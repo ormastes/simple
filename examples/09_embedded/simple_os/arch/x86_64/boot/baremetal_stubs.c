@@ -15313,14 +15313,30 @@ static uint64_t _user_heap_end  = 0;
  * regressing the full kernel (which never sets the flag). Set by rt_user_heap_init,
  * called only by the exec smoke. */
 static int _bare_exec_mode = 0;
+static int _bare_exec_halt_on_exit = 0;
+
+extern void rt_x86_ring3_resume(int64_t rc);
+extern int64_t rt_x86_ring3_resume_valid(void);
 
 static uint64_t _user_heap_bump(uint64_t len);  /* defined below */
+static void _bare_exec_reset_files(void);
 
 void rt_user_heap_init(uint64_t base, uint64_t size) {
     _user_heap_base = base;
     _user_heap_cur  = base;
     _user_heap_end  = base + size;
     _bare_exec_mode = 1;
+    _bare_exec_halt_on_exit = 1;
+    _bare_exec_reset_files();
+}
+
+void rt_user_heap_init_returning(uint64_t base, uint64_t size) {
+    _user_heap_base = base;
+    _user_heap_cur  = base;
+    _user_heap_end  = base + size;
+    _bare_exec_mode = 1;
+    _bare_exec_halt_on_exit = 0;
+    _bare_exec_reset_files();
 }
 
 /* ----------------------------------------------------------------------------
@@ -15352,6 +15368,13 @@ struct bare_file {
 };
 static struct bare_file _bare_files[BARE_MAX_FILES];
 static int _bare_next_fd = 3;
+
+static void _bare_exec_reset_files(void) {
+    for (int i = 0; i < BARE_MAX_FILES; i++) _bare_files[i].used = 0;
+    _bare_in_taken = 0;
+    _bare_out_taken = 0;
+    _bare_next_fd = 3;
+}
 
 static struct bare_file *_bare_fd_lookup(uint64_t fd) {
     for (int i = 0; i < BARE_MAX_FILES; i++)
@@ -15431,6 +15454,8 @@ static int _bare_exec_handle(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2
             serial_puts("[syscall] exit status=");
             serial_put_dec((int64_t)a0);
             serial_puts("\r\n");
+            if (!_bare_exec_halt_on_exit && rt_x86_ring3_resume_valid())
+                rt_x86_ring3_resume((int64_t)a0);
             outb(0xF4, (uint8_t)((a0 << 1) | 1));
             __asm__ __volatile__("cli; hlt");
             *out = 0; return 1;

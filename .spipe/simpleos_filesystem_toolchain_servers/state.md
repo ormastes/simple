@@ -152,3 +152,151 @@ implementation
 - A fail-only marker was added to the shared bare-exec `_user_heap_bump`. QEMU run 14 reproduced the trap without emitting `[user-heap] OOM`, disproving bump-arena exhaustion as the immediate cause.
 - Next owner-boundary investigation: distinguish `rt_alloc(size <= 0)` from allocator-internal failure before another behavioral fix. Do not increase the heap again without new evidence.
 - Evidence: `build/os/elfexec/emit_llvm_profile_run13.out`, `build/os/elfexec/emit_llvm_profile_run14.out`.
+## 2026-07-12 deployed-runtime recovery
+
+- Spark and high-model GDB review proved the deployed 42 MiB pure-Simple ELF still implements the obsolete two-argument `rt_env_set`; current four-argument callers pass key length in argument 2, which the stale callee dereferences as the value pointer and crashes in libc `strlen`.
+- A full isolated bootstrap first exposed and removed a duplicate `module_init_symbol`; the retained implementation is the one covered by the dotted-module regression.
+- The next two cache-preserving cycles reached stage 4 and failed honestly on missing `rt_array_len_safe`. The existing safe `rt_array_len` owner now has a one-line `simple_core` facade, and the missing Rust static SFFI registry row is present.
+- The mandatory three-cycle cap is reached. Do not rebuild again this turn. Next fresh turn: resume the same cache once, require focused `check` to pass, then inspect the rebuilt `rt_env_set` machine signature before deployment acceptance.
+- Evidence: `build/bootstrap/sync-runtime-bootstrap*.log` and `build/bootstrap/sync-runtime/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`.
+## 2026-07-12 self-host recovery — interpreter-safe array length
+
+- Guided Spark/small-model preflight plus high-model review localized the bootstrap failure across three owner registries: native SFFI signature, seed-interpreter extern dispatch, and the Simple-core facade.
+- `rt_array_len_safe` now delegates to existing `rt_array_len` in Simple-core, is declared `(I64)->I64` in the static SFFI registry, and has a dedicated seed-interpreter handler for `Value::Array`, raw runtime arrays, and invalid values. A focused Rust regression covers interpreter arrays.
+- Fresh stage 2 and self-hosted stage 3 succeeded. Stage2 SHA-256: `17ae4bedae2a1f07641f1b733041f43be67ff3fea3133a9312b2dd289c0dc34c`; stage3: `b1070f110c1eb713eb4e2fa679a7eac44e0227ca088817cd7d968cbc7a36e9aa`. Spark disassembly verified the stage2 runtime consumes all four `rt_env_set` arguments.
+- The resumed strict stage 4 reached final link and failed because the bootstrap owner command selected `core-c-bootstrap` for a hosted full CLI. Both stage4 branches now pass the existing `--runtime-bundle rust-hosted` option.
+- Three-cycle cap reached; do not rebuild again this turn. Next fresh turn: resume only stage 4 from the proven stage2/cache, then require exact full-CLI hash, zero uppercase weak definitions, four-argument env ABI, `--version`, `-c 'print(1+1)'`, focused check, and focused interpreter spec.
+- Evidence: `build/bootstrap/sync-runtime-bootstrap-retry{3,4,5}.log`, `build/bootstrap/sync-runtime-stage4-resume.log`.
+- Correction: current Cranelift native-build intentionally rejects the removed `rust-hosted` bundle name, and `SIMPLE_RUNTIME_PATH` does not override its supported core bundle lane. The full host CLI closure still includes hosted-only/platform symbols and remains a separate bootstrap blocker; no ineffective runtime-path workaround remains in the script.
+## 2026-07-12 focused SimpleOS target rebuild handoff
+
+- Full host CLI recovery remains separate: current native-build supports only `simple-core`/`core-c-bootstrap`; the full CLI entry closure still pulls hosted-only/platform symbols. Removed bundle names and `SIMPLE_RUNTIME_PATH` do not change the Cranelift bundle lane, so no workaround remains in the bootstrap script.
+- The final cycle used the proven self-hosted stage2 compiler to build `src/app/simpleos_tool/main.spl` for `x86_64-unknown-simpleos`. Compilation reached target link, but this isolated workspace lacks the target Simple-core archive, leaving core `rt_*` symbols undefined.
+- The canonical next action is `scripts/os/simpleos-native-build.shs`, which first builds the target archive with `check-simple-core-runtime-smoke.shs`, places it in the sysroot, and exports `SIMPLE_SIMPLE_CORE_PATH` before native-build. Do not reuse the old worktree's archive as unproven current evidence.
+- Three-cycle cap reached. Next fresh turn: run the canonical wrapper once with the stage2 compiler and focused entry, verify the exact target ELF/hash, then bake and run the emit-LLVM filesystem profile.
+- Evidence: `build/bootstrap/simpleos-tool-target-current.log`.
+## 2026-07-12 current focused target PASS
+
+- The canonical wrapper now bootstraps a missing SimpleOS sysroot before building/copying the current target Simple-core archive. This makes fresh workspaces provide the complete `crt0.o` + runtime + libc tuple required by Rust target linking.
+- Restored the conflict-lost `llvm_translate_module_direct_ir` owner helper in `llvm_codegen_adapter`; it uses `module.name` and the explicit `options.target`, and the existing direct compile path reuses it.
+- Fresh focused target build PASS: `bin/release/x86_64-unknown-simpleos/simple`, SHA-256 `ef40c3ea4486d90b1d71e6b2e86b8da64f7a11dbae94461adad00c9074efc16a`, 3,692,112 bytes, ELF64 x86-64 ET_EXEC, static/no dynamic section, entry `0x202080`, zero defined uppercase `W`, zero strong `U`.
+- Target Simple-core SHA-256 `c782eacad9e68def0ea79afc280de62be699c53e4d15f407a15d6be3da5ff1f8`; sysroot copy matches. Each required symbol `rt_string_replace`, `rt_to_string`, `rt_array_new`, `stdin_read_char` has exactly one strong definition.
+- Build stamp is newer than the ELF and records target `x86_64-unknown-simpleos`, entry `src/app/simpleos_tool/main.spl`, entry closure, Cranelift, and self-hosted stage2 producer.
+- Next gate: restage or rebuild cross LLC/LLD in this pinned workspace, bake the fresh target into a new image, and run one emit-LLVM QEMU profile. Do not claim filesystem compile/run from the target ELF alone.
+- Evidence: `build/bootstrap/simpleos-native-build-current3.log` and the target/stamp above.
+## 2026-07-12 LLVM guest-tool relink handoff
+
+- High-model review rejected reusing static guest LLC/LLD whose sysroot link inputs were newer. The existing cross LLVM objects remain reusable; only static relink is required.
+- `clang_static.shs` now links the full sysroot `libsimple_runtime.a` beside `libsimpleos_c.a`, because current libc calls Simple array/string ABI owners. The compatibility-only archive was insufficient.
+- LLC relink reached a static ELF with `_start` and exactly one strong undefined symbol, `rt_math_pow`. Codegen intentionally emits the real `(f64,f64)->f64` ABI; SimpleOS libc now owns a one-line wrapper delegating to its existing `pow` implementation.
+- Three LLC relink cycles reached the mandatory cap. Next fresh turn: force current SimpleOS libc/sysroot rebuild so the wrapper enters `libsimpleos_c.a`, relink LLC once, then LLD once, validate zero strong undefineds/hashes, and bake the fresh compiler image with no staged `/HELLO.LL`.
+- Evidence: old artifact lane `build/os/llc_static/relink-current{,2,3}.log`.
+## 2026-07-12 fresh filesystem emit-LLVM cycle 1
+
+- Baked `build/os/elfexec/fat32-simple-toolchain-current.img` from the fresh focused compiler and relinked static Clang/LLC/LLD. The 512 MiB image SHA-256 is `c5195b1c321f4f155aeeb21a583987be3fd2e19db5ded4dd04982954c2e6b8bd` and its timestamp is newer than the compiler.
+- The production ring-3 lane loaded `/USR/BIN/SIMPLE`, parsed its ELF, mapped all `PT_LOAD` segments, constructed six CLI arguments, and entered CPL3 at `0x202080`.
+- Emit-LLVM did not reach HIR. The fresh executable page-faulted at `spl_main+0x85` (`0x208b95`) while reading offset 8 from nil after the `rt_cli_get_args` / `rt_unwrap_or_self` startup sequence; CR2 was `0x8`. QEMU timed out with rc 124 instead of the expected debug-exit rc 3.
+- This is verification/fix cycle 1 for the fresh image. Next cycle must repair the target CLI argument handoff/startup ABI and then rerun this profile once; do not alter WebIR/DrawIR or GUI/web/2D shared IR for this native filesystem failure.
+- Evidence: `build/os/elfexec/emit_llvm_profile_current.out` and `build/os/elfexec/prod_ring3_run.log`.
+## 2026-07-12 filesystem emit-LLVM heap verification handoff
+
+- Cycle 2 reused the existing 64 MiB user-heap mapper for normal streaming filesystem spawn and separated returning exit from the explicit QEMU-halting smoke mode. It proved `[spawn] user heap mapped` before CPL3, but the new computed size argument arrived as zero; the returning owner now takes only the fixed base and owns the already-specified 64 MiB size.
+- Cycle 3 passed the former `rt_cli_get_args`/`args.len()` fault, entered the focused compiler, and opened `/HELLO.SPL`. It then exposed a distinct address-layout collision: the user compiler is linked at `0x200000` while the kernel bump heap begins at `_heap=0x215080` and spans 192 MiB. Under the user CR3, the file-open syscall reads user PT_LOAD bytes as kernel `_heap_off` (`0x6502c641000001c9`) and halts with `heap exhausted`.
+- The canonical SimpleOS userspace linker script already places `.text` at `0x10000000`; the current focused Cranelift target did not consume it. The next fresh turn must rebuild the focused target through the existing LLVM SimpleOS link path (or make the Cranelift SimpleOS linker select the same sysroot script), require entry/PT_LOAD at `0x10000000`, rebake, then run emit-LLVM once.
+- The mandatory three-cycle cap is reached. Do not rerun this profile in this turn. WebIR/DrawIR remains N/A: this is a native address-layout/linker selection defect.
+- Evidence: `build/os/elfexec/emit_llvm_profile_heap_fix{,2}.out`, `build/os/elfexec/prod_ring3_run.log`, `src/os/port/llvm/sysroot.shs`.
+## 2026-07-12 canonical-layout and desugar handoff
+
+- Guided Spark confirmed the canonical LLVM SimpleOS link route; a small audit localized the Cranelift omission to Rust `NativeProjectBuilder`. The shared linker now defaults x86_64 SimpleOS to `<sysroot>/share/simpleos/simpleos.ld`, preserves explicit overrides, fails closed when missing, and leaves non-SimpleOS targets unchanged. Its focused Rust test passes 1/1.
+- The deployed focused Cranelift compiler was rebuilt with the same canonical script: static ELF64, entry and first `PT_LOAD` `0x10000000`, no `PT_INTERP`, zero strong undefineds. Final cycle artifact SHA-256 is `367fed3ae83e3f8af01dcdf31417952626d6382d328bf57a18f382bf4792824a`; image SHA-256 is `d2130fc2cb8162347d351829860019eca1b298fe021ae819fba71826d5f9c17e`.
+- Loader review fixed literal 4096-byte heap mapping, explicit 64 MiB bounds, returning-vs-halting exit mode, and per-exec RAMFS reset. Guest proof now maps the heap, enters CPL3 at `0x10000000`, reads `/HELLO.SPL` from NVMe, and reaches the parser/HIR bridge.
+- Cycle 1 exposed unsafe inlining in `rt_array_len_safe`; an explicit low-value guard is present in machine code. Cycles 2/3 then localized a nil `Function` to dictionary tuple iteration in `desugar_module`. The duplicate Simple-core `rt_for_iterable` owner was deleted, all desugar dictionaries now use `keys()` plus typed lookup, and callers retain `desugar_module`'s returned Module.
+- Three-cycle cap reached before rebuilding the final desugar-key fix. Next fresh turn: rebuild target/runtime/image once, require `phase=hir-ok`, `phase=mir-ok`, `phase=ir-ready`, post-write CPL3, `/HELLO.LL` dump, and exit 0; do not repeat already-green layout/heap checks separately.
+- Evidence: `build/os/elfexec/emit_llvm_{layout,safe,iterable}.out`, `build/os/elfexec/prod_ring3_run.log`, `build/bootstrap/simpleos-native-build-{cranelift-layout,safe-array,iterable}.log`.
+## 2026-07-12 HIR-to-MIR payload handoff
+
+- The final key-based desugar rebuild passed its prior nil-Function trap. A complete `parser_function_new` reconstruction fixed dropped Function metadata and produced live `phase=hir-ok` with `main -> i64`.
+- Guided cycle 2 localized raw null between `[HirStmt]` indexing and positional `HirStmt` destructuring. MIR now uses a typed array read plus direct `stmt.kind`/`stmt.span` fields.
+- Cycle 3 changed the failure from raw null to a garbage frontend expression pointer in `MirLowering.lower_expr`, proving statement transport improved. The HIR statement source already documented that stage4 pattern-extracted `StmtKind.Expr` payloads are garbage and declared `rt_enum_payload`, but still used the broken pattern binding; it now uses `rt_enum_payload(stmt_kind_value)` exactly as documented.
+- Three-cycle cap reached. Next fresh turn: rebuild only the focused target/image once and rerun emit-LLVM. Required evidence remains HIR/MIR/IR markers, post-write CPL3, `/HELLO.LL` dump, exit 0, and wrapper rc3; if green, decode and validate with `llvm-as-18` before LLC/LLD/execute phases.
+- Latest tested artifact SHA-256 `67cde9ce8224cdfeebb25f1e80c353ccfa2e7b522d8eb5346ab115a5411cd0fe`; image `875a57b5baa7c039d71c99809907a1c5c8c58d4a8383e650857fc1af94d34570`.
+- Evidence: `build/os/elfexec/emit_llvm_{desugar,complete_function,direct_hirstmt}.out` and `build/os/elfexec/prod_ring3_run.log`.
+## 2026-07-12 enum-payload boundary handoff
+
+- Spark and a small ABI audit confirmed the frontend `StmtKind.Expr` / `StmtKind.Return` payload extraction is one-word ABI-compatible with the single target Simple-core `rt_enum_payload` owner. Both branches now use that owner; valid target enums use kind 4/tagged pointer/payload +16.
+- Cycle 1 showed the frontend payload change alone did not alter the MIR garbage pointer. Cycle 2 added Return extraction and remained at the same MIR boundary.
+- Higher-model review found MIR still matched an unresolved `kind` after the outer positional `HirStmt` destructure was removed. Cycle 3 rebuilt with `stmt_kind_value` and a MIR-side `rt_enum_payload` call. The fault changed from a machine-code-like garbage pointer to tagged nil at `MirLowering.lower_expr` (`0x101c44a2`), proving the new boundary executes but does not recover a valid HirExpr payload.
+- Three-cycle cap reached. Next fresh turn must inspect the actual target representation of `HirStmt.kind` before changing code: log/disassemble its discriminant, object kind, and payload at the producer and consumer, then choose either a direct typed field/accessor or correct runtime owner. Do not weaken `lower_expr` to accept nil.
+- Latest tested compiler SHA-256 `760b2d05720bd80fd03e5383c85f8fba69af8765d71e34959a5da11e3f92e9ca`; image `54e794f01091308e07a5c8fd6ef26036fa85d4d4a959375fd2964464a103f02f`.
+- Evidence: `build/os/elfexec/emit_llvm_{enum_payload,return_payload,mir_payload}.out` and `build/os/elfexec/prod_ring3_run.log`.
+## 2026-07-12 typed HirStmt and block-value handoff
+
+- Spark disassembly proved the rebuilt HIR producer constructs a direct `HirStmtKind.Expr(HirExpr)` kind-4 enum and the MIR consumer receives the same direct payload; no tuple projection is valid. The producer's inferred `kind` is now explicitly `HirStmtKind`, and MIR uses a qualified typed match.
+- Cycle 1 retained the recursive nil trap; cycle 2 ruled out Return's known-broken `if val` optional binding by replacing it with positive presence plus typed unwrap.
+- Cycle 3 enabled the existing trace flag only for diagnosis. It proved print statement 0 lowers successfully, then `HirBlock(stmts=1, has=true)` reaches `block:value-read` and crashes because `if val actual_value = block.value` binds nil. `HirBlock.value` is nonoptional and guarded by `has`; MIR now directly lowers the typed `block.value`. The temporary global trace flag was removed.
+- Three-cycle cap reached before rebuilding the direct block-value fix. Next fresh turn: rebuild target/image once and run emit-LLVM; expect `block:value-lowered`, MIR/IR markers, post-write CPL3, output dump, exit 0. If green, immediately decode/validate IR and continue LLC/LLD/execute using existing profiles.
+- Latest diagnostic compiler SHA-256 `895b3aedae0589ed6d861f78da4957f239c5432a9f338b34793297763bb0124c`; image `8e08a7a83357eff6dd85ac87bf0dbefef3bd6d7ae72a00ca65ff0c49379f617b`.
+- Evidence: `build/os/elfexec/emit_llvm_{typed_hirstmt_kind,return_unwrap,mir_trace}.out` and `build/os/elfexec/prod_ring3_run.log`.
+## 2026-07-12 MIR PASS and LLVM target handoff
+
+- The rebuilt direct `HirBlock.value` fix passed live: HIR and MIR both report OK. The first backend cycle then exposed `LlvmTargetTriple.datalayout` on an invalid triple after hosted fork/wait ENOSYS.
+- `CodegenTarget.SimpleOS_X86_64` was compared with enum pointer equality. A qualified discriminant match removed host probing in cycle 2, proving target selection, but the returned target struct was still erased before datalayout.
+- Cycle 3 used a typed target triple constructed outside the match; HIR/MIR remained green and no ENOSYS occurred, but datalayout still received an invalid `self`. Review found the portable config immediately rebound the triple through untyped `val triple`; that local is now explicitly `LlvmTargetTriple`.
+- Three-cycle cap reached before rebuilding the typed config local. Next fresh turn: rebuild target/image once, require HIR/MIR/IR/post-write/output/exit markers; if green decode and validate IR then continue existing LLC/LLD/execute profiles.
+- Latest tested compiler SHA-256 `8d90374665152f87618fa52c1536799c6a1253c6e5a98998627e585ee825f647`; image `fbc978d4dd1a075b1d10204664ba5233f5bb249b086f508008dd7ae468adc736`.
+- Evidence: `build/os/elfexec/emit_llvm_{direct_block_value,qualified_target,typed_target_triple}.out` and `build/os/elfexec/prod_ring3_run.log`.
+## 2026-07-12 scoped SimpleOS LLVM header handoff
+
+- Cycle 1 rebuilt the direct `HirBlock.value` fix and passed live HIR and MIR. It then exposed hosted target/datalayout handling in `LlvmTargetTriple.datalayout` after fork/wait ENOSYS.
+- Cycle 2 used qualified SimpleOS target matching and removed the ENOSYS calls, while retaining the invalid datalayout receiver failure.
+- Cycle 3 scoped the canonical SimpleOS LLVM header through `llvm_ir_builder_set_simpleos_header`; HIR/MIR remain green and the former target/datalayout fault is gone. The next failure is `rt_native_eq` at RIP `0x103537e9` (symbol base `0x10353708`), error 5, CR2 `0x183f6f18`, before `phase=ir-ready`.
+- Three-cycle cap reached; QEMU was stopped. Next fresh turn: identify the remaining LLVM translation equality call operating on an erased/invalid value, replace it with a qualified discriminant or typed owner operation, then perform one focused rebuild/run. Do not rerun already-green HIR/MIR checks separately.
+- Latest compiler SHA-256 `f5217bf69246a655cbb3499e96072f2265a8a9ab08a0534b434635916aa4ae58`; image `535f26ef60571719455c81cf9e3fc94a8014346fe5ae60327bb64fca984918ca`.
+- Evidence: `build/os/elfexec/emit_llvm_scoped_header.out` and `build/os/elfexec/prod_ring3_run.log`.
+## 2026-07-12 nonoptional MirLocal equality fix handoff
+
+- Guided Spark disassembly mapped the current live fault exactly: `MirToLlvm.translate_function` loaded `body.locals[local_i]`, then called `rt_native_eq(local, nil)` at `0x102be0d7`; the guest fault at `rt_native_eq+0xe1` (`0x103537e9`) is therefore the impossible nil guard on a nonoptional `[MirLocal]` element.
+- Higher-model review confirmed `MirBody.locals: [MirLocal]`. Both identical loops now bind `val local: MirLocal` and delete the impossible `local == nil` branches. No runtime guard, new facade, or feature-local workaround was added.
+- Focused rebuild could not produce new runtime evidence this turn: the canonical wrapper first hit an unrelated `core_array` archive compiler segfault, then direct native-build using the existing proven archive remained CPU-bound for several minutes versus the prior ~67-second baseline and was stopped under the runaway/performance guard. The target ELF remains the prior SHA-256 `f5217bf69246a655cbb3499e96072f2265a8a9ab08a0534b434635916aa4ae58`; do not treat it as containing this fix.
+- Next fresh turn: retry the single direct native-build when competing compiler workloads are quiet, bake the resulting ELF into the toolchain image, and run one `emit-llvm` filesystem proof. Do not rerun HIR/MIR separately. If green, decode with the recorded base64 envelope, validate with `llvm-as-18`, then continue `llc-object`, `link-object`, and `execute-artifact`.
+## 2026-07-12 target-build configuration handoff
+
+- Two retry commands reproduced long CPU-bound compilation because they used the pinned worktree's stage3 compiler and omitted or selected the wrong cache. This was command drift, not evidence that the two-line `MirLocal` fix caused a compiler regression.
+- Guided small-model audit recovered the proven producer contract from the artifact worktree: compiler `/home/ormastes/dev/pub/simple/build/worktrees/simpleos-filesystem-goal/build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple`, backend `cranelift`, one writer/thread, cache `/home/ormastes/dev/pub/simple/build/worktrees/simpleos-filesystem-goal/build/bootstrap/native_cache_simpleos_fs`. The cache contains the prior target closure; preserve it and let only the changed owner module miss.
+- Three build attempts were consumed this turn (canonical wrapper archive segfault, uncached stage3 build, wrong-cache stage3 build). All were stopped without overwriting the target ELF; SHA remains `f5217bf69246a655cbb3499e96072f2265a8a9ab08a0534b434635916aa4ae58` and does not contain the fix.
+- Next fresh turn must use the recovered stage2/Cranelift/one-thread/absolute-cache contract once, after unrelated Rust builds are quiet. Do not clean caches, increase writers, rerun the Simple-core archive wrapper, or repeat HIR/MIR separately.
+- Exact build command: `SIMPLE_SIMPLE_CORE_PATH=build/os/simple-core-simpleos/libsimple_runtime.a SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 /home/ormastes/dev/pub/simple/build/worktrees/simpleos-filesystem-goal/build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple native-build --source src/compiler --source src/lib --source src/app --backend cranelift --runtime-bundle simple-core --entry-closure --entry src/app/simpleos_tool/main.spl --target x86_64-unknown-simpleos --threads 1 --cache-dir /home/ormastes/dev/pub/simple/build/worktrees/simpleos-filesystem-goal/build/bootstrap/native_cache_simpleos_fs -o bin/release/x86_64-unknown-simpleos/simple`.
+## 2026-07-12 MirType-to-text handoff
+
+- The recovered stage2/Cranelift/one-writer cache contract converged. Cycle 1 built 61 modules/556 cached, embedded the compiler, and proved HIR/MIR live before moving the fault from the deleted `MirLocal == nil` guard to `llvm_type_text(ty: MirType)`'s impossible `ty == nil` call.
+- Cycle 2 deleted that guard. Spark mapped the next live fault exactly to `core_codegen.spl`'s legitimate `llvm_ty == "ptr"`: `llvm_type_text` had used bare variants and an implicit match result. The owner now binds `MirTypeKind`, uses qualified variants, and explicitly returns text from every arm.
+- Cycle 3 rebuilt 3 modules/614 cached and again proved HIR/MIR, but the same first `llvm_ty == "ptr"` comparison faults in `rt_native_eq+0xe1` (`RIP 0x555ca9`, CR2 `0x183f6f18`). Disassembly proves the returned value is malformed after its untyped local handoff, not that text equality itself is invalid.
+- Higher-model review rejected duplicating pointer/bool classification. The minimal pending fix is applied but unbuilt: `val llvm_ty: text = self.llvm_type_text(local.type_)`. Only replace text classification with a qualified `local.type_.kind` match if this explicit owner still fails in a fresh turn.
+- Three live cycles reached; QEMU was stopped after each fault. Latest tested compiler SHA-256 `e7bcfbeb7b144c85697cb840520c71f709095a5fa823f1430c46f60370239466`; image `aa37ab6cf72bfa49290a7e43941c298d77d4e4d61fca84650c59f0afc000fc92`. Neither contains the final `llvm_ty: text` annotation.
+- Next fresh turn: use the same proven cached build command once, bake a new image, and run emit-LLVM. Require IR-ready/post-write/dump/exit evidence before decoding; do not rerun separate HIR/MIR checks.
+## 2026-07-13 LLVM type classification and return-metadata handoff
+
+- Cycle 1 proved `val llvm_ty: text` alone does not repair the returned-text equality boundary: the guest retained the exact `llvm_ty == "ptr"` `rt_native_eq+0xe1` fault. This ruled out simple untyped-local erasure.
+- Cycle 2 replaced derived-text pointer/bool classification with a qualified match on the owning `local.type_.kind`. HIR/MIR remained green and execution advanced to `remember_function_return_type(ret_ty: text)`'s impossible `ret_ty == nil` call.
+- Cycle 3 typed the `ret_ty` producer, removed nonoptional `ret_ty == nil` and sibling `name == nil` clauses, and advanced to the same helper's remaining `ret_ty == "nil"` comparison (`RIP 0x556669`, `rt_native_eq+0xe1`, CR2 `0x183f6f18`). The exhaustive `llvm_type_text(MirType)` owner can return only nonempty concrete LLVM type spellings, so the entire redundant return-type validation guard is now deleted but unbuilt.
+- Three live cycles reached; QEMU was stopped after each exact fault. Latest tested compiler SHA-256 `3cdce70b7c30a5b007ffb32c6620b1e5a4a95a91ff4a69c5cbe65c91c2bade54`; image `03d5a2f3df9a75acab15844dcc4a9c4d4a62cfd874adc410804fe8b599980c69`. Neither contains the final guard deletion.
+- Next fresh turn: rebuild with the proven cached command, embed once, and run emit-LLVM. If the next fault is `name == ""` in `remember_function_param_types`, map it before changing it; unlike `ret_ty`, it is not yet disproven by live evidence. Do not add runtime guards or duplicate type mapping.
+## 2026-07-13 optional presence lowering blocker
+
+- Cycle 1 rebuilt the deleted return-type guard and advanced to `mark_instruction_dest_defined`'s `LocalId?` `Some/nil` match. It was replaced with positive `.?' plus typed unwrap.
+- The first rebuild retry hit ENOSPC. Only superseded, reproducible filesystem-toolchain images from this lane were deleted; this recovered about 11 GiB. No source or unrelated agent artifacts were removed.
+- Cycle 2 rebuilt successfully and advanced to `translate_terminator`'s `MirOperand?` `Some/nil` match. It was replaced with positive `.?' plus typed unwrap and the existing default-return else path.
+- Cycle 3 proved `.?' itself is currently broken in the stage2/Cranelift target: generated code calls `rt_is_some(value)` but on the false path still calls `rt_native_eq(value, nil)`. The live absent Ret value faults at `rt_native_eq+0xe1`, RIP `0x556589`, CR2 `0x183f6f18`.
+- A backend-local raw `rt_is_some` extern was rejected under the runtime-boundary rule. The owner bug is recorded in `doc/08_tracking/bug/pure_simple_bootstrap_nil_lowering_fix_request_2026-07-07.md`: optional presence lowering must branch on the predicate result without adding generic nil equality, with a focused generated-code regression.
+- Latest tested compiler SHA-256 `38dab594f3d82f2745e6d30765fee49468012a7d5c56d855a2a7b5a096da1355`; image `7e18aa0d8f6518c0bef9ec62aab6376d45f22fa6c52e0836dce459acd0bb544b`.
+- Three live cycles reached. Next fresh turn: locate and fix the Cranelift optional-presence lowering owner, run its smallest IR/machine-code regression once, then rebuild the same filesystem compiler and resume emit-LLVM. Do not add a translator-local runtime shortcut.
+## 2026-07-13 optional-presence owner fix and bootstrap evidence
+
+- Guided audits identified the Rust owner at `src/compiler_rust/compiler/src/hir/lower/expr/control.rs::lower_exists_check`: it manufactured `Binary(NotEq, expr, Nil)`, which MIR dispatches through `rt_native_neq`/`rt_native_eq`. It now emits the existing `rt_is_some` builtin directly.
+- Added focused HIR-shape regression `test_exists_check_uses_presence_predicate_without_nil_equality`; focused Cargo evidence passed 1/1 and explicitly excludes `NotEq` and `Nil`.
+- Aligned the pure-Simple MIR `ExistsCheck` owner to emit a direct `rt_is_some` call returning bool instead of passing the optional base through.
+- Isolated one-writer full bootstrap passed: patched Rust seed/runtime rebuilt, stage2 SHA-256 `615e8eed9a14b512cf9b312a8e6ba1b3d562fca93c14ecf74dc021af631e4c00`, stage3 SHA-256 `f8d59f246a6bc3f8ae4b68b2edecda3356b02cc87161566a02dc13a0a9603c73`.
+- Patched stage2 cold-built the 617-module SimpleOS compiler with zero failures. Target ELF SHA-256 `5df5d57c8680fc8808a530d159598ea88f1e756a68b33c9dee6f47eecc2349fa`; image `ecf2d80c15f4f08ad249e200433efa41900363424e4b91c1dcb8c9e558a3dbde`.
+- Live emit-LLVM still faults after HIR/MIR at `rt_native_eq+0xe1`, RIP `0x103543b9`, CR2 `0x183f6f18`. Disassembly of `translate_terminator` still shows an `rt_is_some` call followed by a false-path `rt_native_eq(value, nil)`, so the direct HIR builtin fix alone did not remove the fallback in generated native code.
+- Next fresh turn: finish mapping the remaining fallback to its exact Rust codegen/truthiness owner before editing. Do not repeat the successful bootstrap or add a backend-local runtime extern.
+- Final Spark disassembly narrows the remaining owner to pure-Simple `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` around line 790 (`if value.?:` before typed unwrap). In the exact target ELF, `MirLowering.lower_expr` contains generated `rt_native_neq` calls but no reference to `rt_is_some`; the pure-Simple mirror change was not incorporated into that lower-expression path. Next run must prove the rebuilt `lower_expr` references `rt_is_some` before another QEMU cycle.

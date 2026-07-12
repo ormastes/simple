@@ -51,6 +51,24 @@ fn test_host_object_extension() -> &'static str {
     }
 }
 
+#[test]
+fn simpleos_freestanding_linker_script_defaults_and_overrides() {
+    use simple_common::target::{Target, TargetArch, TargetOS};
+
+    let sysroot = Path::new("/tmp/simpleos-sysroot");
+    let simpleos = Target::new(TargetArch::X86_64, TargetOS::SimpleOS);
+    let linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    assert_eq!(
+        NativeProjectBuilder::resolve_freestanding_linker_script(None, simpleos, sysroot),
+        Some(sysroot.join("share/simpleos/simpleos.ld"))
+    );
+    assert_eq!(
+        NativeProjectBuilder::resolve_freestanding_linker_script(Some(Path::new("custom.ld")), simpleos, sysroot),
+        Some(PathBuf::from("custom.ld"))
+    );
+    assert_eq!(NativeProjectBuilder::resolve_freestanding_linker_script(None, linux, sysroot), None);
+}
+
 fn with_core_c_https_openssl_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
     let previous = std::env::var("SIMPLE_CORE_C_INCLUDE_HTTPS_OPENSSL").ok();
     match value {

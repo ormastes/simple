@@ -11,6 +11,18 @@ use super::tools::{
 };
 
 impl NativeProjectBuilder {
+    pub(super) fn resolve_freestanding_linker_script(
+        explicit: Option<&Path>,
+        target: simple_common::target::Target,
+        simpleos_sysroot: &Path,
+    ) -> Option<PathBuf> {
+        explicit.map(Path::to_path_buf).or_else(|| {
+            (target.os == simple_common::target::TargetOS::SimpleOS
+                && target.arch == simple_common::target::TargetArch::X86_64)
+                .then(|| simpleos_sysroot.join("share/simpleos/simpleos.ld"))
+        })
+    }
+
     fn freestanding_target_triple(target: simple_common::target::Target) -> Option<&'static str> {
         match (target.arch, target.os) {
             (simple_common::target::TargetArch::Riscv32, simple_common::target::TargetOS::None) => {
@@ -1317,6 +1329,16 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
 
         let compiler_rt_builtins = find_compiler_rt_builtins(triple);
         let simpleos_user_runtime = Self::simpleos_user_runtime_paths(cross_target);
+        let effective_linker_script = Self::resolve_freestanding_linker_script(
+            self.config.linker_script.as_deref(),
+            cross_target,
+            &Self::simpleos_sysroot_dir(),
+        );
+        if let Some(ref script) = effective_linker_script {
+            if !script.is_file() {
+                return Err(format!("missing linker script: {}", script.display()));
+            }
+        }
 
         let mut boot_objects: Vec<PathBuf> = Vec::new();
         let mut boot_compile_failures: usize = 0;
@@ -1630,7 +1652,7 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
         let mut cmd = if let Some(ref lld_path) = use_direct_lld {
             let mut c = std::process::Command::new(lld_path);
             c.arg("--gc-sections");
-            if let Some(ref ls) = self.config.linker_script {
+            if let Some(ref ls) = effective_linker_script {
                 c.arg(format!("-T{}", ls.display()));
             }
             for (raw, target) in &weak_boot_defsyms {
@@ -1676,7 +1698,7 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
             c.arg("-fno-pie");
             c.arg("-fuse-ld=lld");
             c.arg("-Wl,--gc-sections");
-            if let Some(ref ls) = self.config.linker_script {
+            if let Some(ref ls) = effective_linker_script {
                 c.arg(format!("-T{}", ls.display()));
             }
             for (raw, target) in &weak_boot_defsyms {

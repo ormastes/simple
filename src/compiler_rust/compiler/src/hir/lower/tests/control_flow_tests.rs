@@ -24,6 +24,15 @@ fn test_lower_while_loop() {
 }
 
 #[test]
+fn test_exists_check_uses_presence_predicate_without_nil_equality() {
+    let module = parse_and_lower("fn present(value: i64?) -> bool:\n    return value.?\n").unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(repr.contains("BuiltinCall") && repr.contains("rt_is_some"), "existence check did not use presence predicate: {repr}");
+    assert!(!repr.contains("NotEq") && !repr.contains("Nil"), "existence check retained generic nil equality: {repr}");
+}
+
+#[test]
 fn test_lower_simd_loop_metadata() {
     let module = parse_and_lower(
         "fn count() -> i64:\n    @simd\n    for i in 0..4:\n        pass\n    @simd\n    while false:\n        pass\n    @simd\n    loop:\n        break\n    return 0\n",

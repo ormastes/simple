@@ -587,6 +587,18 @@ pub fn rt_array_len_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(len))
 }
 
+pub fn rt_array_len_safe_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(value) = args.first() else {
+        return Ok(Value::Int(0));
+    };
+    let value = value.clone().deref_pointer();
+    match value {
+        Value::Array(items) => Ok(Value::Int(items.len() as i64)),
+        Value::Int(raw) => Ok(Value::Int(rt_array_len(RuntimeValue::from_raw(raw as u64)))),
+        _ => Ok(Value::Int(0)),
+    }
+}
+
 /// Bulk-append `count` elements from `src` into `dst`.
 ///
 /// Operates on heap-backed (raw pointer) arrays — the same arrays produced by
@@ -632,7 +644,7 @@ pub fn rt_array_extend_i64_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{interpreter_byte_at, rt_bytes_u32_le_at_fn, rt_bytes_u64_le_at_fn, rt_bytes_u8_at_fn, rt_bytes_u8_set_fn};
+    use super::{interpreter_byte_at, rt_array_len_safe_fn, rt_bytes_u32_le_at_fn, rt_bytes_u64_le_at_fn, rt_bytes_u8_at_fn, rt_bytes_u8_set_fn};
     use crate::value::Value;
     use simple_runtime::value::{rt_array_new, rt_array_push, rt_bytes_u8_at, RuntimeValue};
 
@@ -653,6 +665,13 @@ mod tests {
         let arr = Value::array(vec![Value::UInt { value: 0x2d, width: 8 }]);
         let result = rt_bytes_u8_at_fn(&[arr, Value::Int(0)]).expect("byte lookup should succeed");
         assert_eq!(result, Value::Int(0x2d));
+    }
+
+    #[test]
+    fn rt_array_len_safe_reads_interpreter_arrays() {
+        let result = rt_array_len_safe_fn(&[Value::array(vec![Value::Int(1), Value::Int(2)])])
+            .expect("safe length should succeed");
+        assert_eq!(result, Value::Int(2));
     }
 
     #[test]

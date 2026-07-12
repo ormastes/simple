@@ -1191,14 +1191,14 @@ impl MirLowering:
                 result_local
 
             case ExistsCheck(base):
-                # `x.?` — value if present, nil if absent. Per type inference
-                # (expr_infer.spl ExistsCheck) an already-Optional base passes
-                # through unchanged, so the value passes through unchanged too:
-                # lower the base and yield its local. Without this arm the
-                # dispatch fell to the default `unsupported MIR expression`
-                # path, emitting a use of an undefined SSA value (llc failure /
-                # garbage 0), which broke `if val v = x.?:` binding.
-                self.lower_expr(base)
+                val base_local = self.lower_expr(base)
+                val is_some = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_is_some"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
+                    )))
+                ))
+                self.emit_resolved_direct_call(is_some, [mir_operand_copy(base_local)], MirType.bool())
 
             case Try(try_base):
                 # `expr?` — Err propagates via early return, Ok yields payload.
@@ -1222,7 +1222,8 @@ impl MirLowering:
                 # `return expr`, nil for a bare `return`. Unwrap before lowering
                 # — passing the Optional straight to lower_expr nil-derefs on
                 # `expr.kind`.
-                if val rv = value:
+                if value.?:
+                    val rv: HirExpr = value.unwrap()
                     var br = self.builder
                     val result = self.lower_expr(rv)
                     br = self.builder

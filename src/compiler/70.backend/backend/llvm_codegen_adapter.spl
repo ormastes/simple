@@ -9,6 +9,7 @@ use compiler.backend.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutpu
 use compiler.backend.mir_to_llvm.{MirToLlvm}
 use compiler.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.llvm_backend_tools.{LlvmObjectCode, compile_ir_to_object}
+use compiler.backend.llvm_ir_builder.{llvm_ir_builder_set_simpleos_header}
 extern fn rt_env_get(key: text) -> text
 
 fn llvm_codegen_trace_enabled() -> bool:
@@ -21,6 +22,16 @@ fn llvm_codegen_trace_enabled() -> bool:
 class LlvmCodegenAdapter:
     """Adapts MirToLlvm translator to the Codegen trait interface."""
     options: CompileOptions
+
+pub fn llvm_translate_module_direct_ir(options: CompileOptions, module: MirModule) -> text:
+    val simpleos_header = match options.target:
+        case CodegenTarget.SimpleOS_X86_64: true
+        case _: false
+    llvm_ir_builder_set_simpleos_header(simpleos_header)
+    var translator = MirToLlvm.create(module.name, options.target, nil)
+    val ir = translator.translate_module(module)
+    llvm_ir_builder_set_simpleos_header(false)
+    ir
 
 pub fn llvm_compile_module_direct(options: CompileOptions, module: MirModule) -> Result<CodegenOutput, CompileError>:
     if llvm_codegen_trace_enabled():
@@ -35,10 +46,9 @@ pub fn llvm_compile_module_direct(options: CompileOptions, module: MirModule) ->
     val config = LlvmTargetConfig.for_target_portable_numeric(options.target, nil)
     if llvm_codegen_trace_enabled():
         print "[llvm-direct] translator"
-    var translator = MirToLlvm.create(module.name, options.target, nil)
     if llvm_codegen_trace_enabled():
         print "[llvm-direct] translate"
-    val llvm_ir = translator.translate_module(module)
+    val llvm_ir = llvm_translate_module_direct_ir(options, module)
 
     # Compile IR to object code via llc
     if llvm_codegen_trace_enabled():

@@ -201,17 +201,21 @@ impl MirTextCodegen for MirToLlvm:
         self.ptr_locals = {}
         var local_i = 0
         while local_i < body.locals.len():
-            val local = body.locals[local_i]
-            if local == nil:
-                local_i = local_i + 1
-                continue
-            val llvm_ty = self.llvm_type_text(local.type_)
+            val local: MirLocal = body.locals[local_i]
+            val llvm_ty: text = self.llvm_type_text(local.type_)
             val local_id = self.local_id_value(local.id)
             self.local_types[local_id] = llvm_ty
-            if llvm_ty == "ptr":
-                self.ptr_locals[local_id] = true
-            if llvm_ty == "i1":
-                self.bool_locals[local_id] = true
+            match local.type_.kind:
+                case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_) | MirTypeKind.Function(_, _) | MirTypeKind.Opaque(_):
+                    self.ptr_locals[local_id] = true
+                case MirTypeKind.Struct(_) | MirTypeKind.Enum(_) | MirTypeKind.Tuple(_) | MirTypeKind.Array(_, _) | MirTypeKind.Slice(_) | MirTypeKind.Union(_):
+                    self.ptr_locals[local_id] = true
+                case MirTypeKind.Promise(_) | MirTypeKind.Generator(_, _) | MirTypeKind.ActorType(_):
+                    self.ptr_locals[local_id] = true
+                case MirTypeKind.Bool:
+                    self.bool_locals[local_id] = true
+                case _:
+                    ()
             match local.kind:
                 case Return:
                     self.return_locals[local_id] = true
@@ -227,10 +231,7 @@ impl MirTextCodegen for MirToLlvm:
         while arg_i < body.arg_count:
             var param_local_i = 0
             while param_local_i < body.locals.len():
-                val local = body.locals[param_local_i]
-                if local == nil:
-                    param_local_i = param_local_i + 1
-                    continue
+                val local: MirLocal = body.locals[param_local_i]
                 match local.kind:
                     case Arg(index):
                         if index == arg_i:
@@ -247,7 +248,7 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] function:params {name}"
 
-        val ret_ty = self.llvm_type_text(body.return_ty)
+        val ret_ty: text = self.llvm_type_text(body.return_ty)
         self.current_return_type = ret_ty
         if bootstrap_debug:
             print "[mir-to-llvm] function:return {name}"
@@ -403,9 +404,9 @@ impl MirTextCodegen for MirToLlvm:
             case Copy(dest, _) | Move(dest, _) | BinOp(dest, _, _, _) | CheckedBinOp(dest, _, _, _) | UnaryOp(dest, _, _) | Alloc(dest, _) | Load(dest, _) | GetElementPtr(dest, _, _) | Aggregate(dest, _, _) | GetField(dest, _, _) | Cast(dest, _, _) | Bitcast(dest, _, _) | PipeForward(dest, _, _) | Compose(dest, _, _, _) | Parallel(dest, _) | LayerConnect(dest, _, _) | Ref(dest, _, _) | CreatePromise(dest, _, _) | Await(dest, _) | Spawn(dest, _, _) | Receive(dest, _) | GpuSharedAlloc(dest, _, _) | GpuAtomicOp(dest, _, _, _) | GpuAtomicCas(dest, _, _, _):
                 self.defined_locals[self.local_id_value(dest)] = true
             case Call(dest, _, _) | CallIndirect(dest, _, _, _) | Intrinsic(dest, _, _):
-                match dest:
-                    Some(dest_local): self.defined_locals[self.local_id_value(dest_local)] = true
-                    nil: ()
+                if dest.?:
+                    val dest_local: LocalId = dest.unwrap()
+                    self.defined_locals[self.local_id_value(dest_local)] = true
             case _:
                 ()
 
@@ -439,12 +440,10 @@ impl MirTextCodegen for MirToLlvm:
         tmp
 
     me remember_function_return_type(name: text, ret_ty: text):
-        if ret_ty == nil or ret_ty == "nil" or ret_ty == "":
-            return
         self.function_return_types[name] = ret_ty
 
     me remember_function_param_types(name: text, param_tys: [text]):
-        if name == nil or name == "":
+        if name == "":
             return
         self.function_param_types[name] = param_tys
 
@@ -458,40 +457,40 @@ impl MirTextCodegen for MirToLlvm:
         """Translate a block terminator."""
         match term:
             case Ret(value):
-                match value:
-                    Some(ret_operand):
-                        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                            match ret_operand.kind:
-                                case Const(const_value, const_type):
-                                    match const_value:
-                                        case Int(v):
-                                            val const_ret_ty = self.valid_llvm_type(self.current_return_type)
-                                            self.builder.emit_ret(const_ret_ty, self.ret_value_for_type(const_ret_ty, "{v}"))
-                                            return
-                                case _:
-                                    ()
+                if value.?:
+                    val ret_operand: MirOperand = value.unwrap()
+                    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                         match ret_operand.kind:
-                            case Copy(local) | Move(local):
-                                val return_local_id = self.local_id_value(local)
-                                if self.current_function_name == "_start":
-                                    self.builder.emit("  unreachable")
-                                    return
-                                if self.return_locals.has(return_local_id) or not self.local_types.has(return_local_id):
-                                    self.builder.emit_ret(self.current_return_type, self.ret_value_for_type(self.current_return_type, "0"))
-                                    return
+                            case Const(const_value, const_type):
+                                match const_value:
+                                    case Int(v):
+                                        val const_ret_ty = self.valid_llvm_type(self.current_return_type)
+                                        self.builder.emit_ret(const_ret_ty, self.ret_value_for_type(const_ret_ty, "{v}"))
+                                        return
                             case _:
                                 ()
-                        val val_str = self.translate_operand(ret_operand)
-                        val maybe_ret_ty = self.get_operand_type(ret_operand)
-                        val src_ret_ty = if maybe_ret_ty == nil: self.native_int() else: maybe_ret_ty
-                        val ret_ty = self.valid_llvm_type(self.current_return_type)
-                        val ret_val = self.value_as_type(val_str, src_ret_ty, ret_ty)
-                        self.builder.emit_ret(ret_ty, self.ret_value_for_type(ret_ty, ret_val))
-                    nil:
-                        if self.current_return_type == "void":
-                            self.builder.emit_ret_void()
-                        else:
-                            self.builder.emit_ret(self.current_return_type, self.ret_value_for_type(self.current_return_type, "0"))
+                    match ret_operand.kind:
+                        case Copy(local) | Move(local):
+                            val return_local_id = self.local_id_value(local)
+                            if self.current_function_name == "_start":
+                                self.builder.emit("  unreachable")
+                                return
+                            if self.return_locals.has(return_local_id) or not self.local_types.has(return_local_id):
+                                self.builder.emit_ret(self.current_return_type, self.ret_value_for_type(self.current_return_type, "0"))
+                                return
+                        case _:
+                            ()
+                    val val_str = self.translate_operand(ret_operand)
+                    val maybe_ret_ty = self.get_operand_type(ret_operand)
+                    val src_ret_ty = if maybe_ret_ty == nil: self.native_int() else: maybe_ret_ty
+                    val ret_ty = self.valid_llvm_type(self.current_return_type)
+                    val ret_val = self.value_as_type(val_str, src_ret_ty, ret_ty)
+                    self.builder.emit_ret(ret_ty, self.ret_value_for_type(ret_ty, ret_val))
+                else:
+                    if self.current_return_type == "void":
+                        self.builder.emit_ret_void()
+                    else:
+                        self.builder.emit_ret(self.current_return_type, self.ret_value_for_type(self.current_return_type, "0"))
 
             case Goto(target):
                 self.builder.emit_br("bb{self.block_id_value(target)}")

@@ -854,23 +854,15 @@ impl Lowerer {
     /// - For Result types: use result.ok.? or result.err.?
     /// - For primitives: always true (they always exist)
     ///
-    /// This is lowered to a nil check: `expr != nil`
-    /// For more sophisticated checks (e.g., empty collections), the interpreter
-    /// handles this at runtime through the appropriate SFFI calls.
+    /// Lower directly to the runtime presence predicate. Routing through
+    /// generic `expr != nil` selects native equality for erased optionals.
     pub(super) fn lower_exists_check(&mut self, expr: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         let expr_hir = self.lower_expr(expr, ctx)?;
 
-        // Create a nil check: expr != nil
-        let nil_expr = HirExpr {
-            kind: HirExprKind::Nil,
-            ty: TypeId::NIL,
-        };
-
         Ok(HirExpr {
-            kind: HirExprKind::Binary {
-                op: BinOp::NotEq,
-                left: Box::new(expr_hir),
-                right: Box::new(nil_expr),
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_is_some".to_string(),
+                args: vec![expr_hir],
             },
             ty: TypeId::BOOL,
         })

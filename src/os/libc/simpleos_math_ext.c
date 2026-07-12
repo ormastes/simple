@@ -335,6 +335,10 @@ double pow(double base, double exponent) {
     return exp(exponent * log(base));
 }
 
+double rt_math_pow(double base, double exponent) {
+    return pow(base, exponent);
+}
+
 /* ====================================================================
  * 6. Rounding functions
  * ==================================================================== */

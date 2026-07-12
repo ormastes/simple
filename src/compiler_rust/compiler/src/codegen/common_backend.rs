@@ -152,12 +152,7 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
 pub(crate) fn module_init_symbol(module_prefix: Option<&str>) -> String {
     match module_prefix {
         Some(prefix) if !prefix.is_empty() => {
-            // Sanitize dots → _dot_ so the symbol name matches _init_all.cpp references
-            let sanitized = if cfg!(target_os = "macos") {
-                prefix.replace('.', "_dot_")
-            } else {
-                prefix.to_string()
-            };
+            let sanitized = prefix.replace('.', "_dot_");
             format!("__module_init_{}", sanitized)
         }
         _ => "__module_init".to_string(),

@@ -273,3 +273,24 @@ The OS runner also selected `src/compiler_rust/target/release/simple` before
 checking `SIMPLE_BINARY`/`SIMPLE_BIN`. The selector now checks valid explicit
 overrides first, preventing a requested pure-Simple compiler from silently
 becoming a Rust-seed build.
+## 2026-07-12 deployed ABI and bootstrap follow-up
+
+GDB proved the deployed pure-Simple CLI has a stale two-argument `rt_env_set`: current callers supply `(key_ptr, key_len, value_ptr, value_len)`, but the callee passes `key_len` to libc as the value pointer and crashes in `strlen`. Source already has the four-argument ABI, so the remedy is a provenance-recorded redeploy rather than a call-site workaround.
+
+The isolated rebuild removed a duplicate `module_init_symbol`, then exposed a missing `rt_array_len_safe` static registration. `simple_core` now delegates that name to its already-safe `rt_array_len`, and the Rust SFFI registry declares the same one-argument signature. Verification is deferred because the three-cycle cap was reached.
+## 2026-07-12 self-host recovery continuation
+
+The missing `rt_array_len_safe` name required three aligned owner surfaces: the native SFFI signature, the seed interpreter dispatch, and the Simple-core implementation. The interpreter handler cannot alias raw `rt_array_len`, because interpreted compiler arrays are `Value::Array`; it now returns their vector length, handles raw runtime arrays, and returns zero for invalid values.
+
+With that fix, fresh stage 2 and self-hosted stage 3 succeeded. The strict full-CLI build reached final link, where the bootstrap stage had not exposed the hosted runtime archive and therefore omitted symbols such as `spl_dlsym`, `rt_process_run_timeout`, and platform GUI functions. Verification awaits a fresh capped cycle.
+
+Correction: `rust-hosted` is a removed CLI bundle name, and the Cranelift native-build lane does not switch bundles through `SIMPLE_RUNTIME_PATH`. The full CLI closure must be reduced to supported core dependencies or gain an explicit supported hosted link lane; the ineffective environment workaround was removed.
+## 2026-07-12 focused target handoff
+
+After self-hosted stage 2/3 recovery, a direct focused `x86_64-unknown-simpleos` build reached link but the isolated workspace had no current target Simple-core archive, so core runtime symbols remained undefined. This is an invocation/artifact prerequisite failure: the canonical `scripts/os/simpleos-native-build.shs` wrapper builds the target archive first and exports `SIMPLE_SIMPLE_CORE_PATH`. The next fresh cycle must use that wrapper rather than borrowing an archive from another worktree.
+## 2026-07-12 focused target rebuilt
+
+The canonical SimpleOS wrapper now creates a missing sysroot before target Simple-core, so fresh workspaces provide the complete runtime link tuple. Restoring `llvm_translate_module_direct_ir` resolved the sole remaining closure symbol. The focused target now builds as a static ELF64 x86-64 executable with SHA-256 `ef40c3ea4486d90b1d71e6b2e86b8da64f7a11dbae94461adad00c9074efc16a`, zero defined uppercase weak symbols, and zero strong undefined symbols.
+## 2026-07-12 static LLVM guest-tool relink
+
+Current sysroot inputs require LLC/LLD relink rather than reuse of older binaries. The relinker must include full `libsimple_runtime.a` because current libc calls Simple runtime owners. LLC then narrowed to one strong undefined, `rt_math_pow`; SimpleOS libc now exports that ABI by delegating to its existing freestanding `pow`. Verification awaits a fresh libc/sysroot rebuild and capped LLC/LLD relink.

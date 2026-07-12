@@ -187,3 +187,40 @@ segfault. The repair now:
 - adds `test/01_unit/compiler/backend/backend_declaration_name_collision_spec.spl`
   to prevent reintroducing short `Backend`, `Codegen`, or HIR `Symbol`
   constructors.
+
+## 2026-07-13 follow-up: optional presence emits unsafe nil equality
+
+Status: open, blocks SimpleOS filesystem compiler LLVM emission.
+
+The stage2/Cranelift target lowering of `if value.?` first calls `rt_is_some`,
+then emits a fallback `rt_native_eq(value, nil)` on the false path. For an
+absent `MirOperand?`, the fallback reaches `rt_native_eq+0xe1` and dereferences
+an invalid decoded heap address (`CR2=0x183f6f18`) in ring 3. A direct
+`match value: Some(...) / nil` emits the same unsafe equality.
+
+Reproducer owner:
+
+```text
+src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl
+MirToLlvm.translate_terminator -> Ret(value: MirOperand?)
+```
+
+Required fix: optional presence lowering must trust the boolean result of
+`rt_is_some`/`rt_is_none` and must not append generic native equality against
+nil. Add a focused generated-code regression proving the absent path contains
+the predicate call and branch but no `rt_native_eq`. Do not work around the
+compiler bug with a new backend-local raw runtime extern.
+
+Live evidence: target ELF SHA-256
+`38dab594f3d82f2745e6d30765fee49468012a7d5c56d855a2a7b5a096da1355`,
+image SHA-256
+`7e18aa0d8f6518c0bef9ec62aab6376d45f22fa6c52e0836dce459acd0bb544b`,
+fault RIP `0x556589` (`rt_native_eq+0xe1`).
+
+Owner follow-up evidence: Rust `lower_exists_check` now emits a direct
+`rt_is_some` builtin, its focused HIR regression passes, and an isolated full
+bootstrap rebuilt stage2/stage3 successfully. Nevertheless, the rebuilt
+SimpleOS compiler still contains a false-path `rt_native_eq(value, nil)` after
+the `rt_is_some` call in `translate_terminator` and faults at RIP `0x103543b9`.
+The remaining owner is downstream native codegen/truthiness handling, not the
+HIR existence rewrite. Map that exact fallback before another edit.
