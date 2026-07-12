@@ -49,13 +49,45 @@ name coincidentally collides with a local/generic `.spl` function name.
   `SIMPLE_BOOTSTRAP=1 <fixed seed> run src/app/cli/native_build_main.spl --
   --backend cranelift --entry probe.spl -o out`: no longer errors on
   `rt_array_len_safe`; produces a runnable ELF binary, `rc=0`.
-- String probe (`fn main(): print("hello")`) through the same pipeline:
-  produces a binary that prints `hello`, `rc=0` — first end-to-end
-  verification of the cranelift/LLVM string-constant SFFI fix landed in
-  874914d1fa7, now that native-build can reach codegen at all.
+- String probe (`fn main(): print("hello")`) through the same
+  `SIMPLE_BOOTSTRAP=1`-forced-llc pipeline (this is the path
+  `.claude/rules/bootstrap.md`'s own "internal stage replay" example and this
+  session's actual redeploy invocation use — `SIMPLE_BOOTSTRAP=1` overrides
+  `--backend cranelift` to the LLVM/`llc` backend, confirmed empirically by
+  `[bootstrap-real-llvm]`/`[llvm-tools] llc-object` log lines): produces a
+  binary that prints `hello`, `rc=0` — end-to-end verification of the
+  string-constant SFFI fix landed in 874914d1fa7 **on the LLC backend**, now
+  that native-build can reach codegen at all.
+  **Caveat, precisely stated:** this does *not* verify the Cranelift-direct
+  backend's own string-constant path. Running the identical string probe
+  *without* `SIMPLE_BOOTSTRAP=1` (`--seed-ok`, so `--backend cranelift`
+  actually engages real Cranelift-direct — confirmed by `[cranelift-direct]
+  start` / `compile main` log lines) fails with `error[E1002]: function
+  'cranelift_declare_string_data' not found`, even though that wrapper is
+  defined at `src/lib/nogc_sync_mut/ffi/codegen.spl:320` and imported via
+  `use std.sffi.codegen.*` in `cranelift_codegen_adapter.spl` — sibling
+  bare-`fn`s in the same file (e.g. `cranelift_iconst`) resolve fine via the
+  same import, so this isn't a visibility issue; root cause not
+  investigated further (out of this bug's scope). This is exactly the
+  "NOT verified e2e" caveat already called out in
+  `cranelift_direct_string_constant_null_pointer_2026-07-12.md` — not a
+  regression introduced by this fix, and not fixed here.
 - Sanity: a plain interpreted `run` of a script using a real array (`a.len()`
   builtin) still works, confirming the local-def check didn't regress
   genuine extern dispatch for names without a local definition.
+
+**Separate, newly-discovered follow-on bug:** the same "runtime-symbol-name
+membership checked before local-definition presence" pattern also exists in
+the **codegen backend** (`compile_call` in
+`codegen/instr/calls.rs:2994-3088`), not just the interpreter fixed here — a
+locally-defined function whose bare name coincidentally matches a real
+runtime export (exactly `rt_array_len_safe`'s situation, generic form
+included) compiles without error but **SIGSEGVs at runtime**. This is
+directly relevant to the redeploy target once native-build's entry-closure
+reaches compiling `lexer.spl` to native code. See
+`doc/08_tracking/bug/codegen_rt_prefix_local_function_collision_sigsegv_2026-07-12.md`
+for the full writeup; not fixed in this session (deep, higher-risk change to
+a 2700+ line dispatch function).
 
 ## Original symptom (for history)
 

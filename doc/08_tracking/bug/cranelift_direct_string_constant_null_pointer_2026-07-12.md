@@ -371,3 +371,31 @@ order of many minutes to an hour+ before even reaching codegen (a
 target sources) rather than a specific algorithmic bug, and was not chased
 further — noted here so a future session doesn't have to re-discover that a
 short repro timeout will look like a "hang" when it is actually just slow.
+
+## 2026-07-12 follow-up: concrete e2e symptom for the still-unverified Cranelift-direct path
+
+After a separate, unrelated interpreter fix unblocked `native-build` from
+failing before reaching codegen at all (see
+`doc/08_tracking/bug/seed_native_build_unknown_extern_rt_array_len_safe_2026-07-12.md`),
+the string probe here was finally runnable end-to-end. Result:
+
+- Via `SIMPLE_BOOTSTRAP=1` (which overrides `--backend cranelift` to the
+  LLVM/`llc` backend — confirmed by `[bootstrap-real-llvm]` log lines, and
+  matches `.claude/rules/bootstrap.md`'s own documented "internal stage
+  replay" invocation, i.e. the actual redeploy path used in practice):
+  `fn main(): print("hello")` builds and runs correctly, printing `hello`.
+  This validates the string-constant SFFI mechanism end-to-end **on the LLC
+  backend** specifically.
+- Via `--seed-ok` (no `SIMPLE_BOOTSTRAP=1`), `--backend cranelift` actually
+  engages real Cranelift-direct (confirmed by `[cranelift-direct] start`
+  / `compile main` log lines) — and the *same* string probe now fails with
+  `error[E1002]: function 'cranelift_declare_string_data' not found`, even
+  though that wrapper is defined (`src/lib/nogc_sync_mut/ffi/codegen.spl:320`)
+  and imported (`use std.sffi.codegen.*` in `cranelift_codegen_adapter.spl`).
+  Sibling bare-`fn`s in the same file (e.g. `cranelift_iconst`, used
+  successfully just before this call in the same `cl_translate_const_value`
+  function) resolve fine via the identical import, ruling out a simple
+  visibility issue. Not investigated further this session (out of scope for
+  the interpreter fix that unblocked reaching this point at all) — this is
+  the concrete symptom of the "NOT verified e2e" status already called out
+  above; still open.
