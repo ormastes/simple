@@ -304,16 +304,7 @@ fn _handle_map_bar(args: SyscallArgs) -> SyscallResult:
 
     SyscallResult(value: base_virt as i64)
 
-@cfg(x86_64)
-fn _direct_boot_bar_address(bar_phys: u64, size: u64) -> SyscallResult:
-    val phys_base: u64 = 0xC000000000u64
-    val virt_base: u64 = 0xFFFFC00000000000u64
-    val window_size: u64 = 0x40000000u64
-    if bar_phys < phys_base or bar_phys + size > phys_base + window_size:
-        return SyscallResult(value: -12)
-    SyscallResult(value: (virt_base + bar_phys - phys_base).to_i64())
-
-fn _map_qemu_ivshmem_bar64(bus: u8, dev: u8, func: u8, bar_index: u8) -> SyscallResult:
+fn _map_qemu_ivshmem_bar64(bus: u8, dev: u8, func: u8, bar_index: u8) -> i64:
     val low_offset = (0x10u32 + bar_index.to_u32() * 4u32).to_u8()
     val high_offset = (low_offset.to_u32() + 4u32).to_u8()
     val raw_low = pci_read_bar(bus, dev, func, bar_index)
@@ -329,9 +320,9 @@ fn _map_qemu_ivshmem_bar64(bus: u8, dev: u8, func: u8, bar_index: u8) -> Syscall
     pci_write_config(bus, dev, func, 0x04u8, command_status)
     var info = pci_bar64_decode(raw_low, raw_high, probe_low, probe_high)
     if not info.implemented:
-        return SyscallResult(value: -19)
+        return -19
     if info.size != 0x00800000u64:
-        return SyscallResult(value: -28)
+        return -28
     val window_base = _direct_boot_ivshmem_window_base(dev)
     val programmed_low = ((window_base & 0xFFFFFFF0u64).to_u32()) | (info.raw_low & 0xFu32)
     val programmed_high = (window_base >> 32).to_u32()
@@ -339,9 +330,11 @@ fn _map_qemu_ivshmem_bar64(bus: u8, dev: u8, func: u8, bar_index: u8) -> Syscall
     pci_write_config(bus, dev, func, low_offset, programmed_low)
     pci_write_config(bus, dev, func, 0x04u8, command_status | 0x2u32)
     info = pci_bar64_decode(programmed_low, programmed_high, probe_low, probe_high)
-    _direct_boot_bar_address(info.base, info.size)
+    if info.base < 0xC000000000u64 or info.base + info.size > 0xC040000000u64:
+        return -12
+    0
 
-fn map_qemu_host_gpu_ivshmem_bar2() -> SyscallResult:
+fn map_qemu_host_gpu_ivshmem_bar2() -> i64:
     """Find QEMU ivshmem and expose its shared BAR2 to the boot-owned probe."""
     var dev: u8 = 0u8
     while dev < 32u8:
@@ -357,10 +350,13 @@ fn map_qemu_host_gpu_ivshmem_bar2() -> SyscallResult:
                     val class_code = ((class_info >> 24u32) & 0xFFu32).to_u8()
                     val subclass = ((class_info >> 16u32) & 0xFFu32).to_u8()
                     if pci_function_is_qemu_ivshmem(vendor, pci_read_device_id(0u8, dev, func), class_code, subclass):
-                        return _map_qemu_ivshmem_bar64(0u8, dev, func, 2u8)
+                        val mapped = _map_qemu_ivshmem_bar64(0u8, dev, func, 2u8)
+                        if mapped < 0:
+                            return mapped
+                        return dev.to_i64() + 1
                 func = func + 1u8
         dev = dev + 1u8
-    SyscallResult(value: -19)
+    -19
 
 fn _dma_find_slot(virt_addr: u64) -> i64:
     var i: u64 = 0
