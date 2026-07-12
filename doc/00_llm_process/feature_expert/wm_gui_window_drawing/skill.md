@@ -485,6 +485,136 @@ Hard-won lessons for this live lane (each cost hours):
   as the chained-methods landmine); worked around with an intermediate
   `val eq = a == b` before the `expect`.
 
+## Handoff Notes (2026-07-12)
+
+- **SimpleOS WM input route fixed end-to-end, harness shows PASS** (`b8021eb276`,
+  opus-reviewed). Three root causes: (1) PS/2 init self-poisoned — the keyboard
+  0xF4 ACK byte was never consumed, so the next mouse-config read got the stale
+  0xFA and wrote 0xDA back (bit4 = keyboard clock DISABLED from boot); fixed by
+  consuming the ACK, flushing the buffer, and masking `&0xCF`. (2) `shell.spl`'s
+  `run_baremetal` idle loop deep-copied the whole compositor every spin, a heap
+  storm past the 144MB watermark; now gated on `port_inb(0x64)` bit0 so it only
+  copies when input is actually pending. (3) maximized-marker true/false format
+  plus a 90s TCG correlation deadline (timing only). Also: a single-hop
+  `DesktopShell.process_owned_surface_count_scalar` wrapper heals cross-module
+  scalar marshalling that was returning nil/`<object>` instead of 1/2/3.
+  Evidence (`build/simpleos_wm_fullscreen_evidence/evidence.env`, freshest run):
+  `status=pass`, sequence-correlated `irq -> state -> frame` chains for both
+  maximize and restore, `changed_bytes=1428168`, `baseline_sha256 ==
+  restored_sha256`. **Gotcha:** the checked-in
+  `doc/09_report/simpleos_wm_fullscreen_evidence_2026-07-12.md` was committed
+  from an earlier failing run (`status: fail, reason:
+  wm-simple-web-build-failed`) and has not been regenerated from the passing
+  run above — do not cite that file as current evidence without re-running the
+  harness. A recovered page-fault-storm perf bug (1386 faults/render under TCG)
+  was filed alongside this fix.
+- **De-fake landed** (`599760ca16`, opus-reviewed): WM content frames now route
+  through the real HTML/CSS engine — `simple_web_content_frame_cached` calls
+  `cache.request_to_pixel_artifact` instead of a tag-strip heuristic, which is
+  now fallback-only and carries rejectable provenance.
+  `shared_wm_scene_render_app_content` renders live `state_text` verbatim via
+  real `draw_text`; the canned per-title ASCII table is now used only for empty
+  input and tagged `[canned demo — no live content]`.
+  `hosted_wm_capture_evidence`'s synthetic-seed-scene capture provenance was
+  relabeled from the misleading `verified:*` to the honest
+  `canned:compat-demo-content`. 16 zero-caller canned content generators
+  (`simple_web_app_*`/`themed_*` family, legacy ASCII scene renderer) were
+  deleted with matching spec cleanup in both test twins. New bug filed:
+  `doc/08_tracking/bug/browser_demo_frozen_loading_placeholder_2026-07-12.md`
+  — `browser_demo_hosted_main` calls `update_content` exactly once before
+  entering its event loop and never again, so the app is a permanently frozen
+  "Loading..." placeholder despite being registered end-to-end through the
+  SimpleOS app/launcher registry.
+- **Showcase host-WM adapters for graphics/web created, not yet GUI-verified:**
+  `examples/06_io/ui/wm_graphics_2d_showcase_gui.spl` and
+  `examples/06_io/ui/wm_web_standards_showcase_gui.spl` replicate the accepted
+  `wm_widget_showcase_gui.spl` filesystem-child-bridge pattern via
+  `src/lib/common/ui/wm_app_process_contract.spl`
+  (`SIMPLE_WM_APP_MODE=client` client bridge mode added to
+  `graphics_2d_showcase_gui.spl` and `web_standards_showcase_gui.spl`). Web's
+  bridge child renders at a fixed 80x60 (`RW`/`RH` in
+  `web_standards_showcase_gui.spl`) — a pre-existing perf cap on the web layout
+  path. See `doc/07_guide/ui/showcase_apps.md` and
+  `doc/09_report/showcase_apps_verify_2026-07-12.md` for the full 3x3 readiness
+  matrix; `src/lib/common/ui/showcase_catalog.spl` readiness bits are still all
+  `false`.
+- **Deployed-binary caveat still open:** `bin/simple` traps `exit=132` on
+  dict-heavy compiles until Stage-4 is rebuilt/redeployed with the restored
+  `RuntimeDict` growth fix (`b64b89d3`, see the `bootstrap` layer-expert skill
+  and `doc/08_tracking/bug/stage4_compiled_dict_no_growth_2026-07-11.md`). Any
+  standalone showcase run in this window must use the fresh seed
+  (`src/compiler_rust/target/bootstrap/simple`), not `bin/simple`.
+
+## Handoff Notes (2026-07-12, 4K/8K resolution convention + SimpleOS real 4K screen)
+
+Supersedes the "80x60" bullet in the note above — that limitation is gone.
+
+- **Shared `SHOWCASE_RESOLUTION`/`SHOWCASE_DPI` convention landed** across
+  `graphics_2d_showcase(_gui).spl`, `widget_showcase_gui.spl`,
+  `web_render_file_gui.spl`, `web_standards_showcase_gui.spl`
+  (`297815ba0a`/`2076527bb1`/`9b42b2011d`). `SHOWCASE_RESOLUTION` unset/`"4k"`
+  now DEFAULTS to 3840x2160 (was a small size before); `"8k"` => 7680x4320;
+  explicit `"WxH"` also accepted. `SHOWCASE_DPI` (default 300) scales
+  graphics/widget stroke/detail/text; web reads-but-doesn't-apply it (no DPI
+  hook in the layout engine — `web_render_dpi_scaling_unsupported_2026-07-12.md`).
+  **Gotcha:** none of the host-WM client-env helpers
+  (`wm_graphics_2d_showcase_client_env`/`wm_web_standards_showcase_client_env`
+  in `wm_app_process_contract.spl`) set `SHOWCASE_RESOLUTION` for the spawned
+  child, and widget's `run_wm_client()` calls `build_wm_pixels(W, H, ...)`
+  with the hardcoded `W=3840, H=2160` directly — so launching any of the
+  three host-WM wrapper scripts now silently attempts a full 4K child render
+  under the interpreter unless you export `SHOWCASE_RESOLUTION=<small>`
+  first.
+- **Cross-module name-leak blank-render bug fixed** in
+  `graphics_2d_showcase_gui.spl`: `use graphics_2d_showcase.{run_graphics_2d_showcase, draw_showcase}`
+  leaked `draw_showcase`/`label` into the importing module, shadowing local
+  same-named mutating functions and silently discarding their effect —
+  fixed by renaming locals to `wm_draw_showcase`/`wm_label` (verified
+  1,439,967/1,440,000 nonzero at 800x600). Compiler root cause (import-list
+  scoping vs. name-resolution order) still open:
+  `doc/08_tracking/bug/cross_module_imported_fn_mutation_not_propagating_2026-07-12.md`.
+- **SimpleOS WM now boots a real 3840x2160 argb8888 screen** (`603fabe601`):
+  `gui_entry_desktop.spl` framebuffer 1024x768 -> 3840x2160, QEMU
+  `-global VGA.vgamem_mb=64`. Root cause: `rt_alloc`/`rt_alloc_zeroed`
+  silently truncated allocations over 16MB to 16MB while reporting success,
+  so the 33.2MB 4K backbuffer overflowed adjacent heap; both clamps removed.
+  **Gotcha, same pattern as the 2026-07-11 note above:** the commit message
+  claims harness `status=pass` with `changed_bytes=23174856` and a sha256
+  round-trip, but neither the committed
+  `doc/09_report/simpleos_wm_fullscreen_evidence_2026-07-12.md` nor a live
+  rerun of the harness in this session's verification pass reproduced that
+  PASS state — both show `status=fail,
+  reason=dynamic-scanout-or-desktop-readiness-missing` with correct
+  3840x2160 scanout but 0-byte PPMs. Treat the PASS claim as
+  reported-in-commit-message-only until re-run and the report is
+  regenerated. 8K SimpleOS (132MB VRAM) is explicitly out of scope — beyond
+  BGA/std-vga capability.
+- **Freestanding-codegen bug hit and worked around**: hoisting a `val: u32`
+  constant to module level and reading it from `spl_start()` corrupts the
+  value under the `x86_64-unknown-none` Cranelift target
+  (`width=16000 height=1048` garbage instead of `3840x2160`); plain local
+  literals don't reproduce it. Workaround (local literals) is what ships;
+  filed: `doc/08_tracking/bug/x64_freestanding_module_level_val_u32_desktop_gui_2026-07-12.md`.
+- **Web 4K uniform-frame bug: filed as "Fixed" but the fix isn't in the
+  pushed source.** `web_render_budget_env_override_ignored_by_stage_rearm_2026-07-12.md`
+  is headed "Status: Fixed", but `simple_web_html_layout_renderer.spl` at
+  this repo's HEAD still has the pre-fix budget-rearm logic — the commit
+  message for `297815ba0a` says the real fix "commits separately (WC
+  currently contaminated by a peer layout refactor)". Treat the
+  web-degrades-to-uniform-frame-at-4K behavior as still live until a clean
+  follow-up commit lands it.
+- **WebIR/DrawIR optimization plan committed** (`3963a47`,
+  `doc/03_plan/ui/webir_drawir_optimization.md`): identifies existing
+  building blocks (`simple_web_layout_render_html_draw_ir` Path B,
+  `draw_ir_diff_compositions` node-level diff with zero production callers)
+  and proposes wiring incremental diff-based repaint into the content-frame
+  loop — the concrete path to feasible interactive 4K/8K web, not yet
+  executed.
+- See `doc/07_guide/ui/showcase_apps.md` and
+  `doc/09_report/showcase_apps_verify_2026-07-12.md` (rewritten this pass)
+  for the full per-surface detail; `showcase_catalog.spl` readiness bits
+  are still all `false`.
+
 ## Update Rule
 
 After research, requirements, architecture, design, implementation,
