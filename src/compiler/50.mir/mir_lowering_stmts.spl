@@ -60,6 +60,24 @@ impl MirLowering:
                     case _: return false
         false
 
+    fn local_is_unit(local: LocalId) -> bool:
+        """True when a lowered local's registered MIR type is Unit -- e.g. the
+        placeholder result of a void statement like `print "x"` used as a
+        block's trailing "value" (bootstrap print lowering always returns a
+        LocalId even though the call itself has no result). Unit maps to LLVM
+        `void` (llvm_type_mapper map_type), and `void` is not a legal alloca /
+        load / store operand type -- only a legal function return type. Used
+        by lower_if to skip copying such a placeholder into the (always-i64)
+        merge-result slot, which otherwise forces the backend to materialize
+        an `alloca void` for the arm's placeholder (see bug doc
+        native_if_print_only_arms_alloca_void_2026-07-11.md)."""
+        match self.local_mir_type_of(local):
+            case Some(t):
+                match t.kind:
+                    case MirTypeKind.Unit: true
+                    case _: false
+            case nil: false
+
     me lower_stmt(stmt: HirStmt):
         """Lower HIR statement to MIR."""
         # NOTE: previously declared `val stmt_kind: HirStmtKind` / `val
@@ -580,8 +598,14 @@ impl MirLowering:
         var result_defined = false
         if not b3.current_block_has_explicit_terminator():
             if val then_local = then_result:
-                b3.emit_copy(result, then_local)
-                result_defined = true
+                # A Unit-typed arm result (statement-form print, etc.) has no
+                # real value to merge -- copying it into the i64 result slot
+                # would force an `alloca void` in the backend. Leave
+                # result_defined false; the merge block below falls back to
+                # a const-0 def in that case.
+                if not self.local_is_unit(then_local):
+                    b3.emit_copy(result, then_local)
+                    result_defined = true
             b3.terminate_goto(merge_block)
         self.builder = b3
 
@@ -594,8 +618,9 @@ impl MirLowering:
             var b5 = self.builder
             if not b5.current_block_has_explicit_terminator():
                 if val else_local = else_result:
-                    b5.emit_copy(result, else_local)
-                    result_defined = true
+                    if not self.local_is_unit(else_local):
+                        b5.emit_copy(result, else_local)
+                        result_defined = true
                 b5.terminate_goto(merge_block)
             self.builder = b5
         else:
