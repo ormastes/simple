@@ -663,6 +663,10 @@ int64_t rt_value_int(int64_t value) {
     return (int64_t)(((uint64_t)value << 3) | RT_VALUE_TAG_INT);
 }
 
+int64_t rt_value_as_int(int64_t value) {
+    return value >> 3;
+}
+
 int64_t rt_value_float(int64_t raw_bits) {
     return (int64_t)(((uint64_t)raw_bits & ~RT_VALUE_TAG_MASK) | RT_VALUE_TAG_FLOAT);
 }
@@ -715,6 +719,18 @@ int64_t rt_string_len(int64_t string) {
 const uint8_t* rt_string_data(int64_t string) {
     RtCoreString* s = rt_core_as_string(string);
     return s ? (const uint8_t*)s->data : NULL;
+}
+
+int64_t rt_string_bytes(int64_t string) {
+    RtCoreString* s = rt_core_as_string(string);
+    SplArray* bytes = rt_array_new(s ? (int64_t)s->len : 0);
+    if (!bytes) return rt_core_nil();
+    if (s) {
+        for (uint64_t i = 0; i < s->len; i++) {
+            rt_array_push(bytes, rt_value_int((uint8_t)s->data[i]));
+        }
+    }
+    return (int64_t)(uintptr_t)bytes;
 }
 
 /* Bug #136: string-interpolation operand coercion to a raw C string.

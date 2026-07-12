@@ -18,7 +18,7 @@ struct UiAccessNodeBuild:
 fn ui_access_empty_snapshot(mode: text, active_surface: text, recent_events: [UiAccessEvent]) -> UiAccessSnapshot:
     UiAccessSnapshot(
         protocol_version: UI_ACCESS_PROTOCOL_VERSION,
-        snapshot_revision: 0,
+        snapshot_revision: ui_access_latest_sequence(recent_events),
         mode: mode,
         active_surface: active_surface,
         surfaces: [],
@@ -37,7 +37,7 @@ fn ui_access_snapshot_from_state(state: UIState, recent_events: [UiAccessEvent])
     )
     UiAccessSnapshot(
         protocol_version: UI_ACCESS_PROTOCOL_VERSION,
-        snapshot_revision: recent_events.len().to_i64(),
+        snapshot_revision: ui_access_latest_sequence(recent_events),
         mode: state.mode_name(),
         active_surface: "main",
         surfaces: [surface],
@@ -46,22 +46,45 @@ fn ui_access_snapshot_from_state(state: UIState, recent_events: [UiAccessEvent])
     )
 
 fn ui_access_snapshot_from_session(state: UIState, surfaces: SurfaceManager, active_surface: text, recent_events: [UiAccessEvent], window_surfaces: UiWindowSurfaceRegistry) -> UiAccessSnapshot:
-    val sid = if active_surface == "": "main" else: active_surface
-    val surface = UiAccessSurface(
-        surface_id: sid,
-        title: state.tree.title_text(),
-        active: true,
-        window_id: window_surfaces.window_id_for_surface(sid),
-        app_id: "",
-        root_canonical_id: ui_access_canonical_id(sid, state.tree.root_id)
-    )
+    val surface_ids = surfaces.surface_ids()
+    if surface_ids.len() == 0:
+        return ui_access_empty_snapshot(state.mode_name(), "", recent_events)
+    val sid = if active_surface != "" and surfaces.has(active_surface): active_surface else: surface_ids[0]
+    var access_surfaces: [UiAccessSurface] = []
+    var access_nodes: [UiAccessNode] = []
+    var surface_idx = 0
+    while surface_idx < surface_ids.len():
+        val surface_id = surface_ids[surface_idx]
+        val tree = surfaces.get(surface_id)
+        if tree != nil:
+            val binding = window_surfaces.for_surface(surface_id)
+            var title = tree.title_text()
+            var app_id = ""
+            if binding != nil:
+                if binding.title != "":
+                    title = binding.title
+                app_id = binding.app_id
+            access_surfaces = access_surfaces.push(UiAccessSurface(
+                surface_id: surface_id,
+                title: title,
+                active: surface_id == sid,
+                window_id: window_surfaces.window_id_for_surface(surface_id),
+                app_id: app_id,
+                root_canonical_id: ui_access_canonical_id(surface_id, tree.root_id)
+            ))
+            val surface_nodes = _access_nodes_from_widget(surface_id, tree.root_node(), surfaces.focused(surface_id))
+            var node_idx = 0
+            while node_idx < surface_nodes.len():
+                access_nodes = access_nodes.push(surface_nodes[node_idx])
+                node_idx = node_idx + 1
+        surface_idx = surface_idx + 1
     UiAccessSnapshot(
         protocol_version: UI_ACCESS_PROTOCOL_VERSION,
-        snapshot_revision: recent_events.len().to_i64(),
+        snapshot_revision: ui_access_latest_sequence(recent_events),
         mode: state.mode_name(),
         active_surface: sid,
-        surfaces: [surface],
-        nodes: _access_nodes_from_widget(sid, state.tree.root_node(), state.focused_id),
+        surfaces: access_surfaces,
+        nodes: access_nodes,
         recent_events: ui_access_recent_events(recent_events, UI_ACCESS_MAX_EVENTS)
     )
 
@@ -85,6 +108,11 @@ fn ui_access_recent_events(events: [UiAccessEvent], count: i32) -> [UiAccessEven
         write_idx = write_idx + 1
     out
 
+fn ui_access_latest_sequence(events: [UiAccessEvent]) -> i64:
+    if events.len() == 0:
+        return 0
+    events[events.len() - 1].sequence
+
 fn ui_access_recent_surface_events(events: [UiAccessEvent], surface_id: text, count: i32) -> [UiAccessEvent]:
     var filtered_count = 0
     for event in events:
@@ -100,16 +128,28 @@ fn ui_access_recent_surface_events(events: [UiAccessEvent], surface_id: text, co
             write_idx = write_idx + 1
     ui_access_recent_events(filtered, count)
 
+fn ui_access_history_events(events: [UiAccessEvent], surface_id: text, count: i32) -> [UiAccessEvent]:
+    val recent = if surface_id == "": ui_access_recent_events(events, count) else: ui_access_recent_surface_events(events, surface_id, count)
+    val event_count = recent.len()
+    if event_count == 0:
+        return []
+    var newest_first: [UiAccessEvent] = [recent[0]; event_count]
+    var idx = 0
+    while idx < event_count:
+        newest_first[idx] = recent[event_count - idx - 1]
+        idx = idx + 1
+    newest_first
+
 fn ui_access_record_event(events: [UiAccessEvent], sequence: i64, surface_id: text, widget_id: text, event_kind: text, payload: text) -> [UiAccessEvent]:
-    val seq = if sequence > 0: sequence else: events.len().to_i64() + 1
-    events.push(UiAccessEvent(
+    val seq = if sequence > 0: sequence else: ui_access_latest_sequence(events) + 1
+    ui_access_recent_events(events.push(UiAccessEvent(
         surface_id: surface_id,
         widget_id: widget_id,
         canonical_id: ui_access_canonical_id(surface_id, widget_id),
         event_kind: event_kind,
         payload: payload,
         sequence: seq
-    ))
+    )), UI_ACCESS_MAX_EVENTS)
 
 fn ui_access_record_action(events: [UiAccessEvent], sequence: i64, surface_id: text, widget_id: text, event_kind: text, payload: text) -> [UiAccessEvent]:
     ui_access_record_event(events, sequence, surface_id, widget_id, event_kind, payload)

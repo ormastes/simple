@@ -238,6 +238,17 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
         return Type(kind: TypeKind.Named("Generic", []), span: make_span())
     if type_expr_idx >= TYPE_UNION_BASE:
         return Type(kind: TypeKind.Named(type_tag_name(type_expr_idx), []), span: make_span())
+    # type_expr_idx falls in the tag-space hole (34..TYPE_UNION_BASE-1) here, so
+    # it must be a real expr-arena index. It can go stale when it was captured
+    # (e.g. an extern fn's `-> T` return type, threaded through by #146) before
+    # an interleaved ast_reset() cleared/refilled the shared flat AST arena --
+    # observed OOB (index 48, length 13) crashing the seed interpreter on
+    # src/app/io/process_ops.spl. Bounds-check against the live arena length and
+    # fall back to Infer (pre-#146 behavior) rather than reading out of range;
+    # note this does not catch a stale-but-in-bounds index from a *smaller*
+    # reset that still covers type_expr_idx.
+    if type_expr_idx >= expr_count():
+        return Type(kind: TypeKind.Infer, span: make_span())
     val tag = expr_get_tag(type_expr_idx)
     if tag == EXPR_IDENT:
         Type(kind: TypeKind.Named(expr_get_str(type_expr_idx), []), span: make_span())

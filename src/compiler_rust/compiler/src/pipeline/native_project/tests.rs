@@ -928,6 +928,10 @@ int main(void) {
     if (rt_index_get((int64_t)values, rt_value_int(-3)) != rt_value_nil()) return 17;
     if (rt_index_set((int64_t)values, rt_value_int(2), rt_value_int(99))) return 18;
     if (rt_index_get((int64_t)values, rt_value_nil()) != rt_value_nil()) return 19;
+    int64_t abc = rt_string_new((const uint8_t*)"abc", 3);
+    SplArray* bytes = (SplArray*)(uintptr_t)rt_string_bytes(abc);
+    if (rt_array_len(bytes) != 3) return 20;
+    if (rt_array_get(bytes, 1) != rt_value_int('b')) return 21;
     int64_t out = rt_string_new((const uint8_t*)"out:", 4);
     int64_t err = rt_string_new((const uint8_t*)"err", 3);
     rt_stdout_write(out);
@@ -968,7 +972,13 @@ int main(void) {
         child.stdin.as_mut().unwrap().write_all(b"Z").unwrap();
     }
     let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "{label} ABI probe exited unsuccessfully");
+    assert!(
+        output.status.success(),
+        "{label} ABI probe exited unsuccessfully: status={} stdout={:?} stderr={:?}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "out:Z7true");
     assert_eq!(String::from_utf8_lossy(&output.stderr), "err");
 }

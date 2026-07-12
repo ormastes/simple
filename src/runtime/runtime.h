@@ -250,6 +250,7 @@ void     rt_stderr_flush(void);            /* flushes stderr */
 void     __simple_runtime_init(void);
 void     __simple_runtime_shutdown(void);
 int64_t  rt_value_int(int64_t value);
+int64_t  rt_value_as_int(int64_t value);
 int64_t  rt_value_float(int64_t raw_bits);
 int64_t  rt_value_bool(int64_t value);
 int64_t  rt_value_nil(void);
@@ -266,6 +267,7 @@ void     rt_panic(const char* msg);
 int64_t  rt_string_new(const uint8_t* bytes, uint64_t len);
 int64_t  rt_string_len(int64_t string);
 const uint8_t* rt_string_data(int64_t string);
+int64_t  rt_string_bytes(int64_t string);
 int64_t  rt_string_char_code_at(int64_t string, int64_t index);
 int64_t  rt_string_char_at(int64_t string, int64_t index);
 int64_t  rt_string_concat(int64_t left, int64_t right);
