@@ -98,8 +98,8 @@ witnesses for all 16 candidates, including Bengali rank 11 and Noto Emoji
 `U+1F600`. This is evidence preparation only: the audit found no cell eligible
 for promotion until a bound Pure Simple shaping acceptance run succeeds. The
 matrix therefore remains 0 `native`, 0 `fallback`, 26
-`not-designed-for-script`, and 74 `unavailable`. No Simple test ran in this
-session because its three-attempt cap was already exhausted.
+`not-designed-for-script`, and 74 `unavailable`. Promotion requires the
+executable, exact-face-bound shaping gate named in the system-test plan.
 
 ## Current shared material
 

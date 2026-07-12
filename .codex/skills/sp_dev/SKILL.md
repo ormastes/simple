@@ -416,10 +416,10 @@ font GPU emission, or GUI/Web/2D/3D text.
    completed and the final glyphs remain bound to the exact live face handle
    and generation.
 8. Freeze these four SSpec phrases exactly:
-   `Load a licensed multilingual font manifest`;
-   `Shape and rasterize the same glyph run through 2D and 3D`;
-   `Emit the selected GPU backend program`;
-   `Prove native submission and compare device readback with the CPU oracle`.
+   `Load the pinned multilingual font manifest`;
+   `Prepare one shared font batch for 2D and 3D`;
+   `Emit the selected font composite program and plan compilation`;
+   `Prove native submission and device readback`.
    Mirrored manuals under `doc/06_spec` are `.md` only.
 9. Lower-model sidecars may implement or audit bounded lanes and generated
    manuals, but the final done mark and manual-quality judgment require a

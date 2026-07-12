@@ -40,7 +40,7 @@ each helper fails explicitly. New assertions use built-in matchers only.
 Each listed case count is a minimum and includes happy, boundary, and failure
 behavior.
 
-| Requirement | Spec | Required cases | Count |
+| Requirement | Spec | Required cases | Current/required |
 |---|---|---|---:|
 | REQ-001 | `shared_font_manifest_spec.spl` | pinned hashes/top ten; script totals; tenth/eleventh boundary | 3 |
 | REQ-002 | `shared_font_manifest_spec.spl` | fixed decimal/fallback; alias/macrolanguage policy; double regeneration | 3 |
@@ -48,14 +48,14 @@ behavior.
 | REQ-004 | `shared_font_manifest_spec.spl` | complete license metadata; checksum/table validation; missing field rejection | 3 |
 | REQ-005 | `shared_font_manifest_spec.spl` | pinned catalog revision; unchanged accepted bytes; corpus rejection | 3 |
 | REQ-006 | `shared_font_surfaces_spec.spl` | one owner; identical batch identity; no duplicate material cache | 3 |
-| REQ-007 | `shared_font_surfaces_spec.spl` | selected-script shaping; BiDi/cluster offsets; missing-glyph fallback | 3 |
-| REQ-008 | `shared_font_surfaces_spec.spl` | glyf/default instance; unsupported tables/axes rejection; bitmap fixture | 3 |
+| REQ-007 | pending shaping acceptance spec | selected-script shaping; BiDi/cluster offsets; missing-glyph fallback | 0/3 |
+| REQ-008 | `shared_font_manifest_spec.spl` | compound/default-glyf corpus reconstruction; unsupported-format/axis rejection and bitmap fixture pending | 1/3 |
 | REQ-009 | `shared_font_surfaces_spec.spl` | key separation; bounded eviction/counters; generation/dirty regions | 3 |
 | REQ-010 | `gpu_font_emission_spec.spl` | five source targets; Vulkan contract; deterministic failures/hashes | 3 |
 | REQ-011 | `shared_font_surfaces_spec.spl` | Engine2D API compatibility; DrawIR/batch evidence; CPU parity | 3 |
-| REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 3 |
-| REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 3 |
-| REQ-014 | all four specs | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 3 |
+| REQ-012 | pending native-readback spec | HUD transform; world depth/transform; texture-to-readback chain | 0/3 |
+| REQ-013 | pending native-readback spec | promoted backend pass; unavailable classification; fake proof rejection | 0/3 |
+| REQ-014 | three present specs plus pending native-readback spec | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 2/3 |
 
 | NFR | Evidence | Pass condition |
 |---|---|---|
