@@ -371,13 +371,38 @@ impl MirLowering:
                     # nil-derefs). This mirrors the identical routing in the
                     # main `case Field` arm below -- this disc-guarded
                     # pre-dispatch returns before that arm is reached.
+                    #
+                    # Concat-drop fix (follow-up): rt_strlen reads its operand
+                    # as a raw char* with no tag check. Since the `+` binop now
+                    # emits rt_strcat_tagged (a PROPERLY TAGGED RtCoreString --
+                    # see bin_is_str_concat below), a concat result's `.len`
+                    # field access here would feed a tagged pointer straight
+                    # into rt_strlen, which reads the RtCoreString header 1
+                    # byte in instead of the string bytes (observed: strlen
+                    # stops 3 bytes in at the header's reserved-field NUL, so
+                    # "foo"+"bar" -> len 3 instead of 6). Coerce through
+                    # rt_interp_cstr first -- the same tagged-or-raw
+                    # autodetection already used for string-interpolation
+                    # operands (bug #136) and for print above: a tagged heap
+                    # string unwraps to its buffer, an already-raw char* (a
+                    # plain string literal) passes through unchanged.
                     if (field_name == "len" or field_name == "length") and self.local_is_str(base_local):
+                        val len_cstr_op = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_interp_cstr"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+                        ))
+                        var b_len_cstr = self.builder
+                        val len_cstr_res = b_len_cstr.emit_call(len_cstr_op, [mir_operand_copy(base_local)], MirType(kind: MirTypeKind.Opaque("str")))
+                        self.builder = b_len_cstr
+                        var len_src = base_local
+                        if val len_cstr_local = len_cstr_res:
+                            len_src = len_cstr_local
                         val strlen_func = MirOperand(kind: MirOperandKind.Const(
                             MirConstValue.Str("rt_strlen"),
                             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
                         ))
                         var b_sl = self.builder
-                        val sl_res = b_sl.emit_call(strlen_func, [mir_operand_copy(base_local)], MirType.i64())
+                        val sl_res = b_sl.emit_call(strlen_func, [mir_operand_copy(len_src)], MirType.i64())
                         self.builder = b_sl
                         if val sl_local = sl_res:
                             return sl_local
@@ -677,14 +702,41 @@ impl MirLowering:
                         val left_local = self.lower_expr(left)
                         val right_local = self.lower_expr(right)
                         # String `+` is CONCATENATION, not arithmetic. On the
-                        # native path a string is a raw char*, so `a + b` must
-                        # call rt_strcat (raw char* concat, same representation as
-                        # lower_string_interpolation). The generic emit_binop(Add)
-                        # below would integer-ADD the two char* pointers, yielding
-                        # a garbage pointer that SIGSEGVs on any deref (`print(c)`,
-                        # `c.len`). Detect string operands by their MIR local type
-                        # (Opaque str) because HIR `.type_` is nil on this path;
-                        # any non-string arithmetic keeps the generic binop.
+                        # native path a string is (at the MIR-type level) an
+                        # Opaque "str" value, so `a + b` must call a runtime
+                        # concat helper instead of falling through to the
+                        # generic emit_binop(Add) below, which would
+                        # integer-ADD the two operand bit patterns, yielding a
+                        # garbage pointer that SIGSEGVs on any deref
+                        # (`print(c)`, `c.len`). Detect string operands by
+                        # their MIR local type (Opaque str) because HIR
+                        # `.type_` is nil on this path; any non-string
+                        # arithmetic keeps the generic binop.
+                        #
+                        # Concat-drop fix: this used to call rt_strcat, which
+                        # returns a RAW malloc'd char* with no RtCoreString
+                        # tag. Downstream consumers that tag-validate their
+                        # operands (e.g. the Rust-side extract_rt_string_array
+                        # feeding rt_native_build) silently DROP such untagged
+                        # values -- e.g. a `[text]` array holding one
+                        # concat-produced element and one plain literal lost
+                        # the concat element on that path. rt_strcat_tagged
+                        # (runtime_native.c) normalizes both operands via the
+                        # same tagged-or-raw autodetection rt_interp_cstr uses
+                        # (bug #136) and returns a PROPERLY TAGGED heap string,
+                        # so concat results survive tag-validating consumers.
+                        # The destination MIR type stays Opaque("str") (same
+                        # as before) so local_is_str() keeps routing further
+                        # uses of the result (chained `a + b + c`, `.len()`,
+                        # `==`, `.starts_with()`) through the existing
+                        # tagged-or-raw-tolerant helpers (rt_len,
+                        # rt_text_eq_any, rt_interp_cstr) unchanged. Do NOT
+                        # change lower_string_interpolation/emit_raw_strcat
+                        # (string-interpolation `{expr}` splicing and
+                        # [...].join in method_calls_literals.spl) -- those
+                        # still expect and produce a raw char*, which is what
+                        # rt_print/rt_println consume there; they keep calling
+                        # rt_strcat unchanged.
                         var bin_is_str_concat = false
                         match op:
                             case Add:
@@ -694,7 +746,7 @@ impl MirLowering:
                                 ()
                         if bin_is_str_concat:
                             val cat_func = MirOperand(kind: MirOperandKind.Const(
-                                MirConstValue.Str("rt_strcat"),
+                                MirConstValue.Str("rt_strcat_tagged"),
                                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
                             ))
                             var b_cat = self.builder
@@ -1033,13 +1085,27 @@ impl MirLowering:
                 # raw-char* length accessor. Keyed off the MIR local type
                 # (Opaque str) because HIR `.type_` is nil on this path; user
                 # structs with a real `len` field and arrays are unaffected.
+                # Concat-drop fix (follow-up): same rt_interp_cstr coercion as
+                # the pre-dispatch `.len` arm above -- required since `+` now
+                # emits rt_strcat_tagged (a properly tagged RtCoreString), and
+                # rt_strlen must never receive a tagged pointer directly.
                 if (field_name == "len" or field_name == "length") and self.local_is_str(base_local):
+                    val fa_cstr_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_interp_cstr"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+                    ))
+                    var b_fa_cstr = self.builder
+                    val fa_cstr_res = b_fa_cstr.emit_call(fa_cstr_op, [mir_operand_copy(base_local)], MirType(kind: MirTypeKind.Opaque("str")))
+                    self.builder = b_fa_cstr
+                    var fa_len_src = base_local
+                    if val fa_cstr_local = fa_cstr_res:
+                        fa_len_src = fa_cstr_local
                     val fa_func = MirOperand(kind: MirOperandKind.Const(
                         MirConstValue.Str("rt_strlen"),
                         MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
                     ))
                     var b_fa = self.builder
-                    val fa_res = b_fa.emit_call(fa_func, [mir_operand_copy(base_local)], MirType.i64())
+                    val fa_res = b_fa.emit_call(fa_func, [mir_operand_copy(fa_len_src)], MirType.i64())
                     self.builder = b_fa
                     if val fa_res_local = fa_res:
                         return fa_res_local

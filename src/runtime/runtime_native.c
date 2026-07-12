@@ -1532,6 +1532,40 @@ char* rt_strcat(const char* a, const char* b) {
     return spl_str_concat(a, b);
 }
 
+/* Concat-drop fix: `rt_strcat` above returns a RAW malloc'd char* with no
+ * RtCoreString tag. Downstream consumers that tag-validate their operands
+ * (e.g. the Rust-side extract_rt_string_array feeding rt_native_build,
+ * src/compiler_rust/compiler/src/pipeline/native_project/lib.rs:68-94)
+ * silently DROP such untagged values -- e.g. a `[text]` array holding one
+ * concat-produced element and one plain literal loses the concat element on
+ * that path. rt_strcat_tagged is the tagged-result counterpart used by the
+ * native `+` binop lowering (expr_dispatch.spl bin_is_str_concat): it
+ * normalizes both operands via the same tagged-or-raw autodetection
+ * rt_interp_cstr already uses (bug #136), then builds a single freshly
+ * malloc'd RtCoreString (same layout/tag rt_string_new produces) directly
+ * from the two source buffers -- one copy, no extra rt_string_new wrap. Do
+ * NOT change rt_strcat itself: its existing raw-char* consumers (string
+ * interpolation, [...].join in method_calls_literals.spl) expect a raw
+ * pointer. */
+int64_t rt_strcat_tagged(int64_t a, int64_t b) {
+    const char* left = rt_interp_cstr(a);
+    const char* right = rt_interp_cstr(b);
+    size_t left_len = left ? strlen(left) : 0;
+    size_t right_len = right ? strlen(right) : 0;
+    size_t total = left_len + right_len;
+
+    RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + total + 1);
+    if (!out) return rt_core_nil();
+    out->kind = RT_VALUE_HEAP_STRING;
+    out->reserved = 0;
+    out->len = (uint64_t)total;
+    if (left_len > 0) memcpy(out->data, left, left_len);
+    if (right_len > 0) memcpy(out->data + left_len, right, right_len);
+    out->data[total] = '\0';
+    rt_core_register_string(out);
+    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+}
+
 char* rt_substr(const char* s, int64_t start, int64_t len) {
     return spl_str_slice(s, start, start + len);
 }

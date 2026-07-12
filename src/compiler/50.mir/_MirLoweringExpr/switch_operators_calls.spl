@@ -585,6 +585,31 @@ impl MirLowering:
             self.builder = b_cstr
             if val cstr_local = cstr_res:
                 print_arg = mir_operand_copy(cstr_local)
+        # Concat-drop fix (follow-up, reconciled w/ the numeric-coercion path
+        # above): rt_print/rt_println read their operand as a raw
+        # null-terminated char* with no tag check -- fine as long as every
+        # "str"-typed local really is a raw char* (the pre-existing
+        # assumption). Since the `+` binop now emits rt_strcat_tagged (a
+        # PROPERLY TAGGED RtCoreString, see expr_dispatch.spl bin_is_str_concat)
+        # a concat result printed directly here would feed a tagged pointer
+        # (address | RT_VALUE_TAG_HEAP) straight into fputs, which reads the
+        # RtCoreString header 1 byte in instead of the string bytes (observed:
+        # a 3-char magic-number fragment instead of the real content). Coerce
+        # through rt_interp_cstr -- the same tagged-or-raw autodetection
+        # already used for string-interpolation operands (bug #136): a tagged
+        # heap string unwraps to its buffer, an already-raw char* (a plain
+        # string literal, or the decimal cstr just produced above for a
+        # numeric arg) passes through unchanged, so this is a no-op for every
+        # case that worked before.
+        val concat_cstr_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_interp_cstr"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: self.bootstrap_text_type(), is_variadic: false)))
+        ))
+        var b_concat_cstr = self.builder
+        val concat_cstr_res = b_concat_cstr.emit_call(concat_cstr_op, [mir_operand_copy(print_arg)], self.bootstrap_text_type())
+        self.builder = b_concat_cstr
+        if val concat_cstr_local = concat_cstr_res:
+            print_arg = mir_operand_copy(concat_cstr_local)
         val func_operand = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str(rt_name),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [self.bootstrap_text_type()], return_type: MirType.unit(), is_variadic: false)))

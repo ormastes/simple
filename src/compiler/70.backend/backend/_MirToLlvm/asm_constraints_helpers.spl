@@ -193,6 +193,18 @@ impl MirToLlvm:
         self.builder.emit("declare i64 @rt_dict_contains(i64, i64)")
         self.builder.emit("declare i64 @rt_strlen(ptr)")
         self.builder.emit("declare ptr @rt_strcat(ptr, ptr)")
+        # Concat-drop fix: rt_strcat_tagged is the tagged-result counterpart of
+        # rt_strcat used by the `+` binop lowering (expr_dispatch.spl
+        # bin_is_str_concat) -- the C signature is `int64_t
+        # rt_strcat_tagged(int64_t, int64_t)`, but declared `ptr` here (not
+        # `i64`) to match the Opaque("str") MIR type the call site uses for
+        # both operands and the result (same "ptr" mapping llvm_type_mapper.spl
+        # gives every Opaque(_) type). x86-64 SysV passes/returns a pointer and
+        # an i64 in the same integer register, so this is ABI-identical to an
+        # i64 declare -- the same trick rt_enum_new's declare block above uses
+        # in the opposite direction (i64 declare for an int32_t/int32_t/int64_t
+        # C signature).
+        self.builder.emit("declare ptr @rt_strcat_tagged(ptr, ptr)")
         # Bug #136: string interpolation coerces each `{expr}` result to a raw
         # C string via rt_interp_cstr before rt_strcat splices it (see MIR
         # lower_string_interpolation).
@@ -237,6 +249,7 @@ impl MirToLlvm:
         self.defined_func_names["rt_dict_contains"] = true
         self.defined_func_names["rt_strlen"] = true
         self.defined_func_names["rt_strcat"] = true
+        self.defined_func_names["rt_strcat_tagged"] = true
         self.defined_func_names["rt_string_new"] = true
         self.defined_func_names["rt_native_build"] = true
         self.builder.emit("")
