@@ -8,8 +8,8 @@ use simple_runtime::value::RuntimeValue;
 
 // Import actual SFFI functions from runtime
 use simple_runtime::value::{
-    rt_array_clear, rt_array_extend_i64, rt_array_get, rt_array_len, rt_array_len_safe, rt_array_new, rt_array_pop,
-    rt_array_push, rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set, rt_typed_bytes_u8_push,
+    rt_array_clear, rt_array_extend_i64, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push,
+    rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set, rt_typed_bytes_u8_push,
     rt_typed_words_u32_at, rt_typed_words_u32_push, rt_typed_words_u32_set, rt_typed_words_u32_unchecked,
     rt_typed_words_u64_at, rt_typed_words_u64_unchecked,
 };
@@ -584,24 +584,6 @@ pub fn rt_array_len_fn(args: &[Value]) -> Result<Value, CompileError> {
 
     let arr = RuntimeValue::from_raw(arr_raw as u64);
     let len = rt_array_len(arr);
-    Ok(Value::Int(len))
-}
-
-/// Same as `rt_array_len_fn` but returns 0 (instead of -1) for a
-/// non-array/invalid value, mirroring `rt_array_len_safe`'s "safe" contract.
-pub fn rt_array_len_safe_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let arr_raw = args
-        .first()
-        .ok_or_else(|| {
-            CompileError::semantic_with_context(
-                "rt_array_len_safe expects 1 argument".to_string(),
-                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-            )
-        })?
-        .as_int()?;
-
-    let arr = RuntimeValue::from_raw(arr_raw as u64);
-    let len = rt_array_len_safe(arr);
     Ok(Value::Int(len))
 }
 
