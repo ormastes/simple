@@ -151,6 +151,19 @@ impl HirLowering:
         # Probe MUST be eprint AND ungated (Traps A/C/D, bug doc iters 13-17).
         val bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
         val bootstrap_diag = bootstrap_mode and hir_module_diag_enabled()
+        # A multi-module --entry-closure build under SIMPLE_BOOTSTRAP=1 parses
+        # EVERY module in the closure for real (see flat_is_bootstrap_entry_path
+        # in the flat-AST bridge), not just the single bootstrap_main.spl entry.
+        # The bootstrap branch below only pre-declares SAME-module function
+        # names (bootstrap_decl_idx loop); it never ran resolve_import_symbols,
+        # so a helper module's functions never entered the importing module's
+        # symbol table and every cross-module call HIR-failed with "unresolved
+        # name: <fn>" even though the helper module itself lowered fine (bug
+        # bootstrap_stage2_empty_mir_bodies_2026-07-05, cross-module closure
+        # gap). Single-entry bootstrap_main.spl builds (no closure flag) never
+        # had real cross-module imports to resolve, so this only widens
+        # behavior for the closure path.
+        val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         if bootstrap_diag:
             # NOTE: parser Module has no `path` field (parser_types.spl) — a
             # `{module.path}` interpolation here aborted the whole worker under
@@ -159,9 +172,13 @@ impl HirLowering:
         self.lowered_impl_functions = {}
         # Pass 0: pre-register imported type names so explicit `use` paths win
         # over module load order when two modules export the same short name.
-        if not bootstrap_mode:
+        if not bootstrap_mode or bootstrap_closure:
             hir_module_phase_probe("phase3:hir:imports:start {module.name}")
+            if bootstrap_diag:
+                eprint("[hir-lower] resolve_import_symbols:start module={module.name}")
             self.resolve_import_symbols(module)
+            if bootstrap_diag:
+                eprint("[hir-lower] resolve_import_symbols:done module={module.name}")
             hir_module_phase_probe("phase3:hir:imports:done {module.name}")
 
         # First pass: declare all top-level symbols
