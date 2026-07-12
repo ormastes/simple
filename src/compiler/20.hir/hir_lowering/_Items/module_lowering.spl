@@ -184,8 +184,17 @@ impl HirLowering:
         # First pass: declare all top-level symbols
         if bootstrap_diag:
             eprint("[hir-lower] declare:start module={module.name}")
-        if not bootstrap_mode:
+        if not bootstrap_mode or bootstrap_closure:
             hir_module_phase_probe("phase3:hir:declare:start {module.name}")
+            # Under a closure build, a module's own struct/enum/class/trait
+            # names must be pre-declared before its functions are lowered --
+            # a constructor referencing its own module's struct (e.g.
+            # `Point(x: a, y: b)` inside `make_point`) otherwise hits
+            # lower_unresolved_ident -> "unresolved name: Point" (bug
+            # bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe A). Bootstrap
+            # mode already pre-declares its own function names via the
+            # bootstrap_decl_idx loop below, so this only widens declaration
+            # coverage to types/consts for the closure path.
             self.declare_module_symbols(module)
             hir_module_phase_probe("phase3:hir:declare:done {module.name}")
         if bootstrap_diag:
@@ -287,6 +296,64 @@ impl HirLowering:
                 lower_idx = lower_idx + 1
 
         if bootstrap_mode:
+            # Closure builds need real struct/enum/class/bitfield/trait
+            # definitions in the returned HirModule, not just their names in
+            # the symbol table (declare_module_symbols above only defines
+            # names). Without this, MIR lowering's `struct_field_order` (built
+            # by walking `HirModule.structs`) never learns about a module's
+            # own struct, so `Point(x: a, y: b)` falls through lower_call's
+            # generic-function-call path and the backend emits `call @Point`
+            # -> link failure `undefined symbol: Point` instead of a real
+            # struct construction (bug
+            # bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe A). A plain
+            # (non-closure) bootstrap_main.spl build never declares its own
+            # struct/enum/class types, so these dicts stay empty there and
+            # this is additive only.
+            if bootstrap_closure:
+                val bootstrap_module_classes = module.classes
+                val bootstrap_class_keys = bootstrap_module_classes.keys()
+                var bootstrap_class_idx = 0
+                while bootstrap_class_idx < bootstrap_class_keys.len():
+                    val bootstrap_class_: Class = bootstrap_module_classes[bootstrap_class_keys[bootstrap_class_idx]]
+                    val bootstrap_hir_class = self.lower_class(bootstrap_class_)
+                    classes[bootstrap_hir_class.symbol] = bootstrap_hir_class
+                    bootstrap_class_idx = bootstrap_class_idx + 1
+
+                val bootstrap_module_structs = module.structs
+                val bootstrap_struct_keys = bootstrap_module_structs.keys()
+                var bootstrap_struct_idx = 0
+                while bootstrap_struct_idx < bootstrap_struct_keys.len():
+                    val bootstrap_struct_: Struct = bootstrap_module_structs[bootstrap_struct_keys[bootstrap_struct_idx]]
+                    val bootstrap_hir_struct = self.lower_struct(bootstrap_struct_)
+                    structs[bootstrap_hir_struct.symbol] = bootstrap_hir_struct
+                    bootstrap_struct_idx = bootstrap_struct_idx + 1
+
+                val bootstrap_module_enums = module.enums
+                val bootstrap_enum_keys = bootstrap_module_enums.keys()
+                var bootstrap_enum_idx = 0
+                while bootstrap_enum_idx < bootstrap_enum_keys.len():
+                    val bootstrap_enum_: Enum = bootstrap_module_enums[bootstrap_enum_keys[bootstrap_enum_idx]]
+                    val bootstrap_hir_enum = self.lower_enum(bootstrap_enum_)
+                    enums[bootstrap_hir_enum.symbol] = bootstrap_hir_enum
+                    bootstrap_enum_idx = bootstrap_enum_idx + 1
+
+                val bootstrap_module_bitfields = module.bitfields
+                val bootstrap_bitfield_keys = bootstrap_module_bitfields.keys()
+                var bootstrap_bitfield_idx = 0
+                while bootstrap_bitfield_idx < bootstrap_bitfield_keys.len():
+                    val bootstrap_bf_: Bitfield = bootstrap_module_bitfields[bootstrap_bitfield_keys[bootstrap_bitfield_idx]]
+                    val bootstrap_hir_bf = self.lower_bitfield(bootstrap_bf_)
+                    bitfields[bootstrap_hir_bf.symbol] = bootstrap_hir_bf
+                    bootstrap_bitfield_idx = bootstrap_bitfield_idx + 1
+
+                val bootstrap_module_traits = module.traits
+                val bootstrap_trait_keys = bootstrap_module_traits.keys()
+                var bootstrap_trait_idx = 0
+                while bootstrap_trait_idx < bootstrap_trait_keys.len():
+                    val bootstrap_trait_: Trait = bootstrap_module_traits[bootstrap_trait_keys[bootstrap_trait_idx]]
+                    val bootstrap_hir_trait = self.lower_trait(bootstrap_trait_)
+                    traits[bootstrap_hir_trait.symbol] = bootstrap_hir_trait
+                    bootstrap_trait_idx = bootstrap_trait_idx + 1
             if bootstrap_diag:
                 eprint("[hir-lower] bootstrap-functions:count module={module.name} count={_bootstrap_hir_functions.len()}")
             return HirModule(
@@ -297,11 +364,11 @@ impl HirLowering:
                 domain_blocks: [],
                 symbols: self.symbols,
                 functions: functions,
-                classes: {},
-                structs: {},
-                enums: {},
-                bitfields: {},
-                traits: {},
+                classes: classes,
+                structs: structs,
+                enums: enums,
+                bitfields: bitfields,
+                traits: traits,
                 impls: [],
                 constants: {},
                 static_asserts: [],
@@ -484,7 +551,11 @@ impl HirLowering:
         )
 
     me declare_module_symbols(module: Module):
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        # Closure builds need this pass even under SIMPLE_BOOTSTRAP=1 (see the
+        # call site in lower_module) so a module's own struct/enum/class/
+        # trait names resolve inside its own function bodies.
+        val declare_bootstrap_closure = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not declare_bootstrap_closure:
             return
         # Pass module filename for visibility tracking
         val mod_name = if self.module_filename != "": Some(self.module_filename) else: nil

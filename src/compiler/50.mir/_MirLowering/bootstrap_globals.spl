@@ -105,6 +105,72 @@ fn bootstrap_mir_name_for_index(index: i64) -> text:
         return "rt_native_build"
     ""
 
+fn bootstrap_register_hir_type_defs(lowering: MirLowering, hir_module: HirModule) -> MirLowering:
+    """Populate a fresh MirLowering's struct/enum/class type metadata from one
+    HIR module's own type definitions, mirroring the struct/enum/class block
+    of the normal (non-bootstrap) `lower_module()`
+    (`_MirLowering/module_lowering.spl` lines ~315-391) that neither bootstrap
+    flat-lowering entry point (`bootstrap_lower_hir_globals_to_mir_module`,
+    `bootstrap_lower_extra_hir_module_to_mir`) ever reaches -- both build a
+    fresh `MirLowering` and call `lower_function` directly per function,
+    skipping `lower_module` entirely. Without this, `self.struct_field_order`
+    stays empty, so `lower_call` never reclassifies `Point(x:.., y:..)` as a
+    struct construction and it falls through to a generic function call that
+    links as `undefined symbol: Point` (bug
+    bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe A, MIR-layer half of
+    the HIR-layer fix in `declare_module_symbols`/`lower_module`). A module
+    with no structs/enums/classes of its own (the common case) makes every
+    loop below a no-op, so this is additive only."""
+    var lw = lowering
+    val struct_values = hir_module.structs.values()
+    var si = 0
+    while si < struct_values.len():
+        val struct_def = struct_values[si]
+        var field_names: [text] = []
+        var fi = 0
+        while fi < struct_def.fields.len():
+            field_names.push(struct_def.fields[fi].name)
+            fi = fi + 1
+        var fm = lw.field_map
+        fm[lw.symbol_id_value(struct_def.symbol)] = field_names
+        lw.field_map = fm
+        var sfo = lw.struct_field_order
+        sfo[struct_def.name] = field_names
+        lw.struct_field_order = sfo
+        lw.lower_struct_type(struct_def)
+        si = si + 1
+
+    val enum_values = hir_module.enums.values()
+    var ei = 0
+    while ei < enum_values.len():
+        val enum_def = enum_values[ei]
+        var variant_names: [text] = []
+        var vi = 0
+        while vi < enum_def.variants.len():
+            variant_names.push(enum_def.variants[vi].name)
+            vi = vi + 1
+        var evi = lw.enum_variant_index
+        evi[enum_def.name] = variant_names
+        lw.enum_variant_index = evi
+        ei = ei + 1
+
+    val class_values = hir_module.classes.values()
+    var ci = 0
+    while ci < class_values.len():
+        val class_def = class_values[ci]
+        var field_names: [text] = []
+        var fi2 = 0
+        while fi2 < class_def.fields.len():
+            field_names.push(class_def.fields[fi2].name)
+            fi2 = fi2 + 1
+        var fm2 = lw.field_map
+        fm2[lw.symbol_id_value(class_def.symbol)] = field_names
+        lw.field_map = fm2
+        lw.lower_class_type(class_def)
+        ci = ci + 1
+
+    lw
+
 fn bootstrap_lower_hir_globals_to_mir_module() -> MirModule:
     """Lower the bootstrap entry to MIR with REAL function bodies.
 
@@ -126,6 +192,7 @@ fn bootstrap_lower_hir_globals_to_mir_module() -> MirModule:
     if _bootstrap_entry_hir_module.?:
         val hir_module: HirModule = _bootstrap_entry_hir_module.unwrap()
         var lowering = MirLowering.new(hir_module.symbols)
+        lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
         var lowered_module = lowering.builder.module
         lowered_module.name = hir_module.name
         val entry_functions = hir_module.functions
@@ -204,6 +271,7 @@ fn bootstrap_lower_extra_hir_module_to_mir(hir_module: HirModule) -> i64:
     val trace_enabled = mir_lower_trace_enabled()
     var added_instr_total = 0
     var lowering = MirLowering.new(hir_module.symbols)
+    lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
     val entry_functions = hir_module.functions
     val fn_keys = entry_functions.keys()
     if trace_enabled:
