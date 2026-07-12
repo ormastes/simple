@@ -8,7 +8,7 @@ surface. CPU output is an oracle and compatibility path, not native GPU proof.
 """
 
 use std.spec.*
-use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer, FontRenderBatch}
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer, FontGlyphRun, FontRenderBatch}
 use std.gc_async_mut.gpu.engine2d.engine.{engine2d_font_atlas_subrect_pixels}
 use std.gpu.engine3d.engine.{Engine3D}
 use std.gpu.engine3d.types3d.{mat4_identity, mat4_perspective}
@@ -46,6 +46,28 @@ describe "shared font surfaces":
         expect(warm.quads[0].byte_offset).to_equal(0)
         expect(warm.quads[1].byte_offset).to_equal(1)
 
+    it "should preserve selected font identity across cold and warm batches":
+        var renderer = FontRenderer.browser_serif_default()
+        val cold = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
+        val warm = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
+
+        expect(warm.font_identity).to_equal(cold.font_identity)
+        expect(warm.face_generation).to_equal(cold.face_generation)
+        if cold.font_identity != "":
+            expect(cold.face_generation).to_be_greater_than(0)
+            val selected_rasterizer = renderer.ttf_rasterizer
+            renderer.clear_ttf()
+            if selected_rasterizer != nil:
+                val stale = selected_rasterizer.cache_identity_snapshot()
+                expect(stale.0).to_equal(0)
+                expect(stale.1).to_equal("")
+            val empty = renderer.prepare_text("", 0xFFFFFFFFu32, 16)
+            val invalid = renderer.prepare_text("A", 0xFFFFFFFFu32, 0)
+            expect(empty.font_identity).to_equal("")
+            expect(empty.face_generation).to_equal(0)
+            expect(invalid.font_identity).to_equal("")
+            expect(invalid.face_generation).to_equal(0)
+
     # @req REQ-006 REQ-011
     it "should feed the 2D blend surface from the shared white-alpha atlas":
         var renderer = setup_shared_font_fixture()
@@ -72,8 +94,23 @@ describe "shared font surfaces":
 
     it "should fail closed for invalid sizes and empty content":
         var renderer = setup_shared_font_fixture()
-        expect(renderer.prepare_text("A", 0xFFFFFFFFu32, 0).valid).to_be(false)
+        val invalid = renderer.prepare_text("A", 0xFFFFFFFFu32, 0)
+        expect(invalid.valid).to_be(false)
+        expect(invalid.font_identity).to_equal("")
+        expect(invalid.face_generation).to_equal(0)
         expect(renderer.prepare_text("A", 0xFFFFFFFFu32, 513).valid).to_be(false)
         val empty = renderer.prepare_text("", 0xFFFFFFFFu32, 16)
         expect(empty.valid).to_be(true)
         expect(empty.is_empty()).to_be(true)
+        expect(empty.font_identity).to_equal("")
+        expect(empty.face_generation).to_equal(0)
+
+    it "should snapshot supplied glyph-run generation without claiming an identity":
+        var renderer = setup_shared_font_fixture()
+        val run = FontGlyphRun(valid: false, face_id: 0, face_generation: 37,
+            glyph_ids: [], xs: [], ys: [], clusters: [], advance_x: 0)
+        val batch = renderer.prepare_glyph_run(run, 0xFFFFFFFFu32, 16)
+
+        expect(batch.valid).to_be(false)
+        expect(batch.font_identity).to_equal("")
+        expect(batch.face_generation).to_equal(37)

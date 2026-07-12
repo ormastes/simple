@@ -234,7 +234,7 @@ class FontRenderer:
             rast.close()
         self.ttf_rasterizer = nil
         var cache = self.cache
-        cache.invalidate()
+        cache.sync_face_identity(0, "")
         self.cache = cache
         self.atlas_face_generation = -1
 
@@ -290,7 +290,8 @@ class FontRenderer:
         val active_rasterizer = self.ttf_rasterizer
         var cache = initial_cache
         if active_rasterizer != nil:
-            cache.sync_face_identity(active_rasterizer.generation(), active_rasterizer.cache_identity())
+            val identity_snapshot = active_rasterizer.cache_identity_snapshot()
+            cache.sync_face_identity(identity_snapshot.0, identity_snapshot.1)
         # Check cache first
         val cached = cache.lookup(codepoint, font_size)
         if cached != nil:
@@ -551,16 +552,18 @@ class FontRenderer:
         (self.atlas_codepoints.len() - 1).to_i32()
 
     me prepare_text(content: text, color: u32, font_size: i32) -> FontRenderBatch:
-        if font_size <= 0 or font_size > 512:
-            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
-        if content == "":
-            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
-        var face_generation = self.cache.stats().generation
-        var font_identity = self.cache.stats().font_identity
+        val cache_stats = self.cache.stats()
+        var face_generation = cache_stats.generation
+        var font_identity = cache_stats.font_identity
         val active_rasterizer = self.ttf_rasterizer
         if active_rasterizer != nil:
-            face_generation = active_rasterizer.generation()
-            font_identity = active_rasterizer.cache_identity()
+            val identity_snapshot = active_rasterizer.cache_identity_snapshot()
+            face_generation = identity_snapshot.0
+            font_identity = identity_snapshot.1
+        if font_size <= 0 or font_size > 512:
+            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+        if content == "":
+            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: font_identity, face_generation: face_generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
         if self.atlas_face_generation != face_generation or self.atlas_font_identity != font_identity:
             self._reset_font_atlas(face_generation, font_identity)
         var layout = self.layout_text(content, font_size, 0)
@@ -578,7 +581,7 @@ class FontRenderer:
                 fallback_x = fallback_x + glyph.advance.to_i64()
                 fallback_byte_offset = fallback_byte_offset + ch.len().to_i64()
         if layout.len() == 0:
-            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
         var attempt = 0
         while attempt < 2:
             var quads: [FontRenderQuad] = []
@@ -614,25 +617,38 @@ class FontRenderer:
                     val generation = _next_font_atlas_dependency_generation()
                     if generation == 0:
                         self._reset_font_atlas(face_generation, font_identity)
-                        return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: [])
+                        return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: [])
                     self.atlas_generation = generation
-                return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty)
+                if quads.len() > 0:
+                    val end_cache_stats = self.cache.stats()
+                    var end_generation = end_cache_stats.generation
+                    var end_identity = end_cache_stats.font_identity
+                    if active_rasterizer != nil:
+                        val end_snapshot = active_rasterizer.cache_identity_snapshot()
+                        end_generation = end_snapshot.0
+                        end_identity = end_snapshot.1
+                    if end_generation != face_generation or end_identity != font_identity:
+                        self._reset_font_atlas(end_generation, end_identity)
+                        return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: end_identity, face_generation: end_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: [], quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+                return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: font_identity, face_generation: face_generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty)
             self._reset_font_atlas(face_generation, font_identity)
             attempt = attempt + 1
-        FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+        FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
 
     me prepare_glyph_run(run: FontGlyphRun, color: u32, font_size: i32) -> FontRenderBatch:
         val face_id = run.face_id
+        val font_identity = ""
+        val face_generation = run.face_generation
         var cluster_index: i64 = 0
         while cluster_index < run.clusters.len():
             if run.clusters[cluster_index] < 0:
-                return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+                return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
             cluster_index = cluster_index + 1
         if (not run.valid or not font_face_is_live(face_id, run.face_generation) or
             font_size <= 0 or font_size > 512 or
             run.glyph_ids.len() != run.xs.len() or run.glyph_ids.len() != run.ys.len() or
             run.glyph_ids.len() != run.clusters.len()):
-            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
         if self.atlas_face_generation != -2:
             self._reset_font_atlas(-2, self.cache.stats().font_identity)
         var attempt = 0
@@ -644,7 +660,7 @@ class FontRenderer:
             while i < run.glyph_ids.len():
                 val raw_gid = run.glyph_ids[i]
                 if raw_gid > 2147483647u32:
-                    return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+                    return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
                 val glyph_id = raw_gid.to_i32()
                 val glyph = self.get_glyph_index(face_id, run.face_generation, glyph_id, font_size)
                 if glyph.width > 0 and glyph.height > 0:
@@ -672,9 +688,9 @@ class FontRenderer:
                     val generation = _next_font_atlas_dependency_generation()
                     if generation == 0:
                         self._reset_font_atlas(-2, self.cache.stats().font_identity)
-                        return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: [])
+                        return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: [])
                     self.atlas_generation = generation
-                return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty)
+                return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: font_identity, face_generation: face_generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty)
             self._reset_font_atlas(-2, self.cache.stats().font_identity)
             attempt = attempt + 1
-        FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+        FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])

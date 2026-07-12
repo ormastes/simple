@@ -435,6 +435,12 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   suffixed near miss). Higher-model re-review passed source, tests, and the
   manually synchronized 30-scenario unit manual. Static review PASS; executable
   Simple/docgen and device evidence remain unrun.
+- Batch identity evidence: every synthetic batch constructor supplies explicit
+  identity/generation; system evidence snapshots cold/warm selected identity,
+  empty/invalid preparation, and supplied glyph-run generation without
+  claiming native availability. Native capture reads generation twice around
+  identity, returns neutral `(0, "")` when stale, and discards material if the
+  snapshot changes during preparation; no atomic/global-lock claim is made.
 - OpenCL dirty-atlas slice: Spark traced `FontRenderBatch.dirty_rects` through
   Engine2D and found every changed generation still transferred the full 4 MiB
   atlas. Higher-model review selected one offset-aware sibling of the existing

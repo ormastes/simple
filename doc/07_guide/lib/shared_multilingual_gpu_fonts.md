@@ -115,8 +115,9 @@ val batch = renderer.prepare_text(content, color, font_size)
 
 `FontRenderer` owns one bounded 1024×1024 shelf-packed white-alpha atlas.
 `FontRenderBatch` carries stable per-glyph destination/atlas quads, codepoint and
-byte-offset identity, color, atlas generation, the shared pixels, and only the
-new dirty rectangles. Repeated warm glyphs keep coordinates/generation and
+byte-offset identity, color, exact font identity and face generation snapshots,
+atlas generation, the shared pixels, and only the new dirty rectangles.
+Repeated warm glyphs keep coordinates/generation and
 produce no dirty upload. Face changes or capacity overflow reset and repack the
 atlas. Engine2D uses its established `load_font`/`draw_text` surface, and
 Engine3D consumes the same batch through its CPU HUD/world compatibility path.
@@ -124,6 +125,11 @@ Its `draw_glyph_run_hud` and `draw_glyph_run_world` entrypoints reuse the same
 neutral material, renderer, atlas, and stale-generation rejection. World
 placement projects one anchor and draws a constant-pixel-size billboard; it is
 not depth-tested native 3D text.
+
+The native rasterizer reads generation on both sides of its identity snapshot.
+A stale snapshot is neutral `(0, "")`, and a mid-preparation identity change
+discards that transient batch. This does not make process-global replacement
+atomic and does not claim a global lock.
 
 CPU code remains responsible for face selection, rasterization, fallback, and
 cache identity. Complete Pure Simple complex-script shaping/BiDi is still a

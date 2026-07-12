@@ -33,6 +33,12 @@ destination rectangle, atlas UV rectangle, color, and ordering. `FontRenderBatch
 contains quads, atlas dimensions/material, font/face checksum identity, atlas and
 dependency generations, dirty rectangles, direction/script/language metadata,
 and validity/fallback diagnostics. Values are immutable after preparation.
+Preparation snapshots `font_identity` and `face_generation` even for empty or
+invalid results. Glyph-run batches keep identity empty because the run supplies
+only a revocable face generation, not a checksum identity.
+The native rasterizer captures generation, identity, then generation again.
+Stale capture returns `(0, "")`; a change observed during preparation discards
+the transient material. This is coherence checking, not atomic global state.
 
 The compatibility batch still exposes codepoint, byte offset, rectangles,
 color, atlas generation/pixels, and dirty rectangles. The opt-in neutral

@@ -25,7 +25,7 @@ native NFR gates.
 1. Run the executable SSpec with the self-hosted pure-Simple runtime once it is
    available.
 2. Observe the visible step: **Prepare one shared font batch for 2D and 3D**.
-3. Verify all four examples execute without skips or pending placeholders.
+3. Verify all six examples execute without skips or pending placeholders.
 4. Treat the output as CPU compatibility evidence only.
 
 ## Expected evidence
@@ -39,6 +39,11 @@ native NFR gates.
 - Repeating the same glyphs reports zero dirty rectangles.
 - Atlas generation and the first glyph atlas location remain stable.
 - Quad byte offsets remain `0` and `1`.
+- A selected renderer preserves its exact identity and face generation across
+  cold/warm batches. Nonempty identity is required only when its optional
+  native font seam is available.
+- Clearing an available selected seam makes its retained snapshot neutral
+  `(0, "")`; subsequent empty and invalid batches carry the same neutral pair.
 
 ### Engine2D consumer
 
@@ -57,6 +62,8 @@ native NFR gates.
 
 - Font sizes `0` and `513` produce invalid batches.
 - Empty content at size `16` is valid but empty.
+- Zero-config empty/invalid snapshots carry empty identity and generation zero.
+- An invalid glyph run carries its supplied generation and an empty identity.
 
 <details>
 <summary>Folded executable detail</summary>
@@ -73,3 +80,5 @@ executable source for exact matcher calls.
 The current scenario is a CPU oracle and API-compatibility check. Native 2D/3D
 GPU proof requires the separate resource-handle, submission, fence, and
 device-readback scenario; this manual does not substitute for it.
+The identity evidence proves coherent capture and stale-neutral behavior only;
+it does not claim atomic process-global font replacement or a global lock.
