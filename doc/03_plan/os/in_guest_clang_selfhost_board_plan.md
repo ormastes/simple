@@ -83,19 +83,33 @@ image fresh for the compile pass. Next: Phase 2 (board port).
     *compile* kernel (`fs_exec_clang_stream_ring3_entry`, 125 MB payload) uses the identical
     boot chain + ring-3 machinery — booting IT under OVMF and compiling `hello.c` is the 2e
     capstone, not re-proven here.
-2d. **Robustness for the board:** every syscall/FS error path recovers + reports instead of
-    hang/triple-fault (so an unexpected situation on hardware degrades gracefully, not a
-    silent halt). Audit the fault handler + syscall default cases.
-    - **Known gap (2026-07-12):** `fat32_write_file` on a **pre-existing** `/hello.o` is
-      untested — 2a used a fresh image each run. A second clang run (or a board disk that
-      already holds the file) hits the dir-slot reuse / cluster-free-then-realloc path. Test
-      overwrite + truncate-shorter/grow-longer before trusting it on hardware.
+2d. ✅ **DONE (2026-07-12) — board robustness audit (no new code; verified graceful):**
+    every unexpected path reports + degrades gracefully, none silently hangs or triple-faults:
+    - **Ring-3 fault** (`spl_x86_on_user_fault`, interrupt.spl): emits `[fault] ring-3 process
+      killed: SIGSEGV rip/cr2/cs` via fault-safe port I/O, then the rich-fault ISR parks the
+      CPU (CS-guarded — the historical re-fault runaway is already fixed). Diagnostic + halt,
+      no runaway.
+    - **Unknown syscall** (`rt_syscall_dispatch` default): loud `[syscall] ENOSYS num=… a0=…`
+      to serial + returns `-ENOSYS` to the ring-3 program (no hang).
+    - **Unimplemented rt fn** (S0–S5/V0–V2 stubs): `FATAL: unimplemented rt function: <n>` +
+      halt.
+    - **FS write errors** (`fat32_write_file`): each failure prints a `[wf-diag] … FAILED`
+      marker, `_fat32_free_chain`s any partial allocation, and returns `-1`.
+    - **Exit terminal**: `rt_debug_exit_success` / bare-exec exit `cli;hlt` (2b) — no board
+      fall-through.
+    - **Overwrite (was the known gap) — now PROVEN:** re-ran clang on an image that already
+      held `/hello.o`; `_fat32_find_root_dir_slot` reused the single dirent (no duplicate),
+      the file moved to a fresh cluster (3807→3808), the **old cluster was freed** (FAT=0,
+      no leak), and the extracted object host-links + runs == exit 7. Order is crash-safe:
+      write-new → commit dir → free-old. Residual (not blocking): free-cluster search runs
+      before freeing the old chain, so a same-size overwrite on a 100%-full disk would spuriously
+      fail — fine here (16 spare clusters, one small file).
 2e. **End-to-end board scenario:** over real OpenSSH, `clang -cc1 -emit-obj -o /hello.o
     /hello.c` on the guest writes `/hello.o` to disk; retrieve over SSH/scp; verify. Mark
     physical-hardware NVMe/serial/NIC as provable only on the actual mini-PC.
 
 ## Execution order
 
-1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a ✅ (.o on real NVMe)  →  2b ✅ (board-safe exit)  →  2c ✅ (UEFI boot)  →  2d → 2e.
+1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a ✅ (.o on real NVMe)  →  2b ✅ (board-safe exit)  →  2c ✅ (UEFI boot)  →  2d ✅ (robustness)  →  2e.
 Never start Phase 2 before 1d passes. Small model + guide per step; higher-model review +
 the host-link-and-run / gate verification owned by the coordinator.
