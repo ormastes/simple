@@ -54,9 +54,10 @@ class GlyphCache:
     rasterizations: i64
     evictions: i64
     observed_generation: i64
+    observed_font_identity: text
 
     static fn new(max_size: i32) -> GlyphCache:
-        GlyphCache(entries: [], max_entries: max_size, max_bytes: 33554432, payload_bytes: 0, hits: 0, misses: 0, rasterizations: 0, evictions: 0, observed_generation: 0)
+        GlyphCache(entries: [], max_entries: max_size, max_bytes: 33554432, payload_bytes: 0, hits: 0, misses: 0, rasterizations: 0, evictions: 0, observed_generation: 0, observed_font_identity: "")
 
     me lookup(codepoint: i32, font_size: i32) -> CachedGlyph?:
         for entry in self.entries:
@@ -98,10 +99,14 @@ class GlyphCache:
         self.entries = []
         self.payload_bytes = 0
 
-    me sync_generation(generation: i64):
-        if generation != self.observed_generation:
+    me sync_face_identity(generation: i64, identity: text):
+        if generation != self.observed_generation or identity != self.observed_font_identity:
             self.invalidate()
             self.observed_generation = generation
+            self.observed_font_identity = identity
+
+    me sync_generation(generation: i64):
+        self.sync_face_identity(generation, self.observed_font_identity)
 
     me reset_stats():
         self.hits = 0
@@ -110,7 +115,7 @@ class GlyphCache:
         self.evictions = 0
 
     fn stats() -> FontCacheStats:
-        FontCacheStats(entries: self.entries.len().to_i64(), bytes: self.payload_bytes, generation: self.observed_generation, hits: self.hits, misses: self.misses, rasterizations: self.rasterizations, evictions: self.evictions)
+        FontCacheStats(entries: self.entries.len().to_i64(), bytes: self.payload_bytes, generation: self.observed_generation, font_identity: self.observed_font_identity, hits: self.hits, misses: self.misses, rasterizations: self.rasterizations, evictions: self.evictions)
 
 # ============================================================================
 # Font Renderer
@@ -137,6 +142,7 @@ class FontRenderer:
     atlas_row_height: i32
     atlas_generation: i64
     atlas_face_generation: i64
+    atlas_font_identity: text
 
     static fn new() -> FontRenderer:
         FontRenderer(
@@ -148,7 +154,7 @@ class FontRenderer:
             atlas_pixels: [], atlas_codepoints: [], atlas_face_ids: [], atlas_face_generations: [], atlas_glyph_indices: [], atlas_font_sizes: [],
             atlas_xs: [], atlas_ys: [], atlas_widths: [], atlas_heights: [],
             atlas_cursor_x: 0, atlas_cursor_y: 0, atlas_row_height: 0,
-            atlas_generation: 0, atlas_face_generation: -1
+            atlas_generation: 0, atlas_face_generation: -1, atlas_font_identity: ""
         )
 
     static fn with_ttf(handle: i64) -> FontRenderer:
@@ -161,7 +167,7 @@ class FontRenderer:
             atlas_pixels: [], atlas_codepoints: [], atlas_face_ids: [], atlas_face_generations: [], atlas_glyph_indices: [], atlas_font_sizes: [],
             atlas_xs: [], atlas_ys: [], atlas_widths: [], atlas_heights: [],
             atlas_cursor_x: 0, atlas_cursor_y: 0, atlas_row_height: 0,
-            atlas_generation: 0, atlas_face_generation: -1
+            atlas_generation: 0, atlas_face_generation: -1, atlas_font_identity: ""
         )
 
     static fn browser_serif_default() -> FontRenderer:
@@ -233,7 +239,10 @@ class FontRenderer:
         false
 
     fn has_sffi_ttf() -> bool:
-        self.ttf_rasterizer != nil
+        val rasterizer = self.ttf_rasterizer
+        if rasterizer == nil:
+            return false
+        rasterizer.is_current()
 
     me horizontal_kern(left_codepoint: i32, right_codepoint: i32, font_size: i32) -> i32:
         val rast = self.ttf_rasterizer
@@ -268,7 +277,7 @@ class FontRenderer:
         val active_rasterizer = self.ttf_rasterizer
         var cache = initial_cache
         if active_rasterizer != nil:
-            cache.sync_generation(active_rasterizer.generation())
+            cache.sync_face_identity(active_rasterizer.generation(), active_rasterizer.cache_identity())
         # Check cache first
         val cached = cache.lookup(codepoint, font_size)
         if cached != nil:
@@ -459,7 +468,7 @@ class FontRenderer:
             i = i + 1
         FontTextPayload(valid: true, width: width, height: height, offset_x: min_x, offset_y: min_y, pixels: pixels)
 
-    me _reset_font_atlas(face_generation: i64):
+    me _reset_font_atlas(face_generation: i64, font_identity: text):
         self.atlas_pixels = [0u32; FONT_ATLAS_WIDTH * FONT_ATLAS_HEIGHT]
         self.atlas_codepoints = []
         self.atlas_face_ids = []
@@ -475,6 +484,7 @@ class FontRenderer:
         self.atlas_row_height = 0
         self.atlas_generation = self.atlas_generation + 1
         self.atlas_face_generation = face_generation
+        self.atlas_font_identity = font_identity
 
     fn _font_atlas_entry_index(face_id: i64, face_generation: i64, glyph_index: i32, codepoint: i32, font_size: i32) -> i32:
         # ponytail: bounded linear lookup; replace with a map only if 512-entry profiles require it.
@@ -533,11 +543,13 @@ class FontRenderer:
         if content == "":
             return FontRenderBatch(valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
         var face_generation = self.cache.stats().generation
+        var font_identity = self.cache.stats().font_identity
         val active_rasterizer = self.ttf_rasterizer
         if active_rasterizer != nil:
             face_generation = active_rasterizer.generation()
-        if self.atlas_face_generation != face_generation:
-            self._reset_font_atlas(face_generation)
+            font_identity = active_rasterizer.cache_identity()
+        if self.atlas_face_generation != face_generation or self.atlas_font_identity != font_identity:
+            self._reset_font_atlas(face_generation, font_identity)
         var layout = self.layout_text(content, font_size, 0)
         if layout.len() == 0 and (self.use_vector or self.use_bitmap):
             var fallback_x: i64 = 0
@@ -588,7 +600,7 @@ class FontRenderer:
                 if dirty.len() > 0:
                     self.atlas_generation = self.atlas_generation + 1
                 return FontRenderBatch(valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty)
-            self._reset_font_atlas(face_generation)
+            self._reset_font_atlas(face_generation, font_identity)
             attempt = attempt + 1
         FontRenderBatch(valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
 
@@ -605,7 +617,7 @@ class FontRenderer:
             run.glyph_ids.len() != run.clusters.len()):
             return FontRenderBatch(valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
         if self.atlas_face_generation != -2:
-            self._reset_font_atlas(-2)
+            self._reset_font_atlas(-2, self.cache.stats().font_identity)
         var attempt = 0
         while attempt < 2:
             var quads: [FontRenderQuad] = []
@@ -642,6 +654,6 @@ class FontRenderer:
                 if dirty.len() > 0:
                     self.atlas_generation = self.atlas_generation + 1
                 return FontRenderBatch(valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty)
-            self._reset_font_atlas(-2)
+            self._reset_font_atlas(-2, self.cache.stats().font_identity)
             attempt = attempt + 1
         FontRenderBatch(valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])

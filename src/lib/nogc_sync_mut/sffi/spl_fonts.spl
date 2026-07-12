@@ -143,6 +143,8 @@ class FontRasterizer:
     generation_fp: i64
     font_path: text
     dylib_path: text
+    font_cache_identity: text
+    loaded_generation: i64
 
 impl FontRasterizer:
     # Load libspl_fonts from `dylib_path` and initialize it with the TTF at
@@ -154,10 +156,12 @@ impl FontRasterizer:
     static fn load(dylib_path: text, ttf_path: text) -> FontRasterizer?:
         val blob = file_read_bytes(ttf_path)
         val selected = selected_font_asset_candidate_for_path(ttf_path)
+        var font_cache_identity = ""
         if val candidate = selected:
             val validation = validate_selected_font_asset(ttf_path, blob, candidate.sha256)
             if not validation.valid:
                 return nil
+            font_cache_identity = "sha256={candidate.sha256};axes={candidate.default_axes}"
         if not font_runtime_ttf_default_supported(blob):
             return nil
         val h = spl_dlopen(dylib_path)
@@ -201,6 +205,11 @@ impl FontRasterizer:
         if rc != 1:
             spl_dlclose(h)
             return nil
+        var generation_args: [i64] = []
+        val loaded_generation = spl_wffi_call_i64(generation_fp, generation_args, 0)
+        if loaded_generation <= 0:
+            spl_dlclose(h)
+            return nil
         FontRasterizer(
             lib_handle: h,
             init_fp: init_fp,
@@ -220,6 +229,8 @@ impl FontRasterizer:
             generation_fp: generation_fp,
             font_path: ttf_path,
             dylib_path: dylib_path,
+            font_cache_identity: font_cache_identity,
+            loaded_generation: loaded_generation,
         )
 
     # Internal: read a single metric field for the active glyph handle.
@@ -245,6 +256,8 @@ impl FontRasterizer:
     # can safely interleave rasterize/read. A 0x0 glyph (whitespace) still
     # yields a valid GlyphBitmap with an empty `pixels` array.
     fn rasterize(codepoint: i64, size_px: i64) -> GlyphBitmap?:
+        if not self.is_current():
+            return nil
         var args: [i64] = []
         args.push(codepoint)
         args.push(size_px)
@@ -268,6 +281,8 @@ impl FontRasterizer:
             return nil
         val pixels = rt_bytes_from_raw(pixel_ptr, pixel_len)
         self._free_glyph(handle)
+        if not self.is_current():
+            return nil
         GlyphBitmap(
             width: w,
             height: h,
@@ -279,16 +294,25 @@ impl FontRasterizer:
         )
 
     fn has_glyph(codepoint: i64) -> bool:
+        if not self.is_current():
+            return false
         var args: [i64] = []
         args.push(codepoint)
-        spl_wffi_call_i64(self.has_glyph_fp, args, 1) == 1
+        val present = spl_wffi_call_i64(self.has_glyph_fp, args, 1) == 1
+        present and self.is_current()
 
     fn generation() -> i64:
         var args: [i64] = []
         spl_wffi_call_i64(self.generation_fp, args, 0)
 
+    fn is_current() -> bool:
+        self.loaded_generation > 0 and self.generation_fp != 0 and self.generation() == self.loaded_generation
+
+    fn cache_identity() -> text:
+        if self.is_current(): self.font_cache_identity else: ""
+
     fn rasterize_subpixel(codepoint: i64, size_px: i64) -> SubpixelGlyphBitmap?:
-        if self.subpixel_raster_fp == 0 or self.subpixel_pixel_fp == 0:
+        if not self.is_current() or self.subpixel_raster_fp == 0 or self.subpixel_pixel_fp == 0:
             return nil
         var args: [i64] = []
         args.push(codepoint)
@@ -318,6 +342,8 @@ impl FontRasterizer:
                 x = x + 1
             y = y + 1
         self._free_glyph(handle)
+        if not self.is_current():
+            return nil
         SubpixelGlyphBitmap(
             width: w,
             height: h,
@@ -329,24 +355,26 @@ impl FontRasterizer:
         )
 
     fn horizontal_kern(left_codepoint: i64, right_codepoint: i64, size_px: i64) -> i64:
-        if self.kern_fp == 0:
+        if not self.is_current() or self.kern_fp == 0:
             return 0
         var args: [i64] = []
         args.push(left_codepoint)
         args.push(right_codepoint)
         args.push(size_px)
-        spl_wffi_call_i64(self.kern_fp, args, 3)
+        val result = spl_wffi_call_i64(self.kern_fp, args, 3)
+        if self.is_current(): result else: 0
 
     fn horizontal_line_metric(size_px: i64, field: i64) -> i64:
-        if self.line_metric_fp == 0:
+        if not self.is_current() or self.line_metric_fp == 0:
             return 0
         var args: [i64] = []
         args.push(size_px)
         args.push(field)
-        spl_wffi_call_i64(self.line_metric_fp, args, 2)
+        val result = spl_wffi_call_i64(self.line_metric_fp, args, 2)
+        if self.is_current(): result else: 0
 
     fn layout_text(text_val: text, size_px: i64, max_width: i64) -> [LayoutGlyph]:
-        if self.layout_fp == 0 or self.layout_glyph_metric_fp == 0:
+        if not self.is_current() or self.layout_fp == 0 or self.layout_glyph_metric_fp == 0:
             return []
         val text_bytes = rt_text_to_bytes(text_val)
         var args: [i64] = []
@@ -369,7 +397,7 @@ impl FontRasterizer:
                 byte_offset: self._layout_metric(idx, 5),
             ))
             idx = idx + 1
-        glyphs
+        if self.is_current(): glyphs else: []
 
     fn _layout_metric(index: i64, field: i64) -> i64:
         var args: [i64] = []
@@ -397,4 +425,5 @@ impl FontRasterizer:
         self.glyph_free_fp = 0
         self.has_glyph_fp = 0
         self.generation_fp = 0
+        self.loaded_generation = 0
         rc

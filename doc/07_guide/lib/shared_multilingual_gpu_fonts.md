@@ -163,6 +163,14 @@ entries by face + lifetime generation + glyph index + size. This is a bounded
 renderer seam, not complete mixed-face GSUB/GPOS or automatic `draw_text`
 shaping. The sparse matrix remains unchanged until executable corpus acceptance.
 
+REQ-009 is partial: selected checksum/default-axis identity now fences the
+whole glyph cache and atlas, stats expose that identity, and generation-bound
+wrappers over the process-global face are revocable so stale operations fail
+closed. Conditional real-dylib A-to-B evidence and its manual exist but remain
+unexecuted under the session cap. This is not full rendering-config,
+backend/device, or emitted-program keying, nor concurrent multi-face ownership;
+it does not promote the coverage matrix.
+
 ## GPU code emission is not execution
 
 Simple compiler code provides

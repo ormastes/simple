@@ -218,6 +218,55 @@ describe "shared multilingual font manifest":
         expect(total_bytes).to_equal(51764704)
         expect(total_bytes).to_be_less_than(80 * 1024 * 1024 + 1)
 
+    # @req REQ-005 REQ-009
+    it "should fail closed when a second selected face stales the first wrapper":
+        step("Reject a stale global-face wrapper after loading a second selected face")
+        val assets = setup_shared_font_fixture()
+        val first_asset = assets[13]
+        val second_asset = assets[14]
+        var dylib_available = false
+        var exercised = false
+        for dylib_path in browser_font_dylib_candidates():
+            if file_exists(dylib_path) and not exercised:
+                dylib_available = true
+                val first_loaded = FontRasterizer.load(dylib_path, first_asset.local_path)
+                if first_loaded == nil:
+                    fail("font rasterizer dylib exists but selected face A could not load")
+                var first = first_loaded.?
+                defer:
+                    if first.lib_handle != 0:
+                        first.close()
+                expect(first.is_current()).to_be(true)
+                expect(first.cache_identity()).to_equal("sha256={first_asset.sha256};axes={first_asset.default_axes}")
+
+                val second_loaded = FontRasterizer.load(dylib_path, second_asset.local_path)
+                if second_loaded == nil:
+                    first.close()
+                    fail("font rasterizer dylib exists but selected face B could not load")
+                var second = second_loaded.?
+                defer:
+                    if second.lib_handle != 0:
+                        second.close()
+                expect(second.is_current()).to_be(true)
+                expect(second.cache_identity()).to_equal("sha256={second_asset.sha256};axes={second_asset.default_axes}")
+                expect(first.is_current()).to_be(false)
+                expect(first.cache_identity()).to_equal("")
+                expect(first.has_glyph(65)).to_be(false)
+                expect(first.rasterize(65, 24)).to_be_nil()
+                expect(first.rasterize_subpixel(65, 24)).to_be_nil()
+                expect(first.layout_text("A", 24, 0).len()).to_equal(0)
+                expect(first.horizontal_kern(65, 86, 24)).to_equal(0)
+                expect(first.horizontal_line_metric(24, 0)).to_equal(0)
+                first.close()
+                expect(second.is_current()).to_be(true)
+                expect(second.has_glyph(65)).to_be(true)
+                expect(second.rasterize(65, 24) != nil).to_be(true)
+                second.close()
+                exercised = true
+        if not dylib_available:
+            fail("unavailable: no font rasterizer dylib exists; stale-wrapper evidence did not run")
+        expect(exercised).to_be(true)
+
     # @req REQ-005
     it "should keep candidates provisional while checking exact corpus codepoints and rasters":
         step("Check every candidate against its exact CORPUS codepoints without claiming shaping acceptance")

@@ -108,6 +108,19 @@ format behavior.
   incomplete. These fixtures were not executed in this session and do not
   promote a candidate.
 
+### Global-face wrapper invalidation
+
+- The conditional native scenario loads selected face A, then selected face B
+  through the same available rasterizer dylib without closing A first.
+- B must remain current and expose exactly
+  `sha256=<manifest digest>;axes=<manifest defaults>`. A must become stale,
+  expose an empty cache identity, reject glyph lookup, alpha/subpixel material,
+  layout, kerning, and line metrics, and never read B through A's wrapper.
+- Closing stale A must not invalidate B; B must still find and rasterize `A`
+  before it is closed.
+- If no candidate rasterizer dylib exists, the scenario fails explicitly as
+  `unavailable`; missing native evidence is not a synthetic PASS.
+
 The expanded scenario was not run in this session because the mandatory
 three-attempt Simple command cap was already exhausted.
 

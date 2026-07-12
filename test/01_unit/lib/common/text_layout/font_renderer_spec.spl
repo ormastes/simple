@@ -15,6 +15,7 @@ use std.common.encoding.font_registry.{selected_font_asset_candidates}
 use common.text_layout.font_rasterizer.{reset_vector_font_raster_stats, vector_font_accelerator_stats}
 
 extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 
 fn _count_nonzero_alpha(pixels: [u8]) -> i32:
     var count = 0
@@ -22,6 +23,11 @@ fn _count_nonzero_alpha(pixels: [u8]) -> i32:
         if alpha.to_i32() > 0:
             count = count + 1
     count
+
+describe "SFFI font liveness":
+    it "rejects nil or stale rasterizers through is_current":
+        val source = rt_file_read_text("src/lib/nogc_sync_mut/text_layout/font_renderer.spl")
+        expect(source).to_contain("fn has_sffi_ttf() -> bool:\n        val rasterizer = self.ttf_rasterizer\n        if rasterizer == nil:\n            return false\n        rasterizer.is_current()")
 
 fn _count_full_alpha(pixels: [u8]) -> i32:
     var count = 0
@@ -164,6 +170,16 @@ describe "shared font renderer fallbacks":
         var renderer = FontRenderer.browser_serif_default()
         val first = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
         renderer.atlas_face_generation = renderer.atlas_face_generation + 1
+        val reset = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
+
+        expect(reset.valid).to_be(true)
+        expect(reset.atlas_generation).to_be_greater_than(first.atlas_generation)
+        expect(reset.dirty_rects.len()).to_equal(1)
+
+    it "resets and repacks the atlas when identity changes at the same generation":
+        var renderer = FontRenderer.new()
+        val first = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
+        renderer.atlas_font_identity = "stale-checksum-or-axes"
         val reset = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
 
         expect(reset.valid).to_be(true)
@@ -326,3 +342,33 @@ describe "shared font renderer fallbacks":
         expect(cache.lookup_index(12, 7, 3, 16)).to_be_nil()
         expect(cache.lookup_index(11, 7, 4, 16)).to_be_nil()
         expect(cache.lookup_index(11, 7, 3, 17)).to_be_nil()
+
+    it "keeps entries for a stable face identity and preserves identity across stats reset and invalidation":
+        var cache = GlyphCache.new(8)
+        cache.sync_face_identity(7, "sha256=a;axes=wght:400")
+        cache.insert(CachedGlyph(codepoint: 65, face_id: 0, face_generation: 7, glyph_index: -1, font_size: 16, width: 1, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [255u8]))
+        cache.sync_face_identity(7, "sha256=a;axes=wght:400")
+        expect(cache.stats().entries).to_equal(1)
+        expect(cache.lookup(65, 16)).to_not_be_nil()
+        expect(cache.stats().hits).to_equal(1)
+        cache.reset_stats()
+        expect(cache.stats().font_identity).to_equal("sha256=a;axes=wght:400")
+        cache.invalidate()
+        expect(cache.stats().font_identity).to_equal("sha256=a;axes=wght:400")
+
+    it "invalidates on generation or same-generation checksum and axis identity changes":
+        var cache = GlyphCache.new(8)
+        cache.sync_face_identity(3, "sha256=a;axes=wght:400")
+        cache.insert(CachedGlyph(codepoint: 65, face_id: 0, face_generation: 3, glyph_index: -1, font_size: 16, width: 1, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [255u8]))
+        cache.sync_face_identity(4, "sha256=a;axes=wght:400")
+        expect(cache.stats().entries).to_equal(0)
+        expect(cache.stats().generation).to_equal(4)
+        cache.insert(CachedGlyph(codepoint: 65, face_id: 0, face_generation: 4, glyph_index: -1, font_size: 16, width: 1, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [255u8]))
+        cache.sync_face_identity(4, "sha256=b;axes=wght:400")
+        expect(cache.stats().entries).to_equal(0)
+        cache.insert(CachedGlyph(codepoint: 65, face_id: 0, face_generation: 4, glyph_index: -1, font_size: 16, width: 1, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [255u8]))
+        cache.sync_face_identity(4, "sha256=b;axes=wght:700")
+        expect(cache.stats().entries).to_equal(0)
+        expect(cache.stats().font_identity).to_equal("sha256=b;axes=wght:700")
+        expect(cache.max_entries).to_equal(8)
+        expect(cache.max_bytes).to_equal(33554432)

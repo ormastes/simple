@@ -505,3 +505,9 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   retain legacy path loading and are outside the race-free claim. The Pure
   Simple SHA `[u8]` to `[i64]` conversion amplifies memory for candidates up to
   25 MiB and must be replaced or measured before promotion. No matrix promotion.
+- partial REQ-009: selected checksum/default-axis identity fences the whole
+  glyph cache and atlas and is exposed in stats. Revocable generation-bound
+  wrappers protect the process-global face and stale operations fail closed.
+  Conditional real-dylib A-to-B evidence/manual remains unexecuted under the
+  session cap. Full config/backend/program keys and concurrent multi-face
+  ownership remain out of scope; no matrix promotion.
