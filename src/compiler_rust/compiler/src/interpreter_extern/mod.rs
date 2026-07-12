@@ -1141,6 +1141,16 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_read_lines", file_io::rt_file_read_lines);
     insert_simple!("rt_file_read_text", file_io::rt_file_read_text);
     insert_simple!("rt_file_read_text_at", file_io::rt_file_read_text_at);
+    // rt_file_read_text_rv is the RuntimeValue-ABI variant of rt_file_read_text
+    // (same logical signature `(path: text) -> text`). The compiler frontend
+    // reads bootstrap source through it (parser.spl -> parser_get_bootstrap_source,
+    // fed by lexer.spl SIMPLE_BOOTSTRAP_LEX_PATH). Without a direct handler here,
+    // interpreting the compiler source during a self-hosted native-build fell
+    // through to the dynamic dlsym fallback, which returns None in the worker
+    // process and surfaced as "unknown extern function: rt_file_read_text_rv"
+    // (same class as the rt_enum_* gap in task #113). Alias to the Value-based
+    // reader; the _rv boxing is transparent at the interpreter level.
+    insert_simple!("rt_file_read_text_rv", file_io::rt_file_read_text);
     insert_simple!("rt_file_remove", file_io::rt_file_remove);
     insert_simple!("rt_file_rename", file_io::rt_file_rename);
     insert_simple!("rt_file_size", file_io::rt_file_size);
