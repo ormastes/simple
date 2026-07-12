@@ -493,3 +493,6 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   submission, readback, or execution is claimed. The focused scenario checks
   the exact 15-input ABI: two buffer bindings and the contiguous 13-field
   parameter block.
+- skill freshness: the guide now names `$sp_dev` as process owner for bundled
+  fonts, shaping, glyph material, and GPU text; no source, test, or manual was
+  regenerated for this documentation-only slice.

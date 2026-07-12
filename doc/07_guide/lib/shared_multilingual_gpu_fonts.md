@@ -3,6 +3,8 @@
 This guide separates the selected contract from what the current source proves.
 The feature consolidates font selection and material preparation under the
 existing `FontRenderer`; it does not introduce a second renderer.
+Use `$sp_dev` as the process owner for bundled-font, shaping, glyph-material,
+and GPU-text development lanes.
 
 ## Selected coverage
 

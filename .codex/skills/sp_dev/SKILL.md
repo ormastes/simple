@@ -389,6 +389,42 @@ exists, and cite the canonical implementation paths such as
 `src/lib/common/ui/window_scene_draw_ir.spl`, and
 `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
 
+## Shared multilingual font work
+
+Apply these rules to work touching bundled fonts, shaping, glyph material,
+font GPU emission, or GUI/Web/2D/3D text.
+
+1. Pin the CLDR ranking input and reproducibly regenerate the selected top ten;
+   retain rank 11 only as the cutoff witness, never as a selected-language row.
+2. Keep exactly ten product categories and immutable URL, revision, license,
+   Reserved Font Name (RFN), hash, byte-size, embedded name, table, and
+   default-axis metadata for every bundled free-font candidate.
+3. Keep an honest 10x10 matrix whose only statuses are `native`, `fallback`,
+   `not-designed-for-script`, and `unavailable`. Promote a cell only through an
+   executable, exact-face-bound shaping and corpus gate; codepoint presence is
+   not acceptance.
+4. Reuse the canonical `FontRenderer`, transient `FontRenderBatch`, and common
+   atlas ownership. Do not create another renderer, atlas, cache, or private
+   font draw path.
+5. Web and GUI producers emit `DrawIrComposition`; Engine2D lowers its text
+   through `draw_text`. Engine3D HUD/world text is a separate consumer lane,
+   never a shortcut for Web, GUI, Draw IR, or 2D.
+6. GPU proof climbs `emission -> compile -> submission -> fence -> device-origin
+   readback -> CPU parity`; stop and report the first unavailable rung.
+   `unavailable` is never PASS.
+7. Shaping and material preparation fail closed unless every required operation
+   completed and the final glyphs remain bound to the exact live face handle
+   and generation.
+8. Freeze these four SSpec phrases exactly:
+   `Load a licensed multilingual font manifest`;
+   `Shape and rasterize the same glyph run through 2D and 3D`;
+   `Emit the selected GPU backend program`;
+   `Prove native submission and compare device readback with the CPU oracle`.
+   Mirrored manuals under `doc/06_spec` are `.md` only.
+9. Lower-model sidecars may implement or audit bounded lanes and generated
+   manuals, but the final done mark and manual-quality judgment require a
+   higher-capability review.
+
 For UI-test helper work, keep the test-library surface consistent: new SSpec
 manual specs use canonical `use std.spec.*` and `step("...")`, existing
 `use std.spipe` remains an alias, and UI/SGTTI/Draw IR helpers must layer inside
