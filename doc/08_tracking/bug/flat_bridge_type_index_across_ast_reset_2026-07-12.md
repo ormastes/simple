@@ -117,3 +117,121 @@ OOB errors report which Simple function/line performed the indexing.
 - `bin/simple test test/01_unit/compiler/frontend/flat_ast_if_else_bridge_spec.spl` — 3/3 pass.
 - Full stage-4 gate (`native_build_main.spl --backend cranelift ... --mode dynload`,
   cache cleared first): see report for pass/fail and evidence.
+
+## Corrected root cause (2026-07-12) — re-entrant-parse theory DISPROVEN; hang is earlier and native
+
+A follow-up investigation (isolated worktree, seed pinned from
+`src/compiler_rust/target/bootstrap/simple`) set out to prove a refined theory
+for the self-host `native_build_main.spl --mode dynload --threads 16` hang:
+that an **in-process re-entrant parse** (a lazy/deferred sub-parse calling
+`parser_init_with_path` → `ast_reset()` from inside `flat_ast_to_module`'s
+per-decl conversion loop) invalidates the still-in-flight `decl_body_stmts`
+indices of the function currently being converted, producing the observed
+`[flat-bridge] missing stmt tag idx=54..70 tag=-1` spin. This refined theory
+correctly ruled out the *original* doc's `--threads 16` cross-thread race
+(confirmed process-based via `rt_process_spawn_async`, each worker its own
+address space) and cross-module interleaving (`parse_and_build_module` is
+atomic: parse → convert, no reset in between, per file).
+
+**Instrumentation added for the proof** (module-level `ast_reset_seq` counter
++ trace print in `ast_reset()` at `module_state.spl:319-326`, and
+`STALE-BODY-SUSPECT`/`OOB-ABOUT-TO-HIT` prints in `convert_decl_fn` at
+`convert_nodes.spl:930-940`, gated by `SIMPLE_TRACE_AST_RESET=1`) was already
+present on `main` from a prior session before this investigation began — see
+`git log` on `module_state.spl`/`convert_nodes.spl` (commit `007c06a056b`
+"chore(sync): working-copy snapshot before gh sync"). This investigation
+extended it with a `cap_seq`/`cur_seq` pair threaded from `convert_decl_fn`'s
+`decl_get_body` capture site through to the `stmt_get_tag` OOB print in
+`convert_flat_stmt`, to directly compare "reset count at capture" vs. "reset
+count at consumption." **That extension was reverted before commit** — see
+below — because the build never reaches the code it instruments.
+
+### What was actually proven
+
+Ran the full build 3 times (`SIMPLE_TRACE_AST_RESET=1`, `--backend cranelift
+--source src/compiler --source src/app --source src/lib --entry-closure
+--threads 16 --cache-dir build/bootstrap/native_cache --mode dynload --entry
+src/app/cli/main.spl`, cache cleared each time; one run also wrapped in
+`strace -f -e trace=openat`). All three runs **hang at the exact same point**:
+stdout freezes at line 1135 (identical final line: a "Deprecated syntax for
+type parameters" warning for `src/lib/nogc_async_mut/path.spl:142`), one OS
+thread pegged at ~65-99% CPU in kernel `R` state (`wchan=0`, i.e. userspace
+compute, not blocked on a lock), the other 4 threads parked on `futex_wait_queue`.
+
+Two decisive facts rule out the re-entrant-parse theory for *this*
+manifestation:
+
+1. **Zero occurrences** of `[ast_reset]`, `[parser_init_with_path] resetting`,
+   `[flat-bridge]`, `[convert_decl_fn]`, or `[stmt_get_tag] OOB` anywhere in
+   any of the 3 logs. The traced code (module_state.spl, convert_nodes.spl,
+   parser.spl, ast_stmt.spl — all *interpreted* Simple source, run by the
+   seed) never executes before the freeze.
+2. The literal string "Deprecated syntax for type parameters" (the last
+   diagnostic emitted before every freeze) exists **only** in
+   `src/compiler_rust/parser/src/parser_types.rs:414` — it is not present
+   anywhere under `src/compiler/**/*.spl`. Emitting it requires the seed's
+   own **native** Rust parser, which the seed uses to load/lint the ~2,649
+   files transitively `use`d by `native_build_main.spl` itself (the compiler
+   driver's own source closure) *before* `native_build_main.spl`'s
+   interpreted `main()` (which is what would eventually call into
+   `parse_and_build_module`/`flat_ast_to_module`, the code under
+   investigation) ever runs. `main()`'s only unconditional early behavior
+   (`native_build_entry_args()` / `print_help()` gate) never printed either.
+
+So the flat-AST-bridge hang this bug doc originally describes may still be
+real, but it is **unreachable** in the current tree — a different, earlier,
+purely-native hang blocks the seed before it gets there.
+
+### What the earlier native hang looks like (report-only, not fixed here)
+
+Traced with `strace -f -e trace=openat`: the process is **not deadlocked** —
+it keeps issuing `openat()` calls (38k+ observed, growing ~5 per 20s at the
+point of stopping) long after stdout output has frozen. Aggregating the
+strace log by path shows heavy redundant I/O, not a simple one-shot file
+walk:
+
+- `/home/ormastes/.cache/simple/host/x86_64-unknown-linux-gnu/cpu_config.sdn` — **3,881** opens.
+- Directory opens for module resolution: `src/compiler` (3,127), `src/compiler/10.frontend` (696),
+  `src/compiler/70.backend` (684), plus **279 opens each** for a long list of
+  `src/lib/variants/<arch>/<family>` directories (e.g.
+  `x86_64_sse2/{nogc_sync_mut,nogc_async_mut_noalloc,nogc_async_mut,nogc_async_immut,gc_async_mut,common}`,
+  mirrored for other ISA variants).
+- Only 2,205 *unique* paths were opened across 38,169 total `openat()` calls —
+  i.e. the same files/dirs are being reopened roughly 17x on average.
+
+`cpu_config.sdn` and the `src/lib/variants/**` scan are owned by the seed's
+CPU/SIMD-variant stdlib resolver — native Rust, not `.spl`:
+`src/compiler_rust/compiler/src/stdlib_variant.rs`,
+`src/compiler_rust/compiler/src/interpreter_module/path_resolution.rs`,
+`src/compiler_rust/simd/src/host_config.rs`. `stdlib_variant.rs` does define a
+`host_cpu_config()` cache (`reset_host_cpu_config_cache_for_tests()` exists),
+so the cache is either not being consulted for this call path or is keyed/
+scoped such that it misses on every stdlib-variant module resolution — this
+was not root-caused further (native Rust debugging; `ptrace` was unavailable
+in this sandbox even with `gdb -p`, so no native stack trace could be taken).
+For a ~2,205-file closure this blows up into tens of thousands of redundant
+syscalls; the process was still making forward progress (not livelocked) when
+stopped after ~4 minutes, so this reads as a severe constant-factor
+performance bug (missing memoization in variant/CPU-config path resolution)
+rather than a hard infinite loop.
+
+### Disposition
+
+- **No fix applied in this pass.** The instrumentation added for the proof
+  (`convert_nodes.spl` `g_flat_bridge_cap_seq` / `[OOB-PROOF]` print) was
+  **reverted** — it cannot be compile-verified (the build hangs before
+  reaching it) and it serves a theory that is disproven for the reproducible
+  hang in this tree. The `SIMPLE_TRACE_AST_RESET` infrastructure already on
+  `main` (`ast_reset_seq`, the `ast_reset()` trace print, `STALE-BODY-SUSPECT`
+  / `OOB-ABOUT-TO-HIT`) was left untouched and remains ready to re-run once
+  the earlier native hang is cleared.
+- **Follow-up needed (native, out of scope for this .spl-frontend
+  investigation):** profile/cache `host_cpu_config()` and the
+  `src/lib/variants/**` directory resolution in
+  `src/compiler_rust/compiler/src/stdlib_variant.rs` /
+  `interpreter_module/path_resolution.rs` so stdlib-variant module resolution
+  is O(1) amortized per process instead of re-reading `cpu_config.sdn` and
+  re-scanning variant directories per import. Once that native hang is fixed,
+  re-run this bug's proof recipe (`SIMPLE_TRACE_AST_RESET=1`, watch for
+  `[ast_reset]` / `[flat-bridge]` / `[OOB-PROOF]`-style markers) to determine
+  whether the re-entrant-parse arena race is real.
