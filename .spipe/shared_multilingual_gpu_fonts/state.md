@@ -318,6 +318,11 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   closed; unresolved Inherited runs retain the primary face. Focused fixtures
   cover leading/trailing/between-script and long neutral sequences. Higher
   review passed; no Simple command ran, so this remains static source evidence.
+- Shaped material completion gate: `shaped_run_to_font_glyph_run` now requires
+  `substitution_complete` in addition to exact-face glyph validity and metadata
+  integrity. Direct Latin/emoji cmap witnesses remain non-renderable until the
+  selected GSUB plan completes; a focused synthetic completion branch preserves
+  the future accepted path.
 - Integrated GSUB selector attempt 3 was fully removed after Spark and higher
   review found LangSys activation, Arabic/Indic masking, cross-parent shared
   validation, FeatureParams/FeatureVariations, and structural-validator gaps.

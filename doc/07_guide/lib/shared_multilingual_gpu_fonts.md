@@ -131,8 +131,9 @@ cmap glyph IDs agree. Arabic, Urdu, Devanagari, Bengali, Thai, Hebrew, and emoji
 sequences fail closed. `substitution_complete` and `positioning_complete`
 remain false because active-feature GSUB/GPOS and full BiDi are incomplete; current
 advances/zero offsets are diagnostic placement, not shaping acceptance. Convert
-render-valid direct runs with
-`shaped_run_to_font_glyph_run`; Engine2D consumes only that neutral text-layout
+substitution-complete direct runs with
+`shaped_run_to_font_glyph_run`; incomplete runs remain non-renderable even when
+their pre-GSUB glyph indices match. Engine2D consumes only that neutral text-layout
 value through `draw_glyph_run`, preserving the batch-only layer boundary. It
 carries a revocable generation token rather than a native face pointer. The
 canonical renderer rejects mismatched or freed face handle/generation pairs and keys cache/atlas
