@@ -22,8 +22,102 @@ fn bootstrap_output_from_args(args: [text], i: i64) -> text:
     else:
         bootstrap_output_from_args(args, i + 1)
 
+# ponytail: native codegen currently emits an invalid `bitcast i64 to i1`
+# when a `bool`-returning function merges more than one branch (each arm
+# stores into a shared i64 slot, then the final load is bitcast to i1
+# instead of truncated/compared) -- see filed bug. Returning `i64` (1/0)
+# instead of `bool` sidesteps that miscompile without touching the shared
+# backend; callers compare against `1`.
+fn native_build_flag_needs_value(flag: text) -> i64:
+    if flag == "-o":
+        1
+    elif flag == "--output":
+        1
+    elif flag == "--source":
+        1
+    elif flag == "--entry":
+        1
+    elif flag == "--threads":
+        1
+    elif flag == "--timeout":
+        1
+    elif flag == "--cache-dir":
+        1
+    elif flag == "--backend":
+        1
+    elif flag == "--runtime-bundle":
+        1
+    elif flag == "--runtime-path":
+        1
+    elif flag == "--mode":
+        1
+    elif flag == "--target":
+        1
+    elif flag == "--linker-script":
+        1
+    elif flag == "--log":
+        1
+    else:
+        0
+
+fn native_build_has_explicit_entry(args: [text]) -> i64:
+    var i = 0
+    var found = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--entry" or arg.starts_with("--entry="):
+            found = 1
+        i = i + 1
+    found
+
+# rt_native_build's Rust arg parser (src/compiler_rust/native_all/src/lib.rs)
+# treats any bare positional that isn't consumed by a value-taking flag as a
+# `source_dir` to scan, and silently falls back to compiling
+# `src/app/cli/main.spl` as the entry when no `--entry` was given. That means
+# `bm native-build some_file.spl` never compiles `some_file.spl` -- it scans
+# for it as a directory (a no-op, since it's a file) and then compiles the
+# unrelated default entry instead. Detect the "single .spl file positional,
+# no explicit --entry" shape here and forward an explicit `--entry <path>`
+# (plus `--entry-closure` so the build only walks the entry's reachable
+# closure instead of falling through to a full-project scan).
+fn native_build_single_spl_positional(args: [text]) -> text:
+    var i = 0
+    var result = ""
+    var count = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "native-build":
+            i = i + 1
+        elif native_build_flag_needs_value(arg) == 1:
+            i = i + 2
+        elif arg.starts_with("-"):
+            i = i + 1
+        elif arg.ends_with(".spl"):
+            result = arg
+            count = count + 1
+            i = i + 1
+        else:
+            i = i + 1
+    if count == 1:
+        result
+    else:
+        ""
+
 fn run_native_build_bootstrap(args: [text]) -> i64:
-    rt_native_build(args)
+    if native_build_has_explicit_entry(args) == 1:
+        return rt_native_build(args)
+    val entry_path = native_build_single_spl_positional(args)
+    if entry_path == "":
+        return rt_native_build(args)
+    var forwarded: [text] = []
+    var i = 0
+    while i < args.len():
+        forwarded.push(args[i])
+        i = i + 1
+    forwarded.push("--entry")
+    forwarded.push(entry_path)
+    forwarded.push("--entry-closure")
+    rt_native_build(forwarded)
 
 fn get_cli_args() -> [text]:
     rt_get_args()
