@@ -27,6 +27,10 @@ use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_spawn, x86_64_fs_exec_
 extern fn serial_println(msg: text)
 extern fn rt_boot_tcp_bind(addr: text) -> i64
 extern fn rt_boot_tcp_accept_timeout(fd: i64, ms: i64) -> i64
+extern fn rt_string_from_byte_array(arr: [u8]) -> text
+extern fn rt_string_to_byte_array(s: text) -> [u8]
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 
 # ============================================================================
 # Constants
@@ -69,42 +73,93 @@ fn _sshd_run_pending_ring3_exec() -> i64:
 fn _sshd_run_pending_ring3_exec() -> i64:
     0
 
+# Phase 2e Inc 2: tokenize the intact SSH exec command text into argv, IN THE
+# SHALLOW accept-loop frame. `text.char_at`/`starts_with` mis-decode deep in
+# the sshd session-dispatch call stack (frame-depth/stack-spill sensitive —
+# see doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md §Status
+# point 3).
+#
+# NEW FINDING (isolated + proven via
+# examples/09_embedded/simple_os/arch/x86_64/clang_argv_tokenize_probe_entry.spl
+# / scripts/os/clang_argv_tokenize_probe_run.shs, reproduces even at the
+# shallowest possible frame — bare `_start()`, no SSH/accept-loop involved):
+# `text.char_code_at(i)` itself mis-decodes when `text` is a DYNAMICALLY built
+# string (e.g. via rt_string_from_byte_array at runtime, which is exactly
+# what the decoded SSH command is) — garbage/boxed-object values appear at
+# scattered indices. It is NOT frame-depth sensitive and it is NOT limited to
+# the space character: a plain rodata string LITERAL iterates fine with
+# char_code_at, but a heap-built one does not. The reliable path for dynamic
+# text is the raw [u8] byte-array accessor pair `rt_string_to_byte_array` +
+# `rt_bytes_u8_at` (already proven elsewhere, e.g.
+# ssh_session_helpers.spl's `_u8_at` / `_read_text_field_fast`) — convert the
+# whole command to bytes ONCE, then index the byte array, never `char_code_at`
+# on the text directly.
+fn _sshd_tokenize_command(command: text) -> [text]:
+    val bytes = rt_string_to_byte_array(command)
+    var tokens: [text] = []
+    var cur: [u8] = []
+    var i: i64 = 0
+    val n = bytes.len().to_i64()
+    while i < n:
+        val code = rt_bytes_u8_at(bytes, i)
+        if code == 32:
+            if cur.len() > 0:
+                tokens.push(rt_string_from_byte_array(cur))
+                cur = []
+        else:
+            cur = rt_push_byte(cur, code)
+        i = i + 1
+    if cur.len() > 0:
+        tokens.push(rt_string_from_byte_array(cur))
+    tokens
+
 # Phase 2e Inc 1: deferred ring-3 HEAP-stream spawn of clang (/FSEXEC.ELF on
 # this test image), run from the SAME shallow accept-loop frame as the plain
-# /FSEXEC.ELF path above. Hardcoded argv (no arg-parsing yet — that is Inc 2):
-# `clang -cc1 -triple x86_64-unknown-simpleos -emit-obj -o /hello.o -x c
-# /hello.c`. Proves the critical unknown: does simpleos_fat32_stream_open
-# succeed POST rt_net_init + SSH session activity for a payload far too large
-# to preload (124.6 MB clang vs the ~4 MiB static path-read buffer)? See
+# /FSEXEC.ELF path above. Phase 2e Inc 2: argv is no longer hardcoded — it is
+# parsed (in this shallow frame, via _sshd_tokenize_command above) from the
+# real SSH command text captured by ssh_session.spl's clang-exec branch, e.g.
+# `clang -cc1 -triple x86_64-unknown-simpleos -emit-obj -o /out2.o -x c
+# /hello.c`. argv[0] ("clang") is discarded — clang's `-cc1` driver ignores
+# argv[0]; the remaining tokens ARE the -cc1 argv. Proves the critical
+# unknown from Inc 1: does simpleos_fat32_stream_open succeed POST
+# rt_net_init + SSH session activity for a payload far too large to preload
+# (124.6 MB clang vs the ~4 MiB static path-read buffer)? See
 # doc/03_plan/os/clang_over_ssh_2e_design.md and
 # doc/08_tracking/bug/x64_ssh_kernel_fat32_stream_open_zero.md (the existing
 # workaround preloads pre-net; clang cannot use that short-circuit).
 @cfg(x86_64)
-fn _sshd_run_pending_clang_exec() -> i64:
-    serial_println("[sshd] ring3 deferred CLANG heap-stream spawn /FSEXEC.ELF")
-    val argv: [text] = ["-cc1", "-triple", "x86_64-unknown-simpleos", "-emit-obj", "-o", "/hello.o", "-x", "c", "/hello.c"]
+fn _sshd_run_pending_clang_exec(command: text) -> i64:
+    serial_println("[sshd] ring3 deferred CLANG heap-stream spawn /FSEXEC.ELF command={command}")
+    val all_tokens = _sshd_tokenize_command(command)
+    var argv: [text] = []
+    var i: u64 = 0
+    while i < all_tokens.len():
+        serial_println("[sshd] clang argv[{i}]={all_tokens[i]}")
+        if i > 0:
+            argv.push(all_tokens[i])
+        i = i + 1
     val rc = x86_64_fs_exec_spawn_heap("/FSEXEC.ELF", argv, [])
     serial_println("[sshd] ring3 deferred CLANG spawn returned rc={rc}; accept loop continues")
     rc
 
 @cfg(x86)
-fn _sshd_run_pending_clang_exec() -> i64:
+fn _sshd_run_pending_clang_exec(command: text) -> i64:
     0
 
 @cfg(arm64)
-fn _sshd_run_pending_clang_exec() -> i64:
+fn _sshd_run_pending_clang_exec(command: text) -> i64:
     0
 
 @cfg(arm32)
-fn _sshd_run_pending_clang_exec() -> i64:
+fn _sshd_run_pending_clang_exec(command: text) -> i64:
     0
 
 @cfg(riscv64)
-fn _sshd_run_pending_clang_exec() -> i64:
+fn _sshd_run_pending_clang_exec(command: text) -> i64:
     0
 
 @cfg(riscv32)
-fn _sshd_run_pending_clang_exec() -> i64:
+fn _sshd_run_pending_clang_exec(command: text) -> i64:
     0
 
 fn _sshd_bytes_equal(a: [u8], b: [u8]) -> bool:
@@ -400,7 +455,7 @@ impl SshDaemon:
                     # the deferred exec goes out on the still-open session socket.
                     if session.pending_ring3_exec:
                         val exit_rc = if session.pending_ring3_exec_is_clang:
-                            _sshd_run_pending_clang_exec()
+                            _sshd_run_pending_clang_exec(session.pending_ring3_exec_command)
                         else:
                             _sshd_run_pending_ring3_exec()
                         session.pending_ring3_exec_exit_code = exit_rc.to_u32()

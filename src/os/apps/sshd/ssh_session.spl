@@ -269,6 +269,8 @@ class SshSession:
     pending_ring3_exec_remote_id: u32  # SSH channel remote_id for exit-status response
     pending_ring3_exec_local_id: u32   # SSH channel local_id for cleanup
     pending_ring3_exec_is_clang: bool  # true -> accept loop runs the clang heap-stream spawn (Phase 2e Inc 1)
+    pending_ring3_exec_command: text   # intact decoded exec command text (Phase 2e Inc 2); tokenized by the
+                                        # shallow accept loop into argv — never parsed in this deep frame
 
 impl SshSession:
 
@@ -338,7 +340,8 @@ impl SshSession:
             pending_ring3_exec_exit_code: 0,
             pending_ring3_exec_remote_id: 0,
             pending_ring3_exec_local_id: 0,
-            pending_ring3_exec_is_clang: false
+            pending_ring3_exec_is_clang: false,
+            pending_ring3_exec_command: ""
         )
 
     pub me run():
@@ -721,18 +724,25 @@ impl SshSession:
             self.state = SessionState.Closed
             return
 
-        # Phase 2e Inc 1: a command beginning with 'c' (e.g. `ssh ... clang`)
-        # defers the CLANG heap-stream spawn instead of the plain /FSEXEC.ELF
-        # path. Detected the same RAW-byte way as the '/' case above (the
-        # decoded `command` text is unreliable on this freestanding path — see
-        # doc/08_tracking/bug/x64_ssh_kernel_fat32_stream_open_zero.md); argv is
-        # hardcoded in sshd.spl (no arg-parsing yet — that is Inc 2).
+        # Phase 2e Inc 1/2: a command beginning with 'c' (e.g. `ssh ... clang
+        # -cc1 ...`) defers the CLANG heap-stream spawn instead of the plain
+        # /FSEXEC.ELF path. TRIGGER detection stays the same RAW-byte test as
+        # the '/' case above (per-char text predicates like `starts_with` are
+        # unreliable this deep — see
+        # doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md
+        # §Status point 3). The decoded `command` text ITSELF is fine to store
+        # (rt_string_from_byte_array-into-field is fixed at HEAD, per the same
+        # doc §Status point 2) — only per-char decode/predicates are broken
+        # deep. So we store the intact `command` text here and let the
+        # SHALLOW accept-loop frame (sshd.spl) tokenize it into argv; no
+        # parsing happens in this deep frame (Phase 2e Inc 2).
         if _u8_at(payload, off + 4) == 0x63u8:
-            serial_println("[sshd-session] exec ring3 DEFER clang")
+            serial_println("[sshd-session] exec ring3 DEFER clang command={command}")
             self.pending_ring3_exec_remote_id = remote_id
             self.pending_ring3_exec_local_id = local_id
             self.pending_ring3_exec = true
             self.pending_ring3_exec_is_clang = true
+            self.pending_ring3_exec_command = command
             self.state = SessionState.Closed
             return
 
