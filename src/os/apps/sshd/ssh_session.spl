@@ -268,6 +268,7 @@ class SshSession:
     pending_ring3_exec_exit_code: u32  # exit code from ring-3; set by accept loop after spawn
     pending_ring3_exec_remote_id: u32  # SSH channel remote_id for exit-status response
     pending_ring3_exec_local_id: u32   # SSH channel local_id for cleanup
+    pending_ring3_exec_is_clang: bool  # true -> accept loop runs the clang heap-stream spawn (Phase 2e Inc 1)
 
 impl SshSession:
 
@@ -336,7 +337,8 @@ impl SshSession:
             pending_ring3_exec: false,
             pending_ring3_exec_exit_code: 0,
             pending_ring3_exec_remote_id: 0,
-            pending_ring3_exec_local_id: 0
+            pending_ring3_exec_local_id: 0,
+            pending_ring3_exec_is_clang: false
         )
 
     pub me run():
@@ -716,6 +718,21 @@ impl SshSession:
             self.pending_ring3_exec_remote_id = remote_id
             self.pending_ring3_exec_local_id = local_id
             self.pending_ring3_exec = true
+            self.state = SessionState.Closed
+            return
+
+        # Phase 2e Inc 1: a command beginning with 'c' (e.g. `ssh ... clang`)
+        # defers the CLANG heap-stream spawn instead of the plain /FSEXEC.ELF
+        # path. Detected the same RAW-byte way as the '/' case above (the
+        # decoded `command` text is unreliable on this freestanding path — see
+        # doc/08_tracking/bug/x64_ssh_kernel_fat32_stream_open_zero.md); argv is
+        # hardcoded in sshd.spl (no arg-parsing yet — that is Inc 2).
+        if _u8_at(payload, off + 4) == 0x63u8:
+            serial_println("[sshd-session] exec ring3 DEFER clang")
+            self.pending_ring3_exec_remote_id = remote_id
+            self.pending_ring3_exec_local_id = local_id
+            self.pending_ring3_exec = true
+            self.pending_ring3_exec_is_clang = true
             self.state = SessionState.Closed
             return
 

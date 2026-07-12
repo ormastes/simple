@@ -5,7 +5,7 @@ use os.kernel.loader.smf.{smf_has_header, smf_extract_executable_stub_for_arch, 
 use os.kernel.loader.fs_exec_spawn.{fs_exec_prepare_spawn_from_bytes}
 use os.kernel.loader.cap_exec_gate.{exec_cap_check}
 use os.kernel.loader.process_image.{build_user_process_image_unchecked}
-use os.kernel.loader.x86_64_fs_exec_ring3.{x86_64_fs_exec_enter_image_ring3, x86_64_fs_exec_enter_stream_ring3}
+use os.kernel.loader.x86_64_fs_exec_ring3.{x86_64_fs_exec_enter_image_ring3, x86_64_fs_exec_enter_stream_ring3, x86_64_fs_exec_enter_stream_heap_ring3}
 
 extern fn serial_println(msg: text)
 extern fn simpleos_fat32_path_read_buffer_addr() -> u64
@@ -155,6 +155,24 @@ pub fn x86_64_fs_exec_spawn_as(caller: i64, path: text, argv: [text], envp: [tex
     if handoff_rc < 0:
         return handoff_rc
     pid
+
+pub fn x86_64_fs_exec_spawn_heap(path: text, argv: [text], envp: [text]) -> i64:
+    """Stream-open `path` and enter it via the HEAP ring-3 handoff (opt-in 64
+    MiB anonymous user heap, for real libc programs like clang). ALWAYS
+    streams — never preloads — so payloads far larger than the 4 MiB static
+    path-read buffer (clang is 124.6 MB) can run. No preload short-circuit and
+    no legacy resident-bytes fallback: this is the minimal streaming-only path
+    (Phase 2e Inc 1), mirroring the proven boot-time clang-stream entry
+    (examples/09_embedded/simple_os/arch/x86_64/fs_exec_clang_stream_ring3_entry.spl)
+    but callable from the sshd deferred-exec shallow frame."""
+    serial_println("[fs-exec] heap:resolve path={path}")
+    val (stream_len, header_blob) = _x86_64_open_streaming_elf(path)
+    if stream_len <= 0:
+        serial_println("[fs-exec] heap:stream-open-fail path={path} rc={stream_len}")
+        return -2
+    val hdr_prefix = mmio_read64(header_blob + 32) + ((mmio_read16(header_blob + 56) as u64) * (mmio_read16(header_blob + 54) as u64))
+    serial_println("[fs-exec] heap:stream-open-ok path={path} len={stream_len} hdr_prefix={hdr_prefix}")
+    x86_64_fs_exec_enter_stream_heap_ring3(path, header_blob, hdr_prefix, stream_len as u64, argv, envp)
 
 fn x86_64_fs_exec_spawn_hello_world_smf() -> i64:
     """Backward-compat wrapper: spawn /sys/apps/hello_world.smf."""
