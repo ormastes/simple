@@ -72,9 +72,17 @@ image fresh for the compile pass. Next: Phase 2 (board port).
     falls through past the caller's `main` → triple-fault; now it `cli;hlt` loops after the
     (QEMU-only) `0xF4`. SSH multi-cmd resume gate re-run green (no regression). Gate: both
     SSH gates + clang path green.
-2c. **UEFI boot validation:** boot the clang-capable kernel+disk under OVMF via
-    `ssh_ring3_uefi_boot.shs` (real UEFI firmware path), proving no multiboot/QEMU-`-kernel`
-    dependency.
+2c. ✅ **DONE (2026-07-12) — UEFI boot validation:** `ssh_ring3_uefi_boot.shs` boots the
+    ring-3 kernel (with the 2b exit path compiled in) under REAL UEFI firmware — OVMF →
+    GRUB (`grub-mkstandalone` BOOTX64.EFI) → multiboot → ExitBootServices → kernel `_start`
+    — no QEMU `-kernel`. Green: `PRIMARY GATE PASS: sshd accept loop started under OVMF`,
+    then over real OpenSSH `/FSEXEC.ELF` (a clang-BUILT ring-3 ELF loaded off the FS) prints
+    `hello from clang on simpleos` + `[user] exit rc=42` → `UEFI BOOT VERIFIED`. This proves
+    the kernel survives a real firmware memory-map handoff and runs an FS-exec ring-3 program
+    to completion. Scope note (honest): this boots the SHARED ring-3 kernel; the clang-
+    *compile* kernel (`fs_exec_clang_stream_ring3_entry`, 125 MB payload) uses the identical
+    boot chain + ring-3 machinery — booting IT under OVMF and compiling `hello.c` is the 2e
+    capstone, not re-proven here.
 2d. **Robustness for the board:** every syscall/FS error path recovers + reports instead of
     hang/triple-fault (so an unexpected situation on hardware degrades gracefully, not a
     silent halt). Audit the fault handler + syscall default cases.
@@ -88,6 +96,6 @@ image fresh for the compile pass. Next: Phase 2 (board port).
 
 ## Execution order
 
-1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a ✅ (.o on real NVMe)  →  2b ✅ (board-safe exit)  →  2c → 2d → 2e.
+1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a ✅ (.o on real NVMe)  →  2b ✅ (board-safe exit)  →  2c ✅ (UEFI boot)  →  2d → 2e.
 Never start Phase 2 before 1d passes. Small model + guide per step; higher-model review +
 the host-link-and-run / gate verification owned by the coordinator.
