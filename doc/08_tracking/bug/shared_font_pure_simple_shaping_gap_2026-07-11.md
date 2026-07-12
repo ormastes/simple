@@ -54,20 +54,47 @@ one reviewed slice. The replacement must:
   use the selected Script's DefaultLangSys when its exact language is absent,
   and `DFLT` only when the Script record is absent—never after a malformed exact
   record;
-- bound ScriptList, Script/LangSys, FeatureList, Feature, LookupList, Lookup,
-  and subtable offsets to their owning sections, rejecting aliases, duplicates,
-  bad indices, nonzero `lookupOrder`, and malformed exact records;
-- preserve required-first feature and first-seen lookup order, with explicit
-  default-feature policy and no sorting after selection; and
+- bound every record and referenced structure to the GSUB table and its parent
+  metadata rules, rejecting cycles, parent-metadata overlap, duplicate tags,
+  bad indices, nonzero `lookupOrder`, and malformed exact records. OpenType may
+  legally share Script/LangSys/Feature/Lookup/subtable targets. An implementation
+  may parse a shared target's structural bytes once, but every reference must
+  independently validate its relative base and prove that the target does not
+  overlap that referring parent's metadata;
+- activate the required feature even when absent from the optional feature
+  indices, but apply features through **GSUB stage policy v1**:
+  Latin/Cyrillic/Han `ccmp,locl,rlig,liga,clig,calt`; Arabic
+  `ccmp,locl,stch,isol,fina,fin2,fin3,medi,med2,init,rlig,rclt,calt,mset`;
+  Devanagari `locl,ccmp,nukt,akhn,rphf,rkrf,pref,blwf,abvf,half,pstf,vatu,cjct,init,pres,abvs,blws,psts,haln,calt`.
+  A listed feature activates at its stage only when referenced by the chosen
+  LangSys (or by its required-feature index); an explicitly requested feature
+  must still be referenced there. Any active or requested tag absent from that
+  script's policy remains visible and forces incomplete output. Activate a
+  feature tag once per stage and a lookup once per stage; the same lookup may
+  execute again only when explicitly reached in a later stage;
+  raw LangSys FeatureIndex order and global first-seen lookup deduplication are
+  not shaping order;
 - set completion only when every active lookup flag/type/format is supported
-  and every active subtable validates and applies. Unsupported active lookups
-  remain visible and force incomplete output; and
+  and every active subtable validates and is processed with supported semantics.
+  A valid SingleSubst whose coverage misses the current glyph is a successful
+  no-op; malformed or unsupported data forces incomplete output. Unsupported active lookups
+  remain visible and force incomplete output; validate the final substituted
+  glyph IDs against the exact live face before material becomes renderable;
+- resolve Common/Inherited combining marks to the preceding resolved strong
+  script, otherwise the following resolved strong script, otherwise fail closed;
+  a mark between different strong scripts attaches to the preceding script, and
+  fail unsupported Script enum values closed rather than relabeling them; and
 - leave focused executable fixtures for exact LangSys versus DefaultLangSys,
   absent-script `DFLT`, explicit feature enable/non-enable, a required feature
-  outside the LangSys optional list, first-seen lookup order/deduplication,
-  header/section aliases, duplicate records, nonzero `lookupOrder`, malformed
-  selected SingleSubst, and every unsupported LookupFlag/type forcing
-  `substitution_complete=false`.
+  outside the LangSys optional list, per-script stage order, legal shared child
+  targets, illegal parent-metadata overlap/cycles, duplicate tags, nonzero
+  `lookupOrder`, malformed selected SingleSubst, a valid selected SingleSubst
+  not covering the current glyph, leading/trailing/between-script
+  combining-mark inheritance, a shared target valid from its first reference but
+  overlapping its second parent's metadata, checked absolute-address overflow
+  beyond `u32`,
+  post-substitution glyph validity, and every unsupported LookupFlag/type
+  forcing `substitution_complete=false` and non-renderable material.
 
 ## Acceptance
 

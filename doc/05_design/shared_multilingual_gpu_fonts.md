@@ -65,8 +65,19 @@ data returns unchanged material and cannot set completion.
 
 The selector and application land together. Their first accepted scope covers
 Latin, Cyrillic, Han, Devanagari, and Arabic script/language routing, with
-section-local bounds and required/default feature ordering. A standalone plan
-whose `complete` bit is not derived from validated active subtables is rejected.
+table/parent-metadata bounds and a frozen per-script shaping-stage order.
+Shared OpenType child offsets are legal and cannot be used as invented sibling
+boundaries. Shared structural bytes may be memoized, but each reference validates
+its own relative base and parent-metadata exclusion. Table addressing uses checked
+wide arithmetic; an implementation storing absolute offsets in `u32` rejects a
+GSUB end above `UINT32_MAX`. Common/Inherited marks resolve to the preceding strong
+script, then following strong script, else unsupported; between different scripts
+they attach to the preceding script. The exact initial stage arrays and required/
+duplicate lookup rules are frozen as GSUB stage policy v1 in the shaping-gap
+tracker. A valid selected SingleSubst that does not cover the current glyph is
+a successful no-op, not an incomplete plan. A plan whose
+`complete` bit is not derived from every validated
+active subtable and whose final glyph IDs are not face-valid is rejected.
 
 The revocable font-face handle/generation is intentionally present as opaque
 rasterizer identity and is validated before use. Engine-owned texture, sampler,
