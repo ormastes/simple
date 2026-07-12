@@ -12,11 +12,18 @@ related: src/lib/nogc_sync_mut/ffi/codegen.spl
 # `native-build --backend cranelift`: string constants always compile to a null pointer (SIGSEGV / silent no-op)
 
 **Status:** OPEN — architectural gap, not a quick fix.
-**Severity:** Blocking for `native-build --entry-closure` (and the standard
-3-stage bootstrap, which uses the same path per
-`scripts/bootstrap/bootstrap-from-scratch.sh:541`) on **any** program that
-uses a string literal — i.e. essentially all real Simple programs, including
-`src/app/cli/main.spl`.
+**Severity:** Blocking for `native-build --entry-closure` on **any** program
+that uses a string literal — i.e. essentially all real Simple programs,
+including `src/app/cli/main.spl`. Confirmed blocking for the standard
+3-stage bootstrap too: `scripts/bootstrap/bootstrap-from-scratch.sh:538-541`
+(Stage 2) invokes the exact same `--backend cranelift --entry-closure`
+combination against `--entry src/app/cli/bootstrap_main.spl`, and the
+script's own comment explains cranelift is used deliberately ("the seed
+interpreter intercepts `--backend llvm-lib` and dispatches to
+`bootstrap_main.spl` via the interpreter, where `rt_native_build` is a stub
+that fails. With cranelift the seed uses its Rust `handle_native_build`
+directly") — so there is no LLVM fallback to route around this bug; Stage 2
+is cranelift-or-nothing today.
 **Path:** `bug` track.
 
 ## Symptom
@@ -129,14 +136,21 @@ fixed incidentally by an unrelated parallel-session change, or may be
 order/state-dependent; it was not seen again and is not re-investigated
 here.
 
-The actual, currently-reproducing next wall is this one. `src/app/cli/main.spl`
-and its full transitive closure are real CLI code — they use string literals
-pervasively (`print`, error messages, path construction, etc). Once the
-(very slow — see Performance note below) full closure build reaches Cranelift
-codegen, it will hit this exact bug on the first string constant it
-compiles, either as a build-time crash/miscompile or (more likely, given the
-minimal repro) a *silently* corrupt binary that segfaults or hangs at
-runtime rather than failing the build outright.
+The actual, currently-reproducing next wall is this one. This session's full
+closure runs used `--entry src/app/cli/main.spl` (per the task's repro
+command); the real bootstrap Stage 2 uses `--entry
+src/app/cli/bootstrap_main.spl` instead — either way, both are real CLI code
+that use string literals pervasively (`print`, error messages, path
+construction, etc). Once the (very slow — see Performance note below) full
+closure build reaches Cranelift codegen, it will hit this exact bug on the
+first string constant it compiles, either as a build-time crash/miscompile
+or (more likely, given the minimal repro) a *silently* corrupt binary that
+segfaults or hangs at runtime rather than failing the build outright. The
+full closure builds run this session did not individually reach codegen
+before being stopped (parse phase alone runs many minutes to an hour+, see
+Performance note) — this bug's blocking status is established via the
+isolated minimal-entry probe, not by observing the full closure fail at this
+exact point.
 
 ## Fix (not attempted — scope estimate)
 
