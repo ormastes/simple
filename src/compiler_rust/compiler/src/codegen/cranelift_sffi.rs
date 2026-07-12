@@ -1607,4 +1607,64 @@ mod tests {
             rt_cranelift_free_module(handle);
         }
     }
+
+    /// Direct mechanism test for the string-constant data-object SFFI
+    /// (rt_cranelift_declare_string_data + rt_cranelift_data_addr_in_func),
+    /// independent of the Simple-side adapter/seed pipeline. Builds a
+    /// JIT-compiled `() -> i64` function that returns the address of a
+    /// declared "hello" data object, calls it, and reads the bytes back
+    /// through the *returned pointer* -- not just asserting the handle is
+    /// nonzero, which wouldn't catch a wrong/garbage data-reloc (the
+    /// documented failure mode for this bug).
+    #[test]
+    fn test_string_data_constant_roundtrip() {
+        unsafe {
+            let mod_name = "test_str_const";
+            let module = rt_cranelift_new_module(mod_name.as_ptr() as i64, mod_name.len() as i64, CL_TARGET_X86_64);
+            assert!(module > 0);
+
+            let content = b"hello";
+            let data_id = rt_cranelift_declare_string_data(module, content.as_ptr() as i64, content.len() as i64);
+            assert!(data_id > 0, "declare_string_data should return a nonzero handle");
+
+            // Dedup check: declaring identical content again must return the same handle.
+            let data_id2 = rt_cranelift_declare_string_data(module, content.as_ptr() as i64, content.len() as i64);
+            assert_eq!(data_id, data_id2, "identical content should be content-addressed/deduped");
+
+            let sig = rt_cranelift_new_signature(0); // SystemV
+            rt_cranelift_sig_set_return(sig, CL_TYPE_I64);
+
+            let fname = "get_str_addr";
+            let ctx = rt_cranelift_begin_function(module, fname.as_ptr() as i64, fname.len() as i64, sig);
+            assert!(ctx > 0);
+
+            let entry = rt_cranelift_create_block(ctx);
+            rt_cranelift_switch_to_block(ctx, entry);
+            rt_cranelift_seal_block(ctx, entry);
+
+            let addr_val = rt_cranelift_data_addr_in_func(ctx, data_id);
+            assert!(addr_val > 0, "data_addr_in_func should return a nonzero value handle");
+            rt_cranelift_return(ctx, addr_val);
+
+            let func_id = rt_cranelift_end_function(ctx);
+            assert!(func_id > 0);
+            let ok = rt_cranelift_define_function(module, func_id, ctx);
+            assert!(ok);
+
+            rt_cranelift_finalize_module(module);
+
+            let fptr = rt_cranelift_get_function_ptr(module, fname.as_ptr() as i64, fname.len() as i64);
+            assert!(fptr != 0);
+            let func: extern "C" fn() -> i64 = std::mem::transmute(fptr as *const ());
+            let returned_addr = func();
+            assert_ne!(returned_addr, 0, "returned data address must not be null");
+
+            // Dereference the *actual returned pointer* and verify the real bytes,
+            // not just that some nonzero handle came back.
+            let bytes = std::slice::from_raw_parts(returned_addr as *const u8, content.len());
+            assert_eq!(bytes, content, "data at the returned address must be the exact declared bytes");
+
+            rt_cranelift_free_module(module);
+        }
+    }
 }
