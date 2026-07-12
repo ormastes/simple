@@ -13952,8 +13952,12 @@ RuntimeValue rt_debug_serial_R(void)
 
 RuntimeValue rt_debug_exit_success(void)
 {
+    /* QEMU: isa-debug-exit quits the VM. Board: 0xF4 is unused (no-op), so this
+     * is a terminal "exit success" — halt instead of falling through past the
+     * caller's main (which on real hardware would triple-fault). */
     outb((uint16_t)0xF4, (uint8_t)0);
-    return 0;
+    for (;;) __asm__ volatile("cli; hlt");
+    return 0; /* unreachable */
 }
 
 RuntimeValue rt_debug_serial_R_hang(void)
@@ -15282,17 +15286,31 @@ static void _bare_dbg_path(const char *tag, uint64_t src, uint64_t len) {
     serial_puts("\r\n");
 }
 
+/* ring-3 kernel-resume savepoint (defined in enter_user_first.s) — forward
+ * decls so the bare-exec exit can prefer it over QEMU isa-debug-exit. */
+extern void    rt_x86_ring3_resume(int64_t rc);   /* does not return */
+extern int64_t rt_x86_ring3_resume_valid(void);
+
 /* Native bare-exec syscall handler. Returns 1 (handled, result in *out) or 0
  * (not a bare-exec syscall — let the normal dispatch/shim run). */
 static int _bare_exec_handle(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
                              uint64_t a3, uint64_t a4, uint64_t a5, int64_t *out) {
     (void)a5;
     switch (num) {
-        case 0:   /* exit(status) — dump RAM outputs, then QEMU isa-debug-exit */
+        case 0:   /* exit(status) — dump RAM outputs, then terminate board-safely */
             _bare_dump_all_outputs();
             serial_puts("[syscall] exit status=");
             serial_put_dec((int64_t)a0);
             serial_puts("\r\n");
+            /* Board-safe exit: if the FS-exec ring-3 loader established a kernel
+             * savepoint (rt_x86_enter_user_first), longjmp back into the kernel
+             * with this rc so real hardware regains control and can continue/halt
+             * gracefully — never depending on QEMU quitting. The 0xF4 write is a
+             * QEMU-only fallback for the standalone smoke (no savepoint); on a
+             * board 0xF4 is unused, so we halt. Same pattern as the SSH exit. */
+            if (rt_x86_ring3_resume_valid()) {
+                rt_x86_ring3_resume((int64_t)a0);   /* does not return */
+            }
             outb(0xF4, (uint8_t)((a0 << 1) | 1));
             __asm__ __volatile__("cli; hlt");
             *out = 0; return 1;

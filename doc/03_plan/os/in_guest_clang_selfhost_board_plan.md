@@ -61,10 +61,17 @@ image fresh for the compile pass. Next: Phase 2 (board port).
     so the spare cluster's LBA fell 1 sector past EOF and the NVMe write was out-of-range
     (mark-EOC in the low FAT region passed; the high data-cluster write failed). Error-path
     `[wf-diag] … FAILED` serial markers left in `fat32_write_file` as board diagnostics.
-2b. **Board-safe exit:** replace isa-debug-exit (`outb 0xF4`) for the clang path with the
-    kernel-resume savepoint (as the SSH multi-cmd exit already does) so on real hardware
-    the kernel regains control, reports rc, and halts/continues gracefully — never depends
-    on QEMU quitting. Gate: both SSH gates + clang path all green.
+2b. ✅ **DONE (2026-07-12) — board-safe exit:** the bare-exec exit (`_bare_exec_handle`
+    case 0, the clang path) now prefers the kernel-resume savepoint — `if
+    (rt_x86_ring3_resume_valid()) rt_x86_ring3_resume(rc)` — exactly like the SSH exit,
+    with `outb 0xF4` + `cli;hlt` only as the standalone-smoke fallback. Verified: clang
+    smoke logs `resume_valid=1` → `[spawn] ring3 program exited rc=0 (kernel resumed)` →
+    `CLANG FILE-LAUNCH WORKS rc=0`, 0 faults; QEMU now exits via the entry's clean terminal
+    (rc=1) not the mid-ring3 bare-exec fallback (rc=3). Also fixed a real board hazard:
+    `rt_debug_exit_success` wrote `0xF4` then **returned** — on a board (0xF4 unused) that
+    falls through past the caller's `main` → triple-fault; now it `cli;hlt` loops after the
+    (QEMU-only) `0xF4`. SSH multi-cmd resume gate re-run green (no regression). Gate: both
+    SSH gates + clang path green.
 2c. **UEFI boot validation:** boot the clang-capable kernel+disk under OVMF via
     `ssh_ring3_uefi_boot.shs` (real UEFI firmware path), proving no multiboot/QEMU-`-kernel`
     dependency.
@@ -81,6 +88,6 @@ image fresh for the compile pass. Next: Phase 2 (board port).
 
 ## Execution order
 
-1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a ✅ (.o on real NVMe)  →  2b → 2c → 2d → 2e.
+1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a ✅ (.o on real NVMe)  →  2b ✅ (board-safe exit)  →  2c → 2d → 2e.
 Never start Phase 2 before 1d passes. Small model + guide per step; higher-model review +
 the host-link-and-run / gate verification owned by the coordinator.
