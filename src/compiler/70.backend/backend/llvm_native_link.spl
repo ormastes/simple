@@ -242,14 +242,17 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         if rt_file_exists(native_all):
             bootstrap_native_all = native_all
 
-    # Step 1: Compile C runtime to object files unless bootstrap links the
-    # Rust/native_all archive, which already owns the hosted runtime symbols.
-    # On the NORMAL path the C runtime objects stay in even when native_all is
-    # linked: ld pulls archive members only for still-undefined symbols, so
-    # native_all just backfills seed-owned externs (rt_native_build) while the
-    # C runtime keeps owning rt_interp_cstr/rt_strcat/etc.
-    val native_all_replaces_c_runtime = bootstrap_native_all != "" and
-        (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+    # Step 1: Always compile the FRESH C runtime to object files, even when the
+    # native_all archive is linked (including under SIMPLE_BOOTSTRAP=1). ld
+    # pulls archive members only for still-undefined symbols, so native_all just
+    # backfills seed-owned externs (rt_native_build) while the fresh C runtime
+    # keeps owning rt_interp_cstr/rt_strcat/rt_text_eq_any/
+    # __simple_intrinsic_bounds_check/etc. The old SIMPLE_BOOTSTRAP=1 branch
+    # REPLACED the C runtime with the archive's bundled (and stale) runtime
+    # snapshot, so any runtime symbol added after the archive was built (e.g.
+    # rt_text_eq_any from #148) linked as "undefined symbol" and broke the
+    # stage2 redeploy compile of bootstrap_main. Never replace.
+    val native_all_replaces_c_runtime = false
     if trace:
         print "[LLVM-LINK] step 1: compile_runtime_objects..."
     val runtime_objects = if native_all_replaces_c_runtime:
