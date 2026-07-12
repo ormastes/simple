@@ -95,6 +95,8 @@ pub fn clear_module_cache() {
     // Also clear path resolution cache
     super::interpreter_module::clear_path_resolution_cache();
     super::interpreter_module::reset_resolve_stats();
+    // And the compile-pipeline directory-listing cache
+    crate::pipeline::module_loader::clear_pipeline_dir_listing_cache();
 }
 
 /// Clear module cache selectively — preserve stdlib modules (src/lib/) between tests.

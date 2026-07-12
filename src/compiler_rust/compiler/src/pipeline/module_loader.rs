@@ -1,6 +1,7 @@
 //! Module loading and import resolution utilities.
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -123,6 +124,49 @@ fn resolve_parts_from_root(root: &Path, parts: &[String], use_stmt: &UseStmt) ->
     None
 }
 
+// Thread-local cache for directory listings to avoid repeated `read_dir` on the
+// stdlib-variant candidate roots. `stdlib_root_candidates` yields per-tier variant
+// dirs (e.g. `src/lib/variants/x86_64_avx2`) that usually do NOT exist, plus real
+// dirs (`src/compiler`, its numbered layers) that are re-scanned once per import.
+// Without memoization the pipeline loader re-`read_dir`s each of these on every
+// `use` — thousands of `openat(..., O_DIRECTORY)` (many ENOENT) for a single load.
+// Negatives are cached too (empty vec), so a missing variant dir is probed once.
+thread_local! {
+    static PIPELINE_DIR_LISTING_CACHE: RefCell<HashMap<PathBuf, Vec<(String, PathBuf)>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Cached directory listing. Each entry is (file_name, full_path). Mirrors
+/// `interpreter_module::path_resolution::cached_read_dir`. Returns an empty vec
+/// for missing/unreadable dirs (and caches that), matching the previous
+/// `fs::read_dir(dir).ok()` behaviour where any error meant "no entries".
+fn cached_read_dir(dir: &Path) -> Vec<(String, PathBuf)> {
+    if let Some(entries) = PIPELINE_DIR_LISTING_CACHE.with(|cache| cache.borrow().get(dir).cloned()) {
+        return entries;
+    }
+
+    let mut entries = Vec::new();
+    if let Ok(read_dir) = fs::read_dir(dir) {
+        for entry in read_dir.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            entries.push((name, entry.path()));
+        }
+    }
+
+    PIPELINE_DIR_LISTING_CACHE.with(|cache| {
+        cache.borrow_mut().insert(dir.to_path_buf(), entries.clone());
+    });
+    entries
+}
+
+/// Clear the pipeline directory-listing cache. Mirrors
+/// `path_resolution::clear_path_resolution_cache` so long-lived processes
+/// (test runner, MCP/LSP servers) that reset module state also drop any
+/// negatively-cached dir listings.
+pub fn clear_pipeline_dir_listing_cache() {
+    PIPELINE_DIR_LISTING_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
 fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -> Option<PathBuf> {
     if parts.is_empty() {
         return None;
@@ -150,12 +194,10 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
             if let Some(alias_file) = layered_alias_child_file(&current, part) {
                 return Some(prefer_package_init_for_member_import(alias_file, use_stmt));
             }
-            for entry in fs::read_dir(&current).ok()?.flatten() {
-                let path = entry.path();
+            for (name, path) in cached_read_dir(&current) {
                 if !path.is_dir() {
                     continue;
                 }
-                let name = entry.file_name().to_string_lossy().to_string();
                 let Some(dot) = name.find('.') else {
                     continue;
                 };
@@ -191,12 +233,10 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
         }
 
         let mut matched = None;
-        for entry in fs::read_dir(&current).ok()?.flatten() {
-            let path = entry.path();
+        for (name, path) in cached_read_dir(&current) {
             if !path.is_dir() {
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().to_string();
             let Some(dot) = name.find('.') else {
                 continue;
             };
