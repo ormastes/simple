@@ -25,8 +25,10 @@ this session. `native-build` currently fails before reaching Cranelift
 codegen for *any* program, string or not, on a wall unrelated to this fix
 (see below). **Redeploy is not cleared by this change alone.**
 
-**What was implemented** (see commits `8803ee074b9`, `1958c98ba21`,
-`38669574b13`, `b066df7c669` in this worktree; landed on origin/main):
+**What was implemented** (landed on origin/main as commits `28d9e6936c5`
+(the fix), `19e0dc12a8c` (the JIT test), `e4680b6e42a` (first doc update),
+`b066df7c669` (revert of the mistaken `rt_array_len_safe` stub, see below),
+`692adaa34c7` (this correction)):
 
 1. **New Cranelift data-object SFFI** in
    `src/compiler_rust/compiler/src/codegen/cranelift_sffi.rs`:
