@@ -265,6 +265,9 @@ class SshSession:
     ctr_counter_s2c: [u8]
     active_remote_channel_id: u32
     pending_ring3_exec: bool   # set by exec dispatch; consumed by the shallow accept loop
+    pending_ring3_exec_exit_code: u32  # exit code from ring-3; set by accept loop after spawn
+    pending_ring3_exec_remote_id: u32  # SSH channel remote_id for exit-status response
+    pending_ring3_exec_local_id: u32   # SSH channel local_id for cleanup
 
 impl SshSession:
 
@@ -330,7 +333,10 @@ impl SshSession:
             ctr_counter_c2s: [],
             ctr_counter_s2c: [],
             active_remote_channel_id: 0,
-            pending_ring3_exec: false
+            pending_ring3_exec: false,
+            pending_ring3_exec_exit_code: 0,
+            pending_ring3_exec_remote_id: 0,
+            pending_ring3_exec_local_id: 0
         )
 
     pub me run():
@@ -704,9 +710,11 @@ impl SshSession:
             # exec_request + crypto) faults in ring-0 before the spawn's first line
             # (kernel-stack overflow); the sshd accept loop runs it from a SHALLOW
             # frame (like the prod boot entry) instead. Set a pending flag; the accept
-            # loop performs the spawn after run() returns. No text stored — the target
-            # is the literal /FSEXEC.ELF.
-            self._finish_exec_request_inline(local_id, remote_id, 0, [])
+            # loop performs the spawn after run() returns and sends the real exit code.
+            # No text stored — the target is the literal /FSEXEC.ELF.
+            # Store channel info so the accept loop can send the real exit status after spawn.
+            self.pending_ring3_exec_remote_id = remote_id
+            self.pending_ring3_exec_local_id = local_id
             self.pending_ring3_exec = true
             self.state = SessionState.Closed
             return
@@ -780,6 +788,22 @@ impl SshSession:
         self.channels.remove_closed()
         if self.channels.channels.len() == 0:
             self.state = SessionState.Closed
+
+    me _send_deferred_ring3_exec_response():
+        """Send the real exit status for a deferred ring-3 execution after the spawn completes.
+
+        Called from the accept loop after _sshd_run_pending_ring3_exec() returns the exit code.
+        """
+        if self.pending_ring3_exec:
+            val remote_id = self.pending_ring3_exec_remote_id
+            val local_id = self.pending_ring3_exec_local_id
+            val exit_code = self.pending_ring3_exec_exit_code.to_u32()
+            serial_println("[sshd] sending real exit-status rc={exit_code} remote_id={remote_id}")
+            self.send_packet(_build_channel_exit_status_stable(remote_id, exit_code))
+            self.send_packet(_build_channel_eof_stable(remote_id))
+            self.send_packet(_build_channel_close_stable(remote_id))
+            self.channels.close(local_id)
+            self.channels.remove_closed()
 
     me _forward_shell_output_inline():
         if self.shell == nil:

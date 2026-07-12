@@ -43,30 +43,31 @@ val SSHD_BACKLOG: i32 = 5
 # and the exit(2) syscall longjmps back through it (rt_x86_ring3_resume), so the
 # accept loop survives and can service the NEXT ssh command in the same boot.
 @cfg(x86_64)
-fn _sshd_run_pending_ring3_exec():
+fn _sshd_run_pending_ring3_exec() -> i64:
     serial_println("[sshd] ring3 deferred spawn /FSEXEC.ELF")
     val rc = x86_64_fs_exec_spawn("/FSEXEC.ELF", ["/FSEXEC.ELF"], [])
     serial_println("[sshd] ring3 deferred spawn returned rc={rc}; accept loop continues")
+    rc
 
 @cfg(x86)
-fn _sshd_run_pending_ring3_exec():
-    pass_dn
+fn _sshd_run_pending_ring3_exec() -> i64:
+    0
 
 @cfg(arm64)
-fn _sshd_run_pending_ring3_exec():
-    pass_dn
+fn _sshd_run_pending_ring3_exec() -> i64:
+    0
 
 @cfg(arm32)
-fn _sshd_run_pending_ring3_exec():
-    pass_dn
+fn _sshd_run_pending_ring3_exec() -> i64:
+    0
 
 @cfg(riscv64)
-fn _sshd_run_pending_ring3_exec():
-    pass_dn
+fn _sshd_run_pending_ring3_exec() -> i64:
+    0
 
 @cfg(riscv32)
-fn _sshd_run_pending_ring3_exec():
-    pass_dn
+fn _sshd_run_pending_ring3_exec() -> i64:
+    0
 
 fn _sshd_bytes_equal(a: [u8], b: [u8]) -> bool:
     if a.len() != b.len():
@@ -352,15 +353,19 @@ impl SshDaemon:
                     )
                     serial_println("[sshd] session run")
                     session.run()
-                    serial_println("[sshd] session close")
-                    session.close()
                     # Deferred ring-3 exec: perform the spawn HERE, from the shallow
                     # accept-loop frame (mirrors the prod entry's shallow boot stack),
                     # not deep inside the session's exec dispatch where it faults. The
                     # actual spawn is x86_64-only (behind an @cfg helper — the shared
                     # rv64 sshd lane gets a no-op variant); the flag check is arch-neutral.
+                    # Must run BEFORE session.close(): the real exit-status reply for
+                    # the deferred exec goes out on the still-open session socket.
                     if session.pending_ring3_exec:
-                        _sshd_run_pending_ring3_exec()
+                        val exit_rc = _sshd_run_pending_ring3_exec()
+                        session.pending_ring3_exec_exit_code = exit_rc.to_u32()
+                        session._send_deferred_ring3_exec_response()
+                    serial_println("[sshd] session close")
+                    session.close()
             else:
                 # Accept error — if we're shutting down, that's expected
                 if not self.running:
