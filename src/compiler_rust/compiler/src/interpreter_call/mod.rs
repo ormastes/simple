@@ -240,7 +240,21 @@ pub(crate) fn evaluate_call(
             }
             contains
         });
-        if is_extern {
+        // `EXTERN_FUNCTIONS` is seeded in bulk from the runtime's full symbol
+        // manifest (`RUNTIME_SYMBOL_NAMES`, see interpreter_eval.rs), not just
+        // from `extern fn` declarations actually parsed out of the running
+        // program. That means a name can land in `EXTERN_FUNCTIONS` purely by
+        // coincidentally matching a runtime symbol (e.g. `rt_array_len_safe`,
+        // a local pure-Simple generic helper in lexer.spl/parser.spl that
+        // happens to share its name with an unrelated Rust runtime export).
+        // A local (possibly generic) function definition in scope must win
+        // over that coincidental extern registration — only fall back to
+        // extern dispatch when no local definition exists. See
+        // doc/08_tracking/bug/seed_native_build_unknown_extern_rt_array_len_safe_2026-07-12.md.
+        let has_local_def = is_extern
+            && (functions.contains_key(name.as_str())
+                || FUNCTION_OVERLOADS.with(|cell| cell.borrow().contains_key(name.as_str())));
+        if is_extern && !has_local_def {
             if runtime_profile::is_profiling_active() {
                 runtime_profile::record_full_call(name, None, vec![], runtime_profile::CallType::Ffi);
             }

@@ -1,17 +1,65 @@
 ---
 id: seed_native_build_unknown_extern_rt_array_len_safe_2026-07-12
-status: OPEN
+status: FIXED
 severity: blocking
 discovered: 2026-07-12
+fixed: 2026-07-12
 discovered_by: cranelift AOT string-constant fix verification (agent session)
 related: src/compiler/10.frontend/core/lexer.spl
-related: src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+related: src/compiler_rust/compiler/src/interpreter_call/mod.rs
+related: src/compiler_rust/common/src/runtime_symbols.rs
 related: doc/08_tracking/bug/cranelift_direct_string_constant_null_pointer_2026-07-12.md
 ---
 
 # `native-build` fails on ANY program with "unknown extern function: rt_array_len_safe" before reaching codegen
 
-**Status:** OPEN — root cause located, fix not attempted (separate scope).
+**Status:** FIXED. Root cause: `EXTERN_FUNCTIONS` (checked by the tree-walk
+interpreter's `evaluate_call`, priority 1, *before* local-function lookup) is
+seeded in bulk from `RUNTIME_SYMBOL_NAMES`
+(`src/compiler_rust/common/src/runtime_symbols.rs:139-140,386-387`) — the
+runtime's full linker symbol manifest — not just from `extern fn`
+declarations actually parsed out of the running program. `rt_array_len_safe`
+is a real Rust-runtime export (`runtime/src/value/collections.rs:432`) with a
+coincidentally identical name to the unrelated local pure-Simple generic
+helper `fn rt_array_len_safe<T>(array: [T]) -> i64` in lexer.spl/parser.spl/
+decl_nodes.spl/lexer_struct.spl. Because the extern-membership check never
+consulted local scope, the coincidental manifest entry always won, even
+though a local definition existed.
+
+Confirmed empirically by instrumenting `evaluate_call`'s priority-1 branch
+with a debug print gated on `SIMPLE_DEBUG_CALL_RESOLVE=1`:
+```
+[call-resolve] name=rt_array_len_safe is_extern=true has_local_fn=true
+```
+`is_extern=true` and `has_local_fn=true` simultaneously — proof this was an
+order/priority bug (cause **(a)** in the investigation, not a generic-dispatch
+gap).
+
+**Fix** (`src/compiler_rust/compiler/src/interpreter_call/mod.rs`,
+`evaluate_call`): before honoring the `EXTERN_FUNCTIONS` membership check,
+also check whether a local function definition (including overloaded/generic
+ones, via `functions` and `FUNCTION_OVERLOADS`) exists for the same name.
+Route to extern dispatch only when `is_extern && !has_local_def`. This
+leaves real externs (no local def) completely unaffected — the fix only
+changes behavior for the rare case where a bulk-registered runtime symbol
+name coincidentally collides with a local/generic `.spl` function name.
+
+**Verification:**
+- Trivial probe (`fn main() -> i64: return 0`) via
+  `SIMPLE_BOOTSTRAP=1 <fixed seed> run src/app/cli/native_build_main.spl --
+  --backend cranelift --entry probe.spl -o out`: no longer errors on
+  `rt_array_len_safe`; produces a runnable ELF binary, `rc=0`.
+- String probe (`fn main(): print("hello")`) through the same pipeline:
+  produces a binary that prints `hello`, `rc=0` — first end-to-end
+  verification of the cranelift/LLVM string-constant SFFI fix landed in
+  874914d1fa7, now that native-build can reach codegen at all.
+- Sanity: a plain interpreted `run` of a script using a real array (`a.len()`
+  builtin) still works, confirming the local-def check didn't regress
+  genuine extern dispatch for names without a local definition.
+
+## Original symptom (for history)
+
+**Status (as originally filed):** OPEN — root cause located, fix not attempted (separate scope).
 **Severity:** Blocking. Currently prevents `native-build` (any backend, any
 entry program) from running through the Rust seed at all.
 
