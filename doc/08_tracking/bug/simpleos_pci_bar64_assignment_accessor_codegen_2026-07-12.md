@@ -29,10 +29,9 @@ call boundary. Remove the containment only after that regression passes.
 ## Follow-up native-link evidence
 
 After replacing the returned record and passing only a small PCI slot token,
-the fresh build still faults immediately after `HOST_GPU_MAP_OK`. The reported
-RIP `0x014c53b2` resolves inside the range labeled
-`services__vfs__vfs_boot_init__VfsFileSize.to_i64`, even though the next source
-operation is the host-GPU hello MMIO write. This contradicts a simple bad-BAR
-address diagnosis and points to wrong native symbol/call relocation in the
-271-file entry closure. The compiler must gain a focused cross-module call
-regression before further guest address workarounds are attempted.
+the fresh build still faults immediately after `HOST_GPU_MAP_OK`. Disassembly
+shows RIP `0x014c53b2` is the `ud2` following an emitted
+`error: field access on nil receiver` path while evaluating `device.to_u64()`.
+The probe now uses the primitive `device as u64` cast. The compiler needs a
+focused native regression for integer conversion-method lowering before the
+method form is restored.
