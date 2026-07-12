@@ -12,11 +12,14 @@
 use app.io.sysinfo_ops.{getpid}
 use compiler.backend.backend.entry_point.{generate_entry_point_ir}
 use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
-use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, llc_available}
+use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, _get_temp_dir, _obj_ext, _is_windows, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig}
 
+# TODO(compiler-native-link-facades): replace these direct runtime imports with
+# compiler-safe environment/process/file facades; tracked in
+# doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
@@ -224,6 +227,9 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     if is_simpleos_x86_64_link(user_objects, output):
         return link_simpleos_x86_64(user_objects, output, verbose, options.opt_level)
 
+    if is_simpleos_arm64_link(output):
+        return link_simpleos_arm64(user_objects, output, verbose, options.opt_level)
+
     if is_simpleos_riscv64_link(user_objects, output):
         return link_simpleos_riscv64(user_objects, output, verbose)
 
@@ -354,6 +360,10 @@ fn is_simpleos_riscv64_link(user_objects: [text], output: text) -> bool:
             return true
     false
 
+fn is_simpleos_arm64_link(output: text) -> bool:
+    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    target == "aarch64-unknown-none" or target == "aarch64-unknown-none-elf" or output.contains("simpleos_arm64")
+
 fn is_simpleos_x86_64_link(user_objects: [text], output: text) -> bool:
     val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     if is_simpleos_x86_64_target(target):
@@ -418,6 +428,57 @@ fn compile_simpleos_x86_64_c(src: text, obj: text, opt_level: i64) -> Result<tex
     if code != 0:
         return Err("SimpleOS x86_64 C compile failed for {src}: {err}")
     Ok(obj)
+
+fn compile_simpleos_arm64(src: text, obj: text, opt_level: i64) -> Result<text, text>:
+    var opt = "-O2"
+    if opt_level <= 0:
+        opt = "-O0"
+    elif opt_level == 1:
+        opt = "-Os"
+    val (_out, err, code) = rt_process_run("clang", [
+        "-target", "aarch64-unknown-none-elf", "-c", "-ffreestanding", "-nostdlib",
+        "-fno-pie", "-ffunction-sections", "-fdata-sections", opt,
+        "-I", "examples/09_embedded/simple_os/arch/arm64/boot",
+        "-o", obj, src
+    ])
+    if code != 0:
+        return Err("SimpleOS ARM64 boot compile failed for {src}: {err}")
+    Ok(obj)
+
+fn simpleos_spl_start_symbol(user_objects: [text]) -> text:
+    for obj in user_objects:
+        for symbol in extract_symbols_nm(obj):
+            if symbol.name.ends_with("__spl_start"):
+                return symbol.name
+    ""
+
+fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
+    val pid = getpid()
+    val crt_o = "build/os/simpleos_arm64_crt0_{pid}.o"
+    val stubs_o = "build/os/simpleos_arm64_baremetal_stubs_{pid}.o"
+    match compile_simpleos_arm64("examples/09_embedded/simple_os/arch/arm64/boot/crt0.S", crt_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match compile_simpleos_arm64("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c", stubs_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+
+    val configured_script = rt_env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+    val linker_script = if configured_script != "": configured_script else: "examples/09_embedded/simple_os/arch/arm64/linker.ld"
+    var args: [text] = ["-T", linker_script, "-nostdlib", "--gc-sections", "-o", output, crt_o, stubs_o]
+    val spl_start = simpleos_spl_start_symbol(user_objects)
+    if spl_start != "":
+        args.push("--defsym=spl_start={spl_start}")
+    for obj in user_objects:
+        args.push(obj)
+    val (_out, err, code) = rt_process_run("ld.lld", args)
+    rt_file_delete(crt_o)
+    rt_file_delete(stubs_o)
+    if code != 0:
+        return Err("SimpleOS ARM64 freestanding link failed: {err}")
+    if verbose:
+        print "[llvm-link] SimpleOS ARM64 freestanding executable: {output}"
+    Ok(output)
 
 fn compile_simpleos_x86_64_asm(src: text, obj: text) -> Result<text, text>:
     val (_out, err, code) = rt_process_run("cc", [
@@ -518,6 +579,10 @@ pub fn link_simpleos_x86_64_external(user_objects: [text], output: text) -> Resu
 fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> Result<text, text>:
     var is_smoke_entry = false
     val is_display_smoke = output.contains("simpleos_riscv64_display_smoke")
+    val uses_freestanding_runtime = is_display_smoke or output.contains("simpleos_riscv64_host_gpu_probe")
+    # TODO(rv64-real-exit-facade): remove legacy stub-source generation once
+    # every remaining smoke target uses the architecture-owned QEMU exit path.
+    # Tracked in doc/08_tracking/bug/rv64_host_gpu_real_runtime_exit_facade_2026-07-12.md.
     for obj in user_objects:
         if obj.contains("smoke_entry"):
             is_smoke_entry = true
@@ -577,15 +642,16 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
     stub_src = stub_src + "uint64_t riscv64_hardening_boot_canary_marker(void){return 0;}\n"
     stub_src = stub_src + "uint64_t sandbox_boot_apply_embedded_riscv64(void){return 0;}\n"
     rt_file_write_text(stub_c, stub_src)
-    val (stub_out, stub_err, stub_code) = rt_process_run("riscv64-unknown-elf-gcc", [
-        "-c", "-march=rv64gc", "-mabi=lp64d", "-ffreestanding", "-nostdlib",
-        "-o", stub_o, stub_c
-    ])
-    if stub_code != 0:
-        return Err("SimpleOS RISC-V stub compilation failed: {stub_out}{stub_err}")
+    if not uses_freestanding_runtime:
+        val (stub_out, stub_err, stub_code) = rt_process_run("riscv64-unknown-elf-gcc", [
+            "-c", "-march=rv64gc", "-mabi=lp64d", "-ffreestanding", "-nostdlib",
+            "-o", stub_o, stub_c
+        ])
+        if stub_code != 0:
+            return Err("SimpleOS RISC-V stub compilation failed: {stub_out}{stub_err}")
 
     val runtime_o = "build/os/simpleos_riscv64_freestanding_runtime.o"
-    if is_display_smoke:
+    if uses_freestanding_runtime:
         val (runtime_out, runtime_err, runtime_code) = rt_process_run("riscv64-unknown-elf-gcc", [
             "-c", "-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany", "-ffreestanding", "-nostdlib",
             "-DSIMPLE_BOOT_MINIMAL=1", "-DSIMPLE_RUNTIME_NO_ENTRY=1", "-DSIMPLE_RUNTIME_NO_WEAK_HEAP=1",
@@ -594,14 +660,19 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
         if runtime_code != 0:
             return Err("SimpleOS RISC-V runtime compilation failed: {runtime_out}{runtime_err}")
 
+    val configured_script = rt_env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+    val linker_script = if configured_script != "": configured_script else: "src/os/kernel/arch/riscv64/linker.ld"
     var args: [text] = [
         "-m", "elf64lriscv",
         "--no-relax",
         "-nostdlib",
-        "-T", "src/os/kernel/arch/riscv64/linker.ld",
+        "-T", linker_script,
         "--entry=__simple_riscv_entry"
     ]
-    if not is_smoke_entry and not is_display_smoke:
+    val spl_start = simpleos_spl_start_symbol(user_objects)
+    if spl_start != "":
+        args.push("--defsym=spl_start={spl_start}")
+    if not is_smoke_entry and not uses_freestanding_runtime:
         args = args.push("--defsym=unknown_0=rt_riscv_uart_put")
         args = args.push("--defsym=unknown_1=_uart_put")
         args = args.push("--defsym=unknown_2=rt_riscv_qemu_reserved_end")
@@ -618,7 +689,7 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
     args = args.push(entry_o)
     for obj in user_objects:
         args = args.push(obj)
-    if is_display_smoke:
+    if uses_freestanding_runtime:
         args = args.push(runtime_o)
     else:
         args = args.push(stub_o)

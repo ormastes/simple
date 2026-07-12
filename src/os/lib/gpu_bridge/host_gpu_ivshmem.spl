@@ -1,0 +1,144 @@
+"""SimpleOS guest adapter for the QEMU ivshmem host-GPU service."""
+
+use common.gpu.simpleos_host_gpu_protocol.*
+use os.kernel.boot.mmio_hardware.{mmio_read64, mmio_write64}
+
+# TODO(simpleos-host-gpu-fence-facade): move this required baremetal fence behind
+# the MMIO owner facade; tracked in doc/08_tracking/bug/simpleos_host_gpu_memory_barrier_facade_2026-07-12.md.
+extern fn rt_memory_barrier()
+
+struct HostGpuIvshmemReceipt:
+    completed: bool
+    status: i64
+    reason: i64
+    generation: i64
+    native_handle: i64
+    output_addr: u64
+    output_bytes: i64
+    output_checksum: i64
+    elapsed_us: i64
+    device_identity: i64
+
+struct HostGpuIvshmemHelloReceipt:
+    completed: bool
+    status: i64
+    reason: i64
+    generation: i64
+    render_mask: i64
+    processing_mask: i64
+    max_payload_bytes: i64
+    max_readback_bytes: i64
+    version: i64
+
+fn _host_gpu_write(base: u64, offset: i64, value: i64):
+    mmio_write64(base + (offset as u64), value as u64)
+
+fn _host_gpu_read(base: u64, offset: i64) -> i64:
+    mmio_read64(base + (offset as u64)) as i64
+
+fn _host_gpu_write_commands(base: u64, commands: [SimpleOsHostGpuWireCommand]) -> i64:
+    var words: [i64] = []
+    for command in commands:
+        words.push(command.op)
+        words.push(command.x)
+        words.push(command.y)
+        words.push(command.width)
+        words.push(command.height)
+        words.push(command.value)
+    var i: i64 = 0
+    while i < words.len():
+        _host_gpu_write(base, simpleos_host_gpu_wire_payload_offset() + i * 8, words[i])
+        i = i + 1
+    simpleos_host_gpu_wire_checksum_words(words)
+
+fn host_gpu_ivshmem_negotiate(base: u64, generation: i64, guest_isa: text, render_backend: text, processing_mask: i64, timeout_polls: i64) -> HostGpuIvshmemHelloReceipt:
+    val completion = if base == 0u64: generation else: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
+    if base == 0u64 or not simpleos_host_gpu_generation_is_fresh(generation, completion):
+        return HostGpuIvshmemHelloReceipt(completed: false, status: SIMPLEOS_HOST_GPU_STATUS_FAIL, reason: SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION, generation: generation, render_mask: 0, processing_mask: 0, max_payload_bytes: 0, max_readback_bytes: 0, version: 0)
+    val backend_code = simpleos_host_gpu_backend_code(render_backend)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_MAGIC, SIMPLEOS_HOST_GPU_PROTOCOL_MAGIC)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_VERSION, SIMPLEOS_HOST_GPU_PROTOCOL_VERSION)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_KIND, SIMPLEOS_HOST_GPU_KIND_HELLO)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_BACKEND, backend_code)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_GUEST_ISA, simpleos_host_gpu_guest_isa_code(guest_isa))
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_REQUESTED_RENDER_MASK, simpleos_host_gpu_backend_mask(backend_code))
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_REQUESTED_PROCESSING_MASK, processing_mask)
+    rt_memory_barrier()
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_REQUEST_GENERATION, generation)
+    var polls: i64 = 0
+    var observed = completion
+    while polls < timeout_polls and observed < generation:
+        polls = polls + 1
+        observed = _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
+    if observed != generation:
+        return HostGpuIvshmemHelloReceipt(completed: false, status: SIMPLEOS_HOST_GPU_STATUS_FAIL, reason: if observed > generation: SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION else: SIMPLEOS_HOST_GPU_REASON_TIMEOUT, generation: generation, render_mask: 0, processing_mask: 0, max_payload_bytes: 0, max_readback_bytes: 0, version: 0)
+    rt_memory_barrier()
+    HostGpuIvshmemHelloReceipt(completed: true, status: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_STATUS), reason: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_REASON), generation: generation, render_mask: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_RENDER_MASK), processing_mask: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK), max_payload_bytes: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_PAYLOAD), max_readback_bytes: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_READBACK), version: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION))
+
+fn host_gpu_ivshmem_submit(
+    base: u64,
+    generation: i64,
+    run_id_hash: i64,
+    frame_id: i64,
+    kind: i64,
+    backend: text,
+    width: i64,
+    height: i64,
+    element_count: i64,
+    commands: [SimpleOsHostGpuWireCommand],
+    timeout_polls: i64
+) -> HostGpuIvshmemReceipt:
+    val payload_bytes = commands.len().to_i64() * SIMPLEOS_HOST_GPU_WIRE_COMMAND_BYTES
+    val completion = if base == 0u64: generation else: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
+    if base == 0u64 or not simpleos_host_gpu_generation_is_fresh(generation, completion):
+        return HostGpuIvshmemReceipt(completed: false, status: SIMPLEOS_HOST_GPU_STATUS_FAIL, reason: SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION, generation: generation, native_handle: 0, output_addr: 0u64, output_bytes: 0, output_checksum: 0, elapsed_us: 0, device_identity: 0)
+    if frame_id <= 0 or payload_bytes <= 0 or payload_bytes > SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES:
+        return HostGpuIvshmemReceipt(completed: false, status: SIMPLEOS_HOST_GPU_STATUS_FAIL, reason: SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, generation: generation, native_handle: 0, output_addr: 0u64, output_bytes: 0, output_checksum: 0, elapsed_us: 0, device_identity: 0)
+    if _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION) != SIMPLEOS_HOST_GPU_PROTOCOL_VERSION:
+        return HostGpuIvshmemReceipt(completed: false, status: SIMPLEOS_HOST_GPU_STATUS_FAIL, reason: SIMPLEOS_HOST_GPU_REASON_HELLO_REQUIRED, generation: generation, native_handle: 0, output_addr: 0u64, output_bytes: 0, output_checksum: 0, elapsed_us: 0, device_identity: 0)
+    val backend_code = simpleos_host_gpu_backend_code(backend)
+    if backend_code == 0:
+        return HostGpuIvshmemReceipt(completed: false, status: SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, reason: 2, generation: generation, native_handle: 0, output_addr: 0u64, output_bytes: 0, output_checksum: 0, elapsed_us: 0, device_identity: 0)
+
+    val checksum = _host_gpu_write_commands(base, commands)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_MAGIC, SIMPLEOS_HOST_GPU_PROTOCOL_MAGIC)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_VERSION, SIMPLEOS_HOST_GPU_PROTOCOL_VERSION)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_KIND, kind)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_BACKEND, backend_code)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_WIDTH, width)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_HEIGHT, height)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_ELEMENT_COUNT, element_count)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_PAYLOAD_BYTES, payload_bytes)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_PAYLOAD_CHECKSUM, checksum)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_FRAME_ID, frame_id)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_RUN_ID_HASH, run_id_hash)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_STATUS, SIMPLEOS_HOST_GPU_STATUS_IDLE)
+    rt_memory_barrier()
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_REQUEST_GENERATION, generation)
+
+    var polls: i64 = 0
+    var observed = completion
+    while polls < timeout_polls and observed < generation:
+        polls = polls + 1
+        observed = _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
+    if observed != generation:
+        return HostGpuIvshmemReceipt(completed: false, status: SIMPLEOS_HOST_GPU_STATUS_FAIL, reason: if observed > generation: SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION else: SIMPLEOS_HOST_GPU_REASON_TIMEOUT, generation: generation, native_handle: 0, output_addr: 0u64, output_bytes: 0, output_checksum: 0, elapsed_us: 0, device_identity: 0)
+    rt_memory_barrier()
+    HostGpuIvshmemReceipt(
+        completed: true,
+        status: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_STATUS),
+        reason: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_REASON),
+        generation: generation,
+        native_handle: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NATIVE_HANDLE),
+        output_addr: base + (simpleos_host_gpu_wire_readback_offset() as u64),
+        output_bytes: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_OUTPUT_BYTES),
+        output_checksum: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_OUTPUT_CHECKSUM),
+        elapsed_us: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_ELAPSED_US),
+        device_identity: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_DEVICE_IDENTITY)
+    )
+
+fn host_gpu_ivshmem_fill_u32(base: u64, generation: i64, run_id_hash: i64, frame_id: i64, backend: text, element_count: i64, value: u32, timeout_polls: i64) -> HostGpuIvshmemReceipt:
+    val command = SimpleOsHostGpuWireCommand(op: SIMPLEOS_HOST_GPU_COMMAND_FILL_U32, x: 0, y: 0, width: 0, height: 0, value: value.to_i64())
+    host_gpu_ivshmem_submit(base, generation, run_id_hash, frame_id, SIMPLEOS_HOST_GPU_KIND_PROCESSING, backend, 0, 0, element_count, [command], timeout_polls)
+
+export HostGpuIvshmemReceipt, HostGpuIvshmemHelloReceipt, host_gpu_ivshmem_negotiate, host_gpu_ivshmem_submit, host_gpu_ivshmem_fill_u32

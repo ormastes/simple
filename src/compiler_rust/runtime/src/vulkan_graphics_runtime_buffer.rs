@@ -1,5 +1,7 @@
 #[cfg(feature = "vulkan")]
 use super::vulkan_graphics_runtime_core::{alloc_handle, BufferUsage, VulkanBuffer, STATE};
+#[cfg(feature = "vulkan")]
+use crate::value::{byte_array_parts, RuntimeValue};
 
 // ============================================================================
 // Buffer Management
@@ -117,7 +119,13 @@ pub extern "C" fn rt_vulkan_unmap_memory(_handle: i64) -> i64 {
 /// `data_ptr` is the address of a byte array. `offset` is currently unused.
 #[no_mangle]
 #[cfg(feature = "vulkan")]
-pub extern "C" fn rt_vulkan_copy_to_buffer(handle: i64, data_ptr: i64, offset: i64) -> i64 {
+pub extern "C" fn rt_vulkan_copy_to_buffer(handle: i64, data: RuntimeValue, offset: i64) -> i64 {
+    let Some((data, len)) = byte_array_parts(data) else {
+        return 0;
+    };
+    if offset != 0 {
+        return 0;
+    }
     let mut state = STATE.lock();
     let buf = match state.buffers.get(&handle) {
         Some(b) => b,
@@ -127,13 +135,11 @@ pub extern "C" fn rt_vulkan_copy_to_buffer(handle: i64, data_ptr: i64, offset: i
         }
     };
 
-    if data_ptr == 0 {
-        state.set_error("copy_to_buffer: null data pointer".to_string());
+    if len > buf.size() as usize {
+        state.set_error("copy_to_buffer: source exceeds buffer".to_string());
         return 0;
     }
-
-    let size = buf.size() as usize;
-    let slice = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, size) };
+    let slice = unsafe { std::slice::from_raw_parts(data, len) };
 
     match buf.upload(slice) {
         Ok(()) => 1,
@@ -156,21 +162,25 @@ pub extern "C" fn rt_vulkan_copy_to_buffer(_handle: i64, _data: i64, _offset: i6
 /// Download bytes from a Vulkan buffer to `data_ptr` (host memory).
 #[no_mangle]
 #[cfg(feature = "vulkan")]
-pub extern "C" fn rt_vulkan_copy_from_buffer(data_ptr: i64, handle: i64, offset: i64) -> i64 {
+pub extern "C" fn rt_vulkan_copy_from_buffer(data: RuntimeValue, handle: i64, offset: i64) -> i64 {
+    let Some((data, len)) = byte_array_parts(data) else {
+        return 0;
+    };
+    if offset != 0 {
+        return 0;
+    }
     let state = STATE.lock();
     let buf = match state.buffers.get(&handle) {
         Some(b) => b,
         None => return 0,
     };
 
-    if data_ptr == 0 {
+    if len > buf.size() as usize {
         return 0;
     }
-
-    let size = buf.size();
-    match buf.download(size) {
+    match buf.download(len as u64) {
         Ok(bytes) => {
-            let dst = unsafe { std::slice::from_raw_parts_mut(data_ptr as *mut u8, bytes.len()) };
+            let dst = unsafe { std::slice::from_raw_parts_mut(data, bytes.len()) };
             dst.copy_from_slice(&bytes);
             1
         }

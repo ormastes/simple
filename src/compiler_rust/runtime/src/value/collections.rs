@@ -261,6 +261,17 @@ impl RuntimeArray {
     }
 }
 
+/// Return the backing bytes for a native Simple `[u8]` value.
+pub(crate) fn byte_array_parts(value: RuntimeValue) -> Option<(*mut u8, usize)> {
+    let array = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array)?;
+    let array = unsafe { &*array };
+    if !array.is_byte_packed() || array.len > array.capacity || array.data.is_null() {
+        return None;
+    }
+    let len = usize::try_from(array.len).ok()?;
+    Some((array.data.cast::<u8>(), len))
+}
+
 /// Layout used for the element storage of a `RuntimeArray` with the given
 /// capacity. Capacity 0 is treated as 1 to satisfy the allocator's min-size
 /// requirement.

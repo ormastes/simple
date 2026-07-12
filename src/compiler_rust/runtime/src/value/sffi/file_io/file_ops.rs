@@ -766,24 +766,122 @@ pub extern "C" fn rt_file_write_text_at_cached_repeat(iterations: i64, data: i64
     })
 }
 
+#[cfg(unix)]
+#[no_mangle]
+pub extern "C" fn rt_mmap(path: i64, size: i64, offset: i64, readonly: i64) -> i64 {
+    let Some(path) = tagged_text_to_str(path) else {
+        return 0;
+    };
+    if size <= 0 || offset < 0 {
+        return 0;
+    }
+    if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID)
+        || (readonly == 0 && !runtime_capability_allowed(WRITE_FILE_CAPABILITY_ID))
+    {
+        return 0;
+    }
+    let Ok(size) = usize::try_from(size) else {
+        return 0;
+    };
+    let Ok(offset) = libc::off_t::try_from(offset) else {
+        return 0;
+    };
+    let Some(end) = (offset as u64).checked_add(size as u64) else {
+        return 0;
+    };
+    let file = if readonly != 0 {
+        File::open(path)
+    } else {
+        OpenOptions::new().read(true).write(true).open(path)
+    };
+    let Ok(file) = file else {
+        return 0;
+    };
+    if file.metadata().map_or(true, |metadata| metadata.len() < end) {
+        return 0;
+    }
+    let protection = if readonly != 0 {
+        libc::PROT_READ
+    } else {
+        libc::PROT_READ | libc::PROT_WRITE
+    };
+    let address = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            protection,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            offset,
+        )
+    };
+    if address == libc::MAP_FAILED {
+        0
+    } else if (address as usize) > i64::MAX as usize {
+        unsafe { libc::munmap(address, size) };
+        0
+    } else {
+        address as usize as i64
+    }
+}
+
+#[cfg(not(unix))]
 #[no_mangle]
 pub extern "C" fn rt_mmap(_path: i64, _size: i64, _offset: i64, _readonly: i64) -> i64 {
     0
 }
 
+#[cfg(unix)]
+#[no_mangle]
+pub extern "C" fn rt_munmap(addr: i64, size: i64) -> bool {
+    let Ok(size) = usize::try_from(size) else {
+        return false;
+    };
+    addr > 0 && size > 0 && unsafe { libc::munmap(addr as usize as *mut libc::c_void, size) == 0 }
+}
+
+#[cfg(not(unix))]
 #[no_mangle]
 pub extern "C" fn rt_munmap(_addr: i64, _size: i64) -> bool {
-    true
+    false
 }
 
+#[cfg(unix)]
+#[no_mangle]
+pub extern "C" fn rt_madvise(addr: i64, size: i64, advice: i64) -> bool {
+    let Ok(size) = usize::try_from(size) else {
+        return false;
+    };
+    let advice = match advice {
+        0 => libc::MADV_NORMAL,
+        1 => libc::MADV_RANDOM,
+        2 => libc::MADV_SEQUENTIAL,
+        3 => libc::MADV_WILLNEED,
+        4 => libc::MADV_DONTNEED,
+        _ => return false,
+    };
+    addr > 0 && size > 0 && unsafe { libc::madvise(addr as usize as *mut libc::c_void, size, advice) == 0 }
+}
+
+#[cfg(not(unix))]
 #[no_mangle]
 pub extern "C" fn rt_madvise(_addr: i64, _size: i64, _advice: i64) -> bool {
-    true
+    false
 }
 
+#[cfg(unix)]
+#[no_mangle]
+pub extern "C" fn rt_msync(addr: i64, size: i64) -> bool {
+    let Ok(size) = usize::try_from(size) else {
+        return false;
+    };
+    addr > 0 && size > 0 && unsafe { libc::msync(addr as usize as *mut libc::c_void, size, libc::MS_SYNC) == 0 }
+}
+
+#[cfg(not(unix))]
 #[no_mangle]
 pub extern "C" fn rt_msync(_addr: i64, _size: i64) -> bool {
-    true
+    false
 }
 
 #[no_mangle]
@@ -1142,6 +1240,53 @@ mod tests {
     // Helper to create string pointer for SFFI
     fn str_to_ptr(s: &str) -> (*const u8, u64) {
         (s.as_ptr(), s.len() as u64)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_shared_mmap_cross_process_visibility() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("shared.bin");
+        let file = File::create(&file_path).unwrap();
+        file.set_len(4096).unwrap();
+        drop(file);
+        let path = string_to_tagged_text(file_path.to_str().unwrap());
+
+        assert_eq!(rt_mmap(path, 0, 0, 0), 0);
+        assert_eq!(rt_mmap(path, 4097, 0, 0), 0);
+        assert_eq!(rt_mmap(path, 1, 1, 0), 0);
+        let address = rt_mmap(path, 4096, 0, 0);
+        assert!(address > 0);
+
+        let child = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "printf X | dd of=\"$1\" bs=1 seek=0 conv=notrunc 2>/dev/null",
+                "sh",
+            ])
+            .arg(&file_path)
+            .status()
+            .unwrap();
+        assert!(child.success());
+        assert_eq!(unsafe { (address as usize as *const u8).read_volatile() }, b'X');
+
+        unsafe { (address as usize as *mut u8).write_volatile(b'Y') };
+        assert!(rt_madvise(address, 4096, 0));
+        assert!(!rt_madvise(address, 4096, 5));
+        assert!(rt_msync(address, 4096));
+        let child_read = std::process::Command::new("sh")
+            .args(["-c", "dd if=\"$1\" bs=1 count=1 2>/dev/null", "sh"])
+            .arg(&file_path)
+            .output()
+            .unwrap();
+        assert!(child_read.status.success());
+        assert_eq!(child_read.stdout, b"Y");
+        assert!(rt_munmap(address, 4096));
+
+        let readonly = rt_mmap(path, 4096, 0, 1);
+        assert!(readonly > 0);
+        assert_eq!(unsafe { (readonly as usize as *const u8).read_volatile() }, b'Y');
+        assert!(rt_munmap(readonly, 4096));
     }
 
     // Helper to extract string from RuntimeValue

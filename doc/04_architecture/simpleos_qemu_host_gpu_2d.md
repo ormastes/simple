@@ -3,15 +3,17 @@
 
 ## Decision
 
-Use one bounded, architecture-neutral guest/host protocol over an existing
-VirtIO serial channel. The guest submits Draw IR or ProcessingIR payloads; a
-host daemon selects Vulkan, Metal, DirectX, CUDA, or CPU and returns a
-correlated receipt plus output. x86_64, AArch64, and RISC-V adapters only own
-boot/device discovery. They must not define backend-specific public APIs.
+Use one bounded, architecture-neutral guest/host protocol over QEMU
+`ivshmem-plain`. The current guest submits a bounded Engine2D command subset;
+canonical Draw IR and ProcessingIR payloads remain required before their
+acceptance rows can pass. A host daemon selects a supported private backend and
+returns a correlated receipt plus output. x86_64, AArch64, and RISC-V adapters
+only own boot/device discovery. They must not define backend-specific public
+APIs.
 
-Shared memory and VFIO are excluded until measured channel copies violate the
-selected NFRs. VirtIO-GPU scanout remains display transport and is not evidence
-of device-backed execution.
+The fixed 8 MiB shared region carries control, bounded payload, and readback;
+VFIO remains excluded. VirtIO-GPU scanout remains display transport and is not
+evidence of device-backed execution.
 
 ## Virtual Capsule
 
@@ -49,4 +51,3 @@ and synthetic handles fail closed.
 Cross-ISA TCG rows prove protocol correctness and provenance, not native-ISA
 latency. The first implementation slice is x86_64 Linux Vulkan; the same wire
 contract is reused unchanged for AArch64 and RISC-V.
-

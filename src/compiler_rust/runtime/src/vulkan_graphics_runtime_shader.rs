@@ -1,17 +1,19 @@
 #[cfg(feature = "vulkan")]
 use super::vulkan_graphics_runtime_core::{alloc_handle, ComputePipeline, ShaderModule, STATE};
+#[cfg(feature = "vulkan")]
+use crate::value::{byte_array_parts, RuntimeValue};
 
 // ============================================================================
 // Shader & Pipeline
 // ============================================================================
 
-/// Create a `ShaderModule` from raw SPIR-V bytes.
-///
-/// `spirv_ptr` is treated as `*const u8`; length is inferred from the SPIR-V
-/// header by scanning instruction words up to 64 MiB.
+/// Create a `ShaderModule` from a native Simple `[u8]` value.
 #[no_mangle]
 #[cfg(feature = "vulkan")]
-pub extern "C" fn rt_vulkan_compile_spirv(spirv_ptr: i64) -> i64 {
+pub extern "C" fn rt_vulkan_compile_spirv(spirv: RuntimeValue) -> i64 {
+    let Some((base, len)) = byte_array_parts(spirv) else {
+        return 0;
+    };
     let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
@@ -21,19 +23,17 @@ pub extern "C" fn rt_vulkan_compile_spirv(spirv_ptr: i64) -> i64 {
         }
     };
 
-    if spirv_ptr == 0 {
-        state.set_error("compile_spirv: null pointer".to_string());
+    if len < 20 || len > 64 * 1024 * 1024 || len % 4 != 0 {
+        state.set_error("compile_spirv: invalid byte length".to_string());
         return 0;
     }
-
-    let base = spirv_ptr as *const u8;
-    let magic = unsafe { *(base as *const u32) };
+    let spirv_bytes = unsafe { std::slice::from_raw_parts(base, len) };
+    let magic = u32::from_le_bytes(spirv_bytes[..4].try_into().unwrap());
     if magic != 0x07230203 {
         state.set_error(format!("compile_spirv: bad SPIR-V magic 0x{magic:08x}"));
         return 0;
     }
 
-    let spirv_bytes = read_spirv_bytes(base);
     let spirv_owned = spirv_bytes.to_vec();
 
     match ShaderModule::new(device, spirv_bytes) {
@@ -98,8 +98,7 @@ pub extern "C" fn rt_vulkan_destroy_shader(_module: i64) -> i64 {
 
 /// Create a compute pipeline.
 ///
-/// `shader` is the handle from `rt_vulkan_compile_spirv`, or a raw SPIR-V
-/// pointer. `entry` and `push_size` are currently unused.
+/// `shader` is the handle from `rt_vulkan_compile_spirv`.
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_create_compute_pipeline(shader: i64, _entry: i64, _push_size: i64) -> i64 {
@@ -117,30 +116,12 @@ pub extern "C" fn rt_vulkan_create_compute_pipeline(shader: i64, _entry: i64, _p
         return 0;
     }
 
-    let spirv_owned;
-    let spirv_bytes = if state.shader_modules.contains_key(&shader) {
-        match state.shader_spirv.get(&shader) {
-            Some(bytes) => {
-                spirv_owned = bytes.clone();
-                spirv_owned.as_slice()
-            }
-            None => {
-                state.set_error("create_compute_pipeline: shader handle has no cached SPIR-V bytes".to_string());
-                return 0;
-            }
-        }
-    } else {
-        let base = shader as *const u8;
-        let magic = unsafe { *(base as *const u32) };
-        if magic != 0x07230203 {
-            state.set_error(format!("create_compute_pipeline: bad SPIR-V magic 0x{magic:08x}"));
-            return 0;
-        }
-
-        read_spirv_bytes(base)
+    let Some(spirv_owned) = state.shader_spirv.get(&shader).cloned() else {
+        state.set_error("create_compute_pipeline: unknown shader handle".to_string());
+        return 0;
     };
 
-    match ComputePipeline::new(device, spirv_bytes, _push_size as u32) {
+    match ComputePipeline::new(device, &spirv_owned, _push_size as u32) {
         Ok(pipe) => {
             let h = alloc_handle();
             state.compute_pipelines.insert(h, pipe);
@@ -178,35 +159,4 @@ pub extern "C" fn rt_vulkan_destroy_pipeline(pipe: i64) -> i64 {
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_destroy_pipeline(_pipe: i64) -> i64 {
     0
-}
-
-// ── Internal helper ──────────────────────────────────────────────────────────
-
-/// Read SPIR-V bytes from a raw pointer by scanning instruction words (up to 64 MiB).
-#[cfg(feature = "vulkan")]
-fn read_spirv_bytes(base: *const u8) -> &'static [u8] {
-    let max_len: usize = 64 * 1024 * 1024;
-    let spirv_slice = unsafe { std::slice::from_raw_parts(base, max_len) };
-    let mut pos = 5 * 4; // skip 5-word header
-    loop {
-        if pos + 4 > max_len {
-            break;
-        }
-        let word = u32::from_le_bytes([
-            spirv_slice[pos],
-            spirv_slice[pos + 1],
-            spirv_slice[pos + 2],
-            spirv_slice[pos + 3],
-        ]);
-        let wc = (word >> 16) as usize;
-        if wc == 0 {
-            break;
-        }
-        let advance = wc * 4;
-        if pos + advance > max_len {
-            break;
-        }
-        pos += advance;
-    }
-    unsafe { std::slice::from_raw_parts(base, pos) }
 }

@@ -85,11 +85,7 @@ pub(crate) fn runtime_archive_has_bootstrap_cli_symbols(path: &Path) -> bool {
         return false;
     };
     [
-        "__simple_runtime_init",
-        "__simple_runtime_shutdown",
         "rt_get_args",
-        "rt_cli_arg_count",
-        "rt_cli_arg_at",
         "rt_cli_get_args",
         "rt_array_len",
         "rt_array_get",

@@ -315,6 +315,69 @@ pub extern "C" fn rt_store_barrier() {
     std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn rt_volatile_read_u8(addr: i64) -> i64 {
+    (addr as usize as *const u8).read_volatile() as i64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_volatile_read_u16(addr: i64) -> i64 {
+    (addr as usize as *const u16).read_volatile() as i64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_volatile_read_u32(addr: i64) -> i64 {
+    (addr as usize as *const u32).read_volatile() as i64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_volatile_read_u64(addr: i64) -> i64 {
+    (addr as usize as *const u64).read_volatile() as i64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_volatile_write_u8(addr: i64, value: i64) {
+    (addr as usize as *mut u8).write_volatile(value as u8);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_volatile_write_u16(addr: i64, value: i64) {
+    (addr as usize as *mut u16).write_volatile(value as u16);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_volatile_write_u32(addr: i64, value: i64) {
+    (addr as usize as *mut u32).write_volatile(value as u32);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_volatile_write_u64(addr: i64, value: i64) {
+    (addr as usize as *mut u64).write_volatile(value as u64);
+}
+
+#[cfg(test)]
+mod volatile_tests {
+    use super::*;
+
+    #[test]
+    fn volatile_integer_round_trip() {
+        unsafe {
+            let mut v8 = 0u8;
+            let mut v16 = 0u16;
+            let mut v32 = 0u32;
+            let mut v64 = 0u64;
+            rt_volatile_write_u8((&mut v8 as *mut u8) as i64, 0x12);
+            rt_volatile_write_u16((&mut v16 as *mut u16) as i64, 0x1234);
+            rt_volatile_write_u32((&mut v32 as *mut u32) as i64, 0x12345678);
+            rt_volatile_write_u64((&mut v64 as *mut u64) as i64, 0x123456789abcdef0);
+            assert_eq!(rt_volatile_read_u8((&v8 as *const u8) as i64), 0x12);
+            assert_eq!(rt_volatile_read_u16((&v16 as *const u16) as i64), 0x1234);
+            assert_eq!(rt_volatile_read_u32((&v32 as *const u32) as i64), 0x12345678);
+            assert_eq!(rt_volatile_read_u64((&v64 as *const u64) as i64), 0x123456789abcdef0);
+        }
+    }
+}
+
 pub use security_runtime::{
     rt_security_audit_events, rt_security_audit_failure, rt_security_audit_start, rt_security_audit_success,
     rt_security_enter_gate, rt_security_enter_sandbox, rt_security_exit_gate, rt_security_exit_sandbox,

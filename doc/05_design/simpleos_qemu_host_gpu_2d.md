@@ -20,9 +20,11 @@ outstanding request map rejects duplicate or stale receipts.
 
 ## Flow
 
-1. The guest opens the existing VirtIO channel and negotiates capabilities.
-2. Engine2D serializes the canonical Draw IR fixture; ProcessingIR serializes
-   the canonical compute fixture through the same session.
+1. The guest maps the QEMU `ivshmem-plain` BAR2 region and negotiates bounded
+   capabilities through its control header.
+2. The current Engine2D command subset uses the payload area; canonical Draw IR
+   and ProcessingIR serialization remain open requirements through the same
+   session.
 3. The daemon validates, dispatches to its private host adapter, reads output
    back in the same completion, and emits a correlated receipt.
 4. The guest validates provenance and exact CPU-oracle parity.
@@ -54,4 +56,3 @@ at most 256 MiB, and processing speedup at least 1.5x to become preferred.
    prepared hosts.
 5. Wire canonical row output into the hardening matrix without changing its
    existing 26-row pass contract.
-

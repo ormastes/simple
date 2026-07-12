@@ -2,6 +2,8 @@
 use super::vulkan_graphics_runtime_core::{alloc_handle, DescriptorPool, DescriptorSet, DescriptorSetLayout, vk, STATE};
 #[cfg(feature = "vulkan")]
 use ash::vk::Handle;
+#[cfg(feature = "vulkan")]
+use crate::value::{byte_array_parts, RuntimeValue};
 
 // ============================================================================
 // Descriptor Sets
@@ -219,7 +221,10 @@ pub extern "C" fn rt_vulkan_bind_descriptors(_cmd: i64, _desc_set: i64) -> i64 {
 
 #[no_mangle]
 #[cfg(feature = "vulkan")]
-pub extern "C" fn rt_vulkan_push_constants(cmd: i64, pipeline_handle: i64, data: i64) -> i64 {
+pub extern "C" fn rt_vulkan_push_constants(cmd: i64, pipeline_handle: i64, data: RuntimeValue) -> i64 {
+    let Some((data, len)) = byte_array_parts(data) else {
+        return 0;
+    };
     let state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
@@ -233,11 +238,11 @@ pub extern "C" fn rt_vulkan_push_constants(cmd: i64, pipeline_handle: i64, data:
     if size == 0 {
         return 1;
     }
-    if data == 0 {
+    if len < size as usize {
         return 0;
     }
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
-    let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, size as usize) };
+    let bytes = unsafe { std::slice::from_raw_parts(data, size as usize) };
     unsafe {
         device
             .handle()

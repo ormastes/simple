@@ -1918,3 +1918,17 @@ fn test_generic_collection_ops_reject_forged_heap_values() {
     assert!(rt_slice(forged_heap, 0, 1, 1).is_nil());
     assert_eq!(rt_contains(forged_heap, RuntimeValue::from_int(1)), 0);
 }
+
+#[test]
+fn test_byte_array_parts_rejects_non_byte_arrays() {
+    let bytes = rt_byte_array_new(4);
+    let (data, len) = super::byte_array_parts(bytes).unwrap();
+    assert!(!data.is_null());
+    assert_eq!(len, 0);
+    assert!(super::byte_array_parts(rt_array_new(4)).is_none());
+
+    let array = super::get_typed_ptr_mut::<super::RuntimeArray>(bytes, super::HeapObjectType::Array).unwrap();
+    unsafe { (*array).len = (*array).capacity + 1 };
+    assert!(super::byte_array_parts(bytes).is_none());
+    unsafe { (*array).len = 0 };
+}

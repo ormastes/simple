@@ -145,6 +145,7 @@ pub use collections::{
     rt_typed_words_u64_push_known_at, rt_typed_words_u64_push_known_data_at, rt_typed_words_u64_raw_data_at,
     rt_typed_words_u64_set, rt_typed_words_u64_store_known_data_at, rt_typed_words_u64_unchecked,
 };
+pub(crate) use collections::byte_array_parts;
 pub use collections::{rt_any_add, rt_array_all, rt_array_any, rt_array_filter, rt_array_find};
 pub use utf8_kernels::{
     rt_rank_query, rt_rank_select_build, rt_rank_select_free, rt_select_query, rt_swi_build, rt_swi_byte_to_char,

@@ -1,0 +1,135 @@
+use os.kernel.ipc.host_gpu_ivshmem_map.{map_qemu_host_gpu_ivshmem_bar2}
+use os.lib.gpu_bridge.host_gpu_ivshmem.{host_gpu_ivshmem_negotiate, host_gpu_ivshmem_submit, host_gpu_ivshmem_fill_u32}
+use os.kernel.boot.mmio_hardware.{mmio_read32, mmio_read64}
+use common.gpu.simpleos_host_gpu_protocol.*
+
+extern fn serial_println(msg: text)
+
+val HOST_GPU_PROBE_TIMEOUT_POLLS: i64 = 50000000
+
+@cfg(x86_64)
+fn _host_gpu_probe_isa() -> text: "x86_64"
+@cfg(arm64)
+fn _host_gpu_probe_isa() -> text: "aarch64"
+@cfg(riscv64)
+fn _host_gpu_probe_isa() -> text: "riscv64"
+
+@cfg(x86_64)
+fn _host_gpu_probe_generation() -> i64: 10
+@cfg(arm64)
+fn _host_gpu_probe_generation() -> i64: 20
+@cfg(riscv64)
+fn _host_gpu_probe_generation() -> i64: 30
+
+@cfg(x86_64)
+fn _host_gpu_probe_window_base(device: i64) -> u64:
+    0xC000000000u64 + (device as u64) * 0x01000000u64
+@cfg(arm64)
+fn _host_gpu_probe_window_base(device: i64) -> u64:
+    0x3E000000u64
+@cfg(riscv64)
+fn _host_gpu_probe_window_base(device: i64) -> u64:
+    0x60000000u64 + (device as u64) * 0x01000000u64
+
+fn _host_gpu_probe_fail(isa: text, reason: text):
+    serial_println("HOST_GPU_PROBE_FAIL isa={isa} reason={reason}")
+    serial_println("TEST FAILED")
+
+fn _host_gpu_device_receipt_ok(base: u64, expected_generation: i64, expected_bytes: i64) -> bool:
+    (mmio_read64(base + (SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION as u64)) as i64) == expected_generation and
+        (mmio_read64(base + (SIMPLEOS_HOST_GPU_WIRE_STATUS as u64)) as i64) == SIMPLEOS_HOST_GPU_STATUS_PASS and
+        (mmio_read64(base + (SIMPLEOS_HOST_GPU_WIRE_REASON as u64)) as i64) == 0 and
+        (mmio_read64(base + (SIMPLEOS_HOST_GPU_WIRE_NATIVE_HANDLE as u64)) as i64) > 0 and
+        (mmio_read64(base + (SIMPLEOS_HOST_GPU_WIRE_DEVICE_IDENTITY as u64)) as i64) > 0 and
+        (mmio_read64(base + (SIMPLEOS_HOST_GPU_WIRE_OUTPUT_BYTES as u64)) as i64) == expected_bytes and
+        (mmio_read64(base + (SIMPLEOS_HOST_GPU_WIRE_OUTPUT_CHECKSUM as u64)) as i64) > 0 and
+        (mmio_read64(base + (SIMPLEOS_HOST_GPU_WIRE_ELAPSED_US as u64)) as i64) > 0 and
+        (mmio_read64(base + (SIMPLEOS_HOST_GPU_WIRE_READBACK_SOURCE as u64)) as i64) == SIMPLEOS_HOST_GPU_READBACK_DEVICE
+
+pub fn host_gpu_ivshmem_probe_main():
+    val isa = _host_gpu_probe_isa()
+    val mapped_slot = map_qemu_host_gpu_ivshmem_bar2()
+    if mapped_slot <= 0:
+        _host_gpu_probe_fail(isa, "map-bar2-{mapped_slot}")
+        return
+    val device = mapped_slot - 1
+    # The boot probe stays in the initial address space, where crt0 identity-maps
+    # this MMIO window. Unlike the canonical alias, this value fits Simple's
+    # tagged integer ABI when passed through the guest bridge.
+    val base = _host_gpu_probe_window_base(device)
+    serial_println("HOST_GPU_MAP_OK isa={isa} device={device}")
+
+    val generation = _host_gpu_probe_generation()
+    val hello = host_gpu_ivshmem_negotiate(base, generation - 1, isa, "vulkan", SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN, HOST_GPU_PROBE_TIMEOUT_POLLS)
+    if not hello.completed or hello.status != SIMPLEOS_HOST_GPU_STATUS_PASS or hello.version != SIMPLEOS_HOST_GPU_PROTOCOL_VERSION or hello.render_mask != SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN:
+        _host_gpu_probe_fail(isa, "hello-negotiation")
+        return
+    serial_println("HOST_GPU_HELLO_OK isa={isa} generation={generation - 1} render_mask={hello.render_mask} processing_mask={hello.processing_mask}")
+    val run_id_hash = 1000 + generation
+    val background: u32 = 0xFF224466u32
+    val foreground: u32 = 0xFFCC2020u32
+    val commands: [SimpleOsHostGpuWireCommand] = [
+        SimpleOsHostGpuWireCommand(op: SIMPLEOS_HOST_GPU_COMMAND_CLEAR, x: 0, y: 0, width: 0, height: 0, value: (background as i64)),
+        SimpleOsHostGpuWireCommand(op: SIMPLEOS_HOST_GPU_COMMAND_FILL_RECT, x: 8, y: 8, width: 40, height: 24, value: (foreground as i64))
+    ]
+    serial_println("HOST_GPU_RENDER_REQUEST isa={isa} commands={commands.len()} command_bytes={SIMPLEOS_HOST_GPU_WIRE_COMMAND_BYTES} max_payload={SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES}")
+    val render_receipt = host_gpu_ivshmem_submit(
+        base, generation, run_id_hash, generation,
+        SIMPLEOS_HOST_GPU_KIND_RENDER, "vulkan", 64, 48, 0,
+        commands, HOST_GPU_PROBE_TIMEOUT_POLLS
+    )
+    if not _host_gpu_device_receipt_ok(base, generation, 12288):
+        serial_println("HOST_GPU_RENDER_RECEIPT_FAIL isa={isa} generation={render_receipt.generation} status={render_receipt.status} reason={render_receipt.reason} bytes={render_receipt.output_bytes}")
+        _host_gpu_probe_fail(isa, "render-receipt")
+        return
+
+    var background_count: i64 = 0
+    var foreground_count: i64 = 0
+    var other_count: i64 = 0
+    var render_checksum: i64 = 0
+    var i: i64 = 0
+    while i < 3072:
+        val pixel = mmio_read32(base + (simpleos_host_gpu_wire_readback_offset() as u64) + ((i * 4) as u64))
+        if pixel == background:
+            background_count = background_count + 1
+        elif pixel == foreground:
+            foreground_count = foreground_count + 1
+        else:
+            other_count = other_count + 1
+        render_checksum = (render_checksum + ((pixel & 0x7FFFFFFFu32) as i64)) % 2147483647
+        i = i + 1
+    if render_checksum == 0:
+        render_checksum = 1
+    val output_checksum = mmio_read64(base + (SIMPLEOS_HOST_GPU_WIRE_OUTPUT_CHECKSUM as u64)) as i64
+    if background_count != 2112 or foreground_count != 960 or other_count != 0 or output_checksum != render_checksum:
+        _host_gpu_probe_fail(isa, "render-readback")
+        return
+    val native_handle = mmio_read64(base + (SIMPLEOS_HOST_GPU_WIRE_NATIVE_HANDLE as u64)) as i64
+    val device_identity = mmio_read64(base + (SIMPLEOS_HOST_GPU_WIRE_DEVICE_IDENTITY as u64)) as i64
+    serial_println("HOST_GPU_RENDER_OK isa={isa} generation={generation} handle={native_handle} identity={device_identity} checksum={output_checksum} bg={background_count} rect={foreground_count} other={other_count}")
+
+    if hello.processing_mask != SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN:
+        _host_gpu_probe_fail(isa, "processing-ir-unavailable")
+        return
+
+    val processing_generation = generation + 1
+    host_gpu_ivshmem_fill_u32(
+        base, processing_generation, run_id_hash, processing_generation,
+        "vulkan", 256, 7u32, HOST_GPU_PROBE_TIMEOUT_POLLS
+    )
+    if not _host_gpu_device_receipt_ok(base, processing_generation, 1024):
+        _host_gpu_probe_fail(isa, "processing-receipt")
+        return
+    var mismatch_count: i64 = 0
+    i = 0
+    while i < 256:
+        if mmio_read32(base + (simpleos_host_gpu_wire_readback_offset() as u64) + ((i * 4) as u64)) != 7u32:
+            mismatch_count = mismatch_count + 1
+        i = i + 1
+    val processing_checksum = mmio_read64(base + (SIMPLEOS_HOST_GPU_WIRE_OUTPUT_CHECKSUM as u64)) as i64
+    if mismatch_count != 0 or processing_checksum != 1792:
+        _host_gpu_probe_fail(isa, "processing-readback")
+        return
+    serial_println("HOST_GPU_PROCESS_OK isa={isa} generation={processing_generation} handle={native_handle} identity={device_identity} checksum={processing_checksum} mismatches={mismatch_count}")
+    serial_println("SIMPLEOS_HOST_GPU_2D_PASS isa={isa}")
+    serial_println("TEST PASSED")

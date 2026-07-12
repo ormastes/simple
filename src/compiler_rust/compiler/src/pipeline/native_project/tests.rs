@@ -1774,6 +1774,19 @@ fn test_cxx_abi_symbols_are_not_stub_candidates() {
     assert!(!super::tools::is_system_symbol("app__mcp__main"));
 }
 
+#[test]
+fn test_versioned_termios_symbols_are_not_stub_candidates() {
+    for symbol in [
+        "cfgetispeed@GLIBC_2.2.5",
+        "cfgetospeed@GLIBC_2.2.5",
+        "cfsetispeed@GLIBC_2.2.5",
+        "cfsetospeed@GLIBC_2.2.5",
+        "cfsetspeed@GLIBC_2.2.5",
+    ] {
+        assert!(super::tools::is_system_symbol(symbol), "{symbol}");
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 #[test]
 fn test_generate_stub_object_skips_optional_weak_entry_hooks() {
