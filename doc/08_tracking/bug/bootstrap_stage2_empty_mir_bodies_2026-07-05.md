@@ -11,6 +11,7 @@ related: src/compiler/50.mir/_MirLowering/function_lowering.spl
 related: src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
 related: src/compiler/80.driver/driver_bootstrap.spl
 related: build/bootstrap/stage2/aarch64-apple-darwin/simple
+related: src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl
 ---
 
 # Stage-2 Bootstrap: All function bodies empty (ret-0 stubs)
@@ -796,3 +797,163 @@ Stage 4 is not deployable. Its link accepted 822 unresolved-symbol stubs, and
 the standard `-c 'print(1+1)'` smoke aborts with `field access on nil receiver`
 and exit 132. The next owner is unresolved-stub rejection/closure completeness;
 do not restore seed fallback or deploy this artifact.
+
+## 2026-07-12 Cross-module closure gap: root-caused, fast repro, 3 fixes landed
+
+Root-caused and fixed the specific gap named "closure completeness" above:
+`phase5 aot:lower_to_mir` producing 0 MIR instructions/functions for
+NON-entry modules in a multi-module `--entry-closure` closure. A previous
+5.7hr full-closure build is no longer needed to reproduce or iterate on this
+-- a 2-file closure now reproduces the failure (and each fix) in seconds.
+
+### Fast repro (seconds, not hours)
+
+Two files (real content, not abbreviated):
+
+```
+# src/_mir_repro_helper.spl
+fn triple(x: i64) -> i64:
+    return x * 3
+
+# src/_mir_repro_entry.spl
+use _mir_repro_helper.{triple}
+
+fn main():
+    val y = triple(7)
+    if y == 21:
+        print "PASS"
+    else:
+        print "FAIL"
+```
+
+Files must live directly under a `src/` root component so
+`_driver_module_name_from_path` derives module names that match the `use`
+statement (`_mir_repro_helper`, `_mir_repro_entry`) -- an absolute path or a
+path outside `src/` mangles the derived module name and produces a
+different, spurious "unresolved name" that is a repro artifact, not this bug
+(a real project's `--source`/`--entry` are always `src/...`-relative, so
+this only bites synthetic fixtures).
+
+Repro command (run from the repo root with a Rust seed binary):
+
+```
+env SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 \
+  <seed> run src/app/cli/native_build_main.spl -- \
+  --backend cranelift --entry-closure --source src \
+  --entry src/_mir_repro_entry.spl -o out_repro --threads 2
+```
+
+Before any of today's fixes this fails in seconds with:
+`HIR lowering error in _mir_repro_entry: unresolved name: triple`.
+
+### Root cause: three independent, stacked gaps (not one)
+
+The task hypothesis was "(a) helper module never lowered to HIR/MIR" vs.
+"(b) lowered but not cross-linked into the entry's resolution scope". Both
+were real, plus a third gap one layer further down (object emission). All
+three had to be fixed, in order, before the 2-module closure produced a
+working binary:
+
+1. **(a) Parse-time gate, per non-entry module.**
+   `flat_is_bootstrap_entry_path()`
+   (`src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl`) only
+   recognized the single `SIMPLE_NATIVE_BUILD_ENTRY` path (or a
+   `bootstrap_main.spl` suffix) as "real"; `flat_ast_to_module()`
+   (`module_assembly.spl`) silently substituted `flat_empty_module(path)`
+   for every OTHER module in the closure -- even though `driver.spl`'s
+   parse/HIR phases (`parse_all_impl`, `lower_and_check_impl`) already treat
+   every closure module as needing real lowering once
+   `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1` is set. Traced by instrumenting
+   `[flat-bridge]`: the entry got `"[flat-bridge] bootstrap real
+   entry:start"` + `"building frontend module"`; the helper got neither --
+   confirming the empty-module branch. Fix: `flat_is_bootstrap_entry_path`
+   now returns `true` unconditionally when
+   `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1`.
+
+2. **(b) HIR-time gate, cross-module symbol table.**
+   Even after (1), `HirLowering.lower_module()`
+   (`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl`) skipped
+   `resolve_import_symbols(module)` entirely under `bootstrap_mode` (`if not
+   bootstrap_mode: ... self.resolve_import_symbols(module)`). That call is
+   what registers an imported module's exported functions into the
+   importing module's `self.symbols` table by walking `module.imports` and
+   `self.modules_by_name`. Bootstrap mode only pre-declared SAME-module
+   function names. So `triple` never entered `_mir_repro_entry`'s symbol
+   table and `main`'s call still hit `lower_unresolved_ident` -> "unresolved
+   name: triple", even though the helper module's own HIR now showed
+   `functions:count=1`. Fix: also run `resolve_import_symbols` when
+   `bootstrap_mode and SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1`.
+
+3. **(c) MIR/object-emission gate, single-entry-module accumulator.**
+   After (1)+(2), HIR/MIR lowering succeeded for both modules individually
+   (`[hir-lower] functions:count ... count=1` for each), but the *bootstrap
+   real-LLVM object emitter*
+   (`bootstrap_emit_real_llvm_object`,
+   `src/compiler/80.driver/driver_bootstrap.spl`) iterates a **flat, global
+   accumulator** (`_bootstrap_mir_functions` /
+   `bootstrap_mir_function_count/at/name_at`,
+   `src/compiler/50.mir/_MirLowering/bootstrap_globals.spl`) that
+   `bootstrap_lower_to_mir_context()` only ever populated from ONE
+   `HirModule` (`_bootstrap_entry_hir_module`, set from
+   `ctx.hir_modules[entry_module_name]`). The helper's HIR functions were
+   never fed into that accumulator, so `main`'s MIR/LLVM correctly
+   *referenced* `triple` by name but no `define @triple(...)` was ever
+   emitted -- link failure: `ld.lld: error: undefined symbol: triple`. Fix:
+   new `bootstrap_lower_extra_hir_module_to_mir(hir_module)` appends one
+   more module's functions to the same accumulator (no reset); when
+   `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1`, `bootstrap_lower_to_mir_context()`
+   now calls it for every module in `ctx.hir_modules` besides the entry.
+
+All three fixes are gated on `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1` and only
+*add* behavior (never remove/replace), so the pre-existing single-entry
+`bootstrap_main.spl` path (stage2/3/4 above) is unchanged.
+
+### Verified: repro now produces a real, running binary
+
+```
+$ <seed> run src/app/cli/native_build_main.spl -- --backend cranelift \
+    --entry-closure --source src --entry src/_mir_repro_entry.spl \
+    -o out_repro --threads 2
+...
+[bootstrap-real-llvm] count 2
+[bootstrap-real-llvm] function main
+[bootstrap-real-llvm] function triple
+...
+$ ./out_repro
+PASS
+$ echo $?
+0
+```
+
+`triple(7) == 21` computed correctly through the real MIR/LLVM path (not the
+interpreter), proving the cross-module call executes, not just parses.
+
+### Landed (local commits, not yet pushed -- review-gated)
+
+- `fix(compiler): resolve cross-module MIR-lowering gap for --entry-closure
+  bootstrap builds` -- fixes (1)+(2), `convert_nodes.spl` +
+  `module_lowering.spl`.
+- `fix(compiler): lower every --entry-closure module's functions into the
+  bootstrap MIR/object accumulator` -- fixes (3),
+  `bootstrap_globals.spl` + `driver_bootstrap.spl`.
+
+### Caveats / what this does NOT prove
+
+- `resolve_import_symbols` was enabled under the closure flag, but the
+  full `declare_module_symbols` pass (structs/enums/classes/traits/consts
+  declared BEFORE bodies lower, and same-module forward references) is
+  still skipped under `bootstrap_mode`. This fix only wires up cross-module
+  **functions** reached via `use module.{fn}`. A closure module that only
+  exports a struct/enum/const, or that has same-module forward references
+  between two functions declared out of order, is not covered here and may
+  still gap.
+- Not yet re-run against the real multi-hundred/thousand-module
+  `src/app`+`src/lib`+`src/compiler` closure (that is the 5.7hr build this
+  fast repro was explicitly built to avoid running). The 2-function repro
+  is strong causal evidence for the mechanism, not proof the full stage-2/3
+  rebuild now succeeds end-to-end -- the 822-unresolved-symbol-stub /
+  `field access on nil receiver` Stage 4 symptom recorded above may have
+  the same root cause or may be a distinct, still-open issue. Next owner:
+  re-run the real stage2 closure build with these three fixes and record
+  the next diagnostic (do not repeat the same probe without a source
+  change, per the standing protocol in this doc).
