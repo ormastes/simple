@@ -43,6 +43,46 @@ fn hir_module_diag_enabled() -> bool:
         return true
     diag == "1"
 
+fn hir_module_logical_name_from_path(path: text) -> text:
+    """Derive the dotted logical module name (e.g. `_wallB_mod_a`) from a
+    source path (e.g. `src/_wallB_mod_a.spl`), matching
+    `_driver_module_name_from_path` (80.driver/driver_source_loading.spl) --
+    reimplemented locally rather than imported to avoid a 20.hir ->
+    80.driver layering violation. Under `SIMPLE_BOOTSTRAP=1`,
+    `Module.name`/`HirModule.name` is the raw parsed PATH
+    (`flat_ast_to_module`, `_FlatAstBridge/module_assembly.spl`, `name:
+    path`), not the logical name an `use module.{..}` import statement
+    references -- qualifying a function's accumulator/symbol name by the
+    RAW path instead of this normalized form would mismatch the plain
+    `imp.module` text used at cross-module call sites and produce an
+    unparseable `/`- and `.`-laden LLVM identifier (bug
+    bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
+    var mod_path = path
+    while mod_path.starts_with("../"):
+        mod_path = mod_path.substring(3)
+    if mod_path.starts_with("./"):
+        mod_path = mod_path.substring(2)
+    if mod_path.starts_with("src/"):
+        mod_path = mod_path.substring(4)
+    mod_path = mod_path.replace(".spl", "")
+    mod_path = mod_path.replace(".sdn", "")
+    mod_path.replace("/", ".")
+
+fn hir_module_is_bootstrap_entry(module_name: text) -> bool:
+    """Whether `module_name` (a raw parsed-module path, e.g.
+    `src/_wallB_entry.spl`) is the --entry-closure entry module. Used to
+    keep the entry module's own same-module function-name qualification OFF
+    (bootstrap_lower_hir_globals_to_mir_module, the entry's flat MIR
+    accumulator, never qualifies names -- see bootstrap_globals.spl) while
+    turning it ON for closure helper modules (whose flat accumulator,
+    bootstrap_lower_extra_hir_module_to_mir, always qualifies by
+    module.function to avoid same-name collisions across modules, bug
+    bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
+    val entry_path = hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    if entry_path == "":
+        return false
+    hir_module_logical_name_from_path(entry_path) == hir_module_logical_name_from_path(module_name)
+
 impl HirLowering:
     me register_imported_symbol(imported_mod: Module, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span):
         val as_cls: Class? = imported_mod.classes.get(imported_name)
@@ -62,7 +102,8 @@ impl HirLowering:
             self.symbols.define(local_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
         elif as_fn != nil:
             if as_fn.type_params.len() > 0:
-                self.symbols.define(local_name, SymbolKind.Function, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+                val generic_fn_sym = self.symbols.define(local_name, SymbolKind.Function, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+                self.qualify_imported_function_symbol(generic_fn_sym, imported_mod_name, imported_name)
                 return
             var param_types: [HirType] = []
             for param in as_fn.params:
@@ -75,9 +116,32 @@ impl HirLowering:
                 kind: HirTypeKind.Function(param_types, return_type, []),
                 span: import_span
             )
-            self.symbols.define(local_name, SymbolKind.Function, Some(fn_type), import_span, Visibility.Public, false, Some(imported_mod_name))
+            val imported_fn_sym = self.symbols.define(local_name, SymbolKind.Function, Some(fn_type), import_span, Visibility.Public, false, Some(imported_mod_name))
+            self.qualify_imported_function_symbol(imported_fn_sym, imported_mod_name, imported_name)
         elif as_const != nil:
             self.symbols.define(local_name, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+
+    me qualify_imported_function_symbol(sym_id: SymbolId, imported_mod_name: text, imported_name: text):
+        """Under a --entry-closure bootstrap build, rename a cross-module
+        imported function's stored symbol name to `<module>.<original name>`
+        so it stays distinct from a same-named function imported (under
+        whatever local alias) from a DIFFERENT module. `resolve_import_symbols`
+        registers the symbol under the LOCAL alias (`local_name`, e.g.
+        `compute_a`) for scope lookup, but the flat bootstrap MIR accumulator
+        (`bootstrap_lower_extra_hir_module_to_mir`,
+        `_MirLowering/bootstrap_globals.spl`) keys/emits each closure module's
+        functions the same qualified way -- without this, MIR call-site
+        emission (which resolves the call name from this symbol) and the
+        accumulator's emitted definitions can name the SAME symbol two
+        different ways, or two DIFFERENT modules' same-named functions the
+        SAME way (bug bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B).
+        A plain (non-closure) bootstrap_main.spl build has no cross-module
+        imports to qualify, and a normal (non-bootstrap) compile keeps the
+        local alias name -- both are unaffected by this rename."""
+        val bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        if bootstrap_closure:
+            self.symbols.rename_symbol(sym_id, "{imported_mod_name}.{imported_name}")
 
     me register_glob_imported_symbols(imported_mod: any, imported_mod_name: text, import_span: Span):
         var keys = imported_mod.classes.keys()
@@ -248,10 +312,27 @@ impl HirLowering:
             # lower_unresolved_ident -> HirExprKind.Error, and MIR lower_call's
             # indirect arm then emits `call i64 %lN(...)` through whatever
             # garbage local the Error expr lowered to (#135-class SIGSEGV).
+            # A closure HELPER module's (non-entry) own functions are keyed
+            # in the flat MIR accumulator by `module.function`
+            # (bootstrap_lower_extra_hir_module_to_mir,
+            # bootstrap_globals.spl) so a same-named function from a
+            # DIFFERENT module doesn't collide/drop it (bug
+            # bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B). A
+            # same-module call between two of THIS module's own functions
+            # must resolve through that same qualified name, so pre-declare
+            # under the qualified name here too -- but only for a non-entry
+            # module: the ENTRY's own accumulator
+            # (bootstrap_lower_hir_globals_to_mir_module) never qualifies,
+            # so qualifying its pre-declared names would break every
+            # same-module call in bootstrap_main.spl itself.
+            val bootstrap_decl_qualify = bootstrap_closure and not hir_module_is_bootstrap_entry(module.name)
+            val bootstrap_decl_module_name = hir_module_logical_name_from_path(module.name)
             var bootstrap_decl_idx = 0
             while bootstrap_decl_idx < bootstrap_function_keys.len():
                 val bootstrap_decl_fn: Function = bootstrap_module_functions[bootstrap_function_keys[bootstrap_decl_idx]]
-                self.symbols.define(bootstrap_decl_fn.name, SymbolKind.Function, nil, Span.empty(), false, false, nil)
+                val bootstrap_decl_sym = self.symbols.define(bootstrap_decl_fn.name, SymbolKind.Function, nil, Span.empty(), false, false, nil)
+                if bootstrap_decl_qualify:
+                    self.symbols.rename_symbol(bootstrap_decl_sym, "{bootstrap_decl_module_name}.{bootstrap_decl_fn.name}")
                 bootstrap_decl_idx = bootstrap_decl_idx + 1
             while lower_idx < bootstrap_function_keys.len():
                 val bootstrap_fn: Function = bootstrap_module_functions[bootstrap_function_keys[lower_idx]]

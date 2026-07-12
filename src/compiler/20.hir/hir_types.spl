@@ -322,6 +322,48 @@ impl SymbolTable:
             case _:
                 nil
 
+    me symbol_display_name(id: SymbolId, fallback: text) -> text:
+        """Return the CURRENT stored `.name` for `id` (reflecting any
+        `rename_symbol` call), or `fallback` if the id isn't found.
+
+        Uniquely named to avoid the same seed method-resolver name+arity
+        collision `get_symbol` was itself renamed to dodge (see its
+        docstring): `LoadedModule.get_symbol(name: text)`
+        (99.loader/module_loader.spl) has the SAME name and arity (1 param)
+        as `SymbolTable.get_symbol(id: SymbolId?)`, and empirically the
+        compiled resolver dispatches a HIR-layer `self.symbols.get_symbol(id)`
+        call to the WRONG (loader) sibling here -- `id` (a SymbolId) gets
+        passed where `name: text` is expected, `self.symbols.has(name)`
+        silently returns false for the garbage-typed key, and every call
+        returns nil regardless of whether the id is actually present (bug
+        bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
+        match id:
+            case SymbolId(raw):
+                val found: Symbol? = self.symbols[raw]
+                if val sym = found:
+                    return sym.name
+                fallback
+            case _:
+                fallback
+
+    me rename_symbol(id: SymbolId, new_name: text):
+        """Overwrite a symbol's stored `.name` in place, WITHOUT touching its
+        scope lookup key. Used to give a --entry-closure cross-module
+        function import a qualified `module.function` display/emission name
+        (distinct across modules, unlike its possibly-shared bare or
+        alias-local name) while `compute_a`/`compute_b` etc. still resolve
+        via the original scope entry created by `define()` (bug
+        bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
+        match id:
+            case SymbolId(raw):
+                val found: Symbol? = self.symbols[raw]
+                if val sym = found:
+                    var renamed = sym
+                    renamed.name = new_name
+                    self.symbols[raw] = renamed
+            case _:
+                pass
+
     me push_scope(kind: ScopeKind) -> ScopeId:
         """Push a new scope."""
         val raw_id = self.next_scope_id

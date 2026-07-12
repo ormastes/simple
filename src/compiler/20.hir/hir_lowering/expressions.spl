@@ -340,7 +340,37 @@ impl HirLowering:
                     if found_symbol == nil:
                         self.lower_unresolved_ident(ident_name_t, e.span)
                     else:
-                        HirExprKind.NamedVar(found_symbol, ident_name_t)
+                        # Under a --entry-closure bootstrap build, a
+                        # cross-module imported (or same-module,
+                        # non-entry-module) function's stored symbol name may
+                        # have been rewritten to a qualified `module.function`
+                        # form (qualify_imported_function_symbol /
+                        # bootstrap_decl_idx's rename_symbol call, both in
+                        # this file's `impl HirLowering` block) so it stays
+                        # distinct from a same-named function in a DIFFERENT
+                        # module -- the flat MIR accumulator
+                        # (bootstrap_lower_extra_hir_module_to_mir,
+                        # bootstrap_globals.spl) keys/emits every closure
+                        # helper module's functions the same qualified way.
+                        # Bake the CURRENT stored name into this NamedVar's
+                        # payload text HERE (same HIR-lowering pass as the
+                        # rename, so the mutation is still visible) rather
+                        # than deferring to a fresh `self.symbols` lookup at
+                        # MIR-lowering time: a symbol-table rename applied
+                        # during HIR lowering does not survive the trip
+                        # through the bootstrap entry-HIR-module global into
+                        # that later, separate pass (the interpreter's known
+                        # "mutating a class held inside a value-type struct
+                        # across a pass boundary" landmine) even though it IS
+                        # visible to a same-pass lookup like this one (bug
+                        # bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe
+                        # B). A name that was never rewritten (the common
+                        # case: normal compiles, single-entry bootstrap
+                        # builds, and the entry closure module's own
+                        # same-module calls) round-trips to `ident_name_t`
+                        # unchanged, so this is a no-op there.
+                        val display_name = self.symbols.symbol_display_name(found_symbol, ident_name_t)
+                        HirExprKind.NamedVar(found_symbol, display_name)
                 else:
                     self.lower_unresolved_ident(ident_name_t, e.span)
 
