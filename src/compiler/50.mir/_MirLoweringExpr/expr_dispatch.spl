@@ -87,7 +87,13 @@ impl MirLowering:
         false
 
     fn local_is_float(local: LocalId) -> bool:
-        """True when a lowered local carries an F32/F64 MIR value."""
+        """True when a lowered local holds an f64/f32 value.
+
+        Keyed off the MIR local type (same rationale as local_is_str): HIR
+        `.type_` is frequently nil on the flat path, so float-directed binop
+        lowering must key off the MIR local type. Without this, arithmetic on
+        floats gets an i64 dest from infer_binop_type and the backend emits
+        integer add/mul on double BIT PATTERNS (garbage results)."""
         for item in self.builder.locals:
             if item.id.id == local.id:
                 match item.type_.kind:
@@ -174,12 +180,40 @@ impl MirLowering:
             val interp_item = interps[k]
             val interp_expr = interp_item.expr
             val interp_local = self.lower_expr(interp_expr)
+            # Bug #136: coerce the operand to a raw char*. A string operand
+            # (Opaque "str") passes straight through rt_interp_cstr. A non-string
+            # operand -- e.g. `{a}` / `{a+b}` where `a` is an i64 -- must first be
+            # rendered to a decimal string via rt_raw_i64_to_string (a tagged
+            # string), which rt_interp_cstr then unwraps to its char* buffer.
+            # Without this, rt_interp_cstr treats the raw i64 as a char* pointer
+            # and derefs it -> SIGSEGV. The operand's lowered MIR type drives the
+            # choice; a `val x = <int>` binding propagates the i64 init type to
+            # the local so `{x}` routes to the numeric path.
+            var cstr_src = mir_operand_copy(interp_local)
+            var interp_is_str = false
+            if val interp_ty = self.local_mir_type_of(interp_local):
+                match interp_ty.kind:
+                    case MirTypeKind.Opaque(interp_ty_name):
+                        if interp_ty_name == "str":
+                            interp_is_str = true
+                    case _:
+                        ()
+            if not interp_is_str:
+                val num_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_raw_i64_to_string"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                var b_num = self.builder
+                val num_res = b_num.emit_call(num_op, [mir_operand_copy(interp_local)], MirType.i64())
+                self.builder = b_num
+                if val num_local = num_res:
+                    cstr_src = mir_operand_copy(num_local)
             val cstr_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_interp_cstr"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
             ))
             var b_cstr = self.builder
-            val cstr_res = b_cstr.emit_call(cstr_op, [mir_operand_copy(interp_local)], MirType(kind: MirTypeKind.Opaque("str")))
+            val cstr_res = b_cstr.emit_call(cstr_op, [cstr_src], MirType(kind: MirTypeKind.Opaque("str")))
             self.builder = b_cstr
             if val cstr_local = cstr_res:
                 result_local = self.emit_raw_strcat(result_local, cstr_local)
@@ -331,6 +365,23 @@ impl MirLowering:
                             if variant_name == field_name:
                                 return self.lower_enum_construct_named(enum_name, field_name, [])
                     val base_local = self.lower_expr(base)
+                    # `.len`/`.length` on a native string must route to
+                    # rt_strlen, not emit_get_field: the string is a raw char*
+                    # and a struct get_field reads its first data byte (or
+                    # nil-derefs). This mirrors the identical routing in the
+                    # main `case Field` arm below -- this disc-guarded
+                    # pre-dispatch returns before that arm is reached.
+                    if (field_name == "len" or field_name == "length") and self.local_is_str(base_local):
+                        val strlen_func = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_strlen"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                        ))
+                        var b_sl = self.builder
+                        val sl_res = b_sl.emit_call(strlen_func, [mir_operand_copy(base_local)], MirType.i64())
+                        self.builder = b_sl
+                        if val sl_local = sl_res:
+                            return sl_local
+                        return base_local
                     val bitfield_result = self.try_lower_bitfield_get(base, base_local, field_name)
                     if val bitfield_local = bitfield_result:
                         return bitfield_local
@@ -625,8 +676,92 @@ impl MirLowering:
                     case _:
                         val left_local = self.lower_expr(left)
                         val right_local = self.lower_expr(right)
+                        # String `+` is CONCATENATION, not arithmetic. On the
+                        # native path a string is a raw char*, so `a + b` must
+                        # call rt_strcat (raw char* concat, same representation as
+                        # lower_string_interpolation). The generic emit_binop(Add)
+                        # below would integer-ADD the two char* pointers, yielding
+                        # a garbage pointer that SIGSEGVs on any deref (`print(c)`,
+                        # `c.len`). Detect string operands by their MIR local type
+                        # (Opaque str) because HIR `.type_` is nil on this path;
+                        # any non-string arithmetic keeps the generic binop.
+                        var bin_is_str_concat = false
+                        match op:
+                            case Add:
+                                if self.local_is_str(left_local) or self.local_is_str(right_local):
+                                    bin_is_str_concat = true
+                            case _:
+                                ()
+                        if bin_is_str_concat:
+                            val cat_func = MirOperand(kind: MirOperandKind.Const(
+                                MirConstValue.Str("rt_strcat"),
+                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+                            ))
+                            var b_cat = self.builder
+                            val cat_res = b_cat.emit_call(cat_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], MirType(kind: MirTypeKind.Opaque("str")))
+                            self.builder = b_cat
+                            if val cat_local = cat_res:
+                                return cat_local
+
+                        # #148: untyped/native-path text `==`/`!=` must compare
+                        # CONTENT, not raw i64 identity. A "str"-typed MIR local
+                        # (mir_type_is_str) can be materialized as either a
+                        # TAGGED heap-string handle (rt_string_new -- e.g. argv
+                        # elements from rt_get_args) or a RAW char* pointer (a
+                        # bootstrap string literal, emit_bootstrap_str_const),
+                        # and the two representations are statically
+                        # undiscriminable here (same as the Add/concat case
+                        # above). The generic emit_binop(Eq/Ne) below performs a
+                        # plain `icmp eq/ne i64` on the two operands as opaque
+                        # integers -- a tagged handle can never numerically
+                        # equal a raw literal pointer, so `a == "hello"` always
+                        # failed regardless of content. Only intercept when at
+                        # least one operand is provably string-typed
+                        # (local_is_str); a blanket intercept of all untyped
+                        # `==` would wrongly route plain int compares through a
+                        # string-content check. rt_text_eq_any normalizes both
+                        # operands (tagged-or-raw, autodetected -- mirrors the
+                        # rt_interp_cstr coercion bug #136 already established)
+                        # to a raw buffer and compares bytes.
+                        var bin_is_str_eq = false
+                        match op:
+                            case Eq | NotEq:
+                                if self.local_is_str(left_local) or self.local_is_str(right_local):
+                                    bin_is_str_eq = true
+                            case _:
+                                ()
+                        if bin_is_str_eq:
+                            val eq_func = MirOperand(kind: MirOperandKind.Const(
+                                MirConstValue.Str("rt_text_eq_any"),
+                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                            ))
+                            var b_eq = self.builder
+                            val eq_res = b_eq.emit_call(eq_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], MirType.i64())
+                            self.builder = b_eq
+                            if val eq_local = eq_res:
+                                match op:
+                                    case NotEq:
+                                        var b_neq = self.builder
+                                        val neq_local = b_neq.emit_binop(MirBinOp.BitXor, mir_operand_copy(eq_local), mir_operand_const_int(1), MirType.i64())
+                                        self.builder = b_neq
+                                        return neq_local
+                                    case _:
+                                        return eq_local
+
                         val mir_op = self.lower_binop(op)
-                        val result_type = self.infer_binop_type(op)
+                        # Float arithmetic must carry an F64 dest: infer_binop_type
+                        # defaults arithmetic to i64, which makes translate_binop
+                        # emit integer add/mul on the operands' double BIT PATTERNS
+                        # (e.g. `2.5 * 4.0` natively computed garbage). Detect float
+                        # operands by their MIR local type (HIR `.type_` is nil on
+                        # this path), mirroring the string-concat detection above.
+                        var result_type = self.infer_binop_type(op)
+                        match op:
+                            case Add | Sub | Mul | Div | Mod | Pow:
+                                if self.local_is_float(left_local) or self.local_is_float(right_local):
+                                    result_type = MirType.f64()
+                            case _:
+                                ()
                         var b = self.builder
                         val binop_result = b.emit_binop(mir_op, mir_operand_copy(left_local), mir_operand_copy(right_local), result_type)
                         self.builder = b
@@ -769,6 +904,10 @@ impl MirLowering:
                 # garbage 0), which broke `if val v = x.?:` binding.
                 self.lower_expr(base)
 
+            case Try(try_base):
+                # `expr?` — Err propagates via early return, Ok yields payload.
+                self.lower_try_expr(try_base)
+
             case HostGpuLane(lane_code, payload_size, marker, body):
                 self.lower_host_gpu_lane(lane_code, payload_size, marker, body)
 
@@ -894,8 +1033,6 @@ impl MirLowering:
                 # raw-char* length accessor. Keyed off the MIR local type
                 # (Opaque str) because HIR `.type_` is nil on this path; user
                 # structs with a real `len` field and arrays are unaffected.
-                if field_name == "len" or field_name == "length":
-                    print "[TRACE-LEN2] field={field_name} base_ty={self.dbg_local_type(base_local)}"
                 if (field_name == "len" or field_name == "length") and self.local_is_str(base_local):
                     val fa_func = MirOperand(kind: MirOperandKind.Const(
                         MirConstValue.Str("rt_strlen"),
