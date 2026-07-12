@@ -472,6 +472,25 @@ pub class CompilerDriver:
         val nb_entry_env = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
         val nb_entry_closure_pre = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         if nb_entry_env != "" and not has_project_source and not nb_entry_closure_pre and self.ctx.options.mode == CompileMode.Aot:
+            # BUG FIX (CLI --source loss): explicit --source roots are already
+            # scanned into all_sources by the loop above (driver_inputs), but
+            # under their own path-derived module names -- which do not
+            # necessarily match the dotted import name a caller's entry file
+            # uses to `use` them (e.g. a --source dir reached via "../" is
+            # named by its relative path, not by the bare module the entry
+            # imports). Build a lookup of module names already loaded so the
+            # closure walk below doesn't (a) misreport an already-satisfied
+            # import as "unresolved" just because it isn't reachable through
+            # the cwd/src/entry-dir fallback roots, and (b) so those explicit
+            # --source contents still make it through the parse_all_impl
+            # entry-only filter, which otherwise requires this block to flip
+            # SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE before anything but the exact
+            # entry file is parsed.
+            var closure_loaded_mods: Dict<text, bool> = {}
+            var closure_preidx = 0
+            while closure_preidx < all_sources.len():
+                closure_loaded_mods[all_sources[closure_preidx].module_name] = true
+                closure_preidx = closure_preidx + 1
             var closure_added = 0
             var closure_seen_mods: Dict<text, bool> = {}
             var closure_idx = 0
@@ -485,6 +504,10 @@ pub class CompilerDriver:
                     if closure_seen_mods.contains(closure_mp):
                         continue
                     closure_seen_mods[closure_mp] = true
+                    if closure_loaded_mods.contains(closure_mp):
+                        # Already satisfied by an explicit --source root (or an
+                        # earlier closure step): nothing to resolve, not an error.
+                        continue
                     val closure_file = _driver_resolve_entry_import(closure_mp, closure_dir)
                     if closure_file == "":
                         # LOUD error naming the module path. Single-segment
@@ -507,6 +530,7 @@ pub class CompilerDriver:
                         if not seen_sources.contains(closure_key):
                             seen_sources[closure_key] = true
                             all_sources = all_sources.push(cs)
+                            closure_loaded_mods[cs.module_name] = true
                             closure_added = closure_added + 1
                     if not closure_has_exact:
                         # The path-derived module name differs from the import
@@ -517,9 +541,15 @@ pub class CompilerDriver:
                         if not seen_sources.contains(closure_alias_key):
                             seen_sources[closure_alias_key] = true
                             all_sources = all_sources.push(SourceFile(path: closure_file, content: closure_content, module_name: closure_mp))
+                            closure_loaded_mods[closure_mp] = true
                             closure_added = closure_added + 1
                 closure_idx = closure_idx + 1
-            if closure_added > 0 and self.ctx.errors.len() == 0:
+            if self.ctx.errors.len() == 0 and (closure_added > 0 or input_len > 1):
+                # input_len > 1 means the caller passed explicit --source
+                # roots beyond the bare entry file -- their content must be
+                # compiled in even when every import in them already
+                # resolved by name (closure_added == 0), otherwise
+                # parse_all_impl's entry-only filter drops it right back out.
                 rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
 
         # Add core source roots only when compiling project sources (self-hosted build).
