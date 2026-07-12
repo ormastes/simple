@@ -1,6 +1,6 @@
 # BUG: committed pmm bound kernel_end=0x14000000 overlaps 128MB-base kernel RW — green stream baseline unbuildable from origin
 
-**Status:** open (one-line fix known and verified for streaming; needs gate-verified landing)
+**Status:** RESOLVED (2026-07-12)
 **Severity:** medium-high (fresh builds of the clang streaming path corrupt FAT stream state; masks/compounds the seed regression)
 **Component:** x86_64 fs-exec streaming loader pmm bounds (src/os/kernel/loader/x86_64_fs_exec_ring3.spl area)
 **Found:** 2026-07-12 (bisection lane, green-repro attempt)
@@ -24,3 +24,19 @@ those builds is the separate seed regression, see
 
 Landing requires: SSH hello + multi-cmd gates green + one streaming run
 showing full-file stream completion, with the fix as the only loader change.
+
+## Resolution (2026-07-12)
+
+All x86_64 entry files' pmm reserve bound raised 0x14000000 → 0x18000000
+(384 MiB; constraint comment added at each site; TODO notes the linker-symbol
+derivation upgrade path). 8 entries fixed: clang_stream, fs_elf_exec_smoke,
+ring3_smoke, fs_exec_general, desktop_e2e, ssh_ring3, gui_entry_desktop
+(reserved_end const), fs_exec_stream. fs_exec_prod entry has no such bound
+on origin. Safety check: the only sub-384MB QEMU configs (-m 256M
+abi/modinit probes) boot entries that do not use this bound; all affected
+entries run at 512M+.
+
+Verified: 124.6 MB clang_static streams to completion (PASS stream-open,
+no FAT-state corruption; the downstream abort-134 is the separate
+module_vs_entry/source regression); ssh_clang_hello_ring3 FULL green;
+ssh_multi_cmd green; disassembly shows mov $0x18000000 in the built kernel.

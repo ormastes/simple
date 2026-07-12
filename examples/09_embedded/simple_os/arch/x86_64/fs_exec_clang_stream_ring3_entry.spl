@@ -69,13 +69,15 @@ fn spl_start():
     serial_println("[clang-stream] header path={path} file_size={fsize} hdr_bytes={hdr_n}")
 
     # pmm pool: 2 GiB total. kernel_end MUST cover the FULL kernel memory image —
-    # this kernel's RW segment (.bss + .heap) ends at 0x17608000, so the 0x14000000
-    # bound other lanes use put the pmm bitmap and "free" frames INSIDE live kernel
-    # .bss; streaming then zeroed the FAT stream state mid-load (failed at ~21 MB).
-    # 0x18000000 (384 MiB) clears it; free frames from there cover the 124.6 MB
-    # payload (~32k frames) + 64 MiB user heap. Requires QEMU -m 2G.
-    # ponytail: derive kernel_end from a linker end symbol instead of a constant.
-    if not pmm_init_identity_range(0x80000000, 0x100000, 0x14000000):
+    # this kernel's RW segment (.bss + .heap) ends at 0x17608000.
+    # Constraint: 128 MB base load (0x08000000) + ~118 MB kernel RW extent = ~0x17608000.
+    # Round up to page boundary: 0x18000000 (384 MiB) provides headroom for the
+    # 124.6 MB clang payload (~32k frames) + 64 MiB user heap.
+    # TODO: derive kernel_end from a linker end symbol (__bss_end from linker.ld)
+    #       instead of this constant; see src/os/kernel/arch/x86_64/boot.spl
+    #       for the precedent extern fn _get_kernel_end() approach.
+    # Requires QEMU -m 2G.
+    if not pmm_init_identity_range(0x80000000, 0x100000, 0x18000000):
         serial_println("[clang-stream] FAIL pmm_init")
         serial_println("TEST FAILED")
         rt_debug_exit_success()
