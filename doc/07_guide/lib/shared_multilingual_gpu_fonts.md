@@ -42,11 +42,13 @@ Use `selected_font_coverage_cell(language, category)` for exact policy lookup;
 unknown axes return `nil`. Do not load `witness_family` while the cell is
 `unavailable` or `not-designed-for-script`.
 
-Both native font roots preflight only byte-exact manifest paths; equivalent
-aliases remain unmanaged. Reading, path hashing, and native reopening are a
-TOCTOU window, so this is not security or race-free enforcement. That requires
-loading from the validated bytes or an owned file descriptor. This preflight
-does not promote any coverage-matrix cell.
+The primary `spl_fonts` root initializes exact selected paths from the same
+owned bytes it preflights, with the pinned digest passed to
+`rt_fonts_init_verified_bytes`; it never reopens those paths and is race-free
+for that handoff. Equivalent aliases remain unmanaged on the legacy path ABI.
+The legacy `font_sffi` root still uses exact-path preflight followed by native
+reopen and therefore retains a TOCTOU window. Neither path promotes a
+coverage-matrix cell.
 
 ## Pinned candidate assets
 
