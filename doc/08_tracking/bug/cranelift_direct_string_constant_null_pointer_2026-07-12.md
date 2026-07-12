@@ -399,3 +399,50 @@ the string probe here was finally runnable end-to-end. Result:
   the interpreter fix that unblocked reaching this point at all) — this is
   the concrete symptom of the "NOT verified e2e" status already called out
   above; still open.
+
+## 2026-07-12 follow-up: the `print(<int>)` sibling bug (lines 198-217 above) is FIXED
+
+The separate bug flagged above (`print(add(2, 3))` SIGSEGVs at address `0x5`
+inside `fputs`, because `lower_bootstrap_print_call` passed a raw non-text
+argument straight to `rt_print`/`rt_println`, both `const char*`-typed) is now
+fixed. Root cause confirmed unchanged from the description above:
+`lower_bootstrap_print_call`
+(`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:526`)
+lowered `args[0].value` and passed it directly as the call operand with no
+type coercion.
+
+**Fix:** mirrors bug #136's string-interpolation fix
+(`lower_string_interpolation` in
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:151`). After lowering
+the print argument, check its MIR type via `self.local_mir_type_of(arg_local)`:
+if it's already `Opaque("str")`, pass through unchanged; otherwise render it
+to a tagged heap string via `rt_raw_i64_to_string`, then unwrap that to a raw
+`char*` via `rt_interp_cstr` (the same coercion pair #136 uses), and pass
+*that* to `rt_print`/`rt_println` instead of the raw value.
+
+**Scope:** covers i64 (the confirmed SIGSEGV) and, incidentally, bool (renders
+as `"0"`/`"1"` via the same raw-int path rather than `"true"`/`"false"` — not
+a crash, just not interpreter-matching text; a follow-up if the mismatch
+matters). Float is **not** covered — no `rt_raw_f64_to_string` runtime
+function exists yet, and adding one is a C-runtime change out of scope for
+this pure-Simple lowering fix (`print(<float>)` still SIGSEGVs the same way
+this bug did; tracked as a follow-up, not filed as a separate doc yet).
+
+**Verified via minimal LLC-path repro** (`SIMPLE_BOOTSTRAP=1`, the documented
+redeploy backend), pinned Rust seed running `native-build` over the fixed
+worktree source (no seed rebuild needed — the fix is pure-Simple, interpreted
+by the seed):
+- BEFORE (unmodified source): `print(5); println(42); print(n); print(a+b)`
+  → `SIGSEGV at address 0x5` (the literal `5`, confirming the exact
+  mechanism described above), rc=139.
+- AFTER (fixed source): same program → prints `542\n542` (i.e. `"5"` +
+  `"42\n"` + `"5"` + `"42"`, exactly matching `print`'s no-trailing-newline /
+  `println`'s trailing-newline semantics for values `5, 42, 5, 42`), rc=0, no
+  crash.
+- Regression check: `print("hello")` (literal) and `val s = "world";
+  print(s)` (variable) both still print unchanged (`helloworld`, rc=0) —
+  the `Opaque("str")` pass-through path (including the variable case, not
+  just the literal) is intact.
+
+Landed as a standalone fix to `switch_operators_calls.spl`; independent of
+this doc's still-open Cranelift-direct string-constant gap above.
