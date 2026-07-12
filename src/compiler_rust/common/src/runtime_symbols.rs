@@ -794,6 +794,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_opencl_mem_alloc",
     "rt_opencl_mem_free",
     "rt_opencl_write_buffer",
+    "rt_opencl_write_buffer_at",
     "rt_opencl_read_buffer",
     "rt_opencl_set_kernel_arg_i64",
     "rt_opencl_set_kernel_arg_buffer",

@@ -345,28 +345,33 @@ bool rt_opencl_mem_free(int64_t buffer) {
     return status == RT_OPENCL_SUCCESS;
 }
 
-bool rt_opencl_write_buffer(int64_t queue, int64_t buffer, int64_t host_ptr, int64_t size) {
+bool rt_opencl_write_buffer_at(int64_t queue, int64_t buffer, int64_t host_ptr, int64_t size, int64_t offset) {
     RtOpenClFns* fns = rt_opencl_load_symbols();
     RtOpenClQueue* wrapped_queue = (RtOpenClQueue*)(intptr_t)queue;
     RtOpenClBuffer* wrapped_buffer = (RtOpenClBuffer*)(intptr_t)buffer;
     if (!fns || !rt_opencl_handle_is_plausible(queue) || !rt_opencl_handle_is_plausible(buffer) ||
-        !wrapped_queue || !wrapped_buffer || host_ptr == 0 || size <= 0 ||
+        !wrapped_queue || !wrapped_buffer || host_ptr == 0 || size <= 0 || offset < 0 ||
         wrapped_queue->magic != RT_OPENCL_QUEUE_MAGIC ||
         wrapped_buffer->magic != RT_OPENCL_BUFFER_MAGIC ||
-        (size_t)size > wrapped_buffer->size) {
+        (uint64_t)offset > wrapped_buffer->size ||
+        (uint64_t)size > wrapped_buffer->size - (size_t)offset) {
         return false;
     }
     return fns->enqueue_write_buffer(
         wrapped_queue->queue,
         wrapped_buffer->mem,
         RT_OPENCL_TRUE,
-        0,
+        (size_t)offset,
         (size_t)size,
         (const void*)(intptr_t)host_ptr,
         0,
         NULL,
         NULL
     ) == RT_OPENCL_SUCCESS;
+}
+
+bool rt_opencl_write_buffer(int64_t queue, int64_t buffer, int64_t host_ptr, int64_t size) {
+    return rt_opencl_write_buffer_at(queue, buffer, host_ptr, size, 0);
 }
 
 bool rt_opencl_read_buffer(int64_t queue, int64_t buffer, int64_t host_ptr, int64_t size) {

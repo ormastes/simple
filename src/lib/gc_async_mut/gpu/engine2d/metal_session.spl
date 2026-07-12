@@ -12,12 +12,14 @@
 #   use std.gpu.engine2d.metal_session.{MetalSession}
 
 use std.gpu.engine2d.backend_metal_msl.{_engine2d_msl}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_ENTRY, font_atlas_composite_metal_source}
 use std.nogc_sync_mut.io.metal_sffi.{
     metal_sffi_init, metal_sffi_is_available, metal_sffi_device_count,
     metal_sffi_create_device, metal_sffi_destroy_device,
     metal_sffi_create_command_queue, metal_sffi_destroy_command_queue,
     metal_sffi_compile_shader, metal_sffi_destroy_shader,
     metal_sffi_create_compute_pipeline, metal_sffi_destroy_pipeline,
+    metal_sffi_run_compute_frame,
     metal_last_error
 }
 # ============================================================================
@@ -45,6 +47,7 @@ class MetalSession:
     device: i64               # MTLDevice handle
     command_queue: i64        # MTLCommandQueue handle
     shader_lib: i64           # Compiled MSL shader library handle
+    font_shader_lib: i64      # Separate shared font-atlas MSL library
     pipe_clear: i64           # Compute pipeline: clear
     pipe_rect_filled: i64     # Compute pipeline: filled rect
     pipe_rect_outline: i64    # Compute pipeline: rect outline
@@ -58,6 +61,7 @@ class MetalSession:
     pipe_blit: i64            # Compute pipeline: image blit
     pipe_indexed_fill: i64    # Compute pipeline: GPU-dict pilot indexed_fill (design cpu_gpu_dual_algorithm)
     pipe_glyph_atlas_blit: i64  # Compute pipeline: GPU-dict glyph atlas draw_text accelerator (design cpu_gpu_dual_algorithm W4)
+    pipe_font_atlas_composite: i64  # Optional common font-atlas composite pipeline
     ref_count: i64            # Live reference count (i64 matches CUDA/Vulkan/CPU)
     is_initialized: bool      # True after a successful init() (matches CUDA/Vulkan/CPU naming)
     generation: i64           # Stale-resource detection; incremented on init and cleanup
@@ -69,6 +73,7 @@ class MetalSession:
             device: 0,
             command_queue: 0,
             shader_lib: 0,
+            font_shader_lib: 0,
             pipe_clear: 0,
             pipe_rect_filled: 0,
             pipe_rect_outline: 0,
@@ -82,6 +87,7 @@ class MetalSession:
             pipe_blit: 0,
             pipe_indexed_fill: 0,
             pipe_glyph_atlas_blit: 0,
+            pipe_font_atlas_composite: 0,
             ref_count: 0,
             is_initialized: false,
             generation: 0,
@@ -140,6 +146,11 @@ class MetalSession:
         # MetalBackend.draw_text() checks pipe_glyph_atlas_blit directly and
         # falls through to the CPU-lane mirror when it is 0.
         self.pipe_glyph_atlas_blit = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_glyph_atlas_blit")
+        # The portable font module remains optional so it cannot disable the
+        # existing Metal renderer on an older compiler/runtime.
+        self.font_shader_lib = metal_sffi_compile_shader(self.device, font_atlas_composite_metal_source())
+        if self.font_shader_lib != 0:
+            self.pipe_font_atlas_composite = metal_sffi_create_compute_pipeline(self.device, self.font_shader_lib, FONT_ATLAS_COMPOSITE_ENTRY)
         self.ref_count = 1
         self.is_initialized = true
         self.last_error = 0
@@ -164,6 +175,16 @@ class MetalSession:
 
     me error_code() -> i64:
         self.last_error
+
+    me dispatch_font_atlas_composite(atlas: i64, dst: i64, params: [u8], thread_count: i64) -> bool:
+        if not self.is_valid() or self.pipe_font_atlas_composite == 0:
+            return false
+        if atlas <= 0 or dst <= 0 or params.len() != 52:
+            return false
+        if thread_count <= 0 or thread_count > 2147483647:
+            return false
+        val groups = (thread_count + 63) / 64
+        metal_sffi_run_compute_frame(self.command_queue, self.pipe_font_atlas_composite, atlas, dst, params, groups, 1, 1, 64, 1, 1)
 
     me error_message() -> text:
         """Return a human-readable description of the last init failure."""
@@ -213,6 +234,10 @@ class MetalSession:
             metal_sffi_destroy_pipeline(self.pipe_indexed_fill)
         if self.pipe_glyph_atlas_blit != 0:
             metal_sffi_destroy_pipeline(self.pipe_glyph_atlas_blit)
+        if self.pipe_font_atlas_composite != 0:
+            metal_sffi_destroy_pipeline(self.pipe_font_atlas_composite)
+        if self.font_shader_lib != 0:
+            metal_sffi_destroy_shader(self.font_shader_lib)
         if self.shader_lib != 0:
             metal_sffi_destroy_shader(self.shader_lib)
         if self.command_queue != 0:
@@ -232,6 +257,8 @@ class MetalSession:
         self.pipe_blit = 0
         self.pipe_indexed_fill = 0
         self.pipe_glyph_atlas_blit = 0
+        self.pipe_font_atlas_composite = 0
+        self.font_shader_lib = 0
         self.shader_lib = 0
         self.command_queue = 0
         self.device = 0

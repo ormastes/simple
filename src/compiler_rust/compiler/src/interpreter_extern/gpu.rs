@@ -1739,6 +1739,16 @@ pub fn rt_opencl_write_buffer_fn(args: &[Value]) -> Result<Value, CompileError> 
     Ok(Value::Bool(false))
 }
 
+/// `rt_opencl_write_buffer_at(queue: i64, buffer: i64, host_ptr: i64, size: i64, offset: i64) -> bool`
+pub fn rt_opencl_write_buffer_at_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _queue = arg_i64(args, 0, "rt_opencl_write_buffer_at", 5)?;
+    let _buffer = arg_i64(args, 1, "rt_opencl_write_buffer_at", 5)?;
+    let _host_ptr = arg_i64(args, 2, "rt_opencl_write_buffer_at", 5)?;
+    let _size = arg_i64(args, 3, "rt_opencl_write_buffer_at", 5)?;
+    let _offset = arg_i64(args, 4, "rt_opencl_write_buffer_at", 5)?;
+    Ok(Value::Bool(false))
+}
+
 /// `rt_opencl_read_buffer(queue: i64, buffer: i64, host_ptr: i64, size: i64) -> bool`
 pub fn rt_opencl_read_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
     let _queue = arg_i64(args, 0, "rt_opencl_read_buffer", 4)?;

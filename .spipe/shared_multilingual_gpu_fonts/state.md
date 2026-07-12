@@ -374,3 +374,50 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   suffixed near miss). Higher-model re-review passed source, tests, and the
   manually synchronized 30-scenario unit manual. Static review PASS; executable
   Simple/docgen and device evidence remain unrun.
+- OpenCL dirty-atlas slice: Spark traced `FontRenderBatch.dirty_rects` through
+  Engine2D and found every changed generation still transferred the full 4 MiB
+  atlas. Higher-model review selected one offset-aware sibling of the existing
+  OpenCL write primitive. Consecutive generations now upload validated dirty
+  rows only; allocation, invalidation, gaps, empty/invalid metadata, and failed
+  partial writes invalidate the generation so the next attempt full-uploads.
+  An unconditional decision check distinguishes 4 dirty bytes from allocation,
+  gap, invalid, and empty full-upload cases; conditional device coverage checks
+  that old and newly uploaded glyph pixels both survive. This is static
+  implementation evidence only; no Simple/native throughput claim was made.
+- OpenCL dirty-atlas review: both Spark lanes and the higher-capability reviewer
+  passed the unconditional upload decision, C bounds/pointer math, generation
+  recovery, Rust/SFFI registration, conditional device oracle, guide/SPipe
+  wording, and manually synchronized 9/8-scenario unit manuals. C syntax and
+  Rust formatting checks passed; executable Simple/docgen remains unrun.
+- coverage policy resolver: Spark compared real CUDA/Metal runtime integration
+  with language acceptance; higher review rejected both backend slices without
+  hardware execution and reduced registry work to one exact fail-closed lookup.
+  `selected_font_coverage_cell` returns the canonical matrix cell or `nil` for
+  unknown axes. It does not turn witness metadata into a loadable face and does
+  not change the 0 native / 0 fallback matrix.
+- coverage resolver review: both Spark lanes and the higher-capability reviewer
+  passed exact optional lookup syntax, status-first witness gating, four focused
+  assertions, unchanged 0/0/26/74 counts, guide/SPipe wording, and the manually
+  synchronized five-scenario unit manual. Static PASS; Simple/docgen unrun.
+- CUDA font runtime slice: higher review froze one bounds-checked PTX companion
+  in the existing single CUDA module, a 15-slot/120-byte pointer ABI, persistent
+  device atlas generation, typed Engine2D routing, and synchronized-prefix
+  mirror parity. Three Spark lanes implemented PTX, ABI, and backend/Engine
+  wiring; the existing atlas alpha extractor moved to the shared text helper
+  with its Engine compatibility wrapper retained. CUDA full-uploads changed
+  atlas generations; compiler CUDA C emission remains separate planning source.
+  No CUDA device or Simple command ran, so runtime correctness is not promoted.
+- CUDA runtime review: the extracted PTX companion assembled successfully with
+  CUDA 13 `ptxas` for `sm_75`; C runtime syntax and Rust formatting checks also
+  passed. Both Spark re-reviews and the higher-capability re-review passed the
+  private 2×u64+13×s64 ABI, i64 framebuffer bound, atlas lifecycle, per-quad
+  synchronization/mirror prefix, typed routing, 14-scenario manual, and strict
+  claim boundary. CUDA device execution remains pending.
+- Metal font runtime slice: two Spark audits and higher review froze exact
+  common MSL reuse, an optional MetalSession-owned library/pipeline, the existing
+  leak-free `rt_metal_run_compute_frame` seam, a 13-word/52-byte ABI, persistent
+  full-upload atlas generation, prefix mirror coherence, and native-only typed
+  Engine2D routing. Three Spark lanes implemented source, session/SFFI, and
+  backend/Engine pieces; a convergence refactor removed duplicate backend
+  shader/pipeline ownership and manual command encoding. No macOS Metal or
+  Simple command ran, so native correctness is not promoted.

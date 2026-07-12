@@ -4,7 +4,7 @@
 
 use std.spec.{describe, it, expect}
 use std.gpu.engine2d.backend_probe.{BackendStatus}
-use std.gpu.engine2d.backend_opencl.{OpenClBackend, opencl_2d_generated_source}
+use std.gpu.engine2d.backend_opencl.{OpenClBackend, opencl_2d_generated_source, opencl_font_atlas_dirty_upload_bytes}
 use std.gpu.engine2d.engine.{Engine2D}
 use std.common.gpu.font_atlas_composite.{font_atlas_composite_opencl_source}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
@@ -31,6 +31,19 @@ describe "Engine2D OpenCL backend facade":
         expect(source).to_contain("__kernel void simple_2d_blit_nonzero_u32")
         expect(source).to_contain("__kernel void simple_2d_blit_alpha_u32")
         expect(source.ends_with(font_atlas_composite_opencl_source())).to_equal(true)
+
+    it "selects dirty bytes only for a consecutive valid atlas generation":
+        val rect = FontRenderQuad(codepoint: 66, byte_offset: 1, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 1, atlas_y: 0, color: 0u32)
+        val warm = FontRenderBatch(valid: true, atlas_width: 2, atlas_height: 1, atlas_pixels: [1u32, 2u32], quads: [], atlas_generation: 2, dirty_rects: [rect])
+        val gap = FontRenderBatch(valid: true, atlas_width: 2, atlas_height: 1, atlas_pixels: [1u32, 2u32], quads: [], atlas_generation: 4, dirty_rects: [rect])
+        val invalid = FontRenderBatch(valid: true, atlas_width: 2, atlas_height: 1, atlas_pixels: [1u32, 2u32], quads: [], atlas_generation: 2, dirty_rects: [FontRenderQuad(codepoint: 66, byte_offset: 1, dst_x: 0, dst_y: 0, width: 2, height: 1, atlas_x: 1, atlas_y: 0, color: 0u32)])
+        val empty = FontRenderBatch(valid: true, atlas_width: 2, atlas_height: 1, atlas_pixels: [1u32, 2u32], quads: [], atlas_generation: 2, dirty_rects: [])
+
+        expect(opencl_font_atlas_dirty_upload_bytes(warm, 1, false)).to_equal(4)
+        expect(opencl_font_atlas_dirty_upload_bytes(warm, -1, true)).to_equal(0)
+        expect(opencl_font_atlas_dirty_upload_bytes(gap, 2, false)).to_equal(0)
+        expect(opencl_font_atlas_dirty_upload_bytes(invalid, 1, false)).to_equal(0)
+        expect(opencl_font_atlas_dirty_upload_bytes(empty, 1, false)).to_equal(0)
 
     it "fails closed or initializes through the OpenCL render facade without CPU fallback":
         var backend = OpenClBackend.create()
@@ -90,17 +103,39 @@ describe "Engine2D OpenCL backend facade":
             backend.clear(0xff000000u32)
             val font_batch = FontRenderBatch(
                 valid: true,
-                atlas_width: 1,
+                atlas_width: 2,
                 atlas_height: 1,
-                atlas_pixels: [0x80000000u32],
+                atlas_pixels: [0x80000000u32, 0u32],
                 quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 1, dst_y: 1, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0x80ff0000u32)],
                 atlas_generation: 1,
-                dirty_rects: []
+                dirty_rects: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0u32)]
             )
             expect(backend.draw_font_batch(0, 0, font_batch)).to_equal(1)
+            val warm_batch = FontRenderBatch(
+                valid: true,
+                atlas_width: 2,
+                atlas_height: 1,
+                atlas_pixels: [0x80000000u32, 0x80000000u32],
+                quads: [FontRenderQuad(codepoint: 66, byte_offset: 1, dst_x: 2, dst_y: 1, width: 1, height: 1, atlas_x: 1, atlas_y: 0, color: 0x8000ff00u32)],
+                atlas_generation: 2,
+                dirty_rects: [FontRenderQuad(codepoint: 66, byte_offset: 1, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 1, atlas_y: 0, color: 0u32)]
+            )
+            expect(backend.draw_font_batch(0, 0, warm_batch)).to_equal(1)
+            val gap_batch = FontRenderBatch(
+                valid: true,
+                atlas_width: 2,
+                atlas_height: 1,
+                atlas_pixels: [0x80000000u32, 0xff000000u32],
+                quads: [FontRenderQuad(codepoint: 67, byte_offset: 2, dst_x: 3, dst_y: 1, width: 1, height: 1, atlas_x: 1, atlas_y: 0, color: 0x800000ffu32)],
+                atlas_generation: 4,
+                dirty_rects: [FontRenderQuad(codepoint: 67, byte_offset: 2, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0u32)]
+            )
+            expect(backend.draw_font_batch(0, 0, gap_batch)).to_equal(1)
             val font_readback = backend.read_pixels_with_source()
             expect(font_readback.source).to_equal("device_readback")
             expect(font_readback.pixels[5]).to_equal(0xff400000u32)
+            expect(font_readback.pixels[6]).to_equal(0xff004000u32)
+            expect(font_readback.pixels[7]).to_equal(0xff000080u32)
         else:
             expect(backend.last_probe.status).to_equal(BackendStatus.Unavailable)
             expect(backend.last_probe.has_graphics).to_equal(false)

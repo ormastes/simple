@@ -36,6 +36,9 @@ must not be presented as native coverage for every language.
 Here `native` means an accepted direct category face, not native GPU execution;
 `fallback` means an explicit edge to another accepted face. Codepoint coverage
 alone proves neither status.
+Use `selected_font_coverage_cell(language, category)` for exact policy lookup;
+unknown axes return `nil`. Do not load `witness_family` while the cell is
+`unavailable` or `not-designed-for-script`.
 
 ## Pinned candidate assets
 
@@ -142,9 +145,20 @@ Portable backend planning emits a separate optimization artifact and font
 companion artifact for each selected target. The font path uses the
 `_font_atlas` suffix and requires the versioned composite entry; it is not
 concatenated with the optimization module (especially for WGSL, whose bindings
-conflict). OpenCL is the first
-runtime adapter: `Engine2D.draw_text` uploads the shared atlas when its
-generation changes, binds the exact long-scalar ABI, submits one versioned
+conflict). CUDA, native Metal, and OpenCL are the implemented runtime adapters.
+CUDA appends a hand-written bounds-checked PTX companion to the existing single
+2D module, uploads the atlas on generation change, marshals the exact 15-slot
+pointer ABI, synchronizes each submitted quad, and mirrors only completed
+prefixes. This PTX runtime provider is separate from compiler-emitted CUDA C.
+Metal compiles the exact common MSL helper as an optional separate pipeline,
+uses the fixed 13-word/52-byte parameter block, full-uploads changed atlas
+generations, and dispatches completed 64-thread groups per quad. Only native
+Metal receives the typed batch path; `metal-on-vulkan` remains excluded.
+OpenCL `Engine2D.draw_text` uploads the shared atlas when its
+generation changes. Its first/reset upload is full; consecutive generations
+with valid dirty rectangles use checked per-row buffer offsets, while gaps or
+invalid/empty metadata fail safe to a full upload. It then binds the exact
+long-scalar ABI, submits one versioned
 composite launch per quad, synchronizes, and falls back from the first
 unsubmitted quad.
 
@@ -170,10 +184,10 @@ Missing hardware is `unavailable`, never a simulated pass.
 ## 2D and 3D status
 
 - **2D:** `Engine2D.load_font` and `draw_text` are the supported public surface.
-  OpenCL now attempts the shared versioned atlas-composite kernel first and
-  retains per-glyph `draw_image_blend` for the unsubmitted suffix. Other
-  backends retain image-blit compatibility. Source wiring alone is not device
-  proof.
+  CUDA, native Metal, and OpenCL attempt their shared versioned atlas-composite
+  kernels first and retain per-glyph `draw_image_blend` for the unsubmitted
+  suffix. Other backends retain image-blit compatibility. Source wiring alone
+  is not device proof.
 - **3D:** `load_font`, `draw_text_hud`, and `draw_text_world` consume the same
   batch through the CPU fallback; `draw_glyph_run_hud` and
   `draw_glyph_run_world` do the same for neutral runs, and world points use the

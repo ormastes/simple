@@ -540,6 +540,9 @@ observe a pass:
   Before native promotion, the exact Pure Simple shaping/corpus gate must accept
   the face for the language/script; a codepoint raster/layout witness alone is
   diagnostic and leaves the matrix cell `unavailable`.
+  Resolve matrix policy by exact language and category. Unknown axes fail
+  closed, and `witness_family` must not be treated as a loadable asset unless
+  the resolved status is `native` or `fallback`.
   Supplementary-plane/emoji claims must exercise a real format-12 cmap witness
   (currently `U+1F600`) and prove the selected run face owns the returned glyph
   ID; parser-only lookup is not fallback acceptance.
@@ -561,9 +564,18 @@ observe a pass:
   Distinguish GPU atlas composition from CPU glyph rasterization and from direct
   GPU outline rasterization.
   The OpenCL adapter must additionally prove the versioned shared source,
-  generation-keyed atlas upload with load/unload invalidation, exact 0..14
+  generation-keyed atlas upload with load/unload invalidation, checked dirty-row
+  offsets after the initial full upload, full upload on reset/gap/invalid dirty
+  metadata, exact 0..14
   argument binding, submit/synchronize, and `device_readback`; conditional unit
   execution is not a release PASS when the device is unavailable.
+  The CUDA adapter must prove the versioned PTX entry is in the same loaded 2D
+  module, all 15 value/pointer slots are ordered exactly, atlas generation is
+  invalidated on font replacement, each accepted prefix is synchronized before
+  CPU-mirror parity is updated, and final pixels come from `device_readback`.
+  The Metal adapter must prove compiler/runtime source equality, the optional
+  native pipeline, exact 13-word/52-byte ABI, native-only typed routing (never
+  `metal-on-vulkan`), completed prefix dispatch, and device-origin readback.
 - **CLDR ranking replay.** A release top-language claim requires pinned
   `common/supplemental/{supplementalData,supplementalMetadata,likelySubtags}.xml`
   from the selected CLDR object, verified source hashes, two byte-identical

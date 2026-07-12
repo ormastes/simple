@@ -6,6 +6,12 @@ extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
 extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64) -> i64
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 
+val CUDA_FONT_ARG_COUNT: i64 = 15
+val CUDA_FONT_ARG_BYTES: i64 = CUDA_FONT_ARG_COUNT * 8
+# Private runtime PTX ABI: two pointer-valued u64 slots followed by thirteen
+# s64 slots. Unsigned dimensions/color are zero-extended; destination offsets
+# remain signed. This is intentionally distinct from compiler-emitted CUDA C.
+
 fn cuda_launch_args_read_i32(addr: i64, offset: i64) -> i32:
     rt_ptr_read_i32(addr, offset)
 
@@ -152,6 +158,34 @@ fn _write_rounded_rect_launch_args(val_ptr: i64, args_ptr: i64, d_framebuffer: i
     cuda_launch_args_write_i64(args_ptr, 48, val_ptr + 48)
     cuda_launch_args_write_i64(args_ptr, 56, val_ptr + 56)
     cuda_launch_args_write_i64(args_ptr, 64, val_ptr + 64)
+
+fn _write_font_atlas_composite_launch_args(
+    val_ptr: i64, args_ptr: i64, d_atlas: i64, d_framebuffer: i64,
+    atlas_width: u32, atlas_height: u32, atlas_count: u32,
+    atlas_x: u32, atlas_y: u32, quad_width: u32, quad_height: u32,
+    dst_width: u32, dst_height: u32, dst_count: u32,
+    dst_x: i32, dst_y: i32, color: u32
+):
+    cuda_launch_args_write_i64(val_ptr, 0, d_atlas)
+    cuda_launch_args_write_i64(val_ptr, 8, d_framebuffer)
+    cuda_launch_args_write_i64(val_ptr, 16, _i64_from_u32(atlas_width))
+    cuda_launch_args_write_i64(val_ptr, 24, _i64_from_u32(atlas_height))
+    cuda_launch_args_write_i64(val_ptr, 32, _i64_from_u32(atlas_count))
+    cuda_launch_args_write_i64(val_ptr, 40, _i64_from_u32(atlas_x))
+    cuda_launch_args_write_i64(val_ptr, 48, _i64_from_u32(atlas_y))
+    cuda_launch_args_write_i64(val_ptr, 56, _i64_from_u32(quad_width))
+    cuda_launch_args_write_i64(val_ptr, 64, _i64_from_u32(quad_height))
+    cuda_launch_args_write_i64(val_ptr, 72, _i64_from_u32(dst_width))
+    cuda_launch_args_write_i64(val_ptr, 80, _i64_from_u32(dst_height))
+    cuda_launch_args_write_i64(val_ptr, 88, _i64_from_u32(dst_count))
+    cuda_launch_args_write_i64(val_ptr, 96, _i64(dst_x))
+    cuda_launch_args_write_i64(val_ptr, 104, _i64(dst_y))
+    cuda_launch_args_write_i64(val_ptr, 112, _i64_from_u32(color))
+    var index: i64 = 0
+    while index < CUDA_FONT_ARG_COUNT:
+        val offset = index * 8
+        cuda_launch_args_write_i64(args_ptr, offset, val_ptr + offset)
+        index = index + 1
 
 fn _write_u32_pixels_to_host(ptr: i64, pixels: [u32], count: i32):
     var idx = 0

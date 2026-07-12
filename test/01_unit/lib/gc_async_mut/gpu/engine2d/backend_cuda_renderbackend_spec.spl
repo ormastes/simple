@@ -7,6 +7,7 @@ use std.gpu.engine2d.backend_probe.{BackendStatus}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
 use std.gpu.engine2d.engine.{Engine2D}
 use std.gpu.engine2d.helpers_text.{text_render_to_buf}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 
 describe "CudaBackend RenderBackend facade":
 
@@ -37,6 +38,44 @@ describe "CudaBackend RenderBackend facade":
         expect(source).to_contain("kernel_draw_image_nonzero")
         expect(source).to_contain("param_width")
         expect(source).to_contain("param_height")
+
+    it "embeds the bounds-checked shared font composite PTX entry":
+        val source = cuda_2d_ptx_source()
+        val signature = ".visible .entry simple_font_atlas_composite_v1_u32(\n    .param .u64 param_atlas,\n    .param .u64 param_dst,\n    .param .s64 param_atlas_width,\n    .param .s64 param_atlas_height,\n    .param .s64 param_atlas_count,\n    .param .s64 param_atlas_x,\n    .param .s64 param_atlas_y,\n    .param .s64 param_quad_width,\n    .param .s64 param_quad_height,\n    .param .s64 param_dst_width,\n    .param .s64 param_dst_height,\n    .param .s64 param_dst_count,\n    .param .s64 param_dst_x,\n    .param .s64 param_dst_y,\n    .param .s64 param_color"
+
+        expect(source).to_contain(signature)
+        expect(source).to_contain("setp.ne.s64 %p0, %rd5, %rd16")
+        expect(source).to_contain("setp.ge.s64 %p1, %rd28, %rd12")
+        expect(source).to_contain("sub.u32 %r11, 255, %r8")
+        expect(source).to_contain("mad.lo.u32 %r13, %r14, %r11, %r13")
+
+    it "fails closed for invalid font batches and invalidates atlas generations":
+        var backend = CudaBackend.create()
+        val invalid = FontRenderBatch(valid: false, atlas_width: 0, atlas_height: 0, atlas_pixels: [], quads: [], atlas_generation: 0, dirty_rects: [])
+
+        expect(backend.draw_font_batch(0, 0, invalid)).to_equal(0)
+        backend.font_atlas_generation = 7
+        backend.invalidate_font_atlas()
+        expect(backend.font_atlas_generation).to_equal(-1)
+
+    it "conditionally composites a shared atlas through CUDA device readback":
+        var backend = CudaBackend.create()
+        val ok = backend.init(4, 4)
+        if ok:
+            backend.clear(0xff000000u32)
+            val batch = FontRenderBatch(
+                valid: true, atlas_width: 1, atlas_height: 1,
+                atlas_pixels: [0x80000000u32],
+                quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 1, dst_y: 1, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0x80ff0000u32)],
+                atlas_generation: 1, dirty_rects: []
+            )
+            expect(backend.draw_font_batch(0, 0, batch)).to_equal(1)
+            val readback = backend.read_pixels_with_source()
+            expect(readback.source).to_equal("device_readback")
+            expect(readback.pixels[5]).to_equal(0xff400000u32)
+        else:
+            expect(backend.initialized).to_equal(false)
+        backend.shutdown()
 
     it "does not claim initialized when init fails":
         var backend = CudaBackend.create()

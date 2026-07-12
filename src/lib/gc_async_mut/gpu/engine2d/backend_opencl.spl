@@ -247,6 +247,20 @@ fn _i64(v: i32) -> i64:
 fn _i64_from_u32(v: u32) -> i64:
     v as i64
 
+fn opencl_font_atlas_dirty_upload_bytes(batch: FontRenderBatch, current_generation: i64, allocated: bool) -> i64:
+    if allocated or current_generation + 1 != batch.atlas_generation or batch.dirty_rects.len() == 0:
+        return 0
+    var bytes: i64 = 0
+    for rect in batch.dirty_rects:
+        if rect.width <= 0 or rect.height <= 0 or rect.atlas_x < 0 or rect.atlas_y < 0:
+            return 0
+        if rect.atlas_x > batch.atlas_width or rect.atlas_y > batch.atlas_height:
+            return 0
+        if rect.width > batch.atlas_width - rect.atlas_x or rect.height > batch.atlas_height - rect.atlas_y:
+            return 0
+        bytes = bytes + _i64(rect.width) * _i64(rect.height) * 4
+    bytes
+
 fn _read_u32_pixels_from_host(ptr: i64, count: i32) -> [u32]:
     var out: [u32] = [0u32; count]
     var idx = 0
@@ -476,6 +490,24 @@ class OpenClBackend:
                 self.session.free(d_pixels)
         false
 
+    me _write_font_atlas_dirty_rects(batch: FontRenderBatch) -> bool:
+        for rect in batch.dirty_rects:
+            val row_bytes = _i64(rect.width) * 4
+            var row = 0
+            while row < rect.height:
+                val pixel_offset = _i64(rect.atlas_y + row) * _i64(batch.atlas_width) + _i64(rect.atlas_x)
+                val byte_offset = pixel_offset * 4
+                if not self.session.write_buffer_at(
+                    self.font_atlas_buffer,
+                    self.font_atlas_host_ptr + byte_offset,
+                    row_bytes,
+                    byte_offset
+                ):
+                    self.font_atlas_generation = -1
+                    return false
+                row = row + 1
+        true
+
     me _upload_font_atlas(batch: FontRenderBatch) -> bool:
         if not batch.valid or batch.atlas_width <= 0 or batch.atlas_height <= 0:
             return false
@@ -484,6 +516,7 @@ class OpenClBackend:
             return false
         val pixel_count = pixel_count_i64 as i32
         val required_bytes = pixel_count_i64 * 4
+        var allocated = false
         if self.font_atlas_buffer == 0 or self.font_atlas_host_ptr == 0 or self.font_atlas_bytes != required_bytes:
             val new_host = opencl_host_alloc(required_bytes)
             if new_host == 0:
@@ -500,10 +533,18 @@ class OpenClBackend:
             self.font_atlas_host_ptr = new_host
             self.font_atlas_bytes = required_bytes
             self.font_atlas_generation = -1
+            allocated = true
         if self.font_atlas_generation == batch.atlas_generation:
             return true
         _write_u32_pixels_to_host(self.font_atlas_host_ptr, batch.atlas_pixels, pixel_count)
+        val dirty_upload_bytes = opencl_font_atlas_dirty_upload_bytes(batch, self.font_atlas_generation, allocated)
+        if dirty_upload_bytes > 0:
+            if self._write_font_atlas_dirty_rects(batch):
+                self.font_atlas_generation = batch.atlas_generation
+                return true
+            return false
         if not self.session.write_buffer(self.font_atlas_buffer, self.font_atlas_host_ptr, required_bytes):
+            self.font_atlas_generation = -1
             return false
         self.font_atlas_generation = batch.atlas_generation
         true

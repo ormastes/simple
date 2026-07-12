@@ -8,10 +8,11 @@ use std.gpu.engine2d.backend.{RenderBackend, Engine2DReadback, engine2d_readback
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 use std.gpu.engine2d.backend_cuda_kernels.{cuda_2d_ptx_source}
-use std.gpu.engine2d.backend_cuda_launch_args.{_i64, _i64_from_u32, cuda_launch_args_read_i32, cuda_launch_args_write_i64, _read_u32_pixels_from_host, _write_clear_launch_args, _write_rect_launch_args, _write_image_launch_args, _write_gradient_launch_args, _write_line_launch_args, _write_circle_launch_args, _write_rounded_rect_launch_args, _write_u32_pixels_to_host}
+use std.gpu.engine2d.backend_cuda_launch_args.{CUDA_FONT_ARG_BYTES, _i64, _i64_from_u32, cuda_launch_args_read_i32, cuda_launch_args_write_i64, _read_u32_pixels_from_host, _write_clear_launch_args, _write_rect_launch_args, _write_image_launch_args, _write_gradient_launch_args, _write_line_launch_args, _write_circle_launch_args, _write_rounded_rect_launch_args, _write_font_atlas_composite_launch_args, _write_u32_pixels_to_host}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
 use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count, cuda_device_name, cuda_memcpy_htod, cuda_memcpy_dtoh, cuda_launch_kernel, CUDA_SUCCESS}
-use std.gpu.engine2d.helpers_text.{text_transparent_blit_buffer}
+use std.gpu.engine2d.helpers_text.{font_atlas_subrect_pixels, text_transparent_blit_buffer}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
 
 extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64, size: i64)
@@ -358,6 +359,11 @@ class CudaBackend:
     clear_args_ptr: i64
     rect_val_ptr: i64
     rect_args_ptr: i64
+    font_val_ptr: i64
+    font_args_ptr: i64
+    d_font_atlas: i64
+    font_atlas_bytes: i64
+    font_atlas_generation: i64
     readback_ptr: i64
     last_probe: BackendProbeResult
 
@@ -373,6 +379,11 @@ class CudaBackend:
             clear_args_ptr: 0,
             rect_val_ptr: 0,
             rect_args_ptr: 0,
+            font_val_ptr: 0,
+            font_args_ptr: 0,
+            d_font_atlas: 0,
+            font_atlas_bytes: 0,
+            font_atlas_generation: -1,
             readback_ptr: 0,
             last_probe: BackendProbeResult.unavailable("cuda", "not probed")
         )
@@ -446,8 +457,10 @@ class CudaBackend:
         self.clear_args_ptr = cuda_backend_alloc(CUDA_2D_CLEAR_ARG_BYTES)
         self.rect_val_ptr = cuda_backend_alloc(72)
         self.rect_args_ptr = cuda_backend_alloc(72)
+        self.font_val_ptr = cuda_backend_alloc(CUDA_FONT_ARG_BYTES)
+        self.font_args_ptr = cuda_backend_alloc(CUDA_FONT_ARG_BYTES)
         self.readback_ptr = cuda_backend_alloc(bytes)
-        if self.clear_val_ptr == 0 or self.clear_args_ptr == 0 or self.rect_val_ptr == 0 or self.rect_args_ptr == 0 or self.readback_ptr == 0:
+        if self.clear_val_ptr == 0 or self.clear_args_ptr == 0 or self.rect_val_ptr == 0 or self.rect_args_ptr == 0 or self.font_val_ptr == 0 or self.font_args_ptr == 0 or self.readback_ptr == 0:
             self._free_launch_buffers()
             return false
         cuda_backend_write_i64(self.clear_args_ptr, 0, self.clear_val_ptr)
@@ -477,12 +490,23 @@ class CudaBackend:
         if self.rect_args_ptr != 0:
             cuda_backend_free(self.rect_args_ptr, 72)
             self.rect_args_ptr = 0
+        if self.font_val_ptr != 0:
+            cuda_backend_free(self.font_val_ptr, CUDA_FONT_ARG_BYTES)
+            self.font_val_ptr = 0
+        if self.font_args_ptr != 0:
+            cuda_backend_free(self.font_args_ptr, CUDA_FONT_ARG_BYTES)
+            self.font_args_ptr = 0
         if self.readback_ptr != 0:
             cuda_backend_free(self.readback_ptr, self.framebuffer_bytes)
             self.readback_ptr = 0
 
     me _cleanup_cuda_surface():
         self._free_launch_buffers()
+        if self.d_font_atlas != 0:
+            self.session.free(self.d_font_atlas)
+            self.d_font_atlas = 0
+        self.font_atlas_bytes = 0
+        self.font_atlas_generation = -1
         if self.d_framebuffer != 0:
             self.session.free(self.d_framebuffer)
             self.d_framebuffer = 0
@@ -545,6 +569,78 @@ class CudaBackend:
             if d_pixels != 0:
                 self.session.free(d_pixels)
         false
+
+    me _upload_font_atlas(batch: FontRenderBatch) -> bool:
+        if not batch.valid or batch.atlas_width <= 0 or batch.atlas_height <= 0:
+            return false
+        val pixel_count = _i64(batch.atlas_width) * _i64(batch.atlas_height)
+        if pixel_count <= 0 or pixel_count > 2147483647 or batch.atlas_pixels.len() != pixel_count:
+            return false
+        val required_bytes = pixel_count * 4
+        if self.d_font_atlas == 0 or self.font_atlas_bytes != required_bytes:
+            val new_atlas = self.session.alloc(required_bytes)
+            if new_atlas == 0:
+                return false
+            if self.d_font_atlas != 0:
+                self.session.free(self.d_font_atlas)
+            self.d_font_atlas = new_atlas
+            self.font_atlas_bytes = required_bytes
+            self.font_atlas_generation = -1
+        if self.font_atlas_generation == batch.atlas_generation:
+            return true
+        val host_atlas = cuda_backend_alloc(required_bytes)
+        if host_atlas == 0:
+            return false
+        _write_u32_pixels_to_host(host_atlas, batch.atlas_pixels, pixel_count as i32)
+        val upload_rc = cuda_memcpy_htod(self.d_font_atlas, host_atlas, required_bytes)
+        cuda_backend_free(host_atlas, required_bytes)
+        if upload_rc != CUDA_SUCCESS:
+            self.font_atlas_generation = -1
+            return false
+        self.font_atlas_generation = batch.atlas_generation
+        true
+
+    me invalidate_font_atlas():
+        self.font_atlas_generation = -1
+
+    me draw_font_batch(origin_x: i32, origin_y: i32, batch: FontRenderBatch) -> i64:
+        if not batch.valid or batch.quads.len() == 0 or not self.initialized:
+            return 0
+        if self.mirror.clip_enabled or self.mirror.mask_buf.len() != 0:
+            return 0
+        if not self._upload_font_atlas(batch):
+            return 0
+        val dst_count = _i64(self.width()) * _i64(self.height())
+        if dst_count <= 0 or dst_count > 2147483647:
+            return 0
+        var submitted: i64 = 0
+        while submitted < batch.quads.len():
+            val quad = batch.quads[submitted]
+            val total = _i64(quad.width) * _i64(quad.height)
+            if total <= 0:
+                return submitted
+            val pixels = font_atlas_subrect_pixels(
+                batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
+            )
+            if pixels.len() != total:
+                return submitted
+            _write_font_atlas_composite_launch_args(
+                self.font_val_ptr, self.font_args_ptr, self.d_font_atlas, self.d_framebuffer,
+                batch.atlas_width as u32, batch.atlas_height as u32, batch.atlas_pixels.len() as u32,
+                quad.atlas_x as u32, quad.atlas_y as u32, quad.width as u32, quad.height as u32,
+                self.width() as u32, self.height() as u32, dst_count as u32,
+                origin_x + quad.dst_x, origin_y + quad.dst_y, quad.color
+            )
+            val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+            val rc = self.session.launch_kernel_args("simple_font_atlas_composite_v1_u32", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.font_args_ptr)
+            if rc != CUDA_SUCCESS:
+                return submitted
+            if self.session.sync() != CUDA_SUCCESS:
+                return submitted
+            self.mirror.draw_image_blend(origin_x + quad.dst_x, origin_y + quad.dst_y, quad.width, quad.height, pixels)
+            submitted = submitted + 1
+        submitted
 
 impl RenderBackend for CudaBackend:
     fn name() -> text:

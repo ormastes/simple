@@ -30,7 +30,7 @@ plugin interface, renderer factory, or new native dependency.
 | `src/compiler/70.backend/backend/gpu_generated_2d_contract.spl` | Version, symbol, compile-plan, and artifact evidence. |
 | `src/lib/gc_async_mut/gpu/engine2d/engine.spl` | Existing `load_font`/`draw_text` adapter and backend submission. |
 | `src/lib/gc_async_mut/gpu/engine3d/engine.spl` | Texture/pipeline/draw owner; gains only HUD/world text entrypoints. |
-| `src/lib/gc_async_mut/gpu/engine2d/opencl_session.spl` | Exact OpenCL font ABI binding and runtime-selected-workgroup launch; other target adapters remain gates. |
+| `src/lib/gc_async_mut/gpu/engine2d/opencl_session.spl` | Exact OpenCL font ABI binding, offset-aware atlas writes, and runtime-selected-workgroup launch; other target adapters remain gates. |
 
 Compatibility re-export trees continue to expose the canonical
 `nogc_sync_mut.text_layout` values. Generated copies must not acquire private
@@ -90,10 +90,10 @@ consumer sibling. Everything else is tree-private.
 | Raw layer | Catalog node | Material node | Artifact node |
 |---|---|---|---|
 | Pinned data | Parent: validated generated rows; next: immutable catalog lookup | — | — |
-| Font registry | Parent: language/category/asset result; next: `FontRenderer` selection input | — | — |
+| Font registry | Parent: exact language/category policy cell; next: accepted asset binding | — | — |
 | Renderer/shaper | — | Parent: `FontRenderBatch`; next: Engine2D/Engine3D batch consumption | — |
 | Compiler emitter | — | — | Parent: paired optimization/font `PortableComputeArtifact` plans; next: toolchain/runtime adapters |
-| Engine2D | — | Parent: existing `draw_text`; next: OpenCL atlas adapter | Parent: conditional device readback; next: required verifier |
+| Engine2D | — | Parent: existing `draw_text`; next: CUDA/Metal/OpenCL atlas adapters | Parent: conditional device readback; next: required verifier |
 | Engine3D | — | Parent: `draw_text_hud`/`draw_text_world`; next: none | Parent: native texture/draw evidence; next: verifier |
 
 ## Target promotion flow
@@ -109,7 +109,9 @@ promotion contract, not current native-execution evidence.
    glyphs, updates only dirty atlas regions, and returns quads plus immutable
    atlas/cache identity.
 3. The chosen engine creates or reuses a texture for that atlas generation and
-   uploads dirty regions only.
+   uploads dirty regions only. OpenCL performs row-offset writes after the
+   initial full upload; allocation, invalidation, generation gaps, empty, or
+   invalid dirty metadata fall back to a full upload.
 4. A versioned emitted program samples alpha coverage and composes color. Source
    emission and compilation are recorded separately from execution.
 5. Native promotion requires nonzero texture/sampler/pipeline handles, payload

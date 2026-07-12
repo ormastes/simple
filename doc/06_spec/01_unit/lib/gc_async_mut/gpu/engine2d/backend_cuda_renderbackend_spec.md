@@ -27,7 +27,7 @@ backend_cuda_renderbackend_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -333,6 +333,33 @@ if probe.status != BackendStatus.Initialized:
 
 </details>
 
+### CUDA font PTX addendum
+
+> Manually synchronized on 2026-07-12; no Simple/docgen or CUDA device command
+> ran in this session.
+
+The added scenarios require the single CUDA 2D PTX module to contain the exact
+15-parameter `simple_font_atlas_composite_v1_u32` entry, dimensional/count
+bounds, and integer source-over operations; reject invalid batches and reset
+atlas generations; and conditionally require exact device readback when CUDA is
+available. An unavailable device remains an honest non-promotion result.
+
+#### embeds the bounds-checked shared font composite PTX entry
+
+Checks the exact 15-parameter PTX signature, dimensional/count guards, and
+integer source-over instructions in the single loaded CUDA module.
+
+#### fails closed for invalid font batches and invalidates atlas generations
+
+Rejects an invalid batch before launch and proves font replacement can force
+the next atlas generation upload.
+
+#### conditionally composites a shared atlas through CUDA device readback
+
+When CUDA initializes, clears a 4×4 device framebuffer, composites one 1×1
+atlas quad, and requires exact `device_readback` pixel `0xff400000`. When CUDA is
+unavailable, the scenario records the unavailable state without claiming pass.
+
 ## At a Glance
 
 | Field | Value |
@@ -340,8 +367,8 @@ if probe.status != BackendStatus.Initialized:
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-12 (manual static synchronization) |
+| Generator | `simple spipe-docgen` baseline; manual addendum pending docgen |
 
 ## Overview
 
@@ -352,8 +379,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

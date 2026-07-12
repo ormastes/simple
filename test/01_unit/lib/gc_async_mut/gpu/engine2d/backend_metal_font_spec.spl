@@ -1,0 +1,44 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_metal_font.spl 80%
+
+use spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
+use std.gpu.engine2d.backend_metal_font.{METAL_FONT_PARAMS_BYTES, MetalFontBackendState, metal_font_atlas_composite_params, metal_font_destination_coordinate}
+
+describe "Metal font atlas companion":
+    it "packs the frozen 13-word ABI into 52 bytes":
+        expect(METAL_FONT_PARAMS_BYTES).to_equal(52)
+        val p = metal_font_atlas_composite_params(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, -11, -12, 0xAABBCCDDu32)
+        expect(p.len()).to_equal(52)
+        expect(p[0]).to_equal(1)
+        expect(p[40]).to_equal(0xF5)
+        expect(p[43]).to_equal(0xFF)
+        expect(p[48]).to_equal(0xDD)
+        expect(p[51]).to_equal(0xAA)
+
+    it "starts atlas state invalidated":
+        val state = MetalFontBackendState.create()
+        expect(state.atlas_generation).to_equal(-1)
+        expect(state.atlas_buffer).to_equal(0)
+
+    it "rejects destination coordinate overflow before ABI packing":
+        expect(metal_font_destination_coordinate(10, -3).?).to_equal(7)
+        expect(metal_font_destination_coordinate(2147483647, 0).?).to_equal(2147483647)
+        expect(metal_font_destination_coordinate(-2147483648, 0).?).to_equal(-2147483648)
+        expect(metal_font_destination_coordinate(2147483647, 1)).to_be_nil()
+        expect(metal_font_destination_coordinate(-2147483648, -1)).to_be_nil()
+
+    it "preserves device framebuffer truth when no font quad is submitted":
+        var backend = MetalBackend.create()
+        backend.initialized = true
+        backend.gpu_frame_complete = true
+        backend.d_framebuffer = 1
+        val invalid = FontRenderBatch(valid: false, atlas_width: 0, atlas_height: 0, atlas_pixels: [], quads: [], atlas_generation: 0, dirty_rects: [])
+        expect(backend.draw_font_batch(0, 0, invalid)).to_equal(0)
+        expect(backend.gpu_frame_complete).to_equal(true)
+
+    it "wires the typed Metal font backend only into native Metal constructors":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+        expect(source).to_contain("metal_backend: metal, w: width")
+        expect(source).to_contain("w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: \"metal-on-vulkan\"")

@@ -799,6 +799,7 @@ int64_t  rt_opencl_create_kernel(int64_t program, const char* name);
 int64_t  rt_opencl_mem_alloc(int64_t context, int64_t size);
 bool     rt_opencl_mem_free(int64_t buffer);
 bool     rt_opencl_write_buffer(int64_t queue, int64_t buffer, int64_t host_ptr, int64_t size);
+bool     rt_opencl_write_buffer_at(int64_t queue, int64_t buffer, int64_t host_ptr, int64_t size, int64_t offset);
 bool     rt_opencl_read_buffer(int64_t queue, int64_t buffer, int64_t host_ptr, int64_t size);
 bool     rt_opencl_set_kernel_arg_i64(int64_t kernel, int64_t index, int64_t value);
 bool     rt_opencl_set_kernel_arg_buffer(int64_t kernel, int64_t index, int64_t buffer);

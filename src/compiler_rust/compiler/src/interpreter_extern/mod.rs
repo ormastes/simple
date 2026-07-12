@@ -1833,6 +1833,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_opencl_mem_alloc", gpu::rt_opencl_mem_alloc_fn);
     insert_simple!("rt_opencl_mem_free", gpu::rt_opencl_mem_free_fn);
     insert_simple!("rt_opencl_write_buffer", gpu::rt_opencl_write_buffer_fn);
+    insert_simple!("rt_opencl_write_buffer_at", gpu::rt_opencl_write_buffer_at_fn);
     insert_simple!("rt_opencl_read_buffer", gpu::rt_opencl_read_buffer_fn);
     insert_simple!("rt_opencl_set_kernel_arg_i64", gpu::rt_opencl_set_kernel_arg_i64_fn);
     insert_simple!(

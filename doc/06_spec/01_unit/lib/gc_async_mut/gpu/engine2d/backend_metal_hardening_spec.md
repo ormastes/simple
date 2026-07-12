@@ -27,7 +27,7 @@ backend_metal_hardening_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 36 | 36 | 0 | 0 |
+| 37 | 37 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -763,6 +763,15 @@ assert_equal(s.error_code(), 0)
 
 </details>
 
+#### font composite dispatch rejects invalid ABI inputs before SFFI
+
+The optional session path rejects a short parameter block, missing atlas
+buffer, zero threads, and a thread count above the frozen 32-bit limit before
+calling the Metal runtime.
+
+> Manually synchronized on 2026-07-12; no Simple/docgen or native Metal command
+> ran in this session.
+
 ## At a Glance
 
 | Field | Value |
@@ -770,8 +779,8 @@ assert_equal(s.error_code(), 0)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_metal_hardening_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-12 (manual static synchronization) |
+| Generator | `simple spipe-docgen` baseline; manual addendum pending docgen |
 
 ## Overview
 
@@ -787,8 +796,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 36 |
-| Active scenarios | 36 |
+| Total scenarios | 37 |
+| Active scenarios | 37 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

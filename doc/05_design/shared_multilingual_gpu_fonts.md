@@ -40,6 +40,11 @@ color, atlas generation/pixels, and dirty rectangles. The opt-in neutral
 generation token into the same renderer; it does not make cluster, language,
 full GSUB/GPOS, or complete BiDi claims.
 
+`selected_font_coverage_cell(language, category)` is the fail-closed policy
+lookup. Unknown axes return `nil`. A witness family is not loadable selection:
+callers may bind an asset only after the returned status is `native` or
+`fallback`, which currently leaves every cell unbound.
+
 `ShapedGlyph` now owns absolute source/cluster identity and current advance/
 offset values so reordering cannot detach metadata. `ShapedRun.language` is
 caller metadata (`und` when omitted); script direction remains a per-run flag,
@@ -105,11 +110,22 @@ remain promotion gates rather than fields fabricated on the artifact.
 A font-specific Vulkan SPIR-V contract remains required. Tests inspect source
 syntax and entry markers, but never call that execution evidence.
 
-Engine2D maps batch quads to the shared OpenCL atlas-composite launch when that
-backend is active, caching by atlas generation and invalidating on font
-replacement; an unsubmitted suffix uses the image/alpha route. Other backends
-retain image/alpha compatibility. Engine3D remains CPU HUD/world compatibility.
-Required native readback/promotion evidence and dirty-subrect uploads remain
+Engine2D maps batch quads to the shared CUDA, native Metal, or OpenCL atlas-composite launch
+when that backend is active, caching by atlas generation and invalidating on
+font replacement; an unsubmitted suffix uses the image/alpha route. CUDA uses
+the existing single PTX module and a 15-slot pointer ABI; OpenCL compiles the
+shared source. CUDA's private runtime ABI is two pointer-valued `u64` slots plus
+thirteen `s64` slots; it is intentionally distinct from compiler-emitted CUDA
+C scalar widths. Other backends retain image/alpha compatibility. Engine3D
+remains CPU HUD/world compatibility.
+MetalSession compiles the exact common MSL as an optional separate library and
+owns its pipeline. MetalBackend owns only persistent atlas generation and the
+52-byte parameter policy, dispatching through the leak-free completed-frame
+runtime call. The typed Metal lane is never set for `metal-on-vulkan`.
+After the first full OpenCL atlas upload, a consecutive generation with valid
+dirty rectangles writes only the affected rows at checked byte offsets.
+Allocation, invalidation, generation gaps, or invalid/empty dirty metadata use
+the full-upload fail-safe. Required native readback/promotion evidence remains
 unproved.
 
 The first promoted graphics backend must report compiled versioned entry,

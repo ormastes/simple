@@ -11,6 +11,8 @@ use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, glyph_atlas_dense_value
 use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_download_ptr, metal_buffer_upload_ptr, metal_set_bytes_ptr, metal_u32s_from_ptr, metal_write_u32s_to_ptr, gpu_lut_pack_dense, gpu_lut_free, gpu_lut_dense_byte_len}
 use std.gpu.engine2d.backend_capability.{BackendCapability, Engine2dBackendKind, backend_capability_default, OP_INDEXED_FILL, OP_GLYPH_ATLAS_BLIT, OP_DRAW_GRADIENT_RECT, OP_DRAW_ROUNDED_RECT, OP_DRAW_IMAGE}
 use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
+use std.gpu.engine2d.backend_metal_font.{MetalFontBackendState}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
 use std.gc_async_mut.env.platform.{is_macos}
 use std.env.variables.{env_get}
 use std.gc_async_mut.io.metal_sffi.{
@@ -321,6 +323,7 @@ class MetalBackend:
                            # uploaded once at init — the 5x7 font table never changes, so
                            # unlike lut_buffer/lut_version above it carries no per-call
                            # version/count (init-time upload IS the invalidation contract)
+    font: MetalFontBackendState
 
     static fn create() -> MetalBackend:
         make_metal_backend()
@@ -341,7 +344,8 @@ fn make_metal_backend():
         lut_buffer: 0,
         lut_version: -1,
         lut_count: 0,
-        glyph_lut_buffer: 0
+        glyph_lut_buffer: 0,
+        font: MetalFontBackendState.create()
     )
 
 impl RenderBackend for MetalBackend:
@@ -355,6 +359,7 @@ impl RenderBackend for MetalBackend:
             self.gpu_frame_complete = false
             self.last_error = "Metal requires macOS"
             return false
+        self.font.release()
         if not self.session.init():
             val status = self.session.error_code()
             val msg = _metal_status_message(status)
@@ -415,6 +420,7 @@ impl RenderBackend for MetalBackend:
 
     me shutdown():
         self.mirror.shutdown()
+        self.font.release()
         if self.d_framebuffer != 0:
             metal_sffi_free_buffer(self.d_framebuffer)
             self.d_framebuffer = 0
@@ -576,6 +582,18 @@ impl RenderBackend for MetalBackend:
         self.mirror.height()
 
 impl MetalBackend:
+    me invalidate_font_atlas():
+        self.font.invalidate()
+
+    me draw_font_batch(origin_x: i32, origin_y: i32, batch: FontRenderBatch) -> i64:
+        if not self.initialized or not self.gpu_frame_complete:
+            return 0
+        val done = self.font.draw_font_batch(self.session, self.d_framebuffer, self.mirror,
+            self.w, self.h, origin_x, origin_y, batch)
+        if done > 0:
+            self.dirty = true
+        done
+
     # True when use_gpu_only() has shrunk the CPU mirror to 1x1 while the GPU
     # framebuffer still holds the full surface — i.e. the GPU is the sole source
     # of truth and clip/readback decisions must go through it, not the mirror.
