@@ -996,3 +996,80 @@ structs/enums/classes/traits/consts under `bootstrap_mode`) and Probe B
 key the accumulator uses) before spending the 5.7hr on a full rebuild; do
 not repeat the same full-closure probe without a source change, per the
 standing protocol in this doc.
+
+## 2026-07-12 Both remaining walls (Probe A, Probe B) fixed and verified
+
+Both walls named above are now fixed, gated on
+`SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1`, verified via seconds-repros (no
+5.7hr full closure build run), and landed:
+
+- `f5936db1fb7` -- Probe A (cross-module struct declaration). Mirrors the
+  3-fix chain's shape: `declare_module_symbols` now also runs under
+  `bootstrap_closure` (both the call-site gate in `lower_module()` and its
+  own internal `SIMPLE_BOOTSTRAP=1` early-return needed loosening), AND the
+  bootstrap early-return `HirModule` now carries real lowered
+  structs/enums/classes/bitfields/traits instead of hardcoded `{}` -- but
+  that alone was NOT sufficient. A second, MIR-layer gap had to be closed
+  too: neither bootstrap flat-lowering entry point
+  (`bootstrap_lower_hir_globals_to_mir_module`,
+  `bootstrap_lower_extra_hir_module_to_mir`) ever calls the normal
+  `lower_module()`, so `struct_field_order`/`field_map`/the struct's MIR
+  type were never populated and `lower_call` never reclassified
+  `Point(x:.., y:..)` as a struct construction. New
+  `bootstrap_register_hir_type_defs()` (`bootstrap_globals.spl`) mirrors
+  that block of `lower_module()` onto the fresh per-module `MirLowering`
+  both bootstrap paths already create. Verified with a same-function
+  construct+field-access repro (`p.x * 10 + p.y` against an asymmetric
+  expected value, to rule out field-order coincidences): builds, links,
+  and runs to the correct value.
+
+- `8071d49133d` -- Probe B (same bare function name, two modules, aliased
+  import). Two stacked gaps: (i) the flat MIR accumulator
+  (`bootstrap_lower_extra_hir_module_to_mir`) deduped by bare function
+  name, dropping the second module's same-named function -- fixed by
+  keying/emitting under `module.function`
+  (`bootstrap_mir_logical_module_name()`, derived from the raw
+  parsed-module PATH the same way the driver derives a logical module
+  name from a source path -- `HirModule.name`/`Module.name` is the raw
+  path under bootstrap, NOT the dotted name an `use module.{..}`
+  references, a mismatch that first showed up as an unparseable `/`-laden
+  LLVM identifier). (ii) independently, a cross-module call site
+  referenced the LOCAL import alias (`compute_a`) while the accumulator's
+  emitted `define` used the bare original name (`compute`) -- neither
+  lined up even after (i). Fixed by giving a cross-module imported
+  function's symbol a qualified `module.function` name
+  (`qualify_imported_function_symbol`) and baking the CURRENT stored name
+  into the call site's `HirExprKind.NamedVar` payload TEXT at HIR-lowering
+  time (`expressions.spl`'s `ExprKind.Ident` case), not via a fresh
+  `self.symbols` lookup at MIR-lowering time -- the latter was tried first
+  and silently returned nil for every id: `self.symbols.get_symbol(id)`
+  (`SymbolTable`) shares its name and arity with the unrelated
+  `LoadedModule.get_symbol(name: text)` (`99.loader/module_loader.spl`),
+  and the seed's compiled method resolver dispatches to the wrong sibling
+  (the exact class of bug `get_symbol` itself was already renamed once to
+  dodge, per its own docstring -- confirmed by a scoped debug trace, not
+  guessed). Worked around with uniquely-named
+  `SymbolTable.symbol_display_name()`/`rename_symbol()`. A closure helper
+  module's own intra-module calls (two functions in one module calling
+  each other) needed the identical qualification on the pre-declared
+  same-module callee symbol too, gated OFF for the entry module itself
+  (`hir_module_is_bootstrap_entry()`) so `bootstrap_main.spl`'s own
+  same-module calls are untouched -- verified with a dedicated
+  two-function-one-module repro. Verified with the aliased-same-bare-name
+  repro: both `compute_a`/`compute_b` link and run to their correct,
+  distinct values.
+
+Regression-checked together after both fixes: Wall A's struct repro, the
+original cross-module function repro (`triple`), a single-file
+(non-closure) build, and the intra-module two-function repro all still
+pass.
+
+**Both walls are now clear.** The full `src/app`+`src/lib`+`src/compiler`
+stage2 closure build (main.spl) has NOT been re-run (explicitly out of
+scope for this pass -- seconds-repros only, per the standing 5.7hr-build
+protocol above); it is very likely to hit further, so-far-uncharacterized
+walls (the full closure is orders of magnitude larger and richer than any
+repro here), but the two specific, previously-characterized blockers named
+in this doc are resolved. Next owner: attempt the full redeploy closure
+build and characterize whatever wall it hits next with the same
+fast-repro-first discipline.
