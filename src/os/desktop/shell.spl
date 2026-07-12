@@ -46,6 +46,7 @@ use common.ui.window_scene_draw_ir.{SharedWmPixelBufferBackend, shared_wm_pixel_
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
 use os.desktop.wm_runtime_bridge.{simpleos_wm_pointer_runtime_command, simpleos_wm_apply_pointer}
+use os.kernel.boot.cpu.{port_inb}
 use os.desktop.shell_types.{
     EditorResidentLaunch, _build_editor_resident_launch,
     _fallback_app_id_for_name,
@@ -525,6 +526,17 @@ impl DesktopShell:
                 self.register_materialized_window(wid, pid, app_id)
                 true
 
+    fn process_owned_surface_count_scalar() -> i64:
+        """Single-hop scalar-crossing wrapper (same idiom as
+        materialize_process_launch_scalar / compositor_materialize_process_surface_scalar):
+        `caller.compositor.compositor_process_owned_surface_count_scalar()`
+        two-level field+method chains marshal the i64 return to
+        nil/<object> at the outer call site (proven live 2026-07-12 —
+        3 identical call sites printed <object>/2/nil for the same
+        growing count). Routing the read through a single-hop method on
+        the immediately-addressed receiver keeps the return scalar intact."""
+        self.compositor.compositor_process_owned_surface_count_scalar()
+
     me materialize_process_launch_scalar(app_kind: i64, pid: u64) -> bool:
         """Baremetal owner-safe materialization keyed by the numeric boot app id."""
         if pid == 0:
@@ -786,6 +798,7 @@ impl DesktopShell:
         self.compositor.running = true
         val _engine = engine
         val pixel_backend = SharedWmPixelBufferBackend.new(self.compositor.screen_width, self.compositor.screen_height)
+        serial_println("[wm-loop] polling-active")
 
         while self.compositor.running:
             # Idle path must stay ALLOCATION-FREE: the baremetal bump
@@ -795,6 +808,22 @@ impl DesktopShell:
             # evidence wrapper's 10s input-correlation windows (proven live).
             # Only a PS/2 poll runs when no input is pending.
             #
+            # Hardware pre-check (proven live 2026-07-12): reading the i8042
+            # status register directly is a plain scalar extern call with NO
+            # heap allocation. Without this gate, the copy-commit idiom below
+            # ran on EVERY idle iteration (not just when a byte is actually
+            # waiting), deep-copying the whole Compositor (surfaces array +
+            # window content strings) on a tight busy-poll. That blew past
+            # the 144MB heap-debug watermark within seconds, flooding serial
+            # with millions of "[heap] alloc" lines and starving the loop so
+            # badly it never got back around to observe a QMP-injected key
+            # inside the evidence wrapper's 10s correlation window (zero
+            # [wm-input-irq]/[wm-state]/[wm-frame] markers ever fired).
+            # Skip the expensive copy entirely until the controller reports
+            # an output byte is actually present (status bit0).
+            val ps2_status = port_inb(0x64)
+            if ((ps2_status as i32) & 1) == 0:
+                continue
             # Copy-commit idiom (same fix as materialize_process_launch_scalar
             # / state.md "explicitly committing the nested compositor copy"):
             # stage3 materializes `self.compositor.method()` receivers as

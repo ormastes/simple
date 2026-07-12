@@ -121,20 +121,45 @@ fn _ps2_mouse_read() -> u8:
     _ps2_wait_output_full()
     port_inb(0x60)
 
+fn _ps2_flush_output_buffer():
+    """Drain any stale bytes (device ACKs, leftover scancodes) out of the
+    i8042 output buffer so the next 0x60 read returns what the caller
+    actually asked for."""
+    var guard: i64 = 32
+    while guard > 0:
+        val status = port_inb(0x64)
+        if (status & 0x01) == 0:
+            return
+        port_inb(0x60)
+        guard = guard - 1
+
 fn _keyboard_bootstrap_init():
     port_outb(0x64, 0xAD)
     port_outb(0x64, 0xA7)
     port_inb(0x60)
     port_outb(0x64, 0xAE)
     port_outb(0x60, 0xF4)
+    # Consume the keyboard's 0xFA ACK for the 0xF4 (enable-scanning)
+    # command. Leaving it queued poisoned the NEXT 0x60 read: mouse init's
+    # config-byte read (command 0x20) returned this ACK instead of the
+    # config byte and wrote 0xDA back — bit4 set = keyboard clock DISABLED
+    # — which is why the guest never saw a single scancode after boot
+    # (root cause of the dead QMP-F11 input route, proven live 2026-07-12).
+    _ps2_wait_output_full()
+    port_inb(0x60)
 
 fn _mouse_bootstrap_init(mouse: Ps2Mouse):
     port_outb(0x64, 0xA8)
     _ps2_wait_input_clear()
+    _ps2_flush_output_buffer()
     port_outb(0x64, 0x20)
     _ps2_wait_output_full()
     val config = port_inb(0x60)
-    val new_config = (config | 0x02) & 0xDF
+    # Force bit1 on (mouse IRQ line), bits 4+5 off (keyboard + mouse port
+    # clocks ENABLED). Never trust the read blindly for the keyboard-enable
+    # bit: a polluted config byte here silently kills the keyboard port.
+    val new_config = (config | 0x02) & 0xCF
+    serial_println("[ps2-init] config_read={config} config_written={new_config}")
     port_outb(0x64, 0x60)
     _ps2_wait_input_clear()
     port_outb(0x60, new_config)
@@ -270,22 +295,22 @@ fn spl_start():
     serial_println("[desktop-gui] spawn return app=Browser Demo pid={browser_pid}")
     if browser_pid > 0:
         val browser_materialized = shell.materialize_process_launch_scalar(1, browser_pid as u64)
-        serial_println("[desktop-gui] materialize return app=Browser Demo ok={browser_materialized} owned={shell.compositor.compositor_process_owned_surface_count_scalar()}")
+        serial_println("[desktop-gui] materialize return app=Browser Demo ok={browser_materialized} owned={shell.process_owned_surface_count_scalar()}")
 
     serial_println("[desktop-gui] spawn begin app=Hello World app_id=3")
     val hello_pid = x86_dispatch_installed_syscall_abi(13u64, 3u64, 0u64, 2u64, 0u64, 0u64, 0u64)
     serial_println("[desktop-gui] spawn return app=Hello World pid={hello_pid}")
     if hello_pid > 0:
         val hello_materialized = shell.materialize_process_launch_scalar(3, hello_pid as u64)
-        serial_println("[desktop-gui] materialize return app=Hello World ok={hello_materialized} owned={shell.compositor.compositor_process_owned_surface_count_scalar()}")
+        serial_println("[desktop-gui] materialize return app=Hello World ok={hello_materialized} owned={shell.process_owned_surface_count_scalar()}")
 
     serial_println("[desktop-gui] spawn begin app=Clang app_id=12")
     val clang_pid = x86_dispatch_installed_syscall_abi(13u64, 12u64, 0u64, 2u64, 0u64, 0u64, 0u64)
     serial_println("[desktop-gui] spawn return app=Clang pid={clang_pid}")
     if clang_pid > 0:
         val clang_materialized = shell.materialize_process_launch_scalar(12, clang_pid as u64)
-        serial_println("[desktop-gui] materialize return app=Clang ok={clang_materialized} owned={shell.compositor.compositor_process_owned_surface_count_scalar()}")
-    val owned_surface_count = shell.compositor.compositor_process_owned_surface_count_scalar()
+        serial_println("[desktop-gui] materialize return app=Clang ok={clang_materialized} owned={shell.process_owned_surface_count_scalar()}")
+    val owned_surface_count = shell.process_owned_surface_count_scalar()
     if owned_surface_count < 3:
         serial_println("[production-readiness-failed] reason=process-owned-surfaces expected=3 actual={owned_surface_count}")
         port_outb(0xF4, 1)
