@@ -64,6 +64,24 @@ SSH key). Agents implement + report serial; coordinator reviews + lands.
   See `doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md`. Fixing it removes
   the raw-byte workaround AND unblocks Inc 3 (SFTP OPEN path decode). Worker digging the
   cranelift lowering (`src/compiler/70.backend/backend/cranelift_*.spl`).
-- **Inc 3 PENDING Inc 2** (sshd has no scp/sftp/subsystem): add a minimal read-only SFTP
-  subsystem (INIT/OPEN/READ/CLOSE) so `scp root@host:/hello.o .` works; relies on intact
-  path decode from Inc 2.
+- **Inc 3 DONE (getfile fallback):** `ssh root@host getfile /hello.o > retrieved.o` returns
+  the raw file bytes as channel stdout in ONE shot (no interactive ack protocol, unlike
+  scp-source). Server reads `/hello.o` off FAT32 (`_scp_read_file_bytes`, mmio_read8 raw-read
+  idiom) and delivers it via `_finish_exec_request_inline`. Verified: `retrieved.o` is
+  BYTE-IDENTICAL to the on-disk `/HELLO.O` (sha256 `d0c481d8…90a8c39b`, 712 B), ELF64
+  ET_REL/EM_X86_64, host-links + runs == exit 7. Harness `scripts/os/scp_retrieve_over_ssh.shs`.
+  TWO root-cause fixes landed with it:
+  1. `_build_channel_data_stable`: the DATA copy used the `payload = rt_push_byte(payload, ..)`
+     reassignment form, which on x86_64 freestanding drops the BYTE_PACKED representation once
+     the array grows large and corrupts the payload (712-byte `/hello.o` delivered as
+     0x53-garbage while small handshake/exit packets, staying inline-packed, delivered fine).
+     Switched the data loop to the `.push` intrinsic (mutates in place, preserves packing) —
+     same idiom `_copy_bytes_stable` already documents.
+  2. `_finish_exec_request_inline`: the chained `output.len().to_u32()` mis-lowers on this lane,
+     so `consume_remote_window()` saw a bogus huge count, rejected the payload, and silently
+     dropped the channel data (empty `retrieved.o`). Bound the length to an intermediate var.
+- **scp-source (`scp -O`) — near-complete, deferred:** the C-record + body path is built
+  (`_scp_read_file_bytes`, `_scp_ctrl_line`, `_scp_step_inline`) but the interactive
+  ready-ack handshake is blocked on x86_64 freestanding by non-persisting nested-`me`
+  mutation (`self.scp_stage` set inside a nested call does not persist) plus flush-before-close
+  timing. `getfile` supersedes it for the file-retrieval goal.

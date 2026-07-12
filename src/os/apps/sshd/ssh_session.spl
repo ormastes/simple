@@ -36,6 +36,7 @@ export use os.apps.sshd.ssh_session_channel.*
 extern fn rt_ed25519_keypair_pk(seed: [u8]) -> [u8]
 extern fn rt_rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
+extern fn rt_string_to_byte_array(s: text) -> [u8]
 extern fn rt_thread_sleep(ms: i64) -> i64
 extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
@@ -128,9 +129,17 @@ fn _build_channel_data_stable(recipient: u32, data: [u8]) -> [u8]:
     payload = rt_push_byte(payload, 94)
     payload = _push_u32_be_stable(payload, recipient)
     payload = _push_u32_be_stable(payload, data.len().to_u32())
+    # Copy the DATA via the `.push` intrinsic, NOT the `payload =
+    # rt_push_byte(payload, ..)` reassignment form: on x86_64 freestanding
+    # native-build the reassignment form drops the BYTE_PACKED representation
+    # once the array grows large and corrupts the copy — this was the Inc-3
+    # getfile 0x53-garbage bug (712-byte /hello.o delivered as garbage while
+    # small handshake/exit packets, which stay inline-packed, delivered fine).
+    # See _copy_bytes_stable's note. The 9-byte header above stays small enough
+    # for the reassignment helpers.
     var i: u64 = 0
     while i < data.len():
-        payload = rt_push_byte(payload, _u8_at(data, i).to_i64())
+        payload.push(_u8_at(data, i))
         i = i + 1
     payload
 
@@ -177,6 +186,143 @@ fn _field_range_equals_bytes_stable(payload: [u8], start: u64, end: u64, expecte
             return false
         i = i + 1
     true
+
+# Phase 2e Inc 3: scp-source (`scp -f <path>`) file retrieval. The FAT read
+# below is a plain C buffer read (simpleos_fat32_stream_open/stream_read_at
+# — the SAME primitive x86_64_fs_exec_spawn_heap already proved works
+# POST rt_net_init+vmm+SSH activity, streaming the 124.6 MB clang ELF over
+# real SSH, Phase 2e Inc 1), NOT a ring-3 CPL transition, so it is safe to
+# call from this DEEP session-dispatch frame (unlike the ring-3 spawn, which
+# must be deferred to the shallow accept-loop frame — see
+# doc/08_tracking/bug/x64_ssh_kernel_fat32_stream_open_zero.md bug #2).
+# x86_64-only: guarded with @cfg so shared sshd.spl/ssh_session.spl still
+# compile for the rv64/arm SSH lanes (mirrors sshd.spl's
+# _sshd_run_pending_ring3_exec per-arch stub pattern).
+@cfg(x86_64)
+extern fn simpleos_fat32_stream_open(path: text) -> i64
+@cfg(x86_64)
+extern fn simpleos_fat32_stream_read_at(file_off: u64, dst: u64, len: u64) -> i64
+@cfg(x86_64)
+extern fn simpleos_fat32_path_read_buffer_addr() -> u64
+@cfg(x86_64)
+extern fn mmio_read8(addr: u64) -> u8
+
+fn _scp_ctrl_line(size: i64, name_bytes: [u8]) -> [u8]:
+    """Build the scp-source `C0644 <size> <name>\n` control line as raw [u8].
+    NEVER via text interpolation: on the x64 freestanding target, interpolating
+    an int / dynamic-text field and converting the result to bytes yields an
+    EMPTY buffer (same freestanding class as the char_code_at / text-store bugs
+    — see doc/08_tracking/bug/x64_freestanding_char_code_at_dynamic_text.md).
+    Manual base-10 digits + [u8] concat is the reliable path."""
+    var digits: [u8] = []
+    var v = size
+    if v <= 0:
+        digits = _copy_bytes_stable([0x30])
+    else:
+        while v > 0:
+            var db: [u8] = []
+            db = rt_push_byte(db, (v % 10) + 0x30)
+            digits = rt_bytes_concat(db, digits)
+            v = v / 10
+    var out = _copy_bytes_stable([0x43, 0x30, 0x36, 0x34, 0x34, 0x20])
+    out = rt_bytes_concat(out, digits)
+    out = rt_bytes_concat(out, _copy_bytes_stable([0x20]))
+    out = rt_bytes_concat(out, name_bytes)
+    out = rt_bytes_concat(out, _copy_bytes_stable([0x0A]))
+    out
+
+@cfg(x86_64)
+fn _scp_read_file_bytes(path: text) -> ([u8], i64):
+    val fsize = simpleos_fat32_stream_open(path)
+    if fsize <= 0 or fsize > 4194304:
+        serial_println("[sshd-session] scp read-open-fail path={path} fsize={fsize}")
+        return ([], -1)
+    val buf = simpleos_fat32_path_read_buffer_addr()
+    if buf == 0.to_u64():
+        return ([], -1)
+    val n = simpleos_fat32_stream_read_at(0.to_u64(), buf, fsize.to_u64())
+    if n != fsize:
+        serial_println("[sshd-session] scp read-short path={path} want={fsize} got={n}")
+        return ([], -1)
+    # Build the [u8] by reading each byte straight from the FAT buffer via
+    # mmio_read8 (the proven Inc-1 raw-read idiom) — a Simple-native packed [u8]
+    # that _u8_at reads reliably at any stack depth. Bind the byte to an
+    # intermediate var before .to_i64() (the chained `mmio_read8(...).to_i64()`
+    # mis-lowers on x64 freestanding — same class as the do_version_exchange
+    # note).
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < fsize.to_u64():
+        val b = mmio_read8(buf + i)
+        out = rt_push_byte(out, b.to_i64())
+        i = i + 1
+    (out, fsize)
+
+@cfg(x86)
+fn _scp_read_file_bytes(path: text) -> ([u8], i64):
+    ([], -1)
+
+@cfg(arm64)
+fn _scp_read_file_bytes(path: text) -> ([u8], i64):
+    ([], -1)
+
+@cfg(arm32)
+fn _scp_read_file_bytes(path: text) -> ([u8], i64):
+    ([], -1)
+
+@cfg(riscv64)
+fn _scp_read_file_bytes(path: text) -> ([u8], i64):
+    ([], -1)
+
+@cfg(riscv32)
+fn _scp_read_file_bytes(path: text) -> ([u8], i64):
+    ([], -1)
+
+# Raw [u8] scan helpers for the scp -f command — NEVER text.char_at/
+# starts_with on dynamically-built text (mis-decodes; see
+# doc/08_tracking/bug/x64_freestanding_char_code_at_dynamic_text.md). Mirrors
+# sshd.spl's _sshd_tokenize_command idiom (rt_string_to_byte_array +
+# rt_bytes_u8_at), just applied inline in this deep dispatch frame — bulk
+# byte-array conversion is proven reliable at any stack depth (unlike the
+# per-char text accessors), see that doc's workaround note.
+fn _scp_last_token_bytes(command: text) -> [u8]:
+    """Return the LAST whitespace-delimited token of `command` as raw bytes
+    (the scp -f path — handles `scp -f /hello.o`, `scp -pf /hello.o`, etc.,
+    since the path is always the final token regardless of flag combos)."""
+    val bytes = rt_string_to_byte_array(command)
+    var last: [u8] = []
+    var cur: [u8] = []
+    var i: i64 = 0
+    val n = bytes.len().to_i64()
+    while i < n:
+        val code = rt_bytes_u8_at(bytes, i)
+        if code == 32:
+            if cur.len() > 0:
+                last = cur
+                cur = []
+        else:
+            cur = rt_push_byte(cur, code)
+        i = i + 1
+    if cur.len() > 0:
+        last = cur
+    last
+
+fn _scp_basename_bytes(path_bytes: [u8]) -> [u8]:
+    """Return the bytes after the last '/' in `path_bytes` (the scp control
+    line's basename field)."""
+    var last_slash: i64 = -1
+    var i: i64 = 0
+    val n = path_bytes.len().to_i64()
+    while i < n:
+        if rt_bytes_u8_at(path_bytes, i) == 0x2F:
+            last_slash = i
+        i = i + 1
+    var out: [u8] = []
+    var j = last_slash + 1
+    while j < n:
+        out = rt_push_byte(out, rt_bytes_u8_at(path_bytes, j))
+        j = j + 1
+    out
 
 fn _exec_success_output_for_command(command: text) -> [u8]:
     val trimmed = command.trim()
@@ -271,6 +417,12 @@ class SshSession:
     pending_ring3_exec_is_clang: bool  # true -> accept loop runs the clang heap-stream spawn (Phase 2e Inc 1)
     pending_ring3_exec_command: text   # intact decoded exec command text (Phase 2e Inc 2); tokenized by the
                                         # shallow accept loop into argv — never parsed in this deep frame
+    scp_pending: bool      # true while a `scp -f <path>` handshake is in flight (Phase 2e Inc 3)
+    scp_stage: u32         # 0=await ready-ack 1=await ctrl-ack 2=await final-ack
+    scp_local_id: u32
+    scp_remote_id: u32
+    scp_file_bytes: [u8]   # file bytes read off FAT32/NVMe at exec time
+    scp_file_name: text    # basename sent in the C0644 control line
 
 impl SshSession:
 
@@ -341,7 +493,13 @@ impl SshSession:
             pending_ring3_exec_remote_id: 0,
             pending_ring3_exec_local_id: 0,
             pending_ring3_exec_is_clang: false,
-            pending_ring3_exec_command: ""
+            pending_ring3_exec_command: "",
+            scp_pending: false,
+            scp_stage: 0,
+            scp_local_id: 0,
+            scp_remote_id: 0,
+            scp_file_bytes: [],
+            scp_file_name: ""
         )
 
     pub me run():
@@ -549,6 +707,15 @@ impl SshSession:
             val payload = self.recv_packet_payload()
             val payload_len = payload.len()
             if payload_len == 0:
+                # Phase 2e Inc 3: during an in-flight scp-source handshake the
+                # client's next single-byte ack may not have landed yet on this
+                # non-blocking read — poll again instead of tearing the channel
+                # down (a premature close here is what made scp report "closed by
+                # remote host" after a correctly-sent C-record). Bounded by the
+                # 128-iteration budget; the transfer is tiny + local.
+                if self.scp_pending and self.scp_stage < 2u32:
+                    rt_thread_sleep(5)
+                    continue
                 serial_println("[sshd-session] interactive-inline empty payload closing recv_buf_len={self.recv_buf.len()} seq_c2s={self.cipher.seq_c2s} recv_seq={self.recv_seq}")
                 self.state = SessionState.Closed
                 return
@@ -746,6 +913,62 @@ impl SshSession:
             self.state = SessionState.Closed
             return
 
+        # Phase 2e Inc 3 (getfile): `ssh root@host getfile /path` returns the raw
+        # file bytes as channel stdout in ONE shot. Unlike scp, plain ssh has no
+        # ack protocol — it just receives the channel-data (TCP-buffered) before
+        # the exit-status/close, so a byte-exact download works without an
+        # interactive handshake. Detect 'g' (0x67) by raw byte (deep text
+        # predicates are unreliable — see x64_freestanding_text_char_at bug).
+        if _u8_at(payload, off + 4) == 0x67u8:
+            val gpath_bytes = _scp_last_token_bytes(command)
+            val gpath_text = rt_string_from_byte_array(gpath_bytes)
+            val (gfile_bytes, gfsize) = _scp_read_file_bytes(gpath_text)
+            serial_println("[sshd-session] getfile path={gpath_text} fsize={gfsize} bytes={gfile_bytes.len()}")
+            if gfsize <= 0:
+                self._finish_exec_request_inline(local_id, remote_id, 1, [])
+                return
+            self._finish_exec_request_inline(local_id, remote_id, 0, gfile_bytes)
+            return
+
+        # Phase 2e Inc 3: `scp -f <path>` (legacy scp-source; `scp -O
+        # root@host:/hello.o .` on the host runs this on the guest).
+        # Detected via 4 RAW payload bytes ('s','c','p',' ') — same raw-byte
+        # idiom as the '/' and 'c' branches above (deep text.starts_with is
+        # unreliable — see
+        # doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md
+        # §Status point 3); the 4-byte check also can't collide with the
+        # unrelated "simple "/"simple.smf " exec commands handled below
+        # (those differ at the 2nd byte: 'i' vs 'c'). UNLIKE the '/' and 'c'
+        # branches, this does NOT defer to the shallow accept loop: the FAT
+        # read is a plain C buffer read (no ring-3 CPL transition — see the
+        # note above _scp_read_file_bytes), and the scp handshake needs this
+        # SAME session's packet loop to keep delivering
+        # SSH_MSG_CHANNEL_DATA acks, so `state` must stay Interactive.
+        if (payload.len() >= off + 8 and
+            _u8_at(payload, off + 4) == 0x73u8 and
+            _u8_at(payload, off + 5) == 0x63u8 and
+            _u8_at(payload, off + 6) == 0x70u8 and
+            _u8_at(payload, off + 7) == 0x20u8):
+            serial_println("[sshd-session] exec scp-source command={command}")
+            val path_bytes = _scp_last_token_bytes(command)
+            val name_bytes = _scp_basename_bytes(path_bytes)
+            val path_text = rt_string_from_byte_array(path_bytes)
+            val (file_bytes, fsize) = _scp_read_file_bytes(path_text)
+            serial_println("[sshd-session] scp read path={path_text} fsize={fsize}")
+            if fsize <= 0:
+                self._finish_exec_request_inline(local_id, remote_id, 1, [])
+                return
+            self.scp_pending = true
+            self.scp_stage = 0
+            self.scp_local_id = local_id
+            self.scp_remote_id = remote_id
+            self.scp_file_bytes = file_bytes
+            self.scp_file_name = rt_string_from_byte_array(name_bytes)
+            # Do NOT close state or send an exit status yet — wait for the
+            # client's scp ready-ack (0x00) delivered as SSH_MSG_CHANNEL_DATA
+            # and stepped by _scp_step_inline (see _handle_channel_data_inline).
+            return
+
         val direct_output = _exec_success_output_for_command(command)
         if direct_output.len() > 0:
             self._finish_exec_request_inline(local_id, remote_id, 0, direct_output)
@@ -763,6 +986,9 @@ impl SshSession:
         if payload.len() < 10:
             return
         val recipient = _read_u32_stable(payload, 1)
+        if self.scp_pending:
+            self._scp_step_inline(payload)
+            return
         val r_data = _read_text_field_fast(payload, 5)
         if r_data.is_err():
             return
@@ -770,6 +996,47 @@ impl SshSession:
             if not shell.feed_remote_input(r_data.unwrap().value):
                 self.state = SessionState.Closed
             self._forward_shell_output_inline()
+
+    me _scp_step_inline(payload: [u8]):
+        """Drive the scp-source (`scp -f`) handshake state machine (Phase 2e
+        Inc 3). Reads the client's single-byte ack directly via the raw [u8]
+        accessor (never text) — the SSH_MSG_CHANNEL_DATA wire format is
+        byte-type(1) + recipient(4) + string-len(4) + raw bytes, so the ack
+        byte sits at payload offset 9. Stages:
+          0: got the initial ready-ack -> send `C0644 <size> <name>\\n`
+          1: got the ack for the control line -> send the file bytes + 0x00
+          2: got the final ack -> send exit-status 0 / eof / close
+        """
+        if payload.len() < 10:
+            return
+        val data_len = _read_u32_stable(payload, 5).to_u64()
+        if data_len < 1:
+            return
+        val ack = _u8_at(payload, 9)
+        serial_println("[sshd-session] scp step stage={self.scp_stage} ack=0x{format_hex(ack.to_i64())}")
+        # One-shot the whole scp-source response on the client's first ready-ack.
+        # The staged 0->1->2 machine relied on `self.scp_stage` mutations
+        # persisting across this nested `me` call, which they do NOT on the x64
+        # freestanding target (every ack re-entered stage 0, re-sending the
+        # C-record and never the body). So send everything now: C-record + file
+        # bytes + trailing 0x00, then exit-status/eof/close. OpenSSH's scp sink
+        # buffers pipelined data, so it need not receive the intermediate ack
+        # before the body. Re-entry after this is harmless: _finish closes the
+        # channel, so any later ack's window-consume fails and sends nothing.
+        val size = self.scp_file_bytes.len().to_i64()
+        val name_bytes = rt_string_to_byte_array(self.scp_file_name)
+        val ctrl = _scp_ctrl_line(size, name_bytes)
+        serial_println("[sshd-session] scp one-shot size={size} ctrl_len={ctrl.len()}")
+        if self.channels.consume_remote_window(self.scp_local_id, ctrl.len().to_u32()):
+            self.send_packet(_build_channel_data_stable(self.scp_remote_id, ctrl))
+        val body = self.scp_file_bytes
+        if self.channels.consume_remote_window(self.scp_local_id, body.len().to_u32()):
+            self.send_packet(_build_channel_data_stable(self.scp_remote_id, body))
+        val zero: [u8] = _copy_bytes_stable([0])
+        if self.channels.consume_remote_window(self.scp_local_id, 1u32):
+            self.send_packet(_build_channel_data_stable(self.scp_remote_id, zero))
+        self.scp_pending = false
+        self._finish_exec_request_inline(self.scp_local_id, self.scp_remote_id, 0, [])
 
     me _handle_channel_close_inline(payload: [u8]):
         if payload.len() < 5:
@@ -806,7 +1073,15 @@ impl SshSession:
         self.shell = shell
 
     me _finish_exec_request_inline(local_id: u32, remote_id: u32, exit_status: u32, output: [u8]):
-        if output.len() > 0 and self.channels.consume_remote_window(local_id, output.len().to_u32()):
+        # Bind len to an intermediate var: the chained `output.len().to_u32()`
+        # mis-lowers on x64 freestanding native-build and yields garbage (same
+        # bug documented in do_version_exchange), which made
+        # consume_remote_window() see a bogus huge count, reject the whole
+        # payload, and SILENTLY drop the channel data — the exact Inc 3 getfile
+        # symptom (712-byte /hello.o read on the server, empty file on the host).
+        val out_len = output.len()
+        val out_len_u = out_len.to_u32()
+        if out_len > 0 and self.channels.consume_remote_window(local_id, out_len_u):
             self.send_packet(_build_channel_data_stable(remote_id, output))
         self.send_packet(_build_channel_exit_status_stable(remote_id, exit_status))
         self.send_packet(_build_channel_eof_stable(remote_id))
