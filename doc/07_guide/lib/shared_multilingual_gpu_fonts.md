@@ -155,7 +155,11 @@ shaping. The sparse matrix remains unchanged until executable corpus acceptance.
 Simple compiler code provides
 `emit_portable_font_atlas_composite_kernel(target)`. It emits the versioned
 `simple_font_atlas_composite_v1_u32` entry for CUDA, HIP, OpenCL, Metal, and
-WGSL; a font-specific Vulkan SPIR-V artifact is not implemented yet.
+WGSL. `emit_vulkan_font_atlas_composite_source()` separately returns the
+canonical Vulkan GLSL 450 source for GLSL-to-SPIR-V compilation; Vulkan is not
+a `PortableComputeTarget`, and source emission is not compilation or execution.
+The Vulkan shader's 15-input ABI is two storage-buffer bindings plus the exact
+contiguous 13-field parameter block, and its entry is `main`.
 Native-target signatures include explicit atlas/destination element counts and
 guard computed indices; WGSL uses `arrayLength` for the same fail-closed bound.
 Portable backend planning emits a separate optimization artifact and font

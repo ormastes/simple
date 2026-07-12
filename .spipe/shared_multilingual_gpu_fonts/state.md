@@ -487,3 +487,9 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   pinned identity fields against all 16 real binaries. This is asset-identity
   replay only; runtime enforcement, candidate acceptance, and 0/0/26/74
   coverage promotion remain unchanged. Static checks only; Simple/docgen unrun.
+- Vulkan font source export: `emit_vulkan_font_atlas_composite_source()` returns
+  the canonical common GLSL 450 text unchanged for dedicated GLSL-to-SPIR-V
+  compilation. Vulkan remains outside `PortableComputeTarget`; no compilation,
+  submission, readback, or execution is claimed. The focused scenario checks
+  the exact 15-input ABI: two buffer bindings and the contiguous 13-field
+  parameter block.

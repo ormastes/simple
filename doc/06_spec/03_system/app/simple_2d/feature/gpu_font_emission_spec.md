@@ -32,7 +32,13 @@ execution are not covered.
 
 ## Expected evidence
 
-All targets use entry `simple_font_atlas_composite_v1_u32`.
+All portable targets use entry `simple_font_atlas_composite_v1_u32`.
+
+The dedicated Vulkan export returns canonical GLSL 450 source for external
+GLSL-to-SPIR-V compilation. It is not a `PortableComputeTarget`, compile plan,
+toolchain invocation, or execution claim. Its 15-input ABI is atlas and
+destination bindings plus one contiguous 13-field parameter block; its shader
+entry is `main`.
 
 | Target | Source marker | Source | Planned output | Tool hint |
 |---|---|---|---|---|
