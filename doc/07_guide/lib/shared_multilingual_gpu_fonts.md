@@ -208,6 +208,18 @@ long-scalar ABI, submits one versioned
 composite launch per quad, synchronizes, and falls back from the first
 unsubmitted quad.
 
+Under serialized renderer access, `atlas_generation` is a process-unique,
+positive, sequential dependency token, not a renderer-local edit count. Each
+renderer atlas change reserves a token from the shared sequence, so sequential
+batches from different renderers cannot alias a cached CUDA, Metal, or OpenCL
+atlas. Concurrent token allocation and concurrent renderer ownership remain
+unsupported. A token gap is safe: OpenCL treats
+it as a full upload and uses dirty subrects only for the exact next token.
+Sequential means process-local allocation order only; callers must not infer
+time, renderer identity, or persistence across processes. This closes the
+cross-renderer generation collision, but does not complete REQ-009 or promote
+native hardware coverage.
+
 Every `FontRenderBatch` now stamps program version `1`, tied to
 `simple_font_atlas_composite_v1_u32`. CUDA, native Metal, and OpenCL reject any
 other version before atlas/session mutation; Engine2D then replays the CPU

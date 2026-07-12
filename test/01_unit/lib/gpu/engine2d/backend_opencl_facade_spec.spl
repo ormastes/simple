@@ -7,7 +7,7 @@ use std.gpu.engine2d.backend_probe.{BackendStatus}
 use std.gpu.engine2d.backend_opencl.{OpenClBackend, opencl_2d_generated_source, opencl_font_atlas_dirty_upload_bytes}
 use std.gpu.engine2d.engine.{Engine2D}
 use std.common.gpu.font_atlas_composite.{font_atlas_composite_opencl_source}
-use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderer, FontRenderBatch, FontRenderQuad}
 
 describe "Engine2D OpenCL backend facade":
 
@@ -44,6 +44,20 @@ describe "Engine2D OpenCL backend facade":
         expect(opencl_font_atlas_dirty_upload_bytes(gap, 2, false)).to_equal(0)
         expect(opencl_font_atlas_dirty_upload_bytes(invalid, 1, false)).to_equal(0)
         expect(opencl_font_atlas_dirty_upload_bytes(empty, 1, false)).to_equal(0)
+
+    it "full-uploads across distinct renderer dependency-token gaps":
+        var first_renderer = FontRenderer.new()
+        var skipped_renderer = FontRenderer.new()
+        var second_renderer = FontRenderer.new()
+        val first = first_renderer.prepare_text("A", 0xffffffffu32, 16)
+        skipped_renderer.prepare_text("X", 0xffffffffu32, 16)
+        val second = second_renderer.prepare_text("B", 0xffffffffu32, 16)
+
+        expect(first.is_empty()).to_equal(false)
+        expect(second.is_empty()).to_equal(false)
+        expect(first.atlas_generation).to_be_greater_than(0)
+        expect(second.atlas_generation).to_be_greater_than(first.atlas_generation + 1)
+        expect(opencl_font_atlas_dirty_upload_bytes(second, first.atlas_generation, false)).to_equal(0)
 
     it "fails closed or initializes through the OpenCL render facade without CPU fallback":
         var backend = OpenClBackend.create()

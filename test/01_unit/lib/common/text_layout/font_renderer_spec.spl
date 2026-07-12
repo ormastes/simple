@@ -9,6 +9,7 @@ use common.text_layout.font_renderer.{
     browser_font_candidates_for_family, browser_mono_font_candidates,
     browser_provided_font_paths, browser_sans_font_candidates,
     browser_serif_font_candidates,
+    _font_atlas_dependency_generation_after,
     ensure_browser_provided_fonts}
 use common.text_layout.font_provider.{browser_bundled_font_path_for_family}
 use std.common.encoding.font_registry.{selected_font_asset_candidates}
@@ -40,6 +41,27 @@ describe "font atlas composite program version":
         var renderer = FontRenderer.new()
         expect(renderer.prepare_text("", 0u32, 16).program_version).to_equal(1)
         expect(renderer.prepare_text("A", 0u32, 0).program_version).to_equal(1)
+
+describe "font atlas dependency generation":
+    it "is distinct across sequential renderers, stable while warm, and advances when dirty":
+        var first_renderer = FontRenderer.new()
+        var second_renderer = FontRenderer.new()
+        val first = first_renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
+        val second = second_renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
+        expect(first.atlas_generation).to_be_greater_than(0)
+        expect(second.atlas_generation).to_be_greater_than(0)
+        expect(second.atlas_generation == first.atlas_generation).to_be(false)
+        val warm = first_renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
+        expect(warm.atlas_generation).to_equal(first.atlas_generation)
+        expect(warm.dirty_rects.len()).to_equal(0)
+        val dirty = first_renderer.prepare_text("AB", 0xFFFFFFFFu32, 16)
+        expect(dirty.atlas_generation).to_be_greater_than(warm.atlas_generation)
+        expect(dirty.dirty_rects.len()).to_be_greater_than(0)
+
+    it "returns zero instead of wrapping an exhausted token":
+        expect(_font_atlas_dependency_generation_after(-1)).to_equal(0)
+        expect(_font_atlas_dependency_generation_after(9223372036854775806)).to_equal(9223372036854775807)
+        expect(_font_atlas_dependency_generation_after(9223372036854775807)).to_equal(0)
 
 fn _count_full_alpha(pixels: [u8]) -> i32:
     var count = 0

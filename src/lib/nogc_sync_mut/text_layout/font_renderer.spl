@@ -44,6 +44,18 @@ export use std.nogc_sync_mut.text_layout.font_types.{CachedGlyph, FontCacheStats
 
 val FONT_ATLAS_WIDTH: i32 = 1024
 val FONT_ATLAS_HEIGHT: i32 = 1024
+var _font_atlas_dependency_generation: i64 = 0
+
+fn _font_atlas_dependency_generation_after(current: i64) -> i64:
+    if current < 0 or current >= 9223372036854775807:
+        return 0
+    current + 1
+
+fn _next_font_atlas_dependency_generation() -> i64:
+    val next = _font_atlas_dependency_generation_after(_font_atlas_dependency_generation)
+    if next != 0:
+        _font_atlas_dependency_generation = next
+    next
 
 class GlyphCache:
     entries: [CachedGlyph]
@@ -483,7 +495,7 @@ class FontRenderer:
         self.atlas_cursor_x = 0
         self.atlas_cursor_y = 0
         self.atlas_row_height = 0
-        self.atlas_generation = self.atlas_generation + 1
+        self.atlas_generation = _next_font_atlas_dependency_generation()
         self.atlas_face_generation = face_generation
         self.atlas_font_identity = font_identity
 
@@ -599,7 +611,11 @@ class FontRenderer:
                 i = i + 1
             if not overflow:
                 if dirty.len() > 0:
-                    self.atlas_generation = self.atlas_generation + 1
+                    val generation = _next_font_atlas_dependency_generation()
+                    if generation == 0:
+                        self._reset_font_atlas(face_generation, font_identity)
+                        return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: [])
+                    self.atlas_generation = generation
                 return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty)
             self._reset_font_atlas(face_generation, font_identity)
             attempt = attempt + 1
@@ -653,7 +669,11 @@ class FontRenderer:
                 i = i + 1
             if not overflow:
                 if dirty.len() > 0:
-                    self.atlas_generation = self.atlas_generation + 1
+                    val generation = _next_font_atlas_dependency_generation()
+                    if generation == 0:
+                        self._reset_font_atlas(-2, self.cache.stats().font_identity)
+                        return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: [])
+                    self.atlas_generation = generation
                 return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty)
             self._reset_font_atlas(-2, self.cache.stats().font_identity)
             attempt = attempt + 1

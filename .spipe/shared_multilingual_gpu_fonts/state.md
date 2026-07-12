@@ -517,3 +517,10 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   OpenCL scenarios cover reject-then-v1 recovery; Metal remains static-only
   because no injectable dispatch seam exists. No execution promotion or full
   REQ-009 claim follows.
+- atlas dependency tokens: under serialized renderer access, renderer atlases
+  use positive process-unique sequential tokens rather than renderer-local
+  counters. Sequential distinct-renderer unit evidence prevents CUDA/Metal
+  cache aliasing, and OpenCL token gaps select a full upload rather than dirty
+  subrects. Concurrent token allocation and renderer ownership remain
+  unsupported. Tokens carry no cross-process or temporal meaning; this does
+  not complete REQ-009 or promote hardware evidence.
