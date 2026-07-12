@@ -1,8 +1,38 @@
 # BUG: x86_64 freestanding native-build — text `char_at` / `starts_with` mis-decode
 
 ## Status
-Open. Blocks the *general* (any absolute path) form of SSH ring-3 exec dispatch;
-worked around at the call site with a raw-byte predicate.
+**CORRECTED (2026-07-12, evidence-based).** The original title conflates three
+things; two are non-bugs / already fixed, one is the real residual:
+
+1. **`char_at` returning `0x12_0000_0001` is NOT a bug — by design.**
+   `rt_string_char_at` (`baremetal_stubs.c:823`) legitimately returns a TAG_HEAP
+   (`0b001`) `RuntimeValue` = a freshly-allocated 1-char `text`. The raw-code
+   accessor is `char_code_at` / `rt_string_char_code_at` (`:838`). The old
+   `SSHPROBE9` "garbage" reading was a valid heap handle, misread as a mis-tagged int.
+2. **`rt_string_from_byte_array`-into-typed-store is ALREADY FIXED at HEAD**
+   (`baremetal_stubs.c:6485-6505` dispatches via `_rt_bytes_get` for packed `[u8]`).
+   Proven: a shallow probe decodes byte-correct (47/70/83), and the LIVE SSH kernel
+   now logs `[sshd-session] exec command=/FSEXEC.ELF` INTACT (not the old `/E`). Repro:
+   `examples/09_embedded/simple_os/arch/x86_64/text_char_at_store_probe_entry.spl` +
+   `scripts/os/text_char_at_store_probe_run.shs {cranelift|llvm}`.
+3. **REAL RESIDUAL (open): `text.starts_with(literal)` from the DEEP sshd call
+   stack returns wrong values AND can corrupt control flow.** Replacing the raw-byte
+   workaround with `command.trim().starts_with("/")` regressed the demo to an infinite
+   recovering-fault loop; the faulting rip symbolized to +402 B inside an UNRELATED fn
+   (`services__vfs__vfs_boot_init__VfsFileSize_dot_to_i64`) = corrupted return address.
+   A debug print instead of a crash showed `deep sw=0` (false) for a command that
+   starts with `/`. The IDENTICAL `starts_with("/")` in the SHALLOW probe is always
+   correct → the bug is FRAME-DEPTH / stack-spill sensitive, likely a 2-arg builtin
+   call needing a rodata-literal arg at that exact depth. Needs gdb-level call-site
+   inspection. This is NOT the `@cfg`-dispatch bug the other doc's "CORRECTED ROOT
+   CAUSE" blamed — that note is itself wrong.
+
+**Consequence for callers:** do per-char work with `char_code_at` (raw code), and do
+text predicate/parse work in a SHALLOW frame (the sshd accept loop), never deep in the
+session dispatch. The raw-byte workaround in `ssh_session.spl` is still load-bearing and
+must stay until the deep-stack `starts_with` codegen bug is separately fixed.
+
+Original (superseded) analysis follows.
 
 ## Summary
 On the x86_64 freestanding native-build path (`native-build --target
