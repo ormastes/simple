@@ -33,6 +33,11 @@ execution are not covered.
 ## Expected evidence
 
 All portable targets use entry `simple_font_atlas_composite_v1_u32`.
+Runtime batches stamp matching program version 1; CUDA/Metal/OpenCL reject a
+mismatch before mutation and Engine2D replays CPU from quad 0. CUDA/OpenCL have
+conditional reject-then-v1 recovery evidence, while Metal remains static-only
+without an injectable dispatch seam. This is not native execution or complete
+REQ-009 evidence.
 
 The dedicated Vulkan export returns canonical GLSL 450 source for external
 GLSL-to-SPIR-V compilation. The source export itself is not a

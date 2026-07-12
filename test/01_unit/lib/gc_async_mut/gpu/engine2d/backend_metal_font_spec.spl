@@ -3,7 +3,7 @@
 use spec.{describe, it, expect}
 use std.io_runtime.{file_read}
 use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
-use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 use std.common.gpu.font_atlas_composite.{font_destination_origin}
 use std.gpu.engine2d.backend_metal_font.{METAL_FONT_PARAMS_BYTES, MetalFontBackendState, metal_font_atlas_composite_params}
 
@@ -36,9 +36,22 @@ describe "Metal font atlas companion":
         backend.initialized = true
         backend.gpu_frame_complete = true
         backend.d_framebuffer = 1
-        val invalid = FontRenderBatch(valid: false, atlas_width: 0, atlas_height: 0, atlas_pixels: [], quads: [], atlas_generation: 0, dirty_rects: [])
+        val invalid = FontRenderBatch(program_version: 1, valid: false, atlas_width: 0, atlas_height: 0, atlas_pixels: [], quads: [], atlas_generation: 0, dirty_rects: [])
         expect(backend.draw_font_batch(0, 0, invalid)).to_equal(0)
         expect(backend.gpu_frame_complete).to_equal(true)
+
+    it "rejects unsupported font programs before Metal atlas mutation":
+        var backend = MetalBackend.create()
+        backend.initialized = true
+        backend.gpu_frame_complete = true
+        backend.d_framebuffer = 1
+        backend.font.atlas_generation = 7
+        for version in [0, -1, 2]:
+            val batch = FontRenderBatch(program_version: version, valid: true, atlas_width: 1, atlas_height: 1,
+                atlas_pixels: [1u32], quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 1u32)], atlas_generation: 8, dirty_rects: [])
+            expect(backend.draw_font_batch(0, 0, batch)).to_equal(0)
+            expect(backend.font.atlas_generation).to_equal(7)
+            expect(backend.gpu_frame_complete).to_equal(true)
 
     it "wires the typed Metal font backend only into native Metal constructors":
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")

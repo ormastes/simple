@@ -511,3 +511,9 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   Conditional real-dylib A-to-B evidence/manual remains unexecuted under the
   session cap. Full config/backend/program keys and concurrent multi-face
   ownership remain out of scope; no matrix promotion.
+- font program-version fence: every batch stamps version 1 for
+  `simple_font_atlas_composite_v1_u32`. CUDA/Metal/OpenCL reject mismatches
+  before mutation and Engine2D replays CPU from quad 0. Conditional CUDA and
+  OpenCL scenarios cover reject-then-v1 recovery; Metal remains static-only
+  because no injectable dispatch seam exists. No execution promotion or full
+  REQ-009 claim follows.

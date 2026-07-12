@@ -14,6 +14,10 @@ use std.gpu.engine2d.bitmap_font_offload.{
     bitmap_glyph_raster_preferred_mask_readback_evidence
 }
 use std.nogc_sync_mut.text_layout.font_rasterizer.{VectorFontAcceleratorStats}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
+use std.gpu.engine2d.backend_cuda.{CudaBackend}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 
 fn _accelerator(returned_glyphs: i64, returned_pixels: i64, reason: text) -> VectorFontAcceleratorStats:
     VectorFontAcceleratorStats(
@@ -26,7 +30,33 @@ fn _accelerator(returned_glyphs: i64, returned_pixels: i64, reason: text) -> Vec
         unavailable_reason: reason
     )
 
+fn _one_pixel_batch(version: i64, color: u32) -> FontRenderBatch:
+    FontRenderBatch(
+        program_version: version,
+        valid: true,
+        atlas_width: 1,
+        atlas_height: 1,
+        atlas_pixels: [0xff000000u32],
+        quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 1, dst_y: 1,
+            width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: color)],
+        atlas_generation: 1,
+        dirty_rects: []
+    )
+
 describe "Engine2D font offload preference smoke":
+
+    it "replays unsupported and current font programs from quad zero after GPU refusal":
+        var engine = Engine2D.create_with_backend(3, 2, "software")
+        engine.cuda_backend = CudaBackend.create()
+
+        engine.clear(0xff000000u32)
+        expect(engine._draw_font_batch(0, 0, _one_pixel_batch(2, 0xff123456u32))).to_equal(true)
+        expect(engine.read_pixels()[4]).to_equal(0xff123456u32)
+
+        engine.clear(0xff000000u32)
+        expect(engine._draw_font_batch(0, 0, _one_pixel_batch(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, 0xffabcdefu32))).to_equal(true)
+        expect(engine.read_pixels()[4]).to_equal(0xffabcdefu32)
+        engine.shutdown()
 
     it "uses the shared font offload order for vector and bitmap evidence":
         val vector = vector_font_preferred_offload_evidence(

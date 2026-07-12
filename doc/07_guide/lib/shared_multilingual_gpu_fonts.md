@@ -208,6 +208,15 @@ long-scalar ABI, submits one versioned
 composite launch per quad, synchronizes, and falls back from the first
 unsubmitted quad.
 
+Every `FontRenderBatch` now stamps program version `1`, tied to
+`simple_font_atlas_composite_v1_u32`. CUDA, native Metal, and OpenCL reject any
+other version before atlas/session mutation; Engine2D then replays the CPU
+fallback from quad 0. Conditional CUDA/OpenCL evidence covers mismatch
+rejection followed by version-1 recovery. Metal currently has static rejection
+evidence only because its session has no injectable dispatch seam. None of
+this promotes native execution or completes REQ-009 program/backend cache
+identity.
+
 For OpenCL, compiler emission and Engine2D runtime compilation now share the
 exact source returned by
 `std.common.gpu.font_atlas_composite.font_atlas_composite_opencl_source()`.

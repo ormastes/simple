@@ -51,25 +51,45 @@ describe "CudaBackend RenderBackend facade":
 
     it "fails closed for invalid font batches and invalidates atlas generations":
         var backend = CudaBackend.create()
-        val invalid = FontRenderBatch(valid: false, atlas_width: 0, atlas_height: 0, atlas_pixels: [], quads: [], atlas_generation: 0, dirty_rects: [])
+        val invalid = FontRenderBatch(program_version: 1, valid: false, atlas_width: 0, atlas_height: 0, atlas_pixels: [], quads: [], atlas_generation: 0, dirty_rects: [])
 
         expect(backend.draw_font_batch(0, 0, invalid)).to_equal(0)
         backend.font_atlas_generation = 7
         backend.invalidate_font_atlas()
         expect(backend.font_atlas_generation).to_equal(-1)
 
+    it "rejects unsupported font programs before CUDA atlas mutation":
+        var backend = CudaBackend.create()
+        backend.font_atlas_generation = 7
+        for version in [0, -1, 2]:
+            val batch = FontRenderBatch(program_version: version, valid: true, atlas_width: 1, atlas_height: 1,
+                atlas_pixels: [1u32], quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 1u32)], atlas_generation: 8, dirty_rects: [])
+            expect(backend.draw_font_batch(0, 0, batch)).to_equal(0)
+            expect(backend.font_atlas_generation).to_equal(7)
+
     it "conditionally composites a shared atlas through CUDA device readback":
         var backend = CudaBackend.create()
         val ok = backend.init(4, 4)
         if ok:
             backend.clear(0xff000000u32)
+            val unsupported = FontRenderBatch(
+                program_version: 2,
+                valid: true, atlas_width: 1, atlas_height: 1,
+                atlas_pixels: [0x80000000u32],
+                quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 1, dst_y: 1, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0x80ff0000u32)],
+                atlas_generation: 1, dirty_rects: []
+            )
+            expect(backend.draw_font_batch(0, 0, unsupported)).to_equal(0)
+            expect(backend.font_atlas_generation).to_equal(-1)
             val batch = FontRenderBatch(
+                program_version: 1,
                 valid: true, atlas_width: 1, atlas_height: 1,
                 atlas_pixels: [0x80000000u32],
                 quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 1, dst_y: 1, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0x80ff0000u32)],
                 atlas_generation: 1, dirty_rects: []
             )
             expect(backend.draw_font_batch(0, 0, batch)).to_equal(1)
+            expect(backend.font_atlas_generation).to_equal(1)
             val readback = backend.read_pixels_with_source()
             expect(readback.source).to_equal("device_readback")
             expect(readback.pixels[5]).to_equal(0xff400000u32)
