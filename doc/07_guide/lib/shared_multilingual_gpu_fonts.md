@@ -54,6 +54,10 @@ to the canonical multilingual witness corpus.
 The unchanged binaries and adjacent metadata/licenses are bundled under
 `assets/fonts/google-fonts/` (16 files, 51,764,704 font bytes), but they remain
 **acceptance candidates** where exact executable corpus coverage is pending.
+The canonical font provider now projects all 16 manifest paths and accepts an
+exact, trimmed, case-insensitive family name as a singleton candidate. Encoded
+`@font-face` sources still take priority; generic CSS family heuristics remain
+unchanged. Runtime addressability does not promote any sparse-matrix cell.
 Do not call a face supported until shaping/codepoint tests and the sparse matrix
 accept it. The selected policy permits only unchanged default variable-font
 instances and requires non-default axes plus color/SVG/strike/CFF tables to

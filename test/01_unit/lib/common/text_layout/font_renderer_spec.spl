@@ -10,6 +10,8 @@ use common.text_layout.font_renderer.{
     browser_provided_font_paths, browser_sans_font_candidates,
     browser_serif_font_candidates,
     ensure_browser_provided_fonts}
+use common.text_layout.font_provider.{browser_bundled_font_path_for_family}
+use std.common.encoding.font_registry.{selected_font_asset_candidates}
 use common.text_layout.font_rasterizer.{reset_vector_font_raster_stats, vector_font_accelerator_stats}
 
 extern fn rt_env_set(key: text, value: text) -> bool
@@ -230,6 +232,35 @@ describe "shared font renderer fallbacks":
         expect(result.attempted_download).to_equal(false)
         expect("available,missing").to_contain(result.status)
 
+    it "keeps all provided font paths in pinned manifest order":
+        val assets = selected_font_asset_candidates()
+        val paths = browser_provided_font_paths()
+        expect(paths.len()).to_equal(16)
+        expect(paths.len()).to_equal(assets.len())
+        var i = 0
+        while i < assets.len():
+            expect(paths[i]).to_equal(assets[i].local_path)
+            i = i + 1
+
+    it "resolves each exact bundled family to its sole pinned candidate":
+        val assets = selected_font_asset_candidates()
+        val paths = browser_provided_font_paths()
+        var i = 0
+        while i < assets.len():
+            expect(browser_bundled_font_path_for_family(assets[i].family)).to_equal(paths[i])
+            expect(browser_font_candidates_for_family(assets[i].family)).to_equal([paths[i]])
+            i = i + 1
+        expect(browser_bundled_font_path_for_family("nOtO sAnS aRaBiC")).to_equal(paths[2])
+        expect(browser_bundled_font_path_for_family("  Noto Emoji  ")).to_equal(paths[15])
+
+    it "requires one exact family token for bundled lookup":
+        expect(browser_bundled_font_path_for_family("")).to_equal("")
+        expect(browser_bundled_font_path_for_family("Unknown Family")).to_equal("")
+        expect(browser_bundled_font_path_for_family("Noto Sans SC, sans-serif")).to_equal("")
+        expect(browser_font_candidates_for_family("monospace")[0]).to_equal(browser_mono_font_candidates()[0])
+        expect(browser_font_candidates_for_family("Arial, sans-serif")[0]).to_equal(browser_sans_font_candidates()[0])
+        expect(browser_font_candidates_for_family("Times New Roman, serif")[0]).to_equal(browser_serif_font_candidates()[0])
+
     it "extracts font-face source URLs for browser font materialization":
         val css = "@font-face { font-family: Demo; src: url('/fonts/demo.woff2') format('woff2'), url(\"https://cdn.example/demo.ttf\") format('truetype'); } body { color: red }"
         val urls = browser_font_face_source_urls(css)
@@ -243,6 +274,9 @@ describe "shared font renderer fallbacks":
         expect(browser_font_face_source_from_family_value(family)).to_equal("assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf")
         expect(candidates[0]).to_equal("assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf")
         expect(candidates[1]).to_equal(browser_chrome_compatible_normal_font_path())
+
+        val exact_family = browser_font_face_family_value("Noto Sans SC", "assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf")
+        expect(browser_font_candidates_for_family(exact_family)[0]).to_equal("assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf")
 
     it "keeps remote font-face sources out of renderer file candidates until fetched":
         val family = browser_font_face_family_value("Remote Serif, serif", "https://cdn.example/font.ttf")
