@@ -285,9 +285,13 @@ typedef struct {
 
 typedef struct {
     HeapHeader hdr;
-    uint64_t   len;
+    uint64_t   len;     /* MUST be uint64_t to match compiler-emitted objects */
     char       data[];
 } RuntimeString;
+
+/* Keep in lock-step with arch/common/baremetal_runtime.h (single contract). */
+_Static_assert(offsetof(RuntimeString, len) == 8, "RuntimeString.len must be at offset 8");
+_Static_assert(offsetof(RuntimeString, data) == 16, "RuntimeString.data must be at offset 16");
 
 typedef struct {
     HeapHeader   hdr;
@@ -2663,10 +2667,9 @@ uint64_t simpleos_fat32_preloaded_size(void) { return g_fsexec_preload_size; }
 
 /* Copy a text's bytes + NUL to a physical/identity-mapped address; returns
  * the RAW i64 byte length. Uses THIS file's RuntimeString layout (same decode
- * as rt_print_str, which prints loader-passed text correctly). NOTE:
- * rt_extras.c's RuntimeString header is 4 bytes SHORTER than this layout, so
- * its string-data reads (rt_text_to_bytes elements, etc.) are shifted 4 bytes
- * early — that is why the .spl [u8] channel yields header zeros. */
+ * as rt_print_str, which prints loader-passed text correctly). (The
+ * former rt_extras.c 4-byte-short header layout is fixed; offsets are locked
+ * by the _Static_asserts near the RuntimeString typedef.) */
 int64_t rt_text_copy_to_phys(RuntimeValue str, uint64_t phys)
 {
     RuntimeString *s = 0;

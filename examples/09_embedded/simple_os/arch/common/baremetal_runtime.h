@@ -84,9 +84,15 @@ typedef struct {
 
 typedef struct {
     HeapHeader hdr;
-    uint32_t   len;
+    uint64_t   len;     /* MUST be uint64_t to match compiler-emitted objects */
     char       data[];
 } RuntimeString;
+
+/* Compiler-emitted string layout contract: len is a u64 at offset 8 and the
+ * character payload starts at offset 16. A uint32_t len here shifted every
+ * data[] read 4 bytes early (bug: x64_rt_extras_runtime_string_layout_mismatch). */
+_Static_assert(offsetof(RuntimeString, len) == 8, "RuntimeString.len must be at offset 8");
+_Static_assert(offsetof(RuntimeString, data) == 16, "RuntimeString.data must be at offset 16");
 
 typedef struct {
     HeapHeader   hdr;
