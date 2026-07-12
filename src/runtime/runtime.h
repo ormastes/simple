@@ -206,7 +206,7 @@ int         rt_file_fsync_cached(const char* path);
 
 /* ===== Memory-Mapped File I/O ===== */
 
-void*    rt_mmap(const char* path, int64_t path_len, int64_t size, int64_t offset, bool readonly);
+void*    rt_mmap(const char* path, int64_t size, int64_t offset, bool readonly);
 bool     rt_munmap(void* addr, int64_t size);
 int64_t  rt_volatile_read_u8(int64_t addr);
 int64_t  rt_volatile_read_u16(int64_t addr);
