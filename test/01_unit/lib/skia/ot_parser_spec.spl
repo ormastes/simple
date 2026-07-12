@@ -5,7 +5,7 @@ use std.skia.entity.path.{sk_path_new}
 use std.skia.feature.glyph.ot_parser.{read_u16_be, read_i16_be, read_u32_be, read_fixed_1616, read_f2dot14, OtTable, OtFont, parse_offset_table, find_table}
 use std.skia.feature.glyph.ot_parser_cmap.{CmapFormat4, parse_cmap_format12, cmap_lookup, cmap12_lookup, cmap_glyph_id}
 use std.skia.feature.glyph.ot_parser_metrics.{HorizontalMetrics, parse_hmtx}
-use std.skia.feature.glyph.ot_parser_glyf.{parse_glyf_outline, parse_glyf_simple, parse_glyf_compound}
+use std.skia.feature.glyph.ot_parser_glyf.{parse_glyf_outline, parse_glyf_simple, parse_glyf_compound, rasterize_glyf_bitmap}
 use std.skia.feature.glyph.ot_parser_cff.{parse_cff_charstring}
 use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, GposLookup, GsubSingleResult, apply_gsub_single, parse_gsub_skeleton, parse_gpos_skeleton, GlyphClass, parse_gdef_glyph_class}
 use std.skia.feature.glyph.ot_parser_fvar.{FvarAxis, parse_fvar_axes, parse_avar_mapping}
@@ -346,6 +346,31 @@ fn _glyf_font(offsets: [u32], glyphs: [u8]) -> OtFont:
 fn _one_point_glyph() -> [u8]:
     [0, 1, 0, 2, 0, 3, 0, 2, 0, 3, 0, 0, 0, 0, 1, 0, 2, 0, 3]
 
+fn _raster_font(offsets: [u32], glyphs: [u8]) -> OtFont:
+    var font = _glyf_font(offsets, glyphs)
+    font.blob[18] = 3
+    font.blob[19] = 232
+    val hhea_start = font.blob.len()
+    var i: i64 = 0
+    while i < 36:
+        font.blob.append(0)
+        i = i + 1
+    font.blob[hhea_start + 34] = 0
+    font.blob[hhea_start + 35] = 1
+    val hmtx_start = font.blob.len()
+    font.blob.append(3)
+    font.blob.append(232)
+    font.blob.append(0)
+    font.blob.append(50)
+    i = 1
+    while i < offsets.len() - 1:
+        font.blob.append(0)
+        font.blob.append(50)
+        i = i + 1
+    font.tables.append(OtTable(tag: 1751672161, offset: hhea_start as u32, length: 36))
+    font.tables.append(OtTable(tag: 1752003704, offset: hmtx_start as u32, length: (4 + (offsets.len() - 2) * 2) as u32))
+    font
+
 describe "parse_glyf_outline":
     it "applies compound translation and uniform F2Dot14 scale":
         var glyphs = _one_point_glyph()
@@ -486,6 +511,64 @@ describe "parse_glyf_outline":
                 many.append(byte)
             component_index = component_index + 1
         expect(parse_glyf_outline(_glyf_font([0, 19, 549], many), 1) == None).to_equal(true)
+
+describe "rasterize_glyf_bitmap":
+    it "rasterizes simple and compound outlines with scaled metrics":
+        val triangle: [u8] = [0, 1, 0, 0, 0, 0, 3, 232, 3, 232, 0, 2, 0, 0, 1, 1, 1,
+                              0, 0, 3, 232, 252, 24, 0, 0, 0, 0, 3, 232]
+        val simple = rasterize_glyf_bitmap(_raster_font([0, 29], triangle), 0, 20)
+        expect(simple != None).to_equal(true)
+        val bitmap = simple.unwrap()
+        expect(bitmap.width).to_equal(20)
+        expect(bitmap.height).to_equal(20)
+        expect(bitmap.advance).to_equal(20)
+        expect(bitmap.bearing_x).to_equal(1)
+        expect(bitmap.bearing_y).to_equal(0)
+        expect(bitmap.pixels.len()).to_equal(400)
+
+        var glyphs = triangle
+        val compound: [u8] = [255, 255, 0, 0, 0, 0, 3, 232, 3, 232,
+                              0, 3, 0, 0, 0, 0, 0, 0]
+        for byte in compound:
+            glyphs.append(byte)
+        val composed = rasterize_glyf_bitmap(_raster_font([0, 29, 47], glyphs), 1, 16)
+        expect(composed != None).to_equal(true)
+        expect(composed.unwrap().pixels.len()).to_be_greater_than(0)
+        expect(composed.unwrap().pixels).to_contain(255)
+
+    it "flips asymmetric sfnt Y and rounds half-pixel metrics away from zero":
+        val triangle: [u8] = [0, 1, 0, 0, 254, 12, 3, 232, 0, 0, 0, 2, 0, 0, 1, 1, 1,
+                              0, 0, 3, 232, 252, 24, 254, 12, 0, 0, 1, 244]
+        var font = _raster_font([0, 29], triangle)
+        val metric_offset = font.tables[5].offset as i64
+        font.blob[metric_offset] = 1
+        font.blob[metric_offset + 1] = 244
+        font.blob[metric_offset + 2] = 255
+        font.blob[metric_offset + 3] = 206
+        val parsed = rasterize_glyf_bitmap(font, 0, 15).unwrap()
+        expect(parsed.width).to_equal(15)
+        expect(parsed.height).to_equal(8)
+        expect(parsed.advance).to_equal(8)
+        expect(parsed.bearing_x).to_equal(-1)
+        expect(parsed.bearing_y).to_equal(-8)
+        expect(parsed.pixels[14]).to_equal(0)
+        expect(parsed.pixels[119] as i64).to_be_greater_than(0)
+
+    it "rejects invalid sizes and malformed metric tables":
+        val glyph = _one_point_glyph()
+        val font = _raster_font([0, 19], glyph)
+        expect(rasterize_glyf_bitmap(font, 0, 0) == None).to_equal(true)
+        expect(rasterize_glyf_bitmap(font, 0, 513) == None).to_equal(true)
+        expect(rasterize_glyf_bitmap(_raster_font([0, 0], []), 0, 16) == None).to_equal(true)
+        val short_hmtx = OtFont(blob: font.blob, tables: [
+            font.tables[0], font.tables[1], font.tables[2], font.tables[3], font.tables[4],
+            OtTable(tag: 1752003704, offset: font.tables[5].offset, length: 3)
+        ])
+        expect(rasterize_glyf_bitmap(short_hmtx, 0, 16) == None).to_equal(true)
+        var bad_head = OtFont(blob: font.blob, tables: font.tables)
+        bad_head.blob[18] = 0
+        bad_head.blob[19] = 0
+        expect(rasterize_glyf_bitmap(bad_head, 0, 16) == None).to_equal(true)
 
 describe "parse_cff_charstring":
     it "returns Some empty path for endchar-only charstring":

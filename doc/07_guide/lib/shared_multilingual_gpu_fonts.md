@@ -84,11 +84,13 @@ diagnostics. Loader bool/nil APIs do not surface those reasons.
 
 A complete raw audit found 7,594 compound glyphs (16,194 components) in 14
 candidate faces; the exact witness corpus reaches 76 roots/124 direct
-components. The bounded glyph-ID Pure Simple parser now reconstructs those
-roots, and the manifest scenario checks every result is nonempty against a
-test-only raw sfnt oracle. Native fontdue/stb rasterizers remain the production
-owners; this unrun evidence does not complete REQ-008 or promote any coverage
-cell.
+components. The bounded glyph-ID Pure Simple parser now reconstructs and
+rasterizes those roots with bounded dimensions and exact integer metrics.
+Production selected-font loading still remains owned by the native rasterizers:
+the neutral encoding layer cannot depend upward on Skia, and the current typed
+native wrapper does not retain a second blob for per-glyph fallback. Routing
+through this Pure Simple capability is deferred until a neutral lower owner can
+hold the validated bytes. No coverage cell is promoted.
 
 The manifest scenario now prepares exact `CORPUS.sdn` codepoint and raster
 witnesses for all 16 candidates, including Bengali rank 11 and Noto Emoji

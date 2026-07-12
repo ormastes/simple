@@ -540,3 +540,9 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   roots/124 direct components, and requires a nonempty Pure Simple outline for
   every mapped compound root. Native rasterizers stay the production owner;
   execution and the 0/0/26/74 matrix remain unchanged.
+- selected outline fallback capability: Skia now provides bounded Pure Simple
+  cmap/glyf rasterization with exact integer metrics, but production routing is
+  deferred. The neutral encoding owner cannot depend upward on Skia, and the
+  typed native wrapper keeps its prior native `handle <= 0` fail-closed
+  behavior rather than retaining duplicate font bytes. A neutral lower owner,
+  behavioral native-miss evidence, and matrix promotion remain outstanding.

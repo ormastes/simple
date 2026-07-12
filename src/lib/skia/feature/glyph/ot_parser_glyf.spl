@@ -1,11 +1,22 @@
 # Bounded OpenType glyf outline parser.
 
 use std.skia.entity.path.{SkPath, SkPathVerb, sk_path_new}
+use std.skia.feature.glyph.outline.{GlyphMetrics, GlyphOutline}
+use std.skia.feature.glyph.rasterize.{rasterize_outline}
 use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, read_u16_be, read_i16_be, find_table}
+use std.skia.feature.glyph.ot_parser_metrics.{parse_hmtx}
 
 class GlyfParseResult:
     path: SkPath
     components: i64
+
+class GlyfRasterBitmap:
+    width: i64
+    height: i64
+    advance: i64
+    bearing_x: i64
+    bearing_y: i64
+    pixels: [u8]
 
 fn _table_is_bounded(font: OtFont, table: OtTable, minimum: i64) -> bool:
     val start = table.offset as i64
@@ -342,6 +353,77 @@ fn parse_glyf_outline(font: OtFont, glyph_id: u32) -> Option<SkPath>:
     if parsed == None:
         return None
     Some(parsed.unwrap().path)
+
+fn _round_glyf_metric(value: f64) -> i64:
+    if value >= 0.0: (value + 0.5) as i64 else: (value - 0.5) as i64
+
+fn _ceil_glyf_dimension(value: f64) -> i64:
+    if value < 1.0:
+        return 1
+    val whole = value as i64
+    if value > whole as f64: whole + 1 else: whole
+
+fn rasterize_glyf_bitmap(font: OtFont, glyph_id: u32, size_px: i64) -> Option<GlyfRasterBitmap>:
+    if size_px <= 0 or size_px > 512:
+        return None
+    val head = find_table(font, 1751474532)
+    val hhea = find_table(font, 1751672161)
+    val hmtx = find_table(font, 1752003704)
+    if head == None or hhea == None or hmtx == None:
+        return None
+    val head_table = head.unwrap()
+    val hhea_table = hhea.unwrap()
+    val hmtx_table = hmtx.unwrap()
+    if not _table_is_bounded(font, head_table, 54) or not _table_is_bounded(font, hhea_table, 36) or not _table_is_bounded(font, hmtx_table, 4):
+        return None
+    val units_per_em = read_u16_be(font.blob, head_table.offset as i64 + 18) as i64
+    val long_metrics = read_u16_be(font.blob, hhea_table.offset as i64 + 34) as i64
+    if units_per_em == 0 or long_metrics == 0:
+        return None
+    var metric_end: i64 = 0
+    if glyph_id as i64 < long_metrics:
+        metric_end = (glyph_id as i64 + 1) * 4
+    else:
+        metric_end = long_metrics * 4 + (glyph_id as i64 - long_metrics + 1) * 2
+    if metric_end > hmtx_table.length as i64:
+        return None
+    val path = parse_glyf_outline(font, glyph_id)
+    val metrics = parse_hmtx(font, long_metrics as u32, glyph_id)
+    if path == None or metrics == None:
+        return None
+    val sfnt_path = path.unwrap()
+    if sfnt_path.segments.len() == 0:
+        return None
+    val sfnt_bounds = sfnt_path.bounds()
+    val glyph_path = _append_transformed(sk_path_new(), sfnt_path, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0)
+    val bounds = glyph_path.bounds()
+    val scale = size_px as f64 / units_per_em as f64
+    val em_w = bounds.right - bounds.left
+    val em_h = bounds.bottom - bounds.top
+    val extent = if em_h > em_w: em_h else: em_w
+    val raw_w = em_w * scale
+    val raw_h = em_h * scale
+    val width = _ceil_glyf_dimension(raw_w)
+    val height = _ceil_glyf_dimension(raw_h)
+    if raw_w < 0.0 or raw_h < 0.0 or width > 4096 or height > 4096 or width > 16777216 / height:
+        return None
+    val outline = GlyphOutline(
+        glyph_id: glyph_id,
+        path: glyph_path,
+        metrics: GlyphMetrics(advance_x: metrics.unwrap().advance_width as f64, advance_y: 0.0, bounds: bounds)
+    )
+    val bitmap = rasterize_outline(outline, if extent > 0.0: extent * scale else: size_px as f64)
+    if bitmap.width != width or bitmap.height != height or bitmap.pixels.len() != width * height:
+        return None
+    val horizontal = metrics.unwrap()
+    Some(GlyfRasterBitmap(
+        width: width,
+        height: height,
+        advance: _round_glyf_metric(horizontal.advance_width as f64 * scale),
+        bearing_x: _round_glyf_metric(horizontal.left_side_bearing as f64 * scale),
+        bearing_y: _round_glyf_metric(sfnt_bounds.top * scale),
+        pixels: bitmap.pixels
+    ))
 
 # Deprecated offset entry points cannot establish loca-bounded glyph identity.
 fn parse_glyf_simple(font: OtFont, glyph_offset: u32) -> Option<SkPath>:
