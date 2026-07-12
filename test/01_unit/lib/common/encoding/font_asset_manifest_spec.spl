@@ -1,8 +1,97 @@
 use std.spec.{describe, it, expect}
-use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_language_ranking_source, font_language_ranking_evidence, selected_font_language_ranks, selected_font_coverage_languages, selected_font_coverage_categories, selected_font_coverage_matrix, selected_font_coverage_cell}
-use std.nogc_sync_mut.sffi.io.{file_exists}
+use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_candidate_for_path, validate_selected_font_asset, selected_font_language_ranking_source, font_language_ranking_evidence, selected_font_language_ranks, selected_font_coverage_languages, selected_font_coverage_categories, selected_font_coverage_matrix, selected_font_coverage_cell}
+use std.nogc_sync_mut.sffi.io.{file_exists, file_read_bytes, file_hash_sha256}
+
+fn _manifest_u16(blob: [u8], offset: i64) -> i64:
+    (blob[offset].to_i64() << 8) | blob[offset + 1].to_i64()
+
+fn _manifest_u32(blob: [u8], offset: i64) -> i64:
+    (blob[offset].to_i64() << 24) | (blob[offset + 1].to_i64() << 16) |
+        (blob[offset + 2].to_i64() << 8) | blob[offset + 3].to_i64()
+
+fn _manifest_set_u32(blob: [u8], offset: i64, value: i64) -> [u8]:
+    var result = blob
+    result[offset] = ((value >> 24) & 255).to_u8()
+    result[offset + 1] = ((value >> 16) & 255).to_u8()
+    result[offset + 2] = ((value >> 8) & 255).to_u8()
+    result[offset + 3] = (value & 255).to_u8()
+    result
+
+fn _manifest_table_record(blob: [u8], tag: i64) -> i64:
+    val count = _manifest_u16(blob, 4)
+    var index: i64 = 0
+    while index < count:
+        val record = 12 + index * 16
+        if _manifest_u32(blob, record) == tag: return record
+        index = index + 1
+    -1
 
 describe "selected font asset manifest":
+    it "validates selected runtime assets in deterministic fail-fast order":
+        val unmanaged = validate_selected_font_asset("tmp/unmanaged.ttf", [], "")
+        expect(unmanaged.selected).to_be(false)
+        expect(unmanaged.valid).to_be(true)
+        expect(unmanaged.family).to_equal("")
+        expect(unmanaged.reason).to_equal("unmanaged")
+
+        val assets = selected_font_asset_candidates()
+        var asset_index: i64 = 0
+        while asset_index < assets.len():
+            val asset = assets[asset_index]
+            val result = validate_selected_font_asset(
+                asset.local_path, file_read_bytes(asset.local_path), file_hash_sha256(asset.local_path))
+            expect(result.selected).to_be(true)
+            expect(result.valid).to_be(true)
+            expect(result.family).to_equal(asset.family)
+            expect(result.reason).to_equal("valid")
+            asset_index = asset_index + 1
+        val static_asset = assets[13]
+        val static_blob = file_read_bytes(static_asset.local_path)
+        expect(selected_font_asset_candidate_for_path(static_asset.local_path).?.family).to_equal(static_asset.family)
+        expect(selected_font_asset_candidate_for_path("tmp/unmanaged.ttf")).to_be_nil()
+        expect(validate_selected_font_asset(static_asset.local_path, [], static_asset.sha256).reason).to_equal("byte-length")
+        expect(validate_selected_font_asset(static_asset.local_path, static_blob, static_asset.sha256.upper()).reason).to_equal("sha256")
+
+        var malformed = static_blob
+        malformed[0] = 0u8
+        expect(validate_selected_font_asset(static_asset.local_path, malformed, static_asset.sha256).reason).to_equal("format")
+
+        var changed_tables = static_blob
+        val dsig_record = _manifest_table_record(changed_tables, 1146308935)
+        changed_tables[dsig_record] = 65u8
+        expect(validate_selected_font_asset(static_asset.local_path, changed_tables, static_asset.sha256).reason).to_equal("tables")
+
+        val variable_asset = assets[8]
+        var changed_axes = file_read_bytes(variable_asset.local_path)
+        val fvar_record = _manifest_table_record(changed_axes, 1719034226)
+        val fvar = _manifest_u32(changed_axes, fvar_record + 8)
+        val axes = fvar + _manifest_u16(changed_axes, fvar + 4)
+        changed_axes = _manifest_set_u32(changed_axes, axes + 8, _manifest_u32(changed_axes, axes + 8) + 1)
+        expect(validate_selected_font_asset(variable_asset.local_path, changed_axes, variable_asset.sha256).reason).to_equal("default-axes")
+
+        var changed_name = static_blob
+        val name_record = _manifest_table_record(changed_name, 1851878757)
+        val name = _manifest_u32(changed_name, name_record + 8)
+        val name_count = _manifest_u16(changed_name, name + 2)
+        val strings = name + _manifest_u16(changed_name, name + 4)
+        var record_index: i64 = 0
+        while record_index < name_count:
+            val record = name + 6 + record_index * 12
+            if (_manifest_u16(changed_name, record) == 3 and _manifest_u16(changed_name, record + 4) == 0x0409 and
+                _manifest_u16(changed_name, record + 6) == 5):
+                val start = strings + _manifest_u16(changed_name, record + 10)
+                changed_name[start + 1] = (changed_name[start + 1].to_i64() ^ 1).to_u8()
+                record_index = name_count
+            else:
+                record_index = record_index + 1
+        expect(validate_selected_font_asset(static_asset.local_path, changed_name, static_asset.sha256).reason).to_equal("names")
+
+        val valid = validate_selected_font_asset(static_asset.local_path, static_blob, static_asset.sha256)
+        expect(valid.selected).to_be(true)
+        expect(valid.valid).to_be(true)
+        expect(valid.family).to_equal("UnifrakturCook")
+        expect(valid.reason).to_equal("valid")
+
     it "pins the deterministic CLDR top ten and eleventh-place boundary":
         val source = selected_font_language_ranking_source()
         val selected = selected_font_language_ranks()

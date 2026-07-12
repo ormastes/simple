@@ -496,3 +496,7 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
 - skill freshness: the guide now names `$sp_dev` as process owner for bundled
   fonts, shaping, glyph material, and GPU text; no source, test, or manual was
   regenerated for this documentation-only slice.
+- loader preflight claim boundary: both native roots validate only byte-exact
+  manifest paths before native calls; aliases remain unmanaged. Separate
+  read/hash/native reopen leaves TOCTOU, so security/race-free enforcement
+  still requires validated-byte or owned-fd loading. No matrix promotion.

@@ -20,6 +20,8 @@
 #         get_font_for_script, font_fallback_chain
 #     }
 
+use std.common.encoding.sfnt.{validate_default_glyf_font, sfnt_manifest_tables_match, sfnt_manifest_default_axes_match, sfnt_manifest_names_match}
+
 # ============================================================================
 # Font type classification
 # ============================================================================
@@ -544,6 +546,49 @@ fn selected_font_asset_candidates() -> [FontAssetCandidate]:
         _google_font_candidate("Pixelify Sans", "pixel", "ofl/pixelifysans/PixelifySans[wght].ttf", "ofl/pixelifysans/OFL.txt", "OFL-1.1", "Copyright 2021 The Pixelify Sans Project Authors (https://github.com/eifetx/Pixelify-Sans)", "none declared", 79160, "9ba86cd010a4de309d263ceff8e8044092c9db7efda869620cb9ff1c4389e8a5", "GDEF,GPOS,GSUB,HVAR,MVAR,OS/2,STAT,cmap,fvar,gasp,glyf,gvar,head,hhea,hmtx,loca,maxp,name,post,prep", "cyrillic,latin,latin-ext"),
         _google_font_candidate("Noto Emoji", "emoji", "ofl/notoemoji/NotoEmoji[wght].ttf", "ofl/notoemoji/OFL.txt", "OFL-1.1", "Copyright 2013 Google LLC", "none declared", 1982596, "de6c18832938afc99caf132b39d6a30a19bac7f2e812e28db2535b4608d27551", "GSUB,HVAR,OS/2,STAT,VVAR,cmap,fvar,gasp,glyf,gvar,head,hhea,hmtx,loca,maxp,name,post,vhea,vmtx", "emoji")
     ]
+
+class FontAssetRuntimeValidation:
+    selected: bool
+    valid: bool
+    family: text
+    reason: text
+
+fn selected_font_asset_candidate_for_path(path: text) -> FontAssetCandidate?:
+    for candidate in selected_font_asset_candidates():
+        if candidate.local_path == path: return candidate
+    nil
+
+fn _font_sha256_hex_valid(value: text) -> bool:
+    if value.len() != 64: return false
+    var index: i64 = 0
+    while index < value.len():
+        if not "0123456789abcdef".contains(value[index]): return false
+        index = index + 1
+    true
+
+fn _font_asset_validation(selected: bool, valid: bool, family: text, reason: text) -> FontAssetRuntimeValidation:
+    FontAssetRuntimeValidation(selected: selected, valid: valid, family: family, reason: reason)
+
+fn validate_selected_font_asset(path: text, blob: [u8], sha256_hex: text) -> FontAssetRuntimeValidation:
+    val maybe_candidate = selected_font_asset_candidate_for_path(path)
+    val candidate = match maybe_candidate:
+        Some(value): value
+        None: return _font_asset_validation(false, true, "", "unmanaged")
+    if blob.len() != candidate.byte_len:
+        return _font_asset_validation(true, false, candidate.family, "byte-length")
+    if not _font_sha256_hex_valid(sha256_hex) or sha256_hex != candidate.sha256:
+        return _font_asset_validation(true, false, candidate.family, "sha256")
+    if not validate_default_glyf_font(blob).supported:
+        return _font_asset_validation(true, false, candidate.family, "format")
+    if not sfnt_manifest_tables_match(blob, candidate.sfnt_tables):
+        return _font_asset_validation(true, false, candidate.family, "tables")
+    if not sfnt_manifest_default_axes_match(blob, candidate.default_axes):
+        return _font_asset_validation(true, false, candidate.family, "default-axes")
+    if not sfnt_manifest_names_match(blob, candidate.family, candidate.embedded_style,
+                                     candidate.embedded_full_name, candidate.embedded_postscript_name,
+                                     candidate.embedded_version):
+        return _font_asset_validation(true, false, candidate.family, "names")
+    _font_asset_validation(true, true, candidate.family, "valid")
 
 class FontCoverageCell:
     language: text

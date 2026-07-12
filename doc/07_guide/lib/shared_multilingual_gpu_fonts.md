@@ -42,6 +42,12 @@ Use `selected_font_coverage_cell(language, category)` for exact policy lookup;
 unknown axes return `nil`. Do not load `witness_family` while the cell is
 `unavailable` or `not-designed-for-script`.
 
+Both native font roots preflight only byte-exact manifest paths; equivalent
+aliases remain unmanaged. Reading, path hashing, and native reopening are a
+TOCTOU window, so this is not security or race-free enforcement. That requires
+loading from the validated bytes or an owned file descriptor. This preflight
+does not promote any coverage-matrix cell.
+
 ## Pinned candidate assets
 
 `selected_font_asset_candidates()` records 16 unchanged files from Google Fonts
