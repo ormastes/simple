@@ -692,6 +692,30 @@ fn _run_advance(run: ShapedRun) -> f64:
     for glyph in run.glyphs: advance = advance + glyph.x_advance
     advance
 
+fn _script_is_neutral(script: Script) -> bool:
+    script == Script.Common or script == Script.Inherited
+
+fn _resolved_scripts(codepoints: [u32]) -> [Script]:
+    var scripts: [Script] = []
+    var preceding = Script.Unknown
+    for codepoint in codepoints:
+        val script = script_of(codepoint)
+        if _script_is_neutral(script):
+            scripts.push(if preceding == Script.Unknown: script else: preceding)
+        else:
+            scripts.push(script)
+            preceding = script
+    var following = Script.Unknown
+    var index = scripts.len() - 1
+    while index >= 0:
+        val script = scripts[index]
+        if _script_is_neutral(script):
+            if following != Script.Unknown: scripts[index] = following
+        else:
+            following = script
+        index = index - 1
+    scripts
+
 fn shaper_shape_with_language(shaper: Shaper, codepoints: [u32], font: SkFont, start_x: f64, start_y: f64, language: text) -> [ShapedRun]:
     val n = codepoints.len()
     var runs: [ShapedRun] = []
@@ -699,13 +723,14 @@ fn shaper_shape_with_language(shaper: Shaper, codepoints: [u32], font: SkFont, s
         return runs
     val trimmed_language = language.trim()
     val run_language = if trimmed_language == "": "und" else: trimmed_language
+    val resolved_scripts = _resolved_scripts(codepoints)
     var run_start: i64 = 0
-    var run_script = script_of(codepoints[0])
+    var run_script = resolved_scripts[0]
     var run_x = start_x
     var i: i64 = 1
     while i < n:
         val cp = codepoints[i]
-        val s = script_of(cp)
+        val s = resolved_scripts[i]
         if s != run_script:
             val run_font = fallback_chain_font_for_run(shaper.fallback, run_script, codepoints, start: run_start, end_idx: i)
             val bound = _shaper_ot_face(shaper, run_font)

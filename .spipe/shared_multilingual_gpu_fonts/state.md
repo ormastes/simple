@@ -311,6 +311,17 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   added. Final high-capability review passed after emitted-kernel overflow
   guards and reload invalidation were fixed. No Simple test/compiler ran, so
   this is implemented source, not native promotion evidence.
+- Common/Inherited run resolution: Spark implemented neutral classification and
+  one linear forward/backward resolution pass. ASCII non-letters, combining
+  ranges, variation selectors, and join controls now inherit the preceding
+  strong script, otherwise the following one, with Unknown boundaries failing
+  closed; unresolved Inherited runs retain the primary face. Focused fixtures
+  cover leading/trailing/between-script and long neutral sequences. Higher
+  review passed; no Simple command ran, so this remains static source evidence.
+- Integrated GSUB selector attempt 3 was fully removed after Spark and higher
+  review found LangSys activation, Arabic/Indic masking, cross-parent shared
+  validation, FeatureParams/FeatureVariations, and structural-validator gaps.
+  Per the three-cycle guard, no further selector retry occurs this session.
 - cmap12 slice: Spark confirmed eight bundled candidates carry format 12 and
   Noto Emoji maps `U+1F600` only there. The Pure Simple cmap owner now validates
   Unicode records, sorted/non-overlapping groups, table bounds, scalar range,

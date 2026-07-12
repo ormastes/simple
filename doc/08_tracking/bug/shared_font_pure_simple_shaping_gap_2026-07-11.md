@@ -98,6 +98,10 @@ one reviewed slice. The replacement must:
 
 ## Acceptance
 
+Common/Inherited run resolution is implemented with a linear, deterministic
+preceding-then-following policy and focused static fixtures. Executable evidence
+is still pending, and GSUB plan selection/application remains the open blocker.
+
 - Pinned Latin, Han, Devanagari, Arabic/Urdu, and Cyrillic fixtures expose stable
   face, glyph, cluster, advance, offsets, direction, language, and script.
 - Rasterized glyph IDs match shaped output; missing glyphs/formats fail closed.

@@ -56,15 +56,76 @@ describe "script_of: Latin range":
         val s = script_of(cp)
         expect s to_equal Script.Latin
 
-    it "ASCII boundary 0x007F is Latin":
+    it "ASCII non-letters are Common":
         val cp = 127 as u32
         val s = script_of(cp)
-        expect s to_equal Script.Latin
+        expect s to_equal Script.Common
+        expect script_of(32u32) to_equal Script.Common
+        expect script_of(48u32) to_equal Script.Common
 
     it "selected Latin-1 witnesses stay in one script":
         expect script_of(241 as u32) to_equal Script.Latin
         expect script_of(231 as u32) to_equal Script.Latin
         expect script_of(234 as u32) to_equal Script.Latin
+
+describe "Common and Inherited script resolution":
+    it "classifies combining marks and join controls without inventing a strong script":
+        expect script_of(769u32) to_equal Script.Inherited
+        expect script_of(8205u32) to_equal Script.Common
+
+    it "attaches a trailing combining mark to the preceding strong script":
+        val runs = shaper_shape(shaper_new(system_default_chain()), [65u32, 769u32], sk_font_default(), 0.0, 0.0)
+        expect runs.len() to_equal 1
+        expect runs[0].script to_equal Script.Latin
+        expect runs[0].glyphs.len() to_equal 2
+
+    it "attaches a leading combining mark to the following strong script":
+        val runs = shaper_shape(shaper_new(system_default_chain()), [769u32, 1040u32], sk_font_default(), 0.0, 0.0)
+        expect runs.len() to_equal 1
+        expect runs[0].script to_equal Script.Cyrillic
+        expect runs[0].glyphs.len() to_equal 2
+
+    it "attaches a neutral between differing scripts to the preceding script":
+        val runs = shaper_shape(shaper_new(system_default_chain()), [65u32, 8205u32, 1040u32], sk_font_default(), 0.0, 0.0)
+        expect runs.len() to_equal 2
+        expect runs[0].script to_equal Script.Latin
+        expect runs[0].glyphs.len() to_equal 2
+        expect runs[1].script to_equal Script.Cyrillic
+        expect runs[1].glyphs.len() to_equal 1
+
+    it "resolves leading trailing and between-script spaces":
+        val leading = shaper_shape(shaper_new(system_default_chain()), [32u32, 1040u32], sk_font_default(), 0.0, 0.0)
+        expect leading.len() to_equal 1
+        expect leading[0].script to_equal Script.Cyrillic
+        val trailing = shaper_shape(shaper_new(system_default_chain()), [1576u32, 32u32], sk_font_default(), 0.0, 0.0)
+        expect trailing.len() to_equal 1
+        expect trailing[0].script to_equal Script.Arabic
+        val between = shaper_shape(shaper_new(system_default_chain()), [1040u32, 32u32, 2309u32], sk_font_default(), 0.0, 0.0)
+        expect between.len() to_equal 2
+        expect between[0].glyphs.len() to_equal 2
+
+    it "resolves a long neutral run without splitting":
+        var codepoints: [u32] = [65u32]
+        var index: i64 = 0
+        while index < 256:
+            codepoints.push(32u32)
+            index = index + 1
+        codepoints.push(1040u32)
+        val runs = shaper_shape(shaper_new(system_default_chain()), codepoints, sk_font_default(), 0.0, 0.0)
+        expect runs.len() to_equal 2
+        expect runs[0].glyphs.len() to_equal 257
+
+    it "leaves an all-neutral run unresolved and invalid":
+        val runs = shaper_shape(shaper_new(system_default_chain()), [769u32], sk_font_default(), 0.0, 0.0)
+        expect runs.len() to_equal 1
+        expect runs[0].script to_equal Script.Inherited
+        expect runs[0].glyph_indices_valid to_equal false
+
+    it "keeps the primary font for an unresolved Inherited run":
+        val primary = sk_font_new(sk_typeface_from_name("Inherited Primary", sk_font_style_normal()), 12.0)
+        val fallback = sk_font_new(sk_typeface_from_name("Inherited Fallback", sk_font_style_normal()), 12.0)
+        val chain = fallback_chain_add(fallback_chain_new(primary), fallback)
+        expect fallback_chain_font_for_script(chain, Script.Inherited).typeface.family_name to_equal "Inherited Primary"
 
 describe "script_of: Bengali range":
     it "rank-11 Bengali letters are identified without claiming shaping":
