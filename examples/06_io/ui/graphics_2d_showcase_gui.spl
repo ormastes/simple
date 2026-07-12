@@ -1,6 +1,68 @@
 # graphics_2d_showcase_gui.spl — native window entry for the Engine2D gallery.
+# Also supports WM-client mode when SIMPLE_WM_APP_MODE=client is set.
 
-use examples.ui.graphics_2d_showcase.{run_graphics_2d_showcase}
+# NOTE: sibling-relative import (not examples.ui.graphics_2d_showcase): the seed
+# resolver only matches dot-form numbered dirs (NN.name), so the examples.ui.*
+# path fails at module load under src/compiler_rust/target/bootstrap/simple
+# ("Cannot resolve module: examples.ui.graphics_2d_showcase"). The sibling form
+# resolves file-relative and works in both lanes.
+use graphics_2d_showcase.{run_graphics_2d_showcase, draw_showcase}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.io_runtime.{env_get, getpid, file_write}
+use std.common.image.ppm_decode.{encode_ppm_p6}
+use std.nogc_sync_mut.sffi.io.{file_write_bytes}
+use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
+use common.ui.wm_app_process_contract.{WM_APP_MODE_ENV, WM_BRIDGE_FILE_ENV, WM_FRAME_FILE_ENV, WM_EVENT_FILE_ENV, WM_FRAME_SEQ_FILE_ENV, WM_CLIENT_HOLD_ENV, wm_app_mode_is_client, wm_graphics_2d_showcase_bridge_request_sized, wm_fs_bridge_encode, wm_graphics_2d_showcase_event_path, wm_graphics_2d_showcase_frame_seq_path}
+
+val W: i32 = 800
+val H: i32 = 600
+
+fn run_wm_client_graphics_2d() -> i64:
+    val bridge_path = env_get(WM_BRIDGE_FILE_ENV) ?? ""
+    val frame_path = env_get(WM_FRAME_FILE_ENV) ?? ""
+    if bridge_path == "" or frame_path == "":
+        print "[wm-graphics-2d-client] error=missing-bridge-env"
+        return 2
+
+    val engine = Engine2D.create_offscreen(W, H)
+    draw_showcase(engine)
+    engine.present()
+    val pixels = engine.read_pixels()
+
+    if pixels.len() != W * H:
+        print "[wm-graphics-2d-client] error=render-failed pixels={pixels.len()}"
+        engine.shutdown()
+        return 1
+
+    val bytes = encode_ppm_p6(W.to_u32(), H.to_u32(), pixels)
+    if bytes.len() == 0 or not file_write_bytes(frame_path, bytes):
+        print "[wm-graphics-2d-client] error=frame-write-failed path={frame_path}"
+        engine.shutdown()
+        return 1
+
+    val seq_path = wm_graphics_2d_showcase_frame_seq_path(frame_path)
+    if not file_write(seq_path, "1"):
+        print "[wm-graphics-2d-client] error=seq-write-failed path={seq_path}"
+        engine.shutdown()
+        return 1
+
+    val pid = getpid()
+    val req = wm_graphics_2d_showcase_bridge_request_sized(pid, frame_path, W + 8, H + 32)
+    if not file_write(bridge_path, wm_fs_bridge_encode(req)):
+        print "[wm-graphics-2d-client] error=bridge-write-failed path={bridge_path}"
+        engine.shutdown()
+        return 1
+
+    print "[wm-graphics-2d-client] source=graphics_2d_showcase_gui.spl pid={pid} bridge={bridge_path} frame={frame_path}"
+
+    if (env_get(WM_CLIENT_HOLD_ENV) ?? "") == "1":
+        while true:
+            thread_sleep(100)
+
+    engine.shutdown()
+    0
 
 fn main() -> i64:
+    if wm_app_mode_is_client(env_get(WM_APP_MODE_ENV) ?? ""):
+        return run_wm_client_graphics_2d()
     run_graphics_2d_showcase(true, "software")
