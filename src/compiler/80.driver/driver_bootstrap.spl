@@ -15,7 +15,7 @@ use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptio
 use compiler.backend.backend.backend_helpers.{compile_bootstrap_module_with_backend}
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_function_count, bootstrap_hir_function_at}
-use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module, bootstrap_set_entry_hir_module, bootstrap_clear_entry_hir_module}
+use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module, bootstrap_set_entry_hir_module, bootstrap_clear_entry_hir_module, bootstrap_lower_extra_hir_module_to_mir}
 use compiler.mir_opt.{ssa_alloca_transform_blocks}
 use compiler.common.driver_core_types.{CompileResult}
 use driver_types.{CompileContext, CompileOptions}
@@ -115,6 +115,28 @@ pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, b
     if entry_hir != nil:
         bootstrap_set_entry_hir_module(entry_hir)
     var bootstrap_mir = bootstrap_lower_hir_globals_to_mir_module()
+    # --entry-closure builds parse+HIR-lower EVERY module reachable from the
+    # entry (see SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE handling in driver.spl and
+    # flat_is_bootstrap_entry_path), but the line above only feeds the single
+    # entry module into MIR lowering. The real object emitter
+    # (bootstrap_emit_real_llvm_object) reads the flat
+    # _bootstrap_mir_functions accumulator by index, not a per-module
+    # MirModule -- so a helper module's functions, though correctly
+    # HIR-lowered and resolvable by name in the entry's symbol table (see
+    # resolve_import_symbols), never reached that accumulator and linked as
+    # "undefined symbol: <fn>". Lower every OTHER closure module's functions
+    # too, appending to the same accumulator (bug
+    # bootstrap_stage2_empty_mir_bodies_2026-07-05, cross-module closure gap,
+    # stage 3: object emission).
+    val closure_mode = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+    if closure_mode:
+        for extra_name in ctx.hir_modules.keys():
+            if extra_name != entry_module_name:
+                val extra_hir = ctx.hir_modules[extra_name]
+                if extra_hir != nil:
+                    if bootstrap_trace_enabled():
+                        print "[driver-mir] bootstrap closure extra module={extra_name}"
+                    val _added = bootstrap_lower_extra_hir_module_to_mir(extra_hir)
     next_ctx.bootstrap_entry_mir = Some(bootstrap_mir)
     next_ctx.mir_modules[entry_module_name] = bootstrap_mir
     if bootstrap_trace_enabled():

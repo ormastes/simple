@@ -180,3 +180,56 @@ fn bootstrap_lower_hir_globals_to_mir_module() -> MirModule:
     eprint("error: refusing to emit a stub-only bootstrap binary\n")
     rt_exit(1)
     MirModule(name: "", functions: {}, statics: {}, constants: {}, types: {})
+
+fn bootstrap_lower_extra_hir_module_to_mir(hir_module: HirModule) -> i64:
+    """Lower one additional (non-entry) closure module's functions to MIR,
+    APPENDING to the same flat _bootstrap_mir_functions/_bootstrap_mir_function_names
+    accumulator that bootstrap_lower_hir_globals_to_mir_module() populates for the
+    entry module. Does NOT call bootstrap_mir_functions_reset() -- callers must
+    lower the entry first via bootstrap_lower_hir_globals_to_mir_module(), then
+    call this once per remaining --entry-closure module.
+
+    Needed because the real object emitter (bootstrap_emit_real_llvm_object)
+    iterates the flat accumulator by index (bootstrap_mir_function_count/at/
+    name_at), not a per-module MirModule.functions dict -- without this, a
+    closure's non-entry modules lowered fine to HIR (after the
+    flat_is_bootstrap_entry_path + resolve_import_symbols fixes) but their
+    function bodies never reached the accumulator the object emitter reads,
+    so calls into them linked as "undefined symbol" (bug
+    bootstrap_stage2_empty_mir_bodies_2026-07-05, cross-module closure gap,
+    stage 3: object emission).
+
+    Returns the number of MIR instructions added (0 is not itself an error --
+    an extern-only or type-only helper module legitimately contributes none)."""
+    val trace_enabled = mir_lower_trace_enabled()
+    var added_instr_total = 0
+    var lowering = MirLowering.new(hir_module.symbols)
+    val entry_functions = hir_module.functions
+    val fn_keys = entry_functions.keys()
+    if trace_enabled:
+        print "[mir-lower-extra] module={hir_module.name} functions:count {fn_keys.len()}"
+    var fki = 0
+    while fki < fn_keys.len():
+        val hir_fn: HirFunction = entry_functions[fn_keys[fki]]
+        val fn_name = hir_fn.name
+        if hir_fn.is_extern:
+            fki = fki + 1
+            continue
+        var already_added = false
+        var dup_i = 0
+        while dup_i < _bootstrap_mir_function_names.len():
+            if _bootstrap_mir_function_names[dup_i] == fn_name:
+                already_added = true
+            dup_i = dup_i + 1
+        if fn_name != "" and not already_added:
+            lowering.symbols = hir_module.symbols
+            val mir_fn = lowering.lower_function(hir_fn)
+            bootstrap_mir_functions_add(fn_name, mir_fn)
+            var blk_i = 0
+            while blk_i < mir_fn.blocks.len():
+                added_instr_total = added_instr_total + mir_fn.blocks[blk_i].instructions.len()
+                blk_i = blk_i + 1
+            if trace_enabled:
+                print "[mir-lower-extra] function:added {fn_name}"
+        fki = fki + 1
+    added_instr_total
