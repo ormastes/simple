@@ -1,6 +1,6 @@
 ---
 id: cranelift_direct_string_constant_null_pointer_2026-07-12
-status: OPEN
+status: FIX-IMPLEMENTED-UNVERIFIED-E2E
 severity: blocking
 discovered: 2026-07-12
 discovered_by: native-build --entry-closure self-host closure build (agent session)
@@ -10,6 +10,108 @@ related: src/lib/nogc_sync_mut/ffi/codegen.spl
 ---
 
 # `native-build --backend cranelift`: string constants always compile to a null pointer (SIGSEGV / silent no-op)
+
+## 2026-07-12 update: fix implemented, mechanism verified by Rust unit test, e2e blocked by an unrelated pre-existing wall
+
+**What was implemented** (see commits `8803ee074b9`, `1958c98ba21` in this
+worktree):
+
+1. **New Cranelift data-object SFFI** in
+   `src/compiler_rust/compiler/src/codegen/cranelift_sffi.rs`:
+   - `rt_cranelift_declare_string_data(module, bytes_ptr, bytes_len) -> i64`:
+     declares + defines a read-only rodata `data` object holding the raw
+     bytes (`Module::declare_data` + `DataDescription::define` +
+     `Module::define_data`), content-addressed per module (identical bytes
+     reuse the same data object, verified by a dedup test) via a new
+     `STRING_DATA_CACHE`/`DECLARED_DATA` registry pair mirroring the
+     existing `DECLARED_FUNCS` pattern.
+   - `rt_cranelift_data_addr_in_func(ctx, data_handle) -> i64`:
+     `Module::declare_data_in_func` + `builder.ins().global_value(I64, gv)`
+     to materialize the address as an SSA value in the function currently
+     being built, mirroring `rt_cranelift_iconst`'s handle-return
+     convention.
+   - Both registered in `register_cranelift_sffi_functions` (JITBuilder
+     symbol table, for the self-hosted-recursive-JIT path) and wired through
+     `interpreter_extern/cranelift.rs` + `interpreter_extern/mod.rs` (the
+     seed's own tree-walking-interpreter dispatch table, which is what
+     `native-build` actually runs through).
+2. **Simple-side wrappers** in `src/lib/nogc_sync_mut/ffi/codegen.spl`:
+   `cranelift_declare_string_data(module, s: text) -> i64` /
+   `cranelift_data_addr_in_func(ctx, data_id) -> i64`.
+3. **Adapter wiring** in `cranelift_codegen_adapter.spl`:
+   `cl_translate_const_value`'s `Str(v)` arm now declares `v`'s bytes as
+   rodata, materializes the address, and calls the runtime's own
+   `rt_string_new(ptr, len)` (via the existing `translate_runtime_import_call_i64`
+   helper) instead of emitting a null constant. This deliberately reuses the
+   runtime's real allocation/heap-registration/hash path (`rt_string_new` ->
+   `RuntimeValue::from_heap_ptr` -> `register_heap_ptr`) rather than
+   hand-rolling a second one: this runtime's `text` is a **tagged, heap-registered
+   RuntimeValue** (`src/compiler_rust/runtime/src/value/heap.rs`:
+   `validate_heap_obj` rejects any heap pointer not in
+   `HEAP_ALLOCATION_REGISTRY`), so a static data pointer alone is not a valid
+   `text` value without going through the registration a real allocation
+   gets. `cl_module` had to be threaded through `cl_translate_operand`,
+   `cl_translate_terminator`, and `store_phi_incomings_for_edge` (not just
+   `cl_translate_instruction`) since string constants can appear at any
+   operand site, not only inside a `Const` instruction.
+4. **Unrelated fix required to get any native-build running at all**:
+   `rt_array_len_safe` existed in the runtime crate but had no
+   `interpreter_extern` dispatch entry, so the seed failed on **any**
+   native-build (string or not) with `unknown extern function:
+   rt_array_len_safe` before reaching codegen. Added the missing wrapper +
+   registration (mirrors the existing `rt_array_len` entry).
+
+**Verification performed:**
+- `cargo check`/`cargo build --release --bin simple` for the whole
+  `compiler_rust` workspace: clean.
+- New Rust unit test `test_string_data_constant_roundtrip` in
+  `cranelift_sffi.rs`: JIT-compiles a `() -> i64` function that returns the
+  address of a declared `"hello"` data object, calls it, and **dereferences
+  the actual returned pointer** to compare the 5 bytes against `b"hello"`
+  (not just a nonzero-handle check, which would miss a wrong/garbage
+  data-reloc — the documented failure mode). Also verifies content-addressed
+  dedup (declaring identical bytes twice returns the same handle). **Passes.**
+  This validates the Cranelift data-object mechanism (declare_data +
+  define_data + declare_data_in_func + global_value) in isolation, via the
+  JIT path.
+
+**What was NOT verified — e2e blocked by an unrelated pre-existing wall:**
+Running `native-build --backend cranelift --entry <probe>.spl` (with or
+without `--source src/compiler --source src/app --source src/lib`, and even
+for a **zero-string-literal** probe `fn main() -> i64: return 0`) fails
+**before ever reaching `[cranelift-direct]`** (the adapter's own progress
+prints) with:
+```
+error: semantic: type mismatch: cannot convert array to int
+```
+This reproduces deterministically regardless of `--source` flags or whether
+the entry program contains any string literal at all — i.e. it is **not**
+caused by this session's changes; it is upstream of Cranelift codegen
+entirely, in the seed's own interpreted execution of its (unrelated) source
+files. It matches the "originally documented next wall" this bug doc's first
+version noted as order/state-dependent and not reliably reproducing. The
+message originates from `Value::as_int()` in
+`src/compiler_rust/compiler/src/value_impl.rs:45` (`format!("type mismatch:
+cannot convert {} to int", actual_type)`), i.e. some extern-call site is
+passing an array `Value` through `.as_int()`; the exact call site was not
+tracked down (would need seed-internal instrumentation, out of scope for
+this session per "assess tractable-vs-hard, fix tractable ones, STOP+document
+hard ones").
+
+**Consequently NOT exercised by this session**, and worth flagging
+explicitly for the next fixer: whether a string constant surviving storage
+into a `text` local and reuse (`val s = "hello"; print(s)`), concatenation,
+`==`, or `.len()` is representation-consistent with `cl_translate_cast`'s
+existing fat-pointer `{ptr, len}` handling of `text` **operands** (as opposed
+to the `Const` instruction path this fix touches, whose `type_` is
+`Opaque("str")`, a single-word type — confirmed by tracing
+`StringLit` lowering in
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:519`). The `Str`
+constant now yields a boxed `RuntimeValue` scalar, matching `Opaque("str")`'s
+single-word shape and the boundary code in `cl_translate_cast` that already
+boxes a fat pointer into the same representation via `rt_string_new` before
+calling `rt_string_to_int_lenient`. This is believed consistent but was not
+proven by an actual native-run due to the wall above.
 
 **Status:** OPEN — architectural gap, not a quick fix.
 **Severity:** Blocking for `native-build --entry-closure` on **any** program
