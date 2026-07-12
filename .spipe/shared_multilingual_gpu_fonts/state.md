@@ -535,3 +535,8 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   subrects. Concurrent token allocation and renderer ownership remain
   unsupported. Tokens carry no cross-process or temporal meaning; this does
   not complete REQ-009 or promote hardware evidence.
+- compound corpus replay: the manifest scenario independently scans the pinned
+  sfnt tables, confirms 14 compound-bearing faces and exact CORPUS totals of 76
+  roots/124 direct components, and requires a nonempty Pure Simple outline for
+  every mapped compound root. Native rasterizers stay the production owner;
+  execution and the 0/0/26/74 matrix remain unchanged.

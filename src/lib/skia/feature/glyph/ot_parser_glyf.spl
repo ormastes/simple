@@ -1,174 +1,364 @@
-# OpenType glyf table parser (simple and compound glyph outlines)
+# Bounded OpenType glyf outline parser.
 
 use std.skia.entity.path.{SkPath, SkPathVerb, sk_path_new}
-use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, read_u16_be, read_i16_be, read_u32_be}
+use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, read_u16_be, read_i16_be, find_table}
 
-# ===== glyf =====
+class GlyfParseResult:
+    path: SkPath
+    components: i64
 
-class GlyfFlags:
-    on_curve: bool
-    x_short: bool
-    y_short: bool
-    repeat: bool
-    x_same_positive: bool
-    y_same_positive: bool
+fn _table_is_bounded(font: OtFont, table: OtTable, minimum: i64) -> bool:
+    val start = table.offset as i64
+    val length = table.length as i64
+    start >= 0 and length >= minimum and start <= font.blob.len() and length <= font.blob.len() - start
 
-fn decode_glyf_flags(blob: [u8], flags_start: i64, point_count: i64) -> [u8]:
+fn _active_has(active: [u32], glyph_id: u32) -> bool:
+    for value in active:
+        if value == glyph_id:
+            return true
+    false
+
+fn _append_transformed(dst: SkPath, src: SkPath, xx: f64, xy: f64, yx: f64, yy: f64, dx: f64, dy: f64) -> SkPath:
+    var out = dst
+    for segment in src.segments:
+        if segment.verb == SkPathVerb.Close:
+            out = out.close()
+        else:
+            if segment.verb == SkPathVerb.Move or segment.verb == SkPathVerb.Line:
+                val p = segment.pts[0]
+                val x = xx * p.x + xy * p.y + dx
+                val y = yx * p.x + yy * p.y + dy
+                if segment.verb == SkPathVerb.Move:
+                    out = out.move_to(x, y)
+                else:
+                    out = out.line_to(x, y)
+            else:
+                if segment.verb == SkPathVerb.Quad:
+                    val a = segment.pts[0]
+                    val b = segment.pts[1]
+                    out = out.quad_to(xx * a.x + xy * a.y + dx, yx * a.x + yy * a.y + dy,
+                                      xx * b.x + xy * b.y + dx, yx * b.x + yy * b.y + dy)
+                else:
+                    if segment.verb == SkPathVerb.Cubic:
+                        val a = segment.pts[0]
+                        val b = segment.pts[1]
+                        val c = segment.pts[2]
+                        out = out.cubic_to(xx * a.x + xy * a.y + dx, yx * a.x + yy * a.y + dy,
+                                           xx * b.x + xy * b.y + dx, yx * b.x + yy * b.y + dy,
+                                           xx * c.x + xy * c.y + dx, yx * c.x + yy * c.y + dy)
+                    else:
+                        return sk_path_new()
+    out
+
+fn _parse_simple_slice(blob: [u8], start: i64, end: i64, contour_count: i64) -> Option<SkPath>:
+    if contour_count < 0 or start + 10 > end or contour_count > (end - start - 10) / 2:
+        return None
+    if contour_count == 0:
+        if start + 12 > end:
+            return None
+        val instruction_length = read_u16_be(blob, start + 10) as i64
+        if instruction_length > end - start - 12:
+            return None
+        return Some(sk_path_new())
+    var endpoints: [i32] = []
+    var previous: i32 = -1
+    var i: i64 = 0
+    while i < contour_count:
+        val endpoint = read_u16_be(blob, start + 10 + i * 2) as i32
+        if endpoint <= previous:
+            return None
+        endpoints.append(endpoint)
+        previous = endpoint
+        i = i + 1
+    val point_count = previous as i64 + 1
+    val instruction_offset = start + 10 + contour_count * 2
+    if instruction_offset + 2 > end:
+        return None
+    val instruction_length = read_u16_be(blob, instruction_offset) as i64
+    var pos = instruction_offset + 2
+    if instruction_length > end - pos:
+        return None
+    pos = pos + instruction_length
+
     var flags: [u8] = []
-    var pos: i64 = flags_start
-    while (flags.len() as i64) < point_count and pos < (blob.len() as i64):
-        val f = blob[pos]
+    while flags.len() < point_count:
+        if pos >= end:
+            return None
+        val flag = blob[pos]
         pos = pos + 1
-        flags.append(f)
-        # bit 3 = repeat flag
-        if (f & 8) != 0 and pos < (blob.len() as i64):
+        if (flag & 192) != 0:
+            return None
+        flags.append(flag)
+        if (flag & 8) != 0:
+            if pos >= end:
+                return None
             val repeat_count = blob[pos] as i64
             pos = pos + 1
-            var r: i64 = 0
-            while r < repeat_count and (flags.len() as i64) < point_count:
-                flags.append(f)
-                r = r + 1
-    flags
+            if repeat_count > point_count - flags.len():
+                return None
+            var repeat: i64 = 0
+            while repeat < repeat_count:
+                flags.append(flag)
+                repeat = repeat + 1
 
-fn decode_coord_deltas(blob: [u8], start: i64, flags: [u8], short_bit: u8, same_bit: u8) -> ([i32], i64):
-    var coords: [i32] = []
-    var pos: i64 = start
+    var xs: [i32] = []
     var current: i32 = 0
-    var i: i64 = 0
-    while i < (flags.len() as i64):
-        val f = flags[i]
-        val is_short = (f & short_bit) != 0
-        val is_same = (f & same_bit) != 0
-        if is_short:
-            if pos >= blob.len() as i64:
-                coords.append(current)
-                i = i + 1
-                continue
+    i = 0
+    while i < point_count:
+        val flag = flags[i]
+        if (flag & 2) != 0:
+            if pos >= end:
+                return None
             val delta = blob[pos] as i32
             pos = pos + 1
-            if is_same:
+            if (flag & 16) != 0:
                 current = current + delta
             else:
                 current = current - delta
         else:
-            if is_same:
-                # repeat previous (delta = 0)
-                pass_do_nothing
-            else:
-                if pos + 1 >= blob.len() as i64:
-                    coords.append(current)
-                    i = i + 1
-                    continue
-                val delta = read_i16_be(blob, pos)
+            if (flag & 16) == 0:
+                if pos + 2 > end:
+                    return None
+                current = current + read_i16_be(blob, pos)
                 pos = pos + 2
-                current = current + delta
-        coords.append(current)
+        xs.append(current)
         i = i + 1
-    (coords, pos)
 
-fn parse_glyf_simple(font: OtFont, glyph_offset: u32) -> Option<SkPath>:
-    val blob = font.blob
-    val base = glyph_offset as i64
-    if base + 10 >= blob.len() as i64:
-        return None
-    val num_contours = read_i16_be(blob, base)
-    if num_contours < 0:
-        # Compound glyph
-        return None
-    if num_contours == 0:
-        val empty = sk_path_new()
-        return Some(empty)
-    val contour_count = num_contours as i64
-    # Read contour endpoint indices
-    var endpoints: [i32] = []
-    var i: i64 = 0
-    while i < contour_count:
-        val ep = read_u16_be(blob, base + 10 + i * 2) as i32
-        endpoints.append(ep)
-        i = i + 1
-    val point_count = (endpoints[contour_count - 1] + 1) as i64
-    # Skip instructions
-    val instr_len_off = base + 10 + contour_count * 2
-    if instr_len_off + 1 >= blob.len() as i64:
-        return None
-    val instr_len = read_u16_be(blob, instr_len_off) as i64
-    val flags_start = instr_len_off + 2 + instr_len
-    # Decode flags
-    val flags = decode_glyf_flags(blob, flags_start, point_count)
-    if (flags.len() as i64) < point_count:
-        return None
-    # Estimate flags end: count bytes consumed
-    var flags_pos: i64 = flags_start
-    var fi: i64 = 0
-    var flag_bytes_left: i64 = point_count
-    while fi < (flags.len() as i64) and flag_bytes_left > 0:
-        val f = flags[fi]
-        flags_pos = flags_pos + 1
-        if (f & 8) != 0 and fi + 1 < (flags.len() as i64):
-            val rpt = flags[fi + 1] as i64
-            flags_pos = flags_pos + 1
-            flag_bytes_left = flag_bytes_left - rpt - 1
-            fi = fi + 2
+    var ys: [i32] = []
+    current = 0
+    i = 0
+    while i < point_count:
+        val flag = flags[i]
+        if (flag & 4) != 0:
+            if pos >= end:
+                return None
+            val delta = blob[pos] as i32
+            pos = pos + 1
+            if (flag & 32) != 0:
+                current = current + delta
+            else:
+                current = current - delta
         else:
-            flag_bytes_left = flag_bytes_left - 1
-            fi = fi + 1
-    # Decode x coords (bit 1 = x_short, bit 4 = x_same_positive)
-    val x_result = decode_coord_deltas(blob, flags_pos, flags, 2, 16)
-    val xs = x_result.0
-    val after_x = x_result.1
-    # Decode y coords (bit 2 = y_short, bit 5 = y_same_positive)
-    val y_result = decode_coord_deltas(blob, after_x, flags, 4, 32)
-    val ys = y_result.0
-    if (xs.len() as i64) < point_count or (ys.len() as i64) < point_count:
-        return None
-    # Build SkPath
+            if (flag & 32) == 0:
+                if pos + 2 > end:
+                    return None
+                current = current + read_i16_be(blob, pos)
+                pos = pos + 2
+        ys.append(current)
+        i = i + 1
+
     var path = sk_path_new()
     var contour_start: i64 = 0
-    var ci: i64 = 0
-    while ci < contour_count:
-        val contour_end = endpoints[ci] as i64
-        # moveTo first point
-        val mx = xs[contour_start] as f64
-        val my = ys[contour_start] as f64
-        val p0 = path.move_to(mx, my)
-        path = p0
-        var pi: i64 = contour_start + 1
-        while pi <= contour_end:
-            val px = xs[pi] as f64
-            val py = ys[pi] as f64
-            val on_curve = (flags[pi] & 1) != 0
-            if on_curve:
-                val p1 = path.line_to(px, py)
-                path = p1
+    var contour: i64 = 0
+    while contour < contour_count:
+        val contour_end = endpoints[contour] as i64
+        val first_on = (flags[contour_start] & 1) != 0
+        val last_on = (flags[contour_end] & 1) != 0
+        var move_x: f64 = 0.0
+        var move_y: f64 = 0.0
+        var point = contour_start
+        if first_on:
+            move_x = xs[contour_start] as f64
+            move_y = ys[contour_start] as f64
+            point = contour_start + 1
+        else:
+            if last_on:
+                move_x = xs[contour_end] as f64
+                move_y = ys[contour_end] as f64
             else:
-                # Off-curve: quadratic control point; look ahead for endpoint
-                val next = pi + 1
+                move_x = (xs[contour_start] as f64 + xs[contour_end] as f64) / 2.0
+                move_y = (ys[contour_start] as f64 + ys[contour_end] as f64) / 2.0
+        path = path.move_to(move_x, move_y)
+        while point <= contour_end:
+            val x = xs[point] as f64
+            val y = ys[point] as f64
+            if (flags[point] & 1) != 0:
+                path = path.line_to(x, y)
+            else:
+                var next = point + 1
+                var next_x = move_x
+                var next_y = move_y
+                var next_on = true
                 if next <= contour_end:
-                    val nx = xs[next] as f64
-                    val ny = ys[next] as f64
-                    val next_on = (flags[next] & 1) != 0
-                    if next_on:
-                        val p1 = path.quad_to(px, py, nx, ny)
-                        path = p1
-                        pi = next
-                    else:
-                        # Implied midpoint
-                        val mid_x = (px + nx) / 2.0
-                        val mid_y = (py + ny) / 2.0
-                        val p1 = path.quad_to(px, py, mid_x, mid_y)
-                        path = p1
-                    # don't skip next; outer loop increments
+                    next_x = xs[next] as f64
+                    next_y = ys[next] as f64
+                    next_on = (flags[next] & 1) != 0
+                if next_on:
+                    path = path.quad_to(x, y, next_x, next_y)
+                    point = point + 1
                 else:
-                    # Off-curve at end: wrap to contour start
-                    val p1 = path.quad_to(px, py, mx, my)
-                    path = p1
-            pi = pi + 1
-        val pc = path.close()
-        path = pc
+                    path = path.quad_to(x, y, (x + next_x) / 2.0, (y + next_y) / 2.0)
+            point = point + 1
+        path = path.close()
         contour_start = contour_end + 1
-        ci = ci + 1
+        contour = contour + 1
     Some(path)
 
+fn _f2dot14(blob: [u8], offset: i64) -> f64:
+    (read_i16_be(blob, offset) as f64) / 16384.0
+
+fn _parse_glyph(font: OtFont, glyf: OtTable, loca: OtTable, glyph_id: u32, num_glyphs: i64, long_loca: bool, depth: i64, active: [u32], components: i64) -> Option<GlyfParseResult>:
+    if depth > 8 or glyph_id as i64 >= num_glyphs or _active_has(active, glyph_id):
+        return None
+    val entry_size: i64 = if long_loca: 4 else: 2
+    val loca_pos = loca.offset as i64 + glyph_id as i64 * entry_size
+    var relative_start: i64 = 0
+    var relative_end: i64 = 0
+    if long_loca:
+        relative_start = ((blob_u32(font.blob, loca_pos)) as i64)
+        relative_end = ((blob_u32(font.blob, loca_pos + 4)) as i64)
+    else:
+        relative_start = (read_u16_be(font.blob, loca_pos) as i64) * 2
+        relative_end = (read_u16_be(font.blob, loca_pos + 2) as i64) * 2
+    if relative_end < relative_start or relative_end > glyf.length as i64:
+        return None
+    val start = glyf.offset as i64 + relative_start
+    val end = glyf.offset as i64 + relative_end
+    if start == end:
+        return Some(GlyfParseResult(path: sk_path_new(), components: components))
+    if end - start < 10:
+        return None
+    val contour_count = read_i16_be(font.blob, start) as i64
+    if contour_count >= 0:
+        val simple = _parse_simple_slice(font.blob, start, end, contour_count)
+        if simple == None:
+            return None
+        return Some(GlyfParseResult(path: simple.unwrap(), components: components))
+    if contour_count != -1:
+        return None
+
+    var next_active = active
+    next_active.append(glyph_id)
+    var pos = start + 10
+    var path = sk_path_new()
+    var total = components
+    var more = true
+    var last_flags: u16 = 0
+    while more:
+        total = total + 1
+        if total > 64 or pos + 4 > end:
+            return None
+        val flags = read_u16_be(font.blob, pos)
+        val child_id = read_u16_be(font.blob, pos + 2) as u32
+        pos = pos + 4
+        if (flags & 2) == 0 or (flags & 57344) != 0 or (flags & 16) != 0 or (flags & 4) != 0 or (flags & 2048) != 0:
+            return None
+        if (flags & 256) != 0 and (flags & 32) != 0:
+            return None
+        var dx: f64 = 0.0
+        var dy: f64 = 0.0
+        if (flags & 1) != 0:
+            if pos + 4 > end:
+                return None
+            dx = read_i16_be(font.blob, pos) as f64
+            dy = read_i16_be(font.blob, pos + 2) as f64
+            pos = pos + 4
+        else:
+            if pos + 2 > end:
+                return None
+            var ax = font.blob[pos] as i32
+            var ay = font.blob[pos + 1] as i32
+            if ax >= 128:
+                ax = ax - 256
+            if ay >= 128:
+                ay = ay - 256
+            dx = ax as f64
+            dy = ay as f64
+            pos = pos + 2
+        var xx: f64 = 1.0
+        var xy: f64 = 0.0
+        var yx: f64 = 0.0
+        var yy: f64 = 1.0
+        val transform_bits = flags & 200
+        if transform_bits == 8:
+            if pos + 2 > end:
+                return None
+            xx = _f2dot14(font.blob, pos)
+            yy = xx
+            pos = pos + 2
+        else:
+            if transform_bits == 64:
+                if pos + 4 > end:
+                    return None
+                xx = _f2dot14(font.blob, pos)
+                yy = _f2dot14(font.blob, pos + 2)
+                pos = pos + 4
+            else:
+                if transform_bits == 128:
+                    if pos + 8 > end:
+                        return None
+                    xx = _f2dot14(font.blob, pos)
+                    xy = _f2dot14(font.blob, pos + 2)
+                    yx = _f2dot14(font.blob, pos + 4)
+                    yy = _f2dot14(font.blob, pos + 6)
+                    pos = pos + 8
+                else:
+                    if transform_bits != 0:
+                        return None
+        val child = _parse_glyph(font, glyf, loca, child_id, num_glyphs, long_loca, depth + 1, next_active, total)
+        if child == None:
+            return None
+        val parsed = child.unwrap()
+        total = parsed.components
+        path = _append_transformed(path, parsed.path, xx, xy, yx, yy, dx, dy)
+        more = (flags & 32) != 0
+        last_flags = flags
+    if (last_flags & 256) != 0:
+        if pos + 2 > end:
+            return None
+        val instruction_length = read_u16_be(font.blob, pos) as i64
+        pos = pos + 2
+        if instruction_length > end - pos:
+            return None
+        pos = pos + instruction_length
+    if pos > end:
+        return None
+    Some(GlyfParseResult(path: path, components: total))
+
+fn blob_u32(blob: [u8], offset: i64) -> u32:
+    ((blob[offset] as u32) << 24) | ((blob[offset + 1] as u32) << 16) | ((blob[offset + 2] as u32) << 8) | (blob[offset + 3] as u32)
+
+fn parse_glyf_outline(font: OtFont, glyph_id: u32) -> Option<SkPath>:
+    val head = find_table(font, 1751474532)
+    val maxp = find_table(font, 1835104368)
+    val loca = find_table(font, 1819239265)
+    val glyf = find_table(font, 1735162214)
+    if head == None or maxp == None or loca == None or glyf == None:
+        return None
+    val head_table = head.unwrap()
+    val maxp_table = maxp.unwrap()
+    val loca_table = loca.unwrap()
+    val glyf_table = glyf.unwrap()
+    if not _table_is_bounded(font, head_table, 54) or not _table_is_bounded(font, maxp_table, 6) or not _table_is_bounded(font, loca_table, 2) or not _table_is_bounded(font, glyf_table, 0):
+        return None
+    val num_glyphs = read_u16_be(font.blob, maxp_table.offset as i64 + 4) as i64
+    val format = read_i16_be(font.blob, head_table.offset as i64 + 50)
+    if num_glyphs <= 0 or glyph_id as i64 >= num_glyphs or (format != 0 and format != 1):
+        return None
+    val entry_size: i64 = if format == 1: 4 else: 2
+    if loca_table.length as i64 < (num_glyphs + 1) * entry_size:
+        return None
+    val parsed = _parse_glyph(font, glyf_table, loca_table, glyph_id, num_glyphs, format == 1, 0, [], 0)
+    if parsed == None:
+        return None
+    Some(parsed.unwrap().path)
+
+# Deprecated offset entry points cannot establish loca-bounded glyph identity.
+fn parse_glyf_simple(font: OtFont, glyph_offset: u32) -> Option<SkPath>:
+    val glyf = find_table(font, 1735162214)
+    if glyf == None:
+        return None
+    val table = glyf.unwrap()
+    val start = glyph_offset as i64
+    var end = table.offset as i64 + table.length as i64
+    if end > font.blob.len():
+        end = font.blob.len()
+    if start < table.offset as i64 or start + 10 > end:
+        return None
+    val contour_count = read_i16_be(font.blob, start) as i64
+    if contour_count < 0:
+        return None
+    _parse_simple_slice(font.blob, start, end, contour_count)
+
 fn parse_glyf_compound(font: OtFont, glyph_offset: u32) -> Option<SkPath>:
-    # TODO(ot-parser-compound): compound glyph parsing not yet implemented
     nil

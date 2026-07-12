@@ -107,6 +107,10 @@ format behavior.
   script metadata and reject complex-script material while GSUB/GPOS remain
   incomplete. These fixtures were not executed in this session and do not
   promote a candidate.
+- A test-only raw sfnt oracle independently identifies 14 compound-bearing
+  faces and the exact 76 compound corpus roots/124 direct components. Every
+  mapped root must produce a nonempty Pure Simple outline; this adds no native
+  production owner and does not promote the matrix.
 
 ### Global-face wrapper invalidation
 

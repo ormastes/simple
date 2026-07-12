@@ -15,6 +15,9 @@ use std.nogc_sync_mut.text_layout.font_provider.{browser_font_dylib_candidates}
 use std.common.encoding.font_registry.{FontAssetCandidate, FontCoverageCell, selected_font_language_ranking_source, font_language_ranking_evidence, selected_font_language_ranks, selected_font_asset_candidates, selected_font_coverage_languages, selected_font_coverage_categories, selected_font_coverage_matrix}
 use std.common.encoding.font_cldr_rank.{CldrLanguagePopulationRow, cldr_scan_language_population, cldr_rank_languages, cldr_serialize_language_totals}
 use std.common.encoding.sfnt.{validate_default_glyf_font, sfnt_manifest_tables_match, sfnt_manifest_default_axes_match, sfnt_manifest_names_match}
+use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, parse_offset_table, find_table, read_u16_be, read_i16_be, read_u32_be}
+use std.skia.feature.glyph.ot_parser_cmap.{cmap_glyph_id}
+use std.skia.feature.glyph.ot_parser_glyf.{parse_glyf_outline}
 
 val FONT_ASSET_ROOT = "assets/fonts/google-fonts/"
 val FONT_CORPUS_PATH = FONT_ASSET_ROOT + "CORPUS.sdn"
@@ -129,6 +132,85 @@ fn expect_candidate_witness(assets: [FontAssetCandidate], family: text, witness:
                     break
     expect(found).to_be(true)
     expect(loaded).to_be(true)
+
+fn corpus_witnesses() -> [text]:
+    ["English", "中文", "Español", "हिन्दी", "العربية", "français",
+        "Português", "Русский", "اردو", "Indonesia", "বাংলা", "😀"]
+
+fn table_or_fail(font: OtFont, tag: u32) -> OtTable:
+    val table = find_table(font, tag)
+    if table == nil: fail("missing required compound-oracle table")
+    table.unwrap()
+
+fn loca_value(font: OtFont, loca: OtTable, glyph_id: i64, long_loca: bool) -> i64:
+    val pos = loca.offset as i64 + glyph_id * (if long_loca: 4 else: 2)
+    if long_loca: read_u32_be(font.blob, pos) as i64
+    else: read_u16_be(font.blob, pos) as i64 * 2
+
+# Test-only raw oracle: -1 is simple/empty, -2 is malformed, otherwise direct components.
+fn raw_compound_components(font: OtFont, glyph_id: i64) -> i64:
+    val head = table_or_fail(font, 1751474532)
+    val loca = table_or_fail(font, 1819239265)
+    val glyf = table_or_fail(font, 1735162214)
+    val long_loca = read_i16_be(font.blob, head.offset as i64 + 50) == 1
+    val start = loca_value(font, loca, glyph_id, long_loca)
+    val end = loca_value(font, loca, glyph_id + 1, long_loca)
+    if start == end: return -1
+    if start < 0 or end < start or end > glyf.length as i64 or end - start < 10: return -2
+    var pos = glyf.offset as i64 + start
+    val limit = glyf.offset as i64 + end
+    if read_i16_be(font.blob, pos) >= 0: return -1
+    pos = pos + 10
+    var count: i64 = 0
+    var more = true
+    while more:
+        if pos + 4 > limit: return -2
+        val flags = read_u16_be(font.blob, pos)
+        pos = pos + 4
+        count = count + 1
+        pos = pos + (if (flags & 1) != 0: 4 else: 2)
+        if (flags & 8) != 0: pos = pos + 2
+        elif (flags & 64) != 0: pos = pos + 4
+        elif (flags & 128) != 0: pos = pos + 8
+        if pos > limit or count > 64: return -2
+        more = (flags & 32) != 0
+    count
+
+fn expect_compound_corpus(assets: [FontAssetCandidate]):
+    var compound_faces: i64 = 0
+    var corpus_roots: i64 = 0
+    var corpus_components: i64 = 0
+    for asset in assets:
+        val font = parse_offset_table(file_read_bytes(asset.local_path))
+        expect(font != nil).to_be(true)
+        val parsed = font.unwrap()
+        val maxp = table_or_fail(parsed, 1835104368)
+        val glyph_count = read_u16_be(parsed.blob, maxp.offset as i64 + 4) as i64
+        var has_compound = false
+        for glyph_id in 0..glyph_count:
+            val components = raw_compound_components(parsed, glyph_id)
+            expect(components).to_be_greater_than(-2)
+            if components >= 0:
+                has_compound = true
+                break
+        if has_compound: compound_faces = compound_faces + 1
+        var seen = "|"
+        for witness in corpus_witnesses():
+            for ch in witness:
+                val glyph_id = cmap_glyph_id(parsed, ch.char_code_at(0) as u32)
+                val key = "|" + (glyph_id as i64).to_text() + "|"
+                if glyph_id > 0 and not seen.contains(key):
+                    seen = seen + (glyph_id as i64).to_text() + "|"
+                    val components = raw_compound_components(parsed, glyph_id as i64)
+                    if components >= 0:
+                        val outline = parse_glyf_outline(parsed, glyph_id)
+                        expect(outline != nil).to_be(true)
+                        if outline != nil: expect(outline.unwrap().is_empty()).to_be(false)
+                        corpus_roots = corpus_roots + 1
+                        corpus_components = corpus_components + components
+    expect(compound_faces).to_equal(14)
+    expect(corpus_roots).to_equal(76)
+    expect(corpus_components).to_equal(124)
 
 describe "shared multilingual font manifest":
     # @req REQ-001 REQ-002
@@ -291,6 +373,11 @@ describe "shared multilingual font manifest":
         expect_candidate_witness(assets, "UnifrakturCook", "EnglishEspañolfrançaisPortuguêsIndonesia")
         expect_candidate_witness(assets, "Pixelify Sans", "EnglishEspañolfrançaisPortuguêsРусскийIndonesia")
         expect_candidate_witness(assets, "Noto Emoji", "😀")
+
+    # @req REQ-008
+    it "should reconstruct every compound outline reached by exact corpus mappings":
+        step("Replay exact CORPUS mappings through the bounded Pure Simple glyf parser")
+        expect_compound_corpus(setup_shared_font_fixture())
 
     # @req REQ-004 REQ-005
     it "should preserve the separate Roboto Slab copyright notice":

@@ -80,17 +80,15 @@ fail closed. Both native loader owners now call the Pure Simple structural
 preflight before native state changes; it validates directory bounds/overlap,
 required/excluded tables, and `fvar` defaults. The separate unrun manifest
 scenario compares every exact table and default-axis record and retains typed
-diagnostics. Loader bool/nil APIs do not surface those reasons. The incomplete
-Pure Simple compound-outline parser and executable evidence remain open, so
-REQ-008 is not yet complete.
+diagnostics. Loader bool/nil APIs do not surface those reasons.
 
 A complete raw audit found 7,594 compound glyphs (16,194 components) in 14
-candidate faces; the exact witness corpus reaches 76 roots and uses only
-bounded XY-positioned components. The existing offset-only Pure Simple stub is
-not a safe place to add that subset: its sibling simple decoder lacks glyph
-slice bounds and original point identity. Native fontdue/stb rasterizers remain
-the active compound owners until one glyph-ID/head+loca+maxp parser surface can
-preserve points and reject malformed recursion.
+candidate faces; the exact witness corpus reaches 76 roots/124 direct
+components. The bounded glyph-ID Pure Simple parser now reconstructs those
+roots, and the manifest scenario checks every result is nonempty against a
+test-only raw sfnt oracle. Native fontdue/stb rasterizers remain the production
+owners; this unrun evidence does not complete REQ-008 or promote any coverage
+cell.
 
 The manifest scenario now prepares exact `CORPUS.sdn` codepoint and raster
 witnesses for all 16 candidates, including Bengali rank 11 and Noto Emoji

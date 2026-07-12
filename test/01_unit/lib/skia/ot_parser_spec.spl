@@ -5,7 +5,7 @@ use std.skia.entity.path.{sk_path_new}
 use std.skia.feature.glyph.ot_parser.{read_u16_be, read_i16_be, read_u32_be, read_fixed_1616, read_f2dot14, OtTable, OtFont, parse_offset_table, find_table}
 use std.skia.feature.glyph.ot_parser_cmap.{CmapFormat4, parse_cmap_format12, cmap_lookup, cmap12_lookup, cmap_glyph_id}
 use std.skia.feature.glyph.ot_parser_metrics.{HorizontalMetrics, parse_hmtx}
-use std.skia.feature.glyph.ot_parser_glyf.{parse_glyf_simple, parse_glyf_compound}
+use std.skia.feature.glyph.ot_parser_glyf.{parse_glyf_outline, parse_glyf_simple, parse_glyf_compound}
 use std.skia.feature.glyph.ot_parser_cff.{parse_cff_charstring}
 use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, GposLookup, GsubSingleResult, apply_gsub_single, parse_gsub_skeleton, parse_gpos_skeleton, GlyphClass, parse_gdef_glyph_class}
 use std.skia.feature.glyph.ot_parser_fvar.{FvarAxis, parse_fvar_axes, parse_avar_mapping}
@@ -308,6 +308,184 @@ describe "parse_glyf_compound":
         val empty_font = OtFont(blob: buf, tables: [])
         val result = parse_glyf_compound(empty_font, 0)
         expect(result == None).to_equal(true)
+
+fn _put_u32(bytes: [u8], offset: i64, value: u32) -> [u8]:
+    var out = bytes
+    out[offset] = ((value >> 24) & 255) as u8
+    out[offset + 1] = ((value >> 16) & 255) as u8
+    out[offset + 2] = ((value >> 8) & 255) as u8
+    out[offset + 3] = (value & 255) as u8
+    out
+
+fn _glyf_font(offsets: [u32], glyphs: [u8]) -> OtFont:
+    val count = offsets.len() - 1
+    val loca_length = offsets.len() * 4
+    val glyf_start = 60 + loca_length
+    var blob: [u8] = []
+    var i: i64 = 0
+    while i < glyf_start:
+        blob.append(0)
+        i = i + 1
+    # head.indexToLocFormat = 1; maxp.numGlyphs = count.
+    blob[51] = 1
+    blob[58] = ((count >> 8) & 255) as u8
+    blob[59] = (count & 255) as u8
+    i = 0
+    while i < offsets.len():
+        blob = _put_u32(blob, 60 + i * 4, offsets[i])
+        i = i + 1
+    for byte in glyphs:
+        blob.append(byte)
+    OtFont(blob: blob, tables: [
+        OtTable(tag: 1751474532, offset: 0, length: 54),
+        OtTable(tag: 1835104368, offset: 54, length: 6),
+        OtTable(tag: 1819239265, offset: 60, length: loca_length as u32),
+        OtTable(tag: 1735162214, offset: glyf_start as u32, length: glyphs.len() as u32)
+    ])
+
+fn _one_point_glyph() -> [u8]:
+    [0, 1, 0, 2, 0, 3, 0, 2, 0, 3, 0, 0, 0, 0, 1, 0, 2, 0, 3]
+
+describe "parse_glyf_outline":
+    it "applies compound translation and uniform F2Dot14 scale":
+        var glyphs = _one_point_glyph()
+        # word XY arguments, uniform scale 0.5, child glyph zero, translation (10, 20)
+        val compound: [u8] = [255, 255, 0, 0, 0, 0, 0, 0, 0, 0,
+                              0, 11, 0, 0, 0, 10, 0, 20, 32, 0]
+        for byte in compound:
+            glyphs.append(byte)
+        val parsed = parse_glyf_outline(_glyf_font([0, 19, 39], glyphs), 1)
+        expect(parsed != None).to_equal(true)
+        val bounds = parsed.unwrap().bounds()
+        expect(bounds.left).to_equal(11.0)
+        expect(bounds.top).to_equal(21.5)
+
+    it "supports signed byte arguments, x/y scale, and two-by-two matrix order":
+        var signed_glyphs = _one_point_glyph()
+        val signed_component: [u8] = [255, 255, 0, 0, 0, 0, 0, 0, 0, 0,
+                                      0, 2, 0, 0, 254, 3]
+        for byte in signed_component:
+            signed_glyphs.append(byte)
+        val signed = parse_glyf_outline(_glyf_font([0, 19, 35], signed_glyphs), 1).unwrap().bounds()
+        expect(signed.left).to_equal(0.0)
+        expect(signed.top).to_equal(6.0)
+
+        var xy_glyphs = _one_point_glyph()
+        val xy_component: [u8] = [255, 255, 0, 0, 0, 0, 0, 0, 0, 0,
+                                  0, 66, 0, 0, 0, 0, 32, 0, 96, 0]
+        for byte in xy_component:
+            xy_glyphs.append(byte)
+        val xy = parse_glyf_outline(_glyf_font([0, 19, 39], xy_glyphs), 1).unwrap().bounds()
+        expect(xy.left).to_equal(1.0)
+        expect(xy.top).to_equal(4.5)
+
+        var matrix_glyphs = _one_point_glyph()
+        val matrix_component: [u8] = [255, 255, 0, 0, 0, 0, 0, 0, 0, 0,
+                                      0, 130, 0, 0, 0, 0, 0, 0, 64, 0, 192, 0, 0, 0]
+        for byte in matrix_component:
+            matrix_glyphs.append(byte)
+        val matrix = parse_glyf_outline(_glyf_font([0, 19, 43], matrix_glyphs), 1).unwrap().bounds()
+        expect(matrix.left).to_equal(3.0)
+        expect(matrix.top).to_equal(-2.0)
+
+    it "preserves nested component order and translations":
+        var glyphs = _one_point_glyph()
+        val first: [u8] = [255, 255, 0, 0, 0, 0, 0, 0, 0, 0,
+                           0, 3, 0, 0, 0, 4, 0, 5]
+        val second: [u8] = [255, 255, 0, 0, 0, 0, 0, 0, 0, 0,
+                            0, 3, 0, 1, 0, 6, 0, 7]
+        for byte in first:
+            glyphs.append(byte)
+        for byte in second:
+            glyphs.append(byte)
+        val parsed = parse_glyf_outline(_glyf_font([0, 19, 37, 55], glyphs), 2)
+        expect(parsed != None).to_equal(true)
+        val bounds = parsed.unwrap().bounds()
+        expect(bounds.left).to_equal(12.0)
+        expect(bounds.top).to_equal(15.0)
+
+    it "rejects cycles, point attachment, bad gids, and truncated instructions":
+        val cycle: [u8] = [255, 255, 0, 0, 0, 0, 0, 0, 0, 0,
+                           0, 3, 0, 0, 0, 0, 0, 0]
+        expect(parse_glyf_outline(_glyf_font([0, 18], cycle), 0) == None).to_equal(true)
+        val points: [u8] = [255, 255, 0, 0, 0, 0, 0, 0, 0, 0,
+                            0, 1, 0, 0, 0, 0]
+        expect(parse_glyf_outline(_glyf_font([0, 16], points), 0) == None).to_equal(true)
+        val bad_gid: [u8] = [255, 255, 0, 0, 0, 0, 0, 0, 0, 0,
+                             0, 3, 0, 1, 0, 0, 0, 0]
+        expect(parse_glyf_outline(_glyf_font([0, 18], bad_gid), 0) == None).to_equal(true)
+        var glyphs = _one_point_glyph()
+        val instructions: [u8] = [255, 255, 0, 0, 0, 0, 0, 0, 0, 0,
+                                  1, 3, 0, 0, 0, 0, 0, 0, 0, 2, 99]
+        for byte in instructions:
+            glyphs.append(byte)
+        expect(parse_glyf_outline(_glyf_font([0, 19, 40], glyphs), 1) == None).to_equal(true)
+
+    it "rejects unsupported compound flags, transform conflicts, and non-minus-one headers":
+        val round: [u8] = [255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0]
+        expect(parse_glyf_outline(_glyf_font([0, 18], round), 0) == None).to_equal(true)
+        val scaled_offset: [u8] = [255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 8, 3, 0, 0, 0, 0, 0, 0]
+        expect(parse_glyf_outline(_glyf_font([0, 18], scaled_offset), 0) == None).to_equal(true)
+        val reserved: [u8] = [255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 19, 0, 0, 0, 0, 0, 0]
+        expect(parse_glyf_outline(_glyf_font([0, 18], reserved), 0) == None).to_equal(true)
+        val conflict: [u8] = [255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 74, 0, 0, 0, 0, 32, 0, 32, 0, 32, 0]
+        expect(parse_glyf_outline(_glyf_font([0, 22], conflict), 0) == None).to_equal(true)
+        val wrong_header: [u8] = [255, 254, 0, 0, 0, 0, 0, 0, 0, 0]
+        expect(parse_glyf_outline(_glyf_font([0, 10], wrong_header), 0) == None).to_equal(true)
+
+    it "rejects malformed loca, flag repeats, coordinate data, and empty-glyph instructions":
+        var decreasing = _glyf_font([4, 2], [0, 0, 0, 0])
+        expect(parse_glyf_outline(decreasing, 0) == None).to_equal(true)
+        val short_loca = OtFont(blob: decreasing.blob, tables: [
+            decreasing.tables[0], decreasing.tables[1],
+            OtTable(tag: 1819239265, offset: 60, length: 4), decreasing.tables[3]
+        ])
+        expect(parse_glyf_outline(short_loca, 0) == None).to_equal(true)
+        val past_glyf = _glyf_font([0, 20], [0, 0, 0, 0])
+        expect(parse_glyf_outline(past_glyf, 0) == None).to_equal(true)
+        # One point but repeat count claims a second flag.
+        val repeat_overflow: [u8] = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 1]
+        expect(parse_glyf_outline(_glyf_font([0, 16], repeat_overflow), 0) == None).to_equal(true)
+        val reserved_flag: [u8] = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 193]
+        expect(parse_glyf_outline(_glyf_font([0, 15], reserved_flag), 0) == None).to_equal(true)
+        val truncated_coord: [u8] = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]
+        expect(parse_glyf_outline(_glyf_font([0, 16], truncated_coord), 0) == None).to_equal(true)
+        val empty_bad_instructions: [u8] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 99]
+        expect(parse_glyf_outline(_glyf_font([0, 13], empty_bad_instructions), 0) == None).to_equal(true)
+
+    it "accepts a contour beginning off curve":
+        val glyph: [u8] = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+                           0, 1, 0, 0, 0, 1,
+                           0, 0, 0, 4, 0, 0, 0, 0]
+        val parsed = parse_glyf_outline(_glyf_font([0, 24], glyph), 0)
+        expect(parsed != None).to_equal(true)
+        expect(parsed.unwrap().count_verbs()).to_be_greater_than(2)
+
+    it "rejects recursion deeper than eight and more than 64 components":
+        var chain = _one_point_glyph()
+        var offsets: [u32] = [0, 19]
+        var gid: i64 = 1
+        while gid < 10:
+            val component: [u8] = [255, 255, 0, 0, 0, 0, 0, 0, 0, 0,
+                                   0, 3, 0, (gid - 1) as u8, 0, 0, 0, 0]
+            for byte in component:
+                chain.append(byte)
+            offsets.append((19 + gid * 18) as u32)
+            gid = gid + 1
+        expect(parse_glyf_outline(_glyf_font(offsets, chain), 9) == None).to_equal(true)
+
+        var many = _one_point_glyph()
+        var header: [u8] = [255, 255, 0, 0, 0, 0, 0, 0, 0, 0]
+        for byte in header:
+            many.append(byte)
+        var component_index: i64 = 0
+        while component_index < 65:
+            val flags: u8 = if component_index < 64: 35 else: 3
+            val record: [u8] = [0, flags, 0, 0, 0, 0, 0, 0]
+            for byte in record:
+                many.append(byte)
+            component_index = component_index + 1
+        expect(parse_glyf_outline(_glyf_font([0, 19, 549], many), 1) == None).to_equal(true)
 
 describe "parse_cff_charstring":
     it "returns Some empty path for endchar-only charstring":
