@@ -108,7 +108,9 @@ cache identity. Complete Pure Simple complex-script shaping/BiDi is still a
 tracked prerequisite; the built-in bitmap path remains the zero-config fallback.
 The OpenType parser now supports validated Unicode cmap formats 4 and 12,
 including bundled Noto Emoji `U+1F600`. Mixed-face fallback is not accepted yet
-because the shaper still owns only one global `OtFont`.
+because complete per-script GSUB/GPOS and corpus evidence are still missing.
+The shaper binds OpenType data by exact fallback face handle/generation; an
+unbound or stale attached face never borrows another face's blob.
 
 The opt-in shaped path now keeps each `ShapedGlyph`'s absolute source index,
 cluster, current advance, and explicit zero offset through Arabic reversal,
@@ -117,7 +119,8 @@ caller language identity (empty becomes `und`) while retaining script and
 script-direction identity. Latin-1 letters no longer split Spanish, French, or
 Portuguese witness runs, and mixed-script runs advance instead of overlapping.
 
-Bind an OpenType blob to its runtime face with `shaper_with_ot_face`. Only
+Bind each OpenType blob to its runtime face with additive
+`shaper_with_ot_face` calls; rebinding a handle replaces its prior snapshot. Only
 Latin, Cyrillic, Han, and a single-codepoint emoji run may set
 `glyph_indices_valid`, and only when the selected live face and blob/runtime
 cmap glyph IDs agree. Arabic, Urdu, Devanagari, Bengali, Thai, Hebrew, and emoji

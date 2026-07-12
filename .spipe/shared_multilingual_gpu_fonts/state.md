@@ -261,6 +261,13 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   lengths before glyph-ID rasterization. This removes generation-only reverse
   binding but does not claim UTF-8 byte clusters, complete GSUB/GPOS, language,
   or accepted complex shaping.
+- per-face shaping input: `Shaper` stores replace-by-handle OpenType snapshots
+  and resolves them only after fallback chooses a run font. Exact
+  handle/generation liveness is required; stale or unbound attached faces do
+  not borrow the last/global blob. A primary+emoji fallback fixture preserves
+  the selected face through neutral material and rejects it after free. This
+  fixes mixed-face input identity, not GSUB/GPOS completeness or corpus
+  promotion.
 - OpenCL source ownership (pre-host milestone): compiler emission and Engine2D
   runtime compilation were first unified on
   `common.gpu.font_atlas_composite` for the exact versioned kernel source.
@@ -297,7 +304,8 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   material only when blob cmap IDs equal the live runtime face's IDs for every
   source codepoint. A neutral `FontGlyphRun` preserves the batch-only engine
   boundary; unbound, mismatched, stale, or fabricated IDs fail closed. This
-  does not yet wire automatic `draw_text`, per-fallback `OtFont`, full
+  did not yet wire automatic `draw_text` or per-fallback `OtFont` at that
+  milestone, and still does not complete full
   GSUB/GPOS/BiDi, bearings,
   or Engine3D shaped-run submission. No Simple compiler/test was rerun because
   the session's three-attempt cap was already exhausted.

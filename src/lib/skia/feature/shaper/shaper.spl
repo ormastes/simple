@@ -320,24 +320,51 @@ fn _shaped_glyph(glyph_id: u32, source_index: i64, cluster: i64, x_advance: f64,
 
 # ===== Shaper =====
 
+class ShaperOtFace:
+    handle: i64
+    generation: i64
+    font: OtFont
+
 class Shaper:
     fallback: FallbackChain
     features_enabled: [OpenTypeFeature]
     ot_font: Option<OtFont>
     ot_font_handle: i64
     ot_font_generation: i64
+    ot_faces: [ShaperOtFace]
 
 fn shaper_new(fallback: FallbackChain) -> Shaper:
-    Shaper(fallback: fallback, features_enabled: [], ot_font: None, ot_font_handle: 0, ot_font_generation: 0)
+    Shaper(fallback: fallback, features_enabled: [], ot_font: None, ot_font_handle: 0, ot_font_generation: 0, ot_faces: [])
 
 fn shaper_with_features(shaper: Shaper, features: [OpenTypeFeature]) -> Shaper:
-    Shaper(fallback: shaper.fallback, features_enabled: features, ot_font: shaper.ot_font, ot_font_handle: shaper.ot_font_handle, ot_font_generation: shaper.ot_font_generation)
+    Shaper(fallback: shaper.fallback, features_enabled: features, ot_font: shaper.ot_font, ot_font_handle: shaper.ot_font_handle, ot_font_generation: shaper.ot_font_generation, ot_faces: shaper.ot_faces)
 
 fn shaper_with_ot_font(shaper: Shaper, font: OtFont) -> Shaper:
-    Shaper(fallback: shaper.fallback, features_enabled: shaper.features_enabled, ot_font: Some(font), ot_font_handle: 0, ot_font_generation: 0)
+    Shaper(fallback: shaper.fallback, features_enabled: shaper.features_enabled, ot_font: Some(font), ot_font_handle: 0, ot_font_generation: 0, ot_faces: shaper.ot_faces)
 
 fn shaper_with_ot_face(shaper: Shaper, font_handle: i64, font: OtFont) -> Shaper:
-    Shaper(fallback: shaper.fallback, features_enabled: shaper.features_enabled, ot_font: Some(font), ot_font_handle: font_handle, ot_font_generation: font_face_current_generation(font_handle))
+    val generation = font_face_current_generation(font_handle)
+    if font_handle <= 0 or generation <= 0:
+        return shaper
+    var faces: [ShaperOtFace] = []
+    for face in shaper.ot_faces:
+        if face.handle != font_handle:
+            faces.push(face)
+    faces.push(ShaperOtFace(handle: font_handle, generation: generation, font: font))
+    Shaper(fallback: shaper.fallback, features_enabled: shaper.features_enabled,
+        ot_font: shaper.ot_font, ot_font_handle: shaper.ot_font_handle,
+        ot_font_generation: shaper.ot_font_generation, ot_faces: faces)
+
+fn _shaper_ot_face(shaper: Shaper, selected: SkFont) -> (Option<OtFont>, i64, i64):
+    val handle = selected.typeface.font_handle
+    val generation = selected.typeface.font_generation
+    for face in shaper.ot_faces:
+        if (face.handle == handle and face.generation == generation and
+            font_face_is_live(handle, generation)):
+            return (Some(face.font), handle, generation)
+    if handle <= 0:
+        return (shaper.ot_font, shaper.ot_font_handle, shaper.ot_font_generation)
+    (None, 0, 0)
 
 fn ascii_to_codepoints(s: text) -> [u32]:
     val n = s.len()
@@ -673,7 +700,6 @@ fn shaper_shape_with_language(shaper: Shaper, codepoints: [u32], font: SkFont, s
         return runs
     val trimmed_language = language.trim()
     val run_language = if trimmed_language == "": "und" else: trimmed_language
-    val gsub_lookups = _get_gsub_lookups(shaper.ot_font)
     var run_start: i64 = 0
     var run_script = script_of(codepoints[0])
     var run_x = start_x
@@ -683,14 +709,16 @@ fn shaper_shape_with_language(shaper: Shaper, codepoints: [u32], font: SkFont, s
         val s = script_of(cp)
         if s != run_script:
             val run_font = fallback_chain_font_for_run(shaper.fallback, run_script, codepoints, start: run_start, end_idx: i)
-            val run = _build_run(codepoints, start: run_start, end_idx: i, scr: run_script, language: run_language, font: run_font, ot_font: shaper.ot_font, ot_font_handle: shaper.ot_font_handle, ot_font_generation: shaper.ot_font_generation, gsub_lookups: gsub_lookups, start_x: run_x, start_y: start_y)
+            val bound = _shaper_ot_face(shaper, run_font)
+            val run = _build_run(codepoints, start: run_start, end_idx: i, scr: run_script, language: run_language, font: run_font, ot_font: bound.0, ot_font_handle: bound.1, ot_font_generation: bound.2, gsub_lookups: _get_gsub_lookups(bound.0), start_x: run_x, start_y: start_y)
             runs.push(run)
             run_x = run_x + _run_advance(run)
             run_start = i
             run_script = s
         i = i + 1
     val last_font = fallback_chain_font_for_run(shaper.fallback, run_script, codepoints, start: run_start, end_idx: n)
-    val last_run = _build_run(codepoints, start: run_start, end_idx: n, scr: run_script, language: run_language, font: last_font, ot_font: shaper.ot_font, ot_font_handle: shaper.ot_font_handle, ot_font_generation: shaper.ot_font_generation, gsub_lookups: gsub_lookups, start_x: run_x, start_y: start_y)
+    val last_bound = _shaper_ot_face(shaper, last_font)
+    val last_run = _build_run(codepoints, start: run_start, end_idx: n, scr: run_script, language: run_language, font: last_font, ot_font: last_bound.0, ot_font_handle: last_bound.1, ot_font_generation: last_bound.2, gsub_lookups: _get_gsub_lookups(last_bound.0), start_x: run_x, start_y: start_y)
     runs.push(last_run)
     runs
 

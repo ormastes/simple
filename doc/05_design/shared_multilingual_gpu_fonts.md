@@ -53,6 +53,11 @@ not UAX#9. Both substitution and positioning completeness remain false.
 Complex-script and multi-codepoint emoji material therefore fails closed even
 when blob/runtime cmap IDs match.
 
+`Shaper` stores additive OpenType snapshots keyed by exact live face
+handle/generation. Fallback resolves the snapshot after choosing its run font;
+an attached face without an exact live binding never reuses the legacy unbound
+parser blob.
+
 The revocable font-face handle/generation is intentionally present as opaque
 rasterizer identity and is validated before use. Engine-owned texture, sampler,
 pipeline, submission, fence, and readback handles stay out of both values; they

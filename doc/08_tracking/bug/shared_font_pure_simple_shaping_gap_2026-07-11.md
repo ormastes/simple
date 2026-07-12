@@ -10,15 +10,16 @@ now carries the exact live face handle/generation pair and logical codepoint
 cluster positions, and the renderer rejects mismatches instead of reverse
 resolving a generation globally. It still omits advances/offsets, direction,
 language, script, and UTF-8 byte clusters. The current pure shaper is not an acceptance substitute:
-its text conversion is ASCII-only, GSUB is identity, fallback retains one
-global `OtFont`, and Arabic/Devanagari handling is
+its text conversion is ASCII-only, GSUB is identity, and Arabic/Devanagari handling is
 explicitly partial. Cyrillic and Urdu Arabic-extension script detection now
 work, but detection alone does not provide accepted shaping.
 
-Progress: the existing cmap owner now parses validated Unicode format 12 with
+Progress: fallback runs now resolve an exact live per-face OpenType snapshot;
+stale or unbound attached faces fail closed instead of borrowing another blob.
+The existing cmap owner parses validated Unicode format 12 with
 Windows 3/10 precedence, so bundled Noto Emoji resolves `U+1F600` to its real
-glyph ID. Per-run face binding is still missing, so this does not promote emoji
-fallback or mixed-face shaping.
+glyph ID. Per-run face binding is now present, but emoji fallback or mixed-face
+shaping is not promoted without the remaining GSUB/GPOS corpus gate.
 
 ## Smallest valid fix
 

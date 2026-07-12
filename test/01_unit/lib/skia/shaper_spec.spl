@@ -279,6 +279,40 @@ describe "Shaper":
         expect sequence_material.valid to_equal false
         free_font(handle)
 
+    it "uses OpenType data bound to the face selected by fallback":
+        val primary_path = "src/compiler_rust/vendor/ttf-parser/tests/fonts/demo.ttf"
+        val emoji_path = "assets/fonts/google-fonts/ofl/notoemoji/NotoEmoji[wght].ttf"
+        val primary_loaded = load_font(primary_path)
+        val emoji_loaded = load_font(emoji_path)
+        expect(primary_loaded).to_not_be_nil()
+        expect(emoji_loaded).to_not_be_nil()
+        val primary_handle = primary_loaded as std.nogc_sync_mut.io.font_ffi.FontHandle
+        val emoji_handle = emoji_loaded as std.nogc_sync_mut.io.font_ffi.FontHandle
+        val primary_parsed = parse_offset_table(rt_file_read_bytes(primary_path))
+        val emoji_parsed = parse_offset_table(rt_file_read_bytes(emoji_path))
+        expect(primary_parsed).to_not_equal(None)
+        expect(emoji_parsed).to_not_equal(None)
+        val primary = sk_font_new(sk_typeface_from_attached_font("Demo Latin", sk_font_style_normal(), primary_path, primary_handle.handle), 12.0)
+        val emoji = sk_font_new(sk_typeface_from_attached_font("Noto Emoji", sk_font_style_normal(), emoji_path, emoji_handle.handle), 12.0)
+        val chain = fallback_chain_add(fallback_chain_new(primary), emoji)
+        var bound = shaper_with_ot_face(shaper_new(chain), primary_handle.handle, primary_parsed.unwrap())
+        bound = shaper_with_ot_face(bound, emoji_handle.handle, emoji_parsed.unwrap())
+        val run = shaper_shape_with_language(bound, [128512u32], primary, 0.0, 0.0, "und")[0]
+        expect(run.font_handle).to_equal(emoji_handle.handle)
+        expect(run.glyph_ids[0]).to_not_equal(128512u32)
+        expect(run.glyph_indices_valid).to_equal(true)
+        expect(shaped_run_to_font_glyph_run(run).face_id).to_equal(emoji_handle.handle)
+        val handleless_chain = fallback_chain_add(fallback_chain_new(sk_font_default()), emoji)
+        var mixed = shaper_with_ot_font(shaper_new(handleless_chain), primary_parsed.unwrap())
+        mixed = shaper_with_ot_face(mixed, emoji_handle.handle, emoji_parsed.unwrap())
+        val legacy = shaper_shape_with_language(mixed, [65u32], sk_font_default(), 0.0, 0.0, "en")[0]
+        expect(legacy.glyph_ids[0]).to_equal(99u32)
+        free_font(emoji_handle)
+        val stale = shaper_shape_with_language(bound, [128512u32], primary, 0.0, 0.0, "und")[0]
+        expect(stale.glyph_indices_valid).to_equal(false)
+        expect(stale.glyph_ids[0]).to_equal(128512u32)
+        free_font(primary_handle)
+
 describe "ascii_to_codepoints":
     it "hello produces 5 codepoints":
         val cps = ascii_to_codepoints("hello")
