@@ -2,9 +2,9 @@
 
 use std.cli.cli_util.{get_cli_args}
 use std.common.gpu.simpleos_host_gpu_protocol.*
-use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use app.io.file_ops.{file_exists, file_size, file_mmap, file_munmap}
-use app.io.volatile_ops.{volatile_read_u64, volatile_write_u64, memory_barrier}
+use app.io.volatile_ops.{volatile_read_u64_required, volatile_write_u64_required, memory_barrier_required}
 use app.io.time_ops.{time_now_unix_micros}
 use std.thread_sffi.{thread_sleep}
 
@@ -16,10 +16,10 @@ val REASON_BACKEND_MISMATCH: i64 = 5
 val REASON_NON_DEVICE_READBACK: i64 = 6
 
 fn _read(base: i64, offset: i64) -> i64:
-    volatile_read_u64(base + offset)
+    volatile_read_u64_required(base + offset)
 
 fn _write(base: i64, offset: i64, value: i64):
-    volatile_write_u64(base + offset, value)
+    volatile_write_u64_required(base + offset, value)
 
 fn _finish(base: i64, generation: i64, status: i64, reason: i64, handle: i64, output_bytes: i64, checksum: i64, elapsed_us: i64, source: i64, identity: i64):
     _write(base, SIMPLEOS_HOST_GPU_WIRE_STATUS, status)
@@ -30,7 +30,7 @@ fn _finish(base: i64, generation: i64, status: i64, reason: i64, handle: i64, ou
     _write(base, SIMPLEOS_HOST_GPU_WIRE_ELAPSED_US, elapsed_us)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_READBACK_SOURCE, source)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_DEVICE_IDENTITY, identity)
-    memory_barrier()
+    memory_barrier_required()
     _write(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION, generation)
 
 fn _payload_words(base: i64, payload_bytes: i64) -> [i64]:
@@ -58,14 +58,11 @@ fn _write_pixels(base: i64, pixels: [u32], count: i64) -> i64:
 
 fn _render_backend_available(code: i64) -> bool:
     val name = simpleos_host_gpu_backend_name(code)
-    if name != "vulkan" and name != "metal":
+    if name != "vulkan":
         return false
-    val created = Engine2D.create_requested_backend(1, 1, name)
-    var engine = match created:
-        Ok(value): value
-        Err(_): return false
-    val available = engine.backend_name() == name
-    engine.shutdown()
+    var backend = VulkanBackend.create()
+    val available = backend.init(1, 1)
+    backend.shutdown()
     available
 
 fn _process_hello(base: i64, generation: i64) -> i64:
@@ -99,7 +96,7 @@ fn _process_request(base: i64) -> i64:
     val completion = _read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
     if not simpleos_host_gpu_generation_is_fresh(generation, completion):
         return 0
-    memory_barrier()
+    memory_barrier_required()
     if _read(base, SIMPLEOS_HOST_GPU_WIRE_MAGIC) != SIMPLEOS_HOST_GPU_PROTOCOL_MAGIC or _read(base, SIMPLEOS_HOST_GPU_WIRE_VERSION) != SIMPLEOS_HOST_GPU_PROTOCOL_VERSION:
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, REASON_INVALID_REQUEST, 0, 0, 0, 1, 0, 0)
         return 1
@@ -129,20 +126,13 @@ fn _process_request(base: i64) -> i64:
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, REASON_CHECKSUM_MISMATCH, 0, 0, 0, 1, 0, 0)
         return 1
 
-    var engine_width = width
-    var engine_height = height
-    if kind == SIMPLEOS_HOST_GPU_KIND_PROCESSING:
-        engine_width = if element_count > SIMPLEOS_HOST_GPU_MAX_WIDTH: SIMPLEOS_HOST_GPU_MAX_WIDTH else: element_count
-        engine_height = (element_count + engine_width - 1) / engine_width
-    val created = Engine2D.create_requested_backend(engine_width.to_i32(), engine_height.to_i32(), backend)
-    var engine = match created:
-        Ok(value): value
-        Err(_):
-            _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, REASON_BACKEND_UNAVAILABLE, 0, 0, 0, 1, 0, 0)
-            return 1
-    if engine.backend_name() != backend:
-        engine.shutdown()
-        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, REASON_BACKEND_MISMATCH, 0, 0, 0, 1, 0, 0)
+    if kind != SIMPLEOS_HOST_GPU_KIND_RENDER or backend != "vulkan":
+        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, REASON_BACKEND_UNAVAILABLE, 0, 0, 0, 1, 0, 0)
+        return 1
+
+    var engine = VulkanBackend.create()
+    if not engine.init(width.to_i32(), height.to_i32()):
+        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, REASON_BACKEND_UNAVAILABLE, 0, 0, 0, 1, 0, 0)
         return 1
 
     val started = time_now_unix_micros()
@@ -154,8 +144,6 @@ fn _process_request(base: i64) -> i64:
             engine.clear(words[pos + 5].to_u32())
         elif op == SIMPLEOS_HOST_GPU_COMMAND_FILL_RECT and kind == SIMPLEOS_HOST_GPU_KIND_RENDER:
             engine.draw_rect_filled(words[pos + 1].to_i32(), words[pos + 2].to_i32(), words[pos + 3].to_i32(), words[pos + 4].to_i32(), words[pos + 5].to_u32())
-        elif op == SIMPLEOS_HOST_GPU_COMMAND_FILL_U32 and kind == SIMPLEOS_HOST_GPU_KIND_PROCESSING:
-            engine.clear(words[pos + 5].to_u32())
         else:
             command_ok = false
         pos = pos + 6
@@ -166,7 +154,7 @@ fn _process_request(base: i64) -> i64:
 
     engine.present()
     val readback = engine.read_pixels_with_source()
-    val output_count = if kind == SIMPLEOS_HOST_GPU_KIND_RENDER: width * height else: element_count
+    val output_count = width * height
     if readback.source != "device_readback" or readback.backend_handle <= 0 or readback.pixels.len().to_i64() < output_count:
         engine.shutdown()
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, REASON_NON_DEVICE_READBACK, 0, 0, 0, 1, 0, 0)
