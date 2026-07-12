@@ -535,22 +535,37 @@ impl MirLowering:
         # rt_print/rt_println take `const char*` and deref it directly (no type
         # tag check) -- passing a raw non-str value (e.g. an i64) SIGSEGVs at
         # that address. Mirrors bug #136's string-interpolation fix
-        # (expr_dispatch.spl lower_string_interpolation): a str-typed operand
-        # (Opaque "str") passes straight through; a non-str operand is first
-        # rendered to a decimal string via rt_raw_i64_to_string (a tagged
-        # heap string), then unwrapped to its raw char* buffer via
-        # rt_interp_cstr. Float has no raw-render runtime fn yet and is not
-        # covered here (follow-up).
+        # (expr_dispatch.spl lower_string_interpolation): rendered to a
+        # decimal string via rt_raw_i64_to_string (a tagged heap string),
+        # then unwrapped to its raw char* buffer via rt_interp_cstr.
+        #
+        # IMPORTANT: default is pass-through, coerce only on an *explicitly*
+        # numeric/bool local type. A "coerce unless proven str" default was
+        # tried and reverted: `local_mir_type_of` does not reliably resolve
+        # `Opaque("str")` for text arriving via a function parameter (only
+        # literal/`val x = <literal>` bindings thread the type per #136's own
+        # comment), so that default silently turned every param-passed string
+        # print (the majority of real prints: error messages, paths, names)
+        # into a decimal-pointer number. Coercing only on a known-numeric
+        # type keeps the old (correct) pass-through behavior for text whose
+        # type isn't tracked, while still catching the confirmed SIGSEGV
+        # case (int literals/vars/exprs, which reliably get an explicit
+        # I64 local type). Float has no raw-render runtime fn yet and is not
+        # covered here (follow-up); an untracked float local would still
+        # pass through unchanged (old behavior), not crash differently.
         var print_arg = mir_operand_copy(arg_local)
-        var arg_is_str = false
+        var arg_is_numeric = false
         if val arg_ty = self.local_mir_type_of(arg_local):
             match arg_ty.kind:
-                case MirTypeKind.Opaque(arg_ty_name):
-                    if arg_ty_name == "str":
-                        arg_is_str = true
+                case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64:
+                    arg_is_numeric = true
+                case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64:
+                    arg_is_numeric = true
+                case MirTypeKind.Bool:
+                    arg_is_numeric = true
                 case _:
                     ()
-        if not arg_is_str:
+        if arg_is_numeric:
             val num_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_raw_i64_to_string"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))

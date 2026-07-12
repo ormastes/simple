@@ -446,3 +446,44 @@ by the seed):
 
 Landed as a standalone fix to `switch_operators_calls.spl`; independent of
 this doc's still-open Cranelift-direct string-constant gap above.
+
+### 2026-07-12 correction: initial "coerce unless proven str" default silently regressed param-passed strings; inverted
+
+The first landed version of this fix (commit `8b4f386a8a1`, rebased/pushed as
+`b9ad74ed123`) defaulted to *coercing* any argument whose MIR local type did
+not resolve to `Opaque("str")`. That default was backwards: text arriving via
+a **function parameter** does not reliably get `Opaque("str")` threaded onto
+its local (only literal / `val x = <literal>` bindings do, per #136's own
+comment), so `local_mir_type_of` returned a non-str result for it too — and
+the "coerce unless str" default routed it through `rt_raw_i64_to_string`,
+printing the raw `char*` pointer as a decimal number instead of the string.
+Caught before it went unnoticed by an explicit param-passing probe:
+
+```simple
+fn greet(s: text) -> i64:
+    print(s)
+    return 0
+fn main() -> i64:
+    return greet("hi")
+```
+
+Before this correction: printed `2099451` (a pointer value) instead of `hi`.
+This would have silently broken the overwhelming majority of real prints
+(error messages, paths, names — nearly all passed through a function
+parameter, not a bare literal), while leaving the two originally-tested str
+cases (literal, `val`-bound literal) looking fine.
+
+**Fix:** inverted the default. `lower_bootstrap_print_call` now coerces
+**only** when the local's MIR type explicitly matches a numeric/bool scalar
+(`I8`/`I16`/`I32`/`I64`/`U8`/`U16`/`U32`/`U64`/`Bool`); every other case
+(including `Opaque("str")`, and any local whose type isn't tracked at all)
+passes through unchanged, matching the pre-fix behavior for text. Int
+literals/variables/expressions reliably get an explicit `I64` local type from
+`lower_expr`, so the original SIGSEGV fix is unaffected.
+
+**Re-verified after the inversion**, same pinned-seed LLC-path harness:
+- `print(5); println(42); print(n); print(a+b)` → `542\n542`, rc=0 (int fix
+  still holds).
+- `print("hello"); val s = "world"; print(s)` → `helloworld`, rc=0 (unchanged).
+- `fn greet(s: text): print(s)` called as `greet("hi")` → `hi`, rc=0
+  (regression fixed).
