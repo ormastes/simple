@@ -12,7 +12,7 @@ use compiler.hir.hir_lowering.statements.*
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
-extern fn rt_enum_discriminant(value: ExprKind) -> i64
+extern fn rt_enum_discriminant(value: Any) -> i64
 
 fn hir_expr_env_get(key: text) -> text:
     rt_env_get(key)
@@ -539,18 +539,22 @@ impl HirLowering:
                     HirType(kind: HirTypeKind.Named(symbol, []), span: e.span)
                 else:
                     HirType(kind: HirTypeKind.Error, span: e.span)
-                val hir_payload = payload.map(\p: match p:
-                    case Tuple(values):
-                        var hir_values: [HirExpr] = []
-                        for v in values:
-                            hir_values = hir_values.push(self.lower_hir_expr(v))
-                        HirEnumPayload.Tuple(hir_values)
-                    case Struct(fields):
-                        var hir_fields: [(text, HirExpr)] = []
-                        for (fname, fvalue) in fields:
-                            hir_fields = hir_fields.push((fname, self.lower_hir_expr(fvalue)))
-                        HirEnumPayload.Struct(hir_fields)
-                )
+                val hir_payload = match payload:
+                    case Some(p):
+                        val lowered_payload = match p:
+                            case Tuple(values):
+                                var hir_values: [HirExpr] = []
+                                for v in values:
+                                    hir_values = hir_values.push(self.lower_hir_expr(v))
+                                HirEnumPayload.Tuple(hir_values)
+                            case Struct(fields):
+                                var hir_fields: [(text, HirExpr)] = []
+                                for (fname, fvalue) in fields:
+                                    hir_fields = hir_fields.push((fname, self.lower_hir_expr(fvalue)))
+                                HirEnumPayload.Struct(hir_fields)
+                        Some(lowered_payload)
+                    case None:
+                        nil
                 HirExprKind.EnumLit(hir_type, variant, hir_payload)
 
             # Custom blocks (user-defined: sh{}, sql{}, re{}, etc.)
@@ -669,13 +673,18 @@ impl HirLowering:
                 HirBinOp.Add
 
     me lower_unaryop(op: UnaryOp) -> HirUnaryOp:
-        match op:
-            case UnaryOp.Neg: HirUnaryOp.Neg
-            case UnaryOp.Not: HirUnaryOp.Not
-            case UnaryOp.BitNot: HirUnaryOp.BitNot
-            case UnaryOp.Ref: HirUnaryOp.Ref
-            case UnaryOp.Deref: HirUnaryOp.Deref
-            case UnaryOp.Transpose: HirUnaryOp.Transpose
+        val disc = rt_enum_discriminant(op)
+        if disc == rt_enum_discriminant(UnaryOp.Not):
+            return HirUnaryOp.Not
+        if disc == rt_enum_discriminant(UnaryOp.BitNot):
+            return HirUnaryOp.BitNot
+        if disc == rt_enum_discriminant(UnaryOp.Ref):
+            return HirUnaryOp.Ref
+        if disc == rt_enum_discriminant(UnaryOp.Deref):
+            return HirUnaryOp.Deref
+        if disc == rt_enum_discriminant(UnaryOp.Transpose):
+            return HirUnaryOp.Transpose
+        HirUnaryOp.Neg
 
     me lower_pattern(p: Pattern) -> HirPattern:
         val kind = match p.kind:

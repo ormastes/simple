@@ -54,6 +54,10 @@ impl MirLowering:
         # bootstrap_stage2_empty_mir_bodies_2026-07-05). Real HIR->MIR lowering
         # now runs for all bootstrap functions.
         self.local_map = {}
+        self.runtime_array_locals = {}
+        self.runtime_dict_locals = {}
+        self.runtime_value_locals = {}
+        self.nil_locals = {}
         if bootstrap_trace:
             print "[mir-lower] real-lower:start {fn_.name}"
 
@@ -141,6 +145,13 @@ impl MirLowering:
             var name_bldr = self.builder
             name_bldr.set_local_name(local, param.name)
             self.builder = name_bldr
+            match param.type_.kind:
+                case Named(type_symbol, _):
+                    val parameter_type = self.symbols.get_symbol(type_symbol)
+                    if parameter_type != nil and self.struct_field_order.has(parameter_type.name):
+                        self.struct_value_syms[local.id] = parameter_type.name
+                case _:
+                    ()
             pli = pli + 1
         if trace_enabled:
             print "[mir-lower] lower_function:param-map-done {fn_.name}"
@@ -288,6 +299,8 @@ impl MirLowering:
             case Array(element, size):
                 val array_size = if size != nil: size else: 0
                 MirType(kind: MirTypeKind.Array(self.lower_type(element), array_size))
+            case Dict(key, value):
+                MirType(kind: MirTypeKind.Dict(self.lower_type(key), self.lower_type(value)))
             case Ref(inner, mutable):
                 MirType(kind: MirTypeKind.Ref(self.lower_type(inner), mutable))
             case Optional(inner):
@@ -496,6 +509,14 @@ impl MirLowering:
                     if fields[idx] == field_name:
                         return idx
                     idx = idx + 1
+            val type_symbol = self.symbols.get_symbol(found_type_sym)
+            if type_symbol != nil and self.struct_field_order.has(type_symbol.name):
+                val named_fields = self.struct_field_order[type_symbol.name]
+                var named_idx = 0
+                while named_idx < named_fields.len():
+                    if named_fields[named_idx] == field_name:
+                        return named_idx
+                    named_idx = named_idx + 1
 
         # Fallback: the base is a locally-constructed struct value with no HIR
         # type annotation (`val p = Point(...)`). Recover the struct name from

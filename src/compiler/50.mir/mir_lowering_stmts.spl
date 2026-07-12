@@ -144,7 +144,17 @@ impl MirLowering:
                             case nil:
                                 MirType.i64()
 
-                        val init_local = self.lower_expr(let_init)
+                        var init_local = self.lower_expr(let_init)
+                        val annotated_narrow_int = match mir_type.kind:
+                            case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32: true
+                            case _: false
+                        val annotated_float = match mir_type.kind:
+                            case MirTypeKind.F32 | MirTypeKind.F64: true
+                            case _: false
+                        if let_type != nil and (annotated_narrow_int or annotated_float):
+                            var cast_builder = self.builder
+                            init_local = cast_builder.emit_cast(mir_operand_copy(init_local), mir_type)
+                            self.builder = cast_builder
                         val init_local_id = mir_stmt_local_id_value(init_local)
                         if init_local_id < 0:
                             self.error("let initializer produced no local", Some(span))
@@ -193,6 +203,8 @@ impl MirLowering:
                         # matching str/float.
                         val effective_type = if self.local_is_runtime_array(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
+                        else if self.local_is_runtime_dict(init_local):
+                            self.local_mir_type_of(init_local) ?? mir_type
                         else if self.local_is_str(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else if self.local_is_float(init_local):
@@ -216,6 +228,10 @@ impl MirLowering:
                                 self.runtime_array_locals[local.id] = true
                             if self.runtime_dict_locals.has(init_local.id):
                                 self.runtime_dict_locals[local.id] = true
+                            if self.runtime_value_locals.has(init_local.id):
+                                self.runtime_value_locals[local.id] = true
+                            if self.nil_locals.has(init_local.id):
+                                self.nil_locals[local.id] = true
                             var b2 = self.builder
                             b2.emit_copy(local, init_local)
                             self.builder = b2
@@ -292,6 +308,8 @@ impl MirLowering:
                         # cannot silently diverge.)
                         val effective_type = if has_init and self.local_is_runtime_array(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
+                        else if has_init and self.local_is_runtime_dict(init_local):
+                            self.local_mir_type_of(init_local) ?? mir_type
                         else if has_init and self.local_is_float(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else:
@@ -307,6 +325,10 @@ impl MirLowering:
                                 self.runtime_array_locals[local.id] = true
                             if has_init and self.runtime_dict_locals.has(init_local.id):
                                 self.runtime_dict_locals[local.id] = true
+                            if has_init and self.runtime_value_locals.has(init_local.id):
+                                self.runtime_value_locals[local.id] = true
+                            if has_init and self.nil_locals.has(init_local.id):
+                                self.nil_locals[local.id] = true
                             if has_init:
                                 var b2 = self.builder
                                 b2.emit_copy(local, init_local)
@@ -347,10 +369,30 @@ impl MirLowering:
                 val result = b.emit_binop(mir_op, current, new_val, MirType.i64())
                 b.emit_copy(local, result)
                 self.builder = b
+                self.runtime_value_locals = self.runtime_value_locals.remove(local.id)
+                self.nil_locals = self.nil_locals.remove(local.id)
+                self.runtime_array_locals = self.runtime_array_locals.remove(local.id)
+                self.runtime_dict_locals = self.runtime_dict_locals.remove(local.id)
             else:
                 var b = self.builder
                 b.emit_copy(local, value_local)
                 self.builder = b
+                if self.runtime_value_locals.has(value_local.id):
+                    self.runtime_value_locals[local.id] = true
+                else:
+                    self.runtime_value_locals = self.runtime_value_locals.remove(local.id)
+                if self.runtime_array_locals.has(value_local.id):
+                    self.runtime_array_locals[local.id] = true
+                else:
+                    self.runtime_array_locals = self.runtime_array_locals.remove(local.id)
+                if self.runtime_dict_locals.has(value_local.id):
+                    self.runtime_dict_locals[local.id] = true
+                else:
+                    self.runtime_dict_locals = self.runtime_dict_locals.remove(local.id)
+                if self.nil_locals.has(value_local.id):
+                    self.nil_locals[local.id] = true
+                else:
+                    self.nil_locals = self.nil_locals.remove(local.id)
 
     me lower_assign(target: HirExpr, op: HirAssignOp?, value_local: LocalId):
         """Lower assignment."""
@@ -391,16 +433,18 @@ impl MirLowering:
                 # an element offset). Mirrors the dict getter in expr_dispatch.
                 if self.local_is_runtime_dict(receiver):
                     val dict_key = self.lower_dict_key(index)
+                    val boxed_value = self.box_runtime_value(value_local)
                     val dict_set_op = MirOperand(kind: MirOperandKind.Const(
                         MirConstValue.Str("rt_dict_set"),
                         MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
                     ))
                     var b_dset = self.builder
-                    b_dset.emit_call(dict_set_op, [mir_operand_copy(receiver), mir_operand_copy(dict_key), mir_operand_copy(value_local)], MirType.i64())
+                    b_dset.emit_call(dict_set_op, [mir_operand_copy(receiver), mir_operand_copy(dict_key), mir_operand_copy(boxed_value)], MirType.i64())
                     self.builder = b_dset
                     return
                 val index_local = self.lower_expr(index)
                 self.emit_bounds_check_for_index(base.type_, receiver, index_local)
+                val boxed_value = self.box_runtime_value(value_local)
 
                 # Create function operand for rt_array_set(ptr, i64, i64) -> void.
                 # Mirror the rt_array_get callee shape (see expr_dispatch.spl
@@ -412,7 +456,7 @@ impl MirLowering:
                 ))
 
                 # Emit call with no return value
-                self.builder.emit_call(func_operand, [mir_operand_copy(receiver), mir_operand_copy(index_local), mir_operand_copy(value_local)], MirType.unit())
+                self.builder.emit_call(func_operand, [mir_operand_copy(receiver), mir_operand_copy(index_local), mir_operand_copy(boxed_value)], MirType.unit())
 
             case _:
                 self.error("unsupported MIR assignment target: {target.kind}", nil)

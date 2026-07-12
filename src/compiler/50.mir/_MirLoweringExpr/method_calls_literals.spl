@@ -113,6 +113,29 @@ impl MirLowering:
             case Unresolved: true
             case _: false
 
+        var receiver_is_dict = false
+        if maybe_receiver_type_for_call != nil:
+            val found_receiver_type = maybe_receiver_type_for_call
+            if found_receiver_type != nil:
+                match found_receiver_type.kind:
+                    case Dict(_, _): receiver_is_dict = true
+                    case _: ()
+        if receiver_is_dict and (method == "values" or method == "keys") and args.len() == 0:
+            val receiver_local = self.lower_expr(receiver)
+            val runtime_name = if method == "values": "rt_dict_values" else: "rt_dict_keys"
+            val func_operand = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str(runtime_name),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_dict = self.builder
+            val result = b_dict.emit_call(func_operand, [mir_operand_copy(receiver_local)], MirType.i64())
+            self.builder = b_dict
+            if val result_local = result:
+                self.runtime_array_locals[result_local.id] = true
+                self.runtime_value_locals[result_local.id] = true
+                return result_local
+            return receiver_local
+
         if (method == "len" or method == "length") and args.len() == 0:
             var len_symbol = ""
             if maybe_receiver_type_for_call != nil:
@@ -470,14 +493,26 @@ impl MirLowering:
                 case Index(base, index):
                     wb_base = self.lower_expr(base)
                     wb_index = self.lower_expr(index)
-                    var wb_b = self.builder
-                    val wb_ptr = wb_b.emit_gep(
-                        mir_operand_copy(wb_base),
-                        [mir_operand_copy(wb_index)],
-                        MirType.ptr(receiver_type, false)
-                    )
-                    wb_receiver = wb_b.emit_load(mir_operand_copy(wb_ptr), receiver_type)
-                    self.builder = wb_b
+                    if self.local_is_runtime_array(wb_base):
+                        val getter = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_array_get"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                        ))
+                        var wb_b = self.builder
+                        val loaded = wb_b.emit_call(getter, [mir_operand_copy(wb_base), mir_operand_copy(wb_index)], receiver_type)
+                        self.builder = wb_b
+                        if val value = loaded:
+                            wb_receiver = value
+                            self.runtime_value_locals[value.id] = true
+                    else:
+                        var wb_b = self.builder
+                        val wb_ptr = wb_b.emit_gep(
+                            mir_operand_copy(wb_base),
+                            [mir_operand_copy(wb_index)],
+                            MirType.ptr(receiver_type, false)
+                        )
+                        wb_receiver = wb_b.emit_load(mir_operand_copy(wb_ptr), receiver_type)
+                        self.builder = wb_b
                     wb_kind = 1
                 case Field(base, field_name, resolved):
                     wb_base = self.lower_expr(base)
@@ -771,6 +806,7 @@ impl MirLowering:
         wb_kind 2: `emit_set_field(base, field_idx, receiver)` (struct field)
         """
         if wb_kind == 1:
+            val boxed_receiver = self.box_runtime_value(receiver_value)
             val func_operand = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_array_set"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.ptr(MirType.i64(), false), MirType.i64(), MirType.i64()], return_type: MirType.unit(), is_variadic: false)))
@@ -778,7 +814,7 @@ impl MirLowering:
             self.builder.emit_call(func_operand, [
                 mir_operand_copy(wb_base),
                 mir_operand_copy(wb_index),
-                mir_operand_copy(receiver_value)
+                mir_operand_copy(boxed_receiver)
             ], MirType.unit())
         else if wb_kind == 2:
             var b = self.builder
@@ -904,31 +940,19 @@ impl MirLowering:
     me lower_array_lit(elements: [HirExpr]) -> LocalId:
         """Lower array literal."""
         var operands: [MirOperand] = []
+        var lowered_elem_type = MirType.i64()
         for elem in elements:
             val local = self.lower_expr(elem)
-            operands = operands.push(mir_operand_copy(local))
+            if operands.len() == 0:
+                val local_type = self.local_mir_type_of(local)
+                if local_type != nil:
+                    lowered_elem_type = local_type
+            val boxed = self.box_runtime_value(local)
+            operands = operands.push(mir_operand_copy(boxed))
 
-        # NOTE: `if val first_type = elements[0].type_:` is not sufficient
-        # here -- confirmed by isolated repro that the seed interpreter's
-        # `if val` presence check can still enter the true branch with
-        # `first_type` bound to nil for this indexed+field-chained Option
-        # (elements[0] here is often un-type-inferred the first time this
-        # array/set literal is reached via a fresh, non-entry-closure code
-        # path). A redundant explicit nil re-check on the bound value guards
-        # against calling lower_type(nil), which crashes with "undefined
-        # field 'kind': cannot access field on value of type 'nil'".
-        val elem_type = if elements.len() > 0:
-            val first_elem = elements[0]
-            val first_elem_type = first_elem.type_
-            if val first_type = first_elem_type:
-                if first_type == nil:
-                    MirType.i64()
-                else:
-                    self.lower_type(first_type)
-            else:
-                MirType.i64()
-        else:
-            MirType.i64()
+        # The lowered local is authoritative. Flat HIR expression metadata may
+        # still carry the parser's default i64 for typed variables.
+        val elem_type = lowered_elem_type
         val array_type = MirType(kind: MirTypeKind.Array(elem_type, elements.len()))
 
         val arr_local = self.builder.emit_aggregate(
@@ -937,6 +961,7 @@ impl MirLowering:
             array_type
         )
         self.runtime_array_locals[arr_local.id] = true
+        self.runtime_value_locals[arr_local.id] = true
         arr_local
 
     me lower_dict_key(key_expr: HirExpr) -> LocalId:
@@ -948,38 +973,8 @@ impl MirLowering:
         rt_string_new(ptr, rt_strlen(ptr)); pass everything else (already-tagged
         string variables, int keys) through unchanged.
         """
-        # Every string literal -- plain OR interpolated -- lowers to a raw char*
-        # (Opaque "str"), never a tagged heap string, so any StringLit key needs
-        # tagging. (Do NOT inspect the interps list here: the seed `if val`
-        # presence-check can enter the true branch with the bound value nil, and
-        # `and` is eager, so a `.len()` guard crashes -- see lower_array_lit.)
-        var is_str_key = false
-        match key_expr.kind:
-            case StringLit(_, _):
-                is_str_key = true
-            case _:
-                is_str_key = false
         val key_local = self.lower_expr(key_expr)
-        if not is_str_key:
-            return key_local
-        val strlen_op = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str("rt_strlen"),
-            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-        ))
-        var b_len = self.builder
-        val len_res = b_len.emit_call(strlen_op, [mir_operand_copy(key_local)], MirType.i64())
-        self.builder = b_len
-        if val key_len = len_res:
-            val newstr_op = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_string_new"),
-                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-            ))
-            var b_new = self.builder
-            val tagged_res = b_new.emit_call(newstr_op, [mir_operand_copy(key_local), mir_operand_copy(key_len)], MirType.i64())
-            self.builder = b_new
-            if val tagged = tagged_res:
-                return tagged
-        key_local
+        self.box_runtime_value(key_local)
 
     me lower_dict_lit(entries: [(HirExpr, HirExpr)]) -> LocalId:
         """Lower a dict literal `{k: v, ...}` to rt_dict_new + rt_dict_set calls.
@@ -994,6 +989,9 @@ impl MirLowering:
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ))
         val cap_hint = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64()))
+        var key_type = MirType.i64()
+        var value_type = MirType.i64()
+        var first_entry = true
         var b_new = self.builder
         val new_res = b_new.emit_call(new_op, [cap_hint], MirType.i64())
         self.builder = b_new
@@ -1002,15 +1000,26 @@ impl MirLowering:
                 val (key_expr, value_expr) = entry
                 val key_local = self.lower_dict_key(key_expr)
                 val value_local = self.lower_expr(value_expr)
+                if first_entry:
+                    key_type = self.local_mir_type_of(key_local) ?? key_type
+                    value_type = self.local_mir_type_of(value_local) ?? value_type
+                    first_entry = false
+                val boxed_value = self.box_runtime_value(value_local)
                 val set_op = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_dict_set"),
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
                 ))
                 var b_set = self.builder
-                b_set.emit_call(set_op, [mir_operand_copy(dict_local), mir_operand_copy(key_local), mir_operand_copy(value_local)], MirType.i64())
+                b_set.emit_call(set_op, [mir_operand_copy(dict_local), mir_operand_copy(key_local), mir_operand_copy(boxed_value)], MirType.i64())
                 self.builder = b_set
-            self.runtime_dict_locals[dict_local.id] = true
-            return dict_local
+            val dict_type = MirType(kind: MirTypeKind.Dict(key_type, value_type))
+            var b_typed = self.builder
+            val typed = b_typed.new_temp(dict_type)
+            b_typed.emit_copy(typed, dict_local)
+            self.builder = b_typed
+            self.runtime_dict_locals[typed.id] = true
+            self.runtime_value_locals[typed.id] = true
+            return typed
         # rt_dict_new always returns a local; fall back to a const 0 handle only
         # if the call somehow produced no result, to keep this total.
         var b_fb = self.builder
@@ -1036,12 +1045,10 @@ impl MirLowering:
             if vt != nil:
                 elem_type = self.lower_type(vt)
 
-        # Lower and coerce operands to the i64 runtime ABI.
+        # Lower and coerce operands to the RuntimeValue array ABI.
         val value_local = self.lower_expr(value)
         val count_local = self.lower_expr(count)
-        var vb = self.builder
-        val value_i64 = vb.emit_cast(mir_operand_copy(value_local), MirType.i64())
-        self.builder = vb
+        val value_i64 = self.box_runtime_value(value_local)
         var cb = self.builder
         val count_i64 = cb.emit_cast(mir_operand_copy(count_local), MirType.i64())
         self.builder = cb
@@ -1084,7 +1091,10 @@ impl MirLowering:
             array_type
         )
         self.builder = b
-        result ?? self.builder.new_temp(array_type)
+        val result_local = result ?? self.builder.new_temp(array_type)
+        self.runtime_array_locals[result_local.id] = true
+        self.runtime_value_locals[result_local.id] = true
+        result_local
 
     me lower_tuple_lit(elements: [HirExpr]) -> LocalId:
         """Lower tuple literal."""
@@ -1139,7 +1149,8 @@ impl MirLowering:
         var elem_operands: [MirOperand] = []
         for elem in elements:
             val elem_local = self.lower_expr(elem)
-            elem_operands = elem_operands.push(mir_operand_copy(elem_local))
+            val boxed = self.box_runtime_value(elem_local)
+            elem_operands = elem_operands.push(mir_operand_copy(boxed))
 
         # Create array from elements
         val array_type = MirType(kind: MirTypeKind.Array(elem_type, elements.len()))

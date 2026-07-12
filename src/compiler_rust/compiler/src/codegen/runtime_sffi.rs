@@ -1442,8 +1442,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cranelift_return_void", &[I64], &[]), // ctx -> ()
     RuntimeFuncSpec::new("rt_cranelift_trap", &[I64, I64], &[]), // ctx, code -> ()
     // Function calls
+    RuntimeFuncSpec::new("rt_cranelift_call_args_clear", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_cranelift_call_arg", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_cranelift_call", &[I64, I64, I64, I64], &[I64]), // ctx, func, args_ptr, args_len -> val
     RuntimeFuncSpec::new("rt_cranelift_call_indirect", &[I64, I64, I64, I64, I64], &[I64]), // ctx, sig, addr, args_ptr, args_len -> val
+    RuntimeFuncSpec::new("rt_cranelift_declare_string_data", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cranelift_data_addr_in_func", &[I64, I64], &[I64]),
     // Type conversion
     RuntimeFuncSpec::new("rt_cranelift_sextend", &[I64, I64, I64], &[I64]), // ctx, to_type, value -> val
     RuntimeFuncSpec::new("rt_cranelift_uextend", &[I64, I64, I64], &[I64]), // ctx, to_type, value -> val
@@ -1452,6 +1456,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cranelift_fcvt_to_uint", &[I64, I64, I64], &[I64]), // ctx, to_type, value -> val
     RuntimeFuncSpec::new("rt_cranelift_fcvt_from_sint", &[I64, I64, I64], &[I64]), // ctx, to_type, value -> val
     RuntimeFuncSpec::new("rt_cranelift_fcvt_from_uint", &[I64, I64, I64], &[I64]), // ctx, to_type, value -> val
+    RuntimeFuncSpec::new("rt_cranelift_fpromote", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cranelift_fdemote", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cranelift_bitcast", &[I64, I64, I64], &[I64]), // ctx, to_type, value -> val
     // Block parameters
     RuntimeFuncSpec::new("rt_cranelift_append_block_param", &[I64, I64, I64], &[I64]), // ctx, block, type -> val

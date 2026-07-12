@@ -20,7 +20,7 @@ use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 
 extern fn rt_env_get(key: text) -> text
-extern fn rt_enum_discriminant(value: HirExprKind) -> i64
+extern fn rt_enum_discriminant(value: Any) -> i64
 
 fn mir_expr_env_get(key: text) -> text:
     rt_env_get(key)
@@ -46,7 +46,14 @@ impl MirLowering:
         false
 
     fn local_is_runtime_dict(local: LocalId) -> bool:
-        self.runtime_dict_locals.has(local.id)
+        if self.runtime_dict_locals.has(local.id):
+            return true
+        val type_ = self.local_mir_type_of(local)
+        if type_ == nil:
+            return false
+        match type_.kind:
+            case MirTypeKind.Dict(_, _): true
+            case _: false
 
     fn mir_type_is_str(t: MirType) -> bool:
         """True for the native string MIR types: the fat-pointer struct
@@ -100,6 +107,124 @@ impl MirLowering:
                     case MirTypeKind.F32 | MirTypeKind.F64: return true
                     case _: return false
         false
+
+    fn local_is_f32(local: LocalId) -> bool:
+        val type_ = self.local_mir_type_of(local)
+        if type_ == nil:
+            return false
+        match type_.kind:
+            case MirTypeKind.F32: true
+            case _: false
+
+    me box_runtime_value(local: LocalId) -> LocalId:
+        if self.nil_locals.has(local.id):
+            var nil_builder = self.builder
+            val tagged_nil = nil_builder.emit_const_int(3)
+            self.builder = nil_builder
+            self.runtime_value_locals[tagged_nil.id] = true
+            return tagged_nil
+        if self.runtime_value_locals.has(local.id) or self.runtime_array_locals.has(local.id) or self.runtime_dict_locals.has(local.id):
+            return local
+        if self.local_is_str(local):
+            val strlen = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_strlen"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var sb = self.builder
+            val len = sb.emit_call(strlen, [mir_operand_copy(local)], MirType.i64())
+            self.builder = sb
+            if val length = len:
+                val string_new = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_string_new"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                var nb = self.builder
+                val tagged = nb.emit_call(string_new, [mir_operand_copy(local), mir_operand_copy(length)], MirType.i64())
+                self.builder = nb
+                if val value = tagged:
+                    self.runtime_value_locals[value.id] = true
+                    return value
+            return local
+        val type_ = self.local_mir_type_of(local)
+        if type_ == nil:
+            return local
+        var b = self.builder
+        val boxed = match type_.kind:
+            case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32 | MirTypeKind.I64 | MirTypeKind.U64 | MirTypeKind.Char:
+                val widened = b.emit_cast(mir_operand_copy(local), MirType.i64())
+                val shift = b.emit_const_int(3)
+                b.emit_binop(MirBinOp.Shl, mir_operand_copy(widened), mir_operand_copy(shift), MirType.i64())
+            case MirTypeKind.Bool:
+                val widened = b.emit_cast(mir_operand_copy(local), MirType.i64())
+                val minus_eight = b.emit_const_int(-8)
+                val nineteen = b.emit_const_int(19)
+                val scaled = b.emit_binop(MirBinOp.Mul, mir_operand_copy(widened), mir_operand_copy(minus_eight), MirType.i64())
+                b.emit_binop(MirBinOp.Add, mir_operand_copy(scaled), mir_operand_copy(nineteen), MirType.i64())
+            case MirTypeKind.F32:
+                val promoted = b.emit_cast(mir_operand_copy(local), MirType.f64())
+                val bits = b.emit_bitcast(mir_operand_copy(promoted), MirType.i64())
+                val mask = b.emit_const_int(-8)
+                val tag = b.emit_const_int(2)
+                val payload = b.emit_binop(MirBinOp.BitAnd, mir_operand_copy(bits), mir_operand_copy(mask), MirType.i64())
+                b.emit_binop(MirBinOp.BitOr, mir_operand_copy(payload), mir_operand_copy(tag), MirType.i64())
+            case MirTypeKind.F64:
+                val bits = b.emit_bitcast(mir_operand_copy(local), MirType.i64())
+                val mask = b.emit_const_int(-8)
+                val tag = b.emit_const_int(2)
+                val payload = b.emit_binop(MirBinOp.BitAnd, mir_operand_copy(bits), mir_operand_copy(mask), MirType.i64())
+                b.emit_binop(MirBinOp.BitOr, mir_operand_copy(payload), mir_operand_copy(tag), MirType.i64())
+            case _:
+                local
+        self.builder = b
+        if boxed.id != local.id:
+            self.runtime_value_locals[boxed.id] = true
+        boxed
+
+    me decode_runtime_value(raw: LocalId, result_type: MirType) -> LocalId:
+        var b = self.builder
+        val disc = rt_enum_discriminant(result_type.kind)
+        val is_integer = disc == rt_enum_discriminant(MirTypeKind.I8) or disc == rt_enum_discriminant(MirTypeKind.U8) or disc == rt_enum_discriminant(MirTypeKind.I16) or disc == rt_enum_discriminant(MirTypeKind.U16) or disc == rt_enum_discriminant(MirTypeKind.I32) or disc == rt_enum_discriminant(MirTypeKind.U32) or disc == rt_enum_discriminant(MirTypeKind.I64) or disc == rt_enum_discriminant(MirTypeKind.U64) or disc == rt_enum_discriminant(MirTypeKind.Char)
+        if is_integer:
+            val shift = b.emit_const_int(3)
+            val value = b.emit_binop(MirBinOp.Shr, mir_operand_copy(raw), mir_operand_copy(shift), MirType.i64())
+            val decoded = b.emit_cast(mir_operand_copy(value), result_type)
+            self.builder = b
+            return decoded
+        if disc == rt_enum_discriminant(MirTypeKind.Bool):
+            val true_value = b.emit_const_int(11)
+            val decoded = b.emit_binop(MirBinOp.Eq, mir_operand_copy(raw), mir_operand_copy(true_value), result_type)
+            self.builder = b
+            return decoded
+        if disc == rt_enum_discriminant(MirTypeKind.F64):
+            val mask = b.emit_const_int(-8)
+            val bits = b.emit_binop(MirBinOp.BitAnd, mir_operand_copy(raw), mir_operand_copy(mask), MirType.i64())
+            val decoded = b.emit_bitcast(mir_operand_copy(bits), result_type)
+            self.builder = b
+            return decoded
+        if disc == rt_enum_discriminant(MirTypeKind.F32):
+            val mask = b.emit_const_int(-8)
+            val bits = b.emit_binop(MirBinOp.BitAnd, mir_operand_copy(raw), mir_operand_copy(mask), MirType.i64())
+            val float64 = b.emit_bitcast(mir_operand_copy(bits), MirType.f64())
+            val decoded = b.emit_cast(mir_operand_copy(float64), result_type)
+            self.builder = b
+            return decoded
+        if disc == rt_enum_discriminant(MirTypeKind.Array(MirType.i64(), 0)) or disc == rt_enum_discriminant(MirTypeKind.Slice(MirType.i64())):
+            val typed = b.new_temp(result_type)
+            b.emit_copy(typed, raw)
+            self.runtime_array_locals[typed.id] = true
+            self.runtime_value_locals[typed.id] = true
+            self.builder = b
+            return typed
+        if disc == rt_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64())):
+            val typed = b.new_temp(result_type)
+            b.emit_copy(typed, raw)
+            self.runtime_dict_locals[typed.id] = true
+            self.runtime_value_locals[typed.id] = true
+            self.builder = b
+            return typed
+        self.runtime_value_locals[raw.id] = true
+        self.builder = b
+        raw
 
     me host_gpu_runtime_func(name: text) -> MirOperand:
         MirOperand(kind: MirOperandKind.Const(
@@ -501,7 +626,8 @@ impl MirLowering:
                 var b = self.builder
                 if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     print "[mir-lower-expr] int:builder"
-                val result = b.emit_const_int(value)
+                val result = b.new_temp(MirType.i64())
+                b.emit_const(result, MirConstValue.Int(value), MirType.i64())
                 if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     print "[mir-lower-expr] int:emitted"
                 self.builder = b
@@ -512,7 +638,15 @@ impl MirLowering:
             case FloatLit(value, _):
 
                 var b = self.builder
-                val result = b.emit_const_float(value)
+                var float_type = MirType.f64()
+                val inferred_type = expr_value.type_
+                if inferred_type != nil:
+                    val lowered_type = self.lower_type(inferred_type)
+                    match lowered_type.kind:
+                        case MirTypeKind.F32: float_type = lowered_type
+                        case _: ()
+                val result = b.new_temp(float_type)
+                b.emit_const(result, MirConstValue.Float(value), float_type)
                 self.builder = b
                 result
 
@@ -560,6 +694,7 @@ impl MirLowering:
                 val nil_result = b_nil_lit.new_temp(MirType.i64())
                 b_nil_lit.emit_const(nil_result, MirConstValue.Int(0), MirType.i64())
                 self.builder = b_nil_lit
+                self.nil_locals[nil_result.id] = true
                 nil_result
 
             case UnitLit:
@@ -811,11 +946,63 @@ impl MirLowering:
                         match op:
                             case Add | Sub | Mul | Div | Mod | Pow:
                                 if self.local_is_float(left_local) or self.local_is_float(right_local):
-                                    result_type = MirType.f64()
+                                    result_type = if self.local_is_f32(left_local) and self.local_is_f32(right_local): MirType(kind: MirTypeKind.F32) else: MirType.f64()
                             case _:
                                 ()
                         var b = self.builder
-                        val binop_result = b.emit_binop(mir_op, mir_operand_copy(left_local), mir_operand_copy(right_local), result_type)
+                        var left_binop = left_local
+                        var right_binop = right_local
+                        var left_f32 = false
+                        var left_f64 = false
+                        var right_f32 = false
+                        var right_f64 = false
+                        var left_i64 = false
+                        var right_i64 = false
+                        var left_narrow_int = false
+                        var right_narrow_int = false
+                        var left_binop_type = MirType.i64()
+                        var right_binop_type = MirType.i64()
+                        if val left_type = self.local_mir_type_of(left_local):
+                            left_binop_type = left_type
+                            match left_type.kind:
+                                case MirTypeKind.F32: left_f32 = true
+                                case MirTypeKind.F64: left_f64 = true
+                                case MirTypeKind.I64 | MirTypeKind.U64: left_i64 = true
+                                case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32: left_narrow_int = true
+                                case _: ()
+                        if val right_type = self.local_mir_type_of(right_local):
+                            right_binop_type = right_type
+                            match right_type.kind:
+                                case MirTypeKind.F32: right_f32 = true
+                                case MirTypeKind.F64: right_f64 = true
+                                case MirTypeKind.I64 | MirTypeKind.U64: right_i64 = true
+                                case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32: right_narrow_int = true
+                                case _: ()
+                        var result_f64 = false
+                        match result_type.kind:
+                            case MirTypeKind.F64: result_f64 = true
+                            case _: ()
+                        if left_f32 and (right_f64 or result_f64):
+                            left_binop = b.emit_cast(mir_operand_copy(left_binop), MirType.f64())
+                        if right_f32 and (left_f64 or result_f64):
+                            right_binop = b.emit_cast(mir_operand_copy(right_binop), MirType.f64())
+                        var comparison = false
+                        match op:
+                            case Eq | NotEq | Lt | LtEq | Gt | GtEq: comparison = true
+                            case _: ()
+                        if comparison and left_narrow_int and right_i64:
+                            right_binop = b.emit_cast(mir_operand_copy(right_binop), left_binop_type)
+                        elif comparison and left_i64 and right_narrow_int:
+                            left_binop = b.emit_cast(mir_operand_copy(left_binop), right_binop_type)
+                        if comparison and self.runtime_value_locals.has(left_binop.id) and self.nil_locals.has(right_binop.id):
+                            self.builder = b
+                            right_binop = self.box_runtime_value(right_binop)
+                            b = self.builder
+                        elif comparison and self.nil_locals.has(left_binop.id) and self.runtime_value_locals.has(right_binop.id):
+                            self.builder = b
+                            left_binop = self.box_runtime_value(left_binop)
+                            b = self.builder
+                        val binop_result = b.emit_binop(mir_op, mir_operand_copy(left_binop), mir_operand_copy(right_binop), result_type)
                         self.builder = b
                         binop_result
 
@@ -824,7 +1011,8 @@ impl MirLowering:
                 val operand_local = self.lower_expr(operand)
                 val mir_op = self.lower_unaryop(op)
                 var b = self.builder
-                val unary_result = b.emit_unary(mir_op, mir_operand_copy(operand_local), MirType.i64())
+                val operand_type = self.local_mir_type_of(operand_local) ?? MirType.i64()
+                val unary_result = b.emit_unary(mir_op, mir_operand_copy(operand_local), operand_type)
                 self.builder = b
                 unary_result
 
@@ -853,6 +1041,19 @@ impl MirLowering:
                 # an i64 element offset and emit invalid IR).
                 if self.local_is_runtime_dict(base_local):
                     val dict_key = self.lower_dict_key(index)
+                    var dict_result_type = MirType.i64()
+                    val dict_mir_type = self.local_mir_type_of(base_local)
+                    if dict_mir_type != nil:
+                        if rt_enum_discriminant(dict_mir_type.kind) == rt_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64())):
+                            match dict_mir_type.kind:
+                                case MirTypeKind.Dict(_, value_type): dict_result_type = value_type
+                                case _: ()
+                    val base_type = base.type_
+                    if dict_mir_type == nil and base_type != nil:
+                        match base_type.kind:
+                            case Dict(_, value_type):
+                                dict_result_type = self.lower_type(value_type)
+                            case _: ()
                     val get_op = MirOperand(kind: MirOperandKind.Const(
                         MirConstValue.Str("rt_dict_get"),
                         MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
@@ -861,17 +1062,33 @@ impl MirLowering:
                     val get_res = b_dget.emit_call(get_op, [mir_operand_copy(base_local), mir_operand_copy(dict_key)], MirType.i64())
                     self.builder = b_dget
                     if val get_local = get_res:
-                        return get_local
+                        return self.decode_runtime_value(get_local, dict_result_type)
                     return base_local
                 val index_local = self.lower_expr(index)
                 if val cli_arg_local = self.try_lower_bootstrap_cli_arg_index(base, index_local):
                     return cli_arg_local
                 self.emit_bounds_check_for_index(base.type_, base_local, index_local)
                 var result_type = MirType.i64()
+                var result_type_from_base = false
+                val base_mir_type = self.local_mir_type_of(base_local)
+                if base_mir_type != nil:
+                    match base_mir_type.kind:
+                        case MirTypeKind.Array(element_type, _):
+                            result_type = element_type
+                            result_type_from_base = true
+                        case MirTypeKind.Slice(element_type):
+                            result_type = element_type
+                            result_type_from_base = true
+                        case MirTypeKind.Dict(_, value_type):
+                            result_type = value_type
+                            result_type_from_base = true
+                        case _: ()
                 if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     result_type = self.bootstrap_text_type()
-                if val expr_type = expr_value.type_:
-                    result_type = self.lower_type(expr_type)
+                elif not result_type_from_base:
+                    if val expr_type = expr_value.type_:
+                        if expr_type != nil:
+                            result_type = self.lower_type(expr_type)
                 val runtime_array = self.local_is_runtime_array(base_local)
                 if runtime_array or (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     val getter = MirOperand(kind: MirOperandKind.Const(
@@ -882,16 +1099,7 @@ impl MirLowering:
                     val getter_result = bg.emit_call(getter, [mir_operand_copy(base_local), mir_operand_copy(index_local)], MirType.i64())
                     self.builder = bg
                     if val getter_local = getter_result:
-                        val result_is_i64 = match result_type.kind:
-                            case MirTypeKind.Int(64, true): true
-                            case _: false
-                        if result_is_i64:
-                            getter_local
-                        else:
-                            var cast_builder = self.builder
-                            val casted = cast_builder.emit_cast(mir_operand_copy(getter_local), result_type)
-                            self.builder = cast_builder
-                            casted
+                        self.decode_runtime_value(getter_local, result_type)
                     else:
                         base_local
                 else:
@@ -917,7 +1125,8 @@ impl MirLowering:
                 if val expr_type = expr_value.type_:
                     result_type = self.lower_type(expr_type)
                 var b_nc = self.builder
-                val zero_local = b_nc.emit_const_int(0)
+                val nil_word = if self.runtime_value_locals.has(left_local.id): 3 else: 0
+                val zero_local = b_nc.emit_const_int(nil_word)
                 val cond_local = b_nc.emit_binop(MirBinOp.Ne, mir_operand_copy(left_local), mir_operand_copy(zero_local), MirType.bool())
                 val then_block = b_nc.new_block(Some("null_coalesce_left"))
                 val else_block = b_nc.new_block(Some("null_coalesce_right"))
@@ -928,7 +1137,11 @@ impl MirLowering:
 
                 var b_left = self.builder
                 b_left.switch_to_block(then_block)
-                b_left.emit_copy(result_local, left_local)
+                self.builder = b_left
+                var left_value = left_local
+                if self.runtime_value_locals.has(left_local.id):
+                    left_value = self.decode_runtime_value(left_local, result_type)
+                b_left = self.builder
                 b_left.terminate_goto(merge_block)
                 self.builder = b_left
 
@@ -936,13 +1149,31 @@ impl MirLowering:
                 b_right.switch_to_block(else_block)
                 self.builder = b_right
                 val right_local = self.lower_expr(right)
+                var right_value = right_local
+                val right_runtime = self.runtime_value_locals.has(right_local.id)
+                if right_runtime:
+                    right_value = self.decode_runtime_value(right_local, result_type)
                 var b_right_done = self.builder
-                b_right_done.emit_copy(result_local, right_local)
                 b_right_done.terminate_goto(merge_block)
                 self.builder = b_right_done
+                if self.runtime_value_locals.has(left_value.id) or self.runtime_value_locals.has(right_value.id):
+                    self.runtime_value_locals[result_local.id] = true
+                if self.runtime_array_locals.has(left_value.id) or self.runtime_array_locals.has(right_value.id):
+                    self.runtime_array_locals[result_local.id] = true
+                if self.runtime_dict_locals.has(left_value.id) or self.runtime_dict_locals.has(right_value.id):
+                    self.runtime_dict_locals[result_local.id] = true
 
                 var b_merge = self.builder
                 b_merge.switch_to_block(merge_block)
+                b_merge.emit(MirInst(
+                    kind: MirInstKind.Intrinsic(Some(result_local), "__simple_ssa_phi", [
+                        MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(then_block.id), MirType.i64())),
+                        mir_operand_copy(left_value),
+                        MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(b_right_done.current_block.id), MirType.i64())),
+                        mir_operand_copy(right_value)
+                    ]),
+                    span: nil
+                ))
                 self.builder = b_merge
                 result_local
 

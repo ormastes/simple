@@ -716,6 +716,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cranelift_bor", cranelift::rt_cranelift_bor);
     insert_simple!("rt_cranelift_brif", cranelift::rt_cranelift_brif);
     insert_simple!("rt_cranelift_bxor", cranelift::rt_cranelift_bxor);
+    insert_simple!("rt_cranelift_call_args_clear", cranelift::rt_cranelift_call_args_clear);
+    insert_simple!("rt_cranelift_call_arg", cranelift::rt_cranelift_call_arg);
     insert_simple!("rt_cranelift_call", cranelift::rt_cranelift_call);
     insert_simple!(
         "rt_cranelift_call_function_ptr",
@@ -746,8 +748,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cranelift_fcvt_to_sint", cranelift::rt_cranelift_fcvt_to_sint);
     insert_simple!("rt_cranelift_fcvt_to_uint", cranelift::rt_cranelift_fcvt_to_uint);
     insert_simple!("rt_cranelift_fdiv", cranelift::rt_cranelift_fdiv);
+    insert_simple!("rt_cranelift_fdemote", cranelift::rt_cranelift_fdemote);
     insert_simple!("rt_cranelift_finalize_module", cranelift::rt_cranelift_finalize_module);
     insert_simple!("rt_cranelift_fmul", cranelift::rt_cranelift_fmul);
+    insert_simple!("rt_cranelift_fpromote", cranelift::rt_cranelift_fpromote);
     insert_simple!("rt_cranelift_free_module", cranelift::rt_cranelift_free_module);
     insert_simple!("rt_cranelift_fsub", cranelift::rt_cranelift_fsub);
     insert_simple!(

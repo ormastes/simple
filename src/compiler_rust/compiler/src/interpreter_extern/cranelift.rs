@@ -637,6 +637,19 @@ pub fn rt_cranelift_trap(args: &[Value]) -> Result<Value, CompileError> {
 // Function Calls
 // ============================================================================
 
+pub fn rt_cranelift_call_args_clear(args: &[Value]) -> Result<Value, CompileError> {
+    if let Some(ctx) = args.first() {
+        cranelift_sffi::rt_cranelift_call_args_clear(value_to_i64(ctx));
+    }
+    Ok(Value::Nil)
+}
+
+pub fn rt_cranelift_call_arg(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 { return Ok(Value::Bool(false)); }
+    Ok(Value::Bool(cranelift_sffi::rt_cranelift_call_arg(
+        value_to_i64(&args[0]), value_to_i64(&args[1]))))
+}
+
 /// Call a function
 /// Args: ctx (i64), func (i64), args_ptr (i64), args_len (i64)
 pub fn rt_cranelift_call(args: &[Value]) -> Result<Value, CompileError> {
@@ -692,6 +705,8 @@ impl_conv_wrapper!(rt_cranelift_fcvt_to_sint, rt_cranelift_fcvt_to_sint);
 impl_conv_wrapper!(rt_cranelift_fcvt_to_uint, rt_cranelift_fcvt_to_uint);
 impl_conv_wrapper!(rt_cranelift_fcvt_from_sint, rt_cranelift_fcvt_from_sint);
 impl_conv_wrapper!(rt_cranelift_fcvt_from_uint, rt_cranelift_fcvt_from_uint);
+impl_conv_wrapper!(rt_cranelift_fpromote, rt_cranelift_fpromote);
+impl_conv_wrapper!(rt_cranelift_fdemote, rt_cranelift_fdemote);
 impl_conv_wrapper!(rt_cranelift_bitcast, rt_cranelift_bitcast);
 
 // ============================================================================

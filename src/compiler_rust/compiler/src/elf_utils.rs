@@ -785,9 +785,17 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_cranelift_return" => crate::codegen::cranelift_sffi::rt_cranelift_return as *const () as usize,
         "rt_cranelift_return_void" => crate::codegen::cranelift_sffi::rt_cranelift_return_void as *const () as usize,
         "rt_cranelift_trap" => crate::codegen::cranelift_sffi::rt_cranelift_trap as *const () as usize,
+        "rt_cranelift_call_args_clear" => crate::codegen::cranelift_sffi::rt_cranelift_call_args_clear as *const () as usize,
+        "rt_cranelift_call_arg" => crate::codegen::cranelift_sffi::rt_cranelift_call_arg as *const () as usize,
         "rt_cranelift_call" => crate::codegen::cranelift_sffi::rt_cranelift_call as *const () as usize,
         "rt_cranelift_call_indirect" => {
             crate::codegen::cranelift_sffi::rt_cranelift_call_indirect as *const () as usize
+        }
+        "rt_cranelift_declare_string_data" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_declare_string_data as *const () as usize
+        }
+        "rt_cranelift_data_addr_in_func" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_data_addr_in_func as *const () as usize
         }
         "rt_cranelift_sextend" => crate::codegen::cranelift_sffi::rt_cranelift_sextend as *const () as usize,
         "rt_cranelift_uextend" => crate::codegen::cranelift_sffi::rt_cranelift_uextend as *const () as usize,
@@ -800,6 +808,8 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_cranelift_fcvt_from_uint" => {
             crate::codegen::cranelift_sffi::rt_cranelift_fcvt_from_uint as *const () as usize
         }
+        "rt_cranelift_fpromote" => crate::codegen::cranelift_sffi::rt_cranelift_fpromote as *const () as usize,
+        "rt_cranelift_fdemote" => crate::codegen::cranelift_sffi::rt_cranelift_fdemote as *const () as usize,
         "rt_cranelift_bitcast" => crate::codegen::cranelift_sffi::rt_cranelift_bitcast as *const () as usize,
         "rt_cranelift_append_block_param" => {
             crate::codegen::cranelift_sffi::rt_cranelift_append_block_param as *const () as usize

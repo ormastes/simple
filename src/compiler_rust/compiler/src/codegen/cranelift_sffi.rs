@@ -83,6 +83,7 @@ struct ActiveBuilder {
     values: HashMap<i64, Value>,
     stack_slots: HashMap<i64, StackSlot>,
     func_refs: HashMap<i64, FuncRef>,
+    call_args: Vec<Value>,
     next_block_id: i64,
     next_value_id: i64,
     module_handle: i64,
@@ -651,6 +652,7 @@ pub unsafe extern "C" fn rt_cranelift_begin_function(module: i64, name_ptr: i64,
             values: HashMap::new(),
             stack_slots: HashMap::new(),
             func_refs: HashMap::new(),
+            call_args: Vec::new(),
             next_block_id: 1,
             next_value_id: 1,
             module_handle: module,
@@ -1071,25 +1073,48 @@ pub unsafe extern "C" fn rt_cranelift_trap(ctx: i64, code: i64) {
 // Function Call SFFI
 // ============================================================================
 
+#[no_mangle]
+pub extern "C" fn rt_cranelift_call_args_clear(ctx: i64) {
+    if let Some(ab) = ACTIVE_BUILDERS.lock().unwrap().get_mut(&ctx) {
+        ab.call_args.clear();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_cranelift_call_arg(ctx: i64, value_handle: i64) -> bool {
+    let mut active = ACTIVE_BUILDERS.lock().unwrap();
+    let Some(ab) = active.get_mut(&ctx) else { return false };
+    let Some(&value) = ab.values.get(&value_handle) else { return false };
+    ab.call_args.push(value);
+    true
+}
+
 /// Direct function call via FuncRef handle (from import_function).
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_call(ctx: i64, func_ref_handle: i64, args_ptr: i64, args_len: i64) -> i64 {
     let mut active = ACTIVE_BUILDERS.lock().unwrap();
     let Some(ab) = active.get_mut(&ctx) else { return 0 };
-    let Some(builder) = ab.builder.as_mut() else { return 0 };
     let Some(&func_ref) = ab.func_refs.get(&func_ref_handle) else {
+        eprintln!("cranelift: call missing func-ref handle {func_ref_handle}");
         return 0;
     };
 
-    // Convert arg handles to Values
-    let mut args = Vec::new();
+    let mut args = if args_ptr == 0 {
+        std::mem::take(&mut ab.call_args)
+    } else {
+        Vec::new()
+    };
     if args_ptr != 0 && args_len > 0 {
         let arg_handles = std::slice::from_raw_parts(args_ptr as *const i64, args_len as usize);
         for &h in arg_handles {
-            let Some(&val) = ab.values.get(&h) else { return 0 };
+            let Some(&val) = ab.values.get(&h) else {
+                eprintln!("cranelift: call missing value handle {h}");
+                return 0;
+            };
             args.push(val);
         }
     }
+    let Some(builder) = ab.builder.as_mut() else { return 0 };
 
     let inst = builder.ins().call(func_ref, &args);
     let results = builder.inst_results(inst);
@@ -1124,14 +1149,14 @@ pub unsafe extern "C" fn rt_cranelift_call_indirect(
 
     let mut active = ACTIVE_BUILDERS.lock().unwrap();
     let Some(ab) = active.get_mut(&ctx) else { return 0 };
-    let Some(builder) = ab.builder.as_mut() else { return 0 };
     let Some(&addr_val) = ab.values.get(&addr) else {
         return 0;
     };
-
-    let sig_ref = builder.import_signature(signature);
-
-    let mut args = Vec::new();
+    let mut args = if args_ptr == 0 {
+        std::mem::take(&mut ab.call_args)
+    } else {
+        Vec::new()
+    };
     if args_ptr != 0 && args_len > 0 {
         let arg_handles = std::slice::from_raw_parts(args_ptr as *const i64, args_len as usize);
         for &h in arg_handles {
@@ -1139,6 +1164,8 @@ pub unsafe extern "C" fn rt_cranelift_call_indirect(
             args.push(val);
         }
     }
+    let Some(builder) = ab.builder.as_mut() else { return 0 };
+    let sig_ref = builder.import_signature(signature);
 
     let inst = builder.ins().call_indirect(sig_ref, addr_val, &args);
     let results = builder.inst_results(inst);
@@ -1186,6 +1213,8 @@ impl_conv!(rt_cranelift_fcvt_to_sint, fcvt_to_sint);
 impl_conv!(rt_cranelift_fcvt_to_uint, fcvt_to_uint);
 impl_conv!(rt_cranelift_fcvt_from_sint, fcvt_from_sint);
 impl_conv!(rt_cranelift_fcvt_from_uint, fcvt_from_uint);
+impl_conv!(rt_cranelift_fpromote, fpromote);
+impl_conv!(rt_cranelift_fdemote, fdemote);
 
 /// Bitcast (reinterpret bits).
 #[no_mangle]
@@ -1475,6 +1504,8 @@ pub fn register_cranelift_sffi_functions(builder: &mut JITBuilder) {
     builder.symbol("rt_cranelift_trap", rt_cranelift_trap as *const u8);
 
     // Function calls (bare names)
+    builder.symbol("rt_cranelift_call_args_clear", rt_cranelift_call_args_clear as *const u8);
+    builder.symbol("rt_cranelift_call_arg", rt_cranelift_call_arg as *const u8);
     builder.symbol("cranelift_call", rt_cranelift_call as *const u8);
     builder.symbol("cranelift_call_indirect", rt_cranelift_call_indirect as *const u8);
 
@@ -1486,6 +1517,8 @@ pub fn register_cranelift_sffi_functions(builder: &mut JITBuilder) {
     builder.symbol("rt_cranelift_fcvt_to_uint", rt_cranelift_fcvt_to_uint as *const u8);
     builder.symbol("rt_cranelift_fcvt_from_sint", rt_cranelift_fcvt_from_sint as *const u8);
     builder.symbol("rt_cranelift_fcvt_from_uint", rt_cranelift_fcvt_from_uint as *const u8);
+    builder.symbol("rt_cranelift_fpromote", rt_cranelift_fpromote as *const u8);
+    builder.symbol("rt_cranelift_fdemote", rt_cranelift_fdemote as *const u8);
     builder.symbol("cranelift_bitcast", rt_cranelift_bitcast as *const u8);
 
     // Block parameters (rt_ for append_block_param, bare for block_param)

@@ -3291,6 +3291,15 @@ pub extern "C" fn rt_contains(collection: RuntimeValue, value: RuntimeValue) -> 
     }
 }
 
+#[no_mangle]
+pub extern "C" fn __simple_intrinsic_bounds_check(index: i64, len: i64) -> i64 {
+    if index < 0 || index >= len {
+        eprintln!("PANIC: bounds_check intrinsic index={index} len={len}");
+        std::process::exit(1);
+    }
+    0
+}
+
 #[cfg(test)]
 #[path = "collection_tests.rs"]
 mod tests;
