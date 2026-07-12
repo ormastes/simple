@@ -173,6 +173,10 @@ canonical Vulkan GLSL 450 source for GLSL-to-SPIR-V compilation; Vulkan is not
 a `PortableComputeTarget`, and source emission is not compilation or execution.
 The Vulkan shader's 15-input ABI is two storage-buffer bindings plus the exact
 contiguous 13-field parameter block, and its entry is `main`.
+`vulkan_font_atlas_compile_plan` records canonical source and external
+GLSL-to-SPIR-V metadata; its evidence contract fails closed on missing bytes,
+bad magic, or missing `main`. A valid synthetic contract is not compilation or
+execution, and no compiled artifact exists absent real external capture.
 Native-target signatures include explicit atlas/destination element counts and
 guard computed indices; WGSL uses `arrayLength` for the same fail-closed bound.
 Portable backend planning emits a separate optimization artifact and font

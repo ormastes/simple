@@ -493,6 +493,10 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   submission, readback, or execution is claimed. The focused scenario checks
   the exact 15-input ABI: two buffer bindings and the contiguous 13-field
   parameter block.
+- Vulkan font artifact plan: the dedicated plan preserves canonical GLSL,
+  `main`, tool/format metadata, and `.comp`/`.spv` suffixes. Synthetic evidence
+  covers pass plus every fail-closed reason, but contract validity is not
+  compilation/execution and no compiled artifact exists without real capture.
 - skill freshness: the guide now names `$sp_dev` as process owner for bundled
   fonts, shaping, glyph material, and GPU text; no source, test, or manual was
   regenerated for this documentation-only slice.
