@@ -27,8 +27,8 @@ use std.common.science_math.perf_sugar.{alloc_i64}
 use common.ui.widget.{UITree, WidgetNode, WidgetKind}
 use common.ui.wm_app_process_contract.{WM_APP_MODE_ENV, WM_BRIDGE_FILE_ENV, WM_FRAME_FILE_ENV, WM_EVENT_FILE_ENV, WM_FRAME_SEQ_FILE_ENV, WM_CLIENT_HOLD_ENV, WIDGET_SHOWCASE_APP_SOURCE, wm_app_mode_is_client, wm_widget_showcase_bridge_request_sized, wm_fs_bridge_encode, wm_widget_showcase_event_path, wm_widget_showcase_frame_seq_path, wm_fs_app_event_seq_path, wm_fs_app_event_decode}
 
-val W: i32 = 520
-val H: i32 = 660
+val W: i32 = 3840
+val H: i32 = 2160
 
 # Palette
 val BG: u32 = 0xFF14141Cu32
@@ -98,6 +98,38 @@ fn clamp_i32(v: i32, lo: i32, hi: i32) -> i32:
 fn hit_rect(px: i32, py: i32, x: i32, y: i32, w: i32, h: i32) -> bool:
     px >= x and px < x + w and py >= y and py < y + h
 
+# Density scale helpers: `s` is a permille scale factor (1000 = 1.0x = the
+# historical 96-DPI baseline design). sc() scales a geometry value; sc1()
+# additionally floors at 1 so strokes/radii/fonts never vanish at low DPI.
+fn sc(v: i32, s: i32) -> i32:
+    v * s / 1000
+
+fn sc1(v: i32, s: i32) -> i32:
+    val r = sc(v, s)
+    if r < 1: 1 else: r
+
+# SHOWCASE_DPI (default 300): density used to size widget chrome when the
+# grid is rebalanced for a wide/tall canvas (see grid_params). 96 DPI == 1x.
+fn showcase_dpi() -> i32:
+    val raw = env_get("SHOWCASE_DPI") ?? ""
+    val v = (raw.trim().parse_i64() ?? 300i64).to_i32()
+    if v < 1: 96 else: v
+
+# SHOWCASE_RESOLUTION: "4k" (default), "8k", or an explicit "WxH" token.
+fn showcase_resolution_wh() -> (i32, i32):
+    val raw = (env_get("SHOWCASE_RESOLUTION") ?? "").trim().to_lower()
+    if raw == "" or raw == "4k":
+        return (W, H)
+    if raw == "8k":
+        return (7680, 4320)
+    val parts = raw.split("x")
+    if parts.len() == 2:
+        val pw = (parts[0].parse_i64() ?? 0i64).to_i32()
+        val ph = (parts[1].parse_i64() ?? 0i64).to_i32()
+        if pw > 0 and ph > 0:
+            return (pw, ph)
+    (W, H)
+
 fn slider_value_from_x(local_x: i32) -> i32:
     val slider_x = 268
     val rel = clamp_i32(local_x - slider_x, 0, 130)
@@ -152,165 +184,165 @@ fn showcase_event_cell(ev: text) -> i32:
     -1
 
 # section label above each widget cell
-fn label(b: Engine2D, x: i32, y: i32, name: text):
-    b.draw_text(x, y, name, MUTED, 6)
+fn label(b: Engine2D, x: i32, y: i32, name: text, s: i32):
+    b.draw_text(x, y, name, MUTED, sc1(6, s))
 
-fn w_button(b: Engine2D, x: i32, y: i32, st: ShowcaseState):
-    label(b, x, y, "Button")
+fn w_button(b: Engine2D, x: i32, y: i32, st: ShowcaseState, s: i32):
+    label(b, x, y, "Button", s)
     if st.button_pressed:
-        b.draw_rect_filled(x, y + 10, 60, 18, ACCENT_D)
-        b.draw_rect(x, y + 10, 60, 18, WHITE)
-        b.draw_text(x + 16, y + 15, "Run", AMBER, 7)
+        b.draw_rect_filled(x, y + sc(10, s), sc(60, s), sc(18, s), ACCENT_D)
+        b.draw_rect(x, y + sc(10, s), sc(60, s), sc(18, s), WHITE)
+        b.draw_text(x + sc(16, s), y + sc(15, s), "Run", AMBER, sc1(7, s))
     else:
-        b.draw_rect_filled(x, y + 10, 60, 18, ACCENT)
-        b.draw_rect(x, y + 10, 60, 18, ACCENT_D)
-        b.draw_text(x + 16, y + 15, "Run", WHITE, 7)
+        b.draw_rect_filled(x, y + sc(10, s), sc(60, s), sc(18, s), ACCENT)
+        b.draw_rect(x, y + sc(10, s), sc(60, s), sc(18, s), ACCENT_D)
+        b.draw_text(x + sc(16, s), y + sc(15, s), "Run", WHITE, sc1(7, s))
     # secondary (outline)
-    b.draw_rect(x + 70, y + 10, 60, 18, MUTED)
-    b.draw_text(x + 82, y + 15, "Cancel", FG, 7)
-    b.draw_text(x + 18, y + 33, "Clicks {st.button_count}", MUTED, 6)
+    b.draw_rect(x + sc(70, s), y + sc(10, s), sc(60, s), sc(18, s), MUTED)
+    b.draw_text(x + sc(82, s), y + sc(15, s), "Cancel", FG, sc1(7, s))
+    b.draw_text(x + sc(18, s), y + sc(33, s), "Clicks {st.button_count}", MUTED, sc1(6, s))
 
-fn w_checkbox(b: Engine2D, x: i32, y: i32, st: ShowcaseState):
-    label(b, x, y, "Checkbox / Radio")
-    b.draw_rect(x, y + 12, 13, 13, MUTED)
+fn w_checkbox(b: Engine2D, x: i32, y: i32, st: ShowcaseState, s: i32):
+    label(b, x, y, "Checkbox / Radio", s)
+    b.draw_rect(x, y + sc(12, s), sc(13, s), sc(13, s), MUTED)
     if st.checkbox_on:
-        b.draw_rect_filled(x + 3, y + 15, 7, 7, GREEN)
-    b.draw_text(x + 18, y + 14, "On", FG, 7)
-    b.draw_rect(x + 50, y + 12, 13, 13, MUTED)
+        b.draw_rect_filled(x + sc(3, s), y + sc(15, s), sc(7, s), sc(7, s), GREEN)
+    b.draw_text(x + sc(18, s), y + sc(14, s), "On", FG, sc1(7, s))
+    b.draw_rect(x + sc(50, s), y + sc(12, s), sc(13, s), sc(13, s), MUTED)
     if not st.checkbox_on:
-        b.draw_rect_filled(x + 53, y + 15, 7, 7, AMBER)
-    b.draw_text(x + 68, y + 14, "Off", FG, 7)
+        b.draw_rect_filled(x + sc(53, s), y + sc(15, s), sc(7, s), sc(7, s), AMBER)
+    b.draw_text(x + sc(68, s), y + sc(14, s), "Off", FG, sc1(7, s))
     # radio
-    b.draw_circle(x + 100, y + 18, 7, MUTED)
-    b.draw_circle_filled(x + 100, y + 18, 3, ACCENT)
-    b.draw_circle(x + 124, y + 18, 7, MUTED)
+    b.draw_circle(x + sc(100, s), y + sc(18, s), sc1(7, s), MUTED)
+    b.draw_circle_filled(x + sc(100, s), y + sc(18, s), sc1(3, s), ACCENT)
+    b.draw_circle(x + sc(124, s), y + sc(18, s), sc1(7, s), MUTED)
 
-fn w_switch(b: Engine2D, x: i32, y: i32, on: bool):
-    label(b, x, y, "Toggle switch")
+fn w_switch(b: Engine2D, x: i32, y: i32, on: bool, s: i32):
+    label(b, x, y, "Toggle switch", s)
     # first switch reflects state
     if on:
-        b.draw_rect_filled(x, y + 12, 34, 16, GREEN)
-        b.draw_circle_filled(x + 26, y + 20, 6, WHITE)
+        b.draw_rect_filled(x, y + sc(12, s), sc(34, s), sc(16, s), GREEN)
+        b.draw_circle_filled(x + sc(26, s), y + sc(20, s), sc1(6, s), WHITE)
     else:
-        b.draw_rect_filled(x, y + 12, 34, 16, TRACK)
-        b.draw_circle_filled(x + 8, y + 20, 6, MUTED)
+        b.draw_rect_filled(x, y + sc(12, s), sc(34, s), sc(16, s), TRACK)
+        b.draw_circle_filled(x + sc(8, s), y + sc(20, s), sc1(6, s), MUTED)
     # second stays off (static reference)
-    b.draw_rect_filled(x + 44, y + 12, 34, 16, TRACK)
-    b.draw_circle_filled(x + 52, y + 20, 6, MUTED)
+    b.draw_rect_filled(x + sc(44, s), y + sc(12, s), sc(34, s), sc(16, s), TRACK)
+    b.draw_circle_filled(x + sc(52, s), y + sc(20, s), sc1(6, s), MUTED)
 
-fn w_input(b: Engine2D, x: i32, y: i32):
-    label(b, x, y, "Text input")
-    b.draw_rect(x, y + 11, 150, 18, MUTED)
-    b.draw_text(x + 5, y + 16, "name...", MUTED, 7)
+fn w_input(b: Engine2D, x: i32, y: i32, s: i32):
+    label(b, x, y, "Text input", s)
+    b.draw_rect(x, y + sc(11, s), sc(150, s), sc(18, s), MUTED)
+    b.draw_text(x + sc(5, s), y + sc(16, s), "name...", MUTED, sc1(7, s))
 
-fn w_dropdown(b: Engine2D, x: i32, y: i32):
-    label(b, x, y, "Dropdown")
-    b.draw_rect(x, y + 11, 130, 18, MUTED)
-    b.draw_text(x + 5, y + 16, "Option A", FG, 7)
-    b.draw_triangle_filled(x + 116, y + 16, x + 124, y + 16, x + 120, y + 22, FG)
+fn w_dropdown(b: Engine2D, x: i32, y: i32, s: i32):
+    label(b, x, y, "Dropdown", s)
+    b.draw_rect(x, y + sc(11, s), sc(130, s), sc(18, s), MUTED)
+    b.draw_text(x + sc(5, s), y + sc(16, s), "Option A", FG, sc1(7, s))
+    b.draw_triangle_filled(x + sc(116, s), y + sc(16, s), x + sc(124, s), y + sc(16, s), x + sc(120, s), y + sc(22, s), FG)
 
-fn w_slider(b: Engine2D, x: i32, y: i32, value: i32):
-    label(b, x, y, "Slider")
-    val fill = 130 * value / 100
-    b.draw_rect_filled(x, y + 18, 130, 4, TRACK)
-    b.draw_rect_filled(x, y + 18, fill, 4, ACCENT)
-    b.draw_circle_filled(x + fill, y + 20, 6, WHITE)
+fn w_slider(b: Engine2D, x: i32, y: i32, value: i32, s: i32):
+    label(b, x, y, "Slider", s)
+    val fill = sc(130 * value / 100, s)
+    b.draw_rect_filled(x, y + sc(18, s), sc(130, s), sc(4, s), TRACK)
+    b.draw_rect_filled(x, y + sc(18, s), fill, sc(4, s), ACCENT)
+    b.draw_circle_filled(x + fill, y + sc(20, s), sc1(6, s), WHITE)
 
-fn w_progress(b: Engine2D, x: i32, y: i32, pct: i32):
-    label(b, x, y, "Progress")
-    b.draw_rect_filled(x, y + 14, 130, 10, TRACK)
-    b.draw_rect_filled(x, y + 14, 130 * pct / 100, 10, ACCENT)
-    b.draw_text(x + 136, y + 14, "{pct}%", MUTED, 6)
+fn w_progress(b: Engine2D, x: i32, y: i32, pct: i32, s: i32):
+    label(b, x, y, "Progress", s)
+    b.draw_rect_filled(x, y + sc(14, s), sc(130, s), sc(10, s), TRACK)
+    b.draw_rect_filled(x, y + sc(14, s), sc(130 * pct / 100, s), sc(10, s), ACCENT)
+    b.draw_text(x + sc(136, s), y + sc(14, s), "{pct}%", MUTED, sc1(6, s))
 
-fn w_search(b: Engine2D, x: i32, y: i32):
-    label(b, x, y, "Search bar")
-    b.draw_rect(x, y + 11, 150, 18, MUTED)
-    b.draw_circle(x + 12, y + 19, 4, MUTED)
-    b.draw_line(x + 15, y + 22, x + 19, y + 26, MUTED, 1)
-    b.draw_text(x + 24, y + 16, "Search...", MUTED, 7)
+fn w_search(b: Engine2D, x: i32, y: i32, s: i32):
+    label(b, x, y, "Search bar", s)
+    b.draw_rect(x, y + sc(11, s), sc(150, s), sc(18, s), MUTED)
+    b.draw_circle(x + sc(12, s), y + sc(19, s), sc1(4, s), MUTED)
+    b.draw_line(x + sc(15, s), y + sc(22, s), x + sc(19, s), y + sc(26, s), MUTED, sc1(1, s))
+    b.draw_text(x + sc(24, s), y + sc(16, s), "Search...", MUTED, sc1(7, s))
 
-fn w_tabs(b: Engine2D, x: i32, y: i32):
-    label(b, x, y, "Tabs")
-    b.draw_text(x + 4, y + 14, "Home", FG, 7)
-    b.draw_text(x + 44, y + 14, "Edit", MUTED, 7)
-    b.draw_text(x + 80, y + 14, "View", MUTED, 7)
-    b.draw_rect_filled(x + 2, y + 26, 32, 2, ACCENT)
-    b.draw_line(x, y + 27, x + 150, y + 27, LINE, 1)
+fn w_tabs(b: Engine2D, x: i32, y: i32, s: i32):
+    label(b, x, y, "Tabs", s)
+    b.draw_text(x + sc(4, s), y + sc(14, s), "Home", FG, sc1(7, s))
+    b.draw_text(x + sc(44, s), y + sc(14, s), "Edit", MUTED, sc1(7, s))
+    b.draw_text(x + sc(80, s), y + sc(14, s), "View", MUTED, sc1(7, s))
+    b.draw_rect_filled(x + sc(2, s), y + sc(26, s), sc(32, s), sc(2, s), ACCENT)
+    b.draw_line(x, y + sc(27, s), x + sc(150, s), y + sc(27, s), LINE, sc1(1, s))
 
-fn w_segmented(b: Engine2D, x: i32, y: i32):
-    label(b, x, y, "Segmented")
-    b.draw_rect(x, y + 11, 120, 18, MUTED)
-    b.draw_rect_filled(x + 2, y + 13, 38, 14, ACCENT)
-    b.draw_text(x + 8, y + 16, "Day", WHITE, 6)
-    b.draw_text(x + 50, y + 16, "Week", MUTED, 6)
-    b.draw_text(x + 90, y + 16, "Mo", MUTED, 6)
+fn w_segmented(b: Engine2D, x: i32, y: i32, s: i32):
+    label(b, x, y, "Segmented", s)
+    b.draw_rect(x, y + sc(11, s), sc(120, s), sc(18, s), MUTED)
+    b.draw_rect_filled(x + sc(2, s), y + sc(13, s), sc(38, s), sc(14, s), ACCENT)
+    b.draw_text(x + sc(8, s), y + sc(16, s), "Day", WHITE, sc1(6, s))
+    b.draw_text(x + sc(50, s), y + sc(16, s), "Week", MUTED, sc1(6, s))
+    b.draw_text(x + sc(90, s), y + sc(16, s), "Mo", MUTED, sc1(6, s))
 
-fn w_list(b: Engine2D, x: i32, y: i32):
-    label(b, x, y, "List")
-    b.draw_text(x + 2, y + 14, "- First item", FG, 7)
-    b.draw_text(x + 2, y + 26, "- Second item", FG, 7)
-    b.draw_text(x + 2, y + 38, "- Third item", MUTED, 7)
+fn w_list(b: Engine2D, x: i32, y: i32, s: i32):
+    label(b, x, y, "List", s)
+    b.draw_text(x + sc(2, s), y + sc(14, s), "- First item", FG, sc1(7, s))
+    b.draw_text(x + sc(2, s), y + sc(26, s), "- Second item", FG, sc1(7, s))
+    b.draw_text(x + sc(2, s), y + sc(38, s), "- Third item", MUTED, sc1(7, s))
 
-fn w_tree(b: Engine2D, x: i32, y: i32):
-    label(b, x, y, "Tree")
-    b.draw_triangle_filled(x + 2, y + 12, x + 2, y + 20, x + 8, y + 16, FG)
-    b.draw_text(x + 12, y + 13, "src", FG, 7)
-    b.draw_text(x + 22, y + 26, "main.spl", MUTED, 7)
-    b.draw_text(x + 22, y + 38, "lib.spl", MUTED, 7)
+fn w_tree(b: Engine2D, x: i32, y: i32, s: i32):
+    label(b, x, y, "Tree", s)
+    b.draw_triangle_filled(x + sc(2, s), y + sc(12, s), x + sc(2, s), y + sc(20, s), x + sc(8, s), y + sc(16, s), FG)
+    b.draw_text(x + sc(12, s), y + sc(13, s), "src", FG, sc1(7, s))
+    b.draw_text(x + sc(22, s), y + sc(26, s), "main.spl", MUTED, sc1(7, s))
+    b.draw_text(x + sc(22, s), y + sc(38, s), "lib.spl", MUTED, sc1(7, s))
 
-fn w_table(b: Engine2D, x: i32, y: i32):
-    label(b, x, y, "Table")
-    b.draw_rect_filled(x, y + 11, 150, 12, TRACK)
-    b.draw_text(x + 4, y + 13, "Name", FG, 6)
-    b.draw_text(x + 80, y + 13, "Size", FG, 6)
-    b.draw_text(x + 4, y + 27, "a.spl", MUTED, 6)
-    b.draw_text(x + 80, y + 27, "1.2k", MUTED, 6)
-    b.draw_text(x + 4, y + 39, "b.spl", MUTED, 6)
-    b.draw_text(x + 80, y + 39, "3.4k", MUTED, 6)
-    b.draw_line(x, y + 23, x + 150, y + 23, LINE, 1)
-    b.draw_line(x + 74, y + 11, x + 74, y + 48, LINE, 1)
+fn w_table(b: Engine2D, x: i32, y: i32, s: i32):
+    label(b, x, y, "Table", s)
+    b.draw_rect_filled(x, y + sc(11, s), sc(150, s), sc(12, s), TRACK)
+    b.draw_text(x + sc(4, s), y + sc(13, s), "Name", FG, sc1(6, s))
+    b.draw_text(x + sc(80, s), y + sc(13, s), "Size", FG, sc1(6, s))
+    b.draw_text(x + sc(4, s), y + sc(27, s), "a.spl", MUTED, sc1(6, s))
+    b.draw_text(x + sc(80, s), y + sc(27, s), "1.2k", MUTED, sc1(6, s))
+    b.draw_text(x + sc(4, s), y + sc(39, s), "b.spl", MUTED, sc1(6, s))
+    b.draw_text(x + sc(80, s), y + sc(39, s), "3.4k", MUTED, sc1(6, s))
+    b.draw_line(x, y + sc(23, s), x + sc(150, s), y + sc(23, s), LINE, sc1(1, s))
+    b.draw_line(x + sc(74, s), y + sc(11, s), x + sc(74, s), y + sc(48, s), LINE, sc1(1, s))
 
-fn w_card(b: Engine2D, x: i32, y: i32):
-    label(b, x, y, "Card")
-    b.draw_rect_filled(x + 3, y + 14, 130, 44, 0xFF0C0C12u32)
-    b.draw_rect(x, y + 11, 130, 44, LINE)
-    b.draw_rect_filled(x + 1, y + 12, 128, 42, CARD)
-    b.draw_text(x + 8, y + 18, "Title", FG, 7)
-    b.draw_text(x + 8, y + 32, "Body text here", MUTED, 6)
+fn w_card(b: Engine2D, x: i32, y: i32, s: i32):
+    label(b, x, y, "Card", s)
+    b.draw_rect_filled(x + sc(3, s), y + sc(14, s), sc(130, s), sc(44, s), 0xFF0C0C12u32)
+    b.draw_rect(x, y + sc(11, s), sc(130, s), sc(44, s), LINE)
+    b.draw_rect_filled(x + sc(1, s), y + sc(12, s), sc(128, s), sc(42, s), CARD)
+    b.draw_text(x + sc(8, s), y + sc(18, s), "Title", FG, sc1(7, s))
+    b.draw_text(x + sc(8, s), y + sc(32, s), "Body text here", MUTED, sc1(6, s))
 
-fn w_chip(b: Engine2D, x: i32, y: i32):
-    label(b, x, y, "Badge / Chip")
-    b.draw_rect_filled(x, y + 12, 40, 14, GREEN)
-    b.draw_text(x + 8, y + 14, "New", WHITE, 6)
-    b.draw_rect_filled(x + 48, y + 12, 44, 14, AMBER)
-    b.draw_text(x + 55, y + 14, "Beta", 0xFF1A1A1Au32, 6)
+fn w_chip(b: Engine2D, x: i32, y: i32, s: i32):
+    label(b, x, y, "Badge / Chip", s)
+    b.draw_rect_filled(x, y + sc(12, s), sc(40, s), sc(14, s), GREEN)
+    b.draw_text(x + sc(8, s), y + sc(14, s), "New", WHITE, sc1(6, s))
+    b.draw_rect_filled(x + sc(48, s), y + sc(12, s), sc(44, s), sc(14, s), AMBER)
+    b.draw_text(x + sc(55, s), y + sc(14, s), "Beta", 0xFF1A1A1Au32, sc1(6, s))
 
-fn w_tooltip(b: Engine2D, x: i32, y: i32):
-    label(b, x, y, "Tooltip")
-    b.draw_rect_filled(x, y + 12, 88, 18, 0xFF2D2D3Au32)
-    b.draw_text(x + 6, y + 17, "Helpful hint", FG, 6)
-    b.draw_triangle_filled(x + 12, y + 30, x + 22, y + 30, x + 17, y + 35, 0xFF2D2D3Au32)
+fn w_tooltip(b: Engine2D, x: i32, y: i32, s: i32):
+    label(b, x, y, "Tooltip", s)
+    b.draw_rect_filled(x, y + sc(12, s), sc(88, s), sc(18, s), 0xFF2D2D3Au32)
+    b.draw_text(x + sc(6, s), y + sc(17, s), "Helpful hint", FG, sc1(6, s))
+    b.draw_triangle_filled(x + sc(12, s), y + sc(30, s), x + sc(22, s), y + sc(30, s), x + sc(17, s), y + sc(35, s), 0xFF2D2D3Au32)
 
-fn w_dialog(b: Engine2D, x: i32, y: i32):
-    label(b, x, y, "Dialog / Modal")
-    b.draw_rect(x, y + 11, 150, 50, LINE)
-    b.draw_rect_filled(x + 1, y + 12, 148, 48, CARD)
-    b.draw_text(x + 8, y + 17, "Delete file?", FG, 7)
-    b.draw_text(x + 8, y + 30, "This cannot be undone.", MUTED, 6)
-    b.draw_rect_filled(x + 60, y + 42, 36, 14, TRACK)
-    b.draw_text(x + 66, y + 45, "No", FG, 6)
-    b.draw_rect_filled(x + 102, y + 42, 40, 14, RED)
-    b.draw_text(x + 108, y + 45, "Yes", WHITE, 6)
+fn w_dialog(b: Engine2D, x: i32, y: i32, s: i32):
+    label(b, x, y, "Dialog / Modal", s)
+    b.draw_rect(x, y + sc(11, s), sc(150, s), sc(50, s), LINE)
+    b.draw_rect_filled(x + sc(1, s), y + sc(12, s), sc(148, s), sc(48, s), CARD)
+    b.draw_text(x + sc(8, s), y + sc(17, s), "Delete file?", FG, sc1(7, s))
+    b.draw_text(x + sc(8, s), y + sc(30, s), "This cannot be undone.", MUTED, sc1(6, s))
+    b.draw_rect_filled(x + sc(60, s), y + sc(42, s), sc(36, s), sc(14, s), TRACK)
+    b.draw_text(x + sc(66, s), y + sc(45, s), "No", FG, sc1(6, s))
+    b.draw_rect_filled(x + sc(102, s), y + sc(42, s), sc(40, s), sc(14, s), RED)
+    b.draw_text(x + sc(108, s), y + sc(45, s), "Yes", WHITE, sc1(6, s))
 
-fn w_scrollbar(b: Engine2D, x: i32, y: i32):
-    label(b, x, y, "Scrollbar")
-    b.draw_rect_filled(x, y + 11, 8, 60, TRACK)
-    b.draw_rect_filled(x, y + 14, 8, 26, MUTED)
+fn w_scrollbar(b: Engine2D, x: i32, y: i32, s: i32):
+    label(b, x, y, "Scrollbar", s)
+    b.draw_rect_filled(x, y + sc(11, s), sc(8, s), sc(60, s), TRACK)
+    b.draw_rect_filled(x, y + sc(14, s), sc(8, s), sc(26, s), MUTED)
 
-fn w_avatar(b: Engine2D, x: i32, y: i32):
-    label(b, x, y, "Avatar")
-    b.draw_circle_filled(x + 16, y + 26, 14, ACCENT)
-    b.draw_text(x + 11, y + 22, "JS", WHITE, 7)
+fn w_avatar(b: Engine2D, x: i32, y: i32, s: i32):
+    label(b, x, y, "Avatar", s)
+    b.draw_circle_filled(x + sc(16, s), y + sc(26, s), sc1(14, s), ACCENT)
+    b.draw_text(x + sc(11, s), y + sc(22, s), "JS", WHITE, sc1(7, s))
 
 # Column-major cell position: cells flow down a column, then wrap to the
 # next. Keeps every widget inside the viewport at low resolutions (G1.3).
@@ -333,8 +365,16 @@ fn wm_client_log(msg: text):
     if wm_client_log_enabled():
         print msg
 
-# (rows, col_w) for a given viewport — must match draw_frame's grid.
-fn grid_params(w: i32, h: i32) -> (i32, i32):
+# (rows, col_w, step, header, s) for a given viewport — must match
+# draw_frame's grid. `s` is the permille density scale (1000 = 1.0x) applied
+# to widget chrome via sc()/sc1(). Baseline (narrow/short) viewports keep the
+# exact historical rows-first formula byte-for-byte at s=1000 (low-res gates
+# + interaction hit-tests depend on it). Wide/tall viewports (4K/8K default)
+# where the rows-first formula collapses to a single very wide column are
+# rebalanced across both axes AND scaled to SHOWCASE_DPI (default 300) so the
+# 18 widget cells spread across the whole canvas with crisp, generously sized
+# chrome instead of clustering in one tall strip of tiny widgets.
+fn grid_params(w: i32, h: i32) -> (i32, i32, i32, i32, i32):
     var rows = (h - GRID_HEADER - GRID_FOOTER) / GRID_STEP
     if rows < 1:
         rows = 1
@@ -343,67 +383,96 @@ fn grid_params(w: i32, h: i32) -> (i32, i32):
     # ponytail: below ~170px columns widgets overlap; accept clipping there
     if col_w < 170:
         col_w = 170
-    (rows, col_w)
+    if ncols > 1:
+        return (rows, col_w, GRID_STEP, GRID_HEADER, 1000)
+    # Rebalance: pick a column count that fills width and height together
+    # (sqrt of cells scaled by aspect ratio), then derive rows/col_w/step from
+    # that instead of the degenerate single-column result above. Also derive
+    # the density scale from SHOWCASE_DPI so widget chrome grows with it.
+    val s = showcase_dpi() * 1000 / 96
+    val header = sc(GRID_HEADER, s)
+    val footer = sc(GRID_FOOTER, s)
+    val step_min = sc(GRID_STEP, s)
+    val col_min = sc(170, s)
+    val cells_f = GRID_CELLS.to_f64()
+    val cols_f = (cells_f * w.to_f64() / h.to_f64()).sqrt()
+    var cols = (cols_f + 0.5).to_i32()
+    if cols < 1:
+        cols = 1
+    if cols > GRID_CELLS:
+        cols = GRID_CELLS
+    val rows2 = (GRID_CELLS + cols - 1) / cols
+    var col_w2 = (w - 12) / cols
+    if col_w2 < col_min:
+        col_w2 = col_min
+    var step2 = (h - header - footer) / rows2
+    if step2 < step_min:
+        step2 = step_min
+    (rows2, col_w2, step2, header, s)
 
 fn draw_frame(b: Engine2D, w: i32, h: i32, st: ShowcaseState):
     b.clear(BG)
-    # menubar
-    b.draw_rect_filled(0, 0, w, 16, CARD)
-    b.draw_text(6, 4, "File  Edit  View  Help", FG, 7)
-    # title
-    b.draw_text(8, 22, "Widget Showcase (Engine2D CPU lane)", FG, 8)
-    b.draw_line(8, 38, w - 8, 38, LINE, 1)
-
     # Adaptive grid: 18 cells, rows per column from available height,
-    # column count from cell count, column width from viewport width.
-    val header = GRID_HEADER
-    val step = GRID_STEP
+    # column count from cell count, column width from viewport width. `s` is
+    # the density scale (1000 = 1x baseline; SHOWCASE_DPI-derived for the
+    # wide/tall 4K/8K default) applied to the menubar/title/statusbar chrome
+    # below and to every widget cell via sc()/sc1().
     val gp = grid_params(w, h)
     val rows = gp.0
     val col_w = gp.1
+    val step = gp.2
+    val header = gp.3
+    val s = gp.4
+
+    # menubar
+    b.draw_rect_filled(0, 0, w, sc(16, s), CARD)
+    b.draw_text(sc(6, s), sc(4, s), "File  Edit  View  Help", FG, sc1(7, s))
+    # title
+    b.draw_text(sc(8, s), sc(22, s), "Widget Showcase (Engine2D CPU lane)", FG, sc1(8, s))
+    b.draw_line(sc(8, s), sc(38, s), w - sc(8, s), sc(38, s), LINE, sc1(1, s))
 
     val p0 = cell_pos(0, rows, col_w, header, step)
-    w_button(b, p0.0, p0.1, st)
+    w_button(b, p0.0, p0.1, st, s)
     val p1 = cell_pos(1, rows, col_w, header, step)
-    w_switch(b, p1.0, p1.1, st.switch_on)
+    w_switch(b, p1.0, p1.1, st.switch_on, s)
     val p2 = cell_pos(2, rows, col_w, header, step)
-    w_dropdown(b, p2.0, p2.1)
+    w_dropdown(b, p2.0, p2.1, s)
     val p3 = cell_pos(3, rows, col_w, header, step)
-    w_progress(b, p3.0, p3.1, st.progress_value)
+    w_progress(b, p3.0, p3.1, st.progress_value, s)
     val p4 = cell_pos(4, rows, col_w, header, step)
-    w_tabs(b, p4.0, p4.1)
+    w_tabs(b, p4.0, p4.1, s)
     val p5 = cell_pos(5, rows, col_w, header, step)
-    w_list(b, p5.0, p5.1)
+    w_list(b, p5.0, p5.1, s)
     val p6 = cell_pos(6, rows, col_w, header, step)
-    w_table(b, p6.0, p6.1)
+    w_table(b, p6.0, p6.1, s)
     val p7 = cell_pos(7, rows, col_w, header, step)
-    w_chip(b, p7.0, p7.1)
+    w_chip(b, p7.0, p7.1, s)
     val p8 = cell_pos(8, rows, col_w, header, step)
-    w_dialog(b, p8.0, p8.1)
+    w_dialog(b, p8.0, p8.1, s)
     val p9 = cell_pos(9, rows, col_w, header, step)
-    w_checkbox(b, p9.0, p9.1, st)
+    w_checkbox(b, p9.0, p9.1, st, s)
     val p10 = cell_pos(10, rows, col_w, header, step)
-    w_input(b, p10.0, p10.1)
+    w_input(b, p10.0, p10.1, s)
     val p11 = cell_pos(11, rows, col_w, header, step)
-    w_slider(b, p11.0, p11.1, st.slider_value)
+    w_slider(b, p11.0, p11.1, st.slider_value, s)
     val p12 = cell_pos(12, rows, col_w, header, step)
-    w_search(b, p12.0, p12.1)
+    w_search(b, p12.0, p12.1, s)
     val p13 = cell_pos(13, rows, col_w, header, step)
-    w_segmented(b, p13.0, p13.1)
+    w_segmented(b, p13.0, p13.1, s)
     val p14 = cell_pos(14, rows, col_w, header, step)
-    w_tree(b, p14.0, p14.1)
+    w_tree(b, p14.0, p14.1, s)
     val p15 = cell_pos(15, rows, col_w, header, step)
-    w_card(b, p15.0, p15.1)
+    w_card(b, p15.0, p15.1, s)
     val p16 = cell_pos(16, rows, col_w, header, step)
-    w_tooltip(b, p16.0, p16.1)
+    w_tooltip(b, p16.0, p16.1, s)
     val p17 = cell_pos(17, rows, col_w, header, step)
-    w_scrollbar(b, p17.0, p17.1)
-    w_avatar(b, p17.0 + 76, p17.1)
+    w_scrollbar(b, p17.0, p17.1, s)
+    w_avatar(b, p17.0 + sc(76, s), p17.1, s)
 
     # statusbar
-    b.draw_rect_filled(0, h - 14, w, 14, CARD)
-    b.draw_text(6, h - 11, "Ready", MUTED, 6)
-    b.draw_text(w - 60, h - 11, "Ln 1, Col 1", MUTED, 6)
+    b.draw_rect_filled(0, h - sc(14, s), w, sc(14, s), CARD)
+    b.draw_text(sc(6, s), h - sc(11, s), "Ready", MUTED, sc1(6, s))
+    b.draw_text(w - sc(60, s), h - sc(11, s), "Ln 1, Col 1", MUTED, sc1(6, s))
 
 fn draw_g1_1_frame(b: Engine2D, w: i32, h: i32, st: ShowcaseState):
     b.clear(BG)
@@ -411,7 +480,7 @@ fn draw_g1_1_frame(b: Engine2D, w: i32, h: i32, st: ShowcaseState):
     b.draw_text(6, 4, "File  Edit", FG, 7)
     b.draw_text(8, 22, "Widget Showcase", FG, 8)
     b.draw_line(8, 38, w - 8, 38, LINE, 1)
-    w_button(b, 12, 46, st)
+    w_button(b, 12, 46, st, 1000)
     b.draw_rect_filled(0, h - 14, w, 14, CARD)
     b.draw_text(6, h - 11, "Ready", MUTED, 6)
 
@@ -642,6 +711,8 @@ fn run_showcase_events(w: i32, h: i32, events_raw: text) -> i64:
     val gp = grid_params(w, h)
     val rows = gp.0
     val col_w = gp.1
+    val step = gp.2
+    val header = gp.3
     var fails = 0
     var region_total = 0i64
     for ev in applied:
@@ -650,15 +721,15 @@ fn run_showcase_events(w: i32, h: i32, events_raw: text) -> i64:
             print "FAIL showcase_event={ev} reason=unknown-event"
             fails = fails + 1
             continue
-        val p = cell_pos(idx, rows, col_w, GRID_HEADER, GRID_STEP)
+        val p = cell_pos(idx, rows, col_w, header, step)
         val rx = p.0
         val ry = p.1
-        val d = count_diffs_rect(before, after, w, h, rx, ry, col_w, GRID_STEP)
+        val d = count_diffs_rect(before, after, w, h, rx, ry, col_w, step)
         region_total = region_total + d
         if d > 0:
-            print "PASS showcase_event={ev} region=({rx},{ry},{col_w},{GRID_STEP}) diff={d}"
+            print "PASS showcase_event={ev} region=({rx},{ry},{col_w},{step}) diff={d}"
         else:
-            print "FAIL showcase_event={ev} region=({rx},{ry},{col_w},{GRID_STEP}) diff=0"
+            print "FAIL showcase_event={ev} region=({rx},{ry},{col_w},{step}) diff=0"
             fails = fails + 1
     val total = count_diffs_all(before, after)
     val outside = total - region_total
@@ -841,13 +912,18 @@ fn main() -> i64:
     if wm_app_mode_is_client(env_get(WM_APP_MODE_ENV) ?? ""):
         return run_wm_client()
 
-    # Frame size: SHOWCASE_W/SHOWCASE_H override the 520x660 default (low-res gates).
+    # Frame size: SHOWCASE_RESOLUTION picks the default ("4k" == 3840x2160
+    # unless unset/"4k"; "8k" == 7680x4320; or an explicit "WxH"). SHOWCASE_W/
+    # SHOWCASE_H (low-res gates) override that default when set.
+    val default_wh = showcase_resolution_wh()
+    val default_w = default_wh.0
+    val default_h = default_wh.1
     val w_raw = env_get("SHOWCASE_W") ?? ""
     val h_raw = env_get("SHOWCASE_H") ?? ""
-    val fw0 = (w_raw.parse_i64() ?? W.to_i64()).to_i32()
-    val fh0 = (h_raw.parse_i64() ?? H.to_i64()).to_i32()
-    val fw = if fw0 < 64: W else: fw0
-    val fh = if fh0 < 64: H else: fh0
+    val fw0 = (w_raw.parse_i64() ?? default_w.to_i64()).to_i32()
+    val fh0 = (h_raw.parse_i64() ?? default_h.to_i64()).to_i32()
+    val fw = if fw0 < 64: default_w else: fw0
+    val fh = if fh0 < 64: default_h else: fh0
 
     emit_renderer_log(showcase_backend_key(), fw, fh)
 
