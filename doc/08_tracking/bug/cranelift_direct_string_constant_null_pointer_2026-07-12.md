@@ -487,3 +487,13 @@ literals/variables/expressions reliably get an explicit `I64` local type from
 - `print("hello"); val s = "world"; print(s)` → `helloworld`, rc=0 (unchanged).
 - `fn greet(s: text): print(s)` called as `greet("hi")` → `hi`, rc=0
   (regression fixed).
+- `fn show(n: i64): print(n)` called as `show(42)`, plus
+  `print(add(2, 3))` (the doc's own originally-cited `print(add(2,3))`
+  SIGSEGV-at-`0x5` repro from the "Symptom" section above) → `425`, rc=0.
+  This closes the remaining corner of the matrix (int arriving via a
+  function parameter/return, not just an inline literal/local/expr): a
+  scalar `i64` parameter's MIR local does reliably resolve to an explicit
+  `I64` type (unlike a `text` parameter's `Opaque("str")`, which does not),
+  so the numeric-only coercion default catches it correctly. int-inline,
+  int-param/return, str-inline/local, and str-param are all now verified
+  correct on the LLC bootstrap path.
