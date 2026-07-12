@@ -13,8 +13,20 @@ related: src/lib/nogc_sync_mut/ffi/codegen.spl
 
 ## 2026-07-12 update: fix implemented, mechanism verified by Rust unit test, e2e blocked by an unrelated pre-existing wall
 
-**What was implemented** (see commits `8803ee074b9`, `1958c98ba21` in this
-worktree):
+**BOTTOM LINE — read before assuming this unblocks redeploy:** the
+Cranelift string-constant fix below is implemented, compiles cleanly, and is
+verified correct **in isolation** by a Rust unit test that JIT-compiles and
+executes the new data-object mechanism and dereferences the real returned
+pointer. It has **NOT** been run end-to-end through `native-build`: no
+binary was produced, `print("hello")` was never actually executed, and the
+AOT `ObjectModule` emit/relocation path (the bug's actual originally-reported
+failure mode — object-file emission, not JIT) was never exercised at all
+this session. `native-build` currently fails before reaching Cranelift
+codegen for *any* program, string or not, on a wall unrelated to this fix
+(see below). **Redeploy is not cleared by this change alone.**
+
+**What was implemented** (see commits `8803ee074b9`, `1958c98ba21`,
+`38669574b13`, `b066df7c669` in this worktree; landed on origin/main):
 
 1. **New Cranelift data-object SFFI** in
    `src/compiler_rust/compiler/src/codegen/cranelift_sffi.rs`:
@@ -54,12 +66,13 @@ worktree):
    `cl_translate_terminator`, and `store_phi_incomings_for_edge` (not just
    `cl_translate_instruction`) since string constants can appear at any
    operand site, not only inside a `Const` instruction.
-4. **Unrelated fix required to get any native-build running at all**:
-   `rt_array_len_safe` existed in the runtime crate but had no
-   `interpreter_extern` dispatch entry, so the seed failed on **any**
-   native-build (string or not) with `unknown extern function:
-   rt_array_len_safe` before reaching codegen. Added the missing wrapper +
-   registration (mirrors the existing `rt_array_len` entry).
+4. **Attempted (and reverted) fix for an unrelated blocker** — see
+   "e2e blocked" section below for the corrected account. A same-named
+   `rt_array_len_safe` interpreter_extern stub was added, then found to be
+   *wrong* (it globally shadowed a local Simple function of the same name)
+   and reverted in a follow-up commit. Net effect on this repo: none — the
+   pre-existing wall it was meant to work around is still present and
+   undocumented-fixed.
 
 **Verification performed:**
 - `cargo check`/`cargo build --release --bin simple` for the whole
@@ -75,28 +88,57 @@ worktree):
   define_data + declare_data_in_func + global_value) in isolation, via the
   JIT path.
 
-**What was NOT verified — e2e blocked by an unrelated pre-existing wall:**
-Running `native-build --backend cranelift --entry <probe>.spl` (with or
+**What was NOT verified — e2e blocked by an unrelated pre-existing wall
+(IMPORTANT — corrected below, read this version, not any earlier draft):**
+
+Running `native-build --backend cranelift --entry <probe>.spl` — with or
 without `--source src/compiler --source src/app --source src/lib`, and even
-for a **zero-string-literal** probe `fn main() -> i64: return 0`) fails
+for a **zero-string-literal** probe `fn main() -> i64: return 0` — fails
 **before ever reaching `[cranelift-direct]`** (the adapter's own progress
-prints) with:
+prints), i.e. before Cranelift codegen runs at all, with:
 ```
-error: semantic: type mismatch: cannot convert array to int
+error: semantic: unknown extern function: rt_array_len_safe
 ```
-This reproduces deterministically regardless of `--source` flags or whether
-the entry program contains any string literal at all — i.e. it is **not**
-caused by this session's changes; it is upstream of Cranelift codegen
-entirely, in the seed's own interpreted execution of its (unrelated) source
-files. It matches the "originally documented next wall" this bug doc's first
-version noted as order/state-dependent and not reliably reproducing. The
-message originates from `Value::as_int()` in
-`src/compiler_rust/compiler/src/value_impl.rs:45` (`format!("type mismatch:
-cannot convert {} to int", actual_type)`), i.e. some extern-call site is
-passing an array `Value` through `.as_int()`; the exact call site was not
-tracked down (would need seed-internal instrumentation, out of scope for
-this session per "assess tractable-vs-hard, fix tractable ones, STOP+document
-hard ones").
+**Root cause, confirmed by reading source, not guessed:**
+`src/compiler/10.frontend/core/lexer.spl:34` defines
+```
+fn rt_array_len_safe<T>(array: [T]) -> i64:
+    return array.len()
+```
+as a **local, pure-Simple generic function** — unrelated to the
+`simple_runtime` crate's same-named `rt_array_len_safe(array: RuntimeValue)
+-> i64` extern (a coincidental name collision, or a deliberate mirror for a
+different call site — not established). The seed's `native-build` execution
+path attempts **extern dispatch** for `rt_array_len_safe` instead of
+resolving to lexer.spl's own local definition, and — correctly, given that
+call site never registered an interpreter_extern handler by that bare name
+— fails with "unknown extern function". This is a **local-generic-function
+vs. extern-name resolution gap** in the seed's interpreted execution of
+`native-build`, reproduces deterministically for *any* entry program
+(string literals irrelevant), and is **not caused by this session's string-
+constant changes** — confirmed by A/B testing (see below).
+
+**A mid-session mistake, made and then corrected:** this session initially
+mistook the above for "`rt_array_len_safe` is simply missing from
+`interpreter_extern`" and added a stub wrapper + registration mirroring
+`rt_array_len`'s (commit `28d9e6936c5`). That masked the "unknown extern"
+error but **shadowed lexer.spl's local generic function globally** — any
+call to bare-name `rt_array_len_safe` anywhere now routed through the new
+int-handle-only stub instead of the local `[T]`-array function, so the
+stub's `.as_int()?` on a genuine array argument threw `type mismatch: cannot
+convert array to int`. This was reverted (commit `b066df7c669`); an A/B
+rebuild+run confirmed the revert restores the original "unknown extern
+function: rt_array_len_safe" error exactly, both confirming this diagnosis
+and confirming the revert introduces no new regression.
+
+**Net state: native-build via this seed does not reach Cranelift codegen at
+all right now**, for reasons entirely unrelated to string constants. Tracking
+this local-generic-vs-extern resolution gap is out of scope for this session
+(no location narrower than "the seed's native-build closure-loading path"
+was established; would need seed-internal instrumentation to find the exact
+call site attempting extern dispatch instead of local resolution). Treat it
+as a **separate, still-open, hard-wall bug** blocking e2e verification of
+*any* `native-build --backend cranelift` change, not specific to this fix.
 
 **Consequently NOT exercised by this session**, and worth flagging
 explicitly for the next fixer: whether a string constant surviving storage
