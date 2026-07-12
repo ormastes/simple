@@ -30,6 +30,7 @@ use os.drivers.input.ps2_keyboard.{Ps2Keyboard}
 use os.drivers.input.ps2_mouse.{Ps2Mouse, MouseState}
 use os.compositor.compositor.{Compositor}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
 use os.compositor.input_backend.{Ps2InputBackend}
 use os.compositor.engine2d_display.{create_fb_engine_sized}
 use os.desktop.shell.{DesktopShell}
@@ -174,8 +175,21 @@ fn spl_start():
     val total_memory: u64 = 0x20000000
     val kernel_start: u64 = 0x100000
     val reserved_end: u64 = 0x18000000
-    val framebuffer_width: u32 = 1024
-    val framebuffer_height: u32 = 768
+    # Scanout resolution -- default mode "4k" (true-color ARGB8888, 33.2MB
+    # framebuffer; requires BGA/std-vga vgamem_mb>=64, see
+    # scripts/check/check-simpleos-wm-fullscreen-evidence.shs). To switch
+    # modes, replace 3840/2160 below with 7680/4320 ("8k", ~132MB
+    # framebuffer). 8K is NOT verified end-to-end: QEMU's std-vga/BGA VBE
+    # dispi extension has not been confirmed to scan out past 4K, and 132MB
+    # of VRAM is far beyond what a std-vga BAR comfortably maps --
+    # virtio-gpu/bochs-display would be the realistic path to real 8K.
+    # These are kept as literals (not module-level `val` constants) because
+    # referencing a module-level u32 `val` from spl_start() on this
+    # freestanding native-build target silently produced a garbage scanout
+    # (observed width=16000 height=1048 instead of 3840x2160) -- see
+    # doc/08_tracking/bug/x64_freestanding_module_level_val_u32_desktop_gui_2026-07-12.md.
+    val framebuffer_width: u32 = 3840
+    val framebuffer_height: u32 = 2160
     val framebuffer_bpp: u32 = 32
 
     serial_init()
@@ -319,13 +333,18 @@ fn spl_start():
 
     val registered = launcher_get_app_count()
     serial_println("[desktop-gui] launcher apps={registered}")
+    val wm_frame_executor = Engine2dWmFrameExecutor.create(engine)
     # Paint the first desktop frame BEFORE announcing readiness: the evidence
     # wrapper captures its baseline immediately after the readiness markers,
     # and an unpainted scanout at that instant is an honest FAIL, not a race
     # to be excused.
-    shell.render_baremetal_first_frame(scanout.address, scanout.stride as i32)
+    val first_frame_revision = shell.render_baremetal_first_frame(wm_frame_executor)
+    if first_frame_revision <= 0:
+        serial_println("[production-readiness-failed] reason=simple2d-or-simple-web-frame-invalid")
+        port_outb(0xF4, 1)
+        return
     serial_println("[desktop-gui] desktop-ready")
     serial_println("[production-readiness] wm=live simple_gui=object-tree simple_web=content-frame renderer=engine2d process_owned_surfaces={owned_surface_count} scanout_generation={scanout.generation}")
 
-    shell.run_baremetal(engine, scanout.address, scanout.stride as i32)
+    shell.run_baremetal(wm_frame_executor)
     serial_println("[desktop-gui] shell exited")

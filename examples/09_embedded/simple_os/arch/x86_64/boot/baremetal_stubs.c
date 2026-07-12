@@ -659,8 +659,16 @@ RuntimeValue rt_alloc(RuntimeValue sz)
      * Other runtime functions that need heap pointers use ENCODE_PTR themselves. */
     size_t bytes = (size_t)sz;
     if (bytes == 0) return 0;
-    /* Debug: log allocations of PciDevice-sized (96) or similar struct sizes */
-    if (bytes > 0x1000000) bytes = 0x1000000;
+    /* No silent size clamp here: this used to truncate any request over
+     * 16MB down to exactly 0x1000000 bytes while returning success, so a
+     * caller that asked for (and believed it received) a larger buffer --
+     * e.g. a 3840x2160x4 = ~33.2MB full-screen backbuffer at 4K -- would
+     * write past the end of the actually-allocated 16MB block and silently
+     * corrupt whatever heap memory came after it (observed: corrupted
+     * FAT32/decode_string state a few MB past the truncated allocation).
+     * malloc() below already has a loud panic-on-exhaustion check against
+     * the real 192MB _heap[] backing array, which is the correct place to
+     * enforce a hard limit. */
     void *p = malloc(bytes);
     if (!p) return 0;
     __builtin_memset(p, 0, bytes);  /* zero to avoid garbage in uninitialized fields */
@@ -671,7 +679,10 @@ RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
 {
     size_t bytes = (size_t)sz;
     if (bytes == 0) return 0;
-    if (bytes > 0x1000000) bytes = 0x1000000;
+    /* Same silent-truncation footgun removed from rt_alloc above: a >16MB
+     * request (e.g. a 4K/8K framebuffer) must not be quietly clamped to
+     * 0x1000000 and then overflowed. malloc()'s panic-on-exhaustion against
+     * the real 192MB _heap[] is the correct hard limit. */
     void *p = malloc(bytes);
     if (!p) return 0;
     __builtin_memset(p, 0, bytes);
@@ -8908,7 +8919,10 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
     RuntimeString *s = decode_string(str);
     RuntimeString *d = decode_string(delim);
     RuntimeValue arr = rt_array_new(ENCODE_INT(4));
-    if (!s || s->len == 0) return arr;
+    /* Exported array-return ABI is a RAW RuntimeArray pointer, matching
+     * runtime_native.c and generated [T] indexing. Keep the encoded handle
+     * only while calling the internal append helper. */
+    if (!s || s->len == 0) return (RuntimeValue)(uintptr_t)DECODE_PTR(arr);
     if (!d || d->len == 0) {
         /* Split into individual characters */
         for (uint32_t i = 0; i < s->len; i++) {
@@ -8916,10 +8930,11 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
                 (RuntimeValue)(uintptr_t)&s->data[i], 1);
             arr = rt_array_push_handle(arr, ch);
         }
-        return arr;
+        return (RuntimeValue)(uintptr_t)DECODE_PTR(arr);
     }
     if (d->len > s->len) {
-        return rt_array_push_handle(arr, str);
+        arr = rt_array_push_handle(arr, str);
+        return (RuntimeValue)(uintptr_t)DECODE_PTR(arr);
     }
     uint32_t start = 0;
     for (uint32_t i = 0; i <= s->len - d->len; ) {
@@ -8942,7 +8957,7 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
     RuntimeValue rest = rt_string_slice(str,
         ENCODE_INT(start), ENCODE_INT(s->len));
     arr = rt_array_push_handle(arr, rest);
-    return arr;
+    return (RuntimeValue)(uintptr_t)DECODE_PTR(arr);
 }
 
 static int is_whitespace(char c)

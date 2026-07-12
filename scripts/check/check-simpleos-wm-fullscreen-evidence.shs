@@ -94,6 +94,10 @@ regular_file_status() {
     fi
 }
 
+serial_has_production_fault() {
+    grep -Eq '^\[fault\] \*\*\* EXCEPTION FRAME|page[- ]fault|nil receiver|invalid Simple Web frame|\[simple2d-frame-failed\]' "$SERIAL_LOG" 2>/dev/null
+}
+
 ppm_magic_status() {
     path="$1"
     if [ "$(regular_file_status "$path")" != "pass" ]; then
@@ -177,7 +181,8 @@ if [ -n "${SIMPLEOS_WM_KERNEL_ARTIFACT:-}" ]; then
 elif [ ! -f "$KERNEL_OUTPUT" ]; then
     kernel_stale=true
 elif find src/os src/lib build/os/generated examples/09_embedded/simple_os/arch/x86_64 \
-    -type f -name '*.spl' -newer "$KERNEL_OUTPUT" -print -quit | grep -q .; then
+    -type f \( -name '*.spl' -o -name '*.c' -o -name '*.h' -o -name '*.s' -o -name '*.S' -o -name '*.ld' \) \
+    -newer "$KERNEL_OUTPUT" -print -quit | grep -q .; then
     kernel_stale=true
 fi
 if [ "$kernel_stale" = true ]; then
@@ -235,6 +240,9 @@ fi
 # Launch QEMU directly with the exact wm-simple-web QMP-capture flags used by
 # os.qemu_runner._wm_simple_web_qmp_capture_target(): q35/max/2G, serial
 # routed to a file, no display, BGA std VGA, QMP over a unix socket.
+# vgamem_mb=64 raises the BGA/std-vga linear-framebuffer VRAM aperture past
+# QEMU's 16MB default (only 16MB won't fit a 3840x2160x32bpp = ~33.2MB
+# framebuffer -- BGA would silently reject/clamp the mode).
 qemu-system-x86_64 \
     -no-user-config -monitor none -net none \
     -machine q35 -cpu max -m 2G \
@@ -242,7 +250,7 @@ qemu-system-x86_64 \
     -display none \
     -no-reboot \
     -kernel "$KERNEL_OUTPUT" \
-    -vga std \
+    -vga std -global VGA.vgamem_mb=64 \
     -drive "file=$DISK_IMAGE,if=none,id=nvm,format=raw,snapshot=on" \
     -device "nvme,serial=deadbeef,drive=nvm" \
     -qmp "unix:$QMP_SOCKET,server,nowait" \
@@ -295,7 +303,10 @@ else
     waited=0
     while [ "$waited" -le 60000 ]; do
         serial_bytes="$(wc -c <"$SERIAL_LOG" 2>/dev/null || echo 0)"
-        if [ "$serial_bytes" -gt 1048576 ]; then
+        if serial_has_production_fault; then
+            reason="guest-render-fault"
+            break
+        elif [ "$serial_bytes" -gt 1048576 ]; then
             reason="guest-serial-fault-storm"
             break
         fi
@@ -322,7 +333,7 @@ else
         *[!0-9:]*|:*|*::*|*:) metadata_valid=false ;;
         *) metadata_valid=true ;;
     esac
-    if [ "$reason" = "guest-serial-fault-storm" ]; then
+    if [ "$reason" = "guest-serial-fault-storm" ] || [ "$reason" = "guest-render-fault" ]; then
         :
     elif [ -z "$scanout_marker" ] || [ -z "${ready_marker:-}" ]; then
         reason="dynamic-scanout-or-desktop-readiness-missing"
@@ -505,8 +516,13 @@ PY
             before_sha256="$(marker_field "$delta_line" before_sha256)"
             after_sha256="$(marker_field "$delta_line" after_sha256)"
             restored_sha256="$(marker_field "$delta_line" restored_sha256)"
-            status=pass
-            reason=pass
+            if serial_has_production_fault; then
+                status=fail
+                reason=guest-render-fault
+            else
+                status=pass
+                reason=pass
+            fi
         fi
         fi
     fi
