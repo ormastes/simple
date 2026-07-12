@@ -6,7 +6,7 @@ Does not test FFI extern functions (those require runtime).
 """
 
 use std.spec.{describe, it, expect}
-use std.nogc_sync_mut.io.font_ffi.{FontHandle, GlyphMetrics, GlyphBitmap, font_blob_sha256_hex}
+use std.nogc_sync_mut.io.font_ffi.{FontHandle, GlyphMetrics, GlyphBitmap}
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -77,19 +77,21 @@ describe "GlyphBitmap":
         expect(bitmap.is_valid()).to_equal(false)
 
 describe "font loader owned-byte handoff":
-    it "hashes the selected blob with SHA-256":
-        val empty: [u8] = []
-        expect(font_blob_sha256_hex(empty)).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
-
     it "loads exact selected paths from validated bytes and unmanaged paths by legacy ABI":
         val direct = rt_file_read_text("src/lib/nogc_sync_mut/io/font_sffi.spl")
         val rasterizer = rt_file_read_text("src/lib/nogc_sync_mut/sffi/spl_fonts.spl")
+        val registry = rt_file_read_text("src/lib/common/encoding/font_registry.spl")
         expect(direct).to_contain("val blob = file_read_bytes(path)")
-        expect(direct).to_contain("val selected = selected_font_asset_candidate_for_path(path)\n    if selected != nil:\n        val validation = validate_selected_font_asset(path, blob, font_blob_sha256_hex(blob))")
+        expect(direct).to_contain("val selected = selected_font_asset_candidate_for_path(path)\n    if selected != nil:\n        val validation = validate_selected_font_asset(path, blob)")
+        expect(direct.contains("font_blob_sha256_hex")).to_equal(false)
         expect(direct).to_contain("val h = if selected != nil:\n        rt_font_load_bytes(rt_array_data_ptr_u8(blob), blob.len())\n    else:\n        rt_font_load(path)")
         expect(direct.index_of("validate_selected_font_asset(path, blob") < direct.index_of("rt_font_load_bytes(rt_array_data_ptr_u8(blob)")).to_equal(true)
         expect(rasterizer).to_contain("val blob = file_read_bytes(ttf_path)")
-        expect(rasterizer).to_contain("val selected = selected_font_asset_candidate_for_path(ttf_path)\n        if val candidate = selected:\n            val validation = validate_selected_font_asset(ttf_path, blob, candidate.sha256)")
+        expect(rasterizer).to_contain("val selected = selected_font_asset_candidate_for_path(ttf_path)\n        if val candidate = selected:\n            val validation = validate_selected_font_asset(ttf_path, blob)")
+        expect(rasterizer.contains("validate_selected_font_asset(ttf_path, blob, candidate.sha256)")).to_equal(false)
+        expect(registry).to_contain("fn validate_selected_font_asset(path: text, blob: [u8])")
+        expect(registry).to_contain("sha256_u8_hex(blob) != candidate.sha256")
+        expect(registry.contains("values.push(value.to_i64())")).to_equal(false)
         expect(rasterizer.index_of("validate_selected_font_asset(ttf_path, blob") < rasterizer.index_of("val h = spl_dlopen(dylib_path)")).to_equal(true)
         expect(rasterizer).to_contain("val init_fp = if selected != nil:\n            spl_dlsym(h, \"rt_fonts_init_verified_bytes\")\n        else:\n            spl_dlsym(h, \"rt_fonts_init\")")
         expect(rasterizer).to_contain("init_args.push(rt_array_data_ptr_u8(blob))\n            init_args.push(blob.len())\n            init_args.push(rt_array_data_ptr_u8(expected_digest_bytes))\n            init_args.push(expected_digest_bytes.len())")

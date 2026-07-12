@@ -385,6 +385,11 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   all 16 pinned binaries and exact records. Loader bool/nil APIs intentionally
   discard typed reasons. Pure Simple compound outlines for 14 faces and
   executable Simple evidence remain open, so REQ-008 is not complete.
+- selected-asset hashing: the shared registry validator now computes SHA-256
+  directly from bounded `[u8]` storage after the byte-length gate and before
+  font parsing. Callers cannot supply a candidate digest. `spl_fonts` retains
+  the native verified-bytes digest recheck as defense in depth. This does not
+  promote any coverage cell.
 - format-gate review: Spark independently matched all 16 table/default-axis
   records and reviewed aligned negative fixtures; the high-capability reviewer
   accepted the neutral dependency direction, both root loader guards, typed
@@ -508,9 +513,9 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   regenerated for this documentation-only slice.
 - loader selected-byte handoff: both native roots load exact selected bundled
   paths from owned verified/prevalidated bytes. Aliases and unmanaged fonts
-  retain legacy path loading and are outside the race-free claim. The Pure
-  Simple SHA `[u8]` to `[i64]` conversion amplifies memory for candidates up to
-  25 MiB and must be replaced or measured before promotion. No matrix promotion.
+  retain legacy path loading and are outside the race-free claim. Pure Simple
+  hashes selected `[u8]` payloads in bounded blocks, and the primary native
+  renderer independently rechecks the expected digest. No matrix promotion.
 - partial REQ-009: selected checksum/default-axis identity fences the whole
   glyph cache and atlas and is exposed in stats. Revocable generation-bound
   wrappers protect the process-global face and stale operations fail closed.

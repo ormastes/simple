@@ -43,15 +43,12 @@ unknown axes return `nil`. Do not load `witness_family` while the cell is
 `unavailable` or `not-designed-for-script`.
 
 Both native roots initialize exact selected bundled-font paths from their same
-owned verified or prevalidated bytes. `spl_fonts` passes the pinned digest to
-`rt_fonts_init_verified_bytes`; `font_sffi` hashes the selected blob in Simple
-and calls `rt_font_load_bytes`. Equivalent aliases and other unmanaged fonts
-retain legacy path loading and are outside the race-free claim. Neither path
-promotes a coverage-matrix cell.
-
-NFR: the current Pure Simple SHA helper converts `[u8]` to `[i64]`, temporarily
-amplifying memory for candidates as large as 25 MiB. Replace or measure that
-conversion before any runtime or coverage promotion.
+owned verified bytes. The shared validator hashes bounded `[u8]` storage
+directly after checking the pinned byte length and before parsing font tables.
+`spl_fonts` also passes the pinned digest to `rt_fonts_init_verified_bytes` for
+a native defense-in-depth recheck; `font_sffi` calls `rt_font_load_bytes`.
+Equivalent aliases and other unmanaged fonts retain legacy path loading and are
+outside the race-free claim. Neither path promotes a coverage-matrix cell.
 
 ## Pinned candidate assets
 

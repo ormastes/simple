@@ -150,6 +150,64 @@ fn sha256_text(data: text) -> text:
     use std.common.crypto.types.{text_to_bytes, bytes_to_hex}
     bytes_to_hex(sha256_bytes(text_to_bytes(data)))
 
+# SHA-256 of native bytes without copying the payload into an i64 list.
+fn sha256_u8_hex(data: [u8]) -> text:
+    var h = sha256_initial_hash()
+    val data_len = data.len()
+    var offset = 0
+
+    while data_len >= 64 and offset <= data_len - 64:
+        var block: [i64] = []
+        var i = 0
+        while i < 64:
+            block.push(data[offset + i].to_i64())
+            i = i + 1
+        h = sha256_process_block(h, block)
+        offset = offset + 64
+
+    val remaining = data_len - offset
+    var tail: [i64] = []
+    var i = 0
+    while i < 64:
+        tail.push(0)
+        i = i + 1
+    i = 0
+    while i < remaining:
+        tail[i] = data[offset + i].to_i64()
+        i = i + 1
+    tail[remaining] = 128
+
+    if remaining >= 56:
+        h = sha256_process_block(h, tail)
+        i = 0
+        while i < 64:
+            tail[i] = 0
+            i = i + 1
+
+    # Encode data_len * 8 modulo 2^64 without an overflowing multiplication.
+    tail[56] = (data_len >> 53) & 255
+    tail[57] = (data_len >> 45) & 255
+    tail[58] = (data_len >> 37) & 255
+    tail[59] = (data_len >> 29) & 255
+    tail[60] = (data_len >> 21) & 255
+    tail[61] = (data_len >> 13) & 255
+    tail[62] = (data_len >> 5) & 255
+    tail[63] = (data_len << 3) & 255
+    h = sha256_process_block(h, tail)
+
+    val digits = "0123456789abcdef"
+    var result = ""
+    var wi = 0
+    while wi < 8:
+        val word = h.get(wi)
+        var shift = 28
+        while shift >= 0:
+            val nibble = (word >> shift) & 15
+            result = result + digits[nibble:nibble + 1]
+            shift = shift - 4
+        wi = wi + 1
+    result
+
 # ============================================================================
 # MIR optimizer pattern-recognition hooks
 # Symbol names must match the strings in rules_crypto.spl exactly.
