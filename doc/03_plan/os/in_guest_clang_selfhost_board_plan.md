@@ -49,10 +49,18 @@ image fresh for the compile pass. Next: Phase 2 (board port).
 
 ## Phase 2 — board-runnable port (the must)
 
-2a. **`.o` to real NVMe, not serial:** wire O_CREAT/write/close through the FAT32
-    write path (fsexec has `_fat32_find_root_dir_slot` + cluster-write code) so `/hello.o`
-    lands on the disk image. Verify by mounting the image on host post-run and reading
-    `/hello.o` back (byte-identical to 1d's object).
+2a. ✅ **DONE (2026-07-12) — `.o` to real NVMe:** the bare-exec exit handler now calls
+    `fat32_write_file(name, data, size)` for each RAMFS output; `/hello.o` is allocated a real
+    free cluster (3807) and written to the NVMe disk image. Verified by parsing the raw image
+    post-run: `HELLO.O` dirent → cluster 3807, 712 B → extracted bytes are ELF64 ET_REL
+    EM_X86_64, host-link + run == exit 7 (byte-valid, identical result to 1d).
+    Two harness fixes made this land: (i) `fsexec_mkimg_big.spl` reserves 16 spare clusters
+    (512 KiB) so a free cluster exists; (ii) `build_clang_stream_ring3.shs` now parses
+    `total_bytes=` from the mkimg stdout instead of a **stale, no-longer-written**
+    `fat32-clang-total.txt` — the stale value truncated the image below BPB `total_sectors`,
+    so the spare cluster's LBA fell 1 sector past EOF and the NVMe write was out-of-range
+    (mark-EOC in the low FAT region passed; the high data-cluster write failed). Error-path
+    `[wf-diag] … FAILED` serial markers left in `fat32_write_file` as board diagnostics.
 2b. **Board-safe exit:** replace isa-debug-exit (`outb 0xF4`) for the clang path with the
     kernel-resume savepoint (as the SSH multi-cmd exit already does) so on real hardware
     the kernel regains control, reports rc, and halts/continues gracefully — never depends
@@ -63,12 +71,16 @@ image fresh for the compile pass. Next: Phase 2 (board port).
 2d. **Robustness for the board:** every syscall/FS error path recovers + reports instead of
     hang/triple-fault (so an unexpected situation on hardware degrades gracefully, not a
     silent halt). Audit the fault handler + syscall default cases.
+    - **Known gap (2026-07-12):** `fat32_write_file` on a **pre-existing** `/hello.o` is
+      untested — 2a used a fresh image each run. A second clang run (or a board disk that
+      already holds the file) hits the dir-slot reuse / cluster-free-then-realloc path. Test
+      overwrite + truncate-shorter/grow-longer before trusting it on hardware.
 2e. **End-to-end board scenario:** over real OpenSSH, `clang -cc1 -emit-obj -o /hello.o
     /hello.c` on the guest writes `/hello.o` to disk; retrieve over SSH/scp; verify. Mark
     physical-hardware NVMe/serial/NIC as provable only on the actual mini-PC.
 
 ## Execution order
 
-1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a → 2b → 2c → 2d → 2e.
+1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a ✅ (.o on real NVMe)  →  2b → 2c → 2d → 2e.
 Never start Phase 2 before 1d passes. Small model + guide per step; higher-model review +
 the host-link-and-run / gate verification owned by the coordinator.

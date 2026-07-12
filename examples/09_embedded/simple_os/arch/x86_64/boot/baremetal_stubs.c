@@ -2946,6 +2946,7 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
     uint32_t old_cluster = 0;
     int found = 0;
     if (_fat32_find_root_dir_slot(name83, &dir_cluster, &entry_index, &found, &old_cluster) != 0) {
+        serial_puts("[wf-diag] root-dir slot FAILED\r\n");
         _simpleos_log_write_cstr(4, "[fat32-c] write_file root-dir slot failed");
         return -1;
     }
@@ -2958,18 +2959,20 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
     uint32_t written = 0;
     uint8_t *cluster_buf = (uint8_t *)nvme_alloc_aligned(cluster_bytes, 512);
     if (!cluster_buf) {
+        serial_puts("[wf-diag] cluster_buf alloc FAILED\r\n");
         _simpleos_log_write_cstr(4, "[fat32-c] write_file cluster_buf alloc failed");
         return -1;
     }
-
     for (uint32_t i = 0; i < clusters_needed; i++) {
         uint32_t cluster = _fat32_find_free_cluster();
         if (cluster < 2) {
+            serial_puts("[wf-diag] no free cluster\r\n");
             _simpleos_log_write_cstr(4, "[fat32-c] write_file no free cluster");
             if (first_cluster >= 2) _fat32_free_chain(first_cluster);
             return -1;
         }
         if (_fat32_write_fat_entry(cluster, 0x0FFFFFFF) != 0) {
+            serial_puts("[wf-diag] mark-eoc (NVMe FAT write) FAILED\r\n");
             _simpleos_log_write_cstr(4, "[fat32-c] write_file mark-eoc failed");
             if (first_cluster >= 2) _fat32_free_chain(first_cluster);
             return -1;
@@ -2988,6 +2991,7 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
         if (chunk > 0)
             __builtin_memcpy(cluster_buf, buf + written, chunk);
         if (_fat32_write_cluster(cluster, cluster_buf) != 0) {
+            serial_puts("[wf-diag] data-cluster (NVMe write) FAILED\r\n");
             _simpleos_log_write_cstr(4, "[fat32-c] write_file cluster write failed");
             _fat32_free_chain(first_cluster);
             return -1;
@@ -3010,6 +3014,7 @@ int fat32_write_file(const char *name, const uint8_t *buf, uint32_t size) {
 
     _fat32_write_dir_entry(dir_buf + entry_index * 32, name83, first_cluster, size);
     if (_fat32_write_cluster(dir_cluster, dir_buf) != 0) {
+        serial_puts("[wf-diag] dir-cluster (NVMe write) FAILED\r\n");
         _simpleos_log_write_cstr(4, "[fat32-c] write_file dir write failed");
         if (first_cluster >= 2) _fat32_free_chain(first_cluster);
         return -1;
@@ -15239,8 +15244,19 @@ static void _bare_dump_output(struct bare_file *f) {
 
 static void _bare_dump_all_outputs(void) {
     for (int i = 0; i < BARE_MAX_FILES; i++)
-        if (_bare_files[i].used && _bare_files[i].is_output && _bare_files[i].size > 0)
-            _bare_dump_output(&_bare_files[i]);
+        if (_bare_files[i].used && _bare_files[i].is_output && _bare_files[i].size > 0) {
+            struct bare_file *f = &_bare_files[i];
+            _bare_dump_output(f);
+            /* Board reality: persist the output object to the real FAT32/NVMe
+             * disk (not only a serial base64 dump) so a build on physical
+             * hardware leaves a retrievable file. NVMe write DMA works here —
+             * this runs in ring 0 with the user cr3 loaded and the BAR/queues
+             * cloned into every user AS, same path the on-demand read uses. */
+            int wrc = fat32_write_file(f->name, f->data, f->size);
+            serial_puts("[oo-nvme] persist ");
+            serial_puts(f->name);
+            serial_puts(wrc == 0 ? " -> OK\r\n" : " -> FAIL\r\n");
+        }
 }
 
 /* Debug: print an in-guest path (user ptr + len) to serial. */
