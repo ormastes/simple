@@ -106,6 +106,10 @@ not depth-tested native 3D text.
 CPU code remains responsible for face selection, rasterization, fallback, and
 cache identity. Complete Pure Simple complex-script shaping/BiDi is still a
 tracked prerequisite; the built-in bitmap path remains the zero-config fallback.
+Fontdue remains the basic layout/raster owner, while FreeType and stb provide
+rasterization/metrics; none is shaping evidence. System HarfBuzz is not a
+declared uniformly available dependency, and Rustybuzz is not added under
+the selected Pure Simple contract.
 The OpenType parser now supports validated Unicode cmap formats 4 and 12,
 including bundled Noto Emoji `U+1F600`. Mixed-face fallback is not accepted yet
 because complete per-script GSUB/GPOS and corpus evidence are still missing.

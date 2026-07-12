@@ -37,6 +37,38 @@ selection identifies active lookups; substitution completeness remains false.
    behavior in the existing shaper.
 4. Route prepared batches through that path and retain codepoint bitmap fallback.
 
+## Selector/application acceptance
+
+The rejected standalone selector proved that selection and application must be
+one reviewed slice. The replacement must:
+
+- stay Pure Simple; `fontdue` provides basic layout/rasterization while FreeType
+  and stb provide rasterization/metrics, not shaping; system HarfBuzz is not a
+  declared uniformly available cross-platform dependency, and adding Rustybuzz would violate
+  selected REQ-007;
+- cover the five scripts required by the selected top-ten languages and these
+  exact OpenType mappings: `en→latn/ENG `, `zh→hani/ZHS `,
+  `es→latn/ESP `, `hi→deva/HIN `, `ar→arab/ARA `, `fr→latn/FRA `,
+  `pt→latn/PTG `, `ru→cyrl/RUS `, `ur→arab/URD `, and
+  `id→latn/IND ` (all LangSys tags are four bytes, including shown spaces);
+  use the selected Script's DefaultLangSys when its exact language is absent,
+  and `DFLT` only when the Script record is absent—never after a malformed exact
+  record;
+- bound ScriptList, Script/LangSys, FeatureList, Feature, LookupList, Lookup,
+  and subtable offsets to their owning sections, rejecting aliases, duplicates,
+  bad indices, nonzero `lookupOrder`, and malformed exact records;
+- preserve required-first feature and first-seen lookup order, with explicit
+  default-feature policy and no sorting after selection; and
+- set completion only when every active lookup flag/type/format is supported
+  and every active subtable validates and applies. Unsupported active lookups
+  remain visible and force incomplete output; and
+- leave focused executable fixtures for exact LangSys versus DefaultLangSys,
+  absent-script `DFLT`, explicit feature enable/non-enable, a required feature
+  outside the LangSys optional list, first-seen lookup order/deduplication,
+  header/section aliases, duplicate records, nonzero `lookupOrder`, malformed
+  selected SingleSubst, and every unsupported LookupFlag/type forcing
+  `substitution_complete=false`.
+
 ## Acceptance
 
 - Pinned Latin, Han, Devanagari, Arabic/Urdu, and Cyrillic fixtures expose stable

@@ -63,6 +63,11 @@ SingleSubst 1/2 primitives, while the shaper stays identity until active
 Script/LangSys/Feature lookup selection is available. Unsupported or malformed
 data returns unchanged material and cannot set completion.
 
+The selector and application land together. Their first accepted scope covers
+Latin, Cyrillic, Han, Devanagari, and Arabic script/language routing, with
+section-local bounds and required/default feature ordering. A standalone plan
+whose `complete` bit is not derived from validated active subtables is rejected.
+
 The revocable font-face handle/generation is intentionally present as opaque
 rasterizer identity and is validated before use. Engine-owned texture, sampler,
 pipeline, submission, fence, and readback handles stay out of both values; they

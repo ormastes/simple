@@ -273,6 +273,15 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   1/2 fail closed, and focused fixtures include cross-table rejection. The
   shaper remains identity because Script/LangSys/Feature activation is not yet
   implemented; no substitution-complete claim is made.
+- selector rejection/reuse audit: two Spark reuse lanes found no existing
+  portable shaper—fontdue, FreeType, stb, and browser canvas cannot return the
+  required shared glyph material; host HarfBuzz is undeclared/non-portable and
+  Rustybuzz would violate selected Pure Simple REQ-007. A Spark selector draft
+  was deleted after independent Spark and higher review found section aliasing,
+  incomplete selected-script routing, unsafe completion semantics, and weak
+  tests. The replacement contract requires one integrated, section-bounded
+  selector/application slice for `latn/cyrl/hani/deva/arab`, with every active
+  unsupported lookup retained as incomplete.
 - OpenCL source ownership (pre-host milestone): compiler emission and Engine2D
   runtime compilation were first unified on
   `common.gpu.font_atlas_composite` for the exact versioned kernel source.
