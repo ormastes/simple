@@ -254,6 +254,40 @@ impl MirLowering:
                         return sw_local
             return sw_receiver
 
+        # Bug #138 (follow-up): same untyped-receiver gap as starts_with above,
+        # for `x.ends_with(suffix)`. Mirrors the starts_with fix exactly:
+        # rt_string_ends_with(i64 value, i64 suffix) needs both operands
+        # tagged, so tag a raw string-literal suffix via rt_string_new first.
+        if method == "ends_with" and args.len() == 1 and resolution_is_unresolved:
+            val ew_receiver = self.lower_expr(receiver)
+            val ew_suffix_ptr = self.lower_expr(args[0].value)
+            val ew_strlen_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_strlen"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_ewlen = self.builder
+            val ew_len_res = b_ewlen.emit_call(ew_strlen_op, [mir_operand_copy(ew_suffix_ptr)], MirType.i64())
+            self.builder = b_ewlen
+            if val ew_suffix_len = ew_len_res:
+                val ew_newstr_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_string_new"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                var b_ewnew = self.builder
+                val ew_tagged_res = b_ewnew.emit_call(ew_newstr_op, [mir_operand_copy(ew_suffix_ptr), mir_operand_copy(ew_suffix_len)], MirType.i64())
+                self.builder = b_ewnew
+                if val ew_tagged_suffix = ew_tagged_res:
+                    val ends_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_string_ends_with"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var b_ew = self.builder
+                    val ew_res = b_ew.emit_call(ends_op, [mir_operand_copy(ew_receiver), mir_operand_copy(ew_tagged_suffix)], MirType.i64())
+                    self.builder = b_ew
+                    if val ew_local = ew_res:
+                        return ew_local
+            return ew_receiver
+
         # Bug #137/#138 (follow-up): the typed substring/slice special case
         # below is gated on receiver.type_ == Some(Str), but an untyped
         # receiver (no HIR type inference ran -- both under the bootstrap flat
