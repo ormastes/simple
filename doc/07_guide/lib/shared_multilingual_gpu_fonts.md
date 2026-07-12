@@ -208,6 +208,14 @@ face liveness and every parallel vector length must match before rasterization.
   one graphics backend. Compute dispatch or CPU framebuffer output is not a
   substitute.
 
+The repository also freezes an Engine3D-ready Metal HUD source/vertex contract.
+It emits source and packed vertices only; no Engine3D method selects it and it
+is not native execution evidence. A rejected runtime draft was removed because
+interpreter readback was unsafe, atlas formats were ambiguous, GPU command
+errors were ignored, child cleanup was unproven, and the macOS-only code could
+not be compiled on this host. Future GUI/web/Engine2D work belongs behind the
+refactored WebIR/DrawIR boundary, not a second font draw path.
+
 ## Evidence rules
 
 Check structured batch/DrawIR/object state before pixels. Native evidence must

@@ -79,6 +79,15 @@ a successful no-op, not an incomplete plan. A plan whose
 `complete` bit is not derived from every validated
 active subtable and whose final glyph IDs are not face-valid is rejected.
 
+The first native Engine3D HUD prerequisite is a Simple-owned Metal source and
+20-byte vertex contract (`packed_float2` position, `packed_float2` UV, `u32`
+color), with six vertices per validated atlas quad. The atlas format is frozen
+to A8Unorm and render targets to RGBA8/BGRA8. This material is not execution:
+native promotion still requires a compiled pipeline, texture upload, draw,
+successful command completion, and device-origin texture readback. GUI, web,
+and Engine2D integrations must use the current WebIR/DrawIR refactor rather
+than consuming this Engine3D adapter as a parallel rendering path.
+
 The revocable font-face handle/generation is intentionally present as opaque
 rasterizer identity and is validated before use. Engine-owned texture, sampler,
 pipeline, submission, fence, and readback handles stay out of both values; they

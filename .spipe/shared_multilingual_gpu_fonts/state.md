@@ -322,6 +322,13 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   review found LangSys activation, Arabic/Indic masking, cross-parent shared
   validation, FeatureParams/FeatureVariations, and structural-validator gaps.
   Per the three-cycle guard, no further selector retry occurs this session.
+- Engine3D native-HUD prerequisite: Spark added a neutral Simple-owned MSL
+  contract and an Engine3D-tier checked 20-byte vertex packer. Higher review
+  rejected and removed the accompanying native runtime draft (unsafe
+  interpreter readback, format ambiguity, unchecked GPU completion, unproven
+  child cleanup, and no macOS compile evidence). The retained source makes no
+  execution claim. GUI/web/Engine2D follow the newer WebIR/DrawIR refactor and
+  must not consume this adapter as a parallel path.
 - cmap12 slice: Spark confirmed eight bundled candidates carry format 12 and
   Noto Emoji maps `U+1F600` only there. The Pure Simple cmap owner now validates
   Unicode records, sorted/non-overlapping groups, table bounds, scalar range,
