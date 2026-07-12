@@ -11,6 +11,7 @@ extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
 extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
 extern fn rt_string_join(array: i64, separator: i64) -> i64
 extern fn rt_string_char_at(value: i64, index: i64) -> i64
+extern fn rt_native_eq(left: i64, right: i64) -> i64
 
 # ============================================================================
 # Internal ABI helpers — pub so split files (core_array_ops, core_array_query)
@@ -137,7 +138,68 @@ pub fn rt_array_set(array: i64, idx: i64, value: i64) -> i8:
 pub fn rt_array_set_text(array: i64, idx: i64, value: i64) -> i8:
     return rt_array_set(array, idx, value)
 
+fn dict_ptr(dict: i64) -> i64:
+    if dict < 4096 or (dict & 7) != 1:
+        return 0
+    val ptr = dict & -8
+    if spl_load_u8(ptr, 0) != 6:
+        return 0
+    ptr
+
+fn dict_cap(dict: i64) -> i64:
+    spl_load_i64(dict_ptr(dict), 8)
+
+fn dict_len_value(dict: i64) -> i64:
+    spl_load_i64(dict_ptr(dict), 16)
+
+fn dict_items(dict: i64) -> i64:
+    spl_load_i64(dict_ptr(dict), 32)
+
+fn dict_key(key: i64) -> i64:
+    if key >= 4096 and (key & 7) == 1:
+        return key
+    if (key & 7) == 0 and (key >= 8 or key <= -8):
+        return key
+    key << 3
+
+# ponytail: linear pairs are sufficient for the focused bootstrap compiler;
+# replace with hashing only when guest-scale profiles prove it necessary.
+
+fn dict_find(dict: i64, key: i64) -> i64:
+    val ptr = dict_ptr(dict)
+    if ptr < 1:
+        return -1
+    val canonical = dict_key(key)
+    val len = dict_len_value(dict)
+    val items = dict_items(dict)
+    var i = 0
+    while i < len:
+        if rt_native_eq(spl_load_i64(items, i * 16), canonical) != 0:
+            return i
+        i = i + 1
+    -1
+
+fn dict_reserve(dict: i64, needed: i64) -> i8:
+    var cap = dict_cap(dict)
+    if needed <= cap:
+        return 1
+    var new_cap = cap * 2
+    if new_cap < needed:
+        new_cap = needed
+    val new_items = realloc(dict_items(dict), new_cap * 16)
+    if new_items < 1:
+        return 0
+    spl_store_i64(dict_ptr(dict), 8, new_cap)
+    spl_store_i64(dict_ptr(dict), 32, new_items)
+    1
+
 pub fn rt_index_get(collection: i64, idx: i64) -> i64:
+    if collection >= 4096 and (collection & 7) == 1 and (spl_load_i64(collection & -8, 0) & 4294967295) == 1398034993:
+        if (idx & 7) > 0:
+            return 3
+        return rt_string_char_at(collection, idx >> 3)
+    if dict_ptr(collection) > 0:
+        return rt_dict_get(collection, idx)
     if (idx & 7) > 0:
         return 3
     val raw_idx = idx >> 3
@@ -146,6 +208,8 @@ pub fn rt_index_get(collection: i64, idx: i64) -> i64:
     rt_string_char_at(collection, raw_idx)
 
 pub fn rt_index_set(collection: i64, idx: i64, value: i64) -> i8:
+    if dict_ptr(collection) > 0:
+        return if rt_dict_set(collection, idx, value) != 0: 1 else: 0
     if (idx & 7) > 0:
         return 0
     array_set_raw(collection, idx >> 3, value)
@@ -162,7 +226,122 @@ pub fn rt_tuple_get(tuple: i64, idx: i64) -> i64:
     return rt_array_get(tuple, idx)
 
 pub fn rt_dict_new(cap: i64) -> i64:
-    return rt_array_new(cap)
+    val _ = cap
+    val actual_cap = 8
+    val dict = calloc(1, 40)
+    if dict < 1:
+        return 3
+    val items = calloc(actual_cap, 16)
+    if items < 1:
+        free(dict)
+        return 3
+    spl_store_u8(dict, 0, 6)
+    spl_store_i64(dict, 8, actual_cap)
+    spl_store_i64(dict, 16, 0)
+    spl_store_i64(dict, 32, items)
+    dict | 1
+
+pub fn rt_dict_get(dict: i64, key: i64) -> i64:
+    val index = dict_find(dict, key)
+    if index < 0:
+        return 3
+    spl_load_i64(dict_items(dict), index * 16 + 8)
+
+pub fn rt_dict_set(dict: i64, key: i64, value: i64) -> i8:
+    if dict_ptr(dict) < 1:
+        return 0
+    var index = dict_find(dict, key)
+    if index >= 0:
+        spl_store_i64(dict_items(dict), index * 16 + 8, value)
+        return 1
+    val len = dict_len_value(dict)
+    if dict_reserve(dict, len + 1) < 1:
+        return 0
+    index = len
+    val items = dict_items(dict)
+    spl_store_i64(items, index * 16, dict_key(key))
+    spl_store_i64(items, index * 16 + 8, value)
+    spl_store_i64(dict_ptr(dict), 16, len + 1)
+    1
+
+pub fn rt_dict_insert(dict: i64, key: i64, value: i64) -> i8:
+    rt_dict_set(dict, key, value)
+
+pub fn rt_dict_contains(dict: i64, key: i64) -> i8:
+    return if dict_find(dict, key) >= 0: 1 else: 0
+
+pub fn rt_dict_remove(dict: i64, key: i64) -> i8:
+    val index = dict_find(dict, key)
+    if index < 0:
+        return 0
+    val len = dict_len_value(dict)
+    val last = len - 1
+    val items = dict_items(dict)
+    if index < last:
+        spl_store_i64(items, index * 16, spl_load_i64(items, last * 16))
+        spl_store_i64(items, index * 16 + 8, spl_load_i64(items, last * 16 + 8))
+    spl_store_i64(dict_ptr(dict), 16, last)
+    1
+
+pub fn rt_dict_clear(dict: i64) -> i8:
+    if dict_ptr(dict) < 1:
+        return 0
+    spl_store_i64(dict_ptr(dict), 16, 0)
+    1
+
+pub fn rt_dict_len(dict: i64) -> i64:
+    if dict_ptr(dict) < 1:
+        return 0
+    dict_len_value(dict)
+
+pub fn rt_dict_keys(dict: i64) -> i64:
+    if dict_ptr(dict) < 1:
+        return 3
+    val len = rt_dict_len(dict)
+    val out = rt_array_new(len)
+    if out < 4096:
+        return 3
+    var i = 0
+    while i < len:
+        rt_array_push(out, spl_load_i64(dict_items(dict), i * 16))
+        i = i + 1
+    out
+
+pub fn rt_dict_values(dict: i64) -> i64:
+    if dict_ptr(dict) < 1:
+        return 3
+    val len = rt_dict_len(dict)
+    val out = rt_array_new(len)
+    if out < 4096:
+        return 3
+    var i = 0
+    while i < len:
+        rt_array_push(out, spl_load_i64(dict_items(dict), i * 16 + 8))
+        i = i + 1
+    out
+
+pub fn rt_dict_entries(dict: i64) -> i64:
+    if dict_ptr(dict) < 1:
+        return 3
+    val len = rt_dict_len(dict)
+    val out = rt_array_new(len)
+    if out < 4096:
+        return 3
+    var i = 0
+    while i < len:
+        val pair = rt_tuple_new(2)
+        if pair < 4096:
+            return 3
+        rt_tuple_set(pair, 0, spl_load_i64(dict_items(dict), i * 16))
+        rt_tuple_set(pair, 1, spl_load_i64(dict_items(dict), i * 16 + 8))
+        rt_array_push(out, pair)
+        i = i + 1
+    out
+
+pub fn rt_for_iterable(collection: i64) -> i64:
+    if dict_ptr(collection) > 0:
+        return rt_dict_entries(collection)
+    collection
 
 pub fn rt_array_header_ptr(array: i64) -> i64:
     if array_is_valid(array) < 1:

@@ -100,7 +100,8 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_driver_submit_connect" | "rt_driver_submit_send" | "rt_driver_submit_write" => Some(&[2]),
 
         // Path operations (single path)
-        "rt_path_basename" | "rt_path_dirname" | "rt_path_ext" | "rt_path_absolute" | "rt_path_stem" => Some(&[0]),
+        "rt_path_basename" | "rt_path_dirname" | "rt_path_ext" | "rt_path_absolute" | "rt_path_stem"
+        | "rt_path_parent" => Some(&[0]),
         // Path operations (two paths)
         "rt_path_relative" | "rt_path_join" => Some(&[0, 1]),
 

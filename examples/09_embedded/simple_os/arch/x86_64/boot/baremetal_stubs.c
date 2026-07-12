@@ -108,28 +108,14 @@ static inline void io_wait(void)
      return *(const uint8_t*)(uintptr_t)ptr_addr;
  }
  
- int64_t rt_x86_syscall(uint64_t id, uint64_t a0, uint64_t a1, uint64_t a2,
-                        uint64_t a3, uint64_t a4) {
-     int64_t result;
-     /* Load every register explicitly from memory to avoid register-allocator
-      * reordering between the Sys V C ABI (arg3 in rcx, arg4 in r8, arg5 in
-      * r9) and the SYSCALL ABI (arg3 in r10, arg4 in r8). Memory operands are
-      * slower but unambiguous; the caller is in the kernel-stack path so the
-      * extra spill is negligible. */
-     __asm__ volatile(
-         "movq %1, %%rax\n\t"
-         "movq %2, %%rdi\n\t"
-         "movq %3, %%rsi\n\t"
-         "movq %4, %%rdx\n\t"
-         "movq %5, %%r10\n\t"
-         "movq %6, %%r8\n\t"
-         "syscall\n\t"
-         "movq %%rax, %0"
-         : "=m"(result)
-         : "m"(id), "m"(a0), "m"(a1), "m"(a2), "m"(a3), "m"(a4)
-         : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r10", "r11", "memory"
-    );
-    return result;
+int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
+                            uint64_t a3, uint64_t a4, uint64_t a5);
+
+int64_t rt_x86_syscall(uint64_t id, uint64_t a0, uint64_t a1, uint64_t a2,
+                       uint64_t a3, uint64_t a4) {
+    /* Kernel-internal callers already run at CPL0; bypass LSTAR so the
+     * hardware entry path can be exclusively and safely user-origin. */
+    return rt_syscall_dispatch(id, a0, a1, a2, a3, a4, 0);
 }
 
 #else
@@ -15267,26 +15253,9 @@ static void _bare_dbg_path(const char *tag, uint64_t src, uint64_t len) {
 
 /* Native bare-exec syscall handler. Returns 1 (handled, result in *out) or 0
  * (not a bare-exec syscall — let the normal dispatch/shim run). */
-static uint64_t _bare_sc_count = 0;
-
 static int _bare_exec_handle(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
                              uint64_t a3, uint64_t a4, uint64_t a5, int64_t *out) {
     (void)a5;
-    /* Discovery trace: log the first N syscalls (num + args) so the syscall
-     * surface a real program (clang_static --version) exercises is visible on
-     * serial without flooding it. */
-    _bare_sc_count++;
-    if (_bare_sc_count <= 400 && num != 60 && num != 32) {
-        serial_puts("[sc] n=");
-        serial_put_dec((int64_t)num);
-        serial_puts(" a0=");
-        serial_put_hex(a0);
-        serial_puts(" a1=");
-        serial_put_hex(a1);
-        serial_puts(" a2=");
-        serial_put_hex(a2);
-        serial_puts("\r\n");
-    }
     switch (num) {
         case 0:   /* exit(status) — dump RAM outputs, then QEMU isa-debug-exit */
             _bare_dump_all_outputs();
@@ -15557,7 +15526,18 @@ static int _bare_exec_handle(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2
 static uint64_t _user_heap_bump(uint64_t len) {
     uint64_t aligned = (len + 0xFFF) & ~((uint64_t)0xFFF);
     if (aligned == 0) aligned = 0x1000;
-    if (_user_heap_cur == 0 || _user_heap_cur + aligned > _user_heap_end) return 0;
+    if (_user_heap_cur == 0 || _user_heap_cur + aligned > _user_heap_end) {
+        serial_puts("[user-heap] OOM len=");
+        serial_put_dec((int64_t)len);
+        serial_puts(" aligned=");
+        serial_put_dec((int64_t)aligned);
+        serial_puts(" cur=");
+        serial_put_hex(_user_heap_cur);
+        serial_puts(" end=");
+        serial_put_hex(_user_heap_end);
+        serial_puts("\r\n");
+        return 0;
+    }
     uint64_t p = _user_heap_cur;
     _user_heap_cur += aligned;
     return p;
@@ -15571,24 +15551,20 @@ static uint64_t _user_heap_bump(uint64_t len) {
  * All offsets stay < PAGE (4096). Called from fs_elf_exec_smoke_entry.spl.
  * -------------------------------------------------------------------------- */
 uint64_t rt_bare_build_cc1_stack(uint64_t stack_phys, uint64_t base_va) {
-    /* Stage D status: -emit-llvm-bc is GREEN (front-end + IR gen + RAMFS I/O
-     * end-to-end). -emit-obj is still BLOCKED, but NOT for the reason previously
-     * recorded: the clang_static objects are ALL built by HOST clang 20.1.8
-     * (verified via each .o's .comment section) — NOT the buggy cross-clang
-     * (20.0.0git) — and the current relinked binary was re-verified in-guest on
-     * 2026-07-06: -emit-obj still faults. The first fault is KERNEL-mode
-     * (cs=0x08, cr2=0x0, rip~0x4bf672) followed by a runaway fault loop, i.e. a
-     * SimpleOS ring-3 exec / RAMFS-syscall path issue triggered by the X86
-     * codegen+object-write workload, not a mis-linked or cross-clang-miscompiled
-     * binary. So "rebuild clang_static with a correct compiler" does NOT unblock
-     * D2. See doc/08_tracking/bug/cross_clang_codegen_broken_2026-07-06.md.
-     * Keeping -emit-llvm-bc here so the Stage D smoke stays green. */
     static const char *const cc1_argv[] = {
         "clang", "-cc1", "-triple", "x86_64-unknown-simpleos",
-        "-emit-llvm-bc", "-mrelocation-model", "static", "-O0",
-        "-o", "/hello.bc", "-x", "c", "/hello.c"
+        "-emit-obj", "-mrelocation-model", "static", "-O0",
+        "-o", "/hello.o", "-x", "c", "/hello.c"
     };
-    const int argc = 13;
+    static const char *const link_argv[] = {
+        "clang", "--target=x86_64-unknown-simpleos", "-nostdlib", "-static",
+        "-Wl,--no-mmap-output-file", "-Wl,-e,_start", "-Wl,-Ttext,0x10000000",
+        "/hello.o", "-o", "/hello.elf"
+    };
+    uint32_t input_cluster = 0, input_size = 0;
+    const int link_pass = fat32_find_file("/hello.o", &input_cluster, &input_size) == 0;
+    const char *const *argv = link_pass ? link_argv : cc1_argv;
+    const int argc = link_pass ? 10 : 13;
     const uint64_t rsp_off = 3600;                 /* 16-aligned */
     /* vector = argc + (argc+1) argv ptrs + envp NULL + 3 auxv pairs (6) */
     uint64_t str_off = rsp_off + 8 * (1 + (uint64_t)(argc + 1) + 1 + 6);
@@ -15596,7 +15572,7 @@ uint64_t rt_bare_build_cc1_stack(uint64_t stack_phys, uint64_t base_va) {
     uint64_t cur = str_off;
     for (int i = 0; i < argc; i++) {
         argv_va[i] = base_va + cur;
-        const char *s = cc1_argv[i];
+        const char *s = argv[i];
         int j = 0;
         for (; s[j]; j++)
             *(volatile uint8_t *)(uintptr_t)(stack_phys + cur + (uint64_t)j) = (uint8_t)s[j];

@@ -12,6 +12,7 @@ use compiler.common.config.{TypeInferenceConfig, TypeDefault}
 use compiler.common.visibility.{effective_visibility}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.core.types.{custom_primitive_bind_symbol, custom_primitive_is_name}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: TypeKind) -> i64
@@ -60,19 +61,24 @@ enum LoweringErrorKind:
     Other
 
 fn hirlowering_new() -> HirLowering:
+    val empty_errors: [LoweringError] = []
+    val empty_loaded_modules: [text] = []
+    val empty_modules_by_name: Dict<text, Module> = {}
+    val empty_impl_functions: Dict<SymbolId, HirFunction> = {}
+    val empty_traits: Dict<text, HirTrait> = {}
     HirLowering(
         symbols: SymbolTable.new(),
-        errors: [],
+        errors: empty_errors,
         current_function: nil,
         loop_depth: 0,
         type_inference_config: nil,
         module_filename: "",
         module_resolver: nil,
-        loaded_modules: [],
-        modules_by_name: {},
+        loaded_modules: empty_loaded_modules,
+        modules_by_name: empty_modules_by_name,
         current_method_self_type: nil,
-        lowered_impl_functions: {},
-        lowered_traits: {}
+        lowered_impl_functions: empty_impl_functions,
+        lowered_traits: empty_traits
     )
 
 fn hirlowering_for_module(filename: text, modules_by_name: Dict<text, Module>) -> HirLowering:
@@ -86,52 +92,20 @@ impl HirLowering:
         hirlowering_new()
 
     static fn with_filename(filename: text) -> HirLowering:
-        HirLowering(
-            symbols: SymbolTable.new(),
-            errors: [],
-            current_function: nil,
-            loop_depth: 0,
-            type_inference_config: nil,
-            module_filename: filename,
-            module_resolver: nil,
-            loaded_modules: [],
-            modules_by_name: {},
-            current_method_self_type: nil,
-            lowered_impl_functions: {},
-            lowered_traits: {}
-        )
+        var lowering = hirlowering_new()
+        lowering.module_filename = filename
+        lowering
 
     static fn with_config(config: TypeInferenceConfig) -> HirLowering:
-        HirLowering(
-            symbols: SymbolTable.new(),
-            errors: [],
-            current_function: nil,
-            loop_depth: 0,
-            type_inference_config: Some(config),
-            module_filename: "",
-            module_resolver: nil,
-            loaded_modules: [],
-            modules_by_name: {},
-            current_method_self_type: nil,
-            lowered_impl_functions: {},
-            lowered_traits: {}
-        )
+        var lowering = hirlowering_new()
+        lowering.type_inference_config = Some(config)
+        lowering
 
     static fn with_resolver(resolver: ModuleResolverPort, filename: text) -> HirLowering:
-        HirLowering(
-            symbols: SymbolTable.new(),
-            errors: [],
-            current_function: nil,
-            loop_depth: 0,
-            type_inference_config: nil,
-            module_filename: filename,
-            module_resolver: Some(resolver),
-            loaded_modules: [],
-            modules_by_name: {},
-            current_method_self_type: nil,
-            lowered_impl_functions: {},
-            lowered_traits: {}
-        )
+        var lowering = hirlowering_new()
+        lowering.module_filename = filename
+        lowering.module_resolver = Some(resolver)
+        lowering
 
     me set_type_inference_config(config: TypeInferenceConfig):
         self.type_inference_config = Some(config)
@@ -169,6 +143,8 @@ impl HirLowering:
             false
 
     me error(message: text, span: Span):
+        if hir_type_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
+            eprint("[simpleos-hir-push] {message}")
         self.errors = self.errors.push(LoweringError(
             message: message,
             span: span,
@@ -219,6 +195,20 @@ impl HirLowering:
         # in expressions.spl / statements.spl.
         val kind_disc_v: i64 = hir_type_kind_disc(lt_kind)
         val d_named: i64 = hir_type_kind_disc(TypeKind.Named("", []))
+
+        # Extract in the frontend owner module, where HirTypeKind.Named is not
+        # in scope and cannot collide with TypeKind.Named on stage4.
+        if kind_disc_v == d_named:
+            val nm: text = parser_type_kind_named_name(lt_kind)
+            val nargs: [Type] = parser_type_kind_named_args(lt_kind)
+            if hir_type_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
+                eprint("[hir-type-named] {nm}")
+            if nm == "":
+                self.error("internal: failed to extract named type", lt.span)
+                return HirType(kind: HirTypeKind.Error, span: lt.span)
+            val named_kind = self.lower_named_kind(nm, self.lower_type_list(nargs), lt.span)
+            return HirType(kind: named_kind, span: lt.span)
+
         val d_tuple: i64 = hir_type_kind_disc(TypeKind.Tuple([]))
         val d_array: i64 = hir_type_kind_disc(TypeKind.Array(lt, nil))
         val d_func: i64 = hir_type_kind_disc(TypeKind.Function([], lt))
@@ -228,18 +218,7 @@ impl HirLowering:
         val d_proj: i64 = hir_type_kind_disc(TypeKind.Projection(lt, ""))
 
         var kind: HirTypeKind = HirTypeKind.Infer(0, 0)
-        if kind_disc_v == d_named:
-            var nm: text = ""
-            var nargs: [Type] = []
-            match lt_kind:
-                case TypeKind.Named(name, args):
-                    nm = name
-                    nargs = args
-                case _:
-                    pass
-            val hir_args = self.lower_type_list(nargs)
-            kind = self.lower_named_kind(nm, hir_args, lt.span)
-        elif kind_disc_v == d_tuple:
+        if kind_disc_v == d_tuple:
             var elems: [Type] = []
             match lt_kind:
                 case TypeKind.Tuple(elements):

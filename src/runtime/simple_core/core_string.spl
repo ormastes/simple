@@ -1,6 +1,7 @@
 # Pure-Simple `simple-core` string and string-backed stdio ABI.
 
 extern fn malloc(size: i64) -> i64
+extern fn realloc(ptr: i64, size: i64) -> i64
 extern fn free(ptr: i64)
 extern fn memcpy(dst: i64, src: i64, n: i64) -> i64
 extern fn memcmp(left: i64, right: i64, n: i64) -> i64
@@ -17,6 +18,8 @@ extern fn rt_array_len(array: i64) -> i64
 extern fn rt_array_new(cap: i64) -> i64
 extern fn rt_array_push(array: i64, value: i64) -> i8
 extern fn rt_array_get(array: i64, idx: i64) -> i64
+extern fn rt_dict_len(dict: i64) -> i64
+extern fn rt_dict_contains(dict: i64, key: i64) -> i8
 extern fn rt_value_int(value: i64) -> i64
 extern fn rt_value_as_int(value: i64) -> i64
 extern fn rt_enum_new(enum_id: i32, discriminant: i32, payload: i64) -> i64
@@ -85,6 +88,74 @@ pub fn rt_string_data(value: i64) -> i64:
     if ptr < 1:
         return 0
     return string_data_ptr_value(ptr)
+
+# Raw builder handle layout: len @0, cap @8, byte buffer @16.
+pub fn rt_string_builder_new() -> i64:
+    val handle = malloc(24)
+    if handle < 1:
+        return 0
+    val data = malloc(64)
+    if data < 1:
+        free(handle)
+        return 0
+    spl_store_i64(handle, 0, 0)
+    spl_store_i64(handle, 8, 64)
+    spl_store_i64(handle, 16, data)
+    handle
+
+pub fn rt_string_builder_push(handle: i64, value: i64) -> i64:
+    if handle < 4096:
+        return 0
+    val src = rt_string_data(value)
+    val add_len = rt_string_len(value)
+    if src < 1 or add_len < 0:
+        return 0
+    val len = spl_load_i64(handle, 0)
+    var cap = spl_load_i64(handle, 8)
+    var data = spl_load_i64(handle, 16)
+    val needed = len + add_len
+    if len < 0 or cap < 1 or data < 1 or needed < len:
+        return 0
+    if needed > cap:
+        var new_cap = cap * 2
+        while new_cap < needed:
+            new_cap = new_cap * 2
+        val grown = realloc(data, new_cap)
+        if grown < 1:
+            return 0
+        data = grown
+        cap = new_cap
+        spl_store_i64(handle, 8, cap)
+        spl_store_i64(handle, 16, data)
+    if add_len > 0:
+        memcpy(data + len, src, add_len)
+    spl_store_i64(handle, 0, needed)
+    1
+
+pub fn rt_string_builder_finish(handle: i64) -> i64:
+    if handle < 4096:
+        return 3
+    val len = spl_load_i64(handle, 0)
+    val data = spl_load_i64(handle, 16)
+    if len < 0 or data < 1:
+        return 3
+    val out = rt_string_new(data, len)
+    free(data)
+    free(handle)
+    out
+
+pub fn rt_string_builder_len(handle: i64) -> i64:
+    if handle < 4096:
+        return -1
+    spl_load_i64(handle, 0)
+
+pub fn rt_string_builder_free(handle: i64):
+    if handle < 4096:
+        return
+    val data = spl_load_i64(handle, 16)
+    if data > 0:
+        free(data)
+    free(handle)
 
 pub fn rt_string_bytes(value: i64) -> i64:
     val ptr = string_ptr(value)
@@ -202,13 +273,17 @@ pub fn rt_len(value: i64) -> i64:
     val ptr = string_ptr(value)
     if ptr > 0:
         return string_len_ptr(ptr)
-    if (value & 7) < 1 and value > 4095:
-        return rt_array_len(value)
+    if (value & 7) == 1 and value > 4095:
+        val kind = spl_load_u8(value & -8, 0)
+        if kind == 2:
+            return rt_array_len(value)
+        if kind == 6:
+            return rt_dict_len(value)
     return 0
 
 pub fn rt_native_eq(left: i64, right: i64) -> i64:
-    val left_text_tag = (left & 7) == 1
-    val right_text_tag = (right & 7) == 1
+    val left_text_tag = left >= 4096 and (left & 7) == 1
+    val right_text_tag = right >= 4096 and (right & 7) == 1
     if left_text_tag or right_text_tag:
         if not left_text_tag or not right_text_tag:
             return 0
@@ -243,7 +318,7 @@ pub fn rt_native_neq(left: i64, right: i64) -> i64:
         return 1
     return 0
 
-pub fn rt_contains(collection: i64, value: i64) -> i64:
+pub fn rt_contains(collection: i64, value: i64) -> i8:
     val text_ptr = string_ptr(collection)
     val needle_ptr = string_ptr(value)
     if text_ptr > 0 and needle_ptr > 0:
@@ -251,13 +326,17 @@ pub fn rt_contains(collection: i64, value: i64) -> i64:
         if idx >= 0:
             return 1
         return 0
-    if (collection & 7) < 1 and collection > 4095:
-        val len = rt_array_len(collection)
-        var i = 0
-        while i < len:
-            if rt_native_eq(rt_array_get(collection, i), value) > 0:
-                return 1
-            i = i + 1
+    if (collection & 7) == 1 and collection > 4095:
+        val kind = spl_load_u8(collection & -8, 0)
+        if kind == 6:
+            return rt_dict_contains(collection, value)
+        if kind == 2:
+            val len = rt_array_len(collection)
+            var i = 0
+            while i < len:
+                if rt_native_eq(rt_array_get(collection, i), value) > 0:
+                    return 1
+                i = i + 1
     return 0
 
 pub fn rt_slice(value: i64, start: i64, end: i64, step: i64) -> i64:

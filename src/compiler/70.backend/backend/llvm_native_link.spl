@@ -372,6 +372,8 @@ fn simpleos_x86_64_sysroot() -> text:
     "build/os/sysroot"
 
 fn simpleos_x86_64_user_link_inputs(sysroot: text) -> [text]:
+    val configured_crt0 = rt_env_get("SIMPLE_CRT0_PATH") ?? ""
+    val configured_libc = rt_env_get("SIMPLE_LIBC_PATH") ?? ""
     val configured_runtime = rt_env_get("SIMPLE_SIMPLE_CORE_PATH") ?? ""
     val target_runtime = "build/os/simple-core-simpleos/libsimple_runtime.a"
     val runtime = if configured_runtime != "":
@@ -381,9 +383,9 @@ fn simpleos_x86_64_user_link_inputs(sysroot: text) -> [text]:
     else:
         "{sysroot}/lib/libsimple_runtime.a"
     val inputs: [text] = [
-        "{sysroot}/lib/crt0.o",
+        if configured_crt0 != "": configured_crt0 else: "{sysroot}/lib/crt0.o",
         runtime,
-        "{sysroot}/lib/libsimpleos_c.a"
+        if configured_libc != "": configured_libc else: "{sysroot}/lib/libsimpleos_c.a"
     ]
     inputs
 
@@ -431,7 +433,8 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
         for path in support:
             if not rt_file_exists(path):
                 return Err("SimpleOS x86_64 sysroot is incomplete: missing {path}; run sh src/os/port/llvm/sysroot.shs or set SIMPLE_SYSROOT")
-        val linker_script = "{sysroot}/share/simpleos/simpleos.ld"
+        val configured_script = rt_env_get("SIMPLE_LINKER_SCRIPT") ?? ""
+        val linker_script = if configured_script != "": configured_script else: "{sysroot}/share/simpleos/simpleos.ld"
         if not rt_file_exists(linker_script):
             return Err("SimpleOS x86_64 sysroot is incomplete: missing {linker_script}; run sh src/os/port/llvm/sysroot.shs or set SIMPLE_SYSROOT")
 
@@ -451,7 +454,8 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
         user_args.push(support[1])
         user_args.push(support[2])
         user_args.push("--end-group")
-        val (_user_out, user_err, user_code) = rt_process_run("ld.lld", user_args)
+        val linker = if rt_file_exists("/usr/bin/ld.lld"): "/usr/bin/ld.lld" else: "ld.lld"
+        val (_user_out, user_err, user_code) = rt_process_run(linker, user_args)
         rt_file_delete(entry_object)
         if user_code != 0:
             return Err("SimpleOS x86_64 user executable link failed: {user_err}")
@@ -504,6 +508,9 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
     if verbose:
         print "[llvm-link] SimpleOS x86_64 freestanding executable: {output}"
     Ok(output)
+
+pub fn link_simpleos_x86_64_external(user_objects: [text], output: text) -> Result<text, text>:
+    link_simpleos_x86_64(user_objects, output, false, 2)
 
 fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> Result<text, text>:
     var is_smoke_entry = false

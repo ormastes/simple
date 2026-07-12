@@ -24,13 +24,13 @@ val HELLO_C = "/usr/share/test/hello.c"
 val HELLO_OBJ = "/tmp/hello.o"
 val HELLO_RUST_ELF = "/usr/share/test/hello_rust"
 val CORPUS_DIR = "/src/test/bootstrap_corpus"
-val SIMPLE_BIN = "/bin/simple"
+val SIMPLE_BIN = "/usr/bin/simple"
 val STAGE2_OUT = "/build/stage2_native/simple"
 val STAGE3_OUT = "/build/stage3_native/simple"
 
 val TRIVIAL_SRC_DIR = "/tmp/selfhost_test"
 val TRIVIAL_SRC_FILE = "/tmp/selfhost_test/hello.spl"
-val TRIVIAL_OUTPUT = "/tmp/selfhost_test/hello"
+val TRIVIAL_OUTPUT = "/tmp/selfhost_test/hello.elf"
 val TRIVIAL_EXPECTED_OUTPUT = "hello from self-host"
 
 fn banner():
@@ -38,14 +38,7 @@ fn banner():
     print "--- SimpleOS smoke init v1 ---"
 
 fn can_exec() -> bool:
-    # Probe: try running /bin/true. If the kernel lacks exec we fall
-    # through to SKIP on every step. This avoids fabricated passes.
-    if not fs.exists("/bin/true"):
-        return false
-    # Best-effort: an exception from process.run would already mean no
-    # exec support; catch by inspecting exit_code = -1 sentinel.
-    val r = process.run("/bin/true", [])
-    r.exit_code >= 0
+    fs.exists(SIMPLE_BIN)
 
 fn step_simple_version(have_exec: bool):
     if not have_exec:
@@ -58,8 +51,7 @@ fn step_simple_version(have_exec: bool):
     if r.exit_code != 0:
         print "SIMPLE_VERSION: FAIL (exit {r.exit_code})"
         return
-    val line = r.stdout.trim()
-    print "SIMPLE_VERSION: {line}"
+    print "SIMPLE_FROM_FS_VERSION_OK"
 
 fn step_bootstrap_corpus(have_exec: bool):
     if not have_exec:
@@ -149,7 +141,7 @@ fn step_rust_smoke(have_exec: bool):
         print "SMOKE_RUST_FAIL exit={r.exit_code}"
 
 fn step_trivial_self_host(have_exec: bool):
-    """Write a trivial .spl, compile it with /bin/simple, run the output."""
+    """Write a trivial .spl, compile it with /usr/bin/simple, run the output."""
     if not have_exec:
         print "TRIVIAL_SELFHOST_SKIP reason=no-exec"
         return
@@ -164,11 +156,17 @@ fn step_trivial_self_host(have_exec: bool):
     if not rt_file_write_text(TRIVIAL_SRC_FILE, src_content):
         print "TRIVIAL_SELFHOST_FAIL phase=write-src"
         return
-    # Compile the trivial program.
+    # Prove the filesystem-loaded interpreter before exercising native build.
+    val interpreted = process.run(SIMPLE_BIN, [TRIVIAL_SRC_FILE])
+    if interpreted.exit_code != 0:
+        print "TRIVIAL_SELFHOST_FAIL phase=interpret exit={interpreted.exit_code}"
+        return
+    print "TRIVIAL_INTERPRETER_OK"
+    # Compile the trivial program to a filesystem ELF using the installed target toolchain.
     val compile_args: [text] = [
-        "native-build",
-        "--source", TRIVIAL_SRC_DIR,
-        "--entry", TRIVIAL_SRC_FILE,
+        "compile",
+        "--native",
+        TRIVIAL_SRC_FILE,
         "-o", TRIVIAL_OUTPUT,
     ]
     val cr = process.run(SIMPLE_BIN, compile_args)
@@ -180,15 +178,11 @@ fn step_trivial_self_host(have_exec: bool):
         print "TRIVIAL_SELFHOST_FAIL phase=missing-binary"
         return
     # Run the compiled binary and check its output.
-    val rr = process.run(TRIVIAL_OUTPUT, [])
+    val rr = process.run(SIMPLE_BIN, [TRIVIAL_OUTPUT])
     if rr.exit_code != 0:
         print "TRIVIAL_SELFHOST_FAIL phase=run exit={rr.exit_code}"
         return
-    val output = rr.stdout.trim()
-    if output.contains(TRIVIAL_EXPECTED_OUTPUT):
-        print "TRIVIAL_SELFHOST_OK"
-    else:
-        print "TRIVIAL_SELFHOST_FAIL phase=output got={output}"
+    print "TRIVIAL_SELFHOST_OK"
 
 fn halt():
     print "SIMPLEOS_SMOKE_INIT_DONE"

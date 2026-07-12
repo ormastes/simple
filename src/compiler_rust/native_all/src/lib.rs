@@ -129,6 +129,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     let mut entry_closure = false;
     let mut emit_archive = false;
     let mut target_triple: Option<String> = None;
+    let mut target_cpu: Option<String> = None;
     let mut linker_script: Option<PathBuf> = None;
     let mut log_mode = "on".to_string();
     let mut opt_level = NativeOptimizationLevel::default_for_native_executable();
@@ -175,6 +176,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     "  --emit-archive      Emit a static archive from Simple objects instead of linking an executable"
                 );
                 println!("  --target <triple>   Cross-compilation target (e.g. x86_64-unknown-none)");
+                println!("  --cpu <policy>      CPU policy: default, native, or x86-64-v1..v4");
                 println!("  --linker-script <f> Linker script for freestanding/OS targets");
                 println!("  --log <on|off>      Compile normal SimpleOS logging in or out");
                 return 0;
@@ -321,6 +323,15 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     return 1;
                 }
             }
+            "--cpu" => {
+                if i + 1 < args_vec.len() {
+                    target_cpu = Some(args_vec[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("error: --cpu requires a CPU policy");
+                    return 1;
+                }
+            }
             "--linker-script" => {
                 if i + 1 < args_vec.len() {
                     linker_script = Some(PathBuf::from(&args_vec[i + 1]));
@@ -394,6 +405,8 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     runtime_path = Some(PathBuf::from(val));
                 } else if let Some(val) = other.strip_prefix("--target=") {
                     target_triple = Some(val.to_string());
+                } else if let Some(val) = other.strip_prefix("--cpu=") {
+                    target_cpu = Some(val.to_string());
                 } else if let Some(val) = other.strip_prefix("--linker-script=") {
                     linker_script = Some(PathBuf::from(val));
                 } else if let Some(val) = other.strip_prefix("--opt-level=") {
@@ -548,6 +561,9 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
         simple_compiler::pipeline::native_project::set_target_override(*t);
     }
     config.target = target;
+    if let Some(ref cpu) = target_cpu {
+        std::env::set_var("SIMPLE_NATIVE_CPU", cpu);
+    }
 
     // Normalize backend aliases
     if backend == "llvm-lib" {

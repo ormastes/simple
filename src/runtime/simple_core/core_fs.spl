@@ -12,6 +12,7 @@ extern fn fopen(path: i64, mode: i64) -> i64
 extern fn fclose(stream: i64) -> i64
 extern fn fread(ptr: i64, size: i64, count: i64, stream: i64) -> i64
 extern fn fwrite(ptr: i64, size: i64, count: i64, stream: i64) -> i64
+extern fn ferror(stream: i64) -> i64
 extern fn fseek(stream: i64, offset: i64, whence: i64) -> i64
 extern fn ftell(stream: i64) -> i64
 extern fn open(path: i64, flags: i64) -> i64
@@ -21,11 +22,19 @@ extern fn lseek(fd: i64, offset: i64, whence: i64) -> i64
 extern fn mmap(addr: i64, length: i64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
 extern fn munmap(addr: i64, length: i64) -> i64
 extern fn mkdir(path: i64, mode: i64) -> i64
+extern fn opendir(path: i64) -> i64
+extern fn readdir(dir: i64) -> i64
+extern fn closedir(dir: i64) -> i64
 extern fn rt_string_data(value: i64) -> i64
 extern fn rt_string_len(value: i64) -> i64
 extern fn rt_string_new(bytes: i64, len: i64) -> i64
+extern fn rt_array_new(cap: i64) -> i64
+extern fn rt_array_push(array: i64, value: i64) -> i8
+extern fn rt_byte_array_new_len(len: i64) -> i64
 extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
+extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
 extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
 
 fn fs_copy_cstr(ptr: i64, len: i64) -> i64:
     if ptr < 1 or len < 0:
@@ -66,6 +75,16 @@ fn make_mode_a() -> i64:
     spl_store_u8(buf, 1, 98)
     spl_store_u8(buf, 2, 0)
     return buf
+
+fn make_mode_rw(create: bool) -> i64:
+    val buf = malloc(4)
+    if buf < 1:
+        return 0
+    spl_store_u8(buf, 0, if create: 119 else: 114)
+    spl_store_u8(buf, 1, 43)
+    spl_store_u8(buf, 2, 98)
+    spl_store_u8(buf, 3, 0)
+    buf
 
 # --- File Existence ---
 
@@ -125,6 +144,35 @@ pub fn rt_file_read_text_rv(path: i64) -> i64:
         return rt_string_new(0, 0)
     return rt_file_read_text(ptr, len)
 
+pub fn rt_file_read_bytes(path_ptr_raw: i64, path_len: i64) -> i64:
+    val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
+    if path_ptr < 1:
+        return 3
+    val fd = open(path_ptr, 0)
+    free(path_ptr)
+    if fd < 0:
+        return 3
+    val size = lseek(fd, 0, 2)
+    lseek(fd, 0, 0)
+    if size < 0:
+        close(fd)
+        return 3
+    val out = rt_byte_array_new_len(size)
+    if out < 4096 or (out & 7) != 1:
+        close(fd)
+        return 3
+    if size > 0:
+        val out_ptr = out & -8
+        val data = spl_load_i64(out_ptr, 24)
+        val bytes_read = read(fd, data, size)
+        if bytes_read < 0:
+            close(fd)
+            return 3
+        if bytes_read < size:
+            spl_store_i64(out_ptr, 8, bytes_read)
+    close(fd)
+    out
+
 pub fn rt_file_preload_pages(path: i64) -> i64:
     val raw_ptr = rt_string_data(path)
     val raw_len = rt_string_len(path)
@@ -167,16 +215,57 @@ fn file_write_with_mode(path_ptr_raw: i64, path_len: i64, content_ptr: i64, cont
     free(mode_str)
     if f < 1:
         return 0
-    if content_ptr > 0 and content_len > 0:
-        fwrite(content_ptr, 1, content_len, f)
+    var written = 0
+    if content_len > 0:
+        if content_ptr < 1:
+            fclose(f)
+            return 0
+        written = fwrite(content_ptr, 1, content_len, f)
     fclose(f)
-    return 1
+    return if written == content_len: 1 else: 0
 
 pub fn rt_file_write_text(path_ptr: i64, path_len: i64, content_ptr: i64, content_len: i64) -> i8:
     val mode = make_mode_w()
     if mode < 1:
         return 0
     return file_write_with_mode(path_ptr, path_len, content_ptr, content_len, mode)
+
+pub fn rt_file_write_bytes(path_ptr: i64, path_len: i64, data_ptr: i64, data_len: i64) -> i8:
+    val mode = make_mode_w()
+    if mode < 1:
+        return 0
+    file_write_with_mode(path_ptr, path_len, data_ptr, data_len, mode)
+
+pub fn rt_file_write_text_at(path: i64, offset: i64, data: i64) -> i64:
+    if offset < 0:
+        return -1
+    val path_ptr = fs_copy_cstr(rt_string_data(path), rt_string_len(path))
+    if path_ptr < 1:
+        return -1
+    var mode = make_mode_rw(false)
+    if mode < 1:
+        free(path_ptr)
+        return -1
+    var f = fopen(path_ptr, mode)
+    free(mode)
+    if f < 1:
+        mode = make_mode_rw(true)
+        if mode < 1:
+            free(path_ptr)
+            return -1
+        f = fopen(path_ptr, mode)
+        free(mode)
+    free(path_ptr)
+    if f < 1:
+        return -1
+    if fseek(f, offset, 0) != 0:
+        fclose(f)
+        return -1
+    val data_ptr = rt_string_data(data)
+    val data_len = rt_string_len(data)
+    val written = fwrite(data_ptr, 1, data_len, f)
+    fclose(f)
+    written
 
 pub fn rt_file_append_text(path_ptr: i64, path_len: i64, content_ptr: i64, content_len: i64) -> i8:
     val mode = make_mode_a()
@@ -196,6 +285,69 @@ pub fn rt_file_delete(path: i64) -> i64:
     if result < 0:
         return 0
     return 1
+
+pub fn rt_file_remove(path_ptr: i64, path_len: i64) -> i8:
+    val cstr = fs_copy_cstr(path_ptr, path_len)
+    if cstr < 1:
+        return 0
+    val result = remove(cstr)
+    free(cstr)
+    return if result == 0: 1 else: 0
+
+pub fn rt_file_copy(src_ptr: i64, src_len: i64, dst_ptr: i64, dst_len: i64) -> i8:
+    val src = fs_copy_cstr(src_ptr, src_len)
+    val dst = fs_copy_cstr(dst_ptr, dst_len)
+    if src < 1 or dst < 1:
+        if src > 0: free(src)
+        if dst > 0: free(dst)
+        return 0
+    val read_mode = make_mode_r()
+    val write_mode = make_mode_w()
+    if read_mode < 1 or write_mode < 1:
+        if read_mode > 0: free(read_mode)
+        if write_mode > 0: free(write_mode)
+        free(src)
+        free(dst)
+        return 0
+    val input = fopen(src, read_mode)
+    free(read_mode)
+    if input < 1:
+        free(src)
+        free(dst)
+        free(write_mode)
+        return 0
+    val output = fopen(dst, write_mode)
+    free(src)
+    free(dst)
+    free(write_mode)
+    if output < 1:
+        fclose(input)
+        return 0
+    val buffer = malloc(4096)
+    if buffer < 1:
+        fclose(input)
+        fclose(output)
+        return 0
+    var ok = 1
+    var count = fread(buffer, 1, 4096, input)
+    while count > 0:
+        if fwrite(buffer, 1, count, output) != count:
+            ok = 0
+            count = 0
+        else:
+            count = fread(buffer, 1, 4096, input)
+    if ferror(input) != 0:
+        ok = 0
+    free(buffer)
+    fclose(input)
+    fclose(output)
+    ok as i8
+
+# ponytail: guest stat lacks mtime; zero disables cache freshness until VFS stat returns it.
+pub fn rt_file_stat(path_ptr: i64, path_len: i64) -> i64:
+    val _ = path_ptr
+    val _ = path_len
+    0
 
 # --- File Size ---
 
@@ -219,40 +371,36 @@ pub fn rt_file_size(path_ptr_raw: i64, path_len: i64) -> i64:
 
 # --- Directory Creation (mkdir -p) ---
 
-fn mkdir_one(path_ptr: i64) -> i64:
-    if path_ptr < 1:
-        return 0
-    val result = mkdir(path_ptr, 511)
-    if result < 0:
-        # Check if it already exists by trying to open as directory
-        # Use fopen with "r" — if it succeeds it could be a file or dir,
-        # but for mkdir -p semantics this is acceptable
-        val mode = make_mode_r()
-        if mode < 1:
-            return 0
-        # Try stat-like check: if path is already a dir, mkdir returns EEXIST
-        # We'll just return success since the path exists
-        free(mode)
-        return 1
-    return 1
-
-pub fn rt_dir_create_all(path_ptr_raw: i64, path_len: i64) -> i8:
+pub fn rt_dir_exists(path_ptr_raw: i64, path_len: i64) -> i8:
     val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
     if path_ptr < 1:
         return 0
-    if path_len < 1:
-        free(path_ptr)
+    val dir = opendir(path_ptr)
+    free(path_ptr)
+    if dir < 1:
         return 0
-    # Copy path string so we can modify it in-place
-    val copy = malloc(path_len + 1)
+    closedir(dir)
+    1
+
+pub fn rt_dir_create(path_ptr: i64, path_len: i64, recursive: i8) -> i8:
+    if recursive != 0:
+        return rt_dir_create_all(path_ptr, path_len)
+    val cstr = fs_copy_cstr(path_ptr, path_len)
+    if cstr < 1:
+        return 0
+    val result = mkdir(cstr, 511)
+    free(cstr)
+    if result == 0:
+        return 1
+    rt_dir_exists(path_ptr, path_len)
+
+pub fn rt_dir_create_all(path_ptr_raw: i64, path_len: i64) -> i8:
+    val copy = fs_copy_cstr(path_ptr_raw, path_len)
     if copy < 1:
-        free(path_ptr)
         return 0
-    var i = 0
-    while i < path_len:
-        spl_store_u8(copy, i, spl_load_u8(path_ptr, i))
-        i = i + 1
-    spl_store_u8(copy, path_len, 0)
+    if path_len < 1:
+        free(copy)
+        return 0
     # Walk through path, creating each component
     var pos = 0
     # Skip leading slash
@@ -263,14 +411,88 @@ pub fn rt_dir_create_all(path_ptr_raw: i64, path_len: i64) -> i8:
         if ch > 46 and ch < 48:
             # Found '/' (ASCII 47) — temporarily NUL-terminate and mkdir
             spl_store_u8(copy, pos, 0)
-            mkdir(copy, 511)
+            if mkdir(copy, 511) != 0 and rt_dir_exists(copy, pos) == 0:
+                free(copy)
+                return 0
             spl_store_u8(copy, pos, 47)
         pos = pos + 1
     # mkdir the final component
-    mkdir(copy, 511)
-    free(path_ptr)
+    if mkdir(copy, 511) != 0 and rt_dir_exists(copy, path_len) == 0:
+        free(copy)
+        return 0
     free(copy)
     return 1
 
 pub fn rt_mkdir_p(path: i64) -> i64:
-    return rt_dir_create_all(path)
+    return rt_dir_create_all(rt_string_data(path), rt_string_len(path))
+
+pub fn rt_dir_list(path_ptr_raw: i64, path_len: i64) -> i64:
+    val path_ptr = fs_copy_cstr(path_ptr_raw, path_len)
+    if path_ptr < 1:
+        return 3
+    val dir = opendir(path_ptr)
+    free(path_ptr)
+    if dir < 1:
+        return 3
+    val out = rt_array_new(8)
+    if out < 4096:
+        closedir(dir)
+        return 3
+    var entry = readdir(dir)
+    while entry > 0:
+        val name = entry + 9
+        val len = strlen(name)
+        val dot = len == 1 and spl_load_u8(name, 0) == 46
+        val dotdot = len == 2 and spl_load_u8(name, 0) == 46 and spl_load_u8(name, 1) == 46
+        if not dot and not dotdot:
+            rt_array_push(out, rt_string_new(name, len))
+        entry = readdir(dir)
+    closedir(dir)
+    out
+
+pub fn rt_path_join(left_ptr: i64, left_len: i64, right_ptr: i64, right_len: i64) -> i64:
+    if right_len > 0 and spl_load_u8(right_ptr, 0) == 47:
+        return rt_string_new(right_ptr, right_len)
+    if left_len <= 0:
+        return rt_string_new(right_ptr, right_len)
+    if right_len <= 0:
+        return rt_string_new(left_ptr, left_len)
+    val needs_slash = spl_load_u8(left_ptr, left_len - 1) != 47
+    val total = left_len + right_len + (if needs_slash: 1 else: 0)
+    val data = malloc(total)
+    if data < 1:
+        return 3
+    var pos = 0
+    while pos < left_len:
+        spl_store_u8(data, pos, spl_load_u8(left_ptr, pos))
+        pos = pos + 1
+    if needs_slash:
+        spl_store_u8(data, pos, 47)
+        pos = pos + 1
+    var i = 0
+    while i < right_len:
+        spl_store_u8(data, pos + i, spl_load_u8(right_ptr, i))
+        i = i + 1
+    val out = rt_string_new(data, total)
+    free(data)
+    out
+
+pub fn rt_path_parent(path_ptr: i64, path_len: i64) -> i64:
+    if path_len <= 0:
+        return rt_string_new(0, 0)
+    var end = path_len
+    while end > 1 and spl_load_u8(path_ptr, end - 1) == 47:
+        end = end - 1
+    var slash = end - 1
+    while slash >= 0 and spl_load_u8(path_ptr, slash) != 47:
+        slash = slash - 1
+    if slash < 0:
+        val dot = malloc(1)
+        if dot < 1: return 3
+        spl_store_u8(dot, 0, 46)
+        val out = rt_string_new(dot, 1)
+        free(dot)
+        return out
+    if slash == 0:
+        return rt_string_new(path_ptr, 1)
+    rt_string_new(path_ptr, slash)

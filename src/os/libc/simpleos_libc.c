@@ -322,6 +322,38 @@ FILE *stdin  = &_stdin_f;
 FILE *stdout = &_stdout_f;
 FILE *stderr = &_stderr_f;
 
+/* SimpleCore's current AOT path cannot retain mutable module globals. */
+static int64_t simpleos_runtime_argc_value;
+static int64_t simpleos_runtime_argv_value;
+extern int64_t rt_array_new(int64_t cap);
+extern int8_t rt_array_push(int64_t array, int64_t value);
+extern int64_t rt_array_len(int64_t array);
+extern int64_t rt_string_new(int64_t bytes, int64_t len);
+
+int64_t rt_array_len_safe(int64_t value) {
+    if (value == 0 || value == 3) return 0;
+    return rt_array_len(value);
+}
+
+void simpleos_runtime_set_args(int64_t argc, int64_t argv) {
+    simpleos_runtime_argc_value = argc;
+    simpleos_runtime_argv_value = argv;
+}
+
+int64_t simpleos_runtime_argc(void) { return simpleos_runtime_argc_value; }
+int64_t simpleos_runtime_argv(void) { return simpleos_runtime_argv_value; }
+
+int64_t simpleos_runtime_cli_get_args(void) {
+    char **argv = (char **)(uintptr_t)simpleos_runtime_argv_value;
+    int64_t args = rt_array_new(simpleos_runtime_argc_value);
+    for (int64_t i = 0; i < simpleos_runtime_argc_value; i++) {
+        const char *arg = argv && argv[i] ? argv[i] : "";
+        rt_array_push(args, rt_string_new((int64_t)(uintptr_t)arg,
+                                          (int64_t)strlen(arg)));
+    }
+    return args;
+}
+
 ssize_t write(int fd, const void *buf, size_t count) {
     if (running_on_linux_host()) {
         int64_t r = linux_syscall3(1, fd, (int64_t)(uintptr_t)buf, (int64_t)count);

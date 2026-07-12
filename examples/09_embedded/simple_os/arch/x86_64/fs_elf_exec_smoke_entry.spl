@@ -52,6 +52,19 @@ extern fn simpleos_fat32_path_read_buffer_addr() -> u64
 extern fn simpleos_fat32_stream_open(path: text) -> i64
 extern fn simpleos_fat32_stream_read_at(file_off: u64, dst: u64, len: u64) -> i64
 
+fn _read_elf_range(prefix: u64, file_off: u64, dst: u64, len: u64) -> i64:
+    val prefix_bytes: u64 = 65536
+    var copied: u64 = 0
+    while copied < len and file_off + copied < prefix_bytes:
+        mmio_write8(dst + copied, _rd8(prefix, file_off + copied) as u8)
+        copied = copied + 1
+    if copied < len:
+        val streamed = simpleos_fat32_stream_read_at(file_off + copied, dst + copied, len - copied)
+        if streamed < 0:
+            return streamed
+        copied = copied + (streamed as u64)
+    copied as i64
+
 # Stage D: build the SysV stack for `clang -cc1 -emit-obj /hello.c -o /hello.o`.
 extern fn rt_bare_build_cc1_stack(stack_phys: u64, base_va: u64) -> u64
 
@@ -156,16 +169,18 @@ fn _map_elf64(space: AddressSpace, blob: u64) -> u64:
                 val sv = _rd64(blob, ph + 16)
                 val foff = _rd64(blob, ph + 8)
                 val fsz = _rd64(blob, ph + 32)
-                var cs = va
-                if cs < sv:
-                    cs = sv
-                var ce = va + PAGE
+                var copy_start = va
+                if copy_start < sv:
+                    copy_start = sv
+                var copy_end = va + PAGE
                 val sfe = sv + fsz
-                if ce > sfe:
-                    ce = sfe
-                if cs < ce:
-                    val _n = simpleos_fat32_stream_read_at(foff + (cs - sv), phys + (cs - va), ce - cs)
-                    if _n < 0:
+                if copy_end > sfe:
+                    copy_end = sfe
+                if copy_start < copy_end:
+                    val read_off = foff + (copy_start - sv)
+                    val read_len = copy_end - copy_start
+                    val _n = _read_elf_range(blob, read_off, phys + (copy_start - va), read_len)
+                    if _n != read_len as i64:
                         serial_println("[fsexec] FAIL stream read foff=0x{foff} va=0x{va}")
                         return 0
             k = k + 1
@@ -284,7 +299,7 @@ fn spl_start():
         return
     val blob = simpleos_fat32_path_read_buffer_addr()
     val _hn = simpleos_fat32_stream_read_at(0, blob, 65536)
-    if _hn <= 0:
+    if _hn != 65536:
         _fail("[fsexec] FAIL stream header read rc={_hn}")
         return
     serial_println("[fsexec] stream /FSEXEC.ELF ok size={fsize} hdr=0x{blob}")

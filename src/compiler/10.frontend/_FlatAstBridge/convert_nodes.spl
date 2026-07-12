@@ -86,7 +86,7 @@ fn flat_bootstrap_function_at(index: i64) -> Function:
             if seen == index:
                 if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
                     eprint("[flat-bridge] fn-at:decl {decl_idx}")
-                val fn_ = convert_decl_fn(decl_idx)
+                val fn_: Function = convert_decl_fn(decl_idx)
                 if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
                     eprint("[flat-bridge] fn-at:done")
                 return fn_
@@ -176,6 +176,11 @@ fn convert_decl_is_public(idx: i64) -> bool:
 fn convert_flat_type(type_expr_idx: i64) -> Type:
     if type_expr_idx <= 0:
         return Type(kind: TypeKind.Infer, span: make_span())
+    # Stage4 generic equality tags the parameter but reads TYPE_* module vals
+    # raw (2 became 16 and falsely matched TYPE_OPTION_F64).  Ordered literal
+    # bounds keep the authoritative flat i64 tag on the raw integer path.
+    if type_expr_idx > 1 and type_expr_idx < 3:
+        return Type(kind: TypeKind.Named("i64", []), span: make_span())
     if type_expr_idx == TYPE_VOID:
         return Type(kind: TypeKind.Named("void", []), span: make_span())
     if type_expr_idx == TYPE_BOOL:
@@ -922,6 +927,8 @@ fn convert_decl_fn(idx: i64) -> Function:
         pi = pi + 1
 
     val ret = decl_get_ret_type(idx)
+    if flat_bridge_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
+        eprint("[simpleos-flat-ret] name={name} tag={ret}")
     val body = decl_get_body(idx)
     var stmts: [Stmt] = []
     var si = 0
@@ -937,7 +944,7 @@ fn convert_decl_fn(idx: i64) -> Function:
     # Infer return type, silently dropping every declared return type through
     # the flat-AST bridge. Thread the real return type through instead.
     val has_ret = ret > 0
-    val inferred_ret = if has_ret: convert_flat_type(ret) else: Type(kind: TypeKind.Infer, span: span)
+    val inferred_ret: Type = if has_ret: convert_flat_type(ret) else: Type(kind: TypeKind.Infer, span: span)
     val body_block = Block(stmts: stmts, span: span)
     var fn_attributes: [Attribute] = []
     if decl_get_is_gpu_kernel(idx) != 0:
@@ -965,7 +972,7 @@ fn convert_decl_fn(idx: i64) -> Function:
             for cn in clocked_names:
                 clocked_args.push(Expr(kind: ExprKind.Ident(cn), span: span))
             fn_attributes.push(Attribute(name: "clocked", args: clocked_args, span: span))
-    val converted = parser_function_new(
+    val converted: Function = parser_function_new(
         name,
         [],
         fn_params,

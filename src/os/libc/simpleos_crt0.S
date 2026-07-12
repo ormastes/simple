@@ -42,6 +42,10 @@ _start:
     /* Zero BSS segment */
     lea     rdi, [rip + __bss_start]
     lea     rcx, [rip + __bss_end]
+    test    rcx, rcx
+    jz      .Lbss_done          /* generic links may leave weak end undefined */
+    cmp     rdi, rcx
+    jae     .Lbss_done          /* reject missing/reversed linker boundaries */
     sub     rcx, rdi
     jz      .Lbss_done          /* skip if BSS is empty */
     xor     eax, eax
@@ -54,6 +58,15 @@ _start:
     /* Publish environ before constructors; host smoke has envp, SimpleOS may not. */
     lea     rdi, [rip + environ]
     mov     qword ptr [rdi], r14
+
+    /* Publish argc/argv for SimpleCore's rt_cli_get_args when linked. */
+    lea     rax, [rip + rt_set_args]
+    test    rax, rax
+    jz      .Largs_published
+    mov     rdi, r12
+    mov     rsi, r13
+    call    rax
+.Largs_published:
 
     /* Initialize C++ constructors and libc (.init_array) */
     call    __libc_init_array
@@ -81,6 +94,7 @@ _start:
  */
 .weak __bss_start
 .weak __bss_end
+.weak rt_set_args
 
 /*
  * environ: real .bss storage for the POSIX environment pointer that crt0

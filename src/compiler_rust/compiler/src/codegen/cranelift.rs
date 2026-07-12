@@ -31,8 +31,9 @@ impl Codegen {
         let settings = BackendSettings::aot_for_target(target);
         let (_flags, isa) = create_isa_and_flags(&settings)?;
 
-        let builder = ObjectBuilder::new(isa, "simple_module", cranelift_module::default_libcall_names())
+        let mut builder = ObjectBuilder::new(isa, "simple_module", cranelift_module::default_libcall_names())
             .map_err(|e| BackendError::ModuleError(e.to_string()))?;
+        builder.per_function_section(true).per_data_object_section(true);
 
         let module = ObjectModule::new(builder);
         let backend = CodegenBackend::with_module_and_target(module, target)?;
@@ -59,8 +60,9 @@ impl Codegen {
             .with_cpu(cpu);
         let (_flags, isa) = create_isa_and_flags(&settings)?;
 
-        let builder = ObjectBuilder::new(isa, "simple_module", cranelift_module::default_libcall_names())
+        let mut builder = ObjectBuilder::new(isa, "simple_module", cranelift_module::default_libcall_names())
             .map_err(|e| BackendError::ModuleError(e.to_string()))?;
+        builder.per_function_section(true).per_data_object_section(true);
 
         let module = ObjectModule::new(builder);
         let backend = CodegenBackend::with_module_and_target(module, target)?;

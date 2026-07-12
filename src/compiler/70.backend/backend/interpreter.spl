@@ -9,12 +9,9 @@ use compiler.hir.hir.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.backend.backend_types.*
 use compiler.backend.backend.env.{EvalContext, Environment}
-use compiler.backend.sffi_minimal as sffi  # SFFI wrappers for print/file/env operations
 use compiler.backend.backend.interpreter_calls.*
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
-extern fn rt_host_gpu_lane_event(lane_code: i64, phase_code: i64) -> i64
-extern fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_handle: i64) -> i64
 extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: HirExprKind) -> i64
 
@@ -104,7 +101,6 @@ impl InterpreterBackendImpl:
         # element to a typed local `val f: HirFunction = ...` restores the real
         # struct type so field access resolves the correct index (proven with a
         # minimal field-name-collision repro, iteration 9).
-        var has_main = false
         # Iterate .values() (not .keys()+re-index) and bind each element to a
         # typed local `val sym: Symbol`. `module.symbols.symbols` is a
         # Dict<i64, Symbol>, but the seed erases Dict<K,V> to ANY, so both
@@ -118,8 +114,6 @@ impl InterpreterBackendImpl:
             val sym: Symbol = sym_
             val g_fv: FunctionValue = FunctionValue(symbol: sym.id, name: sym.name)
             ctx.env.define_global(sym.name, Value.Function(g_fv))
-            if sym.name == "main":
-                has_main = true
 
         for fn_ in module.functions.values():
             val f: HirFunction = fn_
@@ -127,21 +121,14 @@ impl InterpreterBackendImpl:
             val g_fv2: FunctionValue = FunctionValue(symbol: fsym, name: f.name)
             ctx.env.define_global(f.name, Value.Function(g_fv2))
 
-        if has_main:
-            for fn_ in module.functions.values():
-                val f: HirFunction = fn_
-                # Match main by NAME, not by `f.symbol.id`. HirFunction.symbol is a
-                # SymbolId whose boxed pointer is left nil for the synthetic `-c`
-                # main by single-file HIR lowering, so `f.symbol.id` dereferences
-                # nil and traps ("field access on nil receiver", iteration 10). The
-                # `name` field (a plain text) is populated, and the symbol-table
-                # scan above already confirmed a symbol literally named "main".
-                if f.name == "main":
-                    val result = self.call_hir_function(f, [], ctx)?
-                    return Ok(BackendResult.Value(result))
-            Ok(BackendResult.Unit)
-        else:
-            Ok(BackendResult.Unit)
+        for fn_ in module.functions.values():
+            val f: HirFunction = fn_
+            # Match main by the function's own name. Requiring a duplicate symbol
+            # table entry silently skipped valid single-file modules.
+            if f.name == "main":
+                val result = self.call_hir_function(f, [], ctx)?
+                return Ok(BackendResult.Value(result))
+        Err(BackendError.runtime_error("module has no main function", nil))
 
     fn process_function(fn_: HirFunction) -> Result<BackendResult, BackendError>:
         Ok(BackendResult.Unit)
@@ -268,7 +255,10 @@ impl InterpreterBackendImpl:
 
             case HirExprKind.StringLit(value, _):
                 itrace("[EE] StringLit arm")
-                Ok(Value.String(value))
+                # Hoist nested enum construction: direct Ok(Value.String(...))
+                # loses the inner payload on the current stage4 AOT path.
+                val string_value: Value = Value.String(value)
+                Ok(string_value)
 
             case HirExprKind.BoolLit(value):
                 itrace("[EE] BoolLit arm")
@@ -432,7 +422,13 @@ impl InterpreterBackendImpl:
                 for arg in call_args_t:
                     val arg_t: HirCallArg = arg
                     val arg_value_t: HirExpr = arg_t.value
-                    val v = self.eval_expr(arg_value_t, ctx)?
+                    # Keep the nested Result<Value> payload typed across the
+                    # stage4 boundary.  The `?` lowering can substitute NIL
+                    # when the Ok payload is itself an enum value.
+                    val evaluated_arg: Result<Value, BackendError> = self.eval_expr(arg_value_t, ctx)
+                    if evaluated_arg.is_err():
+                        return Err(evaluated_arg.unwrap_err())
+                    val v: Value = evaluated_arg.unwrap()
                     arg_values = arg_values.push(v)
                 # Builtin fast-path keyed on the callee NAME: the Value.Function
                 # payload channel loses its FunctionValue on stage4 ([CF]
@@ -556,11 +552,11 @@ impl InterpreterBackendImpl:
 
             case HirExprKind.HostGpuLane(lane_code, payload_size, marker, body):
                 self.eval_expr(marker, ctx)?
-                rt_host_gpu_lane_event(lane_code, 1)
                 if lane_code == 2:
-                    rt_host_gpu_queue_emit(lane_code, 1, payload_size, 0)
+                    return Err(BackendError.not_implemented(
+                        "GPU target.later is unavailable in the SimpleOS standalone interpreter"))
+                val _ = payload_size
                 self.eval_block(body, ctx)?
-                rt_host_gpu_lane_event(lane_code, 2)
                 Ok(Value.Nil)
 
             # Seed treats these no-payload patterns as irrefutable, so they must

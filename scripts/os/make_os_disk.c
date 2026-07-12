@@ -441,6 +441,12 @@ int main(int argc, char **argv)
     int sys_cluster = alloc_clusters((const unsigned char *)"", 0);
     int apps_cluster = alloc_clusters((const unsigned char *)"", 0);
     int perf_cluster = alloc_clusters((const unsigned char *)"", 0);
+    int usr_cluster = alloc_clusters((const unsigned char *)"", 0);
+    int usr_bin_cluster = alloc_clusters((const unsigned char *)"", 0);
+    int usr_lib_cluster = alloc_clusters((const unsigned char *)"", 0);
+    int bin_cluster = alloc_clusters((const unsigned char *)"", 0);
+    int sysrt_cluster = alloc_clusters((const unsigned char *)"", 0);
+    int tmp_cluster = alloc_clusters((const unsigned char *)"", 0);
 
     const char *hello_marker = strcmp(platform, "riscv64") == 0 ? "SIMPLEOS_RISCV64_HELLO_ELF" :
         strcmp(platform, "riscv32") == 0 ? "SIMPLEOS_RISCV32_HELLO_ELF" :
@@ -456,13 +462,24 @@ int main(int argc, char **argv)
     struct bytes kernel_file = read_file(kernel_path);
     struct bytes bootloader_file = read_file(getenv("SIMPLEOS_UEFI_BOOTLOADER"));
     struct bytes simple_payload = read_simpleos_simple_payload();
+    struct bytes clang_payload = read_file(getenv("SIMPLEOS_CLANG_BINARY"));
+    struct bytes llc_payload = read_file(getenv("SIMPLEOS_LLC_BINARY"));
+    struct bytes lld_payload = read_file(getenv("SIMPLEOS_LLD_BINARY"));
+    struct bytes crt0_payload = read_file(getenv("SIMPLEOS_CRT0_OBJECT"));
+    struct bytes runtime_payload = read_file(getenv("SIMPLEOS_RUNTIME_ARCHIVE"));
+    struct bytes libc_payload = read_file(getenv("SIMPLEOS_LIBC_ARCHIVE"));
+    struct bytes linker_script_payload = read_file(getenv("SIMPLEOS_LINKER_SCRIPT"));
+    struct bytes simple_entry_payload = read_file(getenv("SIMPLEOS_SIMPLE_ENTRY_OBJECT"));
+    struct bytes hello_object_payload = read_file(getenv("SIMPLEOS_HELLO_OBJECT"));
+    struct bytes hello_ir_payload = read_file(getenv("SIMPLEOS_HELLO_IR"));
+    struct bytes fsexec_payload = read_file(getenv("SIMPLEOS_FSEXEC_BINARY"));
     struct bytes cfat4k = read_cfat4k_baseline();
     struct bytes kernel = kernel_file.len ? kernel_file : text_bytes("SIMPLEOS_UEFI_KERNEL_MISSING\n");
     struct bytes bootloader = bootloader_file.len ? bootloader_file : text_bytes("SIMPLEOS_UEFI_BOOTLOADER_MISSING\n");
     struct bytes limine = text_bytes("timeout: 0\nserial: yes\n/ SimpleOS\nprotocol: multiboot1\npath: boot():/kernel.elf\ntextmode: no\nresolution: 1024x768x32\ncmdline: console=serial root=/dev/nvme0n1\n");
     struct bytes hello_txt = text_bytes("Hello from SimpleOS\n");
     struct bytes numbers_txt = text_bytes("5\n");
-    struct bytes hello_spl = text_bytes("fn main:\n    print \"Hello from SimpleOS\"\n");
+    struct bytes hello_spl = text_bytes("fn main() -> i64:\n    print \"Hello from SimpleOS\"\n    return 0\n");
     struct bytes nvfs = textf("nvfs-image-version=1\nplatform=%s\nlane=%s\n", platform, lane);
     struct bytes toolset = textf("lane = \"%s\"\nmode=native-filesystem-app\nstatus=standalone-required\n", lane);
     struct bytes markers = textf(
@@ -538,6 +555,20 @@ int main(int argc, char **argv)
     int interpreter_cluster = alloc_clusters(simple_interpreter.data, simple_interpreter.len);
     int loader_cluster = alloc_clusters(simple_loader.data, simple_loader.len);
     int simple_cluster = alloc_clusters(simple_cli.data, simple_cli.len);
+    int simple_usr_cluster = simple_payload.len ? alloc_clusters(simple_payload.data, simple_payload.len) : 0;
+    int simple_bin_cluster = simple_payload.len ? alloc_clusters(simple_payload.data, simple_payload.len) : 0;
+    int simple_apps_cluster = simple_payload.len ? alloc_clusters(simple_payload.data, simple_payload.len) : 0;
+    int clang_bin_cluster = clang_payload.len ? alloc_clusters(clang_payload.data, clang_payload.len) : 0;
+    int llc_bin_cluster = llc_payload.len ? alloc_clusters(llc_payload.data, llc_payload.len) : 0;
+    int lld_bin_cluster = lld_payload.len ? alloc_clusters(lld_payload.data, lld_payload.len) : 0;
+    int crt0_cluster = crt0_payload.len ? alloc_clusters(crt0_payload.data, crt0_payload.len) : 0;
+    int runtime_cluster = runtime_payload.len ? alloc_clusters(runtime_payload.data, runtime_payload.len) : 0;
+    int libc_cluster = libc_payload.len ? alloc_clusters(libc_payload.data, libc_payload.len) : 0;
+    int linker_script_cluster = linker_script_payload.len ? alloc_clusters(linker_script_payload.data, linker_script_payload.len) : 0;
+    int simple_entry_cluster = simple_entry_payload.len ? alloc_clusters(simple_entry_payload.data, simple_entry_payload.len) : 0;
+    int hello_object_cluster = hello_object_payload.len ? alloc_clusters(hello_object_payload.data, hello_object_payload.len) : 0;
+    int hello_ir_cluster = hello_ir_payload.len ? alloc_clusters(hello_ir_payload.data, hello_ir_payload.len) : 0;
+    int fsexec_cluster = fsexec_payload.len ? alloc_clusters(fsexec_payload.data, fsexec_payload.len) : 0;
     int llvm_cluster = alloc_clusters(llvm_app.data, llvm_app.len);
     int clang_cluster = alloc_clusters(clang_app.data, clang_app.len);
     int rust_cluster = alloc_clusters(rust_app.data, rust_app.len);
@@ -545,15 +576,25 @@ int main(int argc, char **argv)
     int cfat4k_cluster = cfat4k.len ? alloc_clusters(cfat4k.data, cfat4k.len) : 0;
     int fat4k_cluster = alloc_clusters(fat4k.data, fat4k.len);
 
-    unsigned char root[4096] = {0}, efi[4096] = {0}, boot[4096] = {0}, sys[4096] = {0}, apps[4096] = {0}, perf[4096] = {0};
-    int root_n = 0, efi_n = 0, boot_n = 0, sys_n = 0, apps_n = 0, perf_n = 0;
+    unsigned char root[4096] = {0}, efi[4096] = {0}, boot[4096] = {0}, sys[4096] = {0}, apps[4096] = {0}, perf[4096] = {0}, usr[4096] = {0}, usr_bin[4096] = {0}, usr_lib[4096] = {0}, bin[4096] = {0}, sysrt[4096] = {0};
+    int root_n = 0, efi_n = 0, boot_n = 0, sys_n = 0, apps_n = 0, perf_n = 0, usr_n = 0, usr_bin_n = 0, usr_lib_n = 0, bin_n = 0, sysrt_n = 0;
     put_dir_entry(root, &root_n, "EFI        ", efi_cluster, 0, 0x10);
     put_dir_entry(root, &root_n, "SYS        ", sys_cluster, 0, 0x10);
+    put_dir_entry(root, &root_n, "USR        ", usr_cluster, 0, 0x10);
+    put_dir_entry(root, &root_n, "BIN        ", bin_cluster, 0, 0x10);
+    put_dir_entry(root, &root_n, "SYSRT      ", sysrt_cluster, 0, 0x10);
+    put_dir_entry(root, &root_n, "TMP        ", tmp_cluster, 0, 0x10);
     put_dir_entry(root, &root_n, "KERNEL  ELF", kernel_cluster, kernel.len, 0x20);
     put_dir_entry(root, &root_n, "LIMINE  CNF", limine_cluster, limine.len, 0x20);
     put_dir_entry(root, &root_n, "HELLO   TXT", hello_txt_cluster, hello_txt.len, 0x20);
     put_dir_entry(root, &root_n, "NUMBERS TXT", numbers_cluster, numbers_txt.len, 0x20);
     put_dir_entry(root, &root_n, "HELLO   SPL", hello_spl_cluster, hello_spl.len, 0x20);
+    if (hello_object_cluster)
+        put_dir_entry(root, &root_n, "HELLO   O  ", hello_object_cluster, hello_object_payload.len, 0x20);
+    if (hello_ir_cluster)
+        put_dir_entry(root, &root_n, "HELLO   LL ", hello_ir_cluster, hello_ir_payload.len, 0x20);
+    if (fsexec_cluster)
+        put_dir_entry(root, &root_n, "FSEXEC  ELF", fsexec_cluster, fsexec_payload.len, 0x20);
     put_dir_entry(efi, &efi_n, "BOOT       ", boot_cluster, 0, 0x10);
     put_dir_entry(boot, &boot_n, "BOOTX64 EFI", bootloader_cluster, bootloader.len, 0x20);
     put_dir_entry(sys, &sys_n, "APPS       ", apps_cluster, 0, 0x10);
@@ -580,6 +621,29 @@ int main(int argc, char **argv)
     put_dir_entry(apps, &apps_n, "SINTSMF SMF", interpreter_cluster, simple_interpreter.len, 0x20);
     put_dir_entry(apps, &apps_n, "SLOADSMFSMF", loader_cluster, simple_loader.len, 0x20);
     put_dir_entry(apps, &apps_n, "SIMPLSTCSMF", simple_cluster, simple_cli.len, 0x20);
+    if (simple_usr_cluster) {
+        put_dir_entry(usr, &usr_n, "BIN        ", usr_bin_cluster, 0, 0x10);
+        put_dir_entry(usr, &usr_n, "LIB        ", usr_lib_cluster, 0, 0x10);
+        put_dir_entry(usr_bin, &usr_bin_n, "SIMPLE     ", simple_usr_cluster, simple_payload.len, 0x20);
+        put_dir_entry(bin, &bin_n, "SIMPLE     ", simple_bin_cluster, simple_payload.len, 0x20);
+        put_dir_entry(apps, &apps_n, "SIMPLE     ", simple_apps_cluster, simple_payload.len, 0x20);
+    }
+    if (clang_bin_cluster)
+        put_dir_entry(usr_bin, &usr_bin_n, "CLANG      ", clang_bin_cluster, clang_payload.len, 0x20);
+    if (llc_bin_cluster)
+        put_dir_entry(usr_bin, &usr_bin_n, "LLC        ", llc_bin_cluster, llc_payload.len, 0x20);
+    if (lld_bin_cluster)
+        put_dir_entry(usr_bin, &usr_bin_n, "LD      LLD", lld_bin_cluster, lld_payload.len, 0x20);
+    if (crt0_cluster)
+        put_dir_entry(usr_lib, &usr_lib_n, "CRT0    O  ", crt0_cluster, crt0_payload.len, 0x20);
+    if (runtime_cluster)
+        put_dir_entry(usr_lib, &usr_lib_n, "SIMPRT  A  ", runtime_cluster, runtime_payload.len, 0x20);
+    if (libc_cluster)
+        put_dir_entry(usr_lib, &usr_lib_n, "SOSLIB  A  ", libc_cluster, libc_payload.len, 0x20);
+    if (simple_entry_cluster)
+        put_dir_entry(usr_lib, &usr_lib_n, "SIMAIN  O  ", simple_entry_cluster, simple_entry_payload.len, 0x20);
+    if (linker_script_cluster)
+        put_dir_entry(sysrt, &sysrt_n, "SIMPLEOSLD ", linker_script_cluster, linker_script_payload.len, 0x20);
     put_dir_entry(apps, &apps_n, "LLVMSMF SMF", llvm_cluster, llvm_app.len, 0x20);
     put_dir_entry(apps, &apps_n, "CLANGSMFSMF", clang_cluster, clang_app.len, 0x20);
     put_dir_entry(apps, &apps_n, "RUSTSMF SMF", rust_cluster, rust_app.len, 0x20);
@@ -594,6 +658,11 @@ int main(int argc, char **argv)
     memcpy(g_image + cluster_offset(sys_cluster), sys, (size_t)sys_n * 32);
     memcpy(g_image + cluster_offset(apps_cluster), apps, (size_t)apps_n * 32);
     memcpy(g_image + cluster_offset(perf_cluster), perf, (size_t)perf_n * 32);
+    memcpy(g_image + cluster_offset(usr_cluster), usr, (size_t)usr_n * 32);
+    memcpy(g_image + cluster_offset(usr_bin_cluster), usr_bin, (size_t)usr_bin_n * 32);
+    memcpy(g_image + cluster_offset(usr_lib_cluster), usr_lib, (size_t)usr_lib_n * 32);
+    memcpy(g_image + cluster_offset(bin_cluster), bin, (size_t)bin_n * 32);
+    memcpy(g_image + cluster_offset(sysrt_cluster), sysrt, (size_t)sysrt_n * 32);
 
     g_image[0] = 0xeb;
     g_image[1] = 0x58;

@@ -13,6 +13,7 @@ use compiler.backend.backend.io_compat.{backend_shell_tuple}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.io_runtime.{process_run}
 
 # SFFI for reading files (object code + optimized IR)
 extern fn rt_file_read_bytes(path: text) -> [u8]
@@ -164,7 +165,29 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
         "{llc} --filetype=obj --relocation-model=pic --function-sections --data-sections -o {obj_path} {ir_path} 2>&1"
     else:
         "{llc} --filetype=obj --relocation-model=pic --function-sections --data-sections -mtriple={triple} -mcpu={cpu}{target_flags} {opt_flag} -o {obj_path} {ir_path} 2>&1"
-    val (llc_out, llc_err, llc_code) = backend_shell_tuple(cmd)
+    var llc_out = ""
+    var llc_err = ""
+    var llc_code = 0
+    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    if target.ends_with("-simpleos"):
+        var llc_args: [text] = [
+            "--filetype=obj", "--relocation-model=pic", "--function-sections", "--data-sections",
+            "-mtriple={triple}", "-mcpu={cpu}", opt_flag, "-o", obj_path, ir_path
+        ]
+        if config.features.len() > 0:
+            llc_args.push("-mattr={config.to_feature_string()}")
+        match config.abi:
+            case Some(abi): llc_args.push("-target-abi={abi}")
+            case nil: ()
+        val (direct_out, direct_err, direct_code) = process_run(llc, llc_args)
+        llc_out = direct_out
+        llc_err = direct_err
+        llc_code = direct_code
+    else:
+        val (shell_out, shell_err, shell_code) = backend_shell_tuple(cmd)
+        llc_out = shell_out
+        llc_err = shell_err
+        llc_code = shell_code
     if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         print "[llvm-tools] llc-done"
 
@@ -173,7 +196,7 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
         if bootstrap_io:
             print "[llvm-direct] failed-ir {ir_path}"
             return Err("llc failed during bootstrap; preserved LLVM IR path printed above")
-        return Err("llc failed (exit {llc_code}):\n{llc_out}\n\nCommand: {cmd}")
+        return Err("llc failed (exit {llc_code}):\n{llc_out}{llc_err}\n\nCommand: {cmd}")
     elif bootstrap_io and file_exists(obj_path):
         print "[llvm-tools] llc-object"
 

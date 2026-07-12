@@ -12,9 +12,12 @@ bounded persistent boot-service core at
 `src/os/services/database/simple_db_service.spl`. The existing boot HTTP
 listener routes `POST /db` bodies through `CREATE table`,
 `INSERT table key value`, and `SELECT table key`; other web requests keep the
-existing response path. This source path is not a live-QEMU claim. The canonical
-RV64 gate must return the inserted `codex-41` value; readiness strings alone
-still fail.
+existing response path. One module-owned literal store persists across accepted
+connections. Request bodies clamp to the 1024-byte boot cap, and responses use
+connection-close framing so RV64 never computes the broken negative
+`Content-Length`. This source path is not a live-QEMU claim. The canonical RV64
+gate must return the inserted `codex-41` value; readiness strings alone still
+fail.
 
 ```
 ┌──────────────────────────────────────────────────┐

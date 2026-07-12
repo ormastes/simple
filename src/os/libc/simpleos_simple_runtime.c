@@ -193,6 +193,18 @@ void rt_println_str(spl_i64 value) {
     rt_println_value(value);
 }
 
+void rt_print(const char *value) {
+    if (!value) return;
+    const char *end = value;
+    while (*end) end++;
+    (void)write(1, value, (size_t)(end - value));
+}
+
+void rt_println(const char *value) {
+    rt_print(value);
+    (void)write(1, "\n", 1);
+}
+
 void rt_eprint_value(spl_i64 value) {
     RtString *string = rt_as_string(value);
     spl_i64 rendered;

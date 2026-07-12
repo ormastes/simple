@@ -48,12 +48,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 LLVM_SRC="${LLVM_SRC:-$HOME/llvm-project}"
 TRIPLE="${SIMPLEOS_TARGET_TRIPLE:-${SIMPLE_TARGET:-x86_64-unknown-simpleos}}"
+TOOL="${SIMPLEOS_LLVM_TOOL:-clang}"
 
 SYSROOT="$REPO_ROOT/build/os/sysroot"
 CROSS_DIR="$REPO_ROOT/build/os/llvm/cross-$TRIPLE"
-OUT_DIR="$REPO_ROOT/build/os/clang_static"
-OUT_BIN="$OUT_DIR/bin/clang_static"
-WORK="$OUT_DIR/work"
+case "$TOOL" in
+    clang) NINJA_BIN="bin/clang-20"; OUT_NAME="clang_static" ;;
+    llc)   NINJA_BIN="bin/llc";      OUT_NAME="llc_static" ;;
+    lld)   NINJA_BIN="bin/lld";      OUT_NAME="lld_static" ;;
+    *) echo "[clang_static] ERROR: unsupported tool: $TOOL"; exit 1 ;;
+esac
+OUT_DIR="$REPO_ROOT/build/os/${TOOL}_static"
+OUT_BIN="$OUT_DIR/bin/$OUT_NAME"
+WORK="$REPO_ROOT/build/os/clang_static/work"
 
 CXX="${CXX:-clang++-20}"
 NM="${NM:-llvm-nm-20}"
@@ -81,7 +88,7 @@ mkdir -p "$OUT_DIR/bin" "$WORK"
 
 # --- Extract the clang driver objects + archive list from the cross build ----
 # The ninja rule for bin/clang-20 lists: <5 driver .o> | <~110 LLVM/clang .a> || ...
-LINE="$(grep -E '^build bin/clang-20:' "$CROSS_DIR/build.ninja" | head -1)"
+LINE="$(grep -E "^build ${NINJA_BIN}:" "$CROSS_DIR/build.ninja" | head -1)"
 REST="${LINE#*CXX_EXECUTABLE_LINKER__clang_Release }"
 OBJS_STR="${REST%% | *}"
 MID="${REST#* | }"
@@ -95,12 +102,14 @@ ARCS=""
 for a in $ARCS_STR; do
     case "$a" in *.a) ARCS="$ARCS $CROSS_DIR/$a" ;; esac
 done
-[ -n "$OBJS" ] || { echo "[clang_static] ERROR: no driver objects parsed from build.ninja"; exit 1; }
+[ -n "$OBJS" ] || { echo "[clang_static] ERROR: no $TOOL objects parsed from build.ninja"; exit 1; }
 
 # --- Pick the libc++ that matches the objects' ABI namespace -----------------
 SAMPLE_OBJ="$(printf '%s\n' $OBJS | head -1)"
 if $NM "$SAMPLE_OBJ" 2>/dev/null | grep -q '21_LIBCPP_ABI_NAMESPACE'; then
     echo "[clang_static] cross objects use the literal _LIBCPP_ABI_NAMESPACE (pre-__1)."
+    LIBCXX_A="$WORK/libc++_litns.a"
+    if [ ! -f "$LIBCXX_A" ]; then
     echo "[clang_static] Building a namespace-matched libc++ (litns) ..."
     SHADOW="$WORK/shadow_include"
     mkdir -p "$SHADOW" "$WORK/litns_obj"
@@ -114,9 +123,9 @@ if $NM "$SAMPLE_OBJ" 2>/dev/null | grep -q '21_LIBCPP_ABI_NAMESPACE'; then
         flat="$(printf '%s' "$src" | tr '/' '_')"
         $CXX -isystem "$SHADOW" $LIBCXX_FLAGS -c "$LLVM_SRC/libcxx/src/$src" -o "$WORK/litns_obj/$flat.o"
     done
-    LIBCXX_A="$WORK/libc++_litns.a"
     rm -f "$LIBCXX_A"
     $AR rcs "$LIBCXX_A" "$WORK"/litns_obj/*.o
+    fi
     echo "[clang_static] litns libc++ built: $LIBCXX_A"
 else
     echo "[clang_static] cross objects use __1; linking against stock sysroot libc++.a"
@@ -124,7 +133,7 @@ else
 fi
 
 # --- Final static link -------------------------------------------------------
-echo "[clang_static] Linking static SimpleOS clang ..."
+echo "[clang_static] Linking static SimpleOS $TOOL ..."
 $CXX --target="$TRIPLE" --sysroot="$SYSROOT" \
     -static -nostdlib -no-pie -fuse-ld=lld \
     -Wl,-T,"$LDSCRIPT" \

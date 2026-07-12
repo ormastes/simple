@@ -10,7 +10,6 @@
 # Design: All state in CoreLexer struct fields. Methods modify self.
 # Compatible with the minimal bootstrap subset: no generics, no closures, no lambdas.
 
-val _NL = "\n"
 use compiler.core.tokens.{keyword_lookup}
 use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space}
 use std.string_core.{char_from_code}
@@ -36,6 +35,7 @@ fn lex_escape_octal_value(c: text) -> i64:
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_array_len_safe(array: i64) -> i64
 
 var core_last_token_text_slot: [text] = [""]
 var core_last_token_line_slot: [i64] = [0]
@@ -44,12 +44,12 @@ var core_last_token_suffix_slot: [text] = [""]
 var core_token_env_save_slot: [bool] = [false]
 
 fn core_token_env_save_set(enabled: bool):
-    if core_token_env_save_slot == nil:
+    if rt_array_len_safe(core_token_env_save_slot) == 0:
         core_token_env_save_slot = [false]
     core_token_env_save_slot[0] = enabled
 
 fn core_token_env_save_enabled() -> bool:
-    if core_token_env_save_slot == nil:
+    if rt_array_len_safe(core_token_env_save_slot) == 0:
         return false
     core_token_env_save_slot[0]
 
@@ -58,20 +58,20 @@ fn core_token_text_save(value: text):
         rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", value)
 
 fn core_token_suffix_save(value: text):
-    if core_last_token_suffix_slot == nil:
+    if rt_array_len_safe(core_last_token_suffix_slot) == 0:
         core_last_token_suffix_slot = [""]
     core_last_token_suffix_slot[0] = value
     if core_token_env_save_enabled():
         rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_SUFFIX", value)
 
 fn core_token_capture(tok_text: text, line: i64, col: i64):
-    if core_last_token_text_slot == nil:
+    if rt_array_len_safe(core_last_token_text_slot) == 0:
         core_last_token_text_slot = [""]
-    if core_last_token_line_slot == nil:
+    if rt_array_len_safe(core_last_token_line_slot) == 0:
         core_last_token_line_slot = [0]
-    if core_last_token_col_slot == nil:
+    if rt_array_len_safe(core_last_token_col_slot) == 0:
         core_last_token_col_slot = [0]
-    if core_last_token_suffix_slot == nil:
+    if rt_array_len_safe(core_last_token_suffix_slot) == 0:
         core_last_token_suffix_slot = [""]
     core_last_token_text_slot[0] = tok_text
     core_last_token_line_slot[0] = line
@@ -79,22 +79,22 @@ fn core_token_capture(tok_text: text, line: i64, col: i64):
     core_last_token_suffix_slot[0] = ""
 
 fn core_lexer_last_text_get() -> text:
-    if core_last_token_text_slot == nil:
+    if rt_array_len_safe(core_last_token_text_slot) == 0:
         return ""
     core_last_token_text_slot[0]
 
 fn core_lexer_last_line_get() -> i64:
-    if core_last_token_line_slot == nil:
+    if rt_array_len_safe(core_last_token_line_slot) == 0:
         return 0
     core_last_token_line_slot[0]
 
 fn core_lexer_last_col_get() -> i64:
-    if core_last_token_col_slot == nil:
+    if rt_array_len_safe(core_last_token_col_slot) == 0:
         return 0
     core_last_token_col_slot[0]
 
 fn core_lexer_last_suffix_get() -> text:
-    if core_last_token_suffix_slot == nil:
+    if rt_array_len_safe(core_last_token_suffix_slot) == 0:
         return ""
     core_last_token_suffix_slot[0]
 
@@ -172,7 +172,7 @@ impl CoreLexer:
             return ""
         val c: text = self.source[self.pos:self.pos + 1]
         self.pos = self.pos + 1
-        if c == _NL:
+        if c == "\n":
             self.line = self.line + 1
             self.col = 1
             self.at_line_start = true
@@ -484,7 +484,7 @@ impl CoreLexer:
                 self.make_token(191, "unterminated string", start_line, start_col)
                 return
             val c: text = self.peek()
-            if c == _NL:
+            if c == "\n":
                 self.make_token(191, "unterminated string", start_line, start_col)
                 return
             if c == quote:
@@ -574,7 +574,7 @@ impl CoreLexer:
                         if la >= src_len:
                             break
                         val lc: text = self.source[la:la + 1]
-                        if lc == _NL:
+                        if lc == "\n":
                             break
                         if la_str != "":
                             if la_esc:
@@ -633,7 +633,7 @@ impl CoreLexer:
                 self.make_token(191, "unterminated string", start_line, start_col)
                 return
             val rc: text = self.peek()
-            if rc == _NL:
+            if rc == "\n":
                 self.make_token(191, "unterminated string", start_line, start_col)
                 return
             if rc == "\"":
@@ -732,7 +732,7 @@ impl CoreLexer:
 
         # Skip blank lines and comment-only lines
         val next_c: text = self.peek()
-        val is_blank: bool = next_c == _NL
+        val is_blank: bool = next_c == "\n"
         val is_end: bool = next_c == ""
         val is_comment: bool = next_c == "#"
         if is_blank:
@@ -746,14 +746,14 @@ impl CoreLexer:
             # Skip comment, then the newline
             for i in 0..100000:
                 val cc: text = self.peek()
-                val is_nl: bool = cc == _NL
+                val is_nl: bool = cc == "\n"
                 val is_eof: bool = cc == ""
                 val done: bool = is_nl or is_eof
                 if done:
                     break
                 self.advance()
             val peek_nl: text = self.peek()
-            if peek_nl == _NL:
+            if peek_nl == "\n":
                 self.advance()
             self.at_line_start = true
             self.scan_token()
@@ -853,7 +853,7 @@ impl CoreLexer:
         self.cur_start = self.pos
 
         # Newline
-        if c == _NL:
+        if c == "\n":
             self.advance()
             self.at_line_start = true
             if self.paren_depth > 0:
@@ -882,7 +882,7 @@ impl CoreLexer:
             if la_c == "." or la_c == "|":
                 self.scan_token_rescan()
                 return
-            self.make_token(180, _NL, start_line, start_col)
+            self.make_token(180, "\n", start_line, start_col)
             return
 
         # Handle indentation at line start
@@ -895,7 +895,7 @@ impl CoreLexer:
             # Skip comment to end of line
             for i in 0..100000:
                 val cc: text = self.peek()
-                val is_nl: bool = cc == _NL
+                val is_nl: bool = cc == "\n"
                 val is_eof: bool = cc == ""
                 val done: bool = is_nl or is_eof
                 if done:

@@ -670,13 +670,14 @@ echo "Stage 4: compiling full CLI (main.spl) with bootstrap compiler..."
 full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 prepare_native_cache stage4
+rm -f "${full_dir}/simple${exe_suffix}"
 if [ "${stage4_is_seed}" -eq 1 ]; then
   # ponytail: seed native-build can hang in the worker wrapper; call the same
   # entrypoint directly until the wrapper path is proven fixed.
   run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
-    SIMPLE_STUB_MISSING_RT=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
     "${stage_for_build}" run src/app/cli/native_build_main.spl -- \
     --backend "${stage4_backend}" \
@@ -692,7 +693,7 @@ else
   run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
-    SIMPLE_STUB_MISSING_RT=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
     "${stage_for_build}" native-build \
     --backend "${stage4_backend}" \

@@ -7,39 +7,52 @@ extern fn abort()
 extern fn gettimeofday(tv: i64, tz: i64) -> i64
 extern fn clock_gettime(clk_id: i64, tp: i64) -> i64
 extern fn malloc(size: i64) -> i64
+extern fn calloc(count: i64, size: i64) -> i64
 extern fn free(ptr: i64)
-extern fn strlen(s: i64) -> i64
 extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
+extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
+extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
 extern fn rt_array_new(cap: i64) -> i64
+extern fn rt_array_len(array: i64) -> i64
+extern fn rt_array_get_text(array: i64, idx: i64) -> i64
 extern fn rt_array_push(array: i64, value: i64) -> i8
+extern fn rt_tuple_new(len: i64) -> i64
+extern fn rt_tuple_set(tuple: i64, idx: i64, value: i64) -> i8
+extern fn rt_value_int(value: i64) -> i64
+extern fn rt_string_data(value: i64) -> i64
 extern fn rt_string_new(bytes: i64, len: i64) -> i64
+extern fn rt_stderr_write(value: i64) -> i64
+extern fn fork() -> i64
+extern fn execvp(path: i64, argv: i64) -> i64
+extern fn waitpid(pid: i64, status: i64, options: i64) -> i64
+extern fn getpid() -> i64
+extern fn simpleos_runtime_set_args(argc: i64, argv: i64)
+extern fn simpleos_runtime_argc() -> i64
+extern fn simpleos_runtime_argv() -> i64
+extern fn simpleos_runtime_cli_get_args() -> i64
 
-var _rt_cli_argc: i64 = 0
-var _rt_cli_argv: i64 = 0
+var _rt_debug_mode_enabled = false
+
+pub fn rt_set_debug_mode(enabled: bool):
+    _rt_debug_mode_enabled = enabled
+
+pub fn rt_is_debug_mode_enabled() -> bool:
+    _rt_debug_mode_enabled
 
 pub fn rt_exit(code: i64) -> i64:
     exit(code)
     return 0
 
 pub fn rt_set_args(argc: i64, argv: i64) -> i64:
-    _rt_cli_argc = argc
-    _rt_cli_argv = argv
+    simpleos_runtime_set_args(argc, argv)
     return 0
 
 pub fn rt_cli_get_args() -> i64:
-    val args = rt_array_new(_rt_cli_argc)
-    if args < 1:
-        return rt_array_new(0)
-    var i = 0
-    while i < _rt_cli_argc:
-        val cstr = spl_load_i64(_rt_cli_argv, i * 8)
-        if cstr > 0:
-            val len = strlen(cstr)
-            rt_array_push(args, rt_string_new(cstr, len))
-        else:
-            rt_array_push(args, rt_string_new(0, 0))
-        i = i + 1
-    return args
+    simpleos_runtime_cli_get_args()
+
+pub fn rt_getpid() -> i64:
+    getpid()
 
 pub fn rt_cli_arg_count() -> i64:
     return _rt_cli_argc
@@ -98,6 +111,9 @@ pub fn rt_time_now_micros() -> i64:
     free(ts)
     return sec * 1000000 + nsec / 1000
 
+pub fn rt_time_now_monotonic_ms() -> i64:
+    rt_time_now_micros() / 1000
+
 pub fn rt_entropy_hardware_ready() -> i64:
     return 0
 
@@ -113,13 +129,69 @@ pub fn rt_term_poll(timeout_ms: i64) -> i8:
 pub fn rt_term_read_timeout(max_len: i64, timeout_ms: i64) -> text:
     return ""
 
-pub fn rt_process_run(cmd: text, args: i64) -> i64:
-    return 3
+fn _process_result(exit_code: i64) -> i64:
+    val result = rt_tuple_new(3)
+    rt_tuple_set(result, 0, rt_string_new(0, 0))
+    rt_tuple_set(result, 1, rt_string_new(0, 0))
+    rt_tuple_set(result, 2, rt_value_int(exit_code))
+    result
+
+pub fn rt_process_run(cmd_ptr: i64, cmd_len: i64, args: i64) -> i64:
+    if cmd_ptr < 1 or cmd_len < 1:
+        return _process_result(-1)
+    val command = malloc(cmd_len + 1)
+    if command < 1:
+        return _process_result(-1)
+    var i = 0
+    while i < cmd_len:
+        spl_store_u8(command, i, spl_load_u8(cmd_ptr, i))
+        i = i + 1
+    spl_store_u8(command, cmd_len, 0)
+
+    val argc = rt_array_len(args)
+    val argv = calloc(argc + 2, 8)
+    if argv < 1:
+        free(command)
+        return _process_result(-1)
+    spl_store_i64(argv, 0, command)
+    i = 0
+    while i < argc:
+        spl_store_i64(argv, (i + 1) * 8, rt_string_data(rt_array_get_text(args, i)))
+        i = i + 1
+
+    val status = calloc(1, 8)
+    if status < 1:
+        free(argv)
+        free(command)
+        return _process_result(-1)
+    val pid = fork()
+    if pid == 0:
+        execvp(command, argv)
+        exit(127)
+        return _process_result(127)
+    if pid < 1:
+        free(status)
+        free(argv)
+        free(command)
+        return _process_result(-1)
+
+    val waited = waitpid(pid, status, 0)
+    val exit_code = if waited < 1: -1 else: (spl_load_i64(status, 0) >> 8) & 255
+    free(status)
+    free(argv)
+    free(command)
+    # ponytail: stdout/stderr inherit the guest console; add pipe capture when
+    # task-local descriptor inheritance is proven by the live process gate.
+    _process_result(exit_code)
 
 pub fn rt_sleep_ms(ms: i64) -> i64:
     usleep(ms * 1000)
     return 0
 
 pub fn rt_panic(msg: i64) -> i64:
+    rt_stderr_write(msg)
     abort()
     return 0
+
+pub fn panic(msg: i64):
+    rt_panic(msg)

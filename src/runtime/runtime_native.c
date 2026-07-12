@@ -1628,6 +1628,11 @@ int64_t rt_array_len(SplArray* a) {
     return array ? array->len : 0;
 }
 
+int64_t rt_array_len_safe(int64_t value) {
+    if (value == 0 || value == 3) return 0;
+    return rt_array_len((SplArray*)(uintptr_t)value);
+}
+
 int64_t rt_array_get(SplArray* a, int64_t idx) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 3;
@@ -2784,30 +2789,26 @@ SplArray* rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args) {
 }
 
 int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
-    if (!path_ptr || path_len > SIZE_MAX - 1) return 0;
-    char* path = (char*)malloc((size_t)path_len + 1);
-    if (!path) return 0;
-    memcpy(path, path_ptr, (size_t)path_len);
-    path[path_len] = '\0';
-
+    char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
+    if (!path) return rt_core_nil();
     FILE* f = fopen(path, "rb");
     free(path);
-    if (!f) return 0;
+    if (!f) return rt_core_nil();
     if (fseek(f, 0, SEEK_END) != 0) {
         fclose(f);
-        return 0;
+        return rt_core_nil();
     }
-    long file_len = ftell(f);
-    if (file_len < 0 || fseek(f, 0, SEEK_SET) != 0) {
+    long end = ftell(f);
+    if (end < 0 || fseek(f, 0, SEEK_SET) != 0) {
         fclose(f);
-        return 0;
+        return rt_core_nil();
     }
-
-    SplArray* result = rt_byte_array_new_len((uint64_t)file_len);
+    SplArray* result = rt_byte_array_new_len((uint64_t)end);
     RtCoreArray* array = rt_core_array_ptr(result);
-    if (!array || (file_len > 0 && fread(array->data, 1, (size_t)file_len, f) != (size_t)file_len)) {
+    if (!array || (end > 0 && !array->data) ||
+        fread(array->data, 1, (size_t)end, f) != (size_t)end) {
         fclose(f);
-        return 0;
+        return rt_core_nil();
     }
     fclose(f);
     return (int64_t)(uintptr_t)result;
@@ -2826,16 +2827,17 @@ int64_t rt_file_read_all_text(int64_t path_tagged) {
 }
 
 
-int rt_file_write_bytes(const uint8_t* path_ptr, uint64_t path_len, const uint8_t* data, uint64_t len) {
-    if (!path_ptr || (!data && len != 0) || path_len > SIZE_MAX - 1) return 0;
-    char* path = (char*)malloc((size_t)path_len + 1);
-    if (!path) return 0;
-    memcpy(path, path_ptr, (size_t)path_len);
-    path[path_len] = '\0';
+int rt_file_write_bytes(const uint8_t* path_ptr, uint64_t path_len,
+                        const uint8_t* data, uint64_t len) {
+    char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
+    if (!path || (!data && len != 0)) {
+        free(path);
+        return 0;
+    }
     FILE* f = fopen(path, "wb");
     free(path);
     if (!f) return 0;
-    size_t written = fwrite(data, 1, (size_t)len, f);
+    size_t written = fwrite(data, 1, len, f);
     fclose(f);
     return written == (size_t)len ? 1 : 0;
 }

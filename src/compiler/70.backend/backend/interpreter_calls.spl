@@ -4,7 +4,7 @@
 # - call_function, call_hir_function, call_function_by_id, call_closure
 # - apply_assign_op
 # - try_call_builtin (SFFI dispatch)
-# - value_to_runtime_ptr, runtime_ptr_to_value, value_to_string
+# - value_to_string
 
 use compiler.hir.hir.*
 use compiler.common.diagnostics.span.{Span}
@@ -14,37 +14,13 @@ use compiler.backend.backend.interpreter.{InterpreterBackendImpl, itrace}
 use compiler.backend.backend.interpreter_aop_weave.*
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
-enum ValueType:
-    Nil
-    Bool
-    Int
-    Float
-    String
-    Array
-    Dict
-    Object
-    Function
-
 extern fn rt_print_value(value: i64)
 extern fn rt_println_value(value: i64)
-extern fn rt_value_type(value: i64) -> ValueType
-extern fn rt_value_int(value: i64) -> i64
-extern fn rt_value_float(value: f64) -> i64
-extern fn rt_value_bool(value: bool) -> i64
-extern fn rt_value_nil() -> i64
-extern fn rt_value_string(ptr: i64, len: i64) -> i64
-extern fn rt_value_is_int(value: i64) -> bool
-extern fn rt_value_is_float(value: i64) -> bool
-extern fn rt_value_is_bool(value: i64) -> bool
-extern fn rt_value_is_nil(value: i64) -> bool
-extern fn rt_value_as_int(value: i64) -> i64
-extern fn rt_value_as_float(value: i64) -> f64
-extern fn rt_value_as_bool(value: i64) -> bool
 extern fn rt_file_exists(path_ptr: i64, path_len: i64) -> bool
-extern fn rt_file_read_text(path_ptr: i64, path_len: i64) -> i64
+extern fn rt_file_read_text(path_ptr: i64, path_len: i64) -> text
 extern fn rt_file_write_text(path_ptr: i64, path_len: i64, content_ptr: i64, content_len: i64) -> bool
 extern fn rt_file_delete(path_ptr: i64, path_len: i64) -> bool
-extern fn rt_env_get(name_ptr: i64, name_len: i64) -> i64
+extern fn rt_env_get(name_ptr: i64, name_len: i64) -> text
 extern fn rt_env_set(name_ptr: i64, name_len: i64, value_ptr: i64, value_len: i64) -> bool
 
 # itrace is imported from interpreter.spl: the ptr-based rt_env_get here
@@ -288,6 +264,8 @@ impl InterpreterBackendImpl:
                                 print "true"
                             else:
                                 print "false"
+                        case Value.String(sv):
+                            print sv
                         case Value.Nil:
                             print "nil"
                         case _:
@@ -301,18 +279,6 @@ impl InterpreterBackendImpl:
                     val arg = args[0]
                     match arg:
                         case Value.RuntimeValue(ptr):
-                            rt_println_value(ptr)
-                        case Value.Int(_):
-                            val ptr = self.value_to_runtime_ptr(arg)
-                            rt_println_value(ptr)
-                        case Value.Float(_):
-                            val ptr = self.value_to_runtime_ptr(arg)
-                            rt_println_value(ptr)
-                        case Value.Bool(_):
-                            val ptr = self.value_to_runtime_ptr(arg)
-                            rt_println_value(ptr)
-                        case Value.Nil:
-                            val ptr = self.value_to_runtime_ptr(arg)
                             rt_println_value(ptr)
                         case _:
                             val msg = self.value_to_string(arg)
@@ -331,19 +297,8 @@ impl InterpreterBackendImpl:
                     val arg = args[0]
                     match arg:
                         case Value.RuntimeValue(ptr):
-                            val type_tag = rt_value_type(ptr)
-                            val type_name = match type_tag:
-                                case ValueType.Nil: "nil"
-                                case ValueType.Bool: "bool"
-                                case ValueType.Int: "int"
-                                case ValueType.Float: "float"
-                                case ValueType.String: "string"
-                                case ValueType.Array: "array"
-                                case ValueType.Dict: "dict"
-                                case ValueType.Object: "object"
-                                case ValueType.Function: "function"
-                                case _: "unknown"
-                            Some(Ok(Value.String(type_name)))
+                            val _ = ptr
+                            Some(Ok(Value.String("runtime_value")))
                         case _:
                             Some(Ok(Value.String(arg.type_name())))
                 else:
@@ -379,11 +334,10 @@ impl InterpreterBackendImpl:
                     match args[0]:
                         case Value.String(path):
                             val ptr = rt_file_read_text(path.ptr(), path.len())
-                            if ptr == 0:
+                            if ptr == "":
                                 Some(Ok(Value.String("")))
                             else:
-                                val result = self.runtime_ptr_to_value(ptr)
-                                Some(Ok(result))
+                                Some(Ok(Value.String(ptr)))
                         case _:
                             Some(Err(BackendError.type_error("file_read requires string path", nil)))
                 else:
@@ -421,11 +375,10 @@ impl InterpreterBackendImpl:
                     match args[0]:
                         case Value.String(name):
                             val ptr = rt_env_get(name.ptr(), name.len())
-                            if ptr == 0:
+                            if ptr == "":
                                 Some(Ok(Value.String("")))
                             else:
-                                val result = self.runtime_ptr_to_value(ptr)
-                                Some(Ok(result))
+                                Some(Ok(Value.String(ptr)))
                         case _:
                             Some(Err(BackendError.type_error("env_get requires string name", nil)))
                 else:
@@ -453,45 +406,16 @@ impl InterpreterBackendImpl:
     # SFFI RuntimeValue Conversion Helpers
     # ========================================================================
 
-    fn value_to_runtime_ptr(value: Value) -> i64:
-        """Convert Simple Value to RuntimeValue pointer for SFFI operations."""
-        match value:
-            case Value.Int(i): rt_value_int(i)
-            case Value.Float(f): rt_value_float(f)
-            case Value.Bool(b): rt_value_bool(b)
-            case Value.Nil: rt_value_nil()
-            case Value.RuntimeValue(ptr): ptr  # Already a pointer
-            case Value.String(s):
-                rt_value_string(s.ptr(), s.len())
-            case _:
-                rt_value_nil()
-
-    fn runtime_ptr_to_value(ptr: i64) -> Value:
-        """Convert RuntimeValue pointer to Simple Value."""
-        if rt_value_is_int(ptr):
-            val i = rt_value_as_int(ptr)
-            Value.Int(i)
-        elif rt_value_is_float(ptr):
-            val f = rt_value_as_float(ptr)
-            Value.Float(f)
-        elif rt_value_is_bool(ptr):
-            val b = rt_value_as_bool(ptr)
-            Value.Bool(b)
-        elif rt_value_is_nil(ptr):
-            Value.Nil
-        else:
-            Value.RuntimeValue(ptr)
-
     fn value_to_string(value: Value) -> text:
         """Convert a Value to its string representation."""
         match value:
+            case Value.String(s): s
             case Value.Nil: "nil"
             case Value.Unit: "()"
             case Value.Bool(b): if b: "true" else: "false"
             case Value.Int(i): "{i}"
             case Value.Float(f): "{f}"
             case Value.Char(c): "{c}"
-            case Value.String(s): s
             case Value.Array(elements):
                 var parts: [text] = []
                 for elem in elements:

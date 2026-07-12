@@ -51,34 +51,8 @@ sighting of the same family.
    `x86_64_fs_exec_ring3.spl::_map_pt_loads` (post-vmm reads are proven good).
    Parse via the raw-buffer mmio path, NOT the boxed `[u8]` channel (still
    boxing-broken: magic reads 248,3,0,0 = 0x7F<<3).
-2. Compiler: fix the address-dependent `rt_mmio_read_u8` miscompile (+ add the
-   regression from the bug doc) so layout shifts can't silently zero readbacks.
-3. ≥512 MB RAM; put clang-20 on the FAT image; attempt `clang --version` then
-   `-c hello.c` in-guest. Note: guest clang currently emits LLVM bitcode (not
-   an ELF .o) due to harness argv — separate, tracked.
-
-## Status update (2026-07-11, clang file-launch lane)
-
-Order-of-work items 1 and 3 are largely DONE; the blocker moved:
-
-- **Streaming works at clang scale**: 124,602,568-byte `clang_static` streams
-  per-PT_LOAD off FAT/NVMe into pmm frames (~30 s whole-image under TCG) via
-  the new opt-in `x86_64_fs_exec_enter_stream_heap_ring3` (64 MiB user heap +
-  `rt_user_heap_init`; opt-in because the bare-exec dispatch flag breaks the
-  SSH longjmp-resume path — both SSH gates re-verified green after the opt-in
-  split). Note: the mission's `clang-20` (131,052,368 B) is dynamically linked
-  (needs ld.so, which SimpleOS doesn't have); the runnable artifact is the
-  static `clang_static`.
-- **Image recipe past the 8.39 MB disk_image cap**:
-  `scripts/os/build_clang_stream_ring3.shs` + `scripts/os/fsexec_mkimg_big.spl`
-  (FAT32 structural prefix + `cat`-appended payload, contiguous chain).
-  Enablers fixed en route: pmm bitmap inside live kernel .bss (kernel_end vs
-  real RW end), kernel 128 MB link base vs clang's 0x10000000 VA
-  (`linker_low1mb.ld` for the stream harness), 2048-page user stack,
-  AT_RANDOM auxv, argv bytes via `rt_text_copy_to_phys`.
-- **NEW sole blocker**: clang executes libc startup then aborts 134 before its
-  first stderr lseek — isolated to a freestanding module-vs-entry compilation
-  defect (identical pipeline exits 0 from the entry-closure file). See
-  `doc/08_tracking/bug/x64_freestanding_module_vs_entry_ring3_handoff.md`.
-  Secondary: `rt_extras.c` RuntimeString layout 4 bytes off
-  (`doc/08_tracking/bug/x64_rt_extras_runtime_string_layout_mismatch.md`).
+2. Rebuild with current `arch_x86_64_early_init`, which disables MMIO test mode
+   before reads; retained C streaming already returned valid ELF bytes.
+3. ≥512 MB RAM; put clang-20 on the FAT image and run the current
+   `-emit-obj /hello.o` lane. Require the fail-closed ELF REL/main/exit-0 gate;
+   historical bitcode and host-produced objects do not count.

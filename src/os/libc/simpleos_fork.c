@@ -105,11 +105,11 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
         else errno = EIO;
         return -1;
     }
-    (void)argv;
-    (void)envp;
     long ret = (long)simpleos_syscall(SYS_EXEC,
         (long)(uintptr_t)path,
-        (long)strlen(path), 0, 0, 0);
+        (long)strlen(path),
+        (long)(uintptr_t)argv,
+        (long)(uintptr_t)envp, 0);
     if (ret < 0) errno = (int)(-ret);
     else errno = EIO;
     return -1;
@@ -120,7 +120,29 @@ int execv(const char *path, char *const argv[]) {
 }
 
 int execvp(const char *file, char *const argv[]) {
-    return execv(file, argv);
+    if (!file || file[0] == '\0') {
+        errno = ENOENT;
+        return -1;
+    }
+    for (const char *p = file; *p; p++) {
+        if (*p == '/') return execv(file, argv);
+    }
+
+    /* SimpleOS images install executable tools in these two canonical roots. */
+    static const char *const roots[] = { "/usr/bin/", "/bin/" };
+    char path[512];
+    size_t file_len = strlen(file);
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
+        size_t root_len = strlen(roots[i]);
+        if (root_len + file_len + 1 > sizeof(path)) {
+            errno = ENAMETOOLONG;
+            continue;
+        }
+        memcpy(path, roots[i], root_len);
+        memcpy(path + root_len, file, file_len + 1);
+        execv(path, argv);
+    }
+    return -1;
 }
 
 pid_t simpleos_waitpid(pid_t pid, int *wstatus, int options) {

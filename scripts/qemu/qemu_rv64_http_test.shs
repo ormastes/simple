@@ -25,6 +25,7 @@ HTTP_PORT="${HTTP_PORT:-8080}"
 HTTPS_PORT="${HTTPS_PORT:-8443}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-60}"
 SERIAL_LOG="${SERIAL_LOG:-build/qemu-rv64-serial.log}"
+DB_QUERY_LOG="${DB_QUERY_LOG:-$(dirname "$SERIAL_LOG")/db_query.log}"
 EXPECT_DEFERRED=false
 EXPECT_HTTP_ONLY=false
 WITH_DISPLAY=false
@@ -86,7 +87,7 @@ done
 # ---- verify prerequisites ----
 if [ ! -f "$ELF" ]; then
   echo "error: ELF not found: ${ELF}" >&2
-  echo "  Build it first through the SimpleOS runner with an LLVM-enabled compiler:" >&2
+  echo "  Build it first through the SimpleOS runner with a target-capable compiler:" >&2
   echo "  bin/simple os build --arch=riscv64" >&2
   echo "  Current seed builds without LLVM fail closed before QEMU; that is not live RV64 evidence." >&2
   exit 1
@@ -101,10 +102,18 @@ if [ "$ALLOW_PREBUILT_ARTIFACT" = "false" ]; then
     echo "  For limited smoke-only evidence from a known prebuilt ELF, rerun with --allow-prebuilt-artifact." >&2
     exit 1
   fi
-  if ! grep -q '^backend=llvm$' "$BUILD_STAMP" 2>/dev/null ||
+  if ! grep -Eq '^backend=(llvm|cranelift)$' "$BUILD_STAMP" 2>/dev/null ||
      ! grep -q '^target=riscv64-unknown-none$' "$BUILD_STAMP" 2>/dev/null ||
      ! grep -q '^entry=src/os/kernel/arch/riscv64/boot.spl$' "$BUILD_STAMP" 2>/dev/null; then
-    echo "error: build stamp does not describe the RV64 LLVM current-source boot lane: ${BUILD_STAMP}" >&2
+    echo "error: build stamp does not describe the RV64 current-source boot lane: ${BUILD_STAMP}" >&2
+    exit 1
+  fi
+  if [ ! "$BUILD_STAMP" -nt "$ELF" ]; then
+    echo "error: build stamp is older than the RV64 ELF: ${BUILD_STAMP}" >&2
+    exit 1
+  fi
+  if grep -Eq '^simple_bin=.*(compiler_rust|simple_seed)' "$BUILD_STAMP" 2>/dev/null; then
+    echo "error: Rust-seed provenance is not self-hosted RV64 evidence: ${BUILD_STAMP}" >&2
     exit 1
   fi
 else
@@ -135,6 +144,10 @@ fi
 # ---- prepare ----
 mkdir -p "$(dirname "$SERIAL_LOG")"
 rm -f "$SERIAL_LOG"
+if [ "$WITH_DB" = "true" ]; then
+  mkdir -p "$(dirname "$DB_QUERY_LOG")"
+  rm -f "$DB_QUERY_LOG"
+fi
 QEMU_PID=""
 if [ "$WITH_STORAGE" = "true" ]; then
   rm -f "$STORAGE_IMG"
@@ -400,6 +413,7 @@ fi
 if [ "$WITH_DB" = "true" ]; then
   printf '%s' "  DB CREATE/INSERT/SELECT... "
   DB_RESPONSE=$(db_query_response)
+  printf '%s\n' "$DB_RESPONSE" > "$DB_QUERY_LOG"
   if echo "$DB_RESPONSE" | grep -q 'OK CREATE' &&
     echo "$DB_RESPONSE" | grep -q 'OK INSERT' &&
     echo "$DB_RESPONSE" | grep -q 'codex-41'; then

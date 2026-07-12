@@ -14,6 +14,9 @@ extern fn simpleos_fat32_stream_read_at(file_off: u64, dst: u64, len: u64) -> i6
 extern fn simpleos_fat32_preloaded_size() -> u64
 extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
 
+fn _x86_64_raw_header_is_elf(buf: u64) -> bool:
+    (mmio_read32(buf) as u64) == 0x464C457F.to_u64() and mmio_read16(buf + 4) == 0x0102 and mmio_read16(buf + 18) == 62
+
 fn _x86_64_open_streaming_elf(path: text) -> (i64, u64):
     """Open `path` and retain only its bounded ELF header/program-header prefix."""
     val ELF_HEADER_LEN: u64 = 64
@@ -25,7 +28,7 @@ fn _x86_64_open_streaming_elf(path: text) -> (i64, u64):
     if buf == 0.to_u64():
         return (0, 0.to_u64())
     val header_read = simpleos_fat32_stream_read_at(0.to_u64(), buf, ELF_HEADER_LEN)
-    if header_read != 64 or (mmio_read32(buf) as u64) != 0x464C457F.to_u64():
+    if header_read != 64 or not _x86_64_raw_header_is_elf(buf):
         return (0, 0.to_u64())
     if mmio_read16(buf + 52) < 64 or mmio_read16(buf + 54) < 56:
         return (0, 0.to_u64())
@@ -35,7 +38,9 @@ fn _x86_64_open_streaming_elf(path: text) -> (i64, u64):
     val file_len = fsize as u64
     if phnum == 0 or phoff > file_len or phnum > ((file_len - phoff) / phentsize):
         return (0, 0.to_u64())
-    val prefix_len = phoff + (phnum * phentsize)
+    var prefix_len = phoff + (phnum * phentsize)
+    if prefix_len < 65536 and prefix_len < file_len:
+        prefix_len = if file_len < 65536: file_len else: 65536
     if prefix_len > HEADER_BUFFER_CAP:
         return (0, 0.to_u64())
     val prefix_read = simpleos_fat32_stream_read_at(0.to_u64(), buf, prefix_len)
@@ -53,7 +58,7 @@ fn _x86_64_read_spawn_bytes_and_blob(path: text) -> ([u8], u64):
     val n = simpleos_fat32_stream_read_at(0.to_u64(), buf, fsize.to_u64())
     if n <= 0:
         return ([], 0.to_u64())
-    if (mmio_read32(buf) as u64) != 0x464C457F.to_u64():
+    if not _x86_64_raw_header_is_elf(buf):
         return ([], 0.to_u64())
     (rt_bytes_from_raw(buf as i64, fsize), buf)
 

@@ -26,3 +26,11 @@ simpleos_syscall:
     ret
 
 .size simpleos_syscall, . - simpleos_syscall
+
+.global simpleos_current_cs
+.type simpleos_current_cs, @function
+simpleos_current_cs:
+    xorl %eax, %eax
+    movw %cs, %ax
+    ret
+.size simpleos_current_cs, . - simpleos_current_cs

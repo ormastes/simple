@@ -768,6 +768,59 @@ fn test_runtime_bundle_auto_prefers_core_c_for_compiler_entry() {
     assert!(!is_native_all);
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[test]
+fn test_runtime_path_cli_archive_does_not_require_optional_lifecycle_hooks() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("runtime.c");
+    let object = temp.path().join("runtime.o");
+    let runtime = temp.path().join("libsimple_runtime.a");
+    std::fs::write(
+        &source,
+        r#"
+void rt_get_args(void) {}
+void rt_cli_get_args(void) {}
+void rt_array_len(void) {}
+void rt_array_get(void) {}
+void rt_array_get_text(void) {}
+void rt_string_len(void) {}
+void rt_string_data(void) {}
+void rt_file_read_text(void) {}
+void rt_process_run(void) {}
+"#,
+    )
+    .unwrap();
+    assert!(std::process::Command::new(find_c_compiler())
+        .arg("-c")
+        .arg(&source)
+        .arg("-o")
+        .arg(&object)
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new(find_archive_tool())
+        .arg("rcs")
+        .arg(&runtime)
+        .arg(&object)
+        .status()
+        .unwrap()
+        .success());
+
+    let config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    let mut builder = NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple_native"))
+        .config(config);
+    builder.entry_file = Some(PathBuf::from("/project/src/app/cli/main.spl"));
+
+    let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert_eq!(selected, runtime);
+    assert!(!is_native_all);
+    assert!(runtime_archive_has_bootstrap_cli_symbols(&selected));
+}
+
 #[test]
 fn test_runtime_bundle_auto_prefers_core_c_for_compiler_source_root() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
@@ -2222,11 +2275,6 @@ fn test_simple_core_source_tree_emits_partial_runtime_archive() {
 
     assert_eq!(result.output, archive);
     assert!(archive.exists());
-    assert!(
-        runtime_archive_has_core_required_symbols(&archive),
-        "pure-Simple source tree must now satisfy the core-required ABI"
-    );
-
     let symbols = std::process::Command::new("nm")
         .arg("-g")
         .arg("--defined-only")
@@ -2235,6 +2283,19 @@ fn test_simple_core_source_tree_emits_partial_runtime_archive() {
         .unwrap();
     assert!(symbols.status.success());
     let stdout = String::from_utf8_lossy(&symbols.stdout);
+    let missing = simple_common::CORE_REQUIRED_RUNTIME_SYMBOLS
+        .iter()
+        .filter(|symbol| {
+            !stdout
+                .lines()
+                .any(|line| line.split_whitespace().last() == Some(**symbol))
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(
+        missing.is_empty() && runtime_archive_has_core_required_symbols(&archive),
+        "pure-Simple source tree missing core-required symbols: {missing:?}"
+    );
     for symbol in [
         "__simple_runtime_init",
         "__simple_runtime_shutdown",
@@ -2312,6 +2373,20 @@ int main(void) {
     extern int64_t rt_index_get(int64_t, int64_t);
     extern int8_t rt_index_set(int64_t, int64_t, int64_t);
     extern int64_t rt_pool_safepoint(void);
+    extern int64_t rt_dict_new(int64_t);
+    extern int64_t rt_dict_get(int64_t, int64_t);
+    extern int8_t rt_dict_set(int64_t, int64_t, int64_t);
+    extern int8_t rt_dict_contains(int64_t, int64_t);
+    extern int8_t rt_dict_remove(int64_t, int64_t);
+    extern int64_t rt_dict_len(int64_t);
+    extern int64_t rt_dict_keys(int64_t);
+    extern int64_t rt_dict_values(int64_t);
+    extern int64_t rt_dict_entries(int64_t);
+    extern int8_t rt_is_none(int64_t);
+    extern int64_t rt_string_builder_new(void);
+    extern int64_t rt_string_builder_push(int64_t, int64_t);
+    extern int64_t rt_string_builder_finish(int64_t);
+    extern int64_t rt_string_builder_len(int64_t);
     if (rt_value_int(7) != 56) return 10;
     if (rt_value_as_int(rt_value_int(-7)) != -7) return 15;
     if (rt_pool_safepoint() != 0) return 16;
@@ -2382,6 +2457,42 @@ int main(void) {
     if (rt_string_char_code_at(t, 2) != 'c') return 78;
     int64_t utf8 = rt_string_new((const uint8_t*)"\xC3\xA9", 2);
     if (rt_string_char_code_at(utf8, 0) != 0xE9) return 79;
+
+    int64_t dict = rt_dict_new(1);
+    if (dict == 3 || rt_dict_len(dict) != 0) return 80;
+    int64_t key1 = rt_string_new((const uint8_t*)"k", 1);
+    int64_t key2 = rt_string_new((const uint8_t*)"k", 1);
+    if (!rt_dict_set(dict, key1, rt_value_int(1))) return 81;
+    if (!rt_dict_set(dict, key2, rt_value_int(2))) return 82;
+    if (rt_dict_len(dict) != 1 || rt_dict_get(dict, key1) != rt_value_int(2)) return 83;
+    if (!rt_dict_set(dict, 5, rt_value_int(3))) return 84;
+    if (rt_dict_get(dict, rt_value_int(5)) != rt_value_int(3)) return 85;
+    int64_t key3 = rt_string_new((const uint8_t*)"z", 1);
+    if (!rt_index_set(dict, key3, rt_value_int(4))) return 86;
+    if (rt_index_get(dict, key3) != rt_value_int(4)) return 87;
+    if (rt_array_len((SplArray*)rt_dict_keys(dict)) != 3) return 88;
+    if (rt_array_len((SplArray*)rt_dict_values(dict)) != 3) return 89;
+    int64_t entries = rt_dict_entries(dict);
+    if (rt_array_len((SplArray*)entries) != 3) return 90;
+    if (rt_array_len((SplArray*)rt_array_get((SplArray*)entries, 0)) != 2) return 91;
+    if (!rt_dict_contains(dict, key3) || !rt_dict_remove(dict, key3)) return 92;
+    if (rt_dict_contains(dict, key3) || rt_dict_get(dict, key3) != 3) return 93;
+
+    int64_t none = rt_enum_new(1, (int32_t)2371748697u, 3);
+    int64_t some = rt_enum_new(1, (int32_t)4053299545u, rt_value_int(9));
+    if (!rt_is_none(none) || rt_is_some(none)) return 94;
+    if (rt_is_none(some) || !rt_is_some(some)) return 95;
+    if ((uint32_t)rt_enum_discriminant(some) != 4053299545u) return 96;
+    if (!rt_enum_check_discriminant(some, 4053299545u)) return 97;
+    if (rt_enum_payload(some) != rt_value_int(9)) return 98;
+    if (rt_unwrap_or_self(some) != rt_value_int(9)) return 99;
+    if (rt_unwrap_or_self(rt_value_int(9)) != rt_value_int(9)) return 100;
+    int64_t builder = rt_string_builder_new();
+    if (!builder || !rt_string_builder_push(builder, t) ||
+        !rt_string_builder_push(builder, rt_string_new((const uint8_t*)"def", 3))) return 101;
+    if (rt_string_builder_len(builder) != 6) return 102;
+    int64_t built = rt_string_builder_finish(builder);
+    if (rt_string_len(built) != 6 || memcmp(rt_string_data(built), "abcdef", 6) != 0) return 103;
     int64_t u = rt_string_new((const uint8_t*)"def", 3);
     int64_t c = rt_string_concat(t, u);
     if (rt_string_len(c) != 6 || memcmp(rt_string_data(c), "abcdef", 6) != 0) return 63;
@@ -3017,9 +3128,7 @@ fn test_strip_inactive_cfg_arch_fns_for_host_run_path_semantics() {
     };
 
     // Wrong-arch variant FIRST, host variant second (declaration-order trap).
-    let src = format!(
-        "@cfg({wrong_a})\nfn f(): pass\n@cfg({host})\nfn f(): pass\nfn main(): f()\n"
-    );
+    let src = format!("@cfg({wrong_a})\nfn f(): pass\n@cfg({host})\nfn f(): pass\nfn main(): f()\n");
     let mut parser = simple_parser::Parser::new(&src);
     let mut module = parser.parse().expect("parse");
     strip_inactive_cfg_arch_fns_for_host(&mut module);
@@ -3039,9 +3148,7 @@ fn test_strip_inactive_cfg_arch_fns_for_host_run_path_semantics() {
 
     // NEITHER variant matches the host: both must be stripped (0 survivors),
     // and the stripped-name registry must produce a call-site hint.
-    let src = format!(
-        "@cfg({wrong_a})\nfn g(): pass\n@cfg({wrong_b})\nfn g(): pass\nfn main(): g()\n"
-    );
+    let src = format!("@cfg({wrong_a})\nfn g(): pass\n@cfg({wrong_b})\nfn g(): pass\nfn main(): g()\n");
     let mut parser = simple_parser::Parser::new(&src);
     let mut module = parser.parse().expect("parse");
     strip_inactive_cfg_arch_fns_for_host(&mut module);

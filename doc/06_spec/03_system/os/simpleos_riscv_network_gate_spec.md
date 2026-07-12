@@ -436,6 +436,10 @@ expect(boot_shim).to_contain("fn rt_io_tcp_write_text(fd: i64, data: text) -> i6
    `SELECT codex answer` requests in one boot session.
 3. Require the retained checker to see three HTTP `200` responses,
    `OK CREATE`, `OK INSERT`, and the selected `codex-41` value.
+4. Persist the live response transcript as `db_query.log`, reject negative
+   `Content-Length`, and require the boot listener to use the module-owned DB
+   wrapper rather than constructing service state in its loop.
+5. Reject a build stamp older than the ELF or naming a Rust seed compiler.
 
 Serial network/bind readiness is checked first but cannot reach the final
 connected PASS without the selected-value evidence.

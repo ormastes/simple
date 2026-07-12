@@ -20,25 +20,8 @@
  *      changing the C-side ABI).
  *   2. Adapts the SYSCALL register convention to the System V C ABI.
  *   3. Calls rt_syscall_dispatch(num, a0..a5) which returns int64_t in rax.
- *   4. Returns via SYSRETQ for ring-3 callers, or plain jmp+popfq for
- *      ring-0 callers (see "Ring-0-safe return" below).
- *
- * Ring-0-safe return:
- *   Kernel-internal code issues `syscall` from ring 0 (e.g. desktop_e2e's
- *   launcher path → posix_spawn → syscall(13, ...)). Hardware does not
- *   record the caller's CPL, so the trampoline tells ring-0 callers from
- *   ring-3 callers by comparing the saved caller RIP (rcx) against the
- *   kernel image bounds [0x100000, _kernel_end). A caller RIP inside that
- *   window is ring 0 by construction — ring-3 user text lives outside the
- *   kernel image. Ring-0 callers return via `jmp *%rcx` so execution stays
- *   in ring 0; ring-3 callers get the standard `sysretq` that transitions
- *   back to CPL=3.
- *
- *   This is a single-CPU, single-address-space heuristic. With SMP or
- *   multiple user VAs colliding with the kernel image range, replace the
- *   check with a proper CS save (e.g. push CS into a per-CPU slot before
- *   SYSCALL-facing code on the kernel side, or swap to an iret-return
- *   trampoline that carries CS in its stack frame).
+ *   4. Returns through an explicit user iretq frame. Kernel-internal calls
+ *      bypass LSTAR and invoke rt_syscall_dispatch directly.
  *
  * Symbols exported:
  *   kernel_syscall_entry_asm      - the trampoline itself (goes in LSTAR)
@@ -50,7 +33,6 @@
  *                                   (baremetal_stubs.c)
  *   _kernel_syscall_stack_top     - top of the global kernel stack
  *   _kernel_syscall_scratch_rsp   - scratch slot for caller rsp
- *   _kernel_end                   - linker-provided top of kernel image
  */
 
     .section .text
@@ -88,35 +70,7 @@ kernel_syscall_entry_asm:
     popq    %r11            /* restore caller RFLAGS */
     popq    %rcx            /* restore caller RIP */
 
-    /* Decide whether to return via sysretq (ring-3 caller) or plain jmp
-     * (ring-0 caller). Test the saved caller RIP against the kernel image
-     * bounds [0x100000, _kernel_end). Hardware does not record CPL, but
-     * ring-3 user code cannot share the kernel image range, so a simple
-     * RIP-range check is correct on single-CPU SimpleOS.
-     *
-     * rax holds the dispatcher return value and must be preserved through
-     * both return paths — use rdx as the scratch comparison register. */
-    movq    $0x100000, %rdx
-    cmpq    %rdx, %rcx
-    jb      .Lkse_ring3_return      /* rcx < 1MB  -> ring 3 */
-    leaq    _kernel_end(%rip), %rdx
-    cmpq    %rdx, %rcx
-    jae     .Lkse_ring3_return      /* rcx >= _kernel_end -> ring 3 */
-
-    /* Ring-0 return: restore RFLAGS from r11, restore the caller's RSP,
-     * and jump to the saved RIP. Keeps CPL=0; sysretq would forcibly
-     * transition to CPL=3 into a kernel-text address and crash.
-     *
-     * popfq on a value pushed from r11 is safe — the kernel's SFMASK
-     * cleared IF before entry, but the caller's saved r11 has the
-     * original IF bit. */
-    pushq   %r11
-    popfq
-    movq    _kernel_syscall_scratch_rsp(%rip), %rsp
-    jmpq    *%rcx
-
-.Lkse_ring3_return:
-    /* Ring-3 return path. Use iretq instead of sysretq so the probe gets a
+    /* User return path. Use iretq instead of sysretq so the probe gets a
      * normal fault frame if return state is wrong, and so user return does not
      * depend on SYSRET's stricter canonical-address and RFLAGS behavior. */
     movq    _kernel_syscall_scratch_rsp(%rip), %rdx

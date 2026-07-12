@@ -558,14 +558,14 @@ RuntimeValue _get_kernel_end(RuntimeValue a, RuntimeValue b, RuntimeValue c, Run
         RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) {
     (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;
     extern char _kernel_end[];
-    return ENCODE_INT((int64_t)(uintptr_t)&_kernel_end);
+    return (RuntimeValue)(uintptr_t)&_kernel_end;
 }
 
 RuntimeValue _get_kernel_start(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d,
         RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) {
     (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;
     extern char _kernel_start[];
-    return ENCODE_INT((int64_t)(uintptr_t)&_kernel_start);
+    return (RuntimeValue)(uintptr_t)&_kernel_start;
 }
 
 RuntimeValue _rv64_trap_vector(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d,
@@ -12894,4 +12894,3 @@ RuntimeValue write_message(RuntimeValue a, RuntimeValue b, RuntimeValue c, Runti
     (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;
     return NIL_VALUE;
 }
-

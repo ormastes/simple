@@ -2283,13 +2283,10 @@ impl LlvmBackend {
                     let native_c_process_run = fallback_name == "rt_process_run"
                         || func_name == "rt_process_run"
                         || dotted_name == "rt_process_run";
-                    let native_c_dir_create = fallback_name == "rt_dir_create"
-                        || func_name == "rt_dir_create"
-                        || dotted_name == "rt_dir_create";
                     let runtime_spec = crate::codegen::runtime_sffi::RUNTIME_FUNCS
                         .iter()
                         .find(|spec| spec.name == fallback_name || spec.name == func_name || spec.name == dotted_name)
-                        .filter(|_| !native_c_process_run && !native_c_dir_create);
+                        .filter(|_| !native_c_process_run);
                     let fallback_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = runtime_spec
                         .map(|spec| {
                             spec.params
@@ -2342,20 +2339,7 @@ impl LlvmBackend {
                         raw_arg_vals.push(int_val);
                     }
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-                    if native_c_dir_create && raw_arg_vals.len() == 2 {
-                        let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
-                            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
-                            module.add_function("rt_string_data", fn_type, None)
-                        });
-                        let path_ptr = builder
-                            .build_call(rt_string_data, &[raw_arg_vals[0].into()], "dir_path_ptr")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?
-                            .try_as_basic_value()
-                            .left()
-                            .unwrap_or_else(|| i64_type.const_int(0, false).into());
-                        arg_vals.push(path_ptr.into());
-                        arg_vals.push(raw_arg_vals[1].into());
-                    } else if let Some(text_indices) = crate::codegen::instr::calls::text_arg_indices(
+                    if let Some(text_indices) = crate::codegen::instr::calls::text_arg_indices(
                         runtime_spec.map(|spec| spec.name).unwrap_or(&fallback_name),
                     ) {
                         let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {

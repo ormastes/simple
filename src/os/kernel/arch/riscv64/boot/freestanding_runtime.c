@@ -848,6 +848,15 @@ spl_i64 rt_string_to_int(spl_i64 value) {
     return sign * acc;
 }
 
+spl_i64 rt_string_to_int_lenient(spl_i64 value) {
+    return rt_string_to_int(value);
+}
+
+spl_i64 rt_invlpg(spl_i64 addr) {
+    (void)addr;
+    return 0;
+}
+
 /* Mirrors src/runtime/simple_core/core_string.spl rt_contains:
  * substring membership when both operands are strings, else array membership
  * via element-wise rt_native_eq. Returns raw 0/1 (matching rt_native_eq).

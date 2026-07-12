@@ -704,6 +704,12 @@ expect(os_native_build_sources(rv32_target)[0]).to_equal("build/os/generated")
 
 </details>
 
+#### prefers explicit target compilers before installed Rust seeds
+
+The target compiler selector checks both `SIMPLE_BINARY` and `SIMPLE_BIN`
+before probing either bootstrap or release Rust-seed paths. This keeps an
+explicit validated self-hosted compiler authoritative for LLVM target builds.
+
 #### lets callers disable compiled OS logging through native-build args
 
 <details>

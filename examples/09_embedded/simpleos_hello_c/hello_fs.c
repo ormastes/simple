@@ -27,8 +27,12 @@ __attribute__((noreturn)) static void sys_exit(long code) {
     __builtin_unreachable();
 }
 
-void _start(void) {
-    const char *m = "hello from clang on simpleos\n";
+int main(void) {
+    const char *m = "hello-from-simpleos-clang\n";
     for (const char *p = m; *p; ++p) sys_putc(*p);
-    sys_exit(42);
+    return 42;
+}
+
+void _start(void) {
+    sys_exit(main());
 }

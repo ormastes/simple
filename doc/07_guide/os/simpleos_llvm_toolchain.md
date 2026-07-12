@@ -22,7 +22,7 @@ The cross `clang-20` is a **host executable** (Linux ELF) that emits
 ## Current filesystem-exec status (2026-07-11)
 
 The guest candidate now exists at
-`build/os/clang_static/bin/clang_static` (124,602,568-byte static ELF), but it
+`build/os/clang_static/bin/clang_static` (122,233,168-byte static ELF), but it
 has **not** passed mounted-filesystem execution. The production x86_64 loader
 now opens the exact requested FAT32 path, retains only a bounded ELF header and
 program-header prefix, and streams every PT_LOAD directly into its mapped user
@@ -79,8 +79,19 @@ yet provable**. Two tracked blockers:
    `build/os/clang_static/bin/clang_static` (a static clang that runs **on**
    SimpleOS, not the host cross-compiler above) plus
    `build/os/.bake_include_toolchain`. `--status` gate =
-   `guest-toolchain-exec-gate BLOCKED`. `build_clang_disk.shs` currently proves
-   LLVM bitcode emission only; its own source records `-emit-obj` as blocked.
+   `guest-toolchain-exec-gate BLOCKED`. Historical `build_clang_disk.shs`
+   evidence proves LLVM bitcode only. The current lane requests
+   `-emit-obj /hello.o` and fails unless the guest dump is x86-64 ELF REL with
+   `main` and exit status 0. Embedded LLD now builds into the guest binary, the
+   static relink has zero undefined symbols, and the wrapper has fail-closed
+   guest object/link/execute phases. It has not produced live proof because the
+   available pure-Simple CLIs fail while native-building the QEMU kernel before
+   guest boot; see
+   `doc/08_tracking/bug/simpleos_clang_fs_pure_compiler_native_build_2026-07-11.md`.
+   Run it with a proven self-hosted compiler, for example:
+   `SIMPLE_BUILD_COMPILER=build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple sh scripts/os/build_clang_disk.shs`.
+   The wrapper rejects Rust-seed provenance and requires exact `-c` output `2`
+   before starting the kernel build.
    **On desktop SimpleOS this static path
    is DEPRECATED — see the launch-policy section below.**
 

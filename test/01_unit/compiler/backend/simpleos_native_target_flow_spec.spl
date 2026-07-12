@@ -2,8 +2,9 @@ use std.spec.*
 use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.backend_helpers.{backend_helper_native_target_for}
 use compiler.backend.backend.llvm_native_link.{is_simpleos_x86_64_target, simpleos_x86_64_user_link_inputs}
-use compiler.backend.backend.llvm_target.{LlvmTargetTriple}
+use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.backend.llvm_cross_target.{toolchain_for_target}
+use std.io_runtime.{rt_file_read_text}
 
 describe "SimpleOS native target flow":
     it "keeps the logical SimpleOS target through codegen and sysroot linking":
@@ -21,3 +22,17 @@ describe "SimpleOS native target flow":
     it "keeps the legacy bare-metal x86 target on the SimpleOS kernel lane":
         expect(backend_helper_native_target_for("x86_64-unknown-none-elf")).to_equal(CodegenTarget.X86_64)
         expect(is_simpleos_x86_64_target("x86_64-unknown-none-elf")).to_be(true)
+
+    it "resolves an explicit SimpleOS target before probing the compiler host":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_target.spl") ?? ""
+        val simpleos_guard = source.index_of("if target == CodegenTarget.SimpleOS_X86_64:") ?? -1
+        val simpleos_return = source.index_of("return simpleos_triple") ?? -1
+        val hosted_probe = source.index_of("val host_os = get_host_os()") ?? -1
+        expect(simpleos_guard).to_be_greater_than(-1)
+        expect(simpleos_return).to_be_greater_than(simpleos_guard)
+        expect(hosted_probe).to_be_greater_than(simpleos_return)
+        expect(hosted_probe).to_be_greater_than(simpleos_guard)
+
+        val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.SimpleOS_X86_64, nil)
+        expect(config.triple.to_text()).to_equal("x86_64-unknown-simpleos")
+        expect(config.triple.datalayout()).to_equal("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128")

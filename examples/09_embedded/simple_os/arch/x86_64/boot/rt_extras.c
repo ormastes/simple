@@ -88,6 +88,7 @@ extern RuntimeValue rt_string_from_cstr(const char *cstr);
 extern RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
 extern RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b);
 extern RuntimeValue rt_string_len(RuntimeValue str);
+extern RuntimeValue rt_string_data(RuntimeValue str);
 extern RuntimeValue rt_value_to_string(RuntimeValue val);
 extern RuntimeValue rt_array_new(RuntimeValue cap);
 extern int8_t rt_array_push(RuntimeValue arr, RuntimeValue val);
@@ -1338,6 +1339,24 @@ RuntimeValue rt_text_to_bytes(RuntimeValue str) {
         rt_array_push(arr, ENCODE_INT((int64_t)(unsigned char)s->data[i]));
     }
     return arr;
+}
+
+uint64_t rt_text_raw_z_size(RuntimeValue str) {
+    return (uint64_t)rt_string_len(str) + 1U;
+}
+
+uint64_t rt_text_copy_z_to_raw(uint64_t dst, RuntimeValue str) {
+    char *out = (char *)(uintptr_t)dst;
+    const char *src = (const char *)(uintptr_t)rt_string_data(str);
+    uint64_t len = (uint64_t)rt_string_len(str);
+    if (!out) return 0;
+    if (!src) {
+        out[0] = '\0';
+        return 1;
+    }
+    for (uint64_t i = 0; i < len; i++) out[i] = src[i];
+    out[len] = '\0';
+    return len + 1U;
 }
 
 RuntimeValue rt_bytes_from_raw(RuntimeValue ptr, RuntimeValue len) {

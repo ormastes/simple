@@ -28,6 +28,22 @@ fn test_compile_add_function() {
 }
 
 #[test]
+fn test_aot_emits_discardable_function_sections() {
+    use object::{Object, ObjectSection};
+
+    let obj = compile_to_object(
+        "fn first() -> i64:\n    return 1\nfn second() -> i64:\n    return 2\n",
+    )
+    .unwrap();
+    let file = object::File::parse(obj.as_slice()).unwrap();
+    let text_sections = file
+        .sections()
+        .filter(|section| section.name().unwrap_or("").starts_with(".text"))
+        .count();
+    assert!(text_sections >= 2, "expected one discardable text section per function");
+}
+
+#[test]
 fn test_compile_comparison() {
     let obj = compile_to_object("fn is_positive(x: i64) -> bool:\n    return x > 0\n").unwrap();
     assert!(!obj.is_empty());

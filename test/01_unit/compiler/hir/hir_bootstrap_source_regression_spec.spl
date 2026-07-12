@@ -5,6 +5,28 @@ fn file_text(path: text) -> text:
     read_file_text(path)
 
 describe "HIR bootstrap source regressions":
+    it "constructs lowering collections with explicit stage4 types":
+        val types = file_text("src/compiler/20.hir/hir_lowering/types.spl")
+        expect(types).to_contain("val empty_errors: [LoweringError] = []")
+        expect(types).to_contain("val empty_loaded_modules: [text] = []")
+        expect(types).to_contain("val empty_modules_by_name: Dict<text, Module> = {}")
+
+    it "extracts named types before constructing other enum payload exemplars":
+        val types = file_text("src/compiler/20.hir/hir_lowering/types.spl")
+        val parser_types = file_text("src/compiler/10.frontend/parser_types_expr.spl")
+        val named_return = types.index_of("return HirType(kind: named_kind, span: lt.span)") ?? -1
+        val optional_exemplar = types.index_of("val d_opt: i64 = hir_type_kind_disc(TypeKind.Optional(lt))") ?? -1
+        expect(parser_types).to_contain("fn parser_type_kind_named_name(kind: TypeKind) -> text:")
+        expect(parser_types).to_contain("fn parser_type_kind_named_args(kind: TypeKind) -> [Type]:")
+        expect(parser_types.contains("compiler.hir")).to_be(false)
+        expect(types).to_contain("val nm: text = parser_type_kind_named_name(lt_kind)")
+        expect(types).to_contain("val nargs: [Type] = parser_type_kind_named_args(lt_kind)")
+        expect(types).to_contain("internal: failed to extract named type")
+        expect(types.contains("rt_enum_payload(value: TypeKind)")).to_be(false)
+        expect(types.contains("case TypeKind.Named(name, args):")).to_be(false)
+        expect(named_return).to_be_greater_than(-1)
+        expect(optional_exemplar).to_be_greater_than(named_return)
+
     it "uses the runtime discriminant for struct-named type variants":
         val types = file_text("src/compiler/20.hir/hir_lowering/types.spl")
         expect(types).to_contain("fn hir_type_kind_disc(k: TypeKind) -> i64:\n    rt_enum_discriminant(k)")

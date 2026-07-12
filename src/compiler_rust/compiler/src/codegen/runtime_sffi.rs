@@ -262,6 +262,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_dict_clear", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_dict_keys", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_dict_values", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_dict_insert", &[I64, I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_dict_contains", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_dict_remove", &[I64, I64], &[I8]),
     // =========================================================================
     // Fast DB operations (runtime_db.c)
@@ -1516,6 +1518,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_time_now_unix", &[], &[I64]),
     RuntimeFuncSpec::new("rt_time_now_nanos", &[], &[I64]),
     RuntimeFuncSpec::new("rt_time_now_micros", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_time_now_monotonic_ms", &[], &[I64]),
     RuntimeFuncSpec::new("rt_time_now_unix_micros", &[], &[I64]),
     RuntimeFuncSpec::new("rt_entropy_hardware_ready", &[], &[I64]),
     RuntimeFuncSpec::new("rt_sleep_ms", &[I64], &[]),
@@ -1575,6 +1578,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_dir_create", &[I64, I64, I8], &[I8]), // path_ptr, path_len, recursive -> bool
     RuntimeFuncSpec::new("rt_dir_create_all", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
+    RuntimeFuncSpec::new("rt_dir_exists", &[I64, I64], &[I8]),     // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_dir_list", &[I64, I64], &[I64]),      // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_dir_remove", &[I64, I64, I8], &[I8]), // path_ptr, path_len, recursive -> bool
     RuntimeFuncSpec::new("rt_dir_remove_all", &[I64, I64], &[I8]), // path -> bool
@@ -1600,6 +1604,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_path_stem", &[I64, I64], &[I64]),     // path -> RuntimeValue
     RuntimeFuncSpec::new("rt_path_relative", &[I64, I64, I64, I64], &[I64]), // from, to -> RuntimeValue
     RuntimeFuncSpec::new("rt_path_join", &[I64, I64, I64, I64], &[I64]), // path1, path2 -> RuntimeValue
+    RuntimeFuncSpec::new("rt_path_parent", &[I64, I64], &[I64]),   // path -> RuntimeValue
     // =========================================================================
     // Runtime Configuration
     // =========================================================================

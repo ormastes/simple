@@ -131,8 +131,15 @@ With `--with-db`, `scripts/qemu/qemu_rv64_http_test.shs` now sends three real
 then select it. It passes only when all three HTTP responses succeed and the
 selected body contains `codex-41`. The retained-evidence checker likewise
 requires three `200` responses plus `OK CREATE`, `OK INSERT`, and `codex-41`;
-serial readiness alone cannot pass. A current-source QEMU run is still blocked
-until the RV64 ELF can be rebuilt by the self-hosted compiler.
+it also rejects negative response lengths. The producer writes the three raw
+responses to `db_query.log` beside `SERIAL_LOG`, so a custom
+`SERIAL_LOG=/artifacts/serial.log` directly creates the checker layout. Serial
+readiness alone cannot pass. A current-source QEMU run is still blocked until
+the RV64 ELF can be rebuilt by the self-hosted compiler.
+
+Without `--allow-prebuilt-artifact`, the wrapper also requires a build stamp
+newer than the ELF and rejects `simple_bin` provenance naming `compiler_rust`
+or `simple_seed`. Seed-built and stale-stamp kernels remain diagnostic only.
 
 When `nm` is available, the wrapper also fail-fast checks the RV64 ELF before
 launch. If `_start` aliases `rt_riscv_uart_put`, the artifact is the known
