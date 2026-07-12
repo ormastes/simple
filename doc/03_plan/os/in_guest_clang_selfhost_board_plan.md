@@ -5,7 +5,14 @@ board hardware, compiling a C file to an object it writes back to disk, retrieva
 over SSH. QEMU is the dev harness; the board is the requirement. No design may depend
 on a QEMU-only mechanism.
 
-**Status (2026-07-12):** ✅ **PHASE 1 DONE.** clang runs in ring-3 and COMPILES a C file:
+**Status (2026-07-12):** ✅ **FULL 2e COMPLETE.** All software increments done: clang compiles
+`/hello.c`→`/hello.o` over real OpenSSH (Inc 1/2) and the object is retrieved BYTE-EXACT over
+SSH via `ssh root@host getfile /hello.o` (Inc 3, `cd0418ee39cb`) — sha256 matches on-disk
+`/HELLO.O`, host-links + runs == exit 7. Remaining is physical-hardware bring-up on the actual
+mini-PC (NVMe/serial/NIC provable only there). Details below and in
+`doc/03_plan/os/clang_over_ssh_2e_design.md`.
+
+✅ **PHASE 1 DONE.** clang runs in ring-3 and COMPILES a C file:
 `clang -cc1 -emit-obj -o /hello.o /hello.c` streams 124 MB clang → ring-3 → reads `/hello.c`
 (28 B off NVMe) → serves `/dev/urandom` → writes a 712-byte `/hello.o` → exit(0). The object
 is byte-valid: base64-dumped at exit, decodes to ELF64 `ET_REL`/`EM_X86_64` with a `main`
@@ -104,12 +111,23 @@ image fresh for the compile pass. Next: Phase 2 (board port).
       write-new → commit dir → free-old. Residual (not blocking): free-cluster search runs
       before freeing the old chain, so a same-size overwrite on a 100%-full disk would spuriously
       fail — fine here (16 spare clusters, one small file).
-2e. **End-to-end board scenario:** over real OpenSSH, `clang -cc1 -emit-obj -o /hello.o
-    /hello.c` on the guest writes `/hello.o` to disk; retrieve over SSH/scp; verify. Mark
-    physical-hardware NVMe/serial/NIC as provable only on the actual mini-PC.
+2e. ✅ **DONE (2026-07-12) — end-to-end over real OpenSSH:** `clang -cc1 -emit-obj -o /hello.o
+    /hello.c` runs on the guest over SSH and writes `/hello.o` to the real NVMe disk (Inc 1/2:
+    sshd shallow-frame tokenizes argv, `x86_64_fs_exec_spawn_heap` streams 124 MB clang into
+    ring-3 post-net). `ssh root@host getfile /hello.o > retrieved.o` (Inc 3, `cd0418ee39cb`)
+    returns the file bytes as channel stdout in one shot; retrieved.o is BYTE-IDENTICAL to the
+    on-disk `/HELLO.O` (sha256 `d0c481d8…90a8c39b`, 712 B), ELF64 ET_REL, host-links + runs ==
+    exit 7. Two x86_64-freestanding root-cause fixes shipped with Inc 3: `_build_channel_data_stable`
+    now copies data via the `.push` intrinsic (the `rt_push_byte` reassignment form dropped the
+    BYTE_PACKED representation for large arrays → 0x53-garbage payload, masked because small
+    handshake packets stayed inline-packed); `_finish_exec_request_inline` binds `output.len()`
+    to an intermediate var (chained `.to_u32()` mis-lowered → `consume_remote_window` dropped the
+    payload). scp-source (`scp -O`) left near-complete (interactive ack handshake blocked by
+    non-persisting nested-`me` mutation); `getfile` supersedes it. REMAINING: physical-hardware
+    NVMe/serial/NIC bring-up, provable only on the actual mini-PC.
 
 ## Execution order
 
-1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a ✅ (.o on real NVMe)  →  2b ✅ (board-safe exit)  →  2c ✅ (UEFI boot)  →  2d ✅ (robustness)  →  2e.
+1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a ✅ (.o on real NVMe)  →  2b ✅ (board-safe exit)  →  2c ✅ (UEFI boot)  →  2d ✅ (robustness)  →  2e ✅ (compile + byte-exact retrieve over SSH). ALL SOFTWARE DONE; physical-board bring-up remains.
 Never start Phase 2 before 1d passes. Small model + guide per step; higher-model review +
 the host-link-and-run / gate verification owned by the coordinator.
