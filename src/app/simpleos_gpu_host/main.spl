@@ -79,16 +79,18 @@ fn _process_hello(base: i64, generation: i64) -> i64:
         processing_backend: if processing_mask == 0: "cpu" else: simpleos_host_gpu_backend_name(render_code)
     )
     val valid = simpleos_host_gpu_validate_hello(hello)
-    if not valid.ok or render_mask == 0 or not _render_backend_available(render_code):
+    val negotiated_render_mask = render_mask & simpleos_host_gpu_backend_mask(render_code)
+    if not valid.ok or negotiated_render_mask == 0 or not _render_backend_available(render_code):
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO, 0, 0, 0, 1, 0, 0)
         return 1
-    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_RENDER_MASK, render_mask & simpleos_host_gpu_backend_mask(render_code))
+    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_RENDER_MASK, negotiated_render_mask)
     # ProcessingIR is not implemented yet; never relabel Engine2D clear as processing.
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK, 0)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_PAYLOAD, SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_READBACK, SIMPLEOS_HOST_GPU_MAX_READBACK_BYTES)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION, SIMPLEOS_HOST_GPU_PROTOCOL_VERSION)
-    _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, 1, 0, 1, 1, SIMPLEOS_HOST_GPU_READBACK_DEVICE, 1)
+    # HELLO proves availability only; device provenance belongs to render readback.
+    _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, 0, 0, 0, 1, 0, 0)
     1
 
 fn _process_request(base: i64) -> i64:
@@ -126,7 +128,9 @@ fn _process_request(base: i64) -> i64:
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, REASON_CHECKSUM_MISMATCH, 0, 0, 0, 1, 0, 0)
         return 1
 
-    if kind != SIMPLEOS_HOST_GPU_KIND_RENDER or backend != "vulkan":
+    val requested_backend_mask = simpleos_host_gpu_backend_mask(_read(base, SIMPLEOS_HOST_GPU_WIRE_BACKEND))
+    val negotiated_render_mask = _read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_RENDER_MASK)
+    if kind != SIMPLEOS_HOST_GPU_KIND_RENDER or backend != "vulkan" or (negotiated_render_mask & requested_backend_mask) == 0:
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, REASON_BACKEND_UNAVAILABLE, 0, 0, 0, 1, 0, 0)
         return 1
 
@@ -152,7 +156,6 @@ fn _process_request(base: i64) -> i64:
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, REASON_UNSUPPORTED_COMMAND, 0, 0, 0, 1, 0, 0)
         return 1
 
-    engine.present()
     val readback = engine.read_pixels_with_source()
     val output_count = width * height
     if readback.source != "device_readback" or readback.backend_handle <= 0 or readback.pixels.len().to_i64() < output_count:
