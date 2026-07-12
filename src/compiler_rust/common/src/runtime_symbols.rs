@@ -137,6 +137,7 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_array_push",
     "rt_array_pop",
     "rt_array_len",
+    "rt_array_len_safe",
     "rt_bytes_u32_le_at",
     "rt_bytes_u64_le_at",
     "rt_typed_bytes_u8_push",
@@ -383,6 +384,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_array_first",
     "rt_array_clear",
     "rt_array_len",
+    "rt_array_len_safe",
     "rt_range",
     "rt_range_inclusive",
     // Tuple operations

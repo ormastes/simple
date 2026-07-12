@@ -402,18 +402,24 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
     if map_heap:
         val HEAP_VA: u64 = 0x9000000000
         val HEAP_PAGES: u64 = 16384
+        # NOTE: use a fresh u64 constant here, NOT PAGE.to_u64(): in this
+        # freestanding native-build, PAGE (a local `val PAGE: i64 = 4096`) lowered
+        # through .to_u64() evaluates to 0, which silently mapped every page to the
+        # same VA and set the heap size to 0 (clang then OOM'd on its first mmap).
+        # See doc/08_tracking/bug for the .to_u64()-returns-zero codegen bug.
+        val HEAP_PAGE_SZ: u64 = 4096
         var hp: u64 = 0
         while hp < HEAP_PAGES:
             val hph = pmm_alloc_page_raw()
             if hph == 0:
                 serial_println("[spawn] FAIL heap alloc page={hp}")
                 return -5
-            vmm_zero_phys_range(hph, PAGE.to_u64())
-            if not vmm_map_user_low_page(space, VirtAddr(addr: HEAP_VA + (hp * PAGE.to_u64())), PhysAddr(addr: hph), VmFlags.user_rw()):
+            vmm_zero_phys_range(hph, HEAP_PAGE_SZ)
+            if not vmm_map_user_low_page(space, VirtAddr(addr: HEAP_VA + (hp * HEAP_PAGE_SZ)), PhysAddr(addr: hph), VmFlags.user_rw()):
                 serial_println("[spawn] FAIL heap map page={hp}")
                 return -6
             hp = hp + 1
-        rt_user_heap_init(HEAP_VA, HEAP_PAGES * PAGE.to_u64())
+        rt_user_heap_init(HEAP_VA, HEAP_PAGES * HEAP_PAGE_SZ)
         serial_println("[spawn] user heap mapped base=0x{HEAP_VA} pages={HEAP_PAGES}")
 
     val ctx = TaskContext(

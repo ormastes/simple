@@ -428,6 +428,12 @@ pub extern "C" fn rt_array_len(array: RuntimeValue) -> i64 {
     unsafe { (*arr).len as i64 }
 }
 
+#[no_mangle]
+pub extern "C" fn rt_array_len_safe(array: RuntimeValue) -> i64 {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    unsafe { (*arr).len as i64 }
+}
+
 /// Get an element from an array
 #[no_mangle]
 pub extern "C" fn rt_array_get(array: RuntimeValue, index: i64) -> RuntimeValue {

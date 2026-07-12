@@ -128,7 +128,7 @@ pub use channels::RuntimeChannel;
 // Re-export collection SFFI functions
 pub use collections::{
     rt_array_clear, rt_array_data_ptr, rt_array_data_ptr_text, rt_array_data_ptr_u8, rt_array_extend_i64,
-    rt_array_first, rt_array_get, rt_array_get_text, rt_array_header_ptr, rt_array_len, rt_array_new,
+    rt_array_first, rt_array_get, rt_array_get_text, rt_array_header_ptr, rt_array_len, rt_array_len_safe, rt_array_new,
     rt_array_new_with_cap_u64, rt_array_pop, rt_array_push, rt_array_set, rt_array_set_len_known,
     rt_array_set_len_known_text, rt_array_set_text, rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at,
     rt_bytes_u64_le_at, rt_bytes_u8_at, rt_bytes_u8_set, rt_contains, rt_cstring_to_text, rt_hash_text,

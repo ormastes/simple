@@ -1628,6 +1628,10 @@ int64_t rt_array_len(SplArray* a) {
     return array ? array->len : 0;
 }
 
+int64_t rt_array_len_safe(int64_t value) {
+    return rt_array_len((SplArray*)(uintptr_t)value);
+}
+
 int64_t rt_array_get(SplArray* a, int64_t idx) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 3;

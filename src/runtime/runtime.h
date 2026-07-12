@@ -299,6 +299,7 @@ SplArray* rt_array_new(int64_t cap);
 SplArray* rt_array_new_with_cap_u64(int64_t cap);
 SplArray* rt_byte_array_new(uint64_t cap);
 int64_t  rt_array_len(SplArray* array);
+int64_t  rt_array_len_safe(int64_t value);
 int64_t  rt_array_get(SplArray* array, int64_t idx);
 int64_t  rt_array_get_text(SplArray* array, int64_t idx);
 void     rt_array_set(SplArray* array, int64_t idx, int64_t value);

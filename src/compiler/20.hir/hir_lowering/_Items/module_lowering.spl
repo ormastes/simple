@@ -315,7 +315,43 @@ impl HirLowering:
             structs[hir_struct.symbol] = hir_struct
             lower_idx = lower_idx + 1
 
-        val lower_module_enums = module.enums
+        # Imported enum names are registered above, but their definitions used
+        # to be dropped here. Preserve the variants and payload types so native
+        # match bindings do not treat text payloads as integer-shaped values.
+        var lower_module_enums: Dict<text, Enum> = {}
+        val local_enum_keys = module.enums.keys()
+        var import_enum_idx = 0
+        while import_enum_idx < local_enum_keys.len():
+            val local_enum_name = local_enum_keys[import_enum_idx]
+            lower_module_enums[local_enum_name] = module.enums[local_enum_name]
+            import_enum_idx = import_enum_idx + 1
+        var enum_import_idx = 0
+        while enum_import_idx < module.imports.len():
+            val imp = module.imports[enum_import_idx]
+            val imported_mod: Module? = self.modules_by_name.get(imp.module)
+            if imported_mod != nil:
+                if imp.items.len() == 0:
+                    val imported_enum_keys = imported_mod.enums.keys()
+                    import_enum_idx = 0
+                    while import_enum_idx < imported_enum_keys.len():
+                        val imported_name = imported_enum_keys[import_enum_idx]
+                        # Imports are registered before local declarations and
+                        # type symbols are first-write-wins, so the imported
+                        # definition must win here too.
+                        lower_module_enums[imported_name] = imported_mod.enums[imported_name]
+                        import_enum_idx = import_enum_idx + 1
+                else:
+                    var enum_item_idx = 0
+                    while enum_item_idx < imp.items.len():
+                        val item = imp.items[enum_item_idx]
+                        val imported_enum: Enum? = imported_mod.enums.get(item.name)
+                        # ponytail: alias-aware enum type substitution is still
+                        # required for self-referential payloads; keep aliases
+                        # on the existing path until that syntax is requested.
+                        if imported_enum != nil and not item.has_alias:
+                            lower_module_enums[item.name] = imported_enum
+                        enum_item_idx = enum_item_idx + 1
+            enum_import_idx = enum_import_idx + 1
         val lower_enum_keys = lower_module_enums.keys()
         lower_idx = 0
         while lower_idx < lower_enum_keys.len():
