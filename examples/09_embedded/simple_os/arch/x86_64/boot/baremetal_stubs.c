@@ -315,6 +315,19 @@ static inline RuntimeValue *runtime_array_items(RuntimeArray *a)
     return a->items ? a->items : runtime_array_inline_items(a);
 }
 
+/* Current freestanding codegen holds tagged RuntimeArray handles and masks the
+ * tag before direct header access. Some hosted/legacy helpers still pass raw
+ * pointers, so accept both representations at this provider boundary while
+ * keeping exported constructors tagged. */
+static inline RuntimeArray *runtime_array_from_abi(RuntimeValue v)
+{
+    RuntimeArray *a = IS_HEAP(v)
+        ? (RuntimeArray *)DECODE_PTR(v)
+        : (RuntimeArray *)(uintptr_t)v;
+    if (!a || a->hdr.type != HEAP_ARRAY) return NULL;
+    return a;
+}
+
 void *malloc(size_t sz);
 
 /* ---- byte-array (packed [u8]) helpers, native-contract compliant ----
@@ -8038,11 +8051,79 @@ RuntimeValue rt_dict_values(RuntimeValue d) { return rt_map_values(d); }
 RuntimeValue rt_dict_clear(RuntimeValue d) { return rt_map_clear(d); }
 RuntimeValue rt_array_first(RuntimeValue a) { (void)a; return NIL_VALUE; }
 RuntimeValue rt_array_last(RuntimeValue a) { (void)a; return NIL_VALUE; }
-RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n) { (void)v; (void)n; return NIL_VALUE; }
-RuntimeValue rt_string_find(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return (RuntimeValue)(-1); }
-RuntimeValue rt_string_rfind(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return (RuntimeValue)(-1); }
+RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n)
+{
+    int64_t count = (int64_t)n; /* MIR passes raw i64 count. */
+    if (count < 0) count = 0;
+    if (count > 0x100000) count = 0x100000;
+    uint64_t cap = count > 0 ? (uint64_t)count : 1ULL;
+    size_t bytes = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
+    RuntimeArray *a = (RuntimeArray *)malloc(bytes);
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.gc_flags = 0;
+    a->hdr.size = (uint32_t)bytes;
+    a->len = (uint64_t)count;
+    a->cap = cap;
+    a->items = runtime_array_inline_items(a);
+    for (int64_t i = 0; i < count; i++) a->items[i] = v;
+    return ENCODE_PTR(a);
+}
+static RuntimeString *decode_string(RuntimeValue v);
+
+RuntimeValue rt_string_find(RuntimeValue s, RuntimeValue sub)
+{
+    RuntimeString *text = decode_string(s);
+    RuntimeString *needle = decode_string(sub);
+    if (!text || !needle) return (RuntimeValue)(-1);
+    if (needle->len == 0) return 0;
+    if (needle->len > text->len) return (RuntimeValue)(-1);
+    for (uint64_t i = 0; i + needle->len <= text->len; i++) {
+        uint64_t j = 0;
+        while (j < needle->len && text->data[i + j] == needle->data[j]) j++;
+        if (j == needle->len) return (RuntimeValue)i;
+    }
+    return (RuntimeValue)(-1);
+}
+
+RuntimeValue rt_string_rfind(RuntimeValue s, RuntimeValue sub)
+{
+    RuntimeString *text = decode_string(s);
+    RuntimeString *needle = decode_string(sub);
+    if (!text || !needle) return (RuntimeValue)(-1);
+    if (needle->len == 0) return (RuntimeValue)text->len;
+    if (needle->len > text->len) return (RuntimeValue)(-1);
+    uint64_t i = text->len - needle->len;
+    for (;;) {
+        uint64_t j = 0;
+        while (j < needle->len && text->data[i + j] == needle->data[j]) j++;
+        if (j == needle->len) return (RuntimeValue)i;
+        if (i == 0) break;
+        i--;
+    }
+    return (RuntimeValue)(-1);
+}
 RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep) { (void)a; (void)sep; return NIL_VALUE; }
-RuntimeValue rt_string_to_int(RuntimeValue s) { (void)s; return ENCODE_INT(0); }
+RuntimeValue rt_string_to_int(RuntimeValue s) {
+    RuntimeString *str = decode_string(s);
+    if (!str) return ENCODE_INT(0);
+    uint32_t i = 0;
+    while (i < str->len) {
+        char c = str->data[i];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') break;
+        i++;
+    }
+    int64_t sign = 1;
+    if (i < str->len && str->data[i] == '-') { sign = -1; i++; }
+    else if (i < str->len && str->data[i] == '+') { i++; }
+    int64_t out = 0;
+    while (i < str->len) {
+        char c = str->data[i++];
+        if (c < '0' || c > '9') break;
+        out = out * 10 + (int64_t)(c - '0');
+    }
+    return ENCODE_INT(sign * out);
+}
 RuntimeValue rt_option_map(RuntimeValue o, RuntimeValue f) { (void)o; (void)f; return NIL_VALUE; }
 RuntimeValue rt_file_read_text(const char *path, int64_t path_len) {
     return _fat32_read_file_text_value(path, path_len);
@@ -8905,12 +8986,13 @@ RuntimeValue rt_string_substr(RuntimeValue str, RuntimeValue start)
     /* substr(str, start) -- returns from start to end */
     RuntimeString *s = decode_string(str);
     if (!s) return NIL_VALUE;
-    int64_t a = DECODE_INT(start);
+    /* rt_string_slice takes RAW indices; `start` arrives raw from codegen. */
+    int64_t a = (int64_t)start;
     if (a < 0) a = 0;
     if ((uint32_t)a >= s->len) {
         return rt_string_from_cstr("");
     }
-    return rt_string_slice(str, start, ENCODE_INT(s->len));
+    return rt_string_slice(str, (RuntimeValue)a, (RuntimeValue)s->len);
 }
 
 /* rt_string_split: split by delimiter, return array of strings */
@@ -8919,10 +9001,19 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
     RuntimeString *s = decode_string(str);
     RuntimeString *d = decode_string(delim);
     RuntimeValue arr = rt_array_new(ENCODE_INT(4));
-    /* Exported array-return ABI is a RAW RuntimeArray pointer, matching
-     * runtime_native.c and generated [T] indexing. Keep the encoded handle
-     * only while calling the internal append helper. */
-    if (!s || s->len == 0) return (RuntimeValue)(uintptr_t)DECODE_PTR(arr);
+    /* Return the TAGGED (ENCODE_PTR) array handle. The freestanding cranelift
+     * codegen inlines `.len()`/`[i]` on the split result assuming a tagged
+     * heap handle (same representation a Simple-built `[text]` carries) — a
+     * raw pointer made `.len()` read garbage and every index return nil,
+     * which is the fault that stalled parse_html. rt_array_new /
+     * rt_array_push_handle already yield ENCODE_PTR(a); return it directly.
+     * See doc/08_tracking/bug/simpleos_freestanding_text_split_abi_parse_html_2026-07-12.md */
+    if (!s) return arr;
+    if (s->len == 0) {
+        /* Parity with hosted rt_string_split: "".split(x) -> [""], not []. */
+        arr = rt_array_push_handle(arr, rt_string_from_cstr(""));
+        return arr;
+    }
     if (!d || d->len == 0) {
         /* Split into individual characters */
         for (uint32_t i = 0; i < s->len; i++) {
@@ -8930,11 +9021,11 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
                 (RuntimeValue)(uintptr_t)&s->data[i], 1);
             arr = rt_array_push_handle(arr, ch);
         }
-        return (RuntimeValue)(uintptr_t)DECODE_PTR(arr);
+        return arr;
     }
     if (d->len > s->len) {
         arr = rt_array_push_handle(arr, str);
-        return (RuntimeValue)(uintptr_t)DECODE_PTR(arr);
+        return arr;
     }
     uint32_t start = 0;
     for (uint32_t i = 0; i <= s->len - d->len; ) {
@@ -8944,8 +9035,13 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
         }
         if (j == d->len) {
             /* Found delimiter at i */
+            /* rt_string_slice treats its start/end args as RAW (untagged)
+             * indices — same convention rt_string_trim uses. Passing
+             * ENCODE_INT here shifted indices by <<3, so every non-trivial
+             * split returned garbage substrings (whole-string / empty). See
+             * doc/08_tracking/bug/simpleos_freestanding_text_split_abi_parse_html_2026-07-12.md */
             RuntimeValue part = rt_string_slice(str,
-                ENCODE_INT(start), ENCODE_INT(i));
+                (RuntimeValue)start, (RuntimeValue)i);
             arr = rt_array_push_handle(arr, part);
             i += d->len;
             start = i;
@@ -8955,9 +9051,9 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
     }
     /* Remainder */
     RuntimeValue rest = rt_string_slice(str,
-        ENCODE_INT(start), ENCODE_INT(s->len));
+        (RuntimeValue)start, (RuntimeValue)s->len);
     arr = rt_array_push_handle(arr, rest);
-    return (RuntimeValue)(uintptr_t)DECODE_PTR(arr);
+    return arr;
 }
 
 static int is_whitespace(char c)
@@ -9596,9 +9692,8 @@ RuntimeValue rt_array_new(RuntimeValue cap_val)
  * handle back after append. The exported ABI below returns a status byte. */
 static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue val)
 {
-    if (!IS_HEAP(arr)) return NIL_VALUE;
-    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    RuntimeArray *a = runtime_array_from_abi(arr);
+    if (!a) return NIL_VALUE;
     if (a->hdr.gc_flags & BYTE_PACKED) {
         /* Byte-packed [u8]: append a PACKED byte (value may arrive tagged
          * ENCODE_INT or raw), growing the packed buffer as needed. */
@@ -12879,9 +12974,8 @@ int64_t rt_tls13_client_app_secret_diag_7(
 /* rt_array_pop: remove and return last element */
 RuntimeValue rt_array_pop(RuntimeValue arr)
 {
-    if (!IS_HEAP(arr)) return NIL_VALUE;
-    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    if (!a || a->hdr.type != HEAP_ARRAY || a->len == 0) return NIL_VALUE;
+    RuntimeArray *a = runtime_array_from_abi(arr);
+    if (!a || a->len == 0) return NIL_VALUE;
     RuntimeValue *items = runtime_array_items(a);
     a->len--;
     RuntimeValue val = items[a->len];
@@ -12894,20 +12988,23 @@ RuntimeValue rt_array_pop(RuntimeValue arr)
  * implementation ABI-compatible with that contract. */
 RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx)
 {
-    if (!IS_HEAP(arr)) return NIL_VALUE;
-    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    RuntimeArray *a = runtime_array_from_abi(arr);
+    if (!a) return NIL_VALUE;
     int64_t i = (int64_t)idx;
     if (i < 0) i += (int64_t)a->len;
     if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
     return runtime_array_items(a)[i];
 }
 
+RuntimeValue rt_array_get_text(RuntimeValue arr, RuntimeValue idx)
+{
+    return rt_array_get(arr, idx);
+}
+
 static int8_t rt_array_set_raw(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
 {
-    if (!IS_HEAP(arr)) return 0;
-    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
+    RuntimeArray *a = runtime_array_from_abi(arr);
+    if (!a) return 0;
     int64_t i = (int64_t)idx;
     if (i < 0) i += (int64_t)a->len;
     if (i < 0 || (uint32_t)i >= a->len) return 0;
@@ -12921,16 +13018,43 @@ int8_t rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
     return rt_array_set_raw(arr, idx, val);
 }
 
+int8_t rt_array_set_text(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
+{
+    return rt_array_set_raw(arr, idx, val);
+}
+
 /* rt_array_len: return RAW (untagged) integer.
  * The Cranelift backend's call_len_method does NOT unbox the result,
  * and the MIR for-loop lowering compares directly with raw index counters.
  * So we must return raw len, not ENCODE_INT(len). */
 RuntimeValue rt_array_len(RuntimeValue arr)
 {
-    if (!IS_HEAP(arr)) return 0;
-    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
+    RuntimeArray *a = runtime_array_from_abi(arr);
+    if (!a) return 0;
     return (RuntimeValue)a->len;
+}
+
+/* Array-literal finalization ABI used by native codegen. Construction first
+ * reserves capacity, then codegen asks for the raw header and publishes the
+ * known literal length before indexed stores. Without these functions the
+ * freestanding auto-stubs leave len=0, so every rt_array_set is rejected. */
+RuntimeValue rt_array_header_ptr(RuntimeValue arr)
+{
+    RuntimeArray *a = runtime_array_from_abi(arr);
+    return a ? (RuntimeValue)(uintptr_t)a : 0;
+}
+
+int8_t rt_array_set_len_known(int64_t header_ptr, int64_t len)
+{
+    RuntimeArray *a = runtime_array_from_abi((RuntimeValue)header_ptr);
+    if (!a || len < 0 || (uint64_t)len > a->cap) return 0;
+    a->len = (uint64_t)len;
+    return 1;
+}
+
+int8_t rt_array_set_len_known_text(int64_t header_ptr, int64_t len)
+{
+    return rt_array_set_len_known(header_ptr, len);
 }
 
 RuntimeValue rt_arm_array_get_byte_u32(RuntimeValue arr, RuntimeValue idx_val)
@@ -13952,12 +14076,8 @@ RuntimeValue rt_debug_serial_R(void)
 
 RuntimeValue rt_debug_exit_success(void)
 {
-    /* QEMU: isa-debug-exit quits the VM. Board: 0xF4 is unused (no-op), so this
-     * is a terminal "exit success" — halt instead of falling through past the
-     * caller's main (which on real hardware would triple-fault). */
     outb((uint16_t)0xF4, (uint8_t)0);
-    for (;;) __asm__ volatile("cli; hlt");
-    return 0; /* unreachable */
+    return 0;
 }
 
 RuntimeValue rt_debug_serial_R_hang(void)
@@ -15286,31 +15406,17 @@ static void _bare_dbg_path(const char *tag, uint64_t src, uint64_t len) {
     serial_puts("\r\n");
 }
 
-/* ring-3 kernel-resume savepoint (defined in enter_user_first.s) — forward
- * decls so the bare-exec exit can prefer it over QEMU isa-debug-exit. */
-extern void    rt_x86_ring3_resume(int64_t rc);   /* does not return */
-extern int64_t rt_x86_ring3_resume_valid(void);
-
 /* Native bare-exec syscall handler. Returns 1 (handled, result in *out) or 0
  * (not a bare-exec syscall — let the normal dispatch/shim run). */
 static int _bare_exec_handle(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
                              uint64_t a3, uint64_t a4, uint64_t a5, int64_t *out) {
     (void)a5;
     switch (num) {
-        case 0:   /* exit(status) — dump RAM outputs, then terminate board-safely */
+        case 0:   /* exit(status) — dump RAM outputs, then QEMU isa-debug-exit */
             _bare_dump_all_outputs();
             serial_puts("[syscall] exit status=");
             serial_put_dec((int64_t)a0);
             serial_puts("\r\n");
-            /* Board-safe exit: if the FS-exec ring-3 loader established a kernel
-             * savepoint (rt_x86_enter_user_first), longjmp back into the kernel
-             * with this rc so real hardware regains control and can continue/halt
-             * gracefully — never depending on QEMU quitting. The 0xF4 write is a
-             * QEMU-only fallback for the standalone smoke (no savepoint); on a
-             * board 0xF4 is unused, so we halt. Same pattern as the SSH exit. */
-            if (rt_x86_ring3_resume_valid()) {
-                rt_x86_ring3_resume((int64_t)a0);   /* does not return */
-            }
             outb(0xF4, (uint8_t)((a0 << 1) | 1));
             __asm__ __volatile__("cli; hlt");
             *out = 0; return 1;
