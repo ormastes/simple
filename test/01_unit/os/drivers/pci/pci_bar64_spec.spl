@@ -1,0 +1,29 @@
+use std.spec.*
+use os.drivers.pci.pci_bar64.*
+
+describe "64-bit PCI BAR planning":
+    it "decodes QEMU ivshmem BAR2 and preserves its flags":
+        val info = pci_bar64_decode(0x0000000Cu32, 0u32, 0xFFF0000Cu32, 0xFFFFFFFFu32)
+        expect(info.implemented).to_be(true)
+        expect(info.prefetchable).to_be(true)
+        expect(info.size).to_equal(1048576u64)
+        expect(info.reason).to_equal("bar-unassigned")
+
+    it "assigns the 64-bit BAR inside a bounded MMIO window":
+        val info = pci_bar64_decode(0x0000000Cu32, 0u32, 0xFFF0000Cu32, 0xFFFFFFFFu32)
+        val plan = pci_bar64_assignment(info, 0x10080000u64, 0x20000000u64)
+        expect(plan.ok).to_be(true)
+        expect(plan.base).to_equal(0x10100000u64)
+        expect(plan.programmed_low).to_equal(0x1010000Cu32)
+        expect(plan.programmed_high).to_equal(0u32)
+
+    it "rejects non-64-bit and exhausted BAR plans":
+        val wrong = pci_bar64_decode(0x1000u32, 0u32, 0xFFFFF000u32, 0u32)
+        expect(wrong.reason).to_equal("not-64-bit-memory-bar")
+        val info = pci_bar64_decode(0x0000000Cu32, 0u32, 0xFFF0000Cu32, 0xFFFFFFFFu32)
+        val exhausted = pci_bar64_assignment(info, 0x20000000u64, 0x20080000u64)
+        expect(exhausted.reason).to_equal("bar-window-exhausted")
+
+    it "recognizes only the QEMU ivshmem RAM controller identity":
+        expect(pci_function_is_qemu_ivshmem(0x1AF4u16, 0x1110u16, 0x05u8, 0x00u8)).to_be(true)
+        expect(pci_function_is_qemu_ivshmem(0x1AF4u16, 0x1050u16, 0x05u8, 0x00u8)).to_be(false)

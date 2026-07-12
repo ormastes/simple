@@ -11,7 +11,8 @@ use os.kernel.memory.pmm.{pmm_alloc_pages, pmm_free_page_range}
 use os.kernel.memory.memory_dma_pages.{memory_dma_free_partial_pages}
 use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_register_dma, memory_leveling_runtime_unregister_dma, memory_leveling_runtime_dma_sync_for_device, memory_leveling_runtime_dma_sync_for_cpu}
 use os.kernel.boot.mmio.{mmio_write8, mmio_write16, mmio_write32, mmio_write64}
-use os.drivers.pci.pci.{pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_irq, pci_read_bar, pci_write_config}
+use os.drivers.pci.pci.{pci_read_config, pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_irq, pci_read_bar, pci_write_config}
+use os.drivers.pci.pci_bar64.{pci_bar64_decode, pci_bar64_assignment, pci_function_is_qemu_ivshmem}
 use os.kernel.interrupts.irq_routing.{irq_route_register}
 use os.kernel.interrupts.idt.{VEC_IRQ_BASE}
 use os.kernel.lifecycle.task_cleanup.{task_register_resource, task_unregister_resource, RES_NOTIFICATION, RES_IRQ_ROUTE, RES_DMA_BUFFER}
@@ -19,6 +20,10 @@ use os.kernel.ipc.notification.{notification_create}
 use os.kernel.ipc.notif_global.{g_notification_table}
 use os.kernel.ipc.syscall.{_next_mmap_addr, _is_userspace_ptr, _is_kernel_addr, PCI_MMIO_FLOOR}
 use os.kernel.types.device_mem_types.{device_grant_token_base, device_grant_bar_token, device_grant_irq_token, device_grant_dma_token, device_grant_iommu_token, device_grant_iommu_domain_id}
+@cfg(arm64)
+use os.kernel.arch.arm64.cpu.{mrs_sctlr_el1}
+@cfg(riscv64)
+use os.kernel.arch.riscv64.cpu.{csrr_satp}
 
 val MAX_DMA_ALLOCS: u64 = 1024
 var dma_alloc_owner: [u64; 1024] = [0; 1024]
@@ -45,6 +50,18 @@ var _pci_dev_class: [u8; 256] = [0; 256]
 var _pci_dev_subclass: [u8; 256] = [0; 256]
 var _pci_dev_prog_if: [u8; 256] = [0; 256]
 var _pci_dev_irq: [u8; 256] = [0; 256]
+
+@cfg(x86_64)
+fn _direct_boot_ivshmem_window_base(device: u8) -> u64:
+    0xC000000000u64 + device.to_u64() * 0x01000000u64
+
+@cfg(arm64)
+fn _direct_boot_ivshmem_window_base(device: u8) -> u64:
+    0x8000000000u64 + device.to_u64() * 0x01000000u64
+
+@cfg(riscv64)
+fn _direct_boot_ivshmem_window_base(device: u8) -> u64:
+    0x400000000u64 + device.to_u64() * 0x01000000u64
 
 # ============================================================================
 # Device Handlers
@@ -298,6 +315,75 @@ fn _handle_map_bar(args: SyscallArgs) -> SyscallResult:
 
     SyscallResult(value: base_virt as i64)
 
+@cfg(x86_64)
+fn _direct_boot_bar_address(bar_phys: u64, size: u64) -> SyscallResult:
+    val phys_base: u64 = 0xC000000000u64
+    val virt_base: u64 = 0xFFFFC00000000000u64
+    val window_size: u64 = 0x40000000u64
+    if bar_phys < phys_base or bar_phys + size > phys_base + window_size:
+        return SyscallResult(value: -12)
+    SyscallResult(value: (virt_base + bar_phys - phys_base).to_i64())
+
+@cfg(arm64)
+fn _direct_boot_bar_address(bar_phys: u64, size: u64) -> SyscallResult:
+    if (mrs_sctlr_el1() & 1u64) != 0u64:
+        return SyscallResult(value: -1)
+    SyscallResult(value: bar_phys.to_i64())
+
+@cfg(riscv64)
+fn _direct_boot_bar_address(bar_phys: u64, size: u64) -> SyscallResult:
+    if (csrr_satp() >> 60u64) != 0u64:
+        return SyscallResult(value: -1)
+    SyscallResult(value: bar_phys.to_i64())
+
+fn _map_qemu_ivshmem_bar64(bus: u8, dev: u8, func: u8, bar_index: u8) -> SyscallResult:
+    val low_offset = (0x10u32 + bar_index.to_u32() * 4u32).to_u8()
+    val high_offset = (low_offset.to_u32() + 4u32).to_u8()
+    val raw_low = pci_read_bar(bus, dev, func, bar_index)
+    val raw_high = pci_read_bar(bus, dev, func, bar_index + 1u8)
+    val command_status = pci_read_config(bus, dev, func, 0x04u8)
+    pci_write_config(bus, dev, func, 0x04u8, command_status & 0xFFFFFFFDu32)
+    pci_write_config(bus, dev, func, low_offset, 0xFFFFFFFFu32)
+    pci_write_config(bus, dev, func, high_offset, 0xFFFFFFFFu32)
+    val probe_low = pci_read_bar(bus, dev, func, bar_index)
+    val probe_high = pci_read_bar(bus, dev, func, bar_index + 1u8)
+    pci_write_config(bus, dev, func, high_offset, raw_high)
+    pci_write_config(bus, dev, func, low_offset, raw_low)
+    pci_write_config(bus, dev, func, 0x04u8, command_status)
+    var info = pci_bar64_decode(raw_low, raw_high, probe_low, probe_high)
+    if not info.implemented:
+        return SyscallResult(value: -19)
+    val window_base = _direct_boot_ivshmem_window_base(dev)
+    val assignment = pci_bar64_assignment(info, window_base, window_base + 0x01000000u64)
+    if not assignment.ok:
+        return SyscallResult(value: -28)
+    pci_write_config(bus, dev, func, high_offset, assignment.programmed_high)
+    pci_write_config(bus, dev, func, low_offset, assignment.programmed_low)
+    pci_write_config(bus, dev, func, 0x04u8, command_status | 0x2u32)
+    info = pci_bar64_decode(assignment.programmed_low, assignment.programmed_high, probe_low, probe_high)
+    _direct_boot_bar_address(info.base, info.size)
+
+fn map_qemu_host_gpu_ivshmem_bar2() -> SyscallResult:
+    """Find QEMU ivshmem and expose its shared BAR2 to the boot-owned probe."""
+    var dev: u8 = 0u8
+    while dev < 32u8:
+        val vendor0 = pci_read_vendor(0u8, dev, 0u8)
+        if vendor0 != 0xFFFFu16:
+            val header_type = pci_read_header_type(0u8, dev, 0u8)
+            val function_count: u8 = if (header_type & 0x80u8) != 0u8: 8u8 else: 1u8
+            var func: u8 = 0u8
+            while func < function_count:
+                val vendor = pci_read_vendor(0u8, dev, func)
+                if vendor != 0xFFFFu16:
+                    val class_info = pci_read_class(0u8, dev, func)
+                    val class_code = ((class_info >> 24u32) & 0xFFu32).to_u8()
+                    val subclass = ((class_info >> 16u32) & 0xFFu32).to_u8()
+                    if pci_function_is_qemu_ivshmem(vendor, pci_read_device_id(0u8, dev, func), class_code, subclass):
+                        return _map_qemu_ivshmem_bar64(0u8, dev, func, 2u8)
+                func = func + 1u8
+        dev = dev + 1u8
+    SyscallResult(value: -19)
+
 fn _dma_find_slot(virt_addr: u64) -> i64:
     var i: u64 = 0
     while i < MAX_DMA_ALLOCS:
@@ -493,3 +579,5 @@ fn _handle_sync_dma_for_cpu(args: SyscallArgs, caller: TaskId) -> SyscallResult:
     if not synchronized.ok:
         return SyscallResult(value: -16)
     SyscallResult(value: 0)
+
+export map_qemu_host_gpu_ivshmem_bar2
