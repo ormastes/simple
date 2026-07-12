@@ -51,3 +51,19 @@ exit, 2c UEFI boot, 2d robustness). 2e is the SSH-invocation capstone.
 `.o` proven by raw-disk extract → `llvm-readobj` (ET_REL/EM_X86_64/main) → `cc .o -o a &&
 ./a; echo $?` == 7. NOT "exit 0". Land exact bytes via plumbing FF push (drift-guarded,
 SSH key). Agents implement + report serial; coordinator reviews + lands.
+
+## Progress (2026-07-12)
+- **Inc 1 DONE + landed 0097ce77629.** clang compiles over real SSH via
+  `x86_64_fs_exec_spawn_heap` → `.o` on real NVMe → exit 7 (raw-disk verified). All 3
+  unknowns proven. Harness `scripts/os/build_clang_over_ssh.shs`.
+- **Inc 2 IN PROGRESS (user chose full-deep = fix the root bug).** Root cause is a
+  cranelift-backend char/text TAG-BOX codegen bug on `--target x86_64-unknown-none
+  --backend cranelift`: `text.char_at(i)` returns a tag-boxed value (`0x12_0000_0001`),
+  `starts_with` returns false, and `rt_string_from_byte_array(...)` stored into a field
+  corrupts (11 B → 2 chars); `len()`/full-`==`/`[u8]`/`i64`/rodata literals are all fine.
+  See `doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md`. Fixing it removes
+  the raw-byte workaround AND unblocks Inc 3 (SFTP OPEN path decode). Worker digging the
+  cranelift lowering (`src/compiler/70.backend/backend/cranelift_*.spl`).
+- **Inc 3 PENDING Inc 2** (sshd has no scp/sftp/subsystem): add a minimal read-only SFTP
+  subsystem (INIT/OPEN/READ/CLOSE) so `scp root@host:/hello.o .` works; relies on intact
+  path decode from Inc 2.
