@@ -4,10 +4,12 @@ Status: open — blocks shared multilingual GPU fonts REQ-005/007/009/012/013
 
 ## Problem
 
-`FontRenderer` rasterizes and caches codepoint + size, while the existing Skia
-shaper produces disconnected glyph IDs. `FontRenderBatch` and the SFFI
-`LayoutGlyph` omit face identity, cluster ranges, advances/offsets, direction,
-language, and script. The current pure shaper is not an acceptance substitute:
+`FontRenderer` still prepares ordinary text as codepoints, while the existing
+Skia shaper produces glyph IDs through an explicit neutral run. `FontGlyphRun`
+now carries the exact live face handle/generation pair and logical codepoint
+cluster positions, and the renderer rejects mismatches instead of reverse
+resolving a generation globally. It still omits advances/offsets, direction,
+language, script, and UTF-8 byte clusters. The current pure shaper is not an acceptance substitute:
 its text conversion is ASCII-only, GSUB is identity, fallback retains one
 global `OtFont`, and Arabic/Devanagari handling is
 explicitly partial. Cyrillic and Urdu Arabic-extension script detection now
@@ -20,8 +22,8 @@ fallback or mixed-face shaping.
 
 ## Smallest valid fix
 
-1. Add one internal shaped-glyph record owned by `FontRenderer`; keep the public
-   `FontRenderBatch` seam stable.
+1. Complete the existing `ShapedGlyph`/`FontGlyphRun` bridge while keeping the
+   public `FontRenderBatch` seam stable.
 2. Add an owned glyph-ID raster operation and key atlas entries by immutable
    face/default-variation identity + glyph ID + rendering configuration.
 3. Reuse `text_codepoints`; complete decoded GSUB/GPOS, per-run faces,

@@ -36,9 +36,10 @@ and validity/fallback diagnostics. Values are immutable after preparation.
 
 The compatibility batch still exposes codepoint, byte offset, rectangles,
 color, atlas generation/pixels, and dirty rectangles. The opt-in neutral
-`FontGlyphRun` carries validated glyph positions plus a revocable face-
-generation token into the same renderer; it does not make cluster, language,
-full GSUB/GPOS, or complete BiDi claims.
+`FontGlyphRun` carries validated glyph positions, logical codepoint clusters,
+and the exact revocable face handle/generation pair into the same renderer.
+It does not claim UTF-8 byte clusters, language, full GSUB/GPOS, or complete
+BiDi.
 
 `selected_font_coverage_cell(language, category)` is the fail-closed policy
 lookup. Unknown axes return `nil`. A witness family is not loadable selection:
@@ -52,9 +53,11 @@ not UAX#9. Both substitution and positioning completeness remain false.
 Complex-script and multi-codepoint emoji material therefore fails closed even
 when blob/runtime cmap IDs match.
 
-Do not place native handles in either value. Engine-owned texture, sampler,
-pipeline, submission, fence, and readback handles remain in the engine evidence
-record and are invalidated when the batch generation changes.
+The revocable font-face handle/generation is intentionally present as opaque
+rasterizer identity and is validated before use. Engine-owned texture, sampler,
+pipeline, submission, fence, and readback handles stay out of both values; they
+remain in the engine evidence record and are invalidated when the batch
+generation changes.
 
 ## Deterministic language and asset manifests
 

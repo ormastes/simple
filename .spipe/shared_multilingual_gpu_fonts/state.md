@@ -255,9 +255,12 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   tag/commit and file hashes, top-eleven totals, script subtotals, and exact
   serialized newline format; source/manual review passed.
 - shaping progress: the existing shared script detector now classifies
-  Cyrillic and Urdu Arabic-extension ranges, with a focused fixture. This
-  removes one REQ-007 blocker but does not claim complete GSUB/GPOS, clusters,
-  language, face identity, or glyph-ID raster integration.
+  Cyrillic and Urdu Arabic-extension ranges, with a focused fixture.
+  `FontGlyphRun` also carries the exact live face handle/generation and logical
+  codepoint clusters; the renderer validates that pair and all parallel vector
+  lengths before glyph-ID rasterization. This removes generation-only reverse
+  binding but does not claim UTF-8 byte clusters, complete GSUB/GPOS, language,
+  or accepted complex shaping.
 - OpenCL source ownership (pre-host milestone): compiler emission and Engine2D
   runtime compilation were first unified on
   `common.gpu.font_atlas_composite` for the exact versioned kernel source.

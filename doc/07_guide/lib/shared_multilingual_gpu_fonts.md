@@ -128,7 +128,7 @@ render-valid direct runs with
 `shaped_run_to_font_glyph_run`; Engine2D consumes only that neutral text-layout
 value through `draw_glyph_run`, preserving the batch-only layer boundary. It
 carries a revocable generation token rather than a native face pointer. The
-canonical renderer rejects freed/stale face generations and keys cache/atlas
+canonical renderer rejects mismatched or freed face handle/generation pairs and keys cache/atlas
 entries by face + lifetime generation + glyph index + size. This is a bounded
 renderer seam, not complete mixed-face GSUB/GPOS or automatic `draw_text`
 shaping. The sparse matrix remains unchanged until executable corpus acceptance.
@@ -180,6 +180,10 @@ Native promotion additionally requires nonzero texture/sampler/pipeline handles,
 the submitted batch hash, draw/submit evidence, a completed fence,
 device-origin readback, a nonblank absolute glyph oracle, and CPU comparison.
 Missing hardware is `unavailable`, never a simulated pass.
+
+Neutral shaped runs bind glyph IDs to the exact live face handle/generation and
+preserve logical codepoint clusters. Those values are not UTF-8 byte offsets;
+face liveness and every parallel vector length must match before rasterization.
 
 ## 2D and 3D status
 

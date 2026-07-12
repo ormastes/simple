@@ -14,7 +14,7 @@ use std.nogc_sync_mut.text_layout.font_rasterizer.{
     blit_glyph
 }
 use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands}
-use std.nogc_sync_mut.io.font_sffi.{font_face_handle_for_generation, font_face_is_live}
+use std.nogc_sync_mut.io.font_sffi.{font_face_is_live}
 export use std.nogc_sync_mut.text_layout.font_types.{CachedGlyph, FontCacheStats, FontGlyphRun, FontTextPayload, FontRenderQuad, FontRenderBatch}
 
 # Shared Font Renderer — unified text rendering for both OS and browser
@@ -593,10 +593,16 @@ class FontRenderer:
         FontRenderBatch(valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
 
     me prepare_glyph_run(run: FontGlyphRun, color: u32, font_size: i32) -> FontRenderBatch:
-        val face_id = font_face_handle_for_generation(run.face_generation)
+        val face_id = run.face_id
+        var cluster_index: i64 = 0
+        while cluster_index < run.clusters.len():
+            if run.clusters[cluster_index] < 0:
+                return FontRenderBatch(valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+            cluster_index = cluster_index + 1
         if (not run.valid or not font_face_is_live(face_id, run.face_generation) or
             font_size <= 0 or font_size > 512 or
-            run.glyph_ids.len() != run.xs.len() or run.glyph_ids.len() != run.ys.len()):
+            run.glyph_ids.len() != run.xs.len() or run.glyph_ids.len() != run.ys.len() or
+            run.glyph_ids.len() != run.clusters.len()):
             return FontRenderBatch(valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
         if self.atlas_face_generation != -2:
             self._reset_font_atlas(-2)
@@ -622,7 +628,7 @@ class FontRenderer:
                         overflow = true
                     else:
                         val quad = FontRenderQuad(
-                            codepoint: -1, byte_offset: i.to_i64(),
+                            codepoint: -1, byte_offset: -1, cluster: run.clusters[i],
                             dst_x: run.xs[i], dst_y: run.ys[i],
                             width: self.atlas_widths[atlas_index], height: self.atlas_heights[atlas_index],
                             atlas_x: self.atlas_xs[atlas_index], atlas_y: self.atlas_ys[atlas_index],
