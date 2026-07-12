@@ -939,21 +939,60 @@ interpreter), proving the cross-module call executes, not just parses.
 
 ### Caveats / what this does NOT prove
 
-- `resolve_import_symbols` was enabled under the closure flag, but the
-  full `declare_module_symbols` pass (structs/enums/classes/traits/consts
-  declared BEFORE bodies lower, and same-module forward references) is
-  still skipped under `bootstrap_mode`. This fix only wires up cross-module
-  **functions** reached via `use module.{fn}`. A closure module that only
-  exports a struct/enum/const, or that has same-module forward references
-  between two functions declared out of order, is not covered here and may
-  still gap.
-- Not yet re-run against the real multi-hundred/thousand-module
-  `src/app`+`src/lib`+`src/compiler` closure (that is the 5.7hr build this
-  fast repro was explicitly built to avoid running). The 2-function repro
-  is strong causal evidence for the mechanism, not proof the full stage-2/3
-  rebuild now succeeds end-to-end -- the 822-unresolved-symbol-stub /
-  `field access on nil receiver` Stage 4 symptom recorded above may have
-  the same root cause or may be a distinct, still-open issue. Next owner:
-  re-run the real stage2 closure build with these three fixes and record
-  the next diagnostic (do not repeat the same probe without a source
-  change, per the standing protocol in this doc).
+Two follow-up discriminating probes (same fast-repro pattern, run immediately
+after the fix above) were used to find where the *next* wall is, rather than
+assume the 2-function repro generalizes:
+
+- **Probe A -- cross-module struct (FAILS, same-module gap, not this fix's
+  scope).** Helper module declares `struct Point` and a `make_point()`
+  constructor; entry imports both and constructs one. Fails in seconds at
+  HIR with `unresolved name: Point` -- inside the HELPER module itself,
+  independent of cross-module wiring. Root cause: `bootstrap_mode` in
+  `lower_module()` skips `declare_module_symbols(module)` entirely (only
+  the `bootstrap_decl_idx` loop pre-declares same-module **function**
+  names, never struct/enum/class/trait/const names), so a function that
+  refers to its own module's struct type before/while it's being lowered
+  can't resolve it. This is the caveat already flagged above, now confirmed
+  empirically rather than inferred: today's fix does not touch
+  `declare_module_symbols`, and the real `src/compiler` closure is full of
+  structs, so this is very likely the next wall a full stage2 rebuild hits.
+- **Probe B -- two modules, same bare function name, aliased on import
+  (FAILS, loud not silent).** `_mir_repro_mod_a.compute` and
+  `_mir_repro_mod_b.compute` (different bodies), entry does
+  `use ..mod_a.{compute as compute_a}` / `use ..mod_b.{compute as
+  compute_b}`. Fails at LINK with `undefined symbol: compute_a` AND
+  `undefined symbol: compute_b` -- neither resolves. Root cause: (i)
+  `bootstrap_lower_extra_hir_module_to_mir`'s dedup guard
+  (`bootstrap_globals.spl`) keys the flat MIR-function accumulator by the
+  function's OWN bare name (`hir_fn.name`, e.g. `"compute"`) and silently
+  drops the second module's same-named function rather than qualifying or
+  erroring, so only one `compute` ever reaches the accumulator; (ii)
+  independently, the bootstrap MIR/LLVM call-site emission for an
+  aliased cross-module import apparently targets the LOCAL alias name
+  (`compute_a`/`compute_b`) while the emitted function `define` uses the
+  bare original name (`compute`) -- neither one lines up, so the link
+  fails for BOTH aliases even though one `compute` body did make it into
+  the object. This is a real, separate gap from what this fix set out to
+  solve (a single cross-module call with no name collision); it fails
+  closed (loud link error, not a silently wrong answer), consistent with
+  this bug's established fail-closed policy, but is unfixed. A real
+  hundreds-of-module closure very likely contains repeated short names
+  (`new`, `init`, `len`, `default`, ...), so this is a second likely wall
+  for the full stage2 rebuild, independent of Probe A.
+
+Net: today's three fixes are verified correct and sufficient for the exact
+case named in the task (a single unaliased cross-module function call with
+no same-module type dependency) and are a real, structural step forward --
+but do NOT by themselves prove the full multi-hundred-module
+`src/app`+`src/lib`+`src/compiler` stage2 closure now builds. Probe A
+(same-module struct/enum declare) and Probe B (bare-name collision across
+modules) are both plausible next walls and are cheap (seconds) to
+investigate first, before re-running the real 5.7hr closure build. Next
+owner: fix Probe A (extend `declare_module_symbols` calls, or the
+`bootstrap_decl_idx`-style pre-declare loop, to cover
+structs/enums/classes/traits/consts under `bootstrap_mode`) and Probe B
+(qualify the flat MIR accumulator key by `module.function` instead of bare
+`function`, and make cross-module call-site emission agree with whatever
+key the accumulator uses) before spending the 5.7hr on a full rebuild; do
+not repeat the same full-closure probe without a source change, per the
+standing protocol in this doc.
