@@ -7,7 +7,7 @@ use std.skia.feature.glyph.ot_parser_cmap.{CmapFormat4, parse_cmap_format12, cma
 use std.skia.feature.glyph.ot_parser_metrics.{HorizontalMetrics, parse_hmtx}
 use std.skia.feature.glyph.ot_parser_glyf.{parse_glyf_simple, parse_glyf_compound}
 use std.skia.feature.glyph.ot_parser_cff.{parse_cff_charstring}
-use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, GposLookup, parse_gsub_skeleton, parse_gpos_skeleton, GlyphClass, parse_gdef_glyph_class}
+use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, GposLookup, GsubSingleResult, apply_gsub_single, parse_gsub_skeleton, parse_gpos_skeleton, GlyphClass, parse_gdef_glyph_class}
 use std.skia.feature.glyph.ot_parser_fvar.{FvarAxis, parse_fvar_axes, parse_avar_mapping}
 use std.skia.feature.glyph.ot_parser_gvar.{GvarTable, parse_gvar, apply_glyph_deltas, decode_packed_point_numbers, decode_packed_deltas, TupleVariationHeader, parse_tuple_variation_header, _compute_tuple_scalar}
 
@@ -342,6 +342,72 @@ describe "parse_gsub_skeleton":
         val empty_font = OtFont(blob: buf, tables: [])
         val result = parse_gsub_skeleton(empty_font)
         expect(result.len()).to_equal(0)
+
+    it "retains absolute lookup and subtable offsets":
+        # GSUB begins at 2; LookupList at 12; lookup at 16; subtable at 24.
+        val blob: [u8] = [
+            99, 99,
+            0, 1, 0, 0, 0, 0, 0, 0, 0, 10,
+            0, 1, 0, 4,
+            0, 1, 0, 0, 0, 1, 0, 8,
+            0, 1, 0, 6, 0, 1, 0, 1, 0, 1, 0, 7
+        ]
+        val font = OtFont(blob: blob, tables: [OtTable(tag: 1196643650, offset: 2, length: 34)])
+        val result = parse_gsub_skeleton(font)
+        expect(result.len()).to_equal(1)
+        expect(result[0].lookup_offset).to_equal(16)
+        expect(result[0].subtable_offsets[0]).to_equal(24)
+
+    it "rejects lookup offsets that alias LookupList metadata":
+        val blob: [u8] = [
+            0, 1, 0, 0, 0, 0, 0, 0, 0, 10,
+            0, 1, 0, 2,
+            0, 1, 0, 0, 0, 0
+        ]
+        val font = OtFont(blob: blob, tables: [OtTable(tag: 1196643650, offset: 0, length: 20)])
+        expect(parse_gsub_skeleton(font).len()).to_equal(0)
+
+describe "apply_gsub_single":
+    it "decodes format 1 through Coverage format 1 using absolute offsets":
+        # SingleSubst1(delta +3), followed by Coverage1 containing glyph 7.
+        val blob: [u8] = [0, 1, 0, 6, 0, 3, 0, 1, 0, 1, 0, 7]
+        val result = apply_gsub_single(blob, 0, blob.len(), 0, 7)
+        expect(result.valid).to_equal(true)
+        expect(result.applied).to_equal(true)
+        expect(result.glyph_id).to_equal(10)
+
+    it "decodes format 2 through bounded Coverage format 2":
+        # Substitute[coverage index 1] is 41; Coverage2 range 20..21 starts at 0.
+        val blob: [u8] = [0, 2, 0, 10, 0, 2, 0, 40, 0, 41, 0, 2, 0, 1, 0, 20, 0, 21, 0, 0]
+        val result = apply_gsub_single(blob, 0, blob.len(), 0, 21)
+        expect(result.valid).to_equal(true)
+        expect(result.applied).to_equal(true)
+        expect(result.glyph_id).to_equal(41)
+
+    it "returns unchanged and invalid for malformed coverage or unsupported format":
+        val truncated: [u8] = [0, 1, 0, 6, 0, 1, 0, 1, 0, 2, 0, 7]
+        val malformed = apply_gsub_single(truncated, 0, truncated.len(), 0, 7)
+        expect(malformed.valid).to_equal(false)
+        expect(malformed.applied).to_equal(false)
+        expect(malformed.glyph_id).to_equal(7)
+        val unsupported: [u8] = [0, 3, 0, 6, 0, 0, 0, 1, 0, 1, 0, 7]
+        val declined = apply_gsub_single(unsupported, 0, unsupported.len(), 0, 7)
+        expect(declined.valid).to_equal(false)
+        expect(declined.glyph_id).to_equal(7)
+        expect(apply_gsub_single(unsupported, 0, unsupported.len(), 0, 8).valid).to_equal(false)
+        val crosses_table = apply_gsub_single([0, 1, 0, 6, 0, 3, 0, 1, 0, 1, 0, 7], 0, 10, 0, 7)
+        expect(crosses_table.valid).to_equal(false)
+        expect(crosses_table.glyph_id).to_equal(7)
+        val before_table = apply_gsub_single([0, 1, 0, 6, 0, 3, 0, 1, 0, 1, 0, 7], 2, 12, 0, 7)
+        expect(before_table.valid).to_equal(false)
+        val mismatched_count = apply_gsub_single([0, 2, 0, 8, 0, 1, 0, 40, 0, 1, 0, 2, 0, 7, 0, 8, 0, 0], 0, 18, 0, 7)
+        expect(mismatched_count.valid).to_equal(false)
+
+    it "wraps signed format 1 deltas modulo 65536":
+        val positive: [u8] = [0, 1, 0, 6, 0, 2, 0, 1, 0, 1, 255, 255]
+        expect(apply_gsub_single(positive, 0, positive.len(), 0, 65535).glyph_id).to_equal(1)
+        val negative: [u8] = [0, 1, 0, 6, 255, 255, 0, 1, 0, 1, 0, 0]
+        expect(apply_gsub_single(negative, 0, negative.len(), 0, 0).glyph_id).to_equal(65535)
 
 describe "parse_gpos_skeleton":
     it "returns empty list when GPOS table is absent":

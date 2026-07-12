@@ -268,6 +268,11 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   the selected face through neutral material and rejects it after free. This
   fixes mixed-face input identity, not GSUB/GPOS completeness or corpus
   promotion.
+- GSUB Single parser foundation: absolute lookup/subtable offsets are validated
+  against the owning GSUB table, Coverage formats 1/2 and SingleSubst formats
+  1/2 fail closed, and focused fixtures include cross-table rejection. The
+  shaper remains identity because Script/LangSys/Feature activation is not yet
+  implemented; no substitution-complete claim is made.
 - OpenCL source ownership (pre-host milestone): compiler emission and Engine2D
   runtime compilation were first unified on
   `common.gpu.font_atlas_composite` for the exact versioned kernel source.

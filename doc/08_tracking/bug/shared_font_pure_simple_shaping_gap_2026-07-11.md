@@ -21,6 +21,11 @@ Windows 3/10 precedence, so bundled Noto Emoji resolves `U+1F600` to its real
 glyph ID. Per-run face binding is now present, but emoji fallback or mixed-face
 shaping is not promoted without the remaining GSUB/GPOS corpus gate.
 
+The layout parser now retains table-bounded absolute GSUB lookup/subtable
+locations and safely decodes Coverage formats 1/2 plus SingleSubst formats 1/2.
+The shaper intentionally does not apply them until Script/LangSys/Feature
+selection identifies active lookups; substitution completeness remains false.
+
 ## Smallest valid fix
 
 1. Complete the existing `ShapedGlyph`/`FontGlyphRun` bridge while keeping the

@@ -125,7 +125,7 @@ Latin, Cyrillic, Han, and a single-codepoint emoji run may set
 `glyph_indices_valid`, and only when the selected live face and blob/runtime
 cmap glyph IDs agree. Arabic, Urdu, Devanagari, Bengali, Thai, Hebrew, and emoji
 sequences fail closed. `substitution_complete` and `positioning_complete`
-remain false because GSUB/GPOS and full BiDi are not implemented; current
+remain false because active-feature GSUB/GPOS and full BiDi are incomplete; current
 advances/zero offsets are diagnostic placement, not shaping acceptance. Convert
 render-valid direct runs with
 `shaped_run_to_font_glyph_run`; Engine2D consumes only that neutral text-layout

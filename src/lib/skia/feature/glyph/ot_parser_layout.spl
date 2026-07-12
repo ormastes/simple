@@ -1,13 +1,106 @@
 # OpenType layout table parsers: GSUB, GPOS, GDEF
 
-use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, find_table, read_u16_be, read_u32_be}
+use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, find_table, read_u16_be, read_i16_be, read_u32_be}
 
 # ===== GSUB / GPOS =====
 
 class GsubLookup:
     lookup_type: u32
     flag: u32
+    lookup_offset: u32
+    table_start: u32
+    table_end: u32
     subtable_offsets: [u32]
+
+class GsubSingleResult:
+    glyph_id: u32
+    applied: bool
+    valid: bool
+
+class _CoverageResult:
+    index: i64
+    count: i64
+    found: bool
+    valid: bool
+
+fn _coverage_index(blob: [u8], coverage_abs: i64, limit: i64, glyph_id: u32) -> _CoverageResult:
+    if limit < 0 or limit > blob.len() as i64 or coverage_abs < 0 or coverage_abs + 4 > limit:
+        return _CoverageResult(index: 0, count: 0, found: false, valid: false)
+    val format = read_u16_be(blob, coverage_abs)
+    val count = read_u16_be(blob, coverage_abs + 2) as i64
+    if format == 1:
+        if coverage_abs + 4 + count * 2 > limit:
+            return _CoverageResult(index: 0, count: 0, found: false, valid: false)
+        var previous: i64 = -1
+        var found: i64 = -1
+        var i: i64 = 0
+        while i < count:
+            val covered = read_u16_be(blob, coverage_abs + 4 + i * 2) as i64
+            if covered <= previous:
+                return _CoverageResult(index: 0, count: 0, found: false, valid: false)
+            if covered == glyph_id as i64:
+                found = i
+            previous = covered
+            i = i + 1
+        return _CoverageResult(index: found, count: count, found: found >= 0, valid: true)
+    if format == 2:
+        if coverage_abs + 4 + count * 6 > limit:
+            return _CoverageResult(index: 0, count: 0, found: false, valid: false)
+        var previous_end: i64 = -1
+        var expected_index: i64 = 0
+        var found: i64 = -1
+        var i: i64 = 0
+        while i < count:
+            val range_abs = coverage_abs + 4 + i * 6
+            val first = read_u16_be(blob, range_abs) as i64
+            val last = read_u16_be(blob, range_abs + 2) as i64
+            val first_index = read_u16_be(blob, range_abs + 4) as i64
+            if first > last or first <= previous_end or first_index != expected_index:
+                return _CoverageResult(index: 0, count: 0, found: false, valid: false)
+            val next_index = first_index + last - first + 1
+            if next_index > 65536:
+                return _CoverageResult(index: 0, count: 0, found: false, valid: false)
+            if glyph_id as i64 >= first and glyph_id as i64 <= last:
+                found = first_index + glyph_id as i64 - first
+            previous_end = last
+            expected_index = next_index
+            i = i + 1
+        return _CoverageResult(index: found, count: expected_index, found: found >= 0, valid: true)
+    _CoverageResult(index: 0, count: 0, found: false, valid: false)
+
+fn apply_gsub_single(blob: [u8], table_start: i64, table_end: i64, subtable_abs: i64, glyph_id: u32) -> GsubSingleResult:
+    val unchanged = GsubSingleResult(glyph_id: glyph_id, applied: false, valid: false)
+    if table_start < 0 or table_start > subtable_abs or table_end < table_start or table_end > blob.len() as i64 or glyph_id > 65535 or subtable_abs + 6 > table_end:
+        return unchanged
+    val format = read_u16_be(blob, subtable_abs)
+    val coverage_offset = read_u16_be(blob, subtable_abs + 2) as i64
+    var glyph_count: i64 = 0
+    var minimum_coverage_offset: i64 = 6
+    if format == 2:
+        glyph_count = read_u16_be(blob, subtable_abs + 4) as i64
+        minimum_coverage_offset = 6 + glyph_count * 2
+        if subtable_abs + minimum_coverage_offset > table_end:
+            return unchanged
+    else if format != 1:
+        return unchanged
+    if coverage_offset < minimum_coverage_offset or subtable_abs + coverage_offset < subtable_abs:
+        return unchanged
+    val coverage = _coverage_index(blob, subtable_abs + coverage_offset, table_end, glyph_id)
+    if not coverage.valid:
+        return unchanged
+    if format == 2 and coverage.count != glyph_count:
+        return unchanged
+    if not coverage.found:
+        return GsubSingleResult(glyph_id: glyph_id, applied: false, valid: true)
+    if format == 1:
+        val delta = read_i16_be(blob, subtable_abs + 4) as i64
+        val replacement = ((glyph_id as i64 + delta) & 65535) as u32
+        return GsubSingleResult(glyph_id: replacement, applied: true, valid: true)
+    if format == 2:
+        if coverage.index >= glyph_count:
+            return unchanged
+        return GsubSingleResult(glyph_id: read_u16_be(blob, subtable_abs + 6 + coverage.index * 2), applied: true, valid: true)
+    unchanged
 
 class GposLookup:
     lookup_type: u32
@@ -18,6 +111,8 @@ fn read_lookup_list(blob: [u8], lookup_list_abs: i64) -> [u32]:
     if lookup_list_abs + 1 >= blob.len() as i64:
         return []
     val count = read_u16_be(blob, lookup_list_abs) as i64
+    if lookup_list_abs + 2 + count * 2 > blob.len() as i64:
+        return []
     var offsets: [u32] = []
     var i: i64 = 0
     while i < count:
@@ -36,32 +131,46 @@ fn parse_gsub_skeleton(font: OtFont) -> [GsubLookup]:
         None:
             return []
     val base = tbl.offset as i64
+    val end = base + tbl.length as i64
     val blob = font.blob
-    if base + 10 >= blob.len() as i64:
+    if base < 0 or end < base or end > blob.len() as i64 or end > 4294967295 or base + 10 > end:
         return []
     val lookup_list_off = read_u16_be(blob, base + 8) as i64
+    if lookup_list_off == 0:
+        return []
     val lookup_list_abs = base + lookup_list_off
-    if lookup_list_abs + 1 >= blob.len() as i64:
+    if lookup_list_abs < base or lookup_list_abs + 2 > end:
         return []
     val count = read_u16_be(blob, lookup_list_abs) as i64
+    if lookup_list_abs + 2 + count * 2 > end:
+        return []
+    val lookup_list_metadata_end = lookup_list_abs + 2 + count * 2
     var results: [GsubLookup] = []
     var i: i64 = 0
     while i < count:
         val off = read_u16_be(blob, lookup_list_abs + 2 + i * 2) as i64
+        if off == 0:
+            return []
         val lkp_abs = lookup_list_abs + off
-        if lkp_abs + 5 >= blob.len() as i64:
-            i = i + 1
-            continue
+        if lkp_abs < lookup_list_metadata_end or lkp_abs + 6 > end:
+            return []
         val ltype = read_u16_be(blob, lkp_abs)
         val flag = read_u16_be(blob, lkp_abs + 2)
         val sub_count = read_u16_be(blob, lkp_abs + 4) as i64
+        val lookup_bytes = 6 + sub_count * 2 + (if (flag & 0x0010u32) != 0u32: 2 else: 0)
+        if lkp_abs + lookup_bytes > end:
+            return []
+        val lookup_metadata_end = lkp_abs + lookup_bytes
         var subs: [u32] = []
         var j: i64 = 0
         while j < sub_count:
             val soff = read_u16_be(blob, lkp_abs + 6 + j * 2)
-            subs.append(soff)
+            val sub_abs = lkp_abs + soff as i64
+            if soff == 0 or sub_abs < lookup_metadata_end or sub_abs + 2 > end:
+                return []
+            subs.append(sub_abs as u32)
             j = j + 1
-        val lkp = GsubLookup(lookup_type: ltype, flag: flag, subtable_offsets: subs)
+        val lkp = GsubLookup(lookup_type: ltype, flag: flag, lookup_offset: lkp_abs as u32, table_start: base as u32, table_end: end as u32, subtable_offsets: subs)
         results.append(lkp)
         i = i + 1
     results

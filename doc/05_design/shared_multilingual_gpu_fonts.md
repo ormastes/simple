@@ -58,6 +58,11 @@ handle/generation. Fallback resolves the snapshot after choosing its run font;
 an attached face without an exact live binding never reuses the legacy unbound
 parser blob.
 
+GSUB decoding is staged: the parser owns table-bounded Coverage 1/2 and
+SingleSubst 1/2 primitives, while the shaper stays identity until active
+Script/LangSys/Feature lookup selection is available. Unsupported or malformed
+data returns unchanged material and cannot set completion.
+
 The revocable font-face handle/generation is intentionally present as opaque
 rasterizer identity and is validated before use. Engine-owned texture, sampler,
 pipeline, submission, fence, and readback handles stay out of both values; they
