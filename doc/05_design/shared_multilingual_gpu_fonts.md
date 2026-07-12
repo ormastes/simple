@@ -84,9 +84,11 @@ The first native Engine3D HUD prerequisite is a Simple-owned Metal source and
 color), with six vertices per validated atlas quad. The atlas format is frozen
 to A8Unorm and render targets to RGBA8/BGRA8. This material is not execution:
 native promotion still requires a compiled pipeline, texture upload, draw,
-successful command completion, and device-origin texture readback. GUI, web,
-and Engine2D integrations must use the current WebIR/DrawIR refactor rather
-than consuming this Engine3D adapter as a parallel rendering path.
+successful command completion, and device-origin texture readback. Web
+producers lower through web semantic/layout and GUI producers through canonical
+widget/scene owners; both emit Draw IR. The Engine2D executor may then lower
+text to transient `FontRenderBatch`. They must not consume this Engine3D
+adapter as a parallel rendering path.
 
 The revocable font-face handle/generation is intentionally present as opaque
 rasterizer identity and is validated before use. Engine-owned texture, sampler,

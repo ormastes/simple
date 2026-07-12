@@ -23,6 +23,16 @@ Simple app state
   -> shell adapter: TUI, browser, Electron, Tauri, SimpleOS WM
 ```
 
+`WebRender IR` is the existing web semantic/layout stage, not a separate
+`WebIR` type. Web producers lower through web semantic/layout; GUI producers
+lower through their canonical widget/scene semantic owners. Both emit
+`common.ui.draw_ir.DrawIrComposition`. The executor in
+`src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` sends text commands through
+`Engine2D.draw_text`; an enabled vector face uses `FontRenderer.prepare_text`
+and transient `FontRenderBatch`, while the default remains backend bitmap text. Atlas pixels,
+generations, and dirty rectangles never move upstream into Draw IR. Engine3D
+HUD/world rendering is a separate engine lane and is not a GUI/web/2D route.
+
 ## Target Layer Hierarchy (2026-07-05)
 
 The stack diagram above describes data flow. This tree describes containment

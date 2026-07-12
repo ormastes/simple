@@ -55,16 +55,14 @@ common base and **no duplication of the cheap shared logic**:
    `DrawIrComposition` of TEXT commands — the same IR the GUI dispatches to GPU
    backends — so the TUI "lane" is GPU-offloadable like the GUI without making
    the default path heavier.
-4. **Font rendering offloads on GPU for both glyph kinds.** Vector glyphs already
-   accepted checksum-verified GPU payloads before CPU fallback; the bitmap path
-   now has the same (`rasterize_bitmap_accelerated` + `bitmap_font_accelerator_stats`).
-   CPU fallback stays load-bearing (no real GPU on CI). Transparency/alpha
-   coverage composites through `blit_glyph` (verified by an absolute oracle).
-5. **Fira Code Nerd is the default unspecified font** at two seams: the glyph
-   path (`font_provider.browser_font_candidates_for_family` fallback → Fira mono)
-   and the HTML/pixel path (`office_style_resolver.default_style_for` emits the
-   `font-family` that the web `text_painter` recognizes). Explicit families are
-   unchanged.
+4. **CPU owns glyph rasterization; supported GPU lanes compose the atlas.**
+   Legacy checksum payloads are not native rasterization evidence. CPU
+   composition remains load-bearing, and transparency/alpha coverage still
+   uses an absolute oracle.
+5. **Unspecified text follows the font-provider candidate policy.** The
+   zero-config Engine2D path remains backend bitmap text; vector faces are
+   opt-in. Explicit families use the same provider rather than a GUI-local
+   default.
 6. **MD WYSIWYG is wired end-to-end.** `app/office/md_wysiwyg_ppm.spl` (headless
    PPM) and `md_wysiwyg_gui.spl` (window) feed `wysiwyg_preview_pane` HTML
    through `simple_web_render_html_to_pixels_with_engine2d_backend`.

@@ -264,6 +264,11 @@ display), it's a `CompositorBackend` + `InputBackend` pair, not a
 - **Don't** cache backend-specific state on `UISession`. Use
   `SurfaceManager` for per-surface state and `WidgetStore` for
   widget-local state.
+- **Don't** call `FontRenderer`, Engine2D font backend adapters, or Engine3D
+  HUD/world methods from GUI/web app code. Emit semantic Draw IR text/style and
+  let the existing Engine2D executor select bitmap text or lower an enabled
+  vector face to transient font batches.
+  Direct Engine2D demos remain low-level examples, not GUI/web architecture.
 
 ## 9. Running an on-screen GUI window on macOS
 

@@ -727,7 +727,8 @@ This iteration moved the stack toward the target above (see design doc
   `Engine2D.load_font` selects a real TTF/OTF through the CPU `spl_fonts`
   owner, caches glyph alpha, builds one tight payload, and composites it on the
   selected drawing backend. Engine2D's unspecified default remains backend
-  bitmap text; Fira Code Nerd is the common/browser font-candidate default.
+  bitmap text; browser candidates are selected by the current font-provider
+  policy rather than a separate GUI default.
   Trusted local paths use UTF-8 bytes. The selected native face/layout remains
   one serialized process-global singleton until concurrent owned handles are required.
 - **MD WYSIWYG wired end-to-end** via `app/office/md_wysiwyg_{ppm,gui}.spl`.

@@ -144,6 +144,10 @@ describe "<Feature Name>":
   state, not merely call the renderer: check Draw IR/object state, scene nodes,
   layout boxes, visible text, readback pixels, hashes, or diffs that prove the
   expected surface exists.
+- GUI/web font specs assert semantic `DrawIrComposition` text/style before
+  backend/readback evidence. When vector text is enabled, `FontRenderBatch`
+  remains transient material inside the Engine2D executor; an app-private font draw path or Engine3D HUD/world
+  shortcut is not valid GUI/web/2D evidence.
 - For HTML/CSS/WASM-backed surfaces, prefer HTML or DOM-visible-text checks
   before raster checks. Assert semantic text, attributes, layout-relevant
   objects, or canvas/wasm bridge state when available; use GUI screenshots,

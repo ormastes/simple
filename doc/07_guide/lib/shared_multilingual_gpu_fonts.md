@@ -213,8 +213,10 @@ It emits source and packed vertices only; no Engine3D method selects it and it
 is not native execution evidence. A rejected runtime draft was removed because
 interpreter readback was unsafe, atlas formats were ambiguous, GPU command
 errors were ignored, child cleanup was unproven, and the macOS-only code could
-not be compiled on this host. Future GUI/web/Engine2D work belongs behind the
-refactored WebIR/DrawIR boundary, not a second font draw path.
+not be compiled on this host. Web producers lower through web semantic/layout;
+GUI producers lower through canonical widget/scene owners. Both emit Draw IR,
+whose Engine2D executor may lower text to transient vector font batches. Do not
+add a second font draw path or reuse Engine3D HUD/world as one.
 
 ## Evidence rules
 

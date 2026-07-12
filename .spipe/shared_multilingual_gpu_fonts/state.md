@@ -327,8 +327,10 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   rejected and removed the accompanying native runtime draft (unsafe
   interpreter readback, format ambiguity, unchecked GPU completion, unproven
   child cleanup, and no macOS compile evidence). The retained source makes no
-  execution claim. GUI/web/Engine2D follow the newer WebIR/DrawIR refactor and
-  must not consume this adapter as a parallel path.
+  execution claim. Web producers lower through web semantic/layout and GUI
+  producers through canonical widget/scene owners; both emit Draw IR. The
+  Engine2D executor may lower text to transient vector font batches and must
+  not consume this adapter as a parallel path.
 - cmap12 slice: Spark confirmed eight bundled candidates carry format 12 and
   Noto Emoji maps `U+1F600` only there. The Pure Simple cmap owner now validates
   Unicode records, sorted/non-overlapping groups, table bounds, scalar range,

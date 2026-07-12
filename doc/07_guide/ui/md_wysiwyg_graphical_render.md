@@ -82,10 +82,10 @@ auto-probes (priority: metal > cuda > rocm > … > cpu_simd > software > cpu).
 
 ## Fonts
 
-Unspecified text defaults to **Fira Code Nerd**. Explicitly-specified families
-(serif → Liberation, sans → Noto, …) are unchanged. Glyph rasterization offloads
-to the GPU when a backend returns checksum-verified glyph pixels, with a
-load-bearing CPU fallback (both vector and bitmap paths).
+Unspecified text follows the current font-provider candidate policy; the
+zero-config Engine2D path remains backend bitmap text. Explicitly specified
+families use the same provider. CPU code owns glyph rasterization; supported GPU
+lanes compose the resulting atlas, with CPU composition as the fallback.
 
 ## Rendering sanity specs
 

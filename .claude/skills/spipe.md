@@ -301,6 +301,11 @@ helper functions inside normal SSpec `it` blocks. The helper may wrap repeated
 setup/readback, but it must contain real assertions and must not replace
 `expect`, `describe`, `it`, or the canonical matchers.
 
+For GUI/web font work, assert semantic `DrawIrComposition` text/style before
+backend/readback evidence. When vector text is enabled, `FontRenderBatch` is
+transient Engine2D-executor material, not WebRender IR or Draw IR. Reject evidence built on an app-private
+font draw path or on Engine3D HUD/world as a GUI/web/2D shortcut.
+
 For RenderDoc evidence, use the shared helper interface instead of spelling
 `renderdoccmd` directly in each spec or check script:
 

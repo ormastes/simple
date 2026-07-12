@@ -303,6 +303,13 @@ MCP server available via npm: `@simple-lang/mcp-server`
 
 ## Critical Rules
 
+- Web producers lower through web semantic/layout; GUI producers lower through
+  their canonical widget/scene semantic owners. Both emit `DrawIrComposition`.
+  Engine2D lowers Draw IR text through `draw_text`; an enabled vector face uses
+  transient `FontRenderer`/`FontRenderBatch` material. Do not put
+  transient atlas/cache material in Draw IR or add private parallel font draw
+  paths. Engine3D HUD/world is a separate lane, never a GUI/web/2D shortcut.
+
 - **Default tooling = pure-Simple self-hosted binary, not the Rust seed.** `test`/`lint`/`fmt`/`build`/`run`/MCP/LSP all run on `bin/release/<triple>/simple` (built via bootstrap). The seed (`src/compiler_rust/target/bootstrap/simple`) is bootstrap-only. If the self-hosted binary is slow/unstable, fix it in pure-Simple (`src/compiler`/`src/lib`/`src/app`) and re-deploy or file a bug — don't fall back to the seed. See `.claude/rules/bootstrap.md`
 - **Self-sufficient**: never fail because another LLM didn't do its step — do it yourself
 - When a short, safe grammar or compact expression form fails, compiles too slowly, or forces a workaround, fix it or record a concrete bug/feature request instead of silently normalizing the workaround
