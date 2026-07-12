@@ -621,13 +621,37 @@ impl MirTextCodegen for MirToLlvm:
         val src_id = self.local_id_value(src)
         val dest_name = self.get_local(dest_id)
         val src_name = self.local_value_text(src_id)
-        var ty = self.valid_llvm_type(self.get_local_type(src_id))
-        if self.ptr_locals.has(src_id):
-            ty = "ptr"
+        # Bug #149: `get_local_type` checks the STICKY `ptr_locals`/
+        # `bool_locals` flags before `local_types`. Those flags are set once,
+        # upfront, from every local's MIR-DECLARED type (translate_function's
+        # priming loop) and are never cleared -- but `translate_call` can
+        # later overwrite `local_types[id]` alone (without clearing a stale
+        # ptr_locals[id]) when the callee's REGISTERED return type disagrees
+        # with the priming guess. This happens for `rt_array_repeat`
+        # (`[value; count]` fill literals): its MIR-declared destination type
+        # is Array (-> "ptr" priming), but the function itself has no static
+        # extern override and falls back to the generic `i64 @name(...)`
+        # auto-declare, so the actual call is emitted as `i64` -- leaving
+        # ptr_locals[id]=true while local_types[id]=="i64". Re-deriving `ty`
+        # via `get_local_type` here then trusted the stale "ptr" flag and
+        # emitted `getelementptr i8, ptr %lN, ...` against an i64-defined
+        # %lN -- invalid IR, llc rejection ("defined with type 'i64' but
+        # expected 'ptr'") on any `[""; N]` / `[0; N]` fill-literal use.
+        #
+        # `local_types[src_id]` is the freshest type actually assigned at
+        # the source's definition site (every value-defining instruction,
+        # including translate_call's override, writes it), so prefer it when
+        # present; only fall back to the sticky flags via `get_local_type`
+        # when local_types has no entry to consult.
+        val recorded_src_ty = self.local_types.get(src_id)
+        var ty = if recorded_src_ty.? and recorded_src_ty.unwrap() != nil and recorded_src_ty.unwrap() != "nil" and recorded_src_ty.unwrap() != "":
+            self.valid_llvm_type(recorded_src_ty.unwrap())
+        else:
+            self.valid_llvm_type(self.get_local_type(src_id))
+        if ty == "ptr":
             self.local_types[dest_id] = "ptr"
             self.ptr_locals[dest_id] = true
-        if self.bool_locals.has(src_id):
-            ty = "i1"
+        if ty == "i1":
             self.local_types[dest_id] = "i1"
             self.bool_locals[dest_id] = true
         val comment = if is_move: "move" else: "copy"

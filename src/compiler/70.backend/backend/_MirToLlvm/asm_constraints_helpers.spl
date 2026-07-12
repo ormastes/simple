@@ -154,6 +154,20 @@ impl MirToLlvm:
             self.builder.emit("declare i64 @rt_array_get(ptr, i64)")
         self.builder.emit("declare void @rt_array_set(ptr, i64, i64)")
         self.builder.emit("declare i8 @rt_array_push(ptr, i64)")
+        # Bug #149: `rt_array_repeat` (backs `[value; count]` fill literals)
+        # had no static override here, so it fell back to the generic
+        # `declare i64 @name(...)` auto-declare in core_codegen's
+        # unknown_func_decls pass. Every call site (translate_call's
+        # `known_ret_ty` registration) then registered its result as i64,
+        # while the MIR-declared destination local (Array kind, from
+        # lower_array_repeat) primed `ptr_locals` to true for that same id
+        # -- a stale-flag mismatch (local defined `i64` but later treated as
+        # `ptr` by a copy or a subsequent `.len()`/index call argument) that
+        # produced invalid IR ("defined with type 'i64' but expected 'ptr'").
+        # rt_array_repeat genuinely returns `SplArray*` in C (same as
+        # rt_array_new), so declare it `ptr` here to match every other
+        # array-handle-returning rt_array_* function above.
+        self.builder.emit("declare ptr @rt_array_repeat(i64, i64)")
         self.builder.emit("declare i64 @__simple_intrinsic_bounds_check(i64, i64)")
         self.builder.emit("declare ptr @rt_engine2d_simd_fill_row_u32(i64, i64)")
         self.builder.emit("declare ptr @rt_engine2d_simd_copy_row_u32(ptr)")
@@ -206,6 +220,7 @@ impl MirToLlvm:
         self.defined_func_names["rt_array_get"] = true
         self.defined_func_names["rt_array_set"] = true
         self.defined_func_names["rt_array_push"] = true
+        self.defined_func_names["rt_array_repeat"] = true
         self.defined_func_names["rt_engine2d_simd_fill_row_u32"] = true
         self.defined_func_names["rt_engine2d_simd_copy_row_u32"] = true
         self.defined_func_names["rt_engine2d_simd_blend_row_u32"] = true
