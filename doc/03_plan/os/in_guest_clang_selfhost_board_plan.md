@@ -1,0 +1,74 @@
+# Deep plan: LLVM/clang as a real FS executable on SimpleOS (board-runnable)
+
+**Final goal (must):** clang runs as an on-disk FS executable on SimpleOS on real
+board hardware, compiling a C file to an object it writes back to disk, retrievable
+over SSH. QEMU is the dev harness; the board is the requirement. No design may depend
+on a QEMU-only mechanism.
+
+**Status (2026-07-12):** ✅ **PHASE 1 DONE.** clang runs in ring-3 and COMPILES a C file:
+`clang -cc1 -emit-obj -o /hello.o /hello.c` streams 124 MB clang → ring-3 → reads `/hello.c`
+(28 B off NVMe) → serves `/dev/urandom` → writes a 712-byte `/hello.o` → exit(0). The object
+is byte-valid: base64-dumped at exit, decodes to ELF64 `ET_REL`/`EM_X86_64` with a `main`
+function symbol, **host-links and runs to `exit 7`** (== `int main(void){return 7;}`). Earlier
+milestones: `clang --version` + exit(0) (391e3c6c6ab); abort-134 was a zero-sized heap from a
+`.to_u64()` codegen bug (fixed). Input-lookup was a stale-image issue (a leftover
+`stageD/hello.o` flips mkimg to the link pass, embedding `HELLO.O` not `HELLO.C`) — build the
+image fresh for the compile pass. Next: Phase 2 (board port).
+
+## Hard constraints (learned this session)
+
+- **`-cc1` only, never the driver.** `clang -c` forks/execs a cc1 subprocess; ring-3 has
+  no fork. Pass frontend args directly (from `clang_static -### -c hello.c`).
+- **No in-guest linking in Phase 1.** `ld`/lld needs fork too. `.o` is the deliverable;
+  link+run happens on host for verification, or is a later phase.
+- **Decisive artifact = byte-valid `.o`, not "exit 0".** Verify: base64/disk `.o` →
+  `llvm-readobj --file-headers --syms` = ET_REL/x86_64/`main` → host-link → run →
+  `echo $?` == 7. Nothing less counts as done (session-long haiku blind spot).
+- **Exit-path edits are highest-risk.** isa-debug-exit vs longjmp-resume is the exact
+  bare-exec-flag interaction that broke both SSH gates before. Any change gates on BOTH
+  `ssh_clang_hello_ring3.shs` AND `ssh_multi_cmd.shs` AND the clang path.
+- **Board portability is unverifiable in-sandbox for physical I/O.** Validate what we can
+  (OVMF = real UEFI firmware, zero isa-debug-exit dependency, `.o` on real NVMe) and state
+  physical-hardware NVMe/serial/NIC as unvalidated-here honestly.
+- One change per pass, trace-and-implement, review each. Discovery-first before implementing.
+
+## Phase 1 — in-guest compile to a valid `.o` (QEMU; keep isa-debug-exit)
+
+1a. **Input lookup (CURRENT BLOCKER):** clang opens `/hello.c`; image has `/HELLO.C`
+    (cluster 3). Fix path resolution in the Stage D open handler / `fat32_find_file`
+    (strip leading `/`, case-insensitive 8.3). Verify: `[sc] open path=/hello.c` →
+    found, bytes served.
+1b. **Iterate remaining syscalls** clang needs for a TU (read, fstat/newfstatat,
+    mmap-of-file, lseek, getcwd, write, close, maybe clock/time), one per pass via the
+    syscall trace. Expect a possible 2nd OOM (a TU needs >64 MiB); bump `HEAP_PAGES`
+    if the heap is the limiter (QEMU has 2G) — trivial now that the heap is real.
+1c. **Output capture:** clang creates `/hello.o` (O_CREAT/O_WRONLY), writes object bytes.
+    Stage D already has an output-file RAM buffer + base64 dump at exit — exercise it.
+1d. **Verify the `.o`:** decode → llvm-readobj ET_REL/x86_64/`main` → host `clang hello.o
+    -o a.out && ./a.out; echo $?` == 7. This closes Phase 1.
+
+## Phase 2 — board-runnable port (the must)
+
+2a. **`.o` to real NVMe, not serial:** wire O_CREAT/write/close through the FAT32
+    write path (fsexec has `_fat32_find_root_dir_slot` + cluster-write code) so `/hello.o`
+    lands on the disk image. Verify by mounting the image on host post-run and reading
+    `/hello.o` back (byte-identical to 1d's object).
+2b. **Board-safe exit:** replace isa-debug-exit (`outb 0xF4`) for the clang path with the
+    kernel-resume savepoint (as the SSH multi-cmd exit already does) so on real hardware
+    the kernel regains control, reports rc, and halts/continues gracefully — never depends
+    on QEMU quitting. Gate: both SSH gates + clang path all green.
+2c. **UEFI boot validation:** boot the clang-capable kernel+disk under OVMF via
+    `ssh_ring3_uefi_boot.shs` (real UEFI firmware path), proving no multiboot/QEMU-`-kernel`
+    dependency.
+2d. **Robustness for the board:** every syscall/FS error path recovers + reports instead of
+    hang/triple-fault (so an unexpected situation on hardware degrades gracefully, not a
+    silent halt). Audit the fault handler + syscall default cases.
+2e. **End-to-end board scenario:** over real OpenSSH, `clang -cc1 -emit-obj -o /hello.o
+    /hello.c` on the guest writes `/hello.o` to disk; retrieve over SSH/scp; verify. Mark
+    physical-hardware NVMe/serial/NIC as provable only on the actual mini-PC.
+
+## Execution order
+
+1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a → 2b → 2c → 2d → 2e.
+Never start Phase 2 before 1d passes. Small model + guide per step; higher-model review +
+the host-link-and-run / gate verification owned by the coordinator.
