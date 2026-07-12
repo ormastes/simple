@@ -733,49 +733,6 @@ fn shared_wm_taskbar_tray_object_rect(metrics: WmRenderMetrics, screen_width: i3
 struct SharedWmSceneRenderStats:
     content_pixel_count: i64
 
-# Deprecated compatibility data for the title-derived canned app-content
-# renderer only. Production chrome and taskbar text must use backend.draw_text.
-fn _shared_wm_scene_legacy_content_ascii_codes(value: text) -> [i32]:
-    if value == "Terminal": return [84, 101, 114, 109, 105, 110, 97, 108]
-    if value == "Editor": return [69, 100, 105, 116, 111, 114]
-    if value == "Browser": return [66, 114, 111, 119, 115, 101, 114]
-    if value == "File Manager": return [70, 105, 108, 101, 32, 77, 97, 110, 97, 103, 101, 114]
-    if value == "Calculator": return [67, 97, 108, 99, 117, 108, 97, 116, 111, 114]
-    if value == "X": return [88]
-    if value == "$ simple$ build check --live": return [36, 32, 115, 105, 109, 112, 108, 101, 36, 32, 98, 117, 105, 108, 100, 32, 99, 104, 101, 99, 107, 32, 45, 45, 108, 105, 118, 101]
-    if value == "src/ test/ main.spl": return [115, 114, 99, 47, 32, 116, 101, 115, 116, 47, 32, 109, 97, 105, 110, 46, 115, 112, 108]
-    if value == "SimpleOS shell via Simple Web": return [83, 105, 109, 112, 108, 101, 79, 83, 32, 115, 104, 101, 108, 108, 32, 118, 105, 97, 32, 83, 105, 109, 112, 108, 101, 32, 87, 101, 98]
-    if value == "main.spl": return [109, 97, 105, 110, 46, 115, 112, 108]
-    if value == "fn main():": return [102, 110, 32, 109, 97, 105, 110, 40, 41, 58]
-    if value == "    print Hello SimpleOS": return [32, 32, 32, 32, 112, 114, 105, 110, 116, 32, 72, 101, 108, 108, 111, 32, 83, 105, 109, 112, 108, 101, 79, 83]
-    if value == "# rendered by Simple Web": return [35, 32, 114, 101, 110, 100, 101, 114, 101, 100, 32, 98, 121, 32, 83, 105, 109, 112, 108, 101, 32, 87, 101, 98]
-    if value == "/home/simple": return [47, 104, 111, 109, 101, 47, 115, 105, 109, 112, 108, 101]
-    if value == "Desktop": return [68, 101, 115, 107, 116, 111, 112]
-    if value == "Documents": return [68, 111, 99, 117, 109, 101, 110, 116, 115]
-    if value == "Downloads": return [68, 111, 119, 110, 108, 111, 97, 100, 115]
-    if value == "state: home": return [115, 116, 97, 116, 101, 58, 32, 104, 111, 109, 101]
-    if value == "0": return [48]
-    if value == "7 8 9 /": return [55, 32, 56, 32, 57, 32, 47]
-    if value == "4 5 6 *": return [52, 32, 53, 32, 54, 32, 42]
-    if value == "1 2 3 -": return [49, 32, 50, 32, 51, 32, 45]
-    if value == "about:network": return [97, 98, 111, 117, 116, 58, 110, 101, 116, 119, 111, 114, 107]
-    if value == "Simple Web": return [83, 105, 109, 112, 108, 101, 32, 87, 101, 98]
-    if value == "GET /status 200": return [71, 69, 84, 32, 47, 115, 116, 97, 116, 117, 115, 32, 50, 48, 48]
-    if value == "Simple Web app surface": return [83, 105, 109, 112, 108, 101, 32, 87, 101, 98, 32, 97, 112, 112, 32, 115, 117, 114, 102, 97, 99, 101]
-    []
-
-fn _draw_shared_wm_scene_text_fit(backend: CompositorBackend, x: i32, y: i32, text_value: text, fg: u32, bg: u32, max_chars: i32):
-    val codes = _shared_wm_scene_legacy_content_ascii_codes(text_value)
-    var count = codes.len()
-    if max_chars > 0 and count > max_chars:
-        count = max_chars
-    var i = 0
-    var cx = x
-    while i < count:
-        backend.draw_char_8x16(cx, y, codes[i].to_u8(), fg, bg)
-        cx = cx + 12
-        i = i + 1
-
 fn _draw_shared_wm_backend_text_fit(backend: CompositorBackend, x: i32, y: i32, text_value: text, fg: u32, bg: u32, max_chars: i32):
     if max_chars <= 0 or text_value.len() <= 0:
         return
@@ -864,8 +821,32 @@ fn shared_wm_scene_render_taskbar_model(backend: CompositorBackend, taskbar: Tas
 
 fn _shared_wm_scene_content_line(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, line_index: i32, text_value: text, fg: u32, bg: u32):
     val y = cy + 34 + line_index * 22
-    _draw_shared_wm_scene_text_fit(backend, cx + 10, y, text_value, fg, bg, if cw > 20: (cw - 20) / 12 else: 0)
+    _draw_shared_wm_backend_text_fit(backend, cx + 10, y, text_value, fg, bg, if cw > 20: (cw - 20) / 8 else: 0)
 
+# Renders `state_text` (the caller's real window content, e.g. window.html)
+# as plain wrapped lines through the real backend.draw_text path. Used
+# whenever the caller supplies non-empty content, so live content is never
+# silently discarded in favor of the canned per-title table below.
+fn _shared_wm_scene_render_live_state_text(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text, fg: u32, bg: u32):
+    val lines = state_text.split("\n")
+    val max_lines = if ch > 34: (ch - 34) / 22 else: 0
+    var limit = lines.len()
+    if limit > max_lines:
+        limit = max_lines
+    var i = 0
+    while i < limit:
+        _shared_wm_scene_content_line(backend, cx, cy, cw, i, lines[i], fg, bg)
+        i = i + 1
+
+# Compatibility app-content renderer. `state_text` (window.html) is the
+# caller's authoritative live content: when it is non-empty this renders it
+# verbatim (line-wrapped) and never substitutes canned markup. The per-title
+# table below is a placeholder ONLY for the case where no live content is
+# available at all (state_text == ""), and every canned block is tagged with
+# an explicit "[canned]" marker line so a captured frame is visibly
+# distinguishable from real app content — see
+# doc/08_tracking/bug/browser_demo_frozen_loading_placeholder_2026-07-12.md
+# for the underlying de-fake audit this guards against regressing.
 fn shared_wm_scene_render_app_content(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text):
     if cw <= 0 or ch <= 0:
         return
@@ -878,24 +859,27 @@ fn shared_wm_scene_render_app_content(backend: CompositorBackend, title: text, c
     val muted = 0xFF94A3B8u32
     backend.fill_rect(cx, cy, cw, ch, bg)
     backend.fill_rect(cx, cy, cw, 24, header)
-    _draw_shared_wm_scene_text_fit(backend, cx + 8, cy + 4, title, text_primary, header, if cw > 16: (cw - 16) / 12 else: 0)
+    _draw_shared_wm_backend_text_fit(backend, cx + 8, cy + 4, title, text_primary, header, if cw > 16: (cw - 16) / 8 else: 0)
+    if state_text != "":
+        _shared_wm_scene_render_live_state_text(backend, cx, cy, cw, ch, state_text, text_primary, bg)
+        return
     if title == "Terminal":
-        _shared_wm_scene_content_line(backend, cx, cy, cw, 0, "$ " + state_text, success, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 0, "$", success, bg)
         _shared_wm_scene_content_line(backend, cx, cy, cw, 1, "src/ test/ main.spl", accent, bg)
-        _shared_wm_scene_content_line(backend, cx, cy, cw, 2, "SimpleOS shell via Simple Web", success, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 2, "[canned demo — no live content]", muted, bg)
         return
     if title == "Editor" or title == "Hello World":
         _shared_wm_scene_content_line(backend, cx, cy, cw, 0, "main.spl", muted, bg)
         _shared_wm_scene_content_line(backend, cx, cy, cw, 1, "fn main():", warning, bg)
         _shared_wm_scene_content_line(backend, cx, cy, cw, 2, "    print Hello SimpleOS", accent, bg)
-        _shared_wm_scene_content_line(backend, cx, cy, cw, 3, "# rendered by Simple Web", success, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 3, "[canned demo — no live content]", muted, bg)
         return
     if title == "File Manager" or title == "Finder":
         _shared_wm_scene_content_line(backend, cx, cy, cw, 0, "/home/simple", accent, bg)
         _shared_wm_scene_content_line(backend, cx, cy, cw, 1, "Desktop", text_primary, bg)
         _shared_wm_scene_content_line(backend, cx, cy, cw, 2, "Documents", text_primary, bg)
         _shared_wm_scene_content_line(backend, cx, cy, cw, 3, "Downloads", text_primary, bg)
-        _shared_wm_scene_content_line(backend, cx, cy, cw, 4, "state: " + state_text, muted, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 4, "[canned demo — no live content]", muted, bg)
         return
     if title == "Calculator":
         _shared_wm_scene_content_line(backend, cx, cy, cw, 0, "0", accent, bg)
@@ -907,9 +891,9 @@ fn shared_wm_scene_render_app_content(backend: CompositorBackend, title: text, c
         _shared_wm_scene_content_line(backend, cx, cy, cw, 0, "about:network", accent, bg)
         _shared_wm_scene_content_line(backend, cx, cy, cw, 1, "Simple Web", success, bg)
         _shared_wm_scene_content_line(backend, cx, cy, cw, 2, "GET /status 200", text_primary, bg)
-        _shared_wm_scene_content_line(backend, cx, cy, cw, 3, state_text, muted, bg)
+        _shared_wm_scene_content_line(backend, cx, cy, cw, 3, "[canned demo — no live content]", muted, bg)
         return
-    _shared_wm_scene_content_line(backend, cx, cy, cw, 0, "Simple Web app surface", text_primary, bg)
+    _shared_wm_scene_content_line(backend, cx, cy, cw, 0, "[canned demo — no live content]", text_primary, bg)
 
 fn _shared_wm_scene_window_content_rect(window: SharedWmWindow) -> SharedWmRect:
     if window.chrome_kind == WM_CHROME_KIND_BORDERLESS:

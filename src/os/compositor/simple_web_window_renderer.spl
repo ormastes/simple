@@ -4,15 +4,12 @@
 # canonical Simple Web renderer and then blitting pixels to CompositorBackend.
 
 use os.compositor.display_backend_core.{CompositorBackend}
-use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderArtifact, WebRenderRequest, web_render_full_html}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderArtifact, WebRenderRequest}
 use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, wm_content_frame_checksum}
-use os.compositor.web_render_surface.{compositor_default_web_page_html, compositor_render_html_artifact, compositor_render_request_artifact}
+use os.compositor.web_render_surface.{compositor_render_html_artifact, compositor_render_request_artifact}
 use std.gc_async_mut.ui.web_render_pixel_software_backend.{WebRenderPixelArtifactCache}
 
 val HOST_WM_DEFAULT_THEME_ID: text = "aetheric_dark"
-
-fn _is_simple_browser_title(title: text) -> bool:
-    title == "Browser" or title == "Simple Browser"
 
 fn _simple_web_window_css(theme: text) -> text:
     var accent = "#2563eb"
@@ -33,15 +30,6 @@ fn _simple_web_window_css(theme: text) -> text:
     # the closing quote and the concat operators, emitting them verbatim and
     # producing invalid CSS (blank render). See bug bug_css_concat_brace_interp.
     ":root \{ --glass-accent: {accent}; --glass-success: {success}; --glass-warning: {warning}; --glass-text-secondary: {muted}; \} .wm-app-container \{ min-height: 100vh; background: {content_bg}; \} .wm-app-titlebar \{ height: 24px; background: {title_bg}; color: #fff; \} .wm-app-content \{ min-height: calc(100vh - 24px); background: {content_bg}; color: #e5e7eb; \} "
-
-fn themed_simple_web_html_with_theme(theme: text, title: text, body_html: text) -> text:
-    web_render_full_html(simple_web_themed_render_request_with_theme(theme, title, body_html, 0, 0))
-
-fn simple_web_themed_render_request_with_theme(theme: text, title: text, body_html: text, viewport_w: i32, viewport_h: i32) -> WebRenderRequest:
-    val css = _simple_web_window_css(theme)
-    val app_css = css + "body { margin: 0; overflow: hidden; } #app { min-height: 100vh; padding: 0; } .simple-web-line { height: 22px; padding: 0 10px; } .simple-web-accent { color: var(--glass-accent); } .simple-web-success { color: var(--glass-success); } .simple-web-warning { color: var(--glass-warning); } .simple-web-muted { color: var(--glass-text-secondary); }"
-    val app_body = "<div class='wm-app-container'><div class='wm-app-titlebar'>" + title + "</div><div class='wm-app-content'>" + body_html + "</div></div>"
-    WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, title, app_body, app_css, "", viewport_w, viewport_h)
 
 # Content-only request for WM-owned windows. The shared WM executor owns the
 # outer titlebar and frame, so this request deliberately emits no nested
@@ -70,35 +58,9 @@ fn simple_web_content_revision(title: text, body_html: text, width: i32, height:
     hash = _simple_web_revision_mix(hash, height.to_i64())
     _simple_web_revision_mix(hash, _clamp_scroll_px(scroll_y).to_i64())
 
-fn themed_simple_web_html(title: text, body_html: text) -> text:
-    themed_simple_web_html_with_theme(HOST_WM_DEFAULT_THEME_ID, title, body_html)
-
-fn simple_web_app_html_with_theme(theme: text, title: text, state_text: text) -> text:
-    web_render_full_html(simple_web_app_render_request_with_theme(theme, title, state_text, 0, 0))
-
-fn simple_web_app_render_request_with_theme(theme: text, title: text, state_text: text, viewport_w: i32, viewport_h: i32) -> WebRenderRequest:
-    if title == "Terminal":
-        return simple_web_themed_render_request_with_theme(theme, title, "<div class='simple-web-line simple-web-success'>$ " + state_text + "</div><div class='simple-web-line simple-web-accent'>src/ test/ main.spl</div><div class='simple-web-line simple-web-success'>SimpleOS shell via Simple Web</div>", viewport_w, viewport_h)
-    if title == "Editor" or title == "Hello World":
-        return simple_web_themed_render_request_with_theme(theme, title, "<div class='simple-web-line simple-web-muted'>main.spl</div><div class='simple-web-line simple-web-warning'>fn main():</div><div class='simple-web-line simple-web-accent'>    print \"Hello SimpleOS\"</div><div class='simple-web-line simple-web-success'># rendered by Simple Web</div>", viewport_w, viewport_h)
-    if title == "File Manager" or title == "Finder":
-        return simple_web_themed_render_request_with_theme(theme, title, "<div class='simple-web-line simple-web-accent'>/home/simple</div><div class='simple-web-line'>Desktop</div><div class='simple-web-line'>Documents</div><div class='simple-web-line'>Downloads</div><div class='simple-web-line simple-web-muted'>state: " + state_text + "</div>", viewport_w, viewport_h)
-    if title == "Calculator":
-        return simple_web_themed_render_request_with_theme(theme, title, "<div class='simple-web-line simple-web-accent'>0</div><div class='simple-web-line'>7 8 9 /</div><div class='simple-web-line'>4 5 6 *</div><div class='simple-web-line'>1 2 3 -</div>", viewport_w, viewport_h)
-    if _is_simple_browser_title(title):
-        return WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, title, compositor_default_web_page_html("about:network"), "", "", viewport_w, viewport_h)
-    simple_web_themed_render_request_with_theme(theme, title, "<div class='simple-web-line'>Simple Web app surface</div>", viewport_w, viewport_h)
-
-fn simple_web_app_html(title: text, state_text: text) -> text:
-    simple_web_app_html_with_theme(HOST_WM_DEFAULT_THEME_ID, title, state_text)
-
 fn simple_web_html_pixel_artifact(html: text, cw: i32, ch: i32) -> WebRenderArtifact:
     val req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "", html, "", "", cw, ch).with_pixel_output()
     compositor_render_html_artifact(req, html)
-
-fn simple_web_app_pixel_artifact_with_theme(theme: text, title: text, cw: i32, ch: i32, state_text: text) -> WebRenderArtifact:
-    val req = simple_web_app_render_request_with_theme(theme, title, state_text, cw, ch).with_pixel_output()
-    compositor_render_request_artifact(req)
 
 fn render_simple_web_html_content(backend: CompositorBackend, cx: i32, cy: i32, cw: i32, ch: i32, html: text):
     render_simple_web_html_content_scrolled(backend, cx, cy, cw, ch, html, 0)
@@ -131,9 +93,9 @@ fn _clamp_scroll_px(scroll_y: i32) -> i32:
     scroll_y
 
 # Public so callers that need to key a cache on the exact render size (e.g.
-# HostCompositor._content_cache_for) can compute the same `full_h` this
-# module's render_simple_web_app_content_* functions render at, without
-# duplicating the clamp constant/logic.
+# HostCompositor._content_cache_for) can compute the same `full_h`
+# simple_web_content_frame_cached renders at, without duplicating the clamp
+# constant/logic.
 fn content_paint_full_height(ch: i32, scroll_y: i32) -> i32:
     ch + _clamp_scroll_px(scroll_y)
 
@@ -165,13 +127,24 @@ fn _window_scrolled_pixels(pixels: [u32], cw: i32, full_h: i32, ch: i32, scroll_
 # caller-supplied parent_window_id/offset). Keeping one render path means a
 # nested Simple Web panel gets exactly the same render/scroll/checksum
 # behavior as a top-level one.
+#
+# Routes through cache.request_to_pixel_artifact (the full HTML layout/CSS
+# engine), NOT request_to_native_safe_pixel_artifact (the tag-stripping
+# bitmap-glyph fallback in web_render_pixel_software_backend._native_safe_wm_pixels).
+# The native-safe path is a crash-recovery fallback only and must be invoked
+# explicitly by a caller that has actually hit that failure mode, not wired
+# in as the default for every desktop window content frame. See
+# WebRenderPixelArtifactCache.request_to_native_safe_pixel_artifact's
+# provenance marking (engine2d_status=compatibility_renderer,
+# engine2d_backend="native-safe-fallback") for how evidence capture can
+# reject a fallback frame that leaked through.
 fn _simple_web_content_frame_cached_impl(cache: WebRenderPixelArtifactCache, window_id: text, scene_revision: i64, content_revision: i64, theme: text, title: text, body_html: text, width: i32, height: i32, scroll_y: i32, parent_window_id: text, offset_x: i32, offset_y: i32) -> WmContentFrame:
     if window_id.len() == 0 or scene_revision <= 0 or content_revision <= 0 or width <= 0 or height <= 0:
         return WmContentFrame(window_id: window_id, scene_revision: scene_revision, content_revision: content_revision, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: width, height: height, pixels: [], checksum: 0u64, parent_window_id: parent_window_id, offset_x: offset_x, offset_y: offset_y)
     val clamped_scroll = _clamp_scroll_px(scroll_y)
     val full_h = height + clamped_scroll
     val req = simple_web_content_render_request_with_theme(theme, title, body_html, width, full_h).with_pixel_output()
-    val artifact = cache.request_to_native_safe_pixel_artifact(req)
+    val artifact = cache.request_to_pixel_artifact(req)
     val visible = _window_scrolled_pixels(artifact.pixels, width, full_h, height, clamped_scroll)
     WmContentFrame(
         window_id: window_id,
@@ -208,54 +181,6 @@ fn render_simple_web_html_content_scrolled(backend: CompositorBackend, cx: i32, 
     val clamped_scroll = _clamp_scroll_px(scroll_y)
     val full_h = ch + clamped_scroll
     val artifact = simple_web_html_pixel_artifact(html, cw, full_h)
-    val visible = _window_scrolled_pixels(artifact.pixels, cw, full_h, ch, clamped_scroll)
-    blit_simple_web_pixels(backend, cx, cy, cw, ch, visible)
-
-fn render_simple_web_app_content(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text):
-    render_simple_web_app_content_scrolled(backend, HOST_WM_DEFAULT_THEME_ID, title, cx, cy, cw, ch, state_text, 0)
-
-fn render_simple_web_app_content_with_theme(backend: CompositorBackend, theme: text, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text):
-    render_simple_web_app_content_scrolled(backend, theme, title, cx, cy, cw, ch, state_text, 0)
-
-# Default-theme convenience wrapper so call sites that don't otherwise touch
-# theming (e.g. host_compositor_entry.spl's render_frame) don't need their
-# own nogc_sync_mut.ui.theme_package import just to pass a scroll offset.
-fn render_simple_web_app_content_with_scroll(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text, scroll_y: i32):
-    render_simple_web_app_content_scrolled(backend, HOST_WM_DEFAULT_THEME_ID, title, cx, cy, cw, ch, state_text, scroll_y)
-
-# Task #15 remainder item 4 (S1 perf): same paint as
-# render_simple_web_app_content_with_scroll, but the pixel artifact is
-# fetched through a caller-owned WebRenderPixelArtifactCache instead of
-# always re-rendering. WebRenderPixelArtifactCache.request_to_pixel_artifact
-# only recomputes when the request's HTML body differs from the cache's
-# last stored HTML (content-hash-equivalent — full-string equality); the
-# cache was itself created/replaced by the caller keyed on (width, height,
-# backend_name) (see HostCompositor._content_cache_for), so a hit requires
-# unchanged content AND unchanged size/backend, exactly the invalidation
-# contract this item calls for. Callers can inspect cache.hits()/.stores()
-# to prove hit/miss behavior.
-fn render_simple_web_app_content_cached(cache: WebRenderPixelArtifactCache, backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text, scroll_y: i32):
-    if cw <= 0 or ch <= 0:
-        return
-    val clamped_scroll = _clamp_scroll_px(scroll_y)
-    val full_h = ch + clamped_scroll
-    val req = simple_web_app_render_request_with_theme(HOST_WM_DEFAULT_THEME_ID, title, state_text, cw, full_h).with_pixel_output()
-    val artifact = cache.request_to_pixel_artifact(req)
-    val visible = _window_scrolled_pixels(artifact.pixels, cw, full_h, ch, clamped_scroll)
-    blit_simple_web_pixels(backend, cx, cy, cw, ch, visible)
-
-# Scroll-aware content paint: translates the content layer by `scroll_y`
-# pixels at paint time by rendering `scroll_y` extra rows of the same
-# document and windowing the visible `ch`-tall slice out of it (see
-# _window_scrolled_pixels). `scroll_y` is normally
-# HostCompositor.scroll_offset_for(window.id).to_i32() — task #15 remainder
-# item 1 (content scroll wiring).
-fn render_simple_web_app_content_scrolled(backend: CompositorBackend, theme: text, title: text, cx: i32, cy: i32, cw: i32, ch: i32, state_text: text, scroll_y: i32):
-    if cw <= 0 or ch <= 0:
-        return
-    val clamped_scroll = _clamp_scroll_px(scroll_y)
-    val full_h = ch + clamped_scroll
-    val artifact = simple_web_app_pixel_artifact_with_theme(theme, title, cw, full_h, state_text)
     val visible = _window_scrolled_pixels(artifact.pixels, cw, full_h, ch, clamped_scroll)
     blit_simple_web_pixels(backend, cx, cy, cw, ch, visible)
 
