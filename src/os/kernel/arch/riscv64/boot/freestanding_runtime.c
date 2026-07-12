@@ -1066,6 +1066,10 @@ void rt_mmio_write_u64(spl_i64 addr, spl_i64 value) {
     *(volatile spl_u64 *)(spl_u64)addr = (spl_u64)value;
 }
 
+void rt_memory_barrier(void) {
+    __asm__ volatile("fence rw, rw" ::: "memory");
+}
+
 static void uart_put_byte(spl_u8 byte) {
     *(volatile spl_u8 *)0x10000000ULL = byte;
 }
