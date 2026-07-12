@@ -81,6 +81,7 @@ lazy_static::lazy_static! {
 use simple_runtime::value::{
     rt_env_all as sffi_env_all, rt_env_cwd as sffi_env_cwd, rt_env_exists as sffi_env_exists,
     rt_env_get as sffi_env_get, rt_env_get_i64 as sffi_env_get_i64, rt_env_home as sffi_env_home,
+    rt_lexer_source_set as sffi_lexer_source_set, rt_lexer_source_slice as sffi_lexer_source_slice,
     rt_env_remove as sffi_env_remove, rt_env_set as sffi_env_set, rt_env_temp as sffi_env_temp,
     rt_set_debug_mode as sffi_set_debug_mode, rt_set_macro_trace as sffi_set_macro_trace,
     rt_platform_name as sffi_platform_name, rt_term_enable_ansi as sffi_term_enable_ansi,
@@ -178,6 +179,24 @@ pub fn rt_env_get(args: &[Value]) -> Result<Value, CompileError> {
         let result = sffi_env_get(key.as_ptr(), key.len() as u64);
         Ok(runtime_to_value(result))
     }
+}
+
+pub fn rt_lexer_source_set(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(Value::Str(source)) = args.first() else {
+        return Err(CompileError::runtime("rt_lexer_source_set requires a text source"));
+    };
+    Ok(Value::Bool(unsafe {
+        sffi_lexer_source_set(source.as_ptr(), source.len() as u64)
+    }))
+}
+
+pub fn rt_lexer_source_slice(args: &[Value]) -> Result<Value, CompileError> {
+    let (Some(Value::Int(start)), Some(Value::Int(end))) = (args.first(), args.get(1)) else {
+        return Err(CompileError::runtime(
+            "rt_lexer_source_slice requires integer start and end",
+        ));
+    };
+    Ok(runtime_to_value(sffi_lexer_source_slice(*start, *end)))
 }
 
 /// Get an environment variable parsed as i64.
@@ -859,6 +878,29 @@ mod tests {
         unsafe {
             std::env::remove_var("_SIMPLE_STACK_SET");
         }
+    }
+
+    #[test]
+    fn lexer_source_slice_handler_preserves_owned_text() {
+        assert_eq!(
+            rt_lexer_source_set(&[Value::Str("aéz".to_string())]).unwrap(),
+            Value::Bool(true)
+        );
+        let saved = rt_lexer_source_slice(&[Value::Int(1), Value::Int(2)]).unwrap();
+        assert_eq!(saved, Value::Str("é".to_string()));
+        assert_eq!(
+            rt_lexer_source_set(&[Value::Str("new".to_string())]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(saved, Value::Str("é".to_string()));
+        assert_eq!(
+            rt_lexer_source_slice(&[Value::Int(0), Value::Int(3)]).unwrap(),
+            Value::Str("new".to_string())
+        );
+        assert_eq!(
+            rt_lexer_source_slice(&[Value::Int(1), Value::Int(99)]).unwrap(),
+            Value::Nil
+        );
     }
 
     // Note: Can't test sys_exit() as it terminates the process

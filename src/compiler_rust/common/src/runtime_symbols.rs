@@ -645,6 +645,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // Environment & Process operations
     "rt_env_get",
     "rt_env_get_i64",
+    "rt_lexer_source_set",
+    "rt_lexer_source_slice",
     "rt_env_set",
     "rt_get_env",
     "rt_set_env",

@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <math.h>
 #include <time.h>
+#include <stdatomic.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/types.h>
@@ -2606,6 +2607,67 @@ int64_t rt_env_get(const uint8_t* key_ptr, uint64_t key_len) {
     free(key);
     if (!value) return rt_core_nil();
     return rt_string_new((const uint8_t*)value, (uint64_t)strlen(value));
+}
+
+static atomic_flag rt_lexer_source_lock = ATOMIC_FLAG_INIT;
+static uint8_t* rt_lexer_source_bytes = NULL;
+static uint64_t rt_lexer_source_length = 0;
+
+static void rt_lexer_source_acquire(void) {
+    while (atomic_flag_test_and_set_explicit(&rt_lexer_source_lock, memory_order_acquire)) {}
+}
+
+static void rt_lexer_source_release(void) {
+    atomic_flag_clear_explicit(&rt_lexer_source_lock, memory_order_release);
+}
+
+bool rt_lexer_source_set(const uint8_t* source_ptr, uint64_t source_len) {
+    if (!source_ptr && source_len != 0) return false;
+    uint8_t* replacement = (uint8_t*)malloc((size_t)source_len + 1);
+    if (!replacement) return false;
+    if (source_len != 0) memcpy(replacement, source_ptr, (size_t)source_len);
+    replacement[source_len] = 0;
+    rt_lexer_source_acquire();
+    uint8_t* previous = rt_lexer_source_bytes;
+    rt_lexer_source_bytes = replacement;
+    rt_lexer_source_length = source_len;
+    rt_lexer_source_release();
+    free(previous);
+    return true;
+}
+
+static bool rt_lexer_source_char_to_byte(uint64_t target, uint64_t* byte_offset) {
+    uint64_t chars = 0;
+    for (uint64_t i = 0; i < rt_lexer_source_length; i++) {
+        if ((rt_lexer_source_bytes[i] & 0xC0) != 0x80) {
+            if (chars == target) {
+                *byte_offset = i;
+                return true;
+            }
+            chars++;
+        }
+    }
+    if (chars == target) {
+        *byte_offset = rt_lexer_source_length;
+        return true;
+    }
+    return false;
+}
+
+int64_t rt_lexer_source_slice(int64_t start, int64_t end) {
+    if (start < 0 || end < start) return rt_core_nil();
+    rt_lexer_source_acquire();
+    uint64_t ustart;
+    uint64_t uend;
+    if (!rt_lexer_source_char_to_byte((uint64_t)start, &ustart) ||
+        !rt_lexer_source_char_to_byte((uint64_t)end, &uend)) {
+        rt_lexer_source_release();
+        return rt_core_nil();
+    }
+    const uint8_t* bytes = rt_lexer_source_bytes ? rt_lexer_source_bytes + ustart : (const uint8_t*)"";
+    int64_t result = rt_string_new(bytes, uend - ustart);
+    rt_lexer_source_release();
+    return result;
 }
 
 int64_t rt_env_get_i64(const uint8_t* key_ptr, uint64_t key_len, int64_t default_value) {

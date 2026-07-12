@@ -11,6 +11,12 @@ use crate::coverage::{rt_coverage_condition_probe, rt_coverage_decision_probe, r
 use crate::value::collections::{rt_array_get, rt_array_len, rt_string_new, rt_tuple_new, rt_tuple_set};
 use crate::value::heap::{get_typed_ptr, HeapObjectType};
 use crate::value::{RuntimeString, RuntimeValue};
+use std::sync::{OnceLock, RwLock};
+
+fn lexer_source_cache() -> &'static RwLock<String> {
+    static CACHE: OnceLock<RwLock<String>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(String::new()))
+}
 
 unsafe fn ptr_bytes<'a>(ptr: *const u8, len: u64, max_len: usize) -> Option<&'a [u8]> {
     if ptr.is_null() || len == 0 || len as usize > max_len {
@@ -145,6 +151,49 @@ pub unsafe extern "C" fn rt_env_get(name_ptr: *const u8, name_len: u64) -> Runti
         return RuntimeValue::NIL;
     };
     rt_string_new(value.as_ptr(), value.len() as u64)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_lexer_source_set(source_ptr: *const u8, source_len: u64) -> bool {
+    let Some(source) = ptr_string_value(source_ptr, source_len, 64 * 1024 * 1024) else {
+        return false;
+    };
+    let Ok(mut cached) = lexer_source_cache().write() else {
+        return false;
+    };
+    *cached = source;
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn rt_lexer_source_slice(start: i64, end: i64) -> RuntimeValue {
+    if start < 0 || end < start {
+        return RuntimeValue::NIL;
+    }
+    let Ok(cached) = lexer_source_cache().read() else {
+        return RuntimeValue::NIL;
+    };
+    let start = start as usize;
+    let end = end as usize;
+    let bounds = if cached.is_ascii() {
+        Some((start, end))
+    } else {
+        let char_to_byte = |index: usize| {
+            if index == cached.chars().count() {
+                Some(cached.len())
+            } else {
+                cached.char_indices().nth(index).map(|(offset, _)| offset)
+            }
+        };
+        char_to_byte(start).zip(char_to_byte(end))
+    };
+    let Some((start, end)) = bounds else {
+        return RuntimeValue::NIL;
+    };
+    let Some(slice) = cached.get(start..end) else {
+        return RuntimeValue::NIL;
+    };
+    rt_string_new(slice.as_ptr(), slice.len() as u64)
 }
 
 /// Get environment variable parsed as i64, or return the supplied default.
@@ -522,7 +571,11 @@ pub unsafe extern "C" fn rt_process_spawn_async(cmd_ptr: *const u8, cmd_len: u64
 #[no_mangle]
 pub extern "C" fn rt_process_spawn_inherit() -> i64 {
     use std::process::{Command, Stdio};
-    let wrapper_name = if cfg!(windows) { "simple_mcp_server.cmd" } else { "simple_mcp_server" };
+    let wrapper_name = if cfg!(windows) {
+        "simple_mcp_server.cmd"
+    } else {
+        "simple_mcp_server"
+    };
     let current_exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(err) => {
@@ -537,7 +590,11 @@ pub extern "C" fn rt_process_spawn_inherit() -> i64 {
     let bin_dir = exe_dir.parent().and_then(|path| path.parent()).unwrap_or(exe_dir);
     let wrapper = {
         let bin_wrapper = bin_dir.join(wrapper_name);
-        if bin_wrapper.is_file() { bin_wrapper } else { exe_dir.join(wrapper_name) }
+        if bin_wrapper.is_file() {
+            bin_wrapper
+        } else {
+            exe_dir.join(wrapper_name)
+        }
     };
     #[cfg(windows)]
     let mut command = {
@@ -1214,6 +1271,28 @@ mod tests {
             let (ptr, len) = str_to_ptr("NONEXISTENT_VAR_XYZ_123");
             let result = rt_env_get(ptr, len);
             assert!(result.is_nil());
+        }
+    }
+
+    #[test]
+    fn lexer_source_slice_is_owned_bounded_and_replaceable() {
+        unsafe {
+            let source = "aéz";
+            assert!(rt_lexer_source_set(source.as_ptr(), source.len() as u64));
+            let saved = rt_lexer_source_slice(1, 2);
+            assert_eq!(extract_string_test(saved), "é");
+            assert!(rt_lexer_source_slice(-1, 1).is_nil());
+            assert_eq!(extract_string_test(rt_lexer_source_slice(2, 3)), "z");
+            assert!(rt_lexer_source_slice(3, 2).is_nil());
+            assert!(rt_lexer_source_slice(0, 99).is_nil());
+
+            let replacement = "new";
+            assert!(rt_lexer_source_set(replacement.as_ptr(), replacement.len() as u64));
+            assert_eq!(extract_string_test(saved), "é");
+            assert_eq!(extract_string_test(rt_lexer_source_slice(0, 3)), "new");
+
+            assert!(rt_lexer_source_set("".as_ptr(), 0));
+            assert_eq!(extract_string_test(rt_lexer_source_slice(0, 0)), "");
         }
     }
 

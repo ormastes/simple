@@ -1,19 +1,9 @@
-# SIMPLE_WEB_RENDER_BUDGET_MS override silently ignored by stage rearm in the software layout renderer
+# SIMPLE_WEB_RENDER_BUDGET_MS override silently ignored by stage rearm in the software layout renderer — FIXED
 
 ## Status
 
-FIX PREPARED, NOT YET COMMITTED. The 8-line fix (area-scaled budget floor + honor the
-env-override in the stage-rearm + arm the full budget up front) in
-`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`,
-`simple_web_layout_render_html_software_pixels` (~line 9334) is authored, opus-reviewed
-(net-positive-only: byte-identical below ~160k px, explicit/env budgets always win), and
-render-verified in an isolated worktree (2560x1440 renders varied 90-color content with the
-fix vs a uniform degraded frame without it). It is NOT on origin (origin has only the
-baseline `resolved_budget_ms` logic). It is held as a clean patch
-(`scratchpad/web_budget_fix_clean.patch`) rather than committed because the shared engine
-working copy currently also holds a concurrent peer's uncommitted `_html_split_on_lt`
-(text.split freestanding-ABI) fix in the same file; the budget patch will be applied on top
-once that peer work lands on origin, to avoid clobbering it.
+Fixed. `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`,
+`simple_web_layout_render_html_software_pixels` (~line 9334).
 
 ## Symptom
 

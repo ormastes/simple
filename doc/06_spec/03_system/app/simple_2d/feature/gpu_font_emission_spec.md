@@ -33,23 +33,12 @@ execution are not covered.
 ## Expected evidence
 
 All portable targets use entry `simple_font_atlas_composite_v1_u32`.
-Runtime batches stamp matching program version 1; CUDA/Metal/OpenCL reject a
-mismatch before mutation and Engine2D replays CPU from quad 0. CUDA/OpenCL have
-conditional reject-then-v1 recovery evidence, while Metal remains static-only
-without an injectable dispatch seam. This is not native execution or complete
-REQ-009 evidence.
 
 The dedicated Vulkan export returns canonical GLSL 450 source for external
-GLSL-to-SPIR-V compilation. The source export itself is not a
-`PortableComputeTarget`, toolchain invocation, or execution claim. Its 15-input
-ABI is atlas and
+GLSL-to-SPIR-V compilation. It is not a `PortableComputeTarget`, compile plan,
+toolchain invocation, or execution claim. Its 15-input ABI is atlas and
 destination bindings plus one contiguous 13-field parameter block; its shader
 entry is `main`.
-
-The dedicated Vulkan plan preserves the canonical source, `main` symbol,
-GLSL/SPIR-V formats, tool hint, and `.comp`/`.spv` suffixes. Synthetic artifact
-contracts cover `pass`, missing bytes, bad magic, and missing `main`. Contract
-validity is metadata validation, not compilation or GPU execution evidence.
 
 | Target | Source marker | Source | Planned output | Tool hint |
 |---|---|---|---|---|
@@ -93,7 +82,6 @@ built-in matcher assertions.
 
 ## Claim boundary
 
-“Plan compilation” means constructing deterministic compile-plan data. No
-compiled Vulkan artifact exists without a real external capture. A real
+“Plan compilation” means constructing deterministic compile-plan data. A real
 toolchain invocation, exported-symbol inspection, GPU submission, and device
 readback remain separate required evidence.

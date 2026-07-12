@@ -60,6 +60,24 @@ fn value_to_bool(val: &Value) -> bool {
     }
 }
 
+unsafe fn interpreter_cranelift_arg_handles(ptr: i64, len: i64) -> Result<Vec<i64>, CompileError> {
+    if len < 0 || (len > 0 && ptr == 0) {
+        return Err(CompileError::semantic("invalid Cranelift argument vector".to_string()));
+    }
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    std::slice::from_raw_parts(ptr as *const Value, len as usize)
+        .iter()
+        .map(|value| match value {
+            Value::Int(handle) => Ok(*handle),
+            _ => Err(CompileError::semantic(
+                "Cranelift argument handle must be an integer".to_string(),
+            )),
+        })
+        .collect()
+}
+
 // ============================================================================
 // Module Management
 // ============================================================================
@@ -666,8 +684,12 @@ pub fn rt_cranelift_call(args: &[Value]) -> Result<Value, CompileError> {
     }
     let ctx = value_to_i64(&args[0]);
     let func = value_to_i64(&args[1]);
-    let args_ptr = value_to_i64(&args[2]);
-    let args_len = value_to_i64(&args[3]);
+    let handles = unsafe { interpreter_cranelift_arg_handles(value_to_i64(&args[2]), value_to_i64(&args[3]))? };
+    let (args_ptr, args_len) = if handles.is_empty() {
+        (0, 0)
+    } else {
+        (handles.as_ptr() as i64, handles.len() as i64)
+    };
     let handle = unsafe { cranelift_sffi::rt_cranelift_call(ctx, func, args_ptr, args_len) };
     Ok(Value::Int(handle))
 }
@@ -681,8 +703,12 @@ pub fn rt_cranelift_call_indirect(args: &[Value]) -> Result<Value, CompileError>
     let ctx = value_to_i64(&args[0]);
     let sig = value_to_i64(&args[1]);
     let callee = value_to_i64(&args[2]);
-    let args_ptr = value_to_i64(&args[3]);
-    let args_len = value_to_i64(&args[4]);
+    let handles = unsafe { interpreter_cranelift_arg_handles(value_to_i64(&args[3]), value_to_i64(&args[4]))? };
+    let (args_ptr, args_len) = if handles.is_empty() {
+        (0, 0)
+    } else {
+        (handles.as_ptr() as i64, handles.len() as i64)
+    };
     let handle = unsafe { cranelift_sffi::rt_cranelift_call_indirect(ctx, sig, callee, args_ptr, args_len) };
     Ok(Value::Int(handle))
 }
@@ -780,4 +806,24 @@ pub fn rt_write_file(args: &[Value]) -> Result<Value, CompileError> {
     let content = value_to_runtime_string(&args[1]);
     let result = simple_runtime::value::cli_sffi::rt_write_file(path, content);
     Ok(Value::Bool(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::interpreter_cranelift_arg_handles;
+    use crate::value::Value;
+
+    #[test]
+    fn interpreter_cranelift_argument_handles_are_validated() {
+        let values = vec![Value::Int(7), Value::Int(11)];
+        assert_eq!(
+            unsafe { interpreter_cranelift_arg_handles(values.as_ptr() as i64, values.len() as i64) }.unwrap(),
+            vec![7, 11]
+        );
+        assert!(unsafe { interpreter_cranelift_arg_handles(0, 0) }.unwrap().is_empty());
+        assert!(unsafe { interpreter_cranelift_arg_handles(0, 1) }.is_err());
+        assert!(unsafe { interpreter_cranelift_arg_handles(0, -1) }.is_err());
+        let invalid = vec![Value::Bool(false)];
+        assert!(unsafe { interpreter_cranelift_arg_handles(invalid.as_ptr() as i64, 1) }.is_err());
+    }
 }

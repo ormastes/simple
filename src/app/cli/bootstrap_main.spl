@@ -3,7 +3,6 @@ extern fn rt_native_build(args: [text]) -> i64
 
 use lazy compiler.driver.{compiler_driver_create, compiler_driver_run_compile}
 use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native)
-use app.io._CliCompile.compile_options.{cli_native_default_opt_level}
 use std.nogc_sync_mut.io_runtime.{env_set}
 
 # Keep in sync with ./VERSION file
@@ -131,25 +130,25 @@ fn run_native_build_bootstrap(args: [text]) -> i64:
         return rt_native_build(args)
     val output = bootstrap_output_from_args(args, 0)
     val backend = native_build_backend_from_args(args, 0)
-    # The in-process AOT MIR-lowering path only lowers real function bodies for
-    # the entry module when SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1; otherwise the
-    # entry module falls through to an empty MirModule stub and the backend
-    # reports "MIR module has no functions" (driver_pipeline.spl:419). Set it
-    # here (a fresh compiled bootstrap_main process does not inherit the
-    # bootstrap-time env) to match cli_native_build's behaviour.
-    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+    # Seed both scalar and array input channels: compiled struct transport can
+    # lose input_files. Leave closure discovery enabled so Driver can load the
+    # entry's imports before it flips SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE to 1.
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry_path)
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
     # Build directly through the pure-Simple CompilerDriver (unique symbol
     # names -- avoids the `aot_native_file_with_backend` duplicate-name
     # collision between driver_public_compile [subprocess facade] and
     # driver_api_native_single [in-process]).
     var options = driver_core_compile_options_default()
     options.input_files = [entry_path]
+    options.bootstrap_input_count = 1
+    options.bootstrap_input_0 = entry_path
     options.mode = CompileMode.Aot
     options.output_file = Some(output)
     options.output_format = driver_output_format_native()
     options.backend = backend
     options.release = true
-    options.opt_level = cli_native_default_opt_level()
+    options.opt_level = 3
     options = compileoptions_normalize_mir_optimization(options)
     val driver = compiler_driver_create(options)
     val result = compiler_driver_run_compile(driver)

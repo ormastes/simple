@@ -11,9 +11,12 @@ use app.ui.tui.screen.{Screen}
 use app.ui.render.tui_widgets.{render_tui_tree}
 use app.ui.render.html_widgets.{render_html_tree}
 use app.ui.access_cli.{ui_access_cli_descriptors, ui_access_cli_parse_request, ui_access_cli_route, ui_access_cli_db_error, ui_access_cli_http_error}
-use app.play.wm_access_cli.{wm_access_descriptors, wm_access_execute, wm_access_validate_action_args}
+use app.play.wm_access_cli.{wm_access_descriptors, wm_access_execute, wm_access_snapshot_from_windows, wm_access_validate_action_args}
 use std.play.wm.mod.{wm_list_windows}
 use app.t32_cli.commands.{shared_access_commands}
+use app.t32_cli.bridge.{bridge_window_list, bridge_window_capture, bridge_window_describe, bridge_action_list, bridge_action_invoke, bridge_history_tail}
+use app.t32_cli.render.{render_result}
+use app.t32_cli.mod.{t32_map_access_error}
 
 var perf_p50_ms: i64 = -1
 var perf_p95_ms: i64 = -1
@@ -63,6 +66,14 @@ fn _base_fail(reason: text) -> bool:
     print "failure=" + reason
     false
 
+fn _t32_common_output_ok(result: AccessResult, operation: AccessOperation, needle: text) -> bool:
+    var normalized = result
+    normalized.operation = operation
+    normalized.source_id = "t32"
+    val human = render_result(normalized)
+    val json = access_render_json(normalized)
+    human.contains(needle) and _contains_all(json, [needle, "\"schema\":\"simple.access/v1\"", "\"operation\":\"" + operation + "\"", "\"id\":\"t32\""])
+
 fn _base_ok() -> bool:
     if ui_access_cli_descriptors().len() != 6 or wm_access_descriptors().len() != 5 or shared_access_commands().len() != 6: return _base_fail("descriptor counts")
     val parsed = ui_access_cli_parse_request(["find", "--surface", "main", "--kind", "button", "--limit", "10"])
@@ -100,7 +111,57 @@ fn _json_parser_ok() -> bool:
 
 fn _t32_compatibility_ok() -> bool:
     val descriptors = shared_access_commands()
-    _has_descriptor(descriptors, "windows", "", ACCESS_OPERATION_LIST) and _has_descriptor(descriptors, "window", "show", ACCESS_OPERATION_SNAPSHOT) and _has_descriptor(descriptors, "window", "describe", ACCESS_OPERATION_SURFACE) and _has_descriptor(descriptors, "action", "list", ACCESS_OPERATION_FIND) and _has_descriptor(descriptors, "action", "do", ACCESS_OPERATION_ACT) and _has_descriptor(descriptors, "history", "", ACCESS_OPERATION_HISTORY)
+    val operations = [ACCESS_OPERATION_LIST, ACCESS_OPERATION_SNAPSHOT, ACCESS_OPERATION_SURFACE, ACCESS_OPERATION_FIND, ACCESS_OPERATION_ACT, ACCESS_OPERATION_HISTORY]
+    if descriptors.len() != operations.len(): return false
+    var i = 0
+    while i < descriptors.len():
+        val descriptor = descriptors[i]
+        if descriptor.operation != operations[i] or descriptor.safety.timeout_ms != 5000: return false
+        if i == 4:
+            if descriptor.safety.read_only or not descriptor.safety.destructive or not descriptor.safety.may_prompt or descriptor.safety.requires_confirmation: return false
+        elif not descriptor.safety.read_only or not descriptor.safety.idempotent:
+            return false
+        i = i + 1
+    val listed = match bridge_window_list():
+        Err(_): return false
+        Ok(result): result
+    if listed.rows.len() < 2 or listed.rows[0].len() == 0 or listed.rows[1].len() == 0: return false
+    val key = listed.rows[1][0]
+    if key == "": return false
+    if not _t32_common_output_ok(listed, ACCESS_OPERATION_LIST, key): return false
+    match bridge_window_describe(key):
+        Err(_): return false
+        Ok(result):
+            if result.kind != "kv" or not result.title.starts_with("Window: ") or result.kv_pairs.len() < 5: return false
+            var key_seen = false
+            for pair in result.kv_pairs:
+                if pair.len() >= 2 and pair[0] == "window_key" and pair[1] == key: key_seen = true
+            if not key_seen or not _t32_common_output_ok(result, ACCESS_OPERATION_SURFACE, key): return false
+    match bridge_action_list(""):
+        Err(_): return false
+        Ok(result):
+            if result.kind != "table" or result.title != "Actions" or result.rows.len() < 2 or result.rows[0] != ["Key", "Label", "Type", "Window"]: return false
+            if result.rows[1].len() < 1: return false
+            val action_key = result.rows[1][0]
+            if action_key == "" or not _t32_common_output_ok(result, ACCESS_OPERATION_FIND, action_key): return false
+    match bridge_history_tail(20):
+        Err(_): return false
+        Ok(result):
+            if result.kind != "table" or result.title != "History (last 20)" or result.rows.len() < 1 or result.rows[0] != ["Command", "Result", "Session", "Core"]: return false
+            if not _t32_common_output_ok(result, ACCESS_OPERATION_HISTORY, "History (last 20)"): return false
+    val missing_message = match bridge_window_capture("__missing_ui_access_window__"):
+        Ok(_): return false
+        Err(message): message
+    val missing = t32_map_access_error(missing_message)
+    if missing.code != "target_not_found" or missing.retryable: return false
+    val error_json = access_error_to_json(ACCESS_OPERATION_SNAPSHOT, "t32-missing", missing)
+    if not _contains_all(error_json, ["\"schema\":\"simple.access/v1\"", "\"operation\":\"snapshot\"", "\"request_id\":\"t32-missing\"", "\"code\":\"target_not_found\""]): return false
+    val invalid_message = match bridge_action_invoke("", ""):
+        Ok(_): return false
+        Err(message): message
+    val invalid = t32_map_access_error(invalid_message)
+    val invalid_json = access_error_to_json(ACCESS_OPERATION_ACT, "t32-invalid", invalid)
+    invalid.code == "invalid_argument" and not invalid.retryable and _contains_all(invalid_json, ["\"schema\":\"simple.access/v1\"", "\"operation\":\"act\"", "\"request_id\":\"t32-invalid\"", "\"code\":\"invalid_argument\""])
 
 fn _compatibility_ok() -> bool:
     val ui_descriptors = ui_access_cli_descriptors()
@@ -176,7 +237,9 @@ fn _common_ownership_ok() -> bool:
     val win_text = file_read("src/lib/common/ui/win_text_access.spl")
     val ui = file_read("src/app/ui/access_cli.spl")
     val wm = file_read("src/app/play/wm_access_cli.spl")
-    not grammar.contains("std.play") and not grammar.contains("rt_") and not win_text.contains("WindowInfo") and not win_text.contains("rt_") and not ui.contains("rt_") and not wm.contains("rt_")
+    val access_sources = grammar + win_text + ui + wm
+    val access_sources_lower = access_sources.to_lower()
+    not grammar.contains("std.play") and not grammar.contains("rt_") and not win_text.contains("WindowInfo") and not win_text.contains("rt_") and not ui.contains("rt_") and not wm.contains("rt_") and not access_sources_lower.contains("draw_ir") and not access_sources_lower.contains("drawir") and not access_sources_lower.contains("web_ir") and not access_sources_lower.contains("webir") and not access_sources_lower.contains("engine2d") and not access_sources_lower.contains("fontrenderer")
 
 fn _bounded_hot_paths_ok() -> bool:
     val store = file_read("src/lib/nogc_sync_mut/ui/access_store.spl")
@@ -190,13 +253,13 @@ fn _bounded_hot_paths_ok() -> bool:
     events.len() == 64 and events[0].sequence == 2 and store.contains("LIMIT 64") and not ui.contains("process_run") and not ui.contains("sleep(") and not wm_owner.contains("[\"getwindowname\"")
 
 fn _live_transport_evidence_ok() -> bool:
-    val evidence = file_read("build/test-artifacts/03_system/app/ui_cli_llm_access/live-ui-transport.txt")
+    val evidence = file_read("build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/protocol/live-ui-transport.txt")
     _contains_all(evidence, ["client_process=separate", "loopback_default=true", "live_windows=pass", "live_find=pass", "live_act=pass", "correlated_history=pass", "service_stop=source_unavailable", "db_fallback=read_only", "db_act=source_unavailable"])
 
 fn _manual_evidence_ok() -> bool:
-    val root = "build/test-artifacts/03_system/app/ui_cli_llm_access/"
+    val root = "build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/"
     val manual = file_read("doc/06_spec/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_spec.md")
-    file_exists(root + "tui-before.txt") and file_exists(root + "tui-after.txt") and file_exists(root + "protocol.json") and file_exists("doc/06_spec/image/03_system/app/ui_cli_llm_access/gui-before.png") and file_exists("doc/06_spec/image/03_system/app/ui_cli_llm_access/gui-after.png") and not manual.contains("STUB")
+    file_exists(root + "tui/tui-before.txt") and file_exists(root + "tui/tui-after.txt") and file_exists(root + "protocol/protocol.json") and file_exists("doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/gui-before.png") and file_exists("doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/gui-after.png") and not manual.contains("STUB")
 
 fn _ui_loop_ok(backend: text) -> bool:
     val tree = build_tree(column("root", [button("run", "Run", "run")]))
@@ -212,7 +275,18 @@ fn _ui_loop_ok(backend: text) -> bool:
     if not rendered.contains("Run"):
         print rendered
         return _base_fail("ui render")
-    val response = handle_test_request("/api/test/ui/act", "POST", "{\"surface_id\":\"main\",\"canonical_id\":\"main#run\",\"action\":\"run\",\"request_id\":\"gate-run\"}", state, \event: session.dispatch(event), session)
+    val snapshot_response = handle_test_request("/api/test/ui/snapshot", "GET", "", state, \event: session.dispatch(event), session)
+    if snapshot_response.0 != 200 or not snapshot_response.2.contains("main#run"): return _base_fail("ui snapshot")
+    val surface_response = handle_test_request("/api/test/ui/surface?id=main", "GET", "", state, \event: session.dispatch(event), session)
+    if surface_response.0 != 200 or not surface_response.2.contains("main#root"): return _base_fail("ui surface")
+    val query_response = handle_test_request("/api/test/ui/query?surface_id=main&kind=button&text=Run&focused_only=false&limit=10", "GET", "", state, \event: session.dispatch(event), session)
+    if query_response.0 != 200 or not query_response.2.contains("main#run"): return _base_fail("ui query")
+    val query_parts = query_response.2.split("\"nodes\":")
+    if query_parts.len() < 2: return _base_fail("ui query nodes")
+    val found_target = extract_field(query_parts[1], "canonical_id")
+    if found_target != "main#run": return _base_fail("ui query target")
+    val action_body = "{\"surface_id\":\"main\",\"canonical_id\":\"" + found_target + "\",\"action\":\"run\",\"request_id\":\"gate-run\"}"
+    val response = handle_test_request("/api/test/ui/act", "POST", action_body, state, \event: session.dispatch(event), session)
     if response.0 != 200: return _base_fail("ui action response")
     var request_seen = false
     var dispatch_seen = false
@@ -240,7 +314,7 @@ fn _ui_loop_ok(backend: text) -> bool:
         render_html_tree(after_state.tree.root_node(), after_state)
     if not rendered_after.contains("Run"): return _base_fail("ui post-action render")
     if is_tui:
-        val out = "build/test-artifacts/03_system/app/ui_cli_llm_access"
+        val out = "build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/tui"
         if not dir_create_all(out): return _base_fail("tui evidence directory")
         if not file_write(out + "/tui-before.txt", rendered): return _base_fail("tui before evidence")
         if not file_write(out + "/tui-after.txt", rendered_after): return _base_fail("tui after evidence")
@@ -252,6 +326,22 @@ fn _wm_loop_ok() -> bool:
         Ok(found): found
     if windows.len() == 0: return false
     val target = "wm:" + windows[0].window_id + "#root"
+    val normalized = wm_access_snapshot_from_windows(windows, _current_time_ms())
+    if normalized.access.surfaces.len() != windows.len() or normalized.access.nodes.len() != windows.len(): return false
+    for node in normalized.access.nodes:
+        if node.kind != "host_window": return false
+    match wm_access_execute("windows", [], ACCESS_OUTPUT_JSON):
+        Err(_): return false
+        Ok(listed):
+            if not _contains_all(listed, [target, "\"schema\":\"simple.access/v1\"", "\"id\":\"host_wm\""]): return false
+    match wm_access_execute("wm-text-snapshot", ["host_wm"], ACCESS_OUTPUT_JSON):
+        Err(_): return false
+        Ok(snapshot):
+            if not snapshot.contains(target): return false
+    match wm_access_execute("wm-text-find", ["host_wm", windows[0].window_id], ACCESS_OUTPUT_JSON):
+        Err(_): return false
+        Ok(found):
+            if not found.contains(target): return false
     match wm_access_execute("wm-text-act", [target, "focus"], ACCESS_OUTPUT_JSON):
         Err(_): return false
         Ok(result):
@@ -363,12 +453,12 @@ fn _emit(s: text):
         "error-taxonomy": print "source_unavailable interaction_required permission_denied unsupported_action target_not_found stale_target target_disabled target_busy timeout invalid_argument semantic_fallback=none fabricated_output=none"
         "environment-states": print "zero_windows=empty headless=headless backend_unavailable=source_unavailable unsupported_rendering=unsupported_action crash_count=0"
         "action-safety": print "target_reresolved=true capability_checked=true state_checked=true input_bounded=true timeout_enforced=true confirmation_policy=eligible silent_approval=false raw_input_fallback=false correlated_result=true"
-        "common-ownership": print "cli_parallel_model=none normalization_owner=common query_owner=common serialization_owner=common safety_owner=common history_owner=common\nadapter_owned=enumerate,capture,refresh,act common_host_backend_imports=0 raw_runtime_shortcuts=0"
+        "common-ownership": print "cli_parallel_model=none normalization_owner=common query_owner=common serialization_owner=common safety_owner=common history_owner=common\nadapter_owned=enumerate,capture,refresh,act common_host_backend_imports=0 raw_runtime_shortcuts=0 renderer_ir_coupling=0"
         "bounded-hot-paths": print "memory_history_limit=64 persisted_history_limit=64 ui_subprocess_calls=0 wm_subprocess_per_record=0 retry_sleeps=0"
         "performance": print "fixture_windows=100 fixture_nodes=1000 warm=true list_snapshot_p95_ms<=100 find_route_p95_ms<=20 rss_delta_mib<=20\np50_ms=" + perf_p50_ms.to_text() + " p95_ms=" + perf_p95_ms.to_text() + " max_rss_mib=" + perf_max_rss_mib.to_text() + " output_checksum=windows-100_nodes-1000"
         "compatibility-help": print "simple_ui_operations=windows,snapshot,surface,find,act,history wm_commands=live existing_spellings=preserved t32_mapping_documented=true existing_ui_modes=pass existing_play_commands=pass mcp_http_protocol=pass schema_additions=additive"
         "live-ui-transport": print "transport=existing-test-api client_process=separate loopback_default=true live_windows=pass live_find=pass live_act=pass correlated_history=pass service_stop=source_unavailable db_fallback=read_only db_act=source_unavailable"
-        "manual-evidence": print "capture_kind=tui capture_kind=gui capture_kind=protocol manual_steps=7 placeholder_passes=0 generated_manual_fresh=true"
+        "manual-evidence": print "capture_kind=tui capture_kind=gui capture_kind=protocol manual_steps=7 placeholder_passes=0"
         "final": print "common_contract=pass cli_routing=pass ui_wm_parity=pass shared_grammar_parity=pass schema=pass safety=pass action_history=pass generated_manual=pass direct_runtime_guards=pass spec_layout_guard=pass highest_capability_review=accepted"
         _: pass_dn
 

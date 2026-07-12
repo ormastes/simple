@@ -10,7 +10,6 @@ use std::sync::Mutex;
 
 use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
 use fontdue::{Font, FontSettings, Metrics, OutlineBounds};
-use sha2::{Digest, Sha256};
 
 struct GlyphSlot {
     metrics: Metrics,
@@ -36,7 +35,6 @@ static FONT_GENERATION: AtomicI64 = AtomicI64::new(0);
 struct FreetypeSlot {
     library: usize,
     face: usize,
-    _bytes: Vec<u8>,
 }
 
 #[repr(C)]
@@ -140,13 +138,6 @@ extern "C" {
         face_index: c_long,
         aface: *mut *mut FtFaceRec,
     ) -> c_int;
-    fn FT_New_Memory_Face(
-        library: *mut c_void,
-        file_base: *const u8,
-        file_size: c_long,
-        face_index: c_long,
-        aface: *mut *mut FtFaceRec,
-    ) -> c_int;
     fn FT_Done_Face(face: *mut FtFaceRec) -> c_int;
     fn FT_Done_FreeType(library: *mut c_void) -> c_int;
     fn FT_Set_Pixel_Sizes(face: *mut FtFaceRec, pixel_width: c_uint, pixel_height: c_uint) -> c_int;
@@ -160,99 +151,6 @@ const FT_LOAD_RENDER: c_int = 0x4;
 const FT_LOAD_TARGET_NORMAL: c_int = 0x0;
 const FT_LOAD_TARGET_LCD: c_int = 3 << 16;
 const FT_LCD_FILTER_DEFAULT: c_uint = 1;
-const MAX_VERIFIED_FONT_BYTES: i64 = 256 * 1024 * 1024;
-
-fn lowercase_sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
-
-fn exact_lowercase_sha256(value: &[u8]) -> bool {
-    value.len() == 64
-        && value
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-}
-
-fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    let mut difference = 0u8;
-    for (a, b) in left.iter().zip(right) {
-        difference |= a ^ b;
-    }
-    difference == 0
-}
-
-fn destroy_freetype_slot(slot: FreetypeSlot) {
-    unsafe {
-        let _ = FT_Done_Face(slot.face as *mut FtFaceRec);
-        let _ = FT_Done_FreeType(slot.library as *mut c_void);
-    }
-}
-
-/// Load verified caller-owned font bytes. Returns 1 only after both rasterizers
-/// are ready; every failure preserves the prior face and generation.
-#[no_mangle]
-pub extern "C" fn rt_fonts_init_verified_bytes(
-    data_ptr: i64,
-    data_len: i64,
-    expected_sha256_ptr: i64,
-    expected_sha256_len: i64,
-) -> i64 {
-    if data_ptr == 0
-        || data_len <= 0
-        || data_len > MAX_VERIFIED_FONT_BYTES
-        || expected_sha256_ptr == 0
-        || expected_sha256_len != 64
-    {
-        return 0;
-    }
-    let expected =
-        unsafe { std::slice::from_raw_parts(expected_sha256_ptr as *const u8, expected_sha256_len as usize) };
-    if !exact_lowercase_sha256(expected) {
-        return 0;
-    }
-    let caller = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, data_len as usize) };
-    let font_bytes = caller.to_vec();
-    let actual = lowercase_sha256_hex(&font_bytes);
-    if !constant_time_equal(actual.as_bytes(), expected) {
-        return 0;
-    }
-    let font = match Font::from_bytes(font_bytes.clone(), FontSettings::default()) {
-        Ok(font) => font,
-        Err(_) => return 0,
-    };
-    let freetype = match load_freetype_memory_face(font_bytes) {
-        Some(slot) => slot,
-        None => return 0,
-    };
-
-    let mut font_slot = match FONT_SLOT.lock() {
-        Ok(slot) => slot,
-        Err(_) => {
-            destroy_freetype_slot(freetype);
-            return 0;
-        }
-    };
-    let mut freetype_slot = match FREETYPE_SLOT.lock() {
-        Ok(slot) => slot,
-        Err(_) => {
-            drop(font_slot);
-            destroy_freetype_slot(freetype);
-            return 0;
-        }
-    };
-    let old_freetype = freetype_slot.replace(freetype);
-    *font_slot = Some(font);
-    FONT_GENERATION.fetch_add(1, Ordering::SeqCst);
-    drop(freetype_slot);
-    drop(font_slot);
-    if let Some(old) = old_freetype {
-        destroy_freetype_slot(old);
-    }
-    1
-}
 
 /// Load a TTF/OTF from `path_ptr`/`path_len`. Returns 1 on success, 0 on any failure.
 #[no_mangle]
@@ -330,27 +228,6 @@ fn load_freetype_face(path: &str) -> Option<FreetypeSlot> {
         Some(FreetypeSlot {
             library: library as usize,
             face: face as usize,
-            _bytes: Vec::new(),
-        })
-    }
-}
-
-fn load_freetype_memory_face(bytes: Vec<u8>) -> Option<FreetypeSlot> {
-    unsafe {
-        let mut library: *mut c_void = std::ptr::null_mut();
-        if FT_Init_FreeType(&mut library) != 0 || library.is_null() {
-            return None;
-        }
-        let _ = FT_Library_SetLcdFilter(library, FT_LCD_FILTER_DEFAULT);
-        let mut face: *mut FtFaceRec = std::ptr::null_mut();
-        if FT_New_Memory_Face(library, bytes.as_ptr(), bytes.len() as c_long, 0, &mut face) != 0 || face.is_null() {
-            let _ = FT_Done_FreeType(library);
-            return None;
-        }
-        Some(FreetypeSlot {
-            library: library as usize,
-            face: face as usize,
-            _bytes: bytes,
         })
     }
 }
@@ -817,7 +694,9 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../vendor/sctk-adwaita/src/title/Cantarell-Regular.ttf"
     );
-    const OWNED_DEMO_FONT: &[u8] = include_bytes!("../../vendor/ttf-parser/tests/fonts/demo.ttf");
+    const OWNED_DEMO_FONT: &[u8] = include_bytes!(
+        "../../vendor/ttf-parser/tests/fonts/demo.ttf"
+    );
 
     fn init_owned_test_font() {
         assert!(std::path::Path::new(OWNED_TEST_FONT).exists());
@@ -835,7 +714,9 @@ mod tests {
             let offset = u32::from_be_bytes(source[offset_pos..offset_pos + 4].try_into().unwrap()) + 16;
             source[offset_pos..offset_pos + 4].copy_from_slice(&offset.to_be_bytes());
         }
-        let kern_directory = [b'k', b'e', b'r', b'n', 0, 8, 255, 215, 0, 0, 1, 160, 0, 0, 0, 24];
+        let kern_directory = [
+            b'k', b'e', b'r', b'n', 0, 8, 255, 215, 0, 0, 1, 160, 0, 0, 0, 24,
+        ];
         let kern_table = [
             0, 0, 0, 1, 0, 0, 0, 20, 0, 1, 0, 1, 0, 6, 0, 0, 0, 0, 0, 1, 0, 1, 255, 192,
         ];
@@ -950,92 +831,5 @@ mod tests {
         assert!(rt_fonts_glyph_pixels_len(second) > 0);
         assert_eq!(rt_fonts_glyph_free(first), 1);
         assert_eq!(rt_fonts_glyph_free(second), 1);
-    }
-
-    #[test]
-    fn verified_bytes_init_owns_memory_and_preserves_prior_state_on_failure() {
-        let _guard = TEST_LOCK.lock().unwrap();
-        let expected = lowercase_sha256_hex(OWNED_DEMO_FONT);
-        assert_eq!(rt_fonts_init_verified_bytes(0, 1, expected.as_ptr() as i64, 64), 0);
-        assert_eq!(rt_fonts_init_verified_bytes(1, 0, expected.as_ptr() as i64, 64), 0);
-        assert_eq!(
-            rt_fonts_init_verified_bytes(1, MAX_VERIFIED_FONT_BYTES + 1, expected.as_ptr() as i64, 64),
-            0
-        );
-        assert_eq!(rt_fonts_init_verified_bytes(1, 1, 0, 64), 0);
-        assert_eq!(
-            rt_fonts_init_verified_bytes(
-                OWNED_DEMO_FONT.as_ptr() as i64,
-                OWNED_DEMO_FONT.len() as i64,
-                expected.as_ptr() as i64,
-                63,
-            ),
-            0
-        );
-
-        let mut caller_bytes = OWNED_DEMO_FONT.to_vec();
-        let before = rt_fonts_generation();
-        assert_eq!(
-            rt_fonts_init_verified_bytes(
-                caller_bytes.as_ptr() as i64,
-                caller_bytes.len() as i64,
-                expected.as_ptr() as i64,
-                expected.len() as i64,
-            ),
-            1
-        );
-        assert_eq!(rt_fonts_generation(), before + 1);
-        caller_bytes.fill(0);
-        drop(caller_bytes);
-        let handle = rt_fonts_rasterize_glyph('A' as i64, 16);
-        assert!(handle > 0);
-        assert!(rt_fonts_glyph_pixels_len(handle) > 0);
-        assert_eq!(rt_fonts_glyph_free(handle), 1);
-        let subpixel = rt_fonts_rasterize_glyph_subpixel('A' as i64, 16);
-        assert!(subpixel > 0);
-        assert!(rt_fonts_glyph_pixels_len(subpixel) > 0);
-        assert_eq!(rt_fonts_glyph_free(subpixel), 1);
-
-        let generation = rt_fonts_generation();
-        let mut wrong_lowercase = expected.as_bytes().to_vec();
-        wrong_lowercase[0] = if wrong_lowercase[0] == b'0' { b'1' } else { b'0' };
-        assert_eq!(
-            rt_fonts_init_verified_bytes(
-                OWNED_DEMO_FONT.as_ptr() as i64,
-                OWNED_DEMO_FONT.len() as i64,
-                wrong_lowercase.as_ptr() as i64,
-                wrong_lowercase.len() as i64,
-            ),
-            0
-        );
-        assert_eq!(rt_fonts_generation(), generation);
-        let digest_preserved = rt_fonts_rasterize_glyph('A' as i64, 16);
-        assert!(digest_preserved > 0);
-        assert_eq!(rt_fonts_glyph_free(digest_preserved), 1);
-        let uppercase = expected.to_uppercase();
-        assert_eq!(
-            rt_fonts_init_verified_bytes(
-                OWNED_DEMO_FONT.as_ptr() as i64,
-                OWNED_DEMO_FONT.len() as i64,
-                uppercase.as_ptr() as i64,
-                uppercase.len() as i64,
-            ),
-            0
-        );
-        let invalid_font = vec![0u8; 32];
-        let invalid_digest = lowercase_sha256_hex(&invalid_font);
-        assert_eq!(
-            rt_fonts_init_verified_bytes(
-                invalid_font.as_ptr() as i64,
-                invalid_font.len() as i64,
-                invalid_digest.as_ptr() as i64,
-                invalid_digest.len() as i64,
-            ),
-            0
-        );
-        assert_eq!(rt_fonts_generation(), generation);
-        let preserved = rt_fonts_rasterize_glyph('A' as i64, 16);
-        assert!(preserved > 0);
-        assert_eq!(rt_fonts_glyph_free(preserved), 1);
     }
 }

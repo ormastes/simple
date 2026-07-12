@@ -2338,6 +2338,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // Environment variables
         "rt_env_get" | "rt_env_get_i64" | "rt_get_env" | "rt_env_exists" | "rt_env_remove" => Some(&[0]),
         "rt_env_set" | "rt_set_env" => Some(&[0, 1]),
+        "rt_lexer_source_set" => Some(&[0]),
 
         // File I/O (single path)
         "rt_crc32_text"
@@ -2371,8 +2372,8 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_file_write_bytes" => Some(&[0]),
 
         // Directory operations
-        "rt_dir_list" | "rt_dir_remove_all" | "rt_dir_glob" | "rt_dir_walk"
-        | "rt_set_current_dir" | "rt_dir_exists" => Some(&[0]),
+        "rt_dir_list" | "rt_dir_remove_all" | "rt_dir_glob" | "rt_dir_walk" | "rt_set_current_dir"
+        | "rt_dir_exists" => Some(&[0]),
         // rt_dir_create/rt_dir_create_all/rt_dir_remove take (path_ptr, path_len[, recursive]) —
         // the linked runtime (runtime/src/value/sffi/file_io/directory.rs) needs
         // the explicit length, not just a null-terminated pointer. These were

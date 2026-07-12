@@ -139,7 +139,11 @@ coverage across at least three focused scenarios.
 
 ## Execution and Pass/Fail
 
-1. Run focused unit/integration evidence owned by `check-ui-cli-access`.
+0. Build and run the two-module imported `Action(text)` native regression with
+   the newly bootstrapped pure-Simple compiler; require exact `run` output.
+   This compiler invariant must pass before collecting any live UI evidence.
+1. Run focused unit/integration evidence owned by `check-ui-cli-access`, then
+   collect live evidence in order: TUI, GUI, WM, and transport.
 2. Run this SSpec in native/compiled mode once after implementation converges.
 3. Generate the mirrored manual with `0 stubs`; inspect primary workflows and
    typed evidence once.
@@ -167,3 +171,14 @@ capture, or unmeasured NFR is FAIL.
 - A common module importing renderer/WM/T32 owners would defeat the requested
   layering even if CLI output looks correct; S01/S11/S12 enforce dependency
   direction.
+
+## WebIR/DrawIR Refactoring Boundary
+
+- UI access remains semantic-only: grammar, snapshots, queries, actions, and
+  history must not import WebIR, DrawIR, Engine2D, or font-renderer owners.
+- Track `src/app/ui.browser/backend.spl` widget-to-DrawIR duplication for the
+  renderer optimization lane; converge it on `widget_tree_to_draw_ir` there.
+- Treat the direct 8x16 text path in `window_scene_draw_ir.spl` as legacy
+  compatibility until Engine2D `draw_text`/font parity evidence replaces it.
+- Neither renderer debt blocks this access feature unless it crosses the
+  semantic boundary; do not add a parallel IR/backend handle here.

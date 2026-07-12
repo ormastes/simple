@@ -1571,6 +1571,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_env_get", &[I64, I64], &[I64]), // name_ptr, name_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_env_get_i64", &[I64, I64, I64], &[I64]), // name_ptr, name_len, default -> i64
+    RuntimeFuncSpec::new("rt_lexer_source_set", &[I64, I64], &[I8]), // source_ptr, source_len -> bool
+    RuntimeFuncSpec::new("rt_lexer_source_slice", &[I64, I64], &[I64]), // start, end -> RuntimeValue
     RuntimeFuncSpec::new("rt_get_env", &[I64, I64], &[I64]), // alias for rt_env_get
     RuntimeFuncSpec::new("rt_env_set", &[I64, I64, I64, I64], &[I8]), // name_ptr, name_len, val_ptr, val_len -> bool
     RuntimeFuncSpec::new("rt_set_env", &[I64, I64, I64, I64], &[]), // alias, no return
