@@ -858,6 +858,40 @@ int64_t rt_text_eq_fast(int64_t left, int64_t right) {
     return rt_string_eq(left, right);
 }
 
+/* #148: native-path `text == text` / `text != text` equality.
+ *
+ * On the normal native (non-bootstrap) MIR->LLVM path a "str"-typed MIR local
+ * (mir_type_is_str) can be materialized as EITHER representation, and the two
+ * are statically undiscriminable at compile time:
+ *   - a TAGGED heap-string handle (built by rt_string_new -- e.g. argv
+ *     elements from rt_cli_get_args/rt_get_args), or
+ *   - a RAW char* pointer (a getelementptr into a `[N x i8]` global -- e.g. a
+ *     bare string literal `"hello"`, per emit_bootstrap_str_const).
+ *
+ * Before this fix, `a == "hello"` lowered to a plain `icmp eq i64` on the two
+ * operands as opaque integers: a tagged handle (a heap pointer OR'd with
+ * RT_VALUE_TAG_HEAP) can never numerically equal a raw string-literal
+ * pointer, so the comparison always failed regardless of content (pointer
+ * identity, not content -- see MIR lowering's Eq/Ne binop intercept in
+ * expr_dispatch.spl, which now routes here whenever local_is_str() says
+ * either operand is string-shaped).
+ *
+ * Root fix: normalize BOTH operands to a raw null-terminated buffer via the
+ * same tagged-or-raw runtime detection rt_interp_cstr already uses for
+ * string-interpolation operands (bug #136), then compare byte content. This
+ * handles all four combinations (tagged/tagged, tagged/raw, raw/tagged,
+ * raw/raw) without any compile-time guess about which side is which --
+ * unlike rt_string_eq/rt_native_eq above, which require BOTH sides already
+ * tagged and so silently return 0 (never equal) for a raw literal operand. */
+int64_t rt_text_eq_any(int64_t left, int64_t right) {
+    if (left == right) return 1;
+    const char* a = rt_interp_cstr(left);
+    const char* b = rt_interp_cstr(right);
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    return strcmp(a, b) == 0 ? 1 : 0;
+}
+
 int64_t rt_native_neq(int64_t left, int64_t right) {
     return !rt_native_eq(left, right);
 }

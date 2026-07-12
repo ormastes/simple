@@ -804,10 +804,21 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     self.builder.emit_neg(dest_name, ty, cast_operand)
             case Not:
+                # #148: emit_icmp_eq alone always produces an i1 SSA value
+                # (LLVM `icmp` results are always i1), but `dest` here was
+                # requested with MIR type i64 (expr_dispatch's Unary lowering
+                # always asks for MirType.i64()) and nothing downstream
+                # widened it -- so a later consumer referencing dest_name as
+                # i64 (e.g. the `and`/`or` combiner, or an `if` condition's
+                # `!= 0` check) hit a genuine LLVM type mismatch ("defined
+                # with type 'i1' but expected 'i64'"). Route through
+                # emit_comparison (same helper translate_binop's Eq/Ne cases
+                # use) so the i1 compare result is zext'd up to `ty` whenever
+                # dest isn't itself i1.
                 val cmp_ty = self.valid_llvm_type(self.get_operand_type(operand))
                 val cmp_operand = self.value_as_type(operand_val, self.get_operand_type(operand), cmp_ty)
                 val rhs = if cmp_ty == "ptr": "null" else: "0"
-                self.builder.emit_icmp_eq(dest_name, cmp_ty, cmp_operand, rhs)
+                self.emit_comparison(dest_name, ty, "eq", cmp_ty, cmp_operand, rhs)
             case BitNot:
                 val cast_operand = self.value_as_type(operand_val, self.get_operand_type(operand), ty)
                 self.builder.emit_not(dest_name, ty, cast_operand)

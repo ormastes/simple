@@ -331,6 +331,7 @@ int8_t   rt_index_set(int64_t collection, int64_t idx, int64_t value);
 int64_t  rt_string_eq(int64_t left, int64_t right);
 int64_t  rt_native_eq(int64_t left, int64_t right);
 int64_t  rt_native_neq(int64_t left, int64_t right);
+int64_t  rt_text_eq_any(int64_t left, int64_t right);
 int64_t  rt_slice(int64_t value, int64_t start, int64_t end, int64_t step);
 int64_t  rt_string_starts_with(int64_t value, int64_t prefix);
 int64_t  rt_string_ends_with(int64_t value, int64_t suffix);

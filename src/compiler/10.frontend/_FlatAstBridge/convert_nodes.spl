@@ -273,6 +273,15 @@ fn op_kind_to_binop(kind: i64) -> BinOp:
     if kind == 122: return BinOp.BitXor
     BinOp.Add
 
+# #148: op-kind decode for EXPR_UNARY (see parse_unary in parser_expr.spl for
+# the token-kind -> expr_unary(kind, ...) mapping). kind == TOK_MINUS (61) is
+# `-x` (Neg), kind == TOK_NOT (57) is `not x` (Not), kind == TOK_TILDE (123)
+# is `~x` (BitNot). Mirrors op_kind_to_binop above.
+fn op_kind_to_unaryop(kind: i64) -> UnaryOp:
+    if kind == 57: return UnaryOp.Not
+    if kind == 123: return UnaryOp.BitNot
+    UnaryOp.Neg
+
 # Convert an expression-form if/else branch (stored as an EXPR id) into a Block.
 # Block-form branches are EXPR_BLOCK (tag 18) carrying STMTS; ternary/inline
 # branches are a bare expr wrapped as a single expression statement. Used by the
@@ -449,8 +458,18 @@ fn convert_flat_expr(idx: i64) -> Expr:
         val op = op_kind_to_binop(expr_get_int(idx))
         return Expr(kind: ExprKind.Binary(op, left, right), span: span)
     elif tag == EXPR_UNARY:
+        # #148: this used to hardcode UnaryOp.Neg for EVERY unary expression,
+        # discarding the actual operator code (expr_get_int) entirely -- so
+        # `not x` silently compiled as `-x`. For a 0/1 boolean operand, `-x`
+        # negated ARITHMETICALLY happens to preserve the SAME truthiness as
+        # `x` itself (`-1 != 0` iff `1 != 0`, and `-0 == 0`), so `not <bool>`
+        # behaved as an identity no-op instead of a logical inversion -- e.g.
+        # `if not a.starts_with(...)` took the SAME branch `if
+        # a.starts_with(...)` would have. Decode the real operator via
+        # op_kind_to_unaryop (mirrors op_kind_to_binop just above for Binary).
         val operand = convert_flat_expr(expr_get_left(idx))
-        return Expr(kind: ExprKind.Unary(UnaryOp.Neg, operand), span: span)
+        val unary_op = op_kind_to_unaryop(expr_get_int(idx))
+        return Expr(kind: ExprKind.Unary(unary_op, operand), span: span)
     elif tag == EXPR_FIELD_ACCESS:
         val obj = convert_flat_expr(expr_get_left(idx))
         val field_name = expr_get_str(idx)

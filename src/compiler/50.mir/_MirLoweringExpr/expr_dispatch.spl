@@ -702,6 +702,52 @@ impl MirLowering:
                             self.builder = b_cat
                             if val cat_local = cat_res:
                                 return cat_local
+
+                        # #148: untyped/native-path text `==`/`!=` must compare
+                        # CONTENT, not raw i64 identity. A "str"-typed MIR local
+                        # (mir_type_is_str) can be materialized as either a
+                        # TAGGED heap-string handle (rt_string_new -- e.g. argv
+                        # elements from rt_get_args) or a RAW char* pointer (a
+                        # bootstrap string literal, emit_bootstrap_str_const),
+                        # and the two representations are statically
+                        # undiscriminable here (same as the Add/concat case
+                        # above). The generic emit_binop(Eq/Ne) below performs a
+                        # plain `icmp eq/ne i64` on the two operands as opaque
+                        # integers -- a tagged handle can never numerically
+                        # equal a raw literal pointer, so `a == "hello"` always
+                        # failed regardless of content. Only intercept when at
+                        # least one operand is provably string-typed
+                        # (local_is_str); a blanket intercept of all untyped
+                        # `==` would wrongly route plain int compares through a
+                        # string-content check. rt_text_eq_any normalizes both
+                        # operands (tagged-or-raw, autodetected -- mirrors the
+                        # rt_interp_cstr coercion bug #136 already established)
+                        # to a raw buffer and compares bytes.
+                        var bin_is_str_eq = false
+                        match op:
+                            case Eq | NotEq:
+                                if self.local_is_str(left_local) or self.local_is_str(right_local):
+                                    bin_is_str_eq = true
+                            case _:
+                                ()
+                        if bin_is_str_eq:
+                            val eq_func = MirOperand(kind: MirOperandKind.Const(
+                                MirConstValue.Str("rt_text_eq_any"),
+                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                            ))
+                            var b_eq = self.builder
+                            val eq_res = b_eq.emit_call(eq_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], MirType.i64())
+                            self.builder = b_eq
+                            if val eq_local = eq_res:
+                                match op:
+                                    case NotEq:
+                                        var b_neq = self.builder
+                                        val neq_local = b_neq.emit_binop(MirBinOp.BitXor, mir_operand_copy(eq_local), mir_operand_const_int(1), MirType.i64())
+                                        self.builder = b_neq
+                                        return neq_local
+                                    case _:
+                                        return eq_local
+
                         val mir_op = self.lower_binop(op)
                         # Float arithmetic must carry an F64 dest: infer_binop_type
                         # defaults arithmetic to i64, which makes translate_binop
