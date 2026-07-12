@@ -63,6 +63,9 @@ format behavior.
 - Every font is unchanged, records `cmap` and `glyf`, and has nonempty
   copyright text plus an RFN state. The manifest also pins extracted style,
   full/PostScript names, version, default axes, and a closed fallback role.
+- Every binary replays its pinned family, subfamily, full, PostScript, and
+  version identity directly from the sfnt `name` table; Noto Emoji's embedded
+  full name is `Noto Emoji Regular`.
 - Every candidate references the same immutable multilingual witness corpus;
   `CORPUS.sdn` is recomputed as
   `sha256:c7cffbf3e1a29c75dcd481593c6880d071966c5cbf0611e2185fe0d73e0c83f6`.
@@ -93,7 +96,8 @@ format behavior.
   A missing rasterizer library is a failure, not a synthetic pass.
 - Before those diagnostics, the scenario reads each binary once and checks the
   shared typed sfnt validator, the complete recorded table set, and the exact
-  static/default-variable axis metadata. Both native loader owners call the
+  static/default-variable axis metadata. It also replays the five pinned sfnt
+  names from each real binary. Both native loader owners call the
   structural bool preflight before native state mutation; typed reasons remain
   scenario evidence and this scenario still needs execution.
 - The matrix remains 0 `native`, 0 `fallback`, 26
@@ -120,6 +124,7 @@ assertions; no copied source block is maintained here.
 
 ## Claim boundary
 
-This manual establishes manifest intent and codepoint/raster evidence only after
+This manual establishes manifest and embedded-name identity plus
+codepoint/raster evidence only after
 its SSpec runs. It does not accept any candidate or prove Pure Simple
 shaping, GPU compilation, submission, readback, or display.

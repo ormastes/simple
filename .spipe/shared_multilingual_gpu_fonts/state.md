@@ -482,3 +482,8 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   backend/Engine pieces; a convergence refactor removed duplicate backend
   shader/pipeline ownership and manual command encoding. No macOS Metal or
   Simple command ran, so native correctness is not promoted.
+- sfnt manifest-name replay: the manifest corrects Noto Emoji's embedded full
+  name to `Noto Emoji Regular` and the executable scenario compares all five
+  pinned identity fields against all 16 real binaries. This is asset-identity
+  replay only; runtime enforcement, candidate acceptance, and 0/0/26/74
+  coverage promotion remain unchanged. Static checks only; Simple/docgen unrun.

@@ -51,6 +51,11 @@ copyright, RFN state, upstream revision, embedded style/full/PostScript names,
 embedded version, default variation axes, fallback role, and a hashed reference
 to the canonical multilingual witness corpus.
 
+The manifest scenario replays the pinned family, subfamily, full, PostScript,
+and version strings from every real binary's sfnt `name` table. This is exact
+asset identity evidence only; it neither enforces names during runtime loading
+nor promotes language/category coverage.
+
 The unchanged binaries and adjacent metadata/licenses are bundled under
 `assets/fonts/google-fonts/` (16 files, 51,764,704 font bytes), but they remain
 **acceptance candidates** where exact executable corpus coverage is pending.

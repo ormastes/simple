@@ -1,6 +1,7 @@
 # Neutral sfnt directory and default-instance TrueType validation.
 
 use std.common.string_core.{char_from_code}
+use std.common.encoding.utf16.{utf16_decode_one}
 
 fn read_u16_be(buf: [u8], offset: i64) -> u32:
     if offset < 0 or offset + 1 >= buf.len(): return 0
@@ -179,3 +180,98 @@ fn sfnt_manifest_default_axes_match(blob: [u8], manifest: text) -> bool:
         val value = if integer as f64 == axis.default_value: integer.to_text() else: axis.default_value.to_text()
         if not _sfnt_names_contain(defaults, _sfnt_tag_text(axis.tag) + "=" + value): return false
     true
+
+class SfntNameValue:
+    name_id: i64
+    value: text
+    seen: bool
+    valid: bool
+
+    me add(candidate: text):
+        if self.seen and self.value != candidate:
+            self.valid = false
+        else:
+            self.value = candidate
+            self.seen = true
+
+fn _sfnt_utf16be_text(blob: [u8], start: i64, length: i64) -> Option<text>:
+    if length % 2 != 0: return None
+    var units: [i64] = []
+    var offset: i64 = 0
+    while offset < length:
+        units.push(read_u16_be(blob, start + offset) as i64)
+        offset = offset + 2
+    var result = ""
+    var index: i64 = 0
+    while index < units.len():
+        val unit = units[index]
+        if unit >= 0xD800 and unit <= 0xDBFF:
+            if index + 1 >= units.len() or units[index + 1] < 0xDC00 or units[index + 1] > 0xDFFF:
+                return None
+        elif unit >= 0xDC00 and unit <= 0xDFFF:
+            return None
+        val decoded = utf16_decode_one(units, index)
+        if decoded[1] <= 0: return None
+        result = result + decoded[0].chr()
+        index = index + decoded[1]
+    Some(result)
+
+fn _sfnt_selected_name(values: [SfntNameValue], primary: i64, fallback: i64) -> Option<text>:
+    for value in values:
+        if value.name_id == primary and value.seen:
+            if not value.valid: return None
+            return Some(value.value)
+    for value in values:
+        if value.name_id == fallback and value.seen:
+            if not value.valid: return None
+            return Some(value.value)
+    None
+
+fn sfnt_manifest_names_match(blob: [u8], family: text, style: text, full_name: text,
+                             postscript_name: text, version: text) -> bool:
+    val maybe_font = parse_offset_table(blob)
+    val font = match maybe_font:
+        Some(value): value
+        None: return false
+    val maybe_table = find_table(font, 1851878757)
+    val table = match maybe_table:
+        Some(value): value
+        None: return false
+    val base = table.offset as i64
+    val limit = base + table.length as i64
+    if table.length < 6 or read_u16_be(blob, base) != 0: return false
+    val count = read_u16_be(blob, base + 2) as i64
+    val records_end = base + 6 + count * 12
+    val strings = base + read_u16_be(blob, base + 4) as i64
+    if records_end > limit or strings < records_end or strings > limit: return false
+    var values: [SfntNameValue] = []
+    for name_id in [1, 2, 4, 5, 6, 16, 17]:
+        values.push(SfntNameValue(name_id: name_id, value: "", seen: false, valid: true))
+    var index: i64 = 0
+    while index < count:
+        val record = base + 6 + index * 12
+        val length = read_u16_be(blob, record + 8) as i64
+        val start = strings + read_u16_be(blob, record + 10) as i64
+        if start > limit or length > limit - start: return false
+        val platform = read_u16_be(blob, record)
+        val encoding = read_u16_be(blob, record + 2)
+        val language = read_u16_be(blob, record + 4)
+        val name_id = read_u16_be(blob, record + 6) as i64
+        if platform == 3 and (encoding == 1 or encoding == 10) and language == 0x0409:
+            for value in values:
+                if value.name_id == name_id:
+                    val decoded = _sfnt_utf16be_text(blob, start, length)
+                    match decoded:
+                        Some(candidate): value.add(candidate)
+                        None: return false
+        index = index + 1
+    val selected_family = _sfnt_selected_name(values, 16, 1)
+    val selected_style = _sfnt_selected_name(values, 17, 2)
+    val selected_full = _sfnt_selected_name(values, 4, -1)
+    val selected_postscript = _sfnt_selected_name(values, 6, -1)
+    val selected_version = _sfnt_selected_name(values, 5, -1)
+    if selected_family == None or selected_style == None or selected_full == None or
+       selected_postscript == None or selected_version == None: return false
+    selected_family.unwrap() == family and selected_style.unwrap() == style and
+        selected_full.unwrap() == full_name and selected_postscript.unwrap() == postscript_name and
+        selected_version.unwrap() == version

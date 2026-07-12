@@ -1,7 +1,7 @@
 # @cover src/lib/common/encoding/sfnt.spl 80%
 
 use std.spec.*
-use std.common.encoding.sfnt.{read_u32_be, read_fixed_1616, parse_offset_table, validate_default_glyf_font, font_runtime_ttf_default_supported, sfnt_manifest_tables_match, sfnt_manifest_default_axes_match}
+use std.common.encoding.sfnt.{read_u32_be, read_fixed_1616, parse_offset_table, validate_default_glyf_font, font_runtime_ttf_default_supported, sfnt_manifest_tables_match, sfnt_manifest_default_axes_match, sfnt_manifest_names_match}
 
 fn _zero_bytes(count: i64) -> [u8]:
     var bytes: [u8] = []
@@ -75,6 +75,45 @@ fn _valid_font(extra: [(i64, [u8])]) -> [u8]:
     for entry in extra: entries.push(entry)
     _sfnt(entries)
 
+fn _name_table(entries: [(i64, text)]) -> [u8]:
+    val records_size = 6 + entries.len() * 12
+    var strings_size: i64 = 0
+    for entry in entries: strings_size = strings_size + entry.1.len() * 2
+    var bytes = _zero_bytes(records_size + strings_size)
+    bytes = _set_u16_be(bytes, 2, entries.len())
+    bytes = _set_u16_be(bytes, 4, records_size)
+    var string_offset: i64 = 0
+    var index: i64 = 0
+    while index < entries.len():
+        val entry = entries[index]
+        val record = 6 + index * 12
+        bytes = _set_u16_be(bytes, record, 3)
+        bytes = _set_u16_be(bytes, record + 2, 1)
+        bytes = _set_u16_be(bytes, record + 4, 0x0409)
+        bytes = _set_u16_be(bytes, record + 6, entry.0)
+        bytes = _set_u16_be(bytes, record + 8, entry.1.len() * 2)
+        bytes = _set_u16_be(bytes, record + 10, string_offset)
+        var char_index: i64 = 0
+        while char_index < entry.1.len():
+            bytes[records_size + string_offset + char_index * 2 + 1] = entry.1[char_index].ord() as u8
+            char_index = char_index + 1
+        string_offset = string_offset + entry.1.len() * 2
+        index = index + 1
+    bytes
+
+fn _replace_name_units(font: [u8], record_index: i64, units: [i64]) -> [u8]:
+    var result = font
+    val base = read_u32_be(result, 20) as i64
+    val record = base + 6 + record_index * 12
+    val strings = base + read_u16_be(result, base + 4) as i64
+    val start = strings + read_u16_be(result, record + 10) as i64
+    result = _set_u16_be(result, record + 8, units.len() * 2)
+    var index: i64 = 0
+    while index < units.len():
+        result = _set_u16_be(result, start + index * 2, units[index])
+        index = index + 1
+    result
+
 describe "default glyf sfnt validation":
     it "accepts static/default-variable fonts and rejects malformed or excluded data":
         val static_font = _valid_font([])
@@ -121,3 +160,47 @@ describe "default glyf sfnt validation":
         expect(sfnt_manifest_tables_match(static_font, "cmap,glyf")).to_be(false)
         expect(sfnt_manifest_default_axes_match(static_font, "static")).to_be(true)
         expect(sfnt_manifest_default_axes_match(variable_font, "wght=400")).to_be(true)
+
+describe "sfnt manifest names":
+    it "matches preferred bounded Windows English names and rejects malformed records":
+        val fallback = _sfnt([(1851878757, _name_table([
+            (1, "Simple Sans"), (2, "Regular"), (4, "Simple Sans Regular"),
+            (6, "SimpleSans-Regular"), (5, "Version 1.0")
+        ]))])
+        expect(sfnt_manifest_names_match(fallback, "Simple Sans", "Regular", "Simple Sans Regular", "SimpleSans-Regular", "Version 1.0")).to_be(true)
+        val preferred = _name_table([
+            (1, "Legacy"), (16, "Simple Sans"), (2, "Roman"), (17, "Regular"),
+            (4, "Simple Sans Regular"), (6, "SimpleSans-Regular"), (5, "Version 1.0")
+        ])
+        val valid = _sfnt([(1851878757, preferred)])
+        expect(sfnt_manifest_names_match(valid, "Simple Sans", "Regular", "Simple Sans Regular", "SimpleSans-Regular", "Version 1.0")).to_be(true)
+        val unicode = _replace_name_units(valid, 1, [0x4E2D, 0xD83D, 0xDE00])
+        expect(sfnt_manifest_names_match(unicode, 0x4E2D.chr() + 0x1F600.chr(), "Regular", "Simple Sans Regular", "SimpleSans-Regular", "Version 1.0")).to_be(true)
+        val lone_high = _replace_name_units(valid, 1, [0xD800])
+        expect(sfnt_manifest_names_match(lone_high, "", "Regular", "Simple Sans Regular", "SimpleSans-Regular", "Version 1.0")).to_be(false)
+        val lone_low = _replace_name_units(valid, 1, [0xDC00])
+        expect(sfnt_manifest_names_match(lone_low, "", "Regular", "Simple Sans Regular", "SimpleSans-Regular", "Version 1.0")).to_be(false)
+        val bad_pair = _replace_name_units(valid, 1, [0xD800, 0x0041])
+        expect(sfnt_manifest_names_match(bad_pair, "", "Regular", "Simple Sans Regular", "SimpleSans-Regular", "Version 1.0")).to_be(false)
+        val missing = _sfnt([(1851878757, _name_table([(1, "Simple Sans"), (2, "Regular")]))])
+        expect(sfnt_manifest_names_match(missing, "Simple Sans", "Regular", "", "", "")).to_be(false)
+        var truncated = valid
+        val name_base = read_u32_be(truncated, 20) as i64
+        truncated = _set_u16_be(truncated, name_base + 6 + 10, preferred.len())
+        expect(sfnt_manifest_names_match(truncated, "Simple Sans", "Regular", "Simple Sans Regular", "SimpleSans-Regular", "Version 1.0")).to_be(false)
+        var odd = valid
+        odd = _set_u16_be(odd, name_base + 6 + 8, 1)
+        expect(sfnt_manifest_names_match(odd, "Simple Sans", "Regular", "Simple Sans Regular", "SimpleSans-Regular", "Version 1.0")).to_be(false)
+        var early_storage = valid
+        early_storage = _set_u16_be(early_storage, name_base + 4, 6)
+        expect(sfnt_manifest_names_match(early_storage, "Simple Sans", "Regular", "Simple Sans Regular", "SimpleSans-Regular", "Version 1.0")).to_be(false)
+        val conflict = _sfnt([(1851878757, _name_table([
+            (16, "Simple Sans"), (16, "Other Sans"), (17, "Regular"),
+            (4, "Simple Sans Regular"), (6, "SimpleSans-Regular"), (5, "Version 1.0")
+        ]))])
+        expect(sfnt_manifest_names_match(conflict, "Simple Sans", "Regular", "Simple Sans Regular", "SimpleSans-Regular", "Version 1.0")).to_be(false)
+        val style_conflict = _sfnt([(1851878757, _name_table([
+            (16, "Simple Sans"), (17, "Regular"), (17, "Bold"),
+            (4, "Simple Sans Regular"), (6, "SimpleSans-Regular"), (5, "Version 1.0")
+        ]))])
+        expect(sfnt_manifest_names_match(style_conflict, "Simple Sans", "Regular", "Simple Sans Regular", "SimpleSans-Regular", "Version 1.0")).to_be(false)
