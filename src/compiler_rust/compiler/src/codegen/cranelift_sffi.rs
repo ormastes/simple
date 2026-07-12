@@ -33,7 +33,7 @@ use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{FuncId, Linkage, Module, ModuleError};
+use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module, ModuleError};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use target_lexicon::Triple;
 
@@ -110,6 +110,10 @@ lazy_static! {
     static ref ACTIVE_BUILDERS: Mutex<HashMap<i64, ActiveBuilder>> = Mutex::new(HashMap::new());
     static ref FINISHED_FUNCS: Mutex<HashMap<i64, FinishedFunc>> = Mutex::new(HashMap::new());
     static ref DECLARED_FUNCS: Mutex<HashMap<i64, FuncId>> = Mutex::new(HashMap::new());
+    /// Declared string/data-constant objects, keyed by a handle (mirrors DECLARED_FUNCS).
+    static ref DECLARED_DATA: Mutex<HashMap<i64, DataId>> = Mutex::new(HashMap::new());
+    /// Content-addressed dedup cache for string constants: (module, raw bytes) -> data handle.
+    static ref STRING_DATA_CACHE: Mutex<HashMap<(i64, Vec<u8>), i64>> = Mutex::new(HashMap::new());
 }
 
 /// Clear all Cranelift SFFI global registries.
@@ -127,6 +131,8 @@ pub fn clear_cranelift_registries() {
     BUILDER_BACKINGS.lock().unwrap().clear();
     FINISHED_FUNCS.lock().unwrap().clear();
     DECLARED_FUNCS.lock().unwrap().clear();
+    DECLARED_DATA.lock().unwrap().clear();
+    STRING_DATA_CACHE.lock().unwrap().clear();
     SIGNATURES.lock().unwrap().clear();
     JIT_MODULES.lock().unwrap().clear();
     AOT_MODULES.lock().unwrap().clear();
@@ -469,6 +475,119 @@ pub unsafe extern "C" fn rt_cranelift_import_function(ctx: i64, func_handle: i64
     let id = ab.next_value_id;
     ab.next_value_id += 1;
     ab.func_refs.insert(id, func_ref);
+    id
+}
+
+// ============================================================================
+// Data / String Constant SFFI
+// ============================================================================
+//
+// AOT string constants: place the literal's raw UTF-8 bytes in the module's
+// rodata as a Cranelift `data` object, then hand the resulting address (+
+// length) to the runtime's own `rt_string_new` at the call site (see the
+// Simple-side wiring in cranelift_codegen_adapter.spl). That keeps heap
+// allocation, the GC header, the content hash, and heap-pointer-registry
+// bookkeeping (`register_heap_ptr`, which `rt_string_new` already calls via
+// `RuntimeValue::from_heap_ptr`) on the single already-correct runtime path
+// instead of hand-rolling a second one here. See
+// doc/08_tracking/bug/cranelift_direct_string_constant_null_pointer_2026-07-12.md.
+
+/// Declare (and define) a read-only data object holding the given raw bytes
+/// in the module's rodata. Content-addressed per module: identical bytes
+/// reuse the same data object. Returns a data handle (0 on failure) for use
+/// with `rt_cranelift_data_addr_in_func`.
+///
+/// # Safety
+/// `bytes_ptr` must point to `bytes_len` readable bytes; `bytes_len` may be
+/// 0 (empty string), in which case `bytes_ptr` is not read.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cranelift_declare_string_data(module: i64, bytes_ptr: i64, bytes_len: i64) -> i64 {
+    if bytes_len < 0 || (bytes_len > 0 && bytes_ptr == 0) {
+        return 0;
+    }
+    let content: Vec<u8> = if bytes_len > 0 {
+        std::slice::from_raw_parts(bytes_ptr as *const u8, bytes_len as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let cache_key = (module, content.clone());
+    if let Some(&handle) = STRING_DATA_CACHE.lock().unwrap().get(&cache_key) {
+        return handle;
+    }
+
+    let name = format!("__simple_str_const_{}", next_handle());
+    let mut desc = DataDescription::new();
+    desc.set_align(8);
+    desc.define(content.into_boxed_slice());
+
+    let data_id = {
+        let mut jit = JIT_MODULES.lock().unwrap();
+        if let Some(mod_ctx) = jit.get_mut(&module) {
+            let id = match mod_ctx.module.declare_data(&name, Linkage::Local, false, false) {
+                Ok(id) => id,
+                Err(_) => return 0,
+            };
+            if mod_ctx.module.define_data(id, &desc).is_err() {
+                return 0;
+            }
+            id
+        } else {
+            drop(jit);
+            let mut aot = AOT_MODULES.lock().unwrap();
+            let Some(mod_ctx) = aot.get_mut(&module) else {
+                return 0;
+            };
+            let id = match mod_ctx.module.declare_data(&name, Linkage::Local, false, false) {
+                Ok(id) => id,
+                Err(_) => return 0,
+            };
+            if mod_ctx.module.define_data(id, &desc).is_err() {
+                return 0;
+            }
+            id
+        }
+    };
+
+    let handle = next_handle();
+    DECLARED_DATA.lock().unwrap().insert(handle, data_id);
+    STRING_DATA_CACHE.lock().unwrap().insert(cache_key, handle);
+    handle
+}
+
+/// Materialize a previously-declared data object's address as an SSA value
+/// inside the function currently being built by `ctx`. Mirrors
+/// `rt_cranelift_iconst`'s handle-return convention (the returned handle
+/// indexes into the same per-function `values` map).
+#[no_mangle]
+pub unsafe extern "C" fn rt_cranelift_data_addr_in_func(ctx: i64, data_handle: i64) -> i64 {
+    let data_id = match DECLARED_DATA.lock().unwrap().get(&data_handle) {
+        Some(&id) => id,
+        None => return 0,
+    };
+
+    let mut active = ACTIVE_BUILDERS.lock().unwrap();
+    let Some(ab) = active.get_mut(&ctx) else { return 0 };
+    let Some(builder) = ab.builder.as_mut() else { return 0 };
+
+    let gv = if ab.is_jit {
+        let modules = JIT_MODULES.lock().unwrap();
+        let Some(mod_ctx) = modules.get(&ab.module_handle) else {
+            return 0;
+        };
+        mod_ctx.module.declare_data_in_func(data_id, builder.func)
+    } else {
+        let modules = AOT_MODULES.lock().unwrap();
+        let Some(mod_ctx) = modules.get(&ab.module_handle) else {
+            return 0;
+        };
+        mod_ctx.module.declare_data_in_func(data_id, builder.func)
+    };
+
+    let result = builder.ins().global_value(types::I64, gv);
+    let id = ab.next_value_id;
+    ab.next_value_id += 1;
+    ab.values.insert(id, result);
     id
 }
 
@@ -1395,6 +1514,16 @@ pub fn register_cranelift_sffi_functions(builder: &mut JITBuilder) {
     builder.symbol(
         "rt_cranelift_aot_define_function",
         rt_cranelift_aot_define_function as *const u8,
+    );
+
+    // Data / string constants (rt_ prefix — have Simple wrappers)
+    builder.symbol(
+        "rt_cranelift_declare_string_data",
+        rt_cranelift_declare_string_data as *const u8,
+    );
+    builder.symbol(
+        "rt_cranelift_data_addr_in_func",
+        rt_cranelift_data_addr_in_func as *const u8,
     );
 }
 

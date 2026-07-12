@@ -472,6 +472,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_array_get", sffi_array::rt_array_get_fn);
     insert_simple!("rt_array_get_text", sffi_array::rt_array_get_fn);
     insert_simple!("rt_array_len", sffi_array::rt_array_len_fn);
+    insert_simple!("rt_array_len_safe", sffi_array::rt_array_len_safe_fn);
     insert_simple!("rt_array_new", sffi_array::rt_array_new_fn);
     insert_simple!("rt_array_new_with_cap", sffi_array::rt_array_new_with_cap_fn);
     insert_simple!("rt_array_new_with_cap_text", sffi_array::rt_array_new_with_cap_fn);
@@ -726,6 +727,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!(
         "rt_cranelift_declare_function",
         cranelift::rt_cranelift_declare_function
+    );
+    insert_simple!(
+        "rt_cranelift_declare_string_data",
+        cranelift::rt_cranelift_declare_string_data
+    );
+    insert_simple!(
+        "rt_cranelift_data_addr_in_func",
+        cranelift::rt_cranelift_data_addr_in_func
     );
     insert_simple!("rt_cranelift_define_function", cranelift::rt_cranelift_define_function);
     insert_simple!("rt_cranelift_emit_object", cranelift::rt_cranelift_emit_object);

@@ -152,6 +152,34 @@ pub fn rt_cranelift_declare_function(args: &[Value]) -> Result<Value, CompileErr
     Ok(Value::Int(handle))
 }
 
+/// Declare (and define) a read-only rodata blob holding the given raw bytes.
+/// Args: module (i64), bytes_ptr (i64), bytes_len (i64)
+/// Returns: data handle (i64), or 0 on failure.
+pub fn rt_cranelift_declare_string_data(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 3 {
+        return Ok(Value::Int(0));
+    }
+    let module = value_to_i64(&args[0]);
+    let bytes_ptr = value_to_i64(&args[1]);
+    let bytes_len = value_to_i64(&args[2]);
+    let handle = unsafe { cranelift_sffi::rt_cranelift_declare_string_data(module, bytes_ptr, bytes_len) };
+    Ok(Value::Int(handle))
+}
+
+/// Materialize a previously-declared data object's address as an SSA value
+/// in the function currently being built.
+/// Args: ctx (i64), data_handle (i64)
+/// Returns: value handle (i64), or 0 on failure.
+pub fn rt_cranelift_data_addr_in_func(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Ok(Value::Int(0));
+    }
+    let ctx = value_to_i64(&args[0]);
+    let data_handle = value_to_i64(&args[1]);
+    let value = unsafe { cranelift_sffi::rt_cranelift_data_addr_in_func(ctx, data_handle) };
+    Ok(Value::Int(value))
+}
+
 /// Import a declared function into the active function builder.
 /// Args: ctx (i64), func_handle (i64)
 pub fn rt_cranelift_import_function(args: &[Value]) -> Result<Value, CompileError> {
