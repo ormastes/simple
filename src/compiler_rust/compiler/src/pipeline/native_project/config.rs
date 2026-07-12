@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use super::tools::{
-    archive_defined_symbols, build_core_c_runtime_library, find_abi_complete_simple_core_runtime_library,
-    find_runtime_library, find_simple_core_runtime_library, runtime_archive_has_core_required_symbols,
+    archive_defined_symbols, build_core_c_runtime_library, find_abi_complete_simple_core_runtime_library, find_runtime_library,
+    find_simple_core_runtime_library, runtime_archive_has_core_required_symbols,
 };
 
 use super::NativeProjectBuilder;
@@ -267,7 +267,8 @@ impl NativeProjectBuilder {
                 candidates.push((runtime, false));
             }
             if let Some(runtime) = find_runtime_library() {
-                if runtime_archive_has_bootstrap_cli_symbols(&runtime) && !candidates.iter().any(|(p, _)| p == &runtime)
+                if runtime_archive_has_bootstrap_cli_symbols(&runtime)
+                    && !candidates.iter().any(|(p, _)| p == &runtime)
                 {
                     candidates.push((runtime, false));
                 }

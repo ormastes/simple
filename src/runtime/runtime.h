@@ -206,8 +206,19 @@ int         rt_file_fsync_cached(const char* path);
 
 /* ===== Memory-Mapped File I/O ===== */
 
-void*    rt_mmap(const char* path, int64_t size, int64_t offset, bool readonly);
+void*    rt_mmap(const char* path, int64_t path_len, int64_t size, int64_t offset, bool readonly);
 bool     rt_munmap(void* addr, int64_t size);
+int64_t  rt_volatile_read_u8(int64_t addr);
+int64_t  rt_volatile_read_u16(int64_t addr);
+int64_t  rt_volatile_read_u32(int64_t addr);
+int64_t  rt_volatile_read_u64(int64_t addr);
+void     rt_volatile_write_u8(int64_t addr, int64_t value);
+void     rt_volatile_write_u16(int64_t addr, int64_t value);
+void     rt_volatile_write_u32(int64_t addr, int64_t value);
+void     rt_volatile_write_u64(int64_t addr, int64_t value);
+void     rt_memory_barrier(void);
+void     rt_load_barrier(void);
+void     rt_store_barrier(void);
 bool     rt_madvise(void* addr, int64_t size, int64_t advice);
 bool     rt_msync(void* addr, int64_t size);
 
@@ -268,6 +279,11 @@ int64_t  rt_string_new(const uint8_t* bytes, uint64_t len);
 int64_t  rt_string_len(int64_t string);
 const uint8_t* rt_string_data(int64_t string);
 int64_t  rt_string_bytes(int64_t string);
+int64_t  rt_string_builder_new(void);
+int64_t  rt_string_builder_push(int64_t handle, int64_t string);
+int64_t  rt_string_builder_finish(int64_t handle);
+int64_t  rt_string_builder_len(int64_t handle);
+void     rt_string_builder_free(int64_t handle);
 int64_t  rt_string_char_code_at(int64_t string, int64_t index);
 int64_t  rt_string_char_at(int64_t string, int64_t index);
 int64_t  rt_string_concat(int64_t left, int64_t right);
@@ -288,6 +304,7 @@ int64_t  rt_array_get_text(SplArray* array, int64_t idx);
 void     rt_array_set(SplArray* array, int64_t idx, int64_t value);
 int8_t   rt_array_set_text(SplArray* array, int64_t idx, int64_t value);
 int8_t   rt_array_push(SplArray* array, int64_t value);
+SplArray* rt_array_concat(SplArray* a, SplArray* b);
 SplArray* rt_array_repeat(int64_t value, int64_t count);
 int64_t  rt_array_data_ptr(SplArray* array);
 int64_t  rt_array_data_ptr_text(SplArray* array);

@@ -151,7 +151,7 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
 /// the Cranelift and LLVM backends so both linkers agree on the same name.
 pub(crate) fn module_init_symbol(module_prefix: Option<&str>) -> String {
     match module_prefix {
-        Some(prefix) => {
+        Some(prefix) if !prefix.is_empty() => {
             // Sanitize dots → _dot_ so the symbol name matches _init_all.cpp references
             let sanitized = if cfg!(target_os = "macos") {
                 prefix.replace('.', "_dot_")
@@ -160,7 +160,7 @@ pub(crate) fn module_init_symbol(module_prefix: Option<&str>) -> String {
             };
             format!("__module_init_{}", sanitized)
         }
-        None => "__module_init".to_string(),
+        _ => "__module_init".to_string(),
     }
 }
 
@@ -2185,12 +2185,6 @@ impl<M: Module> CodegenBackend<M> {
     }
 }
 
-pub(crate) fn module_init_symbol(module_prefix: Option<&str>) -> String {
-    match module_prefix {
-        Some(prefix) if !prefix.is_empty() => format!("__module_init_{}", prefix.replace('.', "_dot_")),
-        _ => "__module_init".to_string(),
-    }
-}
 
 /// Compute a module prefix from a file path relative to a source root.
 ///

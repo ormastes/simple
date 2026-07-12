@@ -22,7 +22,7 @@
 #   [20:12] PT index     (9 bits, 512 entries)
 #   [11:0]  Page offset  (12 bits, 4KB)
 
-use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, VM_NO_EXECUTE}
 use os.kernel.boot.mmio.{mmio_read64, mmio_write64, mmio_invalidate_tlb}
 use os.kernel.memory.pmm.{PhysMemManager, pmm_alloc_page, pmm_free_page}
 
@@ -100,17 +100,17 @@ fn _flags_to_pte_bits(flags: VmFlags) -> u64:
     """Convert VmFlags to x86_64 page table entry bits."""
     var bits: u64 = 0
 
-    if flags.present:
+    if flags.present():
         bits = bits | PTE_PRESENT
-    if flags.writable:
+    if flags.writable():
         bits = bits | PTE_WRITABLE
-    if flags.user:
+    if flags.user():
         bits = bits | PTE_USER
-    if flags.write_through:
+    if flags.write_through():
         bits = bits | PTE_WRITE_THROUGH
-    if flags.cache_disable:
+    if flags.cache_disable():
         bits = bits | PTE_CACHE_DISABLE
-    if flags.no_execute:
+    if flags.no_execute():
         bits = bits | PTE_NO_EXECUTE
 
     bits
@@ -282,16 +282,9 @@ fn x86_64_vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
 
     # W^X enforcement: never map a page as both writable and executable
     var safe_flags = flags
-    if flags.writable and not flags.no_execute:
+    if flags.writable() and not flags.no_execute():
         # Writable pages must not be executable
-        safe_flags = VmFlags(
-            present: flags.present,
-            writable: true,
-            user: flags.user,
-            write_through: flags.write_through,
-            cache_disable: flags.cache_disable,
-            no_execute: true
-        )
+        safe_flags = VmFlags(bits: flags.bits | VM_NO_EXECUTE)
 
     val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
 

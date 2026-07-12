@@ -23,6 +23,7 @@
 #include <string.h>
 #include <errno.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -31,6 +32,7 @@
 #if defined(_WIN32)
 #include <io.h>
 #include <malloc.h>
+#include <windows.h>
 #endif
 #if !defined(_WIN32)
 #include <sys/mman.h>
@@ -663,10 +665,6 @@ int64_t rt_value_int(int64_t value) {
     return (int64_t)(((uint64_t)value << 3) | RT_VALUE_TAG_INT);
 }
 
-int64_t rt_value_as_int(int64_t value) {
-    return value >> 3;
-}
-
 int64_t rt_value_float(int64_t raw_bits) {
     return (int64_t)(((uint64_t)raw_bits & ~RT_VALUE_TAG_MASK) | RT_VALUE_TAG_FLOAT);
 }
@@ -732,6 +730,138 @@ int64_t rt_string_bytes(int64_t string) {
     }
     return (int64_t)(uintptr_t)bytes;
 }
+
+#define RT_STRING_BUILDER_MAGIC 0x534255445F313233ULL
+
+typedef struct RtCoreStringBuilder {
+    uint64_t magic;
+    uint8_t* data;
+    uint64_t len;
+    uint64_t cap;
+} RtCoreStringBuilder;
+
+static RtCoreStringBuilder* rt_core_string_builder(int64_t handle) {
+    if (handle == 0) return NULL;
+    RtCoreStringBuilder* builder = (RtCoreStringBuilder*)(uintptr_t)handle;
+    return builder->magic == RT_STRING_BUILDER_MAGIC ? builder : NULL;
+}
+
+int64_t rt_string_builder_new(void) {
+    RtCoreStringBuilder* builder = (RtCoreStringBuilder*)calloc(1, sizeof(RtCoreStringBuilder));
+    if (!builder) return 0;
+    builder->magic = RT_STRING_BUILDER_MAGIC;
+    return (int64_t)(uintptr_t)builder;
+}
+
+int64_t rt_string_builder_push(int64_t handle, int64_t string) {
+    RtCoreStringBuilder* builder = rt_core_string_builder(handle);
+    int64_t string_len = rt_string_len(string);
+    if (!builder || string_len < 0) return 0;
+    if (string_len == 0) return 1;
+    const uint8_t* data = rt_string_data(string);
+    if (!data || (uint64_t)string_len > UINT64_MAX - builder->len) return 0;
+    uint64_t needed = builder->len + (uint64_t)string_len;
+    if (needed > builder->cap) {
+        uint64_t cap = builder->cap ? builder->cap : 64;
+        while (cap < needed) {
+            if (cap > UINT64_MAX / 2) {
+                cap = needed;
+                break;
+            }
+            cap *= 2;
+        }
+        uint8_t* grown = (uint8_t*)realloc(builder->data, (size_t)cap);
+        if (!grown) return 0;
+        builder->data = grown;
+        builder->cap = cap;
+    }
+    memcpy(builder->data + builder->len, data, (size_t)string_len);
+    builder->len = needed;
+    return 1;
+}
+
+int64_t rt_string_builder_finish(int64_t handle) {
+    RtCoreStringBuilder* builder = rt_core_string_builder(handle);
+    if (!builder) return rt_core_nil();
+    int64_t result = rt_string_new(builder->data, builder->len);
+    builder->magic = 0;
+    free(builder->data);
+    free(builder);
+    return result;
+}
+
+int64_t rt_string_builder_len(int64_t handle) {
+    RtCoreStringBuilder* builder = rt_core_string_builder(handle);
+    return builder ? (int64_t)builder->len : -1;
+}
+
+void rt_string_builder_free(int64_t handle) {
+    RtCoreStringBuilder* builder = rt_core_string_builder(handle);
+    if (!builder) return;
+    builder->magic = 0;
+    free(builder->data);
+    free(builder);
+}
+
+void* rt_mmap(const char* path, int64_t path_len, int64_t size, int64_t offset, bool readonly) {
+    (void)path_len;
+    if (!path || size <= 0 || offset < 0) return NULL;
+#if defined(_WIN32)
+    DWORD access = readonly ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
+    DWORD protect = readonly ? PAGE_READONLY : PAGE_READWRITE;
+    DWORD map_access = readonly ? FILE_MAP_READ : FILE_MAP_WRITE;
+    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return NULL;
+    HANDLE mapping = CreateFileMappingA(file, NULL, protect, 0, 0, NULL);
+    if (!mapping) {
+        CloseHandle(file);
+        return NULL;
+    }
+    void* address = MapViewOfFile(mapping, map_access, (DWORD)((uint64_t)offset >> 32), (DWORD)offset, (SIZE_T)size);
+    CloseHandle(mapping);
+    CloseHandle(file);
+    return address;
+#else
+    int fd = open(path, readonly ? O_RDONLY : O_RDWR);
+    if (fd < 0) return NULL;
+    int prot = readonly ? PROT_READ : (PROT_READ | PROT_WRITE);
+    void* address = mmap(NULL, (size_t)size, prot, MAP_SHARED, fd, (off_t)offset);
+    close(fd);
+    return address == MAP_FAILED ? NULL : address;
+#endif
+}
+
+bool rt_munmap(void* address, int64_t size) {
+    if (!address || size <= 0) return false;
+#if defined(_WIN32)
+    (void)size;
+    return UnmapViewOfFile(address) != 0;
+#else
+    return munmap(address, (size_t)size) == 0;
+#endif
+}
+
+int64_t rt_volatile_read_u8(int64_t address) { return *(volatile uint8_t*)(uintptr_t)address; }
+int64_t rt_volatile_read_u16(int64_t address) { return *(volatile uint16_t*)(uintptr_t)address; }
+int64_t rt_volatile_read_u32(int64_t address) { return *(volatile uint32_t*)(uintptr_t)address; }
+int64_t rt_volatile_read_u64(int64_t address) { return (int64_t)*(volatile uint64_t*)(uintptr_t)address; }
+
+void rt_volatile_write_u8(int64_t address, int64_t value) {
+    *(volatile uint8_t*)(uintptr_t)address = (uint8_t)value;
+}
+void rt_volatile_write_u16(int64_t address, int64_t value) {
+    *(volatile uint16_t*)(uintptr_t)address = (uint16_t)value;
+}
+void rt_volatile_write_u32(int64_t address, int64_t value) {
+    *(volatile uint32_t*)(uintptr_t)address = (uint32_t)value;
+}
+void rt_volatile_write_u64(int64_t address, int64_t value) {
+    *(volatile uint64_t*)(uintptr_t)address = (uint64_t)value;
+}
+
+void rt_memory_barrier(void) { atomic_thread_fence(memory_order_seq_cst); }
+void rt_load_barrier(void) { atomic_thread_fence(memory_order_acquire); }
+void rt_store_barrier(void) { atomic_thread_fence(memory_order_release); }
 
 /* Bug #136: string-interpolation operand coercion to a raw C string.
  * Interpolation `{expr}` operands are MIXED and statically undiscriminable:
@@ -2103,14 +2233,11 @@ int64_t rt_array_pop(SplArray* a) {
 }
 
 int64_t rt_index_get(int64_t collection, int64_t idx) {
+    idx = rt_core_numeric_arg(idx);
     RtCoreArray* a = rt_core_as_array(collection);
-    if (a) {
-        if ((idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return rt_core_nil();
-        return rt_array_get((SplArray*)a, idx >> 3);
-    }
+    if (a) return rt_array_get((SplArray*)a, idx);
     if (rt_core_as_string(collection)) {
-        if ((idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return rt_core_nil();
-        return rt_string_char_at(collection, idx >> 3);
+        return rt_string_char_at(collection, idx);
     }
     RtCoreDict* d = rt_core_as_dict(collection);
     if (d) return rt_core_dict_lookup(d, idx);
@@ -2118,10 +2245,10 @@ int64_t rt_index_get(int64_t collection, int64_t idx) {
 }
 
 int8_t rt_index_set(int64_t collection, int64_t idx, int64_t val) {
+    idx = rt_core_numeric_arg(idx);
     RtCoreArray* a = rt_core_as_array(collection);
     if (a) {
-        if ((idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return 0;
-        rt_array_set((SplArray*)a, idx >> 3, val);
+        rt_array_set((SplArray*)a, idx, val);
         return 1;
     }
     RtCoreDict* d = rt_core_as_dict(collection);
