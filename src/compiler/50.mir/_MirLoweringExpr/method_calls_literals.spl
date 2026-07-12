@@ -587,6 +587,88 @@ impl MirLowering:
                     temp
 
             case Unresolved:
+                # Bug #149: `x.push(item)` never resolves via MethodResolver
+                # (try_instance_method/try_trait_method/try_ufcs in
+                # resolve_strategies.spl all require a symbol-bearing HIR
+                # type; the builtin Array type has none), so every `.push()`
+                # call reaches this arm -- not only on the untyped/bootstrap
+                # argv-driven path. Confirmed empirically: a type-annotated
+                # `var arr: [i64] = [1, 2]; arr.push(3)` hits the identical
+                # fatal "unresolved method call: push" native-build error
+                # (driver_pipeline.spl turns collected MirLowering errors
+                # into a hard failure on the normal, non-bootstrap path) as
+                # an untyped argv-driven push.
+                #
+                # Reuse the SAME writeback bookkeeping the (currently
+                # unreachable for Array) InstanceMethod/TraitMethod/
+                # FreeFunction cases above rely on for mutating methods on
+                # Index/Field receivers: wb_kind/wb_base/wb_index/
+                # wb_field_idx/wb_receiver were already pre-lowered above
+                # this `match resolution:`, regardless of resolution value.
+                # Reusing wb_receiver (instead of re-lowering `receiver`)
+                # avoids double-evaluating a side-effecting index expression
+                # (`stack[compute_index()].push(x)`), and feeding it back
+                # through emit_method_writeback guarantees exact behavioral
+                # parity with however a resolved push would behave.
+                #
+                # Runtime representation (see runtime_native.c): arrays are
+                # heap-boxed -- `rt_core_array_reserve` grows a push by
+                # `realloc`-ing the internal `data` buffer only; the outer
+                # RtCoreArray header (== the tagged i64 handle value itself)
+                # never moves. So `rt_array_push(handle, value)` mutates
+                # through a STABLE handle -- the writeback below is an
+                # idempotent re-store for Index/Field receivers (same as
+                # the existing wb doc comment already states for resolved
+                # mutating methods) and a true no-op for a plain Var
+                # receiver (wb_kind == 0) -- never a silently-dropped append.
+                if method == "push" and args.len() == 1:
+                    val push_recv = if wb_kind != 0: wb_receiver else: self.lower_expr(receiver)
+                    val push_val_raw = self.lower_expr(args[0].value)
+                    var push_val_tagged = push_val_raw
+                    var push_val_is_raw_str = false
+                    if val push_val_ty = self.local_mir_type_of(push_val_raw):
+                        match push_val_ty.kind:
+                            case MirTypeKind.Opaque(push_val_ty_name):
+                                if push_val_ty_name == "str":
+                                    push_val_is_raw_str = true
+                            case _: ()
+                    if push_val_is_raw_str:
+                        # A string LITERAL lowers to a raw char* (Opaque
+                        # "str"); rt_array_push's `val` slot is the i64
+                        # runtime ABI, so tag it first (same scheme as
+                        # starts_with/ends_with's prefix/suffix args above).
+                        # An argv element or any other non-literal value is
+                        # already tagged/int and passes straight through.
+                        val push_strlen_op = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_strlen"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                        ))
+                        var b_pslen = self.builder
+                        val push_len_res = b_pslen.emit_call(push_strlen_op, [mir_operand_copy(push_val_raw)], MirType.i64())
+                        self.builder = b_pslen
+                        if val push_len_local = push_len_res:
+                            val push_newstr_op = MirOperand(kind: MirOperandKind.Const(
+                                MirConstValue.Str("rt_string_new"),
+                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                            ))
+                            var b_psnew = self.builder
+                            val push_tagged_res = b_psnew.emit_call(push_newstr_op, [mir_operand_copy(push_val_raw), mir_operand_copy(push_len_local)], MirType.i64())
+                            self.builder = b_psnew
+                            if val push_tagged_local = push_tagged_res:
+                                push_val_tagged = push_tagged_local
+                    val push_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_array_push"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                            params: [MirType.ptr(MirType.i64(), false), MirType.i64()],
+                            return_type: MirType(kind: MirTypeKind.I8),
+                            is_variadic: false
+                        )))
+                    ))
+                    var b_push = self.builder
+                    b_push.emit_call(push_op, [mir_operand_copy(push_recv), mir_operand_copy(push_val_tagged)], MirType(kind: MirTypeKind.I8))
+                    self.builder = b_push
+                    self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, push_recv)
+                    return push_recv
                 self.error("unresolved method call: {method}", nil)
                 # Task #145: self.error only COLLECTS -- both the bootstrap
                 # lane (driver_bootstrap.spl reads ctx.errors, never
@@ -972,11 +1054,26 @@ impl MirLowering:
             case _: static_size = 0
         val array_type = MirType(kind: MirTypeKind.Array(elem_type, static_size))
 
+        # Bug #149: the FuncPtr's declared `return_type` here is what
+        # `translate_operand`/`remember_function_return_type` registers as
+        # `rt_array_repeat`'s KNOWN return type at codegen time -- it must
+        # match `array_type` (Array kind -> "ptr"), the type this call's
+        # DESTINATION local is actually declared with below. Declaring it
+        # `i64` here (as before) registered a return type that disagreed
+        # with the destination local's MIR-declared (and therefore
+        # `ptr_locals`-primed) type, leaving the call itself emitted as
+        # `i64` while later consumers (a copy, or a `.len()`/index call
+        # argument) still saw the stale `ptr_locals` flag and treated the
+        # i64-defined value as a pointer -- invalid IR. `rt_array_repeat`
+        # genuinely returns `SplArray*` in C (same as rt_array_new), so
+        # `array_type` (-> ptr) is correct here, matching the static
+        # `declare ptr @rt_array_repeat(i64, i64)` in
+        # asm_constraints_helpers.spl's emit_runtime_declarations.
         val repeat_fn = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_array_repeat"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(
                 params: [MirType.i64(), MirType.i64()],
-                return_type: MirType.i64(),
+                return_type: array_type,
                 is_variadic: false
             )))
         ))
