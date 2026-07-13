@@ -26,6 +26,39 @@ extern fn rt_env_get(key: text) -> text
 # ============================================================================
 
 impl MirLowering:
+    me tag_str_local_if_raw(value_local: LocalId) -> LocalId:
+        """A raw char* (string literal, MirType Opaque "str") must be tagged via
+        rt_strlen + rt_string_new before entering the tagged rt_string_* ABI;
+        any other value is already tagged/int and passes through (same scheme
+        as the push fallback's push_val_is_raw_str below)."""
+        var tsr_is_raw = false
+        if val tsr_ty = self.local_mir_type_of(value_local):
+            match tsr_ty.kind:
+                case MirTypeKind.Opaque(tsr_ty_name):
+                    if tsr_ty_name == "str":
+                        tsr_is_raw = true
+                case _: ()
+        if not tsr_is_raw:
+            return value_local
+        val tsr_len_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_strlen"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b_tsrlen = self.builder
+        val tsr_len_res = b_tsrlen.emit_call(tsr_len_op, [mir_operand_copy(value_local)], MirType.i64())
+        self.builder = b_tsrlen
+        if val tsr_len_local = tsr_len_res:
+            val tsr_new_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_string_new"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_tsrnew = self.builder
+            val tsr_new_res = b_tsrnew.emit_call(tsr_new_op, [mir_operand_copy(value_local), mir_operand_copy(tsr_len_local)], MirType.i64())
+            self.builder = b_tsrnew
+            if val tsr_new_local = tsr_new_res:
+                return tsr_new_local
+        value_local
+
     me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution) -> LocalId:
         """Lower method call based on resolution.
 
@@ -459,6 +492,57 @@ impl MirLowering:
                     return subslice_local
                 return sub_recv_raw
             return sub_recv_tagged
+
+        # Erased-receiver fallbacks for builtin text methods (2026-07-13,
+        # whole-compiler redeploy closure): trim/lower/to_lower/split/replace
+        # on an untyped receiver never resolve (no HIR type inference under
+        # bootstrap, and the builtin Str type has no symbol for try_ufcs), so
+        # they fell through to `case Unresolved:` -> const-0 placeholder =
+        # silent data loss (Task #145). Mirror the starts_with/substring
+        # fallbacks above, calling the tagged rt_string_* runtime directly.
+        # Receivers/args on this path are tagged handles (argv elements,
+        # rt_array_get results, rt_string_* results); raw char* literals
+        # (Opaque "str") are tagged first (tag_str_local_if_raw, same scheme
+        # as the push fallback below). Arity-gated so a user method with the
+        # same name but different arity still reaches `case Unresolved:`.
+        # rfind: rt_string_rfind returns -1 for not-found while the language
+        # contract is `i64?` (nil for not-found). Under the bootstrap
+        # bare-payload Optional repr the difference is only observable through
+        # a `?? default` / nil-test; the known closure site
+        # (io_runtime.spl file_write: `rfind("/") ?? 0` then `<= 0` guard)
+        # behaves identically for -1 and nil. Revisit if a closure site ever
+        # distinguishes them.
+        if (method == "trim" or method == "lower" or method == "to_lower" or method == "split" or method == "replace" or method == "rfind") and resolution_is_unresolved:
+            val ts_arity_ok = match method:
+                case "split": args.len() == 1
+                case "rfind": args.len() == 1
+                case "replace": args.len() == 2
+                case _: args.len() == 0
+            if ts_arity_ok:
+                val ts_recv = self.tag_str_local_if_raw(self.lower_expr(receiver))
+                var ts_ops: [MirOperand] = [mir_operand_copy(ts_recv)]
+                for ts_arg in args:
+                    val ts_arg_local = self.lower_expr(ts_arg.value)
+                    ts_ops = ts_ops.push(mir_operand_copy(self.tag_str_local_if_raw(ts_arg_local)))
+                val ts_sym = match method:
+                    case "split": "rt_string_split"
+                    case "replace": "rt_string_replace"
+                    case "trim": "rt_string_trim"
+                    case _: "rt_string_to_lower"
+                val ts_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str(ts_sym),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                var b_ts = self.builder
+                val ts_res = b_ts.emit_call(ts_op, ts_ops, MirType.i64())
+                self.builder = b_ts
+                if val ts_local = ts_res:
+                    # rt_string_split returns a tagged rt_array handle; flag it
+                    # so downstream indexing/for-in routes through rt_array_get.
+                    if method == "split":
+                        self.runtime_array_locals[ts_local.id] = true
+                    return ts_local
+                return ts_recv
 
         if (method == "substring" or method == "slice"):
             val maybe_receiver_type = receiver.type_

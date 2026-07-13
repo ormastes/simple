@@ -1,8 +1,15 @@
 extern fn rt_get_args() -> [text]
 extern fn rt_native_build(args: [text]) -> i64
 
-use lazy compiler.driver.{compiler_driver_create, compiler_driver_run_compile}
-use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native)
+# Non-lazy AND direct-from-defining-module: `use lazy` deferred the driver to
+# a dynload lib that was never implemented (#99), linking as undefined
+# compiler_driver_create/run_compile. And native-build closure discovery
+# follows plain `use` recursively but does NOT follow `export use`, so the
+# compiler.driver __init__ re-export shim was a dead end (4-file closure).
+# Importing driver.spl directly lets discovery pull the driver and its
+# transitive imports statically. (2026-07-13 redeploy)
+use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native, compile_result_is_success, compile_result_errors)
 use std.nogc_sync_mut.io_runtime.{env_set}
 
 # Keep in sync with ./VERSION file
@@ -152,10 +159,14 @@ fn run_native_build_bootstrap(args: [text]) -> i64:
     options = compileoptions_normalize_mir_optimization(options)
     val driver = compiler_driver_create(options)
     val result = compiler_driver_run_compile(driver)
-    if result.is_success():
+    # Free-function accessors, NOT result.is_success()/.get_errors(): this
+    # entry is MIR-lowered without HIR type inference, so method calls on the
+    # lazy-import-returned result never resolve (Task #145 erased-receiver
+    # class); plain imported calls resolve by symbol name.
+    if compile_result_is_success(result):
         0
     else:
-        for err in result.get_errors():
+        for err in compile_result_errors(result):
             print "error: in-process native-build: {err}"
         1
 

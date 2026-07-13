@@ -143,35 +143,12 @@ struct CompileOptions:
     bootstrap_input_5: text
 
     static fn default() -> CompileOptions:
-        CompileOptions(
-            mode: CompileMode.Jit,
-            input_files: [],
-            output_file: nil,
-            output_format: OutputFormat.Native,
-            optimize: false,
-            opt_level: nil,
-            release: false,
-            debug_info: true,
-            verbose: false,
-            log_level: 4,
-            profile: "dev",
-            no_borrow_check: false,
-            backend: "auto",
-            interpreter_mode: "optimized",
-            gc_off: false,
-            smf_output_mode: "code_only",
-            low_memory: false,
-            debug_trace_level: "",
-            allowed_families: [],
-            build_mode: "debug",
-            bootstrap_input_count: 0,
-            bootstrap_input_0: "",
-            bootstrap_input_1: "",
-            bootstrap_input_2: "",
-            bootstrap_input_3: "",
-            bootstrap_input_4: "",
-            bootstrap_input_5: ""
-        )
+        # Body lives in driver_core_compile_options_default(): the bootstrap
+        # MIR path (no HIR type inference) cannot resolve
+        # `CompileOptions.default()` static-method calls (Task #145
+        # erased-receiver class), so bootstrap-reachable code goes through the
+        # free function, which resolves by plain symbol on every path.
+        driver_core_compile_options_default()
 
     fn is_family_allowed(family: text) -> bool:
         """Check if a runtime family is allowed by the current restriction.
@@ -195,7 +172,35 @@ struct CompileOptions:
         false
 
 fn driver_core_compile_options_default() -> CompileOptions:
-    CompileOptions.default()
+    CompileOptions(
+        mode: CompileMode.Jit,
+        input_files: [],
+        output_file: nil,
+        output_format: OutputFormat.Native,
+        optimize: false,
+        opt_level: nil,
+        release: false,
+        debug_info: true,
+        verbose: false,
+        log_level: 4,
+        profile: "dev",
+        no_borrow_check: false,
+        backend: "auto",
+        interpreter_mode: "optimized",
+        gc_off: false,
+        smf_output_mode: "code_only",
+        low_memory: false,
+        debug_trace_level: "",
+        allowed_families: [],
+        build_mode: "debug",
+        bootstrap_input_count: 0,
+        bootstrap_input_0: "",
+        bootstrap_input_1: "",
+        bootstrap_input_2: "",
+        bootstrap_input_3: "",
+        bootstrap_input_4: "",
+        bootstrap_input_5: ""
+    )
 
 fn compileoptions_effective_mir_opt_level(opts: CompileOptions) -> i64:
     if opts.opt_level.?:
@@ -267,6 +272,29 @@ enum CompileResult:
             case CompileResult.CodegenError(m): [m]
             case CompileResult.RuntimeError(m): [m]
             case _: []
+
+# Free-function CompileResult accessors for bootstrap-reachable callers:
+# the bootstrap entry (bootstrap_main.spl) is MIR-lowered without HIR type
+# inference, so `result.is_success()` method calls on its lazy-import-returned
+# result never resolve there (Task #145 erased-receiver class). Plain imported
+# function calls resolve by symbol name on every path; the match bodies live
+# here where CompileResult is local.
+fn compile_result_is_success(r: CompileResult) -> bool:
+    match r:
+        case CompileResult.Success(_): true
+        case _: false
+
+fn compile_result_errors(r: CompileResult) -> [text]:
+    match r:
+        case CompileResult.Success(_): []
+        case CompileResult.TypeError(e): e
+        case CompileResult.ParseError(e): e
+        case CompileResult.BlockError(e): e
+        case CompileResult.ResolveError(e): e
+        case CompileResult.BorrowError(e): e
+        case CompileResult.CodegenError(m): [m]
+        case CompileResult.RuntimeError(m): [m]
+        case _: []
 
 struct SourceFile:
     path: text
