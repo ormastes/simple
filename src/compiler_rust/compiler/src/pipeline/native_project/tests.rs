@@ -1079,6 +1079,22 @@ int main(void) {
     if (rt_array_len(chars) != 2) return 45;
     int64_t second_char = rt_array_get(chars, 1);
     if (rt_string_len(second_char) != 2 || memcmp(rt_string_data(second_char), "\xC3\xA9", 2) != 0) return 46;
+    int64_t keyword_text = rt_string_new((const uint8_t*)"fn", 2);
+    SplArray* keyword_chars = (SplArray*)(uintptr_t)rt_string_chars(keyword_text);
+    int64_t keyword_slice = rt_slice((int64_t)(uintptr_t)keyword_chars, 0, 2, 1);
+    int64_t keyword_join = rt_string_join(keyword_slice, rt_string_new(NULL, 0));
+    if (rt_string_len(keyword_join) != 2 || memcmp(rt_string_data(keyword_join), "fn", 2) != 0) return 47;
+    if (!rt_is_none(rt_value_nil()) || rt_is_none(rt_value_int(1))) return 48;
+    if (!rt_is_none(0) || rt_is_some(0) || !rt_is_some(rt_value_int(1))) return 49;
+    int64_t byte_stride = rt_slice((int64_t)(uintptr_t)byte_left, 0, 2, 2);
+    if (rt_array_len((SplArray*)(uintptr_t)byte_stride) != 1 ||
+        rt_bytes_u8_at((SplArray*)(uintptr_t)byte_stride, 0) != 'a') return 50;
+    int64_t empty_bytes = rt_slice((int64_t)(uintptr_t)byte_left, 0, 0, 1);
+    if (!rt_typed_bytes_u8_push((SplArray*)(uintptr_t)empty_bytes, 'z') ||
+        rt_bytes_u8_at((SplArray*)(uintptr_t)empty_bytes, 0) != 'z') return 51;
+    int64_t empty_words = rt_slice((int64_t)(uintptr_t)words_joined, 0, 0, 1);
+    if (!rt_typed_words_u64_push((SplArray*)(uintptr_t)empty_words, 0x100000001LL) ||
+        rt_typed_words_u64_at((SplArray*)(uintptr_t)empty_words, 0) != 0x100000001LL) return 52;
     int64_t out = rt_string_new((const uint8_t*)"out:", 4);
     int64_t err = rt_string_new((const uint8_t*)"err", 3);
     rt_stdout_write(out);

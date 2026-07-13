@@ -932,13 +932,42 @@ int64_t rt_native_neq(int64_t left, int64_t right) {
 }
 
 int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
+    if (step == 0) return rt_core_nil();
+
+    RtCoreArray* array = rt_core_as_array(value);
+    if (array) {
+        int64_t len = array->len;
+        int64_t begin = start < 0 ? len + start : start;
+        int64_t finish = end < 0 ? len + end : end;
+        if (begin < 0) begin = 0;
+        if (begin > len) begin = len;
+        if (finish < 0) finish = 0;
+        if (finish > len) finish = len;
+        int64_t count = 0;
+        for (int64_t i = begin; (step > 0) ? i < finish : i > finish; i += step) count++;
+        SplArray* result = (array->flags & RT_CORE_ARRAY_FLAG_BYTES)
+            ? rt_byte_array_new((uint64_t)count)
+            : ((array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED)
+                ? rt_array_new_with_cap_u64(count)
+                : rt_array_new(count));
+        RtCoreArray* out = rt_core_as_array((int64_t)(uintptr_t)result);
+        if (!out) return rt_core_nil();
+        for (int64_t i = begin; (step > 0) ? i < finish : i > finish; i += step) {
+            if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+                ((uint8_t*)out->data)[out->len++] = ((uint8_t*)array->data)[i];
+            } else {
+                ((int64_t*)out->data)[out->len++] = ((int64_t*)array->data)[i];
+            }
+        }
+        return (int64_t)(uintptr_t)result;
+    }
+
     RtCoreString* s = rt_core_as_string(value);
     if (!s) return rt_core_nil();
     int64_t len = (int64_t)s->len;
     int64_t begin = start;
     int64_t finish = end;
     int64_t stride = step;
-    if (stride == 0) stride = 1;
     if (begin < 0) begin += len;
     if (finish < 0) finish += len;
     if (begin < 0) begin = 0;
@@ -1120,8 +1149,13 @@ int64_t rt_unwrap_or_self(int64_t value) {
     return value;
 }
 
+int8_t rt_is_none(int64_t value) {
+    if (value == 0 || value == rt_core_nil()) return 1;
+    return rt_enum_discriminant(value) == (int64_t)(uint32_t)2371748697u;
+}
+
 int8_t rt_is_some(int64_t value) {
-    return !rt_core_is_special(value) || rt_core_special_payload(value) != RT_VALUE_SPECIAL_NIL;
+    return !rt_is_none(value);
 }
 
 int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {

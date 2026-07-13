@@ -366,6 +366,7 @@ int64_t  rt_string_split(int64_t value, int64_t delimiter);
 int64_t  rt_string_join(int64_t array, int64_t separator);
 int8_t   rt_contains(int64_t collection, int64_t value);
 int64_t  rt_unwrap_or_self(int64_t value);
+int8_t   rt_is_none(int64_t value);
 int8_t   rt_is_some(int64_t value);
 int8_t   rt_dict_insert(int64_t dict, int64_t key, int64_t value);
 int64_t  rt_string_replace(int64_t value, int64_t old_value, int64_t new_value);

@@ -16,6 +16,8 @@ extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
 extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
 extern fn rt_array_len(array: i64) -> i64
 extern fn rt_array_new(cap: i64) -> i64
+extern fn rt_array_new_with_cap_u64(cap: i64) -> i64
+extern fn rt_byte_array_new(cap: i64) -> i64
 extern fn rt_array_push(array: i64, value: i64) -> i8
 extern fn rt_array_get(array: i64, idx: i64) -> i64
 extern fn rt_dict_len(dict: i64) -> i64
@@ -371,9 +373,47 @@ pub fn rt_contains(collection: i64, value: i64) -> i8:
     return 0
 
 pub fn rt_slice(value: i64, start: i64, end: i64, step: i64) -> i64:
+    if step == 0:
+        return 3
     val ptr = string_ptr(value)
     if ptr < 1:
-        return 3
+        val array_ptr = value & -8
+        if value < 4096 or (value & 7) != 1 or spl_load_u8(array_ptr, 0) != 2:
+            return 3
+        val array_len = rt_array_len(value)
+        var array_begin = if start < 0: array_len + start else: start
+        var array_finish = if end < 0: array_len + end else: end
+        if array_begin < 0:
+            array_begin = 0
+        if array_begin > array_len:
+            array_begin = array_len
+        if array_finish < 0:
+            array_finish = 0
+        if array_finish > array_len:
+            array_finish = array_len
+        var count = 0
+        var count_i = array_begin
+        while (step > 0 and count_i < array_finish) or (step < 0 and count_i > array_finish):
+            count = count + 1
+            count_i = count_i + step
+        val flags = spl_load_u8(array_ptr, 1)
+        val out = if (flags & 8) > 0: rt_byte_array_new(count) elif (flags & 16) > 0: rt_array_new_with_cap_u64(count) else: rt_array_new(count)
+        if out < 4096:
+            return 3
+        val source_items = spl_load_i64(array_ptr, 24)
+        val out_ptr = out & -8
+        val out_items = spl_load_i64(out_ptr, 24)
+        var out_i = 0
+        var array_i = array_begin
+        while (step > 0 and array_i < array_finish) or (step < 0 and array_i > array_finish):
+            if (flags & 8) > 0:
+                spl_store_u8(out_items, out_i, spl_load_u8(source_items, array_i))
+            else:
+                spl_store_i64(out_items, out_i * 8, spl_load_i64(source_items, array_i * 8))
+            out_i = out_i + 1
+            array_i = array_i + step
+        spl_store_i64(out_ptr, 8, out_i)
+        return out
     val len = string_len_ptr(ptr)
     var begin = start
     var finish = end

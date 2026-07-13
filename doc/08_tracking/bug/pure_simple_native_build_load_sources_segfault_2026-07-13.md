@@ -128,3 +128,28 @@ left unchanged. The mandatory third-cycle cap stopped further rebuilds. The
 next continuation should trace `keyword_lookup(ident_text)` and the
 `source_chars[start:pos].join("")` token text produced by the core lexer, then
 prevent AST construction after parser errors.
+
+## Stage-12 and stage-13 evidence
+
+The stage-11 keyword failure came from the C runtime's string-only `rt_slice`:
+the core lexer stores `source.chars()` as `[text]`, then reconstructs an
+identifier with `source_chars[start:pos].join("")`. Array slicing returned nil,
+joining nil returned nil, and every `keyword_lookup` comparison therefore
+fell through to `TOK_IDENT`. C and simple-core `rt_slice` now support arrays;
+the core-C ABI probe reconstructs `"fn"` through the exact chars/slice/join
+path. A lower-model sidecar independently traced and confirmed this cause.
+
+Stage 12 compiled 1,022 files and linked in 236.4 seconds. Its LLVM probe
+produced no parser errors and reached HIR/MIR lowering, where a minimal
+`return 0` program exposed another zero call: C `rt_is_none` was missing even
+though codegen and simple-core expose it. The C runtime now implements the
+same nil/None-enum semantics as simple-core, and `rt_is_some` delegates to it.
+
+Stage 13 compiled 2 files, reused 1,020 cached objects, and linked in 133.0
+seconds. The minimal LLVM build passed frontend and MIR lowering, then reached
+`driver_native_build_cache_scope` and called a zero GOT entry for
+`rt_path_join`; `nm` reports `U rt_path_join`. Rust and simple-core implement
+the four-argument raw-text ABI, but the C runtime does not. The third-cycle cap
+stopped further fixes/rebuilds. The next continuation should add C
+`rt_path_join` with path-join ABI coverage, rebuild from the preserved cache,
+prove the minimal program, and then rerun the unchanged SIMD probe.
