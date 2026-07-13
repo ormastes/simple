@@ -9,6 +9,7 @@ Build, audit, bootstrap, and utility scripts.
 | `audit` | Audit scripts |
 | `bootstrap` | Bootstrap scripts |
 | `check` | Verification and evidence check scripts |
+| `ci` | CI build scripts (SimpleOS toolchain artifacts) |
 | `deps` | Dependency fetching scripts |
 | `fpga` | FPGA board scripts (kria, jtag, flash) |
 | `gui` | macOS GUI launcher scripts |
