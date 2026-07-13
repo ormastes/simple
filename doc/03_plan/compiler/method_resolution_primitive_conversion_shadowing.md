@@ -112,6 +112,18 @@ Diagnosed 2026-07-13:
   `SIMPLE_SEED=` env only redirected the bootstrap DRIVER, not the Stage-1 worker,
   so the stale `bin/release` still did the compile and failed.
 
+FURTHER CONFIRMED 2026-07-13: `build bootstrap`'s Stage-1 WORKER is `bin/release`
+itself (self-exec: `interpreter: bin/release/.../simple`), REGARDLESS of the driver
+— tried `bin/simple build bootstrap`, `SEED=… bin/simple build bootstrap`, and
+`src/compiler_rust/target/bootstrap/simple build bootstrap`; all three fail Stage 1
+on `rt_lexer_source_set`. Both Rust seeds are CURRENT and accept the extern
+(`target/release/simple` rebuilt 04:19; `target/bootstrap/simple` 05:48), but
+`build bootstrap` does not use them for the worker. So it is a CIRCULAR dependency:
+`bin/release` (Jul 11, stale) can only be refreshed by a bootstrap that itself uses
+the stale `bin/release`. This is the known-hard whole-compiler redeploy wall
+(memory: "#99 whole-compiler redeploy — do NOT race/deploy"), a coordinated op, not
+a method-resolution concern.
+
 UNBLOCK (a shared-binary op — coordinate, do not race parallel bootstraps): refresh
 `bin/release/x86_64-unknown-linux-gnu/simple` from a CURRENT compiler (either the
 rebuilt Rust seed, or a self-hosted build produced by it) using the `cp` to `.new`
