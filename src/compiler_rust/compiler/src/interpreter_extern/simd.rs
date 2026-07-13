@@ -1458,6 +1458,27 @@ pub fn rt_engine2d_simd_fill_row_u32(args: &[Value]) -> Result<Value, CompileErr
     Ok(pack_u32_array(sffi_fill_row_u32(count, color)))
 }
 
+/// Interpreter fallback for the native bounded row scheduler.
+pub fn rt_engine2d_simd_fill_rows_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 4 {
+        return Err(CompileError::runtime(
+            "rt_engine2d_simd_fill_rows_u32 expects 4 arguments (width, height, color, worker_limit)".to_string(),
+        ));
+    }
+    let width = require_u64_value("rt_engine2d_simd_fill_rows_u32(width)", &args[0])?;
+    let height = require_u64_value("rt_engine2d_simd_fill_rows_u32(height)", &args[1])?;
+    let count = width
+        .checked_mul(height)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| {
+            CompileError::runtime(
+                "rt_engine2d_simd_fill_rows_u32 dimensions overflow".to_string(),
+            )
+        })?;
+    let color = require_u32_value("rt_engine2d_simd_fill_rows_u32(color)", &args[2])?;
+    Ok(pack_u32_array(sffi_fill_row_u32(count, color)))
+}
+
 /// Interpreter bridge for the native in-place span ABI. Interpreter arrays
 /// are immutable Arc values, so return the updated array for Simple to retain.
 pub fn rt_engine2d_simd_fill_span_u32(args: &[Value]) -> Result<Value, CompileError> {

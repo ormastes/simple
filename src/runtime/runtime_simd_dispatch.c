@@ -9,6 +9,12 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 
+#if defined(_WIN32) || defined(_WIN64)
+#  include <windows.h>
+#else
+#  include <pthread.h>
+#endif
+
 #if defined(__x86_64__) || defined(_M_X64)
 #  include <immintrin.h>
 #endif
@@ -681,6 +687,40 @@ static SplArray* engine2d_new_pixel_array(int64_t n) {
     return a;
 }
 
+typedef struct Engine2dFillChunk {
+    int64_t* out;
+    int64_t width;
+    int64_t begin_row;
+    int64_t end_row;
+    int64_t color;
+} Engine2dFillChunk;
+
+static void engine2d_partition_rows(int64_t rows, int64_t workers, int64_t index,
+                                    int64_t* begin, int64_t* end) {
+    int64_t quotient = rows / workers;
+    int64_t remainder = rows % workers;
+    *begin = index * quotient + (index < remainder ? index : remainder);
+    *end = *begin + quotient + (index < remainder ? 1 : 0);
+}
+
+static void engine2d_fill_chunk(const Engine2dFillChunk* chunk) {
+    int64_t offset = chunk->begin_row * chunk->width;
+    int64_t count = (chunk->end_row - chunk->begin_row) * chunk->width;
+    engine2d_fill_into(chunk->out + offset, count, chunk->color);
+}
+
+#if defined(_WIN32) || defined(_WIN64)
+static DWORD WINAPI engine2d_fill_worker(LPVOID arg) {
+    engine2d_fill_chunk((const Engine2dFillChunk*)arg);
+    return 0;
+}
+#else
+static void* engine2d_fill_worker(void* arg) {
+    engine2d_fill_chunk((const Engine2dFillChunk*)arg);
+    return NULL;
+}
+#endif
+
 SplArray* rt_engine2d_simd_fill_row_u32(int64_t count, int64_t color) {
     int64_t n = count;
     int64_t color_word = color & 0xffffffffLL;
@@ -690,6 +730,71 @@ SplArray* rt_engine2d_simd_fill_row_u32(int64_t count, int64_t color) {
     int64_t* out = (int64_t*)(uintptr_t)rt_array_data_ptr(a);
     if (!out) return a;
     engine2d_fill_into(out, n, color_word);
+    return a;
+}
+
+SplArray* rt_engine2d_simd_fill_rows_u32(int64_t width, int64_t height,
+                                         int64_t color, int64_t worker_limit) {
+    if (width <= 0 || height <= 0) return engine2d_new_pixel_array(0);
+    if (width > INT64_MAX / height) return NULL;
+
+    int64_t total = width * height;
+    SplArray* a = engine2d_new_pixel_array(total);
+    if (!a) return NULL;
+
+    int64_t* out = (int64_t*)(uintptr_t)rt_array_data_ptr(a);
+    if (!out) return a;
+
+    int64_t workers = worker_limit < 1 ? 1 : worker_limit;
+    if (workers > height) workers = height;
+    if (workers > 8) workers = 8;
+
+    Engine2dFillChunk chunks[8];
+    for (int64_t i = 0; i < workers; i++) {
+        chunks[i].out = out;
+        chunks[i].width = width;
+        chunks[i].color = color & 0xffffffffLL;
+        engine2d_partition_rows(height, workers, i,
+                                &chunks[i].begin_row, &chunks[i].end_row);
+    }
+
+    int64_t thread_count = workers - 1;
+    unsigned char created[7] = {0};
+#if defined(_WIN32) || defined(_WIN64)
+    HANDLE threads[7];
+#else
+    pthread_t threads[7];
+#endif
+    for (int64_t i = 1; i < workers; i++) {
+#if defined(_WIN32) || defined(_WIN64)
+        threads[i - 1] = CreateThread(NULL, 0, engine2d_fill_worker,
+                                      &chunks[i], 0, NULL);
+        if (threads[i - 1]) {
+            created[i - 1] = 1;
+        } else {
+            engine2d_fill_chunk(&chunks[i]);
+        }
+#else
+        if (pthread_create(&threads[i - 1], NULL, engine2d_fill_worker,
+                           &chunks[i]) == 0) {
+            created[i - 1] = 1;
+        } else {
+            engine2d_fill_chunk(&chunks[i]);
+        }
+#endif
+    }
+
+    engine2d_fill_chunk(&chunks[0]);
+
+    for (int64_t i = 0; i < thread_count; i++) {
+        if (!created[i]) continue;
+#if defined(_WIN32) || defined(_WIN64)
+        if (WaitForSingleObject(threads[i], INFINITE) != WAIT_OBJECT_0) abort();
+        CloseHandle(threads[i]);
+#else
+        if (pthread_join(threads[i], NULL) != 0) abort();
+#endif
+    }
     return a;
 }
 

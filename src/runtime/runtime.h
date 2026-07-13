@@ -788,6 +788,8 @@ int64_t  rt_engine2d_simd_copy_u32(SplArray* dst, int64_t dst_off, SplArray* src
 
 /* RETURN-style row kernels: build and return a NEW SplArray of packed i64 pixels. */
 SplArray* rt_engine2d_simd_fill_row_u32(int64_t count, int64_t color);
+SplArray* rt_engine2d_simd_fill_rows_u32(int64_t width, int64_t height,
+                                         int64_t color, int64_t worker_limit);
 SplArray* rt_engine2d_simd_copy_row_u32(SplArray* src);
 SplArray* rt_engine2d_simd_blend_row_u32(SplArray* dst, SplArray* src);
 

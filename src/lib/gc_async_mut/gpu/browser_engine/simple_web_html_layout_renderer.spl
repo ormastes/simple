@@ -34,7 +34,7 @@ use common.ui.draw_ir.{
 use common.render_scene.scene.{SceneCommand, scene_fill_rect}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics}
-use std.nogc_async_mut.gpu.engine2d.simd_kernels.{engine2d_simd_fill_buffer_u32}
+use std.nogc_async_mut.gpu.engine2d.simd_kernels.{engine2d_simd_fill_rows_u32}
 
 # ---------------------------------------------------------------------------
 # Render budget + CSS quotas (hostile-page hardening)
@@ -5814,7 +5814,12 @@ fn fb_clear(mut fb: [u32], color: u32):
 fn browser_layout_framebuffer_filled(base: u32, width: i32, height: i32) -> [u32]:
     if width <= 0 or height <= 0:
         return []
-    engine2d_simd_fill_buffer_u32(width.to_i64() * height.to_i64(), base)
+    val pixels = width.to_i64() * height.to_i64()
+    val workers: i64 = if pixels >= 1048576: 8 else: 1
+    engine2d_simd_fill_rows_u32(width.to_i64(), height.to_i64(), base, workers)
+
+fn browser_layout_framebuffer_filled_serial(base: u32, width: i32, height: i32) -> [u32]:
+    engine2d_simd_fill_rows_u32(width.to_i64(), height.to_i64(), base, 1)
 
 # clipped filled rectangle
 fn fb_rect(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color: u32) -> [u32]:
@@ -9581,7 +9586,7 @@ fn _web_gpu_solid_only_frame(nodes: [HNode], styles: [Style], widget_mode: bool)
     true
 
 fn _web_gpu_simulate_fill_ops(fill_ops: [SceneCommand], width: i32, height: i32, base: u32) -> [u32]:
-    var out = browser_layout_framebuffer_filled(base, width, height)
+    var out = browser_layout_framebuffer_filled_serial(base, width, height)
     var oi: i32 = 0
     val op_count = fill_ops.len()
     while oi < op_count:
