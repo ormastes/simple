@@ -24,6 +24,8 @@ use os.kernel.net.rt_net_socket_facade.{rt_net_close}
 # SshDaemon from here) — the import is stripped on non-x86_64 targets.
 @cfg(x86_64)
 use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_spawn, x86_64_fs_exec_spawn_heap}
+@cfg(x86_64)
+use os.kernel.loader.fs_exec_resolve.{fs_exec_resolve}
 extern fn serial_println(msg: text)
 extern fn rt_boot_tcp_bind(addr: text) -> i64
 extern fn rt_boot_tcp_accept_timeout(fd: i64, ms: i64) -> i64
@@ -39,39 +41,10 @@ extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 val SSHD_PORT: u16 = 22
 val SSHD_BACKLOG: i32 = 5
 
-# Deferred ring-3 exec of /FSEXEC.ELF, run from the SHALLOW accept-loop frame.
-# x86_64-only: it calls x86_64_fs_exec_spawn directly (bypassing the mis-dispatching
-# @cfg wrapper — see note above the import). Other arches get a no-op variant so the
-# shared sshd.spl compiles for the rv64 SSH lane. RETURNS the ring-3 program's exit
-# status: the loader saves a kernel savepoint before iretq (rt_x86_enter_user_first)
-# and the exit(2) syscall longjmps back through it (rt_x86_ring3_resume), so the
-# accept loop survives and can service the NEXT ssh command in the same boot.
-@cfg(x86_64)
-fn _sshd_run_pending_ring3_exec() -> i64:
-    serial_println("[sshd] ring3 deferred spawn /FSEXEC.ELF")
-    val rc = x86_64_fs_exec_spawn("/FSEXEC.ELF", ["/FSEXEC.ELF"], [])
-    serial_println("[sshd] ring3 deferred spawn returned rc={rc}; accept loop continues")
-    rc
-
-@cfg(x86)
-fn _sshd_run_pending_ring3_exec() -> i64:
-    0
-
-@cfg(arm64)
-fn _sshd_run_pending_ring3_exec() -> i64:
-    0
-
-@cfg(arm32)
-fn _sshd_run_pending_ring3_exec() -> i64:
-    0
-
-@cfg(riscv64)
-fn _sshd_run_pending_ring3_exec() -> i64:
-    0
-
-@cfg(riscv32)
-fn _sshd_run_pending_ring3_exec() -> i64:
-    0
+# Deferred ring-3 exec, run from the SHALLOW accept-loop frame (kernel-stack
+# overflow deep in the session call stack otherwise — see the unified
+# _sshd_run_pending_exec below for the real implementation; PATH resolution
+# and argv tokenizing both need to happen down here for the same reason).
 
 # Phase 2e Inc 2: tokenize the intact SSH exec command text into argv, IN THE
 # SHALLOW accept-loop frame. `text.char_at`/`starts_with` mis-decode deep in
@@ -113,53 +86,84 @@ fn _sshd_tokenize_command(command: text) -> [text]:
         tokens.push(rt_string_from_byte_array(cur))
     tokens
 
-# Phase 2e Inc 1: deferred ring-3 HEAP-stream spawn of clang (/FSEXEC.ELF on
-# this test image), run from the SAME shallow accept-loop frame as the plain
-# /FSEXEC.ELF path above. Phase 2e Inc 2: argv is no longer hardcoded — it is
-# parsed (in this shallow frame, via _sshd_tokenize_command above) from the
-# real SSH command text captured by ssh_session.spl's clang-exec branch, e.g.
-# `clang -cc1 -triple x86_64-unknown-simpleos -emit-obj -o /out2.o -x c
-# /hello.c`. argv[0] ("clang") is discarded — clang's `-cc1` driver ignores
-# argv[0]; the remaining tokens ARE the -cc1 argv. Proves the critical
-# unknown from Inc 1: does simpleos_fat32_stream_open succeed POST
-# rt_net_init + SSH session activity for a payload far too large to preload
-# (124.6 MB clang vs the ~4 MiB static path-read buffer)? See
-# doc/03_plan/os/clang_over_ssh_2e_design.md and
-# doc/08_tracking/bug/x64_ssh_kernel_fat32_stream_open_zero.md (the existing
-# workaround preloads pre-net; clang cannot use that short-circuit).
+# Default static PATH + minimal environment for ring-3 spawns. sshd exec
+# requests don't carry an env today, so this is the whole envp; merge in a
+# per-request env here if that ever changes (Phase 2 Lane A item 3).
+# A FUNCTION, not a module-level `val [text]`: module-level array
+# initializers do not run under freestanding native-build (see the
+# freestanding-discipline note in fs_exec_resolve.spl / the
+# fs_exec_general_ring3_entry.spl module docstring) — a module val here
+# reads as garbage at runtime and faults.
+fn _sshd_default_envp() -> [text]:
+    ["PATH=/bin:/usr/bin:/usr/local/bin", "HOME=/home/root", "TERM=vt100"]
+
+# Unified deferred ring-3 exec, run from the SHALLOW accept-loop frame
+# (spawning inline deep in the session call stack faults in ring-0 before the
+# spawn's first line — kernel-stack overflow). Replaces the former
+# hardcoded-/FSEXEC.ELF-only and clang-only variants (Phase 2 Lane A, PATH
+# resolution): argv[0] is tokenized here (via _sshd_tokenize_command, the
+# proven-safe raw-byte-array pattern — deep-frame per-char text predicates
+# are unreliable, see the doc note above _sshd_tokenize_command) and resolved
+# through fs_exec_resolve (PATH search over /bin:/usr/bin:/usr/local/bin,
+# memoized). Unresolved names return 127 without ever attempting a spawn —
+# sshd sends that as the real exit status, never hangs.
+#
+# argv[0] is discarded from the spawn argv (same as the historic clang-only
+# path: clang's `-cc1` driver ignores argv[0], and no other in-tree payload
+# currently depends on argv[0] being preserved).
+#
+# Spawn choice: the resolved path "/FSEXEC.ELF" specifically goes through the
+# plain x86_64_fs_exec_spawn (preserves the boot-time-preload fast path some
+# entries, e.g. ssh_ring3_entry.spl, still rely on for that exact file).
+# Every other resolved path goes through x86_64_fs_exec_spawn_heap, the
+# streaming-only path already proven to work post-net for the 124.6 MB clang
+# payload (Phase 2e Inc 1) — this is what /usr/bin/clang (bare "clang" or
+# absolute "/usr/bin/clang") and any other PATH-resolved binary use.
 @cfg(x86_64)
-fn _sshd_run_pending_clang_exec(command: text) -> i64:
-    serial_println("[sshd] ring3 deferred CLANG heap-stream spawn /FSEXEC.ELF command={command}")
+fn _sshd_run_pending_exec(command: text) -> i64:
     val all_tokens = _sshd_tokenize_command(command)
+    if all_tokens.len() == 0:
+        serial_println("[fs-exec] command not found: (empty)")
+        return 127
+    val name = all_tokens[0]
+    val resolved = fs_exec_resolve(name)
+    if resolved.length == 0u64:
+        serial_println("[fs-exec] command not found: {name}")
+        return 127
     var argv: [text] = []
-    var i: u64 = 0
+    var i: u64 = 1
     while i < all_tokens.len():
-        serial_println("[sshd] clang argv[{i}]={all_tokens[i]}")
-        if i > 0:
-            argv.push(all_tokens[i])
+        serial_println("[sshd] exec argv[{i}]={all_tokens[i]}")
+        argv.push(all_tokens[i])
         i = i + 1
-    val rc = x86_64_fs_exec_spawn_heap("/FSEXEC.ELF", argv, [])
-    serial_println("[sshd] ring3 deferred CLANG spawn returned rc={rc}; accept loop continues")
+    if resolved == "/FSEXEC.ELF":
+        serial_println("[sshd] ring3 deferred spawn {resolved} command={command}")
+        val rc = x86_64_fs_exec_spawn(resolved, [resolved], _sshd_default_envp())
+        serial_println("[sshd] ring3 deferred spawn returned rc={rc}; accept loop continues")
+        return rc
+    serial_println("[sshd] ring3 deferred heap-stream spawn {resolved} command={command}")
+    val rc = x86_64_fs_exec_spawn_heap(resolved, argv, _sshd_default_envp())
+    serial_println("[sshd] ring3 deferred heap-stream spawn returned rc={rc}; accept loop continues")
     rc
 
 @cfg(x86)
-fn _sshd_run_pending_clang_exec(command: text) -> i64:
+fn _sshd_run_pending_exec(command: text) -> i64:
     0
 
 @cfg(arm64)
-fn _sshd_run_pending_clang_exec(command: text) -> i64:
+fn _sshd_run_pending_exec(command: text) -> i64:
     0
 
 @cfg(arm32)
-fn _sshd_run_pending_clang_exec(command: text) -> i64:
+fn _sshd_run_pending_exec(command: text) -> i64:
     0
 
 @cfg(riscv64)
-fn _sshd_run_pending_clang_exec(command: text) -> i64:
+fn _sshd_run_pending_exec(command: text) -> i64:
     0
 
 @cfg(riscv32)
-fn _sshd_run_pending_clang_exec(command: text) -> i64:
+fn _sshd_run_pending_exec(command: text) -> i64:
     0
 
 fn _sshd_bytes_equal(a: [u8], b: [u8]) -> bool:
@@ -367,6 +371,23 @@ impl SshDaemon:
         Creates a TCP socket, binds to the configured port, and enters
         the accept loop. This method does not return until stop() is called.
         """
+        match self.bind_and_ready():
+            Ok(_): pass
+            Err(err): return Err(err)
+        serial_println("[sshd] accept loop start")
+        self.accept_loop()
+        Ok(true)
+
+    me bind_and_ready() -> Result<bool, text>:
+        """Run the Ed25519 self-test, pin host keys, and bind the listener.
+
+        Extracted from start() so a combined multi-service boot entry can
+        bring sshd up to "ready to accept" WITHOUT entering the blocking
+        accept_loop(), then round-robin accept_and_handle_once() against
+        other listeners (http, dbd) on the same single boot core. start()
+        still calls this then accept_loop() itself, so the standalone
+        sshd-only boot path is unchanged.
+        """
         serial_println("[sshd] start: begin")
         # Use a fixed RFC 8032 Ed25519 host key in the live lane.
         # The current C-side public-key derivation shim can produce a public
@@ -410,8 +431,6 @@ impl SshDaemon:
 
         serial_println("[sshd] SSH daemon listening on port {self.port}")
         self.running = true
-        serial_println("[sshd] accept loop start")
-        self.accept_loop()
         Ok(true)
 
     me accept_loop():
@@ -422,46 +441,8 @@ impl SshDaemon:
         """
         var accept_wait_ticks: u64 = 0
         while self.running:
-            val raw_client_fd = rt_boot_tcp_accept_timeout(self.listen_fd, 1)
-            if raw_client_fd >= 0:
+            if self.accept_and_handle_once():
                 accept_wait_ticks = 0
-                val client_fd = normalize_boot_tcp_client_fd(raw_client_fd)
-                serial_println("[sshd] accepted client fd={client_fd}")
-                serial_println("[sshd] handle_connection")
-
-                var priv_len: u64 = self.host_private_key.len()
-                var pub_len: u64 = self.host_public_key.len()
-                if priv_len < 1 or pub_len < 1:
-                    serial_println("[sshd] FATAL: host keys not initialized")
-                    rt_net_close(client_fd)
-                else:
-                    serial_println("[sshd] host key lengths ok")
-                    serial_println("[sshd] build host keys")
-                    var host_keys = self.build_host_keys_for_session()
-                    serial_println("[sshd] build host certs")
-                    val host_certs = self.build_host_certificates_for_session()
-                    serial_println("[sshd] session new")
-                    var session = SshSession.new_with_host_materials(
-                        client_fd, self.user_db, host_keys, host_certs, self.host_public_key
-                    )
-                    serial_println("[sshd] session run")
-                    session.run()
-                    # Deferred ring-3 exec: perform the spawn HERE, from the shallow
-                    # accept-loop frame (mirrors the prod entry's shallow boot stack),
-                    # not deep inside the session's exec dispatch where it faults. The
-                    # actual spawn is x86_64-only (behind an @cfg helper — the shared
-                    # rv64 sshd lane gets a no-op variant); the flag check is arch-neutral.
-                    # Must run BEFORE session.close(): the real exit-status reply for
-                    # the deferred exec goes out on the still-open session socket.
-                    if session.pending_ring3_exec:
-                        val exit_rc = if session.pending_ring3_exec_is_clang:
-                            _sshd_run_pending_clang_exec(session.pending_ring3_exec_command)
-                        else:
-                            _sshd_run_pending_ring3_exec()
-                        session.pending_ring3_exec_exit_code = exit_rc.to_u32()
-                        session._send_deferred_ring3_exec_response()
-                    serial_println("[sshd] session close")
-                    session.close()
             else:
                 # Accept error — if we're shutting down, that's expected
                 if not self.running:
@@ -470,6 +451,55 @@ impl SshDaemon:
                 if accept_wait_ticks == 5000:
                     serial_println("[sshd] accept wait ticks=5000")
                     accept_wait_ticks = 0
+
+    me accept_and_handle_once() -> bool:
+        """Accept and fully handle a single pending SSH connection, if any.
+
+        Returns true iff a connection was accepted and handled. Extracted
+        from accept_loop()'s per-iteration body so a combined multi-service
+        boot entry (sshd + http + dbd on one core) can round-robin this
+        alongside other listeners' one-shot accept helpers instead of
+        blocking forever inside accept_loop(). Requires bind_and_ready()
+        (or start(), which calls it) to have run first.
+        """
+        val raw_client_fd = rt_boot_tcp_accept_timeout(self.listen_fd, 1)
+        if raw_client_fd < 0:
+            return false
+        val client_fd = normalize_boot_tcp_client_fd(raw_client_fd)
+        serial_println("[sshd] accepted client fd={client_fd}")
+        serial_println("[sshd] handle_connection")
+
+        var priv_len: u64 = self.host_private_key.len()
+        var pub_len: u64 = self.host_public_key.len()
+        if priv_len < 1 or pub_len < 1:
+            serial_println("[sshd] FATAL: host keys not initialized")
+            rt_net_close(client_fd)
+            return true
+        serial_println("[sshd] host key lengths ok")
+        serial_println("[sshd] build host keys")
+        var host_keys = self.build_host_keys_for_session()
+        serial_println("[sshd] build host certs")
+        val host_certs = self.build_host_certificates_for_session()
+        serial_println("[sshd] session new")
+        var session = SshSession.new_with_host_materials(
+            client_fd, self.user_db, host_keys, host_certs, self.host_public_key
+        )
+        serial_println("[sshd] session run")
+        session.run()
+        # Deferred ring-3 exec: perform the spawn HERE, from the shallow
+        # accept-loop frame (mirrors the prod entry's shallow boot stack),
+        # not deep inside the session's exec dispatch where it faults. The
+        # actual spawn is x86_64-only (behind an @cfg helper — the shared
+        # rv64 sshd lane gets a no-op variant); the flag check is arch-neutral.
+        # Must run BEFORE session.close(): the real exit-status reply for
+        # the deferred exec goes out on the still-open session socket.
+        if session.pending_ring3_exec:
+            val exit_rc = _sshd_run_pending_exec(session.pending_ring3_exec_command)
+            session.pending_ring3_exec_exit_code = exit_rc.to_u32()
+            session._send_deferred_ring3_exec_response()
+        serial_println("[sshd] session close")
+        session.close()
+        true
 
     me handle_connection(client_fd: i64):
         """Handle a new SSH connection from a client."""

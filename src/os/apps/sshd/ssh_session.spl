@@ -412,7 +412,6 @@ class SshSession:
     pending_ring3_exec_exit_code: u32  # exit code from ring-3; set by accept loop after spawn
     pending_ring3_exec_remote_id: u32  # SSH channel remote_id for exit-status response
     pending_ring3_exec_local_id: u32   # SSH channel local_id for cleanup
-    pending_ring3_exec_is_clang: bool  # true -> accept loop runs the clang heap-stream spawn (Phase 2e Inc 1)
     pending_ring3_exec_command: text   # intact decoded exec command text (Phase 2e Inc 2); tokenized by the
                                         # shallow accept loop into argv — never parsed in this deep frame
     scp_pending: bool      # true while a `scp -f <path>` handshake is in flight (Phase 2e Inc 3)
@@ -490,7 +489,6 @@ impl SshSession:
             pending_ring3_exec_exit_code: 0,
             pending_ring3_exec_remote_id: 0,
             pending_ring3_exec_local_id: 0,
-            pending_ring3_exec_is_clang: false,
             pending_ring3_exec_command: "",
             scp_pending: false,
             scp_stage: 0,
@@ -874,18 +872,24 @@ impl SshSession:
         # doc/08_tracking/bug/x64_ssh_kernel_fat32_stream_open_zero.md). Send the
         # channel exit FIRST (spawn does not return on success; the connection drops).
         if _u8_at(payload, off + 4) == 0x2Fu8:
-            serial_println("[sshd-session] exec ring3 DEFER /FSEXEC.ELF")
+            serial_println("[sshd-session] exec ring3 DEFER absolute-path command={command}")
             # DEFER the ring-3 spawn out of this deep call stack. Spawning inline
             # here (many frames deep: run->loop->handle_packet->channel_request->
             # exec_request + crypto) faults in ring-0 before the spawn's first line
             # (kernel-stack overflow); the sshd accept loop runs it from a SHALLOW
             # frame (like the prod boot entry) instead. Set a pending flag; the accept
             # loop performs the spawn after run() returns and sends the real exit code.
-            # No text stored — the target is the literal /FSEXEC.ELF.
+            # Store the intact `command` text (whole-value store/compare is fine on
+            # this deep frame — only per-char predicates are unreliable, see the
+            # Phase 2e Inc 2 note below) so the shallow frame can tokenize argv[0]
+            # itself instead of assuming a fixed "/FSEXEC.ELF" target (Phase 2 Lane A
+            # PATH-resolution generalization — argv[0] already starts with '/' here,
+            # so fs_exec_resolve returns it unchanged).
             # Store channel info so the accept loop can send the real exit status after spawn.
             self.pending_ring3_exec_remote_id = remote_id
             self.pending_ring3_exec_local_id = local_id
             self.pending_ring3_exec = true
+            self.pending_ring3_exec_command = command
             self.state = SessionState.Closed
             return
 
@@ -902,11 +906,10 @@ impl SshSession:
         # SHALLOW accept-loop frame (sshd.spl) tokenize it into argv; no
         # parsing happens in this deep frame (Phase 2e Inc 2).
         if _u8_at(payload, off + 4) == 0x63u8:
-            serial_println("[sshd-session] exec ring3 DEFER clang command={command}")
+            serial_println("[sshd-session] exec ring3 DEFER command={command}")
             self.pending_ring3_exec_remote_id = remote_id
             self.pending_ring3_exec_local_id = local_id
             self.pending_ring3_exec = true
-            self.pending_ring3_exec_is_clang = true
             self.pending_ring3_exec_command = command
             self.state = SessionState.Closed
             return
@@ -972,13 +975,21 @@ impl SshSession:
             self._finish_exec_request_inline(local_id, remote_id, 0, direct_output)
             return
 
-        self._ensure_shell_started_inline(false)
-        if val shell = self.shell:
-            if not shell.feed_remote_input("{command}\n"):
-                self.state = SessionState.Closed
-                return
-            self._forward_shell_output_inline()
-            self._finish_exec_request_inline(local_id, remote_id, 0, [])
+        # Phase 2 Lane A: generic PATH-resolved exec fallback for command
+        # names that don't hit the '/' / 'c' / 'g' / "scp " raw-byte triggers
+        # above (e.g. "nosuchcmd", or any future PATH-resolvable binary that
+        # hasn't been given its own trigger byte). Same safe deferral as the
+        # '/' and 'c' branches: store the intact `command` text and let the
+        # SHALLOW accept-loop frame (sshd.spl `_sshd_run_pending_exec`)
+        # tokenize argv[0], resolve it via fs_exec_resolve, and either spawn
+        # it or return exit 127 "command not found" — never spawns from this
+        # deep frame, and never falls into the interactive toy shell for a
+        # one-shot `ssh host cmd` exec request.
+        self.pending_ring3_exec_remote_id = remote_id
+        self.pending_ring3_exec_local_id = local_id
+        self.pending_ring3_exec = true
+        self.pending_ring3_exec_command = command
+        self.state = SessionState.Closed
 
     me _handle_channel_data_inline(payload: [u8]):
         if payload.len() < 10:
@@ -1097,7 +1108,7 @@ impl SshSession:
     me _send_deferred_ring3_exec_response():
         """Send the real exit status for a deferred ring-3 execution after the spawn completes.
 
-        Called from the accept loop after _sshd_run_pending_ring3_exec() returns the exit code.
+        Called from the accept loop after _sshd_run_pending_exec() returns the exit code.
         """
         if self.pending_ring3_exec:
             val remote_id = self.pending_ring3_exec_remote_id

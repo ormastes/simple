@@ -13,6 +13,11 @@ extern fn simpleos_fat32_stream_open(path: text) -> i64
 extern fn simpleos_fat32_stream_read_at(file_off: u64, dst: u64, len: u64) -> i64
 extern fn simpleos_fat32_preloaded_size() -> u64
 extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
+# Per-spawn RAM file-table reset (baremetal_stubs.c). Without it a SECOND
+# ring-3 exec in the same boot inherits the first run's fd slots and the
+# one-shot output slot -> O_CREAT open fails -EMFILE, and the exit dump
+# re-persists the previous run's stale output object.
+extern fn simpleos_bare_exec_reset()
 
 fn _x86_64_raw_header_is_elf(buf: u64) -> bool:
     (mmio_read32(buf) as u64) == 0x464C457F.to_u64() and mmio_read16(buf + 4) == 0x0102 and mmio_read16(buf + 18) == 62
@@ -80,6 +85,7 @@ pub fn x86_64_fs_exec_spawn_as(caller: i64, path: text, argv: [text], envp: [tex
         serial_println("[fs-exec] x86_64:denied caller={caller} path={path} err={gate}")
         return gate as i64
     serial_println("[fs-exec] spawn:resolve path={path}")
+    simpleos_bare_exec_reset()
 
     # PRELOAD short-circuit: in the merged SSH kernel the exec-time FAT/NVMe read
     # returns 0 (device/FS state clobbered after rt_net_init + vmm + SSH activity —
@@ -166,6 +172,7 @@ pub fn x86_64_fs_exec_spawn_heap(path: text, argv: [text], envp: [text]) -> i64:
     (examples/09_embedded/simple_os/arch/x86_64/fs_exec_clang_stream_ring3_entry.spl)
     but callable from the sshd deferred-exec shallow frame."""
     serial_println("[fs-exec] heap:resolve path={path}")
+    simpleos_bare_exec_reset()
     val (stream_len, header_blob) = _x86_64_open_streaming_elf(path)
     if stream_len <= 0:
         serial_println("[fs-exec] heap:stream-open-fail path={path} rc={stream_len}")

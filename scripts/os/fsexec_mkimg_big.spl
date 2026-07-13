@@ -1,18 +1,34 @@
 # fsexec_mkimg_big.spl — FAT32 *structural prefix* writer for a LARGE payload
 # (clang_static ~119 MB). Writes only BPB + FSInfo + reserved + FAT1 + root-dir
-# cluster (one /FSEXEC.ELF entry, first cluster = 3). The caller
-# (scripts/os/build_clang_disk.shs) then appends the raw ELF payload right after
-# the prefix (so it lands at cluster 3, contiguous) and truncates to the full
-# image size.
+# cluster + a small FHS directory skeleton (one cluster per dir node). The
+# caller (scripts/os/scp_retrieve_over_ssh_uefi.shs et al) then appends the
+# raw ELF payload right after the prefix (so it lands at cluster
+# PAYLOAD_START, contiguous) and truncates to the full image size.
 #
 # Geometry: bytes_per_sector=512, sectors_per_cluster=64 (32 KiB clusters, so the
 # ~119 MB payload is only ~3.8 K clusters => a small FAT), reserved=32,
 # num_fats=1 (the boot-side C reader _fat32_next_cluster reads FAT1 only). root
-# dir = cluster 2, payload = clusters 3..N (contiguous chain).
+# dir = cluster 2, payload = clusters PAYLOAD_START..N (contiguous chain).
 #
 # The whole prefix is built in a PRE-ALLOCATED zero buffer with O(1) index
 # assignment (NOT [u8].push, which is O(n) per element in the seed interpreter
-# and made a byte-by-byte builder take minutes for a 100 MB-class image).
+# and made a byte-by-byte builder take minutes for a 100 MB-class image). The
+# handful of small (~360 KiB total) directory-entry helper calls below DO use
+# the return-and-reassign `buf = helper(buf, ...)` pattern (see
+# src/os/port/disk_image.spl's note on Simple arrays being value types) —
+# that is fine here because they only ever copy the small structural prefix,
+# never the multi-hundred-MB payload (which is never loaded into a Simple
+# array at all; it is appended raw by the shell/host side).
+#
+# FHS skeleton (clang_as_general_fs_exec Phase 2, Lane A): real FAT32
+# subdirectories /bin, /usr, /usr/bin, /usr/local, /usr/local/bin, /etc,
+# /tmp, /home, /home/root, each occupying exactly one 32 KiB cluster (empty
+# dirs rely on the pre-zeroed buffer for their implicit end-of-directory
+# marker). /usr/bin/clang is a SECOND directory entry aliasing the SAME
+# cluster chain as the root-level /FSEXEC.ELF entry (both point at
+# PAYLOAD_START) — the ~119 MB payload is never duplicated. /FSEXEC.ELF stays
+# staged for back-compat with the plain (non-PATH-aware) ring3-exec demo
+# (ssh_ring3_entry.spl) until that caller is migrated to PATH resolution too.
 #
 # Input : build/os/elfexec/payload_size.txt  (decimal byte count of the ELF)
 # Output: build/os/elfexec/fat32-clang-prefix.bin  (structural prefix)
@@ -32,6 +48,70 @@ fn _parse_u64(data: [u8]) -> u64:
         i = i + 1
     v
 
+# -- Small pure helpers (no `img` mutation — safe under Simple's by-value
+# array-parameter semantics) --------------------------------------------
+
+fn _pad_ascii(s: text, width: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0u64
+    while i < width:
+        if i < s.length:
+            out.push(s[i] as u8)
+        else:
+            out.push(0x20u8)
+        i = i + 1u64
+    out
+
+fn _name83_bytes(base: text, ext: text) -> [u8]:
+    """FAT32 8.3 name: 8-char base + 3-char ext, space-padded, no dot."""
+    var out: [u8] = _pad_ascii(base, 8u64)
+    val e = _pad_ascii(ext, 3u64)
+    var i: u64 = 0u64
+    while i < e.len():
+        out.push(e[i])
+        i = i + 1u64
+    out
+
+fn _dir_entry(name83: [u8], cluster: u64, size: u64, attr: u8) -> [u8]:
+    """Build one 32-byte FAT32 directory entry."""
+    var e: [u8] = []
+    var i: u64 = 0u64
+    while i < 11u64:
+        e.push(name83[i])
+        i = i + 1u64
+    e.push(attr)                                    # attr
+    e.push(0u8)                                      # NTRes
+    e.push(0u8)                                      # CrtTimeTenth
+    e.push(0u8)
+    e.push(0u8)                                       # CrtTime
+    e.push(0u8)
+    e.push(0u8)                                       # CrtDate
+    e.push(0u8)
+    e.push(0u8)                                       # LstAccDate
+    e.push(((cluster >> 16) & 0xFFu64) as u8)          # FstClusHI lo
+    e.push(((cluster >> 24) & 0xFFu64) as u8)          # FstClusHI hi
+    e.push(0u8)
+    e.push(0u8)                                       # WrtTime
+    e.push(0u8)
+    e.push(0u8)                                       # WrtDate
+    e.push((cluster & 0xFFu64) as u8)                  # FstClusLO lo
+    e.push(((cluster >> 8) & 0xFFu64) as u8)           # FstClusLO hi
+    e.push((size & 0xFFu64) as u8)                     # FileSize
+    e.push(((size >> 8) & 0xFFu64) as u8)
+    e.push(((size >> 16) & 0xFFu64) as u8)
+    e.push(((size >> 24) & 0xFFu64) as u8)
+    e
+
+fn _write_bytes_at(buf: [u8], base: i64, data: [u8]) -> [u8]:
+    var i: i64 = 0
+    while i < data.len():
+        buf[base + i] = data[i]
+        i = i + 1
+    buf
+
+fn _cluster_base(data_start_sector: u64, cluster_bytes: u64, n: u64) -> i64:
+    ((data_start_sector * 512u64) + ((n - 2u64) * cluster_bytes)) as i64
+
 fn main() -> i64:
     val size_path = "build/os/elfexec/payload_size.txt"
     val prefix_path = "build/os/elfexec/fat32-clang-prefix.bin"
@@ -50,12 +130,12 @@ fn main() -> i64:
     # not need a second image writer or a configuration API.
     var hello_path = "build/os/elfexec/stageD/hello.c"
     var hello_bytes: [u8] = rt_file_read_bytes(hello_path) ?? []
-    var hello_ext: u8 = 0x43u8
+    var hello_ext_str: text = "C"
     val object_bytes: [u8] = rt_file_read_bytes("build/os/elfexec/stageD/hello.o") ?? []
     if object_bytes.len() > 0:
         hello_path = "build/os/elfexec/stageD/hello.o"
         hello_bytes = object_bytes
-        hello_ext = 0x4Fu8
+        hello_ext_str = "O"
     val hello_len: u64 = hello_bytes.len() as u64
 
     val SPC: u64 = 64u64
@@ -67,11 +147,26 @@ fn main() -> i64:
         print "fsexec_mkimg_big_error=input missing or too big: " + hello_path
         return 1
 
+    # -- FHS directory skeleton: 9 one-cluster directory nodes, clusters
+    # 4..12, sitting between HELLO (cluster 3) and the payload chain.
+    val DIR_START: u64 = 4u64
+    val DIR_COUNT: u64 = 9u64
+    val C_BIN: u64 = 4u64          # /bin
+    val C_USR: u64 = 5u64          # /usr
+    val C_USRBIN: u64 = 6u64       # /usr/bin
+    val C_USRLOCAL: u64 = 7u64     # /usr/local
+    val C_USRLOCALBIN: u64 = 8u64  # /usr/local/bin
+    val C_ETC: u64 = 9u64          # /etc
+    val C_TMP: u64 = 10u64         # /tmp
+    val C_HOME: u64 = 11u64        # /home
+    val C_HOMEROOT: u64 = 12u64    # /home/root
+    val PAYLOAD_START: u64 = DIR_START + DIR_COUNT   # 13
+
     var payload_clusters: u64 = payload / CLUSTER_BYTES
     if payload % CLUSTER_BYTES != 0u64:
         payload_clusters = payload_clusters + 1u64
-    # root=2, hello=3, payload=4..highest
-    val highest_cluster: u64 = 3u64 + payload_clusters
+    # root=2, hello=3, dirs=4..12, payload=PAYLOAD_START..highest
+    val highest_cluster: u64 = (PAYLOAD_START - 1u64) + payload_clusters
     # Spare free clusters past the payload so an in-guest program (clang) can
     # WRITE its output object back to the FAT/NVMe disk (fat32_write_file needs a
     # free cluster). 16 clusters * 32 KiB = 512 KiB, zero-padded by the final
@@ -84,10 +179,11 @@ fn main() -> i64:
     fat_sectors = fat_sectors + 8u64                      # slack
 
     val data_start_sector: u64 = RESERVED + (NUM_FATS * fat_sectors)
-    # prefix covers root-dir cluster (2) + hello cluster (3)
-    val prefix_sectors: u64 = data_start_sector + (2u64 * SPC)
+    # prefix covers root-dir(2) + hello(3) + the 9 directory-node clusters
+    # (4..12) = 11 clusters, everything up to (not including) the payload.
+    val prefix_sectors: u64 = data_start_sector + (11u64 * SPC)
     val prefix_bytes_u: u64 = prefix_sectors * 512u64
-    val total_sectors: u64 = data_start_sector + ((payload_clusters + 2u64 + SPARE_CLUSTERS) * SPC)
+    val total_sectors: u64 = data_start_sector + ((payload_clusters + 11u64 + SPARE_CLUSTERS) * SPC)
     val total_bytes: u64 = total_sectors * 512u64
     val total_clusters: u64 = (total_sectors - data_start_sector) / SPC
 
@@ -191,11 +287,20 @@ fn main() -> i64:
     img[fat_base + 9] = 0xFFu8
     img[fat_base + 10] = 0xFFu8
     img[fat_base + 11] = 0x0Fu8
-    img[fat_base + 12] = 0xFFu8  # entry 3 (HELLO.C single cluster, EOC)
+    img[fat_base + 12] = 0xFFu8  # entry 3 (HELLO.C/O single cluster, EOC)
     img[fat_base + 13] = 0xFFu8
     img[fat_base + 14] = 0xFFu8
     img[fat_base + 15] = 0x0Fu8
-    var c: u64 = 4u64            # clang payload chain starts at cluster 4
+    # entries DIR_START..DIR_START+DIR_COUNT-1 (9 one-cluster dir nodes, each EOC)
+    var dc: u64 = DIR_START
+    while dc < DIR_START + DIR_COUNT:
+        val deo: i64 = fat_base + ((dc * 4u64) as i64)
+        img[deo + 0] = 0xFFu8
+        img[deo + 1] = 0xFFu8
+        img[deo + 2] = 0xFFu8
+        img[deo + 3] = 0x0Fu8
+        dc = dc + 1u64
+    var c: u64 = PAYLOAD_START    # clang payload chain
     while c <= highest_cluster:
         var next: u64 = 0x0FFFFFFFu64
         if c < highest_cluster:
@@ -209,44 +314,37 @@ fn main() -> i64:
 
     # ---- Root directory (cluster 2 at data_start_sector*512) ----
     val rd: i64 = (data_start_sector * 512u64) as i64
-    # Entry 0: "HELLO   C  " or "HELLO   O  " at cluster 3.
-    img[rd + 0] = 0x48u8  # H
-    img[rd + 1] = 0x45u8  # E
-    img[rd + 2] = 0x4Cu8  # L
-    img[rd + 3] = 0x4Cu8  # L
-    img[rd + 4] = 0x4Fu8  # O
-    img[rd + 5] = 0x20u8
-    img[rd + 6] = 0x20u8
-    img[rd + 7] = 0x20u8
-    img[rd + 8] = hello_ext
-    img[rd + 9] = 0x20u8
-    img[rd + 10] = 0x20u8
-    img[rd + 11] = 0x20u8  # attr = archive
-    img[rd + 26] = 0x03u8  # FstClusLO = 3
-    img[rd + 28] = (hello_len & 0xFFu64) as u8
-    img[rd + 29] = ((hello_len >> 8) & 0xFFu64) as u8
-    img[rd + 30] = ((hello_len >> 16) & 0xFFu64) as u8
-    img[rd + 31] = ((hello_len >> 24) & 0xFFu64) as u8
-    # Entry 1: "FSEXEC  ELF" at cluster 4, size = payload
-    img[rd + 32] = 0x46u8  # F
-    img[rd + 33] = 0x53u8  # S
-    img[rd + 34] = 0x45u8  # E
-    img[rd + 35] = 0x58u8  # X
-    img[rd + 36] = 0x45u8  # E
-    img[rd + 37] = 0x43u8  # C
-    img[rd + 38] = 0x20u8
-    img[rd + 39] = 0x20u8
-    img[rd + 40] = 0x45u8  # E
-    img[rd + 41] = 0x4Cu8  # L
-    img[rd + 42] = 0x46u8  # F
-    img[rd + 43] = 0x20u8  # attr = archive
-    img[rd + 26 + 32] = 0x04u8  # FstClusLO = 4
-    img[rd + 28 + 32] = (payload & 0xFFu64) as u8
-    img[rd + 29 + 32] = ((payload >> 8) & 0xFFu64) as u8
-    img[rd + 30 + 32] = ((payload >> 16) & 0xFFu64) as u8
-    img[rd + 31 + 32] = ((payload >> 24) & 0xFFu64) as u8
+    img = _write_bytes_at(img, rd + 0 * 32, _dir_entry(_name83_bytes("HELLO", hello_ext_str), 3u64, hello_len, 0x20u8))
+    img = _write_bytes_at(img, rd + 1 * 32, _dir_entry(_name83_bytes("FSEXEC", "ELF"), PAYLOAD_START, payload, 0x20u8))
+    img = _write_bytes_at(img, rd + 2 * 32, _dir_entry(_name83_bytes("BIN", ""), C_BIN, 0u64, 0x10u8))
+    img = _write_bytes_at(img, rd + 3 * 32, _dir_entry(_name83_bytes("USR", ""), C_USR, 0u64, 0x10u8))
+    img = _write_bytes_at(img, rd + 4 * 32, _dir_entry(_name83_bytes("ETC", ""), C_ETC, 0u64, 0x10u8))
+    img = _write_bytes_at(img, rd + 5 * 32, _dir_entry(_name83_bytes("TMP", ""), C_TMP, 0u64, 0x10u8))
+    img = _write_bytes_at(img, rd + 6 * 32, _dir_entry(_name83_bytes("HOME", ""), C_HOME, 0u64, 0x10u8))
 
-    # ---- HELLO.C data (cluster 3 = data_start_sector + SPC) ----
+    # ---- /usr (cluster C_USR): BIN -> /usr/bin, LOCAL -> /usr/local ----
+    val usr_base = _cluster_base(data_start_sector, CLUSTER_BYTES, C_USR)
+    img = _write_bytes_at(img, usr_base + 0 * 32, _dir_entry(_name83_bytes("BIN", ""), C_USRBIN, 0u64, 0x10u8))
+    img = _write_bytes_at(img, usr_base + 1 * 32, _dir_entry(_name83_bytes("LOCAL", ""), C_USRLOCAL, 0u64, 0x10u8))
+
+    # ---- /usr/bin (cluster C_USRBIN): CLANG file, ALIASES the FSEXEC.ELF
+    # cluster chain (same PAYLOAD_START, same size) -- no data duplication.
+    val usrbin_base = _cluster_base(data_start_sector, CLUSTER_BYTES, C_USRBIN)
+    img = _write_bytes_at(img, usrbin_base + 0 * 32, _dir_entry(_name83_bytes("CLANG", ""), PAYLOAD_START, payload, 0x20u8))
+
+    # ---- /usr/local (cluster C_USRLOCAL): BIN -> /usr/local/bin ----
+    val usrlocal_base = _cluster_base(data_start_sector, CLUSTER_BYTES, C_USRLOCAL)
+    img = _write_bytes_at(img, usrlocal_base + 0 * 32, _dir_entry(_name83_bytes("BIN", ""), C_USRLOCALBIN, 0u64, 0x10u8))
+
+    # ---- /home (cluster C_HOME): ROOT -> /home/root ----
+    val home_base = _cluster_base(data_start_sector, CLUSTER_BYTES, C_HOME)
+    img = _write_bytes_at(img, home_base + 0 * 32, _dir_entry(_name83_bytes("ROOT", ""), C_HOMEROOT, 0u64, 0x10u8))
+
+    # /usr/local/bin, /bin, /etc, /tmp, /home/root are empty dirs: the
+    # pre-zeroed buffer already gives them an implicit end-of-directory
+    # marker (first byte 0x00), so no writes are needed for those clusters.
+
+    # ---- HELLO.C/O data (cluster 3 = data_start_sector + SPC) ----
     val hello_base: i64 = ((data_start_sector + SPC) * 512u64) as i64
     var hi: i64 = 0
     while hi < hello_bytes.len():
@@ -257,5 +355,5 @@ fn main() -> i64:
         print "fsexec_mkimg_big_error=write prefix failed"
         return 1
 
-    print "fsexec_mkimg_big_status=ok payload=" + payload.to_text() + " payload_clusters=" + payload_clusters.to_text() + " spc=" + SPC.to_text() + " fat_sectors=" + fat_sectors.to_text() + " prefix_bytes=" + prefix_bytes_u.to_text() + " total_bytes=" + total_bytes.to_text() + " total_clusters=" + total_clusters.to_text()
+    print "fsexec_mkimg_big_status=ok payload=" + payload.to_text() + " payload_clusters=" + payload_clusters.to_text() + " spc=" + SPC.to_text() + " fat_sectors=" + fat_sectors.to_text() + " prefix_bytes=" + prefix_bytes_u.to_text() + " total_bytes=" + total_bytes.to_text() + " total_clusters=" + total_clusters.to_text() + " dirs=9 usrbin_clang_alias_cluster=" + PAYLOAD_START.to_text()
     return 0

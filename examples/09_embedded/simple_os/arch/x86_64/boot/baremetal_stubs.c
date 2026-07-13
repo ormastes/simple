@@ -15369,11 +15369,30 @@ struct bare_file {
 static struct bare_file _bare_files[BARE_MAX_FILES];
 static int _bare_next_fd = 3;
 
-static void _bare_exec_reset_files(void) {
-    for (int i = 0; i < BARE_MAX_FILES; i++) _bare_files[i].used = 0;
+/* Reset the bare-exec RAM file table for a fresh ring-3 exec. Without this, a
+ * SECOND exec in the same boot inherits the first run's slots: close() keeps
+ * slots used for the exit dump (by design), and `_bare_out_taken` is one-shot,
+ * so run 2's O_CREAT open fails -EMFILE ("Too many open files" — observed:
+ * second in-boot clang could not open its output object) and the exit dump
+ * re-persists run 1's stale output. Called by the Simple-side spawn entries
+ * (x86_64_fs_exec_spawn / _spawn_heap) BEFORE entering ring 3. */
+void simpleos_bare_exec_reset(void) {
+    for (int i = 0; i < BARE_MAX_FILES; i++) {
+        _bare_files[i].used = 0;
+        _bare_files[i].is_output = 0;
+        _bare_files[i].is_random = 0;
+        _bare_files[i].size = 0;
+        _bare_files[i].pos = 0;
+    }
     _bare_in_taken = 0;
     _bare_out_taken = 0;
     _bare_next_fd = 3;
+}
+
+/* Upstream C-side spawn callers use this name; delegate to the full reset
+ * (both sides independently fixed the same second-exec EMFILE bug — merged). */
+static void _bare_exec_reset_files(void) {
+    simpleos_bare_exec_reset();
 }
 
 static struct bare_file *_bare_fd_lookup(uint64_t fd) {
