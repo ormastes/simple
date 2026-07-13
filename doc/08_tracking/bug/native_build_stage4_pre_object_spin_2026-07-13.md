@@ -132,6 +132,23 @@ instead of being hidden by this closure fix. The working-tree direct-runtime
 guard passes and no source-level import hoist, direct `rt_*`, or symbol hardcode
 was introduced. The strict full-CLI link remains unrun.
 
+The first of the three true lowering failures was the bare `danger` symbol
+emitted for standard-library `danger:` blocks. The Rust parser's generic
+colon-block rule had represented the authorization boundary as a call with a
+lambda argument. Rust now mirrors the pure compiler's existing `UnsafeBlock`
+shape: contextual `danger:` and canonical `unsafe:` retain a lexical marker
+through HIR, while ordinary `danger(...)` remains a call. MIR erases only the
+marker and lowers the body once. Entry closure, suspension inference,
+compilability, hygiene, symbol/security analysis, driver checks, lints, and
+other material AST walkers recurse through the block. Focused parser and HIR
+tests pass; an interpreter regression passes with a tail value, outer mutation,
+and `continue` propagation, and the driver crate checks. TODO 557 records the
+separate missing Rust safety pass that must reject raw/SFFI/asm operations
+outside this retained marker. No linker exception, fake `danger` function, or
+direct `rt_*` alias was added. The strict full-CLI link remains unrun, so the
+two primitive method-dispatch failures and hosted runtime composition remain
+open.
+
 Reuse the preserved 1,043-object cache only after one of those owners changes,
 then run one bounded strict-link verification. Do not add stubs, relabel a
 runtime bundle, hardcode symbols, or substitute the Rust seed as production

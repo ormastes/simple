@@ -206,6 +206,7 @@ pub fn rt_ast_expr_tag(args: &[Value]) -> Result<Value, CompileError> {
             Expr::Forall { .. } => "Forall",
             Expr::Exists { .. } => "Exists",
             Expr::DoBlock(_) => "DoBlock",
+            Expr::UnsafeBlock(_) => "UnsafeBlock",
             Expr::I18nString { .. } => "I18nString",
             Expr::I18nTemplate { .. } => "I18nTemplate",
             Expr::I18nRef(_) => "I18nRef",

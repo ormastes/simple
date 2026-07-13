@@ -1368,7 +1368,7 @@ fn collect_hir_expr_symbols(expr: &HirExpr, symbols: &mut BTreeSet<String>) {
                 collect_hir_expr_symbols(else_branch, symbols);
             }
         }
-        HirExprKind::Block(stmts) => {
+        HirExprKind::Block(stmts) | HirExprKind::UnsafeBlock(stmts) => {
             for stmt in stmts {
                 collect_hir_stmt_symbols(stmt, symbols);
             }

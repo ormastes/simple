@@ -17,6 +17,21 @@ fn test_lower_literals() {
 }
 
 #[test]
+fn test_lower_danger_block_retains_boundary_and_tail_type() {
+    let module = parse_and_lower("fn test() -> i64:\n    danger:\n        val x = 40\n        x + 2\n").unwrap();
+    let func = &module.functions[0];
+    let HirStmt::Expr(expr) = &func.body[0] else {
+        panic!("Expected unsafe block expression");
+    };
+    assert_eq!(expr.ty, TypeId::I64);
+    let HirExprKind::UnsafeBlock(statements) = &expr.kind else {
+        panic!("Expected retained unsafe boundary, got {:?}", expr.kind);
+    };
+    assert_eq!(statements.len(), 2);
+    assert!(!format!("{statements:?}").contains("danger"));
+}
+
+#[test]
 fn test_lower_binary_ops() {
     let module = parse_and_lower("fn compare(a: i64, b: i64) -> bool:\n    return a < b\n").unwrap();
 

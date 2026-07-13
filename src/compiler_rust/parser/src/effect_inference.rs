@@ -202,7 +202,7 @@ fn has_suspension_in_expr(expr: &Expr) -> bool {
         Expr::Lambda { .. } => false,
 
         // Do block
-        Expr::DoBlock(nodes) => {
+        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
             // Check each node in the do block for suspension
             for node in nodes {
                 if has_suspension_in_node(node) {

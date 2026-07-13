@@ -247,7 +247,7 @@ fn walk_expr(expr: &Expr, h: &mut Hoister) {
             }
         }
         Expr::Lambda { body, .. } => walk_expr(body, h),
-        Expr::DoBlock(nodes) => {
+        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
             for n in nodes {
                 walk_node(n, h);
             }

@@ -109,6 +109,9 @@ pub enum HirExprKind {
     },
     /// Multi-statement block expression, used by colon lambdas and do blocks.
     Block(Vec<HirStmt>),
+    /// Lexical unsafe authorization boundary. MIR lowers the contained block
+    /// normally after semantic/safety passes have observed this marker.
+    UnsafeBlock(Vec<HirStmt>),
 
     // Memory operations
     Ref(Box<HirExpr>),

@@ -155,7 +155,7 @@ impl TestMetaAnalyzer {
             Expr::Call { callee, args } => {
                 self.analyze_call(callee, args);
             }
-            Expr::DoBlock(statements) => {
+            Expr::DoBlock(statements) | Expr::UnsafeBlock(statements) => {
                 self.analyze_statements(statements);
             }
             Expr::If {

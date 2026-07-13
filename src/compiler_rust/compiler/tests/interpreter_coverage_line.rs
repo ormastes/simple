@@ -30,6 +30,27 @@ main = 7"#;
 }
 
 #[test]
+fn test_interpreter_unsafe_block_tail_and_loop_control() {
+    let code = r#"fn danger_tail() -> i32:
+    danger:
+        val x = 40
+        x + 2
+
+fn danger_continue() -> i32:
+    var total = 0
+    for i in 0..5:
+        danger:
+            if i == 2:
+                continue
+            total = total + i
+    return total
+
+main = danger_tail() + danger_continue()"#;
+
+    assert_eq!(run_interpreter(code).unwrap(), 50);
+}
+
+#[test]
 fn test_line_coverage_basic() {
     if !check_coverage_enabled() {
         println!("Coverage disabled, skipping test");

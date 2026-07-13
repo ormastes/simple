@@ -63,6 +63,18 @@ fn test_function_call() {
 }
 
 #[test]
+fn test_danger_block_is_unsafe_boundary_not_call() {
+    let module = parse("danger:\n    val x = 40\n    x + 2\n").unwrap();
+    let Node::Expression(Expr::UnsafeBlock(statements)) = &module.items[0] else {
+        panic!("Expected unsafe block, got {:?}", module.items[0]);
+    };
+    assert_eq!(statements.len(), 2);
+
+    let ordinary_call = parse("danger(1)").unwrap();
+    assert!(matches!(ordinary_call.items[0], Node::Expression(Expr::Call { .. })));
+}
+
+#[test]
 fn test_method_call() {
     let module = parse("obj.method(x)").unwrap();
     if let Node::Expression(Expr::MethodCall {

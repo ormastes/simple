@@ -231,6 +231,7 @@ impl<'a> MirLowerer<'a> {
                 else_branch,
             } => self.lower_if_expr(condition, then_branch, else_branch, expr_ty),
             HirExprKind::Block(stmts) => self.lower_block_expr(stmts),
+            HirExprKind::UnsafeBlock(stmts) => self.lower_block_expr(stmts),
             HirExprKind::LetIn { local_idx, value, body } => self.lower_let_in_expr(*local_idx, value, body),
         }
     }

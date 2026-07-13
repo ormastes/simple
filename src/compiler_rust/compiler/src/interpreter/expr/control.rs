@@ -274,6 +274,16 @@ pub(super) fn eval_control_expr(
             nodes: nodes.clone(),
             env: Arc::new(env.clone()),
         })),
+        Expr::UnsafeBlock(nodes) => {
+            let (flow, last_value) =
+                super::super::exec_unsafe_block(nodes, env, functions, classes, enums, impl_methods)?;
+            match flow {
+                Control::Return(value) => Err(CompileError::TryError(Box::new(value))),
+                Control::Break(value, _) => Err(CompileError::LoopBreak(value)),
+                Control::Continue(_) => Err(CompileError::LoopContinue),
+                Control::Next => Ok(Some(last_value.unwrap_or(Value::Nil))),
+            }
+        }
         _ => Ok(None),
     }
 }
@@ -383,7 +393,7 @@ fn collect_free_vars_recursive(expr: &Expr, vars: &mut HashSet<String>) {
                 }
             }
         }
-        Expr::DoBlock(nodes) => {
+        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
             for stmt in nodes {
                 if let Node::Expression(e) = stmt {
                     collect_free_vars_recursive(e, vars);

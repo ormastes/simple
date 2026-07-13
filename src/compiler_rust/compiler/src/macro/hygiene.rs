@@ -516,6 +516,15 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
             ctx.pop_scope();
             Expr::DoBlock(statements)
         }
+        Expr::UnsafeBlock(nodes) => {
+            ctx.push_scope();
+            let mut statements = Vec::new();
+            for node in nodes {
+                statements.push(apply_macro_hygiene_node(node, ctx));
+            }
+            ctx.pop_scope();
+            Expr::UnsafeBlock(statements)
+        }
         _ => expr.clone(),
     }
 }

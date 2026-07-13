@@ -285,7 +285,7 @@ impl SymbolUsageAnalyzer {
             }
 
             // Blocks
-            Expr::DoBlock(nodes) => {
+            Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
                 for node in nodes {
                     self.collect_usage_from_node(node, usage);
                 }

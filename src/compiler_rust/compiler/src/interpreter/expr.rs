@@ -228,7 +228,7 @@ fn route_expr(
             ops::eval_op_expr(expr, env, functions, classes, enums, impl_methods).transpose()
         }
         // --- control flow ---
-        Expr::Lambda { .. } | Expr::If { .. } | Expr::Match { .. } | Expr::DoBlock(_) => {
+        Expr::Lambda { .. } | Expr::If { .. } | Expr::Match { .. } | Expr::DoBlock(_) | Expr::UnsafeBlock(_) => {
             control::eval_control_expr(expr, env, functions, classes, enums, impl_methods).transpose()
         }
         // --- calls & field access ---

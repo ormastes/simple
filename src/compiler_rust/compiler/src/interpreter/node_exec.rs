@@ -329,6 +329,10 @@ pub(crate) fn exec_node(
         Node::Context(ctx_stmt) => exec_context(ctx_stmt, env, functions, classes, enums, impl_methods),
         Node::With(with_stmt) => exec_with(with_stmt, env, functions, classes, enums, impl_methods),
         Node::Expression(expr) => {
+            if let Expr::UnsafeBlock(nodes) = expr {
+                let (flow, _) = super::exec_unsafe_block(nodes, env, functions, classes, enums, impl_methods)?;
+                return Ok(flow);
+            }
             if let Expr::FunctionalUpdate { target, method, args } = expr {
                 if let Some((name, new_value)) =
                     handle_functional_update(target, method, args, env, functions, classes, enums, impl_methods)?

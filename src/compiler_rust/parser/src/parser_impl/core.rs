@@ -848,6 +848,16 @@ impl<'a> Parser<'a> {
             // pass_do_nothing, pass_dn, pass_todo, todo — lexed as identifiers but are
             // semantic keywords meaning "no-op / not yet implemented".  Handle them
             // as Pass statements so they don't cause "expected expression, found Indent".
+            TokenKind::Identifier { ref name, .. } if name == "danger" || name == "unsafe" => {
+                if self.peek_is(&TokenKind::Colon) {
+                    self.advance();
+                    self.expect(&TokenKind::Colon)?;
+                    let block = self.parse_block()?;
+                    Ok(Node::Expression(Expr::UnsafeBlock(block.statements)))
+                } else {
+                    self.parse_expression_or_assignment()
+                }
+            }
             TokenKind::Identifier { ref name, .. }
                 if name == "pass_dn" || name == "pass_do_nothing" || name == "pass_todo" || name == "todo" =>
             {

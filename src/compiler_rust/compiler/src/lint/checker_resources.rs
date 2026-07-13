@@ -245,7 +245,7 @@ impl LintChecker {
                 Expr::Lambda { body, .. } => {
                     check_expr_for_close(scope, body);
                 }
-                Expr::DoBlock(stmts) => {
+                Expr::DoBlock(stmts) | Expr::UnsafeBlock(stmts) => {
                     for stmt in stmts {
                         check_stmt_for_resources(scope, stmt);
                     }

@@ -310,7 +310,7 @@ impl I18nExtractor {
                     self.visit_expr(value);
                 }
             }
-            Expr::DoBlock(stmts) => {
+            Expr::DoBlock(stmts) | Expr::UnsafeBlock(stmts) => {
                 for stmt in stmts {
                     self.visit_node(stmt);
                 }

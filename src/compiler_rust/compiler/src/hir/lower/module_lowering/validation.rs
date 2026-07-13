@@ -154,7 +154,7 @@ impl Lowerer {
                     self.check_expr_for_async_calls(else_expr, caller_name, function_suspension)?;
                 }
             }
-            HirExprKind::Block(stmts) => {
+            HirExprKind::Block(stmts) | HirExprKind::UnsafeBlock(stmts) => {
                 for stmt in stmts {
                     self.check_stmt_for_async_calls(stmt, caller_name, function_suspension)?;
                 }

@@ -214,7 +214,7 @@ pub(crate) fn visit_ast_nodes(nodes: &[simple_parser::ast::Node], visitor: &mut 
                 }
             }
             Expr::Lambda { body, .. } => visit_expr(body, visitor),
-            Expr::DoBlock(nodes) => visit_ast_nodes(nodes, visitor),
+            Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => visit_ast_nodes(nodes, visitor),
             Expr::Binary { left, right, .. } => {
                 visit_expr(left, visitor);
                 visit_expr(right, visitor);

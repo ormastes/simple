@@ -1020,7 +1020,7 @@ fn validate_concurrency_api_expr(
                 validate_concurrency_api_expr(file_path, value, ctx, errors);
             }
         }
-        Expr::DoBlock(nodes) => {
+        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
             for node in nodes {
                 validate_concurrency_api_node(file_path, node, ctx, errors);
             }
@@ -1241,7 +1241,7 @@ fn share_nothing_expr(
                 share_nothing_expr(value, globals, locals, reported, violations);
             }
         }
-        Expr::DoBlock(nodes) => {
+        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
             for node in nodes {
                 share_nothing_node(node, globals, locals, reported, violations);
             }

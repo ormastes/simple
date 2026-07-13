@@ -764,6 +764,10 @@ pub enum Expr {
     /// Used for colon-block syntax in BDD DSL: `describe "name": body`
     DoBlock(Vec<Node>),
 
+    /// Lexical unsafe authorization block: `danger:` or canonical `unsafe:`.
+    /// The boundary is retained through HIR, then erased when its body is lowered.
+    UnsafeBlock(Vec<Node>),
+
     // Simple Math literals (#1910-#1969)
     /// Grid literal: grid device="cuda": | row | row |
     GridLiteral {

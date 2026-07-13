@@ -70,7 +70,7 @@ impl LintChecker {
                         check_expr(checker, elem);
                     }
                 }
-                Expr::DoBlock(statements) => {
+                Expr::DoBlock(statements) | Expr::UnsafeBlock(statements) => {
                     for stmt in statements {
                         check_stmt(checker, stmt);
                     }
@@ -359,7 +359,7 @@ impl LintChecker {
                     check_expr(checker, left);
                     check_expr(checker, right);
                 }
-                Expr::DoBlock(stmts) => {
+                Expr::DoBlock(stmts) | Expr::UnsafeBlock(stmts) => {
                     for stmt in stmts {
                         check_stmt(checker, stmt);
                     }

@@ -789,6 +789,28 @@ impl Lowerer {
         })
     }
 
+    /// Lower a lexical unsafe block without turning `return` or loop control
+    /// into a tail value. The marker remains visible to HIR safety passes.
+    pub(super) fn lower_unsafe_block(
+        &mut self,
+        statements: &[simple_parser::ast::Node],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let block = simple_parser::ast::Block {
+            statements: statements.to_vec(),
+            ..Default::default()
+        };
+        let block_stmts = self.lower_block(&block, ctx)?;
+        let result_ty = match block_stmts.last() {
+            Some(crate::hir::HirStmt::Expr(expr)) => expr.ty,
+            _ => TypeId::NIL,
+        };
+        Ok(HirExpr {
+            kind: HirExprKind::UnsafeBlock(block_stmts),
+            ty: result_ty,
+        })
+    }
+
     /// Lower a null coalescing expression (expr ?? default) to HIR
     ///
     /// The `??` operator returns the left operand if it's not nil,

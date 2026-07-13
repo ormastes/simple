@@ -96,7 +96,7 @@ pub(crate) use node_exec::{exec_augmented_assignment, exec_node};
 
 // Block execution
 mod block_exec;
-pub(crate) use block_exec::{exec_block, exec_block_fn};
+pub(crate) use block_exec::{exec_block, exec_block_fn, exec_unsafe_block};
 
 // Public API
 mod public_api;
