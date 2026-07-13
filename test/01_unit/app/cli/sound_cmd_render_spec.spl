@@ -52,6 +52,8 @@ val CLI = "bin/simple src/app/sound/main.spl"
 val OUT_DIR = "build/test-artifacts/sound_cmd"
 val TONE_SDN = OUT_DIR + "/tone.sdn"
 val LOWPASS_SDN = OUT_DIR + "/tone_lowpass.sdn"
+val PITCH_SDN = OUT_DIR + "/tone_pitch.sdn"
+val PITCH_BAD_SDN = OUT_DIR + "/tone_pitch_bad.sdn"
 val BAD_SDN = OUT_DIR + "/malformed.sdn"
 val SEQUENCE_SDN = OUT_DIR + "/sequence.sdn"
 val SEQUENCE_MISSING_SDN = OUT_DIR + "/sequence_missing_clip.sdn"
@@ -68,6 +70,8 @@ fn _write_fixtures() -> bool:
     var ok = write_file(TONE_SDN, "sound:\n  kind: \"sfx\"\n  sample_rate: 8000\n  source: { type: \"tone\", wave: \"sine\", freq_hz: 1000, duration_ms: 1 }\n")
     ok = ok and write_file(LOWPASS_SDN, "sound:\n  kind: \"sfx\"\n  sample_rate: 8000\n  source: { type: \"tone\", wave: \"sine\", freq_hz: 1000, duration_ms: 1 }\n  effects: [ { type: \"lowpass\", cutoff_hz: 200 } ]\n")
     ok = ok and write_file(BAD_SDN, "not sdn at all {{{\n")
+    ok = ok and write_file(PITCH_SDN, "sound:\n  kind: \"sfx\"\n  sample_rate: 8000\n  source: { type: \"tone\", wave: \"sine\", freq_hz: 1000, duration_ms: 1 }\n  effects: [ { type: \"pitch\", pitch: 2.0 } ]\n")
+    ok = ok and write_file(PITCH_BAD_SDN, "sound:\n  kind: \"sfx\"\n  sample_rate: 8000\n  source: { type: \"tone\", wave: \"sine\", freq_hz: 1000, duration_ms: 1 }\n  effects: [ { type: \"pitch\", pitch: 0 } ]\n")
     ok = ok and write_file(REVERB_SDN, "sound:\n  kind: \"sfx\"\n  sample_rate: 8000\n  source: { type: \"tone\", wave: \"sine\", freq_hz: 1000, duration_ms: 100 }\n  effects: [ { type: \"reverb\", room_size: 0.5, wet: 0.3 } ]\n")
     ok = ok and write_file(REVERB_BAD_SDN, "sound:\n  kind: \"sfx\"\n  sample_rate: 8000\n  source: { type: \"tone\", wave: \"sine\", freq_hz: 1000, duration_ms: 1 }\n  effects: [ { type: \"reverb\", room_size: 1.5, wet: 0.3 } ]\n")
     ok
@@ -150,6 +154,26 @@ describe "simple sound render":
         val filtered_peak_hi = filtered_bytes[49] as i64
         val filtered_peak = filtered_peak_lo + filtered_peak_hi * 256
         expect(filtered_peak).to_be_less_than(plain_peak)
+
+    it "applies a pitch effect that halves the frame count at pitch_factor=2.0 (resample-based shift)":
+        step("Render the same 8-frame tone with a pitch=2.0 effect")
+        expect(_write_fixtures()).to_equal(true)
+        val out = OUT_DIR + "/pitched.wav"
+        val r = run_cli("render " + PITCH_SDN + " -o " + out)
+        expect(r.exit_code).to_equal(0)
+
+        step("Then the WAV has half the data frames (4 instead of 8): 44-byte header + 4*2 bytes")
+        val bytes = file_read_bytes(out)
+        expect(bytes.len()).to_equal(52)
+
+    it "exits 1 with a path-qualified error when a pitch effect's pitch is <= 0":
+        step("Render an SDN whose pitch effect has pitch=0")
+        expect(_write_fixtures()).to_equal(true)
+        val r = run_cli("render " + PITCH_BAD_SDN + " -o " + OUT_DIR + "/pitch_never.wav")
+
+        step("Then it fails (exit 1) and names the offending field")
+        val ok = (r.exit_code == 1 and r.stdout.contains("effects[0].pitch"))
+        expect(ok).to_equal(true)
 
     it "produces byte-identical WAV output across two separate reverb render invocations":
         step("Render the same reverb-effect SDN twice to two separate files")

@@ -196,3 +196,77 @@ void rt_audio_set_sound_max_distance(int64_t playback_handle, double distance) {
     if (!s) return;
     ma_sound_set_max_distance(s, (float)distance);
 }
+
+/* ================================================================
+ * Capture (recording) — miniaudio capture device -> WAV file sink
+ *
+ * Single active capture at a time (one static device+encoder), matching
+ * the single static playback engine above. Fail-closed: if no capture
+ * device is available (headless CI, no PulseAudio/ALSA capture node),
+ * ma_device_init fails and rt_audio_capture_start returns 0 before any
+ * file is created — callers must not treat 0 as success.
+ * ================================================================ */
+
+static ma_device  g_capture_device;
+static ma_encoder g_capture_encoder;
+static int        g_capture_active = 0;
+static ma_uint64  g_capture_frames = 0;
+
+static void capture_data_callback(ma_device* device, void* output, const void* input, ma_uint32 frame_count) {
+    (void)device;
+    (void)output;
+    if (!g_capture_active || !input) return;
+    ma_encoder_write_pcm_frames(&g_capture_encoder, input, frame_count, NULL);
+    g_capture_frames += frame_count;
+}
+
+int64_t rt_audio_capture_start(const char* path, int64_t sample_rate, int64_t channels) {
+    if (!path || g_capture_active || sample_rate <= 0 || channels <= 0) return 0;
+
+    /* Open the capture device first: this is the step that fails when
+     * there is no capture hardware/backend (headless CI). Only create the
+     * WAV sink file once a device is confirmed available, so the
+     * no-device path leaves no stray file behind. */
+    ma_device_config dev_config = ma_device_config_init(ma_device_type_capture);
+    dev_config.capture.format   = ma_format_s16;
+    dev_config.capture.channels = (ma_uint32)channels;
+    dev_config.sampleRate       = (ma_uint32)sample_rate;
+    dev_config.dataCallback     = capture_data_callback;
+
+    if (ma_device_init(NULL, &dev_config, &g_capture_device) != MA_SUCCESS) {
+        return 0;
+    }
+
+    ma_encoder_config enc_config = ma_encoder_config_init(
+        ma_encoding_format_wav, ma_format_s16, (ma_uint32)channels, (ma_uint32)sample_rate);
+    if (ma_encoder_init_file(path, &enc_config, &g_capture_encoder) != MA_SUCCESS) {
+        ma_device_uninit(&g_capture_device);
+        return 0;
+    }
+
+    if (ma_device_start(&g_capture_device) != MA_SUCCESS) {
+        ma_encoder_uninit(&g_capture_encoder);
+        ma_device_uninit(&g_capture_device);
+        return 0;
+    }
+
+    g_capture_frames = 0;
+    g_capture_active = 1;
+    return 1;
+}
+
+int64_t rt_audio_capture_is_active(void) {
+    return g_capture_active ? 1 : 0;
+}
+
+int64_t rt_audio_capture_frame_count(void) {
+    return (int64_t)g_capture_frames;
+}
+
+int64_t rt_audio_capture_stop(void) {
+    if (!g_capture_active) return 0;
+    ma_device_uninit(&g_capture_device);
+    ma_encoder_uninit(&g_capture_encoder);
+    g_capture_active = 0;
+    return (int64_t)g_capture_frames;
+}

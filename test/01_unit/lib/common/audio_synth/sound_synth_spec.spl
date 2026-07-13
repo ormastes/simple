@@ -11,8 +11,18 @@
 
 use std.spec.{describe, context, it, expect}
 use std.common.engine.audio.sound_synth.{
-    gen_sine, gen_square, gen_white_noise, apply_adsr, mix, reverb
+    gen_sine, gen_square, gen_white_noise, apply_adsr, mix, reverb,
+    apply_lowpass, apply_highpass, apply_delay, apply_pitch_shift
 }
+
+fn _abs_sum(samples: [f64]) -> f64:
+    var total: f64 = 0.0
+    for s in samples:
+        var v = s
+        if v < 0.0:
+            v = -v
+        total = total + v
+    total
 
 describe "sound_synth gen_sine":
 
@@ -199,3 +209,129 @@ describe "sound_synth reverb":
             val a = reverb(imp, 8000, 0.5, 0.5)
             val b = reverb(imp, 8000, 0.5, 0.5)
             expect(a).to_equal(b)
+
+# ============================================================================
+# apply_lowpass / apply_highpass — one-pole filters, band-selective RMS check
+# ============================================================================
+# Deterministic (no randomness, no device): render a tone well above and a
+# tone well below the cutoff, then compare total |sample| energy — the
+# in-band tone must survive filtering far better than the out-of-band tone.
+
+describe "sound_synth apply_lowpass":
+
+    context "8kHz sample rate, cutoff 100Hz":
+
+        it "attenuates a 3kHz tone (far above cutoff) to under 30% of its input energy":
+            val tone = gen_sine(3000.0, 50.0, 8000)
+            val out = apply_lowpass(tone, 100.0, 8000)
+            val in_energy = _abs_sum(tone)
+            val out_energy = _abs_sum(out)
+            expect(out_energy).to_be_less_than(in_energy * 0.3)
+
+        it "passes a 20Hz tone (far below cutoff) at over 80% of its input energy":
+            val tone = gen_sine(20.0, 50.0, 8000)
+            val out = apply_lowpass(tone, 100.0, 8000)
+            val in_energy = _abs_sum(tone)
+            val out_energy = _abs_sum(out)
+            expect(out_energy).to_be_greater_than(in_energy * 0.8)
+
+        it "the same input at the same cutoff produces byte-identical output (deterministic)":
+            val tone = gen_sine(3000.0, 50.0, 8000)
+            val a = apply_lowpass(tone, 100.0, 8000)
+            val b = apply_lowpass(tone, 100.0, 8000)
+            expect(a).to_equal(b)
+
+describe "sound_synth apply_highpass":
+
+    context "8kHz sample rate, cutoff 300Hz":
+
+        it "attenuates a 20Hz tone (far below cutoff) to under 30% of its input energy":
+            val tone = gen_sine(20.0, 50.0, 8000)
+            val out = apply_highpass(tone, 300.0, 8000)
+            val in_energy = _abs_sum(tone)
+            val out_energy = _abs_sum(out)
+            expect(out_energy).to_be_less_than(in_energy * 0.3)
+
+        it "passes a 3kHz tone (well above cutoff, safely below Nyquist) at over 80% of its input energy":
+            val tone = gen_sine(3000.0, 50.0, 8000)
+            val out = apply_highpass(tone, 300.0, 8000)
+            val in_energy = _abs_sum(tone)
+            val out_energy = _abs_sum(out)
+            expect(out_energy).to_be_greater_than(in_energy * 0.8)
+
+# ============================================================================
+# apply_delay — feedback delay line
+# ============================================================================
+
+describe "sound_synth apply_delay":
+
+    context "unit impulse, 100ms delay @ 1000Hz (100 frames), feedback 0.5":
+
+        it "is silent before the delay tap":
+            val imp = _impulse(300)
+            val out = apply_delay(imp, 100.0, 0.5, 1000)
+            expect(out[50]).to_equal(0.0)
+
+        it "produces the first echo at exactly the delay-frame offset with the feedback amplitude":
+            val imp = _impulse(300)
+            val out = apply_delay(imp, 100.0, 0.5, 1000)
+            expect(out[100]).to_equal(0.5)
+
+        it "produces a second echo two delay-frames out with feedback squared":
+            val imp = _impulse(300)
+            val out = apply_delay(imp, 100.0, 0.5, 1000)
+            expect(out[200]).to_equal(0.25)
+
+# ============================================================================
+# apply_pitch_shift — linear-interpolation resample
+# ============================================================================
+# Exact pinned values (not RMS) since the algorithm is pure linear
+# interpolation over a small synthetic ramp buffer — the output at every
+# index is hand-derivable from `src_pos = i * pitch_factor`.
+
+describe "sound_synth apply_pitch_shift":
+
+    context "ramp buffer [0,1,2,3,4], pitch_factor=2.0 (raise pitch, shorten)":
+
+        it "halves the buffer length (floor(5/2.0) = 2)":
+            val ramp: [f64] = [0.0, 1.0, 2.0, 3.0, 4.0]
+            val out = apply_pitch_shift(ramp, 2.0, 8000)
+            expect(out.len()).to_equal(2)
+
+        it "reads every other input sample exactly (no interpolation needed on this ratio)":
+            val ramp: [f64] = [0.0, 1.0, 2.0, 3.0, 4.0]
+            val out = apply_pitch_shift(ramp, 2.0, 8000)
+            expect(out[0]).to_equal(0.0)
+            expect(out[1]).to_equal(2.0)
+
+    context "ramp buffer [0,1,2,3,4], pitch_factor=0.5 (lower pitch, lengthen)":
+
+        it "doubles the buffer length (floor(5/0.5) = 10)":
+            val ramp: [f64] = [0.0, 1.0, 2.0, 3.0, 4.0]
+            val out = apply_pitch_shift(ramp, 0.5, 8000)
+            expect(out.len()).to_equal(10)
+
+        it "linearly interpolates the halfway points between input samples":
+            val ramp: [f64] = [0.0, 1.0, 2.0, 3.0, 4.0]
+            val out = apply_pitch_shift(ramp, 0.5, 8000)
+            expect(out[0]).to_equal(0.0)
+            expect(out[1]).to_equal(0.5)
+            expect(out[2]).to_equal(1.0)
+            expect(out[3]).to_equal(1.5)
+
+        it "clamps the trailing fractional read at the last input sample instead of reading out of bounds":
+            val ramp: [f64] = [0.0, 1.0, 2.0, 3.0, 4.0]
+            val out = apply_pitch_shift(ramp, 0.5, 8000)
+            expect(out[9]).to_equal(4.0)
+
+    context "edge cases":
+
+        it "returns the input unchanged for pitch_factor <= 0.0":
+            val ramp: [f64] = [0.0, 1.0, 2.0]
+            val out = apply_pitch_shift(ramp, 0.0, 8000)
+            expect(out).to_equal(ramp)
+
+        it "returns an empty buffer unchanged":
+            val empty: [f64] = []
+            val out = apply_pitch_shift(empty, 1.5, 8000)
+            expect(out.len()).to_equal(0)
