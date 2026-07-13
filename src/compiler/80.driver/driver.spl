@@ -22,6 +22,7 @@ use compiler.hir.hir.*
 use compiler.mir.mir.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTypeDef, MirBody}
 use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{par_had_error_get}
 use compiler.frontend.parser_types.*
 use compiler.backend.backend.backend_api.{Backend}
 use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
@@ -627,6 +628,18 @@ pub class CompilerDriver:
                     log_phase("phase2:parse:file:start {source.path} chars={source.content.len()}")
                     val entry_module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
                     log_phase("phase2:parse:file:done {source.path}")
+                    # parser_error() only sets the par_had_error flag (par_errors
+                    # is a dead list and parser_error_count() a stub returning 0);
+                    # nothing in this pipeline ever consumed it, so any parse
+                    # error during the entry parse was silently ignored and the
+                    # build proceeded on the error-recovered AST -- a
+                    # silent-wrong-binary channel (found via the `-> ?i64`
+                    # prefix-type diagnostic being emitted-and-ignored). Read via
+                    # the accessor: interpreted module globals read directly from
+                    # another module are stale. Fail phase 2 on any parse error.
+                    if par_had_error_get():
+                        self.ctx.errors.push("parse error in {source.path} (see [parser_error] output above)")
+                        return false
                     if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
                         dtrace("[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
                     self.ctx.modules[source.module_name] = entry_module
