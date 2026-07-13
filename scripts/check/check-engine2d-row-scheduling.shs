@@ -4,6 +4,9 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+cc_bin="${CC:-cc}"
+extra_cflags="${ENGINE2D_SIMD_C_KERNELS_CFLAGS:-}"
+runner="${ENGINE2D_SIMD_C_KERNELS_RUNNER:-}"
 
 cat >"$tmp/check.c" <<'EOF'
 #include <stdint.h>
@@ -74,15 +77,19 @@ int main(void) {
         free(pixels->items);
         free(pixels);
     }
-    printf("engine2d_fill_4k_serial_ms=%.3f\n", benchmark_fill(3840, 2160, 1));
-    printf("engine2d_fill_4k_parallel_ms=%.3f\n", benchmark_fill(3840, 2160, 8));
-    printf("engine2d_fill_8k_serial_ms=%.3f\n", benchmark_fill(7680, 4320, 1));
-    printf("engine2d_fill_8k_parallel_ms=%.3f\n", benchmark_fill(7680, 4320, 8));
+    if (getenv("ENGINE2D_ROW_SCHEDULING_SKIP_PERF") == NULL) {
+        printf("engine2d_fill_4k_serial_ms=%.3f\n", benchmark_fill(3840, 2160, 1));
+        printf("engine2d_fill_4k_parallel_ms=%.3f\n", benchmark_fill(3840, 2160, 8));
+        printf("engine2d_fill_8k_serial_ms=%.3f\n", benchmark_fill(7680, 4320, 1));
+        printf("engine2d_fill_8k_parallel_ms=%.3f\n", benchmark_fill(7680, 4320, 8));
+    }
     puts("engine2d_row_scheduling=true");
     return 0;
 }
 EOF
 
-cc -std=gnu11 -O2 -ffunction-sections -fdata-sections -I"$root/src/runtime" \
+# shellcheck disable=SC2086
+$cc_bin $extra_cflags -std=gnu11 -O2 -ffunction-sections -fdata-sections -I"$root/src/runtime" \
     "$tmp/check.c" -Wl,--gc-sections -pthread -ldl -o "$tmp/check"
-"$tmp/check"
+# shellcheck disable=SC2086
+$runner "$tmp/check"
