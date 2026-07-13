@@ -93,13 +93,17 @@ unmanaged/CFF faces, absent mappings, stale wrappers, and malformed nonzero
 handles fail closed. Native success remains unchanged, no per-glyph file I/O
 occurs, and close releases the retained bytes. No coverage cell is promoted.
 
-The manifest scenario now prepares exact `CORPUS.sdn` codepoint and raster
+The manifest scenario prepares exact `CORPUS.sdn` codepoint and raster
 witnesses for all 16 candidates, including Bengali rank 11 and Noto Emoji
-`U+1F600`. This is evidence preparation only: the audit found no cell eligible
-for promotion until a bound Pure Simple shaping acceptance run succeeds. The
-matrix therefore remains 0 `native`, 0 `fallback`, 26
-`not-designed-for-script`, and 74 `unavailable`. Promotion requires the
-executable, exact-face-bound shaping gate named in the system-test plan.
+`U+1F600`. The exact-face-bound interpreter shaping gate now passes for 55
+simple-script cells, so the matrix totals are 54 `native`, 1 `fallback`, 26
+`not-designed-for-script`, and 19 `unavailable`. An accepted simple cell means
+the exact pinned face stayed live, parsed cmap and runtime glyph IDs agreed for
+the exact language witness, bounded hmtx advances matched, shaping completed,
+and canonical material was produced. The sole fallback is Chinese `mono`:
+live Noto Sans Mono misses `中文`, and the explicit chain selects live Noto Sans
+SC while retaining the Mono request. Arabic, Urdu, and Devanagari completion,
+emoji/category acceptance, and GPU execution remain outside this promotion.
 
 ## Current shared material
 
@@ -137,8 +141,9 @@ rasterization/metrics; none is shaping evidence. System HarfBuzz is not a
 declared uniformly available dependency, and Rustybuzz is not added under
 the selected Pure Simple contract.
 The OpenType parser now supports validated Unicode cmap formats 4 and 12,
-including bundled Noto Emoji `U+1F600`. Mixed-face fallback is not accepted yet
-because complete per-script GSUB/GPOS and corpus evidence are still missing.
+including bundled Noto Emoji `U+1F600`. Mixed-face fallback is accepted only
+for the exact Chinese-mono-to-Noto-Sans-SC row; broader per-script fallback
+still requires complete GSUB/GPOS and corpus evidence.
 The shaper binds OpenType data by exact fallback face handle/generation; an
 unbound or stale attached face never borrows another face's blob.
 
@@ -165,7 +170,7 @@ carries a revocable generation token rather than a native face pointer. The
 canonical renderer rejects mismatched or freed face handle/generation pairs and keys cache/atlas
 entries by face + lifetime generation + glyph index + size. This is a bounded
 renderer seam, not complete mixed-face GSUB/GPOS or automatic `draw_text`
-shaping. The sparse matrix remains unchanged until executable corpus acceptance.
+shaping. The accepted simple subset is the 54/1 matrix evidence above.
 
 REQ-009 is partial: selected checksum/default-axis identity now fences the
 whole glyph cache and atlas, stats expose that identity, and generation-bound

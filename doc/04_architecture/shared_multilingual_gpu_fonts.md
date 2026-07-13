@@ -19,13 +19,13 @@ plugin interface, renderer factory, or new native dependency.
 
 | Existing path | Kept responsibility |
 |---|---|
-| `src/lib/common/encoding/font_registry.spl` | Static pinned language/category/candidate catalog; CLDR regeneration and candidate acceptance remain gates. |
+| `src/lib/common/encoding/font_registry.spl` | Static pinned language/category catalog; nine simple-script families are accepted for exact tuples while seven complex/emoji candidates remain gated. |
 | `src/lib/common/encoding/font_cldr_rank.spl` | Targeted, exact-arithmetic CLDR ranking core with fixture evidence; validating XML input and pinned-source replay remain gates. |
 | `src/lib/common/encoding/sfnt.spl` | Neutral sfnt directory/fvar owner and typed default-`glyf` preflight shared by both production loaders; the old Skia parser modules are compatibility re-exports. |
 | `src/lib/common/gpu/font_atlas_composite.spl` | Shared atlas subrect/color material plus exact OpenCL and Metal kernel sources used by compiler emission and runtime adapters. |
 | `src/lib/nogc_sync_mut/text_layout/font_types.spl` | Canonical shared values; gains `FontGlyphRun`, `FontRenderQuad`, and `FontRenderBatch`. `FontGlyphRun` carries the exact revocable face handle/generation pair plus logical codepoint clusters; consumers validate liveness and never dereference the handle directly. |
 | `src/lib/nogc_sync_mut/text_layout/font_renderer.spl` | Canonical renderer, glyph cache, CPU payload; gains `prepare_text`, the bound glyph-run adapter, and fail-closed sfnt preflight before native loading. |
-| `src/lib/skia/feature/shaper/shaper.spl` and `src/lib/skia/feature/text/bidi.spl` | Existing incomplete Pure Simple shaping/BiDi owners; exact per-fallback-face `OtFont` binding plus glyph/source/cluster/language/current-placement metadata are present. Complex runs fail closed while GSUB/GPOS, canonical language handling, corpus acceptance, and full BiDi remain gates. |
+| `src/lib/skia/feature/shaper/shaper.spl` and `src/lib/skia/feature/text/bidi.spl` | Existing Pure Simple shaping/BiDi owners; exact per-fallback-face `OtFont` binding plus glyph/source/cluster/language/current-placement metadata are present. No-feature Latin/Han/Cyrillic corpus acceptance passed; complex/emoji shaping, GSUB/GPOS, canonical language handling, and full BiDi remain gated. |
 | `src/compiler/70.backend/backend/gpu_portable_compute.spl` | Portable CUDA/HIP/OpenCL/Metal/WGSL artifacts; gains the atlas-composite emitter. |
 | `src/compiler/70.backend/backend/gpu_generated_2d_contract.spl` | Version, symbol, compile-plan, and artifact evidence. |
 | `src/lib/gc_async_mut/gpu/engine2d/engine.spl` | Existing `load_font`/`draw_text` adapter and backend submission. |

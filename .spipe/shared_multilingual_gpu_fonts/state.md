@@ -562,3 +562,22 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   software without retrying unsafe resources. Conditional evidence remains
   unrun here, explicit fence/device identity is unavailable, and
   `promotion_ready` stays false.
+- simple shaping acceptance execution: `bin/release/simple test
+  test/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.spl
+  --mode=interpreter` completed with exit status 0 and no stdout. The source
+  contains four scenarios; no passed-case count is inferred. Exact live-face,
+  cmap/runtime ID, hmtx advance, material, missing/stale, and Chinese Mono-to-SC
+  fallback checks establish 54 `native`, 1 `fallback`, 26
+  `not-designed-for-script`, and 19 `unavailable` evidence cells. REQ-007 is
+  now 2/3: full Arabic/Urdu/Devanagari GSUB/GPOS/BiDi completion remains open.
+  This changes no GPU/native-execution claim; Vulkan promotion remains false
+  and native Engine3D evidence remains pending.
+- post-promotion registry gates: `bin/release/simple test
+  test/01_unit/lib/common/encoding/font_asset_manifest_spec.spl
+  --mode=interpreter` and `bin/release/simple test
+  test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl
+  --mode=interpreter` each completed with exit status 0 and no stdout. No
+  passed-case count is inferred. The unit gate supports exact registry mapping,
+  totals, and accepted-family metadata; the system command is the manifest
+  manual's recorded run. These passes preserve 54/1/26/19 and do not satisfy
+  complex shaping, native GPU readback, or Engine3D promotion.

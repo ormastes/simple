@@ -52,7 +52,7 @@ behavior.
 | REQ-004 | `shared_font_manifest_spec.spl` | complete license metadata; checksum/table validation; missing field rejection | 3 |
 | REQ-005 | `shared_font_manifest_spec.spl` | pinned catalog revision; unchanged accepted bytes; corpus rejection | 3 |
 | REQ-006 | `shared_font_surfaces_spec.spl` | one owner; identical batch identity; no duplicate material cache | 3 |
-| REQ-007 | `shared_font_shaping_acceptance_spec.spl` | exact-face Latin/Han/Cyrillic oracle; missing/stale rejection; Arabic/Devanagari fail-closed guard | 0/3 |
+| REQ-007 | `shared_font_shaping_acceptance_spec.spl` | exact-face simple-script oracle; missing/stale rejection; complete Arabic/Devanagari/Urdu shaping | 2/3 |
 | REQ-008 | `shared_font_manifest_spec.spl` | compound/default-glyf corpus reconstruction; unsupported-format/axis rejection and bitmap fixture pending | 1/3 |
 | REQ-009 | `shared_font_surfaces_spec.spl` | key separation; bounded eviction/counters; generation/dirty regions | 3 |
 | REQ-010 | `gpu_font_emission_spec.spl` | five source targets; Vulkan contract; deterministic failures/hashes | 3 |
@@ -76,7 +76,7 @@ behavior.
 
 - Manifest oracle: source hashes, expected manifest hash, exact ordered IDs,
   full contribution recomputation, and cutoff evidence.
-- Shaping oracle: a selected asset's live handle/generation, parsed owned bytes,
+- Shaping oracle: a selected asset's live handle/generation, independently parsed pinned bytes,
   exact-face run metadata, canonical material, and stale-face rejection.
 - Surface oracle: shaped glyph/cluster records and identical batch/atlas identity
   before structured 2D/3D object evidence.

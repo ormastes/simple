@@ -435,7 +435,7 @@ class FontAssetCandidate:
 
 fn _font_candidate_coverage_state(upstream_path: text) -> text:
     if upstream_path.contains("notosanssc/") or upstream_path.contains("notoserifsc/"):
-        return "candidate: exact CORPUS witness cmap verified for en,zh,es,fr,pt,ru,id; executable Simple shaping acceptance pending"
+        return "accepted-simple: exact Pure Simple identity shaping accepted for en,zh,es,fr,pt,ru,id"
     if upstream_path.contains("devanagari/"):
         return "candidate: exact CORPUS witness cmap verified for en,es,hi,fr,pt,id; executable Simple shaping acceptance pending"
     if upstream_path.contains("arabic/"):
@@ -443,12 +443,12 @@ fn _font_candidate_coverage_state(upstream_path: text) -> text:
     if upstream_path.contains("bengali/"):
         return "candidate: exact rank-11 CORPUS witness cmap verified for bn; executable Simple shaping acceptance pending"
     if upstream_path.contains("notosansmono/"):
-        return "candidate: exact CORPUS witness cmap verified for en,es,fr,pt,ru,id; executable Simple shaping acceptance pending"
+        return "accepted-simple: exact Pure Simple identity shaping accepted for en,es,fr,pt,ru,id"
     if upstream_path.contains("bungee/") or upstream_path.contains("unifrakturcook/"):
-        return "candidate: exact CORPUS witness cmap verified for en,es,fr,pt,id; executable Simple shaping acceptance pending"
+        return "accepted-simple: exact Pure Simple identity shaping accepted for en,es,fr,pt,id"
     if (upstream_path.contains("nunito/") or upstream_path.contains("caveat/") or
         upstream_path.contains("robotoslab/") or upstream_path.contains("pixelifysans/")):
-        return "candidate: exact CORPUS witness cmap verified for en,es,fr,pt,ru,id; executable Simple shaping acceptance pending"
+        return "accepted-simple: exact Pure Simple identity shaping accepted for en,es,fr,pt,ru,id"
     if upstream_path.contains("notoemoji/"):
         return "candidate: exact CORPUS U+1F600 format-12 cmap verified; executable Simple shaping acceptance pending"
     "candidate: exact CORPUS witness cmap pending; executable Simple shaping acceptance pending"
@@ -618,28 +618,46 @@ fn _font_script_face(language: text, category: text) -> text:
     if language == "ar" or language == "ur": return "Noto Naskh Arabic"
     "Noto Serif SC"
 
-fn _font_coverage_status(language: text, category: text) -> text:
-    if category == "display" or category == "blackletter":
-        if not _font_language_is_latin(language): return "not-designed-for-script"
-    if (category == "rounded" or category == "handwriting" or category == "slab" or category == "pixel"):
-        if not _font_language_is_latin_or_cyrillic(language): return "not-designed-for-script"
-    # Candidate bytes are present, but exact shaping/corpus acceptance is
-    # pending. Promotion changes this to native/fallback only after that gate.
-    "unavailable"
+fn selected_font_simple_tuple_accepted(family: text, language: text) -> bool:
+    if family == "Noto Sans SC" or family == "Noto Serif SC":
+        return language == "en" or language == "zh" or language == "es" or language == "fr" or language == "pt" or language == "ru" or language == "id"
+    if family == "Bungee" or family == "UnifrakturCook":
+        return _font_language_is_latin(language)
+    if (family == "Noto Sans Mono" or family == "Nunito" or family == "Caveat" or
+        family == "Roboto Slab" or family == "Pixelify Sans"):
+        return _font_language_is_latin_or_cyrillic(language)
+    false
 
-fn _font_coverage_witness(language: text, category: text, status: text) -> text:
+fn _font_direct_category_face(language: text, category: text) -> text:
     if category == "sans" or category == "serif": return _font_script_face(language, category)
-    if category == "emoji": return "Noto Emoji"
-    if category == "mono":
-        if status == "native": return "Noto Sans Mono"
-        return _font_script_face(language, "sans")
-    if status != "native": return ""
+    if category == "mono": return "Noto Sans Mono"
     if category == "display": return "Bungee"
     if category == "rounded": return "Nunito"
     if category == "handwriting": return "Caveat"
     if category == "slab": return "Roboto Slab"
     if category == "blackletter": return "UnifrakturCook"
-    "Pixelify Sans"
+    if category == "pixel": return "Pixelify Sans"
+    "Noto Emoji"
+
+class FontCoverageResolution:
+    status: text
+    witness_family: text
+
+fn _font_coverage_resolution(language: text, category: text) -> FontCoverageResolution:
+    if category == "display" or category == "blackletter":
+        if not _font_language_is_latin(language):
+            return FontCoverageResolution(status: "not-designed-for-script", witness_family: "")
+    if (category == "rounded" or category == "handwriting" or category == "slab" or category == "pixel"):
+        if not _font_language_is_latin_or_cyrillic(language):
+            return FontCoverageResolution(status: "not-designed-for-script", witness_family: "")
+    val direct = _font_direct_category_face(language, category)
+    if selected_font_simple_tuple_accepted(direct, language):
+        return FontCoverageResolution(status: "native", witness_family: direct)
+    if language == "zh" and category == "mono":
+        val fallback = _font_script_face(language, "sans")
+        if selected_font_simple_tuple_accepted(fallback, language):
+            return FontCoverageResolution(status: "fallback", witness_family: fallback)
+    FontCoverageResolution(status: "unavailable", witness_family: "")
 
 fn selected_font_coverage_matrix() -> [FontCoverageCell]:
     """Return the complete language-major 10x10 sparse coverage matrix."""
@@ -652,18 +670,20 @@ fn selected_font_coverage_matrix() -> [FontCoverageCell]:
         while category_index < categories.len():
             val language = languages[language_index]
             val category = categories[category_index]
-            val status = _font_coverage_status(language, category)
+            val resolution = _font_coverage_resolution(language, category)
             cells.push(FontCoverageCell(
-                language: language, category: category, status: status,
-                witness_family: _font_coverage_witness(language, category, status)
+                language: language, category: category, status: resolution.status,
+                witness_family: resolution.witness_family
             ))
             category_index = category_index + 1
         language_index = language_index + 1
     cells
 
 fn selected_font_coverage_cell(language: text, category: text) -> FontCoverageCell?:
-    """Resolve exact policy; witness_family is evidence, not asset acceptance."""
+    """Resolve exact accepted-simple policy for one known matrix axis pair."""
     for cell in selected_font_coverage_matrix():
         if cell.language == language and cell.category == category:
             return cell
     nil
+
+export selected_font_simple_tuple_accepted

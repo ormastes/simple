@@ -11,13 +11,13 @@ use std.spec.*
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates}
 use std.common.encoding.utf8.{text_codepoints}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
-use std.nogc_sync_mut.io.font_sffi.{FontHandle, load_font, free_font, glyph_index}
+use std.nogc_sync_mut.io.font_sffi.{FontHandle, load_font, free_font, glyph_index, font_face_is_live}
 use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
 use std.skia.entity.font.{SkFont, sk_font_new, sk_font_style_normal, sk_typeface_from_attached_font}
 use std.skia.feature.glyph.ot_parser.{OtFont, find_table, parse_offset_table, read_u16_be}
 use std.skia.feature.glyph.ot_parser_cmap.{cmap_glyph_id}
 use std.skia.feature.glyph.ot_parser_metrics.{parse_hmtx}
-use std.skia.feature.shaper.font_fallback.{fallback_chain_new}
+use std.skia.feature.shaper.font_fallback.{fallback_chain_new, fallback_chain_add}
 use std.skia.feature.shaper.shaper.{ShapedRun, Shaper, shaper_new, shaper_with_ot_face, shaper_shape_with_language, shaped_run_to_font_glyph_run}
 use std.skia.feature.shaper.script_detect.{Script}
 
@@ -28,6 +28,59 @@ class SelectedShapingFixture:
     parsed: OtFont
     shaper: Shaper
     renderer: FontRenderer
+
+class SimpleShapingRow:
+    language: text
+    category: text
+    proposed_status: text
+    family: text
+    witness: text
+    script: Script
+
+fn _simple_row(language: text, category: text, proposed_status: text, family: text) -> SimpleShapingRow:
+    if language == "en": return SimpleShapingRow(language: language, category: category, proposed_status: proposed_status, family: family, witness: "English", script: Script.Latin)
+    if language == "zh": return SimpleShapingRow(language: language, category: category, proposed_status: proposed_status, family: family, witness: "中文", script: Script.CJK)
+    if language == "es": return SimpleShapingRow(language: language, category: category, proposed_status: proposed_status, family: family, witness: "Español", script: Script.Latin)
+    if language == "fr": return SimpleShapingRow(language: language, category: category, proposed_status: proposed_status, family: family, witness: "français", script: Script.Latin)
+    if language == "pt": return SimpleShapingRow(language: language, category: category, proposed_status: proposed_status, family: family, witness: "Português", script: Script.Latin)
+    if language == "ru": return SimpleShapingRow(language: language, category: category, proposed_status: proposed_status, family: family, witness: "Русский", script: Script.Cyrillic)
+    if language == "id": return SimpleShapingRow(language: language, category: category, proposed_status: proposed_status, family: family, witness: "Indonesia", script: Script.Latin)
+    fail("unsupported simple shaping language: " + language)
+
+fn _simple_rows(category: text, proposed_status: text, family: text, languages: [text]) -> [SimpleShapingRow]:
+    var rows: [SimpleShapingRow] = []
+    for language in languages:
+        rows.push(_simple_row(language, category, proposed_status, family))
+    rows
+
+fn simple_shaping_acceptance_rows() -> [SimpleShapingRow]:
+    var rows: [SimpleShapingRow] = []
+    for row in _simple_rows("sans", "native", "Noto Sans SC", ["en", "zh", "es", "fr", "pt", "ru", "id"]):
+        rows.push(row)
+    for row in _simple_rows("serif", "native", "Noto Serif SC", ["en", "zh", "es", "fr", "pt", "ru", "id"]):
+        rows.push(row)
+    for row in _simple_rows("mono", "native", "Noto Sans Mono", ["en", "es", "fr", "pt", "ru", "id"]):
+        rows.push(row)
+    rows.push(_simple_row("zh", "mono", "fallback", "Noto Sans SC"))
+    for row in _simple_rows("display", "native", "Bungee", ["en", "es", "fr", "pt", "id"]):
+        rows.push(row)
+    for row in _simple_rows("rounded", "native", "Nunito", ["en", "es", "fr", "pt", "ru", "id"]):
+        rows.push(row)
+    for row in _simple_rows("handwriting", "native", "Caveat", ["en", "es", "fr", "pt", "ru", "id"]):
+        rows.push(row)
+    for row in _simple_rows("slab", "native", "Roboto Slab", ["en", "es", "fr", "pt", "ru", "id"]):
+        rows.push(row)
+    for row in _simple_rows("blackletter", "native", "UnifrakturCook", ["en", "es", "fr", "pt", "id"]):
+        rows.push(row)
+    for row in _simple_rows("pixel", "native", "Pixelify Sans", ["en", "es", "fr", "pt", "ru", "id"]):
+        rows.push(row)
+    rows
+
+fn _simple_row_for_cell(rows: [SimpleShapingRow], language: text,
+                        category: text) -> SimpleShapingRow:
+    for row in rows:
+        if row.language == language and row.category == category: return row
+    fail("missing simple shaping cell: " + language + "/" + category)
 
 fn _selected_face(family: text) -> FontAssetCandidate:
     for asset in selected_font_asset_candidates():
@@ -56,6 +109,19 @@ fn setup_selected_shaping_face(family: text) -> SelectedShapingFixture:
         owned.handle, ot_font)
     SelectedShapingFixture(asset: asset, handle: owned, font: font, parsed: ot_font, shaper: shaper,
         renderer: FontRenderer.with_ttf(owned.handle))
+
+fn _fixture_for_family(fixtures: [SelectedShapingFixture], family: text) -> SelectedShapingFixture:
+    for fixture in fixtures:
+        if fixture.asset.family == family: return fixture
+    fail("missing loaded shaping fixture: " + family)
+
+fn _zh_mono_fallback_fixture(primary: SelectedShapingFixture,
+                             fallback: SelectedShapingFixture) -> SelectedShapingFixture:
+    val chain = fallback_chain_add(fallback_chain_new(primary.font), fallback.font)
+    val with_primary = shaper_with_ot_face(shaper_new(chain), primary.handle.handle, primary.parsed)
+    val with_fallback = shaper_with_ot_face(with_primary, fallback.handle.handle, fallback.parsed)
+    SelectedShapingFixture(asset: fallback.asset, handle: fallback.handle, font: primary.font,
+        parsed: fallback.parsed, shaper: with_fallback, renderer: fallback.renderer)
 
 fn _exact_advance(font: OtFont, glyph_id: u32, size: f64) -> f64:
     val head = find_table(font, 1751474532u32)
@@ -114,28 +180,70 @@ fn expect_complex_run_pending(fixture: SelectedShapingFixture, content: text, la
         expect(run.positioning_complete).to_be(false)
         expect(shaped_run_to_font_glyph_run(run).valid).to_be(false)
 
-describe "shared font shaping acceptance":
-    # @req REQ-007
-    it "should bind a simple shaped run and material to the exact selected face":
-        step("Accept exact-face-bound simple-script shaping")
-        val fixture = setup_selected_shaping_face("Bungee")
-        val run = expect_simple_identity_run(fixture, "English", "en", Script.Latin)
-        val glyph_run = shaped_run_to_font_glyph_run(run)
-        expect(glyph_run.valid).to_be(true)
-        val batch = fixture.renderer.prepare_glyph_run(glyph_run, 0xFFFFFFFFu32, 32)
-        expect(batch.valid).to_be(true)
-        expect(batch.face_generation).to_equal(fixture.handle.generation)
-        expect(batch.quads.len()).to_equal(run.glyph_ids.len())
-        free_font(fixture.handle)
+fn expect_simple_row_material(fixture: SelectedShapingFixture, row: SimpleShapingRow):
+    expect(fixture.asset.family).to_equal(row.family)
+    val run = expect_simple_identity_run(fixture, row.witness, row.language, row.script)
+    val glyph_run = shaped_run_to_font_glyph_run(run)
+    expect(glyph_run.valid).to_be(true)
+    val batch = fixture.renderer.prepare_glyph_run(glyph_run, 0xFFFFFFFFu32, 32)
+    expect(batch.valid).to_be(true)
+    expect(batch.face_generation).to_equal(fixture.handle.generation)
+    expect(batch.quads.len()).to_equal(run.glyph_ids.len())
 
-    # @req REQ-007
-    it "should accept exact corpus Han and Cyrillic identity runs":
-        val fixture = setup_selected_shaping_face("Noto Sans SC")
-        val han = expect_simple_identity_run(fixture, "中文", "zh", Script.CJK)
-        val cyrillic = expect_simple_identity_run(fixture, "Русский", "ru", Script.Cyrillic)
-        expect(shaped_run_to_font_glyph_run(han).valid).to_be(true)
-        expect(shaped_run_to_font_glyph_run(cyrillic).valid).to_be(true)
-        free_font(fixture.handle)
+describe "shared font shaping acceptance":
+    # @req REQ-003 REQ-007
+    it "should accept every proposed simple-script matrix cell without promoting policy":
+        step("Accept the complete exact-face simple-script matrix")
+        val rows = simple_shaping_acceptance_rows()
+        expect(rows.len()).to_equal(55)
+        var native_count: i64 = 0
+        var fallback_count: i64 = 0
+        var keys: [text] = []
+        for row in rows:
+            val key = row.language + "/" + row.category
+            expect(keys.contains(key)).to_be(false)
+            keys.push(key)
+            if row.proposed_status == "native": native_count = native_count + 1
+            elif row.proposed_status == "fallback": fallback_count = fallback_count + 1
+            else: fail("unsupported proposed shaping status: " + row.proposed_status)
+        expect(native_count).to_equal(54)
+        expect(fallback_count).to_equal(1)
+
+        val fixtures = [
+            setup_selected_shaping_face("Noto Sans SC"),
+            setup_selected_shaping_face("Noto Serif SC"),
+            setup_selected_shaping_face("Noto Sans Mono"),
+            setup_selected_shaping_face("Bungee"),
+            setup_selected_shaping_face("Nunito"),
+            setup_selected_shaping_face("Caveat"),
+            setup_selected_shaping_face("Roboto Slab"),
+            setup_selected_shaping_face("UnifrakturCook"),
+            setup_selected_shaping_face("Pixelify Sans")
+        ]
+        for fixture in fixtures:
+            expect(font_face_is_live(fixture.handle.handle, fixture.handle.generation)).to_be(true)
+        for row in rows:
+            if row.proposed_status == "native":
+                expect_simple_row_material(_fixture_for_family(fixtures, row.family), row)
+
+        val mono = _fixture_for_family(fixtures, "Noto Sans Mono")
+        val sc = _fixture_for_family(fixtures, "Noto Sans SC")
+        expect(mono.handle.handle == sc.handle.handle).to_be(false)
+        expect(font_face_is_live(mono.handle.handle, mono.handle.generation)).to_be(true)
+        expect(font_face_is_live(sc.handle.handle, sc.handle.generation)).to_be(true)
+        for codepoint in _codepoints("中文"):
+            expect(cmap_glyph_id(mono.parsed, codepoint)).to_equal(0u32)
+            expect(glyph_index(mono.handle, codepoint as i64)).to_equal(0)
+            expect(cmap_glyph_id(sc.parsed, codepoint) == 0u32).to_be(false)
+            expect(glyph_index(sc.handle, codepoint as i64) > 0).to_be(true)
+        val fallback_fixture = _zh_mono_fallback_fixture(mono, sc)
+        val fallback_row = _simple_row_for_cell(rows, "zh", "mono")
+        expect(fallback_row.proposed_status).to_equal("fallback")
+        expect(fallback_row.family).to_equal("Noto Sans SC")
+        expect_simple_row_material(fallback_fixture, fallback_row)
+        expect(font_face_is_live(mono.handle.handle, mono.handle.generation)).to_be(true)
+
+        for fixture in fixtures: free_font(fixture.handle)
 
     # @req REQ-007
     it "should reject a selected-face missing glyph":

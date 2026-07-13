@@ -12,7 +12,7 @@ use std.nogc_sync_mut.sffi.io.{file_exists, file_read_text, file_read_bytes}
 use std.nogc_sync_mut.sffi.package.{package_sha256}
 use std.nogc_sync_mut.sffi.spl_fonts.{FontRasterizer}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_dylib_candidates}
-use std.common.encoding.font_registry.{FontAssetCandidate, FontCoverageCell, selected_font_language_ranking_source, font_language_ranking_evidence, selected_font_language_ranks, selected_font_asset_candidates, selected_font_coverage_languages, selected_font_coverage_categories, selected_font_coverage_matrix}
+use std.common.encoding.font_registry.{FontAssetCandidate, FontCoverageCell, selected_font_language_ranking_source, font_language_ranking_evidence, selected_font_language_ranks, selected_font_asset_candidates, selected_font_coverage_languages, selected_font_coverage_categories, selected_font_coverage_matrix, selected_font_simple_tuple_accepted}
 use std.common.encoding.font_cldr_rank.{CldrLanguagePopulationRow, cldr_scan_language_population, cldr_rank_languages, cldr_serialize_language_totals}
 use std.common.encoding.sfnt.{validate_default_glyf_font, sfnt_manifest_tables_match, sfnt_manifest_default_axes_match, sfnt_manifest_names_match}
 use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, parse_offset_table, find_table, read_u16_be, read_i16_be, read_u32_be}
@@ -102,10 +102,43 @@ fn expect_language_coverage(cells: [FontCoverageCell]):
         elif cell.status == "fallback": fallback_count = fallback_count + 1
         elif cell.status == "not-designed-for-script": not_designed_count = not_designed_count + 1
         elif cell.status == "unavailable": unavailable_count = unavailable_count + 1
-    expect(native_count).to_equal(0)
-    expect(fallback_count).to_equal(0)
+    expect(native_count).to_equal(54)
+    expect(fallback_count).to_equal(1)
     expect(not_designed_count).to_equal(26)
-    expect(unavailable_count).to_equal(74)
+    expect(unavailable_count).to_equal(19)
+    val assets = selected_font_asset_candidates()
+    var promoted: i64 = 0
+    for cell in cells:
+        if cell.status == "native" or cell.status == "fallback":
+            promoted = promoted + 1
+            expect(cell.witness_family.len()).to_be_greater_than(0)
+            expect(selected_font_simple_tuple_accepted(cell.witness_family, cell.language)).to_be(true)
+            var matches: i64 = 0
+            for asset in assets:
+                if asset.family == cell.witness_family:
+                    matches = matches + 1
+                    expect(asset.coverage_state).to_start_with("accepted-simple:")
+            expect(matches).to_equal(1)
+        else:
+            expect(cell.witness_family).to_equal("")
+    expect(promoted).to_equal(55)
+    for asset in assets:
+        if asset.coverage_state.starts_with("accepted-simple:"):
+            var tuple_count: i64 = 0
+            var accepted_language_list = ""
+            for language in selected_font_coverage_languages():
+                if selected_font_simple_tuple_accepted(asset.family, language):
+                    tuple_count = tuple_count + 1
+                    if accepted_language_list != "": accepted_language_list = accepted_language_list + ","
+                    accepted_language_list = accepted_language_list + language
+                    var witnessed = false
+                    for cell in cells:
+                        if (cell.language == language and cell.witness_family == asset.family and
+                            (cell.status == "native" or cell.status == "fallback")):
+                            witnessed = true
+                    expect(witnessed).to_be(true)
+            expect(tuple_count).to_be_greater_than(0)
+            expect(asset.coverage_state).to_equal("accepted-simple: exact Pure Simple identity shaping accepted for " + accepted_language_list)
 
 fn expect_candidate_witness(assets: [FontAssetCandidate], family: text, witness: text):
     var found = false
@@ -113,7 +146,8 @@ fn expect_candidate_witness(assets: [FontAssetCandidate], family: text, witness:
     for asset in assets:
         if asset.family == family:
             found = true
-            expect(asset.coverage_state).to_start_with("candidate:")
+            expect(asset.coverage_state.starts_with("candidate:") or
+                asset.coverage_state.starts_with("accepted-simple:")).to_be(true)
             for dylib_path in browser_font_dylib_candidates():
                 val rasterizer = FontRasterizer.load(dylib_path, asset.local_path)
                 if rasterizer != nil:
@@ -350,13 +384,20 @@ describe "shared multilingual font manifest":
         expect(exercised).to_be(true)
 
     # @req REQ-005
-    it "should keep candidates provisional while checking exact corpus codepoints and rasters":
-        step("Check every candidate against its exact CORPUS codepoints without claiming shaping acceptance")
+    it "should bind accepted-simple policy to the exact candidate corpus":
+        step("Check every candidate against its exact CORPUS codepoints and accepted-simple policy")
         val assets = setup_shared_font_fixture()
+        var accepted_simple: i64 = 0
+        var candidate: i64 = 0
         for asset in assets:
-            expect(asset.coverage_state).to_start_with("candidate:")
-            expect(asset.coverage_state).to_contain("executable Simple shaping acceptance pending")
-            expect(asset.coverage_state.contains("accepted")).to_be(false)
+            if asset.coverage_state.starts_with("accepted-simple:"):
+                accepted_simple = accepted_simple + 1
+            elif asset.coverage_state.starts_with("candidate:"):
+                candidate = candidate + 1
+            else:
+                fail("unknown coverage state: " + asset.coverage_state)
+        expect(accepted_simple).to_equal(9)
+        expect(candidate).to_equal(7)
         expect_candidate_witness(assets, "Noto Sans SC", "English中文EspañolfrançaisPortuguêsРусскийIndonesia")
         expect_candidate_witness(assets, "Noto Sans Devanagari", "EnglishEspañolहिन्दीfrançaisPortuguêsIndonesia")
         expect_candidate_witness(assets, "Noto Sans Arabic", "EnglishEspañolالعربيةfrançaisPortuguêsاردوIndonesia")

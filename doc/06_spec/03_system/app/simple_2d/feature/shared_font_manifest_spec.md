@@ -1,8 +1,18 @@
 # Shared Multilingual Font Manifest Specification
 
-> **Manual draft — pending canonical `spipe-docgen`.** This document mirrors
-> the current executable SSpec for review while the pure-Simple compiler build
-> is in progress. It is not generated-run evidence and does not claim a PASS.
+> **Hand-maintained mirror — pending canonical `spipe-docgen`.** The executable
+> SSpec passed; this file records that run without claiming generated provenance.
+
+Status: **PASS**.
+
+Executed command:
+
+```text
+bin/release/simple test test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl --mode=interpreter
+```
+
+The process completed with exit status 0 and no stdout. No per-scenario passed
+count is inferred from the silent runner output.
 
 Executable source:
 `test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl`
@@ -16,23 +26,21 @@ metadata/licenses, all 100 sparse language/category cells, and a fail-closed
 rasterizer witness gate. It does not claim that all 16 candidates have passed
 corpus acceptance, or claim GPU/native execution.
 
-When executed, the CLDR portion covers REQ-001/REQ-002 source hashes,
+The passing CLDR portion covers REQ-001/REQ-002 source hashes,
 contribution replay, deterministic ranking, script subtotals, and cutoff;
 remaining coverage is REQ-003, static/hash portions of REQ-004/005 and NFR-001,
-plus the NFR-003 font-byte limit. This unexecuted draft is not PASS evidence and
-does not prove complete candidate acceptance, REQ-007 shaping, or REQ-008
-format behavior.
+plus the NFR-003 font-byte limit. This PASS does not prove complete REQ-007
+complex shaping, complete REQ-008 format behavior, or GPU execution.
 
 ## Operator flow
 
 ### Load the pinned multilingual font manifest
 
-1. Run the executable SSpec with the self-hosted pure-Simple runtime once it is
-   available.
+1. Run the executable SSpec with the self-hosted pure-Simple runtime.
 2. Observe the visible step: **Load the pinned multilingual font manifest**.
 3. Confirm the scenario completes without skipped or pending examples.
-4. Retain the executable test output as the evidence record; this draft alone
-   is not evidence.
+4. Retain the exit status and output as the evidence record; this mirror alone
+   is not executable evidence.
 
 ## Expected evidence
 
@@ -77,17 +85,17 @@ format behavior.
 ### Sparse coverage
 
 - 10 languages × 10 categories = exactly 100 unique cells.
-- Until the exact shaping corpus passes, status totals are 0 `native`, 0
-  `fallback`, 26 `not-designed-for-script`, and 74 `unavailable`.
-- Representative checks keep Chinese sans, Hindi mono, Urdu serif, and emoji
-  unavailable while their candidates are provisional; Russian display remains
-  not designed for that script.
+- After the separately executed exact shaping gate, status totals are 54
+  `native`, 1 `fallback`, 26 `not-designed-for-script`, and 19 `unavailable`.
+- Chinese sans is native and Chinese mono is the sole fallback. Hindi mono,
+  Urdu serif, and emoji remain unavailable; Russian display remains not
+  designed for that script.
 
-### Provisional corpus gate
+### Corpus and accepted-simple policy gate
 
-- All 16 manifest entries remain explicitly `candidate:` with executable Simple
-  shaping acceptance pending; none may report `accepted` from cmap metadata or
-  raster diagnostics.
+- Nine manifest entries are `accepted-simple:` identity records and seven
+  remain `candidate:`. Cmap metadata or raster diagnostics alone still cannot
+  accept a cell; the separate shaping PASS defines the documented subset.
 - The existing `FontRasterizer` facade loads every pinned face and exercises its
   exact applicable `CORPUS.sdn` codepoints across Latin, Han, Devanagari,
   Arabic, Urdu, Cyrillic, Bengali rank 11, and Common `U+1F600` emoji.
@@ -98,15 +106,16 @@ format behavior.
   shared typed sfnt validator, the complete recorded table set, and the exact
   static/default-variable axis metadata. It also replays the five pinned sfnt
   names from each real binary. Both native loader owners call the
-  structural bool preflight before native state mutation; typed reasons remain
-  scenario evidence and this scenario still needs execution.
-- The matrix remains 0 `native`, 0 `fallback`, 26
-  `not-designed-for-script`, and 74 `unavailable`; no cell may be promoted until
-  the bound Pure Simple shaping gate runs successfully.
-- Focused shaper fixtures now preserve exact CORPUS source/cluster/language/
-  script metadata and reject complex-script material while GSUB/GPOS remain
-  incomplete. These fixtures were not executed in this session and do not
-  promote a candidate.
+  structural bool preflight before native state mutation; typed reasons are
+  retained as scenario evidence.
+- The separately executed bound shaping gate promotes the matrix evidence to
+  54 `native`, 1 `fallback`, 26 `not-designed-for-script`, and 19
+  `unavailable`; this manifest PASS validates that policy but adds no shaping
+  rows beyond the separately executed shaping gate.
+- The focused shaping SSpec passed separately and preserves exact CORPUS
+  source/cluster/language/script metadata for the accepted simple subset while
+  complex-script material remains incomplete. This manifest PASS does not
+  extend that evidence.
 - A test-only raw sfnt oracle independently identifies 14 compound-bearing
   faces and the exact 76 compound corpus roots/124 direct components. Every
   mapped root must produce a nonempty Pure Simple outline; this adds no native
@@ -125,8 +134,8 @@ format behavior.
 - If no candidate rasterizer dylib exists, the scenario fails explicitly as
   `unavailable`; missing native evidence is not a synthetic PASS.
 
-The expanded scenario was not run in this session because the mandatory
-three-attempt Simple command cap was already exhausted.
+The expanded scenario completed with the command and silent exit-0 result
+recorded above. Canonical doc generation was not run.
 
 <details>
 <summary>Folded executable detail</summary>
@@ -141,7 +150,7 @@ assertions; no copied source block is maintained here.
 
 ## Claim boundary
 
-This manual establishes manifest and embedded-name identity plus
-codepoint/raster evidence only after
-its SSpec runs. It does not accept any candidate or prove Pure Simple
-shaping, GPU compilation, submission, readback, or display.
+This PASS establishes manifest and embedded-name identity, current sparse
+policy, and codepoint/raster evidence. It does not independently prove the
+accepted-simple shaping rows, complete complex shaping, GPU compilation,
+submission, readback, or display.

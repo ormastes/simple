@@ -50,14 +50,17 @@ BiDi.
 `selected_font_coverage_cell(language, category)` is the fail-closed policy
 lookup. Unknown axes return `nil`. A witness family is not loadable selection:
 callers may bind an asset only after the returned status is `native` or
-`fallback`, which currently leaves every cell unbound.
+`fallback`. Exact simple-script acceptance now binds 54 native cells and the
+single `zh/mono -> Noto Sans SC` fallback; 45 cells remain unavailable or
+not-designed.
 
 `ShapedGlyph` now owns absolute source/cluster identity and current advance/
 offset values so reordering cannot detach metadata. `ShapedRun.language` is
 caller metadata (`und` when omitted); script direction remains a per-run flag,
-not UAX#9. Both substitution and positioning completeness remain false.
-Complex-script and multi-codepoint emoji material therefore fails closed even
-when blob/runtime cmap IDs match.
+not UAX#9. Substitution and positioning completeness are true only for the
+executed no-feature Latin/Han/Cyrillic identity profile. Complex-script and
+multi-codepoint emoji material remains incomplete and fails closed even when
+blob/runtime cmap IDs match.
 
 `Shaper` stores additive OpenType snapshots keyed by exact live face
 handle/generation. Fallback resolves the snapshot after choosing its run font;

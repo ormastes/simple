@@ -1,5 +1,5 @@
 use std.spec.{describe, it, expect}
-use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_candidate_for_path, validate_selected_font_asset, selected_font_language_ranking_source, font_language_ranking_evidence, selected_font_language_ranks, selected_font_coverage_languages, selected_font_coverage_categories, selected_font_coverage_matrix, selected_font_coverage_cell}
+use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_candidate_for_path, validate_selected_font_asset, selected_font_language_ranking_source, font_language_ranking_evidence, selected_font_language_ranks, selected_font_coverage_languages, selected_font_coverage_categories, selected_font_coverage_matrix, selected_font_coverage_cell, selected_font_simple_tuple_accepted}
 use std.nogc_sync_mut.sffi.io.{file_exists, file_read_bytes}
 
 describe "selected font asset manifest":
@@ -93,6 +93,15 @@ describe "selected font asset manifest":
         expect(assets[13].embedded_version).to_equal("Version 2011-09-01 ")
         expect(assets[15].fallback_role).to_equal("common-emoji-fallback")
 
+        var accepted_simple: i64 = 0
+        var candidate: i64 = 0
+        for asset in assets:
+            if asset.coverage_state.starts_with("accepted-simple:"): accepted_simple = accepted_simple + 1
+            elif asset.coverage_state.starts_with("candidate:"): candidate = candidate + 1
+            else: fail("unknown coverage state: " + asset.coverage_state)
+        expect(accepted_simple).to_equal(9)
+        expect(candidate).to_equal(7)
+
     it "covers every selected sparse category exactly once or more":
         val assets = selected_font_asset_candidates()
         val categories = "|sans|serif|mono|display|rounded|handwriting|slab|blackletter|pixel|emoji|"
@@ -131,23 +140,63 @@ describe "selected font asset manifest":
             elif cell.status == "not-designed-for-script": not_designed_count = not_designed_count + 1
             elif cell.status == "unavailable": unavailable_count = unavailable_count + 1
             i = i + 1
-        expect(native_count).to_equal(0)
-        expect(fallback_count).to_equal(0)
+        expect(native_count).to_equal(54)
+        expect(fallback_count).to_equal(1)
         expect(not_designed_count).to_equal(26)
-        expect(unavailable_count).to_equal(74)
-        expect(cells[10].status).to_equal("unavailable")
+        expect(unavailable_count).to_equal(19)
+        expect(cells[10].status).to_equal("native")
+        expect(cells[12].status).to_equal("fallback")
+        expect(cells[12].witness_family).to_equal("Noto Sans SC")
         expect(cells[32].status).to_equal("unavailable")
         expect(cells[73].status).to_equal("not-designed-for-script")
         expect(cells[81].status).to_equal("unavailable")
         expect(cells[9].status).to_equal("unavailable")
 
     it "resolves selected coverage policy and rejects unknown axes":
-        val unavailable = selected_font_coverage_cell("en", "sans")
+        val native = selected_font_coverage_cell("en", "sans")
         val not_designed = selected_font_coverage_cell("zh", "display")
 
-        expect(unavailable != nil).to_be(true)
-        expect(unavailable.?.status).to_equal("unavailable")
+        expect(native != nil).to_be(true)
+        expect(native.?.status).to_equal("native")
         expect(not_designed != nil).to_be(true)
         expect(not_designed.?.status).to_equal("not-designed-for-script")
         expect(selected_font_coverage_cell("xx", "sans")).to_be_nil()
         expect(selected_font_coverage_cell("en", "unknown")).to_be_nil()
+
+    it "resolves every promoted witness to one accepted Simple tuple":
+        val assets = selected_font_asset_candidates()
+        val languages = selected_font_coverage_languages()
+        val cells = selected_font_coverage_matrix()
+        var promoted: i64 = 0
+        for cell in cells:
+            if cell.status == "native" or cell.status == "fallback":
+                promoted = promoted + 1
+                expect(cell.witness_family.len()).to_be_greater_than(0)
+                expect(selected_font_simple_tuple_accepted(cell.witness_family, cell.language)).to_be(true)
+                var matches: i64 = 0
+                for asset in assets:
+                    if asset.family == cell.witness_family:
+                        matches = matches + 1
+                        expect(asset.coverage_state).to_start_with("accepted-simple:")
+                expect(matches).to_equal(1)
+            else:
+                expect(cell.witness_family).to_equal("")
+        expect(promoted).to_equal(55)
+
+        for asset in assets:
+            if asset.coverage_state.starts_with("accepted-simple:"):
+                var accepted_languages: i64 = 0
+                var accepted_language_list = ""
+                for language in languages:
+                    if selected_font_simple_tuple_accepted(asset.family, language):
+                        accepted_languages = accepted_languages + 1
+                        if accepted_language_list != "": accepted_language_list = accepted_language_list + ","
+                        accepted_language_list = accepted_language_list + language
+                        var witnessed = false
+                        for cell in cells:
+                            if (cell.language == language and cell.witness_family == asset.family and
+                                (cell.status == "native" or cell.status == "fallback")):
+                                witnessed = true
+                        expect(witnessed).to_be(true)
+                expect(accepted_languages).to_be_greater_than(0)
+                expect(asset.coverage_state).to_equal("accepted-simple: exact Pure Simple identity shaping accepted for " + accepted_language_list)
