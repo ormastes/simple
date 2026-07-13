@@ -95,16 +95,31 @@ ADDS a type where inference left none — never overrides (safe for generics).
 NOTE: if the chained receiver's type is `Some(Infer)` rather than nil, extend the
 guard to also match an `Infer` kind, then re-verify; and add Fix B as the guard.
 
-## BLOCKER: bootstrap gate currently broken (pre-existing, not this change)
+## BLOCKER: `bin/release` is stale (precisely diagnosed) — not this change
 
-`bin/simple build bootstrap` Stage 1 (seed compiles the compiler source) FAILS
-with `error: semantic: unknown extern function: rt_lexer_source_set` — an extern
-used in `10.frontend/core/lexer.spl`/`parser.spl` that the current Rust seed
-(`src/compiler_rust/target/release/simple`) does not provide. The source moved
-ahead of the seed (parallel-session drift). Until the Rust seed is rebuilt
-(`cargo build --release` in `src/compiler_rust`, coordinated so as not to race a
-parallel bootstrap), Fix A/B cannot be verified via the mandatory gate and MUST
-NOT be landed. This blocker is independent of the method-resolution fix.
+`bin/simple build bootstrap` Stage 1 FAILS with `error: semantic: unknown extern
+function: rt_lexer_source_set` (used in `10.frontend/core/lexer.spl`/`parser.spl`).
+Diagnosed 2026-07-13:
+- The Rust seed was REBUILT (`cargo build --release` in `src/compiler_rust`, 4m38s,
+  succeeded). The rebuilt seed's NATIVE-BUILD/compile path ACCEPTS
+  `rt_lexer_source_set` (registered `compiler/src/codegen/runtime_sffi.rs:1507`
+  `RuntimeFuncSpec` + `codegen/instr/calls.rs:2341`) — verified by native-building
+  a probe that references it. So the Rust seed is NOT the blocker.
+- The bootstrap Stage-1 WORKER is the deployed self-hosted binary
+  `bin/release/x86_64-unknown-linux-gnu/simple`, whose native-build extern
+  allowlist PREDATES `rt_lexer_source_set` (its interpreter accepts the extern —
+  `bin/release … run` prints ok — but its compile path rejects it). `SEED=`/
+  `SIMPLE_SEED=` env only redirected the bootstrap DRIVER, not the Stage-1 worker,
+  so the stale `bin/release` still did the compile and failed.
+
+UNBLOCK (a shared-binary op — coordinate, do not race parallel bootstraps): refresh
+`bin/release/x86_64-unknown-linux-gnu/simple` from a CURRENT compiler (either the
+rebuilt Rust seed, or a self-hosted build produced by it) using the `cp` to `.new`
++ `mv` pattern (direct `cp` hits "Text file busy" when in use). Then re-apply Fix A
+(above), run `bin/simple build bootstrap` + `bin/simple test`, verify the repro
+(`chained==bound` AND `FileSizeLike.to_i64()==4242`), and land only if all green.
+Blocker is independent of the method-resolution fix; the `.push` workaround remains
+landed.
 
 ## Repro recipe (throwaway probe)
 
