@@ -211,9 +211,8 @@ class FontRenderer:
     static fn browser_default_for_family(family: text) -> FontRenderer:
         var renderer = FontRenderer.new()
         for font_path in browser_font_candidates_for_family(family):
-            for dylib_path in browser_font_dylib_candidates():
-                if renderer.try_enable_ttf(dylib_path, font_path):
-                    return renderer
+            if renderer.try_load_runtime_ttf(font_path):
+                return renderer
         renderer
 
     fn has_ttf() -> bool:
@@ -228,30 +227,7 @@ class FontRenderer:
     # in its default state and callers fall through to the vector/bitmap
     # paths unchanged. Caller opt-in only — default FontRenderer.new()
     # instances behave exactly as before.
-    me try_enable_ttf(dylib_path: text, ttf_path: text) -> bool:
-        val r = FontRasterizer.load(dylib_path, ttf_path)
-        if r != nil:
-            val old = self.ttf_rasterizer
-            self.ttf_rasterizer = r
-            if old != nil:
-                old.close()
-            var cache = self.cache
-            cache.invalidate()
-            self.cache = cache
-            self.atlas_face_generation = -1
-            return true
-        false
-
-    me try_load_runtime_ttf(ttf_path: text) -> bool:
-        if ttf_path.trim() == "":
-            return false
-        for dylib_path in browser_font_dylib_candidates():
-            if self.try_enable_ttf(dylib_path, ttf_path):
-                return true
-        false
-
-    me try_load_selected_bytes(ttf_path: text, blob: [u8]) -> bool:
-        val rasterizer = FontRasterizer.load_selected_bytes(ttf_path, blob)
+    me _try_install_ttf(rasterizer: FontRasterizer?) -> bool:
         if rasterizer == nil:
             return false
         val old = self.ttf_rasterizer
@@ -263,6 +239,20 @@ class FontRenderer:
         self.cache = cache
         self.atlas_face_generation = -1
         true
+
+    me try_enable_ttf(dylib_path: text, ttf_path: text) -> bool:
+        self._try_install_ttf(FontRasterizer.load(dylib_path, ttf_path))
+
+    me try_load_runtime_ttf(ttf_path: text) -> bool:
+        if ttf_path.trim() == "":
+            return false
+        for dylib_path in browser_font_dylib_candidates():
+            if self.try_enable_ttf(dylib_path, ttf_path):
+                return true
+        self._try_install_ttf(FontRasterizer.load_selected(ttf_path))
+
+    me try_load_selected_bytes(ttf_path: text, blob: [u8]) -> bool:
+        self._try_install_ttf(FontRasterizer.load_selected_bytes(ttf_path, blob))
 
     me clear_ttf():
         val rast = self.ttf_rasterizer

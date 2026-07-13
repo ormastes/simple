@@ -42,4 +42,5 @@ fixture bypasses, synthetic handles, or passing placeholders.
   independent normal/highest-capability reviewer; production WM admission
   remains open for device-rendered offscreen opacity and p95 evidence. The
   reusable checked IMAGE src-over primitive and full-target opacity-1000
-  RECT/IMAGE fresh admission are implemented; TEXT remains excluded.
+  RECT/IMAGE admission plus preflighted canonical TEXT glyph compositing are
+  implemented. Smaller/offscreen device surfaces and opacity remain excluded.

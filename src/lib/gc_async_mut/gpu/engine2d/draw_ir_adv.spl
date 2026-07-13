@@ -18,6 +18,7 @@ use common.ui.draw_ir.{
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
+use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_destination_origin}
 
 struct Engine2dDrawIrAdvResult:
     schema: text
@@ -219,6 +220,18 @@ fn _engine2d_draw_ir_image_is_opaque(image: Engine2dResolvedDrawIrImage) -> bool
     true
 
 fn _engine2d_draw_ir_fresh_device_command_supported(command: DrawIrCommand, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32) -> bool:
+    if command.kind == DRAW_IR_COMMAND_TEXT:
+        val identity = _engine2d_draw_ir_style_value(command.computed_style, "font-identity")
+        val font_size = _engine2d_draw_ir_text_font_size(command.computed_style)
+        if (command.text_value == "" or identity == "" or command.x < 0 or command.y < 0 or
+            command.width <= 0 or command.height <= 0 or
+            command.x.to_i64() + command.width.to_i64() > width.to_i64() or
+            command.y.to_i64() + command.height.to_i64() > height.to_i64()):
+            return false
+        return (_engine2d_draw_ir_style_value(command.computed_style, "font-family") != "" and
+            _engine2d_draw_ir_style_value(command.computed_style, "font-advance-widths") != "" and
+            _engine2d_draw_ir_style_value(command.computed_style, "line-height") != "" and
+            font_size > 0 and font_size <= 512)
     if command.x < 0 or command.y < 0 or command.width <= 0 or command.height <= 0:
         return false
     if command.x.to_i64() + command.width.to_i64() > width.to_i64() or command.y.to_i64() + command.height.to_i64() > height.to_i64():
@@ -252,13 +265,46 @@ fn _engine2d_draw_ir_fresh_device_reason(composition: DrawIrComposition, images:
             return "fresh-device-full-target-opacity-1000-required"
         for command in batch.commands:
             if not _engine2d_draw_ir_fresh_device_command_supported(command, images, width, height):
-                return "fresh-device-plain-rect-exact-image-required"
+                return "fresh-device-command-preflight-required"
             if first_command and not _engine2d_draw_ir_fresh_device_initializes_target(command, images, width, height):
                 return "fresh-device-opaque-full-target-first-command-required"
             first_command = false
     if first_command:
         return "fresh-device-nonempty-composition-required"
     ""
+
+fn _engine2d_draw_ir_prepare_fresh_device_text(engine: Engine2D, composition: DrawIrComposition, width: i32, height: i32) -> (Engine2D, text):
+    var eng = engine
+    var selected_identity = ""
+    var pixel_work: i64 = 0
+    val max_pixel_work = width.to_i64() * height.to_i64()
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == DRAW_IR_COMMAND_TEXT:
+                val identity = _engine2d_draw_ir_style_value(command.computed_style, "font-identity")
+                if selected_identity != "" and selected_identity != identity:
+                    return (eng, "fresh-device-single-font-identity-required")
+                if not eng.select_font_identity(identity):
+                    return (eng, "fresh-device-font-identity-unavailable")
+                selected_identity = identity
+                val font_size = _engine2d_draw_ir_text_font_size(command.computed_style)
+                val fonts = eng.fonts()
+                val prepared = fonts.prepare_text(command.text_value, command.color, font_size)
+                eng.font_renderer = fonts
+                if not prepared.valid or prepared.font_identity != identity or prepared.quads.len() == 0:
+                    return (eng, "fresh-device-font-batch-invalid")
+                for quad in prepared.quads:
+                    val total = quad.width.to_i64() * quad.height.to_i64()
+                    val dst_x = font_destination_origin(command.x, quad.dst_x, quad.width)
+                    val dst_y = font_destination_origin(command.y, quad.dst_y, quad.height)
+                    if total <= 0 or total > max_pixel_work - pixel_work:
+                        return (eng, "fresh-device-font-work-limit-exceeded")
+                    pixel_work = pixel_work + total
+                    if (dst_x == nil or dst_y == nil or
+                        font_atlas_subrect_pixels(prepared.atlas_pixels, prepared.atlas_width, prepared.atlas_height,
+                            quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color).len() != total):
+                        return (eng, "fresh-device-font-quad-invalid")
+    (eng, "")
 
 fn _engine2d_draw_ir_preflight_commands(commands: [DrawIrCommand], images: [Engine2dResolvedDrawIrImage]) -> (i32, text):
     var skipped = 0
@@ -462,7 +508,11 @@ fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, c
     if reason != "":
         val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
         return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, 0, 1, reason, engine2d_readback([], "preflight_rejected"))
-    _engine2d_draw_ir_adv_composition_with_images(engine, composition, true, images, true, false, true)
+    val prepared = _engine2d_draw_ir_prepare_fresh_device_text(engine, composition, engine.width(), engine.height())
+    if prepared.1 != "":
+        val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
+        return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, 0, 1, prepared.1, engine2d_readback([], "preflight_rejected"))
+    _engine2d_draw_ir_adv_composition_with_images(prepared.0, composition, true, images, true, false, true)
 
 fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
