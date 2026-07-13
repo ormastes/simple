@@ -632,6 +632,65 @@ impl MirLowering:
                     temp
 
             case Unresolved:
+                # Bug #138/#156 keystone: minimal-viable native resolution of
+                # struct INSTANCE methods when HIR type inference left
+                # `resolution` Unresolved (receiver.type_ nil -- see the
+                # resolution_is_unresolved doc comment above). MethodResolver
+                # (resolve_strategies.spl try_instance_method) requires a
+                # typed receiver to resolve `c.get()`, which native-build
+                # never provides for a plain struct local/param, so every
+                # user struct method previously fell all the way through to
+                # the `self.error(...)` placeholder below. struct_value_syms
+                # (populated for locals/params/constructions -- see
+                # function_lowering.spl's self-param copy and
+                # switch_operators_calls.spl's struct-construction
+                # registration) recovers the receiver's struct NAME from the
+                # lowered local; struct_method_syms (module.impls-derived --
+                # see module_lowering.spl) maps "{struct}::{method}" to the
+                # method's real SymbolId. Dispatch mirrors the resolved
+                # InstanceMethod case above exactly (symbol_to_operand +
+                # resolved_call_return_type), just reached via a name-keyed
+                # lookup instead of `resolution`. The receiver is lowered
+                # ONCE here (reused below by the `push` special-case, which
+                # previously re-lowered it) to avoid double-evaluating a
+                # side-effecting receiver expression.
+                val unresolved_receiver_local = if wb_kind != 0: wb_receiver else: self.lower_expr(receiver)
+                val unresolved_struct_name = self.struct_value_syms.get(unresolved_receiver_local.id)
+                if unresolved_struct_name != nil and unresolved_struct_name != "":
+                    val unresolved_method_key = "{unresolved_struct_name}::{method}"
+                    # struct_method_ambiguous guard: refuse the fast dispatch
+                    # when `method`'s bare name is shared by >1 distinct
+                    # struct's impl -- the backend links direct calls by bare
+                    # name, so dispatching here would silently call whichever
+                    # same-named body won the link, corrupting the OTHER
+                    # struct's result (verified empirically: two structs both
+                    # defining `get()` with different bodies -- without this
+                    # guard the second struct's call returned the first
+                    # struct's answer). Falling through preserves the
+                    # existing (loud) "unresolved method call" error instead.
+                    if self.struct_method_syms.has(unresolved_method_key) and not self.struct_method_ambiguous.has(method):
+                        val resolved_method_id = self.struct_method_syms[unresolved_method_key]
+                        var im_arg_operands: [MirOperand] = [mir_operand_copy(unresolved_receiver_local)]
+                        for arg in args:
+                            val im_arg_local = self.lower_expr(arg.value)
+                            im_arg_operands = im_arg_operands.push(mir_operand_copy(im_arg_local))
+                        val im_method_operand = self.symbol_to_operand(resolved_method_id)
+                        val im_return_type = self.resolved_call_return_type(resolved_method_id)
+                        var im_b = self.builder
+                        val im_result = im_b.emit_call(im_method_operand, im_arg_operands, im_return_type)
+                        self.builder = im_b
+                        var im_wb_value = wb_receiver
+                        if val im_result_local = im_result:
+                            im_wb_value = im_result_local
+                        self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, im_wb_value)
+                        if val im_result_local = im_result:
+                            return im_result_local
+                        var im_b2 = self.builder
+                        val im_temp = im_b2.new_temp(MirType.i64())
+                        im_b2.emit_const(im_temp, MirConstValue.Int(0), MirType.i64())
+                        self.builder = im_b2
+                        return im_temp
+
                 # Bug #149: `x.push(item)` never resolves via MethodResolver
                 # (try_instance_method/try_trait_method/try_ufcs in
                 # resolve_strategies.spl all require a symbol-bearing HIR
@@ -667,7 +726,7 @@ impl MirLowering:
                 # mutating methods) and a true no-op for a plain Var
                 # receiver (wb_kind == 0) -- never a silently-dropped append.
                 if method == "push" and args.len() == 1:
-                    val push_recv = if wb_kind != 0: wb_receiver else: self.lower_expr(receiver)
+                    val push_recv = unresolved_receiver_local
                     val push_val_raw = self.lower_expr(args[0].value)
                     var push_val_tagged = push_val_raw
                     var push_val_is_raw_str = false

@@ -50,6 +50,29 @@ struct MirLowering:
     # type-inference, so a bare `p` Var carries no `.type_` and resolve_field_index
     # cannot recover the struct's field ordering otherwise.
     struct_value_syms: Dict<i64, text>
+    # "{struct NAME}::{method name}" -> the method's real SymbolId, built from
+    # module.impls in lower_module. Bug #138/#156: a receiver with no HIR type
+    # inference (receiver.type_ nil) makes MethodResolver return Unresolved for
+    # every user struct instance method on the native-build path, since
+    # try_instance_method requires a typed receiver. struct_value_syms already
+    # recovers the receiver's struct NAME from the lowered local (populated for
+    # locals/params/constructions); this map lets the Unresolved fallback in
+    # method_calls_literals.spl look up the real method symbol by
+    # (struct_name, method_name) and dispatch a direct call instead of failing.
+    struct_method_syms: Dict<text, SymbolId>
+    # Bare method NAME -> true, when that name is defined by impls on MORE
+    # THAN ONE distinct struct (e.g. both `impl A: fn get(self)` and `impl B:
+    # fn get(self)`). The native backend currently dispatches direct calls by
+    # the bare (unqualified) function name -- impl methods are registered
+    # without struct qualification (see hir module_lowering.spl's "Declare
+    # impl methods" loop) -- so two same-named methods on different structs
+    # emit colliding LLVM symbols and a call silently binds to whichever
+    # definition wins, reading/returning the WRONG struct's data. The
+    # Unresolved fallback in method_calls_literals.spl checks this set and
+    # refuses the fast dispatch for an ambiguous name, falling through to the
+    # existing (loud) "unresolved method call" error instead of risking a
+    # silently wrong result.
+    struct_method_ambiguous: Dict<text, bool>
     # MIR local ID -> true, for locals holding a runtime array value. Explicit
     # id-keyed set (mirrors struct_value_syms) because the native flat-bridge
     # path does not reliably thread the local's Array/Slice MIR type, so the
