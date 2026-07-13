@@ -29,3 +29,7 @@ No showcase entry is accepted in the installed SimpleOS launcher yet. A valid re
 ## Verification flow
 
 For each ready surface: open the catalog, launch the app, snapshot the visible window, find a labeled control/section, act through the real input route, inspect event history, capture the post-action semantic state, and retain the same-run framebuffer/readback plus backend provenance. Blank frames, source-only assertions, synthetic GPU handles, and action logs without a changed frame/state fail verification.
+
+## Spec wiring (landed, still RED — 2026-07-14)
+
+`test/03_system/os/showcase/showcase_apps_spec.spl`'s five wrapper helpers (`launch_showcase`, `require_installed_identity`, `require_owned_window`, `require_nonblank_frame`, `require_post_input_change`) now route through the production adapter — `common.ui.showcase_catalog` readiness flags gate every call, and `os.hosted.hosted_wm_evidence` (`host_wm_evidence_config_from_env`, `host_wm_evidence_parse_command`) supplies the evidence-config/capture/snapshot/input-FIFO checks — instead of a bare `fail()`. All nine app/surface cases still fail, now with a structured `app=... surface=... phase=... cause=surface-not-ready detail=...` message, because every readiness flag above is still `false`; they only flip once a surface has deployed proof.
