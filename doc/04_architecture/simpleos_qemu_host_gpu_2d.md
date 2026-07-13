@@ -60,9 +60,12 @@ needed.
 
 ## Trust and Evidence Boundary
 
-The host daemon rejects unknown versions, oversized batches, invalid geometry
-or buffer references, unsupported operations, duplicate completions, and stale
-run/frame IDs before allocation or execution. A device-backed pass requires a
+The shared protocol defines non-HELLO wire correlation as a positive numeric
+run hash plus positive frame ID. Both the guest submission/receipt boundary and
+host daemon reject zero, negative, stale, or mismatched correlation before
+allocation, execution, or PASS admission. The daemon also rejects unknown
+versions, oversized batches, invalid geometry or buffer references, unsupported
+operations, and duplicate completions. A device-backed pass requires a
 positive native backend handle, host device identity, matching request and
 receipt IDs, same-frame readback/result bytes, exact CPU-oracle checksum, and
 backend markers from the host adapter. Flags, screenshots, scanout, CPU mirrors,

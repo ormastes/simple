@@ -18,6 +18,13 @@ All numeric wire fields use fixed-width little-endian encoding. The decoder
 checks the fixed header and declared length before reading the body. One
 outstanding request map rejects duplicate or stale receipts.
 
+`simpleos_host_gpu_wire_correlation_valid` is the single numeric correlation
+owner. Non-HELLO requests require `run_id_hash > 0` and `frame_id > 0` before
+guest publication and daemon execution; completion parsing and device receipt
+admission compare the exact values, with device admission also requiring the
+positive expected pair. HELLO remains exempt because its control exchange
+intentionally carries zero IDs.
+
 ## Flow
 
 1. The guest maps the QEMU `ivshmem-plain` BAR2 region and negotiates bounded

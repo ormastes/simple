@@ -24,6 +24,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 | native Metal nonzero FillU32, terminal command status, pointer readback, identity, and CPU parity | REQ-004,007,008; NFR-002,004 |
 | honest cross-host backend classification | REQ-008,009 |
 | malformed and stale input rejection | REQ-010; NFR-007 |
+| zero/negative numeric run hash or frame ID rejection at guest and daemon wire boundaries | REQ-005,010; NFR-007,009 |
 | multi-ISA row aggregation and fail-closed parsing | REQ-011,012; NFR-008,009 |
 | cached report validates every host/ISA row and all three Linux serial receipts before promotion | REQ-011,012; NFR-008,009 |
 | latency, negotiation, and RSS evidence | NFR-003,005,006 |
@@ -41,8 +42,10 @@ Every passing row must also record the first-line QEMU version, a reversible
 comma-delimited per-argument hex encoding of the exact QEMU argument vector,
 positive maximum-observed daemon RSS, negotiated protocol version, positive
 HELLO/render/Draw IR/ProcessingIR elapsed times, and correlated run/frame IDs.
-The cached-report validator rejects a missing, duplicate, empty, or nonpositive
-field. This proves evidence completeness only; NFR latency and combined
+Non-HELLO guest submissions and daemon admissions require the shared positive
+numeric run-hash/frame-ID predicate; device receipts recheck both expected and
+returned values. The cached-report validator rejects a missing, duplicate,
+empty, or nonpositive field. This proves evidence completeness only; NFR latency and combined
 QEMU-plus-daemon RSS targets still require fresh measured rows.
 
 The focused Vulkan unit boundary renders CLEAR plus solid RECT on a real or

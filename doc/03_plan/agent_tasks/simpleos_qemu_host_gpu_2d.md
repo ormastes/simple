@@ -38,10 +38,10 @@ fixture bypasses, synthetic handles, or passing placeholders.
 ## Current Handoff
 
 - Wrapper and fail-closed self-test: implemented.
-- Linux Vulkan live rows: x86_64, AArch64, and RV64 pass exact render and
-  ProcessingIR receipts.
-- Fresh pure-Simple guest builds: x86_64 and AArch64 pass; RV64 remains blocked
-  at TODO 537's freestanding runtime/SBI owner boundary.
+- Retained cached Linux/Vulkan evidence contains exact x86_64, AArch64, and
+  RV64 render and ProcessingIR receipts; it is not fresh production evidence.
+- Fresh pure-Simple guest builds and all live QEMU rows remain blocked by TODO
+  548's compiler/runtime deployment work. No current live PASS is claimed.
 - Final reviewer: primary `/root`; native Metal implementation is present but
   its done mark, DirectX, and remaining CUDA receipts remain rejected without
   prepared-host evidence.

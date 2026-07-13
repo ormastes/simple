@@ -51,7 +51,9 @@ the CPU/software fallback and report a stable reason.
    processing evidence.
 10. **Report device-backed host acceleration evidence.** Publish one row with
    host, guest ISA, QEMU/device arguments, protocol, backend, device, IDs,
-   timing, RSS, checksums, status, and reason.
+   timing, RSS, checksums, status, and reason. For every non-HELLO request, both
+   the guest and daemon require a positive numeric run hash and frame ID; a
+   zero, negative, stale, or mismatched value fails before PASS admission.
 11. **Validate cached rows before aggregation.** Accept a cached report only
    when all nine host/ISA rows are present and every passing row links to a
    serial log containing the exact render, Draw IR, and ProcessingIR receipts.
