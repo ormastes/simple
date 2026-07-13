@@ -374,11 +374,45 @@ impl MirLowering:
         # in method_calls_literals.spl recovers the receiver's struct NAME
         # from struct_value_syms and looks it up here to dispatch the real
         # method instead of failing.
-        # Bare method name -> the first struct NAME seen defining it. Local
-        # (not a MirLowering field) -- only used here to detect a SECOND,
-        # different owner for the same bare name and mark it ambiguous (see
-        # struct_method_ambiguous doc comment in mir_lowering_types.spl).
+        # struct_method_first_owner and free_function_names are both LOCAL to
+        # this lower_module call (deliberately NOT MirLowering fields
+        # accumulated across --entry-closure's many modules). Confirmed
+        # empirically that a whole-closure accumulator regresses ordinary,
+        # non-colliding struct methods: names like "get" are independently
+        # defined as instance methods on many UNRELATED stdlib structs
+        # across different modules (Map.get, FixedVec.get, ThemeRegistry.get,
+        # ...) and free functions of common names exist all over the huge
+        # transitive stdlib closure `--entry-closure` pulls in (module.
+        # functions there includes every parsed-but-maybe-dead function, not
+        # just ones the backend actually emits) -- a global accumulator
+        # immediately (and wrongly) marked those names ambiguous everywhere.
+        # Scoping both to a single module still catches the collision this
+        # guard exists for -- confirmed empirically: `impl C: fn value(self)`
+        # alongside a top-level `fn value()` IN THE SAME FILE silently
+        # dispatched `c.value()` to the free function's body instead of the
+        # method's, and two structs with the same method name IN THE SAME
+        # FILE silently dispatched to whichever won the link. A collision
+        # spanning two DIFFERENT modules is therefore a known, accepted gap
+        # (see #156 follow-up notes) -- resolving it precisely needs
+        # backend-level qualified (mangled) symbol naming, out of scope for
+        # this minimal-viable fix.
         var struct_method_first_owner: Dict<text, text> = {}
+        var free_function_names: Dict<text, bool> = {}
+        val module_fn_values = module.functions.values()
+        var mfi = 0
+        while mfi < module_fn_values.len():
+            # module.functions ALSO contains every impl method (merged in via
+            # lowered_impl_functions -- see hir module_lowering.spl), so this
+            # scan must skip is_method entries. Without the guard, EVERY
+            # struct method's own bare name always appears in module.
+            # functions too, making it collide with ITSELF and disabling the
+            # fast dispatch universally (confirmed empirically: `get`/`inc`
+            # both regressed to "unresolved method call" with no actual
+            # free-function collision present).
+            if not module_fn_values[mfi].is_method:
+                free_function_names[module_fn_values[mfi].name] = true
+            mfi = mfi + 1
+
         var impl_mi = 0
         while impl_mi < module.impls.len():
             val impl_def = module.impls[impl_mi]
@@ -401,6 +435,8 @@ impl MirLowering:
                             self.struct_method_ambiguous[impl_method_name] = true
                     else:
                         struct_method_first_owner[impl_method_name] = impl_type_name
+                    if free_function_names.has(impl_method_name):
+                        self.struct_method_ambiguous[impl_method_name] = true
                     mni = mni + 1
             impl_mi = impl_mi + 1
 
