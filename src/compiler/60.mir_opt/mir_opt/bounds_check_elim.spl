@@ -264,18 +264,25 @@ fn try_match_loop_guard_inst(inst: MirInst) -> LoopGuardInfo?:
         case BinOp(_, op, left, right):
             match op:
                 case Lt:
-                    val idx_id = operand_local_id_raw(left)
-                    val arr_id = operand_local_id_raw(right)
-                    if val index_id = idx_id:
-                        if val array_id = arr_id:
-                            return LoopGuardInfo(
-                                index_var_id: index_id,
-                                arr_local_id: array_id
-                            )
-                        else:
+                    # NOTE: explicit match, not `if val X = Y.?:` -- local id
+                    # 0 landmine (`.?` truthiness on a boxed `i64?` collapses
+                    # `Some(0)` to falsy in the bootstrap seed interpreter,
+                    # see var_reassign_ssa.spl's ssa_alloca_apply_def_store).
+                    # Safe direction here (a miss just skips the bounds-check
+                    # elimination for that loop) but the identical landmine,
+                    # so fixed for consistency.
+                    match operand_local_id_raw(left):
+                        case Some(index_id):
+                            match operand_local_id_raw(right):
+                                case Some(array_id):
+                                    return LoopGuardInfo(
+                                        index_var_id: index_id,
+                                        arr_local_id: array_id
+                                    )
+                                case nil:
+                                    nil
+                        case nil:
                             nil
-                    else:
-                        nil
                 case _: nil
         case _: nil
 
@@ -307,15 +314,17 @@ fn inst_is_positive_add_of_self(inst: MirInst, local_id: i64) -> bool:
                 return false
             match op:
                 case Add:
-                    val self_ref = operand_local_id_raw(left)
                     val is_pos_const = operand_is_positive_const(right)
-                    if val self_id = self_ref:
-                        if is_pos_const:
-                            return self_id == local_id
-                        else:
+                    # NOTE: explicit match, not `if val X = Y.?:` -- local id
+                    # 0 landmine, see try_match_loop_guard_inst above.
+                    match operand_local_id_raw(left):
+                        case Some(self_id):
+                            if is_pos_const:
+                                self_id == local_id
+                            else:
+                                false
+                        case nil:
                             false
-                    else:
-                        false
                 case _: false
         case _: false
 

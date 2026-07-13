@@ -123,15 +123,25 @@ impl DimSolver:
 
             case _:
                 # Try to evaluate both and compare
-                val v1 = self.try_eval(e1)
-                val v2 = self.try_eval(e2)
-                if v1.? and v2.?:
-                    if v1.unwrap() == v2.unwrap():
-                        Ok(DimExpr.literal(v1.unwrap(), e1.span))
-                    else:
+                # NOTE: explicit match, not `if v1.? and v2.?:` -- a
+                # dimension expression can legitimately evaluate to 0, and
+                # `.?` truthiness on a boxed `i64?` collapses `Some(0)` to
+                # falsy in the bootstrap seed interpreter (same class of bug
+                # as the landed var_reassign_written_local fix), which would
+                # falsely report a dimension mismatch for two dims that both
+                # evaluate to 0.
+                match self.try_eval(e1):
+                    case Some(v1):
+                        match self.try_eval(e2):
+                            case Some(v2):
+                                if v1 == v2:
+                                    Ok(DimExpr.literal(v1, e1.span))
+                                else:
+                                    Err(DimError.mismatch(e1, e2, e1.span.merge(e2.span)))
+                            case nil:
+                                Err(DimError.mismatch(e1, e2, e1.span.merge(e2.span)))
+                    case nil:
                         Err(DimError.mismatch(e1, e2, e1.span.merge(e2.span)))
-                else:
-                    Err(DimError.mismatch(e1, e2, e1.span.merge(e2.span)))
 
     me bind_var(id: i64, expr: DimExpr):
         """Bind a variable to an expression."""

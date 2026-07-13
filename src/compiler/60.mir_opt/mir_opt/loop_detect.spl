@@ -302,16 +302,28 @@ impl LoopDetector:
                     val else_in_loop = loop_block_set.has(else_.id)
 
                     # Exactly one branch should exit for a counted loop
+                    # NOTE: explicit match, not `if bound.?:` -- a constant
+                    # trip count of 0 is legitimate (a loop that never
+                    # executes), and `.?` truthiness on a boxed `i64?`
+                    # collapses `Some(0)` to falsy in the bootstrap seed
+                    # interpreter (same class of bug as the landed
+                    # var_reassign_written_local fix). Safe direction here
+                    # (a miss just skips the trip-count-based optimization)
+                    # but the identical landmine, fixed for consistency.
                     if then_in_loop and not else_in_loop:
                         # else_ is the exit branch; cond being true continues
-                        val bound = self.extract_comparison_bound(block.instructions, cond)
-                        if bound.?:
-                            return bound
+                        match self.extract_comparison_bound(block.instructions, cond):
+                            case Some(bound_val):
+                                return Some(bound_val)
+                            case nil:
+                                pass_do_nothing
                     elif not then_in_loop and else_in_loop:
                         # then_ is the exit branch; cond being false continues
-                        val bound = self.extract_comparison_bound(block.instructions, cond)
-                        if bound.?:
-                            return bound
+                        match self.extract_comparison_bound(block.instructions, cond):
+                            case Some(bound_val):
+                                return Some(bound_val)
+                            case nil:
+                                pass_do_nothing
                 case _:
                     pass
 
@@ -332,9 +344,11 @@ impl LoopDetector:
             case Move(local): Some(local.id)
             case _: nil
 
-        if not cond_local_id.?:
-            return nil
-        val target_id = cond_local_id.unwrap()
+        # NOTE: explicit match, not `if not cond_local_id.?:` -- local id 0
+        # landmine, see the trip-count note in analyze_trip_count above.
+        val target_id = match cond_local_id:
+            case Some(id): id
+            case nil: return nil
 
         # Scan instructions for the BinOp that defines this local
         for inst in instructions:
@@ -342,33 +356,37 @@ impl LoopDetector:
                 case BinOp(dest, op, left, right):
                     if dest.id == target_id:
                         # Found the comparison instruction
-                        # Check if it's a comparison with a constant bound
-                        val const_val = self.operand_const_int(right)
-                        if const_val.?:
-                            match op:
-                                case Lt:
-                                    # i < N -> trip count is N
-                                    return const_val
-                                case Le:
-                                    # i <= N -> trip count is N + 1
-                                    if val bound = const_val:
-                                        return Some(bound + 1)
-                                case _:
-                                    pass
+                        # Check if it's a comparison with a constant bound.
+                        # NOTE: explicit match, not `if const_val.?:` -- a
+                        # constant bound of 0 is legitimate, same landmine.
+                        match self.operand_const_int(right):
+                            case Some(const_val):
+                                match op:
+                                    case Lt:
+                                        # i < N -> trip count is N
+                                        return Some(const_val)
+                                    case Le:
+                                        # i <= N -> trip count is N + 1
+                                        return Some(const_val + 1)
+                                    case _:
+                                        pass
+                            case nil:
+                                pass_do_nothing
 
                         # Also check left operand (for reversed comparisons like N > i)
-                        val const_val_l = self.operand_const_int(left)
-                        if const_val_l.?:
-                            match op:
-                                case Gt:
-                                    # N > i -> trip count is N
-                                    return const_val_l
-                                case Ge:
-                                    # N >= i -> trip count is N + 1
-                                    if val bound = const_val_l:
-                                        return Some(bound + 1)
-                                case _:
-                                    pass
+                        match self.operand_const_int(left):
+                            case Some(const_val_l):
+                                match op:
+                                    case Gt:
+                                        # N > i -> trip count is N
+                                        return Some(const_val_l)
+                                    case Ge:
+                                        # N >= i -> trip count is N + 1
+                                        return Some(const_val_l + 1)
+                                    case _:
+                                        pass
+                            case nil:
+                                pass_do_nothing
                 case _:
                     pass
 

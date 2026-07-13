@@ -485,14 +485,25 @@ fn colopt_detect_linear_scan_guard(header: MirBlock) -> ColoptLinearScanGuard?:
             case BinOp(_, op, left, right):
                 match op:
                     case Lt:
-                        val idx = colopt_operand_to_local_id(left)
-                        val arr = colopt_operand_to_local_id(right)
-                        if idx.? and arr.?:
-                            return ColoptLinearScanGuard(
-                                index_var_id: idx.unwrap(),
-                                arr_local_id: arr.unwrap()
-                            )
-                        ()
+                        # NOTE: explicit match, not `if idx.? and arr.?:` --
+                        # local id 0 landmine (`.?` truthiness on a boxed
+                        # `i64?` collapses `Some(0)` to falsy in the
+                        # bootstrap seed interpreter, see var_reassign_ssa
+                        # .spl's ssa_alloca_apply_def_store). Safe direction
+                        # here (a miss just skips this optimization) but the
+                        # identical landmine, fixed for consistency.
+                        match colopt_operand_to_local_id(left):
+                            case Some(index_var_id):
+                                match colopt_operand_to_local_id(right):
+                                    case Some(arr_local_id):
+                                        return ColoptLinearScanGuard(
+                                            index_var_id: index_var_id,
+                                            arr_local_id: arr_local_id
+                                        )
+                                    case nil:
+                                        ()
+                            case nil:
+                                ()
                     case _: ()
             case _: ()
     return nil
@@ -504,10 +515,15 @@ fn colopt_block_increments_index(block: MirBlock, index_var_id: i64) -> bool:
                 match op:
                     case Add:
                         if dest.id == index_var_id:
-                            val src = colopt_operand_to_local_id(left)
-                            if src.?:
-                                if src.unwrap() == index_var_id:
-                                    return true
+                            # NOTE: explicit match, not `if src.?:` -- local
+                            # id 0 landmine, see colopt_detect_linear_scan_guard
+                            # above.
+                            match colopt_operand_to_local_id(left):
+                                case Some(src_id):
+                                    if src_id == index_var_id:
+                                        return true
+                                case nil:
+                                    pass_do_nothing
                         ()
                     case _: ()
             case _: ()

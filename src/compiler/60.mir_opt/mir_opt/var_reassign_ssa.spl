@@ -163,23 +163,29 @@ fn ssa_replace_operand_local(operand: MirOperand, original_id: i64, replacement_
             operand
 
 fn ssa_max_local_from_operand(current: i64, operand: MirOperand) -> i64:
-    val local = var_reassign_operand_local(operand)
-    if local.?:
-        val local_id = local.unwrap()
-        if local_id > current:
-            local_id
-        else:
+    # NOTE: explicit match (not `if local.?:`) -- local id 0 is a real,
+    # reachable local id and `.? ` truthiness on a boxed `i64?` collapses
+    # `Some(0)` to falsy in the bootstrap seed interpreter, which would
+    # silently drop local 0 from the max-local-id scan (see the detailed
+    # writeup on `ssa_alloca_apply_def_store` below).
+    match var_reassign_operand_local(operand):
+        case Some(local_id):
+            if local_id > current:
+                local_id
+            else:
+                current
+        case nil:
             current
-    else:
-        current
 
 fn ssa_max_local_from_inst(current: i64, inst: MirInst) -> i64:
     var max_id = current
-    val written = var_reassign_written_local(inst)
-    if written.?:
-        val written_id = written.unwrap()
-        if written_id > max_id:
-            max_id = written_id
+    # NOTE: explicit match, not `if written.?:` -- see ssa_max_local_from_operand.
+    match var_reassign_written_local(inst):
+        case Some(written_id):
+            if written_id > max_id:
+                max_id = written_id
+        case nil:
+            pass_do_nothing
     match inst.kind:
         case Copy(_, src):
             val src_id = ssa_local_id_value(src)
@@ -549,10 +555,13 @@ fn ssa_block_by_id(blocks: [MirBlock], id: i64) -> MirBlock?:
 fn ssa_block_written_locals(block: MirBlock) -> [i64]:
     var locals: [i64] = []
     for inst in block.instructions:
-        val written = var_reassign_written_local(inst)
-        if written.?:
-            val written_id = written.unwrap()
-            locals = local_list_push_unique(locals, written_id)
+        # NOTE: explicit match, not `if written.?:` -- local id 0 landmine,
+        # see ssa_max_local_from_operand.
+        match var_reassign_written_local(inst):
+            case Some(written_id):
+                locals = local_list_push_unique(locals, written_id)
+            case nil:
+                pass_do_nothing
     locals
 
 fn ssa_common_locals(left: [i64], right: [i64]) -> [i64]:
@@ -827,13 +836,18 @@ fn ssa_phi_plan_pred_value_for_block(plan: SsaPhiPlan, block_id: i64) -> i64?:
     nil
 
 fn ssa_apply_phi_plan_to_block(block: MirBlock, plan: SsaPhiPlan) -> MirBlock:
-    val pred_value = ssa_phi_plan_pred_value_for_block(plan, ssa_block_id_value(block.id))
-    if pred_value.?:
-        val value_local_id = pred_value.unwrap()
-        var new_insts: [MirInst] = []
-        for inst in block.instructions:
-            new_insts = new_insts.push(ssa_replace_inst_dest_for_local(inst, plan.original_local_id, value_local_id))
-        return MirBlock(id: block.id, label: block.label, instructions: new_insts, terminator: block.terminator)
+    # NOTE: explicit match, not `if pred_value.?:` -- the predecessor's
+    # incoming local id can legitimately be 0 (local id 0 landmine, see
+    # ssa_max_local_from_operand); a truthiness check here would silently
+    # skip rewriting the phi source in that predecessor block.
+    match ssa_phi_plan_pred_value_for_block(plan, ssa_block_id_value(block.id)):
+        case Some(value_local_id):
+            var new_insts: [MirInst] = []
+            for inst in block.instructions:
+                new_insts = new_insts.push(ssa_replace_inst_dest_for_local(inst, plan.original_local_id, value_local_id))
+            return MirBlock(id: block.id, label: block.label, instructions: new_insts, terminator: block.terminator)
+        case nil:
+            pass_do_nothing
     if ssa_block_id_value(block.id) == plan.join_block_id:
         var join_insts: [MirInst] = [ssa_phi_instruction(plan)]
         for inst in block.instructions:
@@ -953,11 +967,18 @@ fn ssa_reassigned_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
     var counts: [i64] = []
     for block in blocks:
         for inst in block.instructions:
-            val written = var_reassign_written_local(inst)
-            if written.?:
-                val next_counts = local_count_increment(local_ids, counts, written.unwrap())
-                local_ids = next_counts[0]
-                counts = next_counts[1]
+            # NOTE: explicit match, not `if written.?:` -- local id 0
+            # landmine, see ssa_max_local_from_operand. This one is
+            # especially dangerous: it feeds the multi-def/slotting
+            # decision, i.e. exactly the class of silent miscompile the
+            # landed var_reassign_written_local fix addressed.
+            match var_reassign_written_local(inst):
+                case Some(written_id):
+                    val next_counts = local_count_increment(local_ids, counts, written_id)
+                    local_ids = next_counts[0]
+                    counts = next_counts[1]
+                case nil:
+                    pass_do_nothing
     var reassigned: [i64] = []
     var i = 0
     while i < local_ids.len():
@@ -986,11 +1007,13 @@ fn ssa_local_type_lookup(mir_locals: [MirLocal], local_id: i64) -> MirType:
 # rename into a store).
 
 fn ssa_operand_push_local(locals: [i64], operand: MirOperand) -> [i64]:
-    val lo = var_reassign_operand_local(operand)
-    if lo.?:
-        local_list_push_unique(locals, lo.unwrap())
-    else:
-        locals
+    # NOTE: explicit match, not `if lo.?:` -- local id 0 landmine, see
+    # ssa_max_local_from_operand.
+    match var_reassign_operand_local(operand):
+        case Some(local_id):
+            local_list_push_unique(locals, local_id)
+        case nil:
+            locals
 
 fn ssa_collect_inst_operand_locals(locals: [i64], inst: MirInst) -> [i64]:
     """Locals READ by `inst` (its dest is deliberately excluded)."""
@@ -1064,10 +1087,14 @@ fn ssa_collect_term_operand_locals(locals: [i64], term: MirTerminator) -> [i64]:
 
 fn ssa_local_defined_in_block(block: MirBlock, local_id: i64) -> bool:
     for inst in block.instructions:
-        val written = var_reassign_written_local(inst)
-        if written.?:
-            if written.unwrap() == local_id:
-                return true
+        # NOTE: explicit match, not `if written.?:` -- local id 0 landmine,
+        # see ssa_max_local_from_operand.
+        match var_reassign_written_local(inst):
+            case Some(written_id):
+                if written_id == local_id:
+                    return true
+            case nil:
+                pass_do_nothing
     false
 
 fn ssa_local_is_param(mir_locals: [MirLocal], local_id: i64) -> bool:

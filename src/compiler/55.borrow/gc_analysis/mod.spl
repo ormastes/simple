@@ -185,29 +185,46 @@ class GcSafetyAnalyzer:
                 val base_id = self.operand_local(base)
                 val value_id = self.operand_local(value)
 
-                if val base_id_v = base_id.?:
-                    if val value_id_v = value_id.?:
-                        self.escape_analysis.record_field_store(
-                            base_id_v,
-                            field_idx,
-                            value_id_v,
-                            base_id_v  # Use base local as type proxy
-                        )
+                # NOTE: explicit match, not `if val X = Y.?:` -- local id 0
+                # landmine (`.?` truthiness on a boxed `i64?` collapses
+                # `Some(0)` to falsy in the bootstrap seed interpreter, see
+                # var_reassign_ssa.spl's ssa_alloca_apply_def_store). Missing
+                # a field-store escape/barrier record for local 0 is a GC
+                # correctness bug (missed write barrier / missed root).
+                match base_id:
+                    case Some(base_id_v):
+                        match value_id:
+                            case Some(value_id_v):
+                                self.escape_analysis.record_field_store(
+                                    base_id_v,
+                                    field_idx,
+                                    value_id_v,
+                                    base_id_v  # Use base local as type proxy
+                                )
 
-                        # Record write site for barrier analysis
-                        self.barrier_analysis.record_write(WriteSite.field_write(
-                            point, 0, field_idx, 0
-                        ))
+                                # Record write site for barrier analysis
+                                self.barrier_analysis.record_write(WriteSite.field_write(
+                                    point, 0, field_idx, 0
+                                ))
+                            case nil:
+                                pass_do_nothing
+                    case nil:
+                        pass_do_nothing
 
             case GetField(dest, base, field_idx):
                 val base_id = self.operand_local(base)
-                if val base_id_v = base_id.?:
-                    self.escape_analysis.record_field_load(
-                        base_id_v,
-                        field_idx,
-                        dest.id,
-                        0
-                    )
+                # NOTE: explicit match, not `if val X = Y.?:` -- local id 0
+                # landmine, see the SetField case above.
+                match base_id:
+                    case Some(base_id_v):
+                        self.escape_analysis.record_field_load(
+                            base_id_v,
+                            field_idx,
+                            dest.id,
+                            0
+                        )
+                    case nil:
+                        pass_do_nothing
 
             # Call (potential GC point)
             case Call(dest, callee, args, _):
@@ -216,8 +233,13 @@ class GcSafetyAnalyzer:
                 # Arguments may escape
                 for arg in args:
                     val arg_id = self.operand_local(arg)
-                    if val arg_id_v = arg_id.?:
-                        self.escape_analysis.record_call_arg(arg_id_v)
+                    # NOTE: explicit match, not `if val X = Y.?:` -- local id 0
+                    # landmine, see the SetField case above.
+                    match arg_id:
+                        case Some(arg_id_v):
+                            self.escape_analysis.record_call_arg(arg_id_v)
+                        case nil:
+                            pass_do_nothing
 
             case _:
 
