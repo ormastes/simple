@@ -800,21 +800,29 @@ impl HirLowering:
         val stmt_count = b.stmts.len()
         var stmt_idx = 0
         while stmt_idx < stmt_count:
-            val lowered = self.lower_hir_stmt(b.stmts[stmt_idx])
-            if stmt_idx == stmt_count - 1:
-                # QUALIFIED pattern required: bare `case Expr(expr)` collides with
-                # the frontend `struct Expr`, so the seed's unqualified-pattern
-                # heuristic (stmt_lowering.rs, enum_name == "_") extracted the
-                # payload as a struct FieldAccess at offset 0 (the enum header) —
-                # a garbage HirExpr stored as block.value (iterations 10/14/15).
-                match lowered.kind:
-                    case HirStmtKind.Expr(expr):
-                        block_has_value = true
-                        block_value_expr = expr
-                    case _:
-                        stmts = stmts.push(lowered)
-            else:
-                stmts = stmts.push(lowered)
+            # A single source statement may desugar into several HIR statements
+            # (tuple destructuring, see lower_hir_stmt_multi) -- splice them all
+            # in, applying the tail-value extraction only to the very last one.
+            val lowered_list = self.lower_hir_stmt_multi(b.stmts[stmt_idx])
+            val lowered_count = lowered_list.len()
+            var li = 0
+            while li < lowered_count:
+                val lowered = lowered_list[li]
+                if stmt_idx == stmt_count - 1 and li == lowered_count - 1:
+                    # QUALIFIED pattern required: bare `case Expr(expr)` collides with
+                    # the frontend `struct Expr`, so the seed's unqualified-pattern
+                    # heuristic (stmt_lowering.rs, enum_name == "_") extracted the
+                    # payload as a struct FieldAccess at offset 0 (the enum header) —
+                    # a garbage HirExpr stored as block.value (iterations 10/14/15).
+                    match lowered.kind:
+                        case HirStmtKind.Expr(expr):
+                            block_has_value = true
+                            block_value_expr = expr
+                        case _:
+                            stmts = stmts.push(lowered)
+                else:
+                    stmts = stmts.push(lowered)
+                li = li + 1
             stmt_idx = stmt_idx + 1
 
         self.symbols.pop_scope()
@@ -854,7 +862,11 @@ impl HirLowering:
             var boot_stmts: [HirStmt] = []
             var boot_idx = 0
             while boot_idx < b.stmts.len():
-                boot_stmts = boot_stmts.push(self.lower_hir_stmt(b.stmts[boot_idx]))
+                val boot_lowered_list = self.lower_hir_stmt_multi(b.stmts[boot_idx])
+                var boot_li = 0
+                while boot_li < boot_lowered_list.len():
+                    boot_stmts = boot_stmts.push(boot_lowered_list[boot_li])
+                    boot_li = boot_li + 1
                 boot_idx = boot_idx + 1
             eprint("[hir-lower] lower_block_unit:done")
             self.symbols.pop_scope()
@@ -865,8 +877,11 @@ impl HirLowering:
         val stmt_count = b.stmts.len()
         var stmt_idx = 0
         while stmt_idx < stmt_count:
-            val lowered: HirStmt = self.lower_hir_stmt(b.stmts[stmt_idx])
-            stmts = stmts.push(lowered)
+            val lowered_list: [HirStmt] = self.lower_hir_stmt_multi(b.stmts[stmt_idx])
+            var li = 0
+            while li < lowered_list.len():
+                stmts = stmts.push(lowered_list[li])
+                li = li + 1
             stmt_idx = stmt_idx + 1
         self.symbols.pop_scope()
 
