@@ -35,6 +35,10 @@ the CPU/software fallback and report a stable reason.
 8. **Report device-backed host acceleration evidence.** Publish one row with
    host, guest ISA, QEMU/device arguments, protocol, backend, device, IDs,
    timing, RSS, checksums, status, and reason.
+9. **Validate cached rows before aggregation.** Accept a cached passing report
+   only when all nine host/ISA rows are present and the three Linux rows link
+   to serial logs containing the exact render, Draw IR, and ProcessingIR
+   receipts.
 
 ## Failure and fallback checks
 
@@ -60,6 +64,14 @@ Run the parser contract without hardware:
 ```sh
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test
 ```
+
+Validate a cached wrapper report before another checker consumes it:
+
+```sh
+sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --validate-report path/to/report
+```
+
+Status-only or incomplete cached reports fail closed as malformed evidence.
 
 Run the live Linux Vulkan-render/CUDA-processing matrix with a deployed
 pure-Simple compiler and CUDA+Vulkan runtime artifact:

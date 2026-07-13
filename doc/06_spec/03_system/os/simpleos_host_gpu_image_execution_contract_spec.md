@@ -1,4 +1,4 @@
-# SimpleOS Host GPU Image Execution Contract Specification
+# SimpleOS Host GPU Image and Text Execution Contract Specification
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|---------|
@@ -6,12 +6,18 @@
 
 ## Scenarios
 
-### Fresh-device Draw IR accepts only checked image work
+### Fresh-device Draw IR accepts only preflighted image and text work
 
 - Decode resources through the canonical host GPU wire.
-- Admit exactly one clipped, full-opacity, fully opaque embedded IMAGE covering the full target.
-- Reject empty, mixed, RECT, TEXT, gradient, transparent, missing, or mismatched input before dispatch.
-- Require nonempty device readback, a positive backend handle, and zero skipped commands before reporting PASS.
+- Require a full-target opaque RECT or IMAGE to initialize fresh device memory.
+- Admit exact IMAGE commands and resolved TEXT only after font identity, glyph
+  material, target bounds, and the framebuffer-area pixel-work cap preflight.
+- Route transient glyph quads through the same checked Vulkan image blend; font
+  bytes and atlas/cache state remain owned by the canonical font renderer.
+- Reject unresolved, malformed, off-target, scaled, styled, or unsupported work
+  before framebuffer mutation.
+- Require device readback, a positive backend handle, and zero skipped commands
+  before reporting PASS.
 
 ### Completion-unknown Vulkan work fails closed
 

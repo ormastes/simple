@@ -221,6 +221,7 @@ The canonical multi-ISA wrapper is:
 ```sh
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
+sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --validate-report build/simpleos_host_gpu_2d/report.env
 ```
 
 It builds `simpleos-host-gpu-x86_64`, `simpleos-host-gpu-aarch64`, and
@@ -231,6 +232,10 @@ CUDA ProcessingIR executor are implemented with Vulkan ProcessingIR fallback;
 refreshed cross-ISA CUDA receipts
 are still required. macOS Metal and Windows DirectX/CUDA rows remain `unsupported` until native
 host executors and receipts exist; their API names are not treated as proof.
+Cached reports are accepted only through `--validate-report`: an overall status
+cannot promote the lane unless all nine host/ISA rows are well-formed and a
+Linux `pass` carries three existing serial logs with exact correlated render,
+Draw IR, and ProcessingIR receipts.
 
 Processing receipts distinguish the transient backend resource handle from the
 stable device identity. Vulkan hashes the runtime-selected driver identity,

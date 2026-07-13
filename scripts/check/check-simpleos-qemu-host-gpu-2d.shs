@@ -119,6 +119,67 @@ emit_row() {
     echo "${row_prefix}_serial_log=$row_log"
 }
 
+report_one() {
+    report=$1
+    key=$2
+    [ "$(grep -ac "^${key}=" "$report" 2>/dev/null || true)" -eq 1 ] || return 1
+    sed -n "s/^${key}=//p" "$report"
+}
+
+validate_report() {
+    report=$1
+    [ -f "$report" ] || return 1
+    status=$(report_one "$report" simpleos_qemu_host_gpu_2d_status) || return 1
+    reason=$(report_one "$report" simpleos_qemu_host_gpu_2d_reason) || return 1
+    [ -n "$reason" ] || return 1
+    case "$status" in pass|blocked|fail|unsupported) ;; *) return 1 ;; esac
+
+    for report_host in linux macos windows; do
+        for report_isa in x86_64 aarch64 riscv64; do
+            prefix="simpleos_qemu_host_gpu_2d_${report_host}_${report_isa}"
+            row_status=$(report_one "$report" "${prefix}_status") || return 1
+            row_reason=$(report_one "$report" "${prefix}_reason") || return 1
+            row_render_backend=$(report_one "$report" "${prefix}_render_backend") || return 1
+            row_processing_backend=$(report_one "$report" "${prefix}_processing_backend") || return 1
+            row_log=$(report_one "$report" "${prefix}_serial_log") || return 1
+            [ -n "$row_reason" ] && [ -n "$row_log" ] || return 1
+            case "$row_status" in pass|blocked|fail|unsupported) ;; *) return 1 ;; esac
+            case "$report_host:$row_render_backend:$row_processing_backend" in
+                linux:vulkan:cuda-preferred-vulkan-fallback|linux:vulkan:cuda|linux:vulkan:vulkan) ;;
+                macos:metal:metal|windows:directx:cuda) ;;
+                *) return 1 ;;
+            esac
+        done
+    done
+
+    if [ "$status" = pass ]; then
+        [ "$reason" = all-linux-host-gpu-rows-pass ] || return 1
+        [ "$(report_one "$report" simpleos_qemu_host_gpu_2d_backend)" = vulkan ] || return 1
+        [ "$(report_one "$report" simpleos_qemu_host_gpu_2d_processing_backend)" = cuda-preferred-vulkan-fallback ] || return 1
+        [ "$(report_one "$report" simpleos_qemu_host_gpu_2d_rows)" -eq 3 ] || return 1
+        [ "$(report_one "$report" simpleos_qemu_host_gpu_2d_passed)" -eq 3 ] || return 1
+        [ "$(report_one "$report" simpleos_qemu_host_gpu_2d_blocked)" -eq 0 ] || return 1
+        [ "$(report_one "$report" simpleos_qemu_host_gpu_2d_failed)" -eq 0 ] || return 1
+        for report_host in macos windows; do
+            for report_isa in x86_64 aarch64 riscv64; do
+                [ "$(report_one "$report" "simpleos_qemu_host_gpu_2d_${report_host}_${report_isa}_status")" = unsupported ] || return 1
+            done
+        done
+        for report_isa in x86_64 aarch64 riscv64; do
+            prefix="simpleos_qemu_host_gpu_2d_linux_${report_isa}"
+            [ "$(report_one "$report" "${prefix}_status")" = pass ] || return 1
+            [ "$(report_one "$report" "${prefix}_reason")" = ok ] || return 1
+            row_log=$(report_one "$report" "${prefix}_serial_log") || return 1
+            [ -f "$row_log" ] && serial_has_pass "$row_log" "$report_isa" || return 1
+            [ "$(report_one "$report" "${prefix}_processing_backend")" = "$(serial_processing_backend "$row_log" "$report_isa")" ] || return 1
+        done
+    fi
+
+    echo "simpleos_qemu_host_gpu_2d_report_validation=pass"
+    echo "simpleos_qemu_host_gpu_2d_report_status=$status"
+    echo "simpleos_qemu_host_gpu_2d_report_reason=$reason"
+}
+
 self_test() {
     REQUIRE_CUDA=0
     temp_dir=$(mktemp -d)
@@ -133,6 +194,11 @@ self_test() {
     stale_generation_log="$temp_dir/stale-generation.log"
     trailing_log="$temp_dir/trailing.log"
     contradictory_terminal_log="$temp_dir/contradictory-terminal.log"
+    x86_log="$temp_dir/x86_64.log"
+    riscv_log="$temp_dir/riscv64.log"
+    pass_report="$temp_dir/pass.env"
+    fake_report="$temp_dir/fake.env"
+    bad_backend_report="$temp_dir/bad-backend.env"
     cat >"$pass_log" <<'EOF'
 HOST_GPU_MAP_OK isa=aarch64 device=3
 HOST_GPU_HELLO_OK isa=aarch64 generation=19 render_mask=1 processing_mask=9
@@ -142,6 +208,8 @@ HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=22 handle=1 identity=23 
 SIMPLEOS_HOST_GPU_2D_PASS isa=aarch64
 TEST PASSED
 EOF
+    sed 's/aarch64/x86_64/g; s/generation=19/generation=9/g; s/generation=20/generation=10/g; s/generation=21/generation=11/g; s/generation=22/generation=12/g' "$pass_log" >"$x86_log"
+    sed 's/aarch64/riscv64/g; s/generation=19/generation=29/g; s/generation=20/generation=30/g; s/generation=21/generation=31/g; s/generation=22/generation=32/g' "$pass_log" >"$riscv_log"
     sed 's/checksum=1792/checksum=1793/' "$pass_log" >"$corrupt_log"
     sed '/^HOST_GPU_DRAW_IR_OK /s/checksum=405589360/checksum=405589361/' "$pass_log" >"$corrupt_draw_ir_log"
     sed 's/processing_mask=9/processing_mask=1/; s/backend=cuda/backend=vulkan/' "$pass_log" >"$vulkan_log"
@@ -198,12 +266,49 @@ EOF
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
+    {
+        for report_host in macos windows; do
+            for report_isa in x86_64 aarch64 riscv64; do
+                emit_row "$report_host" "$report_isa" unsupported "requires-$report_host-host" none
+            done
+        done
+        emit_row linux x86_64 pass ok "$x86_log" cuda
+        emit_row linux aarch64 pass ok "$pass_log" cuda
+        emit_row linux riscv64 pass ok "$riscv_log" cuda
+        echo simpleos_qemu_host_gpu_2d_status=pass
+        echo simpleos_qemu_host_gpu_2d_reason=all-linux-host-gpu-rows-pass
+        echo simpleos_qemu_host_gpu_2d_backend=vulkan
+        echo simpleos_qemu_host_gpu_2d_processing_backend=cuda-preferred-vulkan-fallback
+        echo simpleos_qemu_host_gpu_2d_rows=3
+        echo simpleos_qemu_host_gpu_2d_passed=3
+        echo simpleos_qemu_host_gpu_2d_blocked=0
+        echo simpleos_qemu_host_gpu_2d_failed=0
+    } >"$pass_report"
+    validate_report "$pass_report" >/dev/null
+    sed 's/simpleos_qemu_host_gpu_2d_linux_aarch64_render_backend=vulkan/simpleos_qemu_host_gpu_2d_linux_aarch64_render_backend=metal/' "$pass_report" >"$bad_backend_report"
+    if validate_report "$bad_backend_report" >/dev/null 2>&1; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    {
+        echo simpleos_qemu_host_gpu_2d_status=pass
+        echo simpleos_qemu_host_gpu_2d_reason=all-linux-host-gpu-rows-pass
+    } >"$fake_report"
+    if validate_report "$fake_report" >/dev/null 2>&1; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
     echo "simpleos_qemu_host_gpu_2d_self_test=pass"
 }
 
 if [ "${1:-}" = --self-test ]; then
     self_test
     exit 0
+fi
+if [ "${1:-}" = --validate-report ]; then
+    [ "$#" -eq 2 ] || exit 2
+    validate_report "$2"
+    exit $?
 fi
 
 mkdir -p "$BUILD_DIR"

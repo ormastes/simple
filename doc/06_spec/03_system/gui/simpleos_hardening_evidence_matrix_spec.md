@@ -28,7 +28,7 @@ simpleos_hardening_evidence_matrix_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -48,7 +48,7 @@ This scenario audits the current SimpleOS hardening goal as a requirement matrix
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/gui/simpleos_hardening_evidence_matrix_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-13 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -332,6 +332,37 @@ be mistaken for a completed RTL proof pass.
 ## Scenarios
 
 ### SimpleOS hardening evidence matrix
+
+#### rejects a status-only cached host-GPU report
+
+1. Validate the cached host-GPU report.
+2. Report malformed evidence without promoting it.
+
+The matrix invokes the canonical host-GPU wrapper's report validator. A file
+containing only an overall `pass` and reason is classified as
+`fail/malformed-wrapper-report`; it cannot stand in for the three correlated
+Linux ISA receipts and their serial logs.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val run_id = _run_id()
+val host_gpu_report = _host_gpu_report_path(run_id)
+process_run_timeout("/bin/sh", ["-c", "mkdir -p " + _build_dir(run_id)], 5000)
+step("Validate the cached host-GPU report")
+expect(file_write(host_gpu_report,
+    "simpleos_qemu_host_gpu_2d_status=pass\n" +
+    "simpleos_qemu_host_gpu_2d_reason=all-linux-host-gpu-rows-pass\n"
+)).to_be(true)
+val result = _run_matrix_with_host_gpu_report(run_id, host_gpu_report)
+step("Report malformed evidence without promoting it")
+expect(result[2]).to_equal(0)
+expect(result[0]).to_contain("simpleos_hardening_qemu_host_gpu_2d_status=fail")
+expect(result[0]).to_contain("simpleos_hardening_qemu_host_gpu_2d_reason=malformed-wrapper-report")
+```
+
+</details>
 
 #### passes the hardening matrix and mission-critical release gate with RTL/SBY prerequisites
 
@@ -710,8 +741,8 @@ expect(stdout).to_contain("simpleos_hardening_qemu_guest_perf_harness_marker_lin
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

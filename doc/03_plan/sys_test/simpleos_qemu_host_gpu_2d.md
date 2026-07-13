@@ -22,6 +22,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 | honest cross-host backend classification | REQ-008,009 |
 | malformed and stale input rejection | REQ-010; NFR-007 |
 | multi-ISA row aggregation and fail-closed parsing | REQ-011,012; NFR-008,009 |
+| cached report validates every host/ISA row and all three Linux serial receipts before promotion | REQ-011,012; NFR-008,009 |
 | latency, negotiation, and RSS evidence | NFR-003,005,006 |
 
 ## Evidence Rules
