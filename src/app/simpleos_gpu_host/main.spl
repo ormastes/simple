@@ -4,7 +4,12 @@ use std.common.gpu.simpleos_host_gpu_protocol.*
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
-use std.common.gpu.simpleos_host_gpu_draw_ir.{simpleos_host_gpu_draw_ir_encode, simpleos_host_gpu_draw_ir_decode}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    simpleos_host_gpu_draw_ir_encode,
+    simpleos_host_gpu_draw_ir_decode,
+    simpleos_host_gpu_image_resource_coverage_reason,
+    simpleos_host_gpu_image_resources_decode
+}
 use std.common.processing.processing_ir.{processing_ir_fill_u32, processing_ir_validate, processing_ir_cpu_execute, processing_ir_outputs_equal}
 use std.gc_async_mut.processing.vulkan_fill_u32.{processing_ir_execute_vulkan, processing_vulkan_device_identity}
 use std.gc_async_mut.processing.cuda_fill_u32.{processing_ir_execute_cuda}
@@ -43,14 +48,20 @@ fn _payload_words(base: i64, payload_bytes: i64) -> [i64]:
         offset = offset + 8
     words
 
-fn _payload_bytes(base: i64, payload_bytes: i64) -> [u8]:
+fn _wire_bytes(base: i64, wire_offset: i64, byte_count: i64) -> [u8]:
     var bytes: [u8] = []
     var offset: i64 = 0
-    while offset < payload_bytes:
-        val packed = _read(base, simpleos_host_gpu_wire_payload_offset() + (offset / 8) * 8).to_u64()
+    while offset < byte_count:
+        val packed = _read(base, wire_offset + (offset / 8) * 8).to_u64()
         bytes.push(((packed >> ((offset % 8).to_u32() * 8u32)) & 0xFFu64).to_u8())
         offset = offset + 1
     bytes
+
+fn _payload_bytes(base: i64, payload_bytes: i64) -> [u8]:
+    _wire_bytes(base, simpleos_host_gpu_wire_payload_offset(), payload_bytes)
+
+fn _request_generation_matches(base: i64, generation: i64) -> bool:
+    _read(base, SIMPLEOS_HOST_GPU_WIRE_REQUEST_GENERATION) == generation
 
 fn _write_pixels(base: i64, pixels: [u32], count: i64) -> i64:
     var checksum: i64 = 0
@@ -141,12 +152,18 @@ fn _process_request(base: i64) -> i64:
     val guest_isa_code = _read(base, SIMPLEOS_HOST_GPU_WIRE_GUEST_ISA)
     val requested_render_mask = _read(base, SIMPLEOS_HOST_GPU_WIRE_REQUESTED_RENDER_MASK)
     val requested_processing_mask = _read(base, SIMPLEOS_HOST_GPU_WIRE_REQUESTED_PROCESSING_MASK)
+    val image_resource_count = _read(base, SIMPLEOS_HOST_GPU_WIRE_IMAGE_RESOURCE_COUNT)
+    val image_resource_bytes = _read(base, SIMPLEOS_HOST_GPU_WIRE_IMAGE_RESOURCE_BYTES)
+    val image_resource_checksum = _read(base, SIMPLEOS_HOST_GPU_WIRE_IMAGE_RESOURCE_CHECKSUM)
     # Snapshot correlation fields under the same acquire fence as the request.
     # Completion publishes this snapshot rather than rereading mutable request memory.
     _write(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_RUN_ID_HASH, run_id_hash)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_FRAME_ID, frame_id)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_BACKEND, backend_code)
     if request_magic != SIMPLEOS_HOST_GPU_PROTOCOL_MAGIC or request_version != SIMPLEOS_HOST_GPU_PROTOCOL_VERSION:
+        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, 0, 0, 0, 1, 0, 0)
+        return 1
+    if kind != SIMPLEOS_HOST_GPU_KIND_DRAW_IR and (image_resource_count != 0 or image_resource_bytes != 0 or image_resource_checksum != 0):
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, 0, 0, 0, 1, 0, 0)
         return 1
 
@@ -166,15 +183,23 @@ fn _process_request(base: i64) -> i64:
         return 1
     var words: [i64] = []
     var draw_ir_bytes: [u8] = []
+    var image_resource_wire_bytes: [u8] = []
     if kind == SIMPLEOS_HOST_GPU_KIND_DRAW_IR:
+        val negotiated_max_readback = _read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_READBACK)
+        val empty_resources = image_resource_count == 0 and image_resource_bytes == 0 and image_resource_checksum == 0
+        val populated_resources = image_resource_count > 0 and image_resource_count <= SIMPLEOS_HOST_GPU_MAX_DRAW_IR_COMMANDS and image_resource_bytes > 0 and image_resource_bytes <= negotiated_max_readback and image_resource_bytes <= simpleos_host_gpu_max_readback_bytes() and image_resource_checksum > 0
+        if not empty_resources and not populated_resources:
+            _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, 0, 0, 0, 1, 0, 0)
+            return 1
         draw_ir_bytes = _payload_bytes(base, payload_bytes)
+        image_resource_wire_bytes = _wire_bytes(base, simpleos_host_gpu_wire_readback_offset(), image_resource_bytes)
     else:
         words = _payload_words(base, payload_bytes)
         if simpleos_host_gpu_wire_checksum_words(words) != expected_checksum:
             _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH, 0, 0, 0, 1, 0, 0)
             return 1
 
-    if _read(base, SIMPLEOS_HOST_GPU_WIRE_REQUEST_GENERATION) != generation:
+    if not _request_generation_matches(base, generation):
         return 0
     val requested_backend_mask = simpleos_host_gpu_backend_mask(backend_code)
     val negotiated_mask = if kind == SIMPLEOS_HOST_GPU_KIND_RENDER or kind == SIMPLEOS_HOST_GPU_KIND_DRAW_IR:
@@ -216,6 +241,8 @@ fn _process_request(base: i64) -> i64:
         if not completed or not processing_ir_outputs_equal(values, oracle):
             _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, if completed: SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH else: SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK, 0, 0, 0, 1, 0, 0)
             return 1
+        if not _request_generation_matches(base, generation):
+            return 0
         val checksum = _write_pixels(base, values, element_count)
         var elapsed = time_now_unix_micros() - started
         if elapsed <= 0:
@@ -232,6 +259,18 @@ fn _process_request(base: i64) -> i64:
         if not canonical.ok or canonical.checksum != expected_checksum or canonical.command_count != element_count:
             _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH, 0, 0, 0, 1, 0, 0)
             return 1
+        val decoded_resources = simpleos_host_gpu_image_resources_decode(image_resource_wire_bytes, image_resource_count, image_resource_checksum, simpleos_host_gpu_max_readback_bytes(), SIMPLEOS_HOST_GPU_MAX_DRAW_IR_COMMANDS)
+        if not decoded_resources.ok or simpleos_host_gpu_image_resource_coverage_reason(decoded.composition, decoded_resources.resources) != "":
+            _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, 0, 0, 0, 1, 0, 0)
+            return 1
+        # Vulkan IMAGE scaling still uses the CPU emulation owner before a
+        # full-frame upload. Transport is lossless, but execution cannot claim
+        # device-backed provenance until the backend has a native image path.
+        if decoded_resources.resources.len() > 0:
+            _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK, 0, 0, 0, 1, 0, 0)
+            return 1
+        if not _request_generation_matches(base, generation):
+            return 0
         match Engine2D.create_requested_backend(width.to_i32(), height.to_i32(), backend):
             Err(_):
                 _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_UNSUPPORTED_BACKEND, 0, 0, 0, 1, 0, 0)
@@ -250,6 +289,8 @@ fn _process_request(base: i64) -> i64:
                 if not device_backed:
                     _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK, 0, 0, 0, 1, 0, 0)
                     return 1
+                if not _request_generation_matches(base, generation):
+                    return 0
                 val checksum = _write_pixels(base, result.pixels, output_count)
                 var elapsed = time_now_unix_micros() - started
                 if elapsed <= 0:
@@ -286,6 +327,9 @@ fn _process_request(base: i64) -> i64:
         engine.shutdown()
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK, 0, 0, 0, 1, 0, 0)
         return 1
+    if not _request_generation_matches(base, generation):
+        engine.shutdown()
+        return 0
     val checksum = _write_pixels(base, readback.pixels, output_count)
     var elapsed = time_now_unix_micros() - started
     if elapsed <= 0:

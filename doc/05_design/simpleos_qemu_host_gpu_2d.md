@@ -25,17 +25,23 @@ outstanding request map rejects duplicate or stale receipts.
 2. Canonical RECT/TEXT/IMAGE Draw IR semantics and ProcessingIR `FillU32` use the payload area.
    Production WM frames first form one `DrawIrComposition`; the local fallback
    resolves checksum-valid top-level `WmContentFrame` pixels as IMAGE resources.
-   IMAGE pixel attachments and clipped nested resources remain open.
+   The guest encodes unique referenced top-level IMAGE pixels as bounded,
+   checksummed little-endian records in the negotiated readback arena and
+   publishes their count, byte length, and checksum with the request. Clipped
+   nested resources remain open.
 3. The daemon validates, dispatches to its private host adapter, reads output
-   back in the same completion, and emits a correlated receipt.
+   back in the same completion, and emits a correlated receipt. It snapshots
+   resource bytes before rendering and rechecks request generation immediately
+   before overwriting the shared arena with result pixels.
 4. The guest validates provenance and exact CPU-oracle parity.
 5. Any unavailable service/backend or invalid receipt returns a stable reason
    and selects the existing software/CPU path without preventing boot.
 
 The local `Engine2dWmFrameExecutor` rejects duplicate or unreferenced content
 frames, stale revisions, bad checksums, unresolved IMAGE commands, and nested
-GROUP metadata. This keeps production rendering honest while the wire remains
-plain-RECT-only.
+GROUP metadata. The wire accepts the same top-level IMAGE resource set, but
+production host-offload selection remains open until session wiring and native
+Vulkan image execution provide honest device-backed provenance.
 
 ## Bounds and Failure Policy
 

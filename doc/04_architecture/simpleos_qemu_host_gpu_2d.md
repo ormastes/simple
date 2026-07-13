@@ -4,11 +4,13 @@
 ## Decision
 
 Use one bounded, architecture-neutral guest/host protocol over QEMU
-`ivshmem-plain`. The current guest submits a bounded canonical plain-RECT Draw
-IR payload and a bounded ProcessingIR `FillU32` payload. The production x86
+`ivshmem-plain`. The current guest submits bounded canonical RECT/TEXT/IMAGE
+Draw IR semantics, separate bounded IMAGE pixel resources, and a bounded
+ProcessingIR `FillU32` payload. The production x86
 desktop source path routes local frames through `DrawIrComposition`, resolved top-level
-`WmContentFrame` IMAGE resources, and Engine2D; styled text/image attachments
-remain required before that same complete composition may use host offload. A
+`WmContentFrame` IMAGE resources, and Engine2D. Production session wiring,
+nested IMAGE clipping, and device-native Vulkan image execution remain required
+before that same complete composition may use host offload. A
 host daemon selects a supported private backend and
 returns a correlated receipt plus output. x86_64, AArch64, and RISC-V adapters
 only own boot/device discovery. They must not define backend-specific public
@@ -64,8 +66,11 @@ contract is reused unchanged for AArch64 and RISC-V.
 fallback owner. It builds and submits the canonical Simple-owned composition,
 resolves only
 unique checksum-valid top-level IMAGE resources, and rejects unsupported nested
-frames rather than dropping their pixels. Host offload must extend the bounded
-wire with equivalent attachments; it must not reintroduce a full-frame copy.
+frames rather than dropping their pixels. The host wire carries equivalent
+top-level attachments as canonical little-endian records in the negotiated
+readback arena. The daemon snapshots and validates them before execution, then
+rechecks request generation before reusing that arena for output. This must not
+be replaced by a producer-specific full-frame copy.
 The canonical Draw IR SDN skin preserves the complete typed command metadata,
 so styled RECT/TEXT and IMAGE semantics can cross the wire without a producer-
 specific parallel codec; binary image pixels remain separate bounded resources.
