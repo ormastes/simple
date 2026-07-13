@@ -739,6 +739,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_cranelift_define_function", cranelift::rt_cranelift_define_function);
     insert_simple!("rt_cranelift_emit_object", cranelift::rt_cranelift_emit_object);
+    insert_simple!(
+        "rt_cranelift_emit_object_raw",
+        cranelift::rt_cranelift_emit_object_raw
+    );
     insert_simple!("rt_cranelift_end_function", cranelift::rt_cranelift_end_function);
     insert_simple!("rt_cranelift_fadd", cranelift::rt_cranelift_fadd);
     insert_simple!("rt_cranelift_fcmp", cranelift::rt_cranelift_fcmp);
@@ -2391,4 +2395,14 @@ pub(crate) fn call_extern_function_with_values(
     }
 
     Err(common::unknown_function(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EXTERN_DISPATCH;
+
+    #[test]
+    fn dispatch_registers_cranelift_emit_object_raw() {
+        assert!(EXTERN_DISPATCH.contains_key("rt_cranelift_emit_object_raw"));
+    }
 }

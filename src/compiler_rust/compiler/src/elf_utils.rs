@@ -828,6 +828,9 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
             crate::codegen::cranelift_sffi::rt_cranelift_call_function_ptr as *const () as usize
         }
         "rt_cranelift_emit_object" => crate::codegen::cranelift_sffi::rt_cranelift_emit_object as *const () as usize,
+        "rt_cranelift_emit_object_raw" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_emit_object_raw as *const () as usize
+        }
 
         _ => return None,
     };
@@ -874,5 +877,10 @@ mod tests {
         ] {
             assert!(resolve_runtime_symbol(symbol).unwrap_or(0) != 0, "{symbol}");
         }
+    }
+
+    #[test]
+    fn resolves_cranelift_emit_object_raw() {
+        assert!(resolve_runtime_symbol("rt_cranelift_emit_object_raw").unwrap_or(0) != 0);
     }
 }

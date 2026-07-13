@@ -258,6 +258,58 @@ intersection with core/provider archives is gated at zero; Stage4 may compose
 that disjoint artifact with core-C only after the gate exists. Provider-profile
 closure and cache fingerprinting remain a separate follow-up.
 
+The focused `src/app/cli/native_build_main.spl` probe narrows that boundary. Its
+first retained-cache link reported 73 undefined names: 65 Cranelift hooks, three
+runtime helpers, and five source-looking names. The source audit found two
+generic `Result` receiver-inference defects, three nonexistent `to_text` method
+resolutions, and a CUDA PTX constant incorrectly routed through color `to_hex`;
+these are not valid reasons to import unrelated GPU, UI, or failsafe modules.
+`rt_mkdir_p` already exists in core-C, while `rt_path_parent` and
+`rt_time_now_monotonic_ms` have canonical pure-Simple core owners.
+
+The focused bootstrap path now builds an ABI-disjoint compiler capsule from a
+dedicated runtime-isolated crate. Its exact 73-hook contract is derived from
+the crate exports and matches both canonical Simple facades; no manual symbol
+manifest is used. The closure localizes every non-contract definition, removes
+constructor/destructor sections, rejects undefined runtime symbols, and fails
+if any definition overlaps the selected core/provider archive. The
+only heap-shaped Cranelift crossing was replaced by a raw pointer/length object
+emission entry behind the canonical Simple FFI/SFFI facades; the old
+`RuntimeValue` entry remains a compatibility wrapper but is excluded from the
+capsule. Selection is limited to the exact focused entry with both bootstrap
+stage flags and forces a freshly built core-C provider. TODO 560 tracks removal
+of the direct `rt_cranelift_*` ABI in favor of a typed provider surface. No
+successful focused Stage4 link or QEMU receipt is claimed yet.
+
+Focused cycle 2 used the refreshed driver, the dedicated capsule, strict
+no-stub mode, and the retained cache. It stopped before link while phase 2
+parsed a newly merged `launch_metadata.spl`: same-indent multiline bitwise OR
+is accepted by the Rust frontend but the pure-Simple parser ended the
+expression at the newline and reported the following pipe. The source now uses
+the established whole-expression parenthesized form; TODO 561 tracks grammar
+parity instead of treating that spelling as the language fix. The failure path
+then dispatched `result.get_errors()` on the active
+`CompileResult.ParseError` variant and lost the enum method owner. The CLI
+failure funnel now calls the existing bootstrap-safe
+`compile_result_errors(CompileResult)` owner directly.
+
+The retained object cache was not the source of the parse failure—phase 2
+reparses before object-cache use—but its key still omits imported-source hashes
+and resolved provider ownership, and the pure-Simple cache records empty
+dependency lists. TODO 562 tracks that independent invalidation hole. The final
+bounded cycle therefore uses a fresh cache and will not be retried.
+
+The third and final bounded cycle used that fresh cache and the refreshed seed.
+It again stopped during phase 2 on the first bitwise pipe in
+`launch_metadata.spl`, before any cache object or capsule link was produced.
+Whole-expression parentheses did not alter the pure-Simple parser failure, so
+that unsuccessful source normalization was reverted. The recovery fix did
+work: the erroneous `ParseError.get_errors` dispatch is gone and the CLI now
+reports the parser failure without a secondary semantic error. Per the
+three-cycle cap, no fourth run is allowed. TODO 561 is the next root blocker;
+the new compiler capsule remains unit/integration verified but has not yet been
+exercised by a successful Stage4 link or QEMU run.
+
 Related:
 
 - `doc/08_tracking/bug/native_build_entry_closure_quadratic_hang_2026-07-12.md`

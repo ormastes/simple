@@ -38,7 +38,9 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use target_lexicon::Triple;
 
 use lazy_static::lazy_static;
+#[cfg(not(compiler_backfill))]
 use simple_runtime::RuntimeValue;
+#[cfg(not(compiler_backfill))]
 use simple_runtime::value::{rt_string_len, rt_string_data};
 
 // ============================================================================
@@ -233,6 +235,7 @@ unsafe fn string_from_ptr(ptr: i64, len: i64) -> String {
 }
 
 /// Extract string from RuntimeValue
+#[cfg(not(compiler_backfill))]
 fn extract_string(val: RuntimeValue) -> Option<String> {
     let len = rt_string_len(val);
     if len <= 0 {
@@ -281,6 +284,7 @@ fn build_isa_and_triple(target: i64) -> Option<(Triple, std::sync::Arc<dyn crane
 // ============================================================================
 
 /// Create a new JIT or AOT module (takes RuntimeValue for name).
+#[cfg(not(compiler_backfill))]
 #[no_mangle]
 pub extern "C" fn rt_cranelift_module_new(name: RuntimeValue, target: i64) -> i64 {
     let name_str = match extract_string(name) {
@@ -422,14 +426,18 @@ pub unsafe extern "C" fn rt_cranelift_declare_function(
         let mut jit = JIT_MODULES.lock().unwrap();
         if let Some(mod_ctx) = jit.get_mut(&module) {
             let id = mod_ctx.module.declare_function(&name, link, &signature).ok();
-            if let Some(id) = id { mod_ctx.func_ids.insert(name.clone(), id); }
+            if let Some(id) = id {
+                mod_ctx.func_ids.insert(name.clone(), id);
+            }
             id
         } else {
             drop(jit);
             let mut aot = AOT_MODULES.lock().unwrap();
             if let Some(mod_ctx) = aot.get_mut(&module) {
                 let id = mod_ctx.module.declare_function(&name, link, &signature).ok();
-                if let Some(id) = id { mod_ctx.func_ids.insert(name.clone(), id); }
+                if let Some(id) = id {
+                    mod_ctx.func_ids.insert(name.clone(), id);
+                }
                 id
             } else {
                 None
@@ -1092,7 +1100,9 @@ pub unsafe extern "C" fn rt_cranelift_function_addr_in_func(ctx: i64, name_ptr: 
     let Some(builder) = ab.builder.as_mut() else { return 0 };
     let func_ref = if ab.is_jit {
         let mut modules = JIT_MODULES.lock().unwrap();
-        let Some(module) = modules.get_mut(&ab.module_handle) else { return 0 };
+        let Some(module) = modules.get_mut(&ab.module_handle) else {
+            return 0;
+        };
         let Some(&func_id) = module.func_ids.get(&name) else {
             eprintln!("cranelift: function address missing declaration {name}");
             return 0;
@@ -1100,7 +1110,9 @@ pub unsafe extern "C" fn rt_cranelift_function_addr_in_func(ctx: i64, name_ptr: 
         module.module.declare_func_in_func(func_id, builder.func)
     } else {
         let mut modules = AOT_MODULES.lock().unwrap();
-        let Some(module) = modules.get_mut(&ab.module_handle) else { return 0 };
+        let Some(module) = modules.get_mut(&ab.module_handle) else {
+            return 0;
+        };
         let Some(&func_id) = module.func_ids.get(&name) else {
             eprintln!("cranelift: function address missing declaration {name}");
             return 0;
@@ -1118,7 +1130,9 @@ pub unsafe extern "C" fn rt_cranelift_function_addr_in_func(ctx: i64, name_ptr: 
 pub extern "C" fn rt_cranelift_call_arg(ctx: i64, value_handle: i64) -> bool {
     let mut active = ACTIVE_BUILDERS.lock().unwrap();
     let Some(ab) = active.get_mut(&ctx) else { return false };
-    let Some(&value) = ab.values.get(&value_handle) else { return false };
+    let Some(&value) = ab.values.get(&value_handle) else {
+        return false;
+    };
     ab.call_args.push(value);
     true
 }
@@ -1386,6 +1400,7 @@ pub unsafe extern "C" fn rt_cranelift_new_aot_module(name_ptr: i64, name_len: i6
 }
 
 /// Emit an object file from an AOT module.
+#[cfg(not(compiler_backfill))]
 #[no_mangle]
 pub unsafe extern "C" fn rt_cranelift_emit_object(module: i64, path: RuntimeValue) -> bool {
     let path_str = match extract_string(path) {
@@ -1393,6 +1408,21 @@ pub unsafe extern "C" fn rt_cranelift_emit_object(module: i64, path: RuntimeValu
         None => return false,
     };
 
+    rt_cranelift_emit_object_impl(module, &path_str)
+}
+
+/// Emit an object file from an AOT module using a raw string slice.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cranelift_emit_object_raw(module: i64, path_ptr: i64, path_len: i64) -> bool {
+    let path = string_from_ptr(path_ptr, path_len);
+    if path.is_empty() {
+        return false;
+    }
+
+    rt_cranelift_emit_object_impl(module, &path)
+}
+
+fn rt_cranelift_emit_object_impl(module: i64, path: &str) -> bool {
     let mut aot_modules = AOT_MODULES.lock().unwrap();
     if let Some(ctx) = aot_modules.remove(&module) {
         let product = ctx.module.finish();
@@ -1400,7 +1430,7 @@ pub unsafe extern "C" fn rt_cranelift_emit_object(module: i64, path: RuntimeValu
         if bytes.is_empty() {
             return false;
         }
-        std::fs::write(&path_str, bytes).is_ok()
+        std::fs::write(path, bytes).is_ok()
     } else {
         false
     }
@@ -1538,7 +1568,10 @@ pub fn register_cranelift_sffi_functions(builder: &mut JITBuilder) {
     builder.symbol("rt_cranelift_trap", rt_cranelift_trap as *const u8);
 
     // Function calls (bare names)
-    builder.symbol("rt_cranelift_call_args_clear", rt_cranelift_call_args_clear as *const u8);
+    builder.symbol(
+        "rt_cranelift_call_args_clear",
+        rt_cranelift_call_args_clear as *const u8,
+    );
     builder.symbol("rt_cranelift_call_arg", rt_cranelift_call_arg as *const u8);
     builder.symbol("cranelift_call", rt_cranelift_call as *const u8);
     builder.symbol("cranelift_call_indirect", rt_cranelift_call_indirect as *const u8);
@@ -1577,7 +1610,12 @@ pub fn register_cranelift_sffi_functions(builder: &mut JITBuilder) {
     );
 
     // Object file generation / AOT compilation
+    #[cfg(not(compiler_backfill))]
     builder.symbol("rt_cranelift_emit_object", rt_cranelift_emit_object as *const u8);
+    builder.symbol(
+        "rt_cranelift_emit_object_raw",
+        rt_cranelift_emit_object_raw as *const u8,
+    );
     builder.symbol(
         "rt_cranelift_aot_define_function",
         rt_cranelift_aot_define_function as *const u8,
@@ -1679,6 +1717,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_emit_object_raw() {
+        unsafe {
+            let name = "test_emit_object_raw";
+            let module = rt_cranelift_new_aot_module(name.as_ptr() as i64, name.len() as i64, CL_TARGET_X86_64);
+            assert!(module > 0);
+
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().join("test.o");
+            let path = path.to_string_lossy();
+            assert!(rt_cranelift_emit_object_raw(
+                module,
+                path.as_ptr() as i64,
+                path.len() as i64,
+            ));
+            assert!(!std::fs::read(path.as_ref()).unwrap().is_empty());
+        }
+    }
+
     /// Direct mechanism test for the string-constant data-object SFFI
     /// (rt_cranelift_declare_string_data + rt_cranelift_data_addr_in_func),
     /// independent of the Simple-side adapter/seed pipeline. Builds a
@@ -1700,7 +1757,10 @@ mod tests {
 
             // Dedup check: declaring identical content again must return the same handle.
             let data_id2 = rt_cranelift_declare_string_data(module, content.as_ptr() as i64, content.len() as i64);
-            assert_eq!(data_id, data_id2, "identical content should be content-addressed/deduped");
+            assert_eq!(
+                data_id, data_id2,
+                "identical content should be content-addressed/deduped"
+            );
 
             let sig = rt_cranelift_new_signature(0); // SystemV
             rt_cranelift_sig_set_return(sig, CL_TYPE_I64);
@@ -1733,7 +1793,10 @@ mod tests {
             // Dereference the *actual returned pointer* and verify the real bytes,
             // not just that some nonzero handle came back.
             let bytes = std::slice::from_raw_parts(returned_addr as *const u8, content.len());
-            assert_eq!(bytes, content, "data at the returned address must be the exact declared bytes");
+            assert_eq!(
+                bytes, content,
+                "data at the returned address must be the exact declared bytes"
+            );
 
             rt_cranelift_free_module(module);
         }

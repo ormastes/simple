@@ -51,6 +51,34 @@ fn test_host_object_extension() -> &'static str {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn build_compiler_backfill_test_archive(root: &Path, name: &str, sources: &[&str]) -> PathBuf {
+    let mut objects = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        let source_path = root.join(format!("{name}_{index}.c"));
+        let object_path = root.join(format!("{name}_{index}.o"));
+        std::fs::write(&source_path, source).unwrap();
+        assert!(std::process::Command::new(find_c_compiler())
+            .args(["-c", "-ffunction-sections", "-fdata-sections"])
+            .arg(&source_path)
+            .arg("-o")
+            .arg(&object_path)
+            .status()
+            .unwrap()
+            .success());
+        objects.push(object_path);
+    }
+    let archive = root.join(format!("lib{name}.a"));
+    assert!(std::process::Command::new(find_archive_tool())
+        .arg("rcs")
+        .arg(&archive)
+        .args(&objects)
+        .status()
+        .unwrap()
+        .success());
+    archive
+}
+
 #[test]
 fn simpleos_freestanding_linker_script_defaults_and_overrides() {
     use simple_common::target::{Target, TargetArch, TargetOS};
@@ -1206,6 +1234,316 @@ fn test_find_native_all_library_does_not_search_compiler_rust_target() {
     assert!(selected.is_none());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn test_compiler_backfill_archive_keeps_exact_manifest_and_localizes_dependency_closure() {
+    let temp = tempfile::tempdir().unwrap();
+    let compiler = build_compiler_backfill_test_archive(
+        temp.path(),
+        "compiler",
+        &[r#"
+void hidden_helper(void) {}
+void rt_cranelift_requested_hook(void) { hidden_helper(); }
+__attribute__((constructor)) static void compiler_ctor(void) { hidden_helper(); }
+"#],
+    );
+    let provider = build_compiler_backfill_test_archive(temp.path(), "provider", &["void provider_only(void) {}\n"]);
+    let output_dir = temp.path().join("output");
+
+    let output = build_compiler_backfill_archive(&compiler, &[provider], &output_dir).unwrap();
+    assert_eq!(output, output_dir.join("libsimple_compiler_backfill.a"));
+    let (defined, undefined) = super::tools::archive_global_symbols(&output).unwrap();
+    assert_eq!(defined.get("rt_cranelift_requested_hook"), Some(&1));
+    assert!(!defined.contains_key("hidden_helper"));
+    assert_eq!(defined.len(), 1);
+    assert!(!undefined
+        .iter()
+        .any(|symbol| symbol.starts_with("rt_") || symbol.starts_with("spl_")));
+    assert_eq!(archive_members(&output).unwrap(), ["compiler_backfill_local.o"]);
+    let symbols = nm_command().arg("--defined-only").arg(&output).output().unwrap();
+    assert!(symbols.status.success());
+    let symbols = String::from_utf8_lossy(&symbols.stdout);
+    assert!(symbols.lines().any(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        matches!(fields.as_slice(), [_address, "t", "hidden_helper"])
+    }));
+    assert!(!symbols.contains("__simple_compiler_backfill_private_"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_compiler_backfill_archive_rejects_missing_derived_contract() {
+    let temp = tempfile::tempdir().unwrap();
+    let compiler = build_compiler_backfill_test_archive(temp.path(), "compiler", &["void requested_hook(void) {}\n"]);
+    let output_dir = temp.path().join("output");
+
+    let error = build_compiler_backfill_archive(&compiler, &[], &output_dir).unwrap_err();
+    assert!(error.contains("defines no rt_cranelift_* exports"));
+    assert!(!output_dir.join("libsimple_compiler_backfill.a").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_compiler_backfill_archive_requires_each_export_exactly_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let compiler = build_compiler_backfill_test_archive(
+        temp.path(),
+        "compiler",
+        &[
+            "void rt_cranelift_requested_hook(void) {}\n",
+            "void rt_cranelift_requested_hook(void) {}\n",
+        ],
+    );
+
+    let error = build_compiler_backfill_archive(&compiler, &[], &temp.path().join("output")).unwrap_err();
+    assert!(error.contains("must be defined exactly once"));
+    assert!(error.contains("found 2"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_compiler_backfill_archive_rejects_runtime_provider_dependencies() {
+    let temp = tempfile::tempdir().unwrap();
+    let compiler = build_compiler_backfill_test_archive(
+        temp.path(),
+        "compiler",
+        &["extern void rt_missing(void); void rt_cranelift_requested_hook(void) { rt_missing(); }\n"],
+    );
+
+    let error = build_compiler_backfill_archive(&compiler, &[], &temp.path().join("output")).unwrap_err();
+    assert!(error.contains("runtime/provider ownership outside the manifest"));
+    assert!(error.contains("rt_missing"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_compiler_backfill_archive_rejects_same_archive_runtime_laundering() {
+    let temp = tempfile::tempdir().unwrap();
+    let compiler = build_compiler_backfill_test_archive(
+        temp.path(),
+        "compiler",
+        &[
+            "extern void rt_hidden_runtime(void); void rt_cranelift_requested_hook(void) { rt_hidden_runtime(); }\n",
+            "void rt_hidden_runtime(void) {}\n",
+        ],
+    );
+    let output_dir = temp.path().join("output");
+
+    let error = build_compiler_backfill_archive(&compiler, &[], &output_dir).unwrap_err();
+    assert!(error.contains("runtime/provider ownership outside the manifest"));
+    assert!(error.contains("rt_hidden_runtime"));
+    assert!(!output_dir.join("libsimple_compiler_backfill.a").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_compiler_backfill_archive_rejects_provider_symbol_overlap() {
+    let temp = tempfile::tempdir().unwrap();
+    let compiler = build_compiler_backfill_test_archive(
+        temp.path(),
+        "compiler",
+        &["void rt_cranelift_requested_hook(void) {}\n"],
+    );
+    let provider = build_compiler_backfill_test_archive(
+        temp.path(),
+        "provider",
+        &["void rt_cranelift_requested_hook(void) {}\n"],
+    );
+
+    let error = build_compiler_backfill_archive(
+        &compiler,
+        std::slice::from_ref(&provider),
+        &temp.path().join("output"),
+    )
+    .unwrap_err();
+    assert!(error.contains(&provider.display().to_string()));
+    assert!(error.contains("rt_cranelift_requested_hook"));
+}
+
+#[test]
+fn test_stage4_focused_native_build_authorization_requires_both_envs_and_exact_entry() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
+    let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
+    let temp = tempfile::tempdir().unwrap();
+    let entry = temp.path().join("src/app/cli/native_build_main.spl");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, "fn main() -> i64: 0\n").unwrap();
+    let builder = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("out")).entry_file(entry);
+
+    unsafe {
+        std::env::remove_var("SIMPLE_BOOTSTRAP");
+        std::env::remove_var("SIMPLE_BOOTSTRAP_STAGE4");
+    }
+    assert!(!builder.is_authorized_stage4_focused_native_build_entry());
+    unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", "1") };
+    assert!(!builder.is_authorized_stage4_focused_native_build_entry());
+    unsafe { std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", "1") };
+    assert!(builder.is_authorized_stage4_focused_native_build_entry());
+
+    let spoof = temp.path().join("other/src/app/cli/native_build_main.spl");
+    std::fs::create_dir_all(spoof.parent().unwrap()).unwrap();
+    std::fs::write(&spoof, "fn main() -> i64: 0\n").unwrap();
+    let spoof_builder =
+        NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("spoof-out")).entry_file(spoof);
+    assert!(!spoof_builder.is_authorized_stage4_focused_native_build_entry());
+
+    match old_bootstrap {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP") },
+    }
+    match old_stage4 {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP_STAGE4") },
+    }
+}
+
+#[test]
+fn test_stage4_focused_native_build_selects_only_dedicated_compiler_backfill() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
+    let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
+    unsafe {
+        std::env::set_var("SIMPLE_BOOTSTRAP", "1");
+        std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", "1");
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_path = temp.path().join("runtime");
+    let deps = runtime_path.join("deps");
+    std::fs::create_dir_all(&deps).unwrap();
+    std::fs::write(deps.join("libsimple_compiler.a"), b"full-compiler-decoy").unwrap();
+    std::fs::write(runtime_path.join("libsimple_native_all.a"), b"native-all-decoy").unwrap();
+    let config = NativeBuildConfig {
+        runtime_path: Some(runtime_path.clone()),
+        ..Default::default()
+    };
+
+    let focused_entry = temp.path().join("src/app/cli/native_build_main.spl");
+    std::fs::create_dir_all(focused_entry.parent().unwrap()).unwrap();
+    std::fs::write(&focused_entry, "fn main() -> i64: 0\n").unwrap();
+    let focused = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("focused-out"))
+        .config(config.clone())
+        .entry_file(focused_entry);
+
+    let error = focused.selected_stage4_compiler_backfill_archive().unwrap_err();
+    assert!(error.contains("libsimple_compiler_backfill.a"));
+    let dedicated = deps.join("libsimple_compiler_backfill.a");
+    std::fs::write(&dedicated, b"dedicated-backfill").unwrap();
+    assert_eq!(focused.selected_stage4_compiler_backfill_archive().unwrap(), Some(dedicated));
+
+    let full_entry = temp.path().join("src/app/cli/main.spl");
+    std::fs::write(&full_entry, "fn main() -> i64: 0\n").unwrap();
+    let full = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("full-out"))
+        .config(config)
+        .entry_file(full_entry);
+    assert_eq!(full.selected_stage4_compiler_backfill_archive().unwrap(), None);
+    assert_eq!(
+        full.selected_runtime_library(&temp.path().join("full-link")).unwrap(),
+        Some((runtime_path.join("libsimple_native_all.a"), true))
+    );
+
+    match old_bootstrap {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP") },
+    }
+    match old_stage4 {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP_STAGE4") },
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_stage4_focused_native_build_linker_prepares_dedicated_compiler_backfill_through_gate() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
+    let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
+    unsafe {
+        std::env::set_var("SIMPLE_BOOTSTRAP", "1");
+        std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", "1");
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_path = temp.path().join("runtime");
+    let deps = runtime_path.join("deps");
+    std::fs::create_dir_all(&deps).unwrap();
+    let dedicated = build_compiler_backfill_test_archive(
+        &deps,
+        "simple_compiler_backfill",
+        &["void hidden_helper(void) {}\nvoid rt_cranelift_requested_hook(void) { hidden_helper(); }\n"],
+    );
+    assert_eq!(dedicated, deps.join("libsimple_compiler_backfill.a"));
+    let provider = build_compiler_backfill_test_archive(temp.path(), "core_provider", &["void core_only(void) {}\n"]);
+    let entry = temp.path().join("src/app/cli/native_build_main.spl");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, "fn main() -> i64: 0\n").unwrap();
+    let builder = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("out"))
+        .config(NativeBuildConfig {
+            runtime_path: Some(runtime_path),
+            ..Default::default()
+        })
+        .entry_file(entry);
+
+    let output_dir = temp.path().join("prepared");
+    let prepared = builder
+        .prepare_stage4_compiler_backfill_archive(Some(&(provider, false)), &output_dir)
+        .unwrap()
+        .unwrap();
+    assert_eq!(prepared, output_dir.join("libsimple_compiler_backfill.a"));
+    assert_ne!(prepared, dedicated);
+    let (defined, _) = super::tools::archive_global_symbols(&prepared).unwrap();
+    assert_eq!(defined.get("rt_cranelift_requested_hook"), Some(&1));
+    assert!(!defined.contains_key("hidden_helper"));
+
+    match old_bootstrap {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP") },
+    }
+    match old_stage4 {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP_STAGE4") },
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[test]
+fn test_stage4_focused_native_build_forces_fresh_core_c_over_runtime_path_decoys() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
+    let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
+    unsafe {
+        std::env::set_var("SIMPLE_BOOTSTRAP", "1");
+        std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", "1");
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let entry = temp.path().join("src/app/cli/native_build_main.spl");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, "fn main() -> i64: 0\n").unwrap();
+    std::fs::write(temp.path().join("libsimple_native_all.a"), b"native-all-decoy").unwrap();
+    let config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    let builder = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("out"))
+        .config(config)
+        .entry_file(entry);
+    let link_dir = temp.path().join("link");
+    let (selected, is_native_all) = builder.selected_runtime_library(&link_dir).unwrap().unwrap();
+    assert_eq!(selected, link_dir.join("core_c_runtime/libsimple_runtime.a"));
+    assert!(!is_native_all);
+    assert!(runtime_archive_has_bootstrap_cli_symbols(&selected));
+
+    match old_bootstrap {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP") },
+    }
+    match old_stage4 {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP_STAGE4") },
+    }
+}
+
 #[test]
 fn test_runtime_bundle_auto_ignores_native_all_for_non_compiler_entry() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
@@ -1817,14 +2155,12 @@ fn test_llvm_mangle_does_not_rebind_qualified_method_to_unrelated_type() {
         crate::hir::TypeId::VOID,
         simple_parser::Visibility::Private,
     );
-    func.blocks[0]
-        .instructions
-        .push(crate::mir::MirInst::MethodCallStatic {
-            dest: Some(crate::mir::VReg(1)),
-            receiver: crate::mir::VReg(0),
-            func_name: "str.rfind".to_string(),
-            args: vec![],
-        });
+    func.blocks[0].instructions.push(crate::mir::MirInst::MethodCallStatic {
+        dest: Some(crate::mir::VReg(1)),
+        receiver: crate::mir::VReg(0),
+        func_name: "str.rfind".to_string(),
+        args: vec![],
+    });
     func.blocks[0].terminator = crate::mir::Terminator::Return(None);
     mir.functions.push(func);
 
@@ -2276,7 +2612,7 @@ int main(int argc, char** argv) {
         populate_global_enum_defs: false,
     };
 
-    let stub_o = super::stubs::generate_stub_object(temp.path(), &[], &main_o, None, &imports).unwrap();
+    let stub_o = super::stubs::generate_stub_object(temp.path(), &[], &main_o, &[], &imports).unwrap();
     let output = std::process::Command::new("nm")
         .arg("-g")
         .arg(&stub_o)
@@ -2345,7 +2681,7 @@ int main(void) {
         populate_global_enum_defs: false,
     };
 
-    let stub_o = super::stubs::generate_stub_object(temp.path(), &[], &main_o, None, &imports).unwrap();
+    let stub_o = super::stubs::generate_stub_object(temp.path(), &[], &main_o, &[], &imports).unwrap();
 
     match previous.as_deref() {
         Some(value) => std::env::set_var("SIMPLE_STUB_MISSING_RT", value),
@@ -2411,7 +2747,7 @@ int main(void) {
         populate_global_enum_defs: false,
     };
 
-    let stub_o = super::stubs::generate_stub_object(temp.path(), &[], &main_o, None, &imports).unwrap();
+    let stub_o = super::stubs::generate_stub_object(temp.path(), &[], &main_o, &[], &imports).unwrap();
 
     match previous.as_deref() {
         Some(value) => std::env::set_var("SIMPLE_NO_STUB_FALLBACK", value),

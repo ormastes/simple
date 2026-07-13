@@ -2,8 +2,8 @@
 //! runtime library discovery, system symbol identification,
 //! and LLVM constructor stripping.
 
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::collections::HashSet;
 
 use super::{effective_target, safe_canonicalize, RUNTIME_PATH_OVERRIDE};
 use simple_common::CORE_REQUIRED_RUNTIME_SYMBOLS;
@@ -541,6 +541,374 @@ pub(crate) fn find_objcopy_tool() -> Option<String> {
         return Some("objcopy".to_string());
     }
     None
+}
+
+fn canonical_archive_symbol(symbol: &str) -> &str {
+    #[cfg(target_os = "macos")]
+    {
+        symbol.strip_prefix('_').unwrap_or(symbol)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        symbol
+    }
+}
+
+pub(super) fn archive_global_symbols(path: &Path) -> Result<(BTreeMap<String, usize>, BTreeSet<String>), String> {
+    let output = nm_command()
+        .arg("-g")
+        .arg("-p")
+        .arg(path)
+        .output()
+        .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to inspect archive {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let mut defined = BTreeMap::new();
+    let mut undefined = BTreeSet::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let (kind, name) = match fields.as_slice() {
+            [kind, name] if kind.len() == 1 => (*kind, *name),
+            [_address, kind, name] if kind.len() == 1 => (*kind, *name),
+            _ => continue,
+        };
+        if matches!(kind, "U" | "w" | "v") {
+            undefined.insert(name.to_string());
+        } else {
+            *defined.entry(name.to_string()).or_insert(0) += 1;
+        }
+    }
+    Ok((defined, undefined))
+}
+
+fn forbidden_archive_sections(path: &Path) -> Result<Vec<&'static str>, String> {
+    let tool = find_objdump_tool().ok_or_else(|| {
+        format!(
+            "cannot verify constructor removal from {}: no objdump/readelf tool found",
+            path.display()
+        )
+    })?;
+    let output = if tool.contains("readelf") {
+        std::process::Command::new(&tool).arg("-S").arg(path).output()
+    } else {
+        std::process::Command::new(&tool).arg("-h").arg(path).output()
+    }
+    .map_err(|err| format!("failed to inspect sections in {}: {err}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to inspect sections in {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok([
+        ".init_array",
+        ".ctors",
+        ".fini_array",
+        ".dtors",
+        "__mod_init_func",
+        "__mod_term_func",
+    ]
+    .into_iter()
+    .filter(|section| stdout.contains(section))
+    .collect())
+}
+
+/// Build the Stage-4 compiler hook archive without importing a second runtime.
+///
+/// The dedicated archive's globally defined `rt_cranelift_*` symbols are the
+/// exact export contract. On GNU/Linux, a relocatable link roots those exports
+/// and section-GCs everything outside their dependency closure. Surviving
+/// non-contract definitions are localized; the result is rejected unless its
+/// public ABI is contract-only and disjoint from every provider.
+pub(crate) fn build_compiler_backfill_archive(
+    compiler_archive: &Path,
+    provider_archives: &[PathBuf],
+    temp_dir: &Path,
+) -> Result<PathBuf, String> {
+    if !cfg!(target_os = "linux") {
+        return Err("compiler backfill closure currently requires GNU/Linux binutils semantics".to_string());
+    }
+
+    let output = temp_dir.join("libsimple_compiler_backfill.a");
+    if safe_canonicalize(compiler_archive) == safe_canonicalize(&output) {
+        return Err("compiler backfill input and output archive must differ".to_string());
+    }
+    let closure_object = temp_dir.join("compiler_backfill_closure.o");
+    let localized_object = temp_dir.join("compiler_backfill_local.o");
+    let localize_path = temp_dir.join("compiler_backfill_localize.syms");
+    let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_file(&closure_object);
+    let _ = std::fs::remove_file(&localized_object);
+    let _ = std::fs::remove_file(&localize_path);
+
+    let result = (|| {
+        let (source_defined, source_undefined) = archive_global_symbols(compiler_archive)?;
+        if source_defined.is_empty() {
+            return Err(format!(
+                "compiler archive {} defines no global symbols",
+                compiler_archive.display()
+            ));
+        }
+
+        let mut contract_counts = BTreeMap::new();
+        let mut manifest_raw = BTreeSet::new();
+        for (symbol, count) in &source_defined {
+            let canonical = canonical_archive_symbol(symbol);
+            if canonical.starts_with("rt_cranelift_") {
+                *contract_counts.entry(canonical.to_string()).or_insert(0usize) += *count;
+                manifest_raw.insert(symbol.clone());
+            }
+        }
+        if contract_counts.is_empty() {
+            return Err(format!(
+                "dedicated compiler backfill archive {} defines no rt_cranelift_* exports",
+                compiler_archive.display()
+            ));
+        }
+        for (export, count) in &contract_counts {
+            if *count != 1 {
+                return Err(format!(
+                    "derived compiler backfill export `{export}` must be defined exactly once in {} (found {count})",
+                    compiler_archive.display()
+                ));
+            }
+        }
+        let manifest: BTreeSet<String> = contract_counts.into_keys().collect();
+
+        let forbidden_source_runtime: BTreeSet<&str> = source_defined
+            .keys()
+            .chain(source_undefined.iter())
+            .map(|symbol| canonical_archive_symbol(symbol))
+            .filter(|symbol| {
+                (symbol.starts_with("rt_") || symbol.starts_with("spl_")) && !manifest.contains(*symbol)
+            })
+            .collect();
+        if !forbidden_source_runtime.is_empty() {
+            return Err(format!(
+                "compiler backfill source contains runtime/provider ownership outside the manifest: {}",
+                forbidden_source_runtime.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+
+        std::fs::create_dir_all(temp_dir).map_err(|err| {
+            format!(
+                "failed to create compiler backfill directory {}: {err}",
+                temp_dir.display()
+            )
+        })?;
+        let cc = find_c_compiler();
+        let mut closure_cmd = std::process::Command::new(&cc);
+        closure_cmd
+            .arg("-nostdlib")
+            .arg("-no-pie")
+            .arg("-Wl,-r")
+            .arg("-Wl,--gc-sections");
+        for export in &manifest {
+            closure_cmd.arg(format!("-Wl,--undefined={export}"));
+        }
+        let closure_result = closure_cmd
+            .arg("-o")
+            .arg(&closure_object)
+            .arg(compiler_archive)
+            .output()
+            .map_err(|err| format!("failed to execute compiler backfill closure link with {cc}: {err}"))?;
+        if !closure_result.status.success() {
+            return Err(format!(
+                "compiler backfill closure link failed: {}",
+                String::from_utf8_lossy(&closure_result.stderr).trim()
+            ));
+        }
+
+        let (closure_defined, closure_undefined) = archive_global_symbols(&closure_object)?;
+        for export in &manifest {
+            let count: usize = closure_defined
+                .iter()
+                .filter(|(symbol, _)| canonical_archive_symbol(symbol) == export)
+                .map(|(_, count)| *count)
+                .sum();
+            if count != 1 {
+                return Err(format!("compiler backfill closure export `{export}` has {count} definitions"));
+            }
+        }
+        let forbidden_closure_runtime: Vec<&str> = closure_undefined
+            .iter()
+            .map(|symbol| canonical_archive_symbol(symbol))
+            .filter(|symbol| symbol.starts_with("rt_") || symbol.starts_with("spl_"))
+            .collect();
+        if !forbidden_closure_runtime.is_empty() {
+            return Err(format!(
+                "compiler backfill closure has forbidden runtime/provider dependencies: {}",
+                forbidden_closure_runtime.join(", ")
+            ));
+        }
+
+        let localize_symbols: Vec<&String> = closure_defined
+            .keys()
+            .filter(|symbol| !manifest_raw.contains(*symbol))
+            .collect();
+        let localize_text = localize_symbols
+            .iter()
+            .map(|symbol| symbol.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(
+            &localize_path,
+            if localize_text.is_empty() {
+                String::new()
+            } else {
+                localize_text + "\n"
+            },
+        )
+        .map_err(|err| format!("failed to write compiler backfill localization list: {err}"))?;
+
+        let objcopy = find_objcopy_tool().ok_or_else(|| "compiler backfill requires objcopy".to_string())?;
+        let command_output = std::process::Command::new(&objcopy)
+            .arg(format!("--localize-symbols={}", localize_path.display()))
+            .arg("--remove-section=.init_array")
+            .arg("--remove-section=.init_array.*")
+            .arg("--remove-section=.ctors")
+            .arg("--remove-section=.ctors.*")
+            .arg("--remove-section=.fini_array")
+            .arg("--remove-section=.fini_array.*")
+            .arg("--remove-section=.dtors")
+            .arg("--remove-section=.dtors.*")
+            .arg("--remove-section=__mod_init_func")
+            .arg("--remove-section=__mod_term_func")
+            .arg(&closure_object)
+            .arg(&localized_object)
+            .output()
+            .map_err(|err| format!("failed to execute compiler backfill objcopy: {err}"))?;
+        if !command_output.status.success() {
+            return Err(format!(
+                "compiler backfill objcopy failed: {}",
+                String::from_utf8_lossy(&command_output.stderr).trim()
+            ));
+        }
+
+        let (localized_defined, localized_undefined) = archive_global_symbols(&localized_object)?;
+        for export in &manifest {
+            let count: usize = localized_defined
+                .iter()
+                .filter(|(symbol, _)| canonical_archive_symbol(symbol) == export)
+                .map(|(_, count)| *count)
+                .sum();
+            if count != 1 {
+                return Err(format!(
+                    "localized compiler backfill export `{export}` has {count} definitions"
+                ));
+            }
+        }
+        for symbol in localized_defined.keys() {
+            let canonical = canonical_archive_symbol(symbol);
+            if !manifest.contains(canonical) {
+                return Err(format!("compiler backfill retained unexpected global export `{canonical}`"));
+            }
+        }
+        let forbidden_undefined: Vec<&str> = localized_undefined
+            .iter()
+            .map(|symbol| canonical_archive_symbol(symbol))
+            .filter(|symbol| symbol.starts_with("rt_") || symbol.starts_with("spl_"))
+            .collect();
+        if !forbidden_undefined.is_empty() {
+            return Err(format!(
+                "compiler backfill has forbidden runtime/provider dependencies: {}",
+                forbidden_undefined.join(", ")
+            ));
+        }
+
+        let output_symbols: BTreeSet<String> = localized_defined
+            .keys()
+            .map(|symbol| canonical_archive_symbol(symbol).to_string())
+            .collect();
+        for provider in provider_archives {
+            let (provider_defined, _) = archive_global_symbols(provider)?;
+            if provider_defined.is_empty() {
+                return Err(format!(
+                    "provider archive {} defines no global symbols",
+                    provider.display()
+                ));
+            }
+            let overlap: Vec<String> = provider_defined
+                .keys()
+                .map(|symbol| canonical_archive_symbol(symbol))
+                .filter(|symbol| output_symbols.contains(*symbol))
+                .map(str::to_string)
+                .collect();
+            if !overlap.is_empty() {
+                return Err(format!(
+                    "compiler backfill overlaps provider archive {}: {}",
+                    provider.display(),
+                    overlap.join(", ")
+                ));
+            }
+        }
+
+        let forbidden_sections = forbidden_archive_sections(&localized_object)?;
+        if !forbidden_sections.is_empty() {
+            return Err(format!(
+                "compiler backfill retained constructor/destructor sections: {}",
+                forbidden_sections.join(", ")
+            ));
+        }
+
+        let archive_tool = find_archive_tool();
+        let archive_result = std::process::Command::new(&archive_tool)
+            .arg("rcsD")
+            .arg(&output)
+            .arg(&localized_object)
+            .output()
+            .map_err(|err| format!("failed to execute deterministic archive tool {archive_tool}: {err}"))?;
+        if !archive_result.status.success() {
+            return Err(format!(
+                "failed to create compiler backfill archive: {}",
+                String::from_utf8_lossy(&archive_result.stderr).trim()
+            ));
+        }
+        let members = std::process::Command::new(&archive_tool)
+            .arg("t")
+            .arg(&output)
+            .output()
+            .map_err(|err| format!("failed to inspect compiler backfill archive members: {err}"))?;
+        let member_stdout = String::from_utf8_lossy(&members.stdout);
+        let member_names: Vec<&str> = member_stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        if !members.status.success() || member_names != ["compiler_backfill_local.o"] {
+            return Err(format!(
+                "compiler backfill archive must contain exactly compiler_backfill_local.o (found {})",
+                member_names.join(", ")
+            ));
+        }
+        let (output_defined, output_undefined) = archive_global_symbols(&output)?;
+        if output_defined != localized_defined || output_undefined != localized_undefined {
+            return Err("compiler backfill archive symbol table changed while archiving".to_string());
+        }
+        let output_sections = forbidden_archive_sections(&output)?;
+        if !output_sections.is_empty() {
+            return Err(format!(
+                "compiler backfill archive retained constructor/destructor sections: {}",
+                output_sections.join(", ")
+            ));
+        }
+        Ok(output.clone())
+    })();
+
+    let _ = std::fs::remove_file(&closure_object);
+    let _ = std::fs::remove_file(&localized_object);
+    let _ = std::fs::remove_file(&localize_path);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&output);
+    }
+    result
 }
 
 /// Error type for LLVM constructor stripping failures (LIM-010).

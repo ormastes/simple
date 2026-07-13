@@ -100,6 +100,37 @@ pub(crate) fn runtime_archive_has_bootstrap_cli_symbols(path: &Path) -> bool {
 }
 
 impl NativeProjectBuilder {
+    pub(crate) fn is_authorized_stage4_focused_native_build_entry(&self) -> bool {
+        if std::env::var("SIMPLE_BOOTSTRAP").as_deref() != Ok("1")
+            || std::env::var("SIMPLE_BOOTSTRAP_STAGE4").as_deref() != Ok("1")
+        {
+            return false;
+        }
+        let expected = super::safe_canonicalize(&self.project_root.join("src/app/cli/native_build_main.spl"));
+        self.entry_file
+            .as_ref()
+            .is_some_and(|entry| super::safe_canonicalize(entry) == expected)
+    }
+
+    pub(crate) fn selected_stage4_compiler_backfill_archive(&self) -> Result<Option<PathBuf>, String> {
+        if !self.is_authorized_stage4_focused_native_build_entry() {
+            return Ok(None);
+        }
+        let runtime_path = self
+            .config
+            .runtime_path
+            .as_ref()
+            .ok_or_else(|| "Stage4 focused native-build requires an explicit runtime path".to_string())?;
+        let archive = runtime_path.join("deps").join("libsimple_compiler_backfill.a");
+        if !archive.is_file() {
+            return Err(format!(
+                "Stage4 focused native-build compiler backfill archive is missing: {}",
+                archive.display()
+            ));
+        }
+        Ok(Some(archive))
+    }
+
     pub(crate) fn runtime_bundle_prefers_core_lane(&self) -> bool {
         true
     }
@@ -163,9 +194,7 @@ impl NativeProjectBuilder {
         selected_runtime: Option<&(PathBuf, bool)>,
     ) -> Result<(), String> {
         if let Some((runtime_lib, true)) = selected_runtime {
-            if is_bootstrap_main_entry(&self.entry_file)
-                || is_authorized_stage4_cli_entry(&self.entry_file)
-            {
+            if is_bootstrap_main_entry(&self.entry_file) || is_authorized_stage4_cli_entry(&self.entry_file) {
                 return Ok(());
             }
             let entry = self
@@ -192,6 +221,15 @@ impl NativeProjectBuilder {
             );
         }
         let lane = self.resolve_runtime_lane();
+        if self.is_authorized_stage4_focused_native_build_entry() {
+            if lane != NativeRuntimeLane::CoreCBootstrap {
+                return Err("Stage4 focused native-build requires the core-c-bootstrap runtime lane".to_string());
+            }
+            let core_dir = temp_dir.join("core_c_runtime");
+            let core = build_core_c_runtime_library(&core_dir)
+                .ok_or_else(|| "failed to build the Stage4 focused core-C runtime archive".to_string())?;
+            return Ok(Some((core, false)));
+        }
         let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
         let native_all_name = if cfg!(target_os = "windows") {
             "simple_native_all.lib"
@@ -204,9 +242,7 @@ impl NativeProjectBuilder {
             "libsimple_runtime.a"
         };
 
-        if is_bootstrap_main_entry(&self.entry_file)
-            || is_authorized_stage4_cli_entry(&self.entry_file)
-        {
+        if is_bootstrap_main_entry(&self.entry_file) || is_authorized_stage4_cli_entry(&self.entry_file) {
             if let Some(ref rp) = self.config.runtime_path {
                 let native_all = rp.join(native_all_name);
                 if native_all.exists() {

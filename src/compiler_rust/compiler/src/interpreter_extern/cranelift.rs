@@ -155,6 +155,19 @@ pub fn rt_cranelift_emit_object(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(result))
 }
 
+/// Emit AOT module to object file using a raw string slice.
+/// Args: module (i64), path_ptr (i64), path_len (i64)
+pub fn rt_cranelift_emit_object_raw(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 3 {
+        return Ok(Value::Bool(false));
+    }
+    let module = value_to_i64(&args[0]);
+    let path_ptr = value_to_i64(&args[1]);
+    let path_len = value_to_i64(&args[2]);
+    let result = unsafe { cranelift_sffi::rt_cranelift_emit_object_raw(module, path_ptr, path_len) };
+    Ok(Value::Bool(result))
+}
+
 /// Declare a function in a Cranelift module.
 /// Args: module (i64), name_ptr (i64), name_len (i64), sig (i64), linkage (i64)
 pub fn rt_cranelift_declare_function(args: &[Value]) -> Result<Value, CompileError> {
@@ -810,7 +823,7 @@ pub fn rt_write_file(args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(test)]
 mod tests {
-    use super::interpreter_cranelift_arg_handles;
+    use super::{interpreter_cranelift_arg_handles, rt_cranelift_emit_object_raw};
     use crate::value::Value;
 
     #[test]
@@ -825,5 +838,10 @@ mod tests {
         assert!(unsafe { interpreter_cranelift_arg_handles(0, -1) }.is_err());
         let invalid = vec![Value::Bool(false)];
         assert!(unsafe { interpreter_cranelift_arg_handles(invalid.as_ptr() as i64, 1) }.is_err());
+    }
+
+    #[test]
+    fn interpreter_cranelift_emit_object_raw_validates_arity() {
+        assert_eq!(rt_cranelift_emit_object_raw(&[]).unwrap(), Value::Bool(false));
     }
 }

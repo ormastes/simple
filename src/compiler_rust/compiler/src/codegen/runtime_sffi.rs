@@ -1477,6 +1477,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cranelift_call_function_ptr", &[I64, I64, I64], &[I64]), // ptr, args_ptr, args_len -> result
     // Object file generation
     RuntimeFuncSpec::new("rt_cranelift_emit_object", &[I64, I64], &[I8]), // module, path (RuntimeValue) -> success
+    RuntimeFuncSpec::new("rt_cranelift_emit_object_raw", &[I64, I64, I64], &[I8]),
     // =========================================================================
     // CUDA Runtime
     // =========================================================================
@@ -1878,6 +1879,17 @@ mod tests {
         assert_eq!(tier_of("rt_cranelift_module_new"), Ext);
         assert_eq!(tier_of("rt_par_map"), Ext);
         assert_eq!(tier_of("rt_simd_aes_round_u8x16"), Ext);
+    }
+
+    #[test]
+    fn cranelift_emit_object_raw_signature_is_registered() {
+        let spec = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_cranelift_emit_object_raw")
+            .expect("raw Cranelift object emission must be registered for native codegen");
+        assert_eq!(spec.params, [I64, I64, I64]);
+        assert_eq!(spec.returns, [I8]);
+        assert_eq!(spec.tier(), RuntimeFuncTier::Ext);
     }
 
     #[test]

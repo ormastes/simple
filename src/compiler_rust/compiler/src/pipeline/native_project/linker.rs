@@ -6,11 +6,26 @@ use std::path::{Path, PathBuf};
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
-    find_archive_tool, find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_native_all_library,
-    find_objcopy_tool, is_system_symbol, nm_command, strip_llvm_constructors, target_c_compiler, target_cxx_compiler,
+    build_compiler_backfill_archive, find_archive_tool, find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler,
+    find_native_all_library, find_objcopy_tool, is_system_symbol, nm_command, strip_llvm_constructors,
+    target_c_compiler, target_cxx_compiler,
 };
 
 impl NativeProjectBuilder {
+    pub(crate) fn prepare_stage4_compiler_backfill_archive(
+        &self,
+        selected_runtime: Option<&(PathBuf, bool)>,
+        temp_dir: &Path,
+    ) -> Result<Option<PathBuf>, String> {
+        let Some(source) = self.selected_stage4_compiler_backfill_archive()? else {
+            return Ok(None);
+        };
+        let providers = selected_runtime
+            .map(|(path, _)| vec![path.clone()])
+            .unwrap_or_default();
+        build_compiler_backfill_archive(&source, &providers, temp_dir).map(Some)
+    }
+
     pub(super) fn resolve_freestanding_linker_script(
         explicit: Option<&Path>,
         target: simple_common::target::Target,
@@ -912,6 +927,7 @@ int main(int argc, char** argv) {
             }
             other => other,
         };
+        let compiler_backfill = self.prepare_stage4_compiler_backfill_archive(selected_runtime.as_ref(), temp_dir)?;
         let has_native_all = selected_runtime
             .as_ref()
             .is_some_and(|(_, is_native_all)| *is_native_all);
@@ -1048,6 +1064,10 @@ int main(int argc, char** argv) {
             for obj in object_paths {
                 cmd.arg(obj);
             }
+        }
+
+        if let Some(backfill) = compiler_backfill.as_ref() {
+            cmd.arg(backfill);
         }
 
         if let Some((runtime_lib, is_native_all)) = selected_runtime.as_ref() {
@@ -1196,13 +1216,14 @@ int main(int argc, char** argv) {
 
         #[cfg(not(target_os = "windows"))]
         {
-            let stubs_o = generate_stub_object(
-                temp_dir,
-                object_paths,
-                &main_o,
-                selected_runtime.as_ref().map(|(p, _)| p.as_path()),
-                imports,
-            )?;
+            let mut provider_paths = Vec::new();
+            if let Some(backfill) = compiler_backfill.as_ref() {
+                provider_paths.push(backfill.as_path());
+            }
+            if let Some((runtime, _)) = selected_runtime.as_ref() {
+                provider_paths.push(runtime.as_path());
+            }
+            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, imports)?;
             cmd.arg(&stubs_o);
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             if let Some((runtime_lib, _)) = selected_runtime.as_ref() {
@@ -1212,13 +1233,14 @@ int main(int argc, char** argv) {
         }
         #[cfg(target_os = "windows")]
         if !is_msvc && !is_clang_cl {
-            let stubs_o = generate_stub_object(
-                temp_dir,
-                object_paths,
-                &main_o,
-                selected_runtime.as_ref().map(|(p, _)| p.as_path()),
-                &imports,
-            )?;
+            let mut provider_paths = Vec::new();
+            if let Some(backfill) = compiler_backfill.as_ref() {
+                provider_paths.push(backfill.as_path());
+            }
+            if let Some((runtime, _)) = selected_runtime.as_ref() {
+                provider_paths.push(runtime.as_path());
+            }
+            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, &imports)?;
             cmd.arg(&stubs_o);
         }
         let strict_no_stub_fallback = std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");

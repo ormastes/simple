@@ -498,7 +498,7 @@ pub(crate) fn generate_stub_object(
     temp_dir: &std::path::Path,
     object_paths: &[PathBuf],
     main_o: &std::path::Path,
-    selected_runtime_lib: Option<&std::path::Path>,
+    selected_runtime_libs: &[&std::path::Path],
     imports: &ModuleImports,
 ) -> Result<PathBuf, String> {
     use std::collections::{HashSet, BTreeSet};
@@ -537,10 +537,17 @@ pub(crate) fn generate_stub_object(
         }
     }
 
-    let runtime_lib = selected_runtime_lib
-        .map(|p| p.to_path_buf())
-        .or_else(find_runtime_library);
-    if let Some(ref rt_path) = runtime_lib {
+    let fallback_runtime = if selected_runtime_libs.is_empty() {
+        find_runtime_library()
+    } else {
+        None
+    };
+    let runtime_libs: Vec<&std::path::Path> = if let Some(path) = fallback_runtime.as_deref() {
+        vec![path]
+    } else {
+        selected_runtime_libs.to_vec()
+    };
+    for rt_path in runtime_libs {
         let output = nm_command()
             .arg("-g")
             .arg("-p")
