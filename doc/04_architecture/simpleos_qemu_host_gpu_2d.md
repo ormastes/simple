@@ -86,6 +86,15 @@ top-level attachments as canonical little-endian records in the negotiated
 readback arena. The daemon snapshots and validates them before execution, then
 rechecks request generation before reusing that arena for output. This must not
 be replaced by a producer-specific full-frame copy.
+
+The local fallback uses
+`engine2d_draw_ir_adv_composition_present_with_images`: the existing Draw IR
+executor renders and presents directly to its Engine2D surface while returning
+the normal rendered/skipped/fallback accounting with an explicit
+`not_requested` empty readback. Regular composition calls still present and
+read back; fresh-device calls still read back without presenting. This removes
+the production WM's discarded full-frame snapshot without introducing another
+result type, session API, renderer, or Draw IR ownership path.
 The canonical Draw IR SDN skin preserves the complete typed command metadata,
 so styled RECT/TEXT and IMAGE semantics can cross the wire without a producer-
 specific parallel codec; binary image pixels remain separate bounded resources.

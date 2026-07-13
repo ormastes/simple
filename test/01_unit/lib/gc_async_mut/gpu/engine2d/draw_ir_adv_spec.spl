@@ -47,7 +47,7 @@ use common.ui.draw_ir.{
     draw_ir_text,
     draw_ir_style_prop
 }
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_composition}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_composition, engine2d_draw_ir_adv_composition_present_with_images}
 use std.gc_async_mut.gpu.engine2d.draw_ir_runtime_adv.{engine2d_draw_ir_adv_batch_runtime_queue}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{engine2d_host_gpu_runtime_queue_with_backend_handle, engine2d_host_gpu_runtime_reset}
@@ -142,6 +142,49 @@ describe "Engine2D advanced Draw IR executor":
         expect(result.skipped_command_count).to_equal(0)
         expect(result.pixels[1 * 32 + 1]).to_equal(RED)
         expect(result.pixels[8 * 32 + 7]).to_equal(GREEN)
+        engine.shutdown()
+
+    it "presents a production composition without requesting framebuffer readback":
+        var engine = Engine2D.create_with_backend(16, 16, "cpu")
+        engine.clear(BG)
+        val batch = draw_ir_batch("present-only", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("wm", "desktop", 0, 0, 16, 16, 0, 1000, false), [
+            draw_ir_rect("body", 2, 3, 6, 5, GREEN)
+        ])
+        val composition = draw_ir_composition("present-only", "scene", DRAW_IR_BACKEND_GPU, [batch])
+        var images: [Engine2dResolvedDrawIrImage] = []
+
+        step("Render the production composition directly to the existing Engine2D surface")
+        val result = engine2d_draw_ir_adv_composition_present_with_images(engine, composition, false, images)
+
+        step("Return accounting without allocating a framebuffer snapshot")
+        val rendered_pixels = engine.read_pixels()
+        expect(rendered_pixels[3 * 16 + 2]).to_equal(GREEN)
+        expect(result.rendered_command_count).to_equal(1)
+        expect(result.skipped_command_count).to_equal(0)
+        expect(result.fallback_required).to_be(true)
+        expect(result.pixels.len()).to_equal(0)
+        expect(result.readback_source).to_equal("not_requested")
+        expect(result.backend_handle).to_equal(0)
+        expect(result.readback_checksum).to_equal(0)
+        engine.shutdown()
+
+    it "rejects an unsupported present-only composition without requesting readback":
+        var engine = Engine2D.create_with_backend(16, 16, "cpu")
+        engine.clear(BG)
+        val unsupported = DrawIrCommand(kind: "future-path", component_id: "path", x: 1, y: 1, width: 5, height: 5, color: RED, text_value: "", border_rect: draw_ir_no_rect(), content_rect: draw_ir_no_rect(), hit_rect: draw_ir_no_rect(), clip_rect: draw_ir_no_rect(), computed_style: [], edge: nil, parent_id: "", image_uri: "", points: [])
+        val batch = draw_ir_batch("present-rejected", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("wm", "desktop", 0, 0, 16, 16, 0, 1000, false), [unsupported])
+        val composition = draw_ir_composition("present-rejected", "scene", DRAW_IR_BACKEND_GPU, [batch])
+        var images: [Engine2dResolvedDrawIrImage] = []
+
+        val result = engine2d_draw_ir_adv_composition_present_with_images(engine, composition, false, images)
+
+        expect(result.rendered_command_count).to_equal(0)
+        expect(result.skipped_command_count).to_equal(1)
+        expect(result.fallback_required).to_be(true)
+        expect(result.pixels.len()).to_equal(0)
+        expect(result.readback_source).to_equal("not_requested")
+        expect(result.backend_handle).to_equal(0)
+        expect(result.readback_checksum).to_equal(0)
         engine.shutdown()
 
     it "paints a border on a transparent-background box while the interior stays background color":

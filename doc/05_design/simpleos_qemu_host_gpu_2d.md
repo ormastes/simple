@@ -56,6 +56,16 @@ QEMU evidence. The host-only fresh-device executor may bypass the software
 offscreen surface for one exact opaque IMAGE covering the full target;
 all other IMAGE shapes preserve the existing offscreen/fallback behavior.
 
+Local production composition calls
+`engine2d_draw_ir_adv_composition_present_with_images`. The shared internal
+executor takes independent `present_frame` and `readback_frame` controls:
+regular composition is `(true, true)`, fresh-device execution is
+`(false, true)`, and the production present-only path is `(true, false)`. When
+readback is disabled, both preflight rejection and successful rendering return
+`engine2d_readback([], "not_requested")`; neither branch calls the Engine2D
+readback API. Rendering, presentation, and accounting remain otherwise
+identical, so the WM avoids allocating a discarded full-frame pixel snapshot.
+
 ## Bounds and Failure Policy
 
 Use negotiated maxima for payload bytes, commands, dimensions, queue depth,
