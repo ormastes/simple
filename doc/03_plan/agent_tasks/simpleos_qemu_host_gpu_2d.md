@@ -28,6 +28,7 @@
 | canonical WM command trace | Codex Spark | required RECT/TEXT/IMAGE/embedding subset and exclusions |
 | checked Vulkan provenance trace | Codex Spark | shared tri-state dispatch owner and raw CLEAR/RECT test boundary |
 | native Metal Draw IR source | Codex Spark | shared-session surface, checked opacity composite, strict host admission |
+| native Metal ProcessingIR source | Codex Spark | dedicated checked FillU32 kernel, pointer readback, strict daemon probe |
 | merge and generated-manual review | primary `/root` | wrapper/parser/manual accepted; native non-Linux rows remain open |
 | final review | normal/highest-capability Codex | requirements, exclusions, security, NFR, manual quality |
 

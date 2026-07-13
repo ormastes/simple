@@ -33,6 +33,9 @@ fn vulkan_backend_helpers_source() -> text:
 fn host_gpu_daemon_source() -> text:
     file_read_text("src/app/simpleos_gpu_host/main.spl")
 
+fn metal_processing_source() -> text:
+    file_read_text("src/lib/gc_async_mut/processing/metal_fill_u32.spl")
+
 fn run_host_gpu_wrapper_self_test() -> text:
     val (out, err, code) = process_run("/bin/sh", ["scripts/check/check-simpleos-qemu-host-gpu-2d.shs", "--self-test"])
     expect(code).to_equal(0)
@@ -97,7 +100,7 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         expect(daemon).to_contain("Engine2D.create_requested_backend(1, 1, name)")
         expect(daemon).to_contain("engine.backend_name() == name")
         expect(daemon).to_contain("metal_device_info(0)")
-        expect(daemon).to_contain("metal|{info.name}|{info.total_memory}")
+        expect(daemon).to_contain("processing_metal_device_identity(info.name, info.total_memory)")
         expect(daemon).to_contain("kind == SIMPLEOS_HOST_GPU_KIND_RENDER and backend != \"vulkan\"")
         expect(daemon.contains("backend != \"vulkan\" and kind == SIMPLEOS_HOST_GPU_KIND_DRAW_IR")).to_equal(false)
 
@@ -109,6 +112,19 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         expect(source).to_contain("checksum=1792 mismatches=0")
         expect(source).to_contain("cuda-preferred-vulkan-fallback")
         expect(run_host_gpu_wrapper_self_test()).to_contain("simpleos_qemu_host_gpu_2d_self_test=pass")
+
+    # @capture(protocol)
+    it "keeps native Metal ProcessingIR separate from Engine2D rendering":
+        val daemon = host_gpu_daemon_source()
+        val metal = metal_processing_source()
+        expect(daemon).to_contain("processing_ir_execute_metal")
+        expect(daemon).to_contain("SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL")
+        expect(daemon).to_contain("processing_ir_outputs_equal(probe.values, processing_ir_cpu_execute(probe_ir))")
+        expect(daemon).to_contain("SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK, negotiated_processing_mask")
+        expect(metal).to_contain("metal_sffi_run_compute_frame")
+        expect(metal).to_contain("metal_buffer_download_ptr")
+        expect(metal.contains("MetalSession")).to_equal(false)
+        expect(metal.contains("Engine2D")).to_equal(false)
 
     # @manual: folded
     it "keeps the guest bootable when acceleration is unavailable":

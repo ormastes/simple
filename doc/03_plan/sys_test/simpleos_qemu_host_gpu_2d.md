@@ -21,6 +21,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 | production x86 active-VMM mapping, idle-generation submission, validated MMIO presentation, and local fallback | REQ-002,003,005,006,009,010; NFR-001,004 |
 | resolved TEXT preflight, canonical glyph material, exact CPU/Vulkan parity, and device provenance | REQ-003,005,006,010; NFR-001 |
 | exact device-backed ProcessingIR result | REQ-004,007; NFR-002,004 |
+| native Metal nonzero FillU32, terminal command status, pointer readback, identity, and CPU parity | REQ-004,007,008; NFR-002,004 |
 | honest cross-host backend classification | REQ-008,009 |
 | malformed and stale input rejection | REQ-010; NFR-007 |
 | multi-ISA row aggregation and fail-closed parsing | REQ-011,012; NFR-008,009 |

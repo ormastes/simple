@@ -234,8 +234,9 @@ render plus ProcessingIR device readback. Linux Vulkan rendering and the native
 CUDA ProcessingIR executor are implemented with Vulkan ProcessingIR fallback;
 refreshed cross-ISA CUDA receipts
 are still required. macOS Metal Draw IR execution is implemented but remains
-`unsupported` evidence until a prepared native host produces a fresh receipt;
-Metal ProcessingIR is unavailable. Windows DirectX/CUDA rows remain
+`unsupported` evidence until a prepared native host produces a fresh receipt.
+Metal ProcessingIR FillU32 is implemented through a dedicated checked MSL
+kernel and device readback, but likewise needs a prepared-host receipt. Windows DirectX/CUDA rows remain
 `unsupported`; the current DirectX renderer is software emulation and its API
 name is not proof. The host Draw IR executor retains the parent Vulkan or Metal
 session for bounded smaller WM surfaces, requires child device readback, and
@@ -252,6 +253,9 @@ Processing receipts distinguish the transient backend resource handle from the
 stable device identity. Vulkan hashes the runtime-selected driver identity,
 which includes the device name and driver metadata, and negotiation fails
 closed when it is missing; a buffer handle alone is not device provenance.
+Metal hashes validated default-device metadata and is advertised only after a
+real nonzero FillU32 probe returns exact device bytes, a positive handle, and
+identity.
 The guest bridge captures the completion once and validates its typed receipt,
 including the device readback source and run/frame/backend correlation. Host
 and guest checksum loops share the same masked modular checksum primitives.

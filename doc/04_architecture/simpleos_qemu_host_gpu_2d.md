@@ -117,7 +117,7 @@ after a bounded real ProcessingIR probe returns both values.
 | Host | Rendering | Processing | Classification rule |
 |---|---|---|---|
 | Linux | Vulkan | Vulkan; CUDA on prepared NVIDIA host | pass only with device receipt |
-| macOS | Metal implementation, native receipt still required | unavailable: no Metal ProcessingIR executor | never infer processing from an Engine2D clear |
+| macOS | Metal implementation, native receipt still required | dedicated Metal ProcessingIR FillU32, native receipt still required | never infer processing from an Engine2D clear |
 | Windows | unavailable: current Simple DirectX lane is software emulation | unavailable | standalone D3D probes are not production receipts |
 | Any missing prerequisite | CPU/software | CPU | `unsupported` or `blocked`, never accelerated |
 

@@ -6,8 +6,9 @@ the wrapper and its fail-closed parser self-test still exercise the shared
 full-frame IMAGE Draw IR fixture. Earlier
 Linux/Vulkan live x86_64, AArch64, and RV64 raw-render receipts pass; refreshed
 cross-ISA Draw IR and CUDA ProcessingIR receipts remain pending. Native Metal
-Draw IR execution is implemented but its prepared-macOS receipt remains
-unavailable; DirectX remains software emulation and cannot pass.
+Draw IR and dedicated ProcessingIR FillU32 execution are implemented, but their
+prepared-macOS receipts remain unavailable; DirectX remains software emulation
+and cannot pass.
 
 This scenario proves that supported SimpleOS guests use one bounded protocol to
 execute Draw IR and ProcessingIR on a real host device. Unsupported rows retain
@@ -41,13 +42,25 @@ the CPU/software fallback and report a stable reason.
    honestly selects local rendering until TODO 552 expands the bounded wire.
 8. **Run the ProcessingIR parity fixture.** Correlate the host completion and
    require exact output-buffer parity with the CPU oracle.
-9. **Report device-backed host acceleration evidence.** Publish one row with
+9. **Keep native Metal ProcessingIR separate from Engine2D rendering.** Probe
+   and execute the dedicated MSL FillU32 owner, require checked command
+   completion and pointer readback, and never relabel a Metal render clear as
+   processing evidence.
+10. **Report device-backed host acceleration evidence.** Publish one row with
    host, guest ISA, QEMU/device arguments, protocol, backend, device, IDs,
    timing, RSS, checksums, status, and reason.
-10. **Validate cached rows before aggregation.** Accept a cached passing report
+11. **Validate cached rows before aggregation.** Accept a cached passing report
    only when all nine host/ISA rows are present and the three Linux rows link
    to serial logs containing the exact render, Draw IR, and ProcessingIR
    receipts.
+
+### Keep native Metal ProcessingIR separate from Engine2D rendering
+
+The daemon imports `processing_ir_execute_metal`, probes the Metal backend with
+a nonzero FillU32 operation, compares the returned values with the CPU oracle,
+and publishes the same negotiated mask used for the HELLO backend label. The
+executor uses `metal_sffi_run_compute_frame` and canonical pointer readback; it
+does not import `Engine2D` or `MetalSession`.
 
 ## Failure and fallback checks
 
@@ -62,8 +75,9 @@ the CPU/software fallback and report a stable reason.
 
 Linux uses Vulkan for rendering and CUDA for ProcessingIR on a prepared NVIDIA
 host, with Vulkan ProcessingIR retained when CUDA is unavailable. Metal Draw IR
-requires a prepared native macOS host and exact device receipt; Metal
-ProcessingIR remains unavailable. DirectX cannot pass until a native D3D owner
+requires a prepared native macOS host and exact device receipt. Metal
+ProcessingIR uses its own MSL kernel and device readback rather than an
+Engine2D clear. DirectX cannot pass until a native D3D owner
 replaces the current software-emulation backend. Cross-ISA TCG rows
 prove correctness and honest provenance; they are exempt from native-ISA
 latency and speedup targets.

@@ -29,9 +29,9 @@ mod metal_impl {
     use objc2::runtime::ProtocolObject;
     use objc2_foundation::NSString;
     use objc2_metal::{
-        MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
-        MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice, MTLFunction, MTLLibrary, MTLResourceOptions,
-        MTLSize,
+        MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue,
+        MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice, MTLFunction,
+        MTLLibrary, MTLResourceOptions, MTLSize,
     };
 
     // Link the required Apple frameworks.
@@ -149,6 +149,15 @@ mod metal_impl {
         LAST_ERROR.with(|e| {
             *e.borrow_mut() = CString::new(msg).ok();
         });
+    }
+
+    fn wait_for_successful_completion(command: &ProtocolObject<dyn MTLCommandBuffer>, operation: &str) -> bool {
+        command.waitUntilCompleted();
+        if command.status() == MTLCommandBufferStatus::Completed && command.error().is_none() {
+            return true;
+        }
+        set_last_error(&format!("{operation}: Metal command did not complete successfully"));
+        false
     }
 
     pub fn get_last_error() -> *const c_char {
@@ -307,10 +316,7 @@ mod metal_impl {
     pub fn wait_completed(cmd_handle: i64) -> i64 {
         let buf = with_cmd_bufs(|m| m.get(&cmd_handle).map(|w| w.0.clone()));
         match buf {
-            Some(buf) => {
-                buf.waitUntilCompleted();
-                1
-            }
+            Some(buf) => wait_for_successful_completion(&buf, "wait_completed") as i64,
             None => {
                 set_last_error("wait_completed: invalid handle");
                 0
@@ -685,8 +691,7 @@ mod metal_impl {
                 encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per);
                 encoder.endEncoding();
                 cmd.commit();
-                cmd.waitUntilCompleted();
-                1
+                wait_for_successful_completion(&cmd, "run_blit_frame") as i64
             }
             _ => {
                 set_last_error("run_blit_frame: invalid queue, pipeline, or buffer handle");
@@ -757,8 +762,7 @@ mod metal_impl {
                 encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per);
                 encoder.endEncoding();
                 cmd.commit();
-                cmd.waitUntilCompleted();
-                1
+                wait_for_successful_completion(&cmd, "run_compute_frame") as i64
             }
             _ => {
                 set_last_error("run_compute_frame: invalid queue, pipeline, or buffer handle");

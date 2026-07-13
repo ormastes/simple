@@ -17,9 +17,9 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{
 use std.common.processing.processing_ir.{processing_ir_fill_u32, processing_ir_validate, processing_ir_cpu_execute, processing_ir_outputs_equal}
 use std.gc_async_mut.processing.vulkan_fill_u32.{processing_ir_execute_vulkan, processing_vulkan_device_identity}
 use std.gc_async_mut.processing.cuda_fill_u32.{processing_ir_execute_cuda}
+use std.gc_async_mut.processing.metal_fill_u32.{processing_ir_execute_metal, processing_metal_device_identity}
 use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_selected_device_driver_identity}
 use std.nogc_sync_mut.io.metal_sffi.{metal_device_info}
-use std.common.hash.djb2.{djb2_hash_text}
 use app.io.file_ops.{file_exists, file_size, file_mmap, file_munmap}
 use app.io.volatile_ops.{volatile_read_u64_required, volatile_write_u64_required, memory_barrier_required}
 use app.io.time_ops.{time_now_unix_micros}
@@ -84,12 +84,6 @@ fn _write_pixels(base: i64, pixels: [u32], count: i64) -> i64:
         i = i + 2
     simpleos_host_gpu_readback_checksum_finalize(checksum)
 
-fn _stable_device_identity(description: text) -> i64:
-    if description == "":
-        return 0
-    val identity = djb2_hash_text(description) & 0x7FFFFFFF
-    if identity == 0: 1 else: identity
-
 fn _render_device_identity(backend: text) -> i64:
     if backend == "vulkan":
         return processing_vulkan_device_identity(vulkan_sffi_selected_device_driver_identity())
@@ -97,7 +91,7 @@ fn _render_device_identity(backend: text) -> i64:
         val info = metal_device_info(0)
         if info.name == "" or info.total_memory <= 0:
             return 0
-        return _stable_device_identity("metal|{info.name}|{info.total_memory}")
+        return processing_metal_device_identity(info.name, info.total_memory)
     0
 
 fn _render_backend_available(code: i64) -> bool:
@@ -114,16 +108,24 @@ fn _render_backend_available(code: i64) -> bool:
 fn _processing_backend_mask(requested: i64) -> i64:
     var available: i64 = 0
     if (requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN) != 0:
-        val probe = processing_ir_execute_vulkan(processing_ir_fill_u32(1, 1u32))
-        if probe.completed and probe.backend_handle > 0 and probe.device_identity > 0:
+        val probe_ir = processing_ir_fill_u32(1, 1u32)
+        val probe = processing_ir_execute_vulkan(probe_ir)
+        if probe.completed and probe.backend_handle > 0 and probe.device_identity > 0 and processing_ir_outputs_equal(probe.values, processing_ir_cpu_execute(probe_ir)):
             available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN
     if (requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0:
-        val probe = processing_ir_execute_cuda(processing_ir_fill_u32(1, 1u32))
-        if probe.completed and probe.backend_handle > 0 and probe.device_identity > 0:
+        val probe_ir = processing_ir_fill_u32(1, 1u32)
+        val probe = processing_ir_execute_cuda(probe_ir)
+        if probe.completed and probe.backend_handle > 0 and probe.device_identity > 0 and processing_ir_outputs_equal(probe.values, processing_ir_cpu_execute(probe_ir)):
             available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA
+    if (requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL) != 0:
+        val probe_ir = processing_ir_fill_u32(1, 1u32)
+        val probe = processing_ir_execute_metal(probe_ir)
+        if probe.completed and probe.backend_handle > 0 and probe.device_identity > 0 and processing_ir_outputs_equal(probe.values, processing_ir_cpu_execute(probe_ir)):
+            available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
     available
 
 fn _process_hello(base: i64, generation: i64, version: i64, guest_isa_code: i64, render_mask: i64, processing_mask: i64, render_code: i64) -> i64:
+    val negotiated_processing_mask = _processing_backend_mask(processing_mask)
     val hello = SimpleOsHostGpuHello(
         version: version,
         guest_isa: simpleos_host_gpu_guest_isa_name(guest_isa_code),
@@ -131,7 +133,7 @@ fn _process_hello(base: i64, generation: i64, version: i64, guest_isa_code: i64,
         max_payload_bytes: SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES,
         max_readback_bytes: simpleos_host_gpu_max_readback_bytes(),
         render_backend: simpleos_host_gpu_backend_name(render_code),
-        processing_backend: if (processing_mask & SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0: "cuda" elif processing_mask == 0: "cpu" else: "vulkan"
+        processing_backend: if (negotiated_processing_mask & SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0: "cuda" elif (negotiated_processing_mask & SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL) != 0: "metal" elif negotiated_processing_mask == 0: "cpu" else: "vulkan"
     )
     val valid = simpleos_host_gpu_validate_hello(hello)
     val negotiated_render_mask = render_mask & simpleos_host_gpu_backend_mask(render_code)
@@ -143,7 +145,7 @@ fn _process_hello(base: i64, generation: i64, version: i64, guest_isa_code: i64,
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO, 0, 0, 0, 1, 0, 0)
         return 1
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_RENDER_MASK, negotiated_render_mask)
-    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK, _processing_backend_mask(processing_mask))
+    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK, negotiated_processing_mask)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_PAYLOAD, SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_READBACK, simpleos_host_gpu_max_readback_bytes())
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION, SIMPLEOS_HOST_GPU_PROTOCOL_VERSION)
@@ -253,6 +255,12 @@ fn _process_request(base: i64) -> i64:
             device_identity = result.device_identity
         elif backend == "vulkan":
             val result = processing_ir_execute_vulkan(ir)
+            completed = result.completed
+            values = result.values
+            backend_handle = result.backend_handle
+            device_identity = result.device_identity
+        elif backend == "metal":
+            val result = processing_ir_execute_metal(ir)
             completed = result.completed
             values = result.values
             backend_handle = result.backend_handle

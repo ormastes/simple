@@ -155,10 +155,22 @@ composite helpers require encode, dispatch, end, commit, and wait success.
 Unknown commit completion poisons the surface and retains command dependencies
 rather than replaying on CPU. Known completion and uncommitted failure remove
 the runtime's encoder/command registry handles through the Metal facade. The host
-receipt hashes the default Metal device name and total memory; raw render and
-ProcessingIR remain unavailable on Metal.
+receipt hashes the default Metal device name and total memory. Raw render
+remains unavailable on Metal; ProcessingIR still needs a prepared
+macOS receipt before it can be marked verified.
 
 ## Observability and NFRs
+
+### Native Metal ProcessingIR
+
+`processing_ir_execute_metal` owns a dedicated MSL FillU32 kernel and does not
+reuse Engine2D clear or `MetalSession`. It validates the common ProcessingIR,
+uses the synchronous checked Metal compute owner, performs pointer-based device
+readback through the canonical Metal I/O facade, and returns a positive
+historical resource handle plus stable device metadata identity only after
+exact output recovery. The shared runtime accepts completion only when the
+command reaches `MTLCommandBufferStatus::Completed` with no error. A separate
+CPU oracle remains the daemon's final parity gate.
 
 Each row records host OS, guest ISA, QEMU version/arguments, protocol/backend,
 device identity, IDs, timing, max RSS, and checksums. Native-ISA rows require
