@@ -951,6 +951,13 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
         "core-c runtime archive must include the array concatenation ABI emitted for array +"
     );
     let core_c_members = archive_members(&core_c).expect("core-c runtime archive members should be readable");
+    let directx_object = format!("runtime_directx_core.{}", test_host_object_extension());
+    assert!(
+        core_c_members.contains(&directx_object),
+        "core-c runtime archive must include the fail-closed DirectX capsule"
+    );
+    assert!(core_c_symbols.contains("rt_directx_execute_readback_checked"));
+    assert!(core_c_symbols.contains("rt_directx_hardware_adapter_identity"));
     let https_object = format!("runtime_https_openssl_core.{}", test_host_object_extension());
     assert!(
         !core_c_members.contains(&https_object),

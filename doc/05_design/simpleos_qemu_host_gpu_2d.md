@@ -162,6 +162,19 @@ a positive framebuffer handle, and the same stable identity. ProcessingIR and
 all three QEMU ISA rows still need prepared macOS receipts before they can be
 marked verified.
 
+## Checked DirectX D3D11 source
+
+On Windows, `DirectXBackend` keeps the CPU mirror for fallback semantics but
+queues only the receipt-eligible CLEAR, bounded FILL_RECT, and full-target
+opaque IMAGE subset. One canonical no-GC facade owns the two raw runtime hooks;
+the hardware-only D3D11 owner validates the complete bounded stream, executes
+once, performs blocking staging readback, and returns both a positive target
+handle and the executing adapter identity. The backend caches that result and
+poisons native eligibility after an unsupported or post-execution mutation.
+Non-Windows DirectX remains explicitly named software emulation. Windows
+daemon/guest negotiation, wrapper coverage, ProcessingIR selection, and live
+QEMU receipts remain open while TODO 548 blocks Simple compiler execution.
+
 ## Observability and NFRs
 
 ### Native Metal ProcessingIR

@@ -199,6 +199,7 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
     let runtime_root = find_core_c_runtime_source_root()?;
     let mut runtime_inputs = vec![
         "runtime_native.c",
+        "runtime_directx_core.c",
         "runtime_legacy_core.c",
         "runtime_mcp_core.c",
         "runtime_pool.c",

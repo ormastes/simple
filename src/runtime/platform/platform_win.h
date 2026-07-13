@@ -431,7 +431,7 @@ void* rt_mmap(const char* path, int64_t size, int64_t offset, bool readonly) {
     if (!path || size <= 0 || offset < 0) return NULL;
 
     DWORD access = readonly ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
-    DWORD share = FILE_SHARE_READ;
+    DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE;
     DWORD protect = readonly ? PAGE_READONLY : PAGE_READWRITE;
     DWORD map_access = readonly ? FILE_MAP_READ : FILE_MAP_WRITE;
 

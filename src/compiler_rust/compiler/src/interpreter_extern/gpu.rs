@@ -395,6 +395,17 @@ pub fn rt_metal_device_count_fn(_args: &[Value]) -> Result<Value, CompileError> 
     Ok(Value::Int(rt_metal_device_count()))
 }
 
+pub fn rt_directx_execute_readback_checked_fn(args: &[Value]) -> Result<Value, CompileError> {
+    for index in 0..6 {
+        arg_i64(args, index, "rt_directx_execute_readback_checked", 6)?;
+    }
+    Ok(Value::Int(0))
+}
+
+pub fn rt_directx_hardware_adapter_identity_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
 pub fn rt_metal_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Str(c_ptr_to_string(rt_metal_device_name(arg_i64(
         args,

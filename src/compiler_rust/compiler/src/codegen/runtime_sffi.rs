@@ -1037,6 +1037,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
         &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
         &[I64],
     ),
+    RuntimeFuncSpec::new(
+        "rt_directx_execute_readback_checked",
+        &[I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new("rt_directx_hardware_adapter_identity", &[], &[I64]),
     // =========================================================================
     // Parallel iterator operations (#415)
     // =========================================================================

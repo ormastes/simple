@@ -27,7 +27,11 @@ backend_directx_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 28 | 28 | 0 | 0 |
+
+> Contract manually refreshed on 2026-07-13. Execution and `spipe-docgen`
+> regeneration remain blocked by TODO 548; this document claims no new runtime
+> evidence.
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,8 +51,8 @@ Pins the Engine2D DirectX backend surface for both Linux DXVK/vkd3d routing and 
 | Design | doc/05_design/host_gpu_lane.md |
 | Research | doc/01_research/language/host_gpu_lane/later_gpu_host_grammar.md |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_directx_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-13 |
+| Generator | Manual refresh; `simple spipe-docgen` blocked by TODO 548 |
 
 ## Overview
 
@@ -82,11 +86,10 @@ expect(readback.source).to_equal("swapchain_present")
 expect(readback.backend_handle).to_equal(77)
 ```
 
-Initialized readback target after present:
+Native Windows checked readback does not require present:
 
 ```simple
 b.clear(0xFF224466)
-b.present()
 val readback = b.read_pixels_with_source()
 expect(readback.source).to_equal("device_readback")
 expect(readback.backend_handle).to_be_greater_than(0)
@@ -98,12 +101,16 @@ expect(readback.pixel_count).to_equal(16)
 - `leaf=dlopen` means a real Vulkan/DXVK/VKD3D library was found at probe time.
 - `leaf=structured` means no loadable library was found and the structured
   handle fallback is active.
+- `leaf=native-d3d11` means the Windows hardware-only D3D11 probe returned a
+  positive adapter identity.
 - `swapchain_present` is presentation provenance, not backend
   `device_readback` proof.
 - DirectX may report `device_readback` only after an initialized readback
-  target has uploaded and read back the expected pixel count with a positive
-  readback handle. Checksum is evidence, not the validity gate, because an
-  all-zero frame is valid and may checksum to zero.
+  target has executed the eligible frame and read back the expected pixel
+  count with a positive native handle and matching executing-adapter identity.
+  Unsupported or post-execution mutation poisons native receipt eligibility.
+  Checksum is evidence, not the validity gate, because an all-zero frame is
+  valid and may checksum to zero.
 
 ## Scenarios
 
@@ -125,7 +132,7 @@ expect(plat_ok).to_equal(true)
 
 </details>
 
-#### probe leaf field is either dlopen or structured
+#### probe leaf field is a recognized platform value
 
 <details>
 <summary>Executable SSpec</summary>
@@ -135,7 +142,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = dx_platform_probe()
-val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured"
+val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured" or probe.leaf == "leaf=native-d3d11"
 expect(leaf_ok).to_equal(true)
 ```
 
@@ -180,7 +187,7 @@ expect(valid).to_equal(true)
 
 </details>
 
-#### probe_directx reason contains leaf evidence
+#### probe_directx reason contains platform-specific evidence
 
 <details>
 <summary>Executable SSpec</summary>
@@ -190,23 +197,24 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = probe_directx()
-val has_leaf = result.reason.contains("leaf=")
-expect(has_leaf).to_equal(true)
+val has_evidence = if get_host_os() == "windows": result.reason.contains("leaf=native-d3d11") else: result.reason.contains("leaf=")
+expect(has_evidence).to_equal(true)
 ```
 
 </details>
 
-#### probe_directx api_name is directx
+#### probe_directx api_name distinguishes native Windows from emulation
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = probe_directx()
-expect(result.api_name).to_equal("directx")
+val expected = if get_host_os() == "windows": "directx" else: "directx-software-emulation"
+expect(result.api_name).to_equal(expected)
 ```
 
 </details>
@@ -216,33 +224,169 @@ expect(result.api_name).to_equal("directx")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val first = probe_directx()
 val second = probe_directx()
-expect(first.api_name).to_equal("directx")
-expect(second.api_name).to_equal("directx")
-expect(first.reason.contains("leaf=")).to_be(true)
-expect(second.reason.contains("leaf=")).to_be(true)
+expect(first.api_name).to_equal(second.api_name)
+expect(first.reason.len()).to_be_greater_than(0)
+expect(second.reason.len()).to_be_greater_than(0)
 ```
 
 </details>
 
 ### DirectX 2D backend — init and name
 
-#### backend name is directx
+#### reported backend name distinguishes native Windows from emulation
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val b = DirectXBackend.create()
-expect(b.name()).to_equal("directx")
+val expected = if get_host_os() == "windows": "directx" else: "directx-software-emulation"
+expect(b.name()).to_equal(expected)
+```
+
+</details>
+
+#### reported backend name always identifies directx
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val b = DirectXBackend.create()
+val reported = b.name()
+expect(reported).to_start_with("directx")
+val expected = if get_host_os() == "windows": "directx" else: "directx-software-emulation"
+expect(reported).to_equal(expected)
+```
+
+</details>
+
+#### native queue uses the frozen header and fixed CLEAR/FILL records
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var b = DirectXBackend.create()
+b.sw.init(4, 4)
+b.native_hardware = true
+b.native_receipt_eligible = true
+b.initialized = true
+b.clear(0xFF112233)
+b.draw_rect_filled(1, 1, 2, 2, 0xFF445566)
+expect(b.native_words[0]).to_equal(0x44583131u32)
+expect(b.native_words[1]).to_equal(1u32)
+expect(b.native_words[2]).to_equal(2u32)
+expect(b.native_words[3]).to_equal(20u32)
+expect(b.native_words[4]).to_equal(1u32)
+expect(b.native_words[12]).to_equal(2u32)
+b.shutdown()
+```
+
+</details>
+
+#### unsupported operations poison native receipt eligibility
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var b = DirectXBackend.create()
+b.sw.init(4, 4)
+b.native_hardware = true
+b.native_receipt_eligible = true
+b.initialized = true
+b.clear(0xFF112233)
+expect(b.native_receipt_eligible).to_equal(true)
+b.native_cached_handle = 77
+b.native_cached_pixels = [0xFF112233u32]
+b.draw_line(0, 0, 3, 3, 0xFFFFFFFF, 1)
+expect(b.native_receipt_eligible).to_equal(false)
+expect(b.native_cached_handle).to_equal(0)
+expect(b.native_cached_pixels.len()).to_equal(0)
+b.native_receipt_eligible = true
+b.native_attempted = true
+b.native_cached_handle = 88
+b.native_cached_pixels = [0xFF445566u32]
+b.clear(0xFF000000)
+expect(b.native_receipt_eligible).to_equal(false)
+expect(b.native_cached_handle).to_equal(0)
+expect(b.native_cached_pixels.len()).to_equal(0)
+b.shutdown()
+```
+
+</details>
+
+#### full-target opaque IMAGE is queued inline
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var b = DirectXBackend.create()
+b.sw.init(2, 1)
+b.native_hardware = true
+b.native_receipt_eligible = true
+b.initialized = true
+b.draw_image(0, 0, 2, 1, [0xFF010203u32, 0xFF040506u32])
+expect(b.native_receipt_eligible).to_equal(true)
+expect(b.native_words[2]).to_equal(1u32)
+expect(b.native_words[4]).to_equal(3u32)
+expect(b.native_words[5]).to_equal(10u32)
+expect(b.native_words[11]).to_equal(2u32)
+expect(b.native_words[12]).to_equal(0xFF010203u32)
+expect(b.native_words[13]).to_equal(0xFF040506u32)
+b.shutdown()
+```
+
+</details>
+
+#### backend owns no direct DirectX runtime extern
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl")
+val facade = file_read("src/lib/nogc_sync_mut/gpu/engine2d/sffi_directx.spl")
+val runtime = file_read("src/runtime/runtime_directx_core.c")
+expect(backend.contains("rt_directx_")).to_equal(false)
+expect(backend).to_contain("directx_execute_readback_checked")
+expect(backend).to_contain("fn _native_execute_once")
+expect(backend).to_contain("self.native_attempted = true")
+expect(backend).to_contain("native.device_identity == self.native_device_identity")
+expect(backend).to_contain("self.native_receipt_eligible = false\n            self.native_cached_handle = 0\n            self.native_cached_pixels = []")
+expect(facade).to_contain("extern fn rt_directx_execute_readback_checked")
+expect(facade).to_contain("extern fn rt_directx_hardware_adapter_identity")
+expect(facade).to_contain("device_identity")
+expect(runtime).to_contain("if (command_index == 0) return 0;")
+expect(runtime).to_contain("command_index == 0 && (x != 0 || y != 0 || w != width || h != height)")
+expect(runtime).to_contain("(pixel >> 24) != 0xffu")
+expect(runtime).to_contain("out[0] = (uint32_t)identity;")
 ```
 
 </details>
@@ -290,7 +434,7 @@ expect(readback.backend_handle).to_equal(77)
 
 </details>
 
-#### reports device readback only after present populates a readback target
+#### reports checked device readback for an eligible frame
 
 - var b = DirectXBackend create
 - b clear
@@ -325,7 +469,7 @@ else:
 
 </details>
 
-#### accepts all-zero device readback frames after present
+#### accepts all-zero checked readback frames
 
 - var b = DirectXBackend create
 - b clear
@@ -458,7 +602,7 @@ if ok:
 else:
     # init failed (no DXVK/Vulkan): assert leaf evidence from probe
     val probe = dx_platform_probe()
-    val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured"
+    val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured" or probe.leaf == "leaf=native-d3d11"
     expect(leaf_ok).to_equal(true)
 ```
 
@@ -488,7 +632,8 @@ if ok:
     expect(pixels.len()).to_be_greater_than(0)
 else:
     val probe = dx_platform_probe()
-    expect(probe.platform).to_equal("linux-dxvk")
+    val expected_platform = if get_host_os() == "windows": "windows-native" else: "linux-dxvk"
+    expect(probe.platform).to_equal(expected_platform)
 ```
 
 </details>
@@ -572,7 +717,7 @@ if ok:
     expect(p0).to_equal(0xFFFF0000)
 else:
     val probe = dx_platform_probe()
-    val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured"
+    val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured" or probe.leaf == "leaf=native-d3d11"
     expect(leaf_ok).to_equal(true)
 ```
 
@@ -590,7 +735,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = dx_platform_probe()
-val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured"
+val leaf_ok = probe.leaf == "leaf=dlopen" or probe.leaf == "leaf=structured" or probe.leaf == "leaf=native-d3d11"
 expect(leaf_ok).to_equal(true)
 ```
 
@@ -614,7 +759,7 @@ expect(ok_is_bool).to_equal(true)
 
 </details>
 
-#### probe_directx reason contains dxvk-d3d11 identifier
+#### probe_directx reason identifies the platform backend
 
 <details>
 <summary>Executable SSpec</summary>
@@ -624,8 +769,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = probe_directx()
-val has_dxvk = result.reason.contains("dxvk-d3d11")
-expect(has_dxvk).to_equal(true)
+val expected = if get_host_os() == "windows": result.reason.contains("leaf=native-d3d11") else: result.reason.contains("dxvk-d3d11")
+expect(expected).to_equal(true)
 ```
 
 </details>
@@ -634,8 +779,8 @@ expect(has_dxvk).to_equal(true)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 23 |
-| Active scenarios | 23 |
+| Total scenarios | 28 |
+| Active scenarios | 28 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

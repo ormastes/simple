@@ -213,6 +213,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_cuda_")
         || name.starts_with("rt_vk_")
         || name.starts_with("rt_metal_")
+        || name.starts_with("rt_directx_")
         || name.starts_with("rt_cranelift_")
         || name.starts_with("rt_par_")
     {
@@ -1173,6 +1174,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_metal_get_last_error",
     "rt_metal_run_compute_frame",
     "rt_metal_run_blit_frame",
+    "rt_directx_execute_readback_checked",
+    "rt_directx_hardware_adapter_identity",
     // ---- Auto-completion: cfg-active exported runtime symbols ----
     // Symbols below carry #[no_mangle]/#[export_name] in runtime/src and are present
     // in the default bootstrap build's libsimple_runtime cdylib, but were previously

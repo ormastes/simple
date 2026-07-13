@@ -105,7 +105,12 @@ composition uses a checked MSL src-over kernel with canonical
 device readback, a positive framebuffer handle, and a stable default-device
 name/memory identity all agree. `metal-on-vulkan` remains an explicitly named
 compatibility backend and cannot satisfy a Metal receipt. DirectX remains
-rejected because its current backend honestly reports software emulation.
+software emulation on non-Windows hosts. Windows now has one bounded native
+D3D11 owner for CLEAR, FILL_RECT, and full-target opaque IMAGE. It admits
+`device_readback` only after hardware-device execution, blocking staging
+readback, a positive target handle, and same-call adapter identity all agree.
+Daemon/guest negotiation and prepared-Windows receipt evidence remain open, so
+the Windows QEMU row is not yet classified as accelerated.
 
 Vulkan ProcessingIR hashes the runtime-selected driver identity, which includes
 device name, vendor/device IDs, driver version, and API version. Storage-buffer handles remain per-request resource handles and
@@ -118,7 +123,7 @@ after a bounded real ProcessingIR probe returns both values.
 |---|---|---|---|
 | Linux | Vulkan | Vulkan; CUDA on prepared NVIDIA host | pass only with device receipt |
 | macOS | Metal implementation, native receipt still required | dedicated Metal ProcessingIR FillU32, native receipt still required | never infer processing from an Engine2D clear |
-| Windows | unavailable: current Simple DirectX lane is software emulation | unavailable | standalone D3D probes are not production receipts |
+| Windows | bounded native D3D11 owner implemented; QEMU integration and receipt pending | CUDA/Vulkan owner reuse planned | require same-call hardware identity, positive target handle, and exact readback; ivshmem mapping permits concurrent QEMU/daemon writes |
 | Any missing prerequisite | CPU/software | CPU | `unsupported` or `blocked`, never accelerated |
 
 Cross-ISA TCG rows prove protocol correctness and provenance, not native-ISA

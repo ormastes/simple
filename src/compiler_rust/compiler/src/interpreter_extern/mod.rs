@@ -905,6 +905,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_metal_set_scissor", gpu::rt_metal_set_scissor_fn);
     insert_simple!("rt_metal_set_viewport", gpu::rt_metal_set_viewport_fn);
     insert_simple!("rt_metal_wait_completed", gpu::rt_metal_wait_completed_fn);
+    insert_simple!(
+        "rt_directx_execute_readback_checked",
+        gpu::rt_directx_execute_readback_checked_fn
+    );
+    insert_simple!(
+        "rt_directx_hardware_adapter_identity",
+        gpu::rt_directx_hardware_adapter_identity_fn
+    );
     insert_simple!("rt_rocm_device_count", gpu_rocm::rt_rocm_device_count_fn);
     insert_simple!("rt_rocm_device_get", gpu_rocm::rt_rocm_device_get_fn);
     insert_simple!("rt_rocm_device_memory", gpu_rocm::rt_rocm_device_memory_fn);
