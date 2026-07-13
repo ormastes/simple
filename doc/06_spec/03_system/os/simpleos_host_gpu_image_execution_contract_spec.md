@@ -6,16 +6,24 @@
 
 ## Scenarios
 
-### Fresh-device Draw IR accepts only preflighted image and text work
+### Fresh-device Draw IR accepts only preflighted image, text, and embedded work
 
 - Decode resources through the canonical host GPU wire.
 - Require a full-target opaque RECT or IMAGE to initialize fresh device memory.
-- Admit exact IMAGE commands and resolved TEXT only after font identity, glyph
-  material, target bounds, and the framebuffer-area pixel-work cap preflight.
+- Admit bounded smaller surfaces only with a real embedding ID. A Vulkan
+  parent retains its session into a transparent per-surface framebuffer.
+- Admit exact IMAGE commands, resolved TEXT, metadata-only WM RECT styles, and
+  one nonzero-alpha first RECT that initializes a fresh transparent child after
+  target/clip, font identity, glyph material, and framebuffer-area work
+  preflight. Later translucent RECTs remain rejected.
 - Route transient glyph quads through the same checked Vulkan image blend; font
   bytes and atlas/cache state remain owned by the canonical font renderer.
-- Reject unresolved, malformed, off-target, scaled, styled, or unsupported work
-  before framebuffer mutation.
+- Route an admitted nonzero-alpha RECT initializer through the same checked
+  Vulkan src-over path; opaque RECTs retain the direct rect kernel.
+- Read each Vulkan child before present, require device provenance, then apply
+  embedding opacity through the checked parent Vulkan blend and release it.
+- Reject unresolved, malformed, unbounded, scaled, effect-styled, or unsupported
+  work before promotion.
 - Require device readback, a positive backend handle, and zero skipped commands
   before reporting PASS.
 

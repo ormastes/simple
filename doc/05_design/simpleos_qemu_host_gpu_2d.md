@@ -51,19 +51,23 @@ producer-side full-frame shortcut.
 The local `Engine2dWmFrameExecutor` rejects duplicate or unreferenced content
 frames, stale revisions, bad checksums, unresolved IMAGE commands, and nested
 GROUP metadata. The wire accepts the same top-level IMAGE resource set, but
-production host-offload selection remains open until session wiring and fresh
-QEMU evidence. The host-only fresh-device executor preflights the whole
-composition before mutation. It admits only full-target, origin-zero,
-opacity-1000 batches containing plain opaque RECTs, exact unscaled IMAGEs, and
-resolved TEXT whose selected font and every transient atlas quad preflight
-within a framebuffer-area glyph-pixel work budget;
+production host-offload selection remains open until guest session selection
+and fresh QEMU evidence. The host-only fresh-device executor preflights the
+whole composition before mutation. It admits full-target batches plus bounded
+named embedded surfaces at opacity `(0, 1000]`, containing opaque RECTs plus a
+nonzero-alpha first RECT that initializes a transparent child, canonical WM
+metadata-only styles, exact unscaled IMAGEs, and resolved TEXT
+whose selected font and every transient atlas quad preflight within a
+framebuffer-area glyph-pixel work budget;
 the first command must be an opaque full-target RECT or IMAGE so newly allocated
 Vulkan memory is never read before initialization. Direct IMAGE commands and
 canonical TEXT glyph quads use checked src-over. Font bytes are loaded by the
 existing SFFI font owner, never by Engine2D; family resolution preserves native
 dylib priority and then uses the validated pure-Simple selected-byte fallback.
-Styled or translucent RECT,
-scaling, smaller/offscreen batches, GROUP, and group opacity remain rejected.
+Effect-styled or later translucent RECT, scaling, unnamed/unbounded surfaces,
+and GROUP remain rejected. A Vulkan child must return checked device readback and
+is composited through the checked parent src-over path before its retained
+session is released.
 
 Local production composition calls
 `engine2d_draw_ir_adv_composition_present_with_images`. The shared internal
@@ -124,16 +128,16 @@ with ineligible cleanup evidence from status `0` (no submission), preventing a
 non-idempotent src-over CPU replay.
 
 This slice hardens the existing raw host-daemon CLEAR/RECT fixture and the
-fresh full-target Draw IR subset. The production WM minimum remains solid RECT
+fresh production Draw IR subset. The production WM minimum remains RECT
 plus canonical `draw_text` using
 the Draw IR `font-identity`, exact-size IMAGE, clip, and embedded src-over/
 opacity. Font selection continues through `FontRenderer` and transient
 `FontRenderBatch`; font bytes and atlas/cache state do not enter Draw IR. The
 host rejects any command that falls back to CPU or lacks checked completion
-before emitting a device receipt. Checked image src-over now carries both IMAGE
-pixels and preflighted glyph quads, but the production WM remains excluded
-until its offscreen surface is device-rendered
-before group opacity and representative p95 evidence are proven.
+before emitting a device receipt. Checked image src-over now carries IMAGE
+pixels, preflighted glyph quads, and shared-session child frames at canonical WM
+opacity. Production guest submission and representative p95 evidence remain
+open.
 
 ## Observability and NFRs
 

@@ -273,6 +273,24 @@ class Engine2D:
         val capability = sw.capability()
         Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
 
+    me create_shared_vulkan_offscreen(width: i32, height: i32) -> Result<Engine2D, text>:
+        """Create one transparent child framebuffer on this engine's Vulkan session."""
+        val pixel_count = width.to_i64() * height.to_i64()
+        if width <= 0 or height <= 0 or pixel_count <= 0 or pixel_count > 2147483647:
+            return Err("invalid-shared-vulkan-surface-size")
+        val active = self.vulkan_backend
+        if active == nil:
+            return Err("shared-vulkan-parent-required")
+        val parent = active
+        if not parent.owns_session or not parent.session.is_valid():
+            return Err("shared-vulkan-session-required")
+        var vulkan = VulkanBackend.create()
+        if not vulkan.init_with_session(width, height, parent.session):
+            return Err(if vulkan.last_error == "": "shared-vulkan-surface-init-failed" else: vulkan.last_error)
+        var child = Engine2D(backend: vulkan, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, vulkan_backend: vulkan, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "vulkan")
+        child.clear(0x00000000u32)
+        Ok(child)
+
     static fn create_requested_backend(width: i32, height: i32, backend_name: text) -> Result<Engine2D, text>:
         """Create one canonical backend without silently falling back."""
         val requested_backend = backend_canonical_name(backend_name)
@@ -1047,6 +1065,16 @@ class Engine2D:
             return
         val scaled = engine2d_scale_pixel_alpha(src.read_pixels(), opacity_milli)
         self.draw_image_blend(dst_x, dst_y, src.width(), src.height(), scaled)
+
+    me draw_vulkan_image_blend_checked(dst_x: i32, dst_y: i32, width: i32, height: i32, pixels: [u32], opacity_milli: i32) -> bool:
+        """Blend child pixels only through the active checked Vulkan path."""
+        val active = self.vulkan_backend
+        if active == nil:
+            return false
+        val vulkan = active
+        val completed = vulkan.draw_image_blend_checked(dst_x, dst_y, width, height, pixels, opacity_milli)
+        self.vulkan_backend = vulkan
+        completed
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
         if dst_w == src_w and dst_h == src_h:

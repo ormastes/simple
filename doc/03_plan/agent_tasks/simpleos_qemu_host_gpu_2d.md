@@ -39,8 +39,10 @@ fixture bypasses, synthetic handles, or passing placeholders.
   at TODO 537's freestanding runtime/SBI owner boundary.
 - Final reviewer: primary `/root`; Metal/DirectX/CUDA done marks remain rejected.
 - Checked raw framebuffer dispatch: traced by Spark and accepted by the
-  independent normal/highest-capability reviewer; production WM admission
-  remains open for device-rendered offscreen opacity and p95 evidence. The
+  independent normal/highest-capability reviewer. Production WM host execution
+  now uses device-rendered shared-session offscreen surfaces and checked
+  opacity; guest submission and p95 evidence remain open. The
   reusable checked IMAGE src-over primitive and full-target opacity-1000
   RECT/IMAGE admission plus preflighted canonical TEXT glyph compositing are
-  implemented. Smaller/offscreen device surfaces and opacity remain excluded.
+  implemented. Smaller/offscreen device surfaces and opacity are covered by the
+  canonical WM integration boundary.

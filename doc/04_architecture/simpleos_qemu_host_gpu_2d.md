@@ -8,9 +8,11 @@ Use one bounded, architecture-neutral guest/host protocol over QEMU
 Draw IR semantics, separate bounded IMAGE pixel resources, and a bounded
 ProcessingIR `FillU32` payload. The production x86
 desktop source path routes local frames through `DrawIrComposition`, resolved top-level
-`WmContentFrame` IMAGE resources, and Engine2D. Production session wiring,
-smaller device surfaces/group opacity, and fresh QEMU evidence
-remain required before that same complete composition may use host offload. A
+`WmContentFrame` IMAGE resources, and Engine2D. The host Engine2D path now
+retains one Vulkan session across smaller per-window device surfaces and applies
+their embedding opacity with checked src-over. Production guest session
+selection and fresh QEMU evidence remain required before that same complete
+composition may use host offload. A
 host daemon selects a supported private backend and
 returns a correlated receipt plus output. x86_64, AArch64, and RISC-V adapters
 only own boot/device discovery. They must not define backend-specific public
@@ -76,14 +78,16 @@ completion poisons further mutation and readback. IMAGE copy and straight-ARGB
 src-over share `vulkan_dispatch_image_composite_checked`, which additionally
 owns the source buffer lifetime through known fence completion.
 
-The canonical production WM currently emits solid RECT, resolved-font TEXT,
-and exact-size IMAGE commands. Its visible shadow is a displaced solid RECT,
-not a Draw IR shadow effect; gradient, border, radius, and transform kernels
-are therefore outside this raw CLEAR/RECT hardening slice. Full-target
-desktop/chrome/taskbar batches can eventually render directly. The Vulkan image
-pipeline now supports checked clipped src-over, including transparent pixels.
-Smaller window batches still require a device-rendered offscreen surface before
-group opacity can be admitted; the current software offscreen path remains
+The canonical production WM currently emits RECT, resolved-font TEXT, and
+exact-size IMAGE commands. Its leading shadow command is a displaced
+translucent RECT, but its current window-sized embedded clip plus the following
+body overwrite leave no visible shadow pixels; TODO 554 owns that producer
+geometry bug. Gradient, border, radius, and transform kernels are therefore
+outside this raw CLEAR/RECT hardening slice. Full-target
+desktop/chrome/taskbar batches render directly. Smaller window batches retain
+the parent's `VulkanSession`, render into a transparent child framebuffer,
+require checked device readback, and apply `opacity_milli` through the checked
+parent src-over pipeline. Software children remain local fallback only and are
 ineligible for a device receipt. Nested GROUP batches remain rejected.
 
 Vulkan ProcessingIR hashes the runtime-selected driver identity, which includes
@@ -131,15 +135,19 @@ src-over for transparent or partially clipped images. Masked or scaled images
 retain CPU semantics and poison device provenance for that request.
 Completion-unknown submissions never replay on the CPU or release potentially
 in-flight dependencies.
-Fresh-device admission is all-or-nothing before mutation: every batch must be
-full-target at opacity 1000, commands are limited to plain opaque RECT, exact
-IMAGE, and resolved TEXT whose selected font and transient glyph quads pass
-preflight within a framebuffer-area glyph-pixel work budget; the first command
-must overwrite the full target opaquely. TEXT uses
+Fresh-device admission is all-or-nothing before mutation: the first command
+must overwrite the full target opaquely; later batches may be full-target or a
+bounded named embedded surface with opacity in `(0, 1000]`. Commands are
+limited to opaque RECT plus a nonzero-alpha first RECT that initializes a
+fresh transparent embedded surface (including canonical WM metadata-only
+styles), exact IMAGE, and resolved TEXT whose selected font and transient glyph quads pass
+preflight within a framebuffer-area glyph-pixel work budget. TEXT uses
 the canonical `FontRenderer` batch and checked Vulkan IMAGE src-over rather
 than a parallel font shader or Draw IR atlas state. This
-admits device-backed desktop/chrome/image/text subsets without treating undefined
-fresh Vulkan allocation bytes or software offscreen pixels as device evidence.
+admits device-backed desktop/chrome/window/image/text subsets without treating
+undefined fresh Vulkan allocation bytes or software offscreen pixels as device
+evidence. Each child releases its retained session after synchronous checked
+readback and parent composition.
 The core executor imports `draw_ir_adv.spl`; host runtime-queue integration is
 kept in the sibling `draw_ir_runtime_adv.spl` so the baremetal closure does not
 acquire direct host-runtime APIs. This source path is not compile-verified while

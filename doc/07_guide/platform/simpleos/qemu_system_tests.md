@@ -232,6 +232,11 @@ CUDA ProcessingIR executor are implemented with Vulkan ProcessingIR fallback;
 refreshed cross-ISA CUDA receipts
 are still required. macOS Metal and Windows DirectX/CUDA rows remain `unsupported` until native
 host executors and receipts exist; their API names are not treated as proof.
+The host Draw IR executor retains the parent Vulkan session for bounded smaller
+WM surfaces, requires child device readback, and applies canonical embedding
+opacity through checked parent src-over. The current wrapper fixture remains
+full-frame, so this owner-level implementation is not fresh production-WM QEMU
+evidence.
 Cached reports are accepted only through `--validate-report`: an overall status
 cannot promote the lane unless all nine host/ISA rows are well-formed and a
 Linux `pass` carries three existing serial logs with exact correlated render,

@@ -1,7 +1,9 @@
 # SimpleOS QEMU Host-GPU 2D
 
-Status: implementation in progress. The canonical wrapper and its fail-closed
-parser self-test include the shared full-frame IMAGE Draw IR path. Earlier
+Status: implementation in progress. The host executor now admits checked
+shared-session Vulkan child surfaces for canonical offset/opacity WM batches;
+the wrapper and its fail-closed parser self-test still exercise the shared
+full-frame IMAGE Draw IR fixture. Earlier
 Linux/Vulkan live x86_64, AArch64, and RV64 raw-render receipts pass; refreshed
 cross-ISA Draw IR and CUDA ProcessingIR receipts remain pending. Native Metal
 and DirectX host receipts remain unavailable.

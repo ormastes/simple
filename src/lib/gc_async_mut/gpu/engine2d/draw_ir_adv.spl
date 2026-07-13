@@ -72,10 +72,9 @@ fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositio
 fn _engine2d_draw_ir_supported_command(kind: text) -> bool:
     kind == DRAW_IR_COMMAND_RECT or kind == DRAW_IR_COMMAND_TEXT or kind == DRAW_IR_COMMAND_IMAGE
 
-# A fully transparent (alpha == 0) fill is a no-op in a real compositor, but the
-# GPU rect kernel stores the raw color word, so a zero-color box reads back as an
-# opaque black bar over whatever it covers. Skip painting those.
-fn _engine2d_draw_ir_opaque(color: u32) -> bool:
+# A fully transparent fill has no visible contribution. Nonzero alpha may
+# initialize a fresh transparent child through each backend's canonical fill.
+fn _engine2d_draw_ir_has_visible_alpha(color: u32) -> bool:
     ((color >> 24) & 0xFFu32) != 0u32
 
 # Recover the pixel font size a text command was laid out with from its computed
@@ -155,16 +154,16 @@ fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], 
     val bottom_c = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-bottom-color"), 0, 0) as u32
     val left_c = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-left-color"), 0, 0) as u32
     val uniform = top_w == right_w and right_w == bottom_w and bottom_w == left_w and top_w > 0 and top_c == right_c and right_c == bottom_c and bottom_c == left_c
-    if radius > 0 and uniform and _engine2d_draw_ir_opaque(top_c):
+    if radius > 0 and uniform and _engine2d_draw_ir_has_visible_alpha(top_c):
         eng.draw_rounded_rect_outline(x, y, w, h, radius, top_c, top_w)
         return eng
-    if top_w > 0 and _engine2d_draw_ir_opaque(top_c):
+    if top_w > 0 and _engine2d_draw_ir_has_visible_alpha(top_c):
         eng.draw_rect_filled(x, y, w, top_w, top_c)
-    if bottom_w > 0 and _engine2d_draw_ir_opaque(bottom_c):
+    if bottom_w > 0 and _engine2d_draw_ir_has_visible_alpha(bottom_c):
         eng.draw_rect_filled(x, y + h - bottom_w, w, bottom_w, bottom_c)
-    if left_w > 0 and _engine2d_draw_ir_opaque(left_c):
+    if left_w > 0 and _engine2d_draw_ir_has_visible_alpha(left_c):
         eng.draw_rect_filled(x, y, left_w, h, left_c)
-    if right_w > 0 and _engine2d_draw_ir_opaque(right_c):
+    if right_w > 0 and _engine2d_draw_ir_has_visible_alpha(right_c):
         eng.draw_rect_filled(x + w - right_w, y, right_w, h, right_c)
     eng
 
@@ -183,7 +182,7 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
         val sx = _engine2d_draw_ir_nth_int(shadow, 0, 0) as i32
         val sy = _engine2d_draw_ir_nth_int(shadow, 1, 0) as i32
         val scolor = _engine2d_draw_ir_nth_int(shadow, 2, 0) as u32
-        if _engine2d_draw_ir_opaque(scolor):
+        if _engine2d_draw_ir_has_visible_alpha(scolor):
             eng.draw_shadow_rect(x, y, w, h, sx, sy, 0, scolor)
     val radius = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-radius"), 0, 0) as i32
     val bg_image = _engine2d_draw_ir_style_value(style, "background-image")
@@ -191,7 +190,7 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
         val g_from = _engine2d_draw_ir_nth_int(bg_image, 0, 0) as u32
         val g_to = _engine2d_draw_ir_nth_int(bg_image, 1, 0) as u32
         eng.draw_gradient_rect(x, y, w, h, g_from, g_to)
-    elif _engine2d_draw_ir_opaque(command.color):
+    elif _engine2d_draw_ir_has_visible_alpha(command.color):
         if radius > 0:
             eng.draw_rounded_rect(x, y, w, h, radius, command.color)
         else:
@@ -219,26 +218,39 @@ fn _engine2d_draw_ir_image_is_opaque(image: Engine2dResolvedDrawIrImage) -> bool
             return false
     true
 
-fn _engine2d_draw_ir_fresh_device_command_supported(command: DrawIrCommand, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32) -> bool:
+fn _engine2d_draw_ir_fresh_device_rect_style_supported(style: [DrawIrStyleProp]) -> bool:
+    for prop in style:
+        if prop.key != "source" and prop.key != "part" and prop.key != "z-index" and prop.key != "focused":
+            return false
+    true
+
+fn _engine2d_draw_ir_fresh_device_command_supported(command: DrawIrCommand, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32, allow_clipped: bool, allow_translucent_initializer: bool) -> bool:
+    val right = command.x.to_i64() + command.width.to_i64()
+    val bottom = command.y.to_i64() + command.height.to_i64()
+    if (command.width <= 0 or command.height <= 0 or right <= 0 or bottom <= 0 or
+        command.x >= width or command.y >= height):
+        return false
+    val wholly_bounded = command.x >= 0 and command.y >= 0 and right <= width.to_i64() and bottom <= height.to_i64()
     if command.kind == DRAW_IR_COMMAND_TEXT:
         val identity = _engine2d_draw_ir_style_value(command.computed_style, "font-identity")
         val font_size = _engine2d_draw_ir_text_font_size(command.computed_style)
-        if (command.text_value == "" or identity == "" or command.x < 0 or command.y < 0 or
-            command.width <= 0 or command.height <= 0 or
-            command.x.to_i64() + command.width.to_i64() > width.to_i64() or
-            command.y.to_i64() + command.height.to_i64() > height.to_i64()):
+        if command.text_value == "" or identity == "" or (not allow_clipped and not wholly_bounded):
             return false
         return (_engine2d_draw_ir_style_value(command.computed_style, "font-family") != "" and
             _engine2d_draw_ir_style_value(command.computed_style, "font-advance-widths") != "" and
             _engine2d_draw_ir_style_value(command.computed_style, "line-height") != "" and
             font_size > 0 and font_size <= 512)
-    if command.x < 0 or command.y < 0 or command.width <= 0 or command.height <= 0:
-        return false
-    if command.x.to_i64() + command.width.to_i64() > width.to_i64() or command.y.to_i64() + command.height.to_i64() > height.to_i64():
+    if not allow_clipped and not wholly_bounded:
         return false
     if command.kind == DRAW_IR_COMMAND_RECT:
-        return command.computed_style.len() == 0 and ((command.color >> 24) & 0xFFu32) == 0xFFu32
+        if not _engine2d_draw_ir_fresh_device_rect_style_supported(command.computed_style):
+            return false
+        val alpha = (command.color >> 24) & 0xFFu32
+        val pixel_work = command.width.to_i64() * command.height.to_i64()
+        return (alpha == 0xFFu32 or (allow_translucent_initializer and alpha > 0u32)) and pixel_work <= width.to_i64() * height.to_i64()
     if command.kind != DRAW_IR_COMMAND_IMAGE:
+        return false
+    if not wholly_bounded:
         return false
     val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
     if image_index < 0:
@@ -260,15 +272,26 @@ fn _engine2d_draw_ir_fresh_device_reason(composition: DrawIrComposition, images:
     var first_command = true
     for batch in composition.batches:
         val embedding = batch.embedding
-        if (embedding.x != 0 or embedding.y != 0 or embedding.width != width or
-            embedding.height != height or embedding.opacity_milli != 1000):
-            return "fresh-device-full-target-opacity-1000-required"
+        val right = embedding.x.to_i64() + embedding.width.to_i64()
+        val bottom = embedding.y.to_i64() + embedding.height.to_i64()
+        if (embedding.x < 0 or embedding.y < 0 or embedding.width <= 0 or embedding.height <= 0 or
+            right > width.to_i64() or bottom > height.to_i64() or
+            embedding.opacity_milli <= 0 or embedding.opacity_milli > 1000):
+            return "fresh-device-bounded-embedding-required"
+        val fills_target = embedding.x == 0 and embedding.y == 0 and embedding.width == width and embedding.height == height
+        if (not fills_target or embedding.opacity_milli < 1000) and embedding.surface_id == "":
+            return "fresh-device-embedded-surface-required"
+        if first_command and (not fills_target or embedding.opacity_milli != 1000):
+            return "fresh-device-opaque-full-target-first-command-required"
+        var command_index = 0
         for command in batch.commands:
-            if not _engine2d_draw_ir_fresh_device_command_supported(command, images, width, height):
+            val allow_translucent_initializer = not fills_target and embedding.clip and command_index == 0
+            if not _engine2d_draw_ir_fresh_device_command_supported(command, images, embedding.width, embedding.height, not fills_target and embedding.clip, allow_translucent_initializer):
                 return "fresh-device-command-preflight-required"
             if first_command and not _engine2d_draw_ir_fresh_device_initializes_target(command, images, width, height):
                 return "fresh-device-opaque-full-target-first-command-required"
             first_command = false
+            command_index = command_index + 1
     if first_command:
         return "fresh-device-nonempty-composition-required"
     ""
@@ -446,6 +469,8 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
 fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32, allow_parent_image: bool) -> (Engine2D, i32, i32, text):
     var eng = engine
     val embedding = batch.embedding
+    if batch.commands.len() == 0:
+        return (eng, 0, 0, "")
     # Perf short-circuit: a batch whose embedding is (0,0) at full opacity and
     # EXACTLY the size of the target it renders onto composites as a plain 1:1
     # copy with no cropping/offset/alpha effect — offscreen-then-blit would be
@@ -469,13 +494,31 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             eng.clear_clip()
         return (eng, direct.1, direct.2, direct.3)
 
-    var offscreen = Engine2D.create_offscreen(embedding.width, embedding.height)
+    var offscreen: Engine2D
+    if eng.backend_name() == "vulkan":
+        val offscreen_result = eng.create_shared_vulkan_offscreen(embedding.width, embedding.height)
+        match offscreen_result:
+            Err(reason):
+                return (eng, 0, batch.commands.len().to_i32(), reason)
+            Ok(created):
+                offscreen = created
+    else:
+        offscreen = Engine2D.create_offscreen(embedding.width, embedding.height)
     val inner = _engine2d_draw_ir_render_commands(offscreen, batch.commands, 0, 0, images, false)
     offscreen = inner.0
-    if embedding.opacity_milli >= 1000:
+    var composited = true
+    if eng.backend_name() == "vulkan":
+        val child = offscreen.read_pixels_with_source()
+        composited = (child.source == "device_readback" and child.backend_handle > 0 and
+            child.pixels.len() == embedding.width.to_i64() * embedding.height.to_i64() and
+            eng.draw_vulkan_image_blend_checked(embedding.x, embedding.y, embedding.width, embedding.height, child.pixels, embedding.opacity_milli))
+    elif embedding.opacity_milli >= 1000:
         eng.draw_engine(embedding.x, embedding.y, offscreen)
     else:
         eng.draw_engine_opacity(embedding.x, embedding.y, offscreen, embedding.opacity_milli)
+    offscreen.shutdown()
+    if not composited:
+        return (eng, 0, batch.commands.len().to_i32(), "embedded-device-composite-not-proven")
     (eng, inner.1, inner.2, inner.3)
 
 fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool) -> Engine2dDrawIrAdvResult:

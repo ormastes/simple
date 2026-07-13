@@ -585,6 +585,16 @@ impl RenderBackend for VulkanBackend:
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         if self.completion_unknown: return
+        if color_a(color) < 255:
+            val pixel_count = _i64(w) * _i64(h)
+            if pixel_count <= 0:
+                return
+            if pixel_count > 2147483647:
+                self.cpu_fallback_used = true
+                return
+            val pixels: [u32] = [color; w * h]
+            self.draw_image_blend(x, y, w, h, pixels)
+            return
         val pc = _pack_rect_pc(x, y, w, h, color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
@@ -718,6 +728,18 @@ impl RenderBackend for VulkanBackend:
     me _draw_image_blend_native(x: i32, y: i32, w: i32, h: i32, pixels: [u32], opacity_milli: i32) -> i64:
         """Composite a clipped straight-ARGB image on the Vulkan device."""
         self._draw_image_composite_native(x, y, w, h, pixels, opacity_milli, VK_IMAGE_COMPOSITE_SRC_OVER, false)
+
+    me draw_image_blend_checked(x: i32, y: i32, w: i32, h: i32, pixels: [u32], opacity_milli: i32) -> bool:
+        """Composite only when fenced native Vulkan completion is proven."""
+        if self.completion_unknown:
+            return false
+        val status = self._draw_image_blend_native(x, y, w, h, pixels, opacity_milli)
+        if status == 1:
+            return true
+        self.cpu_fallback_used = true
+        if status < 0:
+            self.completion_unknown = true
+        false
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         if self.completion_unknown: return

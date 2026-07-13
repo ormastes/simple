@@ -5,15 +5,16 @@
 # Engine2D Embedded Render Surface (Lane A: CPU embedded render target)
 
 Proves the 2D renderer's real internal embedded render target: an offscreen
-Engine2D (always CPU/software-backed) can be drawn to independently and then
+Engine2D can be drawn to independently and then
 stitched into a parent Engine2D as one blit (`draw_engine`/
 `draw_engine_opacity`), and the Draw IR executor activates this same offscreen
 path automatically for any batch whose `embedding.surface_id` is non-empty —
 while batches that never set a surface_id keep the exact legacy
 translate+clip behavior (no regression for existing callers).
 
-CPU scenarios are headless/deterministic; the device-route scenario uses the
-requested shared-session Vulkan backend when one is available.
+CPU scenarios are headless/deterministic. A Vulkan parent uses a transparent
+child framebuffer retained from the same session and admits only checked
+device readback plus checked parent compositing.
 """
 
 use std.spec.{describe, context, it, expect}
@@ -22,12 +23,17 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     engine2d_draw_ir_adv_batch,
     engine2d_draw_ir_adv_batch_with_images,
     engine2d_draw_ir_adv_composition,
+    engine2d_draw_ir_adv_composition_with_images,
     engine2d_draw_ir_adv_fresh_device_composition_with_images,
     engine2d_resolved_draw_ir_image
 }
 use std.gc_async_mut.text_layout.font_renderer.{resolve_font_metrics}
 use std.gpu.engine2d.color.{rgb, rgba, color_r, color_g, color_b, color_a}
 use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_GPU,
+    DRAW_IR_COMMAND_IMAGE,
+    DRAW_IR_COMMAND_RECT,
+    DRAW_IR_COMMAND_TEXT,
     draw_ir_batch,
     draw_ir_composition,
     draw_ir_embedding_config,
@@ -35,6 +41,18 @@ use common.ui.draw_ir.{
     draw_ir_rect,
     draw_ir_text,
     draw_ir_text_resolved_font
+}
+use common.ui.taskbar_model.{empty_taskbar_model}
+use common.ui.window_scene.{
+    WM_CONTENT_ORIGIN_SIMPLE_WEB,
+    WmContentFrame,
+    simple_gui_internal_window,
+    simple_gui_internal_window_scene,
+    wm_content_frame_checksum
+}
+use common.ui.window_scene_draw_ir.{
+    shared_wm_content_frame_image_uri,
+    shared_wm_scene_draw_ir_composition_with_content
 }
 
 val BG: u32 = rgb(0, 0, 0)
@@ -117,6 +135,90 @@ describe "Engine2D embedded render surface":
             expect(color_g(p)).to_equal(0)
             expect(color_b(p)).to_equal(0)
             engine.shutdown()
+
+        it "composites a canonical offset translucent WM window on the shared Vulkan session":
+            val window = simple_gui_internal_window("surf", "win", 1u64, "app", "One", 10, 36, 120, 80, "", false, false, 1)
+            val scene = simple_gui_internal_window_scene(160, 120, DRAW_IR_BACKEND_GPU, [window])
+            val content_pixels: [u32] = [GREEN; 120 * 52]
+            val frame = WmContentFrame(window_id: "win", scene_revision: 7, content_revision: 1,
+                origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 120, height: 52,
+                pixels: content_pixels, checksum: wm_content_frame_checksum(content_pixels),
+                parent_window_id: "", offset_x: 0, offset_y: 0)
+            val composition = shared_wm_scene_draw_ir_composition_with_content(scene, empty_taskbar_model(), [frame], DRAW_IR_BACKEND_GPU, 1000, "09:41", 0)
+            val content_image = engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(frame), 120, 52, content_pixels)
+            var window_batches = 0
+            var content_batches = 0
+            for batch in composition.batches:
+                if batch.batch_id == "window-win":
+                    window_batches = window_batches + 1
+                    expect(batch.embedding.x).to_equal(10)
+                    expect(batch.embedding.y).to_equal(36)
+                    expect(batch.embedding.width).to_equal(120)
+                    expect(batch.embedding.height).to_equal(80)
+                    expect(batch.embedding.opacity_milli).to_equal(930)
+                    expect(batch.embedding.clip).to_be(true)
+                    expect(batch.commands[0].kind).to_equal(DRAW_IR_COMMAND_RECT)
+                    expect((batch.commands[0].color >> 24) & 0xFFu32).to_equal(0x33u32)
+                    var resolved_text = 0
+                    for command in batch.commands:
+                        if command.kind == DRAW_IR_COMMAND_TEXT and command.computed_style.len() > 0:
+                            resolved_text = resolved_text + 1
+                    expect(resolved_text).to_be_greater_than(0)
+                if batch.batch_id == "content-win":
+                    content_batches = content_batches + 1
+                    expect(batch.embedding.x).to_equal(10)
+                    expect(batch.embedding.y).to_equal(64)
+                    expect(batch.embedding.width).to_equal(120)
+                    expect(batch.embedding.height).to_equal(52)
+                    expect(batch.commands.len()).to_equal(1)
+                    expect(batch.commands[0].kind).to_equal(DRAW_IR_COMMAND_IMAGE)
+                    expect(batch.commands[0].image_uri).to_equal(content_image.image_uri)
+            expect(window_batches).to_equal(1)
+            expect(content_batches).to_equal(1)
+
+            var cpu = Engine2D.create_with_backend(160, 120, "cpu")
+            val expected = engine2d_draw_ir_adv_composition_with_images(cpu, composition, false, [content_image])
+            expect(expected.skipped_command_count).to_equal(0)
+            match Engine2D.create_requested_backend(160, 120, "vulkan"):
+                Err(reason):
+                    expect(reason.len()).to_be_greater_than(0)
+                Ok(engine):
+                    val parent_backend = engine.vulkan_backend
+                    expect(parent_backend != nil).to_be(true)
+                    if parent_backend != nil:
+                        val parent = parent_backend
+                        val refs_before = parent.session.ref_count
+                        match engine.create_shared_vulkan_offscreen(2, 2):
+                            Err(reason):
+                                expect(reason.len()).to_equal(0)
+                            Ok(child):
+                                val child_backend = child.vulkan_backend
+                                expect(child_backend != nil).to_be(true)
+                                if child_backend != nil:
+                                    val child_vulkan = child_backend
+                                    expect(child_vulkan.session.device).to_equal(parent.session.device)
+                                    expect(child_vulkan.session.generation).to_equal(parent.session.generation)
+                                    expect(parent.session.ref_count).to_equal(refs_before + 1)
+                                val alpha_embedding = draw_ir_embedding_config("alpha-child", "alpha-child", 0, 0, 2, 2, 0, 1000, true)
+                                val alpha_batch = draw_ir_batch("alpha-child", DRAW_IR_BACKEND_GPU, alpha_embedding, [
+                                    draw_ir_rect("alpha-init", 0, 0, 2, 2, 0x33FF0000u32)
+                                ])
+                                val alpha_result = engine2d_draw_ir_adv_batch(child, alpha_batch, true)
+                                expect(alpha_result.fallback_required).to_be(false)
+                                expect(alpha_result.readback_source).to_equal("device_readback")
+                                expect(alpha_result.backend_handle).to_be_greater_than(0)
+                                expect(alpha_result.pixels[0]).to_equal(0x33330000u32)
+                                child.shutdown()
+                                expect(parent.session.ref_count).to_equal(refs_before)
+                    val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, composition, [content_image])
+                    expect(result.fallback_required).to_be(false)
+                    expect(result.skipped_command_count).to_equal(0)
+                    expect(result.rendered_command_count).to_equal(expected.rendered_command_count)
+                    expect(result.readback_source).to_equal("device_readback")
+                    expect(result.backend_handle).to_be_greater_than(0)
+                    expect(result.pixels).to_equal(expected.pixels)
+                    engine.shutdown()
+            cpu.shutdown()
 
         it "nested embedding depth 2: an embedded surface can itself display another embedded render's output":
             # Level 1 (innermost): an independent offscreen render target, built
