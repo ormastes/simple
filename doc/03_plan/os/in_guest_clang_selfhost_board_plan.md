@@ -50,7 +50,10 @@ loop (overlap fault cleared) → in-guest `clang -cc1 -emit-obj /hello.o` → ge
 ET_REL/EM_X86_64 object → host `cc && ./a.out` → exit 7.
 
 Remaining after 2f: physical-hardware bring-up on the actual mini-PC (NVMe/serial/NIC provable
-only there). Details below and in `doc/03_plan/os/clang_over_ssh_2e_design.md`.
+only there). Detailed phased plan (P0 board+evidence channel → P1 USB first-light → P2 real
+NVMe compile → P3 real NIC driver [the HIGH gap: only virtio-net exists] → P4 full goal):
+`doc/03_plan/os/simpleos/hw_qemu/clang_board_bringup_x86_64_uefi.md`. Details below and in
+`doc/03_plan/os/clang_over_ssh_2e_design.md`.
 
 ✅ **PHASE 1 DONE.** clang runs in ring-3 and COMPILES a C file:
 `clang -cc1 -emit-obj -o /hello.o /hello.c` streams 124 MB clang → ring-3 → reads `/hello.c`

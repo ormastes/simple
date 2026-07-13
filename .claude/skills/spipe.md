@@ -887,6 +887,21 @@ pattern (direct `cp` hits "Text file busy" when in use), then re-run the gate. S
 central-compiler resolver change is only *verified* after this refresh — a
 probe-green interpreter run is not the bootstrap gate.
 
+### SimpleOS board-proxy evidence: OVMF pflash, never `-kernel`
+
+For SimpleOS "board-runnable" claims, QEMU `-kernel` runs are NOT board
+evidence — they bypass real firmware (the design ban: "no QEMU-only
+mechanism"). The board-proxy gate is **OVMF pflash + GRUB-EFI**
+(`scripts/os/scp_retrieve_over_ssh_uefi.shs` is the reference: boots the
+128 MB-base kernel `linker_128mb.ld`, SSH → in-guest clang compile → `getfile`
+byte-exact object → exit 7). Layout invariant to respect in any OS spec that
+links or mmaps user memory: the OVMF kernel `.bss` band is
+`[0x08000000, ~0x16400000)`; ring-3 payloads link at `0x40000000`, mmap base
+`0x50000000` (`sysroot.shs` / `syscall.spl`). Evidence bar for any board-proxy
+PASS: a durable serial transcript with the full ladder — never a verbal claim
+(the 2e "FULL COMPLETE" mislabel was caught exactly this way). Physical-board
+phases: `doc/03_plan/os/simpleos/hw_qemu/clang_board_bringup_x86_64_uefi.md`.
+
 For memory-perspective work (gc/nogc boundary, leak checks, alloc enforcement):
 the gc-boundary lint (`gc_boundary_crossing`) resolves alias shims via
 `GC_ALIAS_MANIFEST` — kept in sync in BOTH compilers
