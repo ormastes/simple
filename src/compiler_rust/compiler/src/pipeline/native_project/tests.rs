@@ -946,6 +946,10 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
         core_c_symbols.contains("spl_thread_cpu_count"),
         "core-c runtime archive must include the legacy thread CPU-count ABI used by std.thread_sffi"
     );
+    assert!(
+        core_c_symbols.contains("rt_array_concat"),
+        "core-c runtime archive must include the array concatenation ABI emitted for array +"
+    );
     let core_c_members = archive_members(&core_c).expect("core-c runtime archive members should be readable");
     let https_object = format!("runtime_https_openssl_core.{}", test_host_object_extension());
     assert!(
@@ -1026,10 +1030,43 @@ int main(void) {
     if (rt_index_get((int64_t)values, rt_value_int(-3)) != rt_value_nil()) return 17;
     if (rt_index_set((int64_t)values, rt_value_int(2), rt_value_int(99))) return 18;
     if (rt_index_get((int64_t)values, rt_value_nil()) != rt_value_nil()) return 19;
+    SplArray* tail = rt_array_new(1);
+    if (!tail || !rt_array_push(tail, rt_value_int(30))) return 20;
+    SplArray* joined = rt_array_concat(values, tail);
+    if (!joined || rt_array_len(joined) != 3) return 21;
+    if (rt_array_get(joined, 0) != rt_value_int(10)) return 22;
+    if (rt_array_get(joined, 1) != rt_value_int(21)) return 23;
+    if (rt_array_get(joined, 2) != rt_value_int(30)) return 24;
+    if (rt_array_len(values) != 2 || rt_array_len(tail) != 1) return 25;
+    SplArray* byte_left = rt_byte_array_new(2);
+    SplArray* byte_right = rt_byte_array_new(1);
+    if (!byte_left || !byte_right) return 26;
+    if (!rt_array_push(byte_left, rt_value_int('a')) || !rt_array_push(byte_left, rt_value_int('b'))) return 27;
+    if (!rt_array_push(byte_right, rt_value_int('c'))) return 28;
+    SplArray* byte_joined = rt_array_concat(byte_left, byte_right);
+    if (!byte_joined || rt_array_len(byte_joined) != 3) return 29;
+    if (rt_bytes_u8_at(byte_joined, 0) != 'a' || rt_bytes_u8_at(byte_joined, 2) != 'c') return 30;
+    if (rt_array_concat(NULL, byte_right) != NULL) return 31;
+    if (!rt_array_clear(joined) || rt_array_len(joined) != 0) return 32;
+    if (rt_array_clear(NULL)) return 33;
+    SplArray* mixed = rt_array_concat(tail, byte_left);
+    if (!mixed || rt_array_len(mixed) != 3) return 34;
+    if (rt_array_get(mixed, 0) != rt_value_int(30) || rt_array_get(mixed, 1) != rt_value_int('a')) return 35;
+    SplArray* words_left = rt_array_new_with_cap_u64(1);
+    SplArray* words_right = rt_array_new_with_cap_u64(1);
+    if (!words_left || !words_right) return 36;
+    if (!rt_typed_words_u64_push(words_left, 0x100000000LL)) return 37;
+    if (!rt_typed_words_u64_push(words_right, -1LL)) return 38;
+    SplArray* words_joined = rt_array_concat(words_left, words_right);
+    if (!words_joined || rt_array_len(words_joined) != 2) return 39;
+    if (rt_typed_words_u64_at(words_joined, 0) != 0x100000000LL ||
+        rt_typed_words_u64_at(words_joined, 1) != -1LL) return 40;
+    if (rt_array_concat(words_left, tail) != NULL) return 41;
+    if (rt_array_new(100000001LL) != NULL) return 42;
     int64_t abc = rt_string_new((const uint8_t*)"abc", 3);
     SplArray* bytes = (SplArray*)(uintptr_t)rt_string_bytes(abc);
-    if (rt_array_len(bytes) != 3) return 20;
-    if (rt_array_get(bytes, 1) != rt_value_int('b')) return 21;
+    if (rt_array_len(bytes) != 3) return 43;
+    if (rt_array_get(bytes, 1) != rt_value_int('b')) return 44;
     int64_t out = rt_string_new((const uint8_t*)"out:", 4);
     int64_t err = rt_string_new((const uint8_t*)"err", 3);
     rt_stdout_write(out);

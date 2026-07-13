@@ -97,6 +97,7 @@ bool rt_dir_create(const char* path, bool recursive) {
 #define RT_VALUE_HEAP_DICT 0x06U
 #define RT_CORE_ARRAY_FLAG_BYTES 0x08U
 #define RT_CORE_ARRAY_FLAG_U64_PACKED 0x10U
+#define RT_CORE_ARRAY_MAX_CAP 100000000LL
 #define RT_HOST_GPU_LANE_HOST 1
 #define RT_HOST_GPU_LANE_GPU 2
 #define RT_HOST_GPU_PHASE_BEGIN 1
@@ -501,7 +502,7 @@ static inline RtCoreArray* rt_core_as_array(int64_t value) {
     }
     RtCoreArray* a = (RtCoreArray*)raw;
     if (a->kind != RT_VALUE_HEAP_ARRAY) return NULL;
-    if (a->len < 0 || a->cap < 0 || a->len > a->cap || a->cap > 100000000) return NULL;
+    if (a->len < 0 || a->cap < 0 || a->len > a->cap || a->cap > RT_CORE_ARRAY_MAX_CAP) return NULL;
     return a;
 }
 
@@ -1592,7 +1593,8 @@ int64_t rt_strcmp(const char* a, const char* b) {
 
 static SplArray* rt_core_array_new_fill(int64_t cap, uint8_t flags, int zero_items) {
     int64_t actual_cap = cap > 4 ? cap : 4;
-    if (actual_cap < 0 || actual_cap > INT64_MAX / (int64_t)sizeof(int64_t)) {
+    if (actual_cap < 0 || actual_cap > RT_CORE_ARRAY_MAX_CAP ||
+        actual_cap > INT64_MAX / (int64_t)sizeof(int64_t)) {
         return NULL;
     }
     RtCoreArray* a = (RtCoreArray*)calloc(1, sizeof(RtCoreArray));
@@ -1715,6 +1717,54 @@ int8_t rt_array_push(SplArray* a, int64_t val) {
         ((int64_t*)array->data)[array->len++] = val;
     }
     return 1;
+}
+
+int8_t rt_array_clear(SplArray* a) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    array->len = 0;
+    return 1;
+}
+
+SplArray* rt_array_concat(SplArray* a, SplArray* b) {
+    RtCoreArray* left = rt_core_array_ptr(a);
+    RtCoreArray* right = rt_core_array_ptr(b);
+    if (!left || !right || left->len > INT64_MAX - right->len) return NULL;
+
+    int64_t total = left->len + right->len;
+    if (total > RT_CORE_ARRAY_MAX_CAP) return NULL;
+    int left_bytes = (left->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+    int right_bytes = (right->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+    int left_u64 = (left->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
+    int right_u64 = (right->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
+    if (left_u64 != right_u64) return NULL;
+
+    SplArray* result = left_bytes && right_bytes
+        ? rt_byte_array_new((uint64_t)total)
+        : (left_u64 && right_u64 ? rt_array_new_with_cap_u64(total) : rt_array_new(total));
+    RtCoreArray* out = rt_core_array_ptr(result);
+    if (!out) return NULL;
+
+    if (left_bytes && right_bytes) {
+        if (left->len > 0) memcpy(out->data, left->data, (size_t)left->len);
+        if (right->len > 0) memcpy((uint8_t*)out->data + left->len, right->data, (size_t)right->len);
+    } else if (left_u64 && right_u64) {
+        if (left->len > 0) memcpy(out->data, left->data, (size_t)left->len * sizeof(uint64_t));
+        if (right->len > 0) {
+            memcpy((uint64_t*)out->data + left->len, right->data, (size_t)right->len * sizeof(uint64_t));
+        }
+    } else {
+        int64_t* items = (int64_t*)out->data;
+        for (int64_t i = 0; i < left->len; i++) {
+            items[i] = left_bytes ? rt_value_int(((uint8_t*)left->data)[i]) : ((int64_t*)left->data)[i];
+        }
+        for (int64_t i = 0; i < right->len; i++) {
+            items[left->len + i] =
+                right_bytes ? rt_value_int(((uint8_t*)right->data)[i]) : ((int64_t*)right->data)[i];
+        }
+    }
+    out->len = total;
+    return result;
 }
 
 /* FR-COMPILER-012: array-repeat for `[value; count]` syntax in JIT.

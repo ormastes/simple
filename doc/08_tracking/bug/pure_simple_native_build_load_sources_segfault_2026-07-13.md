@@ -2,9 +2,10 @@
 
 ## Status
 
-Partially fixed. A new stage-5 pure-Simple CLI now builds and reaches native
-entry-closure discovery. Updated Simple/LLVM AOT execution evidence for the
-Engine2D SIMD row scheduler remains blocked by the next native runtime issue.
+Partially fixed through stage 8. Pure-Simple native-build now passes entry
+closure loading and starts frontend parsing. Updated Simple/LLVM AOT execution
+evidence for the Engine2D SIMD row scheduler remains blocked by a later
+runtime/frontend failure whose exact cause is not yet classified.
 Cross-compiled runtime binaries pass on x86-64, AArch64, and RV64GCV.
 
 ## Reproducer
@@ -73,3 +74,26 @@ is implemented by the Rust interpreter but is absent from native method
 registration; `split` lowers to `rt_string_split`. The entry-closure scan now
 uses one `content.split("\\n")` pass, preserving the linear scan while using
 the supported native ABI.
+
+## Stage-6 through stage-8 evidence
+
+The cache-preserving stage-6 rebuild compiled 3 files, reused 1,016 cached
+objects, and linked in 146.2 seconds. Its first native SIMD probe reached
+`CompilerDriver.load_sources_impl`, where disassembly identified a null call
+through the declared but C-runtime-missing `rt_array_concat` ABI.
+
+The shared C runtime now implements `rt_array_concat` for generic, packed-byte,
+packed-u64, and mixed arrays without mutating either input. The existing core-C
+ABI probe covers those cases, invalid input, and the exported symbol. That
+focused probe passes. Stage 7 then compiled 2 files, reused 1,017 cached
+objects, and linked in 155.0 seconds. Its next null call was `rt_array_clear` from
+`expr_reset`; the C runtime now implements the same validate-and-reset behavior
+as the Rust and simple-core runtimes, with valid and invalid cases in the ABI
+probe.
+
+Stage 8 compiled 2 files, reused 1,017 cached objects, and linked in 137.6
+seconds. `nm` confirms both `rt_array_concat` and `rt_array_clear` are defined.
+The pure-Simple LLVM SIMD probe still exits 139 before emitting a compiler
+diagnostic. The mandatory three-cycle cap stopped further rebuilds in this
+session; the next bounded continuation should take one debugger backtrace from
+stage 8, classify the failure, and resolve only the concrete cause.
