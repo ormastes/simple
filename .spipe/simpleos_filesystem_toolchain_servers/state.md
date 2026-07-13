@@ -300,3 +300,70 @@ implementation
 - Live emit-LLVM still faults after HIR/MIR at `rt_native_eq+0xe1`, RIP `0x103543b9`, CR2 `0x183f6f18`. Disassembly of `translate_terminator` still shows an `rt_is_some` call followed by a false-path `rt_native_eq(value, nil)`, so the direct HIR builtin fix alone did not remove the fallback in generated native code.
 - Next fresh turn: finish mapping the remaining fallback to its exact Rust codegen/truthiness owner before editing. Do not repeat the successful bootstrap or add a backend-local runtime extern.
 - Final Spark disassembly narrows the remaining owner to pure-Simple `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` around line 790 (`if value.?:` before typed unwrap). In the exact target ELF, `MirLowering.lower_expr` contains generated `rt_native_neq` calls but no reference to `rt_is_some`; the pure-Simple mirror change was not incorporated into that lower-expression path. Next run must prove the rebuilt `lower_expr` references `rt_is_some` before another QEMU cycle.
+
+## 2026-07-13 shared is_some lowering and third live cycle
+
+- Guided Spark review identified the minimal shared owner in `MirLowering.lower_method_call`: zero-argument `is_some()` now lowers the receiver once and emits the existing typed `rt_is_some` builtin returning `MirType.bool()`. Higher-model review accepted this over a runtime shim or another caller-local workaround.
+- The cached target rebuild passed with 3 compiled, 614 cached, 0 failed. Target ELF SHA-256 is `76067f4cd46c4c598342005d288319743e6dd40e663372be89fa9d82febfa95c`; canonical rebuilt image SHA-256 is `5752be7dd6d7252806a74e04df4d756f03f53f3347cbde2e3f12452ee6d0e23c`.
+- The third live `emit-llvm` cycle again proved filesystem load plus HIR and MIR, then faulted at `rt_native_eq+0xe1` (`RIP 0x103546d9`, `CR2 0x183f6f18`) before IR-ready. QEMU timed out only because the recovered fault handler returned to a stopped user task; the wrapper correctly failed.
+- Root cause of the unchanged generated path: the target compiler was rebuilt by the previously bootstrapped stage2. The new pure-Simple lowering code is present inside the target compiler for compiling later inputs, but that old stage2 necessarily compiled `translate_terminator` itself with the old optional/method lowering. A fresh isolated bootstrap is required before rebuilding the target; otherwise source edits to the self-hosted compiler cannot change its own machine-code call path.
+- Three-cycle live cap reached. Do not run QEMU again this turn. Next fresh turn: bootstrap the pure-Simple owner change once, rebuild the target with that new stage2, require static evidence that `translate_terminator` no longer contains the fallback equality path, then spend one live cycle.
+
+## 2026-07-13 bootstrapped is_some live result
+
+- Fresh isolated one-writer bootstrap passed. New stage2 SHA-256 is `1e1687ab27c8d37a5bdc31e0e4e436c6f016a7fc2e6ded00496ad4e017bcf743`; stage3 SHA-256 is `398103ab6e60c955e51949d578ce0c844ae2ca85ce269e6ec3bbcba5ea103759`.
+- The new stage2 cold-built all 617 SimpleOS target modules with zero failures. Target ELF SHA-256 is `8ca3a9e8e2c8494d89846c541a25040e6dccc5cad33b565af0a88db6e2799dd6`; image SHA-256 is `312e341c1ac4fda3c02646ae1a5abbf3c1146958453f920cb408b36528665440`.
+- Live filesystem execution again passed load, CPL3, HIR, and MIR, then faulted at `rt_native_eq+0xe1` (`RIP 0x103546b9`, `CR2 0x183f6f18`). This disproves the hypothesis that only the stale stage2 kept the fallback alive.
+- Higher-model review rejected the sidecar static gate because the previously live-failing ELF also passed it; the Option wrapper call itself is clean, so the fault is a later equality.
+- Source tracing found the immediate next operation in `translate_terminator`: `get_operand_type(operand: MirOperand) -> text` was assigned to an inferred `maybe_ret_ty` and compared with `nil`, despite its nonoptional return type. The pending minimal owner fix binds the result directly as `text` and removes the impossible nil equality. No runtime shim or duplicated type classifier was added.
+- Live cap reached. Next fresh turn: bootstrap this one-line translator fix, cached-rebuild the target, and run one live emit-LLVM cycle. Do not rerun the clean Option wrapper static gate or separate HIR/MIR checks.
+
+## 2026-07-13 nonoptional operand-type live result
+
+- Isolated one-writer bootstrap of the direct `get_operand_type` text binding passed. Stage2 SHA-256 is `1f9419085c461ad63168fa3b9f55f8e909242f571e01b02f5a5f7fbae70bc565`; stage3 remains `398103ab6e60c955e51949d578ce0c844ae2ca85ce269e6ec3bbcba5ea103759`.
+- Cold SimpleOS target build passed 617 compiled, 0 failed. It took 579.7 seconds versus the prior 345.6-second compile under host contention; no semantic failure was observed, but retain this as a performance-regression signal if repeated on a quiet host.
+- Target ELF SHA-256 is `5c4034e07e099dde2cc64bdbbfc5375aca482fcebba21af577d0f71062755102`; image SHA-256 is `56ff4394b7e334a34f3bee7ee26f698aa915b10956eaf2817a6a7de749421457`.
+- Live filesystem execution again passed load, CPL3, HIR, and MIR, then faulted at `rt_native_eq+0xe1` (`RIP 0x103544b9`, `CR2 0x183f6f18`). The removed local `maybe_ret_ty == nil` guard was not the final bad equality.
+- Guided sidecar audit, accepted by higher-model review only after this live result, identified the next shared owner: every normal Ret immediately passes through `valid_llvm_type(ty: text)`, which still compared its nonoptional text parameter with `nil`. The pending minimal fix removes only `ty == nil` and retains the empty-string and literal-`"nil"` fallbacks.
+- One live cycle consumed; QEMU stopped. Next fresh turn: bootstrap the shared `valid_llvm_type` fix, rebuild, and run one live emit-LLVM cycle. Do not stack the sidecar's lower-ranked `get_local_type` or `translate_const` cleanups without new evidence.
+
+## 2026-07-13 valid LLVM type live result and diagnostic handoff
+
+- Isolated bootstrap passed with stage2 SHA-256 `c3265f660097406ce98970dd211407b33700538dadd9de459256a628109eb045`; stage3 remained `398103ab6e60c955e51949d578ce0c844ae2ca85ce269e6ec3bbcba5ea103759`.
+- Higher-model review accepted the sidecar cache audit: native-build cache scope and freshness omit compiler identity, so reusing the preceding target cache after a compiler semantic change is unsafe. A fresh cache was used; the concrete defect is recorded at `doc/08_tracking/bug/native_build_cache_omits_compiler_identity_2026-07-13.md`.
+- Cold target build passed 617 compiled, 0 failed, but took 633.6 seconds compile plus 62.0 seconds link. Target ELF SHA-256 is `057ed4dd67ea8050a31c522c481e6e310c5c48b7c71733eab64c50895813357c`; image SHA-256 is `81841df67cba240b8d49addfccc32bdba2e55cd690bea7b7d351b428817a2abc`.
+- Live filesystem execution again passed load, CPL3, HIR, and MIR, then faulted at `rt_native_eq+0xe1` (`RIP 0x103544e9`, `CR2 0x183f6f18`). Removing `ty == nil` from shared `valid_llvm_type(text)` did not move the failure.
+- Repeated source-order deletion is now rejected. The focused guest entry pending change sets the existing `SIMPLE_BOOTSTRAP_DEBUG=1` switch, enabling already-present `MirToLlvm` function/phase markers. Because only `src/app/simpleos_tool/main.spl` changes and the current cache was produced by the same compiler, the next target rebuild may safely reuse this exact cache and should miss only the focused entry module.
+- One live cycle consumed. Next fresh turn: cached-rebuild the diagnostic entry, run one live emit-LLVM cycle, use the last emitted translator marker to identify the exact operation, then remove the temporary debug env setting after the owner fix is proven.
+
+## 2026-07-13 exact third-local type-mapping localization
+
+- Same-compiler diagnostic rebuild correctly reused the cache: first pass 2 compiled/615 cached, then trace refinements 3 compiled/614 cached. No stale compiler-object cache was crossed.
+- Setting the existing `SIMPLE_BOOTSTRAP_DEBUG=1` exposed that it changes translation semantics: the guest took the bootstrap-global registry path and faulted at `bootstrap_mir_function_count+0x18` (`CR2=0x8`). This separate defect is recorded at `doc/08_tracking/bug/mir_to_llvm_bootstrap_debug_changes_translation_semantics_2026-07-13.md`.
+- Higher-model review separated tracing from semantics with the temporary `SIMPLEOS_TRANSLATE_TRACE` flag. The focused guest entry enables it; the normal `bootstrap_debug` branch remains false.
+- Real-path trace ELF SHA-256 was `10d29a6aae88250fb847bad009dcff81cc286a3fd9c8cefdb7fc8c0b20e8860f`; image SHA-256 was `4342e17a721e2a29e88ef3fdb199e9ea88948c82943a4ee9d47fa16ed6221b90`. It localized the crash to `translate_function(__simple_main)` after `function:start` and before `function:locals`.
+- Final fine trace ELF SHA-256 is `6c38ec4a8cae0dea0e71366eb091503a9b59f13ace9a8fe72fccf29264c4fc92`; image SHA-256 is `c5cdd9b5ec3732d8f314f51c35315b9bc0fd9aa97a51409f1b8a8a86238d9615`.
+- The first two `__simple_main` locals completed load, `llvm_type_text`, id extraction, map insertion, type-kind classification, local-kind classification, and loop advance. The third local printed `local:type` and then faulted inside `llvm_type_text(local.type_)` at `rt_native_eq+0xe1` (`RIP 0x10355c89`, `CR2 0x183f6f18`) before `local:id`.
+- Three live cycles reached. Do not run QEMU again this turn. Next fresh turn: identify the third MIR local and its `MirTypeKind` from host-side MIR/source construction, then fix the producing representation or the exact type-match owner. Do not delete another nil/equality guard by source order. Remove temporary trace markers and `SIMPLEOS_TRANSLATE_TRACE` after the owner fix is proven.
+
+## 2026-07-13 discriminant equality root cause
+
+- Guided source audit proved `body.locals[2]` is the `LocalKind.Temp` / `MirTypeKind.Unit` placeholder produced by `lower_bootstrap_print_call`; local order is Return/I64, print string/Opaque, print result/Unit, return literal/I64, return placeholder/Unit. Higher-model review accepted the source chain after the live index trace matched it exactly.
+- Machine-code review proved Unit construction is valid. `llvm_type_text` calls `rt_enum_check_discriminant(value, expected_hash)` for match arms. That helper called `rt_enum_discriminant`, then generic `rt_native_eq` on the two integer hashes.
+- Unit's expected hash is `0x183f6f19`. `rt_native_eq` treats odd integers above `0x1000` as tagged heap handles, masks the low bits, and dereferences `0x183f6f18`, exactly matching every live `CR2`. This is the complete causal chain for the recurring fault.
+- Pending shared owner fix is in `src/runtime/simple_core/core_values.spl`: `rt_enum_check_discriminant` and the same unsafe fixed-discriminant comparison in `rt_is_none` now use numeric `<`/`>` and accept equality only when neither relation holds. No translator-local workaround or new runtime alias was added.
+- runtime_need: compare raw integer enum discriminants without tagged-value heuristics.
+- facade_checked: existing Simple-core `rt_enum_discriminant` owner and hosted C runtime implementations, which already use numeric equality.
+- chosen_path: `runtime-owned-change` in the existing Simple-core ABI implementation.
+- rejected_shortcuts: translator Unit special case, malformed-local substitution, new raw extern, `rt_native_eq` pointer heuristics, or deleting additional source guards.
+- Concrete bug and regression contract: `doc/08_tracking/bug/simple_core_discriminant_equality_uses_tagged_value_compare_2026-07-13.md`.
+- Next fresh turn: rebuild the Simple-core archive once, relink the cached target compiler, statically prove `rt_enum_check_discriminant` no longer calls/references `rt_native_eq`, then run one live emit-LLVM cycle. Remove temporary trace markers after the owner fix advances past the third local.
+
+## 2026-07-13 discriminant runtime fix live proof
+
+- Rebuilt Simple-core archive SHA-256 `1d81411ccf6f99fce6a06af289134bb8866da63a3b794ad4c436baf6a5f2208f`, installed it in the SimpleOS sysroot, and relinked the target compiler SHA-256 `d6245954c4f7c1049408b92d5b76a14d0691d6701499a4410fb28cf05a20aa0f`.
+- Static higher-model gate passed for the linked ELF: `rt_enum_check_discriminant` calls `rt_enum_discriminant` exactly once, contains numeric compare/branch instructions, and does not reference `rt_native_eq`; the `rt_is_none` compatibility closure also contains no `rt_native_eq` reference.
+- Live filesystem `emit-llvm` loaded `/HELLO.SPL`, reached CPL3, completed HIR and MIR, and processed all six `__simple_main` locals. This proves the former Unit-local discriminant crash is fixed.
+- The same bounded live cycle exposed the next independent fault after `function:started __simple_main`, during LLVM function-body emission: user RIP `0x10352539`, CR2 `0x0`, page-fault error `0x5`. The wrapper timed out with rc 124 after the recovered task stopped, so IR was not written.
+- Removed the temporary `SIMPLEOS_TRANSLATE_TRACE` guest setting and fine-grained translator markers after proof. The existing `SIMPLE_BOOTSTRAP_DEBUG` diagnostics remain unchanged.
+- Next fresh turn: map RIP `0x10352539` to the linked compiler symbol/instruction and identify the exact body-emission owner before editing. Do not rerun the discriminant gate or repeat this live cycle.
