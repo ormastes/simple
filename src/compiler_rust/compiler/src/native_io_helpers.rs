@@ -75,7 +75,7 @@ fn make_io_error(err: io::Error) -> Value {
             return Value::Enum {
                 enum_name: "IoError".to_string(),
                 variant: "Other".to_string(),
-                payload: Some(Box::new(Value::Str(err.to_string()))),
+                payload: Some(Box::new(Value::text(err.to_string()))),
             };
         }
     };
@@ -110,7 +110,7 @@ pub fn io_err_msg(msg: &str) -> Value {
         payload: Some(Box::new(Value::Enum {
             enum_name: "IoError".to_string(),
             variant: "Other".to_string(),
-            payload: Some(Box::new(Value::Str(msg.to_string()))),
+            payload: Some(Box::new(Value::text(msg.to_string()))),
         })),
     }
 }
@@ -122,7 +122,7 @@ pub fn io_err_msg(msg: &str) -> Value {
 pub fn extract_path(args: &[Value], idx: usize) -> Result<String, CompileError> {
     args.get(idx)
         .and_then(|v| match v {
-            Value::Str(s) => Some(s.clone()),
+            Value::Str(s) => Some(s.as_ref().clone()),
             Value::Symbol(s) => Some(s.clone()),
             // Unit types and other string-like values
             _ => None,
@@ -168,7 +168,7 @@ pub fn extract_int(args: &[Value], idx: usize) -> Result<i64, CompileError> {
 pub fn extract_open_mode(args: &[Value], idx: usize) -> Result<String, CompileError> {
     match args.get(idx) {
         Some(Value::Enum { variant, .. }) => Ok(variant.clone()),
-        Some(Value::Str(s)) => Ok(s.clone()),
+        Some(Value::Str(s)) => Ok(s.as_ref().clone()),
         _ => Err(crate::error::factory::argument_must_be(idx, "an OpenMode")),
     }
 }
@@ -229,11 +229,11 @@ pub fn create_dir_entry(entry: &std::fs::DirEntry) -> Value {
     let mut fields = HashMap::new();
     fields.insert(
         "path".to_string(),
-        Value::Str(entry.path().to_string_lossy().to_string()),
+        Value::text(entry.path().to_string_lossy().to_string()),
     );
     fields.insert(
         "name".to_string(),
-        Value::Str(entry.file_name().to_string_lossy().to_string()),
+        Value::text(entry.file_name().to_string_lossy().to_string()),
     );
 
     // Determine file type

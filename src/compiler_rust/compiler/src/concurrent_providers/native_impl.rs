@@ -126,7 +126,7 @@ impl MapProvider for NativeMapProvider {
 
     fn hashmap_keys(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
         let map = get_map!(self, handle)?;
-        Ok(map.keys().map(|k| Value::Str(k.clone())).collect())
+        Ok(map.keys().map(|k| Value::text(k.clone())).collect())
     }
 
     fn hashmap_values(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
@@ -138,7 +138,7 @@ impl MapProvider for NativeMapProvider {
         let map = get_map!(self, handle)?;
         Ok(map
             .iter()
-            .map(|(k, v)| Value::array(vec![Value::Str(k.clone()), v.clone()]))
+            .map(|(k, v)| Value::array(vec![Value::text(k.clone()), v.clone()]))
             .collect())
     }
 
@@ -195,7 +195,7 @@ impl MapProvider for NativeMapProvider {
             .hashsets
             .get(&handle)
             .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle)))?;
-        Ok(set.iter().map(|s| Value::Str(s.clone())).collect())
+        Ok(set.iter().map(|s| Value::text(s.clone())).collect())
     }
 
     fn hashset_union(&self, a: Handle, b: Handle) -> Result<Handle, CompileError> {
@@ -353,7 +353,7 @@ impl MapProvider for NativeMapProvider {
             .btreemaps
             .get(&handle)
             .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
-        Ok(map.keys().map(|k| Value::Str(k.clone())).collect())
+        Ok(map.keys().map(|k| Value::text(k.clone())).collect())
     }
 
     fn btreemap_values(&self, handle: Handle) -> Result<Vec<Value>, CompileError> {
@@ -371,7 +371,7 @@ impl MapProvider for NativeMapProvider {
             .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
         Ok(map
             .iter()
-            .map(|(k, v)| Value::array(vec![Value::Str(k.clone()), v.clone()]))
+            .map(|(k, v)| Value::array(vec![Value::text(k.clone()), v.clone()]))
             .collect())
     }
 
@@ -380,7 +380,7 @@ impl MapProvider for NativeMapProvider {
             .btreemaps
             .get(&handle)
             .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
-        Ok(map.keys().next().map(|k| Value::Str(k.clone())).unwrap_or(Value::Nil))
+        Ok(map.keys().next().map(|k| Value::text(k.clone())).unwrap_or(Value::Nil))
     }
 
     fn btreemap_last_key(&self, handle: Handle) -> Result<Value, CompileError> {
@@ -391,7 +391,7 @@ impl MapProvider for NativeMapProvider {
         Ok(map
             .keys()
             .next_back()
-            .map(|k| Value::Str(k.clone()))
+            .map(|k| Value::text(k.clone()))
             .unwrap_or(Value::Nil))
     }
 
@@ -448,7 +448,7 @@ impl MapProvider for NativeMapProvider {
             .btreesets
             .get(&handle)
             .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
-        Ok(set.iter().map(|s| Value::Str(s.clone())).collect())
+        Ok(set.iter().map(|s| Value::text(s.clone())).collect())
     }
 
     fn btreeset_first(&self, handle: Handle) -> Result<Value, CompileError> {
@@ -456,7 +456,7 @@ impl MapProvider for NativeMapProvider {
             .btreesets
             .get(&handle)
             .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
-        Ok(set.iter().next().map(|s| Value::Str(s.clone())).unwrap_or(Value::Nil))
+        Ok(set.iter().next().map(|s| Value::text(s.clone())).unwrap_or(Value::Nil))
     }
 
     fn btreeset_last(&self, handle: Handle) -> Result<Value, CompileError> {
@@ -467,7 +467,7 @@ impl MapProvider for NativeMapProvider {
         Ok(set
             .iter()
             .next_back()
-            .map(|s| Value::Str(s.clone()))
+            .map(|s| Value::text(s.clone()))
             .unwrap_or(Value::Nil))
     }
 

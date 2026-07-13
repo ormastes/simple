@@ -40,7 +40,7 @@ pub fn handle_int_methods(
                 CastNumericResult::Float(v) => Value::Float(v),
             }
         }
-        "to_string" | "to_text" => Value::Str(n.to_string()),
+        "to_string" | "to_text" => Value::text(n.to_string()),
         "clamp" => {
             let min = eval_arg(
                 args,
@@ -89,9 +89,9 @@ pub fn handle_int_methods(
         "bit_count" | "count_ones" => Value::Int(n.count_ones() as i64),
         "leading_zeros" => Value::Int(n.leading_zeros() as i64),
         "trailing_zeros" => Value::Int(n.trailing_zeros() as i64),
-        "to_hex" => Value::Str(format!("{:x}", n)),
-        "to_bin" => Value::Str(format!("{:b}", n)),
-        "to_oct" => Value::Str(format!("{:o}", n)),
+        "to_hex" => Value::text(format!("{:x}", n)),
+        "to_bin" => Value::text(format!("{:b}", n)),
+        "to_oct" => Value::text(format!("{:o}", n)),
         "times" => {
             // Call a function n times, returning array of results
             let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -215,7 +215,7 @@ pub fn handle_int_methods(
                 return Err(CompileError::Runtime(format!("chr() argument out of range: {}", n)));
             }
             match char::from_u32(n as u32) {
-                Some(c) => Value::Str(c.to_string()),
+                Some(c) => Value::text(c.to_string()),
                 None => return Err(CompileError::Runtime(format!("invalid Unicode code point: {}", n))),
             }
         }
@@ -276,7 +276,7 @@ pub fn handle_float_methods(
                 CastNumericResult::Float(v) => Value::Float(v),
             }
         }
-        "to_string" | "to_text" => Value::Str(f.to_string()),
+        "to_string" | "to_text" => Value::text(f.to_string()),
         "floor" => Value::Float(f.floor()),
         "ceil" => Value::Float(f.ceil()),
         "round" => Value::Float(f.round()),
@@ -471,7 +471,7 @@ pub fn handle_bool_methods(
 ) -> Result<Option<Value>, CompileError> {
     let result = match method {
         "to_int" => Value::Int(if b { 1 } else { 0 }),
-        "to_string" | "to_text" => Value::Str(b.to_string()),
+        "to_string" | "to_text" => Value::text(b.to_string()),
         "is_public" => Value::Bool(b),
         "then" => {
             // Returns Some(result) if true, None if false

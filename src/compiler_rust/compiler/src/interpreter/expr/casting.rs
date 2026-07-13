@@ -175,14 +175,14 @@ fn cast_to_bool(val: Value) -> Result<Value, CompileError> {
 
 fn cast_to_string(val: Value) -> Result<Value, CompileError> {
     match val {
-        Value::Int(i) => Ok(Value::Str(string_cast::from_int(i))),
-        Value::UInt { value, .. } => Ok(Value::Str(value.to_string())),
-        Value::Float(f) => Ok(Value::Str(string_cast::from_float(f))),
-        Value::Float32(f) => Ok(Value::Str(string_cast::from_float(f as f64))),
-        Value::Bool(b) => Ok(Value::Str(string_cast::from_bool(b))),
+        Value::Int(i) => Ok(Value::text(string_cast::from_int(i))),
+        Value::UInt { value, .. } => Ok(Value::text(value.to_string())),
+        Value::Float(f) => Ok(Value::text(string_cast::from_float(f))),
+        Value::Float32(f) => Ok(Value::text(string_cast::from_float(f as f64))),
+        Value::Bool(b) => Ok(Value::text(string_cast::from_bool(b))),
         Value::Str(s) => Ok(Value::Str(s)),
-        Value::Symbol(s) => Ok(Value::Str(s)),
-        Value::Nil => Ok(Value::Str("nil".to_string())),
+        Value::Symbol(s) => Ok(Value::text(s)),
+        Value::Nil => Ok(Value::text("nil".to_string())),
         _ => {
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
@@ -201,7 +201,7 @@ fn cast_to_char(val: Value) -> Result<Value, CompileError> {
         Value::Int(i) => {
             if (0..=0x10FFFF).contains(&i) {
                 if let Some(c) = char::from_u32(i as u32) {
-                    return Ok(Value::Str(c.to_string()));
+                    return Ok(Value::text(c.to_string()));
                 }
             }
             let ctx = ErrorContext::new()

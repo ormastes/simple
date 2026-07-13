@@ -21,7 +21,7 @@ pub fn find(args: &[Value]) -> Result<Value, CompileError> {
         Ok(re) => {
             if let Some(m) = re.find(&text) {
                 Ok(Value::array(vec![
-                    Value::Str(m.as_str().to_string()),
+                    Value::text(m.as_str().to_string()),
                     Value::Int(m.start() as i64),
                     Value::Int(m.end() as i64),
                 ]))
@@ -43,7 +43,7 @@ pub fn find_all(args: &[Value]) -> Result<Value, CompileError> {
                 .find_iter(&text)
                 .map(|m| {
                     Value::array(vec![
-                        Value::Str(m.as_str().to_string()),
+                        Value::text(m.as_str().to_string()),
                         Value::Int(m.start() as i64),
                         Value::Int(m.end() as i64),
                     ])
@@ -65,7 +65,7 @@ pub fn captures(args: &[Value]) -> Result<Value, CompileError> {
                 let results: Vec<Value> = caps
                     .iter()
                     .map(|m| match m {
-                        Some(m) => Value::Str(m.as_str().to_string()),
+                        Some(m) => Value::text(m.as_str().to_string()),
                         None => Value::Nil,
                     })
                     .collect();
@@ -84,7 +84,7 @@ pub fn replace(args: &[Value]) -> Result<Value, CompileError> {
     let text = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
     let replacement = args.get(2).map(|v| v.to_display_string()).unwrap_or_default();
     match regex::Regex::new(&pattern) {
-        Ok(re) => Ok(Value::Str(re.replace(&text, replacement.as_str()).to_string())),
+        Ok(re) => Ok(Value::text(re.replace(&text, replacement.as_str()).to_string())),
         Err(e) => Err(CompileError::semantic(format!("invalid regex pattern: {}", e))),
     }
 }
@@ -95,7 +95,7 @@ pub fn replace_all(args: &[Value]) -> Result<Value, CompileError> {
     let text = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
     let replacement = args.get(2).map(|v| v.to_display_string()).unwrap_or_default();
     match regex::Regex::new(&pattern) {
-        Ok(re) => Ok(Value::Str(re.replace_all(&text, replacement.as_str()).to_string())),
+        Ok(re) => Ok(Value::text(re.replace_all(&text, replacement.as_str()).to_string())),
         Err(e) => Err(CompileError::semantic(format!("invalid regex pattern: {}", e))),
     }
 }
@@ -106,7 +106,7 @@ pub fn split(args: &[Value]) -> Result<Value, CompileError> {
     let text = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
     match regex::Regex::new(&pattern) {
         Ok(re) => {
-            let parts: Vec<Value> = re.split(&text).map(|s| Value::Str(s.to_string())).collect();
+            let parts: Vec<Value> = re.split(&text).map(|s| Value::text(s.to_string())).collect();
             Ok(Value::array(parts))
         }
         Err(e) => Err(CompileError::semantic(format!("invalid regex pattern: {}", e))),
@@ -120,7 +120,7 @@ pub fn split_n(args: &[Value]) -> Result<Value, CompileError> {
     let limit = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(0) as usize;
     match regex::Regex::new(&pattern) {
         Ok(re) => {
-            let parts: Vec<Value> = re.splitn(&text, limit).map(|s| Value::Str(s.to_string())).collect();
+            let parts: Vec<Value> = re.splitn(&text, limit).map(|s| Value::text(s.to_string())).collect();
             Ok(Value::array(parts))
         }
         Err(e) => Err(CompileError::semantic(format!("invalid regex pattern: {}", e))),

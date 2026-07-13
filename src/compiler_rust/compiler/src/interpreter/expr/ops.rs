@@ -643,14 +643,14 @@ pub(super) fn eval_op_expr(
 
             let result = match op {
                 BinOp::Add => match (&left_val, &right_val) {
-                    (Value::Str(a), Value::Str(b)) => Ok(Value::Str(concat_text(a, b))),
+                    (Value::Str(a), Value::Str(b)) => Ok(Value::text(concat_text(a, b))),
                     (Value::Str(a), b) => {
                         let b = b.to_display_string();
-                        Ok(Value::Str(concat_text(a, &b)))
+                        Ok(Value::text(concat_text(a, &b)))
                     }
                     (a, Value::Str(b)) => {
                         let a = a.to_display_string();
-                        Ok(Value::Str(concat_text(&a, b)))
+                        Ok(Value::text(concat_text(&a, b)))
                     }
                     // Array concatenation: [a, b] + [c, d] => [a, b, c, d]
                     (Value::Array(a), Value::Array(b)) => {
@@ -734,16 +734,16 @@ pub(super) fn eval_op_expr(
                     match (&left_val, &right_val) {
                         (Value::Str(s), Value::Int(n)) => {
                             if *n <= 0 {
-                                Ok(Value::Str(String::new()))
+                                Ok(Value::text(String::new()))
                             } else {
-                                Ok(Value::Str(s.repeat(*n as usize)))
+                                Ok(Value::text(s.repeat(*n as usize)))
                             }
                         }
                         (Value::Int(n), Value::Str(s)) => {
                             if *n <= 0 {
-                                Ok(Value::Str(String::new()))
+                                Ok(Value::text(String::new()))
                             } else {
-                                Ok(Value::Str(s.repeat(*n as usize)))
+                                Ok(Value::text(s.repeat(*n as usize)))
                             }
                         }
                         _ if use_f32 => Ok(Value::Float32(as_f32(&left_val)? * as_f32(&right_val)?)),

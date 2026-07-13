@@ -90,7 +90,7 @@ pub(super) fn eval_literal_expr(
         })),
         Expr::Bool(b) => Ok(Some(Value::Bool(*b))),
         Expr::Nil => Ok(Some(Value::Nil)),
-        Expr::String(s) => Ok(Some(Value::Str(s.clone()))),
+        Expr::String(s) => Ok(Some(Value::text(s.clone()))),
         Expr::TypedString(s, suffix) => {
             // Custom string literal suffix handling:
             // 1. Check LITERAL_FUNCTIONS registry for explicit override
@@ -105,7 +105,7 @@ pub(super) fn eval_literal_expr(
             if let Some(lit_fn_info) = literal_fn_result {
                 // Execute the literal function body with the string value
                 let mut local_env: Env = Env::new();
-                local_env.insert(lit_fn_info.param_name.clone(), Value::Str(s.clone()));
+                local_env.insert(lit_fn_info.param_name.clone(), Value::text(s.clone()));
 
                 match exec_block_fn(
                     &lit_fn_info.body,
@@ -135,7 +135,7 @@ pub(super) fn eval_literal_expr(
                         // Bind the string value to the first parameter
                         if !from_method.params.is_empty() {
                             let param_name = &from_method.params[0].name;
-                            local_env.insert(param_name.clone(), Value::Str(s.clone()));
+                            local_env.insert(param_name.clone(), Value::text(s.clone()));
                         }
 
                         match exec_block_fn(
@@ -158,7 +158,7 @@ pub(super) fn eval_literal_expr(
             // Step 4: Fall back to Value::Unit (backward compatibility)
             let family = lookup_unit_family(suffix);
             Ok(Some(Value::Unit {
-                value: Box::new(Value::Str(s.clone())),
+                value: Box::new(Value::text(s.clone())),
                 suffix: suffix.clone(),
                 family,
             }))
@@ -181,7 +181,7 @@ pub(super) fn eval_literal_expr(
                     }
                 }
             }
-            Ok(Some(Value::Str(out)))
+            Ok(Some(Value::text(out)))
         }
         Expr::Symbol(s) => Ok(Some(Value::Symbol(s.clone()))),
 
@@ -189,7 +189,7 @@ pub(super) fn eval_literal_expr(
         Expr::I18nString { name, default_text } => {
             // Look up in locale registry, fallback to default text
             let text = crate::i18n::lookup(name).unwrap_or_else(|| default_text.clone());
-            Ok(Some(Value::Str(text)))
+            Ok(Some(Value::text(text)))
         }
 
         // i18n template strings
@@ -235,14 +235,14 @@ pub(super) fn eval_literal_expr(
                 result = result.replace(&format!("{{{}}}", key), &value.to_display_string());
             }
 
-            Ok(Some(Value::Str(result)))
+            Ok(Some(Value::text(result)))
         }
 
         // i18n reference (named string without inline default)
         Expr::I18nRef(name) => {
             // Look up in locale registry, return placeholder if not found
             let text = crate::i18n::lookup_or_placeholder(name);
-            Ok(Some(Value::Str(text)))
+            Ok(Some(Value::text(text)))
         }
 
         // Custom block expressions: m{...}, sh{...}, sql{...}, re{...}, etc.
@@ -608,7 +608,7 @@ fn try_call_fmt_method(
         if let Ok(Some(result)) = call_method_if_exists(value, "fmt", &[], env, functions, classes, enums, impl_methods)
         {
             if let Value::Str(s) = result {
-                return Some(s);
+                return Some(Arc::try_unwrap(s).unwrap_or_else(|s| s.as_ref().clone()));
             }
             return Some(result.to_display_string());
         }
@@ -632,7 +632,7 @@ pub(crate) fn try_call_debug_fmt_method(
             call_method_if_exists(value, "debug_fmt", &[], env, functions, classes, enums, impl_methods)
         {
             if let Value::Str(s) = result {
-                return Some(s);
+                return Some(Arc::try_unwrap(s).unwrap_or_else(|s| s.as_ref().clone()));
             }
             return Some(result.to_display_string());
         }

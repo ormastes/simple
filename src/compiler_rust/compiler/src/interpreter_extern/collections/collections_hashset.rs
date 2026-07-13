@@ -58,7 +58,7 @@ pub fn __rt_hashset_insert(args: &[Value]) -> Result<Value, CompileError> {
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
         let value = match args.get(1) {
-            Some(Value::Str(s)) => s.clone(),
+            Some(Value::Str(s)) => s.as_ref().clone(),
             Some(Value::Int(n)) => n.to_string(),
             _ => {
                 return Err(CompileError::runtime(
@@ -74,7 +74,7 @@ pub fn __rt_hashset_insert(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     let value = match args.get(1) {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         Some(Value::Int(n)) => n.to_string(),
         _ => {
             return Err(CompileError::runtime(
@@ -102,7 +102,7 @@ pub fn __rt_hashset_contains(args: &[Value]) -> Result<Value, CompileError> {
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
         let value = match args.get(1) {
-            Some(Value::Str(s)) => s.clone(),
+            Some(Value::Str(s)) => s.as_ref().clone(),
             Some(Value::Int(n)) => n.to_string(),
             _ => {
                 return Err(CompileError::runtime(
@@ -118,7 +118,7 @@ pub fn __rt_hashset_contains(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     let value = match args.get(1) {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         Some(Value::Int(n)) => n.to_string(),
         _ => {
             return Err(CompileError::runtime(
@@ -147,7 +147,7 @@ pub fn __rt_hashset_remove(args: &[Value]) -> Result<Value, CompileError> {
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
         let value = match args.get(1) {
-            Some(Value::Str(s)) => s.clone(),
+            Some(Value::Str(s)) => s.as_ref().clone(),
             Some(Value::Int(n)) => n.to_string(),
             _ => {
                 return Err(CompileError::runtime(
@@ -163,7 +163,7 @@ pub fn __rt_hashset_remove(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     let value = match args.get(1) {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         Some(Value::Int(n)) => n.to_string(),
         _ => {
             return Err(CompileError::runtime(
@@ -255,7 +255,7 @@ pub fn __rt_hashset_to_array(args: &[Value]) -> Result<Value, CompileError> {
         .get(&handle)
         .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle)))?;
 
-    let array: Vec<Value> = set.iter().map(|s| Value::Str(s.clone())).collect();
+    let array: Vec<Value> = set.iter().map(|s| Value::text(s.clone())).collect();
     Ok(Value::array(array))
 }
 

@@ -123,7 +123,7 @@ pub fn rt_random_hex_fn(args: &[Value]) -> Result<Value, CompileError> {
     for b in &bytes {
         let _ = write!(&mut hex, "{:02x}", b);
     }
-    Ok(Value::Str(hex))
+    Ok(Value::text(hex))
 }
 
 /// rt_random_i64 - Generate a random i64 value using OS CSPRNG.

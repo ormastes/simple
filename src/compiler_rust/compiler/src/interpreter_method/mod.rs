@@ -143,7 +143,7 @@ pub(crate) fn evaluate_method_call(
                 _ => 0,
             };
             let ch = char::from_u32(code as u32).unwrap_or('\0');
-            return Ok(Value::Str(ch.to_string()));
+            return Ok(Value::text(ch.to_string()));
         }
     }
 
@@ -447,7 +447,7 @@ pub(crate) fn evaluate_method_call(
             let prefix = eval_arg(
                 args,
                 0,
-                Value::Str(String::new()),
+                Value::text(String::new()),
                 env,
                 functions,
                 classes,
@@ -475,7 +475,7 @@ pub(crate) fn evaluate_method_call(
             let suffix = eval_arg(
                 args,
                 0,
-                Value::Str(String::new()),
+                Value::text(String::new()),
                 env,
                 functions,
                 classes,
@@ -648,13 +648,13 @@ pub(crate) fn evaluate_method_call(
                 "to_i16" => return Ok(Value::Int(*value as u16 as i16 as i64)),
                 "to_i32" => return Ok(Value::Int(*value as u32 as i32 as i64)),
                 "to_i64" => return Ok(Value::Int(*value as i64)),
-                "to_string" | "to_text" => return Ok(Value::Str(value.to_string())),
+                "to_string" | "to_text" => return Ok(Value::text(value.to_string())),
                 "bit_count" | "count_ones" => return Ok(Value::Int(value.count_ones() as i64)),
                 "leading_zeros" => return Ok(Value::Int(value.leading_zeros() as i64)),
                 "trailing_zeros" => return Ok(Value::Int(value.trailing_zeros() as i64)),
-                "to_hex" => return Ok(Value::Str(format!("{:x}", value))),
-                "to_bin" => return Ok(Value::Str(format!("{:b}", value))),
-                "to_oct" => return Ok(Value::Str(format!("{:o}", value))),
+                "to_hex" => return Ok(Value::text(format!("{:x}", value))),
+                "to_bin" => return Ok(Value::text(format!("{:b}", value))),
+                "to_oct" => return Ok(Value::text(format!("{:o}", value))),
                 _ => {}
             }
             if let Some(result) = primitives::handle_int_methods(
@@ -687,7 +687,7 @@ pub(crate) fn evaluate_method_call(
             match method {
                 "to_f32" => return Ok(Value::Float32(*f)),
                 "to_f64" | "to_float" => return Ok(Value::Float(*f as f64)),
-                "to_string" | "to_text" => return Ok(Value::Str(f.to_string())),
+                "to_string" | "to_text" => return Ok(Value::text(f.to_string())),
                 _ => {}
             }
             // Delegate to handle_float_methods for arithmetic helpers; if it
@@ -1227,7 +1227,7 @@ pub(crate) fn evaluate_method_call(
                     let msg = eval_arg(
                         args,
                         0,
-                        Value::Str("expected Some value".to_string()),
+                        Value::text("expected Some value".to_string()),
                         env,
                         functions,
                         classes,
@@ -1442,7 +1442,7 @@ pub(crate) fn evaluate_method_call_with_self_update(
                 _ => 0,
             };
             let ch = char::from_u32(code as u32).unwrap_or('\0');
-            return Ok((Value::Str(ch.to_string()), None));
+            return Ok((Value::text(ch.to_string()), None));
         }
     }
 

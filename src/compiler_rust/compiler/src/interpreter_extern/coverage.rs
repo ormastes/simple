@@ -552,11 +552,11 @@ pub fn rt_coverage_dump_sdn(_args: &[Value]) -> Result<Value, CompileError> {
         if let Ok(guard) = cov.lock() {
             // Generate SDN format coverage data
             let sdn = guard.to_sdn();
-            return Ok(Value::Str(sdn));
+            return Ok(Value::text(sdn));
         }
     }
     // Return empty string if no coverage data
-    Ok(Value::Str(String::new()))
+    Ok(Value::text(String::new()))
 }
 
 /// Free SDN string (no-op in interpreter - GC handles memory)
@@ -569,9 +569,9 @@ pub fn rt_coverage_free_sdn(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_cstring_to_text(args: &[Value]) -> Result<Value, CompileError> {
     // In the interpreter, strings are already managed, so just pass through
     match args.first() {
-        Some(Value::Str(s)) => Ok(Value::Str(s.clone())),
-        Some(Value::Int(0)) => Ok(Value::Str(String::new())), // null pointer
-        _ => Ok(Value::Str(String::new())),
+        Some(Value::Str(s)) => Ok(Value::shared_text(s.clone())),
+        Some(Value::Int(0)) => Ok(Value::text(String::new())), // null pointer
+        _ => Ok(Value::text(String::new())),
     }
 }
 

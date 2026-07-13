@@ -25,6 +25,40 @@ UI/TUI, GUI, and WM runtime evidence gates.
   unit test but did not improve the oracle, so it was removed rather than kept
   as speculative complexity. Host sampling is unavailable
   (`perf_event_paranoid=4`).
+- A one-slice-per-token parser cache alone measured 12.459s/35.956s and did
+  not satisfy the gate. The follow-up root audit found both interpreter
+  function-block paths dropped `module_global[index] = value`: they only
+  searched and updated the function-local environment. Both paths now preserve
+  lexical-local precedence and fall back to updating `MODULE_GLOBALS`; focused
+  global-persistence and local-shadowing oracles exit 0. Scaling must be
+  measured once in the next bounded cycle.
+- The approved post-root oracle measured 12.276s/27.631s (2.25x), so linearity
+  remains acceptable but the 22 KiB absolute ceiling still fails. The
+  493-source bootstrap was not launched.
+- A higher-requested, environment-gated mutable-object COW diagnostic was
+  attempted three times against an isolated 22 KiB parse (exact generator and
+  warm-up variants). Each SIGSEGVed before emitting a counter. All diagnostic
+  code and fixtures were removed. COW remains a plausible but unproven owner;
+  no aliasing-sensitive in-place rewrite was accepted.
+- A subsequent Rust-only real-executor harness avoids the unstable parser
+  runtime and deterministically proves the COW: executing
+  `loaded = slot[0]; loaded.pos = 1; slot[0] = loaded` changes both field-map
+  and source-buffer identity for 8-byte and 1 MiB sources while preserving
+  values. The harness passes as a characterization test.
+- A narrow indexed-place prototype was fully reverted before testing because
+  the existing owned-self helper consumes fields but cannot return recoverable
+  state on method error; correct rollback would otherwise require the same
+  deep clone. Shared immutable `Value::Str` storage is the remaining reviewed
+  semantics-safe owner, but its broad mechanical migration is not yet applied.
+- The shared-text architecture is now higher-approved and implementation has
+  started. Reproducible pre-migration RSS baselines are 200,292 KiB (parser)
+  and 449,272 KiB (10,000 distinct retained short texts). The coherent type
+  flip reduced compiler errors from 614 to 217 in three bounded cycles, then
+  stopped at the mandatory cap. The migration remains incomplete and no parser
+  scaling or bootstrap shard is authorized yet.
+- Runtime slice offsets now follow lexer character indices, translating to
+  UTF-8 byte boundaries in Rust and C. The prior byte-offset behavior was
+  wrong for non-ASCII source; focused ownership/Unicode tests pass.
 
 ## Rejected fixes
 

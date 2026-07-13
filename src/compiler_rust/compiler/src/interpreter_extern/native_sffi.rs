@@ -42,8 +42,8 @@ pub fn rt_compile_to_llvm_ir(args: &[Value]) -> Result<Value, CompileError> {
     if !Path::new(source_file).exists() {
         let error_msg = format!("Source file not found: {}", source_file);
         return Ok(Value::Tuple(vec![
-            Value::Str("".into()),
-            Value::Str(error_msg),
+            Value::text("".into()),
+            Value::text(error_msg),
             Value::Int(1),
         ]));
     }
@@ -65,7 +65,11 @@ pub fn rt_compile_to_llvm_ir(args: &[Value]) -> Result<Value, CompileError> {
         _target_triple
     );
 
-    Ok(Value::Tuple(vec![Value::Str(ir), Value::Str("".into()), Value::Int(0)]))
+    Ok(Value::Tuple(vec![
+        Value::text(ir),
+        Value::text("".into()),
+        Value::Int(0),
+    ]))
 }
 
 /// Compile Simple source to native executable using LLVM backend
@@ -95,7 +99,7 @@ pub fn rt_compile_to_native(args: &[Value]) -> Result<Value, CompileError> {
     let source_path = PathBuf::from(source_path);
     if !source_path.exists() {
         let error_msg = format!("Source file not found: {}", source_path.display());
-        return Ok(Value::Tuple(vec![Value::Bool(false), Value::Str(error_msg)]));
+        return Ok(Value::Tuple(vec![Value::Bool(false), Value::text(error_msg)]));
     }
 
     let mut output_path = if output_path.trim().is_empty() {
@@ -113,7 +117,7 @@ pub fn rt_compile_to_native(args: &[Value]) -> Result<Value, CompileError> {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 let msg = format!("Failed to create output directory {}: {}", parent.display(), e);
-                return Ok(Value::Tuple(vec![Value::Bool(false), Value::Str(msg)]));
+                return Ok(Value::Tuple(vec![Value::Bool(false), Value::text(msg)]));
             }
         }
     }
@@ -122,7 +126,7 @@ pub fn rt_compile_to_native(args: &[Value]) -> Result<Value, CompileError> {
         match &args[2] {
             Value::Str(s) => match NativeOptimizationLevel::parse(s) {
                 Ok(level) => level,
-                Err(err) => return Ok(Value::Tuple(vec![Value::Bool(false), Value::Str(err)])),
+                Err(err) => return Ok(Value::Tuple(vec![Value::Bool(false), Value::text(err)])),
             },
             _ => return Err(CompileError::runtime("opt_level must be a string")),
         }
@@ -145,7 +149,7 @@ pub fn rt_compile_to_native(args: &[Value]) -> Result<Value, CompileError> {
         Ok(p) => p,
         Err(e) => {
             let msg = format!("Failed to create compiler pipeline: {}", e);
-            return Ok(Value::Tuple(vec![Value::Bool(false), Value::Str(msg)]));
+            return Ok(Value::Tuple(vec![Value::Bool(false), Value::text(msg)]));
         }
     };
 
@@ -169,9 +173,9 @@ pub fn rt_compile_to_native(args: &[Value]) -> Result<Value, CompileError> {
         Ok(res) => {
             // Ensure the output exists and return success
             let success = res.output.exists();
-            Ok(Value::Tuple(vec![Value::Bool(success), Value::Str(String::new())]))
+            Ok(Value::Tuple(vec![Value::Bool(success), Value::text(String::new())]))
         }
-        Err(e) => Ok(Value::Tuple(vec![Value::Bool(false), Value::Str(e.to_string())])),
+        Err(e) => Ok(Value::Tuple(vec![Value::Bool(false), Value::text(e.to_string())])),
     }
 }
 
@@ -214,8 +218,8 @@ pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
     // Check if binary exists
     if !Path::new(binary_path).exists() {
         return Ok(Value::Tuple(vec![
-            Value::Str("".into()),
-            Value::Str(format!("Binary not found: {}", binary_path)),
+            Value::text("".into()),
+            Value::text(format!("Binary not found: {}", binary_path)),
             Value::Int(127), // Command not found
         ]));
     }
@@ -237,8 +241,8 @@ pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
         Ok(child) => child,
         Err(e) => {
             return Ok(Value::Tuple(vec![
-                Value::Str("".into()),
-                Value::Str(format!("Execution error: {}", e)),
+                Value::text("".into()),
+                Value::text(format!("Execution error: {}", e)),
                 Value::Int(-1),
             ]));
         }
@@ -269,8 +273,8 @@ pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
 
     if status.is_none() {
         return Ok(Value::Tuple(vec![
-            Value::Str("".into()),
-            Value::Str("Execution timed out".into()),
+            Value::text("".into()),
+            Value::text("Execution timed out".into()),
             Value::Int(124), // Timeout exit code
         ]));
     }
@@ -290,8 +294,8 @@ pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
     let exit_code = status.unwrap().code().unwrap_or(-1) as i64;
 
     Ok(Value::Tuple(vec![
-        Value::Str(stdout_str),
-        Value::Str(stderr_str),
+        Value::text(stdout_str),
+        Value::text(stderr_str),
         Value::Int(exit_code),
     ]))
 }
@@ -329,8 +333,8 @@ mod tests {
         std::fs::write(&tmp_source, "fn main() -> i32:\n    return 0\n").unwrap();
 
         let args = vec![
-            Value::Str(tmp_source.to_string_lossy().into()),
-            Value::Str(tmp_bin.to_string_lossy().into()),
+            Value::text(tmp_source.to_string_lossy().into()),
+            Value::text(tmp_bin.to_string_lossy().into()),
         ];
         let result = rt_compile_to_native(&args).unwrap();
 
@@ -358,9 +362,9 @@ mod tests {
         std::fs::write(&tmp_source, "fn main() -> i32:\n    return 0\n").unwrap();
 
         let args = vec![
-            Value::Str(tmp_source.to_string_lossy().into()),
-            Value::Str(tmp_bin.to_string_lossy().into()),
-            Value::Str("basic".into()),
+            Value::text(tmp_source.to_string_lossy().into()),
+            Value::text(tmp_bin.to_string_lossy().into()),
+            Value::text("basic".into()),
         ];
         let result = rt_compile_to_native(&args).unwrap();
 
@@ -379,7 +383,7 @@ mod tests {
 
     #[test]
     fn test_file_delete_nonexistent() {
-        let args = vec![Value::Str("/tmp/nonexistent_file_xyz123".into())];
+        let args = vec![Value::text("/tmp/nonexistent_file_xyz123".into())];
         let result = rt_file_delete(&args).unwrap();
         assert_eq!(result, Value::Bool(false));
     }

@@ -73,12 +73,12 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
         Value::FrozenArray(arr) => Ok(arr.as_ref().clone()),
         Value::FixedSizeArray { data, .. } => Ok(data.clone()),
         Value::Tuple(t) => Ok(t.clone()),
-        Value::Str(s) => Ok(s.chars().map(|c| Value::Str(c.to_string())).collect()),
+        Value::Str(s) => Ok(s.chars().map(|c| Value::text(c.to_string())).collect()),
         Value::Generator(gen) => Ok(gen.collect_remaining()),
         Value::FrozenDict(map) => {
             let entries: Vec<Value> = map
                 .iter()
-                .map(|(k, v)| Value::Tuple(vec![Value::Str(k.clone()), v.clone()]))
+                .map(|(k, v)| Value::Tuple(vec![Value::text(k.clone()), v.clone()]))
                 .collect();
             Ok(entries)
         }
@@ -86,7 +86,7 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
             // Iterate over dict returns (key, value) tuples
             let entries: Vec<Value> = map
                 .iter()
-                .map(|(k, v)| Value::Tuple(vec![Value::Str(k.clone()), v.clone()]))
+                .map(|(k, v)| Value::Tuple(vec![Value::text(k.clone()), v.clone()]))
                 .collect();
             Ok(entries)
         }
@@ -315,7 +315,11 @@ pub(super) fn exec_block_closure_into(
                     // Handle index assignment: arr[i] = value or dict["key"] = value
                     let index_val = evaluate_expr(index, &mut local_env, functions, classes, enums, impl_methods)?;
                     if let simple_parser::ast::Expr::Identifier(container_name) = receiver.as_ref() {
-                        if let Some(container) = local_env.get(container_name).cloned() {
+                        let local_container = local_env.get(container_name).cloned();
+                        let is_global = local_container.is_none();
+                        let container = local_container
+                            .or_else(|| MODULE_GLOBALS.with(|cell| cell.borrow().get(container_name).cloned()));
+                        if let Some(container) = container {
                             let new_container = match container {
                                 Value::Array(mut arc) => {
                                     let arr = std::sync::Arc::make_mut(&mut arc);
@@ -344,7 +348,13 @@ pub(super) fn exec_block_closure_into(
                                 }
                                 _ => container,
                             };
-                            local_env.insert(container_name.clone(), new_container);
+                            if is_global {
+                                MODULE_GLOBALS.with(|cell| {
+                                    cell.borrow_mut().insert(container_name.clone(), new_container);
+                                });
+                            } else {
+                                local_env.insert(container_name.clone(), new_container);
+                            }
                         }
                     }
                 }
@@ -361,11 +371,16 @@ pub(super) fn exec_block_closure_into(
                 )?;
 
                 match &context_obj {
-                    Value::Str(name) | Value::Symbol(name) => {
+                    Value::Str(_) | Value::Symbol(_) => {
+                        let name = match &context_obj {
+                            Value::Str(name) => name.as_str(),
+                            Value::Symbol(name) => name.as_str(),
+                            _ => unreachable!(),
+                        };
                         let name_str = if matches!(context_obj, Value::Symbol(_)) {
                             format!("with {}", name)
                         } else {
-                            name.clone()
+                            name.to_string()
                         };
 
                         let ctx_def_blocks = if matches!(context_obj, Value::Symbol(_)) {
@@ -1142,7 +1157,11 @@ fn exec_block_closure_mut(
                     // Handle index assignment: arr[i] = value or dict["key"] = value
                     let index_val = evaluate_expr(index, local_env, functions, classes, enums, impl_methods)?;
                     if let simple_parser::ast::Expr::Identifier(container_name) = receiver.as_ref() {
-                        if let Some(container) = local_env.get(container_name).cloned() {
+                        let local_container = local_env.get(container_name).cloned();
+                        let is_global = local_container.is_none();
+                        let container = local_container
+                            .or_else(|| MODULE_GLOBALS.with(|cell| cell.borrow().get(container_name).cloned()));
+                        if let Some(container) = container {
                             let new_container = match container {
                                 Value::Array(mut arc) => {
                                     let arr = std::sync::Arc::make_mut(&mut arc);
@@ -1171,7 +1190,13 @@ fn exec_block_closure_mut(
                                 }
                                 _ => container,
                             };
-                            local_env.insert(container_name.clone(), new_container);
+                            if is_global {
+                                MODULE_GLOBALS.with(|cell| {
+                                    cell.borrow_mut().insert(container_name.clone(), new_container);
+                                });
+                            } else {
+                                local_env.insert(container_name.clone(), new_container);
+                            }
                         }
                     }
                 }
@@ -1635,4 +1660,70 @@ fn exec_block_closure_mut(
     }
 
     Ok(last_value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use simple_parser::Parser;
+
+    fn object_identity(env: &Env) -> (*const HashMap<String, Value>, *const u8, usize, i64) {
+        let Value::Array(slot) = env.get("slot").expect("slot") else {
+            panic!("slot must be an array");
+        };
+        let Value::Object { fields, .. } = &slot[0] else {
+            panic!("slot[0] must be an object");
+        };
+        let Value::Str(source) = fields.get("source").expect("source") else {
+            panic!("source must be text");
+        };
+        let pos = fields.get("pos").expect("pos").as_int().expect("pos must be i64");
+        (Arc::as_ptr(fields), source.as_ptr(), source.len(), pos)
+    }
+
+    #[test]
+    fn closure_object_field_write_shares_source_buffer() {
+        let mut parser =
+            Parser::new("fn probe():\n    var loaded = slot[0]\n    loaded.pos = 1\n    slot[0] = loaded\n");
+        let module = parser.parse().expect("parse probe");
+        let body = module
+            .items
+            .iter()
+            .find_map(|node| match node {
+                Node::Function(function) if function.name == "probe" => Some(&function.body.statements),
+                _ => None,
+            })
+            .expect("probe function");
+
+        for source_len in [8, 1024 * 1024] {
+            let mut fields = HashMap::new();
+            fields.insert("source".to_string(), Value::text("x".repeat(source_len)));
+            fields.insert("pos".to_string(), Value::Int(0));
+            let object = Value::Object {
+                class: "CoreLexerProbe".to_string(),
+                fields: Arc::new(fields),
+            };
+            let mut env = Env::new();
+            env.insert("slot".to_string(), Value::array(vec![object]));
+            let before = object_identity(&env);
+
+            exec_block_closure_into(
+                body,
+                &mut env,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .expect("execute probe");
+
+            let after = object_identity(&env);
+            assert_eq!((after.2, after.3), (source_len, 1));
+            assert_ne!(before.0, after.0, "field map must currently COW");
+            assert_eq!(
+                before.1, after.1,
+                "source buffer must remain shared across field-map COW"
+            );
+        }
+    }
 }

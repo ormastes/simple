@@ -154,10 +154,10 @@ pub fn dispatch(name: &str, args: &[Value]) -> Option<Result<Value, CompileError
                 let ptr = rt_driver_poll_data(handle, index);
                 let len = rt_driver_poll_data_len(handle, index);
                 if ptr.is_null() || len <= 0 {
-                    Ok(Value::Str("".into()))
+                    Ok(Value::text("".into()))
                 } else {
                     let slice = std::slice::from_raw_parts(ptr, len as usize);
-                    Ok(Value::Str(String::from_utf8_lossy(slice).into_owned().into()))
+                    Ok(Value::text(String::from_utf8_lossy(slice).into_owned().into()))
                 }
             }
         }
@@ -171,10 +171,10 @@ pub fn dispatch(name: &str, args: &[Value]) -> Option<Result<Value, CompileError
         "rt_driver_backend_name" => unsafe {
             let ptr = rt_driver_backend_name(get_i64(args, 0));
             if ptr.is_null() {
-                Ok(Value::Str("unknown".into()))
+                Ok(Value::text("unknown".into()))
             } else {
                 let cstr = std::ffi::CStr::from_ptr(ptr as *const std::os::raw::c_char);
-                Ok(Value::Str(cstr.to_string_lossy().into_owned().into()))
+                Ok(Value::text(cstr.to_string_lossy().into_owned().into()))
             }
         },
         "rt_driver_supports_sendfile" => Ok(Value::Bool(unsafe { rt_driver_supports_sendfile(get_i64(args, 0)) })),

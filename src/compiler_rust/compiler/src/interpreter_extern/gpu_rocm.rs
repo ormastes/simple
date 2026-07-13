@@ -49,7 +49,7 @@ pub fn rt_rocm_device_memory_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_rocm_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
     let _id = arg_i64(args, 0, "rt_rocm_device_name", 1)?;
-    Ok(Value::Str(String::new()))
+    Ok(Value::text(String::new()))
 }
 
 pub fn rt_rocm_set_device_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -84,7 +84,7 @@ pub fn rt_rocm_synchronize_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_rocm_get_last_error_fn(args: &[Value]) -> Result<Value, CompileError> {
     expect_len(args, "rt_rocm_get_last_error", 0)?;
-    Ok(Value::Str("ROCm backend unavailable".to_string()))
+    Ok(Value::text("ROCm backend unavailable".to_string()))
 }
 
 pub fn rt_rocm_mem_alloc_fn(args: &[Value]) -> Result<Value, CompileError> {

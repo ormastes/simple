@@ -179,7 +179,7 @@ pub(crate) fn pattern_matches(
                 }
                 Expr::String(s) => {
                     if let Value::Str(v) = value {
-                        Ok(v == s)
+                        Ok(**v == *s)
                     } else {
                         Ok(false)
                     }
@@ -198,7 +198,7 @@ pub(crate) fn pattern_matches(
                         }
                     }
                     if let Value::Str(v) = value {
-                        Ok(v == &pattern_str)
+                        Ok(**v == pattern_str)
                     } else {
                         Ok(false)
                     }

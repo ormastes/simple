@@ -13,7 +13,7 @@ const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Get CLI version
 pub fn rt_cli_version(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Str(format!("Simple v{}", CLI_VERSION)))
+    Ok(Value::text(format!("Simple v{}", CLI_VERSION)))
 }
 
 /// Print help message
@@ -50,7 +50,7 @@ pub fn rt_cli_print_version(_args: &[Value]) -> Result<Value, CompileError> {
 /// Get command line arguments
 pub fn rt_cli_get_args(_args: &[Value]) -> Result<Value, CompileError> {
     let args = get_interpreter_args();
-    let arr: Vec<Value> = args.into_iter().map(Value::Str).collect();
+    let arr: Vec<Value> = args.into_iter().map(Value::text).collect();
     Ok(Value::array(arr))
 }
 
@@ -70,7 +70,7 @@ pub fn rt_cli_arg_at(args: &[Value]) -> Result<Value, CompileError> {
         .ok()
         .and_then(|index| get_interpreter_args().get(index).cloned())
         .unwrap_or_default();
-    Ok(Value::Str(value))
+    Ok(Value::text(value))
 }
 
 /// Check if file exists
@@ -79,7 +79,7 @@ pub fn rt_cli_file_exists(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Bool(false));
     }
     let path = match &args[0] {
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => s.as_ref().clone(),
         _ => return Ok(Value::Bool(false)),
     };
     Ok(Value::Bool(std::path::Path::new(&path).exists()))
@@ -200,7 +200,7 @@ pub fn rt_cli_run_tests(args: &[Value]) -> Result<Value, CompileError> {
 /// Validate test database
 pub fn rt_test_db_validate(args: &[Value]) -> Result<Value, CompileError> {
     let path = match args.first() {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         _ => return Ok(Value::Int(-1)),
     };
 
@@ -208,7 +208,7 @@ pub fn rt_test_db_validate(args: &[Value]) -> Result<Value, CompileError> {
     let mut cmd = Command::new(std::env::current_exe().unwrap_or_else(|_| "simple_old".into()));
     cmd.arg("test");
     cmd.arg("--validate-db");
-    cmd.arg(&path);
+    cmd.arg(&*path);
     cmd.env("SIMPLE_TEST_DEBUG", "basic");
 
     match cmd.output() {
@@ -259,7 +259,7 @@ pub fn rt_test_run_is_stale(_args: &[Value]) -> Result<Value, CompileError> {
 /// Cleanup stale test runs
 pub fn rt_test_db_cleanup_stale_runs(args: &[Value]) -> Result<Value, CompileError> {
     let path = match args.first() {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         _ => return Ok(Value::Int(-1)),
     };
 
@@ -268,7 +268,7 @@ pub fn rt_test_db_cleanup_stale_runs(args: &[Value]) -> Result<Value, CompileErr
     cmd.arg("test");
     cmd.arg("--cleanup-runs");
     cmd.arg("--db-path");
-    cmd.arg(&path);
+    cmd.arg(&*path);
     cmd.env("SIMPLE_TEST_AUTO_CLEANUP", "1");
 
     match cmd.status() {

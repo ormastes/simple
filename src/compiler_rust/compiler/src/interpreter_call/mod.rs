@@ -913,7 +913,7 @@ pub(crate) fn evaluate_call(
                         }
                         // Fallback for unknown types: return typed dict
                         let mut fields = std::collections::HashMap::new();
-                        fields.insert("__type__".to_string(), Value::Str(type_name.to_string()));
+                        fields.insert("__type__".to_string(), Value::text(type_name.to_string()));
                         for arg in args {
                             let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
                             if let Some(name) = &arg.name {
@@ -1074,7 +1074,7 @@ pub(crate) fn evaluate_call(
                     _ => 0,
                 };
                 let ch = char::from_u32(code as u32).unwrap_or('\0');
-                return Ok(Value::Str(ch.to_string()));
+                return Ok(Value::text(ch.to_string()));
             }
 
             // Fallback: if segments[0] is bound as a value (e.g. a module-level

@@ -208,7 +208,7 @@ pub fn handle_array_methods(
             let sep = eval_arg(
                 args,
                 0,
-                Value::Str("".into()),
+                Value::text("".into()),
                 env,
                 functions,
                 classes,
@@ -217,7 +217,7 @@ pub fn handle_array_methods(
             )?
             .to_display_string();
             let parts: Vec<String> = arr.iter().map(|v| v.to_display_string()).collect();
-            Value::Str(parts.join(&sep))
+            Value::text(parts.join(&sep))
         }
         "sum" => {
             let mut total: i64 = 0;
@@ -876,7 +876,7 @@ pub fn handle_dict_methods(
             map.get(&key).cloned().unwrap_or(Value::Nil)
         }
         "keys" => {
-            let keys: Vec<Value> = map.keys().map(|k| Value::Str(k.clone())).collect();
+            let keys: Vec<Value> = map.keys().map(|k| Value::text(k.clone())).collect();
             Value::array(keys)
         }
         "values" => {
@@ -934,7 +934,7 @@ pub fn handle_dict_methods(
         "entries" | "items" => {
             let entries: Vec<Value> = map
                 .iter()
-                .map(|(k, v)| Value::Tuple(vec![Value::Str(k.clone()), v.clone()]))
+                .map(|(k, v)| Value::Tuple(vec![Value::text(k.clone()), v.clone()]))
                 .collect();
             Value::array(entries)
         }

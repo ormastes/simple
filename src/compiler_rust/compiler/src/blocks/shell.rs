@@ -131,17 +131,17 @@ fn command_to_value(cmd: ShellCommand) -> Value {
     match cmd {
         ShellCommand::Simple { command, args } => {
             let mut fields = HashMap::new();
-            fields.insert("type".to_string(), Value::Str("simple".to_string()));
-            fields.insert("command".to_string(), Value::Str(command));
+            fields.insert("type".to_string(), Value::text("simple".to_string()));
+            fields.insert("command".to_string(), Value::text(command));
             fields.insert(
                 "args".to_string(),
-                Value::array(args.into_iter().map(Value::Str).collect()),
+                Value::array(args.into_iter().map(Value::text).collect()),
             );
             Value::dict(fields)
         }
         ShellCommand::Pipeline(cmds) => {
             let mut fields = HashMap::new();
-            fields.insert("type".to_string(), Value::Str("pipeline".to_string()));
+            fields.insert("type".to_string(), Value::text("pipeline".to_string()));
             fields.insert(
                 "commands".to_string(),
                 Value::array(cmds.into_iter().map(command_to_value).collect()),
@@ -150,14 +150,14 @@ fn command_to_value(cmd: ShellCommand) -> Value {
         }
         ShellCommand::Assignment { name, value } => {
             let mut fields = HashMap::new();
-            fields.insert("type".to_string(), Value::Str("assignment".to_string()));
-            fields.insert("name".to_string(), Value::Str(name));
-            fields.insert("value".to_string(), Value::Str(value));
+            fields.insert("type".to_string(), Value::text("assignment".to_string()));
+            fields.insert("name".to_string(), Value::text(name));
+            fields.insert("value".to_string(), Value::text(value));
             Value::dict(fields)
         }
         ShellCommand::Sequence(cmds) => {
             let mut fields = HashMap::new();
-            fields.insert("type".to_string(), Value::Str("sequence".to_string()));
+            fields.insert("type".to_string(), Value::text("sequence".to_string()));
             fields.insert(
                 "commands".to_string(),
                 Value::array(cmds.into_iter().map(command_to_value).collect()),

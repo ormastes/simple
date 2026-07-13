@@ -58,7 +58,7 @@ impl MathValue {
             MathValue::Error(message) => Value::Enum {
                 enum_name: "Result".to_string(),
                 variant: "Err".to_string(),
-                payload: Some(Box::new(Value::Str(message))),
+                payload: Some(Box::new(Value::text(message))),
             },
         }
     }

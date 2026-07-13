@@ -407,7 +407,7 @@ pub fn rt_directx_hardware_adapter_identity_fn(_args: &[Value]) -> Result<Value,
 }
 
 pub fn rt_metal_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Str(c_ptr_to_string(rt_metal_device_name(arg_i64(
+    Ok(Value::text(c_ptr_to_string(rt_metal_device_name(arg_i64(
         args,
         0,
         "rt_metal_device_name",
@@ -702,7 +702,7 @@ pub fn rt_metal_wait_completed_fn(args: &[Value]) -> Result<Value, CompileError>
 }
 
 pub fn rt_metal_get_last_error_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Str(c_ptr_to_string(rt_metal_get_last_error())))
+    Ok(Value::text(c_ptr_to_string(rt_metal_get_last_error())))
 }
 
 pub fn rt_metal_create_sampler_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -883,7 +883,7 @@ pub fn rt_cuda_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
-        Ok(Value::Str(String::new()))
+        Ok(Value::text(String::new()))
     }
 }
 
@@ -1328,7 +1328,7 @@ pub fn rt_cuda_get_error_string_fn(args: &[Value]) -> Result<Value, CompileError
     }
     #[cfg(not(feature = "cuda"))]
     {
-        Ok(Value::Str(String::from("CUDA support disabled")))
+        Ok(Value::text(String::from("CUDA support disabled")))
     }
 }
 
@@ -2972,10 +2972,10 @@ pub fn rt_vulkan_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
             let name_bytes = &props.device_name;
             let nul = name_bytes.iter().position(|&b| b == 0).unwrap_or(256);
             let name = String::from_utf8_lossy(&name_bytes[..nul]).into_owned();
-            return Ok(Value::Str(name));
+            return Ok(Value::text(name));
         }
     }
-    Ok(Value::Str(String::new()))
+    Ok(Value::text(String::new()))
 }
 
 fn vulkan_device_properties(index: usize) -> Option<vulkan_dlopen::VkPhysicalDeviceProperties> {
@@ -4030,7 +4030,7 @@ pub fn rt_vulkan_get_last_error_fn(_args: &[Value]) -> Result<Value, CompileErro
     use vulkan_dlopen::VK_STATE;
     let guard = VK_STATE.lock().unwrap();
     let err = guard.as_ref().map(|s| s.last_error.clone()).unwrap_or_default();
-    Ok(Value::Str(err))
+    Ok(Value::text(err))
 }
 
 // ============================================================================

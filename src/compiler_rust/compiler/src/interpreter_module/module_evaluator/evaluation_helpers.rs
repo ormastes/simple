@@ -336,7 +336,7 @@ pub(super) fn register_definitions(
             }
             Node::Macro(m) => {
                 // Register macro in exports with special prefix
-                exports.insert(format!("macro:{}", m.name), Value::Str(format!("macro:{}", m.name)));
+                exports.insert(format!("macro:{}", m.name), Value::text(format!("macro:{}", m.name)));
                 // Also register in the thread-local USER_MACROS
                 crate::interpreter::USER_MACROS.with(|cell| cell.borrow_mut().insert(m.name.clone(), m.clone()));
             }

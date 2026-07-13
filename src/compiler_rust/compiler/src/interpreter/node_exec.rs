@@ -798,7 +798,11 @@ fn exec_assignment(
             }
         }
         // Case 2: Indexed object field: arr[index].field = value
-        else if let Expr::Index { receiver: array_expr, index } = receiver.as_ref() {
+        else if let Expr::Index {
+            receiver: array_expr,
+            index,
+        } = receiver.as_ref()
+        {
             if let Expr::Identifier(array_name) = array_expr.as_ref() {
                 let index_value = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
                 let idx = index_value.as_int()? as usize;
@@ -825,7 +829,10 @@ fn exec_assignment(
                                 .with_code(codes::INVALID_ASSIGNMENT)
                                 .with_help("indexed field assignment requires an object element");
                             Err(CompileError::semantic_with_context(
-                                format!("invalid assignment: cannot set field on {} array element", other.type_name()),
+                                format!(
+                                    "invalid assignment: cannot set field on {} array element",
+                                    other.type_name()
+                                ),
                                 ctx,
                             ))
                         }
@@ -1492,7 +1499,7 @@ fn try_string_append_in_place(
     };
     // Re-check after side effects in case RHS evaluation rebound `name`.
     if let Some(Value::Str(mut s)) = env.remove(name) {
-        s.push_str(&rhs_str);
+        Arc::make_mut(&mut s).push_str(rhs_str.as_str());
         env.insert(name.to_string(), Value::Str(s));
         Ok(None)
     } else {

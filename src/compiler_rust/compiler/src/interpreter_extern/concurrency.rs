@@ -705,7 +705,7 @@ pub fn rt_get_concurrent_backend(_args: &[Value]) -> Result<Value, CompileError>
         ConcurrentBackend::PureStd => "pure_std",
         ConcurrentBackend::Native => "native",
     };
-    Ok(Value::Str(name.to_string()))
+    Ok(Value::text(name.to_string()))
 }
 
 #[cfg(test)]
@@ -724,7 +724,7 @@ mod tests {
     #[test]
     fn channel_close_preserves_buffered_messages() {
         let id = new_pure_std_channel();
-        rt_channel_send(&[Value::Int(id), Value::Str("queued".to_string())]).expect("send");
+        rt_channel_send(&[Value::Int(id), Value::text("queued".to_string())]).expect("send");
         rt_channel_close(&[Value::Int(id)]).expect("close");
 
         let received = rt_channel_try_recv(&[Value::Int(id)]).expect("try recv");
@@ -743,7 +743,7 @@ mod tests {
             Value::Int(1)
         ));
 
-        rt_channel_send(&[Value::Int(id), Value::Str("ignored".to_string())]).expect("send after close is ignored");
+        rt_channel_send(&[Value::Int(id), Value::text("ignored".to_string())]).expect("send after close is ignored");
         let received = rt_channel_try_recv(&[Value::Int(id)]).expect("try recv");
         assert!(matches!(received, Value::Nil));
     }

@@ -288,7 +288,7 @@ pub fn __rt_btreemap_keys(args: &[Value]) -> Result<Value, CompileError> {
         .get(&handle)
         .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
 
-    let keys: Vec<Value> = map.keys().map(|k| Value::Str(k.clone())).collect();
+    let keys: Vec<Value> = map.keys().map(|k| Value::text(k.clone())).collect();
     Ok(Value::array(keys))
 }
 
@@ -342,7 +342,7 @@ pub fn __rt_btreemap_entries(args: &[Value]) -> Result<Value, CompileError> {
 
     let entries: Vec<Value> = map
         .iter()
-        .map(|(k, v)| Value::array(vec![Value::Str(k.clone()), v.clone()]))
+        .map(|(k, v)| Value::array(vec![Value::text(k.clone()), v.clone()]))
         .collect();
 
     Ok(Value::array(entries))
@@ -372,7 +372,7 @@ pub fn __rt_btreemap_first_key(args: &[Value]) -> Result<Value, CompileError> {
         .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
 
     match map.keys().next() {
-        Some(key) => Ok(Value::Str(key.clone())),
+        Some(key) => Ok(Value::text(key.clone())),
         None => Ok(Value::Nil),
     }
 }
@@ -401,7 +401,7 @@ pub fn __rt_btreemap_last_key(args: &[Value]) -> Result<Value, CompileError> {
         .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
 
     match map.keys().next_back() {
-        Some(key) => Ok(Value::Str(key.clone())),
+        Some(key) => Ok(Value::text(key.clone())),
         None => Ok(Value::Nil),
     }
 }

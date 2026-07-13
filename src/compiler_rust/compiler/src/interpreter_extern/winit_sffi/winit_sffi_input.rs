@@ -129,7 +129,7 @@ pub(super) fn dispatch_input(name: &str, args: &[Value]) -> Result<Value, Compil
             }
         }
         "rt_winit_event_keyboard_modifiers" => Ok(int_value(0)),
-        "rt_winit_event_received_character" => Ok(Value::Str(String::new())),
+        "rt_winit_event_received_character" => Ok(Value::text(String::new())),
         "rt_winit_event_mouse_button" => {
             let event_id = get_i64(args, 0, name)?;
             let events = EVENTS.lock();

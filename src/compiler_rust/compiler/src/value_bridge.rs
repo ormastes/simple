@@ -503,10 +503,10 @@ impl BridgeValue {
             bridge_tags::BOOL => Value::Bool(self.payload != 0),
             bridge_tags::STRING => {
                 if self.extended.is_null() {
-                    Value::Str(String::new())
+                    Value::text(String::new())
                 } else {
                     let cstr = CStr::from_ptr(self.extended as *const c_char);
-                    Value::Str(cstr.to_string_lossy().into_owned())
+                    Value::text(cstr.to_string_lossy().into_owned())
                 }
             }
             bridge_tags::SYMBOL => {
@@ -711,7 +711,7 @@ mod tests {
 
     #[test]
     fn test_value_to_bridge_str() {
-        let v = Value::Str("hello".to_string());
+        let v = Value::text("hello".to_string());
         let bv = BridgeValue::from(&v);
         assert_eq!(bv.tag, bridge_tags::STRING);
         unsafe {

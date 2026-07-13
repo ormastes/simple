@@ -62,7 +62,7 @@ pub fn sha256(args: &[Value]) -> Result<Value, CompileError> {
         let result = c_str.to_string_lossy().to_string();
         rt_package_free_string(result_ptr);
 
-        Ok(Value::Str(result))
+        Ok(Value::text(result))
     }
 }
 

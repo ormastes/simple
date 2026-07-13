@@ -882,7 +882,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             clear_last_error();
             Ok(Value::Int(0))
         }
-        "rt_rapier2d_get_last_error" => Ok(Value::Str(LAST_ERROR.lock().clone())),
+        "rt_rapier2d_get_last_error" => Ok(Value::text(LAST_ERROR.lock().clone())),
         _ => Err(unknown_function(name)),
     }
 }

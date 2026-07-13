@@ -58,7 +58,7 @@ pub fn __rt_hashmap_insert(args: &[Value]) -> Result<Value, CompileError> {
             _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
         };
         let key = match args.get(1) {
-            Some(Value::Str(s)) => s.clone(),
+            Some(Value::Str(s)) => s.as_ref().clone(),
             _ => return Err(CompileError::runtime("HashMap key must be a string".to_string())),
         };
         let value = match args.get(2) {
@@ -73,7 +73,7 @@ pub fn __rt_hashmap_insert(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     let key = match args.get(1) {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         _ => return Err(CompileError::runtime("HashMap key must be a string".to_string())),
     };
 
@@ -104,7 +104,7 @@ pub fn __rt_hashmap_get(args: &[Value]) -> Result<Value, CompileError> {
             _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
         };
         let key = match args.get(1) {
-            Some(Value::Str(s)) => s.clone(),
+            Some(Value::Str(s)) => s.as_ref().clone(),
             _ => return Err(CompileError::runtime("HashMap key must be a string".to_string())),
         };
         return registry.map.hashmap_get(handle, &key);
@@ -115,7 +115,7 @@ pub fn __rt_hashmap_get(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     let key = match args.get(1) {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         _ => return Err(CompileError::runtime("HashMap key must be a string".to_string())),
     };
 
@@ -141,7 +141,7 @@ pub fn __rt_hashmap_contains_key(args: &[Value]) -> Result<Value, CompileError> 
             _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
         };
         let key = match args.get(1) {
-            Some(Value::Str(s)) => s.clone(),
+            Some(Value::Str(s)) => s.as_ref().clone(),
             _ => return Err(CompileError::runtime("HashMap key must be a string".to_string())),
         };
         return registry.map.hashmap_contains_key(handle, &key).map(Value::Bool);
@@ -152,7 +152,7 @@ pub fn __rt_hashmap_contains_key(args: &[Value]) -> Result<Value, CompileError> 
     };
 
     let key = match args.get(1) {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         _ => return Err(CompileError::runtime("HashMap key must be a string".to_string())),
     };
 
@@ -176,7 +176,7 @@ pub fn __rt_hashmap_remove(args: &[Value]) -> Result<Value, CompileError> {
             _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
         };
         let key = match args.get(1) {
-            Some(Value::Str(s)) => s.clone(),
+            Some(Value::Str(s)) => s.as_ref().clone(),
             _ => return Err(CompileError::runtime("HashMap key must be a string".to_string())),
         };
         return registry.map.hashmap_remove(handle, &key);
@@ -187,7 +187,7 @@ pub fn __rt_hashmap_remove(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     let key = match args.get(1) {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         _ => return Err(CompileError::runtime("HashMap key must be a string".to_string())),
     };
 
@@ -277,7 +277,7 @@ pub fn __rt_hashmap_keys(args: &[Value]) -> Result<Value, CompileError> {
         .get(&handle)
         .ok_or_else(|| CompileError::runtime(format!("Invalid HashMap handle: {}", handle)))?;
 
-    let keys: Vec<Value> = map.keys().map(|k| Value::Str(k.clone())).collect();
+    let keys: Vec<Value> = map.keys().map(|k| Value::text(k.clone())).collect();
     Ok(Value::array(keys))
 }
 
@@ -331,7 +331,7 @@ pub fn __rt_hashmap_entries(args: &[Value]) -> Result<Value, CompileError> {
 
     let entries: Vec<Value> = map
         .iter()
-        .map(|(k, v)| Value::array(vec![Value::Str(k.clone()), v.clone()]))
+        .map(|(k, v)| Value::array(vec![Value::text(k.clone()), v.clone()]))
         .collect();
 
     Ok(Value::array(entries))

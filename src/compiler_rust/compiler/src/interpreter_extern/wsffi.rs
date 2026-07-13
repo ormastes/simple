@@ -447,12 +447,12 @@ pub fn rt_cstring_to_text(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     if ptr.is_null() {
-        return Ok(Value::Str("".into()));
+        return Ok(Value::text("".into()));
     }
 
     let c_str = unsafe { CStr::from_ptr(ptr) };
     let s = c_str.to_string_lossy().into_owned();
-    Ok(Value::Str(s))
+    Ok(Value::text(s))
 }
 
 #[cfg(test)]

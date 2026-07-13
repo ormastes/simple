@@ -229,7 +229,7 @@ impl Clone for Value {
             Value::Float(f) => Value::Float(*f),
             Value::Float32(f) => Value::Float32(*f),
             Value::Bool(b) => Value::Bool(*b),
-            Value::Str(s) => Value::Str(s.clone()),
+            Value::Str(s) => Value::shared_text(Arc::clone(s)),
             Value::Symbol(s) => Value::Symbol(s.clone()),
             Value::Array(a) => Value::Array(Arc::clone(a)),
             Value::FrozenArray(a) => Value::FrozenArray(a.clone()),
@@ -343,13 +343,9 @@ impl PartialEq for Value {
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Float32(a), Value::Float32(b)) => a == b,
             // Cross-variant: f32 vs f64 compares as f64 (widening)
-            (Value::Float32(a), Value::Float(b)) | (Value::Float(b), Value::Float32(a)) => {
-                (*a as f64) == *b
-            }
+            (Value::Float32(a), Value::Float(b)) | (Value::Float(b), Value::Float32(a)) => (*a as f64) == *b,
             // Cross-variant: int vs float compares numerically
-            (Value::Float32(a), Value::Int(b)) | (Value::Int(b), Value::Float32(a)) => {
-                (*a as f64) == (*b as f64)
-            }
+            (Value::Float32(a), Value::Int(b)) | (Value::Int(b), Value::Float32(a)) => (*a as f64) == (*b as f64),
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Symbol(a), Value::Symbol(b)) => a == b,

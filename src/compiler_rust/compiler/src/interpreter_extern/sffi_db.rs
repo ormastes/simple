@@ -577,14 +577,14 @@ pub fn rt_db_get_text_fn(args: &[Value]) -> Result<Value, CompileError> {
     let tables = TABLES.lock().unwrap();
     let t = match tables.get(handle).and_then(|s| s.as_ref()) {
         Some(t) => t,
-        None => return Ok(Value::Str(String::new())),
+        None => return Ok(Value::text(String::new())),
     };
     if row >= t.rows.len() || col >= t.num_cols as usize || !t.rows[row].alive {
-        return Ok(Value::Str(String::new()));
+        return Ok(Value::text(String::new()));
     }
     match &t.rows[row].values[col] {
-        ColValue::Text(s) => Ok(Value::Str(s.clone())),
-        _ => Ok(Value::Str(String::new())),
+        ColValue::Text(s) => Ok(Value::text(s.clone())),
+        _ => Ok(Value::text(String::new())),
     }
 }
 
@@ -828,7 +828,7 @@ pub fn rt_db_iput3_fn(args: &[Value]) -> Result<Value, CompileError> {
     let pk = format!("{pk_int}");
     let str_args = vec![
         Value::Int(handle as i64),
-        Value::Str(pk),
+        Value::text(pk),
         Value::Int(0),
         Value::Int(v0),
         Value::Int(v1),
@@ -845,7 +845,7 @@ pub fn rt_db_iget_int_fn(args: &[Value]) -> Result<Value, CompileError> {
     let pk = format!("{pk_int}");
     let str_args = vec![
         Value::Int(handle as i64),
-        Value::Str(pk),
+        Value::text(pk),
         Value::Int(col),
         Value::Int(default_val),
     ];
@@ -860,7 +860,7 @@ pub fn rt_db_iupdate_int_fn(args: &[Value]) -> Result<Value, CompileError> {
     let pk = format!("{pk_int}");
     let str_args = vec![
         Value::Int(handle as i64),
-        Value::Str(pk),
+        Value::text(pk),
         Value::Int(col),
         Value::Int(value),
     ];
@@ -871,7 +871,7 @@ pub fn rt_db_idelete_fn(args: &[Value]) -> Result<Value, CompileError> {
     let handle = arg_int(args, 0, "rt_db_idelete")? as usize;
     let pk_int = arg_int(args, 1, "rt_db_idelete")?;
     let pk = format!("{pk_int}");
-    let str_args = vec![Value::Int(handle as i64), Value::Str(pk)];
+    let str_args = vec![Value::Int(handle as i64), Value::text(pk)];
     rt_db_delete_fn(&str_args)
 }
 
@@ -1297,7 +1297,7 @@ pub fn rt_sqlite_column_count_fn(args: &[Value]) -> Result<Value, CompileError> 
 
 pub fn rt_sqlite_column_name_fn(args: &[Value]) -> Result<Value, CompileError> {
     let Some(stmt_idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_column_name")?) else {
-        return Ok(Value::Str(String::new()));
+        return Ok(Value::text(String::new()));
     };
     let col_idx = arg_int(args, 1, "rt_sqlite_column_name")? as usize;
     let stmts = SQLITE_STMTS.lock().unwrap();
@@ -1307,7 +1307,7 @@ pub fn rt_sqlite_column_name_fn(args: &[Value]) -> Result<Value, CompileError> {
         .and_then(|stmt| stmt.columns.get(col_idx))
         .cloned()
         .unwrap_or_default();
-    Ok(Value::Str(value))
+    Ok(Value::text(value))
 }
 
 fn sqlite_column_value(stmt: &SqlStmt, idx: usize) -> SqlValue {
@@ -1320,7 +1320,7 @@ fn sqlite_column_value(stmt: &SqlStmt, idx: usize) -> SqlValue {
 
 pub fn rt_sqlite_column_text_fn(args: &[Value]) -> Result<Value, CompileError> {
     let Some(stmt_idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_column_text")?) else {
-        return Ok(Value::Str(String::new()));
+        return Ok(Value::text(String::new()));
     };
     let col_idx = arg_int(args, 1, "rt_sqlite_column_text")? as usize;
     let stmts = SQLITE_STMTS.lock().unwrap();
@@ -1329,7 +1329,7 @@ pub fn rt_sqlite_column_text_fn(args: &[Value]) -> Result<Value, CompileError> {
         .and_then(|slot| slot.as_ref())
         .map(|stmt| sqlite_column_value(stmt, col_idx).as_text())
         .unwrap_or_default();
-    Ok(Value::Str(value))
+    Ok(Value::text(value))
 }
 
 pub fn rt_sqlite_column_int_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -1362,7 +1362,7 @@ pub fn rt_sqlite_column_float_fn(args: &[Value]) -> Result<Value, CompileError> 
 
 pub fn rt_sqlite_column_type_fn(args: &[Value]) -> Result<Value, CompileError> {
     let Some(stmt_idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_column_type")?) else {
-        return Ok(Value::Str("null".to_string()));
+        return Ok(Value::text("null".to_string()));
     };
     let col_idx = arg_int(args, 1, "rt_sqlite_column_type")? as usize;
     let stmts = SQLITE_STMTS.lock().unwrap();
@@ -1371,7 +1371,7 @@ pub fn rt_sqlite_column_type_fn(args: &[Value]) -> Result<Value, CompileError> {
         .and_then(|slot| slot.as_ref())
         .map(|stmt| sqlite_column_value(stmt, col_idx).type_name().to_string())
         .unwrap_or_else(|| "null".to_string());
-    Ok(Value::Str(value))
+    Ok(Value::text(value))
 }
 
 pub fn rt_sqlite_bind_text_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -1482,7 +1482,7 @@ pub fn rt_sqlite_changes_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_sqlite_error_message_fn(args: &[Value]) -> Result<Value, CompileError> {
     let Some(idx) = sqlite_handle_to_index(arg_int(args, 0, "rt_sqlite_error_message")?) else {
-        return Ok(Value::Str("Invalid connection".to_string()));
+        return Ok(Value::text("Invalid connection".to_string()));
     };
     let conns = SQLITE_CONNS.lock().unwrap();
     let value = conns
@@ -1490,5 +1490,5 @@ pub fn rt_sqlite_error_message_fn(args: &[Value]) -> Result<Value, CompileError>
         .and_then(|slot| slot.as_ref())
         .map(|conn| conn.error.clone())
         .unwrap_or_default();
-    Ok(Value::Str(value))
+    Ok(Value::text(value))
 }

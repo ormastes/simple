@@ -216,7 +216,7 @@ pub(crate) fn evaluate_macro_invocation(
                 let val = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
                 output.push_str(&val.to_display_string());
             }
-            Ok(Value::Str(output))
+            Ok(Value::text(output))
         }
         "dbg" => {
             if let Some(MacroArg::Expr(e)) = macro_args.first() {
@@ -230,9 +230,9 @@ pub(crate) fn evaluate_macro_invocation(
         "stringify" => {
             // Convert expression to its source code string representation
             if let Some(MacroArg::Expr(e)) = macro_args.first() {
-                Ok(Value::Str(expr_to_source_string(e)))
+                Ok(Value::text(expr_to_source_string(e)))
             } else {
-                Ok(Value::Str(String::new()))
+                Ok(Value::text(String::new()))
             }
         }
         _ => {

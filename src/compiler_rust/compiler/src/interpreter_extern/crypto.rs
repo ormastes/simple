@@ -68,7 +68,7 @@ pub fn rt_sha1_finish(args: &[Value]) -> Result<Value, CompileError> {
         hasher.update(&data);
         let result = hasher.finalize();
         let hex = format!("{:x}", result);
-        Ok(Value::Str(hex))
+        Ok(Value::text(hex))
     } else {
         Ok(Value::Nil)
     }
@@ -86,7 +86,7 @@ pub fn rt_sha1_finish_bytes(args: &[Value]) -> Result<Value, CompileError> {
         let result = hasher.finalize();
         // Return raw bytes as a string (byte-transparent)
         let bytes: Vec<u8> = result.to_vec();
-        Ok(Value::Str(String::from_utf8_lossy(&bytes).into_owned()))
+        Ok(Value::text(String::from_utf8_lossy(&bytes).into_owned()))
     } else {
         Ok(Value::Nil)
     }
@@ -126,7 +126,7 @@ pub fn rt_sha1_finish_base64(args: &[Value]) -> Result<Value, CompileError> {
         let result = hasher.finalize();
         let bytes: Vec<u8> = result.to_vec();
         let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        Ok(Value::Str(encoded))
+        Ok(Value::text(encoded))
     } else {
         Ok(Value::Nil)
     }
@@ -145,7 +145,7 @@ pub fn rt_base64_encode(args: &[Value]) -> Result<Value, CompileError> {
         _ => Vec::new(),
     };
     let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
-    Ok(Value::Str(encoded))
+    Ok(Value::text(encoded))
 }
 
 pub fn rt_base64_decode(args: &[Value]) -> Result<Value, CompileError> {
@@ -153,8 +153,8 @@ pub fn rt_base64_decode(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::Str(s)) => s.clone(),
         _ => return Ok(Value::Nil),
     };
-    match base64::engine::general_purpose::STANDARD.decode(&input) {
-        Ok(bytes) => Ok(Value::Str(String::from_utf8_lossy(&bytes).into_owned())),
+    match base64::engine::general_purpose::STANDARD.decode(&*input) {
+        Ok(bytes) => Ok(Value::text(String::from_utf8_lossy(&bytes).into_owned())),
         Err(_) => Ok(Value::Nil),
     }
 }
@@ -210,7 +210,7 @@ pub fn rt_sha1(args: &[Value]) -> Result<Value, CompileError> {
     let mut hasher = Sha1::new();
     hasher.update(&data);
     let result = hasher.finalize();
-    Ok(Value::Str(format!("{:x}", result)))
+    Ok(Value::text(format!("{:x}", result)))
 }
 
 /// Base64url decode (RFC 4648 section 5, no padding).
@@ -219,11 +219,11 @@ pub fn rt_sha1(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_base64url_decode(args: &[Value]) -> Result<Value, CompileError> {
     let input = match args.first() {
         Some(Value::Str(s)) => s.clone(),
-        _ => return Ok(Value::Str(String::new())),
+        _ => return Ok(Value::text(String::new())),
     };
-    match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&input) {
-        Ok(bytes) => Ok(Value::Str(String::from_utf8_lossy(&bytes).into_owned())),
-        Err(_) => Ok(Value::Str(String::new())),
+    match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&*input) {
+        Ok(bytes) => Ok(Value::text(String::from_utf8_lossy(&bytes).into_owned())),
+        Err(_) => Ok(Value::text(String::new())),
     }
 }
 
@@ -241,5 +241,5 @@ pub fn rt_base64url_encode(args: &[Value]) -> Result<Value, CompileError> {
         _ => data.len(),
     };
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&data[..limit]);
-    Ok(Value::Str(encoded))
+    Ok(Value::text(encoded))
 }

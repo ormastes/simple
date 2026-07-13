@@ -196,7 +196,7 @@ fn rt_tls_client_write_stub(_args: &[Value]) -> Result<Value, CompileError> {
 
 /// `rt_tls_client_read` — stub
 fn rt_tls_client_read_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Str(String::new()))
+    Ok(Value::text(String::new()))
 }
 
 /// `rt_tls_client_close` — stub
@@ -206,7 +206,7 @@ fn rt_tls_client_close_stub(_args: &[Value]) -> Result<Value, CompileError> {
 
 /// `rt_tls_get_protocol_version` — stub
 fn rt_tls_get_protocol_version_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Str(String::new()))
+    Ok(Value::text(String::new()))
 }
 
 /// `rt_perf_*` stubs — perf module not yet implemented

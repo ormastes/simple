@@ -16,6 +16,8 @@ use simple_parser::ast::{Expr, FunctionDef, Node};
 
 use crate::error::{codes, CompileError, ErrorContext};
 
+pub type SharedText = Arc<String>;
+
 /// Frequently-used enum type and variant names as constants.
 /// Eliminates repeated string allocation at hot paths and establishes
 /// a single source of truth for these names.
@@ -872,7 +874,7 @@ pub enum Value {
     /// `f64` slot would introduce double rounding at literal parse time.
     Float32(f32),
     Bool(bool),
-    Str(String),
+    Str(SharedText),
     Symbol(String),
     /// Mutable array (default for array literals)
     /// Wrapped in Arc for O(1) clone (COW via Arc::make_mut for mutations)
@@ -1017,6 +1019,34 @@ impl Clone for NativeFunction {
 }
 
 impl Value {
+    pub fn text(value: impl Into<String>) -> Self {
+        Value::Str(Arc::new(value.into()))
+    }
+
+    pub fn shared_text(value: SharedText) -> Self {
+        Value::Str(value)
+    }
+
+    pub fn text_owned(value: String) -> Self {
+        Value::text(value)
+    }
+
+    pub fn as_text_str(&self) -> Option<&str> {
+        match self {
+            Value::Str(value) => Some(value.as_str()),
+            Value::Symbol(value) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn into_text_string(self) -> Option<String> {
+        match self {
+            Value::Str(value) => Some(Arc::try_unwrap(value).unwrap_or_else(|value| value.as_ref().clone())),
+            Value::Symbol(value) => Some(value),
+            _ => None,
+        }
+    }
+
     /// Create a new mutable array value (default for array literals)
     pub fn array(vec: Vec<Value>) -> Self {
         Value::Array(Arc::new(vec))

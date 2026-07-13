@@ -167,14 +167,14 @@ pub fn simple_lexer_tokenize(args: &[Value]) -> Result<Value, CompileError> {
         .into_iter()
         .map(|token| {
             let mut fields = HashMap::new();
-            fields.insert("kind".to_string(), Value::Str(token.kind));
-            fields.insert("text".to_string(), Value::Str(token.text));
+            fields.insert("kind".to_string(), Value::text(token.kind));
+            fields.insert("text".to_string(), Value::text(token.text));
 
             if let Some(name) = token.name {
-                fields.insert("name".to_string(), Value::Str(name));
+                fields.insert("name".to_string(), Value::text(name));
             }
             if let Some(pattern) = token.pattern {
-                fields.insert("pattern".to_string(), Value::Str(pattern));
+                fields.insert("pattern".to_string(), Value::text(pattern));
             }
             if let Some(value) = token.value {
                 fields.insert("value".to_string(), Value::Int(value));

@@ -86,7 +86,7 @@ thread_local! {
 /// Create an ExampleGroup Value object
 fn create_example_group(description: String, parent: Option<Value>) -> Value {
     let mut fields = HashMap::new();
-    fields.insert("description".to_string(), Value::Str(description));
+    fields.insert("description".to_string(), Value::text(description));
     fields.insert(
         "parent".to_string(),
         match parent {
@@ -115,7 +115,7 @@ fn create_example_group(description: String, parent: Option<Value>) -> Value {
 /// Create an Example Value object
 fn create_example(description: String, block: Value, resource_limits: Option<Value>) -> Value {
     let mut fields = HashMap::new();
-    fields.insert("description".to_string(), Value::Str(description));
+    fields.insert("description".to_string(), Value::text(description));
     fields.insert("block".to_string(), block);
     fields.insert("is_skipped".to_string(), Value::Bool(false));
     fields.insert("tags".to_string(), Value::array(Vec::new()));
@@ -479,7 +479,7 @@ pub(super) fn eval_bdd_builtin(
                     let first_arg = eval_arg(
                         args,
                         0,
-                        Value::Str("unnamed".to_string()),
+                        Value::text("unnamed".to_string()),
                         env,
                         functions,
                         classes,
@@ -491,7 +491,7 @@ pub(super) fn eval_bdd_builtin(
                             let blocks = BDD_CONTEXT_DEFS.with(|cell| cell.borrow().get(ctx_name).cloned());
                             (format!("with {}", ctx_name), blocks)
                         }
-                        Value::Str(s) => (s.clone(), None),
+                        Value::Str(s) => (s.as_ref().clone(), None),
                         _ => ("unnamed".to_string(), None),
                     }
                 }
@@ -916,7 +916,7 @@ pub(super) fn eval_bdd_builtin(
             let name = eval_arg(
                 args,
                 0,
-                Value::Str("unnamed".to_string()),
+                Value::text("unnamed".to_string()),
                 env,
                 functions,
                 classes,
@@ -924,7 +924,7 @@ pub(super) fn eval_bdd_builtin(
                 impl_methods,
             )?;
             let name_str = match &name {
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 Value::Symbol(s) => s.clone(),
                 _ => "unnamed".to_string(),
             };
@@ -940,7 +940,7 @@ pub(super) fn eval_bdd_builtin(
             let name = eval_arg(
                 args,
                 0,
-                Value::Str("unnamed".to_string()),
+                Value::text("unnamed".to_string()),
                 env,
                 functions,
                 classes,
@@ -948,7 +948,7 @@ pub(super) fn eval_bdd_builtin(
                 impl_methods,
             )?;
             let name_str = match &name {
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 Value::Symbol(s) => s.clone(),
                 _ => "unnamed".to_string(),
             };
@@ -1019,7 +1019,7 @@ pub(super) fn eval_bdd_builtin(
             )?;
             let name_str = match &name {
                 Value::Symbol(s) => s.clone(),
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 _ => "unnamed".to_string(),
             };
             let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -1043,7 +1043,7 @@ pub(super) fn eval_bdd_builtin(
             )?;
             let name_str = match &name {
                 Value::Symbol(s) => s.clone(),
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 _ => "unnamed".to_string(),
             };
             let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -1091,7 +1091,7 @@ pub(super) fn eval_bdd_builtin(
             )?;
             let name_str = match &name {
                 Value::Symbol(s) => s.clone(),
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 _ => "unnamed".to_string(),
             };
             let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -1115,7 +1115,7 @@ pub(super) fn eval_bdd_builtin(
             )?;
             let name_str = match &name {
                 Value::Symbol(s) => s.clone(),
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 _ => "unnamed".to_string(),
             };
 
@@ -1156,7 +1156,7 @@ pub(super) fn eval_bdd_builtin(
             )?;
             let name_str = match &name {
                 Value::Symbol(s) => s.clone(),
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 _ => "unnamed".to_string(),
             };
 
@@ -1178,7 +1178,7 @@ pub(super) fn eval_bdd_builtin(
             )?;
             let name_str = match &name {
                 Value::Symbol(s) => s.clone(),
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 _ => "unnamed".to_string(),
             };
             let factory = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -1203,7 +1203,7 @@ pub(super) fn eval_bdd_builtin(
             )?;
             let name_str = match &name {
                 Value::Symbol(s) => s.clone(),
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 _ => "unnamed".to_string(),
             };
 
@@ -1245,7 +1245,7 @@ pub(super) fn eval_bdd_builtin(
             )?;
             let name_str = match &name {
                 Value::Symbol(s) => s.clone(),
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 _ => "unnamed".to_string(),
             };
 
@@ -1272,7 +1272,7 @@ pub(super) fn eval_bdd_builtin(
             )?;
             let name_str = match &name {
                 Value::Symbol(s) => s.clone(),
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 _ => "unnamed".to_string(),
             };
 
@@ -1387,7 +1387,7 @@ pub(super) fn eval_bdd_builtin(
         "to_contain" | "to_include" => {
             let needle = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let needle_str = match &needle {
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 other => other.to_display_string(),
             };
             Ok(Some(Value::Matcher(MatcherValue::Contains(needle_str))))
@@ -1506,7 +1506,7 @@ pub(super) fn eval_bdd_builtin(
             let haystack = eval_arg(
                 args,
                 0,
-                Value::Str(String::new()),
+                Value::text(String::new()),
                 env,
                 functions,
                 classes,
@@ -1516,7 +1516,7 @@ pub(super) fn eval_bdd_builtin(
             let needle = eval_arg(
                 args,
                 1,
-                Value::Str(String::new()),
+                Value::text(String::new()),
                 env,
                 functions,
                 classes,
@@ -1540,7 +1540,7 @@ pub(super) fn eval_bdd_builtin(
             let msg = eval_arg(
                 args,
                 0,
-                Value::Str("assertion failed".to_string()),
+                Value::text("assertion failed".to_string()),
                 env,
                 functions,
                 classes,
@@ -1575,7 +1575,7 @@ pub(super) fn eval_bdd_builtin(
             let name = eval_arg(
                 args,
                 0,
-                Value::Str("".to_string()),
+                Value::text("".to_string()),
                 env,
                 functions,
                 classes,
@@ -1597,7 +1597,7 @@ pub(super) fn eval_bdd_builtin(
             let name = eval_arg(
                 args,
                 0,
-                Value::Str("".to_string()),
+                Value::text("".to_string()),
                 env,
                 functions,
                 classes,
@@ -1633,7 +1633,7 @@ pub(super) fn eval_bdd_builtin(
             let name = eval_arg(
                 args,
                 0,
-                Value::Str("".to_string()),
+                Value::text("".to_string()),
                 env,
                 functions,
                 classes,
@@ -1655,7 +1655,7 @@ pub(super) fn eval_bdd_builtin(
             let name = eval_arg(
                 args,
                 0,
-                Value::Str("".to_string()),
+                Value::text("".to_string()),
                 env,
                 functions,
                 classes,

@@ -150,17 +150,17 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
             // String repetition: "a" * 3 -> "aaa"
             (Value::Str(s), Value::Int(n)) => {
                 if *n <= 0 {
-                    Ok(Value::Str(String::new()))
+                    Ok(Value::text(String::new()))
                 } else {
-                    Ok(Value::Str(s.repeat(*n as usize)))
+                    Ok(Value::text(s.repeat(*n as usize)))
                 }
             }
             // String repetition: 3 * "a" -> "aaa"
             (Value::Int(n), Value::Str(s)) => {
                 if *n <= 0 {
-                    Ok(Value::Str(String::new()))
+                    Ok(Value::text(String::new()))
                 } else {
-                    Ok(Value::Str(s.repeat(*n as usize)))
+                    Ok(Value::text(s.repeat(*n as usize)))
                 }
             }
             _ => {

@@ -46,7 +46,7 @@ pub fn mock_policy_init_patterns(args: &[Value]) -> Result<Value, CompileError> 
             // Collect patterns as strings
             let pattern_strings: Vec<String> = patterns
                 .iter()
-                .filter_map(|v| if let Value::Str(s) = v { Some(s.clone()) } else { None })
+                .filter_map(|v| if let Value::Str(s) = v { Some(s.as_ref().clone()) } else { None })
                 .collect();
 
             // Convert to 'static refs by leaking (this is fine for test setup)
@@ -119,7 +119,7 @@ pub fn mock_policy_try_check(args: &[Value]) -> Result<Value, CompileError> {
         MockCheckResult::NotAllowed { .. } => "not_allowed",
     };
 
-    Ok(Value::Str(result_str.to_string()))
+    Ok(Value::text(result_str.to_string()))
 }
 
 /// Get the current mock policy mode.
@@ -139,7 +139,7 @@ pub fn mock_policy_get_mode(_args: &[Value]) -> Result<Value, CompileError> {
         MockCheckResult::NotAllowed { .. } => "custom", // Wildcard not allowed means restricted
     };
 
-    Ok(Value::Str(mode.to_string()))
+    Ok(Value::text(mode.to_string()))
 }
 
 #[cfg(test)]

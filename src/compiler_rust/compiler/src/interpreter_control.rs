@@ -2957,12 +2957,17 @@ pub(super) fn exec_context(
 
     // Check if this is a BDD-style context (string or symbol description)
     match &context_obj {
-        Value::Str(name) | Value::Symbol(name) => {
+        Value::Str(_) | Value::Symbol(_) => {
+            let name = match &context_obj {
+                Value::Str(name) => name.as_str(),
+                Value::Symbol(name) => name.as_str(),
+                _ => unreachable!(),
+            };
             // BDD-style context: context "description": block
             let name_str = if matches!(context_obj, Value::Symbol(_)) {
                 format!("with {}", name)
             } else {
-                name.clone()
+                name.to_string()
             };
 
             // Check if this is a symbol referencing a context_def
@@ -3596,7 +3601,7 @@ fn try_exec_string_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Re
 
     env.insert(loop_shape.assignment.target, Value::Int(target));
     if let Some(ch) = last_value {
-        env.insert(loop_shape.loop_var, Value::Str(ch.to_string()));
+        env.insert(loop_shape.loop_var, Value::text(ch.to_string()));
     }
     Ok(Some(Control::Next))
 }
@@ -3755,7 +3760,7 @@ fn try_exec_string_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<O
 
     env.insert(loop_shape.assignment.target, Value::Int(target));
     if let Some(ch) = last_value {
-        env.insert(loop_shape.loop_var, Value::Str(ch.to_string()));
+        env.insert(loop_shape.loop_var, Value::text(ch.to_string()));
     }
     Ok(Some(Control::Next))
 }

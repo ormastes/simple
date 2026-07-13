@@ -17,12 +17,12 @@
 // Built-in methods for String
 if let Value::Str(ref s) = recv_val {
     match method {
-        "to_string" | "to_text" => return Ok(Value::Str(s.clone())),
+        "to_string" | "to_text" => return Ok(Value::shared_text(s.clone())),
         "len" | "length" => return Ok(Value::Int(s.len() as i64)),
         "char_count" => return Ok(Value::Int(s.chars().count() as i64)),
         "is_empty" => return Ok(Value::Bool(s.is_empty())),
         "chars" => {
-            let chars: Vec<Value> = s.chars().map(|c| Value::Str(c.to_string())).collect();
+            let chars: Vec<Value> = s.chars().map(|c| Value::text(c.to_string())).collect();
             return Ok(Value::array(chars));
         }
         "bytes" => {
@@ -30,34 +30,34 @@ if let Value::Str(ref s) = recv_val {
             return Ok(Value::array(bytes));
         }
         "has" | "contains" => {
-            let needle = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            let needle = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             return Ok(Value::Bool(s.contains(&needle)));
         }
         "starts_with" => {
-            let prefix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            let prefix = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             return Ok(Value::Bool(s.starts_with(&prefix)));
         }
         "ends_with" => {
-            let suffix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            let suffix = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             return Ok(Value::Bool(s.ends_with(&suffix)));
         }
         "find_str" | "find" | "index_of" => {
-            let needle = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            let needle = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             return Ok(match s.find(&needle) {
                 Some(idx) => Value::Int(idx as i64),
                 None => Value::Int(-1),
             });
         }
-        "up" | "upper" | "uppercase" | "to_upper" | "to_uppercase" => return Ok(Value::Str(s.to_uppercase())),
-        "down" | "lower" | "lowercase" | "to_lower" | "to_lowercase" => return Ok(Value::Str(s.to_lowercase())),
+        "up" | "upper" | "uppercase" | "to_upper" | "to_uppercase" => return Ok(Value::text(s.to_uppercase())),
+        "down" | "lower" | "lowercase" | "to_lower" | "to_lowercase" => return Ok(Value::text(s.to_lowercase())),
         "capitalize" => {
             // Uppercase first character, lowercase the rest
             let mut chars = s.chars();
             match chars.next() {
-                None => return Ok(Value::Str(String::new())),
+                None => return Ok(Value::text(String::new())),
                 Some(first) => {
                     let rest: String = chars.map(|c| c.to_lowercase().to_string()).collect::<String>();
-                    return Ok(Value::Str(format!("{}{}", first.to_uppercase(), rest)));
+                    return Ok(Value::text(format!("{}{}", first.to_uppercase(), rest)));
                 }
             }
         }
@@ -70,7 +70,7 @@ if let Value::Str(ref s) = recv_val {
                     c.to_uppercase().to_string()
                 }
             }).collect();
-            return Ok(Value::Str(result));
+            return Ok(Value::text(result));
         }
         "title" | "titlecase" => {
             // Titlecase: uppercase first character of each word
@@ -87,30 +87,30 @@ if let Value::Str(ref s) = recv_val {
                     result.push_str(&c.to_lowercase().to_string());
                 }
             }
-            return Ok(Value::Str(result));
+            return Ok(Value::text(result));
         }
-        "trim" | "trimmed" | "strip" => return Ok(Value::Str(s.trim().to_string())),
-        "trim_start" | "trim_left" => return Ok(Value::Str(s.trim_start().to_string())),
-        "trim_end" | "trim_right" => return Ok(Value::Str(s.trim_end().to_string())),
+        "trim" | "trimmed" | "strip" => return Ok(Value::text(s.trim().to_string())),
+        "trim_start" | "trim_left" => return Ok(Value::text(s.trim_start().to_string())),
+        "trim_end" | "trim_right" => return Ok(Value::text(s.trim_end().to_string())),
         "trim_start_matches" => {
             // Repeatedly remove prefix until it no longer matches
-            let prefix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
-            return Ok(Value::Str(s.trim_start_matches(&*prefix).to_string()));
+            let prefix = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::text(s.trim_start_matches(&*prefix).to_string()));
         }
         "trim_end_matches" => {
             // Repeatedly remove suffix until it no longer matches
-            let suffix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
-            return Ok(Value::Str(s.trim_end_matches(&*suffix).to_string()));
+            let suffix = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::text(s.trim_end_matches(&*suffix).to_string()));
         }
         "removeprefix" | "remove_prefix" => {
             // Remove prefix if present
-            let prefix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
-            return Ok(Value::Str(s.strip_prefix(&prefix).unwrap_or(s).to_string()));
+            let prefix = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::text(s.strip_prefix(&prefix).unwrap_or(s).to_string()));
         }
         "removesuffix" | "remove_suffix" => {
             // Remove suffix if present
-            let suffix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
-            return Ok(Value::Str(s.strip_suffix(&suffix).unwrap_or(s).to_string()));
+            let suffix = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::text(s.strip_suffix(&suffix).unwrap_or(s).to_string()));
         }
         "chomp" => {
             // Remove trailing newline or record separator (default: \n, \r\n, \r)
@@ -118,7 +118,7 @@ if let Value::Str(ref s) = recv_val {
                 .or_else(|| s.strip_suffix('\n'))
                 .or_else(|| s.strip_suffix('\r'))
                 .unwrap_or(s);
-            return Ok(Value::Str(result.to_string()));
+            return Ok(Value::text(result.to_string()));
         }
         "squeeze" => {
             // Remove duplicate adjacent characters
@@ -129,7 +129,7 @@ if let Value::Str(ref s) = recv_val {
                 .map(|v| v.to_key_string());
 
             if s.is_empty() {
-                return Ok(Value::Str(String::new()));
+                return Ok(Value::text(String::new()));
             }
 
             let mut result = String::new();
@@ -150,69 +150,69 @@ if let Value::Str(ref s) = recv_val {
                 }
                 prev = Some(c);
             }
-            return Ok(Value::Str(result));
+            return Ok(Value::text(result));
         }
-        "rev" | "reversed" => return Ok(Value::Str(s.chars().rev().collect())),
+        "rev" | "reversed" => return Ok(Value::text(s.chars().rev().collect())),
         "sorted" => {
             let mut chars: Vec<char> = s.chars().collect();
             chars.sort();
-            return Ok(Value::Str(chars.into_iter().collect()));
+            return Ok(Value::text(chars.into_iter().collect()));
         }
         "taken" | "take" => {
             let n = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            return Ok(Value::Str(s.chars().take(n).collect()));
+            return Ok(Value::text(s.chars().take(n).collect()));
         }
         "dropped" | "drop" | "skip" => {
             let n = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            return Ok(Value::Str(s.chars().skip(n).collect()));
+            return Ok(Value::text(s.chars().skip(n).collect()));
         }
         "appended" => {
-            let ch = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
-            return Ok(Value::Str(format!("{}{}", s, ch)));
+            let ch = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::text(format!("{}{}", s, ch)));
         }
         "prepended" => {
-            let ch = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
-            return Ok(Value::Str(format!("{}{}", ch, s)));
+            let ch = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::text(format!("{}{}", ch, s)));
         }
         "push" => {
             // Note: Returns a new string with the character appended (strings are immutable)
-            let ch = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
-            return Ok(Value::Str(format!("{}{}", s, ch)));
+            let ch = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::text(format!("{}{}", s, ch)));
         }
         "push_str" => {
             // Note: Returns a new string with the string appended (strings are immutable)
-            let other = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
-            return Ok(Value::Str(format!("{}{}", s, other)));
+            let other = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::text(format!("{}{}", s, other)));
         }
         "pop" => {
             // Note: Returns Some(last_char) but doesn't modify the string (immutable)
             if s.is_empty() {
                 return Ok(Value::none());
             }
-            let last = s.chars().last().map(|c| Value::Str(c.to_string())).unwrap_or(Value::Nil);
+            let last = s.chars().last().map(|c| Value::text(c.to_string())).unwrap_or(Value::Nil);
             return Ok(Value::some(last));
         }
         "clear" => {
             // Note: Returns empty string (strings are immutable)
-            return Ok(Value::Str(String::new()));
+            return Ok(Value::text(String::new()));
         }
         "split" => {
-            let sep = eval_arg(args, 0, Value::Str(" ".into()), env, functions, classes, enums, impl_methods)?.to_key_string();
-            let parts: Vec<Value> = s.split(&sep).map(|p| Value::Str(p.to_string())).collect();
+            let sep = eval_arg(args, 0, Value::text(" ".into()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            let parts: Vec<Value> = s.split(&sep).map(|p| Value::text(p.to_string())).collect();
             return Ok(Value::array(parts));
         }
         "split_lines" | "lines" => {
-            let parts: Vec<Value> = s.lines().map(|p| Value::Str(p.to_string())).collect();
+            let parts: Vec<Value> = s.lines().map(|p| Value::text(p.to_string())).collect();
             return Ok(Value::array(parts));
         }
         "partition" => {
             // Split into [before, separator, after] at first occurrence
-            let sep = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            let sep = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             if sep.is_empty() {
                 return Ok(Value::array(vec![
-                    Value::Str(s.clone()),
-                    Value::Str(String::new()),
-                    Value::Str(String::new()),
+                    Value::shared_text(s.clone()),
+                    Value::text(String::new()),
+                    Value::text(String::new()),
                 ]));
             }
             match s.find(&sep) {
@@ -220,28 +220,28 @@ if let Value::Str(ref s) = recv_val {
                     let before = &s[..idx];
                     let after = &s[idx + sep.len()..];
                     return Ok(Value::array(vec![
-                        Value::Str(before.to_string()),
-                        Value::Str(sep),
-                        Value::Str(after.to_string()),
+                        Value::text(before.to_string()),
+                        Value::text(sep),
+                        Value::text(after.to_string()),
                     ]));
                 }
                 None => {
                     return Ok(Value::array(vec![
-                        Value::Str(s.clone()),
-                        Value::Str(String::new()),
-                        Value::Str(String::new()),
+                        Value::shared_text(s.clone()),
+                        Value::text(String::new()),
+                        Value::text(String::new()),
                     ]));
                 }
             }
         }
         "rpartition" => {
             // Split into [before, separator, after] at last occurrence
-            let sep = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            let sep = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             if sep.is_empty() {
                 return Ok(Value::array(vec![
-                    Value::Str(String::new()),
-                    Value::Str(String::new()),
-                    Value::Str(s.clone()),
+                    Value::text(String::new()),
+                    Value::text(String::new()),
+                    Value::shared_text(s.clone()),
                 ]));
             }
             match s.rfind(&sep) {
@@ -249,29 +249,29 @@ if let Value::Str(ref s) = recv_val {
                     let before = &s[..idx];
                     let after = &s[idx + sep.len()..];
                     return Ok(Value::array(vec![
-                        Value::Str(before.to_string()),
-                        Value::Str(sep),
-                        Value::Str(after.to_string()),
+                        Value::text(before.to_string()),
+                        Value::text(sep),
+                        Value::text(after.to_string()),
                     ]));
                 }
                 None => {
                     return Ok(Value::array(vec![
-                        Value::Str(String::new()),
-                        Value::Str(String::new()),
-                        Value::Str(s.clone()),
+                        Value::text(String::new()),
+                        Value::text(String::new()),
+                        Value::shared_text(s.clone()),
                     ]));
                 }
             }
         }
         "replace" => {
-            let old = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
-            let new = eval_arg(args, 1, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
-            return Ok(Value::Str(s.replace(&old, &new)));
+            let old = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            let new = eval_arg(args, 1, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::text(s.replace(&old, &new)));
         }
         "replace_first" => {
-            let old = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
-            let new = eval_arg(args, 1, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
-            return Ok(Value::Str(s.replacen(&old, &new, 1)));
+            let old = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            let new = eval_arg(args, 1, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::text(s.replacen(&old, &new, 1)));
         }
         "slice" | "substring" => {
             let start_raw = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
@@ -285,24 +285,24 @@ if let Value::Str(ref s) = recv_val {
             // Identity fast path: full-string slice avoids the chars() walk + Vec<char>.
             // Byte-len upper-bounds char count, so end >= s.len() guarantees end >= chars().count().
             if start == 0 && end >= s.len() {
-                return Ok(Value::Str(s.to_string()));
+                return Ok(Value::shared_text(s.clone()));
             }
             // Work with char indices for unicode safety
             let chars: Vec<char> = s.chars().collect();
             let end = end.min(chars.len());
             let start = start.min(end);
             let result: String = chars[start..end].iter().collect();
-            return Ok(Value::Str(result));
+            return Ok(Value::text(result));
         }
         "repeat" => {
             let n = eval_arg_usize(args, 0, 1, env, functions, classes, enums, impl_methods)?;
-            return Ok(Value::Str(s.repeat(n)));
+            return Ok(Value::text(s.repeat(n)));
         }
         "rev" | "reverse" => {
-            return Ok(Value::Str(s.chars().rev().collect()));
+            return Ok(Value::text(s.chars().rev().collect()));
         }
         "last_index_of" | "rfind" => {
-            let needle = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            let needle = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             return Ok(match s.rfind(&needle) {
                 Some(idx) => Value::Int(idx as i64),
                 None => Value::Int(-1),
@@ -335,12 +335,12 @@ if let Value::Str(ref s) = recv_val {
         "char_at" | "at" => {
             let raw_idx = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
             if raw_idx < 0 {
-                return Ok(Value::Str(String::new()));
+                return Ok(Value::text(String::new()));
             }
             let idx = raw_idx as usize;
             match s.chars().nth(idx) {
-                Some(c) => return Ok(Value::Str(c.to_string())),
-                None => return Ok(Value::Str(String::new())),
+                Some(c) => return Ok(Value::text(c.to_string())),
+                None => return Ok(Value::text(String::new())),
             }
         }
         "ord" | "codepoint" | "code_point" => {
@@ -360,50 +360,50 @@ if let Value::Str(ref s) = recv_val {
         }
         "pad_left" | "pad_start" => {
             let width = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            let pad_char = eval_arg(args, 1, Value::Str(" ".into()), env, functions, classes, enums, impl_methods)?
+            let pad_char = eval_arg(args, 1, Value::text(" ".into()), env, functions, classes, enums, impl_methods)?
                 .to_key_string()
                 .chars()
                 .next()
                 .unwrap_or(' ');
             let current_len = s.chars().count();
             if current_len >= width {
-                return Ok(Value::Str(s.clone()));
+                return Ok(Value::shared_text(s.clone()));
             }
             let padding: String = std::iter::repeat_n(pad_char, width - current_len).collect();
-            return Ok(Value::Str(format!("{}{}", padding, s)));
+            return Ok(Value::text(format!("{}{}", padding, s)));
         }
         "pad_right" | "pad_end" => {
             let width = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            let pad_char = eval_arg(args, 1, Value::Str(" ".into()), env, functions, classes, enums, impl_methods)?
+            let pad_char = eval_arg(args, 1, Value::text(" ".into()), env, functions, classes, enums, impl_methods)?
                 .to_key_string()
                 .chars()
                 .next()
                 .unwrap_or(' ');
             let current_len = s.chars().count();
             if current_len >= width {
-                return Ok(Value::Str(s.clone()));
+                return Ok(Value::shared_text(s.clone()));
             }
             let padding: String = std::iter::repeat_n(pad_char, width - current_len).collect();
-            return Ok(Value::Str(format!("{}{}", s, padding)));
+            return Ok(Value::text(format!("{}{}", s, padding)));
         }
         "center" => {
             // Center string with padding on both sides
             let width = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            let pad_char = eval_arg(args, 1, Value::Str(" ".into()), env, functions, classes, enums, impl_methods)?
+            let pad_char = eval_arg(args, 1, Value::text(" ".into()), env, functions, classes, enums, impl_methods)?
                 .to_key_string()
                 .chars()
                 .next()
                 .unwrap_or(' ');
             let current_len = s.chars().count();
             if current_len >= width {
-                return Ok(Value::Str(s.clone()));
+                return Ok(Value::shared_text(s.clone()));
             }
             let total_padding = width - current_len;
             let left_padding = total_padding / 2;
             let right_padding = total_padding - left_padding;
             let left: String = std::iter::repeat_n(pad_char, left_padding).collect();
             let right: String = std::iter::repeat_n(pad_char, right_padding).collect();
-            return Ok(Value::Str(format!("{}{}{}", left, s, right)));
+            return Ok(Value::text(format!("{}{}{}", left, s, right)));
         }
         "zfill" => {
             // Pad with zeros on the left to reach specified width
@@ -411,7 +411,7 @@ if let Value::Str(ref s) = recv_val {
             let width = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
             let current_len = s.chars().count();
             if current_len >= width {
-                return Ok(Value::Str(s.clone()));
+                return Ok(Value::shared_text(s.clone()));
             }
 
             // Check if string starts with + or -
@@ -422,7 +422,7 @@ if let Value::Str(ref s) = recv_val {
             };
 
             let padding: String = "0".repeat(width - current_len);
-            return Ok(Value::Str(format!("{}{}{}", sign, padding, rest)));
+            return Ok(Value::text(format!("{}{}{}", sign, padding, rest)));
         }
         "is_numeric" => {
             return Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_ascii_digit())));
@@ -440,7 +440,7 @@ if let Value::Str(ref s) = recv_val {
             return Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_whitespace())));
         }
         "count" => {
-            let needle = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            let needle = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             return Ok(Value::Int(s.matches(&needle).count() as i64));
         }
         "substr" => {
@@ -453,11 +453,11 @@ if let Value::Str(ref s) = recv_val {
             let start = start.min(chars.len());
             let end = (start + length).min(chars.len());
             let result: String = chars[start..end].iter().collect();
-            return Ok(Value::Str(result));
+            return Ok(Value::text(result));
         }
         "find_all" | "find_indices" => {
             // find_all(needle) - Return all indices where needle is found
-            let needle = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            let needle = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             if needle.is_empty() {
                 return Ok(Value::array(vec![]));
             }
@@ -472,7 +472,7 @@ if let Value::Str(ref s) = recv_val {
             let arr_val = eval_arg(args, 0, Value::array(vec![]), env, functions, classes, enums, impl_methods)?;
             if let Value::Array(arr) = arr_val {
                 let parts: Vec<String> = arr.iter().map(|v| v.to_display_string()).collect();
-                return Ok(Value::Str(parts.join(s)));
+                return Ok(Value::text(parts.join(s)));
             } else {
                 return Err(crate::error::CompileError::semantic(
                     "join expects an array argument",

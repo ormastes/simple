@@ -64,7 +64,7 @@ fn parse_regex(payload: &str) -> Result<Value, CompileError> {
 
     // Build result structure
     let mut result = HashMap::new();
-    result.insert("pattern".to_string(), Value::Str(pattern.clone()));
+    result.insert("pattern".to_string(), Value::text(pattern.clone()));
     result.insert(
         "flags".to_string(),
         Value::dict({
@@ -79,7 +79,7 @@ fn parse_regex(payload: &str) -> Result<Value, CompileError> {
     );
     result.insert(
         "capture_groups".to_string(),
-        Value::array(capture_groups.into_iter().map(Value::Str).collect()),
+        Value::array(capture_groups.into_iter().map(Value::text).collect()),
     );
 
     Ok(Value::dict(result))
@@ -289,7 +289,7 @@ mod tests {
     fn test_simple_pattern() {
         let result = parse_regex("hello").unwrap();
         if let Value::Dict(map) = result {
-            assert_eq!(map.get("pattern"), Some(&Value::Str("hello".to_string())));
+            assert_eq!(map.get("pattern"), Some(&Value::text("hello".to_string())));
         } else {
             panic!("expected dict");
         }

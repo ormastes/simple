@@ -148,9 +148,9 @@ pub fn rt_file_hash_sha256(args: &[Value]) -> Result<Value, CompileError> {
                 .iter()
                 .map(|byte| format!("{:02x}", byte))
                 .collect::<String>();
-            Ok(Value::Str(hex))
+            Ok(Value::text(hex))
         }
-        Err(_) => Ok(Value::Str(String::new())),
+        Err(_) => Ok(Value::text(String::new())),
     }
 }
 
@@ -162,15 +162,15 @@ pub fn rt_file_hash_sha256(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_file_canonicalize(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::canonicalize(&path) {
-        Ok(canonical) => Ok(Value::Str(canonical.to_string_lossy().to_string())),
+        Ok(canonical) => Ok(Value::text(canonical.to_string_lossy().to_string())),
         Err(_) => {
             // Fallback: make absolute
             match std::env::current_dir() {
                 Ok(cwd) => {
                     let abs = cwd.join(&path);
-                    Ok(Value::Str(abs.to_string_lossy().to_string()))
+                    Ok(Value::text(abs.to_string_lossy().to_string()))
                 }
-                Err(_) => Ok(Value::Str(path)),
+                Err(_) => Ok(Value::text(path)),
             }
         }
     }
@@ -191,9 +191,9 @@ pub fn rt_file_read_text(args: &[Value]) -> Result<Value, CompileError> {
             } else {
                 content
             };
-            Ok(Value::Str(content))
+            Ok(Value::text(content))
         }
-        Err(_) => Ok(Value::Str(String::new())),
+        Err(_) => Ok(Value::text(String::new())),
     }
 }
 
@@ -286,26 +286,26 @@ pub fn rt_file_read_text_at(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let offset = match args.get(1) {
         Some(Value::Int(n)) if *n >= 0 => *n as u64,
-        _ => return Ok(Value::Str(String::new())),
+        _ => return Ok(Value::text(String::new())),
     };
     let size = match args.get(2) {
         Some(Value::Int(n)) if *n >= 0 => *n as usize,
-        _ => return Ok(Value::Str(String::new())),
+        _ => return Ok(Value::text(String::new())),
     };
     let mut file = match OpenOptions::new().read(true).open(&path) {
         Ok(file) => file,
-        Err(_) => return Ok(Value::Str(String::new())),
+        Err(_) => return Ok(Value::text(String::new())),
     };
     if file.seek(SeekFrom::Start(offset)).is_err() {
-        return Ok(Value::Str(String::new()));
+        return Ok(Value::text(String::new()));
     }
     let mut buf = vec![0u8; size];
     match file.read(&mut buf) {
         Ok(n) => {
             buf.truncate(n);
-            Ok(Value::Str(String::from_utf8_lossy(&buf).to_string()))
+            Ok(Value::text(String::from_utf8_lossy(&buf).to_string()))
         }
-        Err(_) => Ok(Value::Str(String::new())),
+        Err(_) => Ok(Value::text(String::new())),
     }
 }
 
@@ -383,7 +383,7 @@ pub fn rt_file_read_lines(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::read_to_string(&path) {
         Ok(content) => {
-            let lines: Vec<Value> = content.lines().map(|l| Value::Str(l.to_string())).collect();
+            let lines: Vec<Value> = content.lines().map(|l| Value::text(l.to_string())).collect();
             Ok(make_some(Value::array(lines)))
         }
         Err(_) => Ok(make_none()),
@@ -964,9 +964,9 @@ mod tests {
         let path = dir.path().join("append.txt");
         let path = path.to_string_lossy().to_string();
 
-        let first = rt_file_write_text_at(&[Value::Str(path.clone()), Value::Int(0), Value::Str("abc".to_string())])
+        let first = rt_file_write_text_at(&[Value::text(path.clone()), Value::Int(0), Value::text("abc".to_string())])
             .expect("first write");
-        let second = rt_file_write_text_at(&[Value::Str(path.clone()), Value::Int(3), Value::Str("def".to_string())])
+        let second = rt_file_write_text_at(&[Value::text(path.clone()), Value::Int(3), Value::text("def".to_string())])
             .expect("second write");
 
         assert_eq!(first, Value::Int(3));
@@ -987,7 +987,7 @@ mod tests {
         std::fs::write(&path, b"abc").expect("seed write");
         let path = path.to_string_lossy().to_string();
 
-        let ok = rt_file_truncate(&[Value::Str(path.clone()), Value::UInt { value: 4096, width: 64 }])
+        let ok = rt_file_truncate(&[Value::text(path.clone()), Value::UInt { value: 4096, width: 64 }])
             .expect("truncate with boxed u64 size");
         assert_eq!(ok, Value::Bool(true));
         assert_eq!(std::fs::metadata(&path).expect("metadata").len(), 4096);
@@ -1000,7 +1000,7 @@ mod tests {
         std::fs::write(&path, b"abc").expect("seed write");
         let path = path.to_string_lossy().to_string();
 
-        let ok = rt_file_truncate(&[Value::Str(path.clone()), Value::Int(2048)]).expect("truncate with int size");
+        let ok = rt_file_truncate(&[Value::text(path.clone()), Value::Int(2048)]).expect("truncate with int size");
         assert_eq!(ok, Value::Bool(true));
         assert_eq!(std::fs::metadata(&path).expect("metadata").len(), 2048);
     }
@@ -1014,7 +1014,7 @@ mod tests {
         std::fs::write(&path, b"abc").expect("seed write");
         let path = path.to_string_lossy().to_string();
 
-        let result = rt_file_truncate(&[Value::Str(path), Value::Str("not-a-size".to_string())]);
+        let result = rt_file_truncate(&[Value::Str(path), Value::text("not-a-size".to_string())]);
         assert!(result.is_err());
     }
 
@@ -1040,10 +1040,10 @@ mod tests {
         std::fs::write(&path, "simple mmap").expect("write");
         let path = path.to_string_lossy().to_string();
 
-        let text = rt_file_mmap_read_text(&[Value::Str(path.clone())]).expect("mmap text");
+        let text = rt_file_mmap_read_text(&[Value::text(path.clone())]).expect("mmap text");
         let bytes = rt_file_mmap_read_bytes(&[Value::Str(path)]).expect("mmap bytes");
 
-        assert_eq!(text, Value::Str("simple mmap".to_string()));
+        assert_eq!(text, Value::text("simple mmap".to_string()));
         match bytes {
             Value::Enum {
                 variant,
@@ -1094,7 +1094,7 @@ pub fn rt_dir_list(args: &[Value]) -> Result<Value, CompileError> {
             let names: Vec<Value> = entries
                 .flatten()
                 .filter_map(|e| e.file_name().into_string().ok())
-                .map(Value::Str)
+                .map(Value::text)
                 .collect();
             Ok(Value::array(names))
         }
@@ -1145,7 +1145,7 @@ pub fn rt_file_find(args: &[Value]) -> Result<Value, CompileError> {
                 .filter_map(|e| {
                     let name = e.file_name().into_string().ok()?;
                     if matches_pattern(&name, &pattern) {
-                        Some(Value::Str(e.path().to_string_lossy().to_string()))
+                        Some(Value::text(e.path().to_string_lossy().to_string()))
                     } else {
                         None
                     }
@@ -1179,7 +1179,7 @@ pub fn rt_dir_walk(args: &[Value]) -> Result<Value, CompileError> {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                results.push(Value::Str(path.to_string_lossy().to_string()));
+                results.push(Value::text(path.to_string_lossy().to_string()));
                 if path.is_dir() {
                     walk_recursive(&path, results);
                 }
@@ -1195,7 +1195,7 @@ pub fn rt_dir_walk(args: &[Value]) -> Result<Value, CompileError> {
 /// Get current directory (returns Option<text>)
 pub fn rt_current_dir(_args: &[Value]) -> Result<Value, CompileError> {
     match std::env::current_dir() {
-        Ok(cwd) => Ok(make_some(Value::Str(cwd.to_string_lossy().to_string()))),
+        Ok(cwd) => Ok(make_some(Value::text(cwd.to_string_lossy().to_string()))),
         Err(_) => Ok(make_none()),
     }
 }
@@ -1203,8 +1203,8 @@ pub fn rt_current_dir(_args: &[Value]) -> Result<Value, CompileError> {
 /// Get current directory (returns plain text, for snpm compatibility)
 pub fn rt_get_cwd(_args: &[Value]) -> Result<Value, CompileError> {
     match std::env::current_dir() {
-        Ok(cwd) => Ok(Value::Str(cwd.to_string_lossy().to_string())),
-        Err(_) => Ok(Value::Str(String::new())),
+        Ok(cwd) => Ok(Value::text(cwd.to_string_lossy().to_string())),
+        Err(_) => Ok(Value::text(String::new())),
     }
 }
 
@@ -1299,21 +1299,21 @@ pub fn rt_file_close(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_path_basename(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let basename = Path::new(&path).file_name().and_then(|s| s.to_str()).unwrap_or("");
-    Ok(Value::Str(basename.to_string()))
+    Ok(Value::text(basename.to_string()))
 }
 
 /// Get dirname
 pub fn rt_path_dirname(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let dirname = Path::new(&path).parent().and_then(|p| p.to_str()).unwrap_or("");
-    Ok(Value::Str(dirname.to_string()))
+    Ok(Value::text(dirname.to_string()))
 }
 
 /// Get extension
 pub fn rt_path_ext(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let ext = Path::new(&path).extension().and_then(|s| s.to_str()).unwrap_or("");
-    Ok(Value::Str(ext.to_string()))
+    Ok(Value::text(ext.to_string()))
 }
 
 /// Get absolute path
@@ -1324,16 +1324,16 @@ pub fn rt_path_absolute(args: &[Value]) -> Result<Value, CompileError> {
 /// Get path separator
 pub fn rt_path_separator(_args: &[Value]) -> Result<Value, CompileError> {
     #[cfg(target_os = "windows")]
-    return Ok(Value::Str("\\".to_string()));
+    return Ok(Value::text("\\".to_string()));
     #[cfg(not(target_os = "windows"))]
-    Ok(Value::Str("/".to_string()))
+    Ok(Value::text("/".to_string()))
 }
 
 /// Get file stem
 pub fn rt_path_stem(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let stem = Path::new(&path).file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    Ok(Value::Str(stem.to_string()))
+    Ok(Value::text(stem.to_string()))
 }
 
 /// Get relative path
@@ -1345,8 +1345,8 @@ pub fn rt_path_relative(args: &[Value]) -> Result<Value, CompileError> {
     let base_obj = Path::new(&base);
 
     match path_obj.strip_prefix(base_obj) {
-        Ok(relative) => Ok(Value::Str(relative.to_string_lossy().to_string())),
-        Err(_) => Ok(Value::Str(path)),
+        Ok(relative) => Ok(Value::text(relative.to_string_lossy().to_string())),
+        Err(_) => Ok(Value::text(path)),
     }
 }
 
@@ -1356,7 +1356,7 @@ pub fn rt_path_join(args: &[Value]) -> Result<Value, CompileError> {
     let path2 = extract_path(args, 1)?;
 
     let joined = Path::new(&path1).join(&path2);
-    Ok(Value::Str(joined.to_string_lossy().to_string()))
+    Ok(Value::text(joined.to_string_lossy().to_string()))
 }
 
 // ============================================================================
@@ -1491,7 +1491,7 @@ pub fn rt_process_exists(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Get hostname
 pub fn rt_hostname(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Str(get_hostname()))
+    Ok(Value::text(get_hostname()))
 }
 
 fn get_hostname() -> String {
@@ -1725,12 +1725,12 @@ pub fn rt_readdir_entry(args: &[Value]) -> Result<Value, CompileError> {
     let h = if let Value::Int(v) = &args[0] {
         (*v - 1) as usize
     } else {
-        return Ok(Value::Str(String::new()));
+        return Ok(Value::text(String::new()));
     };
     let idx = if let Value::Int(v) = &args[1] {
         *v as usize
     } else {
-        return Ok(Value::Str(String::new()));
+        return Ok(Value::text(String::new()));
     };
     let handles = DIR_HANDLES.lock().unwrap();
     let entry = handles
@@ -1739,7 +1739,7 @@ pub fn rt_readdir_entry(args: &[Value]) -> Result<Value, CompileError> {
         .and_then(|s| s.entries.get(idx))
         .cloned()
         .unwrap_or_default();
-    Ok(Value::Str(entry))
+    Ok(Value::text(entry))
 }
 
 pub fn rt_readdir_free(args: &[Value]) -> Result<Value, CompileError> {

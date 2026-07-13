@@ -343,7 +343,7 @@ pub fn rt_timestamp_iso8601(_args: &[Value]) -> Result<Value, CompileError> {
     let seconds = time_of_day % 60;
     // Approximate date calculation from days since 1970-01-01
     let (year, month, day) = days_to_ymd(days_since_epoch as i64);
-    Ok(Value::Str(format!(
+    Ok(Value::text(format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
         year, month, day, hours, minutes, seconds
     )))

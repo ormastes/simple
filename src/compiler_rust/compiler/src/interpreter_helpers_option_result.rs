@@ -18,8 +18,8 @@ use super::super::super::{eval_arg, evaluate_expr, exec_block, Control, Enums, I
 /// Convert a Message to a Value
 pub(crate) fn message_to_value(msg: Message) -> Value {
     match msg {
-        Message::Value(s) => Value::Str(s),
-        Message::Bytes(b) => Value::Str(String::from_utf8_lossy(&b).to_string()),
+        Message::Value(s) => Value::text(s),
+        Message::Bytes(b) => Value::text(String::from_utf8_lossy(&b).to_string()),
     }
 }
 

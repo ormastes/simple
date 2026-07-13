@@ -140,7 +140,7 @@ fn parse_request(path: &Path) -> Option<BridgeRequest> {
 pub fn rt_host_wm_server_start(_args: &[Value]) -> Result<Value, CompileError> {
     let dir = std::env::temp_dir().join(format!("simple-host-wm-{}-{}", std::process::id(), now_nanos()));
     ensure_bridge_dirs(&dir).map_err(|e| CompileError::runtime(format!("rt_host_wm_server_start: {e}")))?;
-    Ok(Value::Str(dir.to_string_lossy().to_string()))
+    Ok(Value::text(dir.to_string_lossy().to_string()))
 }
 
 pub fn rt_host_wm_server_cleanup(args: &[Value]) -> Result<Value, CompileError> {
@@ -191,14 +191,14 @@ pub fn rt_host_wm_server_poll(args: &[Value]) -> Result<Value, CompileError> {
                 Value::Int(req.client_id),
                 Value::Int(req.method),
                 Value::Int(req.window_id),
-                Value::Str(req.title),
+                Value::text(req.title),
                 Value::Int(req.x),
                 Value::Int(req.y),
                 Value::Int(req.w),
                 Value::Int(req.h),
-                Value::Str(req.content),
+                Value::text(req.content),
                 Value::Int(req.process_id),
-                Value::Str(req.app_id),
+                Value::text(req.app_id),
             ]));
         }
         let _ = fs::remove_file(path);

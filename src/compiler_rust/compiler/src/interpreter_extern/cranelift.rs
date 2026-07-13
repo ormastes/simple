@@ -22,15 +22,15 @@ fn value_to_runtime_string(val: &Value) -> RuntimeValue {
 fn runtime_string_to_value(rv: RuntimeValue) -> Value {
     let len = simple_runtime::value::rt_string_len(rv);
     if len <= 0 {
-        return Value::Str(String::new());
+        return Value::text(String::new());
     }
     let data = simple_runtime::value::rt_string_data(rv);
     if data.is_null() {
-        return Value::Str(String::new());
+        return Value::text(String::new());
     }
     unsafe {
         let slice = std::slice::from_raw_parts(data, len as usize);
-        Value::Str(String::from_utf8_lossy(slice).to_string())
+        Value::text(String::from_utf8_lossy(slice).to_string())
     }
 }
 
@@ -790,7 +790,7 @@ pub fn rt_exec(args: &[Value]) -> Result<Value, CompileError> {
 /// Get file hash
 pub fn rt_file_hash(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
-        return Ok(Value::Str(String::new()));
+        return Ok(Value::text(String::new()));
     }
     let path = value_to_runtime_string(&args[0]);
     let result = simple_runtime::value::cli_sffi::rt_file_hash(path);

@@ -50,8 +50,8 @@ pub fn rt_http_get(args: &[Value]) -> Result<Value, CompileError> {
         _ => {
             return Ok(Value::Tuple(vec![
                 Value::Int(-1),
-                Value::Str(String::new()),
-                Value::Str("rt_http_get: missing or invalid URL argument".to_string()),
+                Value::text(String::new()),
+                Value::text("rt_http_get: missing or invalid URL argument".to_string()),
             ]))
         }
     };
@@ -61,14 +61,14 @@ pub fn rt_http_get(args: &[Value]) -> Result<Value, CompileError> {
             let body = response.into_string().unwrap_or_default();
             Ok(Value::Tuple(vec![
                 Value::Int(status),
-                Value::Str(body),
-                Value::Str(String::new()),
+                Value::text(body),
+                Value::text(String::new()),
             ]))
         }
         Err(e) => Ok(Value::Tuple(vec![
             Value::Int(-1),
-            Value::Str(String::new()),
-            Value::Str(format!("rt_http_get error: {e}")),
+            Value::text(String::new()),
+            Value::text(format!("rt_http_get error: {e}")),
         ])),
     }
 }
@@ -87,7 +87,7 @@ pub fn rt_http_get(args: &[Value]) -> Result<Value, CompileError> {
 /// `rt_http_*` extern family behaves consistently under the bootstrap interpreter.
 pub fn rt_http_request(args: &[Value]) -> Result<Value, CompileError> {
     fn err_tuple(msg: String) -> Value {
-        Value::Tuple(vec![Value::Int(-1), Value::Str(String::new()), Value::Str(msg)])
+        Value::Tuple(vec![Value::Int(-1), Value::text(String::new()), Value::text(msg)])
     }
     let method = match args.first() {
         Some(Value::Str(s)) => s.clone(),
@@ -142,7 +142,7 @@ pub fn rt_http_request(args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Tuple(vec![
                 Value::Int(status),
                 Value::Str(body),
-                Value::Str(String::new()),
+                Value::text(String::new()),
             ]))
         }
         // ureq surfaces non-2xx/3xx as Err(Status); return the real code + body, not -1.
@@ -150,8 +150,8 @@ pub fn rt_http_request(args: &[Value]) -> Result<Value, CompileError> {
             let body = response.into_string().unwrap_or_default();
             Ok(Value::Tuple(vec![
                 Value::Int(code as i64),
-                Value::Str(body),
-                Value::Str(String::new()),
+                Value::text(body),
+                Value::text(String::new()),
             ]))
         }
         Err(e) => Ok(err_tuple(format!("rt_http_request error: {e}"))),

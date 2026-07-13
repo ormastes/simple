@@ -98,13 +98,13 @@ fn arch_name_to_target(name: &str) -> Option<simple_common::target::Target> {
 /// Returns the backend name ("cranelift-jit" or "llvm-jit") for a JIT instance.
 pub fn rt_jit_backend_name(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
-        return Ok(Value::Str("invalid".into()));
+        return Ok(Value::text("invalid".into()));
     }
     let handle = value_to_i64(&args[0]);
     let instances = JIT_INSTANCES.lock().unwrap();
     match instances.get(&handle) {
-        Some(em) => Ok(Value::Str(em.backend_name().to_string())),
-        None => Ok(Value::Str("invalid".into())),
+        Some(em) => Ok(Value::text(em.backend_name().to_string())),
+        None => Ok(Value::text("invalid".into())),
     }
 }
 
@@ -112,7 +112,7 @@ pub fn rt_jit_backend_name(args: &[Value]) -> Result<Value, CompileError> {
 /// Compiles Simple source through full pipeline. Returns "" on success, error on failure.
 pub fn rt_jit_compile_source(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
-        return Ok(Value::Str("missing arguments".into()));
+        return Ok(Value::text("missing arguments".into()));
     }
     let handle = value_to_i64(&args[0]);
     let source = value_to_str(&args[1]);
@@ -120,25 +120,25 @@ pub fn rt_jit_compile_source(args: &[Value]) -> Result<Value, CompileError> {
     let mut parser = Parser::new(&source);
     let ast = match parser.parse() {
         Ok(a) => a,
-        Err(e) => return Ok(Value::Str(format!("parse: {:?}", e))),
+        Err(e) => return Ok(Value::text(format!("parse: {:?}", e))),
     };
     let hir_module = match hir::lower(&ast) {
         Ok(h) => h,
-        Err(e) => return Ok(Value::Str(format!("hir: {:?}", e))),
+        Err(e) => return Ok(Value::text(format!("hir: {:?}", e))),
     };
     let mir_module = match lower_to_mir(&hir_module) {
         Ok(m) => m,
-        Err(e) => return Ok(Value::Str(format!("mir: {:?}", e))),
+        Err(e) => return Ok(Value::text(format!("mir: {:?}", e))),
     };
 
     let mut instances = JIT_INSTANCES.lock().unwrap();
     let em = match instances.get_mut(&handle) {
         Some(j) => j,
-        None => return Ok(Value::Str("invalid handle".into())),
+        None => return Ok(Value::text("invalid handle".into())),
     };
     match em.compile_module(&mir_module) {
-        Ok(_) => Ok(Value::Str(String::new())),
-        Err(e) => Ok(Value::Str(format!("codegen: {}", e))),
+        Ok(_) => Ok(Value::text(String::new())),
+        Err(e) => Ok(Value::text(format!("codegen: {}", e))),
     }
 }
 

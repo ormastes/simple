@@ -430,7 +430,7 @@ fn eval_binary_op(left: &Value, op: &BinOp, right: &Value) -> Result<Value, Comp
         (Value::Float(l), BinOp::LtEq, Value::Float(r)) => Ok(Value::Bool(l <= r)),
         (Value::Float(l), BinOp::GtEq, Value::Float(r)) => Ok(Value::Bool(l >= r)),
         // String operations
-        (Value::Str(l), BinOp::Add, Value::Str(r)) => Ok(Value::Str(format!("{}{}", l, r))),
+        (Value::Str(l), BinOp::Add, Value::Str(r)) => Ok(Value::text(format!("{}{}", l, r))),
         (Value::Str(l), BinOp::Eq, Value::Str(r)) => Ok(Value::Bool(l == r)),
         (Value::Str(l), BinOp::NotEq, Value::Str(r)) => Ok(Value::Bool(l != r)),
         _ => Err(CompileError::runtime(format!(

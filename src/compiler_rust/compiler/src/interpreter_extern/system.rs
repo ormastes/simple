@@ -142,11 +142,11 @@ pub fn rt_env_set(args: &[Value]) -> Result<Value, CompileError> {
     }
 
     let key = match &args[0] {
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => s.as_ref().clone(),
         _ => return Err(CompileError::runtime("rt_env_set: key must be a string")),
     };
     let value = match &args[1] {
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => s.as_ref().clone(),
         _ => return Err(CompileError::runtime("rt_env_set: value must be a string")),
     };
 
@@ -171,7 +171,7 @@ pub fn rt_env_get(args: &[Value]) -> Result<Value, CompileError> {
     }
 
     let key = match &args[0] {
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => s.as_ref().clone(),
         _ => return Err(CompileError::runtime("rt_env_get: key must be a string")),
     };
 
@@ -208,7 +208,7 @@ pub fn rt_env_get_i64(args: &[Value]) -> Result<Value, CompileError> {
     }
 
     let key = match &args[0] {
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => s.as_ref().clone(),
         _ => return Err(CompileError::runtime("rt_env_get_i64: key must be a string")),
     };
     let default_value = args[1].as_int()?;
@@ -251,7 +251,7 @@ pub fn rt_env_exists(args: &[Value]) -> Result<Value, CompileError> {
     }
 
     let key = match &args[0] {
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => s.as_ref().clone(),
         _ => return Err(CompileError::runtime("rt_env_exists: key must be a string")),
     };
 
@@ -276,7 +276,7 @@ pub fn rt_env_remove(args: &[Value]) -> Result<Value, CompileError> {
     }
 
     let key = match &args[0] {
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => s.as_ref().clone(),
         _ => return Err(CompileError::runtime("rt_env_remove: key must be a string")),
     };
 
@@ -413,7 +413,7 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
     }
 
     let cmd = match &args[0] {
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => s.as_ref().clone(),
         _ => return Err(CompileError::runtime("rt_process_run: cmd must be a string")),
     };
 
@@ -422,7 +422,7 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
             let mut v = Vec::new();
             for item in arr.iter() {
                 if let Value::Str(s) = item {
-                    v.push(s.clone());
+                    v.push(s.as_ref().clone());
                 }
             }
             v
@@ -434,7 +434,7 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let mut command = std::process::Command::new(&cmd);
+    let mut command = std::process::Command::new(&*cmd);
     clear_simple_child_stack_env(&mut command);
     let output = command.args(&cmd_args).stdin(std::process::Stdio::null()).output();
 
@@ -444,14 +444,14 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             let exit_code = out.status.code().unwrap_or(-1) as i64;
             Ok(Value::Tuple(vec![
-                Value::Str(stdout),
-                Value::Str(stderr),
+                Value::text(stdout),
+                Value::text(stderr),
                 Value::Int(exit_code),
             ]))
         }
         Err(_) => Ok(Value::Tuple(vec![
-            Value::Str(String::new()),
-            Value::Str(String::new()),
+            Value::text(String::new()),
+            Value::text(String::new()),
             Value::Int(-1),
         ])),
     }
@@ -471,7 +471,7 @@ pub fn rt_process_execute(args: &[Value]) -> Result<Value, CompileError> {
     }
 
     let cmd = match &args[0] {
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => s.as_ref().clone(),
         _ => return Err(CompileError::runtime("rt_process_execute: cmd must be a string")),
     };
 
@@ -480,7 +480,7 @@ pub fn rt_process_execute(args: &[Value]) -> Result<Value, CompileError> {
             let mut v = Vec::new();
             for item in arr.iter() {
                 if let Value::Str(s) = item {
-                    v.push(s.clone());
+                    v.push(s.as_ref().clone());
                 }
             }
             v
@@ -492,7 +492,7 @@ pub fn rt_process_execute(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let mut command = std::process::Command::new(&cmd);
+    let mut command = std::process::Command::new(&*cmd);
     clear_simple_child_stack_env(&mut command);
     let status = command
         .args(&cmd_args)
@@ -527,7 +527,7 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
     }
 
     let cmd = match &args[0] {
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => s.as_ref().clone(),
         _ => return Err(CompileError::runtime("rt_process_run_timeout: cmd must be a string")),
     };
 
@@ -536,7 +536,7 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
             let mut v = Vec::new();
             for item in arr.iter() {
                 if let Value::Str(s) = item {
-                    v.push(s.clone());
+                    v.push(s.as_ref().clone());
                 }
             }
             v
@@ -557,7 +557,7 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let mut command = std::process::Command::new(&cmd);
+    let mut command = std::process::Command::new(&*cmd);
     clear_simple_child_stack_env(&mut command);
     let mut child = match command
         .args(&cmd_args)
@@ -569,8 +569,8 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
         Ok(child) => child,
         Err(_) => {
             return Ok(Value::Tuple(vec![
-                Value::Str(String::new()),
-                Value::Str(String::new()),
+                Value::text(String::new()),
+                Value::text(String::new()),
                 Value::Int(-1),
             ]));
         }
@@ -578,13 +578,13 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
 
     match finish_child_output_with_timeout(child, timeout_ms) {
         Ok((stdout, stderr, exit_code)) => Ok(Value::Tuple(vec![
-            Value::Str(stdout),
-            Value::Str(stderr),
+            Value::text(stdout),
+            Value::text(stderr),
             Value::Int(exit_code),
         ])),
         Err(()) => Ok(Value::Tuple(vec![
-            Value::Str(String::new()),
-            Value::Str("Process timed out".to_string()),
+            Value::text(String::new()),
+            Value::text("Process timed out".to_string()),
             Value::Int(-1),
         ])),
     }
@@ -607,7 +607,7 @@ pub fn rt_process_spawn_async(args: &[Value]) -> Result<Value, CompileError> {
     }
 
     let cmd = match &args[0] {
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => s.as_ref().clone(),
         _ => return Err(CompileError::runtime("rt_process_spawn_async: cmd must be a string")),
     };
 
@@ -616,7 +616,7 @@ pub fn rt_process_spawn_async(args: &[Value]) -> Result<Value, CompileError> {
             let mut v = Vec::new();
             for item in arr.iter() {
                 if let Value::Str(s) = item {
-                    v.push(s.clone());
+                    v.push(s.as_ref().clone());
                 }
             }
             v
@@ -628,7 +628,7 @@ pub fn rt_process_spawn_async(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let mut command = std::process::Command::new(&cmd);
+    let mut command = std::process::Command::new(&*cmd);
     clear_simple_child_stack_env(&mut command);
     match command
         .args(&cmd_args)
@@ -851,9 +851,9 @@ mod tests {
             std::env::set_var("_SIMPLE_STACK_SET", "1");
         }
         let result = rt_process_run(&[
-            Value::Str("/bin/sh".to_string()),
+            Value::text("/bin/sh".to_string()),
             Value::Array(Arc::new(vec![
-                Value::Str("-c".to_string()),
+                Value::text("-c".to_string()),
                 Value::Str(
                     "if env | grep '^_SIMPLE_STACK_SET=' >/dev/null; then printf present; else printf unset; fi"
                         .to_string(),
@@ -883,19 +883,19 @@ mod tests {
     #[test]
     fn lexer_source_slice_handler_preserves_owned_text() {
         assert_eq!(
-            rt_lexer_source_set(&[Value::Str("aéz".to_string())]).unwrap(),
+            rt_lexer_source_set(&[Value::text("aéz".to_string())]).unwrap(),
             Value::Bool(true)
         );
         let saved = rt_lexer_source_slice(&[Value::Int(1), Value::Int(2)]).unwrap();
-        assert_eq!(saved, Value::Str("é".to_string()));
+        assert_eq!(saved, Value::text("é".to_string()));
         assert_eq!(
-            rt_lexer_source_set(&[Value::Str("new".to_string())]).unwrap(),
+            rt_lexer_source_set(&[Value::text("new".to_string())]).unwrap(),
             Value::Bool(true)
         );
-        assert_eq!(saved, Value::Str("é".to_string()));
+        assert_eq!(saved, Value::text("é".to_string()));
         assert_eq!(
             rt_lexer_source_slice(&[Value::Int(0), Value::Int(3)]).unwrap(),
-            Value::Str("new".to_string())
+            Value::text("new".to_string())
         );
         assert_eq!(
             rt_lexer_source_slice(&[Value::Int(1), Value::Int(99)]).unwrap(),

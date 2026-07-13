@@ -148,7 +148,7 @@ pub fn rt_error_message(args: &[Value]) -> Result<Value, CompileError> {
                 ErrorContext::new().with_code(codes::INVALID_OPERATION),
             )
         })?;
-        Ok(Value::Str(format!("{}", err)))
+        Ok(Value::text(format!("{}", err)))
     })
 }
 

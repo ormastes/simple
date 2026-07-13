@@ -326,7 +326,7 @@ pub fn rt_env_var_names(args: &[Value]) -> Result<Value, CompileError> {
         let stack = reg
             .get(&handle)
             .ok_or_else(|| invalid_handle("rt_env_var_names", handle))?;
-        let names: Vec<Value> = stack.env.keys().map(|k| Value::Str(k.clone())).collect();
+        let names: Vec<Value> = stack.env.keys().map(|k| Value::text(k.clone())).collect();
         Ok(Value::array(names))
     })
 }

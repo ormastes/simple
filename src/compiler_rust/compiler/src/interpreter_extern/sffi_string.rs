@@ -175,14 +175,14 @@ pub fn rt_string_builder_finish_fn(args: &[Value]) -> Result<Value, CompileError
     // so the interpreter returns a proper text value (not a raw pointer int).
     let len = rt_string_len(rv);
     if len <= 0 {
-        return Ok(Value::Str(String::new()));
+        return Ok(Value::text(String::new()));
     }
     let data = rt_string_data(rv);
     if data.is_null() {
-        return Ok(Value::Str(String::new()));
+        return Ok(Value::text(String::new()));
     }
     let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
-    Ok(Value::Str(String::from_utf8_lossy(bytes).into_owned()))
+    Ok(Value::text(String::from_utf8_lossy(bytes).into_owned()))
 }
 
 /// Return the current accumulated length of the builder (i64).

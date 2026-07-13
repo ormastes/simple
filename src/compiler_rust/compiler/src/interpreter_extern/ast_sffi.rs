@@ -217,7 +217,7 @@ pub fn rt_ast_expr_tag(args: &[Value]) -> Result<Value, CompileError> {
             Expr::VolatileAccess { .. } => "VolatileAccess",
             _ => "UnknownExpr",
         };
-        Ok(Value::Str(tag.to_string()))
+        Ok(Value::text(tag.to_string()))
     })
 }
 
@@ -266,7 +266,7 @@ pub fn rt_ast_expr_string_value(args: &[Value]) -> Result<Value, CompileError> {
             .get(&handle)
             .ok_or_else(|| invalid_handle("rt_ast_expr_string_value", handle))?;
         match expr {
-            Expr::String(s) => Ok(Value::Str(s.clone())),
+            Expr::String(s) => Ok(Value::text(s.clone())),
             _ => Err(CompileError::semantic_with_context(
                 "rt_ast_expr_string_value: not a String expression".to_string(),
                 ErrorContext::new().with_code(codes::TYPE_MISMATCH),
@@ -302,7 +302,7 @@ pub fn rt_ast_expr_ident_name(args: &[Value]) -> Result<Value, CompileError> {
             .get(&handle)
             .ok_or_else(|| invalid_handle("rt_ast_expr_ident_name", handle))?;
         match expr {
-            Expr::Identifier(name) => Ok(Value::Str(name.clone())),
+            Expr::Identifier(name) => Ok(Value::text(name.clone())),
             _ => Err(CompileError::semantic_with_context(
                 "rt_ast_expr_ident_name: not an Identifier expression".to_string(),
                 ErrorContext::new().with_code(codes::TYPE_MISMATCH),
@@ -354,7 +354,7 @@ pub fn rt_ast_expr_binary_op(args: &[Value]) -> Result<Value, CompileError> {
                     BinOp::Compose => ">>",
                     BinOp::LayerConnect => "~>",
                 };
-                Ok(Value::Str(s.to_string()))
+                Ok(Value::text(s.to_string()))
             }
             _ => Err(CompileError::semantic_with_context(
                 "rt_ast_expr_binary_op: not a Binary expression".to_string(),
@@ -426,7 +426,7 @@ pub fn rt_ast_expr_unary_op(args: &[Value]) -> Result<Value, CompileError> {
                     UnaryOp::ChannelRecv => "<-",
                     UnaryOp::Move => "move",
                 };
-                Ok(Value::Str(s.to_string()))
+                Ok(Value::text(s.to_string()))
             }
             _ => Err(CompileError::semantic_with_context(
                 "rt_ast_expr_unary_op: not a Unary expression".to_string(),
@@ -550,7 +550,7 @@ pub fn rt_ast_arg_name(args: &[Value]) -> Result<Value, CompileError> {
             .get(&handle)
             .ok_or_else(|| invalid_handle("rt_ast_arg_name", handle))?;
         match &arg.name {
-            Some(name) => Ok(Value::Str(name.clone())),
+            Some(name) => Ok(Value::text(name.clone())),
             None => Ok(Value::Nil),
         }
     })
@@ -586,7 +586,7 @@ pub fn rt_ast_expr_method_name(args: &[Value]) -> Result<Value, CompileError> {
             .get(&handle)
             .ok_or_else(|| invalid_handle("rt_ast_expr_method_name", handle))?;
         match expr {
-            Expr::MethodCall { method, .. } => Ok(Value::Str(method.clone())),
+            Expr::MethodCall { method, .. } => Ok(Value::text(method.clone())),
             _ => Err(CompileError::semantic_with_context(
                 "rt_ast_expr_method_name: not a MethodCall expression".to_string(),
                 ErrorContext::new().with_code(codes::TYPE_MISMATCH),
@@ -670,7 +670,7 @@ pub fn rt_ast_expr_field_name(args: &[Value]) -> Result<Value, CompileError> {
             .get(&handle)
             .ok_or_else(|| invalid_handle("rt_ast_expr_field_name", handle))?;
         match expr {
-            Expr::FieldAccess { field, .. } => Ok(Value::Str(field.clone())),
+            Expr::FieldAccess { field, .. } => Ok(Value::text(field.clone())),
             _ => Err(CompileError::semantic_with_context(
                 "rt_ast_expr_field_name: not a FieldAccess expression".to_string(),
                 ErrorContext::new().with_code(codes::TYPE_MISMATCH),

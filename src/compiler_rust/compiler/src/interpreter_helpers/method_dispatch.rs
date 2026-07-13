@@ -32,42 +32,42 @@ pub(crate) fn call_method_on_value(
         Value::Str(s) => match method {
             "len" | "length" => return Ok(Value::Int(s.chars().count() as i64)),
             "is_empty" => return Ok(Value::Bool(s.is_empty())),
-            "to_string" => return Ok(Value::Str(s.clone())),
-            "chars" => return Ok(Value::array(s.chars().map(|c| Value::Str(c.to_string())).collect())),
-            "trim" | "strip" => return Ok(Value::Str(s.trim().to_string())),
-            "to_upper" | "upper" | "uppercase" => return Ok(Value::Str(s.to_uppercase())),
-            "to_lower" | "lower" | "lowercase" => return Ok(Value::Str(s.to_lowercase())),
+            "to_string" => return Ok(Value::shared_text(s.clone())),
+            "chars" => return Ok(Value::array(s.chars().map(|c| Value::text(c.to_string())).collect())),
+            "trim" | "strip" => return Ok(Value::text(s.trim().to_string())),
+            "to_upper" | "upper" | "uppercase" => return Ok(Value::text(s.to_uppercase())),
+            "to_lower" | "lower" | "lowercase" => return Ok(Value::text(s.to_lowercase())),
             "contains" | "includes" => {
                 if let Some(Value::Str(needle)) = _args.first() {
-                    return Ok(Value::Bool(s.contains(needle)));
+                    return Ok(Value::Bool(s.contains(needle.as_str())));
                 }
                 return Ok(Value::Bool(false));
             }
             "starts_with" => {
                 if let Some(Value::Str(needle)) = _args.first() {
-                    return Ok(Value::Bool(s.starts_with(needle)));
+                    return Ok(Value::Bool(s.starts_with(needle.as_str())));
                 }
                 return Ok(Value::Bool(false));
             }
             "ends_with" => {
                 if let Some(Value::Str(needle)) = _args.first() {
-                    return Ok(Value::Bool(s.ends_with(needle)));
+                    return Ok(Value::Bool(s.ends_with(needle.as_str())));
                 }
                 return Ok(Value::Bool(false));
             }
             "replace" => {
                 let old = _args.first().map(Value::to_key_string).unwrap_or_default();
                 let new = _args.get(1).map(Value::to_key_string).unwrap_or_default();
-                return Ok(Value::Str(s.replace(&old, &new)));
+                return Ok(Value::text(s.replace(&old, &new)));
             }
             "replace_first" => {
                 let old = _args.first().map(Value::to_key_string).unwrap_or_default();
                 let new = _args.get(1).map(Value::to_key_string).unwrap_or_default();
-                return Ok(Value::Str(s.replacen(&old, &new, 1)));
+                return Ok(Value::text(s.replacen(&old, &new, 1)));
             }
             "index_of" => {
                 if let Some(Value::Str(needle)) = _args.first() {
-                    if let Some(idx) = s.find(needle) {
+                    if let Some(idx) = s.find(needle.as_str()) {
                         return Ok(Value::Int(s[..idx].chars().count() as i64));
                     }
                 }
@@ -195,7 +195,7 @@ pub(crate) fn call_method_on_value(
                     })
                     .unwrap_or(",");
                 let joined: String = arr.iter().map(|v| v.to_display_string()).collect::<Vec<_>>().join(sep);
-                return Ok(Value::Str(joined));
+                return Ok(Value::text(joined));
             }
             "reverse" | "reversed" => {
                 let mut rev = arr.to_vec();
@@ -486,7 +486,7 @@ pub(crate) fn call_method_on_value(
         // Int methods
         Value::Int(n) => match method {
             "abs" => return Ok(Value::Int(n.abs())),
-            "to_string" | "to_text" => return Ok(Value::Str(n.to_string())),
+            "to_string" | "to_text" => return Ok(Value::text(n.to_string())),
             "to_float" | "to_f64" => return Ok(Value::Float(*n as f64)),
             "to_f32" => return Ok(Value::Float32(*n as f32)),
             "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
@@ -507,7 +507,7 @@ pub(crate) fn call_method_on_value(
         // used by `value_impl.rs::as_int` and `value_bridge.rs:288`.
         Value::UInt { value, .. } => match method {
             "abs" => return Ok(recv_val.clone()), // unsigned: identity
-            "to_string" | "to_text" => return Ok(Value::Str(value.to_string())),
+            "to_string" | "to_text" => return Ok(Value::text(value.to_string())),
             "to_float" | "to_f64" => return Ok(Value::Float(*value as f64)),
             "to_f32" => return Ok(Value::Float32(*value as f32)),
             "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
@@ -527,7 +527,7 @@ pub(crate) fn call_method_on_value(
             "floor" => return Ok(Value::Float(f.floor())),
             "ceil" => return Ok(Value::Float(f.ceil())),
             "round" => return Ok(Value::Float(f.round())),
-            "to_string" | "to_text" => return Ok(Value::Str(f.to_string())),
+            "to_string" | "to_text" => return Ok(Value::text(f.to_string())),
             "to_int" | "truncate" => return Ok(Value::Int(f.trunc() as i64)),
             "to_f64" => return Ok(Value::Float(*f)),
             "to_f32" => return Ok(Value::Float32(*f as f32)),
@@ -549,7 +549,7 @@ pub(crate) fn call_method_on_value(
             "floor" => return Ok(Value::Float32(f.floor())),
             "ceil" => return Ok(Value::Float32(f.ceil())),
             "round" => return Ok(Value::Float32(f.round())),
-            "to_string" | "to_text" => return Ok(Value::Str(f.to_string())),
+            "to_string" | "to_text" => return Ok(Value::text(f.to_string())),
             "to_int" | "truncate" => return Ok(Value::Int(f.trunc() as i64)),
             "to_f64" => return Ok(Value::Float(*f as f64)),
             "to_f32" => return Ok(Value::Float32(*f)),
@@ -925,9 +925,9 @@ mod tests {
         let impl_methods = HashMap::new();
 
         let first = call_method_on_value(
-            Value::Str("hello".to_string()),
+            Value::text("hello".to_string()),
             "replace",
-            &[Value::Str("h".to_string()), Value::Str("H".to_string())],
+            &[Value::text("h".to_string()), Value::text("H".to_string())],
             &mut env,
             &mut functions,
             &mut classes,
@@ -939,7 +939,7 @@ mod tests {
         let chained = call_method_on_value(
             first,
             "replace",
-            &[Value::Str("e".to_string()), Value::Str("E".to_string())],
+            &[Value::text("e".to_string()), Value::text("E".to_string())],
             &mut env,
             &mut functions,
             &mut classes,
@@ -948,7 +948,7 @@ mod tests {
         )
         .expect("chained replace should dispatch");
 
-        assert_eq!(chained, Value::Str("HEllo".to_string()));
+        assert_eq!(chained, Value::text("HEllo".to_string()));
     }
 }
 

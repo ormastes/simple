@@ -556,7 +556,7 @@ mod tests {
                 Value::Int(id),
                 Value::Int(0),
                 Value::Int(0),
-                Value::Str("A".to_string()),
+                Value::text("A".to_string()),
                 Value::Int(0xFFFFFFFFu32 as i64),
                 Value::Int(0xFF000000u32 as i64),
             ],

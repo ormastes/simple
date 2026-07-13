@@ -100,14 +100,14 @@ fn indexed_string_char(s: &str, raw_idx: i64) -> Result<Value, CompileError> {
         let len = s.len() as i64;
         let idx = if raw_idx < 0 { len + raw_idx } else { raw_idx };
         if (0..len).contains(&idx) {
-            return Ok(Value::Str(String::from(s.as_bytes()[idx as usize] as char)));
+            return Ok(Value::text(String::from(s.as_bytes()[idx as usize] as char)));
         }
         return Err(string_index_out_of_bounds(s, raw_idx, len));
     }
 
     if raw_idx >= 0 {
         if let Some(c) = s.chars().nth(raw_idx as usize) {
-            return Ok(Value::Str(c.to_string()));
+            return Ok(Value::text(c.to_string()));
         }
         let len = s.chars().count() as i64;
         return Err(string_index_out_of_bounds(s, raw_idx, len));
@@ -116,7 +116,7 @@ fn indexed_string_char(s: &str, raw_idx: i64) -> Result<Value, CompileError> {
     let len = s.chars().count() as i64;
     let idx = len + raw_idx;
     if (0..len).contains(&idx) {
-        return Ok(Value::Str(
+        return Ok(Value::text(
             s.chars()
                 .nth(idx as usize)
                 .expect("bounds checked string character index")
@@ -409,7 +409,7 @@ pub(super) fn eval_collection_expr(
                                 .get(start_idx..end_idx.min(chars.len()))
                                 .map(|s| s.iter().collect())
                                 .unwrap_or_default();
-                            Ok(Value::Str(sliced))
+                            Ok(Value::text(sliced))
                         }
                         Value::Object {
                             ref class, ref fields, ..
@@ -844,7 +844,7 @@ pub(super) fn eval_collection_expr(
                 Value::Str(s) => {
                     let chars: Vec<char> = s.chars().collect();
                     let sliced = slice_collection(&chars, start_idx, end_idx, step_val);
-                    Ok(Value::Str(sliced.into_iter().collect()))
+                    Ok(Value::text(sliced.into_iter().collect::<String>()))
                 }
                 Value::Tuple(tup) => Ok(Value::Tuple(slice_collection(&tup, start_idx, end_idx, step_val))),
                 Value::LabeledTuple { values, .. } => {

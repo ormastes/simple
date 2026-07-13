@@ -156,7 +156,7 @@ pub(super) fn eval_builtin(
             let Value::Str(key) = eval_arg(
                 args,
                 0,
-                Value::Str(String::new()),
+                Value::text(String::new()),
                 env,
                 functions,
                 classes,
@@ -166,7 +166,7 @@ pub(super) fn eval_builtin(
             else {
                 return Err(CompileError::runtime("sys_env_bool expects string argument"));
             };
-            let value = std::env::var(key).unwrap_or_default().to_ascii_lowercase();
+            let value = std::env::var(key.as_str()).unwrap_or_default().to_ascii_lowercase();
             Ok(Some(Value::Bool(matches!(value.as_str(), "1" | "true" | "yes" | "on"))))
         }
         "len" => {
@@ -431,12 +431,12 @@ pub(super) fn eval_builtin(
                 } else {
                     "threaded"
                 };
-                return Ok(Some(Value::Str(mode.to_string())));
+                return Ok(Some(Value::text(mode.to_string())));
             }
             let mode_arg = eval_arg(
                 args,
                 0,
-                Value::Str("threaded".to_string()),
+                Value::text("threaded".to_string()),
                 env,
                 functions,
                 classes,
@@ -523,7 +523,7 @@ pub(super) fn eval_builtin(
             let error = eval_arg(
                 args,
                 0,
-                Value::Str("error".to_string()),
+                Value::text("error".to_string()),
                 env,
                 functions,
                 classes,
@@ -672,14 +672,14 @@ pub(super) fn eval_builtin(
             let val = eval_arg(
                 args,
                 0,
-                Value::Str("".to_string()),
+                Value::text("".to_string()),
                 env,
                 functions,
                 classes,
                 enums,
                 impl_methods,
             )?;
-            Ok(Some(Value::Str(val.to_display_string())))
+            Ok(Some(Value::text(val.to_display_string())))
         }
         "bool" => {
             let val = eval_arg(

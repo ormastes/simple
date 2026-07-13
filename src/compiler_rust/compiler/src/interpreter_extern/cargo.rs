@@ -12,8 +12,8 @@ fn create_build_result(success: bool, exit_code: i64, stdout: String, stderr: St
     let mut fields = std::collections::HashMap::new();
     fields.insert("success".to_string(), Value::Bool(success));
     fields.insert("exit_code".to_string(), Value::Int(exit_code));
-    fields.insert("stdout".to_string(), Value::Str(stdout));
-    fields.insert("stderr".to_string(), Value::Str(stderr));
+    fields.insert("stdout".to_string(), Value::text(stdout));
+    fields.insert("stderr".to_string(), Value::text(stderr));
     fields.insert("duration_ms".to_string(), Value::Int(duration_ms));
     Value::dict(fields)
 }
@@ -31,8 +31,8 @@ fn create_test_result(
     let mut fields = std::collections::HashMap::new();
     fields.insert("success".to_string(), Value::Bool(success));
     fields.insert("exit_code".to_string(), Value::Int(exit_code));
-    fields.insert("stdout".to_string(), Value::Str(stdout));
-    fields.insert("stderr".to_string(), Value::Str(stderr));
+    fields.insert("stdout".to_string(), Value::text(stdout));
+    fields.insert("stderr".to_string(), Value::text(stderr));
     fields.insert("tests_run".to_string(), Value::Int(tests_run));
     fields.insert("tests_passed".to_string(), Value::Int(tests_passed));
     fields.insert("tests_failed".to_string(), Value::Int(tests_failed));
@@ -55,7 +55,7 @@ fn create_test_result(
 pub fn rt_cargo_build(args: &[Value]) -> Result<Value, CompileError> {
     // Extract arguments
     let profile = match args.first() {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         _ => "debug".to_string(),
     };
 
@@ -63,7 +63,7 @@ pub fn rt_cargo_build(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::Array(arr)) => arr
             .iter()
             .filter_map(|v| match v {
-                Value::Str(s) => Some(s.clone()),
+                Value::Str(s) => Some(s.as_ref().clone()),
                 _ => None,
             })
             .collect::<Vec<String>>(),

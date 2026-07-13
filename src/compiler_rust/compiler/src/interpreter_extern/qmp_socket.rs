@@ -47,7 +47,7 @@ pub fn rt_unix_socket_connect(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Str(s)) => s.clone(),
             _ => return Ok(Value::Int(-1)),
         };
-        match UnixStream::connect(&path) {
+        match UnixStream::connect(&*path) {
             Ok(stream) => {
                 let mut guard = CONNS.lock().unwrap();
                 let table = guard.get_or_insert_with(ConnTable::new);
@@ -110,7 +110,7 @@ pub fn rt_fd_read_until(args: &[Value]) -> Result<Value, CompileError> {
     {
         let fd = match args.first() {
             Some(Value::Int(n)) => *n,
-            _ => return Ok(Value::Str(String::new())),
+            _ => return Ok(Value::text(String::new())),
         };
         let stop = match args.get(1) {
             Some(Value::Int(n)) => *n as u8,
@@ -137,15 +137,15 @@ pub fn rt_fd_read_until(args: &[Value]) -> Result<Value, CompileError> {
                         Err(_) => break,
                     }
                 }
-                return Ok(Value::Str(String::from_utf8_lossy(&buf).into_owned()));
+                return Ok(Value::text(String::from_utf8_lossy(&buf).into_owned()));
             }
         }
-        Ok(Value::Str(String::new()))
+        Ok(Value::text(String::new()))
     }
     #[cfg(not(unix))]
     {
         let _ = args;
-        Ok(Value::Str(String::new()))
+        Ok(Value::text(String::new()))
     }
 }
 
@@ -205,8 +205,8 @@ pub fn rt_unix_socket_listen(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Int(n)) => *n,
             _ => 16,
         };
-        let _ = std::fs::remove_file(&path); // best-effort stale cleanup
-        match UnixListener::bind(&path) {
+        let _ = std::fs::remove_file(&*path); // best-effort stale cleanup
+        match UnixListener::bind(&*path) {
             Ok(listener) => {
                 if listener.set_nonblocking(true).is_err() {
                     return Ok(Value::Int(NEG_EIO));
@@ -309,7 +309,7 @@ pub fn rt_unix_socket_recv(args: &[Value]) -> Result<Value, CompileError> {
     {
         let fd = match args.first() {
             Some(Value::Int(n)) => *n,
-            _ => return Ok(Value::Str(String::new())),
+            _ => return Ok(Value::text(String::new())),
         };
         let max = match args.get(1) {
             Some(Value::Int(n)) => *n as usize,
@@ -318,25 +318,25 @@ pub fn rt_unix_socket_recv(args: &[Value]) -> Result<Value, CompileError> {
         let mut guard = CONNS.lock().unwrap();
         let table = match guard.as_mut() {
             Some(t) => t,
-            None => return Ok(Value::Str(String::new())),
+            None => return Ok(Value::text(String::new())),
         };
         let stream = match table.streams.get_mut(&fd) {
             Some(s) => s,
-            None => return Ok(Value::Str(String::new())),
+            None => return Ok(Value::text(String::new())),
         };
         let mut buf = vec![0u8; max];
         match stream.read(&mut buf) {
             Ok(n) => {
                 buf.truncate(n);
-                Ok(Value::Str(String::from_utf8_lossy(&buf).into_owned()))
+                Ok(Value::text(String::from_utf8_lossy(&buf).into_owned()))
             }
-            Err(_) => Ok(Value::Str(String::new())),
+            Err(_) => Ok(Value::text(String::new())),
         }
     }
     #[cfg(not(unix))]
     {
         let _ = args;
-        Ok(Value::Str(String::new()))
+        Ok(Value::text(String::new()))
     }
 }
 

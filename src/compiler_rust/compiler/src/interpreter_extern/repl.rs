@@ -140,7 +140,7 @@ pub fn simple_repl_runner_execute_fn(args: &[Value]) -> Result<Value, CompileErr
         Err(CompileError::runtime("REPL runner execution failed"))
     } else {
         let result_str = String::from_utf8_lossy(&result_buffer[..result_len as usize]);
-        Ok(Value::Str(result_str.into_owned()))
+        Ok(Value::text(result_str.into_owned()))
     }
 }
 
@@ -155,5 +155,5 @@ pub fn simple_repl_runner_get_prelude_fn(_args: &[Value]) -> Result<Value, Compi
     let mut buffer = vec![0u8; 65536]; // 64KB buffer
     let len = simple_repl_runner_get_prelude(buffer.as_mut_ptr(), buffer.len());
     let prelude = String::from_utf8_lossy(&buffer[..len]);
-    Ok(Value::Str(prelude.into_owned()))
+    Ok(Value::text(prelude.into_owned()))
 }

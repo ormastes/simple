@@ -22,7 +22,7 @@ pub fn to_string(args: &[Value]) -> Result<Value, CompileError> {
             .with_help("to_string expects exactly 1 argument");
         CompileError::semantic_with_context("to_string expects 1 argument", ctx)
     })?;
-    Ok(Value::Str(val.to_display_string()))
+    Ok(Value::text(val.to_display_string()))
 }
 
 /// Convert a value to integer
@@ -116,7 +116,7 @@ pub fn rt_byte_char_fn(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::Int(v)) => *v as u8,
         _ => 0u8,
     };
-    Ok(Value::Str(String::from(byte_val as char)))
+    Ok(Value::text(String::from(byte_val as char)))
 }
 
 /// Convert a byte array to text
@@ -133,9 +133,9 @@ pub fn rt_bytes_to_text_fn(args: &[Value]) -> Result<Value, CompileError> {
                 })
                 .collect();
             let text = String::from_utf8_lossy(&bytes).into_owned();
-            Ok(Value::Str(text))
+            Ok(Value::text(text))
         }
-        _ => Ok(Value::Str(String::new())),
+        _ => Ok(Value::text(String::new())),
     }
 }
 
@@ -374,8 +374,11 @@ mod tests {
 
     #[test]
     fn test_to_string() {
-        assert_eq!(to_string(&[Value::Int(42)]).unwrap(), Value::Str("42".to_string()));
-        assert_eq!(to_string(&[Value::Bool(true)]).unwrap(), Value::Str("true".to_string()));
+        assert_eq!(to_string(&[Value::Int(42)]).unwrap(), Value::text("42".to_string()));
+        assert_eq!(
+            to_string(&[Value::Bool(true)]).unwrap(),
+            Value::text("true".to_string())
+        );
     }
 
     #[test]
@@ -385,8 +388,8 @@ mod tests {
 
     #[test]
     fn test_to_int_from_string() {
-        assert_eq!(to_int(&[Value::Str("123".to_string())]).unwrap(), Value::Int(123));
-        assert!(to_int(&[Value::Str("abc".to_string())]).is_err());
+        assert_eq!(to_int(&[Value::text("123".to_string())]).unwrap(), Value::Int(123));
+        assert!(to_int(&[Value::text("abc".to_string())]).is_err());
     }
 
     #[test]
@@ -397,13 +400,13 @@ mod tests {
 
     #[test]
     fn test_rt_hash_text_uses_stable_byte_hash() {
-        assert_eq!(rt_hash_text(&[Value::Str("".to_string())]).unwrap(), Value::Int(5381));
+        assert_eq!(rt_hash_text(&[Value::text("".to_string())]).unwrap(), Value::Int(5381));
         assert_eq!(
-            rt_hash_text(&[Value::Str("abc".to_string())]).unwrap(),
+            rt_hash_text(&[Value::text("abc".to_string())]).unwrap(),
             Value::Int(193485963)
         );
         assert_eq!(
-            rt_hash_text(&[Value::Str("key_7".to_string())]).unwrap(),
+            rt_hash_text(&[Value::text("key_7".to_string())]).unwrap(),
             Value::Int(210718207876)
         );
     }

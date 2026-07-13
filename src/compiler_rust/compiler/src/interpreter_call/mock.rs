@@ -26,7 +26,7 @@ pub(super) fn eval_mock_builtin(
             let type_name = eval_arg(
                 args,
                 0,
-                Value::Str("Mock".to_string()),
+                Value::text("Mock".to_string()),
                 env,
                 functions,
                 classes,
@@ -34,7 +34,7 @@ pub(super) fn eval_mock_builtin(
                 impl_methods,
             )?;
             let type_str = match &type_name {
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 Value::Symbol(s) => s.clone(),
                 _ => "Mock".to_string(),
             };
@@ -44,7 +44,7 @@ pub(super) fn eval_mock_builtin(
             let type_name = eval_arg(
                 args,
                 0,
-                Value::Str("Spy".to_string()),
+                Value::text("Spy".to_string()),
                 env,
                 functions,
                 classes,
@@ -52,7 +52,7 @@ pub(super) fn eval_mock_builtin(
                 impl_methods,
             )?;
             let type_str = match &type_name {
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 Value::Symbol(s) => s.clone(),
                 _ => "Spy".to_string(),
             };
@@ -96,7 +96,7 @@ pub(super) fn eval_mock_builtin(
             let s = eval_arg(
                 args,
                 0,
-                Value::Str("".to_string()),
+                Value::text("".to_string()),
                 env,
                 functions,
                 classes,
@@ -104,7 +104,7 @@ pub(super) fn eval_mock_builtin(
                 impl_methods,
             )?;
             let s_str = match &s {
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 _ => "".to_string(),
             };
             Ok(Some(Value::Matcher(crate::value::MatcherValue::StartsWith(s_str))))
@@ -113,7 +113,7 @@ pub(super) fn eval_mock_builtin(
             let s = eval_arg(
                 args,
                 0,
-                Value::Str("".to_string()),
+                Value::text("".to_string()),
                 env,
                 functions,
                 classes,
@@ -121,7 +121,7 @@ pub(super) fn eval_mock_builtin(
                 impl_methods,
             )?;
             let s_str = match &s {
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 _ => "".to_string(),
             };
             Ok(Some(Value::Matcher(crate::value::MatcherValue::EndsWith(s_str))))
@@ -146,7 +146,7 @@ pub(super) fn eval_mock_builtin(
             let s = eval_arg(
                 args,
                 0,
-                Value::Str("".to_string()),
+                Value::text("".to_string()),
                 env,
                 functions,
                 classes,
@@ -154,7 +154,7 @@ pub(super) fn eval_mock_builtin(
                 impl_methods,
             )?;
             let s_str = match &s {
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 _ => "".to_string(),
             };
             Ok(Some(Value::Matcher(crate::value::MatcherValue::Contains(s_str))))
@@ -163,7 +163,7 @@ pub(super) fn eval_mock_builtin(
             let s = eval_arg(
                 args,
                 0,
-                Value::Str("".to_string()),
+                Value::text("".to_string()),
                 env,
                 functions,
                 classes,
@@ -171,7 +171,7 @@ pub(super) fn eval_mock_builtin(
                 impl_methods,
             )?;
             let s_str = match &s {
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 _ => "".to_string(),
             };
             Ok(Some(Value::Matcher(crate::value::MatcherValue::StartsWith(s_str))))
@@ -180,7 +180,7 @@ pub(super) fn eval_mock_builtin(
             let s = eval_arg(
                 args,
                 0,
-                Value::Str("".to_string()),
+                Value::text("".to_string()),
                 env,
                 functions,
                 classes,
@@ -188,7 +188,7 @@ pub(super) fn eval_mock_builtin(
                 impl_methods,
             )?;
             let s_str = match &s {
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 _ => "".to_string(),
             };
             Ok(Some(Value::Matcher(crate::value::MatcherValue::EndsWith(s_str))))
@@ -197,7 +197,7 @@ pub(super) fn eval_mock_builtin(
             let type_name = eval_arg(
                 args,
                 0,
-                Value::Str("".to_string()),
+                Value::text("".to_string()),
                 env,
                 functions,
                 classes,
@@ -205,7 +205,7 @@ pub(super) fn eval_mock_builtin(
                 impl_methods,
             )?;
             let type_str = match &type_name {
-                Value::Str(s) => s.clone(),
+                Value::Str(s) => s.as_ref().clone(),
                 _ => "".to_string(),
             };
             Ok(Some(Value::Matcher(crate::value::MatcherValue::OfType(type_str))))

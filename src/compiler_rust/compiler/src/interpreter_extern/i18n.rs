@@ -144,7 +144,7 @@ pub fn rt_i18n_get_message(args: &[Value], _env: &mut Env) -> Result<Value, Comp
     };
 
     // Return the message ID as the message (no i18n lookup)
-    Ok(Value::Str(format!("{}.{}", domain, id)))
+    Ok(Value::text(format!("{}.{}", domain, id)))
 }
 
 /// Get a localized severity name
@@ -188,8 +188,8 @@ mod tests {
             // Insert a key-value pair
             let args = vec![
                 Value::Int(handle),
-                Value::Str("test".to_string()),
-                Value::Str("value".to_string()),
+                Value::text("test".to_string()),
+                Value::text("value".to_string()),
             ];
             let insert_result = rt_i18n_context_insert(&args, &mut env);
             assert!(insert_result.is_ok());
@@ -205,7 +205,7 @@ mod tests {
     fn test_severity_name() {
         let mut env = Env::new();
 
-        let args = vec![Value::Str("error".to_string())];
+        let args = vec![Value::text("error".to_string())];
         let result = rt_i18n_severity_name(&args, &mut env);
 
         assert!(result.is_ok());

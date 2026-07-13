@@ -45,17 +45,17 @@ impl MapProvider for StdMapProvider {
 
     fn hashmap_insert(&self, handle: Handle, key: String, value: Value) -> Result<Value, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_hashmap_insert;
-        __rt_hashmap_insert(&[Value::Int(handle), Value::Str(key), value])
+        __rt_hashmap_insert(&[Value::Int(handle), Value::text(key), value])
     }
 
     fn hashmap_get(&self, handle: Handle, key: &str) -> Result<Value, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_hashmap_get;
-        __rt_hashmap_get(&[Value::Int(handle), Value::Str(key.to_string())])
+        __rt_hashmap_get(&[Value::Int(handle), Value::text(key.to_string())])
     }
 
     fn hashmap_contains_key(&self, handle: Handle, key: &str) -> Result<bool, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_hashmap_contains_key;
-        match __rt_hashmap_contains_key(&[Value::Int(handle), Value::Str(key.to_string())])? {
+        match __rt_hashmap_contains_key(&[Value::Int(handle), Value::text(key.to_string())])? {
             Value::Bool(b) => Ok(b),
             _ => Ok(false),
         }
@@ -63,7 +63,7 @@ impl MapProvider for StdMapProvider {
 
     fn hashmap_remove(&self, handle: Handle, key: &str) -> Result<Value, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_hashmap_remove;
-        __rt_hashmap_remove(&[Value::Int(handle), Value::Str(key.to_string())])
+        __rt_hashmap_remove(&[Value::Int(handle), Value::text(key.to_string())])
     }
 
     fn hashmap_len(&self, handle: Handle) -> Result<usize, CompileError> {
@@ -115,7 +115,7 @@ impl MapProvider for StdMapProvider {
 
     fn hashset_insert(&self, handle: Handle, value: String) -> Result<bool, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_hashset_insert;
-        match __rt_hashset_insert(&[Value::Int(handle), Value::Str(value)])? {
+        match __rt_hashset_insert(&[Value::Int(handle), Value::text(value)])? {
             Value::Bool(b) => Ok(b),
             _ => Ok(false),
         }
@@ -123,7 +123,7 @@ impl MapProvider for StdMapProvider {
 
     fn hashset_contains(&self, handle: Handle, value: &str) -> Result<bool, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_hashset_contains;
-        match __rt_hashset_contains(&[Value::Int(handle), Value::Str(value.to_string())])? {
+        match __rt_hashset_contains(&[Value::Int(handle), Value::text(value.to_string())])? {
             Value::Bool(b) => Ok(b),
             _ => Ok(false),
         }
@@ -131,7 +131,7 @@ impl MapProvider for StdMapProvider {
 
     fn hashset_remove(&self, handle: Handle, value: &str) -> Result<bool, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_hashset_remove;
-        match __rt_hashset_remove(&[Value::Int(handle), Value::Str(value.to_string())])? {
+        match __rt_hashset_remove(&[Value::Int(handle), Value::text(value.to_string())])? {
             Value::Bool(b) => Ok(b),
             _ => Ok(false),
         }
@@ -218,17 +218,17 @@ impl MapProvider for StdMapProvider {
 
     fn btreemap_insert(&self, handle: Handle, key: String, value: Value) -> Result<Value, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_btreemap_insert;
-        __rt_btreemap_insert(&[Value::Int(handle), Value::Str(key), value])
+        __rt_btreemap_insert(&[Value::Int(handle), Value::text(key), value])
     }
 
     fn btreemap_get(&self, handle: Handle, key: &str) -> Result<Value, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_btreemap_get;
-        __rt_btreemap_get(&[Value::Int(handle), Value::Str(key.to_string())])
+        __rt_btreemap_get(&[Value::Int(handle), Value::text(key.to_string())])
     }
 
     fn btreemap_contains_key(&self, handle: Handle, key: &str) -> Result<bool, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_btreemap_contains_key;
-        match __rt_btreemap_contains_key(&[Value::Int(handle), Value::Str(key.to_string())])? {
+        match __rt_btreemap_contains_key(&[Value::Int(handle), Value::text(key.to_string())])? {
             Value::Bool(b) => Ok(b),
             _ => Ok(false),
         }
@@ -236,7 +236,7 @@ impl MapProvider for StdMapProvider {
 
     fn btreemap_remove(&self, handle: Handle, key: &str) -> Result<Value, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_btreemap_remove;
-        __rt_btreemap_remove(&[Value::Int(handle), Value::Str(key.to_string())])
+        __rt_btreemap_remove(&[Value::Int(handle), Value::text(key.to_string())])
     }
 
     fn btreemap_len(&self, handle: Handle) -> Result<usize, CompileError> {
@@ -298,7 +298,7 @@ impl MapProvider for StdMapProvider {
 
     fn btreeset_insert(&self, handle: Handle, value: String) -> Result<bool, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_btreeset_insert;
-        match __rt_btreeset_insert(&[Value::Int(handle), Value::Str(value)])? {
+        match __rt_btreeset_insert(&[Value::Int(handle), Value::text(value)])? {
             Value::Bool(b) => Ok(b),
             _ => Ok(false),
         }
@@ -306,7 +306,7 @@ impl MapProvider for StdMapProvider {
 
     fn btreeset_contains(&self, handle: Handle, value: &str) -> Result<bool, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_btreeset_contains;
-        match __rt_btreeset_contains(&[Value::Int(handle), Value::Str(value.to_string())])? {
+        match __rt_btreeset_contains(&[Value::Int(handle), Value::text(value.to_string())])? {
             Value::Bool(b) => Ok(b),
             _ => Ok(false),
         }
@@ -314,7 +314,7 @@ impl MapProvider for StdMapProvider {
 
     fn btreeset_remove(&self, handle: Handle, value: &str) -> Result<bool, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_btreeset_remove;
-        match __rt_btreeset_remove(&[Value::Int(handle), Value::Str(value.to_string())])? {
+        match __rt_btreeset_remove(&[Value::Int(handle), Value::text(value.to_string())])? {
             Value::Bool(b) => Ok(b),
             _ => Ok(false),
         }
@@ -431,17 +431,17 @@ impl ConcurrentMapProvider for StdConcurrentMapProvider {
 
     fn concurrent_map_insert(&self, handle: Handle, key: String, value: Value) -> Result<Value, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_hashmap_insert;
-        __rt_hashmap_insert(&[Value::Int(handle), Value::Str(key), value])
+        __rt_hashmap_insert(&[Value::Int(handle), Value::text(key), value])
     }
 
     fn concurrent_map_get(&self, handle: Handle, key: &str) -> Result<Value, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_hashmap_get;
-        __rt_hashmap_get(&[Value::Int(handle), Value::Str(key.to_string())])
+        __rt_hashmap_get(&[Value::Int(handle), Value::text(key.to_string())])
     }
 
     fn concurrent_map_remove(&self, handle: Handle, key: &str) -> Result<Value, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_hashmap_remove;
-        __rt_hashmap_remove(&[Value::Int(handle), Value::Str(key.to_string())])
+        __rt_hashmap_remove(&[Value::Int(handle), Value::text(key.to_string())])
     }
 
     fn concurrent_map_len(&self, handle: Handle) -> Result<usize, CompileError> {
@@ -454,7 +454,7 @@ impl ConcurrentMapProvider for StdConcurrentMapProvider {
 
     fn concurrent_map_contains_key(&self, handle: Handle, key: &str) -> Result<bool, CompileError> {
         use crate::interpreter::interpreter_extern::collections::__rt_hashmap_contains_key;
-        match __rt_hashmap_contains_key(&[Value::Int(handle), Value::Str(key.to_string())])? {
+        match __rt_hashmap_contains_key(&[Value::Int(handle), Value::text(key.to_string())])? {
             Value::Bool(b) => Ok(b),
             _ => Ok(false),
         }

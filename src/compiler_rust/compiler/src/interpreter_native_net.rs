@@ -210,7 +210,7 @@ macro_rules! read_from_to_array {
                 let arr_len = arr.len();
                 Ok(net_ok(Value::array(vec![
                     Value::Int(arr_len as i64),
-                    Value::Str(addr.to_string()),
+                    Value::text(addr.to_string()),
                     Value::array(arr),
                 ])))
             }
@@ -244,7 +244,7 @@ fn make_net_error(err: std::io::Error) -> Value {
             return Value::Enum {
                 enum_name: "IoError".to_string(),
                 variant: "Other".to_string(),
-                payload: Some(Box::new(Value::Str(err.to_string()))),
+                payload: Some(Box::new(Value::text(err.to_string()))),
             };
         }
     };
@@ -279,7 +279,7 @@ fn net_err_msg(msg: &str) -> Value {
         payload: Some(Box::new(Value::Enum {
             enum_name: "IoError".to_string(),
             variant: "Other".to_string(),
-            payload: Some(Box::new(Value::Str(msg.to_string()))),
+            payload: Some(Box::new(Value::text(msg.to_string()))),
         })),
     }
 }
@@ -401,7 +401,7 @@ pub fn native_tcp_accept_interp(args: &[Value]) -> Result<Value, CompileError> {
             // Return tuple (stream_handle, peer_addr_string)
             Ok(net_ok(Value::array(vec![
                 Value::Int(stream_handle),
-                Value::Str(peer_addr.to_string()),
+                Value::text(peer_addr.to_string()),
             ])))
         }
         Err(e) => Ok(net_err(e)),
@@ -418,13 +418,13 @@ pub fn native_tcp_connect_interp(args: &[Value]) -> Result<Value, CompileError> 
             // Return tuple (handle, local_addr, error_code) - 0 means success
             Ok(Value::Tuple(vec![
                 Value::Int(handle),
-                Value::Str(local_addr),
+                Value::text(local_addr),
                 Value::Int(0),
             ]))
         }
         Err(e) => Ok(Value::Tuple(vec![
             Value::Int(-1),
-            Value::Str(String::new()),
+            Value::text(String::new()),
             Value::Int(io_error_to_code(&e)),
         ])),
     }
@@ -437,7 +437,7 @@ pub fn native_tcp_connect_timeout_interp(args: &[Value]) -> Result<Value, Compil
     net_result!(TcpStream::connect_timeout(&addr, timeout).map(|stream| {
         let local_addr = stream.local_addr().map(|a| a.to_string()).unwrap_or_default();
         let handle = allocate_socket(SocketHandle::TcpStream(stream));
-        Value::array(vec![Value::Int(handle), Value::Str(local_addr)])
+        Value::array(vec![Value::Int(handle), Value::text(local_addr)])
     }))
 }
 
@@ -597,11 +597,11 @@ pub fn rt_io_tcp_connect_timeout_interp(args: &[Value]) -> Result<Value, Compile
 pub fn rt_dns_lookup_interp(args: &[Value]) -> Result<Value, CompileError> {
     let host = match args.first() {
         Some(Value::Str(s)) => s.as_str(),
-        _ => return Ok(Value::Str(String::new())),
+        _ => return Ok(Value::text(String::new())),
     };
     let iter = match (host, 0).to_socket_addrs() {
         Ok(iter) => iter,
-        Err(_) => return Ok(Value::Str(String::new())),
+        Err(_) => return Ok(Value::text(String::new())),
     };
     let mut addresses: Vec<String> = Vec::new();
     for addr in iter {
@@ -610,7 +610,7 @@ pub fn rt_dns_lookup_interp(args: &[Value]) -> Result<Value, CompileError> {
             addresses.push(ip);
         }
     }
-    Ok(Value::Str(addresses.join(",")))
+    Ok(Value::text(addresses.join(",")))
 }
 
 pub fn rt_io_tcp_read_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -685,7 +685,7 @@ pub fn rt_io_tcp_read_line_interp(args: &[Value]) -> Result<Value, CompileError>
             if out.is_empty() {
                 Ok(Value::Nil)
             } else {
-                Ok(Value::Str(String::from_utf8_lossy(&out).into_owned()))
+                Ok(Value::text(String::from_utf8_lossy(&out).into_owned()))
             }
         }
         Err(_) => Ok(Value::Nil),
@@ -786,9 +786,9 @@ pub fn rt_io_tcp_close_interp(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_io_tcp_local_addr_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
     match with_tcp_listener(handle, |listener| listener.local_addr()) {
-        Ok(addr) => Ok(Value::Str(addr.to_string())),
+        Ok(addr) => Ok(Value::text(addr.to_string())),
         Err(_) => match with_tcp_stream(handle, |stream| stream.local_addr()) {
-            Ok(addr) => Ok(Value::Str(addr.to_string())),
+            Ok(addr) => Ok(Value::text(addr.to_string())),
             Err(_) => Ok(Value::Nil),
         },
     }
@@ -797,7 +797,7 @@ pub fn rt_io_tcp_local_addr_interp(args: &[Value]) -> Result<Value, CompileError
 pub fn rt_io_tcp_peer_addr_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
     match with_tcp_stream(handle, |stream| stream.peer_addr()) {
-        Ok(addr) => Ok(Value::Str(addr.to_string())),
+        Ok(addr) => Ok(Value::text(addr.to_string())),
         Err(_) => Ok(Value::Nil),
     }
 }
@@ -1069,7 +1069,7 @@ pub fn native_udp_peek_interp(args: &[Value]) -> Result<Value, CompileError> {
 pub fn native_udp_peer_addr_interp(args: &[Value]) -> Result<Value, CompileError> {
     with_udp_socket_op!(args, 0, |socket| socket
         .peer_addr()
-        .map(|addr| Value::Str(addr.to_string())))
+        .map(|addr| Value::text(addr.to_string())))
 }
 
 pub fn native_udp_set_multicast_loop_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -1222,7 +1222,7 @@ pub fn native_http_send_interp(args: &[Value]) -> Result<Value, CompileError> {
             // Return response object
             let mut fields = HashMap::new();
             fields.insert("status".to_string(), Value::Int(status as i64));
-            fields.insert("body".to_string(), Value::Str(body_str));
+            fields.insert("body".to_string(), Value::text(body_str));
 
             Ok(net_ok(Value::Object {
                 class: "HttpResponse".to_string(),

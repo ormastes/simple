@@ -45,7 +45,7 @@ pub fn input(args: &[Value]) -> Result<Value, CompileError> {
         .transpose()
         .map_err(|e| crate::error::factory::input_error(&e))?
         .unwrap_or_default();
-    Ok(Value::Str(line))
+    Ok(Value::text(line))
 }
 
 /// Read a single character from stdin
@@ -69,9 +69,9 @@ pub fn stdin_read_char(_args: &[Value]) -> Result<Value, CompileError> {
     use std::io::Read;
     let mut buf = [0u8; 1];
     match std::io::stdin().read(&mut buf) {
-        Ok(0) => Ok(Value::Str(String::new())), // EOF
-        Ok(_) => Ok(Value::Str(String::from_utf8_lossy(&buf).to_string())),
-        Err(_) => Ok(Value::Str(String::new())), // Error treated as EOF
+        Ok(0) => Ok(Value::text(String::new())), // EOF
+        Ok(_) => Ok(Value::text(String::from_utf8_lossy(&buf).to_string())),
+        Err(_) => Ok(Value::text(String::new())), // Error treated as EOF
     }
 }
 

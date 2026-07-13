@@ -175,10 +175,14 @@ fn native_btreemap_ordering() {
     let keys = p.btreemap_keys(h).unwrap();
     assert_eq!(
         keys,
-        vec![Value::Str("a".into()), Value::Str("b".into()), Value::Str("c".into())]
+        vec![
+            Value::text("a".into()),
+            Value::text("b".into()),
+            Value::text("c".into())
+        ]
     );
-    assert_eq!(p.btreemap_first_key(h).unwrap(), Value::Str("a".into()));
-    assert_eq!(p.btreemap_last_key(h).unwrap(), Value::Str("c".into()));
+    assert_eq!(p.btreemap_first_key(h).unwrap(), Value::text("a".into()));
+    assert_eq!(p.btreemap_last_key(h).unwrap(), Value::text("c".into()));
 }
 
 // ============================================================================
@@ -204,10 +208,10 @@ fn native_btreeset_ordering() {
     let h = p.btreeset_new().unwrap();
     p.btreeset_insert(h, "z".into()).unwrap();
     p.btreeset_insert(h, "a".into()).unwrap();
-    assert_eq!(p.btreeset_first(h).unwrap(), Value::Str("a".into()));
-    assert_eq!(p.btreeset_last(h).unwrap(), Value::Str("z".into()));
+    assert_eq!(p.btreeset_first(h).unwrap(), Value::text("a".into()));
+    assert_eq!(p.btreeset_last(h).unwrap(), Value::text("z".into()));
     let arr = p.btreeset_to_array(h).unwrap();
-    assert_eq!(arr, vec![Value::Str("a".into()), Value::Str("z".into())]);
+    assert_eq!(arr, vec![Value::text("a".into()), Value::text("z".into())]);
 }
 
 #[test]
@@ -311,10 +315,10 @@ fn native_channel_multiple_types() {
     let p = NativeChannelProvider::new();
     let h = p.channel_new().unwrap();
     p.channel_send(h, Value::Int(42)).unwrap();
-    p.channel_send(h, Value::Str("hello".into())).unwrap();
+    p.channel_send(h, Value::text("hello".into())).unwrap();
     p.channel_send(h, Value::Bool(true)).unwrap();
     assert_eq!(p.channel_try_recv(h).unwrap(), Value::Int(42));
-    assert_eq!(p.channel_try_recv(h).unwrap(), Value::Str("hello".into()));
+    assert_eq!(p.channel_try_recv(h).unwrap(), Value::text("hello".into()));
     assert_eq!(p.channel_try_recv(h).unwrap(), Value::Bool(true));
 }
 

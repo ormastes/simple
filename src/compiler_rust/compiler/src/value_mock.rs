@@ -245,7 +245,7 @@ impl MatcherValue {
                         arr.iter().any(|item| {
                             match item {
                                 // Direct string match
-                                super::Value::Str(item_str) => item_str == s,
+                                super::Value::Str(item_str) => **item_str == *s,
                                 // Convert numbers to string for comparison
                                 super::Value::Int(n) => n.to_string() == *s,
                                 super::Value::Float(f) => f.to_string() == *s,

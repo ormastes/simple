@@ -43,14 +43,14 @@ pub fn handle_unit_methods(
 ) -> Result<Option<Value>, CompileError> {
     match method {
         "value" => return Ok(Some((**value).clone())),
-        "suffix" => return Ok(Some(Value::Str(suffix.to_string()))),
+        "suffix" => return Ok(Some(Value::text(suffix.to_string()))),
         "family" => return Ok(Some(family.clone().map_or(Value::Nil, Value::Str))),
-        "to_string" => return Ok(Some(Value::Str(format!("{}_{}", value.to_display_string(), suffix)))),
+        "to_string" => return Ok(Some(Value::text(format!("{}_{}", value.to_display_string(), suffix)))),
         // `to_text` renders just the numeric value (no suffix) so concat
         // expressions like `v.to_text() + " kmph"` work as the user expects.
         // Without this arm the `other if other.starts_with("to_")` catchall
         // below would treat `text` as a target unit and fail.
-        "to_text" => return Ok(Some(Value::Str(value.to_display_string()))),
+        "to_text" => return Ok(Some(Value::text(value.to_display_string()))),
         // For dynamic to_X() conversion methods, check if method starts with "to_"
         other if other.starts_with("to_") => {
             let target_suffix = &other[3..]; // Remove "to_" prefix
@@ -251,7 +251,7 @@ pub fn handle_option_methods(
             let msg = eval_arg(
                 args,
                 0,
-                Value::Str("Option was None".into()),
+                Value::text("Option was None".into()),
                 env,
                 functions,
                 classes,
@@ -332,7 +332,7 @@ pub fn handle_option_methods(
             let error = eval_arg(
                 args,
                 0,
-                Value::Str("None".into()),
+                Value::text("None".into()),
                 env,
                 functions,
                 classes,
@@ -447,7 +447,7 @@ pub fn handle_result_methods(
             let msg = eval_arg(
                 args,
                 0,
-                Value::Str("Result was Err".into()),
+                Value::text("Result was Err".into()),
                 env,
                 functions,
                 classes,
@@ -541,7 +541,7 @@ pub fn handle_result_methods(
             let msg = eval_arg(
                 args,
                 0,
-                Value::Str("Result was Ok".into()),
+                Value::text("Result was Ok".into()),
                 env,
                 functions,
                 classes,

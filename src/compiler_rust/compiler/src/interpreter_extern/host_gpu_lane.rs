@@ -151,7 +151,7 @@ pub fn rt_host_gpu_queue_last_payload_hash(_args: &[Value]) -> Result<Value, Com
 }
 
 pub fn rt_host_gpu_queue_last_payload_text(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Str(host_gpu_lane::rt_host_gpu_queue_last_payload_text()))
+    Ok(Value::text(host_gpu_lane::rt_host_gpu_queue_last_payload_text()))
 }
 
 fn expect_int(value: Option<&Value>, message: &str) -> Result<i64, CompileError> {

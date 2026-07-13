@@ -351,7 +351,7 @@ pub(crate) fn eval_dict_filter(
             crate::interpreter::check_execution_limit()?;
             let mut local_env = captured.clone();
             if params.len() >= 2 {
-                local_env.insert(params[0].clone(), Value::Str(k.clone()));
+                local_env.insert(params[0].clone(), Value::text(k.clone()));
                 local_env.insert(params[1].clone(), v.clone());
             } else if let Some(param) = params.first() {
                 local_env.insert(param.clone(), v.clone());
@@ -378,7 +378,7 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
         Value::FrozenArray(arr) => Ok(arr.as_ref().clone()),
         Value::FixedSizeArray { data, .. } => Ok(data.clone()),
         Value::Tuple(tup) => Ok(tup.clone()),
-        Value::Str(s) => Ok(s.chars().map(|c| Value::Str(c.to_string())).collect()),
+        Value::Str(s) => Ok(s.chars().map(|c| Value::text(c.to_string())).collect()),
         // Generator functions (`gen f(): yield ...`) evaluate eagerly: calling
         // them returns a Value::Generator holding all yielded values. Iterating
         // it (e.g. `for x in counter()`) drains the collected yields in order.
@@ -387,11 +387,11 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
         Value::Generator(gen) => Ok(gen.collect_remaining()),
         Value::Dict(map) => Ok(map
             .iter()
-            .map(|(k, v)| Value::Tuple(vec![Value::Str(k.clone()), v.clone()]))
+            .map(|(k, v)| Value::Tuple(vec![Value::text(k.clone()), v.clone()]))
             .collect()),
         Value::FrozenDict(map) => Ok(map
             .iter()
-            .map(|(k, v)| Value::Tuple(vec![Value::Str(k.clone()), v.clone()]))
+            .map(|(k, v)| Value::Tuple(vec![Value::text(k.clone()), v.clone()]))
             .collect()),
         Value::Object { class, fields } if class == BUILTIN_RANGE => {
             // Range object

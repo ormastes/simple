@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn test_simple_layout_mark_string() {
-        let result = simple_layout_mark(&[Value::Str("startup".to_string())]);
+        let result = simple_layout_mark(&[Value::text("startup".to_string())]);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Value::Nil);
     }

@@ -75,7 +75,7 @@ pub fn rt_diagram_trace_method_with_args(args: &[Value]) -> Result<Value, Compil
         Value::Array(items) => items
             .iter()
             .filter_map(|v| match v {
-                Value::Str(s) => Some(s.clone()),
+                Value::Str(s) => Some(s.as_ref().clone()),
                 _ => None,
             })
             .collect(),
@@ -123,14 +123,14 @@ pub fn rt_diagram_mark_architectural(args: &[Value]) -> Result<Value, CompileErr
 pub fn rt_diagram_generate_sequence(_args: &[Value]) -> Result<Value, CompileError> {
     let events = diagram_sffi::get_recorded_events();
     let mermaid = generate_sequence_mermaid(&events);
-    Ok(Value::Str(mermaid))
+    Ok(Value::text(mermaid))
 }
 
 /// Generate class diagram as mermaid string
 pub fn rt_diagram_generate_class(_args: &[Value]) -> Result<Value, CompileError> {
     let events = diagram_sffi::get_recorded_events();
     let mermaid = generate_class_mermaid(&events);
-    Ok(Value::Str(mermaid))
+    Ok(Value::text(mermaid))
 }
 
 /// Generate architecture diagram as mermaid string
@@ -138,7 +138,7 @@ pub fn rt_diagram_generate_arch(_args: &[Value]) -> Result<Value, CompileError> 
     let events = diagram_sffi::get_recorded_events();
     let arch_entities = diagram_sffi::get_architectural_entities();
     let mermaid = generate_arch_mermaid(&events, &arch_entities);
-    Ok(Value::Str(mermaid))
+    Ok(Value::text(mermaid))
 }
 
 /// Free a string (no-op in interpreter, for SFFI compatibility)

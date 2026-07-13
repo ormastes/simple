@@ -10,13 +10,13 @@ const SDN_VERSION: &str = "sdn 0.1.0";
 
 /// Get SDN version
 pub fn rt_sdn_version(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Str(SDN_VERSION.to_string()))
+    Ok(Value::text(SDN_VERSION.to_string()))
 }
 
 /// Check/validate an SDN file
 pub fn rt_sdn_check(args: &[Value]) -> Result<Value, CompileError> {
     let path = match args.first() {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         _ => return Ok(Value::Int(1)),
     };
 
@@ -32,15 +32,15 @@ pub fn rt_sdn_check(args: &[Value]) -> Result<Value, CompileError> {
 /// Convert SDN file to JSON string
 pub fn rt_sdn_to_json(args: &[Value]) -> Result<Value, CompileError> {
     let path = match args.first() {
-        Some(Value::Str(s)) => s.clone(),
-        _ => return Ok(Value::Str(String::new())),
+        Some(Value::Str(s)) => s.as_ref().clone(),
+        _ => return Ok(Value::text(String::new())),
     };
 
     match SdnDocument::from_file(Path::new(&path)) {
-        Ok(doc) => Ok(Value::Str(doc.to_json())),
+        Ok(doc) => Ok(Value::text(doc.to_json())),
         Err(e) => {
             eprintln!("error: Parse error: {}", e);
-            Ok(Value::Str(String::new()))
+            Ok(Value::text(String::new()))
         }
     }
 }
@@ -48,26 +48,26 @@ pub fn rt_sdn_to_json(args: &[Value]) -> Result<Value, CompileError> {
 /// Convert JSON file to SDN string
 pub fn rt_sdn_from_json(args: &[Value]) -> Result<Value, CompileError> {
     let path = match args.first() {
-        Some(Value::Str(s)) => s.clone(),
-        _ => return Ok(Value::Str(String::new())),
+        Some(Value::Str(s)) => s.as_ref().clone(),
+        _ => return Ok(Value::text(String::new())),
     };
 
-    let content = match std::fs::read_to_string(&path) {
+    let content = match std::fs::read_to_string(&*path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: Read error: {}", e);
-            return Ok(Value::Str(String::new()));
+            return Ok(Value::text(String::new()));
         }
     };
 
     match serde_json::from_str::<serde_json::Value>(&content) {
         Ok(json) => {
             let sdn = json_to_sdn(&json);
-            Ok(Value::Str(format_sdn_value(&sdn)))
+            Ok(Value::text(format_sdn_value(&sdn)))
         }
         Err(e) => {
             eprintln!("error: JSON parse error: {}", e);
-            Ok(Value::Str(String::new()))
+            Ok(Value::text(String::new()))
         }
     }
 }
@@ -76,17 +76,17 @@ pub fn rt_sdn_from_json(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_sdn_get(args: &[Value]) -> Result<Value, CompileError> {
     let (path, key) = match (args.first(), args.get(1)) {
         (Some(Value::Str(p)), Some(Value::Str(k))) => (p.clone(), k.clone()),
-        _ => return Ok(Value::Str(String::new())),
+        _ => return Ok(Value::text(String::new())),
     };
 
     match SdnDocument::from_file(Path::new(&path)) {
         Ok(doc) => match doc.get(&key) {
-            Some(value) => Ok(Value::Str(format_sdn_value(value))),
-            None => Ok(Value::Str(String::new())),
+            Some(value) => Ok(Value::text(format_sdn_value(value))),
+            None => Ok(Value::text(String::new())),
         },
         Err(e) => {
             eprintln!("error: Parse error: {}", e);
-            Ok(Value::Str(String::new()))
+            Ok(Value::text(String::new()))
         }
     }
 }
@@ -123,7 +123,7 @@ pub fn rt_sdn_set(args: &[Value]) -> Result<Value, CompileError> {
 /// Format SDN file
 pub fn rt_sdn_fmt(args: &[Value]) -> Result<Value, CompileError> {
     let path = match args.first() {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         _ => return Ok(Value::Int(1)),
     };
 

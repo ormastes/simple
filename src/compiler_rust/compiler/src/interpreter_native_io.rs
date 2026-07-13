@@ -86,7 +86,7 @@ pub fn native_fs_read_string(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
 
     match std::fs::read_to_string(&path) {
-        Ok(content) => Ok(io_ok(Value::Str(content))),
+        Ok(content) => Ok(io_ok(Value::text(content))),
         Err(e) => Ok(io_err(e)),
     }
 }
@@ -106,7 +106,7 @@ pub fn native_fs_write_string(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    match std::fs::write(&path, &content) {
+    match std::fs::write(&path, &*content) {
         Ok(()) => Ok(io_ok(Value::Int(content.len() as i64))),
         Err(e) => Ok(io_err(e)),
     }

@@ -24,7 +24,7 @@ macro_rules! extract_method_name {
         )?;
         match &method_name {
             Value::Symbol(s) => s.clone(),
-            Value::Str(s) => s.clone(),
+            Value::Str(s) => s.as_ref().clone(),
             _ => return Err(crate::error::factory::mock_expects_method_name($context)),
         }
     }};

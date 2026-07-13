@@ -90,7 +90,7 @@ pub fn format_bytes(args: &[Value]) -> Result<Value, CompileError> {
         format!("{} bytes", bytes)
     };
 
-    Ok(Value::Str(formatted))
+    Ok(Value::text(formatted))
 }
 
 /// Parse a memory size string (e.g., "100M", "2G")

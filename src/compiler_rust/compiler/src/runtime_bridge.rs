@@ -69,7 +69,8 @@ pub fn value_to_runtime(v: &Value) -> RuntimeValue {
         Value::Float(f) => RuntimeValue::from_float(*f),
         Value::Float32(f) => RuntimeValue::from_float(*f as f64),
         Value::Bool(b) => RuntimeValue::from_bool(*b),
-        Value::Str(s) | Value::Symbol(s) => simple_runtime::value::rt_string_new(s.as_ptr(), s.len() as u64),
+        Value::Str(s) => simple_runtime::value::rt_string_new(s.as_ptr(), s.len() as u64),
+        Value::Symbol(s) => simple_runtime::value::rt_string_new(s.as_ptr(), s.len() as u64),
         Value::Array(items) | Value::FrozenArray(items) => values_to_runtime_array(items.iter()),
         Value::FixedSizeArray { data, .. } => values_to_runtime_array(data.iter()),
         // A tuple must marshal to a runtime tuple (not an array) so it is
@@ -162,11 +163,11 @@ pub fn runtime_to_value(rv: RuntimeValue) -> Value {
                         let data_ptr = rt_string_data(rv);
 
                         if data_ptr.is_null() || len == 0 {
-                            Value::Str(String::new())
+                            Value::text(String::new())
                         } else {
                             let slice = std::slice::from_raw_parts(data_ptr, len);
                             match std::str::from_utf8(slice) {
-                                Ok(s) => Value::Str(s.to_string()),
+                                Ok(s) => Value::text(s.to_string()),
                                 Err(_) => Value::Nil,
                             }
                         }

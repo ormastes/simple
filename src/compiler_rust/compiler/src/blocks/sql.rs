@@ -82,15 +82,15 @@ fn parse_sql_query(payload: &str) -> Result<Value, CompileError> {
 
     // Build result structure
     let mut result = HashMap::new();
-    result.insert("query_type".to_string(), Value::Str(query_type.as_str().to_string()));
-    result.insert("raw_query".to_string(), Value::Str(payload.to_string()));
+    result.insert("query_type".to_string(), Value::text(query_type.as_str().to_string()));
+    result.insert("raw_query".to_string(), Value::text(payload.to_string()));
     result.insert(
         "positional_params".to_string(),
-        Value::array(positional_params.into_iter().map(Value::Str).collect()),
+        Value::array(positional_params.into_iter().map(Value::text).collect()),
     );
     result.insert(
         "named_params".to_string(),
-        Value::array(named_params.into_iter().map(Value::Str).collect()),
+        Value::array(named_params.into_iter().map(Value::text).collect()),
     );
 
     Ok(Value::dict(result))
