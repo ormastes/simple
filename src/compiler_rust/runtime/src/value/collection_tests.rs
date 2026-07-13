@@ -1920,15 +1920,19 @@ fn test_generic_collection_ops_reject_forged_heap_values() {
 }
 
 #[test]
-fn test_byte_array_parts_rejects_non_byte_arrays() {
+fn test_byte_array_bytes_supports_packed_and_tagged_storage() {
     let bytes = rt_byte_array_new(4);
-    let (data, len) = super::byte_array_parts(bytes).unwrap();
-    assert!(!data.is_null());
-    assert_eq!(len, 0);
-    assert!(super::byte_array_parts(rt_array_new(4)).is_none());
+    assert_eq!(super::byte_array_bytes(bytes).unwrap(), b"");
+
+    let generic = rt_array_new(2);
+    rt_array_push(generic, RuntimeValue::from_int(b'A' as i64));
+    rt_array_push(generic, RuntimeValue::from_int(b'B' as i64));
+    assert_eq!(super::byte_array_bytes(generic).unwrap(), b"AB");
+    assert!(super::byte_array_write(generic, b"CD"));
+    assert_eq!(super::byte_array_bytes(generic).unwrap(), b"CD");
 
     let array = super::get_typed_ptr_mut::<super::RuntimeArray>(bytes, super::HeapObjectType::Array).unwrap();
     unsafe { (*array).len = (*array).capacity + 1 };
-    assert!(super::byte_array_parts(bytes).is_none());
+    assert!(super::byte_array_bytes(bytes).is_none());
     unsafe { (*array).len = 0 };
 }

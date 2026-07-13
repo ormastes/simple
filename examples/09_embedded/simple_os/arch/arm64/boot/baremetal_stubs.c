@@ -72,22 +72,27 @@ static void serial_puthex(uint32_t v) {
 #define FALSE_VALUE    ENCODE_INT(0)
 
 typedef struct {
+    /* Little-endian word assignment also clears gc_flags/reserved bytes. */
     uint32_t type;
     uint32_t size;
 } HeapHeader;
 
 typedef struct {
     HeapHeader hdr;
-    uint32_t   len;
+    uint64_t   len;
     char       data[];
 } RuntimeString;
 
 typedef struct {
-    HeapHeader   hdr;
-    uint32_t     len;
-    uint32_t     cap;
-    RuntimeValue items[];
+    HeapHeader    hdr;
+    uint64_t      len;
+    uint64_t      cap;
+    RuntimeValue *items;
 } RuntimeArray;
+
+_Static_assert(offsetof(RuntimeString, data) == 16, "RuntimeString payload ABI");
+_Static_assert(offsetof(RuntimeArray, items) == 24, "RuntimeArray items ABI");
+_Static_assert(sizeof(RuntimeArray) == 32, "RuntimeArray header ABI");
 
 #define HEAP_STRING 1
 #define HEAP_ARRAY  2
@@ -120,7 +125,8 @@ RuntimeValue rt_map_new(void);
 RuntimeValue rt_map_set(RuntimeValue map, RuntimeValue key, RuntimeValue value);
 RuntimeValue rt_map_get(RuntimeValue map, RuntimeValue key);
 RuntimeValue rt_array_new(RuntimeValue cap_val);
-RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val);
+static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue val);
+int8_t rt_array_push(RuntimeValue arr, RuntimeValue val);
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b);
 RuntimeValue rt_string_from_cstr(const char *cstr);
 RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
@@ -672,7 +678,7 @@ RuntimeValue rt_store_barrier(void) {
 /* Forward decls for array helpers defined later in this file. */
 RuntimeValue rt_array_new_with_cap(RuntimeValue cap_val);
 RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx);
-RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val);
+int8_t rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val);
 
 /* --- float bit reinterpret (from x86_64 primitives.c) --- */
 RuntimeValue f32_from_bits(RuntimeValue bits)
@@ -841,7 +847,7 @@ RuntimeValue rt_typed_words_u32_at(RuntimeValue arr, RuntimeValue idx)
 }
 RuntimeValue rt_typed_words_u32_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
 {
-    return rt_array_set(arr, idx, val);
+    return rt_array_set(arr, idx, val) ? TRUE_VALUE : FALSE_VALUE;
 }
 RuntimeValue rt_typed_words_u64_at(RuntimeValue arr, RuntimeValue idx)
 {
@@ -859,8 +865,7 @@ int8_t rt_typed_words_u64_push(RuntimeValue arr, int64_t val)
 }
 int8_t rt_typed_words_u64_set(RuntimeValue arr, int64_t idx, int64_t val)
 {
-    rt_array_set(arr, ENCODE_INT(idx), ENCODE_INT(val));
-    return 1;
+    return rt_array_set(arr, idx, ENCODE_INT(val));
 }
 
 /* --- interpreter call bridge: not reachable on the native boot path. --- */
@@ -1214,7 +1219,7 @@ RuntimeValue rt_clone(RuntimeValue val) {
     if (h->type == HEAP_ARRAY) {
         RuntimeArray *a = (RuntimeArray *)h;
         RuntimeValue new_arr = rt_array_new(ENCODE_INT(a->cap));
-        for (uint32_t i = 0; i < a->len; i++) new_arr = rt_array_push(new_arr, a->items[i]);
+        for (uint32_t i = 0; i < a->len; i++) new_arr = rt_array_push_handle(new_arr, a->items[i]);
         return new_arr;
     }
     if (h->type == HEAP_MAP) return rt_map_clone(val);
@@ -1286,22 +1291,22 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim) {
     if (!d || d->len == 0) {
         for (uint32_t i = 0; i < s->len; i++) {
             RuntimeValue ch = rt_string_new((RuntimeValue)(uintptr_t)&s->data[i], 1);
-            arr = rt_array_push(arr, ch);
+            arr = rt_array_push_handle(arr, ch);
         } return arr;
     }
     if (d->len > s->len) {
-        return rt_array_push(arr, str);
+        return rt_array_push_handle(arr, str);
     }
     uint32_t start = 0;
     for (uint32_t i = 0; i <= s->len - d->len; ) {
         uint32_t j; for (j = 0; j < d->len; j++) { if (s->data[i+j] != d->data[j]) break; }
         if (j == d->len) {
             RuntimeValue part = rt_string_slice(str, ENCODE_INT(start), ENCODE_INT(i));
-            arr = rt_array_push(arr, part); i += d->len; start = i;
+            arr = rt_array_push_handle(arr, part); i += d->len; start = i;
         } else { i++; }
     }
     RuntimeValue rest = rt_string_slice(str, ENCODE_INT(start), ENCODE_INT(s->len));
-    arr = rt_array_push(arr, rest); return arr;
+    arr = rt_array_push_handle(arr, rest); return arr;
 }
 
 static int is_whitespace(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
@@ -1421,14 +1426,14 @@ RuntimeValue rt_string_reverse(RuntimeValue str) {
 RuntimeValue rt_string_chars(RuntimeValue str) {
     RuntimeString *s = decode_string(str); RuntimeValue arr = rt_array_new(ENCODE_INT(s ? s->len : 0));
     if (!s) return arr;
-    for (uint32_t i = 0; i < s->len; i++) { arr = rt_array_push(arr, rt_string_new((RuntimeValue)(uintptr_t)&s->data[i], 1)); }
+    for (uint32_t i = 0; i < s->len; i++) { arr = rt_array_push_handle(arr, rt_string_new((RuntimeValue)(uintptr_t)&s->data[i], 1)); }
     return arr;
 }
 
 RuntimeValue rt_string_bytes(RuntimeValue str) {
     RuntimeString *s = decode_string(str); RuntimeValue arr = rt_array_new(ENCODE_INT(s ? s->len : 0));
     if (!s) return arr;
-    for (uint32_t i = 0; i < s->len; i++) arr = rt_array_push(arr, ENCODE_INT((int64_t)(unsigned char)s->data[i]));
+    for (uint32_t i = 0; i < s->len; i++) arr = rt_array_push_handle(arr, ENCODE_INT((int64_t)(unsigned char)s->data[i]));
     return arr;
 }
 
@@ -1463,28 +1468,34 @@ RuntimeValue rt_array_new(RuntimeValue cap_val) {
     if (cap > 0x100000) cap = 0x100000;
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
-    if (!a) return NIL_VALUE; a->hdr.type = HEAP_ARRAY; a->hdr.size = (uint32_t)alloc_size; a->len = 0; a->cap = (uint32_t)cap;
+    if (!a) return NIL_VALUE; a->hdr.type = HEAP_ARRAY; a->hdr.size = (uint32_t)alloc_size; a->len = 0; a->cap = (uint64_t)cap; a->items = (RuntimeValue *)(a + 1);
     for (int64_t i = 0; i < cap; i++) a->items[i] = NIL_VALUE;
     return ENCODE_PTR(a);
 }
 
-RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val) {
+static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue val) {
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
     if (a->len >= a->cap) {
-        uint32_t old_cap = a->cap;
-        uint32_t new_cap = old_cap ? old_cap * 2 : 64;
-        size_t new_size = sizeof(RuntimeArray) + (size_t)new_cap * sizeof(RuntimeValue);
-        RuntimeArray *grown = (RuntimeArray *)realloc(a, new_size);
+        uint64_t old_cap = a->cap;
+        uint64_t new_cap = old_cap ? old_cap * 2 : 64;
+        /* ponytail: the bump heap cannot reclaim old growth buffers; the
+         * 1 MiB capacity ceiling bounds waste. Add last-allocation growth
+         * only if long-lived ARM workloads measure allocator pressure. */
+        RuntimeValue *grown = (RuntimeValue *)malloc((size_t)new_cap * sizeof(RuntimeValue));
         if (!grown) return ENCODE_PTR(a);
-        grown->hdr.size = (uint32_t)new_size;
-        grown->cap = new_cap;
-        for (uint32_t i = old_cap; i < new_cap; i++) grown->items[i] = NIL_VALUE;
-        a = grown;
+        for (uint64_t i = 0; i < a->len; i++) grown[i] = a->items[i];
+        for (uint64_t i = a->len; i < new_cap; i++) grown[i] = NIL_VALUE;
+        a->items = grown;
+        a->cap = new_cap;
     }
     a->items[a->len] = val; a->len++;
     return ENCODE_PTR(a);
+}
+
+int8_t rt_array_push(RuntimeValue arr, RuntimeValue val) {
+    return rt_array_push_handle(arr, val) != NIL_VALUE;
 }
 
 RuntimeValue rt_array_new_with_cap(RuntimeValue cap_val) {
@@ -1497,7 +1508,8 @@ RuntimeValue rt_array_new_with_cap(RuntimeValue cap_val) {
     a->hdr.type = HEAP_ARRAY;
     a->hdr.size = (uint32_t)alloc_size;
     a->len = 0;
-    a->cap = (uint32_t)cap;
+    a->cap = (uint64_t)cap;
+    a->items = (RuntimeValue *)(a + 1);
     for (int64_t i = 0; i < cap; i++) a->items[i] = NIL_VALUE;
     return ENCODE_PTR(a);
 }
@@ -1511,15 +1523,17 @@ RuntimeValue rt_array_pop(RuntimeValue arr) {
 RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx) {
     if (!IS_HEAP(arr)) return NIL_VALUE; RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    int64_t i = DECODE_INT(idx); if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
+    int64_t i = (int64_t)idx; if (i < 0) i += (int64_t)a->len;
+    if (i < 0 || (uint64_t)i >= a->len) return NIL_VALUE;
     return a->items[i];
 }
 
-RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val) {
-    if (!IS_HEAP(arr)) return NIL_VALUE; RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    int64_t i = DECODE_INT(idx); if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
-    a->items[i] = val; return val;
+int8_t rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val) {
+    if (!IS_HEAP(arr)) return 0; RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
+    int64_t i = (int64_t)idx; if (i < 0) i += (int64_t)a->len;
+    if (i < 0 || (uint64_t)i >= a->len) return 0;
+    a->items[i] = val; return 1;
 }
 
 RuntimeValue rt_array_len(RuntimeValue arr) {
@@ -1534,7 +1548,7 @@ RuntimeValue rt_array_slice(RuntimeValue arr, RuntimeValue start, RuntimeValue e
     if (s < 0) s = 0; if (e > (int64_t)a->len) e = (int64_t)a->len;
     if (s >= e) return rt_array_new(ENCODE_INT(1));
     RuntimeValue result = rt_array_new(ENCODE_INT(e - s));
-    for (int64_t i = s; i < e; i++) result = rt_array_push(result, a->items[i]);
+    for (int64_t i = s; i < e; i++) result = rt_array_push_handle(result, a->items[i]);
     return result;
 }
 
@@ -1581,8 +1595,8 @@ RuntimeValue rt_array_concat(RuntimeValue arr_a, RuntimeValue arr_b) {
     uint32_t la = (a && a->hdr.type == HEAP_ARRAY) ? a->len : 0;
     uint32_t lb = (b && b->hdr.type == HEAP_ARRAY) ? b->len : 0;
     RuntimeValue result = rt_array_new(ENCODE_INT(la + lb > 0 ? la + lb : 1));
-    for (uint32_t i = 0; i < la; i++) result = rt_array_push(result, a->items[i]);
-    for (uint32_t i = 0; i < lb; i++) result = rt_array_push(result, b->items[i]);
+    for (uint32_t i = 0; i < la; i++) result = rt_array_push_handle(result, a->items[i]);
+    for (uint32_t i = 0; i < lb; i++) result = rt_array_push_handle(result, b->items[i]);
     return result;
 }
 
@@ -1596,7 +1610,7 @@ RuntimeValue rt_array_clone(RuntimeValue arr) {
     if (!IS_HEAP(arr)) return NIL_VALUE; RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
     RuntimeValue result = rt_array_new(ENCODE_INT(a->cap));
-    for (uint32_t i = 0; i < a->len; i++) result = rt_array_push(result, a->items[i]);
+    for (uint32_t i = 0; i < a->len; i++) result = rt_array_push_handle(result, a->items[i]);
     return result;
 }
 
@@ -1710,13 +1724,13 @@ RuntimeValue rt_map_remove(RuntimeValue map, RuntimeValue key) {
 RuntimeValue rt_map_keys(RuntimeValue map) {
     RuntimeMap *m = decode_map(map); if (!m) return NIL_VALUE;
     RuntimeValue arr = rt_array_new(ENCODE_INT(m->len > 0 ? m->len : 1));
-    for (uint32_t i = 0; i < m->len; i++) arr = rt_array_push(arr, m->keys[i]); return arr;
+    for (uint32_t i = 0; i < m->len; i++) arr = rt_array_push_handle(arr, m->keys[i]); return arr;
 }
 
 RuntimeValue rt_map_values(RuntimeValue map) {
     RuntimeMap *m = decode_map(map); if (!m) return NIL_VALUE;
     RuntimeValue arr = rt_array_new(ENCODE_INT(m->len > 0 ? m->len : 1));
-    for (uint32_t i = 0; i < m->len; i++) arr = rt_array_push(arr, m->values[i]); return arr;
+    for (uint32_t i = 0; i < m->len; i++) arr = rt_array_push_handle(arr, m->values[i]); return arr;
 }
 
 RuntimeValue rt_map_entries(RuntimeValue map) {
@@ -1724,8 +1738,8 @@ RuntimeValue rt_map_entries(RuntimeValue map) {
     RuntimeValue arr = rt_array_new(ENCODE_INT(m->len > 0 ? m->len : 1));
     for (uint32_t i = 0; i < m->len; i++) {
         RuntimeValue pair = rt_array_new(ENCODE_INT(2));
-        pair = rt_array_push(pair, m->keys[i]); pair = rt_array_push(pair, m->values[i]);
-        arr = rt_array_push(arr, pair);
+        pair = rt_array_push_handle(pair, m->keys[i]); pair = rt_array_push_handle(pair, m->values[i]);
+        arr = rt_array_push_handle(arr, pair);
     } return arr;
 }
 
@@ -2364,6 +2378,7 @@ RuntimeValue rt_dma_bytes_to_array(RuntimeValue addr, RuntimeValue len_val)
     a->hdr.size = (uint32_t)alloc_size;
     a->len = (uint32_t)len;
     a->cap = (uint32_t)len;
+    a->items = (RuntimeValue *)(a + 1);
     for (uint64_t i = 0; i < len; i++) {
         a->items[i] = ENCODE_INT(src[i]);
     }
@@ -2556,6 +2571,7 @@ RuntimeValue rt_arm_virtio_blk_read_prefix(RuntimeValue first_lba_val, RuntimeVa
     a->hdr.size = (uint32_t)alloc_size;
     a->len = (uint32_t)size;
     a->cap = (uint32_t)size;
+    a->items = (RuntimeValue *)(a + 1);
     uint64_t copied = 0;
     uint64_t sector = 0;
     while (copied < size) {
@@ -3009,6 +3025,7 @@ RuntimeValue simpleos_fat32_read_path_array(const char *path, int64_t path_len)
     a->hdr.size = (uint32_t)alloc_size;
     a->len = file_size;
     a->cap = file_size;
+    a->items = (RuntimeValue *)(a + 1);
     for (uint32_t i = 0; i < file_size; i++)
         a->items[i] = ENCODE_INT((int64_t)simpleos_fat32_path_read_buf[i]);
     return ENCODE_PTR(a);
@@ -3138,6 +3155,7 @@ RuntimeValue rt_arm_array_empty_exact(void)
     a->hdr.size = (uint32_t)alloc_size;
     a->len = 0;
     a->cap = 0;
+    a->items = (RuntimeValue *)0;
     return ENCODE_PTR(a);
 }
 
@@ -4003,6 +4021,7 @@ RuntimeValue rt_tuple_new(RuntimeValue len_rv)
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     a->len = (uint32_t)len;
     a->cap = (uint32_t)len;
+    a->items = (RuntimeValue *)(a + 1);
     for (uint32_t i = 0; i < (uint32_t)len; i++) a->items[i] = NIL_VALUE;
     return ENCODE_PTR(a);
 }

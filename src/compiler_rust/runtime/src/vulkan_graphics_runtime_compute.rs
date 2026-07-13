@@ -3,7 +3,7 @@ use super::vulkan_graphics_runtime_core::{alloc_handle, DescriptorPool, Descript
 #[cfg(feature = "vulkan")]
 use ash::vk::Handle;
 #[cfg(feature = "vulkan")]
-use crate::value::{byte_array_parts, RuntimeValue};
+use crate::value::{byte_array_bytes, RuntimeValue};
 
 // ============================================================================
 // Descriptor Sets
@@ -222,9 +222,10 @@ pub extern "C" fn rt_vulkan_bind_descriptors(_cmd: i64, _desc_set: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_push_constants(cmd: i64, pipeline_handle: i64, data: RuntimeValue) -> i64 {
-    let Some((data, len)) = byte_array_parts(data) else {
+    let Some(data) = byte_array_bytes(data) else {
         return 0;
     };
+    let len = data.len();
     let state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
@@ -242,11 +243,14 @@ pub extern "C" fn rt_vulkan_push_constants(cmd: i64, pipeline_handle: i64, data:
         return 0;
     }
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
-    let bytes = unsafe { std::slice::from_raw_parts(data, size as usize) };
     unsafe {
-        device
-            .handle()
-            .cmd_push_constants(vk_cmd, pipeline.layout(), vk::ShaderStageFlags::COMPUTE, 0, bytes);
+        device.handle().cmd_push_constants(
+            vk_cmd,
+            pipeline.layout(),
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            &data[..size as usize],
+        );
     }
     1
 }
@@ -346,7 +350,7 @@ pub extern "C" fn rt_vulkan_fence_submission_supported() -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_submit_and_wait_fence(cmd: i64) -> i64 {
     use super::vulkan_graphics_runtime_core::{alloc_handle, Fence};
-    use super::vulkan::device::FencedSubmitError;
+    use crate::vulkan::device::FencedSubmitError;
 
     if cmd == 0 {
         return 0;
@@ -410,7 +414,7 @@ pub extern "C" fn rt_vulkan_wait_idle() -> i64 {
             drop(state);
             STATE.lock().clean_quarantined_compute();
             1
-        },
+        }
         Err(e) => {
             tracing::error!("wait_idle: {e}");
             0

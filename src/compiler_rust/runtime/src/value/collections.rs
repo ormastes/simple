@@ -261,15 +261,40 @@ impl RuntimeArray {
     }
 }
 
-/// Return the backing bytes for a native Simple `[u8]` value.
-pub(crate) fn byte_array_parts(value: RuntimeValue) -> Option<(*mut u8, usize)> {
+/// Copy bytes from either native representation of Simple `[u8]`.
+pub(crate) fn byte_array_bytes(value: RuntimeValue) -> Option<Vec<u8>> {
     let array = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array)?;
     let array = unsafe { &*array };
-    if !array.is_byte_packed() || array.len > array.capacity || array.data.is_null() {
+    if array.len > array.capacity || array.data.is_null() {
         return None;
     }
     let len = usize::try_from(array.len).ok()?;
-    Some((array.data.cast::<u8>(), len))
+    if array.is_byte_packed() {
+        return Some(unsafe { std::slice::from_raw_parts(array.data.cast::<u8>(), len) }.to_vec());
+    }
+    unsafe { array.as_slice() }
+        .iter()
+        .map(|value| value.is_int().then(|| (value.as_int() & 0xff) as u8))
+        .collect()
+}
+
+/// Write bytes into either native representation of Simple `[u8]`.
+pub(crate) fn byte_array_write(value: RuntimeValue, bytes: &[u8]) -> bool {
+    let Some(array) = get_typed_ptr_mut::<RuntimeArray>(value, HeapObjectType::Array) else {
+        return false;
+    };
+    let array = unsafe { &mut *array };
+    if array.len > array.capacity || array.data.is_null() || bytes.len() > array.len as usize {
+        return false;
+    }
+    if array.is_byte_packed() {
+        unsafe { std::slice::from_raw_parts_mut(array.data.cast::<u8>(), bytes.len()) }.copy_from_slice(bytes);
+    } else {
+        for (slot, byte) in unsafe { array.as_mut_slice() }.iter_mut().zip(bytes) {
+            *slot = RuntimeValue::from_int(*byte as i64);
+        }
+    }
+    true
 }
 
 /// Layout used for the element storage of a `RuntimeArray` with the given

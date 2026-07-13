@@ -41,7 +41,11 @@ impl BufferUsage {
     fn to_vk_usage(&self) -> vk::BufferUsageFlags {
         let mut flags = vk::BufferUsageFlags::empty();
         if self.storage {
-            flags |= vk::BufferUsageFlags::STORAGE_BUFFER;
+            // Storage buffers are device-local and upload/download always use
+            // staging copies, so both transfer directions are mandatory.
+            flags |= vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_SRC
+                | vk::BufferUsageFlags::TRANSFER_DST;
         }
         if self.uniform {
             flags |= vk::BufferUsageFlags::UNIFORM_BUFFER;
@@ -53,6 +57,27 @@ impl BufferUsage {
             flags |= vk::BufferUsageFlags::TRANSFER_DST;
         }
         flags
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BufferUsage;
+    use ash::vk;
+
+    #[test]
+    fn storage_usage_includes_staging_transfer_directions() {
+        let flags = BufferUsage {
+            storage: true,
+            uniform: false,
+            transfer_src: false,
+            transfer_dst: false,
+        }
+        .to_vk_usage();
+
+        assert!(flags.contains(vk::BufferUsageFlags::STORAGE_BUFFER));
+        assert!(flags.contains(vk::BufferUsageFlags::TRANSFER_SRC));
+        assert!(flags.contains(vk::BufferUsageFlags::TRANSFER_DST));
     }
 }
 

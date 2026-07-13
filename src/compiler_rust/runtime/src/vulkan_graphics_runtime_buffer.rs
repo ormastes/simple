@@ -1,7 +1,7 @@
 #[cfg(feature = "vulkan")]
 use super::vulkan_graphics_runtime_core::{alloc_handle, BufferUsage, VulkanBuffer, STATE};
 #[cfg(feature = "vulkan")]
-use crate::value::{byte_array_parts, RuntimeValue};
+use crate::value::{byte_array_bytes, byte_array_write, RuntimeValue};
 
 // ============================================================================
 // Buffer Management
@@ -120,9 +120,10 @@ pub extern "C" fn rt_vulkan_unmap_memory(_handle: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_copy_to_buffer(handle: i64, data: RuntimeValue, offset: i64) -> i64 {
-    let Some((data, len)) = byte_array_parts(data) else {
+    let Some(data) = byte_array_bytes(data) else {
         return 0;
     };
+    let len = data.len();
     if offset != 0 {
         return 0;
     }
@@ -139,9 +140,7 @@ pub extern "C" fn rt_vulkan_copy_to_buffer(handle: i64, data: RuntimeValue, offs
         state.set_error("copy_to_buffer: source exceeds buffer".to_string());
         return 0;
     }
-    let slice = unsafe { std::slice::from_raw_parts(data, len) };
-
-    match buf.upload(slice) {
+    match buf.upload(&data) {
         Ok(()) => 1,
         Err(e) => {
             let err_msg = format!("copy_to_buffer: {e}");
@@ -163,9 +162,10 @@ pub extern "C" fn rt_vulkan_copy_to_buffer(_handle: i64, _data: i64, _offset: i6
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_copy_from_buffer(data: RuntimeValue, handle: i64, offset: i64) -> i64 {
-    let Some((data, len)) = byte_array_parts(data) else {
+    let Some(current) = byte_array_bytes(data) else {
         return 0;
     };
+    let len = current.len();
     if offset != 0 {
         return 0;
     }
@@ -179,11 +179,7 @@ pub extern "C" fn rt_vulkan_copy_from_buffer(data: RuntimeValue, handle: i64, of
         return 0;
     }
     match buf.download(len as u64) {
-        Ok(bytes) => {
-            let dst = unsafe { std::slice::from_raw_parts_mut(data, bytes.len()) };
-            dst.copy_from_slice(&bytes);
-            1
-        }
+        Ok(bytes) => byte_array_write(data, &bytes) as i64,
         Err(e) => {
             tracing::error!("copy_from_buffer: {e}");
             0

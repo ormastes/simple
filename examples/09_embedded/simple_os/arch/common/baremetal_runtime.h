@@ -95,11 +95,15 @@ _Static_assert(offsetof(RuntimeString, len) == 8, "RuntimeString.len must be at 
 _Static_assert(offsetof(RuntimeString, data) == 16, "RuntimeString.data must be at offset 16");
 
 typedef struct {
-    HeapHeader   hdr;
-    uint32_t     len;
-    uint32_t     cap;
-    RuntimeValue items[];
+    HeapHeader    hdr;
+    uint64_t      len;
+    uint64_t      cap;
+    RuntimeValue *items;
 } RuntimeArray;
+
+_Static_assert(offsetof(RuntimeArray, len) == 8, "RuntimeArray.len must be at offset 8");
+_Static_assert(offsetof(RuntimeArray, items) == 24, "RuntimeArray.items must be at offset 24");
+_Static_assert(sizeof(RuntimeArray) == 32, "RuntimeArray header must be 32 bytes");
 
 typedef struct {
     HeapHeader    hdr;

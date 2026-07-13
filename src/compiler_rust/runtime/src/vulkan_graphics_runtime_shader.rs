@@ -1,7 +1,7 @@
 #[cfg(feature = "vulkan")]
 use super::vulkan_graphics_runtime_core::{alloc_handle, ComputePipeline, ShaderModule, STATE};
 #[cfg(feature = "vulkan")]
-use crate::value::{byte_array_parts, RuntimeValue};
+use crate::value::{byte_array_bytes, RuntimeValue};
 
 // ============================================================================
 // Shader & Pipeline
@@ -11,9 +11,10 @@ use crate::value::{byte_array_parts, RuntimeValue};
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_compile_spirv(spirv: RuntimeValue) -> i64 {
-    let Some((base, len)) = byte_array_parts(spirv) else {
+    let Some(spirv_bytes) = byte_array_bytes(spirv) else {
         return 0;
     };
+    let len = spirv_bytes.len();
     let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
@@ -27,16 +28,15 @@ pub extern "C" fn rt_vulkan_compile_spirv(spirv: RuntimeValue) -> i64 {
         state.set_error("compile_spirv: invalid byte length".to_string());
         return 0;
     }
-    let spirv_bytes = unsafe { std::slice::from_raw_parts(base, len) };
     let magic = u32::from_le_bytes(spirv_bytes[..4].try_into().unwrap());
     if magic != 0x07230203 {
         state.set_error(format!("compile_spirv: bad SPIR-V magic 0x{magic:08x}"));
         return 0;
     }
 
-    let spirv_owned = spirv_bytes.to_vec();
+    let spirv_owned = spirv_bytes.clone();
 
-    match ShaderModule::new(device, spirv_bytes) {
+    match ShaderModule::new(device, &spirv_bytes) {
         Ok(module) => {
             let h = alloc_handle();
             state.shader_modules.insert(h, module);
