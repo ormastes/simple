@@ -35,7 +35,7 @@ fn lex_escape_octal_value(c: text) -> i64:
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
-fn lexer_struct_array_len<T>(array: [T]) -> i64:
+fn rt_array_len_safe<T>(array: [T]) -> i64:
     return array.len()
 
 var core_last_token_text_slot: [text] = [""]
@@ -45,12 +45,12 @@ var core_last_token_suffix_slot: [text] = [""]
 var core_token_env_save_slot: [bool] = [false]
 
 fn core_token_env_save_set(enabled: bool):
-    if lexer_struct_array_len(core_token_env_save_slot) == 0:
+    if rt_array_len_safe(core_token_env_save_slot) == 0:
         core_token_env_save_slot = [false]
     core_token_env_save_slot[0] = enabled
 
 fn core_token_env_save_enabled() -> bool:
-    if lexer_struct_array_len(core_token_env_save_slot) == 0:
+    if rt_array_len_safe(core_token_env_save_slot) == 0:
         return false
     core_token_env_save_slot[0]
 
@@ -59,20 +59,20 @@ fn core_token_text_save(value: text):
         rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", value)
 
 fn core_token_suffix_save(value: text):
-    if lexer_struct_array_len(core_last_token_suffix_slot) == 0:
+    if rt_array_len_safe(core_last_token_suffix_slot) == 0:
         core_last_token_suffix_slot = [""]
     core_last_token_suffix_slot[0] = value
     if core_token_env_save_enabled():
         rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_SUFFIX", value)
 
 fn core_token_capture(tok_text: text, line: i64, col: i64):
-    if lexer_struct_array_len(core_last_token_text_slot) == 0:
+    if rt_array_len_safe(core_last_token_text_slot) == 0:
         core_last_token_text_slot = [""]
-    if lexer_struct_array_len(core_last_token_line_slot) == 0:
+    if rt_array_len_safe(core_last_token_line_slot) == 0:
         core_last_token_line_slot = [0]
-    if lexer_struct_array_len(core_last_token_col_slot) == 0:
+    if rt_array_len_safe(core_last_token_col_slot) == 0:
         core_last_token_col_slot = [0]
-    if lexer_struct_array_len(core_last_token_suffix_slot) == 0:
+    if rt_array_len_safe(core_last_token_suffix_slot) == 0:
         core_last_token_suffix_slot = [""]
     core_last_token_text_slot[0] = tok_text
     core_last_token_line_slot[0] = line
@@ -80,22 +80,22 @@ fn core_token_capture(tok_text: text, line: i64, col: i64):
     core_last_token_suffix_slot[0] = ""
 
 fn core_lexer_last_text_get() -> text:
-    if lexer_struct_array_len(core_last_token_text_slot) == 0:
+    if rt_array_len_safe(core_last_token_text_slot) == 0:
         return ""
     core_last_token_text_slot[0]
 
 fn core_lexer_last_line_get() -> i64:
-    if lexer_struct_array_len(core_last_token_line_slot) == 0:
+    if rt_array_len_safe(core_last_token_line_slot) == 0:
         return 0
     core_last_token_line_slot[0]
 
 fn core_lexer_last_col_get() -> i64:
-    if lexer_struct_array_len(core_last_token_col_slot) == 0:
+    if rt_array_len_safe(core_last_token_col_slot) == 0:
         return 0
     core_last_token_col_slot[0]
 
 fn core_lexer_last_suffix_get() -> text:
-    if lexer_struct_array_len(core_last_token_suffix_slot) == 0:
+    if rt_array_len_safe(core_last_token_suffix_slot) == 0:
         return ""
     core_last_token_suffix_slot[0]
 
@@ -103,6 +103,12 @@ fn core_lexer_last_suffix_get() -> text:
 
 struct CoreLexer:
     source: text
+    # Char-indexed view of `source`, built once (O(N)). Every scan reads chars
+    # via this array in O(1), instead of `source[pos:pos+1]` which rebuilds a
+    # full Vec<char> per call (O(N)) -> O(N^2)/file. Per-instance, so nested/
+    # re-entrant lexing is isolated (no shared-cache staleness). Char-indexed
+    # also removes the pos(char)-vs-len(byte) mismatch that stalled the scanner.
+    source_chars: [text]
     pos: i64
     line: i64
     col: i64
@@ -119,7 +125,7 @@ struct CoreLexer:
 # ===== Constructor (free function) =====
 
 fn make_core_lexer(source: text) -> CoreLexer:
-    CoreLexer(source: source, pos: 0, line: 1, col: 1, indent_stack: [0], pending_dedents: 0, at_line_start: true, paren_depth: 0, cur_kind: 0, cur_text: "", cur_line: 0, cur_col: 0, cur_start: 0)
+    CoreLexer(source: source, source_chars: source.chars(), pos: 0, line: 1, col: 1, indent_stack: [0], pending_dedents: 0, at_line_start: true, paren_depth: 0, cur_kind: 0, cur_text: "", cur_line: 0, cur_col: 0, cur_start: 0)
 
 # ===== CoreLexer Methods =====
 
@@ -128,31 +134,40 @@ impl CoreLexer:
     # ----- Read-only accessors -----
 
     fn at_end() -> bool:
-        # pos walks in slice units while len() may count bytes; for sources
-        # containing multi-byte UTF-8 chars (e.g. in comments) pos can exhaust
-        # the text before reaching len(), with slicing returning "". Treat an
-        # empty peek as end-of-input or the EOF/DEDENT emission never runs and
-        # the token stream stalls on the last real token (infinite NEWLINEs).
-        if self.pos >= self.source.len():
-            return true
-        self.source[self.pos:self.pos + 1] == ""
+        # Char-indexed: pos and length are both in chars, so this is exact
+        # (no byte-vs-char mismatch that previously stalled the scanner).
+        self.pos >= self.source_chars.len()
 
     fn peek() -> text:
-        if self.pos >= self.source.len():
+        if self.pos >= self.source_chars.len():
             return ""
-        self.source[self.pos:self.pos + 1]
+        self.source_chars[self.pos]
 
     fn peek_next() -> text:
         val next_pos: i64 = self.pos + 1
-        if next_pos >= self.source.len():
+        if next_pos >= self.source_chars.len():
             return ""
-        self.source[next_pos:next_pos + 1]
+        self.source_chars[next_pos]
 
     fn peek_at(offset: i64) -> text:
         val target: i64 = self.pos + offset
-        if target >= self.source.len():
+        if target >= self.source_chars.len():
             return ""
-        self.source[target:target + 1]
+        self.source_chars[target]
+
+    # Token-text extraction over a [start,end) char range: O(span) via array
+    # slice + join, replacing `source[start:end]` which was O(N) per call.
+    fn char_slice(start: i64, end: i64) -> text:
+        var s: i64 = start
+        if s < 0:
+            s = 0
+        var e: i64 = end
+        val n: i64 = self.source_chars.len()
+        if e > n:
+            e = n
+        if e <= s:
+            return ""
+        self.source_chars[s:e].join("")
 
     fn token_kind() -> i64:
         self.cur_kind
@@ -169,9 +184,9 @@ impl CoreLexer:
     # ----- Mutating methods -----
 
     me advance() -> text:
-        if self.pos >= self.source.len():
+        if self.pos >= self.source_chars.len():
             return ""
-        val c: text = self.source[self.pos:self.pos + 1]
+        val c: text = self.source_chars[self.pos]
         self.pos = self.pos + 1
         if c == "\n":
             self.line = self.line + 1
@@ -182,9 +197,9 @@ impl CoreLexer:
         c
 
     me match_char(expected: text) -> bool:
-        if self.pos >= self.source.len():
+        if self.pos >= self.source_chars.len():
             return false
-        if self.source[self.pos:self.pos + 1] != expected:
+        if self.source_chars[self.pos] != expected:
             return false
         self.pos = self.pos + 1
         self.col = self.col + 1
@@ -236,33 +251,33 @@ impl CoreLexer:
         val start_col: i64 = self.col
         self.cur_start = start
         var is_float: bool = false
-        val src: text = self.source
+        val src: [text] = self.source_chars
         val src_len: i64 = src.len()
         var pos: i64 = self.pos
 
         # Check for hex, binary, octal prefix
-        val first: text = if pos < src_len then src[pos:pos + 1] else ""
+        val first: text = if pos < src_len then src[pos] else ""
         if first == "0":
-            val second: text = if pos + 1 < src_len then src[pos + 1:pos + 2] else ""
+            val second: text = if pos + 1 < src_len then src[pos + 1] else ""
             if second == "x":
                 # Hex literal
                 pos = pos + 2
                 for i in 0..64:
                     if pos >= src_len:
                         break
-                    val hc: text = src[pos:pos + 1]
+                    val hc: text = src[pos]
                     if hc == "_":
                         pos = pos + 1
                     elif is_hex_digit(hc):
                         pos = pos + 1
                     else:
                         break
-                var num_text: text = self.source[start:pos]
+                var num_text: text = self.char_slice(start, pos)
                 # Type suffix: 0x10000000u64 / 0x1234_u64 (decimal parity;
                 # the hex-digit loop already stopped at the non-hex alpha).
                 var hex_suffix: text = ""
                 val hxlen: i64 = num_text.len()
-                val after_hex: text = if pos < src_len then src[pos:pos + 1] else ""
+                val after_hex: text = if pos < src_len then src[pos] else ""
                 if is_alpha(after_hex):
                     if hxlen > 0 and num_text[hxlen - 1:hxlen] == "_":
                         num_text = num_text[0:hxlen - 1]
@@ -270,11 +285,11 @@ impl CoreLexer:
                     for si in 0..1000:
                         if pos >= src_len:
                             break
-                        if is_ident_char(src[pos:pos + 1]):
+                        if is_ident_char(src[pos]):
                             pos = pos + 1
                         else:
                             break
-                    hex_suffix = self.source[hsuf_start:pos]
+                    hex_suffix = self.char_slice(hsuf_start, pos)
                 core_token_suffix_save(hex_suffix)
                 if hex_suffix != "":
                     self.pos = pos
@@ -293,7 +308,7 @@ impl CoreLexer:
                 for i in 0..64:
                     if pos >= src_len:
                         break
-                    val bc: text = src[pos:pos + 1]
+                    val bc: text = src[pos]
                     val is_bin: bool = bc == "0"
                     val is_bin1: bool = bc == "1"
                     val is_under: bool = bc == "_"
@@ -303,7 +318,7 @@ impl CoreLexer:
                         pos = pos + 1
                     else:
                         break
-                val num_text: text = self.source[start:pos]
+                val num_text: text = self.char_slice(start, pos)
                 self.pos = pos
                 self.col = self.col + (pos - start)
                 self.make_token(1, num_text, start_line, start_col)
@@ -316,7 +331,7 @@ impl CoreLexer:
                 for i in 0..64:
                     if pos >= src_len:
                         break
-                    val oc: text = src[pos:pos + 1]
+                    val oc: text = src[pos]
                     val is_oct: bool = is_digit(oc)
                     val is_under: bool = oc == "_"
                     val valid: bool = is_oct or is_under
@@ -324,7 +339,7 @@ impl CoreLexer:
                         pos = pos + 1
                     else:
                         break
-                val num_text: text = self.source[start:pos]
+                val num_text: text = self.char_slice(start, pos)
                 self.pos = pos
                 self.col = self.col + (pos - start)
                 self.make_token(1, num_text, start_line, start_col)
@@ -336,7 +351,7 @@ impl CoreLexer:
         for i in 0..100:
             if pos >= src_len:
                 break
-            val dc: text = src[pos:pos + 1]
+            val dc: text = src[pos]
             val is_d: bool = is_digit(dc)
             val is_u: bool = dc == "_"
             val valid: bool = is_d or is_u
@@ -346,8 +361,8 @@ impl CoreLexer:
                 break
 
         # Check for float
-        val maybe_dot: text = if pos < src_len then src[pos:pos + 1] else ""
-        val after_dot: text = if pos + 1 < src_len then src[pos + 1:pos + 2] else ""
+        val maybe_dot: text = if pos < src_len then src[pos] else ""
+        val after_dot: text = if pos + 1 < src_len then src[pos + 1] else ""
         val dot_then_digit: bool = maybe_dot == "."
         if dot_then_digit:
             val is_next_dig: bool = is_digit(after_dot)
@@ -357,7 +372,7 @@ impl CoreLexer:
                 for i in 0..100:
                     if pos >= src_len:
                         break
-                    val fc: text = src[pos:pos + 1]
+                    val fc: text = src[pos]
                     val is_fd: bool = is_digit(fc)
                     val is_fu: bool = fc == "_"
                     val fvalid: bool = is_fd or is_fu
@@ -367,14 +382,14 @@ impl CoreLexer:
                         break
 
         # Check for exponent
-        val exp_c: text = if pos < src_len then src[pos:pos + 1] else ""
+        val exp_c: text = if pos < src_len then src[pos] else ""
         val is_exp_e: bool = exp_c == "e"
         val is_exp_E: bool = exp_c == "E"
         val has_exp: bool = is_exp_e or is_exp_E
         if has_exp:
             is_float = true
             pos = pos + 1
-            val sign: text = if pos < src_len then src[pos:pos + 1] else ""
+            val sign: text = if pos < src_len then src[pos] else ""
             val is_plus: bool = sign == "+"
             val is_minus: bool = sign == "-"
             val has_sign: bool = is_plus or is_minus
@@ -383,13 +398,13 @@ impl CoreLexer:
             for i in 0..100:
                 if pos >= src_len:
                     break
-                val ec: text = src[pos:pos + 1]
+                val ec: text = src[pos]
                 if is_digit(ec):
                     pos = pos + 1
                 else:
                     break
 
-        var num_text: text = self.source[start:pos]
+        var num_text: text = self.char_slice(start, pos)
 
         # Unit/type suffix: `10_u8` (underscore form) or `10u8`/`5ms` (direct
         # alpha, seed lexer parity — an alpha run glued to a number can only
@@ -398,7 +413,7 @@ impl CoreLexer:
         # alpha follower. Suffix travels via the CORE_TOKEN_SUFFIX env channel.
         var suffix: text = ""
         val nlen: i64 = num_text.len()
-        val next_ch: text = if pos < src_len then src[pos:pos + 1] else ""
+        val next_ch: text = if pos < src_len then src[pos] else ""
         if is_alpha(next_ch):
             if nlen > 0 and num_text[nlen - 1:nlen] == "_":
                 num_text = num_text[0:nlen - 1]
@@ -406,11 +421,11 @@ impl CoreLexer:
             for i in 0..1000:
                 if pos >= src_len:
                     break
-                if is_ident_char(src[pos:pos + 1]):
+                if is_ident_char(src[pos]):
                     pos = pos + 1
                 else:
                     break
-            suffix = self.source[suf_start:pos]
+            suffix = self.char_slice(suf_start, pos)
         self.pos = pos
         self.col = self.col + (pos - start)
         if suffix != "":
@@ -457,7 +472,7 @@ impl CoreLexer:
                 if close_all:
                     break
                 self.advance()
-            val content: text = self.source[seg_start:self.pos]
+            val content: text = self.char_slice(seg_start, self.pos)
             if not self.at_end():
                 self.advance()
                 self.advance()
@@ -567,14 +582,14 @@ impl CoreLexer:
                 var la_found: i64 = -1
                 if not la_is_quote:
                     var la: i64 = self.pos + 1
-                    val src_len: i64 = self.source.len()
+                    val src_len: i64 = self.source_chars.len()
                     var la_depth: i64 = 1
                     var la_str: text = ""
                     var la_esc: bool = false
                     for j in 0..100000:
                         if la >= src_len:
                             break
-                        val lc: text = self.source[la:la + 1]
+                        val lc: text = self.source_chars[la]
                         if lc == "\n":
                             break
                         if la_str != "":
@@ -654,14 +669,14 @@ impl CoreLexer:
         val start_line: i64 = self.line
         val start_col: i64 = self.col
         self.cur_start = start
-        val src: text = self.source
+        val src: [text] = self.source_chars
         val src_len: i64 = src.len()
         var pos: i64 = self.pos
 
         for i in 0..1000:
             if pos >= src_len:
                 break
-            val c: text = src[pos:pos + 1]
+            val c: text = src[pos]
             if is_ident_char(c):
                 pos = pos + 1
             else:
@@ -670,13 +685,13 @@ impl CoreLexer:
         self.pos = pos
         # identifiers never contain newlines
         self.col = self.col + (pos - start)
-        val ident_text: text = src[start:pos]
+        val ident_text: text = src[start:pos].join("")
 
         # G36: r"..." raw string — backslashes are literal, no escape processing.
         # Matches Rust seed scan_raw_double_string semantics: read until closing "
         # (cannot span newlines). Emits kind 3 (StringLit) with raw content.
         if ident_text == "r":
-            val next_ch: text = if pos < src_len then src[pos:pos + 1] else ""
+            val next_ch: text = if pos < src_len then src[pos] else ""
             if next_ch == "\"":
                 self.scan_raw_string(start_line, start_col)
                 return
@@ -874,12 +889,12 @@ impl CoreLexer:
             # non-blank char is `.` or `|`, suppress the newline (continuation).
             var dot_la: i64 = self.pos
             for _di in 0..100000:
-                val dc: text = self.source[dot_la:dot_la + 1]
+                val dc: text = if dot_la < self.source_chars.len() then self.source_chars[dot_la] else ""
                 if dc == " " or dc == "\t":
                     dot_la = dot_la + 1
                 else:
                     break
-            val la_c: text = self.source[dot_la:dot_la + 1]
+            val la_c: text = if dot_la < self.source_chars.len() then self.source_chars[dot_la] else ""
             if la_c == "." or la_c == "|":
                 self.scan_token_rescan()
                 return
