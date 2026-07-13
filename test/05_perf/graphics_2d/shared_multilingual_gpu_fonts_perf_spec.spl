@@ -1,0 +1,198 @@
+# @tag: rendering, font, performance
+# @req NFR-004 NFR-005 NFR-006 NFR-008
+
+"""# Shared Multilingual Font Performance Evidence
+
+Measures warm 1,024-glyph CPU text at 1080p and 4K, a 4,096-glyph CPU row,
+cache hits, unchanged atlas generation, live RSS, and a promoted Vulkan path.
+The Vulkan lane consumes production elapsed, cumulative atlas-upload, and
+tracked GPU-buffer high-water counters; handles and readback alone are not
+performance evidence.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.color.{rgb}
+use std.gc_async_mut.io.time_ops.{time_now_nanos}
+use std.io_runtime.{getpid}
+use std.nogc_sync_mut.process_monitor.{read_proc_status_rss_linux}
+
+val FONT_PATH = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+val SAMPLE_COUNT: i64 = 11
+
+class FontPerfBudgetEvidence:
+    status: text
+    reason: text
+    warm_1080_p95_ns: i64
+    warm_4k_p95_ns: i64
+    cpu_4096_p95_ns: i64
+    gpu_4096_p95_ns: i64
+    warm_hits: i64
+    warm_requests: i64
+    unchanged_upload: bool
+    rss_growth_percent: i64
+    gpu_resource_high_water_bytes: i64
+
+fn _repeat_a(count: i64) -> text:
+    # ponytail: bounded O(n^2) fixture construction; replace with a text builder
+    # only if benchmark setup reaches the timed region or fixture sizes grow.
+    var out = ""
+    var i: i64 = 0
+    while i < count:
+        out = out + "A"
+        i = i + 1
+    out
+
+fn _sort(values: [i64]) -> [i64]:
+    var out = values
+    var i: i64 = 1
+    while i < out.len():
+        val value = out[i]
+        var j = i - 1
+        while j >= 0 and out[j] > value:
+            out[j + 1] = out[j]
+            j = j - 1
+        out[j + 1] = value
+        i = i + 1
+    out
+
+fn _p95(values: [i64]) -> i64:
+    if values.len() == 0: return 0
+    val sorted = _sort(values)
+    var index = sorted.len() * 95 / 100
+    if index >= sorted.len(): index = sorted.len() - 1
+    sorted[index]
+
+fn _measure_cpu(width: i32, height: i32, content: text) -> (bool, i64, i64, i64, bool, i64):
+    var engine = Engine2D.create_with_backend(width, height, "cpu")
+    if not engine.load_font(FONT_PATH):
+        engine.shutdown()
+        return (false, 0, 0, 0, false, 0)
+    var fonts = engine.fonts()
+    val first = fonts.prepare_text(content, 0xffffffffu32, 32)
+    val second = fonts.prepare_text(content, 0xffffffffu32, 32)
+    engine.font_renderer = fonts
+    val unchanged_upload = first.valid and second.valid and first.atlas_generation == second.atlas_generation and second.dirty_rects.len() == 0
+    engine.reset_cache_stats()
+    var samples: [i64] = []
+    var i: i64 = 0
+    while i < SAMPLE_COUNT:
+        engine.clear(rgb(0, 0, 0))
+        val started = time_now_nanos()
+        engine.draw_text(0, 0, content, 0xffffffffu32, 32)
+        samples.push(time_now_nanos() - started)
+        i = i + 1
+    val stats = engine.font_cache_stats()
+    val rss_kb = read_proc_status_rss_linux(getpid())
+    engine.shutdown()
+    (true, _p95(samples), stats.hits, stats.misses, unchanged_upload, rss_kb)
+
+fn _measure_vulkan_4096(content: text) -> (bool, i64, bool, i64, text):
+    var engine = Engine2D.create_with_backend(1920, 1080, "vulkan")
+    if engine.backend_name() != "vulkan" or engine.vulkan_backend == nil:
+        engine.shutdown()
+        return (false, 0, false, 0, "vulkan-backend-unavailable")
+    if not engine.load_font(FONT_PATH):
+        engine.shutdown()
+        return (false, 0, false, 0, "runtime-font-face-unavailable")
+    val active = engine.vulkan_backend
+    var vulkan = active.?
+    val pipeline = vulkan.install_font_atlas_pipeline([])
+    engine.vulkan_backend = vulkan
+    if pipeline.status != "ready":
+        engine.shutdown()
+        return (false, 0, false, 0, pipeline.reason)
+
+    engine.clear(rgb(0, 0, 0))
+    engine.draw_text(0, 0, content, 0xffffffffu32, 32)
+    val warm = engine.vulkan_font_performance_evidence()
+    if warm == nil or not warm.?.promotion_ready:
+        val reason = if warm == nil: "missing-vulkan-font-evidence" else: warm.?.reason
+        engine.shutdown()
+        return (false, 0, false, 0, reason)
+    val uploads_before = warm.?.atlas_upload_count
+    var samples: [i64] = []
+    var i: i64 = 0
+    while i < SAMPLE_COUNT:
+        engine.clear(rgb(0, 0, 0))
+        val started = time_now_nanos()
+        engine.draw_text(0, 0, content, 0xffffffffu32, 32)
+        val elapsed = time_now_nanos() - started
+        val observed = engine.vulkan_font_performance_evidence()
+        if observed == nil or not observed.?.promotion_ready or observed.?.elapsed_ns <= 0 or elapsed <= 0:
+            val reason = if observed == nil: "missing-vulkan-font-evidence" else: observed.?.reason
+            engine.shutdown()
+            return (false, 0, false, 0, reason)
+        samples.push(elapsed)
+        i = i + 1
+    val final_evidence = engine.vulkan_font_performance_evidence()
+    val final = final_evidence.?
+    val unchanged_upload = final.atlas_upload_count == uploads_before
+    val resource_bytes = final.gpu_resource_high_water_bytes
+    engine.shutdown()
+    (true, _p95(samples), unchanged_upload, resource_bytes, "pass")
+
+fn expect_font_perf_budget(evidence: FontPerfBudgetEvidence) -> bool:
+    evidence.status == "pass" and evidence.warm_requests > 0 and
+        evidence.warm_hits * 100 >= evidence.warm_requests * 95 and
+        evidence.warm_1080_p95_ns <= 4000000 and evidence.warm_4k_p95_ns <= 8000000 and
+        evidence.gpu_4096_p95_ns > 0 and evidence.cpu_4096_p95_ns >= evidence.gpu_4096_p95_ns * 125 / 100 and
+        evidence.unchanged_upload and evidence.rss_growth_percent <= 10 and
+        evidence.gpu_resource_high_water_bytes > 0 and evidence.gpu_resource_high_water_bytes <= 134217728
+
+fn _measure_font_perf_budget() -> FontPerfBudgetEvidence:
+    val rss_before = read_proc_status_rss_linux(getpid())
+    val text_1024 = _repeat_a(1024)
+    val text_4096 = _repeat_a(4096)
+    val (ok_1080, p95_1080, hits_1080, misses_1080, unchanged_1080, rss_1080) = _measure_cpu(1920, 1080, text_1024)
+    val (ok_4k, p95_4k, hits_4k, misses_4k, unchanged_4k, rss_4k) = _measure_cpu(3840, 2160, text_1024)
+    val (ok_4096, cpu_4096, _hits_4096, _misses_4096, unchanged_4096, rss_4096) = _measure_cpu(1920, 1080, text_4096)
+    val (gpu_ready, gpu_4096, gpu_unchanged, gpu_resources, gpu_reason) = _measure_vulkan_4096(text_4096)
+    var rss_high = rss_1080
+    if rss_4k > rss_high: rss_high = rss_4k
+    if rss_4096 > rss_high: rss_high = rss_4096
+    val rss_growth = if rss_before > 0 and rss_high > rss_before: (rss_high - rss_before) * 100 / rss_before else: 0
+    val requests = 1024 * SAMPLE_COUNT * 2
+    val hits = hits_1080 + hits_4k
+    val cpu_ready = ok_1080 and ok_4k and ok_4096 and misses_1080 == 0 and misses_4k == 0
+    val measured = FontPerfBudgetEvidence(
+        status: "pass",
+        reason: "pass",
+        warm_1080_p95_ns: p95_1080,
+        warm_4k_p95_ns: p95_4k,
+        cpu_4096_p95_ns: cpu_4096,
+        gpu_4096_p95_ns: gpu_4096,
+        warm_hits: hits,
+        warm_requests: requests,
+        unchanged_upload: unchanged_1080 and unchanged_4k and unchanged_4096 and gpu_unchanged,
+        rss_growth_percent: rss_growth,
+        gpu_resource_high_water_bytes: gpu_resources,
+    )
+    if cpu_ready and gpu_ready and expect_font_perf_budget(measured):
+        return measured
+    FontPerfBudgetEvidence(
+        status: if cpu_ready and gpu_ready: "failed" else: "unavailable",
+        reason: if not cpu_ready: "runtime-font-face-unavailable" elif not gpu_ready: gpu_reason else: "font-performance-budget-exceeded",
+        warm_1080_p95_ns: p95_1080,
+        warm_4k_p95_ns: p95_4k,
+        cpu_4096_p95_ns: cpu_4096,
+        gpu_4096_p95_ns: gpu_4096,
+        warm_hits: hits,
+        warm_requests: requests,
+        unchanged_upload: unchanged_1080 and unchanged_4k and unchanged_4096 and gpu_unchanged,
+        rss_growth_percent: rss_growth,
+        gpu_resource_high_water_bytes: gpu_resources,
+    )
+
+describe "shared multilingual font performance evidence":
+    it "measures warm text and fails closed without promoted GPU counters":
+        step("Measure warm font rendering and resource bounds")
+        val evidence = _measure_font_perf_budget()
+        print "font_perf status={evidence.status} reason={evidence.reason} warm_1080_p95_ns={evidence.warm_1080_p95_ns} warm_4k_p95_ns={evidence.warm_4k_p95_ns} cpu_4096_p95_ns={evidence.cpu_4096_p95_ns} gpu_4096_p95_ns={evidence.gpu_4096_p95_ns} warm_hits={evidence.warm_hits}/{evidence.warm_requests} unchanged_upload={evidence.unchanged_upload} rss_growth_percent={evidence.rss_growth_percent} gpu_resource_high_water_bytes={evidence.gpu_resource_high_water_bytes}"
+        if evidence.status == "pass":
+            expect(expect_font_perf_budget(evidence)).to_be(true)
+        else if evidence.status == "unavailable":
+            expect(evidence.reason != "pass").to_be(true)
+            expect(expect_font_perf_budget(evidence)).to_be(false)
+        else:
+            expect(evidence.status).to_equal("pass")

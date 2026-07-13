@@ -72,10 +72,11 @@ SingleSubst 1/2 primitives, while the shaper stays identity until active
 Script/LangSys/Feature lookup selection is available. Unsupported or malformed
 data returns unchanged material and cannot set completion.
 
-The selector and application land together. Their first accepted scope covers
-Latin, Cyrillic, Han, Devanagari, and Arabic script/language routing, with
-section-local bounds and required/default feature ordering. A standalone plan
-whose `complete` bit is not derived from validated active subtables is rejected.
+The selector and application must land together. Current accepted scope covers
+direct Latin, Cyrillic, Han, and bounded Arabic/Urdu letter witnesses.
+Devanagari stays incomplete until Script/LangSys/Feature routing selects the
+active dev2 lookups. A standalone plan whose `complete` bit is not derived from
+validated active subtables is rejected.
 
 The first native Engine3D HUD prerequisite is a Simple-owned Metal source and
 20-byte vertex contract (`packed_float2` position, `packed_float2` UV, `u32`
@@ -199,6 +200,30 @@ disk bake. Required guest evidence is exact path/length/hash, successful glyph
 material, WM Draw IR family/identity, and nonblank framebuffer output for Latin
 plus one accepted non-ASCII simple-script witness. Host-repository presence is
 not guest evidence.
+
+Remaining completion behavior is intentionally narrow:
+
+- Legacy Web, GUI, and WM text uses existing Draw IR scene helpers; paint code
+  does not load fonts privately.
+- Engine2D verifies a nonempty `font-identity` immediately before its existing
+  `draw_text`. A missing identity uses the face already selected through the
+  public Engine2D API (including SimpleOS retained-byte preload); an invalid or
+  changed nonempty identity clears vector state and uses bitmap behavior.
+- A selected-script run is accepted only when face generation, glyph IDs,
+  clusters, advances, offsets, language, script, direction, and parallel vector
+  lengths agree. Unsupported GSUB/GPOS lookups reject the run rather than
+  returning a partial sequence.
+- Engine3D HUD/world consumes `FontRenderBatch`; promotion requires real
+  texture/sampler/pipeline/draw/fence/readback evidence from its chosen backend.
+- SimpleOS validates the staged candidate/hash before boot and checks literal
+  pixels produced by the guest WM. Pixelify uses a separate literal default-axis
+  dimensions/advance/checksum format oracle.
+- Performance uses warm cache/backend counters for 1,024 glyphs at 1080p/4K,
+  4,096 equal-semantics CPU/GPU glyphs, unchanged uploads, RSS, and GPU
+  resource high-water.
+
+Evidence states are `pass`, `unavailable`, `runtime-blocked`, or a concrete
+rejection. Helpers never translate the latter three into success.
 
 ## Failure and fallback
 

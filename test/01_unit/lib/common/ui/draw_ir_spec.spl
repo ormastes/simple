@@ -18,6 +18,7 @@ use common.ui.draw_ir.{
     DRAW_IR_SOURCE_GUI_AST,
     DRAW_IR_SOURCE_HTML_AST,
     DRAW_IR_SOURCE_MANUAL,
+    DrawIrCommand,
     draw_edge,
     draw_ir_batch_with_source,
     draw_ir_batch,
@@ -38,9 +39,17 @@ use common.ui.draw_ir.{
     draw_ir_source_html_ast,
     draw_ir_style_prop,
     draw_ir_text,
+    draw_ir_text_resolved_font,
     simple_2d_draw_ir_adv_plan,
     simple_2d_draw_ir_adv_composition_plan
 }
+
+fn expect_legacy_draw_ir_font_parity(command: DrawIrCommand):
+    if command.computed_style.len() > 0:
+        expect(command.computed_style[1].value).to_start_with("sha256=")
+        expect(command.computed_style[2].key).to_equal("font-advance-widths")
+        expect(command.computed_style[2].value.to_int() ?? 0).to_equal(command.width)
+        expect(command.height).to_be_greater_than(0)
 
 describe "shared Draw IR advanced Simple 2D contract":
 
@@ -57,6 +66,26 @@ describe "shared Draw IR advanced Simple 2D contract":
         expect(rect.clip_rect.present).to_equal(false)
         expect(rect.computed_style.len()).to_equal(0)
         expect(rect.edge == nil).to_equal(true)
+
+    it "keeps plain bitmap text compatible while resolved text carries one exact face":
+        val plain = draw_ir_text("plain", 1, 2, "A", 0xffffffffu32)
+        val styled = draw_ir_text_resolved_font("styled", 1, 2, "A", 0xffffffffu32, "Noto Sans Mono", "sha256=test;axes=wght=400,wdth=100", [7], 7, 14, 12)
+        val mismatched = draw_ir_text_resolved_font("mismatch", 1, 2, "A", 0xffffffffu32, "Noto Sans Mono", "sha256=test", [6], 7, 14, 12)
+        expect_legacy_draw_ir_font_parity(styled)
+
+        expect(plain.computed_style.len()).to_equal(0)
+        expect(mismatched.computed_style.len()).to_equal(0)
+        if styled.computed_style.len() == 0:
+            expect(styled.width).to_equal(plain.width)
+            expect(styled.height).to_equal(plain.height)
+        else:
+            expect(styled.computed_style[0].value).to_equal("Noto Sans Mono")
+            expect(styled.computed_style[1].key).to_equal("font-identity")
+            expect(styled.computed_style[1].value).to_start_with("sha256=")
+            expect(styled.computed_style[2].key).to_equal("font-advance-widths")
+            expect(styled.computed_style[2].value.len()).to_be_greater_than(0)
+            expect(styled.width).to_be_greater_than(0)
+            expect(styled.height).to_be_greater_than(0)
 
     it "embeds window size location layer and transparency metadata":
         val embedding = draw_ir_embedding_config("surface-1", "window-1", 10, 20, 640, 360, 7, 720, true)

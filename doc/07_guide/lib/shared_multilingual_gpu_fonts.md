@@ -161,14 +161,16 @@ script-direction identity. Latin-1 letters no longer split Spanish, French, or
 Portuguese witness runs, and mixed-script runs advance instead of overlapping.
 
 Bind each OpenType blob to its runtime face with additive
-`shaper_with_ot_face` calls; rebinding a handle replaces its prior snapshot. Only
+`shaper_with_ot_face` calls; rebinding a handle replaces its prior snapshot.
 Latin, Cyrillic, Han, and a single-codepoint emoji run may set
-`glyph_indices_valid`, and only when the selected live face and blob/runtime
-cmap glyph IDs agree. Arabic, Urdu, Devanagari, Bengali, Thai, Hebrew, and emoji
-sequences fail closed. `substitution_complete` and `positioning_complete`
-remain false because active-feature GSUB/GPOS and full BiDi are incomplete; current
-advances/zero offsets are diagnostic placement, not shaping acceptance. Convert
-substitution-complete direct runs with
+`glyph_indices_valid` only when the selected live face and blob/runtime cmap
+glyph IDs agree. The pinned Arabic/Urdu letter witnesses additionally use
+presentation-form cmap selection and hmtx advances. Devanagari remains
+incomplete because Script/LangSys/Feature activation is not yet implemented;
+the provisional Indic state machine cannot promote a run. Marks, Bengali,
+Thai, Hebrew, and multi-codepoint emoji also fail closed. Convert
+substitution-complete
+accepted runs with
 `shaped_run_to_font_glyph_run`; incomplete runs remain non-renderable even when
 their pre-GSUB glyph indices match. Engine2D consumes only that neutral text-layout
 value through `draw_glyph_run`, preserving the batch-only layer boundary. It
@@ -306,22 +308,54 @@ interpreter readback was unsafe, atlas formats were ambiguous, GPU command
 errors were ignored, child cleanup was unproven, and the macOS-only code could
 not be compiled on this host. Web producers lower through web semantic/layout;
 GUI producers lower through canonical widget/scene owners. Both emit Draw IR.
-The web semantic style now preserves inherited/cascaded `font-family` (including
-the `font` shorthand) as a computed-style property without putting atlas/cache
-material in Draw IR. Engine2D deliberately does not activate that family yet:
-web layout still measures with legacy 5×7 metrics, so selecting a TTF only
-during paint would create overflow/overlap. The old bitmap route and production
-web painter remain unchanged. Completion requires web layout and Engine2D paint
-to consume one resolved face/metric identity.
+The web semantic style preserves inherited/cascaded `font-family`, including the
+`font` shorthand. A successful selected-face resolution now records the stable
+font identity, exact advances, width, and line height used by layout. Web Draw
+IR carries only `font-family`, `font-identity`, and serialized advances;
+Engine2D resolves the identity back to the pinned candidate, verifies the live
+face generation/identity, and uses its existing `draw_text` path. An absent,
+unknown, failed, or changed identity unloads transient vector state and retains
+the byte-compatible bitmap fallback. Draw IR never owns glyphs, atlas pixels,
+native handles, or cache state.
 
-SimpleOS remains an explicit host gap: its image builders have no shared
-immutable-data manifest carrying guest path, length, and SHA-256, and the
-selected native loader needs hosted file/dylib facilities. Do not claim bundled
-font support in a guest image until one canonical asset manifest feeds every
-release/initramfs builder and a Pure Simple byte-backed load plus QEMU
-framebuffer/serial evidence proves the selected family. The existing bitmap
-fallback remains supported meanwhile. Do not add a second font draw path or
-reuse Engine3D HUD/world as one.
+The old framebuffer web painter still rasterizes 5×7 glyphs even when resolved
+metrics shape its boxes. It is therefore compatibility behavior, not final
+legacy vector-font parity. The completion path is to route production legacy
+Web/GUI/WM producers through their canonical semantic/scene owners into the
+same Draw IR executor, not to add paint-local font loading.
+
+SimpleOS image construction now reuses the exact selected
+`FontAssetCandidate` for Noto Sans Mono. Installer rootfs and initramfs staging
+validate its pinned length and SHA-256 and preserve
+`/assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf`.
+The `mkfs.fat` lane can retain that long path; the legacy 8.3 FAT builder
+explicitly omits the disk copy while the initramfs still carries it. Packaging
+is not guest rendering evidence: PASS still requires the production SimpleOS
+WM to load that exact identity and a QEMU framebuffer oracle to find its literal
+glyph pixels. The bitmap fallback remains supported meanwhile. Do not add a
+second font draw path or reuse Engine3D HUD/world as one.
+
+## Completion workflow
+
+Keep the remaining work on the frozen public seams:
+
+1. `FontRenderer` prepares metrics, shaped runs, and `FontRenderBatch`.
+2. Web/GUI/WM producers emit semantic `DrawIrComposition`; Engine2D alone
+   materializes vector glyphs and retains bitmap fallback.
+3. Selected Latin, Han, Arabic/Urdu, and Cyrillic fixtures must
+   prove face, glyph, cluster, advance, offset, direction, language, and script
+   identity before a matrix cell is accepted.
+4. Engine3D HUD/world promotion requires texture, sampler, pipeline, draw,
+   completed fence, depth/transform behavior, and device-origin readback.
+5. SimpleOS proof names the packaged candidate/hash and checks literal guest
+   framebuffer pixels. Pixelify Sans separately needs a literal default-axis
+   dimensions/advance/checksum oracle.
+6. Warm performance records cache hit rate and 1,024-glyph p95 at 1080p/4K;
+   promotion also records equal-semantics 4,096-glyph CPU/GPU p95, unchanged
+   upload behavior, RSS delta, and GPU resource high-water.
+
+Run each acceptance gate once per session. Unavailable hardware or the stale
+self-hosted runtime is a blocker record, never a synthetic PASS.
 
 ## Evidence rules
 

@@ -18,25 +18,11 @@ use std.nogc_sync_mut.io.font_sffi.{font_face_is_live}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 export use std.nogc_sync_mut.text_layout.font_types.{CachedGlyph, FontCacheStats, FontGlyphRun, FontTextPayload, FontRenderQuad, FontRenderBatch}
 
-# Shared Font Renderer — unified text rendering for both OS and browser
-#
-# Provides buffer-based text rendering using three font backends:
-#   1. TrueType/OpenType (via the spl_fonts fontdue/FreeType owner) — Unicode, AA, proportional
-#   2. Vector font (outline commands) — 29 glyphs, 2x2 sub-pixel AA
-#   3. Bitmap 8x16 (VGA fallback) — monospace, no AA
-#
-# The renderer auto-selects the best available backend per glyph:
-#   - If TrueType font loaded → use TrueType
-#   - If vector glyph available → use vector
-#   - Otherwise → bitmap fallback
-#
+# Shared Font Renderer — unified buffer text for OS and browser.
+# Backends are TrueType/OpenType, the small built-in vector face, then VGA
+# bitmap fallback. The first available backend owns each glyph.
 # This module has NO dependency on CompositorBackend, so it can be used
 # by the OS compositor, browser engine, and game engine alike.
-#
-# Sub-modules:
-#   font_provider.spl     — font candidate lists, CSS @font-face parsing, materialization
-#   font_rasterizer.spl   — glyph rasterization backends + blit_glyph
-#   font_vector_data.spl  — vector outline tables + system font constants
 
 # ============================================================================
 # Glyph Cache
@@ -50,6 +36,33 @@ class ResolvedFontMetrics:
     width: i32
     line_height: i32
     reason: text
+
+# ponytail: process-local 128-entry ring for pinned layout metrics; replace with
+# per-document caches only when concurrent multi-face ownership lands.
+val RESOLVED_FONT_METRICS_CACHE_LIMIT: i64 = 128
+var _resolved_font_metric_keys: [text] = []
+var _resolved_font_metric_values: [ResolvedFontMetrics] = []
+var _resolved_font_metric_cursor: i64 = 0
+
+fn _resolved_font_metric_key(family: text, content: text, font_size: i32) -> text:
+    family.trim().lower() + "\n" + font_size.to_string() + "\n" + content
+
+fn _resolved_font_metric_cached(key: text) -> ResolvedFontMetrics?:
+    var index: i64 = 0
+    while index < _resolved_font_metric_keys.len():
+        if _resolved_font_metric_keys[index] == key:
+            return _resolved_font_metric_values[index]
+        index = index + 1
+    nil
+
+fn _resolved_font_metric_store(key: text, metrics: ResolvedFontMetrics):
+    if _resolved_font_metric_keys.len() < RESOLVED_FONT_METRICS_CACHE_LIMIT:
+        _resolved_font_metric_keys.push(key)
+        _resolved_font_metric_values.push(metrics)
+        return
+    _resolved_font_metric_keys[_resolved_font_metric_cursor] = key
+    _resolved_font_metric_values[_resolved_font_metric_cursor] = metrics
+    _resolved_font_metric_cursor = (_resolved_font_metric_cursor + 1) % RESOLVED_FONT_METRICS_CACHE_LIMIT
 
 val FONT_ATLAS_WIDTH: i32 = 1024
 val FONT_ATLAS_HEIGHT: i32 = 1024
@@ -236,6 +249,20 @@ class FontRenderer:
             if self.try_enable_ttf(dylib_path, ttf_path):
                 return true
         false
+
+    me try_load_selected_bytes(ttf_path: text, blob: [u8]) -> bool:
+        val rasterizer = FontRasterizer.load_selected_bytes(ttf_path, blob)
+        if rasterizer == nil:
+            return false
+        val old = self.ttf_rasterizer
+        self.ttf_rasterizer = rasterizer
+        if old != nil:
+            old.close()
+        var cache = self.cache
+        cache.invalidate()
+        self.cache = cache
+        self.atlas_face_generation = -1
+        true
 
     me clear_ttf():
         val rast = self.ttf_rasterizer
@@ -735,6 +762,9 @@ class FontRenderer:
 fn resolve_font_metrics(family: text, content: text, font_size: i32) -> ResolvedFontMetrics:
     if family.trim() == "" or font_size <= 0 or font_size > 512:
         return ResolvedFontMetrics(valid: false, family: family, identity: "", advances: [], width: 0, line_height: 0, reason: "invalid-font-request")
+    val cache_key = _resolved_font_metric_key(family, content, font_size)
+    if val cached = _resolved_font_metric_cached(cache_key):
+        return cached
     var renderer = FontRenderer.browser_default_for_family(family)
     if not renderer.has_sffi_ttf():
         return ResolvedFontMetrics(valid: false, family: family, identity: "", advances: [], width: 0, line_height: 0, reason: "font-runtime-unavailable")
@@ -751,7 +781,7 @@ fn resolve_font_metrics(family: text, content: text, font_size: i32) -> Resolved
     for ch in content:
         character_count = character_count + 1
     val valid = identity != "" and advances.len() == character_count
-    ResolvedFontMetrics(
+    val resolved = ResolvedFontMetrics(
         valid: valid,
         family: family,
         identity: identity,
@@ -760,3 +790,6 @@ fn resolve_font_metrics(family: text, content: text, font_size: i32) -> Resolved
         line_height: if valid: line_height else: 0,
         reason: if valid: "resolved" else: "font-identity-unavailable"
     )
+    if resolved.valid:
+        _resolved_font_metric_store(cache_key, resolved)
+    resolved

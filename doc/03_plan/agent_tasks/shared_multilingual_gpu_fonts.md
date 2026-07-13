@@ -11,6 +11,13 @@ Primary interfaces are frozen before sidecar work:
 - Emitter: `emit_portable_font_atlas_composite_kernel(target)`.
 - Engine3D adapters: `draw_text_hud`, `draw_text_world`.
 - Manual steps and setup/checkers are those in the system-test plan.
+- Remaining completion steps are `Render legacy Web GUI and WM text through DrawIR`,
+  `Shape selected Unicode scripts with the pinned face`, `Render Engine3D HUD
+  and world text on the promoted backend`, `Capture SimpleOS pinned-font
+  pixels`, and `Measure warm font rendering and resource bounds`.
+- Their checkers are `expect_legacy_draw_ir_font_parity`,
+  `expect_selected_unicode_shaping`, `expect_engine3d_font_readback`,
+  `expect_simpleos_font_pixel_oracle`, and `expect_font_perf_budget`.
 - Temporary helpers must call `assert(false)` or `fail(...)`.
 
 No lane may add `SharedFontRenderer`, `GpuFontEmitter`, another atlas/cache,
@@ -27,7 +34,7 @@ raw `rt_*` shortcuts, a new dependency, or a fake device-success path.
 | E — specs/manuals/docs | test/doc owner; small sidecar may review generated-manual readability | four planned SSpecs/manuals, affected guides, SPipe recipe | REQ-014, zero stubs, freshness audits |
 | F — resolved UI fonts | Spark metric sidecar + Spark Draw IR sidecar | `ResolvedFontMetrics`, Web layout advances, Draw IR identity verification; no font material in IR | legacy + WebRender IR/Draw IR parity |
 | G — SimpleOS font host | Spark image-builder sidecar | existing `FontAssetCandidate`, four existing image payload paths, verified-byte startup | guest path/hash/glyph/framebuffer evidence |
-| F — final verification | primary/best available reviewer only | verification report; fixes returned to owning lane | requirement-by-requirement PASS/WARN/FAIL |
+| H — final verification | primary/best available reviewer only | verification report; fixes returned to owning lane | requirement-by-requirement PASS/WARN/FAIL |
 
 Sidecars do not accept broad findings, exclusions, generated-manual quality, or
 done marks. The primary normal/highest-capability reviewer decides those after
@@ -45,10 +52,10 @@ checking source and executable evidence.
 6. Lane G uses `Boot SimpleOS with the pinned font asset` and
    `expect_simpleos_font_asset`. Merge owner is the primary Codex session;
    final normal/highest-capability review owns all done marks.
-   promotion so the CPU/material oracle is stable.
-5. Lane E writes specs with each owner and generates manuals after executable
+7. Lane D promotion starts only after the CPU/material oracle is stable.
+8. Lane E writes specs with each owner and generates manuals after executable
    behavior exists.
-6. Lane F runs each acceptance gate once. At most three verify/fix cycles are
+9. Lane H runs each acceptance gate once. At most three verify/fix cycles are
    allowed; repeated green checks are not rerun.
 
 ## Merge ownership and review

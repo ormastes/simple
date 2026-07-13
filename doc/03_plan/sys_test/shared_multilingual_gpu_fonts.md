@@ -43,9 +43,24 @@ Resolved-host extension steps:
 - `step("Render legacy and WebIR text with one face identity")`
 - `step("Boot SimpleOS with the pinned font asset")`
 
+Completion steps:
+
+- `step("Render legacy Web GUI and WM text through DrawIR")`
+- `step("Shape selected Unicode scripts with the pinned face")`
+- `step("Render Engine3D HUD and world text on the promoted backend")`
+- `step("Capture SimpleOS pinned-font pixels")`
+- `step("Measure warm font rendering and resource bounds")`
+
 Shared checkers are `expect_resolved_font_metrics`,
 `expect_draw_ir_font_identity`, and `expect_simpleos_font_asset`; temporary
 implementations must call `fail(...)` rather than pass silently.
+
+Completion checkers are `expect_legacy_draw_ir_font_parity`,
+`expect_selected_unicode_shaping`, `expect_engine3d_font_readback`,
+`expect_simpleos_font_pixel_oracle`, and `expect_font_perf_budget`. They consume
+the existing `FontRenderer`, `FontRenderBatch`, Draw IR, Engine2D, Engine3D,
+and SimpleOS evidence records; they must not introduce another renderer or
+test-only success channel.
 
 Shared helpers are `setup_shared_font_fixture`, `setup_selected_shaping_face`,
 `expect_simple_identity_run`, `expect_complex_run_pending`, `expect_font_license`,
@@ -67,7 +82,7 @@ behavior.
 | REQ-004 | `shared_font_manifest_spec.spl` | complete license metadata; checksum/table validation; missing field rejection | 3 |
 | REQ-005 | `shared_font_manifest_spec.spl` | pinned catalog revision; unchanged accepted bytes; corpus rejection | 3 |
 | REQ-006 | `shared_font_surfaces_spec.spl` | one owner; identical batch identity; no duplicate material cache | 3 |
-| REQ-007 | `shared_font_shaping_acceptance_spec.spl` | exact-face simple-script oracle; missing/stale rejection; complete Arabic/Devanagari/Urdu shaping | 2/3 |
+| REQ-007 | `shared_font_shaping_acceptance_spec.spl` | exact-face simple-script oracle; missing/stale rejection; pinned Arabic/Urdu letter shaping; Devanagari and broader complex-script cases fail closed | 2/3 |
 | REQ-008 | `shared_font_manifest_spec.spl` plus focused sfnt/bitmap unit specs | compound/default-glyf corpus reconstruction; unsupported-format/axis rejection; literal default-variable + bitmap fixtures | 2/3 source; literal variable oracle/execution blocked |
 | REQ-009 | `shared_font_surfaces_spec.spl` | key separation; bounded eviction/counters; generation/dirty regions | 3 |
 | REQ-010 | `gpu_font_emission_spec.spl` | five source targets; Vulkan contract; deterministic failures/hashes | 3 |

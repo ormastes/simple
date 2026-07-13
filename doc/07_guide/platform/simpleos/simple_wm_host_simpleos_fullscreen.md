@@ -37,6 +37,21 @@ The production `DesktopShell.run_baremetal` loop renders `runtime_scene_snapshot
 
 The production x86_64 entry launches process-owned Browser Demo, Hello World, and Clang surfaces from payloads present in the canonical FAT32 fixture, validates dynamic scanout metadata, and keeps one persistent framebuffer Engine2D. Set-1 F11 input is recorded by `Compositor`, consumed exactly once by `DesktopShell`, and correlated with the resulting maximize/restore state and rendered scene revision.
 
+### Font path
+
+SimpleOS packages the pinned Noto Sans Mono candidate at
+`/assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf` through
+the existing rootfs/initramfs payload contracts. The WM does not own a font
+renderer: its scene carries Draw IR family/identity semantics and the persistent
+Engine2D owns `FontRenderer` materialization. Missing guest file support, an
+identity mismatch, or an unavailable vector runtime retains the fixed bitmap
+fallback.
+
+Packaging alone is not a font-rendering PASS. The `Capture SimpleOS pinned-font
+pixels` scenario must record the candidate hash, guest path, WM Draw IR identity,
+and literal nonblank framebuffer region produced inside QEMU. Host rendering,
+serial-only markers, or repository file presence are blockers, not substitutes.
+
 ## Scenario Manuals
 
 - `doc/06_spec/03_system/os/wm/simple_wm_host_fullscreen_spec.md`

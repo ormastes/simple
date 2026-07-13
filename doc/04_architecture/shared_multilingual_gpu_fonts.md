@@ -124,6 +124,26 @@ that exact length/hash through their existing payload contracts. Verified-byte
 loading belongs in the current font facade and must precede WM startup; a guest
 path marker without glyph/framebuffer evidence is not support.
 
+The completion topology keeps all remaining paths on existing owners:
+
+```text
+Web semantic/layout ─┐
+Widget/GUI scene ────┼─> DrawIrComposition ─> Engine2D.draw_text
+WM scene ────────────┘                           │
+                                                 └─> FontRenderer/FontRenderBatch
+
+Engine3D.draw_text_{hud,world} ─────────────────────> same FontRenderer/FontRenderBatch
+SimpleOS WM scene ─> DrawIrComposition ─> Engine2D ─> staged FontAssetCandidate
+```
+
+Legacy commands without `font-identity` retain bitmap text. Identified commands
+must resolve the exact pinned candidate and live generation or clear vector
+state before bitmap fallback. Unicode shaping fails closed until every run
+vector and face binding agrees. Engine3D and SimpleOS evidence comes from their
+own device/guest paths; host mirrors and test-only status fields are not valid
+edges. Performance observation reuses existing renderer/backend counters and
+timers rather than adding a benchmark-only renderer, cache, or upload path.
+
 Current source includes provisional static catalog, CPU preparation, OpenCL
 Engine2D atlas submission with image-blit fallback, Engine3D CPU compatibility,
 and separate companion font artifacts in portable backend plans. The steps below remain the full

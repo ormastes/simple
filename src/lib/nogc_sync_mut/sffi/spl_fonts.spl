@@ -150,6 +150,24 @@ class FontRasterizer:
     selected_blob: [u8]
 
 impl FontRasterizer:
+    static fn load_selected_bytes(ttf_path: text, blob: [u8]) -> FontRasterizer?:
+        val selected = selected_font_asset_candidate_for_path(ttf_path)
+        if selected == nil:
+            return nil
+        val candidate = selected.?
+        val validation = validate_selected_font_asset(ttf_path, blob)
+        if not validation.valid or not font_runtime_ttf_default_supported(blob):
+            return nil
+        FontRasterizer(
+            lib_handle: 0, init_fp: 0, raster_fp: 0, subpixel_raster_fp: 0,
+            metric_fp: 0, pixel_fp: 0, subpixel_pixel_fp: 0, kern_fp: 0,
+            line_metric_fp: 0, layout_fp: 0, layout_glyph_metric_fp: 0,
+            glyph_pixels_ptr_fp: 0, glyph_pixels_len_fp: 0, glyph_free_fp: 0,
+            has_glyph_fp: 0, generation_fp: 0, font_path: ttf_path,
+            dylib_path: "", font_cache_identity: "sha256={candidate.sha256};axes={candidate.default_axes}",
+            loaded_generation: 1, selected_blob: blob,
+        )
+
     # Load libspl_fonts from `dylib_path` and initialize it with the TTF at
     # `ttf_path`. Returns nil on any failure (dylib missing, symbol missing,
     # font file unreadable, font parse error).
@@ -286,6 +304,8 @@ impl FontRasterizer:
     fn rasterize(codepoint: i64, size_px: i64) -> GlyphBitmap?:
         if not self.is_current():
             return nil
+        if self.lib_handle == 0:
+            return self._rasterize_selected_outline(codepoint, size_px)
         var args: [i64] = []
         args.push(codepoint)
         args.push(size_px)
@@ -328,17 +348,29 @@ impl FontRasterizer:
     fn has_glyph(codepoint: i64) -> bool:
         if not self.is_current():
             return false
+        if self.lib_handle == 0:
+            if val font = parse_offset_table(self.selected_blob):
+                return sfnt_cmap_glyph_id(font, codepoint as u32) != 0
+            return false
         var args: [i64] = []
         args.push(codepoint)
         val present = spl_wffi_call_i64(self.has_glyph_fp, args, 1) == 1
         present and self.is_current()
 
     fn generation() -> i64:
+        if self.lib_handle == 0:
+            return self.loaded_generation
         var args: [i64] = []
         spl_wffi_call_i64(self.generation_fp, args, 0)
 
     fn cache_identity_snapshot() -> (i64, text):
-        if self.loaded_generation <= 0 or self.generation_fp == 0:
+        if self.loaded_generation <= 0:
+            return (0, "")
+        if self.lib_handle == 0:
+            if self.selected_blob.len() == 0:
+                return (0, "")
+            return (self.loaded_generation, self.font_cache_identity)
+        if self.generation_fp == 0:
             return (0, "")
         val generation_before = self.generation()
         if generation_before != self.loaded_generation:
@@ -452,7 +484,7 @@ impl FontRasterizer:
     # Release the dynamic library handle. The typed wrapper becomes unusable
     # after this call. Returns 0 on success (matching libc dlclose).
     me close() -> i64:
-        val rc = spl_dlclose(self.lib_handle)
+        val rc = if self.lib_handle == 0: 0 else: spl_dlclose(self.lib_handle)
         self.lib_handle = 0
         self.init_fp = 0
         self.raster_fp = 0

@@ -7,6 +7,7 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence, VulkanFontCompositeEvidence}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
+use std.gc_async_mut.io.time_ops.{time_now_nanos}
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_alloc_buffer, vulkan_sffi_free_buffer,
     vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_from_buffer,
@@ -20,6 +21,13 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
 
 val VULKAN_FONT_PARAMS_BYTES: i64 = 52
 val _VULKAN_STORAGE_BUFFER: i64 = 0x80
+
+fn vulkan_font_elapsed_ns(started_ns: i64, finished_ns: i64) -> i64:
+    if finished_ns > started_ns: finished_ns - started_ns else: 0
+
+fn vulkan_font_gpu_resource_bytes(atlas_bytes: i64, framebuffer_bytes: i64, params_allocated: bool) -> i64:
+    if atlas_bytes < 0 or framebuffer_bytes < 0: return 0
+    atlas_bytes + framebuffer_bytes + (if params_allocated: VULKAN_FONT_PARAMS_BYTES else: 0)
 
 fn _vulkan_font_pack_i32_le(mut buf: [u8], offset: i32, value: i32) -> i32:
     buf[offset] = (value & 0xFF) as u8
@@ -171,6 +179,16 @@ fn _vulkan_font_completion(evidence: VulkanFontCompositeEvidence, fence_handle: 
 impl VulkanBackend:
     me composite_font_batch(origin_x: i32, origin_y: i32,
                             batch: FontRenderBatch) -> VulkanFontCompositeEvidence:
+        val started_ns = time_now_nanos()
+        var evidence = self._composite_font_batch_impl(origin_x, origin_y, batch)
+        evidence.elapsed_ns = vulkan_font_elapsed_ns(started_ns, time_now_nanos())
+        evidence.atlas_upload_count = self.font_atlas_upload_count
+        evidence.atlas_upload_bytes = self.font_atlas_upload_bytes
+        evidence.gpu_resource_high_water_bytes = self.font_gpu_resource_high_water_bytes
+        evidence
+
+    me _composite_font_batch_impl(origin_x: i32, origin_y: i32,
+                                  batch: FontRenderBatch) -> VulkanFontCompositeEvidence:
         val pipeline = self.font_atlas_pipeline_evidence()
         val framebuffer = self.d_framebuffer
         val width = self.w
@@ -223,15 +241,24 @@ impl VulkanBackend:
             self.font_atlas_width = batch.atlas_width
             self.font_atlas_height = batch.atlas_height
             self.font_atlas_generation = -1
+            val allocated_bytes = vulkan_font_gpu_resource_bytes(atlas_bytes, dst_count * 4, self.d_font_params != 0)
+            if allocated_bytes > self.font_gpu_resource_high_water_bytes:
+                self.font_gpu_resource_high_water_bytes = allocated_bytes
         if self.font_atlas_generation != batch.atlas_generation:
             if not vulkan_sffi_copy_to_buffer(self.d_font_atlas, _vulkan_font_pixels_to_bytes(batch.atlas_pixels), 0):
                 self.font_atlas_generation = -1
                 return _vulkan_font_evidence(pipeline, "failed", "atlas-upload-failed", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
             self.font_atlas_generation = batch.atlas_generation
+            self.font_atlas_upload_count = self.font_atlas_upload_count + 1
+            self.font_atlas_upload_bytes = self.font_atlas_upload_bytes + atlas_bytes
         if self.d_font_params == 0:
             self.d_font_params = vulkan_sffi_alloc_buffer(VULKAN_FONT_PARAMS_BYTES, _VULKAN_STORAGE_BUFFER)
             if self.d_font_params == 0:
                 return _vulkan_font_evidence(pipeline, "failed", "params-allocation-failed", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+
+        val resource_bytes = vulkan_font_gpu_resource_bytes(atlas_bytes, dst_count * 4, true)
+        if resource_bytes > self.font_gpu_resource_high_water_bytes:
+            self.font_gpu_resource_high_water_bytes = resource_bytes
 
         val byte_count = dst_count * 4
         val before_bytes = _vulkan_font_download(framebuffer, byte_count)

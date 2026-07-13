@@ -16,6 +16,7 @@ use common.text_layout.font_provider.{browser_bundled_font_path_for_family}
 use std.common.encoding.font_registry.{selected_font_asset_candidates}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_atlas_composite_program_version_valid}
 use common.text_layout.font_rasterizer.{reset_vector_font_raster_stats, vector_font_accelerator_stats}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 
 fn expect_resolved_font_metrics(metrics: ResolvedFontMetrics):
     expect(metrics.valid).to_be(true)
@@ -43,6 +44,18 @@ describe "SFFI font liveness":
     it "rejects nil or stale rasterizers through is_current":
         val source = rt_file_read_text("src/lib/nogc_sync_mut/text_layout/font_renderer.spl")
         expect(source).to_contain("fn has_sffi_ttf() -> bool:\n        val rasterizer = self.ttf_rasterizer\n        if rasterizer == nil:\n            return false\n        rasterizer.is_current()")
+
+    it "renders a selected face from owned bytes without a hosted dylib":
+        val path = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+        var renderer = FontRenderer.new()
+        expect(renderer.try_load_selected_bytes(path, file_read_bytes(path))).to_be(true)
+        val batch = renderer.prepare_text("A", 0xffffffffu32, 32)
+        expect(batch.valid).to_be(true)
+        expect(batch.font_identity).to_start_with("sha256=2cb2adb378a8f574")
+        expect(batch.quads.len()).to_equal(1)
+        expect(batch.quads[0].width).to_equal(18)
+        expect(batch.quads[0].height).to_equal(23)
+        renderer.clear_ttf()
 
 describe "font atlas composite program version":
     it "accepts only version one and stamps every renderer outcome":

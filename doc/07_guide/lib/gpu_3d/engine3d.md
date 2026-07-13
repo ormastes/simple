@@ -418,6 +418,13 @@ with the CPU oracle. Existing CPU delegation, compute dispatch, emitted source,
 or texture upload alone does not establish Engine3D GPU font rendering. Do not
 document a promoted native backend until those source and test gates pass.
 
+The completion scenario is `Render Engine3D HUD and world text on the promoted
+backend`, checked by `expect_engine3d_font_readback`. It must use the existing
+`FontRenderer`/`FontRenderBatch` seam and record texture, sampler, pipeline,
+transform/depth, draw, completed fence, and device-origin readback. The current
+CPU facade and host-backed `VulkanBackend3D` compatibility buffer remain useful
+oracles but cannot satisfy that checker.
+
 See [Shared Multilingual GPU Fonts](../shared_multilingual_gpu_fonts.md) for the
 selected languages, ten-category candidate catalog, and evidence contract.
 
