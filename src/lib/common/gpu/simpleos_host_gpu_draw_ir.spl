@@ -2,11 +2,13 @@
 
 use std.common.ui.draw_ir.{
     DRAW_IR_BACKEND_AUTO, DRAW_IR_BACKEND_GPU,
-    DRAW_IR_COMMAND_RECT, DRAW_IR_SCHEMA_VERSION,
+    DRAW_IR_COMMAND_IMAGE, DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT,
+    DRAW_IR_SCHEMA_VERSION,
     DrawIrComposition, draw_ir_composition
 }
 use std.common.ui.draw_ir_sdn.{draw_ir_to_sdn, sdn_to_draw_ir}
 use std.common.base_encoding.utilities.{text_to_bytes, bytes_to_text}
+use std.common.gpu.simpleos_host_gpu_protocol.{SIMPLEOS_HOST_GPU_MAX_HEIGHT, SIMPLEOS_HOST_GPU_MAX_WIDTH}
 
 struct SimpleOsHostGpuDrawIrPayload:
     ok: bool
@@ -67,6 +69,8 @@ fn _simpleos_host_gpu_draw_ir_validation_reason(composition: DrawIrComposition, 
             return "unsupported-batch-backend"
         if batch.embedding.width <= 0 or batch.embedding.height <= 0:
             return "invalid-batch-bounds"
+        if batch.embedding.width > SIMPLEOS_HOST_GPU_MAX_WIDTH or batch.embedding.height > SIMPLEOS_HOST_GPU_MAX_HEIGHT:
+            return "batch-bounds-exceed-protocol"
         if batch.commands.len() == 0:
             return "empty-batch-commands"
         for command in batch.commands:
@@ -75,11 +79,17 @@ fn _simpleos_host_gpu_draw_ir_validation_reason(composition: DrawIrComposition, 
                 return "too-many-commands"
             if command.component_id == "":
                 return "missing-command-id"
-            if command.kind != DRAW_IR_COMMAND_RECT:
+            if command.kind != DRAW_IR_COMMAND_RECT and command.kind != DRAW_IR_COMMAND_TEXT and command.kind != DRAW_IR_COMMAND_IMAGE:
                 return "unsupported-command"
-            if command.width <= 0 or command.height <= 0:
-                return "invalid-rect-bounds"
-            if command.text_value != "" or command.border_rect.present or command.content_rect.present or command.hit_rect.present or command.clip_rect.present or command.computed_style.len() != 0 or command.edge != nil or command.parent_id != "" or command.image_uri != "" or command.points.len() != 0:
+            if command.kind != DRAW_IR_COMMAND_TEXT and (command.width <= 0 or command.height <= 0):
+                return "invalid-command-bounds"
+            if command.width > SIMPLEOS_HOST_GPU_MAX_WIDTH or command.height > SIMPLEOS_HOST_GPU_MAX_HEIGHT:
+                return "command-bounds-exceed-protocol"
+            if command.kind == DRAW_IR_COMMAND_TEXT and command.text_value == "":
+                return "missing-text"
+            if command.kind == DRAW_IR_COMMAND_IMAGE and command.image_uri == "":
+                return "missing-image-uri"
+            if (command.kind != DRAW_IR_COMMAND_TEXT and command.text_value != "") or (command.kind != DRAW_IR_COMMAND_IMAGE and command.image_uri != "") or command.edge != nil or command.parent_id != "" or command.points.len() != 0:
                 return "unsupported-extended-command"
     ""
 

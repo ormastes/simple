@@ -66,6 +66,9 @@ resolves only
 unique checksum-valid top-level IMAGE resources, and rejects unsupported nested
 frames rather than dropping their pixels. Host offload must extend the bounded
 wire with equivalent attachments; it must not reintroduce a full-frame copy.
+The canonical Draw IR SDN skin preserves the complete typed command metadata,
+so styled RECT/TEXT and IMAGE semantics can cross the wire without a producer-
+specific parallel codec; binary image pixels remain separate bounded resources.
 The core executor imports `draw_ir_adv.spl`; host runtime-queue integration is
 kept in the sibling `draw_ir_runtime_adv.spl` so the baremetal closure does not
 acquire direct host-runtime APIs. This source path is not compile-verified while

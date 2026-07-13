@@ -5,23 +5,24 @@
 
 use common.ui.draw_ir.{
     DRAW_IR_COMMAND_EDGE,
-    DRAW_IR_COMMAND_IMAGE,
     DRAW_IR_COMMAND_RECT,
-    DRAW_IR_COMMAND_TEXT,
     DRAW_IR_SCHEMA_VERSION,
+    DrawEdge,
     DrawIrBatch,
     DrawIrCommand,
     DrawIrComposition,
+    DrawIrPoint,
+    DrawIrRect,
     DrawIrSourceInfo,
+    DrawIrStyleProp,
     draw_edge,
     draw_ir_batch_with_source,
     draw_ir_composition,
-    draw_ir_edge_command,
     draw_ir_embedding_config,
-    draw_ir_image_command,
+    draw_ir_point,
     draw_ir_rect,
     draw_ir_source_info,
-    draw_ir_text
+    draw_ir_style_prop
 }
 
 fn _draw_ir_sdn_escape(value: text) -> text:
@@ -110,12 +111,38 @@ fn _draw_ir_sdn_u32(line: text, key: text) -> u32:
     val value = _draw_ir_sdn_field(line, key)
     _draw_ir_sdn_parse_u32(value)
 
+fn _draw_ir_sdn_emit_rect(line: text, key: text, rect: DrawIrRect) -> text:
+    line + " {key}_present={rect.present} {key}_x={rect.x} {key}_y={rect.y} {key}_width={rect.width} {key}_height={rect.height}"
+
+fn _draw_ir_sdn_emit_styles(line: text, key: text, styles: [DrawIrStyleProp]) -> text:
+    var out = line + " {key}_count={styles.len()}"
+    var index = 0
+    for style in styles:
+        out = out + " {key}_{index}_key={_draw_ir_sdn_escape(style.key)} {key}_{index}_value={_draw_ir_sdn_escape(style.value)}"
+        index = index + 1
+    out
+
+fn _draw_ir_sdn_emit_points(line: text, key: text, points: [DrawIrPoint]) -> text:
+    var out = line + " {key}_count={points.len()}"
+    var index = 0
+    for point in points:
+        out = out + " {key}_{index}_x={point.x} {key}_{index}_y={point.y}"
+        index = index + 1
+    out
+
 fn _draw_ir_sdn_emit_command(command: DrawIrCommand) -> text:
-    var line = "\t\tcommand kind={command.kind} id={_draw_ir_sdn_escape(command.component_id)} x={command.x} y={command.y} width={command.width} height={command.height} color={command.color} text={_draw_ir_sdn_escape(command.text_value)}"
-    if command.kind == DRAW_IR_COMMAND_EDGE and command.edge != nil:
-        line = line + " source={_draw_ir_sdn_escape(command.edge.source)} target={_draw_ir_sdn_escape(command.edge.target)} routing={_draw_ir_sdn_escape(command.edge.routing)}"
-    if command.kind == DRAW_IR_COMMAND_IMAGE:
-        line = line + " image_uri={_draw_ir_sdn_escape(command.image_uri)}"
+    var line = "\t\tcommand kind={command.kind} id={_draw_ir_sdn_escape(command.component_id)} x={command.x} y={command.y} width={command.width} height={command.height} color={command.color} text={_draw_ir_sdn_escape(command.text_value)} parent_id={_draw_ir_sdn_escape(command.parent_id)} image_uri={_draw_ir_sdn_escape(command.image_uri)}"
+    line = _draw_ir_sdn_emit_rect(line, "border", command.border_rect)
+    line = _draw_ir_sdn_emit_rect(line, "content", command.content_rect)
+    line = _draw_ir_sdn_emit_rect(line, "hit", command.hit_rect)
+    line = _draw_ir_sdn_emit_rect(line, "clip", command.clip_rect)
+    line = _draw_ir_sdn_emit_styles(line, "style", command.computed_style)
+    line = _draw_ir_sdn_emit_points(line, "point", command.points)
+    line = line + " edge_present={command.edge != nil}"
+    if val edge = command.edge:
+        line = line + " edge_id={_draw_ir_sdn_escape(edge.id)} edge_source={_draw_ir_sdn_escape(edge.source)} edge_target={_draw_ir_sdn_escape(edge.target)} edge_routing={_draw_ir_sdn_escape(edge.routing)}"
+        line = _draw_ir_sdn_emit_styles(line, "edge_style", edge.style)
+        line = _draw_ir_sdn_emit_points(line, "edge_point", edge.points)
     line
 
 fn _draw_ir_sdn_emit_batch(batch: DrawIrBatch) -> text:
@@ -150,17 +177,98 @@ fn draw_ir_to_sdn(composition: DrawIrComposition) -> text:
         write_idx = write_idx + 1
     lines.join("\n")
 
+fn _draw_ir_sdn_parse_rect(line: text, key: text) -> DrawIrRect:
+    DrawIrRect(
+        present: _draw_ir_sdn_bool(line, "{key}_present"),
+        x: _draw_ir_sdn_i32(line, "{key}_x"),
+        y: _draw_ir_sdn_i32(line, "{key}_y"),
+        width: _draw_ir_sdn_i32(line, "{key}_width"),
+        height: _draw_ir_sdn_i32(line, "{key}_height")
+    )
+
+fn _draw_ir_sdn_parse_styles(line: text, key: text) -> [DrawIrStyleProp]:
+    val count = _draw_ir_sdn_i32(line, "{key}_count")
+    var styles: [DrawIrStyleProp] = []
+    val parts = line.split(" ")
+    if count <= 0 or count > parts.len().to_i32():
+        return styles
+    val prefix = "{key}_"
+    var pending_key = ""
+    var have_key = false
+    for part in parts:
+        val separator = part.find("=")
+        if part.starts_with(prefix) and separator >= 0 and part.substring(0, separator).ends_with("_key"):
+            pending_key = _draw_ir_sdn_unescape(part.substring(separator + 1, part.len()))
+            have_key = true
+        elif have_key and part.starts_with(prefix) and separator >= 0 and part.substring(0, separator).ends_with("_value"):
+            styles.push(draw_ir_style_prop(pending_key, _draw_ir_sdn_unescape(part.substring(separator + 1, part.len()))))
+            have_key = false
+    if styles.len() != count:
+        return []
+    styles
+
+fn _draw_ir_sdn_parse_points(line: text, key: text) -> [DrawIrPoint]:
+    val count = _draw_ir_sdn_i32(line, "{key}_count")
+    var points: [DrawIrPoint] = []
+    val parts = line.split(" ")
+    if count <= 0 or count > parts.len().to_i32():
+        return points
+    val prefix = "{key}_"
+    var pending_x = 0
+    var have_x = false
+    for part in parts:
+        val separator = part.find("=")
+        if part.starts_with(prefix) and separator >= 0 and part.substring(0, separator).ends_with("_x"):
+            pending_x = _draw_ir_sdn_parse_i32(part.substring(separator + 1, part.len()))
+            have_x = true
+        elif have_x and part.starts_with(prefix) and separator >= 0 and part.substring(0, separator).ends_with("_y"):
+            points.push(draw_ir_point(pending_x, _draw_ir_sdn_parse_i32(part.substring(separator + 1, part.len()))))
+            have_x = false
+    if points.len() != count:
+        return []
+    points
+
 fn _draw_ir_sdn_parse_command(line: text) -> DrawIrCommand:
-    val kind = _draw_ir_sdn_field(line, "kind")
-    val component_id = _draw_ir_sdn_field(line, "id")
-    if kind == DRAW_IR_COMMAND_TEXT:
-        return draw_ir_text(component_id, _draw_ir_sdn_i32(line, "x"), _draw_ir_sdn_i32(line, "y"), _draw_ir_sdn_field(line, "text"), _draw_ir_sdn_u32(line, "color"))
-    if kind == DRAW_IR_COMMAND_EDGE:
-        val edge = draw_edge(component_id, _draw_ir_sdn_field(line, "source"), _draw_ir_sdn_field(line, "target"), _draw_ir_sdn_field(line, "routing"), [], [])
-        return draw_ir_edge_command(edge)
-    if kind == DRAW_IR_COMMAND_IMAGE:
-        return draw_ir_image_command(component_id, _draw_ir_sdn_i32(line, "x"), _draw_ir_sdn_i32(line, "y"), _draw_ir_sdn_i32(line, "width"), _draw_ir_sdn_i32(line, "height"), _draw_ir_sdn_field(line, "image_uri"), [])
-    draw_ir_rect(component_id, _draw_ir_sdn_i32(line, "x"), _draw_ir_sdn_i32(line, "y"), _draw_ir_sdn_i32(line, "width"), _draw_ir_sdn_i32(line, "height"), _draw_ir_sdn_u32(line, "color"))
+    var edge: DrawEdge? = nil
+    val edge_present = _draw_ir_sdn_field(line, "edge_present")
+    if edge_present == "true":
+        edge = draw_edge(
+            _draw_ir_sdn_field(line, "edge_id"),
+            _draw_ir_sdn_field(line, "edge_source"),
+            _draw_ir_sdn_field(line, "edge_target"),
+            _draw_ir_sdn_field(line, "edge_routing"),
+            _draw_ir_sdn_parse_points(line, "edge_point"),
+            _draw_ir_sdn_parse_styles(line, "edge_style")
+        )
+    elif edge_present == "" and _draw_ir_sdn_field(line, "kind") == DRAW_IR_COMMAND_EDGE:
+        # Version-2 compatibility for payloads emitted before edge_present.
+        edge = draw_edge(
+            _draw_ir_sdn_field(line, "id"),
+            _draw_ir_sdn_field(line, "source"),
+            _draw_ir_sdn_field(line, "target"),
+            _draw_ir_sdn_field(line, "routing"),
+            [],
+            []
+        )
+    DrawIrCommand(
+        kind: _draw_ir_sdn_field(line, "kind"),
+        component_id: _draw_ir_sdn_field(line, "id"),
+        x: _draw_ir_sdn_i32(line, "x"),
+        y: _draw_ir_sdn_i32(line, "y"),
+        width: _draw_ir_sdn_i32(line, "width"),
+        height: _draw_ir_sdn_i32(line, "height"),
+        color: _draw_ir_sdn_u32(line, "color"),
+        text_value: _draw_ir_sdn_field(line, "text"),
+        border_rect: _draw_ir_sdn_parse_rect(line, "border"),
+        content_rect: _draw_ir_sdn_parse_rect(line, "content"),
+        hit_rect: _draw_ir_sdn_parse_rect(line, "hit"),
+        clip_rect: _draw_ir_sdn_parse_rect(line, "clip"),
+        computed_style: _draw_ir_sdn_parse_styles(line, "style"),
+        edge: edge,
+        parent_id: _draw_ir_sdn_field(line, "parent_id"),
+        image_uri: _draw_ir_sdn_field(line, "image_uri"),
+        points: _draw_ir_sdn_parse_points(line, "point")
+    )
 
 fn _draw_ir_sdn_parse_source(line: text) -> DrawIrSourceInfo:
     draw_ir_source_info(

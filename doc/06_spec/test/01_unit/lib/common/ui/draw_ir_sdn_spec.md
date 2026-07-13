@@ -28,7 +28,7 @@ draw_ir_sdn_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -57,6 +57,30 @@ expect(sdn).to_contain("\tbatch id=wm-desktop")
 expect(sdn).to_contain("\t\tcommand kind=rect")
 expect(sdn).to_contain("source_kind=wm_scene")
 ```
+
+</details>
+
+#### round-trips all command variants and their serialized metadata
+
+<details>
+<summary>Executable SSpec</summary>
+
+The executable source builds styled RECT, resolved-font TEXT, IMAGE, GROUP,
+PORT, PATH, and EDGE commands, serializes one composition with
+`draw_ir_to_sdn`, parses it with `sdn_to_draw_ir`, and checks the previously
+dropped rectangles, styles, font metrics, URI, hierarchy, points, and edge
+material. See the runnable source for the complete assertion set.
+
+</details>
+
+#### parses the legacy version-2 edge fields
+
+<details>
+<summary>Executable SSpec</summary>
+
+The executable source parses a version-2 EDGE line using the original
+`source`, `target`, and `routing` fields and verifies that all three values are
+retained.
 
 </details>
 
@@ -97,7 +121,7 @@ expect(parsed.batches[2].commands[3].text_value).to_equal("Window One")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/ui/draw_ir_sdn_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-13 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -109,8 +133,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
