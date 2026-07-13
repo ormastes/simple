@@ -15,6 +15,7 @@
 - Checked-raw checkers: `submit_checked_clear_rect`; `expect_device_backed_clear_rect_readback`
 - Production guest helpers: `map_qemu_host_gpu_ivshmem_bar2_active_vmm`; `host_gpu_ivshmem_next_generation`; `Engine2dWmFrameExecutor._render_host_gpu`
 - Production manual step: `Select host presentation or the existing local production renderer`
+- Metal owner interfaces: `MetalBackend.init_with_session`; `MetalBackend.draw_image_blend_checked`; `Engine2D.create_shared_metal_offscreen`; `Engine2D.draw_metal_image_blend_checked`
 
 ## Lanes
 
@@ -26,6 +27,7 @@
 | host backend review | lower-model sidecar | Metal/DirectX/CUDA/Vulkan capability classification |
 | canonical WM command trace | Codex Spark | required RECT/TEXT/IMAGE/embedding subset and exclusions |
 | checked Vulkan provenance trace | Codex Spark | shared tri-state dispatch owner and raw CLEAR/RECT test boundary |
+| native Metal Draw IR source | Codex Spark | shared-session surface, checked opacity composite, strict host admission |
 | merge and generated-manual review | primary `/root` | wrapper/parser/manual accepted; native non-Linux rows remain open |
 | final review | normal/highest-capability Codex | requirements, exclusions, security, NFR, manual quality |
 
@@ -39,7 +41,9 @@ fixture bypasses, synthetic handles, or passing placeholders.
   ProcessingIR receipts.
 - Fresh pure-Simple guest builds: x86_64 and AArch64 pass; RV64 remains blocked
   at TODO 537's freestanding runtime/SBI owner boundary.
-- Final reviewer: primary `/root`; Metal/DirectX/CUDA done marks remain rejected.
+- Final reviewer: primary `/root`; native Metal implementation is present but
+  its done mark, DirectX, and remaining CUDA receipts remain rejected without
+  prepared-host evidence.
 - Checked raw framebuffer dispatch: traced by Spark and accepted by the
   independent normal/highest-capability reviewer. Production WM host execution
   now uses device-rendered shared-session offscreen surfaces and checked

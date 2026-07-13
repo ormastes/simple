@@ -1,12 +1,13 @@
 # SimpleOS QEMU Host-GPU 2D
 
 Status: implementation in progress. The host executor now admits checked
-shared-session Vulkan child surfaces for canonical offset/opacity WM batches;
+shared-session Vulkan and Metal child surfaces for canonical offset/opacity WM batches;
 the wrapper and its fail-closed parser self-test still exercise the shared
 full-frame IMAGE Draw IR fixture. Earlier
 Linux/Vulkan live x86_64, AArch64, and RV64 raw-render receipts pass; refreshed
 cross-ISA Draw IR and CUDA ProcessingIR receipts remain pending. Native Metal
-and DirectX host receipts remain unavailable.
+Draw IR execution is implemented but its prepared-macOS receipt remains
+unavailable; DirectX remains software emulation and cannot pass.
 
 This scenario proves that supported SimpleOS guests use one bounded protocol to
 execute Draw IR and ProcessingIR on a real host device. Unsupported rows retain
@@ -60,8 +61,10 @@ the CPU/software fallback and report a stable reason.
 ## Platform matrix
 
 Linux uses Vulkan for rendering and CUDA for ProcessingIR on a prepared NVIDIA
-host, with Vulkan ProcessingIR retained when CUDA is unavailable. Metal and
-DirectX rows require their native hosts. Cross-ISA TCG rows
+host, with Vulkan ProcessingIR retained when CUDA is unavailable. Metal Draw IR
+requires a prepared native macOS host and exact device receipt; Metal
+ProcessingIR remains unavailable. DirectX cannot pass until a native D3D owner
+replaces the current software-emulation backend. Cross-ISA TCG rows
 prove correctness and honest provenance; they are exempt from native-ISA
 latency and speedup targets.
 

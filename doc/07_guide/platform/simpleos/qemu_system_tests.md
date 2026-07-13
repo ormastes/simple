@@ -233,11 +233,14 @@ daemon over one bounded ivshmem region per row, and requires exact Vulkan
 render plus ProcessingIR device readback. Linux Vulkan rendering and the native
 CUDA ProcessingIR executor are implemented with Vulkan ProcessingIR fallback;
 refreshed cross-ISA CUDA receipts
-are still required. macOS Metal and Windows DirectX/CUDA rows remain `unsupported` until native
-host executors and receipts exist; their API names are not treated as proof.
-The host Draw IR executor retains the parent Vulkan session for bounded smaller
-WM surfaces, requires child device readback, and applies canonical embedding
-opacity through checked parent src-over. The current wrapper fixture remains
+are still required. macOS Metal Draw IR execution is implemented but remains
+`unsupported` evidence until a prepared native host produces a fresh receipt;
+Metal ProcessingIR is unavailable. Windows DirectX/CUDA rows remain
+`unsupported`; the current DirectX renderer is software emulation and its API
+name is not proof. The host Draw IR executor retains the parent Vulkan or Metal
+session for bounded smaller WM surfaces, requires child device readback, and
+applies canonical embedding opacity through checked native parent src-over.
+The current wrapper fixture remains
 full-frame, so fresh production-WM QEMU evidence is still required even though
 the production selection seam is wired.
 Cached reports are accepted only through `--validate-report`: an overall status

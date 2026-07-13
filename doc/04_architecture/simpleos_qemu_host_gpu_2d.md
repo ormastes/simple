@@ -9,8 +9,8 @@ Draw IR semantics, separate bounded IMAGE pixel resources, and a bounded
 ProcessingIR `FillU32` payload. The production x86
 desktop source path routes local frames through `DrawIrComposition`, resolved top-level
 `WmContentFrame` IMAGE resources, and Engine2D. The host Engine2D path now
-retains one Vulkan session across smaller per-window device surfaces and applies
-their embedding opacity with checked src-over. The production x86 executor now
+retains one Vulkan or Metal session across smaller per-window device surfaces
+and applies their embedding opacity with checked native src-over. The production x86 executor now
 maps the complete BAR into the active VMM, negotiates one bounded session, and
 submits that same canonical composition when readback capacity permits. A
 host daemon selects a supported private backend and
@@ -97,6 +97,16 @@ require checked device readback, and apply `opacity_milli` through the checked
 parent src-over pipeline. Software children remain local fallback only and are
 ineligible for a device receipt. Nested GROUP batches remain rejected.
 
+The native Metal owner follows the same Draw IR contract: a fresh top-level or
+shared child framebuffer is cleared transparently on-device before it becomes
+receipt-eligible, child surfaces retain the parent's `MetalSession`, and parent
+composition uses a checked MSL src-over kernel with canonical
+`opacity_milli`. The daemon admits the exact `metal` backend only when creation,
+device readback, a positive framebuffer handle, and a stable default-device
+name/memory identity all agree. `metal-on-vulkan` remains an explicitly named
+compatibility backend and cannot satisfy a Metal receipt. DirectX remains
+rejected because its current backend honestly reports software emulation.
+
 Vulkan ProcessingIR hashes the runtime-selected driver identity, which includes
 device name, vendor/device IDs, driver version, and API version. Storage-buffer handles remain per-request resource handles and
 must never be reused as device provenance. Vulkan processing is negotiated only
@@ -141,7 +151,11 @@ opaque, wholly bounded IMAGE resources; mode 1 performs clipped straight-ARGB
 src-over for transparent or partially clipped images. Masked or scaled images
 retain CPU semantics and poison device provenance for that request.
 Completion-unknown submissions never replay on the CPU or release potentially
-in-flight dependencies.
+in-flight dependencies. Metal applies the same rule to framebuffer dispatches
+and staged images by quarantining the command and any source until completion
+is known. Known completion and pre-commit failure remove encoder/command
+registry handles through the Metal owner facade; TODO 555 tracks deferred
+reclamation when shutdown still cannot prove completion.
 Fresh-device admission is all-or-nothing before mutation: the first command
 must overwrite the full target opaquely; later batches may be full-target or a
 bounded named embedded surface with opacity in `(0, 1000]`. Commands are

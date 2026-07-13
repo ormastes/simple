@@ -849,6 +849,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_metal_commit_command_buffer", gpu::rt_metal_commit_command_buffer_fn);
     insert_simple!("rt_metal_compile_shader", gpu::rt_metal_compile_shader_fn);
     insert_simple!("rt_metal_create_command_buffer", gpu::rt_metal_create_command_buffer_fn);
+    insert_simple!(
+        "rt_metal_destroy_command_buffer",
+        gpu::rt_metal_destroy_command_buffer_fn
+    );
     insert_simple!("rt_metal_create_command_queue", gpu::rt_metal_create_command_queue_fn);
     insert_simple!(
         "rt_metal_create_compute_encoder",
@@ -883,6 +887,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_metal_draw_indexed", gpu::rt_metal_draw_indexed_fn);
     insert_simple!("rt_metal_draw_primitives", gpu::rt_metal_draw_primitives_fn);
     insert_simple!("rt_metal_end_compute_encoder", gpu::rt_metal_end_compute_encoder_fn);
+    insert_simple!(
+        "rt_metal_destroy_compute_encoder",
+        gpu::rt_metal_destroy_compute_encoder_fn
+    );
     insert_simple!("rt_metal_end_render_pass", gpu::rt_metal_end_render_pass_fn);
     insert_simple!("rt_metal_free_buffer", gpu::rt_metal_free_buffer_fn);
     insert_simple!("rt_metal_free_texture", gpu::rt_metal_free_texture_fn);

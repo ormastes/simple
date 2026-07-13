@@ -17,9 +17,11 @@ use std.gc_async_mut.env.platform.{is_macos}
 use std.env.variables.{env_get}
 use std.gc_async_mut.io.metal_sffi.{
     metal_sffi_alloc_buffer, metal_sffi_free_buffer,
-    metal_sffi_create_command_buffer, metal_sffi_commit_command_buffer,
+    metal_sffi_create_command_buffer, metal_sffi_destroy_command_buffer,
+    metal_sffi_commit_command_buffer,
     metal_sffi_wait_completed, metal_sffi_dispatch_compute,
     metal_sffi_create_compute_encoder, metal_sffi_end_compute_encoder,
+    metal_sffi_destroy_compute_encoder,
     metal_sffi_set_buffer, metal_sffi_set_bytes
 }
 
@@ -314,6 +316,9 @@ class MetalBackend:
     dirty: bool
     initialized: bool
     gpu_frame_complete: bool
+    pending_composite_command: i64
+    pending_composite_encoder: i64
+    pending_composite_source: i64
     last_probe: BackendProbeResult
     last_error: text
     lut_buffer: i64     # device buffer handle for the uploaded palette GpuLut
@@ -339,6 +344,9 @@ fn make_metal_backend():
         dirty: false,
         initialized: false,
         gpu_frame_complete: false,
+        pending_composite_command: 0,
+        pending_composite_encoder: 0,
+        pending_composite_source: 0,
         last_probe: BackendProbeResult.unavailable("metal", "not probed"),
         last_error: "",
         lut_buffer: 0,
@@ -402,6 +410,13 @@ impl RenderBackend for MetalBackend:
         self.dirty = false
         self.initialized = true
         self.gpu_frame_complete = false
+        self.mirror.clear(0x00000000u32)
+        if not self._dispatch_metal_clear(0x00000000u32):
+            self.last_error = "Metal transparent surface initialization failed"
+            self.shutdown()
+            return false
+        self.gpu_frame_complete = true
+        self.dirty = true
         self.last_error = ""
         self.last_probe = BackendProbeResult.success("metal", "Metal initialized")
         self.last_probe.api_name = "metal"
@@ -418,7 +433,77 @@ impl RenderBackend for MetalBackend:
             self.glyph_lut_buffer = self._upload_glyph_atlas()
         self.initialized
 
+    me init_with_session(width: i32, height: i32, session: MetalSession) -> bool:
+        """Create a transparent surface on an already-initialized shared session."""
+        if width <= 0 or height <= 0:
+            self.last_error = "invalid Metal framebuffer dimensions"
+            return false
+        if self.initialized or self.d_framebuffer != 0 or self.pending_composite_command != 0:
+            self.last_error = "Metal backend surface is already initialized"
+            return false
+        if not session.is_valid():
+            self.last_error = "Metal shared session is not initialized"
+            return false
+
+        self.session = session.retain()
+        self.command_queue = self.session.command_queue
+        self.w = width
+        self.h = height
+        val bytes = width.to_i64() * height.to_i64() * 4
+        self.d_framebuffer = metal_sffi_alloc_buffer(self.session.device, bytes)
+        if self.d_framebuffer == 0:
+            self.session.release()
+            self.command_queue = 0
+            self.w = 0
+            self.h = 0
+            self.last_error = "Metal framebuffer allocation failed"
+            return false
+        if not self.mirror.init(width, height):
+            metal_sffi_free_buffer(self.d_framebuffer)
+            self.d_framebuffer = 0
+            self.session.release()
+            self.command_queue = 0
+            self.w = 0
+            self.h = 0
+            self.last_error = "Metal mirror surface allocation failed"
+            return false
+
+        self.initialized = true
+        self.dirty = false
+        self.gpu_frame_complete = false
+        self.mirror.clear(0x00000000u32)
+        val cleared = self._dispatch_metal_clear(0x00000000u32)
+        if not cleared:
+            self.last_error = "Metal transparent surface initialization failed"
+            self.shutdown()
+            return false
+        self.gpu_frame_complete = true
+        self.dirty = true
+        self.last_error = ""
+        self.last_probe = BackendProbeResult.success("metal", "Metal shared surface initialized")
+        self.last_probe.api_name = "metal"
+        self.last_probe.feature_gate = "metal_runtime"
+        self.last_probe.shader_format = "msl"
+        if self.session.pipe_glyph_atlas_blit != 0:
+            self.glyph_lut_buffer = self._upload_glyph_atlas()
+        true
+
     me shutdown():
+        if self.pending_composite_command != 0:
+            if not metal_sffi_wait_completed(self.pending_composite_command):
+                # ponytail: quarantine the surface and staged source until the
+                # runtime can prove command completion; freeing either may race
+                # an in-flight Metal command. TODO 555 tracks a runtime-owned
+                # deferred completion reaper for deterministic reclamation.
+                return
+            if self.pending_composite_source != 0:
+                metal_sffi_free_buffer(self.pending_composite_source)
+            if self.pending_composite_encoder != 0:
+                metal_sffi_destroy_compute_encoder(self.pending_composite_encoder)
+            metal_sffi_destroy_command_buffer(self.pending_composite_command)
+            self.pending_composite_command = 0
+            self.pending_composite_encoder = 0
+            self.pending_composite_source = 0
         self.mirror.shutdown()
         self.font.release()
         if self.d_framebuffer != 0:
@@ -582,6 +667,24 @@ impl RenderBackend for MetalBackend:
         self.mirror.height()
 
 impl MetalBackend:
+    me draw_image_blend_checked(x: i32, y: i32, w: i32, h: i32, pixels: [u32], opacity_milli: i32) -> bool:
+        val right = x.to_i64() + w.to_i64()
+        val bottom = y.to_i64() + h.to_i64()
+        val exact_pixels = w.to_i64() * h.to_i64()
+        if (not self.initialized or not self.gpu_frame_complete or
+            self.d_framebuffer == 0 or self.session.pipe_image_composite == 0):
+            self.gpu_frame_complete = false
+            return false
+        if (x < 0 or y < 0 or w <= 0 or h <= 0 or right > self.w.to_i64() or
+            bottom > self.h.to_i64() or pixels.len() != exact_pixels or
+            opacity_milli <= 0 or opacity_milli > 1000):
+            self.gpu_frame_complete = false
+            return false
+        val completed = self._dispatch_metal_image_composite(x, y, w, h, pixels, opacity_milli)
+        self.gpu_frame_complete = completed
+        self.dirty = self.dirty or completed
+        completed
+
     me invalidate_font_atlas():
         self.font.invalidate()
 
@@ -780,31 +883,10 @@ impl MetalBackend:
         metal_host_write_i32(params, 12, h as i64)
         metal_host_write_i32(params, 16, self.w as i64)
         metal_host_write_i32(params, 20, self.h as i64)
-        val q = self.command_queue
-        val fb = self.d_framebuffer
         val lut = self.lut_buffer
         val pipeline = self.session.pipe_indexed_fill
-        val cmd = metal_sffi_create_command_buffer(q)
-        var ok = cmd != 0
-        if ok:
-            val encoder = metal_sffi_create_compute_encoder(cmd)
-            if encoder == 0:
-                ok = false
-            else:
-                metal_sffi_set_buffer(encoder, fb, 0, 0)
-                metal_set_bytes_ptr(encoder, params, 24, 1)
-                metal_sffi_set_buffer(encoder, idx_buf, 0, 2)
-                metal_sffi_set_buffer(encoder, lut, 0, 3)
-                val bx = 16
-                val by = 16
-                val gx = ((_metal_i64(w) + bx - 1) / bx) * bx
-                val gy = ((_metal_i64(h) + by - 1) / by) * by
-                metal_sffi_dispatch_compute(encoder, pipeline, gx, gy, 1, bx, by, 1)
-                metal_sffi_end_compute_encoder(encoder)
-                metal_sffi_commit_command_buffer(cmd)
-                metal_sffi_wait_completed(cmd)
+        val ok = self._dispatch_metal_aux_image_checked(pipeline, idx_buf, lut, params, 24, w, h)
         metal_host_free(params)
-        metal_sffi_free_buffer(idx_buf)
         ok
 
     me read_pixels_gpu_only() -> [u32]:
@@ -865,6 +947,8 @@ impl MetalBackend:
     me _dispatch_metal_blit(x: i32, y: i32, block_w: i32, block_h: i32, host_ptr: i64, byte_size: i64) -> bool:
         if block_w <= 0 or block_h <= 0:
             return true
+        if self.pending_composite_command != 0:
+            return false
         val src_buf = metal_sffi_alloc_buffer(self.session.device, byte_size)
         if src_buf == 0:
             return false
@@ -885,26 +969,138 @@ impl MetalBackend:
         val fb = self.d_framebuffer
         val pipeline = self.session.pipe_blit
         val cmd = metal_sffi_create_command_buffer(q)
-        var ok = cmd != 0
-        if ok:
-            val encoder = metal_sffi_create_compute_encoder(cmd)
-            if encoder == 0:
-                ok = false
-            else:
-                metal_sffi_set_buffer(encoder, fb, 0, 0)
-                metal_set_bytes_ptr(encoder, params, 24, 1)
-                metal_sffi_set_buffer(encoder, src_buf, 0, 2)
-                val bx = 16
-                val by = 16
-                val gx = ((_metal_i64(block_w) + bx - 1) / bx) * bx
-                val gy = ((_metal_i64(block_h) + by - 1) / by) * by
-                metal_sffi_dispatch_compute(encoder, pipeline, gx, gy, 1, bx, by, 1)
-                metal_sffi_end_compute_encoder(encoder)
-                metal_sffi_commit_command_buffer(cmd)
-                metal_sffi_wait_completed(cmd)
+        if cmd == 0:
+            metal_host_free(params)
+            metal_sffi_free_buffer(src_buf)
+            return false
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            metal_host_free(params)
+            metal_sffi_free_buffer(src_buf)
+            metal_sffi_destroy_command_buffer(cmd)
+            return false
+        var encoded = metal_sffi_set_buffer(encoder, fb, 0, 0)
+        encoded = encoded and (metal_set_bytes_ptr(encoder, params, 24, 1) != 0)
+        encoded = encoded and metal_sffi_set_buffer(encoder, src_buf, 0, 2)
+        val bx = 16
+        val by = 16
+        val gx = ((_metal_i64(block_w) + bx - 1) / bx) * bx
+        val gy = ((_metal_i64(block_h) + by - 1) / by) * by
+        if encoded:
+            encoded = metal_sffi_dispatch_compute(encoder, pipeline, gx, gy, 1, bx, by, 1)
+        encoded = encoded and metal_sffi_end_compute_encoder(encoder)
         metal_host_free(params)
+        if not encoded:
+            metal_sffi_free_buffer(src_buf)
+            metal_sffi_destroy_compute_encoder(encoder)
+            metal_sffi_destroy_command_buffer(cmd)
+            return false
+        self.pending_composite_command = cmd
+        self.pending_composite_encoder = encoder
+        self.pending_composite_source = src_buf
+        val committed = metal_sffi_commit_command_buffer(cmd)
+        if not committed or not metal_sffi_wait_completed(cmd):
+            self.initialized = false
+            self.gpu_frame_complete = false
+            self.last_error = "Metal image blit completion unknown"
+            return false
         metal_sffi_free_buffer(src_buf)
-        ok
+        metal_sffi_destroy_compute_encoder(encoder)
+        metal_sffi_destroy_command_buffer(cmd)
+        self.pending_composite_command = 0
+        self.pending_composite_encoder = 0
+        self.pending_composite_source = 0
+        true
+
+    me _dispatch_metal_image_composite(x: i32, y: i32, w: i32, h: i32, pixels: [u32], opacity_milli: i32) -> bool:
+        val total_pixels = w.to_i64() * h.to_i64()
+        val byte_size = total_pixels * 4
+        val host = metal_host_alloc(byte_size)
+        if host == 0:
+            return false
+        if _metal_env_flag("SIMPLE_ONE_CALL_UPLOAD"):
+            if metal_write_u32s_to_ptr(host, pixels) != total_pixels:
+                metal_host_free(host)
+                return false
+        elif (env_get("SIMPLE_BULK_UPLOAD") ?? "") == "cdylib":
+            if not bulk_upload_u32s(host, pixels, total_pixels):
+                metal_host_free(host)
+                return false
+        else:
+            var i: i64 = 0
+            while i < total_pixels:
+                metal_host_write_i32(host, i * 4, pixels[i as i32].to_i64())
+                i = i + 1
+
+        val src_buf = metal_sffi_alloc_buffer(self.session.device, byte_size)
+        if src_buf == 0:
+            metal_host_free(host)
+            return false
+        if metal_buffer_upload_ptr(src_buf, host, byte_size) == 0:
+            metal_host_free(host)
+            metal_sffi_free_buffer(src_buf)
+            return false
+        metal_host_free(host)
+
+        val params = metal_host_alloc(28)
+        if params == 0:
+            metal_sffi_free_buffer(src_buf)
+            return false
+        metal_host_write_i32(params, 0, x.to_i64())
+        metal_host_write_i32(params, 4, y.to_i64())
+        metal_host_write_i32(params, 8, w.to_i64())
+        metal_host_write_i32(params, 12, h.to_i64())
+        metal_host_write_i32(params, 16, self.w.to_i64())
+        metal_host_write_i32(params, 20, self.h.to_i64())
+        metal_host_write_i32(params, 24, opacity_milli.to_i64())
+
+        val cmd = metal_sffi_create_command_buffer(self.command_queue)
+        if cmd == 0:
+            metal_host_free(params)
+            metal_sffi_free_buffer(src_buf)
+            return false
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            metal_host_free(params)
+            metal_sffi_free_buffer(src_buf)
+            metal_sffi_destroy_command_buffer(cmd)
+            return false
+        var encoded = metal_sffi_set_buffer(encoder, self.d_framebuffer, 0, 0)
+        encoded = encoded and (metal_set_bytes_ptr(encoder, params, 28, 1) != 0)
+        encoded = encoded and metal_sffi_set_buffer(encoder, src_buf, 0, 2)
+        if encoded:
+            val bx = 16
+            val by = 16
+            val gx = ((w.to_i64() + bx - 1) / bx) * bx
+            val gy = ((h.to_i64() + by - 1) / by) * by
+            encoded = metal_sffi_dispatch_compute(encoder, self.session.pipe_image_composite, gx, gy, 1, bx, by, 1)
+        encoded = encoded and metal_sffi_end_compute_encoder(encoder)
+        metal_host_free(params)
+        if not encoded:
+            metal_sffi_free_buffer(src_buf)
+            metal_sffi_destroy_compute_encoder(encoder)
+            metal_sffi_destroy_command_buffer(cmd)
+            return false
+
+        # Once commit is attempted, a false return does not prove that Metal
+        # never observed the source buffer. Keep it owned until completion is
+        # positively observed, and make this surface receipt-ineligible.
+        self.pending_composite_command = cmd
+        self.pending_composite_encoder = encoder
+        self.pending_composite_source = src_buf
+        val committed = metal_sffi_commit_command_buffer(cmd)
+        if not committed or not metal_sffi_wait_completed(cmd):
+            self.initialized = false
+            self.gpu_frame_complete = false
+            self.last_error = "Metal image composite completion unknown"
+            return false
+        metal_sffi_free_buffer(src_buf)
+        metal_sffi_destroy_compute_encoder(encoder)
+        metal_sffi_destroy_command_buffer(cmd)
+        self.pending_composite_command = 0
+        self.pending_composite_encoder = 0
+        self.pending_composite_source = 0
+        true
 
     # Draw a host RGBA pixel block (w x h, u32/pixel, row-major, same layout as
     # SoftwareBackend.draw_image) into the GPU framebuffer at (x, y) via the
@@ -1293,38 +1489,65 @@ impl MetalBackend:
         metal_host_write_i32(params, 24, color as i64)
         metal_host_write_i32(params, 28, self.w as i64)
         metal_host_write_i32(params, 32, self.h as i64)
-        val q = self.command_queue
-        val fb = self.d_framebuffer
         val atlas = self.glyph_lut_buffer
         val pipeline = self.session.pipe_glyph_atlas_blit
-        val cmd = metal_sffi_create_command_buffer(q)
-        var ok = cmd != 0
-        if ok:
-            val encoder = metal_sffi_create_compute_encoder(cmd)
-            if encoder == 0:
-                ok = false
-            else:
-                metal_sffi_set_buffer(encoder, fb, 0, 0)
-                metal_set_bytes_ptr(encoder, params, 36, 1)
-                metal_sffi_set_buffer(encoder, cp_buf, 0, 2)
-                metal_sffi_set_buffer(encoder, atlas, 0, 3)
-                val bx = 16
-                val by = 16
-                val gx = ((_metal_i64(text_w) + bx - 1) / bx) * bx
-                val gy = ((_metal_i64(text_h) + by - 1) / by) * by
-                metal_sffi_dispatch_compute(encoder, pipeline, gx, gy, 1, bx, by, 1)
-                metal_sffi_end_compute_encoder(encoder)
-                metal_sffi_commit_command_buffer(cmd)
-                metal_sffi_wait_completed(cmd)
+        val ok = self._dispatch_metal_aux_image_checked(pipeline, cp_buf, atlas, params, 36, text_w, text_h)
         metal_host_free(params)
-        metal_sffi_free_buffer(cp_buf)
         ok
+
+    me _dispatch_metal_aux_image_checked(pipeline: i64, source: i64, auxiliary: i64, params: i64, params_len: i64, w: i32, h: i32) -> bool:
+        if self.pending_composite_command != 0:
+            metal_sffi_free_buffer(source)
+            return false
+        val cmd = metal_sffi_create_command_buffer(self.command_queue)
+        if cmd == 0:
+            metal_sffi_free_buffer(source)
+            return false
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            metal_sffi_free_buffer(source)
+            metal_sffi_destroy_command_buffer(cmd)
+            return false
+        var encoded = metal_sffi_set_buffer(encoder, self.d_framebuffer, 0, 0)
+        encoded = encoded and (metal_set_bytes_ptr(encoder, params, params_len, 1) != 0)
+        encoded = encoded and metal_sffi_set_buffer(encoder, source, 0, 2)
+        encoded = encoded and metal_sffi_set_buffer(encoder, auxiliary, 0, 3)
+        val block_x = 16
+        val block_y = 16
+        val grid_x = ((_metal_i64(w) + block_x - 1) / block_x) * block_x
+        val grid_y = ((_metal_i64(h) + block_y - 1) / block_y) * block_y
+        if encoded:
+            encoded = metal_sffi_dispatch_compute(encoder, pipeline, grid_x, grid_y, 1, block_x, block_y, 1)
+        encoded = encoded and metal_sffi_end_compute_encoder(encoder)
+        if not encoded:
+            metal_sffi_free_buffer(source)
+            metal_sffi_destroy_compute_encoder(encoder)
+            metal_sffi_destroy_command_buffer(cmd)
+            return false
+        self.pending_composite_command = cmd
+        self.pending_composite_encoder = encoder
+        self.pending_composite_source = source
+        val committed = metal_sffi_commit_command_buffer(cmd)
+        if not committed or not metal_sffi_wait_completed(cmd):
+            self.initialized = false
+            self.gpu_frame_complete = false
+            self.last_error = "Metal auxiliary image completion unknown"
+            return false
+        metal_sffi_free_buffer(source)
+        metal_sffi_destroy_compute_encoder(encoder)
+        metal_sffi_destroy_command_buffer(cmd)
+        self.pending_composite_command = 0
+        self.pending_composite_encoder = 0
+        self.pending_composite_source = 0
+        true
 
     me _dispatch_metal_1d(pipeline: i64, threads: i64, block_x: i64, params: i64, params_len: i64) -> bool:
         # TODO: [runtime][P2] Interpreter loses the `self` binding when a struct
         # field is passed inline as a call argument after a prior extern call in
         # the same method ("variable `self` not found"). Hoisting self.* into
         # locals first is the workaround applied here and in _dispatch_metal_2d.
+        if self.pending_composite_command != 0:
+            return false
         val q = self.command_queue
         val fb = self.d_framebuffer
         val cmd = metal_sffi_create_command_buffer(q)
@@ -1332,15 +1555,35 @@ impl MetalBackend:
             return false
         val encoder = metal_sffi_create_compute_encoder(cmd)
         if encoder == 0:
+            metal_sffi_destroy_command_buffer(cmd)
             return false
-        metal_sffi_set_buffer(encoder, fb, 0, 0)
-        metal_set_bytes_ptr(encoder, params, params_len, 1)
-        metal_sffi_dispatch_compute(encoder, pipeline, threads, 1, 1, block_x, 1, 1)
-        metal_sffi_end_compute_encoder(encoder)
-        metal_sffi_commit_command_buffer(cmd)
-        metal_sffi_wait_completed(cmd)
+        var encoded = metal_sffi_set_buffer(encoder, fb, 0, 0)
+        encoded = encoded and (metal_set_bytes_ptr(encoder, params, params_len, 1) != 0)
+        if encoded:
+            encoded = metal_sffi_dispatch_compute(encoder, pipeline, threads, 1, 1, block_x, 1, 1)
+        encoded = encoded and metal_sffi_end_compute_encoder(encoder)
+        if not encoded:
+            metal_sffi_destroy_compute_encoder(encoder)
+            metal_sffi_destroy_command_buffer(cmd)
+            return false
+        self.pending_composite_command = cmd
+        self.pending_composite_encoder = encoder
+        self.pending_composite_source = 0
+        val committed = metal_sffi_commit_command_buffer(cmd)
+        if not committed or not metal_sffi_wait_completed(cmd):
+            self.initialized = false
+            self.gpu_frame_complete = false
+            self.last_error = "Metal 1D dispatch completion unknown"
+            return false
+        metal_sffi_destroy_compute_encoder(encoder)
+        metal_sffi_destroy_command_buffer(cmd)
+        self.pending_composite_command = 0
+        self.pending_composite_encoder = 0
+        true
 
     me _dispatch_metal_2d(pipeline: i64, w: i32, h: i32, params: i64, params_len: i64) -> bool:
+        if self.pending_composite_command != 0:
+            return false
         val q = self.command_queue
         val fb = self.d_framebuffer
         val cmd = metal_sffi_create_command_buffer(q)
@@ -1348,17 +1591,35 @@ impl MetalBackend:
             return false
         val encoder = metal_sffi_create_compute_encoder(cmd)
         if encoder == 0:
+            metal_sffi_destroy_command_buffer(cmd)
             return false
-        metal_sffi_set_buffer(encoder, fb, 0, 0)
-        metal_set_bytes_ptr(encoder, params, params_len, 1)
+        var encoded = metal_sffi_set_buffer(encoder, fb, 0, 0)
+        encoded = encoded and (metal_set_bytes_ptr(encoder, params, params_len, 1) != 0)
         val block_x = 16
         val block_y = 16
         val grid_x = ((_metal_i64(w) + block_x - 1) / block_x) * block_x
         val grid_y = ((_metal_i64(h) + block_y - 1) / block_y) * block_y
-        metal_sffi_dispatch_compute(encoder, pipeline, grid_x, grid_y, 1, block_x, block_y, 1)
-        metal_sffi_end_compute_encoder(encoder)
-        metal_sffi_commit_command_buffer(cmd)
-        metal_sffi_wait_completed(cmd)
+        if encoded:
+            encoded = metal_sffi_dispatch_compute(encoder, pipeline, grid_x, grid_y, 1, block_x, block_y, 1)
+        encoded = encoded and metal_sffi_end_compute_encoder(encoder)
+        if not encoded:
+            metal_sffi_destroy_compute_encoder(encoder)
+            metal_sffi_destroy_command_buffer(cmd)
+            return false
+        self.pending_composite_command = cmd
+        self.pending_composite_encoder = encoder
+        self.pending_composite_source = 0
+        val committed = metal_sffi_commit_command_buffer(cmd)
+        if not committed or not metal_sffi_wait_completed(cmd):
+            self.initialized = false
+            self.gpu_frame_complete = false
+            self.last_error = "Metal 2D dispatch completion unknown"
+            return false
+        metal_sffi_destroy_compute_encoder(encoder)
+        metal_sffi_destroy_command_buffer(cmd)
+        self.pending_composite_command = 0
+        self.pending_composite_encoder = 0
+        true
 
 impl Engine2DExtended for MetalBackend:
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):

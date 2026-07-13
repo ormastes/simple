@@ -136,7 +136,7 @@ describe "Engine2D embedded render surface":
             expect(color_b(p)).to_equal(0)
             engine.shutdown()
 
-        it "composites a canonical offset translucent WM window on the shared Vulkan session":
+        it "composites a canonical offset translucent WM window on shared Vulkan and Metal sessions":
             val window = simple_gui_internal_window("surf", "win", 1u64, "app", "One", 10, 36, 120, 80, "", false, false, 1)
             val scene = simple_gui_internal_window_scene(160, 120, DRAW_IR_BACKEND_GPU, [window])
             val content_pixels: [u32] = [GREEN; 120 * 52]
@@ -208,6 +208,40 @@ describe "Engine2D embedded render surface":
                                 expect(alpha_result.readback_source).to_equal("device_readback")
                                 expect(alpha_result.backend_handle).to_be_greater_than(0)
                                 expect(alpha_result.pixels[0]).to_equal(0x33330000u32)
+                                child.shutdown()
+                                expect(parent.session.ref_count).to_equal(refs_before)
+                    val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, composition, [content_image])
+                    expect(result.fallback_required).to_be(false)
+                    expect(result.skipped_command_count).to_equal(0)
+                    expect(result.rendered_command_count).to_equal(expected.rendered_command_count)
+                    expect(result.readback_source).to_equal("device_readback")
+                    expect(result.backend_handle).to_be_greater_than(0)
+                    expect(result.pixels).to_equal(expected.pixels)
+                    engine.shutdown()
+            match Engine2D.create_requested_backend(160, 120, "metal"):
+                Err(reason):
+                    expect(reason.len()).to_be_greater_than(0)
+                Ok(engine):
+                    val parent_backend = engine.metal_backend
+                    expect(parent_backend != nil).to_be(true)
+                    if parent_backend != nil:
+                        val parent = parent_backend
+                        val refs_before = parent.session.ref_count
+                        match engine.create_shared_metal_offscreen(2, 2):
+                            Err(reason):
+                                expect(reason.len()).to_equal(0)
+                            Ok(child):
+                                val child_backend = child.metal_backend
+                                expect(child_backend != nil).to_be(true)
+                                if child_backend != nil:
+                                    val child_metal = child_backend
+                                    expect(child_metal.session.device).to_equal(parent.session.device)
+                                    expect(child_metal.session.generation).to_equal(parent.session.generation)
+                                    expect(parent.session.ref_count).to_equal(refs_before + 1)
+                                val child_readback = child.read_pixels_with_source()
+                                expect(child_readback.source).to_equal("device_readback")
+                                expect(child_readback.backend_handle).to_be_greater_than(0)
+                                expect(child_readback.pixels.len()).to_equal(4)
                                 child.shutdown()
                                 expect(parent.session.ref_count).to_equal(refs_before)
                     val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, composition, [content_image])

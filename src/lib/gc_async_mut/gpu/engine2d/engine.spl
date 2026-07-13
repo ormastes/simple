@@ -291,6 +291,23 @@ class Engine2D:
         child.clear(0x00000000u32)
         Ok(child)
 
+    me create_shared_metal_offscreen(width: i32, height: i32) -> Result<Engine2D, text>:
+        """Create one transparent child framebuffer on this engine's Metal session."""
+        val pixel_count = width.to_i64() * height.to_i64()
+        if width <= 0 or height <= 0 or pixel_count <= 0 or pixel_count > 2147483647:
+            return Err("invalid-shared-metal-surface-size")
+        val active = self.metal_backend
+        if active == nil:
+            return Err("shared-metal-parent-required")
+        val parent = active
+        if not parent.session.is_valid():
+            return Err("shared-metal-session-required")
+        var metal = MetalBackend.create()
+        if not metal.init_with_session(width, height, parent.session):
+            return Err(if metal.last_error == "": "shared-metal-surface-init-failed" else: metal.last_error)
+        val capability = metal.capability()
+        Ok(Engine2D(backend: metal, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, metal_backend: metal, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal"))
+
     static fn create_requested_backend(width: i32, height: i32, backend_name: text) -> Result<Engine2D, text>:
         """Create one canonical backend without silently falling back."""
         val requested_backend = backend_canonical_name(backend_name)
@@ -345,12 +362,9 @@ class Engine2D:
             if metal.init(width, height):
                 val capability = metal.capability()
                 return Ok(Engine2D(backend: metal, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, metal_backend: metal, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal"))
-            # Metal-on-Vulkan emulation: native Metal is macOS-only, so on other
-            # platforms serve the Metal API request through the real Vulkan
-            # backend instead of silently dropping to CPU. Pixels are genuinely
-            # Vulkan-rendered; primitive coverage matches VulkanBackend. The
-            # selected name discloses the emulation rather than claiming native
-            # Metal. Verified bit-exact vs SoftwareBackend in the oracle spec.
+
+        if requested_backend == "metal-on-vulkan":
+            # Compatibility stays explicit: strict "metal" never claims this lane.
             var metal_vk = VulkanBackend.create()
             if metal_vk.init(width, height):
                 return Ok(Engine2D(backend: metal_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal-on-vulkan"))
@@ -1074,6 +1088,16 @@ class Engine2D:
         val vulkan = active
         val completed = vulkan.draw_image_blend_checked(dst_x, dst_y, width, height, pixels, opacity_milli)
         self.vulkan_backend = vulkan
+        completed
+
+    me draw_metal_image_blend_checked(dst_x: i32, dst_y: i32, width: i32, height: i32, pixels: [u32], opacity_milli: i32) -> bool:
+        """Blend child pixels only through the active checked Metal path."""
+        val active = self.metal_backend
+        if active == nil:
+            return false
+        val metal = active
+        val completed = metal.draw_image_blend_checked(dst_x, dst_y, width, height, pixels, opacity_milli)
+        self.metal_backend = metal
         completed
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):

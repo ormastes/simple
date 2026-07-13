@@ -139,6 +139,16 @@ struct BlitParams {
     int fb_h;
 };
 
+struct ImageCompositeParams {
+    int x;
+    int y;
+    int w;
+    int h;
+    int fb_w;
+    int fb_h;
+    int opacity_milli;
+};
+
 struct IndexedFillParams {
     int x;
     int y;
@@ -706,6 +716,32 @@ kernel void kernel_blit_image(
     int src_idx = ly * p.w + lx;
     int dst_idx = py * p.fb_w + px;
     fb[dst_idx] = src[src_idx];
+}
+
+// ---- kernel_composite_image ----
+
+kernel void kernel_composite_image(
+    device uint* fb                       [[buffer(0)]],
+    constant ImageCompositeParams& p      [[buffer(1)]],
+    device const uint* src                [[buffer(2)]],
+    uint2 tid                             [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int src_idx = ly * p.w + lx;
+    int dst_idx = py * p.fb_w + px;
+    uint color = src[src_idx];
+    uint alpha = (color >> 24) & 0xFFu;
+    uint opacity = (uint)clamp(p.opacity_milli, 0, 1000);
+    uint scaled_alpha = (alpha * opacity) / 1000u;
+    uint scaled = (color & 0x00FFFFFFu) | (scaled_alpha << 24);
+    fb[dst_idx] = blend_src_over(scaled, fb[dst_idx]);
 }
 
 // lut_lookup: GpuLut dense-kind lookup (design GpuLut §3.1/§3.2).

@@ -257,7 +257,8 @@ use simple_runtime::metal_graphics_runtime::{
     rt_metal_commit_command_buffer, rt_metal_compile_shader, rt_metal_create_command_buffer,
     rt_metal_create_command_queue, rt_metal_create_compute_encoder, rt_metal_create_compute_pipeline,
     rt_metal_create_device, rt_metal_create_render_pipeline, rt_metal_create_sampler, rt_metal_create_swapchain,
-    rt_metal_create_texture, rt_metal_destroy_command_queue, rt_metal_destroy_device, rt_metal_destroy_pipeline,
+    rt_metal_create_texture, rt_metal_destroy_command_buffer, rt_metal_destroy_command_queue,
+    rt_metal_destroy_compute_encoder, rt_metal_destroy_device, rt_metal_destroy_pipeline,
     rt_metal_destroy_render_pipeline, rt_metal_destroy_sampler, rt_metal_destroy_shader, rt_metal_destroy_swapchain,
     rt_metal_device_count, rt_metal_device_memory, rt_metal_device_name, rt_metal_dispatch_compute,
     rt_metal_draw_indexed, rt_metal_draw_primitives, rt_metal_end_compute_encoder, rt_metal_end_render_pass,
@@ -532,11 +533,29 @@ pub fn rt_metal_create_command_buffer_fn(args: &[Value]) -> Result<Value, Compil
     )?)))
 }
 
+pub fn rt_metal_destroy_command_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_destroy_command_buffer(arg_i64(
+        args,
+        0,
+        "rt_metal_destroy_command_buffer",
+        1,
+    )?)))
+}
+
 pub fn rt_metal_create_compute_encoder_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(rt_metal_create_compute_encoder(arg_i64(
         args,
         0,
         "rt_metal_create_compute_encoder",
+        1,
+    )?)))
+}
+
+pub fn rt_metal_destroy_compute_encoder_fn(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(rt_metal_destroy_compute_encoder(arg_i64(
+        args,
+        0,
+        "rt_metal_destroy_compute_encoder",
         1,
     )?)))
 }

@@ -33,13 +33,14 @@ content IMAGE. The scenario verifies:
 
 - clipped leading translucent shadow metadata and resolved title/close TEXT;
 - exact content IMAGE URI and placement;
-- child and parent share the same Vulkan device/session generation;
+- child and parent share the same Vulkan or Metal device/session generation;
 - creating and shutting the child increments then restores the session count;
 - the shared renderer composites a nonzero-alpha child initializer on-device;
-- the full CPU and Vulkan frames match exactly; and
-- Vulkan reports device readback, a positive handle, and no skipped work.
+- the full CPU and available native GPU frames match exactly; and
+- Vulkan or Metal reports device readback, a positive handle, and no skipped work.
 
-Vulkan absence is an explicit unavailable branch, not a device PASS. TODO 554
+Vulkan/Metal absence is an explicit unavailable branch, not a device PASS;
+the explicit Metal-on-Vulkan compatibility name is not native Metal. TODO 554
 tracks the producer geometry that currently clips and overwrites the shadow.
 
 ### Nested embedded output

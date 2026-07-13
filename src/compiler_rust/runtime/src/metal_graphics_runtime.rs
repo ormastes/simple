@@ -318,6 +318,14 @@ mod metal_impl {
         }
     }
 
+    pub fn destroy_command_buffer(handle: i64) -> i64 {
+        if with_cmd_bufs(|m| m.remove(&handle).is_some()) {
+            1
+        } else {
+            0
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Buffer Management
     // -------------------------------------------------------------------------
@@ -507,6 +515,14 @@ mod metal_impl {
                 set_last_error("end_compute_encoder: invalid handle");
                 0
             }
+        }
+    }
+
+    pub fn destroy_compute_encoder(handle: i64) -> i64 {
+        if with_encoders(|m| m.remove(&handle).is_some()) {
+            1
+        } else {
+            0
         }
     }
 
@@ -998,6 +1014,18 @@ pub extern "C" fn rt_metal_end_compute_encoder(_encoder: i64) -> i64 {
 }
 
 #[no_mangle]
+pub extern "C" fn rt_metal_destroy_compute_encoder(_encoder: i64) -> i64 {
+    #[cfg(target_os = "macos")]
+    {
+        metal_impl::destroy_compute_encoder(_encoder)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        0
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn rt_metal_set_buffer(_encoder: i64, _buffer: i64, _offset: i64, _index: i64) -> i64 {
     #[cfg(target_os = "macos")]
     {
@@ -1145,6 +1173,18 @@ pub extern "C" fn rt_metal_wait_completed(_cmd: i64) -> i64 {
     #[cfg(target_os = "macos")]
     {
         metal_impl::wait_completed(_cmd)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_metal_destroy_command_buffer(_cmd: i64) -> i64 {
+    #[cfg(target_os = "macos")]
+    {
+        metal_impl::destroy_command_buffer(_cmd)
     }
     #[cfg(not(target_os = "macos"))]
     {

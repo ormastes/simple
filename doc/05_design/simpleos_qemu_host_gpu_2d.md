@@ -143,6 +143,21 @@ pixels, preflighted glyph quads, and shared-session child frames at canonical WM
 opacity. Production guest submission and representative p95 evidence remain
 open.
 
+## Checked Metal Draw IR source
+
+`Engine2D.create_requested_backend(..., "metal")` is strict native selection;
+the explicit `metal-on-vulkan` key owns compatibility. A new Metal surface must
+complete a transparent device clear before any Draw IR mutation can qualify.
+Embedded WM surfaces retain the parent's `MetalSession`, return exact checked
+device readback, and composite through `draw_metal_image_blend_checked` using
+the shared MSL src-over/opacity pipeline. Clear, 2D primitive, image blit, and
+composite helpers require encode, dispatch, end, commit, and wait success.
+Unknown commit completion poisons the surface and retains command dependencies
+rather than replaying on CPU. Known completion and uncommitted failure remove
+the runtime's encoder/command registry handles through the Metal facade. The host
+receipt hashes the default Metal device name and total memory; raw render and
+ProcessingIR remain unavailable on Metal.
+
 ## Observability and NFRs
 
 Each row records host OS, guest ISA, QEMU version/arguments, protocol/backend,

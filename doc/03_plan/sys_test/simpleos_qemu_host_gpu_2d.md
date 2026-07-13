@@ -17,6 +17,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 | checked raw Vulkan CLEAR/RECT completion and fail-closed provenance | REQ-003,005,006,010; NFR-001 |
 | clipped transparent IMAGE src-over parity and device provenance | REQ-003,005,006,010; NFR-001 |
 | opaque full-target initialization plus shared-session offset/opacity-930 WM surface admission | REQ-003,005,006,010; NFR-001 |
+| strict native Metal creation, transparent device bootstrap, shared-session composite, and exact identity | REQ-003,005,006,008,010; NFR-001 |
 | production x86 active-VMM mapping, idle-generation submission, validated MMIO presentation, and local fallback | REQ-002,003,005,006,009,010; NFR-001,004 |
 | resolved TEXT preflight, canonical glyph material, exact CPU/Vulkan parity, and device provenance | REQ-003,005,006,010; NFR-001 |
 | exact device-backed ProcessingIR result | REQ-004,007; NFR-002,004 |
@@ -47,8 +48,9 @@ The embedded-surface integration boundary admits an opaque full-target RECT
 followed by a transparent exact IMAGE and requires device readback, positive
 handle, exact pixels, and no fallback. It also projects a canonical unfocused
 WM window at opacity 930, renders its smaller offset surface through the
-parent's retained Vulkan session, and requires exact CPU parity plus final
-device provenance. The fixture asserts the canonical leading translucent
+parent's retained Vulkan or Metal session, and requires exact CPU parity plus
+final device provenance. Metal absence is an explicit unavailable branch;
+Metal-on-Vulkan cannot satisfy the native branch. The fixture asserts the canonical leading translucent
 shadow command is admitted but does not claim it is visible; TODO 554 tracks
 its clipped/overwritten producer geometry.
 The same boundary admits resolved pinned-font TEXT only after the complete glyph
