@@ -7,7 +7,7 @@
 
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
 use os.kernel.types.task_types.{TaskId, TaskPriority, BlockReason}
-use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.ipc.cspace_spawn.{spawn_full}
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
 use os.kernel.scheduler.scheduler.{Scheduler, wait_collect_result_pid, wait_collect_result_status, wait_collect_result_error}
 use os.kernel.ipc.ipc.{IpcManager}
@@ -136,7 +136,11 @@ fn _handle_spawn(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     """
     val entry = args.arg0
     val priority = _u64_to_priority(args.arg1)
-    val caps = CapabilitySet.full()
+    # Boot/init compat: raw entry-address spawn still needs ambient authority
+    # until the AT_SIMPLE_CSPACE injection ABI lands (P3). Route through the
+    # named spawn_full() wrapper so the ambient grant stays auditable — the
+    # least-authority default lives in spawn_with_cspace (cspace_spawn.spl).
+    val caps = spawn_full()
 
     var sched = scheduler
     val task_id = sched.create_task(entry, priority, caps)
@@ -651,7 +655,9 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
     val image_result = build_user_process_image(path, bytes_result.unwrap(), arch, sp_argv, sp_envp)
     if image_result.is_ok():
         val priority = _u64_to_priority(priority_raw)
-        val caps = CapabilitySet.full()
+        # Boot/init compat wrapper (see spawn_full); migrates to a per-image
+        # SpawnSpec pouch once the injection ABI is wired at boot.
+        val caps = spawn_full()
         var sched = scheduler
         val before_next_task_id = g_scheduler_next_task_id
         val raw_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
@@ -718,7 +724,9 @@ pub struct SpawnBinaryDirectState:
 fn _spawn_from_resolved_bytes_for_arch_state(path: text, path_bytes: [u8], bytes: [u8], priority_raw: u64, scheduler: Scheduler, klog: KernelLog, arch: Architecture) -> SpawnBinaryDirectState:
     val _path_bytes = path_bytes
     val priority = _u64_to_priority(priority_raw)
-    val caps = CapabilitySet.full()
+    # Boot/init compat wrapper (see spawn_full); migrates to a per-image
+    # SpawnSpec pouch once the injection ABI is wired at boot.
+    val caps = spawn_full()
     var sched = scheduler
     log_raw_println("[syscall13] staged create_user_task begin")
     val pid = sched.create_user_task_from_bytes_pid(path, bytes, arch, priority, caps)
