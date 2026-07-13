@@ -1,13 +1,24 @@
 /*
- * x86_64 Bare-Metal Linker Script
+ * x86_64 Bare-Metal Linker Script — 128 MiB base (GRUB-EFI / OVMF)
  *
- * Target: x86_64 processors (QEMU, physical hardware)
- * Bootloader: Multiboot1 compatible (QEMU -kernel)
+ * Target: x86_64 processors booted via UEFI firmware (OVMF) -> GRUB-EFI ->
+ *         multiboot1. This is the real-board boot chain (NOT QEMU `-kernel`).
+ * Bootloader: Multiboot1 compatible.
+ *
+ * Why 128 MiB (0x08000000) instead of 1 MiB:
+ *   The large merged ring-3 kernel occupies the whole low region [1MB, ~229MB]
+ *   at a 1MB base (its file image + ~211MB NOBITS .bss). That starves GRUB-EFI's
+ *   multiboot1 relocator of a safe low scratch/trampoline slot and faults
+ *   (#UD at RIP~0x1012 in the relocator, caught by OVMF, before _start runs).
+ *   Loading at 128MB leaves [1MB,128MB) free for GRUB's relocator + multiboot
+ *   info while staying within the crt0 identity map (first 4GiB) and below the
+ *   PMM heap (0x80000000). Kernel .bss then reaches ~0x16400000 (~356MB); the
+ *   ring-3 payload is linked at 0x40000000 (1GiB, see sysroot.shs simpleos.ld)
+ *   and the mmap base at 0x50000000, both clear of that band.
  *
  * Memory Layout:
- *   0x00100000 - Kernel load address (1MB mark)
- *   0x00200000 - Stack (grows down)
- *   Identity-mapped first 1GB via page tables
+ *   0x08000000 - Kernel load address (128MB mark)
+ *   Identity-mapped first 4GB via page tables
  *
  * Sections:
  *   .text.entry - Multiboot1 header + _start (must be in first 8KB)
@@ -22,22 +33,11 @@ ENTRY(_entry32)
 
 SECTIONS
 {
-    /* Kernel load base.
-     *
-     * Historically 1MB (0x100000, the classic multiboot low-memory mark). That
-     * works for QEMU `-kernel` and for a small (~2MB text) kernel under
-     * GRUB-EFI/OVMF. But the large merged ring-3 kernel (~22.6MB text) occupies
-     * the whole low region [1MB, ~237MB] once its file image + 236MB BSS are
-     * placed there, which starves GRUB-EFI's multiboot1 relocator of a safe
-     * low scratch/trampoline slot and makes it fault (#UD at RIP~0x1012 in the
-     * relocator, caught by OVMF, before the kernel _start ever runs).
-     *
-     * Loading at 128MB leaves the entire [1MB, 128MB) low region free for
-     * GRUB's relocator trampoline + multiboot info, while staying well within
-     * the crt0 identity map (first 4GiB) and below the PMM heap region
-     * (0x80000000). QEMU `-kernel` honours p_paddr identically, so that path is
-     * unaffected. */
-    . = 0x100000; /* low-1MB variant for the QEMU -kernel getfile lane. Ring-3 payloads (clang_static) now link at 0x40000000 (1GiB, see sysroot.shs), so they are clear of the kernel .bss at either the 1MB or the 128MB base. This variant stays at 1MB for the proven QEMU -kernel lane; the OVMF/GRUB-EFI lane uses linker_128mb.ld (128MB base) so GRUB's multiboot1 relocator has a low scratch slot. */
+    /* Kernel base 128MB — leaves [1MB,128MB) free for GRUB-EFI's multiboot1
+     * relocator trampoline + boot info (see header). QEMU `-kernel` honours
+     * p_paddr identically, but this variant is intended for the OVMF/GRUB-EFI
+     * lane; the QEMU `-kernel` getfile lane keeps linker_low1mb.ld at 1MB. */
+    . = 0x8000000;
     _kernel_start = .;
 
     /* Code section — .text.entry first for Multiboot header */

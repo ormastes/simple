@@ -1,0 +1,225 @@
+#!/bin/sh
+# scp_retrieve_over_ssh_uefi.shs — capstone: run clang on SimpleOS, compile a C
+# file in-guest, and retrieve the object over SSH (getfile), booted through REAL
+# UEFI firmware (OVMF pflash -> GRUB-EFI -> multiboot1), NOT QEMU `-kernel`.
+#
+# This is the board-representative proof for goal-gap 2f. It is the OVMF sibling
+# of scripts/os/scp_retrieve_over_ssh.shs (which uses the forbidden `-kernel`).
+# The ONLY differences from that lane:
+#   1. The kernel is linked at the 128 MiB base (linker_128mb.ld) so GRUB-EFI's
+#      multiboot1 relocator has a free low scratch/trampoline slot (a 1 MiB base
+#      faults #UD at RIP~0x1012 in the relocator under OVMF).
+#   2. Boot is OVMF pflash + a self-contained grub-mkstandalone BOOTX64.EFI whose
+#      memdisk embeds the kernel, served to OVMF over vvfat — the full
+#      UEFI -> bootloader -> ExitBootServices -> multiboot handoff.
+#
+# The ring-3 clang payload links at 0x40000000 (1 GiB, sysroot.shs simpleos.ld)
+# and the anonymous-mmap base is 0x50000000 (1.25 GiB), both clear of the kernel
+# .bss band [128 MiB, ~356 MiB] that a 128 MiB kernel base produces. That is the
+# fix this harness exists to prove: at 0x10000000 the payload/mmap fell inside
+# the .bss band and the syscall path faulted under the user CR3.
+#
+# GATES (serial):
+#   L1 "[grub-uefi] multiboot loading"     OVMF -> GRUB-EFI app ran
+#   L2 "call _start" / "SimpleOS Boot"      multiboot handoff -> kernel _start
+#   L3 "accept loop start"                  sshd reached ring-3 accept loop
+#   L4 "oo-nvme] persist /hello.o -> OK"    in-guest clang compiled the object
+#   L5 host: retrieved.o links and ./a returns 7
+#
+# Env: SEED, CLANG_BIN, SKIP_STAGE=1, SKIP_KERNEL=1, QEMU_MEM (2G), BOOT_WAIT.
+set -eu
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+SEED="${SEED:-src/compiler_rust/target/release/simple}"
+CLANG_BIN="${CLANG_BIN:-build/os/clang_static/bin/clang_static}"
+ENTRY="examples/09_embedded/simple_os/arch/x86_64/ssh_ring3_clang_entry.spl"
+LINKER="examples/09_embedded/simple_os/arch/x86_64/linker_128mb.ld"
+KERNEL="build/os/simpleos_ssh_ring3_uefi128.elf"
+IMG="build/os/elfexec/fat32-clang.img"
+SERIAL="build/os/scp_retrieve_over_ssh_uefi.serial.log"
+CACHE="build/os/ssh_clang_cache_uefi128"
+BUILD="build/os/uefi_scp"
+ESP="$BUILD/esp"
+EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+OVMF_VARS="$BUILD/OVMF_VARS_4M.fd"
+QEMU_MEM="${QEMU_MEM:-2G}"
+BOOT_WAIT="${BOOT_WAIT:-60}"
+SCRATCH="${SCRATCH:-/tmp/claude-1000/-home-ormastes-dev-pub-simple/f6547767-3f36-4410-969d-edaead425415/scratchpad}"
+
+command -v grub-mkstandalone >/dev/null 2>&1 || { echo "FAIL: grub-mkstandalone missing"; exit 1; }
+command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "FAIL: qemu-system-x86_64 missing"; exit 1; }
+command -v sshpass >/dev/null 2>&1 || { echo "FAIL: sshpass missing"; exit 1; }
+[ -f "$OVMF_CODE" ] || { echo "FAIL: OVMF_CODE not found at $OVMF_CODE"; exit 1; }
+[ -f "$OVMF_VARS_SRC" ] || { echo "FAIL: OVMF_VARS not found at $OVMF_VARS_SRC"; exit 1; }
+mkdir -p build/os/generated/generated build/os/elfexec/stageD "$SCRATCH"
+
+# ---- 1. Payload image with clang_static (linked at 0x40000000) + hello.c ----
+if [ "${SKIP_STAGE:-1}" != "1" ] || [ ! -f "$IMG" ]; then
+    [ -f "$CLANG_BIN" ] || { echo "[uefi-scp] missing $CLANG_BIN (relink clang_static at 0x40000000 first)"; exit 1; }
+    printf 'int main(void){ return 7; }\n' > build/os/elfexec/stageD/hello.c
+    SIZE="$(stat -c%s "$CLANG_BIN")"; echo "$SIZE" > build/os/elfexec/payload_size.txt
+    MKOUT="$(SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SEED" run scripts/os/fsexec_mkimg_big.spl 2>&1)"
+    TOTAL="$(echo "$MKOUT" | sed -n 's/.*total_bytes=\([0-9][0-9]*\).*/\1/p' | tail -1)"
+    [ -n "$TOTAL" ] || { echo "[uefi-scp] could not parse total_bytes"; exit 1; }
+    cat build/os/elfexec/fat32-clang-prefix.bin "$CLANG_BIN" > "$IMG"
+    truncate -s "$TOTAL" "$IMG"
+fi
+[ -f "$IMG" ] || { echo "[uefi-scp] missing image $IMG"; exit 1; }
+# Verify the payload really links at 0x40000000 (this is the fix under test).
+if command -v readelf >/dev/null 2>&1; then
+    PBASE="$(readelf -l "$CLANG_BIN" 2>/dev/null | awk '/LOAD/{print $3; exit}')"
+    echo "[uefi-scp] clang_static first PT_LOAD vaddr = $PBASE (want 0x0000000040000000)"
+fi
+
+# ---- 2. Build the 128 MiB-base merged SSH + clang-stream kernel -------------
+printf 'pub fn ssh_live_build_marker() -> text:\n    "ssh-ring3-build:uefi-scp-128"\n' \
+    > build/os/generated/ssh_live_build_marker.spl
+cat > build/os/generated/generated/simpleos_log_config.spl <<'SPL'
+val SIMPLEOS_LOG_COMPILED: bool = false
+
+fn simpleos_log_compile_enabled() -> bool:
+    SIMPLEOS_LOG_COMPILED
+
+fn simpleos_log_compile_mode_name() -> text:
+    if SIMPLEOS_LOG_COMPILED:
+        return "on"
+    "off"
+SPL
+
+if [ "${SKIP_KERNEL:-0}" != "1" ] || [ ! -f "$KERNEL" ]; then
+    OBJCOPY_PREFIX=""
+    for d in /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin; do
+        [ -f "$d/llvm-objcopy" ] && OBJCOPY_PREFIX="$d" && break
+    done
+    rm -rf "$CACHE"; mkdir -p "$CACHE"; rm -f "$KERNEL"
+    echo "[uefi-scp] building 128MB-base kernel -> $KERNEL"
+    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT/src" SIMPLE_OS_LOG_MODE=off SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+    PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        "$SEED" native-build --source build/os/generated --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os --backend cranelift --cpu x86-64-v1 \
+        --opt-level=aggressive --log off --entry-closure --cache-dir "$CACHE" \
+        --entry "$ENTRY" --target x86_64-unknown-none -o "$KERNEL" \
+        --linker-script "$LINKER" 2>&1 | tail -40
+    [ -f "$KERNEL" ] || { echo "[uefi-scp] KERNEL BUILD FAILED"; exit 1; }
+fi
+echo "[uefi-scp] kernel=$KERNEL ($(stat -c%s "$KERNEL") bytes)"
+if command -v readelf >/dev/null 2>&1; then
+    KBASE="$(readelf -l "$KERNEL" 2>/dev/null | awk '/LOAD/{print $3; exit}')"
+    echo "[uefi-scp] kernel first PT_LOAD vaddr = $KBASE (want 0x0000000008000000)"
+fi
+
+# ---- 3. Assemble the ESP: self-contained BOOTX64.EFI (kernel in memdisk) ----
+rm -rf "$BUILD"; mkdir -p "$ESP/EFI/BOOT"
+cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+cat > "$BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+menuentry "SimpleOS SSH ring-3 clang (UEFI/multiboot, 128MB)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+echo "[uefi-scp] building self-contained BOOTX64.EFI (embeds kernel via memdisk) ..."
+grub-mkstandalone --format=x86_64-efi --output="$EFIAPP" \
+    --modules="multiboot normal echo part_gpt fat" \
+    "boot/grub/grub.cfg=$BUILD/grub.cfg" "boot/kernel.elf=$KERNEL"
+[ -f "$EFIAPP" ] || { echo "FAIL: grub-mkstandalone did not produce $EFIAPP"; exit 1; }
+
+# ---- 4. Pick a free host port ----------------------------------------------
+SSH_PORT="${SSH_PORT:-42222}"
+if ss -ltn 2>/dev/null | grep -q ":$SSH_PORT "; then
+    for p in 43222 44222 45222 46222; do
+        ss -ltn 2>/dev/null | grep -q ":$p " || { SSH_PORT=$p; break; }
+    done
+fi
+echo "[uefi-scp] host ssh port = $SSH_PORT -> guest 22"
+
+# ---- 5. Boot under OVMF pflash (NOT -kernel). ESP via vvfat, payload on NVMe.
+rm -f "$SERIAL"
+qemu-system-x86_64 -no-user-config -monitor none -nographic -no-reboot \
+    -machine q35 -cpu qemu64 -m "$QEMU_MEM" \
+    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+    -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+    -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+    -device virtio-blk-pci,drive=esp,bootindex=0 \
+    -serial "file:$SERIAL" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -drive "file=$IMG,if=none,id=nvm,format=raw" -device nvme,serial=deadbeef,drive=nvm \
+    -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22" -device virtio-net-pci,netdev=n0 &
+QEMU_PID=$!
+trap 'kill "$QEMU_PID" 2>/dev/null || true' EXIT
+
+# ---- 6. Wait for the ring-3 accept loop under OVMF -------------------------
+i=0
+while [ $i -lt "$BOOT_WAIT" ]; do
+    grep -qa "accept loop start" "$SERIAL" 2>/dev/null && break
+    kill -0 "$QEMU_PID" 2>/dev/null || break
+    sleep 1; i=$((i+1))
+done
+rung() { grep -qa "$1" "$SERIAL" 2>/dev/null && echo "  [ok]   $2" || echo "  [MISS] $2"; }
+echo "===== UEFI boot ladder ====="
+rung "\[grub-uefi\] multiboot loading" "L1 OVMF -> GRUB-EFI app ran"
+rung "call _start\|SimpleOS Boot"       "L2 multiboot handoff -> kernel _start"
+rung "accept loop start"                "L3 sshd ring-3 accept loop (payload overlap fault cleared)"
+if ! grep -qa "accept loop start" "$SERIAL" 2>/dev/null; then
+    echo "===== RESULT: accept loop NOT reached under OVMF ====="
+    sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$SERIAL" 2>/dev/null | grep -a . | tail -30
+    kill "$QEMU_PID" 2>/dev/null || true
+    exit 1
+fi
+
+# ---- 7. In-guest clang compile, then getfile retrieval --------------------
+CLANG_CMD="clang -cc1 -triple x86_64-unknown-simpleos -emit-obj -o /hello.o -x c /hello.c"
+echo "[uefi-scp] ssh -p $SSH_PORT root@127.0.0.1 $CLANG_CMD"
+sshpass -p simpleos ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+    root@127.0.0.1 $CLANG_CMD || true
+j=0
+while [ $j -lt 120 ]; do
+    grep -qaE "oo-nvme\] persist|heap:stream-open-fail|ring3 program exited" "$SERIAL" 2>/dev/null && break
+    kill -0 "$QEMU_PID" 2>/dev/null || break
+    sleep 2; j=$((j+2))
+done
+if ! grep -qa "oo-nvme\] persist /hello.o -> OK" "$SERIAL" 2>/dev/null; then
+    echo "[uefi-scp] FAIL: /hello.o not persisted (clang compile under OVMF incomplete)"
+    kill "$QEMU_PID" 2>/dev/null || true; sleep 1
+    echo "===== serial tail ====="; sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$SERIAL" | tail -60
+    exit 1
+fi
+echo "  [ok]   L4 in-guest clang compiled /hello.o under OVMF"
+
+rm -f "$SCRATCH/retrieved_uefi.o"
+sshpass -p simpleos ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+    root@127.0.0.1 getfile /hello.o > "$SCRATCH/retrieved_uefi.o" 2>/dev/null || true
+k=0
+while [ $k -lt 20 ]; do
+    grep -qaE "getfile path|scp read-open-fail" "$SERIAL" 2>/dev/null && break
+    kill -0 "$QEMU_PID" 2>/dev/null || break
+    sleep 1; k=$((k+1))
+done
+kill "$QEMU_PID" 2>/dev/null || true; sleep 1
+
+# ---- 8. Host-side verification --------------------------------------------
+if [ ! -s "$SCRATCH/retrieved_uefi.o" ]; then
+    echo "FAIL: $SCRATCH/retrieved_uefi.o missing or empty"; exit 1
+fi
+echo "[uefi-scp] retrieved_uefi.o size=$(stat -c%s "$SCRATCH/retrieved_uefi.o")"
+llvm-readobj -h "$SCRATCH/retrieved_uefi.o" 2>/dev/null | grep -E "Type|Machine" || true
+# NB: guard against `set -e` — a_uefi.out intentionally returns 7 (non-zero),
+# which would otherwise abort the script before the exit-code check prints.
+cc "$SCRATCH/retrieved_uefi.o" -o "$SCRATCH/a_uefi.out"
+RC=0; "$SCRATCH/a_uefi.out" || RC=$?
+echo "[uefi-scp] retrieved.o host exit code = $RC (want 7)"
+if [ "$RC" = "7" ]; then
+    echo "PASS: clang-over-SSH-under-OVMF VERIFIED (compile in-guest + getfile + exit 7)"
+else
+    echo "FAIL: host exit code $RC"
+    exit 1
+fi
