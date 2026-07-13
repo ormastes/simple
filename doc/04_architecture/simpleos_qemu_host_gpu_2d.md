@@ -42,6 +42,11 @@ receipt IDs, same-frame readback/result bytes, exact CPU-oracle checksum, and
 backend markers from the host adapter. Flags, screenshots, scanout, CPU mirrors,
 and synthetic handles fail closed.
 
+Vulkan ProcessingIR hashes the runtime-selected driver identity, which includes
+device name, vendor/device IDs, driver version, and API version. Storage-buffer handles remain per-request resource handles and
+must never be reused as device provenance. Vulkan processing is negotiated only
+after a bounded real ProcessingIR probe returns both values.
+
 ## Platform Classification
 
 | Host | Rendering | Processing | Classification rule |

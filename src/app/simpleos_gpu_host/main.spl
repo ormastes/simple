@@ -6,10 +6,9 @@ use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{simpleos_host_gpu_draw_ir_encode, simpleos_host_gpu_draw_ir_decode}
 use std.common.processing.processing_ir.{processing_ir_fill_u32, processing_ir_validate, processing_ir_cpu_execute, processing_ir_outputs_equal}
-use std.gc_async_mut.processing.vulkan_fill_u32.{processing_ir_execute_vulkan}
+use std.gc_async_mut.processing.vulkan_fill_u32.{processing_ir_execute_vulkan, processing_vulkan_device_identity}
 use std.gc_async_mut.processing.cuda_fill_u32.{processing_ir_execute_cuda}
-use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_device_name, vulkan_sffi_device_driver_identity}
-use std.common.hash.djb2.{djb2_hash_text}
+use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_selected_device_driver_identity}
 use app.io.file_ops.{file_exists, file_size, file_mmap, file_munmap}
 use app.io.volatile_ops.{volatile_read_u64_required, volatile_write_u64_required, memory_barrier_required}
 use app.io.time_ops.{time_now_unix_micros}
@@ -69,12 +68,7 @@ fn _write_pixels(base: i64, pixels: [u32], count: i64) -> i64:
     if checksum == 0: 1 else: checksum
 
 fn _vulkan_device_identity() -> i64:
-    val device_name = vulkan_sffi_device_name(0)
-    val driver_identity = vulkan_sffi_device_driver_identity(0)
-    if device_name == "" or driver_identity == "":
-        return 0
-    val identity = djb2_hash_text(device_name + "|" + driver_identity) & 0x7FFFFFFF
-    if identity == 0: 1 else: identity
+    processing_vulkan_device_identity(vulkan_sffi_selected_device_driver_identity())
 
 fn _render_backend_available(code: i64) -> bool:
     val name = simpleos_host_gpu_backend_name(code)
@@ -89,8 +83,10 @@ fn _render_backend_available(code: i64) -> bool:
 
 fn _processing_backend_mask(requested: i64) -> i64:
     var available: i64 = 0
-    if (requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN) != 0 and _render_backend_available(SIMPLEOS_HOST_GPU_BACKEND_VULKAN):
-        available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN
+    if (requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN) != 0:
+        val probe = processing_ir_execute_vulkan(processing_ir_fill_u32(1, 1u32))
+        if probe.completed and probe.backend_handle > 0 and probe.device_identity > 0:
+            available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN
     if (requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0:
         val probe = processing_ir_execute_cuda(processing_ir_fill_u32(1, 1u32))
         if probe.completed and probe.backend_handle > 0 and probe.device_identity > 0:
@@ -216,7 +212,7 @@ fn _process_request(base: i64) -> i64:
             completed = result.completed
             values = result.values
             backend_handle = result.backend_handle
-            device_identity = result.backend_handle
+            device_identity = result.device_identity
         if not completed or not processing_ir_outputs_equal(values, oracle):
             _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, if completed: SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH else: SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK, 0, 0, 0, 1, 0, 0)
             return 1

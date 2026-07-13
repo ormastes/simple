@@ -231,3 +231,8 @@ CUDA ProcessingIR executor are implemented with Vulkan ProcessingIR fallback;
 refreshed cross-ISA CUDA receipts
 are still required. macOS Metal and Windows DirectX/CUDA rows remain `unsupported` until native
 host executors and receipts exist; their API names are not treated as proof.
+
+Processing receipts distinguish the transient backend resource handle from the
+stable device identity. Vulkan hashes the runtime-selected driver identity,
+which includes the device name and driver metadata, and negotiation fails
+closed when it is missing; a buffer handle alone is not device provenance.
