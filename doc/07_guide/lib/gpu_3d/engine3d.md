@@ -421,9 +421,12 @@ document a promoted native backend until those source and test gates pass.
 The completion scenario is `Render Engine3D HUD and world text on the promoted
 backend`, checked by `expect_engine3d_font_readback`. It must use the existing
 `FontRenderer`/`FontRenderBatch` seam and record texture, sampler, pipeline,
-transform/depth, draw, completed fence, and device-origin readback. The current
-CPU facade and host-backed `VulkanBackend3D` compatibility buffer remain useful
-oracles but cannot satisfy that checker.
+transform/depth, draw, completed fence, and device-origin readback. The Vulkan
+owner now supplies real untextured mesh/depth/fence/readback prerequisites and
+borrows shared device state safely. It still cannot satisfy the font checker:
+the graphics pipeline has no combined-image-sampler descriptor layout, so
+texture binding remains explicitly unavailable and HUD/world stay on the CPU
+compatibility path.
 
 See [Shared Multilingual GPU Fonts](../shared_multilingual_gpu_fonts.md) for the
 selected languages, ten-category candidate catalog, and evidence contract.

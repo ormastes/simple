@@ -7,7 +7,7 @@ use super::vulkan_graphics_runtime_core::{alloc_handle, Framebuffer, VulkanSwapc
 
 #[no_mangle]
 #[cfg(feature = "vulkan")]
-pub extern "C" fn rt_vulkan_create_framebuffer(_device: i64, rp: i64, image: i64, w: i64, h: i64) -> i64 {
+pub extern "C" fn rt_vulkan_create_framebuffer(_device: i64, rp: i64, image: i64, depth: i64, w: i64, h: i64) -> i64 {
     let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
@@ -33,7 +33,15 @@ pub extern "C" fn rt_vulkan_create_framebuffer(_device: i64, rp: i64, image: i64
         }
     };
 
-    match Framebuffer::new(device, &render_pass, img.view(), w as u32, h as u32) {
+    let depth_img = match state.images.get(&depth) {
+        Some(image) => image.clone(),
+        None => {
+            state.set_error(format!("create_framebuffer: depth image {depth} not found"));
+            return 0;
+        }
+    };
+
+    match Framebuffer::new_with_depth(device, &render_pass, img.view(), depth_img.view(), w as u32, h as u32) {
         Ok(fb) => {
             let handle = alloc_handle();
             state.framebuffers.insert(handle, fb);
@@ -48,7 +56,14 @@ pub extern "C" fn rt_vulkan_create_framebuffer(_device: i64, rp: i64, image: i64
 
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
-pub extern "C" fn rt_vulkan_create_framebuffer(_device: i64, _rp: i64, _image: i64, _w: i64, _h: i64) -> i64 {
+pub extern "C" fn rt_vulkan_create_framebuffer(
+    _device: i64,
+    _rp: i64,
+    _image: i64,
+    _depth: i64,
+    _w: i64,
+    _h: i64,
+) -> i64 {
     0
 }
 

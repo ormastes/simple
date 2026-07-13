@@ -5,6 +5,7 @@ use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, find_table, read_u16_be, 
 # ===== GSUB / GPOS =====
 
 class GsubLookup:
+    lookup_index: i64
     lookup_type: u32
     flag: u32
     lookup_offset: u32
@@ -103,8 +104,12 @@ fn apply_gsub_single(blob: [u8], table_start: i64, table_end: i64, subtable_abs:
     unchanged
 
 class GposLookup:
+    lookup_index: i64
     lookup_type: u32
     flag: u32
+    lookup_offset: u32
+    table_start: u32
+    table_end: u32
     subtable_offsets: [u32]
 
 fn read_lookup_list(blob: [u8], lookup_list_abs: i64) -> [u32]:
@@ -170,10 +175,90 @@ fn parse_gsub_skeleton(font: OtFont) -> [GsubLookup]:
                 return []
             subs.append(sub_abs as u32)
             j = j + 1
-        val lkp = GsubLookup(lookup_type: ltype, flag: flag, lookup_offset: lkp_abs as u32, table_start: base as u32, table_end: end as u32, subtable_offsets: subs)
+        val lkp = GsubLookup(lookup_index: i, lookup_type: ltype, flag: flag, lookup_offset: lkp_abs as u32, table_start: base as u32, table_end: end as u32, subtable_offsets: subs)
         results.append(lkp)
         i = i + 1
     results
+
+fn select_gsub_lookups(font: OtFont, script_tag: u32, language_tag: u32,
+                       default_feature_tags: [u32]) -> [GsubLookup]:
+    val table = match find_table(font, 1196643650u32):  # GSUB
+        Some(value): value
+        None: return []
+    val base = table.offset as i64
+    val limit = base + table.length as i64
+    val blob = font.blob
+    if base < 0 or limit < base or limit > blob.len() as i64 or base + 10 > limit: return []
+    val script_list = base + read_u16_be(blob, base + 4) as i64
+    val feature_list = base + read_u16_be(blob, base + 6) as i64
+    if script_list <= base or feature_list <= base or script_list + 2 > limit or feature_list + 2 > limit: return []
+
+    val script_count = read_u16_be(blob, script_list) as i64
+    if script_list + 2 + script_count * 6 > limit: return []
+    var script: i64 = -1
+    var script_index: i64 = 0
+    while script_index < script_count:
+        val record = script_list + 2 + script_index * 6
+        val offset = read_u16_be(blob, record + 4) as i64
+        if offset == 0 or script_list + offset < script_list + 2 + script_count * 6 or script_list + offset + 4 > limit: return []
+        if read_u32_be(blob, record) == script_tag: script = script_list + offset
+        script_index = script_index + 1
+    if script < 0: return []
+
+    val default_offset = read_u16_be(blob, script) as i64
+    val language_count = read_u16_be(blob, script + 2) as i64
+    if script + 4 + language_count * 6 > limit: return []
+    var language_system: i64 = -1
+    var language_index: i64 = 0
+    while language_index < language_count:
+        val record = script + 4 + language_index * 6
+        val offset = read_u16_be(blob, record + 4) as i64
+        if offset == 0 or script + offset < script + 4 + language_count * 6 or script + offset + 6 > limit: return []
+        if read_u32_be(blob, record) == language_tag: language_system = script + offset
+        language_index = language_index + 1
+    if language_system < 0:
+        if default_offset == 0 or script + default_offset < script + 4 + language_count * 6 or script + default_offset + 6 > limit: return []
+        language_system = script + default_offset
+
+    if read_u16_be(blob, language_system) != 0u32: return []  # reserved LookupOrder
+    val required_feature = read_u16_be(blob, language_system + 2)
+    val language_feature_count = read_u16_be(blob, language_system + 4) as i64
+    if language_system + 6 + language_feature_count * 2 > limit: return []
+    val feature_count = read_u16_be(blob, feature_list) as i64
+    if feature_list + 2 + feature_count * 6 > limit: return []
+
+    var feature_indices: [u32] = []
+    if required_feature != 65535u32:
+        if required_feature as i64 >= feature_count: return []
+        feature_indices.push(required_feature)
+    for wanted_tag in default_feature_tags:
+        var listed_index: i64 = 0
+        while listed_index < language_feature_count:
+            val available = read_u16_be(blob, language_system + 6 + listed_index * 2)
+            if available as i64 >= feature_count: return []
+            val available_record = feature_list + 2 + available as i64 * 6
+            if available != required_feature and read_u32_be(blob, available_record) == wanted_tag:
+                feature_indices.push(available)
+            listed_index = listed_index + 1
+
+    val catalog = parse_gsub_skeleton(font)
+    if catalog.len() == 0: return []
+    var selected: [GsubLookup] = []
+    for feature_index in feature_indices:
+        if feature_index as i64 >= feature_count: return []
+        val record = feature_list + 2 + feature_index as i64 * 6
+        val offset = read_u16_be(blob, record + 4) as i64
+        val feature = feature_list + offset
+        if offset == 0 or feature < feature_list + 2 + feature_count * 6 or feature + 4 > limit: return []
+        val lookup_count = read_u16_be(blob, feature + 2) as i64
+        if feature + 4 + lookup_count * 2 > limit: return []
+        var lookup_index: i64 = 0
+        while lookup_index < lookup_count:
+            val selected_index = read_u16_be(blob, feature + 4 + lookup_index * 2) as i64
+            if selected_index < 0 or selected_index >= catalog.len(): return []
+            selected.push(catalog[selected_index])
+            lookup_index = lookup_index + 1
+    selected
 
 fn parse_gpos_skeleton(font: OtFont) -> [GposLookup]:
     # Tag 'GPOS' = 0x47504F53
@@ -185,35 +270,128 @@ fn parse_gpos_skeleton(font: OtFont) -> [GposLookup]:
         None:
             return []
     val base = tbl.offset as i64
+    val end = base + tbl.length as i64
     val blob = font.blob
-    if base + 10 >= blob.len() as i64:
-        return []
+    if base < 0 or end < base or end > blob.len() as i64 or base + 10 > end: return []
     val lookup_list_off = read_u16_be(blob, base + 8) as i64
+    if lookup_list_off == 0: return []
     val lookup_list_abs = base + lookup_list_off
-    if lookup_list_abs + 1 >= blob.len() as i64:
-        return []
+    if lookup_list_abs < base or lookup_list_abs + 2 > end: return []
     val count = read_u16_be(blob, lookup_list_abs) as i64
+    if lookup_list_abs + 2 + count * 2 > end: return []
+    val list_metadata_end = lookup_list_abs + 2 + count * 2
     var results: [GposLookup] = []
     var i: i64 = 0
     while i < count:
         val off = read_u16_be(blob, lookup_list_abs + 2 + i * 2) as i64
+        if off == 0: return []
         val lkp_abs = lookup_list_abs + off
-        if lkp_abs + 5 >= blob.len() as i64:
-            i = i + 1
-            continue
+        if lkp_abs < list_metadata_end or lkp_abs + 6 > end: return []
         val ltype = read_u16_be(blob, lkp_abs)
         val flag = read_u16_be(blob, lkp_abs + 2)
         val sub_count = read_u16_be(blob, lkp_abs + 4) as i64
+        val lookup_bytes = 6 + sub_count * 2 + (if (flag & 16u32) != 0u32: 2 else: 0)
+        if lkp_abs + lookup_bytes > end: return []
+        val lookup_metadata_end = lkp_abs + lookup_bytes
         var subs: [u32] = []
         var j: i64 = 0
         while j < sub_count:
             val soff = read_u16_be(blob, lkp_abs + 6 + j * 2)
-            subs.append(soff)
+            val sub_abs = lkp_abs + soff as i64
+            if soff == 0u32 or sub_abs < lookup_metadata_end or sub_abs + 2 > end: return []
+            subs.append(sub_abs as u32)
             j = j + 1
-        val lkp = GposLookup(lookup_type: ltype, flag: flag, subtable_offsets: subs)
+        val lkp = GposLookup(lookup_index: i, lookup_type: ltype, flag: flag,
+            lookup_offset: lkp_abs as u32, table_start: base as u32,
+            table_end: end as u32, subtable_offsets: subs)
         results.append(lkp)
         i = i + 1
     results
+
+fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
+                                 script_tag: u32, language_tag: u32,
+                                 default_feature_tags: [u32]) -> Option<[i64]>:
+    val table = match find_table(font, table_tag):
+        Some(value): value
+        None: return None
+    val base = table.offset as i64
+    val limit = base + table.length as i64
+    val blob = font.blob
+    if base < 0 or limit < base or limit > blob.len() as i64 or base + 10 > limit: return None
+    val script_list = base + read_u16_be(blob, base + 4) as i64
+    val feature_list = base + read_u16_be(blob, base + 6) as i64
+    if script_list <= base or feature_list <= base or script_list + 2 > limit or feature_list + 2 > limit: return None
+    val script_count = read_u16_be(blob, script_list) as i64
+    if script_list + 2 + script_count * 6 > limit: return None
+    var script: i64 = -1
+    var index: i64 = 0
+    while index < script_count:
+        val record = script_list + 2 + index * 6
+        val offset = read_u16_be(blob, record + 4) as i64
+        if offset == 0 or script_list + offset < script_list + 2 + script_count * 6 or script_list + offset + 4 > limit: return None
+        if read_u32_be(blob, record) == script_tag: script = script_list + offset
+        index = index + 1
+    if script < 0: return None
+    val default_offset = read_u16_be(blob, script) as i64
+    val language_count = read_u16_be(blob, script + 2) as i64
+    if script + 4 + language_count * 6 > limit: return None
+    var language_system: i64 = -1
+    index = 0
+    while index < language_count:
+        val record = script + 4 + index * 6
+        val offset = read_u16_be(blob, record + 4) as i64
+        if offset == 0 or script + offset < script + 4 + language_count * 6 or script + offset + 6 > limit: return None
+        if read_u32_be(blob, record) == language_tag: language_system = script + offset
+        index = index + 1
+    if language_system < 0:
+        if default_offset == 0 or script + default_offset < script + 4 + language_count * 6 or script + default_offset + 6 > limit: return None
+        language_system = script + default_offset
+    if read_u16_be(blob, language_system) != 0u32: return None
+    val required = read_u16_be(blob, language_system + 2)
+    val listed_count = read_u16_be(blob, language_system + 4) as i64
+    if language_system + 6 + listed_count * 2 > limit: return None
+    val feature_count = read_u16_be(blob, feature_list) as i64
+    if feature_list + 2 + feature_count * 6 > limit: return None
+    var feature_indices: [u32] = []
+    if required != 65535u32:
+        if required as i64 >= feature_count: return None
+        feature_indices.push(required)
+    for wanted_tag in default_feature_tags:
+        index = 0
+        while index < listed_count:
+            val available = read_u16_be(blob, language_system + 6 + index * 2)
+            if available as i64 >= feature_count: return None
+            val available_record = feature_list + 2 + available as i64 * 6
+            if available != required and read_u32_be(blob, available_record) == wanted_tag:
+                feature_indices.push(available)
+            index = index + 1
+    var result: [i64] = []
+    for feature_index in feature_indices:
+        if feature_index as i64 >= feature_count: return None
+        val record = feature_list + 2 + feature_index as i64 * 6
+        val offset = read_u16_be(blob, record + 4) as i64
+        val feature = feature_list + offset
+        if offset == 0 or feature < feature_list + 2 + feature_count * 6 or feature + 4 > limit: return None
+        val lookup_count = read_u16_be(blob, feature + 2) as i64
+        if feature + 4 + lookup_count * 2 > limit: return None
+        index = 0
+        while index < lookup_count:
+            result.push(read_u16_be(blob, feature + 4 + index * 2) as i64)
+            index = index + 1
+    Some(result)
+
+fn select_gpos_lookups(font: OtFont, script_tag: u32, language_tag: u32,
+                       default_feature_tags: [u32]) -> [GposLookup]:
+    val indices = match _active_layout_lookup_indices(font, 1196643155u32, script_tag, language_tag, default_feature_tags):
+        Some(value): value
+        None: return []
+    val catalog = parse_gpos_skeleton(font)
+    if catalog.len() == 0: return []
+    var selected: [GposLookup] = []
+    for index in indices:
+        if index < 0 or index >= catalog.len(): return []
+        selected.push(catalog[index])
+    selected
 
 # ===== GDEF =====
 

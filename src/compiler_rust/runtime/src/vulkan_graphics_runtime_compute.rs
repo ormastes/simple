@@ -309,6 +309,29 @@ pub extern "C" fn rt_vulkan_end_compute(_cmd: i64) -> i64 {
     0
 }
 
+/// Discard a command buffer that was never submitted. This is the canonical
+/// cleanup path for fail-fast graphics/compute recording.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_discard_command(cmd: i64) -> i64 {
+    if cmd == 0 {
+        return 0;
+    }
+    let state = STATE.lock();
+    let device = match state.require_device() {
+        Ok(device) => device,
+        Err(_) => return 0,
+    };
+    device.free_compute_command(vk::CommandBuffer::from_raw(cmd as u64));
+    1
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_discard_command(_cmd: i64) -> i64 {
+    0
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[no_mangle]

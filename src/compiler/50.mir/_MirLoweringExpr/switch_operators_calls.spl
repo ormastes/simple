@@ -78,6 +78,11 @@ impl MirLowering:
             val dest = b.new_temp(return_type)
             b.emit(MirInst(kind: MirInstKind.Call(Some(dest), func, args), span: nil))
             self.builder = b
+            match return_type.kind:
+                case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
+                    self.runtime_array_locals[dest.id] = true
+                    self.runtime_value_locals[dest.id] = true
+                case _: ()
             return dest
         b.emit(MirInst(kind: MirInstKind.Call(nil, func, args), span: nil))
         val temp = b.new_temp(MirType.unit())
@@ -498,6 +503,17 @@ impl MirLowering:
             return MirType.i64()
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             return self.resolved_call_return_type(symbol)
+        # Preserve declared user-function returns before applying the small
+        # bootstrap builtin fallback table. Replacing a declared Array return
+        # with i64 made a direct `Box(items: make_items())` aggregate consume
+        # pointer-typed call bits as an integer; a named local only hid this by
+        # inserting a type-recovering Copy.
+        val resolved_symbol = self.symbols.get_symbol(symbol)
+        if val found_symbol = resolved_symbol:
+            if val found_type = found_symbol.type_:
+                match found_type.kind:
+                    case HirTypeKind.Function(_, ret, _): return self.lower_type(ret)
+                    case _: ()
         var call_name = name
         if call_name == "":
             call_name = self.bootstrap_resolved_call_name(symbol)

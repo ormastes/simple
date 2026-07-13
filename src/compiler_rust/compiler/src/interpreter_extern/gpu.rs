@@ -1877,7 +1877,20 @@ pub fn rt_vulkan_upload_image_fn(_args: &[Value]) -> Result<Value, CompileError>
     Ok(Value::Int(0))
 }
 
-/// `rt_vulkan_create_graphics_pipeline(spirv_vert: [u8], spirv_frag: [u8], stride: i64) -> i64`
+/// Native graphics image transfers are unavailable in interpreter mode.
+pub fn rt_vulkan_copy_to_image_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Bool(false))
+}
+
+pub fn rt_vulkan_copy_from_image_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Bool(false))
+}
+
+pub fn rt_vulkan_graphics_unavailable_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// Canonical 10-argument graphics pipeline ABI; interpreter mode is unavailable.
 pub fn rt_vulkan_create_graphics_pipeline_fn(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(0))
 }
@@ -2303,12 +2316,17 @@ mod vulkan_dlopen {
     type FnVkDeviceWaitIdle = unsafe extern "C" fn(VkDevice) -> VkResult;
     type FnVkResetCommandBuffer = unsafe extern "C" fn(VkCommandBuffer, u32) -> VkResult;
     type FnVkGetPhysicalDeviceProperties = unsafe extern "C" fn(VkPhysicalDevice, *mut VkPhysicalDeviceProperties);
-    type FnVkCreateFence = unsafe extern "C" fn(VkDevice, *const VkFenceCreateInfo, *const c_void, *mut u64) -> VkResult;
+    type FnVkCreateFence =
+        unsafe extern "C" fn(VkDevice, *const VkFenceCreateInfo, *const c_void, *mut u64) -> VkResult;
     type FnVkDestroyFence = unsafe extern "C" fn(VkDevice, u64, *const c_void);
     type FnVkWaitForFences = unsafe extern "C" fn(VkDevice, u32, *const u64, u32, u64) -> VkResult;
 
     #[repr(C)]
-    pub(super) struct VkFenceCreateInfo { pub s_type: u32, pub p_next: *const c_void, pub flags: u32 }
+    pub(super) struct VkFenceCreateInfo {
+        pub s_type: u32,
+        pub p_next: *const c_void,
+        pub flags: u32,
+    }
 
     #[repr(C)]
     pub(super) struct VkPhysicalDeviceProperties {
@@ -2935,9 +2953,16 @@ fn vulkan_device_properties(index: usize) -> Option<vulkan_dlopen::VkPhysicalDev
     let guard = VK_STATE.lock().unwrap();
     let s = guard.as_ref()?;
     let pd = *s.physical_devices.get(index)?;
-    let mut props = VkPhysicalDeviceProperties { api_version: 0, driver_version: 0, vendor_id: 0,
-        device_id: 0, device_type: 0, device_name: [0; 256], pipeline_cache_uuid: [0; 16],
-        _limits_and_sparse: [0; 524] };
+    let mut props = VkPhysicalDeviceProperties {
+        api_version: 0,
+        driver_version: 0,
+        vendor_id: 0,
+        device_id: 0,
+        device_type: 0,
+        device_name: [0; 256],
+        pipeline_cache_uuid: [0; 16],
+        _limits_and_sparse: [0; 524],
+    };
     unsafe { (s.fns.get_physical_device_properties)(pd, &mut props) };
     Some(props)
 }
@@ -2949,30 +2974,76 @@ fn vulkan_properties_name(props: &vulkan_dlopen::VkPhysicalDeviceProperties) -> 
 
 pub fn rt_vulkan_device_driver_identity_fn(args: &[Value]) -> Result<Value, CompileError> {
     let index = arg_i64(args, 0, "rt_vulkan_device_driver_identity", 1)? as usize;
-    Ok(Value::Str(vulkan_device_properties(index).map(|p| format!("{}|vendor={:08x}|device={:08x}|driver={:08x}|api={:08x}",
-        vulkan_properties_name(&p), p.vendor_id, p.device_id, p.driver_version, p.api_version)).unwrap_or_default()))
+    Ok(Value::Str(
+        vulkan_device_properties(index)
+            .map(|p| {
+                format!(
+                    "{}|vendor={:08x}|device={:08x}|driver={:08x}|api={:08x}",
+                    vulkan_properties_name(&p),
+                    p.vendor_id,
+                    p.device_id,
+                    p.driver_version,
+                    p.api_version
+                )
+            })
+            .unwrap_or_default(),
+    ))
 }
 
 pub fn rt_vulkan_selected_device_driver_identity_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    let index = vulkan_dlopen::VK_STATE.lock().unwrap().as_ref().and_then(|s|
-        s.physical_devices.iter().position(|&pd| pd == s.device_physical_device));
-    Ok(Value::Str(index.and_then(vulkan_device_properties).map(|p| format!("{}|vendor={:08x}|device={:08x}|driver={:08x}|api={:08x}",
-        vulkan_properties_name(&p), p.vendor_id, p.device_id, p.driver_version, p.api_version)).unwrap_or_default()))
+    let index = vulkan_dlopen::VK_STATE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|s| s.physical_devices.iter().position(|&pd| pd == s.device_physical_device));
+    Ok(Value::Str(
+        index
+            .and_then(vulkan_device_properties)
+            .map(|p| {
+                format!(
+                    "{}|vendor={:08x}|device={:08x}|driver={:08x}|api={:08x}",
+                    vulkan_properties_name(&p),
+                    p.vendor_id,
+                    p.device_id,
+                    p.driver_version,
+                    p.api_version
+                )
+            })
+            .unwrap_or_default(),
+    ))
 }
 
 fn vulkan_device_type_name(kind: u32) -> &'static str {
-    match kind { 1 => "integrated", 2 => "discrete", 3 => "virtual", 4 => "cpu", _ => "other" }
+    match kind {
+        1 => "integrated",
+        2 => "discrete",
+        3 => "virtual",
+        4 => "cpu",
+        _ => "other",
+    }
 }
 
 pub fn rt_vulkan_device_type_fn(args: &[Value]) -> Result<Value, CompileError> {
     let index = arg_i64(args, 0, "rt_vulkan_device_type", 1)? as usize;
-    Ok(Value::Str(vulkan_device_properties(index).map(|p| vulkan_device_type_name(p.device_type).to_string()).unwrap_or_default()))
+    Ok(Value::Str(
+        vulkan_device_properties(index)
+            .map(|p| vulkan_device_type_name(p.device_type).to_string())
+            .unwrap_or_default(),
+    ))
 }
 
 pub fn rt_vulkan_selected_device_type_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    let index = vulkan_dlopen::VK_STATE.lock().unwrap().as_ref().and_then(|s|
-        s.physical_devices.iter().position(|&pd| pd == s.device_physical_device));
-    Ok(Value::Str(index.and_then(vulkan_device_properties).map(|p| vulkan_device_type_name(p.device_type).to_string()).unwrap_or_default()))
+    let index = vulkan_dlopen::VK_STATE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|s| s.physical_devices.iter().position(|&pd| pd == s.device_physical_device));
+    Ok(Value::Str(
+        index
+            .and_then(vulkan_device_properties)
+            .map(|p| vulkan_device_type_name(p.device_type).to_string())
+            .unwrap_or_default(),
+    ))
 }
 
 /// `rt_vulkan_alloc_buffer(byte_count: i64, usage: i64) -> i64`
@@ -3817,21 +3888,45 @@ pub fn rt_vulkan_submit_and_wait_fence_fn(args: &[Value]) -> Result<Value, Compi
     use std::ptr;
     let ch = arg_i64(args, 0, "rt_vulkan_submit_and_wait_fence", 1)? as usize;
     let mut guard = VK_STATE.lock().unwrap();
-    let s = match guard.as_mut() { Some(s) => s, None => return Ok(Value::Int(0)) };
-    if ch == 0 || ch > s.command_buffers.len() { return Ok(Value::Int(0)); }
-    let cmd = match s.command_buffers[ch - 1].as_ref() { Some(e) => e.cmd, None => return Ok(Value::Int(0)) };
-    let info = VkFenceCreateInfo { s_type: 8, p_next: ptr::null(), flags: 0 };
-    let mut fence = 0;
-    if unsafe { (s.fns.create_fence)(s.device, &info, ptr::null(), &mut fence) } != VK_SUCCESS {
-        if let Some(e) = s.command_buffers[ch - 1].take() { unsafe { (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &e.cmd) } }
+    let s = match guard.as_mut() {
+        Some(s) => s,
+        None => return Ok(Value::Int(0)),
+    };
+    if ch == 0 || ch > s.command_buffers.len() {
         return Ok(Value::Int(0));
     }
-    let submit = VkSubmitInfo { s_type: 4, p_next: ptr::null(), wait_semaphore_count: 0,
-        p_wait_semaphores: ptr::null(), p_wait_dst_stage_mask: ptr::null(), command_buffer_count: 1,
-        p_command_buffers: &cmd, signal_semaphore_count: 0, p_signal_semaphores: ptr::null() };
+    let cmd = match s.command_buffers[ch - 1].as_ref() {
+        Some(e) => e.cmd,
+        None => return Ok(Value::Int(0)),
+    };
+    let info = VkFenceCreateInfo {
+        s_type: 8,
+        p_next: ptr::null(),
+        flags: 0,
+    };
+    let mut fence = 0;
+    if unsafe { (s.fns.create_fence)(s.device, &info, ptr::null(), &mut fence) } != VK_SUCCESS {
+        if let Some(e) = s.command_buffers[ch - 1].take() {
+            unsafe { (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &e.cmd) }
+        }
+        return Ok(Value::Int(0));
+    }
+    let submit = VkSubmitInfo {
+        s_type: 4,
+        p_next: ptr::null(),
+        wait_semaphore_count: 0,
+        p_wait_semaphores: ptr::null(),
+        p_wait_dst_stage_mask: ptr::null(),
+        command_buffer_count: 1,
+        p_command_buffers: &cmd,
+        signal_semaphore_count: 0,
+        p_signal_semaphores: ptr::null(),
+    };
     if unsafe { (s.fns.queue_submit)(s.queue, 1, &submit, fence) } != VK_SUCCESS {
         unsafe { (s.fns.destroy_fence)(s.device, fence, ptr::null()) };
-        if let Some(e) = s.command_buffers[ch - 1].take() { unsafe { (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &e.cmd) } }
+        if let Some(e) = s.command_buffers[ch - 1].take() {
+            unsafe { (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &e.cmd) }
+        }
         return Ok(Value::Int(0));
     }
     if unsafe { (s.fns.wait_for_fences)(s.device, 1, &fence, 1, u64::MAX) } != VK_SUCCESS {
@@ -3839,7 +3934,9 @@ pub fn rt_vulkan_submit_and_wait_fence_fn(args: &[Value]) -> Result<Value, Compi
         s.quarantined_commands.push((fence, cmd));
         return Ok(Value::Int(-1));
     }
-    if let Some(e) = s.command_buffers[ch - 1].take() { unsafe { (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &e.cmd) } }
+    if let Some(e) = s.command_buffers[ch - 1].take() {
+        unsafe { (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &e.cmd) }
+    }
     s.live_fences.push(fence);
     Ok(Value::Int(fence as i64))
 }
@@ -3849,8 +3946,13 @@ pub fn rt_vulkan_wait_fence_fn(args: &[Value]) -> Result<Value, CompileError> {
     let fence = arg_i64(args, 0, "rt_vulkan_wait_fence", 2)? as u64;
     let timeout = arg_i64(args, 1, "rt_vulkan_wait_fence", 2)?;
     let guard = VK_STATE.lock().unwrap();
-    let s = match guard.as_ref() { Some(s) => s, None => return Ok(Value::Int(0)) };
-    if !s.live_fences.contains(&fence) { return Ok(Value::Int(0)); }
+    let s = match guard.as_ref() {
+        Some(s) => s,
+        None => return Ok(Value::Int(0)),
+    };
+    if !s.live_fences.contains(&fence) {
+        return Ok(Value::Int(0));
+    }
     let timeout = if timeout < 0 { u64::MAX } else { timeout as u64 };
     let ok = unsafe { (s.fns.wait_for_fences)(s.device, 1, &fence, 1, timeout) };
     Ok(Value::Int(if ok == VK_SUCCESS { 1 } else { 0 }))
@@ -3861,7 +3963,10 @@ pub fn rt_vulkan_destroy_fence_fn(args: &[Value]) -> Result<Value, CompileError>
     use std::ptr;
     let fence = arg_i64(args, 0, "rt_vulkan_destroy_fence", 1)? as u64;
     let mut guard = VK_STATE.lock().unwrap();
-    let s = match guard.as_mut() { Some(s) => s, None => return Ok(Value::Int(0)) };
+    let s = match guard.as_mut() {
+        Some(s) => s,
+        None => return Ok(Value::Int(0)),
+    };
     let Some(index) = s.live_fences.iter().position(|&candidate| candidate == fence) else {
         return Ok(Value::Int(0));
     };

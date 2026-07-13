@@ -3,6 +3,43 @@ use super::vulkan_graphics_runtime_core::{
     alloc_handle, AddressMode, FilterMode, GraphicsPipeline, ImageUsage, RenderPass, Sampler, ShaderModule,
     VulkanImage, vk, STATE,
 };
+#[cfg(feature = "vulkan")]
+use crate::value::{byte_array_bytes, byte_array_write, RuntimeValue};
+
+#[cfg(feature = "vulkan")]
+fn vertex3d_input(
+    stride: u32,
+) -> (
+    vk::VertexInputBindingDescription,
+    [vk::VertexInputAttributeDescription; 3],
+) {
+    let binding = vk::VertexInputBindingDescription {
+        binding: 0,
+        stride,
+        input_rate: vk::VertexInputRate::VERTEX,
+    };
+    let attributes = [
+        vk::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: vk::Format::R32G32B32_SFLOAT,
+            offset: 0,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 1,
+            binding: 0,
+            format: vk::Format::R32G32B32_SFLOAT,
+            offset: 12,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 2,
+            binding: 0,
+            format: vk::Format::R32G32_SFLOAT,
+            offset: 24,
+        },
+    ];
+    (binding, attributes)
+}
 
 // ============================================================================
 // Render Pass
@@ -79,6 +116,40 @@ pub extern "C" fn rt_vulkan_destroy_render_pass(_rp: i64) -> i64 {
     0
 }
 
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_create_offscreen_render_pass(_device: i64, color_fmt: i64, depth_fmt: i64) -> i64 {
+    let mut state = STATE.lock();
+    let device = match state.require_device() {
+        Ok(device) => device,
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
+    };
+    match RenderPass::new_offscreen_with_depth(
+        device,
+        vk::Format::from_raw(color_fmt as i32),
+        vk::Format::from_raw(depth_fmt as i32),
+    ) {
+        Ok(render_pass) => {
+            let handle = alloc_handle();
+            state.render_passes.insert(handle, render_pass);
+            handle
+        }
+        Err(e) => {
+            state.set_error(format!("create_offscreen_render_pass: {e}"));
+            0
+        }
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_create_offscreen_render_pass(_device: i64, _color_fmt: i64, _depth_fmt: i64) -> i64 {
+    0
+}
+
 // ============================================================================
 // Graphics Pipeline
 // ============================================================================
@@ -90,8 +161,12 @@ pub extern "C" fn rt_vulkan_create_graphics_pipeline(
     vs: i64,
     fs: i64,
     rp: i64,
-    _blend: i64,
-    _topo: i64,
+    vertex_stride: i64,
+    depth_test: i64,
+    depth_write: i64,
+    cull_back_faces: i64,
+    blend: i64,
+    topo: i64,
 ) -> i64 {
     let mut state = STATE.lock();
     let device = match state.require_device() {
@@ -130,16 +205,34 @@ pub extern "C" fn rt_vulkan_create_graphics_pipeline(
         width: 800,
         height: 600,
     };
+    if !(32..=i64::from(u32::MAX)).contains(&vertex_stride) {
+        state.set_error(format!(
+            "create_graphics_pipeline: GPU mesh stride {vertex_stride} is smaller than 32 bytes"
+        ));
+        return 0;
+    }
+    // gpu_mesh3d uploads eight packed f32s: position.xyz, normal.xyz, uv.xy.
+    let (vertex_binding, vertex_attributes) = vertex3d_input(vertex_stride as u32);
+    let vertex_bindings = [vertex_binding];
 
     match GraphicsPipeline::new(
         device,
         &render_pass,
         &vertex_shader,
         &fragment_shader,
-        &[],
-        &[],
+        &vertex_bindings,
+        &vertex_attributes,
         &[],
         extent,
+        vk::PrimitiveTopology::from_raw(topo as i32),
+        if cull_back_faces != 0 {
+            vk::CullModeFlags::BACK
+        } else {
+            vk::CullModeFlags::NONE
+        },
+        blend != 0,
+        depth_test != 0,
+        depth_write != 0,
     ) {
         Ok(pipe) => {
             let h = alloc_handle();
@@ -160,6 +253,10 @@ pub extern "C" fn rt_vulkan_create_graphics_pipeline(
     _vs: i64,
     _fs: i64,
     _rp: i64,
+    _vertex_stride: i64,
+    _depth_test: i64,
+    _depth_write: i64,
+    _cull_back_faces: i64,
     _blend: i64,
     _topo: i64,
 ) -> i64 {
@@ -238,6 +335,46 @@ pub extern "C" fn rt_vulkan_create_image(_device: i64, _w: i64, _h: i64, _fmt: i
     0
 }
 
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_copy_to_image(image: i64, data: RuntimeValue) -> i64 {
+    let Some(bytes) = byte_array_bytes(data) else { return 0 };
+    let state = STATE.lock();
+    let Some(image) = state.images.get(&image) else {
+        return 0;
+    };
+    image.upload(&bytes).is_ok() as i64
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_copy_to_image(_image: i64, _data: i64) -> i64 {
+    0
+}
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_copy_from_image(data: RuntimeValue, image: i64) -> i64 {
+    let Some(current) = byte_array_bytes(data) else {
+        return 0;
+    };
+    let mut bytes = vec![0; current.len()];
+    let state = STATE.lock();
+    let Some(image) = state.images.get(&image) else {
+        return 0;
+    };
+    if image.download(&mut bytes).is_err() {
+        return 0;
+    }
+    byte_array_write(data, &bytes) as i64
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_copy_from_image(_data: i64, _image: i64) -> i64 {
+    0
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -307,4 +444,20 @@ pub extern "C" fn rt_vulkan_destroy_sampler(sampler: i64) -> i64 {
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_destroy_sampler(_sampler: i64) -> i64 {
     0
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_mesh_input_matches_eight_f32_wire_layout() {
+        let (binding, attributes) = vertex3d_input(32);
+        assert_eq!(binding.stride, 32);
+        assert_eq!(attributes[0].offset, 0);
+        assert_eq!(attributes[1].offset, 12);
+        assert_eq!(attributes[2].offset, 24);
+        assert_eq!(attributes[0].format, vk::Format::R32G32B32_SFLOAT);
+        assert_eq!(attributes[2].format, vk::Format::R32G32_SFLOAT);
+    }
 }

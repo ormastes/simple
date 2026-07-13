@@ -12,6 +12,8 @@ use std::sync::Arc;
 pub struct BufferUsage {
     pub storage: bool, // Storage buffer (compute shaders)
     pub uniform: bool, // Uniform buffer
+    pub vertex: bool,
+    pub index: bool,
     pub transfer_src: bool,
     pub transfer_dst: bool,
 }
@@ -22,6 +24,8 @@ impl BufferUsage {
         Self {
             storage: true,
             uniform: false,
+            vertex: false,
+            index: false,
             transfer_src: true,
             transfer_dst: true,
         }
@@ -32,6 +36,8 @@ impl BufferUsage {
         Self {
             storage: false,
             uniform: true,
+            vertex: false,
+            index: false,
             transfer_src: false,
             transfer_dst: true,
         }
@@ -49,6 +55,12 @@ impl BufferUsage {
         }
         if self.uniform {
             flags |= vk::BufferUsageFlags::UNIFORM_BUFFER;
+        }
+        if self.vertex {
+            flags |= vk::BufferUsageFlags::VERTEX_BUFFER;
+        }
+        if self.index {
+            flags |= vk::BufferUsageFlags::INDEX_BUFFER;
         }
         if self.transfer_src {
             flags |= vk::BufferUsageFlags::TRANSFER_SRC;
@@ -70,6 +82,8 @@ mod tests {
         let flags = BufferUsage {
             storage: true,
             uniform: false,
+            vertex: false,
+            index: false,
             transfer_src: false,
             transfer_dst: false,
         }

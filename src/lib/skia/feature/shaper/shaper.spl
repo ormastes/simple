@@ -9,6 +9,7 @@ use std.skia.feature.glyph.ot_parser.{OtFont}
 use std.skia.feature.glyph.ot_parser_cmap.{cmap_glyph_id}
 use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, GposLookup, parse_gsub_skeleton, parse_gpos_skeleton, parse_gdef_glyph_class}
 use std.skia.feature.shaper.selected_complex.{selected_arabic_presentation_codepoint, selected_hmtx_advance, selected_glyph_advance}
+use std.skia.feature.shaper.selected_devanagari.{selected_devanagari_glyphs}
 use std.nogc_sync_mut.text_layout.font_types.{FontGlyphRun}
 use std.nogc_sync_mut.io.font_sffi.{font_face_current_generation, font_face_is_live}
 extern fn rt_font_glyph_index(font_handle: i64, codepoint: i64) -> i64
@@ -442,6 +443,14 @@ fn _selected_arabic_complete(codepoints: [u32], start: i64, end_idx: i64,
     true
 
 fn _shape_devanagari_run(codepoints: [u32], start: i64, end_idx: i64, ot_font: Option<OtFont>, gsub_lookups: [GsubLookup], font_size: f64) -> [ShapedGlyph]:
+    val selected = selected_devanagari_glyphs(codepoints, start, end_idx, ot_font, font_size)
+    if selected.len() > 0:
+        var exact: [ShapedGlyph] = []
+        for glyph in selected:
+            val cls = if glyph.matra: IndicClass.Matra else: IndicClass.Normal
+            exact.push(_shaped_glyph(glyph.glyph_id, glyph.source_index, glyph.cluster,
+                                     glyph.x_advance, ArabicJoinForm.Isolated, cls))
+        return exact
     var result: [ShapedGlyph] = []
     # Minimal reph handling: leading "ra + halant" is emitted after the
     # first base consonant and does not consume additional advance.
@@ -633,6 +642,20 @@ fn _simple_identity_complete(codepoints: [u32], start: i64, end_idx: i64, scr: S
         index = index + 1
     true
 
+fn _selected_devanagari_complete(codepoints: [u32], start: i64, end_idx: i64,
+                                 language: text, font: Option<OtFont>, size: f64,
+                                 glyphs: [ShapedGlyph]) -> bool:
+    if language != "hi": return false
+    val expected = selected_devanagari_glyphs(codepoints, start, end_idx, font, size)
+    if expected.len() == 0 or expected.len() != glyphs.len(): return false
+    var index: i64 = 0
+    while index < glyphs.len():
+        if glyphs[index].glyph_id != expected[index].glyph_id or glyphs[index].source_index != expected[index].source_index or
+            glyphs[index].cluster != expected[index].cluster or glyphs[index].x_advance != expected[index].x_advance or
+            glyphs[index].x_advance <= 0.0 or glyphs[index].y_advance != 0.0 or glyphs[index].x_offset != 0.0 or glyphs[index].y_offset != 0.0: return false
+        index = index + 1
+    true
+
 fn _build_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script, language: text, font: SkFont, ot_font: Option<OtFont>, ot_font_handle: i64, ot_font_generation: i64, gsub_lookups: [GsubLookup], features_empty: bool, start_x: f64, start_y: f64) -> ShapedRun:
     val rtl = script_is_rtl(scr)
     val shaped_glyphs = _dispatch_shape_run(codepoints, start: start, end_idx: end_idx, scr: scr, ot_font: ot_font, gsub_lookups: gsub_lookups, font_size: font.size)
@@ -652,7 +675,9 @@ fn _build_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script, language
         font_face_is_live(font.typeface.font_handle, font.typeface.font_generation))
     val selected_arabic_complete = (handle_matches and features_empty and scr == Script.Arabic and
         _selected_arabic_complete(codepoints, start, end_idx, language, ot_font, shaped_glyphs))
-    var glyph_indices_valid = selected_arabic_complete
+    val selected_devanagari_complete = (handle_matches and features_empty and scr == Script.Devanagari and
+        _selected_devanagari_complete(codepoints, start, end_idx, language, ot_font, font.size, shaped_glyphs))
+    var glyph_indices_valid = selected_arabic_complete or selected_devanagari_complete
     if handle_matches and _run_can_render_direct(scr, start, end_idx, codepoints.len()):
         glyph_indices_valid = _run_has_mapped_glyphs(ot_font, font.typeface.font_handle, codepoints, start: start, end_idx: end_idx)
     val identity_complete = _simple_identity_complete(codepoints, start, end_idx, scr, font,
@@ -661,8 +686,8 @@ fn _build_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script, language
         script: scr, language: language, glyph_ids: glyph_ids, positions: positions,
         font_handle: font.typeface.font_handle, font_generation: font.typeface.font_generation,
         glyph_indices_valid: glyph_indices_valid,
-        substitution_complete: identity_complete or selected_arabic_complete,
-        positioning_complete: identity_complete or selected_arabic_complete,
+        substitution_complete: identity_complete or selected_arabic_complete or selected_devanagari_complete,
+        positioning_complete: identity_complete or selected_arabic_complete or selected_devanagari_complete,
         is_rtl: rtl, glyphs: shaped_glyphs
     )
 

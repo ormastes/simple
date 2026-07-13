@@ -72,11 +72,11 @@ SingleSubst 1/2 primitives, while the shaper stays identity until active
 Script/LangSys/Feature lookup selection is available. Unsupported or malformed
 data returns unchanged material and cannot set completion.
 
-The selector and application must land together. Current accepted scope covers
-direct Latin, Cyrillic, Han, and bounded Arabic/Urdu letter witnesses.
-Devanagari stays incomplete until Script/LangSys/Feature routing selects the
-active dev2 lookups. A standalone plan whose `complete` bit is not derived from
-validated active subtables is rejected.
+The selector and application land together. Accepted scope covers direct Latin,
+Cyrillic, Han, bounded Arabic/Urdu letters, and the exact Hindi `हिन्दी`
+witness. The Hindi path selects `dev2` Script/LangSys records and only ordered
+default feature tags; discretionary and inactive lookups cannot set completion.
+Other Indic sequences remain fail-closed.
 
 The first native Engine3D HUD prerequisite is a Simple-owned Metal source and
 20-byte vertex contract (`packed_float2` position, `packed_float2` UV, `u32`
@@ -158,7 +158,9 @@ the existing single PTX module and a 15-slot pointer ABI; OpenCL compiles the
 shared source. CUDA's private runtime ABI is two pointer-valued `u64` slots plus
 thirteen `s64` slots; it is intentionally distinct from compiler-emitted CUDA
 C scalar widths. Other backends retain image/alpha compatibility. Engine3D
-remains CPU HUD/world compatibility.
+retains CPU HUD/world compatibility; its Vulkan owner now proves the untextured
+mesh/depth/fence/readback prerequisite but cannot promote font textures until
+the graphics pipeline owns a combined-image-sampler descriptor layout.
 MetalSession compiles the exact common MSL as an optional separate library and
 owns its pipeline. MetalBackend owns only persistent atlas generation and the
 52-byte parameter policy, dispatching through the leak-free completed-frame
@@ -172,7 +174,7 @@ unproved.
 The Vulkan promotion lane reports a compiled versioned entry,
 nonzero handles, batch/payload hash, submit/draw, completed fence, device-origin
 readback, accelerated device type, and backend/driver identity. A CPU mirror is
-a comparator, never the readback source. Engine3D promotion remains open.
+a comparator, never the readback source. Engine3D font promotion remains open.
 
 ## Resolved fonts across legacy UI, WebRender IR, Draw IR, and SimpleOS
 

@@ -341,6 +341,11 @@ pub extern "C" fn rt_vk_graphics_pipeline_create(
             vertex_attributes,
             descriptor_layouts,
             extent,
+            vk::PrimitiveTopology::TRIANGLE_LIST,
+            vk::CullModeFlags::NONE,
+            true,
+            false,
+            false,
         ) {
             Ok(pipeline) => {
                 let handle = next_handle();

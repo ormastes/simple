@@ -83,6 +83,11 @@ impl GraphicsPipeline {
         vertex_attributes: &[vk::VertexInputAttributeDescription],
         descriptor_layouts: &[&DescriptorSetLayout],
         extent: vk::Extent2D,
+        topology: vk::PrimitiveTopology,
+        cull_mode: vk::CullModeFlags,
+        blend_enabled: bool,
+        depth_test: bool,
+        depth_write: bool,
     ) -> VulkanResult<Arc<Self>> {
         // Pipeline layout
         let set_layouts: Vec<vk::DescriptorSetLayout> =
@@ -121,7 +126,7 @@ impl GraphicsPipeline {
 
         // Input assembly state
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .topology(topology)
             .primitive_restart_enable(false);
 
         // Viewport state (dynamic)
@@ -148,7 +153,7 @@ impl GraphicsPipeline {
             .rasterizer_discard_enable(false)
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::NONE)
+            .cull_mode(cull_mode)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .depth_bias_enable(false);
 
@@ -160,7 +165,7 @@ impl GraphicsPipeline {
         // Color blend attachment (alpha blending)
         let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
             .color_write_mask(vk::ColorComponentFlags::RGBA)
-            .blend_enable(true)
+            .blend_enable(blend_enabled)
             .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
             .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .color_blend_op(vk::BlendOp::ADD)
@@ -173,6 +178,11 @@ impl GraphicsPipeline {
         let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
             .logic_op_enable(false)
             .attachments(&attachments);
+
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(depth_test)
+            .depth_write_enable(depth_write)
+            .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
 
         // Dynamic state
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
@@ -188,6 +198,7 @@ impl GraphicsPipeline {
             .rasterization_state(&rasterizer)
             .multisample_state(&multisampling)
             .color_blend_state(&color_blending)
+            .depth_stencil_state(&depth_stencil)
             .dynamic_state(&dynamic_state_info)
             .layout(pipeline_layout)
             .render_pass(render_pass.handle())

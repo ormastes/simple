@@ -165,10 +165,11 @@ Bind each OpenType blob to its runtime face with additive
 Latin, Cyrillic, Han, and a single-codepoint emoji run may set
 `glyph_indices_valid` only when the selected live face and blob/runtime cmap
 glyph IDs agree. The pinned Arabic/Urdu letter witnesses additionally use
-presentation-form cmap selection and hmtx advances. Devanagari remains
-incomplete because Script/LangSys/Feature activation is not yet implemented;
-the provisional Indic state machine cannot promote a run. Marks, Bengali,
-Thai, Hebrew, and multi-codepoint emoji also fail closed. Convert
+presentation-form cmap selection and hmtx advances. The exact Hindi `हिन्दी`
+witness selects bounded `dev2` Script/LangSys records and ordered default GSUB/
+GPOS feature tags, with a HarfBuzz glyph/advance oracle; discretionary or
+inactive lookups and other Indic sequences fail closed. Marks, Bengali, Thai,
+Hebrew, and multi-codepoint emoji also fail closed. Convert
 substitution-complete
 accepted runs with
 `shaped_run_to_font_glyph_run`; incomplete runs remain non-renderable even when
@@ -301,6 +302,13 @@ face liveness and every parallel vector length must match before rasterization.
   one graphics backend. Compute dispatch or CPU framebuffer output is not a
   substitute.
 
+The Vulkan Engine3D owner now has a real untextured 8×f32 mesh path, color plus
+depth framebuffer, indexed draw, fenced completion, and staged device readback.
+It borrows an existing Vulkan session and caches framebuffer resources. Font
+promotion remains unavailable because texture binding still lacks an owned
+combined-image-sampler descriptor layout; HUD/world therefore retain the CPU
+compatibility path.
+
 The repository also freezes an Engine3D-ready Metal HUD source/vertex contract.
 It emits source and packed vertices only; no Engine3D method selects it and it
 is not native execution evidence. A rejected runtime draft was removed because
@@ -342,7 +350,7 @@ Keep the remaining work on the frozen public seams:
 1. `FontRenderer` prepares metrics, shaped runs, and `FontRenderBatch`.
 2. Web/GUI/WM producers emit semantic `DrawIrComposition`; Engine2D alone
    materializes vector glyphs and retains bitmap fallback.
-3. Selected Latin, Han, Arabic/Urdu, and Cyrillic fixtures must
+3. Selected Latin, Han, Arabic/Urdu, exact Hindi, and Cyrillic fixtures must
    prove face, glyph, cluster, advance, offset, direction, language, and script
    identity before a matrix cell is accepted.
 4. Engine3D HUD/world promotion requires texture, sampler, pipeline, draw,

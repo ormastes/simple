@@ -13,6 +13,7 @@ pub struct Framebuffer {
     framebuffer: vk::Framebuffer,
     width: u32,
     height: u32,
+    has_depth: bool,
 }
 
 impl Framebuffer {
@@ -45,6 +46,36 @@ impl Framebuffer {
             framebuffer,
             width,
             height,
+            has_depth: false,
+        }))
+    }
+
+    pub fn new_with_depth(
+        device: Arc<VulkanDevice>,
+        render_pass: &RenderPass,
+        color_view: vk::ImageView,
+        depth_view: vk::ImageView,
+        width: u32,
+        height: u32,
+    ) -> VulkanResult<Arc<Self>> {
+        let attachments = [color_view, depth_view];
+        let create_info = vk::FramebufferCreateInfo::default()
+            .render_pass(render_pass.handle())
+            .attachments(&attachments)
+            .width(width)
+            .height(height)
+            .layers(1);
+        let framebuffer = unsafe {
+            device.handle().create_framebuffer(&create_info, None).map_err(|e| {
+                VulkanError::PipelineCreationFailed(format!("Failed to create depth framebuffer: {:?}", e))
+            })?
+        };
+        Ok(Arc::new(Self {
+            device,
+            framebuffer,
+            width,
+            height,
+            has_depth: true,
         }))
     }
 
@@ -76,6 +107,10 @@ impl Framebuffer {
     /// Get framebuffer height
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    pub fn has_depth(&self) -> bool {
+        self.has_depth
     }
 }
 

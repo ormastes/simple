@@ -129,6 +129,12 @@ module, nonzero failed-file count, or generated unresolved stub removes the
 candidate artifact and reports `production-native-build-incomplete`; a linked
 file alone is not executable provenance.
 
+The recovered compiler crash was traced to direct array-return values losing
+their resolved type during bootstrap constructor lowering. Source now preserves
+the declared Array/Slice return and registers its runtime materialization, with
+concrete and generic constructor regressions. A fresh canonical compiler deploy
+and QEMU pixel run are still required; source repair is not guest evidence.
+
 The current stage3 freestanding compiler also emits entry-module scalar values
 as weak zero-return text stubs and ignores the requested x86-64-v1 CPU baseline.
 The production entry therefore keeps early hardware operands local, and the

@@ -331,9 +331,30 @@ impl VulkanImage {
 
         let cmd = self.device.begin_transfer_command()?;
 
-        // Transition image to TRANSFER_SRC
+        // Offscreen render targets finish their pass in TRANSFER_SRC; sampled
+        // textures finish upload in SHADER_READ_ONLY. Swapchain images are not
+        // represented by VulkanImage and retain PRESENT_SRC behavior.
+        let source_layout = if self.usage.color_attachment {
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL
+        } else {
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+        };
+        let source_stage = if self.usage.color_attachment {
+            vk::PipelineStageFlags::TRANSFER
+        } else {
+            vk::PipelineStageFlags::FRAGMENT_SHADER
+        };
+        let source_access = if self.usage.color_attachment {
+            vk::AccessFlags::TRANSFER_READ
+        } else {
+            vk::AccessFlags::SHADER_READ
+        };
+
+        // Sampled textures require a transition. Offscreen targets already
+        // have the layout and visibility established by the render pass.
+        if source_layout != vk::ImageLayout::TRANSFER_SRC_OPTIMAL {
         let barrier = vk::ImageMemoryBarrier::default()
-            .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .old_layout(source_layout)
             .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -345,19 +366,20 @@ impl VulkanImage {
                 base_array_layer: 0,
                 layer_count: 1,
             })
-            .src_access_mask(vk::AccessFlags::SHADER_READ)
+                .src_access_mask(source_access)
             .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
 
         unsafe {
             self.device.handle().cmd_pipeline_barrier(
                 cmd,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    source_stage,
                 vk::PipelineStageFlags::TRANSFER,
                 vk::DependencyFlags::empty(),
                 &[],
                 &[],
                 &[barrier],
             );
+        }
         }
 
         // Copy image to buffer
@@ -386,6 +408,35 @@ impl VulkanImage {
                 staging.handle(),
                 &[region],
             );
+        }
+
+        if source_layout != vk::ImageLayout::TRANSFER_SRC_OPTIMAL {
+            let restore = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .new_layout(source_layout)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(self.image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .dst_access_mask(source_access);
+            unsafe {
+                self.device.handle().cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    source_stage,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[restore],
+                );
+            }
         }
 
         self.device.submit_transfer_command(cmd)?;

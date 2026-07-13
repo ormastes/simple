@@ -33,11 +33,19 @@ pub extern "C" fn rt_vulkan_begin_render_pass_gfx(
     };
 
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
-    let clear_values = [vk::ClearValue {
+    let color_clear = vk::ClearValue {
         color: vk::ClearColorValue {
             float32: [cr as f32, cg as f32, cb as f32, ca as f32],
         },
-    }];
+    };
+    let depth_clear = vk::ClearValue {
+        depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 },
+    };
+    let clear_values = if framebuffer.has_depth() {
+        vec![color_clear, depth_clear]
+    } else {
+        vec![color_clear]
+    };
 
     let render_area = vk::Rect2D {
         offset: vk::Offset2D { x: 0, y: 0 },

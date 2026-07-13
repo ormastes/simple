@@ -46,7 +46,7 @@ fn make_pipeline_desc() -> PipelineDesc3D:
         fragment_shader_spirv: [],
         vertex_shader_wgsl: "",
         fragment_shader_wgsl: "",
-        vertex_stride: 32,
+        vertex_stride: 96,
         cull_back_faces: true,
         depth_write: true,
         depth_test: true
@@ -144,6 +144,62 @@ describe "Stream B: VulkanCommand3D kind-tag construction":
             expect(matches).to_equal(true)
 
 describe "Stream B: VulkanRenderBackend3D command recording":
+
+    describe "canonical Vertex3D pipeline state":
+        it "carries the 32-byte mesh wire layout plus topology and blend defaults":
+            val desc = make_pipeline_desc()
+            expect(desc.vertex_stride).to_equal(32)
+            expect(desc.topology).to_equal(3)
+            expect(desc.blend_mode).to_equal(1)
+
+    describe "native device evidence":
+
+        it "reuses one framebuffer for repeated passes on the same color target":
+            var backend = VulkanRenderBackend3D.create()
+            if backend.init(4, 4):
+                val color = backend.create_texture(4, 4, TextureFormat3D.Rgba8Unorm)
+                val depth = backend.create_texture(4, 4, TextureFormat3D.Depth32Float)
+                backend.begin_render_pass(color, depth)
+                backend.begin_render_pass(color, depth)
+                expect(backend.cached_framebuffer_count()).to_equal(1)
+                backend.shutdown()
+
+        it "borrows an already active Vulkan session without taking shutdown ownership":
+            var owner = VulkanRenderBackend3D.create()
+            if owner.init(4, 4):
+                var borrower = VulkanRenderBackend3D.create()
+                expect(borrower.init(4, 4)).to_equal(true)
+                expect(borrower.owns_vulkan_session()).to_equal(false)
+                borrower.shutdown()
+                owner.shutdown()
+        it "reports real handles only after native init or explicit unavailability":
+            var backend = VulkanRenderBackend3D.create()
+            val initialized = backend.init(4, 4)
+            val evidence = backend.device_evidence()
+            if initialized:
+                expect(evidence.device_handle).to_be_greater_than(0)
+                expect(evidence.device_name.len()).to_be_greater_than(0)
+            else:
+                expect(evidence.status).to_equal("unavailable")
+                expect(evidence.reason.len()).to_be_greater_than(0)
+            expect(evidence.texture_binding_ready).to_equal(false)
+            if initialized:
+                backend.shutdown()
+
+        it "discards the command buffer when texture binding blocks recording":
+            var backend = VulkanRenderBackend3D.create()
+            val initialized = backend.init(4, 4)
+            if initialized:
+                backend.begin_frame()
+                val texture = backend.create_texture(4, 4, TextureFormat3D.Rgba8Unorm)
+                backend.bind_texture(RenderPassHandle.invalid(), texture, 0)
+                backend.end_frame()
+            val evidence = backend.device_evidence()
+            expect(evidence.command_handle).to_equal(0)
+            expect(evidence.status).to_equal("unavailable")
+            expect(evidence.texture_binding_ready).to_equal(false)
+            if initialized:
+                backend.shutdown()
 
     describe "capabilities":
         it "AC-1: backend kind is Vulkan":

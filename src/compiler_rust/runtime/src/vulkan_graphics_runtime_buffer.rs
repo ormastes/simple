@@ -21,15 +21,18 @@ pub extern "C" fn rt_vulkan_alloc_buffer(size: i64, usage: i64) -> i64 {
 
     // Decode usage flags from the Simple-side enum encoding:
     //   0x80 = STORAGE_BUFFER, 0x10 = UNIFORM_BUFFER,
+    //   0x40 = VERTEX_BUFFER,  0x20 = INDEX_BUFFER,
     //   0x1  = TRANSFER_SRC,   0x2  = TRANSFER_DST
     let buf_usage = BufferUsage {
         storage: (usage & 0x80) != 0,
         uniform: (usage & 0x10) != 0,
+        vertex: (usage & 0x40) != 0,
+        index: (usage & 0x20) != 0,
         transfer_src: (usage & 0x01) != 0,
         transfer_dst: (usage & 0x02) != 0,
     };
 
-    let buf_usage = if !buf_usage.storage && !buf_usage.uniform {
+    let buf_usage = if !buf_usage.storage && !buf_usage.uniform && !buf_usage.vertex && !buf_usage.index {
         BufferUsage::storage()
     } else {
         buf_usage
