@@ -1498,9 +1498,10 @@ fn try_string_append_in_place(
         return Ok(Some(rhs_val));
     };
     // Re-check after side effects in case RHS evaluation rebound `name`.
-    if let Some(Value::Str(mut s)) = env.remove(name) {
-        Arc::make_mut(&mut s).push_str(rhs_str.as_str());
-        env.insert(name.to_string(), Value::Str(s));
+    if let Some(Value::Str(s)) = env.remove(name) {
+        let mut result = s.as_ref().clone();
+        result.push_str(rhs_str.as_str());
+        env.insert(name.to_string(), Value::text(result));
         Ok(None)
     } else {
         // RHS side effect rebound `name` to a non-string. Return the RHS value

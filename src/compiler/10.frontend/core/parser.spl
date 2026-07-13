@@ -34,8 +34,6 @@ use compiler.core.ast.{ast_reset}
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_file_read_text_rv(path: text) -> text
-extern fn rt_lexer_source_set(source: text) -> bool
-extern fn rt_lexer_source_slice(start: i64, end: i64) -> text
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
 
 use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
@@ -149,8 +147,12 @@ fn parser_token_text_from_offsets(kind: i64) -> text:
     val end = lex_token_end_get()
     if end <= start:
         return ""
-    var text = rt_lexer_source_slice(start, end) ?? ""
-    if text == "": return ""
+    val source = parser_lex_source_cached()
+    if source == "":
+        return ""
+    if start < 0 or end > source.len():
+        return ""
+    var text = source[start:end]
     if kind == 3 and text.len() >= 2:
         text = text[1:text.len() - 1]
     if kind == 7 or kind == 8:
@@ -179,8 +181,6 @@ fn par_text_set(value: text):
         rt_env_set("SIMPLE_BOOTSTRAP_PAR_TEXT", value)
 
 fn par_text_get() -> text:
-    if rt_array_len_safe(par_text_slot) > 0 and par_text_slot[0] != "":
-        return par_text_slot[0]
     val from_offsets = parser_token_text_from_offsets(par_kind_get())
     if from_offsets != "":
         return from_offsets
@@ -243,7 +243,7 @@ fn parser_init_with_path(source: text, path: text):
 fn parser_advance():
     val kind = lex_next()
     par_kind_set(kind)
-    par_text_set(parser_token_text_from_offsets(kind))
+    par_text_set("")
     par_line_set(lex_token_line())
     par_col_set(lex_token_col())
 
@@ -666,7 +666,6 @@ fn parse_module(source: text, path: text):
     parser_init_with_path(preprocessed, path)
     parse_module_body()
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
-    rt_lexer_source_set(saved_lex_source)
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
     parser_lex_source_gen_bump()
 
@@ -688,7 +687,6 @@ fn parse_module_file(source: text, path: text):
     parser_advance()
     parse_module_body()
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
-    rt_lexer_source_set(saved_lex_source)
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
     parser_lex_source_gen_bump()
 

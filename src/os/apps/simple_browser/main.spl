@@ -1,0 +1,170 @@
+# Simple Browser — real in-guest entry (Lane BR item 2).
+#
+# Loads an HTML file off the guest VFS and renders it through the same
+# GPU-free software raster path proven on the host in
+# test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_software_no_gpu_spec.spl
+# (`simple_web_layout_render_html_software_pixels`): parse -> CSS cascade ->
+# layout -> paint, directly into a [u32] RGBA framebuffer array. No
+# Electron/Tauri/web backend, no host-GPU import.
+#
+# Deliberately NOT imported here (freestanding-blocking; see the Lane BR
+# tiering report for the traced reason each one is excluded):
+#   - app.ui.browser.{app, backend, ...}        (hosted GUI app: pulls in
+#     nogc_sync_mut.ui.gui_renderer + os.compositor.host_compositor_entry,
+#     the host-window / Electron-Tauri-web GUI stack)
+#   - std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+#   - std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer
+#   - std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter
+#     (all three transitively `use std.gpu.engine2d.engine.{Engine2D}`, which
+#     unconditionally imports all 11 GPU/compute backends — CUDA, Vulkan,
+#     DirectX, OpenCL, OpenGL, Metal, ROCm, Intel, WebGPU, Qualcomm, plus
+#     backend_emu/backend_baremetal/backend_virtio_gpu. Fine for a hosted
+#     build; not proven freestanding-safe, and unnecessary here since
+#     `simple_web_layout_render_html_software_pixels` already IS the
+#     software raster path and never touches Engine2D on the "software"
+#     backend — see the no-GPU host spec above.)
+#
+# `simple_web_html_layout_renderer.spl`'s own `use` list is exactly
+# common.ui.glyph_bitmap_5x7 / common.ui.draw_ir / common.render_scene.scene
+# (all three have zero further imports) plus 3 externs — rt_time_now_unix_micros,
+# rt_env_get, rt_bytes_to_text — all present in the freestanding runtime
+# (confirmed: rt_env_get is defined in src/runtime/runtime_native.c, which
+# baremetal/kernel builds link; rt_time_now_unix_micros already has a
+# freestanding @export("C") definition in src/os/kernel/net/tls_shim.spl).
+#
+# File loading uses the VFS externs (vfs_open/vfs_read_line/vfs_close,
+# vfs_create/vfs_write_all) — the same freestanding-shimmed surface
+# coreutils/cat.spl uses — NOT browser_file_ops.spl's rt_file_read_text: on
+# baremetal that extern is a fixed stub that always returns "" (see
+# src/os/kernel/net/tls_shim.spl's header comment), so it would silently
+# "load" every page as empty.
+#
+# Entry-point convention: `spl_start()` is the ONE proven freestanding-app
+# entry symbol in this repo (used identically by
+# examples/09_embedded/simple_os/arch/x86_64/{browser_soft_entry,ssh_ring3_entry}.spl),
+# built via `native-build --entry-closure --entry <this file> --target
+# x86_64-unknown-none`. That target boots this module directly as the QEMU
+# kernel — a real, direct-boot smoke gate for the render path (see
+# scripts/os/simple_browser_board_gate.shs).
+#
+# It is NOT the ring-3 userland FS-exec ABI implied by "stage as
+# /usr/bin/simple-browser ... run over SSH": grepping this repo for every
+# `--target x86_64-unknown-simpleos` invocation (scripts/os/build_user_hello_elf.shs,
+# build_simpleos_llvm_image.shs, scp_retrieve_over_ssh*.shs,
+# fhs_path_exec_gate_uefi.shs) shows that triple is used ONLY to cross-compile
+# C source with the ported clang/LLVM toolchain — there is no existing
+# invocation anywhere in this repo of Simple's own `native-build --target
+# x86_64-unknown-simpleos` producing a ring-3 userland ELF from a .spl file.
+# Staging a Simple-compiled simple-browser binary as a genuine FS-exec
+# userland payload is blocked on that (separately-owned, M0-M2 "keystone")
+# ring-3 userland target not existing yet for Simple source — see the board
+# gate script for the precise marker.
+
+use os.apps.simple_browser.simple_browser.{simple_browser_render_marker}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+
+extern fn serial_println(msg: text)
+extern fn vfs_open(path: text, flags: i32) -> i64
+extern fn vfs_read_line(handle: i64) -> text
+extern fn vfs_close(handle: i64) -> i32
+extern fn vfs_create(path: text, mode: u32) -> i64
+extern fn vfs_write_all(handle: i64, data: [u8]) -> i64
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+val _O_RDONLY: i32 = 0
+val _MODE_0644: u32 = 420
+
+val SIMPLE_BROWSER_DEFAULT_PAGE_PATH: text = "/index.html"
+val SIMPLE_BROWSER_VIEWPORT_W: i32 = 160
+val SIMPLE_BROWSER_VIEWPORT_H: i32 = 120
+val SIMPLE_BROWSER_CAPTURE_PATH: text = "/tmp/simple_browser_fb.ppm"
+val SIMPLE_BROWSER_BG: u32 = 0xFFFFFFFFu32
+
+fn _fallback_html(path: text) -> text:
+    "<html><body style='margin:0;background:#ffffff'>" +
+        "<h1 style='color:#0055cc'>Simple Browser</h1>" +
+        "<p>No page found at {path} - showing the built-in fallback page.</p>" +
+        "</body></html>"
+
+fn _read_file_via_vfs(path: text) -> text?:
+    """Read a whole text file off the guest VFS. nil if it can't be opened
+    or is empty (`.?` on the accumulated text already encodes both cases)."""
+    val handle = vfs_open(path, _O_RDONLY)
+    if handle < 0:
+        return nil
+    var text_out = ""
+    var line = vfs_read_line(handle)
+    while line != "":
+        text_out = "{text_out}{line}\n"
+        line = vfs_read_line(handle)
+    vfs_close(handle)
+    text_out.?
+
+fn _count_non_background_pixels(pixels: [u32], bg: u32) -> i32:
+    var count: i32 = 0
+    var i: i32 = 0
+    while i < pixels.len():
+        if pixels[i] != bg:
+            count = count + 1
+        i = i + 1
+    count
+
+fn _ppm_header(width: i32, height: i32) -> text:
+    "P6\n{width} {height}\n255\n"
+
+fn _pixels_to_ppm_bytes(pixels: [u32], width: i32, height: i32) -> [u8]:
+    """Encode an 0xAARRGGBB pixel buffer as a binary PPM (P6) byte stream —
+    the framebuffer-capture artifact for the board gate. Fixed 160x120 (19.2K
+    px) smoke-test viewport to keep the per-pixel array-append loop cheap."""
+    var out: [u8] = rt_text_to_bytes(_ppm_header(width, height))
+    var i: i32 = 0
+    val total = width * height
+    while i < total:
+        val px = pixels[i]
+        val r = ((px >> 16) & 0xFFu32) as u8
+        val g = ((px >> 8) & 0xFFu32) as u8
+        val b = (px & 0xFFu32) as u8
+        out = out + [r, g, b]
+        i = i + 1
+    out
+
+fn _write_capture(path: text, pixels: [u32], width: i32, height: i32) -> bool:
+    val handle = vfs_create(path, _MODE_0644)
+    if handle < 0:
+        return false
+    val bytes = _pixels_to_ppm_bytes(pixels, width, height)
+    val written = vfs_write_all(handle, bytes)
+    vfs_close(handle)
+    written == bytes.len() as i64
+
+fn simple_browser_render_page(path: text) -> i32:
+    """Load `path` from the guest VFS, render it through the GPU-free
+    software raster path, capture the framebuffer to a PPM file, and print
+    a render marker. Returns the non-background pixel count (0 = blank /
+    hard failure)."""
+    val html = _read_file_via_vfs(path) ?? _fallback_html(path)
+
+    val pixels = simple_web_layout_render_html_software_pixels(
+        html, SIMPLE_BROWSER_VIEWPORT_W, SIMPLE_BROWSER_VIEWPORT_H)
+    val non_bg = _count_non_background_pixels(pixels, SIMPLE_BROWSER_BG)
+    val captured = _write_capture(
+        SIMPLE_BROWSER_CAPTURE_PATH, pixels, SIMPLE_BROWSER_VIEWPORT_W, SIMPLE_BROWSER_VIEWPORT_H)
+
+    serial_println(simple_browser_render_marker(0u64, 0u64))
+    serial_println("[simple-browser] page={path} non_bg_pixels={non_bg} capture={SIMPLE_BROWSER_CAPTURE_PATH} capture_ok={captured}")
+    non_bg
+
+fn spl_start():
+    """Freestanding entry-closure boot target. See the module doc comment
+    for what this proves (direct-kernel-boot render smoke test) and what it
+    does NOT yet prove (ring-3 userland FS-exec of a Simple-built binary)."""
+    serial_println("[simple-browser] start")
+    val non_bg = simple_browser_render_page(SIMPLE_BROWSER_DEFAULT_PAGE_PATH)
+    if non_bg > 0:
+        serial_println("[PASS] simple_browser_entry")
+        serial_println("TEST PASSED")
+    else:
+        serial_println("[FAIL] simple_browser_entry")
+        serial_println("TEST FAILED")

@@ -317,11 +317,11 @@ fn io_error_to_code(err: &std::io::Error) -> i64 {
 
 fn extract_socket_addr(args: &[Value], idx: usize) -> Result<SocketAddr, CompileError> {
     let addr_str = match args.get(idx) {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         Some(Value::Object { fields, .. }) => {
             // Handle SocketAddr object
             let ip = fields.get("ip").and_then(|v| match v {
-                Value::Str(s) => Some(s.clone()),
+                Value::Str(s) => Some(s.as_ref().clone()),
                 _ => None,
             });
             let port = fields.get("port").and_then(|v| v.as_int().ok());
@@ -1169,18 +1169,18 @@ pub fn native_http_send_interp(args: &[Value]) -> Result<Value, CompileError> {
     // Extract request details
     let method = match args.first() {
         Some(Value::Enum { variant, .. }) => variant.clone(),
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         _ => "GET".to_string(),
     };
 
     let url = match args.get(1) {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         Some(Value::Object { fields, .. }) => {
             // Handle HttpUrl object
             fields
                 .get("url")
                 .and_then(|v| match v {
-                    Value::Str(s) => Some(s.clone()),
+                    Value::Str(s) => Some(s.as_ref().clone()),
                     _ => None,
                 })
                 .unwrap_or_default()

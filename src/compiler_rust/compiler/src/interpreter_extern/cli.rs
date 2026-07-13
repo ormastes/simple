@@ -150,7 +150,7 @@ pub fn rt_cli_run_tests(args: &[Value]) -> Result<Value, CompileError> {
         if let Value::Array(arr) = &args[0] {
             for val in arr.iter() {
                 if let Value::Str(s) = val {
-                    cmd_args.push(s.clone());
+                    cmd_args.push(s.as_ref().clone());
                 }
             }
         }

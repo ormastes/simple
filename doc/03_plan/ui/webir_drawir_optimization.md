@@ -1,4 +1,4 @@
-# WebIR + DrawIR Rendering Pipeline — Optimization & Refactoring Plan
+# Web Semantic/Layout + DrawIR Pipeline — Optimization & Refactoring Plan
 
 Status: draft plan (not yet executed). Scope: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
 (9,456 lines) and its relationship to the existing Draw IR layer
@@ -37,7 +37,7 @@ shared as a first-class value.
 ### 1.2 What already exists vs. what's missing
 
 **Already exists (verified by reading the code, not assumed):**
-- `simple_web_layout_render_html_draw_ir` (L9203) already converts HTML → `DrawIrComposition` via the SAME parse/style/layout stages as Path A — this is de facto WebIR→DrawIR today, just thin and incomplete (§1.3).
+- `simple_web_layout_render_html_draw_ir` (L9203) already converts HTML → `DrawIrComposition` via the SAME web semantic/layout stages as Path A; the lowering is thin and incomplete (§1.3).
 - `src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl:27` `simple_web_layout_render_html_pixels_engine2d` already chains HTML → `simple_web_layout_render_html_draw_ir` → `Engine2D.create_with_backend_fast()` (no-mirror GPU mode) → `engine2d_draw_ir_adv_composition` (`draw_ir_adv.spl:422`) → one-shot GPU readback. Comment there cites this as the fix for the interpreted per-op framebuffer mirror being the dominant cost.
 - This fast path is **already wired into production**, but only for the WM chrome scene: `src/os/compositor/wm_scene.spl:462-487` `render_scene_to_backend()` uses the full CSS pixel path below `WM_SCENE_CSS_RENDER_PIXEL_CAP=10000px`, else the DrawIR+Engine2D-fast path if Metal is available (`engine2d_fast_metal_available()`, L479), else a non-CSS themed rect rasterizer (`wm_scene_direct_rect_pixels`, L489) that **skips text entirely** (L500-501).
 - `engine2d_draw_ir_adv.spl` already re-derives border-radius, linear-gradient background, and box-shadow from `DrawIrCommand.computed_style` text props (`_engine2d_draw_ir_render_box`, L188) and calls real Engine2D primitives (`draw_rounded_rect`, `draw_gradient_rect`, `draw_shadow_rect`). Only `RECT`/`TEXT`/`IMAGE` command kinds are executed (`_engine2d_draw_ir_supported_command`, L82); others are tracked as skipped/unsupported.
@@ -57,20 +57,18 @@ shared as a first-class value.
 
 ## 2. Target Architecture
 
-**Decision: DrawIR does not need a second, competing display-list format.**
-Formalize the *existing* implicit intermediate — the `(nodes: [HNode], styles:
-[Style], boxes: LayoutResult)` tuple that `compute_styles`/`layout_document`
-already produce — as a named struct, **`WebIrDocument`**. This is "WebIR": a
-styled, laid-out DOM tree, still hierarchical (has parent/child + selector
-provenance), before flattening to a display list. `DrawIrComposition` remains
-the display list — it already carries CSS provenance via `DrawIrSourceInfo`
-(html_ast), so no new sibling IR is needed downstream of it.
+**Decision: do not add a `WebIR`/`WebIrDocument` type or a second display-list
+format.** The existing private `(nodes: [HNode], styles: [Style], boxes:
+LayoutResult)` semantic/layout state remains owned by the web renderer.
+`DrawIrComposition` remains the sole shared display list and already carries
+CSS provenance through `DrawIrSourceInfo` (`html_ast`). This matches the
+canonical UI architecture in `doc/04_architecture/ui/00_ui_architecture.md`.
 
 ```
 HTML/CSS text
     │  parse_html / extract_css_vw
     ▼
-WebIrDocument (NEW name for existing tuple: nodes+styles+boxes, hierarchical)
+existing web semantic/layout state (private nodes+styles+boxes)
     │  _html_draw_ir_commands (extend: parent_id, image, iframe-as-embedded-batch)
     ▼
 DrawIrComposition (EXISTING — draw_ir.spl, already HTML-aware)
@@ -79,12 +77,12 @@ DrawIrComposition (EXISTING — draw_ir.spl, already HTML-aware)
 Engine2D backend (software / Metal / CUDA / ... — EXISTING, unmodified)
 ```
 
-Widgets (`widget_draw_ir.spl`) skip the WebIr-equivalent stage entirely
+Widgets (`widget_draw_ir.spl`) skip the web semantic/layout stage entirely
 because widget layout has no CSS cascade or text-wrap ambiguity — the
-box-model result IS the display list. Web needs the named intermediate
-because (a) CSS cascade + flex + text-wrap is expensive enough to want to
-cache/diff *before* flattening, and (b) `HNode` parent/child structure is the
-only place subtree-level invalidation can be computed.
+box-model result IS the display list. Web may cache its existing private
+semantic/layout state because CSS cascade, flex, and text wrap are expensive,
+and use `HNode` parent/child structure for subtree invalidation, without
+promoting that state into a named or shared IR.
 
 Backends are already shared (Engine2D executes WM chrome, widgets, and (via
 the existing fast path) web content through the same `draw_ir_adv.spl`
@@ -100,7 +98,7 @@ producers through the one that exists and complete its command coverage.
    speedup the content-frame path needs relative to its measured ~4-5s/render
    interpreted cost.
 2. **Wire `draw_ir_diff_compositions` into the render loop** (currently unused
-   in production). Diff the new `WebIrDocument`/`DrawIrComposition` against
+   in production). Diff the new `DrawIrComposition` against
    the last one cached per `window_id`, and re-issue backend draw calls only
    for nodes whose diff state is `"changed"`/`"added"`/`"removed"` — replacing
    `WebRenderPixelArtifactCache`'s whole-string equality with a node-level
@@ -131,15 +129,14 @@ Root-cause `web_render_full_engine_call_order_nondeterminism_2026-07-12.md`.
 *Acceptance:* 100 repeated same-input renders in one process produce identical
 checksums.
 
-**Phase 1 — Name and share `WebIrDocument` (pure refactor).**
-Extract `struct WebIrDocument { nodes: [HNode], styles: [Style], boxes:
-LayoutResult, node_count: i32 }` and one `fn web_ir_build(html, width, height,
-budget_ms) -> WebIrDocument`, replacing the 4 duplicated parse→style→layout
-call sequences at L9203/9220/9259/9408/9434. *Acceptance:* existing spec suite
-(`simple_web_renderer_spec.spl` and friends, ~800 lines) green, byte-identical
-output — no behavior change.
+**Phase 1 — Share the existing web semantic/layout lowering (pure refactor).**
+Keep nodes/styles/boxes private to the web renderer and extract only the
+smallest internal helper needed to remove duplicated parse→style→layout call
+sequences at L9203/9220/9259/9408/9434. Do not expose or name a new IR type.
+*Acceptance:* existing spec suite (`simple_web_renderer_spec.spl` and friends,
+~800 lines) green, byte-identical output — no behavior change.
 
-**Phase 2 — Close WebIR→DrawIR coverage gaps.**
+**Phase 2 — Close web semantic/layout→DrawIR coverage gaps.**
 Set `parent_id` from `HNode.parent`; emit `<img>` as `DRAW_IR_COMMAND_IMAGE`;
 emit iframe content as a nested embedded `DrawIrBatch` (reuse the depth-3
 embedded-surface mechanism already in `draw_ir_adv.spl:336`
@@ -160,7 +157,7 @@ re-render time vs. the current interpreted baseline; flag flipped default-on
 only after N clean CI cycles.
 
 **Phase 4 — Wire `draw_ir_diff` into the cache for incremental repaint.**
-Cache `WebIrDocument` + `DrawIrComposition` per `window_id`; on a new
+Cache `DrawIrComposition` per `window_id`; on a new
 `content_revision`, diff via `draw_ir_diff_compositions` and extend
 `draw_ir_adv.spl` with an incremental entry that skips `"unchanged"` commands.
 *Acceptance:* perf probe demonstrating re-render cost scales with changed-node
@@ -185,7 +182,7 @@ audit, don't assume duplication.
    every later phase's confidence.
 2. **Text fidelity.** `draw_ir_adv.spl:93-107` re-derives font size by
    re-parsing the `font-size` string out of `computed_style` rather than
-   reusing a value the WebIR already computed as a typed field — any encoding
+   reusing a value the web semantic/layout stage already computed — any encoding
    drift (e.g., `parse_font_shorthand_size_px`, L1827, edge cases) could
    silently diverge between Path A and Path B without tripping a
    geometry-only parity check. Needs its own text-fidelity corpus.
@@ -221,10 +218,10 @@ audit, don't assume duplication.
 - **300 DPI.** Neither `DrawIrComposition` nor `DrawIrEmbeddingConfig` carries
   a DPI field today — `dpi_scale_milli` is passed as a bare parameter and
   baked into pixel coordinates before any IR value exists
-  (`window_scene_draw_ir.spl:623`). Phase 1's `WebIrDocument` should add an
-  explicit `dpi_scale_milli` field so a future cache/diff layer can tell "DPI
-  changed" apart from "content changed" instead of treating every DPI change
-  as a full-content invalidation by accident.
+  (`window_scene_draw_ir.spl:623`). Include `dpi_scale_milli` in the existing
+  render-cache key (or the canonical Draw IR embedding configuration if that
+  owner gains the field) so a future cache/diff layer can distinguish DPI
+  changes from content changes without creating a parallel web IR type.
 
 ## Unknowns not determined from code
 

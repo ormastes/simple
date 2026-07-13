@@ -44,7 +44,7 @@ pub fn handle_unit_methods(
     match method {
         "value" => return Ok(Some((**value).clone())),
         "suffix" => return Ok(Some(Value::text(suffix.to_string()))),
-        "family" => return Ok(Some(family.clone().map_or(Value::Nil, Value::Str))),
+        "family" => return Ok(Some(family.clone().map_or(Value::Nil, Value::text_owned))),
         "to_string" => return Ok(Some(Value::text(format!("{}_{}", value.to_display_string(), suffix)))),
         // `to_text` renders just the numeric value (no suffix) so concat
         // expressions like `v.to_text() + " kmph"` work as the user expects.
@@ -251,7 +251,7 @@ pub fn handle_option_methods(
             let msg = eval_arg(
                 args,
                 0,
-                Value::text("Option was None".into()),
+                Value::text("Option was None"),
                 env,
                 functions,
                 classes,
@@ -332,7 +332,7 @@ pub fn handle_option_methods(
             let error = eval_arg(
                 args,
                 0,
-                Value::text("None".into()),
+                Value::text("None"),
                 env,
                 functions,
                 classes,
@@ -447,7 +447,7 @@ pub fn handle_result_methods(
             let msg = eval_arg(
                 args,
                 0,
-                Value::text("Result was Err".into()),
+                Value::text("Result was Err"),
                 env,
                 functions,
                 classes,
@@ -541,7 +541,7 @@ pub fn handle_result_methods(
             let msg = eval_arg(
                 args,
                 0,
-                Value::text("Result was Ok".into()),
+                Value::text("Result was Ok"),
                 env,
                 functions,
                 classes,

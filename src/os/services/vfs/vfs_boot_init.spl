@@ -371,6 +371,98 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     log_raw_println("[vfs-init] VFS ready (pure-Simple NVMe + FAT32)")
     true
 
+pub fn vfs_boot_probe_pure_simple_nvme_adapter() -> Result<BlockDevice, text>:
+    """Acquire a pure-Simple NVMe BlockDevice dedicated to root-filesystem
+    superblock probing (NVFS/DBFS), independent of the FAT32 boot path.
+
+    Fails closed (returns Err) on any grant/init/evidence/bounce-buffer
+    error so callers can cheaply fall through to the next probe. Uses a
+    LOCAL NvmeDriver instance and does not touch the FAT32 boot globals
+    (g_nvme/g_adapter) -- the FAT32 path (vfs_boot_init_production) still
+    performs its own independent pure-Simple NVMe acquisition afterwards
+    and is unaffected by this call. NvmeDriver.init_from_grant() resets the
+    controller as part of its init sequence, so a second acquisition by the
+    FAT32 path after a probe miss reinitializes cleanly (at the cost of the
+    probe adapter's DMA allocations, which are not the FAT32 path's and are
+    only ever made once per boot).
+    """
+    pcimgr_init()
+    val nvme_class: i64 = 1
+    val nvme_sub: i64 = 8
+    var nvme_idx = pcimgr_find_nvme_storage()
+    if nvme_idx < 0:
+        nvme_idx = pcimgr_find_by_class_i64(nvme_class, nvme_sub)
+    if nvme_idx < 0:
+        nvme_idx = pcimgr_find_qemu_nvme()
+    if nvme_idx < 0:
+        return Err("root-probe: no NVMe device found")
+    val grant_result = pcimgr_grant_device(nvme_idx.to_u64(), 0)
+    if grant_result.is_err():
+        return Err("root-probe: NVMe grant failed: {grant_result.unwrap_err()}")
+    val grant = grant_result.unwrap()
+    var probe_nvme = NvmeDriver.new()
+    val nvme_init = probe_nvme.init_from_grant(grant)
+    if nvme_init.is_err():
+        return Err("root-probe: NVMe init failed: {nvme_init.unwrap_err()}")
+    val transfer_evidence_result = probe_nvme.transfer_evidence_from_reversible_probe(
+        0u64,
+        "system-driver",
+        "kernel-owned-resource",
+        "system-kernel-namespace",
+        device_grant_is_isolated(grant),
+        device_grant_is_isolated(grant)
+    )
+    if transfer_evidence_result.is_err():
+        return Err("root-probe: transfer probe failed: {transfer_evidence_result.unwrap_err()}")
+    val transfer_evidence = transfer_evidence_result.unwrap()
+    val ns = NvmeNamespaceIdentity(
+        controller_id: 0u32,
+        nsid: 1u32,
+        lba_size: probe_nvme.get_sector_size(),
+        lba_count: probe_nvme.get_sector_count(),
+        eui64: 0u64,
+        nguid_lo: 0u64,
+        nguid_hi: 0u64,
+        uuid_lo: 0u64,
+        uuid_hi: 0u64
+    )
+    val queue = NvmeQueueAssignment(
+        queue_id: SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+        role: NvmeQueueRole.System,
+        controller_id: 0u32,
+        nsid: 1u32,
+        owner_task: 0u64,
+        max_depth: 128u16,
+        rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+    )
+    val lease_result = nvme_filesystem_lease_from_transfer_evidence(
+        transfer_evidence,
+        ns,
+        0u64,
+        probe_nvme.get_sector_count(),
+        queue,
+        NvmeFilesystemConsumer.Dbfs
+    )
+    if lease_result.is_err():
+        return Err("root-probe: lease policy degraded: {lease_result.unwrap_err()}")
+    val lease = lease_result.unwrap()
+    var adapter = NvmeBlockAdapter.for_identified_namespace_unchecked(
+        probe_nvme,
+        1u32,
+        SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+        0u64,
+        probe_nvme.get_sector_count(),
+        probe_nvme.get_sector_size(),
+        "root-probe"
+    )
+    val bounce_init = adapter.init_bounce_buffer()
+    if bounce_init.is_err():
+        return Err("root-probe: bounce buffer failed: {bounce_init.unwrap_err()}")
+    boot_nvme_production_handoff_provision(adapter, transfer_evidence, lease)
+    log_raw_println("[vfs-init] root-probe: pure-Simple NVMe adapter ready for NVFS/DBFS probing")
+    val dev: BlockDevice = adapter
+    Ok(dev)
+
 fn _vfs_boot_nvme_shared_dma(sector_size: u32) -> Result<SharedDmaBuffer, text>:
     val byte_len = if sector_size.to_u64() < 4096u64: 4096u64 else: sector_size.to_u64()
     val dma = g_nvme.alloc_dma(byte_len)

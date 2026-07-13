@@ -51,7 +51,7 @@ fn get_handle(args: &[Value], index: usize, name: &str) -> Result<i64, CompileEr
 
 fn get_string_arg(args: &[Value], index: usize, name: &str) -> Result<String, CompileError> {
     match args.get(index) {
-        Some(Value::Str(s)) => Ok(s.clone()),
+        Some(Value::Str(s)) => Ok(s.as_ref().clone()),
         _ => Err(CompileError::semantic_with_context(
             format!("{} expects string argument at index {}", name, index),
             ErrorContext::new().with_code(codes::TYPE_MISMATCH),

@@ -280,7 +280,7 @@ pub(super) fn arg_i64(args: &[Value], index: usize, name: &str, expected: usize)
 
 pub(super) fn arg_text(args: &[Value], index: usize, name: &str, expected: usize) -> Result<String, CompileError> {
     match args.get(index) {
-        Some(Value::Str(s)) => Ok(s.clone()),
+        Some(Value::Str(s)) => Ok(s.as_ref().clone()),
         Some(other) => Err(CompileError::semantic(format!(
             "{name} argument {index} must be text, got {}",
             other.type_name()
@@ -4355,7 +4355,7 @@ pub fn rt_renderdoc_set_capture_file_path_template_fn(args: &[Value]) -> Result<
 
 /// `rt_renderdoc_capture_file_path_template_from_env() -> text`
 pub fn rt_renderdoc_capture_file_path_template_from_env_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Str(
+    Ok(Value::text(
         std::env::var("RDOC_SIMPLE_CAPTURE_PATH").unwrap_or_default(),
     ))
 }

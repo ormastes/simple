@@ -75,7 +75,7 @@ pub fn rt_sdn_from_json(args: &[Value]) -> Result<Value, CompileError> {
 /// Get value at path from SDN file
 pub fn rt_sdn_get(args: &[Value]) -> Result<Value, CompileError> {
     let (path, key) = match (args.first(), args.get(1)) {
-        (Some(Value::Str(p)), Some(Value::Str(k))) => (p.clone(), k.clone()),
+        (Some(Value::Str(p)), Some(Value::Str(k))) => (p.as_ref().clone(), k.as_ref().clone()),
         _ => return Ok(Value::text(String::new())),
     };
 
@@ -94,7 +94,9 @@ pub fn rt_sdn_get(args: &[Value]) -> Result<Value, CompileError> {
 /// Set value at path in SDN file
 pub fn rt_sdn_set(args: &[Value]) -> Result<Value, CompileError> {
     let (path, key, value) = match (args.first(), args.get(1), args.get(2)) {
-        (Some(Value::Str(p)), Some(Value::Str(k)), Some(Value::Str(v))) => (p.clone(), k.clone(), v.clone()),
+        (Some(Value::Str(p)), Some(Value::Str(k)), Some(Value::Str(v))) => {
+            (p.as_ref().clone(), k.as_ref().clone(), v.as_ref().clone())
+        }
         _ => return Ok(Value::Int(1)),
     };
 
@@ -218,5 +220,28 @@ fn json_to_sdn(json: &serde_json::Value) -> SdnValue {
             }
             SdnValue::Dict(dict)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_text_json_sdn_roundtrip_preserves_unicode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let json_path = dir.path().join("value.json");
+        std::fs::write(&json_path, r#"{"message":"é🙂"}"#).expect("write JSON");
+
+        let sdn = rt_sdn_from_json(&[Value::text(json_path.to_string_lossy().into_owned())]).expect("JSON to SDN");
+        let Value::Str(sdn) = sdn else { panic!("expected SDN text") };
+        assert!(sdn.contains("é🙂"));
+
+        let sdn_path = dir.path().join("value.sdn");
+        std::fs::write(&sdn_path, "message: \"é🙂\"\n").expect("write SDN");
+        let json = rt_sdn_to_json(&[Value::text(sdn_path.to_string_lossy().into_owned())]).expect("SDN to JSON");
+        let Value::Str(json) = json else { panic!("expected JSON text") };
+        let parsed: serde_json::Value = serde_json::from_str(json.as_str()).expect("parse JSON output");
+        assert_eq!(parsed["message"], "é🙂");
     }
 }

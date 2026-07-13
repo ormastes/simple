@@ -38,7 +38,7 @@ fn alloc_btreemap_handle() -> BTreeMapHandle {
 // Helper to convert Value to string for BTreeMap key
 fn value_to_btree_key(value: &Value) -> String {
     match value {
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => s.as_ref().clone(),
         Value::Int(n) => n.to_string(),
         Value::Float(f) => f.to_string(),
         Value::Bool(b) => b.to_string(),

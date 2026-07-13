@@ -1,0 +1,106 @@
+diff --git a/src/compiler/10.frontend/core/parser_stmts.spl b/src/compiler/10.frontend/core/parser_stmts.spl
+index e35401f7a62..ebbfb7fa542 100644
+--- a/src/compiler/10.frontend/core/parser_stmts.spl
++++ b/src/compiler/10.frontend/core/parser_stmts.spl
+@@ -9,7 +9,7 @@ use compiler.core.tokens.{TOK_INT_LIT, TOK_STRING_LIT}
+ use compiler.core.tokens.{TOK_IDENT}
+ use compiler.core.tokens.{TOK_KW_VAL, TOK_KW_VAR, TOK_KW_FN}
+ use compiler.core.tokens.{TOK_KW_IF, TOK_KW_ELIF, TOK_KW_ELSE}
+-use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_WHILE, TOK_KW_IN}
++use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_WHILE, TOK_KW_IN, TOK_KW_LOOP}
+ use compiler.core.tokens.{TOK_KW_MATCH, TOK_KW_CASE}
+ use compiler.core.tokens.{TOK_KW_RETURN, TOK_KW_BREAK, TOK_KW_CONTINUE}
+ use compiler.core.tokens.{TOK_KW_AND, TOK_KW_OR, TOK_KW_NOT}
+@@ -33,7 +33,7 @@ use compiler.core.tokens.{TOK_BACKSLASH}
+ use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT}
+ use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
+ use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_ARRAY_LIT}
+-use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access}
++use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit}
+ use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr, expr_match_expr}
+ use compiler.core.ast.{expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
+ use compiler.core.ast.{expr_unit, expr_block, expr_lambda}
+@@ -347,6 +347,17 @@ fn parse_statement() -> i64:
+     if kind == 46:
+         return parse_while_stmt()
+ 
++    # Statement-form `loop:` -- desugar to `while true:` so downstream
++    # (HIR/MIR/native) lowering treats it as a genuine loop instead of a
++    # one-shot block. (Bug #163: native --entry ran `loop:` zero times
++    # because the old expression-position parse produced a plain
++    # expr_block with no loop semantics at all.) Loop-as-EXPRESSION
++    # (e.g. `val x = loop: ... break v`) is untouched -- still handled
++    # by the primary_expr.spl fallback -- since that path carries
++    # break-with-value semantics that are out of scope here.
++    if kind == TOK_KW_LOOP:
++        return parse_loop_stmt()
++
+     if kind == 43:
+         # G33: `match` may be an identifier (var match = true; match = false).
+         # After consuming `match`, a token that cannot start an expression
+@@ -870,6 +881,21 @@ fn parse_while_stmt() -> i64:
+     val body = parse_block()
+     stmt_while_stmt(cond, body, 0)
+ 
++# Statement-form `loop: <body>` -- desugar to the exact AST shape that
++# `while true: <body>` produces (see the `true_expr` desugar above), so
++# every downstream layer (type-check, HIR, MIR, native codegen) treats it
++# as a genuine loop rather than a plain one-shot block.
++fn parse_loop_stmt() -> i64:
++    parser_advance()  # consume 'loop'
++    parser_expect(161)  # consume ':'
++    val body = parse_block()
++    # Use the real EXPR_BOOL_LIT node (same as what parsing a literal
++    # `true` token in expression position produces) rather than
++    # expr_ident("true", ...), which HIR lowering treats as an unresolved
++    # identifier and rejects.
++    val true_expr = expr_bool_lit(1, 0)
++    stmt_while_stmt(true_expr, body, 0)
++
+ # G33: kinds that cannot START an expression — a statement keyword followed
+ # by one of these is being used as an identifier, not a keyword.
+ fn g33_kw_ident_follow(kind: i64) -> bool:
+@@ -1262,6 +1288,13 @@ fn parse_tuple_destructure_val() -> i64:
+     if par_kind_get() == 169:
+         joined = joined + "_"
+         parser_advance()
++    elif par_kind_get() == TOK_IDENT:
++        # Plain identifier: capture real text. tok_kind_name(TOK_IDENT)=="Ident"
++        # and keyword_lookup("Ident")==TOK_IDENT, so the keyword round-trip below
++        # is trivially true for every ident and would append the literal "Ident"
++        # (same bug fixed in parse_val_decl_stmt's single-name path).
++        joined = joined + par_text_get()
++        parser_expect(6)
+     else:
+         val tdv0_kn = tok_kind_name(par_kind_get())
+         if keyword_lookup(tdv0_kn) == par_kind_get():
+@@ -1275,6 +1308,9 @@ fn parse_tuple_destructure_val() -> i64:
+         if par_kind_get() == 169:
+             joined = joined + ",_"
+             parser_advance()
++        elif par_kind_get() == TOK_IDENT:
++            joined = joined + "," + par_text_get()
++            parser_expect(6)
+         else:
+             val tdvN_kn = tok_kind_name(par_kind_get())
+             if keyword_lookup(tdvN_kn) == par_kind_get():
+@@ -1299,6 +1335,9 @@ fn parse_tuple_destructure_var() -> i64:
+     if par_kind_get() == 169:
+         joined = joined + "_"
+         parser_advance()
++    elif par_kind_get() == TOK_IDENT:
++        joined = joined + par_text_get()
++        parser_expect(6)
+     else:
+         val tdvr0_kn = tok_kind_name(par_kind_get())
+         if keyword_lookup(tdvr0_kn) == par_kind_get():
+@@ -1312,6 +1351,9 @@ fn parse_tuple_destructure_var() -> i64:
+         if par_kind_get() == 169:
+             joined = joined + ",_"
+             parser_advance()
++        elif par_kind_get() == TOK_IDENT:
++            joined = joined + "," + par_text_get()
++            parser_expect(6)
+         else:
+             val tdvrN_kn = tok_kind_name(par_kind_get())
+             if keyword_lookup(tdvrN_kn) == par_kind_get():

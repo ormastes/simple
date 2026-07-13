@@ -164,7 +164,7 @@ fn arg_str(args: &[Value], idx: usize, fn_name: &str) -> Result<String, CompileE
             )
         })
         .map(|v| match v {
-            Value::Str(s) => s.clone(),
+            Value::Str(s) => s.as_ref().clone(),
             Value::Int(n) => format!("{n}"),
             _ => format!("{v:?}"),
         })

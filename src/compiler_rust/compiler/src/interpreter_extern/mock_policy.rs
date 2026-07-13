@@ -157,6 +157,6 @@ mod tests {
         // Initialize to all
         mock_policy_init_all(&[]).unwrap();
         let mode = mock_policy_get_mode(&[]).unwrap();
-        assert!(matches!(mode, Value::Str(s) if s == "all"));
+        assert!(matches!(mode, Value::Str(s) if s.as_str() == "all"));
     }
 }

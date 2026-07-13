@@ -88,7 +88,7 @@ pub(super) fn eval_mock_builtin(
         "include" => {
             let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             match &val {
-                Value::Str(s) => Ok(Some(Value::Matcher(crate::value::MatcherValue::Contains(s.clone())))),
+                Value::Str(s) => Ok(Some(Value::Matcher(crate::value::MatcherValue::Contains(s.as_ref().clone())))),
                 _ => Ok(Some(Value::Matcher(crate::value::MatcherValue::Exact(Box::new(val))))),
             }
         }

@@ -1,35 +1,159 @@
-# HTTP Baremetal -- Minimal kernel-native HTTP loop for SimpleOS boot.
+# HTTP Baremetal -- kernel-native HTTP transport for SimpleOS boot, running
+# the REAL Simple web server's pure-logic pipeline (std.nogc_sync_mut.http_server):
+# HttpStatus/HttpResponse (types.spl), parse_request_line (parser.spl),
+# path_is_safe (router.spl), serialize_response (response.spl), and
+# mime_from_path (mime.spl) are reused verbatim — this file does not
+# reimplement HTTP status text, response framing, path-traversal checks, or
+# MIME lookup.
 #
-# This boot-local launcher avoids os.kernel.net.__init__ so the RISC-V
-# freestanding ELF does not pull the hosted netstack closure.
+# NOT reused: SimpleHttpServer (server.spl) — it imports
+# std.concurrent.thread.thread_spawn_with_args, a threading dependency this
+# single-core freestanding boot core cannot provide. Also not reused:
+# parse_request/parse_request_with_limits (parser.spl) and write_response/
+# write_error (response.spl) — they take a std.nogc_sync_mut.io.tcp.TcpStream
+# parameter (a hosted OS-socket wrapper, not proven under
+# x86_64-unknown-none). Router (router.spl)'s pattern-matching registration
+# is also not wired in: this boot server only ever answers two fixed routes
+# (GET / and GET /files/<name>), so route dispatch below is a small,
+# explicitly-named hand-written seam rather than a Router instance — wiring
+# a real Router is straightforward follow-up if more routes are needed.
+#
+# This transport binds/accepts/reads/writes via the true per-socket rt_net_*
+# primitives (rt_net_socket/bind/listen/accept/send_bytes/recv_bytes/close —
+# the same primitives sshd's own rt_boot_tcp_* convenience wrappers are built
+# on; see src/os/apps/sshd/sshd.spl), NOT rt_io_tcp_bind/
+# os.kernel.boot.tcp_baremetal_min: that path's underlying rt_boot_tcp_bind(addr)
+# ignores its addr argument and always binds port 22 on this backend (see
+# examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c
+# rt_boot_tcp_bind), and its accept/read/write convenience functions share
+# ONE single global listener/client slot process-wide — so it cannot coexist
+# with sshd's own listener on a different port in the same boot image.
+#
+# GET /files/<name> reads through the switchable VFS hub
+# (os.services.vfs.vfs_init.g_vfs_read_file_bytes / g_vfs_file_exists),
+# which routes to whatever filesystem driver is mounted at boot (FAT32
+# today, DBFS once Lane C1's DbFsDriver root mount lands) — no
+# filesystem-specific token appears in this file.
 
-use os.kernel.boot.tcp_baremetal_min
 use os.services.database.simple_db_service.{simple_db_execute_http_request, simple_db_http_request}
+use os.services.vfs.vfs_init.{g_vfs_read_file_bytes, g_vfs_file_exists}
+use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
+use std.nogc_sync_mut.http_server.parser.{parse_request_line}
+use std.nogc_sync_mut.http_server.router.{path_is_safe}
+use std.nogc_sync_mut.http_server.response.{serialize_response}
+use std.nogc_sync_mut.http_server.mime.{mime_from_path}
 
 extern fn log_raw_println(msg: text)
-extern fn rt_io_tcp_bind(addr: text) -> i64
-extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
-extern fn rt_io_tcp_write_auto(fd: i64) -> i64
-extern fn rt_io_tcp_close(fd: i64) -> bool
+extern fn rt_net_socket(proto: i64) -> i64
+extern fn rt_net_bind(sock_fd: i64, port_num: i64) -> i64
+extern fn rt_net_listen(sock_fd: i64, backlog: i64) -> i64
+extern fn rt_net_accept(sock_fd: i64) -> i64
+extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
+extern fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]
+extern fn rt_net_close(sock_fd: i64) -> i64
+extern fn rt_string_from_byte_array(arr: [u8]) -> text
+extern fn rt_string_to_byte_array(s: text) -> [u8]
 
-val SIMPLEOS_HTTP_LISTEN_ADDR: text = "0.0.0.0:8080"
+val HTTP_PORT: i64 = 8080
+val HTTP_MAX_REQUEST_BYTES: i64 = 4096
+val HTTP_STATUS_BODY: text = "{\"status\":\"ok\",\"server\":\"SimpleOS\"}\n"
+
+# Decode helper mirroring sshd's decode_net_runtime_i32/fd (see sshd.spl):
+# the direct baremetal net runtime returns ENCODE_INT(value) for successes.
+fn _http_decode_i64(raw: i64) -> i64:
+    if raw > 7:
+        return raw >> 3
+    raw
+
+fn _http_encode(resp: HttpResponse) -> [u8]:
+    rt_string_to_byte_array(serialize_response(resp))
+
+fn _http_files_target(path: text) -> text?:
+    """Return the safe VFS path for GET /files/<name>, or nil if unsafe/malformed.
+
+    Reuses the real web server's path_is_safe traversal check (router.spl);
+    additionally requires a single flat path segment so the route stays
+    confined to one file directly under the mounted root.
+    """
+    if not path.starts_with("/files/"):
+        return nil
+    val name = path.slice(7)
+    if name.len() == 0 or name.len() > 200:
+        return nil
+    if name.find("/") >= 0:
+        return nil
+    if not path_is_safe(path):
+        return nil
+    Some("/" + name)
+
+fn _http_route(request: text) -> [u8]:
+    if simple_db_http_request(request):
+        return rt_string_to_byte_array(simple_db_execute_http_request(request))
+    val line_end = request.find("\r\n")
+    val line = if line_end >= 0: request.slice(0, line_end) else: request
+    val (method, path, version) = parse_request_line(line)
+    if not version.starts_with("HTTP/1.") or path.len() == 0 or not path.starts_with("/"):
+        return _http_encode(HttpResponse(status: HttpStatus.BadRequest, headers: [], body: "ERR malformed request\n"))
+    if method != "GET":
+        return _http_encode(HttpResponse(status: HttpStatus.NotFound, headers: [], body: "ERR route not found\n"))
+    if path == "/":
+        return _http_encode(HttpResponse(status: HttpStatus.Ok, headers: [("Content-Type", "application/json")], body: HTTP_STATUS_BODY))
+    val target = _http_files_target(path)
+    if target == nil:
+        return _http_encode(HttpResponse(status: HttpStatus.NotFound, headers: [], body: "ERR route not found\n"))
+    val file_path = target.unwrap()
+    if not g_vfs_file_exists(file_path):
+        return _http_encode(HttpResponse(status: HttpStatus.NotFound, headers: [], body: "ERR file not found\n"))
+    val bytes = g_vfs_read_file_bytes(file_path)
+    if bytes.len() == 0:
+        return _http_encode(HttpResponse(status: HttpStatus.NotFound, headers: [], body: "ERR file not found\n"))
+    val content_type = mime_from_path(file_path)
+    _http_encode(HttpResponse(status: HttpStatus.Ok, headers: [("Content-Type", content_type)], body: rt_string_from_byte_array(bytes)))
+
+pub fn http_bind_baremetal() -> i64:
+    """Bind and listen on the boot HTTP port. Returns the listener fd, or < 0
+    on failure.
+
+    Extracted so a combined multi-service boot entry can bind once and
+    round-robin http_accept_and_handle_once() alongside other listeners
+    (sshd, dbd) on the same single boot core.
+    """
+    val sock_raw = rt_net_socket(1)
+    val sock_fd = _http_decode_i64(sock_raw)
+    if sock_fd < 0:
+        log_raw_println("[http_baremetal] ERROR: socket failed")
+        return sock_fd
+    val bind_rc = _http_decode_i64(rt_net_bind(sock_fd, HTTP_PORT))
+    if bind_rc < 0:
+        log_raw_println("[http_baremetal] ERROR: bind failed")
+        return bind_rc
+    val listen_rc = _http_decode_i64(rt_net_listen(sock_fd, 8))
+    if listen_rc < 0:
+        log_raw_println("[http_baremetal] ERROR: listen failed")
+        return listen_rc
+    sock_fd
+
+pub fn http_accept_and_handle_once(listener: i64) -> bool:
+    """Accept and fully handle a single pending HTTP request, if any."""
+    val raw_client = rt_net_accept(listener)
+    val client = _http_decode_i64(raw_client)
+    if client < 0:
+        return false
+    val request_bytes = rt_net_recv_bytes(client, HTTP_MAX_REQUEST_BYTES)
+    val request = rt_string_from_byte_array(request_bytes)
+    rt_net_send_bytes(client, _http_route(request))
+    rt_net_close(client)
+    true
 
 fn start_http_server_baremetal():
     """Start a minimal single-core HTTP loop on the boot core."""
     log_raw_println("[http_baremetal] Starting minimal HTTP loop...")
 
-    val listener = rt_io_tcp_bind(SIMPLEOS_HTTP_LISTEN_ADDR)
+    val listener = http_bind_baremetal()
     if listener < 0:
-        log_raw_println("[http_baremetal] ERROR: bind failed")
         return
 
-    log_raw_println("[http_baremetal] Bootstrap TCP shim bound on 0.0.0.0:8080")
+    log_raw_println("[http_baremetal] Listening on 0.0.0.0:8080")
+    log_raw_println("[http] serving on 0.0.0.0:8080")
     while true:
-        val client = rt_io_tcp_accept_timeout(listener, 1)
-        if client >= 0:
-            val request = boot_tcp_read_text(1024)
-            if simple_db_http_request(request):
-                rt_io_tcp_write_text(client, simple_db_execute_http_request(request))
-            else:
-                rt_io_tcp_write_auto(client)
-            rt_io_tcp_close(client)
+        http_accept_and_handle_once(listener)

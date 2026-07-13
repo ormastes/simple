@@ -77,7 +77,7 @@ pub(crate) fn build_macro_const_bindings(
 /// Some(string) for supported types, None for unsupported types.
 pub(crate) fn const_value_to_string(value: &Value) -> Option<String> {
     match value {
-        Value::Str(s) => Some(s.clone()),
+        Value::Str(s) => Some(s.as_ref().clone()),
         Value::Symbol(s) => Some(s.clone()),
         Value::Int(i) => Some(i.to_string()),
         Value::Float(f) => Some(f.to_string()),

@@ -35,7 +35,7 @@ fn get_i64(args: &[Value], idx: usize, name: &str) -> Result<i64, CompileError> 
 
 fn get_string(args: &[Value], idx: usize, name: &str) -> Result<String, CompileError> {
     match args.get(idx) {
-        Some(Value::Str(v)) => Ok(v.clone()),
+        Some(Value::Str(v)) => Ok(v.as_ref().clone()),
         _ => Err(CompileError::runtime(format!(
             "{name}: argument {idx} must be a string"
         ))),

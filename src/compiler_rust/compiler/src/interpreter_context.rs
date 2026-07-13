@@ -81,7 +81,7 @@ fn value_to_expr(val: &Value) -> Result<Expr, CompileError> {
     Ok(match val {
         Value::Int(i) => Expr::Integer(*i),
         Value::Bool(b) => Expr::Bool(*b),
-        Value::Str(s) => Expr::String(s.clone()),
+        Value::Str(s) => Expr::String(s.as_ref().clone()),
         Value::Symbol(s) => Expr::Symbol(s.clone()),
         Value::Nil => Expr::Nil,
         Value::Array(items) => {

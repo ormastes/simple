@@ -1,0 +1,107 @@
+diff --git a/src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl b/src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+index accbe1a22df..7f6d4c00d30 100644
+--- a/src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
++++ b/src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+@@ -786,7 +786,13 @@ fn convert_flat_pattern(pat_eid: i64) -> Pattern:
+ # Scope shipped here (task option 2, not full function-scope defer): a `defer`
+ # registered directly at the TOP LEVEL of a function body runs, in LIFO order,
+ # before every `return` in that function (including early returns nested in
+-# if/while/for) and at fall-off-the-end. Any OTHER placement — nested inside
++# if/while/for) and at fall-off-the-end -- including when ordinary statements
++# follow the `defer` (e.g. `fn work(): defer f(); g(); h()`, no explicit
++# `return`), as long as the function has no declared `-> T` return type (see
++# the `has_ret` fall-off-the-end block in `convert_decl_fn` below for why that
++# guard exists: a declared return type gives the body's last statement an
++# implicit-tail-value role that an appended defer-replay would silently
++# steal, so that shape stays refused). Any OTHER placement — nested inside
+ # if/while/for/match, or `errdefer` anywhere — is refused with a LOUD build
+ # failure instead of a silent drop: it lowers to a reference to a
+ # deliberately-nonexistent identifier, which HIR name resolution rejects with
+@@ -1034,6 +1040,12 @@ fn convert_decl_fn(idx: i64) -> Function:
+         pi = pi + 1
+ 
+     val ret = decl_get_ret_type(idx)
++    # Computed here (before the body/defer conversion below) rather than at its
++    # original call site further down, because the fall-off-the-end defer
++    # replay logic needs to know, per function, whether a `-> T` return type
++    # was declared. See the `has_ret` usage inside the `g_pending_defers`
++    # fall-off-the-end block for why this matters.
++    val has_ret = ret > 0
+     if flat_bridge_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
+         eprint("[simpleos-flat-ret] name={name} tag={ret}")
+     val body = decl_get_body(idx)
+@@ -1059,21 +1071,36 @@ fn convert_decl_fn(idx: i64) -> Function:
+         si = si + 1
+ 
+     if g_pending_defers.len() > 0:
+-        # Fall-off-the-end replay. Only safe to append here when the function's
++        # Fall-off-the-end replay. Already safe to append when the function's
+         # last raw top-level statement was `defer` itself (nothing trails it,
+         # so the append is truly the new last statement with nothing to
+-        # disturb). If the last raw statement was already an explicit
+-        # `return`, `convert_flat_stmt_in_list`'s STMT_RETURN case already
+-        # spliced the defers before it — appending again here would be dead
+-        # code AFTER that return, and would also silently steal the
+-        # tail-value slot that `lower_hir_block` assigns to the last entry in
+-        # `stmts` (it would no longer be the `return`), so it is skipped, not
+-        # duplicated. Any OTHER trailing statement kind desugars to
+-        # `StmtKind.Expr(...)`, and `lower_hir_block` treats the LAST such
+-        # entry as the block's implicit tail value — appending a defer-replay
+-        # statement after it would silently replace the function's real
+-        # (implicit) return value with the defer's value instead. Refuse
+-        # loudly rather than risk that.
++        # disturb) -- see the STMT_DEFER arm below. If the last raw statement
++        # was already an explicit `return`, `convert_flat_stmt_in_list`'s
++        # STMT_RETURN case already spliced the defers before it -- appending
++        # again here would be dead code AFTER that return, so it is skipped,
++        # not duplicated (see the `last_raw_tag != STMT_RETURN` guard below).
++        #
++        # The remaining shape -- the body falls off the end with ordinary
++        # statements AFTER the last `defer` (bug #172 follow-up, the MOST
++        # COMMON defer pattern: `fn work(): defer f(); g(); h()`, no explicit
++        # `return`) -- is handled here too, but ONLY when the function has NO
++        # declared `-> T` return type (`has_ret == false`). That guard exists
++        # because of how HIR lowering picks a lowering path for the body
++        # (`_Items/declaration_lowering.spl`, gated on `fn_.has_return_type`):
++        #   - has_ret == false -> `lower_hir_block_unit`: every statement,
++        #     INCLUDING a trailing expression-statement, stays a plain
++        #     statement; no tail value is ever extracted. Appending the
++        #     defer-replay statements after the real last statement is
++        #     unconditionally safe here -- there is no implicit return value
++        #     for the append to clobber.
++        #   - has_ret == true -> `lower_hir_block`: the LAST statement (if an
++        #     expression-statement) is lifted out of `stmts` and used as the
++        #     block's implicit tail-value / return value. Appending a
++        #     defer-replay statement after it would silently steal that slot
++        #     (the defer's own expression, not the function's real value,
++        #     would become the return value) -- so that shape is intentionally
++        #     left OUT OF SCOPE and still refused loudly rather than risking a
++        #     silently wrong return value.
+         val last_raw_tag = if body_len > 0: stmt_get_tag(body[body_len - 1]) else: -1
+         if last_raw_tag == STMT_DEFER:
+             var dj = g_pending_defers.len() - 1
+@@ -1081,7 +1108,13 @@ fn convert_decl_fn(idx: i64) -> Function:
+                 stmts.push(g_pending_defers[dj])
+                 dj = dj - 1
+         elif last_raw_tag != STMT_RETURN:
+-            stmts.push(defer_unsupported_marker(make_span()))
++            if has_ret:
++                stmts.push(defer_unsupported_marker(make_span()))
++            else:
++                var ej = g_pending_defers.len() - 1
++                while ej >= 0:
++                    stmts.push(g_pending_defers[ej])
++                    ej = ej - 1
+     g_pending_defers = saved_pending_defers
+ 
+     val visibility = convert_decl_visibility(idx)
+@@ -1112,7 +1145,8 @@ fn convert_decl_fn(idx: i64) -> Function:
+     # the function was always constructed with has_return_type=false and an
+     # Infer return type, silently dropping every declared return type through
+     # the flat-AST bridge. Thread the real return type through instead.
+-    val has_ret = ret > 0
++    # (`has_ret` itself is computed earlier, right after `ret` -- see the
++    # fall-off-the-end defer replay block above for why.)
+     val inferred_ret: Type = if has_ret: convert_flat_type(ret) else: Type(kind: TypeKind.Infer, span: span)
+     val body_block = Block(stmts: stmts, span: span)
+     var fn_attributes: [Attribute] = []

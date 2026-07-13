@@ -232,7 +232,7 @@ pub fn sys_env_bool(args: &[Value]) -> Result<Value, CompileError> {
         Value::Str(s) => s,
         _ => return Err(CompileError::runtime("sys_env_bool: key must be a string")),
     };
-    let value = std::env::var(key).unwrap_or_default().to_ascii_lowercase();
+    let value = std::env::var(key.as_str()).unwrap_or_default().to_ascii_lowercase();
     Ok(Value::Bool(matches!(value.as_str(), "1" | "true" | "yes" | "on")))
 }
 
@@ -854,7 +854,7 @@ mod tests {
             Value::text("/bin/sh".to_string()),
             Value::Array(Arc::new(vec![
                 Value::text("-c".to_string()),
-                Value::Str(
+                Value::text(
                     "if env | grep '^_SIMPLE_STACK_SET=' >/dev/null; then printf present; else printf unset; fi"
                         .to_string(),
                 ),
@@ -873,7 +873,7 @@ mod tests {
             panic!("expected exit code int");
         };
 
-        assert_eq!(stdout, "unset");
+        assert_eq!(stdout.as_str(), "unset");
         assert_eq!(exit_code, 0);
         unsafe {
             std::env::remove_var("_SIMPLE_STACK_SET");

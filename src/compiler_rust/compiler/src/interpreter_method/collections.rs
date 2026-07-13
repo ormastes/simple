@@ -208,7 +208,7 @@ pub fn handle_array_methods(
             let sep = eval_arg(
                 args,
                 0,
-                Value::text("".into()),
+                Value::text(""),
                 env,
                 functions,
                 classes,

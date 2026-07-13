@@ -1,0 +1,89 @@
+# FreeBSD-style /etc/rc.conf reader for boot-time service gating.
+#
+# Parses `name_enable="YES|NO"` lines (plus a bare `hostname="..."` line),
+# tolerant of comments (#...) and blank lines. Unknown keys are logged, not
+# fatal. When /etc/rc.conf is absent, or a specific `<service>_enable` key is
+# absent from a present file, the service is treated as ENABLED — this keeps
+# every existing autostart call site behaving exactly as before on images
+# that don't stage rc.conf at all (the common case today).
+#
+# MDSOC: feature dimension, boot layer
+
+use os.services.vfs.vfs_init.{g_vfs_file_exists, g_vfs_read_file_text}
+
+extern fn serial_println(msg: text)
+
+val RC_CONF_PATH: text = "/etc/rc.conf"
+
+pub fn rc_conf_service_enabled(service: text) -> bool:
+    """Return whether `<service>_enable` is "YES" per /etc/rc.conf.
+
+    Default is enabled (true) when /etc/rc.conf is absent, or when the
+    file exists but does not mention this service's key — matches FreeBSD
+    rc.conf semantics closely enough for boot-time gating while never
+    surprising a caller that doesn't stage the file.
+    """
+    val key = "{service}_enable"
+    val found = _rc_conf_lookup(key)
+    if found == nil:
+        return true
+    found.unwrap() != "NO"
+
+pub fn rc_conf_hostname() -> text:
+    """Return the configured hostname, or "simpleos" when unset."""
+    val found = _rc_conf_lookup("hostname")
+    if found == nil:
+        return "simpleos"
+    found.unwrap()
+
+pub fn rc_conf_service_marker(service: text) -> text:
+    """Boot-log marker text for a service's rc.conf gate decision.
+
+    Distinguishes the "no rc.conf / key absent -> default enabled" case
+    from an explicit "(rc.conf)" YES so gate transcripts can tell them
+    apart, per the Lane E QEMU gate contract.
+    """
+    val key = "{service}_enable"
+    val found = _rc_conf_lookup(key)
+    val enabled = rc_conf_service_enabled(service)
+    val state = if enabled: "YES" else: "NO"
+    val source = if found == nil: "default" else: "rc.conf"
+    "[rc] {key}={state} ({source})"
+
+# ---------------------------------------------------------------------------
+# Internal
+# ---------------------------------------------------------------------------
+
+fn _rc_conf_lookup(key: text) -> text?:
+    """Return the raw (quote-stripped) value for `key`, or nil when the
+    file is absent or the key is not present in it."""
+    if not g_vfs_file_exists(RC_CONF_PATH):
+        return nil
+    val content = g_vfs_read_file_text(RC_CONF_PATH)
+    for raw_line in content.split("\n"):
+        val line = raw_line.trim()
+        if line == "" or line.starts_with("#"):
+            pass_dn
+        else:
+            val eq = line.find_str("=")
+            if eq < 0:
+                serial_println("[rc] malformed rc.conf line ignored: {line}")
+            else:
+                val k = line.slice(0, eq).trim()
+                val raw_value = line.slice(eq + 1, line.len()).trim()
+                val v = _strip_quotes(raw_value)
+                if k == key:
+                    return v
+                elif not _is_known_key(k):
+                    serial_println("[rc] unknown rc.conf key (ignored): {k}")
+    nil
+
+fn _is_known_key(key: text) -> bool:
+    """Keys this reader recognizes today; anything else is logged as unknown
+    but never treated as fatal."""
+    key == "hostname" or key.ends_with("_enable")
+
+fn _strip_quotes(v: text) -> text:
+    if v.len() >= 2 and v.starts_with("\"") and v.ends_with("\""):
+        return v.slice(1, v.len() - 1)
+    v

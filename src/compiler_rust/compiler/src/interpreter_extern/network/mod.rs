@@ -46,7 +46,7 @@ use std::sync::Arc;
 /// Callable from Simple as: `rt_http_get(url: text) -> (i64, text, text)`
 pub fn rt_http_get(args: &[Value]) -> Result<Value, CompileError> {
     let url = match args.first() {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         _ => {
             return Ok(Value::Tuple(vec![
                 Value::Int(-1),
@@ -90,7 +90,7 @@ pub fn rt_http_request(args: &[Value]) -> Result<Value, CompileError> {
         Value::Tuple(vec![Value::Int(-1), Value::text(String::new()), Value::text(msg)])
     }
     let method = match args.first() {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         _ => {
             return Ok(err_tuple(
                 "rt_http_request: missing or invalid method argument".to_string(),
@@ -98,7 +98,7 @@ pub fn rt_http_request(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
     let url = match args.get(1) {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         _ => {
             return Ok(err_tuple(
                 "rt_http_request: missing or invalid url argument".to_string(),
@@ -122,7 +122,7 @@ pub fn rt_http_request(args: &[Value]) -> Result<Value, CompileError> {
         }
     }
     let body = match args.get(3) {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         _ => String::new(),
     };
 
@@ -141,7 +141,7 @@ pub fn rt_http_request(args: &[Value]) -> Result<Value, CompileError> {
             let body = response.into_string().unwrap_or_default();
             Ok(Value::Tuple(vec![
                 Value::Int(status),
-                Value::Str(body),
+                Value::text(body),
                 Value::text(String::new()),
             ]))
         }

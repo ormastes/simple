@@ -89,7 +89,7 @@ fn test_value_as_int_from_nil() {
 
 #[test]
 fn test_value_as_int_from_string_fails() {
-    assert!(Value::text("hello".into()).as_int().is_err());
+    assert!(Value::text("hello").as_int().is_err());
 }
 
 #[test]
@@ -142,7 +142,7 @@ fn test_value_to_key_string_bool() {
 
 #[test]
 fn test_value_to_key_string_str() {
-    assert_eq!(Value::text("hello".into()).to_key_string(), "hello");
+    assert_eq!(Value::text("hello").to_key_string(), "hello");
 }
 
 #[test]
@@ -180,8 +180,8 @@ fn test_value_truthy_float() {
 
 #[test]
 fn test_value_truthy_str() {
-    assert!(Value::text("hello".into()).truthy());
-    assert!(!Value::text("".into()).truthy());
+    assert!(Value::text("hello").truthy());
+    assert!(!Value::text("").truthy());
 }
 
 #[test]
@@ -238,7 +238,7 @@ fn test_value_truthy_enum() {
 // ==========================================================================
 #[test]
 fn test_value_to_display_string_str() {
-    assert_eq!(Value::text("hello".into()).to_display_string(), "hello");
+    assert_eq!(Value::text("hello").to_display_string(), "hello");
 }
 
 #[test]
@@ -287,7 +287,7 @@ fn test_value_type_name() {
     assert_eq!(Value::Int(0).type_name(), "i64");
     assert_eq!(Value::Float(0.0).type_name(), "f64");
     assert_eq!(Value::Bool(true).type_name(), "bool");
-    assert_eq!(Value::text("".into()).type_name(), "str");
+    assert_eq!(Value::text("").type_name(), "str");
     assert_eq!(Value::Symbol("".into()).type_name(), "symbol");
     assert_eq!(Value::array(vec![]).type_name(), "array");
     assert_eq!(Value::Tuple(vec![]).type_name(), "tuple");
@@ -342,10 +342,10 @@ fn test_value_matches_type_bool() {
 
 #[test]
 fn test_value_matches_type_str() {
-    assert!(Value::text("hello".into()).matches_type("str"));
-    assert!(Value::text("hello".into()).matches_type("String"));
-    assert!(Value::text("hello".into()).matches_type("Str"));
-    assert!(!Value::text("hello".into()).matches_type("int"));
+    assert!(Value::text("hello").matches_type("str"));
+    assert!(Value::text("hello").matches_type("String"));
+    assert!(Value::text("hello").matches_type("Str"));
+    assert!(!Value::text("hello").matches_type("int"));
 }
 
 #[test]
@@ -427,7 +427,7 @@ fn test_value_clone_bool() {
 
 #[test]
 fn test_value_clone_str() {
-    let v = Value::text("hello".into());
+    let v = Value::text("hello");
     assert_eq!(v.clone(), v);
 }
 
@@ -482,9 +482,70 @@ fn test_value_clone_nil() {
 }
 
 #[test]
+fn shared_text_clone_preserves_buffer_identity() {
+    let original = Value::text("shared source".to_string());
+    let cloned = original.clone();
+    let (Value::Str(original), Value::Str(cloned)) = (&original, &cloned) else {
+        panic!("expected text values");
+    };
+    assert!(Arc::ptr_eq(original, cloned));
+    assert_eq!(original.as_ptr(), cloned.as_ptr());
+}
+
+#[test]
+fn alias_concat_isolation() {
+    let source = r#"
+var original = "abc"
+var changed = original
+changed = changed + "def"
+main = if original == "abc" and changed == "abcdef": 1 else: 0
+"#;
+    let module = simple_parser::Parser::new(source).parse().expect("parse alias concat");
+    let result = crate::interpreter::evaluate_module(&module.items).expect("evaluate alias concat");
+    assert_eq!(result, 1);
+}
+
+#[test]
+fn shared_text_unicode_index_and_slice() {
+    let source = r#"
+var value = "aé🙂z"
+main = if value[1] == "é" and value[-2] == "🙂" and value[1:3] == "é🙂": 1 else: 0
+"#;
+    let module = simple_parser::Parser::new(source).parse().expect("parse Unicode text operations");
+    let result = crate::interpreter::evaluate_module(&module.items).expect("evaluate Unicode text operations");
+    assert_eq!(result, 1);
+}
+
+#[test]
+fn shared_text_content_key_display_and_ordering() {
+    let left = Value::text("alpha".to_string());
+    let equal = Value::text("alpha".to_string());
+    assert_eq!(left, equal);
+    assert_eq!(left.to_key_string(), "alpha");
+    assert_eq!(left.to_display_string(), "alpha");
+
+    let source = r#"main = if "alpha" < "beta" and "beta" > "alpha": 1 else: 0"#;
+    let module = simple_parser::Parser::new(source).parse().expect("parse text ordering");
+    assert_eq!(crate::interpreter::evaluate_module(&module.items).expect("evaluate text ordering"), 1);
+}
+
+#[test]
+fn shared_text_transform_alias_isolation() {
+    let source = r#"
+var original = " Abc "
+var upper = original.to_upper()
+var replaced = original.replace("b", "x")
+var sliced = original[1:4]
+main = if original == " Abc " and upper == " ABC " and replaced == " Axc " and sliced == "Abc": 1 else: 0
+"#;
+    let module = simple_parser::Parser::new(source).parse().expect("parse text transforms");
+    assert_eq!(crate::interpreter::evaluate_module(&module.items).expect("evaluate text transforms"), 1);
+}
+
+#[test]
 fn test_value_equality_mismatch() {
     assert_ne!(Value::Int(42), Value::Float(42.0));
-    assert_ne!(Value::Int(42), Value::text("42".into()));
+    assert_ne!(Value::Int(42), Value::text("42"));
     assert_ne!(Value::Bool(true), Value::Int(1));
 }
 

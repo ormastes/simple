@@ -1,0 +1,66 @@
+diff --git a/src/compiler/50.mir/mir_lowering_stmts.spl b/src/compiler/50.mir/mir_lowering_stmts.spl
+index f596b5ad508..bcb2d5fbe70 100644
+--- a/src/compiler/50.mir/mir_lowering_stmts.spl
++++ b/src/compiler/50.mir/mir_lowering_stmts.spl
+@@ -1009,10 +1009,17 @@ impl MirLowering:
+         var b_blocks = self.builder
+         val cond_block = b_blocks.new_block(Some("for_arr_cond"))
+         val body_block = b_blocks.new_block(Some("for_arr_body"))
++        val inc_block = b_blocks.new_block(Some("for_arr_inc"))
+         val exit_block = b_blocks.new_block(Some("for_arr_exit"))
+         self.builder = b_blocks
+ 
+-        self.loop_stack = self.loop_stack.push((cond_block, exit_block))
++        # `continue` must target the increment block, not cond_block directly:
++        # this is a counted-index desugaring of `for x in arr`, so the counter
++        # increment is compiler-synthesized and must run on every iteration
++        # (including ones ended early by `continue`). Pointing continue at
++        # cond_block skips the increment, so the counter never advances and the
++        # loop spins forever once a `continue` fires.
++        self.loop_stack = self.loop_stack.push((inc_block, exit_block))
+ 
+         # Jump to condition check
+         var b_goto = self.builder
+@@ -1050,10 +1057,20 @@ impl MirLowering:
+             elem_local = b_get.new_temp(MirType.i64())
+         self.builder = b_get
+ 
+-        # Bind loop variable to the element
++        # rt_array_get returns a TAGGED runtime value (value << 3 for small
++        # ints, boxed handle otherwise). Decode it to the element's primitive
++        # type before binding, exactly as the direct index-read path does
++        # (decode_runtime_value in _MirLoweringExpr/expr_dispatch.spl). Without
++        # this the loop variable stays tagged, so arithmetic and comparisons
++        # against untagged literals are wrong (e.g. `x == 3` never matches a
++        # tagged element, and `total + x` accumulates value<<3). Regression
++        # introduced when array elements began carrying tagged runtime values.
++        val decoded_elem = self.decode_runtime_value(elem_local, element_type)
++
++        # Bind loop variable to the (decoded) element
+         var b_bind = self.builder
+         val loop_var = b_bind.new_local(nil, element_type, LocalKind.Var)
+-        b_bind.emit_copy(loop_var, elem_local)
++        b_bind.emit_copy(loop_var, decoded_elem)
+         self.builder = b_bind
+         val loop_var_id = mir_stmt_symbol_id_value(var_)
+         if loop_var_id < 0:
+@@ -1064,8 +1081,18 @@ impl MirLowering:
+         # Lower the loop body
+         self.lower_block(body)
+ 
+-        # Increment: i = i + 1
++        # Fall through into the increment block. If the body's last statement
++        # already terminated the current block (an explicit break/continue/
++        # return with no trailing code), don't add a second terminator -- let
++        # that jump stand.
++        var b_body_end = self.builder
++        if not b_body_end.current_block_has_explicit_terminator():
++            b_body_end.terminate_goto(inc_block)
++        self.builder = b_body_end
++
++        # Increment: i = i + 1 (also the `continue` target -- see loop_stack push)
+         var b_inc = self.builder
++        b_inc.switch_to_block(inc_block)
+         val incremented = b_inc.emit_binop(
+             MirBinOp.Add,
+             mir_operand_copy(counter),

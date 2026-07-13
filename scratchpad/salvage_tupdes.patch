@@ -1,0 +1,180 @@
+diff --git a/src/compiler/10.frontend/core/parser_stmts.spl b/src/compiler/10.frontend/core/parser_stmts.spl
+index e35401f7a62..0fcc000b692 100644
+--- a/src/compiler/10.frontend/core/parser_stmts.spl
++++ b/src/compiler/10.frontend/core/parser_stmts.spl
+@@ -1258,10 +1258,21 @@ fn parse_tuple_destructure_val() -> i64:
+     # The evaluator detects the "(" prefix and destructures
+     parser_advance()  # consume (
+     var joined = "("
+-    # G30: accept _ (kind 169); G40: accept any keyword via G26 round-trip
++    # G30: accept _ (kind 169); G26: plain Ident MUST be captured via
++    # par_text_get() before the keyword round-trip check below -- that check
++    # (tok_kind_name(TOK_IDENT) == "Ident", keyword_lookup("Ident") ==
++    # TOK_IDENT since "Ident" is not a real keyword) is trivially true for
++    # EVERY plain identifier, so without this explicit TOK_IDENT branch first
++    # every destructured name silently became the literal string "Ident"
++    # (same class of bug already fixed for single-name `val` in
++    # parse_val_decl_stmt above -- that fix never propagated to the
++    # parenthesized tuple form). G40: accept any keyword via G26 round-trip.
+     if par_kind_get() == 169:
+         joined = joined + "_"
+         parser_advance()
++    elif par_kind_get() == TOK_IDENT:
++        joined = joined + par_text_get()
++        parser_expect(6)
+     else:
+         val tdv0_kn = tok_kind_name(par_kind_get())
+         if keyword_lookup(tdv0_kn) == par_kind_get():
+@@ -1275,6 +1286,9 @@ fn parse_tuple_destructure_val() -> i64:
+         if par_kind_get() == 169:
+             joined = joined + ",_"
+             parser_advance()
++        elif par_kind_get() == TOK_IDENT:
++            joined = joined + "," + par_text_get()
++            parser_expect(6)
+         else:
+             val tdvN_kn = tok_kind_name(par_kind_get())
+             if keyword_lookup(tdvN_kn) == par_kind_get():
+diff --git a/src/compiler/20.hir/hir_lowering/expressions.spl b/src/compiler/20.hir/hir_lowering/expressions.spl
+index 88072129a9e..543dc812597 100644
+--- a/src/compiler/20.hir/hir_lowering/expressions.spl
++++ b/src/compiler/20.hir/hir_lowering/expressions.spl
+@@ -794,21 +794,29 @@ impl HirLowering:
+         val stmt_count = b.stmts.len()
+         var stmt_idx = 0
+         while stmt_idx < stmt_count:
+-            val lowered = self.lower_hir_stmt(b.stmts[stmt_idx])
+-            if stmt_idx == stmt_count - 1:
+-                # QUALIFIED pattern required: bare `case Expr(expr)` collides with
+-                # the frontend `struct Expr`, so the seed's unqualified-pattern
+-                # heuristic (stmt_lowering.rs, enum_name == "_") extracted the
+-                # payload as a struct FieldAccess at offset 0 (the enum header) —
+-                # a garbage HirExpr stored as block.value (iterations 10/14/15).
+-                match lowered.kind:
+-                    case HirStmtKind.Expr(expr):
+-                        block_has_value = true
+-                        block_value_expr = expr
+-                    case _:
+-                        stmts = stmts.push(lowered)
+-            else:
+-                stmts = stmts.push(lowered)
++            # A single source statement may desugar into several HIR statements
++            # (tuple destructuring, see lower_hir_stmt_multi) -- splice them all
++            # in, applying the tail-value extraction only to the very last one.
++            val lowered_list = self.lower_hir_stmt_multi(b.stmts[stmt_idx])
++            val lowered_count = lowered_list.len()
++            var li = 0
++            while li < lowered_count:
++                val lowered = lowered_list[li]
++                if stmt_idx == stmt_count - 1 and li == lowered_count - 1:
++                    # QUALIFIED pattern required: bare `case Expr(expr)` collides with
++                    # the frontend `struct Expr`, so the seed's unqualified-pattern
++                    # heuristic (stmt_lowering.rs, enum_name == "_") extracted the
++                    # payload as a struct FieldAccess at offset 0 (the enum header) —
++                    # a garbage HirExpr stored as block.value (iterations 10/14/15).
++                    match lowered.kind:
++                        case HirStmtKind.Expr(expr):
++                            block_has_value = true
++                            block_value_expr = expr
++                        case _:
++                            stmts = stmts.push(lowered)
++                else:
++                    stmts = stmts.push(lowered)
++                li = li + 1
+             stmt_idx = stmt_idx + 1
+ 
+         self.symbols.pop_scope()
+@@ -848,7 +856,11 @@ impl HirLowering:
+             var boot_stmts: [HirStmt] = []
+             var boot_idx = 0
+             while boot_idx < b.stmts.len():
+-                boot_stmts = boot_stmts.push(self.lower_hir_stmt(b.stmts[boot_idx]))
++                val boot_lowered_list = self.lower_hir_stmt_multi(b.stmts[boot_idx])
++                var boot_li = 0
++                while boot_li < boot_lowered_list.len():
++                    boot_stmts = boot_stmts.push(boot_lowered_list[boot_li])
++                    boot_li = boot_li + 1
+                 boot_idx = boot_idx + 1
+             eprint("[hir-lower] lower_block_unit:done")
+             self.symbols.pop_scope()
+@@ -859,8 +871,11 @@ impl HirLowering:
+         val stmt_count = b.stmts.len()
+         var stmt_idx = 0
+         while stmt_idx < stmt_count:
+-            val lowered: HirStmt = self.lower_hir_stmt(b.stmts[stmt_idx])
+-            stmts = stmts.push(lowered)
++            val lowered_list: [HirStmt] = self.lower_hir_stmt_multi(b.stmts[stmt_idx])
++            var li = 0
++            while li < lowered_list.len():
++                stmts = stmts.push(lowered_list[li])
++                li = li + 1
+             stmt_idx = stmt_idx + 1
+         self.symbols.pop_scope()
+ 
+diff --git a/src/compiler/20.hir/hir_lowering/statements.spl b/src/compiler/20.hir/hir_lowering/statements.spl
+index d695dae0fb1..c8160eceebf 100644
+--- a/src/compiler/20.hir/hir_lowering/statements.spl
++++ b/src/compiler/20.hir/hir_lowering/statements.spl
+@@ -56,6 +56,62 @@ impl HirLowering:
+             result = result.push(hir_item)
+         result
+ 
++    # Lower a single source statement to zero-or-more HIR statements. Almost
++    # every statement is 1:1 -- the exception is literal-tuple destructuring
++    # (`val (a, b) = (x, y)`), which the parser encodes as a single
++    # StmtKind.Val whose `name` is the literal text "(a,b)" (see
++    # parse_tuple_destructure_val in parser_stmts.spl). That single source
++    # statement desugars into N ordinary `Let` bindings here, so callers that
++    # iterate over a block's statements must call this instead of
++    # `lower_hir_stmt` and splice the results (see lower_hir_block /
++    # lower_hir_block_unit in expressions.spl).
++    me lower_hir_stmt_multi(s: Stmt) -> [HirStmt]:
++        val stmt_kind_value: StmtKind = s.kind
++        val sk_disc: i64 = hir_stmt_kind_disc(stmt_kind_value)
++        val sk_dummy: Expr = Expr(kind: ExprKind.NilLit, span: s.span)
++        if sk_disc == hir_stmt_kind_disc(StmtKind.Val("", nil, sk_dummy)):
++            val v_name = match stmt_kind_value:
++                case StmtKind.Val(vname, _, _):
++                    vname
++                case _:
++                    ""
++            if v_name.len() > 1 and v_name[0:1] == "(":
++                val v_init = match stmt_kind_value:
++                    case StmtKind.Val(_, _, vinit):
++                        vinit
++                    case _:
++                        sk_dummy
++                return self.lower_hir_tuple_destructure_val(v_name, v_init, s.span)
++        [self.lower_hir_stmt(s)]
++
++    # Desugar `val (a, b, ...) = <literal tuple expr>` into N `Let` bindings,
++    # evaluating each element expression exactly once, left to right. Only a
++    # LITERAL tuple initializer (`ExprKind.TupleLit`) is supported -- anything
++    # else (a variable, a function call returning a tuple, ...) is a loud HIR
++    # error so a non-literal initializer never silently produces a wrong
++    # answer.
++    me lower_hir_tuple_destructure_val(joined_name: text, init: Expr, span: Span) -> [HirStmt]:
++        val inner = joined_name[1:joined_name.len() - 1]
++        val names = inner.split(",")
++        match init.kind:
++            case ExprKind.TupleLit(elements):
++                if elements.len() != names.len():
++                    self.error("tuple destructure arity mismatch: " + names.len().to_text() + " name(s) on the left vs " + elements.len().to_text() + " value(s) on the right", span)
++                    [HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, type_: nil, span: span)), span: span)]
++                else:
++                    var result: [HirStmt] = []
++                    var i = 0
++                    while i < names.len():
++                        val nm = names[i]
++                        val hir_init = self.lower_hir_expr(elements[i])
++                        val symbol = self.symbols.define(nm, SymbolKind.Variable, nil, span, false, false, nil)
++                        result = result.push(HirStmt(kind: HirStmtKind.Let(symbol, nil, hir_init), span: span))
++                        i = i + 1
++                    result
++            case _:
++                self.error("tuple destructure `val (" + inner + ") = ...` requires a literal tuple initializer, e.g. `val (a, b) = (x, y)`; a non-literal initializer (variable, function call, ...) is not supported", span)
++                [HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, type_: nil, span: span)), span: span)]
++
+     me lower_hir_stmt(s: Stmt) -> HirStmt:
+         if (hir_stmt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+             eprint("[hir-lower] lower_stmt:start")

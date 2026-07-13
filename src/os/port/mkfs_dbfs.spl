@@ -1,0 +1,50 @@
+# mkfs.dbfs — build a bootable DBFS root filesystem image.
+#
+# Wraps build_dbfs_rootfs_image (src/os/port/dbfs_image.spl) with a small
+# host-run CLI entry and a minimal seed file set, so a DBFS root image can be
+# produced the same way disk_image_bake.spl produces a FAT32 one.
+#
+# Usage:
+#   bin/simple run src/os/port/mkfs_dbfs.spl -- [output_path] [size_sectors]
+#   (default output: build/os/simpleos_dbfs_root.img, default size: 65536
+#   sectors == 32 MiB)
+#
+# Layout (see dbfs_image.spl): LBA 0-1 reserved (NVFS coexistence, zeroed),
+# LBA 2-3 DBFS superblock replicas, LBA 4+ DBFS arena.
+
+use os.port.dbfs_image.{DbfsImageConfig, PayloadEntry, build_dbfs_rootfs_image}
+use std.process
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+val DEFAULT_OUTPUT: text = "build/os/simpleos_dbfs_root.img"
+val DEFAULT_SIZE_SECTORS: u64 = 65536u64   # 32 MiB
+
+fn _mkfs_dbfs_text_bytes(s: text) -> [u8]:
+    rt_text_to_bytes(s)
+
+fn _mkfs_dbfs_seeds() -> [PayloadEntry]:
+    [
+        PayloadEntry(
+            name: "/etc/motd",
+            data: _mkfs_dbfs_text_bytes("SimpleOS DBFS root\n")
+        ),
+        PayloadEntry(
+            name: "/README",
+            data: _mkfs_dbfs_text_bytes(
+                "This is a DBFS-rooted SimpleOS image.\n" +
+                "See doc/06_spec/build/dbfs_posix_d3_1_spec.md for the POSIX shim status.\n"
+            )
+        ),
+    ]
+
+fn main(args: [text]):
+    val output = if args.len() > 0: args[0] else: DEFAULT_OUTPUT
+    val size_sectors = if args.len() > 1: args[1].to_i64().to_u64() else: DEFAULT_SIZE_SECTORS
+    val cfg = DbfsImageConfig(size_sectors: size_sectors, seeds: _mkfs_dbfs_seeds())
+    match build_dbfs_rootfs_image(cfg, output):
+        case Ok(_):
+            print "mkfs.dbfs: wrote {output} ({size_sectors} sectors)"
+        case Err(e):
+            print "mkfs.dbfs: FAILED: {e}"
+            process.exit(1)

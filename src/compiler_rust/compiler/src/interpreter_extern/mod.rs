@@ -209,10 +209,6 @@ fn rt_tls_get_protocol_version_stub(_args: &[Value]) -> Result<Value, CompileErr
     Ok(Value::text(String::new()))
 }
 
-/// `rt_perf_*` stubs — perf module not yet implemented
-fn rt_perf_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Nil)
-}
 
 /// Build the dispatch table mapping extern function names to their implementations.
 /// Only includes "simple" functions that take `&[Value]` and return `Result<Value, CompileError>`.
@@ -2130,17 +2126,17 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_package_chmod", package::chmod);
     insert_simple!("rt_package_exists", package::exists);
     insert_simple!("rt_package_is_dir", package::is_dir);
-    // Performance stubs
-    insert_simple!("rt_perf_enable", rt_perf_stub);
-    insert_simple!("rt_perf_enabled", rt_perf_stub);
-    insert_simple!("rt_perf_clock_ns", rt_perf_stub);
-    insert_simple!("rt_perf_rdtsc", rt_perf_stub);
-    insert_simple!("rt_perf_cycles_to_ns", rt_perf_stub);
-    insert_simple!("rt_perf_region_enter", rt_perf_stub);
-    insert_simple!("rt_perf_region_exit", rt_perf_stub);
-    insert_simple!("rt_perf_dump_sdn", rt_perf_stub);
-    insert_simple!("rt_perf_free_sdn", rt_perf_stub);
-    insert_simple!("rt_perf_clear", rt_perf_stub);
+    // Performance primitives (Lane L observability — real impl, time.rs)
+    insert_simple!("rt_perf_enable", time::rt_perf_enable_fn);
+    insert_simple!("rt_perf_enabled", time::rt_perf_enabled_fn);
+    insert_simple!("rt_perf_clock_ns", time::rt_perf_clock_ns_fn);
+    insert_simple!("rt_perf_rdtsc", time::rt_perf_rdtsc_fn);
+    insert_simple!("rt_perf_cycles_to_ns", time::rt_perf_cycles_to_ns_fn);
+    insert_simple!("rt_perf_region_enter", time::rt_perf_region_enter_fn);
+    insert_simple!("rt_perf_region_exit", time::rt_perf_region_exit_fn);
+    insert_simple!("rt_perf_dump_sdn", time::rt_perf_dump_sdn_fn);
+    insert_simple!("rt_perf_free_sdn", time::rt_perf_free_sdn_fn);
+    insert_simple!("rt_perf_clear", time::rt_perf_clear_fn);
 
     m.insert(
         "compiler__driver__driver__compiler_driver_create",

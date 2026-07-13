@@ -1,0 +1,66 @@
+diff --git a/src/compiler/20.hir/hir_lowering/statements.spl b/src/compiler/20.hir/hir_lowering/statements.spl
+index ecbbb30c5c9..89fa6899946 100644
+--- a/src/compiler/20.hir/hir_lowering/statements.spl
++++ b/src/compiler/20.hir/hir_lowering/statements.spl
+@@ -82,6 +82,20 @@ impl HirLowering:
+                     case _:
+                         sk_dummy
+                 return self.lower_hir_tuple_destructure_val(v_name, v_init, s.span)
++        if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", nil, nil)):
++            val vr_name = match stmt_kind_value:
++                case StmtKind.Var(vrname, _, _):
++                    vrname
++                case _:
++                    ""
++            if vr_name.len() > 1 and vr_name[0:1] == "(":
++                val vr_init = match stmt_kind_value:
++                    case StmtKind.Var(_, _, vrinit):
++                        vrinit
++                    case _:
++                        nil
++                val vr_init_expr = vr_init ?? sk_dummy
++                return self.lower_hir_tuple_destructure_var(vr_name, vr_init_expr, s.span)
+         [self.lower_hir_stmt(s)]
+ 
+     # Desugar `val (a, b, ...) = <literal tuple expr>` into N `Let` bindings,
+@@ -120,6 +134,40 @@ impl HirLowering:
+                 self.error("unresolved name: tuple destructure `val (" + inner + ") = ...` requires a literal tuple initializer, e.g. `val (a, b) = (x, y)`; a non-literal initializer (variable, function call, ...) is not supported", span)
+                 [HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, type_: nil, span: span)), span: span)]
+ 
++    # Desugar `var (a, b, ...) = <literal tuple expr>` into N mutable `Let`
++    # bindings, mirroring lower_hir_tuple_destructure_val above but marking
++    # each symbol mutable so a later `a = 5` reassignment is legal (a `val`
++    # binding would loud-fail reassignment instead).
++    me lower_hir_tuple_destructure_var(joined_name: text, init: Expr, span: Span) -> [HirStmt]:
++        val inner = joined_name[1:joined_name.len() - 1]
++        val names = inner.split(",")
++        match init.kind:
++            case ExprKind.TupleLit(elements):
++                if elements.len() != names.len():
++                    # The "unresolved name:" prefix is REQUIRED for loudness:
++                    # driver.spl's _hir_lowering_error_is_fatal only promotes
++                    # HIR lowering errors with that prefix to fatal build
++                    # errors -- anything else is silently downgraded to a
++                    # warning and never surfaces.
++                    self.error("unresolved name: tuple destructure arity mismatch for `var (" + inner + ")`: " + names.len().to_text() + " name(s) on the left vs " + elements.len().to_text() + " value(s) on the right", span)
++                    [HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, type_: nil, span: span)), span: span)]
++                else:
++                    var result: [HirStmt] = []
++                    var i = 0
++                    while i < names.len():
++                        val nm = names[i]
++                        val hir_init = self.lower_hir_expr(elements[i])
++                        val symbol = self.symbols.define(nm, SymbolKind.Variable, nil, span, false, true, nil)
++                        result = result.push(HirStmt(kind: HirStmtKind.Let(symbol, nil, hir_init), span: span))
++                        i = i + 1
++                    result
++            case _:
++                # "unresolved name:" prefix: see arity-mismatch note above --
++                # required so this stays a FATAL build error instead of a
++                # silently-downgraded warning.
++                self.error("unresolved name: tuple destructure `var (" + inner + ") = ...` requires a literal tuple initializer, e.g. `var (a, b) = (x, y)`; a non-literal initializer (variable, function call, ...) is not supported", span)
++                [HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, type_: nil, span: span)), span: span)]
++
+     me lower_hir_stmt(s: Stmt) -> HirStmt:
+         if (hir_stmt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+             eprint("[hir-lower] lower_stmt:start")

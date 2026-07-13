@@ -395,22 +395,237 @@ pub fn rt_sleep_ms(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 // ============================================================================
-// Profiler SFFI Stubs (no-op in interpreter mode)
+// Profiler + Perf State (Lane L observability — interpreter mode, real impl)
+// ============================================================================
+//
+// Backs rt_profiler_*/rt_perf_* when Simple code runs under the tree-walk
+// interpreter. Independent of the Cranelift-native callback path in
+// `simple_runtime::value::profiler_sffi` (only wired for JIT/AOT-compiled
+// code) — no native codegen callback is ever registered in interpreter mode,
+// so these were previously no-ops. State lives in process-global maps keyed
+// by region/function name.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
+
+/// Aggregated timing stats for one named region (function or perf region).
+#[derive(Clone, Copy, Default)]
+struct PerfRegionStat {
+    count: i64,
+    total_ns: i64,
+    min_ns: i64,
+    max_ns: i64,
+}
+
+impl PerfRegionStat {
+    fn record(&mut self, elapsed_ns: i64) {
+        if self.count == 0 {
+            self.min_ns = elapsed_ns;
+            self.max_ns = elapsed_ns;
+        } else {
+            if elapsed_ns < self.min_ns {
+                self.min_ns = elapsed_ns;
+            }
+            if elapsed_ns > self.max_ns {
+                self.max_ns = elapsed_ns;
+            }
+        }
+        self.count += 1;
+        self.total_ns += elapsed_ns;
+    }
+}
+
+/// rt_profiler_record_call/record_return is always live in interpreter mode
+/// (there is no separate compiled path to fall back to).
+static PROFILER_ACTIVE: AtomicBool = AtomicBool::new(true);
+/// rt_perf_region_enter/exit only records once rt_perf_enable() is called,
+/// matching the ffi_gen contract ("Enable performance tracking at runtime").
+static PERF_ENABLED: AtomicBool = AtomicBool::new(false);
+
+fn perf_regions() -> &'static Mutex<HashMap<String, PerfRegionStat>> {
+    static MAP: OnceLock<Mutex<HashMap<String, PerfRegionStat>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn perf_call_stack() -> &'static Mutex<Vec<(String, i64)>> {
+    static STACK: OnceLock<Mutex<Vec<(String, i64)>>> = OnceLock::new();
+    STACK.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Arbitrary-baseline monotonic clock (Instant-backed). Unlike
+/// `rt_time_monotonic_ns` above — which is epoch-based via SystemTime and
+/// can jump with wall-clock adjustments despite its name — this is a true
+/// monotonic clock, matching the ffi_gen doc for `rt_perf_clock_ns`
+/// ("monotonic nanoseconds since arbitrary baseline").
+fn perf_clock_ns() -> i64 {
+    static BASE: OnceLock<Instant> = OnceLock::new();
+    BASE.get_or_init(Instant::now).elapsed().as_nanos() as i64
+}
+
+fn perf_enter(key: String) {
+    perf_call_stack().lock().unwrap().push((key, perf_clock_ns()));
+}
+
+fn perf_exit(key: &str) {
+    let mut stack = perf_call_stack().lock().unwrap();
+    // Pop the most recent matching frame (LIFO). Tolerate mismatched
+    // call/return pairs by falling back to the top-of-stack frame so one
+    // bad instrumentation site can't wedge the whole stack.
+    let idx = stack
+        .iter()
+        .rposition(|(name, _)| name == key)
+        .unwrap_or_else(|| stack.len().wrapping_sub(1));
+    if idx >= stack.len() {
+        return;
+    }
+    let (_, start_ns) = stack.remove(idx);
+    drop(stack);
+    let elapsed = (perf_clock_ns() - start_ns).max(0);
+    perf_regions().lock().unwrap().entry(key.to_string()).or_default().record(elapsed);
+}
+
+/// Record a function call entry (interpreter mode).
+///
+/// Callable from Simple as: `rt_profiler_record_call(function_name, file, line)`
+pub fn rt_profiler_record_call_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if !PROFILER_ACTIVE.load(Ordering::Relaxed) {
+        return Ok(Value::Nil);
+    }
+    let name = args.first().and_then(|v| v.as_text_str()).unwrap_or("<unknown>");
+    perf_enter(name.to_string());
+    Ok(Value::Nil)
+}
+
+/// Record a function return exit (interpreter mode).
+///
+/// Callable from Simple as: `rt_profiler_record_return(function_name, file, line)`
+pub fn rt_profiler_record_return_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if !PROFILER_ACTIVE.load(Ordering::Relaxed) {
+        return Ok(Value::Nil);
+    }
+    let name = args.first().and_then(|v| v.as_text_str()).unwrap_or("<unknown>");
+    perf_exit(name);
+    Ok(Value::Nil)
+}
+
+/// Check if the interpreter-mode profiler is active.
+pub fn rt_profiler_is_active_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Bool(PROFILER_ACTIVE.load(Ordering::Relaxed)))
+}
+
+// ============================================================================
+// rt_perf_* — Perf Primitives (interpreter mode, real implementation)
+//
+// Contract mirrors src/compiler/90.tools/ffi_gen/specs/perf.spl. Previously
+// all ten of these dispatched to a shared `rt_perf_stub` no-op in mod.rs.
 // ============================================================================
 
-/// Record a function call (no-op in interpreter)
-pub fn rt_profiler_record_call_fn(_args: &[Value]) -> Result<Value, CompileError> {
+/// Enable perf region tracking (rt_perf_region_enter/exit becomes live).
+pub fn rt_perf_enable_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    PERF_ENABLED.store(true, Ordering::SeqCst);
     Ok(Value::Nil)
 }
 
-/// Record a function return (no-op in interpreter)
-pub fn rt_profiler_record_return_fn(_args: &[Value]) -> Result<Value, CompileError> {
+/// Check if perf region tracking is enabled.
+pub fn rt_perf_enabled_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Bool(PERF_ENABLED.load(Ordering::Relaxed)))
+}
+
+/// Get monotonic nanoseconds since an arbitrary process-local baseline.
+pub fn rt_perf_clock_ns_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(perf_clock_ns()))
+}
+
+/// Get CPU cycle counter via rdtsc on x86_64; falls back to perf_clock_ns
+/// on other arches (no portable unprivileged cycle counter there).
+#[cfg(target_arch = "x86_64")]
+pub fn rt_perf_rdtsc_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    let cycles = unsafe { core::arch::x86_64::_rdtsc() };
+    Ok(Value::Int(cycles as i64))
+}
+
+/// Get CPU cycle counter (non-x86_64 fallback: monotonic ns baseline).
+#[cfg(not(target_arch = "x86_64"))]
+pub fn rt_perf_rdtsc_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(perf_clock_ns()))
+}
+
+/// Convert rdtsc cycles to nanoseconds given CPU frequency in MHz.
+pub fn rt_perf_cycles_to_ns_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let cycles = match args.first() {
+        Some(Value::Int(v)) => *v,
+        _ => return Err(CompileError::semantic("rt_perf_cycles_to_ns requires i64 cycles argument")),
+    };
+    let freq_mhz = match args.get(1) {
+        Some(Value::Int(v)) if *v != 0 => *v,
+        _ => return Err(CompileError::semantic("rt_perf_cycles_to_ns requires nonzero i64 freq_mhz argument")),
+    };
+    let ns = (cycles as i128 * 1000i128 / freq_mhz as i128) as i64;
+    Ok(Value::Int(ns))
+}
+
+/// Record entry into a performance region (keyed by numeric region_id).
+pub fn rt_perf_region_enter_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if !PERF_ENABLED.load(Ordering::Relaxed) {
+        return Ok(Value::Nil);
+    }
+    let region_id = match args.first() {
+        Some(Value::Int(v)) => *v,
+        _ => return Err(CompileError::semantic("rt_perf_region_enter requires i64 region_id argument")),
+    };
+    perf_enter(format!("region:{region_id}"));
     Ok(Value::Nil)
 }
 
-/// Check if profiler is active (always false in interpreter)
-pub fn rt_profiler_is_active_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(false))
+/// Record exit from a performance region.
+pub fn rt_perf_region_exit_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if !PERF_ENABLED.load(Ordering::Relaxed) {
+        return Ok(Value::Nil);
+    }
+    let region_id = match args.first() {
+        Some(Value::Int(v)) => *v,
+        _ => return Err(CompileError::semantic("rt_perf_region_exit requires i64 region_id argument")),
+    };
+    perf_exit(&format!("region:{region_id}"));
+    Ok(Value::Nil)
+}
+
+/// Dump collected rt_profiler_*/rt_perf_region_* stats as an SDN string.
+pub fn rt_perf_dump_sdn_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    let regions = perf_regions().lock().unwrap();
+    let mut out = String::from("perf_regions:\n");
+    if regions.is_empty() {
+        out.push_str("  []\n");
+    } else {
+        let mut names: Vec<&String> = regions.keys().collect();
+        names.sort();
+        for name in names {
+            let stat = &regions[name];
+            let avg_ns = if stat.count > 0 { stat.total_ns / stat.count } else { 0 };
+            let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+            out.push_str(&format!(
+                "  - name: \"{escaped}\"\n    count: {}\n    total_ns: {}\n    avg_ns: {}\n    min_ns: {}\n    max_ns: {}\n",
+                stat.count, stat.total_ns, avg_ns, stat.min_ns, stat.max_ns
+            ));
+        }
+    }
+    Ok(Value::text(out))
+}
+
+/// Free an SDN string returned by rt_perf_dump_sdn. No-op in interpreter
+/// mode — interpreter `Value` strings are reference-counted, not manually
+/// allocated/freed pointers.
+pub fn rt_perf_free_sdn_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Nil)
+}
+
+/// Clear all collected perf/profiler region data and reset the call stack.
+pub fn rt_perf_clear_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    perf_regions().lock().unwrap().clear();
+    perf_call_stack().lock().unwrap().clear();
+    Ok(Value::Nil)
 }
 
 #[cfg(test)]

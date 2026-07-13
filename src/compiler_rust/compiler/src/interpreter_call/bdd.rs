@@ -209,7 +209,7 @@ fn get_current_describe_path() -> String {
         for group in stack.iter() {
             if let Value::Object { fields, .. } = group {
                 if let Some(Value::Str(desc)) = fields.get("description") {
-                    parts.push(desc.clone());
+                    parts.push(desc.as_ref().clone());
                 }
             }
         }
@@ -1583,7 +1583,7 @@ pub(super) fn eval_bdd_builtin(
                 impl_methods,
             )?;
             let name_str = match name {
-                Value::Str(s) => s,
+                Value::Str(s) => s.as_ref().clone(),
                 Value::Symbol(s) => s,
                 _ => "".to_string(),
             };
@@ -1605,7 +1605,7 @@ pub(super) fn eval_bdd_builtin(
                 impl_methods,
             )?;
             let name_str = match name {
-                Value::Str(s) => s,
+                Value::Str(s) => s.as_ref().clone(),
                 Value::Symbol(s) => s,
                 _ => "".to_string(),
             };
@@ -1641,7 +1641,7 @@ pub(super) fn eval_bdd_builtin(
                 impl_methods,
             )?;
             let name_str = match name {
-                Value::Str(s) => s,
+                Value::Str(s) => s.as_ref().clone(),
                 Value::Symbol(s) => s,
                 _ => "".to_string(),
             };
@@ -1663,7 +1663,7 @@ pub(super) fn eval_bdd_builtin(
                 impl_methods,
             )?;
             let name_str = match name {
-                Value::Str(s) => s,
+                Value::Str(s) => s.as_ref().clone(),
                 Value::Symbol(s) => s,
                 _ => "".to_string(),
             };

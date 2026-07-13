@@ -18,7 +18,7 @@ use std::path::Path;
 /// Helper to extract string argument
 fn get_str_arg(args: &[Value], idx: usize) -> String {
     match args.get(idx) {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => s.as_ref().clone(),
         _ => String::new(),
     }
 }

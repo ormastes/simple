@@ -2012,7 +2012,7 @@ pub fn rt_text_to_upper_ascii(args: &[Value]) -> Result<Value, CompileError> {
     }
     let s = extract_str("rt_text_to_upper_ascii", &args[0])?;
     let bytes: Vec<u8> = s.bytes().map(|b| b.to_ascii_uppercase()).collect();
-    Ok(Value::text(String::from_utf8_lossy(&bytes).into()))
+    Ok(Value::text(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 pub fn rt_text_to_lower_ascii(args: &[Value]) -> Result<Value, CompileError> {
@@ -2023,7 +2023,7 @@ pub fn rt_text_to_lower_ascii(args: &[Value]) -> Result<Value, CompileError> {
     }
     let s = extract_str("rt_text_to_lower_ascii", &args[0])?;
     let bytes: Vec<u8> = s.bytes().map(|b| b.to_ascii_lowercase()).collect();
-    Ok(Value::text(String::from_utf8_lossy(&bytes).into()))
+    Ok(Value::text(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 pub fn rt_swi_build(args: &[Value]) -> Result<Value, CompileError> {

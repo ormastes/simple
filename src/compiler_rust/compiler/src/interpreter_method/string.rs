@@ -152,19 +152,19 @@ if let Value::Str(ref s) = recv_val {
             }
             return Ok(Value::text(result));
         }
-        "rev" | "reversed" => return Ok(Value::text(s.chars().rev().collect())),
+        "rev" | "reversed" => return Ok(Value::text(s.chars().rev().collect::<String>())),
         "sorted" => {
             let mut chars: Vec<char> = s.chars().collect();
             chars.sort();
-            return Ok(Value::text(chars.into_iter().collect()));
+            return Ok(Value::text(chars.into_iter().collect::<String>()));
         }
         "taken" | "take" => {
             let n = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            return Ok(Value::text(s.chars().take(n).collect()));
+            return Ok(Value::text(s.chars().take(n).collect::<String>()));
         }
         "dropped" | "drop" | "skip" => {
             let n = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            return Ok(Value::text(s.chars().skip(n).collect()));
+            return Ok(Value::text(s.chars().skip(n).collect::<String>()));
         }
         "appended" => {
             let ch = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
@@ -197,7 +197,7 @@ if let Value::Str(ref s) = recv_val {
             return Ok(Value::text(String::new()));
         }
         "split" => {
-            let sep = eval_arg(args, 0, Value::text(" ".into()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            let sep = eval_arg(args, 0, Value::text(" "), env, functions, classes, enums, impl_methods)?.to_key_string();
             let parts: Vec<Value> = s.split(&sep).map(|p| Value::text(p.to_string())).collect();
             return Ok(Value::array(parts));
         }
@@ -299,7 +299,7 @@ if let Value::Str(ref s) = recv_val {
             return Ok(Value::text(s.repeat(n)));
         }
         "rev" | "reverse" => {
-            return Ok(Value::text(s.chars().rev().collect()));
+            return Ok(Value::text(s.chars().rev().collect::<String>()));
         }
         "last_index_of" | "rfind" => {
             let needle = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
@@ -360,7 +360,7 @@ if let Value::Str(ref s) = recv_val {
         }
         "pad_left" | "pad_start" => {
             let width = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            let pad_char = eval_arg(args, 1, Value::text(" ".into()), env, functions, classes, enums, impl_methods)?
+            let pad_char = eval_arg(args, 1, Value::text(" "), env, functions, classes, enums, impl_methods)?
                 .to_key_string()
                 .chars()
                 .next()
@@ -374,7 +374,7 @@ if let Value::Str(ref s) = recv_val {
         }
         "pad_right" | "pad_end" => {
             let width = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            let pad_char = eval_arg(args, 1, Value::text(" ".into()), env, functions, classes, enums, impl_methods)?
+            let pad_char = eval_arg(args, 1, Value::text(" "), env, functions, classes, enums, impl_methods)?
                 .to_key_string()
                 .chars()
                 .next()
@@ -389,7 +389,7 @@ if let Value::Str(ref s) = recv_val {
         "center" => {
             // Center string with padding on both sides
             let width = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            let pad_char = eval_arg(args, 1, Value::text(" ".into()), env, functions, classes, enums, impl_methods)?
+            let pad_char = eval_arg(args, 1, Value::text(" "), env, functions, classes, enums, impl_methods)?
                 .to_key_string()
                 .chars()
                 .next()
@@ -494,13 +494,13 @@ if let Value::Str(ref s) = recv_val {
             )?;
 
             if let Value::Dict(data) = dict_val {
-                let mut result = s.clone();
+                let mut result = s.as_ref().clone();
                 for (key, value) in data.iter() {
                     let placeholder = format!("{{{}}}", key);
                     let replacement = value.to_display_string();
                     result = result.replace(&placeholder, &replacement);
                 }
-                return Ok(Value::Str(result));
+                return Ok(Value::text(result));
             } else {
                 return Err(crate::error::CompileError::semantic(
                     "FString.with expects a dict argument",

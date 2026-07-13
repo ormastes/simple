@@ -728,7 +728,7 @@ mod tests {
         rt_channel_close(&[Value::Int(id)]).expect("close");
 
         let received = rt_channel_try_recv(&[Value::Int(id)]).expect("try recv");
-        assert!(matches!(received, Value::Str(ref value) if value == "queued"));
+        assert!(matches!(received, Value::Str(ref value) if value.as_str() == "queued"));
         let empty = rt_channel_try_recv(&[Value::Int(id)]).expect("try recv empty");
         assert!(matches!(empty, Value::Nil));
     }

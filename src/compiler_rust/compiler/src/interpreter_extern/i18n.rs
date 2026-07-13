@@ -210,7 +210,7 @@ mod tests {
 
         assert!(result.is_ok());
         if let Ok(Value::Str(s)) = result {
-            assert_eq!(s, "error");
+            assert_eq!(s.as_str(), "error");
         }
     }
 }

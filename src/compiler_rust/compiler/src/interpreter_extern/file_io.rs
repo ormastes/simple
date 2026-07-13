@@ -74,7 +74,7 @@ fn make_none() -> Value {
 // Helper to extract path from first argument
 fn extract_path(args: &[Value], idx: usize) -> Result<String, CompileError> {
     match args.get(idx) {
-        Some(Value::Str(s)) => Ok(s.clone()),
+        Some(Value::Str(s)) => Ok(s.as_ref().clone()),
         _ => {
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
@@ -90,7 +90,7 @@ fn extract_path(args: &[Value], idx: usize) -> Result<String, CompileError> {
 // Helper to extract content string
 fn extract_content(args: &[Value], idx: usize) -> Result<String, CompileError> {
     match args.get(idx) {
-        Some(Value::Str(s)) => Ok(s.clone()),
+        Some(Value::Str(s)) => Ok(s.as_ref().clone()),
         _ => {
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
@@ -1014,7 +1014,7 @@ mod tests {
         std::fs::write(&path, b"abc").expect("seed write");
         let path = path.to_string_lossy().to_string();
 
-        let result = rt_file_truncate(&[Value::Str(path), Value::text("not-a-size".to_string())]);
+        let result = rt_file_truncate(&[Value::text(path), Value::text("not-a-size".to_string())]);
         assert!(result.is_err());
     }
 
@@ -1025,11 +1025,11 @@ mod tests {
         std::fs::write(&path, "durable").expect("write");
         let path = path.to_string_lossy().to_string();
 
-        let ok = rt_file_fsync(&[Value::Str(path)]).expect("fsync");
+        let ok = rt_file_fsync(&[Value::text(path)]).expect("fsync");
         assert_eq!(ok, Value::Bool(true));
 
         let missing = dir.path().join("missing.txt").to_string_lossy().to_string();
-        let fail = rt_file_fsync(&[Value::Str(missing)]).expect("missing fsync");
+        let fail = rt_file_fsync(&[Value::text(missing)]).expect("missing fsync");
         assert_eq!(fail, Value::Bool(false));
     }
 
@@ -1041,7 +1041,7 @@ mod tests {
         let path = path.to_string_lossy().to_string();
 
         let text = rt_file_mmap_read_text(&[Value::text(path.clone())]).expect("mmap text");
-        let bytes = rt_file_mmap_read_bytes(&[Value::Str(path)]).expect("mmap bytes");
+        let bytes = rt_file_mmap_read_bytes(&[Value::text(path)]).expect("mmap bytes");
 
         assert_eq!(text, Value::text("simple mmap".to_string()));
         match bytes {

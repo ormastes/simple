@@ -447,7 +447,7 @@ pub fn rt_cstring_to_text(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     if ptr.is_null() {
-        return Ok(Value::text("".into()));
+        return Ok(Value::text(""));
     }
 
     let c_str = unsafe { CStr::from_ptr(ptr) };

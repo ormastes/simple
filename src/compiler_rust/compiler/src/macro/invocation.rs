@@ -161,7 +161,7 @@ pub(crate) fn evaluate_macro_invocation(
 
                 // Extract type name from string or symbol
                 let type_name = match &type_val {
-                    Value::Str(s) => s.clone(),
+                    Value::Str(s) => s.as_ref().clone(),
                     Value::Symbol(s) => s.clone(),
                     _ => {
                         let ctx = ErrorContext::new()

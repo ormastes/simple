@@ -27,7 +27,7 @@ pub fn simple_layout_mark(args: &[Value]) -> Result<Value, CompileError> {
     })?;
 
     let marker_name = match val {
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => s.as_ref().clone(),
         Value::Symbol(s) => s.clone(),
         _ => {
             let ctx = ErrorContext::new()

@@ -132,12 +132,12 @@ pub fn rt_cargo_build(args: &[Value]) -> Result<Value, CompileError> {
 /// - tests_failed: i64
 pub fn rt_cargo_test(args: &[Value]) -> Result<Value, CompileError> {
     let package = match args.first() {
-        Some(Value::Str(s)) if !s.is_empty() => s.clone(),
+        Some(Value::Str(s)) if !s.is_empty() => s.as_ref().clone(),
         _ => String::new(),
     };
 
     let filter = match args.get(1) {
-        Some(Value::Str(s)) if !s.is_empty() => s.clone(),
+        Some(Value::Str(s)) if !s.is_empty() => s.as_ref().clone(),
         _ => String::new(),
     };
 
@@ -242,7 +242,7 @@ pub fn rt_cargo_clean(_args: &[Value]) -> Result<Value, CompileError> {
 /// Returns: dict with test result fields
 pub fn rt_cargo_test_doc(args: &[Value]) -> Result<Value, CompileError> {
     let package = match args.first() {
-        Some(Value::Str(s)) if !s.is_empty() => s.clone(),
+        Some(Value::Str(s)) if !s.is_empty() => s.as_ref().clone(),
         _ => String::new(),
     };
 

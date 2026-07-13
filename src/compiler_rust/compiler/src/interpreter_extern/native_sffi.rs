@@ -42,7 +42,7 @@ pub fn rt_compile_to_llvm_ir(args: &[Value]) -> Result<Value, CompileError> {
     if !Path::new(source_file).exists() {
         let error_msg = format!("Source file not found: {}", source_file);
         return Ok(Value::Tuple(vec![
-            Value::text("".into()),
+            Value::text(""),
             Value::text(error_msg),
             Value::Int(1),
         ]));
@@ -67,7 +67,7 @@ pub fn rt_compile_to_llvm_ir(args: &[Value]) -> Result<Value, CompileError> {
 
     Ok(Value::Tuple(vec![
         Value::text(ir),
-        Value::text("".into()),
+        Value::text(""),
         Value::Int(0),
     ]))
 }
@@ -218,7 +218,7 @@ pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
     // Check if binary exists
     if !Path::new(binary_path).exists() {
         return Ok(Value::Tuple(vec![
-            Value::text("".into()),
+            Value::text(""),
             Value::text(format!("Binary not found: {}", binary_path)),
             Value::Int(127), // Command not found
         ]));
@@ -241,7 +241,7 @@ pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
         Ok(child) => child,
         Err(e) => {
             return Ok(Value::Tuple(vec![
-                Value::text("".into()),
+                Value::text(""),
                 Value::text(format!("Execution error: {}", e)),
                 Value::Int(-1),
             ]));
@@ -273,8 +273,8 @@ pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
 
     if status.is_none() {
         return Ok(Value::Tuple(vec![
-            Value::text("".into()),
-            Value::text("Execution timed out".into()),
+            Value::text(""),
+            Value::text("Execution timed out"),
             Value::Int(124), // Timeout exit code
         ]));
     }
@@ -333,8 +333,8 @@ mod tests {
         std::fs::write(&tmp_source, "fn main() -> i32:\n    return 0\n").unwrap();
 
         let args = vec![
-            Value::text(tmp_source.to_string_lossy().into()),
-            Value::text(tmp_bin.to_string_lossy().into()),
+            Value::text(tmp_source.to_string_lossy().into_owned()),
+            Value::text(tmp_bin.to_string_lossy().into_owned()),
         ];
         let result = rt_compile_to_native(&args).unwrap();
 
@@ -362,9 +362,9 @@ mod tests {
         std::fs::write(&tmp_source, "fn main() -> i32:\n    return 0\n").unwrap();
 
         let args = vec![
-            Value::text(tmp_source.to_string_lossy().into()),
-            Value::text(tmp_bin.to_string_lossy().into()),
-            Value::text("basic".into()),
+            Value::text(tmp_source.to_string_lossy().into_owned()),
+            Value::text(tmp_bin.to_string_lossy().into_owned()),
+            Value::text("basic"),
         ];
         let result = rt_compile_to_native(&args).unwrap();
 
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn test_file_delete_nonexistent() {
-        let args = vec![Value::text("/tmp/nonexistent_file_xyz123".into())];
+        let args = vec![Value::text("/tmp/nonexistent_file_xyz123")];
         let result = rt_file_delete(&args).unwrap();
         assert_eq!(result, Value::Bool(false));
     }

@@ -250,4 +250,11 @@ mod tests {
         assert_eq!(runtime_to_value(RuntimeValue::from_int(42)), Value::Int(42));
         assert_eq!(runtime_to_value(RuntimeValue::TRUE), Value::Bool(true));
     }
+
+    #[test]
+    fn shared_text_runtime_roundtrip_preserves_unicode() {
+        let value = Value::text("é🙂".to_string());
+        let runtime = value_to_runtime(&value);
+        assert_eq!(runtime_to_value(runtime), value);
+    }
 }

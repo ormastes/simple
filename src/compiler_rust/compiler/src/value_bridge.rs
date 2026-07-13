@@ -724,6 +724,16 @@ mod tests {
     }
 
     #[test]
+    fn shared_text_bridge_roundtrip_preserves_unicode() {
+        let value = Value::text("é🙂".to_string());
+        let bridge = BridgeValue::from(&value);
+        unsafe {
+            assert_eq!(bridge.as_str(), "é🙂");
+            assert_eq!(bridge.to_value(), value);
+        }
+    }
+
+    #[test]
     fn test_bridge_to_value_int() {
         let bv = BridgeValue::int(42);
         let v = unsafe { bv.to_value() };

@@ -36,7 +36,7 @@ fn value_to_i64(val: &Value) -> i64 {
 
 fn value_to_str(val: &Value) -> String {
     match val {
-        Value::Str(s) => s.clone(),
+        Value::Str(s) => s.as_ref().clone(),
         _ => String::new(),
     }
 }
@@ -98,13 +98,13 @@ fn arch_name_to_target(name: &str) -> Option<simple_common::target::Target> {
 /// Returns the backend name ("cranelift-jit" or "llvm-jit") for a JIT instance.
 pub fn rt_jit_backend_name(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
-        return Ok(Value::text("invalid".into()));
+        return Ok(Value::text("invalid"));
     }
     let handle = value_to_i64(&args[0]);
     let instances = JIT_INSTANCES.lock().unwrap();
     match instances.get(&handle) {
         Some(em) => Ok(Value::text(em.backend_name().to_string())),
-        None => Ok(Value::text("invalid".into())),
+        None => Ok(Value::text("invalid")),
     }
 }
 
@@ -112,7 +112,7 @@ pub fn rt_jit_backend_name(args: &[Value]) -> Result<Value, CompileError> {
 /// Compiles Simple source through full pipeline. Returns "" on success, error on failure.
 pub fn rt_jit_compile_source(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
-        return Ok(Value::text("missing arguments".into()));
+        return Ok(Value::text("missing arguments"));
     }
     let handle = value_to_i64(&args[0]);
     let source = value_to_str(&args[1]);
@@ -134,7 +134,7 @@ pub fn rt_jit_compile_source(args: &[Value]) -> Result<Value, CompileError> {
     let mut instances = JIT_INSTANCES.lock().unwrap();
     let em = match instances.get_mut(&handle) {
         Some(j) => j,
-        None => return Ok(Value::text("invalid handle".into())),
+        None => return Ok(Value::text("invalid handle")),
     };
     match em.compile_module(&mir_module) {
         Ok(_) => Ok(Value::text(String::new())),

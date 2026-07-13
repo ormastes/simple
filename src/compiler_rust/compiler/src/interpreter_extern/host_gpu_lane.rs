@@ -163,7 +163,7 @@ fn expect_int(value: Option<&Value>, message: &str) -> Result<i64, CompileError>
 
 fn expect_text(value: Option<&Value>, message: &str) -> Result<String, CompileError> {
     match value {
-        Some(Value::Str(s)) => Ok(s.clone()),
+        Some(Value::Str(s)) => Ok(s.as_ref().clone()),
         _ => Err(CompileError::Runtime(message.to_string())),
     }
 }
