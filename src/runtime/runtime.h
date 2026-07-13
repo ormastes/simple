@@ -297,6 +297,7 @@ int64_t  rt_value_to_string(int64_t value);
 int64_t  rt_function_not_found(const uint8_t* name, uint64_t len);
 int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv);
 SplArray* rt_array_new(int64_t cap);
+SplArray* rt_array_new_uninit(int64_t cap);
 SplArray* rt_array_new_with_cap_u64(int64_t cap);
 SplArray* rt_byte_array_new(uint64_t cap);
 int64_t  rt_array_len(SplArray* array);

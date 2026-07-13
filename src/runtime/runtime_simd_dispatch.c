@@ -675,7 +675,7 @@ static void engine2d_blend_into(int64_t* out, const int64_t* dst,
 
 static SplArray* engine2d_new_pixel_array(int64_t n) {
     if (n < 0) n = 0;
-    SplArray* a = rt_array_new(n);
+    SplArray* a = rt_array_new_uninit(n);
     if (!a) return NULL;
     rt_array_set_len_known(rt_array_header_ptr(a), n);
     return a;

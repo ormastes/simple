@@ -1617,6 +1617,10 @@ SplArray* rt_array_new(int64_t cap) {
     return rt_core_array_new(cap, 0);
 }
 
+SplArray* rt_array_new_uninit(int64_t cap) {
+    return rt_core_array_new_fill(cap, 0, 0);
+}
+
 SplArray* rt_array_new_with_cap_u64(int64_t cap) {
     return rt_core_array_new(cap, RT_CORE_ARRAY_FLAG_U64_PACKED);
 }
