@@ -361,8 +361,12 @@ pub fn detect_common_mistake(current: &Token, previous: &Token, next: Option<&To
         return Some(CommonMistake::JavaThis);
     }
 
-    // Check for 'function' (JavaScript/TypeScript)
-    if current.lexeme == "function" && matches!(current.kind, TokenKind::Identifier { .. }) {
+    // Check for JavaScript/TypeScript `function name`, while preserving
+    // `function` as a valid Simple identifier in binders and field access.
+    if current.lexeme == "function"
+        && matches!(current.kind, TokenKind::Identifier { .. })
+        && next.is_some_and(|token| matches!(token.kind, TokenKind::Identifier { .. }))
+    {
         return Some(CommonMistake::TsFunction);
     }
 

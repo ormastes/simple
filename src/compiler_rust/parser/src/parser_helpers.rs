@@ -53,11 +53,12 @@ impl<'a> Parser<'a> {
         // the initial token was already checked in Parser::new()
         let skip_check = matches!(self.previous.kind, TokenKind::Eof);
 
-        let next_token = if !self.pending_tokens.is_empty() {
-            Some(&self.pending_tokens[0])
-        } else {
-            None
-        };
+        // Common-mistake detection needs reliable one-token lookahead. Buffering
+        // here is semantics-neutral because the same token is consumed below.
+        if self.pending_tokens.is_empty() {
+            self.pending_tokens.push_back(self.lexer.next_token());
+        }
+        let next_token = self.pending_tokens.front();
 
         if !skip_check {
             if let Some(mistake) = detect_common_mistake(&self.current, &self.previous, next_token) {

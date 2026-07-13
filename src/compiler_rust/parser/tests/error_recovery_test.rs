@@ -164,9 +164,49 @@ fn test_typescript_function_detection() {
         "function".to_string(),
     );
     let prev = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "\n".to_string());
+    let name = Token::new(
+        TokenKind::Identifier {
+            name: "add".to_string(),
+            pattern: NamePattern::Immutable,
+        },
+        Span::new(9, 12, 1, 10),
+        "add".to_string(),
+    );
 
-    let mistake = detect_common_mistake(&function_token, &prev, None);
+    let mistake = detect_common_mistake(&function_token, &prev, Some(&name));
     assert_eq!(mistake, Some(CommonMistake::TsFunction));
+}
+
+#[test]
+fn test_function_identifier_in_for_binder_is_not_typescript() {
+    use simple_parser::token::{NamePattern, Span, Token, TokenKind};
+
+    let function_token = Token::new(
+        TokenKind::Identifier {
+            name: "function".to_string(),
+            pattern: NamePattern::Immutable,
+        },
+        Span::new(4, 12, 1, 5),
+        "function".to_string(),
+    );
+    let prev = Token::new(TokenKind::For, Span::new(0, 3, 1, 1), "for".to_string());
+    let next = Token::new(TokenKind::In, Span::new(13, 15, 1, 14), "in".to_string());
+
+    assert_eq!(detect_common_mistake(&function_token, &prev, Some(&next)), None);
+}
+
+#[test]
+fn test_typescript_function_detection_uses_parser_lookahead() {
+    let mut parser = Parser::new("val ready = true\nfunction add(a, b):\n    a + b\n");
+    let _ = parser.parse();
+
+    assert!(
+        parser
+            .error_hints()
+            .iter()
+            .any(|hint| hint.message.contains("Replace 'function' with 'fn'")),
+        "expected parser-level TypeScript function hint"
+    );
 }
 
 #[test]
