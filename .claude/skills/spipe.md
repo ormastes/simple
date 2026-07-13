@@ -572,6 +572,11 @@ observe a pass:
   device-origin readback.
   Distinguish GPU atlas composition from CPU glyph rasterization and from direct
   GPU outline rasterization.
+  WM/GUI/Web/2D selected-font proof also requires one stable manifest identity
+  and identical ordered advances across Web layout and Draw IR paint; family
+  metadata or paint-only TTF selection is insufficient. SimpleOS additionally
+  requires the exact pinned asset in every applicable image builder plus guest
+  path/hash/glyph/framebuffer evidence, not a host path marker.
   The OpenCL adapter must additionally prove the versioned shared source,
   generation-keyed atlas upload with load/unload invalidation, checked dirty-row
   offsets after the initial full upload, full upload on reset/gap/invalid dirty

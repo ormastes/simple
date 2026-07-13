@@ -3,7 +3,8 @@ use common.text_layout.font_renderer.{
     browser_chrome_compatible_normal_font_name,
     browser_chrome_compatible_normal_font_path,
     browser_chrome_compatible_vector_font_name,
-    CachedGlyph, GlyphCache, FontRenderer, browser_font_download_script_path, browser_font_face_source_urls,
+    CachedGlyph, GlyphCache, FontRenderer, ResolvedFontMetrics, resolve_font_metrics,
+    browser_font_download_script_path, browser_font_face_source_urls,
     browser_font_face_family_value, browser_font_face_source_from_family_value,
     browser_font_cache_dir, browser_font_face_cached_source_path, ensure_browser_font_face_sources,
     browser_font_candidates_for_family, browser_mono_font_candidates,
@@ -15,6 +16,18 @@ use common.text_layout.font_provider.{browser_bundled_font_path_for_family}
 use std.common.encoding.font_registry.{selected_font_asset_candidates}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_atlas_composite_program_version_valid}
 use common.text_layout.font_rasterizer.{reset_vector_font_raster_stats, vector_font_accelerator_stats}
+
+fn expect_resolved_font_metrics(metrics: ResolvedFontMetrics):
+    expect(metrics.valid).to_be(true)
+    expect(metrics.identity).to_start_with("sha256=")
+    expect(metrics.identity).to_contain(";axes=")
+    expect(metrics.advances.len()).to_equal(3)
+    var width = 0
+    for advance in metrics.advances:
+        expect(advance).to_be_greater_than(0)
+        width = width + advance
+    expect(metrics.width).to_equal(width)
+    expect(metrics.line_height).to_be_greater_than(0)
 
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -129,6 +142,24 @@ fn _clear_rocm_vector_glyph_payload():
     rt_env_set("ROCM_VECTOR_FONT_GLYPH_0_CHECKSUM", "")
 
 describe "shared font renderer fallbacks":
+    it "measures ordered advances through the canonical renderer":
+        var renderer = FontRenderer.new()
+        val advances = renderer.measure_text_advances("ABC", 16)
+        expect(advances.len()).to_equal(3)
+        var width = 0
+        for advance in advances:
+            expect(advance).to_be_greater_than(0)
+            width = width + advance
+        expect(renderer.measure_text_width("ABC", 16)).to_equal(width)
+
+    it "resolves a pinned family or reports the unavailable runtime honestly":
+        val metrics = resolve_font_metrics("Noto Sans Mono", "ABC", 16)
+        if metrics.valid:
+            expect_resolved_font_metrics(metrics)
+            expect(metrics.family).to_equal("Noto Sans Mono")
+        else:
+            expect(metrics.reason).to_equal("font-runtime-unavailable")
+
     it "renders vector glyph coverage with antialiasing evidence":
         var renderer = FontRenderer.new()
         renderer.use_bitmap = false

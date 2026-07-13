@@ -425,6 +425,14 @@ font GPU emission, or GUI/Web/2D/3D text.
 9. Lower-model sidecars may implement or audit bounded lanes and generated
    manuals, but the final done mark and manual-quality judgment require a
    higher-capability review.
+10. WM/GUI/Web/2D selected-font evidence must bind Web layout and Draw IR paint
+    to one stable manifest identity and the same ordered advances. Preserving
+    `font-family` metadata or selecting a TTF only during paint is incomplete;
+    unstyled legacy Draw IR must remain bitmap-compatible.
+11. SimpleOS font-host claims must reuse `FontAssetCandidate`, stage the exact
+    pinned bytes through every applicable disk/initramfs builder, and prove
+    guest path/length/hash plus glyph and framebuffer evidence. Host-repository
+    asset presence is not guest proof.
 
 For UI-test helper work, keep the test-library surface consistent: new SSpec
 manual specs use canonical `use std.spec.*` and `step("...")`, existing

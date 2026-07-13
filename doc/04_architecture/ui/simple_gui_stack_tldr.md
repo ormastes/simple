@@ -169,6 +169,10 @@ Host input
   invalid shortcut. Production web pixels and SimpleOS image packaging remain
   open; SimpleOS needs one hash-pinned immutable-data manifest shared by its
   image builders.
+- Resolved-font target: `FontRenderer.resolve_font_metrics` supplies one stable
+  manifest identity plus exact advances to Web layout; Draw IR carries only
+  `font-family`/`font-identity`/`font-advance-widths`, and Engine2D verifies the
+  same identity before paint. Legacy commands without identity remain bitmap.
 - Opt-in `Engine2D.load_font` is separate: CPU `spl_fonts` raster/layout,
   per-engine glyph cache, then one tight payload blended by the drawing backend.
   UTF-8 local paths are supported; the face/layout is a serialized

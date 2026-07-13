@@ -98,6 +98,32 @@ consumer sibling. Everything else is tree-private.
 
 ## Target promotion flow
 
+### WM/GUI/Web/2D resolved-font contract
+
+`FontAssetCandidate` remains the only selected-asset identity authority. The
+canonical `FontRenderer` owner adds `ResolvedFontMetrics` and
+`resolve_font_metrics(family, text, size)`. A valid result contains the stable
+manifest identity (`sha256=<hash>;axes=<defaults>`), exact ordered advances,
+total width, and line height. It contains no native handle, glyph bitmap,
+atlas, cache entry, or backend object.
+
+Web semantic/layout resolves metrics before line wrapping. Its existing Draw IR
+computed-style carrier may emit only `font-family`, `font-identity`, and
+`font-advance-widths`. The Draw IR executor resolves the identity back through
+the same registry, loads that exact face through `FontRenderer`, verifies the
+prepared batch identity, then paints. Missing or mismatched identity fails back
+to the unchanged bitmap route; paint-only selection is forbidden because it
+would diverge from web wrapping. Legacy WM/GUI/manual Draw IR commands without
+these keys remain byte- and pixel-compatible.
+
+SimpleOS reuses the same `FontAssetCandidate`; it does not define another asset
+record. The first guest face is pinned Noto Sans Mono at
+`/assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf`.
+Release/QEMU disk, installer staging, initramfs, and legacy bake paths must stage
+that exact length/hash through their existing payload contracts. Verified-byte
+loading belongs in the current font facade and must precede WM startup; a guest
+path marker without glyph/framebuffer evidence is not support.
+
 Current source includes provisional static catalog, CPU preparation, OpenCL
 Engine2D atlas submission with image-blit fallback, Engine3D CPU compatibility,
 and separate companion font artifacts in portable backend plans. The steps below remain the full

@@ -25,6 +25,8 @@ raw `rt_*` shortcuts, a new dependency, or a fake device-success path.
 | C — emission | implementation agent; Spark-style sidecar may inspect target markers read-only | existing compiler portable-compute/generated-artifact files | REQ-010 deterministic emission/compile scenarios |
 | D — 2D/3D native | implementation agent; small sidecar may audit evidence completeness read-only | existing Engine2D/Engine3D adapters and backend facade only | REQ-011–013 plus NFR-002/004–008 native evidence |
 | E — specs/manuals/docs | test/doc owner; small sidecar may review generated-manual readability | four planned SSpecs/manuals, affected guides, SPipe recipe | REQ-014, zero stubs, freshness audits |
+| F — resolved UI fonts | Spark metric sidecar + Spark Draw IR sidecar | `ResolvedFontMetrics`, Web layout advances, Draw IR identity verification; no font material in IR | legacy + WebRender IR/Draw IR parity |
+| G — SimpleOS font host | Spark image-builder sidecar | existing `FontAssetCandidate`, four existing image payload paths, verified-byte startup | guest path/hash/glyph/framebuffer evidence |
 | F — final verification | primary/best available reviewer only | verification report; fixes returned to owning lane | requirement-by-requirement PASS/WARN/FAIL |
 
 Sidecars do not accept broad findings, exclusions, generated-manual quality, or
@@ -37,6 +39,12 @@ checking source and executable evidence.
 2. Lane B lands the shared batch and CPU oracle.
 3. Lane C may proceed beside B after the batch field contract is frozen.
 4. Lane D begins only after B/C contracts compile; Engine2D precedes Engine3D
+5. Lane F uses manual steps `Resolve one selected font for layout and DrawIR paint`
+   and `Render legacy and WebIR text with one face identity`; checkers are
+   `expect_resolved_font_metrics` and `expect_draw_ir_font_identity`.
+6. Lane G uses `Boot SimpleOS with the pinned font asset` and
+   `expect_simpleos_font_asset`. Merge owner is the primary Codex session;
+   final normal/highest-capability review owns all done marks.
    promotion so the CPU/material oracle is stable.
 5. Lane E writes specs with each owner and generates manuals after executable
    behavior exists.
@@ -66,4 +74,3 @@ checking source and executable evidence.
   and no executable spec under `doc/06_spec`.
 - F: all REQ-001–014 and NFR-001–008 traced to authoritative current evidence;
   direct-env runtime guards pass and verification reports `STATUS: PASS`.
-

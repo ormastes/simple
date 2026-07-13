@@ -42,6 +42,15 @@ export use std.nogc_sync_mut.text_layout.font_types.{CachedGlyph, FontCacheStats
 # Glyph Cache
 # ============================================================================
 
+class ResolvedFontMetrics:
+    valid: bool
+    family: text
+    identity: text
+    advances: [i32]
+    width: i32
+    line_height: i32
+    reason: text
+
 val FONT_ATLAS_WIDTH: i32 = 1024
 val FONT_ATLAS_HEIGHT: i32 = 1024
 var _font_atlas_dependency_generation: i64 = 0
@@ -239,6 +248,16 @@ class FontRenderer:
         self.atlas_face_generation = -1
 
     fn cache_stats() -> FontCacheStats: self.cache.stats()
+    me current_font_identity() -> text:
+        val rasterizer = self.ttf_rasterizer
+        if rasterizer == nil:
+            return ""
+        val snapshot = rasterizer.cache_identity_snapshot()
+        var cache = self.cache
+        cache.sync_face_identity(snapshot.0, snapshot.1)
+        self.cache = cache
+        snapshot.1
+
     me reset_cache_stats():
         var cache = self.cache
         cache.reset_stats()
@@ -378,6 +397,24 @@ class FontRenderer:
             prev_cp = cp
         self.cache = cache
         total_w
+
+    me measure_text_advances(content: text, font_size: i32) -> [i32]:
+        var advances: [i32] = []
+        var prev_cp = -1
+        var cache = self.cache
+        for ch in content:
+            val cp = ch.char_code_at(0)
+            var advance = 0
+            if prev_cp >= 0:
+                advance = self.horizontal_kern(prev_cp, cp, font_size)
+            val result = self.glyph_with_cache(cp, font_size, cache)
+            cache = result.1
+            val glyph_advance = result.0.advance
+            advance = advance + (if glyph_advance > 0: glyph_advance else: font_size * 55 / 100)
+            advances.push(advance)
+            prev_cp = cp
+        self.cache = cache
+        advances
 
     # -----------------------------------------------------------------------
     # Render text into a pixel buffer (ARGB u32)
@@ -694,3 +731,32 @@ class FontRenderer:
             self._reset_font_atlas(-2, self.cache.stats().font_identity)
             attempt = attempt + 1
         FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+
+fn resolve_font_metrics(family: text, content: text, font_size: i32) -> ResolvedFontMetrics:
+    if family.trim() == "" or font_size <= 0 or font_size > 512:
+        return ResolvedFontMetrics(valid: false, family: family, identity: "", advances: [], width: 0, line_height: 0, reason: "invalid-font-request")
+    var renderer = FontRenderer.browser_default_for_family(family)
+    if not renderer.has_sffi_ttf():
+        return ResolvedFontMetrics(valid: false, family: family, identity: "", advances: [], width: 0, line_height: 0, reason: "font-runtime-unavailable")
+    val advances = renderer.measure_text_advances(content, font_size)
+    var width = 0
+    for advance in advances:
+        width = width + advance
+    var line_height = renderer.horizontal_line_metric(font_size, 3)
+    if line_height <= 0:
+        line_height = font_size
+    val identity = renderer.cache_stats().font_identity
+    renderer.clear_ttf()
+    var character_count = 0
+    for ch in content:
+        character_count = character_count + 1
+    val valid = identity != "" and advances.len() == character_count
+    ResolvedFontMetrics(
+        valid: valid,
+        family: family,
+        identity: identity,
+        advances: if valid: advances else: [],
+        width: if valid: width else: 0,
+        line_height: if valid: line_height else: 0,
+        reason: if valid: "resolved" else: "font-identity-unavailable"
+    )

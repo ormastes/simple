@@ -173,6 +173,33 @@ nonzero handles, batch/payload hash, submit/draw, completed fence, device-origin
 readback, accelerated device type, and backend/driver identity. A CPU mirror is
 a comparator, never the readback source. Engine3D promotion remains open.
 
+## Resolved fonts across legacy UI, WebRender IR, Draw IR, and SimpleOS
+
+The shared interface names are fixed:
+
+- `ResolvedFontMetrics`
+- `resolve_font_metrics(family, text, font_size)`
+- Draw IR computed-style keys `font-family`, `font-identity`, and
+  `font-advance-widths`
+
+Resolution uses the existing provider/registry and `FontRenderer`; it does not
+create a web renderer, atlas, or font cache. Web layout consumes exact ordered
+advances for intrinsic width, wrapping, alignment, ellipsis, and line boxes.
+Draw IR paint accepts a styled face only when its registry identity matches the
+prepared `FontRenderBatch.font_identity`. Unstyled and failed resolution use the
+old bitmap metrics and pixels unchanged. Mixed-family pages may reload the
+process-global native face at command boundaries; a render-local last-identity
+cache avoids redundant reloads. This serialized ceiling is deliberate; replace
+it only when the native owner supports concurrent faces.
+
+SimpleOS uses the existing selected candidate and verified-byte font facade.
+The same Noto Sans Mono payload must be inserted by the release/QEMU disk C
+builder, `ImageBuilder._populate_root_partition`, initramfs staging, and legacy
+disk bake. Required guest evidence is exact path/length/hash, successful glyph
+material, WM Draw IR family/identity, and nonblank framebuffer output for Latin
+plus one accepted non-ASCII simple-script witness. Host-repository presence is
+not guest evidence.
+
 ## Failure and fallback
 
 - Missing/corrupt manifest, license, hash, or unsupported sfnt data: reject face.

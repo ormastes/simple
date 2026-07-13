@@ -37,6 +37,16 @@ Visible primary steps:
 - `step("Emit the selected font composite program and plan compilation")`
 - `step("Prove native submission and device readback")`
 
+Resolved-host extension steps:
+
+- `step("Resolve one selected font for layout and DrawIR paint")`
+- `step("Render legacy and WebIR text with one face identity")`
+- `step("Boot SimpleOS with the pinned font asset")`
+
+Shared checkers are `expect_resolved_font_metrics`,
+`expect_draw_ir_font_identity`, and `expect_simpleos_font_asset`; temporary
+implementations must call `fail(...)` rather than pass silently.
+
 Shared helpers are `setup_shared_font_fixture`, `setup_selected_shaping_face`,
 `expect_simple_identity_run`, `expect_complex_run_pending`, `expect_font_license`,
 `expect_language_coverage`, `expect_shared_font_batch`,

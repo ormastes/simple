@@ -13,6 +13,7 @@ use os.tools.pkg.pkg_format.{
     ExtendedManifest, PkgArch, PackageType,
     pkg_arch_to_text, pkg_arch_from_text
 }
+use std.common.encoding.font_registry.{simpleos_default_font_asset_candidate, validate_selected_font_asset}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_env_get(key: text) -> text?
@@ -141,6 +142,11 @@ impl ImageBuilder:
             val simple_check = _validate_simple_binary(simple_binary, self.config.arch)
             if val Err(e) = simple_check:
                 return Err(e)
+        val font = simpleos_default_font_asset_candidate()
+        val font_blob = rt_file_read_bytes(font.local_path) ?? []
+        val font_validation = validate_selected_font_asset(font.local_path, font_blob)
+        if not font_validation.valid:
+            return Err("SimpleOS font asset invalid: " + font_validation.reason)
         print "Creating {artifact_kind}: {self.config.output_path}"
         print "  Architecture: {arch_name}"
         print "  Size: {self.config.image_size_mb} MB"
@@ -224,6 +230,10 @@ impl ImageBuilder:
         manifest = manifest + self._stage_simple_toolchain_payload(rootfs_root)
         manifest = manifest + self._stage_clang_toolchain_payload(rootfs_root)
         manifest = manifest + self._stage_rust_toolchain_payload(rootfs_root)
+        val font = simpleos_default_font_asset_candidate()
+        _ensure_parent_dirs(rootfs_root, "/" + font.local_path)
+        if _copy_file(font.local_path, "{rootfs_root}/" + font.local_path):
+            manifest = manifest + _manifest_file("/" + font.local_path, "font-asset", "simpleos-core")
         manifest
 
     fn _stage_simple_toolchain_payload(rootfs_root: text) -> text:

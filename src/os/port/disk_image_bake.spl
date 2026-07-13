@@ -27,6 +27,7 @@ use std.common.{str_last_index_of}
 use os.port.initramfs_pack.{PackConfig, PayloadEntry as InitramfsPayloadEntry,
     cmd_build, validate_image}
 use os.port.disk_image.{DiskImageConfig, PayloadEntry, build}
+use std.common.encoding.font_registry.{simpleos_default_font_asset_candidate, validate_selected_font_asset}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
@@ -65,6 +66,16 @@ fn _build_initramfs(out_initramfs: text, hello_rs_path: text, hello_c_path: text
             guest_path: "/usr/share/test/hello_c.o",
             is_dir: false,
         ))
+    val font = simpleos_default_font_asset_candidate()
+    val font_blob: [u8] = rt_file_read_bytes(font.local_path) ?? []
+    val font_validation = validate_selected_font_asset(font.local_path, font_blob)
+    if not font_validation.valid:
+        return Err("bake: SimpleOS font asset invalid: " + font_validation.reason)
+    payloads.push(InitramfsPayloadEntry(
+        host_path: font.local_path,
+        guest_path: "/" + font.local_path,
+        is_dir: false,
+    ))
 
     val config = PackConfig(
         simple_binary: "build/bootstrap/stage3/simple_simpleos",
@@ -289,6 +300,14 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
     if io.file_exists("build/os/.bake_use_mkfs_fat"):
         if _host_tool_available("mkfs.fat"):
             if _host_tool_available("mcopy"):
+                val font = simpleos_default_font_asset_candidate()
+                val font_blob: [u8] = rt_file_read_bytes(font.local_path) ?? []
+                val font_validation = validate_selected_font_asset(font.local_path, font_blob)
+                if not font_validation.valid:
+                    return Err("bake: SimpleOS font asset invalid: " + font_validation.reason)
+                match _load_payload_at(font.local_path, "NOTOSANSTTF", "/" + font.local_path):
+                    case Ok(e): mkfs_payloads.push(e)
+                    case Err(e): return Err(e)
                 print "bake: using mkfs.fat+mcopy fast path (build/os/.bake_use_mkfs_fat present)"
                 match _bake_via_mkfs_fat(out_disk, mkfs_payloads, size_mb):
                     case Ok(()):
@@ -301,6 +320,7 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
             print "bake: mkfs.fat not found on PATH; falling back to interpreter path"
 
     if not used_fast_path:
+        print "bake: font omitted from FAT32 disk because the legacy builder has no long-file-name support; initramfs still contains it"
         match build(cfg, out_disk):
             case Ok(()):
                 ()
