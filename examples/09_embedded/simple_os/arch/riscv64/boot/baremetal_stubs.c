@@ -1444,3 +1444,71 @@ __attribute__((naked, section(".text.entry"))) void _start(void)
         "j 1b\n"
     );
 }
+
+/* ---- Lane BR64: in-guest Simple toolchain staging gate --------------------
+ * Probes the REAL riscv64-unknown-simpleos `simple` interpreter ELF staged by
+ * scripts/os/fsexec_mkimg_simple.spl at the FAT32 root (/FSEXEC.ELF, aliased
+ * /usr/bin/simple) plus its /hello.spl source. Validates ELF magic,
+ * ELFCLASS64, EM_RISCV (243) and reports e_entry, proving the on-board
+ * OpenSBI -> kernel -> virtio-blk -> FAT32 path can locate and read the
+ * cross-built toolchain binary. */
+static uint32_t g_simple_tool_size;
+static uint32_t g_simple_tool_entry_lo;
+static uint32_t g_simple_tool_entry_hi;
+
+static int riscv_probe_root_elf(const char *name11)
+{
+    Fat32Probe fat;
+    if (!fat32_probe_bpb(&fat)) return 0;
+    uint32_t file_size = 0;
+    uint32_t cluster = fat32_find_entry_cluster(&fat, fat.root_cluster, name11, 0, &file_size);
+    if (cluster < 2U || file_size == 0) return 0;
+    if (!fat32_read_first_sector(&fat, cluster)) return 0;
+    const unsigned char *e = sector_data();
+    if (e[0] != 0x7f || e[1] != 'E' || e[2] != 'L' || e[3] != 'F') return 0;
+    if (e[4] != 2) return 0;                    /* ELFCLASS64 */
+    if (e[18] != 243 || e[19] != 0) return 0;   /* e_machine == EM_RISCV */
+    g_simple_tool_size = file_size;
+    g_simple_tool_entry_lo = rd32(e + 24);
+    g_simple_tool_entry_hi = rd32(e + 28);
+    return 1;
+}
+
+RuntimeValue rt_riscv_simple_tool_probe(void)
+{
+    return riscv_probe_root_elf("FSEXEC  ELF") ? 1 : 0;
+}
+
+RuntimeValue rt_riscv_simple_tool_size(void)
+{
+    return (RuntimeValue)g_simple_tool_size;
+}
+
+RuntimeValue rt_riscv_simple_tool_entry_hi20(void)
+{
+    /* entry >> 12 keeps the value in comfortable i64 print range */
+    uint64_t entry = ((uint64_t)g_simple_tool_entry_hi << 32) | g_simple_tool_entry_lo;
+    return (RuntimeValue)(entry >> 12);
+}
+
+RuntimeValue rt_riscv_simple_hello_probe(void)
+{
+    Fat32Probe fat;
+    if (!fat32_probe_bpb(&fat)) return 0;
+    uint32_t file_size = 0;
+    uint32_t cluster = fat32_find_entry_cluster(&fat, fat.root_cluster, "HELLO   SPL", 0, &file_size);
+    if (cluster < 2U || file_size == 0) return 0;
+    if (!fat32_read_first_sector(&fat, cluster)) return 0;
+    const unsigned char *b = sector_data();
+    const char *want = "hello from simple on simpleos";
+    uint32_t wl = 0;
+    while (want[wl]) wl++;
+    for (uint32_t i = 0; i + wl < 512U; i++) {
+        uint32_t ok = 1;
+        for (uint32_t j = 0; j < wl; j++) {
+            if (b[i + j] != (unsigned char)want[j]) { ok = 0; break; }
+        }
+        if (ok) return 1;
+    }
+    return 0;
+}

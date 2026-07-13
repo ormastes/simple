@@ -1,0 +1,323 @@
+#!/bin/sh
+# Build the riscv64-unknown-simpleos userspace sysroot.
+#
+# Mirrors the aarch64 lane of src/os/port/llvm/sysroot.shs (which errors out
+# for riscv64: "libc runtime build is not wired for $TRIPLE") into a separate
+# sysroot dir so the x86_64 sysroot at build/os/sysroot is never clobbered.
+#
+# Produces build/os/sysroot-riscv64/
+#   lib/crt0.o                 riscv64 user _start (bss clear, gp init, main, exit)
+#   lib/libsimpleos_c.a        SimpleOS libc cross-built rv64gc/lp64d
+#   lib/libsimpleos_all.a      libc + pure-Simple core runtime + crt0 merged —
+#                              served through the seed linker's builtins slot
+#                              (via cc-riscv64-simpleos -print-libgcc-file-name)
+#   lib/cc-riscv64-simpleos    CC wrapper: passthrough clang, but answers
+#                              -print-libgcc-file-name with libsimpleos_all.a
+#   share/simpleos/simpleos.ld userspace linker script, base 0x90000000
+#                              (clears the rv64 kernel band 0x80200000+126M
+#                              declared in src/os/kernel/arch/riscv64/linker.ld)
+set -eu
+
+REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$REPO_ROOT"
+
+SYSROOT="$REPO_ROOT/build/os/sysroot-riscv64"
+LIBC_DIR="$REPO_ROOT/src/os/libc"
+LIBC_BUILD="$REPO_ROOT/build/os/libc-riscv64-unknown-simpleos"
+CORE_OBJ_DIR="${SIMPLE_CORE_OBJ_DIR:-$REPO_ROOT/build/os/simple-core-simpleos-riscv64/parts/objects}"
+TRIPLE_CC="riscv64-unknown-none-elf"
+CC="${CC:-clang}"
+AR="${AR:-llvm-ar}"
+command -v "$AR" >/dev/null 2>&1 || AR=ar
+CFLAGS="--target=$TRIPLE_CC -march=rv64gc -mabi=lp64d -mcmodel=medany -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -O2 -Wall -Wextra -Wno-unused-parameter -D__simpleos__=1 -I$LIBC_DIR/include"
+
+mkdir -p "$SYSROOT/lib" "$SYSROOT/share/simpleos" "$LIBC_BUILD"
+printf '%s\n' "riscv64-unknown-simpleos" > "$SYSROOT/share/simpleos/target-triple.txt"
+
+echo "[sysroot-rv64] Building SimpleOS libc for riscv64..."
+for src in \
+    simpleos_libc.c simpleos_math.c simpleos_math_ext.c simpleos_fs.c \
+    simpleos_pthread.c simpleos_alloc.c simpleos_process.c \
+    simpleos_string_ext.c simpleos_stdlib_ext.c \
+    simpleos_time.c simpleos_printf_float.c simpleos_cxxabi.c \
+    simpleos_dlmalloc.c simpleos_signal.c simpleos_libc_ext.c \
+    simpleos_poll.c simpleos_process_wait.c \
+    simpleos_pthread_rwlock.c simpleos_pthread_cond.c \
+    simpleos_sched.c simpleos_epoll.c simpleos_eventfd.c \
+    simpleos_timerfd.c simpleos_signalfd.c simpleos_inotify.c \
+    simpleos_fs_walk.c simpleos_glob_stub.c simpleos_pwd_stub.c \
+    simpleos_strfmon.c simpleos_fork.c simpleos_ipc.c \
+    simpleos_socket.c simpleos_filelock.c simpleos_statvfs.c \
+    simpleos_utsname.c
+do
+    "$CC" $CFLAGS -c "$LIBC_DIR/$src" -o "$LIBC_BUILD/${src%.c}.o"
+done
+
+cat > "$LIBC_BUILD/simpleos_crt0_riscv64.S" << 'ASMEOF'
+.section .text
+.global _start
+.type _start, %function
+_start:
+.option push
+.option norelax
+    la gp, __global_pointer$
+.option pop
+    la a0, __bss_start
+    la a1, __bss_end
+    bgeu a0, a1, 1f
+0:
+    sb zero, 0(a0)
+    addi a0, a0, 1
+    bltu a0, a1, 0b
+1:
+    call __libc_init_array
+    li a0, 0
+    li a1, 0
+    li a2, 0
+    call main
+    call exit
+2:
+    j 2b
+.size _start, . - _start
+.weak __bss_start
+.weak __bss_end
+ASMEOF
+
+cat > "$LIBC_BUILD/simpleos_syscall_riscv64.S" << 'ASMEOF'
+.section .text
+.global simpleos_syscall
+.type simpleos_syscall, %function
+simpleos_syscall:
+    mv a7, a0
+    mv a0, a1
+    mv a1, a2
+    mv a2, a3
+    mv a3, a4
+    mv a4, a5
+    ecall
+    ret
+.size simpleos_syscall, . - simpleos_syscall
+
+.global __clear_cache
+.type __clear_cache, %function
+__clear_cache:
+    fence.i
+    ret
+.size __clear_cache, . - __clear_cache
+
+/*
+ * simpleos_current_cs: x86 reports the CS selector (0x2b = user ring-3).
+ * riscv U-mode cannot read the privilege level; report the x86 user-CS
+ * constant so callers checking `cs == 0x2b and cs & 3 == 3`
+ * (simpleos_tool focused_pipeline require_user_cpl) keep working.
+ */
+.global simpleos_current_cs
+.type simpleos_current_cs, %function
+simpleos_current_cs:
+    li a0, 0x2b
+    ret
+.size simpleos_current_cs, . - simpleos_current_cs
+ASMEOF
+
+cat > "$LIBC_BUILD/simpleos_setjmp_riscv64.S" << 'ASMEOF'
+.section .text
+.global setjmp
+.type setjmp, %function
+setjmp:
+    sd s0,   0(a0)
+    sd s1,   8(a0)
+    sd s2,  16(a0)
+    sd s3,  24(a0)
+    sd s4,  32(a0)
+    sd s5,  40(a0)
+    sd s6,  48(a0)
+    sd s7,  56(a0)
+    sd s8,  64(a0)
+    sd s9,  72(a0)
+    sd s10, 80(a0)
+    sd s11, 88(a0)
+    sd sp,  96(a0)
+    sd ra, 104(a0)
+    li a0, 0
+    ret
+.size setjmp, . - setjmp
+
+.global _setjmp
+.type _setjmp, %function
+_setjmp:
+    j setjmp
+.size _setjmp, . - _setjmp
+
+.global longjmp
+.type longjmp, %function
+longjmp:
+    ld s0,   0(a0)
+    ld s1,   8(a0)
+    ld s2,  16(a0)
+    ld s3,  24(a0)
+    ld s4,  32(a0)
+    ld s5,  40(a0)
+    ld s6,  48(a0)
+    ld s7,  56(a0)
+    ld s8,  64(a0)
+    ld s9,  72(a0)
+    ld s10, 80(a0)
+    ld s11, 88(a0)
+    ld sp,  96(a0)
+    ld ra, 104(a0)
+    mv a0, a1
+    bnez a0, 1f
+    li a0, 1
+1:
+    ret
+.size longjmp, . - longjmp
+
+.global _longjmp
+.type _longjmp, %function
+_longjmp:
+    j longjmp
+.size _longjmp, . - _longjmp
+ASMEOF
+
+"$CC" --target="$TRIPLE_CC" -march=rv64gc -mabi=lp64d -ffreestanding -nostdlib -c "$LIBC_BUILD/simpleos_crt0_riscv64.S" -o "$LIBC_BUILD/simpleos_crt0.o"
+"$CC" --target="$TRIPLE_CC" -march=rv64gc -mabi=lp64d -ffreestanding -nostdlib -c "$LIBC_BUILD/simpleos_syscall_riscv64.S" -o "$LIBC_BUILD/simpleos_syscall.o"
+"$CC" --target="$TRIPLE_CC" -march=rv64gc -mabi=lp64d -ffreestanding -nostdlib -c "$LIBC_BUILD/simpleos_setjmp_riscv64.S" -o "$LIBC_BUILD/simpleos_setjmp.o"
+
+rm -f "$SYSROOT/lib/libsimpleos_c.a"
+"$AR" rcs "$SYSROOT/lib/libsimpleos_c.a" "$LIBC_BUILD"/*.o
+cp "$LIBC_BUILD/simpleos_crt0.o" "$SYSROOT/lib/crt0.o"
+echo "[sysroot-rv64] Installed libsimpleos_c.a + crt0.o"
+
+# -- Merged link archive (served via the -print-libgcc-file-name slot) -------
+rm -f "$SYSROOT/lib/libsimpleos_all.a"
+if [ -d "$CORE_OBJ_DIR" ]; then
+    "$AR" rcs "$SYSROOT/lib/libsimpleos_all.a" \
+        "$LIBC_BUILD"/*.o \
+        "$CORE_OBJ_DIR"/*/*.o
+    echo "[sysroot-rv64] Installed libsimpleos_all.a (libc + simple-core runtime + crt0)"
+else
+    "$AR" rcs "$SYSROOT/lib/libsimpleos_all.a" "$LIBC_BUILD"/*.o
+    echo "[sysroot-rv64] WARNING: core runtime objects missing ($CORE_OBJ_DIR); libsimpleos_all.a is libc-only"
+fi
+
+# -- CC wrapper ---------------------------------------------------------------
+cat > "$SYSROOT/lib/cc-riscv64-simpleos" << CCEOF
+#!/bin/sh
+# clang passthrough that serves libsimpleos_all.a as the compiler builtins
+# archive, so the Simple seed linker places it AFTER the Simple objects.
+for a in "\$@"; do
+    if [ "\$a" = "-print-libgcc-file-name" ]; then
+        echo "$SYSROOT/lib/libsimpleos_all.a"
+        exit 0
+    fi
+done
+exec clang "\$@"
+CCEOF
+chmod +x "$SYSROOT/lib/cc-riscv64-simpleos"
+
+# -- Linker script ------------------------------------------------------------
+cat > "$SYSROOT/share/simpleos/simpleos.ld" << LDEOF
+/* SimpleOS riscv64 userspace linker script
+ *
+ * Text starts at 0x90000000: the rv64 kernel is an OpenSBI S-mode payload
+ * linked at 0x80200000 with a declared 126M RAM band
+ * (src/os/kernel/arch/riscv64/linker.ld), i.e. up to ~0x88000000. 0x90000000
+ * clears that band while staying in QEMU virt RAM when the guest has
+ * >= 512M (RAM 0x80000000..0xA0000000). Sv39 canonical low half.
+ * Static linking only.
+ */
+ENTRY(_start)
+INPUT($SYSROOT/lib/crt0.o)
+
+SECTIONS {
+    . = 0x90000000;
+
+    .text : {
+        *(.text.entry)
+        *(.text .text.*)
+    }
+
+    . = ALIGN(4096);
+    .rodata : {
+        *(.rodata .rodata.*)
+        *(.srodata .srodata.*)
+    }
+
+    . = ALIGN(8);
+    .eh_frame_hdr : {
+        __eh_frame_hdr_start = .;
+        KEEP(*(.eh_frame_hdr))
+        __eh_frame_hdr_end = .;
+    }
+
+    . = ALIGN(8);
+    .eh_frame : {
+        __eh_frame_start = .;
+        KEEP(*(.eh_frame))
+        __eh_frame_end = .;
+    }
+
+    . = ALIGN(4096);
+    .data : {
+        *(.data .data.*)
+    }
+
+    . = ALIGN(8);
+    .sdata : {
+        PROVIDE(__global_pointer\$ = . + 0x800);
+        *(.sdata .sdata.*)
+    }
+
+    . = ALIGN(8);
+    .got : {
+        *(.got) *(.got.*)
+    }
+
+    . = ALIGN(16);
+    .init_array : {
+        __init_array_start = .;
+        KEEP(*(.init_array .init_array.*))
+        __init_array_end = .;
+    }
+
+    . = ALIGN(16);
+    .fini_array : {
+        __fini_array_start = .;
+        KEEP(*(.fini_array .fini_array.*))
+        __fini_array_end = .;
+    }
+
+    . = ALIGN(16);
+    .tdata : {
+        _tls_start = .;
+        *(.tdata .tdata.*)
+    }
+
+    . = ALIGN(16);
+    .tbss : {
+        *(.tbss .tbss.*)
+        _tls_end = .;
+    }
+
+    . = ALIGN(4096);
+    .bss : {
+        __bss_start = .;
+        *(.sbss .sbss.*)
+        *(.bss .bss.*)
+        *(COMMON)
+        __bss_end = .;
+    }
+
+    _end = .;
+
+    /DISCARD/ : {
+        *(.comment)
+        *(.note .note.*)
+        *(.plt)
+        *(.rela.plt)
+    }
+}
+LDEOF
+
+echo "[sysroot-rv64] Sysroot ready: $SYSROOT"
+ls -la "$SYSROOT/lib/" "$SYSROOT/share/simpleos/"
