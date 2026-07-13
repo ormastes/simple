@@ -542,6 +542,19 @@ impl MirLowering:
                     var field_builder = self.builder
                     val field_result = field_builder.emit_get_field(mir_operand_copy(base_local), field_idx, field_type)
                     self.builder = field_builder
+                    # Bug #166: propagate the field's own struct type (if any) so a
+                    # further `.field` chained off this result resolves against the
+                    # right struct instead of resolve_field_index silently
+                    # defaulting the next lookup to index 0 (`r.origin.y` read
+                    # `x`'s slot because `r.origin`'s type was otherwise unknown).
+                    val base_struct_name = self.resolve_base_struct_name(base, base_local)
+                    if val bsn = base_struct_name:
+                        if self.struct_field_type_name.has(bsn):
+                            val nested_types = self.struct_field_type_name[bsn]
+                            if field_idx >= 0 and field_idx < nested_types.len():
+                                val nested_name = nested_types[field_idx]
+                                if nested_name != "":
+                                    self.struct_value_syms[field_result.id] = nested_name
                     return field_result
                 case _:
                     pass
@@ -1351,6 +1364,16 @@ impl MirLowering:
                 var b = self.builder
                 val result = b.emit_get_field(mir_operand_copy(base_local), field_idx, field_type)
                 self.builder = b
+                # Bug #166: same struct-name propagation as the disc-guarded
+                # Field arm above, kept in sync for this fallback dispatch path.
+                val base_struct_name2 = self.resolve_base_struct_name(base, base_local)
+                if val bsn2 = base_struct_name2:
+                    if self.struct_field_type_name.has(bsn2):
+                        val nested_types2 = self.struct_field_type_name[bsn2]
+                        if field_idx >= 0 and field_idx < nested_types2.len():
+                            val nested_name2 = nested_types2[field_idx]
+                            if nested_name2 != "":
+                                self.struct_value_syms[result.id] = nested_name2
                 result
 
             # Type cast: expr as Type

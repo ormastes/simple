@@ -880,6 +880,17 @@ impl MirLowering:
         constructed storage (see backend translate_aggregate Struct branch)."""
         val field_names = self.struct_field_order[struct_name]
         var ops: [MirOperand] = []
+        # Bug #166: learn this struct's per-field TYPE names from the argument
+        # values. Struct field types are `Infer` in the native/bootstrap path
+        # (both parser- and HIR-level), so they cannot be read from struct
+        # declarations. But a nested struct argument's own construction has
+        # already registered its result local in struct_value_syms with its
+        # struct name, so we can recover "field fi of struct_name holds a P"
+        # here. All instances of a struct share layout, so this name-keyed
+        # field-type map is globally valid and lets chained field access
+        # (`r.origin.y`) resolve the inner field against the right struct
+        # instead of silently defaulting to index 0.
+        var field_type_names: [text] = []
         var fi = 0
         while fi < field_names.len():
             val want = field_names[fi]
@@ -893,7 +904,25 @@ impl MirLowering:
                 ai = ai + 1
             val v = self.lower_expr(chosen)
             ops = ops.push(mir_operand_copy(v))
+            val arg_struct = self.struct_value_syms.get(v.id)
+            field_type_names.push(arg_struct ?? "")
             fi = fi + 1
+        # Only record a non-trivial map (at least one nested struct field), and
+        # only when a prior construction has not already recorded richer info.
+        if not self.struct_field_type_name.has(struct_name):
+            self.struct_field_type_name[struct_name] = field_type_names
+        else:
+            # Merge: keep any previously-known non-empty field type name.
+            val prev = self.struct_field_type_name[struct_name]
+            var merged: [text] = []
+            var mi = 0
+            while mi < field_type_names.len():
+                var name_i = field_type_names[mi]
+                if name_i == "" and mi < prev.len():
+                    name_i = prev[mi]
+                merged.push(name_i)
+                mi = mi + 1
+            self.struct_field_type_name[struct_name] = merged
         val struct_ty = MirType(kind: MirTypeKind.Struct(symbol))
         var b = self.builder
         val dest = b.emit_aggregate(AggregateKind.Struct(symbol), ops, struct_ty)
