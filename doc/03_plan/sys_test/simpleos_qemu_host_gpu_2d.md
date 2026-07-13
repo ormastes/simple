@@ -16,6 +16,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 | exact device-backed Draw IR readback | REQ-003,006; NFR-001 |
 | checked raw Vulkan CLEAR/RECT completion and fail-closed provenance | REQ-003,005,006,010; NFR-001 |
 | clipped transparent IMAGE src-over parity and device provenance | REQ-003,005,006,010; NFR-001 |
+| full-target opacity-1000 RECT/IMAGE fresh admission with opaque initialization | REQ-003,005,006,010; NFR-001 |
 | exact device-backed ProcessingIR result | REQ-004,007; NFR-002,004 |
 | honest cross-host backend classification | REQ-008,009 |
 | malformed and stale input rejection | REQ-010; NFR-007 |
@@ -39,3 +40,7 @@ silently regain receipt eligibility.
 The same boundary composites one partially offscreen transparent IMAGE through
 an active clip and requires exact `SoftwareBackend` parity plus device-only
 readback provenance.
+The embedded-surface integration boundary admits an opaque full-target RECT
+followed by a transparent exact IMAGE and requires device readback, positive
+handle, exact pixels, and no fallback. Opacity 930 and smaller/offscreen batches
+must return `preflight_rejected` before drawing.

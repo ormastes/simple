@@ -210,7 +210,7 @@ fn _engine2d_draw_ir_resolved_image_index(images: [Engine2dResolvedDrawIrImage],
     -1
 
 fn _engine2d_draw_ir_valid_resolved_image(image: Engine2dResolvedDrawIrImage) -> bool:
-    image.width > 0 and image.height > 0 and image.pixels.len() == image.width * image.height
+    image.width > 0 and image.height > 0 and image.pixels.len() == image.width.to_i64() * image.height.to_i64()
 
 fn _engine2d_draw_ir_image_is_opaque(image: Engine2dResolvedDrawIrImage) -> bool:
     for pixel in image.pixels:
@@ -218,20 +218,47 @@ fn _engine2d_draw_ir_image_is_opaque(image: Engine2dResolvedDrawIrImage) -> bool
             return false
     true
 
-fn _engine2d_draw_ir_exact_opaque_embedded_image_index(batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage]) -> i32:
-    val embedding = batch.embedding
-    if embedding.surface_id == "" or embedding.opacity_milli < 1000 or not embedding.clip or batch.commands.len() != 1:
-        return -1
-    val command = batch.commands[0]
-    if command.kind != DRAW_IR_COMMAND_IMAGE or command.x != 0 or command.y != 0 or command.width != embedding.width or command.height != embedding.height:
-        return -1
+fn _engine2d_draw_ir_fresh_device_command_supported(command: DrawIrCommand, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32) -> bool:
+    if command.x < 0 or command.y < 0 or command.width <= 0 or command.height <= 0:
+        return false
+    if command.x.to_i64() + command.width.to_i64() > width.to_i64() or command.y.to_i64() + command.height.to_i64() > height.to_i64():
+        return false
+    if command.kind == DRAW_IR_COMMAND_RECT:
+        return command.computed_style.len() == 0 and ((command.color >> 24) & 0xFFu32) == 0xFFu32
+    if command.kind != DRAW_IR_COMMAND_IMAGE:
+        return false
     val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
     if image_index < 0:
-        return -1
+        return false
     val image = images[image_index]
-    if not _engine2d_draw_ir_valid_resolved_image(image) or not _engine2d_draw_ir_image_is_opaque(image) or image.width != embedding.width or image.height != embedding.height:
-        return -1
-    image_index
+    _engine2d_draw_ir_valid_resolved_image(image) and command.width == image.width and command.height == image.height
+
+fn _engine2d_draw_ir_fresh_device_initializes_target(command: DrawIrCommand, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32) -> bool:
+    if command.x != 0 or command.y != 0 or command.width != width or command.height != height:
+        return false
+    if command.kind == DRAW_IR_COMMAND_RECT:
+        return command.computed_style.len() == 0 and ((command.color >> 24) & 0xFFu32) == 0xFFu32
+    if command.kind != DRAW_IR_COMMAND_IMAGE:
+        return false
+    val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
+    image_index >= 0 and _engine2d_draw_ir_valid_resolved_image(images[image_index]) and _engine2d_draw_ir_image_is_opaque(images[image_index])
+
+fn _engine2d_draw_ir_fresh_device_reason(composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32) -> text:
+    var first_command = true
+    for batch in composition.batches:
+        val embedding = batch.embedding
+        if (embedding.x != 0 or embedding.y != 0 or embedding.width != width or
+            embedding.height != height or embedding.opacity_milli != 1000):
+            return "fresh-device-full-target-opacity-1000-required"
+        for command in batch.commands:
+            if not _engine2d_draw_ir_fresh_device_command_supported(command, images, width, height):
+                return "fresh-device-plain-rect-exact-image-required"
+            if first_command and not _engine2d_draw_ir_fresh_device_initializes_target(command, images, width, height):
+                return "fresh-device-opaque-full-target-first-command-required"
+            first_command = false
+    if first_command:
+        return "fresh-device-nonempty-composition-required"
+    ""
 
 fn _engine2d_draw_ir_preflight_commands(commands: [DrawIrCommand], images: [Engine2dResolvedDrawIrImage]) -> (i32, text):
     var skipped = 0
@@ -318,7 +345,7 @@ val ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH: i32 = 3
 # Engine2D is value-copied across this free-function boundary (see
 # _engine2d_draw_ir_render_box), so the caller MUST reassign from element .0
 # of the returned tuple: (engine, rendered_count, skipped_count, unsupported_kinds).
-fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage]) -> (Engine2D, i32, i32, text):
+fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool) -> (Engine2D, i32, i32, text):
     var eng = engine
     var rendered = 0
     var skipped = 0
@@ -339,7 +366,10 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
             val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
             if image_index >= 0 and _engine2d_draw_ir_valid_resolved_image(images[image_index]):
                 val image = images[image_index]
-                eng.draw_image_scaled(x, y, command.width, command.height, image.width, image.height, image.pixels)
+                if blend_images:
+                    eng.draw_image_blend(x, y, image.width, image.height, image.pixels)
+                else:
+                    eng.draw_image_scaled(x, y, command.width, command.height, image.width, image.height, image.pixels)
                 rendered = rendered + 1
             else:
                 skipped = skipped + 1
@@ -387,24 +417,14 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
     if not use_embedded_surface:
         if embedding.clip:
             eng.set_clip(embedding.x, embedding.y, embedding.width, embedding.height)
-        val direct = _engine2d_draw_ir_render_commands(eng, batch.commands, embedding.x, embedding.y, images)
+        val direct = _engine2d_draw_ir_render_commands(eng, batch.commands, embedding.x, embedding.y, images, allow_parent_image)
         eng = direct.0
         if embedding.clip:
             eng.clear_clip()
         return (eng, direct.1, direct.2, direct.3)
 
-    # A full-size embedded IMAGE with opaque pixels needs neither an offscreen
-    # software surface nor a scale pass. Transparent pixels retain the existing
-    # offscreen src-over composition semantics.
-    if allow_parent_image and _engine2d_draw_ir_exact_opaque_embedded_image_index(batch, images) >= 0:
-        eng.set_clip(embedding.x, embedding.y, embedding.width, embedding.height)
-        val direct = _engine2d_draw_ir_render_commands(eng, batch.commands, embedding.x, embedding.y, images)
-        eng = direct.0
-        eng.clear_clip()
-        return (eng, direct.1, direct.2, direct.3)
-
     var offscreen = Engine2D.create_offscreen(embedding.width, embedding.height)
-    val inner = _engine2d_draw_ir_render_commands(offscreen, batch.commands, 0, 0, images)
+    val inner = _engine2d_draw_ir_render_commands(offscreen, batch.commands, 0, 0, images, false)
     offscreen = inner.0
     if embedding.opacity_milli >= 1000:
         eng.draw_engine(embedding.x, embedding.y, offscreen)
@@ -437,16 +457,11 @@ fn engine2d_draw_ir_adv_composition_present_with_images(engine: Engine2D, compos
     _engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images, false, true, false)
 
 fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
-    """Render/read back a fresh unclipped device engine without host-cache present."""
-    var image_index = -1
-    if composition.batches.len() == 1:
-        image_index = _engine2d_draw_ir_exact_opaque_embedded_image_index(composition.batches[0], images)
-        val embedding = composition.batches[0].embedding
-        if embedding.x != 0 or embedding.y != 0 or embedding.width != engine.width() or embedding.height != engine.height():
-            image_index = -1
-    if image_index < 0:
+    """Render/read back an exhaustively preflighted fresh device composition."""
+    val reason = _engine2d_draw_ir_fresh_device_reason(composition, images, engine.width(), engine.height())
+    if reason != "":
         val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
-        return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, 0, 1, "fresh-device-exact-opaque-image-required", engine2d_readback([], "preflight_rejected"))
+        return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, 0, 1, reason, engine2d_readback([], "preflight_rejected"))
     _engine2d_draw_ir_adv_composition_with_images(engine, composition, true, images, true, false, true)
 
 fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool) -> Engine2dDrawIrAdvResult:

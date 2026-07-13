@@ -9,8 +9,8 @@ Draw IR semantics, separate bounded IMAGE pixel resources, and a bounded
 ProcessingIR `FillU32` payload. The production x86
 desktop source path routes local frames through `DrawIrComposition`, resolved top-level
 `WmContentFrame` IMAGE resources, and Engine2D. Production session wiring,
-nested IMAGE clipping, and fresh device execution remain required
-before that same complete composition may use host offload. A
+device TEXT, smaller device surfaces/group opacity, and fresh QEMU evidence
+remain required before that same complete composition may use host offload. A
 host daemon selects a supported private backend and
 returns a correlated receipt plus output. x86_64, AArch64, and RISC-V adapters
 only own boot/device discovery. They must not define backend-specific public
@@ -131,6 +131,11 @@ src-over for transparent or partially clipped images. Masked or scaled images
 retain CPU semantics and poison device provenance for that request.
 Completion-unknown submissions never replay on the CPU or release potentially
 in-flight dependencies.
+Fresh-device admission is all-or-nothing before mutation: every batch must be
+full-target at opacity 1000, commands are limited to plain opaque RECT and exact
+IMAGE, and the first command must overwrite the full target opaquely. This
+admits device-backed desktop/chrome/image subsets without treating undefined
+fresh Vulkan allocation bytes or software offscreen pixels as device evidence.
 The core executor imports `draw_ir_adv.spl`; host runtime-queue integration is
 kept in the sibling `draw_ir_runtime_adv.spl` so the baremetal closure does not
 acquire direct host-runtime APIs. This source path is not compile-verified while

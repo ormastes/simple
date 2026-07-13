@@ -52,9 +52,13 @@ The local `Engine2dWmFrameExecutor` rejects duplicate or unreferenced content
 frames, stale revisions, bad checksums, unresolved IMAGE commands, and nested
 GROUP metadata. The wire accepts the same top-level IMAGE resource set, but
 production host-offload selection remains open until session wiring and fresh
-QEMU evidence. The host-only fresh-device executor may bypass the software
-offscreen surface for one exact opaque IMAGE covering the full target;
-all other IMAGE shapes preserve the existing offscreen/fallback behavior.
+QEMU evidence. The host-only fresh-device executor preflights the whole
+composition before mutation. It admits only full-target, origin-zero,
+opacity-1000 batches containing plain opaque RECTs and exact unscaled IMAGEs;
+the first command must be an opaque full-target RECT or IMAGE so newly allocated
+Vulkan memory is never read before initialization. Direct IMAGE commands use
+checked src-over. TEXT, styled or translucent RECT, scaling, smaller/offscreen
+batches, GROUP, and group opacity remain rejected.
 
 Local production composition calls
 `engine2d_draw_ir_adv_composition_present_with_images`. The shared internal

@@ -41,4 +41,5 @@ fixture bypasses, synthetic handles, or passing placeholders.
 - Checked raw framebuffer dispatch: traced by Spark and accepted by the
   independent normal/highest-capability reviewer; production WM admission
   remains open for device-rendered offscreen opacity and p95 evidence. The
-  reusable checked IMAGE src-over primitive is implemented.
+  reusable checked IMAGE src-over primitive and full-target opacity-1000
+  RECT/IMAGE fresh admission are implemented; TEXT remains excluded.
