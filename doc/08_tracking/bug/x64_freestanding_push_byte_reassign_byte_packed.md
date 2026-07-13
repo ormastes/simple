@@ -1,10 +1,45 @@
-# x64 freestanding: `rt_push_byte` reassignment corrupts a large [u8] — REAL but not minimally reproducible
+# ROOT CAUSE FOUND: `u8.to_i64()` mis-dispatches to `VfsFileSize.to_i64()` (method-name collision)
 
 **Target:** `native-build --backend cranelift --target x86_64-unknown-none`
-(SimpleOS freestanding). **Status:** OPEN, workaround landed. The bug is REAL
-(confirmed by a real-code revert, below) but is NOT reproducible in isolation, so
-the cranelift-lowering root cause is NOT yet located. Do NOT attempt a backend
-patch until a minimal repro exists — three faithful probes could not produce one.
+(SimpleOS freestanding). **Status:** ROOT-CAUSED via asm dump. NOT a backend
+codegen bug and NOT "reassignment drops BYTE_PACKED" — it is a FRONTEND
+method-resolution collision. Workaround (`.push`) landed and verified.
+
+## Root cause (proven by disassembly)
+
+`objdump` of `_build_channel_data_stable` in the miscompiled (reassignment) scp
+kernel shows the data loop's `_u8_at(data,i).to_i64()` compiles to:
+```
+call _u8_at                      # -> u8 byte in rax   (0x1ba033)
+call services__vfs__vfs_boot_init__VfsFileSize.to_i64   # (0x274902)  <-- WRONG
+call rt_push_byte(payload, rax)  # (0x1277b0)
+```
+`_u8_at` returns `u8`; its `.to_i64()` should be the primitive u8→i64 conversion.
+Instead it bound to `VfsFileSize.to_i64()` (`src/os/services/vfs/vfs_boot_init.spl:77`,
+`me fn to_i64() -> i64: self.bytes`). That method treats the small byte value
+(0-255) as a `VfsFileSize` pointer and returns `self.bytes` (a field load off a
+tiny address) → garbage (the `0x53` fill). This is a `to_i64` method-NAME
+collision: the resolver picked the user-class method over the primitive
+conversion.
+
+## Why every earlier observation fits
+
+- `.push(_u8_at(data,i))` is correct because it takes the `u8` directly — there
+  is no `.to_i64()` to mis-resolve. (Not because reassignment is unsafe.)
+- The three standalone probes PASSED because their entry-closure did not pull in
+  `services.vfs.vfs_boot_init.VfsFileSize`, so `.to_i64()` resolved to the
+  primitive conversion. The full sshd/OS closure DOES include `VfsFileSize`,
+  which is exactly why the bug is "context-dependent."
+- Real-code revert reproduced the `0x53` garbage (sha `f496977c`); `.push`
+  restores byte-exact (`d0c481d8`).
+
+## The actual fix belongs in method resolution
+
+Primitive `.to_i64()` (u8/i32/… → i64) must not be shadowed by a same-named
+user-class method (`to_i64`) that happens to be in the module closure. Fix in the
+HIR/type-check method resolver (receiver-type-strict dispatch), NOT the cranelift
+backend. A same-name-collision hazard is already noted for the interpreter
+(global method registry); this is the native-codegen analogue.
 
 ## Symptom (in the real code)
 
