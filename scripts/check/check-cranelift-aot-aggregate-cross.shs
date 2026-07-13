@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="${SIMPLE_BIN:-bin/release/x86_64-unknown-linux-gnu/simple}"
+BUILD_DIR="${BUILD_DIR:-build/check/cranelift-aot-aggregate-cross}"
+FIXTURE="test/fixtures/compiler/stage4_struct_enum_array_probe.spl"
+READELF="${READELF:-$(command -v llvm-readelf || command -v readelf)}"
+test -x "$SIMPLE_BIN"
+mkdir -p "$BUILD_DIR"
+
+check_target() {
+    target="$1"
+    machine="$2"
+    out="$BUILD_DIR/$target.o"
+    log="$BUILD_DIR/$target.log"
+    rm -rf "$BUILD_DIR/$target-cache" "$out" "$log"
+    env -u SIMPLE_BOOTSTRAP "$SIMPLE_BIN" native-build \
+        --backend cranelift --emit-object --target "$target" \
+        --source test/fixtures/compiler --entry-closure --entry "$FIXTURE" \
+        --cache-dir "$BUILD_DIR/$target-cache" -o "$out" >"$log" 2>&1
+    ! grep -q "missing func-ref\|function address missing\|MIR lowering error" "$log"
+    header="$(LC_ALL=C "$READELF" -h "$out")"
+    printf '%s\n' "$header" | grep -Eq 'Class:[[:space:]]+ELF64'
+    printf '%s\n' "$header" | grep -Eq 'Type:[[:space:]]+REL([[:space:]]|$)'
+    printf '%s\n' "$header" | grep -Eq "Machine:[[:space:]]+$machine([[:space:]]|$)"
+}
+
+if [ "$#" -eq 0 ]; then
+    set -- aarch64-unknown-linux-gnu riscv64-unknown-linux-gnu
+fi
+for target in "$@"; do
+    case "$target" in
+        aarch64-unknown-linux-gnu) check_target "$target" AArch64 ;;
+        riscv64-unknown-linux-gnu) check_target "$target" RISC-V ;;
+        *) echo "unsupported target: $target" >&2; exit 2 ;;
+    esac
+done
+echo "cranelift-aot-aggregate-cross: pass"

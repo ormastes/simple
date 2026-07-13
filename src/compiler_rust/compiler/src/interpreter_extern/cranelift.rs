@@ -180,6 +180,14 @@ pub fn rt_cranelift_data_addr_in_func(args: &[Value]) -> Result<Value, CompileEr
     Ok(Value::Int(value))
 }
 
+pub fn rt_cranelift_function_addr_in_func(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 3 { return Ok(Value::Int(0)); }
+    let value = unsafe { cranelift_sffi::rt_cranelift_function_addr_in_func(
+        value_to_i64(&args[0]), value_to_i64(&args[1]), value_to_i64(&args[2])
+    ) };
+    Ok(Value::Int(value))
+}
+
 /// Import a declared function into the active function builder.
 /// Args: ctx (i64), func_handle (i64)
 pub fn rt_cranelift_import_function(args: &[Value]) -> Result<Value, CompileError> {

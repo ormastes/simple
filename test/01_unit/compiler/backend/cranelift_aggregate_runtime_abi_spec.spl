@@ -6,12 +6,21 @@ use std.spec.*
 describe "Cranelift aggregate runtime ABI":
     it "owns a behavioral aggregate and bounds check":
         val check = file_read("scripts/check/check-cranelift-aot-aggregates.shs")
+        val cross_check = file_read("scripts/check/check-cranelift-aot-aggregate-cross.shs")
         val fixture = file_read("test/fixtures/compiler/stage4_struct_enum_array_probe.spl")
         expect(check).to_contain("stage4_struct_enum_array_probe.spl")
         expect(check).to_contain("cranelift_array_oob.spl")
         expect(check).to_contain("test ! -s \"$BUILD_DIR/actual.txt\"")
         expect(check).to_contain("oob.expected.stderr")
+        expect(cross_check).to_contain("aarch64-unknown-linux-gnu AArch64")
+        expect(cross_check).to_contain("riscv64-unknown-linux-gnu RISC-V")
+        expect(cross_check).to_contain("Type:[[:space:]]+REL")
+        expect(cross_check).to_contain("function address missing")
         expect(fixture).to_contain("if signed_values[0] != -2: return -6")
+        expect(fixture).to_contain("if add_pair(20, 22) != 42: return 8")
+        expect(fixture).to_contain("if call_zero(zero_value) != 31: return 9")
+        expect(fixture).to_contain("if call_pair(add_pair) != 42: return 10")
+        expect(fixture).to_contain("if identity(local_value) != 17: return 11")
         expect(fixture).to_contain("fn main() -> i64:")
 
     it "keeps dictionaries on the heap runtime ABI":
@@ -21,3 +30,13 @@ describe "Cranelift aggregate runtime ABI":
         expect(lowering).to_contain("method == \"values\" or method == \"keys\"")
         expect(lowering).to_contain("\"rt_dict_values\"")
         expect(lowering).to_contain("\"rt_dict_keys\"")
+
+    it "materializes function pointer constants as code addresses":
+        val adapter = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        val wrapper = file_read("src/lib/nogc_sync_mut/sffi/codegen.spl")
+        val resolver = file_read("src/compiler_rust/compiler/src/elf_utils.rs")
+        val interpreter = file_read("src/compiler_rust/compiler/src/interpreter_extern/mod.rs")
+        expect(adapter).to_contain("case FuncPtr(_): return cranelift_function_addr_in_func(ctx, v)")
+        expect(wrapper).to_contain("rt_cranelift_function_addr_in_func")
+        expect(resolver).to_contain("\"rt_cranelift_function_addr_in_func\"")
+        expect(interpreter).to_contain("\"rt_cranelift_function_addr_in_func\"")

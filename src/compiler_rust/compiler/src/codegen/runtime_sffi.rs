@@ -1448,6 +1448,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cranelift_call_indirect", &[I64, I64, I64, I64, I64], &[I64]), // ctx, sig, addr, args_ptr, args_len -> val
     RuntimeFuncSpec::new("rt_cranelift_declare_string_data", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cranelift_data_addr_in_func", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cranelift_function_addr_in_func", &[I64, I64, I64], &[I64]),
     // Type conversion
     RuntimeFuncSpec::new("rt_cranelift_sextend", &[I64, I64, I64], &[I64]), // ctx, to_type, value -> val
     RuntimeFuncSpec::new("rt_cranelift_uextend", &[I64, I64, I64], &[I64]), // ctx, to_type, value -> val

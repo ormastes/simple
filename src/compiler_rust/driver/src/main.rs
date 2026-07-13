@@ -146,12 +146,8 @@ struct CommandEntry {
 fn dispatch_command(entry: &CommandEntry, ctx: &CommandContext) -> i32 {
     let pure_simple_tool = command_is_pure_simple_tool(entry.name);
 
-    // native-build with an explicit --target: the pure-Simple interpreted worker neither
-    // parses --target nor cross-compiles (its multi-module AOT pipeline hardcodes the host
-    // target), and it times out loading the whole compiler graph for a large --source set.
-    // A cross/bare-metal target can only be honored by the in-process Rust LLVM handler,
-    // which parses --target/--linker-script and registers RISCV/AArch64 codegen. Route only
-    // these; host builds (no --target) stay on the pure-Simple path, keeping it the default.
+    // Cross-target executable builds still need the Rust handler. Object emission is
+    // already implemented by the Simple path and must not be linked into an executable.
     if entry.name == "native-build" && native_build_wants_cross_target(ctx.args) {
         return run_rust_handler(&entry.rust_handler, ctx);
     }
@@ -226,13 +222,11 @@ fn test_should_use_light_daemon_client(args: &[String]) -> bool {
         .any(|arg| !arg.starts_with('-') && arg.ends_with(".spl"))
 }
 
-/// True if a native-build invocation passes an explicit `--target` (cross/bare-metal).
-/// The pure-Simple native-build path silently drops `--target`, so any explicit target
-/// must be routed to the in-process Rust handler that actually parses and honors it.
+/// True for cross-target executable builds owned by the Rust handler.
 fn native_build_wants_cross_target(args: &[String]) -> bool {
-    args.iter()
-        .skip(1)
-        .any(|a| a == "--target" || a.starts_with("--target="))
+    let args = &args[1..];
+    args.iter().any(|a| a == "--target" || a.starts_with("--target="))
+        && !args.iter().any(|a| a == "--emit-object")
 }
 
 fn command_is_pure_simple_tool(name: &str) -> bool {
@@ -1638,6 +1632,22 @@ fn parse_file_execution_options(args: &[String]) -> Result<(Option<Target>, Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cross_target_object_emission_stays_on_simple_path() {
+        let executable = ["native-build", "--target=aarch64-unknown-linux-gnu"]
+            .map(str::to_string);
+        let object = [
+            "native-build",
+            "--target",
+            "riscv64-unknown-linux-gnu",
+            "--emit-object",
+        ]
+        .map(str::to_string);
+
+        assert!(native_build_wants_cross_target(&executable));
+        assert!(!native_build_wants_cross_target(&object));
+    }
 
     #[test]
     fn file_execution_options_extract_target_and_strip_runtime_flags() {

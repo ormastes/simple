@@ -737,6 +737,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_cranelift_data_addr_in_func",
         cranelift::rt_cranelift_data_addr_in_func
     );
+    insert_simple!(
+        "rt_cranelift_function_addr_in_func",
+        cranelift::rt_cranelift_function_addr_in_func
+    );
     insert_simple!("rt_cranelift_define_function", cranelift::rt_cranelift_define_function);
     insert_simple!("rt_cranelift_emit_object", cranelift::rt_cranelift_emit_object);
     insert_simple!("rt_cranelift_end_function", cranelift::rt_cranelift_end_function);

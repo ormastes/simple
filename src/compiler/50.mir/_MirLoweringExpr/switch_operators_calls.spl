@@ -980,6 +980,9 @@ impl MirLowering:
                 case _:
                     pass
 
+        if is_direct and self.local_map.has(mir_expr_symbol_id_value(direct_symbol)):
+            is_direct = false
+
         if is_direct:
             # Inline a val-bound lambda `f(args)` by beta-reduction (lambda-lift).
             val inl = self.try_inline_lambda_call(direct_symbol, args)
@@ -1002,7 +1005,24 @@ impl MirLowering:
 
         var arg_operands: [MirOperand] = []
         for arg in args:
-            val arg_local = self.lower_expr(arg.value)
+            val arg_value: HirExpr = arg.value
+            val arg_kind: HirExprKind = arg_value.kind
+            val fallback_arg_symbol = SymbolId(id: -1)
+            val named_var_disc = rt_enum_discriminant(HirExprKind.NamedVar(fallback_arg_symbol, ""))
+            var emitted_function = false
+            if rt_enum_discriminant(arg_kind) == named_var_disc:
+                match arg_kind:
+                    case HirExprKind.NamedVar(symbol, name):
+                        if not self.local_map.has(mir_expr_symbol_id_value(symbol)):
+                            val function_operand = self.named_function_operand(name)
+                            if function_operand != nil:
+                                arg_operands = arg_operands.push(function_operand.unwrap())
+                                emitted_function = true
+                    case _:
+                        pass
+            if emitted_function:
+                continue
+            val arg_local = self.lower_expr(arg_value)
             arg_operands = arg_operands.push(mir_operand_copy(arg_local))
 
         if is_direct:

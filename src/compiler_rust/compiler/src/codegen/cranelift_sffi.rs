@@ -421,12 +421,16 @@ pub unsafe extern "C" fn rt_cranelift_declare_function(
     let func_id = {
         let mut jit = JIT_MODULES.lock().unwrap();
         if let Some(mod_ctx) = jit.get_mut(&module) {
-            mod_ctx.module.declare_function(&name, link, &signature).ok()
+            let id = mod_ctx.module.declare_function(&name, link, &signature).ok();
+            if let Some(id) = id { mod_ctx.func_ids.insert(name.clone(), id); }
+            id
         } else {
             drop(jit);
             let mut aot = AOT_MODULES.lock().unwrap();
             if let Some(mod_ctx) = aot.get_mut(&module) {
-                mod_ctx.module.declare_function(&name, link, &signature).ok()
+                let id = mod_ctx.module.declare_function(&name, link, &signature).ok();
+                if let Some(id) = id { mod_ctx.func_ids.insert(name.clone(), id); }
+                id
             } else {
                 None
             }
@@ -1081,6 +1085,36 @@ pub extern "C" fn rt_cranelift_call_args_clear(ctx: i64) {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn rt_cranelift_function_addr_in_func(ctx: i64, name_ptr: i64, name_len: i64) -> i64 {
+    let name = string_from_ptr(name_ptr, name_len);
+    let mut active = ACTIVE_BUILDERS.lock().unwrap();
+    let Some(ab) = active.get_mut(&ctx) else { return 0 };
+    let Some(builder) = ab.builder.as_mut() else { return 0 };
+    let func_ref = if ab.is_jit {
+        let mut modules = JIT_MODULES.lock().unwrap();
+        let Some(module) = modules.get_mut(&ab.module_handle) else { return 0 };
+        let Some(&func_id) = module.func_ids.get(&name) else {
+            eprintln!("cranelift: function address missing declaration {name}");
+            return 0;
+        };
+        module.module.declare_func_in_func(func_id, builder.func)
+    } else {
+        let mut modules = AOT_MODULES.lock().unwrap();
+        let Some(module) = modules.get_mut(&ab.module_handle) else { return 0 };
+        let Some(&func_id) = module.func_ids.get(&name) else {
+            eprintln!("cranelift: function address missing declaration {name}");
+            return 0;
+        };
+        module.module.declare_func_in_func(func_id, builder.func)
+    };
+    let value = builder.ins().func_addr(types::I64, func_ref);
+    let id = ab.next_value_id;
+    ab.next_value_id += 1;
+    ab.values.insert(id, value);
+    id
+}
+
+#[no_mangle]
 pub extern "C" fn rt_cranelift_call_arg(ctx: i64, value_handle: i64) -> bool {
     let mut active = ACTIVE_BUILDERS.lock().unwrap();
     let Some(ab) = active.get_mut(&ctx) else { return false };
@@ -1557,6 +1591,10 @@ pub fn register_cranelift_sffi_functions(builder: &mut JITBuilder) {
     builder.symbol(
         "rt_cranelift_data_addr_in_func",
         rt_cranelift_data_addr_in_func as *const u8,
+    );
+    builder.symbol(
+        "rt_cranelift_function_addr_in_func",
+        rt_cranelift_function_addr_in_func as *const u8,
     );
 }
 

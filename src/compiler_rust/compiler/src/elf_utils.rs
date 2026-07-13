@@ -797,6 +797,9 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_cranelift_data_addr_in_func" => {
             crate::codegen::cranelift_sffi::rt_cranelift_data_addr_in_func as *const () as usize
         }
+        "rt_cranelift_function_addr_in_func" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_function_addr_in_func as *const () as usize
+        }
         "rt_cranelift_sextend" => crate::codegen::cranelift_sffi::rt_cranelift_sextend as *const () as usize,
         "rt_cranelift_uextend" => crate::codegen::cranelift_sffi::rt_cranelift_uextend as *const () as usize,
         "rt_cranelift_ireduce" => crate::codegen::cranelift_sffi::rt_cranelift_ireduce as *const () as usize,
