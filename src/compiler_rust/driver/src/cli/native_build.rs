@@ -54,6 +54,10 @@ fn is_removed_runtime_bundle(value: &str) -> bool {
     )
 }
 
+fn is_allowed_runtime_bundle(value: &str, bootstrap: bool) -> bool {
+    is_valid_runtime_bundle(value) || (bootstrap && value == "rust-hosted")
+}
+
 fn normalize_backend(value: &str) -> Result<String, String> {
     let normalized = match value.trim().to_ascii_lowercase().as_str() {
         "llvm-lib" | "llvmlib" => "llvm".to_string(),
@@ -364,7 +368,8 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         return 1;
     }
 
-    if !is_valid_runtime_bundle(&runtime_bundle) {
+    let bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
+    if !is_allowed_runtime_bundle(&runtime_bundle, bootstrap) {
         if is_removed_runtime_bundle(&runtime_bundle) {
             eprintln!(
                 "error: runtime bundle '{}' was removed; use simple-core or core-c-bootstrap",
@@ -566,7 +571,14 @@ pub fn handle_native_build(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_backend;
+    use super::{is_allowed_runtime_bundle, normalize_backend};
+
+    #[test]
+    fn permits_rust_hosted_only_for_bootstrap() {
+        assert!(is_allowed_runtime_bundle("rust-hosted", true));
+        assert!(!is_allowed_runtime_bundle("rust-hosted", false));
+        assert!(is_allowed_runtime_bundle("simple-core", false));
+    }
 
     #[test]
     fn normalizes_llvm_aliases() {

@@ -64,6 +64,10 @@ fn is_removed_runtime_bundle(value: &str) -> bool {
     )
 }
 
+fn is_allowed_runtime_bundle(value: &str, bootstrap: bool) -> bool {
+    is_valid_runtime_bundle(value) || (bootstrap && value == "rust-hosted")
+}
+
 // Helper: extract a Rust String from a Simple runtime string value.
 fn extract_rt_string(val: RuntimeValue) -> Option<String> {
     let len = rt_string_len(val);
@@ -444,7 +448,8 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
         }
     }
 
-    if !is_valid_runtime_bundle(&runtime_bundle) {
+    let bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
+    if !is_allowed_runtime_bundle(&runtime_bundle, bootstrap) {
         if is_removed_runtime_bundle(&runtime_bundle) {
             eprintln!(
                 "error: runtime bundle '{}' was removed; use simple-core or core-c-bootstrap",

@@ -279,7 +279,10 @@ fn test_module_prefix_from_path() {
 
 #[test]
 fn test_dotted_module_init_symbol_matches_portable_c_reference() {
-    assert_eq!(module_init_symbol(Some("app__ui.render__ansi")), "__module_init_app__ui_dot_render__ansi");
+    assert_eq!(
+        module_init_symbol(Some("app__ui.render__ansi")),
+        "__module_init_app__ui_dot_render__ansi"
+    );
     assert_eq!(module_init_symbol(None), "__module_init");
 }
 
@@ -1127,6 +1130,31 @@ fn test_runtime_bundle_hosted_is_removed_for_non_compiler_entry() {
 
     let err = builder.selected_runtime_library(temp.path()).unwrap_err();
     assert!(err.contains("removed Rust-hosted runtime bundles"));
+}
+
+#[test]
+fn test_runtime_bundle_hosted_is_allowed_for_bootstrap_entry_only() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
+    unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", "1") };
+    let temp = tempfile::tempdir().unwrap();
+    let native_all = temp.path().join("libsimple_native_all.a");
+    std::fs::write(&native_all, b"all").unwrap();
+
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "rust-hosted".to_string();
+    let mut builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("simple")).config(config);
+    builder.entry_file = Some(PathBuf::from("/project/src/app/cli/bootstrap_main.spl"));
+
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert_eq!(selected, (native_all, true));
+    match old_bootstrap {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP") },
+    }
 }
 
 #[test]
