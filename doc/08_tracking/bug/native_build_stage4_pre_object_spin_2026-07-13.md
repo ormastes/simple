@@ -86,6 +86,15 @@ The remaining fix belongs to two explicit owner classes, tracked by TODO 535:
 2. Correct full-CLI entry-closure/import qualification or code generation for
    the 18 non-runtime Simple definitions.
 
+Focused follow-up split the non-runtime group into 15 import/closure failures
+and three lowering failures. The first shared import-map defect was an obsolete
+blanket exclusion of every path containing `check.spl`; it suppressed the real
+`cli/check.spl` and `cli/arch_check.spl` owners even though both were discovered
+and compiled. The exclusion is removed, and the focused production-filename
+import-map regression passes. This proves the owner fix for `run_check` and
+`run_arch_check`; the strict full-CLI link has not been rerun, so the remaining
+symbol count is not inferred or promoted to PASS.
+
 Reuse the preserved 1,043-object cache only after one of those owners changes,
 then run one bounded strict-link verification. Do not add stubs, relabel a
 runtime bundle, hardcode symbols, or substitute the Rust seed as production

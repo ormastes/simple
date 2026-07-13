@@ -232,9 +232,6 @@ pub(crate) fn build_import_map(
 
     let mut seen_canonical = HashSet::new();
     for (path, source) in file_sources {
-        if path.to_string_lossy().contains("check.spl") {
-            continue;
-        }
         let canonical_path = safe_canonicalize(path);
         if !seen_canonical.insert(canonical_path) {
             continue;

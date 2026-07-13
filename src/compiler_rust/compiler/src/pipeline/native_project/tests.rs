@@ -1435,6 +1435,36 @@ fn test_build_use_map_glob_import_populates_symbol_entries() {
 }
 
 #[test]
+fn test_build_use_map_keeps_production_check_modules() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let app_root = src_root.join("app");
+    let check_path = app_root.join("cli/check.spl");
+    let consumer_path = app_root.join("cli/main.spl");
+    std::fs::create_dir_all(check_path.parent().unwrap()).unwrap();
+
+    std::fs::write(&check_path, "fn run_check(args: [text]) -> i64:\n    return 0\n").unwrap();
+    std::fs::write(
+        &consumer_path,
+        "use app.cli.check.{run_check}\nfn main() -> i64:\n    return run_check([])\n",
+    )
+    .unwrap();
+
+    let file_sources = vec![
+        (check_path.clone(), std::fs::read_to_string(&check_path).unwrap()),
+        (consumer_path.clone(), std::fs::read_to_string(&consumer_path).unwrap()),
+    ];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&app_root), &src_root);
+    let expected = format!("{}__run_check", module_prefix_from_path(&check_path, &app_root));
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&consumer_path).unwrap())
+        .parse()
+        .unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
+
+    assert_eq!(use_map.get("run_check"), Some(&expected));
+}
+
+#[test]
 fn test_build_use_map_resolves_data_from_dotted_module_with_name_collision() {
     let temp = tempfile::tempdir().unwrap();
     let src_root = temp.path().join("project/src");
