@@ -574,6 +574,22 @@ impl MirLowering:
         if expr_disc == call_disc:
             match expr_value.kind:
                 case HirExprKind.Call(callee, args, _):
+                    # Built-in Option construction: `Some(v)` / `None(...)` ->
+                    # rt_enum_new with Option's discriminants (Some=0, None=1,
+                    # registered in enum_variant_index). The callee is a bare
+                    # NamedVar (emitted by hir_lowering's lower_unresolved_ident
+                    # because Option is not a module enum). Mirrors the Ok/Err
+                    # interception in switch_operators_calls' lower_call, but
+                    # placed here so Option support needs no edit to that file.
+                    val callee_kind: HirExprKind = callee.kind
+                    val nv_disc = rt_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ""))
+                    if rt_enum_discriminant(callee_kind) == nv_disc:
+                        match callee_kind:
+                            case HirExprKind.NamedVar(nv_symbol, nv_name):
+                                if (nv_name == "Some" or nv_name == "None") and self.enum_variant_index.has("Option") and not self.local_map.has(mir_expr_symbol_id_value(nv_symbol)):
+                                    return self.lower_enum_construct_named("Option", nv_name, args)
+                            case _:
+                                pass
                     return self.lower_call(callee, args)
                 case _:
                     pass
@@ -628,6 +644,11 @@ impl MirLowering:
                             val pre_nv_id = pre_resolved.id
                             if pre_nv_id >= 0 and self.local_map.has(pre_nv_id):
                                 return self.local_map[pre_nv_id]
+                        # Built-in nullary Option `None` used as a value (not a
+                        # call): construct Option.None (disc 1) via rt_enum_new.
+                        # A local of the same name shadows it (handled above).
+                        if pre_name == "None" and self.enum_variant_index.has("Option") and not (pre_sym_id >= 0 and self.local_map.has(pre_sym_id)):
+                            return self.lower_enum_construct_named("Option", "None", [])
                 case _:
                     pass
 
