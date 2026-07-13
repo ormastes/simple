@@ -8,6 +8,7 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{Function, ImportItem, Param}
+use compiler.frontend.parser_types_expr.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
@@ -89,6 +90,123 @@ fn bootstrap_function_names_from_env() -> [text]:
                 names.push(name)
         i = i + 1
     names
+
+# ============================================================================
+# Untyped-return inference (native --entry path)
+#
+# A function declared with NO return type (`fn f(...): ...`, no `-> T`) is
+# assumed to return Unit. If its body actually contains an explicit
+# `return <value>`, that assumption is wrong: MIR/backend still emit the
+# function as `void`, but the `return` carries a real value, producing
+# invalid LLVM IR (`ret void %t0` after a bogus bitcast-to-void) that llc
+# rejects with a cryptic, far-from-the-cause error.
+#
+# This has to be resolved BEFORE any function body is lowered to HIR: a
+# function's return type is registered onto its symbol (as part of
+# `HirTypeKind.Function(params, ret, effects)`) in the module's up-front
+# signature-declaration pass, precisely so that CALLERS defined later in the
+# same module (or compiled earlier in the module's function-iteration order)
+# see the right type for `val v = f(...)`. Inferring the return type only
+# after `f`'s own body is lowered (i.e. inside `lower_function`) would fix
+# `f`'s own `ret` instruction but leave every caller still treating the call
+# as void. So the inference below runs directly over the pre-lowering
+# parser AST (`Function`/`Block`/`Stmt`/`Expr`), during that same signature
+# pass (see `infer_untyped_return_type` in module_lowering.spl); it never
+# runs under SIMPLE_BOOTSTRAP (that pass is skipped there entirely).
+#
+# `ReturnScan` is the result of walking a function body looking for
+# `return <value>` sites and trying to agree on ONE simple concrete type
+# (i64/i32/u64/u32/f64/f32/bool/text) for all of them. When that succeeds,
+# the return type is promoted from the Unit default to the inferred type
+# (route (a)). When it can't (disagreement, or an un-inferrable value shape
+# such as a bare function call — which also conservatively covers a
+# self-recursive call: this syntax-level pass never resolves a `Call`'s
+# type, so a `return f(...)` anywhere, self-recursive or not, always counts
+# as "un-inferrable" rather than being silently guessed at), a fatal error
+# is raised instead (route (b)) rather than shipping a body that will crash
+# the backend with a useless message.
+struct ReturnScan:
+    found_value_return: bool
+    resolved_name: text?
+    ambiguous: bool
+
+fn return_scan_empty() -> ReturnScan:
+    ReturnScan(found_value_return: false, resolved_name: nil, ambiguous: false)
+
+fn merge_return_scan(a: ReturnScan, b: ReturnScan) -> ReturnScan:
+    var out = a
+    if b.ambiguous:
+        out.ambiguous = true
+    if b.found_value_return:
+        out.found_value_return = true
+        if b.resolved_name.?:
+            if out.resolved_name.?:
+                if out.resolved_name.unwrap() != b.resolved_name.unwrap():
+                    out.ambiguous = true
+            else:
+                out.resolved_name = b.resolved_name
+        else:
+            out.ambiguous = true
+    out
+
+fn ast_binop_is_comparison(op: BinOp) -> bool:
+    match op:
+        case BinOp.Eq: true
+        case BinOp.NotEq: true
+        case BinOp.Lt: true
+        case BinOp.LtEq: true
+        case BinOp.Gt: true
+        case BinOp.GtEq: true
+        case BinOp.And: true
+        case BinOp.Or: true
+        case _: false
+
+fn ast_binop_is_arith(op: BinOp) -> bool:
+    match op:
+        case BinOp.Add: true
+        case BinOp.Sub: true
+        case BinOp.Mul: true
+        case BinOp.Div: true
+        case BinOp.Mod: true
+        case _: false
+
+fn hir_simple_type_name_is_known(name: text) -> bool:
+    if name == "i64": return true
+    if name == "i32": return true
+    if name == "u64": return true
+    if name == "u32": return true
+    if name == "f64": return true
+    if name == "f32": return true
+    if name == "text": return true
+    false
+
+fn hir_type_simple_name(t: HirType) -> text?:
+    match t.kind:
+        case HirTypeKind.Int(bits, signed):
+            if signed and bits == 64: Some("i64")
+            elif signed and bits == 32: Some("i32")
+            elif (not signed) and bits == 64: Some("u64")
+            elif (not signed) and bits == 32: Some("u32")
+            else: nil
+        case HirTypeKind.Float(bits):
+            if bits == 64: Some("f64")
+            elif bits == 32: Some("f32")
+            else: nil
+        case HirTypeKind.Bool: Some("bool")
+        case HirTypeKind.Str: Some("text")
+        case _: nil
+
+fn hir_type_kind_from_simple_name(name: text) -> HirTypeKind:
+    match name:
+        case "i64": HirTypeKind.Int(64, true)
+        case "i32": HirTypeKind.Int(32, true)
+        case "u64": HirTypeKind.Int(64, false)
+        case "u32": HirTypeKind.Int(32, false)
+        case "f64": HirTypeKind.Float(64)
+        case "f32": HirTypeKind.Float(32)
+        case "bool": HirTypeKind.Bool
+        case "text": HirTypeKind.Str
+        case _: HirTypeKind.Unit
 
 fn bootstrap_hir_symbol_for_name(name: text) -> SymbolId:
     if name == "bootstrap_version":

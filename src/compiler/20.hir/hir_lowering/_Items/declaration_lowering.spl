@@ -242,6 +242,32 @@ impl HirLowering:
         if bootstrap_diag:
             eprint("[hir-lower] lower_function:body {fn_.name}")
 
+        # Untyped-return inference (native --entry path). A function with NO
+        # declared return type defaults to Unit above -- but if its body has
+        # an explicit `return <value>`, that default is wrong: the backend
+        # still emits `void`, yet MIR carries a real value out of the
+        # `return`, producing invalid LLVM IR (`ret void %t0` after a bogus
+        # bitcast) that llc rejects with a cryptic, far-from-the-cause error.
+        # The actual inference (and, when it can't agree on one simple type,
+        # the fatal route-(b) error) already ran BEFORE this function's body
+        # was lowered, in the module's up-front signature-declaration pass
+        # (`infer_untyped_return_type` in module_lowering.spl) -- it has to
+        # run that early so CALLERS of this function see the right type too,
+        # not just this function's own `ret` instruction. Here we just pick
+        # up whatever that pass decided, by reading it back off this
+        # function's own symbol. Gated out of SIMPLE_BOOTSTRAP: that path
+        # computes return_type via `bootstrap_builtin_return_type` above and
+        # is owned by the parallel bootstrap-redeploy lane (module_lowering's
+        # inference pass is itself skipped entirely under plain bootstrap).
+        if (not fn_.has_return_type) and (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            val fn_sym_type = self.symbols.get_symbol_type(fn_symbol_id)
+            if fn_sym_type.?:
+                match fn_sym_type.unwrap().kind:
+                    case HirTypeKind.Function(_, ret, _):
+                        return_type = ret
+                    case _:
+                        pass
+
         # NOTE(#133): pop unconditionally, matching the unconditional push above.
         self.symbols.pop_scope()
         self.current_function = nil

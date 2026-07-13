@@ -8,6 +8,7 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{Function, ImportItem, Param}
+use compiler.frontend.parser_types_expr.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
@@ -84,6 +85,222 @@ fn hir_module_is_bootstrap_entry(module_name: text) -> bool:
     hir_module_logical_name_from_path(entry_path) == hir_module_logical_name_from_path(module_name)
 
 impl HirLowering:
+    # Untyped-return inference (native --entry path) -- see the `ReturnScan`
+    # doc comment in lowering_helpers.spl for the full rationale. Runs over
+    # the raw parser AST (`Function.body`), NOT the HIR, because it has to
+    # happen during this module's up-front signature-declaration pass --
+    # before ANY function body is lowered -- so a caller elsewhere in the
+    # module sees the promoted return type too, not just the callee's own
+    # generated `ret` instruction.
+    me infer_untyped_return_type(fn_decl: Function) -> HirType:
+        val scan = self.scan_ast_block_for_returns(fn_decl.body, fn_decl.params)
+        if not scan.found_value_return:
+            return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
+        if scan.ambiguous or not scan.resolved_name.?:
+            self.error("untyped function returns a value: function '{fn_decl.name}' returns a value but declares no return type; add '-> T'", fn_decl.span)
+            return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
+        HirType(kind: hir_type_kind_from_simple_name(scan.resolved_name.unwrap()), span: fn_decl.span)
+
+    me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:
+        match e.kind:
+            case ExprKind.IntLit(_):
+                Some("i64")
+            case ExprKind.FloatLit(_):
+                Some("f64")
+            case ExprKind.StringLit(_, _):
+                Some("text")
+            case ExprKind.BoolLit(_):
+                Some("bool")
+            case ExprKind.Ident(name):
+                var i = 0
+                var found: HirType? = nil
+                while i < params.len():
+                    if params[i].name == name:
+                        found = Some(self.lower_type(params[i].type_))
+                    i = i + 1
+                if found.?: hir_type_simple_name(found.unwrap()) else: nil
+            case ExprKind.Unary(op, operand):
+                match op:
+                    case UnaryOp.Not:
+                        Some("bool")
+                    case UnaryOp.Neg:
+                        self.infer_simple_type_name_ast(operand, params)
+                    case _:
+                        nil
+            case ExprKind.Binary(op, left, right):
+                if ast_binop_is_comparison(op):
+                    Some("bool")
+                elif ast_binop_is_arith(op):
+                    val lt = self.infer_simple_type_name_ast(left, params)
+                    val rt = self.infer_simple_type_name_ast(right, params)
+                    if lt.? and rt.? and lt.unwrap() == rt.unwrap() and hir_simple_type_name_is_known(lt.unwrap()):
+                        lt
+                    else:
+                        nil
+                else:
+                    nil
+            case ExprKind.Cast(_, target):
+                hir_type_simple_name(self.lower_type(target))
+            case _:
+                # Anything else (a call, index, field access, struct/enum
+                # literal, ...) is deliberately left un-inferred here rather
+                # than guessed at -- this also conservatively covers a
+                # self-recursive call: `return f(...)` (whether or not `f`
+                # is the function being scanned) always resolves to `nil`,
+                # which `merge_return_scan` turns into `ambiguous`, which
+                # `infer_untyped_return_type` turns into the fatal route-(b)
+                # error instead of a silently-wrong return type.
+                nil
+
+    me scan_ast_block_for_returns(b: Block, params: [Param]) -> ReturnScan:
+        var acc = return_scan_empty()
+        for stmt in b.stmts:
+            acc = merge_return_scan(acc, self.scan_ast_stmt_for_returns(stmt, params))
+        acc
+
+    me scan_ast_stmt_for_returns(s: Stmt, params: [Param]) -> ReturnScan:
+        match s.kind:
+            case StmtKind.Expr(expr):
+                self.scan_ast_expr_for_returns(expr, params)
+            case StmtKind.Val(_, _, init):
+                self.scan_ast_expr_for_returns(init, params)
+            case StmtKind.Var(_, _, init):
+                if init.?: self.scan_ast_expr_for_returns(init.unwrap(), params) else: return_scan_empty()
+            case StmtKind.Assign(target, _, value):
+                merge_return_scan(self.scan_ast_expr_for_returns(target, params), self.scan_ast_expr_for_returns(value, params))
+            case StmtKind.Return(value):
+                if value.?:
+                    val v = value.unwrap()
+                    ReturnScan(found_value_return: true, resolved_name: self.infer_simple_type_name_ast(v, params), ambiguous: false)
+                else:
+                    return_scan_empty()
+            case StmtKind.For(_, iter, body):
+                merge_return_scan(self.scan_ast_expr_for_returns(iter, params), self.scan_ast_block_for_returns(body, params))
+            case StmtKind.While(cond, body):
+                merge_return_scan(self.scan_ast_expr_for_returns(cond, params), self.scan_ast_block_for_returns(body, params))
+            case StmtKind.Loop(body):
+                self.scan_ast_block_for_returns(body, params)
+            case StmtKind.Yield(value):
+                if value.?: self.scan_ast_expr_for_returns(value.unwrap(), params) else: return_scan_empty()
+            case StmtKind.Throw(value):
+                self.scan_ast_expr_for_returns(value, params)
+            case StmtKind.With(_, body):
+                self.scan_ast_block_for_returns(body, params)
+            case _:
+                return_scan_empty()
+
+    # Walks reachable sub-expressions looking for `return <value>` sites,
+    # EXCEPT inside a nested `Lambda` body (its own function scope -- a
+    # `return` inside one belongs to the closure, not this function). Rare
+    # shapes fall through to `case _` (no descent): under-covering here is
+    # conservative, not unsound -- a `return` hidden in an unhandled shape is
+    # exactly as broken as it already was before this change (the
+    # pre-existing Unit-return default is unchanged), so it cannot regress a
+    # working case.
+    me scan_ast_expr_for_returns(e: Expr, params: [Param]) -> ReturnScan:
+        match e.kind:
+            case ExprKind.Return(value):
+                if value.?:
+                    val v = value.unwrap()
+                    ReturnScan(found_value_return: true, resolved_name: self.infer_simple_type_name_ast(v, params), ambiguous: false)
+                else:
+                    return_scan_empty()
+            case ExprKind.If(cond, then_, else_):
+                var acc = merge_return_scan(self.scan_ast_expr_for_returns(cond, params), self.scan_ast_block_for_returns(then_, params))
+                if else_.?:
+                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(else_.unwrap(), params))
+                acc
+            case ExprKind.MatchCase(scrutinee, arms):
+                var acc = self.scan_ast_expr_for_returns(scrutinee, params)
+                for arm in arms:
+                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(arm.body, params))
+                    if arm.has_guard:
+                        acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(arm.guard, params))
+                acc
+            case ExprKind.TryCatch(body, clauses, finally_):
+                var acc = self.scan_ast_block_for_returns(body, params)
+                for clause in clauses:
+                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(clause.body, params))
+                if finally_.?:
+                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(finally_.unwrap(), params))
+                acc
+            case ExprKind.Block(block):
+                self.scan_ast_block_for_returns(block, params)
+            case ExprKind.LossBlock(body):
+                self.scan_ast_block_for_returns(body, params)
+            case ExprKind.NogradBlock(body):
+                self.scan_ast_block_for_returns(body, params)
+            case ExprKind.UnsafeBlock(body):
+                self.scan_ast_block_for_returns(body, params)
+            case ExprKind.Lambda(_, _):
+                return_scan_empty()
+            case ExprKind.Binary(_, left, right):
+                merge_return_scan(self.scan_ast_expr_for_returns(left, params), self.scan_ast_expr_for_returns(right, params))
+            case ExprKind.Unary(_, operand):
+                self.scan_ast_expr_for_returns(operand, params)
+            case ExprKind.Call(callee, args):
+                var acc = self.scan_ast_expr_for_returns(callee, params)
+                for a in args:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(a.value, params))
+                acc
+            case ExprKind.MethodCall(receiver, _, args):
+                var acc = self.scan_ast_expr_for_returns(receiver, params)
+                for a in args:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(a.value, params))
+                acc
+            case ExprKind.Cast(expr, _):
+                self.scan_ast_expr_for_returns(expr, params)
+            case ExprKind.Index(base, index):
+                merge_return_scan(self.scan_ast_expr_for_returns(base, params), self.scan_ast_expr_for_returns(index, params))
+            case ExprKind.Field(base, _):
+                self.scan_ast_expr_for_returns(base, params)
+            case ExprKind.OptionalChain(base, _):
+                self.scan_ast_expr_for_returns(base, params)
+            case ExprKind.NullCoalesce(left, right):
+                merge_return_scan(self.scan_ast_expr_for_returns(left, params), self.scan_ast_expr_for_returns(right, params))
+            case ExprKind.ExistsCheck(base):
+                self.scan_ast_expr_for_returns(base, params)
+            case ExprKind.ForceUnwrap(base):
+                self.scan_ast_expr_for_returns(base, params)
+            case ExprKind.Range(start, end, _, step):
+                var acc = return_scan_empty()
+                if start.?:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(start.unwrap(), params))
+                if end.?:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(end.unwrap(), params))
+                if step.?:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(step.unwrap(), params))
+                acc
+            case ExprKind.Await(expr):
+                self.scan_ast_expr_for_returns(expr, params)
+            case ExprKind.Yield(value):
+                if value.?: self.scan_ast_expr_for_returns(value.unwrap(), params) else: return_scan_empty()
+            case ExprKind.Throw(value):
+                self.scan_ast_expr_for_returns(value, params)
+            case ExprKind.Try(expr):
+                self.scan_ast_expr_for_returns(expr, params)
+            case ExprKind.ArrayLit(elements):
+                var acc = return_scan_empty()
+                for el in elements:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(el, params))
+                acc
+            case ExprKind.TupleLit(elements):
+                var acc = return_scan_empty()
+                for el in elements:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(el, params))
+                acc
+            case ExprKind.SetLit(elements):
+                var acc = return_scan_empty()
+                for el in elements:
+                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(el, params))
+                acc
+            case ExprKind.ArrayRepeat(value, count):
+                merge_return_scan(self.scan_ast_expr_for_returns(value, params), self.scan_ast_expr_for_returns(count, params))
+            case ExprKind.Break(_):
+                return_scan_empty()
+            case _:
+                return_scan_empty()
+
     me register_imported_symbol(imported_mod: Module, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span):
         val as_cls: Class? = imported_mod.classes.get(imported_name)
         val as_str: Struct? = imported_mod.structs.get(imported_name)
@@ -111,7 +328,7 @@ impl HirLowering:
             val return_type = if as_fn.has_return_type:
                 self.lower_type(as_fn.return_type)
             else:
-                HirType(kind: HirTypeKind.Unit, span: import_span)
+                self.infer_untyped_return_type(as_fn)
             val fn_type = HirType(
                 kind: HirTypeKind.Function(param_types, return_type, []),
                 span: import_span
@@ -705,7 +922,7 @@ impl HirLowering:
             val return_type = if fn_decl.has_return_type:
                 self.lower_type(fn_decl.return_type)
             else:
-                HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
+                self.infer_untyped_return_type(fn_decl)
             val fn_type = HirType(
                 kind: HirTypeKind.Function(param_types, return_type, []),
                 span: fn_decl.span
