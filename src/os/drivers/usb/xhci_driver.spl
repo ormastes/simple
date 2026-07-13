@@ -73,9 +73,17 @@ class XhciController:
     db_base: u64            # Doorbell array base
     max_slots: u32          # Max device slots (HCSPARAMS1[7:0])
     max_ports: u32          # Max ports (HCSPARAMS1[31:24])
-    cmd_ring: TrbRing       # Command ring
+    # Command ring state is kept as scalar fields, NOT a nested TrbRing class
+    # field: reading a class-typed field back off another class instance in
+    # seed freestanding builds mangles the inner object (trb_write through
+    # ctrl.cmd_ring faulted in rt_mmio_write_* on a garbage ring base, while
+    # every scalar u64 field on ctrl read back correctly).
+    cmd_ring_base: u64      # Command ring physical base
+    cmd_ring_enqueue: u32   # Command ring producer enqueue index
+    cmd_ring_cycle: bool    # Command ring producer cycle state
     event_ring_base: u64    # Event ring segment physical address
     event_ring_cycle: bool  # Event ring consumer cycle state
+    event_ring_dequeue: u32 # Event ring consumer dequeue index (0-based)
     dcbaa_phys: u64         # DCBAA physical address
 
 # ============================================================================
@@ -117,9 +125,12 @@ fn xhci_probe() -> XhciController?:
                                 db_base: 0,
                                 max_slots: 0,
                                 max_ports: 0,
-                                cmd_ring: trb_ring_new(0),
+                                cmd_ring_base: 0,
+                                cmd_ring_enqueue: 0,
+                                cmd_ring_cycle: true,
                                 event_ring_base: 0,
                                 event_ring_cycle: true,
+                                event_ring_dequeue: 0,
                                 dcbaa_phys: 0
                             )
                             return ctrl
@@ -216,10 +227,16 @@ fn xhci_init(ctrl: XhciController) -> Result<bool, text>:
     xhci_op_write32(ctrl, XHCI_OP_CONFIG, ctrl.max_slots)
 
     # Step 8: Alloc DCBAA (1 page), zero 256*8 bytes, write to DCBAAP
-    val dcbaa_result = pmm_alloc_pages(1)
-    if not dcbaa_result.?:
+    # NOTE: allocation results are consumed via `if val Some(...)` bindings, not
+    # `.?` + `.unwrap()` — the latter misfires on Option<PhysAddr> in seed
+    # freestanding native builds (took the error branch even though the PMM
+    # allocation had succeeded; same class of problem as the documented seed
+    # lane-Option poison in scenario_catalog.spl).
+    var dcbaa_phys: u64 = 0
+    if val Some(dcbaa_page) = pmm_alloc_pages(1):
+        dcbaa_phys = dcbaa_page.addr
+    else:
         return Result.Err("xhci: failed to alloc DCBAA page")
-    val dcbaa_phys = dcbaa_result.unwrap().addr
     ctrl.dcbaa_phys = dcbaa_phys
     # Zero 256 slot pointers (8 bytes each = 2048 bytes)
     var slot_i: u32 = 0
@@ -228,27 +245,44 @@ fn xhci_init(ctrl: XhciController) -> Result<bool, text>:
         slot_i = slot_i + 1
     xhci_op_write64(ctrl, XHCI_OP_DCBAAP, dcbaa_phys)
 
-    # Step 9: Alloc command ring (1 page), init TrbRing, write CRCR = phys | RCS(1)
-    val cmd_ring_result = pmm_alloc_pages(1)
-    if not cmd_ring_result.?:
+    # Step 9: Alloc command ring (1 page), zero it, write CRCR = phys | RCS(1)
+    var cmd_ring_phys: u64 = 0
+    if val Some(cmd_ring_page) = pmm_alloc_pages(1):
+        cmd_ring_phys = cmd_ring_page.addr
+    else:
         return Result.Err("xhci: failed to alloc command ring page")
-    val cmd_ring_phys = cmd_ring_result.unwrap().addr
-    ctrl.cmd_ring = trb_ring_new(cmd_ring_phys)
+    # Zero the ring so stale memory can never carry a valid producer cycle bit.
+    var cz: u64 = 0
+    while cz < 512:
+        mmio_write64(cmd_ring_phys + (cz * 8), 0)
+        cz = cz + 1
+    ctrl.cmd_ring_base = cmd_ring_phys
+    ctrl.cmd_ring_enqueue = 0
+    ctrl.cmd_ring_cycle = true
     # CRCR: physical address with RCS (bit 0) = 1
     xhci_op_write64(ctrl, XHCI_OP_CRCR, cmd_ring_phys | 1)
 
     # Step 10: Alloc event ring segment (1 page) + ERST (1 page)
-    val evt_seg_result = pmm_alloc_pages(1)
-    if not evt_seg_result.?:
+    var evt_seg_phys: u64 = 0
+    if val Some(evt_seg_page) = pmm_alloc_pages(1):
+        evt_seg_phys = evt_seg_page.addr
+    else:
         return Result.Err("xhci: failed to alloc event ring page")
-    val evt_seg_phys = evt_seg_result.unwrap().addr
     ctrl.event_ring_base = evt_seg_phys
     ctrl.event_ring_cycle = true
+    ctrl.event_ring_dequeue = 0
+    # Zero the event ring segment so no stale memory can alias a valid
+    # cycle-bit-matching event TRB before the controller writes real events.
+    var ez: u64 = 0
+    while ez < 512:
+        mmio_write64(evt_seg_phys + (ez * 8), 0)
+        ez = ez + 1
 
-    val erst_result = pmm_alloc_pages(1)
-    if not erst_result.?:
+    var erst_phys: u64 = 0
+    if val Some(erst_page) = pmm_alloc_pages(1):
+        erst_phys = erst_page.addr
+    else:
         return Result.Err("xhci: failed to alloc ERST page")
-    val erst_phys = erst_result.unwrap().addr
 
     # Write ERST entry: [segment_base_lo, segment_base_hi, segment_size, 0]
     mmio_write32(erst_phys,      (evt_seg_phys & 0xFFFFFFFF).to_u32())
@@ -301,48 +335,98 @@ class CmdCompletionResult:
     completion_code: u32   # Completion code from event status bits [31:24]
     slot_id: u32           # Slot ID from event control bits [31:24]
 
+# ============================================================================
+# Command Ring Producer
+# ============================================================================
+
+# Number of 16-byte TRB slots in the one-page command ring (4096 / 16).
+val CMD_RING_TRBS: u32 = 256
+
+fn _xhci_cmd_ring_push(ctrl: XhciController, param: u64, status: u32, control: u32):
+    """Enqueue one TRB onto the command ring using scalar ring state.
+
+    Applies the producer cycle bit, writes the TRB, advances the enqueue
+    index, and installs a toggling Link TRB when the last usable slot is
+    reached (same protocol as xhci_trb.trb_write, but without routing the
+    ring through a nested class field — see the note on XhciController).
+    """
+    val last_slot = CMD_RING_TRBS - 1
+    var ctrl_word = control & (0xFFFFFFFF - TRB_CYCLE)
+    if ctrl.cmd_ring_cycle:
+        ctrl_word = ctrl_word | TRB_CYCLE
+    trb_write_raw(ctrl.cmd_ring_base, ctrl.cmd_ring_enqueue, param, status, ctrl_word)
+    ctrl.cmd_ring_enqueue = ctrl.cmd_ring_enqueue + 1
+    if ctrl.cmd_ring_enqueue >= last_slot:
+        var link_ctrl = (TRB_TYPE_LINK << TRB_TYPE_SHIFT) | TRB_TOGGLE_CYCLE
+        if ctrl.cmd_ring_cycle:
+            link_ctrl = link_ctrl | TRB_CYCLE
+        trb_write_raw(ctrl.cmd_ring_base, last_slot, ctrl.cmd_ring_base, 0, link_ctrl)
+        ctrl.cmd_ring_cycle = not ctrl.cmd_ring_cycle
+        ctrl.cmd_ring_enqueue = 0
+
+# ============================================================================
+# Event Ring Consumer
+# ============================================================================
+
+fn xhci_wait_for_event_type(ctrl: XhciController, want_type: u32, max_iters: u32) -> CmdCompletionResult?:
+    """Consume event TRBs in ring order until one of `want_type` is found.
+
+    Tracks a persistent dequeue index + consumer cycle state on the controller
+    (the previous implementation rescanned the whole segment from slot 0 on
+    every call, so an already-consumed completion event — whose cycle bit
+    still matches — satisfied the NEXT command instantly and raced real
+    hardware completion). Events of other types (e.g. Port Status Change on
+    attach) are consumed and skipped. ERDP is advanced (with EHB write-1-to-
+    clear) after every consumed event.
+
+    Returns CmdCompletionResult(status field bits [31:24] as completion_code,
+    control bits [31:24] as slot_id) or nil on timeout.
+    """
+    var iters: u32 = 0
+    while iters < max_iters:
+        val idx = ctrl.event_ring_dequeue
+        val trb_addr = ctrl.event_ring_base + (idx * 16).to_u64()
+        val status = mmio_read32(trb_addr + 8)
+        val control_word = mmio_read32(trb_addr + 12)
+        val evt_cycle = control_word & 1
+        val expected_cycle: u32 = if ctrl.event_ring_cycle: 1 else: 0
+        if evt_cycle == expected_cycle:
+            # Consume this event: advance dequeue, toggle cycle on wrap
+            var next = idx + 1
+            if next >= EVENT_RING_SEGMENT_SIZE:
+                next = 0
+                ctrl.event_ring_cycle = not ctrl.event_ring_cycle
+            ctrl.event_ring_dequeue = next
+            val erdp = ctrl.event_ring_base + (next * 16).to_u64()
+            # Bit 3 = EHB (Event Handler Busy), write-1-to-clear
+            xhci_rt_write64(ctrl, 0, 0x18, erdp | 8)
+            val evt_type = (control_word >> 10) & 0x3F
+            if evt_type == want_type:
+                return CmdCompletionResult(
+                    completion_code: (status >> 24) & 0xFF,
+                    slot_id: (control_word >> 24) & 0xFF
+                )
+        iters = iters + 1
+    nil
+
 fn xhci_send_command(ctrl: XhciController, trb_type: u32, param: u64, slot: u32) -> Result<u32, text>:
     """Enqueue a command TRB, ring doorbell, poll event ring for completion.
 
     Returns the completion code from the command completion event status field.
     Updates ERDP after consuming the event.
     """
-    # Build control word: trb_type in bits [15:10], cycle bit in bit 0
-    val cycle_bit: u32 = if ctrl.event_ring_cycle: 1 else: 0
-    val control = (trb_type << 10) | cycle_bit
-    trb_write(ctrl.cmd_ring, trb_type, param, 0, control)
+    # Build control word: trb_type in bits [15:10], slot in bits [31:24]
+    # (Address Device / Configure Endpoint carry the slot ID in the control
+    # word), cycle bit applied by trb_write.
+    val control = (trb_type << 10) | (slot << 24)
+    _xhci_cmd_ring_push(ctrl, param, 0, control)
 
     # Ring host-controller doorbell (slot=0, target=0)
     xhci_ring_doorbell(ctrl, 0, 0)
 
-    # Poll event ring for a CMD_COMPLETION event
-    val evt_base = ctrl.event_ring_base
-    var poll_i: u32 = 0
-    var found = false
-    var completion_code: u32 = 0
-
-    while poll_i < POLL_CMD_ITERS and not found:
-        # Each TRB is 16 bytes; dequeue index tracked via ctrl.event_ring_cycle
-        # We poll slot 0 of the event ring for simplicity (no dequeue ptr tracking here)
-        val trb_addr = evt_base + (poll_i % EVENT_RING_SEGMENT_SIZE * 16).to_u64()
-        val status = mmio_read32(trb_addr + 8)
-        val control_word = mmio_read32(trb_addr + 12)
-        val evt_type = (control_word >> 10) & 0x3F
-        val evt_cycle = control_word & 1
-        val expected_cycle: u32 = if ctrl.event_ring_cycle: 1 else: 0
-        if evt_type == TRB_TYPE_CMD_COMPLETION and evt_cycle == expected_cycle:
-            # Completion code in status bits [31:24]
-            completion_code = (status >> 24) & 0xFF
-            found = true
-            # Update ERDP to consumed TRB address (advance past this entry)
-            val next_dequeue = evt_base + ((poll_i % EVENT_RING_SEGMENT_SIZE + 1) * 16).to_u64()
-            xhci_rt_write64(ctrl, 0, 0x18, next_dequeue)
-        poll_i = poll_i + 1
-
-    if not found:
-        return Result.Err("xhci: command timeout — no completion event")
-
-    Result.Ok(completion_code)
+    if val Some(evt) = xhci_wait_for_event_type(ctrl, TRB_TYPE_CMD_COMPLETION, POLL_CMD_ITERS):
+        return Result.Ok(evt.completion_code)
+    Result.Err("xhci: command timeout — no completion event")
 
 fn xhci_send_command_with_slot(ctrl: XhciController, trb_type: u32, param: u64, slot: u32) -> Result<CmdCompletionResult, text>:
     """Enqueue a command TRB, ring doorbell, poll event ring for completion.
@@ -351,36 +435,12 @@ fn xhci_send_command_with_slot(ctrl: XhciController, trb_type: u32, param: u64, 
     slot ID from the command completion event (bits [31:24] of control word).
     Used for Enable Slot commands where the hardware assigns a slot ID.
     """
-    val cycle_bit: u32 = if ctrl.event_ring_cycle: 1 else: 0
-    val control = (trb_type << 10) | cycle_bit
-    trb_write(ctrl.cmd_ring, param, 0, control)
+    val control = (trb_type << 10) | (slot << 24)
+    _xhci_cmd_ring_push(ctrl, param, 0, control)
 
     # Ring host-controller doorbell (slot=0, target=0)
     xhci_ring_doorbell(ctrl, 0, 0)
 
-    # Poll event ring for a CMD_COMPLETION event
-    val evt_base = ctrl.event_ring_base
-    var poll_i: u32 = 0
-    var found = false
-    var completion_code: u32 = 0
-    var out_slot_id: u32 = 0
-
-    while poll_i < POLL_CMD_ITERS and not found:
-        val trb_addr = evt_base + (poll_i % EVENT_RING_SEGMENT_SIZE * 16).to_u64()
-        val status = mmio_read32(trb_addr + 8)
-        val control_word = mmio_read32(trb_addr + 12)
-        val evt_type = (control_word >> 10) & 0x3F
-        val evt_cycle = control_word & 1
-        val expected_cycle: u32 = if ctrl.event_ring_cycle: 1 else: 0
-        if evt_type == TRB_TYPE_CMD_COMPLETION and evt_cycle == expected_cycle:
-            completion_code = (status >> 24) & 0xFF
-            out_slot_id = (control_word >> 24) & 0xFF
-            found = true
-            val next_dequeue = evt_base + ((poll_i % EVENT_RING_SEGMENT_SIZE + 1) * 16).to_u64()
-            xhci_rt_write64(ctrl, 0, 0x18, next_dequeue)
-        poll_i = poll_i + 1
-
-    if not found:
-        return Result.Err("xhci: command timeout — no completion event")
-
-    Result.Ok(CmdCompletionResult(completion_code: completion_code, slot_id: out_slot_id))
+    if val Some(evt) = xhci_wait_for_event_type(ctrl, TRB_TYPE_CMD_COMPLETION, POLL_CMD_ITERS):
+        return Result.Ok(evt)
+    Result.Err("xhci: command timeout — no completion event")

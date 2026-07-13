@@ -11,24 +11,25 @@ use os.kernel.boot.mmio.{mmio_read8, mmio_read16, mmio_read32, mmio_write32, mmi
 use os.kernel.memory.pmm.{pmm_alloc_pages}
 use os.drivers.usb.xhci_regs.{XhciPortRegs, PORTSC_CCS, PORTSC_PR}
 use os.drivers.usb.xhci_trb.{
-    TrbRing, trb_ring_new, trb_write,
-    trb_setup, trb_data, trb_status,
+    trb_write_raw,
+    TRB_TYPE_SETUP, TRB_TYPE_DATA, TRB_TYPE_STATUS, TRB_TYPE_SHIFT,
+    TRB_CYCLE, TRB_IOC, TRB_IDT, TRB_DIR_IN, TRB_TRT_IN_DATA,
     TRB_TYPE_CMD_ENABLE_SLOT, TRB_TYPE_CMD_ADDRESS_DEVICE,
-    TRB_TYPE_TRANSFER_EVENT, TRB_CC_SUCCESS,
-    trb_event_completion_code, trb_event_type
+    TRB_TYPE_TRANSFER_EVENT, TRB_CC_SUCCESS
 }
 use os.drivers.usb.xhci_driver.{
     XhciController, CmdCompletionResult,
     xhci_send_command, xhci_send_command_with_slot,
-    xhci_ring_doorbell, xhci_rt_write64
+    xhci_ring_doorbell, xhci_wait_for_event_type
 }
+
+# Fail-closed diagnostics: enumeration failures print one terse serial line
+# per failed step (never on success paths) so QEMU gates can localize faults.
+extern fn serial_println(msg: text)
 
 # ============================================================================
 # Constants
 # ============================================================================
-
-# HHDM (Higher-Half Direct Map) offset for x86_64 SimpleOS
-val HHDM_OFFSET: u64 = 0xFFFF800000000000
 
 # Input context layout offsets (32-byte stride per context entry)
 val INPUT_CTX_ICC_OFFSET: u64  = 0x00   # Input Control Context
@@ -56,9 +57,6 @@ val DDESC_OFF_PID:         u64 = 10
 val POLL_XFER_ITERS: u32    = 100000
 val POLL_PORT_RESET_ITERS: u32 = 500
 
-# Event ring segment size (must match xhci_driver.spl)
-val ENUM_EVT_RING_SEG_SIZE: u32 = 64
-
 # ============================================================================
 # Data Structures
 # ============================================================================
@@ -81,8 +79,18 @@ class UsbDevice:
 # ============================================================================
 
 fn _phys_to_virt(phys: u64) -> u64:
-    """Map a physical address to its higher-half virtual address via HHDM."""
-    phys + HHDM_OFFSET
+    """Map a physical address to the address the CPU can dereference.
+
+    The q35 direct-boot lanes that run this enumerator identity-map physical
+    memory (there is no higher-half HHDM mapping in that boot path), and every
+    other access in this module (DCBAA, input contexts, TRB rings) already
+    reads/writes raw physical addresses through the identity map. The
+    descriptor read must do the same — adding HHDM_OFFSET here pointed the
+    parse at an unmapped higher-half address. Boot paths that do set up an
+    HHDM also keep the identity map for low physical memory, so identity is
+    correct for both.
+    """
+    phys
 
 fn _max_packet_size(speed: u8) -> u32:
     """Default max packet size for EP0 based on speed.
@@ -97,12 +105,12 @@ fn _max_packet_size(speed: u8) -> u32:
         else:
             8
 
-fn _build_input_context(speed: u8, root_hub_port: u32) -> (u64, TrbRing)?:
+fn _build_input_context(speed: u8, root_hub_port: u32, ep0_ring_phys: u64) -> u64?:
     """Allocate and fill an xHCI Input Context for slot enable + EP0.
 
-    Allocates two pages: one for the Input Context and one for the EP0
-    Transfer Ring. Returns (input_ctx_phys, ep0_ring) or nil on allocation
-    failure.
+    The caller allocates and owns the EP0 transfer ring page; its physical
+    base is passed in and written to the EP0 context TR Dequeue Pointer.
+    Returns the input context physical address, or nil on allocation failure.
 
     Input Context layout (32-byte stride per entry, CSZ=0):
       +0x00  Input Control Context — A0=1 (slot), A1=1 (EP1/EP0)
@@ -110,23 +118,20 @@ fn _build_input_context(speed: u8, root_hub_port: u32) -> (u64, TrbRing)?:
       +0x40  EP0 Context — EP type, max packet size, TR dequeue pointer
     """
     # Allocate input context page (4K-aligned, zero it)
-    val ic_result = pmm_alloc_pages(1)
-    if not ic_result.?:
+    # NOTE: `if val Some(...)` bindings instead of `.?` + `.unwrap()` — the
+    # latter misfires on Option<PhysAddr> in seed freestanding native builds
+    # (see the matching note in xhci_driver.spl xhci_init).
+    var ic_phys: u64 = 0
+    if val Some(ic_page) = pmm_alloc_pages(1):
+        ic_phys = ic_page.addr
+    else:
         return nil
-    val ic_phys = ic_result.unwrap().addr
 
     # Zero the input context (512 * 8 bytes = 4096)
     var zi: u64 = 0
     while zi < 512:
         mmio_write64(ic_phys + (zi * 8), 0)
         zi = zi + 1
-
-    # Allocate EP0 transfer ring page
-    val ep0_result = pmm_alloc_pages(1)
-    if not ep0_result.?:
-        return nil
-    val ep0_phys = ep0_result.unwrap().addr
-    val ep0_ring = trb_ring_new(ep0_phys)
 
     # ---- Input Control Context (offset 0x00) ----
     # Add Context flags: bit 1 = A0 (slot), bit 2 = A1 (EP0/EP1 index 1)
@@ -147,36 +152,21 @@ fn _build_input_context(speed: u8, root_hub_port: u32) -> (u64, TrbRing)?:
     mmio_write32(ic_phys + INPUT_CTX_EP0_OFFSET + 4, ep0_dw1)
     # DWORD 2-3: TR Dequeue Pointer (physical address, cycle bit in LSB)
     # EP0 ring starts with cycle=true → bit 0 = 1
-    val ep0_dequeue = ep0_phys | 1
+    val ep0_dequeue = ep0_ring_phys | 1
     mmio_write32(ic_phys + INPUT_CTX_EP0_OFFSET + 8,  (ep0_dequeue & 0xFFFFFFFF).to_u32())
     mmio_write32(ic_phys + INPUT_CTX_EP0_OFFSET + 12, (ep0_dequeue >> 32).to_u32())
 
-    (ic_phys, ep0_ring)
+    ic_phys
 
 fn _poll_transfer_event(ctrl: XhciController) -> u32:
     """Poll the event ring for a Transfer Event and return the completion code.
 
-    Returns TRB_CC_SUCCESS (1) on success, or 0 on timeout.
-    Advances ERDP after consuming the event.
+    Returns TRB_CC_SUCCESS (1) on success, or 0 on timeout. Uses the shared
+    ordered event-ring consumer (persistent dequeue index) so stale, already-
+    consumed events can never satisfy a new transfer.
     """
-    val evt_base = ctrl.event_ring_base
-    var poll_i: u32 = 0
-    var result: u32 = 0
-
-    while poll_i < POLL_XFER_ITERS:
-        val trb_addr = evt_base + (poll_i % ENUM_EVT_RING_SEG_SIZE * 16).to_u64()
-        val status       = mmio_read32(trb_addr + 8)
-        val control_word = mmio_read32(trb_addr + 12)
-        val evt_type  = (control_word >> 10) & 0x3F
-        val evt_cycle = control_word & 1
-        val expected_cycle: u32 = if ctrl.event_ring_cycle: 1 else: 0
-        if evt_type == TRB_TYPE_TRANSFER_EVENT and evt_cycle == expected_cycle:
-            result = (status >> 24) & 0xFF
-            val next_dequeue = evt_base + ((poll_i % ENUM_EVT_RING_SEG_SIZE + 1) * 16).to_u64()
-            xhci_rt_write64(ctrl, 0, 0x18, next_dequeue)
-            return result
-        poll_i = poll_i + 1
-
+    if val Some(evt) = xhci_wait_for_event_type(ctrl, TRB_TYPE_TRANSFER_EVENT, POLL_XFER_ITERS):
+        return evt.completion_code
     0  # timeout
 
 # ============================================================================
@@ -218,21 +208,36 @@ fn xhci_enumerate(ctrl: XhciController) -> [UsbDevice]:
             val speed = port_regs2.port_speed()
 
             # Enable Slot command — hardware assigns slot_id
-            val enable_res = xhci_send_command_with_slot(ctrl, TRB_TYPE_CMD_ENABLE_SLOT, 0, 0)
-            if enable_res.?:
-                val enable_cc = enable_res.unwrap()
+            # NOTE: `if val Ok/Some(...)` bindings instead of `.?` + `.unwrap()`
+            # (seed freestanding Option/Result check misfire — see xhci_init).
+            if val Ok(enable_cc) = xhci_send_command_with_slot(ctrl, TRB_TYPE_CMD_ENABLE_SLOT, 0, 0):
+                if enable_cc.completion_code != TRB_CC_SUCCESS:
+                    serial_println("[xhci-enum] enable_slot cc=" + enable_cc.completion_code.to_text() + " port=" + port.to_text())
                 if enable_cc.completion_code == TRB_CC_SUCCESS:
                     val slot_id = enable_cc.slot_id
 
-                    # Build input context + EP0 ring (port is 0-based, spec needs 1-based)
-                    val ic_result = _build_input_context(speed, port + 1)
-                    if ic_result.?:
-                        val (in_ctx_phys, ep0_ring) = ic_result.unwrap()
+                    # Allocate + zero the EP0 transfer ring page (scalar state,
+                    # no TrbRing object — see the note on XhciController).
+                    var ep0_phys: u64 = 0
+                    if val Some(ep0_page) = pmm_alloc_pages(1):
+                        ep0_phys = ep0_page.addr
+                    var ez: u64 = 0
+                    while ez < 512:
+                        mmio_write64(ep0_phys + (ez * 8), 0)
+                        ez = ez + 1
+
+                    # Build input context (port is 0-based, spec needs 1-based)
+                    var in_ctx_phys: u64 = 0
+                    if ep0_phys != 0:
+                        if val Some(ic_addr) = _build_input_context(speed, port + 1, ep0_phys):
+                            in_ctx_phys = ic_addr
+                    if in_ctx_phys == 0:
+                        serial_println("[xhci-enum] input_context_alloc failed port=" + port.to_text())
+                    if in_ctx_phys != 0:
 
                         # Allocate device context page
-                        val dc_result = pmm_alloc_pages(1)
-                        if dc_result.?:
-                            val dev_ctx_phys = dc_result.unwrap().addr
+                        if val Some(dc_page) = pmm_alloc_pages(1):
+                            val dev_ctx_phys = dc_page.addr
 
                             # Zero the device context page
                             var di: u64 = 0
@@ -245,44 +250,57 @@ fn xhci_enumerate(ctrl: XhciController) -> [UsbDevice]:
                             mmio_write64(dcbaa_entry, dev_ctx_phys)
 
                             # Address Device command (BSR=0: sends SET_ADDRESS on bus)
-                            val addr_res = xhci_send_command(ctrl, TRB_TYPE_CMD_ADDRESS_DEVICE, in_ctx_phys, slot_id)
-                            if addr_res.?:
-                                if addr_res.unwrap() == TRB_CC_SUCCESS:
+                            if val Ok(addr_cc) = xhci_send_command(ctrl, TRB_TYPE_CMD_ADDRESS_DEVICE, in_ctx_phys, slot_id):
+                                if addr_cc != TRB_CC_SUCCESS:
+                                    serial_println("[xhci-enum] address_device cc=" + addr_cc.to_text() + " port=" + port.to_text() + " slot=" + slot_id.to_text())
+                                if addr_cc == TRB_CC_SUCCESS:
                                     # Allocate descriptor buffer (1 page)
-                                    val desc_result = pmm_alloc_pages(1)
-                                    if desc_result.?:
-                                        val desc_buf_phys = desc_result.unwrap().addr
+                                    if val Some(desc_page) = pmm_alloc_pages(1):
+                                        val desc_buf_phys = desc_page.addr
 
                                         # EP0 control transfer: GET_DESCRIPTOR (Device, index 0, 18 bytes)
-                                        # Setup stage (IDT — packet inline)
-                                        val (s_param, s_stat, s_ctrl) = trb_setup(
-                                            USB_REQ_TYPE_DEVICE_IN,
-                                            USB_REQ_GET_DESCRIPTOR,
-                                            USB_DESC_TYPE_DEVICE,
-                                            0,
-                                            USB_DEVICE_DESC_LEN,
-                                            ep0_ring.cycle
-                                        )
-                                        trb_write(ep0_ring, s_param, s_stat, s_ctrl)
+                                        # TRB fields are computed inline and written with
+                                        # trb_write_raw — the tuple-returning trb_setup/
+                                        # trb_data/trb_status constructors and the TrbRing
+                                        # producer both mangle through this seed freestanding
+                                        # path (see the note on XhciController). Fresh ring,
+                                        # cycle bit = 1 on all three TRBs.
 
-                                        # Data stage (IN direction — device → host)
-                                        val (d_param, d_stat, d_ctrl) = trb_data(
-                                            desc_buf_phys,
-                                            USB_DEVICE_DESC_LEN.to_u32(),
-                                            true,
-                                            ep0_ring.cycle
-                                        )
-                                        trb_write(ep0_ring, d_param, d_stat, d_ctrl)
+                                        # Setup stage (IDT — 8-byte SETUP packet inline in param).
+                                        # Packed as one u64 literal: bmRequestType=0x80
+                                        # (device-to-host), bRequest=6 (GET_DESCRIPTOR),
+                                        # wValue=0x0100 (Device descriptor), wIndex=0,
+                                        # wLength=18 (0x12). Built from a wide literal, NOT
+                                        # from u8/u16 constants + .to_u64() shifts — those
+                                        # conversions returned 0 in seed freestanding builds
+                                        # (the TRB param read back as 0 on hardware, and the
+                                        # device rightly STALLed the garbage request).
+                                        val setup_pkt: u64 = 0x0012000001000680
+                                        val setup_ctrl = (TRB_TYPE_SETUP << TRB_TYPE_SHIFT) | TRB_IDT | TRB_TRT_IN_DATA | TRB_CYCLE
+                                        trb_write_raw(ep0_phys, 0, setup_pkt, 8, setup_ctrl)
 
-                                        # Status stage (OUT direction, IOC)
-                                        val (st_param, st_stat, st_ctrl) = trb_status(false, ep0_ring.cycle)
-                                        trb_write(ep0_ring, st_param, st_stat, st_ctrl)
+                                        # Data stage (IN direction — device → host, 18 bytes;
+                                        # wide literal for the same reason as setup_pkt)
+                                        val data_ctrl = (TRB_TYPE_DATA << TRB_TYPE_SHIFT) | TRB_DIR_IN | TRB_CYCLE
+                                        val desc_len: u32 = 18
+                                        trb_write_raw(ep0_phys, 1, desc_buf_phys, desc_len, data_ctrl)
+
+                                        # Status stage (OUT direction, IOC — single event
+                                        # fires only after the whole transfer, so the data
+                                        # buffer is guaranteed complete when it arrives)
+                                        val status_ctrl = (TRB_TYPE_STATUS << TRB_TYPE_SHIFT) | TRB_IOC | TRB_CYCLE
+                                        trb_write_raw(ep0_phys, 2, 0, 0, status_ctrl)
 
                                         # Ring EP0 doorbell for this slot (target=1 = EP0)
                                         xhci_ring_doorbell(ctrl, slot_id, 1)
 
                                         # Poll for transfer completion event
                                         val xfer_cc = _poll_transfer_event(ctrl)
+                                        if xfer_cc != TRB_CC_SUCCESS:
+                                            serial_println("[xhci-enum] ep0_get_descriptor cc=" + xfer_cc.to_text() + " port=" + port.to_text() + " slot=" + slot_id.to_text())
+                                            serial_println("[xhci-enum] ep0_trb0 param=" + mmio_read64(ep0_phys).to_text() + " status=" + mmio_read32(ep0_phys + 8).to_text() + " control=" + mmio_read32(ep0_phys + 12).to_text())
+                                            serial_println("[xhci-enum] ep0_trb1 param=" + mmio_read64(ep0_phys + 16).to_text() + " status=" + mmio_read32(ep0_phys + 24).to_text() + " control=" + mmio_read32(ep0_phys + 28).to_text())
+                                            serial_println("[xhci-enum] ep0_trb2 control=" + mmio_read32(ep0_phys + 44).to_text())
                                         if xfer_cc == TRB_CC_SUCCESS:
                                             # Parse device descriptor from HHDM-mapped buffer
                                             val desc_virt = _phys_to_virt(desc_buf_phys)
