@@ -5,12 +5,39 @@ board hardware, compiling a C file to an object it writes back to disk, retrieva
 over SSH. QEMU is the dev harness; the board is the requirement. No design may depend
 on a QEMU-only mechanism.
 
-**Status (2026-07-12):** ✅ **FULL 2e COMPLETE.** All software increments done: clang compiles
-`/hello.c`→`/hello.o` over real OpenSSH (Inc 1/2) and the object is retrieved BYTE-EXACT over
-SSH via `ssh root@host getfile /hello.o` (Inc 3, `cd0418ee39cb`) — sha256 matches on-disk
-`/HELLO.O`, host-links + runs == exit 7. Remaining is physical-hardware bring-up on the actual
-mini-PC (NVMe/serial/NIC provable only there). Details below and in
-`doc/03_plan/os/clang_over_ssh_2e_design.md`.
+**Status (2026-07-13, corrected):** clang compiles `/hello.c`→`/hello.o` over real OpenSSH
+(Inc 1/2) and the object is retrieved BYTE-EXACT via `ssh root@host getfile /hello.o` (Inc 3,
+`cd0418ee39cb`) — sha256 matches on-disk `/HELLO.O`, host-links + runs == exit 7. **This is
+proven under QEMU `-kernel` only.**
+
+⚠️ **OPEN GAP — the 2e capstone is NOT yet met (violates the plan's own "no QEMU-only
+mechanism" rule).** The clang-*compile* kernel (`fs_exec_clang_stream_ring3_entry`, 125 MB
+payload) has NEVER booted under OVMF/UEFI (the board proxy). 2c proved OVMF boot for the SMALL
+(~2 MB) hello kernel only. Root cause = a hard linker-layout conflict, NOT physical hardware:
+- GRUB-EFI/OVMF's multiboot1 relocator requires the kernel loaded HIGH (128 MB / `0x8000000`)
+  so the low region `[1MB,128MB)` stays free for its trampoline — else `#UD` at RIP~`0x1012`
+  before `_start` (see `linker_low1mb.ld` base comment).
+- The clang ring-3 payload is linked at VA `[0x10000000, 0x16100000)` in the user AS. A 128 MB
+  kernel base pushes kernel `.bss` to ~375 MB, OVERLAPPING that payload range, so the syscall
+  path (user cr3) faults writing kernel `.bss`. Hence the clang kernel is forced to the 1 MB
+  base — `-kernel`-only ("Not for GRUB-EFI"). The two constraints are mutually exclusive under
+  the current flat layout.
+
+**Fix path (2f — required to close the goal, software-only, QEMU-provable via OVMF):** make the
+clang kernel OVMF-bootable WITHOUT overlapping the payload. Options, cleanest first:
+- (a) **Direct UEFI-stub entry** (`efi_main`, `--target x86_64-unknown-uefi`) that loads the
+  kernel via UEFI boot services and jumps to `_start` — no multiboot1 low relocator at all, so
+  the kernel can load anywhere and payload VA is unconstrained. Best match for real board UEFI.
+- (b) **Higher-half kernel** (`0xffffffff80000000`) + a tiny low trampoline, decoupling kernel
+  placement from the payload's low-canonical VA.
+- (c) **Relocate the clang payload VA** out of `[0x10000000,0x16100000)` (re-link `clang_static`
+  higher, or use PIE) so a 128 MB kernel base no longer overlaps.
+Gate: `fs_exec_clang_stream_ring3_entry` boots under OVMF, `ssh root@host clang -cc1 … /hello.c`
+writes `/hello.o` to NVMe, `getfile` retrieves it byte-exact — with NO QEMU `-kernel`, NO
+`isa-debug-exit`. Only THEN is 2e/board-runnable actually met (plus physical-hardware bring-up).
+
+Remaining after 2f: physical-hardware bring-up on the actual mini-PC (NVMe/serial/NIC provable
+only there). Details below and in `doc/03_plan/os/clang_over_ssh_2e_design.md`.
 
 ✅ **PHASE 1 DONE.** clang runs in ring-3 and COMPILES a C file:
 `clang -cc1 -emit-obj -o /hello.o /hello.c` streams 124 MB clang → ring-3 → reads `/hello.c`
@@ -128,6 +155,6 @@ image fresh for the compile pass. Next: Phase 2 (board port).
 
 ## Execution order
 
-1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a ✅ (.o on real NVMe)  →  2b ✅ (board-safe exit)  →  2c ✅ (UEFI boot)  →  2d ✅ (robustness)  →  2e ✅ (compile + byte-exact retrieve over SSH). ALL SOFTWARE DONE; physical-board bring-up remains.
+1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a ✅ (.o on real NVMe)  →  2b ✅ (board-safe exit)  →  2c ✅ (UEFI boot)  →  2d ✅ (robustness)  →  2e ✅ (compile + byte-exact retrieve over SSH, QEMU `-kernel`)  →  **2f ⬜ (clang kernel boots under OVMF — the board-proxy capstone; linker/boot layout conflict, see OPEN GAP above)**  →  physical-board bring-up. NOT all software done: 2f is an open, QEMU-provable software gap.
 Never start Phase 2 before 1d passes. Small model + guide per step; higher-model review +
 the host-link-and-run / gate verification owned by the coordinator.
