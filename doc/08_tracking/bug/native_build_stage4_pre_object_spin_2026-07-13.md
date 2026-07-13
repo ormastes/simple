@@ -2,9 +2,9 @@
 
 ## Status
 
-Open. The earlier quadratic entry-closure scan is fixed, but a fresh canonical
-full-CLI Stage 4 can still consume one CPU indefinitely before producing a
-phase marker, cache object, or output executable.
+Mitigation implemented; live verification pending. The earlier quadratic
+entry-closure scan is fixed, but the canonical Rust-seed Stage-4 branch omitted
+the explicit host target needed to enter the bounded bootstrap builder.
 
 ## Reproducer
 
@@ -44,14 +44,27 @@ compiled and linked in 229.2 seconds. The fixed closure walker itself completes
 about 498 files in 2.199 seconds, so CPU activity alone is not evidence of
 healthy closure discovery.
 
-## Required fix
+## Root cause and mitigation
 
-Instrument the next investigation from its first run with
+The seed dispatch treats a host `native-build` without `--target` as a
+pure-Simple tool request and interprets `native_build_main.spl`; it does not
+enter the Rust bootstrap builder. Existing retained evidence shows that adding
+`--target x86_64-unknown-linux-gnu` starts discovery in seconds and completes
+a 1,019-file build in 244.2 seconds.
+
+The canonical seed Stage-4 branch now invokes the actual `native-build`
+command with `--target "${PLATFORM}"`, using the already detected host triple
+rather than a hardcoded architecture. The bootstrap fallback-policy integration
+spec locks both the command and target into the seed branch. No fourth build
+was launched after the three-cycle cap, so fresh full-CLI verification remains
+open.
+
+Instrument that next bounded verification from its first run with
 `SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1`, `SIMPLE_COMPILER_PHASE_PROFILE=1`, and
 `SIMPLE_COMPILER_TRACE=1`. Locate the last advancing closure/phase marker and
-fix that owner before retrying the full build. Do not normalize the spin with a
-longer timeout, reuse an unproven cache, substitute a Rust seed as production
-evidence, or launch a fourth uninstrumented bootstrap cycle.
+fix any later owner before retrying. Do not normalize a spin with a longer
+timeout, reuse an unproven cache, or substitute a Rust seed as production
+evidence.
 
 Related:
 
