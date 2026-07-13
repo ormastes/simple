@@ -1,0 +1,84 @@
+# Session Types — Privilege Session Hierarchy (OCap S1)
+#
+# A Session is the temporal + authority envelope around a principal's activity.
+# A login mints a root User session holding the principal's CEILING capability
+# set; a sub-role irreversibly narrows it (pledge drop); teardown bumps the
+# session epoch to bulk-revoke every capability bound to the session subtree.
+# This is the SurfaceHandle / capability generation-counter pattern applied to
+# whole sessions instead of individual tokens: one epoch bump invalidates every
+# bound capability in O(1), no per-token walk.
+#
+# Kernel-side, pure Simple — seed-run verifiable
+# (test/01_unit/os/security/session_hierarchy_spec.spl). This file holds only
+# the value types + pure containment helpers; the session TABLE and the
+# login/open_subrole/session_teardown operations live on CapabilityManager in
+# os.kernel.ipc.capability (which owns the per-task records they gate).
+
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
+
+enum SessionKind:
+    """Privilege tier of a session.
+
+    System   — kernel / init authority (the root of trust).
+    Tenant   — an isolation domain (org / namespace) under System.
+    User     — an authenticated principal login (the sshd case).
+    SubRole  — an irreversibly narrowed slice of a parent session (pledge drop).
+    Llm      — a model-driven agent session (least-authority by default).
+    """
+    System
+    Tenant
+    User
+    SubRole
+    Llm
+
+struct Session:
+    """One node in the privilege-session hierarchy.
+
+    id        — unique monotone session id (0 = invalid / no session).
+    kind      — SessionKind tier.
+    epoch     — generation counter; bumping it invalidates every capability
+                bound to this session at its prior epoch (O(1) bulk revoke).
+    principal — the authenticated identity string ("root", "alice", ...).
+    ceiling   — the maximum authority this session may EVER hold. Invariant,
+                enforced at creation: ceiling(child) ⊆ current(parent).
+    current   — the authority currently in effect (⊆ ceiling; only shrinks).
+    budget    — hierarchical resource budget; refunded upward on teardown.
+    parent    — parent session id (0 = root session).
+    children  — child session ids (maintained on open_subrole).
+    sealed    — true once torn down; a sealed session denies every check.
+    """
+    id: u64
+    kind: SessionKind
+    epoch: u64
+    principal: text
+    ceiling: CapabilitySet
+    current: CapabilitySet
+    budget: u64
+    parent: u64
+    children: [u64]
+    sealed: bool
+
+fn capset_subset(sub: CapabilitySet, sup: CapabilitySet) -> bool:
+    """Return true iff every concrete capability in `sub` is authorized by
+    `sup` — the `sub ⊆ sup` monotonic containment test used to enforce
+    ceiling(child) ⊆ current(parent). An empty `sub` is vacuously a subset.
+
+    Uses CapabilitySet.has (capability_kind_allows) so path/rights containment
+    is respected, not just exact equality.
+    """
+    for t in sub.caps:
+        if not sup.has(t.kind):
+            return false
+    true
+
+fn capset_clone_unpledged(cs: CapabilitySet) -> CapabilitySet:
+    """Copy a capability set's tokens into a FRESH unpledged set so a subsequent
+    pledge() actually filters. (CapabilitySet.pledge no-ops on an already-pledged
+    set, so a subrole drop must start from an unpledged clone.) The clone can
+    only ever be narrowed, never widened, because it begins as exactly the
+    parent's tokens.
+    """
+    var toks: [CapabilityToken] = []
+    for t in cs.caps:
+        toks.push(t)
+    CapabilitySet(caps: toks, is_pledged: false)
