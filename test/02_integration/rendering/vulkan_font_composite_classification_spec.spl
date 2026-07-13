@@ -4,7 +4,7 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{vulkan_font_runtime_classification}
 use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
-use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_is_available}
+use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_is_available, vulkan_sffi_fence_submission_supported}
 
 fn _integration_font_batch() -> FontRenderBatch:
     FontRenderBatch(program_version: 1, font_identity: "integration-font", face_generation: 1,
@@ -34,10 +34,31 @@ describe "Vulkan font composite conditional execution":
                 val pipeline = backend.install_font_atlas_pipeline([])
                 val evidence = backend.composite_font_batch(0, 0, _integration_font_batch())
                 if pipeline.status == "ready":
-                    expect(evidence.status == "executed-unpromoted" or evidence.status == "failed" or evidence.status == "readback-mismatch").to_equal(true)
+                    if pipeline.device_type == "cpu" or pipeline.device_type == "other":
+                        expect(evidence.promotion_ready).to_equal(false)
+                        expect(evidence.device_executed).to_equal(false)
+                        expect(evidence.reason).to_equal("accelerated-device-required")
+                    elif not vulkan_sffi_fence_submission_supported():
+                        expect(evidence.promotion_ready).to_equal(false)
+                        expect(evidence.device_executed).to_equal(false)
+                        expect(evidence.reason).to_equal("fenced-submit-required")
+                    else:
+                        expect(evidence.promotion_ready).to_equal(true)
+                        expect(evidence.status).to_equal("promoted")
+                        expect(evidence.device_executed).to_equal(true)
+                        expect(evidence.dispatch_count).to_equal(evidence.quad_count)
+                        expect(vulkan_sffi_fence_submission_supported()).to_equal(true)
+                        expect(evidence.fence_handle > 0).to_equal(true)
+                        expect(evidence.fence_evidence_available).to_equal(true)
+                        expect(evidence.fence_destroyed).to_equal(true)
+                        expect(evidence.completion_waited).to_equal(true)
+                        expect(evidence.readback_byte_count > 0).to_equal(true)
+                        expect(evidence.parity).to_equal(true)
+                        expect(evidence.device_name != "").to_equal(true)
+                        expect(evidence.device_type == "discrete" or evidence.device_type == "integrated" or evidence.device_type == "virtual").to_equal(true)
+                        expect(evidence.driver_identity != "").to_equal(true)
                 else:
                     expect(evidence.status).to_equal("unavailable")
                     expect(evidence.device_executed).to_equal(false)
-                expect(evidence.promotion_ready).to_equal(false)
                 backend.shutdown()
                 session.release()

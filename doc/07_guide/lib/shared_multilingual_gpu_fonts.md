@@ -254,11 +254,13 @@ the real device framebuffer. The adapter validates the complete batch before
 atlas/cache mutation, binds atlas/destination/52-byte params buffers, waits for
 each dispatch, reads the framebuffer directly, and compares it with an
 independent CPU oracle. Ordinary unavailable/rejected states replay the CPU
-path; unknown command, rollback, descriptor, or resource-cleanup states replace
+path; unknown fence completion, rollback, descriptor, fence, or resource-cleanup states replace
 the Engine2D facade with software and permanently disable that Vulkan font lane.
-The conditional integration stops at the first unavailable rung. Explicit
-fence and device/driver identity are still absent, so `promotion_ready` remains
-false even after device readback parity; no native Vulkan claim follows.
+The conditional integration stops at the first unavailable rung. Promotion now
+requires an accelerated discrete, integrated, or virtual device; a stable
+selected device/driver identity; real fenced submission and destruction; direct
+device readback; and CPU-oracle parity. CPU Vulkan and unfenced submission stop
+before mutation and replay through software, so they cannot become native evidence.
 
 Do not add the entry name to metadata alone. Native CUDA/HIP uses a pointer-array
 argument ABI, OpenCL needs explicit argument binding, Metal uses the packed

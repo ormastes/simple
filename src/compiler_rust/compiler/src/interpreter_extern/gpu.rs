@@ -2303,6 +2303,12 @@ mod vulkan_dlopen {
     type FnVkDeviceWaitIdle = unsafe extern "C" fn(VkDevice) -> VkResult;
     type FnVkResetCommandBuffer = unsafe extern "C" fn(VkCommandBuffer, u32) -> VkResult;
     type FnVkGetPhysicalDeviceProperties = unsafe extern "C" fn(VkPhysicalDevice, *mut VkPhysicalDeviceProperties);
+    type FnVkCreateFence = unsafe extern "C" fn(VkDevice, *const VkFenceCreateInfo, *const c_void, *mut u64) -> VkResult;
+    type FnVkDestroyFence = unsafe extern "C" fn(VkDevice, u64, *const c_void);
+    type FnVkWaitForFences = unsafe extern "C" fn(VkDevice, u32, *const u64, u32, u64) -> VkResult;
+
+    #[repr(C)]
+    pub(super) struct VkFenceCreateInfo { pub s_type: u32, pub p_next: *const c_void, pub flags: u32 }
 
     #[repr(C)]
     pub(super) struct VkPhysicalDeviceProperties {
@@ -2363,6 +2369,9 @@ mod vulkan_dlopen {
         pub device_wait_idle: FnVkDeviceWaitIdle,
         pub reset_command_buffer: FnVkResetCommandBuffer,
         pub get_physical_device_properties: FnVkGetPhysicalDeviceProperties,
+        pub create_fence: FnVkCreateFence,
+        pub destroy_fence: FnVkDestroyFence,
+        pub wait_for_fences: FnVkWaitForFences,
     }
     unsafe impl Send for VkFns {}
     unsafe impl Sync for VkFns {}
@@ -2503,6 +2512,9 @@ mod vulkan_dlopen {
             cmd_dispatch: sym!("vkCmdDispatch"),
             cmd_pipeline_barrier: sym!("vkCmdPipelineBarrier"),
             queue_submit: sym!("vkQueueSubmit"),
+            create_fence: sym!("vkCreateFence"),
+            destroy_fence: sym!("vkDestroyFence"),
+            wait_for_fences: sym!("vkWaitForFences"),
             queue_wait_idle: sym!("vkQueueWaitIdle"),
             device_wait_idle: sym!("vkDeviceWaitIdle"),
             reset_command_buffer: sym!("vkResetCommandBuffer"),
@@ -2589,6 +2601,7 @@ mod vulkan_dlopen {
     pub struct VulkanState {
         pub instance: VkInstance,
         pub physical_device: VkPhysicalDevice,
+        pub device_physical_device: VkPhysicalDevice,
         pub physical_devices: Vec<VkPhysicalDevice>,
         pub device: VkDevice,
         pub queue: VkQueue,
@@ -2600,6 +2613,8 @@ mod vulkan_dlopen {
         pub pipelines: Vec<Option<PipelineEntry>>,
         pub descriptor_sets: Vec<Option<DescriptorSetEntry>>,
         pub command_buffers: Vec<Option<CommandBufferEntry>>,
+        pub quarantined_commands: Vec<(u64, VkCommandBuffer)>,
+        pub live_fences: Vec<u64>,
         pub last_error: String,
         pub selected_device_index: usize,
         pub fns: VkFns,
@@ -2753,6 +2768,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         let state = VulkanState {
             instance,
             physical_device: chosen_phys,
+            device_physical_device: chosen_phys,
             physical_devices: phys_devs,
             device,
             queue,
@@ -2764,6 +2780,8 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             pipelines: Vec::new(),
             descriptor_sets: Vec::new(),
             command_buffers: Vec::new(),
+            quarantined_commands: Vec::new(),
+            live_fences: Vec::new(),
             last_error: String::new(),
             selected_device_index: 0,
             fns,
@@ -2781,6 +2799,17 @@ pub fn rt_vulkan_shutdown_fn(_args: &[Value]) -> Result<Value, CompileError> {
     if let Some(st) = guard.take() {
         unsafe {
             let f = &st.fns;
+            if (f.device_wait_idle)(st.device) != VK_SUCCESS {
+                *guard = Some(st);
+                return Ok(Value::Int(0));
+            }
+            for (fence, cmd) in &st.quarantined_commands {
+                (f.free_command_buffers)(st.device, st.command_pool, 1, cmd);
+                (f.destroy_fence)(st.device, *fence, ptr::null());
+            }
+            for fence in &st.live_fences {
+                (f.destroy_fence)(st.device, *fence, ptr::null());
+            }
             // Free command buffers
             for e in st.command_buffers.iter().flatten() {
                 let cmd = e.cmd;
@@ -2899,6 +2928,51 @@ pub fn rt_vulkan_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
         }
     }
     Ok(Value::Str(String::new()))
+}
+
+fn vulkan_device_properties(index: usize) -> Option<vulkan_dlopen::VkPhysicalDeviceProperties> {
+    use vulkan_dlopen::*;
+    let guard = VK_STATE.lock().unwrap();
+    let s = guard.as_ref()?;
+    let pd = *s.physical_devices.get(index)?;
+    let mut props = VkPhysicalDeviceProperties { api_version: 0, driver_version: 0, vendor_id: 0,
+        device_id: 0, device_type: 0, device_name: [0; 256], pipeline_cache_uuid: [0; 16],
+        _limits_and_sparse: [0; 524] };
+    unsafe { (s.fns.get_physical_device_properties)(pd, &mut props) };
+    Some(props)
+}
+
+fn vulkan_properties_name(props: &vulkan_dlopen::VkPhysicalDeviceProperties) -> String {
+    let end = props.device_name.iter().position(|&b| b == 0).unwrap_or(256);
+    String::from_utf8_lossy(&props.device_name[..end]).into_owned()
+}
+
+pub fn rt_vulkan_device_driver_identity_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let index = arg_i64(args, 0, "rt_vulkan_device_driver_identity", 1)? as usize;
+    Ok(Value::Str(vulkan_device_properties(index).map(|p| format!("{}|vendor={:08x}|device={:08x}|driver={:08x}|api={:08x}",
+        vulkan_properties_name(&p), p.vendor_id, p.device_id, p.driver_version, p.api_version)).unwrap_or_default()))
+}
+
+pub fn rt_vulkan_selected_device_driver_identity_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    let index = vulkan_dlopen::VK_STATE.lock().unwrap().as_ref().and_then(|s|
+        s.physical_devices.iter().position(|&pd| pd == s.device_physical_device));
+    Ok(Value::Str(index.and_then(vulkan_device_properties).map(|p| format!("{}|vendor={:08x}|device={:08x}|driver={:08x}|api={:08x}",
+        vulkan_properties_name(&p), p.vendor_id, p.device_id, p.driver_version, p.api_version)).unwrap_or_default()))
+}
+
+fn vulkan_device_type_name(kind: u32) -> &'static str {
+    match kind { 1 => "integrated", 2 => "discrete", 3 => "virtual", 4 => "cpu", _ => "other" }
+}
+
+pub fn rt_vulkan_device_type_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let index = arg_i64(args, 0, "rt_vulkan_device_type", 1)? as usize;
+    Ok(Value::Str(vulkan_device_properties(index).map(|p| vulkan_device_type_name(p.device_type).to_string()).unwrap_or_default()))
+}
+
+pub fn rt_vulkan_selected_device_type_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    let index = vulkan_dlopen::VK_STATE.lock().unwrap().as_ref().and_then(|s|
+        s.physical_devices.iter().position(|&pd| pd == s.device_physical_device));
+    Ok(Value::Str(index.and_then(vulkan_device_properties).map(|p| vulkan_device_type_name(p.device_type).to_string()).unwrap_or_default()))
 }
 
 /// `rt_vulkan_alloc_buffer(byte_count: i64, usage: i64) -> i64`
@@ -3734,12 +3808,83 @@ pub fn rt_vulkan_submit_and_wait_fn(args: &[Value]) -> Result<Value, CompileErro
     Ok(Value::Int(if ok == VK_SUCCESS { 1 } else { 0 }))
 }
 
+pub fn rt_vulkan_fence_submission_supported_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(1))
+}
+
+pub fn rt_vulkan_submit_and_wait_fence_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::*;
+    use std::ptr;
+    let ch = arg_i64(args, 0, "rt_vulkan_submit_and_wait_fence", 1)? as usize;
+    let mut guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_mut() { Some(s) => s, None => return Ok(Value::Int(0)) };
+    if ch == 0 || ch > s.command_buffers.len() { return Ok(Value::Int(0)); }
+    let cmd = match s.command_buffers[ch - 1].as_ref() { Some(e) => e.cmd, None => return Ok(Value::Int(0)) };
+    let info = VkFenceCreateInfo { s_type: 8, p_next: ptr::null(), flags: 0 };
+    let mut fence = 0;
+    if unsafe { (s.fns.create_fence)(s.device, &info, ptr::null(), &mut fence) } != VK_SUCCESS {
+        if let Some(e) = s.command_buffers[ch - 1].take() { unsafe { (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &e.cmd) } }
+        return Ok(Value::Int(0));
+    }
+    let submit = VkSubmitInfo { s_type: 4, p_next: ptr::null(), wait_semaphore_count: 0,
+        p_wait_semaphores: ptr::null(), p_wait_dst_stage_mask: ptr::null(), command_buffer_count: 1,
+        p_command_buffers: &cmd, signal_semaphore_count: 0, p_signal_semaphores: ptr::null() };
+    if unsafe { (s.fns.queue_submit)(s.queue, 1, &submit, fence) } != VK_SUCCESS {
+        unsafe { (s.fns.destroy_fence)(s.device, fence, ptr::null()) };
+        if let Some(e) = s.command_buffers[ch - 1].take() { unsafe { (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &e.cmd) } }
+        return Ok(Value::Int(0));
+    }
+    if unsafe { (s.fns.wait_for_fences)(s.device, 1, &fence, 1, u64::MAX) } != VK_SUCCESS {
+        s.command_buffers[ch - 1].take();
+        s.quarantined_commands.push((fence, cmd));
+        return Ok(Value::Int(-1));
+    }
+    if let Some(e) = s.command_buffers[ch - 1].take() { unsafe { (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &e.cmd) } }
+    s.live_fences.push(fence);
+    Ok(Value::Int(fence as i64))
+}
+
+pub fn rt_vulkan_wait_fence_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::*;
+    let fence = arg_i64(args, 0, "rt_vulkan_wait_fence", 2)? as u64;
+    let timeout = arg_i64(args, 1, "rt_vulkan_wait_fence", 2)?;
+    let guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_ref() { Some(s) => s, None => return Ok(Value::Int(0)) };
+    if !s.live_fences.contains(&fence) { return Ok(Value::Int(0)); }
+    let timeout = if timeout < 0 { u64::MAX } else { timeout as u64 };
+    let ok = unsafe { (s.fns.wait_for_fences)(s.device, 1, &fence, 1, timeout) };
+    Ok(Value::Int(if ok == VK_SUCCESS { 1 } else { 0 }))
+}
+
+pub fn rt_vulkan_destroy_fence_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::*;
+    use std::ptr;
+    let fence = arg_i64(args, 0, "rt_vulkan_destroy_fence", 1)? as u64;
+    let mut guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_mut() { Some(s) => s, None => return Ok(Value::Int(0)) };
+    let Some(index) = s.live_fences.iter().position(|&candidate| candidate == fence) else {
+        return Ok(Value::Int(0));
+    };
+    s.live_fences.swap_remove(index);
+    unsafe { (s.fns.destroy_fence)(s.device, fence, ptr::null()) };
+    Ok(Value::Int(1))
+}
+
 /// `rt_vulkan_wait_idle() -> bool`
 pub fn rt_vulkan_wait_idle_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::VK_STATE;
-    let guard = VK_STATE.lock().unwrap();
-    if let Some(s) = guard.as_ref() {
+    use std::ptr;
+    let mut guard = VK_STATE.lock().unwrap();
+    if let Some(s) = guard.as_mut() {
         let ok = unsafe { (s.fns.device_wait_idle)(s.device) };
+        if ok == vulkan_dlopen::VK_SUCCESS {
+            for (fence, cmd) in s.quarantined_commands.drain(..) {
+                unsafe {
+                    (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &cmd);
+                    (s.fns.destroy_fence)(s.device, fence, ptr::null());
+                }
+            }
+        }
         return Ok(Value::Int(if ok == vulkan_dlopen::VK_SUCCESS { 1 } else { 0 }));
     }
     Ok(Value::Int(0))

@@ -326,6 +326,69 @@ pub extern "C" fn rt_vulkan_submit_and_wait(_cmd: i64) -> i64 {
     0
 }
 
+// ───────────────────────────────────────────────────────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn rt_vulkan_fence_submission_supported() -> i64 {
+    if cfg!(feature = "vulkan") {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_submit_and_wait_fence(cmd: i64) -> i64 {
+    use super::vulkan_graphics_runtime_core::{alloc_handle, Fence};
+    use super::vulkan::device::FencedSubmitError;
+
+    if cmd == 0 {
+        return 0;
+    }
+    let mut state = STATE.lock();
+    let device = match state.require_device() {
+        Ok(d) => d,
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
+    };
+    let fence = match Fence::new(device.clone(), false) {
+        Ok(fence) => fence,
+        Err(e) => {
+            device.free_compute_command(vk::CommandBuffer::from_raw(cmd as u64));
+            state.set_error(format!("submit_and_wait_fence create: {e}"));
+            return 0;
+        }
+    };
+    let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
+    match device.submit_compute_command_with_fence(vk_cmd, &fence) {
+        Ok(()) => {
+            let handle = alloc_handle();
+            state.fences.insert(handle, fence);
+            handle
+        }
+        Err(FencedSubmitError::NotSubmitted(e)) => {
+            state.set_error(format!("submit_and_wait_fence: {e}"));
+            0
+        }
+        Err(FencedSubmitError::CompletionUnknown(e)) => {
+            state.set_error(format!("submit_and_wait_fence completion unknown: {e}"));
+            // A wait error can leave the command in flight. Keep the fence alive so
+            // its native handle cannot be destroyed while the queue may still use it.
+            state.quarantined_compute.push((fence, vk_cmd));
+            -1
+        }
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_submit_and_wait_fence(_cmd: i64) -> i64 {
+    0
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -337,7 +400,12 @@ pub extern "C" fn rt_vulkan_wait_idle() -> i64 {
         Err(_) => return 0,
     };
     match device.wait_idle() {
-        Ok(()) => 1,
+        Ok(()) => {
+            drop(device);
+            drop(state);
+            STATE.lock().clean_quarantined_compute();
+            1
+        },
         Err(e) => {
             tracing::error!("wait_idle: {e}");
             0

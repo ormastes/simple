@@ -1,9 +1,13 @@
 use std::os::raw::c_char;
 
 #[cfg(feature = "vulkan")]
-use super::vulkan_graphics_runtime_core::{empty_cstr, leaked_cstr, vk, VulkanDevice, VulkanInstance, STATE};
+use super::vulkan_graphics_runtime_core::{empty_cstr, vk, VulkanDevice, VulkanInstance, STATE};
 #[cfg(not(feature = "vulkan"))]
-use super::vulkan_graphics_runtime_core::{empty_cstr, leaked_cstr};
+use super::vulkan_graphics_runtime_core::empty_cstr;
+
+fn driver_identity(name: &str, vendor_id: u32, device_id: u32, driver_version: u32, api_version: u32) -> String {
+    format!("{name}|vendor={vendor_id:08x}|device={device_id:08x}|driver={driver_version:08x}|api={api_version:08x}")
+}
 
 // ============================================================================
 // Device Enumeration & Selection
@@ -102,10 +106,10 @@ pub extern "C" fn rt_vulkan_get_device() -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_device_name(id: i64) -> *const c_char {
-    let state = STATE.lock();
+    let mut state = STATE.lock();
     let idx = id as usize;
-    match state.physical_devices.get(idx) {
-        Some(pd) => leaked_cstr(&pd.name()),
+    match state.physical_devices.get(idx).map(|pd| pd.name()) {
+        Some(name) => state.cached_cstr(name),
         None => empty_cstr(),
     }
 }
@@ -114,6 +118,68 @@ pub extern "C" fn rt_vulkan_device_name(id: i64) -> *const c_char {
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_device_name(_id: i64) -> *const c_char {
     empty_cstr()
+}
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_device_driver_identity(id: i64) -> *const c_char {
+    let mut state = STATE.lock();
+    let identity = state.physical_devices.get(id as usize).map(|pd| driver_identity(
+            &pd.name(),
+            pd.properties.vendor_id,
+            pd.properties.device_id,
+            pd.properties.driver_version,
+            pd.properties.api_version,
+        ));
+    match identity {
+        Some(identity) => state.cached_cstr(identity),
+        None => empty_cstr(),
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_device_driver_identity(_id: i64) -> *const c_char {
+    empty_cstr()
+}
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_selected_device_driver_identity() -> *const c_char {
+    let mut state = STATE.lock();
+    let identity = state.device.as_ref().map(|device| {
+            let pd = device.physical_device();
+            driver_identity(
+                &pd.name(),
+                pd.properties.vendor_id,
+                pd.properties.device_id,
+                pd.properties.driver_version,
+                pd.properties.api_version,
+            )
+        });
+    match identity {
+        Some(identity) => state.cached_cstr(identity),
+        None => empty_cstr(),
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_selected_device_driver_identity() -> *const c_char {
+    empty_cstr()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::driver_identity;
+
+    #[test]
+    fn driver_identity_is_stable_and_unambiguous() {
+        assert_eq!(
+            driver_identity("GPU", 0x10de, 0x2684, 0x123, 0x0040_3000),
+            "GPU|vendor=000010de|device=00002684|driver=00000123|api=00403000"
+        );
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -140,7 +206,7 @@ pub extern "C" fn rt_vulkan_device_memory(_id: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_device_type(id: i64) -> *const c_char {
-    let state = STATE.lock();
+    let mut state = STATE.lock();
     let idx = id as usize;
     match state.physical_devices.get(idx) {
         Some(pd) => {
@@ -151,11 +217,29 @@ pub extern "C" fn rt_vulkan_device_type(id: i64) -> *const c_char {
                 vk::PhysicalDeviceType::CPU => "cpu",
                 _ => "other",
             };
-            leaked_cstr(ty)
+            state.cached_cstr(ty.to_string())
         }
         None => empty_cstr(),
     }
 }
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_selected_device_type() -> *const c_char {
+    let mut state = STATE.lock();
+    let ty = state.device.as_ref().map(|device| match device.physical_device().properties.device_type {
+        vk::PhysicalDeviceType::DISCRETE_GPU => "discrete",
+        vk::PhysicalDeviceType::INTEGRATED_GPU => "integrated",
+        vk::PhysicalDeviceType::VIRTUAL_GPU => "virtual",
+        vk::PhysicalDeviceType::CPU => "cpu",
+        _ => "other",
+    });
+    ty.map_or_else(empty_cstr, |ty| state.cached_cstr(ty.to_string()))
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_selected_device_type() -> *const c_char { empty_cstr() }
 
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]

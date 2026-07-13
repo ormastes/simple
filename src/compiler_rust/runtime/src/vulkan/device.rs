@@ -2,6 +2,7 @@
 
 use super::error::{VulkanError, VulkanResult};
 use super::instance::{VulkanInstance, VulkanPhysicalDevice};
+use super::sync::Fence;
 use ash::vk;
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use parking_lot::Mutex;
@@ -45,6 +46,11 @@ pub struct VulkanDevice {
     // Swapchain loader (for presentation)
     #[cfg(feature = "vulkan")]
     swapchain_loader: Option<ash::khr::swapchain::Device>,
+}
+
+pub enum FencedSubmitError {
+    NotSubmitted(VulkanError),
+    CompletionUnknown(VulkanError),
 }
 
 impl VulkanDevice {
@@ -403,12 +409,6 @@ impl VulkanDevice {
 
     /// Submit and wait for a compute command buffer
     pub fn submit_compute_command(&self, cmd: vk::CommandBuffer) -> VulkanResult<()> {
-        unsafe {
-            self.device
-                .end_command_buffer(cmd)
-                .map_err(|e| VulkanError::CommandBufferError(format!("End: {:?}", e)))?;
-        }
-
         let cmd_buffers = [cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
@@ -431,6 +431,43 @@ impl VulkanDevice {
         }
 
         Ok(())
+    }
+
+    /// Submit a compute command buffer with a real fence and wait for completion.
+    ///
+    /// The command buffer is freed exactly once after a successful infinite wait.
+    /// If the wait fails after queue submission, it is intentionally left allocated:
+    /// freeing a potentially in-flight command buffer would violate Vulkan lifetime rules.
+    pub fn submit_compute_command_with_fence(
+        &self,
+        cmd: vk::CommandBuffer,
+        fence: &Fence,
+    ) -> Result<(), FencedSubmitError> {
+        let cmd_buffers = [cmd];
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
+        let queue = self.compute_queue.lock();
+        let submit_result = unsafe { self.device.queue_submit(*queue, &[submit_info], fence.handle()) };
+        if let Err(e) = submit_result {
+            let pool = self.compute_pool.lock();
+            unsafe { self.device.free_command_buffers(*pool, &[cmd]) };
+            return Err(FencedSubmitError::NotSubmitted(VulkanError::CommandBufferError(
+                format!("Submit: {:?}", e),
+            )));
+        }
+        drop(queue);
+
+        if let Err(e) = fence.wait(u64::MAX) {
+            return Err(FencedSubmitError::CompletionUnknown(e));
+        }
+
+        let pool = self.compute_pool.lock();
+        unsafe { self.device.free_command_buffers(*pool, &[cmd]) };
+        Ok(())
+    }
+
+    pub fn free_compute_command(&self, cmd: vk::CommandBuffer) {
+        let pool = self.compute_pool.lock();
+        unsafe { self.device.free_command_buffers(*pool, &[cmd]) };
     }
 }
 

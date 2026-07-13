@@ -145,8 +145,8 @@ format for CUDA, HIP, OpenCL, Metal, and WGSL. Each portable backend plan now
 contains a separate optimization/font artifact pair with distinct paths; WGSL
 is never concatenated because the modules own conflicting bindings. Exported-symbol and source/version-hash evidence
 remain promotion gates rather than fields fabricated on the artifact.
-A font-specific Vulkan SPIR-V contract remains required. Tests inspect source
-syntax and entry markers, but never call that execution evidence.
+A bounded font-specific Vulkan SPIR-V contract is installed by the retained
+session. Conditional execution evidence remains environment-dependent.
 
 Engine2D and Engine3D reuse the same common atlas subrect/color material.
 Engine2D maps batch quads to the shared CUDA, native Metal, or OpenCL atlas-composite launch
@@ -167,10 +167,10 @@ Allocation, invalidation, generation gaps, or invalid/empty dirty metadata use
 the full-upload fail-safe. Required native readback/promotion evidence remains
 unproved.
 
-The first promoted graphics backend must report compiled versioned entry,
+The Vulkan promotion lane reports a compiled versioned entry,
 nonzero handles, batch/payload hash, submit/draw, completed fence, device-origin
-readback, and backend/driver identity. A CPU mirror is a comparator, never the
-readback source.
+readback, accelerated device type, and backend/driver identity. A CPU mirror is
+a comparator, never the readback source. Engine3D promotion remains open.
 
 ## Failure and fallback
 

@@ -5,7 +5,7 @@ use std.io_runtime.{file_read}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{
     VULKAN_FONT_PARAMS_BYTES,
     vulkan_font_atlas_composite_params, vulkan_font_dispatch_groups, vulkan_font_atlas_replacement_status,
-    vulkan_font_pixels_checksum
+    vulkan_font_pixels_checksum, vulkan_font_promotion_ready
 }
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend}
@@ -61,6 +61,23 @@ describe "Vulkan font atlas composite companion":
         expect(first).to_not_equal(0)
         expect(vulkan_font_pixels_checksum(pixels)).to_equal(first)
 
+    it "promotes only complete fenced device identity evidence":
+        expect(vulkan_font_promotion_ready(1, 1, true, true, 4, true,
+            7, true, true, "device", "discrete", "driver")).to_equal(true)
+        expect(vulkan_font_promotion_ready(1, 1, true, true, 4, true,
+            0, false, false, "device", "discrete", "driver")).to_equal(false)
+        expect(vulkan_font_promotion_ready(1, 1, true, true, 4, true,
+            7, true, true, "", "discrete", "driver")).to_equal(false)
+        expect(vulkan_font_promotion_ready(1, 1, true, true, 4, false,
+            7, true, true, "device", "discrete", "driver")).to_equal(false)
+        expect(vulkan_font_promotion_ready(1, 1, true, true, 4, true,
+            7, true, true, "device", "cpu", "driver")).to_equal(false)
+
+    it "keeps CPU Vulkan and legacy submission out of promotion":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
+        expect(source).to_contain("device_type == \"discrete\"")
+        expect(source.contains("vulkan_sffi_submit_and_wait(command)")).to_equal(false)
+
     it "keeps Vulkan atlas synchronization full-upload only":
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
         val session = file_read("src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl")
@@ -78,6 +95,11 @@ describe "Vulkan font atlas composite companion":
         expect(source.index_of("vulkan_sffi_bind_pipeline(command") < source.index_of("vulkan_sffi_bind_descriptors(command")).to_equal(true)
         expect(source).to_contain("descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(descriptor)")
         expect(source).to_contain("partial-framebuffer-restore-failed")
+        expect(source.contains("extern fn rt_vulkan_")).to_equal(false)
+        expect(source).to_contain("vulkan_sffi_fence_submission_supported()")
+        expect(source).to_contain("vulkan_sffi_submit_and_wait_fence(command)")
+        expect(source).to_contain("fence-completion-unknown")
+        expect(source).to_contain("fence-cleanup-failed")
         expect(source.index_of("val old_freed = vulkan_sffi_free_buffer(self.d_font_atlas)") < source.index_of("self.d_font_atlas = fresh")).to_equal(true)
         expect(source).to_contain("val fresh_freed = vulkan_sffi_free_buffer(fresh)")
         expect(source).to_contain("return _vulkan_font_evidence(pipeline, \"failed\", reason, self.d_font_atlas")

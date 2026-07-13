@@ -60,6 +60,8 @@ pub(super) struct VulkanState {
     pub shader_modules: HashMap<i64, Arc<ShaderModule>>,
     pub shader_spirv: HashMap<i64, Vec<u8>>,
     pub fences: HashMap<i64, Fence>,
+    pub quarantined_compute: Vec<(Fence, vk::CommandBuffer)>,
+    pub strings: HashMap<String, CString>,
     pub semaphores: HashMap<i64, Semaphore>,
     pub images: HashMap<i64, Arc<VulkanImage>>,
     pub samplers: HashMap<i64, Arc<Sampler>>,
@@ -89,6 +91,8 @@ impl VulkanState {
             shader_modules: HashMap::new(),
             shader_spirv: HashMap::new(),
             fences: HashMap::new(),
+            quarantined_compute: Vec::new(),
+            strings: HashMap::new(),
             semaphores: HashMap::new(),
             images: HashMap::new(),
             samplers: HashMap::new(),
@@ -119,6 +123,21 @@ impl VulkanState {
             .cloned()
             .ok_or_else(|| "Vulkan device not initialised — call rt_vulkan_init() first".to_string())
     }
+
+    pub fn cached_cstr(&mut self, value: String) -> *const c_char {
+        self.strings
+            .entry(value.clone())
+            .or_insert_with(|| CString::new(value).unwrap_or_default())
+            .as_ptr()
+    }
+
+    pub fn clean_quarantined_compute(&mut self) {
+        if let Some(device) = self.device.clone() {
+            for (_, cmd) in self.quarantined_compute.drain(..) {
+                device.free_compute_command(cmd);
+            }
+        }
+    }
 }
 
 #[cfg(feature = "vulkan")]
@@ -134,7 +153,7 @@ pub(super) fn leaked_cstr(s: &str) -> *const c_char {
 }
 
 pub(super) fn empty_cstr() -> *const c_char {
-    leaked_cstr("")
+    b"\0".as_ptr() as *const c_char
 }
 
 #[cfg(feature = "vulkan")]
@@ -198,6 +217,13 @@ pub extern "C" fn rt_vulkan_init() -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_shutdown() -> i64 {
     let mut state = STATE.lock();
+    if let Some(device) = state.device.clone() {
+        if let Err(e) = device.wait_idle() {
+            state.set_error(format!("shutdown wait_idle: {e}"));
+            return 0;
+        }
+        state.clean_quarantined_compute();
+    }
     state.descriptor_sets.clear();
     state.active_compute_layout = None;
     state.descriptor_pools.clear();
@@ -214,6 +240,7 @@ pub extern "C" fn rt_vulkan_shutdown() -> i64 {
     state.shader_spirv.clear();
     state.buffers.clear();
     state.fences.clear();
+    state.quarantined_compute.clear();
     state.semaphores.clear();
     state.semaphore_pool = None;
     state.window_manager = None;
@@ -221,6 +248,7 @@ pub extern "C" fn rt_vulkan_shutdown() -> i64 {
     state.device = None;
     state.instance = None;
     state.last_error.clear();
+    state.strings.clear();
     1
 }
 
@@ -253,11 +281,12 @@ pub extern "C" fn rt_vulkan_is_available() -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_get_last_error() -> *const c_char {
-    let state = STATE.lock();
+    let mut state = STATE.lock();
     if state.last_error.is_empty() {
         empty_cstr()
     } else {
-        leaked_cstr(&state.last_error)
+        let error = state.last_error.clone();
+        state.cached_cstr(error)
     }
 }
 

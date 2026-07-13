@@ -25,7 +25,9 @@ use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_create_compute_pipeline, vulkan_sffi_destroy_pipeline,
     vulkan_sffi_init, vulkan_sffi_shutdown, vulkan_sffi_is_available,
     vulkan_sffi_device_count, vulkan_sffi_select_device,
-    vulkan_sffi_begin_compute, vulkan_sffi_submit_and_wait
+    vulkan_sffi_begin_compute, vulkan_sffi_submit_and_wait,
+    vulkan_sffi_device_name, vulkan_sffi_selected_device_type,
+    vulkan_sffi_selected_device_driver_identity
 }
 use std.gc_async_mut.io.vulkan_sffi.{vulkan_get_device}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence}
@@ -94,6 +96,10 @@ class VulkanSession:
 
     font_atlas_artifact_mode: text
     font_atlas_status: text
+    selected_device_index: i64
+    device_name: text
+    device_type: text
+    driver_identity: text
 
     ref_count: i64
     is_initialized: bool
@@ -134,6 +140,10 @@ class VulkanSession:
             pipe_font_atlas: 0,
             font_atlas_artifact_mode: "none",
             font_atlas_status: "not-installed",
+            selected_device_index: -1,
+            device_name: "",
+            device_type: "",
+            driver_identity: "",
             ref_count: 0,
             is_initialized: false,
             generation: 0
@@ -162,6 +172,10 @@ class VulkanSession:
 
         if not vulkan_sffi_select_device(0):
             return 4
+        self.selected_device_index = 0
+        self.device_name = vulkan_sffi_device_name(0)
+        self.device_type = vulkan_sffi_selected_device_type()
+        self.driver_identity = vulkan_sffi_selected_device_driver_identity()
 
         # Retrieve the opaque device handle exposed by the runtime
         self.device = vulkan_get_device()
@@ -254,7 +268,9 @@ class VulkanSession:
         if spirv_bytes.len() > _VS_MAX_FONT_SPIRV_BYTES:
             return VulkanFontPipelineEvidence(
                 status: "rejected", reason: "compile-artifact-too-large",
-                artifact_mode: "precompiled-spirv", shader_handle: 0, pipeline_handle: 0
+                artifact_mode: "precompiled-spirv", shader_handle: 0, pipeline_handle: 0,
+                device_name: self.device_name, device_type: self.device_type,
+                driver_identity: self.driver_identity
             )
         if (spirv_bytes.len() > 0 and
             (spirv_bytes.len() < 20 or spirv_bytes.len() % 4 != 0 or
@@ -262,19 +278,25 @@ class VulkanSession:
              spirv_bytes[2] != 0x23u8 or spirv_bytes[3] != 0x07u8)):
             return VulkanFontPipelineEvidence(
                 status: "rejected", reason: "invalid-spirv",
-                artifact_mode: "precompiled-spirv", shader_handle: 0, pipeline_handle: 0
+                artifact_mode: "precompiled-spirv", shader_handle: 0, pipeline_handle: 0,
+                device_name: self.device_name, device_type: self.device_type,
+                driver_identity: self.driver_identity
             )
         if self.pipe_font_atlas > 0 and self.shader_font_atlas > 0:
             return VulkanFontPipelineEvidence(
                 status: "ready", reason: "cached",
                 artifact_mode: self.font_atlas_artifact_mode,
                 shader_handle: self.shader_font_atlas,
-                pipeline_handle: self.pipe_font_atlas
+                pipeline_handle: self.pipe_font_atlas,
+                device_name: self.device_name, device_type: self.device_type,
+                driver_identity: self.driver_identity
             )
         if not self.is_valid():
             return VulkanFontPipelineEvidence(
                 status: "unavailable", reason: "invalid-session", artifact_mode: "none",
-                shader_handle: 0, pipeline_handle: 0
+                shader_handle: 0, pipeline_handle: 0,
+                device_name: self.device_name, device_type: self.device_type,
+                driver_identity: self.driver_identity
             )
 
         var mode = "runtime-glsl"
@@ -292,7 +314,9 @@ class VulkanSession:
                 status: "failed",
                 reason: if mode == "runtime-glsl": "glsl-compiler-unavailable" else: "compile-artifact-unavailable",
                 artifact_mode: mode,
-                shader_handle: 0, pipeline_handle: 0
+                shader_handle: 0, pipeline_handle: 0,
+                device_name: self.device_name, device_type: self.device_type,
+                driver_identity: self.driver_identity
             )
         self.pipe_font_atlas = vulkan_sffi_create_compute_pipeline(
             self.shader_font_atlas, "main", 0
@@ -305,13 +329,17 @@ class VulkanSession:
             self.font_atlas_artifact_mode = mode
             return VulkanFontPipelineEvidence(
                 status: "failed", reason: "pipeline-create-failed", artifact_mode: mode,
-                shader_handle: 0, pipeline_handle: 0
+                shader_handle: 0, pipeline_handle: 0,
+                device_name: self.device_name, device_type: self.device_type,
+                driver_identity: self.driver_identity
             )
         self.font_atlas_status = "ready"
         self.font_atlas_artifact_mode = mode
         VulkanFontPipelineEvidence(
             status: "ready", reason: "installed", artifact_mode: mode,
-            shader_handle: self.shader_font_atlas, pipeline_handle: self.pipe_font_atlas
+            shader_handle: self.shader_font_atlas, pipeline_handle: self.pipe_font_atlas,
+                device_name: self.device_name, device_type: self.device_type,
+                driver_identity: self.driver_identity
         )
 
     me font_atlas_pipeline_evidence() -> VulkanFontPipelineEvidence:
@@ -321,13 +349,17 @@ class VulkanSession:
                 status: "ready", reason: "current-session-pipeline",
                 artifact_mode: self.font_atlas_artifact_mode,
                 shader_handle: self.shader_font_atlas,
-                pipeline_handle: self.pipe_font_atlas
+                pipeline_handle: self.pipe_font_atlas,
+                device_name: self.device_name, device_type: self.device_type,
+                driver_identity: self.driver_identity
             )
         VulkanFontPipelineEvidence(
             status: "unavailable",
             reason: if self.is_valid(): "font-pipeline-not-installed" else: "invalid-session",
             artifact_mode: self.font_atlas_artifact_mode,
-            shader_handle: 0, pipeline_handle: 0
+            shader_handle: 0, pipeline_handle: 0,
+                device_name: self.device_name, device_type: self.device_type,
+                driver_identity: self.driver_identity
         )
 
     me _cleanup():
@@ -379,6 +411,10 @@ class VulkanSession:
         self.shader_font_atlas = 0
         self.font_atlas_artifact_mode = "none"
         self.font_atlas_status = "not-installed"
+        self.selected_device_index = -1
+        self.device_name = ""
+        self.driver_identity = ""
+        self.device_type = ""
 
         self.device = 0
         self.instance = 0
