@@ -104,10 +104,14 @@ fn bare_export_names(items: &[simple_parser::ast::Node]) -> Vec<String> {
     names
 }
 
-fn provided_export_names(items: &[simple_parser::ast::Node], requested: &[String]) -> (Vec<String>, Vec<String>, bool) {
+fn provided_export_names(
+    items: &[simple_parser::ast::Node],
+    requested: &[String],
+) -> (Vec<String>, Vec<String>, Vec<String>, bool) {
     use simple_parser::ast::{Node, Pattern};
 
     let mut defined = Vec::new();
+    let mut extern_decls = Vec::new();
     let mut imported = Vec::new();
     let mut forwarded = Vec::new();
     let mut imports_all = false;
@@ -116,7 +120,10 @@ fn provided_export_names(items: &[simple_parser::ast::Node], requested: &[String
     for item in items {
         match item {
             Node::Function(def) if !def.body.statements.is_empty() => defined.push(def.name.clone()),
-            Node::Extern(def) => defined.push(def.name.clone()),
+            // Extern items are declarations, not definitions: a sibling that
+            // re-declares `extern fn foo` to call another module's `fn foo`
+            // must not tie as an export provider with the real definition.
+            Node::Extern(def) => extern_decls.push(def.name.clone()),
             Node::Class(def) => defined.push(def.name.clone()),
             Node::Struct(def) => defined.push(def.name.clone()),
             Node::Enum(def) => defined.push(def.name.clone()),
@@ -151,7 +158,11 @@ fn provided_export_names(items: &[simple_parser::ast::Node], requested: &[String
         .iter()
         .filter(|name| {
             forwarded.contains(name)
-                || (bare_exports.contains(name) && (defined.contains(name) || imports_all || imported.contains(name)))
+                || (bare_exports.contains(name)
+                    && (defined.contains(name)
+                        || extern_decls.contains(name)
+                        || imports_all
+                        || imported.contains(name)))
         })
         .cloned()
         .collect();
@@ -164,7 +175,14 @@ fn provided_export_names(items: &[simple_parser::ast::Node], requested: &[String
         .collect();
     implicit.sort();
     implicit.dedup();
-    (explicit, implicit, forwards_glob)
+    let mut extern_weak: Vec<String> = requested
+        .iter()
+        .filter(|name| extern_decls.contains(name) && !defined.contains(name))
+        .cloned()
+        .collect();
+    extern_weak.sort();
+    extern_weak.dedup();
+    (explicit, implicit, extern_weak, forwards_glob)
 }
 
 pub(crate) fn visit_ast_nodes(nodes: &[simple_parser::ast::Node], visitor: &mut dyn FnMut(&simple_parser::ast::Node)) {
@@ -942,6 +960,7 @@ impl NativeProjectBuilder {
                     let mut explicit_providers: BTreeMap<String, Vec<PathBuf>> =
                         requested.iter().cloned().map(|name| (name, Vec::new())).collect();
                     let mut implicit_providers = explicit_providers.clone();
+                    let mut extern_weak_providers = explicit_providers.clone();
                     let mut glob_forwarders = Vec::new();
                     for sibling in siblings {
                         let mut sibling_source = match std::fs::read_to_string(&sibling) {
@@ -960,7 +979,7 @@ impl NativeProjectBuilder {
                             Err(_) => continue,
                         };
                         strip_inactive_cfg_arch_fns(&mut sibling_module, target_arch);
-                        let (explicit, implicit, forwards_glob) =
+                        let (explicit, implicit, extern_weak, forwards_glob) =
                             provided_export_names(&sibling_module.items, &requested);
                         if forwards_glob {
                             glob_forwarders.push(sibling.clone());
@@ -971,18 +990,50 @@ impl NativeProjectBuilder {
                         for name in implicit {
                             implicit_providers.entry(name).or_default().push(sibling.clone());
                         }
+                        for name in extern_weak {
+                            extern_weak_providers.entry(name).or_default().push(sibling.clone());
+                        }
                     }
                     found_deps.extend(glob_forwarders);
                     for name in requested {
                         let explicit = explicit_providers.remove(&name).unwrap_or_default();
                         let implicit = implicit_providers.remove(&name).unwrap_or_default();
-                        let owners = if explicit.is_empty() { implicit } else { explicit };
+                        let extern_weak = extern_weak_providers.remove(&name).unwrap_or_default();
+                        // Tiered resolution: explicit exports beat real
+                        // definitions, which beat extern re-declarations.
+                        let owners = if !explicit.is_empty() {
+                            explicit
+                        } else if !implicit.is_empty() {
+                            implicit
+                        } else {
+                            extern_weak
+                        };
                         match owners.as_slice() {
                             [owner] => {
                                 found_deps.insert(owner.clone());
                             }
                             [] => {}
                             _ => {
+                                // Escape hatch for mid-flight source trees where two
+                                // siblings genuinely define the same helper: include
+                                // every candidate (over-inclusion only compiles more
+                                // files) instead of failing the whole build.
+                                if std::env::var("SIMPLE_AMBIGUOUS_EXPORT_ALL").map_or(false, |v| v == "1") {
+                                    eprintln!(
+                                        "warning: ambiguous package export `{}` in {} (including all providers): {}",
+                                        name,
+                                        canonical.display(),
+                                        owners
+                                            .iter()
+                                            .map(|path| path.display().to_string())
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    );
+                                    for owner in owners.iter() {
+                                        found_deps.insert(owner.clone());
+                                    }
+                                    continue;
+                                }
                                 return Err(format!(
                                     "ambiguous package export `{}` in {}: {}",
                                     name,

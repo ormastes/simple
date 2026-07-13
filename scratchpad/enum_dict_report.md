@@ -153,9 +153,16 @@ from the worktree root, `bin/simple` symlinked to the shared release binary.
 
 ## Smoke matrix
 
-`sh scripts/check/native-smoke-matrix.shs` result: **(filled in after the
-background run completes — see note in chat reply if this section still says
-pending)**
+`sh scripts/check/native-smoke-matrix.shs` (run from /tmp/wt_edict with the fix
+applied): **total=15 pass=14 fail=1 xfail=0 xpass=0 codegen_fallback_hits=0**.
+Sole failure = `option_nil_check` (rc got=1 want=7), the one allowed failure
+per the gate. All enum/dict-relevant rows green: `enum_construct` (7),
+`enum_match` (8), `dict_index` (13), `result_try_op` (15). Gate (>=14/15,
+0 fallback hits, only option_nil_check allowed): **MET**.
+
+Note: `option_nil_check` exercises `x.?` — the native-side sibling of the same
+`.?`-on-Some(payload) truthiness landmine documented as root cause above. It
+fails identically on the green base; this patch neither fixes nor regresses it.
 
 ## Files changed
 

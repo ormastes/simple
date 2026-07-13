@@ -584,6 +584,12 @@ int main(int argc, char **argv)
     put_dir_entry(root, &root_n, "BIN        ", bin_cluster, 0, 0x10);
     put_dir_entry(root, &root_n, "SYSRT      ", sysrt_cluster, 0, 0x10);
     put_dir_entry(root, &root_n, "TMP        ", tmp_cluster, 0, 0x10);
+    /* Lane BA: root-level staging of the cross-built interpreter so the arm64
+     * board gate reads it via the proven root directory-scan path (avoids the
+     * /SYS/APPS subdirectory descent). Placed early so the dirent stays within
+     * the first 512-byte directory sector. */
+    if (simple_bin_cluster)
+        put_dir_entry(root, &root_n, "SIMPLE  ELF", simple_bin_cluster, simple_payload.len, 0x20);
     put_dir_entry(root, &root_n, "KERNEL  ELF", kernel_cluster, kernel.len, 0x20);
     put_dir_entry(root, &root_n, "LIMINE  CNF", limine_cluster, limine.len, 0x20);
     put_dir_entry(root, &root_n, "HELLO   TXT", hello_txt_cluster, hello_txt.len, 0x20);

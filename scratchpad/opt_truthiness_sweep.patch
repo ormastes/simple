@@ -1,0 +1,866 @@
+diff --git a/src/compiler/00.common/effects.spl b/src/compiler/00.common/effects.spl
+index 59dad8e61a5..6a4217b06cc 100644
+--- a/src/compiler/00.common/effects.spl
++++ b/src/compiler/00.common/effects.spl
+@@ -116,13 +116,21 @@ impl EffectEnv:
+         2. Built-ins (SFFI annotations)
+         3. Default to Synchronous
+         """
++        # NOTE: `Dict.get()` returns the raw value or nil, NOT a
++        # Some(..)-tagged Option -- `if val Some(x) = d.get(k):` silently
++        # never matches (documented interpreter landmine, see
++        # std.nogc_sync_mut.diag.spl's header comment). Use a direct
++        # nil-check instead, or every symbol would silently skip its
++        # inferred/builtin effect and fall through to the Synchronous default.
+         # Check local effects first
+-        if val Some(eff) = self.effects.get(sym):
+-            return eff
++        val local_eff = self.effects.get(sym)
++        if local_eff != nil:
++            return local_eff
+ 
+         # Check builtins by function name
+-        if val Some(eff) = self.builtins.get(sym):
+-            return eff
++        val builtin_eff = self.builtins.get(sym)
++        if builtin_eff != nil:
++            return builtin_eff
+ 
+         # Default to Synchronous
+         EffectTag.PureTag
+diff --git a/src/compiler/30.types/dim_constraints.spl b/src/compiler/30.types/dim_constraints.spl
+index 061c7ef7a52..e968b00a818 100644
+--- a/src/compiler/30.types/dim_constraints.spl
++++ b/src/compiler/30.types/dim_constraints.spl
+@@ -123,15 +123,25 @@ impl DimSolver:
+ 
+             case _:
+                 # Try to evaluate both and compare
+-                val v1 = self.try_eval(e1)
+-                val v2 = self.try_eval(e2)
+-                if v1.? and v2.?:
+-                    if v1.unwrap() == v2.unwrap():
+-                        Ok(DimExpr.literal(v1.unwrap(), e1.span))
+-                    else:
++                # NOTE: explicit match, not `if v1.? and v2.?:` -- a
++                # dimension expression can legitimately evaluate to 0, and
++                # `.?` truthiness on a boxed `i64?` collapses `Some(0)` to
++                # falsy in the bootstrap seed interpreter (same class of bug
++                # as the landed var_reassign_written_local fix), which would
++                # falsely report a dimension mismatch for two dims that both
++                # evaluate to 0.
++                match self.try_eval(e1):
++                    case Some(v1):
++                        match self.try_eval(e2):
++                            case Some(v2):
++                                if v1 == v2:
++                                    Ok(DimExpr.literal(v1, e1.span))
++                                else:
++                                    Err(DimError.mismatch(e1, e2, e1.span.merge(e2.span)))
++                            case nil:
++                                Err(DimError.mismatch(e1, e2, e1.span.merge(e2.span)))
++                    case nil:
+                         Err(DimError.mismatch(e1, e2, e1.span.merge(e2.span)))
+-                else:
+-                    Err(DimError.mismatch(e1, e2, e1.span.merge(e2.span)))
+ 
+     me bind_var(id: i64, expr: DimExpr):
+         """Bind a variable to an expression."""
+diff --git a/src/compiler/55.borrow/gc_analysis/mod.spl b/src/compiler/55.borrow/gc_analysis/mod.spl
+index 91e067307c2..bb06989260b 100644
+--- a/src/compiler/55.borrow/gc_analysis/mod.spl
++++ b/src/compiler/55.borrow/gc_analysis/mod.spl
+@@ -185,29 +185,46 @@ class GcSafetyAnalyzer:
+                 val base_id = self.operand_local(base)
+                 val value_id = self.operand_local(value)
+ 
+-                if val base_id_v = base_id.?:
+-                    if val value_id_v = value_id.?:
+-                        self.escape_analysis.record_field_store(
+-                            base_id_v,
+-                            field_idx,
+-                            value_id_v,
+-                            base_id_v  # Use base local as type proxy
+-                        )
+-
+-                        # Record write site for barrier analysis
+-                        self.barrier_analysis.record_write(WriteSite.field_write(
+-                            point, 0, field_idx, 0
+-                        ))
++                # NOTE: explicit match, not `if val X = Y.?:` -- local id 0
++                # landmine (`.?` truthiness on a boxed `i64?` collapses
++                # `Some(0)` to falsy in the bootstrap seed interpreter, see
++                # var_reassign_ssa.spl's ssa_alloca_apply_def_store). Missing
++                # a field-store escape/barrier record for local 0 is a GC
++                # correctness bug (missed write barrier / missed root).
++                match base_id:
++                    case Some(base_id_v):
++                        match value_id:
++                            case Some(value_id_v):
++                                self.escape_analysis.record_field_store(
++                                    base_id_v,
++                                    field_idx,
++                                    value_id_v,
++                                    base_id_v  # Use base local as type proxy
++                                )
++
++                                # Record write site for barrier analysis
++                                self.barrier_analysis.record_write(WriteSite.field_write(
++                                    point, 0, field_idx, 0
++                                ))
++                            case nil:
++                                pass_do_nothing
++                    case nil:
++                        pass_do_nothing
+ 
+             case GetField(dest, base, field_idx):
+                 val base_id = self.operand_local(base)
+-                if val base_id_v = base_id.?:
+-                    self.escape_analysis.record_field_load(
+-                        base_id_v,
+-                        field_idx,
+-                        dest.id,
+-                        0
+-                    )
++                # NOTE: explicit match, not `if val X = Y.?:` -- local id 0
++                # landmine, see the SetField case above.
++                match base_id:
++                    case Some(base_id_v):
++                        self.escape_analysis.record_field_load(
++                            base_id_v,
++                            field_idx,
++                            dest.id,
++                            0
++                        )
++                    case nil:
++                        pass_do_nothing
+ 
+             # Call (potential GC point)
+             case Call(dest, callee, args, _):
+@@ -216,8 +233,13 @@ class GcSafetyAnalyzer:
+                 # Arguments may escape
+                 for arg in args:
+                     val arg_id = self.operand_local(arg)
+-                    if val arg_id_v = arg_id.?:
+-                        self.escape_analysis.record_call_arg(arg_id_v)
++                    # NOTE: explicit match, not `if val X = Y.?:` -- local id 0
++                    # landmine, see the SetField case above.
++                    match arg_id:
++                        case Some(arg_id_v):
++                            self.escape_analysis.record_call_arg(arg_id_v)
++                        case nil:
++                            pass_do_nothing
+ 
+             case _:
+ 
+diff --git a/src/compiler/60.mir_opt/mir_opt/_Inline/driver.spl b/src/compiler/60.mir_opt/mir_opt/_Inline/driver.spl
+index ce693c4ef22..b8c3afd87e9 100644
+--- a/src/compiler/60.mir_opt/mir_opt/_Inline/driver.spl
++++ b/src/compiler/60.mir_opt/mir_opt/_Inline/driver.spl
+@@ -351,15 +351,21 @@ impl ModuleInliner:
+                 case Call(dest, callee_op, args):
+                     # Try to resolve callee to a candidate function
+                     # First try by symbol ID
+-                    val callee_id = self.extract_func_symbol_id(callee_op)
+-                    val callee_by_id = if callee_id.?:
+-                        val found_callee_id = callee_id.unwrap()
+-                        if candidates.has(found_callee_id):
+-                            Some(candidates[found_callee_id])
+-                        else:
++                    # NOTE: explicit match, not `if callee_id.?:` -- symbol
++                    # id 0 landmine (`.?` truthiness on a boxed `i64?`
++                    # collapses `Some(0)` to falsy in the bootstrap seed
++                    # interpreter, see var_reassign_ssa.spl's
++                    # ssa_alloca_apply_def_store). A miss here just falls
++                    # through to the name-based lookup below, but it is the
++                    # identical landmine so fixed for consistency.
++                    val callee_by_id = match self.extract_func_symbol_id(callee_op):
++                        case Some(found_callee_id):
++                            if candidates.has(found_callee_id):
++                                Some(candidates[found_callee_id])
++                            else:
++                                nil
++                        case nil:
+                             nil
+-                    else:
+-                        nil
+ 
+                     # Fall back to name-based lookup
+                     val resolved_callee = if callee_by_id.?:
+diff --git a/src/compiler/60.mir_opt/mir_opt/bounds_check_elim.spl b/src/compiler/60.mir_opt/mir_opt/bounds_check_elim.spl
+index e5c6c286bc3..dbf83071aac 100644
+--- a/src/compiler/60.mir_opt/mir_opt/bounds_check_elim.spl
++++ b/src/compiler/60.mir_opt/mir_opt/bounds_check_elim.spl
+@@ -264,18 +264,25 @@ fn try_match_loop_guard_inst(inst: MirInst) -> LoopGuardInfo?:
+         case BinOp(_, op, left, right):
+             match op:
+                 case Lt:
+-                    val idx_id = operand_local_id_raw(left)
+-                    val arr_id = operand_local_id_raw(right)
+-                    if val index_id = idx_id:
+-                        if val array_id = arr_id:
+-                            return LoopGuardInfo(
+-                                index_var_id: index_id,
+-                                arr_local_id: array_id
+-                            )
+-                        else:
++                    # NOTE: explicit match, not `if val X = Y.?:` -- local id
++                    # 0 landmine (`.?` truthiness on a boxed `i64?` collapses
++                    # `Some(0)` to falsy in the bootstrap seed interpreter,
++                    # see var_reassign_ssa.spl's ssa_alloca_apply_def_store).
++                    # Safe direction here (a miss just skips the bounds-check
++                    # elimination for that loop) but the identical landmine,
++                    # so fixed for consistency.
++                    match operand_local_id_raw(left):
++                        case Some(index_id):
++                            match operand_local_id_raw(right):
++                                case Some(array_id):
++                                    return LoopGuardInfo(
++                                        index_var_id: index_id,
++                                        arr_local_id: array_id
++                                    )
++                                case nil:
++                                    nil
++                        case nil:
+                             nil
+-                    else:
+-                        nil
+                 case _: nil
+         case _: nil
+ 
+@@ -307,15 +314,17 @@ fn inst_is_positive_add_of_self(inst: MirInst, local_id: i64) -> bool:
+                 return false
+             match op:
+                 case Add:
+-                    val self_ref = operand_local_id_raw(left)
+                     val is_pos_const = operand_is_positive_const(right)
+-                    if val self_id = self_ref:
+-                        if is_pos_const:
+-                            return self_id == local_id
+-                        else:
++                    # NOTE: explicit match, not `if val X = Y.?:` -- local id
++                    # 0 landmine, see try_match_loop_guard_inst above.
++                    match operand_local_id_raw(left):
++                        case Some(self_id):
++                            if is_pos_const:
++                                self_id == local_id
++                            else:
++                                false
++                        case nil:
+                             false
+-                    else:
+-                        false
+                 case _: false
+         case _: false
+ 
+diff --git a/src/compiler/60.mir_opt/mir_opt/collection_opt_patterns.spl b/src/compiler/60.mir_opt/mir_opt/collection_opt_patterns.spl
+index 5fdc495ba42..3761dd96aff 100644
+--- a/src/compiler/60.mir_opt/mir_opt/collection_opt_patterns.spl
++++ b/src/compiler/60.mir_opt/mir_opt/collection_opt_patterns.spl
+@@ -485,14 +485,25 @@ fn colopt_detect_linear_scan_guard(header: MirBlock) -> ColoptLinearScanGuard?:
+             case BinOp(_, op, left, right):
+                 match op:
+                     case Lt:
+-                        val idx = colopt_operand_to_local_id(left)
+-                        val arr = colopt_operand_to_local_id(right)
+-                        if idx.? and arr.?:
+-                            return ColoptLinearScanGuard(
+-                                index_var_id: idx.unwrap(),
+-                                arr_local_id: arr.unwrap()
+-                            )
+-                        ()
++                        # NOTE: explicit match, not `if idx.? and arr.?:` --
++                        # local id 0 landmine (`.?` truthiness on a boxed
++                        # `i64?` collapses `Some(0)` to falsy in the
++                        # bootstrap seed interpreter, see var_reassign_ssa
++                        # .spl's ssa_alloca_apply_def_store). Safe direction
++                        # here (a miss just skips this optimization) but the
++                        # identical landmine, fixed for consistency.
++                        match colopt_operand_to_local_id(left):
++                            case Some(index_var_id):
++                                match colopt_operand_to_local_id(right):
++                                    case Some(arr_local_id):
++                                        return ColoptLinearScanGuard(
++                                            index_var_id: index_var_id,
++                                            arr_local_id: arr_local_id
++                                        )
++                                    case nil:
++                                        ()
++                            case nil:
++                                ()
+                     case _: ()
+             case _: ()
+     return nil
+@@ -504,10 +515,15 @@ fn colopt_block_increments_index(block: MirBlock, index_var_id: i64) -> bool:
+                 match op:
+                     case Add:
+                         if dest.id == index_var_id:
+-                            val src = colopt_operand_to_local_id(left)
+-                            if src.?:
+-                                if src.unwrap() == index_var_id:
+-                                    return true
++                            # NOTE: explicit match, not `if src.?:` -- local
++                            # id 0 landmine, see colopt_detect_linear_scan_guard
++                            # above.
++                            match colopt_operand_to_local_id(left):
++                                case Some(src_id):
++                                    if src_id == index_var_id:
++                                        return true
++                                case nil:
++                                    pass_do_nothing
+                         ()
+                     case _: ()
+             case _: ()
+diff --git a/src/compiler/60.mir_opt/mir_opt/loop_detect.spl b/src/compiler/60.mir_opt/mir_opt/loop_detect.spl
+index 598853b3aca..9605a92454f 100644
+--- a/src/compiler/60.mir_opt/mir_opt/loop_detect.spl
++++ b/src/compiler/60.mir_opt/mir_opt/loop_detect.spl
+@@ -302,16 +302,28 @@ impl LoopDetector:
+                     val else_in_loop = loop_block_set.has(else_.id)
+ 
+                     # Exactly one branch should exit for a counted loop
++                    # NOTE: explicit match, not `if bound.?:` -- a constant
++                    # trip count of 0 is legitimate (a loop that never
++                    # executes), and `.?` truthiness on a boxed `i64?`
++                    # collapses `Some(0)` to falsy in the bootstrap seed
++                    # interpreter (same class of bug as the landed
++                    # var_reassign_written_local fix). Safe direction here
++                    # (a miss just skips the trip-count-based optimization)
++                    # but the identical landmine, fixed for consistency.
+                     if then_in_loop and not else_in_loop:
+                         # else_ is the exit branch; cond being true continues
+-                        val bound = self.extract_comparison_bound(block.instructions, cond)
+-                        if bound.?:
+-                            return bound
++                        match self.extract_comparison_bound(block.instructions, cond):
++                            case Some(bound_val):
++                                return Some(bound_val)
++                            case nil:
++                                pass_do_nothing
+                     elif not then_in_loop and else_in_loop:
+                         # then_ is the exit branch; cond being false continues
+-                        val bound = self.extract_comparison_bound(block.instructions, cond)
+-                        if bound.?:
+-                            return bound
++                        match self.extract_comparison_bound(block.instructions, cond):
++                            case Some(bound_val):
++                                return Some(bound_val)
++                            case nil:
++                                pass_do_nothing
+                 case _:
+                     pass
+ 
+@@ -332,9 +344,11 @@ impl LoopDetector:
+             case Move(local): Some(local.id)
+             case _: nil
+ 
+-        if not cond_local_id.?:
+-            return nil
+-        val target_id = cond_local_id.unwrap()
++        # NOTE: explicit match, not `if not cond_local_id.?:` -- local id 0
++        # landmine, see the trip-count note in analyze_trip_count above.
++        val target_id = match cond_local_id:
++            case Some(id): id
++            case nil: return nil
+ 
+         # Scan instructions for the BinOp that defines this local
+         for inst in instructions:
+@@ -342,33 +356,37 @@ impl LoopDetector:
+                 case BinOp(dest, op, left, right):
+                     if dest.id == target_id:
+                         # Found the comparison instruction
+-                        # Check if it's a comparison with a constant bound
+-                        val const_val = self.operand_const_int(right)
+-                        if const_val.?:
+-                            match op:
+-                                case Lt:
+-                                    # i < N -> trip count is N
+-                                    return const_val
+-                                case Le:
+-                                    # i <= N -> trip count is N + 1
+-                                    if val bound = const_val:
+-                                        return Some(bound + 1)
+-                                case _:
+-                                    pass
++                        # Check if it's a comparison with a constant bound.
++                        # NOTE: explicit match, not `if const_val.?:` -- a
++                        # constant bound of 0 is legitimate, same landmine.
++                        match self.operand_const_int(right):
++                            case Some(const_val):
++                                match op:
++                                    case Lt:
++                                        # i < N -> trip count is N
++                                        return Some(const_val)
++                                    case Le:
++                                        # i <= N -> trip count is N + 1
++                                        return Some(const_val + 1)
++                                    case _:
++                                        pass
++                            case nil:
++                                pass_do_nothing
+ 
+                         # Also check left operand (for reversed comparisons like N > i)
+-                        val const_val_l = self.operand_const_int(left)
+-                        if const_val_l.?:
+-                            match op:
+-                                case Gt:
+-                                    # N > i -> trip count is N
+-                                    return const_val_l
+-                                case Ge:
+-                                    # N >= i -> trip count is N + 1
+-                                    if val bound = const_val_l:
+-                                        return Some(bound + 1)
+-                                case _:
+-                                    pass
++                        match self.operand_const_int(left):
++                            case Some(const_val_l):
++                                match op:
++                                    case Gt:
++                                        # N > i -> trip count is N
++                                        return Some(const_val_l)
++                                    case Ge:
++                                        # N >= i -> trip count is N + 1
++                                        return Some(const_val_l + 1)
++                                    case _:
++                                        pass
++                            case nil:
++                                pass_do_nothing
+                 case _:
+                     pass
+ 
+diff --git a/src/compiler/60.mir_opt/mir_opt/var_reassign_analysis.spl b/src/compiler/60.mir_opt/mir_opt/var_reassign_analysis.spl
+index d3a39a72f95..9ad9798613f 100644
+--- a/src/compiler/60.mir_opt/mir_opt/var_reassign_analysis.spl
++++ b/src/compiler/60.mir_opt/mir_opt/var_reassign_analysis.spl
+@@ -106,20 +106,26 @@ fn var_reassign_operand_local(operand: MirOperand) -> i64?:
+             nil
+ 
+ fn var_reassign_collect_escape_operand(escaped: [i64], operand: MirOperand) -> [i64]:
+-    val local = var_reassign_operand_local(operand)
+-    if local.?:
+-        val local_id = local
+-        local_list_push_unique(escaped, local_id)
+-    else:
+-        escaped
++    # NOTE: explicit match, not `if local.?:` -- local id 0 is a real,
++    # reachable local id and `.?` truthiness on a boxed `i64?` collapses
++    # `Some(0)` to falsy in the bootstrap seed interpreter (see
++    # var_reassign_ssa.spl's ssa_alloca_apply_def_store for the full
++    # writeup). Missing an escape for local 0 here would let borrow_safe
++    # analysis wrongly treat an escaping local 0 as SSA-transform-safe.
++    match var_reassign_operand_local(operand):
++        case Some(local_id):
++            local_list_push_unique(escaped, local_id)
++        case nil:
++            escaped
+ 
+ fn var_reassign_collect_escape_operand_with_aliases(escaped: [i64], operand: MirOperand, alias_keys: [i64], alias_values: [i64]) -> [i64]:
+-    val local = var_reassign_operand_local(operand)
+-    if local.?:
+-        val local_id = local
+-        local_list_push_unique(escaped, local_alias_root(alias_keys, alias_values, local_id))
+-    else:
+-        escaped
++    # NOTE: explicit match, not `if local.?:` -- local id 0 landmine, see
++    # var_reassign_collect_escape_operand above.
++    match var_reassign_operand_local(operand):
++        case Some(local_id):
++            local_list_push_unique(escaped, local_alias_root(alias_keys, alias_values, local_id))
++        case nil:
++            escaped
+ 
+ fn var_reassign_written_local(inst: MirInst) -> i64?:
+     match inst.kind:
+@@ -265,12 +271,13 @@ fn var_reassign_update_aliases_for_inst(inst: MirInst, alias_keys: [i64], alias_
+         case Ref(dest, _, place):
+             local_alias_set(alias_keys, alias_values, var_reassign_local_id_value(dest), local_alias_root(alias_keys, alias_values, var_reassign_local_id_value(place.local)))
+         case _:
+-            val written = var_reassign_written_local(inst)
+-            if written.?:
+-                val written_id = written
+-                local_alias_reset(alias_keys, alias_values, written_id)
+-            else:
+-                (alias_keys, alias_values)
++            # NOTE: explicit match, not `if written.?:` -- local id 0
++            # landmine, see var_reassign_collect_escape_operand above.
++            match var_reassign_written_local(inst):
++                case Some(written_id):
++                    local_alias_reset(alias_keys, alias_values, written_id)
++                case nil:
++                    (alias_keys, alias_values)
+ 
+ fn analyze_var_reassign_blocks(blocks: [MirBlock]) -> VarReassignAnalysis:
+     var local_ids: [i64] = []
+@@ -283,15 +290,21 @@ fn analyze_var_reassign_blocks(blocks: [MirBlock]) -> VarReassignAnalysis:
+ 
+     for block in blocks:
+         for inst in block.instructions:
+-            val written = var_reassign_written_local(inst)
+-            if written.?:
+-                val local_id = written
+-                val local_root = local_alias_root(alias_keys, alias_values, local_id)
+-                if local_count_value(local_ids, counts, local_id) > 0 and (local_list_contains(borrowed, local_id) or local_list_contains(borrowed, local_root)):
+-                    borrow_safe = false
+-                val next_counts = local_count_increment(local_ids, counts, local_id)
+-                local_ids = next_counts[0]
+-                counts = next_counts[1]
++            # NOTE: explicit match, not `if written.?:` -- local id 0
++            # landmine, see var_reassign_collect_escape_operand above. This
++            # is the core reassignment-count / borrow-safety scan: missing
++            # local 0 here would silently under-count its reassignments and
++            # could report ssa_transform_safe=true for an unsafe transform.
++            match var_reassign_written_local(inst):
++                case Some(local_id):
++                    val local_root = local_alias_root(alias_keys, alias_values, local_id)
++                    if local_count_value(local_ids, counts, local_id) > 0 and (local_list_contains(borrowed, local_id) or local_list_contains(borrowed, local_root)):
++                        borrow_safe = false
++                    val next_counts = local_count_increment(local_ids, counts, local_id)
++                    local_ids = next_counts[0]
++                    counts = next_counts[1]
++                case nil:
++                    pass_do_nothing
+             match inst.kind:
+                 case Ref(_, _, place):
+                     borrowed = local_list_push_unique(borrowed, local_alias_root(alias_keys, alias_values, var_reassign_local_id_value(place.local)))
+diff --git a/src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl b/src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl
+index 9f0e811ae32..3c282b57ba7 100644
+--- a/src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl
++++ b/src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl
+@@ -163,23 +163,29 @@ fn ssa_replace_operand_local(operand: MirOperand, original_id: i64, replacement_
+             operand
+ 
+ fn ssa_max_local_from_operand(current: i64, operand: MirOperand) -> i64:
+-    val local = var_reassign_operand_local(operand)
+-    if local.?:
+-        val local_id = local.unwrap()
+-        if local_id > current:
+-            local_id
+-        else:
++    # NOTE: explicit match (not `if local.?:`) -- local id 0 is a real,
++    # reachable local id and `.? ` truthiness on a boxed `i64?` collapses
++    # `Some(0)` to falsy in the bootstrap seed interpreter, which would
++    # silently drop local 0 from the max-local-id scan (see the detailed
++    # writeup on `ssa_alloca_apply_def_store` below).
++    match var_reassign_operand_local(operand):
++        case Some(local_id):
++            if local_id > current:
++                local_id
++            else:
++                current
++        case nil:
+             current
+-    else:
+-        current
+ 
+ fn ssa_max_local_from_inst(current: i64, inst: MirInst) -> i64:
+     var max_id = current
+-    val written = var_reassign_written_local(inst)
+-    if written.?:
+-        val written_id = written.unwrap()
+-        if written_id > max_id:
+-            max_id = written_id
++    # NOTE: explicit match, not `if written.?:` -- see ssa_max_local_from_operand.
++    match var_reassign_written_local(inst):
++        case Some(written_id):
++            if written_id > max_id:
++                max_id = written_id
++        case nil:
++            pass_do_nothing
+     match inst.kind:
+         case Copy(_, src):
+             val src_id = ssa_local_id_value(src)
+@@ -546,10 +552,13 @@ fn ssa_block_by_id(blocks: [MirBlock], id: i64) -> MirBlock?:
+ fn ssa_block_written_locals(block: MirBlock) -> [i64]:
+     var locals: [i64] = []
+     for inst in block.instructions:
+-        val written = var_reassign_written_local(inst)
+-        if written.?:
+-            val written_id = written.unwrap()
+-            locals = local_list_push_unique(locals, written_id)
++        # NOTE: explicit match, not `if written.?:` -- local id 0 landmine,
++        # see ssa_max_local_from_operand.
++        match var_reassign_written_local(inst):
++            case Some(written_id):
++                locals = local_list_push_unique(locals, written_id)
++            case nil:
++                pass_do_nothing
+     locals
+ 
+ fn ssa_common_locals(left: [i64], right: [i64]) -> [i64]:
+@@ -824,13 +833,18 @@ fn ssa_phi_plan_pred_value_for_block(plan: SsaPhiPlan, block_id: i64) -> i64?:
+     nil
+ 
+ fn ssa_apply_phi_plan_to_block(block: MirBlock, plan: SsaPhiPlan) -> MirBlock:
+-    val pred_value = ssa_phi_plan_pred_value_for_block(plan, ssa_block_id_value(block.id))
+-    if pred_value.?:
+-        val value_local_id = pred_value.unwrap()
+-        var new_insts: [MirInst] = []
+-        for inst in block.instructions:
+-            new_insts = new_insts.push(ssa_replace_inst_dest_for_local(inst, plan.original_local_id, value_local_id))
+-        return MirBlock(id: block.id, label: block.label, instructions: new_insts, terminator: block.terminator)
++    # NOTE: explicit match, not `if pred_value.?:` -- the predecessor's
++    # incoming local id can legitimately be 0 (local id 0 landmine, see
++    # ssa_max_local_from_operand); a truthiness check here would silently
++    # skip rewriting the phi source in that predecessor block.
++    match ssa_phi_plan_pred_value_for_block(plan, ssa_block_id_value(block.id)):
++        case Some(value_local_id):
++            var new_insts: [MirInst] = []
++            for inst in block.instructions:
++                new_insts = new_insts.push(ssa_replace_inst_dest_for_local(inst, plan.original_local_id, value_local_id))
++            return MirBlock(id: block.id, label: block.label, instructions: new_insts, terminator: block.terminator)
++        case nil:
++            pass_do_nothing
+     if ssa_block_id_value(block.id) == plan.join_block_id:
+         var join_insts: [MirInst] = [ssa_phi_instruction(plan)]
+         for inst in block.instructions:
+@@ -950,11 +964,18 @@ fn ssa_reassigned_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
+     var counts: [i64] = []
+     for block in blocks:
+         for inst in block.instructions:
+-            val written = var_reassign_written_local(inst)
+-            if written.?:
+-                val next_counts = local_count_increment(local_ids, counts, written.unwrap())
+-                local_ids = next_counts[0]
+-                counts = next_counts[1]
++            # NOTE: explicit match, not `if written.?:` -- local id 0
++            # landmine, see ssa_max_local_from_operand. This one is
++            # especially dangerous: it feeds the multi-def/slotting
++            # decision, i.e. exactly the class of silent miscompile the
++            # landed var_reassign_written_local fix addressed.
++            match var_reassign_written_local(inst):
++                case Some(written_id):
++                    val next_counts = local_count_increment(local_ids, counts, written_id)
++                    local_ids = next_counts[0]
++                    counts = next_counts[1]
++                case nil:
++                    pass_do_nothing
+     var reassigned: [i64] = []
+     var i = 0
+     while i < local_ids.len():
+@@ -983,11 +1004,13 @@ fn ssa_local_type_lookup(mir_locals: [MirLocal], local_id: i64) -> MirType:
+ # rename into a store).
+ 
+ fn ssa_operand_push_local(locals: [i64], operand: MirOperand) -> [i64]:
+-    val lo = var_reassign_operand_local(operand)
+-    if lo.?:
+-        local_list_push_unique(locals, lo.unwrap())
+-    else:
+-        locals
++    # NOTE: explicit match, not `if lo.?:` -- local id 0 landmine, see
++    # ssa_max_local_from_operand.
++    match var_reassign_operand_local(operand):
++        case Some(local_id):
++            local_list_push_unique(locals, local_id)
++        case nil:
++            locals
+ 
+ fn ssa_collect_inst_operand_locals(locals: [i64], inst: MirInst) -> [i64]:
+     """Locals READ by `inst` (its dest is deliberately excluded)."""
+@@ -1061,10 +1084,14 @@ fn ssa_collect_term_operand_locals(locals: [i64], term: MirTerminator) -> [i64]:
+ 
+ fn ssa_local_defined_in_block(block: MirBlock, local_id: i64) -> bool:
+     for inst in block.instructions:
+-        val written = var_reassign_written_local(inst)
+-        if written.?:
+-            if written.unwrap() == local_id:
+-                return true
++        # NOTE: explicit match, not `if written.?:` -- local id 0 landmine,
++        # see ssa_max_local_from_operand.
++        match var_reassign_written_local(inst):
++            case Some(written_id):
++                if written_id == local_id:
++                    return true
++            case nil:
++                pass_do_nothing
+     false
+ 
+ fn ssa_local_is_param(mir_locals: [MirLocal], local_id: i64) -> bool:
+diff --git a/src/compiler/95.interp/mir_interp_ops.spl b/src/compiler/95.interp/mir_interp_ops.spl
+index c86d54e4295..150e9e3d0a6 100644
+--- a/src/compiler/95.interp/mir_interp_ops.spl
++++ b/src/compiler/95.interp/mir_interp_ops.spl
+@@ -196,27 +196,37 @@ impl MirInterpreter:
+         self.current_block = Some(callee.entry_block.id)
+ 
+         # Execute blocks until return
++        # NOTE: driven by an explicit `match self.current_block` (not
++        # `while self.current_block.?:`) -- block id 0 is the conventional
++        # entry-block id, and `.?` truthiness on a boxed `i64?` collapses
++        # `Some(0)` to falsy in the bootstrap seed interpreter (same class
++        # of bug as the landed var_reassign_written_local fix), which would
++        # make this loop exit immediately whenever the current block is 0.
+         var max_iter = 10000
+-        while self.current_block.? and not self.has_returned and max_iter > 0:
+-            val block_id = self.current_block.unwrap()
+-            val block = self.blocks[block_id]
+-
+-            for inst in block.instructions:
+-                val error = self.execute_instruction(inst)
+-                if error.?:
+-                    # Restore state on error
+-                    self._pop_call_stack()
+-                    return (nil, error)
+-                if self.has_returned:
+-                    break
+-
+-            if not self.has_returned:
+-                val error = self.execute_terminator(block.terminator)
+-                if error.?:
+-                    self._pop_call_stack()
+-                    return (nil, error)
+-
+-            max_iter = max_iter - 1
++        var has_block = true
++        while has_block and not self.has_returned and max_iter > 0:
++            match self.current_block:
++                case Some(block_id):
++                    val block = self.blocks[block_id]
++
++                    for inst in block.instructions:
++                        val error = self.execute_instruction(inst)
++                        if error.?:
++                            # Restore state on error
++                            self._pop_call_stack()
++                            return (nil, error)
++                        if self.has_returned:
++                            break
++
++                    if not self.has_returned:
++                        val error = self.execute_terminator(block.terminator)
++                        if error.?:
++                            self._pop_call_stack()
++                            return (nil, error)
++
++                    max_iter = max_iter - 1
++                case nil:
++                    has_block = false
+ 
+         if max_iter == 0:
+             self._pop_call_stack()
+diff --git a/src/compiler/95.interp/mir_interpreter.spl b/src/compiler/95.interp/mir_interpreter.spl
+index 9080ad2c7a6..9667e70482f 100644
+--- a/src/compiler/95.interp/mir_interpreter.spl
++++ b/src/compiler/95.interp/mir_interpreter.spl
+@@ -498,27 +498,37 @@ impl MirInterpreter:
+         self.current_block = Some(callee.entry_block.id)
+ 
+         # Execute blocks until return
++        # NOTE: driven by an explicit `match self.current_block` (not
++        # `while self.current_block.?:`) -- block id 0 is the conventional
++        # entry-block id, and `.?` truthiness on a boxed `i64?` collapses
++        # `Some(0)` to falsy in the bootstrap seed interpreter (same class
++        # of bug as the landed var_reassign_written_local fix), which would
++        # make this loop exit immediately whenever the current block is 0.
+         var max_iter = 10000
+-        while self.current_block.? and not self.has_returned and max_iter > 0:
+-            val block_id = self.current_block.unwrap()
+-            val block = self.blocks[block_id]
+-
+-            for inst in block.instructions:
+-                val error = self.execute_instruction(inst)
+-                if error.?:
+-                    # Restore state on error
+-                    self._pop_call_stack()
+-                    return (nil, error)
+-                if self.has_returned:
+-                    break
+-
+-            if not self.has_returned:
+-                val error = self.execute_terminator(block.terminator)
+-                if error.?:
+-                    self._pop_call_stack()
+-                    return (nil, error)
+-
+-            max_iter = max_iter - 1
++        var has_block = true
++        while has_block and not self.has_returned and max_iter > 0:
++            match self.current_block:
++                case Some(block_id):
++                    val block = self.blocks[block_id]
++
++                    for inst in block.instructions:
++                        val error = self.execute_instruction(inst)
++                        if error.?:
++                            # Restore state on error
++                            self._pop_call_stack()
++                            return (nil, error)
++                        if self.has_returned:
++                            break
++
++                    if not self.has_returned:
++                        val error = self.execute_terminator(block.terminator)
++                        if error.?:
++                            self._pop_call_stack()
++                            return (nil, error)
++
++                    max_iter = max_iter - 1
++                case nil:
++                    has_block = false
+ 
+         if max_iter == 0:
+             self._pop_call_stack()
+@@ -555,13 +565,20 @@ impl MirInterpreter:
+             case "__simple_ssa_phi":
+                 # Pseudo-phi args are either plain values or predecessor/value pairs.
+                 if args.len() >= 4:
+-                    if self.previous_block.?:
+-                        val pred = self.previous_block.unwrap()
+-                        var i = 0
+-                        while i + 1 < args.len():
+-                            if self.get_operand(args[i]) == pred:
+-                                return self.get_operand(args[i + 1])
+-                            i = i + 2
++                    # NOTE: explicit match, not `if self.previous_block.?:` --
++                    # predecessor block id 0 landmine, see the entry-block
++                    # loop note above. A falsy collapse here silently drops
++                    # straight to the arg[1] fallback value instead of the
++                    # value actually paired with predecessor block 0.
++                    match self.previous_block:
++                        case Some(pred):
++                            var i = 0
++                            while i + 1 < args.len():
++                                if self.get_operand(args[i]) == pred:
++                                    return self.get_operand(args[i + 1])
++                                i = i + 2
++                        case nil:
++                            pass_do_nothing
+                     self.get_operand(args[1])
+                 elif args.len() > 0:
+                     self.get_operand(args[0])
+diff --git a/src/compiler/99.loader/module_resolver/manifest.spl b/src/compiler/99.loader/module_resolver/manifest.spl
+index 8f69a59f396..322c693bec3 100644
+--- a/src/compiler/99.loader/module_resolver/manifest.spl
++++ b/src/compiler/99.loader/module_resolver/manifest.spl
+@@ -49,7 +49,13 @@ impl ModuleResolver:
+         val init_path = path_join(dir_path, "__init__.spl")
+ 
+         # Check cache
+-        if val Some(cached) = self.manifests.get(init_path):
++        # NOTE: `Dict.get()` returns the raw value or nil, NOT a
++        # Some(..)-tagged Option -- `if val Some(x) = d.get(k):` silently
++        # never matches (documented interpreter landmine, see
++        # std.nogc_sync_mut.diag.spl's header comment). The cache above was
++        # silently dead: every call reparsed __init__.spl from scratch.
++        val cached = self.manifests.get(init_path)
++        if cached != nil:
+             return Ok(cached.clone())
+ 
+         # If __init__.spl doesn't exist, return empty manifest
+diff --git a/src/compiler/99.loader/module_resolver/resolution.spl b/src/compiler/99.loader/module_resolver/resolution.spl
+index d4d7e4685ff..d11e5eff55f 100644
+--- a/src/compiler/99.loader/module_resolver/resolution.spl
++++ b/src/compiler/99.loader/module_resolver/resolution.spl
+@@ -377,7 +377,12 @@ impl ModuleResolver:
+         var current = Some(path_parent(file_path))
+         while val Some(dir) = current:
+             val init_path = path_join(dir, "__init__.spl")
+-            if val Some(manifest) = self.manifests.get(init_path):
++            # NOTE: `Dict.get()` returns the raw value or nil, NOT a
++            # Some(..)-tagged Option -- `if val Some(x) = d.get(k):` silently
++            # never matches (documented interpreter landmine, see
++            # std.nogc_sync_mut.diag.spl's header comment).
++            val manifest = self.manifests.get(init_path)
++            if manifest != nil:
+                 uses.extend(manifest.common_uses.clone())
+ 
+             if dir == self.source_root:

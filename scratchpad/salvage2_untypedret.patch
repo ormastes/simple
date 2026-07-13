@@ -1,0 +1,456 @@
+diff --git a/bin/release/simple b/bin/release/simple
+deleted file mode 100755
+index 7f01cd15d8c..00000000000
+--- a/bin/release/simple
++++ /dev/null
+@@ -1,11 +0,0 @@
+-#!/usr/bin/env bash
+-set -euo pipefail
+-
+-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+-runtime="$script_dir/x86_64-unknown-linux-gnu/simple"
+-if [ ! -x "$runtime" ]; then
+-  repo_root="$(cd "$script_dir/../.." && pwd)"
+-  runtime="$repo_root/release/x86_64-unknown-linux-gnu/simple"
+-fi
+-chmod +x "$runtime" 2>/dev/null || true
+-exec "$runtime" "$@"
+diff --git a/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl b/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
+index d70430804ba..1ac27dbc5fd 100644
+--- a/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
++++ b/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
+@@ -242,6 +242,32 @@ impl HirLowering:
+         if bootstrap_diag:
+             eprint("[hir-lower] lower_function:body {fn_.name}")
+ 
++        # Untyped-return inference (native --entry path). A function with NO
++        # declared return type defaults to Unit above -- but if its body has
++        # an explicit `return <value>`, that default is wrong: the backend
++        # still emits `void`, yet MIR carries a real value out of the
++        # `return`, producing invalid LLVM IR (`ret void %t0` after a bogus
++        # bitcast) that llc rejects with a cryptic, far-from-the-cause error.
++        # The actual inference (and, when it can't agree on one simple type,
++        # the fatal route-(b) error) already ran BEFORE this function's body
++        # was lowered, in the module's up-front signature-declaration pass
++        # (`infer_untyped_return_type` in module_lowering.spl) -- it has to
++        # run that early so CALLERS of this function see the right type too,
++        # not just this function's own `ret` instruction. Here we just pick
++        # up whatever that pass decided, by reading it back off this
++        # function's own symbol. Gated out of SIMPLE_BOOTSTRAP: that path
++        # computes return_type via `bootstrap_builtin_return_type` above and
++        # is owned by the parallel bootstrap-redeploy lane (module_lowering's
++        # inference pass is itself skipped entirely under plain bootstrap).
++        if (not fn_.has_return_type) and (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
++            val fn_sym_type = self.symbols.get_symbol_type(fn_symbol_id)
++            if fn_sym_type.?:
++                match fn_sym_type.unwrap().kind:
++                    case HirTypeKind.Function(_, ret, _):
++                        return_type = ret
++                    case _:
++                        pass
++
+         # NOTE(#133): pop unconditionally, matching the unconditional push above.
+         self.symbols.pop_scope()
+         self.current_function = nil
+diff --git a/src/compiler/20.hir/hir_lowering/_Items/lowering_helpers.spl b/src/compiler/20.hir/hir_lowering/_Items/lowering_helpers.spl
+index e96ae521ace..7a5c41023bf 100644
+--- a/src/compiler/20.hir/hir_lowering/_Items/lowering_helpers.spl
++++ b/src/compiler/20.hir/hir_lowering/_Items/lowering_helpers.spl
+@@ -8,6 +8,7 @@ use compiler.hir.hir_types.*
+ use compiler.hir.hir_definitions.*
+ use compiler.frontend.parser_types.*
+ use compiler.frontend.parser_types.{Function, ImportItem, Param}
++use compiler.frontend.parser_types_expr.*
+ use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
+ use compiler.common.diagnostics.span.{Span}
+ use compiler.hir.hir_lowering.types.HirLowering
+@@ -90,6 +91,123 @@ fn bootstrap_function_names_from_env() -> [text]:
+         i = i + 1
+     names
+ 
++# ============================================================================
++# Untyped-return inference (native --entry path)
++#
++# A function declared with NO return type (`fn f(...): ...`, no `-> T`) is
++# assumed to return Unit. If its body actually contains an explicit
++# `return <value>`, that assumption is wrong: MIR/backend still emit the
++# function as `void`, but the `return` carries a real value, producing
++# invalid LLVM IR (`ret void %t0` after a bogus bitcast-to-void) that llc
++# rejects with a cryptic, far-from-the-cause error.
++#
++# This has to be resolved BEFORE any function body is lowered to HIR: a
++# function's return type is registered onto its symbol (as part of
++# `HirTypeKind.Function(params, ret, effects)`) in the module's up-front
++# signature-declaration pass, precisely so that CALLERS defined later in the
++# same module (or compiled earlier in the module's function-iteration order)
++# see the right type for `val v = f(...)`. Inferring the return type only
++# after `f`'s own body is lowered (i.e. inside `lower_function`) would fix
++# `f`'s own `ret` instruction but leave every caller still treating the call
++# as void. So the inference below runs directly over the pre-lowering
++# parser AST (`Function`/`Block`/`Stmt`/`Expr`), during that same signature
++# pass (see `infer_untyped_return_type` in module_lowering.spl); it never
++# runs under SIMPLE_BOOTSTRAP (that pass is skipped there entirely).
++#
++# `ReturnScan` is the result of walking a function body looking for
++# `return <value>` sites and trying to agree on ONE simple concrete type
++# (i64/i32/u64/u32/f64/f32/bool/text) for all of them. When that succeeds,
++# the return type is promoted from the Unit default to the inferred type
++# (route (a)). When it can't (disagreement, or an un-inferrable value shape
++# such as a bare function call — which also conservatively covers a
++# self-recursive call: this syntax-level pass never resolves a `Call`'s
++# type, so a `return f(...)` anywhere, self-recursive or not, always counts
++# as "un-inferrable" rather than being silently guessed at), a fatal error
++# is raised instead (route (b)) rather than shipping a body that will crash
++# the backend with a useless message.
++struct ReturnScan:
++    found_value_return: bool
++    resolved_name: text?
++    ambiguous: bool
++
++fn return_scan_empty() -> ReturnScan:
++    ReturnScan(found_value_return: false, resolved_name: nil, ambiguous: false)
++
++fn merge_return_scan(a: ReturnScan, b: ReturnScan) -> ReturnScan:
++    var out = a
++    if b.ambiguous:
++        out.ambiguous = true
++    if b.found_value_return:
++        out.found_value_return = true
++        if b.resolved_name.?:
++            if out.resolved_name.?:
++                if out.resolved_name.unwrap() != b.resolved_name.unwrap():
++                    out.ambiguous = true
++            else:
++                out.resolved_name = b.resolved_name
++        else:
++            out.ambiguous = true
++    out
++
++fn ast_binop_is_comparison(op: BinOp) -> bool:
++    match op:
++        case BinOp.Eq: true
++        case BinOp.NotEq: true
++        case BinOp.Lt: true
++        case BinOp.LtEq: true
++        case BinOp.Gt: true
++        case BinOp.GtEq: true
++        case BinOp.And: true
++        case BinOp.Or: true
++        case _: false
++
++fn ast_binop_is_arith(op: BinOp) -> bool:
++    match op:
++        case BinOp.Add: true
++        case BinOp.Sub: true
++        case BinOp.Mul: true
++        case BinOp.Div: true
++        case BinOp.Mod: true
++        case _: false
++
++fn hir_simple_type_name_is_known(name: text) -> bool:
++    if name == "i64": return true
++    if name == "i32": return true
++    if name == "u64": return true
++    if name == "u32": return true
++    if name == "f64": return true
++    if name == "f32": return true
++    if name == "text": return true
++    false
++
++fn hir_type_simple_name(t: HirType) -> text?:
++    match t.kind:
++        case HirTypeKind.Int(bits, signed):
++            if signed and bits == 64: Some("i64")
++            elif signed and bits == 32: Some("i32")
++            elif (not signed) and bits == 64: Some("u64")
++            elif (not signed) and bits == 32: Some("u32")
++            else: nil
++        case HirTypeKind.Float(bits):
++            if bits == 64: Some("f64")
++            elif bits == 32: Some("f32")
++            else: nil
++        case HirTypeKind.Bool: Some("bool")
++        case HirTypeKind.Str: Some("text")
++        case _: nil
++
++fn hir_type_kind_from_simple_name(name: text) -> HirTypeKind:
++    match name:
++        case "i64": HirTypeKind.Int(64, true)
++        case "i32": HirTypeKind.Int(32, true)
++        case "u64": HirTypeKind.Int(64, false)
++        case "u32": HirTypeKind.Int(32, false)
++        case "f64": HirTypeKind.Float(64)
++        case "f32": HirTypeKind.Float(32)
++        case "bool": HirTypeKind.Bool
++        case "text": HirTypeKind.Str
++        case _: HirTypeKind.Unit
++
+ fn bootstrap_hir_symbol_for_name(name: text) -> SymbolId:
+     if name == "bootstrap_version":
+         return SymbolId(id: 1)
+diff --git a/src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl b/src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl
+index 0047c3af0fb..ea9b6131b9f 100644
+--- a/src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl
++++ b/src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl
+@@ -8,6 +8,7 @@ use compiler.hir.hir_types.*
+ use compiler.hir.hir_definitions.*
+ use compiler.frontend.parser_types.*
+ use compiler.frontend.parser_types.{Function, ImportItem, Param}
++use compiler.frontend.parser_types_expr.*
+ use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
+ use compiler.common.diagnostics.span.{Span}
+ use compiler.hir.hir_lowering.types.HirLowering
+@@ -84,6 +85,222 @@ fn hir_module_is_bootstrap_entry(module_name: text) -> bool:
+     hir_module_logical_name_from_path(entry_path) == hir_module_logical_name_from_path(module_name)
+ 
+ impl HirLowering:
++    # Untyped-return inference (native --entry path) -- see the `ReturnScan`
++    # doc comment in lowering_helpers.spl for the full rationale. Runs over
++    # the raw parser AST (`Function.body`), NOT the HIR, because it has to
++    # happen during this module's up-front signature-declaration pass --
++    # before ANY function body is lowered -- so a caller elsewhere in the
++    # module sees the promoted return type too, not just the callee's own
++    # generated `ret` instruction.
++    me infer_untyped_return_type(fn_decl: Function) -> HirType:
++        val scan = self.scan_ast_block_for_returns(fn_decl.body, fn_decl.params)
++        if not scan.found_value_return:
++            return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
++        if scan.ambiguous or not scan.resolved_name.?:
++            self.error("untyped function returns a value: function '{fn_decl.name}' returns a value but declares no return type; add '-> T'", fn_decl.span)
++            return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
++        HirType(kind: hir_type_kind_from_simple_name(scan.resolved_name.unwrap()), span: fn_decl.span)
++
++    me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:
++        match e.kind:
++            case ExprKind.IntLit(_):
++                Some("i64")
++            case ExprKind.FloatLit(_):
++                Some("f64")
++            case ExprKind.StringLit(_, _):
++                Some("text")
++            case ExprKind.BoolLit(_):
++                Some("bool")
++            case ExprKind.Ident(name):
++                var i = 0
++                var found: HirType? = nil
++                while i < params.len():
++                    if params[i].name == name:
++                        found = Some(self.lower_type(params[i].type_))
++                    i = i + 1
++                if found.?: hir_type_simple_name(found.unwrap()) else: nil
++            case ExprKind.Unary(op, operand):
++                match op:
++                    case UnaryOp.Not:
++                        Some("bool")
++                    case UnaryOp.Neg:
++                        self.infer_simple_type_name_ast(operand, params)
++                    case _:
++                        nil
++            case ExprKind.Binary(op, left, right):
++                if ast_binop_is_comparison(op):
++                    Some("bool")
++                elif ast_binop_is_arith(op):
++                    val lt = self.infer_simple_type_name_ast(left, params)
++                    val rt = self.infer_simple_type_name_ast(right, params)
++                    if lt.? and rt.? and lt.unwrap() == rt.unwrap() and hir_simple_type_name_is_known(lt.unwrap()):
++                        lt
++                    else:
++                        nil
++                else:
++                    nil
++            case ExprKind.Cast(_, target):
++                hir_type_simple_name(self.lower_type(target))
++            case _:
++                # Anything else (a call, index, field access, struct/enum
++                # literal, ...) is deliberately left un-inferred here rather
++                # than guessed at -- this also conservatively covers a
++                # self-recursive call: `return f(...)` (whether or not `f`
++                # is the function being scanned) always resolves to `nil`,
++                # which `merge_return_scan` turns into `ambiguous`, which
++                # `infer_untyped_return_type` turns into the fatal route-(b)
++                # error instead of a silently-wrong return type.
++                nil
++
++    me scan_ast_block_for_returns(b: Block, params: [Param]) -> ReturnScan:
++        var acc = return_scan_empty()
++        for stmt in b.stmts:
++            acc = merge_return_scan(acc, self.scan_ast_stmt_for_returns(stmt, params))
++        acc
++
++    me scan_ast_stmt_for_returns(s: Stmt, params: [Param]) -> ReturnScan:
++        match s.kind:
++            case StmtKind.Expr(expr):
++                self.scan_ast_expr_for_returns(expr, params)
++            case StmtKind.Val(_, _, init):
++                self.scan_ast_expr_for_returns(init, params)
++            case StmtKind.Var(_, _, init):
++                if init.?: self.scan_ast_expr_for_returns(init.unwrap(), params) else: return_scan_empty()
++            case StmtKind.Assign(target, _, value):
++                merge_return_scan(self.scan_ast_expr_for_returns(target, params), self.scan_ast_expr_for_returns(value, params))
++            case StmtKind.Return(value):
++                if value.?:
++                    val v = value.unwrap()
++                    ReturnScan(found_value_return: true, resolved_name: self.infer_simple_type_name_ast(v, params), ambiguous: false)
++                else:
++                    return_scan_empty()
++            case StmtKind.For(_, iter, body):
++                merge_return_scan(self.scan_ast_expr_for_returns(iter, params), self.scan_ast_block_for_returns(body, params))
++            case StmtKind.While(cond, body):
++                merge_return_scan(self.scan_ast_expr_for_returns(cond, params), self.scan_ast_block_for_returns(body, params))
++            case StmtKind.Loop(body):
++                self.scan_ast_block_for_returns(body, params)
++            case StmtKind.Yield(value):
++                if value.?: self.scan_ast_expr_for_returns(value.unwrap(), params) else: return_scan_empty()
++            case StmtKind.Throw(value):
++                self.scan_ast_expr_for_returns(value, params)
++            case StmtKind.With(_, body):
++                self.scan_ast_block_for_returns(body, params)
++            case _:
++                return_scan_empty()
++
++    # Walks reachable sub-expressions looking for `return <value>` sites,
++    # EXCEPT inside a nested `Lambda` body (its own function scope -- a
++    # `return` inside one belongs to the closure, not this function). Rare
++    # shapes fall through to `case _` (no descent): under-covering here is
++    # conservative, not unsound -- a `return` hidden in an unhandled shape is
++    # exactly as broken as it already was before this change (the
++    # pre-existing Unit-return default is unchanged), so it cannot regress a
++    # working case.
++    me scan_ast_expr_for_returns(e: Expr, params: [Param]) -> ReturnScan:
++        match e.kind:
++            case ExprKind.Return(value):
++                if value.?:
++                    val v = value.unwrap()
++                    ReturnScan(found_value_return: true, resolved_name: self.infer_simple_type_name_ast(v, params), ambiguous: false)
++                else:
++                    return_scan_empty()
++            case ExprKind.If(cond, then_, else_):
++                var acc = merge_return_scan(self.scan_ast_expr_for_returns(cond, params), self.scan_ast_block_for_returns(then_, params))
++                if else_.?:
++                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(else_.unwrap(), params))
++                acc
++            case ExprKind.MatchCase(scrutinee, arms):
++                var acc = self.scan_ast_expr_for_returns(scrutinee, params)
++                for arm in arms:
++                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(arm.body, params))
++                    if arm.has_guard:
++                        acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(arm.guard, params))
++                acc
++            case ExprKind.TryCatch(body, clauses, finally_):
++                var acc = self.scan_ast_block_for_returns(body, params)
++                for clause in clauses:
++                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(clause.body, params))
++                if finally_.?:
++                    acc = merge_return_scan(acc, self.scan_ast_block_for_returns(finally_.unwrap(), params))
++                acc
++            case ExprKind.Block(block):
++                self.scan_ast_block_for_returns(block, params)
++            case ExprKind.LossBlock(body):
++                self.scan_ast_block_for_returns(body, params)
++            case ExprKind.NogradBlock(body):
++                self.scan_ast_block_for_returns(body, params)
++            case ExprKind.UnsafeBlock(body):
++                self.scan_ast_block_for_returns(body, params)
++            case ExprKind.Lambda(_, _):
++                return_scan_empty()
++            case ExprKind.Binary(_, left, right):
++                merge_return_scan(self.scan_ast_expr_for_returns(left, params), self.scan_ast_expr_for_returns(right, params))
++            case ExprKind.Unary(_, operand):
++                self.scan_ast_expr_for_returns(operand, params)
++            case ExprKind.Call(callee, args):
++                var acc = self.scan_ast_expr_for_returns(callee, params)
++                for a in args:
++                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(a.value, params))
++                acc
++            case ExprKind.MethodCall(receiver, _, args):
++                var acc = self.scan_ast_expr_for_returns(receiver, params)
++                for a in args:
++                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(a.value, params))
++                acc
++            case ExprKind.Cast(expr, _):
++                self.scan_ast_expr_for_returns(expr, params)
++            case ExprKind.Index(base, index):
++                merge_return_scan(self.scan_ast_expr_for_returns(base, params), self.scan_ast_expr_for_returns(index, params))
++            case ExprKind.Field(base, _):
++                self.scan_ast_expr_for_returns(base, params)
++            case ExprKind.OptionalChain(base, _):
++                self.scan_ast_expr_for_returns(base, params)
++            case ExprKind.NullCoalesce(left, right):
++                merge_return_scan(self.scan_ast_expr_for_returns(left, params), self.scan_ast_expr_for_returns(right, params))
++            case ExprKind.ExistsCheck(base):
++                self.scan_ast_expr_for_returns(base, params)
++            case ExprKind.ForceUnwrap(base):
++                self.scan_ast_expr_for_returns(base, params)
++            case ExprKind.Range(start, end, _, step):
++                var acc = return_scan_empty()
++                if start.?:
++                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(start.unwrap(), params))
++                if end.?:
++                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(end.unwrap(), params))
++                if step.?:
++                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(step.unwrap(), params))
++                acc
++            case ExprKind.Await(expr):
++                self.scan_ast_expr_for_returns(expr, params)
++            case ExprKind.Yield(value):
++                if value.?: self.scan_ast_expr_for_returns(value.unwrap(), params) else: return_scan_empty()
++            case ExprKind.Throw(value):
++                self.scan_ast_expr_for_returns(value, params)
++            case ExprKind.Try(expr):
++                self.scan_ast_expr_for_returns(expr, params)
++            case ExprKind.ArrayLit(elements):
++                var acc = return_scan_empty()
++                for el in elements:
++                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(el, params))
++                acc
++            case ExprKind.TupleLit(elements):
++                var acc = return_scan_empty()
++                for el in elements:
++                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(el, params))
++                acc
++            case ExprKind.SetLit(elements):
++                var acc = return_scan_empty()
++                for el in elements:
++                    acc = merge_return_scan(acc, self.scan_ast_expr_for_returns(el, params))
++                acc
++            case ExprKind.ArrayRepeat(value, count):
++                merge_return_scan(self.scan_ast_expr_for_returns(value, params), self.scan_ast_expr_for_returns(count, params))
++            case ExprKind.Break(_):
++                return_scan_empty()
++            case _:
++                return_scan_empty()
++
+     me register_imported_symbol(imported_mod: Module, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span):
+         val as_cls: Class? = imported_mod.classes.get(imported_name)
+         val as_str: Struct? = imported_mod.structs.get(imported_name)
+@@ -111,7 +328,7 @@ impl HirLowering:
+             val return_type = if as_fn.has_return_type:
+                 self.lower_type(as_fn.return_type)
+             else:
+-                HirType(kind: HirTypeKind.Unit, span: import_span)
++                self.infer_untyped_return_type(as_fn)
+             val fn_type = HirType(
+                 kind: HirTypeKind.Function(param_types, return_type, []),
+                 span: import_span
+@@ -705,7 +922,7 @@ impl HirLowering:
+             val return_type = if fn_decl.has_return_type:
+                 self.lower_type(fn_decl.return_type)
+             else:
+-                HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
++                self.infer_untyped_return_type(fn_decl)
+             val fn_type = HirType(
+                 kind: HirTypeKind.Function(param_types, return_type, []),
+                 span: fn_decl.span
+diff --git a/src/compiler/80.driver/driver.spl b/src/compiler/80.driver/driver.spl
+index 6e1ced0e5bf..9e5bad8c1e2 100644
+--- a/src/compiler/80.driver/driver.spl
++++ b/src/compiler/80.driver/driver.spl
+@@ -134,7 +134,7 @@ fn _format_hir_lowering_error(name: text, err: LoweringError) -> text:
+         "HIR lowering error in {name}: {err.message}"
+ 
+ fn _hir_lowering_error_is_fatal(message: text) -> bool:
+-    message.starts_with("unresolved name:") or message.starts_with("generic functions are not supported on the native build path yet")
++    message.starts_with("unresolved name:") or message.starts_with("generic functions are not supported on the native build path yet") or message.starts_with("untyped function returns a value:")
+ 
+ fn _driver_collect_hir_errors(ctx: CompileContext, name: text, errors: [LoweringError]):
+     for err in errors:

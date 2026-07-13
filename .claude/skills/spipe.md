@@ -870,6 +870,8 @@ Normal bootstrap reuses the Rust seed and never runs cargo. The wrapper has a
 claiming the pure-Simple toolchain is healthy (see `.claude/rules/bootstrap.md`).
 See `doc/07_guide/runtime/process_kill_safety.md`.
 
+<<<<<<< Conflict 1 of 1
++++++++ Contents of side #1
 ### Bootstrap gate uses the deployed `bin/release`, not the Rust seed
 
 `bin/simple build bootstrap` Stage-1 worker is the **deployed self-hosted**
@@ -921,6 +923,40 @@ PASS: a durable serial transcript with the full ladder — never a verbal claim
 (the 2e "FULL COMPLETE" mislabel was caught exactly this way). Physical-board
 phases: `doc/03_plan/os/simpleos/hw_qemu/clang_board_bringup_x86_64_uefi.md`.
 
+%%%%%%% Changes from base to side #2
++### Bootstrap gate uses the deployed `bin/release`, not the Rust seed
++
++`bin/simple build bootstrap` Stage-1 worker is the **deployed self-hosted**
++`bin/release/<triple>/simple` (it self-execs — `interpreter: bin/release/.../simple`),
++NOT `target/release/simple` or `target/bootstrap/simple`. `SEED=`/`SIMPLE_SEED=`
++redirect only the bootstrap *driver*, not the Stage-1 worker. Consequence: when a
++new `rt_*` extern lands in `.spl` (e.g. `rt_lexer_source_set` in `lexer.spl`), the
++worker's stale native-build extern allowlist rejects it (`unknown extern function:
++rt_lexer_source_set`) even though both Rust seeds accept it — a **circular redeploy
++wall**: `bin/release` can only be refreshed by a bootstrap that runs `bin/release`.
++This is the known-hard whole-compiler redeploy (memory: "#99 whole-compiler
++redeploy — do NOT race"). Unblock by refreshing
++`bin/release/<triple>/simple` from a CURRENT compiler via the `cp` to `.new` + `mv`
++pattern (direct `cp` hits "Text file busy" when in use), then re-run the gate. So a
++central-compiler resolver change is only *verified* after this refresh — a
++probe-green interpreter run is not the bootstrap gate.
++
++### SimpleOS board-proxy evidence: OVMF pflash, never `-kernel`
++
++For SimpleOS "board-runnable" claims, QEMU `-kernel` runs are NOT board
++evidence — they bypass real firmware (the design ban: "no QEMU-only
++mechanism"). The board-proxy gate is **OVMF pflash + GRUB-EFI**
++(`scripts/os/scp_retrieve_over_ssh_uefi.shs` is the reference: boots the
++128 MB-base kernel `linker_128mb.ld`, SSH → in-guest clang compile → `getfile`
++byte-exact object → exit 7). Layout invariant to respect in any OS spec that
++links or mmaps user memory: the OVMF kernel `.bss` band is
++`[0x08000000, ~0x16400000)`; ring-3 payloads link at `0x40000000`, mmap base
++`0x50000000` (`sysroot.shs` / `syscall.spl`). Evidence bar for any board-proxy
++PASS: a durable serial transcript with the full ladder — never a verbal claim
++(the 2e "FULL COMPLETE" mislabel was caught exactly this way). Physical-board
++phases: `doc/03_plan/os/simpleos/hw_qemu/clang_board_bringup_x86_64_uefi.md`.
++
+>>>>>>> Conflict 1 of 1 ends
 For memory-perspective work (gc/nogc boundary, leak checks, alloc enforcement):
 the gc-boundary lint (`gc_boundary_crossing`) resolves alias shims via
 `GC_ALIAS_MANIFEST` — kept in sync in BOTH compilers

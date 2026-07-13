@@ -33,8 +33,11 @@ impl NativeProjectBuilder {
     ) -> Option<PathBuf> {
         explicit.map(Path::to_path_buf).or_else(|| {
             (target.os == simple_common::target::TargetOS::SimpleOS
-                && target.arch == simple_common::target::TargetArch::X86_64)
-                .then(|| simpleos_sysroot.join("share/simpleos/simpleos.ld"))
+                && matches!(
+                    target.arch,
+                    simple_common::target::TargetArch::X86_64 | simple_common::target::TargetArch::Aarch64
+                ))
+            .then(|| simpleos_sysroot.join("share/simpleos/simpleos.ld"))
         })
     }
 
@@ -78,19 +81,27 @@ impl NativeProjectBuilder {
         }
     }
 
-    fn simpleos_sysroot_dir() -> PathBuf {
-        std::env::var("SIMPLEOS_SYSROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("build/os/sysroot"))
+    fn simpleos_sysroot_dir(arch: simple_common::target::TargetArch) -> PathBuf {
+        if let Ok(explicit) = std::env::var("SIMPLEOS_SYSROOT") {
+            return PathBuf::from(explicit);
+        }
+        match arch {
+            // Per-arch sysroots: x86_64 keeps the historical unsuffixed path.
+            simple_common::target::TargetArch::Aarch64 => PathBuf::from("build/os/sysroot-aarch64"),
+            _ => PathBuf::from("build/os/sysroot"),
+        }
     }
 
     fn simpleos_user_runtime_paths(cross_target: simple_common::target::Target) -> Option<(PathBuf, PathBuf, PathBuf)> {
         if cross_target.os != simple_common::target::TargetOS::SimpleOS
-            || cross_target.arch != simple_common::target::TargetArch::X86_64
+            || !matches!(
+                cross_target.arch,
+                simple_common::target::TargetArch::X86_64 | simple_common::target::TargetArch::Aarch64
+            )
         {
             return None;
         }
-        let sysroot = Self::simpleos_sysroot_dir();
+        let sysroot = Self::simpleos_sysroot_dir(cross_target.arch);
         let crt0 = sysroot.join("lib").join("crt0.o");
         let runtime = sysroot.join("lib").join("libsimple_runtime.a");
         let libc = sysroot.join("lib").join("libsimpleos_c.a");
@@ -1354,7 +1365,7 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
         let effective_linker_script = Self::resolve_freestanding_linker_script(
             self.config.linker_script.as_deref(),
             cross_target,
-            &Self::simpleos_sysroot_dir(),
+            &Self::simpleos_sysroot_dir(cross_target.arch),
         );
         if let Some(ref script) = effective_linker_script {
             if !script.is_file() {

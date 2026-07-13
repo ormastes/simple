@@ -34,8 +34,23 @@ use compiler.core.ast.{ast_reset}
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_file_read_text_rv(path: text) -> text
+extern fn rt_lexer_source_set(source: text) -> bool
+extern fn rt_lexer_source_slice(start: i64, end: i64) -> text
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
 
+fn rt_array_len_safe<T>(array: [T]) -> i64:
+    # Nil-/zero-safe: in one-binary freestanding native builds the
+    # module-level array-global INITIALIZERS never run, so an unassigned
+    # global reads as a RAW 0 handle in zeroed .bss (NOT the nil tag 3, so
+    # `== nil` / `?? []` do not catch it). A plain `.len()` inlines to an
+    # unchecked (handle&-8)+8 load and faults (cr2=0x8). Reinterpret the
+    # handle and apply the SAME `< 4096` low-address gate array_is_valid
+    # uses (catches raw 0, nil tag 3, and any bogus small handle). Mirror of
+    # the C twin rt_array_len_safe in src/os/libc/simpleos_libc.c.
+    val raw = array as i64
+    if raw < 4096:
+        return 0
+    return array.len()
 use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
 use compiler.core.types.{TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY}
 use compiler.core.types.{TYPE_NIL}
@@ -121,7 +136,7 @@ fn parser_lex_source_cached() -> text:
     # slots persist across calls in compiled stage4; the interpreter falls back
     # to a refetch each call (cache slot does not persist) — slow but correct.
     val gen = parser_env_i64("SIMPLE_BOOTSTRAP_LEX_SOURCE_GEN")
-    if par_src_cache_slot != nil and par_src_cache_gen_slot != nil:
+    if rt_array_len_safe(par_src_cache_slot) > 0 and rt_array_len_safe(par_src_cache_gen_slot) > 0:
         if par_src_cache_gen_slot[0] == gen and par_src_cache_slot[0] != "":
             return par_src_cache_slot[0]
     val inline_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
@@ -130,9 +145,9 @@ fn parser_lex_source_cached() -> text:
         val path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
         if path != "":
             src = rt_file_read_text_rv(path) ?? ""
-    if par_src_cache_slot == nil:
+    if rt_array_len_safe(par_src_cache_slot) == 0:
         par_src_cache_slot = [""]
-    if par_src_cache_gen_slot == nil:
+    if rt_array_len_safe(par_src_cache_gen_slot) == 0:
         par_src_cache_gen_slot = [-1]
     par_src_cache_slot[0] = src
     par_src_cache_gen_slot[0] = gen
@@ -147,12 +162,8 @@ fn parser_token_text_from_offsets(kind: i64) -> text:
     val end = lex_token_end_get()
     if end <= start:
         return ""
-    val source = parser_lex_source_cached()
-    if source == "":
-        return ""
-    if start < 0 or end > source.len():
-        return ""
-    var text = source[start:end]
+    var text = rt_lexer_source_slice(start, end) ?? ""
+    if text == "": return ""
     if kind == 3 and text.len() >= 2:
         text = text[1:text.len() - 1]
     if kind == 7 or kind == 8:
@@ -171,9 +182,9 @@ fn par_kind_set(value: i64):
         rt_env_set("SIMPLE_BOOTSTRAP_PAR_KIND", "{value}")
 
 fn par_kind_get() -> i64:
-    if par_kind_slot == nil:
-        return parser_env_i64("SIMPLE_BOOTSTRAP_PAR_KIND")
-    par_kind_slot[0]
+    if rt_array_len_safe(par_kind_slot) > 0:
+        return par_kind_slot[0]
+    parser_env_i64("SIMPLE_BOOTSTRAP_PAR_KIND")
 
 fn par_text_set(value: text):
     par_text_slot[0] = value
@@ -181,10 +192,12 @@ fn par_text_set(value: text):
         rt_env_set("SIMPLE_BOOTSTRAP_PAR_TEXT", value)
 
 fn par_text_get() -> text:
+    if rt_array_len_safe(par_text_slot) > 0 and par_text_slot[0] != "":
+        return par_text_slot[0]
     val from_offsets = parser_token_text_from_offsets(par_kind_get())
     if from_offsets != "":
         return from_offsets
-    if par_text_slot != nil:
+    if rt_array_len_safe(par_text_slot) > 0:
         return par_text_slot[0]
     if par_env_save_enabled():
         return rt_env_get("SIMPLE_BOOTSTRAP_PAR_TEXT") ?? ""
@@ -196,9 +209,9 @@ fn par_line_set(value: i64):
         rt_env_set("SIMPLE_BOOTSTRAP_PAR_LINE", "{value}")
 
 fn par_line_get() -> i64:
-    if par_line_slot == nil:
-        return parser_env_i64("SIMPLE_BOOTSTRAP_PAR_LINE")
-    par_line_slot[0]
+    if rt_array_len_safe(par_line_slot) > 0:
+        return par_line_slot[0]
+    parser_env_i64("SIMPLE_BOOTSTRAP_PAR_LINE")
 
 fn par_col_set(value: i64):
     par_col_slot[0] = value
@@ -206,9 +219,9 @@ fn par_col_set(value: i64):
         rt_env_set("SIMPLE_BOOTSTRAP_PAR_COL", "{value}")
 
 fn par_col_get() -> i64:
-    if par_col_slot == nil:
-        return parser_env_i64("SIMPLE_BOOTSTRAP_PAR_COL")
-    par_col_slot[0]
+    if rt_array_len_safe(par_col_slot) > 0:
+        return par_col_slot[0]
+    parser_env_i64("SIMPLE_BOOTSTRAP_PAR_COL")
 
 fn par_had_error_set(value: bool):
     par_had_error = value
@@ -222,15 +235,20 @@ fn parser_init(source: text):
     parser_init_with_path(source, "")
 
 fn parser_init_with_path(source: text, path: text):
-    par_errors = []
+    # Nil-guards: module-level vars may be nil in native binaries
+    if rt_array_len_safe(par_errors) == 0:
+        par_errors = []
     par_warnings = []
-    par_struct_names = []
-    par_kind_slot = [0]
-    par_text_slot = [""]
-    par_line_slot = [0]
-    par_col_slot = [0]
-    par_src_cache_slot = [""]
-    par_src_cache_gen_slot = [-1]
+    if rt_array_len_safe(par_struct_names) == 0:
+        par_struct_names = []
+    if rt_array_len_safe(par_kind_slot) == 0:
+        par_kind_slot = [0]
+    if rt_array_len_safe(par_text_slot) == 0:
+        par_text_slot = [""]
+    if rt_array_len_safe(par_line_slot) == 0:
+        par_line_slot = [0]
+    if rt_array_len_safe(par_col_slot) == 0:
+        par_col_slot = [0]
     par_had_error = false
     if (rt_env_get("SIMPLE_TRACE_AST_RESET") ?? "") == "1":
         print "[parser_init_with_path] resetting for path={path}"
@@ -243,7 +261,7 @@ fn parser_init_with_path(source: text, path: text):
 fn parser_advance():
     val kind = lex_next()
     par_kind_set(kind)
-    par_text_set("")
+    par_text_set(parser_token_text_from_offsets(kind))
     par_line_set(lex_token_line())
     par_col_set(lex_token_col())
 
@@ -379,22 +397,6 @@ fn parser_absorb_optional_suffix(base: i64) -> i64:
 fn parser_parse_type() -> i64:
     # dyn Trait -- dynamic dispatch type (parsed as named type)
     var kind = par_kind_get()
-    # Prefix optional shorthand `?T` is not documented/legal syntax (the
-    # supported spelling is the suffix form `T?`, e.g. `i64?`, `[T]?`, or
-    # `Option<T>`). Left unhandled, the leading `?` fell through every type
-    # form below to the catch-all "expected type annotation" error WITHOUT
-    # consuming the token; the caller's subsequent `parser_expect(TOK_COLON)`
-    # then also failed on the still-current `?`, and the block parser's error
-    # recovery re-parsed the leftover `? i64:` as expression statements —
-    # cascading into unrelated "unresolved name: i64" / "unresolved name: n"
-    # HIR errors that looked like param registration was destroyed. Emit one
-    # clear, located diagnostic naming the workaround and resync by consuming
-    # the `?` plus the underlying type so the rest of the declaration (return
-    # type position, param list, function body) parses normally.
-    if kind == TOK_QUESTION:
-        parser_error("prefix optional type '?T' is not supported; use suffix form 'T?' (e.g. i64?) or Option<T> instead")
-        parser_advance()
-        return parser_parse_type()
     if kind == 199:
         parser_advance()
         # Parse the trait name
@@ -615,18 +617,6 @@ fn parser_parse_type() -> i64:
                     break
                 parser_parse_type()
         parser_expect(141)
-        # Function type without the `fn` keyword: (T, ...) -> U. When `->`
-        # (kind 167) follows the closing paren, the leading paren-group is the
-        # parameter list of a first-class function type, not a tuple. Parse and
-        # drop the return type and encode as TYPE_FN, exactly like the
-        # `fn(...) -> U` branch above (the bootstrap type-id lane carries only
-        # the fn-ness, not the signature; MIR derives call arity from the call
-        # site). Without this, `g: (i64) -> i64` mis-parsed as a tuple and left
-        # the `-> i64` tokens for the param parser to choke on.
-        if par_kind_get() == 167:
-            parser_advance()
-            parser_parse_type()
-            return parser_absorb_optional_suffix(TYPE_FN)
         return parser_absorb_optional_suffix(TYPE_ANY)
     # Dict type: {K: V}
     if par_kind_get() == 142:
@@ -666,6 +656,7 @@ fn parse_module(source: text, path: text):
     parser_init_with_path(preprocessed, path)
     parse_module_body()
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
+    rt_lexer_source_set(saved_lex_source)
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
     parser_lex_source_gen_bump()
 
@@ -687,6 +678,7 @@ fn parse_module_file(source: text, path: text):
     parser_advance()
     parse_module_body()
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
+    rt_lexer_source_set(saved_lex_source)
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
     parser_lex_source_gen_bump()
 

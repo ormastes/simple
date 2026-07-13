@@ -12,7 +12,12 @@ extern "C" {
 #endif
 
 /* jmp_buf stores the platform callee-saved state used by setjmp.S. */
+#if defined(__aarch64__)
+/* x19-x28, x29, x30, sp, d8-d15 (see simpleos_setjmp_aarch64.S) */
+typedef uint64_t jmp_buf[24];
+#else
 typedef uint64_t jmp_buf[16];
+#endif
 
 int  setjmp(jmp_buf env);
 void longjmp(jmp_buf env, int val) __attribute__((noreturn));

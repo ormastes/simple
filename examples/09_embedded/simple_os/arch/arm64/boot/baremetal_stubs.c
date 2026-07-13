@@ -2575,6 +2575,11 @@ RuntimeValue rt_arm_virtio_blk_read_prefix(RuntimeValue first_lba_val, RuntimeVa
     uint64_t copied = 0;
     uint64_t sector = 0;
     while (copied < size) {
+        /* NOTE: a multi-sector burst here is unreliable on this single-sector
+         * oriented descriptor ring (a later sector in the same call can return
+         * a non-zero status). Callers that need whole clusters issue one
+         * single-sector read_prefix per sector instead (see _arm_read_cluster),
+         * which is the proven-correct path. */
         RuntimeValue status = rt_arm_virtio_blk_read_sector_direct((RuntimeValue)(first_lba + sector));
         if (status == (RuntimeValue)0xffffffffULL || status != 0) break;
         uint8_t *src = g_arm_virtio_blk_dma_storage + 16;

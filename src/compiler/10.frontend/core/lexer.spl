@@ -31,7 +31,19 @@ use compiler.core.ast.{lexer_cur_suffix2_get, lexer_cur_suffix2_set}
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
-fn lexer_array_len<T>(array: [T]) -> i64:
+extern fn rt_lexer_source_set(source: text) -> bool
+fn rt_array_len_safe<T>(array: [T]) -> i64:
+    # Nil-/zero-safe: in one-binary freestanding native builds the
+    # module-level array-global INITIALIZERS never run, so an unassigned
+    # global reads as a RAW 0 handle in zeroed .bss (NOT the nil tag 3, so
+    # `== nil` / `?? []` do not catch it). A plain `.len()` inlines to an
+    # unchecked (handle&-8)+8 load and faults (cr2=0x8). Reinterpret the
+    # handle and apply the SAME `< 4096` low-address gate array_is_valid
+    # uses (catches raw 0, nil tag 3, and any bogus small handle). Mirror of
+    # the C twin rt_array_len_safe in src/os/libc/simpleos_libc.c.
+    val raw = array as i64
+    if raw < 4096:
+        return 0
     return array.len()
 
 # Import from split scanner module
@@ -90,29 +102,29 @@ fn lex_init_with_path(source: text, source_path: text):
     # Nil-guards: module-level vars may be nil in native binaries
     if lex_state == nil:
         lex_state = {}
-    if lexer_array_len(lex_source_char_count_slot) == 0:
+    if rt_array_len_safe(lex_source_char_count_slot) == 0:
         lex_source_char_count_slot = [0]
-    if lexer_array_len(lex_source_code_base_slot) == 0:
+    if rt_array_len_safe(lex_source_code_base_slot) == 0:
         lex_source_code_base_slot = [0]
-    if lexer_array_len(lex_source_codes) == 0:
+    if rt_array_len_safe(lex_source_codes) == 0:
         lex_source_codes = []
-    if lexer_array_len(current_core_lexer_slot) == 0:
+    if rt_array_len_safe(current_core_lexer_slot) == 0:
         current_core_lexer_slot = []
-    if lexer_array_len(lex_env_save_enabled) == 0:
+    if rt_array_len_safe(lex_env_save_enabled) == 0:
         lex_env_save_enabled = [false]
-    if lexer_array_len(lex_cur_kind_direct) == 0:
+    if rt_array_len_safe(lex_cur_kind_direct) == 0:
         lex_cur_kind_direct = [0]
-    if lexer_array_len(lex_cur_text_direct) == 0:
+    if rt_array_len_safe(lex_cur_text_direct) == 0:
         lex_cur_text_direct = [""]
-    if lexer_array_len(lex_cur_line_direct) == 0:
+    if rt_array_len_safe(lex_cur_line_direct) == 0:
         lex_cur_line_direct = [0]
-    if lexer_array_len(lex_cur_col_direct) == 0:
+    if rt_array_len_safe(lex_cur_col_direct) == 0:
         lex_cur_col_direct = [0]
-    if lexer_array_len(lex_cur_suffix_direct) == 0:
+    if rt_array_len_safe(lex_cur_suffix_direct) == 0:
         lex_cur_suffix_direct = [""]
-    if lexer_array_len(lex_token_start_direct) == 0:
+    if rt_array_len_safe(lex_token_start_direct) == 0:
         lex_token_start_direct = [0]
-    if lexer_array_len(lex_token_end_direct) == 0:
+    if rt_array_len_safe(lex_token_end_direct) == 0:
         lex_token_end_direct = [0]
     lex_env_save_enabled[0] = (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1"
     core_token_env_save_set(lex_env_save_enabled[0])
@@ -124,6 +136,7 @@ fn lex_init_with_path(source: text, source_path: text):
     if core_source == "" and source_path != "":
         core_source = rt_file_read_text(source_path) ?? ""
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", core_source)
+    rt_lexer_source_set(core_source)
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", source_path)
     # Perf signal: bump the source generation so the parser's whole-source cache
     # (parser_lex_source_cached) refetches for this new source. See parser.spl.
@@ -186,11 +199,11 @@ fn lex_source_slice(start: i64, end: i64) -> text:
 
 fn lex_source_set(value: text):
     # Nil-guards: module-level vars may be nil in native binaries
-    if lexer_array_len(lex_source_code_base_slot) == 0:
+    if rt_array_len_safe(lex_source_code_base_slot) == 0:
         lex_source_code_base_slot = [0]
-    if lexer_array_len(lex_source_codes) == 0:
+    if rt_array_len_safe(lex_source_codes) == 0:
         lex_source_codes = []
-    if lexer_array_len(lex_source_char_count_slot) == 0:
+    if rt_array_len_safe(lex_source_char_count_slot) == 0:
         lex_source_char_count_slot = [0]
     val source_len = value.len()
     lex_source_code_base_slot[0] = lex_source_codes.len()
@@ -279,7 +292,7 @@ fn lex_cur_col_set(value: i64):
 fn lex_cur_text_get_slot() -> text:
     if lex_cur_kind_direct[0] == 3:
         return lex_cur_text_direct[0]
-    if lex_cur_text_direct[0] == "" and lexer_array_len(current_core_lexer_slot) > 0:
+    if lex_cur_text_direct[0] == "" and rt_array_len_safe(current_core_lexer_slot) > 0:
         val lx = current_core_lexer_slot[0]
         val start = lex_token_start_direct[0]
         val end = lex_token_end_direct[0]
@@ -306,12 +319,12 @@ fn lex_cur_suffix_set(value: text):
         rt_env_set("SIMPLE_BOOTSTRAP_LEX_CUR_SUFFIX", value)
 
 fn lex_token_start_get() -> i64:
-    if lexer_array_len(lex_token_start_direct) > 0:
+    if rt_array_len_safe(lex_token_start_direct) > 0:
         return lex_token_start_direct[0]
     lex_env_i64("SIMPLE_BOOTSTRAP_LEX_TOKEN_START", 0)
 
 fn lex_token_end_get() -> i64:
-    if lexer_array_len(lex_token_end_direct) > 0:
+    if rt_array_len_safe(lex_token_end_direct) > 0:
         return lex_token_end_direct[0]
     lex_env_i64("SIMPLE_BOOTSTRAP_LEX_TOKEN_END", 0)
 
@@ -710,7 +723,7 @@ fn lex_scan_token_local():
 # ===== Public API =====
 
 fn lex_next() -> i64:
-    if lexer_array_len(current_core_lexer_slot) == 0:
+    if rt_array_len_safe(current_core_lexer_slot) == 0:
         current_core_lexer_slot = [current_core_lexer_load()]
     var loaded = current_core_lexer_slot[0]
     val _scan_kind = loaded.next_token()
@@ -793,7 +806,7 @@ fn lex_cur_suffix_get() -> text:
 # Text fields (par_text, lex_cur_text) are stored alongside as a [text].
 
 fn lex_snapshot_save() -> ([i64], [text]):
-    if lexer_array_len(current_core_lexer_slot) == 0:
+    if rt_array_len_safe(current_core_lexer_slot) == 0:
         current_core_lexer_slot = [current_core_lexer_load()]
     val lx = current_core_lexer_slot[0]
     var at_ls_i: i64 = 0
@@ -806,7 +819,7 @@ fn lex_snapshot_save() -> ([i64], [text]):
 
 fn lex_snapshot_restore(nums: [i64], txts: [text]):
     # Rebuild the CoreLexer from saved fields
-    if lexer_array_len(current_core_lexer_slot) == 0:
+    if rt_array_len_safe(current_core_lexer_slot) == 0:
         current_core_lexer_slot = [current_core_lexer_load()]
     var lx = current_core_lexer_slot[0]
     lx.pos = nums[0]
