@@ -1,0 +1,103 @@
+# @cover src/lib/common/gpu/simpleos_host_gpu_draw_ir.spl 80%
+
+use std.spec.*
+use std.common.gpu.simpleos_host_gpu_draw_ir.{simpleos_host_gpu_draw_ir_encode, simpleos_host_gpu_draw_ir_decode}
+use std.common.ui.draw_ir.{
+    DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_RECT, DRAW_IR_SCHEMA_VERSION,
+    DrawIrComposition,
+    draw_ir_batch, draw_ir_composition, draw_ir_embedding_config,
+    draw_ir_box_with_style, draw_ir_image_command, draw_ir_rect, draw_ir_rect_bounds,
+    draw_ir_style_prop, draw_ir_text
+}
+use std.common.base_encoding.utilities.{text_to_bytes, bytes_to_text}
+
+val DRAW_IR_TEST_MAX_BYTES: i64 = 65536
+val DRAW_IR_TEST_MAX_COMMANDS: i64 = 8
+
+fn _host_gpu_draw_ir_fixture() -> DrawIrComposition:
+    val embedding = draw_ir_embedding_config("surface-1", "window-1", 4, 6, 64, 48, 1, 1000, true)
+    val batch = draw_ir_batch("batch-1", DRAW_IR_BACKEND_GPU, embedding, [
+        draw_ir_rect("body", 0, 0, 64, 48, 0xff224466u32)
+    ])
+    draw_ir_composition("composition-1", "scene-1", DRAW_IR_BACKEND_GPU, [batch])
+
+describe "SimpleOS host-GPU bounded Draw IR codec":
+    it "round-trips the exact plain-rect subset with a deterministic checksum":
+        step("Encode one canonical Draw IR composition within the negotiated bounds")
+        val encoded = simpleos_host_gpu_draw_ir_encode(_host_gpu_draw_ir_fixture(), DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        expect(encoded.ok).to_be(true)
+        expect(encoded.reason).to_equal("ok")
+        expect(encoded.command_count).to_equal(1)
+        expect(encoded.checksum).to_be_greater_than(0)
+
+        step("Decode and verify exact schema IDs batch fields and command fields")
+        val decoded = simpleos_host_gpu_draw_ir_decode(encoded.bytes, DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        expect(decoded.ok).to_be(true)
+        expect(decoded.composition.schema).to_equal(DRAW_IR_SCHEMA_VERSION)
+        expect(decoded.composition.composition_id).to_equal("composition-1")
+        expect(decoded.composition.scene_key).to_equal("scene-1")
+        expect(decoded.composition.backend_target).to_equal(DRAW_IR_BACKEND_GPU)
+        expect(decoded.composition.batches.len()).to_equal(1)
+        expect(decoded.composition.batches[0].schema).to_equal(DRAW_IR_SCHEMA_VERSION)
+        expect(decoded.composition.batches[0].batch_id).to_equal("batch-1")
+        expect(decoded.composition.batches[0].embedding.surface_id).to_equal("surface-1")
+        expect(decoded.composition.batches[0].embedding.component_id).to_equal("window-1")
+        expect(decoded.composition.batches[0].commands[0].kind).to_equal(DRAW_IR_COMMAND_RECT)
+        expect(decoded.composition.batches[0].commands[0].width).to_equal(64)
+
+        step("Re-encode the decoded value and require the same bytes and checksum")
+        val reencoded = simpleos_host_gpu_draw_ir_encode(decoded.composition, DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        expect(reencoded.bytes).to_equal(encoded.bytes)
+        expect(reencoded.checksum).to_equal(encoded.checksum)
+
+    it "rejects an encoded payload larger than the caller bound":
+        step("Set a byte bound smaller than the canonical SDN payload")
+        val encoded = simpleos_host_gpu_draw_ir_encode(_host_gpu_draw_ir_fixture(), 16, DRAW_IR_TEST_MAX_COMMANDS)
+        expect(encoded.ok).to_be(false)
+        expect(encoded.reason).to_equal("payload-too-large")
+
+    it "rejects commands outside the first plain-rect subset":
+        step("Build a valid batch containing an image command")
+        val embedding = draw_ir_embedding_config("surface-1", "window-1", 0, 0, 32, 32, 0, 1000, false)
+        val batch = draw_ir_batch("batch-image", DRAW_IR_BACKEND_GPU, embedding, [
+            draw_ir_image_command("image-1", 0, 0, 16, 16, "asset://image", [])
+        ])
+        val composition = draw_ir_composition("composition-image", "scene-image", DRAW_IR_BACKEND_GPU, [batch])
+        val encoded = simpleos_host_gpu_draw_ir_encode(composition, DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        expect(encoded.ok).to_be(false)
+        expect(encoded.reason).to_equal("unsupported-command")
+
+    it "rejects text and styled boxes that the SDN skin cannot preserve exactly":
+        val embedding = draw_ir_embedding_config("surface-1", "window-1", 0, 0, 32, 32, 0, 1000, false)
+        val text_batch = draw_ir_batch("batch-text", DRAW_IR_BACKEND_GPU, embedding, [
+            draw_ir_text("title", 2, 12, "SimpleOS", 0xffffffffu32)
+        ])
+        val text_payload = simpleos_host_gpu_draw_ir_encode(draw_ir_composition("composition-text", "scene-text", DRAW_IR_BACKEND_GPU, [text_batch]), DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        expect(text_payload.ok).to_be(false)
+        expect(text_payload.reason).to_equal("unsupported-command")
+
+        val styled_box = draw_ir_box_with_style("box", 0, 0, 32, 32, 0xff224466u32, draw_ir_rect_bounds(0, 0, 32, 32), draw_ir_rect_bounds(1, 1, 30, 30), draw_ir_rect_bounds(0, 0, 32, 32), draw_ir_rect_bounds(0, 0, 32, 32), [draw_ir_style_prop("display", "block")])
+        val styled_batch = draw_ir_batch("batch-styled", DRAW_IR_BACKEND_GPU, embedding, [styled_box])
+        val styled_payload = simpleos_host_gpu_draw_ir_encode(draw_ir_composition("composition-styled", "scene-styled", DRAW_IR_BACKEND_GPU, [styled_batch]), DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        expect(styled_payload.ok).to_be(false)
+        expect(styled_payload.reason).to_equal("unsupported-extended-command")
+
+    it "rejects empty compositions and empty payloads":
+        step("Reject a composition without batches")
+        val empty_composition = draw_ir_composition("composition-empty", "scene-empty", DRAW_IR_BACKEND_GPU, [])
+        val encoded = simpleos_host_gpu_draw_ir_encode(empty_composition, DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        expect(encoded.ok).to_be(false)
+        expect(encoded.reason).to_equal("empty-batches")
+
+        step("Reject a zero-byte payload before SDN parsing")
+        val decoded = simpleos_host_gpu_draw_ir_decode([], DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        expect(decoded.ok).to_be(false)
+        expect(decoded.reason).to_equal("empty-payload")
+
+    it "rejects a corrupted Draw IR schema before decoding":
+        step("Replace the exact schema version in an otherwise canonical payload")
+        val encoded = simpleos_host_gpu_draw_ir_encode(_host_gpu_draw_ir_fixture(), DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        val corrupt_text = bytes_to_text(encoded.bytes).replace(DRAW_IR_SCHEMA_VERSION, "simple-draw-ir-v999")
+        val decoded = simpleos_host_gpu_draw_ir_decode(text_to_bytes(corrupt_text), DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        expect(decoded.ok).to_be(false)
+        expect(decoded.reason).to_equal("schema-mismatch")

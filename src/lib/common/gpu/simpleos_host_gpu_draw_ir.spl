@@ -1,0 +1,128 @@
+"""Bounded canonical Draw IR payload codec for the SimpleOS host-GPU wire."""
+
+use std.common.ui.draw_ir.{
+    DRAW_IR_BACKEND_AUTO, DRAW_IR_BACKEND_GPU,
+    DRAW_IR_COMMAND_RECT, DRAW_IR_SCHEMA_VERSION,
+    DrawIrComposition, draw_ir_composition
+}
+use std.common.ui.draw_ir_sdn.{draw_ir_to_sdn, sdn_to_draw_ir}
+use std.common.base_encoding.utilities.{text_to_bytes, bytes_to_text}
+
+struct SimpleOsHostGpuDrawIrPayload:
+    ok: bool
+    reason: text
+    bytes: [u8]
+    checksum: i64
+    command_count: i64
+
+struct SimpleOsHostGpuDrawIrDecode:
+    ok: bool
+    reason: text
+    composition: DrawIrComposition
+
+fn _simpleos_host_gpu_draw_ir_empty() -> DrawIrComposition:
+    draw_ir_composition("", "", "", [])
+
+fn _simpleos_host_gpu_draw_ir_reject(reason: text) -> SimpleOsHostGpuDrawIrPayload:
+    SimpleOsHostGpuDrawIrPayload(ok: false, reason: reason, bytes: [], checksum: 0, command_count: 0)
+
+fn _simpleos_host_gpu_draw_ir_decode_reject(reason: text) -> SimpleOsHostGpuDrawIrDecode:
+    SimpleOsHostGpuDrawIrDecode(ok: false, reason: reason, composition: _simpleos_host_gpu_draw_ir_empty())
+
+fn _simpleos_host_gpu_draw_ir_checksum(bytes: [u8]) -> i64:
+    var checksum: i64 = 0
+    for byte in bytes:
+        checksum = (checksum + byte.to_i64()) % 2147483647
+    if checksum == 0: 1 else: checksum
+
+fn _simpleos_host_gpu_draw_ir_bytes_equal(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
+
+fn _simpleos_host_gpu_draw_ir_validation_reason(composition: DrawIrComposition, max_commands: i64) -> text:
+    if composition.schema != DRAW_IR_SCHEMA_VERSION:
+        return "schema-mismatch"
+    if composition.composition_id == "":
+        return "missing-composition-id"
+    if composition.scene_key == "":
+        return "missing-scene-key"
+    if composition.backend_target != DRAW_IR_BACKEND_AUTO and composition.backend_target != DRAW_IR_BACKEND_GPU:
+        return "unsupported-backend-target"
+    if composition.batches.len() == 0:
+        return "empty-batches"
+
+    var command_count: i64 = 0
+    for batch in composition.batches:
+        if batch.schema != DRAW_IR_SCHEMA_VERSION:
+            return "batch-schema-mismatch"
+        if batch.batch_id == "" or batch.embedding.surface_id == "" or batch.embedding.component_id == "":
+            return "missing-batch-id"
+        if batch.backend_target != DRAW_IR_BACKEND_AUTO and batch.backend_target != DRAW_IR_BACKEND_GPU:
+            return "unsupported-batch-backend"
+        if batch.embedding.width <= 0 or batch.embedding.height <= 0:
+            return "invalid-batch-bounds"
+        if batch.commands.len() == 0:
+            return "empty-batch-commands"
+        for command in batch.commands:
+            command_count = command_count + 1
+            if command_count > max_commands:
+                return "too-many-commands"
+            if command.component_id == "":
+                return "missing-command-id"
+            if command.kind != DRAW_IR_COMMAND_RECT:
+                return "unsupported-command"
+            if command.width <= 0 or command.height <= 0:
+                return "invalid-rect-bounds"
+            if command.text_value != "" or command.border_rect.present or command.content_rect.present or command.hit_rect.present or command.clip_rect.present or command.computed_style.len() != 0 or command.edge != nil or command.parent_id != "" or command.image_uri != "" or command.points.len() != 0:
+                return "unsupported-extended-command"
+    ""
+
+fn _simpleos_host_gpu_draw_ir_command_count(composition: DrawIrComposition) -> i64:
+    var count: i64 = 0
+    for batch in composition.batches:
+        count = count + batch.commands.len().to_i64()
+    count
+
+fn simpleos_host_gpu_draw_ir_encode(composition: DrawIrComposition, max_payload_bytes: i64, max_commands: i64) -> SimpleOsHostGpuDrawIrPayload:
+    if max_payload_bytes <= 0 or max_commands <= 0:
+        return _simpleos_host_gpu_draw_ir_reject("invalid-limits")
+    val reason = _simpleos_host_gpu_draw_ir_validation_reason(composition, max_commands)
+    if reason != "":
+        return _simpleos_host_gpu_draw_ir_reject(reason)
+    val bytes = text_to_bytes(draw_ir_to_sdn(composition))
+    if bytes.len().to_i64() > max_payload_bytes:
+        return _simpleos_host_gpu_draw_ir_reject("payload-too-large")
+    SimpleOsHostGpuDrawIrPayload(
+        ok: true,
+        reason: "ok",
+        bytes: bytes,
+        checksum: _simpleos_host_gpu_draw_ir_checksum(bytes),
+        command_count: _simpleos_host_gpu_draw_ir_command_count(composition)
+    )
+
+fn simpleos_host_gpu_draw_ir_decode(bytes: [u8], max_payload_bytes: i64, max_commands: i64) -> SimpleOsHostGpuDrawIrDecode:
+    if max_payload_bytes <= 0 or max_commands <= 0:
+        return _simpleos_host_gpu_draw_ir_decode_reject("invalid-limits")
+    if bytes.len() == 0:
+        return _simpleos_host_gpu_draw_ir_decode_reject("empty-payload")
+    if bytes.len().to_i64() > max_payload_bytes:
+        return _simpleos_host_gpu_draw_ir_decode_reject("payload-too-large")
+    val source = bytes_to_text(bytes)
+    if not source.starts_with("draw_ir schema={DRAW_IR_SCHEMA_VERSION}\n"):
+        return _simpleos_host_gpu_draw_ir_decode_reject("schema-mismatch")
+    val composition = sdn_to_draw_ir(source)
+    val reason = _simpleos_host_gpu_draw_ir_validation_reason(composition, max_commands)
+    if reason != "":
+        return _simpleos_host_gpu_draw_ir_decode_reject(reason)
+    if not _simpleos_host_gpu_draw_ir_bytes_equal(bytes, text_to_bytes(draw_ir_to_sdn(composition))):
+        return _simpleos_host_gpu_draw_ir_decode_reject("noncanonical-payload")
+    SimpleOsHostGpuDrawIrDecode(ok: true, reason: "ok", composition: composition)
+
+export SimpleOsHostGpuDrawIrPayload, SimpleOsHostGpuDrawIrDecode
+export simpleos_host_gpu_draw_ir_encode, simpleos_host_gpu_draw_ir_decode

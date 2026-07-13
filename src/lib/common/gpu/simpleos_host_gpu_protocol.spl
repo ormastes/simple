@@ -6,6 +6,7 @@ val SIMPLEOS_HOST_GPU_PROTOCOL_VERSION: i64 = 1
 val SIMPLEOS_HOST_GPU_REGION_BYTES: i64 = 8 * 1024 * 1024
 val SIMPLEOS_HOST_GPU_CONTROL_BYTES: i64 = 4 * 1024
 val SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES: i64 = 64 * 1024
+val SIMPLEOS_HOST_GPU_MAX_DRAW_IR_COMMANDS: i64 = 1024
 
 fn simpleos_host_gpu_wire_payload_offset() -> i64:
     SIMPLEOS_HOST_GPU_CONTROL_BYTES
@@ -50,11 +51,15 @@ val SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK: i64 = 200
 val SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_PAYLOAD: i64 = 208
 val SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_READBACK: i64 = 216
 val SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION: i64 = 224
+val SIMPLEOS_HOST_GPU_WIRE_COMPLETION_RUN_ID_HASH: i64 = 232
+val SIMPLEOS_HOST_GPU_WIRE_COMPLETION_FRAME_ID: i64 = 240
+val SIMPLEOS_HOST_GPU_WIRE_COMPLETION_BACKEND: i64 = 248
 val SIMPLEOS_HOST_GPU_WIRE_COMMAND_BYTES: i64 = 48
 
 val SIMPLEOS_HOST_GPU_KIND_HELLO: i64 = 0
 val SIMPLEOS_HOST_GPU_KIND_RENDER: i64 = 1
 val SIMPLEOS_HOST_GPU_KIND_PROCESSING: i64 = 2
+val SIMPLEOS_HOST_GPU_KIND_DRAW_IR: i64 = 3
 val SIMPLEOS_HOST_GPU_BACKEND_VULKAN: i64 = 1
 val SIMPLEOS_HOST_GPU_BACKEND_METAL: i64 = 2
 val SIMPLEOS_HOST_GPU_BACKEND_DIRECTX: i64 = 3
@@ -82,6 +87,11 @@ val SIMPLEOS_HOST_GPU_REASON_TIMEOUT: i64 = 3
 val SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION: i64 = 7
 val SIMPLEOS_HOST_GPU_REASON_HELLO_REQUIRED: i64 = 8
 val SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO: i64 = 9
+val SIMPLEOS_HOST_GPU_REASON_CORRELATION_MISMATCH: i64 = 10
+val SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH: i64 = 11
+val SIMPLEOS_HOST_GPU_REASON_UNSUPPORTED_COMMAND: i64 = 12
+val SIMPLEOS_HOST_GPU_REASON_BACKEND_MISMATCH: i64 = 13
+val SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK: i64 = 14
 
 struct SimpleOsHostGpuWireCommand:
     op: i64
@@ -219,7 +229,7 @@ fn simpleos_host_gpu_validate_hello(hello: SimpleOsHostGpuHello) -> SimpleOsHost
     simpleos_host_gpu_validation_ok()
 
 fn simpleos_host_gpu_batch_output_bytes(batch: SimpleOsHostGpuBatch) -> i64:
-    if batch.kind == "render":
+    if batch.kind == "render" or batch.kind == "draw_ir":
         return batch.width * batch.height * 4
     if batch.kind == "processing":
         return batch.element_count * 4
@@ -234,13 +244,13 @@ fn simpleos_host_gpu_validate_batch(batch: SimpleOsHostGpuBatch) -> SimpleOsHost
         return simpleos_host_gpu_validation_reject("fail", "invalid-run-id")
     if batch.frame_id <= 0:
         return simpleos_host_gpu_validation_reject("fail", "invalid-frame-id")
-    if batch.kind != "render" and batch.kind != "processing":
+    if batch.kind != "render" and batch.kind != "draw_ir" and batch.kind != "processing":
         return simpleos_host_gpu_validation_reject("unsupported", "unsupported-batch-kind")
     if batch.payload_bytes <= 0 or batch.payload_bytes > SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES:
         return simpleos_host_gpu_validation_reject("fail", "invalid-payload-size")
     if batch.payload_checksum <= 0:
         return simpleos_host_gpu_validation_reject("fail", "invalid-payload-checksum")
-    if batch.kind == "render":
+    if batch.kind == "render" or batch.kind == "draw_ir":
         if not simpleos_host_gpu_render_backend_supported(batch.backend) or batch.backend == "auto":
             return simpleos_host_gpu_validation_reject("unsupported", "unsupported-render-backend")
         if batch.width <= 0 or batch.height <= 0 or batch.width > SIMPLEOS_HOST_GPU_MAX_WIDTH or batch.height > SIMPLEOS_HOST_GPU_MAX_HEIGHT:
@@ -288,7 +298,7 @@ fn simpleos_host_gpu_validate_receipt(batch: SimpleOsHostGpuBatch, receipt: Simp
 
 export SIMPLEOS_HOST_GPU_PROTOCOL_MAGIC, SIMPLEOS_HOST_GPU_PROTOCOL_VERSION
 export SIMPLEOS_HOST_GPU_REGION_BYTES, SIMPLEOS_HOST_GPU_CONTROL_BYTES
-export SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES, simpleos_host_gpu_max_readback_bytes
+export SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES, SIMPLEOS_HOST_GPU_MAX_DRAW_IR_COMMANDS, simpleos_host_gpu_max_readback_bytes
 export SIMPLEOS_HOST_GPU_MAX_WIDTH, SIMPLEOS_HOST_GPU_MAX_HEIGHT, SIMPLEOS_HOST_GPU_MAX_ID_BYTES
 export SIMPLEOS_HOST_GPU_WIRE_MAGIC, SIMPLEOS_HOST_GPU_WIRE_VERSION
 export SIMPLEOS_HOST_GPU_WIRE_REQUEST_GENERATION, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION
@@ -301,8 +311,9 @@ export SIMPLEOS_HOST_GPU_WIRE_READBACK_SOURCE, SIMPLEOS_HOST_GPU_WIRE_DEVICE_IDE
 export SIMPLEOS_HOST_GPU_WIRE_GUEST_ISA, SIMPLEOS_HOST_GPU_WIRE_REQUESTED_RENDER_MASK, SIMPLEOS_HOST_GPU_WIRE_REQUESTED_PROCESSING_MASK
 export SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_RENDER_MASK, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK
 export SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_PAYLOAD, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_READBACK, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION
+export SIMPLEOS_HOST_GPU_WIRE_COMPLETION_RUN_ID_HASH, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_FRAME_ID, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_BACKEND
 export simpleos_host_gpu_wire_payload_offset, simpleos_host_gpu_wire_readback_offset, SIMPLEOS_HOST_GPU_WIRE_COMMAND_BYTES
-export SIMPLEOS_HOST_GPU_KIND_HELLO, SIMPLEOS_HOST_GPU_KIND_RENDER, SIMPLEOS_HOST_GPU_KIND_PROCESSING
+export SIMPLEOS_HOST_GPU_KIND_HELLO, SIMPLEOS_HOST_GPU_KIND_RENDER, SIMPLEOS_HOST_GPU_KIND_PROCESSING, SIMPLEOS_HOST_GPU_KIND_DRAW_IR
 export SIMPLEOS_HOST_GPU_BACKEND_VULKAN, SIMPLEOS_HOST_GPU_BACKEND_METAL, SIMPLEOS_HOST_GPU_BACKEND_DIRECTX
 export SIMPLEOS_HOST_GPU_BACKEND_CUDA, SIMPLEOS_HOST_GPU_BACKEND_CPU
 export SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN, SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL, SIMPLEOS_HOST_GPU_BACKEND_MASK_DIRECTX
@@ -313,6 +324,8 @@ export SIMPLEOS_HOST_GPU_STATUS_IDLE, SIMPLEOS_HOST_GPU_STATUS_PASS, SIMPLEOS_HO
 export SIMPLEOS_HOST_GPU_READBACK_DEVICE, SimpleOsHostGpuWireCommand
 export SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, SIMPLEOS_HOST_GPU_REASON_UNSUPPORTED_BACKEND, SIMPLEOS_HOST_GPU_REASON_TIMEOUT
 export SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION, SIMPLEOS_HOST_GPU_REASON_HELLO_REQUIRED, SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO
+export SIMPLEOS_HOST_GPU_REASON_CORRELATION_MISMATCH, SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH
+export SIMPLEOS_HOST_GPU_REASON_UNSUPPORTED_COMMAND, SIMPLEOS_HOST_GPU_REASON_BACKEND_MISMATCH, SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK
 export simpleos_host_gpu_backend_code, simpleos_host_gpu_backend_name, simpleos_host_gpu_backend_mask
 export simpleos_host_gpu_guest_isa_code, simpleos_host_gpu_guest_isa_name, simpleos_host_gpu_generation_is_fresh
 export simpleos_host_gpu_wire_checksum_words

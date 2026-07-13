@@ -18,6 +18,7 @@ use common.ui.draw_ir.{
 }
 use common.ui.draw_ir_sdn.{sdn_to_draw_ir}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback}
 use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{
     Engine2dHostGpuRuntimeDispatchResult,
     Engine2dHostGpuRuntimeDrainResult,
@@ -40,6 +41,9 @@ struct Engine2dDrawIrAdvResult:
     rendered_command_count: i32
     skipped_command_count: i32
     pixels: [u32]
+    readback_source: text
+    backend_handle: i64
+    readback_checksum: i64
 
 struct Engine2dDrawIrRuntimeQueueResult:
     render: Engine2dDrawIrAdvResult
@@ -55,7 +59,7 @@ struct Engine2dResolvedDrawIrImage:
     height: i32
     pixels: [u32]
 
-fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, pixels: [u32]) -> Engine2dDrawIrAdvResult:
+fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, readback: Engine2DReadback) -> Engine2dDrawIrAdvResult:
     Engine2dDrawIrAdvResult(
         schema: plan.schema,
         unit_id: plan.batch_id,
@@ -64,10 +68,13 @@ fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, s
         fallback_reason: plan.fallback_reason,
         rendered_command_count: rendered,
         skipped_command_count: skipped,
-        pixels: pixels
+        pixels: readback.pixels,
+        readback_source: readback.source,
+        backend_handle: readback.backend_handle,
+        readback_checksum: readback.checksum
     )
 
-fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositionPlan, rendered: i32, skipped: i32, pixels: [u32]) -> Engine2dDrawIrAdvResult:
+fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositionPlan, rendered: i32, skipped: i32, readback: Engine2DReadback) -> Engine2dDrawIrAdvResult:
     Engine2dDrawIrAdvResult(
         schema: plan.schema,
         unit_id: plan.composition_id,
@@ -76,7 +83,10 @@ fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositio
         fallback_reason: plan.fallback_reason,
         rendered_command_count: rendered,
         skipped_command_count: skipped,
-        pixels: pixels
+        pixels: readback.pixels,
+        readback_source: readback.source,
+        backend_handle: readback.backend_handle,
+        readback_checksum: readback.checksum
     )
 
 fn _engine2d_draw_ir_supported_command(kind: text) -> bool:
@@ -242,7 +252,7 @@ fn _engine2d_draw_ir_append_unsupported_reason(reason: text, unsupported_kinds: 
         return unsupported_reason
     "{reason}; {unsupported_reason}"
 
-fn _engine2d_draw_ir_result_from_plan_with_unsupported(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, unsupported_kinds: text, pixels: [u32]) -> Engine2dDrawIrAdvResult:
+fn _engine2d_draw_ir_result_from_plan_with_unsupported(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, unsupported_kinds: text, readback: Engine2DReadback) -> Engine2dDrawIrAdvResult:
     val has_unsupported = skipped > 0 and unsupported_kinds != "none"
     Engine2dDrawIrAdvResult(
         schema: plan.schema,
@@ -252,10 +262,13 @@ fn _engine2d_draw_ir_result_from_plan_with_unsupported(plan: Simple2dDrawIrPlan,
         fallback_reason: _engine2d_draw_ir_append_unsupported_reason(plan.fallback_reason, unsupported_kinds),
         rendered_command_count: rendered,
         skipped_command_count: skipped,
-        pixels: pixels
+        pixels: readback.pixels,
+        readback_source: readback.source,
+        backend_handle: readback.backend_handle,
+        readback_checksum: readback.checksum
     )
 
-fn _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan: Simple2dDrawIrCompositionPlan, rendered: i32, skipped: i32, unsupported_kinds: text, pixels: [u32]) -> Engine2dDrawIrAdvResult:
+fn _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan: Simple2dDrawIrCompositionPlan, rendered: i32, skipped: i32, unsupported_kinds: text, readback: Engine2DReadback) -> Engine2dDrawIrAdvResult:
     val has_unsupported = skipped > 0 and unsupported_kinds != "none"
     Engine2dDrawIrAdvResult(
         schema: plan.schema,
@@ -265,7 +278,10 @@ fn _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan: Simple2
         fallback_reason: _engine2d_draw_ir_append_unsupported_reason(plan.fallback_reason, unsupported_kinds),
         rendered_command_count: rendered,
         skipped_command_count: skipped,
-        pixels: pixels
+        pixels: readback.pixels,
+        readback_source: readback.source,
+        backend_handle: readback.backend_handle,
+        readback_checksum: readback.checksum
     )
 
 # Maximum embedded-surface nesting depth for _engine2d_draw_ir_render_batch_embedded.
@@ -382,7 +398,7 @@ fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, 
     var unsupported_kinds = outcome.3
     if unsupported_kinds == "":
         unsupported_kinds = "none"
-    _engine2d_draw_ir_result_from_plan_with_unsupported(plan, outcome.1, outcome.2, unsupported_kinds, eng.read_pixels())
+    _engine2d_draw_ir_result_from_plan_with_unsupported(plan, outcome.1, outcome.2, unsupported_kinds, eng.read_pixels_with_source())
 
 fn engine2d_draw_ir_adv_apply_runtime_dispatch(engine: Engine2D, dispatch: Engine2dHostGpuRuntimeDispatchResult) -> Engine2dDrawIrAdvResult:
     if not dispatch.dispatched:
@@ -394,14 +410,17 @@ fn engine2d_draw_ir_adv_apply_runtime_dispatch(engine: Engine2D, dispatch: Engin
             fallback_reason: dispatch.diagnostic,
             rendered_command_count: 0,
             skipped_command_count: 0,
-            pixels: engine.read_pixels()
+            pixels: engine.read_pixels(),
+            readback_source: "none",
+            backend_handle: 0,
+            readback_checksum: 0
         )
     val composition = sdn_to_draw_ir(dispatch.payload_text)
     engine2d_draw_ir_adv_composition(engine, composition, true)
 
 fn _engine2d_draw_ir_runtime_queue_submit_dispatch(batch: DrawIrBatch, selected_backend: text, command_count: i64, packet_bytes: i64, payload: Engine2dDrawIrPayloadSummary, queue: Engine2dHostGpuRuntimeQueue) -> Engine2dDrawIrRuntimeQueueResult:
     val dispatch_result = engine2d_draw_ir_runtime_queue_dispatch(batch, selected_backend, command_count, packet_bytes, payload, queue)
-    val render = Engine2dDrawIrAdvResult(schema: batch.schema, unit_id: batch.batch_id, selected_backend: selected_backend, fallback_required: false, fallback_reason: dispatch_result.runtime_dispatch.diagnostic, rendered_command_count: 0, skipped_command_count: 0, pixels: [])
+    val render = Engine2dDrawIrAdvResult(schema: batch.schema, unit_id: batch.batch_id, selected_backend: selected_backend, fallback_required: false, fallback_reason: dispatch_result.runtime_dispatch.diagnostic, rendered_command_count: 0, skipped_command_count: 0, pixels: [], readback_source: "none", backend_handle: 0, readback_checksum: 0)
     Engine2dDrawIrRuntimeQueueResult(render: render, runtime_submit: dispatch_result.runtime_submit, runtime_drain: dispatch_result.runtime_drain, runtime_dispatch: dispatch_result.runtime_dispatch, queued_for_gpu: dispatch_result.queued_for_gpu, payload: dispatch_result.payload)
 
 fn engine2d_draw_ir_adv_batch_runtime_queue(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool, queue: Engine2dHostGpuRuntimeQueue) -> Engine2dDrawIrRuntimeQueueResult:
@@ -409,7 +428,7 @@ fn engine2d_draw_ir_adv_batch_runtime_queue(engine: Engine2D, batch: DrawIrBatch
     val packet_bytes = plan.command_count * 64
     val payload = engine2d_draw_ir_payload_summary(batch, packet_bytes)
     val queue_result = _engine2d_draw_ir_runtime_queue_submit_dispatch(batch, plan.selected_backend, plan.command_count, packet_bytes, payload, queue)
-    var render = Engine2dDrawIrAdvResult(schema: batch.schema, unit_id: batch.batch_id, selected_backend: "host", fallback_required: true, fallback_reason: "runtime queue pending", rendered_command_count: 0, skipped_command_count: 0, pixels: engine.read_pixels())
+    var render = Engine2dDrawIrAdvResult(schema: batch.schema, unit_id: batch.batch_id, selected_backend: "host", fallback_required: true, fallback_reason: "runtime queue pending", rendered_command_count: 0, skipped_command_count: 0, pixels: engine.read_pixels(), readback_source: "none", backend_handle: 0, readback_checksum: 0)
     if queue_result.queued_for_gpu:
         render = engine2d_draw_ir_adv_apply_runtime_dispatch(engine, queue_result.runtime_dispatch)
     else:
@@ -451,7 +470,7 @@ fn engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: D
             unsupported_kinds = unsupported_kinds + outcome.3
     if unsupported_kinds == "":
         unsupported_kinds = "none"
-    _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, rendered, skipped, unsupported_kinds, eng.read_pixels())
+    _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, rendered, skipped, unsupported_kinds, eng.read_pixels_with_source())
 
 export Engine2dDrawIrAdvResult
 export Engine2dDrawIrRuntimeQueueResult
