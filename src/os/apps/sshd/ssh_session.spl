@@ -246,10 +246,8 @@ fn _scp_read_file_bytes(path: text) -> ([u8], i64):
         return ([], -1)
     # Build the [u8] by reading each byte straight from the FAT buffer via
     # mmio_read8 (the proven Inc-1 raw-read idiom) — a Simple-native packed [u8]
-    # that _u8_at reads reliably at any stack depth. Bind the byte to an
-    # intermediate var before .to_i64() (the chained `mmio_read8(...).to_i64()`
-    # mis-lowers on x64 freestanding — same class as the do_version_exchange
-    # note).
+    # that _u8_at reads reliably at any stack depth. (`b` is bound before
+    # `.to_i64()` only for clarity; a chained form would work too.)
     var out: [u8] = []
     var i: u64 = 0
     while i < fsize.to_u64():
@@ -1022,12 +1020,10 @@ impl SshSession:
         # connection is a fresh SshSession with scp_stage=0). Re-entry after this
         # is harmless: _finish closes the channel, so any later ack's
         # window-consume fails and sends nothing.
-        # NOTE: bind every `.len()` to an intermediate var before `.to_u32()` —
-        # the chained `x.len().to_u32()` form mis-lowers on the x64 freestanding
-        # target and yields a bogus count, so consume_remote_window() rejects the
-        # send and the data is silently dropped (the same class fixed in
-        # _finish_exec_request_inline / do_version_exchange; see
-        # doc/08_tracking/bug/x64_freestanding_chained_len_cast_miscompile.md).
+        # (ctrl_len/body_len are bound before the sends only for readability; a
+        # chained `.len().to_u32()` here would work too — the earlier
+        # "chained-cast mis-lowering" theory did not reproduce; see
+        # doc/08_tracking/bug/x64_freestanding_chained_len_cast_miscompile.md.)
         val size = self.scp_file_bytes.len().to_i64()
         val name_bytes = rt_string_to_byte_array(self.scp_file_name)
         val ctrl = _scp_ctrl_line(size, name_bytes)
@@ -1080,15 +1076,15 @@ impl SshSession:
         self.shell = shell
 
     me _finish_exec_request_inline(local_id: u32, remote_id: u32, exit_status: u32, output: [u8]):
-        # Bind len to an intermediate var: the chained `output.len().to_u32()`
-        # mis-lowers on x64 freestanding native-build and yields garbage (same
-        # bug documented in do_version_exchange), which made
-        # consume_remote_window() see a bogus huge count, reject the whole
-        # payload, and SILENTLY drop the channel data — the exact Inc 3 getfile
-        # symptom (712-byte /hello.o read on the server, empty file on the host).
-        val out_len = output.len()
-        val out_len_u = out_len.to_u32()
-        if out_len > 0 and self.channels.consume_remote_window(local_id, out_len_u):
+        # Sends the command output as one channel-data packet, then
+        # exit-status/eof/close. The real Inc-3 getfile fix was in
+        # _build_channel_data_stable (`.push` vs the rt_push_byte reassignment
+        # form — the latter dropped BYTE_PACKED for large [u8] and corrupted the
+        # payload). An earlier `output.len().to_u32()`→bound-var change here was
+        # NOT necessary: this chained form is proven to deliver byte-exact (see
+        # doc/08_tracking/bug/x64_freestanding_chained_len_cast_miscompile.md,
+        # which records that the chained-cast mis-lowering did not reproduce).
+        if output.len() > 0 and self.channels.consume_remote_window(local_id, output.len().to_u32()):
             self.send_packet(_build_channel_data_stable(remote_id, output))
         self.send_packet(_build_channel_exit_status_stable(remote_id, exit_status))
         self.send_packet(_build_channel_eof_stable(remote_id))
