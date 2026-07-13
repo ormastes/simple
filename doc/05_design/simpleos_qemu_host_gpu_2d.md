@@ -37,6 +37,17 @@ outstanding request map rejects duplicate or stale receipts.
 5. Any unavailable service/backend or invalid receipt returns a stable reason
    and selects the existing software/CPU path without preventing boot.
 
+`FramebufferDriver.present_argb32_from_mmio` is the bounded presentation
+primitive for a later production executor-wiring slice. It rejects invalid or
+unaligned source addresses, mismatched dimensions/byte counts, non-ARGB32 or
+undersized-pitch destinations, overflow, direct-MMIO source/destination
+overlap, insufficient host-buffer capacity, and non-positive or mismatched
+checksums. It scans the complete source before any destination write, then
+copies exact rows using the destination pitch and presents only after the copy
+finishes. It allocates no staging buffer. `Engine2dWmFrameExecutor` remains the
+frame owner; this helper is not a session API and does not authorize a
+producer-side full-frame shortcut.
+
 The local `Engine2dWmFrameExecutor` rejects duplicate or unreferenced content
 frames, stale revisions, bad checksums, unresolved IMAGE commands, and nested
 GROUP metadata. The wire accepts the same top-level IMAGE resource set, but
@@ -53,6 +64,11 @@ out-of-range references, stale IDs, duplicate completions, missing readback,
 zero handles, checksum mismatch, or missing device identity are `fail`, not
 fallback passes. Missing host capability is `unsupported`; missing prepared
 environment is `blocked`.
+
+The 8 MiB wire provides 8,318,976 readback bytes. The selected 1280x720 fixture
+fits, while the current 3840x2160 production desktop does not. Production 4K
+must retain local rendering until the wire capacity is deliberately expanded
+with updated bounds and evidence; downscale and crop are not fallback options.
 
 ## Observability and NFRs
 

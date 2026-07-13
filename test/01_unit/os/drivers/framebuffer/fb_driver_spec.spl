@@ -13,7 +13,9 @@ and the 8x16 bitmap font glyph lookup.
 """
 
 use std.spec
-use os.drivers.framebuffer.fb_driver.{Color, get_glyph_8x16}
+use os.drivers.framebuffer.fb_driver.{Color, FramebufferDriver, get_glyph_8x16}
+use os.kernel.boot.mmio.{mmio_reset_for_test, mmio_read32, mmio_write32}
+use common.gpu.simpleos_host_gpu_protocol.{simpleos_host_gpu_readback_checksum}
 
 
 # ============================================================================
@@ -198,3 +200,66 @@ describe "get_glyph_8x16":
         # Row 2 (index 2) = 0x10, Row 3 (index 3) = 0x38
         expect(glyph[2]).to_equal(0x10)
         expect(glyph[3]).to_equal(0x38)
+
+describe "FramebufferDriver MMIO ARGB presenter":
+    it "validates before writing and copies exact rows with destination stride":
+        step("Validate the complete shared readback before scanout writes")
+        mmio_reset_for_test()
+        val source = 0x1000u64
+        val destination = 0x2000u64
+        val pixels: [u32] = [0xFF010203u32, 0xFF040506u32, 0xFF070809u32, 0xFF0A0B0Cu32]
+        var i = 0
+        while i < pixels.len():
+            mmio_write32(source + i.to_u64() * 4u64, pixels[i])
+            i = i + 1
+        var fb = FramebufferDriver.from_scanout_raw(destination, 2u32, 2u32, 16u32, 32u32)
+
+        step("Copy exact ARGB rows through the framebuffer MMIO owner")
+        expect(fb.present_argb32_from_mmio(source, 2u32, 2u32, 16, simpleos_host_gpu_readback_checksum(pixels, 4))).to_be(true)
+        expect(mmio_read32(destination)).to_equal(pixels[0])
+        expect(mmio_read32(destination + 4u64)).to_equal(pixels[1])
+        expect(mmio_read32(destination + 16u64)).to_equal(pixels[2])
+        expect(mmio_read32(destination + 20u64)).to_equal(pixels[3])
+        expect(mmio_read32(destination + 8u64)).to_equal(0u32)
+
+    it "leaves the destination untouched when the complete checksum is wrong":
+        mmio_reset_for_test()
+        val source = 0x3000u64
+        val destination = 0x4000u64
+        mmio_write32(source, 0xFF112233u32)
+        mmio_write32(destination, 0xFFAABBCCu32)
+        var fb = FramebufferDriver.from_scanout_raw(destination, 1u32, 1u32, 4u32, 32u32)
+        expect(fb.present_argb32_from_mmio(source, 1u32, 1u32, 4, 1)).to_be(false)
+        expect(mmio_read32(destination)).to_equal(0xFFAABBCCu32)
+
+    it "rejects invalid dimensions bytes pitch addresses and overlapping ranges":
+        mmio_reset_for_test()
+        val pixels: [u32] = [0xFF112233u32, 0xFF445566u32, 0xFF778899u32, 0xFFAABBCCu32]
+        val checksum = simpleos_host_gpu_readback_checksum(pixels, 4)
+        var valid = FramebufferDriver.from_scanout_raw(0x6000u64, 2u32, 2u32, 8u32, 32u32)
+        var short_pitch = FramebufferDriver.from_scanout_raw(0x6000u64, 2u32, 2u32, 4u32, 32u32)
+        var unaligned_pitch = FramebufferDriver.from_scanout_raw(0x6000u64, 2u32, 2u32, 9u32, 32u32)
+        var wrong_bpp = FramebufferDriver.from_scanout_raw(0x6000u64, 2u32, 2u32, 8u32, 24u32)
+        var overlap = FramebufferDriver.from_scanout_raw(0x5008u64, 2u32, 2u32, 8u32, 32u32)
+        var short_host = FramebufferDriver.from_buffer(2u32, 2u32)
+        short_host.host_buffer = []
+        expect(valid.present_argb32_from_mmio(0u64, 2u32, 2u32, 16, checksum)).to_be(false)
+        expect(valid.present_argb32_from_mmio(0x5002u64, 2u32, 2u32, 16, checksum)).to_be(false)
+        expect(valid.present_argb32_from_mmio(0x5000u64, 1u32, 2u32, 8, checksum)).to_be(false)
+        expect(valid.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 12, checksum)).to_be(false)
+        expect(valid.present_argb32_from_mmio(0xFFFFFFFFFFFFFFFCu64, 2u32, 2u32, 16, checksum)).to_be(false)
+        expect(short_pitch.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum)).to_be(false)
+        expect(unaligned_pitch.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum)).to_be(false)
+        expect(wrong_bpp.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum)).to_be(false)
+        expect(overlap.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum)).to_be(false)
+        expect(short_host.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum)).to_be(false)
+
+    it "copies into an existing host-backed buffer without a staging allocation":
+        mmio_reset_for_test()
+        val source = 0x7000u64
+        val pixels: [u32] = [0xFF102030u32, 0xFF405060u32]
+        mmio_write32(source, pixels[0])
+        mmio_write32(source + 4u64, pixels[1])
+        var fb = FramebufferDriver.from_buffer(2u32, 1u32)
+        expect(fb.present_argb32_from_mmio(source, 2u32, 1u32, 8, simpleos_host_gpu_readback_checksum(pixels, 2))).to_be(true)
+        expect(fb.host_pixels()).to_equal(pixels)

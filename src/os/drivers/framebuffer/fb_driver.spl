@@ -10,6 +10,7 @@ use os.kernel.boot.ports.{FramebufferInfo, framebuffer_info_phys_addr}
 use os.kernel.boot.mmio.{mmio_write32, mmio_read32}
 use std.gpu.engine2d.framebuffer_surface.{FramebufferSurface}
 use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
+use common.gpu.simpleos_host_gpu_protocol.{simpleos_host_gpu_readback_checksum_step, simpleos_host_gpu_readback_checksum_finalize}
 
 # ============================================================================
 # Color
@@ -256,6 +257,62 @@ impl FramebufferDriver:
             flush_mode: "dirty-rect",
             cache_policy: if self.front_addr == 0: "coherent" else: "uncached"
         )
+
+    me present_argb32_from_mmio(source_addr: u64, source_width: u32, source_height: u32, source_bytes: i64, expected_checksum: i64) -> bool:
+        """Validate and present one complete ARGB32 MMIO readback without allocating."""
+        if source_addr == 0u64 or source_addr % 4u64 != 0u64 or source_width == 0u32 or source_height == 0u32:
+            return false
+        if self.bpp != 32u32 or source_width != self.width or source_height != self.height or expected_checksum <= 0:
+            return false
+        val max_u64 = 0xFFFFFFFFFFFFFFFFu64
+        val pixel_count = source_width.to_u64() * source_height.to_u64()
+        if pixel_count == 0u64 or pixel_count > max_u64 / 4u64:
+            return false
+        val exact_bytes = pixel_count * 4u64
+        if source_bytes <= 0 or source_bytes.to_u64() != exact_bytes or source_addr > max_u64 - exact_bytes:
+            return false
+        val row_bytes = source_width.to_u64() * 4u64
+        if self.pitch.to_u64() < row_bytes or self.pitch % 4u32 != 0u32:
+            return false
+        val last_row_offset = (source_height.to_u64() - 1u64) * self.pitch.to_u64()
+        if last_row_offset > max_u64 - row_bytes:
+            return false
+        val destination_span = last_row_offset + row_bytes
+        val host_backed = self.front_addr == 0u64
+        if host_backed:
+            if destination_span / 4u64 > self.host_buffer.len().to_u64():
+                return false
+        else:
+            if self.front_addr % 4u64 != 0u64 or self.front_addr > max_u64 - destination_span:
+                return false
+            val source_end = source_addr + exact_bytes
+            val destination_end = self.front_addr + destination_span
+            if source_addr < destination_end and self.front_addr < source_end:
+                return false
+
+        var checksum: i64 = 0
+        var index: u64 = 0u64
+        while index < pixel_count:
+            checksum = simpleos_host_gpu_readback_checksum_step(checksum, mmio_read32(source_addr + index * 4u64))
+            index = index + 1u64
+        if simpleos_host_gpu_readback_checksum_finalize(checksum) != expected_checksum:
+            return false
+
+        var row: u64 = 0u64
+        while row < source_height.to_u64():
+            var col: u64 = 0u64
+            while col < source_width.to_u64():
+                val pixel = mmio_read32(source_addr + (row * source_width.to_u64() + col) * 4u64)
+                val destination_offset = row * self.pitch.to_u64() + col * 4u64
+                if host_backed:
+                    self.host_buffer[(destination_offset / 4u64).to_i64()] = pixel
+                else:
+                    mmio_write32(self.front_addr + destination_offset, pixel)
+                col = col + 1u64
+            row = row + 1u64
+        self.mark_dirty_rect(0u32, 0u32, self.width, self.height)
+        self.swap_buffers()
+        true
 
     me put_pixel(x: u32, y: u32, color: Color):
         """Set a single pixel on the active surface (MMIO or host buffer)."""

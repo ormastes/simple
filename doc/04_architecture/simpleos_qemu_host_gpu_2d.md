@@ -20,6 +20,21 @@ The fixed 8 MiB shared region carries control, bounded payload, and readback;
 VFIO remains excluded. VirtIO-GPU scanout remains display transport and is not
 evidence of device-backed execution.
 
+The fixed layout leaves 8,318,976 bytes for readback: 1280x720 ARGB fits and
+1920x1080 barely fits, but the production x86 3840x2160 scanout requires
+33,177,600 bytes. A 4K production frame therefore selects the existing local
+Engine2D path until a separately reviewed bounded-capacity change lands; it
+must not be downscaled, cropped, or reported as host accelerated.
+
+Completed readback presentation will remain owned by `Engine2dWmFrameExecutor`
+and will route through `FramebufferDriver.present_argb32_from_mmio`. The driver
+validates the complete source checksum before the first scanout write, then
+copies exact stride-aware rows directly from MMIO and presents the full damage
+rectangle. The two-pass presenter uses O(1) auxiliary memory and performs no
+per-frame staging allocation. Receipt bytes remain valid only until the next
+guest generation is published, so presentation must complete synchronously
+before another submission.
+
 ## Virtual Capsule
 
 `SimpleOsHostGpuSession` is the capsule boundary:
