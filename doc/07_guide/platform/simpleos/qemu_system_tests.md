@@ -246,8 +246,14 @@ full-frame, so fresh production-WM QEMU evidence is still required even though
 the production selection seam is wired.
 Cached reports are accepted only through `--validate-report`: an overall status
 cannot promote the lane unless all nine host/ISA rows are well-formed and a
-Linux `pass` carries three existing serial logs with exact correlated render,
-Draw IR, and ProcessingIR receipts.
+passing active host carries three existing serial logs with exact correlated
+render, Draw IR, and ProcessingIR receipts. Every passing row must also contain
+the actual QEMU version, a reversible comma-delimited per-argument hex encoding
+of its exact argument vector, positive maximum-observed daemon RSS, protocol
+version, positive operation timings, and matching run/frame identities. The
+validator rejects missing, duplicate, empty, or nonpositive fields; fresh live
+rows are still required before claiming the latency or combined QEMU-plus-daemon
+RSS targets.
 
 Processing receipts distinguish the transient backend resource handle from the
 stable device identity. Vulkan hashes the runtime-selected driver identity,

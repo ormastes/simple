@@ -22,7 +22,7 @@ use std.nogc_sync_mut.io.metal_sffi.{metal_device_info}
 use std.nogc_sync_mut.gpu.engine2d.sffi_directx.{directx_hardware_adapter_identity}
 use app.io.file_ops.{file_exists, file_size, file_mmap, file_munmap}
 use app.io.volatile_ops.{volatile_read_u64_required, volatile_write_u64_required, memory_barrier_required}
-use app.io.time_ops.{time_now_unix_micros}
+use app.io.time_ops.{time_now_nanos}
 use app.io.args_ops.{get_args}
 use app.io.thread.{thread_sleep_ms}
 
@@ -31,6 +31,12 @@ fn _read(base: i64, offset: i64) -> i64:
 
 fn _write(base: i64, offset: i64, value: i64):
     volatile_write_u64_required(base + offset, value)
+
+fn _elapsed_us_since(started_nanos: i64) -> i64:
+    val elapsed_nanos = time_now_nanos() - started_nanos
+    if elapsed_nanos <= 0:
+        return 0
+    (elapsed_nanos + 999) / 1000
 
 fn _finish(base: i64, generation: i64, status: i64, reason: i64, handle: i64, output_bytes: i64, checksum: i64, elapsed_us: i64, source: i64, identity: i64):
     if _read(base, SIMPLEOS_HOST_GPU_WIRE_REQUEST_GENERATION) != generation:
@@ -127,6 +133,7 @@ fn _processing_backend_mask(requested: i64) -> i64:
     available
 
 fn _process_hello(base: i64, generation: i64, version: i64, guest_isa_code: i64, render_mask: i64, processing_mask: i64, render_code: i64) -> i64:
+    val started = time_now_nanos()
     val negotiated_processing_mask = _processing_backend_mask(processing_mask)
     val hello = SimpleOsHostGpuHello(
         version: version,
@@ -141,10 +148,10 @@ fn _process_hello(base: i64, generation: i64, version: i64, guest_isa_code: i64,
     val negotiated_render_mask = render_mask & simpleos_host_gpu_backend_mask(render_code)
     if valid.status != "pass":
         print("HOST_GPU_DAEMON_HELLO_INVALID reason={valid.reason} readback={hello.max_readback_bytes} max={simpleos_host_gpu_max_readback_bytes()}\n")
-        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO, 0, 0, 0, 1, 0, 0)
+        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO, 0, 0, 0, _elapsed_us_since(started), 0, 0)
         return 1
     if negotiated_render_mask == 0 or not _render_backend_available(render_code):
-        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO, 0, 0, 0, 1, 0, 0)
+        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO, 0, 0, 0, _elapsed_us_since(started), 0, 0)
         return 1
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_RENDER_MASK, negotiated_render_mask)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK, negotiated_processing_mask)
@@ -152,7 +159,7 @@ fn _process_hello(base: i64, generation: i64, version: i64, guest_isa_code: i64,
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_READBACK, simpleos_host_gpu_max_readback_bytes())
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION, SIMPLEOS_HOST_GPU_PROTOCOL_VERSION)
     # HELLO proves availability only; device provenance belongs to render readback.
-    _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, 0, 0, 0, 1, 0, 0)
+    _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, 0, 0, 0, _elapsed_us_since(started), 0, 0)
     1
 
 fn _process_request(base: i64) -> i64:
@@ -244,7 +251,7 @@ fn _process_request(base: i64) -> i64:
             _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, 0, 0, 0, 1, 0, 0)
             return 1
         val oracle = processing_ir_cpu_execute(ir)
-        val started = time_now_unix_micros()
+        val started = time_now_nanos()
         var completed = false
         var values: [u32] = []
         var backend_handle: i64 = 0
@@ -273,9 +280,7 @@ fn _process_request(base: i64) -> i64:
         if not _request_generation_matches(base, generation):
             return 0
         val checksum = _write_pixels(base, values, element_count)
-        var elapsed = time_now_unix_micros() - started
-        if elapsed <= 0:
-            elapsed = 1
+        val elapsed = _elapsed_us_since(started)
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, backend_handle, element_count * 4, checksum, elapsed, SIMPLEOS_HOST_GPU_READBACK_DEVICE, device_identity)
         return 1
 
@@ -306,7 +311,7 @@ fn _process_request(base: i64) -> i64:
                     draw_engine.shutdown()
                     _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_BACKEND_MISMATCH, 0, 0, 0, 1, 0, 0)
                     return 1
-                val started = time_now_unix_micros()
+                val started = time_now_nanos()
                 val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(draw_engine, decoded.composition, resolved_images)
                 val output_count = width * height
                 val device_identity = if backend == "directx": result.device_identity else: _render_device_identity(backend)
@@ -318,9 +323,7 @@ fn _process_request(base: i64) -> i64:
                 if not _request_generation_matches(base, generation):
                     return 0
                 val checksum = _write_pixels(base, result.pixels, output_count)
-                var elapsed = time_now_unix_micros() - started
-                if elapsed <= 0:
-                    elapsed = 1
+                val elapsed = _elapsed_us_since(started)
                 _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, result.backend_handle, output_count * 4, checksum, elapsed, SIMPLEOS_HOST_GPU_READBACK_DEVICE, device_identity)
                 return 1
 
@@ -333,7 +336,7 @@ fn _process_request(base: i64) -> i64:
                 engine.shutdown()
                 _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_BACKEND_MISMATCH, 0, 0, 0, 1, 0, 0)
                 return 1
-            val started = time_now_unix_micros()
+            val started = time_now_nanos()
             var command_ok = true
             var pos: i64 = 0
             while pos + 5 < words.len() and command_ok:
@@ -361,9 +364,7 @@ fn _process_request(base: i64) -> i64:
                 engine.shutdown()
                 return 0
             val checksum = _write_pixels(base, readback.pixels, output_count)
-            var elapsed = time_now_unix_micros() - started
-            if elapsed <= 0:
-                elapsed = 1
+            val elapsed = _elapsed_us_since(started)
             engine.shutdown()
             _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, readback.backend_handle, output_count * 4, checksum, elapsed, SIMPLEOS_HOST_GPU_READBACK_DEVICE, device_identity)
             return 1

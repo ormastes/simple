@@ -37,6 +37,14 @@ handles, compile-only output, or a CPU mirror. Unsupported and blocked rows are
 valid classifications but do not satisfy a host/ISA combination classified as
 supported.
 
+Every passing row must also record the first-line QEMU version, a reversible
+comma-delimited per-argument hex encoding of the exact QEMU argument vector,
+positive maximum-observed daemon RSS, negotiated protocol version, positive
+HELLO/render/Draw IR/ProcessingIR elapsed times, and correlated run/frame IDs.
+The cached-report validator rejects a missing, duplicate, empty, or nonpositive
+field. This proves evidence completeness only; NFR latency and combined
+QEMU-plus-daemon RSS targets still require fresh measured rows.
+
 The focused Vulkan unit boundary renders CLEAR plus solid RECT on a real or
 lavapipe device and requires exact pixels, `device_readback`, a positive
 handle, and no fallback/unknown-completion state. The system spec also rejects

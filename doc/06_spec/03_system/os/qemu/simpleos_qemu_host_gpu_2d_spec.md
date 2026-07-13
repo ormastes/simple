@@ -52,10 +52,14 @@ the CPU/software fallback and report a stable reason.
 10. **Report device-backed host acceleration evidence.** Publish one row with
    host, guest ISA, QEMU/device arguments, protocol, backend, device, IDs,
    timing, RSS, checksums, status, and reason.
-11. **Validate cached rows before aggregation.** Accept a cached passing report
-   only when all nine host/ISA rows are present and the three active-host rows link
-   to serial logs containing the exact render, Draw IR, and ProcessingIR
-   receipts.
+11. **Validate cached rows before aggregation.** Accept a cached report only
+   when all nine host/ISA rows are present and every passing row links to a
+   serial log containing the exact render, Draw IR, and ProcessingIR receipts.
+   Each passing row also requires a unique QEMU version, a reversible
+   comma-delimited per-argument hex encoding of its exact QEMU argument vector,
+   positive maximum-observed daemon RSS, negotiated protocol,
+   positive HELLO/render/Draw IR/ProcessingIR timings, and correlated run/frame
+   IDs. Missing, duplicate, empty, or nonpositive evidence fails closed.
 
 ### Keep native Metal ProcessingIR separate from Engine2D rendering
 
