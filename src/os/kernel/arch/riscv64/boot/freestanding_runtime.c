@@ -154,6 +154,11 @@ static spl_i64 rt_nil(void) {
     return rt_special(RT_VALUE_SPECIAL_NIL);
 }
 
+spl_i64 rt_memory_barrier(void) {
+    __asm__ volatile("fence rw, rw" ::: "memory");
+    return rt_nil();
+}
+
 spl_i64 rt_function_not_found(const spl_u8 *name, spl_u64 len) {
     (void)name;
     (void)len;
