@@ -2793,7 +2793,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
 
 /// `rt_vulkan_shutdown()`
 pub fn rt_vulkan_shutdown_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    use vulkan_dlopen::VK_STATE;
+    use vulkan_dlopen::{VK_STATE, VK_SUCCESS};
     use std::ptr;
     let mut guard = VK_STATE.lock().unwrap();
     if let Some(st) = guard.take() {
