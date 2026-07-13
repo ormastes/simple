@@ -81,7 +81,10 @@ SSH key). Agents implement + report serial; coordinator reviews + lands.
      so `consume_remote_window()` saw a bogus huge count, rejected the payload, and silently
      dropped the channel data (empty `retrieved.o`). Bound the length to an intermediate var.
 - **scp-source (`scp -O`) — near-complete, deferred:** the C-record + body path is built
-  (`_scp_read_file_bytes`, `_scp_ctrl_line`, `_scp_step_inline`) but the interactive
-  ready-ack handshake is blocked on x86_64 freestanding by non-persisting nested-`me`
-  mutation (`self.scp_stage` set inside a nested call does not persist) plus flush-before-close
-  timing. `getfile` supersedes it for the file-retrieval goal.
+  (`_scp_read_file_bytes`, `_scp_ctrl_line`, `_scp_step_inline`, now one-shot). Earlier
+  mis-diagnosis of a "non-persisting nested-`me` mutation" was DISPROVEN (repro prints
+  `NESTED_ME_OK`; `_finish_exec` mutates `self` via a nested `me` call and works). The real
+  residual factors were the chained `x.len().to_u32()` mis-lowering (now bound at every scp
+  call site — see `doc/08_tracking/bug/x64_freestanding_chained_len_cast_miscompile.md`) and
+  that each `scp`/`ssh` invocation opens a fresh connection (new `SshSession`, `scp_stage=0`).
+  `getfile` supersedes scp for the file-retrieval goal, so scp-source is left as-is.

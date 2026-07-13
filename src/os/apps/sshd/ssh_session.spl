@@ -1014,23 +1014,30 @@ impl SshSession:
             return
         val ack = _u8_at(payload, 9)
         serial_println("[sshd-session] scp step stage={self.scp_stage} ack=0x{format_hex(ack.to_i64())}")
-        # One-shot the whole scp-source response on the client's first ready-ack.
-        # The staged 0->1->2 machine relied on `self.scp_stage` mutations
-        # persisting across this nested `me` call, which they do NOT on the x64
-        # freestanding target (every ack re-entered stage 0, re-sending the
-        # C-record and never the body). So send everything now: C-record + file
-        # bytes + trailing 0x00, then exit-status/eof/close. OpenSSH's scp sink
-        # buffers pipelined data, so it need not receive the intermediate ack
-        # before the body. Re-entry after this is harmless: _finish closes the
-        # channel, so any later ack's window-consume fails and sends nothing.
+        # One-shot the whole scp-source response on the client's first ready-ack:
+        # C-record + file bytes + trailing 0x00, then exit-status/eof/close.
+        # OpenSSH's scp sink buffers pipelined data, so it need not receive the
+        # intermediate ack before the body, and one-shotting avoids depending on
+        # a persistent multi-stage cursor across reconnects (each new TCP
+        # connection is a fresh SshSession with scp_stage=0). Re-entry after this
+        # is harmless: _finish closes the channel, so any later ack's
+        # window-consume fails and sends nothing.
+        # NOTE: bind every `.len()` to an intermediate var before `.to_u32()` —
+        # the chained `x.len().to_u32()` form mis-lowers on the x64 freestanding
+        # target and yields a bogus count, so consume_remote_window() rejects the
+        # send and the data is silently dropped (the same class fixed in
+        # _finish_exec_request_inline / do_version_exchange; see
+        # doc/08_tracking/bug/x64_freestanding_chained_len_cast_miscompile.md).
         val size = self.scp_file_bytes.len().to_i64()
         val name_bytes = rt_string_to_byte_array(self.scp_file_name)
         val ctrl = _scp_ctrl_line(size, name_bytes)
-        serial_println("[sshd-session] scp one-shot size={size} ctrl_len={ctrl.len()}")
-        if self.channels.consume_remote_window(self.scp_local_id, ctrl.len().to_u32()):
+        val ctrl_len = ctrl.len()
+        serial_println("[sshd-session] scp one-shot size={size} ctrl_len={ctrl_len}")
+        if self.channels.consume_remote_window(self.scp_local_id, ctrl_len.to_u32()):
             self.send_packet(_build_channel_data_stable(self.scp_remote_id, ctrl))
         val body = self.scp_file_bytes
-        if self.channels.consume_remote_window(self.scp_local_id, body.len().to_u32()):
+        val body_len = body.len()
+        if self.channels.consume_remote_window(self.scp_local_id, body_len.to_u32()):
             self.send_packet(_build_channel_data_stable(self.scp_remote_id, body))
         val zero: [u8] = _copy_bytes_stable([0])
         if self.channels.consume_remote_window(self.scp_local_id, 1u32):
