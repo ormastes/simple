@@ -150,6 +150,19 @@ impl HirLowering:
         if bootstrap_diag:
             eprint("[hir-lower] lower_function:type_params {fn_.name}")
 
+        # Phase A gate (#158): generic functions (`fn id<T>(x: T) -> T`) are
+        # NOT monomorphized on the native --entry build path -- the erased
+        # `T` parameter/return type silently degrades to `Infer`/ANY, which
+        # previously made calls to generic functions return 0 instead of the
+        # real argument (silent-wrong, no diagnostic). Now that
+        # `Function.type_params` is threaded through from the frontend
+        # (convert_decl_fn in the flat-AST bridge), fail loudly here instead
+        # of proceeding into codegen with an unmonomorphized generic. Real
+        # monomorphization is tracked separately (#158 Phase B) -- this is a
+        # deliberate hard stop, not a workaround.
+        if fn_.type_params.len() > 0:
+            self.error("generic functions are not supported on the native build path yet: fn '{fn_.name}' declares type parameter(s); monomorphization is not implemented (#158 Phase B)", fn_.span)
+
         # Lower parameters
         # NOTE(#133): lowered unconditionally, including under SIMPLE_BOOTSTRAP.
         # Previously this whole block was skipped under bootstrap, so `params`

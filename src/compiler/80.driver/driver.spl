@@ -112,6 +112,20 @@ fn dtrace(msg: text) -> ():
 # targets (a bare `nosuchfn(1)` call, matching the task's known bug where an
 # unresolved ident silently decayed to HirExprKind.Error); everything else
 # stays a non-fatal warning.
+#
+# #158 Phase A: "generic functions are not supported..." is the second class
+# added to this allowlist. Root cause: the flat-AST bridge (convert_decl_fn,
+# 10.frontend/_FlatAstBridge/convert_nodes.spl) previously hardcoded a plain
+# `fn`'s type_params to `[]`, so `fn id<T>(x: T) -> T` silently erased its `T`
+# to Infer/ANY through HIR/MIR/LLVM and returned 0 instead of the argument on
+# the native --entry path (no diagnostic at all). Now that type_params are
+# threaded through, `lower_function` (20.hir/hir_lowering/_Items/
+# declaration_lowering.spl) raises this error for any function with its own
+# type parameters. Without adding it here, that push would (like every other
+# HirLowering.error() call) decay to a non-fatal warning and the build would
+# proceed into monomorphize/MIR/LLVM anyway, resurfacing as a cryptic
+# backend/llc crash instead of a clear diagnostic — real monomorphization is
+# tracked separately (#158 Phase B), so until then this must hard-fail here.
 fn _format_hir_lowering_error(name: text, err: LoweringError) -> text:
     if err.span.file != "":
         "HIR lowering error in {name} ({err.span.file}:{err.span.line}:{err.span.col}): {err.message}"
@@ -119,7 +133,7 @@ fn _format_hir_lowering_error(name: text, err: LoweringError) -> text:
         "HIR lowering error in {name}: {err.message}"
 
 fn _hir_lowering_error_is_fatal(message: text) -> bool:
-    message.starts_with("unresolved name:")
+    message.starts_with("unresolved name:") or message.starts_with("generic functions are not supported on the native build path yet")
 
 fn _driver_collect_hir_errors(ctx: CompileContext, name: text, errors: [LoweringError]):
     for err in errors:
