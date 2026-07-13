@@ -128,11 +128,14 @@ impl HirLowering:
                         i = i + 1
                     result
             case _:
-                # "unresolved name:" prefix: see arity-mismatch note above --
-                # required so this stays a FATAL build error instead of a
-                # silently-downgraded warning.
-                self.error("unresolved name: tuple destructure `val (" + inner + ") = ...` requires a literal tuple initializer, e.g. `val (a, b) = (x, y)`; a non-literal initializer (variable, function call, ...) is not supported", span)
-                [HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, type_: nil, span: span)), span: span)]
+                # Non-literal initializer (variable, function call returning a
+                # tuple, e.g. `val (out, err, code) = rt_process_run(...)`):
+                # general desugar via lower_tuple_destructure below — binds a
+                # temp to the tuple value ONCE, then binds each name to
+                # temp[i] (rt_array_get; tuples are rt_arrays at runtime).
+                # Correct, not silent-wrong: element order/evaluation match
+                # the interpreter's eval_tuple_destructure.
+                [self.lower_tuple_destructure(joined_name, self.lower_hir_expr(init), false, span)]
 
     # Desugar `var (a, b, ...) = <literal tuple expr>` into N mutable `Let`
     # bindings, mirroring lower_hir_tuple_destructure_val above but marking
@@ -162,11 +165,42 @@ impl HirLowering:
                         i = i + 1
                     result
             case _:
-                # "unresolved name:" prefix: see arity-mismatch note above --
-                # required so this stays a FATAL build error instead of a
-                # silently-downgraded warning.
-                self.error("unresolved name: tuple destructure `var (" + inner + ") = ...` requires a literal tuple initializer, e.g. `var (a, b) = (x, y)`; a non-literal initializer (variable, function call, ...) is not supported", span)
-                [HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, type_: nil, span: span)), span: span)]
+                # Non-literal initializer: general desugar (see the val
+                # variant above) with mutable bindings.
+                [self.lower_tuple_destructure(joined_name, self.lower_hir_expr(init), true, span)]
+
+    # General tuple destructure for NON-LITERAL initializers: `val/var
+    # (a, b, c) = expr` where expr is a variable or a call returning a tuple
+    # (e.g. `val (out, err, code) = rt_process_run(...)`). Binds a temp to
+    # the init tuple ONCE (evaluating the RHS exactly once), then binds each
+    # name to temp[i]. Tuples are rt_arrays at runtime (rt_tuple_new ->
+    # rt_array_new), and under SIMPLE_BOOTSTRAP an Index lowers to
+    # rt_array_get, so temp[i] extracts element i. Emitted as a Block; MIR
+    # keys local_map by symbol_id function-wide (no scope dealloc), so the
+    # bindings stay visible to later statements. Literal initializers take
+    # the per-element fast path in lower_hir_tuple_destructure_val/var above.
+    # NOTE(verify-later): element types are nil, so the bootstrap Index path
+    # defaults elements to text; genuinely-i64 elements (a shell exit code)
+    # are text-typed — bits are i64-repr so it compiles, but confirm integer
+    # uses once the redeploy builds.
+    me lower_tuple_destructure(name: text, hir_init: HirExpr, is_mut: bool, span: Span) -> HirStmt:
+        val inner = name.slice(1, name.len() - 1)
+        val parts = inner.split(",")
+        var stmts: [HirStmt] = []
+        val tmp_sym = self.symbols.define("__tuple_destr", SymbolKind.Variable, nil, span, false, false, nil)
+        stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(tmp_sym, nil, hir_init), span: span))
+        var i = 0
+        while i < parts.len():
+            val pname = parts[i]
+            if pname != "_":
+                val idx_expr = HirExpr(kind: HirExprKind.Index(
+                    HirExpr(kind: HirExprKind.Var(tmp_sym), type_: nil, span: span),
+                    HirExpr(kind: HirExprKind.IntLit(i, nil), type_: nil, span: span)
+                ), type_: nil, span: span)
+                val psym = self.symbols.define(pname, SymbolKind.Variable, nil, span, false, is_mut, nil)
+                stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(psym, nil, idx_expr), span: span))
+            i = i + 1
+        HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: span), span: span)), span: span)
 
     me lower_hir_stmt(s: Stmt) -> HirStmt:
         if (hir_stmt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
