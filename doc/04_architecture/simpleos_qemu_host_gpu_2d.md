@@ -97,7 +97,7 @@ require checked device readback, and apply `opacity_milli` through the checked
 parent src-over pipeline. Software children remain local fallback only and are
 ineligible for a device receipt. Nested GROUP batches remain rejected.
 
-The native Metal owner follows the same Draw IR contract: a fresh top-level or
+The native Metal owner follows the same raw-render and Draw IR contract: a fresh top-level or
 shared child framebuffer is cleared transparently on-device before it becomes
 receipt-eligible, child surfaces retain the parent's `MetalSession`, and parent
 composition uses a checked MSL src-over kernel with canonical
@@ -122,8 +122,12 @@ after a bounded real ProcessingIR probe returns both values.
 | Any missing prerequisite | CPU/software | CPU | `unsupported` or `blocked`, never accelerated |
 
 Cross-ISA TCG rows prove protocol correctness and provenance, not native-ISA
-latency. The first implementation slice is x86_64 Linux Vulkan; the same wire
-contract is reused unchanged for AArch64 and RISC-V.
+latency. The guest negotiates strict native Metal first, then retries Vulkan
+with a fresh generation when Metal is unavailable. The selected backend is
+used unchanged for raw rendering and Draw IR; ProcessingIR uses Metal with
+Metal or prefers CUDA and falls back to Vulkan with Vulkan. Prepared macOS and
+Linux hosts therefore exercise the same wire contract on x86_64, AArch64, and
+RISC-V without accepting a compatibility backend under a native name.
 
 `src/os/compositor/engine2d_wm_frame_executor.spl` is the local production
 fallback owner. It builds and submits the canonical Simple-owned composition,

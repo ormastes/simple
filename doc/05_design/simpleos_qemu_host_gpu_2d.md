@@ -155,9 +155,12 @@ composite helpers require encode, dispatch, end, commit, and wait success.
 Unknown commit completion poisons the surface and retains command dependencies
 rather than replaying on CPU. Known completion and uncommitted failure remove
 the runtime's encoder/command registry handles through the Metal facade. The host
-receipt hashes the default Metal device name and total memory. Raw render
-remains unavailable on Metal; ProcessingIR still needs a prepared
-macOS receipt before it can be marked verified.
+receipt hashes the default Metal device name and total memory. Raw CLEAR/RECT
+uses the same strict Engine2D factory as Draw IR and is receipt-eligible only
+with exact native Metal selection, checked device completion, device readback,
+a positive framebuffer handle, and the same stable identity. ProcessingIR and
+all three QEMU ISA rows still need prepared macOS receipts before they can be
+marked verified.
 
 ## Observability and NFRs
 

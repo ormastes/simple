@@ -48,10 +48,14 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         step("Probe the QEMU guest GPU capability")
         step("Validate version limits backend sets readback and readiness")
         val source = host_gpu_wrapper_source()
+        val probe = host_gpu_probe_source()
         expect(source).to_contain("simpleos-host-gpu-x86_64")
         expect(source).to_contain("simpleos-host-gpu-aarch64")
         expect(source).to_contain("simpleos-host-gpu-riscv64")
-        expect(source).to_contain("render_mask=1 processing_mask=9")
+        expect(source).to_contain("EXPECTED_RENDER_MASK")
+        expect(source).to_contain("EXPECTED_PROCESSING_MASK")
+        expect(probe).to_contain("render_backend = \"metal\"")
+        expect(probe).to_contain("render_backend = \"vulkan\"")
 
     # @capture(artifact)
     it "returns an exact device-backed Simple 2D readback":
@@ -79,8 +83,8 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         expect(source).to_contain("handle=[1-9][0-9]* identity=[1-9][0-9]*")
 
     # @capture(protocol)
-    it "requires checked raw Vulkan completion before a device receipt":
-        step("Dispatch the raw CLEAR and solid RECT fixture through checked Vulkan commands")
+    it "requires checked raw native backend completion before a device receipt":
+        step("Dispatch the raw CLEAR and solid RECT fixture through strict Engine2D selection")
         step("Reject unchecked or fallback raw rendering before device-backed receipt")
         val helpers = vulkan_backend_helpers_source()
         val backend = vulkan_backend_source()
@@ -93,6 +97,9 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         expect(helpers).to_contain("me _dispatch_framebuffer_checked")
         expect(backend).to_contain("self._dispatch_framebuffer_checked")
         expect(backend.contains("vulkan_dispatch_compute(")).to_equal(false)
+        val daemon = host_gpu_daemon_source()
+        expect(daemon).to_contain("Engine2D.create_requested_backend(width.to_i32(), height.to_i32(), backend)")
+        expect(daemon).to_contain("engine.backend_name() != backend")
 
     # @capture(protocol)
     it "admits only strict native Metal Draw IR with stable device identity":
@@ -101,7 +108,7 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         expect(daemon).to_contain("engine.backend_name() == name")
         expect(daemon).to_contain("metal_device_info(0)")
         expect(daemon).to_contain("processing_metal_device_identity(info.name, info.total_memory)")
-        expect(daemon).to_contain("kind == SIMPLEOS_HOST_GPU_KIND_RENDER and backend != \"vulkan\"")
+        expect(daemon).to_contain("backend != \"vulkan\" and backend != \"metal\"")
         expect(daemon.contains("backend != \"vulkan\" and kind == SIMPLEOS_HOST_GPU_KIND_DRAW_IR")).to_equal(false)
 
     # @capture(artifact)
@@ -110,7 +117,7 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         step("Compare the result buffer and correlated completion with the CPU oracle")
         val source = host_gpu_wrapper_source()
         expect(source).to_contain("checksum=1792 mismatches=0")
-        expect(source).to_contain("cuda-preferred-vulkan-fallback")
+        expect(source).to_contain("PROCESSING_BACKEND")
         expect(run_host_gpu_wrapper_self_test()).to_contain("simpleos_qemu_host_gpu_2d_self_test=pass")
 
     # @capture(protocol)
@@ -132,8 +139,8 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         step("Select the existing software or CPU fallback with a stable reason")
         step("Select host presentation or the existing local production renderer")
         val source = host_gpu_wrapper_source()
-        expect(source).to_contain("vulkan-cuda-runtime-artifact-missing")
-        expect(source).to_contain("host-daemon-backend-not-implemented")
+        expect(source).to_contain("runtime-artifact-missing")
+        expect(source).to_contain("qemu-host-gpu-capability-missing")
         val production = production_wm_executor_source()
         expect(production).to_contain("host_gpu_ivshmem_submit_draw_ir")
         expect(production).to_contain("host_gpu_ivshmem_device_receipt_valid")

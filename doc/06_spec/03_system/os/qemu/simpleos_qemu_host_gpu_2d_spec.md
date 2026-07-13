@@ -2,11 +2,11 @@
 
 Status: implementation in progress. The host executor now admits checked
 shared-session Vulkan and Metal child surfaces for canonical offset/opacity WM batches;
-the wrapper and its fail-closed parser self-test still exercise the shared
+the wrapper and its fail-closed Linux/macOS parser self-test exercises the shared
 full-frame IMAGE Draw IR fixture. Earlier
 Linux/Vulkan live x86_64, AArch64, and RV64 raw-render receipts pass; refreshed
 cross-ISA Draw IR and CUDA ProcessingIR receipts remain pending. Native Metal
-Draw IR and dedicated ProcessingIR FillU32 execution are implemented, but their
+raw rendering, Draw IR, and dedicated ProcessingIR FillU32 execution are implemented, but their
 prepared-macOS receipts remain unavailable; DirectX remains software emulation
 and cannot pass.
 
@@ -18,7 +18,8 @@ the CPU/software fallback and report a stable reason.
 
 1. **Probe the QEMU guest GPU capability.** Boot the selected x86_64, AArch64,
    or RISC-V guest and negotiate protocol version, limits, backend sets,
-   readback, and host readiness.
+   readback, and host readiness. Try strict native Metal first; when it is
+   unavailable, retry Vulkan with a fresh generation.
 2. **Render and read back the Simple 2D parity fixture.** Correlate frame ID,
    native device identity, positive backend handle, same-frame output, and the
    exact CPU-oracle checksum.
@@ -26,11 +27,11 @@ the CPU/software fallback and report a stable reason.
    Use the same 64x48 opaque background-and-rectangle oracle as one clipped
    full-target `DrawIrComposition` IMAGE resource.
 4. **Compare Draw IR readback and correlated device receipt across all three ISAs.**
-   Require the exact checksum and pixel counts with positive Vulkan handle and
-   device identity before accepting the marker.
-5. **Dispatch the raw CLEAR and solid RECT fixture through checked Vulkan commands.**
-   Route the existing raw QEMU framebuffer mutations through fenced completion
-   evidence.
+   Require the exact checksum and pixel counts with a positive native Metal or
+   Vulkan handle and stable device identity before accepting the marker.
+5. **Dispatch the raw CLEAR and solid RECT fixture through strict Engine2D selection.**
+   Route raw QEMU framebuffer mutations through the exact native Metal or
+   Vulkan backend selected by HELLO and require checked completion evidence.
 6. **Reject unchecked or fallback raw rendering before device-backed receipt.**
    Known failure invalidates device provenance; unknown completion poisons the
    frame rather than replaying it.
@@ -50,7 +51,7 @@ the CPU/software fallback and report a stable reason.
    host, guest ISA, QEMU/device arguments, protocol, backend, device, IDs,
    timing, RSS, checksums, status, and reason.
 11. **Validate cached rows before aggregation.** Accept a cached passing report
-   only when all nine host/ISA rows are present and the three Linux rows link
+   only when all nine host/ISA rows are present and the three active-host rows link
    to serial logs containing the exact render, Draw IR, and ProcessingIR
    receipts.
 
@@ -74,8 +75,8 @@ does not import `Engine2D` or `MetalSession`.
 ## Platform matrix
 
 Linux uses Vulkan for rendering and CUDA for ProcessingIR on a prepared NVIDIA
-host, with Vulkan ProcessingIR retained when CUDA is unavailable. Metal Draw IR
-requires a prepared native macOS host and exact device receipt. Metal
+host, with Vulkan ProcessingIR retained when CUDA is unavailable. macOS uses
+strict native Metal for raw rendering, Draw IR, and exact device receipts. Metal
 ProcessingIR uses its own MSL kernel and device readback rather than an
 Engine2D clear. DirectX cannot pass until a native D3D owner
 replaces the current software-emulation backend. Cross-ISA TCG rows
@@ -104,6 +105,10 @@ pure-Simple compiler and CUDA+Vulkan runtime artifact:
 ```sh
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
 ```
+
+On a prepared macOS host the same command selects the Metal contract, uses the
+Darwin pure-Simple compiler/runtime artifact, and capability-gates each QEMU
+binary before launch. Native macOS evidence remains pending.
 
 The default path builds guests through the named `_QemuRunner` scenarios.
 `SIMPLEOS_HOST_GPU_USE_EXISTING_GUESTS=1` is an explicit cached-artifact

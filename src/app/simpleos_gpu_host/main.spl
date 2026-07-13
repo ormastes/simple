@@ -1,7 +1,6 @@
 """Host-side Engine2D and ProcessingIR executor for SimpleOS QEMU ivshmem."""
 
 use std.common.gpu.simpleos_host_gpu_protocol.*
-use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dResolvedDrawIrImage,
@@ -229,7 +228,7 @@ fn _process_request(base: i64) -> i64:
         _read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK)
     else:
         0
-    if (negotiated_mask & requested_backend_mask) == 0 or (kind == SIMPLEOS_HOST_GPU_KIND_RENDER and backend != "vulkan"):
+    if (negotiated_mask & requested_backend_mask) == 0 or (kind == SIMPLEOS_HOST_GPU_KIND_RENDER and backend != "vulkan" and backend != "metal"):
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_UNSUPPORTED_BACKEND, 0, 0, 0, 1, 0, 0)
         return 1
 
@@ -322,45 +321,49 @@ fn _process_request(base: i64) -> i64:
                 _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, result.backend_handle, output_count * 4, checksum, elapsed, SIMPLEOS_HOST_GPU_READBACK_DEVICE, device_identity)
                 return 1
 
-    var engine = VulkanBackend.create()
-    if not engine.init(width.to_i32(), height.to_i32()):
-        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_UNSUPPORTED_BACKEND, 0, 0, 0, 1, 0, 0)
-        return 1
+    match Engine2D.create_requested_backend(width.to_i32(), height.to_i32(), backend):
+        Err(_):
+            _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_UNSUPPORTED_BACKEND, 0, 0, 0, 1, 0, 0)
+            return 1
+        Ok(engine):
+            if engine.backend_name() != backend:
+                engine.shutdown()
+                _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_BACKEND_MISMATCH, 0, 0, 0, 1, 0, 0)
+                return 1
+            val started = time_now_unix_micros()
+            var command_ok = true
+            var pos: i64 = 0
+            while pos + 5 < words.len() and command_ok:
+                val op = words[pos]
+                if op == SIMPLEOS_HOST_GPU_COMMAND_CLEAR:
+                    engine.clear(words[pos + 5].to_u32())
+                elif op == SIMPLEOS_HOST_GPU_COMMAND_FILL_RECT and kind == SIMPLEOS_HOST_GPU_KIND_RENDER:
+                    engine.draw_rect_filled(words[pos + 1].to_i32(), words[pos + 2].to_i32(), words[pos + 3].to_i32(), words[pos + 4].to_i32(), words[pos + 5].to_u32())
+                else:
+                    command_ok = false
+                pos = pos + 6
+            if not command_ok or pos != words.len():
+                engine.shutdown()
+                _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_UNSUPPORTED_COMMAND, 0, 0, 0, 1, 0, 0)
+                return 1
 
-    val started = time_now_unix_micros()
-    var command_ok = true
-    var pos: i64 = 0
-    while pos + 5 < words.len() and command_ok:
-        val op = words[pos]
-        if op == SIMPLEOS_HOST_GPU_COMMAND_CLEAR:
-            engine.clear(words[pos + 5].to_u32())
-        elif op == SIMPLEOS_HOST_GPU_COMMAND_FILL_RECT and kind == SIMPLEOS_HOST_GPU_KIND_RENDER:
-            engine.draw_rect_filled(words[pos + 1].to_i32(), words[pos + 2].to_i32(), words[pos + 3].to_i32(), words[pos + 4].to_i32(), words[pos + 5].to_u32())
-        else:
-            command_ok = false
-        pos = pos + 6
-    if not command_ok or pos != words.len():
-        engine.shutdown()
-        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_UNSUPPORTED_COMMAND, 0, 0, 0, 1, 0, 0)
-        return 1
-
-    val readback = engine.read_pixels_with_source()
-    val output_count = width * height
-    val device_identity = _render_device_identity(backend)
-    if readback.source != "device_readback" or readback.backend_handle <= 0 or device_identity <= 0 or readback.pixels.len().to_i64() < output_count:
-        engine.shutdown()
-        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK, 0, 0, 0, 1, 0, 0)
-        return 1
-    if not _request_generation_matches(base, generation):
-        engine.shutdown()
-        return 0
-    val checksum = _write_pixels(base, readback.pixels, output_count)
-    var elapsed = time_now_unix_micros() - started
-    if elapsed <= 0:
-        elapsed = 1
-    engine.shutdown()
-    _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, readback.backend_handle, output_count * 4, checksum, elapsed, SIMPLEOS_HOST_GPU_READBACK_DEVICE, device_identity)
-    1
+            val readback = engine.read_pixels_with_source()
+            val output_count = width * height
+            val device_identity = _render_device_identity(backend)
+            if readback.source != "device_readback" or readback.backend_handle <= 0 or device_identity <= 0 or readback.pixels.len().to_i64() < output_count:
+                engine.shutdown()
+                _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK, 0, 0, 0, 1, 0, 0)
+                return 1
+            if not _request_generation_matches(base, generation):
+                engine.shutdown()
+                return 0
+            val checksum = _write_pixels(base, readback.pixels, output_count)
+            var elapsed = time_now_unix_micros() - started
+            if elapsed <= 0:
+                elapsed = 1
+            engine.shutdown()
+            _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, readback.backend_handle, output_count * 4, checksum, elapsed, SIMPLEOS_HOST_GPU_READBACK_DEVICE, device_identity)
+            return 1
 
 fn _arg_value(args: [text], prefix: text) -> text:
     for arg in args:
