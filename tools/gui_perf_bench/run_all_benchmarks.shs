@@ -14,6 +14,7 @@ HEIGHT="${HEIGHT:-4320}"
 FRAMES="${FRAMES:-60}"
 DPI="${DPI:-300}"
 SIMPLE_WEB_CPU_MODE="${SIMPLE_WEB_CPU_MODE:-native}"
+CPU_BASE_COMPARE_FAILED=0
 
 select_simple_bin() {
     if [[ -x "$PROJECT_DIR/bin/simple" ]]; then
@@ -164,15 +165,18 @@ emit_cpu_base_compare() {
     local baseline_backend=""
     local baseline_metric=""
     local baseline_ms=""
+    local baseline_checksum=""
 
     if [[ "$(kv_value "$BUILD_DIR/javascript_node.stdout" "gui_perf_benchmark_status")" == "completed" ]]; then
         baseline_backend="$(kv_value "$BUILD_DIR/javascript_node.stdout" "gui_perf_benchmark_backend")"
         baseline_metric="frame_time_p50_ms"
         baseline_ms="$(kv_value "$BUILD_DIR/javascript_node.stdout" "gui_perf_benchmark_frame_time_p50_ms")"
+        baseline_checksum="$(kv_value "$BUILD_DIR/javascript_node.stdout" "gui_perf_benchmark_argb_sum32")"
     elif [[ "$(kv_value "$BUILD_DIR/gtk3.stdout" "gui_perf_benchmark_status")" == "completed" ]]; then
         baseline_backend="gtk3_cairo"
         baseline_metric="draw_only_avg_ms"
         baseline_ms="$(kv_value "$BUILD_DIR/gtk3.stdout" "gui_perf_benchmark_draw_only_avg_ms")"
+        baseline_checksum="$(kv_value "$BUILD_DIR/gtk3.stdout" "gui_perf_benchmark_argb_sum32")"
     fi
 
     echo "## CPU Drawing Library Baseline Compare" | tee -a "$REPORT"
@@ -203,6 +207,11 @@ emit_cpu_base_compare() {
     elif [[ -z "$baseline_ms" ]]; then
         echo "gui_perf_cpu_base_compare_status=unavailable" | tee -a "$REPORT"
         echo "gui_perf_cpu_base_compare_reason=no_completed_gtk3_or_node_canvas_cpu_baseline" | tee -a "$REPORT"
+    elif [[ "$baseline_checksum" != "$(sdn_text_value "$simple_file" "checksum")" ]]; then
+        echo "gui_perf_cpu_base_compare_status=invalid" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_reason=fixture-checksum-mismatch" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_baseline_checksum=$baseline_checksum" | tee -a "$REPORT"
+        CPU_BASE_COMPARE_FAILED=1
     else
         local simple_ms
         simple_ms="$(awk -v us="$simple_us" 'BEGIN { printf "%.3f", us / 1000.0 }')"
@@ -216,12 +225,14 @@ emit_cpu_base_compare() {
         echo "gui_perf_cpu_base_compare_baseline_backend=$baseline_backend" | tee -a "$REPORT"
         echo "gui_perf_cpu_base_compare_baseline_metric=$baseline_metric" | tee -a "$REPORT"
         echo "gui_perf_cpu_base_compare_baseline_ms=$baseline_ms" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_baseline_checksum=$baseline_checksum" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_semantic_parity=true" | tee -a "$REPORT"
         echo "gui_perf_cpu_base_compare_baseline_over_simple_ratio=$ratio" | tee -a "$REPORT"
         echo "gui_perf_cpu_base_compare_target_met=$target" | tee -a "$REPORT"
         if [[ "${GUI_CPU_BASELINE_REQUIRE_TARGET_MET:-0}" = "1" && "$target" != "yes" ]]; then
             echo "gui_perf_cpu_base_compare_strict_status=fail" | tee -a "$REPORT"
             echo "gui_perf_cpu_base_compare_strict_reason=target-not-met" | tee -a "$REPORT"
-            return 1
+            CPU_BASE_COMPARE_FAILED=1
         fi
     fi
     echo "" | tee -a "$REPORT"
@@ -235,9 +246,9 @@ if pkg-config --exists gtk+-3.0 2>/dev/null; then
         gcc -O2 -o "$GTK_BIN" "$SCRIPT_DIR/bench_gtk.c" $(pkg-config --cflags --libs gtk+-3.0) -lm
     fi
     if command -v xvfb-run >/dev/null 2>&1; then
-        run_bench "gtk3" "xvfb-run -a env GDK_BACKEND=x11 $GTK_BIN --width $WIDTH --height $HEIGHT --frames $FRAMES"
+        run_bench "gtk3" "xvfb-run -a env GDK_BACKEND=x11 $GTK_BIN --width $WIDTH --height $HEIGHT --frames $FRAMES --fixture gui-perf-cpu-base-solid"
     else
-        run_bench "gtk3" "GDK_BACKEND=x11 $GTK_BIN --width $WIDTH --height $HEIGHT --frames $FRAMES"
+        run_bench "gtk3" "GDK_BACKEND=x11 $GTK_BIN --width $WIDTH --height $HEIGHT --frames $FRAMES --fixture gui-perf-cpu-base-solid"
     fi
 else
     echo "--- gtk3: SKIPPED (gtk+-3.0 not found) ---" | tee -a "$REPORT"
@@ -262,12 +273,12 @@ fi
 if command -v node >/dev/null 2>&1; then
     # Check if canvas module available
     if node -e "require('canvas')" 2>/dev/null; then
-        run_bench "javascript_node" "node $SCRIPT_DIR/bench_js_node.js --width $WIDTH --height $HEIGHT --frames $FRAMES"
+        run_bench "javascript_node" "node $SCRIPT_DIR/bench_js_node.js --width $WIDTH --height $HEIGHT --frames $FRAMES --fixture gui-perf-cpu-base-solid"
     else
         echo "--- javascript_node: installing canvas module ---"
         (cd "$SCRIPT_DIR" && npm install canvas 2>/dev/null) || true
         if node -e "require('canvas')" 2>/dev/null; then
-            run_bench "javascript_node" "node $SCRIPT_DIR/bench_js_node.js --width $WIDTH --height $HEIGHT --frames $FRAMES"
+            run_bench "javascript_node" "node $SCRIPT_DIR/bench_js_node.js --width $WIDTH --height $HEIGHT --frames $FRAMES --fixture gui-perf-cpu-base-solid"
         else
             echo "--- javascript_node: SKIPPED (canvas module unavailable) ---" | tee -a "$REPORT"
             echo "gui_perf_benchmark_backend=javascript_node" | tee -a "$REPORT"
@@ -331,8 +342,8 @@ if [[ -x "$SIMPLE_BIN" ]]; then
     SIMPLE_BIN_SIZE=$(stat -Lc%s "$SIMPLE_BIN" 2>/dev/null || wc -c <"$SIMPLE_BIN")
     SIMPLE_WEB_CPU_SIMD_ENTRY="$BUILD_DIR/simple_web_cpu_simd.entry.spl"
     SIMPLE_WEB_SOFTWARE_ENTRY="$BUILD_DIR/simple_web_software.entry.spl"
-    write_simple_web_export_entry "$SIMPLE_WEB_CPU_SIMD_ENTRY" cpu_simd gui-perf-8k-cpu-simd
-    write_simple_web_export_entry "$SIMPLE_WEB_SOFTWARE_ENTRY" software gui-perf-8k-software
+    write_simple_web_export_entry "$SIMPLE_WEB_CPU_SIMD_ENTRY" cpu_simd gui-perf-cpu-base-solid
+    write_simple_web_export_entry "$SIMPLE_WEB_SOFTWARE_ENTRY" software gui-perf-cpu-base-solid
     run_bench "simple_web_cpu_simd" "$SIMPLE_BIN run $SIMPLE_WEB_CPU_SIMD_ENTRY --mode=$SIMPLE_WEB_CPU_MODE"
     run_bench "simple_web_software" "$SIMPLE_BIN run $SIMPLE_WEB_SOFTWARE_ENTRY --mode=$SIMPLE_WEB_CPU_MODE"
 else
@@ -371,3 +382,5 @@ emit_cpu_base_compare
 if [[ "${SKIP_PROFILE_REPORT_CONTRACT:-0}" != "1" ]]; then
     sh "$PROFILE_REPORT_CONTRACT_TEST" gui tools/gui_perf_bench/run_all_benchmarks.shs "${REPORT#$PROJECT_DIR/}"
 fi
+
+exit "$CPU_BASE_COMPARE_FAILED"

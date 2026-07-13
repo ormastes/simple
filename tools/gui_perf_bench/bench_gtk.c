@@ -5,6 +5,7 @@
 
 #include <gtk/gtk.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -13,6 +14,8 @@ static int g_width = 7680;
 static int g_height = 4320;
 static int g_frames = 60;
 static int g_frame_count = 0;
+static int g_solid_fixture = 0;
+static cairo_surface_t *g_surface = NULL;
 static double g_frame_times[4096];
 static double g_draw_times[4096];
 static struct timespec g_start, g_warm_start, g_prev_frame_start;
@@ -34,6 +37,11 @@ static unsigned long pixel_checksum(unsigned char *data, int w, int h, int strid
 }
 
 static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer data) {
+    cairo_t *surface_cr = NULL;
+    if (g_solid_fixture) {
+        surface_cr = cairo_create(g_surface);
+        cr = surface_cr;
+    }
     struct timespec frame_start, frame_end;
     clock_gettime(CLOCK_MONOTONIC, &frame_start);
 
@@ -42,8 +50,15 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer data) {
     }
 
     // Fill background — 8K pixel work
-    cairo_set_source_rgb(cr, 0.15, 0.15, 0.20);
+    if (g_solid_fixture)
+        cairo_set_source_rgb(cr, 16.0 / 255.0, 32.0 / 255.0, 48.0 / 255.0);
+    else
+        cairo_set_source_rgb(cr, 0.15, 0.15, 0.20);
     cairo_paint(cr);
+
+    if (g_solid_fixture) {
+        goto draw_complete;
+    }
 
     // Draw representative GUI widgets
     // Title bar
@@ -72,6 +87,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer data) {
         cairo_fill(cr);
     }
 
+draw_complete:
+    if (surface_cr != NULL) cairo_destroy(surface_cr);
     clock_gettime(CLOCK_MONOTONIC, &frame_end);
 
     if (g_frame_count < 4096) {
@@ -130,6 +147,18 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer data) {
         printf("gui_perf_benchmark_draw_only_avg_ms=%.3f\n", nd > 0 ? draw_sorted[nd / 2] : 0);
         printf("gui_perf_benchmark_pixel_count=%ld\n", (long)g_width * g_height);
         printf("gui_perf_benchmark_bytes_per_frame=%ld\n", (long)g_width * g_height * 4);
+        if (g_solid_fixture) {
+            unsigned long long argb_sum32 = 0;
+            cairo_surface_flush(g_surface);
+            unsigned char *pixels = cairo_image_surface_get_data(g_surface);
+            int stride = cairo_image_surface_get_stride(g_surface);
+            for (int y = 0; y < g_height; y++) {
+                uint32_t *row = (uint32_t *)(pixels + y * stride);
+                for (int x = 0; x < g_width; x++) argb_sum32 += row[x];
+            }
+            printf("gui_perf_benchmark_argb_sum32=sum32:%llu\n", argb_sum32);
+        }
+        printf("gui_perf_benchmark_fixture=%s\n", g_solid_fixture ? "gui-perf-cpu-base-solid" : "widgets");
         printf("gui_perf_benchmark_status=completed\n");
 
         gtk_main_quit();
@@ -144,9 +173,13 @@ int main(int argc, char *argv[]) {
         if (strcmp(argv[i], "--width") == 0) g_width = atoi(argv[i+1]);
         if (strcmp(argv[i], "--height") == 0) g_height = atoi(argv[i+1]);
         if (strcmp(argv[i], "--frames") == 0) g_frames = atoi(argv[i+1]);
+        if (strcmp(argv[i], "--fixture") == 0) g_solid_fixture = strcmp(argv[i+1], "gui-perf-cpu-base-solid") == 0;
     }
 
     gtk_init(&argc, &argv);
+    if (g_solid_fixture) {
+        g_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, g_width, g_height);
+    }
 
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_default_size(GTK_WINDOW(window), g_width, g_height);
@@ -159,6 +192,7 @@ int main(int argc, char *argv[]) {
 
     gtk_widget_show_all(window);
     gtk_main();
+    if (g_surface != NULL) cairo_surface_destroy(g_surface);
 
     return 0;
 }
