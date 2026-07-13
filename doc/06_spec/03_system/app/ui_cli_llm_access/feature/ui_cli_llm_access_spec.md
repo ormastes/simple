@@ -27,7 +27,7 @@ ui_cli_llm_access_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -619,46 +619,6 @@ _check_gate("manual-evidence", [
 
 </details>
 
-<details>
-<summary>Advanced: should pass the converged focused gate and highest-capability review</summary>
-
-#### should pass the converged focused gate and highest-capability review
-
-- Start UI access
-   - Protocol capture: after_step
-- Review access history
-   - Protocol capture: after_step
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 15 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Start UI access")
-step("Review access history")
-_check_gate("final", [
-    "common_contract=pass",
-    "cli_routing=pass",
-    "ui_wm_parity=pass",
-    "shared_grammar_parity=pass",
-    "schema=pass",
-    "safety=pass",
-    "action_history=pass",
-    "generated_manual=pass",
-    "direct_runtime_guards=pass",
-    "spec_layout_guard=pass",
-    "highest_capability_review=accepted"
-])
-```
-
-</details>
-
-
-</details>
-
 ## At a Glance
 
 | Field | Value |
@@ -678,8 +638,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

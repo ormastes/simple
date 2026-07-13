@@ -26,7 +26,7 @@ Independent implementation work may run in parallel only after Lane A signatures
 - Merge owner: primary Codex agent in the default `ui-cli-llm-access` lane.
 - Sidecars: design used independent architecture, UI/guide, and SSpec/test-plan lanes. Implementation may use A-D sidecars with disjoint files after common signatures freeze.
 - Generated-manual owner: evidence/docs lane drafts; merge owner reads it as an operator manual and repairs steps/captures.
-- Final reviewer: primary highest-capability Codex model after all merges. It must accept architecture, dependency direction, shared T32 grammar, live transport, action safety, implementation, focused evidence, performance evidence, generated-manual quality, exclusions, and done status.
+- Final reviewer: primary highest-capability Codex model after all merges. It must accept architecture, dependency direction, shared T32 grammar, live transport, action safety, implementation, focused evidence, performance evidence, generated-manual quality, exclusions, and done status, then bind that acceptance to the clean full revision and canonical evidence-manifest digest.
 
 ## Merge order
 

@@ -12,6 +12,18 @@ The repository does not ship bundled TRACE32 GUI compatibility shared
 libraries; the GUI path relies on the locally installed vendor runtime under
 `/opt/t32` plus host X11 access.
 
+The container image registers `/opt/t32/fonts` with Fontconfig and enables the
+distro's forced-bitmap rule because TRACE32 requests its vendor PCF faces
+through Xft. After changing the vendor font directory or Dockerfile, rebuild
+with `bash config/t32/trace32_x11_container.shs build`. A healthy image resolves the
+startup face to a `t32` `PCF` file, not a TrueType fallback:
+
+```sh
+docker run --rm -v /opt/t32:/opt/t32:ro simple-trace32-x11:latest \
+  fc-match -f '%{family}|%{style}|%{fontformat}|%{file}\n' \
+  't32:style=lss:pixelsize=16:fontformat=PCF:antialias=false:hinting=false'
+```
+
 Licensing and provenance:
 
 - do not assume vendor-installed TRACE32 runtime files under `/opt/t32` are

@@ -1,0 +1,134 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+ARTIFACT_ROOT="build/test-artifacts/03_system/app/ui_cli_llm_access"
+FEATURE_ROOT="$ARTIFACT_ROOT/feature/ui_cli_llm_access"
+MANIFEST="$FEATURE_ROOT/evidence.sha256"
+RECEIPT="$ARTIFACT_ROOT/highest_capability_review.txt"
+MODE="${1:---check}"
+
+fail() {
+    echo "ui-cli-final-review: $*" >&2
+    exit 1
+}
+
+current_revision() {
+    jj log -r @- --no-graph --no-pager -T 'commit_id ++ "\n"' 2>/dev/null | tail -n 1
+}
+
+receipt_value() {
+    key="$1"
+    count="$(sed -n "s/^${key}=//p" "$RECEIPT" | wc -l | tr -d ' ')"
+    [ "$count" = 1 ] || fail "receipt must contain exactly one ${key}"
+    sed -n "s/^${key}=//p" "$RECEIPT"
+}
+
+require_clean_revision() {
+    [ -z "$(jj diff --summary)" ] || fail "working copy is dirty"
+    REVISION="$(current_revision)"
+    [ -n "$REVISION" ] || fail "cannot resolve reviewed revision"
+}
+
+evidence_paths() {
+    printf '%s\n' \
+        "$FEATURE_ROOT/focused-checks.txt" \
+        "$FEATURE_ROOT/direct-runtime-working.txt" \
+        "$FEATURE_ROOT/direct-runtime-staged.txt" \
+        "$FEATURE_ROOT/spec-layout.txt" \
+        "$FEATURE_ROOT/protocol/live-ui-transport.txt" \
+        "$FEATURE_ROOT/protocol/protocol.json" \
+        "$FEATURE_ROOT/t32/t32-gui-status.txt" \
+        "$FEATURE_ROOT/t32/t32-gui.png" \
+        "$FEATURE_ROOT/tui/tui-before.txt" \
+        "$FEATURE_ROOT/tui/tui-after.txt" \
+        "doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/gui-before.png" \
+        "doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/gui-after.png" \
+        "doc/06_spec/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_spec.md" \
+        "doc/06_spec/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_final_review_spec.md" \
+        "test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_spec.spl" \
+        "test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_final_review_spec.spl" \
+        "scripts/check/check-ui-cli-access.spl" \
+        "scripts/check/check-ui-cli-live-transport.shs"
+}
+
+write_hashes() {
+    output="$1"
+    : > "$output"
+    evidence_paths | while IFS= read -r path; do
+        [ -f "$path" ] || fail "missing evidence: $path"
+        sha256sum "$path" >> "$output"
+    done
+}
+
+write_manifest() {
+    require_clean_revision
+    mkdir -p "$(dirname -- "$MANIFEST")"
+    tmp="$MANIFEST.tmp"
+    trap 'rm -f "$tmp"' EXIT HUP INT TERM
+    write_hashes "$tmp"
+    mv "$tmp" "$MANIFEST"
+    trap - EXIT HUP INT TERM
+    echo "evidence_manifest=$MANIFEST"
+    echo "evidence_manifest_sha256=$(sha256sum "$MANIFEST" | awk '{print $1}')"
+    echo "reviewed_revision=$REVISION"
+}
+
+check_binding() {
+    require_clean_revision
+    [ -f "$RECEIPT" ] || fail "missing review receipt"
+    [ "$(receipt_value receipt_schema)" = "ui-cli-access-review/v1" ] || fail "unsupported receipt schema"
+    receipt_revision_matches || fail "receipt revision is stale"
+    [ "$(receipt_value evidence_manifest)" = "$MANIFEST" ] || fail "unexpected evidence manifest"
+    [ -f "$MANIFEST" ] || fail "missing evidence manifest"
+    expected_manifest="$(mktemp "${TMPDIR:-/tmp}/ui-cli-evidence.XXXXXX")"
+    trap 'rm -f "$expected_manifest"' EXIT HUP INT TERM
+    write_hashes "$expected_manifest"
+    cmp -s "$expected_manifest" "$MANIFEST" || fail "evidence manifest is incomplete or stale"
+    rm -f "$expected_manifest"
+    trap - EXIT HUP INT TERM
+    MANIFEST_SHA256="$(sha256sum "$MANIFEST" | awk '{print $1}')"
+    [ "$(receipt_value evidence_manifest_sha256)" = "$MANIFEST_SHA256" ] || fail "manifest digest does not match receipt"
+}
+
+receipt_revision_matches() {
+    [ "$(receipt_value reviewed_revision)" = "$REVISION" ]
+}
+
+check_stale_rejection() {
+    stale_receipt="$(mktemp "${TMPDIR:-/tmp}/ui-cli-review.XXXXXX")"
+    trap 'rm -f "$stale_receipt"' EXIT HUP INT TERM
+    canonical_receipt="$RECEIPT"
+    sed 's/^reviewed_revision=.*/reviewed_revision=0000000000000000000000000000000000000000/' "$canonical_receipt" > "$stale_receipt"
+    RECEIPT="$stale_receipt"
+    if receipt_revision_matches; then
+        fail "stale review receipt was accepted"
+    fi
+    RECEIPT="$canonical_receipt"
+    rm -f "$stale_receipt"
+    trap - EXIT HUP INT TERM
+    echo "stale_receipt_rejected=pass"
+}
+
+case "$MODE" in
+    --write-manifest)
+        write_manifest
+        ;;
+    --check-binding)
+        check_binding
+        ;;
+    --check)
+        check_binding
+        check_stale_rejection
+        exec bin/simple run scripts/check/check-ui-cli-access.spl \
+            --scenario final \
+            --reviewed-revision "$REVISION" \
+            --evidence-manifest-sha256 "$MANIFEST_SHA256"
+        ;;
+    *)
+        echo "usage: $0 [--write-manifest|--check-binding|--check]" >&2
+        exit 2
+        ;;
+esac

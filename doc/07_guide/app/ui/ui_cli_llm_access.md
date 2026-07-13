@@ -296,3 +296,103 @@ fixture and the UI CLI itself, never a direct HTTP shortcut.
 The focused `check-ui-cli-access` manual-evidence scenario also rejects
 `pass_todo`, `pass_dn`, `pass_do_nothing`, and trivial always-true assertions in its gate/spec
 sources before accepting the generated manual.
+
+Regenerate the manual before committing the implementation:
+
+```sh
+bin/simple run src/app/spipe_docgen/main.spl \
+  test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_spec.spl \
+  test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_final_review_spec.spl \
+  --output doc/06_spec/03_system/app/ui_cli_llm_access/feature --no-index
+```
+
+Review and commit the implementation and regenerated manual. On that revision,
+run the primary SSpec exactly once and save its transcript:
+
+```sh
+set -eu
+FEATURE=build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access
+mkdir -p "$FEATURE"
+bin/simple test \
+  test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_spec.spl \
+  --mode=native --clean --force-rebuild > "$FEATURE/focused-checks.txt" 2>&1
+```
+
+With the repo-managed TRACE32 GUI running on the current `DISPLAY`, record its
+exact PCF resolution, RCL status, X11 tree, and rendered frame:
+
+```sh
+T32_OUT="$FEATURE/t32"
+T32_RUNTIME="${T32_CONTAINER_RUNTIME:-docker}"
+T32_NAME="${T32_CONTAINER_NAME:-simple-trace32-x11}"
+mkdir -p "$T32_OUT"
+{
+  "$T32_RUNTIME" exec "$T32_NAME" fc-match -f \
+    'font_match=%{family}|%{style}|%{pixelsize}|%{fontformat}|%{file}\n' \
+    't32:style=lss:pixelsize=16:fontformat=PCF:antialias=false:hinting=false'
+  bash config/t32/trace32_x11_container.shs status
+  bash config/t32/trace32_x11_container.shs ping
+  xwininfo -display "$DISPLAY" -root -tree
+} > "$T32_OUT/t32-gui-status.txt" 2>&1
+import -display "$DISPLAY" -window root "$T32_OUT/t32-gui.png"
+```
+
+The first line must resolve to family `t32`, format `PCF`, and a file below
+`/opt/t32/fonts`; a DejaVu/TrueType fallback is a failure.
+
+If the run creates or updates tracked GUI evidence images, commit only those
+generated assets; do not rerun the already-green primary spec. With the working
+copy clean, record the guards and create the manifest:
+
+```sh
+set -eu
+FEATURE=build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access
+sh scripts/audit/direct-env-runtime-guard.shs --working \
+  > "$FEATURE/direct-runtime-working.txt" 2>&1
+sh scripts/audit/direct-env-runtime-guard.shs --staged \
+  > "$FEATURE/direct-runtime-staged.txt" 2>&1
+count=$(find doc/06_spec -name '*_spec.spl' | wc -l)
+printf 'doc06_spec_spl_count=%s\n' "$count" > "$FEATURE/spec-layout.txt"
+test "$count" -eq 0
+sh scripts/check/check-ui-cli-final-review.shs --write-manifest
+```
+
+The highest-capability reviewer writes
+`build/test-artifacts/03_system/app/ui_cli_llm_access/highest_capability_review.txt`
+with the reported full revision and manifest digest. The final command validates
+every hash and proves a stale-revision receipt is rejected before it can pass.
+The receipt is exact-line data:
+
+```text
+receipt_schema=ui-cli-access-review/v1
+reviewed_revision=<full revision printed by --write-manifest>
+evidence_manifest=build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/evidence.sha256
+evidence_manifest_sha256=<digest printed by --write-manifest>
+reviewer_capability=highest
+architecture=accepted
+implementation=accepted
+common_contract=pass
+cli_routing=pass
+ui_wm_parity=pass
+shared_grammar_parity=pass
+schema=pass
+safety=pass
+action_history=pass
+live_transport=accepted
+performance=accepted
+focused_evidence=accepted
+generated_manual=pass
+direct_runtime_guards=pass
+spec_layout_guard=pass
+exclusions=accepted
+done_claim=accepted
+highest_capability_review=accepted
+```
+
+After the reviewer writes that receipt, run the bound final scenario once:
+
+```sh
+bin/simple test \
+  test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_final_review_spec.spl \
+  --mode=native --clean --force-rebuild
+```

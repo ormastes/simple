@@ -21,7 +21,9 @@ cross-backend equivalence.
 ## Executable Evidence
 
 - Spec: `test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_spec.spl`
+- Final review spec: `test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_final_review_spec.spl`
 - Generated manual: `doc/06_spec/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_spec.md`
+- Final review manual: `doc/06_spec/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_final_review_spec.md`
 - Focused gate: `bin/simple run scripts/check/check-ui-cli-access.spl`
 - Production execution: native/compiled SSpec mode; interpreter loading alone is
   not execution evidence.
@@ -30,6 +32,10 @@ The Pure Simple gate owns deterministic live fixtures and emits one compact
 report per `--scenario`. A missing or failing gate is a hard scenario failure;
 `setup_ui_cli_access` and `_check_gate` never accept planned or fabricated
 output.
+
+Run the primary spec once and save its transcript, then hash that evidence and
+obtain the bound review receipt before running the final review spec once. This
+two-phase split avoids rerunning already-green acceptance scenarios.
 
 ## Environment and Fixtures
 

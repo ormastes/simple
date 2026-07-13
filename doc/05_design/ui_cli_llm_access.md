@@ -15,12 +15,16 @@ Implement the selected `REQ-UCLA-001..025` and `NFR-UCLA-001..022` by extracting
 | `examples/10_tooling/trace32_tools/t32_cli/commands.spl` | Map overlapping GUI commands to shared descriptors; keep T32-only catalog entries | T32 adapter |
 | `examples/10_tooling/trace32_tools/t32_cli/types.spl` | Compatibility alias `T32BridgeResult = AccessResult` | T32 adapter |
 | `examples/10_tooling/trace32_tools/t32_cli/render.spl` | Forward to shared human renderer; retain only T32 GUI-status decoration if needed | T32 adapter |
+| `examples/10_tooling/trace32_tools/t32_cli/bridge_access.spl` | Own T32 discovery/inspect/action/history bridge logic below the stable `bridge.spl` facade | T32 adapter |
+| `config/t32/trace32_x11_container.Dockerfile` | Admit and register vendor PCF fonts for the real Xft GUI path | T32 runtime |
 | `examples/10_tooling/trace32_tools/t32_cli/mod.spl` | Parse output mode and map T-code/text failures to `AccessError` | T32 adapter |
 | `src/app/ui/access_cli.spl` | New UI descriptor catalog and live test-API/read-only-store adapter | UI adapter |
 | `src/app/ui/cli_entry.spl` | Dispatch access verbs before backend modes; preserve existing modes | UI entry |
 | `src/app/play/wm_access_cli.spl` | New live WM conversion/dispatch owner | WM adapter |
 | `src/app/play/main.spl` | Replace planned WM branches with live calls; preserve spellings | play entry |
 | `scripts/check/check-ui-cli-access.spl` | Pure Simple focused scenario checker | evidence |
+| `scripts/check/check-ui-cli-final-review.shs` | Bind final review to the clean revision and hashed evidence manifest | evidence |
+| `test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_final_review_spec.spl` | Run only the bound final acceptance after the primary transcript is reviewed | evidence |
 
 No renderer, generic adapter trait, or new service is added. The persisted UI
 store gains one additive property column so capture/staleness metadata survives
@@ -167,6 +171,8 @@ Adapters map private failures to the selected stable codes. Empty is success onl
 ## Test and evidence hooks
 
 The Pure Simple checker `scripts/check/check-ui-cli-access.spl` owns deterministic fixtures and calls real common/app entry functions. System scenarios call it through `bin/simple run`, require scenario-specific evidence markers, and capture TUI/protocol/GUI artifacts. The checker has no alternate pass path: missing live fixtures, commands, measurements, captures, or final review evidence fail nonzero.
+
+After the primary SSpec run, `scripts/check/check-ui-cli-final-review.shs --write-manifest` hashes its transcript, T32 GUI font/status/window-tree/screenshot proof, and the other canonical evidence. The highest-capability reviewer records that manifest digest and the full reviewed revision in the receipt. A separate final-review SSpec invokes `--check`, which rejects dirty, stale, altered, or incomplete evidence before invoking the final Pure Simple scenario. This preserves one execution per acceptance scenario.
 
 `scripts/check/check-ui-cli-live-transport.shs` separately launches
 `test/fixtures/ui_cli_access/live_server.spl`, drives windows/find/act/history

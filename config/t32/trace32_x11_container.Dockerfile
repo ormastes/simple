@@ -21,7 +21,15 @@ RUN apt-get update && \
         x11-utils \
         xvfb \
         xfonts-utils && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    rm -f /etc/fonts/conf.d/70-no-bitmaps-except-emoji.conf && \
+    ln -sf /usr/share/fontconfig/conf.avail/70-force-bitmaps.conf \
+        /etc/fonts/conf.d/70-force-bitmaps.conf && \
+    printf '%s\n' \
+        '<?xml version="1.0"?>' \
+        '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">' \
+        '<fontconfig><dir>/opt/t32/fonts</dir></fontconfig>' \
+        > /etc/fonts/conf.d/69-trace32-fonts.conf
 
 WORKDIR /workspace
 
