@@ -34,3 +34,21 @@ main
 The next fix should make `load_sources_impl` return a source-loading error
 instead of dereferencing an invalid module/source handle. Do not use the Rust
 seed as production evidence or retry bootstrap loops to bypass this crash.
+
+## Bootstrap rebuild evidence
+
+On 2026-07-13, three bounded attempts used the optimized Rust seed only to
+rebuild the pure-Simple CLI with the concrete entry
+`src/app/cli/_CliMain/main_and_help.spl`, `--entry-closure`, and the preserved
+1,177-object cache. Each attempt timed out after 900 seconds before discovery
+or object generation, at about 100% CPU and 1.27 GB RSS. Using one
+`--source src` root instead of the three compiler/app/lib roots did not change the
+result. With `SIMPLE_NATIVE_BUILD_RUST_TRACE=1`, the final attempt recorded
+zero `discover visit` events, zero cache mutations, and no output artifact.
+
+The first attempt exposed invalid nested-JSON brace escaping in
+`src/app/stats/doc_coverage_dynamic.spl`; that source now passes the focused
+bootstrap check. After that repair, the final build log contained zero parser
+errors but still timed out before discovery. The remaining investigation must
+instrument the pre-discovery source-analysis phase rather than retry the same
+full CLI build.
