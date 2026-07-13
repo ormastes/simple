@@ -12,7 +12,8 @@ use common.ui.widget_hit.{
     widget_dispatch_hover,
     widget_dispatch_click,
     widget_dispatch_scroll,
-    widget_dispatch_key
+    widget_dispatch_key,
+    widget_hit_test
 }
 
 # Viewport used to lay out the tree for hit-testing. Stored in the tree's
@@ -75,6 +76,27 @@ fn process_event(state: UIState, event: UIEvent) -> UIState:
         UIEvent.InputChange(target_id, value):
             return handle_input_change(state, target_id, value)
         UIEvent.FetchResult(request_id, url, status, headers, body, error):
+            return state
+        UIEvent.DragStart(source_id, mime, data):
+            return handle_drag_start(state, source_id, mime, data)
+        UIEvent.DragMove(x, y):
+            return handle_drag_move(state, x, y)
+        UIEvent.DragDrop(mime, data, x, y, source_id):
+            return handle_drag_drop(state, mime, data, x, y, source_id)
+        # Copy/Cut/Paste/PasteFromHistory are stateless from process_event's
+        # point of view: process_event is a pure (state, event) -> state
+        # reducer with no side channel for a ClipboardService instance. The
+        # actual clipboard mechanics are dispatched by the caller that owns
+        # the service (see nogc_sync_mut.ui.session.UISession.dispatch,
+        # which owns one ClipboardService per session and handles these
+        # variants directly before/alongside calling process_event).
+        UIEvent.Copy:
+            return state
+        UIEvent.Cut:
+            return state
+        UIEvent.Paste:
+            return state
+        UIEvent.PasteFromHistory(index):
             return state
 
 fn handle_keypress(state: UIState, key: text) -> UIState:
@@ -259,6 +281,77 @@ fn handle_scroll(state: UIState, x: i32, y: i32, dy: i32) -> UIState:
     val w = _viewport_dim(state, "viewport_w", 640)
     val h = _viewport_dim(state, "viewport_h", 480)
     widget_dispatch_scroll(root, w, h, x, y, dy)
+    return state
+
+# =========================================================================
+# Content drag-and-drop (distinct from window titlebar move, which the
+# compositor handles on its own — this is CONTENT dragged between widgets).
+# =========================================================================
+
+# Drag bookkeeping is stored as props on the ROOT widget node (the same
+# process-local widget prop store that `ui_hover` / `ui_pressed` / `ui_focus`
+# already use), NOT as UITree tokens. Tokens live in the tree's `Dict` field
+# and are copied by value on every `with_token`, so they do not round-trip
+# through the pure `(state,event)->state` reducer under all backends; the
+# prop store is the single shared surface every other pointer reducer here
+# writes to, and it is what renderers read back. Keeping drag state on the
+# root node keeps these handlers pure (they return `state` unchanged; all
+# effects are in the shared store) and consistent with hover/press.
+val _DRAG_ACTIVE_PROP: text = "ui_drag_active"
+val _DRAG_SOURCE_PROP: text = "ui_drag_source"
+val _DRAG_MIME_PROP: text = "ui_drag_mime"
+val _DRAG_DATA_PROP: text = "ui_drag_data"
+
+fn handle_drag_start(state: UIState, source_id: text, mime: text, data: text) -> UIState:
+    """Begin a content drag: record the payload on the root node and mark the
+    source widget so a renderer can show drag feedback."""
+    val root = state.tree.root_node()
+    root.set_prop(_DRAG_ACTIVE_PROP, "true")
+    root.set_prop(_DRAG_SOURCE_PROP, source_id)
+    root.set_prop(_DRAG_MIME_PROP, mime)
+    root.set_prop(_DRAG_DATA_PROP, data)
+    val node = state.tree.find_widget(source_id)
+    if node != nil:
+        node.set_prop("ui_dragging", "true")
+    return state
+
+fn handle_drag_move(state: UIState, x: i32, y: i32) -> UIState:
+    """Highlight the widget under the pointer as the current drop target."""
+    val root = state.tree.root_node()
+    if root.get_prop(_DRAG_ACTIVE_PROP) != "true":
+        return state
+    val w = _viewport_dim(state, "viewport_w", 640)
+    val h = _viewport_dim(state, "viewport_h", 480)
+    val hit = widget_hit_test(root, w, h, x, y)
+    for id in root.collect_ids():
+        if id != "":
+            var flag = "false"
+            if hit.found and id == hit.id:
+                flag = "true"
+            WidgetNode(id: id).set_prop("ui_drop_target", flag)
+    return state
+
+fn handle_drag_drop(state: UIState, mime: text, data: text, x: i32, y: i32, source_id: text) -> UIState:
+    """Deliver the dragged payload to the widget under (x, y) and clear drag
+    state. Delivery target: an input/textfield's `value` prop (the same
+    generic surface Copy/Cut/Paste write to) — the inter-widget minimum."""
+    val root = state.tree.root_node()
+    val w = _viewport_dim(state, "viewport_w", 640)
+    val h = _viewport_dim(state, "viewport_h", 480)
+    val hit = widget_hit_test(root, w, h, x, y)
+    for id in root.collect_ids():
+        if id != "":
+            WidgetNode(id: id).set_prop("ui_drop_target", "false")
+    if source_id != "":
+        val src = state.tree.find_widget(source_id)
+        if src != nil:
+            src.set_prop("ui_dragging", "false")
+    root.set_prop(_DRAG_ACTIVE_PROP, "false")
+    if not hit.found:
+        return state
+    val target_kind = WidgetNode(id: hit.id).kind_name()
+    if target_kind == "input" or target_kind == "textfield":
+        WidgetNode(id: hit.id).set_prop("value", data)
     return state
 
 fn handle_focus_event(state: UIState, target_id: text, kind: text) -> UIState:

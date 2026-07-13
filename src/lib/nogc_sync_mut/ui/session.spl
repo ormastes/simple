@@ -21,6 +21,7 @@ use common.ui.capability.{Capability}
 use common.ui.capability_policy.{CapabilityPolicy, check_capability, require_capability}
 use common.ui.patch_stream.{PatchStream}
 use common.ui.semantic_contract.{SemanticUiCommand, SemanticUiDispatchResult, semantic_ui_command_to_event}
+use common.ui.clipboard_service.{ClipboardService, ClipboardEntry}
 
 # =========================================================================
 # UISession
@@ -41,6 +42,7 @@ class UISession:
     access_store: UiAccessStore?
     window_surfaces: UiWindowSurfaceRegistry
     patch_stream: PatchStream
+    clipboard: ClipboardService
 
     static fn new(tree: UITree) -> UISession:
         """Create a session with a main tree and default settings."""
@@ -61,7 +63,8 @@ class UISession:
             access_sequence: 0,
             access_store: nil,
             window_surfaces: UiWindowSurfaceRegistry.new(),
-            patch_stream: PatchStream.new()
+            patch_stream: PatchStream.new(),
+            clipboard: ClipboardService.new()
         )
 
     static fn new_with_store(tree: UITree, store: WidgetStore) -> UISession:
@@ -82,7 +85,8 @@ class UISession:
             access_sequence: 0,
             access_store: nil,
             window_surfaces: UiWindowSurfaceRegistry.new(),
-            patch_stream: PatchStream.new()
+            patch_stream: PatchStream.new(),
+            clipboard: ClipboardService.new()
         )
 
     static fn new_with_policy(tree: UITree, policy: CapabilityPolicy) -> UISession:
@@ -104,7 +108,8 @@ class UISession:
             access_sequence: 0,
             access_store: nil,
             window_surfaces: UiWindowSurfaceRegistry.new(),
-            patch_stream: PatchStream.new()
+            patch_stream: PatchStream.new(),
+            clipboard: ClipboardService.new()
         )
 
 # =========================================================================
@@ -228,6 +233,20 @@ impl UISession:
             UIEvent.Action(name):
                 event_kind = "action"
                 payload = name
+                # Editor Cut/Copy/Paste buttons (editor.spl) fire generic
+                # UIEvent.Action(name) values; translate the well-known
+                # "editor.edit.*" names into real ClipboardService calls
+                # here rather than widening process_event's pure signature.
+                if name == "editor.edit.copy":
+                    payload = self._clipboard_copy_focused()
+                elif name == "editor.edit.cut":
+                    payload = self._clipboard_cut_focused()
+                elif name == "editor.edit.paste":
+                    payload = self._clipboard_paste_focused()
+                elif name.starts_with("editor.edit.paste_history_"):
+                    val idx_str = name.slice(26, name.len())
+                    val idx = idx_str.to_int() ?? 0
+                    payload = self._clipboard_paste_history_focused(idx)
             UIEvent.FocusNext:
                 event_kind = "focus_next"
                 payload = "focus_next"
@@ -272,6 +291,29 @@ impl UISession:
             UIEvent.FileChanged:
                 event_kind = "file_changed"
                 payload = "file_changed"
+            UIEvent.DragStart(source_id, mime, data):
+                event_kind = "drag_start"
+                target_widget_id = source_id
+                payload = mime + ":" + data
+            UIEvent.DragMove(x, y):
+                event_kind = "drag_move"
+                payload = "{x},{y}"
+            UIEvent.DragDrop(mime, data, x, y, source_id):
+                event_kind = "drag_drop"
+                target_widget_id = source_id
+                payload = mime + ":" + data
+            UIEvent.Copy:
+                event_kind = "clipboard_copy"
+                payload = self._clipboard_copy_focused()
+            UIEvent.Cut:
+                event_kind = "clipboard_cut"
+                payload = self._clipboard_cut_focused()
+            UIEvent.Paste:
+                event_kind = "clipboard_paste"
+                payload = self._clipboard_paste_focused()
+            UIEvent.PasteFromHistory(index):
+                event_kind = "clipboard_paste_history"
+                payload = self._clipboard_paste_history_focused(index)
         self.state = update_state(self.state, event)
         self.surfaces.update_tree(surface_id, self.state.tree)
         self.surfaces.update_focus(surface_id, self.state.focused_id)
@@ -645,6 +687,72 @@ impl UISession:
     me set_capability_policy(policy: CapabilityPolicy):
         """Replace the session's capability policy."""
         self.capability_policy = policy
+
+    # -- Clipboard (ClipboardService-backed) ----------------------------------
+    #
+    # Copy/Cut/Paste/PasteFromHistory act on the currently focused widget's
+    # `value` prop — the same generic surface an input/textfield already
+    # exposes (see widget_hit.widget_dispatch_key), so this works uniformly
+    # for any GUI or TUI widget tree with a focused input, not just editor.spl.
+    # Capability-gated via the session's CapabilityPolicy (default-allow when
+    # no policy is attached, matching check_cap's existing convention).
+
+    me _clipboard_copy_focused() -> text:
+        if self.check_cap(Capability.ClipboardWrite).is_err():
+            return ""
+        val id = self.state.focused_id
+        if id == "":
+            return ""
+        val node = self.state.tree.find_widget(id)
+        if node == nil:
+            return ""
+        val value = node.get_prop("value")
+        self.clipboard.copy("text/plain", value)
+        return value
+
+    me _clipboard_cut_focused() -> text:
+        if self.check_cap(Capability.ClipboardWrite).is_err():
+            return ""
+        val id = self.state.focused_id
+        if id == "":
+            return ""
+        val node = self.state.tree.find_widget(id)
+        if node == nil:
+            return ""
+        val value = node.get_prop("value")
+        self.clipboard.cut("text/plain", value)
+        node.set_prop("value", "")
+        return value
+
+    me _clipboard_paste_focused() -> text:
+        if self.check_cap(Capability.ClipboardRead).is_err():
+            return ""
+        val id = self.state.focused_id
+        if id == "":
+            return ""
+        val node = self.state.tree.find_widget(id)
+        if node == nil:
+            return ""
+        val entry = self.clipboard.paste()
+        if entry == nil:
+            return ""
+        node.set_prop("value", entry.data)
+        return entry.data
+
+    me _clipboard_paste_history_focused(index: i32) -> text:
+        if self.check_cap(Capability.ClipboardRead).is_err():
+            return ""
+        val id = self.state.focused_id
+        if id == "":
+            return ""
+        val node = self.state.tree.find_widget(id)
+        if node == nil:
+            return ""
+        val entry = self.clipboard.paste_from_history(index)
+        if entry == nil:
+            return ""
+        node.set_prop("value", entry.data)
+        return entry.data
 
     me open_surface_gated(id: text, tree: UITree, required_cap: Capability) -> Result<SurfaceHandle, text>:
         """Open a surface only if the required capability is granted."""
