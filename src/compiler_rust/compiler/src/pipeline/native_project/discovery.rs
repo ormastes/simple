@@ -210,9 +210,13 @@ impl NativeProjectBuilder {
             }
 
             let mut parser = simple_parser::Parser::new(&source);
-            let module = parser
-                .parse()
-                .map_err(|e| format!("failed to parse {} during discovery: {}", canonical.display(), e))?;
+            let module = parser.parse().map_err(|e| {
+                let location = e
+                    .span()
+                    .map(|span| format!(" at {}:{}", span.line, span.column))
+                    .unwrap_or_default();
+                format!("failed to parse {}{} during discovery: {}", canonical.display(), location, e)
+            })?;
 
             // Try each resolver -- the first hit wins for each dependency.
             let mut found_deps: HashSet<PathBuf> = HashSet::new();

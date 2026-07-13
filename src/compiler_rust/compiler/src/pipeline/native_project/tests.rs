@@ -260,6 +260,23 @@ fn debug_os_entry_closure() {
 }
 
 #[test]
+fn repo_sfnt_source_parses_for_entry_discovery() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let path = repo_root.join("src/lib/common/encoding/sfnt.spl");
+    let source = std::fs::read_to_string(&path).unwrap();
+    simple_parser::Parser::new(&source)
+        .parse()
+        .unwrap_or_else(|error| panic!("{} {:?}: {error}", path.display(), error.span()));
+}
+
+#[test]
 fn test_module_prefix_from_path() {
     let source_root = PathBuf::from("/project/src");
 

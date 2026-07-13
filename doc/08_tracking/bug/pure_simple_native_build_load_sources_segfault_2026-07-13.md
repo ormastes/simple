@@ -52,3 +52,11 @@ bootstrap check. After that repair, the final build log contained zero parser
 errors but still timed out before discovery. The remaining investigation must
 instrument the pre-discovery source-analysis phase rather than retry the same
 full CLI build.
+
+Follow-up identified the dispatch cause: a host `native-build` without
+`--target` is a pure-Simple tool and interprets `src/app/cli/native_build_main.spl`;
+it never enters the Rust bootstrap builder. Supplying the real host target
+`--target x86_64-unknown-linux-gnu` routes the seed to its bootstrap handler and
+starts entry discovery in seconds. That path then exposed a spanless Rust-parser
+failure in `src/lib/common/encoding/sfnt.spl`; discovery now reports parser
+line/column, and a focused regression covers the compatible SFNT source form.
