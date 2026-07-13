@@ -192,9 +192,11 @@ Host input
 | `src/lib/common/ui/draw_ir_sdn.spl` | SDN interchange skin over Draw IR |
 | `src/lib/common/ui/draw_ir_drawio.spl` | Draw.io mxGraph interchange skin over Draw IR |
 | `src/lib/common/ui/window_scene.spl` | WM scene, event target translation, scene layout keys |
-| `src/lib/common/ui/window_scene_draw_ir.spl` | WM scene → Draw IR composition |
+| `src/lib/common/ui/window_scene_draw_ir.spl` | WM scene → ordered Draw IR composition with top-level content IMAGE projection |
 | `src/lib/common/ui/wm_runtime_dispatch.spl` | WM dispatch command adapter for host shells |
-| `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` | Engine2D Draw IR executor (rect/text, CPU fallback) |
+| `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` | Engine2D Draw IR executor (rect/text/resolved image, present, CPU fallback) |
+| `src/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_adv.spl` | Optional host runtime-queue adapter, separate from the baremetal core closure |
+| `src/os/compositor/engine2d_wm_frame_executor.spl` | SimpleOS production WM DrawIR/Engine2D frame owner; invalid or nested-unresolved content fails closed |
 | `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl` | Drawing vs processing lane split |
 | `src/app/ui.render/capability.spl` | Implementation-free renderer capabilities |
 | `src/app/ui.render/widgets.spl` | TUI-only compatibility renderer shim |

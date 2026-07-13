@@ -28,7 +28,7 @@ shell_baremetal_backend_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -62,13 +62,45 @@ val window = simple_gui_internal_window(
 )
 val scene = simple_gui_internal_window_scene(800, 600, "simpleos-compositor", [window])
 val pixels = _solid_pixels(412 * 264, 0xFF102030u32)
-val frame = WmContentFrame(window_id: "41", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 412, height: 264, pixels: pixels, checksum: 1u64)
+val frame = WmContentFrame(window_id: "41", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 412, height: 264, pixels: pixels, checksum: wm_content_frame_checksum(pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
 render_baremetal_shared_wm_scene(backend, scene, empty_taskbar_model(), [frame], 7, 9, "12:34")
 
 expect(backend.clear_count).to_equal(1)
 expect(backend.fill_count > 0).to_be(true)
 expect(backend.text_count > 0).to_be(true)
 expect(backend.present_count).to_equal(0)
+```
+
+</details>
+
+#### routes the production loop through authoritative runtime scene inputs
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val src = file_read("src/os/desktop/shell.spl")
+val run_start = src.index_of("me run_baremetal") ?? 0
+val snapshot_start = src.index_of("fn runtime_scene_snapshot") ?? src.len()
+val run_body = src.slice(run_start, snapshot_start)
+expect(src).to_contain("me render_baremetal_frame(executor: Engine2dWmFrameExecutor)")
+expect(src).to_contain("executor.render(scene, taskbar, content_frames")
+expect(run_body).to_contain("self.render_baremetal_frame(executor)")
+expect(run_body.contains("render_baremetal_shared_wm_scene")).to_be(false)
+```
+
+</details>
+
+#### routes the live taskbar model and clock through shared taskbar object rendering
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val src = file_read("src/os/desktop/shell_baremetal.spl")
+expect(src).to_contain("shared_wm_scene_render_taskbar_context_to_backend")
+expect(src).to_contain("SharedWmTaskbarRenderInput")
+expect(src.contains("shared_wm_scene_render_to_backend_with_taskbar")).to_be(false)
 ```
 
 </details>
@@ -92,8 +124,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -50,11 +50,12 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val composition = shared_wm_scene_draw_ir_composition(_layered_scene(), _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
 
-expect(composition.batches.len()).to_equal(6)
+expect(composition.batches.len()).to_equal(7)
 expect(composition.batches[2].embedding.surface_id).to_equal("bottom")
 expect(composition.batches[3].embedding.surface_id).to_equal("middle-a")
 expect(composition.batches[4].embedding.surface_id).to_equal("middle-b")
 expect(composition.batches[5].embedding.surface_id).to_equal("top")
+expect(composition.batches[6].embedding.component_id).to_equal("wm-taskbar-objects")
 ```
 
 </details>
@@ -70,11 +71,12 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val composition = shared_wm_scene_draw_ir_composition(_sparse_layered_scene(), _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
 
-expect(composition.batches.len()).to_equal(6)
+expect(composition.batches.len()).to_equal(7)
 expect(composition.batches[2].embedding.surface_id).to_equal("bottom")
 expect(composition.batches[3].embedding.surface_id).to_equal("middle-a")
 expect(composition.batches[4].embedding.surface_id).to_equal("middle-b")
 expect(composition.batches[5].embedding.surface_id).to_equal("top")
+expect(composition.batches[6].embedding.component_id).to_equal("wm-taskbar-objects")
 ```
 
 </details>

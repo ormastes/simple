@@ -38,7 +38,8 @@ use common.ui.window_scene.{
     simple_gui_internal_window_scene
 }
 use common.ui.taskbar_model.{TaskbarModel}
-use common.ui.window_scene_draw_ir.{shared_wm_scene_render_context_to_backend, shared_wm_scene_draw_ir_composition_with_content}
+use common.ui.draw_ir.{DRAW_IR_COMMAND_IMAGE}
+use common.ui.window_scene_draw_ir.{shared_wm_content_frame_image_uri, shared_wm_scene_render_context_to_backend, shared_wm_scene_draw_ir_composition_with_content}
 use common.ui.wm_gui_content_frame.{wm_gui_content_frame_from_pixels}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 
@@ -256,7 +257,7 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         val window = _borderless_window("win-probe", 10, 10, 100, 70)
         val scene = simple_gui_internal_window_scene(140, 140, "nested-f", [window])
         val pixels: [u32] = [0xFF123456u32; 100 * 70]
-        val frame = WmContentFrame(window_id: "win-probe", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 100, height: 70, pixels: pixels, checksum: 77u64, parent_window_id: "", offset_x: 0, offset_y: 0)
+        val frame = WmContentFrame(window_id: "win-probe", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 100, height: 70, pixels: pixels, checksum: wm_content_frame_checksum(pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
         val revision = WmSceneRevision(scene_revision: 7, input_revision: 11, taskbar_revision: 3)
         val input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: [frame], metrics: _metrics(), t_micros: 0)
         val backend = TestPixelBackend.create(140, 140, 0u32)
@@ -283,3 +284,29 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
                         found_parent_id = true
         expect(found_surface).to_equal(true)
         expect(found_parent_id).to_equal(true)
+
+    it "projects an authoritative top-level content frame as a resolved Draw IR image":
+        val window = _borderless_window("win-image", 10, 10, 20, 20)
+        val scene = simple_gui_internal_window_scene(80, 80, "image-projection", [window])
+        val pixels = _solid_pixels(20 * 20, 0xFF556677u32)
+        val frame = WmContentFrame(window_id: "win-image", scene_revision: 9, content_revision: 2, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 20, height: 20, pixels: pixels, checksum: wm_content_frame_checksum(pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
+        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, TaskbarModel(pinned: [], running: [], tray: []), [frame], "cpu", 1000, "", 0)
+        var found = false
+        for batch in composition.batches:
+            for command in batch.commands:
+                if command.kind == DRAW_IR_COMMAND_IMAGE and command.image_uri == shared_wm_content_frame_image_uri(frame):
+                    found = true
+        expect(found).to_be(true)
+
+    it "rejects a top-level Draw IR image whose nonzero checksum is incorrect":
+        val window = _borderless_window("win-bad-image", 10, 10, 20, 20)
+        val scene = simple_gui_internal_window_scene(80, 80, "bad-image-projection", [window])
+        val pixels = _solid_pixels(20 * 20, 0xFF556677u32)
+        val frame = WmContentFrame(window_id: "win-bad-image", scene_revision: 9, content_revision: 2, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 20, height: 20, pixels: pixels, checksum: 1u64, parent_window_id: "", offset_x: 0, offset_y: 0)
+        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, TaskbarModel(pinned: [], running: [], tray: []), [frame], "cpu", 1000, "", 0)
+        var found = false
+        for batch in composition.batches:
+            for command in batch.commands:
+                if command.kind == DRAW_IR_COMMAND_IMAGE:
+                    found = true
+        expect(found).to_be(false)

@@ -40,6 +40,7 @@ use common.ui.window_scene.{
     WM_CONTENT_ORIGIN_SIMPLE_WEB,
     shared_wm_background_color,
     shared_wm_scene_resolve_background,
+    wm_content_frame_checksum,
     simple_gui_internal_window_with_chrome_kind,
     simple_gui_internal_window_scene
 }
@@ -184,7 +185,8 @@ describe "SharedWmScene render executor (common.ui.window_scene_draw_ir)":
         val scene = simple_gui_internal_window_scene(168, 160, "executor-spec", [window])
         val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 56)
         val revision = WmSceneRevision(scene_revision: 9, input_revision: 10, taskbar_revision: 11)
-        val frame = WmContentFrame(window_id: "window-derived", scene_revision: 9, content_revision: 1, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 100, height: 40, pixels: [0xFF123456u32; 4000], checksum: 1u64, parent_window_id: "", offset_x: 0, offset_y: 0)
+        val derived_pixels: [u32] = [0xFF123456u32; 4000]
+        val frame = WmContentFrame(window_id: "window-derived", scene_revision: 9, content_revision: 1, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 100, height: 40, pixels: derived_pixels, checksum: wm_content_frame_checksum(derived_pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
         val render = SharedWmRenderInput(scene: scene, revision: revision, content_frames: [frame], metrics: metrics, t_micros: 0)
         val taskbar = TaskbarModel(
             pinned: [
@@ -208,7 +210,7 @@ describe "SharedWmScene render executor (common.ui.window_scene_draw_ir)":
         val scene = _one_window_scene(WM_CHROME_KIND_BORDERLESS)
         val pixels: [u32] = [0xFF123456u32; 100 * 70]
         val revision = WmSceneRevision(scene_revision: 7, input_revision: 11, taskbar_revision: 3)
-        val frame = WmContentFrame(window_id: "win-probe", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 100, height: 70, pixels: pixels, checksum: 77u64, parent_window_id: "", offset_x: 0, offset_y: 0)
+        val frame = WmContentFrame(window_id: "win-probe", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 100, height: 70, pixels: pixels, checksum: wm_content_frame_checksum(pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
         val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 44)
         val input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: [frame], metrics: metrics, t_micros: 0)
         val backend = TestPixelBackend.create(140, 140, 0u32)
@@ -216,10 +218,11 @@ describe "SharedWmScene render executor (common.ui.window_scene_draw_ir)":
         expect(backend.pixels[20 * 140 + 20]).to_equal(0xFF123456u32)
         expect(stats.content_pixel_count).to_equal(7000)
 
-    it "fails closed instead of drawing canned content for a zero-checksum rich frame":
+    it "fails closed instead of drawing content with a nonzero incorrect checksum":
         val scene = _one_window_scene(WM_CHROME_KIND_BORDERLESS)
         val revision = WmSceneRevision(scene_revision: 7, input_revision: 11, taskbar_revision: 3)
-        val stale = WmContentFrame(window_id: "win-probe", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 100, height: 70, pixels: [0xFF123456u32; 100 * 70], checksum: 0u64, parent_window_id: "", offset_x: 0, offset_y: 0)
+        val stale_pixels: [u32] = [0xFF123456u32; 100 * 70]
+        val stale = WmContentFrame(window_id: "win-probe", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 100, height: 70, pixels: stale_pixels, checksum: wm_content_frame_checksum(stale_pixels) ^ 1u64, parent_window_id: "", offset_x: 0, offset_y: 0)
         val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 44)
         val backend = TestPixelBackend.create(140, 140, 0u32)
         val stats = shared_wm_scene_render_context_to_backend(backend, SharedWmRenderInput(scene: scene, revision: revision, content_frames: [stale], metrics: metrics, t_micros: 0))
@@ -229,7 +232,8 @@ describe "SharedWmScene render executor (common.ui.window_scene_draw_ir)":
     it "rejects a frame whose scene revision mismatches authoritative input":
         val scene = _one_window_scene(WM_CHROME_KIND_BORDERLESS)
         val revision = WmSceneRevision(scene_revision: 8, input_revision: 11, taskbar_revision: 3)
-        val mismatched = WmContentFrame(window_id: "win-probe", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 100, height: 70, pixels: [0xFF123456u32; 100 * 70], checksum: 77u64, parent_window_id: "", offset_x: 0, offset_y: 0)
+        val mismatched_pixels: [u32] = [0xFF123456u32; 100 * 70]
+        val mismatched = WmContentFrame(window_id: "win-probe", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 100, height: 70, pixels: mismatched_pixels, checksum: wm_content_frame_checksum(mismatched_pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
         val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 44)
         val backend = TestPixelBackend.create(140, 140, 0u32)
         val input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: [mismatched], metrics: metrics, t_micros: 0)

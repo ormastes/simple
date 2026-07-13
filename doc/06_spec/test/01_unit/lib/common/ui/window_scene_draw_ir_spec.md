@@ -54,11 +54,12 @@ val composition = shared_wm_scene_draw_ir_composition(scene, _taskbar(), DRAW_IR
 expect(composition.composition_id).to_equal("wm-composite")
 expect(composition.scene_key).to_equal(shared_wm_scene_layout_key(scene))
 expect(composition.backend_target).to_equal(DRAW_IR_BACKEND_GPU)
-expect(composition.batches.len()).to_equal(4)
+expect(composition.batches.len()).to_equal(5)
 expect(composition.batches[0].embedding.component_id).to_equal("desktop")
 expect(composition.batches[1].embedding.component_id).to_equal("wm-chrome")
 expect(composition.batches[2].embedding.surface_id).to_equal("surf1")
 expect(composition.batches[3].embedding.surface_id).to_equal("surf2")
+expect(composition.batches[4].embedding.component_id).to_equal("wm-taskbar-objects")
 expect(composition.batches[0].source.source_kind).to_equal(DRAW_IR_SOURCE_WM_SCENE)
 expect(composition.batches[1].source.source_id).to_equal("wm.chrome")
 expect(composition.batches[2].source.source_id).to_equal("wm.window.win1")
@@ -70,7 +71,7 @@ expect(composition.batches[2].embedding.y).to_equal(40)
 expect(composition.batches[3].embedding.x).to_equal(80)
 expect(composition.batches[3].embedding.y).to_equal(120)
 expect(composition.batches[3].commands[0].kind).to_equal(DRAW_IR_COMMAND_RECT)
-expect(composition.batches[3].commands[3].kind).to_equal(DRAW_IR_COMMAND_TEXT)
+expect(composition.batches[3].commands[6].kind).to_equal(DRAW_IR_COMMAND_TEXT)
 ```
 
 </details>
@@ -138,8 +139,8 @@ val plan = simple_2d_draw_ir_adv_composition_plan(composition, false)
 expect(plan.composition_id).to_equal("wm-composite")
 expect(plan.backend_target).to_equal(DRAW_IR_BACKEND_GPU)
 expect(plan.selected_backend).to_equal("cpu")
-expect(plan.batch_count).to_equal(4)
-expect(plan.command_count).to_equal(12)
+expect(plan.batch_count).to_equal(5)
+expect(plan.command_count).to_equal(34)
 expect(plan.fallback_required).to_equal(true)
 ```
 

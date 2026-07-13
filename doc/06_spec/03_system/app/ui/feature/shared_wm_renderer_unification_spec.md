@@ -225,13 +225,14 @@ val window = simple_gui_internal_window(
 )
 val scene = simple_gui_internal_window_scene(800, 600, "simpleos-compositor", [window])
 val pixels = _solid_pixels(412 * 264, 0xFF102030u32)
-val frame = WmContentFrame(window_id: "41", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 412, height: 264, pixels: pixels, checksum: 1u64)
+val frame = WmContentFrame(window_id: "41", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 412, height: 264, pixels: pixels, checksum: wm_content_frame_checksum(pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
 render_baremetal_shared_wm_scene(backend, scene, empty_taskbar_model(), [frame], 7, 9, "12:34")
 
 val fill_seen = if backend.fill_count > 0: 1 else: 0
 val text_seen = if backend.text_count > 0: 1 else: 0
 expect(fill_seen).to_equal(1)
 expect(text_seen).to_equal(1)
+expect(backend.blit_count).to_equal(1)
 expect(backend.present_count).to_equal(0)
 ```
 

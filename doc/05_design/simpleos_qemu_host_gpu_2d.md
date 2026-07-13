@@ -22,14 +22,20 @@ outstanding request map rejects duplicate or stale receipts.
 
 1. The guest maps the QEMU `ivshmem-plain` BAR2 region and negotiates bounded
    capabilities through its control header.
-2. The current Engine2D command subset uses the payload area; canonical Draw IR
-   and ProcessingIR serialization remain open requirements through the same
-   session.
+2. Canonical plain-RECT Draw IR and ProcessingIR `FillU32` use the payload area.
+   Production WM frames first form one `DrawIrComposition`; the local fallback
+   resolves checksum-valid top-level `WmContentFrame` pixels as IMAGE resources.
+   Styled text/image wire attachments and clipped nested resources remain open.
 3. The daemon validates, dispatches to its private host adapter, reads output
    back in the same completion, and emits a correlated receipt.
 4. The guest validates provenance and exact CPU-oracle parity.
 5. Any unavailable service/backend or invalid receipt returns a stable reason
    and selects the existing software/CPU path without preventing boot.
+
+The local `Engine2dWmFrameExecutor` rejects duplicate or unreferenced content
+frames, stale revisions, bad checksums, unresolved IMAGE commands, and nested
+GROUP metadata. This keeps production rendering honest while the wire remains
+plain-RECT-only.
 
 ## Bounds and Failure Policy
 

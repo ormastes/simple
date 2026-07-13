@@ -1,0 +1,56 @@
+# Canonical Shared WM -> Draw IR -> Engine2D production frame executor.
+
+use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU}
+use common.ui.taskbar_model.{TaskbarModel}
+use common.ui.window_scene.{SharedWmScene, WmContentFrame}
+use common.ui.window_scene_draw_ir.{
+    shared_wm_content_frame_for_window,
+    shared_wm_content_frame_image_uri,
+    shared_wm_scene_draw_ir_composition_with_content,
+    shared_wm_scene_window_content_rect_with_titlebar
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    Engine2dResolvedDrawIrImage,
+    engine2d_draw_ir_adv_composition_with_images,
+    engine2d_resolved_draw_ir_image
+}
+
+extern fn serial_println(msg: text)
+
+class Engine2dWmFrameExecutor:
+    engine: Engine2D
+
+    static fn create(engine: Engine2D) -> Engine2dWmFrameExecutor:
+        Engine2dWmFrameExecutor(engine: engine)
+
+    me render(scene: SharedWmScene, taskbar: TaskbarModel, content_frames: [WmContentFrame], scene_revision: i64, taskbar_revision: i64, clock_label: text) -> i64:
+        if scene_revision <= 0 or taskbar_revision <= 0:
+            return 0
+
+        var images: [Engine2dResolvedDrawIrImage] = []
+        var expected_images = 0
+        for window in scene.windows:
+            if not window.minimized:
+                val content = shared_wm_scene_window_content_rect_with_titlebar(window, 28)
+                if content.width > 0 and content.height > 0:
+                    expected_images = expected_images + 1
+                    if val frame = shared_wm_content_frame_for_window(content_frames, scene_revision, window, 28):
+                        val image_uri = shared_wm_content_frame_image_uri(frame)
+                        var duplicate_uri = image_uri == ""
+                        for image in images:
+                            if image.image_uri == image_uri:
+                                duplicate_uri = true
+                        if duplicate_uri:
+                            return 0
+                        images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))
+
+        if content_frames.len() != expected_images or images.len() != expected_images:
+            serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} content_frames={content_frames.len()} reason=resource-coverage")
+            return 0
+        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar, content_frames, DRAW_IR_BACKEND_CPU, 1000, clock_label, 0)
+        val result = engine2d_draw_ir_adv_composition_with_images(self.engine, composition, false, images)
+        if result.fallback_required or result.skipped_command_count != 0 or result.rendered_command_count <= 0:
+            serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} skipped={result.skipped_command_count} reason={result.fallback_reason}")
+            return 0
+        scene_revision

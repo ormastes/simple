@@ -15,6 +15,19 @@ bin/simple test test/03_system/os/qemu/sys_qemu_riscv64_fs_exec_spec.spl
 
 The bootstrap driver is required because system-level tests execute compiled binaries, not interpreter mode.
 
+## Production Desktop DrawIR Path
+
+The x86 desktop source entry creates one persistent `Engine2dWmFrameExecutor` and
+passes it to `DesktopShell.render_baremetal_first_frame` and
+`DesktopShell.run_baremetal`. Each changed frame is a canonical
+`DrawIrComposition`; top-level Simple Web/GUI pixels are request-scoped resolved
+IMAGE resources validated by revision, dimensions, exact pixel count, checksum,
+and unique URI before Engine2D presentation. Nested content currently fails
+closed. Host offload remains unavailable for production desktop frames until
+TODO 549 adds lossless styled-text and IMAGE attachments to the bounded wire.
+This source path is not compile-verified while TODO 548 blocks the pure-Simple
+checker; no QEMU receipt is claimed by this section.
+
 ## Direct Boot Fallback
 
 While P1 system-test automation is open, use direct `qemu-system-*` commands for manual verification. This is the known-good riscv64 boot command:

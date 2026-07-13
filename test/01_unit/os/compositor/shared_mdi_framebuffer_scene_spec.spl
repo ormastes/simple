@@ -6,17 +6,19 @@ use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiFramebufferBackend, dra
 use os.compositor.shared_mdi_setup.{shared_mdi_surfaces}
 use os.compositor.wm_action_applier.{wm_taskbar_item_x}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
-use common.ui.window_scene.{WM_CHROME_KIND_BORDERLESS, WM_CONTENT_ORIGIN_SIMPLE_WEB, SharedWmRenderInput, SharedWmTaskbarRenderInput, WmContentFrame, WmRenderMetrics, WmSceneRevision, simple_gui_internal_window_scene, simple_gui_internal_window_with_chrome_kind}
+use common.ui.window_scene.{WM_CHROME_KIND_BORDERLESS, WM_CONTENT_ORIGIN_SIMPLE_WEB, SharedWmRenderInput, SharedWmTaskbarRenderInput, WmContentFrame, WmRenderMetrics, WmSceneRevision, simple_gui_internal_window_scene, simple_gui_internal_window_with_chrome_kind, wm_content_frame_checksum}
 use common.ui.taskbar_model.{AppRef, TaskbarModel, TrayItem, WindowRef}
 
-fn _rich_framebuffer_input(checksum: u64) -> SharedWmTaskbarRenderInput:
+fn _rich_framebuffer_input(valid_checksum: bool) -> SharedWmTaskbarRenderInput:
     val window = simple_gui_internal_window_with_chrome_kind(
         "surface-rich", "window-rich", 7u64, "browser", "Browser",
         20, 20, 100, 70, "", false, true, 0, WM_CHROME_KIND_BORDERLESS
     )
     val scene = simple_gui_internal_window_scene(180, 160, "unit-rich-framebuffer", [window])
     val revision = WmSceneRevision(scene_revision: 9, input_revision: 10, taskbar_revision: 11)
-    val frame = WmContentFrame(window_id: "window-rich", scene_revision: 9, content_revision: 2, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 100, height: 70, pixels: [0xFF123456u32; 7000], checksum: checksum, parent_window_id: "", offset_x: 0, offset_y: 0)
+    val pixels: [u32] = [0xFF123456u32; 7000]
+    val checksum = if valid_checksum: wm_content_frame_checksum(pixels) else: 0u64
+    val frame = WmContentFrame(window_id: "window-rich", scene_revision: 9, content_revision: 2, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 100, height: 70, pixels: pixels, checksum: checksum, parent_window_id: "", offset_x: 0, offset_y: 0)
     val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 56)
     val render = SharedWmRenderInput(scene: scene, revision: revision, content_frames: [frame], metrics: metrics, t_micros: 0)
     val taskbar = TaskbarModel(
@@ -29,19 +31,19 @@ fn _rich_framebuffer_input(checksum: u64) -> SharedWmTaskbarRenderInput:
 describe "shared MDI framebuffer scene":
 
     it "renders validated Simple Web pixels and authoritative taskbar objects through the rich framebuffer entry":
-        val scene = render_shared_mdi_framebuffer_scene_for_taskbar_render_input(_rich_framebuffer_input(77u64))
+        val scene = render_shared_mdi_framebuffer_scene_for_taskbar_render_input(_rich_framebuffer_input(true))
         expect(scene.web_pixel_count).to_equal(7000)
         expect(scene.pixels[20 * 180 + 20]).to_equal(0xFF123456u32)
         expect(scene.fallback_reason).to_equal("")
         expect(scene.readback_status).to_equal("verified:cpu-framebuffer-mirror")
 
     it "bounds rich taskbar labels to their object slots":
-        val scene = render_shared_mdi_framebuffer_scene_for_taskbar_render_input(_rich_framebuffer_input(77u64))
+        val scene = render_shared_mdi_framebuffer_scene_for_taskbar_render_input(_rich_framebuffer_input(true))
         expect(scene.pixels.len()).to_equal(180 * 160)
         expect(scene.fallback_reason).to_equal("")
 
     it "fails closed and reports rejected rich content instead of canned pixels":
-        val scene = render_shared_mdi_framebuffer_scene_for_taskbar_render_input(_rich_framebuffer_input(0u64))
+        val scene = render_shared_mdi_framebuffer_scene_for_taskbar_render_input(_rich_framebuffer_input(false))
         expect(scene.web_pixel_count).to_equal(0)
         expect(scene.pixels[20 * 180 + 20]).to_equal(0xFFFF00FFu32)
         expect(scene.fallback_reason).to_equal("rejected-invalid-simple-web-content-frame")

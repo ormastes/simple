@@ -87,11 +87,11 @@ runtime drain reports the backend handle rather than the queue id.
 
 #### submits and drains a GPU-selected Draw IR batch through the runtime queue
 
-- rt host gpu queue reset
+- engine2d host gpu runtime reset
 - var engine = Engine2D create with backend
 - engine clear
 - draw ir rect
-   - Expected: result.render.unit_id equals `batch-runtime`
+   - Expected: result.render.unit_id equals `runtime-batch-runtime`
    - Expected: result.render.selected_backend equals `gpu`
    - Expected: result.render.rendered_command_count equals `1`
    - Expected: result.runtime_submit.packet_id equals `1`
@@ -106,11 +106,11 @@ runtime drain reports the backend handle rather than the queue id.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-rt_host_gpu_queue_reset()
+engine2d_host_gpu_runtime_reset()
 var engine = Engine2D.create_with_backend(32, 24, "cpu")
 engine.clear(BG)
 val batch = draw_ir_batch("batch-runtime", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("surf1", "win1", 0, 0, 20, 16, 10, 1000, false), [
@@ -120,7 +120,10 @@ val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, 
 
 val result = engine2d_draw_ir_adv_batch_runtime_queue(engine, batch, true, queue)
 
-expect(result.render.unit_id).to_equal("batch-runtime")
+# Runtime-queued batches dispatch through a "runtime-"-tagged composition
+# (see draw_ir_runtime_queue.spl payload summary), so the rendered unit id
+# reflects that composition id, not the bare batch id.
+expect(result.render.unit_id).to_equal("runtime-batch-runtime")
 expect(result.render.selected_backend).to_equal("gpu")
 expect(result.render.rendered_command_count).to_equal(1)
 expect(result.runtime_submit.submitted).to_be(true)

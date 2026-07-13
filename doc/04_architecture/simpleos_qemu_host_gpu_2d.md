@@ -4,9 +4,12 @@
 ## Decision
 
 Use one bounded, architecture-neutral guest/host protocol over QEMU
-`ivshmem-plain`. The current guest submits a bounded Engine2D command subset;
-canonical Draw IR and ProcessingIR payloads remain required before their
-acceptance rows can pass. A host daemon selects a supported private backend and
+`ivshmem-plain`. The current guest submits a bounded canonical plain-RECT Draw
+IR payload and a bounded ProcessingIR `FillU32` payload. The production x86
+desktop source path routes local frames through `DrawIrComposition`, resolved top-level
+`WmContentFrame` IMAGE resources, and Engine2D; styled text/image attachments
+remain required before that same complete composition may use host offload. A
+host daemon selects a supported private backend and
 returns a correlated receipt plus output. x86_64, AArch64, and RISC-V adapters
 only own boot/device discovery. They must not define backend-specific public
 APIs.
@@ -44,10 +47,21 @@ and synthetic handles fail closed.
 | Host | Rendering | Processing | Classification rule |
 |---|---|---|---|
 | Linux | Vulkan | Vulkan; CUDA on prepared NVIDIA host | pass only with device receipt |
-| macOS | Metal | Metal | pass only with Metal device receipt |
-| Windows | DirectX or Vulkan | DirectX/Vulkan | pass only with device receipt |
+| macOS | Metal implementation, native receipt still required | unavailable: no Metal ProcessingIR executor | never infer processing from an Engine2D clear |
+| Windows | unavailable: current Simple DirectX lane is software emulation | unavailable | standalone D3D probes are not production receipts |
 | Any missing prerequisite | CPU/software | CPU | `unsupported` or `blocked`, never accelerated |
 
 Cross-ISA TCG rows prove protocol correctness and provenance, not native-ISA
 latency. The first implementation slice is x86_64 Linux Vulkan; the same wire
 contract is reused unchanged for AArch64 and RISC-V.
+
+`src/os/compositor/engine2d_wm_frame_executor.spl` is the local production
+fallback owner. It builds and submits the canonical Simple-owned composition,
+resolves only
+unique checksum-valid top-level IMAGE resources, and rejects unsupported nested
+frames rather than dropping their pixels. Host offload must extend the bounded
+wire with equivalent attachments; it must not reintroduce a full-frame copy.
+The core executor imports `draw_ir_adv.spl`; host runtime-queue integration is
+kept in the sibling `draw_ir_runtime_adv.spl` so the baremetal closure does not
+acquire direct host-runtime APIs. This source path is not compile-verified while
+TODO 548 blocks the pure-Simple checker.

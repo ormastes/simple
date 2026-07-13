@@ -266,9 +266,15 @@ Window-manager composition is projected by
 chrome, taskbar, and visible windows into ordered Draw IR batches keyed by
 `shared_wm_scene_layout_key(scene)`. The first Engine2D-facing acceptor lives in
 `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl`; it executes supported
-`rect` and `text` Draw IR commands through the existing Engine2D facade and
-returns readback pixels plus CPU/GPU fallback metadata. Real GPU Draw IR
-execution remains a later plugin/backend job.
+`rect`, `text`, and caller-resolved `image` Draw IR commands through the
+existing Engine2D facade, presents the completed composition, and returns
+readback pixels plus CPU/GPU fallback metadata. SimpleOS production desktop
+source frames enter through `src/os/compositor/engine2d_wm_frame_executor.spl`; invalid
+or duplicate top-level `WmContentFrame` resources fail closed, and nested IMAGE
+projection remains explicit unfinished work rather than omitted pixels. Real
+host-GPU Draw IR execution remains a backend job. Host runtime-queue integration
+lives separately in `draw_ir_runtime_adv.spl`; importing the core executor does
+not pull host-queue runtime APIs into the baremetal closure.
 
 ### Render Optimization Plugin
 
@@ -503,9 +509,11 @@ dispatch commands and forwards them to the web adapter protocol.
 | Draw IR SDN skin | `src/lib/common/ui/draw_ir_sdn.spl` | Deterministic tab-indented SDN import/export over `DrawIrComposition` |
 | Draw IR Draw.io skin | `src/lib/common/ui/draw_ir_drawio.spl` | Draw.io mxGraph import/export over the same `DrawIrComposition` model |
 | WM scene | `src/lib/common/ui/window_scene.spl` | `SharedWmScene`, `SharedWmWindow`, event target translation, scene layout keys, cache-safe pointer targeting |
-| WM → Draw IR | `src/lib/common/ui/window_scene_draw_ir.spl` | WM scene composition into ordered Draw IR batches (desktop, chrome, windows by z-order) |
+| WM → Draw IR | `src/lib/common/ui/window_scene_draw_ir.spl` | WM scene composition into ordered Draw IR batches (desktop, chrome, windows by z-order, top-level content IMAGE projection) |
 | WM dispatch | `src/lib/common/ui/wm_runtime_dispatch.spl` | `WmRuntimeDispatchCommand`, `WmRuntimeShellState`, backend-neutral WM command adapter |
-| Engine2D Draw IR | `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` | `Engine2dDrawIrAdvResult`, first Simple2D-facing Draw IR executor (rect/text, CPU fallback, pixel readback) |
+| Engine2D Draw IR | `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` | `Engine2dDrawIrAdvResult`, Draw IR executor (rect/text/resolved image, present, CPU fallback, pixel readback) |
+| Engine2D Draw IR runtime queue | `src/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_adv.spl` | Optional host runtime-queue adapter, kept out of the core/baremetal import closure |
+| SimpleOS WM frame executor | `src/os/compositor/engine2d_wm_frame_executor.spl` | Persistent production DrawIR/Engine2D owner with exact content-frame validation and fail-closed resource coverage |
 | Backend lane | `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl` | Drawing vs processing lane split contract |
 | Host/GPU event queue | `src/lib/nogc_async_mut/gpu/engine2d/host_gpu_event_queue.spl` | Host event decision, queue submit, queue receipt evidence, and Pure Simple queue lifecycle state |
 | Host/GPU Draw IR flow | `src/lib/nogc_async_mut/gpu/engine2d/host_gpu_draw_ir_event_flow.spl` | Draw IR event routing into host or GPU queue lanes with explicit forward/backward phase evidence |

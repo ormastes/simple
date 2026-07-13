@@ -41,8 +41,7 @@ use os.desktop.shell_process.{
     _process_rows, _process_panel_rows, _window_overlay_rows,
     _selected_process_row, _normalized_process_selection, _process_is_live
 }
-use os.desktop.shell_baremetal.{baremetal_engine2d_overlay_backend, render_baremetal_shared_wm_scene, render_baremetal_shared_wm_scene_to_pixel_buffer}
-use common.ui.window_scene_draw_ir.{SharedWmPixelBufferBackend, shared_wm_pixel_buffer_addr, shared_wm_pixel_buffer_count}
+use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
 use os.desktop.wm_runtime_bridge.{simpleos_wm_pointer_runtime_command, simpleos_wm_apply_pointer}
@@ -56,7 +55,6 @@ use os.desktop.shell_types.{
     APP_ID_SHELL, APP_ID_EDITOR, APP_ID_SIMPLE_BROWSER
 }
 
-extern fn memcpy(dst: i64, src: i64, n: i64) -> i64
 extern fn serial_println(msg: text)
 
 fn _simpleos_revision_mix_i64(seed: i64, value: i64) -> i64:
@@ -755,49 +753,36 @@ impl DesktopShell:
         else:
             log_info("[desktop] " + "[shell] launcher launch failed for {name}; no window created")
 
-    me render_baremetal_frame_and_blit(pixel_backend: SharedWmPixelBufferBackend, scanout_addr: u64, scanout_stride: i32) -> i64:
-        """Render one full shared-WM frame into the scalar-owned pixel buffer
-        and blit it row-wise to the scanout. Returns the rendered scene
-        revision. The [u32] class-field/array-return boundary is a proven
-        stage3 corruption — see window_scene_draw_ir.spl."""
-        val screen_w = self.compositor.screen_width
-        val screen_h = self.compositor.screen_height
+    me render_baremetal_frame(executor: Engine2dWmFrameExecutor) -> i64:
+        """Render one authoritative WM snapshot through Draw IR + Engine2D."""
         val scene = self.runtime_scene_snapshot()
         val taskbar = self.runtime_taskbar_model()
         val scene_revision = self.runtime_scene_revision()
         val taskbar_revision = self.runtime_taskbar_revision()
         val content_frames = self.runtime_content_frames(scene_revision)
-        render_baremetal_shared_wm_scene_to_pixel_buffer(pixel_backend, scene, taskbar, content_frames, scene_revision, taskbar_revision, self.clock_text)
-        val frame_buffer_addr = shared_wm_pixel_buffer_addr()
-        val frame_pixel_count = shared_wm_pixel_buffer_count()
-        if frame_buffer_addr != 0 and frame_pixel_count >= screen_w as i64 * screen_h as i64:
-            val row_bytes: i64 = screen_w as i64 * 4
-            var frame_y: i64 = 0
-            while frame_y < screen_h as i64:
-                memcpy(scanout_addr as i64 + frame_y * scanout_stride as i64, frame_buffer_addr + frame_y * row_bytes, row_bytes)
-                frame_y = frame_y + 1
+        val rendered_revision = executor.render(scene, taskbar, content_frames, scene_revision, taskbar_revision, self.clock_text)
+        if rendered_revision <= 0:
+            return 0
         self.last_rendered_scene_revision = scene_revision
         self.last_rendered_taskbar_revision = taskbar_revision
-        scene_revision
+        rendered_revision
 
-    me render_baremetal_first_frame(scanout_addr: u64, scanout_stride: i32):
-        """Render and blit the first desktop frame BEFORE readiness markers
+    me render_baremetal_first_frame(executor: Engine2dWmFrameExecutor) -> i64:
+        """Render the first desktop frame BEFORE readiness markers
         are announced, so the evidence baseline capture cannot race an
         unpainted scanout."""
-        val pixel_backend = SharedWmPixelBufferBackend.new(self.compositor.screen_width, self.compositor.screen_height)
-        val revision = self.render_baremetal_frame_and_blit(pixel_backend, scanout_addr, scanout_stride)
-        serial_println("[desktop-gui] first-frame-blitted scene_revision={revision}")
+        val revision = self.render_baremetal_frame(executor)
+        serial_println("[desktop-gui] first-frame-rendered scene_revision={revision}")
+        revision
 
-    me run_baremetal(engine: Engine2D, scanout_addr: u64, scanout_stride: i32):
+    me run_baremetal(executor: Engine2dWmFrameExecutor):
         """Baremetal event loop rendering live compositor state through the
-        shared pixel-buffer path. Re-renders only when the scene/taskbar
+        shared Draw IR/Engine2D path. Re-renders only when the scene/taskbar
         revision changes (or on an explicit fullscreen action) so the input
         poll cadence stays far inside the evidence wrapper's correlation
-        windows; VRAM retains the last blitted frame between changes."""
+        windows; scanout retains the last presented frame between changes."""
         log_info("[desktop] " + "[shell] entering baremetal event loop...")
         self.compositor.running = true
-        val _engine = engine
-        val pixel_backend = SharedWmPixelBufferBackend.new(self.compositor.screen_width, self.compositor.screen_height)
         serial_println("[wm-loop] polling-active")
 
         while self.compositor.running:
@@ -859,7 +844,7 @@ impl DesktopShell:
             val need_render = (fullscreen_sequence > 0 and fullscreen_action != "") or scene_revision != self.last_rendered_scene_revision or taskbar_revision != self.last_rendered_taskbar_revision
             var rendered_revision = scene_revision
             if need_render:
-                rendered_revision = self.render_baremetal_frame_and_blit(pixel_backend, scanout_addr, scanout_stride)
+                rendered_revision = self.render_baremetal_frame(executor)
             if fullscreen_sequence > 0 and fullscreen_action != "":
                 # Interpolate bool as explicit text: baremetal bool
                 # interpolation prints 1/0, but the evidence wrapper's

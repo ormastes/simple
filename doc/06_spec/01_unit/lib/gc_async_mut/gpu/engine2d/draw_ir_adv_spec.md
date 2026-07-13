@@ -28,7 +28,7 @@ draw_ir_adv_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -141,11 +141,11 @@ engine.shutdown()
 
 #### submits a GPU-selected Draw IR batch through the runtime host GPU queue
 
-- rt host gpu queue reset
+- engine2d host gpu runtime reset
 - var engine = Engine2D create with backend
 - engine clear
 - draw ir rect
-   - Expected: result.render.unit_id equals `batch-runtime`
+   - Expected: result.render.unit_id equals `runtime-batch-runtime`
    - Expected: result.render.selected_backend equals `gpu`
    - Expected: result.render.rendered_command_count equals `1`
    - Expected: result.runtime_submit.packet_id equals `1`
@@ -162,17 +162,17 @@ Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-rt_host_gpu_queue_reset()
+engine2d_host_gpu_runtime_reset()
 var engine = Engine2D.create_with_backend(32, 24, "cpu")
 engine.clear(BG)
 val batch = draw_ir_batch("batch-runtime", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("surf1", "win1", 0, 0, 20, 16, 10, 1000, false), [
     draw_ir_rect("body", 2, 3, 6, 5, GREEN)
 ])
-val queue = engine2d_host_gpu_runtime_queue("vulkan", 7, true, 4096)
+val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 7, 7, true, 4096)
 
 val result = engine2d_draw_ir_adv_batch_runtime_queue(engine, batch, true, queue)
 
-expect(result.render.unit_id).to_equal("batch-runtime")
+expect(result.render.unit_id).to_equal("runtime-batch-runtime")
 expect(result.render.selected_backend).to_equal("gpu")
 expect(result.render.rendered_command_count).to_equal(1)
 expect(result.runtime_submit.submitted).to_be(true)
@@ -261,12 +261,32 @@ engine.shutdown()
 
 </details>
 
+#### preflights a composition before any supported command can paint
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+var engine = Engine2D.create_with_backend(16, 16, "cpu")
+engine.clear(BG)
+val unsupported = DrawIrCommand(kind: "future-path", component_id: "path", x: 1, y: 1, width: 5, height: 5, color: RED, text_value: "", border_rect: draw_ir_no_rect(), content_rect: draw_ir_no_rect(), hit_rect: draw_ir_no_rect(), clip_rect: draw_ir_no_rect(), computed_style: [], edge: nil, parent_id: "", image_uri: "", points: [])
+val batch = draw_ir_batch("transactional", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("surf", "win", 0, 0, 16, 16, 1, 1000, false), [draw_ir_rect("would-paint", 0, 0, 16, 16, RED), unsupported])
+val composition = draw_ir_composition("transactional", "scene", DRAW_IR_BACKEND_GPU, [batch])
+val result = engine2d_draw_ir_adv_composition(engine, composition, false)
+expect(result.rendered_command_count).to_equal(0)
+expect(result.skipped_command_count).to_equal(1)
+expect(result.pixels[0]).to_equal(BG)
+engine.shutdown()
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -28,7 +28,7 @@ draw_ir_adv_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -261,12 +261,32 @@ engine.shutdown()
 
 </details>
 
+#### preflights a composition before any supported command can paint
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+var engine = Engine2D.create_with_backend(16, 16, "cpu")
+engine.clear(BG)
+val unsupported = DrawIrCommand(kind: "future-path", component_id: "path", x: 1, y: 1, width: 5, height: 5, color: RED, text_value: "", border_rect: draw_ir_no_rect(), content_rect: draw_ir_no_rect(), hit_rect: draw_ir_no_rect(), clip_rect: draw_ir_no_rect(), computed_style: [], edge: nil, parent_id: "", image_uri: "", points: [])
+val batch = draw_ir_batch("transactional", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("surf", "win", 0, 0, 16, 16, 1, 1000, false), [draw_ir_rect("would-paint", 0, 0, 16, 16, RED), unsupported])
+val composition = draw_ir_composition("transactional", "scene", DRAW_IR_BACKEND_GPU, [batch])
+val result = engine2d_draw_ir_adv_composition(engine, composition, false)
+expect(result.rendered_command_count).to_equal(0)
+expect(result.skipped_command_count).to_equal(1)
+expect(result.pixels[0]).to_equal(BG)
+engine.shutdown()
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
