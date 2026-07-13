@@ -428,9 +428,9 @@ uint16_t rt_mmio_read_u16(uint64_t addr)
     return *(volatile uint16_t *)(uintptr_t)addr;
 }
 
-uint32_t rt_mmio_read_u32(uint64_t addr)
+uint64_t rt_mmio_read_u32(uint64_t addr)
 {
-    return *(volatile uint32_t *)(uintptr_t)addr;
+    return (uint64_t)*(volatile uint32_t *)(uintptr_t)addr;
 }
 
 uint64_t rt_mmio_read_u64(uint64_t addr)
