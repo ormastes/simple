@@ -1,0 +1,282 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+BUILD_DIR=${SIMPLEOS_HOST_GPU_BUILD_DIR:-build/simpleos_host_gpu_2d}
+RUNTIME_PATH=${SIMPLEOS_HOST_GPU_RUNTIME_PATH:-build/simpleos_gpu_host/vulkan-runtime-target/bootstrap}
+QEMU_TIMEOUT=${SIMPLEOS_HOST_GPU_QEMU_TIMEOUT:-20}
+BACKEND=vulkan
+
+find_simple() {
+    if [ -n "${SIMPLE_BIN:-}" ] && [ -x "$SIMPLE_BIN" ]; then
+        printf '%s\n' "$SIMPLE_BIN"
+        return
+    fi
+    for candidate in \
+        bin/release/x86_64-unknown-linux-gnu/simple \
+        build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple \
+        build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple
+    do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+    return 1
+}
+
+serial_has_pass() {
+    log=$1
+    isa=$2
+    [ "$(grep -ac "HOST_GPU_MAP_OK isa=$isa" "$log")" -eq 1 ] &&
+    [ "$(grep -ac "HOST_GPU_HELLO_OK isa=$isa" "$log")" -eq 1 ] &&
+    [ "$(grep -ac "HOST_GPU_RENDER_OK isa=$isa" "$log")" -eq 1 ] &&
+    [ "$(grep -ac "HOST_GPU_PROCESS_OK isa=$isa" "$log")" -eq 1 ] &&
+    [ "$(grep -ac "SIMPLEOS_HOST_GPU_2D_PASS isa=$isa" "$log")" -eq 1 ] &&
+    [ "$(grep -ac "TEST PASSED" "$log")" -eq 1 ] &&
+    grep -aEq "HOST_GPU_MAP_OK isa=$isa device=[1-9][0-9]*" "$log" &&
+    grep -aEq "HOST_GPU_HELLO_OK isa=$isa .*render_mask=1 processing_mask=1" "$log" &&
+    grep -aEq "HOST_GPU_RENDER_OK isa=$isa .*handle=[1-9][0-9]* identity=[1-9][0-9]* checksum=405589360 bg=2112 rect=960 other=0" "$log" &&
+    grep -aEq "HOST_GPU_PROCESS_OK isa=$isa .*handle=[1-9][0-9]* identity=[1-9][0-9]* checksum=1792 mismatches=0" "$log" &&
+    grep -aFq "SIMPLEOS_HOST_GPU_2D_PASS isa=$isa" "$log" &&
+    grep -aFq "TEST PASSED" "$log" &&
+    ! grep -aFq "HOST_GPU_PROBE_FAIL isa=$isa" "$log"
+}
+
+serial_reason() {
+    log=$1
+    isa=$2
+    reason=$(sed -n "s/.*HOST_GPU_PROBE_FAIL isa=$isa reason=\([^[:space:]]*\).*/\1/p" "$log" | tail -n 1)
+    if [ -n "$reason" ]; then
+        printf '%s\n' "$reason"
+    elif grep -aFq "TEST FAILED" "$log"; then
+        printf '%s\n' guest-test-failed
+    else
+        printf '%s\n' missing-correlated-device-receipt
+    fi
+}
+
+emit_row() {
+    row_host=$1
+    row_isa=$2
+    row_status=$3
+    row_reason=$4
+    row_log=$5
+    row_prefix="simpleos_qemu_host_gpu_2d_${row_host}_${row_isa}"
+    case "$row_host" in
+        macos) row_render_backend=metal; row_processing_backend=metal ;;
+        windows) row_render_backend=directx; row_processing_backend=cuda ;;
+        *) row_render_backend=vulkan; row_processing_backend=vulkan ;;
+    esac
+    echo "${row_prefix}_status=$row_status"
+    echo "${row_prefix}_reason=$row_reason"
+    echo "${row_prefix}_render_backend=$row_render_backend"
+    echo "${row_prefix}_processing_backend=$row_processing_backend"
+    echo "${row_prefix}_serial_log=$row_log"
+}
+
+self_test() {
+    temp_dir=$(mktemp -d)
+    trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
+    pass_log="$temp_dir/pass.log"
+    fail_log="$temp_dir/fail.log"
+    corrupt_log="$temp_dir/corrupt.log"
+    cat >"$pass_log" <<'EOF'
+HOST_GPU_MAP_OK isa=aarch64 device=3
+HOST_GPU_HELLO_OK isa=aarch64 generation=19 render_mask=1 processing_mask=1
+HOST_GPU_RENDER_OK isa=aarch64 generation=20 handle=22 identity=22 checksum=405589360 bg=2112 rect=960 other=0
+HOST_GPU_PROCESS_OK isa=aarch64 generation=21 handle=23 identity=23 checksum=1792 mismatches=0
+SIMPLEOS_HOST_GPU_2D_PASS isa=aarch64
+TEST PASSED
+EOF
+    sed 's/checksum=1792/checksum=1793/' "$pass_log" >"$corrupt_log"
+    cat >"$fail_log" <<'EOF'
+HOST_GPU_MAP_OK isa=aarch64 device=3
+HOST_GPU_HELLO_OK isa=aarch64 generation=19 render_mask=1 processing_mask=1
+HOST_GPU_RENDER_OK isa=aarch64 generation=20 handle=22 identity=22 checksum=405589360 bg=2112 rect=960 other=0
+HOST_GPU_PROCESS_OK isa=aarch64 generation=21 handle=0 identity=0 checksum=1792 mismatches=0
+TEST PASSED
+EOF
+    serial_has_pass "$pass_log" aarch64
+    if serial_has_pass "$fail_log" aarch64; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    if serial_has_pass "$corrupt_log" aarch64; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    echo "simpleos_qemu_host_gpu_2d_self_test=pass"
+}
+
+if [ "${1:-}" = --self-test ]; then
+    self_test
+    exit 0
+fi
+
+mkdir -p "$BUILD_DIR"
+
+host=$(uname -s)
+case "$host" in
+    Linux) host=linux ;;
+    Darwin) host=macos ;;
+    MINGW*|MSYS*|CYGWIN*) host=windows ;;
+    *) host=unknown ;;
+esac
+
+for other_host in linux macos windows; do
+    if [ "$other_host" != "$host" ]; then
+        for isa in x86_64 aarch64 riscv64; do
+            emit_row "$other_host" "$isa" unsupported "requires-$other_host-host" none
+        done
+    fi
+done
+
+if [ "$host" != linux ]; then
+    for isa in x86_64 aarch64 riscv64; do
+        emit_row "$host" "$isa" unsupported host-daemon-backend-not-implemented none
+    done
+    echo "simpleos_qemu_host_gpu_2d_status=unsupported"
+    echo "simpleos_qemu_host_gpu_2d_reason=linux-vulkan-only"
+    exit 0
+fi
+
+simple_bin=$(find_simple || true)
+if [ -z "$simple_bin" ]; then
+    for isa in x86_64 aarch64 riscv64; do emit_row linux "$isa" blocked pure-simple-compiler-missing none; done
+    echo "simpleos_qemu_host_gpu_2d_status=blocked"
+    echo "simpleos_qemu_host_gpu_2d_reason=pure-simple-compiler-missing"
+    exit 1
+fi
+
+daemon=${SIMPLEOS_GPU_HOST_BIN:-$BUILD_DIR/simpleos_gpu_host}
+if [ -z "${SIMPLEOS_GPU_HOST_BIN:-}" ]; then
+    if [ ! -d "$RUNTIME_PATH" ]; then
+        for isa in x86_64 aarch64 riscv64; do emit_row linux "$isa" blocked vulkan-runtime-artifact-missing none; done
+        echo "simpleos_qemu_host_gpu_2d_status=blocked"
+        echo "simpleos_qemu_host_gpu_2d_reason=vulkan-runtime-artifact-missing"
+        exit 1
+    fi
+    if ! SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_NO_STUB_FALLBACK=1 "$simple_bin" native-build \
+        --backend cranelift --source src/app --source src/lib --entry-closure \
+        --entry src/app/simpleos_gpu_host/main.spl --runtime-bundle core-c-bootstrap \
+        --runtime-path "$RUNTIME_PATH" --cache-dir "$BUILD_DIR/daemon-cache" \
+        --timeout 90 --output "$daemon" >"$BUILD_DIR/daemon-build.log" 2>&1
+    then
+        for isa in x86_64 aarch64 riscv64; do emit_row linux "$isa" blocked host-daemon-build-failed "$BUILD_DIR/daemon-build.log"; done
+        echo "simpleos_qemu_host_gpu_2d_status=blocked"
+        echo "simpleos_qemu_host_gpu_2d_reason=host-daemon-build-failed"
+        exit 1
+    fi
+elif [ ! -x "$daemon" ]; then
+    for isa in x86_64 aarch64 riscv64; do emit_row linux "$isa" blocked provided-host-daemon-missing none; done
+    echo "simpleos_qemu_host_gpu_2d_status=blocked"
+    echo "simpleos_qemu_host_gpu_2d_reason=provided-host-daemon-missing"
+    exit 1
+fi
+
+build_guest() {
+    isa=$1
+    case "$isa" in
+        x86_64) scenario=simpleos-host-gpu-x86_64 ;;
+        aarch64) scenario=simpleos-host-gpu-aarch64 ;;
+        riscv64) scenario=simpleos-host-gpu-riscv64 ;;
+    esac
+    if [ "${SIMPLEOS_HOST_GPU_USE_EXISTING_GUESTS:-0}" = 1 ]; then
+        [ -f "$(kernel_for_isa "$isa")" ]
+        return
+    fi
+    if SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_BIN="$simple_bin" SIMPLE_BINARY="$simple_bin" \
+        "$simple_bin" os build --scenario="$scenario" >"$BUILD_DIR/$isa-build.log" 2>&1
+    then
+        return 0
+    fi
+    return 1
+}
+
+kernel_for_isa() {
+    case "$1" in
+        x86_64) echo build/os/simpleos_x86_64_host_gpu_probe.elf ;;
+        aarch64) echo build/os/simpleos_arm64_host_gpu_probe.elf ;;
+        riscv64) echo build/os/simpleos_riscv64_host_gpu_probe.elf ;;
+    esac
+}
+
+run_guest() {
+    isa=$1
+    shm="$BUILD_DIR/$isa.shm"
+    serial="$BUILD_DIR/$isa-serial.log"
+    daemon_log="$BUILD_DIR/$isa-daemon.log"
+    kernel=$(kernel_for_isa "$isa")
+    rm -f "$shm" "$serial" "$daemon_log"
+    truncate -s 8M "$shm"
+    "$daemon" --shm="$shm" >"$daemon_log" 2>&1 &
+    daemon_pid=$!
+    case "$isa" in
+        x86_64)
+            timeout "$QEMU_TIMEOUT" qemu-system-x86_64 -machine q35 -m 512M \
+                -kernel "$kernel" -nographic -no-reboot -device virtio-net-pci \
+                -object memory-backend-file,id=hostgpu,share=on,mem-path="$shm",size=8M \
+                -device ivshmem-plain,memdev=hostgpu >"$serial" 2>&1 || true
+            ;;
+        aarch64)
+            timeout "$QEMU_TIMEOUT" qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M \
+                -kernel "$kernel" -nographic -device virtio-net-pci \
+                -object memory-backend-file,id=hostgpu,share=on,mem-path="$shm",size=8M \
+                -device ivshmem-plain,memdev=hostgpu >"$serial" 2>&1 || true
+            ;;
+        riscv64)
+            timeout "$QEMU_TIMEOUT" qemu-system-riscv64 -machine virt -m 512M \
+                -kernel "$kernel" -nographic \
+                -object memory-backend-file,id=hostgpu,share=on,mem-path="$shm",size=8M \
+                -device ivshmem-plain,memdev=hostgpu >"$serial" 2>&1 || true
+            ;;
+    esac
+    rss_kib=$(sed -n 's/^VmHWM:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "/proc/$daemon_pid/status" 2>/dev/null || true)
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    if serial_has_pass "$serial" "$isa"; then
+        emit_row linux "$isa" pass ok "$serial"
+    else
+        emit_row linux "$isa" fail "$(serial_reason "$serial" "$isa")" "$serial"
+        return 1
+    fi
+    echo "simpleos_qemu_host_gpu_2d_linux_${isa}_daemon_max_rss_kib=${rss_kib:-unknown}"
+}
+
+overall=pass
+passed=0
+blocked=0
+failed=0
+for isa in x86_64 aarch64 riscv64; do
+    if ! command -v "qemu-system-$isa" >/dev/null 2>&1; then
+        emit_row linux "$isa" blocked qemu-binary-missing none
+        overall=fail
+        blocked=$((blocked + 1))
+        continue
+    fi
+    if ! build_guest "$isa"; then
+        emit_row linux "$isa" fail guest-build-failed "$BUILD_DIR/$isa-build.log"
+        overall=fail
+        failed=$((failed + 1))
+        continue
+    fi
+    if ! run_guest "$isa"; then
+        overall=fail
+        failed=$((failed + 1))
+    else
+        passed=$((passed + 1))
+    fi
+done
+
+echo "simpleos_qemu_host_gpu_2d_status=$overall"
+echo "simpleos_qemu_host_gpu_2d_reason=$(if [ "$overall" = pass ]; then echo all-linux-vulkan-rows-pass; else echo one-or-more-linux-vulkan-rows-failed; fi)"
+echo "simpleos_qemu_host_gpu_2d_backend=$BACKEND"
+echo "simpleos_qemu_host_gpu_2d_rows=3"
+echo "simpleos_qemu_host_gpu_2d_passed=$passed"
+echo "simpleos_qemu_host_gpu_2d_blocked=$blocked"
+echo "simpleos_qemu_host_gpu_2d_failed=$failed"
+echo "simpleos_qemu_host_gpu_2d_daemon=$daemon"
+[ "$overall" = pass ]

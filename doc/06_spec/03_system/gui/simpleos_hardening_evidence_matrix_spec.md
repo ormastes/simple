@@ -225,12 +225,17 @@ The wrapper emits these rows:
 - `simpleos_hardening_qemu_mdi_status`
 - `simpleos_hardening_rv64_display_smoke_qmp_status`
 - `simpleos_hardening_qemu_virtio_gpu_access_status`
+- `simpleos_hardening_qemu_host_gpu_2d_status`
 
 The readiness matrix passes only when all twenty-six rows are `pass` and the
 required guest-side QEMU performance release gate is `pass`. Mission-critical
 release is a stricter gate: it still requires
 `scripts/check/check-simpleos-mission-critical-release.shs` to pass, including
 the strict RISC-V RTL SBY proof lane.
+
+The host-GPU 2D wrapper is supplemental and does not change the 26-row count.
+Set `SIMPLEOS_HOST_GPU_2D_LIVE=1` to run it, or provide
+`SIMPLEOS_HOST_GPU_2D_REPORT`; otherwise the matrix reports `not-run`.
 
 The report emits the counted `byl_sby_artifact_audit` row and the
 `riscv_rtl_rvfi_readiness_note` so generated SBY/RVFI readiness artifacts cannot

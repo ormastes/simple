@@ -200,3 +200,19 @@ matrix. The host configuration and hardening matrices report
 `simpleos_hardening_rv64_display_smoke_qmp_status=pass` when the wrapper sees
 the WM lifecycle serial markers, a nonblack QMP PPM, and all five WM anchor
 sample pixels.
+
+## Host-GPU rendering and ProcessingIR
+
+The canonical multi-ISA wrapper is:
+
+```sh
+sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test
+sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
+```
+
+It builds `simpleos-host-gpu-x86_64`, `simpleos-host-gpu-aarch64`, and
+`simpleos-host-gpu-riscv64` through `_QemuRunner`, starts the strict host
+daemon over one bounded ivshmem region per row, and requires exact Vulkan
+render plus ProcessingIR device readback. Linux/Vulkan is implemented.
+macOS Metal and Windows DirectX/CUDA rows remain `unsupported` until native
+host executors and receipts exist; their API names are not treated as proof.

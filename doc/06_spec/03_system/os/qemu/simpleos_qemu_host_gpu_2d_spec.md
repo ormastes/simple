@@ -1,8 +1,9 @@
 # SimpleOS QEMU Host-GPU 2D
 
-Status: implementation in progress. Linux/Vulkan live x86_64, AArch64, and
-RV64 probes now pass rendering plus the ProcessingIR `FillU32` oracle; the
-canonical cross-host wrapper and remaining scenarios still fail closed.
+Status: implementation in progress. The canonical wrapper and its fail-closed
+parser self-test are implemented. Linux/Vulkan live x86_64, AArch64, and RV64
+probes pass rendering plus the ProcessingIR `FillU32` oracle. Native Metal,
+DirectX, and CUDA host receipts remain unavailable.
 
 This scenario proves that supported SimpleOS guests use one bounded protocol to
 execute Draw IR and ProcessingIR on a real host device. Unsupported rows retain
@@ -36,6 +37,25 @@ the CPU/software fallback and report a stable reason.
 Linux Vulkan is the first required live slice. Metal, DirectX/Vulkan, and CUDA
 rows run only on prepared hosts. Cross-ISA TCG rows prove correctness and honest
 provenance; they are exempt from native-ISA latency and speedup targets.
+
+## Verification
+
+Run the parser contract without hardware:
+
+```sh
+sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test
+```
+
+Run the live Linux/Vulkan matrix with a deployed pure-Simple compiler and
+cached Vulkan runtime artifact:
+
+```sh
+sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
+```
+
+The default path builds guests through the named `_QemuRunner` scenarios.
+`SIMPLEOS_HOST_GPU_USE_EXISTING_GUESTS=1` is an explicit cached-artifact
+evidence mode; it is not a fresh-build claim.
 
 ## Executable source
 
