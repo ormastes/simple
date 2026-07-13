@@ -63,6 +63,49 @@ residual erased-receiver case A misses, and it converts a would-be `const-0`
 Land only if all three are green. A parallel session's next bootstrap will eat a
 silently-broken resolver change, so the bootstrap gate is mandatory.
 
+## Fix A — IMPLEMENTED (reverted from WC, unverified; bootstrap blocked)
+
+Applied to `src/compiler/35.semantics/resolve.spl` then reverted because the
+verification gate could not run (see blocker below). Re-apply exactly:
+
+1. In `resolve_expr`, the `case Call(callee, args, type_args):` arm — after
+   `resolved_args`, before building `HirExprKind.Call(...)`, insert:
+```
+                if not resolved_type.?:
+                    val callee_ret = self.callee_return_type(resolved_callee)
+                    if callee_ret.?:
+                        resolved_type = callee_ret
+```
+2. Add this method (next to `resolve_call_result_type`):
+```
+    me callee_return_type(callee: HirExpr) -> HirType?:
+        match callee.kind:
+            case Var(sym):
+                if self.module_functions.contains_key(sym):
+                    Some(self.module_functions[sym].return_type)
+                else:
+                    nil
+            case _:
+                nil
+```
+`HirFunction.return_type` is a non-optional `HirType` (`hir_definitions.spl:27`);
+`module_functions` is used (not `self.symbols`, which is empty in the resolve
+pass — same as `fill_call_defaults`). Guard on `not resolved_type.?` so it only
+ADDS a type where inference left none — never overrides (safe for generics).
+NOTE: if the chained receiver's type is `Some(Infer)` rather than nil, extend the
+guard to also match an `Infer` kind, then re-verify; and add Fix B as the guard.
+
+## BLOCKER: bootstrap gate currently broken (pre-existing, not this change)
+
+`bin/simple build bootstrap` Stage 1 (seed compiles the compiler source) FAILS
+with `error: semantic: unknown extern function: rt_lexer_source_set` — an extern
+used in `10.frontend/core/lexer.spl`/`parser.spl` that the current Rust seed
+(`src/compiler_rust/target/release/simple`) does not provide. The source moved
+ahead of the seed (parallel-session drift). Until the Rust seed is rebuilt
+(`cargo build --release` in `src/compiler_rust`, coordinated so as not to race a
+parallel bootstrap), Fix A/B cannot be verified via the mandatory gate and MUST
+NOT be landed. This blocker is independent of the method-resolution fix.
+
 ## Repro recipe (throwaway probe)
 
 Freestanding entry with `class FileSizeLike: bytes: i64 / me fn to_i64: self.bytes`,
