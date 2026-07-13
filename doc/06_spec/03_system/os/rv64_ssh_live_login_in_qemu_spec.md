@@ -226,23 +226,28 @@ expect(entry.contains("extern fn rt_net_")).to_equal(false)
 
 </details>
 
-#### routes rv64-ssh through the RV64 OpenSSH host probe contract
+#### routes rv64-ssh through the shared OpenSSH host probe contract
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+Runnable source: compiler-selection and dispatch assertions folded for reproduction.
+Reproduction: this block contains the executable scenario's compiler and host-probe contract checks.
 
 ```simple
 val runner = rt_file_read_text("src/os/_QemuRunner/scenario_exec.spl")
 val contract = rt_file_read_text("src/os/ssh_qemu_contract.spl")
+val build_runner = rt_file_read_text("src/os/_QemuRunner/os_build_run.spl")
+val compiler_selector_start = build_runner.find("fn _find_simple_binary_for_target")
+expect(compiler_selector_start).to_be_greater_than(-1)
+val compiler_selector = build_runner.slice(compiler_selector_start, build_runner.len())
 expect(runner.contains("scenario.name == \"rv64-ssh\"")).to_equal(true)
 expect(runner.contains("run_rv64_ssh_probe(cmd_parts, timeout_ms)")).to_equal(true)
+expect(compiler_selector.contains("src/compiler_rust/target/")).to_equal(false)
+expect(build_runner).to_contain("not stderr.contains(\"bootstrap seed only\")")
 expect(contract.contains("pub fn run_rv64_ssh_probe")).to_equal(true)
-expect(contract.contains("run_ssh_probe(\"rv64\", cmd_parts, timeout_ms)")).to_equal(true)
+expect(contract.contains("run_rv64_ssh_single_connection_probe(cmd_parts, timeout_ms)")).to_equal(true)
 expect(contract.contains("extern fn rt_process_run_timeout")).to_equal(true)
-expect(contract.contains("SSH daemon listening on port 22")).to_equal(true)
 ```
 
 </details>

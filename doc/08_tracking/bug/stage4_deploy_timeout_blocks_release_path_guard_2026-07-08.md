@@ -33,6 +33,21 @@ cli___CliMain__main
 The same probe succeeds through `bin/simple` after source resolution because the
 source-level guard returns no delegate driver.
 
+## 2026-07-13 isolated-worktree recheck
+
+`release/x86_64-unknown-linux-gnu/simple` in the isolated host-GPU worktree is
+a pure-Simple artifact, not the Rust seed, but it still predates the startup
+fix. `run examples/01_getting_started/hello_native.spl` reproduces the
+`startup_normalize_program_args` crash. Even a one-thread cached Hello World
+`native-build` exits 139 in `rt_env_set`: GDB shows `SIMPLE_OS_LOG_MODE` paired
+with the invalid value pointer `0x12`. The shared checkout is a separate state:
+its deployed `bin/simple` still points to a Rust seed and emits the mandatory
+seed warning.
+
+The QEMU runner and host-GPU wrapper now fail closed on seed provenance and
+abnormal bounded native-build parser probes. Those guards prevent stale output
+from being accepted, but they cannot replace the required compiler redeployment.
+
 ## Deploy attempts
 
 Both deploy attempts reached stage4 and failed to produce a new

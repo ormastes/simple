@@ -207,6 +207,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val objcopy_prefix = _objcopy_path_prefix()
     val simple_bin = _find_simple_binary_for_target(target, backend_name)
     if simple_bin == "":
+        _remove_stale_build_output(target)
         print "[build][{arch_label}] phase=tooling FAILED: no runnable pure-Simple compiler"
         return false
     val stamp_content = _native_build_stamp_content(target, backend_name, args, simple_bin, log_mode)
@@ -366,28 +367,20 @@ fn _simple_binary_is_valid(candidate: text) -> bool:
     val (stdout, stderr, exit_code) = process_run_timeout(candidate, ["--version"], 5000)
     exit_code == 0 and stdout != "" and not stderr.contains("bootstrap seed only")
 
-fn _simple_binary_supports_backend(candidate: text, backend_name: text) -> bool:
+fn _simple_binary_has_native_build_contract(candidate: text, backend_name: text) -> bool:
+    # This is a bounded CLI liveness/command-surface probe. The real build is
+    # still authoritative for backend runtime/toolchain availability.
     if not _simple_binary_is_valid(candidate):
         return false
-    if backend_name != "llvm":
-        return true
     val probe_args = [
         "native-build",
-        "--backend", "llvm",
-        "--source", "src",
+        "--backend", backend_name,
         "--entry", "src/app/cli/main.spl",
-        "--target", "definitely-invalid-target",
-        "-o", "/tmp/simple_backend_probe.elf",
-        "--linker-script", "examples/09_embedded/simple_os/arch/riscv64/linker.ld"
+        "--mode", "definitely-invalid-mode"
     ]
-    val (_stdout, stderr, _exit_code) = process_run_timeout(candidate, probe_args, 5000)
-    if stderr.contains("native backend 'llvm' is not available"):
-        return false
-    if stderr.contains("LLVM backend requested but 'llvm' feature not enabled"):
-        return false
-    if stderr.contains("No suitable version of LLVM was found"):
-        return false
-    true
+    val (stdout, stderr, exit_code) = process_run_timeout(candidate, probe_args, 5000)
+    val diagnostic = "Error: invalid --mode 'definitely-invalid-mode' (expected dynload or one-binary)"
+    exit_code == 1 and (stdout + "\n" + stderr).contains(diagnostic)
 
 fn _find_simple_binary() -> text:
     val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
@@ -417,10 +410,10 @@ fn _find_simple_binary() -> text:
 
 fn _find_simple_binary_for_target(target: OsTarget, backend_name: text) -> text:
     val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
-    if env_bin != "" and _simple_binary_supports_backend(env_bin, backend_name):
+    if env_bin != "" and _simple_binary_has_native_build_contract(env_bin, backend_name):
         return env_bin
     val env_simple_bin = rt_env_get("SIMPLE_BIN") ?? ""
-    if env_simple_bin != "" and _simple_binary_supports_backend(env_simple_bin, backend_name):
+    if env_simple_bin != "" and _simple_binary_has_native_build_contract(env_simple_bin, backend_name):
         return env_simple_bin
     val candidates: [text] = [
         "release/x86_64-unknown-linux-gnu/simple",
@@ -432,7 +425,7 @@ fn _find_simple_binary_for_target(target: OsTarget, backend_name: text) -> text:
         "bin/release/linux-x86_64/simple",
     ]
     for cand in candidates:
-        if _simple_binary_supports_backend(cand, backend_name):
+        if _simple_binary_has_native_build_contract(cand, backend_name):
             return cand
     ""
 
@@ -541,11 +534,16 @@ fn _simpleos_log_config_source(enabled: bool) -> text:
         "        return \"on\"\n" +
         "    \"off\"\n"
 
-fn _prepare_build_output(target: OsTarget, build_marker: text) -> bool:
+fn _remove_stale_build_output(target: OsTarget) -> bool:
     if rt_file_exists(target.output):
         if not rt_file_delete(target.output):
             print "[build] could not remove stale artifact: {target.output}"
             return false
+    true
+
+fn _prepare_build_output(target: OsTarget, build_marker: text) -> bool:
+    if not _remove_stale_build_output(target):
+        return false
     if rt_file_exists(_legacy_simpleos_log_config_path()):
         rt_file_delete(_legacy_simpleos_log_config_path())
     if not rt_dir_create_all("build/os/generated/generated"):

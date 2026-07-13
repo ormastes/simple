@@ -100,6 +100,11 @@ sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --validate-report path/to/r
 ```
 
 Status-only or incomplete cached reports fail closed as malformed evidence.
+The wrapper bounds both compiler probes to five seconds, rejects any version
+probe that reports `bootstrap seed only`, and then requires the exact exit-1
+diagnostic from a deliberate invalid-mode native-build command. Explicit
+compiler overrides do not bypass this liveness/command-surface gate; the real
+build remains authoritative for backend runtime/toolchain availability.
 
 Run the live Linux Vulkan-render/CUDA-processing matrix with a deployed
 pure-Simple compiler and CUDA+Vulkan runtime artifact:

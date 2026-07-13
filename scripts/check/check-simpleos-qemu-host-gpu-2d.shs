@@ -57,10 +57,35 @@ case "$ACTIVE_HOST" in
 esac
 RUNTIME_PATH=${SIMPLEOS_HOST_GPU_RUNTIME_PATH:-$DEFAULT_RUNTIME_PATH}
 
+simple_binary_is_valid() {
+    candidate=$1
+    [ -x "$candidate" ] || return 1
+    timeout_bin=$(find_timeout || true)
+    [ -n "$timeout_bin" ] || return 1
+    version=$("$timeout_bin" 5 "$candidate" --version 2>&1) || return 1
+    [ -n "$version" ] || return 1
+    case "$version" in
+        *"bootstrap seed only"*) return 1 ;;
+    esac
+    if probe=$("$timeout_bin" 5 "$candidate" native-build --backend cranelift \
+        --entry src/app/cli/main.spl --mode definitely-invalid-mode 2>&1)
+    then
+        return 1
+    else
+        probe_status=$?
+    fi
+    [ "$probe_status" -eq 1 ] || return 1
+    case "$probe" in
+        *"Error: invalid --mode 'definitely-invalid-mode' (expected dynload or one-binary)"*) ;;
+        *) return 1 ;;
+    esac
+}
+
 find_simple() {
-    if [ -n "${SIMPLE_BIN:-}" ] && [ -x "$SIMPLE_BIN" ]; then
+    if [ -n "${SIMPLE_BIN:-}" ]; then
+        simple_binary_is_valid "$SIMPLE_BIN" || return 1
         printf '%s\n' "$SIMPLE_BIN"
-        return
+        return 0
     fi
     case "$ACTIVE_HOST" in
         macos)
@@ -83,9 +108,9 @@ build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple"
     esac
     for candidate in $candidates
     do
-        if [ -x "$candidate" ]; then
+        if simple_binary_is_valid "$candidate"; then
             printf '%s\n' "$candidate"
-            return
+            return 0
         fi
     done
     return 1
@@ -367,6 +392,51 @@ self_test() {
     directx_pass_report="$temp_dir/directx-pass.env"
     fake_report="$temp_dir/fake.env"
     bad_backend_report="$temp_dir/bad-backend.env"
+    valid_simple="$temp_dir/simple-valid"
+    seed_simple="$temp_dir/simple-seed"
+    hanging_simple="$temp_dir/simple-hanging"
+    failing_simple="$temp_dir/simple-probe-failing"
+    cat >"$valid_simple" <<'EOF'
+#!/bin/sh
+if [ "$1" = "--version" ]; then
+    echo 'Simple v1.0.0-beta'
+    exit 0
+fi
+echo "Error: invalid --mode 'definitely-invalid-mode' (expected dynload or one-binary)" >&2
+exit 1
+EOF
+    cat >"$seed_simple" <<'EOF'
+#!/bin/sh
+echo 'Simple Language v1.0.0-beta'
+echo 'WARNING: this Rust-built Simple binary is a bootstrap seed only' >&2
+EOF
+    cat >"$hanging_simple" <<'EOF'
+#!/bin/sh
+sleep 6
+EOF
+    cat >"$failing_simple" <<'EOF'
+#!/bin/sh
+if [ "$1" = "--version" ]; then
+    echo 'Simple v1.0.0-beta'
+    exit 0
+fi
+echo 'native-build probe failed without the expected parser contract' >&2
+exit 1
+EOF
+    chmod +x "$valid_simple" "$seed_simple" "$hanging_simple" "$failing_simple"
+    simple_binary_is_valid "$valid_simple"
+    if simple_binary_is_valid "$seed_simple"; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    if simple_binary_is_valid "$hanging_simple"; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    if simple_binary_is_valid "$failing_simple"; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
     cat >"$pass_log" <<'EOF'
 HOST_GPU_MAP_OK isa=aarch64 device=3
 HOST_GPU_HELLO_OK isa=aarch64 generation=21 render_mask=1 processing_mask=9

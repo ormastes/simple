@@ -704,11 +704,40 @@ expect(os_native_build_sources(rv32_target)[0]).to_equal("build/os/generated")
 
 </details>
 
-#### prefers explicit target compilers before installed Rust seeds
+#### rejects the Rust bootstrap seed and requires the native-build CLI contract
 
 The target compiler selector checks both `SIMPLE_BINARY` and `SIMPLE_BIN`
-before probing either bootstrap or release Rust-seed paths. This keeps an
-explicit validated self-hosted compiler authoritative for LLVM target builds.
+before pure-Simple release candidates. Every candidate must pass a bounded
+version/seed check and the exact fail-fast native-build CLI contract for the
+requested backend token. This probe establishes command-surface liveness only;
+the real build remains authoritative for backend runtime/toolchain availability.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = rt_file_read_text("src/os/_QemuRunner/os_build_run.spl")
+val start = source.find("fn _find_simple_binary_for_target")
+expect(start).to_be_greater_than(-1)
+val selector = source.slice(start, source.len())
+val explicit = selector.find("val env_bin = rt_env_get(\"SIMPLE_BINARY\")")
+val explicit_alias = selector.find("val env_simple_bin = rt_env_get(\"SIMPLE_BIN\")")
+expect(explicit).to_be_greater_than(-1)
+expect(explicit_alias).to_be_greater_than(explicit)
+expect(selector.contains("src/compiler_rust/target/")).to_equal(false)
+expect(source).to_contain("if _simple_binary_has_native_build_contract(cand, backend_name):\n            return cand\n    \"\"\n\nfn _build_sources")
+expect(source).to_contain("not stderr.contains(\"bootstrap seed only\")")
+expect(source).to_contain("\"--backend\", backend_name")
+expect(source).to_contain("\"--mode\", \"definitely-invalid-mode\"")
+expect(source).to_contain("exit_code == 1 and (stdout + \"\\n\" + stderr).contains(diagnostic)")
+expect(source).to_contain("if simple_bin == \"\":\n        _remove_stale_build_output(target)")
+expect(source).to_contain("phase=tooling FAILED: no runnable pure-Simple compiler")
+```
+
+</details>
 
 #### lets callers disable compiled OS logging through native-build args
 
