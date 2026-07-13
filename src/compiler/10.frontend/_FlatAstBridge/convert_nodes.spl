@@ -6,7 +6,7 @@ use compiler.frontend.flat_ast_bridge.*
 # Module shape expected by HIR lowering. This is used as the bootstrap-safe
 # frontend path when the newer parser surface is unavailable.
 
-use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_advance, par_kind_get}
+use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_advance, par_kind_get, parser_set_had_error}
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.frontend.core.parser_expr.{parse_expr}
 use compiler.frontend.core.lexer.{lex_init_with_path}
@@ -388,13 +388,26 @@ fn flat_bridge_parse_interp_inner(inner: text) -> i64:
     # parsed expr idx, or -1 when `inner` is not a single clean expression
     # (leftover tokens / parse failure) so the caller can fall back to a plain
     # literal.
+    # Sticky par_had_error guard (bug: driver.spl's phase-2 gate reads
+    # par_had_error_get() right after this file's parse_full_frontend()
+    # returns; parser_tok_save/restore only snapshot kind/line/col/text, not
+    # this flag, so a recovered failure here — deliberately swallowed below
+    # via the idx<0 fallback-to-literal path — would otherwise stay set and
+    # fail phase 2 on a file whose real AST is fine). Save/restore around the
+    # whole speculative fragment parse so only a REAL top-level parse error
+    # (raised outside this function, on the real module lex) can trip the
+    # gate.
+    val had_error_before = parser_has_errors()
     lex_init_with_path(inner, "")
     parser_advance()
     val idx = parse_expr()
     if idx < 0:
+        parser_set_had_error(had_error_before)
         return -1
     if par_kind_get() != TOK_EOF:
+        parser_set_had_error(had_error_before)
         return -1
+    parser_set_had_error(had_error_before)
     idx
 
 fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
