@@ -59,6 +59,32 @@ receipt IDs, same-frame readback/result bytes, exact CPU-oracle checksum, and
 backend markers from the host adapter. Flags, screenshots, scanout, CPU mirrors,
 and synthetic handles fail closed.
 
+### Checked raw Vulkan framebuffer execution
+
+Every Vulkan framebuffer mutation that can support a device-backed receipt
+must pass one fenced tri-state owner before `dirty` is set. The shared
+`vulkan_dispatch_framebuffer_compute_checked` returns `1` only after command
+submission, fence completion, and cleanup are proven; `0` means receipt is
+ineligible but no dependency may remain in flight; `-1` means completion or
+command/descriptor dependency release is unknown. The framebuffer may already
+have mutated on a `0` cleanup-evidence failure, so the backend refreshes device
+bytes conservatively while keeping receipt provenance ineligible; no CPU replay
+is permitted. The backend
+maps these through `_dispatch_framebuffer_checked`: success marks the device
+buffer dirty, known failure makes device provenance ineligible, and unknown
+completion poisons further mutation and readback. Exact IMAGE keeps its
+existing checked helper because that helper additionally owns the source
+buffer lifetime.
+
+The canonical production WM currently emits solid RECT, resolved-font TEXT,
+and exact-size IMAGE commands. Its visible shadow is a displaced solid RECT,
+not a Draw IR shadow effect; gradient, border, radius, and transform kernels
+are therefore outside this raw CLEAR/RECT hardening slice. Full-target
+desktop/chrome/taskbar batches can eventually render directly. Smaller window batches and transparent content require
+the existing clip and embedded-surface opacity semantics; they must remain
+ineligible for a device receipt until device-backed src-over composition is
+implemented. Nested GROUP batches remain rejected.
+
 Vulkan ProcessingIR hashes the runtime-selected driver identity, which includes
 device name, vendor/device IDs, driver version, and API version. Storage-buffer handles remain per-request resource handles and
 must never be reused as device provenance. Vulkan processing is negotiated only

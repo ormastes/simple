@@ -20,6 +20,7 @@ placeholder blobs provide Vulkan parity.
 
 use std.spec.{describe, context, it, expect}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gc_async_mut.gpu.engine2d.color.{rgb}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 
@@ -183,6 +184,34 @@ describe "Vulkan strict smoke tests":
                     engine.shutdown()
 
     context "draw_rect_filled pixel parity with CPU reference":
+
+        it "checked clear and rect return exact device-backed readback before present":
+            val probe = probe_vulkan()
+            if probe.is_ok():
+                var backend = VulkanBackend.create()
+                val initialized = backend.init(16, 16)
+                expect(initialized).to_equal(true)
+                if initialized:
+                    val bg = color_blue_u32()
+                    val fg = color_red_u32()
+                    backend.clear(bg)
+                    backend.draw_rect_filled(2, 2, 6, 6, fg)
+                    val readback = backend.read_pixels_with_source()
+                    val cpu_ref = build_cpu_reference(16, 16, bg, fg, 2, 2, 6, 6)
+                    var mismatch_count = 0
+                    expect(readback.pixels.len()).to_equal(256)
+                    if readback.pixels.len() == 256:
+                        var ci = 0
+                        while ci < 256:
+                            if readback.pixels[ci] != cpu_ref[ci]:
+                                mismatch_count = mismatch_count + 1
+                            ci = ci + 1
+                    expect(mismatch_count).to_equal(0)
+                    expect(readback.source).to_equal("device_readback")
+                    expect(readback.backend_handle).to_be_greater_than(0)
+                    expect(backend.cpu_fallback_used).to_equal(false)
+                    expect(backend.completion_unknown).to_equal(false)
+                    backend.shutdown()
 
         it "draw_rect_filled writes correct pixels in the rect region":
             val probe = probe_vulkan()

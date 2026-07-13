@@ -14,7 +14,7 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_bind_pipeline, vulkan_sffi_bind_descriptors,
     vulkan_sffi_push_constants, vulkan_sffi_dispatch,
     vulkan_sffi_end_compute, vulkan_sffi_discard_command,
-    vulkan_sffi_submit_and_wait, vulkan_sffi_fence_submission_supported,
+    vulkan_sffi_fence_submission_supported,
     vulkan_sffi_submit_and_wait_fence, vulkan_sffi_wait_fence,
     vulkan_sffi_destroy_fence, vulkan_sffi_free_buffer,
     vulkan_sffi_copy_from_buffer, vulkan_sffi_copy_to_buffer,
@@ -35,18 +35,55 @@ val VK_PUSH_CONSTANT_SIZE: i64 = 64
 # Compute Dispatch Methods
 # ============================================================================
 
-fn vulkan_dispatch_compute(d_framebuffer: i64, pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64):
-    """Dispatch a compute shader with the framebuffer bound at binding 0."""
+fn vulkan_dispatch_framebuffer_compute_checked(d_framebuffer: i64, pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
+    """Dispatch one framebuffer kernel with fenced, fail-closed completion."""
+    if d_framebuffer <= 0 or pipe <= 0 or push_data.len() == 0 or gx <= 0 or gy <= 0 or gz <= 0:
+        return 0
+    if not vulkan_sffi_fence_submission_supported():
+        return 0
     val desc = vulkan_sffi_create_descriptor_set(pipe)
-    vulkan_sffi_bind_buffer(desc, 0, d_framebuffer)
-    val cmd = vulkan_sffi_begin_compute()
-    vulkan_sffi_bind_pipeline(cmd, pipe)
-    vulkan_sffi_bind_descriptors(cmd, desc)
-    vulkan_sffi_push_constants(cmd, pipe, push_data)
-    vulkan_sffi_dispatch(cmd, gx, gy, gz)
-    vulkan_sffi_end_compute(cmd)
-    vulkan_sffi_submit_and_wait(cmd)
-    vulkan_sffi_destroy_descriptor_set(desc)
+    if desc <= 0:
+        return 0
+
+    var cmd: i64 = 0
+    var ready = vulkan_sffi_bind_buffer(desc, 0, d_framebuffer)
+    if ready:
+        cmd = vulkan_sffi_begin_compute()
+        ready = cmd > 0
+    if ready:
+        ready = vulkan_sffi_bind_pipeline(cmd, pipe)
+    if ready:
+        ready = vulkan_sffi_bind_descriptors(cmd, desc)
+    if ready:
+        ready = vulkan_sffi_push_constants(cmd, pipe, push_data)
+    if ready:
+        ready = vulkan_sffi_dispatch(cmd, gx, gy, gz)
+    if ready:
+        ready = vulkan_sffi_end_compute(cmd)
+
+    if not ready:
+        val command_released = cmd <= 0 or vulkan_sffi_discard_command(cmd)
+        if not command_released:
+            return -1
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        return 0
+
+    val fence = vulkan_sffi_submit_and_wait_fence(cmd)
+    if fence < 0:
+        if not vulkan_sffi_wait_idle():
+            return -1
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        return 0
+    if fence == 0:
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        return 0
+
+    val completion_waited = vulkan_sffi_wait_fence(fence, 0)
+    if not completion_waited and not vulkan_sffi_wait_idle():
+        return -1
+    val fence_destroyed = vulkan_sffi_destroy_fence(fence)
+    val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+    if completion_waited and fence_destroyed and descriptor_destroyed: 1 else: 0
 
 fn vulkan_dispatch_blit_compute_checked(d_framebuffer: i64, pipe: i64, d_src: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
     """Dispatch a blit and consume d_src only after completion is known."""
@@ -118,9 +155,19 @@ fn vulkan_dispatch_blit_compute_checked(d_framebuffer: i64, pipe: i64, d_src: i6
 
 impl VulkanBackend:
 
-    me _dispatch_compute(pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64):
-        """Dispatch a compute shader with the framebuffer bound at binding 0."""
-        vulkan_dispatch_compute(self.d_framebuffer, pipe, push_data, gx, gy, gz)
+    me _dispatch_framebuffer_checked(pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
+        val dispatched = vulkan_dispatch_framebuffer_compute_checked(self.d_framebuffer, pipe, push_data, gx, gy, gz)
+        if dispatched > 0:
+            self.dirty = true
+        else:
+            self.cpu_fallback_used = true
+            if dispatched < 0:
+                self.completion_unknown = true
+            elif self.initialized and self.d_framebuffer > 0:
+                # Status 0 may follow a completed mutation whose cleanup
+                # evidence failed. Refresh device bytes, but never promote it.
+                self.dirty = true
+        dispatched
 
     me _gpu_draw_text_fallback(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         """Render text on CPU and upload affected region to GPU.

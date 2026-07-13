@@ -24,9 +24,15 @@ the CPU/software fallback and report a stable reason.
 4. **Compare Draw IR readback and correlated device receipt across all three ISAs.**
    Require the exact checksum and pixel counts with positive Vulkan handle and
    device identity before accepting the marker.
-5. **Run the ProcessingIR parity fixture.** Correlate the host completion and
+5. **Dispatch the raw CLEAR and solid RECT fixture through checked Vulkan commands.**
+   Route the existing raw QEMU framebuffer mutations through fenced completion
+   evidence.
+6. **Reject unchecked or fallback raw rendering before device-backed receipt.**
+   Known failure invalidates device provenance; unknown completion poisons the
+   frame rather than replaying it. This does not claim production-WM offload.
+7. **Run the ProcessingIR parity fixture.** Correlate the host completion and
    require exact output-buffer parity with the CPU oracle.
-6. **Report device-backed host acceleration evidence.** Publish one row with
+8. **Report device-backed host acceleration evidence.** Publish one row with
    host, guest ISA, QEMU/device arguments, protocol, backend, device, IDs,
    timing, RSS, checksums, status, and reason.
 

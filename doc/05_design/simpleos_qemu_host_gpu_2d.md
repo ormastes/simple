@@ -80,6 +80,40 @@ fits, while the current 3840x2160 production desktop does not. Production 4K
 must retain local rendering until the wire capacity is deliberately expanded
 with updated bounds and evidence; downscale and crop are not fallback options.
 
+## Checked Vulkan Dispatch
+
+`vulkan_dispatch_framebuffer_compute_checked(framebuffer, pipeline, push,
+gx, gy, gz) -> i64` reuses the checked IMAGE dispatch lifecycle with one bound
+framebuffer and no owned source buffer:
+
+1. reject invalid handles, empty push data, zero workgroups, or missing fenced
+   submission with `0`;
+2. build and validate descriptor and command state, discarding a partial
+   command on known setup failure;
+3. submit with a fence and return `-1` when completion or dependent command/
+   descriptor release remains unknown;
+4. return `1` only when completion and cleanup evidence are complete;
+5. otherwise return `0` without receipt eligibility or CPU replay; a completed
+   mutation may exist when only cleanup evidence failed.
+
+`VulkanBackend._dispatch_framebuffer_checked(...) -> i64` is the sole state
+mapper. `1` sets `dirty`; `0` sets the existing sticky conservative provenance
+flag and marks a valid initialized framebuffer dirty for conservative device
+refresh; `-1` sets that flag plus `completion_unknown` and remains unreadable.
+CLEAR, RECT outline/filled, filled
+CIRCLE, filled TRIANGLE, and vertical GRADIENT route through it. Emulated
+line/circle/rounded shapes inherit the checked RECT-filled path. No new runtime
+alias, dispatcher class, or backend API is introduced.
+
+This slice hardens the existing raw host-daemon CLEAR/RECT fixture only. The
+production WM minimum remains solid RECT plus canonical `draw_text` using
+the Draw IR `font-identity`, exact-size IMAGE, clip, and embedded src-over/
+opacity. Font selection continues through `FontRenderer` and transient
+`FontRenderBatch`; font bytes and atlas/cache state do not enter Draw IR. The
+host rejects any command that falls back to CPU or lacks checked completion
+before emitting a device receipt. It does not admit the production WM until
+device-backed embedded src-over/opacity and representative p95 evidence exist.
+
 ## Observability and NFRs
 
 Each row records host OS, guest ISA, QEMU version/arguments, protocol/backend,

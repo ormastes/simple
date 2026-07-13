@@ -21,6 +21,12 @@ fn host_gpu_probe_source() -> text:
 fn host_gpu_guest_bridge_source() -> text:
     file_read_text("src/os/lib/gpu_bridge/host_gpu_ivshmem.spl")
 
+fn vulkan_backend_source() -> text:
+    file_read_text("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+
+fn vulkan_backend_helpers_source() -> text:
+    file_read_text("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
+
 fn run_host_gpu_wrapper_self_test() -> text:
     val (out, err, code) = process_run("/bin/sh", ["scripts/check/check-simpleos-qemu-host-gpu-2d.shs", "--self-test"])
     expect(code).to_equal(0)
@@ -62,6 +68,22 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         expect(source).to_contain("HOST_GPU_DRAW_IR_OK")
         expect(source).to_contain("checksum=405589360 bg=2112 image=960 other=0")
         expect(source).to_contain("handle=[1-9][0-9]* identity=[1-9][0-9]*")
+
+    # @capture(protocol)
+    it "requires checked raw Vulkan completion before a device receipt":
+        step("Dispatch the raw CLEAR and solid RECT fixture through checked Vulkan commands")
+        step("Reject unchecked or fallback raw rendering before device-backed receipt")
+        val helpers = vulkan_backend_helpers_source()
+        val backend = vulkan_backend_source()
+        expect(helpers).to_contain("fn vulkan_dispatch_framebuffer_compute_checked")
+        expect(helpers).to_contain("vulkan_sffi_submit_and_wait_fence(cmd)")
+        expect(helpers.contains("fn vulkan_dispatch_compute(")).to_equal(false)
+        expect(helpers).to_contain("if dispatched > 0:")
+        expect(helpers).to_contain("if dispatched < 0:")
+        expect(helpers).to_contain("elif self.initialized and self.d_framebuffer > 0:")
+        expect(helpers).to_contain("me _dispatch_framebuffer_checked")
+        expect(backend).to_contain("self._dispatch_framebuffer_checked")
+        expect(backend.contains("vulkan_dispatch_compute(")).to_equal(false)
 
     # @capture(artifact)
     it "returns an exact device-backed ProcessingIR result":

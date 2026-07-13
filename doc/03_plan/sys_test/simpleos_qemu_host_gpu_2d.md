@@ -14,6 +14,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 |---|---|
 | negotiate one bounded architecture-neutral protocol | REQ-001,002,005 |
 | exact device-backed Draw IR readback | REQ-003,006; NFR-001 |
+| checked raw Vulkan CLEAR/RECT completion and fail-closed provenance | REQ-003,005,006,010; NFR-001 |
 | exact device-backed ProcessingIR result | REQ-004,007; NFR-002,004 |
 | honest cross-host backend classification | REQ-008,009 |
 | malformed and stale input rejection | REQ-010; NFR-007 |
@@ -29,3 +30,8 @@ handles, compile-only output, or a CPU mirror. Unsupported and blocked rows are
 valid classifications but do not satisfy a host/ISA combination classified as
 supported.
 
+The focused Vulkan unit boundary renders CLEAR plus solid RECT on a real or
+lavapipe device and requires exact pixels, `device_readback`, a positive
+handle, and no fallback/unknown-completion state. The system spec also rejects
+the old unchecked submit route structurally so an ignored SFFI result cannot
+silently regain receipt eligibility.
