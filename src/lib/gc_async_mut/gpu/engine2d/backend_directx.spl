@@ -4,14 +4,16 @@ On Linux: routes D3D11 device/swapchain semantics through dxvk_d3d11
 (DXVK → Vulkan translation) using the local build/dx/prefix or system
 Vulkan ICD. Platform probe selects the expected leaf evidence string.
 
-On Windows: queues the receipt-eligible CLEAR/FILL_RECT/full-target opaque
-IMAGE subset and executes it through one checked native D3D11 frame/readback
+On Windows: queues the receipt-eligible CLEAR/FILL_RECT/opaque IMAGE subset
+and executes it through one checked native D3D11 frame/readback
 hook. Every other operation remains available through SoftwareBackend but
 poisons native receipt eligibility for that frame.
 
 The SoftwareBackend mirror preserves the complete RenderBackend surface. On
-Windows, only a bounded clear/fill/full-target opaque-image subset is eligible
-for a hardware receipt; one canonical SFFI facade executes that frame once on
+Windows, only a bounded clear/fill/opaque-image subset is eligible; an image
+may initialize the target only when full-sized, while a prior clear permits
+bounded partial images. Both image and opaque image-blend entrypoints share
+the same receipt validator; one canonical SFFI facade executes that frame once on
 D3D11 and returns blocking staging-readback evidence. Any other operation or
 mutation after execution invalidates the receipt. Linux remains the existing
 DXVK-structured CPU-raster compatibility path and reports
@@ -27,7 +29,7 @@ Usage:
     val pixels = b.read_pixels()
 """
 
-use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_handle}
+use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_handle, engine2d_readback_with_identity}
 use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.platform.{get_host_os}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus, BackendProbeResult}
@@ -164,20 +166,37 @@ impl DirectXBackend:
         self._native_finish_record()
         self.native_has_frame = true
 
-    me _native_append_image(pixels: [u32]):
+    me _native_append_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         val payload_words = pixels.len().to_u32()
         self.native_words.push(DIRECTX_FRAME_OP_IMAGE)
         self.native_words.push(DIRECTX_FRAME_RECORD_WORDS + payload_words)
-        self.native_words.push(0u32)
-        self.native_words.push(0u32)
-        self.native_words.push(self.width().to_u32())
-        self.native_words.push(self.height().to_u32())
+        self.native_words.push(x.to_u32())
+        self.native_words.push(y.to_u32())
+        self.native_words.push(w.to_u32())
+        self.native_words.push(h.to_u32())
         self.native_words.push(0u32)
         self.native_words.push(payload_words)
         for pixel in pixels:
             self.native_words.push(pixel)
         self._native_finish_record()
         self.native_has_frame = true
+
+    me _native_queue_opaque_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if not self.native_hardware:
+            return
+        val in_bounds = x >= 0 and y >= 0 and w > 0 and h > 0 and x <= self.width() - w and y <= self.height() - h
+        var opaque = in_bounds and pixels.len().to_i64() == w.to_i64() * h.to_i64()
+        var i = 0
+        while i < pixels.len() and opaque:
+            opaque = ((pixels[i] >> 24u32) & 0xFFu32) == 0xFFu32
+            i = i + 1
+        val can_initialize = self.native_has_frame or (x == 0 and y == 0 and w == self.width() and h == self.height())
+        if self.native_receipt_eligible and not self.native_attempted and opaque and can_initialize:
+            if not self.native_has_frame:
+                self._native_reset()
+            self._native_append_image(x, y, w, h, pixels)
+        else:
+            self._poison_native_receipt()
 
     me _poison_native_receipt():
         if self.native_hardware:
@@ -362,21 +381,10 @@ impl RenderBackend for DirectXBackend:
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         self.sw.draw_image(x, y, w, h, pixels)
-        if self.native_hardware:
-            var opaque = x == 0 and y == 0 and w == self.width() and h == self.height() and pixels.len().to_i64() == w.to_i64() * h.to_i64()
-            var i = 0
-            while i < pixels.len() and opaque:
-                opaque = ((pixels[i] >> 24u32) & 0xFFu32) == 0xFFu32
-                i = i + 1
-            if self.native_receipt_eligible and not self.native_attempted and opaque:
-                if not self.native_has_frame:
-                    self._native_reset()
-                self._native_append_image(pixels)
-            else:
-                self._poison_native_receipt()
+        self._native_queue_opaque_image(x, y, w, h, pixels)
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         self.sw.draw_image_blend(x, y, w, h, pixels)
-        self._poison_native_receipt()
+        self._native_queue_opaque_image(x, y, w, h, pixels)
 
     me set_clip(x: i32, y: i32, w: i32, h: i32):
         self.sw.set_clip(x, y, w, h)
@@ -425,7 +433,7 @@ impl RenderBackend for DirectXBackend:
         if self.native_hardware:
             self._native_execute_once()
             if self.native_cached_handle > 0:
-                return engine2d_readback_with_handle(self.native_cached_pixels, "device_readback", self.native_cached_handle)
+                return engine2d_readback_with_identity(self.native_cached_pixels, "device_readback", self.native_cached_handle, self.native_device_identity)
             if not self.native_completion_known:
                 return engine2d_readback([], "completion_unknown")
             return engine2d_readback(self.sw.read_pixels(), "cpu_mirror")
@@ -504,7 +512,7 @@ impl Engine2DExtended for DirectXBackend:
 
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         self.sw.draw_image_blend(x, y, w, h, pixels)
-        self._poison_native_receipt()
+        self._native_queue_opaque_image(x, y, w, h, pixels)
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
         self.sw.draw_image_scaled(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)

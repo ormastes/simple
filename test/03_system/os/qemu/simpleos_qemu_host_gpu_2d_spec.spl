@@ -36,6 +36,9 @@ fn host_gpu_daemon_source() -> text:
 fn metal_processing_source() -> text:
     file_read_text("src/lib/gc_async_mut/processing/metal_fill_u32.spl")
 
+fn draw_ir_executor_source() -> text:
+    file_read_text("src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl")
+
 fn windows_platform_source() -> text:
     file_read_text("src/runtime/platform/platform_win.h")
 
@@ -64,7 +67,14 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         expect(source).to_contain("EXPECTED_RENDER_MASK")
         expect(source).to_contain("EXPECTED_PROCESSING_MASK")
         expect(probe).to_contain("render_backend = \"metal\"")
+        expect(probe).to_contain("render_backend = \"directx\"")
         expect(probe).to_contain("render_backend = \"vulkan\"")
+        expect(probe).to_contain("(hello.processing_mask & processing_mask) == hello.processing_mask")
+        expect(probe.contains("(hello.processing_mask & render_mask) != 0")).to_equal(false)
+        expect(probe).to_contain("SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0: \"cuda\"")
+        expect(probe).to_contain("SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN) != 0: \"vulkan\"")
+        expect(source).to_contain("BACKEND=directx")
+        expect(source).to_contain("EXPECTED_PROCESSING_MASK='(1|8|9)'")
         expect(windows_platform_source()).to_contain("DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE;")
         expect(windows_native_linker_source()).to_contain("\"d3d11.lib\", \"dxgi.lib\"")
         expect(windows_shared_linker_source()).to_contain("\"d3d11\", \"dxgi\"")
@@ -76,6 +86,7 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         val source = host_gpu_wrapper_source()
         val probe = host_gpu_probe_source()
         expect(probe).to_contain("host_gpu_ivshmem_submit_draw_ir")
+        expect(draw_ir_executor_source()).to_contain("val apply_clip = embedding.clip and not fills_target_exactly")
         expect(probe).to_contain("host_gpu_ivshmem_device_receipt_valid(render_receipt")
         expect(probe).to_contain("host_gpu_ivshmem_device_receipt_valid(draw_ir_receipt")
         expect(probe).to_contain("host_gpu_ivshmem_device_receipt_valid(processing_receipt")
@@ -120,7 +131,11 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         expect(daemon).to_contain("engine.backend_name() == name")
         expect(daemon).to_contain("metal_device_info(0)")
         expect(daemon).to_contain("processing_metal_device_identity(info.name, info.total_memory)")
-        expect(daemon).to_contain("backend != \"vulkan\" and backend != \"metal\"")
+        expect(daemon).to_contain("directx_hardware_adapter_identity()")
+        expect(daemon).to_contain("if backend == \"directx\": result.device_identity")
+        expect(daemon).to_contain("if backend == \"directx\": readback.device_identity")
+        expect(daemon).to_contain("backend != \"vulkan\" and backend != \"metal\" and backend != \"directx\"")
+        expect(host_gpu_wrapper_source()).to_contain("[ \"$render_identity\" = \"$draw_ir_identity\" ]")
         expect(daemon.contains("backend != \"vulkan\" and kind == SIMPLEOS_HOST_GPU_KIND_DRAW_IR")).to_equal(false)
 
     # @capture(artifact)

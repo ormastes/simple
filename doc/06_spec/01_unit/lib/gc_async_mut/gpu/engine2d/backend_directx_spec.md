@@ -335,12 +335,12 @@ b.shutdown()
 
 </details>
 
-#### full-target opaque IMAGE is queued inline
+#### opaque IMAGE is queued inline after a valid initializer
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -358,6 +358,19 @@ expect(b.native_words[11]).to_equal(2u32)
 expect(b.native_words[12]).to_equal(0xFF010203u32)
 expect(b.native_words[13]).to_equal(0xFF040506u32)
 b.shutdown()
+
+var partial = DirectXBackend.create()
+partial.sw.init(4, 2)
+partial.native_hardware = true
+partial.native_receipt_eligible = true
+partial.initialized = true
+partial.clear(0xFF000000)
+partial.draw_image_blend(1, 0, 2, 1, [0xFF010203u32, 0xFF040506u32])
+expect(partial.native_receipt_eligible).to_equal(true)
+expect(partial.native_words[12]).to_equal(3u32)
+expect(partial.native_words[14]).to_equal(1u32)
+expect(partial.native_words[16]).to_equal(2u32)
+partial.shutdown()
 ```
 
 </details>
@@ -367,7 +380,7 @@ b.shutdown()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -379,6 +392,7 @@ expect(backend).to_contain("directx_execute_readback_checked")
 expect(backend).to_contain("fn _native_execute_once")
 expect(backend).to_contain("self.native_attempted = true")
 expect(backend).to_contain("native.device_identity == self.native_device_identity")
+expect(backend).to_contain("engine2d_readback_with_identity")
 expect(backend).to_contain("self.native_receipt_eligible = false\n            self.native_cached_handle = 0\n            self.native_cached_pixels = []")
 expect(facade).to_contain("extern fn rt_directx_execute_readback_checked")
 expect(facade).to_contain("extern fn rt_directx_hardware_adapter_identity")
@@ -442,12 +456,13 @@ expect(readback.backend_handle).to_equal(77)
    - Expected: readback.source equals `device_readback`
    - Expected: readback.pixel_count equals `16`
    - Expected: readback.pixels[0] equals `0xFF224466`
+   - Expected on Windows: readback.device_identity is positive
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -462,6 +477,8 @@ if ok:
     expect(readback.pixel_count).to_equal(16)
     expect(readback.checksum).to_be_greater_than(0)
     expect(readback.pixels[0]).to_equal(0xFF224466)
+    if get_host_os() == "windows":
+        expect(readback.device_identity).to_be_greater_than(0)
 else:
     val probe = dx_platform_probe()
     expect(probe.leaf).to_contain("leaf=")

@@ -106,11 +106,16 @@ device readback, a positive framebuffer handle, and a stable default-device
 name/memory identity all agree. `metal-on-vulkan` remains an explicitly named
 compatibility backend and cannot satisfy a Metal receipt. DirectX remains
 software emulation on non-Windows hosts. Windows now has one bounded native
-D3D11 owner for CLEAR, FILL_RECT, and full-target opaque IMAGE. It admits
+D3D11 owner for CLEAR, FILL_RECT, and opaque IMAGE initialized by either a
+full-target image or an earlier clear. It admits
 `device_readback` only after hardware-device execution, blocking staging
-readback, a positive target handle, and same-call adapter identity all agree.
-Daemon/guest negotiation and prepared-Windows receipt evidence remain open, so
-the Windows QEMU row is not yet classified as accelerated.
+readback, a positive target handle, and backend validation of the execution
+adapter identity all agree. That identity travels with `Engine2DReadback`
+through Draw IR into the daemon receipt; the wrapper requires raw-render and
+Draw IR receipts to name the same device.
+Guest/daemon/wrapper negotiation keeps the DirectX render mask independent
+from CUDA/Vulkan processing masks. Prepared-Windows receipt evidence remains
+open, so the Windows QEMU row is not yet classified as accelerated.
 
 Vulkan ProcessingIR hashes the runtime-selected driver identity, which includes
 device name, vendor/device IDs, driver version, and API version. Storage-buffer handles remain per-request resource handles and
@@ -123,16 +128,16 @@ after a bounded real ProcessingIR probe returns both values.
 |---|---|---|---|
 | Linux | Vulkan | Vulkan; CUDA on prepared NVIDIA host | pass only with device receipt |
 | macOS | Metal implementation, native receipt still required | dedicated Metal ProcessingIR FillU32, native receipt still required | never infer processing from an Engine2D clear |
-| Windows | bounded native D3D11 owner implemented; QEMU integration and receipt pending | CUDA/Vulkan owner reuse planned | require same-call hardware identity, positive target handle, and exact readback; ivshmem mapping permits concurrent QEMU/daemon writes |
+| Windows | bounded native D3D11 owner and QEMU negotiation implemented; receipt pending | CUDA preferred, Vulkan fallback | require independent masks, positive hardware identity/target handle, and exact readback; ivshmem mapping permits concurrent QEMU/daemon writes |
 | Any missing prerequisite | CPU/software | CPU | `unsupported` or `blocked`, never accelerated |
 
 Cross-ISA TCG rows prove protocol correctness and provenance, not native-ISA
-latency. The guest negotiates strict native Metal first, then retries Vulkan
-with a fresh generation when Metal is unavailable. The selected backend is
-used unchanged for raw rendering and Draw IR; ProcessingIR uses Metal with
-Metal or prefers CUDA and falls back to Vulkan with Vulkan. Prepared macOS and
-Linux hosts therefore exercise the same wire contract on x86_64, AArch64, and
-RISC-V without accepting a compatibility backend under a native name.
+latency. The guest tries strict native Metal, DirectX, then Vulkan with fresh
+generations. The selected backend is used unchanged for raw rendering and Draw
+IR. ProcessingIR is selected independently: CUDA first, then Metal, then
+Vulkan. Prepared hosts therefore exercise the same wire contract on x86_64,
+AArch64, and RISC-V without accepting a compatibility backend under a native
+name.
 
 `src/os/compositor/engine2d_wm_frame_executor.spl` is the local production
 fallback owner. It builds and submits the canonical Simple-owned composition,

@@ -37,10 +37,10 @@ fn _host_gpu_probe_fail(isa: text, reason: text):
     serial_println("HOST_GPU_PROBE_FAIL isa={isa} reason={reason}")
     serial_println("TEST FAILED")
 
-fn _host_gpu_probe_hello_valid(hello: HostGpuIvshmemHelloReceipt, render_mask: i64) -> bool:
+fn _host_gpu_probe_hello_valid(hello: HostGpuIvshmemHelloReceipt, render_mask: i64, processing_mask: i64) -> bool:
     hello.completed and hello.status == SIMPLEOS_HOST_GPU_STATUS_PASS and
         hello.version == SIMPLEOS_HOST_GPU_PROTOCOL_VERSION and hello.render_mask == render_mask and
-        (hello.processing_mask & render_mask) != 0
+        hello.processing_mask != 0 and (hello.processing_mask & processing_mask) == hello.processing_mask
 
 pub fn host_gpu_ivshmem_probe_main():
     val isa = _host_gpu_probe_isa()
@@ -59,14 +59,23 @@ pub fn host_gpu_ivshmem_probe_main():
     var render_backend = "metal"
     var render_backend_code = SIMPLEOS_HOST_GPU_BACKEND_METAL
     var render_backend_mask = SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
-    var hello = host_gpu_ivshmem_negotiate(base, hello_generation, isa, render_backend, render_backend_mask, HOST_GPU_PROBE_TIMEOUT_POLLS)
-    if not _host_gpu_probe_hello_valid(hello, render_backend_mask):
+    var processing_mask = SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
+    var hello = host_gpu_ivshmem_negotiate(base, hello_generation, isa, render_backend, processing_mask, HOST_GPU_PROBE_TIMEOUT_POLLS)
+    if not _host_gpu_probe_hello_valid(hello, render_backend_mask, processing_mask):
+        hello_generation = hello_generation + 1
+        render_backend = "directx"
+        render_backend_code = SIMPLEOS_HOST_GPU_BACKEND_DIRECTX
+        render_backend_mask = SIMPLEOS_HOST_GPU_BACKEND_MASK_DIRECTX
+        processing_mask = SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN | SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA
+        hello = host_gpu_ivshmem_negotiate(base, hello_generation, isa, render_backend, processing_mask, HOST_GPU_PROBE_TIMEOUT_POLLS)
+    if not _host_gpu_probe_hello_valid(hello, render_backend_mask, processing_mask):
         hello_generation = hello_generation + 1
         render_backend = "vulkan"
         render_backend_code = SIMPLEOS_HOST_GPU_BACKEND_VULKAN
         render_backend_mask = SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN
-        hello = host_gpu_ivshmem_negotiate(base, hello_generation, isa, render_backend, render_backend_mask | SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA, HOST_GPU_PROBE_TIMEOUT_POLLS)
-    if not _host_gpu_probe_hello_valid(hello, render_backend_mask):
+        processing_mask = SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN | SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA
+        hello = host_gpu_ivshmem_negotiate(base, hello_generation, isa, render_backend, processing_mask, HOST_GPU_PROBE_TIMEOUT_POLLS)
+    if not _host_gpu_probe_hello_valid(hello, render_backend_mask, processing_mask):
         _host_gpu_probe_fail(isa, "hello-negotiation")
         return
     serial_println("HOST_GPU_HELLO_OK isa={isa} generation={hello_generation} render_mask={hello.render_mask} processing_mask={hello.processing_mask}")
@@ -163,7 +172,7 @@ pub fn host_gpu_ivshmem_probe_main():
     val draw_ir_identity = draw_ir_receipt.device_identity
     serial_println("HOST_GPU_DRAW_IR_OK isa={isa} backend={render_backend} generation={draw_ir_generation} handle={draw_ir_handle} identity={draw_ir_identity} checksum={draw_ir_checksum} bg={background_count} image={foreground_count} other={other_count}")
 
-    val processing_backend = if (hello.processing_mask & SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0: "cuda" elif (hello.processing_mask & render_backend_mask) != 0: render_backend else: ""
+    val processing_backend = if (hello.processing_mask & SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0: "cuda" elif (hello.processing_mask & SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL) != 0: "metal" elif (hello.processing_mask & SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN) != 0: "vulkan" else: ""
     if processing_backend == "":
         _host_gpu_probe_fail(isa, "processing-ir-unavailable")
         return

@@ -32,6 +32,13 @@ set_host_contract() {
             EXPECTED_PROCESSING_MASK=2
             EXPECTED_PROCESSING_RECEIPT=metal
             ;;
+        windows)
+            BACKEND=directx
+            PROCESSING_BACKEND=cuda-preferred-vulkan-fallback
+            EXPECTED_RENDER_MASK=4
+            EXPECTED_PROCESSING_MASK='(1|8|9)'
+            EXPECTED_PROCESSING_RECEIPT='(cuda|vulkan)'
+            ;;
         *)
             BACKEND=unsupported
             PROCESSING_BACKEND=unsupported
@@ -45,6 +52,7 @@ set_host_contract() {
 set_host_contract "$ACTIVE_HOST"
 case "$ACTIVE_HOST" in
     macos) DEFAULT_RUNTIME_PATH=src/compiler_rust/target/bootstrap ;;
+    windows) DEFAULT_RUNTIME_PATH= ;;
     *) DEFAULT_RUNTIME_PATH=build/simpleos_gpu_host/vulkan-cuda-runtime-target/bootstrap ;;
 esac
 RUNTIME_PATH=${SIMPLEOS_HOST_GPU_RUNTIME_PATH:-$DEFAULT_RUNTIME_PATH}
@@ -61,6 +69,11 @@ bin/release/aarch64-apple-darwin/simple
 bin/release/x86_64-apple-darwin/simple
 build/bootstrap/stage3/$(uname -m)-apple-darwin/simple
 build/bootstrap/stage2/$(uname -m)-apple-darwin/simple"
+            ;;
+        windows)
+            candidates="bin/release/x86_64-pc-windows-msvc/simple.exe
+bin/release/x86_64-pc-windows-gnu/simple.exe
+bin/release/windows-x86_64/simple.exe"
             ;;
         *)
             candidates="bin/release/x86_64-unknown-linux-gnu/simple
@@ -113,19 +126,23 @@ serial_receipts_valid() {
     render_generation=$(sed -n "s/^HOST_GPU_RENDER_OK isa=$isa backend=$BACKEND generation=\([1-9][0-9]*\) .*/\1/p" "$log")
     draw_ir_generation=$(sed -n "s/^HOST_GPU_DRAW_IR_OK isa=$isa backend=$BACKEND generation=\([1-9][0-9]*\) .*/\1/p" "$log")
     process_generation=$(sed -n "s/^HOST_GPU_PROCESS_OK isa=$isa backend=.* generation=\([1-9][0-9]*\) .*/\1/p" "$log")
+    render_identity=$(sed -n "s/^HOST_GPU_RENDER_OK isa=$isa .* identity=\([1-9][0-9]*\) checksum=.*/\1/p" "$log")
+    draw_ir_identity=$(sed -n "s/^HOST_GPU_DRAW_IR_OK isa=$isa .* identity=\([1-9][0-9]*\) checksum=.*/\1/p" "$log")
     case "$isa" in
         x86_64) expected_hello_generation=9 ;;
         aarch64) expected_hello_generation=19 ;;
         riscv64) expected_hello_generation=29 ;;
         *) return 1 ;;
     esac
-    if [ "$ACTIVE_HOST" = linux ]; then
-        expected_hello_generation=$((expected_hello_generation + 1))
-    fi
+    case "$ACTIVE_HOST" in
+        windows) expected_hello_generation=$((expected_hello_generation + 1)) ;;
+        linux) expected_hello_generation=$((expected_hello_generation + 2)) ;;
+    esac
     [ "$hello_generation" -eq "$expected_hello_generation" ] &&
     [ "$render_generation" -eq "$((hello_generation + 1))" ] &&
     [ "$draw_ir_generation" -eq "$((render_generation + 1))" ] &&
-    [ "$process_generation" -eq "$((draw_ir_generation + 1))" ]
+    [ "$process_generation" -eq "$((draw_ir_generation + 1))" ] &&
+    [ "$render_identity" = "$draw_ir_identity" ]
 }
 
 serial_processing_pair_valid() {
@@ -134,7 +151,7 @@ serial_processing_pair_valid() {
     if [ "$ACTIVE_HOST" = macos ]; then
         grep -aEq "^HOST_GPU_HELLO_OK isa=$isa .* processing_mask=2[[:space:]]*$" "$log" &&
         grep -aEq "^HOST_GPU_PROCESS_OK isa=$isa backend=metal " "$log"
-    elif grep -aEq "^HOST_GPU_HELLO_OK isa=$isa .* processing_mask=9[[:space:]]*$" "$log"; then
+    elif grep -aEq "^HOST_GPU_HELLO_OK isa=$isa .* processing_mask=(8|9)[[:space:]]*$" "$log"; then
         grep -aEq "^HOST_GPU_PROCESS_OK isa=$isa backend=cuda " "$log"
     elif grep -aEq "^HOST_GPU_HELLO_OK isa=$isa .* processing_mask=1[[:space:]]*$" "$log"; then
         grep -aEq "^HOST_GPU_PROCESS_OK isa=$isa backend=vulkan " "$log"
@@ -260,7 +277,7 @@ validate_report() {
     reason=$(report_one "$report" simpleos_qemu_host_gpu_2d_reason) || return 1
     report_active_host=$(report_one "$report" simpleos_qemu_host_gpu_2d_host 2>/dev/null || true)
     [ -n "$report_active_host" ] || report_active_host=linux
-    case "$report_active_host" in linux|macos) ;; *) return 1 ;; esac
+    case "$report_active_host" in linux|macos|windows) ;; *) return 1 ;; esac
     [ -n "$reason" ] || return 1
     case "$status" in pass|blocked|fail|unsupported) ;; *) return 1 ;; esac
 
@@ -276,7 +293,7 @@ validate_report() {
             case "$row_status" in pass|blocked|fail|unsupported) ;; *) return 1 ;; esac
             case "$report_host:$row_render_backend:$row_processing_backend" in
                 linux:vulkan:cuda-preferred-vulkan-fallback|linux:vulkan:cuda|linux:vulkan:vulkan) ;;
-                macos:metal:metal|windows:directx:cuda) ;;
+                macos:metal:metal|windows:directx:cuda-preferred-vulkan-fallback|windows:directx:cuda|windows:directx:vulkan) ;;
                 *) return 1 ;;
             esac
         done
@@ -338,35 +355,43 @@ self_test() {
     metal_wrong_mask_log="$temp_dir/metal-wrong-mask.log"
     metal_wrong_backend_log="$temp_dir/metal-wrong-backend.log"
     metal_wrong_generation_log="$temp_dir/metal-wrong-generation.log"
+    directx_log="$temp_dir/directx-aarch64.log"
+    directx_x86_log="$temp_dir/directx-x86_64.log"
+    directx_riscv_log="$temp_dir/directx-riscv64.log"
+    directx_vulkan_log="$temp_dir/directx-vulkan.log"
+    directx_wrong_mask_log="$temp_dir/directx-wrong-mask.log"
+    directx_wrong_backend_log="$temp_dir/directx-wrong-backend.log"
+    directx_wrong_identity_log="$temp_dir/directx-wrong-identity.log"
     pass_report="$temp_dir/pass.env"
     metal_pass_report="$temp_dir/metal-pass.env"
+    directx_pass_report="$temp_dir/directx-pass.env"
     fake_report="$temp_dir/fake.env"
     bad_backend_report="$temp_dir/bad-backend.env"
     cat >"$pass_log" <<'EOF'
 HOST_GPU_MAP_OK isa=aarch64 device=3
-HOST_GPU_HELLO_OK isa=aarch64 generation=20 render_mask=1 processing_mask=9
-HOST_GPU_RENDER_OK isa=aarch64 backend=vulkan generation=21 handle=22 identity=22 checksum=405589360 bg=2112 rect=960 other=0
-HOST_GPU_DRAW_IR_OK isa=aarch64 backend=vulkan generation=22 handle=24 identity=22 checksum=405589360 bg=2112 image=960 other=0
-HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=23 handle=1 identity=23 checksum=1792 mismatches=0
+HOST_GPU_HELLO_OK isa=aarch64 generation=21 render_mask=1 processing_mask=9
+HOST_GPU_RENDER_OK isa=aarch64 backend=vulkan generation=22 handle=22 identity=22 checksum=405589360 bg=2112 rect=960 other=0
+HOST_GPU_DRAW_IR_OK isa=aarch64 backend=vulkan generation=23 handle=24 identity=22 checksum=405589360 bg=2112 image=960 other=0
+HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=24 handle=1 identity=23 checksum=1792 mismatches=0
 SIMPLEOS_HOST_GPU_2D_PASS isa=aarch64
 TEST PASSED
 EOF
-    sed 's/aarch64/x86_64/g; s/generation=20/generation=10/g; s/generation=21/generation=11/g; s/generation=22/generation=12/g; s/generation=23/generation=13/g' "$pass_log" >"$x86_log"
-    sed 's/aarch64/riscv64/g; s/generation=20/generation=30/g; s/generation=21/generation=31/g; s/generation=22/generation=32/g; s/generation=23/generation=33/g' "$pass_log" >"$riscv_log"
+    sed 's/aarch64/x86_64/g; s/generation=21/generation=11/g; s/generation=22/generation=12/g; s/generation=23/generation=13/g; s/generation=24/generation=14/g' "$pass_log" >"$x86_log"
+    sed 's/aarch64/riscv64/g; s/generation=21/generation=31/g; s/generation=22/generation=32/g; s/generation=23/generation=33/g; s/generation=24/generation=34/g' "$pass_log" >"$riscv_log"
     sed 's/checksum=1792/checksum=1793/' "$pass_log" >"$corrupt_log"
     sed '/^HOST_GPU_DRAW_IR_OK /s/checksum=405589360/checksum=405589361/' "$pass_log" >"$corrupt_draw_ir_log"
     sed 's/processing_mask=9/processing_mask=1/; s/backend=cuda/backend=vulkan/' "$pass_log" >"$vulkan_log"
     sed 's/backend=cuda/backend=vulkan/' "$pass_log" >"$wrong_backend_log"
-    sed 's/backend=vulkan generation=21/backend=vulkan generation=999/' "$pass_log" >"$wrong_generation_log"
-    sed 's/generation=20/generation=100/; s/generation=21/generation=101/; s/generation=22/generation=102/; s/generation=23/generation=103/' "$pass_log" >"$stale_generation_log"
+    sed 's/backend=vulkan generation=22/backend=vulkan generation=999/' "$pass_log" >"$wrong_generation_log"
+    sed 's/generation=21/generation=101/; s/generation=22/generation=102/; s/generation=23/generation=103/; s/generation=24/generation=104/' "$pass_log" >"$stale_generation_log"
     sed 's/mismatches=0/mismatches=0 contradictory=true/' "$pass_log" >"$trailing_log"
     { sed '$d' "$pass_log"; echo "TEST FAILED"; echo "TEST PASSED"; } >"$contradictory_terminal_log"
     cat >"$fail_log" <<'EOF'
 HOST_GPU_MAP_OK isa=aarch64 device=3
-HOST_GPU_HELLO_OK isa=aarch64 generation=20 render_mask=1 processing_mask=9
-HOST_GPU_RENDER_OK isa=aarch64 backend=vulkan generation=21 handle=22 identity=22 checksum=405589360 bg=2112 rect=960 other=0
-HOST_GPU_DRAW_IR_OK isa=aarch64 backend=vulkan generation=22 handle=24 identity=22 checksum=405589360 bg=2112 image=960 other=0
-HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=23 handle=0 identity=0 checksum=1792 mismatches=0
+HOST_GPU_HELLO_OK isa=aarch64 generation=21 render_mask=1 processing_mask=9
+HOST_GPU_RENDER_OK isa=aarch64 backend=vulkan generation=22 handle=22 identity=22 checksum=405589360 bg=2112 rect=960 other=0
+HOST_GPU_DRAW_IR_OK isa=aarch64 backend=vulkan generation=23 handle=24 identity=22 checksum=405589360 bg=2112 image=960 other=0
+HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=24 handle=0 identity=0 checksum=1792 mismatches=0
 TEST PASSED
 EOF
     cat >"$metal_log" <<'EOF'
@@ -383,6 +408,21 @@ EOF
     sed 's/render_mask=2/render_mask=1/' "$metal_log" >"$metal_wrong_mask_log"
     sed 's/backend=metal/backend=vulkan/g' "$metal_log" >"$metal_wrong_backend_log"
     sed 's/backend=metal generation=20/backend=metal generation=999/' "$metal_log" >"$metal_wrong_generation_log"
+    cat >"$directx_log" <<'EOF'
+HOST_GPU_MAP_OK isa=aarch64 device=3
+HOST_GPU_HELLO_OK isa=aarch64 generation=20 render_mask=4 processing_mask=8
+HOST_GPU_RENDER_OK isa=aarch64 backend=directx generation=21 handle=22 identity=22 checksum=405589360 bg=2112 rect=960 other=0
+HOST_GPU_DRAW_IR_OK isa=aarch64 backend=directx generation=22 handle=24 identity=22 checksum=405589360 bg=2112 image=960 other=0
+HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=23 handle=1 identity=23 checksum=1792 mismatches=0
+SIMPLEOS_HOST_GPU_2D_PASS isa=aarch64
+TEST PASSED
+EOF
+    sed 's/aarch64/x86_64/g; s/generation=20/generation=10/g; s/generation=21/generation=11/g; s/generation=22/generation=12/g; s/generation=23/generation=13/g' "$directx_log" >"$directx_x86_log"
+    sed 's/aarch64/riscv64/g; s/generation=20/generation=30/g; s/generation=21/generation=31/g; s/generation=22/generation=32/g; s/generation=23/generation=33/g' "$directx_log" >"$directx_riscv_log"
+    sed 's/processing_mask=8/processing_mask=1/; s/backend=cuda/backend=vulkan/' "$directx_log" >"$directx_vulkan_log"
+    sed 's/render_mask=4/render_mask=1/' "$directx_log" >"$directx_wrong_mask_log"
+    sed 's/backend=directx/backend=vulkan/g' "$directx_log" >"$directx_wrong_backend_log"
+    sed '/^HOST_GPU_DRAW_IR_OK /s/identity=22/identity=99/' "$directx_log" >"$directx_wrong_identity_log"
     serial_has_pass "$pass_log" aarch64
     serial_has_pass "$vulkan_log" aarch64
     REQUIRE_CUDA=1
@@ -486,6 +526,36 @@ EOF
         echo simpleos_qemu_host_gpu_2d_failed=0
     } >"$metal_pass_report"
     validate_report "$metal_pass_report" >/dev/null
+    set_host_contract windows
+    serial_has_pass "$directx_log" aarch64
+    serial_has_pass "$directx_vulkan_log" aarch64
+    if serial_has_pass "$directx_wrong_mask_log" aarch64 ||
+       serial_has_pass "$directx_wrong_backend_log" aarch64 ||
+       serial_has_pass "$directx_wrong_identity_log" aarch64
+    then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    {
+        for report_host in linux macos; do
+            for report_isa in x86_64 aarch64 riscv64; do
+                emit_row "$report_host" "$report_isa" unsupported "requires-$report_host-host" none
+            done
+        done
+        emit_row windows x86_64 pass ok "$directx_x86_log" cuda
+        emit_row windows aarch64 pass ok "$directx_log" cuda
+        emit_row windows riscv64 pass ok "$directx_riscv_log" cuda
+        echo simpleos_qemu_host_gpu_2d_host=windows
+        echo simpleos_qemu_host_gpu_2d_status=pass
+        echo simpleos_qemu_host_gpu_2d_reason=all-windows-host-gpu-rows-pass
+        echo simpleos_qemu_host_gpu_2d_backend=directx
+        echo simpleos_qemu_host_gpu_2d_processing_backend=cuda-preferred-vulkan-fallback
+        echo simpleos_qemu_host_gpu_2d_rows=3
+        echo simpleos_qemu_host_gpu_2d_passed=3
+        echo simpleos_qemu_host_gpu_2d_blocked=0
+        echo simpleos_qemu_host_gpu_2d_failed=0
+    } >"$directx_pass_report"
+    validate_report "$directx_pass_report" >/dev/null
     set_host_contract linux
     echo "simpleos_qemu_host_gpu_2d_self_test=pass"
 }
@@ -512,7 +582,7 @@ for other_host in linux macos windows; do
     fi
 done
 
-if [ "$host" != linux ] && [ "$host" != macos ]; then
+if [ "$host" != linux ] && [ "$host" != macos ] && [ "$host" != windows ]; then
     for isa in x86_64 aarch64 riscv64; do
         emit_row "$host" "$isa" unsupported host-daemon-backend-not-implemented none
     done
@@ -523,7 +593,7 @@ if [ "$host" != linux ] && [ "$host" != macos ]; then
 fi
 
 simple_bin=$(find_simple || true)
-if [ -z "$simple_bin" ]; then
+if [ -z "$simple_bin" ] && { [ -z "${SIMPLEOS_GPU_HOST_BIN:-}" ] || [ "${SIMPLEOS_HOST_GPU_USE_EXISTING_GUESTS:-0}" != 1 ]; }; then
     for isa in x86_64 aarch64 riscv64; do emit_row "$host" "$isa" blocked pure-simple-compiler-missing none; done
     echo "simpleos_qemu_host_gpu_2d_host=$host"
     echo "simpleos_qemu_host_gpu_2d_status=blocked"
@@ -531,11 +601,17 @@ if [ -z "$simple_bin" ]; then
     exit 1
 fi
 
-daemon=${SIMPLEOS_GPU_HOST_BIN:-$BUILD_DIR/simpleos_gpu_host}
+default_daemon=$BUILD_DIR/simpleos_gpu_host
+if [ "$host" = windows ]; then
+    default_daemon=$BUILD_DIR/simpleos_gpu_host.exe
+fi
+daemon=${SIMPLEOS_GPU_HOST_BIN:-$default_daemon}
 if [ -z "${SIMPLEOS_GPU_HOST_BIN:-}" ]; then
     runtime_reason=vulkan-cuda-runtime-artifact-missing
     if [ "$host" = macos ]; then
         runtime_reason=metal-runtime-artifact-missing
+    elif [ "$host" = windows ]; then
+        runtime_reason=directx-runtime-artifact-missing
     fi
     if [ ! -d "$RUNTIME_PATH" ] || { [ "$host" = macos ] && ! core_c_bootstrap_runtime_available; }; then
         for isa in x86_64 aarch64 riscv64; do emit_row "$host" "$isa" blocked "$runtime_reason" none; done

@@ -1,14 +1,15 @@
 # SimpleOS QEMU Host-GPU 2D
 
 Status: implementation in progress. The host executor now admits checked
-shared-session Vulkan and Metal child surfaces for canonical offset/opacity WM batches;
-the wrapper and its fail-closed Linux/macOS parser self-test exercises the shared
-full-frame IMAGE Draw IR fixture. Earlier
+Vulkan, Metal, and native Windows D3D11 rendering. Render and ProcessingIR
+masks negotiate independently; Windows prefers CUDA and falls back to Vulkan.
+The fail-closed Linux/macOS/Windows wrapper self-test exercises the shared
+IMAGE Draw IR fixture. Earlier
 Linux/Vulkan live x86_64, AArch64, and RV64 raw-render receipts pass; refreshed
 cross-ISA Draw IR and CUDA ProcessingIR receipts remain pending. Native Metal
 raw rendering, Draw IR, and dedicated ProcessingIR FillU32 execution are implemented, but their
-prepared-macOS receipts remain unavailable; DirectX remains software emulation
-and cannot pass.
+prepared-macOS receipts remain unavailable. Native Windows receipts remain
+pending while TODO 548 blocks a fresh Simple/QEMU run.
 
 This scenario proves that supported SimpleOS guests use one bounded protocol to
 execute Draw IR and ProcessingIR on a real host device. Unsupported rows retain
@@ -18,20 +19,21 @@ the CPU/software fallback and report a stable reason.
 
 1. **Probe the QEMU guest GPU capability.** Boot the selected x86_64, AArch64,
    or RISC-V guest and negotiate protocol version, limits, backend sets,
-   readback, and host readiness. Try strict native Metal first; when it is
-   unavailable, retry Vulkan with a fresh generation.
+   readback, and host readiness. Try strict native Metal, DirectX, then Vulkan
+   with fresh generations while validating processing against its own mask.
 2. **Render and read back the Simple 2D parity fixture.** Correlate frame ID,
    native device identity, positive backend handle, same-frame output, and the
-   exact CPU-oracle checksum.
+   exact CPU-oracle checksum. Raw-render and Draw IR receipts must carry the
+   same execution device identity.
 3. **Submit the canonical full-frame IMAGE composition through the shared guest bridge.**
    Use the same 64x48 opaque background-and-rectangle oracle as one clipped
    full-target `DrawIrComposition` IMAGE resource.
 4. **Compare Draw IR readback and correlated device receipt across all three ISAs.**
-   Require the exact checksum and pixel counts with a positive native Metal or
-   Vulkan handle and stable device identity before accepting the marker.
+   Require the exact checksum and pixel counts with a positive native Metal,
+   DirectX, or Vulkan handle and stable device identity before accepting the marker.
 5. **Dispatch the raw CLEAR and solid RECT fixture through strict Engine2D selection.**
-   Route raw QEMU framebuffer mutations through the exact native Metal or
-   Vulkan backend selected by HELLO and require checked completion evidence.
+   Route raw QEMU framebuffer mutations through the exact native Metal,
+   DirectX, or Vulkan backend selected by HELLO and require checked completion evidence.
 6. **Reject unchecked or fallback raw rendering before device-backed receipt.**
    Known failure invalidates device provenance; unknown completion poisons the
    frame rather than replaying it.
@@ -78,8 +80,8 @@ Linux uses Vulkan for rendering and CUDA for ProcessingIR on a prepared NVIDIA
 host, with Vulkan ProcessingIR retained when CUDA is unavailable. macOS uses
 strict native Metal for raw rendering, Draw IR, and exact device receipts. Metal
 ProcessingIR uses its own MSL kernel and device readback rather than an
-Engine2D clear. DirectX cannot pass until a native D3D owner
-replaces the current software-emulation backend. Cross-ISA TCG rows
+Engine2D clear. Windows uses the bounded native D3D11 owner for rendering and
+selects CUDA or Vulkan ProcessingIR independently. Cross-ISA TCG rows
 prove correctness and honest provenance; they are exempt from native-ISA
 latency and speedup targets.
 
@@ -109,6 +111,11 @@ sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
 On a prepared macOS host the same command selects the Metal contract, uses the
 Darwin pure-Simple compiler/runtime artifact, and capability-gates each QEMU
 binary before launch. Native macOS evidence remains pending.
+
+On Windows, provide a native daemon with `SIMPLEOS_GPU_HOST_BIN`; cached guest
+artifacts may be selected explicitly with
+`SIMPLEOS_HOST_GPU_USE_EXISTING_GUESTS=1`. The wrapper does not infer a runtime
+bundle or claim a fresh build.
 
 The default path builds guests through the named `_QemuRunner` scenarios.
 `SIMPLEOS_HOST_GPU_USE_EXISTING_GUESTS=1` is an explicit cached-artifact
