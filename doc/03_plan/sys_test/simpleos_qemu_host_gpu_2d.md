@@ -27,6 +27,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 | zero/negative numeric run hash or frame ID rejection at guest and daemon wire boundaries | REQ-005,010; NFR-007,009 |
 | multi-ISA row aggregation and fail-closed parsing | REQ-011,012; NFR-008,009 |
 | cached report validates every host/ISA row and all three Linux serial receipts before promotion | REQ-011,012; NFR-008,009 |
+| live and cached QEMU argv match the ISA machine, kernel, and shared ivshmem binding | REQ-006,011,012; NFR-009 |
 | latency, negotiation, and RSS evidence | NFR-003,005,006 |
 
 ## Evidence Rules
@@ -45,8 +46,11 @@ HELLO/render/Draw IR/ProcessingIR elapsed times, and correlated run/frame IDs.
 Non-HELLO guest submissions and daemon admissions require the shared positive
 numeric run-hash/frame-ID predicate; device receipts recheck both expected and
 returned values. The cached-report validator rejects a missing, duplicate,
-empty, or nonpositive field. This proves evidence completeness only; NFR latency and combined
-QEMU-plus-daemon RSS targets still require fresh measured rows.
+empty, or nonpositive field. It also parses the encoded argv tokens and rejects
+the wrong ISA machine/kernel, missing or altered shared-memory object, extra
+arguments, and any ivshmem device not bound to `hostgpu`. This proves evidence
+completeness only; NFR latency and combined QEMU-plus-daemon RSS targets still
+require fresh measured rows.
 
 The focused Vulkan unit boundary renders CLEAR plus solid RECT on a real or
 lavapipe device and requires exact pixels, `device_readback`, a positive

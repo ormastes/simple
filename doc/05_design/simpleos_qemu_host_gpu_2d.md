@@ -25,6 +25,13 @@ admission compare the exact values, with device admission also requiring the
 positive expected pair. HELLO remains exempt because its control exchange
 intentionally carries zero IDs.
 
+`qemu_argv_evidence_valid` validates the existing per-argument hex encoding
+without decoding variable paths. It requires the exact x86_64, AArch64, or
+RISC-V token count/order, derives the kernel basename from `kernel_for_isa`,
+and accepts a variable nonempty shared-memory path only inside the canonical
+`memory-backend-file,id=hostgpu,share=on,...,size=8M` object. Both live row
+admission and cached promotion use this owner.
+
 ## Flow
 
 1. The guest maps the QEMU `ivshmem-plain` BAR2 region and negotiates bounded

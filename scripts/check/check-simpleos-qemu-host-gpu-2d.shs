@@ -329,8 +329,76 @@ encode_argv_hex() {
     printf '%s' "$encoded_argv"
 }
 
+kernel_for_isa() {
+    case "$1" in
+        x86_64) echo build/os/simpleos_x86_64_host_gpu_probe.elf ;;
+        aarch64) echo build/os/simpleos_arm64_host_gpu_probe.elf ;;
+        riscv64) echo build/os/simpleos_riscv64_host_gpu_probe.elf ;;
+    esac
+}
+
 encoded_argv_valid() {
     printf '%s\n' "$1" | grep -Eq '^hex:([0-9a-f][0-9a-f])+(,([0-9a-f][0-9a-f])+)*$'
+}
+
+encoded_arg() {
+    encode_argv_hex "$1" | sed 's/^hex://'
+}
+
+encoded_arg_has_affixes() {
+    encoded_prefix=$(encoded_arg "$2")
+    encoded_suffix=$(encoded_arg "$3")
+    case "$1" in
+        "$encoded_prefix"?*"$encoded_suffix") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+qemu_argv_evidence_valid() {
+    isa=$1
+    encoded=$2
+    encoded_argv_valid "$encoded" || return 1
+    old_ifs=$IFS
+    IFS=,
+    set -- ${encoded#hex:}
+    IFS=$old_ifs
+    kernel_suffix=$(encoded_arg "$(basename "$(kernel_for_isa "$isa")")")
+    object_prefix='memory-backend-file,id=hostgpu,share=on,mem-path='
+    object_suffix=',size=8M'
+    ivshmem=$(encoded_arg 'ivshmem-plain,memdev=hostgpu')
+    case "$isa" in
+        x86_64)
+            [ "$#" -eq 14 ] &&
+            [ "$1" = "$(encoded_arg -machine)" ] && [ "$2" = "$(encoded_arg q35)" ] &&
+            [ "$3" = "$(encoded_arg -m)" ] && [ "$4" = "$(encoded_arg 512M)" ] &&
+            [ "$5" = "$(encoded_arg -kernel)" ] && case "$6" in *"$kernel_suffix") true ;; *) false ;; esac &&
+            [ "$7" = "$(encoded_arg -nographic)" ] && [ "$8" = "$(encoded_arg -no-reboot)" ] &&
+            [ "$9" = "$(encoded_arg -device)" ] && [ "${10}" = "$(encoded_arg virtio-net-pci)" ] &&
+            [ "${11}" = "$(encoded_arg -object)" ] && encoded_arg_has_affixes "${12}" "$object_prefix" "$object_suffix" &&
+            [ "${13}" = "$(encoded_arg -device)" ] && [ "${14}" = "$ivshmem" ]
+            ;;
+        aarch64)
+            [ "$#" -eq 15 ] &&
+            [ "$1" = "$(encoded_arg -machine)" ] && [ "$2" = "$(encoded_arg virt)" ] &&
+            [ "$3" = "$(encoded_arg -cpu)" ] && [ "$4" = "$(encoded_arg cortex-a72)" ] &&
+            [ "$5" = "$(encoded_arg -m)" ] && [ "$6" = "$(encoded_arg 512M)" ] &&
+            [ "$7" = "$(encoded_arg -kernel)" ] && case "$8" in *"$kernel_suffix") true ;; *) false ;; esac &&
+            [ "$9" = "$(encoded_arg -nographic)" ] && [ "${10}" = "$(encoded_arg -device)" ] &&
+            [ "${11}" = "$(encoded_arg virtio-net-pci)" ] && [ "${12}" = "$(encoded_arg -object)" ] &&
+            encoded_arg_has_affixes "${13}" "$object_prefix" "$object_suffix" &&
+            [ "${14}" = "$(encoded_arg -device)" ] && [ "${15}" = "$ivshmem" ]
+            ;;
+        riscv64)
+            [ "$#" -eq 11 ] &&
+            [ "$1" = "$(encoded_arg -machine)" ] && [ "$2" = "$(encoded_arg virt)" ] &&
+            [ "$3" = "$(encoded_arg -m)" ] && [ "$4" = "$(encoded_arg 512M)" ] &&
+            [ "$5" = "$(encoded_arg -kernel)" ] && case "$6" in *"$kernel_suffix") true ;; *) false ;; esac &&
+            [ "$7" = "$(encoded_arg -nographic)" ] && [ "$8" = "$(encoded_arg -object)" ] &&
+            encoded_arg_has_affixes "$9" "$object_prefix" "$object_suffix" &&
+            [ "${10}" = "$(encoded_arg -device)" ] && [ "${11}" = "$ivshmem" ]
+            ;;
+        *) return 1 ;;
+    esac
 }
 
 emit_row_execution_evidence() {
@@ -384,7 +452,7 @@ validate_report() {
                     row_qemu_device_args=$(report_one "$report" "${prefix}_qemu_device_args") &&
                     row_daemon_rss=$(report_one "$report" "${prefix}_daemon_max_rss_kib") &&
                     [ -n "$row_qemu_version" ] &&
-                    encoded_argv_valid "$row_qemu_device_args" &&
+                    qemu_argv_evidence_valid "$report_isa" "$row_qemu_device_args" &&
                     case "$row_daemon_rss" in ''|*[!0-9]*) false ;; *) true ;; esac &&
                     [ "$row_daemon_rss" -gt 0 ]
                 }; then
@@ -464,6 +532,15 @@ self_test() {
     seed_simple="$temp_dir/simple-seed"
     hanging_simple="$temp_dir/simple-hanging"
     failing_simple="$temp_dir/simple-probe-failing"
+    x86_qemu_args=$(encode_argv_hex -machine q35 -m 512M -kernel "$(kernel_for_isa x86_64)" -nographic -no-reboot \
+        -device virtio-net-pci -object "memory-backend-file,id=hostgpu,share=on,mem-path=$temp_dir/x86 host gpu.shm,size=8M" \
+        -device ivshmem-plain,memdev=hostgpu)
+    arm_qemu_args=$(encode_argv_hex -machine virt -cpu cortex-a72 -m 512M -kernel "$(kernel_for_isa aarch64)" -nographic \
+        -device virtio-net-pci -object "memory-backend-file,id=hostgpu,share=on,mem-path=$temp_dir/arm host gpu.shm,size=8M" \
+        -device ivshmem-plain,memdev=hostgpu)
+    rv_qemu_args=$(encode_argv_hex -machine virt -m 512M -kernel "$(kernel_for_isa riscv64)" -nographic \
+        -object "memory-backend-file,id=hostgpu,share=on,mem-path=$temp_dir/rv host gpu.shm,size=8M" \
+        -device ivshmem-plain,memdev=hostgpu)
     cat >"$valid_simple" <<'EOF'
 #!/bin/sh
 if [ "$1" = "--version" ]; then
@@ -608,11 +685,11 @@ EOF
             done
         done
         emit_row linux x86_64 pass ok "$x86_log" cuda
-        emit_row_execution_evidence linux x86_64 "QEMU emulator version 9.0.0" "$(encode_argv_hex -machine q35 -device ivshmem-plain)" 65536
+        emit_row_execution_evidence linux x86_64 "QEMU emulator version 9.0.0" "$x86_qemu_args" 65536
         emit_row linux aarch64 pass ok "$pass_log" cuda
-        emit_row_execution_evidence linux aarch64 "QEMU emulator version 9.0.0" "$(encode_argv_hex -machine virt -cpu cortex-a72 -device ivshmem-plain)" 65536
+        emit_row_execution_evidence linux aarch64 "QEMU emulator version 9.0.0" "$arm_qemu_args" 65536
         emit_row linux riscv64 pass ok "$riscv_log" cuda
-        emit_row_execution_evidence linux riscv64 "QEMU emulator version 9.0.0" "$(encode_argv_hex -machine virt -device ivshmem-plain)" 65536
+        emit_row_execution_evidence linux riscv64 "QEMU emulator version 9.0.0" "$rv_qemu_args" 65536
         echo simpleos_qemu_host_gpu_2d_host=linux
         echo simpleos_qemu_host_gpu_2d_status=pass
         echo simpleos_qemu_host_gpu_2d_reason=all-linux-host-gpu-rows-pass
@@ -629,6 +706,17 @@ EOF
         exit 1
     fi
     if encoded_argv_valid hex:,; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    qemu_argv_evidence_valid x86_64 "$x86_qemu_args"
+    qemu_argv_evidence_valid aarch64 "$arm_qemu_args"
+    qemu_argv_evidence_valid riscv64 "$rv_qemu_args"
+    if qemu_argv_evidence_valid x86_64 "$(encode_argv_hex -machine virt -m 512M -kernel "$(kernel_for_isa x86_64)" -nographic -no-reboot -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
+       qemu_argv_evidence_valid aarch64 "$(encode_argv_hex -machine virt -cpu cortex-a72 -m 512M -kernel "$(kernel_for_isa x86_64)" -nographic -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
+       qemu_argv_evidence_valid riscv64 "$(encode_argv_hex -machine virt -m 512M -kernel "$(kernel_for_isa riscv64)" -nographic -object memory-backend-file,id=hostgpu,share=off,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
+       qemu_argv_evidence_valid riscv64 "$(encode_argv_hex -machine virt -m 512M -kernel "$(kernel_for_isa riscv64)" -nographic -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=wrong)"
+    then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
@@ -684,11 +772,11 @@ EOF
             done
         done
         emit_row macos x86_64 pass ok "$metal_x86_log" metal
-        emit_row_execution_evidence macos x86_64 "QEMU emulator version 9.0.0" "$(encode_argv_hex -machine q35 -device ivshmem-plain)" 65536
+        emit_row_execution_evidence macos x86_64 "QEMU emulator version 9.0.0" "$x86_qemu_args" 65536
         emit_row macos aarch64 pass ok "$metal_log" metal
-        emit_row_execution_evidence macos aarch64 "QEMU emulator version 9.0.0" "$(encode_argv_hex -machine virt -cpu cortex-a72 -device ivshmem-plain)" 65536
+        emit_row_execution_evidence macos aarch64 "QEMU emulator version 9.0.0" "$arm_qemu_args" 65536
         emit_row macos riscv64 pass ok "$metal_riscv_log" metal
-        emit_row_execution_evidence macos riscv64 "QEMU emulator version 9.0.0" "$(encode_argv_hex -machine virt -device ivshmem-plain)" 65536
+        emit_row_execution_evidence macos riscv64 "QEMU emulator version 9.0.0" "$rv_qemu_args" 65536
         echo simpleos_qemu_host_gpu_2d_host=macos
         echo simpleos_qemu_host_gpu_2d_status=pass
         echo simpleos_qemu_host_gpu_2d_reason=all-macos-host-gpu-rows-pass
@@ -717,11 +805,11 @@ EOF
             done
         done
         emit_row windows x86_64 pass ok "$directx_x86_log" cuda
-        emit_row_execution_evidence windows x86_64 "QEMU emulator version 9.0.0" "$(encode_argv_hex -machine q35 -device ivshmem-plain)" 65536
+        emit_row_execution_evidence windows x86_64 "QEMU emulator version 9.0.0" "$x86_qemu_args" 65536
         emit_row windows aarch64 pass ok "$directx_log" cuda
-        emit_row_execution_evidence windows aarch64 "QEMU emulator version 9.0.0" "$(encode_argv_hex -machine virt -cpu cortex-a72 -device ivshmem-plain)" 65536
+        emit_row_execution_evidence windows aarch64 "QEMU emulator version 9.0.0" "$arm_qemu_args" 65536
         emit_row windows riscv64 pass ok "$directx_riscv_log" cuda
-        emit_row_execution_evidence windows riscv64 "QEMU emulator version 9.0.0" "$(encode_argv_hex -machine virt -device ivshmem-plain)" 65536
+        emit_row_execution_evidence windows riscv64 "QEMU emulator version 9.0.0" "$rv_qemu_args" 65536
         echo simpleos_qemu_host_gpu_2d_host=windows
         echo simpleos_qemu_host_gpu_2d_status=pass
         echo simpleos_qemu_host_gpu_2d_reason=all-windows-host-gpu-rows-pass
@@ -851,14 +939,6 @@ build_guest() {
     return 1
 }
 
-kernel_for_isa() {
-    case "$1" in
-        x86_64) echo build/os/simpleos_x86_64_host_gpu_probe.elf ;;
-        aarch64) echo build/os/simpleos_arm64_host_gpu_probe.elf ;;
-        riscv64) echo build/os/simpleos_riscv64_host_gpu_probe.elf ;;
-    esac
-}
-
 run_guest() {
     isa=$1
     qemu_bin=$(qemu_bin_for_isa "$isa")
@@ -897,7 +977,7 @@ run_guest() {
     wait "$daemon_pid" 2>/dev/null || true
     wait "$rss_monitor_pid" 2>/dev/null || true
     rss_kib=$(sed -n '1p' "$rss_file" 2>/dev/null || true)
-    if encoded_argv_valid "$qemu_device_args"; then qemu_args_valid=1; else qemu_args_valid=0; fi
+    if qemu_argv_evidence_valid "$isa" "$qemu_device_args"; then qemu_args_valid=1; else qemu_args_valid=0; fi
     case "$rss_kib" in ''|*[!0-9]*|0) execution_evidence_valid=0 ;; *) execution_evidence_valid=1 ;; esac
     if [ -z "$qemu_version" ] || [ "$qemu_args_valid" != 1 ]; then
         execution_evidence_valid=0

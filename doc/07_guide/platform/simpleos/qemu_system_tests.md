@@ -252,7 +252,10 @@ render, Draw IR, and ProcessingIR receipts. Every passing row must also contain
 the actual QEMU version, a reversible comma-delimited per-argument hex encoding
 of its exact argument vector, positive maximum-observed daemon RSS, protocol
 version, positive operation timings, and matching run/frame identities. The
-validator rejects missing, duplicate, empty, or nonpositive fields; fresh live
+validator checks the encoded token sequence against the ISA-specific machine,
+kernel basename, and exact shared `hostgpu` object/device binding; a syntactic
+hex string with the wrong QEMU semantics fails. It also rejects missing,
+duplicate, empty, or nonpositive fields; fresh live
 rows are still required before claiming the latency or combined QEMU-plus-daemon
 RSS targets.
 

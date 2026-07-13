@@ -71,6 +71,11 @@ receipt IDs, same-frame readback/result bytes, exact CPU-oracle checksum, and
 backend markers from the host adapter. Flags, screenshots, scanout, CPU mirrors,
 and synthetic handles fail closed.
 
+QEMU argv evidence is reversible but not trusted as an opaque string. The
+canonical wrapper checks the exact per-ISA token shape at live capture and
+cached-report promotion: machine, kernel basename, bounded memory, and the
+shared `hostgpu` memory object/device binding must match the executed lane.
+
 ### Checked raw Vulkan framebuffer execution
 
 Every Vulkan framebuffer mutation that can support a device-backed receipt

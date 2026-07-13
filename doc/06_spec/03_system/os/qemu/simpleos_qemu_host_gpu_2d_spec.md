@@ -61,7 +61,9 @@ the CPU/software fallback and report a stable reason.
    comma-delimited per-argument hex encoding of its exact QEMU argument vector,
    positive maximum-observed daemon RSS, negotiated protocol,
    positive HELLO/render/Draw IR/ProcessingIR timings, and correlated run/frame
-   IDs. Missing, duplicate, empty, or nonpositive evidence fails closed.
+   IDs. The encoded argv must also match the ISA-specific machine, kernel, and
+   exact shared `hostgpu` object/device binding; wrong or extra tokens fail.
+   Missing, duplicate, empty, or nonpositive evidence fails closed.
 
 ### Keep native Metal ProcessingIR separate from Engine2D rendering
 
