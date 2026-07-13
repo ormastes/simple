@@ -8,6 +8,8 @@ batch, and portable emission. A fifth native graphics readback scenario remains
 planned and does not exist yet. Unit/integration suites for the
 existing shaper, Engine2D, Engine3D texture path, emitter, and backend readback
 remain supporting evidence; they do not replace these end-to-end scenarios.
+The focused Vulkan integration/manual pair exercises the frozen native-proof
+step for Engine2D only; the fifth Engine3D system scenario remains pending.
 
 Planned executable/manual pairs:
 
@@ -18,6 +20,9 @@ Planned executable/manual pairs:
 | `test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/shared_font_surfaces_spec.md` |
 | `test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/gpu_font_emission_spec.md` |
 | `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.md` |
+
+Supporting conditional pair: `test/02_integration/rendering/vulkan_font_composite_classification_spec.spl`
+and `doc/06_spec/02_integration/rendering/vulkan_font_composite_classification_spec.md`.
 
 Excluded claims: multicolor/CFF/non-default variations, GPU shaping/outline
 rasterization, and native success on unavailable hardware.

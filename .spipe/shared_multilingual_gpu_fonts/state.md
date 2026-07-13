@@ -581,3 +581,17 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   totals, and accepted-family metadata; the system command is the manifest
   manual's recorded run. These passes preserve 54/1/26/19 and do not satisfy
   complex shaping, native GPU readback, or Engine3D promotion.
+- fenced Vulkan promotion correction (2026-07-13): the canonical Engine2D
+  Vulkan lane now records a stable selected accelerated device type plus
+  device/driver identity, uses a real wait-and-destroy fence, requires direct
+  device readback and the absolute CPU oracle, and poisons the surface when
+  completion becomes unknown. CPU/other devices and unfenced submission stop
+  before font batch, atlas, or destination mutation. The focused frozen flow is
+  `step("Prove native submission and device readback")` in
+  `test/02_integration/rendering/vulkan_font_composite_classification_spec.spl`,
+  mirrored at
+  `doc/06_spec/02_integration/rendering/vulkan_font_composite_classification_spec.md`.
+  Automatic docgen and execution are not claimed: the deployed self-hosted
+  compiler exits 139 on the new Vulkan extern surface, while rebuilding the
+  Rust compiler is blocked by missing vendored `vendor/rspirv/dr/build.rs`.
+  Engine3D REQ-012/REQ-013 and native performance NFRs remain open.

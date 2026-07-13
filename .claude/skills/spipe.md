@@ -542,6 +542,10 @@ observe a pass:
   readback against an absolute CPU oracle. Emitted source, environment payload,
   upload alone, software backend names, simulation, or equal checksums are not
   native proof. Record unavailable hardware as `unavailable`; never promote it.
+  Vulkan promotion additionally requires an accelerated `discrete`, `integrated`,
+  or `virtual` device, stable selected device/driver identity, a real fence wait
+  and destroy, and surface poisoning when completion becomes unknown. CPU/other
+  devices and unfenced submission remain unpromoted.
   Before native promotion, the exact Pure Simple shaping/corpus gate must accept
   the face for the language/script; a codepoint raster/layout witness alone is
   diagnostic and leaves the matrix cell `unavailable`.
