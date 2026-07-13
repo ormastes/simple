@@ -552,3 +552,13 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   whose focused test forces a zero native result while the unchanged legacy
   ABI succeeds. Independent common sfnt raster assertions cover the second
   half; unmanaged faces keep the legacy ABI. No matrix promotion.
+- Vulkan Engine2D font batch slice: the real canonical `vulkan` constructor is
+  session-backed and accepts bounded precompiled font SPIR-V; the common
+  three-buffer/52-byte ABI now has validated atlas upload, per-quad dispatch,
+  synchronous completion, direct framebuffer readback, and an independent CPU
+  parity oracle. All deterministic validation precedes cache/device mutation.
+  Ordinary unavailable states replay CPU from quad zero; unknowable command,
+  rollback, descriptor, or cleanup states poison the Vulkan surface into
+  software without retrying unsafe resources. Conditional evidence remains
+  unrun here, explicit fence/device identity is unavailable, and
+  `promotion_ready` stays false.

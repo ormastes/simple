@@ -21,15 +21,19 @@ use std.gpu.engine2d.backend_vulkan_spirv.{
 }
 use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_compile_spirv, vulkan_sffi_destroy_shader,
+    vulkan_sffi_compile_glsl,
     vulkan_sffi_create_compute_pipeline, vulkan_sffi_destroy_pipeline,
     vulkan_sffi_init, vulkan_sffi_shutdown, vulkan_sffi_is_available,
     vulkan_sffi_device_count, vulkan_sffi_select_device,
     vulkan_sffi_begin_compute, vulkan_sffi_submit_and_wait
 }
 use std.gc_async_mut.io.vulkan_sffi.{vulkan_get_device}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence}
+use std.common.gpu.font_atlas_composite.{font_atlas_composite_vulkan_glsl_source}
 
 # Push constant size in bytes — matches VulkanBackend's VK_PUSH_CONSTANT_SIZE
 val _VS_PUSH_CONSTANT_SIZE: i64 = 64
+val _VS_MAX_FONT_SPIRV_BYTES: i64 = 16777216
 
 # ============================================================================
 # VulkanSession
@@ -73,6 +77,7 @@ class VulkanSession:
     shader_triangle: i64
     shader_gradient: i64
     shader_blit: i64
+    shader_font_atlas: i64
 
     # Compute pipeline handles
     pipe_clear: i64
@@ -85,6 +90,10 @@ class VulkanSession:
     pipe_triangle: i64
     pipe_gradient: i64
     pipe_blit: i64
+    pipe_font_atlas: i64
+
+    font_atlas_artifact_mode: text
+    font_atlas_status: text
 
     ref_count: i64
     is_initialized: bool
@@ -111,6 +120,7 @@ class VulkanSession:
             shader_triangle: 0,
             shader_gradient: 0,
             shader_blit: 0,
+            shader_font_atlas: 0,
             pipe_clear: 0,
             pipe_rect_filled: 0,
             pipe_rect_outline: 0,
@@ -121,6 +131,9 @@ class VulkanSession:
             pipe_triangle: 0,
             pipe_gradient: 0,
             pipe_blit: 0,
+            pipe_font_atlas: 0,
+            font_atlas_artifact_mode: "none",
+            font_atlas_status: "not-installed",
             ref_count: 0,
             is_initialized: false,
             generation: 0
@@ -236,8 +249,91 @@ class VulkanSession:
         else:
             1
 
+    me install_font_atlas_pipeline(spirv_bytes: [u8]) -> VulkanFontPipelineEvidence:
+        """Install and cache the shared font-atlas compute pipeline."""
+        if spirv_bytes.len() > _VS_MAX_FONT_SPIRV_BYTES:
+            return VulkanFontPipelineEvidence(
+                status: "rejected", reason: "compile-artifact-too-large",
+                artifact_mode: "precompiled-spirv", shader_handle: 0, pipeline_handle: 0
+            )
+        if (spirv_bytes.len() > 0 and
+            (spirv_bytes.len() < 20 or spirv_bytes.len() % 4 != 0 or
+             spirv_bytes[0] != 0x03u8 or spirv_bytes[1] != 0x02u8 or
+             spirv_bytes[2] != 0x23u8 or spirv_bytes[3] != 0x07u8)):
+            return VulkanFontPipelineEvidence(
+                status: "rejected", reason: "invalid-spirv",
+                artifact_mode: "precompiled-spirv", shader_handle: 0, pipeline_handle: 0
+            )
+        if self.pipe_font_atlas > 0 and self.shader_font_atlas > 0:
+            return VulkanFontPipelineEvidence(
+                status: "ready", reason: "cached",
+                artifact_mode: self.font_atlas_artifact_mode,
+                shader_handle: self.shader_font_atlas,
+                pipeline_handle: self.pipe_font_atlas
+            )
+        if not self.is_valid():
+            return VulkanFontPipelineEvidence(
+                status: "unavailable", reason: "invalid-session", artifact_mode: "none",
+                shader_handle: 0, pipeline_handle: 0
+            )
+
+        var mode = "runtime-glsl"
+        if spirv_bytes.len() > 0:
+            mode = "precompiled-spirv"
+            self.shader_font_atlas = vulkan_sffi_compile_spirv(spirv_bytes)
+        else:
+            self.shader_font_atlas = vulkan_sffi_compile_glsl(font_atlas_composite_vulkan_glsl_source())
+
+        if self.shader_font_atlas <= 0:
+            self.shader_font_atlas = 0
+            self.font_atlas_status = "failed"
+            self.font_atlas_artifact_mode = mode
+            return VulkanFontPipelineEvidence(
+                status: "failed",
+                reason: if mode == "runtime-glsl": "glsl-compiler-unavailable" else: "compile-artifact-unavailable",
+                artifact_mode: mode,
+                shader_handle: 0, pipeline_handle: 0
+            )
+        self.pipe_font_atlas = vulkan_sffi_create_compute_pipeline(
+            self.shader_font_atlas, "main", 0
+        )
+        if self.pipe_font_atlas <= 0:
+            vulkan_sffi_destroy_shader(self.shader_font_atlas)
+            self.shader_font_atlas = 0
+            self.pipe_font_atlas = 0
+            self.font_atlas_status = "failed"
+            self.font_atlas_artifact_mode = mode
+            return VulkanFontPipelineEvidence(
+                status: "failed", reason: "pipeline-create-failed", artifact_mode: mode,
+                shader_handle: 0, pipeline_handle: 0
+            )
+        self.font_atlas_status = "ready"
+        self.font_atlas_artifact_mode = mode
+        VulkanFontPipelineEvidence(
+            status: "ready", reason: "installed", artifact_mode: mode,
+            shader_handle: self.shader_font_atlas, pipeline_handle: self.pipe_font_atlas
+        )
+
+    me font_atlas_pipeline_evidence() -> VulkanFontPipelineEvidence:
+        """Read the current retained pipeline authority without copying ownership."""
+        if self.is_valid() and self.shader_font_atlas > 0 and self.pipe_font_atlas > 0:
+            return VulkanFontPipelineEvidence(
+                status: "ready", reason: "current-session-pipeline",
+                artifact_mode: self.font_atlas_artifact_mode,
+                shader_handle: self.shader_font_atlas,
+                pipeline_handle: self.pipe_font_atlas
+            )
+        VulkanFontPipelineEvidence(
+            status: "unavailable",
+            reason: if self.is_valid(): "font-pipeline-not-installed" else: "invalid-session",
+            artifact_mode: self.font_atlas_artifact_mode,
+            shader_handle: 0, pipeline_handle: 0
+        )
+
     me _cleanup():
         """Destroy all GPU objects. Called automatically by release() on zero refcount."""
+        if self.pipe_font_atlas != 0:     vulkan_sffi_destroy_pipeline(self.pipe_font_atlas)
+        self.pipe_font_atlas = 0
         if self.pipe_clear != 0:          vulkan_sffi_destroy_pipeline(self.pipe_clear)
         if self.pipe_rect_filled != 0:    vulkan_sffi_destroy_pipeline(self.pipe_rect_filled)
         if self.pipe_rect_outline != 0:   vulkan_sffi_destroy_pipeline(self.pipe_rect_outline)
@@ -269,6 +365,7 @@ class VulkanSession:
         if self.shader_triangle != 0:       vulkan_sffi_destroy_shader(self.shader_triangle)
         if self.shader_gradient != 0:       vulkan_sffi_destroy_shader(self.shader_gradient)
         if self.shader_blit != 0:           vulkan_sffi_destroy_shader(self.shader_blit)
+        if self.shader_font_atlas != 0:     vulkan_sffi_destroy_shader(self.shader_font_atlas)
         self.shader_clear = 0
         self.shader_rect_filled = 0
         self.shader_rect_outline = 0
@@ -279,6 +376,9 @@ class VulkanSession:
         self.shader_triangle = 0
         self.shader_gradient = 0
         self.shader_blit = 0
+        self.shader_font_atlas = 0
+        self.font_atlas_artifact_mode = "none"
+        self.font_atlas_status = "not-installed"
 
         self.device = 0
         self.instance = 0

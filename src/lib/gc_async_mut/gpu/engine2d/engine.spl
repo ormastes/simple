@@ -35,6 +35,8 @@ use std.gpu.engine2d.backend_virtio_gpu.{VirtioGpuBackend}
 use std.gpu.engine2d.backend_cpu.{CpuBackend}
 use std.gpu.engine2d.backend_cuda.{CudaBackend}
 use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gpu.engine2d.backend_vulkan_font
+use std.gpu.engine2d.vulkan_session.{VulkanSession}
 use std.gpu.engine2d.backend_directx.{DirectXBackend}
 use std.gpu.engine2d.backend_opencl.{OpenClBackend}
 use std.gpu.engine2d.backend_opengl.{OpenGLBackend}
@@ -131,6 +133,8 @@ class Engine2D:
     baremetal_backend: BaremetalBackend?
     virtio_gpu_backend: VirtioGpuBackend?
     cuda_backend: CudaBackend? = nil
+    vulkan_backend: VulkanBackend? = nil
+    vulkan_font_state_unknown: bool = false
     metal_backend: MetalBackend? = nil
     opencl_backend: OpenClBackend? = nil
     w: i32
@@ -146,6 +150,27 @@ class Engine2D:
         val created = FontRenderer.new()
         self.font_renderer = created
         created
+
+    me install_vulkan_font_spirv(spirv_bytes: [u8]) -> bool:
+        """Install one bounded precompiled font compositor on a real Vulkan engine."""
+        if spirv_bytes.len() == 0 or spirv_bytes.len() > 16777216:
+            return false
+        val active = self.vulkan_backend
+        if active == nil:
+            return false
+        val vulkan = active
+        val evidence = vulkan.install_font_atlas_pipeline(spirv_bytes)
+        self.vulkan_backend = vulkan
+        evidence.status == "ready"
+
+    me _poison_vulkan_font_surface():
+        var software = SoftwareBackend.create()
+        software.init(self.w, self.h)
+        self.capability = software.capability()
+        self.backend = software
+        self.vulkan_backend = nil
+        self.selected_backend_name = "vulkan-poisoned-software"
+        self.vulkan_font_state_unknown = true
 
     # ========================================================================
     # Constructors
@@ -253,9 +278,12 @@ class Engine2D:
                 return Ok(Engine2D(backend: cuda, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: cuda, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cuda"))
 
         if requested_backend == "vulkan":
+            var session = VulkanSession.create()
             var vulkan = VulkanBackend.create()
-            if vulkan.init(width, height):
-                return Ok(Engine2D(backend: vulkan, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "vulkan"))
+            if session.init() == 0 and vulkan.init_with_session(width, height, session):
+                session.release()
+                return Ok(Engine2D(backend: vulkan, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, vulkan_backend: vulkan, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "vulkan"))
+            session.release()
 
         if requested_backend == "directx":
             var directx = DirectXBackend.create()
@@ -683,7 +711,7 @@ class Engine2D:
             self.backend.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
 
     me _draw_font_batch(x: i32, y: i32, batch: FontRenderBatch) -> bool:
-        if not batch.valid:
+        if self.vulkan_font_state_unknown or not batch.valid:
             return false
         var quad_index: i64 = 0
         val active_cuda = self.cuda_backend
@@ -707,6 +735,21 @@ class Engine2D:
             self.opencl_backend = opencl
             if quad_index < 0 or quad_index > batch.quads.len():
                 quad_index = 0
+        val active_vulkan = self.vulkan_backend
+        if quad_index == 0 and active_vulkan != nil:
+            val vulkan = active_vulkan
+            val evidence = vulkan.composite_font_batch(x, y, batch)
+            self.vulkan_backend = vulkan
+            if (evidence.reason == "partial-framebuffer-restore-failed" or
+                evidence.reason == "missing-command-cleanup-capability" or
+                evidence.reason == "descriptor-cleanup-failed" or
+                evidence.reason == "atlas-cleanup-failed" or
+                evidence.reason == "cleanup-failed"):
+                self._poison_vulkan_font_surface()
+                return false
+            if (evidence.device_executed and evidence.parity and
+                evidence.dispatch_count == batch.quads.len()):
+                quad_index = batch.quads.len()
         while quad_index < batch.quads.len():
             val quad = batch.quads[quad_index]
             val pixels = engine2d_font_atlas_subrect_pixels(
@@ -737,6 +780,8 @@ class Engine2D:
                 self.font_renderer = fonts
                 if self._draw_font_batch(x, y, batch):
                     return
+        if self.vulkan_font_state_unknown:
+            return
         if val Some(vg) = self.virtio_gpu_backend:
             vg.draw_text(x, y, text_val, color, font_size)
         elif val Some(bm) = self.baremetal_backend:

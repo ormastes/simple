@@ -1,0 +1,43 @@
+use spec.{describe, it, expect}
+use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{vulkan_font_runtime_classification}
+use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
+use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_is_available}
+
+fn _integration_font_batch() -> FontRenderBatch:
+    FontRenderBatch(program_version: 1, font_identity: "integration-font", face_generation: 1,
+        valid: true, atlas_width: 1, atlas_height: 1, atlas_pixels: [0xffffffffu32],
+        quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+            width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0xffffffffu32)],
+        atlas_generation: 1, dirty_rects: [])
+
+describe "Vulkan font composite conditional execution":
+    it "uses real runtime rungs and stops honestly at the first unavailable one":
+        val runtime_available = vulkan_sffi_is_available()
+        var backend = VulkanBackend.create()
+        if not runtime_available:
+            val evidence = backend.composite_font_batch(0, 0, _integration_font_batch())
+            expect(vulkan_font_runtime_classification(false, evidence)).to_equal("unavailable")
+            expect(evidence.reason).to_equal("font-pipeline-not-ready")
+            expect(evidence.device_executed).to_equal(false)
+        else:
+            var session = VulkanSession.create()
+            val init_code = session.init()
+            if init_code != 0:
+                val evidence = backend.composite_font_batch(0, 0, _integration_font_batch())
+                expect(evidence.device_executed).to_equal(false)
+                expect(evidence.promotion_ready).to_equal(false)
+            else:
+                expect(backend.init_with_session(2, 2, session)).to_equal(true)
+                val pipeline = backend.install_font_atlas_pipeline([])
+                val evidence = backend.composite_font_batch(0, 0, _integration_font_batch())
+                if pipeline.status == "ready":
+                    expect(evidence.status == "executed-unpromoted" or evidence.status == "failed" or evidence.status == "readback-mismatch").to_equal(true)
+                else:
+                    expect(evidence.status).to_equal("unavailable")
+                    expect(evidence.device_executed).to_equal(false)
+                expect(evidence.promotion_ready).to_equal(false)
+                backend.shutdown()
+                session.release()

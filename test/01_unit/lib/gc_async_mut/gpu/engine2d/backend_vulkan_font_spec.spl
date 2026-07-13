@@ -1,0 +1,172 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl 80%
+
+use spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{
+    VULKAN_FONT_PARAMS_BYTES,
+    vulkan_font_atlas_composite_params, vulkan_font_dispatch_groups, vulkan_font_atlas_replacement_status,
+    vulkan_font_pixels_checksum
+}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend}
+use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
+
+fn _font_quad_batch(version: i64) -> FontRenderBatch:
+    FontRenderBatch(program_version: version, font_identity: "unit-font", face_generation: 1,
+        valid: true, atlas_width: 1, atlas_height: 1, atlas_pixels: [0xffffffffu32],
+        quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+            width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0xffffffffu32)],
+        atlas_generation: 1, dirty_rects: [])
+
+describe "Vulkan font atlas composite companion":
+    it "packs the frozen 13-word ABI into 52 little-endian bytes":
+        val p = vulkan_font_atlas_composite_params(2, 2, 4, 0, 0, 2, 2, 8, 9, 72, -11, -12, 0xAABBCCDDu32)
+        expect(VULKAN_FONT_PARAMS_BYTES).to_equal(52)
+        expect(p.len()).to_equal(52)
+        expect(p[0]).to_equal(2)
+        expect(p[40]).to_equal(0xF5)
+        expect(p[43]).to_equal(0xFF)
+        expect(p[48]).to_equal(0xDD)
+        expect(p[51]).to_equal(0xAA)
+
+    it "rejects parameter counts outside the shader i32 contract":
+        expect(vulkan_font_atlas_composite_params(1, 1, -1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1u32).len()).to_equal(0)
+        expect(vulkan_font_atlas_composite_params(1, 1, 2147483648, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1u32).len()).to_equal(0)
+        expect(vulkan_font_atlas_composite_params(1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1u32).len()).to_equal(0)
+
+    it "ceil-dispatches bounded pixels in 64-thread groups":
+        expect(vulkan_font_dispatch_groups(0)).to_equal(0)
+        expect(vulkan_font_dispatch_groups(1)).to_equal(1)
+        expect(vulkan_font_dispatch_groups(64)).to_equal(1)
+        expect(vulkan_font_dispatch_groups(65)).to_equal(2)
+        expect(vulkan_font_dispatch_groups(2147483648)).to_equal(0)
+
+    it "preserves the old atlas unless cleanup succeeds":
+        expect(vulkan_font_atlas_replacement_status(false, false, false)).to_equal("replace")
+        expect(vulkan_font_atlas_replacement_status(true, true, false)).to_equal("replace")
+        expect(vulkan_font_atlas_replacement_status(true, false, true)).to_equal("atlas-cleanup-failed")
+        expect(vulkan_font_atlas_replacement_status(true, false, false)).to_equal("cleanup-failed")
+
+    it "uses a deterministic nonzero pixel checksum":
+        expect(vulkan_font_pixels_checksum([])).to_equal(0)
+        val first = vulkan_font_pixels_checksum([0u32, 1u32])
+        expect(first).to_not_equal(0)
+        expect(vulkan_font_pixels_checksum([0u32, 1u32])).to_equal(first)
+        expect(vulkan_font_pixels_checksum([1u32, 0u32]) == first).to_equal(false)
+
+    it "wraps deterministically for a large pixel input":
+        val pixels: [u32] = [0xfeedbeefu32; 65536]
+        val first = vulkan_font_pixels_checksum(pixels)
+        expect(first).to_not_equal(0)
+        expect(vulkan_font_pixels_checksum(pixels)).to_equal(first)
+
+    it "keeps Vulkan atlas synchronization full-upload only":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
+        val session = file_read("src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl")
+        val backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        expect(source).to_contain("_vulkan_font_pixels_to_bytes(batch.atlas_pixels)")
+        expect(source).to_contain("if self.font_atlas_generation != batch.atlas_generation")
+        expect(source).to_contain("self.font_atlas_generation = batch.atlas_generation")
+        expect(source.contains("batch.dirty_rects")).to_equal(false)
+        expect(session).to_contain("self.shader_font_atlas, \"main\", 0")
+        expect(session).to_contain("precompiled-spirv")
+        expect(session).to_contain("runtime-glsl")
+        expect(backend.contains("pipe_font_atlas:")).to_equal(false)
+        expect(backend).to_contain("self._clear_borrowed_pipeline_handles()\n            self.session.release()")
+        expect(source.index_of("vulkan_sffi_bind_buffer(descriptor, 2, params)") < source.index_of("command = vulkan_sffi_begin_compute()")).to_equal(true)
+        expect(source.index_of("vulkan_sffi_bind_pipeline(command") < source.index_of("vulkan_sffi_bind_descriptors(command")).to_equal(true)
+        expect(source).to_contain("descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(descriptor)")
+        expect(source).to_contain("partial-framebuffer-restore-failed")
+        expect(source.index_of("val old_freed = vulkan_sffi_free_buffer(self.d_font_atlas)") < source.index_of("self.d_font_atlas = fresh")).to_equal(true)
+        expect(source).to_contain("val fresh_freed = vulkan_sffi_free_buffer(fresh)")
+        expect(source).to_contain("return _vulkan_font_evidence(pipeline, \"failed\", reason, self.d_font_atlas")
+        expect(source.index_of("var checked: i64 = 0") < source.index_of("val atlas_bytes = atlas_count * 4")).to_equal(true)
+        expect(source.index_of("var checked: i64 = 0") < source.index_of("vulkan_sffi_alloc_buffer(atlas_bytes")).to_equal(true)
+        expect(source.index_of("var checked: i64 = 0") < source.index_of("self.font_atlas_generation = batch.atlas_generation")).to_equal(true)
+
+    it "rejects unavailable pipelines without touching Vulkan state":
+        var state = VulkanBackend.create()
+        val evidence = state.composite_font_batch(0, 0, _font_quad_batch(1))
+        expect(evidence.status).to_equal("unavailable")
+        expect(evidence.submitted).to_equal(false)
+        expect(evidence.device_executed).to_equal(false)
+        expect(evidence.promotion_ready).to_equal(false)
+        expect(state.d_font_atlas).to_equal(0)
+
+    it "rejects malformed artifacts before cached pipeline authority":
+        var session = VulkanSession.create()
+        session.shader_font_atlas = 11
+        session.pipe_font_atlas = 22
+        session.font_atlas_status = "ready"
+        session.font_atlas_artifact_mode = "precompiled-spirv"
+        val evidence = session.install_font_atlas_pipeline([0u8; 20])
+        expect(evidence.status).to_equal("rejected")
+        expect(evidence.reason).to_equal("invalid-spirv")
+        expect(session.shader_font_atlas).to_equal(11)
+        expect(session.pipe_font_atlas).to_equal(22)
+        expect(session.font_atlas_status).to_equal("ready")
+        expect(session.font_atlas_artifact_mode).to_equal("precompiled-spirv")
+
+    it "rejects unsupported program versions before atlas mutation":
+        var state = VulkanBackend.create()
+        state.owns_session = true
+        state.session.is_initialized = true
+        state.session.device = 1
+        state.session.font_atlas_status = "ready"
+        state.session.font_atlas_artifact_mode = "precompiled-spirv"
+        state.session.shader_font_atlas = 1
+        state.session.pipe_font_atlas = 1
+        val evidence = state.composite_font_batch(0, 0, _font_quad_batch(2))
+        expect(evidence.status).to_equal("rejected")
+        expect(evidence.reason).to_equal("invalid-font-batch")
+        expect(state.d_font_atlas).to_equal(0)
+
+    it "rejects an invalid quad before cache or parameter mutation":
+        var state = VulkanBackend.create()
+        state.owns_session = true
+        state.session.is_initialized = true
+        state.session.device = 1
+        state.session.font_atlas_status = "ready"
+        state.session.font_atlas_artifact_mode = "precompiled-spirv"
+        state.session.shader_font_atlas = 1
+        state.session.pipe_font_atlas = 1
+        state.d_framebuffer = 1
+        state.w = 1
+        state.h = 1
+        state.d_font_atlas = 77
+        state.d_font_params = 88
+        state.font_atlas_width = 2
+        state.font_atlas_height = 2
+        state.font_atlas_generation = 9
+        val invalid = FontRenderBatch(program_version: 1, font_identity: "unit-font", face_generation: 1,
+            valid: true, atlas_width: 1, atlas_height: 1, atlas_pixels: [0xffffffffu32],
+            quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+                width: 1, height: 1, atlas_x: 1, atlas_y: 0, color: 0xffffffffu32)],
+            atlas_generation: 10, dirty_rects: [])
+        val evidence = state.composite_font_batch(0, 0, invalid)
+        expect(evidence.status).to_equal("rejected")
+        expect(evidence.reason).to_equal("invalid-font-quad")
+        expect(state.d_font_atlas).to_equal(77)
+        expect(state.d_font_params).to_equal(88)
+        expect(state.font_atlas_width).to_equal(2)
+        expect(state.font_atlas_height).to_equal(2)
+        expect(state.font_atlas_generation).to_equal(9)
+
+    it "clears borrowed handles before shared-session release and stays idempotent":
+        var state = VulkanBackend.create()
+        state.owns_session = true
+        state.session.ref_count = 1
+        state.shader_clear = 11
+        state.shader_blit = 12
+        state.pipe_clear = 21
+        state.pipe_blit = 22
+        state.shutdown()
+        expect(state.shader_clear).to_equal(0)
+        expect(state.shader_blit).to_equal(0)
+        expect(state.pipe_clear).to_equal(0)
+        expect(state.pipe_blit).to_equal(0)
+        expect(state.owns_session).to_equal(false)
+        state.shutdown()
+        expect(state.shader_clear).to_equal(0)
+        expect(state.pipe_clear).to_equal(0)

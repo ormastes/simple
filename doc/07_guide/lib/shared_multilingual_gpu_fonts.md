@@ -241,6 +241,20 @@ an internal adapter. Font load/unload invalidates the cached atlas identity.
 This source path is implemented but not promoted as native evidence until the
 conditional device test runs and reports device-origin readback.
 
+Vulkan now has a canonical `FontRenderBatch` adapter beside the other Engine2D
+adapters. A session accepts bounded precompiled SPIR-V for the common GLSL
+`main` entry (or attempts runtime GLSL where that compiler exists), creates the
+zero-push-constant three-buffer pipeline, and composites validated quads into
+the real device framebuffer. The adapter validates the complete batch before
+atlas/cache mutation, binds atlas/destination/52-byte params buffers, waits for
+each dispatch, reads the framebuffer directly, and compares it with an
+independent CPU oracle. Ordinary unavailable/rejected states replay the CPU
+path; unknown command, rollback, descriptor, or resource-cleanup states replace
+the Engine2D facade with software and permanently disable that Vulkan font lane.
+The conditional integration stops at the first unavailable rung. Explicit
+fence and device/driver identity are still absent, so `promotion_ready` remains
+false even after device readback parity; no native Vulkan claim follows.
+
 Do not add the entry name to metadata alone. Native CUDA/HIP uses a pointer-array
 argument ABI, OpenCL needs explicit argument binding, Metal uses the packed
 buffer-2 struct, and WGSL uses its own storage bindings. A backend becomes usable

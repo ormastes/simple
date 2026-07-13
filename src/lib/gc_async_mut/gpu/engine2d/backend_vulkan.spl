@@ -57,6 +57,7 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_wait_idle, vulkan_sffi_last_error
 }
 use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence}
 
 # ============================================================================
 # Vulkan Availability Check
@@ -185,6 +186,12 @@ class VulkanBackend:
     pipe_triangle: i64
     pipe_gradient: i64
     pipe_blit: i64
+    # Per-surface font composite storage; the session owns the pipeline.
+    d_font_atlas: i64
+    d_font_params: i64
+    font_atlas_generation: i64
+    font_atlas_width: i32
+    font_atlas_height: i32
     # Mask buffer storage
     mask_buf: [u8]
     mask_w: i32
@@ -228,6 +235,11 @@ class VulkanBackend:
             pipe_triangle: 0,
             pipe_gradient: 0,
             pipe_blit: 0,
+            d_font_atlas: 0,
+            d_font_params: 0,
+            font_atlas_generation: -1,
+            font_atlas_width: 0,
+            font_atlas_height: 0,
             mask_buf: [],
             mask_w: 0,
             mask_h: 0,
@@ -241,6 +253,47 @@ class VulkanBackend:
             session: VulkanSession.create(),
             owns_session: false,
             last_error: ""
+        )
+
+impl VulkanBackend:
+    me _clear_borrowed_pipeline_handles():
+        self.shader_clear = 0
+        self.shader_rect_filled = 0
+        self.shader_rect_outline = 0
+        self.shader_circle_filled = 0
+        self.shader_circle_outline = 0
+        self.shader_line = 0
+        self.shader_rounded_rect = 0
+        self.shader_triangle = 0
+        self.shader_gradient = 0
+        self.shader_blit = 0
+        self.pipe_clear = 0
+        self.pipe_rect_filled = 0
+        self.pipe_rect_outline = 0
+        self.pipe_circle_filled = 0
+        self.pipe_circle_outline = 0
+        self.pipe_line = 0
+        self.pipe_rounded_rect = 0
+        self.pipe_triangle = 0
+        self.pipe_gradient = 0
+        self.pipe_blit = 0
+
+    me install_font_atlas_pipeline(spirv_bytes: [u8]) -> VulkanFontPipelineEvidence:
+        """Install through the retained shared session; standalone mode fails closed."""
+        if self.owns_session:
+            return self.session.install_font_atlas_pipeline(spirv_bytes)
+        VulkanFontPipelineEvidence(
+            status: "unavailable", reason: "font-pipeline-requires-session",
+            artifact_mode: "none", shader_handle: 0, pipeline_handle: 0
+        )
+
+    fn font_atlas_pipeline_evidence() -> VulkanFontPipelineEvidence:
+        """Return only the live retained session's current font pipeline."""
+        if self.owns_session:
+            return self.session.font_atlas_pipeline_evidence()
+        VulkanFontPipelineEvidence(
+            status: "unavailable", reason: "font-pipeline-requires-session",
+            artifact_mode: "none", shader_handle: 0, pipeline_handle: 0
         )
 
 impl RenderBackend for VulkanBackend:
@@ -411,6 +464,7 @@ impl RenderBackend for VulkanBackend:
         self.d_framebuffer = vulkan_sffi_alloc_buffer(fb_size, 0x80)
         if self.d_framebuffer == 0:
             self.last_error = "vulkan_sffi_alloc_buffer failed: " + vulkan_sffi_last_error()
+            self._clear_borrowed_pipeline_handles()
             self.session.release()
             self.owns_session = false
             return false
@@ -429,6 +483,15 @@ impl RenderBackend for VulkanBackend:
         true
 
     me shutdown():
+        if self.d_font_params != 0:
+            vulkan_sffi_free_buffer(self.d_font_params)
+            self.d_font_params = 0
+        if self.d_font_atlas != 0:
+            vulkan_sffi_free_buffer(self.d_font_atlas)
+            self.d_font_atlas = 0
+        self.font_atlas_generation = -1
+        self.font_atlas_width = 0
+        self.font_atlas_height = 0
         if self.owns_session:
             # Session owns shaders/pipelines — do not destroy them here
             if self.d_framebuffer != 0:
@@ -441,6 +504,7 @@ impl RenderBackend for VulkanBackend:
             self.mask_w = 0
             self.mask_h = 0
             self.initialized = false
+            self._clear_borrowed_pipeline_handles()
             self.session.release()
             self.owns_session = false
             return
