@@ -676,6 +676,7 @@ if [ "${stage4_is_seed}" -eq 1 ]; then
   # entrypoint directly until the wrapper path is proven fixed.
   run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+    SIMPLE_BOOTSTRAP_STAGE4=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
@@ -692,6 +693,7 @@ if [ "${stage4_is_seed}" -eq 1 ]; then
 else
   run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+    SIMPLE_BOOTSTRAP_STAGE4=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
@@ -718,6 +720,14 @@ install -m755 "${seed_bin}" "${full_dir}/simple_seed${exe_suffix}"
 stage4_smoke="$(run_timeout 30 "${full_bin}" -c 'print(1+1)' 2>/dev/null)"
 if [ "${stage4_smoke}" != "2" ]; then
   echo "error: stage4 binary failed smoke test (-c 'print(1+1)' -> '${stage4_smoke}')" >&2
+  exit 1
+fi
+
+# `-c` can succeed by delegating to the sibling Rust seed even when the newly
+# linked full CLI cannot read or compile source files itself. MCP/LSP startup
+# needs the latter, so reject such candidates before deployment.
+if ! run_timeout 60 "${full_bin}" check src/app/cli/bootstrap_main.spl >/dev/null 2>&1; then
+  echo "error: stage4 binary failed source-check smoke (MCP/LSP would not start)" >&2
   exit 1
 fi
 
