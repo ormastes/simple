@@ -74,8 +74,33 @@ written guides, higher-model review, evidence-gated landings.
 | H5 | Net + speed gates | In-guest throughput/latency gate over hostfwd using existing BenchmarkSuite + http_benchmark harness; record baselines in doc/10_metrics | netperf practice |
 | H6 | BSD init/services | Wire rc_conf → init_service ServiceDefs (deps + restart policy already modeled); gate: kill a supervised service, watch restart; ordered boot markers; clean shutdown | rc(8), rc.conf(5) |
 | H7 | SMP live | Un-gate + green the existing simpleos_smp_ap_live_spec (-smp 2), per-CPU run queues executing real tasks, cross-CPU reschedule IPI proof | SMP scheduling |
-| H8 | SMF dyload in-guest | Pending SMF recon — verify historical dyload, then port SMF loader in-guest before ELF .so | (SMF native) |
+| H8 | SMF dyload gate | Recon verdict: SMF dyload is ALREADY production-ready in-guest (kernel `loader_api.spl:27-77` dispatch → `smf_load`/`elf64_load`, `dylib_registry` symbol lookup, arch/ABI/role validation; TemplateCode monomorphized at load — no relocations needed). BUT zero in-guest .smf usage exists outside the loader = unproven in practice. Lane = author a gate: build a small .smf library, load it in-guest via `loader_dynopen_path`, call a symbol, assert output. ELF .so stays unprioritized (needs R_X86_64_* engine + PLT + .init/.fini vs SMF's simpler model) | (SMF native) |
 | H9 | Privileges (LATER — design only) | uid/gid over DBFS (FAT32 has no modes); pledge/unveil + capability manager already exist — design doc maps them to ucred-style model | ucred, chmod |
+
+## Cross-arch requirement (STANDING, user 2026-07-13)
+
+Every host-OS feature must target **x86 (32/64), arm (32/aarch64), riscv
+(32/64)**. Current per-arch reality (recon-verified) — lanes must state their
+arch coverage and record non-x86 ports as explicit TODOs, never silently ship
+x86-only:
+
+| Capability | x86_64 | x86_32 | aarch64 | arm32 | riscv64 | riscv32 |
+|---|---|---|---|---|---|---|
+| Paging + per-proc AS | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Bootable QEMU lane | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Transactional swap | ✅ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ (P2/P3 of paging plan) |
+| SMP AP bringup | INIT/SIPI present, gated | ⬜ | partial | partial | proven | proven (rv32 3-core) |
+| Ring-3 FS-exec + PATH | ✅ (landed) | ⬜ | scaffolding (arm_fs_exec_*) | ⬜ | ⬜ | ⬜ |
+| SMF dyload (format) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (arch byte in trailer) |
+| libc simpleos_syscall ABI | ✅ | ABI neutral; Linux-fallback asm x86_64-only | " | " | " | " |
+| OVMF/clang capstone | ✅ | n/a | needs arm UEFI | n/a | n/a | n/a |
+
+Implication: paging/SMF are broadly arch-ready; the **FS-exec/loader, libc
+fallback asm, and per-arch swap** are the x86_64-heavy areas needing ports.
+Lane W (WM) already reuses one compositor across arches (framebuffer on
+baremetal, winit on host). New lanes: prefer arch-neutral Simple + @cfg or
+HAL-trait dispatch (per the paging plan's MmuSwapHooks pattern); put
+per-arch asm/regs behind the existing arch/hal.spl seam.
 
 ## Rules of engagement
 - Board-workable: no `-kernel`/`isa-debug-exit` pass semantics; OVMF or
