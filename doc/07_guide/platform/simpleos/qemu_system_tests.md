@@ -213,6 +213,8 @@ sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
 It builds `simpleos-host-gpu-x86_64`, `simpleos-host-gpu-aarch64`, and
 `simpleos-host-gpu-riscv64` through `_QemuRunner`, starts the strict host
 daemon over one bounded ivshmem region per row, and requires exact Vulkan
-render plus ProcessingIR device readback. Linux/Vulkan is implemented.
-macOS Metal and Windows DirectX/CUDA rows remain `unsupported` until native
+render plus ProcessingIR device readback. Linux Vulkan rendering and the native
+CUDA ProcessingIR executor are implemented with Vulkan ProcessingIR fallback;
+refreshed cross-ISA CUDA receipts
+are still required. macOS Metal and Windows DirectX/CUDA rows remain `unsupported` until native
 host executors and receipts exist; their API names are not treated as proof.

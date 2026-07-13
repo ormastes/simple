@@ -4,6 +4,7 @@ use std.common.gpu.simpleos_host_gpu_protocol.*
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.common.processing.processing_ir.{processing_ir_fill_u32, processing_ir_validate, processing_ir_cpu_execute, processing_ir_outputs_equal}
 use std.gc_async_mut.processing.vulkan_fill_u32.{processing_ir_execute_vulkan}
+use std.gc_async_mut.processing.cuda_fill_u32.{processing_ir_execute_cuda}
 use app.io.file_ops.{file_exists, file_size, file_mmap, file_munmap}
 use app.io.volatile_ops.{volatile_read_u64_required, volatile_write_u64_required, memory_barrier_required}
 use app.io.time_ops.{time_now_unix_micros}
@@ -69,6 +70,16 @@ fn _render_backend_available(code: i64) -> bool:
     backend.shutdown()
     available
 
+fn _processing_backend_mask(requested: i64) -> i64:
+    var available: i64 = 0
+    if (requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN) != 0 and _render_backend_available(SIMPLEOS_HOST_GPU_BACKEND_VULKAN):
+        available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN
+    if (requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0:
+        val probe = processing_ir_execute_cuda(processing_ir_fill_u32(1, 1u32))
+        if probe.completed and probe.backend_handle > 0 and probe.device_identity > 0:
+            available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA
+    available
+
 fn _process_hello(base: i64, generation: i64) -> i64:
     val render_mask = _read(base, SIMPLEOS_HOST_GPU_WIRE_REQUESTED_RENDER_MASK)
     val processing_mask = _read(base, SIMPLEOS_HOST_GPU_WIRE_REQUESTED_PROCESSING_MASK)
@@ -80,7 +91,7 @@ fn _process_hello(base: i64, generation: i64) -> i64:
         max_payload_bytes: SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES,
         max_readback_bytes: simpleos_host_gpu_max_readback_bytes(),
         render_backend: simpleos_host_gpu_backend_name(render_code),
-        processing_backend: if processing_mask == 0: "cpu" else: simpleos_host_gpu_backend_name(render_code)
+        processing_backend: if (processing_mask & SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0: "cuda" elif processing_mask == 0: "cpu" else: "vulkan"
     )
     val valid = simpleos_host_gpu_validate_hello(hello)
     val negotiated_render_mask = render_mask & simpleos_host_gpu_backend_mask(render_code)
@@ -92,7 +103,7 @@ fn _process_hello(base: i64, generation: i64) -> i64:
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO, 0, 0, 0, 1, 0, 0)
         return 1
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_RENDER_MASK, negotiated_render_mask)
-    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK, processing_mask & simpleos_host_gpu_backend_mask(render_code))
+    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK, _processing_backend_mask(processing_mask))
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_PAYLOAD, SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_READBACK, simpleos_host_gpu_max_readback_bytes())
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION, SIMPLEOS_HOST_GPU_PROTOCOL_VERSION)
@@ -142,7 +153,7 @@ fn _process_request(base: i64) -> i64:
         _read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK)
     else:
         0
-    if backend != "vulkan" or (negotiated_mask & requested_backend_mask) == 0:
+    if (negotiated_mask & requested_backend_mask) == 0 or (kind == SIMPLEOS_HOST_GPU_KIND_RENDER and backend != "vulkan"):
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, REASON_BACKEND_UNAVAILABLE, 0, 0, 0, 1, 0, 0)
         return 1
 
@@ -156,15 +167,30 @@ fn _process_request(base: i64) -> i64:
             return 1
         val oracle = processing_ir_cpu_execute(ir)
         val started = time_now_unix_micros()
-        val result = processing_ir_execute_vulkan(ir)
-        if not result.completed or not processing_ir_outputs_equal(result.values, oracle):
-            _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, if result.completed: REASON_CHECKSUM_MISMATCH else: REASON_NON_DEVICE_READBACK, 0, 0, 0, 1, 0, 0)
+        var completed = false
+        var values: [u32] = []
+        var backend_handle: i64 = 0
+        var device_identity: i64 = 0
+        if backend == "cuda":
+            val result = processing_ir_execute_cuda(ir)
+            completed = result.completed
+            values = result.values
+            backend_handle = result.backend_handle
+            device_identity = result.device_identity
+        elif backend == "vulkan":
+            val result = processing_ir_execute_vulkan(ir)
+            completed = result.completed
+            values = result.values
+            backend_handle = result.backend_handle
+            device_identity = result.backend_handle
+        if not completed or not processing_ir_outputs_equal(values, oracle):
+            _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, if completed: REASON_CHECKSUM_MISMATCH else: REASON_NON_DEVICE_READBACK, 0, 0, 0, 1, 0, 0)
             return 1
-        val checksum = _write_pixels(base, result.values, element_count)
+        val checksum = _write_pixels(base, values, element_count)
         var elapsed = time_now_unix_micros() - started
         if elapsed <= 0:
             elapsed = 1
-        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, result.backend_handle, element_count * 4, checksum, elapsed, SIMPLEOS_HOST_GPU_READBACK_DEVICE, result.backend_handle)
+        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, backend_handle, element_count * 4, checksum, elapsed, SIMPLEOS_HOST_GPU_READBACK_DEVICE, device_identity)
         return 1
 
     var engine = VulkanBackend.create()

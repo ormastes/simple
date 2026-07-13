@@ -50,9 +50,8 @@ at most 256 MiB, and processing speedup at least 1.5x to become preferred.
 ## Minimal Implementation Order
 
 1. Pure Simple codec/validator and CPU oracle tests.
-2. x86_64 Linux/Vulkan guest-daemon vertical slice.
+2. x86_64 Linux/Vulkan rendering plus CUDA-preferred, Vulkan-fallback ProcessingIR guest-daemon vertical slice.
 3. AArch64 and RISC-V transport adapters using the identical protocol.
-4. macOS Metal, Windows DirectX/Vulkan, and NVIDIA CUDA adapters only on
-   prepared hosts.
+4. macOS Metal and Windows DirectX adapters only on prepared native hosts.
 5. Wire canonical row output into the hardening matrix without changing its
    existing 26-row pass contract.

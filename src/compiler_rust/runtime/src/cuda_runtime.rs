@@ -126,6 +126,7 @@ mod cuda_driver {
     type CuDeviceGetAttribute = unsafe extern "C" fn(*mut c_int, c_int, CUdevice) -> c_int;
     type CuCtxCreate = unsafe extern "C" fn(*mut CUcontext, c_uint, CUdevice) -> c_int;
     type CuCtxDestroy = unsafe extern "C" fn(CUcontext) -> c_int;
+    type CuCtxGetCurrent = unsafe extern "C" fn(*mut CUcontext) -> c_int;
     type CuCtxSetCurrent = unsafe extern "C" fn(CUcontext) -> c_int;
     type CuModuleLoadData = unsafe extern "C" fn(*mut CUmodule, *const c_void) -> c_int;
     type CuModuleUnload = unsafe extern "C" fn(CUmodule) -> c_int;
@@ -162,6 +163,7 @@ mod cuda_driver {
         cuDeviceGetAttribute: CuDeviceGetAttribute,
         cuCtxCreate_v2: CuCtxCreate,
         cuCtxDestroy_v2: CuCtxDestroy,
+        cuCtxGetCurrent: CuCtxGetCurrent,
         cuCtxSetCurrent: CuCtxSetCurrent,
         cuModuleLoadData: CuModuleLoadData,
         cuModuleUnload: CuModuleUnload,
@@ -215,6 +217,7 @@ mod cuda_driver {
             cuDeviceGetAttribute: sym!(b"cuDeviceGetAttribute\0", CuDeviceGetAttribute),
             cuCtxCreate_v2: sym!(b"cuCtxCreate_v2\0", CuCtxCreate),
             cuCtxDestroy_v2: sym!(b"cuCtxDestroy_v2\0", CuCtxDestroy),
+            cuCtxGetCurrent: sym!(b"cuCtxGetCurrent\0", CuCtxGetCurrent),
             cuCtxSetCurrent: sym!(b"cuCtxSetCurrent\0", CuCtxSetCurrent),
             cuModuleLoadData: sym!(b"cuModuleLoadData\0", CuModuleLoadData),
             cuModuleUnload: sym!(b"cuModuleUnload\0", CuModuleUnload),
@@ -272,6 +275,10 @@ mod cuda_driver {
 
     pub unsafe fn cuCtxDestroy_v2(ctx: CUcontext) -> c_int {
         dispatch!(cuCtxDestroy_v2(ctx))
+    }
+
+    pub unsafe fn cuCtxGetCurrent(pctx: *mut CUcontext) -> c_int {
+        dispatch!(cuCtxGetCurrent(pctx))
     }
 
     pub unsafe fn cuCtxSetCurrent(ctx: CUcontext) -> c_int {
@@ -894,12 +901,22 @@ fn get_or_create_default_context() -> CudaResult<CUcontext> {
 }
 
 #[cfg(feature = "cuda")]
-fn ensure_default_context_current() -> CudaResult<()> {
-    let context = get_or_create_default_context()?;
+fn ensure_default_context_current() -> Result<(), c_int> {
+    unsafe {
+        let mut current: CUcontext = ptr::null_mut();
+        let err = cuCtxGetCurrent(&mut current);
+        if err != 0 {
+            return Err(err);
+        }
+        if !current.is_null() {
+            return Ok(());
+        }
+    }
+    let context = get_or_create_default_context().map_err(|err| err as c_int)?;
     unsafe {
         let err = cuCtxSetCurrent(context);
         if err != 0 {
-            return Err(std::mem::transmute(err));
+            return Err(err);
         }
     }
     Ok(())
@@ -2589,6 +2606,12 @@ mod tests {
         .unwrap();
         let kernel_name = CString::new("noop").unwrap();
 
+        assert_eq!(rt_cuda_init(), 0);
+        let device = rt_cuda_device_get(0);
+        assert!(device >= 0, "expected CUDA device handle, got {device}");
+        let context = rt_cuda_ctx_create(device);
+        assert!(context > 0, "expected CUDA context, got {context}");
+
         let module = rt_cuda_module_load_data(ptx.as_ptr());
         assert!(module > 0, "expected PTX module to load, got {module}");
 
@@ -2600,6 +2623,9 @@ mod tests {
 
         let unload = rt_cuda_module_unload(module);
         assert_eq!(unload, 0, "expected module unload to succeed, got {unload}");
+
+        let destroy = rt_cuda_ctx_destroy(context);
+        assert_eq!(destroy, 0, "expected context destroy to succeed, got {destroy}");
     }
 
     #[test]
