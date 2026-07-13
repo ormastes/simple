@@ -4,12 +4,61 @@
 #          core_list, core_select, cmd_run, cmm_run, eval
 
 use app.t32_cli.error_codes.{T4010, T4013, T4070, T4071, T4082, T4200, t32_err_not_found, t32_err_no_session_mcp, t32_err_missing_param, t32_err_backend_not_found, t32_err_cmd_failed, t32_err_connection_failed}
+use app.mcp_t32.session_state.{McpT32Session, McpT32HistoryItem, MCP_T32_SESSIONS, MCP_T32_CURRENT_SESSION, MCP_T32_CURRENT_CORE, MCP_T32_HISTORY, MCP_T32_AREA_READY, MCP_T32_AREA_NAME}
+use app.mcp_t32.ctypes_bridge.{t32_ctypes_load, t32_ctypes_available, t32_ctypes_init, t32_ctypes_eval, t32_ctypes_get_message, t32_ctypes_get_practice_state, t32_ctypes_run_remote, t32_ctypes_set_api_lib_path}
+use std.io_runtime.{read_file, env_get}
+use app.mcp_t32.json_helpers.{t32_LB, t32_RB, t32_SB_L, t32_SB_R, t32_js, t32_jp, t32_jo2, t32_extract_field, t32_make_tool_result, t32_make_tool_error}
 
 # --- Backend detection (t32rem primary, python t32-rcl fallback) ---
 
 var MCP_T32_BACKEND_TYPE = ""    # "ctypes" | "t32rem" | "python_rcl" | ""
 var MCP_T32_BACKEND_CMD = ""     # Cached command path/prefix
 var MCP_T32_LAST_STDERR = ""     # Last subprocess stderr (preserved for error reporting)
+var T32_DEFAULT_PORT: i64 = 20000
+var T32_DEFAULT_HOST = "localhost"
+var T32_BACKEND_PREFERENCE = "t32rem"
+var T32_PYTHON_BINARY = "python3"
+var T32_PYTHON_BRIDGE_PATH = ""
+var T32_CONFIG_LOADED = false
+
+fn t32_load_default_config():
+    if T32_CONFIG_LOADED:
+        return
+    T32_CONFIG_LOADED = true
+    var api_lib_path = ""
+    val candidates = ["config/t32/t32_mcp.sdn", "../config/t32/t32_mcp.sdn", "../../config/t32/t32_mcp.sdn"]
+    for path in candidates:
+        val content = read_file(path) ?? ""
+        if content == "":
+            continue
+        for line in content.split("\n"):
+            val trimmed = line.trim()
+            if trimmed.starts_with("default_port:"):
+                T32_DEFAULT_PORT = int(trimmed.substring(13).trim())
+            elif trimmed.starts_with("default_host:"):
+                T32_DEFAULT_HOST = trimmed.substring(13).trim()
+            elif trimmed.starts_with("backend_preference:"):
+                T32_BACKEND_PREFERENCE = trimmed.substring(19).trim()
+            elif trimmed.starts_with("python_binary:"):
+                T32_PYTHON_BINARY = trimmed.substring(14).trim()
+            elif trimmed.starts_with("python_bridge:"):
+                T32_PYTHON_BRIDGE_PATH = trimmed.substring(14).trim()
+            elif trimmed.starts_with("api_lib_path:"):
+                api_lib_path = trimmed.substring(13).trim()
+        break
+    val env_port = env_get("T32_DEFAULT_PORT") ?? ""
+    if env_port != "": T32_DEFAULT_PORT = int(env_port)
+    val env_host = env_get("T32_DEFAULT_HOST") ?? ""
+    if env_host != "": T32_DEFAULT_HOST = env_host
+    val env_backend = env_get("T32_BACKEND_PREFERENCE") ?? ""
+    if env_backend != "": T32_BACKEND_PREFERENCE = env_backend
+    val env_python = env_get("T32_PYTHON") ?? ""
+    if env_python != "": T32_PYTHON_BINARY = env_python
+    val env_bridge = env_get("T32_PYTHON_BRIDGE") ?? ""
+    if env_bridge != "": T32_PYTHON_BRIDGE_PATH = env_bridge
+    val env_api_lib = env_get("T32_API_LIB") ?? ""
+    if env_api_lib != "": api_lib_path = env_api_lib
+    t32_ctypes_set_api_lib_path(api_lib_path)
 
 fn t32_find_python_rcl_bridge() -> text:
     val python_bin = T32_PYTHON_BINARY
@@ -46,6 +95,7 @@ fn t32_find_python_rcl_bridge() -> text:
     ""
 
 fn t32_find_backend() -> text:
+    t32_load_default_config()
     # Return cached result
     if MCP_T32_BACKEND_CMD != "":
         return MCP_T32_BACKEND_CMD
@@ -355,6 +405,12 @@ fn t32_find_current_session() -> Option<McpT32Session>:
             return Some(s)
     nil
 
+fn t32_mcp_session_ids() -> [text]:
+    var ids: [text] = []
+    for session in MCP_T32_SESSIONS:
+        ids.push(session.id)
+    ids
+
 fn t32_add_history(command: text, result: text, session_id: text, core_id: text):
     val entry = McpT32HistoryItem(
         command: command,
@@ -504,6 +560,7 @@ fn handle_t32_sessions_list(id: text, body: text) -> text:
     t32_make_tool_result(id, arr)
 
 fn handle_t32_session_open(id: text, body: text) -> text:
+    t32_load_default_config()
     var host = t32_extract_field(body, "host")
     val port_str = t32_extract_field(body, "port")
     val name = t32_extract_field(body, "name")
@@ -926,3 +983,7 @@ fn handle_t32_error_check(id: text, body: text) -> text:
 export handle_t32_sessions_list, handle_t32_session_open, handle_t32_session_resume, handle_t32_session_close
 export handle_t32_core_list, handle_t32_core_select, handle_t32_cmd_run, handle_t32_cmm_run, handle_t32_eval
 export handle_t32_error_check
+export t32_find_backend, t32_get_backend_type, t32_query_gui_status_json, t32_query_errors
+export t32_run_remote, t32_find_current_session, t32_add_history
+export t32_mcp_session_ids, t32_append_status_bar_json, t32_block_contains_word
+export t32_check_blocking, t32_has_blocking, t32_scan_cmm_file, t32_poll_practice_state

@@ -16,8 +16,12 @@ Implement the selected `REQ-UCLA-001..025` and `NFR-UCLA-001..022` by extracting
 | `examples/10_tooling/trace32_tools/t32_cli/types.spl` | Compatibility alias `T32BridgeResult = AccessResult` | T32 adapter |
 | `examples/10_tooling/trace32_tools/t32_cli/render.spl` | Forward to shared human renderer; retain only T32 GUI-status decoration if needed | T32 adapter |
 | `examples/10_tooling/trace32_tools/t32_cli/bridge_access.spl` | Own T32 discovery/inspect/action/history bridge logic below the stable `bridge.spl` facade | T32 adapter |
+| `examples/10_tooling/trace32_tools/t32_cli/access_error.spl` | Own T-code/text-to-`AccessError` mapping without importing the CLI entrypoint | T32 adapter |
+| `examples/10_tooling/trace32_tools/t32_mcp/session_state.spl` | Implemented but runtime-unverified dependency-light owner for `McpT32Session`, session/current/core/history state formerly owned by the removed MCP entrypoint | T32 runtime |
+| `examples/10_tooling/trace32_tools/t32_mcp/catalog_key.spl` | Own pipe-delimited catalog-key extraction without an action/window import cycle | T32 runtime |
+| `examples/10_tooling/trace32_tools/t32_mcp/diagnostics.spl` | Route legacy MCP diagnostics through structured logging | T32 runtime |
 | `config/t32/trace32_x11_container.Dockerfile` | Admit and register vendor PCF fonts for the real Xft GUI path | T32 runtime |
-| `examples/10_tooling/trace32_tools/t32_cli/mod.spl` | Parse output mode and map T-code/text failures to `AccessError` | T32 adapter |
+| `examples/10_tooling/trace32_tools/t32_cli/mod.spl` | Dispatch the CLI, parse output mode, and re-export the T32 error mapper | T32 adapter |
 | `src/app/ui/access_cli.spl` | New UI descriptor catalog and live test-API/read-only-store adapter | UI adapter |
 | `src/app/ui/cli_entry.spl` | Dispatch access verbs before backend modes; preserve existing modes | UI entry |
 | `src/app/play/wm_access_cli.spl` | New live WM conversion/dispatch owner | WM adapter |
@@ -93,7 +97,7 @@ class AccessResult:
     payload_json: text
     returned_count: i64
     truncated: bool
-    gui_status: i32
+    gui_status: text
 ```
 
 `AccessResult` retains the existing T32 scalar/table/kv/list/raw constructors so `T32BridgeResult` can be a zero-behavior type alias. New snapshot/document constructors add source, revision, payload, and bounds.
@@ -120,6 +124,8 @@ minimum arguments, timeout positivity, confirmation policy, and snapshot action 
 - Its overlapping `windows`, `window show/describe`, `action do/list`, and `history` entries expose mapped `AccessCommandDescriptor` values.
 - `T32BridgeResult` aliases `AccessResult`; existing bridge constructors compile unchanged.
 - Existing T-codes remain `source_code`; the boundary maps them to stable common codes.
+- Session types and mutable session/current/core/history state live in a non-entrypoint owner imported explicitly by MCP and CLI bridge modules. Entrypoints do not own reusable state.
+- Session configuration loads `config/t32/t32_mcp.sdn` once, then applies environment overrides; ctypes keeps API-library path ownership behind a setter.
 - T32-only sessions/CMM/jobs/dialog commands retain their existing dispatch and safety checks.
 
 ## Live UI adapter
@@ -170,7 +176,7 @@ Adapters map private failures to the selected stable codes. Empty is success onl
 
 ## Test and evidence hooks
 
-The Pure Simple checker `scripts/check/check-ui-cli-access.spl` owns deterministic fixtures and calls real common/app entry functions. System scenarios call it through `bin/simple run`, require scenario-specific evidence markers, and capture TUI/protocol/GUI artifacts. The checker has no alternate pass path: missing live fixtures, commands, measurements, captures, or final review evidence fail nonzero.
+The Pure Simple checker `scripts/check/check-ui-cli-access.spl` owns deterministic fixtures and calls real common/app entry functions. It intentionally imports the narrow `t32_cli.bridge_access` and `t32_cli.access_error` evidence owners instead of the `t32_cli.mod` entrypoint or broad `bridge.spl` compatibility facade. System scenarios call it through `bin/simple run`, require scenario-specific evidence markers, and capture TUI/protocol/GUI artifacts. The checker has no alternate pass path: missing live fixtures, commands, measurements, captures, or final review evidence fail nonzero.
 
 After the primary SSpec run, `scripts/check/check-ui-cli-final-review.shs --write-manifest` hashes its transcript, T32 GUI font/status/window-tree/screenshot proof, and the other canonical evidence. The highest-capability reviewer records that manifest digest and the full reviewed revision in the receipt. A separate final-review SSpec invokes `--check`, which rejects dirty, stale, altered, or incomplete evidence before invoking the final Pure Simple scenario. This preserves one execution per acceptance scenario.
 
@@ -181,7 +187,11 @@ fallback plus fail-closed database action.
 
 ## Performance plan
 
-The checker constructs the selected 100-window/1,000-node fixture, warms once, measures retained iterations, records p50/p95 and maximum RSS through existing facades, and asserts list/snapshot <=100 ms p95, find/pre-action <=20 ms p95, RSS delta <=20 MiB, history <=64, one refresh/request per read, and no per-record subprocess.
+The checker constructs the selected 100-window/1,000-node fixture, warms once, measures retained iterations, records p50/p95 and maximum RSS through existing facades, and asserts the in-memory `access_result_from_snapshot` list projection <=100 ms p95, `access_find_nodes` <=20 ms p95, RSS delta <=20 MiB, history <=64, one refresh/request per read, and no per-record subprocess. These measurements do not claim full HTTP route or snapshot-capture latency; the live transport scenario proves that separate path functionally.
+
+## Build closure
+
+The focused checker is hosted application code: UI persistence and WM access require SQLite and process symbols. A core-only bootstrap runtime cannot link that closure and must fail explicitly; the removed `rust-hosted` bundle is not a fallback. Bootstrap compilation may diagnose source ownership, but acceptance execution uses a current Pure-Simple host tool and its normal hosted runtime. Semantic dependency failures must stop before linking rather than being skipped as non-critical modules.
 
 ## Compatibility and migration order
 
