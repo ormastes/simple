@@ -16,25 +16,21 @@ the `__init__.spl` re-export can't disambiguate.
 
 | Symbol | Files | Canonical | Fix |
 |---|---|---|---|
-| `is_alpha` (+`is_alpha_num`) | `aop_predicate_parser.spl` (local helper, l.112) vs `lexer_chars.spl` | lexer_chars | rename the aop-local helper → `aop_is_alpha`/`aop_is_alpha_num` (only used inside that file, l.54/57/122). **VERIFIED clears the ambiguity** (native-build of a trivial closure passes; simpleos_tool build advances to the next symbol). Fix saved: `scratchpad/lanebx_recover/`-adjacent / this session's WC edit. |
-| `mono_cache_register` | `monomorphize.spl` vs `type_erasure.spl` | (unverified) monomorphize | make the non-canonical definition file-private or import the shared one |
-| `intersection_type_get_members` | `type_checker.spl` vs `types.spl` | (unverified) types | same pattern (found by Lane BX) |
+| `is_alpha` | `aop_predicate_parser.spl` vs `lexer_chars.spl` | `lexer_chars.spl` | **VERIFIED:** rename the semantically different AOP-local identifier helpers and source the public facade export. |
+| `mono_cache_register` | `monomorphize.spl` vs `type_erasure.spl` | `monomorphize.spl` | **VERIFIED:** rename the incompatible type-erasure-local cache helper and source the public facade export. |
+| `intersection_type_get_members` and seven sibling accessors | `type_checker.spl` stale externs vs `types.spl` | `types.spl` | **VERIFIED:** import the canonical named/union/intersection/refinement registry accessors and delete the extern providers. |
 
-Fix each the same way: keep ONE package-level definition (the canonical
-module), make the duplicate file-private (rename with a module prefix) or
-import the canonical one. Then re-run a `native-build --source src/compiler`
-until it advances past module load — expect more instances until the cascade
-clears.
+Keep one package-level owner. Import stale declarations from that owner; give
+distinct private state a module-specific name. Never pick the first provider or
+special-case a symbol in discovery.
 
-## Ownership / why not fixed here
+## Current boundary
 
-These live in `src/compiler/10.frontend/core` (central-compiler) and the same
-parallel session that introduced them (`050209d9b36`) owns the in-progress
-bootstrap redeploy — it hits these in its OWN bootstrap and will clear the
-whole class. Landing piecemeal renames into the actively-churning tree risks
-conflicting with that fix, and does NOT unblock the in-guest interpreter RUN
-(that is blocked deeper — see below). So this is filed for the redeploy owner;
-the `is_alpha` fix pattern above is verified and trivially applied to the rest.
+The next bounded continuation verified the monomorphization owner and cleared
+the parser facade's duplicate compatibility paths by sourcing split expression
+and statement APIs from their real modules. Native-build then passed package
+discovery and compiled every source module. No ambiguous core export remains in
+the current full-CLI closure; the strict linker now owns the next blocker.
 
 ## Related, deeper blocker (does not depend on this)
 

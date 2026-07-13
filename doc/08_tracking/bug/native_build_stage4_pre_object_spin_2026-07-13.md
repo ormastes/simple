@@ -176,6 +176,57 @@ direct `rt_*` call was added. The strict full-CLI link remains deliberately
 unrun; hosted runtime/provider composition is still open and no compiler,
 host-GPU, or QEMU PASS is claimed. Final higher review passes the bounded diff.
 
+The refreshed bootstrap seed and native-all archive both build. The first
+retained-cache strict follow-up then failed before compilation on ambiguous
+facade ownership for `ExecutionConfig`: `config.spl` owns the public type while
+`di.spl` contained stale nominal “forward declarations” for it and `LogConfig`.
+DI now imports both canonical config types and deletes the duplicate structs
+and impls. The next bounded run advanced to a second genuine collision:
+`db.Table` is an SDN persistence detail, while `table.Table` is the public
+columnar API paired with `Column`. The root facade no longer re-exports the DB
+table and explicitly sources public `Table` from `table.spl`.
+
+The next continuation verified that explicit `Table` ownership and advanced to
+the frontend type-registry seam. `types.spl` owns the named, union,
+intersection, and refinement registries; `type_checker.spl` now imports their
+eight accessors instead of redeclaring them as extern providers. The second
+strict run advanced again to `is_alpha`. The public lexer helper remains owned
+by `lexer_chars.spl`; the semantically different AOP-local helpers, which also
+admit underscore, are renamed for identifier start/continuation. The lexer
+facade export is explicitly sourced and its redundant lexer-struct export is
+removed.
+
+The third and final bounded run verified both fixes and stopped on
+`mono_cache_register`. `monomorphize.spl` owns the public key-to-declaration
+cache, while `type_erasure.spl` owns an incompatible internal
+name-and-type-arguments cache. The internal helper is renamed, the public export
+is explicitly sourced from `monomorphize`, and the adjacent stale
+`type_tag_name` extern is replaced with its canonical `types.spl` import. These
+post-cap edits are intentionally unverified, uncommitted, and unsynced. The next
+continuation may run one preserved-cache strict check; no resolver relaxation,
+provider ordering, or symbol hardcode is allowed.
+
+That continuation verified the monomorphization and `type_tag_name` ownership
+repairs, then exposed duplicate root-facade paths for the split parser. The root
+facade now sources expression and statement APIs from `parser_expr.spl` and
+`parser_stmts.spl` exactly once while `parser.spl` retains its direct-import
+compatibility API. The dead `parse_primary` export was removed; the real owner
+is `parse_primary_expr`. The second strict run passed package discovery and
+failed in `aot_compile_to_bytes` because an unannotated `Result.unwrap()` local
+lost its `CompiledModule` receiver type. The existing typed-local pattern fixed
+that one call; TODO 558 tracks the language inference defect rather than
+silently treating the annotation as the final compiler behavior.
+
+The third bounded run compiled every source module and reached strict link. It
+now reports 112 unique undefined symbols: 101 `rt_*`, four `spl_memtrack_*`, and
+seven non-runtime names. Compared with the retained 120-symbol baseline, 13 old
+names are gone and five new names appear; four of those five are the correctly
+lowered memory-tracker ABI names. The remaining non-runtime set is one untyped
+`str.rfind` call, five design-system serialization/diff helpers, and
+`font_atlas_composite_program_version_valid`. Runtime/provider composition and
+those seven source owners remain open. No fourth build, host-GPU check, or QEMU
+PASS is claimed.
+
 Reuse the preserved 1,043-object cache only after one of those owners changes,
 then run one bounded strict-link verification. Do not add stubs, relabel a
 runtime bundle, hardcode symbols, or substitute the Rust seed as production
