@@ -6,6 +6,18 @@ use super::error::{VulkanError, VulkanResult};
 use ash::vk;
 use std::sync::Arc;
 
+fn ensure_storage_binding(bindings: &mut Vec<vk::DescriptorSetLayoutBinding<'static>>) {
+    if bindings.is_empty() {
+        bindings.push(
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        );
+    }
+}
+
 /// Compute pipeline with shader and layout
 pub struct ComputePipeline {
     device: Arc<VulkanDevice>,
@@ -73,6 +85,10 @@ impl ComputePipeline {
                 bindings.push(vk_binding);
             }
         }
+        // The SFFI compute contract always binds storage buffer 0. Some valid
+        // hand-assembled kernels are not described by spirv-reflect, so keep
+        // the pipeline layout compatible with the descriptor allocator.
+        ensure_storage_binding(&mut bindings);
 
         let descriptor_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
 
@@ -252,6 +268,23 @@ impl ComputePipeline {
     /// Push constant byte size configured for the pipeline layout.
     pub fn push_constant_size(&self) -> u32 {
         self.push_constant_size
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_storage_binding;
+    use ash::vk;
+
+    #[test]
+    fn empty_reflection_keeps_storage_binding_zero() {
+        let mut bindings = Vec::new();
+        ensure_storage_binding(&mut bindings);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].binding, 0);
+        assert_eq!(bindings[0].descriptor_type, vk::DescriptorType::STORAGE_BUFFER);
+        assert_eq!(bindings[0].descriptor_count, 1);
+        assert_eq!(bindings[0].stage_flags, vk::ShaderStageFlags::COMPUTE);
     }
 }
 
