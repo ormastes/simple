@@ -1,0 +1,100 @@
+# Host tray controller — "tray icon mode" for Simple apps.
+#
+# HONEST SCOPE: this is the smallest REAL control surface over the WM daemon
+# (list/focus/close/quit-all), not a native system-tray pixel icon. winit has
+# no tray API; a real graphical icon needs per-platform FFI (Linux:
+# StatusNotifierItem/DBus or libappindicator; macOS: NSStatusBar via objc
+# FFI; Windows: Shell_NotifyIcon) that is out of this pass's budget. `status`
+# reports that gap honestly per platform instead of claiming an icon that
+# does not exist. The CLI control surface itself is real on every platform —
+# it only talks to the daemon's existing file IPC — and is the fallback path
+# explicitly allowed by the WM hardening plan (option (c): "`simple play
+# tray` TUI/CLI controller").
+#
+# `simple play tray list|focus <id>|close <id>|quit-all|status`
+
+use std.env.platform.{detect_os}
+use std.daemon_sdk.types.{daemon_request_new}
+use std.daemon_sdk.client.{daemon_submit_and_wait}
+use app.play.wm_daemon_client.{wm_daemon_config, wm_daemon_list_windows, WMD_WINDOW_FOCUS, WMD_WINDOW_CLOSE}
+use app.play.wm_daemon_ensure.{wm_daemon_autoconnect}
+
+fn _native_icon_status(os: text) -> text:
+    if os == "linux":
+        "not-implemented (needs StatusNotifierItem/DBus FFI) -- CLI control surface below is real"
+    elif os == "macos":
+        "not-yet-supported on macos (needs NSStatusBar FFI) -- CLI control surface below is real"
+    elif os == "windows":
+        "not-yet-supported on windows (needs Shell_NotifyIcon FFI) -- CLI control surface below is real"
+    else:
+        "not-yet-supported on {os} -- CLI control surface below is real"
+
+pub fn wm_tray_dispatch(args: [text], as_json: bool) -> i64:
+    val sub = if args.len() > 0: args[0] else: "status"
+    val os = detect_os()
+
+    if sub == "status":
+        if as_json:
+            print "{\"command\":\"tray\",\"os\":\"" + os + "\",\"native_icon\":\"" + _native_icon_status(os) + "\"}"
+        else:
+            print "tray: os={os}"
+            print "  native icon: {_native_icon_status(os)}"
+            print "  control surface: list/focus/close/quit-all via daemon IPC (real, all platforms)"
+        return 0
+
+    # The control verbs below need a live daemon; auto-ensure it (same
+    # zero-overhead singleton probe hosted apps use).
+    wm_daemon_autoconnect()
+    val config = wm_daemon_config()
+
+    if sub == "list":
+        val windows = wm_daemon_list_windows()
+        if windows == nil:
+            print "tray: daemon unavailable"
+            return 1
+        val ws = windows ?? []
+        if as_json:
+            var parts: [text] = []
+            for w in ws:
+                parts = parts.push("{\"window_id\":\"" + w.window_id + "\",\"title\":\"" + w.title + "\",\"focused\":" + (if w.focused: "true" else: "false") + "}")
+            print "[" + parts.join(",") + "]"
+        else:
+            for w in ws:
+                val mark = if w.focused: "*" else: " "
+                print "{mark} {w.window_id}\t{w.title}"
+        return 0
+
+    if sub == "focus":
+        if args.len() < 2:
+            print "usage: simple play tray focus <id>"
+            return 2
+        var req = daemon_request_new(WMD_WINDOW_FOCUS)
+        req.set_field("id", args[1])
+        val resp = daemon_submit_and_wait(req, config, 5000)
+        print "tray: focused {resp.get_field(\"focused\")}"
+        return 0
+
+    if sub == "close":
+        if args.len() < 2:
+            print "usage: simple play tray close <id>"
+            return 2
+        var req = daemon_request_new(WMD_WINDOW_CLOSE)
+        req.set_field("id", args[1])
+        val resp = daemon_submit_and_wait(req, config, 5000)
+        print "tray: closed {resp.get_field(\"closed\")}"
+        return 0
+
+    if sub == "quit-all":
+        val windows = wm_daemon_list_windows() ?? []
+        var closed = 0
+        for w in windows:
+            var req = daemon_request_new(WMD_WINDOW_CLOSE)
+            req.set_field("id", w.window_id)
+            daemon_submit_and_wait(req, config, 5000)
+            closed = closed + 1
+        print "tray: closed {closed} window(s)"
+        return 0
+
+    print "unknown tray subcommand: {sub}"
+    print "subcommands: list focus close quit-all status"
+    1

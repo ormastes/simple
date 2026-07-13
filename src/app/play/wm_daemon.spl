@@ -20,14 +20,24 @@ use std.daemon_sdk.daemon.{DaemonRunner, daemon_runner_start}
 use std.daemon_sdk.types.{DaemonConfig, DaemonRequest, DaemonResponse, daemon_request_new, daemon_response_new}
 use std.daemon_sdk.client.{daemon_ensure_running, daemon_submit_and_wait, daemon_stop}
 use std.daemon_sdk.protocol.{read_daemon_requests, write_daemon_response, clear_processed_requests}
-use app.play.wm_daemon_client.{wm_daemon_config, wm_daemon_is_running, WMD_WINDOWS_LIST, WMD_WINDOW_OPEN, WMD_WINDOW_CLOSE, WMD_STATUS, wm_daemon_windows_from_response}
-use os.compositor.host_compositor_entry.{HostWmConfig, HostBackendKind, HostWmHandle, HostCompositor, init_host_wm}
+use app.play.wm_daemon_client.{wm_daemon_config, wm_daemon_is_running, WMD_WINDOWS_LIST, WMD_WINDOW_OPEN, WMD_WINDOW_CLOSE, WMD_WINDOW_FOCUS, WMD_STATUS, wm_daemon_windows_from_response}
+use app.play.wm_daemon_ensure.{wm_daemon_ensure_healthy}
+# Imports host_compositor_core directly (NOT host_compositor_entry, which
+# also re-exports host_compositor_bootstrap.* -- the SDL2/Cocoa/Win32
+# alternate-backend + background-provider modules). The resident daemon only
+# ever needs the Headless backend, so it uses init_headless_host_wm (core.spl)
+# instead of the full init_host_wm (bootstrap.spl) -- see that function's doc
+# for why this keeps rendering backends out of the daemon's module graph
+# (item 5, WM hardening plan: "WM core must be VERY SMALL").
+use os.compositor.host_compositor_core.{HostWmConfig, HostBackendKind, HostWmHandle, HostCompositor, init_headless_host_wm}
 use common.window_protocol.geometry.{Size}
-use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_FOCUS}
 use app.io.mod.{process_spawn_async, env_get}
 
 extern fn rt_sleep_ms(ms: i64)
 extern fn rt_env_get(key: text) -> text?
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
 
 val WM_DAEMON_IDLE_SLEEP_MS: i64 = 16
 
@@ -42,14 +52,24 @@ val WM_DAEMON_IDLE_SLEEP_MS: i64 = 16
 # loop and the in-process tests driving the SAME compositor lifecycle.
 
 var _wm_stop_requested: bool = false
+# Sanity-check bookkeeping for the `status` verb (see item 3 of the WM
+# hardening plan): when the serve loop started, and the timestamp of its most
+# recent poll cycle — both cheap module-scalar writes (scalars persist
+# reliably across frames in the interpreter; see WmRouteOutcome's doc for why
+# class fields do not).
+var _wm_daemon_start_micros: i64 = 0
+var _wm_daemon_last_cycle_micros: i64 = 0
 
 fn _wm_standard_config() -> HostWmConfig:
     HostWmConfig(backend: HostBackendKind.Headless, initial_size: Size(width: 1024u32, height: 768u32), title: "wm-daemon")
 
 pub fn wm_daemon_build_handle() -> HostWmHandle?:
-    """Build the headless host compositor handle (same code path as windowed
-    mode; only the pixel-sink backend differs)."""
-    init_host_wm(_wm_standard_config())
+    """Build the headless host compositor handle via the lean
+    init_headless_host_wm entry (host_compositor_core.spl) -- same
+    HostCompositor/HeadlessHostCompositorBackend code windowed mode's
+    init_host_wm(Headless) reaches, just without pulling the SDL2/Cocoa/Win32
+    alternate-backend modules into this process's module graph."""
+    init_headless_host_wm(_wm_standard_config())
 
 pub fn wm_daemon_reset_stop():
     _wm_stop_requested = false
@@ -100,11 +120,23 @@ pub fn wm_daemon_route(comp_in: HostCompositor, req: DaemonRequest) -> WmRouteOu
         resp.set_field("closed", "{id}")
         resp.set_field("count", "{comp.windows.len()}")
         return WmRouteOutcome(resp: resp, comp: comp)
+    if kind == WMD_WINDOW_FOCUS:
+        val id = req.get_field("id").to_i64() ?? -1
+        comp.apply_bridge_request(0, 0, COMP_FOCUS.to_i64(), id, "", 0, 0, 0, 0, "", 0, "wm-daemon")
+        var resp = daemon_response_new(req.id, 0)
+        resp.set_field("focused", "{id}")
+        resp.set_field("count", "{comp.windows.len()}")
+        return WmRouteOutcome(resp: resp, comp: comp)
     if kind == WMD_STATUS:
         var resp = daemon_response_new(req.id, 0)
         resp.set_field("running", "true")
         resp.set_field("backend", "headless")
         resp.set_field("windows", "{comp.windows.len()}")
+        resp.set_field("pid", "{rt_getpid()}")
+        val now = rt_time_now_unix_micros()
+        val uptime_ms = if _wm_daemon_start_micros > 0: (now - _wm_daemon_start_micros) / 1000 else: 0
+        resp.set_field("uptime_ms", "{uptime_ms}")
+        resp.set_field("last_frame_ms", "{_wm_daemon_last_cycle_micros / 1000}")
         return WmRouteOutcome(resp: resp, comp: comp)
     var unknown = daemon_response_new(req.id, 1)
     unknown.set_field("error", "unknown WM daemon command kind {kind}")
@@ -170,6 +202,8 @@ fn _wm_daemon_serve() -> i64:
         print "wm daemon: lock held by another instance"
         return 1
     wm_daemon_reset_stop()
+    _wm_daemon_start_micros = rt_time_now_unix_micros()
+    _wm_daemon_last_cycle_micros = _wm_daemon_start_micros
     print "wm daemon: serving (headless)"
     val render = (rt_env_get("SIMPLE_WM_DAEMON_RENDER") ?? "") == "1"
     # Poll cycle is inlined here (instead of runner.run_poll_cycle(closure))
@@ -188,6 +222,7 @@ fn _wm_daemon_serve() -> i64:
             clear_processed_requests(config.request_dir, processed_ids)
         if render:
             handle.run_once()
+        _wm_daemon_last_cycle_micros = rt_time_now_unix_micros()
         rt_sleep_ms(WM_DAEMON_IDLE_SLEEP_MS)
     runner.shutdown()
     0
@@ -234,6 +269,18 @@ pub fn wm_daemon_dispatch(args: [text], as_json: bool) -> i64:
             print msg
         return 0
 
+    if sub == "health":
+        # Background sanity check + hang recovery (item 3 of the WM
+        # hardening plan): pings status with a 500ms timeout; a hang or
+        # stale lock is killed/relaunched — never on the app-launch hot
+        # path, only when this verb is invoked explicitly.
+        val marker = wm_daemon_ensure_healthy()
+        if as_json:
+            print "{\"command\":\"daemon\",\"action\":\"health\",\"result\":\"" + marker + "\"}"
+        else:
+            print "[wm-daemon] health-check result={marker}"
+        return if marker == "healthy" or marker.ends_with("relaunched"): 0 else: 1
+
     # The remaining verbs require a live daemon.
     if not _wm_daemon_ensure():
         print "wm daemon: unavailable"
@@ -274,12 +321,22 @@ pub fn wm_daemon_dispatch(args: [text], as_json: bool) -> i64:
         _print_response(resp, ["closed", "count"], as_json)
         return 0
 
+    if sub == "window-focus":
+        if args.len() < 2:
+            print "usage: simple play daemon window-focus <id>"
+            return 2
+        var req = daemon_request_new(WMD_WINDOW_FOCUS)
+        req.set_field("id", args[1])
+        val resp = daemon_submit_and_wait(req, config, 5000)
+        _print_response(resp, ["focused", "count"], as_json)
+        return 0
+
     if sub == "status":
         val req = daemon_request_new(WMD_STATUS)
         val resp = daemon_submit_and_wait(req, config, 5000)
-        _print_response(resp, ["running", "backend", "windows"], as_json)
+        _print_response(resp, ["running", "backend", "windows", "pid", "uptime_ms", "last_frame_ms"], as_json)
         return 0
 
     print "unknown daemon subcommand: {sub}"
-    print "subcommands: serve start windows-list window-open window-close status stop"
+    print "subcommands: serve start windows-list window-open window-close window-focus status health stop"
     1

@@ -6,6 +6,7 @@ use os.compositor.hosted_backend_sdl2.{HostedSdl2Backend}
 use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
 use os.compositor.hosted_backend_win32.{HostedWin32Backend}
 use common.ui.window_scene.{shared_wm_scene_register_background_image_provider, shared_wm_scene_register_motion_background_source, BackgroundSpec, WM_BACKGROUND_KIND_MOTION}
+use app.play.wm_daemon_ensure.{wm_daemon_autoconnect}
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_time_now_unix_micros() -> i64
 
@@ -107,6 +108,19 @@ fn host_motion_background_registered_spec() -> BackgroundSpec?:
 fn init_host_wm(cfg: HostWmConfig) -> HostWmHandle?:
     ensure_host_background_image_provider_registered()
     ensure_host_motion_background_source_registered(cfg.initial_size.width.to_i32(), cfg.initial_size.height.to_i32())
+    # Auto-ensure the tiny background WM daemon for every REAL hosted GUI
+    # launch (item 2 of the WM hardening plan). Guarded to Headless: the
+    # daemon's own compositor handle is built via this same init_host_wm
+    # with HostBackendKind.Headless (see wm_daemon_build_handle), so this
+    # skip is what prevents the daemon from trying to auto-spawn itself; it
+    # also means non-GUI Headless test/harness callers never pay the probe.
+    # A single lock-file stat (see wm_daemon_autoconnect); zero-overhead,
+    # never blocks on daemon init. SIMPLE_WM_DAEMON_AUTOCONNECT=0 opts out
+    # (test isolation / in-guest SimpleOS builds, which never reach this
+    # backend selection in the first place since init_host_wm is a
+    # hosted-only entry point — see recon notes).
+    if cfg.backend != HostBackendKind.Headless and (rt_env_get("SIMPLE_WM_DAEMON_AUTOCONNECT") ?? "1") != "0":
+        wm_daemon_autoconnect()
     if cfg.backend == HostBackendKind.Tui:
         return nil
     val event_loop_id = 1

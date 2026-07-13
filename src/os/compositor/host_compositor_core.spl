@@ -1109,6 +1109,29 @@ class HostWmHandle:
             self.run_once()
             rt_sleep_ms(HOST_WM_IDLE_SLEEP_MS.to_i64())
 
+# Minimal headless-only WM init (item 5 of the WM hardening plan: "WM core
+# must be VERY SMALL"). Builds a HostWmHandle the same way the Headless arm
+# of host_compositor_bootstrap.init_host_wm's _create_backend_for_kind does
+# (HeadlessHostCompositorBackend as the CompositorBackend, plain
+# HostCompositor.new -- deliberately NOT new_headless's native_pixel_lane
+# variant, to keep this byte-identical to the path the daemon already
+# exercised), just reached without going through that file's
+# _create_backend_for_kind/background-provider wiring. A caller that imports
+# ONLY host_compositor_core (not host_compositor_entry, which re-exports
+# host_compositor_bootstrap.*) never pulls hosted_backend_sdl2 /
+# hosted_backend_cocoa / hosted_backend_win32 / background_image_provider /
+# background_motion_provider into its module graph, so the resident daemon
+# process (which only ever needs Headless -- see wm_daemon.wm_daemon_build_handle)
+# can stay on this lean entry instead. No compositor refactor: HostCompositor
+# itself is untouched, this is purely an alternate top-level constructor.
+fn init_headless_host_wm(cfg: HostWmConfig) -> HostWmHandle:
+    val w = cfg.initial_size.width.to_i32()
+    val h = cfg.initial_size.height.to_i32()
+    val backend = HeadlessHostCompositorBackend.new(w, h)
+    val comp = HostCompositor.new(backend, cfg.initial_size)
+    val wm = HostWmLoopState(running: true)
+    HostWmHandle(compositor: comp, wm: wm, event_loop_id: 1, window_id: 1, backend: HostBackendKind.Headless)
+
 class SimpleOsGuiAdapter:
     compositor: HostCompositor
     delivered_input_events: i64
