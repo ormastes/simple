@@ -2,9 +2,10 @@
 
 ## Status
 
-Open. This blocks updated Simple/LLVM AOT execution evidence for the Engine2D
-SIMD row scheduler. Cross-compiled runtime binaries pass on x86-64, AArch64,
-and RV64GCV; the crash occurs before MIR or LLVM generation.
+Partially fixed. A new stage-5 pure-Simple CLI now builds and reaches native
+entry-closure discovery. Updated Simple/LLVM AOT execution evidence for the
+Engine2D SIMD row scheduler remains blocked by the next native runtime issue.
+Cross-compiled runtime binaries pass on x86-64, AArch64, and RV64GCV.
 
 ## Reproducer
 
@@ -60,3 +61,15 @@ it never enters the Rust bootstrap builder. Supplying the real host target
 starts entry discovery in seconds. That path then exposed a spanless Rust-parser
 failure in `src/lib/common/encoding/sfnt.spl`; discovery now reports parser
 line/column, and a focused regression covers the compatible SFNT source form.
+
+## Stage-5 evidence
+
+An explicit host target completed the optimized Rust-seed bootstrap build in
+244.2 seconds: 1,019 reachable files compiled, zero failed, and
+`build/bootstrap-simd-stage5/simple --version` reports `Simple v1.0.0-beta`.
+The stage-5 artifact reaches pure-Simple native-build, but the SIMD probe then
+reported `function not found: str.split_lines` and exited 139. `split_lines`
+is implemented by the Rust interpreter but is absent from native method
+registration; `split` lowers to `rt_string_split`. The entry-closure scan now
+uses one `content.split("\\n")` pass, preserving the linear scan while using
+the supported native ABI.

@@ -260,7 +260,7 @@ fn debug_os_entry_closure() {
 }
 
 #[test]
-fn repo_sfnt_source_parses_for_entry_discovery() {
+fn repo_native_discovery_sources_parse() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -269,11 +269,18 @@ fn repo_sfnt_source_parses_for_entry_discovery() {
         .parent()
         .unwrap()
         .to_path_buf();
-    let path = repo_root.join("src/lib/common/encoding/sfnt.spl");
-    let source = std::fs::read_to_string(&path).unwrap();
-    simple_parser::Parser::new(&source)
-        .parse()
-        .unwrap_or_else(|error| panic!("{} {:?}: {error}", path.display(), error.span()));
+    for relative in [
+        "src/app/io/_CliCompile/compile_targets.spl",
+        "src/lib/common/encoding/sfnt.spl",
+        "src/lib/common/encoding/sfnt_glyf.spl",
+        "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl",
+    ] {
+        let path = repo_root.join(relative);
+        let source = std::fs::read_to_string(&path).unwrap();
+        simple_parser::Parser::new(&source)
+            .parse()
+            .unwrap_or_else(|error| panic!("{} {:?}: {error}", path.display(), error.span()));
+    }
 }
 
 #[test]
