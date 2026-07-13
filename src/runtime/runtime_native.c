@@ -698,6 +698,7 @@ int64_t rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t 
 
 int64_t rt_string_new(const uint8_t* bytes, uint64_t len) {
     if (!bytes && len > 0) return rt_core_nil();
+    if (len > SIZE_MAX - sizeof(RtCoreString) - 1) return rt_core_nil();
 
     RtCoreString* s = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)len + 1);
     if (!s) return rt_core_nil();
@@ -2571,6 +2572,31 @@ static char* rt_core_text_arg_to_cstr(const uint8_t* ptr, uint64_t len) {
     if (len != 0) memcpy(out, ptr, (size_t)len);
     out[len] = '\0';
     return out;
+}
+
+int64_t rt_path_join(
+    const uint8_t* left,
+    uint64_t left_len,
+    const uint8_t* right,
+    uint64_t right_len
+) {
+    if (!left) return rt_string_new(NULL, 0);
+    if (left_len > SIZE_MAX || right_len > SIZE_MAX) return rt_core_nil();
+    if (!right || right_len == 0) return rt_string_new(left, left_len);
+    if (right[0] == '/' || left_len == 0) return rt_string_new(right, right_len);
+
+    uint64_t separator_len = left[left_len - 1] == '/' ? 0 : 1;
+    if (separator_len > SIZE_MAX - right_len) return rt_core_nil();
+    if (left_len > SIZE_MAX - right_len - separator_len) return rt_core_nil();
+    size_t joined_len = (size_t)(left_len + right_len + separator_len);
+    uint8_t* joined = (uint8_t*)malloc(joined_len);
+    if (!joined) return rt_core_nil();
+    memcpy(joined, left, (size_t)left_len);
+    if (separator_len) joined[left_len] = '/';
+    memcpy(joined + left_len + separator_len, right, (size_t)right_len);
+    int64_t result = rt_string_new(joined, joined_len);
+    free(joined);
+    return result;
 }
 
 int64_t rt_env_get(const uint8_t* key_ptr, uint64_t key_len) {

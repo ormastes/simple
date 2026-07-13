@@ -435,6 +435,7 @@ void        spl_env_set(const char* key, const char* value);
 bool        rt_env_set(const uint8_t* key, uint64_t key_len, const uint8_t* value, uint64_t value_len);
 const char* rt_platform_name(void);
 int64_t     rt_term_enable_ansi(void);
+int64_t     rt_path_join(const uint8_t* left, uint64_t left_len, const uint8_t* right, uint64_t right_len);
 
 /* ===== Cross-Platform System Functions ===== */
 

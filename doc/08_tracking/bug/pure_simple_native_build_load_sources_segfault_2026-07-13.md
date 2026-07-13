@@ -2,12 +2,13 @@
 
 ## Status
 
-Partially fixed through stage 11. Pure-Simple native-build now passes entry
-closure loading and starts frontend parsing. The stage-8 and stage-10 crashes
-are classified and fixed, but updated Simple/LLVM AOT execution evidence for
-the Engine2D SIMD row scheduler remains blocked by keyword-token
-misclassification followed by a nil AST field access.
-Cross-compiled runtime binaries pass on x86-64, AArch64, and RV64GCV.
+Runtime ABI defects through `rt_path_join` are fixed and covered by the shared
+core ABI probe. Stage 13 reaches native-build cache path construction, but an
+updated pure-Simple compiler could not be produced in stage 14 because all
+three bounded seed/worker entry variants stalled before native object discovery.
+Cross-compiled runtime binaries pass on x86-64, AArch64, and RV64GCV; updated
+Simple/LLVM AOT execution evidence for the Engine2D SIMD row scheduler remains
+blocked on the bootstrap-dispatch stall.
 
 ## Reproducer
 
@@ -153,3 +154,28 @@ the four-argument raw-text ABI, but the C runtime does not. The third-cycle cap
 stopped further fixes/rebuilds. The next continuation should add C
 `rt_path_join` with path-join ABI coverage, rebuild from the preserved cache,
 prove the minimal program, and then rerun the unchanged SIMD probe.
+
+## Stage-14 evidence
+
+The C runtime now implements the four-argument raw-text `rt_path_join` ABI with
+the same valid-input, byte-oriented POSIX behavior as simple-core: an absolute
+right path replaces the left path, empty sides copy the other side, and
+relative paths gain exactly one separator. The shared core ABI probe covers
+relative, absolute, empty-side, and trailing-separator joins; its core-C lane
+passes, and the same source runs against simple-core when an ABI-complete archive
+is available. A fresh bootstrap-profile Rust seed/runtime build also passes.
+
+Three bounded pure-Simple rebuild variants were attempted with the preserved
+`build/bootstrap-simd-stage5/cache`: direct `native-build`, the dedicated
+`native_build_main.spl` entry, and direct `native-build` after refreshing the
+seed with `SIMPLE_BOOTSTRAP=1`. Each loaded the Simple compiler graph, then
+stalled before native object discovery at about one CPU core and 1.22-1.27 GB
+RSS. No output binary or new cache object was produced, so each attempt was
+terminated rather than waiting for the redundant 900-second timeout. The
+mandatory three-cycle cap prevents another rebuild in this session.
+
+The next continuation should diagnose why current seed dispatch no longer
+reaches the cached native-build worker path that produced stages 12 and 13.
+Keep `build/bootstrap-simd-stage5/cache`, do not rerun an unchanged entry path,
+and resume the unchanged LLVM SIMD probe only after a new pure-Simple compiler
+artifact is produced.

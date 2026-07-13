@@ -1095,6 +1095,22 @@ int main(void) {
     int64_t empty_words = rt_slice((int64_t)(uintptr_t)words_joined, 0, 0, 1);
     if (!rt_typed_words_u64_push((SplArray*)(uintptr_t)empty_words, 0x100000001LL) ||
         rt_typed_words_u64_at((SplArray*)(uintptr_t)empty_words, 0) != 0x100000001LL) return 52;
+    int64_t joined_path = rt_path_join((const uint8_t*)"/tmp/cache", 10, (const uint8_t*)"object", 6);
+    if (rt_string_len(joined_path) != 17 ||
+        memcmp(rt_string_data(joined_path), "/tmp/cache/object", 17) != 0) return 53;
+    int64_t absolute_path = rt_path_join((const uint8_t*)"/tmp/cache", 10, (const uint8_t*)"/etc/config", 11);
+    if (rt_string_len(absolute_path) != 11 ||
+        memcmp(rt_string_data(absolute_path), "/etc/config", 11) != 0) return 54;
+    int64_t empty_right_path = rt_path_join((const uint8_t*)"/tmp/cache/", 11, NULL, 0);
+    if (rt_string_len(empty_right_path) != 11 ||
+        memcmp(rt_string_data(empty_right_path), "/tmp/cache/", 11) != 0) return 55;
+    int64_t empty_left_path = rt_path_join((const uint8_t*)"", 0, (const uint8_t*)"object", 6);
+    if (rt_string_len(empty_left_path) != 6 ||
+        memcmp(rt_string_data(empty_left_path), "object", 6) != 0) return 56;
+    int64_t single_separator_path = rt_path_join((const uint8_t*)"/tmp/cache/", 11, (const uint8_t*)"object", 6);
+    if (rt_string_len(single_separator_path) != 17 ||
+        memcmp(rt_string_data(single_separator_path), "/tmp/cache/object", 17) != 0) return 57;
+    if (rt_string_new((const uint8_t*)"x", UINT64_MAX) != rt_value_nil()) return 58;
     int64_t out = rt_string_new((const uint8_t*)"out:", 4);
     int64_t err = rt_string_new((const uint8_t*)"err", 3);
     rt_stdout_write(out);
