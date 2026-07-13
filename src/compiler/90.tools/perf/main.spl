@@ -5,6 +5,7 @@ import io
 import perf.profiler
 import perf.benchmark
 import perf.optimizer
+import perf.trace
 
 fn show_help():
     print "Simple Performance Tools"
@@ -17,6 +18,7 @@ fn show_help():
     print "  benchmark <file>       Run benchmarks"
     print "  optimize <file|dir>    Analyze code and suggest optimizations"
     print "  compare <cur> <base>   Compare benchmark results"
+    print "  trace <out.json>       Profile a demo workload, emit Chrome trace JSON"
     print "  help                   Show this help"
     print ""
     print "Examples:"
@@ -24,6 +26,7 @@ fn show_help():
     print "  simple perf benchmark benchmarks/loops.spl"
     print "  simple perf optimize src/"
     print "  simple perf compare results/current.json results/baseline.json"
+    print "  simple perf trace /tmp/trace.json"
 
 fn cmd_profile(args: List<text>):
     if args.len() < 2:
@@ -118,6 +121,35 @@ fn cmd_compare(args: List<text>):
 
     benchmark.compare_with_baseline(current, baseline)
 
+fn cmd_trace(args: List<text>):
+    if args.len() < 2:
+        print "Error: No output file specified"
+        print "Usage: simple perf trace <out.json>"
+        return
+
+    val out_path = args[1]
+
+    profiler.init_profiler()
+    trace.trace_clear()
+    var prof = profiler.get_profiler()
+    prof.enable()
+
+    # Known workload: manual span wrapping N profiled regions, so the gate
+    # can assert both B/E span events and profiler-fed X (complete) events.
+    trace.trace_begin("demo_workload", "smoke", 0)
+    var acc = 0
+    var i = 0
+    while i < 1000:
+        val start = prof.start_region("compute")
+        acc = acc + i * 2
+        prof.end_region("compute", start)
+        i = i + 1
+    trace.trace_end("demo_workload", "smoke", 0)
+
+    trace.trace_from_profiler(prof)
+    trace.trace_save(out_path)
+    print "acc={acc} events={trace.trace_events_count()}"
+
 fn main():
     val args = rt_get_args()
 
@@ -133,6 +165,7 @@ fn main():
         "benchmark": cmd_benchmark(rest_args)
         "optimize": cmd_optimize(rest_args)
         "compare": cmd_compare(rest_args)
+        "trace": cmd_trace(rest_args)
         "help": show_help()
         _:
             print "Unknown command: {command}"

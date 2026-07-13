@@ -670,6 +670,113 @@ pub fn log_get_level() -> i64:
 fn is_enabled(level: i64, scope: text) -> bool:
     _level_passes(level, subsys_from_scope(scope))
 
+# ---------------------------------------------------------------------------
+# Structured syslog record (RFC5424-ish) — Lane L observability Phase 1.
+#
+# Field layout mirrors RFC5424 positionally (PRI/VERSION, TIMESTAMP,
+# HOSTNAME, APP-NAME, PROCID, MSGID, STRUCTURED-DATA, MSG) but is simplified:
+#   - PRI = facility*8 + level (severity), like RFC5424.
+#   - TIMESTAMP carries raw ts_nanos (not an ISO-8601 string) — "ish".
+#   - HOSTNAME/MSGID are unused ("-"); APP-NAME carries the subsys id.
+#   - STRUCTURED-DATA is "-" or "[k=v,k2=v2]" (comma-, not space-, separated
+#     so the whole record stays parseable with single-space partitioning).
+# Callers own `pid` (e.g. from rt_getpid() in userland, 0 in-kernel) so this
+# module stays free of an OS-specific pid extern.
+# ---------------------------------------------------------------------------
+class SyslogKv:
+    key:   text
+    value: text
+
+    static fn new(key: text, value: text) -> SyslogKv:
+        SyslogKv(key: key, value: value)
+
+class SyslogRecord:
+    ts_nanos: i64
+    level:    i64   # severity (syslog scale, 0=highest)
+    facility: i64
+    pid:      i64
+    subsys:   i64
+    msg:      text
+    kv:       [SyslogKv]
+
+    static fn new(level: i64, facility: i64, pid: i64, subsys: i64, msg: text) -> SyslogRecord:
+        SyslogRecord(
+            ts_nanos: rt_time_now_unix_micros() * 1000,
+            level: level,
+            facility: facility,
+            pid: pid,
+            subsys: subsys,
+            msg: msg,
+            kv: []
+        )
+
+fn syslog_record_with_kv(rec: SyslogRecord, key: text, value: text) -> SyslogRecord:
+    var kv = rec.kv
+    kv.push(SyslogKv.new(key, value))
+    SyslogRecord(
+        ts_nanos: rec.ts_nanos,
+        level: rec.level,
+        facility: rec.facility,
+        pid: rec.pid,
+        subsys: rec.subsys,
+        msg: rec.msg,
+        kv: kv
+    )
+
+fn _syslog_format_sd(kv: [SyslogKv]) -> text:
+    if kv.len() == 0:
+        return "-"
+    var s = "["
+    var i = 0
+    while i < kv.len():
+        if i > 0:
+            s = s + ","
+        s = s + kv[i].key + "=" + kv[i].value
+        i = i + 1
+    s + "]"
+
+fn syslog_format(rec: SyslogRecord) -> text:
+    val pri = rec.facility * 8 + rec.level
+    val sd = _syslog_format_sd(rec.kv)
+    "<{pri}>1 {rec.ts_nanos} - {rec.subsys} {rec.pid} - {sd} {rec.msg}"
+
+fn _syslog_parse_sd(sd: text) -> [SyslogKv]:
+    var result: [SyslogKv] = []
+    if sd == "-" or sd.len() < 2:
+        return result
+    val inner = sd.slice(1, sd.len() - 1)
+    if inner.len() == 0:
+        return result
+    val parts = inner.split(",")
+    var i = 0
+    while i < parts.len():
+        val kvp = parts[i].partition("=")
+        result.push(SyslogKv.new(kvp[0], kvp[2]))
+        i = i + 1
+    result
+
+fn syslog_parse(line: text) -> SyslogRecord:
+    val p1 = line.partition(" ")        # [priver, " ", rest]
+    val p2 = p1[2].partition(" ")       # [ts_nanos, " ", rest]
+    val p3 = p2[2].partition(" ")       # [hostname(-), " ", rest]
+    val p4 = p3[2].partition(" ")       # [subsys, " ", rest]
+    val p5 = p4[2].partition(" ")       # [pid, " ", rest]
+    val p6 = p5[2].partition(" ")       # [msgid(-), " ", rest]
+    val p7 = p6[2].partition(" ")       # [structured-data, " ", msg]
+
+    val pri_str = p1[0].partition("<")[2].partition(">")[0]
+    val pri = pri_str.to_int()
+
+    SyslogRecord(
+        ts_nanos: p2[0].to_int(),
+        level: pri % 8,
+        facility: pri / 8,
+        pid: p5[0].to_int(),
+        subsys: p4[0].to_int(),
+        msg: p7[2],
+        kv: _syslog_parse_sd(p7[0])
+    )
+
 export log, log_dispatch_text, subsys_from_scope
 export debug, error, info, warn, verbose, fatal, log_info, log_get_level, is_enabled
 export parse_level, level_name, set_level, get_global_level
@@ -678,3 +785,4 @@ export SUBSYS_KERN, SUBSYS_VMM, SUBSYS_VFS, SUBSYS_NET, SUBSYS_IRQ
 export SUBSYS_DRIVER_BLOCK, SUBSYS_DRIVER_NET, SUBSYS_DRIVER_INPUT, SUBSYS_DRIVER_GFX
 export SUBSYS_PKG, SUBSYS_CLI, SUBSYS_TEST, SUBSYS_USER_BASE, MAX_SUBSYS, MAX_BACKENDS
 export log_trace, log_debug, log_warn, log_error, log_fatal
+export SyslogKv, SyslogRecord, syslog_format, syslog_parse, syslog_record_with_kv

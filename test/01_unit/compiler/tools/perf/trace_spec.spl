@@ -1,0 +1,70 @@
+"""
+Lane L observability Phase 1 — Chrome Trace Event Format span API.
+
+perf.trace adds trace_begin/trace_end (B/E span events), a generic
+trace_ingest_span() complete-span (X) ingestion hook (feeds the profiler now;
+feeds a kernel scheduler-trace-ring reader once Phase 2 wires it), and
+trace_to_json() emitting the Chrome Trace Event JSON format.
+
+Gate: emit a trace, validate JSON has matching B/E events.
+
+NOTE: imports use the direct `use module.{fns}` form, NOT
+`import module as alias` — under the interpreter the aliased form binds a
+separate module instance per call site, so module-global state (the trace
+event buffer) written through one alias call is invisible to the next
+(trace_events_count() returned 0 right after trace_begin/trace_end pushed 2).
+Direct-import form shares one instance and behaves correctly. Filed as an
+interpreter module-aliasing state bug alongside this lane's work.
+"""
+
+use std.spec
+use compiler.tools.perf.trace.{
+    trace_clear, trace_begin, trace_end, trace_events_count, trace_to_json,
+    trace_ingest_span, trace_from_profiler
+}
+use compiler.tools.perf.profiler.{init_profiler, get_profiler}
+
+describe "chrome trace — begin/end span events":
+
+    it "emits matching B/E events for one span":
+        trace_clear()
+        trace_begin("region_a", "test", 0)
+        trace_end("region_a", "test", 0)
+
+        expect(trace_events_count()).to_equal(2)
+
+        val j = trace_to_json()
+        expect(j.contains("\"ph\":\"B\"")).to_equal(true)
+        expect(j.contains("\"ph\":\"E\"")).to_equal(true)
+        expect(j.contains("\"name\":\"region_a\"")).to_equal(true)
+        expect(j.contains("\"traceEvents\"")).to_equal(true)
+
+    it "emits a complete (X) span with a duration via trace_ingest_span":
+        trace_clear()
+        trace_ingest_span("ingested", "sched", 1000, 5000, 2)
+
+        val j = trace_to_json()
+        expect(trace_events_count()).to_equal(1)
+        expect(j.contains("\"ph\":\"X\"")).to_equal(true)
+        expect(j.contains("\"dur\":4")).to_equal(true)  # (5000-1000)ns / 1000 = 4us
+
+describe "chrome trace — fed from profiler.spl":
+
+    it "trace_from_profiler feeds one X event per profiled region":
+        trace_clear()
+        init_profiler()
+        var prof = get_profiler()
+        prof.enable()
+
+        var i = 0
+        while i < 50:
+            val start = prof.start_region("hot_region")
+            i = i + 1
+            prof.end_region("hot_region", start)
+
+        trace_from_profiler(prof)
+
+        expect(trace_events_count()).to_equal(1)
+        val j = trace_to_json()
+        expect(j.contains("\"name\":\"hot_region\"")).to_equal(true)
+        expect(j.contains("\"ph\":\"X\"")).to_equal(true)
