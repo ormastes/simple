@@ -168,7 +168,7 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
 
     # No precompiled artifact exists. Compile to SMF instead of silently
     # falling back to source execution.
-    run_test_file_native(file_path, options)
+    run_test_file_compile(file_path, options)
 
 fn run_test_file_native_old(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
@@ -258,7 +258,8 @@ fn spipe_rewrite_infix_expect_line(line: text) -> text:
             val expected = trimmed.substring(split_at + needle.len()).trim()
             if actual.len() == 0 or expected.len() == 0:
                 return line
-            val indent_len = line.len() - line.trim_start().len()
+            val line_trimmed_start = line.trim_start()
+            val indent_len = line.len() - line_trimmed_start.len()
             val indent = line.substring(0, indent_len)
             return indent + "expect(" + actual + ")." + matcher + "(" + expected + ")"
         i = i + 1
@@ -327,13 +328,15 @@ fn spipe_rewrite_method_expect_line(line: text) -> text:
     if actual_end < 0:
         return line
     val actual = inner.substring(0, actual_end).trim()
-    val after_actual = inner.substring(actual_end + 1).trim_start()
+    val after_actual_raw = inner.substring(actual_end + 1)
+    val after_actual = after_actual_raw.trim_start()
     if not after_actual.starts_with("."):
         return line
     var negated = false
     var after_neg = after_actual.substring(1)
     if after_neg.starts_with("not_()"):
-        val next = after_neg.substring(6).trim_start()
+        val next_raw = after_neg.substring(6)
+        val next = next_raw.trim_start()
         if not next.starts_with("."):
             return line
         negated = true
@@ -349,7 +352,7 @@ fn spipe_rewrite_method_expect_line(line: text) -> text:
     val arg_str = matcher_args.substring(0, close_idx).trim()
     var form = ""
     if matcher == "to_equal" or matcher == "to_be":
-        form = if negated: actual + " != " + arg_str else: actual + " == " + arg_str
+        form = if negated: "(" + actual + ") != " + arg_str else: "(" + actual + ") == " + arg_str
     elif matcher == "to_be_nil":
         form = if negated: actual + " != nil" else: actual + " == nil"
     elif matcher == "to_be_truthy" or matcher == "to_be_true":
@@ -504,16 +507,6 @@ fn preprocess_spipe_file(file_path: text) -> text:
                 import_brace_depth = delta
             continue
 
-        # Top-level declarations (at column 0 only) stay outside main.
-        if not in_top_fn:
-            val line_indent = line.len() - trimmed.len()
-            if line_indent == 0:
-                if spipe_is_top_level_start(trimmed):
-                    in_top_fn = true
-                    top_fn_indent = 0
-                    top_level_parts.push(line)
-                    continue
-
         # If we're inside a top-level function definition, keep collecting
         # lines until we see a line at the same or lesser indentation (not blank)
         if in_top_fn:
@@ -529,6 +522,14 @@ fn preprocess_spipe_file(file_path: text) -> text:
                 in_top_fn = false
                 # Fall through to body processing
 
+        # Top-level declarations (at column 0 only) stay outside main.
+        val line_indent = line.len() - trimmed.len()
+        if line_indent == 0 and spipe_is_top_level_start(trimmed):
+            in_top_fn = true
+            top_fn_indent = 0
+            top_level_parts.push(line)
+            continue
+
         # Everything else goes into fn main() body
         if trimmed.len() > 0:
             body_parts.push("    " + line)
@@ -540,16 +541,19 @@ fn preprocess_spipe_file(file_path: text) -> text:
     val body = body_parts.join("\n")
     val helpers = if spipe_helpers_used(body, top_level): spipe_inline_helpers() else: ""
     val wrapped = imports + "\n" + helpers + "\n" + top_level + "\nfn main():\n" + body
-    val tmp_path = "/tmp/spipe_wrapped_" + file_path.replace("/", "_")
+    val slash = spipe_last_index_of(file_path, "/")
+    val dir = if slash >= 0: file_path.substring(0, slash + 1) else: ""
+    val base = if slash >= 0: file_path.substring(slash + 1) else: file_path
+    val tmp_path = dir + ".spipe_wrapped_entry_" + base
     file_write(tmp_path, wrapped)
     tmp_path
 
-fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult:
+fn run_test_file_compile(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
     val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
 
-    # Native mode: Compile test file to .smf, then run the .smf
+    # Compile mode: compile test file to .smf, then run the .smf.
     # Step 1: Preprocess SPipe files (wrap in fn main())
     val (wrapped_path, cleanup_path) = build_coverage_wrapper(file_path, options)
     val source_path = preprocess_spipe_file(wrapped_path)
@@ -559,7 +563,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     var compile_args: [text] = ["compile", source_path, "-o", smf_path]
     if options.verbose:
         compile_args.push("--verbose")
-        print "[native] Compiling {file_path} to {smf_path}"
+        print "[compile] Compiling {file_path} to {smf_path}"
 
     val compile_result = process_run_with_limits(binary, compile_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs)
     val compile_stdout = compile_result.stdout
@@ -588,7 +592,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
 
     # Step 3: Run the compiled .smf
     if options.verbose:
-        print "[native] Running {smf_path}"
+        print "[compile] Running {smf_path}"
 
     var run_args: [text] = [smf_path]
     if options.gc_log:
@@ -640,10 +644,89 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
 
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
 
-fn run_test_file_compile(file_path: text, options: TestOptions) -> TestFileResult:
-    """Compile mode: compile test file to .smf and run it.
-    Delegates to run_test_file_native which already does compile-then-run."""
-    run_test_file_native(file_path, options)
+fn cleanup_native_test_artifacts(native_path: text, source_path: text, wrapped_path: text, cleanup_path: text, keep_artifacts: bool):
+    if keep_artifacts:
+        return
+    if file_exists(native_path):
+        file_delete(native_path)
+    if source_path != wrapped_path and file_exists(source_path):
+        file_delete(source_path)
+    if cleanup_path != "" and file_exists(cleanup_path):
+        file_delete(cleanup_path)
+
+fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult:
+    val binary = find_simple_binary()
+    val start = time_now_unix_micros()
+    val timeout_ms = options.timeout * 1000
+    val (wrapped_path, cleanup_path) = build_coverage_wrapper(file_path, options)
+    val source_path = preprocess_spipe_file(wrapped_path)
+    val native_path = file_path + ".native_test"
+
+    var compile_args: [text] = [
+        "native-build",
+        "--backend", "cranelift",
+        "--runtime-bundle", "core-c-bootstrap",
+        "--opt-level", "basic",
+        "--entry-closure",
+        "--source", "src/compiler",
+        "--source", "src/app",
+        "--source", "src/lib",
+        "--source", "src/os",
+        "--entry", source_path,
+        "-o", native_path
+    ]
+    val slash = spipe_last_index_of(source_path, "/")
+    if slash > 0:
+        compile_args.push("--source")
+        compile_args.push(source_path.substring(0, slash))
+    if options.verbose:
+        compile_args.push("--verbose")
+        print "[native] Compiling {file_path} to {native_path}"
+
+    val compile_result = process_run_with_limits(binary, compile_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs)
+    if compile_result.exit_code != 0:
+        val end = time_now_unix_micros()
+        cleanup_native_test_artifacts(native_path, source_path, wrapped_path, cleanup_path, options.keep_artifacts)
+        return TestFileResult(
+            path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: (end - start) / 1000, setup_ms: 0,
+            error: "Native compilation failed: {compile_result.stderr}",
+            timed_out: compile_result.limit_exceeded and compile_result.limit_type.contains("timeout"), cached: false
+        )
+
+    if options.verbose:
+        print "[native] Running {native_path}"
+    var run_args: [text] = []
+    if options.gc_log:
+        run_args.push("--gc-log")
+    if options.gc_off:
+        run_args.push("--gc=off")
+
+    var stdout = ""
+    var stderr = ""
+    var exit_code = 0
+    if (options.max_mem_gb > 0 or options.max_procs > 0) and not options.no_limits:
+        val memory_bytes = if options.max_mem_gb > 0: options.max_mem_gb * 1024 * 1024 * 1024 else: 0
+        val run_result = process_run_with_limits(native_path, run_args, timeout_ms, memory_bytes, 0, 0, options.max_procs)
+        stdout = run_result.stdout
+        stderr = run_result.stderr
+        exit_code = run_result.exit_code
+        if run_result.limit_exceeded:
+            val end = time_now_unix_micros()
+            cleanup_native_test_artifacts(native_path, source_path, wrapped_path, cleanup_path, options.keep_artifacts)
+            return TestFileResult(
+                path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: (end - start) / 1000, setup_ms: 0,
+                error: limit_exceeded_message(run_result, options), timed_out: run_result.limit_type.contains("timeout"), cached: false
+            )
+    else:
+        val (out, err, code) = process_run_timeout(native_path, run_args, timeout_ms)
+        stdout = out
+        stderr = err
+        exit_code = code
+    val end = time_now_unix_micros()
+    cleanup_native_test_artifacts(native_path, source_path, wrapped_path, cleanup_path, options.keep_artifacts)
+    make_result_from_output(file_path, stdout, stderr, exit_code, (end - start) / 1000, options.timeout)
 
 # =========================================================================
 # G1: Safe mode execution with resource limits
@@ -697,4 +780,4 @@ export use std.test_runner.test_executor_parsing.{find_simple_binary, find_simpl
 export use std.test_runner.test_executor_composite.{run_test_file_composite, extract_base_runtime, extract_platform_layer, extract_arch_from_spec, run_test_file_baremetal, run_test_file_remote, run_test_file_baremetal_via_interpreter, run_test_file_baremetal_qemu, find_baremetal_elf, qemu_binary_for_arch, qemu_machine_for_arch}
 
 # Exports from this file
-export run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe
+export run_test_file_interpreter, run_test_file_smf, run_test_file_native_old, run_test_file_native, run_test_file_compile, run_test_file_safe_mode, preprocess_spipe_file

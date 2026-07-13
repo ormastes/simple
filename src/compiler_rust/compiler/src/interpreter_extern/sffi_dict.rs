@@ -8,7 +8,7 @@ use simple_runtime::value::RuntimeValue;
 
 // Import actual SFFI functions from runtime
 use simple_runtime::value::{
-    rt_dict_new, rt_dict_set, rt_dict_get, rt_dict_len, rt_dict_clear, rt_dict_keys, rt_dict_values,
+    rt_dict_clear, rt_dict_contains, rt_dict_get, rt_dict_keys, rt_dict_len, rt_dict_new, rt_dict_set, rt_dict_values,
 };
 
 // ============================================================================
@@ -99,6 +99,33 @@ pub fn rt_dict_get_fn(args: &[Value]) -> Result<Value, CompileError> {
 
     let rv = rt_dict_get(dict, key);
     Ok(Value::Int(rv.to_raw() as i64))
+}
+
+/// Check whether a dictionary contains a key.
+pub fn rt_dict_contains_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let dict_raw = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_dict_contains expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+
+    let key_raw = args
+        .get(1)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_dict_contains expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+
+    let dict = RuntimeValue::from_raw(dict_raw as u64);
+    let key = RuntimeValue::from_raw(key_raw as u64);
+    Ok(Value::Bool(rt_dict_contains(dict, key)))
 }
 
 /// Get dictionary length

@@ -14,6 +14,7 @@
 
 use compiler.mir.mir_data.*
 use compiler.hir.hir_types.*
+use std.alloc.sffi.{rt_dict_contains, rt_dict_keys}
 
 # ============================================================================
 # Async Type Mapping
@@ -278,37 +279,38 @@ class AsyncIntegration:
 
     me analyze_module(module: MirModule):
         """Analyze all functions in a module for async patterns."""
-        for _for_item_0 in module.functions:
-            val name = _for_item_0[0]
-            val func = _for_item_0[1]
+        val function_symbols: [SymbolId] = rt_dict_keys(module.functions)
+        var function_index = 0
+        while function_index < function_symbols.len():
+            val func = module.functions[function_symbols[function_index]]
             val info = analyze_async_function(MirBody.from_function(func))
             if info.has_await or info.has_yield:
-                self.analyzed_functions[name] = info
+                self.analyzed_functions[func.name] = info
+            function_index = function_index + 1
 
     me generate_state_machines():
         """Generate state machines for all async functions."""
-        for _for_item_1 in self.analyzed_functions:
-            val name = _for_item_1[0]
-            val info = _for_item_1[1]
+        val function_names: [text] = rt_dict_keys(self.analyzed_functions)
+        var function_index = 0
+        while function_index < function_names.len():
+            val name = function_names[function_index]
+            val info = self.analyzed_functions[name]
             val sm = generate_state_machine_stub(info)
             self.state_machines[name] = sm
+            function_index = function_index + 1
 
     fn get_async_functions() -> [text]:
         """Get list of async function names."""
-        var names: [text] = []
-        for _for_item_2 in self.analyzed_functions:
-            val name = _for_item_2[0]
-            val _unused_1 = _for_item_2[1]
-            names = names.push(name)
+        val names: [text] = rt_dict_keys(self.analyzed_functions)
         names
 
     fn is_async_function(name: text) -> bool:
         """Check if function is async."""
-        self.analyzed_functions.has(name)
+        rt_dict_contains(self.analyzed_functions, name)
 
     fn get_suspension_point_count(name: text) -> i64:
         """Get suspension point count for a function."""
-        if self.analyzed_functions.has(name):
+        if rt_dict_contains(self.analyzed_functions, name):
             self.analyzed_functions[name].suspension_points
         else:
             0
@@ -320,16 +322,21 @@ class AsyncIntegration:
 fn process_async_mir(modules: Dict<text, MirModule>) -> Dict<text, AsyncStateMachine>:
     """Process MIR modules and generate async state machines."""
     var machines: Dict<text, AsyncStateMachine> = {}
-    for _for_item_3 in modules:
-        val _module_name = _for_item_3[0]
-        val module = _for_item_3[1]
+    val module_names: [text] = rt_dict_keys(modules)
+    var module_index = 0
+    while module_index < module_names.len():
+        val module = modules[module_names[module_index]]
         val integration = AsyncIntegration.create()
         integration.analyze_module(module)
         integration.generate_state_machines()
-        for _for_item_4 in integration.state_machines:
-            val fn_name = _for_item_4[0]
-            val machine = _for_item_4[1]
+        val function_names: [text] = rt_dict_keys(integration.state_machines)
+        var function_index = 0
+        while function_index < function_names.len():
+            val fn_name = function_names[function_index]
+            val machine = integration.state_machines[fn_name]
             machines[fn_name] = machine
+            function_index = function_index + 1
+        module_index = module_index + 1
     machines
 
 # ============================================================================

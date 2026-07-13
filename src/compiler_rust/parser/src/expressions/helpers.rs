@@ -188,20 +188,20 @@ impl<'a> Parser<'a> {
 
                 let mut statements = Vec::new();
                 while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-            // Skip empty lines and same-line statement separators.
-            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Semicolon) {
-                self.advance();
-            }
+                    // Skip empty lines and same-line statement separators.
+                    while self.check(&TokenKind::Newline) || self.check(&TokenKind::Semicolon) {
+                        self.advance();
+                    }
                     if self.check(&TokenKind::Dedent) || self.is_at_end() {
                         break;
                     }
 
                     statements.push(self.parse_item()?);
 
-            // Consume one separator after the statement if present.
-            if self.check(&TokenKind::Newline) || self.check(&TokenKind::Semicolon) {
-                self.advance();
-            }
+                    // Consume one separator after the statement if present.
+                    if self.check(&TokenKind::Newline) || self.check(&TokenKind::Semicolon) {
+                        self.advance();
+                    }
                 }
 
                 if self.check(&TokenKind::Dedent) {

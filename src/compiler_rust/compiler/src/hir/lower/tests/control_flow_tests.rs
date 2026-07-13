@@ -28,8 +28,14 @@ fn test_exists_check_uses_presence_predicate_without_nil_equality() {
     let module = parse_and_lower("fn present(value: i64?) -> bool:\n    return value.?\n").unwrap();
     let repr = format!("{:?}", module.functions[0].body);
 
-    assert!(repr.contains("BuiltinCall") && repr.contains("rt_is_some"), "existence check did not use presence predicate: {repr}");
-    assert!(!repr.contains("NotEq") && !repr.contains("Nil"), "existence check retained generic nil equality: {repr}");
+    assert!(
+        repr.contains("BuiltinCall") && repr.contains("rt_is_some"),
+        "existence check did not use presence predicate: {repr}"
+    );
+    assert!(
+        !repr.contains("NotEq") && !repr.contains("Nil"),
+        "existence check retained generic nil equality: {repr}"
+    );
 }
 
 #[test]
@@ -84,6 +90,30 @@ fn test_match_arm_leading_statements_are_kept() {
     assert!(
         repr.contains("Integer(41)"),
         "match arm `val y = 41` initializer was dropped: {repr}"
+    );
+}
+
+#[test]
+fn test_optional_struct_pattern_binding_preserves_inner_type() {
+    let module = parse_and_lower(
+        "struct Mapping:\n    allocation_id: u64\n    owner_id: u64\n\nfn lookup() -> Mapping?:\n    nil\n\nfn owner() -> u64:\n    match lookup():\n        Some(mapping):\n            return mapping.owner_id\n        None:\n            return 0\n",
+    )
+    .unwrap();
+
+    let owner = module
+        .functions
+        .iter()
+        .find(|function| function.name == "owner")
+        .unwrap();
+    let mapping = owner.locals.iter().find(|local| local.name == "mapping").unwrap();
+    assert!(matches!(
+        module.types.get(mapping.ty),
+        Some(HirType::Struct { name, .. }) if name == "Mapping"
+    ));
+    let owner_body = format!("{:?}", owner.body);
+    assert!(
+        owner_body.contains("rt_enum_payload"),
+        "Some-binding must extract the materialized Option payload: {owner_body}"
     );
 }
 
@@ -223,6 +253,39 @@ fn test_enum_variant_pattern_condition_still_uses_discriminant() {
 }
 
 #[test]
+fn test_multi_field_enum_payload_keeps_array_type() {
+    let source = "enum Payload:\n    Item(text, i64, text)\n\nfn third(value: Payload) -> text:\n    match value:\n        case Payload.Item(_, _, result):\n            return result\n        case _:\n            return \"\"\n";
+    let module = parse_and_lower(source).unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(
+        repr.contains("rt_enum_payload"),
+        "missing enum payload extraction: {repr}"
+    );
+    assert!(repr.contains("Index"), "missing payload field index: {repr}");
+
+    let array_type_is_present = module
+        .types
+        .iter()
+        .any(|(_, ty)| matches!(ty, HirType::Array { element, size: Some(3) } if *element == TypeId::ANY));
+    assert!(
+        array_type_is_present,
+        "multi-field payload receiver was not typed as [any; 3]"
+    );
+
+    let mir = crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed");
+    let mir_repr = format!("{mir:?}");
+    assert!(
+        mir_repr.contains("rt_array_get"),
+        "payload extraction did not use rt_array_get: {mir_repr}"
+    );
+    assert!(
+        !mir_repr.contains("rt_index_get"),
+        "payload extraction retained generic rt_index_get: {mir_repr}"
+    );
+}
+
+#[test]
 fn test_subject_enum_const_variant_beats_unrelated_const_struct() {
     let source = "class Const:\n    value: i64\n\nenum Inst:\n    Const(i64, i64, i64)\n    Other\n\nfn destination(inst: Inst) -> i64:\n    val result = match inst:\n        case Const(dest, _, _):\n            dest\n        case _:\n            -1\n    return result\n";
     let module = parse_and_lower(source).unwrap();
@@ -239,6 +302,23 @@ fn test_subject_enum_const_variant_beats_unrelated_const_struct() {
     assert!(
         repr.contains("rt_enum_payload"),
         "subject-owned Const variant must extract its payload fields: {repr}"
+    );
+}
+
+#[test]
+fn test_if_let_multi_field_enum_payload_uses_array_get() {
+    let source = "enum Payload:\n    Item(text, i64, text)\n\nfn third(value: Payload) -> text:\n    if val Payload.Item(_, _, result) = value:\n        return result\n    return \"\"\n";
+    let module = parse_and_lower(source).unwrap();
+    let mir = crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed");
+    let mir_repr = format!("{mir:?}");
+
+    assert!(
+        mir_repr.contains("rt_array_get"),
+        "if-let payload did not use rt_array_get: {mir_repr}"
+    );
+    assert!(
+        !mir_repr.contains("rt_index_get"),
+        "if-let payload retained generic rt_index_get: {mir_repr}"
     );
 }
 

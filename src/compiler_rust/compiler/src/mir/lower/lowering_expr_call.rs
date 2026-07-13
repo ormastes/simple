@@ -2,6 +2,7 @@
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
 use crate::hir::{DispatchMode, HirExpr, HirExprKind, HirType, TypeId};
+use crate::method_registry::GLOBAL_REGISTRY;
 use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, VReg};
 
@@ -166,6 +167,33 @@ impl<'a> MirLowerer<'a> {
                                 &DispatchMode::Dynamic,
                             );
                         }
+                    }
+                }
+            }
+        }
+
+        if let HirExprKind::Global(name) = &callee.kind {
+            // Standard-library trait defaults may arrive as module-mangled global
+            // aliases. Re-enter normal concrete method lowering when the receiver
+            // is a builtin type; leave all other aliases on the ordinary path.
+            if let Some((_, method)) = GLOBAL_REGISTRY.compatibility_alias(name) {
+                if let Some(receiver) = args.first() {
+                    let receiver_ty = self.recover_receiver_type(receiver).unwrap_or(receiver.ty);
+                    let receiver_type = self
+                        .type_registry
+                        .and_then(|registry| registry.get(receiver_ty))
+                        .and_then(|ty| match ty {
+                            HirType::Array { .. } => Some("Array"),
+                            HirType::Dict { .. } => Some("Dict"),
+                            HirType::Tuple(_) | HirType::LabeledTuple(_) => Some("Tuple"),
+                            HirType::String => Some("String"),
+                            HirType::Struct { name, .. } if name == "String" || name == "text" || name == "str" => {
+                                Some("String")
+                            }
+                            _ => None,
+                        });
+                    if receiver_type.is_some_and(|type_name| GLOBAL_REGISTRY.has_method(type_name, method)) {
+                        return self.lower_method_call_expr(receiver, method, &args[1..], &DispatchMode::Static);
                     }
                 }
             }

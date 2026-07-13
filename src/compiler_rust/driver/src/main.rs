@@ -223,16 +223,38 @@ fn test_should_use_single_runner(args: &[String]) -> bool {
 }
 
 fn test_should_use_light_daemon_client(args: &[String]) -> bool {
-    args.iter()
-        .skip(1)
-        .any(|arg| !arg.starts_with('-') && arg.ends_with(".spl"))
+    test_requests_interpreter_mode(args)
+        && args
+            .iter()
+            .skip(1)
+            .any(|arg| !arg.starts_with('-') && arg.ends_with(".spl"))
+}
+
+fn test_requests_interpreter_mode(args: &[String]) -> bool {
+    let mut i = 1;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--compile" {
+            return false;
+        }
+        if arg == "--mode" && i + 1 < args.len() {
+            return args[i + 1] == "interpreter";
+        }
+        if let Some(mode) = arg.strip_prefix("--mode=") {
+            return mode == "interpreter";
+        }
+        if let Some(mode) = arg.strip_prefix("--compile=") {
+            return mode == "interpreter";
+        }
+        i += 1;
+    }
+    true
 }
 
 /// True for cross-target executable builds owned by the Rust handler.
 fn native_build_wants_cross_target(args: &[String]) -> bool {
     let args = &args[1..];
-    args.iter().any(|a| a == "--target" || a.starts_with("--target="))
-        && !args.iter().any(|a| a == "--emit-object")
+    args.iter().any(|a| a == "--target" || a.starts_with("--target=")) && !args.iter().any(|a| a == "--emit-object")
 }
 
 fn native_build_rust_override(value: Option<&str>) -> bool {
@@ -1645,18 +1667,22 @@ mod tests {
 
     #[test]
     fn cross_target_object_emission_stays_on_simple_path() {
-        let executable = ["native-build", "--target=aarch64-unknown-linux-gnu"]
-            .map(str::to_string);
-        let object = [
-            "native-build",
-            "--target",
-            "riscv64-unknown-linux-gnu",
-            "--emit-object",
-        ]
-        .map(str::to_string);
+        let executable = ["native-build", "--target=aarch64-unknown-linux-gnu"].map(str::to_string);
+        let object = ["native-build", "--target", "riscv64-unknown-linux-gnu", "--emit-object"].map(str::to_string);
 
         assert!(native_build_wants_cross_target(&executable));
         assert!(!native_build_wants_cross_target(&object));
+    }
+
+    #[test]
+    fn explicit_native_test_bypasses_interpreter_only_light_client() {
+        let native = ["test", "memory_spec.spl", "--mode=native"].map(str::to_string);
+        let compile = ["test", "memory_spec.spl", "--compile"].map(str::to_string);
+        let interpreter = ["test", "memory_spec.spl", "--mode=interpreter"].map(str::to_string);
+
+        assert!(!test_should_use_light_daemon_client(&native));
+        assert!(!test_should_use_light_daemon_client(&compile));
+        assert!(test_should_use_light_daemon_client(&interpreter));
     }
 
     #[test]

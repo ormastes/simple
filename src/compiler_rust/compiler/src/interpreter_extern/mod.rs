@@ -1018,6 +1018,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_diagram_trace_return", diagram::rt_diagram_trace_return);
     insert_simple!("rt_dict_clear", sffi_dict::rt_dict_clear_fn);
+    insert_simple!("rt_dict_contains", sffi_dict::rt_dict_contains_fn);
     insert_simple!("rt_dict_get", sffi_dict::rt_dict_get_fn);
     insert_simple!("rt_dict_keys", sffi_dict::rt_dict_keys_fn);
     insert_simple!("rt_dict_len", sffi_dict::rt_dict_len_fn);

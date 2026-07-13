@@ -200,16 +200,16 @@ impl LlvmBackend {
             let ptr_bits = builder
                 .build_and(value, i64_type.const_int(!7u64, false), "array_len_ptr_bits")
                 .map_err(|e| crate::error::factory::llvm_build_failed("array len ptr bits", &e))?;
-            let is_nil = builder
-                .build_int_compare(IntPredicate::EQ, ptr_bits, i64_type.const_zero(), "array_len_is_nil")
-                .map_err(|e| crate::error::factory::llvm_build_failed("array len nil check", &e))?;
-            let load_block = self.context_ref().append_basic_block(function, "array_len_load");
+            let is_null = builder
+                .build_int_compare(IntPredicate::EQ, ptr_bits, i64_type.const_zero(), "array_len_is_null")
+                .map_err(|e| crate::error::factory::llvm_build_failed("array len null check", &e))?;
+            let len_block = self.context_ref().append_basic_block(function, "array_len_load");
             let done_block = self.context_ref().append_basic_block(function, "array_len_done");
             builder
-                .build_conditional_branch(is_nil, done_block, load_block)
-                .map_err(|e| crate::error::factory::llvm_build_failed("array len nil branch", &e))?;
+                .build_conditional_branch(is_null, done_block, len_block)
+                .map_err(|e| crate::error::factory::llvm_build_failed("array len null branch", &e))?;
 
-            builder.position_at_end(load_block);
+            builder.position_at_end(len_block);
             let object_ptr = builder
                 .build_int_to_ptr(ptr_bits, ptr_type, "array_len_object_ptr")
                 .map_err(|e| crate::error::factory::llvm_build_failed("array len int_to_ptr", &e))?;
@@ -233,7 +233,8 @@ impl LlvmBackend {
             let phi = builder
                 .build_phi(i64_type, "array_len_inline")
                 .map_err(|e| crate::error::factory::llvm_build_failed("array len phi", &e))?;
-            phi.add_incoming(&[(&i64_type.const_zero(), current_block), (&len, loaded_block)]);
+            let zero = i64_type.const_zero();
+            phi.add_incoming(&[(&zero, current_block), (&len, loaded_block)]);
             vreg_map.insert(dest, phi.as_basic_value());
             return Ok(true);
         }

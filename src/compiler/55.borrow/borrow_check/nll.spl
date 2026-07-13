@@ -13,6 +13,7 @@
 
 use compiler.borrow.borrow_check.lifetime.*
 use compiler.borrow.borrow_check.borrow_graph.*
+use std.alloc.sffi.{rt_dict_contains, rt_dict_keys}
 
 # ============================================================================
 # Control Flow Graph
@@ -87,17 +88,21 @@ class ControlFlowGraph:
 
     me compute_predecessors():
         """Compute predecessor edges from successor edges."""
-        for id in self.blocks.keys():
+        val block_ids: [i64] = rt_dict_keys(self.blocks)
+        var block_index = 0
+        while block_index < block_ids.len():
+            val id = block_ids[block_index]
             val block = self.blocks[id]
             for succ_id in block.successors:
-                if self.blocks.has(succ_id):
+                if rt_dict_contains(self.blocks, succ_id):
                     var succ_block = self.blocks[succ_id]
                     succ_block.predecessors = succ_block.predecessors.push(id)
                     self.blocks[succ_id] = succ_block
+            block_index = block_index + 1
 
     fn get_block(id: i64) -> BasicBlock:
         """Get a block by ID."""
-        if self.blocks.has(id):
+        if rt_dict_contains(self.blocks, id):
             return self.blocks[id]
         BasicBlock.create(id)
 
@@ -123,7 +128,7 @@ class ControlFlowGraph:
 
         visited = visited.push(block_id)
 
-        if self.blocks.has(block_id):
+        if rt_dict_contains(self.blocks, block_id):
             val block = self.blocks[block_id]
             for succ_id in block.successors:
                 self.dfs_postorder(succ_id, visited, order)
@@ -184,9 +189,13 @@ class LivenessAnalysis:
         var live_out: Dict<i64, [i64]> = {}
 
         # Initialize
-        for id in self.cfg.blocks.keys():
+        val block_ids: [i64] = rt_dict_keys(self.cfg.blocks)
+        var init_index = 0
+        while init_index < block_ids.len():
+            val id = block_ids[init_index]
             live_in[id] = []
             live_out[id] = []
+            init_index = init_index + 1
 
         # Fixed-point iteration (backward)
         var changed = true
@@ -197,7 +206,9 @@ class LivenessAnalysis:
             changed = false
             iterations = iterations + 1
 
-            for id in self.cfg.blocks.keys():
+            var block_index = 0
+            while block_index < block_ids.len():
+                val id = block_ids[block_index]
                 val block = self.cfg.blocks[id]
                 # Compute live_out from successors
                 var new_out: [i64] = []
@@ -226,6 +237,7 @@ class LivenessAnalysis:
 
                 live_in[id] = new_in
                 live_out[id] = new_out
+                block_index = block_index + 1
 
         LivenessResult(live_in: live_in, live_out: live_out)
 
@@ -355,7 +367,7 @@ class NLLChecker:
 
     me check_block(block_id: i64, liveness: LivenessResult):
         """Check a single basic block."""
-        if not self.cfg.blocks.has(block_id):
+        if not rt_dict_contains(self.cfg.blocks, block_id):
             return
         val block = self.cfg.get_block(block_id)
         # Propagate borrows from predecessors

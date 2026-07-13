@@ -1386,36 +1386,48 @@ int         rt_file_fsync(const char* path) {
 int         rt_file_fsync_cached(const char* path) {
     return rt_file_fsync(path);
 }
-int         rt_file_sync(const char* path) {
+int         rt_file_sync(const char* path, int64_t path_len) {
+    (void)path_len;
     return rt_file_fsync(path);
 }
-int64_t     rt_crc32_text(const char* text) {
-    if (!text) return 0;
+int64_t     rt_crc32_text(const char* text, int64_t text_len) {
+    if (!text || text_len <= 0) return 0;
     uint32_t crc = 0xFFFFFFFF;
     const uint8_t* p = (const uint8_t*)text;
-    while (*p) {
-        crc ^= *p++;
+    for (int64_t i = 0; i < text_len; i++) {
+        crc ^= p[i];
         for (int i = 0; i < 8; i++)
             crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
     }
     return (int64_t)(crc ^ 0xFFFFFFFF);
 }
 
-int         rt_file_create_excl(const char* path, const char* content) {
-    if (!path) return 0;
-    int fd = open(path, O_CREAT | O_EXCL | O_WRONLY, 0644);
-    if (fd < 0) return 0;
-    if (content) {
-        size_t len = strlen(content);
-        if (len > 0) {
-            ssize_t w = write(fd, content, len);
-            if (w < 0 || (size_t)w != len) {
-                close(fd);
-                return 0;
-            }
-        }
+int         rt_file_create_excl(const char* path, int64_t path_len,
+                                const char* content, int64_t content_len) {
+    if (!path || path_len <= 0 || (uint64_t)path_len >= SIZE_MAX ||
+        memchr(path, '\0', (size_t)path_len) != NULL || content_len < 0 ||
+        (content_len > 0 && !content)) return 0;
+    char* path_copy = (char*)malloc((size_t)path_len + 1);
+    if (!path_copy) return 0;
+    memcpy(path_copy, path, (size_t)path_len);
+    path_copy[path_len] = '\0';
+    int fd = open(path_copy, O_CREAT | O_EXCL | O_WRONLY, 0644);
+    if (fd < 0) {
+        free(path_copy);
+        return 0;
     }
-    close(fd);
+    int ok = 1;
+    if (content && content_len > 0) {
+        ssize_t w = write(fd, content, (size_t)content_len);
+        if (w < 0 || w != content_len) ok = 0;
+    }
+    if (close(fd) != 0) ok = 0;
+    if (!ok) {
+        remove(path_copy);
+        free(path_copy);
+        return 0;
+    }
+    free(path_copy);
     return 1;
 }
 

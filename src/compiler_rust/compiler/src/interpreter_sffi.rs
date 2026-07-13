@@ -835,7 +835,15 @@ mod tests {
 
     #[test]
     fn interp_call_dispatches_plain_io_externs() {
-        for name in ["print", "print_raw", "eprint", "eprint_raw", "dprint", "println", "eprintln"] {
+        for name in [
+            "print",
+            "print_raw",
+            "eprint",
+            "eprint_raw",
+            "dprint",
+            "println",
+            "eprintln",
+        ] {
             assert!(interp_call_uses_extern_dispatch(name), "{name}");
         }
         assert!(!interp_call_uses_extern_dispatch("user_function"));

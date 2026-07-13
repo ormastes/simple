@@ -996,7 +996,7 @@ impl Lowerer {
     /// the whole-program import map (called without a `use` import). Such calls
     /// otherwise have no return-type info, so their result is ANY and field
     /// access on the result fails ("cannot infer field type, struct 'ANY'").
-    /// We resolve each function's declared named return type now that all
+    /// We resolve each function's declared return type now that all
     /// imported types (and `global_struct_defs`) are available.
     /// ADDITIVE: only fills entries that are missing or ANY, and only when the
     /// return type resolves to a concrete type — never downgrades.

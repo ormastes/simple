@@ -228,10 +228,16 @@ pub fn rt_cranelift_data_addr_in_func(args: &[Value]) -> Result<Value, CompileEr
 }
 
 pub fn rt_cranelift_function_addr_in_func(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 3 { return Ok(Value::Int(0)); }
-    let value = unsafe { cranelift_sffi::rt_cranelift_function_addr_in_func(
-        value_to_i64(&args[0]), value_to_i64(&args[1]), value_to_i64(&args[2])
-    ) };
+    if args.len() < 3 {
+        return Ok(Value::Int(0));
+    }
+    let value = unsafe {
+        cranelift_sffi::rt_cranelift_function_addr_in_func(
+            value_to_i64(&args[0]),
+            value_to_i64(&args[1]),
+            value_to_i64(&args[2]),
+        )
+    };
     Ok(Value::Int(value))
 }
 
@@ -700,9 +706,13 @@ pub fn rt_cranelift_call_args_clear(args: &[Value]) -> Result<Value, CompileErro
 }
 
 pub fn rt_cranelift_call_arg(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 { return Ok(Value::Bool(false)); }
+    if args.len() < 2 {
+        return Ok(Value::Bool(false));
+    }
     Ok(Value::Bool(cranelift_sffi::rt_cranelift_call_arg(
-        value_to_i64(&args[0]), value_to_i64(&args[1]))))
+        value_to_i64(&args[0]),
+        value_to_i64(&args[1]),
+    )))
 }
 
 /// Call a function

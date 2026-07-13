@@ -338,6 +338,10 @@ case "${jobs}" in
     ;;
 esac
 echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus})"
+selfhost_jobs="${jobs}"
+if [ "${selfhost_jobs}" -gt 2 ]; then
+  selfhost_jobs=2
+fi
 
 native_cache_dir="${output_dir}/native_cache"
 native_cache_stamp="${native_cache_dir}/bootstrap-wide-inputs.sha256"
@@ -345,9 +349,12 @@ native_cache_freshened=0
 
 bootstrap_wide_inputs_hash() {
   {
-    # Source-level invalidation belongs to the native-build cache, which
-    # fingerprints each module. This stamp covers only build-wide context.
+    # Module fingerprints cover source edits, but unchanged modules must also
+    # be rebuilt when the compiler/runtime that emits their objects changes.
     printf 'platform=%s backend=%s mode=%s stub_fallback=forbidden\n' "${PLATFORM}" "${backend}" "${bootstrap_mode}"
+    printf 'seed-inputs=%s\n' "${seed_inputs_fingerprint:-missing}"
+    find src/compiler -name '*.spl' -type f -print 2>/dev/null \
+      | LC_ALL=C sort | hash_path_list
     env | LC_ALL=C sort | awk '/^SIMPLE_.*(AOP|MDSOC|WEAV|LOAD|INTERPRET|EXECUTION|LIB|NATIVE_BUILD)/ { print }'
   } | hash_stream
 }
@@ -438,14 +445,17 @@ bootstrap_native_build_main() {
   env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_BOOTSTRAP_STAGE4=1 \
+    SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_BINARY="$(absolute_path "${compiler}")" \
     "${compiler}" native-build \
+    --target "${PLATFORM}" \
     --backend "${backend}" \
+    --runtime-bundle rust-hosted \
     --source src/compiler --source src/app --source src/lib --source examples/10_tooling \
     --entry-closure \
-    --threads "${jobs}" \
+    --threads "${selfhost_jobs}" \
     --cache-dir "${native_cache_dir}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/main.spl \
@@ -520,8 +530,9 @@ fi
 # Content-hash staleness gate (see seed_inputs_hash above). Runs here so the
 # backend/features are final before they enter the fingerprint. If the seed or
 # runtime library is missing, the cargo branch below rebuilds regardless.
+seed_inputs_fingerprint=$(seed_inputs_hash)
 if [ -x "${seed_bin}" ] && [ -f "${native_all_lib}" ]; then
-  if [ ! -f "${seed_stamp}" ] || [ "$(cat "${seed_stamp}" 2>/dev/null)" != "$(seed_inputs_hash)" ]; then
+  if [ ! -f "${seed_stamp}" ] || [ "$(cat "${seed_stamp}" 2>/dev/null)" != "${seed_inputs_fingerprint}" ]; then
     seed_stale=1
     if [ "${full_bootstrap}" -eq 1 ]; then
       echo "Seed/runtime stale (Rust source content changed since last build). Full bootstrap will rebuild Rust."
@@ -629,12 +640,16 @@ else
   rm -f "${stage2_bin}" "${stage3_bin}"
   set +e
   env RUST_LOG="${RUST_LOG:-error}" \
+    SIMPLE_BOOTSTRAP=1 \
+    SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_NATIVE_BUILD_RUST=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_BINARY="$(absolute_path "${seed_bin}")" \
     "${seed_bin}" native-build \
+    --target "${PLATFORM}" \
     --backend "${backend}" \
+    --runtime-bundle rust-hosted \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${jobs}" \
@@ -677,16 +692,20 @@ else
   set +e
   [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ] && \
   env RUST_LOG="${RUST_LOG:-error}" \
+    SIMPLE_BOOTSTRAP=1 \
+    SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_NATIVE_BUILD_RUST=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_BINARY="$(absolute_path "${stage2_bin}")" \
     "${stage2_bin}" native-build \
+    --target "${PLATFORM}" \
     --backend "${backend}" \
+    --runtime-bundle rust-hosted \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
-    --threads "${jobs}" \
+    --threads "${selfhost_jobs}" \
     --cache-dir "${native_cache_dir}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/bootstrap_main.spl \
@@ -720,6 +739,43 @@ else
     else
       echo "  warning: stage3 self-host failed (exit ${stage3_status}); Stage 4 unavailable"
     fi
+  fi
+
+  stage2_capability_ok=0
+  stage2_capability_bin="${output_dir}/stage2-capability-${PLATFORM}${exe_suffix}"
+  stage2_capability_cache="${output_dir}/stage2-capability-cache"
+  rm -f "${stage2_capability_bin}"
+  if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
+    set +e
+    env SIMPLE_BOOTSTRAP=1 \
+      SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1 \
+      SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+      "${stage2_bin}" native-build \
+      --target "${PLATFORM}" \
+      --backend cranelift \
+      --source src/compiler --source src/app --source src/lib \
+      --entry-closure \
+      --threads 1 \
+      --cache-dir "${stage2_capability_cache}" \
+      --mode "${bootstrap_mode}" \
+      --entry test/04_smoke/windows_native_hello.spl \
+      --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
+      -o "${stage2_capability_bin}" \
+      >"${log_dir}/stage2-capability.log" 2>&1
+    stage2_capability_status=$?
+    set -e
+    if [ "${stage2_capability_status}" -eq 0 ] && [ -x "${stage2_capability_bin}" ]; then
+      if stage2_capability_output="$(run_timeout 30 "${stage2_capability_bin}" 2>/dev/null)"; then
+        if [ "${stage2_capability_output}" = "windows native hello" ]; then
+          stage2_capability_ok=1
+          echo "  Stage 2 native-build capability passed"
+        fi
+      fi
+    fi
+  fi
+  if [ "${stage2_capability_ok}" -ne 1 ]; then
+    echo "  warning: Stage 2 native-build capability failed; using seed for stage 4" >&2
+    echo "  warning: see ${log_dir}/stage2-capability.log" >&2
   fi
 fi
 
@@ -756,9 +812,14 @@ if [ "${stage3_ok:-0}" -eq 1 ] && [ -x "${stage3}" ]; then
     stage_for_build="${stage3}"
   fi
 else
-  echo "Stage 3 unavailable — no verified compiler for Stage 4"
-  stage_for_build=""
-  stage4_is_seed=1
+  if [ "${stage2_capability_ok:-0}" -eq 1 ] && [ -x "${stage2}" ]; then
+    echo "Stage 3 unavailable — using capability-verified Stage 2 for stage 4"
+    stage_for_build="${stage2}"
+  else
+    echo "Stage 3 unavailable — no verified compiler for Stage 4"
+    stage_for_build=""
+    stage4_is_seed=1
+  fi
 fi
 
 # Fast iteration stops after the pure-Simple dynload stages. Relinking the
@@ -807,7 +868,8 @@ fi
 # `-c` can succeed by delegating to the sibling Rust seed even when the newly
 # linked full CLI cannot read or compile source files itself. MCP/LSP startup
 # needs the latter, so reject such candidates before deployment.
-if ! run_timeout 60 "${full_bin}" check src/app/cli/bootstrap_main.spl >/dev/null 2>&1; then
+if ! run_timeout 60 env SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
+    "${full_bin}" check src/app/cli/bootstrap_main.spl >/dev/null 2>&1; then
   echo "error: stage4 binary failed source-check smoke (MCP/LSP would not start)" >&2
   exit 1
 fi
@@ -927,20 +989,13 @@ if [ "${deploy}" -eq 1 ]; then
     [ "${out}" = "2" ]
   }
   seed_delegate="${deploy_dir}/simple_seed${exe_suffix}"
-  if ! seed_probe "${seed_delegate}"; then
-    seed_src=""
-    for cand in src/compiler_rust/target/bootstrap/simple \
-                src/compiler_rust/target/release/simple; do
-      if seed_probe "${cand}"; then seed_src="${cand}"; break; fi
-    done
-    if [ -z "${seed_src}" ]; then
-      echo "ERROR: deploy refused — no working seed driver for ${seed_delegate}." >&2
-      echo "  Build one first: scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy" >&2
-      exit 1
-    fi
-    install -m755 "${seed_src}" "${seed_delegate}"
-    echo "Installed probed seed delegate: ${seed_src} -> ${seed_delegate}"
+  seed_src="${full_dir}/simple_seed${exe_suffix}"
+  if ! seed_probe "${seed_src}"; then
+    echo "ERROR: deploy refused — current seed driver failed smoke test: ${seed_src}." >&2
+    exit 1
   fi
+  install -m755 "${seed_src}" "${seed_delegate}"
+  echo "Installed current seed delegate: ${seed_src} -> ${seed_delegate}"
 
   deployed_bin="${deploy_dir}/simple${exe_suffix}"
   prev_bin="${deploy_dir}/simple${exe_suffix}.pre_deploy"

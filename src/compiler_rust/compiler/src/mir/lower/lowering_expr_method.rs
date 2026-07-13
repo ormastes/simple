@@ -33,6 +33,7 @@ impl<'a> MirLowerer<'a> {
         let registry = self.type_registry?;
         match registry.get(ty) {
             Some(HirType::Array { .. }) => Some("Array"),
+            Some(HirType::Dict { .. }) => Some("Dict"),
             Some(HirType::Tuple(_) | HirType::LabeledTuple(_)) => Some("Tuple"),
             _ => None,
         }

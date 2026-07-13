@@ -16,6 +16,7 @@ use compiler.backend.llvm_type_mapper.LlvmTypeMapper
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
+use std.alloc.sffi.{rt_dict_contains, rt_dict_keys, rt_dict_values}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -165,7 +166,8 @@ impl MirTextCodegen for MirToLlvm:
                 print "[llvm-translate] function-done"
                 bootstrap_fni = bootstrap_fni + 1
         else:
-            for fn_ in module.functions.values():
+            val functions: [MirFunction] = rt_dict_values(module.functions)
+            for fn_ in functions:
                 val body = MirBody.from_function(llvm_bootstrap_ssa_function(fn_))
                 val fn_name = self.llvm_function_symbol_name(fn_.name)
                 val ret_ty = self.llvm_type_text(body.return_ty)
@@ -176,7 +178,7 @@ impl MirTextCodegen for MirToLlvm:
                 self.remember_function_return_unsigned(fn_name, ret_unsigned)
                 self.remember_function_param_types_from_signature(fn_.name, fn_.signature)
                 self.remember_function_param_types_from_signature(fn_name, fn_.signature)
-            for fn_ in module.functions.values():
+            for fn_ in functions:
                 val body = MirBody.from_function(llvm_bootstrap_ssa_function(fn_))
                 val fn_name = self.llvm_function_symbol_name(fn_.name)
                 self.translate_function(fn_name, body)
@@ -184,13 +186,14 @@ impl MirTextCodegen for MirToLlvm:
         if self.unknown_func_decls.len() > 0:
             self.builder.emit("")
             self.builder.emit("; External call declarations")
-            for unknown_name in self.unknown_func_decls.keys():
+            val unknown_names: [text] = rt_dict_keys(self.unknown_func_decls)
+            for unknown_name in unknown_names:
                 # rt_* runtime builtins covered by the static runtime-declares
                 # block are registered in defined_func_names; skip those so we
                 # never emit a wrong-signature llc redefinition. Any other
                 # extern (including user-declared rt_* names missing from the
                 # static block) gets the normal auto-declare.
-                if not self.defined_func_names.has(unknown_name):
+                if not rt_dict_contains(self.defined_func_names, unknown_name):
                     self.builder.emit("declare i64 @{unknown_name}(...)")
 
         val bootstrap_string_globals = if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
@@ -530,11 +533,8 @@ impl MirTextCodegen for MirToLlvm:
 
     me value_as_type(value: text, from_ty: text, to_ty: text) -> text:
         var src_ty = self.valid_llvm_type(from_ty)
-        # POSITIVE `.?` form only (see get_local_type): Option-match on
-        # Dict.get mis-dispatches under the seed interpreter.
-        val maybe_actual_ty = self.value_types.get(value)
-        if maybe_actual_ty.?:
-            src_ty = self.valid_llvm_type(maybe_actual_ty.unwrap())
+        if rt_dict_contains(self.value_types, value):
+            src_ty = self.valid_llvm_type(self.value_types[value])
         val dst_ty = self.valid_llvm_type(to_ty)
         if src_ty == dst_ty:
             return self.ret_value_for_type(dst_ty, value)
@@ -643,7 +643,7 @@ impl MirTextCodegen for MirToLlvm:
                             if self.current_function_name == "_start":
                                 self.builder.emit("  unreachable")
                                 return
-                            if self.return_locals.has(return_local_id) or not self.local_types.has(return_local_id):
+                            if rt_dict_contains(self.return_locals, return_local_id) or not rt_dict_contains(self.local_types, return_local_id):
                                 self.builder.emit_ret(self.current_return_type, self.ret_value_for_type(self.current_return_type, "0"))
                                 return
                         case _:
@@ -827,9 +827,8 @@ impl MirTextCodegen for MirToLlvm:
         # including translate_call's override, writes it), so prefer it when
         # present; only fall back to the sticky flags via `get_local_type`
         # when local_types has no entry to consult.
-        val recorded_src_ty = self.local_types.get(src_id)
-        var ty = if recorded_src_ty.? and recorded_src_ty.unwrap() != nil and recorded_src_ty.unwrap() != "nil" and recorded_src_ty.unwrap() != "":
-            self.valid_llvm_type(recorded_src_ty.unwrap())
+        var ty = if rt_dict_contains(self.local_types, src_id) and self.local_types[src_id] != nil and self.local_types[src_id] != "nil" and self.local_types[src_id] != "":
+            self.valid_llvm_type(self.local_types[src_id])
         else:
             self.valid_llvm_type(self.get_local_type(src_id))
         # Bug (nested-array/dict handle unbox): a destination local PRIMED
@@ -1114,9 +1113,9 @@ impl MirTextCodegen for MirToLlvm:
             var arg_ty = self.valid_llvm_type(maybe_arg_ty)
             match arg.kind:
                 case Copy(local) | Move(local):
-                    if self.bool_locals.has(self.local_id_value(local)):
+                    if rt_dict_contains(self.bool_locals, self.local_id_value(local)):
                         arg_ty = "i1"
-                    if self.ptr_locals.has(self.local_id_value(local)):
+                    if rt_dict_contains(self.ptr_locals, self.local_id_value(local)):
                         arg_ty = "ptr"
                 case _:
                     ()
@@ -1265,9 +1264,9 @@ impl MirTextCodegen for MirToLlvm:
         Only a local with NO declared type at all (truly malformed MIR)
         still falls back to `undef` so LLVM stays valid.
         """
-        if self.defined_locals.get(id).?:
+        if rt_dict_contains(self.defined_locals, id):
             return self.get_local(id)
-        if self.ptr_locals.get(id).? or self.bool_locals.get(id).? or self.local_types.get(id).?:
+        if rt_dict_contains(self.ptr_locals, id) or rt_dict_contains(self.bool_locals, id) or rt_dict_contains(self.local_types, id):
             return self.get_local(id)
         # ponytail: malformed MIR (no declared local at all) lowers to
         # `undef` so LLVM stays valid.
@@ -1275,22 +1274,19 @@ impl MirTextCodegen for MirToLlvm:
 
     fn get_local_type(id: i64) -> text:
         """Get LLVM type for a local variable, falling back to native int type."""
-        val maybe_ptr = self.ptr_locals.get(id)
-        if maybe_ptr.?:
+        if rt_dict_contains(self.ptr_locals, id):
             return "ptr"
-        val maybe_bool = self.bool_locals.get(id)
-        if maybe_bool.?:
+        if rt_dict_contains(self.bool_locals, id):
             return "i1"
-        # POSITIVE `.?` form only: `match dict.get(): case Some(ty)/nil`
-        # mis-dispatches under the seed interpreter (same struct-boxed-optional
-        # quirk documented in var_reassign_ssa.spl), returning literal nil for
-        # locals whose type IS tracked -- every caller then fell back to
+        # Use an explicit presence check: optional Dict lookup mis-dispatches
+        # under the seed interpreter (same struct-boxed-optional quirk documented
+        # in var_reassign_ssa.spl), returning literal nil for tracked locals --
+        # every caller then fell back to
         # native_int, which is the root of the "backend does not track local
         # types" #135 symptom family (typed copies emitted as `add i64`,
         # double operands fed to `mul nsw i64`, call args typed nil).
-        val maybe_ty = self.local_types.get(id)
-        if maybe_ty.?:
-            val ty = maybe_ty.unwrap()
+        if rt_dict_contains(self.local_types, id):
+            val ty = self.local_types[id]
             if ty == nil or ty == "nil":
                 self.native_int()
             else:
@@ -1299,24 +1295,18 @@ impl MirTextCodegen for MirToLlvm:
             self.native_int()
 
     fn lookup_function_return_type(func_name: text) -> text:
-        # ponytail: flattened (no nested match-as-expression) -- a nested
-        # `match X.get(y):` inside an outer match arm was observed to silently
-        # skip its `case Some(...)` body under the bootstrap seed's codegen
-        # even when `.has(y)` was true, which fed a raw `nil` into emitted
-        # LLVM IR text (bug #134). Explicit early-returns avoid the nested
-        # match-value-propagation path entirely.
-        val direct = self.function_return_types.get(func_name)
-        if direct.?:
-            val ty = direct.unwrap()
+        # ponytail: explicit presence checks and early returns avoid the seed's
+        # struct-boxed optional match-value propagation bug (#134).
+        if rt_dict_contains(self.function_return_types, func_name):
+            val ty = self.function_return_types[func_name]
             if ty == nil or ty == "nil":
                 return ""
             return ty
         if not func_name.starts_with("@"):
             return ""
         val bare = func_name[1:]
-        val bare_hit = self.function_return_types.get(bare)
-        if bare_hit.?:
-            val bare_ty = bare_hit.unwrap()
+        if rt_dict_contains(self.function_return_types, bare):
+            val bare_ty = self.function_return_types[bare]
             if bare_ty == nil or bare_ty == "nil":
                 return ""
             return bare_ty
@@ -1324,18 +1314,16 @@ impl MirTextCodegen for MirToLlvm:
 
     fn lookup_function_param_type(func_name: text, index: i64) -> text:
         # ponytail: flattened for the same reason as lookup_function_return_type.
-        val direct = self.function_param_types.get(func_name)
-        if direct.?:
-            val param_tys = direct.unwrap()
+        if rt_dict_contains(self.function_param_types, func_name):
+            val param_tys = self.function_param_types[func_name]
             if index < param_tys.len():
                 return param_tys[index]
             return ""
         if not func_name.starts_with("@"):
             return ""
         val bare = func_name[1:]
-        val bare_hit = self.function_param_types.get(bare)
-        if bare_hit.?:
-            val bare_param_tys = bare_hit.unwrap()
+        if rt_dict_contains(self.function_param_types, bare):
+            val bare_param_tys = self.function_param_types[bare]
             if index < bare_param_tys.len():
                 return bare_param_tys[index]
             return ""
@@ -1412,7 +1400,11 @@ impl MirTextCodegen for MirToLlvm:
         """Element type of the alloca slot behind `ptr`, or "" if unknown."""
         match ptr.kind:
             case Copy(local) | Move(local):
-                self.alloca_elem_types.get(self.local_id_value(local)) ?? ""
+                val local_id = self.local_id_value(local)
+                if rt_dict_contains(self.alloca_elem_types, local_id):
+                    self.alloca_elem_types[local_id]
+                else:
+                    ""
             case _:
                 ""
 

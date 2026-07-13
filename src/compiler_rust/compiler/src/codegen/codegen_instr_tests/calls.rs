@@ -1,8 +1,8 @@
 use super::{aot_compiles, aot_compiles_module, aot_object};
 use crate::hir::{BinOp, TypeId};
 use crate::mir::{
-    BlockId, LocalKind, MirFunction, MirInst, MirLiteral, MirLocal, MirModule, MirPattern, PatternBinding, Terminator,
-    UnitOverflowBehavior,
+    BindingStep, BlockId, LocalKind, MirFunction, MirInst, MirLiteral, MirLocal, MirModule, MirPattern, PatternBinding,
+    Terminator, UnitOverflowBehavior,
 };
 
 // =============================================================================
@@ -261,6 +261,28 @@ fn codegen_pattern_bind() {
             binding: PatternBinding {
                 name: "x".to_string(),
                 path: vec![],
+            },
+        });
+        dest
+    }));
+}
+
+#[test]
+fn codegen_pattern_bind_enum_tuple_field() {
+    assert!(aot_compiles("pat_bind_enum_tuple", |f| {
+        let subject = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt {
+            dest: subject,
+            value: 42,
+        });
+        block.instructions.push(MirInst::PatternBind {
+            dest,
+            subject,
+            binding: PatternBinding {
+                name: "field".to_string(),
+                path: vec![BindingStep::EnumPayload, BindingStep::TupleIndex(1)],
             },
         });
         dest

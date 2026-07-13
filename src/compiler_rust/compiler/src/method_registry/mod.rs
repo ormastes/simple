@@ -16,5 +16,5 @@
 mod builtins;
 mod registry;
 
-pub use builtins::{ARRAY_METHODS, DICT_METHODS, STRING_METHODS, BUILTIN_METHODS};
+pub use builtins::{ARRAY_METHODS, COMPATIBILITY_METHOD_ALIASES, DICT_METHODS, STRING_METHODS, BUILTIN_METHODS};
 pub use registry::{MethodRegistry, MethodInfo, RuntimeFn, GLOBAL_REGISTRY};

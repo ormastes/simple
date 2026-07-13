@@ -91,7 +91,9 @@ pub(crate) fn inline_runtime_len_value(
     // Separate blocks so off16 is never loaded on a (possibly smaller) non-dict.
     let spldict_len_block = builder.create_block();
     let other_len_block = builder.create_block();
-    builder.ins().brif(is_spldict, spldict_len_block, &[], other_len_block, &[]);
+    builder
+        .ins()
+        .brif(is_spldict, spldict_len_block, &[], other_len_block, &[]);
     builder.seal_block(len_block);
 
     builder.switch_to_block(spldict_len_block);
@@ -117,17 +119,16 @@ pub(crate) fn inline_runtime_array_len_value(
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(value, ptr_mask);
     let zero = builder.ins().iconst(types::I64, 0);
-    let load_block = builder.create_block();
+    let is_null = builder.ins().icmp_imm(IntCC::Equal, ptr_bits, 0);
+    let len_block = builder.create_block();
     let done_block = builder.create_block();
     builder.append_block_param(done_block, types::I64);
+    builder.ins().brif(is_null, done_block, &[zero], len_block, &[]);
 
-    let is_nil = builder.ins().icmp_imm(IntCC::Equal, ptr_bits, 0);
-    builder.ins().brif(is_nil, done_block, &[zero], load_block, &[]);
-
-    builder.switch_to_block(load_block);
+    builder.switch_to_block(len_block);
     let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
     builder.ins().jump(done_block, &[len]);
-    builder.seal_block(load_block);
+    builder.seal_block(len_block);
 
     builder.switch_to_block(done_block);
     let result = builder.block_params(done_block)[0];

@@ -389,20 +389,6 @@ fn compile_inline_bytes_u8_at<M: Module>(
 
     builder.switch_to_block(load_block);
     let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
-    if trusted_array {
-        let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
-        let packed_byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
-        let packed_value = builder.ins().uextend(types::I64, packed_byte);
-        builder.ins().jump(done_block, &[packed_value]);
-        builder.seal_block(load_block);
-
-        builder.switch_to_block(done_block);
-        let result = builder.block_params(done_block)[0];
-        builder.seal_block(done_block);
-        ctx.vreg_values.insert(*dest, result);
-        return Ok(true);
-    }
-
     let packed_block = builder.create_block();
     let slot_block = builder.create_block();
     let gc_flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);

@@ -200,7 +200,7 @@ pub(super) fn keys_equal(a: RuntimeValue, b: RuntimeValue) -> bool {
 /// Get a value from a dictionary by key
 #[no_mangle]
 pub extern "C" fn rt_dict_get(dict: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
-    let d = as_typed_ptr!(dict, HeapObjectType::Dict, RuntimeDict, RuntimeValue::NIL);
+    let d = as_typed_ptr!(dict, HeapObjectType::Dict, RuntimeDict, rt_array_new(0));
     unsafe {
         let capacity = (*d).capacity;
         if capacity == 0 {
@@ -222,6 +222,41 @@ pub extern "C" fn rt_dict_get(dict: RuntimeValue, key: RuntimeValue) -> RuntimeV
             }
         }
         RuntimeValue::NIL
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_dict_get_i64_raw(dict: RuntimeValue, key: i64) -> i64 {
+    let runtime_key = RuntimeValue::from_int(key);
+    if !rt_dict_contains(dict, runtime_key) {
+        return 0;
+    }
+    rt_dict_get(dict, runtime_key).to_raw() as i64
+}
+
+/// Return whether a dictionary contains a key, independently of its value.
+#[no_mangle]
+pub extern "C" fn rt_dict_contains(dict: RuntimeValue, key: RuntimeValue) -> bool {
+    let d = as_typed_ptr!(dict, HeapObjectType::Dict, RuntimeDict, false);
+    unsafe {
+        let capacity = (*d).capacity;
+        if capacity == 0 {
+            return false;
+        }
+
+        let hash = hash_value(key);
+        let data_ptr = (*d).data as *const RuntimeValue;
+        for i in 0..capacity {
+            let idx = ((hash + i) % capacity) as usize;
+            let stored_key = *data_ptr.add(idx * 2);
+            if stored_key.is_nil() {
+                return false;
+            }
+            if keys_equal(stored_key, key) {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -262,6 +297,15 @@ pub extern "C" fn rt_dict_set(dict: RuntimeValue, key: RuntimeValue, value: Runt
         }
         false // Unreachable after growth, kept as a safety net
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_dict_set_i64_raw(dict: RuntimeValue, key: i64, value: i64) -> bool {
+    rt_dict_set(
+        dict,
+        RuntimeValue::from_int(key),
+        RuntimeValue::from_raw(value as u64),
+    )
 }
 
 /// Clear all entries from a dictionary

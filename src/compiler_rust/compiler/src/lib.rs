@@ -5,6 +5,11 @@
 
 use simple_common::target::NativeCodegenBackend;
 
+/// Drop a hosted JIT instance by its native handle.
+pub fn native_jit_cleanup_handle(handle: i64) -> i64 {
+    interpreter::interpreter_extern::jit_native::cleanup_handle(handle)
+}
+
 pub mod repl_runner;
 pub mod mock_helper;
 pub mod aop_config;

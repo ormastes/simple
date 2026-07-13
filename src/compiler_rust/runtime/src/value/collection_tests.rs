@@ -92,8 +92,8 @@ use super::{
 };
 // Dict functions are in a sibling module, import via crate path
 use crate::value::{
-    clear_all_runtime_registries, rt_dict_clear, rt_dict_get, rt_dict_len, rt_dict_new, rt_dict_remove, rt_dict_set,
-    RuntimeValue,
+    clear_all_runtime_registries, rt_dict_clear, rt_dict_contains, rt_dict_get, rt_dict_len, rt_dict_new,
+    rt_dict_remove, rt_dict_set, RuntimeValue,
 };
 use simple_simd::SimdTier;
 use std::sync::{Mutex, OnceLock};
@@ -135,7 +135,7 @@ fn test_low_heap_tagged_values_do_not_crash_collection_runtime() {
     let unregistered_heap = RuntimeValue::from_raw(0x10001);
     let key = RuntimeValue::from_int(7);
 
-    assert_eq!(rt_array_len(null_heap), -1);
+    assert_eq!(rt_array_len(null_heap), 0);
     assert_eq!(rt_array_len(unregistered_heap), -1);
     assert!(!rt_array_push(null_heap, RuntimeValue::from_int(1)));
     assert!(!rt_array_push(unregistered_heap, RuntimeValue::from_int(1)));
@@ -407,7 +407,7 @@ fn test_array_invalid_value() {
     let not_an_array = RuntimeValue::from_int(42);
 
     // All operations should handle invalid values gracefully
-    assert_eq!(rt_array_len(not_an_array), -1); // Returns -1 for invalid
+    assert_eq!(rt_array_len(not_an_array), -1); // Non-null invalid handles retain the error sentinel.
     assert!(rt_array_get(not_an_array, 0).is_nil());
     assert!(!rt_array_set(not_an_array, 0, RuntimeValue::from_int(99)));
     assert!(!rt_array_push(not_an_array, RuntimeValue::from_int(99)));
@@ -654,6 +654,17 @@ fn test_dict_get_missing() {
     // Get non-existent key should return NIL
     let val = rt_dict_get(dict, key);
     assert!(val.is_nil());
+}
+
+#[test]
+fn test_dict_contains_distinguishes_present_nil_value() {
+    let dict = rt_dict_new(10);
+    let present = rt_string_new("present".as_ptr(), 7);
+    let missing = rt_string_new("missing".as_ptr(), 7);
+
+    assert!(rt_dict_set(dict, present, RuntimeValue::NIL));
+    assert!(rt_dict_contains(dict, present));
+    assert!(!rt_dict_contains(dict, missing));
 }
 
 #[test]

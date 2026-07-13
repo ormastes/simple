@@ -20,6 +20,11 @@ static JIT_INSTANCES: LazyLock<Mutex<HashMap<i64, LocalExecutionManager>>> =
 
 static NEXT_HANDLE: LazyLock<Mutex<i64>> = LazyLock::new(|| Mutex::new(1));
 
+pub(crate) fn cleanup_handle(handle: i64) -> i64 {
+    JIT_INSTANCES.lock().unwrap().remove(&handle);
+    0
+}
+
 fn next_handle() -> i64 {
     let mut h = NEXT_HANDLE.lock().unwrap();
     let val = *h;
@@ -232,6 +237,21 @@ pub fn rt_jit_cleanup(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Int(-1));
     }
     let handle = value_to_i64(&args[0]);
-    JIT_INSTANCES.lock().unwrap().remove(&handle);
-    Ok(Value::Int(0))
+    Ok(Value::Int(cleanup_handle(handle)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_handle_drops_hosted_jit_instance() {
+        let Value::Int(handle) = rt_jit_create(&[]).expect("create JIT") else {
+            panic!("expected JIT handle");
+        };
+        assert!(handle > 0);
+        assert!(JIT_INSTANCES.lock().unwrap().contains_key(&handle));
+        assert_eq!(cleanup_handle(handle), 0);
+        assert!(!JIT_INSTANCES.lock().unwrap().contains_key(&handle));
+    }
 }

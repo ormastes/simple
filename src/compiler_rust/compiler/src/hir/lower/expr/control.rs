@@ -569,6 +569,15 @@ impl Lowerer {
         variant_name: &str,
         expected_ty: TypeId,
     ) -> Option<Vec<TypeId>> {
+        // `T?` resolves to Pointer<T>, while pattern syntax still uses
+        // `Some(value)`. Preserve T on the binding instead of searching an
+        // unrelated generic Option definition and degrading the payload to ANY.
+        if variant_name == "Some" {
+            if let Some(HirType::Pointer { inner, .. }) = self.module.types.get(expected_ty) {
+                return Some(vec![*inner]);
+            }
+        }
+
         // First, try to use the expected type if it's an enum
         if expected_ty != TypeId::ANY {
             if let Some(HirType::Enum {

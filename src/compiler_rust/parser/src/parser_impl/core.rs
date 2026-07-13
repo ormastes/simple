@@ -337,6 +337,7 @@ impl<'a> Parser<'a> {
 
             self.debug_verbose(&format!("Parsing item {}", iterations));
             items.push(self.parse_item()?);
+            items.append(&mut self.pending_statements);
         }
 
         self.debug_trace(&format!("Finished parse(), {} items", items.len()));
@@ -643,6 +644,7 @@ impl<'a> Parser<'a> {
                     TokenKind::Identifier { .. }
                     | TokenKind::Match  // used as module name in lz77/match.spl
                     | TokenKind::Mod    // used as module name in failsafe/__init__.spl
+                    | TokenKind::Shared // used as module root in shared/contracts.spl
                     | TokenKind::Dot // from .module import (relative import)
                 ) {
                     self.parse_from_import() // Python-style: from module import {...}

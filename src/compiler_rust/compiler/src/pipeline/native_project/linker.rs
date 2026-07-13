@@ -8,7 +8,8 @@ use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
     archive_create_command, build_compiler_backfill_archive, find_archive_tool, find_c_compiler,
     find_compiler_rt_builtins, find_cxx_compiler, find_native_all_library, find_objcopy_tool, is_system_symbol,
-    nm_command, strip_llvm_constructors, target_c_compiler, target_cxx_compiler,
+    nm_command, strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
+    build_stage4_c_runtime_library,
 };
 
 impl NativeProjectBuilder {
@@ -1038,6 +1039,11 @@ int main(int argc, char** argv) {
                         cmd.arg(runtime_lib);
                     }
                 }
+                if std::env::var("SIMPLE_BOOTSTRAP_STAGE4").as_deref() == Ok("1") {
+                    let core_c_runtime = build_stage4_c_runtime_library(&temp_dir.join("stage4_core_c_runtime"))
+                        .ok_or_else(|| "failed to build Stage 4 core-C runtime supplement".to_string())?;
+                    cmd.arg(core_c_runtime);
+                }
             } else {
                 #[cfg(target_os = "macos")]
                 {
@@ -1129,6 +1135,9 @@ int main(int argc, char** argv) {
             }
             if require_openssl {
                 cmd.arg("-lssl").arg("-lcrypto");
+            }
+            if has_native_all {
+                cmd.args(terminfo_link_args(cross_target));
             }
             #[cfg(target_os = "linux")]
             {

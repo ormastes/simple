@@ -369,7 +369,8 @@ pub(crate) fn compile_file_to_object(
     pipeline.rewrite_hir_simd_loops(&mut hir);
 
     // MIR
-    let mut mir = crate::mir::lower_to_mir(&hir).map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
+    let mut mir = crate::mir::lower_to_mir_with_global_trait_impls(&hir, imports.trait_impls.as_ref())
+        .map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
 
     // Trampoline: when the entry file has no local `main` but re-exports one
     // via `use`, inject a synthetic MIR function that forwards to the resolved

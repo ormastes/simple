@@ -31,10 +31,7 @@ fn test_compile_add_function() {
 fn test_aot_emits_discardable_function_sections() {
     use object::{Object, ObjectSection};
 
-    let obj = compile_to_object(
-        "fn first() -> i64:\n    return 1\nfn second() -> i64:\n    return 2\n",
-    )
-    .unwrap();
+    let obj = compile_to_object("fn first() -> i64:\n    return 1\nfn second() -> i64:\n    return 2\n").unwrap();
     let file = object::File::parse(obj.as_slice()).unwrap();
     let text_sections = file
         .sections()

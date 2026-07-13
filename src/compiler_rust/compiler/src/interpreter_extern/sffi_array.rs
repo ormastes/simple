@@ -644,7 +644,10 @@ pub fn rt_array_extend_i64_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{interpreter_byte_at, rt_array_len_safe_fn, rt_bytes_u32_le_at_fn, rt_bytes_u64_le_at_fn, rt_bytes_u8_at_fn, rt_bytes_u8_set_fn};
+    use super::{
+        interpreter_byte_at, rt_array_len_safe_fn, rt_bytes_u32_le_at_fn, rt_bytes_u64_le_at_fn, rt_bytes_u8_at_fn,
+        rt_bytes_u8_set_fn,
+    };
     use crate::value::Value;
     use simple_runtime::value::{rt_array_new, rt_array_push, rt_bytes_u8_at, RuntimeValue};
 

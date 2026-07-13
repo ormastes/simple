@@ -4150,6 +4150,544 @@ int64_t simpleos_virtio_net_selftest(void)
     return 0;
 }
 
+int64_t simpleos_virtio_net_init(void)
+{
+    return _virtio_net_init();
+}
+
+uint64_t simpleos_virtio_net_rx_dma_addr(void)
+{
+    return (uint64_t)(uintptr_t)_vnet.rx_buffers;
+}
+
+uint64_t simpleos_virtio_net_rx_dma_len(void)
+{
+    return (uint64_t)_vnet.rx_qsize * VIRTIO_NET_BUF_SIZE;
+}
+
+uint64_t simpleos_virtio_net_tx_dma_addr(void)
+{
+    return (uint64_t)(uintptr_t)_vnet.tx_buffers;
+}
+
+uint64_t simpleos_virtio_net_tx_dma_len(void)
+{
+    return (uint64_t)_vnet.tx_qsize * VIRTIO_NET_BUF_SIZE;
+}
+
+uint64_t simpleos_memory_leveling_virtio_net_init(void)
+{
+    int rc = _virtio_net_init();
+    return rc < 0 ? (uint64_t)(-rc) : 0;
+}
+
+uint64_t simpleos_memory_leveling_virtio_net_selftest(void)
+{
+    int rc = (int)simpleos_virtio_net_selftest();
+    return rc < 0 ? (uint64_t)(-rc) : 0;
+}
+
+/* Minimal legacy VirtIO PCI evidence used by the memory-leveling QEMU gate.
+ * Production device ownership remains in the Simple drivers and memory
+ * manager; these helpers only drive real QEMU queues from the freestanding
+ * bootstrap runtime and expose the DMA regions registered by that manager. */
+struct simpleos_legacy_virtq {
+    uint16_t iobase;
+    uint16_t qsize;
+    uint16_t last_used;
+    struct vring_desc *desc;
+    struct vring_avail *avail;
+    struct vring_used *used;
+};
+
+static int simpleos_find_legacy_virtio(uint16_t device_id, uint16_t *iobase)
+{
+    if (_pci_cache_count < 0) _pci_scan();
+    for (int i = 0; i < _pci_cache_count; i++) {
+        if (_pci_cache[i].vendor != 0x1AF4 || _pci_cache[i].devid != device_id)
+            continue;
+
+        uint32_t cfg = 0x80000000u
+            | ((uint32_t)_pci_cache[i].bus << 16)
+            | ((uint32_t)_pci_cache[i].dev << 11);
+        outl(0xCF8, cfg | 0x10);
+        uint32_t bar0 = inl(0xCFC);
+        if ((bar0 & 1u) == 0) return -95;
+
+        outl(0xCF8, cfg | 0x04);
+        uint32_t command = inl(0xCFC) | (1u << 0) | (1u << 2);
+        outl(0xCF8, cfg | 0x04);
+        outl(0xCFC, command);
+        *iobase = (uint16_t)(bar0 & ~3u);
+        return 0;
+    }
+    return -19;
+}
+
+static int simpleos_legacy_virtq_setup(uint16_t iobase, uint16_t queue_index,
+                                      struct simpleos_legacy_virtq *queue)
+{
+    outw((uint16_t)(iobase + 0x0E), queue_index);
+    uint16_t qsize = inw((uint16_t)(iobase + 0x0C));
+    if (qsize == 0) return -19;
+
+    size_t desc_size = (size_t)qsize * 16;
+    size_t avail_size = 6 + (size_t)qsize * 2;
+    size_t used_offset = (desc_size + avail_size + 4095) & ~(size_t)4095;
+    size_t total = used_offset + 6 + (size_t)qsize * 8;
+    void *memory = nvme_alloc_aligned(total, 4096);
+    if (!memory) return -12;
+    __builtin_memset(memory, 0, total);
+
+    queue->iobase = iobase;
+    queue->qsize = qsize;
+    queue->last_used = 0;
+    queue->desc = (struct vring_desc *)memory;
+    queue->avail = (struct vring_avail *)((uint8_t *)memory + desc_size);
+    queue->used = (struct vring_used *)((uint8_t *)memory + used_offset);
+
+    uint32_t pfn = (uint32_t)((uintptr_t)memory >> 12);
+    outl((uint16_t)(iobase + 0x08), pfn);
+    if (inl((uint16_t)(iobase + 0x08)) != pfn) return -5;
+    return 0;
+}
+
+static int simpleos_legacy_virtq_submit(struct simpleos_legacy_virtq *queue,
+                                       uint16_t head, uint32_t poll_limit)
+{
+    uint16_t avail_index = queue->avail->idx;
+    queue->avail->ring[avail_index % queue->qsize] = head;
+    __sync_synchronize();
+    queue->avail->idx = (uint16_t)(avail_index + 1);
+    __sync_synchronize();
+    outw((uint16_t)(queue->iobase + 0x10), 0);
+
+    for (uint32_t i = 0; i < poll_limit; i++) {
+        uint16_t used = queue->used->idx;
+        if (used != queue->last_used) {
+            __sync_synchronize();
+            uint16_t slot = (uint16_t)((used - 1u) % queue->qsize);
+            if (queue->used->ring[slot].id != head) return -5;
+            queue->last_used = used;
+            return 0;
+        }
+        __asm__ volatile("pause" ::: "memory");
+    }
+    return -110;
+}
+
+static int simpleos_legacy_virtio_begin(uint16_t iobase)
+{
+    outb((uint16_t)(iobase + 0x12), 0);
+    for (volatile int i = 0; i < 10000; i++) {}
+    outb((uint16_t)(iobase + 0x12), VIRTIO_STATUS_ACK);
+    outb((uint16_t)(iobase + 0x12), VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER);
+    outl((uint16_t)(iobase + 0x04), 0);
+    return 0;
+}
+
+static void simpleos_legacy_virtio_finish(uint16_t iobase)
+{
+    outb((uint16_t)(iobase + 0x12),
+         VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_DRIVER_OK);
+}
+
+struct simpleos_modern_virtq {
+    volatile uint8_t *common;
+    volatile uint16_t *notify;
+    uint16_t qsize;
+    uint16_t last_used;
+    struct vring_desc *desc;
+    struct vring_avail *avail;
+    struct vring_used *used;
+};
+
+static uint32_t simpleos_pci_cfg_read32(int index, uint8_t offset)
+{
+    uint32_t cfg = 0x80000000u
+        | ((uint32_t)_pci_cache[index].bus << 16)
+        | ((uint32_t)_pci_cache[index].dev << 11)
+        | (uint32_t)(offset & 0xFCu);
+    outl(0xCF8, cfg);
+    return inl(0xCFC);
+}
+
+static uint8_t simpleos_pci_cfg_read8(int index, uint8_t offset)
+{
+    uint32_t value = simpleos_pci_cfg_read32(index, offset);
+    return (uint8_t)(value >> ((offset & 3u) * 8u));
+}
+
+static uint64_t simpleos_pci_bar_addr(int index, uint8_t bar_index)
+{
+    if (bar_index > 5) return 0;
+    uint8_t offset = (uint8_t)(0x10u + bar_index * 4u);
+    uint32_t low = simpleos_pci_cfg_read32(index, offset);
+    if (low & 1u) return 0;
+    uint64_t base = (uint64_t)(low & ~0xFu);
+    if (((low >> 1) & 3u) == 2u) {
+        if (bar_index == 5) return 0;
+        base |= (uint64_t)simpleos_pci_cfg_read32(index, (uint8_t)(offset + 4u)) << 32;
+    }
+    return base;
+}
+
+static int simpleos_find_modern_gpu(volatile uint8_t **common_out,
+                                    volatile uint8_t **notify_out,
+                                    uint32_t *notify_multiplier_out)
+{
+    if (_pci_cache_count < 0) _pci_scan();
+    int gpu_index = -1;
+    for (int i = 0; i < _pci_cache_count; i++) {
+        if (_pci_cache[i].vendor == 0x1AF4 && _pci_cache[i].devid == 0x1050) {
+            gpu_index = i;
+            break;
+        }
+    }
+    if (gpu_index < 0) return -19;
+
+    serial_puts("[memory-leveling] virtio-gpu-pci device=0x");
+    serial_put_hex(_pci_cache[gpu_index].devid);
+    serial_puts("\r\n");
+
+    uint32_t cfg = 0x80000000u
+        | ((uint32_t)_pci_cache[gpu_index].bus << 16)
+        | ((uint32_t)_pci_cache[gpu_index].dev << 11);
+    outl(0xCF8, cfg | 0x04);
+    uint32_t command = inl(0xCFC) | (1u << 1) | (1u << 2);
+    outl(0xCF8, cfg | 0x04);
+    outl(0xCFC, command);
+
+    volatile uint8_t *common = 0;
+    volatile uint8_t *notify = 0;
+    uint32_t notify_multiplier = 0;
+    uint8_t cap = simpleos_pci_cfg_read8(gpu_index, 0x34);
+    for (int count = 0; cap >= 0x40 && count < 48; count++) {
+        uint8_t id = simpleos_pci_cfg_read8(gpu_index, cap);
+        uint8_t next = simpleos_pci_cfg_read8(gpu_index, (uint8_t)(cap + 1));
+        uint8_t length = simpleos_pci_cfg_read8(gpu_index, (uint8_t)(cap + 2));
+        uint8_t cfg_type = simpleos_pci_cfg_read8(gpu_index, (uint8_t)(cap + 3));
+        uint8_t bar = simpleos_pci_cfg_read8(gpu_index, (uint8_t)(cap + 4));
+        serial_puts("[memory-leveling] virtio-gpu-cap id=0x");
+        serial_put_hex(id);
+        serial_puts(" type=");
+        serial_put_dec(cfg_type);
+        serial_puts(" bar=");
+        serial_put_dec(bar);
+        serial_puts(" len=");
+        serial_put_dec(length);
+        serial_puts("\r\n");
+        if (id == 0x09 && length >= 16 && (cfg_type == 1 || cfg_type == 2)) {
+            uint64_t bar_addr = simpleos_pci_bar_addr(gpu_index, bar);
+            uint32_t offset = simpleos_pci_cfg_read32(gpu_index, (uint8_t)(cap + 8));
+            serial_puts("[memory-leveling] virtio-gpu-cap-map base=0x");
+            serial_put_hex((uint32_t)bar_addr);
+            serial_puts(" offset=0x");
+            serial_put_hex(offset);
+            serial_puts("\r\n");
+            if (bar_addr == 0 || UINT64_MAX - bar_addr < offset) return -95;
+            if (cfg_type == 1) common = (volatile uint8_t *)(uintptr_t)(bar_addr + offset);
+            if (cfg_type == 2 && length >= 20) {
+                notify = (volatile uint8_t *)(uintptr_t)(bar_addr + offset);
+                notify_multiplier = simpleos_pci_cfg_read32(gpu_index, (uint8_t)(cap + 16));
+                serial_puts("[memory-leveling] virtio-gpu-notify multiplier=");
+                serial_put_dec((int)notify_multiplier);
+                serial_puts("\r\n");
+            }
+        }
+        if (next == 0 || next == cap) break;
+        cap = next;
+    }
+    if (!common || !notify || notify_multiplier == 0) return -95;
+    *common_out = common;
+    *notify_out = notify;
+    *notify_multiplier_out = notify_multiplier;
+    return 0;
+}
+
+static int simpleos_modern_gpu_begin(volatile uint8_t *common)
+{
+    *(volatile uint8_t *)(common + 0x14) = 0;
+    for (uint32_t i = 0; i < 100000; i++) {
+        if (*(volatile uint8_t *)(common + 0x14) == 0) break;
+        if (i == 99999) return -110;
+    }
+    *(volatile uint8_t *)(common + 0x14) = VIRTIO_STATUS_ACK;
+    *(volatile uint8_t *)(common + 0x14) = VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER;
+
+    *(volatile uint32_t *)(void *)(common + 0x00) = 1;
+    uint32_t high_features = *(volatile uint32_t *)(void *)(common + 0x04);
+    if ((high_features & 1u) == 0) return -95;
+    *(volatile uint32_t *)(void *)(common + 0x08) = 0;
+    *(volatile uint32_t *)(void *)(common + 0x0C) = 0;
+    *(volatile uint32_t *)(void *)(common + 0x08) = 1;
+    *(volatile uint32_t *)(void *)(common + 0x0C) = 1;
+
+    *(volatile uint8_t *)(common + 0x14) =
+        VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK;
+    if ((*(volatile uint8_t *)(common + 0x14) & VIRTIO_STATUS_FEATURES_OK) == 0)
+        return -95;
+    return 0;
+}
+
+static int simpleos_modern_virtq_setup(volatile uint8_t *common,
+                                      volatile uint8_t *notify_base,
+                                      uint32_t notify_multiplier,
+                                      struct simpleos_modern_virtq *queue)
+{
+    *(volatile uint16_t *)(void *)(common + 0x16) = 0;
+    uint16_t max_size = *(volatile uint16_t *)(void *)(common + 0x18);
+    if (max_size == 0) return -19;
+    uint16_t qsize = max_size > 128 ? 128 : max_size;
+    *(volatile uint16_t *)(void *)(common + 0x18) = qsize;
+
+    size_t desc_size = (size_t)qsize * 16;
+    size_t avail_size = 6 + (size_t)qsize * 2;
+    size_t used_size = 6 + (size_t)qsize * 8;
+    void *desc = nvme_alloc_aligned(desc_size, 4096);
+    void *avail = nvme_alloc_aligned(avail_size, 4096);
+    void *used = nvme_alloc_aligned(used_size, 4096);
+    if (!desc || !avail || !used) return -12;
+    __builtin_memset(desc, 0, desc_size);
+    __builtin_memset(avail, 0, avail_size);
+    __builtin_memset(used, 0, used_size);
+
+    uint64_t desc_addr = (uint64_t)(uintptr_t)desc;
+    uint64_t avail_addr = (uint64_t)(uintptr_t)avail;
+    uint64_t used_addr = (uint64_t)(uintptr_t)used;
+    *(volatile uint64_t *)(void *)(common + 0x20) = desc_addr;
+    *(volatile uint64_t *)(void *)(common + 0x28) = avail_addr;
+    *(volatile uint64_t *)(void *)(common + 0x30) = used_addr;
+    uint16_t notify_off = *(volatile uint16_t *)(void *)(common + 0x1E);
+    *(volatile uint16_t *)(void *)(common + 0x1C) = 1;
+
+    queue->common = common;
+    queue->notify = (volatile uint16_t *)(void *)(notify_base +
+        (uint64_t)notify_off * notify_multiplier);
+    queue->qsize = qsize;
+    queue->last_used = 0;
+    queue->desc = (struct vring_desc *)desc;
+    queue->avail = (struct vring_avail *)avail;
+    queue->used = (struct vring_used *)used;
+    return 0;
+}
+
+static int simpleos_modern_virtq_submit(struct simpleos_modern_virtq *queue,
+                                       uint16_t head, uint32_t poll_limit)
+{
+    uint16_t avail_index = queue->avail->idx;
+    queue->avail->ring[avail_index % queue->qsize] = head;
+    __sync_synchronize();
+    queue->avail->idx = (uint16_t)(avail_index + 1);
+    __sync_synchronize();
+    *queue->notify = 0;
+    for (uint32_t i = 0; i < poll_limit; i++) {
+        uint16_t used = queue->used->idx;
+        if (used != queue->last_used) {
+            __sync_synchronize();
+            uint16_t slot = (uint16_t)((used - 1u) % queue->qsize);
+            if (queue->used->ring[slot].id != head) return -5;
+            queue->last_used = used;
+            return 0;
+        }
+        __asm__ volatile("pause" ::: "memory");
+    }
+    return -110;
+}
+
+struct simpleos_virtio_gpu_probe {
+    struct simpleos_modern_virtq queue;
+    uint8_t *request;
+    uint8_t *response;
+    uint8_t *framebuffer;
+    uint64_t framebuffer_len;
+    int initialized;
+};
+
+static struct simpleos_virtio_gpu_probe _simpleos_vgpu;
+
+static uint64_t simpleos_probe_failure(const char *stage, int rc)
+{
+    uint64_t code = rc < 0 ? (uint64_t)(-rc) : (uint64_t)rc;
+    if (code == 0) code = 5;
+    serial_puts("[memory-leveling] device-probe-fail stage=");
+    serial_puts(stage);
+    serial_puts(" code=");
+    serial_put_dec((int)code);
+    serial_puts("\r\n");
+    return code;
+}
+
+static int simpleos_virtio_gpu_command(uint32_t type, uint32_t request_len,
+                                      uint32_t response_len,
+                                      uint32_t expected_response)
+{
+    struct simpleos_modern_virtq *q = &_simpleos_vgpu.queue;
+    __builtin_memset(_simpleos_vgpu.response, 0, 512);
+    *(volatile uint32_t *)(void *)_simpleos_vgpu.request = type;
+
+    q->desc[0].addr = (uint64_t)(uintptr_t)_simpleos_vgpu.request;
+    q->desc[0].len = request_len;
+    q->desc[0].flags = VRING_DESC_F_NEXT;
+    q->desc[0].next = 1;
+    q->desc[1].addr = (uint64_t)(uintptr_t)_simpleos_vgpu.response;
+    q->desc[1].len = response_len;
+    q->desc[1].flags = VRING_DESC_F_WRITE;
+    q->desc[1].next = 0;
+
+    int rc = simpleos_modern_virtq_submit(q, 0, 2000000);
+    if (rc < 0) return rc;
+    uint32_t response_type = *(volatile uint32_t *)(void *)_simpleos_vgpu.response;
+    return response_type == expected_response ? 0 : -5;
+}
+
+uint64_t simpleos_virtio_gpu_memory_init(void)
+{
+    if (_simpleos_vgpu.initialized) return 0;
+    volatile uint8_t *common = 0;
+    volatile uint8_t *notify = 0;
+    uint32_t notify_multiplier = 0;
+    int rc = simpleos_find_modern_gpu(&common, &notify, &notify_multiplier);
+    if (rc < 0) return simpleos_probe_failure("gpu-find", rc);
+    rc = simpleos_modern_gpu_begin(common);
+    if (rc < 0) return simpleos_probe_failure("gpu-negotiate", rc);
+    rc = simpleos_modern_virtq_setup(common, notify, notify_multiplier,
+                                     &_simpleos_vgpu.queue);
+    if (rc < 0) return simpleos_probe_failure("gpu-queue", rc);
+    *(volatile uint8_t *)(common + 0x14) =
+        VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER |
+        VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK;
+    if ((*(volatile uint8_t *)(common + 0x14) &
+         (VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK)) !=
+        (VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK))
+        return simpleos_probe_failure("gpu-driver-ok", -95);
+
+    _simpleos_vgpu.request = (uint8_t *)nvme_alloc_aligned(512, 64);
+    _simpleos_vgpu.response = (uint8_t *)nvme_alloc_aligned(512, 64);
+    _simpleos_vgpu.framebuffer_len = 64u * 64u * 4u;
+    _simpleos_vgpu.framebuffer = (uint8_t *)nvme_alloc_aligned(
+        (size_t)_simpleos_vgpu.framebuffer_len, 4096);
+    if (!_simpleos_vgpu.request || !_simpleos_vgpu.response ||
+        !_simpleos_vgpu.framebuffer) return simpleos_probe_failure("gpu-dma", -12);
+    __builtin_memset(_simpleos_vgpu.request, 0, 512);
+    __builtin_memset(_simpleos_vgpu.framebuffer, 0x5A,
+                     (size_t)_simpleos_vgpu.framebuffer_len);
+
+    rc = simpleos_virtio_gpu_command(0x0100, 24, 408, 0x1101);
+    if (rc < 0) return simpleos_probe_failure("gpu-display-info", rc);
+
+    __builtin_memset(_simpleos_vgpu.request, 0, 512);
+    *(uint32_t *)(void *)(_simpleos_vgpu.request + 24) = 1;
+    *(uint32_t *)(void *)(_simpleos_vgpu.request + 28) = 1;
+    *(uint32_t *)(void *)(_simpleos_vgpu.request + 32) = 64;
+    *(uint32_t *)(void *)(_simpleos_vgpu.request + 36) = 64;
+    rc = simpleos_virtio_gpu_command(0x0101, 40, 24, 0x1100);
+    if (rc < 0) return simpleos_probe_failure("gpu-resource-create", rc);
+
+    _simpleos_vgpu.initialized = 1;
+    serial_puts("[memory-leveling] virtio-gpu-backing=prepared\r\n");
+    return 0;
+}
+
+uint64_t simpleos_virtio_gpu_dma_addr(void)
+{
+    return (uint64_t)(uintptr_t)_simpleos_vgpu.framebuffer;
+}
+
+uint64_t simpleos_virtio_gpu_dma_len(void)
+{
+    return _simpleos_vgpu.framebuffer_len;
+}
+
+uint64_t simpleos_virtio_gpu_flush_selftest(void)
+{
+    if (!_simpleos_vgpu.initialized) return simpleos_probe_failure("gpu-not-initialized", -19);
+    __builtin_memset(_simpleos_vgpu.request, 0, 512);
+    *(uint32_t *)(void *)(_simpleos_vgpu.request + 24) = 1;
+    *(uint32_t *)(void *)(_simpleos_vgpu.request + 28) = 1;
+    *(uint64_t *)(void *)(_simpleos_vgpu.request + 32) =
+        (uint64_t)(uintptr_t)_simpleos_vgpu.framebuffer;
+    *(uint32_t *)(void *)(_simpleos_vgpu.request + 40) =
+        (uint32_t)_simpleos_vgpu.framebuffer_len;
+    int rc = simpleos_virtio_gpu_command(0x0106, 48, 24, 0x1100);
+    if (rc < 0) return simpleos_probe_failure("gpu-attach-backing", rc);
+
+    __builtin_memset(_simpleos_vgpu.request, 0, 512);
+    *(uint32_t *)(void *)(_simpleos_vgpu.request + 32) = 64;
+    *(uint32_t *)(void *)(_simpleos_vgpu.request + 36) = 64;
+    *(uint32_t *)(void *)(_simpleos_vgpu.request + 48) = 1;
+    rc = simpleos_virtio_gpu_command(0x0105, 56, 24, 0x1100);
+    if (rc < 0) return simpleos_probe_failure("gpu-transfer", rc);
+
+    __builtin_memset(_simpleos_vgpu.request, 0, 512);
+    *(uint32_t *)(void *)(_simpleos_vgpu.request + 32) = 64;
+    *(uint32_t *)(void *)(_simpleos_vgpu.request + 36) = 64;
+    *(uint32_t *)(void *)(_simpleos_vgpu.request + 40) = 1;
+    rc = simpleos_virtio_gpu_command(0x0104, 48, 24, 0x1100);
+    if (rc < 0) return simpleos_probe_failure("gpu-flush", rc);
+    serial_puts("[memory-leveling] virtio-gpu-transfer-flush=complete\r\n");
+    return 0;
+}
+
+struct simpleos_virtio_blk_req {
+    uint32_t type;
+    uint32_t reserved;
+    uint64_t sector;
+} __attribute__((packed));
+
+uint64_t simpleos_virtio_blk_swap_selftest(void)
+{
+    uint16_t iobase = 0;
+    int rc = simpleos_find_legacy_virtio(0x1001, &iobase);
+    if (rc < 0) return simpleos_probe_failure("blk-find", rc);
+    simpleos_legacy_virtio_begin(iobase);
+    struct simpleos_legacy_virtq queue;
+    rc = simpleos_legacy_virtq_setup(iobase, 0, &queue);
+    if (rc < 0) return simpleos_probe_failure("blk-queue", rc);
+    simpleos_legacy_virtio_finish(iobase);
+
+    struct simpleos_virtio_blk_req *request =
+        (struct simpleos_virtio_blk_req *)nvme_alloc_aligned(64, 64);
+    uint8_t *data = (uint8_t *)nvme_alloc_aligned(512, 512);
+    uint8_t *status = (uint8_t *)nvme_alloc_aligned(64, 64);
+    if (!request || !data || !status) return simpleos_probe_failure("blk-dma", -12);
+
+    for (uint32_t i = 0; i < 512; i++) data[i] = (uint8_t)((i * 37u + 11u) & 0xFFu);
+    request->type = 1;
+    request->reserved = 0;
+    request->sector = 8;
+    *status = 0xFF;
+    queue.desc[0] = (struct vring_desc){
+        .addr = (uint64_t)(uintptr_t)request, .len = 16,
+        .flags = VRING_DESC_F_NEXT, .next = 1
+    };
+    queue.desc[1] = (struct vring_desc){
+        .addr = (uint64_t)(uintptr_t)data, .len = 512,
+        .flags = VRING_DESC_F_NEXT, .next = 2
+    };
+    queue.desc[2] = (struct vring_desc){
+        .addr = (uint64_t)(uintptr_t)status, .len = 1,
+        .flags = VRING_DESC_F_WRITE, .next = 0
+    };
+    rc = simpleos_legacy_virtq_submit(&queue, 0, 2000000);
+    if (rc < 0 || *status != 0)
+        return simpleos_probe_failure("blk-write", rc < 0 ? rc : -5);
+
+    __builtin_memset(data, 0, 512);
+    request->type = 0;
+    *status = 0xFF;
+    queue.desc[1].flags = VRING_DESC_F_NEXT | VRING_DESC_F_WRITE;
+    rc = simpleos_legacy_virtq_submit(&queue, 0, 2000000);
+    if (rc < 0 || *status != 0)
+        return simpleos_probe_failure("blk-read", rc < 0 ? rc : -5);
+    for (uint32_t i = 0; i < 512; i++) {
+        uint8_t expected = (uint8_t)((i * 37u + 11u) & 0xFFu);
+        if (data[i] != expected) return simpleos_probe_failure("blk-compare", -74);
+    }
+    serial_puts("[memory-leveling] virtio-blk-write-read=complete bytes=512\r\n");
+    return 0;
+}
+
 /* TCP header */
 struct tcp_hdr {
     uint16_t src_port;

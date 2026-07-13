@@ -103,6 +103,14 @@ impl MethodRegistry {
     pub fn type_names(&self) -> Vec<&'static str> {
         self.methods.keys().copied().collect()
     }
+
+    /// Resolve one of the standard-library default-method compatibility aliases.
+    pub fn compatibility_alias(&self, name: &str) -> Option<(&'static str, &'static str)> {
+        super::builtins::COMPATIBILITY_METHOD_ALIASES
+            .iter()
+            .find(|(alias, _, _)| *alias == name)
+            .map(|(_, trait_name, method)| (*trait_name, *method))
+    }
 }
 
 impl Default for MethodRegistry {
@@ -232,5 +240,23 @@ mod tests {
         assert!(types.contains(&"String"));
         assert!(types.contains(&"Int"));
         assert!(types.contains(&"Float"));
+    }
+
+    #[test]
+    fn test_compatibility_aliases_are_exact() {
+        let registry = &*GLOBAL_REGISTRY;
+        assert_eq!(
+            registry.compatibility_alias("compiler_rust__lib__std__src__core__traits__Len_dot_is_empty"),
+            Some(("Len", "is_empty"))
+        );
+        assert_eq!(
+            registry.compatibility_alias("compiler_rust__lib__std__src__core__traits__ExactSizeIterator_dot_is_empty"),
+            Some(("ExactSizeIterator", "is_empty"))
+        );
+        assert_eq!(
+            registry.compatibility_alias("compiler_rust__lib__std__src__core__traits__DoubleEndedIterator_dot_rfind"),
+            Some(("DoubleEndedIterator", "rfind"))
+        );
+        assert_eq!(registry.compatibility_alias("Len_dot_is_empty"), None);
     }
 }

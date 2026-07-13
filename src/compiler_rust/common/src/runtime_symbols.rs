@@ -605,6 +605,14 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_thread_is_done_limited",
     "rt_thread_id_limited",
     "rt_thread_free_limited",
+    "rt_volatile_read_u8",
+    "rt_volatile_read_u16",
+    "rt_volatile_read_u32",
+    "rt_volatile_read_u64",
+    "rt_volatile_write_u8",
+    "rt_volatile_write_u16",
+    "rt_volatile_write_u32",
+    "rt_volatile_write_u64",
     "rt_memory_barrier",
     "rt_load_barrier",
     "rt_store_barrier",
@@ -1987,6 +1995,8 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_len"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_time_now_unix_micros"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_println_value"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_volatile_read_u64"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_volatile_write_u64"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_memory_barrier"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_load_barrier"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_store_barrier"));

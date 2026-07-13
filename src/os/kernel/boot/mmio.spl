@@ -4,108 +4,57 @@
 # These guarantee reads/writes are not optimized away by the compiler.
 
 use os.kernel.boot.mmio_hardware.{
-    mmio_read64 as hardware_mmio_read64, mmio_write64 as hardware_mmio_write64,
-    mmio_read32 as hardware_mmio_read32, mmio_write32 as hardware_mmio_write32,
-    mmio_read16 as hardware_mmio_read16, mmio_write16 as hardware_mmio_write16,
-    mmio_read8 as hardware_mmio_read8, mmio_write8 as hardware_mmio_write8
+    hardware_mmio_read64, hardware_mmio_write64,
+    hardware_mmio_read32, hardware_mmio_write32,
+    hardware_mmio_read16, hardware_mmio_write16,
+    hardware_mmio_read8, hardware_mmio_write8
 }
 
 extern fn rt_invlpg(addr: u64)
 
-class _MmioByteRegion:
-    base: u64
-    values: [u8]
-
-impl _MmioByteRegion:
-    fn contains(addr: u64) -> bool:
-        addr >= self.base and addr < self.base + (self.values.len() as u64)
-
-    fn can_append(addr: u64) -> bool:
-        addr == self.base + (self.values.len() as u64)
-
-    fn read(addr: u64) -> u8:
-        self.values[(addr - self.base) as i64]
-
-    me write(addr: u64, value: u8):
-        if self.can_append(addr):
-            me.values.push(value)
-        else:
-            me.values[(addr - self.base) as i64] = value
-
-class _MmioWordRegion:
-    base: u64
-    values: [u64]
-
-impl _MmioWordRegion:
-    fn contains(addr: u64) -> bool:
-        addr >= self.base and ((addr - self.base) % 8) == 0 and ((addr - self.base) / 8) < (self.values.len() as u64)
-
-    fn can_append(addr: u64) -> bool:
-        addr == self.base + (self.values.len() as u64) * 8
-
-    fn read(addr: u64) -> u64:
-        self.values[((addr - self.base) / 8) as i64]
-
-    me write(addr: u64, value: u64):
-        if self.can_append(addr):
-            me.values.push(value)
-        else:
-            me.values[((addr - self.base) / 8) as i64] = value
-
 var _mmio_test_mode: bool = false
-var _mmio_test_bytes: [_MmioByteRegion] = []
-var _mmio_test_words: [_MmioWordRegion] = []
+var _mmio_test_addr8: [u64] = []
+var _mmio_test_value8: [u8] = []
+var _mmio_test_addr64: [u64] = []
+var _mmio_test_value64: [u64] = []
 var _mmio_test_addr16: [u64] = []
 var _mmio_test_value16: [u16] = []
 var _mmio_test_addr32: [u64] = []
 var _mmio_test_value32: [u32] = []
 
 fn _mmio_test_find(addresses: [u64], addr: u64) -> i64:
+    var found: i64 = -1
     var i: i64 = 0
     while i < addresses.len():
         if addresses[i] == addr:
-            return i
+            found = i
         i = i + 1
-    -1
+    found
 
 fn _mmio_test_read8(addr: u64) -> u8:
-    var i: i64 = 0
-    while i < _mmio_test_bytes.len():
-        if _mmio_test_bytes[i].contains(addr):
-            return _mmio_test_bytes[i].read(addr)
-        i = i + 1
-    0
+    val index = _mmio_test_find(_mmio_test_addr8, addr)
+    if index < 0: return 0
+    _mmio_test_value8[index]
 
 fn _mmio_test_write8(addr: u64, value: u8):
-    var i: i64 = 0
-    while i < _mmio_test_bytes.len():
-        if _mmio_test_bytes[i].contains(addr) or _mmio_test_bytes[i].can_append(addr):
-            _mmio_test_bytes[i].write(addr, value)
-            return
-        i = i + 1
-    _mmio_test_bytes.push(_MmioByteRegion(base: addr, values: [value]))
+    _mmio_test_addr8 = _mmio_test_addr8.push(addr)
+    _mmio_test_value8 = _mmio_test_value8.push(value)
 
 fn _mmio_test_read64(addr: u64) -> u64:
-    var i: i64 = 0
-    while i < _mmio_test_words.len():
-        if _mmio_test_words[i].contains(addr):
-            return _mmio_test_words[i].read(addr)
-        i = i + 1
-    0
+    val index = _mmio_test_find(_mmio_test_addr64, addr)
+    if index < 0: return 0
+    _mmio_test_value64[index]
 
 fn _mmio_test_write64(addr: u64, value: u64):
-    var i: i64 = 0
-    while i < _mmio_test_words.len():
-        if _mmio_test_words[i].contains(addr) or _mmio_test_words[i].can_append(addr):
-            _mmio_test_words[i].write(addr, value)
-            return
-        i = i + 1
-    _mmio_test_words.push(_MmioWordRegion(base: addr, values: [value]))
+    _mmio_test_addr64 = _mmio_test_addr64.push(addr)
+    _mmio_test_value64 = _mmio_test_value64.push(value)
 
 fn mmio_reset_for_test():
     _mmio_test_mode = true
-    _mmio_test_bytes = []
-    _mmio_test_words = []
+    _mmio_test_addr8 = []
+    _mmio_test_value8 = []
+    _mmio_test_addr64 = []
+    _mmio_test_value64 = []
     _mmio_test_addr16 = []
     _mmio_test_value16 = []
     _mmio_test_addr32 = []
@@ -156,12 +105,8 @@ fn mmio_read32(addr: u64) -> u32:
 fn mmio_write32(addr: u64, value: u32):
     """Write 32-bit value to memory-mapped register."""
     if _mmio_test_mode:
-        val index = _mmio_test_find(_mmio_test_addr32, addr)
-        if index < 0:
-            _mmio_test_addr32.push(addr)
-            _mmio_test_value32.push(value)
-        else:
-            _mmio_test_value32[index] = value
+        _mmio_test_addr32 = _mmio_test_addr32.push(addr)
+        _mmio_test_value32 = _mmio_test_value32.push(value)
         return
     hardware_mmio_write32(addr, value)
 
@@ -176,12 +121,8 @@ fn mmio_read16(addr: u64) -> u16:
 fn mmio_write16(addr: u64, value: u16):
     """Write 16-bit value to memory-mapped register."""
     if _mmio_test_mode:
-        val index = _mmio_test_find(_mmio_test_addr16, addr)
-        if index < 0:
-            _mmio_test_addr16.push(addr)
-            _mmio_test_value16.push(value)
-        else:
-            _mmio_test_value16[index] = value
+        _mmio_test_addr16 = _mmio_test_addr16.push(addr)
+        _mmio_test_value16 = _mmio_test_value16.push(value)
         return
     hardware_mmio_write16(addr, value)
 

@@ -1054,6 +1054,42 @@ fn test() -> i64:
     }
 
     #[test]
+    fn aliased_import_call_lowers_to_original_global_symbol() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let owner = src.join("owner");
+        fs::create_dir_all(&owner).unwrap();
+
+        fs::write(owner.join("mmio.spl"), "fn mmio_read64(addr: u64) -> u64:\n    addr\n").unwrap();
+        let main_path = src.join("main.spl");
+        fs::write(
+            &main_path,
+            r#"use owner.mmio.{mmio_read64 as hardware_mmio_read64}
+
+fn read_hardware(addr: u64) -> u64:
+    hardware_mmio_read64(addr)
+"#,
+        )
+        .unwrap();
+
+        let source = fs::read_to_string(&main_path).unwrap();
+        let mut parser = Parser::new(&source);
+        let ast = parser.parse().expect("parse failed");
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let mut lowerer = Lowerer::with_module_resolver(resolver, main_path);
+        let lowered = lowerer.lower_module(&ast).expect("HIR lowering should succeed");
+        let func = lowered
+            .functions
+            .iter()
+            .find(|func| func.name == "read_hardware")
+            .expect("read_hardware function");
+        let body = format!("{:?}", func.body);
+
+        assert!(body.contains("Global(\"mmio_read64\")"), "body: {body}");
+        assert!(!body.contains("Global(\"hardware_mmio_read64\")"), "body: {body}");
+    }
+
+    #[test]
     fn import_target_intersection_matches_group_reexports() {
         let requested = ImportTarget::Single("shell".to_string());
         let available = ImportTarget::Group(vec![

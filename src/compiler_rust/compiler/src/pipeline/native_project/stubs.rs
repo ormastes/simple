@@ -648,10 +648,12 @@ pub(crate) fn generate_stub_object(
     }
 
     // The object scan runs before the final linker's section GC, so it also sees
-    // references from unreachable functions. In strict mode, emit no weak stubs
-    // and let the platform linker diagnose only unresolved live sections.
+    // references from unreachable functions. Strict mode must still emit
+    // compatibility trampolines when the concrete mangled definition is already
+    // present; those aliases resolve real code rather than hiding a missing
+    // implementation. Leave every genuinely unresolved symbol to the linker.
     if strict_no_stub_fallback {
-        needs_stub.clear();
+        needs_stub.retain(|sym| resolve_defined_suffix_alias(sym, &defined).is_some());
     }
 
     if needs_stub.is_empty() {

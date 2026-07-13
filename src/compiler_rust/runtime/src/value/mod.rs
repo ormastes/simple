@@ -128,8 +128,8 @@ pub use channels::RuntimeChannel;
 // Re-export collection SFFI functions
 pub use collections::{
     rt_array_clear, rt_array_data_ptr, rt_array_data_ptr_text, rt_array_data_ptr_u8, rt_array_extend_i64,
-    rt_array_first, rt_array_get, rt_array_get_text, rt_array_header_ptr, rt_array_len, rt_array_len_safe,
-    rt_array_new, rt_array_new_with_cap_u64, rt_array_pop, rt_array_push, rt_array_set, rt_array_set_len_known,
+    rt_array_first, rt_array_get, rt_array_get_i64_raw, rt_array_get_text, rt_array_header_ptr, rt_array_len, rt_array_len_safe,
+    rt_array_new, rt_array_new_with_cap_u64, rt_array_pop, rt_array_push, rt_array_push_i64_raw, rt_array_set, rt_array_set_len_known,
     rt_array_set_len_known_text, rt_array_set_text, rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at,
     rt_bytes_u64_le_at, rt_bytes_u8_at, rt_bytes_u8_set, rt_contains, rt_cstring_to_text, rt_hash_text,
     rt_for_iterable, rt_index_get, rt_index_set, rt_len, rt_range, rt_range_inclusive, rt_slice, rt_string_char_at,
@@ -155,8 +155,8 @@ pub use utf8_kernels::{
 
 // Re-export dict SFFI functions
 pub use dict::{
-    rt_dict_clear, rt_dict_entries, rt_dict_get, rt_dict_keys, rt_dict_len, rt_dict_new, rt_dict_remove, rt_dict_set,
-    rt_dict_values,
+    rt_dict_clear, rt_dict_contains, rt_dict_entries, rt_dict_get, rt_dict_get_i64_raw, rt_dict_keys, rt_dict_len,
+    rt_dict_new, rt_dict_remove, rt_dict_set, rt_dict_set_i64_raw, rt_dict_values,
 };
 
 // Re-export high-performance collection SFFI functions (Rust std::collections)

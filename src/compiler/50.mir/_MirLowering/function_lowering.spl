@@ -23,6 +23,7 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
+use std.alloc.sffi.{rt_dict_contains}
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
 use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
 use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
@@ -54,6 +55,8 @@ impl MirLowering:
         # bootstrap_stage2_empty_mir_bodies_2026-07-05). Real HIR->MIR lowering
         # now runs for all bootstrap functions.
         self.local_map = {}
+        self.local_symbol_ids = []
+        self.local_symbol_values = []
         self.runtime_array_locals = {}
         self.runtime_dict_locals = {}
         self.runtime_value_locals = {}
@@ -129,20 +132,18 @@ impl MirLowering:
             print "[mir-lower] lower_function:param-map-start {fn_.name} count={fn_.params.len()}"
         while pli < fn_.params.len():
             val param = fn_.params[pli]
-            val local = if arg_locals.has(pli):
+            val local = if rt_dict_contains(arg_locals, pli):
                 arg_locals[pli]
             else:
                 # The seed interpreter can miss the Arg-pattern scan above.
                 # Fall back to the actual builder layout, not a hardcoded +1.
                 LocalId(id: pli + parameter_local_offset)
-            # `if val` can still bind nil in this interpreter; re-check before `.id`.
-            if val found_symbol = param.symbol:
-                if found_symbol == nil:
-                    self.error("function parameter has no resolved symbol", Some(param.span))
-                else:
-                    self.local_map[found_symbol.id] = local
-            else:
-                self.error("function parameter has no resolved symbol", Some(param.span))
+            # HirParam.symbol is required, not optional. Optional-pattern binding
+            # erases the staged SymbolId and can bind nil in the native compiler.
+            val param_symbol_id = param.symbol.id
+            self.bind_local(param_symbol_id, local)
+            if trace_enabled:
+                print "[mir-param-id] fn={fn_.name} name={param.name} symbol={param_symbol_id} local={local.id}"
             # Thread the real HIR parameter name onto the (nameless) MIR arg
             # local so backends render actual port names, not arg0/arg1/arg2.
             var name_bldr = self.builder
@@ -179,7 +180,7 @@ impl MirLowering:
             match param.type_.kind:
                 case Named(type_symbol, _):
                     val parameter_type = self.symbols.get_symbol(type_symbol)
-                    val is_named_struct = parameter_type != nil and self.struct_field_order.has(parameter_type.name)
+                    val is_named_struct = parameter_type != nil and rt_dict_contains(self.struct_field_order, parameter_type.name)
                     if is_named_struct and (is_me_receiver or is_mut_param):
                         # Bind the receiver/mut-param directly to the raw
                         # incoming arg local (already mapped via
@@ -241,9 +242,7 @@ impl MirLowering:
                         )
                         self.builder = agg_bldr
                         self.struct_value_syms[copy_local.id] = parameter_type.name
-                        if val copy_symbol = param.symbol:
-                            if copy_symbol != nil:
-                                self.local_map[copy_symbol.id] = copy_local
+                        self.bind_local(param_symbol_id, copy_local)
                 case _:
                     ()
             pli = pli + 1
@@ -615,7 +614,7 @@ impl MirLowering:
         val type_sym = self.expr_type_symbol(base)
         if val found_type_sym = type_sym:
             val sym_id = self.symbol_id_value(found_type_sym)
-            if self.field_map.has(sym_id):
+            if rt_dict_contains(self.field_map, sym_id):
                 val fields = self.field_map[sym_id]
                 val n = fields.len()
                 var idx = 0
@@ -624,7 +623,7 @@ impl MirLowering:
                         return idx
                     idx = idx + 1
             val type_symbol = self.symbols.get_symbol(found_type_sym)
-            if type_symbol != nil and self.struct_field_order.has(type_symbol.name):
+            if type_symbol != nil and rt_dict_contains(self.struct_field_order, type_symbol.name):
                 val named_fields = self.struct_field_order[type_symbol.name]
                 var named_idx = 0
                 while named_idx < named_fields.len():
@@ -635,10 +634,12 @@ impl MirLowering:
         # Fallback: the base is a locally-constructed struct value with no HIR
         # type annotation (`val p = Point(...)`). Recover the struct name from
         # struct_value_syms keyed by the base local (mirrors bitfield_value_syms).
-        val vname = self.struct_value_syms.get(base_local.id)
+        var vname: text? = nil
+        if rt_dict_contains(self.struct_value_syms, base_local.id):
+            vname = self.struct_value_syms[base_local.id]
         if vname != nil:
             val nm = vname ?? ""
-            if self.struct_field_order.has(nm):
+            if rt_dict_contains(self.struct_field_order, nm):
                 val vfields = self.struct_field_order[nm]
                 val vn = vfields.len()
                 var vidx = 0
@@ -666,7 +667,9 @@ impl MirLowering:
             val type_symbol = self.symbols.get_symbol(found_type_sym)
             if type_symbol != nil:
                 return Some(type_symbol.name)
-        self.struct_value_syms.get(base_local.id)
+        if rt_dict_contains(self.struct_value_syms, base_local.id):
+            return Some(self.struct_value_syms[base_local.id])
+        nil
 
     fn expr_type_symbol(expr: HirExpr) -> SymbolId?:
         """Determine the type symbol of an expression from its HIR type annotation."""

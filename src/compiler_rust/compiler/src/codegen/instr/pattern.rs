@@ -98,15 +98,20 @@ pub(crate) fn compile_pattern_bind<M: Module>(
     subject: VReg,
     binding: &PatternBinding,
 ) {
-    let current = ctx.vreg_values[&subject];
-
-    let result = if binding.path.iter().any(|s| matches!(s, BindingStep::EnumPayload)) {
-        // All enums use rt_enum_new format, so use rt_enum_payload consistently
-        call_runtime_1(ctx, builder, "rt_enum_payload", current)
-    } else {
-        current
-    };
-    ctx.vreg_values.insert(dest, result);
+    let mut current = ctx.vreg_values[&subject];
+    for step in &binding.path {
+        current = match step {
+            BindingStep::EnumPayload => call_runtime_1(ctx, builder, "rt_enum_payload", current),
+            BindingStep::TupleIndex(index) => {
+                let index_value = builder.ins().iconst(types::I64, i64::from(*index));
+                call_runtime_2(ctx, builder, "rt_tuple_get", current, index_value)
+            }
+            // Cranelift does not yet carry field offsets in FieldName, matching
+            // the LLVM backend's current pass-through behavior.
+            BindingStep::FieldName(_) => current,
+        };
+    }
+    ctx.vreg_values.insert(dest, current);
 }
 
 /// Calculate discriminant for enum variant (stub - returns hash of name)

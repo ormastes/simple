@@ -18,6 +18,11 @@ struct MirLowering:
     builder: MirBuilder
     symbols: SymbolTable
     local_map: Dict<i64, LocalId>
+    # Native-safe authoritative scope bindings. The staged compiler cannot
+    # reliably mutate or query Dict<i64, LocalId>; indexed parallel arrays keep
+    # symbol lookup deterministic without Optional or wrapper destructuring.
+    local_symbol_ids: [i64]
+    local_symbol_values: [LocalId]
     current_function_symbols: [SymbolId]
     current_function_names: [text]
     loop_stack: [(BlockId, BlockId)]  # (continue_block, break_block)
@@ -172,6 +177,32 @@ struct MirLowering:
     # mir_lowering_stmts.spl's `lower_assign_var` write hook (to emit
     # `StoreGlobal` for the mutable subset).
     global_symbol_ids: Dict<i64, bool>
+
+impl MirLowering:
+    me bind_local(symbol_id: i64, local: LocalId):
+        if symbol_id < 0 or local.id < 0:
+            return
+        var ids = self.local_symbol_ids
+        var values = self.local_symbol_values
+        var i = 0
+        while i < ids.len():
+            if ids[i] == symbol_id:
+                values[i] = local
+                self.local_symbol_values = values
+                return
+            i = i + 1
+        ids.push(symbol_id)
+        values.push(local)
+        self.local_symbol_ids = ids
+        self.local_symbol_values = values
+
+    fn find_local(symbol_id: i64) -> LocalId:
+        var i = self.local_symbol_ids.len() - 1
+        while i >= 0:
+            if self.local_symbol_ids[i] == symbol_id:
+                return self.local_symbol_values[i]
+            i = i - 1
+        LocalId(id: -1)
 
 struct MirError:
     """MIR lowering error."""

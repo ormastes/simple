@@ -318,6 +318,13 @@ pub static STRING_METHODS: &[MethodInfo] = &[
         description: "replaces occurrences of pattern",
     },
     MethodInfo {
+        name: "rfind",
+        runtime_fn: RuntimeFn::Simple("rt_string_rfind"),
+        param_count: 1,
+        is_mutating: false,
+        description: "finds the last substring position",
+    },
+    MethodInfo {
         name: "chars",
         runtime_fn: RuntimeFn::Simple("rt_string_chars"),
         param_count: 0,
@@ -585,6 +592,25 @@ pub static FLOAT_METHODS: &[MethodInfo] = &[
         is_mutating: false,
         description: "returns base-10 logarithm",
     },
+];
+
+/// Compatibility aliases emitted for default methods from the standard traits module.
+pub static COMPATIBILITY_METHOD_ALIASES: &[(&str, &str, &str)] = &[
+    (
+        "compiler_rust__lib__std__src__core__traits__Len_dot_is_empty",
+        "Len",
+        "is_empty",
+    ),
+    (
+        "compiler_rust__lib__std__src__core__traits__ExactSizeIterator_dot_is_empty",
+        "ExactSizeIterator",
+        "is_empty",
+    ),
+    (
+        "compiler_rust__lib__std__src__core__traits__DoubleEndedIterator_dot_rfind",
+        "DoubleEndedIterator",
+        "rfind",
+    ),
 ];
 
 /// All built-in methods for convenient iteration.

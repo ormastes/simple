@@ -24,6 +24,22 @@ fn archive_is_fresh_for_runtime_inputs(archive: &Path, runtime_root: &Path, inpu
     })
 }
 
+pub(crate) fn runtime_inputs_fingerprint(runtime_root: &Path, inputs: &[&str]) -> Option<String> {
+    // Stable FNV-1a is sufficient for cache invalidation and avoids a hashing dependency.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for input in inputs {
+        for byte in input.as_bytes().iter().chain([0].iter()) {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        for byte in std::fs::read(runtime_root.join(input)).ok()? {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    Some(format!("{hash:016x}"))
+}
+
 fn archive_has_exact_runtime_members(archive: &Path, inputs: &[&str]) -> bool {
     let tool = find_archive_tool();
     let output = archive_list_command(&tool, archive).output();
@@ -175,6 +191,32 @@ pub(crate) fn target_cxx_compiler(target: simple_common::target::Target) -> Stri
         .unwrap_or_else(find_cxx_compiler)
 }
 
+/// Return the linker arguments for terminfo symbols used by hosted LLVM.
+pub(crate) fn terminfo_link_args(target: simple_common::target::Target) -> Vec<String> {
+    if target.os != simple_common::target::TargetOS::Linux {
+        return Vec::new();
+    }
+
+    if target.is_host() {
+        if let Ok(output) = std::process::Command::new("pkg-config")
+            .args(["--libs", "tinfo"])
+            .output()
+        {
+            if output.status.success() {
+                let args = String::from_utf8_lossy(&output.stdout)
+                    .split_whitespace()
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>();
+                if !args.is_empty() {
+                    return args;
+                }
+            }
+        }
+    }
+
+    vec!["-ltinfo".to_string()]
+}
+
 fn host_archive_name() -> &'static str {
     #[cfg(target_os = "windows")]
     {
@@ -235,7 +277,7 @@ fn find_core_c_runtime_source_root() -> Option<PathBuf> {
     None
 }
 
-pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
+fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Option<PathBuf> {
     let archive = build_dir.join(host_archive_name());
     let runtime_root = find_core_c_runtime_source_root()?;
     let mut runtime_inputs = vec![
@@ -260,10 +302,17 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
     if std::env::var("SIMPLE_CORE_C_INCLUDE_HTTPS_OPENSSL").ok().as_deref() == Some("1") {
         runtime_inputs.push("runtime_https_openssl_core.c");
     }
+    if include_stage4_hosted {
+        runtime_inputs.extend(["runtime_font.c", "runtime_memtrack.c", "runtime_sqlite.c"]);
+    }
+
+    let fingerprint = runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?;
+    let fingerprint_path = build_dir.join(format!("{}.inputs.fingerprint", host_archive_name()));
 
     if has_nonempty_archive_payload(&archive)
         && archive_is_fresh_for_runtime_inputs(&archive, &runtime_root, &runtime_inputs)
         && archive_has_exact_runtime_members(&archive, &runtime_inputs)
+        && std::fs::read_to_string(&fingerprint_path).ok().as_deref() == Some(fingerprint.as_str())
     {
         return Some(archive);
     }
@@ -307,10 +356,19 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
         .status()
         .ok()?;
     if status.success() && has_nonempty_archive_payload(&archive) {
+        std::fs::write(fingerprint_path, fingerprint).ok()?;
         Some(archive)
     } else {
         None
     }
+}
+
+pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
+    build_c_runtime_library(build_dir, false)
+}
+
+pub(crate) fn build_stage4_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
+    build_c_runtime_library(build_dir, true)
 }
 
 /// Find the pure-Simple core runtime library.

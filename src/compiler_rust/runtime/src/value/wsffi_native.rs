@@ -107,8 +107,9 @@ pub extern "C" fn spl_dlclose(handle: i64) -> i64 {
 /// `args_rv` is a tagged RuntimeValue representing an Array of i64 values.
 /// `nargs` is the argument count.
 ///
-/// Each element in the array is a RuntimeValue whose raw `.0` field is the
-/// i64 value to pass (since Simple pushes raw i64s into the array).
+/// Each element in the array is a tagged Simple integer. Decode it before
+/// crossing the C ABI; forwarding `.0` would shift every argument left by the
+/// integer tag width.
 #[no_mangle]
 pub extern "C" fn spl_wffi_call_i64(fptr: i64, args_rv: RuntimeValue, nargs: i64) -> i64 {
     if fptr == 0 {
@@ -119,9 +120,7 @@ pub extern "C" fn spl_wffi_call_i64(fptr: i64, args_rv: RuntimeValue, nargs: i64
     let mut raw_args: [i64; 8] = [0; 8];
     for (i, slot) in raw_args.iter_mut().enumerate().take(n.min(8)) {
         let val = rt_array_get(args_rv, i as i64);
-        // The array elements are RuntimeValues containing the raw i64 values.
-        // Extract the underlying u64 and reinterpret as i64.
-        *slot = val.0 as i64;
+        *slot = val.as_int();
     }
 
     type Fn0 = unsafe extern "C" fn() -> i64;
@@ -263,6 +262,22 @@ fn runtime_value_to_f64(value: RuntimeValue) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::collections::{rt_array_new, rt_array_push};
+
+    unsafe extern "C" fn i64_two_args(a: i64, b: i64) -> i64 {
+        a + b
+    }
+
+    #[test]
+    fn spl_wffi_call_i64_decodes_tagged_integer_arguments() {
+        let args = rt_array_new(2);
+        assert!(rt_array_push(args, RuntimeValue::from_int(0x24c_7468)));
+        assert!(rt_array_push(args, RuntimeValue::from_int(7)));
+
+        let result = spl_wffi_call_i64(i64_two_args as usize as i64, args, 2);
+
+        assert_eq!(result, 0x24c_746f);
+    }
 
     unsafe extern "C" fn f64_no_args() -> f64 {
         6.25

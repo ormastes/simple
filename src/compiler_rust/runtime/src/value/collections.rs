@@ -460,6 +460,9 @@ pub extern "C" fn rt_byte_array_new_len(len: u64) -> RuntimeValue {
 /// Get the length of an array
 #[no_mangle]
 pub extern "C" fn rt_array_len(array: RuntimeValue) -> i64 {
+    if array.to_raw() & !7 == 0 {
+        return 0;
+    }
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
     unsafe { (*arr).len as i64 }
 }
@@ -488,6 +491,11 @@ pub extern "C" fn rt_array_get(array: RuntimeValue, index: i64) -> RuntimeValue 
         }
         (*arr).as_slice()[idx as usize]
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_array_get_i64_raw(array: RuntimeValue, index: i64) -> i64 {
+    rt_array_get(array, index).to_raw() as i64
 }
 
 /// Get a text element from a word-backed array.
@@ -847,6 +855,11 @@ pub extern "C" fn rt_typed_words_u64_set(array: RuntimeValue, index: i64, value:
 #[no_mangle]
 pub extern "C" fn rt_array_push(array: RuntimeValue, value: RuntimeValue) -> bool {
     rt_array_push_grow(array, value)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_array_push_i64_raw(array: RuntimeValue, value: i64) -> bool {
+    rt_array_push_grow(array, RuntimeValue::from_raw(value as u64))
 }
 
 /// Push a raw byte into a `[u8]`-style runtime array without RuntimeValue boxing.

@@ -11,6 +11,7 @@ use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
+use std.alloc.sffi.{rt_dict_contains}
 
 # ============================================================================
 # HIR Module Structure
@@ -187,6 +188,7 @@ enum ScopeKind:
 class SymbolTable:
     """Symbol table for name resolution."""
     symbols: Dict<i64, Symbol>
+    display_names: [text]
     scopes: Dict<i64, Scope>
     current_scope: ScopeId
     next_symbol_id: i64
@@ -196,6 +198,7 @@ impl SymbolTable:
     static fn new() -> SymbolTable:
         var table = SymbolTable(
             symbols: {},
+            display_names: [],
             scopes: {},
             current_scope: ScopeId(id: 0),
             next_symbol_id: 0,
@@ -231,14 +234,15 @@ impl SymbolTable:
 
         if is_type_symbol:
             val scope = self.scopes[self.current_scope.id]
-            val existing = scope.symbols.get(name)
-            if existing != nil:
+            if rt_dict_contains(scope.symbols, name):
+                val existing: i64 = scope.symbols[name]
                 # Already registered — return the existing id (first-write-wins)
                 return SymbolId(id: existing)
 
         val raw_id = self.next_symbol_id
         val id = SymbolId(id: raw_id)
         self.next_symbol_id = raw_id + 1
+        self.display_names = self.display_names.push(name)
 
         val symbol = HirSymbol(
             id: id,
@@ -270,21 +274,16 @@ impl SymbolTable:
 
         loop:
             val scope = self.scopes[scope_id.id]
-            # `if scope.symbols.contains(name): return scope.symbols[name]`
-            # tripped the interpreter's known Dict-lookup defect (a `contains`
-            # + bracket-index re-fetch pattern silently yielding nil instead
-            # of the stored value -- see doc/08_tracking/bug/
-            # vhdl_backend_spec_remaining_failures_2026-07-02.md). Use the
-            # plain nil-check idiom on a single `.get()` call instead.
-            val found = scope.symbols.get(name)
-            if found != nil:
+            # Route through the Dict runtime owner. Compiled `.get()` calls can
+            # collide with unrelated same-named methods after field type erasure.
+            if rt_dict_contains(scope.symbols, name):
+                val found: i64 = scope.symbols[name]
                 return Some(SymbolId(id: found))
 
-            match scope.parent:
-                case Some(parent):
-                    scope_id = parent
-                case nil:
-                    break
+            if scope.parent.?:
+                scope_id = scope.parent.unwrap()
+            else:
+                break
 
         nil
 
@@ -294,15 +293,14 @@ impl SymbolTable:
 
         loop:
             val scope = self.scopes[scope_id.id]
-            val found = scope.symbols.get(name)
-            if found != nil:
+            if rt_dict_contains(scope.symbols, name):
+                val found: i64 = scope.symbols[name]
                 return SymbolId(id: found)
 
-            match scope.parent:
-                case Some(parent):
-                    scope_id = parent
-                case nil:
-                    break
+            if scope.parent.?:
+                scope_id = scope.parent.unwrap()
+            else:
+                break
 
         SymbolId(id: -1)
 
@@ -339,9 +337,9 @@ impl SymbolTable:
         bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
         match id:
             case SymbolId(raw):
-                val found: Symbol? = self.symbols[raw]
-                if val sym = found:
-                    return sym.name
+                if raw >= 0:
+                    if raw < self.display_names.len():
+                        return self.display_names[raw]
                 fallback
             case _:
                 fallback
@@ -356,6 +354,9 @@ impl SymbolTable:
         bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
         match id:
             case SymbolId(raw):
+                if raw >= 0:
+                    if raw < self.display_names.len():
+                        self.display_names[raw] = new_name
                 val found: Symbol? = self.symbols[raw]
                 if val sym = found:
                     var renamed = sym
@@ -383,11 +384,8 @@ impl SymbolTable:
     me pop_scope():
         """Pop current scope."""
         val scope = self.scopes[self.current_scope.id]
-        match scope.parent:
-            case Some(parent):
-                self.current_scope = parent
-            case nil:
-                pass
+        if scope.parent.?:
+            self.current_scope = scope.parent.unwrap()
 
     # ========================================================================
     # Method Resolution Helpers (for UFCS support)

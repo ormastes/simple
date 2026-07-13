@@ -159,6 +159,13 @@ fn simpleos_freestanding_linker_script_defaults_and_overrides() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn test_native_all_link_args_include_terminfo() {
+    let args = super::tools::terminfo_link_args(simple_common::target::Target::host());
+    assert!(args.iter().any(|arg| arg == "-ltinfo"), "terminfo args: {args:?}");
+}
+
 fn with_core_c_https_openssl_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
     let previous = std::env::var("SIMPLE_CORE_C_INCLUDE_HTTPS_OPENSSL").ok();
     match value {
@@ -793,6 +800,129 @@ fn test_entry_closure_handles_shared_import_fan_in() {
 }
 
 #[test]
+fn test_entry_closure_follows_function_local_imports() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_dir = project_root.join("src");
+    std::fs::create_dir_all(src_dir.join("app")).unwrap();
+    std::fs::create_dir_all(src_dir.join("lib")).unwrap();
+    let entry = src_dir.join("app/main.spl");
+    let helper = src_dir.join("lib/helper.spl");
+    std::fs::write(&entry, "fn main():\n    use lib.helper.{value}\n    print value()\n").unwrap();
+    std::fs::write(&helper, "fn value() -> i64:\n    1\n").unwrap();
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(src_dir)
+        .entry_file(entry);
+    let files = builder.discover_files().unwrap();
+    assert!(files.iter().any(|path| same_file_path(path, &helper)));
+}
+
+#[test]
+fn test_entry_closure_expands_bare_export_package_facades() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_dir = project_root.join("src");
+    let package = src_dir.join("lib/facade");
+    std::fs::create_dir_all(src_dir.join("app")).unwrap();
+    std::fs::create_dir_all(&package).unwrap();
+    let entry = src_dir.join("app/main.spl");
+    let init = package.join("__init__.spl");
+    let implementation = package.join("serializer.spl");
+    let unrelated = package.join("unrelated.spl");
+    std::fs::write(&entry, "use lib.facade.{encode}\nfn main():\n    print encode()\n").unwrap();
+    std::fs::write(&init, "export encode\n").unwrap();
+    std::fs::write(&implementation, "fn encode() -> text:\n    \"ok\"\n").unwrap();
+    std::fs::write(&unrelated, "fn decode() -> text:\n    \"no\"\n").unwrap();
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(src_dir)
+        .entry_file(entry);
+    let files = builder.discover_files().unwrap();
+    assert!(files.iter().any(|path| same_file_path(path, &init)));
+    assert!(files.iter().any(|path| same_file_path(path, &implementation)));
+    assert!(!files.iter().any(|path| same_file_path(path, &unrelated)));
+    assert_eq!(files.len(), 3);
+}
+
+#[test]
+fn test_entry_closure_follows_bare_export_facade_to_owner_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_dir = project_root.join("src");
+    let package = src_dir.join("lib/facade");
+    let owner_package = src_dir.join("lib/owner");
+    std::fs::create_dir_all(src_dir.join("app")).unwrap();
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::create_dir_all(&owner_package).unwrap();
+    let entry = src_dir.join("app/main.spl");
+    let init = package.join("__init__.spl");
+    let facade = package.join("mod.spl");
+    let aliased = package.join("aliased.spl");
+    let owner = owner_package.join("mod.spl");
+    let unrelated = package.join("unrelated.spl");
+    std::fs::write(&entry, "use lib.facade.{encode}\nfn main():\n    print encode()\n").unwrap();
+    std::fs::write(&init, "export encode\n").unwrap();
+    std::fs::write(&facade, "export use lib.owner.mod.{encode}\n").unwrap();
+    std::fs::write(&aliased, "export use lib.owner.mod.{encode as renamed}\n").unwrap();
+    std::fs::write(&owner, "fn encode() -> text:\n    \"ok\"\n").unwrap();
+    std::fs::write(&unrelated, "fn decode() -> text:\n    \"no\"\n").unwrap();
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(src_dir)
+        .entry_file(entry);
+    let files = builder.discover_files().unwrap();
+    assert!(files.iter().any(|path| same_file_path(path, &init)));
+    assert!(files.iter().any(|path| same_file_path(path, &facade)));
+    assert!(files.iter().any(|path| same_file_path(path, &owner)));
+    assert!(!files.iter().any(|path| same_file_path(path, &aliased)));
+    assert!(!files.iter().any(|path| same_file_path(path, &unrelated)));
+    assert_eq!(files.len(), 4);
+}
+
+#[test]
+fn test_entry_closure_follows_extend_method_imports() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_dir = project_root.join("src");
+    std::fs::create_dir_all(src_dir.join("app")).unwrap();
+    std::fs::create_dir_all(src_dir.join("lib")).unwrap();
+    let entry = src_dir.join("app/main.spl");
+    let extension = src_dir.join("lib/extended.spl");
+    let helper = src_dir.join("lib/helper.spl");
+    std::fs::write(&entry, "use lib.extended.*\nfn main():\n    pass\n").unwrap();
+    std::fs::write(
+        &extension,
+        "extend Widget:\n    fn value():\n        use lib.helper.{helper}\n        helper()\n",
+    )
+    .unwrap();
+    std::fs::write(&helper, "fn helper():\n    pass\n").unwrap();
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(src_dir)
+        .entry_file(entry);
+    let files = builder.discover_files().unwrap();
+    assert!(files.iter().any(|path| same_file_path(path, &extension)));
+    assert!(files.iter().any(|path| same_file_path(path, &helper)));
+}
+
+#[test]
 fn test_entry_closure_resolves_project_src_imports_from_narrow_source_roots() {
     let temp = tempfile::tempdir().unwrap();
     let project_root = temp.path().join("project");
@@ -1062,12 +1192,17 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     let core_c = with_core_c_https_openssl_env(None, || {
         build_core_c_runtime_library(temp.path()).expect("core-c runtime archive should build")
     });
-    assert!(
-        runtime_archive_has_core_required_symbols(&core_c),
-        "core-c runtime archive is missing one or more core-required ABI symbols: {}",
-        core_c.display()
-    );
     let core_c_symbols = archive_defined_symbols(&core_c).expect("core-c runtime symbols should be readable");
+    let missing = simple_common::CORE_REQUIRED_RUNTIME_SYMBOLS
+        .iter()
+        .filter(|symbol| !core_c_symbols.contains(symbol.trim_start_matches('_')))
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(
+        missing.is_empty() && runtime_archive_has_core_required_symbols(&core_c),
+        "core-c runtime archive is missing core-required ABI symbols: {missing:?} ({})",
+        core_c.display(),
+    );
     assert!(
         core_c_symbols.contains("simd_text_init"),
         "core-c runtime archive must include runtime_simd_utf8.c because runtime_native.c calls simd_text_init"
@@ -1080,10 +1215,36 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
         core_c_symbols.contains("spl_thread_cpu_count"),
         "core-c runtime archive must include the legacy thread CPU-count ABI used by std.thread_sffi"
     );
-    assert!(
-        core_c_symbols.contains("rt_array_concat"),
-        "core-c runtime archive must include the array concatenation ABI emitted for array +"
-    );
+    assert!(core_c_symbols.contains("rt_crc32_text"));
+    assert!(core_c_symbols.contains("rt_file_create_excl"));
+    assert!(core_c_symbols.contains("rt_file_sync"));
+    assert!(core_c_symbols.contains("rt_bytes_alloc"));
+    assert!(core_c_symbols.contains("rt_invlpg"));
+    assert!(core_c_symbols.contains("serial_println"));
+    assert!(core_c_symbols.contains("unsafe_addr_of"));
+    for symbol in [
+        "rt_array_concat",
+        "rt_is_none",
+        "rt_math_pow",
+        "rt_memory_barrier",
+        "rt_read_cr3",
+        "rt_read_cr3_raw",
+        "rt_volatile_read_u8",
+        "rt_volatile_read_u16",
+        "rt_volatile_read_u32",
+        "rt_volatile_read_u64",
+        "rt_volatile_write_u8",
+        "rt_volatile_write_u16",
+        "rt_volatile_write_u32",
+        "rt_volatile_write_u64",
+        "rt_write_cr3",
+        "rt_write_cr3_raw",
+    ] {
+        assert!(
+            core_c_symbols.contains(symbol),
+            "core-c runtime archive missing {symbol}"
+        );
+    }
     for symbol in simple_common::RUNTIME_SYMBOL_NAMES
         .iter()
         .copied()
@@ -1126,6 +1287,35 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
             simple_core.display()
         );
     }
+}
+
+#[test]
+fn test_stage4_c_runtime_archive_includes_hosted_font_and_sqlite() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let archive = build_stage4_c_runtime_library(temp.path()).expect("Stage 4 C runtime archive should build");
+    let symbols = archive_defined_symbols(&archive).expect("Stage 4 C runtime symbols should be readable");
+    assert!(symbols.contains("rt_font_glyph_bitmap"));
+    assert!(symbols.contains("rt_sqlite_open"));
+    assert!(symbols.contains("spl_memtrack_enable"));
+    assert!(symbols.contains("spl_memtrack_disable"));
+    assert!(symbols.contains("spl_memtrack_snapshot"));
+    assert!(symbols.contains("spl_memtrack_dump_since"));
+}
+
+#[test]
+fn test_runtime_inputs_fingerprint_tracks_names_and_content() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("runtime.c"), b"one").unwrap();
+    std::fs::write(temp.path().join("runtime.h"), b"header").unwrap();
+
+    let initial = runtime_inputs_fingerprint(temp.path(), &["runtime.c", "runtime.h"]).unwrap();
+    std::fs::write(temp.path().join("runtime.c"), b"two").unwrap();
+    let changed_content = runtime_inputs_fingerprint(temp.path(), &["runtime.c", "runtime.h"]).unwrap();
+    let changed_names = runtime_inputs_fingerprint(temp.path(), &["runtime.h", "runtime.c"]).unwrap();
+
+    assert_ne!(initial, changed_content);
+    assert_ne!(changed_content, changed_names);
 }
 
 #[test]
@@ -2088,6 +2278,41 @@ fn test_stage4_compiler_entries_select_only_dedicated_compiler_backfill() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn test_core_c_runtime_native_focus_contract() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = build_core_c_runtime_library(temp.path()).expect("core-c runtime archive should build");
+    let executable = temp.path().join("runtime_native_focus_test");
+    let status = std::process::Command::new(find_c_compiler())
+        .arg("-I")
+        .arg(repo_root.join("src/runtime"))
+        .arg(repo_root.join("test/01_unit/runtime/runtime_native_focus_test.c"))
+        .arg(&runtime)
+        .args(["-lpthread", "-ldl", "-lm"])
+        .arg("-o")
+        .arg(&executable)
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to compile runtime_native_focus_test.c");
+    let output = std::process::Command::new(&executable).output().unwrap();
+    assert!(
+        output.status.success(),
+        "runtime native focus contract failed: status={} stdout={:?} stderr={:?}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn test_stage4_compiler_entries_prepare_dedicated_backfill_through_gate() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
@@ -2281,6 +2506,31 @@ fn test_runtime_bundle_host_gpu_rejects_missing_engine2d_queue_symbols() {
     let error = builder.selected_runtime_library(temp.path()).unwrap_err();
     assert!(error.contains("missing Engine2D queue symbols"));
     assert!(error.contains("rt_host_gpu_queue_emit_payload"));
+}
+
+#[test]
+fn test_runtime_bundle_hosted_is_allowed_for_authorized_stage4_cli() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
+    unsafe { std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", "1") };
+    let temp = tempfile::tempdir().unwrap();
+    let native_all = temp.path().join("libsimple_native_all.a");
+    std::fs::write(&native_all, b"all").unwrap();
+
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "rust-hosted".to_string();
+    let mut builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("simple")).config(config);
+    builder.entry_file = Some(PathBuf::from("/project/src/app/cli/main.spl"));
+
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert_eq!(selected, (native_all, true));
+    match old_stage4 {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP_STAGE4") },
+    }
 }
 
 #[test]
@@ -2746,6 +2996,179 @@ fn test_build_import_map_skips_pass_only_trait_methods() {
 }
 
 #[test]
+fn test_build_import_map_records_cross_module_trait_implementations() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    let trait_path = lib_root.join("fs/block_device.spl");
+    let impl_path = lib_root.join("fs/mem_block_device.spl");
+    std::fs::create_dir_all(trait_path.parent().unwrap()).unwrap();
+    std::fs::write(&trait_path, "trait BlockDevice:\n    fn sector_size() -> u32\n").unwrap();
+    std::fs::write(
+        &impl_path,
+        "struct MemBlockDevice:\n    size: u32\n\nimpl BlockDevice for MemBlockDevice:\n    fn sector_size() -> u32:\n        self.size\n",
+    )
+    .unwrap();
+
+    let file_sources = vec![
+        (trait_path.clone(), std::fs::read_to_string(&trait_path).unwrap()),
+        (impl_path.clone(), std::fs::read_to_string(&impl_path).unwrap()),
+    ];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+
+    assert_eq!(
+        result.trait_impls.get("BlockDevice"),
+        Some(&vec!["MemBlockDevice".to_string()])
+    );
+}
+
+#[test]
+fn test_build_import_map_records_optional_struct_return_types() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let os_root = src_root.join("os");
+    let mapping_path = os_root.join("kernel/mapping.spl");
+    std::fs::create_dir_all(mapping_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &mapping_path,
+        "struct MemoryRuntimeMapping:\n    allocation_id: u64\n    owner_id: u64\n\nfn find_mapping(id: u64) -> MemoryRuntimeMapping?:\n    nil\n",
+    )
+    .unwrap();
+
+    let file_sources = vec![(mapping_path.clone(), std::fs::read_to_string(&mapping_path).unwrap())];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&os_root), &src_root);
+
+    assert_eq!(
+        result.fn_return_types.get("find_mapping"),
+        Some(&simple_parser::Type::Optional(Box::new(simple_parser::Type::Simple(
+            "MemoryRuntimeMapping".to_string()
+        ))))
+    );
+}
+
+#[test]
+fn test_build_import_map_records_primitive_return_types() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let os_root = src_root.join("os");
+    let vmm_path = os_root.join("kernel/memory/vmm_core.spl");
+    std::fs::create_dir_all(vmm_path.parent().unwrap()).unwrap();
+    std::fs::write(&vmm_path, "fn vmm_read_pte(addr: u64) -> u64:\n    addr\n").unwrap();
+
+    let file_sources = vec![(vmm_path.clone(), std::fs::read_to_string(&vmm_path).unwrap())];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&os_root), &src_root);
+
+    assert_eq!(
+        result.fn_return_types.get("vmm_read_pte"),
+        Some(&simple_parser::Type::Simple("u64".to_string()))
+    );
+}
+
+#[test]
+fn test_global_primitive_return_keeps_native_comparison_typed() {
+    let source = "struct SwapTxn:\n    source_phys_addr: u64\n\nfn changed(txn: SwapTxn) -> bool:\n    val current = vmm_read_pte(0)\n    return current != txn.source_phys_addr\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_lenient_types(true);
+    lowerer.set_global_fn_return_types(std::sync::Arc::new(std::collections::HashMap::from([(
+        "vmm_read_pte".to_string(),
+        simple_parser::Type::Simple("u64".to_string()),
+    )])));
+
+    let lowered = lowerer.lower_module(&ast).unwrap();
+    let changed = lowered
+        .functions
+        .iter()
+        .find(|function| function.name == "changed")
+        .unwrap();
+    let current = changed.locals.iter().find(|local| local.name == "current").unwrap();
+    assert_eq!(current.ty, crate::hir::TypeId::U64);
+    let crate::hir::HirStmt::Return(Some(expr)) = &changed.body[1] else {
+        panic!("expected comparison return");
+    };
+    let crate::hir::HirExprKind::Binary { left, right, .. } = &expr.kind else {
+        panic!("expected binary comparison");
+    };
+    assert_eq!(left.ty, crate::hir::TypeId::U64);
+    assert_eq!(right.ty, crate::hir::TypeId::U64);
+}
+
+#[test]
+fn test_cross_module_optional_struct_match_keeps_payload_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let os_root = src_root.join("os");
+    let memory_root = os_root.join("kernel/memory");
+    std::fs::create_dir_all(&memory_root).unwrap();
+
+    let manager_path = memory_root.join("memory_leveling_manager.spl");
+    let runtime_path = memory_root.join("memory_leveling_runtime.spl");
+    let caller_path = memory_root.join("memory_swap_runtime.spl");
+    std::fs::write(
+        &manager_path,
+        "struct MemoryRuntimeMapping:\n    allocation_id: u64\n    owner_id: u64\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &runtime_path,
+        "use os.kernel.memory.memory_leveling_manager.MemoryRuntimeMapping\n\nfn find_mapping(id: u64) -> MemoryRuntimeMapping?:\n    nil\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &caller_path,
+        "use os.kernel.memory.memory_leveling_runtime.find_mapping\n\nfn owner() -> u64:\n    match find_mapping(1):\n        Some(mapping):\n            return mapping.owner_id\n        None:\n            return 0\n",
+    )
+    .unwrap();
+
+    let paths = [&manager_path, &runtime_path, &caller_path];
+    let file_sources: Vec<_> = paths
+        .iter()
+        .map(|path| ((*path).clone(), std::fs::read_to_string(path).unwrap()))
+        .collect();
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&os_root), &src_root);
+
+    let mut field_indices: std::collections::HashMap<String, std::collections::HashSet<usize>> =
+        std::collections::HashMap::new();
+    for fields in result.struct_defs.values() {
+        for (index, (field_name, _)) in fields.iter().enumerate() {
+            field_indices.entry(field_name.clone()).or_default().insert(index);
+        }
+    }
+    let ambiguous = field_indices
+        .into_iter()
+        .filter_map(|(name, indices)| (indices.len() > 1).then_some(name))
+        .collect();
+
+    let caller_source = std::fs::read_to_string(&caller_path).unwrap();
+    let ast = simple_parser::Parser::new(&caller_source).parse().unwrap();
+    let resolver = crate::module_resolver::ModuleResolver::new(project_root, os_root.clone())
+        .with_extra_source_roots(vec![src_root, os_root]);
+    let mut lowerer = crate::hir::Lowerer::with_module_resolver(resolver, caller_path);
+    lowerer.set_lenient_types(true);
+    lowerer.set_global_struct_defs(std::sync::Arc::new(result.struct_defs));
+    lowerer.set_duplicate_global_struct_defs(std::sync::Arc::new(result.duplicate_struct_defs));
+    lowerer.set_ambiguous_field_names(std::sync::Arc::new(ambiguous));
+    lowerer.set_global_fn_return_types(std::sync::Arc::new(result.fn_return_types));
+
+    let lowered = lowerer.lower_module(&ast).unwrap();
+    let owner = lowered
+        .functions
+        .iter()
+        .find(|function| function.name == "owner")
+        .unwrap();
+    let mapping = owner.locals.iter().find(|local| local.name == "mapping").unwrap();
+    assert!(matches!(
+        lowered.types.get(mapping.ty),
+        Some(crate::hir::HirType::Struct { name, .. }) if name == "MemoryRuntimeMapping"
+    ));
+    assert!(
+        format!("{:?}", owner.body).contains("rt_enum_payload"),
+        "materialized Option payload must be extracted before struct field access"
+    );
+}
+
+#[test]
 fn test_build_import_map_records_enum_defs_without_callable_variant_symbols() {
     let temp = tempfile::tempdir().unwrap();
     let project_root = temp.path().join("project");
@@ -3050,6 +3473,7 @@ int main(void) { app_call(); return 0; }
         ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
         all_mangled: std::sync::Arc::new(all_mangled),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -3158,6 +3582,7 @@ void __module_init_security_registry(void) {
         ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -3283,6 +3708,7 @@ int main(int argc, char** argv) {
         ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -3352,6 +3778,7 @@ int main(void) {
         ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -3418,6 +3845,7 @@ int main(void) {
         ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -3438,6 +3866,66 @@ int main(void) {
     let output = std::process::Command::new("nm").arg("-g").arg(stub_o).output().unwrap();
     assert!(output.status.success());
     assert!(!String::from_utf8_lossy(&output.stdout).contains("missing_simple_symbol"));
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn test_no_stub_fallback_keeps_resolved_simple_aliases() {
+    let _guard = no_stub_fallback_env_lock().lock().unwrap();
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    if std::process::Command::new(&cc).arg("--version").output().is_err() {
+        return;
+    }
+
+    let previous = std::env::var("SIMPLE_NO_STUB_FALLBACK").ok();
+    std::env::set_var("SIMPLE_NO_STUB_FALLBACK", "1");
+
+    let temp = tempfile::tempdir().unwrap();
+    let main_c = temp.path().join("main.c");
+    let main_o = temp.path().join("main.o");
+    std::fs::write(
+        &main_c,
+        r#"
+extern long run_check(void);
+long cli__check__run_check(void) { return 7; }
+int main(void) { return (int)run_check(); }
+"#,
+    )
+    .unwrap();
+    assert!(std::process::Command::new(&cc)
+        .args(["-c", "-ffunction-sections", "-fdata-sections"])
+        .arg(&main_c)
+        .arg("-o")
+        .arg(&main_o)
+        .status()
+        .unwrap()
+        .success());
+
+    let imports = ModuleImports {
+        import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+        ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
+        all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
+        re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
+        fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        populate_global_struct_defs: false,
+        populate_global_enum_defs: false,
+    };
+    let stub_o = super::stubs::generate_stub_object(temp.path(), &[], &main_o, &[], &imports).unwrap();
+
+    match previous.as_deref() {
+        Some(value) => std::env::set_var("SIMPLE_NO_STUB_FALLBACK", value),
+        None => std::env::remove_var("SIMPLE_NO_STUB_FALLBACK"),
+    }
+
+    let output = std::process::Command::new("nm").arg("-g").arg(stub_o).output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("run_check"));
 }
 
 #[cfg(target_os = "linux")]
@@ -4130,6 +4618,7 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),

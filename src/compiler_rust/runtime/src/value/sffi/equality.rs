@@ -1,6 +1,7 @@
 //! Value equality comparison implemented directly in Rust.
 
 use crate::value::core::RuntimeValue;
+use crate::value::collections::RuntimeArray;
 use crate::value::heap::{get_typed_ptr, HeapObjectType};
 use crate::value::objects::RuntimeEnum;
 use crate::value::{tags, RuntimeString};
@@ -13,6 +14,8 @@ pub extern "C" fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
         0
     }
 }
+
+const MAX_ARRAY_EQ_PAIRS: usize = 256;
 #[no_mangle]
 pub extern "C" fn rt_value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
     value_compare(a, b)
@@ -40,6 +43,10 @@ pub extern "C" fn rt_native_neq(a: i64, b: i64) -> i64 {
 }
 
 fn value_eq(a: RuntimeValue, b: RuntimeValue) -> bool {
+    value_eq_inner(a, b, &mut Vec::new())
+}
+
+fn value_eq_inner(a: RuntimeValue, b: RuntimeValue, visited: &mut Vec<(usize, usize)>) -> bool {
     if a.to_raw() == b.to_raw() {
         return true;
     }
@@ -48,12 +55,12 @@ fn value_eq(a: RuntimeValue, b: RuntimeValue) -> bool {
         (tags::TAG_INT, tags::TAG_INT) => a.as_int() == b.as_int(),
         (tags::TAG_FLOAT, tags::TAG_FLOAT) => a.as_float() == b.as_float(),
         (tags::TAG_SPECIAL, tags::TAG_SPECIAL) => false,
-        (tags::TAG_HEAP, tags::TAG_HEAP) => heap_value_eq(a, b),
+        (tags::TAG_HEAP, tags::TAG_HEAP) => heap_value_eq(a, b, visited),
         _ => false,
     }
 }
 
-fn heap_value_eq(a: RuntimeValue, b: RuntimeValue) -> bool {
+fn heap_value_eq(a: RuntimeValue, b: RuntimeValue, visited: &mut Vec<(usize, usize)>) -> bool {
     match (a.heap_type(), b.heap_type()) {
         (Some(HeapObjectType::String), Some(HeapObjectType::String)) => {
             let Some(sa) = get_typed_ptr::<RuntimeString>(a, HeapObjectType::String) else {
@@ -71,10 +78,106 @@ fn heap_value_eq(a: RuntimeValue, b: RuntimeValue) -> bool {
             let Some(eb) = get_typed_ptr::<RuntimeEnum>(b, HeapObjectType::Enum) else {
                 return false;
             };
-            unsafe { (*ea).discriminant == (*eb).discriminant && value_eq((*ea).payload, (*eb).payload) }
+            unsafe { (*ea).discriminant == (*eb).discriminant && value_eq_inner((*ea).payload, (*eb).payload, visited) }
+        }
+        (Some(HeapObjectType::Array), Some(HeapObjectType::Array)) => {
+            let Some(aa) = get_typed_ptr::<RuntimeArray>(a, HeapObjectType::Array) else {
+                return false;
+            };
+            let Some(ab) = get_typed_ptr::<RuntimeArray>(b, HeapObjectType::Array) else {
+                return false;
+            };
+            unsafe { array_eq(aa, ab, visited) }
         }
         _ => false,
     }
+}
+
+unsafe fn array_eq(left: *const RuntimeArray, right: *const RuntimeArray, visited: &mut Vec<(usize, usize)>) -> bool {
+    if left == right {
+        return true;
+    }
+    if (*left).len != (*right).len {
+        return false;
+    }
+    let pair = (left as usize, right as usize);
+    if visited.contains(&pair) {
+        return true;
+    }
+    if visited.len() >= MAX_ARRAY_EQ_PAIRS {
+        return false;
+    }
+    visited.push(pair);
+
+    let equal = array_eq_contents(left, right, visited);
+    visited.pop();
+    equal
+}
+
+unsafe fn array_eq_contents(
+    left: *const RuntimeArray,
+    right: *const RuntimeArray,
+    visited: &mut Vec<(usize, usize)>,
+) -> bool {
+    let len = (*left).len as usize;
+    if len > 0 && ((*left).data.is_null() || (*right).data.is_null()) {
+        return false;
+    }
+    let left_bytes = (*left).is_byte_packed();
+    let right_bytes = (*right).is_byte_packed();
+    let left_u64 = (*left).is_u64_packed();
+    let right_u64 = (*right).is_u64_packed();
+    if left_bytes && right_bytes {
+        return std::slice::from_raw_parts((*left).data as *const u8, len)
+            == std::slice::from_raw_parts((*right).data as *const u8, len);
+    }
+    if left_u64 && right_u64 {
+        return std::slice::from_raw_parts((*left).data as *const u64, len)
+            == std::slice::from_raw_parts((*right).data as *const u64, len);
+    }
+
+    for index in 0..len {
+        if left_bytes {
+            let value = *((*left).data as *const u8).add(index) as i64;
+            if right_u64 {
+                if value as u64 != *((*right).data as *const u64).add(index) {
+                    return false;
+                }
+            } else if !generic_int_eq(*(*right).data.add(index), value) {
+                return false;
+            }
+        } else if right_bytes {
+            let value = *((*right).data as *const u8).add(index) as i64;
+            if left_u64 {
+                if *((*left).data as *const u64).add(index) != value as u64 {
+                    return false;
+                }
+            } else if !generic_int_eq(*(*left).data.add(index), value) {
+                return false;
+            }
+        } else if left_u64 {
+            if !generic_int_eq(
+                *(*right).data.add(index),
+                *((*left).data as *const u64).add(index) as i64,
+            ) {
+                return false;
+            }
+        } else if right_u64 {
+            if !generic_int_eq(
+                *(*left).data.add(index),
+                *((*right).data as *const u64).add(index) as i64,
+            ) {
+                return false;
+            }
+        } else if !value_eq_inner(*(*left).data.add(index), *(*right).data.add(index), visited) {
+            return false;
+        }
+    }
+    true
+}
+
+fn generic_int_eq(value: RuntimeValue, expected: i64) -> bool {
+    value.is_int() && value.as_int() == expected
 }
 
 fn value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
@@ -152,6 +255,10 @@ fn compare_f64(a: f64, b: f64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value::collections::{
+        rt_array_new, rt_array_new_with_cap_u64, rt_array_push, rt_byte_array_new, rt_typed_bytes_u8_push,
+        rt_typed_words_u64_push,
+    };
 
     #[test]
     fn test_int_equality() {
@@ -297,5 +404,42 @@ mod tests {
         assert_eq!(rt_native_eq(a, b), 1);
         assert_eq!(rt_native_eq(a, c), 0);
         assert_eq!(rt_native_neq(a, c), 1);
+    }
+
+    #[test]
+    fn test_array_equality_handles_packed_generic_and_cycles() {
+        let packed_bytes = rt_byte_array_new(1);
+        let generic_bytes = rt_array_new(1);
+        for value in [2, 4, 6, 8, 10] {
+            assert!(rt_typed_bytes_u8_push(packed_bytes, value));
+            assert!(rt_typed_bytes_u8_push(generic_bytes, value));
+        }
+        assert_eq!(rt_value_eq(packed_bytes, generic_bytes), 1);
+
+        let packed_words = rt_array_new_with_cap_u64(1);
+        let generic_words = rt_array_new(1);
+        for value in [-1, 7, 99] {
+            assert!(rt_typed_words_u64_push(packed_words, value));
+            assert!(rt_typed_words_u64_push(generic_words, value));
+        }
+        assert_eq!(rt_value_eq(packed_words, generic_words), 1);
+
+        let cycle_left = rt_array_new(1);
+        let cycle_right = rt_array_new(1);
+        assert!(rt_array_push(cycle_left, cycle_left));
+        assert!(rt_array_push(cycle_right, cycle_right));
+        assert_eq!(rt_value_eq(cycle_left, cycle_right), 1);
+
+        let wide_left = rt_array_new(300);
+        let wide_right = rt_array_new(300);
+        for value in 0..300 {
+            let child_left = rt_array_new(1);
+            let child_right = rt_array_new(1);
+            assert!(rt_array_push(child_left, RuntimeValue::from_int(value)));
+            assert!(rt_array_push(child_right, RuntimeValue::from_int(value)));
+            assert!(rt_array_push(wide_left, child_left));
+            assert!(rt_array_push(wide_right, child_right));
+        }
+        assert_eq!(rt_value_eq(wide_left, wide_right), 1);
     }
 }

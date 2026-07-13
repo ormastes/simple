@@ -34,6 +34,7 @@
 #include <malloc.h>
 #endif
 #if !defined(_WIN32)
+#include <netdb.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -149,6 +150,136 @@ int64_t rt_cuda_device_count(void) { return 0; }
 int32_t rt_vk_available(void) { return 0; }
 int64_t rt_vulkan_is_available(void) { return 0; }
 int64_t rt_vulkan_device_count(void) { return 0; }
+
+/* Optional hosted backends are unavailable in the core C runtime. */
+#if defined(__GNUC__) || defined(__clang__)
+#define SPL_HOSTED_UNAVAILABLE_WEAK __attribute__((weak))
+#else
+#define SPL_HOSTED_UNAVAILABLE_WEAK
+#endif
+
+/* ROCm */
+bool rt_rocm_init(void) { return false; }
+bool rt_rocm_is_available(void) { return false; }
+int64_t rt_rocm_device_count(void) { return 0; }
+int64_t rt_rocm_malloc(int64_t size) { (void)size; return -3; }
+bool rt_rocm_free(int64_t ptr) { (void)ptr; return false; }
+bool rt_rocm_memset(int64_t ptr, int64_t value, int64_t size) {
+    (void)ptr; (void)value; (void)size;
+    return false;
+}
+int64_t rt_rocm_compile_hsaco(int64_t source) { (void)source; return -3; }
+int64_t rt_rocm_get_function(int64_t module, int64_t name) {
+    (void)module; (void)name;
+    return -3;
+}
+bool rt_rocm_launch_kernel(int64_t func, int64_t grid_x, int64_t grid_y,
+                           int64_t grid_z, int64_t block_x, int64_t block_y,
+                           int64_t block_z, int64_t shared_mem, int64_t args) {
+    (void)func; (void)grid_x; (void)grid_y; (void)grid_z;
+    (void)block_x; (void)block_y; (void)block_z; (void)shared_mem; (void)args;
+    return false;
+}
+bool rt_rocm_unload_module(int64_t module) { (void)module; return false; }
+
+/* ROCm Engine2D */
+int64_t rt_engine2d_rocm_upload_pixels(int64_t dst, int64_t pixels, int64_t count) {
+    (void)dst; (void)pixels; (void)count;
+    return -3;
+}
+
+/* oneAPI */
+bool rt_oneapi_init(void) { return false; }
+bool rt_oneapi_is_available(void) { return false; }
+int64_t rt_oneapi_device_count(void) { return 0; }
+int64_t rt_oneapi_malloc_device(int64_t size) { (void)size; return -3; }
+bool rt_oneapi_free(int64_t ptr) { (void)ptr; return false; }
+bool rt_oneapi_memset(int64_t ptr, int64_t value, int64_t size) {
+    (void)ptr; (void)value; (void)size;
+    return false;
+}
+int64_t rt_oneapi_compile_spirv(int64_t bytes, int64_t size) {
+    (void)bytes; (void)size;
+    return -3;
+}
+int64_t rt_oneapi_compile_opencl(int64_t source) { (void)source; return -3; }
+int64_t rt_oneapi_get_function(int64_t module, int64_t name) {
+    (void)module; (void)name;
+    return -3;
+}
+int64_t rt_oneapi_create_queue(void) { return -3; }
+bool rt_oneapi_destroy_queue(int64_t queue) { (void)queue; return false; }
+bool rt_oneapi_submit_kernel(int64_t queue, int64_t kernel,
+                              int64_t global_range, int64_t local_range) {
+    (void)queue; (void)kernel; (void)global_range; (void)local_range;
+    return false;
+}
+
+/* OpenGL */
+int64_t rt_opengl_init(int64_t width, int64_t height) {
+    (void)width; (void)height;
+    return -3;
+}
+bool rt_opengl_destroy(int64_t ctx) { (void)ctx; return false; }
+int64_t rt_opengl_is_available(void) { return 0; }
+int64_t rt_opengl_create_fbo(int64_t ctx, int64_t width, int64_t height) {
+    (void)ctx; (void)width; (void)height;
+    return -3;
+}
+bool rt_opengl_destroy_fbo(int64_t ctx, int64_t fbo) {
+    (void)ctx; (void)fbo;
+    return false;
+}
+bool rt_opengl_bind_fbo(int64_t ctx, int64_t fbo) {
+    (void)ctx; (void)fbo;
+    return false;
+}
+bool rt_opengl_clear(int64_t ctx, int64_t color) {
+    (void)ctx; (void)color;
+    return false;
+}
+bool rt_opengl_draw_image(int64_t ctx, int64_t x, int64_t y, int64_t width,
+                          int64_t height, int64_t pixels, int64_t image_width,
+                          int64_t image_height) {
+    (void)ctx; (void)x; (void)y; (void)width; (void)height;
+    (void)pixels; (void)image_width; (void)image_height;
+    return false;
+}
+
+/* Intel Engine2D */
+bool rt_intel_engine2d_set_args_blit(int64_t fb, int64_t src, int64_t x,
+                                     int64_t y, int64_t width, int64_t height,
+                                     int64_t fb_width, int64_t fb_height) {
+    (void)fb; (void)src; (void)x; (void)y; (void)width; (void)height;
+    (void)fb_width; (void)fb_height;
+    return false;
+}
+int64_t rt_intel_engine2d_upload_pixels(int64_t dst, int64_t pixels, int64_t count) {
+    (void)dst; (void)pixels; (void)count;
+    return -3;
+}
+
+/* Hosted SDL2 compositor surface. The title is unused while unavailable. */
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_sdl2_init(void) { return 0; }
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_sdl2_create_window(const char* title,
+                                                           int64_t width,
+                                                           int64_t height) {
+    (void)title; (void)width; (void)height;
+    return 0;
+}
+SPL_HOSTED_UNAVAILABLE_WEAK void rt_sdl2_clear(int64_t handle, int64_t color) {
+    (void)handle; (void)color;
+}
+SPL_HOSTED_UNAVAILABLE_WEAK void rt_sdl2_fill_rect(int64_t handle, int64_t x,
+                                                    int64_t y, int64_t width,
+                                                    int64_t height, int64_t color) {
+    (void)handle; (void)x; (void)y; (void)width; (void)height; (void)color;
+}
+SPL_HOSTED_UNAVAILABLE_WEAK void rt_sdl2_present(int64_t handle) {
+    (void)handle;
+}
+
+#undef SPL_HOSTED_UNAVAILABLE_WEAK
 
 static int64_t rt_host_gpu_queue_now_us(void) {
     struct timespec ts;
@@ -432,6 +563,12 @@ static int rt_core_dict_del(RtCoreDict* d, int64_t key);
 static RtCoreString** rt_core_string_registry = NULL;
 static size_t rt_core_string_registry_len = 0;
 static size_t rt_core_string_registry_cap = 0;
+static RtCoreArray** rt_core_array_registry = NULL;
+static size_t rt_core_array_registry_len = 0;
+static size_t rt_core_array_registry_cap = 0;
+static RtCoreEnum** rt_core_enum_registry = NULL;
+static size_t rt_core_enum_registry_len = 0;
+static size_t rt_core_enum_registry_cap = 0;
 
 static void rt_core_register_string(RtCoreString* s) {
     if (!s) return;
@@ -448,6 +585,26 @@ static void rt_core_register_string(RtCoreString* s) {
 static int rt_core_is_registered_string(RtCoreString* s) {
     for (size_t i = 0; i < rt_core_string_registry_len; i++) {
         if (rt_core_string_registry[i] == s) return 1;
+    }
+    return 0;
+}
+
+static void rt_core_register_array(RtCoreArray* array) {
+    if (!array) return;
+    if (rt_core_array_registry_len == rt_core_array_registry_cap) {
+        size_t next_cap = rt_core_array_registry_cap == 0 ? 64 : rt_core_array_registry_cap * 2;
+        RtCoreArray** next =
+            (RtCoreArray**)realloc(rt_core_array_registry, next_cap * sizeof(RtCoreArray*));
+        if (!next) return;
+        rt_core_array_registry = next;
+        rt_core_array_registry_cap = next_cap;
+    }
+    rt_core_array_registry[rt_core_array_registry_len++] = array;
+}
+
+static int rt_core_is_registered_array(RtCoreArray* array) {
+    for (size_t i = 0; i < rt_core_array_registry_len; i++) {
+        if (rt_core_array_registry[i] == array) return 1;
     }
     return 0;
 }
@@ -470,10 +627,6 @@ static int rt_core_is_registered_string(RtCoreString* s) {
  * tag bits is never a member of this registry, so it now resolves to "not an
  * enum" (NULL) instead of being dereferenced. Real heap-boxed enums (Option
  * or otherwise) are unaffected since they are always registered at creation. */
-static RtCoreEnum** rt_core_enum_registry = NULL;
-static size_t rt_core_enum_registry_len = 0;
-static size_t rt_core_enum_registry_cap = 0;
-
 static void rt_core_register_enum(RtCoreEnum* e) {
     if (!e) return;
     if (rt_core_enum_registry_len == rt_core_enum_registry_cap) {
@@ -575,6 +728,13 @@ static inline int64_t rt_core_as_int(int64_t value) {
     return value >> 3;
 }
 
+static inline double rt_core_as_float(int64_t value) {
+    uint64_t bits = ((uint64_t)value) & ~RT_VALUE_TAG_MASK;
+    double result;
+    memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
 static inline uint64_t rt_core_special_payload(int64_t value) {
     return ((uint64_t)value) >> 3;
 }
@@ -611,6 +771,18 @@ static inline RtCoreArray* rt_core_as_array(int64_t value) {
     return a;
 }
 
+static inline RtCoreArray* rt_core_as_registered_array(int64_t value) {
+    uintptr_t raw = (uintptr_t)value;
+    if (raw < 4096) return NULL;
+    if ((raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP) {
+        raw &= ~RT_VALUE_TAG_MASK;
+    } else if ((raw & RT_VALUE_TAG_MASK) != 0) {
+        return NULL;
+    }
+    RtCoreArray* array = (RtCoreArray*)raw;
+    return rt_core_is_registered_array(array) ? rt_core_as_array(value) : NULL;
+}
+
 static inline RtCoreEnum* rt_core_as_enum(int64_t value) {
     if (!rt_core_is_heap(value)) return NULL;
     RtCoreEnum* e = (RtCoreEnum*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
@@ -623,6 +795,13 @@ static inline RtCoreEnum* rt_core_as_enum(int64_t value) {
     if (!rt_core_is_registered_enum(e)) return NULL;
     if (e->kind != RT_VALUE_HEAP_ENUM) return NULL;
     return e;
+}
+
+static inline RtCoreEnum* rt_core_as_registered_enum(int64_t value) {
+    if (!rt_core_is_heap(value)) return NULL;
+    RtCoreEnum* result =
+        (RtCoreEnum*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    return rt_core_is_registered_enum(result) ? rt_core_as_enum(value) : NULL;
 }
 
 static inline RtCoreArray* rt_core_array_ptr(SplArray* value) {
@@ -865,6 +1044,78 @@ int64_t rt_string_chars(int64_t string) {
     return (int64_t)(uintptr_t)chars;
 }
 
+#define RT_STRING_BUILDER_MAGIC 0x534255445F313233ULL
+
+typedef struct RtStringBuilder {
+    uint64_t magic;
+    size_t len;
+    size_t cap;
+    uint8_t* data;
+} RtStringBuilder;
+
+static RtStringBuilder* rt_string_builder_from_handle(int64_t handle) {
+    if (handle == 0) return NULL;
+    RtStringBuilder* builder = (RtStringBuilder*)(uintptr_t)handle;
+    return builder->magic == RT_STRING_BUILDER_MAGIC ? builder : NULL;
+}
+
+int64_t rt_string_builder_new(void) {
+    RtStringBuilder* builder = (RtStringBuilder*)calloc(1, sizeof(RtStringBuilder));
+    if (!builder) return 0;
+    builder->magic = RT_STRING_BUILDER_MAGIC;
+    return (int64_t)(uintptr_t)builder;
+}
+
+int64_t rt_string_builder_push(int64_t handle, int64_t string) {
+    RtStringBuilder* builder = rt_string_builder_from_handle(handle);
+    RtCoreString* value = rt_core_as_string(string);
+    if (!builder || !value) return 0;
+    if (value->len == 0) return 1;
+    if (value->len > SIZE_MAX - builder->len) return 0;
+
+    size_t required = builder->len + (size_t)value->len;
+    if (required > builder->cap) {
+        size_t next_cap = builder->cap == 0 ? 64 : builder->cap;
+        while (next_cap < required) {
+            if (next_cap > SIZE_MAX / 2) {
+                next_cap = required;
+                break;
+            }
+            next_cap *= 2;
+        }
+        uint8_t* next = (uint8_t*)realloc(builder->data, next_cap);
+        if (!next) return 0;
+        builder->data = next;
+        builder->cap = next_cap;
+    }
+    memcpy(builder->data + builder->len, value->data, (size_t)value->len);
+    builder->len = required;
+    return 1;
+}
+
+int64_t rt_string_builder_finish(int64_t handle) {
+    RtStringBuilder* builder = rt_string_builder_from_handle(handle);
+    if (!builder) return rt_core_nil();
+    int64_t result = rt_string_new(builder->data, (uint64_t)builder->len);
+    builder->magic = 0;
+    free(builder->data);
+    free(builder);
+    return result;
+}
+
+int64_t rt_string_builder_len(int64_t handle) {
+    RtStringBuilder* builder = rt_string_builder_from_handle(handle);
+    return builder ? (int64_t)builder->len : -1;
+}
+
+void rt_string_builder_free(int64_t handle) {
+    RtStringBuilder* builder = rt_string_builder_from_handle(handle);
+    if (!builder) return;
+    builder->magic = 0;
+    free(builder->data);
+    free(builder);
+}
+
 /* Bug #136: string-interpolation operand coercion to a raw C string.
  * Interpolation `{expr}` operands are MIXED and statically undiscriminable:
  * a tagged heap string (e.g. an argv element built via rt_string_new) vs a
@@ -1094,14 +1345,146 @@ int64_t rt_value_to_string(int64_t value) {
     return rt_to_string(value);
 }
 
-int64_t rt_native_eq(int64_t left, int64_t right) {
+typedef struct RtCoreEqPair {
+    RtCoreArray* left;
+    RtCoreArray* right;
+} RtCoreEqPair;
+
+#define RT_CORE_EQ_MAX_ARRAY_PAIRS 256
+
+static int rt_core_value_eq_inner(
+    int64_t left,
+    int64_t right,
+    RtCoreEqPair* visited,
+    size_t visited_len);
+
+static int rt_core_generic_int_eq(int64_t value, int64_t expected) {
+    return rt_core_is_int(value) && rt_core_as_int(value) == expected;
+}
+
+static int rt_core_array_eq(
+    RtCoreArray* left,
+    RtCoreArray* right,
+    RtCoreEqPair* visited,
+    size_t visited_len) {
+    if (left == right) return 1;
+    if (!left || !right || left->len != right->len) return 0;
+    for (size_t i = 0; i < visited_len; i++) {
+        if (visited[i].left == left && visited[i].right == right) return 1;
+    }
+    if (visited_len >= RT_CORE_EQ_MAX_ARRAY_PAIRS) return 0;
+    visited[visited_len++] = (RtCoreEqPair){left, right};
+
+    int left_bytes = (left->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+    int right_bytes = (right->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+    int left_u64 = (left->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
+    int right_u64 = (right->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
+    if (left_bytes && right_bytes) {
+        return left->len == 0 || memcmp(left->data, right->data, (size_t)left->len) == 0;
+    }
+    if (left_u64 && right_u64) {
+        return left->len == 0 ||
+            memcmp(left->data, right->data, (size_t)left->len * sizeof(uint64_t)) == 0;
+    }
+
+    for (int64_t i = 0; i < left->len; i++) {
+        if (left_bytes) {
+            int64_t value = (int64_t)((uint8_t*)left->data)[i];
+            if (right_u64) {
+                if ((uint64_t)value != ((uint64_t*)right->data)[i]) return 0;
+            } else if (!rt_core_generic_int_eq(((int64_t*)right->data)[i], value)) {
+                return 0;
+            }
+        } else if (right_bytes) {
+            int64_t value = (int64_t)((uint8_t*)right->data)[i];
+            if (left_u64) {
+                if (((uint64_t*)left->data)[i] != (uint64_t)value) return 0;
+            } else if (!rt_core_generic_int_eq(((int64_t*)left->data)[i], value)) {
+                return 0;
+            }
+        } else if (left_u64) {
+            if (!rt_core_generic_int_eq(
+                    ((int64_t*)right->data)[i],
+                    (int64_t)((uint64_t*)left->data)[i])) return 0;
+        } else if (right_u64) {
+            if (!rt_core_generic_int_eq(
+                    ((int64_t*)left->data)[i],
+                    (int64_t)((uint64_t*)right->data)[i])) return 0;
+        } else if (!rt_core_value_eq_inner(
+                       ((int64_t*)left->data)[i],
+                       ((int64_t*)right->data)[i],
+                       visited,
+                       visited_len)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int rt_core_enum_eq(
+    RtCoreEnum* left,
+    RtCoreEnum* right,
+    RtCoreEqPair* visited,
+    size_t visited_len) {
+    return left && right && left->discriminant == right->discriminant &&
+        rt_core_value_eq_inner(left->payload, right->payload, visited, visited_len);
+}
+
+static int rt_core_value_eq_inner(
+    int64_t left,
+    int64_t right,
+    RtCoreEqPair* visited,
+    size_t visited_len) {
+    if (left == right) return 1;
+    if (rt_core_is_float(left) || rt_core_is_float(right)) {
+        return rt_core_is_float(left) && rt_core_is_float(right) &&
+            rt_core_as_float(left) == rt_core_as_float(right);
+    }
+    if (rt_core_is_special(left) || rt_core_is_special(right)) return 0;
     RtCoreString* a = rt_core_as_string(left);
     RtCoreString* b = rt_core_as_string(right);
     if (a || b) {
         if (!a || !b || a->len != b->len) return 0;
         return a->len == 0 || memcmp(a->data, b->data, (size_t)a->len) == 0;
     }
-    return left == right;
+    RtCoreArray* left_array = rt_core_as_registered_array(left);
+    RtCoreArray* right_array = rt_core_as_registered_array(right);
+    if (left_array || right_array) {
+        return rt_core_array_eq(left_array, right_array, visited, visited_len);
+    }
+    RtCoreEnum* left_enum = rt_core_as_registered_enum(left);
+    RtCoreEnum* right_enum = rt_core_as_registered_enum(right);
+    if (left_enum || right_enum) {
+        return rt_core_enum_eq(left_enum, right_enum, visited, visited_len);
+    }
+    return 0;
+}
+
+int64_t rt_native_eq(int64_t left, int64_t right) {
+    if (left == right) return 1;
+    if (rt_core_is_float(left) || rt_core_is_float(right)) {
+        return rt_core_is_float(left) && rt_core_is_float(right) &&
+            rt_core_as_float(left) == rt_core_as_float(right);
+    }
+    if (rt_core_is_special(left) || rt_core_is_special(right)) return 0;
+    RtCoreString* left_string = rt_core_as_string(left);
+    RtCoreString* right_string = rt_core_as_string(right);
+    if (left_string || right_string) {
+        if (!left_string || !right_string || left_string->len != right_string->len) return 0;
+        return left_string->len == 0 ||
+            memcmp(left_string->data, right_string->data, (size_t)left_string->len) == 0;
+    }
+    RtCoreArray* left_array = rt_core_as_registered_array(left);
+    RtCoreArray* right_array = rt_core_as_registered_array(right);
+    RtCoreEnum* left_enum = rt_core_as_registered_enum(left);
+    RtCoreEnum* right_enum = rt_core_as_registered_enum(right);
+    if (!left_array && !right_array && !left_enum && !right_enum) return 0;
+
+    RtCoreEqPair visited[RT_CORE_EQ_MAX_ARRAY_PAIRS];
+    if (left_array || right_array) {
+        return rt_core_array_eq(left_array, right_array, visited, 0);
+    }
+    return rt_core_enum_eq(left_enum, right_enum, visited, 0);
 }
 
 int64_t rt_string_eq(int64_t left, int64_t right) {
@@ -1420,7 +1803,6 @@ int8_t rt_is_none(int64_t value) {
     if (value == rt_core_nil()) return 1;
     return rt_enum_discriminant(value) == (int64_t)(uint32_t)2371748697u;
 }
-
 int8_t rt_is_some(int64_t value) {
     return !rt_is_none(value);
 }
@@ -1554,6 +1936,10 @@ void rt_println_value(int64_t value) {
     rt_core_print_value_to(stdout, value);
     fputc('\n', stdout);
     fflush(stdout);
+}
+
+void serial_println(int64_t value) {
+    rt_println_value(value);
 }
 
 void rt_eprint_value(int64_t value) {
@@ -1740,6 +2126,72 @@ void* rt_memset(void* dst, int8_t val, int64_t n) {
 
 int64_t rt_memcmp(const void* a, const void* b, int64_t n) {
     return (int64_t)memcmp(a, b, (size_t)n);
+}
+
+void rt_invlpg(uint64_t addr) {
+    (void)addr;
+}
+
+uint64_t unsafe_addr_of(int64_t value) {
+    return (uint64_t)value;
+}
+
+static uint64_t rt_host_cr3;
+
+uint64_t rt_read_cr3(void) {
+    return rt_host_cr3;
+}
+
+void rt_write_cr3(uint64_t value) {
+    rt_host_cr3 = value;
+}
+
+uint64_t rt_read_cr3_raw(void) {
+    return rt_read_cr3();
+}
+
+void rt_write_cr3_raw(uint64_t value) {
+    rt_write_cr3(value);
+}
+
+int64_t rt_volatile_read_u8(int64_t addr) {
+    return *(volatile uint8_t*)(uintptr_t)addr;
+}
+
+int64_t rt_volatile_read_u16(int64_t addr) {
+    return *(volatile uint16_t*)(uintptr_t)addr;
+}
+
+int64_t rt_volatile_read_u32(int64_t addr) {
+    return *(volatile uint32_t*)(uintptr_t)addr;
+}
+
+int64_t rt_volatile_read_u64(int64_t addr) {
+    return (int64_t)*(volatile uint64_t*)(uintptr_t)addr;
+}
+
+void rt_volatile_write_u8(int64_t addr, int64_t value) {
+    *(volatile uint8_t*)(uintptr_t)addr = (uint8_t)value;
+}
+
+void rt_volatile_write_u16(int64_t addr, int64_t value) {
+    *(volatile uint16_t*)(uintptr_t)addr = (uint16_t)value;
+}
+
+void rt_volatile_write_u32(int64_t addr, int64_t value) {
+    *(volatile uint32_t*)(uintptr_t)addr = (uint32_t)value;
+}
+
+void rt_volatile_write_u64(int64_t addr, int64_t value) {
+    *(volatile uint64_t*)(uintptr_t)addr = (uint64_t)value;
+}
+
+void rt_memory_barrier(void) {
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+}
+
+double rt_math_pow(double base, double exponent) {
+    return pow(base, exponent);
 }
 
 /* ================================================================
@@ -1937,6 +2389,7 @@ static SplArray* rt_core_array_new_fill(int64_t cap, uint8_t flags, int zero_ite
         free(a);
         return NULL;
     }
+    rt_core_register_array(a);
     return (SplArray*)(((uintptr_t)a) | RT_VALUE_TAG_HEAP);
 }
 
@@ -1970,6 +2423,11 @@ SplArray* rt_byte_array_new_len(uint64_t len) {
         array->len = (int64_t)len;
     }
     return a;
+}
+
+SplArray* rt_bytes_alloc(int64_t len) {
+    if (len < 0) return NULL;
+    return rt_byte_array_new_len((uint64_t)len);
 }
 
 int64_t rt_text_to_bytes(int64_t text_value) {
@@ -2055,6 +2513,14 @@ int8_t rt_array_clear(SplArray* a) {
     return 1;
 }
 
+int8_t rt_array_push_i64_raw(SplArray* a, int64_t val) {
+    return rt_array_push(a, val);
+}
+
+int64_t rt_array_get_i64_raw(SplArray* a, int64_t index) {
+    return rt_array_get(a, index);
+}
+
 SplArray* rt_array_concat(SplArray* a, SplArray* b) {
     RtCoreArray* left = rt_core_array_ptr(a);
     RtCoreArray* right = rt_core_array_ptr(b);
@@ -2095,7 +2561,6 @@ SplArray* rt_array_concat(SplArray* a, SplArray* b) {
     out->len = total;
     return result;
 }
-
 /* FR-COMPILER-012: array-repeat for `[value; count]` syntax in JIT.
  * Creates a new array with `count` copies of `value`. */
 SplArray* rt_array_repeat(int64_t value, int64_t count) {
@@ -2179,33 +2644,38 @@ int64_t rt_bytes_u8_at(SplArray* a, int64_t idx) {
     if (!array) return 0;
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return 0;
-    return (int64_t)((uint8_t*)array->data)[idx];
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        return (int64_t)((uint8_t*)array->data)[idx];
+    }
+    return rt_core_as_int(((int64_t*)array->data)[idx]) & 0xff;
 }
 
 int64_t rt_bytes_u32_le_at(SplArray* a, int64_t idx) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    idx = rt_core_numeric_arg(idx);
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx + 4 > array->len) return 0;
-    uint8_t* bytes = (uint8_t*)array->data;
-    uint64_t v = (uint64_t)bytes[idx]
-        | ((uint64_t)bytes[idx + 1] << 8)
-        | ((uint64_t)bytes[idx + 2] << 16)
-        | ((uint64_t)bytes[idx + 3] << 24);
+    uint64_t v = 0;
+    for (int shift = 0; shift < 4; shift++) {
+        uint64_t byte = (array->flags & RT_CORE_ARRAY_FLAG_BYTES)
+            ? ((uint8_t*)array->data)[idx + shift]
+            : (uint64_t)(rt_core_as_int(((int64_t*)array->data)[idx + shift]) & 0xff);
+        v |= byte << (shift * 8);
+    }
     return (int64_t)v;
 }
 
 int64_t rt_bytes_u64_le_at(SplArray* a, int64_t idx) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    idx = rt_core_numeric_arg(idx);
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx + 8 > array->len) return 0;
-    uint8_t* bytes = (uint8_t*)array->data;
     uint64_t v = 0;
     for (int shift = 0; shift < 8; shift++) {
-        v |= ((uint64_t)bytes[idx + shift]) << (shift * 8);
+        uint64_t byte = (array->flags & RT_CORE_ARRAY_FLAG_BYTES)
+            ? ((uint8_t*)array->data)[idx + shift]
+            : (uint64_t)(rt_core_as_int(((int64_t*)array->data)[idx + shift]) & 0xff);
+        v |= byte << (shift * 8);
     }
     return (int64_t)v;
 }
@@ -2213,7 +2683,7 @@ int64_t rt_bytes_u64_le_at(SplArray* a, int64_t idx) {
 int8_t rt_bytes_u8_set(SplArray* a, int64_t idx, int64_t val) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    val = rt_core_numeric_arg(val) & 0xff;
+    val &= 0xff;
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return 0;
     if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
@@ -2240,7 +2710,10 @@ int8_t rt_typed_bytes_u8_push(SplArray* a, int64_t val) {
 int64_t rt_typed_bytes_u8_unchecked(SplArray* a, int64_t idx) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    return (int64_t)((uint8_t*)array->data)[idx];
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        return (int64_t)((uint8_t*)array->data)[idx];
+    }
+    return rt_core_as_int(((int64_t*)array->data)[idx]) & 0xff;
 }
 
 int64_t rt_typed_bytes_u32_le_at(SplArray* a, int64_t idx) {
@@ -2254,11 +2727,12 @@ int64_t rt_typed_bytes_u64_le_at(SplArray* a, int64_t idx) {
 int64_t rt_typed_bytes_u64_le_unchecked(SplArray* a, int64_t idx) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    idx = rt_core_numeric_arg(idx);
-    uint8_t* bytes = (uint8_t*)array->data;
     uint64_t v = 0;
     for (int shift = 0; shift < 8; shift++) {
-        v |= ((uint64_t)bytes[idx + shift]) << (shift * 8);
+        uint64_t byte = (array->flags & RT_CORE_ARRAY_FLAG_BYTES)
+            ? ((uint8_t*)array->data)[idx + shift]
+            : (uint64_t)(rt_core_as_int(((int64_t*)array->data)[idx + shift]) & 0xff);
+        v |= byte << (shift * 8);
     }
     return (int64_t)v;
 }
@@ -2266,26 +2740,31 @@ int64_t rt_typed_bytes_u64_le_unchecked(SplArray* a, int64_t idx) {
 int8_t rt_typed_bytes_u32_le_set(SplArray* a, int64_t idx, int64_t val) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    idx = rt_core_numeric_arg(idx);
     if (idx < 0 || idx + 4 > array->len) return 0;
-    uint8_t* bytes = (uint8_t*)array->data;
     uint32_t v = (uint32_t)val;
-    bytes[idx] = (uint8_t)(v & 0xff);
-    bytes[idx + 1] = (uint8_t)((v >> 8) & 0xff);
-    bytes[idx + 2] = (uint8_t)((v >> 16) & 0xff);
-    bytes[idx + 3] = (uint8_t)((v >> 24) & 0xff);
+    for (int shift = 0; shift < 4; shift++) {
+        int64_t byte = (int64_t)((v >> (shift * 8)) & 0xff);
+        if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+            ((uint8_t*)array->data)[idx + shift] = (uint8_t)byte;
+        } else {
+            ((int64_t*)array->data)[idx + shift] = rt_value_int(byte);
+        }
+    }
     return 1;
 }
 
 int8_t rt_typed_bytes_u64_le_set(SplArray* a, int64_t idx, int64_t val) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    idx = rt_core_numeric_arg(idx);
     if (idx < 0 || idx + 8 > array->len) return 0;
-    uint8_t* bytes = (uint8_t*)array->data;
     uint64_t v = (uint64_t)val;
     for (int shift = 0; shift < 8; shift++) {
-        bytes[idx + shift] = (uint8_t)((v >> (shift * 8)) & 0xff);
+        int64_t byte = (int64_t)((v >> (shift * 8)) & 0xff);
+        if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+            ((uint8_t*)array->data)[idx + shift] = (uint8_t)byte;
+        } else {
+            ((int64_t*)array->data)[idx + shift] = rt_value_int(byte);
+        }
     }
     return 1;
 }
@@ -2293,46 +2772,59 @@ int8_t rt_typed_bytes_u64_le_set(SplArray* a, int64_t idx, int64_t val) {
 int64_t rt_typed_words_u32_at(SplArray* a, int64_t idx) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    idx = rt_core_numeric_arg(idx);
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return 0;
-    return ((int64_t*)array->data)[idx] & 0xffffffffLL;
+    int64_t value = ((int64_t*)array->data)[idx];
+    if (!(array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED)) value = rt_core_numeric_arg(value);
+    return value & 0xffffffffLL;
 }
 
 int8_t rt_typed_words_u32_push(SplArray* a, int64_t val) {
-    return rt_array_push(a, val & 0xffffffffLL);
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    if (!rt_core_array_reserve(a, array->len + 1)) return 0;
+    val &= 0xffffffffLL;
+    ((int64_t*)array->data)[array->len++] =
+        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
+    return 1;
 }
 
 int8_t rt_typed_words_u32_set(SplArray* a, int64_t idx, int64_t val) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    idx = rt_core_numeric_arg(idx);
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return 0;
-    ((int64_t*)array->data)[idx] = val & 0xffffffffLL;
+    val &= 0xffffffffLL;
+    ((int64_t*)array->data)[idx] =
+        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
     return 1;
 }
 
 int64_t rt_typed_words_u64_at(SplArray* a, int64_t idx) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    idx = rt_core_numeric_arg(idx);
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return 0;
-    return ((int64_t*)array->data)[idx];
+    int64_t value = ((int64_t*)array->data)[idx];
+    return (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? value : rt_core_as_int(value);
 }
 
 int8_t rt_typed_words_u64_push(SplArray* a, int64_t val) {
-    return rt_array_push(a, val);
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    if (!rt_core_array_reserve(a, array->len + 1)) return 0;
+    ((int64_t*)array->data)[array->len++] =
+        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
+    return 1;
 }
 
 int8_t rt_typed_words_u64_set(SplArray* a, int64_t idx, int64_t val) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    idx = rt_core_numeric_arg(idx);
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return 0;
-    ((int64_t*)array->data)[idx] = val;
+    ((int64_t*)array->data)[idx] =
+        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
     return 1;
 }
 
@@ -2348,7 +2840,8 @@ int8_t rt_typed_words_u64_store_known_data_at(
     int64_t val) {
     RtCoreArray* array = rt_core_as_array(header_ptr);
     if (!array || data_ptr == 0 || idx < 0 || idx >= array->cap) return 0;
-    ((int64_t*)(uintptr_t)data_ptr)[idx] = val;
+    ((int64_t*)(uintptr_t)data_ptr)[idx] =
+        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
     return 1;
 }
 
@@ -2364,7 +2857,6 @@ int64_t rt_tuple_new(int64_t len) {
 int8_t rt_tuple_set(int64_t tuple, int64_t idx, int64_t value) {
     RtCoreArray* array = rt_core_as_array(tuple);
     if (!array) return 0;
-    idx = rt_core_numeric_arg(idx);
     if (idx < 0 || idx >= array->len) return 0;
     ((int64_t*)array->data)[idx] = value;
     return 1;
@@ -2373,7 +2865,6 @@ int8_t rt_tuple_set(int64_t tuple, int64_t idx, int64_t value) {
 int64_t rt_tuple_get(int64_t tuple, int64_t idx) {
     RtCoreArray* array = rt_core_as_array(tuple);
     if (!array) return rt_core_nil();
-    idx = rt_core_numeric_arg(idx);
     if (idx < 0 || idx >= array->len) return rt_core_nil();
     return ((int64_t*)array->data)[idx];
 }
@@ -2558,12 +3049,14 @@ void rt_bdd_expect_fail(int64_t msg_ptr, int64_t msg_len) {
 void rt_bdd_expect_eq_rv(int64_t actual, int64_t expected) {
     RtCoreString* actual_string = rt_core_as_string(actual);
     RtCoreString* expected_string = rt_core_as_string(expected);
+    RtCoreArray* actual_array = rt_core_as_registered_array(actual);
+    RtCoreArray* expected_array = rt_core_as_registered_array(expected);
     int bool_equal =
         (actual == 1 && (expected == 16 || expected == (int64_t)rt_core_from_special(RT_VALUE_SPECIAL_TRUE))) ||
         (expected == 1 && (actual == 16 || actual == (int64_t)rt_core_from_special(RT_VALUE_SPECIAL_TRUE))) ||
         (actual == 0 && (expected == 24 || expected == (int64_t)rt_core_from_special(RT_VALUE_SPECIAL_FALSE))) ||
         (expected == 0 && (actual == 24 || actual == (int64_t)rt_core_from_special(RT_VALUE_SPECIAL_FALSE)));
-    int64_t equal = (actual_string || expected_string)
+    int64_t equal = (actual_string || expected_string || actual_array || expected_array)
         ? rt_native_eq(actual, expected)
         : (bool_equal || rt_core_numeric_arg(actual) == rt_core_numeric_arg(expected));
     if (equal != 1) {
@@ -2807,10 +3300,23 @@ int64_t rt_dict_get(int64_t dict, int64_t key) {
     return rt_core_dict_lookup(rt_core_as_dict(dict), key);
 }
 
+int64_t rt_dict_get_i64_raw(int64_t dict, int64_t key) {
+    RtCoreDict* d = rt_core_as_dict(dict);
+    int64_t runtime_key = rt_value_int(key);
+    if (!rt_core_dict_has(d, runtime_key)) return 0;
+    return rt_core_dict_lookup(d, runtime_key);
+}
+
 int8_t rt_dict_set(int64_t dict, int64_t key, int64_t value) {
     RtCoreDict* d = rt_core_as_dict(dict);
     if (!d) return 0;
     return (int8_t)rt_core_dict_put(d, key, value);
+}
+
+int8_t rt_dict_set_i64_raw(int64_t dict, int64_t key, int64_t value) {
+    RtCoreDict* d = rt_core_as_dict(dict);
+    if (!d) return 0;
+    return (int8_t)rt_core_dict_put(d, rt_value_int(key), value);
 }
 
 int8_t rt_dict_insert(int64_t dict, int64_t key, int64_t value) {
@@ -2843,7 +3349,7 @@ int64_t rt_dict_len(int64_t dict) {
 
 int64_t rt_dict_keys(int64_t dict) {
     RtCoreDict* d = rt_core_as_dict(dict);
-    if (!d) return rt_core_nil();
+    if (!d) return (int64_t)(uintptr_t)rt_array_new(0);
     SplArray* arr = rt_array_new(d->len);
     if (!arr) return rt_core_nil();
     for (int64_t i = 0; i < d->cap; i++) {
@@ -2854,7 +3360,7 @@ int64_t rt_dict_keys(int64_t dict) {
 
 int64_t rt_dict_values(int64_t dict) {
     RtCoreDict* d = rt_core_as_dict(dict);
-    if (!d) return rt_core_nil();
+    if (!d) return (int64_t)(uintptr_t)rt_array_new(0);
     SplArray* arr = rt_array_new(d->len);
     if (!arr) return rt_core_nil();
     for (int64_t i = 0; i < d->cap; i++) {
@@ -2866,7 +3372,7 @@ int64_t rt_dict_values(int64_t dict) {
 /* Array of (key, value) 2-tuples — the form `for (k, v) in dict` iterates. */
 int64_t rt_dict_entries(int64_t dict) {
     RtCoreDict* d = rt_core_as_dict(dict);
-    if (!d) return rt_core_nil();
+    if (!d) return (int64_t)(uintptr_t)rt_array_new(0);
     SplArray* arr = rt_array_new(d->len);
     if (!arr) return rt_core_nil();
     for (int64_t i = 0; i < d->cap; i++) {
@@ -2938,6 +3444,415 @@ int rt_file_remove(int64_t path_value, int64_t path_len_unused) {
     int ok = remove(path) == 0 ? 1 : 0;
     free(path);
     return ok;
+}
+
+/* Non-accelerator native bridges. Text parameters use the ABI selected by
+ * the caller: path_parent is (ptr, len); the legacy filename/extension
+ * aliases receive a tagged RuntimeValue. */
+int64_t rt_path_parent(const uint8_t* path_ptr, int64_t path_len) {
+    if (!path_ptr || path_len <= 0) return rt_string_new(NULL, 0);
+    int64_t end = path_len;
+    while (end > 1 && path_ptr[end - 1] == '/') end--;
+    int64_t slash = end - 1;
+    while (slash >= 0 && path_ptr[slash] != '/') slash--;
+    if (slash < 0) return rt_string_new((const uint8_t*)".", 1);
+    if (slash == 0) return rt_string_new(path_ptr, 1);
+    return rt_string_new(path_ptr, (uint64_t)slash);
+}
+
+int64_t rt_path_filename(int64_t path_value) {
+    RtCoreString* path = rt_core_as_string(path_value);
+    if (!path || path->len == 0) return rt_string_new(NULL, 0);
+    uint64_t end = path->len;
+    while (end > 0 && path->data[end - 1] == '/') end--;
+    if (end == 0) return rt_string_new(NULL, 0);
+    uint64_t start = end;
+    while (start > 0 && path->data[start - 1] != '/') start--;
+    return rt_string_new((const uint8_t*)path->data + start, end - start);
+}
+
+int64_t rt_path_extension(int64_t path_value) {
+    RtCoreString* path = rt_core_as_string(path_value);
+    if (!path || path->len == 0) return rt_string_new(NULL, 0);
+    uint64_t end = path->len;
+    while (end > 0 && path->data[end - 1] == '/') end--;
+    uint64_t start = end;
+    while (start > 0 && path->data[start - 1] != '/') start--;
+    uint64_t dot = end;
+    while (dot > start && path->data[dot - 1] != '.') dot--;
+    if (dot == start || (dot == start + 1 && path->data[start] == '.')) {
+        return rt_string_new(NULL, 0);
+    }
+    return rt_string_new((const uint8_t*)path->data + dot, end - dot);
+}
+
+void rt_sleep_secs(int64_t seconds) {
+    if (seconds <= 0) return;
+    rt_sleep_ms_native(seconds > INT64_MAX / 1000 ? INT64_MAX : seconds * 1000);
+}
+
+static int64_t rt_http_tuple(int64_t status, const uint8_t* body, uint64_t body_len,
+                             const char* error) {
+    int64_t tuple = rt_tuple_new(3);
+    if (tuple == rt_core_nil()) return rt_core_nil();
+    rt_tuple_set(tuple, 0, rt_value_int(status));
+    rt_tuple_set(tuple, 1, rt_string_new(body, body_len));
+    rt_tuple_set(tuple, 2, rt_string_new((const uint8_t*)(error ? error : ""),
+                                         error ? (uint64_t)strlen(error) : 0));
+    return tuple;
+}
+
+static int64_t rt_http_download_tuple(int64_t status, uint64_t bytes, const char* error) {
+    int64_t tuple = rt_tuple_new(3);
+    if (tuple == rt_core_nil()) return rt_core_nil();
+    rt_tuple_set(tuple, 0, rt_value_int(status));
+    rt_tuple_set(tuple, 1, rt_value_int((int64_t)bytes));
+    rt_tuple_set(tuple, 2, rt_string_new((const uint8_t*)(error ? error : ""),
+                                         error ? (uint64_t)strlen(error) : 0));
+    return tuple;
+}
+
+#if !defined(_WIN32)
+static int rt_http_send_all(int fd, const void* data, size_t len) {
+    const uint8_t* ptr = (const uint8_t*)data;
+    while (len > 0) {
+        ssize_t sent = send(fd, ptr, len, 0);
+        if (sent <= 0) return 0;
+        ptr += (size_t)sent;
+        len -= (size_t)sent;
+    }
+    return 1;
+}
+
+static int rt_http_append(char** dst, size_t* len, size_t* cap,
+                          const char* text, size_t text_len) {
+    if (*len > SIZE_MAX - text_len - 1) return 0;
+    size_t need = *len + text_len + 1;
+    if (need > *cap) {
+        size_t next = *cap ? *cap : 1024;
+        while (next < need) {
+            if (next > SIZE_MAX / 2) return 0;
+            next *= 2;
+        }
+        char* grown = (char*)realloc(*dst, next);
+        if (!grown) return 0;
+        *dst = grown;
+        *cap = next;
+    }
+    memcpy(*dst + *len, text, text_len);
+    *len += text_len;
+    (*dst)[*len] = '\0';
+    return 1;
+}
+
+static const char* rt_http_header_end(const uint8_t* data, size_t len) {
+    if (!data || len < 4) return NULL;
+    for (size_t i = 0; i + 4 <= len; i++) {
+        if (memcmp(data + i, "\r\n\r\n", 4) == 0) return (const char*)data + i;
+    }
+    return NULL;
+}
+
+static int rt_http_has_header(const char* headers, size_t len, const char* name) {
+    size_t name_len = strlen(name);
+    const char* line = headers;
+    const char* end = headers + len;
+    while (line < end) {
+        const char* next = strstr(line, "\r\n");
+        if (!next || next > end) next = end;
+        if ((size_t)(next - line) > name_len &&
+            strncasecmp(line, name, name_len) == 0 && line[name_len] == ':') return 1;
+        line = next < end ? next + 2 : end;
+    }
+    return 0;
+}
+
+static int64_t rt_http_content_length(const char* headers, size_t len) {
+    const char* line = headers;
+    const char* end = headers + len;
+    while (line < end) {
+        const char* next = strstr(line, "\r\n");
+        if (!next || next > end) next = end;
+        if ((size_t)(next - line) >= 15 && strncasecmp(line, "Content-Length:", 15) == 0) {
+            const char* value = line + 15;
+            while (value < next && (*value == ' ' || *value == '\t')) value++;
+            char* parse_end = NULL;
+            unsigned long long parsed = strtoull(value, &parse_end, 10);
+            if (parse_end == value || parsed > (unsigned long long)INT64_MAX) return -1;
+            return (int64_t)parsed;
+        }
+        line = next < end ? next + 2 : end;
+    }
+    return -1;
+}
+
+static int rt_http_decode_chunked(const uint8_t* src, size_t src_len,
+                                  uint8_t** out, size_t* out_len) {
+    size_t pos = 0, used = 0, cap = src_len;
+    uint8_t* result = cap ? (uint8_t*)malloc(cap) : NULL;
+    if (cap && !result) return 0;
+    while (pos < src_len) {
+        size_t line_start = pos;
+        while (pos + 1 < src_len && !(src[pos] == '\r' && src[pos + 1] == '\n')) pos++;
+        if (pos + 1 >= src_len) { free(result); return 0; }
+        size_t size_len = pos - line_start;
+        const uint8_t* semi = memchr(src + line_start, ';', size_len);
+        if (semi) size_len = (size_t)(semi - (src + line_start));
+        char size_text[32];
+        if (size_len == 0 || size_len >= sizeof(size_text)) { free(result); return 0; }
+        memcpy(size_text, src + line_start, size_len); size_text[size_len] = '\0';
+        char* parse_end = NULL;
+        unsigned long long chunk = strtoull(size_text, &parse_end, 16);
+        if (parse_end == size_text || chunk > SIZE_MAX) { free(result); return 0; }
+        pos += 2;
+        if (chunk == 0) break;
+        if ((size_t)chunk > src_len - pos || used > SIZE_MAX - (size_t)chunk) {
+            free(result); return 0;
+        }
+        if (used + (size_t)chunk > cap) {
+            uint8_t* grown = (uint8_t*)realloc(result, used + (size_t)chunk);
+            if (!grown) { free(result); return 0; }
+            result = grown; cap = used + (size_t)chunk;
+        }
+        memcpy(result + used, src + pos, (size_t)chunk); used += (size_t)chunk; pos += (size_t)chunk;
+        if (pos + 1 >= src_len || src[pos] != '\r' || src[pos + 1] != '\n') {
+            free(result); return 0;
+        }
+        pos += 2;
+    }
+    *out = result; *out_len = used; return 1;
+}
+
+static int rt_http_method_is_token(const char* method) {
+    if (!method || !*method) return 0;
+    for (const unsigned char* p = (const unsigned char*)method; *p; p++) {
+        if (!(('0' <= *p && *p <= '9') || ('A' <= *p && *p <= 'Z') ||
+              ('a' <= *p && *p <= 'z') || strchr("!#$%&'*+-.^_`|~", *p))) return 0;
+    }
+    return 1;
+}
+
+static int rt_http_perform(const char* method, const char* url, RtCoreArray* headers,
+                           const uint8_t* body, size_t body_len, int64_t* status_out,
+                           uint8_t** body_out, size_t* body_len_out, char* error, size_t error_cap) {
+    *status_out = -1; *body_out = NULL; *body_len_out = 0;
+    if (!rt_http_method_is_token(method) || !url) {
+        snprintf(error, error_cap, "invalid HTTP method or URL"); return 0;
+    }
+    for (const unsigned char* p = (const unsigned char*)url; *p; p++) {
+        if (*p <= 0x20 || *p == 0x7f) {
+            snprintf(error, error_cap, "invalid HTTP URL"); return 0;
+        }
+    }
+    if (strncmp(url, "http://", 7) != 0) {
+        snprintf(error, error_cap, "native HTTP supports http:// only; HTTPS requires the TLS runtime"); return 0;
+    }
+    const char* authority = url + 7;
+    const char* target = strpbrk(authority, "/?#");
+    const char* authority_end = target ? target : authority + strlen(authority);
+    if (authority_end == authority) { snprintf(error, error_cap, "HTTP URL has no host"); return 0; }
+    size_t authority_len = (size_t)(authority_end - authority);
+    char* host_port = (char*)malloc(authority_len + 1);
+    if (!host_port) { snprintf(error, error_cap, "out of memory"); return 0; }
+    memcpy(host_port, authority, authority_len); host_port[authority_len] = '\0';
+    int port = 80;
+    char* colon = strrchr(host_port, ':');
+    if (colon && colon[1] != '\0') {
+        char* parse_end = NULL; long parsed = strtol(colon + 1, &parse_end, 10);
+        if (*parse_end != '\0' || parsed < 1 || parsed > 65535) {
+            free(host_port); snprintf(error, error_cap, "invalid HTTP port"); return 0;
+        }
+        *colon = '\0'; port = (int)parsed;
+    }
+    if (!host_port[0]) { free(host_port); snprintf(error, error_cap, "HTTP URL has no host"); return 0; }
+    char port_text[8]; snprintf(port_text, sizeof(port_text), "%d", port);
+    struct addrinfo hints, *results = NULL;
+    memset(&hints, 0, sizeof(hints)); hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host_port, port_text, &hints, &results) != 0) {
+        free(host_port); snprintf(error, error_cap, "HTTP host lookup failed"); return 0;
+    }
+    int fd = -1;
+    for (struct addrinfo* item = results; item; item = item->ai_next) {
+        fd = socket(item->ai_family, item->ai_socktype, item->ai_protocol);
+        if (fd >= 0 && connect(fd, item->ai_addr, item->ai_addrlen) == 0) break;
+        if (fd >= 0) { close(fd); fd = -1; }
+    }
+    freeaddrinfo(results);
+    if (fd < 0) { free(host_port); snprintf(error, error_cap, "HTTP connection failed"); return 0; }
+    const char* request_target = target ? target : "/";
+    char* query_target = NULL;
+    if (request_target[0] == '?' || request_target[0] == '#') {
+        query_target = (char*)malloc(strlen(request_target) + 2);
+        if (!query_target) { close(fd); free(host_port); snprintf(error, error_cap, "out of memory"); return 0; }
+        query_target[0] = '/'; strcpy(query_target + 1, request_target); request_target = query_target;
+    }
+    char* request = NULL; size_t request_len = 0, request_cap = 0; char line[256];
+    int line_len = snprintf(line, sizeof(line), "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n",
+                            method, request_target, host_port);
+    int ok = line_len > 0 && (size_t)line_len < sizeof(line) &&
+             rt_http_append(&request, &request_len, &request_cap, line, (size_t)line_len);
+    free(query_target);
+    if (ok && headers) {
+        for (int64_t i = 0; i < headers->len; i++) {
+            RtCoreString* header = rt_core_as_string(((int64_t*)headers->data)[i]);
+            if (!header || memchr(header->data, '\r', header->len) || memchr(header->data, '\n', header->len)) continue;
+            ok = rt_http_append(&request, &request_len, &request_cap, header->data, header->len) &&
+                 rt_http_append(&request, &request_len, &request_cap, "\r\n", 2);
+            if (!ok) break;
+        }
+    }
+    if (ok && !rt_http_has_header(request, request_len, "Content-Length")) {
+        line_len = snprintf(line, sizeof(line), "Content-Length: %zu\r\n", body_len);
+        ok = line_len > 0 && (size_t)line_len < sizeof(line) &&
+             rt_http_append(&request, &request_len, &request_cap, line, (size_t)line_len);
+    }
+    ok = ok && rt_http_append(&request, &request_len, &request_cap, "\r\n", 2);
+    if (ok) ok = rt_http_send_all(fd, request, request_len) && rt_http_send_all(fd, body, body_len);
+    free(request); free(host_port);
+    if (!ok) { close(fd); snprintf(error, error_cap, "HTTP request write failed"); return 0; }
+    size_t received = 0, capacity = 8192;
+    uint8_t* response = (uint8_t*)malloc(capacity + 1);
+    if (!response) { close(fd); snprintf(error, error_cap, "out of memory"); return 0; }
+    for (;;) {
+        if (received == capacity) {
+            if (capacity >= 64 * 1024 * 1024) { free(response); close(fd); snprintf(error, error_cap, "HTTP response too large"); return 0; }
+            capacity *= 2; uint8_t* grown = (uint8_t*)realloc(response, capacity + 1);
+            if (!grown) { free(response); close(fd); snprintf(error, error_cap, "out of memory"); return 0; }
+            response = grown;
+        }
+        ssize_t n = recv(fd, response + received, capacity - received, 0);
+        if (n < 0) { free(response); close(fd); snprintf(error, error_cap, "HTTP response read failed"); return 0; }
+        if (n == 0) break;
+        received += (size_t)n;
+    }
+    close(fd); response[received] = '\0';
+    const char* header_end = rt_http_header_end(response, received);
+    if (!header_end) { free(response); snprintf(error, error_cap, "invalid HTTP response"); return 0; }
+    int status = 0;
+    if (sscanf((const char*)response, "HTTP/%*s %d", &status) != 1) {
+        free(response); snprintf(error, error_cap, "invalid HTTP status"); return 0;
+    }
+    const char* header_start = strchr((const char*)response, '\n');
+    if (!header_start || header_start >= header_end) { free(response); snprintf(error, error_cap, "invalid HTTP headers"); return 0; }
+    header_start++; size_t header_len = (size_t)(header_end - header_start);
+    const uint8_t* payload = (const uint8_t*)header_end + 4;
+    size_t payload_len = received - (size_t)(payload - response);
+    if (rt_http_has_header(header_start, header_len, "Transfer-Encoding") && strcasestr(header_start, "chunked")) {
+        uint8_t* decoded = NULL; size_t decoded_len = 0;
+        if (!rt_http_decode_chunked(payload, payload_len, &decoded, &decoded_len)) {
+            free(response); snprintf(error, error_cap, "invalid chunked HTTP response"); return 0;
+        }
+        free(response); response = decoded; payload = response; payload_len = decoded_len;
+    } else {
+        int64_t declared = rt_http_content_length(header_start, header_len);
+        if (declared >= 0 && (uint64_t)declared < payload_len) payload_len = (size_t)declared;
+        memmove(response, payload, payload_len); payload = response;
+    }
+    *status_out = status; *body_out = response; *body_len_out = payload_len; return 1;
+}
+#endif
+
+int64_t rt_http_request(int64_t method_value, int64_t url_value, int64_t headers_value,
+                        int64_t body_value) {
+    RtCoreString* method = rt_core_as_string(method_value);
+    RtCoreString* url = rt_core_as_string(url_value);
+    RtCoreString* body = rt_core_as_string(body_value);
+    if (!method || !url) return rt_http_tuple(-1, NULL, 0, "invalid HTTP text argument");
+#if defined(_WIN32)
+    return rt_http_tuple(-1, NULL, 0, "native HTTP is unavailable on Windows core runtime");
+#else
+    int64_t status = -1; uint8_t* response = NULL; size_t response_len = 0; char error[160] = {0};
+    int ok = rt_http_perform(method->data, url->data, rt_core_as_array(headers_value),
+                             body ? (const uint8_t*)body->data : NULL, body ? (size_t)body->len : 0,
+                             &status, &response, &response_len, error, sizeof(error));
+    int64_t result = ok ? rt_http_tuple(status, response, response_len, "")
+                        : rt_http_tuple(-1, NULL, 0, error);
+    free(response); return result;
+#endif
+}
+
+int64_t rt_http_download(int64_t url_value, int64_t output_path_value) {
+    RtCoreString* url = rt_core_as_string(url_value);
+    RtCoreString* output_path = rt_core_as_string(output_path_value);
+    if (!url || !output_path) return rt_http_download_tuple(-1, 0, "invalid HTTP download text argument");
+#if defined(_WIN32)
+    return rt_http_download_tuple(-1, 0, "native HTTP is unavailable on Windows core runtime");
+#else
+    int64_t status = -1; uint8_t* body = NULL; size_t body_len = 0; char error[160] = {0};
+    int ok = rt_http_perform("GET", url->data, NULL, NULL, 0, &status, &body, &body_len, error, sizeof(error));
+    if (ok) {
+        FILE* file = fopen(output_path->data, "wb");
+        if (!file) {
+            ok = 0; snprintf(error, sizeof(error), "HTTP download write failed");
+        } else {
+            size_t written = fwrite(body, 1, body_len, file);
+            int closed = fclose(file) == 0;
+            if (written != body_len || !closed) {
+                ok = 0; snprintf(error, sizeof(error), "HTTP download write failed");
+            }
+        }
+    }
+    int64_t result = ok ? rt_http_download_tuple(status, body_len, "")
+                        : rt_http_download_tuple(-1, 0, error);
+    free(body); return result;
+#endif
+}
+
+static void rt_glyph_pattern(uint8_t ch, uint8_t out[7]) {
+    static const uint8_t upper[26][7] = {
+        {14,17,17,31,17,17,17}, {30,17,17,30,17,17,30}, {15,16,16,16,16,16,15},
+        {30,17,17,17,17,17,30}, {31,16,16,30,16,16,31}, {31,16,16,30,16,16,16},
+        {15,16,16,23,17,17,15}, {17,17,17,31,17,17,17}, {31,4,4,4,4,4,31},
+        {1,1,1,1,17,17,14}, {17,18,20,24,20,18,17}, {16,16,16,16,16,16,31},
+        {17,27,21,21,17,17,17}, {17,25,21,19,17,17,17}, {14,17,17,17,17,17,14},
+        {30,17,17,30,16,16,16}, {14,17,17,17,21,18,13}, {30,17,17,30,20,18,17},
+        {15,16,16,14,1,1,30}, {31,4,4,4,4,4,4}, {17,17,17,17,17,17,14},
+        {17,17,17,17,17,10,4}, {17,17,21,21,21,21,10}, {17,17,10,4,10,17,17},
+        {17,17,10,4,4,4,4}, {31,1,2,4,8,16,31},
+    };
+    static const uint8_t digits[10][7] = {
+        {14,17,19,21,25,17,14}, {4,12,4,4,4,4,14}, {14,17,1,2,4,8,31},
+        {30,1,1,14,1,1,30}, {2,6,10,18,31,2,2}, {31,16,16,30,1,1,30},
+        {14,16,16,30,17,17,14}, {31,1,2,4,8,8,8}, {14,17,17,14,17,17,14},
+        {14,17,17,15,1,1,14},
+    };
+    if (ch >= 'a' && ch <= 'z') ch = (uint8_t)(ch - ('a' - 'A'));
+    if (ch >= 'A' && ch <= 'Z') memcpy(out, upper[ch - 'A'], 7);
+    else if (ch >= '0' && ch <= '9') memcpy(out, digits[ch - '0'], 7);
+    else {
+        switch (ch) {
+            case ':': { const uint8_t p[7] = {0,4,4,0,4,4,0}; memcpy(out,p,7); break; }
+            case '.': { const uint8_t p[7] = {0,0,0,0,0,12,12}; memcpy(out,p,7); break; }
+            case '/': { const uint8_t p[7] = {1,2,2,4,8,8,16}; memcpy(out,p,7); break; }
+            case '-': { const uint8_t p[7] = {0,0,0,31,0,0,0}; memcpy(out,p,7); break; }
+            case '_': { const uint8_t p[7] = {0,0,0,0,0,0,31}; memcpy(out,p,7); break; }
+            case '$': { const uint8_t p[7] = {4,15,20,14,5,30,4}; memcpy(out,p,7); break; }
+            case '>': { const uint8_t p[7] = {16,8,4,2,4,8,16}; memcpy(out,p,7); break; }
+            case '<': { const uint8_t p[7] = {1,2,4,8,4,2,1}; memcpy(out,p,7); break; }
+            case '=': { const uint8_t p[7] = {0,0,31,0,31,0,0}; memcpy(out,p,7); break; }
+            case '?': { const uint8_t p[7] = {14,17,1,2,4,0,4}; memcpy(out,p,7); break; }
+            case ' ': memset(out, 0, 7); break;
+            default: { const uint8_t p[7] = {31,1,2,4,4,0,4}; memcpy(out,p,7); break; }
+        }
+    }
+}
+
+int64_t rt_gui_get_glyph_8x16(int32_t codepoint) {
+    SplArray* result = rt_byte_array_new(16);
+    RtCoreArray* array = rt_core_array_ptr(result);
+    if (!array || !array->data) return (int64_t)(uintptr_t)result;
+    memset(array->data, 0, 16);
+    if (codepoint <= 0 || codepoint == 32) { array->len = 16; return (int64_t)(uintptr_t)result; }
+    uint8_t pattern[7];
+    rt_glyph_pattern((codepoint >= 0x20 && codepoint <= 0x7e) ? (uint8_t)codepoint : '?', pattern);
+    for (int row = 0; row < 7; row++) {
+        uint8_t expanded = 0;
+        for (int col = 0; col < 5; col++) if (pattern[row] & (uint8_t)(16 >> col)) expanded |= (uint8_t)(64 >> col);
+        ((uint8_t*)array->data)[1 + row * 2] = expanded;
+        ((uint8_t*)array->data)[2 + row * 2] = expanded;
+    }
+    array->len = 16;
+    return (int64_t)(uintptr_t)result;
 }
 
 int64_t rt_file_size(const char* path) {

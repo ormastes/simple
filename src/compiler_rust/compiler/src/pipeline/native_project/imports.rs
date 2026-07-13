@@ -15,6 +15,10 @@ pub(crate) struct ImportMapResult {
     pub all_mangled: std::collections::HashMap<String, Vec<String>>,
     /// module_prefix -> (func_name -> actual_mangled_name) for re-exported functions.
     pub re_exports: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    /// Project-wide `impl Trait for Type` declarations. MIR lowering uses this
+    /// to distinguish real cross-module vtable dispatch from unsupported
+    /// duck-typed calls.
+    pub trait_impls: std::collections::HashMap<String, Vec<String>>,
     /// Global struct definitions: struct_name -> field names (in order).
     pub struct_defs: std::collections::HashMap<String, Vec<(String, simple_parser::Type)>>,
     /// Duplicate global struct/class definitions keyed by bare type name.
@@ -224,10 +228,10 @@ pub(crate) fn build_import_map(
     let mut enum_defs: HashMap<String, Vec<(String, Option<usize>)>> = HashMap::new();
     let mut data_exports: HashSet<String> = HashSet::new();
     let mut fn_arities: HashMap<String, usize> = HashMap::new();
-    // Bare function name -> declared named return type (struct/enum/class).
-    // Lets the lowerer give a real return type to calls reached via the global
-    // import map (no `use` import), so the result isn't ANY and field access
-    // on it resolves. Only named (uppercase) return types are kept.
+    let mut trait_impls: HashMap<String, Vec<String>> = HashMap::new();
+    // Bare function name -> declared return type. This includes primitive
+    // returns: losing `u64` here turns native comparisons into mixed ANY/scalar
+    // operations whose tagged ABI differs from raw machine integers.
     let mut fn_return_types: HashMap<String, simple_parser::Type> = HashMap::new();
 
     let mut seen_canonical = HashSet::new();
@@ -254,25 +258,10 @@ pub(crate) fn build_import_map(
                             let mangled = format!("{}__{}", prefix, f.name);
                             fn_arities.insert(mangled.clone(), f.params.len());
                             raw_to_mangled.entry(f.name.clone()).or_default().push(mangled);
-                            // Record a named return type so callers reached via the
-                            // global import map get a real result type instead of ANY.
-                            // Handles `-> Struct` and `-> [Struct]` (the array element
-                            // type is what indexing `result[i].field` needs). Skip on
-                            // bare-name collision to avoid mis-typing a same-named
-                            // function defined elsewhere.
-                            let is_named_upper = |t: &simple_parser::Type| {
-                                matches!(t, simple_parser::Type::Simple(n)
-                                    if n.chars().next().is_some_and(|c| c.is_uppercase()))
-                            };
-                            let captured: Option<simple_parser::Type> = match &f.return_type {
-                                Some(t) if is_named_upper(t) => Some(t.clone()),
-                                Some(t @ simple_parser::Type::Array { element, .. })
-                                    if is_named_upper(element.as_ref()) =>
-                                {
-                                    Some(t.clone())
-                                }
-                                _ => None,
-                            };
+                            // Preserve every declared return type. The lowerer
+                            // discards types it cannot resolve, and the collision
+                            // handling below removes ambiguous bare function names.
+                            let captured = f.return_type.clone();
                             if let Some(cap) = captured {
                                 match fn_return_types.entry(f.name.clone()) {
                                     std::collections::hash_map::Entry::Occupied(mut e) => {
@@ -436,6 +425,12 @@ pub(crate) fn build_import_map(
                             _ => None,
                         };
                         if let Some(type_name) = type_name {
+                            if let Some(trait_name) = &imp.trait_name {
+                                let implementations = trait_impls.entry(trait_name.clone()).or_default();
+                                if !implementations.iter().any(|candidate| candidate == type_name) {
+                                    implementations.push(type_name.to_string());
+                                }
+                            }
                             for m in &imp.methods {
                                 if !m.body.statements.is_empty() {
                                     let raw = format!("{}.{}", type_name, m.name);
@@ -680,6 +675,7 @@ pub(crate) fn build_import_map(
         ambiguous,
         all_mangled: raw_to_mangled,
         re_exports,
+        trait_impls,
         struct_defs,
         duplicate_struct_defs,
         enum_defs,

@@ -1059,9 +1059,9 @@ fn rewrite_method_expect_line(line: &str) -> String {
 
     let op_form = match matcher {
         "to_equal" | "to_be" => Some(if negated {
-            format!("{} != {}", actual, arg_str)
+            format!("({}) != {}", actual, arg_str)
         } else {
-            format!("{} == {}", actual, arg_str)
+            format!("({}) == {}", actual, arg_str)
         }),
         "to_be_nil" => Some(if negated {
             format!("{} != nil", actual)
@@ -2280,6 +2280,27 @@ describe "infix":
 
         assert!(wrapped_source.contains("expect value == 1"));
         assert!(wrapped_source.contains("expect (output).contains(\"ok\")"));
+    }
+
+    #[test]
+    fn test_preprocess_spipe_parenthesizes_conditional_equality_subject() {
+        let tempdir = tempdir().expect("tempdir");
+        let spec_path = tempdir.path().join("conditional_expect_spec.spl");
+        fs::write(
+            &spec_path,
+            r#"use std.spec.*
+
+describe "conditional":
+    it "rewrites":
+        expect(if ready: 1 else: 0).to_equal(1)
+"#,
+        )
+        .expect("write spec");
+
+        let wrapped = preprocess_spipe_for_smf(&spec_path).expect("preprocess");
+        let wrapped_source = fs::read_to_string(wrapped).expect("read wrapped");
+
+        assert!(wrapped_source.contains("expect (if ready: 1 else: 0) == 1"));
     }
 
     #[test]

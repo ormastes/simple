@@ -60,7 +60,7 @@ fn generate_spipe_docs_for_results(result: &TestRunResult, quiet: bool) {
         if !path_text.ends_with("_spec.spl") {
             continue;
         }
-        if path_text.contains("/.spipe_matchers_") || path_text.contains("/.sspec_wrapped_entry_") {
+        if path_text.contains("/.spipe_matchers_") || path_text.contains("/.spipe_wrapped_entry_") {
             continue;
         }
         spec_paths.push(file.path.clone());

@@ -31,6 +31,7 @@ use driver_types.{CompileContext, CompileOptions}
 use compiler.driver.driver.{CompilerDriver}
 use compiler.driver.driver_log_helpers.{log_debug, log_warn, log_phase}
 use compiler.driver.driver_source_loading.{_format_nll_error, _driver_is_bootstrap_entry_source}
+use std.alloc.sffi.{rt_dict_keys}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -45,14 +46,9 @@ fn _driver_env_bool(key: text) -> bool:
 # Format each MirError the same way jit_interpreter.spl / compiler.spl
 # already report them (message, plus file:line:col when the span is known).
 fn _format_mir_error(err: MirError) -> text:
-    match err.span:
-        Some(sp):
-            if sp.file != "":
-                "MIR lowering error ({sp.file}:{sp.line}:{sp.col}): {err.message}"
-            else:
-                "MIR lowering error: {err.message}"
-        nil:
-            "MIR lowering error: {err.message}"
+    # Span payloads can be absent even when a staged native Optional is tagged
+    # Some. Diagnostics must never crash while reporting the original failure.
+    "MIR lowering error: {err.message}"
 
 # MirLowering.errors mixes genuine "this MIR is broken" failures with
 # recoverable/informational entries the lowering pipeline pushes through the
@@ -177,13 +173,17 @@ impl CompilerDriver:
         var pipeline = CodegenPipeline.jit()
         var compiled_modules: [CompiledModule] = []
 
-        for name in self.ctx.mir_modules.keys():
+        val jit_module_names: [text] = rt_dict_keys(self.ctx.mir_modules)
+        var jit_module_i = 0
+        while jit_module_i < jit_module_names.len():
+            val name = jit_module_names[jit_module_i]
             val mir_module = self.ctx.mir_modules[name]
             match pipeline.compile_module(mir_module):
                 case Ok(compiled):
                     compiled_modules.push(compiled)
                 case Err(e):
                     return CompileResult.CodegenError("JIT compile error in {name}: {e.message}")
+            jit_module_i = jit_module_i + 1
 
         if compiled_modules.len() == 0:
             return CompileResult.RuntimeError("No modules compiled")
@@ -238,11 +238,15 @@ impl CompilerDriver:
             return true
         log_debug("running borrow check")
         var checker = BorrowChecker.create()
-        for name in self.ctx.mir_modules.keys():
+        val borrow_module_names: [text] = rt_dict_keys(self.ctx.mir_modules)
+        var borrow_module_i = 0
+        while borrow_module_i < borrow_module_names.len():
+            val name = borrow_module_names[borrow_module_i]
             val mir_module = self.ctx.mir_modules[name]
             val all_errors = check_mir_module(mir_module)
             for err in all_errors:
                 self.ctx.add_error(_format_nll_error(err))
+            borrow_module_i = borrow_module_i + 1
         self.ctx.errors.len() == 0
 
     fn format_borrow_error(err: NLLError) -> text:
@@ -276,11 +280,15 @@ impl CompilerDriver:
         val log = self.ctx.logger
         log_debug("optimizing MIR modules")
 
-        for name in self.ctx.mir_modules.keys():
+        val optimize_module_names: [text] = rt_dict_keys(self.ctx.mir_modules)
+        var optimize_module_i = 0
+        while optimize_module_i < optimize_module_names.len():
+            val name = optimize_module_names[optimize_module_i]
             val mir_module = self.ctx.mir_modules[name]
             val optimized = optimize_mir_module(mir_module, config)
             # Direct mutation (avoids copy-modify-reassign bug in compiled mode)
             self.ctx.mir_modules[name] = optimized
+            optimize_module_i = optimize_module_i + 1
 
     # --------------------------------------------------------------------------
     # AOP Weaving
@@ -290,10 +298,14 @@ impl CompilerDriver:
         """Apply AOP weaving to all MIR modules using advice from HIR modules."""
         # Collect all AOP advices from HIR modules
         var all_advices: [HirAopAdvice] = []
-        for name in self.ctx.hir_modules.keys():
+        val advice_module_names: [text] = rt_dict_keys(self.ctx.hir_modules)
+        var advice_module_i = 0
+        while advice_module_i < advice_module_names.len():
+            val name = advice_module_names[advice_module_i]
             val hir_mod = self.ctx.hir_modules[name]
             for advice in hir_mod.aop_advices:
                 all_advices.push(advice)
+            advice_module_i = advice_module_i + 1
 
         # Validate predicates and advice forms
         for advice in all_advices:
@@ -337,10 +349,16 @@ impl CompilerDriver:
                 self.ctx.warnings.push("[AOP] {conflict.message}")
 
         # Weave each MIR function
-        for mod_name in self.ctx.mir_modules.keys():
+        val weave_module_names: [text] = rt_dict_keys(self.ctx.mir_modules)
+        var weave_module_i = 0
+        while weave_module_i < weave_module_names.len():
+            val mod_name = weave_module_names[weave_module_i]
             val mir_module = self.ctx.mir_modules[mod_name]
             var woven_functions: Dict<SymbolId, MirFunction> = {}
-            for func in mir_module.functions.values():
+            val weave_function_symbols: [SymbolId] = rt_dict_keys(mir_module.functions)
+            var weave_function_i = 0
+            while weave_function_i < weave_function_symbols.len():
+                val func = mir_module.functions[weave_function_symbols[weave_function_i]]
                 # Extract block info for AOP matching
                 val blocks = extract_mir_block_info(func.blocks)
                 # Run weaving analysis
@@ -357,6 +375,7 @@ impl CompilerDriver:
                         self.ctx.errors.push("[AOP] {diag.message}")
                     elif diag.is_warning():
                         self.ctx.warnings.push("[AOP] {diag.message}")
+                weave_function_i = weave_function_i + 1
             self.ctx.mir_modules[mod_name] = MirModule(
                 name: mir_module.name,
                 functions: woven_functions,
@@ -364,6 +383,7 @@ impl CompilerDriver:
                 constants: mir_module.constants,
                 types: mir_module.types
             )
+            weave_module_i = weave_module_i + 1
 
     # --------------------------------------------------------------------------
     # Debug Trace Injection
@@ -380,10 +400,14 @@ impl CompilerDriver:
             return
 
         log_debug("debug trace injection: level={level}")
-        for name in self.ctx.mir_modules.keys():
+        val trace_module_names: [text] = rt_dict_keys(self.ctx.mir_modules)
+        var trace_module_i = 0
+        while trace_module_i < trace_module_names.len():
+            val name = trace_module_names[trace_module_i]
             val mir_module = self.ctx.mir_modules[name]
             val instrumented = inject_debug_trace(mir_module, level)
             self.ctx.mir_modules[name] = instrumented
+            trace_module_i = trace_module_i + 1
 
     fn get_optimization_config() -> OptimizationConfig:
         """Get optimization config from compiler options."""
@@ -457,6 +481,8 @@ impl CompilerDriver:
                 ),
                 symbols: SymbolTable.new(),
                 local_map: {},
+                local_symbol_ids: [],
+                local_symbol_values: [],
                 current_function_symbols: [],
                 current_function_names: [],
                 loop_stack: [],
@@ -474,6 +500,8 @@ impl CompilerDriver:
                 runtime_array_locals: {},
                 runtime_dict_locals: {},
                 array_element_struct_syms: {},
+                runtime_value_locals: {},
+                nil_locals: {},
                 enum_variant_index: {},
                 lambda_bindings: {},
                 lambda_capture_snapshot: {},
@@ -529,6 +557,8 @@ impl CompilerDriver:
             ),
             symbols: SymbolTable.new(),
             local_map: {},
+            local_symbol_ids: [],
+            local_symbol_values: [],
             current_function_symbols: [],
             current_function_names: [],
             loop_stack: [],
@@ -546,6 +576,8 @@ impl CompilerDriver:
             runtime_array_locals: {},
             runtime_dict_locals: {},
             array_element_struct_syms: {},
+            runtime_value_locals: {},
+            nil_locals: {},
             enum_variant_index: {},
             lambda_bindings: {},
             lambda_capture_snapshot: {},

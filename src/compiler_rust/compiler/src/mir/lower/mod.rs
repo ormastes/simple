@@ -68,6 +68,19 @@ pub fn lower_to_mir_with_mode_and_di(
         .lower_module(hir)
 }
 
+/// Lower HIR to MIR with project-wide trait implementation metadata.
+pub fn lower_to_mir_with_global_trait_impls(
+    hir: &HirModule,
+    trait_impls: &std::collections::HashMap<String, Vec<String>>,
+) -> MirLowerResult<MirModule> {
+    MirLowerer::new()
+        .with_refined_types(&hir.refined_types)
+        .with_type_registry(&hir.types)
+        .with_trait_infos(&hir.trait_infos)
+        .with_global_trait_impls(trait_impls)
+        .lower_module(hir)
+}
+
 /// Lower HIR to MIR with contract mode, DI configuration, and active DI profile.
 pub fn lower_to_mir_with_mode_di_profile(
     hir: &HirModule,

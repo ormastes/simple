@@ -265,6 +265,8 @@ pub struct MirLowerer<'a> {
     pub(super) type_registry: Option<&'a crate::hir::TypeRegistry>,
     /// Reference to trait infos for vtable slot resolution (static polymorphism)
     pub(super) trait_infos: Option<&'a std::collections::HashMap<String, crate::hir::HirTraitInfo>>,
+    /// Project-wide trait implementations for cross-module vtable dispatch.
+    pub(super) global_trait_impls: Option<&'a std::collections::HashMap<String, Vec<String>>>,
     /// DI configuration for constructor injection
     pub(super) di_config: Option<DiConfig>,
     /// Active DI profile for selecting profile-specific bindings.
@@ -338,6 +340,7 @@ impl<'a> MirLowerer<'a> {
             refined_types: None,
             type_registry: None,
             trait_infos: None,
+            global_trait_impls: None,
             di_config: None,
             di_profile: "default".to_string(),
             inject_functions: HashMap::new(),
@@ -376,6 +379,7 @@ impl<'a> MirLowerer<'a> {
             refined_types: None,
             type_registry: None,
             trait_infos: None,
+            global_trait_impls: None,
             di_config: None,
             di_profile: "default".to_string(),
             inject_functions: HashMap::new(),
@@ -887,6 +891,11 @@ impl<'a> MirLowerer<'a> {
         self
     }
 
+    pub fn with_global_trait_impls(mut self, trait_impls: &'a std::collections::HashMap<String, Vec<String>>) -> Self {
+        self.global_trait_impls = Some(trait_impls);
+        self
+    }
+
     /// Get vtable slot for a method on a trait
     /// Returns None if trait or method not found
     pub(super) fn get_vtable_slot(&self, trait_name: &str, method_name: &str) -> Option<u32> {
@@ -1153,6 +1162,14 @@ impl<'a> MirLowerer<'a> {
         self.function_value_globals = hir.global_init_functions.keys().cloned().collect();
         self.singleton_cache.clear(); // Clear singleton cache for each module
         self.dependency_graph = crate::di::DependencyGraph::default(); // Reset dependency graph per module (#1009)
+        if let Some(global_trait_impls) = self.global_trait_impls {
+            for (trait_name, implementations) in global_trait_impls {
+                for type_name in implementations {
+                    self.dependency_graph
+                        .add_implementation(trait_name.clone(), type_name.clone());
+                }
+            }
+        }
         self.di_resolution_stack.clear(); // Clear DI resolution stack per module
 
         for func in &hir.functions {

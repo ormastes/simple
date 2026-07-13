@@ -99,13 +99,62 @@ The process isolation scenario creates two real sparse page-table roots, maps
 the same virtual address to distinct frames, swaps exactly one mapping, proves
 the other PTE remains present, and restores the swapped mapping.
 
-The strict QEMU lane now builds and boots with a current bootstrap compiler.
-Serial evidence proves configuration separation, swap roundtrip, GPU lifecycle,
-NIC/DMA lifecycle, truthful unavailable physical migration, and `TEST PASSED`.
-The remaining release blocker is producing a current pure-Simple CLI: the full
-CLI native build exceeded 900 seconds without an artifact, so canonical
-`bin/simple` verification is still pending. The Rust-built compiler remains a
-bootstrap-only verifier and is not accepted as the normal tool.
+The strict QEMU lane uses modern VirtIO-GPU PCI for framebuffer backing and
+transfer/flush, legacy VirtIO-block PCI for a 512-byte write/read swap round
+trip, and legacy VirtIO-net PCI for observable RX/TX completion. The probe
+registers the actual identity-mapped GPU and NIC DMA regions with the SimpleOS
+memory-leveling manager before device submission. Physical migration remains
+unavailable.
+
+The last successful QEMU serial log observed real VirtIO-block swap I/O,
+modern VirtIO-GPU framebuffer attach/transfer/flush, legacy VirtIO-net RX/TX
+completion, protected manager lifecycles, and `TEST PASSED`. That artifact
+predates the current `MemoryLevelingManager.get -> Some(...)` source change,
+so it is useful behavioral evidence but not current-revision provenance. The
+fresh canonical checker attempt failed during kernel native-build before QEMU
+started; do not claim a current QEMU PASS until that checker is rerun.
+
+Direct native pressure evidence is closed. The pure-Simple `--mode=native` runner
+now invokes `native-build --backend cranelift --runtime-bundle
+core-c-bootstrap`, runs the resulting ELF directly, and keeps SMF behavior in
+compile mode. The core-C runtime now supplies `rt_bytes_alloc`, hosted
+`rt_invlpg`, `serial_println`, and the five required incremental string-builder
+exports; its focused archive ABI test passes. The explicit-target pressure ELF
+reports `2 examples, 0 failures`, including byte-exact swap restoration and
+swap-slot reuse.
+
+The first Cranelift pressure ELF linked but was rejected as evidence: native
+project lowering did not know that `MemBlockDevice` implements `BlockDevice`
+in another compilation unit, so the live write call reached the protected
+duck-dispatch trap. Native discovery now carries a project-wide
+`trait -> implementation types` map into MIR lowering without duplicating
+vtable definitions. The same link also exposed a stubbed `unsafe_addr_of`;
+core-C now owns that array-header address primitive and the archive test checks
+its export.
+
+Earlier bootstrap attempts crashed while creating LLVM modules and the
+canonical checker faulted during frontend initialization. Those failures are
+superseded by the explicit-target pressure PASS and the full-bootstrap
+null-safe array-length fix described below. AC-13 remains open for the fresh
+QEMU build, malformed-token source-check failures, MCP recursion guard, and
+repo-hygiene violations. The Rust-built compiler remains bootstrap-only and is
+not accepted as the normal tool.
+
+The explicit host-target Cranelift path now compiles the complete 29-file
+pressure/swap closure without fallback symbols. Cross-module optional struct
+returns require two compiler contracts: project import discovery must retain
+the nested named type, and the `Some(value)` payload binding must retain that
+concrete type. Native codegen materializes `OptionSome`, so matching still uses
+`rt_enum_payload`; direct pointer binding is incorrect. Both contracts have
+focused Rust regressions.
+
+The final native test boundary was the MMIO test store, not swap policy.
+Nested region arrays lost element updates after native reallocation, so page
+table construction retained parent entries while the deeper and leaf entries
+read as zero. Test-mode 8/64-bit MMIO now uses sparse flat address/value arrays,
+matching the existing 16/32-bit owner and avoiding nested native array
+mutation. The follow-up explicit-target pressure contract passes both
+scenarios with exact restored bytes and reusable swap capacity.
 
 Do not claim GPUDirect, RDMA hardware paging, CXL, or live GPU/NIC migration
 from model or QEMU-only evidence. Real device movement needs driver-owned
@@ -136,3 +185,67 @@ options, in preference order: (a) UEFI-stub entry (`efi_main`,
 low payload window; (c) relocate the clang payload VA out of the kernel's range.
 Until one lands, the board-proxy capstone (clang kernel booting under OVMF)
 stays open. See `doc/03_plan/os/in_guest_clang_selfhost_board_plan.md` step 2f.
+
+## Native pressure/swap verification
+
+The Rust bootstrap driver selects its direct native-project handler only when
+the host target is explicit. For the pressure/swap closure, pass
+`--target x86_64-unknown-linux-gnu`; omitting it delegates to the interpreted
+pure-Simple worker and can time out before code generation.
+
+Native-project discovery must preserve primitive function return types as well
+as named project types. Otherwise an imported `u64` result such as
+`vmm_read_pte` becomes `ANY`, and mixed tagged/raw equality can report a stale
+mapping even when the live and saved physical addresses are identical.
+
+The test-mode MMIO store must also avoid indexed mutation of global typed
+arrays in native builds. Use append-only address/value entries and a forward
+scan that remembers the final matching index. Reverse scans based on assigning
+`addresses.len()` to a local index have not preserved the initial page-table
+lookup in the direct native pressure/swap closure.
+
+Generic typed-word array helpers must preserve the owning array's runtime
+representation. Generic `[u32]`/`[u64]` arrays store tagged integer values;
+packed arrays store raw words. Growth fallback through
+`rt_typed_words_u32/u64_push` must not switch a generic array from tagged to
+raw storage. Typed-word indices are raw `i64` values at the runtime ABI; an
+index such as `8` must not be decoded as a tagged integer. Unchecked reads use
+the array header to distinguish generic from packed storage, while bare data
+pointer reads decode generic tagged slots. The checked u64 data-pointer path
+uses its supplied header for that representation decision. Generic signed u64
+loads use arithmetic untagging, and known data-pointer stores likewise consult
+the header before choosing tagged generic or raw packed storage.
+
+Native value equality is also part of the pressure-test contract. Separately
+allocated arrays compare structurally across packed-byte, packed-u64, and
+generic tagged storage; ancestor-pair tracking terminates cycles without
+rejecting wide acyclic arrays. Core-C BDD equality routes array operands through
+that owner instead of weakening byte-content assertions to identity checks.
+The explicit-target pressure ELF must report `2 examples, 0 failures`.
+
+Typed byte access has the same representation requirement. A statically typed
+`[u8]` may still use generic tagged slots when created by a module initializer;
+Cranelift's trusted-array path may skip header type validation, but it must read
+the byte-packed flag before choosing one-byte or eight-byte slot addressing.
+Core-C fallback accessors follow the same rule.
+
+Native optional aggregate returns must be explicit. In particular,
+`MemoryLevelingManager.get` and all successful `vmm_translate` paths return
+`Some(value)`. Returning a bare aggregate lets the caller compile `.unwrap()`
+as `rt_enum_payload(raw_pointer)`, which yields nil even though the aggregate
+itself is valid.
+
+Native array length is null-safe in every backend. Cranelift and LLVM must
+branch around the trusted array-header load when the masked pointer is zero;
+the Rust and core-C `rt_array_len` fallbacks return zero as well. This matters
+for native module globals, whose declared array initializer may still be raw
+null before the frontend's lazy state setup runs.
+
+The full bootstrap must rebuild the Rust seed after backend changes. Reusing a
+stale seed can produce successful Stage 2/3/4 artifacts that still contain the
+old unchecked load. Current Stage 2 disassembly shows a zero test before the
+offset-8 load, Stage 3 and Stage 4 pass, and the deployed compiler checker no
+longer crashes. Release verification is still open: lib/MCP/LSP source checks
+currently expose unrelated malformed-token diagnostics, the MCP interpreter
+smoke hits its recursion guard, and fresh QEMU provenance fails during kernel
+native-build before QEMU starts.

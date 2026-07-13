@@ -12,6 +12,7 @@ OUT_DIR="build/test-artifacts/simpleos-memory-leveling-qemu"
 KERNEL="$OUT_DIR/memory_leveling_qemu.elf"
 SERIAL_LOG="$OUT_DIR/serial.log"
 BUILD_LOG="$OUT_DIR/build.log"
+SWAP_DISK="$OUT_DIR/swap.raw"
 STAGE="$OUT_DIR/source"
 CACHE_DIR="$OUT_DIR/native-cache"
 
@@ -24,6 +25,7 @@ COMPILER_SHA256="$(sha256sum "$SIMPLE_BIN" | cut -d' ' -f1)"
 command -v "$QEMU_BIN" >/dev/null 2>&1 || { echo "memory_leveling_qemu_status=blocked reason=qemu-missing"; exit 2; }
 test -x "$SIMPLE_BIN" || { echo "memory_leveling_qemu_status=blocked reason=simple-binary-missing"; exit 2; }
 mkdir -p "$OUT_DIR"
+truncate -s 8M "$SWAP_DISK"
 
 rm -rf "$STAGE" "$CACHE_DIR"
 mkdir -p \
@@ -43,6 +45,7 @@ cp examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c \
     "$STAGE/examples/09_embedded/simple_os/arch/x86_64/boot/"
 cp examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s \
     examples/09_embedded/simple_os/arch/x86_64/boot/ap_trampoline.s \
+    examples/09_embedded/simple_os/arch/x86_64/boot/enter_user_first.s \
     examples/09_embedded/simple_os/arch/x86_64/boot/syscall_entry.s \
     "$STAGE/examples/09_embedded/simple_os/arch/x86_64/boot/"
 cp examples/09_embedded/simple_os/arch/x86_64/boot/curve25519_ring_helper.c \
@@ -69,14 +72,17 @@ SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$STAGE/src/lib" \
 
 test -s "$KERNEL" || { echo "memory_leveling_qemu_status=fail reason=empty-kernel"; exit 1; }
 sync "$KERNEL"
+sync "$SWAP_DISK"
 
 set +e
 timeout 30 "$QEMU_BIN" \
     -machine q35 -cpu qemu64 -m 256M -kernel "$KERNEL" \
     -serial stdio -monitor none -display none -no-reboot \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-    -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
-    -device virtio-vga >"$SERIAL_LOG" 2>&1
+    -netdev user,id=net0 -device virtio-net-pci,netdev=net0,disable-modern=on \
+    -drive file="$SWAP_DISK",if=none,format=raw,id=swap0 \
+    -device virtio-blk-pci,drive=swap0,disable-modern=on,disable-legacy=off \
+    -device virtio-gpu-pci >"$SERIAL_LOG" 2>&1
 qemu_rc=$?
 set -e
 
@@ -84,9 +90,11 @@ test "$qemu_rc" -eq 1 || { tail -60 "$SERIAL_LOG"; echo "memory_leveling_qemu_st
 for marker in \
     "[memory-leveling] config-separation=pass" \
     "[memory-leveling] swap-roundtrip=pass" \
-    "[memory-leveling] gpu-lifecycle=pass migration=unavailable" \
+    "[memory-leveling] virtio-blk-write-read=complete bytes=512" \
+    "[memory-leveling] gpu-lifecycle=pass backend=virtio-gpu" \
+    "[memory-leveling] virtio-gpu-transfer-flush=complete" \
     "[memory-leveling] nic-dma-lifecycle=pass" \
-    "[memory-leveling] qemu-capabilities=pass physical-migration=unavailable" \
+    "[memory-leveling] qemu-capabilities=pass virtio-block=true dma-map-unmap=true physical-migration=unavailable" \
     "TEST PASSED"
 do
     grep -Fq "$marker" "$SERIAL_LOG" || { tail -60 "$SERIAL_LOG"; echo "memory_leveling_qemu_status=fail reason=missing-marker"; exit 1; }

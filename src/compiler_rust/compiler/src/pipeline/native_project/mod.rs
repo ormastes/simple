@@ -171,6 +171,8 @@ pub(crate) struct ModuleImports {
     pub all_mangled: std::sync::Arc<std::collections::HashMap<String, Vec<String>>>,
     /// Per-module re-export maps.
     pub re_exports: std::sync::Arc<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
+    /// Project-wide trait implementations used to validate virtual dispatch.
+    pub trait_impls: std::sync::Arc<std::collections::HashMap<String, Vec<String>>>,
     /// Global struct definitions: struct_name -> [(field_name, field_type_name)].
     /// Shared across all compilation units for consistent cross-module field offsets.
     pub struct_defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, simple_parser::Type)>>>,
@@ -673,6 +675,7 @@ impl NativeProjectBuilder {
                 ambiguous_names: std::sync::Arc::new(result.ambiguous),
                 all_mangled: std::sync::Arc::new(result.all_mangled),
                 re_exports: std::sync::Arc::new(result.re_exports),
+                trait_impls: std::sync::Arc::new(result.trait_impls),
                 struct_defs: std::sync::Arc::new(result.struct_defs),
                 duplicate_struct_defs: std::sync::Arc::new(result.duplicate_struct_defs),
                 enum_defs: std::sync::Arc::new(result.enum_defs),
@@ -688,6 +691,7 @@ impl NativeProjectBuilder {
                 ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
                 all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
                 re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+                trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
                 struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),

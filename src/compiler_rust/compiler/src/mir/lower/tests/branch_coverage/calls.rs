@@ -3,6 +3,7 @@
 use super::super::common::*;
 use super::helpers::*;
 use crate::hir;
+use crate::method_registry::GLOBAL_REGISTRY;
 use crate::mir::lower::{lower_to_mir, ContractMode, MirLowerer};
 use crate::mir::function::MirFunction;
 use crate::mir::{CallTarget, MirInst};
@@ -18,6 +19,148 @@ fn method_call_static_dispatch() {
         "struct Counter:\n    value: i64\n\nimpl Counter:\n    fn get(self) -> i64:\n        return self.value\n\nfn test() -> i64:\n    let c = Counter { value: 42 }\n    return c.get()\n",
     ).unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::MethodCallStatic { .. })));
+}
+
+#[test]
+fn dict_field_keys_uses_builtin_dict_dispatch() {
+    let mir = compile_to_mir(
+        "struct Module:\n    functions: Dict<text, i64>\n\nfn test(module: Module) -> [text]:\n    return module.functions.keys()\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "Dict.keys"
+    )));
+    assert!(!has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "Map.keys" || func_name == "keys"
+    )));
+}
+
+#[test]
+fn text_rfind_does_not_resolve_to_trait_default() {
+    let mir = compile_to_mir(
+        r#"struct text:
+    data: i64
+
+impl text:
+    fn replace(old: text, new: text) -> text:
+        return self
+
+fn parent(path: text) -> i64:
+    val normalized = path.replace("x", "/")
+    return normalized.rfind("/")
+"#,
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "text.rfind"
+    )));
+    assert_eq!(GLOBAL_REGISTRY.runtime_fn("String", "rfind"), Some("rt_string_rfind"));
+    assert!(!has_inst(&mir, |i| matches!(i, MirInst::MethodCallVirtual { .. })));
+}
+
+fn lower_compatibility_alias(alias: &str, source: &str, erase_receiver_type: bool) -> crate::mir::function::MirModule {
+    let mut parser = Parser::new(source);
+    let ast = parser.parse().expect("parse failed");
+    let mut hir_module = hir::lower(&ast).expect("hir lower failed");
+    let function = hir_module.functions.iter_mut().find(|f| f.name == "test").unwrap();
+    let expr = function
+        .body
+        .iter_mut()
+        .find_map(|statement| match statement {
+            hir::HirStmt::Return(Some(expr)) => Some(expr),
+            _ => None,
+        })
+        .expect("expected return");
+    let (mut receiver, args) = match &expr.kind {
+        hir::HirExprKind::MethodCall { receiver, args, .. } => ((**receiver).clone(), args.clone()),
+        kind => panic!("expected method call, got {kind:?}"),
+    };
+    if erase_receiver_type {
+        receiver.ty = hir::TypeId::ANY;
+    }
+    let mut call_args = Vec::with_capacity(args.len() + 1);
+    call_args.push(receiver);
+    call_args.extend(args);
+    expr.kind = hir::HirExprKind::Call {
+        func: Box::new(hir::HirExpr {
+            kind: hir::HirExprKind::Global(alias.to_string()),
+            ty: hir::TypeId::ANY,
+        }),
+        args: call_args,
+    };
+    lower_to_mir(&hir_module).unwrap()
+}
+
+#[test]
+fn len_trait_compatibility_alias_lowers_to_array_method() {
+    let mir = lower_compatibility_alias(
+        "compiler_rust__lib__std__src__core__traits__Len_dot_is_empty",
+        "fn test(values: [i64]) -> bool:\n    return values.is_empty()\n",
+        false,
+    );
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "Array.is_empty"
+    )));
+}
+
+#[test]
+fn len_trait_compatibility_alias_recovers_local_array_type() {
+    let mir = lower_compatibility_alias(
+        "compiler_rust__lib__std__src__core__traits__Len_dot_is_empty",
+        "fn test(values: [i64]) -> bool:\n    return values.is_empty()\n",
+        true,
+    );
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "Array.is_empty"
+    )));
+}
+
+#[test]
+fn exact_size_iterator_compatibility_alias_lowers_to_array_method() {
+    let mir = lower_compatibility_alias(
+        "compiler_rust__lib__std__src__core__traits__ExactSizeIterator_dot_is_empty",
+        "fn test(values: [i64]) -> bool:\n    return values.is_empty()\n",
+        false,
+    );
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "Array.is_empty"
+    )));
+}
+
+#[test]
+fn double_ended_iterator_compatibility_alias_lowers_to_string_method() {
+    let mir = lower_compatibility_alias(
+        "compiler_rust__lib__std__src__core__traits__DoubleEndedIterator_dot_rfind",
+        "fn test(value: str) -> i64:\n    return value.rfind(\"/\")\n",
+        false,
+    );
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "str.rfind"
+    )));
+}
+
+#[test]
+fn compatibility_alias_lowers_receiver_once() {
+    let mir = lower_compatibility_alias(
+        "compiler_rust__lib__std__src__core__traits__DoubleEndedIterator_dot_rfind",
+        "fn make() -> str:\n    return \"/tmp/file\"\n\nfn test() -> i64:\n    return make().rfind(\"/\")\n",
+        false,
+    );
+    let make_calls = mir
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.instructions)
+        .filter(|instruction| matches!(instruction, MirInst::Call { target, .. } if target.name() == "make"))
+        .count();
+    assert_eq!(make_calls, 1);
 }
 
 #[test]

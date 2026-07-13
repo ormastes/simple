@@ -16,6 +16,7 @@ extern fn array_ptr(array: i64) -> i64
 extern fn array_items(array: i64) -> i64
 extern fn array_len_value(array: i64) -> i64
 extern fn array_cap(array: i64) -> i64
+extern fn array_flags(array: i64) -> i64
 extern fn array_is_valid(array: i64) -> i64
 extern fn set_array_items(array: i64, items: i64)
 extern fn set_array_len(array: i64, len: i64)
@@ -51,6 +52,16 @@ fn val_is_falsy(v: i64) -> i64:
 
 fn val_from_int(i: i64) -> i64:
     return i << 3
+
+fn typed_word_encode(array: i64, value: i64) -> i64:
+    if (array_flags(array) & 16) != 0:
+        return value
+    return val_from_int(value)
+
+fn typed_word_decode(array: i64, value: i64) -> i64:
+    if (array_flags(array) & 16) != 0:
+        return value
+    return val_as_int(value)
 
 # ============================================================================
 # Tier 1: Mechanical, no extra dependencies
@@ -360,27 +371,27 @@ pub fn rt_typed_bytes_u8_push(array: i64, value: i64) -> i8:
 pub fn rt_typed_words_u32_at(array: i64, idx: i64) -> i64:
     if array_is_valid(array) < 1:
         return 0
-    val actual_idx = normalize_index(array, idx)
+    val actual_idx = if idx < 0: array_len_value(array) + idx else: idx
     if actual_idx < 0 or actual_idx >= array_len_value(array):
         return 0
-    return spl_load_i64(array_items(array), actual_idx * 8) & 0xffffffff
+    return typed_word_decode(array, spl_load_i64(array_items(array), actual_idx * 8)) & 0xffffffff
 
 pub fn rt_typed_words_u32_unchecked(array: i64, idx: i64) -> i64:
-    return spl_load_i64(array_items(array), numeric_index(idx) * 8) & 0xffffffff
+    return typed_word_decode(array, spl_load_i64(array_items(array), idx * 8)) & 0xffffffff
 
 pub fn rt_typed_words_u32_data_at(items: i64, idx: i64) -> i64:
-    return spl_load_i64(items, numeric_index(idx) * 8) & 0xffffffff
+    return val_as_int(spl_load_i64(items, idx * 8)) & 0xffffffff
 
 pub fn rt_typed_words_u32_push(array: i64, value: i64) -> i8:
-    return rt_array_push(array, value & 0xffffffff)
+    return rt_array_push(array, typed_word_encode(array, value & 0xffffffff))
 
 pub fn rt_typed_words_u32_push_known_at(array: i64, idx: i64, value: i64) -> i8:
     if array_is_valid(array) < 1:
         return 0
-    val actual_idx = numeric_index(idx)
+    val actual_idx = idx
     if actual_idx < 0 or actual_idx >= array_cap(array):
         return 0
-    spl_store_i64(array_items(array), actual_idx * 8, value & 0xffffffff)
+    spl_store_i64(array_items(array), actual_idx * 8, typed_word_encode(array, value & 0xffffffff))
     if actual_idx >= array_len_value(array):
         set_array_len(array, actual_idx + 1)
     return 1
@@ -388,10 +399,10 @@ pub fn rt_typed_words_u32_push_known_at(array: i64, idx: i64, value: i64) -> i8:
 pub fn rt_typed_words_u32_push_known_data_at(array: i64, items: i64, idx: i64, value: i64) -> i8:
     if array_is_valid(array) < 1:
         return 0
-    val actual_idx = numeric_index(idx)
+    val actual_idx = idx
     if actual_idx < 0 or actual_idx >= array_cap(array):
         return 0
-    spl_store_i64(items, numeric_index(idx) * 8, value & 0xffffffff)
+    spl_store_i64(items, actual_idx * 8, typed_word_encode(array, value & 0xffffffff))
     if actual_idx >= array_len_value(array):
         set_array_len(array, actual_idx + 1)
     return 1
@@ -402,33 +413,33 @@ pub fn rt_typed_words_u32_store_known_data_at(array: i64, items: i64, idx: i64, 
 pub fn rt_typed_words_u32_set(array: i64, idx: i64, value: i64) -> i8:
     if array_is_valid(array) < 1:
         return 0
-    val actual_idx = normalize_index(array, idx)
+    val actual_idx = if idx < 0: array_len_value(array) + idx else: idx
     if actual_idx < 0 or actual_idx >= array_len_value(array):
         return 0
-    spl_store_i64(array_items(array), actual_idx * 8, value & 0xffffffff)
+    spl_store_i64(array_items(array), actual_idx * 8, typed_word_encode(array, value & 0xffffffff))
     return 1
 
 pub fn rt_typed_words_u64_at(array: i64, idx: i64) -> i64:
     if array_is_valid(array) < 1:
         return 0
-    val actual_idx = normalize_index(array, idx)
+    val actual_idx = if idx < 0: array_len_value(array) + idx else: idx
     if actual_idx < 0 or actual_idx >= array_len_value(array):
         return 0
-    return spl_load_i64(array_items(array), actual_idx * 8)
+    return typed_word_decode(array, spl_load_i64(array_items(array), actual_idx * 8))
 
 pub fn rt_typed_words_u64_unchecked(array: i64, idx: i64) -> i64:
-    return spl_load_i64(array_items(array), numeric_index(idx) * 8)
+    return typed_word_decode(array, spl_load_i64(array_items(array), idx * 8))
 
 pub fn rt_typed_words_u64_data_at(items: i64, idx: i64) -> i64:
-    return spl_load_i64(items, numeric_index(idx) * 8)
+    return val_as_int(spl_load_i64(items, idx * 8))
 
 pub fn rt_typed_words_u64_data_at_checked(array: i64, items: i64, idx: i64) -> i64:
     if array_is_valid(array) < 1:
         return 0
-    val actual_idx = normalize_index(array, idx)
+    val actual_idx = if idx < 0: array_len_value(array) + idx else: idx
     if actual_idx < 0 or actual_idx >= array_len_value(array):
         return 0
-    return spl_load_i64(array_items(array), actual_idx * 8)
+    return typed_word_decode(array, spl_load_i64(items, actual_idx * 8))
 
 pub fn rt_typed_words_u64_raw_data_at(items: i64, idx: i64) -> i64:
     return spl_load_i64(items, idx * 8)
@@ -615,15 +626,15 @@ pub fn rt_numeric_contains_u64(array: i64, value: i64) -> i8:
     return found
 
 pub fn rt_typed_words_u64_push(array: i64, value: i64) -> i8:
-    return rt_array_push(array, value)
+    return rt_array_push(array, typed_word_encode(array, value))
 
 pub fn rt_typed_words_u64_push_known_at(array: i64, idx: i64, value: i64) -> i8:
     if array_is_valid(array) < 1:
         return 0
-    val actual_idx = numeric_index(idx)
+    val actual_idx = idx
     if actual_idx < 0 or actual_idx >= array_cap(array):
         return 0
-    spl_store_i64(array_items(array), actual_idx * 8, value)
+    spl_store_i64(array_items(array), actual_idx * 8, typed_word_encode(array, value))
     if actual_idx >= array_len_value(array):
         set_array_len(array, actual_idx + 1)
     return 1
@@ -631,10 +642,10 @@ pub fn rt_typed_words_u64_push_known_at(array: i64, idx: i64, value: i64) -> i8:
 pub fn rt_typed_words_u64_push_known_data_at(array: i64, items: i64, idx: i64, value: i64) -> i8:
     if array_is_valid(array) < 1:
         return 0
-    val actual_idx = numeric_index(idx)
+    val actual_idx = idx
     if actual_idx < 0 or actual_idx >= array_cap(array):
         return 0
-    spl_store_i64(items, numeric_index(idx) * 8, value)
+    spl_store_i64(items, actual_idx * 8, typed_word_encode(array, value))
     if actual_idx >= array_len_value(array):
         set_array_len(array, actual_idx + 1)
     return 1
@@ -645,10 +656,10 @@ pub fn rt_typed_words_u64_store_known_data_at(array: i64, items: i64, idx: i64, 
 pub fn rt_typed_words_u64_set(array: i64, idx: i64, value: i64) -> i8:
     if array_is_valid(array) < 1:
         return 0
-    val actual_idx = normalize_index(array, idx)
+    val actual_idx = if idx < 0: array_len_value(array) + idx else: idx
     if actual_idx < 0 or actual_idx >= array_len_value(array):
         return 0
-    spl_store_i64(array_items(array), actual_idx * 8, value)
+    spl_store_i64(array_items(array), actual_idx * 8, typed_word_encode(array, value))
     return 1
 
 pub fn rt_array_extend_i64(dst: i64, src: i64, count: i64) -> i8:

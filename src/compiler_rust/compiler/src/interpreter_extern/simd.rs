@@ -1470,11 +1470,7 @@ pub fn rt_engine2d_simd_fill_rows_u32(args: &[Value]) -> Result<Value, CompileEr
     let count = width
         .checked_mul(height)
         .and_then(|value| usize::try_from(value).ok())
-        .ok_or_else(|| {
-            CompileError::runtime(
-                "rt_engine2d_simd_fill_rows_u32 dimensions overflow".to_string(),
-            )
-        })?;
+        .ok_or_else(|| CompileError::runtime("rt_engine2d_simd_fill_rows_u32 dimensions overflow".to_string()))?;
     let color = require_u32_value("rt_engine2d_simd_fill_rows_u32(color)", &args[2])?;
     Ok(pack_u32_array(sffi_fill_row_u32(count, color)))
 }

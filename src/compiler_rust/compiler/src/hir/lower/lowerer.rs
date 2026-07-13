@@ -76,7 +76,7 @@ pub struct Lowerer {
     /// Captured from the AST during module lowering so omitted trailing
     /// arguments can be filled at call sites (`lower_call`).
     pub(super) fn_param_defaults: HashMap<String, Vec<Option<Expr>>>,
-    /// Whole-program map of free-function name -> declared (named) return type,
+    /// Whole-program map of free-function name -> declared return type,
     /// built by `build_import_map`. Functions reached via the global import map
     /// (called without a `use` import) otherwise have no return-type info, so
     /// their call results become ANY and field access on them fails. Resolved

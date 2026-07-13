@@ -35,11 +35,20 @@ use simple_runtime::value::{
     rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_tuple_new, rt_tuple_set, RuntimeValue,
 };
 
+#[no_mangle]
+pub extern "C" fn rt_jit_cleanup(handle: i64) -> i64 {
+    simple_compiler::native_jit_cleanup_handle(handle)
+}
+
 fn native_build_rust_trace_enabled() -> bool {
     matches!(
         std::env::var("SIMPLE_NATIVE_BUILD_RUST_TRACE").as_deref(),
         Ok("1") | Ok("true") | Ok("yes") | Ok("on")
     )
+}
+
+fn native_build_process_args_usable(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "native-build")
 }
 
 fn is_valid_runtime_bundle(value: &str) -> bool {
@@ -69,6 +78,10 @@ fn is_removed_runtime_bundle(value: &str) -> bool {
 
 fn is_allowed_runtime_bundle(value: &str, bootstrap: bool) -> bool {
     is_valid_runtime_bundle(value) || (bootstrap && value == "rust-hosted")
+}
+
+fn native_build_bootstrap_mode(bootstrap: bool, stage4: bool) -> bool {
+    bootstrap || stage4
 }
 
 // Helper: extract a Rust String from a Simple runtime string value.
@@ -122,7 +135,20 @@ fn resolve_native_build_entry(
 /// Returns exit code (0 = success).
 #[no_mangle]
 pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
-    let args_vec = extract_rt_string_array(args);
+    let args_vec = if std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1") {
+        // ponytail: bootstrap binaries currently mix the C array ABI with the
+        // Rust RuntimeValue ABI. Prefer process argv when the native runtime
+        // initialized it; otherwise preserve the Simple array passed by
+        // bootstrap_main instead of silently compiling the default project.
+        let process_args: Vec<String> = std::env::args().collect();
+        if native_build_process_args_usable(&process_args) {
+            process_args
+        } else {
+            extract_rt_string_array(args)
+        }
+    } else {
+        extract_rt_string_array(args)
+    };
     if native_build_rust_trace_enabled() {
         eprintln!("[native-rust-trace] raw args={:?}", args_vec);
     }
@@ -462,6 +488,10 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
         }
     }
 
+    let bootstrap = native_build_bootstrap_mode(
+        std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1"),
+        std::env::var("SIMPLE_BOOTSTRAP_STAGE4").as_deref() == Ok("1"),
+    );
     let entry_file = match resolve_native_build_entry(entry_file, &bare_spl) {
         Ok(entry) => entry,
         Err(message) => {
@@ -469,8 +499,6 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
             return 1;
         }
     };
-
-    let bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
     if !is_allowed_runtime_bundle(&runtime_bundle, bootstrap) {
         if is_removed_runtime_bundle(&runtime_bundle) {
             eprintln!(
@@ -2017,6 +2045,24 @@ mod tests {
         let array = to_rv(raw_array);
         let len = rt_array_len(array);
         (0..len).map(|idx| rt_array_get(array, idx)).collect()
+    }
+
+    #[test]
+    fn native_build_process_args_require_command_marker() {
+        assert!(!native_build_process_args_usable(&[]));
+        assert!(!native_build_process_args_usable(&["simple".to_string()]));
+        assert!(native_build_process_args_usable(&[
+            "simple".to_string(),
+            "native-build".to_string(),
+            "--entry-closure".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn native_build_bootstrap_mode_includes_stage4() {
+        assert!(!native_build_bootstrap_mode(false, false));
+        assert!(native_build_bootstrap_mode(true, false));
+        assert!(native_build_bootstrap_mode(false, true));
     }
 
     #[test]

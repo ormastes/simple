@@ -274,60 +274,10 @@ impl Lowerer {
                         ctx.add_local(name.clone(), *ty, mutability);
                     }
 
-                    // 5. Generate payload extraction stmts (for enum bindings like Some(x))
-                    let mut binding_stmts = Vec::new();
-                    if let Pattern::Enum {
-                        payload: Some(payload_patterns),
-                        ..
-                    } = pattern
-                    {
-                        let binding_type_map: std::collections::HashMap<String, TypeId> =
-                            bindings.iter().cloned().collect();
-
-                        for (i, p) in payload_patterns.iter().enumerate() {
-                            if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) = p {
-                                if let Some(local_idx) = ctx.local_map.get(name) {
-                                    let local_idx = *local_idx;
-                                    let binding_ty = binding_type_map.get(name).copied().unwrap_or(TypeId::ANY);
-
-                                    let payload_expr = HirExpr {
-                                        kind: HirExprKind::BuiltinCall {
-                                            name: "rt_enum_payload".to_string(),
-                                            args: vec![HirExpr {
-                                                kind: HirExprKind::Local(subject_idx),
-                                                ty: subject_ty,
-                                            }],
-                                        },
-                                        ty: if payload_patterns.len() == 1 {
-                                            binding_ty
-                                        } else {
-                                            TypeId::ANY
-                                        },
-                                    };
-
-                                    let value = if payload_patterns.len() == 1 {
-                                        payload_expr
-                                    } else {
-                                        HirExpr {
-                                            kind: HirExprKind::Index {
-                                                receiver: Box::new(payload_expr),
-                                                index: Box::new(HirExpr {
-                                                    kind: HirExprKind::Integer(i as i64),
-                                                    ty: TypeId::I64,
-                                                }),
-                                            },
-                                            ty: binding_ty,
-                                        }
-                                    };
-                                    binding_stmts.push(HirStmt::Let {
-                                        local_index: local_idx,
-                                        ty: binding_ty,
-                                        value: Some(value),
-                                    });
-                                }
-                            }
-                        }
-                    }
+                    // 5. Generate payload extraction stmts through the same owner
+                    // used by match arms, including multi-field array typing.
+                    let binding_stmts =
+                        self.build_pattern_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
 
                     // 6. Lower then_block with bindings in scope
                     let mut then_block = Vec::new();
@@ -382,56 +332,13 @@ impl Lowerer {
                                 ctx.add_local(name.clone(), *ty, elif_mutability);
                             }
 
-                            let mut elif_binding_stmts = Vec::new();
-                            if let Pattern::Enum {
-                                payload: Some(payload_patterns),
-                                ..
-                            } = ep
-                            {
-                                let binding_type_map: std::collections::HashMap<String, TypeId> =
-                                    elif_bindings.iter().cloned().collect();
-                                for (i, p) in payload_patterns.iter().enumerate() {
-                                    if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) = p {
-                                        if let Some(local_idx) = ctx.local_map.get(name) {
-                                            let local_idx = *local_idx;
-                                            let binding_ty = binding_type_map.get(name).copied().unwrap_or(TypeId::ANY);
-                                            let payload_expr = HirExpr {
-                                                kind: HirExprKind::BuiltinCall {
-                                                    name: "rt_enum_payload".to_string(),
-                                                    args: vec![HirExpr {
-                                                        kind: HirExprKind::Local(elif_subject_idx),
-                                                        ty: elif_subject_ty,
-                                                    }],
-                                                },
-                                                ty: if payload_patterns.len() == 1 {
-                                                    binding_ty
-                                                } else {
-                                                    TypeId::ANY
-                                                },
-                                            };
-                                            let value = if payload_patterns.len() == 1 {
-                                                payload_expr
-                                            } else {
-                                                HirExpr {
-                                                    kind: HirExprKind::Index {
-                                                        receiver: Box::new(payload_expr),
-                                                        index: Box::new(HirExpr {
-                                                            kind: HirExprKind::Integer(i as i64),
-                                                            ty: TypeId::I64,
-                                                        }),
-                                                    },
-                                                    ty: binding_ty,
-                                                }
-                                            };
-                                            elif_binding_stmts.push(HirStmt::Let {
-                                                local_index: local_idx,
-                                                ty: binding_ty,
-                                                value: Some(value),
-                                            });
-                                        }
-                                    }
-                                }
-                            }
+                            let elif_binding_stmts = self.build_pattern_binding_stmts(
+                                ep,
+                                elif_subject_idx,
+                                elif_subject_ty,
+                                &elif_bindings,
+                                ctx,
+                            );
 
                             let mut elif_then = Vec::new();
                             elif_then.extend(elif_binding_stmts);
@@ -1009,6 +916,15 @@ impl Lowerer {
             // Build a map from binding name to its resolved type
             // (computed by extract_pattern_bindings using enum variant field types)
             let binding_type_map: std::collections::HashMap<String, TypeId> = bindings.iter().cloned().collect();
+            // Multi-field enum payloads are represented by a runtime array. Keep
+            // that representation in HIR so MIR uses rt_array_get with a raw
+            // integer index instead of the opaque rt_index_get dispatcher.
+            let payload_array_ty = (payload_patterns.len() > 1).then(|| {
+                self.module.types.register(HirType::Array {
+                    element: TypeId::ANY,
+                    size: Some(payload_patterns.len()),
+                })
+            });
 
             // Detect positional class/struct pattern: Pattern::Enum{name:"_", variant:"ClassName"}
             // over a class instance. The parser emits class-name patterns this way because it
@@ -1094,11 +1010,7 @@ impl Lowerer {
                             // see the binding's scalar type, apply `UnboxInt` to the
                             // heap pointer, and produce garbage. See
                             // doc/08_tracking/bug/enum_field_i64_zero_destructure_2026-04-28.md.
-                            let payload_expr_ty = if payload_patterns.len() == 1 {
-                                binding_ty
-                            } else {
-                                TypeId::ANY
-                            };
+                            let payload_expr_ty = payload_array_ty.unwrap_or(binding_ty);
                             let payload_expr = HirExpr {
                                 kind: HirExprKind::BuiltinCall {
                                     name: "rt_enum_payload".to_string(),

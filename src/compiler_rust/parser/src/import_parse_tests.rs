@@ -129,6 +129,7 @@ mod tests {
         assert!(try_parse("import ..level\n").is_ok());
         assert!(try_parse("import .easy_fix\n").is_ok());
         assert!(try_parse("from types import {Type}\n").is_ok());
+        assert!(try_parse("from shared.contracts import {ContractMode}\n").is_ok());
         assert!(try_parse("mod compression.gzip.types\n").is_ok());
         assert!(try_parse("use base64::types::{X, Y}\n").is_ok());
         assert!(try_parse("use std.path\n").is_ok());

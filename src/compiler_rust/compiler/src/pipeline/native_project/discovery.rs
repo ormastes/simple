@@ -1043,6 +1043,39 @@ impl NativeProjectBuilder {
                 }
             }
 
+            // Bare exports in a package facade identify symbols but not their
+            // owning sibling module. Queue only siblings that define one of
+            // those symbols so unrelated files do not enter the closure.
+            let bare_export_names = bare_export_names(&module.items);
+            if canonical.file_name().and_then(|name| name.to_str()) == Some("__init__.spl")
+                && !bare_export_names.is_empty()
+            {
+                if let Some(parent) = canonical.parent() {
+                    if let Ok(entries) = std::fs::read_dir(parent) {
+                        for entry in entries.flatten() {
+                            let sibling = entry.path();
+                            if sibling.extension().and_then(|ext| ext.to_str()) == Some("spl")
+                                && !same_file_path(&sibling, &canonical)
+                            {
+                                let Ok(sibling_source) = std::fs::read_to_string(&sibling) else {
+                                    continue;
+                                };
+                                let mut sibling_parser = simple_parser::Parser::new(&sibling_source);
+                                let Ok(sibling_module) = sibling_parser.parse() else {
+                                    continue;
+                                };
+                                if bare_export_names.iter().any(|name| {
+                                    defines_top_level_name(&sibling_module.items, name)
+                                        || reexports_top_level_name(&sibling_module.items, name)
+                                }) {
+                                    found_deps.insert(safe_canonicalize(&sibling));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Resolve each import atomically: the first resolver hit wins, and
             // the filesystem fallback runs only when every resolver misses.
             found_deps.extend(extract_reachable_module_paths(
@@ -1095,6 +1128,152 @@ impl NativeProjectBuilder {
         }
         indices
     }
+}
+
+fn visit_reachable_nodes<'a>(
+    nodes: &'a [simple_parser::ast::Node],
+    visit: &mut impl FnMut(&'a simple_parser::ast::Node),
+) {
+    use simple_parser::ast::{DeferBody, Node, SkipBody};
+
+    for node in nodes {
+        visit(node);
+        match node {
+            Node::Function(function) => visit_reachable_nodes(&function.body.statements, visit),
+            Node::ModDecl(module) => {
+                if let Some(body) = &module.body {
+                    visit_reachable_nodes(body, visit);
+                }
+            }
+            Node::Class(class) => {
+                for method in &class.methods {
+                    visit_reachable_nodes(&method.body.statements, visit);
+                }
+            }
+            Node::Struct(structure) => {
+                for method in &structure.methods {
+                    visit_reachable_nodes(&method.body.statements, visit);
+                }
+            }
+            Node::Enum(enumeration) => {
+                for method in &enumeration.methods {
+                    visit_reachable_nodes(&method.body.statements, visit);
+                }
+            }
+            Node::Impl(implementation) => {
+                for method in &implementation.methods {
+                    visit_reachable_nodes(&method.body.statements, visit);
+                }
+            }
+            Node::Trait(trait_def) => {
+                for method in &trait_def.methods {
+                    visit_reachable_nodes(&method.body.statements, visit);
+                }
+            }
+            Node::Mixin(mixin) => {
+                for method in &mixin.methods {
+                    visit_reachable_nodes(&method.body.statements, visit);
+                }
+            }
+            Node::Actor(actor) => {
+                for method in &actor.methods {
+                    visit_reachable_nodes(&method.body.statements, visit);
+                }
+            }
+            Node::Extend(extension) => {
+                for method in &extension.methods {
+                    visit_reachable_nodes(&method.body.statements, visit);
+                }
+            }
+            Node::LiteralFunction(function) => visit_reachable_nodes(&function.body.statements, visit),
+            Node::If(stmt) => {
+                visit_reachable_nodes(&stmt.then_block.statements, visit);
+                for (_, _, block) in &stmt.elif_branches {
+                    visit_reachable_nodes(&block.statements, visit);
+                }
+                if let Some(block) = &stmt.else_block {
+                    visit_reachable_nodes(&block.statements, visit);
+                }
+            }
+            Node::While(stmt) => visit_reachable_nodes(&stmt.body.statements, visit),
+            Node::For(stmt) => visit_reachable_nodes(&stmt.body.statements, visit),
+            Node::Loop(stmt) => visit_reachable_nodes(&stmt.body.statements, visit),
+            Node::Context(stmt) => visit_reachable_nodes(&stmt.body.statements, visit),
+            Node::With(stmt) => visit_reachable_nodes(&stmt.body.statements, visit),
+            Node::Match(stmt) => {
+                for arm in &stmt.arms {
+                    visit_reachable_nodes(&arm.body.statements, visit);
+                }
+            }
+            Node::Defer(stmt) => {
+                if let DeferBody::Block(block) = &stmt.body {
+                    visit_reachable_nodes(&block.statements, visit);
+                }
+            }
+            Node::ErrDefer(stmt) => {
+                if let DeferBody::Block(block) = &stmt.body {
+                    visit_reachable_nodes(&block.statements, visit);
+                }
+            }
+            Node::Skip(stmt) => {
+                if let SkipBody::Block(block) = &stmt.body {
+                    visit_reachable_nodes(&block.statements, visit);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn defines_top_level_name(items: &[simple_parser::ast::Node], name: &str) -> bool {
+    use simple_parser::ast::{Node, Pattern};
+
+    items.iter().any(|item| match item {
+        Node::Function(def) => def.name == name,
+        Node::Struct(def) => def.name == name,
+        Node::Class(def) => def.name == name,
+        Node::Enum(def) => def.name == name,
+        Node::Trait(def) => def.name == name,
+        Node::Mixin(def) => def.name == name,
+        Node::Actor(def) => def.name == name,
+        Node::TypeAlias(def) => def.name == name,
+        Node::ClassAlias(def) => def.name == name,
+        Node::FunctionAlias(def) => def.name == name,
+        Node::Extern(def) => def.name == name,
+        Node::ExternClass(def) => def.name == name,
+        Node::Macro(def) => def.name == name,
+        Node::Bitfield(def) => def.name == name,
+        Node::Newtype(def) => def.name == name,
+        Node::Unit(def) => def.name == name,
+        Node::UnitFamily(def) => def.name == name,
+        Node::CompoundUnit(def) => def.name == name,
+        Node::HandlePool(def) => def.type_name == name,
+        Node::Const(def) => def.name == name,
+        Node::Static(def) => def.name == name,
+        Node::Let(def) => matches!(&def.pattern, Pattern::Identifier(identifier) if identifier == name),
+        _ => false,
+    })
+}
+
+fn reexports_top_level_name(items: &[simple_parser::ast::Node], name: &str) -> bool {
+    use simple_parser::ast::{ExportUseStmt, ImportTarget, Node};
+
+    fn target_exports_name(target: &ImportTarget, name: &str) -> bool {
+        match target {
+            ImportTarget::Glob => true,
+            ImportTarget::Single(exported) => exported == name,
+            ImportTarget::Aliased { alias, .. } => alias == name,
+            ImportTarget::Group(targets) => targets.iter().any(|target| target_exports_name(target, name)),
+        }
+    }
+
+    items.iter().any(|item| {
+        matches!(
+            item,
+            Node::ExportUseStmt(ExportUseStmt { path, target, .. })
+                if !path.segments.is_empty() && target_exports_name(target, name)
+        )
+    })
 }
 
 pub(crate) fn extract_reachable_module_paths(
@@ -1198,26 +1377,66 @@ pub(crate) fn extract_reachable_module_paths(
 
     let mut deps = Vec::new();
     visit_ast_nodes(&module.items, &mut |item| match item {
-        Node::UseStmt(UseStmt { path, target, .. }) => {
-            push_dep(&mut deps, resolvers, fallback_roots, project_root, from_file, path, Some(target))
-        }
-        Node::CommonUseStmt(CommonUseStmt { path, target, .. }) => {
-            push_dep(&mut deps, resolvers, fallback_roots, project_root, from_file, path, Some(target))
-        }
-        Node::ExportUseStmt(ExportUseStmt { path, target, .. }) => {
-            push_dep(&mut deps, resolvers, fallback_roots, project_root, from_file, path, Some(target))
-        }
+        Node::UseStmt(UseStmt { path, target, .. }) => push_dep(
+            &mut deps,
+            resolvers,
+            fallback_roots,
+            project_root,
+            from_file,
+            path,
+            Some(target),
+        ),
+        Node::CommonUseStmt(CommonUseStmt { path, target, .. }) => push_dep(
+            &mut deps,
+            resolvers,
+            fallback_roots,
+            project_root,
+            from_file,
+            path,
+            Some(target),
+        ),
+        Node::ExportUseStmt(ExportUseStmt { path, target, .. }) => push_dep(
+            &mut deps,
+            resolvers,
+            fallback_roots,
+            project_root,
+            from_file,
+            path,
+            Some(target),
+        ),
         Node::MultiUse(MultiUse { imports, .. }) => {
             for (path, target) in imports {
-                push_dep(&mut deps, resolvers, fallback_roots, project_root, from_file, path, Some(target));
+                push_dep(
+                    &mut deps,
+                    resolvers,
+                    fallback_roots,
+                    project_root,
+                    from_file,
+                    path,
+                    Some(target),
+                );
             }
         }
-        Node::AutoImportStmt(AutoImportStmt { path, .. }) => {
-            push_dep(&mut deps, resolvers, fallback_roots, project_root, from_file, path, None)
-        }
+        Node::AutoImportStmt(AutoImportStmt { path, .. }) => push_dep(
+            &mut deps,
+            resolvers,
+            fallback_roots,
+            project_root,
+            from_file,
+            path,
+            None,
+        ),
         Node::ModDecl(ModDecl { name, body, .. }) if body.is_none() => {
             let path = ModulePath::new(vec![name.clone()]);
-            push_dep(&mut deps, resolvers, fallback_roots, project_root, from_file, &path, None);
+            push_dep(
+                &mut deps,
+                resolvers,
+                fallback_roots,
+                project_root,
+                from_file,
+                &path,
+                None,
+            );
         }
         _ => {}
     });

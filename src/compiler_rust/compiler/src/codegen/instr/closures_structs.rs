@@ -54,6 +54,17 @@ fn erased_receiver_should_fall_through_ambiguous_method(receiver_ty: Option<Type
     matches!(receiver_ty, None | Some(TypeId::ANY)) && matches!(method, "to_string" | "to_text" | "str")
 }
 
+fn is_bare_builtin_collection_method(method: &str, arg_count: usize) -> bool {
+    matches!(
+        (method, arg_count),
+        ("get", 1)
+            | ("has" | "contains" | "contains_key" | "has_key", 1)
+            | ("remove", 1)
+            | ("find", 1)
+            | ("len" | "length" | "keys" | "values", 0)
+    )
+}
+
 pub(crate) fn compile_closure_create<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -326,34 +337,8 @@ pub(crate) fn compile_method_call_static<M: Module>(
     // is false only for erased receivers). Arity is gated so a genuine user
     // method with a different signature (e.g. `get()` / `get(a, b)`) still falls
     // through to normal resolution when the builtin does not apply.
-    let bare_builtin_collection = !lookup_name.contains('.')
-        && match (lookup_name, args.len()) {
-            // element access — rt_index_get (array OR dict, nil on miss)
-            ("get", 1) => true,
-            // membership — rt_contains (array/dict/string; 0 for anything else)
-            ("has" | "contains" | "contains_key" | "has_key", 1) => true,
-            // dict removal — rt_dict_remove (no-op for non-dicts)
-            ("remove", 1) => true,
-            // substring search — rt_string_find (rt_core_as_string NULL-checks
-            // the receiver tag and returns -1 for non-strings, so it is safe
-            // for erased receivers). Without this, `clean.find(" #")` in
-            // check_wide_public_text bound by name-suffix to the unique linked
-            // MutSlice.find and segfaulted `stage4 lint <any file>` (bug #62).
-            ("find", 1) => true,
-            // length — rt_len (array/string/dict/tuple)
-            ("len" | "length", 0) => true,
-            // dict enumeration — rt_dict_keys / rt_dict_values. Like the other
-            // idioms here these are tag-safe (dict_ptr validates the SplDict/
-            // RuntimeDict header and returns an empty array for non-dicts). Without
-            // this, `.keys()`/`.values()` on an ERASED Dict receiver (e.g.
-            // `module.functions.keys()` — Dict<K,V> resolves to TypeId::ANY) fall
-            // through to the receiver-type-blind name resolution below, bind to an
-            // unrelated same-named symbol, and silently return an empty array —
-            // which drops a synthesized `main` during in-guest HIR lowering (the
-            // SimpleOS interpreter then reports "module has no main function").
-            ("keys" | "values", 0) => true,
-            _ => false,
-        };
+    let bare_builtin_collection =
+        !lookup_name.contains('.') && is_bare_builtin_collection_method(lookup_name, args.len());
     if bare_builtin_collection {
         if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, lookup_name, args)? {
             if let Some(d) = dest {
@@ -869,6 +854,13 @@ mod tests {
             Some(TypeId::I64),
             "to_string"
         ));
+    }
+
+    #[test]
+    fn erased_dict_views_use_builtin_dispatch() {
+        assert!(is_bare_builtin_collection_method("keys", 0));
+        assert!(is_bare_builtin_collection_method("values", 0));
+        assert!(!is_bare_builtin_collection_method("keys", 1));
     }
 }
 

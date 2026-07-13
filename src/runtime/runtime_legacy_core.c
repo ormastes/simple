@@ -17,6 +17,7 @@
 #include <time.h>
 #if defined(_WIN32)
 #include <direct.h>
+#include <io.h>
 #include <process.h>
 #include <windows.h>
 #else
@@ -302,6 +303,56 @@ int rt_file_append(const char* path, const char* content) {
     size_t n = fwrite(content, 1, len, f);
     fclose(f);
     return n == len ? 1 : 0;
+}
+
+int rt_file_sync(const char* path, int64_t path_len) {
+    (void)path_len;
+    FILE* f = path ? fopen(path, "rb") : NULL;
+    if (!f) return 0;
+#if defined(_WIN32)
+    int ok = _commit(_fileno(f)) == 0;
+#else
+    int ok = fsync(fileno(f)) == 0;
+#endif
+    fclose(f);
+    return ok ? 1 : 0;
+}
+
+int64_t rt_crc32_text(const char* text, int64_t text_len) {
+    if (!text || text_len <= 0) return 0;
+    uint32_t crc = 0xFFFFFFFFU;
+    const unsigned char* p = (const unsigned char*)text;
+    for (int64_t i = 0; i < text_len; i++) {
+        crc ^= p[i];
+        for (int i = 0; i < 8; i++) crc = (crc >> 1) ^ (0xEDB88320U & -(crc & 1U));
+    }
+    return (int64_t)(crc ^ 0xFFFFFFFFU);
+}
+
+int rt_file_create_excl(const char* path, int64_t path_len,
+                        const char* content, int64_t content_len) {
+    if (!path || path_len <= 0 || (uint64_t)path_len >= SIZE_MAX ||
+        memchr(path, '\0', (size_t)path_len) != NULL || content_len < 0 ||
+        (content_len > 0 && !content)) return 0;
+    char* path_copy = (char*)malloc((size_t)path_len + 1);
+    if (!path_copy) return 0;
+    memcpy(path_copy, path, (size_t)path_len);
+    path_copy[path_len] = '\0';
+    FILE* f = fopen(path_copy, "wx");
+    if (!f) {
+        free(path_copy);
+        return 0;
+    }
+    size_t len = content && content_len > 0 ? (size_t)content_len : 0;
+    int write_ok = fwrite(content ? content : "", 1, len, f) == len;
+    int close_ok = fclose(f) == 0;
+    if (!write_ok || !close_ok) {
+        remove(path_copy);
+        free(path_copy);
+        return 0;
+    }
+    free(path_copy);
+    return 1;
 }
 
 /* weak: runtime_native.c provides the strong definition; both objects are

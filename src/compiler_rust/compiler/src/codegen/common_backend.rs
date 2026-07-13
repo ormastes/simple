@@ -199,8 +199,12 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_array_push"
             | "rt_typed_bytes_u8_push"
             | "rt_tuple_new"
+            // PatternBind lowers enum binding paths directly in codegen, so
+            // these calls do not appear in referenced_call_names.
+            | "rt_tuple_get"
             | "rt_tuple_set"
             | "rt_enum_new"
+            | "rt_enum_payload"
             | "rt_string_eq"
             | "rt_hash_text"
             | "rt_value_bool"

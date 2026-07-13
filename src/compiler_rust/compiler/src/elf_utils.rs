@@ -786,7 +786,9 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_cranelift_return" => crate::codegen::cranelift_sffi::rt_cranelift_return as *const () as usize,
         "rt_cranelift_return_void" => crate::codegen::cranelift_sffi::rt_cranelift_return_void as *const () as usize,
         "rt_cranelift_trap" => crate::codegen::cranelift_sffi::rt_cranelift_trap as *const () as usize,
-        "rt_cranelift_call_args_clear" => crate::codegen::cranelift_sffi::rt_cranelift_call_args_clear as *const () as usize,
+        "rt_cranelift_call_args_clear" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_call_args_clear as *const () as usize
+        }
         "rt_cranelift_call_arg" => crate::codegen::cranelift_sffi::rt_cranelift_call_arg as *const () as usize,
         "rt_cranelift_call" => crate::codegen::cranelift_sffi::rt_cranelift_call as *const () as usize,
         "rt_cranelift_call_indirect" => {

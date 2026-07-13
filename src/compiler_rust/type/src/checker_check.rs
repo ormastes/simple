@@ -7,6 +7,23 @@
 // - Pattern binding
 
 impl TypeChecker {
+    fn register_import_aliases(&mut self, target: &simple_parser::ast::ImportTarget) {
+        use simple_parser::ast::ImportTarget;
+
+        match target {
+            ImportTarget::Aliased { alias, .. } => {
+                let ty = self.fresh_var();
+                self.env.insert(alias.clone(), ty);
+            }
+            ImportTarget::Group(targets) => {
+                for target in targets {
+                    self.register_import_aliases(target);
+                }
+            }
+            ImportTarget::Single(_) | ImportTarget::Glob => {}
+        }
+    }
+
     fn register_trait_impl(&mut self, impl_block: &ImplBlock) -> Result<(), TypeError> {
         let is_default = impl_block.attributes.iter().any(|attr| attr.name == "default");
 
@@ -235,12 +252,22 @@ impl TypeChecker {
                 | Node::FunctionAlias(_) => {
                     // Statement nodes at module level are checked in second pass
                 }
-                // Module system nodes (parsed but not type-checked at this level)
+                Node::UseStmt(use_stmt) => {
+                    self.register_import_aliases(&use_stmt.target);
+                }
+                Node::MultiUse(multi_use) => {
+                    for (_, target) in &multi_use.imports {
+                        self.register_import_aliases(target);
+                    }
+                }
+                Node::CommonUseStmt(use_stmt) => {
+                    self.register_import_aliases(&use_stmt.target);
+                }
+                Node::ExportUseStmt(use_stmt) => {
+                    self.register_import_aliases(&use_stmt.target);
+                }
+                // Other module system nodes are parsed but not type-checked here.
                 Node::ModDecl(_)
-                | Node::UseStmt(_)
-                | Node::MultiUse(_)
-                | Node::CommonUseStmt(_)
-                | Node::ExportUseStmt(_)
                 | Node::StructuredExportStmt(_)
                 | Node::AutoImportStmt(_)
                 | Node::RequiresCapabilities(_)

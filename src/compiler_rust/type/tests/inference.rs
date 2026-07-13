@@ -57,6 +57,18 @@ fn infers_tuple_literal() {
 }
 
 #[test]
+fn grouped_import_alias_is_available_to_type_checking() {
+    let items = parse_items(
+        r#"use os.kernel.boot.mmio_hardware.{mmio_read64 as hardware_mmio_read64}
+fn read_hardware(addr: u64) -> u64:
+    hardware_mmio_read64(addr)
+"#,
+    );
+
+    simple_type::check(&items).expect("grouped import alias should be bound");
+}
+
+#[test]
 fn infers_labeled_tuple_literal_and_field() {
     let items = parse_items("let t = (sum: 1, carry: true)\nlet x = t.sum\nmain = x");
     check(&items).expect("type check ok");

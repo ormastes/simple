@@ -17,6 +17,56 @@ fn test_lower_literals() {
 }
 
 #[test]
+fn text_rfind_uses_string_method_lowering() {
+    let module = parse_and_lower(
+        r#"struct text:
+    data: i64
+
+impl text:
+    fn replace(old: text, new: text) -> text:
+        return self
+
+fn parent(path: text) -> i64:
+    val normalized = path.replace("x", "/")
+    return normalized.rfind("/")
+"#,
+    )
+    .unwrap();
+    let function = module.functions.iter().find(|f| f.name == "parent").expect("parent");
+    let HirStmt::Return(Some(expr)) = &function.body[1] else {
+        panic!("expected return expression");
+    };
+    assert!(
+        matches!(&expr.kind, HirExprKind::MethodCall { dispatch: DispatchMode::Static, method, .. } if method == "rfind")
+    );
+}
+
+#[test]
+fn uppercase_string_is_empty_uses_string_method_lowering() {
+    let module = parse_and_lower(
+        r#"struct String:
+    data: i64
+
+impl String:
+    fn trim() -> String:
+        return self
+
+fn empty(value: String) -> bool:
+    val trimmed = value.trim()
+    return trimmed.is_empty()
+"#,
+    )
+    .unwrap();
+    let function = module.functions.iter().find(|f| f.name == "empty").expect("empty");
+    let HirStmt::Return(Some(expr)) = &function.body[1] else {
+        panic!("expected return expression");
+    };
+    assert!(
+        matches!(&expr.kind, HirExprKind::MethodCall { dispatch: DispatchMode::Static, method, .. } if method == "is_empty")
+    );
+}
+
+#[test]
 fn test_lower_danger_block_retains_boundary_and_tail_type() {
     let module = parse_and_lower("fn test() -> i64:\n    danger:\n        val x = 40\n        x + 2\n").unwrap();
     let func = &module.functions[0];
@@ -487,6 +537,25 @@ fn test_lower_static_enum_unit_variant_value() {
         panic!("Expected return statement");
     };
     assert_eq!(expr.kind, HirExprKind::Global("FsError::InvalidArg".to_string()));
+}
+
+#[test]
+fn test_trait_typed_method_result_enables_result_builtin() {
+    let module = parse_and_lower(
+        "trait Device:\n    fn write(data: [u8]) -> Result<bool, text>\n\nclass Store:\n    device: Device\n\nimpl Store:\n    fn failed(data: [u8]) -> bool:\n        val written = self.device.write(data)\n        written.is_err()\n",
+    )
+    .unwrap();
+
+    let failed = module
+        .functions
+        .iter()
+        .find(|function| function.name.ends_with("failed"))
+        .unwrap();
+    let body = format!("{:?}", failed.body);
+    assert!(
+        body.contains("rt_enum_check_discriminant") && !body.contains("method: \"is_err\""),
+        "trait Result return must lower is_err as a builtin: {body}"
+    );
 }
 
 #[test]
