@@ -70,3 +70,7 @@ The core executor imports `draw_ir_adv.spl`; host runtime-queue integration is
 kept in the sibling `draw_ir_runtime_adv.spl` so the baremetal closure does not
 acquire direct host-runtime APIs. This source path is not compile-verified while
 TODO 548 blocks the pure-Simple checker.
+
+The QEMU build owner accepts only a runnable pure-Simple compiler. A candidate
+whose version probe identifies it as a bootstrap seed is rejected, and absence
+of a valid compiler fails the build before spawning any architecture worker.
