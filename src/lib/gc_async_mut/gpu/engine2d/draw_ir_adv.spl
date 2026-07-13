@@ -17,7 +17,7 @@ use common.ui.draw_ir.{
     simple_2d_draw_ir_adv_plan
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback}
+use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 
 struct Engine2dDrawIrAdvResult:
     schema: text
@@ -212,6 +212,27 @@ fn _engine2d_draw_ir_resolved_image_index(images: [Engine2dResolvedDrawIrImage],
 fn _engine2d_draw_ir_valid_resolved_image(image: Engine2dResolvedDrawIrImage) -> bool:
     image.width > 0 and image.height > 0 and image.pixels.len() == image.width * image.height
 
+fn _engine2d_draw_ir_image_is_opaque(image: Engine2dResolvedDrawIrImage) -> bool:
+    for pixel in image.pixels:
+        if ((pixel >> 24) & 0xFFu32) != 0xFFu32:
+            return false
+    true
+
+fn _engine2d_draw_ir_exact_opaque_embedded_image_index(batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage]) -> i32:
+    val embedding = batch.embedding
+    if embedding.surface_id == "" or embedding.opacity_milli < 1000 or not embedding.clip or batch.commands.len() != 1:
+        return -1
+    val command = batch.commands[0]
+    if command.kind != DRAW_IR_COMMAND_IMAGE or command.x != 0 or command.y != 0 or command.width != embedding.width or command.height != embedding.height:
+        return -1
+    val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
+    if image_index < 0:
+        return -1
+    val image = images[image_index]
+    if not _engine2d_draw_ir_valid_resolved_image(image) or not _engine2d_draw_ir_image_is_opaque(image) or image.width != embedding.width or image.height != embedding.height:
+        return -1
+    image_index
+
 fn _engine2d_draw_ir_preflight_commands(commands: [DrawIrCommand], images: [Engine2dResolvedDrawIrImage]) -> (i32, text):
     var skipped = 0
     var kinds = ""
@@ -346,7 +367,7 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
 # today's exact direct translate+clip behavior — this is the load-bearing
 # backward-compatibility path: no regression for callers that never opted
 # into a real embedded surface.
-fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32) -> (Engine2D, i32, i32, text):
+fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32, allow_parent_image: bool) -> (Engine2D, i32, i32, text):
     var eng = engine
     val embedding = batch.embedding
     # Perf short-circuit: a batch whose embedding is (0,0) at full opacity and
@@ -372,6 +393,16 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             eng.clear_clip()
         return (eng, direct.1, direct.2, direct.3)
 
+    # A full-size embedded IMAGE with opaque pixels needs neither an offscreen
+    # software surface nor a scale pass. Transparent pixels retain the existing
+    # offscreen src-over composition semantics.
+    if allow_parent_image and _engine2d_draw_ir_exact_opaque_embedded_image_index(batch, images) >= 0:
+        eng.set_clip(embedding.x, embedding.y, embedding.width, embedding.height)
+        val direct = _engine2d_draw_ir_render_commands(eng, batch.commands, embedding.x, embedding.y, images)
+        eng = direct.0
+        eng.clear_clip()
+        return (eng, direct.1, direct.2, direct.3)
+
     var offscreen = Engine2D.create_offscreen(embedding.width, embedding.height)
     val inner = _engine2d_draw_ir_render_commands(offscreen, batch.commands, 0, 0, images)
     offscreen = inner.0
@@ -387,7 +418,7 @@ fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_availabl
 
 fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
-    val outcome = _engine2d_draw_ir_render_batch_embedded(engine, batch, images, 0)
+    val outcome = _engine2d_draw_ir_render_batch_embedded(engine, batch, images, 0, false)
     val eng = outcome.0
     var unsupported_kinds = outcome.3
     if unsupported_kinds == "":
@@ -399,6 +430,22 @@ fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposi
     engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images)
 
 fn engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
+    _engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images, false, true)
+
+fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
+    """Render/read back a fresh unclipped device engine without host-cache present."""
+    var image_index = -1
+    if composition.batches.len() == 1:
+        image_index = _engine2d_draw_ir_exact_opaque_embedded_image_index(composition.batches[0], images)
+        val embedding = composition.batches[0].embedding
+        if embedding.x != 0 or embedding.y != 0 or embedding.width != engine.width() or embedding.height != engine.height():
+            image_index = -1
+    if image_index < 0:
+        val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
+        return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, 0, 1, "fresh-device-exact-opaque-image-required", engine2d_readback([], "preflight_rejected"))
+    _engine2d_draw_ir_adv_composition_with_images(engine, composition, true, images, true, false)
+
+fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
     var preflight_skipped = 0
     var preflight_kinds = ""
@@ -424,7 +471,7 @@ fn engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: D
     # accounting) for no behavior change against any current producer, so it
     # is left as a documented limitation rather than done speculatively.
     for batch in composition.batches:
-        val outcome = _engine2d_draw_ir_render_batch_embedded(eng, batch, images, 0)
+        val outcome = _engine2d_draw_ir_render_batch_embedded(eng, batch, images, 0, allow_parent_image)
         eng = outcome.0
         rendered = rendered + outcome.1
         skipped = skipped + outcome.2
@@ -434,7 +481,8 @@ fn engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: D
             unsupported_kinds = unsupported_kinds + outcome.3
     if unsupported_kinds == "":
         unsupported_kinds = "none"
-    eng.present()
+    if present_frame:
+        eng.present()
     _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, rendered, skipped, unsupported_kinds, eng.read_pixels_with_source())
 
 export Engine2dDrawIrAdvResult
@@ -443,4 +491,5 @@ export engine2d_draw_ir_adv_batch
 export engine2d_draw_ir_adv_batch_with_images
 export engine2d_draw_ir_adv_composition
 export engine2d_draw_ir_adv_composition_with_images
+export engine2d_draw_ir_adv_fresh_device_composition_with_images
 export engine2d_resolved_draw_ir_image

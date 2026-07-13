@@ -1,0 +1,52 @@
+"""Static ownership contract for device-backed SimpleOS IMAGE execution."""
+
+use std.io_runtime.{file_read}
+use std.spec.*
+
+describe "SimpleOS host GPU IMAGE execution":
+    it "admits resources only through the fresh-device Draw IR path with strict provenance":
+        val daemon = file_read("src/app/simpleos_gpu_host/main.spl")
+        val draw_ir = file_read("src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl")
+        expect(daemon).to_contain("engine2d_draw_ir_adv_fresh_device_composition_with_images")
+        expect(daemon).to_contain("result.readback_source == \"device_readback\"")
+        expect(daemon).to_contain("result.backend_handle > 0")
+        expect(daemon.contains("if decoded_resources.resources.len() > 0")).to_equal(false)
+        val fresh_start = draw_ir.index_of("fn engine2d_draw_ir_adv_fresh_device_composition_with_images") ?? 0
+        val shared_start = draw_ir.index_of("fn _engine2d_draw_ir_adv_composition_with_images") ?? draw_ir.len()
+        val fresh_body = draw_ir.slice(fresh_start, shared_start)
+        expect(fresh_body).to_contain("composition.batches.len() == 1")
+        expect(fresh_body).to_contain("_engine2d_draw_ir_exact_opaque_embedded_image_index")
+        expect(fresh_body).to_contain("embedding.x != 0")
+        expect(fresh_body).to_contain("embedding.y != 0")
+        expect(fresh_body).to_contain("embedding.width != engine.width()")
+        expect(fresh_body).to_contain("embedding.height != engine.height()")
+        expect(fresh_body).to_contain("preflight_rejected")
+        expect(fresh_body).to_contain("fresh-device-exact-opaque-image-required")
+        expect(fresh_body).to_contain("plan, 0, 1")
+        val exact_start = draw_ir.index_of("fn _engine2d_draw_ir_exact_opaque_embedded_image_index") ?? 0
+        val generic_start = draw_ir.index_of("fn _engine2d_draw_ir_preflight_commands") ?? draw_ir.len()
+        val exact_body = draw_ir.slice(exact_start, generic_start)
+        expect(exact_body).to_contain("batch.commands.len() != 1")
+        expect(exact_body).to_contain("command.kind != DRAW_IR_COMMAND_IMAGE")
+        expect(exact_body).to_contain("command.x != 0")
+        expect(exact_body).to_contain("command.width != embedding.width")
+        expect(exact_body).to_contain("embedding.opacity_milli < 1000")
+        expect(exact_body).to_contain("not embedding.clip")
+        expect(exact_body).to_contain("not _engine2d_draw_ir_image_is_opaque(image)")
+
+    it "uses fenced tri-state cleanup and quarantines completion-unknown dependencies":
+        val helper = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
+        val backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        expect(helper).to_contain("vulkan_sffi_submit_and_wait_fence(cmd)")
+        expect(helper).to_contain("if fence < 0:")
+        expect(helper).to_contain("if not vulkan_sffi_wait_idle():\n            return -1")
+        expect(helper).to_contain("vulkan_sffi_discard_command(cmd)")
+        expect(backend).to_contain("if self.completion_unknown: return")
+        expect(backend).to_contain("if self.completion_unknown or not self.initialized")
+        expect(backend).to_contain("return engine2d_readback([], \"completion_unknown\")")
+
+    it "shares the validated blit shader across standalone and session backends":
+        val backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        val session = file_read("src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl")
+        expect(backend).to_contain("vulkan_sffi_compile_spirv(spirv_blit())")
+        expect(session).to_contain("vulkan_sffi_compile_spirv(spirv_blit())")

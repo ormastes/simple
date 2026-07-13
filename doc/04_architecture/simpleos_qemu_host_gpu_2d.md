@@ -9,7 +9,7 @@ Draw IR semantics, separate bounded IMAGE pixel resources, and a bounded
 ProcessingIR `FillU32` payload. The production x86
 desktop source path routes local frames through `DrawIrComposition`, resolved top-level
 `WmContentFrame` IMAGE resources, and Engine2D. Production session wiring,
-nested IMAGE clipping, and device-native Vulkan image execution remain required
+nested IMAGE clipping, and fresh device execution remain required
 before that same complete composition may use host offload. A
 host daemon selects a supported private backend and
 returns a correlated receipt plus output. x86_64, AArch64, and RISC-V adapters
@@ -74,6 +74,11 @@ be replaced by a producer-specific full-frame copy.
 The canonical Draw IR SDN skin preserves the complete typed command metadata,
 so styled RECT/TEXT and IMAGE semantics can cross the wire without a producer-
 specific parallel codec; binary image pixels remain separate bounded resources.
+The Vulkan owner admits only exact-size, opaque, wholly bounded IMAGE resources
+through its existing two-buffer compute blit. Scaled, transparent, masked, or
+partially clipped images retain CPU semantics and poison device provenance for
+that request. Completion-unknown submissions never replay on the CPU or release
+potentially in-flight dependencies.
 The core executor imports `draw_ir_adv.spl`; host runtime-queue integration is
 kept in the sibling `draw_ir_runtime_adv.spl` so the baremetal closure does not
 acquire direct host-runtime APIs. This source path is not compile-verified while

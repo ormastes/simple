@@ -3,7 +3,11 @@
 use std.common.gpu.simpleos_host_gpu_protocol.*
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    Engine2dResolvedDrawIrImage,
+    engine2d_draw_ir_adv_fresh_device_composition_with_images,
+    engine2d_resolved_draw_ir_image
+}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{
     simpleos_host_gpu_draw_ir_encode,
     simpleos_host_gpu_draw_ir_decode,
@@ -263,12 +267,9 @@ fn _process_request(base: i64) -> i64:
         if not decoded_resources.ok or simpleos_host_gpu_image_resource_coverage_reason(decoded.composition, decoded_resources.resources) != "":
             _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, 0, 0, 0, 1, 0, 0)
             return 1
-        # Vulkan IMAGE scaling still uses the CPU emulation owner before a
-        # full-frame upload. Transport is lossless, but execution cannot claim
-        # device-backed provenance until the backend has a native image path.
-        if decoded_resources.resources.len() > 0:
-            _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK, 0, 0, 0, 1, 0, 0)
-            return 1
+        var resolved_images: [Engine2dResolvedDrawIrImage] = []
+        for image in decoded_resources.resources:
+            resolved_images.push(engine2d_resolved_draw_ir_image(image.image_uri, image.width, image.height, image.pixels))
         if not _request_generation_matches(base, generation):
             return 0
         match Engine2D.create_requested_backend(width.to_i32(), height.to_i32(), backend):
@@ -281,7 +282,7 @@ fn _process_request(base: i64) -> i64:
                     _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_BACKEND_MISMATCH, 0, 0, 0, 1, 0, 0)
                     return 1
                 val started = time_now_unix_micros()
-                val result = engine2d_draw_ir_adv_composition(draw_engine, decoded.composition, true)
+                val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(draw_engine, decoded.composition, resolved_images)
                 val output_count = width * height
                 val device_identity = _vulkan_device_identity()
                 val device_backed = result.selected_backend == "gpu" and not result.fallback_required and result.skipped_command_count == 0 and result.rendered_command_count.to_i64() == element_count and result.readback_source == "device_readback" and result.backend_handle > 0 and result.readback_checksum > 0 and device_identity > 0 and result.pixels.len().to_i64() >= output_count

@@ -120,6 +120,28 @@ describe "Vulkan 2D drawing lane — VulkanBackend raster":
 
     context "2D primitive rendering with lavapipe or real device":
 
+        it "image fallback provenance stays sticky across present":
+            var b = VulkanBackend.create()
+            if b.init(8, 8):
+                b.clear(0x101010FFu32)
+                b.draw_image(2, 2, 2, 2, [0xFF0000FFu32, 0x00FF00FFu32, 0x0000FFFFu32, 0xFFFFFFFFu32])
+                val native_readback = b.read_pixels_with_source()
+                expect(native_readback.source).to_equal("device_readback")
+                expect(native_readback.backend_handle).to_be_greater_than(0)
+                assert_false(b.cpu_fallback_used)
+
+                b.draw_image_scaled(0, 0, 3, 3, 2, 2, [0xFF0000FFu32, 0x00FF00FFu32, 0x0000FFFFu32, 0xFFFFFFFFu32])
+                assert_true(b.cpu_fallback_used)
+                b.present()
+                assert_true(b.cpu_fallback_used)
+                val fallback_readback = b.read_pixels_with_source()
+                expect(fallback_readback.source).to_equal("cpu_fallback")
+                expect(fallback_readback.backend_handle).to_equal(0)
+                b.shutdown()
+            else:
+                val kind = vulkan_classify_error(b.last_error)
+                assert_not_equal(kind, VulkanErrorKind.None)
+
         it "draw_line does not crash backend":
             var b = VulkanBackend.create()
             if b.init(8, 8):

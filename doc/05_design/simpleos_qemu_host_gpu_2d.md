@@ -40,8 +40,10 @@ outstanding request map rejects duplicate or stale receipts.
 The local `Engine2dWmFrameExecutor` rejects duplicate or unreferenced content
 frames, stale revisions, bad checksums, unresolved IMAGE commands, and nested
 GROUP metadata. The wire accepts the same top-level IMAGE resource set, but
-production host-offload selection remains open until session wiring and native
-Vulkan image execution provide honest device-backed provenance.
+production host-offload selection remains open until session wiring and fresh
+QEMU evidence. The host-only fresh-device executor may bypass the software
+offscreen surface for one exact opaque IMAGE covering the full target;
+all other IMAGE shapes preserve the existing offscreen/fallback behavior.
 
 ## Bounds and Failure Policy
 
