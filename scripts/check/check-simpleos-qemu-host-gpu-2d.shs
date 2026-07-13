@@ -35,6 +35,7 @@ serial_has_pass() {
     [ "$(grep -aEc "^HOST_GPU_MAP_OK isa=$isa .*[[:space:]]*$" "$log")" -eq 1 ] &&
     [ "$(grep -aEc "^HOST_GPU_HELLO_OK isa=$isa .*[[:space:]]*$" "$log")" -eq 1 ] &&
     [ "$(grep -aEc "^HOST_GPU_RENDER_OK isa=$isa .*[[:space:]]*$" "$log")" -eq 1 ] &&
+    [ "$(grep -aEc "^HOST_GPU_DRAW_IR_OK isa=$isa .*[[:space:]]*$" "$log")" -eq 1 ] &&
     [ "$(grep -aEc "^HOST_GPU_PROCESS_OK isa=$isa .*[[:space:]]*$" "$log")" -eq 1 ] &&
     [ "$(grep -aEc "^SIMPLEOS_HOST_GPU_2D_PASS isa=$isa[[:space:]]*$" "$log")" -eq 1 ] &&
     [ "$(grep -aEc "^TEST PASSED[[:space:]]*$" "$log")" -eq 1 ] &&
@@ -51,9 +52,11 @@ serial_receipts_valid() {
     grep -aEq "^HOST_GPU_MAP_OK isa=$isa device=[1-9][0-9]*[[:space:]]*$" "$log" || return 1
     grep -aEq "^HOST_GPU_HELLO_OK isa=$isa generation=[1-9][0-9]* render_mask=1 processing_mask=(1|9)[[:space:]]*$" "$log" || return 1
     grep -aEq "^HOST_GPU_RENDER_OK isa=$isa backend=vulkan generation=[1-9][0-9]* handle=[1-9][0-9]* identity=[1-9][0-9]* checksum=405589360 bg=2112 rect=960 other=0[[:space:]]*$" "$log" || return 1
+    grep -aEq "^HOST_GPU_DRAW_IR_OK isa=$isa backend=vulkan generation=[1-9][0-9]* handle=[1-9][0-9]* identity=[1-9][0-9]* checksum=405589360 bg=2112 image=960 other=0[[:space:]]*$" "$log" || return 1
     grep -aEq "^HOST_GPU_PROCESS_OK isa=$isa backend=(cuda|vulkan) generation=[1-9][0-9]* handle=[1-9][0-9]* identity=[1-9][0-9]* checksum=1792 mismatches=0[[:space:]]*$" "$log" || return 1
     hello_generation=$(sed -n "s/^HOST_GPU_HELLO_OK isa=$isa generation=\([1-9][0-9]*\) .*/\1/p" "$log")
     render_generation=$(sed -n "s/^HOST_GPU_RENDER_OK isa=$isa backend=vulkan generation=\([1-9][0-9]*\) .*/\1/p" "$log")
+    draw_ir_generation=$(sed -n "s/^HOST_GPU_DRAW_IR_OK isa=$isa backend=vulkan generation=\([1-9][0-9]*\) .*/\1/p" "$log")
     process_generation=$(sed -n "s/^HOST_GPU_PROCESS_OK isa=$isa backend=.* generation=\([1-9][0-9]*\) .*/\1/p" "$log")
     case "$isa" in
         x86_64) expected_hello_generation=9 ;;
@@ -63,7 +66,8 @@ serial_receipts_valid() {
     esac
     [ "$hello_generation" -eq "$expected_hello_generation" ] &&
     [ "$render_generation" -eq "$((hello_generation + 1))" ] &&
-    [ "$process_generation" -eq "$((render_generation + 1))" ]
+    [ "$draw_ir_generation" -eq "$((render_generation + 1))" ] &&
+    [ "$process_generation" -eq "$((draw_ir_generation + 1))" ]
 }
 
 serial_processing_pair_valid() {
@@ -122,6 +126,7 @@ self_test() {
     pass_log="$temp_dir/pass.log"
     fail_log="$temp_dir/fail.log"
     corrupt_log="$temp_dir/corrupt.log"
+    corrupt_draw_ir_log="$temp_dir/corrupt-draw-ir.log"
     vulkan_log="$temp_dir/vulkan.log"
     wrong_backend_log="$temp_dir/wrong-backend.log"
     wrong_generation_log="$temp_dir/wrong-generation.log"
@@ -132,22 +137,25 @@ self_test() {
 HOST_GPU_MAP_OK isa=aarch64 device=3
 HOST_GPU_HELLO_OK isa=aarch64 generation=19 render_mask=1 processing_mask=9
 HOST_GPU_RENDER_OK isa=aarch64 backend=vulkan generation=20 handle=22 identity=22 checksum=405589360 bg=2112 rect=960 other=0
-HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=21 handle=1 identity=23 checksum=1792 mismatches=0
+HOST_GPU_DRAW_IR_OK isa=aarch64 backend=vulkan generation=21 handle=24 identity=22 checksum=405589360 bg=2112 image=960 other=0
+HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=22 handle=1 identity=23 checksum=1792 mismatches=0
 SIMPLEOS_HOST_GPU_2D_PASS isa=aarch64
 TEST PASSED
 EOF
     sed 's/checksum=1792/checksum=1793/' "$pass_log" >"$corrupt_log"
+    sed '/^HOST_GPU_DRAW_IR_OK /s/checksum=405589360/checksum=405589361/' "$pass_log" >"$corrupt_draw_ir_log"
     sed 's/processing_mask=9/processing_mask=1/; s/backend=cuda/backend=vulkan/' "$pass_log" >"$vulkan_log"
     sed 's/backend=cuda/backend=vulkan/' "$pass_log" >"$wrong_backend_log"
     sed 's/backend=vulkan generation=20/backend=vulkan generation=999/' "$pass_log" >"$wrong_generation_log"
-    sed 's/generation=19/generation=99/; s/generation=20/generation=100/; s/generation=21/generation=101/' "$pass_log" >"$stale_generation_log"
+    sed 's/generation=19/generation=99/; s/generation=20/generation=100/; s/generation=21/generation=101/; s/generation=22/generation=102/' "$pass_log" >"$stale_generation_log"
     sed 's/mismatches=0/mismatches=0 contradictory=true/' "$pass_log" >"$trailing_log"
     { sed '$d' "$pass_log"; echo "TEST FAILED"; echo "TEST PASSED"; } >"$contradictory_terminal_log"
     cat >"$fail_log" <<'EOF'
 HOST_GPU_MAP_OK isa=aarch64 device=3
 HOST_GPU_HELLO_OK isa=aarch64 generation=19 render_mask=1 processing_mask=9
 HOST_GPU_RENDER_OK isa=aarch64 backend=vulkan generation=20 handle=22 identity=22 checksum=405589360 bg=2112 rect=960 other=0
-HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=21 handle=0 identity=0 checksum=1792 mismatches=0
+HOST_GPU_DRAW_IR_OK isa=aarch64 backend=vulkan generation=21 handle=24 identity=22 checksum=405589360 bg=2112 image=960 other=0
+HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=22 handle=0 identity=0 checksum=1792 mismatches=0
 TEST PASSED
 EOF
     serial_has_pass "$pass_log" aarch64
@@ -163,6 +171,10 @@ EOF
         exit 1
     fi
     if serial_has_pass "$corrupt_log" aarch64; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    if serial_has_pass "$corrupt_draw_ir_log" aarch64; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi

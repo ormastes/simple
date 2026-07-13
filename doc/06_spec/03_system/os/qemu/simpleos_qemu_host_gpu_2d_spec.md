@@ -1,10 +1,10 @@
 # SimpleOS QEMU Host-GPU 2D
 
 Status: implementation in progress. The canonical wrapper and its fail-closed
-parser self-test are implemented. Linux/Vulkan live x86_64, AArch64, and RV64
-render receipts pass. The dedicated CUDA ProcessingIR `FillU32` executor passes
-native device readback and CPU-oracle parity; refreshed cross-ISA CUDA receipts
-remain pending. Native Metal and DirectX host receipts remain unavailable.
+parser self-test include the shared full-frame IMAGE Draw IR path. Earlier
+Linux/Vulkan live x86_64, AArch64, and RV64 raw-render receipts pass; refreshed
+cross-ISA Draw IR and CUDA ProcessingIR receipts remain pending. Native Metal
+and DirectX host receipts remain unavailable.
 
 This scenario proves that supported SimpleOS guests use one bounded protocol to
 execute Draw IR and ProcessingIR on a real host device. Unsupported rows retain
@@ -18,9 +18,15 @@ the CPU/software fallback and report a stable reason.
 2. **Render and read back the Simple 2D parity fixture.** Correlate frame ID,
    native device identity, positive backend handle, same-frame output, and the
    exact CPU-oracle checksum.
-3. **Run the ProcessingIR parity fixture.** Correlate the host completion and
+3. **Submit the canonical full-frame IMAGE composition through the shared guest bridge.**
+   Use the same 64x48 opaque background-and-rectangle oracle as one clipped
+   full-target `DrawIrComposition` IMAGE resource.
+4. **Compare Draw IR readback and correlated device receipt across all three ISAs.**
+   Require the exact checksum and pixel counts with positive Vulkan handle and
+   device identity before accepting the marker.
+5. **Run the ProcessingIR parity fixture.** Correlate the host completion and
    require exact output-buffer parity with the CPU oracle.
-4. **Report device-backed host acceleration evidence.** Publish one row with
+6. **Report device-backed host acceleration evidence.** Publish one row with
    host, guest ISA, QEMU/device arguments, protocol, backend, device, IDs,
    timing, RSS, checksums, status, and reason.
 
