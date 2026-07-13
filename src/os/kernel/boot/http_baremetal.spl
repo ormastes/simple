@@ -37,9 +37,8 @@
 
 use os.services.database.simple_db_service.{simple_db_execute_http_request, simple_db_http_request}
 use os.services.vfs.vfs_init.{g_vfs_read_file_bytes, g_vfs_file_exists}
+use os.kernel.net.http_route.{http_classify_request, HttpRoute, HttpRouteKind}
 use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
-use std.nogc_sync_mut.http_server.parser.{parse_request_line}
-use std.nogc_sync_mut.http_server.router.{path_is_safe}
 use std.nogc_sync_mut.http_server.response.{serialize_response}
 use std.nogc_sync_mut.http_server.mime.{mime_from_path}
 
@@ -68,40 +67,7 @@ fn _http_decode_i64(raw: i64) -> i64:
 fn _http_encode(resp: HttpResponse) -> [u8]:
     rt_string_to_byte_array(serialize_response(resp))
 
-fn _http_files_target(path: text) -> text?:
-    """Return the safe VFS path for GET /files/<name>, or nil if unsafe/malformed.
-
-    Reuses the real web server's path_is_safe traversal check (router.spl);
-    additionally requires a single flat path segment so the route stays
-    confined to one file directly under the mounted root.
-    """
-    if not path.starts_with("/files/"):
-        return nil
-    val name = path.slice(7)
-    if name.len() == 0 or name.len() > 200:
-        return nil
-    if name.find("/") >= 0:
-        return nil
-    if not path_is_safe(path):
-        return nil
-    Some("/" + name)
-
-fn _http_route(request: text) -> [u8]:
-    if simple_db_http_request(request):
-        return rt_string_to_byte_array(simple_db_execute_http_request(request))
-    val line_end = request.find("\r\n")
-    val line = if line_end >= 0: request.slice(0, line_end) else: request
-    val (method, path, version) = parse_request_line(line)
-    if not version.starts_with("HTTP/1.") or path.len() == 0 or not path.starts_with("/"):
-        return _http_encode(HttpResponse(status: HttpStatus.BadRequest, headers: [], body: "ERR malformed request\n"))
-    if method != "GET":
-        return _http_encode(HttpResponse(status: HttpStatus.NotFound, headers: [], body: "ERR route not found\n"))
-    if path == "/":
-        return _http_encode(HttpResponse(status: HttpStatus.Ok, headers: [("Content-Type", "application/json")], body: HTTP_STATUS_BODY))
-    val target = _http_files_target(path)
-    if target == nil:
-        return _http_encode(HttpResponse(status: HttpStatus.NotFound, headers: [], body: "ERR route not found\n"))
-    val file_path = target.unwrap()
+fn _http_serve_file(file_path: text) -> [u8]:
     if not g_vfs_file_exists(file_path):
         return _http_encode(HttpResponse(status: HttpStatus.NotFound, headers: [], body: "ERR file not found\n"))
     val bytes = g_vfs_read_file_bytes(file_path)
@@ -109,6 +75,22 @@ fn _http_route(request: text) -> [u8]:
         return _http_encode(HttpResponse(status: HttpStatus.NotFound, headers: [], body: "ERR file not found\n"))
     val content_type = mime_from_path(file_path)
     _http_encode(HttpResponse(status: HttpStatus.Ok, headers: [("Content-Type", content_type)], body: rt_string_from_byte_array(bytes)))
+
+fn _http_route(request: text) -> [u8]:
+    if simple_db_http_request(request):
+        return rt_string_to_byte_array(simple_db_execute_http_request(request))
+    # Route decision comes from the pure, spec-tested classifier (which reuses
+    # the real parse_request_line + path_is_safe); the transport only does I/O.
+    val route = http_classify_request(request)
+    match route.kind:
+        HttpRouteKind.BadRequest:
+            _http_encode(HttpResponse(status: HttpStatus.BadRequest, headers: [], body: "ERR malformed request\n"))
+        HttpRouteKind.NotFound:
+            _http_encode(HttpResponse(status: HttpStatus.NotFound, headers: [], body: "ERR route not found\n"))
+        HttpRouteKind.Status:
+            _http_encode(HttpResponse(status: HttpStatus.Ok, headers: [("Content-Type", "application/json")], body: HTTP_STATUS_BODY))
+        HttpRouteKind.File:
+            _http_serve_file(route.file_path)
 
 pub fn http_bind_baremetal() -> i64:
     """Bind and listen on the boot HTTP port. Returns the listener fd, or < 0

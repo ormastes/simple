@@ -6,13 +6,18 @@
 # and PCI/VirtIO network surfaces can support that larger ABI.
 #
 # NOTE: the boot entries this lane's one-boot QEMU gate actually exercises
-# link os.kernel.boot.http_baremetal (the rt_boot_tcp_*-backed launcher),
-# not this os.kernel.net variant — its rt_io_tcp_* family is backed by the
-# hosted tcp_shim.spl/netstack service, which is not proven to link into a
-# freestanding x86_64-unknown-none boot image today. This file gets the
-# same route hardening for source-level consistency and for whichever
-# future boot path does exercise it; see
-# src/os/kernel/boot/http_baremetal.spl for the gate-proven server.
+# link os.kernel.boot.http_baremetal (the rt_net_*-backed launcher), not this
+# os.kernel.net variant — its rt_io_tcp_* family is backed by the hosted
+# tcp_shim.spl/netstack service, which is not proven to link into a
+# freestanding x86_64-unknown-none boot image today. This file gets the same
+# route hardening for source-level consistency and for whichever future boot
+# path does exercise it; see src/os/kernel/boot/http_baremetal.spl for the
+# gate-proven server.
+#
+# Routing comes from the pure, spec-tested classifier
+# (os.kernel.net.http_route.http_classify_request, which reuses the real
+# parse_request_line + path_is_safe); this file only does socket I/O and the
+# VFS read for the File route — no hand-rolled request-line parser.
 #
 # GET /files/<name> reads through the switchable VFS hub
 # (os.services.vfs.vfs_init.g_vfs_read_file_bytes / g_vfs_file_exists) —
@@ -20,6 +25,7 @@
 
 use os.kernel.log.klog_api.{log_raw_println}
 use os.services.vfs.vfs_init.{g_vfs_read_file_bytes, g_vfs_file_exists}
+use os.kernel.net.http_route.{http_classify_request, HttpRoute, HttpRouteKind}
 
 extern fn rt_io_tcp_bind(addr: text) -> i64
 extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
@@ -32,61 +38,28 @@ val SIMPLEOS_HTTP_LISTEN_ADDR: text = "0.0.0.0:8080"
 val HTTP_MAX_REQUEST_BYTES: i64 = 4096
 val SIMPLEOS_HTTP_RESPONSE: text = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nServer: SimpleOS\r\nConnection: close\r\nContent-Length: 44\r\n\r\n{\"status\":\"ok\",\"server\":\"SimpleOS\"}\n"
 
-struct HttpRequestLine:
-    method: text
-    path: text
-    ok: bool
-
 fn _http_text_response(status: text, content_type: text, body: text) -> text:
     "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nServer: SimpleOS\r\nConnection: close\r\nContent-Length: {body.len()}\r\n\r\n{body}"
 
-fn _http_parse_request_line(request: text) -> HttpRequestLine:
-    val line_end = request.find("\r\n")
-    val line = if line_end >= 0: request.slice(0, line_end) else: request
-    val sp1 = line.find(" ")
-    if sp1 <= 0:
-        return HttpRequestLine(method: "", path: "", ok: false)
-    val rest = line.slice(sp1 + 1)
-    val sp2 = rest.find(" ")
-    if sp2 <= 0:
-        return HttpRequestLine(method: "", path: "", ok: false)
-    val method = line.slice(0, sp1)
-    val path = rest.slice(0, sp2)
-    val version = rest.slice(sp2 + 1)
-    if not version.starts_with("HTTP/1."):
-        return HttpRequestLine(method: "", path: "", ok: false)
-    if path.len() == 0 or not path.starts_with("/"):
-        return HttpRequestLine(method: "", path: "", ok: false)
-    HttpRequestLine(method: method, path: path, ok: true)
-
-fn _http_files_target(path: text) -> text?:
-    if not path.starts_with("/files/"):
-        return nil
-    val name = path.slice(7)
-    if name.len() == 0 or name.len() > 200:
-        return nil
-    if name.find("..") >= 0 or name.find("/") >= 0:
-        return nil
-    Some("/" + name)
-
-fn _http_route(request: text) -> text:
-    val parsed = _http_parse_request_line(request)
-    if not parsed.ok:
-        return _http_text_response("400 Bad Request", "text/plain", "ERR malformed request\n")
-    if parsed.method != "GET":
-        return _http_text_response("404 Not Found", "text/plain", "ERR route not found\n")
-    if parsed.path == "/":
-        return SIMPLEOS_HTTP_RESPONSE
-    val target = _http_files_target(parsed.path)
-    if target == nil:
-        return _http_text_response("404 Not Found", "text/plain", "ERR route not found\n")
-    val file_path = target.unwrap()
+fn _http_serve_file(file_path: text) -> text:
     if not g_vfs_file_exists(file_path):
         return _http_text_response("404 Not Found", "text/plain", "ERR file not found\n")
     val bytes = g_vfs_read_file_bytes(file_path)
     if bytes.len() == 0:
         return _http_text_response("404 Not Found", "text/plain", "ERR file not found\n")
     _http_text_response("200 OK", "application/octet-stream", rt_bytes_to_text(bytes))
+
+fn _http_route(request: text) -> text:
+    val route = http_classify_request(request)
+    match route.kind:
+        HttpRouteKind.BadRequest:
+            _http_text_response("400 Bad Request", "text/plain", "ERR malformed request\n")
+        HttpRouteKind.NotFound:
+            _http_text_response("404 Not Found", "text/plain", "ERR route not found\n")
+        HttpRouteKind.Status:
+            SIMPLEOS_HTTP_RESPONSE
+        HttpRouteKind.File:
+            _http_serve_file(route.file_path)
 
 fn start_http_server_baremetal():
     """Start a minimal single-core HTTP loop on the boot core."""
