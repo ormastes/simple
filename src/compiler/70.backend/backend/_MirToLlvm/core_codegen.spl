@@ -1110,7 +1110,15 @@ impl MirTextCodegen for MirToLlvm:
     me translate_alloc(dest: LocalId, ty: MirType):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
-        val llvm_ty = self.valid_llvm_type(self.llvm_type_text(ty))
+        val raw_ty = self.valid_llvm_type(self.llvm_type_text(ty))
+        # A void-typed spill slot is emitted by the var_reassign_ssa alloca
+        # transform when it slots a local whose value is unit -- e.g. the
+        # discarded result temp of a `match`/`if` used as a statement. `alloca
+        # void`/`load void` are rejected by llc ("void type only allowed for
+        # function results"). The slot is dead (never stored, its load result
+        # unused), so back it with the universal i64 word: valid IR, and the
+        # garbage load value is never observed.
+        val llvm_ty = if raw_ty == "void": "i64" else: raw_ty
         self.mark_ptr_local(dest_id)
         # Record the slot's element type so Load/Store through this slot use
         # it. The var_reassign_ssa spill temps have no MirLocal entry, so
@@ -1136,7 +1144,9 @@ impl MirTextCodegen for MirToLlvm:
         # temp with no tracked type (defaults i64), which would read an f64
         # slot's bits as an integer.
         val slot_elem = self.operand_alloca_elem_type(ptr)
-        val load_ty = if slot_elem != "": slot_elem else: self.valid_llvm_type(self.get_local_type(dest_id))
+        val load_ty_raw = if slot_elem != "": slot_elem else: self.valid_llvm_type(self.get_local_type(dest_id))
+        # See translate_alloc: void spill slots are materialized as i64.
+        val load_ty = if load_ty_raw == "void": "i64" else: load_ty_raw
         if load_ty == "ptr":
             self.mark_ptr_local(dest_id)
         # Register the load result's type. Locals materialized after the
@@ -1154,6 +1164,8 @@ impl MirTextCodegen for MirToLlvm:
         val raw_value_val = self.translate_operand(value)
         # Prefer the alloca slot's element type (see translate_load).
         val slot_elem = self.operand_alloca_elem_type(ptr)
-        val store_ty = if slot_elem != "": slot_elem else: self.valid_llvm_type(self.get_operand_type(value))
+        val store_ty_raw = if slot_elem != "": slot_elem else: self.valid_llvm_type(self.get_operand_type(value))
+        # See translate_alloc: void spill slots are materialized as i64.
+        val store_ty = if store_ty_raw == "void": "i64" else: store_ty_raw
         val value_val = self.value_as_type(raw_value_val, self.get_operand_type(value), store_ty)
         self.builder.emit_store(store_ty, value_val, ptr_val)
