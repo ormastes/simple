@@ -31,13 +31,19 @@ the CPU/software fallback and report a stable reason.
    evidence.
 6. **Reject unchecked or fallback raw rendering before device-backed receipt.**
    Known failure invalidates device provenance; unknown completion poisons the
-   frame rather than replaying it. This does not claim production-WM offload.
-7. **Run the ProcessingIR parity fixture.** Correlate the host completion and
+   frame rather than replaying it.
+7. **Select host presentation or the existing local production renderer.**
+   The x86 desktop maps the full ivshmem BAR into its active VMM, derives a
+   fresh generation only from an idle slot, submits the canonical WM Draw IR,
+   validates the correlated device receipt, and presents checksum-checked MMIO
+   readback. Any failure falls through to local Engine2D. The current 4K entry
+   honestly selects local rendering until TODO 552 expands the bounded wire.
+8. **Run the ProcessingIR parity fixture.** Correlate the host completion and
    require exact output-buffer parity with the CPU oracle.
-8. **Report device-backed host acceleration evidence.** Publish one row with
+9. **Report device-backed host acceleration evidence.** Publish one row with
    host, guest ISA, QEMU/device arguments, protocol, backend, device, IDs,
    timing, RSS, checksums, status, and reason.
-9. **Validate cached rows before aggregation.** Accept a cached passing report
+10. **Validate cached rows before aggregation.** Accept a cached passing report
    only when all nine host/ISA rows are present and the three Linux rows link
    to serial logs containing the exact render, Draw IR, and ProcessingIR
    receipts.

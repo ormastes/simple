@@ -13,6 +13,8 @@
 - Checked IMAGE dispatch: `vulkan_dispatch_image_composite_checked`; manual step: `Render one clipped alpha IMAGE through Vulkan src-over`
 - Checked-raw manual steps: `Dispatch the raw CLEAR and solid RECT fixture through checked Vulkan commands`; `Reject unchecked or fallback raw rendering before device-backed receipt`
 - Checked-raw checkers: `submit_checked_clear_rect`; `expect_device_backed_clear_rect_readback`
+- Production guest helpers: `map_qemu_host_gpu_ivshmem_bar2_active_vmm`; `host_gpu_ivshmem_next_generation`; `Engine2dWmFrameExecutor._render_host_gpu`
+- Production manual step: `Select host presentation or the existing local production renderer`
 
 ## Lanes
 
@@ -41,7 +43,10 @@ fixture bypasses, synthetic handles, or passing placeholders.
 - Checked raw framebuffer dispatch: traced by Spark and accepted by the
   independent normal/highest-capability reviewer. Production WM host execution
   now uses device-rendered shared-session offscreen surfaces and checked
-  opacity; guest submission and p95 evidence remain open. The
+  opacity. Production x86 guest submission now maps BAR2 into the active VMM,
+  derives request generations from the idle wire slot, validates device receipts,
+  and presents checked readback with local fallback. Fresh QEMU/p95 evidence and
+  TODO 552's selected 4K capacity change remain open. The
   reusable checked IMAGE src-over primitive and full-target opacity-1000
   RECT/IMAGE admission plus preflighted canonical TEXT glyph compositing are
   implemented. Smaller/offscreen device surfaces and opacity are covered by the

@@ -10,9 +10,9 @@ ProcessingIR `FillU32` payload. The production x86
 desktop source path routes local frames through `DrawIrComposition`, resolved top-level
 `WmContentFrame` IMAGE resources, and Engine2D. The host Engine2D path now
 retains one Vulkan session across smaller per-window device surfaces and applies
-their embedding opacity with checked src-over. Production guest session
-selection and fresh QEMU evidence remain required before that same complete
-composition may use host offload. A
+their embedding opacity with checked src-over. The production x86 executor now
+maps the complete BAR into the active VMM, negotiates one bounded session, and
+submits that same canonical composition when readback capacity permits. A
 host daemon selects a supported private backend and
 returns a correlated receipt plus output. x86_64, AArch64, and RISC-V adapters
 only own boot/device discovery. They must not define backend-specific public
@@ -28,14 +28,21 @@ The fixed layout leaves 8,318,976 bytes for readback: 1280x720 ARGB fits and
 Engine2D path until a separately reviewed bounded-capacity change lands; it
 must not be downscaled, cropped, or reported as host accelerated.
 
-Completed readback presentation will remain owned by `Engine2dWmFrameExecutor`
-and will route through `FramebufferDriver.present_argb32_from_mmio`. The driver
+Completed readback presentation remains owned by `Engine2dWmFrameExecutor`
+and routes through `FramebufferDriver.present_argb32_from_mmio`. The driver
 validates the complete source checksum before the first scanout write, then
 copies exact stride-aware rows directly from MMIO and presents the full damage
 rectangle. The two-pass presenter uses O(1) auxiliary memory and performs no
 per-frame staging allocation. Receipt bytes remain valid only until the next
 guest generation is published, so presentation must complete synchronously
 before another submission.
+
+The executor derives each request generation from an idle wire slot rather than
+mutable executor state, because the baremetal shell passes executor values by
+copy. It builds one `auto` Draw IR composition: a valid correlated host receipt
+is presented synchronously, while unavailable mapping, capacity, negotiation,
+receipt, or presentation selects the existing local Engine2D path. The current
+3840x2160 entry therefore remains local under TODO 552's 8 MiB capacity ceiling.
 
 ## Virtual Capsule
 

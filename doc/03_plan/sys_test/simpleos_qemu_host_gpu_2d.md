@@ -17,6 +17,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 | checked raw Vulkan CLEAR/RECT completion and fail-closed provenance | REQ-003,005,006,010; NFR-001 |
 | clipped transparent IMAGE src-over parity and device provenance | REQ-003,005,006,010; NFR-001 |
 | opaque full-target initialization plus shared-session offset/opacity-930 WM surface admission | REQ-003,005,006,010; NFR-001 |
+| production x86 active-VMM mapping, idle-generation submission, validated MMIO presentation, and local fallback | REQ-002,003,005,006,009,010; NFR-001,004 |
 | resolved TEXT preflight, canonical glyph material, exact CPU/Vulkan parity, and device provenance | REQ-003,005,006,010; NFR-001 |
 | exact device-backed ProcessingIR result | REQ-004,007; NFR-002,004 |
 | honest cross-host backend classification | REQ-008,009 |

@@ -22,9 +22,12 @@ passes it to `DesktopShell.render_baremetal_first_frame` and
 `DesktopShell.run_baremetal`. Each changed frame is a canonical
 `DrawIrComposition`; top-level Simple Web/GUI pixels are request-scoped resolved
 IMAGE resources validated by revision, dimensions, exact pixel count, checksum,
-and unique URI before Engine2D presentation. Nested content currently fails
-closed. Host offload remains unavailable for production desktop frames until
-TODO 549 adds lossless styled-text and IMAGE attachments to the bounded wire.
+and unique URI before presentation. Nested content currently fails closed. The
+executor maps the bounded ivshmem BAR into the active VMM and tries the existing
+host Draw IR bridge first; only a correlated device receipt followed by checked
+MMIO presentation succeeds, and every other case falls through to local
+Engine2D. The current 3840x2160 frame exceeds the 8 MiB wire, so TODO 552 keeps
+that default entry honestly local without downscale or crop.
 This source path is not compile-verified while TODO 548 blocks the pure-Simple
 checker; no QEMU receipt is claimed by this section.
 
@@ -235,8 +238,8 @@ host executors and receipts exist; their API names are not treated as proof.
 The host Draw IR executor retains the parent Vulkan session for bounded smaller
 WM surfaces, requires child device readback, and applies canonical embedding
 opacity through checked parent src-over. The current wrapper fixture remains
-full-frame, so this owner-level implementation is not fresh production-WM QEMU
-evidence.
+full-frame, so fresh production-WM QEMU evidence is still required even though
+the production selection seam is wired.
 Cached reports are accepted only through `--validate-report`: an overall status
 cannot promote the lane unless all nine host/ISA rows are well-formed and a
 Linux `pass` carries three existing serial logs with exact correlated render,

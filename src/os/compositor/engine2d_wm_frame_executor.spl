@@ -1,6 +1,15 @@
 # Canonical Shared WM -> Draw IR -> Engine2D production frame executor.
 
-use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU}
+use common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource, simpleos_host_gpu_image_resource}
+use common.gpu.simpleos_host_gpu_protocol.{
+    SIMPLEOS_HOST_GPU_PROTOCOL_VERSION,
+    SIMPLEOS_HOST_GPU_STATUS_PASS,
+    simpleos_host_gpu_backend_name,
+    simpleos_host_gpu_backend_mask,
+    simpleos_host_gpu_guest_isa_name,
+    simpleos_host_gpu_max_readback_bytes
+}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO, DrawIrComposition}
 use common.ui.taskbar_model.{TaskbarModel}
 use common.ui.window_scene.{SharedWmScene, WmContentFrame}
 use common.ui.window_scene_draw_ir.{
@@ -15,20 +24,83 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     engine2d_draw_ir_adv_composition_present_with_images,
     engine2d_resolved_draw_ir_image
 }
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use os.lib.gpu_bridge.host_gpu_ivshmem.{
+    HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS,
+    host_gpu_ivshmem_device_receipt_valid,
+    host_gpu_ivshmem_negotiate,
+    host_gpu_ivshmem_next_generation,
+    host_gpu_ivshmem_submit_draw_ir
+}
 
 extern fn serial_println(msg: text)
 
 class Engine2dWmFrameExecutor:
     engine: Engine2D
+    framebuffer: FramebufferDriver
+    host_gpu_base: u64
+    host_gpu_run_id_hash: i64
+    host_gpu_backend: text
+    host_gpu_backend_code: i64
 
-    static fn create(engine: Engine2D) -> Engine2dWmFrameExecutor:
-        Engine2dWmFrameExecutor(engine: engine)
+    static fn create(engine: Engine2D, framebuffer: FramebufferDriver) -> Engine2dWmFrameExecutor:
+        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0)
+
+    static fn create_host_gpu(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64) -> Engine2dWmFrameExecutor:
+        var executor = Engine2dWmFrameExecutor.create(engine, framebuffer)
+        val width = framebuffer.width.to_i64()
+        val height = framebuffer.height.to_i64()
+        val max_pixels = simpleos_host_gpu_max_readback_bytes() / 4
+        if base == 0u64 or width <= 0 or height <= 0 or height > max_pixels or width > max_pixels / height:
+            serial_println("[wm-frame] host-gpu-fallback reason=unavailable-or-readback-capacity width={width} height={height}")
+            return executor
+        val guest_isa = simpleos_host_gpu_guest_isa_name(guest_isa_code)
+        val backend = simpleos_host_gpu_backend_name(backend_code)
+        val backend_mask = simpleos_host_gpu_backend_mask(backend_code)
+        val hello_generation = host_gpu_ivshmem_next_generation(base)
+        if guest_isa == "unsupported" or backend_code == 0 or backend_mask == 0 or hello_generation <= 0:
+            serial_println("[wm-frame] host-gpu-fallback reason=invalid-session")
+            return executor
+        val hello = host_gpu_ivshmem_negotiate(base, hello_generation, guest_isa, backend, 0, HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS)
+        if not hello.completed or hello.status != SIMPLEOS_HOST_GPU_STATUS_PASS or hello.version != SIMPLEOS_HOST_GPU_PROTOCOL_VERSION or (hello.render_mask & backend_mask) == 0:
+            serial_println("[wm-frame] host-gpu-fallback reason=negotiation status={hello.status} detail={hello.reason}")
+            return executor
+        val expected_bytes = width * height * 4
+        if hello.max_readback_bytes < expected_bytes:
+            serial_println("[wm-frame] host-gpu-fallback reason=negotiated-readback-capacity bytes={expected_bytes} max={hello.max_readback_bytes}")
+            return executor
+        executor.host_gpu_base = base
+        executor.host_gpu_run_id_hash = hello_generation
+        executor.host_gpu_backend = backend
+        executor.host_gpu_backend_code = backend_code
+        serial_println("[wm-frame] host-gpu-ready backend={backend} generation={hello_generation}")
+        executor
+
+    me _render_host_gpu(composition: DrawIrComposition, resources: [SimpleOsHostGpuImageResource]) -> bool:
+        val generation = host_gpu_ivshmem_next_generation(self.host_gpu_base)
+        if generation <= 0:
+            return false
+        val expected_bytes = self.framebuffer.width.to_i64() * self.framebuffer.height.to_i64() * 4
+        val receipt = host_gpu_ivshmem_submit_draw_ir(
+            self.host_gpu_base, generation, self.host_gpu_run_id_hash, generation,
+            self.host_gpu_backend, self.framebuffer.width.to_i64(), self.framebuffer.height.to_i64(),
+            composition, resources, HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS
+        )
+        if not host_gpu_ivshmem_device_receipt_valid(receipt, generation, self.host_gpu_run_id_hash, generation, self.host_gpu_backend_code, expected_bytes):
+            serial_println("[wm-frame] host-gpu-fallback reason=receipt status={receipt.status} detail={receipt.reason}")
+            return false
+        if not self.framebuffer.present_argb32_from_mmio(receipt.output_addr, self.framebuffer.width, self.framebuffer.height, receipt.output_bytes, receipt.output_checksum):
+            serial_println("[wm-frame] host-gpu-fallback reason=readback-presentation")
+            return false
+        serial_println("[wm-frame] host-gpu-presented backend={self.host_gpu_backend} generation={generation} checksum={receipt.output_checksum}")
+        true
 
     me render(scene: SharedWmScene, taskbar: TaskbarModel, content_frames: [WmContentFrame], scene_revision: i64, taskbar_revision: i64, clock_label: text) -> i64:
         if scene_revision <= 0 or taskbar_revision <= 0:
             return 0
 
         var images: [Engine2dResolvedDrawIrImage] = []
+        var host_images: [SimpleOsHostGpuImageResource] = []
         var expected_images = 0
         for window in scene.windows:
             if not window.minimized:
@@ -44,11 +116,16 @@ class Engine2dWmFrameExecutor:
                         if duplicate_uri:
                             return 0
                         images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))
+                        if self.host_gpu_base != 0u64:
+                            host_images.push(simpleos_host_gpu_image_resource(image_uri, frame.width, frame.height, frame.pixels))
 
         if content_frames.len() != expected_images or images.len() != expected_images:
             serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} content_frames={content_frames.len()} reason=resource-coverage")
             return 0
-        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar, content_frames, DRAW_IR_BACKEND_CPU, 1000, clock_label, 0)
+        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar, content_frames, DRAW_IR_BACKEND_AUTO, 1000, clock_label, 0)
+        if self.host_gpu_base != 0u64:
+            if self._render_host_gpu(composition, host_images):
+                return scene_revision
         val result = engine2d_draw_ir_adv_composition_present_with_images(self.engine, composition, false, images)
         if result.fallback_required or result.skipped_command_count != 0 or result.rendered_command_count <= 0:
             serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} skipped={result.skipped_command_count} reason={result.fallback_reason}")

@@ -37,8 +37,8 @@ outstanding request map rejects duplicate or stale receipts.
 5. Any unavailable service/backend or invalid receipt returns a stable reason
    and selects the existing software/CPU path without preventing boot.
 
-`FramebufferDriver.present_argb32_from_mmio` is the bounded presentation
-primitive for a later production executor-wiring slice. It rejects invalid or
+`FramebufferDriver.present_argb32_from_mmio` is the bounded production
+presentation primitive. It rejects invalid or
 unaligned source addresses, mismatched dimensions/byte counts, non-ARGB32 or
 undersized-pitch destinations, overflow, direct-MMIO source/destination
 overlap, insufficient host-buffer capacity, and non-positive or mismatched
@@ -48,11 +48,12 @@ finishes. It allocates no staging buffer. `Engine2dWmFrameExecutor` remains the
 frame owner; this helper is not a session API and does not authorize a
 producer-side full-frame shortcut.
 
-The local `Engine2dWmFrameExecutor` rejects duplicate or unreferenced content
+The production `Engine2dWmFrameExecutor` rejects duplicate or unreferenced content
 frames, stale revisions, bad checksums, unresolved IMAGE commands, and nested
 GROUP metadata. The wire accepts the same top-level IMAGE resource set, but
-production host-offload selection remains open until guest session selection
-and fresh QEMU evidence. The host-only fresh-device executor preflights the
+maps BAR2 into the active x86 VMM, derives generations only from an idle wire
+slot, and selects host offload only after bounded negotiation. Fresh QEMU
+evidence remains open. The host-only fresh-device executor preflights the
 whole composition before mutation. It admits full-target batches plus bounded
 named embedded surfaces at opacity `(0, 1000]`, containing opaque RECTs plus a
 nonzero-alpha first RECT that initializes a transparent child, canonical WM
@@ -69,7 +70,10 @@ and GROUP remain rejected. A Vulkan child must return checked device readback an
 is composited through the checked parent src-over path before its retained
 session is released.
 
-Local production composition calls
+One `DRAW_IR_BACKEND_AUTO` production composition feeds both routes. A validated
+host receipt presents through the framebuffer MMIO owner; any host failure falls
+through to `engine2d_draw_ir_adv_composition_present_with_images` without a
+second producer or composition. Local production composition calls
 `engine2d_draw_ir_adv_composition_present_with_images`. The shared internal
 executor takes independent `present_frame` and `readback_frame` controls:
 regular composition is `(true, true)`, fresh-device execution is
