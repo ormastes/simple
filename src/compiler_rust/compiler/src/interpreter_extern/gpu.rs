@@ -245,8 +245,8 @@ use simple_runtime::value::gpu_vulkan::{
 #[cfg(feature = "cuda")]
 use simple_runtime::cuda_runtime::{
     rt_cuda_available, rt_cuda_ctx_create, rt_cuda_ctx_destroy, rt_cuda_ctx_synchronize,
-    rt_cuda_device_compute_capability, rt_cuda_device_count, rt_cuda_device_get, rt_cuda_device_name,
-    rt_cuda_f64_binary_op, rt_cuda_f64_minmax, rt_cuda_f64_scalar_div, rt_cuda_f64_slice_1d, rt_cuda_f64_slice_2d,
+    rt_cuda_device_compute_capability, rt_cuda_device_count, rt_cuda_device_get, rt_cuda_device_identity,
+    rt_cuda_device_name, rt_cuda_f64_binary_op, rt_cuda_f64_minmax, rt_cuda_f64_scalar_div, rt_cuda_f64_slice_1d, rt_cuda_f64_slice_2d,
     rt_cuda_f64_sum, rt_cuda_f64_sum_axis, rt_cuda_get_error_string, rt_cuda_init, rt_cuda_launch_kernel,
     rt_cuda_mem_alloc, rt_cuda_mem_free, rt_cuda_memcpy_dtoh, rt_cuda_memcpy_dtod, rt_cuda_memcpy_htod, rt_cuda_memset,
     rt_cuda_module_get_function, rt_cuda_module_load, rt_cuda_module_load_data, rt_cuda_module_unload, rt_cuda_sync,
@@ -879,7 +879,7 @@ pub fn rt_cuda_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
     let device = arg_i64(args, 0, "rt_cuda_device_name", 1)?;
     #[cfg(feature = "cuda")]
     {
-        return Ok(Value::Str(c_ptr_to_string(rt_cuda_device_name(device))));
+        return Ok(Value::Str(c_ptr_to_string(rt_cuda_device_name(device)).into()));
     }
     #[cfg(not(feature = "cuda"))]
     {
@@ -896,6 +896,18 @@ pub fn rt_cuda_device_compute_capability_fn(args: &[Value]) -> Result<Value, Com
     #[cfg(not(feature = "cuda"))]
     {
         Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_device_identity_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let device = arg_i64(args, 0, "rt_cuda_device_identity", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_device_identity(device)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Value::Int(0))
     }
 }
 
@@ -1324,7 +1336,7 @@ pub fn rt_cuda_get_error_string_fn(args: &[Value]) -> Result<Value, CompileError
     let error_code = arg_i64(args, 0, "rt_cuda_get_error_string", 1)?;
     #[cfg(feature = "cuda")]
     {
-        return Ok(Value::Str(c_ptr_to_string(rt_cuda_get_error_string(error_code))));
+        return Ok(Value::Str(c_ptr_to_string(rt_cuda_get_error_string(error_code)).into()));
     }
     #[cfg(not(feature = "cuda"))]
     {

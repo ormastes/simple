@@ -121,6 +121,12 @@ Vulkan ProcessingIR hashes the runtime-selected driver identity, which includes
 device name, vendor/device IDs, driver version, and API version. Storage-buffer handles remain per-request resource handles and
 must never be reused as device provenance. Vulkan processing is negotiated only
 after a bounded real ProcessingIR probe returns both values.
+CUDA ProcessingIR uses a nonzero 63-bit hash of the CUDA Driver API device UUID.
+The runtime prefers `cuDeviceGetUuid_v2` so MIG compute instances retain their
+own identity and falls back to the legacy symbol for older drivers;
+device ordinal and compute capability are capability metadata, not identity.
+UUID lookup failure or an all-zero UUID rejects CUDA negotiation instead of
+manufacturing positive provenance from the ordinal.
 
 ## Platform Classification
 

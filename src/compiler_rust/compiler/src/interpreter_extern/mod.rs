@@ -808,6 +808,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_cuda_device_count", gpu::rt_cuda_device_count_fn);
     insert_simple!("rt_cuda_device_get", gpu::rt_cuda_device_get_fn);
+    insert_simple!("rt_cuda_device_identity", gpu::rt_cuda_device_identity_fn);
     insert_simple!("rt_cuda_device_name", gpu::rt_cuda_device_name_fn);
     insert_simple!("rt_cuda_f64_binary_op", gpu::rt_cuda_f64_binary_op_fn);
     insert_simple!("rt_cuda_f64_minmax", gpu::rt_cuda_f64_minmax_fn);

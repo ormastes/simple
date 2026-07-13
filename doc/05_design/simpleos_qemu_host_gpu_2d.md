@@ -179,6 +179,14 @@ daemon, and wrapper now negotiate DirectX rendering independently from
 CUDA-preferred/Vulkan-fallback ProcessingIR. Live Windows QEMU receipts remain
 open while TODO 548 blocks Simple compiler execution.
 
+CUDA device provenance comes from preferred `cuDeviceGetUuid_v2` with legacy
+symbol fallback behind the canonical CUDA runtime facade. The runtime rejects
+the all-zero sentinel and otherwise returns a stable nonzero 63-bit UUID hash.
+The ProcessingIR executor and daemon both reject zero identity; the native
+readback gate checks the shared fixed hash vector, repeatability, and pairwise
+distinction when multiple devices are present. Aggregate PASS also requires a
+positive identity and a nonempty backend report.
+
 ## Observability and NFRs
 
 ### Native Metal ProcessingIR

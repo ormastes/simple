@@ -211,7 +211,10 @@ or names a different backend.
 For Metal-specific parser changes, also run
 `sh scripts/check/check-metal-generated-2d-readback.shs --self-test`.
 For CUDA-specific parser changes, also run
-`sh scripts/check/check-cuda-generated-2d-readback.shs --self-test`.
+`sh scripts/check/check-cuda-generated-2d-readback.shs --self-test`. CUDA PASS
+evidence also requires a positive stable UUID-derived device identity.
+The aggregate matrix additionally requires the CUDA backend report to exist and
+be nonempty; source tokens alone are not PASS evidence.
 For OpenCL-specific parser changes, also run
 `sh scripts/check/check-opencl-generated-2d-readback.shs --self-test`.
 For ROCm-specific parser changes, also run

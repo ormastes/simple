@@ -236,9 +236,10 @@ refreshed cross-ISA CUDA receipts
 are still required. macOS Metal Draw IR execution is implemented but remains
 `unsupported` evidence until a prepared native host produces a fresh receipt.
 Metal ProcessingIR FillU32 is implemented through a dedicated checked MSL
-kernel and device readback, but likewise needs a prepared-host receipt. Windows DirectX/CUDA rows remain
-`unsupported`; the current DirectX renderer is software emulation and its API
-name is not proof. The host Draw IR executor retains the parent Vulkan or Metal
+kernel and device readback, but likewise needs a prepared-host receipt. Windows
+DirectX/CUDA rows remain `unsupported` evidence until a prepared host produces
+fresh receipts; a bounded native D3D11 owner is implemented, but its API name
+alone is not proof. The host Draw IR executor retains the parent Vulkan or Metal
 session for bounded smaller WM surfaces, requires child device readback, and
 applies canonical embedding opacity through checked native parent src-over.
 The current wrapper fixture remains
@@ -258,7 +259,10 @@ RSS targets.
 Processing receipts distinguish the transient backend resource handle from the
 stable device identity. Vulkan hashes the runtime-selected driver identity,
 which includes the device name and driver metadata, and negotiation fails
-closed when it is missing; a buffer handle alone is not device provenance.
+closed when it is missing. CUDA prefers the MIG-aware v2 UUID API with legacy
+fallback, rejects the all-zero sentinel, and the native gate requires repeated
+reads to agree (and multiple devices to remain distinct);
+an ordinal, compute capability, or buffer handle alone is not device provenance.
 Metal hashes validated default-device metadata and is advertised only after a
 real nonzero FillU32 probe returns exact device bytes, a positive handle, and
 identity.

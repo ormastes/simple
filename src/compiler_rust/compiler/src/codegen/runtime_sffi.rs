@@ -1485,6 +1485,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cuda_available", &[], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_device_count", &[], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_device_get", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cuda_device_identity", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_device_name", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_device_compute_capability", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_is_available", &[], &[I64]),

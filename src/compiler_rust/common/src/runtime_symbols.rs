@@ -1398,6 +1398,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_cuda_ctx_synchronize",
     "rt_cuda_device_compute_capability",
     "rt_cuda_device_count",
+    "rt_cuda_device_identity",
     "rt_cuda_device_name",
     "rt_cuda_f64_binary_op",
     "rt_cuda_f64_minmax",

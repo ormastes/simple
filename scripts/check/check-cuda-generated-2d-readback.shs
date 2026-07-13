@@ -27,6 +27,7 @@ emit_unavailable() {
         echo "cuda_generated_2d_readback_ptx=$PTX_PATH"
         echo "cuda_generated_2d_readback_submit_attempted=false"
         echo "cuda_generated_2d_readback_readback_available=false"
+        echo "cuda_generated_2d_readback_device_identity=0"
         echo "cuda_generated_2d_readback_expected_checksum=0"
         echo "cuda_generated_2d_readback_actual_checksum=0"
     } >"$BUILD_DIR/evidence.env"
@@ -71,10 +72,20 @@ cuda_mark_claimed_pass_failed() {
 
 cuda_validate_evidence() {
     [ -s "$BUILD_DIR/evidence.env" ] || return 0
+    if grep -q '^cuda_generated_2d_readback_status=pass$' "$BUILD_DIR/evidence.env"; then
+        for field in status reason submit_attempted readback_available device_identity expected_checksum actual_checksum mismatch_count fill_expected_checksum fill_actual_checksum fill_mismatch_count copy_expected_checksum copy_actual_checksum copy_mismatch_count alpha_expected_checksum alpha_actual_checksum alpha_mismatch_count scroll_expected_checksum scroll_actual_checksum scroll_mismatch_count; do
+            count="$(grep -c "^cuda_generated_2d_readback_${field}=" "$BUILD_DIR/evidence.env" || true)"
+            if [ "$count" -gt 1 ]; then
+                cuda_mark_claimed_pass_failed "duplicate-evidence-field"
+                return 0
+            fi
+        done
+    fi
     status="$(cuda_env_value cuda_generated_2d_readback_status)"
     [ "$status" = "pass" ] || return 0
     submit="$(cuda_env_value cuda_generated_2d_readback_submit_attempted)"
     readback="$(cuda_env_value cuda_generated_2d_readback_readback_available)"
+    identity="$(cuda_env_value cuda_generated_2d_readback_device_identity)"
     expected="$(cuda_env_value cuda_generated_2d_readback_expected_checksum)"
     actual="$(cuda_env_value cuda_generated_2d_readback_actual_checksum)"
     mismatches="$(cuda_env_value cuda_generated_2d_readback_mismatch_count)"
@@ -83,6 +94,8 @@ cuda_validate_evidence() {
         cuda_mark_claimed_pass_failed "missing-submit-attempt"
     elif [ "$readback" != "true" ]; then
         cuda_mark_claimed_pass_failed "missing-readback"
+    elif ! cuda_positive_decimal "$identity"; then
+        cuda_mark_claimed_pass_failed "missing-device-identity"
     elif ! cuda_positive_decimal "$expected" || ! cuda_positive_decimal "$actual"; then
         cuda_mark_claimed_pass_failed "checksum-missing-or-zero"
     elif [ "$expected" != "$actual" ]; then
@@ -175,6 +188,7 @@ cuda_generated_2d_readback_status=pass
 cuda_generated_2d_readback_reason=fake
 cuda_generated_2d_readback_submit_attempted=true
 cuda_generated_2d_readback_readback_available=true
+cuda_generated_2d_readback_device_identity=123
 cuda_generated_2d_readback_expected_checksum=4
 cuda_generated_2d_readback_actual_checksum=5
 cuda_generated_2d_readback_mismatch_count=0
@@ -204,6 +218,7 @@ cuda_generated_2d_readback_status=pass
 cuda_generated_2d_readback_reason=readback-pixels-matched
 cuda_generated_2d_readback_submit_attempted=true
 cuda_generated_2d_readback_readback_available=true
+cuda_generated_2d_readback_device_identity=123
 cuda_generated_2d_readback_expected_checksum=4
 cuda_generated_2d_readback_actual_checksum=4
 cuda_generated_2d_readback_mismatch_count=0
@@ -227,8 +242,34 @@ EOF
         exit 1
     fi
 
+    echo 'cuda_generated_2d_readback_device_identity=0' >>"$BUILD_DIR/evidence.env"
+    cuda_validate_evidence
+    if ! grep -q '^cuda_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^cuda_generated_2d_readback_reason=duplicate-evidence-field$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=duplicate-device-identity-accepted"
+        exit 1
+    fi
+
+    sed '/^cuda_generated_2d_readback_device_identity=/d; /^cuda_generated_2d_readback_status=/d; /^cuda_generated_2d_readback_reason=/d' "$BUILD_DIR/evidence.env" >"$BUILD_DIR/evidence.env.tmp"
+    {
+        echo 'cuda_generated_2d_readback_status=pass'
+        echo 'cuda_generated_2d_readback_reason=readback-pixels-matched'
+        echo 'cuda_generated_2d_readback_device_identity=123'
+        cat "$BUILD_DIR/evidence.env.tmp"
+    } >"$BUILD_DIR/evidence.env"
+    sed '/^cuda_generated_2d_readback_device_identity=/d' "$BUILD_DIR/evidence.env" >"$BUILD_DIR/evidence.env.tmp"
+    mv "$BUILD_DIR/evidence.env.tmp" "$BUILD_DIR/evidence.env"
+    cuda_validate_evidence
+    if ! grep -q '^cuda_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^cuda_generated_2d_readback_reason=missing-device-identity$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=missing-device-identity-accepted"
+        exit 1
+    fi
+
     echo "self_test_status=pass"
-    echo "self_test_reason=cuda-submit-readback-checksum-gate"
+    echo "self_test_reason=cuda-submit-readback-identity-checksum-gate"
     exit 0
 fi
 
@@ -241,9 +282,13 @@ if ! generated_2d_module_verified "$PTX_PATH"; then
 else
     cat >"$BUILD_DIR/cuda_generated_2d_readback.c" <<'C_EOF'
 #include <cuda.h>
+#include <dlfcn.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+typedef CUresult (*CudaDeviceGetUuidFn)(CUuuid *, CUdevice);
 
 static char *read_file(const char *path, size_t *size_out) {
     FILE *f = fopen(path, "rb");
@@ -268,8 +313,22 @@ static void fail(const char *reason, int code, uint64_t expected, uint64_t actua
     printf("cuda_generated_2d_readback_cuda_code=%d\n", code);
     printf("cuda_generated_2d_readback_submit_attempted=true\n");
     printf("cuda_generated_2d_readback_readback_available=false\n");
+    printf("cuda_generated_2d_readback_device_identity=0\n");
     printf("cuda_generated_2d_readback_expected_checksum=%llu\n", (unsigned long long)expected);
     printf("cuda_generated_2d_readback_actual_checksum=%llu\n", (unsigned long long)actual);
+}
+
+static uint64_t cuda_uuid_identity(const CUuuid *uuid) {
+    int all_zero = 1;
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (unsigned int i = 0; i < 16; i++) {
+        if (uuid->bytes[i] != 0) all_zero = 0;
+        hash ^= (uint8_t)uuid->bytes[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    if (all_zero) return 0;
+    hash &= INT64_MAX;
+    return hash == 0 ? 1 : hash;
 }
 
 static uint64_t checksum_u32(const uint32_t *data, unsigned int count) {
@@ -342,6 +401,38 @@ int main(int argc, char **argv) {
     CUdevice dev;
     rc = cuDeviceGet(&dev, 0);
     if (rc != CUDA_SUCCESS) { fail("cuDeviceGet-failed", (int)rc, 0, 0); free(ptx); return 3; }
+
+    CudaDeviceGetUuidFn device_get_uuid = (CudaDeviceGetUuidFn)dlsym(RTLD_DEFAULT, "cuDeviceGetUuid_v2");
+    if (!device_get_uuid) device_get_uuid = (CudaDeviceGetUuidFn)dlsym(RTLD_DEFAULT, "cuDeviceGetUuid");
+    if (!device_get_uuid) { fail("cuDeviceGetUuid-symbol-missing", -1, 0, 0); free(ptx); return 3; }
+    CUuuid identity_vector = {{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
+    if (cuda_uuid_identity(&identity_vector) != UINT64_C(4116863941369023524)) { fail("cuda-device-identity-hash-self-check-failed", -1, 0, 0); free(ptx); return 3; }
+
+    int device_count = 0;
+    rc = cuDeviceGetCount(&device_count);
+    if (rc != CUDA_SUCCESS || device_count < 1) { fail("cuDeviceGetCount-failed", (int)rc, 0, 0); free(ptx); return 3; }
+    CUuuid selected_uuid;
+    CUuuid repeated_uuid;
+    rc = device_get_uuid(&selected_uuid, dev);
+    if (rc != CUDA_SUCCESS) { fail("cuDeviceGetUuid-failed", (int)rc, 0, 0); free(ptx); return 3; }
+    rc = device_get_uuid(&repeated_uuid, dev);
+    if (rc != CUDA_SUCCESS || memcmp(&selected_uuid, &repeated_uuid, sizeof(CUuuid)) != 0) { fail("cuda-device-uuid-unstable", (int)rc, 0, 0); free(ptx); return 3; }
+    uint64_t device_identity = cuda_uuid_identity(&selected_uuid);
+    if (device_identity == 0) { fail("cuda-device-uuid-zero", -1, 0, 0); free(ptx); return 3; }
+    uint64_t *device_identities = (uint64_t *)calloc((size_t)device_count, sizeof(uint64_t));
+    if (!device_identities) { fail("cuda-device-identity-alloc-failed", -1, 0, 0); free(ptx); return 3; }
+    for (int ordinal = 0; ordinal < device_count; ordinal++) {
+        CUdevice candidate;
+        CUuuid uuid;
+        rc = cuDeviceGet(&candidate, ordinal);
+        if (rc == CUDA_SUCCESS) rc = device_get_uuid(&uuid, candidate);
+        if (rc != CUDA_SUCCESS) { fail("cuda-device-identity-read-failed", (int)rc, 0, 0); free(device_identities); free(ptx); return 3; }
+        device_identities[ordinal] = cuda_uuid_identity(&uuid);
+        for (int prior = 0; prior < ordinal; prior++) {
+            if (device_identities[prior] == device_identities[ordinal]) { fail("cuda-device-identity-collision", -1, device_identities[prior], device_identities[ordinal]); free(device_identities); free(ptx); return 3; }
+        }
+    }
+    free(device_identities);
 
     CUcontext ctx;
     rc = cuDevicePrimaryCtxRetain(&ctx, dev);
@@ -473,6 +564,7 @@ int main(int argc, char **argv) {
         printf("cuda_generated_2d_readback_cuda_code=0\n");
         printf("cuda_generated_2d_readback_submit_attempted=true\n");
         printf("cuda_generated_2d_readback_readback_available=true\n");
+        printf("cuda_generated_2d_readback_device_identity=%llu\n", (unsigned long long)device_identity);
         printf("cuda_generated_2d_readback_expected_checksum=%llu\n", (unsigned long long)expected);
         printf("cuda_generated_2d_readback_actual_checksum=%llu\n", (unsigned long long)actual);
         printf("cuda_generated_2d_readback_mismatch_count=%llu\n", (unsigned long long)mismatches);
@@ -513,7 +605,7 @@ C_EOF
 
     if ! generated_2d_have "$CC_TOOL"; then
         emit_unavailable "missing-c-compiler"
-    elif ! "$CC_TOOL" "$BUILD_DIR/cuda_generated_2d_readback.c" -lcuda -o "$BUILD_DIR/cuda_generated_2d_readback" >"$BUILD_DIR/cc.out" 2>"$BUILD_DIR/cc.err"; then
+    elif ! "$CC_TOOL" "$BUILD_DIR/cuda_generated_2d_readback.c" -lcuda -ldl -o "$BUILD_DIR/cuda_generated_2d_readback" >"$BUILD_DIR/cc.out" 2>"$BUILD_DIR/cc.err"; then
         emit_unavailable "cuda-driver-compile-failed"
     elif "$BUILD_DIR/cuda_generated_2d_readback" "$PTX_PATH" "$CUDA_ELEMENT_COUNT" "$CUDA_FILL_VALUE" "$EXPECTED_PIXELS_PATH" "$ACTUAL_PIXELS_PATH" >"$BUILD_DIR/evidence.env" 2>"$BUILD_DIR/run.err"; then
         :

@@ -81,7 +81,11 @@ does not import `Engine2D` or `MetalSession`.
 ## Platform matrix
 
 Linux uses Vulkan for rendering and CUDA for ProcessingIR on a prepared NVIDIA
-host, with Vulkan ProcessingIR retained when CUDA is unavailable. macOS uses
+host, with Vulkan ProcessingIR retained when CUDA is unavailable. CUDA receipts
+derive device identity from the CUDA device UUID, not ordinal or compute
+capability, prefer the MIG-aware v2 API, and fail closed when UUID provenance is
+unavailable or all-zero. The native and aggregate wrapper self-tests reject
+identity-less proof and missing reports. macOS uses
 strict native Metal for raw rendering, Draw IR, and exact device receipts. Metal
 ProcessingIR uses its own MSL kernel and device readback rather than an
 Engine2D clear. Windows uses the bounded native D3D11 owner for rendering and

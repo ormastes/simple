@@ -218,6 +218,7 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
     "rt_cuda_init",
     "rt_cuda_device_count",
     "rt_cuda_device_get",
+    "rt_cuda_device_identity",
     "rt_cuda_device_name",
     "rt_cuda_device_compute_capability",
     "rt_cuda_ctx_create",

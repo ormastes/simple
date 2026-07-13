@@ -113,6 +113,29 @@ type CUfunction = *mut c_void;
 type CUdeviceptr = u64;
 type CUstream = *mut c_void;
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct CUuuid {
+    bytes: [u8; 16],
+}
+
+fn cuda_device_uuid_identity(bytes: &[u8; 16]) -> i64 {
+    if bytes.iter().all(|byte| *byte == 0) {
+        return 0;
+    }
+    let mut hash = 14_695_981_039_346_656_037_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(1_099_511_628_211_u64);
+    }
+    let identity = hash & i64::MAX as u64;
+    if identity == 0 {
+        1
+    } else {
+        identity as i64
+    }
+}
+
 #[cfg(feature = "cuda")]
 #[allow(non_snake_case)]
 mod cuda_driver {
@@ -123,6 +146,7 @@ mod cuda_driver {
     type CuDeviceGetCount = unsafe extern "C" fn(*mut c_int) -> c_int;
     type CuDeviceGet = unsafe extern "C" fn(*mut CUdevice, c_int) -> c_int;
     type CuDeviceGetName = unsafe extern "C" fn(*mut c_char, c_int, CUdevice) -> c_int;
+    type CuDeviceGetUuid = unsafe extern "C" fn(*mut CUuuid, CUdevice) -> c_int;
     type CuDeviceGetAttribute = unsafe extern "C" fn(*mut c_int, c_int, CUdevice) -> c_int;
     type CuCtxCreate = unsafe extern "C" fn(*mut CUcontext, c_uint, CUdevice) -> c_int;
     type CuCtxDestroy = unsafe extern "C" fn(CUcontext) -> c_int;
@@ -160,6 +184,7 @@ mod cuda_driver {
         cuDeviceGetCount: CuDeviceGetCount,
         cuDeviceGet: CuDeviceGet,
         cuDeviceGetName: CuDeviceGetName,
+        cuDeviceGetUuid: CuDeviceGetUuid,
         cuDeviceGetAttribute: CuDeviceGetAttribute,
         cuCtxCreate_v2: CuCtxCreate,
         cuCtxDestroy_v2: CuCtxDestroy,
@@ -209,11 +234,19 @@ mod cuda_driver {
             }};
         }
 
+        let cu_device_get_uuid = unsafe {
+            lib.get::<CuDeviceGetUuid>(b"cuDeviceGetUuid_v2\0")
+                .or_else(|_| lib.get::<CuDeviceGetUuid>(b"cuDeviceGetUuid\0"))
+                .map(|symbol| *symbol)
+                .map_err(|_| CudaError::SharedObjectSymbolNotFound)?
+        };
+
         Ok(CudaFns {
             cuInit: sym!(b"cuInit\0", CuInit),
             cuDeviceGetCount: sym!(b"cuDeviceGetCount\0", CuDeviceGetCount),
             cuDeviceGet: sym!(b"cuDeviceGet\0", CuDeviceGet),
             cuDeviceGetName: sym!(b"cuDeviceGetName\0", CuDeviceGetName),
+            cuDeviceGetUuid: cu_device_get_uuid,
             cuDeviceGetAttribute: sym!(b"cuDeviceGetAttribute\0", CuDeviceGetAttribute),
             cuCtxCreate_v2: sym!(b"cuCtxCreate_v2\0", CuCtxCreate),
             cuCtxDestroy_v2: sym!(b"cuCtxDestroy_v2\0", CuCtxDestroy),
@@ -263,6 +296,10 @@ mod cuda_driver {
 
     pub unsafe fn cuDeviceGetName(name: *mut c_char, len: c_int, dev: CUdevice) -> c_int {
         dispatch!(cuDeviceGetName(name, len, dev))
+    }
+
+    pub unsafe fn cuDeviceGetUuid(uuid: *mut CUuuid, dev: CUdevice) -> c_int {
+        dispatch!(cuDeviceGetUuid(uuid, dev))
     }
 
     pub unsafe fn cuDeviceGetAttribute(pi: *mut c_int, attrib: c_int, dev: CUdevice) -> c_int {
@@ -1415,6 +1452,25 @@ pub extern "C" fn rt_cuda_device_compute_capability(_device: i64) -> i64 {
     0
 }
 
+/// Get a stable nonzero 63-bit identity derived from the CUDA device UUID.
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_device_identity(device: i64) -> i64 {
+    unsafe {
+        let mut uuid = CUuuid::default();
+        if cuDeviceGetUuid(&mut uuid, device as CUdevice) != 0 {
+            return 0;
+        }
+        cuda_device_uuid_identity(&uuid.bytes)
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_device_identity(_device: i64) -> i64 {
+    0
+}
+
 /// Create CUDA context for device
 #[no_mangle]
 #[cfg(feature = "cuda")]
@@ -2522,6 +2578,21 @@ mod tests {
     fn test_device_count() {
         // This should not panic even without CUDA
         let _ = get_device_count();
+    }
+
+    #[test]
+    fn cuda_uuid_identity_is_stable_nonzero_and_distinct() {
+        let zero = [0_u8; 16];
+        let mut first = zero;
+        first[0] = 1;
+        let mut second = first;
+        second[15] = 1;
+        let identity = cuda_device_uuid_identity(&first);
+        assert_eq!(cuda_device_uuid_identity(&zero), 0);
+        assert_eq!(identity, 4_116_863_941_369_023_524);
+        assert!(identity > 0);
+        assert_eq!(identity, cuda_device_uuid_identity(&first));
+        assert_ne!(identity, cuda_device_uuid_identity(&second));
     }
 
     #[test]
