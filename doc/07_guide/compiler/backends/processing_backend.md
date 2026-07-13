@@ -1,12 +1,22 @@
 # Processing Backend Guide
 
-**Status:** Proposed
+**Status:** Partial — `FillU32` CPU/Vulkan slice available
 
 The processing backend is the planned portable compute layer underneath
 `std.gpu`, draw APIs, and ML matops. It should use the current CUDA/Vulkan
 runtime hooks, RISC-V cross targets, and conservative VHDL backend without
 pretending that the repository already contains a full RISC-V64 mobile-style
 GPGPU.
+
+## Available Today
+
+`std.common.processing.processing_ir` provides the validated `FillU32` IR value
+and CPU oracle. `std.gc_async_mut.processing.vulkan_fill_u32` executes it through
+the existing Vulkan SFFI and returns device-read bytes. The SimpleOS QEMU host
+service negotiates this as Vulkan processing and requires exact CPU parity.
+Fresh x86_64, AArch64, and RV64 QEMU probes report checksum `1792` with zero
+mismatches for 256 elements filled with `7`. CUDA, Metal, compiler kernel
+lowering, and a public device/queue API remain unavailable.
 
 ## Target Stack
 
@@ -52,7 +62,7 @@ unsupported recursion.
 
 ## Implementation Order
 
-1. ProcessingIR and CPU golden backend.
+1. ProcessingIR and CPU golden backend. (`FillU32` runtime slice complete.)
 2. Vulkan/SPIR-V lowering for `@kernel` and `@vulkan_kernel`.
 3. `std.processing` device, buffer, queue, fence, and event APIs.
 4. Matops: GEMM, reduce, softmax, layernorm, attention.

@@ -1,9 +1,10 @@
 <!-- codex-architecture -->
 # Processing Backend TLDR
 
-Simple has CUDA/Vulkan hooks, tensor paths, RV64 targets, MDSOC structure, and a
-conservative VHDL backend. It does not yet have a real RV64 Adreno/Mali-like
-GPGPU. Build that as a portable `processing` lane:
+Simple now has one real portable slice: validated ProcessingIR `FillU32`, a CPU
+oracle, and Vulkan device execution/readback used by the SimpleOS QEMU host
+service. It still does not have compiler kernel lowering, CUDA/Metal ProcessingIR
+backends, a public processing API, or a real RV64 Adreno/Mali-like GPGPU.
 
 ```text
 Simple @kernel/@draw/@matops
@@ -17,6 +18,7 @@ CUDA/Vulkan names. Keep `std.gpu`, draw, and ML APIs above it.
 Important boundaries:
 
 - `src/compiler/00.common/processing/` owns shared IR contracts.
+- `src/lib/common/processing/` owns runtime-neutral values and CPU oracles.
 - `src/compiler/70.backend/backend/processing/` owns lowering selection.
 - `src/runtime/processing/` owns queues, memory handles, events, and fallback.
 - `src/os/driver/gpu/simplegpu/` owns MMIO, DMA, command queues, and fences.

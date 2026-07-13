@@ -1,6 +1,8 @@
 # SimpleOS QEMU Host-GPU 2D
 
-Status: design contract; implementation scenarios intentionally fail closed.
+Status: implementation in progress. Linux/Vulkan live x86_64, AArch64, and
+RV64 probes now pass rendering plus the ProcessingIR `FillU32` oracle; the
+canonical cross-host wrapper and remaining scenarios still fail closed.
 
 This scenario proves that supported SimpleOS guests use one bounded protocol to
 execute Draw IR and ProcessingIR on a real host device. Unsupported rows retain
@@ -38,4 +40,3 @@ provenance; they are exempt from native-ISA latency and speedup targets.
 ## Executable source
 
 `test/03_system/os/qemu/simpleos_qemu_host_gpu_2d_spec.spl`
-

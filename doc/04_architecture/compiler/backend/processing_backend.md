@@ -2,7 +2,7 @@
 # Processing Backend Architecture
 
 **Date:** 2026-06-14
-**Status:** Proposed
+**Status:** Partial — validated `FillU32` vertical slice implemented
 **Scope:** Portable compute, draw, tensor, RV64 vector, and FPGA soft-accelerator backend lane.
 
 ## Bottom Line
@@ -29,6 +29,14 @@ Backends
 
 ## Current State
 
+The first runtime-neutral slice now exists. `src/lib/common/processing/processing_ir.spl`
+owns a validated `FillU32` value and CPU oracle;
+`src/lib/gc_async_mut/processing/vulkan_fill_u32.spl` executes that value through
+the existing Vulkan SFFI. The SimpleOS host service accepts the existing bounded
+wire command only after Vulkan negotiation, compares device readback with the
+CPU oracle, and reports device provenance. This is not yet the compiler MIR
+bridge, public `std.processing` API, CUDA/Metal backend, or `simplegpu64`.
+
 | Area | Existing repo evidence | Design consequence |
 |------|------------------------|--------------------|
 | CUDA/Vulkan runtime | `src/compiler_rust/runtime/src/cuda_runtime.rs`, `src/compiler_rust/runtime/src/value/gpu_vulkan/`, `src/compiler_rust/compiler/src/interpreter_extern/gpu.rs` | Reuse runtime handles and fail-closed backend diagnostics. |
@@ -43,6 +51,7 @@ Backends
 
 ```text
 src/lib/processing/                         public Simple processing API
+src/lib/common/processing/                  runtime-neutral validated IR values and CPU oracles
 src/compiler/00.common/processing/          shared IR contracts and diagnostics
 src/compiler/50.mir/processing/             MIR-to-ProcessingIR bridge
 src/compiler/70.backend/backend/processing/ backend selection and lowering
@@ -130,7 +139,8 @@ mobile and desktop GPUs.
 
 ## Build Stages
 
-1. Define ProcessingIR plus CPU golden backend.
+1. Define ProcessingIR plus CPU golden backend. (`FillU32` runtime slice done;
+   compiler lowering remains.)
 2. Lower `@kernel` and `@vulkan_kernel` to Vulkan/SPIR-V.
 3. Add `std.processing` buffers, queues, fences, and events.
 4. Add matops: tiled GEMM, reduce, softmax, layernorm.
