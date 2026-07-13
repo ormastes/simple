@@ -94,6 +94,12 @@ fn _draw_ir_command_by_id(commands: [DrawIrCommand], component_id: text) -> Draw
         idx = idx + 1
     commands[0]
 
+fn _draw_ir_text_command(commands: [DrawIrCommand], value: text) -> DrawIrCommand:
+    for command in commands:
+        if command.kind == "text" and command.text_value == value:
+            return command
+    commands[0]
+
 fn _draw_ir_style_value(command: DrawIrCommand, key: text) -> text:
     var idx = 0
     while idx < command.computed_style.len():
@@ -386,6 +392,22 @@ describe "SimpleWebRenderer":
         expect(_draw_ir_style_value(label, "line-height")).to_equal("18")
         expect(_count_color(shorthand_pixels, 0xFF111827u32)).to_be_greater_than(0)
         expect(_pixels_equal(normal_pixels, shorthand_pixels)).to_equal(false)
+
+    it "preserves cascaded font families in text Draw IR computed style":
+        val html = "<html><head><style>.parent{font-family:\"Noto Sans Mono\",monospace}.override{font-family:Pixelify Sans,sans-serif}.short{font:italic 700 18px/20px \"Roboto Slab\",serif}</style></head><body><div class='parent'><span>Inherited</span><span class='override'>Override</span><span class='short'>Shorthand</span></div></body></html>"
+        val composition = simple_web_layout_render_html_draw_ir(html, 160, 64)
+        val commands = composition.batches[0].commands
+        val inherited = _draw_ir_text_command(commands, "Inherited")
+        val overridden = _draw_ir_text_command(commands, "Override")
+        val shorthand = _draw_ir_text_command(commands, "Shorthand")
+
+        expect(composition.schema).to_equal("simple-draw-ir-v2")
+        expect(_draw_ir_style_value(inherited, "font-family")).to_equal("\"Noto Sans Mono\",monospace")
+        expect(_draw_ir_style_value(overridden, "font-family")).to_equal("Pixelify Sans,sans-serif")
+        expect(_draw_ir_style_value(shorthand, "font-family")).to_equal("\"Roboto Slab\",serif")
+        expect(_draw_ir_style_value(shorthand, "font-size")).to_equal("18")
+        expect(_draw_ir_style_value(shorthand, "font-style")).to_equal("italic")
+        expect(_draw_ir_style_value(shorthand, "font-weight")).to_equal("bold")
 
     it "renders aspect-ratio boxes from a definite width":
         val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.card{width:60px;aspect-ratio:2/1;background-color:#22c55e}.next{width:16px;height:6px;background-color:#f59e0b}</style></head><body><div id='card' class='card'></div><div id='next' class='next'></div></body></html>"

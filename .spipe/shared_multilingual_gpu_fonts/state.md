@@ -595,3 +595,30 @@ implementation-in-progress; native Engine3D promotion and executable verificatio
   compiler exits 139 on the new Vulkan extern surface, while rebuilding the
   Rust compiler is blocked by missing vendored `vendor/rspirv/dr/build.rs`.
   Engine3D REQ-012/REQ-013 and native performance NFRs remain open.
+- REQ-008 source completion (2026-07-13): the neutral sfnt owner rejects legacy
+  `bdat`/`bloc` strikes with the existing unsupported-table policy and exposes
+  `validate_glyf_font_instance`, which accepts only `static` or the exact
+  declared default-axis tuple. The selected registry reuses that owner before
+  native loading. Focused checks repeat the pinned Pixelify Sans `wght=400`
+  Pure Simple raster and pin the existing 8×16 VGA `A` glyph checksum without
+  adding a rasterizer or asset. One interpreter attempt for each of
+  `sfnt_spec.spl`, `sfnt_glyf_spec.spl`, and
+  `bitmap_font_gpu_offload_spec.spl` exited 139 with no stdout due to the
+  deployed compiler blocker; no retry or runtime PASS is claimed. Non-default
+  `gvar` interpolation and broader legal compound component modes remain excluded.
+- WebRender-IR/Draw-IR font family bridge (2026-07-13): canonical web style now
+  preserves default, inherited, overridden, and shorthand `font-family` in
+  Draw IR computed style. The Draw IR schema remains unchanged. Engine2D keeps
+  the legacy bitmap route because web layout still uses fixed 5×7 metrics;
+  selecting TTF only at paint would create layout divergence. Focused
+  source/unit contracts were added but not executed due
+  to the deployed compiler exit-139 blocker. The production web pixel painter
+  still bypasses Draw IR, and SimpleOS has no shared immutable-data image
+  manifest or Pure Simple selected-face startup load; neither is claimed done.
+  One interpreter attempt each for `simple_web_renderer_spec.spl`,
+  `draw_ir_adv_spec.spl`, and `font_renderer_spec.spl` exited 139 with no
+  stdout; the no-retry guard was honored and no runtime PASS is inferred.
+  Higher integration review passed after paint-time family selection was removed
+  and REQ-008 was reduced to honest partial status. The touched web renderer's
+  pre-existing raw environment read was also moved to the canonical env facade;
+  `direct-env-runtime-guard --working` then passed.

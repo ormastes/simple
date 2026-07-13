@@ -162,6 +162,13 @@ Host input
 - Font offload uses `engine2d_font_offload_backend_order()` for vector and
   bitmap glyph preparation, with readback/checksum parity against the CPU
   reference path before a backend is treated as valid.
+- Web semantic/layout preserves inherited/cascaded `font-family` in existing
+  Draw IR computed-style metadata. Draw IR owns no font bytes or atlas material.
+  Execution stays on the bitmap default until web layout and Engine2D paint
+  share one resolved provider/metric identity; paint-only TTF selection is an
+  invalid shortcut. Production web pixels and SimpleOS image packaging remain
+  open; SimpleOS needs one hash-pinned immutable-data manifest shared by its
+  image builders.
 - Opt-in `Engine2D.load_font` is separate: CPU `spl_fonts` raster/layout,
   per-engine glyph cache, then one tight payload blended by the drawing backend.
   UTF-8 local paths are supported; the face/layout is a serialized

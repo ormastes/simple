@@ -58,7 +58,7 @@ behavior.
 | REQ-005 | `shared_font_manifest_spec.spl` | pinned catalog revision; unchanged accepted bytes; corpus rejection | 3 |
 | REQ-006 | `shared_font_surfaces_spec.spl` | one owner; identical batch identity; no duplicate material cache | 3 |
 | REQ-007 | `shared_font_shaping_acceptance_spec.spl` | exact-face simple-script oracle; missing/stale rejection; complete Arabic/Devanagari/Urdu shaping | 2/3 |
-| REQ-008 | `shared_font_manifest_spec.spl` | compound/default-glyf corpus reconstruction; unsupported-format/axis rejection and bitmap fixture pending | 1/3 |
+| REQ-008 | `shared_font_manifest_spec.spl` plus focused sfnt/bitmap unit specs | compound/default-glyf corpus reconstruction; unsupported-format/axis rejection; literal default-variable + bitmap fixtures | 2/3 source; literal variable oracle/execution blocked |
 | REQ-009 | `shared_font_surfaces_spec.spl` | key separation; bounded eviction/counters; generation/dirty regions | 3 |
 | REQ-010 | `gpu_font_emission_spec.spl` | five source targets; Vulkan contract; deterministic failures/hashes | 3 |
 | REQ-011 | `shared_font_surfaces_spec.spl` | Engine2D API compatibility; DrawIR/batch evidence; CPU parity | 3 |

@@ -120,6 +120,12 @@ complex shaping, complete REQ-008 format behavior, or GPU execution.
   faces and the exact 76 compound corpus roots/124 direct components. Every
   mapped root must produce a nonempty Pure Simple outline; this adds no native
   production owner and does not promote the matrix.
+- Focused supporting specs now reject color/CFF/SVG/current and legacy bitmap
+  strike tables, accept only static or exact default-axis requests, repeat the
+  pinned Pixelify Sans `wght=400` Pure Simple raster, and pin the built-in 8×16
+  monochrome fallback glyph. The deployed compiler exits 139 before these
+  refreshed specs execute, so this manual does not upgrade REQ-008 to runtime
+  PASS or claim non-default `gvar` interpolation.
 
 ### Global-face wrapper invalidation
 

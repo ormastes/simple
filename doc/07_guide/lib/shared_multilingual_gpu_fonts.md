@@ -78,9 +78,15 @@ accept it. The selected policy permits only unchanged default variable-font
 instances and requires non-default axes plus color/SVG/strike/CFF tables to
 fail closed. Both native loader owners now call the Pure Simple structural
 preflight before native state changes; it validates directory bounds/overlap,
-required/excluded tables, and `fvar` defaults. The separate unrun manifest
-scenario compares every exact table and default-axis record and retains typed
-diagnostics. Loader bool/nil APIs do not surface those reasons.
+required/excluded tables (including legacy `bdat`/`bloc` bitmap strikes), and
+`fvar` defaults. `validate_glyf_font_instance` accepts only `static` or the
+exact declared default-axis tuple; non-default and unknown requests fail closed
+before native loading/cache mutation. Focused source coverage also repeats a
+Pure Simple raster of pinned Pixelify Sans at `wght=400` and pins the built-in
+8×16 monochrome `A` glyph. The real Pixelify witness currently proves repeat
+stability/nonempty metrics but lacks literal dimensions, advance, and checksum,
+so REQ-008 remains partial. The deployed compiler prevents executing these
+refreshed checks; this is not a new runtime PASS claim.
 
 A complete raw audit found 7,594 compound glyphs (16,194 components) in 14
 candidate faces; the exact witness corpus reaches 76 roots/124 direct
@@ -299,9 +305,23 @@ is not native execution evidence. A rejected runtime draft was removed because
 interpreter readback was unsafe, atlas formats were ambiguous, GPU command
 errors were ignored, child cleanup was unproven, and the macOS-only code could
 not be compiled on this host. Web producers lower through web semantic/layout;
-GUI producers lower through canonical widget/scene owners. Both emit Draw IR,
-whose Engine2D executor may lower text to transient vector font batches. Do not
-add a second font draw path or reuse Engine3D HUD/world as one.
+GUI producers lower through canonical widget/scene owners. Both emit Draw IR.
+The web semantic style now preserves inherited/cascaded `font-family` (including
+the `font` shorthand) as a computed-style property without putting atlas/cache
+material in Draw IR. Engine2D deliberately does not activate that family yet:
+web layout still measures with legacy 5×7 metrics, so selecting a TTF only
+during paint would create overflow/overlap. The old bitmap route and production
+web painter remain unchanged. Completion requires web layout and Engine2D paint
+to consume one resolved face/metric identity.
+
+SimpleOS remains an explicit host gap: its image builders have no shared
+immutable-data manifest carrying guest path, length, and SHA-256, and the
+selected native loader needs hosted file/dylib facilities. Do not claim bundled
+font support in a guest image until one canonical asset manifest feeds every
+release/initramfs builder and a Pure Simple byte-backed load plus QEMU
+framebuffer/serial evidence proves the selected family. The existing bitmap
+fallback remains supported meanwhile. Do not add a second font draw path or
+reuse Engine3D HUD/world as one.
 
 ## Evidence rules
 

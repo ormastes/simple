@@ -73,7 +73,8 @@ Simple TUI                    Simple GUI API
                          single/composed batches,
                          window/pane composition,
                          callback id locality,
-                         source/style provenance
+                         source/style provenance,
+                         semantic font-family only
                                   |
                                   v
                            Simple 2D API
@@ -140,6 +141,15 @@ CPU or GPU draw execution
 ```
 
 ## Ownership Rules
+
+Web semantic/layout and GUI scene owners preserve text family/style as Draw IR
+computed-style metadata. Draw IR never owns font bytes, glyphs, atlases, or
+caches. A family becomes executable only after web layout and Engine2D paint
+bind to the same provider/`FontRenderer` metric identity; paint-only selection
+is forbidden because it diverges from line wrapping. Until then the legacy
+bitmap behavior stays active. SimpleOS must obtain the same pinned bytes through
+a canonical immutable image-data manifest rather than a host-only path or an
+app-private font bundle.
 
 Simple owns:
 

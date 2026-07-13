@@ -118,8 +118,9 @@ The renderer follows only declared fallback edges.
 
 This is the target algorithm. Current compatibility material preparation covers
 the atlas steps and both native loader owners now share the neutral default-glyf
-preflight. Complete shaping/cache keys and Pure Simple compound outlines remain
-open.
+preflight. The bounded compound corpus path, exact default-instance request
+guard, and built-in monochrome bitmap fallback are implemented; broader legal
+compound component modes, complete shaping, and complete cache keys remain open.
 
 1. Resolve the requested family/category and the shaped run's language/script
    through the validated sparse matrix.
