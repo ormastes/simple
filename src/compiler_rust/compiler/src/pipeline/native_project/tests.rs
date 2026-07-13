@@ -66,7 +66,10 @@ fn simpleos_freestanding_linker_script_defaults_and_overrides() {
         NativeProjectBuilder::resolve_freestanding_linker_script(Some(Path::new("custom.ld")), simpleos, sysroot),
         Some(PathBuf::from("custom.ld"))
     );
-    assert_eq!(NativeProjectBuilder::resolve_freestanding_linker_script(None, linux, sysroot), None);
+    assert_eq!(
+        NativeProjectBuilder::resolve_freestanding_linker_script(None, linux, sysroot),
+        None
+    );
 }
 
 fn with_core_c_https_openssl_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
@@ -1462,6 +1465,167 @@ fn test_build_use_map_keeps_production_check_modules() {
     let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
 
     assert_eq!(use_map.get("run_check"), Some(&expected));
+}
+
+#[test]
+fn test_package_bare_exports_resolve_exact_cfg_active_sibling_owners() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let app_root = src_root.join("app");
+    let pkg_root = app_root.join("pkg");
+    std::fs::create_dir_all(&pkg_root).unwrap();
+
+    let main_path = app_root.join("main.spl");
+    let init_path = pkg_root.join("__init__.spl");
+    let direct_path = pkg_root.join("direct.spl");
+    let forward_path = pkg_root.join("forward.spl");
+    let real_path = app_root.join("z_real.spl");
+    let decoy_path = app_root.join("a_decoy.spl");
+    let cfg_path = app_root.join("b_cfg_noise.spl");
+    let private_path = pkg_root.join("private.spl");
+
+    std::fs::write(
+        &main_path,
+        "use app.pkg.{direct_api, forwarded_api}\nuse app.pkg.private.{private_anchor}\nuse app.a_decoy.{decoy_anchor}\nuse app.b_cfg_noise.{cfg_anchor}\nfn main() -> i64:\n    return direct_api() + forwarded_api() + private_anchor() + decoy_anchor() + cfg_anchor()\n",
+    )
+    .unwrap();
+    std::fs::write(&init_path, "export direct_api, forwarded_api\n").unwrap();
+    std::fs::write(
+        &direct_path,
+        "fn direct_api() -> i64:\n    return 7\nexport direct_api\n",
+    )
+    .unwrap();
+    std::fs::write(&forward_path, "export use app.z_real.*\n").unwrap();
+    std::fs::write(&real_path, "fn forwarded_api() -> i64:\n    return 11\n").unwrap();
+    std::fs::write(
+        &decoy_path,
+        "fn direct_api() -> i64:\n    return 99\nfn forwarded_api() -> i64:\n    return 99\nfn decoy_anchor() -> i64:\n    return 0\n",
+    )
+    .unwrap();
+    let inactive_arch = if super::effective_target().arch == simple_common::target::TargetArch::X86_64 {
+        "riscv64"
+    } else {
+        "x86_64"
+    };
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "@cfg({inactive_arch})\nfn direct_api() -> i64:\n    return 88\n@cfg({inactive_arch})\nfn forwarded_api() -> i64:\n    return 88\nfn cfg_anchor() -> i64:\n    return 0\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &private_path,
+        "use app.a_decoy.{forwarded_api}\nfn direct_api() -> i64:\n    return 77\nfn private_anchor() -> i64:\n    return 0\n",
+    )
+    .unwrap();
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), temp.path().join("out"))
+        .source_dir(src_root.clone())
+        .entry_file(main_path.clone());
+    let file_sources = builder.discover_reachable_files_with_sources(&main_path).unwrap();
+    let actual: std::collections::BTreeSet<_> = file_sources
+        .iter()
+        .map(|(path, _)| path.strip_prefix(&src_root).unwrap().to_path_buf())
+        .collect();
+    let expected: std::collections::BTreeSet<_> = [
+        "app/main.spl",
+        "app/pkg/__init__.spl",
+        "app/pkg/direct.spl",
+        "app/pkg/forward.spl",
+        "app/pkg/private.spl",
+        "app/z_real.spl",
+        "app/a_decoy.spl",
+        "app/b_cfg_noise.spl",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect();
+    assert_eq!(actual, expected);
+
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&src_root), &src_root);
+    let direct_owner = format!("{}__direct_api", module_prefix_from_path(&direct_path, &src_root));
+    let forwarded_owner = format!("{}__forwarded_api", module_prefix_from_path(&real_path, &src_root));
+    let package_exports = result.re_exports.get("app__pkg").unwrap();
+    assert_eq!(package_exports.get("direct_api"), Some(&direct_owner));
+    assert_eq!(package_exports.get("forwarded_api"), Some(&forwarded_owner));
+    assert_eq!(result.all_mangled.get("direct_api").unwrap().len(), 3);
+    assert_eq!(result.all_mangled.get("forwarded_api").unwrap().len(), 2);
+    assert!(result
+        .re_exports
+        .get(&module_prefix_from_path(&private_path, &src_root))
+        .is_none_or(|exports| !exports.contains_key("forwarded_api")));
+
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&main_path).unwrap())
+        .parse()
+        .unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
+    assert_eq!(use_map.get("direct_api"), Some(&direct_owner));
+    assert_eq!(use_map.get("forwarded_api"), Some(&forwarded_owner));
+
+    let conflict_pkg = app_root.join("conflict_pkg");
+    std::fs::create_dir_all(&conflict_pkg).unwrap();
+    let conflict_paths = [
+        (conflict_pkg.join("__init__.spl"), "export clash\n"),
+        (conflict_pkg.join("a_forward.spl"), "export use app.real_a.{clash}\n"),
+        (conflict_pkg.join("b_forward.spl"), "export use app.z_hop.{clash}\n"),
+        (app_root.join("z_hop.spl"), "export use app.real_b.{clash}\n"),
+        (app_root.join("real_a.spl"), "fn clash() -> i64:\n    return 1\n"),
+        (app_root.join("real_b.spl"), "fn clash() -> i64:\n    return 2\n"),
+        (
+            app_root.join("conflict_consumer.spl"),
+            "use app.conflict_pkg.{clash}\nfn consume() -> i64:\n    return clash()\n",
+        ),
+    ];
+    for (path, source) in &conflict_paths {
+        std::fs::write(path, source).unwrap();
+    }
+    let conflict_sources: Vec<_> = conflict_paths
+        .iter()
+        .map(|(path, _)| (path.clone(), std::fs::read_to_string(path).unwrap()))
+        .collect();
+    let conflict = super::imports::build_import_map(&conflict_sources, std::slice::from_ref(&src_root), &src_root);
+    let real_a = format!(
+        "{}__clash",
+        module_prefix_from_path(&app_root.join("real_a.spl"), &src_root)
+    );
+    let real_b = format!(
+        "{}__clash",
+        module_prefix_from_path(&app_root.join("real_b.spl"), &src_root)
+    );
+    assert_eq!(
+        conflict
+            .re_exports
+            .get("app__conflict_pkg__a_forward")
+            .and_then(|exports| exports.get("clash")),
+        Some(&real_a)
+    );
+    assert_eq!(
+        conflict
+            .re_exports
+            .get("app__conflict_pkg__b_forward")
+            .and_then(|exports| exports.get("clash")),
+        Some(&real_b)
+    );
+    assert!(conflict
+        .re_exports
+        .get("app__conflict_pkg")
+        .is_none_or(|exports| !exports.contains_key("clash")));
+    let consumer_ast = simple_parser::Parser::new(&conflict_sources.last().unwrap().1)
+        .parse()
+        .unwrap();
+    let conflict_use_map =
+        super::imports::build_use_map_from_ast(&consumer_ast, &conflict.all_mangled, &conflict.re_exports);
+    assert!(!conflict_use_map.contains_key("clash"));
+
+    let star_pkg = app_root.join("star_pkg");
+    std::fs::create_dir_all(&star_pkg).unwrap();
+    std::fs::write(star_pkg.join("__init__.spl"), "export *\n").unwrap();
+    let star_main = app_root.join("star_main.spl");
+    std::fs::write(&star_main, "use app.star_pkg.*\nfn main():\n    pass\n").unwrap();
+    let star_error = builder.discover_reachable_files_with_sources(&star_main).unwrap_err();
+    assert!(star_error.contains("bare package `export *` is unsupported"));
 }
 
 #[test]

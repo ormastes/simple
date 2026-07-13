@@ -471,47 +471,171 @@ pub(crate) fn build_import_map(
         }
     }
 
-    // Build re-export index
-    let mut re_exports: std::collections::HashMap<String, std::collections::HashMap<String, String>> =
-        std::collections::HashMap::new();
+    // Build a deterministic re-export index. Package `__init__.spl` facades
+    // use their parent directory as the public module key and select an exact
+    // sibling owner; candidate order is never a resolution rule.
+    #[derive(Default)]
+    struct ExportMetadata {
+        path: PathBuf,
+        root: PathBuf,
+        prefix: String,
+        public_imports: Vec<(Vec<String>, simple_parser::ast::ImportTarget, bool)>,
+        explicit_targets: Vec<simple_parser::ast::ImportTarget>,
+        bare_exports: Vec<String>,
+    }
+
+    let mut metadata = Vec::new();
     let mut seen_canonical_reexport = std::collections::HashSet::new();
     for (path, source) in file_sources {
         let canonical_path = safe_canonicalize(path);
-        if !seen_canonical_reexport.insert(canonical_path) {
+        if !seen_canonical_reexport.insert(canonical_path.clone()) {
             continue;
         }
         let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
         let prefix = module_prefix_from_path(path, &per_file_root);
         let mut parser = simple_parser::Parser::new(source);
-        if let Ok(ast) = parser.parse() {
-            let mut use_items: Vec<(Vec<String>, &simple_parser::ast::ImportTarget)> = Vec::new();
+        if let Ok(mut ast) = parser.parse() {
+            super::discovery::strip_inactive_cfg_arch_fns(&mut ast, super::effective_target().arch);
+            let mut item_metadata = ExportMetadata {
+                path: canonical_path,
+                root: per_file_root,
+                prefix,
+                ..Default::default()
+            };
+            let mut internal_imports = Vec::new();
             for item in &ast.items {
                 match item {
                     simple_parser::ast::Node::UseStmt(u) => {
-                        use_items.push((u.path.segments.clone(), &u.target));
+                        internal_imports.push((u.path.segments.clone(), u.target.clone()));
                     }
                     simple_parser::ast::Node::MultiUse(mu) => {
                         for (path, target) in &mu.imports {
-                            use_items.push((path.segments.clone(), target));
+                            internal_imports.push((path.segments.clone(), target.clone()));
+                        }
+                    }
+                    simple_parser::ast::Node::ExportUseStmt(export) => {
+                        if export.path.segments.is_empty() {
+                            collect_target_names(&export.target, &mut item_metadata.bare_exports);
+                        } else {
+                            item_metadata.public_imports.push((
+                                export.path.segments.clone(),
+                                export.target.clone(),
+                                false,
+                            ));
+                            item_metadata.explicit_targets.push(export.target.clone());
                         }
                     }
                     _ => {}
                 }
             }
-            for (segments, target) in use_items {
+            item_metadata.bare_exports.sort();
+            item_metadata.bare_exports.dedup();
+            for (segments, target) in internal_imports {
+                if item_metadata
+                    .bare_exports
+                    .iter()
+                    .any(|name| import_target_exports_name(&target, name))
+                    || matches!(target, simple_parser::ast::ImportTarget::Glob)
+                        && !item_metadata.bare_exports.is_empty()
+                {
+                    item_metadata.public_imports.push((segments, target, true));
+                }
+            }
+            metadata.push(item_metadata);
+        }
+    }
+    metadata.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let mut owner_sets = std::collections::BTreeMap::new();
+    for _ in 0..=metadata.len() {
+        let mut changed = false;
+        for item in &metadata {
+            for (segments, target, bare_only) in &item.public_imports {
                 let norm_segments: Vec<&str> = segments
                     .iter()
                     .map(|s| if s == "std" { "lib" } else { s.as_str() })
                     .collect();
-                let names = collect_imported_names_flat(target, &norm_segments, &raw_to_mangled, &re_exports);
-                for name in names {
-                    if let Some(resolved) =
-                        resolve_import_name_strict(&name, &norm_segments, &raw_to_mangled, &re_exports)
+                let mut bindings = Vec::new();
+                collect_target_bindings(target, &mut bindings);
+                if matches!(target, simple_parser::ast::ImportTarget::Glob) {
+                    let names: Vec<String> = if *bare_only {
+                        item.bare_exports.clone()
+                    } else {
+                        raw_to_mangled.keys().cloned().collect()
+                    };
+                    bindings.extend(names.into_iter().map(|name| (name.clone(), name)));
+                }
+                for (public_name, source_name) in bindings {
+                    if *bare_only && !item.bare_exports.contains(&public_name) {
+                        continue;
+                    }
+                    let owners =
+                        resolve_import_owner_candidates(&source_name, &norm_segments, &raw_to_mangled, &owner_sets);
+                    let entry = owner_sets
+                        .entry((item.prefix.clone(), public_name))
+                        .or_insert_with(std::collections::BTreeSet::new);
+                    let before = entry.len();
+                    entry.extend(owners);
+                    changed |= entry.len() != before;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut package_owner_sets = std::collections::BTreeMap::new();
+    for item in metadata
+        .iter()
+        .filter(|item| item.path.file_name().is_some_and(|name| name == "__init__.spl"))
+    {
+        let Some(parent) = item.path.parent() else { continue };
+        let package_prefix = module_prefix_from_path(parent, &item.root);
+        for name in &item.bare_exports {
+            let mut explicit = std::collections::BTreeSet::new();
+            let mut implicit = std::collections::BTreeSet::new();
+            for sibling in metadata.iter().filter(|candidate| {
+                candidate.path.parent() == Some(parent)
+                    && candidate.path.file_name().is_some_and(|file| file != "__init__.spl")
+            }) {
+                let expected = sanitize_mangled(format!("{}__{}", sibling.prefix, name));
+                if raw_to_mangled
+                    .get(name)
+                    .is_some_and(|candidates| candidates.iter().any(|candidate| candidate == &expected))
+                {
+                    if sibling.bare_exports.contains(name) {
+                        explicit.insert(expected);
+                    } else {
+                        implicit.insert(expected);
+                    }
+                }
+                if let Some(owners) = owner_sets.get(&(sibling.prefix.clone(), name.clone())) {
+                    if sibling.bare_exports.contains(name)
+                        || sibling
+                            .explicit_targets
+                            .iter()
+                            .any(|target| import_target_exports_name(target, name))
                     {
-                        re_exports.entry(prefix.clone()).or_default().insert(name, resolved);
+                        explicit.extend(owners.iter().cloned());
                     }
                 }
             }
+            package_owner_sets.insert(
+                (package_prefix.clone(), name.clone()),
+                if explicit.is_empty() { implicit } else { explicit },
+            );
+        }
+    }
+
+    let mut re_exports: std::collections::HashMap<String, std::collections::HashMap<String, String>> =
+        std::collections::HashMap::new();
+    for ((prefix, name), owners) in owner_sets.into_iter().chain(package_owner_sets) {
+        if owners.len() == 1 {
+            re_exports
+                .entry(prefix)
+                .or_default()
+                .insert(name, owners.into_iter().next().unwrap());
         }
     }
 
@@ -704,7 +828,7 @@ fn resolve_import_name(
     }
 
     let candidates = all_mangled.get(func_name)?;
-    Some(candidates[0].clone())
+    (candidates.len() == 1).then(|| candidates[0].clone())
 }
 
 fn resolve_import_name_strict(
@@ -713,17 +837,6 @@ fn resolve_import_name_strict(
     all_mangled: &std::collections::HashMap<String, Vec<String>>,
     re_exports: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 ) -> Option<String> {
-    let candidates = all_mangled.get(func_name)?;
-    if candidates.len() == 1 {
-        return Some(candidates[0].clone());
-    }
-
-    for candidate in candidates {
-        if mangled_matches_use_path(candidate, use_segments) {
-            return Some(candidate.clone());
-        }
-    }
-
     let expected_prefix = use_segments.join("__");
     if let Some(module_re_exports) = re_exports.get(&expected_prefix) {
         if let Some(actual_mangled) = module_re_exports.get(func_name) {
@@ -740,33 +853,83 @@ fn resolve_import_name_strict(
         }
     }
 
+    let candidates = all_mangled.get(func_name)?;
+    let matching: Vec<&String> = candidates
+        .iter()
+        .filter(|candidate| mangled_matches_use_path(candidate, use_segments))
+        .collect();
+    if matching.len() == 1 {
+        return Some(matching[0].clone());
+    }
+
     None
 }
 
-fn collect_imported_names_flat(
-    target: &simple_parser::ast::ImportTarget,
-    use_segments: &[&str],
-    all_mangled: &std::collections::HashMap<String, Vec<String>>,
-    re_exports: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
-) -> Vec<String> {
-    let mut names = Vec::new();
+fn collect_target_names(target: &simple_parser::ast::ImportTarget, names: &mut Vec<String>) {
     match target {
         simple_parser::ast::ImportTarget::Single(name) => names.push(name.clone()),
-        simple_parser::ast::ImportTarget::Aliased { name, .. } => names.push(name.clone()),
+        simple_parser::ast::ImportTarget::Aliased { alias, .. } => names.push(alias.clone()),
         simple_parser::ast::ImportTarget::Group(items) => {
             for item in items {
-                names.extend(collect_imported_names_flat(item, use_segments, all_mangled, re_exports));
+                collect_target_names(item, names);
             }
         }
-        simple_parser::ast::ImportTarget::Glob => {
-            for raw_name in all_mangled.keys() {
-                if resolve_import_name_strict(raw_name, use_segments, all_mangled, re_exports).is_some() {
-                    names.push(raw_name.clone());
-                }
+        simple_parser::ast::ImportTarget::Glob => {}
+    }
+}
+
+fn collect_target_bindings(target: &simple_parser::ast::ImportTarget, bindings: &mut Vec<(String, String)>) {
+    match target {
+        simple_parser::ast::ImportTarget::Single(name) => bindings.push((name.clone(), name.clone())),
+        simple_parser::ast::ImportTarget::Aliased { name, alias } => {
+            bindings.push((alias.clone(), name.clone()));
+        }
+        simple_parser::ast::ImportTarget::Group(items) => {
+            for item in items {
+                collect_target_bindings(item, bindings);
             }
+        }
+        simple_parser::ast::ImportTarget::Glob => {}
+    }
+}
+
+fn import_target_exports_name(target: &simple_parser::ast::ImportTarget, wanted: &str) -> bool {
+    match target {
+        simple_parser::ast::ImportTarget::Single(name) => name == wanted,
+        simple_parser::ast::ImportTarget::Aliased { alias, .. } => alias == wanted,
+        simple_parser::ast::ImportTarget::Group(items) => {
+            items.iter().any(|item| import_target_exports_name(item, wanted))
+        }
+        simple_parser::ast::ImportTarget::Glob => true,
+    }
+}
+
+fn resolve_import_owner_candidates(
+    func_name: &str,
+    use_segments: &[&str],
+    all_mangled: &std::collections::HashMap<String, Vec<String>>,
+    owner_sets: &std::collections::BTreeMap<(String, String), std::collections::BTreeSet<String>>,
+) -> std::collections::BTreeSet<String> {
+    let mut owners = std::collections::BTreeSet::new();
+    let expected_prefix = use_segments.join("__");
+    if let Some(forwarded) = owner_sets.get(&(expected_prefix, func_name.to_string())) {
+        owners.extend(forwarded.iter().cloned());
+    }
+    if use_segments.len() > 1 {
+        let stripped_prefix = use_segments[1..].join("__");
+        if let Some(forwarded) = owner_sets.get(&(stripped_prefix, func_name.to_string())) {
+            owners.extend(forwarded.iter().cloned());
         }
     }
-    names
+    if let Some(candidates) = all_mangled.get(func_name) {
+        owners.extend(
+            candidates
+                .iter()
+                .filter(|candidate| mangled_matches_use_path(candidate, use_segments))
+                .cloned(),
+        );
+    }
+    owners
 }
 
 fn mangled_matches_use_path(mangled: &str, use_segments: &[&str]) -> bool {

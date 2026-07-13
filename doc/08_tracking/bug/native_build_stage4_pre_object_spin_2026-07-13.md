@@ -95,6 +95,26 @@ import-map regression passes. This proves the owner fix for `run_check` and
 `run_arch_check`; the strict full-CLI link has not been rerun, so the remaining
 symbol count is not inferred or promoted to PASS.
 
+The next shared closure defect was bare package facades such as
+`lib.common.json.__init__`: native entry-closure discovery did not select the
+cfg-active sibling that owns a bare exported name, and the re-export index used
+the `__init__` file prefix rather than the package prefix. Discovery now selects
+sorted, cfg-stripped AST providers with explicit export ownership preferred over
+a unique implicit sibling definition, rejects ambiguous ownership, and queues
+only the selected providers. Import indexing resolves direct and forwarded
+owners to the parent package prefix through a deterministic fixed point; a
+qualified import no longer falls back to the first global same-name candidate.
+One adversarial regression executes and passes with a same-name reachable decoy,
+wrong-architecture definitions, an unrelated sibling, and a two-hop forwarded
+owner. Higher review rejected an intermediate first-candidate/stale-map form;
+the accepted owner-set form publishes only final singleton mappings. Named
+facade exports through sibling glob forwarders are queued without claiming
+every name before indexing; a truly bare package `export *` now fails explicitly
+instead of producing an incomplete closure. Final higher review passes. Both
+direct-runtime guards pass and no direct `rt_*` use was added. The
+strict full-CLI link remains deliberately unrun under the three-cycle cap, so
+this is focused closure evidence rather than a compiler or QEMU PASS.
+
 Reuse the preserved 1,043-object cache only after one of those owners changes,
 then run one bounded strict-link verification. Do not add stubs, relabel a
 runtime bundle, hardcode symbols, or substitute the Rust seed as production

@@ -1,7 +1,7 @@
 //! File discovery: full-scan and entry-closure based .spl file discovery,
 //! reachable module path extraction, file deduplication.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use simple_common::target::TargetArch;
@@ -66,6 +66,105 @@ pub(crate) fn file_arch_cfg_gate(source: &str, target_arch: TargetArch) -> Optio
         });
     }
     None
+}
+
+fn import_target_names(target: &simple_parser::ast::ImportTarget, names: &mut Vec<String>) {
+    use simple_parser::ast::ImportTarget;
+    match target {
+        ImportTarget::Single(name) => names.push(name.clone()),
+        ImportTarget::Aliased { alias, .. } => names.push(alias.clone()),
+        ImportTarget::Group(items) => {
+            for item in items {
+                import_target_names(item, names);
+            }
+        }
+        ImportTarget::Glob => {}
+    }
+}
+
+fn import_target_has_glob(target: &simple_parser::ast::ImportTarget) -> bool {
+    match target {
+        simple_parser::ast::ImportTarget::Group(items) => items.iter().any(import_target_has_glob),
+        simple_parser::ast::ImportTarget::Glob => true,
+        _ => false,
+    }
+}
+
+fn bare_export_names(items: &[simple_parser::ast::Node]) -> Vec<String> {
+    let mut names = Vec::new();
+    for item in items {
+        if let simple_parser::ast::Node::ExportUseStmt(export) = item {
+            if export.path.segments.is_empty() {
+                import_target_names(&export.target, &mut names);
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn provided_export_names(items: &[simple_parser::ast::Node], requested: &[String]) -> (Vec<String>, Vec<String>, bool) {
+    use simple_parser::ast::{Node, Pattern};
+
+    let mut defined = Vec::new();
+    let mut imported = Vec::new();
+    let mut forwarded = Vec::new();
+    let mut imports_all = false;
+    let mut forwards_glob = false;
+    let bare_exports = bare_export_names(items);
+    for item in items {
+        match item {
+            Node::Function(def) if !def.body.statements.is_empty() => defined.push(def.name.clone()),
+            Node::Extern(def) => defined.push(def.name.clone()),
+            Node::Class(def) => defined.push(def.name.clone()),
+            Node::Struct(def) => defined.push(def.name.clone()),
+            Node::Enum(def) => defined.push(def.name.clone()),
+            Node::Trait(def) => defined.push(def.name.clone()),
+            Node::Let(stmt) => match &stmt.pattern {
+                Pattern::Identifier(name) | Pattern::MutIdentifier(name) => defined.push(name.clone()),
+                _ => {}
+            },
+            Node::Const(stmt) => defined.push(stmt.name.clone()),
+            Node::Static(stmt) => defined.push(stmt.name.clone()),
+            Node::UseStmt(stmt) => {
+                imports_all |= import_target_has_glob(&stmt.target);
+                import_target_names(&stmt.target, &mut imported);
+            }
+            Node::MultiUse(stmt) => {
+                for (_, target) in &stmt.imports {
+                    imports_all |= import_target_has_glob(target);
+                    import_target_names(target, &mut imported);
+                }
+            }
+            Node::ExportUseStmt(stmt) if !stmt.path.segments.is_empty() => {
+                imports_all |= import_target_has_glob(&stmt.target);
+                forwards_glob |= import_target_has_glob(&stmt.target);
+                import_target_names(&stmt.target, &mut imported);
+                import_target_names(&stmt.target, &mut forwarded);
+            }
+            _ => {}
+        }
+    }
+
+    let mut explicit: Vec<String> = requested
+        .iter()
+        .filter(|name| {
+            forwarded.contains(name)
+                || (bare_exports.contains(name) && (defined.contains(name) || imports_all || imported.contains(name)))
+        })
+        .cloned()
+        .collect();
+    explicit.sort();
+    explicit.dedup();
+    let mut implicit: Vec<String> = requested
+        .iter()
+        .filter(|name| defined.contains(name))
+        .cloned()
+        .collect();
+    implicit.sort();
+    implicit.dedup();
+    (explicit, implicit, forwards_glob)
 }
 
 impl NativeProjectBuilder {
@@ -210,16 +309,116 @@ impl NativeProjectBuilder {
             }
 
             let mut parser = simple_parser::Parser::new(&source);
-            let module = parser.parse().map_err(|e| {
+            let mut module = parser.parse().map_err(|e| {
                 let location = e
                     .span()
                     .map(|span| format!(" at {}:{}", span.line, span.column))
                     .unwrap_or_default();
-                format!("failed to parse {}{} during discovery: {}", canonical.display(), location, e)
+                format!(
+                    "failed to parse {}{} during discovery: {}",
+                    canonical.display(),
+                    location,
+                    e
+                )
             })?;
+            let target_arch = super::effective_target().arch;
+            strip_inactive_cfg_arch_fns(&mut module, target_arch);
+            let mut found_deps: HashSet<PathBuf> = HashSet::new();
+
+            // A package facade may export names implemented by sibling files.
+            // Select those providers from cfg-stripped ASTs, never from text or
+            // directory order, and reject ambiguous package ownership.
+            if canonical.file_name().is_some_and(|name| name == "__init__.spl") {
+                if module.items.iter().any(|item| {
+                    matches!(item, simple_parser::ast::Node::ExportUseStmt(export)
+                        if export.path.segments.is_empty() && import_target_has_glob(&export.target))
+                }) {
+                    return Err(format!(
+                        "bare package `export *` is unsupported during native entry-closure discovery: {}",
+                        canonical.display()
+                    ));
+                }
+                let requested = bare_export_names(&module.items);
+                if !requested.is_empty() {
+                    let parent = canonical
+                        .parent()
+                        .ok_or_else(|| format!("package init has no parent: {}", canonical.display()))?;
+                    let mut siblings: Vec<PathBuf> = std::fs::read_dir(parent)
+                        .map_err(|e| format!("failed to read package {}: {}", parent.display(), e))?
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path())
+                        .filter(|path| {
+                            path.extension().is_some_and(|ext| ext == "spl")
+                                && path
+                                    .file_name()
+                                    .is_some_and(|name| name != "__init__.spl" && name != "mod_stub.spl")
+                        })
+                        .map(|path| safe_canonicalize(&path))
+                        .collect();
+                    siblings.sort();
+                    siblings.dedup();
+
+                    let mut explicit_providers: BTreeMap<String, Vec<PathBuf>> =
+                        requested.iter().cloned().map(|name| (name, Vec::new())).collect();
+                    let mut implicit_providers = explicit_providers.clone();
+                    let mut glob_forwarders = Vec::new();
+                    for sibling in siblings {
+                        let mut sibling_source = match std::fs::read_to_string(&sibling) {
+                            Ok(source) => source,
+                            Err(_) => continue,
+                        };
+                        if sibling_source.contains('\r') {
+                            sibling_source = sibling_source.replace('\r', "");
+                        }
+                        if file_arch_cfg_gate(&sibling_source, target_arch) == Some(false) {
+                            continue;
+                        }
+                        let mut sibling_parser = simple_parser::Parser::new(&sibling_source);
+                        let mut sibling_module = match sibling_parser.parse() {
+                            Ok(module) => module,
+                            Err(_) => continue,
+                        };
+                        strip_inactive_cfg_arch_fns(&mut sibling_module, target_arch);
+                        let (explicit, implicit, forwards_glob) =
+                            provided_export_names(&sibling_module.items, &requested);
+                        if forwards_glob {
+                            glob_forwarders.push(sibling.clone());
+                        }
+                        for name in explicit {
+                            explicit_providers.entry(name).or_default().push(sibling.clone());
+                        }
+                        for name in implicit {
+                            implicit_providers.entry(name).or_default().push(sibling.clone());
+                        }
+                    }
+                    found_deps.extend(glob_forwarders);
+                    for name in requested {
+                        let explicit = explicit_providers.remove(&name).unwrap_or_default();
+                        let implicit = implicit_providers.remove(&name).unwrap_or_default();
+                        let owners = if explicit.is_empty() { implicit } else { explicit };
+                        match owners.as_slice() {
+                            [owner] => {
+                                found_deps.insert(owner.clone());
+                            }
+                            [] => {}
+                            _ => {
+                                return Err(format!(
+                                    "ambiguous package export `{}` in {}: {}",
+                                    name,
+                                    canonical.display(),
+                                    owners
+                                        .iter()
+                                        .map(|path| path.display().to_string())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
 
             // Try each resolver -- the first hit wins for each dependency.
-            let mut found_deps: HashSet<PathBuf> = HashSet::new();
             for resolver in &mut resolvers {
                 for dep in extract_reachable_module_paths(&module, &canonical, resolver) {
                     let dep_canonical = safe_canonicalize(&dep);
@@ -328,6 +527,8 @@ impl NativeProjectBuilder {
                 }
             }
 
+            let mut found_deps: Vec<_> = found_deps.into_iter().collect();
+            found_deps.sort();
             for dep in found_deps {
                 if queued.insert(dep.clone()) {
                     queue.push_back(dep);
