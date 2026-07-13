@@ -42,8 +42,7 @@ use std.spec.*
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-
-extern fn rt_vulkan_device_count() -> i64
+use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_device_count}
 
 # Count pixels that differ between two equal-length framebuffers.
 fn pixel_mismatches(a: [u32], b: [u32]) -> i64:
@@ -104,7 +103,7 @@ describe "Engine2D Vulkan backend compute matches the reference":
 
         step("If real Vulkan is unavailable, assert the device count is honestly zero")
         if not available:
-            expect(rt_vulkan_device_count()).to_equal(0)
+            expect(vulkan_sffi_device_count()).to_equal(0)
             return
 
         step("Dispatch a real GPU clear and a filled rect, then read the framebuffer back")
@@ -142,7 +141,7 @@ describe "Engine2D Vulkan backend compute matches the reference":
         step("Create the Vulkan backend; if unavailable, assert zero devices honestly")
         var vk = VulkanBackend.create()
         if not vk.init(w, h):
-            expect(rt_vulkan_device_count()).to_equal(0)
+            expect(vulkan_sffi_device_count()).to_equal(0)
             return
 
         step("Create the SoftwareBackend reference at the same size")
@@ -179,7 +178,7 @@ describe "Engine2D Vulkan backend compute matches the reference":
         step("Create the Vulkan backend; if unavailable, assert zero devices honestly")
         var vk = VulkanBackend.create()
         if not vk.init(w, h):
-            expect(rt_vulkan_device_count()).to_equal(0)
+            expect(vulkan_sffi_device_count()).to_equal(0)
             return
 
         step("Blit a 2x2 image and verify device readback matches the source")
@@ -204,7 +203,7 @@ describe "Engine2D Vulkan backend compute matches the reference":
         step("Create the Vulkan backend; if unavailable, assert zero devices honestly")
         var vk = VulkanBackend.create()
         if not vk.init(w, h):
-            expect(rt_vulkan_device_count()).to_equal(0)
+            expect(vulkan_sffi_device_count()).to_equal(0)
             return
 
         step("Render the same partially clipped image through Vulkan and SoftwareBackend")
@@ -252,6 +251,59 @@ describe "Engine2D Vulkan backend compute matches the reference":
         expect(masked[2 * w + 0]).to_equal(src[1])
         expect(masked[2 * w + 1]).to_equal(bg)
 
+    it "Vulkan alpha image compositing stays device-backed and matches SoftwareBackend":
+        val w: i32 = 6
+        val h: i32 = 5
+        val bg: u32 = 0xFF102030u32
+        val src = [
+            0x004080C0u32, 0x804080C0u32, 0xFF112233u32,
+            0x4000FF00u32, 0xC0FF0000u32, 0x200000FFu32
+        ]
+
+        step("Create the Vulkan backend; if unavailable, assert zero devices honestly")
+        var vk = VulkanBackend.create()
+        if not vk.init(w, h):
+            expect(vulkan_sffi_device_count()).to_equal(0)
+            return
+
+        step("Render one clipped alpha IMAGE through Vulkan src-over")
+        var sw = SoftwareBackend.create()
+        sw.init(w, h)
+        vk.clear(bg)
+        sw.clear(bg)
+        vk.set_clip(1, 1, 3, 3)
+        sw.set_clip(1, 1, 3, 3)
+        vk.draw_image_blend(-1, 1, 3, 2, src)
+        sw.draw_image_blend(-1, 1, 3, 2, src)
+
+        step("Every pixel matches the software oracle without CPU fallback")
+        val readback = vk.read_pixels_with_source()
+        expect(pixel_mismatches(readback.pixels, sw.read_pixels())).to_equal(0)
+        expect(readback.source).to_equal("device_readback")
+        expect(readback.backend_handle).to_be_greater_than(0)
+        expect(vk.cpu_fallback_used).to_be(false)
+        expect(vk.completion_unknown).to_be(false)
+
+        step("Opacity 500 uses the same checked device path and integer alpha scaling")
+        val half_alpha_src = [
+            0x004080C0u32, 0x404080C0u32, 0x7F112233u32,
+            0x2000FF00u32, 0x60FF0000u32, 0x100000FFu32
+        ]
+        vk.clear_clip()
+        sw.clear_clip()
+        vk.clear(bg)
+        sw.clear(bg)
+        vk.set_clip(1, 1, 3, 3)
+        sw.set_clip(1, 1, 3, 3)
+        val opacity_status = vk._draw_image_blend_native(-1, 1, 3, 2, src, 500)
+        sw.draw_image_blend(-1, 1, 3, 2, half_alpha_src)
+        val opacity_readback = vk.read_pixels_with_source()
+        expect(opacity_status).to_be_greater_than(0)
+        expect(pixel_mismatches(opacity_readback.pixels, sw.read_pixels())).to_equal(0)
+        expect(opacity_readback.source).to_equal("device_readback")
+        expect(opacity_readback.backend_handle).to_be_greater_than(0)
+        expect(vk._draw_image_blend_native(0, 0, 3, 2, src, 0)).to_equal(0)
+
     it "real GPU vertical gradient matches the endpoint-exact first-principles oracle":
         # Reconciliation guard (bug vulkan_raster_kernels_noop_and_divergent):
         # the gradient SPIR-V blob originally divided its integer lerp by the rect
@@ -266,7 +318,7 @@ describe "Engine2D Vulkan backend compute matches the reference":
         step("Create the Vulkan backend; if unavailable, assert zero devices honestly")
         var vk = VulkanBackend.create()
         if not vk.init(w, h):
-            expect(rt_vulkan_device_count()).to_equal(0)
+            expect(vulkan_sffi_device_count()).to_equal(0)
             return
 
         step("Dispatch the real GPU gradient and read the framebuffer back")

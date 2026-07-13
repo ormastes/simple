@@ -72,18 +72,19 @@ bytes conservatively while keeping receipt provenance ineligible; no CPU replay
 is permitted. The backend
 maps these through `_dispatch_framebuffer_checked`: success marks the device
 buffer dirty, known failure makes device provenance ineligible, and unknown
-completion poisons further mutation and readback. Exact IMAGE keeps its
-existing checked helper because that helper additionally owns the source
-buffer lifetime.
+completion poisons further mutation and readback. IMAGE copy and straight-ARGB
+src-over share `vulkan_dispatch_image_composite_checked`, which additionally
+owns the source buffer lifetime through known fence completion.
 
 The canonical production WM currently emits solid RECT, resolved-font TEXT,
 and exact-size IMAGE commands. Its visible shadow is a displaced solid RECT,
 not a Draw IR shadow effect; gradient, border, radius, and transform kernels
 are therefore outside this raw CLEAR/RECT hardening slice. Full-target
-desktop/chrome/taskbar batches can eventually render directly. Smaller window batches and transparent content require
-the existing clip and embedded-surface opacity semantics; they must remain
-ineligible for a device receipt until device-backed src-over composition is
-implemented. Nested GROUP batches remain rejected.
+desktop/chrome/taskbar batches can eventually render directly. The Vulkan image
+pipeline now supports checked clipped src-over, including transparent pixels.
+Smaller window batches still require a device-rendered offscreen surface before
+group opacity can be admitted; the current software offscreen path remains
+ineligible for a device receipt. Nested GROUP batches remain rejected.
 
 Vulkan ProcessingIR hashes the runtime-selected driver identity, which includes
 device name, vendor/device IDs, driver version, and API version. Storage-buffer handles remain per-request resource handles and
@@ -124,11 +125,12 @@ result type, session API, renderer, or Draw IR ownership path.
 The canonical Draw IR SDN skin preserves the complete typed command metadata,
 so styled RECT/TEXT and IMAGE semantics can cross the wire without a producer-
 specific parallel codec; binary image pixels remain separate bounded resources.
-The Vulkan owner admits only exact-size, opaque, wholly bounded IMAGE resources
-through its existing two-buffer compute blit. Scaled, transparent, masked, or
-partially clipped images retain CPU semantics and poison device provenance for
-that request. Completion-unknown submissions never replay on the CPU or release
-potentially in-flight dependencies.
+The Vulkan owner uses one two-buffer compute pipeline: mode 0 copies exact-size,
+opaque, wholly bounded IMAGE resources; mode 1 performs clipped straight-ARGB
+src-over for transparent or partially clipped images. Masked or scaled images
+retain CPU semantics and poison device provenance for that request.
+Completion-unknown submissions never replay on the CPU or release potentially
+in-flight dependencies.
 The core executor imports `draw_ir_adv.spl`; host runtime-queue integration is
 kept in the sibling `draw_ir_runtime_adv.spl` so the baremetal closure does not
 acquire direct host-runtime APIs. This source path is not compile-verified while

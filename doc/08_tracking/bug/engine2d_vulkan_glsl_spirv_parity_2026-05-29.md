@@ -61,7 +61,7 @@ real compiled SPIR-V 1.3 modules (not stubs):
 - `spirv_rounded_rect` 3680B — integer SDF corner check, LocalSize 16×16
 - `spirv_triangle_filled` 3212B — barycentric edge function, LocalSize 16×16
 - `spirv_gradient_rect` 3296B — per-channel RGBA lerp, LocalSize 16×16
-- `spirv_blit` 1804B — src→fb copy (binding 0=fb, 1=src), LocalSize 16×16
+- `spirv_blit` 3688B — checked copy or clipped straight-ARGB src-over (binding 0=fb, 1=src), LocalSize 16×16
 
 All blobs assembled with `spirv-as --target-env vulkan1.1` (SPIRV-Tools v2025.1)
 and validated with `spirv-val --target-env vulkan1.1`. Round-trip verification
@@ -95,4 +95,3 @@ timeout 180s src/compiler_rust/target/debug/simple test test/02_integration/rend
 
 Prior result: `success: true`, `total_passed: 18`, `total_failed: 0`,
 `duration_ms: 9772`.
-

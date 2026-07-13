@@ -10,6 +10,7 @@
 - Setup/checkers: `simpleos_host_gpu_prepare_row`, `simpleos_host_gpu_validate_receipt`, `simpleos_host_gpu_compare_oracles`
 - Placeholder: `fail("SimpleOS QEMU host-GPU protocol not implemented")`
 - Checked dispatch: `vulkan_dispatch_framebuffer_compute_checked`; backend mapper: `_dispatch_framebuffer_checked`
+- Checked IMAGE dispatch: `vulkan_dispatch_image_composite_checked`; manual step: `Render one clipped alpha IMAGE through Vulkan src-over`
 - Checked-raw manual steps: `Dispatch the raw CLEAR and solid RECT fixture through checked Vulkan commands`; `Reject unchecked or fallback raw rendering before device-backed receipt`
 - Checked-raw checkers: `submit_checked_clear_rect`; `expect_device_backed_clear_rect_readback`
 
@@ -39,4 +40,5 @@ fixture bypasses, synthetic handles, or passing placeholders.
 - Final reviewer: primary `/root`; Metal/DirectX/CUDA done marks remain rejected.
 - Checked raw framebuffer dispatch: traced by Spark and accepted by the
   independent normal/highest-capability reviewer; production WM admission
-  remains open for embedded src-over/opacity and p95 evidence.
+  remains open for device-rendered offscreen opacity and p95 evidence. The
+  reusable checked IMAGE src-over primitive is implemented.

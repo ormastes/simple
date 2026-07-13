@@ -105,14 +105,24 @@ CIRCLE, filled TRIANGLE, and vertical GRADIENT route through it. Emulated
 line/circle/rounded shapes inherit the checked RECT-filled path. No new runtime
 alias, dispatcher class, or backend API is introduced.
 
+`vulkan_dispatch_image_composite_checked(...) -> i64` retains the same fenced
+source-buffer lifecycle for both modes of the existing blit pipeline. Mode 0 is
+exact copy. Mode 1 applies framebuffer bounds, the active half-open clip, and
+integer straight-ARGB src-over with `opacity_milli`. A real Vulkan readback must
+match `SoftwareBackend` exactly and report `device_readback` with neither CPU
+fallback nor unknown completion. Status `2` distinguishes a completed mutation
+with ineligible cleanup evidence from status `0` (no submission), preventing a
+non-idempotent src-over CPU replay.
+
 This slice hardens the existing raw host-daemon CLEAR/RECT fixture only. The
 production WM minimum remains solid RECT plus canonical `draw_text` using
 the Draw IR `font-identity`, exact-size IMAGE, clip, and embedded src-over/
 opacity. Font selection continues through `FontRenderer` and transient
 `FontRenderBatch`; font bytes and atlas/cache state do not enter Draw IR. The
 host rejects any command that falls back to CPU or lacks checked completion
-before emitting a device receipt. It does not admit the production WM until
-device-backed embedded src-over/opacity and representative p95 evidence exist.
+before emitting a device receipt. Checked image src-over is now available, but
+the production WM remains excluded until its offscreen surface is device-rendered
+before group opacity and representative p95 evidence are proven.
 
 ## Observability and NFRs
 
