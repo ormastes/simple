@@ -1,0 +1,42 @@
+"""pseudofs_mount — registers the /dev and /proc pseudo-filesystems with the
+VFS manager, using the SAME `VfsManager.mount` call FAT32/DBFS/win_vfs use.
+
+Mirrors `win_vfs_mount.spl`: production boot wires `VfsManager.mount` against
+the trait-adapter instances so pseudo-filesystems compose exactly like any
+block-backed filesystem.
+
+Plan: host_os_completeness H4.
+"""
+
+use os.services.vfs.vfs.{VfsManager}
+use os.services.devfs_filesystem.{DevFs}
+use os.services.procfs_filesystem.{ProcFs}
+
+class PseudoMountStatus:
+    """Sized result: `value` is the mount path on success."""
+    ok: bool
+    value: text
+    error: text
+
+fn register_devfs(mgr: VfsManager) -> PseudoMountStatus:
+    """Mount a fresh DevFs adapter at /dev (read-write; writes discard)."""
+    val fs = DevFs.new()
+    val result = mgr.mount("/dev", "devfs", "", false, fs)
+    if result.is_err():
+        return PseudoMountStatus(ok: false, value: "", error: result.unwrap_err())
+    PseudoMountStatus(ok: true, value: "/dev", error: "")
+
+fn register_procfs(mgr: VfsManager) -> PseudoMountStatus:
+    """Mount a fresh ProcFs adapter at /proc (read-only)."""
+    val fs = ProcFs.new()
+    val result = mgr.mount("/proc", "procfs", "", true, fs)
+    if result.is_err():
+        return PseudoMountStatus(ok: false, value: "", error: result.unwrap_err())
+    PseudoMountStatus(ok: true, value: "/proc", error: "")
+
+fn register_pseudo_filesystems(mgr: VfsManager) -> PseudoMountStatus:
+    """Mount both /dev and /proc; returns the first failure, else /proc status."""
+    val dev = register_devfs(mgr)
+    if not dev.ok:
+        return dev
+    register_procfs(mgr)
