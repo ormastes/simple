@@ -29,11 +29,28 @@ the data loop to the `.push` intrinsic fixed it — byte-identity confirmed. See
 `x64_freestanding_push_byte_reassign_byte_packed.md` and the `_copy_bytes_stable`
 note in `src/os/apps/sshd/ssh_session_helpers.spl`.
 
-## Scope / open thread
+## `do_version_exchange` note — ALSO verified false (both halves)
 
-- No claim is made about the PRE-EXISTING `do_version_exchange` note (a different
-  shape: `rt_bytes_slice` + `- 2` arithmetic, not `[u8].len()`); it was not
-  tested here.
+The pre-existing note in `do_version_exchange` made two claims: (a)
+`our_version.len().to_i64()` chained mis-lowers, and (b) storing an
+`rt_bytes_slice` extern-`[u8]` return directly into a struct field drops the
+BYTE_PACKED representation (hence `_copy_bytes_stable`). A faithful freestanding
+probe (`our_version` is `[u8]` — `ssh_build_version_string() -> [u8]` — and
+`rt_bytes_slice(arr: [u8], start, length) -> [u8]`) showed BOTH are false:
+- chained `[u8].len().to_i64() - 2` == the bound form == 19;
+- `rt_bytes_slice(arr, 0, 19)` used DIRECTLY reads back `len=19`, `[0]=83`;
+- stored DIRECTLY into a struct field (no `_copy_bytes_stable`) also reads back
+  `len=19`, `[0]=83`.
+
+The `ov_len` bind and `_copy_bytes_stable` wrapper in `do_version_exchange` are
+therefore harmless defensive copies, not workarounds for a real bug. CAUTION
+that produced a false positive mid-investigation: declaring the extern with the
+WRONG signature (`rt_bytes_slice(s: text, ..)` instead of `(arr: [u8], ..)`) and
+passing a `text` returned garbage len+bytes — a probe artifact, not a codegen
+bug. Always match the real extern signature.
+
+## Open thread
+
 - One thing remains unexplained (not chased, superseded): the very first getfile
   boot produced an EMPTY object (0 bytes) rather than 712-of-garbage; the likely
   cause is a transient/reconnect, not a chained cast. The endpoint is byte-exact.

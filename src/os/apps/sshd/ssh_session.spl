@@ -1146,12 +1146,15 @@ impl SshSession:
         # Send our version string
         val our_version = ssh_build_version_string()
         serial_println("[sshd-session] version bytes len={our_version.len()}")
-        # NOTE: `our_version.len().to_i64()` (chained method call) mis-lowers on
-        # x64 freestanding native-build and yields garbage (see bug doc); bind the
-        # length to an intermediate var first. Also, storing an extern `[u8]`
-        # return (rt_bytes_slice) directly into the struct field drops the
-        # BYTE_PACKED representation — pass it straight through _copy_bytes_stable
-        # (the proven-safe idiom) so the field holds a Simple-built packed copy.
+        # NOTE: the ov_len bind and the _copy_bytes_stable wrapper below were once
+        # believed necessary — a suspicion that `our_version.len().to_i64()`
+        # mis-lowers and that an rt_bytes_slice extern-`[u8]` return stored into a
+        # field drops the BYTE_PACKED representation. Both were VERIFIED FALSE on
+        # x64 freestanding by a faithful `[u8]` probe (chained cast == bound; a
+        # direct field-store of rt_bytes_slice(arr,..) reads back correct len +
+        # bytes). Kept only as harmless defensive copies — NOT working around a
+        # real codegen bug. See the retracted
+        # doc/08_tracking/bug/x64_freestanding_chained_len_cast_miscompile.md.
         val ov_len = our_version.len()
         val sv_len_i: i64 = ov_len.to_i64() - 2
         self.server_version_bytes = _copy_bytes_stable(rt_bytes_slice(our_version, 0, sv_len_i))
