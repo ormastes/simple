@@ -167,6 +167,31 @@ fn ones_at_7() -> i64:
 }
 
 #[test]
+fn test_jit_module_init_boolean_array_preserves_false_and_true() {
+    let source = r#"
+var flags: [bool] = [false, true]
+var disabled: bool = false
+
+fn flags_len() -> i64:
+    flags.len()
+
+fn flags_score() -> i64:
+    if disabled:
+        return 100
+    if flags[0]:
+        return 10
+    if flags[1]:
+        return 1
+    0
+"#;
+    let jit = jit_compile(source).unwrap();
+    let len = unsafe { jit.call_i64_void("flags_len").unwrap() };
+    assert_eq!(len, 2);
+    let score = unsafe { jit.call_i64_void("flags_score").unwrap() };
+    assert_eq!(score, 1);
+}
+
+#[test]
 fn test_jit_i32_return_controls_loop_condition() {
     let source = r#"
 fn as_i32(v: i64) -> i32:

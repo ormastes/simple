@@ -1233,8 +1233,8 @@ impl<M: Module> CodegenBackend<M> {
                     // A typed BOOL global is loaded as a raw i8 (see GlobalLoad in
                     // codegen/instr/mod.rs + types_util::type_id_to_cranelift), but the
                     // module_pass capture stores a *tag-boxed* bool constant
-                    // (TAG_SPECIAL 0b011 | payload<<3): false=0b011=3, true=0b1011=11.
-                    // Writing that tagged byte into .data makes `false` read back as 3
+                    // (TAG_SPECIAL 0b011 | payload<<3): false=0b10011=19, true=0b1011=11.
+                    // Writing that tagged byte into .data makes `false` read back as 19
                     // (nonzero => truthy). Untag typed bools to raw 0/1 here so the i8
                     // load matches native GlobalStore semantics (icmp results are 0/1).
                     // ANY-typed bool globals keep the tagged encoding (loaded as i64
@@ -1850,6 +1850,16 @@ impl<M: Module> CodegenBackend<M> {
         } else {
             None
         };
+        let bool_value_id = if init_arrays.values().any(|init| init.element_type == TypeId::BOOL) {
+            Some(
+                *self
+                    .runtime_funcs
+                    .get("rt_value_bool")
+                    .ok_or_else(|| BackendError::ModuleError("rt_value_bool not declared".into()))?,
+            )
+        } else {
+            None
+        };
         let alloc_id = if init_functions.is_empty() && init_structs.is_empty() {
             None
         } else {
@@ -1998,6 +2008,19 @@ impl<M: Module> CodegenBackend<M> {
                         let byte = builder.ins().iconst(types::I64, (*value & 0xff) as i64);
                         builder.ins().call(push_ref, &[array, byte]);
                     }
+                }
+                array
+            } else if init.element_type == TypeId::BOOL {
+                let new_ref = self.module.declare_func_in_func(array_new_id.unwrap(), builder.func);
+                let call_inst = builder.ins().call(new_ref, &[capacity]);
+                let array = builder.inst_results(call_inst)[0];
+                let push_ref = self.module.declare_func_in_func(array_push_id.unwrap(), builder.func);
+                let bool_ref = self.module.declare_func_in_func(bool_value_id.unwrap(), builder.func);
+                for value in &init.values {
+                    let raw = builder.ins().iconst(types::I64, i64::from(*value != 0));
+                    let call_inst = builder.ins().call(bool_ref, &[raw]);
+                    let boxed = builder.inst_results(call_inst)[0];
+                    builder.ins().call(push_ref, &[array, boxed]);
                 }
                 array
             } else {
@@ -2179,7 +2202,6 @@ impl<M: Module> CodegenBackend<M> {
         Ok(())
     }
 }
-
 
 /// Compute a module prefix from a file path relative to a source root.
 ///

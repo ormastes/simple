@@ -1067,6 +1067,11 @@ int main(void) {
     SplArray* bytes = (SplArray*)(uintptr_t)rt_string_bytes(abc);
     if (rt_array_len(bytes) != 3) return 43;
     if (rt_array_get(bytes, 1) != rt_value_int('b')) return 44;
+    int64_t utf8_chars_text = rt_string_new((const uint8_t*)"a\xC3\xA9", 3);
+    SplArray* chars = (SplArray*)(uintptr_t)rt_string_chars(utf8_chars_text);
+    if (rt_array_len(chars) != 2) return 45;
+    int64_t second_char = rt_array_get(chars, 1);
+    if (rt_string_len(second_char) != 2 || memcmp(rt_string_data(second_char), "\xC3\xA9", 2) != 0) return 46;
     int64_t out = rt_string_new((const uint8_t*)"out:", 4);
     int64_t err = rt_string_new((const uint8_t*)"err", 3);
     rt_stdout_write(out);

@@ -227,6 +227,17 @@ fn main() -> i64:
 }
 
 #[test]
+fn native_inline_array_len_handles_tagged_nil() {
+    let code = r#"
+extern fn rt_array_len(array: i64) -> i64
+
+fn main() -> i64:
+    rt_array_len(3)
+"#;
+    assert_eq!(compile_native_and_run(code), 0);
+}
+
+#[test]
 fn native_compile_binary_with_locals() {
     let code = r#"
 fn main() -> i64:

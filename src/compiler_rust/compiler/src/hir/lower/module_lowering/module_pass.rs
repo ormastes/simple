@@ -105,10 +105,17 @@ fn method_with_impl_driver_attrs(method: &ast::FunctionDef, impl_attrs: &[ast::A
 }
 
 fn try_const_array_eval(expr: &Expr) -> Option<Vec<i64>> {
+    fn element(expr: &Expr) -> Option<i64> {
+        match expr {
+            Expr::Bool(value) => Some(i64::from(*value)),
+            _ => try_const_eval(expr),
+        }
+    }
+
     match expr {
-        Expr::Array(elements) => elements.iter().map(try_const_eval).collect(),
+        Expr::Array(elements) => elements.iter().map(element).collect(),
         Expr::ArrayRepeat { value, count } => {
-            let value = try_const_eval(value)?;
+            let value = element(value)?;
             let count = try_const_eval(count)?;
             if count < 0 {
                 return None;
@@ -544,7 +551,7 @@ impl Lowerer {
                     }
                 } else if let Expr::Bool(val) = &s.value {
                     // Store tagged boolean value: TAG_SPECIAL(0b011) | (payload << 3)
-                    let tagged = if *val { 0b011 | (1 << 3) } else { 0b011 };
+                    let tagged = 0b011 | ((if *val { 1 } else { 2 }) << 3);
                     self.global_init_values.insert(s.name.clone(), tagged);
                 }
                 record_const_array_init(
@@ -603,7 +610,7 @@ impl Lowerer {
                         }
                     }
                 } else if let Expr::Bool(val) = &c.value {
-                    let tagged = if *val { 0b011 | (1 << 3) } else { 0b011 };
+                    let tagged = 0b011 | ((if *val { 1 } else { 2 }) << 3);
                     self.global_init_values.insert(c.name.clone(), tagged);
                 }
                 record_const_array_init(
@@ -667,7 +674,7 @@ impl Lowerer {
                             }
                         }
                     } else if let Some(Expr::Bool(val)) = &l.value {
-                        let tagged = if *val { 0b011 | (1 << 3) } else { 0b011 };
+                        let tagged = 0b011 | ((if *val { 1 } else { 2 }) << 3);
                         self.global_init_values.insert(n.clone(), tagged);
                     }
                     record_const_array_init(

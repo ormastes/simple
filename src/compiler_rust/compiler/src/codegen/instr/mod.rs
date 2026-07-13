@@ -1380,7 +1380,14 @@ pub fn compile_instruction<M: Module>(
             let tag = builder.ins().band(val, seven);
             let is_int = builder.ins().icmp_imm(IntCC::Equal, tag, 0);
             let shifted = builder.ins().sshr(val, three);
-            let unboxed = builder.ins().select(is_int, shifted, val);
+            let is_true = builder.ins().icmp_imm(IntCC::Equal, val, 11);
+            let is_false = builder.ins().icmp_imm(IntCC::Equal, val, 19);
+            let is_bool = builder.ins().bor(is_true, is_false);
+            let zero = builder.ins().iconst(types::I64, 0);
+            let one = builder.ins().iconst(types::I64, 1);
+            let raw_bool = builder.ins().select(is_true, one, zero);
+            let int_or_value = builder.ins().select(is_int, shifted, val);
+            let unboxed = builder.ins().select(is_bool, raw_bool, int_or_value);
             ctx.vreg_values.insert(*dest, unboxed);
         }
 

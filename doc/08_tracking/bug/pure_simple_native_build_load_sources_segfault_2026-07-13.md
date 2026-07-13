@@ -2,10 +2,11 @@
 
 ## Status
 
-Partially fixed through stage 8. Pure-Simple native-build now passes entry
-closure loading and starts frontend parsing. Updated Simple/LLVM AOT execution
-evidence for the Engine2D SIMD row scheduler remains blocked by a later
-runtime/frontend failure whose exact cause is not yet classified.
+Partially fixed through stage 11. Pure-Simple native-build now passes entry
+closure loading and starts frontend parsing. The stage-8 and stage-10 crashes
+are classified and fixed, but updated Simple/LLVM AOT execution evidence for
+the Engine2D SIMD row scheduler remains blocked by keyword-token
+misclassification followed by a nil AST field access.
 Cross-compiled runtime binaries pass on x86-64, AArch64, and RV64GCV.
 
 ## Reproducer
@@ -94,6 +95,36 @@ probe.
 Stage 8 compiled 2 files, reused 1,017 cached objects, and linked in 137.6
 seconds. `nm` confirms both `rt_array_concat` and `rt_array_clear` are defined.
 The pure-Simple LLVM SIMD probe still exits 139 before emitting a compiler
-diagnostic. The mandatory three-cycle cap stopped further rebuilds in this
-session; the next bounded continuation should take one debugger backtrace from
-stage 8, classify the failure, and resolve only the concrete cause.
+diagnostic. A bounded debugger run located the fault in
+`compiler.frontend.core.lexer.lex_init_with_path`: the native global for
+`lex_env_save_enabled: [bool] = [false]` remained zero and the trusted inline
+`rt_array_len` path dereferenced that zero value.
+
+The Rust HIR constant-array collector did not accept boolean expressions, so it
+discarded `[false]` instead of emitting module initialization. Both native
+backends now preserve boolean constant arrays and box each element with
+`rt_value_bool`; scalar `false` uses the canonical tagged value 19 instead of
+nil 3. The shared `UnboxInt` lowering, which also handles native boolean array
+elements, recognizes tagged true/false and returns raw 1/0. Trusted inline
+array length lowering in Cranelift and LLVM now also honors the runtime ABI's
+`rt_array_len(nil) == 0` contract. Focused JIT and native compile-and-run
+regressions cover the boolean initializer and nil length cases, and the LLVM
+feature path compiles successfully.
+
+Stage 10 then reached `make_core_lexer` and called a zero GOT entry for
+`rt_string_chars`, which was declared by codegen but absent from the shared C
+runtime. The C and simple-core runtimes now implement the ABI with UTF-8
+character boundaries, and empty-delimiter string splitting reuses it. The
+core-C ABI probe covers ASCII and multibyte output. Stage 11 compiled 2 files,
+reused 1,017 cached objects, and linked in 133.8 seconds; its probe passed both
+former null calls and reached source parsing.
+
+The remaining stage-11 failure classifies all source keywords as identifiers:
+the parser consequently reports every function `->` and block `:` as an
+unexpected expression token, then performs a nil field access and terminates
+with `SIGILL`. A direct pointer-as-`i64` ABI fixture produced the same result,
+so typed `[u32]` signatures are not the cause and the production fixture was
+left unchanged. The mandatory third-cycle cap stopped further rebuilds. The
+next continuation should trace `keyword_lookup(ident_text)` and the
+`source_chars[start:pos].join("")` token text produced by the core lexer, then
+prevent AST construction after parser errors.

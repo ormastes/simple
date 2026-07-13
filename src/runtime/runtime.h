@@ -279,6 +279,7 @@ int64_t  rt_string_new(const uint8_t* bytes, uint64_t len);
 int64_t  rt_string_len(int64_t string);
 const uint8_t* rt_string_data(int64_t string);
 int64_t  rt_string_bytes(int64_t string);
+int64_t  rt_string_chars(int64_t string);
 int64_t  rt_string_builder_new(void);
 int64_t  rt_string_builder_push(int64_t handle, int64_t string);
 int64_t  rt_string_builder_finish(int64_t handle);

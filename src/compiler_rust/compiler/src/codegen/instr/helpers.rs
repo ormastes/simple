@@ -95,7 +95,23 @@ pub(crate) fn inline_runtime_array_len_value(
 ) -> cranelift_codegen::ir::Value {
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(value, ptr_mask);
-    builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8)
+    let zero = builder.ins().iconst(types::I64, 0);
+    let load_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+
+    let is_nil = builder.ins().icmp_imm(IntCC::Equal, ptr_bits, 0);
+    builder.ins().brif(is_nil, done_block, &[zero], load_block, &[]);
+
+    builder.switch_to_block(load_block);
+    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    builder.ins().jump(done_block, &[len]);
+    builder.seal_block(load_block);
+
+    builder.switch_to_block(done_block);
+    let result = builder.block_params(done_block)[0];
+    builder.seal_block(done_block);
+    result
 }
 
 /// Helper to create a string constant in module data and return (ptr, len) values.

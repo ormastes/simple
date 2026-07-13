@@ -199,6 +199,16 @@ impl LlvmBackend {
             let ptr_bits = builder
                 .build_and(value, i64_type.const_int(!7u64, false), "array_len_ptr_bits")
                 .map_err(|e| crate::error::factory::llvm_build_failed("array len ptr bits", &e))?;
+            let is_nil = builder
+                .build_int_compare(IntPredicate::EQ, ptr_bits, i64_type.const_zero(), "array_len_is_nil")
+                .map_err(|e| crate::error::factory::llvm_build_failed("array len nil check", &e))?;
+            let load_block = self.context_ref().append_basic_block(function, "array_len_load");
+            let done_block = self.context_ref().append_basic_block(function, "array_len_done");
+            builder
+                .build_conditional_branch(is_nil, done_block, load_block)
+                .map_err(|e| crate::error::factory::llvm_build_failed("array len nil branch", &e))?;
+
+            builder.position_at_end(load_block);
             let object_ptr = builder
                 .build_int_to_ptr(ptr_bits, ptr_type, "array_len_object_ptr")
                 .map_err(|e| crate::error::factory::llvm_build_failed("array len int_to_ptr", &e))?;
@@ -209,8 +219,21 @@ impl LlvmBackend {
             };
             let len = builder
                 .build_load(i64_type, len_ptr, "array_len_value")
-                .map_err(|e| crate::error::factory::llvm_build_failed("array len load", &e))?;
-            vreg_map.insert(dest, len);
+                .map_err(|e| crate::error::factory::llvm_build_failed("array len load", &e))?
+                .into_int_value();
+            builder
+                .build_unconditional_branch(done_block)
+                .map_err(|e| crate::error::factory::llvm_build_failed("array len done branch", &e))?;
+            let loaded_block = builder
+                .get_insert_block()
+                .ok_or_else(|| CompileError::semantic("LLVM array len load block missing".to_string()))?;
+
+            builder.position_at_end(done_block);
+            let phi = builder
+                .build_phi(i64_type, "array_len_inline")
+                .map_err(|e| crate::error::factory::llvm_build_failed("array len phi", &e))?;
+            phi.add_incoming(&[(&i64_type.const_zero(), current_block), (&len, loaded_block)]);
+            vreg_map.insert(dest, phi.as_basic_value());
             return Ok(true);
         }
         let tag = builder

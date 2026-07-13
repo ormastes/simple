@@ -734,6 +734,24 @@ int64_t rt_string_bytes(int64_t string) {
     return (int64_t)(uintptr_t)bytes;
 }
 
+int64_t rt_string_chars(int64_t string) {
+    RtCoreString* s = rt_core_as_string(string);
+    SplArray* chars = rt_array_new(s ? (int64_t)s->len : 0);
+    if (!chars) return rt_core_nil();
+    if (!s) return (int64_t)(uintptr_t)chars;
+
+    for (uint64_t i = 0; i < s->len;) {
+        uint8_t lead = (uint8_t)s->data[i];
+        uint64_t width = 1;
+        if (lead >= 0xc2 && lead <= 0xdf && i + 2 <= s->len) width = 2;
+        else if (lead >= 0xe0 && lead <= 0xef && i + 3 <= s->len) width = 3;
+        else if (lead >= 0xf0 && lead <= 0xf7 && i + 4 <= s->len) width = 4;
+        rt_array_push(chars, rt_string_new((const uint8_t*)s->data + i, width));
+        i += width;
+    }
+    return (int64_t)(uintptr_t)chars;
+}
+
 /* Bug #136: string-interpolation operand coercion to a raw C string.
  * Interpolation `{expr}` operands are MIXED and statically undiscriminable:
  * a tagged heap string (e.g. an argv element built via rt_string_new) vs a
@@ -1004,15 +1022,7 @@ int64_t rt_string_split(int64_t value, int64_t delimiter) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* d = rt_core_as_string(delimiter);
     if (!s || !d) return rt_core_nil();
-    if (d->len == 0) {
-        SplArray* chars = rt_array_new((int64_t)s->len);
-        if (!chars) return rt_core_nil();
-        for (uint64_t i = 0; i < s->len; i++) {
-            uint8_t byte = (uint8_t)s->data[i];
-            rt_array_push(chars, rt_string_new(&byte, 1));
-        }
-        return (int64_t)(uintptr_t)chars;
-    }
+    if (d->len == 0) return rt_string_chars(value);
 
     uint64_t count = 1;
     for (uint64_t i = 0; i + d->len <= s->len;) {

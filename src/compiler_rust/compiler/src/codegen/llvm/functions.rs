@@ -1759,7 +1759,42 @@ impl LlvmBackend {
                 let shifted = builder
                     .build_right_shift(int_val, i64_type.const_int(3, false), true, "unbox_int")
                     .map_err(|e| crate::error::factory::llvm_build_failed("unbox_int shift", &e))?;
-                vreg_map.insert(*dest, shifted.into());
+                let tag = builder
+                    .build_and(int_val, i64_type.const_int(7, false), "unbox_tag")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox tag", &e))?;
+                let is_int = builder
+                    .build_int_compare(inkwell::IntPredicate::EQ, tag, i64_type.const_zero(), "unbox_is_int")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox int test", &e))?;
+                let is_true = builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        int_val,
+                        i64_type.const_int(11, false),
+                        "unbox_is_true",
+                    )
+                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox true test", &e))?;
+                let is_false = builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        int_val,
+                        i64_type.const_int(19, false),
+                        "unbox_is_false",
+                    )
+                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox false test", &e))?;
+                let is_bool = builder
+                    .build_or(is_true, is_false, "unbox_is_bool")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox bool test", &e))?;
+                let raw_bool = builder
+                    .build_int_z_extend(is_true, i64_type, "unbox_bool")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox bool", &e))?;
+                let int_or_value = builder
+                    .build_select(is_int, shifted, int_val, "unbox_int_or_value")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox integer", &e))?
+                    .into_int_value();
+                let unboxed = builder
+                    .build_select(is_bool, raw_bool, int_or_value, "unbox_scalar")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox scalar", &e))?;
+                vreg_map.insert(*dest, unboxed);
             }
             MirInst::BoxFloat { dest, value } => {
                 let val = self.get_vreg(value, vreg_map)?;

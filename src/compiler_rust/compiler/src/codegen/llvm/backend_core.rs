@@ -552,6 +552,17 @@ impl LlvmBackend {
                     }
                 }
                 array
+            } else if init.element_type == crate::hir::TypeId::BOOL {
+                let array_new = get_rt("rt_array_new", 1);
+                let array_push = get_rt("rt_array_push", 2);
+                let value_bool = get_rt("rt_value_bool", 1);
+                let array = call_i64(array_new, &[capacity], "init_bool_arr")?;
+                for value in &init.values {
+                    let raw = i64_type.const_int(u64::from(*value != 0), false);
+                    let boxed = call_i64(value_bool, &[raw], "init_bool")?;
+                    let _ = call_i64(array_push, &[array, boxed], "init_bool_arr_push")?;
+                }
+                array
             } else {
                 let array_new = get_rt("rt_array_new", 1);
                 let array_push = get_rt("rt_array_push", 2);
