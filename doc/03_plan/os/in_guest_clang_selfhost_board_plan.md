@@ -36,6 +36,19 @@ Gate: `fs_exec_clang_stream_ring3_entry` boots under OVMF, `ssh root@host clang 
 writes `/hello.o` to NVMe, `getfile` retrieves it byte-exact — with NO QEMU `-kernel`, NO
 `isa-debug-exit`. Only THEN is 2e/board-runnable actually met (plus physical-hardware bring-up).
 
+**2f RESOLVED (2026-07-13, commit `7cf0b6aec3a`):** took extended option (c). Ground-truthing
+the ELFs showed the streaming kernel carries a 211 MB NOBITS `.bss` (`_kernel_end`≈0x0e412000),
+so at a 128 MB base its band [0x08000000, ~0x16400000] swallowed BOTH the payload
+(`clang_static` [268 MB, ~352 MB]) and the mmap base (0x10000000). Fix: relocate payload VA
+0x10000000 → 0x40000000 (1 GiB) via `src/os/port/llvm/sysroot.shs` simpleos.ld, and mmap base
+→ 0x50000000 (1.25 GiB) via `src/os/kernel/ipc/syscall.spl`; both now clear the `.bss` band.
+Only low-half user regions are payload/mmap/brk (brk 0x30000000 already above the band), so this
+is a complete fix — (b)'s boot-assembly rework was unnecessary. New `linker_128mb.ld` (OVMF
+kernel variant, base 0x08000000) + `scripts/os/scp_retrieve_over_ssh_uefi.shs` (OVMF pflash
+getfile harness, no `-kernel`). Verified under OVMF: GRUB-EFI → multiboot → ring-3 sshd accept
+loop (overlap fault cleared) → in-guest `clang -cc1 -emit-obj /hello.o` → getfile 712-byte
+ET_REL/EM_X86_64 object → host `cc && ./a.out` → exit 7.
+
 Remaining after 2f: physical-hardware bring-up on the actual mini-PC (NVMe/serial/NIC provable
 only there). Details below and in `doc/03_plan/os/clang_over_ssh_2e_design.md`.
 
@@ -155,6 +168,6 @@ image fresh for the compile pass. Next: Phase 2 (board port).
 
 ## Execution order
 
-1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a ✅ (.o on real NVMe)  →  2b ✅ (board-safe exit)  →  2c ✅ (UEFI boot)  →  2d ✅ (robustness)  →  2e ✅ (compile + byte-exact retrieve over SSH, QEMU `-kernel`)  →  **2f ⬜ (clang kernel boots under OVMF — the board-proxy capstone; linker/boot layout conflict, see OPEN GAP above)**  →  physical-board bring-up. NOT all software done: 2f is an open, QEMU-provable software gap.
+1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a ✅ (.o on real NVMe)  →  2b ✅ (board-safe exit)  →  2c ✅ (UEFI boot)  →  2d ✅ (robustness)  →  2e ✅ (compile + byte-exact retrieve over SSH, QEMU `-kernel`)  →  2f ✅ (clang kernel boots under OVMF — the board-proxy capstone; payload/mmap relocated clear of the 128 MB kernel `.bss` band, commit `7cf0b6aec3a`)  →  physical-board bring-up. All software done; only physical-hardware bring-up on the actual mini-PC remains.
 Never start Phase 2 before 1d passes. Small model + guide per step; higher-model review +
 the host-link-and-run / gate verification owned by the coordinator.
