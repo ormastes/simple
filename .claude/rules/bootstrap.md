@@ -77,4 +77,27 @@ SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple native-build \
   --entry src/app/cli/bootstrap_main.spl -o build/bootstrap/stage2/<triple>/simple
 ```
 
+## Redeploy #79 Key Findings (2026-07-11)
+
+**Parse-Error Gate False Positives:** The phase-2 parse-error gate (checking
+`par_had_error` flag) is structurally correct but currently false-positives on
+speculative/fragment re-lex errors. Known open bug; fix in flight. Gate behavior
+is sound for deployed binaries but may cause spurious bootstrap failures during
+stage2 diagnosis.
+
+**Driver Import Pattern:** `use lazy` dynload for the compiler driver was never
+implemented. Bootstrap now imports `compiler.driver.driver` directly in
+`bootstrap_main.spl`. If changing driver initialization, verify direct imports
+still resolve.
+
+**Native-Build Closure Discovery:** The native-build recursive dependency
+tracer follows plain `use` imports but does NOT traverse `export use` shims.
+Only direct imports trigger cascading closure collection. Plan closure manually
+for re-exports if needed.
+
+**Runtime Path Requirement:** `SIMPLE_RUNTIME_PATH` env var MUST point at the
+seed target directory for hosted linking. The `--runtime-path` CLI flag alone
+does not set it. Ensure the wrapper sets both when invoking native-build in
+hosted mode (e.g., `SIMPLE_RUNTIME_PATH="$seed_target" bin/simple native-build`).
+
 See `.claude/memory/ref_architecture.md` for detailed architecture.

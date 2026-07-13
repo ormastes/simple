@@ -62,6 +62,21 @@ marshalling in the deployed binary (not seed-dependent).
    fallback. See
    [doc/00_llm_process/feature_expert/codegen_ambiguous_method/skill.md](../../feature_expert/codegen_ambiguous_method/skill.md).
 
+## Redeploy #79 Findings (2026-07-11)
+
+**Cranelift Backend Bool Convention:** Bool is uniformly i64 across the
+Cranelift adapter (signatures, constants, comparison results, Not mask, casts,
+8-byte slot floor). Previously B1/i8 signatures disagreed with bodies and
+callers, causing verifier failures. All Bool-returning operations now emit i64
+to match the all-i64 call convention.
+See: [src/compiler/70.backend/backend/cranelift_codegen_adapter.spl](../../../../src/compiler/70.backend/backend/cranelift_codegen_adapter.spl).
+
+**MIR Erased-Receiver Text-Method Fallbacks:** Text methods on untyped
+receivers now lower directly to `rt_string_*` runtime calls (arity-gated):
+trim, lower, to_lower, split, replace, rfind. Caveat: rfind returns -1 (not
+nil) on the fallback path due to C linkage compatibility.
+See: [src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl](../../../../src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl).
+
 ## Update Rule
 
 After backend regressions, FFI fixes, or linker changes, refresh this skill

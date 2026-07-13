@@ -1,0 +1,40 @@
+# Interpolation Fragment Sticky par_had_error Regression
+#
+# Bug: commit 102035b227f added a phase-2 gate in driver.spl's parse_all_impl
+# (`if par_had_error_get(): fail phase 2`) so real parse errors are no longer
+# silently ignored. But `par_had_error` (compiler.core.parser) is a single
+# sticky module global, and `flat_bridge_parse_interp_inner`
+# (_FlatAstBridge/convert_nodes.spl) sub-lexes+parses each `{...}` region of a
+# string literal as a SPECULATIVE fragment: if the region isn't a clean single
+# expression it deliberately falls back to a plain literal (see the `idx < 0`
+# path) — a recovered, by-design failure, not a real module-level parse
+# error. Before the fix, that recovered failure still set `par_had_error`,
+# and nothing ever cleared it again, so a file containing e.g. a JSON/CSS-ish
+# brace run inside a string (not real interpolation) would fail phase 2 even
+# though its AST is fine.
+#
+# @cover src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl 5%
+
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.core.parser.{parser_has_errors}
+
+describe "Flat AST bridge interpolation fragment recovery does not stick par_had_error":
+    it "recovers from a non-expression brace region in a string literal without leaving par_had_error set":
+        # `{,}` is not a clean single expression (a bare comma), so
+        # flat_bridge_parse_interp_inner's primary-expr parse fails, prints a
+        # "[parser_error] line 1:1: unexpected token in expression" for the
+        # FRAGMENT (not the real module source), and recovers by returning -1
+        # so the whole string is kept as a plain literal.
+        val src = "val s = \"prefix {,} suffix\"\n"
+        val module = parse_and_build_module(src, "test_interp_fragment_recovery.spl")
+
+        expect(module.constants.contains("s")).to_equal(true)
+        expect(parser_has_errors()).to_equal(false)
+
+    it "still reports a real top-level parse error via the same flag":
+        # Sanity check: the fix must not blind the gate to genuine module-level
+        # parse errors (e.g. a truncated function with no body).
+        val bad_src = "fn broken(\n"
+        val bad_module = parse_and_build_module(bad_src, "test_real_parse_error.spl")
+
+        expect(parser_has_errors()).to_equal(true)

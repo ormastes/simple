@@ -801,14 +801,29 @@ match person:
         print "{n} is a minor"
 ```
 
-### Binding Destructuring
+### Binding Destructuring & Tuple Unpacking
 
 ```simple
-val (x, y) = get_point()
-val (first, second, ...rest) = items
+# Tuple destructuring — both literal and non-literal initializers
+val (x, y) = get_point()                    # function result
+val (a, b, c) = (1, 2, 3)                   # literal tuple
+val (first, second, ...rest) = items        # variable destructuring
+
+# Single evaluation guarantee: non-literal initializers eval exactly once
+val (a, b) = expensive_fn()                 # fn called once, indexed results extracted
+
+# Underscore skips unwanted fields
+val (x, _, z) = get_coords()
+
+# Array & dict destructuring
 val [a, b, c] = triple
 val {name, age} = person
 ```
+
+**Native Path Support** (2026-07-11 redeploy):
+- Literal tuples: per-element lowering with arity checking.
+- Non-literal initializers: desugared to temp variable + indexed extraction, guaranteeing single evaluation.
+- Parser fix: plain identifiers in patterns no longer become literal names (was a `parse_pattern` bug).
 
 ---
 

@@ -76,6 +76,32 @@ bootstrap-blocking regressions.
   tail-drops in single-expr blocks.
 - **#130 arg-wipe in seed stage2**: bootstrap_main arg handling.
 
+## Redeploy #79 Operator Notes (2026-07-11)
+
+**Parse-Error Gate False-Positives:** The phase-2 parse-error gate
+(`par_had_error` check) is structurally correct but false-positives on
+speculative/fragment re-lex errors. Bootstrap gate may spuriously fail during
+stage2 diagnosis. Workaround: diff the actual Hir output to confirm semantic
+correctness; known bug, fix in flight.
+
+**Driver Import Pattern:** `use lazy` dynload for the compiler driver was
+never implemented. `bootstrap_main.spl` now imports `compiler.driver.driver`
+directly. Any driver initialization changes must verify this direct import
+path still resolves.
+
+**Native-Build Closure Discovery Limitation:** The recursive closure tracer
+follows plain `use` imports but does NOT traverse `export use` shims. Only
+direct imports trigger cascading collection. If re-exporting driver or
+lowering modules, closure must be assembled manually or closure-tracer
+extended to handle shims.
+
+**Runtime Library Path:** `SIMPLE_RUNTIME_PATH` env var MUST be set to the
+seed target directory for hosted native-build linking. The `--runtime-path`
+CLI flag alone does not set the env var. Host-side wrappers must explicitly
+pass both: `SIMPLE_RUNTIME_PATH="path/to/seed/target" bin/simple native-build`.
+Hosted link will backfill `rt_*` externs from `libsimple_native_all.a` only if
+the env var points to the correct seed target.
+
 ## Gotchas
 
 1. **JIT path is opt-in:** seed stage2 defaults to LLVM llc (via

@@ -58,7 +58,28 @@ Oracle = `env -u SIMPLE_BOOTSTRAP bin/simple run` (per probe, reliable for
 param/method cases; alias rows judged by spec-by-construction due to the
 documented interp `val`-alias landmine).
 
-RESULTS_TABLE_PLACEHOLDER
+| Fixture | Shape | Before (native) | After (native) | Expected | Verdict |
+|---|---|---|---|---|---|
+| c1_class_arg_mutate | class, plain `fn bump(c: C)` | 1 | **41** | 41 | FIXED |
+| c1m_class_mut_param | class, `fn bump(mut c: C)` | 1 | **41** | 41 | FIXED |
+| c2_class_alias_mutate | class, `val b = a` alias | 41 | 41 | 41 | still correct |
+| c2b_class_var_alias | class, `var b = a` alias | 41 | 41 | 41 | still correct |
+| c3_class_in_array | class, `arr[0].x = 41` | 41 | 41 | 41 | still correct |
+| c4_class_as_struct_field | class, `h.c.x = 41` chain | 41 | 41 | 41 | still correct |
+| c5_class_method_mutate_self | class, plain-`fn` self ×2 | 1 | **41** | 41 | FIXED (class exempt from copy) |
+| c5m_class_me_method | class, `me inc()` ×2 | 1 | **41** | 41 | FIXED |
+| s1_struct_arg_mutate | struct, plain `fn bump(c: C)` | 1 | 1 | 1 | **REGRESSION GUARD: copy preserved** |
+| s1m_struct_mut_param | struct, `fn bump(mut c: C)` | 1 | **41** | 41 (oracle 41, doc case 2) | FIXED |
+| s2_struct_alias_mutate | struct, `val b = a` alias | 41 | 41 | 1 | still wrong — bonus defect (1), documented below |
+| s3_struct_in_array | struct, `arr[0].x = 41` | 41 | 41 | 41 | still correct |
+| s4_struct_as_struct_field | struct, `h.c.x = 41` chain | 41 | 41 | 41 | still correct |
+| s5_struct_method_mutate_self | struct, plain-`fn` self ×2 | 1 | 1 | compile error per W1006 doc | deliberately unchanged (see below) |
+| s5m_struct_me_method | struct, `me inc()` ×2 | 1 | **41** | 41 | FIXED |
+| multi_construct | class+struct+me+mut+plain+loop | — | c=113;x=11;y=2 | c=113;x=11;y=2 | PASS |
+| s_readonly_method | struct, read-only `fn get_x()` | 7 | 7 | 7 | still correct |
+
+Oracle spot-checks (interp): c1m=41, c5m=41, s5m=41, s1=1, s1m=41 — native
+now matches the oracle on every sanctioned-mutation row.
 
 ## Regression guards
 
