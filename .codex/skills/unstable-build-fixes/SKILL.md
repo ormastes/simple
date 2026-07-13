@@ -23,7 +23,7 @@ Goal: produce the requested Simple executable without throwing away useful cache
    ```bash
    bin/simple native-build --backend cranelift --source src/compiler --source src/app --source src/lib \
      --entry-closure --threads 8 --cache-dir build/bootstrap/native_cache --mode dynload \
-     --entry src/app/cli/main.spl -o build/native_probe/simple
+     --entry src/app/cli/_CliMain/main_and_help.spl -o build/native_probe/simple
    ```
 2. Run parallel mini builds with separate caches for early failures:
    - `src/app/cli/bootstrap_main.spl` -> `build/mini_cache_bootstrap`

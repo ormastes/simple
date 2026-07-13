@@ -1,6 +1,35 @@
 use std.spec
 use std.io_runtime.{file_read}
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key}
+use compiler.driver.driver_aot_output.{driver_native_module_is_export_facade}
+use compiler.frontend.parser_types.{Module, Export, DomainBlock}
+use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_types.{MirConstant, MirConstValue, MirType}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
+
+fn native_build_test_module(exports: [Export], domain_blocks: [DomainBlock]) -> Module:
+    Module(
+        name: "facade",
+        imports: [],
+        exports: exports,
+        domain_blocks: domain_blocks,
+        functions: {},
+        classes: {},
+        actors: {},
+        structs: {},
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        type_aliases: {},
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: []
+    )
 
 describe "native-build cache plumbing policy":
     it "routes AOT cache metadata and objects through SIMPLE_NATIVE_BUILD_CACHE_DIR":
@@ -11,6 +40,37 @@ describe "native-build cache plumbing policy":
         expect(src).to_contain("BuildCache.load(cache_path)")
         expect(src).to_contain("object_files = object_files.push(obj_path)")
         expect(src.contains("object_files = reconstructed_outputs")).to_equal(false)
+
+    it "recognizes only parser-confirmed export facades":
+        val empty_mir = MirModule(name: "facade", functions: {}, statics: {}, constants: {}, types: {})
+        val facade = native_build_test_module([Export(items: ["impl.*"], span: Span.empty())], [])
+        expect(driver_native_module_is_export_facade(empty_mir, facade)).to_equal(true)
+        expect(driver_native_module_is_export_facade(empty_mir, native_build_test_module([], []))).to_equal(false)
+        val declared = native_build_test_module(
+            [Export(items: ["impl.*"], span: Span.empty())],
+            [DomainBlock(kind: "schema", payload: "User", context: "", span: Span.empty())]
+        )
+        expect(driver_native_module_is_export_facade(empty_mir, declared)).to_equal(false)
+        expect(driver_native_module_is_export_facade(empty_mir, nil)).to_equal(false)
+
+        val constant = MirConstant(
+            symbol: SymbolId(id: 1),
+            name: "answer",
+            type_: MirType.i64(),
+            value: MirConstValue.Int(42)
+        )
+        var constants: Dict<SymbolId, MirConstant> = {}
+        constants[constant.symbol] = constant
+        val data_mir = MirModule(name: "facade", functions: {}, statics: {}, constants: constants, types: {})
+        expect(driver_native_module_is_export_facade(data_mir, facade)).to_equal(false)
+
+    it "skips parser-confirmed facades but rejects an all-empty native build":
+        val src = file_read("src/compiler/80.driver/driver_aot_output.spl")
+        expect(src).to_contain("pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: Module?) -> bool:")
+        expect(src).to_contain("if mir.functions.len() > 0 or mir.statics.len() > 0 or mir.constants.len() > 0 or mir.types.len() > 0:")
+        expect(src).to_contain("if driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules.get(name)):")
+        expect(src).to_contain("if object_files.len() == 0 and uncached_names.len() == 0:")
+        expect(src).to_contain("native-build produced no code-bearing MIR modules")
 
     it "persists native build cache entries between retries":
         val build_src = file_read("src/compiler/80.driver/driver_build/incremental.spl")

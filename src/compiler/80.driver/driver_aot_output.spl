@@ -24,6 +24,7 @@ use compiler.driver.driver_bootstrap.{bootstrap_entry_module_name}
 use compiler.common.config.{Logger}
 use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind}
 use compiler.mir.mir_data.{MirModule}
+use compiler.frontend.parser_types.{Module}
 use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint, native_build_cache_scope_key}
 use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig, BuildResult}
 
@@ -90,6 +91,20 @@ fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> 
         if source.module_name == module_name:
             return source.path
     ""
+
+pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: Module?) -> bool:
+    if mir.functions.len() > 0 or mir.statics.len() > 0 or mir.constants.len() > 0 or mir.types.len() > 0:
+        return false
+    if parsed_module == nil:
+        return false
+    val parsed = parsed_module
+    (parsed.exports.len() > 0 and parsed.domain_blocks.len() == 0 and
+        parsed.functions.len() == 0 and parsed.classes.len() == 0 and parsed.actors.len() == 0 and
+        parsed.structs.len() == 0 and parsed.enums.len() == 0 and parsed.bitfields.len() == 0 and
+        parsed.traits.len() == 0 and parsed.impls.len() == 0 and parsed.type_aliases.len() == 0 and
+        parsed.constants.len() == 0 and parsed.static_asserts.len() == 0 and
+        parsed.aop_advices.len() == 0 and parsed.di_bindings.len() == 0 and
+        parsed.arch_rules.len() == 0 and parsed.mock_decls.len() == 0)
 
 fn driver_native_build_filter_scoped_outputs(cached_outputs: [text], cache_scope_root: text) -> ([text], bool):
     var scoped_outputs: [text] = []
@@ -246,6 +261,10 @@ impl CompilerDriver:
         # Phase 1: Check cache, collect cached objects, identify uncached modules
         var uncached_names: [text] = []
         for name in module_names:
+            # Import/export facades contribute symbols through their imported
+            # implementation modules and have no object code of their own.
+            if driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules.get(name)):
+                continue
             val cache_source = driver_native_module_cache_source(ctx, name)
             var used_cache = false
             if cache_source != "":
@@ -265,6 +284,9 @@ impl CompilerDriver:
                         build_cache.remove_entry(cache_source)
             if not used_cache:
                 uncached_names = uncached_names.push(name)
+
+        if object_files.len() == 0 and uncached_names.len() == 0:
+            return CompileResult.CodegenError("native-build produced no code-bearing MIR modules")
 
         # Phase 2: Compile uncached modules through ParallelBuilder
         if uncached_names.len() > 0:
