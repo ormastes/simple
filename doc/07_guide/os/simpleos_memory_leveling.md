@@ -110,3 +110,29 @@ bootstrap-only verifier and is not accepted as the normal tool.
 Do not claim GPUDirect, RDMA hardware paging, CXL, or live GPU/NIC migration
 from model or QEMU-only evidence. Real device movement needs driver-owned
 migration/coherence proof.
+
+## Kernel-base vs clang-payload placement conflict (2f boot gap)
+
+The in-guest clang self-host path streams a 124.6 MB `clang_static` per-PT_LOAD
+into ring-3 at virtual range `[0x10000000, 0x16100000)`. That range is a fixed
+placement decision baked into the clang ELF link, not a leveling choice at
+runtime — so the kernel's own image must be leveled to avoid it.
+
+- `-kernel` (QEMU direct) links the clang kernel at base `0x100000` (1 MB) via
+  `arch/x86_64/linker_low1mb.ld`. Kernel `.bss` stays well below `0x10000000`,
+  so the clang payload VA is clear and the syscall path runs under the user CR3.
+  clang-compile-over-SSH is proven **only** on this path.
+- GRUB-EFI / OVMF needs the kernel at `128 MB` (a lower base faults `#UD` at
+  `RIP~0x1012` in the multiboot relocator). But a 128 MB base pushes kernel
+  `.bss` to ~375 MB, which **overlaps** the clang payload VA — the user-CR3
+  syscall then faults. So the clang kernel is currently `-kernel`-only ("Not for
+  GRUB-EFI"; see the linker comment).
+
+This is a placement conflict, not a QEMU limitation: any real-board loader that
+imposes a high kernel base collides with the clang payload's fixed VA. Fix
+options, in preference order: (a) UEFI-stub entry (`efi_main`,
+`--target x86_64-unknown-uefi`) so no multiboot relocator forces the high base;
+(b) higher-half kernel at `0xffffffff80000000` so `.bss` never intersects the
+low payload window; (c) relocate the clang payload VA out of the kernel's range.
+Until one lands, the board-proxy capstone (clang kernel booting under OVMF)
+stays open. See `doc/03_plan/os/in_guest_clang_selfhost_board_plan.md` step 2f.

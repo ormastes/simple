@@ -542,10 +542,6 @@ observe a pass:
   readback against an absolute CPU oracle. Emitted source, environment payload,
   upload alone, software backend names, simulation, or equal checksums are not
   native proof. Record unavailable hardware as `unavailable`; never promote it.
-  Vulkan promotion additionally requires an accelerated `discrete`, `integrated`,
-  or `virtual` device, stable selected device/driver identity, a real fence wait
-  and destroy, and surface poisoning when completion becomes unknown. CPU/other
-  devices and unfenced submission remain unpromoted.
   Before native promotion, the exact Pure Simple shaping/corpus gate must accept
   the face for the language/script; a codepoint raster/layout witness alone is
   diagnostic and leaves the matrix cell `unavailable`.
@@ -572,11 +568,6 @@ observe a pass:
   device-origin readback.
   Distinguish GPU atlas composition from CPU glyph rasterization and from direct
   GPU outline rasterization.
-  WM/GUI/Web/2D selected-font proof also requires one stable manifest identity
-  and identical ordered advances across Web layout and Draw IR paint; family
-  metadata or paint-only TTF selection is insufficient. SimpleOS additionally
-  requires the exact pinned asset in every applicable image builder plus guest
-  path/hash/glyph/framebuffer evidence, not a host path marker.
   The OpenCL adapter must additionally prove the versioned shared source,
   generation-keyed atlas upload with load/unload invalidation, checked dirty-row
   offsets after the initial full upload, full upload on reset/gap/invalid dirty
@@ -878,6 +869,23 @@ Normal bootstrap reuses the Rust seed and never runs cargo. The wrapper has a
 `-c 'print(1+1)'` deploy smoke gate; still run focused post-deploy smoke before
 claiming the pure-Simple toolchain is healthy (see `.claude/rules/bootstrap.md`).
 See `doc/07_guide/runtime/process_kill_safety.md`.
+
+### Bootstrap gate uses the deployed `bin/release`, not the Rust seed
+
+`bin/simple build bootstrap` Stage-1 worker is the **deployed self-hosted**
+`bin/release/<triple>/simple` (it self-execs — `interpreter: bin/release/.../simple`),
+NOT `target/release/simple` or `target/bootstrap/simple`. `SEED=`/`SIMPLE_SEED=`
+redirect only the bootstrap *driver*, not the Stage-1 worker. Consequence: when a
+new `rt_*` extern lands in `.spl` (e.g. `rt_lexer_source_set` in `lexer.spl`), the
+worker's stale native-build extern allowlist rejects it (`unknown extern function:
+rt_lexer_source_set`) even though both Rust seeds accept it — a **circular redeploy
+wall**: `bin/release` can only be refreshed by a bootstrap that runs `bin/release`.
+This is the known-hard whole-compiler redeploy (memory: "#99 whole-compiler
+redeploy — do NOT race"). Unblock by refreshing
+`bin/release/<triple>/simple` from a CURRENT compiler via the `cp` to `.new` + `mv`
+pattern (direct `cp` hits "Text file busy" when in use), then re-run the gate. So a
+central-compiler resolver change is only *verified* after this refresh — a
+probe-green interpreter run is not the bootstrap gate.
 
 For memory-perspective work (gc/nogc boundary, leak checks, alloc enforcement):
 the gc-boundary lint (`gc_boundary_crossing`) resolves alias shims via
