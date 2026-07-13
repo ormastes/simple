@@ -887,6 +887,25 @@ pattern (direct `cp` hits "Text file busy" when in use), then re-run the gate. S
 central-compiler resolver change is only *verified* after this refresh — a
 probe-green interpreter run is not the bootstrap gate.
 
+### SimpleOS freestanding-.spl discipline (kernel-path specs/code)
+
+Three proven traps when Simple code targets the freestanding kernel
+(x86_64-unknown-none) — each cost a debugging arc; all documented in
+`src/os/kernel/loader/fs_exec_resolve.spl`'s header:
+1. Module-level array/`[text]` initializers DO NOT RUN (garbage + fault on
+   `.len()`): use function-returning constants + lazy-init behind a bool
+   (scalar module vars land in zeroed .bss, so `false` is reliable).
+2. class construction + trait-object dynamic dispatch corrupts ring-0 boot:
+   use direct externs or @cfg dispatch in kernel paths.
+3. `char_at`/`starts_with` are unreliable on DYNAMICALLY built strings:
+   use the raw `[u8]` accessor pattern (rt_string_to_byte_array +
+   rt_bytes_u8_at).
+Also: deep-call-stack spawn/exec calls overflow the kernel stack — call
+spawn-like entries from shallow frames (sshd accept loop, not packet
+handlers). Current host-OS state + lane map:
+`doc/07_guide/os/simpleos_host_os_guide.md` and
+`doc/03_plan/os/simpleos/host_os_completeness_plan.md`.
+
 ### SimpleOS board-proxy evidence: OVMF pflash, never `-kernel`
 
 For SimpleOS "board-runnable" claims, QEMU `-kernel` runs are NOT board
