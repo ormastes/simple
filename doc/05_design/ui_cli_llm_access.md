@@ -12,10 +12,10 @@ Implement the selected `REQ-UCLA-001..025` and `NFR-UCLA-001..022` by extracting
 | `src/lib/common/ui/access_cli_grammar.spl` | New shared descriptor/request/result/error/safety/output records plus validation and rendering | common UI |
 | `src/lib/common/ui/access.spl` | Re-export shared grammar | common UI |
 | `src/lib/common/ui/win_text_access.spl` | Remove `WindowInfo` import; accept already-normalized surface/node values | common UI |
-| `src/app/t32_cli/commands.spl` | Map overlapping GUI commands to shared descriptors; keep T32-only catalog entries | T32 adapter |
-| `src/app/t32_cli/types.spl` | Compatibility alias `T32BridgeResult = AccessResult` | T32 adapter |
-| `src/app/t32_cli/render.spl` | Forward to shared human renderer; retain only T32 GUI-status decoration if needed | T32 adapter |
-| `src/app/t32_cli/mod.spl` | Parse output mode and map T-code/text failures to `AccessError` | T32 adapter |
+| `examples/10_tooling/trace32_tools/t32_cli/commands.spl` | Map overlapping GUI commands to shared descriptors; keep T32-only catalog entries | T32 adapter |
+| `examples/10_tooling/trace32_tools/t32_cli/types.spl` | Compatibility alias `T32BridgeResult = AccessResult` | T32 adapter |
+| `examples/10_tooling/trace32_tools/t32_cli/render.spl` | Forward to shared human renderer; retain only T32 GUI-status decoration if needed | T32 adapter |
+| `examples/10_tooling/trace32_tools/t32_cli/mod.spl` | Parse output mode and map T-code/text failures to `AccessError` | T32 adapter |
 | `src/app/ui/access_cli.spl` | New UI descriptor catalog and live test-API/read-only-store adapter | UI adapter |
 | `src/app/ui/cli_entry.spl` | Dispatch access verbs before backend modes; preserve existing modes | UI entry |
 | `src/app/play/wm_access_cli.spl` | New live WM conversion/dispatch owner | WM adapter |

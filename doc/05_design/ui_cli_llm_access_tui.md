@@ -226,12 +226,13 @@ System scenarios capture the real rendered state, not hand-written expected
 text:
 
 - CLI and native TUI: save plain/ANSI output under
-  `build/test-artifacts/03_system/app/ui_cli_llm_access/`; capture `windows`,
+  `build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/tui/`; capture `windows`,
   `snapshot`, `surface`, `find`, `act`, and `history`, plus one typed failure.
-- JSON: save stdout as protocol evidence in the same directory and parse it;
+- JSON: save stdout as protocol evidence under
+  `build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/protocol/` and parse it;
   separately capture stderr and exit status to prove clean machine output.
 - GUI: capture the live fixture before and after action under
-  `doc/06_spec/image/03_system/app/ui_cli_llm_access/`.
+  `doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/`.
 - Generated manual: embed the paths with `**TUI Captures:**` and
   `**Screenshots:**`; screenshots supplement semantic assertions and never
   replace snapshot/find/action/history checks.

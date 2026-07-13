@@ -18,6 +18,22 @@ inside this repository.
 6. `ui_access_observe`
 7. `ui_access_state`
 
+## Deployed CLI Flow
+
+Use the same access order through the deployed CLI:
+
+1. `simple ui windows`
+2. `simple ui snapshot` or `simple ui surface <surface_id>`
+3. `simple ui find --surface <surface_id> ...`
+4. `simple ui act --canonical <surface_id#widget_id> --action <action>`
+5. `simple ui history --surface <surface_id>`
+
+Human output is the default; add `--json` for one machine-readable
+`simple.access/v1` envelope. Live commands use the existing loopback UI test
+API (and accept `--port N`). `--ui-access-db PATH` is an explicit read-only
+fallback for list/snapshot/surface/find/history; it rejects `act` rather than
+turning the store into a command queue.
+
 ## Common Window Text
 
 Use `std.common.ui.win_text_access` when a task needs the same text/query/action
@@ -31,8 +47,11 @@ TRACE32 open/capture, and host WM privileged input remain adapter-owned; use the
 common helpers only for normalized snapshot/query/action logic.
 For MCP scalar adapter payloads, use `play_wm_text_snapshot`,
 `play_wm_text_find`, and `play_wm_text_act`.
-For CLI planning/discovery, use `simple play wm-text-snapshot`,
-`simple play wm-text-find`, and `simple play wm-text-act`.
+For live host-WM CLI access, use `simple play windows`,
+`simple play wm-text-snapshot host_wm`,
+`simple play wm-text-find host_wm <text>`,
+`simple play wm-text-act <canonical_id> <action>`, and
+`simple play wm-text-history`.
 
 ## SPipe GUI Test Know-How
 

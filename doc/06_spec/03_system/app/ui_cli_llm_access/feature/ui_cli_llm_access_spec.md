@@ -572,6 +572,7 @@ _check_gate("live-ui-transport", [
     "live_windows=pass",
     "live_find=pass",
     "live_act=pass",
+    "post_action_state=pass",
     "correlated_history=pass",
     "service_stop=source_unavailable",
     "db_fallback=read_only",
@@ -609,8 +610,7 @@ _check_gate("manual-evidence", [
     "capture_kind=gui",
     "capture_kind=protocol",
     "manual_steps=7",
-    "placeholder_passes=0",
-    "generated_manual_fresh=true"
+    "placeholder_passes=0"
 ])
 ```
 
@@ -666,7 +666,7 @@ _check_gate("final", [
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_spec.spl` |
-| Updated | 2026-07-11 |
+| Updated | 2026-07-13 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

@@ -14,7 +14,7 @@
 | Lane | Scope | Owned paths | Depends on |
 |---|---|---|---|
 | A — common grammar | Shared records/parser/validation/rendering and WinText layering fix | `src/lib/common/ui/access_cli_grammar.spl`, `access.spl`, `win_text_access.spl`, focused unit specs | selected design |
-| B — T32 adapter | Descriptor/result/error/output mapping with T32-only compatibility | `src/app/t32_cli/**`, T32 parity tests | Lane A |
+| B — T32 adapter | Descriptor/result/error/output mapping with T32-only compatibility | `examples/10_tooling/trace32_tools/t32_cli/**`, T32 parity tests | Lane A |
 | C — UI adapter | Existing test-API client, read-only DB fallback, deployed CLI routing | `src/app/ui/access_cli.spl`, `cli_entry.spl`, focused UI tests | Lane A |
 | D — WM adapter | Live list/conversion/action and play dispatch | `src/app/play/wm_access_cli.spl`, `main.spl`, focused WM tests | Lane A |
 | E — evidence/docs | Pure Simple checker, SSpec/manual, captures, guide freshness, perf evidence | checker/system/perf/doc paths on feature slug | A-D merged |
@@ -43,4 +43,3 @@ Independent implementation work may run in parallel only after Lane A signatures
 - Never rerun an already-green acceptance check in this session.
 - Missing live adapter/capture/perf evidence remains FAIL; no planned or source-string marker substitutes.
 - Unrelated dirty files and other active lanes are preserved and excluded from commits.
-

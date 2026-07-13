@@ -50,6 +50,8 @@ use app.mcp_t32.dialog_tools.{
 }
 
 use cmm_lsp.cmm_parser.{parse_cmm_source}
+use common.ui.access_cli_grammar.{access_result_from_snapshot, ACCESS_OPERATION_LIST}
+use common.ui.win_text_access.{WinTextSnapshot, win_text_trace32_snapshot, win_text_merge_snapshots}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -180,9 +182,7 @@ fn bridge_session_info(session_id: text) -> Result<T32BridgeResult, text>:
         for s in MCP_T32_SESSIONS:
             if s.id == session_id:
                 target_session = Some(s)
-        if target_session.?:
-            pass_do_nothing
-        else:
+        if not target_session.?:
             return Err("Session not found: {session_id}")
     else:
         target_session = t32_find_current_session()
@@ -390,8 +390,11 @@ fn bridge_eval(expression: text) -> Result<T32BridgeResult, text>:
 fn bridge_window_list() -> Result<T32BridgeResult, text>:
     val catalog = t32_get_window_catalog()
     if catalog.len() == 0:
-        return Ok(T32BridgeResult.scalar("No windows in catalog."))
+        var empty = T32BridgeResult.scalar("No windows in catalog.")
+        empty.set_context(ACCESS_OPERATION_LIST, "t32", MCP_T32_CURRENT_SESSION, 0, "", "[]", false)
+        return Ok(empty)
     var rows: [[text]] = [["Key", "Title", "Kind", "Capture"]]
+    var snapshots: [WinTextSnapshot] = []
     for entry in catalog:
         var key = ""
         var title = ""
@@ -406,7 +409,13 @@ fn bridge_window_list() -> Result<T32BridgeResult, text>:
         if cap == "":
             cap = "print_parse"
         rows.push([key, title, kind, cap])
-    Ok(T32BridgeResult.table("Windows", rows))
+        snapshots.push(win_text_trace32_snapshot(key, title, open_cmd, capture_cmd, cap, "", 0, 0, 0))
+    val merged = win_text_merge_snapshots("trace32", snapshots)
+    val normalized = access_result_from_snapshot(ACCESS_OPERATION_LIST, "t32", MCP_T32_CURRENT_SESSION, merged.access, 0)
+    var result = T32BridgeResult.table("Windows", rows)
+    result.set_context(ACCESS_OPERATION_LIST, "t32", MCP_T32_CURRENT_SESSION, normalized.revision, "", normalized.payload_json, normalized.truncated)
+    result.returned_count = normalized.returned_count
+    Ok(result)
 
 fn bridge_window_open(window_key: text) -> Result<T32BridgeResult, text>:
     if window_key == "":
@@ -1065,7 +1074,7 @@ fn bridge_dialog_get(label: text, query_type: text) -> Result<T32BridgeResult, t
                 return Err("Dialog element '{label}' expects type '{parsed.value_type}', not '{requested_type}'")
             if requested_type == "":
                 requested_type = parsed.value_type
-        nil: pass_do_nothing
+        nil: ()
     val session = bridge_require_session()?
     var detected_type = requested_type
     var value = ""
@@ -1109,7 +1118,7 @@ fn bridge_dialog_set(label: text, action: text, value: text) -> Result<T32Bridge
                 return Err("Dialog element '{label}' uses a generated label and cannot be set at runtime")
             if not t32_dialog_action_allowed(parsed.supported_actions, actual_action):
                 return Err("Dialog element '{label}' is type '{parsed.widget_type}' and does not support action '{actual_action}'")
-        nil: pass_do_nothing
+        nil: ()
     val cmd = t32_dialog_set_command(label, actual_action)
     if cmd == "":
         return Err("Invalid dialog action: {actual_action}")

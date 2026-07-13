@@ -286,9 +286,13 @@ time and stale metadata when reporting it.
 ## Evidence locations
 
 Verification stores CLI/TUI and JSON evidence under
-`build/test-artifacts/03_system/app/ui_cli_llm_access/` and GUI images under
-`doc/06_spec/image/03_system/app/ui_cli_llm_access/`. The generated SPipe
+`build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/`
+and GUI images under
+`doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/`. The generated SPipe
 manual embeds both. Screenshots prove presentation; parsed JSON and semantic
 assertions prove protocol behavior. The reproducible separate-process transport
 gate is `scripts/check/check-ui-cli-live-transport.shs`; it uses the standalone
 fixture and the UI CLI itself, never a direct HTTP shortcut.
+The focused `check-ui-cli-access` manual-evidence scenario also rejects
+`pass_todo`, `pass_dn`, `pass_do_nothing`, and trivial always-true assertions in its gate/spec
+sources before accepting the generated manual.

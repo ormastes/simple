@@ -7,19 +7,25 @@ use app.t32_cli.render.{render_result, render_error}
 use app.t32_cli.commands.{all_top_level_names, subcmds_for, find_shared_access_command}
 use app.t32_cli.cli_shell.{start_t32_shell}
 use app.t32_cli.error_codes.{t32_err_unknown_cmd, t32_err_unknown_subcmd, t32_err_missing_args}
-use common.ui.access_cli_grammar.{AccessError, access_render_json, access_error_to_json, ACCESS_OUTPUT_HUMAN, ACCESS_OUTPUT_JSON}
+use common.ui.access_cli_grammar.{AccessRequest, AccessError, access_validate_request, access_render_json, access_error_to_json, ACCESS_OPERATION_SURFACE, ACCESS_OPERATION_ACT, ACCESS_OUTPUT_HUMAN, ACCESS_OUTPUT_JSON}
 
 extern fn sys_get_args() -> [text]
 
 var t32_access_operation = ""
 var t32_access_output_mode = ACCESS_OUTPUT_HUMAN
+var t32_access_exit_code: i32 = 0
 
-fn t32_cli_main(args: [text]):
+fn t32_cli_main(args: [text]) -> i32:
+    t32_access_exit_code = 0
     if args.len() == 0:
         print_usage()
-        return
+        return 0
 
-    val dispatch_args = prepare_access_args(args)
+    val dispatch_args = match prepare_access_args(args):
+        Err(access_error):
+            print_typed_access_error(access_error, true)
+            return t32_access_exit_code
+        Ok(prepared): prepared
     val cmd = dispatch_args[0]
     var rest: [text] = []
     var i = 1
@@ -52,9 +58,12 @@ fn t32_cli_main(args: [text]):
         "shell": cmd_shell(rest)
         "help": print_usage()
         "--help": print_usage()
-        _: print t32_err_unknown_cmd(cmd)
+        _:
+            print t32_err_unknown_cmd(cmd)
+            t32_access_exit_code = 2
+    t32_access_exit_code
 
-fn main():
+fn main() -> i32:
     val raw_args = sys_get_args()
     var args = raw_args
     if args.len() >= 2 and not args[0].ends_with(".spl") and args[1].ends_with(".spl"):
@@ -79,12 +88,16 @@ fn print_bridge(result: Result<T32BridgeResult, text>):
         Err(e): print_access_error(e, true)
 
 fn print_access_error(message: text, decorate_human: bool):
+    print_typed_access_error(t32_map_access_error(message), decorate_human)
+
+fn print_typed_access_error(access_error: AccessError, decorate_human: bool):
+    t32_access_exit_code = 1
     if t32_access_output_mode == ACCESS_OUTPUT_JSON and t32_access_operation != "":
-        print access_error_to_json(t32_access_operation, "", t32_map_access_error(message))
+        print access_error_to_json(t32_access_operation, "", access_error)
     elif decorate_human:
-        print render_error(message)
+        print render_error(access_error.message)
     else:
-        print message
+        print access_error.message
 
 fn t32_map_access_error(message: text) -> AccessError:
     val lower = message.to_lower()
@@ -116,21 +129,56 @@ fn t32_source_code(message: text) -> text:
         return message.slice(0, 5)
     ""
 
-fn prepare_access_args(args: [text]) -> [text]:
+fn prepare_access_args(args: [text]) -> Result<[text], AccessError>:
     t32_access_operation = ""
     t32_access_output_mode = ACCESS_OUTPUT_HUMAN
     val name = args[0]
     var subcmd = ""
     if (name == "window" or name == "action") and args.len() > 1:
         subcmd = args[1]
+    if has_flag(args, "--json") and ((name == "window" and subcmd != "open") or name == "action"):
+        t32_access_output_mode = ACCESS_OUTPUT_JSON
+        t32_access_operation = if name == "window": ACCESS_OPERATION_SURFACE else: ACCESS_OPERATION_ACT
     match find_shared_access_command(name, subcmd):
         Some(descriptor):
             t32_access_operation = descriptor.operation
+            var prepared = args
             if has_flag(args, "--json"):
                 t32_access_output_mode = ACCESS_OUTPUT_JSON
-                return without_flag(args, "--json")
+                prepared = without_flag(args, "--json")
+            val first_arg = if descriptor.subcommand == "": 1 else: 2
+            var request_args: [text] = []
+            var i = first_arg
+            while i < prepared.len():
+                request_args.push(prepared[i])
+                i = i + 1
+            val request = AccessRequest.create(descriptor, t32_access_output_mode, "t32", "", "", request_args, descriptor.safety.timeout_ms, false)
+            access_validate_request(request)?
+            if request_args.len().to_i64() > t32_access_max_args(descriptor.handler_key):
+                return Err(AccessError.detailed("invalid_argument", "too many arguments", "", "Usage: " + descriptor.usage, false, false))
+            if descriptor.handler_key == "t32_history_tail" and request_args.len() == 1 and not t32_positive_decimal(request_args[0]):
+                return Err(AccessError.detailed("invalid_argument", "history count must be a positive integer", "", "Usage: " + descriptor.usage, false, false))
+            return Ok(prepared)
         nil: ()
-    args
+    if t32_access_operation != "":
+        return Ok(without_flag(args, "--json"))
+    Ok(args)
+
+fn t32_access_max_args(handler_key: text) -> i64:
+    match handler_key:
+        "t32_window_list": 0
+        "t32_window_capture": 1
+        "t32_window_describe": 1
+        "t32_action_list": 1
+        "t32_action_invoke": 2
+        "t32_history_tail": 1
+        _: 0
+
+fn t32_positive_decimal(value: text) -> bool:
+    if value == "": return false
+    for ch in value:
+        if not "0123456789".contains(ch): return false
+    parse_int(value) > 0
 
 fn without_flag(args: [text], flag: text) -> [text]:
     var filtered: [text] = []

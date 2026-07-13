@@ -78,13 +78,14 @@ The system spec launches an existing GUI fixture and existing TUI fixture,
 then drives both through the CLI grammar:
 
 1. Capture GUI before action:
-   `doc/06_spec/image/03_system/app/ui_cli_llm_access/gui-before.png`.
+   `doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/gui-before.png`.
 2. Save matching `snapshot --json` and `find --json` protocol evidence under
-   `build/test-artifacts/03_system/app/ui_cli_llm_access/`.
+   `build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/protocol/`.
 3. Act on the canonical ID, refresh, and assert the correlated history pair.
 4. Capture GUI after action as `gui-after.png`.
 5. Save TUI before/after text or ANSI captures as `tui-before.txt` and
-   `tui-after.txt` in the build artifact directory.
+   `tui-after.txt` under
+   `build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/tui/`.
 6. Generate the operator manual with `**Screenshots:**` and
    `**TUI Captures:**` metadata linking these artifacts.
 

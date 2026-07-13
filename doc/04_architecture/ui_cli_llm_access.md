@@ -40,7 +40,7 @@ history rules, and human/JSON rendering.
 The repository already has the semantic core in
 `src/lib/common/ui/access_types.spl`, `access_query.spl`, and
 `win_text_access.spl`. TRACE32 already has a command registry, bridge result,
-renderer, and errors in `src/app/t32_cli/`. Reimplementing either model would
+renderer, and errors in `examples/10_tooling/trace32_tools/t32_cli/`. Reimplementing either model would
 violate `REQ-UCLA-012` and create two parity problems.
 
 The required change is therefore a grammar extraction plus thin source
@@ -204,7 +204,7 @@ src/lib/common/ui/
   access_query.spl         existing query/serialization owner
   win_text_access.spl      existing source envelope; no host backend import
 
-src/app/t32_cli/           catalog/remote/capture/action adapter
+examples/10_tooling/trace32_tools/t32_cli/  catalog/remote/capture/action adapter
 src/app/ui/                deployed UI CLI and local test-API client adapter
 src/app/ui.test_api/       existing live UISession service (unchanged contract)
 src/app/play/ + play.wm    host WM CLI and platform adapter
@@ -299,7 +299,7 @@ and total durations to stderr; JSON stdout stays uncontaminated.
 |---|---|
 | New UI/WM CLI snapshot types | Duplicates `UiAccessSnapshot`/`WinTextSnapshot` and query/action rules |
 | Put adapters behind one generic trait/registry | No runtime plugin need; plain source dispatch is smaller and keeps ownership visible |
-| Reuse `T32BridgeResult` from `src/app/t32_cli` directly | Creates an upward sibling dependency and keeps the grammar T32-owned |
+| Reuse `T32BridgeResult` from the T32 CLI module directly | Creates an upward sibling dependency and keeps the grammar T32-owned |
 | Move WM backend records into common | Leaks mutable platform implementation into the dependency-light entry closure |
 | Infer actions or fall back to raw input | Violates capability and safety requirements |
 | Canonicalize signed JSON bytes | No signing/hash requirement; deterministic arrays and semantic JSON are sufficient |

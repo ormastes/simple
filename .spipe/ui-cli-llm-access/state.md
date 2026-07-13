@@ -33,7 +33,10 @@ Add a shared T32-style `UiCliAccess` command contract that lets LLMs discover, i
 - Sidecar lanes: T32 reference/contract research; common `UiCliAccess` contract; GUI/TUI UI adapters; WM window-list adapter; SSpec evidence, generated manual, and detailed guide.
 - Merge owner: primary Codex agent in the `ui-cli-llm-access` lane; unrelated dirty files and concurrent feature lanes are excluded.
 - Final reviewer: primary highest-capability Codex model after all lane outputs are integrated; it must explicitly accept behavior, architecture, shared logic, safety, exclusions, evidence, generated-manual quality, and completion status.
-- Shared interface: `UiCliAccess`.
+- Shared interface: `UiCliAccess` is the protocol-contract label, not a wrapper
+  class; its concrete shared surface is `AccessCommandDescriptor`,
+  `AccessOperation`, `AccessRequest`, `AccessResult`, `AccessError`,
+  `AccessSafety`, and `AccessOutputMode`.
 - Command concepts: `ui windows list`, `wm windows list`, `snapshot`, `surface`, `find`, `act`, and `history`; research must reuse established repo spellings where they already exist.
 - Manual step helpers: `step("Start UI access")`, `step("List active windows")`, `step("Inspect TUI rendering")`, `step("Inspect GUI rendering")`, `step("Find an interactive target")`, `step("Act on the target")`, and `step("Review access history")`.
 - Setup/checker helpers: `setup_ui_cli_access` and `check-ui-cli-access`, subject to established repo naming discovered in research.
@@ -48,7 +51,7 @@ Add a shared T32-style `UiCliAccess` command contract that lets LLMs discover, i
 - `src/lib/common/ui/win_text_access.spl:1-230` — existing TRACE32/Simple UI/host-WM/compositor normalization and action validation; its upward `WindowInfo` import is the layering gap.
 - `src/app/ui/cli_entry.spl:1-120` — deployed `simple ui` entry lacks access-protocol dispatch.
 - `src/app/play/main.spl:83-220` — advertises WM access commands but currently plans instead of executing them live.
-- `src/app/t32_cli/commands.spl:58-63` and `mod.spl:28-89` — canonical T32 list/capture command and parity registry precedent.
+- `examples/10_tooling/trace32_tools/t32_cli/commands.spl` and `mod.spl` — canonical T32 list/capture command and parity registry precedent.
 
 ### Reusable Modules
 - `common.ui.access` — snapshot/surface/find/action metadata/history/serialization; no parallel CLI model is needed.
@@ -99,7 +102,7 @@ ui_cli_llm_access:
 |---|---|---|---|
 | Shared grammar | `src/lib/common/ui/access_cli_grammar.spl` | descriptor/request/result/error/safety/output grammar and rendering | New |
 | Common access | `src/lib/common/ui/access.spl`, `win_text_access.spl` | exports and backend-type decoupling | Modified |
-| T32 adapter | `src/app/t32_cli/{commands,types,render,mod}.spl` | shared GUI grammar mapping with T32-only compatibility | Modified |
+| T32 adapter | `examples/10_tooling/trace32_tools/t32_cli/{commands,types,render,mod}.spl` | shared GUI grammar mapping with T32-only compatibility | Modified |
 | UI adapter | `src/app/ui/access_cli.spl`, `cli_entry.spl` | existing test-API client and read-only store fallback | New/Modified |
 | WM adapter | `src/app/play/wm_access_cli.spl`, `main.spl` | live list/conversion/action replacing planned output | New/Modified |
 | Evidence | `scripts/check/check-ui-cli-access.spl` | Pure Simple focused checker | New |
@@ -225,3 +228,4 @@ implementation-blocked
 - agent-handoff-integrity-2026-07-13: Current agent-task plan still defines frozen shared interfaces/manual steps/setup checker, disjoint A-E common/T32/UI/WM/evidence lanes, primary merge owner, generated-manual owner, highest-capability final reviewer, merge order, and bounded stop rules. No handoff repair is needed after concurrent sync; runtime evidence remains the missing layer.
 - fetch-only-sync-review-2026-07-13: Updated stale default jj workspace metadata, fetched origin (`Nothing changed`), and confirmed Git `main`/`origin/main` both at `0b63b447263`; tracked file count did not decrease (102659 -> 102677 after importing concurrent Git changes). Spark and highest review STOP commit/rebase/bookmark/push because the tree has ~156 mixed-owner changes, 49 release-bound core/compiler/lib paths without STATUS PASS, a recorded 2895/239/1 compiler suite, `_tip2` conflict, and large WIP-parent divergence. Host load 26.64 with 16 native builds/3 compilers and 97% disk also forbids release rebuild/RSS. Fetch-only sync is complete; no oracle consumed.
 - shared-text-post-migration-release-build-2026-07-13: After higher-reviewed cleanup reclaimed ~248 GiB (125 -> 373 GiB free), the post-migration release seed rebuilt successfully with idle I/O, nice 15, one Cargo job, and the documented release package/path. `simple-compiler` finished optimized with only two existing unused-assignment warnings. Build timing is explicitly not performance evidence because two foreign native builds remained active; the two one-shot RSS/timing oracles are still unconsumed pending a quiet host.
+- ui-cli-contract-and-evidence-repair-2026-07-13: Three bounded Spark lanes plus primary merge review repaired T32 shared `AccessRequest` validation/nonzero typed failures/normalized window JSON, known host-WM capture/stale/kind metadata, UI store-close error propagation, canonical nested evidence paths, post-action focused-state proof, focused no-placeholder checks, deployed `simple-ui` skill guidance, generated-manual source drift, and stale T32 implementation paths in architecture/design/plans. Static direct-runtime, spec-layout, conflict-marker, whitespace, shell-syntax, and SPipe wiring gates pass. Runtime completion remains unproven: the deployed `bin/simple` is still a Rust bootstrap seed, concurrent builds keep host load high, TRACE32 GUI lacks `DISPLAY`/Xauthority and a running container, the live GUI/TUI/WM/transport/perf scenarios have not run, the manual has not been regenerated with real captures, and the marker-file-only final gate still requires evidence binding before highest-capability completion acceptance.
