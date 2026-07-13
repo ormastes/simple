@@ -349,12 +349,24 @@ encoded_arg_has_affixes() {
     encoded_prefix=$(encoded_arg "$2")
     encoded_suffix=$(encoded_arg "$3")
     case "$1" in
-        "$encoded_prefix"?*"$encoded_suffix") return 0 ;;
+        "$encoded_prefix"?*"$encoded_suffix")
+            encoded_middle=${1#"$encoded_prefix"}
+            encoded_middle=${encoded_middle%"$encoded_suffix"}
+            case "$encoded_middle" in *2c*) return 1 ;; esac
+            return 0
+            ;;
         *) return 1 ;;
     esac
 }
 
-qemu_argv_evidence_valid() {
+encoded_kernel_path_valid() {
+    case "$1" in
+        "$2"|*2f"$2"|*5c"$2") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+qemu_argv_evidence_valid() (
     isa=$1
     encoded=$2
     encoded_argv_valid "$encoded" || return 1
@@ -371,7 +383,7 @@ qemu_argv_evidence_valid() {
             [ "$#" -eq 14 ] &&
             [ "$1" = "$(encoded_arg -machine)" ] && [ "$2" = "$(encoded_arg q35)" ] &&
             [ "$3" = "$(encoded_arg -m)" ] && [ "$4" = "$(encoded_arg 512M)" ] &&
-            [ "$5" = "$(encoded_arg -kernel)" ] && case "$6" in *"$kernel_suffix") true ;; *) false ;; esac &&
+            [ "$5" = "$(encoded_arg -kernel)" ] && encoded_kernel_path_valid "$6" "$kernel_suffix" &&
             [ "$7" = "$(encoded_arg -nographic)" ] && [ "$8" = "$(encoded_arg -no-reboot)" ] &&
             [ "$9" = "$(encoded_arg -device)" ] && [ "${10}" = "$(encoded_arg virtio-net-pci)" ] &&
             [ "${11}" = "$(encoded_arg -object)" ] && encoded_arg_has_affixes "${12}" "$object_prefix" "$object_suffix" &&
@@ -382,7 +394,7 @@ qemu_argv_evidence_valid() {
             [ "$1" = "$(encoded_arg -machine)" ] && [ "$2" = "$(encoded_arg virt)" ] &&
             [ "$3" = "$(encoded_arg -cpu)" ] && [ "$4" = "$(encoded_arg cortex-a72)" ] &&
             [ "$5" = "$(encoded_arg -m)" ] && [ "$6" = "$(encoded_arg 512M)" ] &&
-            [ "$7" = "$(encoded_arg -kernel)" ] && case "$8" in *"$kernel_suffix") true ;; *) false ;; esac &&
+            [ "$7" = "$(encoded_arg -kernel)" ] && encoded_kernel_path_valid "$8" "$kernel_suffix" &&
             [ "$9" = "$(encoded_arg -nographic)" ] && [ "${10}" = "$(encoded_arg -device)" ] &&
             [ "${11}" = "$(encoded_arg virtio-net-pci)" ] && [ "${12}" = "$(encoded_arg -object)" ] &&
             encoded_arg_has_affixes "${13}" "$object_prefix" "$object_suffix" &&
@@ -392,14 +404,14 @@ qemu_argv_evidence_valid() {
             [ "$#" -eq 11 ] &&
             [ "$1" = "$(encoded_arg -machine)" ] && [ "$2" = "$(encoded_arg virt)" ] &&
             [ "$3" = "$(encoded_arg -m)" ] && [ "$4" = "$(encoded_arg 512M)" ] &&
-            [ "$5" = "$(encoded_arg -kernel)" ] && case "$6" in *"$kernel_suffix") true ;; *) false ;; esac &&
+            [ "$5" = "$(encoded_arg -kernel)" ] && encoded_kernel_path_valid "$6" "$kernel_suffix" &&
             [ "$7" = "$(encoded_arg -nographic)" ] && [ "$8" = "$(encoded_arg -object)" ] &&
             encoded_arg_has_affixes "$9" "$object_prefix" "$object_suffix" &&
             [ "${10}" = "$(encoded_arg -device)" ] && [ "${11}" = "$ivshmem" ]
             ;;
         *) return 1 ;;
     esac
-}
+)
 
 emit_row_execution_evidence() {
     evidence_prefix="simpleos_qemu_host_gpu_2d_$1_$2"
@@ -714,9 +726,17 @@ EOF
     qemu_argv_evidence_valid riscv64 "$rv_qemu_args"
     if qemu_argv_evidence_valid x86_64 "$(encode_argv_hex -machine virt -m 512M -kernel "$(kernel_for_isa x86_64)" -nographic -no-reboot -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
        qemu_argv_evidence_valid aarch64 "$(encode_argv_hex -machine virt -cpu cortex-a72 -m 512M -kernel "$(kernel_for_isa x86_64)" -nographic -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
+       qemu_argv_evidence_valid aarch64 "$(encode_argv_hex -machine virt -cpu cortex-a72 -m 512M -kernel "evil$(basename "$(kernel_for_isa aarch64)")" -nographic -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
+       qemu_argv_evidence_valid riscv64 "$(encode_argv_hex -machine virt -m 512M -kernel "$(kernel_for_isa riscv64)" -nographic -object memory-backend-file,id=hostgpu,share=on,mem-path=x,readonly=on,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
        qemu_argv_evidence_valid riscv64 "$(encode_argv_hex -machine virt -m 512M -kernel "$(kernel_for_isa riscv64)" -nographic -object memory-backend-file,id=hostgpu,share=off,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
        qemu_argv_evidence_valid riscv64 "$(encode_argv_hex -machine virt -m 512M -kernel "$(kernel_for_isa riscv64)" -nographic -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=wrong)"
     then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    wrong_machine_args=$(encode_argv_hex -machine virt -m 512M -kernel "$(kernel_for_isa x86_64)" -nographic -no-reboot -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)
+    sed "s|simpleos_qemu_host_gpu_2d_linux_x86_64_qemu_device_args=$x86_qemu_args|simpleos_qemu_host_gpu_2d_linux_x86_64_qemu_device_args=$wrong_machine_args|" "$pass_report" >"$bad_backend_report"
+    if validate_report "$bad_backend_report" >/dev/null 2>&1; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
