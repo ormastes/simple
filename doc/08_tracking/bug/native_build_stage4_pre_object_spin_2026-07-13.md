@@ -232,6 +232,32 @@ then run one bounded strict-link verification. Do not add stubs, relabel a
 runtime bundle, hardcode symbols, or substitute the Rust seed as production
 evidence.
 
+The next bounded continuation restored the two historical Stitch theme-sync
+owners and the shared font-atlas program-version contract that broad earlier
+changes had removed while their callers remained. The theme CLI now consumes
+the parsed-design-system accessors with explicit exports, and CUDA, Metal, and
+OpenCL again share the same fail-closed font-program validator already used by
+Vulkan. The Rust HIR keeps text-returning method results typed through
+`replace(...).rfind(...)`; the pure-Simple bootstrap fallback selects the same
+string runtime owner. TODO 559 records that fallback's remaining `-1` versus
+Optional-nil semantic debt rather than accepting it as a general fix.
+
+Two retained-cache strict links after the source restoration and review edits
+compiled all 1,043 sources and converged on the same 105 undefined symbols:
+101 `rt_*`, four `spl_memtrack_*`, and zero source-owned names. The seven prior
+source gaps are therefore closed. The remaining gate is runtime/provider
+composition under TODO 535; no host-GPU or QEMU PASS is claimed.
+
+A read-only archive audit rejects using raw `libsimple_native_all.a` as a
+compiler-only backfill. It defines 252 symbols also owned by the current core-C
+sources, and the archive member containing `rt_cli_run_file` carries 453 global
+definitions. Archive ordering, whole-archive, duplicate-definition allowances,
+or symbol-name closure filters would only hide the ownership error. The safe
+next boundary is a separately built compiler-hook archive whose defined-symbol
+intersection with core/provider archives is gated at zero; Stage4 may compose
+that disjoint artifact with core-C only after the gate exists. Provider-profile
+closure and cache fingerprinting remain a separate follow-up.
+
 Related:
 
 - `doc/08_tracking/bug/native_build_entry_closure_quadratic_hang_2026-07-12.md`

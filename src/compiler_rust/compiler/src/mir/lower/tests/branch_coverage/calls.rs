@@ -208,6 +208,27 @@ fn primitive_to_text_method_call_is_builtin_qualified() {
 }
 
 #[test]
+fn chained_text_replace_rfind_keeps_string_receiver() {
+    let mir = compile_to_mir(
+        "fn parent_dir(path: text) -> i64:\n    val normalized = path.replace(\"\\\\\", \"/\")\n    return normalized.rfind(\"/\")\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "str.replace"
+    )));
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "str.rfind"
+    )));
+    assert!(!has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. }
+            if func_name.contains("DoubleEndedIterator") || func_name == "rfind"
+    )));
+}
+
+#[test]
 fn direct_call_boxes_integer_args_for_any_params() {
     let mir =
         compile_to_mir("fn add(a: Any, b: Any) -> Any:\n    return a + b\n\nfn test() -> Any:\n    return add(1, 2)\n")
