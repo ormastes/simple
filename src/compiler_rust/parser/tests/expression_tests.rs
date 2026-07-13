@@ -90,6 +90,27 @@ fn test_method_call() {
 }
 
 #[test]
+fn test_constant_method_call_is_not_parsed_as_static_type_path() {
+    let module = parse("FRAME_HEADER_WORDS.to_u32()").unwrap();
+    let Node::Expression(Expr::MethodCall {
+        receiver, method, ..
+    }) = &module.items[0]
+    else {
+        panic!("Expected method call, got {:?}", module.items[0]);
+    };
+    assert_eq!(**receiver, Expr::Identifier("FRAME_HEADER_WORDS".to_string()));
+    assert_eq!(method, "to_u32");
+
+    for source in ["FrameHeader.new()", "TCB.empty(1)"] {
+        let static_call = parse(source).unwrap();
+        assert!(matches!(
+            static_call.items[0],
+            Node::Expression(Expr::MethodCall { .. })
+        ));
+    }
+}
+
+#[test]
 fn test_map_placeholder_inside_fstring_interpolation() {
     let module = parse("[\"a\"].map(\"item:{_1}\")").unwrap();
     if let Node::Expression(Expr::MethodCall { method, args, .. }) = &module.items[0] {

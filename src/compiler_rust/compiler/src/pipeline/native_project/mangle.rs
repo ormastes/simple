@@ -620,7 +620,13 @@ fn resolve_method_call_static(
                 use_match
             };
             let best = best.or_else(|| {
-                if candidates.len() == 1 {
+                // A qualified receiver is semantic type evidence.  Do not
+                // discard it merely because another type contributes the only
+                // same-named method in the suffix index (for example,
+                // `str.rfind` versus `DoubleEndedIterator.rfind`).  Bare calls
+                // have no such evidence and retain the unique-candidate
+                // fallback.
+                if !has_type_qualifier && candidates.len() == 1 {
                     candidates.first()
                 } else {
                     None

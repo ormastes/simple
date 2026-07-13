@@ -13,7 +13,7 @@ use super::super::interpreter_state::{LITERAL_FUNCTIONS, LiteralFunctionInfo};
 use crate::interpreter::block_exec::exec_block_fn;
 use crate::interpreter::core_types::Control;
 
-use super::super::{ClassDef, Enums, Env, FunctionDef, ImplMethods, MODULE_GLOBALS, MOVED_VARS};
+use super::super::{ClassDef, Enums, Env, FunctionDef, ImplMethods, GLOBAL_ENUMS, MODULE_GLOBALS, MOVED_VARS};
 
 pub(super) fn eval_literal_expr(
     expr: &Expr,
@@ -293,7 +293,7 @@ pub(super) fn eval_literal_expr(
                 }));
             }
             // Check enums - return as EnumType for variant construction (EnumName.Variant)
-            if enums.contains_key(name) {
+            if enums.contains_key(name) || GLOBAL_ENUMS.with(|cell| cell.borrow().contains_key(name)) {
                 return Ok(Some(Value::EnumType {
                     enum_name: name.clone(),
                 }));

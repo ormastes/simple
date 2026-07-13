@@ -32,6 +32,41 @@ fn test_lower_danger_block_retains_boundary_and_tail_type() {
 }
 
 #[test]
+fn test_lower_resolves_constant_receiver_and_acronym_static_type_semantically() {
+    let constant_module = parse_and_lower(
+        "val FRAME_HEADER_WORDS: i32 = 4\nfn words() -> u32:\n    return FRAME_HEADER_WORDS.to_u32()\n",
+    )
+    .unwrap();
+    let words = constant_module
+        .functions
+        .iter()
+        .find(|function| function.name == "words")
+        .unwrap();
+    let HirStmt::Return(Some(expr)) = &words.body[0] else {
+        panic!("Expected constant conversion return");
+    };
+    let HirExprKind::MethodCall {
+        receiver,
+        method,
+        dispatch,
+        ..
+    } = &expr.kind
+    else {
+        panic!("Expected numeric method call, got {:?}", expr.kind);
+    };
+    assert!(matches!(receiver.kind, HirExprKind::Global(ref name) if name == "FRAME_HEADER_WORDS"));
+    assert_eq!(receiver.ty, TypeId::I32);
+    assert_eq!(method, "to_u32");
+    assert_eq!(*dispatch, DispatchMode::Static);
+    assert_eq!(expr.ty, TypeId::U32);
+
+    parse_and_lower(
+        "class TCB:\n    id: i32\n    static fn empty(slot: i32) -> TCB:\n        return TCB(id: slot)\nfn make() -> TCB:\n    return TCB.empty(1)\n",
+    )
+    .expect("ALL_CAPS acronym types must retain static method resolution");
+}
+
+#[test]
 fn test_lower_binary_ops() {
     let module = parse_and_lower("fn compare(a: i64, b: i64) -> bool:\n    return a < b\n").unwrap();
 

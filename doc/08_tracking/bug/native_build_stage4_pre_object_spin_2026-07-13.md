@@ -149,6 +149,33 @@ direct `rt_*` alias was added. The strict full-CLI link remains unrun, so the
 two primitive method-dispatch failures and hosted runtime composition remain
 open.
 
+The final two non-runtime lowering failures had distinct semantic owners. The
+parser treated every uppercase-leading identifier as a type path, so the typed
+constant `DIRECTX_FRAME_HEADER_WORDS.to_u32()` became a zero-argument static
+call named after the constant. Because spelling cannot distinguish an ALL_CAPS
+constant from an acronym type such as `TCB`, the parser now retains all dotted
+calls as receiver-bearing method syntax; HIR/interpreter semantic resolution
+owns the value-versus-type decision. A focused HIR regression proves both the
+typed constant conversion and `TCB.empty()` static call. Separately, native MIR mangling replaced qualified
+`str.rfind` with the sole same-named method in the whole suffix index,
+`DoubleEndedIterator.rfind`, despite the receiver types disagreeing. Qualified
+calls now require a type-compatible candidate; only bare calls retain the
+unique-candidate fallback. This preserves real class/trait dispatch and lets
+the existing primitive codegen owners handle `i32.to_u32` and `str.rfind`.
+
+The ALL_CAPS/acronym parser regression, semantic HIR regression, and adversarial
+qualified-method regression each pass 1/1. A sidecar then found the interpreter's
+legacy Path-only `Bitfield.new` dispatch. MethodCall now reuses the existing
+bitfield constructor through the `interpreter_call` module boundary and mirrors
+the old imported-enum fallback. Its focused interpreter regression executes and
+passes 1/1 after the bounded continuation. The first compiler-test attempt also exposed four
+recent Vulkan device-property wrappers constructing shared text from an owned
+`String`; their owner now performs the required `SharedText` conversion and the
+compiler test builds. No symbol exception, method-name allow-list, or new
+direct `rt_*` call was added. The strict full-CLI link remains deliberately
+unrun; hosted runtime/provider composition is still open and no compiler,
+host-GPU, or QEMU PASS is claimed. Final higher review passes the bounded diff.
+
 Reuse the preserved 1,043-object cache only after one of those owners changes,
 then run one bounded strict-link verification. Do not add stubs, relabel a
 runtime bundle, hardcode symbols, or substitute the Rust seed as production

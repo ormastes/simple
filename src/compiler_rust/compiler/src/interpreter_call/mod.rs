@@ -17,6 +17,7 @@ pub(crate) use core::{
     bind_args, bind_args_with_injected, exec_function, exec_function_with_captured_env, exec_function_with_values,
     exec_function_with_values_and_self, exec_lambda, instantiate_class, ProceedContext, IN_NEW_METHOD,
 };
+pub(crate) use core::bitfield_support::instantiate_bitfield_from_args;
 
 use std::sync::Arc;
 use std::borrow::Borrow;

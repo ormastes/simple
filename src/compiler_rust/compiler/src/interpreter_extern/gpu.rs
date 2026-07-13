@@ -3016,7 +3016,8 @@ pub fn rt_vulkan_device_driver_identity_fn(args: &[Value]) -> Result<Value, Comp
                     p.api_version
                 )
             })
-            .unwrap_or_default(),
+            .unwrap_or_default()
+            .into(),
     ))
 }
 
@@ -3039,7 +3040,8 @@ pub fn rt_vulkan_selected_device_driver_identity_fn(_args: &[Value]) -> Result<V
                     p.api_version
                 )
             })
-            .unwrap_or_default(),
+            .unwrap_or_default()
+            .into(),
     ))
 }
 
@@ -3058,7 +3060,8 @@ pub fn rt_vulkan_device_type_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Str(
         vulkan_device_properties(index)
             .map(|p| vulkan_device_type_name(p.device_type).to_string())
-            .unwrap_or_default(),
+            .unwrap_or_default()
+            .into(),
     ))
 }
 
@@ -3072,7 +3075,8 @@ pub fn rt_vulkan_selected_device_type_fn(_args: &[Value]) -> Result<Value, Compi
         index
             .and_then(vulkan_device_properties)
             .map(|p| vulkan_device_type_name(p.device_type).to_string())
-            .unwrap_or_default(),
+            .unwrap_or_default()
+            .into(),
     ))
 }
 

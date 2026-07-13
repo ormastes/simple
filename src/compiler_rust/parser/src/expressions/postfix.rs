@@ -90,19 +90,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Check if an expression is a simple type identifier (starting with uppercase)
-    /// Used to detect static method calls like `Duration.new()` vs instance calls like `obj.method()`
-    /// Note: This only returns true for simple identifiers, NOT field accesses like `module.Type`
-    /// Field accesses are handled differently - they remain as MethodCall and the interpreter
-    /// resolves the type from the module.
-    fn is_type_path(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::Identifier(name) => name.chars().next().is_some_and(|c| c.is_uppercase()),
-            // Don't convert field accesses to paths - let the interpreter handle module.Type.method()
-            _ => false,
-        }
-    }
-
     fn validate_bracket_operand(&self, expr: &Expr, context: &str) -> Result<(), ParseError> {
         match expr {
             Expr::Binary {
@@ -377,24 +364,16 @@ impl<'a> Parser<'a> {
                                 let trailing_lambda = self.parse_trailing_lambda()?;
                                 args.push(Argument::new(None, trailing_lambda));
                             }
-                            // Check if this is a static method call: Type.method()
-                            // Indicated by receiver being a type name (uppercase first letter)
-                            if self.is_type_path(&expr) {
-                                // Static method call: convert to Path + Call
-                                let mut path_segments = self.field_access_to_path_segments(&expr)?;
-                                path_segments.push(field);
-                                expr = Expr::Call {
-                                    callee: Box::new(Expr::Path(path_segments)),
-                                    args,
-                                };
-                            } else {
-                                expr = Expr::MethodCall {
-                                    receiver: Box::new(expr),
-                                    method: field,
-                                    args,
-                                    generic_args,
-                                };
-                            }
+                            // Parsing cannot distinguish an ALL_CAPS constant
+                            // receiver from an acronym type such as `TCB`.
+                            // Preserve the receiver uniformly; HIR/interpreter
+                            // resolution owns the value-versus-type decision.
+                            expr = Expr::MethodCall {
+                                receiver: Box::new(expr),
+                                method: field,
+                                args,
+                                generic_args,
+                            };
                         } else if self.check(&TokenKind::Backslash) {
                             // Method call with only trailing block: obj.method \x: body
                             let trailing_lambda = self.parse_trailing_lambda()?;

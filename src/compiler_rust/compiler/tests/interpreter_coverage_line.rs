@@ -51,6 +51,18 @@ main = danger_tail() + danger_continue()"#;
 }
 
 #[test]
+fn test_interpreter_method_call_preserves_bitfield_static_new() {
+    let code = r#"bitfield Flags(u32):
+    a: 4
+    b: 28
+
+var flags: Flags = Flags.new(3)
+main = flags.a"#;
+
+    assert_eq!(run_interpreter(code).unwrap(), 3);
+}
+
+#[test]
 fn test_line_coverage_basic() {
     if !check_coverage_enabled() {
         println!("Coverage disabled, skipping test");
