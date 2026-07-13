@@ -310,6 +310,18 @@ three-cycle cap, no fourth run is allowed. TODO 561 is the next root blocker;
 the new compiler capsule remains unit/integration verified but has not yet been
 exercised by a successful Stage4 link or QEMU run.
 
+The follow-up root fix centralizes the lexer continuation contract in
+`token_requires_rhs` and applies it to both the struct lexer and the legacy
+module scanner. A trailing required-RHS token now suppresses physical newline
+and continuation indentation without mutating the enclosing indentation stack;
+open-ended `..` and ambiguous unary/postfix operators remain structural. The
+focused pure-Simple regression mirrors `_launch_meta_le_u32`. Its execution is
+currently blocked before the spec starts because the canonical release binary
+identifies itself as the Rust bootstrap seed and aborts on unresolved
+`rt_cli_arg_count`; the seed was not accepted as a normal test fallback. The
+Stage4 three-cycle cap remains exhausted, so neither parser PASS nor a capsule,
+host-GPU, or QEMU PASS is claimed.
+
 Related:
 
 - `doc/08_tracking/bug/native_build_entry_closure_quadratic_hang_2026-07-12.md`
