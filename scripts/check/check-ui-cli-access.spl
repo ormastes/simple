@@ -23,6 +23,7 @@ var perf_p95_ms: i64 = -1
 var perf_find_p95_ms: i64 = -1
 var perf_rss_delta_mib: i64 = -1
 var perf_max_rss_mib: i64 = -1
+var perf_output_checksum: i64 = -1
 
 fn _current_time_ms() -> i64:
     time_now_unix_micros() / 1000
@@ -82,6 +83,10 @@ fn _t32_common_output_ok(result: AccessResult, operation: AccessOperation, needl
 
 fn _base_ok() -> bool:
     if ui_access_cli_descriptors().len() != 6 or wm_access_descriptors().len() != 5 or shared_access_commands().len() != 6: return _base_fail("descriptor counts")
+    match ui_access_cli_parse_request(["unknown"]):
+        Ok(_): return _base_fail("unknown command accepted")
+        Err(e):
+            if e.code != "invalid_argument": return _base_fail("unknown command code")
     val parsed = ui_access_cli_parse_request(["find", "--surface", "main", "--kind", "button", "--limit", "10"])
     match parsed:
         Err(_): return _base_fail("request parse")
@@ -177,6 +182,12 @@ fn _compatibility_ok() -> bool:
     val json = access_render_json(access_result_from_snapshot(ACCESS_OPERATION_LIST, "simple_ui", "", _fixture_snapshot(), 1))
     ui_ok and wm_ok and _t32_compatibility_ok() and json.contains("\"schema\":\"simple.access/v1\"")
 
+fn _shared_grammar_ok() -> bool:
+    val ui = ui_access_cli_descriptors()
+    val wm = wm_access_descriptors()
+    val t32 = shared_access_commands()
+    _has_descriptor(ui, "windows", "", ACCESS_OPERATION_LIST) and _has_descriptor(ui, "snapshot", "", ACCESS_OPERATION_SNAPSHOT) and _has_descriptor(ui, "surface", "", ACCESS_OPERATION_SURFACE) and _has_descriptor(ui, "find", "", ACCESS_OPERATION_FIND) and _has_descriptor(ui, "act", "", ACCESS_OPERATION_ACT) and _has_descriptor(ui, "history", "", ACCESS_OPERATION_HISTORY) and _has_descriptor(wm, "windows", "", ACCESS_OPERATION_LIST) and _has_descriptor(wm, "wm-text-snapshot", "", ACCESS_OPERATION_SNAPSHOT) and _has_descriptor(wm, "wm-text-find", "", ACCESS_OPERATION_FIND) and _has_descriptor(wm, "wm-text-act", "", ACCESS_OPERATION_ACT) and _has_descriptor(wm, "wm-text-history", "", ACCESS_OPERATION_HISTORY) and _has_descriptor(t32, "windows", "", ACCESS_OPERATION_LIST) and _has_descriptor(t32, "window", "show", ACCESS_OPERATION_SNAPSHOT) and _has_descriptor(t32, "window", "describe", ACCESS_OPERATION_SURFACE) and _has_descriptor(t32, "action", "list", ACCESS_OPERATION_FIND) and _has_descriptor(t32, "action", "do", ACCESS_OPERATION_ACT) and _has_descriptor(t32, "history", "", ACCESS_OPERATION_HISTORY)
+
 fn _identity_ok() -> bool:
     val snapshot = _inventory_snapshot()
     val result = access_result_from_snapshot(ACCESS_OPERATION_LIST, "simple_ui", "fixture", snapshot, 1)
@@ -188,19 +199,26 @@ fn _identity_ok() -> bool:
         Ok(_): return false
         Err(e):
             if e.code != "target_not_found": return false
-    file_read("src/app/ui/access_cli.spl").contains("stale_target")
+    val stale_snapshot = win_text_host_wm_single_window_snapshot("stale", "stale", "Stale", "", 1, 1, false, 1, 1, 3)
+    val stale_result = access_result_from_snapshot(ACCESS_OPERATION_LIST, "host_wm", "", stale_snapshot.access, 1)
+    access_render_json(stale_result).contains("\"stale\":true")
 
 fn _output_modes_ok() -> bool:
     val result = access_result_from_snapshot(ACCESS_OPERATION_LIST, "simple_ui", "fixture", _inventory_snapshot(), 1)
     val human = access_render_human(result)
     val json = access_render_json(result)
-    human.contains("Alpha") and json.starts_with("{") and json.ends_with("}") and not json.contains("\n") and _contains_all(json, ["\"schema_version\":1", "\"id\":\"a\"", "\"returned\":1", "\"truncated\":true"])
+    val utf8_surface = UiAccessSurface(surface_id: "utf8", title: "窗口", active: true, window_id: "", app_id: "fixture", root_canonical_id: "utf8#root")
+    val utf8_root = UiAccessNode(canonical_id: "utf8#root", surface_id: "utf8", widget_id: "root", kind: "window", visible: true, focused: true, enabled: true, selected: false, text_value: "窗口", props: [], child_ids: [], action_names: [])
+    val utf8_result = access_result_from_snapshot(ACCESS_OPERATION_LIST, "simple_ui", "utf8", UiAccessSnapshot(protocol_version: 1, snapshot_revision: 1, mode: "fixture", active_surface: "utf8", surfaces: [utf8_surface], nodes: [utf8_root], recent_events: []), 1)
+    _contains_all(human, ["a", "Alpha", "fixture"]) and _contains_all(json, ["\"id\":\"a\"", "\"title\":\"Alpha\"", "\"owner\":\"fixture\""]) and json.starts_with("{") and json.ends_with("}") and not json.contains("\n") and _contains_all(json, ["\"schema_version\":1", "\"returned\":1", "\"truncated\":true"]) and access_render_human(utf8_result).contains("窗口") and access_render_json(utf8_result).contains("窗口")
 
 fn _environment_ok() -> bool:
     val empty = UiAccessSnapshot(protocol_version: 1, snapshot_revision: 0, mode: "headless", active_surface: "", surfaces: [], nodes: [], recent_events: [])
     val listed = access_result_from_snapshot(ACCESS_OPERATION_LIST, "simple_ui", "", empty, 100)
     if listed.returned_count != 0 or not access_render_json(listed).contains("\"items\":[]"): return false
+    if not ui_access_snapshot_to_json(empty).contains("\"mode\":\"headless\""): return false
     if ui_access_cli_db_error(ACCESS_OPERATION_ACT, "fixture").code != "source_unavailable": return false
+    if ui_access_cli_http_error(500, "", "").code != "source_unavailable": return false
     match access_validate_snapshot_action(_fixture_snapshot(), "main#run", "unsupported"):
         Ok(_): false
         Err(e): e.code == "unsupported_action"
@@ -236,7 +254,9 @@ fn _error_taxonomy_ok() -> bool:
         ui_access_cli_http_error(504, "", "").code,
         ui_access_cli_http_error(400, "", "bad input").code
     ]
-    mapped == ["source_unavailable", "interaction_required", "permission_denied", "unsupported_action", "target_not_found", "stale_target", "target_disabled", "target_busy", "timeout", "invalid_argument"]
+    if mapped != ["source_unavailable", "interaction_required", "permission_denied", "unsupported_action", "target_not_found", "stale_target", "target_disabled", "target_busy", "timeout", "invalid_argument"]: return false
+    val error_json = access_error_to_json(ACCESS_OPERATION_FIND, "fixture-error", ui_access_cli_http_error(400, "", "bad input"))
+    _contains_all(error_json, ["\"ok\":false", "\"code\":\"invalid_argument\""])
 
 fn _common_ownership_ok() -> bool:
     val grammar = file_read("src/lib/common/ui/access_cli_grammar.spl")
@@ -245,7 +265,9 @@ fn _common_ownership_ok() -> bool:
     val wm = file_read("src/app/play/wm_access_cli.spl")
     val access_sources = grammar + win_text + ui + wm
     val access_sources_lower = access_sources.to_lower()
-    not grammar.contains("std.play") and not grammar.contains("rt_") and not win_text.contains("WindowInfo") and not win_text.contains("rt_") and not ui.contains("rt_") and not wm.contains("rt_") and not access_sources_lower.contains("draw_ir") and not access_sources_lower.contains("drawir") and not access_sources_lower.contains("web_ir") and not access_sources_lower.contains("webir") and not access_sources_lower.contains("engine2d") and not access_sources_lower.contains("fontrenderer")
+    val shared_calls = ["access_find_descriptor(", "access_validate_request(", "access_result_from_snapshot(", "access_render_human(", "access_render_json("]
+    val wm_shared_calls = ["access_find_descriptor(", "access_validate_request(", "access_result_from_snapshot(", "access_render_human(", "access_render_json(", "win_text_find_nodes(", "access_validate_snapshot_action("]
+    _contains_all(ui, shared_calls) and _contains_all(wm, wm_shared_calls) and not ui.contains("fn access_render_") and not ui.contains("fn access_find_descriptor") and not ui.contains("fn access_validate_snapshot_action") and not wm.contains("fn access_render_") and not wm.contains("fn access_find_descriptor") and not wm.contains("fn access_validate_snapshot_action") and not grammar.contains("std.play") and not grammar.contains("rt_") and not win_text.contains("WindowInfo") and not win_text.contains("rt_") and not ui.contains("rt_") and not wm.contains("rt_") and not access_sources_lower.contains("draw_ir") and not access_sources_lower.contains("drawir") and not access_sources_lower.contains("web_ir") and not access_sources_lower.contains("webir") and not access_sources_lower.contains("engine2d") and not access_sources_lower.contains("fontrenderer")
 
 fn _bounded_hot_paths_ok() -> bool:
     val store = file_read("src/lib/nogc_sync_mut/ui/access_store.spl")
@@ -260,7 +282,9 @@ fn _bounded_hot_paths_ok() -> bool:
 
 fn _live_transport_evidence_ok() -> bool:
     val evidence = file_read("build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/protocol/live-ui-transport.txt")
-    _contains_all(evidence, ["client_process=separate", "loopback_default=true", "live_windows=pass", "live_find=pass", "live_act=pass", "post_action_state=pass", "correlated_history=pass", "service_stop=source_unavailable", "db_fallback=read_only", "db_act=source_unavailable"])
+    if not _contains_all(evidence, ["transport=existing-test-api", "client_process=separate", "loopback_default=true", "help_operations=pass", "human_json_fixture_fields=equal", "malformed_args=invalid_argument", "unknown_target=target_not_found", "live_windows=pass", "live_find=pass", "live_act=pass", "post_action_state=pass", "correlated_history=pass", "correlated_history_request_id=", "service_stop=source_unavailable", "db_fallback=read_only", "db_act=source_unavailable"]): return false
+    val parts = evidence.split("correlated_history_request_id=")
+    parts.len() >= 2 and parts[1].split("\n")[0] != ""
 
 fn _manual_evidence_ok() -> bool:
     val root = "build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/"
@@ -340,12 +364,22 @@ fn _wm_loop_ok() -> bool:
     val target = "wm:" + windows[0].window_id + "#root"
     val normalized = wm_access_snapshot_from_windows(windows, _current_time_ms())
     if normalized.access.surfaces.len() != windows.len() or normalized.access.nodes.len() != windows.len(): return false
-    for node in normalized.access.nodes:
-        if node.kind != "host_window": return false
+    var node_index: i64 = 0
+    while node_index < normalized.access.nodes.len():
+        val node = normalized.access.nodes[node_index]
+        if node.kind != "host_window" or node.child_ids.len() != 0: return false
+        node_index = node_index + 1
+    val empty = wm_access_snapshot_from_windows([], _current_time_ms())
+    val empty_result = access_result_from_snapshot(ACCESS_OPERATION_LIST, "host_wm", "", empty.access, 100)
+    if empty_result.returned_count != 0 or not access_render_json(empty_result).contains("\"items\":[]"): return false
+    match access_validate_snapshot_action(normalized.access, "wm:__missing__#root", "focus"):
+        Ok(_): return false
+        Err(e):
+            if e.code != "target_not_found": return false
     match wm_access_execute("windows", [], ACCESS_OUTPUT_JSON):
         Err(_): return false
         Ok(listed):
-            if not _contains_all(listed, [target, "\"schema\":\"simple.access/v1\"", "\"id\":\"host_wm\""]): return false
+            if not _contains_all(listed, [target, "\"schema\":\"simple.access/v1\"", "\"id\":\"host_wm\"", "\"title\":", "\"owner\":", "\"surface_kind\":", "\"state\":", "\"geometry\":", "\"focused\":", "\"visible\":", "\"parent_id\":", "\"capabilities\":", "\"captured_at\":", "\"stale\":"]): return false
     match wm_access_execute("wm-text-snapshot", ["host_wm"], ACCESS_OUTPUT_JSON):
         Err(_): return false
         Ok(snapshot):
@@ -391,9 +425,9 @@ fn _sort(values: [i64]) -> [i64]:
         i = i + 1
     out
 
-fn _rss_kib() -> i64:
+fn _status_kib(label: text) -> i64:
     for line in file_read("/proc/self/status").split("\n"):
-        if line.starts_with("VmRSS:"):
+        if line.starts_with(label):
             var digits = ""
             for ch in line:
                 if ch >= "0" and ch <= "9": digits = digits + ch
@@ -401,10 +435,14 @@ fn _rss_kib() -> i64:
     0
 
 fn _perf_ok() -> bool:
-    val before = _rss_kib()
     val snapshot = _perf_snapshot()
+    val warm_list = access_result_from_snapshot(ACCESS_OPERATION_LIST, "simple_ui", "perf", snapshot, 100)
+    val warm_find = ui_access_find_nodes(snapshot, "", "button", "Run", 1000)
+    if warm_list.returned_count != 100 or warm_find.len() != 100: return false
+    val before = _status_kib("VmRSS:")
     var lists: [i64] = []
     var finds: [i64] = []
+    var checksum: i64 = 0
     var i = 0
     while i < 20:
         val t1 = _current_time_ms()
@@ -414,15 +452,17 @@ fn _perf_ok() -> bool:
         val found = ui_access_find_nodes(snapshot, "", "button", "Run", 1000)
         finds = finds.push(_current_time_ms() - t2)
         if listed.returned_count != 100 or found.len() != 100: return false
+        checksum = checksum + listed.returned_count + found.len().to_i64()
         i = i + 1
     val sl = _sort(lists)
     val sf = _sort(finds)
     perf_p50_ms = sl[9]
     perf_p95_ms = sl[18]
     perf_find_p95_ms = sf[18]
-    val after = _rss_kib()
+    val after = _status_kib("VmRSS:")
     perf_rss_delta_mib = if after > before: (after - before + 1023) / 1024 else: 0
-    perf_max_rss_mib = (after + 1023) / 1024
+    perf_max_rss_mib = (_status_kib("VmHWM:") + 1023) / 1024
+    perf_output_checksum = checksum
     perf_p95_ms <= 100 and perf_find_p95_ms <= 20 and perf_rss_delta_mib <= 20
 
 fn _scenario_ok(s: text, reviewed_revision: text, evidence_manifest_sha256: text) -> bool:
@@ -430,7 +470,7 @@ fn _scenario_ok(s: text, reviewed_revision: text, evidence_manifest_sha256: text
     if not _base_ok(): return false
     match s:
         "setup": true
-        "shared-grammar": true
+        "shared-grammar": _shared_grammar_ok()
         "t32-compatibility": _t32_compatibility_ok()
         "live-tui-loop": _ui_loop_ok("tui")
         "live-gui-loop": _ui_loop_ok("gui")
@@ -456,20 +496,20 @@ fn _emit(s: text):
         "setup": ()
         "json-parser": print "surface_id=main canonical_id=main#run action=run request_id=gate-run"
         "shared-grammar": print "AccessCommandDescriptor AccessOperation AccessRequest AccessResult AccessError AccessSafety AccessOutputMode\nsources=trace32,simple_ui,host_wm\nparity=list,capture_or_snapshot,find,act,history"
-        "t32-compatibility": print "t32_specific_commands=preserved descriptor_mapping=pass operation_mapping=pass result_mapping=pass error_mapping=pass safety_mapping=pass output_mapping=pass"
+        "t32-compatibility": print "t32_shared_operations=preserved descriptor_mapping=pass operation_mapping=pass result_mapping=pass error_mapping=pass safety_mapping=pass output_mapping=pass"
         "live-tui-loop": print "source=simple_ui surface_kind=tui canonical_id=main#run action_result=ok history_correlation=pass capture_kind=tui"
         "live-gui-loop": print "source=simple_ui surface_kind=gui canonical_id=main#run action_result=ok history_correlation=pass capture_kind=gui"
-        "live-wm-loop": print "source=host_wm schema_parity=pass deterministic_order=pass top_level_only=true owner_adapter_action=pass history_correlation=pass"
-        "identity-ordering-staleness": print "stable_identity=pass deterministic_order=pass unavailable_fields=explicit removed_target=target_not_found stale_response=stale_target"
-        "output-modes": print "human_json_semantics=equal json_payload_count=1 json_encoding=utf-8 json_version=1 stdout_diagnostics=0 ordering=deterministic truncation=explicit"
-        "error-taxonomy": print "source_unavailable interaction_required permission_denied unsupported_action target_not_found stale_target target_disabled target_busy timeout invalid_argument semantic_fallback=none fabricated_output=none"
-        "environment-states": print "zero_windows=empty headless=headless backend_unavailable=source_unavailable unsupported_rendering=unsupported_action crash_count=0"
-        "action-safety": print "target_reresolved=true capability_checked=true state_checked=true input_bounded=true timeout_enforced=true confirmation_policy=eligible silent_approval=false raw_input_fallback=false correlated_result=true"
-        "common-ownership": print "cli_parallel_model=none normalization_owner=common query_owner=common serialization_owner=common safety_owner=common history_owner=common\nadapter_owned=enumerate,capture,refresh,act common_host_backend_imports=0 raw_runtime_shortcuts=0 renderer_ir_coupling=0"
+        "live-wm-loop": print "source=host_wm shared_schema_fields=pass one_host_root_per_owner_window=true empty_windows=pass missing_target=target_not_found owner_adapter_action=pass history_correlation=pass"
+        "identity-ordering-staleness": print "stable_identity=pass deterministic_order=pass unavailable_fields=explicit removed_target=target_not_found stale_metadata=true"
+        "output-modes": print "human_json_fixture_fields=equal utf8_fields=preserved json_single_line=true schema_version=1 ordering=deterministic truncation=explicit"
+        "error-taxonomy": print "source_unavailable interaction_required permission_denied unsupported_action target_not_found stale_target target_disabled target_busy timeout invalid_argument typed_error_json=pass"
+        "environment-states": print "zero_windows=empty headless=headless backend_unavailable=source_unavailable unsupported_action=unsupported_action"
+        "action-safety": print "queried_target_used=true capability_checked=true state_checked=true invalid_coordinates=rejected confirmation_required=true correlated_result=true"
+        "common-ownership": print "common_delegation_calls=pass frontend_owner_redefinitions=0 common_host_backend_imports=0 raw_runtime_string_guard=pass renderer_ir_string_guard=pass"
         "bounded-hot-paths": print "memory_history_limit=64 persisted_history_limit=64 ui_subprocess_calls=0 wm_subprocess_per_record=0 retry_sleeps=0"
-        "performance": print "fixture_windows=100 fixture_nodes=1000 warm=true list_snapshot_p95_ms<=100 find_route_p95_ms<=20 rss_delta_mib<=20\np50_ms=" + perf_p50_ms.to_text() + " p95_ms=" + perf_p95_ms.to_text() + " max_rss_mib=" + perf_max_rss_mib.to_text() + " output_checksum=windows-100_nodes-1000"
-        "compatibility-help": print "simple_ui_operations=windows,snapshot,surface,find,act,history wm_commands=live existing_spellings=preserved t32_mapping_documented=true existing_ui_modes=pass existing_play_commands=pass mcp_http_protocol=pass schema_additions=additive"
-        "live-ui-transport": print "transport=existing-test-api client_process=separate loopback_default=true live_windows=pass live_find=pass live_act=pass post_action_state=pass correlated_history=pass service_stop=source_unavailable db_fallback=read_only db_act=source_unavailable"
+        "performance": print "fixture_windows=100 fixture_nodes=1000 warm=true list_result_p95_ms<=100 find_nodes_p95_ms<=20 rss_delta_mib<=20\np50_ms=" + perf_p50_ms.to_text() + " p95_ms=" + perf_p95_ms.to_text() + " max_rss_mib=" + perf_max_rss_mib.to_text() + " output_checksum=" + perf_output_checksum.to_text()
+        "compatibility-help": print "simple_ui_operations=windows,snapshot,surface,find,act,history wm_descriptors=present existing_spellings=preserved unknown_command=invalid_argument t32_mapping_checked=true schema_v1_render=pass"
+        "live-ui-transport": print "transport=existing-test-api client_process=separate loopback_default=true help_operations=pass human_json_fixture_fields=equal malformed_args=invalid_argument unknown_target=target_not_found live_windows=pass live_find=pass live_act=pass post_action_state=pass correlated_history=pass service_stop=source_unavailable db_fallback=read_only db_act=source_unavailable"
         "manual-evidence": print "capture_kind=tui capture_kind=gui capture_kind=protocol manual_steps=7 placeholder_passes=0"
         "final": print "common_contract=pass cli_routing=pass ui_wm_parity=pass shared_grammar_parity=pass schema=pass safety=pass action_history=pass live_transport=accepted performance=accepted generated_manual=pass direct_runtime_guards=pass spec_layout_guard=pass highest_capability_review=accepted"
         _: ()

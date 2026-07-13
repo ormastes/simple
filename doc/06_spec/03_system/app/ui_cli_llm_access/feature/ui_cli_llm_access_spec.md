@@ -78,9 +78,9 @@ _check_gate("shared-grammar", [
 </details>
 
 <details>
-<summary>Advanced: should preserve T32 commands while mapping overlapping operations</summary>
+<summary>Advanced: should preserve T32 shared operations while mapping them to the common grammar</summary>
 
-#### should preserve T32 commands while mapping overlapping operations
+#### should preserve T32 shared operations while mapping them to the common grammar
 
 - Start UI access
    - Protocol capture: after_step
@@ -95,7 +95,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Start UI access")
 _check_gate("t32-compatibility", [
-    "t32_specific_commands=preserved",
+    "t32_shared_operations=preserved",
     "descriptor_mapping=pass",
     "operation_mapping=pass",
     "result_mapping=pass",
@@ -192,7 +192,7 @@ _check_gate("live-gui-loop", [
 
 </details>
 
-#### should list and safely act on live host-WM windows
+#### should list and safely act on one normalized root per live host-WM window
 
 - List active windows
    - Protocol capture: after_step
@@ -217,9 +217,10 @@ step("Act on the target")
 step("Review access history")
 _check_gate("live-wm-loop", [
     "source=host_wm",
-    "schema_parity=pass",
-    "deterministic_order=pass",
-    "top_level_only=true",
+    "shared_schema_fields=pass",
+    "one_host_root_per_owner_window=true",
+    "empty_windows=pass",
+    "missing_target=target_not_found",
     "owner_adapter_action=pass",
     "history_correlation=pass"
 ])
@@ -228,9 +229,9 @@ _check_gate("live-wm-loop", [
 </details>
 
 <details>
-<summary>Advanced: should preserve stable scoped identity and reject stale targets</summary>
+<summary>Advanced: should preserve stable scoped identity, stale metadata, and removed-target rejection</summary>
 
-#### should preserve stable scoped identity and reject stale targets
+#### should preserve stable scoped identity, stale metadata, and removed-target rejection
 
 - List active windows
    - Protocol capture: after_step
@@ -255,7 +256,7 @@ _check_gate("identity-ordering-staleness", [
     "deterministic_order=pass",
     "unavailable_fields=explicit",
     "removed_target=target_not_found",
-    "stale_response=stale_target"
+    "stale_metadata=true"
 ])
 ```
 
@@ -264,7 +265,7 @@ _check_gate("identity-ordering-staleness", [
 
 </details>
 
-#### should keep human and versioned JSON output semantically equal
+#### should preserve fixture fields and UTF-8 across human and versioned JSON output
 
 - List active windows
    - Protocol capture: after_step
@@ -279,11 +280,10 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("List active windows")
 _check_gate("output-modes", [
-    "human_json_semantics=equal",
-    "json_payload_count=1",
-    "json_encoding=utf-8",
-    "json_version=",
-    "stdout_diagnostics=0",
+    "human_json_fixture_fields=equal",
+    "utf8_fields=preserved",
+    "json_single_line=true",
+    "schema_version=1",
     "ordering=deterministic",
     "truncation=explicit"
 ])
@@ -291,7 +291,7 @@ _check_gate("output-modes", [
 
 </details>
 
-#### should return every stable access failure without fabrication
+#### should map every stable code and serialize invalid arguments through typed error JSON
 
 - Find an interactive target
    - Protocol capture: after_step
@@ -319,8 +319,7 @@ _check_gate("error-taxonomy", [
     "target_busy",
     "timeout",
     "invalid_argument",
-    "semantic_fallback=none",
-    "fabricated_output=none"
+    "typed_error_json=pass"
 ])
 ```
 
@@ -350,8 +349,7 @@ _check_gate("environment-states", [
     "zero_windows=empty",
     "headless=headless",
     "backend_unavailable=source_unavailable",
-    "unsupported_rendering=unsupported_action",
-    "crash_count=0"
+    "unsupported_action=unsupported_action"
 ])
 ```
 
@@ -360,7 +358,7 @@ _check_gate("environment-states", [
 
 </details>
 
-#### should enforce capability, state, input, timeout, and confirmation safety
+#### should enforce capability, state, coordinate, and confirmation safety
 
 - Find an interactive target
    - Protocol capture: after_step
@@ -381,14 +379,11 @@ step("Find an interactive target")
 step("Act on the target")
 step("Review access history")
 _check_gate("action-safety", [
-    "target_reresolved=true",
+    "queried_target_used=true",
     "capability_checked=true",
     "state_checked=true",
-    "input_bounded=true",
-    "timeout_enforced=true",
-    "confirmation_policy=eligible",
-    "silent_approval=false",
-    "raw_input_fallback=false",
+    "invalid_coordinates=rejected",
+    "confirmation_required=true",
     "correlated_result=true"
 ])
 ```
@@ -396,9 +391,9 @@ _check_gate("action-safety", [
 </details>
 
 <details>
-<summary>Advanced: should keep snapshots, queries, serialization, safety, and history common-owned</summary>
+<summary>Advanced: should delegate grammar, query, rendering, and safety to common owners</summary>
 
-#### should keep snapshots, queries, serialization, safety, and history common-owned
+#### should delegate grammar, query, rendering, and safety to common owners
 
 - Start UI access
    - Protocol capture: after_step
@@ -413,15 +408,11 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Start UI access")
 _check_gate("common-ownership", [
-    "cli_parallel_model=none",
-    "normalization_owner=common",
-    "query_owner=common",
-    "serialization_owner=common",
-    "safety_owner=common",
-    "history_owner=common",
-    "adapter_owned=enumerate,capture,refresh,act",
+    "common_delegation_calls=pass",
+    "frontend_owner_redefinitions=0",
     "common_host_backend_imports=0",
-    "raw_runtime_shortcuts=0"
+    "raw_runtime_string_guard=pass",
+    "renderer_ir_string_guard=pass"
 ])
 ```
 
@@ -431,9 +422,9 @@ _check_gate("common-ownership", [
 </details>
 
 <details>
-<summary>Advanced: should keep bounded access hot paths free of scans and subprocess fanout</summary>
+<summary>Advanced: should bound history and reject selected subprocess and retry-sleep hot paths</summary>
 
-#### should keep bounded access hot paths free of scans and subprocess fanout
+#### should bound history and reject selected subprocess and retry-sleep hot paths
 
 - List active windows
    - Protocol capture: after_step
@@ -457,13 +448,11 @@ step("Inspect TUI rendering")
 step("Inspect GUI rendering")
 step("Find an interactive target")
 _check_gate("bounded-hot-paths", [
-    "history_limit=64",
-    "full_tree_scans=0",
-    "source_reparses=0",
-    "subprocess_per_record=0",
-    "retry_sleeps=0",
-    "cached_artifact_wrapper=pass",
-    "dependency_light_grammar=pass"
+    "memory_history_limit=64",
+    "persisted_history_limit=64",
+    "ui_subprocess_calls=0",
+    "wm_subprocess_per_record=0",
+    "retry_sleeps=0"
 ])
 ```
 
@@ -499,8 +488,8 @@ _check_gate("performance", [
     "fixture_windows=100",
     "fixture_nodes=1000",
     "warm=true",
-    "list_snapshot_p95_ms<=100",
-    "find_route_p95_ms<=20",
+    "list_result_p95_ms<=100",
+    "find_nodes_p95_ms<=20",
     "rss_delta_mib<=20",
     "p50_ms=",
     "p95_ms=",
@@ -514,7 +503,7 @@ _check_gate("performance", [
 
 </details>
 
-#### should keep help, deployed commands, and existing access surfaces compatible
+#### should keep shared descriptors and established command spellings compatible
 
 - Start UI access
    - TUI capture: after_step
@@ -530,13 +519,11 @@ Reproduction: this block contains the complete executable scenario source.
 step("Start UI access")
 _check_gate("compatibility-help", [
     "simple_ui_operations=windows,snapshot,surface,find,act,history",
-    "wm_commands=live",
+    "wm_descriptors=present",
     "existing_spellings=preserved",
-    "t32_mapping_documented=true",
-    "existing_ui_modes=pass",
-    "existing_play_commands=pass",
-    "mcp_http_protocol=pass",
-    "schema_additions=additive"
+    "unknown_command=invalid_argument",
+    "t32_mapping_checked=true",
+    "schema_v1_render=pass"
 ])
 ```
 
@@ -569,6 +556,10 @@ _check_gate("live-ui-transport", [
     "transport=existing-test-api",
     "client_process=separate",
     "loopback_default=true",
+    "help_operations=pass",
+    "human_json_fixture_fields=equal",
+    "malformed_args=invalid_argument",
+    "unknown_target=target_not_found",
     "live_windows=pass",
     "live_find=pass",
     "live_act=pass",

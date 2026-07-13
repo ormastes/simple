@@ -11,7 +11,12 @@ PORT=18765
 IMAGE_OUT=doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access
 mkdir -p "$OUT"
 mkdir -p "$IMAGE_OUT"
-rm -f "$DB" "$OUT"/live-*.json "$OUT"/live-*.log "$OUT"/live-ui-transport.txt
+rm -f "$DB" "$OUT"/live-*.json "$OUT"/live-*.log "$OUT"/live-*.txt
+
+"$SIMPLE_BIN" ui --help >"$OUT/live-help.txt"
+for operation in windows snapshot surface find act history; do
+    rg -q "simple ui $operation" "$OUT/live-help.txt"
+done
 
 cleanup() {
     if [ "${SERVER_PID:-}" ]; then
@@ -35,6 +40,14 @@ while [ "$i" -lt 50 ]; do
     sleep 0.1
 done
 [ "$ready" -eq 1 ]
+"$SIMPLE_BIN" ui windows --port "$PORT" >"$OUT/live-windows-human.txt" 2>"$OUT/live-windows-human.log"
+
+if "$SIMPLE_BIN" ui find --limit bad --port "$PORT" --json >"$OUT/live-malformed.json" 2>"$OUT/live-malformed.log"; then
+    exit 1
+fi
+if "$SIMPLE_BIN" ui act --canonical main#__missing__ --action focus_noop --port "$PORT" --json >"$OUT/live-missing.json" 2>"$OUT/live-missing.log"; then
+    exit 1
+fi
 
 CHROME_BIN=${CHROME_BIN:-}
 if [ -z "$CHROME_BIN" ]; then
@@ -62,11 +75,20 @@ if "$SIMPLE_BIN" ui act --canonical main#noop --action focus_noop --ui-access-db
 fi
 
 rg -q '"schema":"simple.access/v1"' "$OUT/live-windows.json"
+rg -q 'main' "$OUT/live-windows-human.txt"
+rg -q 'main' "$OUT/live-windows.json"
+rg -q 'UI CLI access fixture' "$OUT/live-windows-human.txt"
+rg -q 'UI CLI access fixture' "$OUT/live-windows.json"
+rg -q 'invalid_argument' "$OUT/live-malformed.log" "$OUT/live-malformed.json"
+rg -q 'target_not_found' "$OUT/live-missing.log" "$OUT/live-missing.json"
 rg -q 'main#noop' "$OUT/live-find.json"
 rg -q '"request_id":' "$OUT/live-act.json"
+ACTION_REQUEST_ID=$(rg -o '"request_id":"[^"]+"' "$OUT/live-act.json" | head -1 | cut -d'"' -f4)
+[ -n "$ACTION_REQUEST_ID" ]
 rg -q 'main#noop' "$OUT/live-after.json"
 rg -q '"focused":true' "$OUT/live-after.json"
 rg -q 'access_request' "$OUT/live-history.json"
+rg -Fq "$ACTION_REQUEST_ID" "$OUT/live-history.json"
 rg -q 'source_unavailable' "$OUT/live-stopped.log" "$OUT/live-stopped.json"
 rg -q '"mode":"persisted"' "$OUT/live-db-snapshot.json"
 rg -q 'source_unavailable' "$OUT/live-db-act.log" "$OUT/live-db-act.json"
@@ -76,11 +98,16 @@ cp "$OUT/live-windows.json" "$OUT/protocol.json"
     printf '%s\n' 'transport=existing-test-api'
     printf '%s\n' 'client_process=separate'
     printf '%s\n' 'loopback_default=true'
+    printf '%s\n' 'help_operations=pass'
+    printf '%s\n' 'human_json_fixture_fields=equal'
+    printf '%s\n' 'malformed_args=invalid_argument'
+    printf '%s\n' 'unknown_target=target_not_found'
     printf '%s\n' 'live_windows=pass'
     printf '%s\n' 'live_find=pass'
     printf '%s\n' 'live_act=pass'
     printf '%s\n' 'post_action_state=pass'
     printf '%s\n' 'correlated_history=pass'
+    printf 'correlated_history_request_id=%s\n' "$ACTION_REQUEST_ID"
     printf '%s\n' 'service_stop=source_unavailable'
     printf '%s\n' 'db_fallback=read_only'
     printf '%s\n' 'db_act=source_unavailable'

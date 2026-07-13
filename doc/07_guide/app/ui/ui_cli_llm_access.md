@@ -1,7 +1,7 @@
 <!-- codex-design -->
 # UI CLI Access for LLMs and Operators
 
-**Status:** implemented in the current worktree; final live verification is pending.
+**Status:** implementation is present; final live verification and docgen remain blocked until a current pure-Simple checker can be built.
 
 This interface lets an LLM inspect and safely operate TRACE32 GUI windows,
 Simple GUI/TUI surfaces, and host WM windows with one access grammar. The
@@ -293,6 +293,8 @@ manual embeds both. Screenshots prove presentation; parsed JSON and semantic
 assertions prove protocol behavior. The reproducible separate-process transport
 gate is `scripts/check/check-ui-cli-live-transport.shs`; it uses the standalone
 fixture and the UI CLI itself, never a direct HTTP shortcut.
+Until that gate and docgen run successfully, the synchronized manual source and
+existing capture paths are not final acceptance evidence.
 The focused `check-ui-cli-access` manual-evidence scenario also rejects
 `pass_todo`, `pass_dn`, `pass_do_nothing`, and trivial always-true assertions in its gate/spec
 sources before accepting the generated manual.
