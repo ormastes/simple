@@ -1629,6 +1629,54 @@ fn test_package_bare_exports_resolve_exact_cfg_active_sibling_owners() {
 }
 
 #[test]
+fn test_entry_closure_and_use_map_follow_nested_function_local_use() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let main_path = src_root.join("app/main.spl");
+    let worker_path = src_root.join("app/worker.spl");
+    let codec_path = src_root.join("lib/local_codec.spl");
+    std::fs::create_dir_all(main_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(codec_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &main_path,
+        "use app.worker.{run_worker}\nfn main() -> i64:\n    return run_worker(true)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &worker_path,
+        "fn run_worker(enabled: bool) -> i64:\n    if enabled:\n        val action = \\:\n            use lib.local_codec.{encode_local_value}\n            encode_local_value()\n        return action()\n    return 0\n",
+    )
+    .unwrap();
+    std::fs::write(&codec_path, "fn encode_local_value() -> i64:\n    return 7\n").unwrap();
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), temp.path().join("out"))
+        .source_dir(src_root.clone())
+        .entry_file(main_path.clone());
+    let file_sources = builder.discover_reachable_files_with_sources(&main_path).unwrap();
+    let actual: std::collections::BTreeSet<_> = file_sources
+        .iter()
+        .map(|(path, _)| path.strip_prefix(&src_root).unwrap().to_path_buf())
+        .collect();
+    let expected: std::collections::BTreeSet<_> = ["app/main.spl", "app/worker.spl", "lib/local_codec.spl"]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    assert_eq!(actual, expected);
+
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&src_root), &src_root);
+    let worker_ast = simple_parser::Parser::new(&std::fs::read_to_string(&worker_path).unwrap())
+        .parse()
+        .unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&worker_ast, &result.all_mangled, &result.re_exports);
+    let owner = format!(
+        "{}__encode_local_value",
+        module_prefix_from_path(&codec_path, &src_root)
+    );
+    assert_eq!(use_map.get("encode_local_value"), Some(&owner));
+}
+
+#[test]
 fn test_build_use_map_resolves_data_from_dotted_module_with_name_collision() {
     let temp = tempfile::tempdir().unwrap();
     let src_root = temp.path().join("project/src");

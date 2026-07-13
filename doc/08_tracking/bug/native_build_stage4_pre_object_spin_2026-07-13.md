@@ -115,6 +115,23 @@ direct-runtime guards pass and no direct `rt_*` use was added. The
 strict full-CLI link remains deliberately unrun under the three-cycle cap, so
 this is focused closure evidence rather than a compiler or QEMU PASS.
 
+The next shared closure defect was a traversal boundary: both entry-closure
+discovery and native import indexing inspected only module-level statements,
+so a valid `use` nested inside a function or expression block could be parsed
+and lowered to HIR but its owner never entered the native project. Both paths
+now share one recursive AST walk that includes declaration bodies, statement
+blocks, and expression-owned blocks. A synthetic regression places the import
+under `if -> let -> lambda -> do-block`. Higher review rejected the first
+partial visitor, the final bounded fix cycle closed its concrete declaration,
+statement, metadata, macro, and expression carriers, and the expanded regression
+passes 1/1. Final higher review passes the executable traversal and confirms
+that the remaining pattern/type/signature metadata cannot hide a lowered nested
+`use`. Function-local aliases still share the module-wide native use map,
+so conflicting aliases in different functions remain open under TODO 556
+instead of being hidden by this closure fix. The working-tree direct-runtime
+guard passes and no source-level import hoist, direct `rt_*`, or symbol hardcode
+was introduced. The strict full-CLI link remains unrun.
+
 Reuse the preserved 1,043-object cache only after one of those owners changes,
 then run one bounded strict-link verification. Do not add stubs, relabel a
 runtime bundle, hardcode symbols, or substitute the Rust seed as production

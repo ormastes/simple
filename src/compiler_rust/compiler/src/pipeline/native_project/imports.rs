@@ -719,34 +719,32 @@ pub(crate) fn build_use_map_from_ast(
 ) -> std::collections::HashMap<String, String> {
     let mut use_map = std::collections::HashMap::new();
 
-    for item in &ast.items {
-        match item {
-            simple_parser::ast::Node::UseStmt(use_stmt) => {
-                collect_use_imports(
-                    &use_stmt.path.segments,
-                    &use_stmt.target,
-                    all_mangled,
-                    re_exports,
-                    &mut use_map,
-                );
-            }
-            simple_parser::ast::Node::ExportUseStmt(export_use) => {
-                collect_use_imports(
-                    &export_use.path.segments,
-                    &export_use.target,
-                    all_mangled,
-                    re_exports,
-                    &mut use_map,
-                );
-            }
-            simple_parser::ast::Node::MultiUse(multi_use) => {
-                for (path, target) in &multi_use.imports {
-                    collect_use_imports(&path.segments, target, all_mangled, re_exports, &mut use_map);
-                }
-            }
-            _ => {}
+    super::discovery::visit_ast_nodes(&ast.items, &mut |item| match item {
+        simple_parser::ast::Node::UseStmt(use_stmt) => {
+            collect_use_imports(
+                &use_stmt.path.segments,
+                &use_stmt.target,
+                all_mangled,
+                re_exports,
+                &mut use_map,
+            );
         }
-    }
+        simple_parser::ast::Node::ExportUseStmt(export_use) => {
+            collect_use_imports(
+                &export_use.path.segments,
+                &export_use.target,
+                all_mangled,
+                re_exports,
+                &mut use_map,
+            );
+        }
+        simple_parser::ast::Node::MultiUse(multi_use) => {
+            for (path, target) in &multi_use.imports {
+                collect_use_imports(&path.segments, target, all_mangled, re_exports, &mut use_map);
+            }
+        }
+        _ => {}
+    });
 
     use_map
 }
