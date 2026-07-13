@@ -555,6 +555,40 @@ fn resolve_method_call_static(
             // payload/discriminant lowering paths.
             return;
         }
+        if !has_type_qualifier
+            && matches!(
+                method,
+                "starts_with"
+                    | "ends_with"
+                    | "trim"
+                    | "trim_start"
+                    | "trim_end"
+                    | "to_upper"
+                    | "upper"
+                    | "to_lower"
+                    | "lower"
+                    | "char_at"
+                    | "char_code_at"
+                    | "replace"
+            )
+        {
+            // Preserve bare string-builtin method names when the receiver type
+            // could not be recovered (an erased receiver -- e.g. `parts[i]` from
+            // `split(...)`, or a `line.trim()` chain -- leaves the MethodCallStatic
+            // func_name bare). The single-candidate suffix fallback below would
+            // rebind bare `starts_with` to the ONLY user method of that name,
+            // struct `Path.starts_with` (fs_driver/types.spl), whose `self.raw`
+            // dereferences the text receiver as a Path struct -> crash inside
+            // decode_string (SimpleOS WM first-frame render fault, 2026-07-13).
+            // Leaving the name bare routes it through codegen's `bare_rt_redirect`
+            // table (functions/calls.rs) -> rt_string_* -- the SAME correct
+            // lowering a statically-typed `text` receiver gets. Every method here
+            // has a bare_rt_redirect entry, so leaving it bare never produces an
+            // unresolved-call error. Scoped to unambiguous string ops (contains/
+            // split/index_of/to_string are intentionally excluded -- either they
+            // collide with generic user methods or lack a bare_rt_redirect entry).
+            return;
+        }
         let type_part_lower = type_part.to_lowercase();
         let candidates = local_suffix_index.get(method).or_else(|| suffix_index.get(method));
         if let Some(candidates) = candidates {
