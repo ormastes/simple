@@ -18,6 +18,9 @@ fn host_gpu_wrapper_source() -> text:
 fn host_gpu_probe_source() -> text:
     file_read_text("examples/09_embedded/simple_os/arch/common/host_gpu_ivshmem_probe_entry.spl")
 
+fn host_gpu_guest_bridge_source() -> text:
+    file_read_text("src/os/lib/gpu_bridge/host_gpu_ivshmem.spl")
+
 fn run_host_gpu_wrapper_self_test() -> text:
     val (out, err, code) = process_run("/bin/sh", ["scripts/check/check-simpleos-qemu-host-gpu-2d.shs", "--self-test"])
     expect(code).to_equal(0)
@@ -40,7 +43,21 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         step("Submit the canonical full-frame IMAGE composition through the shared guest bridge")
         step("Compare Draw IR readback and correlated device receipt across all three ISAs")
         val source = host_gpu_wrapper_source()
-        expect(host_gpu_probe_source()).to_contain("host_gpu_ivshmem_submit_draw_ir")
+        val probe = host_gpu_probe_source()
+        expect(probe).to_contain("host_gpu_ivshmem_submit_draw_ir")
+        expect(probe).to_contain("host_gpu_ivshmem_device_receipt_valid(render_receipt")
+        expect(probe).to_contain("host_gpu_ivshmem_device_receipt_valid(draw_ir_receipt")
+        expect(probe).to_contain("host_gpu_ivshmem_device_receipt_valid(processing_receipt")
+        expect(probe.contains("_host_gpu_device_receipt_ok")).to_equal(false)
+        expect(probe.contains("mmio_read64")).to_equal(false)
+        val bridge = host_gpu_guest_bridge_source()
+        expect(bridge).to_contain("receipt.completed and receipt.generation == expected_generation")
+        expect(bridge).to_contain("receipt.status == SIMPLEOS_HOST_GPU_STATUS_PASS and receipt.reason == 0")
+        expect(bridge).to_contain("receipt.native_handle > 0 and receipt.device_identity > 0 and receipt.output_addr > 0u64")
+        expect(bridge).to_contain("receipt.output_bytes == expected_bytes and receipt.output_checksum > 0 and receipt.elapsed_us > 0")
+        expect(bridge).to_contain("receipt.readback_source == SIMPLEOS_HOST_GPU_READBACK_DEVICE")
+        expect(bridge).to_contain("receipt.run_id_hash == expected_run_id_hash and receipt.frame_id == expected_frame_id")
+        expect(bridge).to_contain("receipt.backend_code == expected_backend")
         expect(source).to_contain("checksum=405589360 bg=2112 rect=960 other=0")
         expect(source).to_contain("HOST_GPU_DRAW_IR_OK")
         expect(source).to_contain("checksum=405589360 bg=2112 image=960 other=0")

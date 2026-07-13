@@ -236,3 +236,6 @@ Processing receipts distinguish the transient backend resource handle from the
 stable device identity. Vulkan hashes the runtime-selected driver identity,
 which includes the device name and driver metadata, and negotiation fails
 closed when it is missing; a buffer handle alone is not device provenance.
+The guest bridge captures the completion once and validates its typed receipt,
+including the device readback source and run/frame/backend correlation. Host
+and guest checksum loops share the same masked modular checksum primitives.
