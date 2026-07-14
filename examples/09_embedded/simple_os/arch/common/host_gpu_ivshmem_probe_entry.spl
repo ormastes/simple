@@ -2,12 +2,29 @@ use os.kernel.ipc.host_gpu_ivshmem_map.{map_qemu_host_gpu_ivshmem_bar2}
 use os.lib.gpu_bridge.host_gpu_ivshmem.{HostGpuIvshmemHelloReceipt, host_gpu_ivshmem_negotiate, host_gpu_ivshmem_submit, host_gpu_ivshmem_submit_draw_ir, host_gpu_ivshmem_fill_u32, host_gpu_ivshmem_device_receipt_valid}
 use os.kernel.boot.mmio_hardware.{mmio_read32}
 use common.gpu.simpleos_host_gpu_protocol.*
-use common.gpu.simpleos_host_gpu_draw_ir.{simpleos_host_gpu_image_resource}
-use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_image_command}
+use common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource, simpleos_host_gpu_image_resource}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_image_command, draw_ir_rect}
 
 extern fn serial_println(msg: text)
 
 val HOST_GPU_PROBE_TIMEOUT_POLLS: i64 = 50000000
+val HOST_GPU_FIXTURE_WIDTH: i64 = 1280
+val HOST_GPU_FIXTURE_HEIGHT: i64 = 720
+val HOST_GPU_FIXTURE_PIXEL_COUNT: i64 = HOST_GPU_FIXTURE_WIDTH * HOST_GPU_FIXTURE_HEIGHT
+val HOST_GPU_FIXTURE_OUTPUT_BYTES: i64 = HOST_GPU_FIXTURE_PIXEL_COUNT * 4
+val HOST_GPU_FIXTURE_RECT_X: i64 = 160
+val HOST_GPU_FIXTURE_RECT_Y: i64 = 120
+val HOST_GPU_FIXTURE_RECT_WIDTH: i64 = 800
+val HOST_GPU_FIXTURE_RECT_HEIGHT: i64 = 360
+val HOST_GPU_FIXTURE_RECT_PIXELS: i64 = HOST_GPU_FIXTURE_RECT_WIDTH * HOST_GPU_FIXTURE_RECT_HEIGHT
+val HOST_GPU_FIXTURE_BACKGROUND_PIXELS: i64 = HOST_GPU_FIXTURE_PIXEL_COUNT - HOST_GPU_FIXTURE_RECT_PIXELS
+
+fn host_gpu_fixture_expected_pixel(index: i64, background: u32, foreground: u32) -> u32:
+    val x = index % HOST_GPU_FIXTURE_WIDTH
+    val y = index / HOST_GPU_FIXTURE_WIDTH
+    if x >= HOST_GPU_FIXTURE_RECT_X and x < HOST_GPU_FIXTURE_RECT_X + HOST_GPU_FIXTURE_RECT_WIDTH and y >= HOST_GPU_FIXTURE_RECT_Y and y < HOST_GPU_FIXTURE_RECT_Y + HOST_GPU_FIXTURE_RECT_HEIGHT:
+        return foreground
+    background
 
 @cfg(x86_64)
 fn _host_gpu_probe_isa() -> text: "x86_64"
@@ -173,12 +190,54 @@ pub fn host_gpu_ivshmem_probe_main():
     val draw_ir_identity = draw_ir_receipt.device_identity
     serial_println("HOST_GPU_DRAW_IR_OK isa={isa} backend={render_backend} generation={draw_ir_generation} run={draw_ir_receipt.run_id_hash} frame={draw_ir_receipt.frame_id} protocol={hello.version} elapsed_us={draw_ir_receipt.elapsed_us} handle={draw_ir_handle} identity={draw_ir_identity} checksum={draw_ir_checksum} bg={background_count} image={foreground_count} other={other_count}")
 
+    val fixture_embedding = draw_ir_embedding_config("host-gpu-fixture-surface", "host-gpu-fixture-component", 0, 0, HOST_GPU_FIXTURE_WIDTH.to_i32(), HOST_GPU_FIXTURE_HEIGHT.to_i32(), 0, 1000, true)
+    val fixture_composition = draw_ir_composition("host-gpu-fixture-composition", "host-gpu-fixture-scene", DRAW_IR_BACKEND_GPU, [
+        draw_ir_batch("host-gpu-fixture-batch", DRAW_IR_BACKEND_GPU, fixture_embedding, [
+            draw_ir_rect("host-gpu-fixture-background", 0, 0, HOST_GPU_FIXTURE_WIDTH.to_i32(), HOST_GPU_FIXTURE_HEIGHT.to_i32(), background),
+            draw_ir_rect("host-gpu-fixture-foreground", HOST_GPU_FIXTURE_RECT_X.to_i32(), HOST_GPU_FIXTURE_RECT_Y.to_i32(), HOST_GPU_FIXTURE_RECT_WIDTH.to_i32(), HOST_GPU_FIXTURE_RECT_HEIGHT.to_i32(), foreground)
+        ])
+    ])
+    val fixture_generation = generation + 2
+    val fixture_image_resources: [SimpleOsHostGpuImageResource] = []
+    val fixture_receipt = host_gpu_ivshmem_submit_draw_ir(
+        base, fixture_generation, run_id_hash, fixture_generation, render_backend,
+        HOST_GPU_FIXTURE_WIDTH, HOST_GPU_FIXTURE_HEIGHT, fixture_composition, fixture_image_resources, HOST_GPU_PROBE_TIMEOUT_POLLS
+    )
+    if not host_gpu_ivshmem_device_receipt_valid(fixture_receipt, fixture_generation, run_id_hash, fixture_generation, render_backend_code, HOST_GPU_FIXTURE_OUTPUT_BYTES):
+        _host_gpu_probe_fail(isa, "fixture-receipt")
+        return
+
+    background_count = 0
+    foreground_count = 0
+    var fixture_mismatches: i64 = 0
+    var fixture_checksum: i64 = 0
+    var fixture_expected_checksum: i64 = 0
+    i = 0
+    while i < HOST_GPU_FIXTURE_PIXEL_COUNT:
+        val pixel = mmio_read32(base + (simpleos_host_gpu_wire_readback_offset() as u64) + ((i * 4) as u64))
+        val expected = host_gpu_fixture_expected_pixel(i, background, foreground)
+        if pixel != expected:
+            fixture_mismatches = fixture_mismatches + 1
+        if pixel == background:
+            background_count = background_count + 1
+        elif pixel == foreground:
+            foreground_count = foreground_count + 1
+        fixture_checksum = simpleos_host_gpu_readback_checksum_step(fixture_checksum, pixel)
+        fixture_expected_checksum = simpleos_host_gpu_readback_checksum_step(fixture_expected_checksum, expected)
+        i = i + 1
+    fixture_checksum = simpleos_host_gpu_readback_checksum_finalize(fixture_checksum)
+    fixture_expected_checksum = simpleos_host_gpu_readback_checksum_finalize(fixture_expected_checksum)
+    if fixture_mismatches != 0 or background_count != HOST_GPU_FIXTURE_BACKGROUND_PIXELS or foreground_count != HOST_GPU_FIXTURE_RECT_PIXELS or fixture_checksum != fixture_expected_checksum or fixture_receipt.output_checksum != fixture_expected_checksum:
+        _host_gpu_probe_fail(isa, "fixture-readback")
+        return
+    serial_println("HOST_GPU_FIXTURE_OK isa={isa} backend={render_backend} generation={fixture_generation} run={fixture_receipt.run_id_hash} frame={fixture_receipt.frame_id} protocol={hello.version} width={HOST_GPU_FIXTURE_WIDTH} height={HOST_GPU_FIXTURE_HEIGHT} elapsed_us={fixture_receipt.elapsed_us} handle={fixture_receipt.native_handle} identity={fixture_receipt.device_identity} checksum={fixture_receipt.output_checksum} bg={background_count} rect={foreground_count} mismatches={fixture_mismatches}")
+
     val processing_backend = if (hello.processing_mask & SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0: "cuda" elif (hello.processing_mask & SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL) != 0: "metal" elif (hello.processing_mask & SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN) != 0: "vulkan" else: ""
     if processing_backend == "":
         _host_gpu_probe_fail(isa, "processing-ir-unavailable")
         return
 
-    val processing_generation = generation + 2
+    val processing_generation = generation + 3
     val processing_receipt = host_gpu_ivshmem_fill_u32(
         base, processing_generation, run_id_hash, processing_generation,
         processing_backend, 256, 7u32, HOST_GPU_PROBE_TIMEOUT_POLLS

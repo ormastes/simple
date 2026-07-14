@@ -227,8 +227,12 @@ post-HELLO-probe, setup-inclusive receipt is correlated by ISA, backend,
 generation, run, and frame. Cached validation recomputes the overflow-safe
 1.5x boundary; positive correct-but-slower evidence remains
 `available-not-preferred`, while missing or invalid timing cannot pass.
-The current 64x48 fixture proves protocol correctness only; TODO 569 owns the
-selected 1280x720 render gate and TODO 570 owns the processing preference ratio.
+The probe retains its 64x48 full-frame IMAGE transport regression and follows
+it with a separate 1280x720 two-RECT Draw IR request. The latter checks all
+921,600 readback positions against the independent CPU oracle and records exact
+dimensions, counts, checksum, and zero mismatches. TODO 569 remains open until
+fresh supported-host rows execute that source-ready gate; TODO 570 likewise
+awaits fresh processing preference evidence.
 
 ## Minimal Implementation Order
 

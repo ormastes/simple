@@ -14,6 +14,8 @@ desktop and contract-v2 evidence parser are source-ready, but no fresh RV64
 live PASS is claimed. ProcessingIR CPU/device timing and preference
 classification are source-ready; TODO 570 remains open until prepared native
 rows provide fresh correlated receipts.
+The exact 1280x720 Draw IR fixture and full pixel oracle are source-ready;
+TODO 569 remains open until fresh supported-host rows execute them.
 
 This scenario proves that supported SimpleOS guests use one bounded protocol to
 execute Draw IR and ProcessingIR on a real host device. Unsupported rows retain
@@ -42,7 +44,12 @@ the CPU/software fallback and report a stable reason.
 5. **Compare Draw IR readback and correlated device receipt across all three ISAs.**
    Require the exact checksum and pixel counts with a positive native Metal,
    DirectX, or Vulkan handle and stable device identity before accepting the marker.
-6. **Prove the AArch64 production desktop frame.** Build the
+6. **Render the selected 1280x720 canonical fixture.** Submit one opaque
+   background RECT and one foreground RECT through the same
+   `DrawIrComposition -> Engine2D` path. Compare all 921,600 device-readback
+   pixels against the positional CPU oracle and require checksum 1417723768,
+   633,600 background pixels, 288,000 rectangle pixels, and zero mismatches.
+7. **Prove the AArch64 production desktop frame.** Build the
    `arm64-desktop-engine2d` guest through the wrapper, require its production
    QEMU argv lane, and accept exactly one correlated
    `[wm-frame] host-gpu-presented` marker only after receipt validation and
@@ -53,50 +60,50 @@ the CPU/software fallback and report a stable reason.
    reports retain the production serial log and exact QEMU
    device arguments under the `_production_serial_log` and
    `_production_qemu_device_args` keys.
-7. **Initialize the dynamic RISC-V VirtIO scanout.** Discover mode and stride
+8. **Initialize the dynamic RISC-V VirtIO scanout.** Discover mode and stride
    through the architecture display facade before framebuffer construction.
-8. **Render the canonical Shared WM scene through Draw IR and Engine2D.** Use
+9. **Render the canonical Shared WM scene through Draw IR and Engine2D.** Use
    compositor-owned surfaces, `DesktopShell`, and `Engine2dWmFrameExecutor`.
-9. **Present the completed framebuffer through VirtIO-GPU.** Transfer and flush
+10. **Present the completed framebuffer through VirtIO-GPU.** Transfer and flush
    only after the correlated canonical frame is complete.
-10. **Report source-only status until a fresh pure-Simple ELF boots.** Contract
+11. **Report source-only status until a fresh pure-Simple ELF boots.** Contract
     v2 rejects the historical fixed-resolution/fixed-anchor report; TODO 548
     remains the execution blocker.
-11. **Dispatch the raw CLEAR and solid RECT fixture through strict Engine2D selection.**
+12. **Dispatch the raw CLEAR and solid RECT fixture through strict Engine2D selection.**
    Route raw QEMU framebuffer mutations through the exact native Metal,
    DirectX, or Vulkan backend selected by HELLO and require checked completion evidence.
-12. **Reject unchecked or fallback raw rendering before device-backed receipt.**
+13. **Reject unchecked or fallback raw rendering before device-backed receipt.**
    Known failure invalidates device provenance; unknown completion poisons the
    frame rather than replaying it.
-13. **Select host presentation or the existing local production renderer.**
+14. **Select host presentation or the existing local production renderer.**
    The x86 desktop maps the full ivshmem BAR into its active VMM, derives a
    fresh generation only from an idle slot, submits the canonical WM Draw IR,
    validates the correlated device receipt, and presents checksum-checked MMIO
    readback. Any failure falls through to local Engine2D. The current 4K entry
    honestly selects local rendering until TODO 552 expands the bounded wire.
-14. **Run the ProcessingIR parity fixture.** Correlate the host completion and
+15. **Run the ProcessingIR parity fixture.** Correlate the host completion and
    require exact output-buffer parity with the CPU oracle. Vulkan uses the
    canonical SFFI owner's fenced tri-state dispatch: only proven status `1`
    may read back, while unknown completion retains dependencies and the device.
-15. **Classify device processing preference.** Time the existing FillU32(256,
+16. **Classify device processing preference.** Time the existing FillU32(256,
    7) CPU oracle and device executor independently after the HELLO probe. A
    valid row requires positive correlated microsecond timings and reports
    `preferred` only when CPU time is at least 1.5 times device time; otherwise
    it reports `available-not-preferred`. Missing, stale, duplicate, zero, or
    dishonest evidence fails the row.
-16. **Keep native Metal ProcessingIR separate from Engine2D rendering.** Probe
+17. **Keep native Metal ProcessingIR separate from Engine2D rendering.** Probe
    and execute the dedicated MSL FillU32 owner, require checked command
    completion and pointer readback, and never relabel a Metal render clear as
    processing evidence.
-17. **Report device-backed host acceleration evidence.** Publish one row with
+18. **Report device-backed host acceleration evidence.** Publish one row with
    host, guest ISA, QEMU/device arguments, protocol, backend, device, IDs,
    timing, concurrently sampled daemon/QEMU/combined RSS maxima, checksums,
    status, and reason. For every non-HELLO request, both
    the guest and daemon require a positive numeric run hash and frame ID; a
    zero, negative, stale, or mismatched value fails before PASS admission.
-18. **Validate cached rows before aggregation.** Accept a cached report only
+19. **Validate cached rows before aggregation.** Accept a cached report only
    when all nine host/ISA rows are present and every passing row links to a
-   serial log containing the exact render, Draw IR, and ProcessingIR receipts.
+   serial log containing the exact render, Draw IR, 1280x720 fixture, and ProcessingIR receipts.
    Each passing row also requires a unique QEMU version, a reversible
    comma-delimited per-argument hex encoding of its exact QEMU argument vector,
    positive maximum-observed daemon RSS, QEMU RSS, and concurrent combined RSS,

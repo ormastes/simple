@@ -15,6 +15,11 @@ COMPILER_CHECK_TIMEOUT_SECONDS=10
 COMPILER_CHECK_KILL_GRACE_SECONDS=1
 EXPECTED_PROTOCOL_VERSION=$(sed -n 's/^val SIMPLEOS_HOST_GPU_PROTOCOL_VERSION: i64 = \([0-9][0-9]*\)$/\1/p' src/lib/common/gpu/simpleos_host_gpu_protocol.spl)
 [ -n "$EXPECTED_PROTOCOL_VERSION" ] || exit 2
+HOST_GPU_FIXTURE_WIDTH=1280
+HOST_GPU_FIXTURE_HEIGHT=720
+HOST_GPU_FIXTURE_CHECKSUM=1417723768
+HOST_GPU_FIXTURE_BACKGROUND_PIXELS=633600
+HOST_GPU_FIXTURE_RECT_PIXELS=288000
 
 case "$(uname -s)" in
     Linux) ACTIVE_HOST=linux ;;
@@ -136,8 +141,6 @@ serial_has_pass() {
     isa=$2
     [ "$(grep -aEc "^HOST_GPU_MAP_OK isa=$isa .*[[:space:]]*$" "$log")" -eq 1 ] &&
     [ "$(grep -aEc "^HOST_GPU_HELLO_OK isa=$isa .*[[:space:]]*$" "$log")" -eq 1 ] &&
-    serial_render_receipt_valid "$log" "$isa" &&
-    [ "$(grep -aEc "^HOST_GPU_DRAW_IR_OK isa=$isa .*[[:space:]]*$" "$log")" -eq 1 ] &&
     [ "$(grep -aEc "^HOST_GPU_PROCESS_OK isa=$isa .*[[:space:]]*$" "$log")" -eq 1 ] &&
     [ "$(grep -aEc "^SIMPLEOS_HOST_GPU_2D_PASS isa=$isa[[:space:]]*$" "$log")" -eq 1 ] &&
     [ "$(grep -aEc "^TEST PASSED[[:space:]]*$" "$log")" -eq 1 ] &&
@@ -188,10 +191,12 @@ arm64_production_serial_has_correlated_frame() {
     awk -v ready="$ready_line" 'NR > ready && /^\[wm-frame\] host-gpu-fallback / { failed=1 } END { exit failed ? 1 : 0 }' "$log"
 }
 
-serial_render_receipt_valid() {
+serial_render_fixture_valid() {
     log=$1
     isa=$2
-    [ "$(grep -aEc "^HOST_GPU_RENDER_OK isa=$isa backend=$BACKEND .*[[:space:]]*$" "$log")" -eq 1 ]
+    [ "$(grep -aEc "^HOST_GPU_RENDER_OK isa=$isa backend=$BACKEND .*[[:space:]]*$" "$log")" -eq 1 ] &&
+    [ "$(grep -aEc "^HOST_GPU_DRAW_IR_OK isa=$isa backend=$BACKEND .*[[:space:]]*$" "$log")" -eq 1 ] &&
+    [ "$(grep -aEc "^HOST_GPU_FIXTURE_OK isa=$isa backend=$BACKEND generation=[1-9][0-9]* run=[1-9][0-9]* frame=[1-9][0-9]* protocol=$EXPECTED_PROTOCOL_VERSION width=$HOST_GPU_FIXTURE_WIDTH height=$HOST_GPU_FIXTURE_HEIGHT elapsed_us=[1-9][0-9]* handle=[1-9][0-9]* identity=[1-9][0-9]* checksum=$HOST_GPU_FIXTURE_CHECKSUM bg=$HOST_GPU_FIXTURE_BACKGROUND_PIXELS rect=$HOST_GPU_FIXTURE_RECT_PIXELS mismatches=0[[:space:]]*$" "$log")" -eq 1 ]
 }
 
 serial_receipts_valid() {
@@ -201,19 +206,24 @@ serial_receipts_valid() {
     grep -aEq "^HOST_GPU_HELLO_OK isa=$isa generation=[1-9][0-9]* render_mask=$EXPECTED_RENDER_MASK processing_mask=$EXPECTED_PROCESSING_MASK protocol=$EXPECTED_PROTOCOL_VERSION elapsed_us=[1-9][0-9]*[[:space:]]*$" "$log" || return 1
     grep -aEq "^HOST_GPU_RENDER_OK isa=$isa backend=$BACKEND generation=[1-9][0-9]* run=[1-9][0-9]* frame=[1-9][0-9]* protocol=$EXPECTED_PROTOCOL_VERSION elapsed_us=[1-9][0-9]* handle=[1-9][0-9]* identity=[1-9][0-9]* checksum=405589360 bg=2112 rect=960 other=0[[:space:]]*$" "$log" || return 1
     grep -aEq "^HOST_GPU_DRAW_IR_OK isa=$isa backend=$BACKEND generation=[1-9][0-9]* run=[1-9][0-9]* frame=[1-9][0-9]* protocol=$EXPECTED_PROTOCOL_VERSION elapsed_us=[1-9][0-9]* handle=[1-9][0-9]* identity=[1-9][0-9]* checksum=405589360 bg=2112 image=960 other=0[[:space:]]*$" "$log" || return 1
+    serial_render_fixture_valid "$log" "$isa" || return 1
     grep -aEq "^HOST_GPU_PROCESS_OK isa=$isa backend=$EXPECTED_PROCESSING_RECEIPT generation=[1-9][0-9]* run=[1-9][0-9]* frame=[1-9][0-9]* protocol=$EXPECTED_PROTOCOL_VERSION elapsed_us=[1-9][0-9]* handle=[1-9][0-9]* identity=[1-9][0-9]* checksum=1792 mismatches=0[[:space:]]*$" "$log" || return 1
     hello_generation=$(sed -n "s/^HOST_GPU_HELLO_OK isa=$isa generation=\([1-9][0-9]*\) .*/\1/p" "$log")
     render_generation=$(sed -n "s/^HOST_GPU_RENDER_OK isa=$isa backend=$BACKEND generation=\([1-9][0-9]*\) .*/\1/p" "$log")
     draw_ir_generation=$(sed -n "s/^HOST_GPU_DRAW_IR_OK isa=$isa backend=$BACKEND generation=\([1-9][0-9]*\) .*/\1/p" "$log")
+    fixture_generation=$(sed -n "s/^HOST_GPU_FIXTURE_OK isa=$isa backend=$BACKEND generation=\([1-9][0-9]*\) .*/\1/p" "$log")
     process_generation=$(sed -n "s/^HOST_GPU_PROCESS_OK isa=$isa backend=.* generation=\([1-9][0-9]*\) .*/\1/p" "$log")
     render_run=$(sed -n "s/^HOST_GPU_RENDER_OK isa=$isa .* run=\([1-9][0-9]*\) .*/\1/p" "$log")
     draw_ir_run=$(sed -n "s/^HOST_GPU_DRAW_IR_OK isa=$isa .* run=\([1-9][0-9]*\) .*/\1/p" "$log")
+    fixture_run=$(sed -n "s/^HOST_GPU_FIXTURE_OK isa=$isa .* run=\([1-9][0-9]*\) .*/\1/p" "$log")
     process_run=$(sed -n "s/^HOST_GPU_PROCESS_OK isa=$isa .* run=\([1-9][0-9]*\) .*/\1/p" "$log")
     render_frame=$(sed -n "s/^HOST_GPU_RENDER_OK isa=$isa .* frame=\([1-9][0-9]*\) .*/\1/p" "$log")
     draw_ir_frame=$(sed -n "s/^HOST_GPU_DRAW_IR_OK isa=$isa .* frame=\([1-9][0-9]*\) .*/\1/p" "$log")
+    fixture_frame=$(sed -n "s/^HOST_GPU_FIXTURE_OK isa=$isa .* frame=\([1-9][0-9]*\) .*/\1/p" "$log")
     process_frame=$(sed -n "s/^HOST_GPU_PROCESS_OK isa=$isa .* frame=\([1-9][0-9]*\) .*/\1/p" "$log")
     render_identity=$(sed -n "s/^HOST_GPU_RENDER_OK isa=$isa .* identity=\([1-9][0-9]*\) checksum=.*/\1/p" "$log")
     draw_ir_identity=$(sed -n "s/^HOST_GPU_DRAW_IR_OK isa=$isa .* identity=\([1-9][0-9]*\) checksum=.*/\1/p" "$log")
+    fixture_identity=$(sed -n "s/^HOST_GPU_FIXTURE_OK isa=$isa .* identity=\([1-9][0-9]*\) checksum=.*/\1/p" "$log")
     case "$isa" in
         x86_64) expected_hello_generation=9 ;;
         aarch64) expected_hello_generation=19 ;;
@@ -227,12 +237,14 @@ serial_receipts_valid() {
     [ "$hello_generation" -eq "$expected_hello_generation" ] &&
     [ "$render_generation" -eq "$((hello_generation + 1))" ] &&
     [ "$draw_ir_generation" -eq "$((render_generation + 1))" ] &&
-    [ "$process_generation" -eq "$((draw_ir_generation + 1))" ] &&
-    [ "$render_run" = "$draw_ir_run" ] && [ "$render_run" = "$process_run" ] &&
+    [ "$fixture_generation" -eq "$((draw_ir_generation + 1))" ] &&
+    [ "$process_generation" -eq "$((fixture_generation + 1))" ] &&
+    [ "$render_run" = "$draw_ir_run" ] && [ "$render_run" = "$fixture_run" ] && [ "$render_run" = "$process_run" ] &&
     [ "$render_frame" = "$render_generation" ] &&
     [ "$draw_ir_frame" = "$draw_ir_generation" ] &&
+    [ "$fixture_frame" = "$fixture_generation" ] &&
     [ "$process_frame" = "$process_generation" ] &&
-    [ "$render_identity" = "$draw_ir_identity" ]
+    [ "$render_identity" = "$draw_ir_identity" ] && [ "$render_identity" = "$fixture_identity" ]
 }
 
 serial_processing_pair_valid() {
@@ -453,6 +465,7 @@ metal_guest_contract_available() {
     grep -Eq 'host_gpu_ivshmem_negotiate\(.*render_backend' "$probe" &&
     grep -Fq 'HOST_GPU_RENDER_OK' "$probe" &&
     grep -Fq 'HOST_GPU_DRAW_IR_OK' "$probe" &&
+    grep -Fq 'HOST_GPU_FIXTURE_OK' "$probe" &&
     grep -Fq 'HOST_GPU_PROCESS_OK' "$probe"
 }
 
@@ -784,6 +797,8 @@ self_test() {
     vulkan_log="$temp_dir/vulkan.log"
     wrong_backend_log="$temp_dir/wrong-backend.log"
     wrong_generation_log="$temp_dir/wrong-generation.log"
+    wrong_fixture_log="$temp_dir/wrong-fixture.log"
+    wrong_fixture_correlation_log="$temp_dir/wrong-fixture-correlation.log"
     stale_generation_log="$temp_dir/stale-generation.log"
     trailing_log="$temp_dir/trailing.log"
     contradictory_terminal_log="$temp_dir/contradictory-terminal.log"
@@ -936,42 +951,45 @@ HOST_GPU_MAP_OK isa=aarch64 device=3
 HOST_GPU_HELLO_OK isa=aarch64 generation=21 render_mask=1 processing_mask=9 protocol=1 elapsed_us=40
 HOST_GPU_RENDER_OK isa=aarch64 backend=vulkan generation=22 run=1022 frame=22 protocol=1 elapsed_us=100 handle=22 identity=22 checksum=405589360 bg=2112 rect=960 other=0
 HOST_GPU_DRAW_IR_OK isa=aarch64 backend=vulkan generation=23 run=1022 frame=23 protocol=1 elapsed_us=110 handle=24 identity=22 checksum=405589360 bg=2112 image=960 other=0
-HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=24 run=1022 frame=24 protocol=1 elapsed_us=80 handle=1 identity=23 checksum=1792 mismatches=0
+HOST_GPU_FIXTURE_OK isa=aarch64 backend=vulkan generation=24 run=1022 frame=24 protocol=1 width=1280 height=720 elapsed_us=120 handle=25 identity=22 checksum=1417723768 bg=633600 rect=288000 mismatches=0
+HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=25 run=1022 frame=25 protocol=1 elapsed_us=80 handle=1 identity=23 checksum=1792 mismatches=0
 SIMPLEOS_HOST_GPU_2D_PASS isa=aarch64
 TEST PASSED
 EOF
     cat >"$production_log" <<'EOF'
 [WM] ramfb configured successfully via fw_cfg DMA
 [wm-frame] host-gpu-fallback reason=negotiation status=2 detail=2
-[wm-frame] host-gpu-ready backend=vulkan generation=27
-[wm-frame] host-gpu-presented backend=vulkan generation=28 run=27 frame=28 checksum=123456
+[wm-frame] host-gpu-ready backend=vulkan generation=28
+[wm-frame] host-gpu-presented backend=vulkan generation=29 run=28 frame=29 checksum=123456
 [desktop-gui] first-frame-rendered scene_revision=1
 [desktop-gui-arm64] desktop-ready revision=1
 EOF
     sed 's/backend=vulkan/backend=metal/g' "$production_log" >"$production_wrong_backend_log"
-    sed 's/run=27/run=99/' "$production_log" >"$production_wrong_run_log"
-    sed 's/frame=28/frame=99/' "$production_log" >"$production_wrong_frame_log"
-    sed -e 's/generation=27$/generation=30/' \
-        -e 's/generation=28 run=27 frame=28/generation=31 run=30 frame=31/' \
+    sed 's/run=28/run=99/' "$production_log" >"$production_wrong_run_log"
+    sed 's/frame=29/frame=99/' "$production_log" >"$production_wrong_frame_log"
+    sed -e 's/generation=28$/generation=31/' \
+        -e 's/generation=29 run=28 frame=29/generation=32 run=31 frame=32/' \
         "$production_log" >"$production_discontinuous_log"
     { cat "$production_log"; grep '^\[wm-frame\] host-gpu-presented ' "$production_log"; } >"$production_duplicate_log"
     grep -v '^\[desktop-gui-arm64\] desktop-ready ' "$production_log" >"$production_missing_log"
     sed -e 's/backend=vulkan/backend=metal/g' \
-        -e 's/generation=27$/generation=23/' \
-        -e 's/generation=28 run=27 frame=28/generation=24 run=23 frame=24/' \
+        -e 's/generation=28$/generation=24/' \
+        -e 's/generation=29 run=28 frame=29/generation=25 run=24 frame=25/' \
         "$production_log" >"$metal_production_log"
     sed -e 's/backend=vulkan/backend=directx/g' \
-        -e 's/generation=27$/generation=25/' \
-        -e 's/generation=28 run=27 frame=28/generation=26 run=25 frame=26/' \
+        -e 's/generation=28$/generation=26/' \
+        -e 's/generation=29 run=28 frame=29/generation=27 run=26 frame=27/' \
         "$production_log" >"$directx_production_log"
-    sed 's/aarch64/x86_64/g; s/generation=21/generation=11/g; s/generation=22/generation=12/g; s/generation=23/generation=13/g; s/generation=24/generation=14/g; s/frame=22/frame=12/g; s/frame=23/frame=13/g; s/frame=24/frame=14/g' "$pass_log" >"$x86_log"
-    sed 's/aarch64/riscv64/g; s/generation=21/generation=31/g; s/generation=22/generation=32/g; s/generation=23/generation=33/g; s/generation=24/generation=34/g; s/frame=22/frame=32/g; s/frame=23/frame=33/g; s/frame=24/frame=34/g' "$pass_log" >"$riscv_log"
+    sed 's/aarch64/x86_64/g; s/generation=21/generation=11/g; s/generation=22/generation=12/g; s/generation=23/generation=13/g; s/generation=24/generation=14/g; s/generation=25/generation=15/g; s/frame=22/frame=12/g; s/frame=23/frame=13/g; s/frame=24/frame=14/g; s/frame=25/frame=15/g' "$pass_log" >"$x86_log"
+    sed 's/aarch64/riscv64/g; s/generation=21/generation=31/g; s/generation=22/generation=32/g; s/generation=23/generation=33/g; s/generation=24/generation=34/g; s/generation=25/generation=35/g; s/frame=22/frame=32/g; s/frame=23/frame=33/g; s/frame=24/frame=34/g; s/frame=25/frame=35/g' "$pass_log" >"$riscv_log"
     sed 's/checksum=1792/checksum=1793/' "$pass_log" >"$corrupt_log"
     sed '/^HOST_GPU_DRAW_IR_OK /s/checksum=405589360/checksum=405589361/' "$pass_log" >"$corrupt_draw_ir_log"
     sed 's/processing_mask=9/processing_mask=1/; s/backend=cuda/backend=vulkan/' "$pass_log" >"$vulkan_log"
     sed 's/backend=cuda/backend=vulkan/' "$pass_log" >"$wrong_backend_log"
     sed 's/backend=vulkan generation=22/backend=vulkan generation=999/' "$pass_log" >"$wrong_generation_log"
-    sed 's/generation=21/generation=101/; s/generation=22/generation=102/; s/generation=23/generation=103/; s/generation=24/generation=104/' "$pass_log" >"$stale_generation_log"
+    sed '/^HOST_GPU_FIXTURE_OK /s/width=1280/width=1279/' "$pass_log" >"$wrong_fixture_log"
+    sed '/^HOST_GPU_FIXTURE_OK /s/generation=24/generation=99/' "$pass_log" >"$wrong_fixture_correlation_log"
+    sed 's/generation=21/generation=101/; s/generation=22/generation=102/; s/generation=23/generation=103/; s/generation=24/generation=104/; s/generation=25/generation=105/' "$pass_log" >"$stale_generation_log"
     sed 's/mismatches=0/mismatches=0 contradictory=true/' "$pass_log" >"$trailing_log"
     { sed '$d' "$pass_log"; echo "TEST FAILED"; echo "TEST PASSED"; } >"$contradictory_terminal_log"
     cat >"$fail_log" <<'EOF'
@@ -979,7 +997,8 @@ HOST_GPU_MAP_OK isa=aarch64 device=3
 HOST_GPU_HELLO_OK isa=aarch64 generation=21 render_mask=1 processing_mask=9 protocol=1 elapsed_us=40
 HOST_GPU_RENDER_OK isa=aarch64 backend=vulkan generation=22 run=1022 frame=22 protocol=1 elapsed_us=100 handle=22 identity=22 checksum=405589360 bg=2112 rect=960 other=0
 HOST_GPU_DRAW_IR_OK isa=aarch64 backend=vulkan generation=23 run=1022 frame=23 protocol=1 elapsed_us=110 handle=24 identity=22 checksum=405589360 bg=2112 image=960 other=0
-HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=24 run=1022 frame=24 protocol=1 elapsed_us=80 handle=0 identity=0 checksum=1792 mismatches=0
+HOST_GPU_FIXTURE_OK isa=aarch64 backend=vulkan generation=24 run=1022 frame=24 protocol=1 width=1280 height=720 elapsed_us=120 handle=25 identity=22 checksum=1417723768 bg=633600 rect=288000 mismatches=0
+HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=25 run=1022 frame=25 protocol=1 elapsed_us=80 handle=0 identity=0 checksum=1792 mismatches=0
 TEST PASSED
 EOF
     cat >"$metal_log" <<'EOF'
@@ -987,12 +1006,13 @@ HOST_GPU_MAP_OK isa=aarch64 device=3
 HOST_GPU_HELLO_OK isa=aarch64 generation=19 render_mask=2 processing_mask=2 protocol=1 elapsed_us=40
 HOST_GPU_RENDER_OK isa=aarch64 backend=metal generation=20 run=1020 frame=20 protocol=1 elapsed_us=100 handle=22 identity=22 checksum=405589360 bg=2112 rect=960 other=0
 HOST_GPU_DRAW_IR_OK isa=aarch64 backend=metal generation=21 run=1020 frame=21 protocol=1 elapsed_us=110 handle=24 identity=22 checksum=405589360 bg=2112 image=960 other=0
-HOST_GPU_PROCESS_OK isa=aarch64 backend=metal generation=22 run=1020 frame=22 protocol=1 elapsed_us=80 handle=1 identity=23 checksum=1792 mismatches=0
+HOST_GPU_FIXTURE_OK isa=aarch64 backend=metal generation=22 run=1020 frame=22 protocol=1 width=1280 height=720 elapsed_us=120 handle=25 identity=22 checksum=1417723768 bg=633600 rect=288000 mismatches=0
+HOST_GPU_PROCESS_OK isa=aarch64 backend=metal generation=23 run=1020 frame=23 protocol=1 elapsed_us=80 handle=1 identity=23 checksum=1792 mismatches=0
 SIMPLEOS_HOST_GPU_2D_PASS isa=aarch64
 TEST PASSED
 EOF
-    sed 's/aarch64/x86_64/g; s/generation=19/generation=9/g; s/generation=20/generation=10/g; s/generation=21/generation=11/g; s/generation=22/generation=12/g; s/frame=20/frame=10/g; s/frame=21/frame=11/g; s/frame=22/frame=12/g' "$metal_log" >"$metal_x86_log"
-    sed 's/aarch64/riscv64/g; s/generation=19/generation=29/g; s/generation=20/generation=30/g; s/generation=21/generation=31/g; s/generation=22/generation=32/g; s/frame=20/frame=30/g; s/frame=21/frame=31/g; s/frame=22/frame=32/g' "$metal_log" >"$metal_riscv_log"
+    sed 's/aarch64/x86_64/g; s/generation=19/generation=9/g; s/generation=20/generation=10/g; s/generation=21/generation=11/g; s/generation=22/generation=12/g; s/generation=23/generation=13/g; s/frame=20/frame=10/g; s/frame=21/frame=11/g; s/frame=22/frame=12/g; s/frame=23/frame=13/g' "$metal_log" >"$metal_x86_log"
+    sed 's/aarch64/riscv64/g; s/generation=19/generation=29/g; s/generation=20/generation=30/g; s/generation=21/generation=31/g; s/generation=22/generation=32/g; s/generation=23/generation=33/g; s/frame=20/frame=30/g; s/frame=21/frame=31/g; s/frame=22/frame=32/g; s/frame=23/frame=33/g' "$metal_log" >"$metal_riscv_log"
     sed 's/render_mask=2/render_mask=1/' "$metal_log" >"$metal_wrong_mask_log"
     sed 's/backend=metal/backend=vulkan/g' "$metal_log" >"$metal_wrong_backend_log"
     sed 's/backend=metal generation=20/backend=metal generation=999/' "$metal_log" >"$metal_wrong_generation_log"
@@ -1001,30 +1021,31 @@ HOST_GPU_MAP_OK isa=aarch64 device=3
 HOST_GPU_HELLO_OK isa=aarch64 generation=20 render_mask=4 processing_mask=8 protocol=1 elapsed_us=40
 HOST_GPU_RENDER_OK isa=aarch64 backend=directx generation=21 run=1021 frame=21 protocol=1 elapsed_us=100 handle=22 identity=22 checksum=405589360 bg=2112 rect=960 other=0
 HOST_GPU_DRAW_IR_OK isa=aarch64 backend=directx generation=22 run=1021 frame=22 protocol=1 elapsed_us=110 handle=24 identity=22 checksum=405589360 bg=2112 image=960 other=0
-HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=23 run=1021 frame=23 protocol=1 elapsed_us=80 handle=1 identity=23 checksum=1792 mismatches=0
+HOST_GPU_FIXTURE_OK isa=aarch64 backend=directx generation=23 run=1021 frame=23 protocol=1 width=1280 height=720 elapsed_us=120 handle=25 identity=22 checksum=1417723768 bg=633600 rect=288000 mismatches=0
+HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=24 run=1021 frame=24 protocol=1 elapsed_us=80 handle=1 identity=23 checksum=1792 mismatches=0
 SIMPLEOS_HOST_GPU_2D_PASS isa=aarch64
 TEST PASSED
 EOF
-    sed 's/aarch64/x86_64/g; s/generation=20/generation=10/g; s/generation=21/generation=11/g; s/generation=22/generation=12/g; s/generation=23/generation=13/g; s/frame=21/frame=11/g; s/frame=22/frame=12/g; s/frame=23/frame=13/g' "$directx_log" >"$directx_x86_log"
-    sed 's/aarch64/riscv64/g; s/generation=20/generation=30/g; s/generation=21/generation=31/g; s/generation=22/generation=32/g; s/generation=23/generation=33/g; s/frame=21/frame=31/g; s/frame=22/frame=32/g; s/frame=23/frame=33/g' "$directx_log" >"$directx_riscv_log"
+    sed 's/aarch64/x86_64/g; s/generation=20/generation=10/g; s/generation=21/generation=11/g; s/generation=22/generation=12/g; s/generation=23/generation=13/g; s/generation=24/generation=14/g; s/frame=21/frame=11/g; s/frame=22/frame=12/g; s/frame=23/frame=13/g; s/frame=24/frame=14/g' "$directx_log" >"$directx_x86_log"
+    sed 's/aarch64/riscv64/g; s/generation=20/generation=30/g; s/generation=21/generation=31/g; s/generation=22/generation=32/g; s/generation=23/generation=33/g; s/generation=24/generation=34/g; s/frame=21/frame=31/g; s/frame=22/frame=32/g; s/frame=23/frame=33/g; s/frame=24/frame=34/g' "$directx_log" >"$directx_riscv_log"
     sed 's/processing_mask=8/processing_mask=1/; s/backend=cuda/backend=vulkan/' "$directx_log" >"$directx_vulkan_log"
     sed 's/render_mask=4/render_mask=1/' "$directx_log" >"$directx_wrong_mask_log"
     sed 's/backend=directx/backend=vulkan/g' "$directx_log" >"$directx_wrong_backend_log"
     sed '/^HOST_GPU_DRAW_IR_OK /s/identity=22/identity=99/' "$directx_log" >"$directx_wrong_identity_log"
     cat >"$pass_daemon_log" <<'EOF'
-HOST_GPU_PROCESS_PERF isa=aarch64 backend=cuda generation=24 run=1022 frame=24 cpu_us=120 device_us=80 preference=preferred
+HOST_GPU_PROCESS_PERF isa=aarch64 backend=cuda generation=25 run=1022 frame=25 cpu_us=120 device_us=80 preference=preferred
 EOF
-    sed 's/aarch64/x86_64/; s/generation=24/generation=14/; s/frame=24/frame=14/' "$pass_daemon_log" >"$x86_daemon_log"
-    sed 's/aarch64/riscv64/; s/generation=24/generation=34/; s/frame=24/frame=34/' "$pass_daemon_log" >"$riscv_daemon_log"
-    sed 's/backend=cuda/backend=metal/; s/generation=24/generation=22/; s/run=1022/run=1020/; s/frame=24/frame=22/' "$pass_daemon_log" >"$metal_daemon_log"
-    sed 's/aarch64/x86_64/; s/backend=cuda/backend=metal/; s/generation=24/generation=12/; s/run=1022/run=1020/; s/frame=24/frame=12/' "$pass_daemon_log" >"$metal_x86_daemon_log"
-    sed 's/aarch64/riscv64/; s/backend=cuda/backend=metal/; s/generation=24/generation=32/; s/run=1022/run=1020/; s/frame=24/frame=32/' "$pass_daemon_log" >"$metal_riscv_daemon_log"
-    sed 's/generation=24/generation=23/; s/run=1022/run=1021/; s/frame=24/frame=23/' "$pass_daemon_log" >"$directx_daemon_log"
-    sed 's/aarch64/x86_64/; s/generation=24/generation=13/; s/run=1022/run=1021/; s/frame=24/frame=13/' "$pass_daemon_log" >"$directx_x86_daemon_log"
-    sed 's/aarch64/riscv64/; s/generation=24/generation=33/; s/run=1022/run=1021/; s/frame=24/frame=33/' "$pass_daemon_log" >"$directx_riscv_daemon_log"
+    sed 's/aarch64/x86_64/; s/generation=25/generation=15/; s/frame=25/frame=15/' "$pass_daemon_log" >"$x86_daemon_log"
+    sed 's/aarch64/riscv64/; s/generation=25/generation=35/; s/frame=25/frame=35/' "$pass_daemon_log" >"$riscv_daemon_log"
+    sed 's/backend=cuda/backend=metal/; s/generation=25/generation=23/; s/run=1022/run=1020/; s/frame=25/frame=23/' "$pass_daemon_log" >"$metal_daemon_log"
+    sed 's/aarch64/x86_64/; s/backend=cuda/backend=metal/; s/generation=25/generation=13/; s/run=1022/run=1020/; s/frame=25/frame=13/' "$pass_daemon_log" >"$metal_x86_daemon_log"
+    sed 's/aarch64/riscv64/; s/backend=cuda/backend=metal/; s/generation=25/generation=33/; s/run=1022/run=1020/; s/frame=25/frame=33/' "$pass_daemon_log" >"$metal_riscv_daemon_log"
+    sed 's/generation=25/generation=24/; s/run=1022/run=1021/; s/frame=25/frame=24/' "$pass_daemon_log" >"$directx_daemon_log"
+    sed 's/aarch64/x86_64/; s/generation=25/generation=14/; s/run=1022/run=1021/; s/frame=25/frame=14/' "$pass_daemon_log" >"$directx_x86_daemon_log"
+    sed 's/aarch64/riscv64/; s/generation=25/generation=34/; s/run=1022/run=1021/; s/frame=25/frame=34/' "$pass_daemon_log" >"$directx_riscv_daemon_log"
     sed 's/cpu_us=120/cpu_us=119/; s/preference=preferred/preference=available-not-preferred/' "$pass_daemon_log" >"$slow_daemon_log"
     sed 's/cpu_us=120/cpu_us=119/' "$pass_daemon_log" >"$dishonest_daemon_log"
-    sed 's/generation=24/generation=25/' "$pass_daemon_log" >"$stale_perf_daemon_log"
+    sed 's/generation=25/generation=26/' "$pass_daemon_log" >"$stale_perf_daemon_log"
     { cat "$pass_daemon_log"; cat "$pass_daemon_log"; } >"$duplicate_perf_daemon_log"
     sed 's/cpu_us=120/cpu_us=0/' "$pass_daemon_log" >"$zero_perf_daemon_log"
     sed 's/cpu_us=120/cpu_us=9223372036854775808/; s/preference=preferred/preference=available-not-preferred/' "$pass_daemon_log" >"$oversized_perf_daemon_log"
@@ -1064,6 +1085,14 @@ EOF
         exit 1
     fi
     if serial_has_pass "$wrong_generation_log" aarch64; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    if serial_render_fixture_valid "$wrong_fixture_log" aarch64 || serial_has_pass "$wrong_fixture_log" aarch64; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    if serial_has_pass "$wrong_fixture_correlation_log" aarch64; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi

@@ -35,6 +35,12 @@ The fixed layout leaves 8,318,976 bytes for readback: 1280x720 ARGB fits and
 Engine2D path until a separately reviewed bounded-capacity change lands; it
 must not be downscaled, cropped, or reported as host accelerated.
 
+The selected 1280x720 evidence request reuses the canonical Draw IR RECT path
+and compares every returned pixel with a positional CPU oracle. It is a
+separate synchronous generation after the retained 64x48 full-frame IMAGE
+regression, so exact NFR evidence does not expand protocol v1 or weaken IMAGE
+transport coverage.
+
 Completed readback presentation remains owned by `Engine2dWmFrameExecutor`
 and routes through `FramebufferDriver.present_argb32_from_mmio`. The driver
 validates the complete source checksum before the first scanout write, then

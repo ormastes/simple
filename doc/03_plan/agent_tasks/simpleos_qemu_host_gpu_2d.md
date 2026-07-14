@@ -17,6 +17,7 @@
 - Production manual step: `Select host presentation or the existing local production renderer`
 - Metal owner interfaces: `MetalBackend.init_with_session`; `MetalBackend.draw_image_blend_checked`; `Engine2D.create_shared_metal_offscreen`; `Engine2D.draw_metal_image_blend_checked`
 - Processing performance receipt: `HOST_GPU_PROCESS_PERF`; checker: `processing_perf_evidence_valid`; manual step: `Classify device processing preference`; fail-fast placeholder: `fail("ProcessingIR preference evidence missing")`
+- Exact fixture constants: `HOST_GPU_FIXTURE_*`; oracle: `host_gpu_fixture_expected_pixel`; checker: `serial_render_fixture_valid`; manual step: `Render the selected 1280x720 canonical fixture`; fail-fast placeholder: `fail("1280x720 host-GPU fixture evidence missing")`
 
 ## Lanes
 
@@ -32,6 +33,7 @@
 | native Metal ProcessingIR source | Codex Spark | dedicated checked FillU32 kernel, pointer readback, strict daemon probe |
 | QEMU/daemon RSS evidence | Codex Spark | concurrent component/combined sampling and isolated metrics self-test |
 | ProcessingIR preference evidence | Codex Spark sidecars | independent CPU/device timing, correlated receipt, and fail-closed 1.5x classification |
+| exact 1280x720 Draw IR fixture | Codex Spark sidecars | wire/memory audit, positional oracle, cached evidence exclusions, and manual review |
 | merge and generated-manual review | primary `/root` | wrapper/parser/manual accepted; native non-Linux rows remain open |
 | final review | normal/highest-capability Codex | requirements, exclusions, security, NFR, manual quality |
 
@@ -65,6 +67,9 @@ fixture bypasses, synthetic handles, or passing placeholders.
   by TODO 569 and TODO 570 instead of being inferred from 64x48 parity. The
   daemon and cached-report checker now implement the correlated classification
   contract, but TODO 570 stays open until prepared native rows execute it.
+  TODO 569's source contract now adds the selected 1280x720 positional oracle
+  without replacing the smaller IMAGE regression; it also stays open for fresh
+  supported-host execution.
 - Final reviewer: primary `/root`; native Metal implementation is present but
   its done mark, DirectX, and remaining CUDA receipts remain rejected without
   prepared-host evidence.

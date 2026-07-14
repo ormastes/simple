@@ -247,13 +247,16 @@ from reaching the QEMU build path.
 It builds `simpleos-host-gpu-x86_64`, `simpleos-host-gpu-aarch64`, and
 `simpleos-host-gpu-riscv64` through `_QemuRunner`, starts the strict host
 daemon over one bounded ivshmem region per row, and requires the existing
-64x48 raw-render, Draw IR, and independent ProcessingIR device-readback probe.
+64x48 raw-render and full-frame IMAGE regression, a separate exact 1280x720
+two-RECT Draw IR readback, and independent ProcessingIR device-readback probe.
 The AArch64 row has a second mandatory phase: after that probe passes, the
 wrapper boots `arm64-desktop-engine2d` while retaining the same daemon, shared
 memory file, and RSS metrics file. Each QEMU phase is sampled concurrently with
 the daemon, and the daemon, QEMU, and combined maxima carry across both boots.
-The production phase does not replace or
-weaken the 64x48 probe. Its ready generation must continue the probe's final
+The exact fixture compares all 921,600 returned pixels with its positional CPU
+oracle and requires checksum 1417723768, 633,600 background pixels, 288,000
+foreground pixels, and zero mismatches. The production phase does not replace
+or weaken either probe. Its ready generation must continue the probe's final
 ProcessingIR generation according to the shared Metal, DirectX, then Vulkan
 negotiation order, proving both boots used one daemon session rather than two
 independent valid logs.
@@ -299,8 +302,9 @@ execution, so this source-level contract is not a fresh live PASS.
 Cached reports are accepted only through `--validate-report`: an overall status
 cannot promote the lane unless all nine host/ISA rows are well-formed and a
 passing active host carries three existing serial logs with exact correlated
-render, Draw IR, and ProcessingIR receipts. Each passing row also carries one
-daemon performance receipt correlated by ISA/backend/generation/run/frame.
+render, Draw IR, 1280x720 fixture, and ProcessingIR receipts. Each passing row
+also carries one daemon performance receipt correlated by
+ISA/backend/generation/run/frame.
 The validator requires positive CPU/device microseconds, requires device time
 to match the guest receipt, and independently labels the existing
 FillU32(256, 7) request `preferred` only at 1.5x or greater speedup; a correct
@@ -319,8 +323,8 @@ hex string with the wrong QEMU semantics fails. It also rejects missing,
 duplicate, empty, nonpositive, or inconsistent fields. The isolated metrics
 self-test exercises malformed values and the two-phase maximum carry without
 starting QEMU or a compiler. Fresh live rows are still required before claiming
-the latency or 256 MiB combined QEMU-plus-daemon RSS targets. The 64x48 protocol
-fixture does not satisfy NFR-001's selected 1280x720 dimensions (TODO 569), and
+the latency or 256 MiB combined QEMU-plus-daemon RSS targets. TODO 569 remains
+open until prepared native rows execute the now-source-ready 1280x720 fixture;
 TODO 570 remains open until prepared native rows execute the now-source-ready
 ProcessingIR preference contract.
 

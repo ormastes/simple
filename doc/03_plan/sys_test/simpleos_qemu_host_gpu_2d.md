@@ -22,7 +22,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 | production x86 active-VMM mapping, idle-generation submission, validated MMIO presentation, and local fallback | REQ-002,003,005,006,009,010 |
 | resolved TEXT preflight, canonical glyph material, exact CPU/Vulkan parity, and device provenance | REQ-003,005,006,010 |
 | exact device-backed ProcessingIR result after shared fenced Vulkan completion; unknown completion precedes and suppresses teardown | REQ-004,007; NFR-002 |
-| mandatory AArch64 production desktop boot after the unchanged 64x48 render/Draw IR/ProcessingIR probe | REQ-002,003,004,005,006,007,009,010,011,012; NFR-002,008,009 |
+| mandatory AArch64 production desktop boot after the retained 64x48 IMAGE regression, exact 1280x720 Draw IR fixture, and ProcessingIR probe | REQ-002,003,004,005,006,007,009,010,011,012; NFR-001,002,008,009 |
 | AArch64 desktop source boundary uses architecture-owned RAMFB/PL011 facades and no legacy WM I/O or direct runtime GUI/MMIO imports | REQ-002,003,009,010 |
 | exact AArch64 production argv with RAMFB and the same daemon/shared-memory/RSS-metrics accumulator lifecycle | REQ-006,011,012; NFR-005,006,008,009 |
 | correlated host-GPU ready -> presented -> first-frame -> desktop-ready production evidence | REQ-003,005,006,009,010,011,012; NFR-001,004,007,008,009 |
@@ -35,7 +35,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 | cached report validates every host/ISA row and all three Linux serial receipts before promotion | REQ-011,012; NFR-008,009 |
 | live and cached QEMU argv match the ISA machine, kernel, and shared ivshmem binding | REQ-006,011,012; NFR-009 |
 | latency, negotiation, and RSS evidence | NFR-003,005,006 |
-| exact 1280x720 canonical render/readback fixture (TODO 569) | NFR-001 |
+| exact 1280x720 canonical Draw IR readback with a positional zero-mismatch oracle (TODO 569) | NFR-001 |
 | measured device-vs-CPU processing preference and `available-not-preferred` classification (TODO 570) | NFR-004 |
 
 ## Evidence Rules
@@ -76,8 +76,9 @@ preserved across the AArch64 probe/production boots. NFR latency and the 256 MiB
 combined-memory target still require fresh measured rows.
 
 The AArch64 pass contract has two mandatory boots under one wrapper-owned
-lifecycle. The first remains the 64x48 raw-render, Draw IR, and independent
-ProcessingIR probe. Only after it passes may the wrapper boot
+lifecycle. The first retains the 64x48 raw-render/IMAGE regression, then
+requires the exact 1280x720 positional Draw IR oracle and independent
+ProcessingIR probe. Only after all four receipts pass may the wrapper boot
 `arm64-desktop-engine2d` against the same daemon, shared-memory file, and
 RSS metrics file; a fresh sampler per boot carries the recorded maxima forward.
 The second encoded argv must select the desktop ELF,
