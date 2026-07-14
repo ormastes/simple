@@ -121,3 +121,26 @@ that the heap-exhaustion had been masking — i.e. the reroute left a null-deref
 first-frame desktop render. This is the SimpleOS WM owner's render code (reliable
 symbolization needs their own build). The O(n^2) heap fix is landed and independent;
 this null-deref is what still blocks the 4K PASS.
+
+## Update (2026-07-14): O(n^2) heap fix VERIFIED; render null-deref is compositor.spl failing NATIVE-BUILD (seed HIR)
+The O(n^2) `_zero_u32_buffer` fix (`1fe2653d`) is CONFIRMED effective on a clean build:
+two `[heap] alloc` lines total (~1MB early + one 0x800020 framebuffer alloc), boot
+proceeds cleanly through pmm/vmm bootstrap, vfs-init, `framebuffer ready 3840x2160`,
+engine2d-ready, keyboard-ready, mouse-ready — NO heap exhaustion. That regression is fixed.
+
+Remaining blocker: the render null-deref (cr2=0x0 loop after mouse-ready) traces to
+`compositor.spl` FAILING NATIVE-BUILD (passes `check`, fails `SIMPLE_BOOTSTRAP=1`), so
+the kernel SKIPS it and links a weak-stub compositor → desktop-gui derefs a null
+compositor entry → cr2=0x0 loop (RIPs 0xb05ea5/0xb06732/0xb07158/0xb1c529/...).
+Native-build error: `hir: cannot infer field type while lowering
+Compositor._handle_input_backend: struct 'ANY' field 'abs_x'`. Root: `inp` is the
+`InputBackend` TRAIT, so the bootstrap HIR erases `inp.poll_mouse()`'s `MouseEvent?`
+return to ANY, then rejects field access on ANY (07-12 compiled because native-build
+then allowed ANY field access — a stricter HIR inference has since regressed it).
+Workarounds tried + REVERTED (all still lower to ANY): type annotation, `if val`
+pattern-binding (works for nilable FIELDS but not trait-method calls), correct field
+names. Needs a SEED HIR fix (propagate trait-method return types) OR a concrete-backend
+refactor — both bootstrap-scoped / WM owner's call. Same class as the web JIT gaps.
+
+NET: O(n^2) heap bug FIXED+VERIFIED; full 4K PASS still blocked by the compositor
+native-build failure.
