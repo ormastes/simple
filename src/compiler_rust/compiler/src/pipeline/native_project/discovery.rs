@@ -1050,13 +1050,15 @@ impl NativeProjectBuilder {
                 }
             }
 
-            // Try each resolver -- the first hit wins for each dependency.
-            for resolver in &mut resolvers {
-                for dep in extract_reachable_module_paths(&module, &canonical, resolver) {
-                    let dep_canonical = safe_canonicalize(&dep);
-                    found_deps.insert(dep_canonical);
-                }
-            }
+            // Resolve each import atomically: the first resolver hit wins, and
+            // the filesystem fallback runs only when every resolver misses.
+            found_deps.extend(extract_reachable_module_paths(
+                &module,
+                &canonical,
+                &mut resolvers,
+                &canonical_source_dirs,
+                &self.project_root,
+            ));
             if rust_trace && !found_deps.is_empty() {
                 eprintln!(
                     "[native-rust-trace] discover deps {} count={}",
@@ -1068,92 +1070,6 @@ impl NativeProjectBuilder {
                 }
                 if found_deps.len() > 8 {
                     eprintln!("  dep_more={}", found_deps.len() - 8);
-                }
-            }
-
-            // Filesystem fallback: for any `use` statement whose segments form a
-            // plausible path under one of the --source dirs, check the filesystem
-            // directly.
-            {
-                use simple_parser::ast::{
-                    AutoImportStmt, CommonUseStmt, ExportUseStmt, ImportTarget, ModDecl, ModulePath, MultiUse, Node,
-                    UseStmt,
-                };
-
-                fn segments_from_use(path: &ModulePath, target: Option<&ImportTarget>) -> Vec<Vec<String>> {
-                    let mut results = Vec::new();
-                    if let Some(ImportTarget::Single(name)) | Some(ImportTarget::Aliased { name, .. }) = target {
-                        let mut segs = path.segments.clone();
-                        segs.push(name.clone());
-                        results.push(segs);
-                    }
-                    results.push(path.segments.clone());
-                    results
-                }
-
-                let mut use_segment_lists: Vec<Vec<String>> = Vec::new();
-                visit_ast_nodes(&module.items, &mut |item| match item {
-                    Node::UseStmt(UseStmt { path, target, .. }) => {
-                        use_segment_lists.extend(segments_from_use(path, Some(target)));
-                    }
-                    Node::CommonUseStmt(CommonUseStmt { path, target, .. }) => {
-                        use_segment_lists.extend(segments_from_use(path, Some(target)));
-                    }
-                    Node::ExportUseStmt(ExportUseStmt { path, target, .. }) => {
-                        use_segment_lists.extend(segments_from_use(path, Some(target)));
-                    }
-                    Node::MultiUse(MultiUse { imports, .. }) => {
-                        for (path, target) in imports {
-                            use_segment_lists.extend(segments_from_use(path, Some(target)));
-                        }
-                    }
-                    Node::AutoImportStmt(AutoImportStmt { path, .. }) => {
-                        use_segment_lists.extend(segments_from_use(path, None));
-                    }
-                    Node::ModDecl(ModDecl { name, body, .. }) if body.is_none() => {
-                        use_segment_lists.push(vec![name.clone()]);
-                    }
-                    _ => {}
-                });
-
-                for segments in &use_segment_lists {
-                    if segments.is_empty() {
-                        continue;
-                    }
-                    for src_dir in &canonical_source_dirs {
-                        let dir_name = src_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
-
-                        let try_segments: Vec<&[String]> = if !segments.is_empty() && segments[0] == dir_name {
-                            vec![&segments[1..], &segments[..]]
-                        } else {
-                            vec![&segments[..]]
-                        };
-
-                        for segs in &try_segments {
-                            if segs.is_empty() {
-                                continue;
-                            }
-                            let rel_path: PathBuf = segs.iter().collect();
-                            let spl_path = src_dir.join(&rel_path).with_extension("spl");
-                            if spl_path.is_file() {
-                                let dep_canonical = safe_canonicalize(&spl_path);
-                                found_deps.insert(dep_canonical);
-                                break;
-                            }
-                            let mod_path = src_dir.join(&rel_path).join("mod.spl");
-                            if mod_path.is_file() {
-                                let dep_canonical = safe_canonicalize(&mod_path);
-                                found_deps.insert(dep_canonical);
-                                break;
-                            }
-                            let init_path = src_dir.join(&rel_path).join("__init__.spl");
-                            if init_path.is_file() {
-                                let dep_canonical = safe_canonicalize(&init_path);
-                                found_deps.insert(dep_canonical);
-                                break;
-                            }
-                        }
-                    }
                 }
             }
 
@@ -1191,43 +1107,96 @@ impl NativeProjectBuilder {
 pub(crate) fn extract_reachable_module_paths(
     module: &simple_parser::ast::Module,
     from_file: &Path,
-    resolver: &mut crate::module_resolver::ModuleResolver,
+    resolvers: &mut [crate::module_resolver::ModuleResolver],
+    fallback_roots: &[PathBuf],
+    project_root: &Path,
 ) -> Vec<PathBuf> {
     use simple_parser::ast::{
         AutoImportStmt, CommonUseStmt, ExportUseStmt, ImportTarget, ModDecl, ModulePath, MultiUse, Node, UseStmt,
     };
 
     fn resolve_candidate(
-        resolver: &mut crate::module_resolver::ModuleResolver,
+        resolvers: &mut [crate::module_resolver::ModuleResolver],
+        fallback_roots: &[PathBuf],
+        project_root: &Path,
         from_file: &Path,
         path: &ModulePath,
         target: Option<&ImportTarget>,
     ) -> Option<PathBuf> {
-        match target {
-            Some(ImportTarget::Single(name)) | Some(ImportTarget::Aliased { name, .. }) => {
-                let mut module_segments = path.segments.clone();
-                module_segments.push(name.clone());
-                let module_path = ModulePath::new(module_segments);
-                if let Ok(resolved) = resolver.resolve(&module_path, from_file) {
-                    return Some(safe_canonicalize(&resolved.path));
+        for resolver in resolvers {
+            match target {
+                Some(ImportTarget::Single(name)) | Some(ImportTarget::Aliased { name, .. }) => {
+                    let mut module_segments = path.segments.clone();
+                    module_segments.push(name.clone());
+                    let module_path = ModulePath::new(module_segments);
+                    if let Ok(resolved) = resolver.resolve(&module_path, from_file) {
+                        return Some(safe_canonicalize(&resolved.path));
+                    }
+                }
+                _ => {}
+            }
+            if let Ok(resolved) = resolver.resolve(path, from_file) {
+                return Some(safe_canonicalize(&resolved.path));
+            }
+        }
+
+        let mut segment_lists = Vec::new();
+        if let Some(ImportTarget::Single(name)) | Some(ImportTarget::Aliased { name, .. }) = target {
+            let mut segments = path.segments.clone();
+            segments.push(name.clone());
+            segment_lists.push(segments);
+        }
+        segment_lists.push(path.segments.clone());
+
+        for segments in segment_lists {
+            if segments.is_empty() {
+                continue;
+            }
+            if segments[0] == "lib" && segments.len() > 1 {
+                return find_module_file(&project_root.join("src/lib"), &segments[1..]);
+            }
+            for root in fallback_roots {
+                let root_name = root.file_name().and_then(|name| name.to_str()).unwrap_or("");
+                if segments[0] == root_name {
+                    if let Some(found) = find_module_file(root, &segments[1..]) {
+                        return Some(found);
+                    }
+                }
+                if let Some(found) = find_module_file(root, &segments) {
+                    return Some(found);
                 }
             }
-            _ => {}
         }
-        resolver
-            .resolve(path, from_file)
-            .ok()
-            .map(|resolved| safe_canonicalize(&resolved.path))
+        None
+    }
+
+    fn find_module_file(root: &Path, segments: &[String]) -> Option<PathBuf> {
+        if segments.is_empty() {
+            return None;
+        }
+        let rel_path: PathBuf = segments.iter().collect();
+        for candidate in [
+            root.join(&rel_path).with_extension("spl"),
+            root.join(&rel_path).join("mod.spl"),
+            root.join(&rel_path).join("__init__.spl"),
+        ] {
+            if candidate.is_file() {
+                return Some(safe_canonicalize(&candidate));
+            }
+        }
+        None
     }
 
     fn push_dep(
         deps: &mut Vec<PathBuf>,
-        resolver: &mut crate::module_resolver::ModuleResolver,
+        resolvers: &mut [crate::module_resolver::ModuleResolver],
+        fallback_roots: &[PathBuf],
+        project_root: &Path,
         from_file: &Path,
         path: &ModulePath,
         target: Option<&ImportTarget>,
     ) {
-        if let Some(resolved) = resolve_candidate(resolver, from_file, path, target) {
+        if let Some(resolved) = resolve_candidate(resolvers, fallback_roots, project_root, from_file, path, target) {
             if !deps.iter().any(|existing| same_file_path(existing, &resolved)) {
                 deps.push(resolved);
             }
@@ -1236,22 +1205,26 @@ pub(crate) fn extract_reachable_module_paths(
 
     let mut deps = Vec::new();
     visit_ast_nodes(&module.items, &mut |item| match item {
-        Node::UseStmt(UseStmt { path, target, .. }) => push_dep(&mut deps, resolver, from_file, path, Some(target)),
+        Node::UseStmt(UseStmt { path, target, .. }) => {
+            push_dep(&mut deps, resolvers, fallback_roots, project_root, from_file, path, Some(target))
+        }
         Node::CommonUseStmt(CommonUseStmt { path, target, .. }) => {
-            push_dep(&mut deps, resolver, from_file, path, Some(target))
+            push_dep(&mut deps, resolvers, fallback_roots, project_root, from_file, path, Some(target))
         }
         Node::ExportUseStmt(ExportUseStmt { path, target, .. }) => {
-            push_dep(&mut deps, resolver, from_file, path, Some(target))
+            push_dep(&mut deps, resolvers, fallback_roots, project_root, from_file, path, Some(target))
         }
         Node::MultiUse(MultiUse { imports, .. }) => {
             for (path, target) in imports {
-                push_dep(&mut deps, resolver, from_file, path, Some(target));
+                push_dep(&mut deps, resolvers, fallback_roots, project_root, from_file, path, Some(target));
             }
         }
-        Node::AutoImportStmt(AutoImportStmt { path, .. }) => push_dep(&mut deps, resolver, from_file, path, None),
+        Node::AutoImportStmt(AutoImportStmt { path, .. }) => {
+            push_dep(&mut deps, resolvers, fallback_roots, project_root, from_file, path, None)
+        }
         Node::ModDecl(ModDecl { name, body, .. }) if body.is_none() => {
             let path = ModulePath::new(vec![name.clone()]);
-            push_dep(&mut deps, resolver, from_file, &path, None);
+            push_dep(&mut deps, resolvers, fallback_roots, project_root, from_file, &path, None);
         }
         _ => {}
     });

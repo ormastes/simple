@@ -117,7 +117,10 @@ yet provable**. Two tracked blockers:
    Run it with a proven self-hosted compiler, for example:
    `SIMPLE_BUILD_COMPILER=build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple sh scripts/os/build_clang_disk.shs`.
    The wrapper rejects Rust-seed provenance and requires exact `-c` output `2`
-   before starting the kernel build.
+   before starting the kernel build. Its final handoff pins the shared
+   `execute-artifact` profile and requires exact output
+   `hello-from-simpleos-clang` plus guest exit status 42; canonical Simple
+   version/interpreter profiles do not accept these overrides.
    **On desktop SimpleOS this static path
    is DEPRECATED — see the launch-policy section below.**
 

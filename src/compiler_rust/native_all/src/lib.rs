@@ -105,13 +105,7 @@ fn extract_rt_string_array(arr: RuntimeValue) -> Vec<String> {
 /// Returns exit code (0 = success).
 #[no_mangle]
 pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
-    let args_vec = if std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1") {
-        // ponytail: bootstrap binaries currently mix the C array ABI with the
-        // Rust RuntimeValue ABI; process argv is the command's source of truth.
-        std::env::args().collect()
-    } else {
-        extract_rt_string_array(args)
-    };
+    let args_vec = extract_rt_string_array(args);
     if native_build_rust_trace_enabled() {
         eprintln!("[native-rust-trace] raw args={:?}", args_vec);
     }

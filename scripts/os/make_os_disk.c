@@ -237,6 +237,41 @@ static void put_dir_entry(unsigned char *entries, int *count, const char *name, 
     *count += 1;
 }
 
+static unsigned char fat_lfn_checksum(const char *short_name)
+{
+    unsigned char sum = 0;
+    for (int i = 0; i < 11; ++i)
+        sum = (unsigned char)(((sum & 1U) ? 0x80U : 0U) + (sum >> 1) + (unsigned char)short_name[i]);
+    return sum;
+}
+
+static void put_named_dir_entry(unsigned char *entries, int *count, const char *short_name,
+                                const char *long_name, int cluster, size_t size, unsigned char attr)
+{
+    size_t len = strlen(long_name);
+    int parts = (int)((len + 12U) / 13U);
+    static const unsigned char offsets[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
+    unsigned char checksum = fat_lfn_checksum(short_name);
+    for (int part = parts; part >= 1; --part) {
+        unsigned char *entry = entries + ((size_t)(*count) * 32U);
+        memset(entry, 0xff, 32);
+        entry[0] = (unsigned char)(part | (part == parts ? 0x40 : 0));
+        entry[11] = 0x0f;
+        entry[12] = 0;
+        entry[13] = checksum;
+        entry[26] = 0;
+        entry[27] = 0;
+        size_t start = (size_t)(part - 1) * 13U;
+        for (int i = 0; i < 13; ++i) {
+            size_t index = start + (size_t)i;
+            uint16_t ch = index < len ? (unsigned char)long_name[index] : (index == len ? 0 : 0xffffU);
+            write_u16(entry, offsets[i], ch);
+        }
+        *count += 1;
+    }
+    put_dir_entry(entries, count, short_name, cluster, size, attr);
+}
+
 static struct bytes elf_image(const char *marker, int machine, bool is64)
 {
     size_t marker_len = strlen(marker) + 1;
@@ -482,6 +517,18 @@ int main(int argc, char **argv)
     struct bytes hello_spl = text_bytes("fn main() -> i64:\n    print \"Hello from SimpleOS\"\n    return 0\n");
     struct bytes nvfs = textf("nvfs-image-version=1\nplatform=%s\nlane=%s\n", platform, lane);
     struct bytes toolset = textf("lane = \"%s\"\nmode=native-filesystem-app\nstatus=standalone-required\n", lane);
+    struct bytes simple_tool_manifest = textf(
+        "[simple_toolchain]\nstatus = \"embedded\"\n"
+        "host_payload = \"%s\"\nbuild_stamp = \"%s.build_stamp\"\n"
+        "runtime_source = \"simpleos-filesystem\"\n"
+        "role = \"/usr/bin/simple\"\nrole = \"/usr/bin/simple.smf\"\n"
+        "role = \"/bin/simple\"\nrole = \"/bin/simple.smf\"\n"
+        "role = \"/sys/apps/simple\"\nrole = \"/sys/apps/simple.smf\"\n"
+        "role = \"/sys/apps/simple_compiler\"\nrole = \"/sys/apps/simple_compiler.smf\"\n"
+        "role = \"/sys/apps/simple_interpreter\"\nrole = \"/sys/apps/simple_interpreter.smf\"\n"
+        "role = \"/sys/apps/simple_loader\"\nrole = \"/sys/apps/simple_loader.smf\"\n",
+        getenv("SIMPLEOS_SIMPLE_BINARY") ? getenv("SIMPLEOS_SIMPLE_BINARY") : "",
+        getenv("SIMPLEOS_SIMPLE_BINARY") ? getenv("SIMPLEOS_SIMPLE_BINARY") : "");
     struct bytes markers = textf(
         "\nHELLOSMF\nBROWSMF\nSBROWSMF\nSMUXSMF\nSCOMPSMF\nSINTSMF\nSLOADSMF\nSIMPLSTC\nLLVMSMF\nCLANGSMF\nRUSTSMF\nSTEAM204SMF\n"
         "[steam-2048-demo] source=2048\n[game-port] profile=steamos-rebuild-v1 source=2048\nrebuild_target=simpleos-native\n"
@@ -533,6 +580,7 @@ int main(int argc, char **argv)
     int hello_spl_cluster = alloc_clusters(hello_spl.data, hello_spl.len);
     int nvfs_cluster = alloc_clusters(nvfs.data, nvfs.len);
     int toolset_cluster = alloc_clusters(toolset.data, toolset.len);
+    int simple_tool_manifest_cluster = simple_payload.len ? alloc_clusters(simple_tool_manifest.data, simple_tool_manifest.len) : 0;
     int markers_cluster = alloc_clusters(markers.data, markers.len);
     int llvm_manifest_cluster = alloc_clusters(llvm_manifest.data, llvm_manifest.len);
     int clang_manifest_cluster = alloc_clusters(clang_manifest.data, clang_manifest.len);
@@ -558,6 +606,11 @@ int main(int argc, char **argv)
     int simple_usr_cluster = simple_payload.len ? alloc_clusters(simple_payload.data, simple_payload.len) : 0;
     int simple_bin_cluster = simple_payload.len ? alloc_clusters(simple_payload.data, simple_payload.len) : 0;
     int simple_apps_cluster = simple_payload.len ? alloc_clusters(simple_payload.data, simple_payload.len) : 0;
+    int simple_usr_smf_cluster = simple_payload.len ? alloc_clusters(simple_cli.data, simple_cli.len) : 0;
+    int simple_bin_smf_cluster = simple_payload.len ? alloc_clusters(simple_cli.data, simple_cli.len) : 0;
+    int simple_compiler_raw_cluster = simple_payload.len ? alloc_clusters(simple_payload.data, simple_payload.len) : 0;
+    int simple_interpreter_raw_cluster = simple_payload.len ? alloc_clusters(simple_payload.data, simple_payload.len) : 0;
+    int simple_loader_raw_cluster = simple_payload.len ? alloc_clusters(simple_payload.data, simple_payload.len) : 0;
     int clang_bin_cluster = clang_payload.len ? alloc_clusters(clang_payload.data, clang_payload.len) : 0;
     int llc_bin_cluster = llc_payload.len ? alloc_clusters(llc_payload.data, llc_payload.len) : 0;
     int lld_bin_cluster = lld_payload.len ? alloc_clusters(lld_payload.data, lld_payload.len) : 0;
@@ -607,6 +660,9 @@ int main(int argc, char **argv)
     put_dir_entry(sys, &sys_n, "PERF       ", perf_cluster, 0, 0x10);
     put_dir_entry(sys, &sys_n, "NVFSVER TXT", nvfs_cluster, nvfs.len, 0x20);
     put_dir_entry(sys, &sys_n, "TOOLSET SDN", toolset_cluster, toolset.len, 0x20);
+    if (simple_tool_manifest_cluster)
+        put_named_dir_entry(sys, &sys_n, "SIMPLETOSDN", "SIMPLETOOL.SDN",
+                            simple_tool_manifest_cluster, simple_tool_manifest.len, 0x20);
     put_dir_entry(sys, &sys_n, "MARKERS TXT", markers_cluster, markers.len, 0x20);
     put_dir_entry(sys, &sys_n, "LLVMMAN TXT", llvm_manifest_cluster, llvm_manifest.len, 0x20);
     put_dir_entry(sys, &sys_n, "CLANGMANTXT", clang_manifest_cluster, clang_manifest.len, 0x20);
@@ -623,16 +679,21 @@ int main(int argc, char **argv)
     put_dir_entry(sys, &sys_n, "RUSTPIPESTP", rust_pipe_cluster, rust_pipe.len, 0x20);
     put_dir_entry(apps, &apps_n, "HELLOSMFSMF", hello_cluster, hello.len, 0x20);
     put_dir_entry(apps, &apps_n, "BROWSMF SMF", browser_cluster, browser.len, 0x20);
-    put_dir_entry(apps, &apps_n, "SCOMPSMFSMF", compiler_cluster, simple_compiler.len, 0x20);
-    put_dir_entry(apps, &apps_n, "SINTSMF SMF", interpreter_cluster, simple_interpreter.len, 0x20);
-    put_dir_entry(apps, &apps_n, "SLOADSMFSMF", loader_cluster, simple_loader.len, 0x20);
-    put_dir_entry(apps, &apps_n, "SIMPLSTCSMF", simple_cluster, simple_cli.len, 0x20);
+    put_named_dir_entry(apps, &apps_n, "SCOMPSMFSMF", "simple_compiler.smf", compiler_cluster, simple_compiler.len, 0x20);
+    put_named_dir_entry(apps, &apps_n, "SINTSMF SMF", "simple_interpreter.smf", interpreter_cluster, simple_interpreter.len, 0x20);
+    put_named_dir_entry(apps, &apps_n, "SLOADSMFSMF", "simple_loader.smf", loader_cluster, simple_loader.len, 0x20);
+    put_named_dir_entry(apps, &apps_n, "SIMPLSTCSMF", "simple.smf", simple_cluster, simple_cli.len, 0x20);
     if (simple_usr_cluster) {
         put_dir_entry(usr, &usr_n, "BIN        ", usr_bin_cluster, 0, 0x10);
         put_dir_entry(usr, &usr_n, "LIB        ", usr_lib_cluster, 0, 0x10);
         put_dir_entry(usr_bin, &usr_bin_n, "SIMPLE     ", simple_usr_cluster, simple_payload.len, 0x20);
+        put_named_dir_entry(usr_bin, &usr_bin_n, "SIMPLE  SMF", "simple.smf", simple_usr_smf_cluster, simple_cli.len, 0x20);
         put_dir_entry(bin, &bin_n, "SIMPLE     ", simple_bin_cluster, simple_payload.len, 0x20);
+        put_named_dir_entry(bin, &bin_n, "SIMPLE  SMF", "simple.smf", simple_bin_smf_cluster, simple_cli.len, 0x20);
         put_dir_entry(apps, &apps_n, "SIMPLE     ", simple_apps_cluster, simple_payload.len, 0x20);
+        put_named_dir_entry(apps, &apps_n, "SCOMPILER  ", "simple_compiler", simple_compiler_raw_cluster, simple_payload.len, 0x20);
+        put_named_dir_entry(apps, &apps_n, "SINTERP    ", "simple_interpreter", simple_interpreter_raw_cluster, simple_payload.len, 0x20);
+        put_named_dir_entry(apps, &apps_n, "SLOADER    ", "simple_loader", simple_loader_raw_cluster, simple_payload.len, 0x20);
     }
     if (clang_bin_cluster)
         put_dir_entry(usr_bin, &usr_bin_n, "CLANG      ", clang_bin_cluster, clang_payload.len, 0x20);

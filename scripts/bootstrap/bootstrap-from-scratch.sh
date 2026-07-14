@@ -34,6 +34,7 @@ Options:
   --pure-simple      Compatibility alias for the default no-Rust rebuild mode.
   --mode=<name>      Pure-Simple build mode: dynload or one-binary
                      (default: dynload; env: SIMPLE_BOOTSTRAP_MODE)
+                     SIMPLE_NO_STUB_FALLBACK=1 also makes staged failures fatal
   --full-cli         Relink the full CLI after the staged pure-Simple build.
                      Implied by --deploy and one-binary mode.
   --fresh-cache      Clear the dynload native cache once before rebuilding
@@ -61,6 +62,10 @@ full_bootstrap=0
 full_cli=0
 fresh_cache=0
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
+case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
+  1|true|yes|on) strict_bootstrap=1 ;;
+  *) strict_bootstrap=0 ;;
+esac
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -312,7 +317,7 @@ bootstrap_wide_inputs_hash() {
   {
     # Source-level invalidation belongs to the native-build cache, which
     # fingerprints each module. This stamp covers only build-wide context.
-    printf 'platform=%s backend=%s mode=%s\n' "${PLATFORM}" "${backend}" "${bootstrap_mode}"
+    printf 'platform=%s backend=%s mode=%s stub_fallback=forbidden\n' "${PLATFORM}" "${backend}" "${bootstrap_mode}"
     env | LC_ALL=C sort | awk '/^SIMPLE_.*(AOP|MDSOC|WEAV|LOAD|INTERPRET|EXECUTION|LIB|NATIVE_BUILD)/ { print }'
   } | hash_stream
 }
@@ -534,6 +539,8 @@ else
   set +e
   env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+    SIMPLE_NATIVE_BUILD_RUST=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_BINARY="$(absolute_path "${seed_bin}")" \
     "${seed_bin}" native-build \
     --backend cranelift \
@@ -550,6 +557,10 @@ else
   set -e
   echo "  stage2-native-build log: ${log_dir}/stage2-native-build.log"
   if [ "${stage2_status}" -ne 0 ]; then
+    if [ "${strict_bootstrap}" -eq 1 ]; then
+      echo "error: strict bootstrap stage2 failed (exit ${stage2_status}); refusing seed fallback" >&2
+      exit "${stage2_status}"
+    fi
     echo "  warning: stage2 native-build failed (exit ${stage2_status}); using seed for stage 4" >&2
     echo "  warning: see doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md" >&2
   fi
@@ -568,6 +579,8 @@ else
   [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ] && \
   env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+    SIMPLE_NATIVE_BUILD_RUST=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_BINARY="$(absolute_path "${stage2_bin}")" \
     "${stage2_bin}" native-build \
@@ -589,6 +602,13 @@ else
     stage3_ok=1
     echo "  Stage 3 succeeded"
   else
+    if [ "${strict_bootstrap}" -eq 1 ]; then
+      echo "error: strict bootstrap stage3 failed; refusing seed fallback" >&2
+      if [ "${stage3_status}" -ne 0 ]; then
+        exit "${stage3_status}"
+      fi
+      exit 2
+    fi
     if [ "${stage3_status}" -eq 0 ]; then
       echo "  warning: stage3 self-host produced no executable; using seed for stage 4"
     else

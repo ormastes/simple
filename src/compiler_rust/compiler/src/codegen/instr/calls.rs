@@ -121,6 +121,7 @@ mod tests {
         assert_eq!(sffi_alias_target("to_f64"), Some("rt_string_to_float"));
         assert_eq!(sffi_alias_target("to_string"), Some("rt_to_string"));
         assert_eq!(sffi_alias_target("to_text"), Some("rt_to_string"));
+        assert_eq!(sffi_alias_target("dealloc"), Some("rt_free"));
     }
 }
 
@@ -2715,6 +2716,7 @@ pub fn sffi_alias_target(name: &str) -> Option<&'static str> {
         "rt_dict_insert" => Some("rt_dict_set"),
         "rt_println" => Some("rt_println_value"),
         "rt_print" => Some("rt_print_value"),
+        "dealloc" | "free" => Some("rt_free"),
         "len" | "length" => Some("rt_len"),
         "to_text" | "to_string" | "str" => Some("rt_to_string"),
         "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),

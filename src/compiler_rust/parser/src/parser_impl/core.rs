@@ -450,6 +450,8 @@ impl<'a> Parser<'a> {
             && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
         let is_capability_policy_decl = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "capability")
             && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
+        let is_danger_scope = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "danger")
+            && self.peek_is(&TokenKind::Colon);
 
         match &self.current.kind {
             // Route @ and legacy #[...] to attributed_item.
@@ -725,6 +727,19 @@ impl<'a> Parser<'a> {
                     self.parse_expression_or_assignment()
                 }
             }
+            TokenKind::Identifier { .. } if is_danger_scope => {
+                self.advance();
+                self.expect(&TokenKind::Colon)?;
+                let mut body = self.parse_block()?.statements;
+                if body.is_empty() {
+                    return Ok(Node::Pass(PassStmt {
+                        span: self.previous.span,
+                    }));
+                }
+                let first = body.remove(0);
+                self.pending_statements.splice(0..0, body);
+                Ok(first)
+            }
             TokenKind::Context => {
                 // Check if this is a context statement (context expr:) or function call (context(...)) or BDD DSL (context "string":)
                 let next = self.peek_next();
@@ -915,6 +930,8 @@ impl<'a> Parser<'a> {
             if self.is_statement_start() {
                 let start_span = self.current.span;
                 let stmt = self.parse_item()?;
+                let mut statements = vec![stmt];
+                statements.append(&mut self.pending_statements);
                 return Ok(Block {
                     span: Span::new(
                         start_span.start,
@@ -922,7 +939,7 @@ impl<'a> Parser<'a> {
                         start_span.line,
                         start_span.column,
                     ),
-                    statements: vec![stmt],
+                    statements,
                 });
             }
 
@@ -1027,6 +1044,7 @@ impl<'a> Parser<'a> {
             }
 
             statements.push(self.parse_item()?);
+            statements.append(&mut self.pending_statements);
 
             // Consume newline after statement if present
             if self.check(&TokenKind::Newline) {

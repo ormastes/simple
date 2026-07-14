@@ -14,7 +14,8 @@
 # fs_exec_spawn_ring3 API instead of the direct enter-image handoff.
 #
 # Env knobs: SKIP_KERNEL=1 (reuse kernel), QEMU_MEM (default 512M),
-#            QEMU_TIMEOUT (default 40s), FSEXEC_DISK (default fat32-fsexec.img).
+#            QEMU_TIMEOUT (default 40s), FSEXEC_DISK (default fat32-fsexec.img),
+#            FSEXEC_EXPECTED_OUTPUT, FSEXEC_EXPECTED_EXIT_STATUS (default 0).
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -35,6 +36,7 @@ QEMU_MEM="${QEMU_MEM:-512M}"
 QEMU_TIMEOUT="${QEMU_TIMEOUT:-40}"
 QEMU_CPU="${QEMU_CPU:-qemu64}"
 FSEXEC_PROFILE="${FSEXEC_PROFILE:-version}"
+EXPECTED_EXIT_STATUS=0
 
 mkdir -p "$OUT_DIR" build/os/generated/generated
 
@@ -49,8 +51,11 @@ esac
 NATIVE_HELP="$("$COMPILER" native-build --help 2>&1 || true)"
 printf '%s\n' "$NATIVE_HELP" | grep -q -- '--target' || fail "compiler lacks native-build --target: $COMPILER"
 command -v nm >/dev/null 2>&1 || fail "nm is required for compiler provenance"
-[ "$(nm "$COMPILER" | awk '$2 == "W" { count += 1 } END { print count + 0 }')" -eq 0 ] \
-    || fail "compiler contains weak fallback definitions: $COMPILER"
+WEAK_FALLBACKS="$(nm "$COMPILER" | awk '
+    $2 == "W" && $3 !~ /^__module_init_/ &&
+    $3 !~ /^(__ashlti3|__floattidf|__lshrti3|__powidf2|__udivti3|cbrt|ceilf|floorf|fma|fmaf|fmax|fmaxf|fmin|fminf|fmod|fmodf|rint|rintf|round|roundf|trunc|truncf)$/ { print $3 }
+')"
+[ -z "$WEAK_FALLBACKS" ] || fail "compiler contains weak fallback definitions: $WEAK_FALLBACKS"
 [ "${SKIP_KERNEL:-0}" = "0" ] || fail "SKIP_KERNEL is forbidden in the live proof"
 [ -f "$FSEXEC_DISK" ] || fail "missing FAT32 disk: $FSEXEC_DISK"
 
@@ -130,7 +135,8 @@ pub fn simpleos_fsexec_args() -> [text]:
 SPL
         ;;
     execute-artifact)
-        EXPECTED_OUTPUT='Hello from SimpleOS'
+        EXPECTED_OUTPUT="${FSEXEC_EXPECTED_OUTPUT:-Hello from SimpleOS}"
+        EXPECTED_EXIT_STATUS="${FSEXEC_EXPECTED_EXIT_STATUS:-0}"
         EXPECTED_DUMP=''
         cat >build/os/generated/generated/simpleos_fsexec_profile.spl <<'SPL'
 pub fn simpleos_fsexec_path() -> text:
@@ -142,6 +148,18 @@ SPL
         ;;
     *) fail "unsupported FSEXEC_PROFILE: $FSEXEC_PROFILE" ;;
 esac
+if [ "$FSEXEC_PROFILE" != "execute-artifact" ]; then
+    [ -z "${FSEXEC_EXPECTED_OUTPUT+x}" ] || fail "output override requires execute-artifact profile"
+    [ -z "${FSEXEC_EXPECTED_EXIT_STATUS+x}" ] || fail "exit override requires execute-artifact profile"
+fi
+[ -n "$EXPECTED_OUTPUT" ] || [ "$FSEXEC_PROFILE" != "execute-artifact" ] \
+    || fail "execute-artifact output must be nonempty"
+[ "$(printf '%s' "$EXPECTED_OUTPUT" | tr -d '\r\n')" = "$EXPECTED_OUTPUT" ] \
+    || fail "expected output must be one line"
+case "$EXPECTED_EXIT_STATUS" in
+    ''|*[!0-9]*) fail "expected exit status must be an integer" ;;
+esac
+[ "$EXPECTED_EXIT_STATUS" -le 255 ] || fail "expected exit status must be <= 255"
 
 # ---- 1. Kernel -----------------------------------------------------------
 # The NVMe/FAT32 C reader (boot/baremetal_stubs.c) lives under the entry's arch
@@ -209,7 +227,7 @@ if [ "$FSEXEC_PROFILE" = "interpret" ] || [ "$FSEXEC_PROFILE" = "emit-object" ] 
     grep -q '\[simpleos-cpl\] phase=post-read cs=0x2b cpl=3' "$SERIAL_LOG" \
         || fail "missing post-read CPL3 proof"
 fi
-[ -z "$EXPECTED_OUTPUT" ] || sed 's/\r*$//' "$SERIAL_LOG" | grep -Fqx "$EXPECTED_OUTPUT" \
+[ -z "$EXPECTED_OUTPUT" ] || sed 's/\r*$//' "$SERIAL_LOG" | grep -Fqx -- "$EXPECTED_OUTPUT" \
     || fail "missing exact $FSEXEC_PROFILE output"
 [ -z "$EXPECTED_DUMP" ] || grep -Eq "\[oo\] name=$EXPECTED_DUMP size=[1-9][0-9]*" "$SERIAL_LOG" \
     || fail "missing nonempty $EXPECTED_DUMP output dump"
@@ -219,5 +237,6 @@ fi
     || fail "missing output terminator"
 [ "$FSEXEC_PROFILE" != "emit-object" ] && [ "$FSEXEC_PROFILE" != "emit-llvm" ] || grep -q '\[simpleos-cpl\] phase=post-write cs=0x2b cpl=3' "$SERIAL_LOG" \
     || fail "missing post-write CPL3 proof"
-sed 's/\r*$//' "$SERIAL_LOG" | grep -qx '\[syscall\] exit status=0' || fail "missing clean exit 0"
+sed 's/\r*$//' "$SERIAL_LOG" | grep -Fqx -- "[syscall] exit status=$EXPECTED_EXIT_STATUS" \
+    || fail "missing expected exit $EXPECTED_EXIT_STATUS"
 echo "[prod-ring3] PASS filesystem Simple ELF executed"

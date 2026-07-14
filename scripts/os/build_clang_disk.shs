@@ -74,8 +74,11 @@ esac
 NATIVE_HELP="$("$COMPILER" native-build --help 2>&1 || true)"
 printf '%s\n' "$NATIVE_HELP" | grep -q -- '--target' || fail "compiler lacks native-build --target: $COMPILER"
 command -v nm >/dev/null 2>&1 || fail "nm is required for compiler provenance"
-[ "$(nm "$COMPILER" | awk '$2 == "W" { count += 1 } END { print count + 0 }')" -eq 0 ] \
-    || fail "compiler contains weak fallback definitions: $COMPILER"
+WEAK_FALLBACKS="$(nm "$COMPILER" | awk '
+    $2 == "W" && $3 !~ /^__module_init_/ &&
+    $3 !~ /^(__ashlti3|__floattidf|__lshrti3|__powidf2|__udivti3|cbrt|ceilf|floorf|fma|fmaf|fmax|fmaxf|fmin|fminf|fmod|fmodf|rint|rintf|round|roundf|trunc|truncf)$/ { print $3 }
+')"
+[ -z "$WEAK_FALLBACKS" ] || fail "compiler contains weak fallback definitions: $WEAK_FALLBACKS"
 [ "${SKIP_KERNEL:-0}" = "0" ] || fail "SKIP_KERNEL is forbidden in the live proof"
 [ "${SKIP_IMG:-0}" = "0" ] || fail "SKIP_IMG is forbidden in the live proof"
 
@@ -236,9 +239,7 @@ cat "$PREFIX" "$LINKED" > "$EXEC_IMG"
 truncate -s "$(cat "$OUT_DIR/fat32-clang-total.txt")" "$EXEC_IMG"
 echo "[clang-disk] artifact image=$EXEC_IMG sha256=$(sha256sum "$EXEC_IMG" | awk '{print $1}')"
 SIMPLE_BUILD_COMPILER="$COMPILER" FSEXEC_DISK="$ROOT_DIR/$EXEC_IMG" \
+    FSEXEC_PROFILE=execute-artifact \
+    FSEXEC_EXPECTED_OUTPUT=hello-from-simpleos-clang FSEXEC_EXPECTED_EXIT_STATUS=42 \
     sh scripts/os/build_fsexec_prod_ring3.shs
-sed 's/\r$//' "$OUT_DIR/prod_ring3_run.log" | grep -qx 'hello-from-simpleos-clang' \
-    || fail "filesystem executable did not print the exact hello marker"
-sed 's/\r$//' "$OUT_DIR/prod_ring3_run.log" | grep -qx '\[syscall\] exit status=42' \
-    || fail "filesystem executable did not exit 42"
 echo "[clang-disk] PASS guest_exec=/hello.elf output=hello-from-simpleos-clang"

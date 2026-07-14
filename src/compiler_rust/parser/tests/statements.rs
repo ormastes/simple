@@ -83,6 +83,25 @@ fn parse_return_statement() {
     parse_ok("fn test():\n    return 42");
 }
 
+#[test]
+fn parse_danger_block_as_transparent_statements() {
+    let items = parse("fn test(x: i64) -> i64:\n    danger:\n        if x > 0:\n            return x\n    return 0\n");
+    let Node::Function(function) = &items[0] else {
+        panic!("expected function");
+    };
+    assert!(matches!(&function.body.statements[0], Node::If(_)));
+    assert!(matches!(&function.body.statements[1], Node::Return(_)));
+}
+
+#[test]
+fn parse_terminal_danger_block_drains_pending_statements() {
+    let items = parse("fn test():\n    danger:\n        val first = 1\n        val second = 2\n");
+    let Node::Function(function) = &items[0] else {
+        panic!("expected function");
+    };
+    assert_eq!(function.body.statements.len(), 2);
+}
+
 // Break/continue need newline after them
 #[test]
 fn parse_break_continue() {

@@ -53,6 +53,11 @@ pub unsafe extern "C" fn rt_path_dirname(path_ptr: *const u8, path_len: u64) -> 
     })
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn rt_path_parent(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
+    rt_path_dirname(path_ptr, path_len)
+}
+
 /// Get file extension from path
 /// Returns the extension without the leading dot
 #[no_mangle]
@@ -239,6 +244,14 @@ mod tests {
             let result = rt_path_dirname(ptr, len);
             let dirname = extract_string(result);
             assert_eq!(dirname, "/path/to");
+        }
+    }
+
+    #[test]
+    fn test_path_parent_alias() {
+        unsafe {
+            let (ptr, len) = str_to_ptr("/path/to/file.txt");
+            assert_eq!(extract_string(rt_path_parent(ptr, len)), "/path/to");
         }
     }
 

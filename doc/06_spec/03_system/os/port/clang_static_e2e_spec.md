@@ -16,14 +16,18 @@ Status: active, fail-closed; source flow implemented, live proof blocked before 
 3. Require its validated guest-produced ELF64 x86-64 relocatable object with
    an exact `main` symbol.
 4. Require in-guest `/hello.elf` linking.
-5. Require the resulting filesystem ELF to run in ring 3 and emit the
-   independently checked `hello-from-simpleos-clang` output.
+5. Require the resulting filesystem ELF to run in ring 3, emit the exact
+   `hello-from-simpleos-clang` line, and exit with status 42. The shared
+   production runner must report PASS before the Clang wrapper may report PASS.
 
 ## Evidence contract
 
 ```text
 [clang-disk] PASS guest_exit=0 ... format=ELF64 type=REL machine=x86-64 symbol=main
 [clang-disk] PASS guest_link=/hello.elf
+hello-from-simpleos-clang
+[syscall] exit status=42
+[prod-ring3] PASS filesystem Simple ELF executed
 [clang-disk] PASS guest_exec=/hello.elf output=hello-from-simpleos-clang
 ```
 

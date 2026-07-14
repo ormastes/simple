@@ -137,10 +137,11 @@ BOOT_TIMEOUT=3 SERIAL_TAIL_LINES=20 \
 On failure the wrapper prints only the serial tail. This keeps repeated RV64
 banner loops from flooding the calling session.
 
-As of 2026-07-11 the retained HTTP transcript is historical only. A fresh
-`bin/simple os build --arch=riscv64` fails because the deployed compiler is the
-Rust seed without LLVM, and `build/os/simpleos_riscv64.elf` is absent. Do not use
-`--allow-prebuilt-artifact` for a current-source claim.
+On 2026-07-11 a current-source RV64 kernel passed live HTTP and same-boot DB
+CREATE/INSERT/SELECT; see
+`doc/09_report/verify_simpleos_filesystem_toolchain_servers.md`. Fresh checkouts
+do not retain its ELF, serial log, or DB transcript, so rebuild and rerun without
+`--allow-prebuilt-artifact` before making a fresh-current-evidence claim.
 
 With `--with-db`, `scripts/qemu/qemu_rv64_http_test.shs` now sends three real
 `POST /db` requests in one guest boot: create `codex`, insert `answer=codex-41`,
@@ -150,8 +151,10 @@ requires three `200` responses plus `OK CREATE`, `OK INSERT`, and `codex-41`;
 it also rejects negative response lengths. The producer writes the three raw
 responses to `db_query.log` beside `SERIAL_LOG`, so a custom
 `SERIAL_LOG=/artifacts/serial.log` directly creates the checker layout. Serial
-readiness alone cannot pass. A current-source QEMU run is still blocked until
-the RV64 ELF can be rebuilt by the self-hosted compiler.
+readiness alone cannot pass. This proves networking and state across requests
+within one boot only: `SimpleDbService` stores rows in module memory and the
+wrapper recreates the attached storage image. Filesystem and reboot persistence
+remain unproven.
 
 Without `--allow-prebuilt-artifact`, the wrapper also requires a build stamp
 newer than the ELF and rejects `simple_bin` provenance naming `compiler_rust`

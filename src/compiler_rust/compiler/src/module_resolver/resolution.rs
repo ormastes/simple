@@ -499,6 +499,16 @@ impl ModuleResolver {
             }
         }
 
+        // `lib.*` is the canonical project stdlib namespace, never a package
+        // relative to the importing file. Otherwise `src/app/lib/x.spl` can
+        // shadow the intended `src/lib/x.spl` during entry-closure discovery.
+        if segments[0] == "lib" && segments.len() > 1 {
+            let project_lib = self.project_root.join("src/lib");
+            if project_lib.is_dir() {
+                return self.resolve_from_base(&project_lib, &segments[1..], path);
+            }
+        }
+
         if segments[0] == "compiler_shared" && segments.len() > 2 && segments[1] == "interpreter" {
             for root in ordered_source_roots(self) {
                 let compiler_dir = root.join("compiler");

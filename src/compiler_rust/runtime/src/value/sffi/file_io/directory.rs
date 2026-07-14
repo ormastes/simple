@@ -213,6 +213,11 @@ pub unsafe extern "C" fn rt_dir_create_all(path_ptr: *const u8, path_len: u64) -
     rt_dir_create(path_ptr, path_len, true)
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn rt_mkdir_p(path_ptr: *const u8, path_len: u64) -> bool {
+    rt_dir_create_all(path_ptr, path_len)
+}
+
 /// Walk directory recursively, returning all files and directories
 /// Returns List[String] of all paths found
 #[no_mangle]
@@ -399,6 +404,15 @@ mod tests {
             assert!(dir_path.exists());
             assert!(dir_path.is_dir());
         }
+    }
+
+    #[test]
+    fn test_mkdir_p_alias() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir_path = temp_dir.path().join("alias").join("nested");
+        let (ptr, len) = str_to_ptr(dir_path.to_str().unwrap());
+        unsafe { assert!(rt_mkdir_p(ptr, len)) };
+        assert!(dir_path.is_dir());
     }
 
     #[test]

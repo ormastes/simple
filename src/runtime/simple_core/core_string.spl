@@ -15,11 +15,13 @@ extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
 extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
 extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
 extern fn rt_array_len(array: i64) -> i64
+extern fn rt_array_len_safe(array: i64) -> i64
 extern fn rt_array_new(cap: i64) -> i64
 extern fn rt_array_new_with_cap_u64(cap: i64) -> i64
 extern fn rt_byte_array_new(cap: i64) -> i64
 extern fn rt_array_push(array: i64, value: i64) -> i8
 extern fn rt_array_get(array: i64, idx: i64) -> i64
+extern fn array_is_valid(array: i64) -> i64
 extern fn rt_dict_len(dict: i64) -> i64
 extern fn rt_dict_contains(dict: i64, key: i64) -> i8
 extern fn rt_value_int(value: i64) -> i64
@@ -176,21 +178,21 @@ pub fn rt_string_chars(value: i64) -> i64:
     val ptr = string_ptr(value)
     if ptr < 1:
         return rt_array_new(0)
-    val len = string_len_ptr(ptr)
     val data = string_data_ptr_value(ptr)
+    val len = string_len_ptr(ptr)
     val out = rt_array_new(len)
-    var i = 0
-    while i < len:
-        val lead = spl_load_u8(data, i) & 255
+    var byte_index = 0
+    while byte_index < len:
+        val b0 = spl_load_u8(data, byte_index) & 255
         var width = 1
-        if lead >= 194 and lead <= 223 and i + 2 <= len:
+        if b0 >= 194 and b0 <= 223 and byte_index + 1 < len:
             width = 2
-        elif lead >= 224 and lead <= 239 and i + 3 <= len:
+        elif b0 >= 224 and b0 <= 239 and byte_index + 2 < len:
             width = 3
-        elif lead >= 240 and lead <= 247 and i + 4 <= len:
+        elif b0 >= 240 and b0 <= 244 and byte_index + 3 < len:
             width = 4
-        rt_array_push(out, rt_string_new(data + i, width))
-        i = i + width
+        rt_array_push(out, rt_string_new(data + byte_index, width))
+        byte_index = byte_index + width
     return out
 
 pub fn rt_string_char_code_at(value: i64, index: i64) -> i64:
@@ -378,10 +380,10 @@ pub fn rt_slice(value: i64, start: i64, end: i64, step: i64) -> i64:
         return 3
     val ptr = string_ptr(value)
     if ptr < 1:
-        val array_ptr = value & -8
-        if value < 4096 or (value & 7) != 1 or spl_load_u8(array_ptr, 0) != 2:
+        if array_is_valid(value) < 1:
             return 3
-        val array_len = rt_array_len(value)
+        val array_ptr = value & -8
+        val array_len = rt_array_len_safe(value)
         var array_begin = if start < 0: array_len + start else: start
         var array_finish = if end < 0: array_len + end else: end
         if array_begin < 0:
@@ -982,7 +984,7 @@ pub fn rt_string_join(array: i64, separator: i64) -> i64:
     # `< 4096` gate).
     if array < 4096:
         return rt_string_new(0, 0)
-    val arr_len = rt_array_len(array)
+    val arr_len = rt_array_len_safe(array)
     if arr_len <= 0:
         return rt_string_new(0, 0)
     val sep_ptr = string_ptr(separator)
@@ -1091,31 +1093,6 @@ pub fn rt_string_to_float(value: i64) -> i64:
             return 3
         cursor = cursor + 1
     return rt_value_float(spl_f64_to_bits(parsed))
-
-# rt_string_chars — characters of a string as an array of single-character
-# strings (UTF-8 aware: continuation bytes 0b10xxxxxx are glued to their lead
-# byte). Mirrors src/compiler_rust/runtime/src/value/collections.rs
-# rt_string_chars, which the codegen emits for `text.chars()`.
-pub fn rt_string_chars(value: i64) -> i64:
-    val ptr = string_ptr(value)
-    if ptr < 1:
-        return rt_array_new(0)
-    val len = string_len_ptr(ptr)
-    val result = rt_array_new(4)
-    val data = string_data_ptr_value(ptr)
-    var i = 0
-    while i < len:
-        var clen = 1
-        var scan = 1
-        while scan > 0 and i + clen < len:
-            val marker = spl_load_u8(data, i + clen) & 192
-            if marker > 127 and marker < 129:
-                clen = clen + 1
-            else:
-                scan = 0
-        rt_array_push(result, rt_string_new(data + i, clen))
-        i = i + clen
-    return result
 
 # -- Lexer source cache (mirrors src/runtime/runtime_native.c
 # rt_lexer_source_set / rt_lexer_source_slice). The parser/lexer set the

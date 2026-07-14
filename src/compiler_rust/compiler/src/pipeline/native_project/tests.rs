@@ -702,6 +702,8 @@ fn test_entry_closure_handles_shared_import_fan_in() {
     let a_file = src_lib_dir.join("a.spl");
     let b_file = src_lib_dir.join("b.spl");
     let shared_file = src_lib_dir.join("shared.spl");
+    let shadow_file = src_app_dir.join("lib/shared.spl");
+    std::fs::create_dir_all(shadow_file.parent().unwrap()).unwrap();
 
     std::fs::write(
         &entry_file,
@@ -711,6 +713,7 @@ fn test_entry_closure_handles_shared_import_fan_in() {
     std::fs::write(&a_file, "use lib.shared.{s}\nfn a() -> i64:\n    return s()\n").unwrap();
     std::fs::write(&b_file, "use lib.shared.{s}\nfn b() -> i64:\n    return s()\n").unwrap();
     std::fs::write(&shared_file, "fn s() -> i64:\n    return 1\n").unwrap();
+    std::fs::write(&shadow_file, "fn s() -> i64:\n    return 2\n").unwrap();
 
     let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
         .config(NativeBuildConfig {
@@ -726,6 +729,7 @@ fn test_entry_closure_handles_shared_import_fan_in() {
     assert!(files.iter().any(|path| same_file_path(path, &a_file)));
     assert!(files.iter().any(|path| same_file_path(path, &b_file)));
     assert!(files.iter().any(|path| same_file_path(path, &shared_file)));
+    assert!(!files.iter().any(|path| same_file_path(path, &shadow_file)));
     assert_eq!(files.len(), 4);
 }
 
@@ -759,6 +763,29 @@ fn test_entry_closure_resolves_project_src_imports_from_narrow_source_roots() {
     assert!(files.iter().any(|path| same_file_path(path, &entry_file)));
     assert!(files.iter().any(|path| same_file_path(path, &dep_file)));
     assert_eq!(files.len(), 2);
+}
+
+#[test]
+fn test_bootstrap_entry_closure_avoids_driver_package_hub() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+    let entry = repo_root.join("src/app/cli/bootstrap_main.spl");
+    let builder = NativeProjectBuilder::new(repo_root.clone(), repo_root.join("bin/bootstrap-test"))
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(repo_root.join("src/compiler"))
+        .source_dir(repo_root.join("src/app"))
+        .source_dir(repo_root.join("src/lib"))
+        .entry_file(entry.clone());
+
+    let files = builder.discover_files().unwrap();
+    assert!(files.iter().any(|path| same_file_path(path, &repo_root.join("src/compiler/80.driver/driver.spl"))));
+    assert!(files.iter().any(|path| same_file_path(path, &repo_root.join("src/compiler/80.driver/watcher/smf_manifest.spl"))));
+    assert!(!files.iter().any(|path| same_file_path(path, &repo_root.join("src/compiler/80.driver/__init__.spl"))));
+    assert!(!files.iter().any(|path| path.starts_with(repo_root.join("src/app/llm_caret"))));
+    assert!(!files.iter().any(|path| path.starts_with(repo_root.join("src/app/leak_finder"))));
 }
 
 #[test]

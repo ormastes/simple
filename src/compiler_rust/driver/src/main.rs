@@ -146,6 +146,12 @@ struct CommandEntry {
 fn dispatch_command(entry: &CommandEntry, ctx: &CommandContext) -> i32 {
     let pure_simple_tool = command_is_pure_simple_tool(entry.name);
 
+    if entry.name == "native-build"
+        && native_build_rust_override(std::env::var("SIMPLE_NATIVE_BUILD_RUST").ok().as_deref())
+    {
+        return run_rust_handler(&entry.rust_handler, ctx);
+    }
+
     // Cross-target executable builds still need the Rust handler. Object emission is
     // already implemented by the Simple path and must not be linked into an executable.
     if entry.name == "native-build" && native_build_wants_cross_target(ctx.args) {
@@ -227,6 +233,10 @@ fn native_build_wants_cross_target(args: &[String]) -> bool {
     let args = &args[1..];
     args.iter().any(|a| a == "--target" || a.starts_with("--target="))
         && !args.iter().any(|a| a == "--emit-object")
+}
+
+fn native_build_rust_override(value: Option<&str>) -> bool {
+    value == Some("1")
 }
 
 fn command_is_pure_simple_tool(name: &str) -> bool {
@@ -1647,6 +1657,14 @@ mod tests {
 
         assert!(native_build_wants_cross_target(&executable));
         assert!(!native_build_wants_cross_target(&object));
+    }
+
+    #[test]
+    fn native_build_rust_override_requires_exact_one() {
+        assert!(native_build_rust_override(Some("1")));
+        assert!(!native_build_rust_override(Some("0")));
+        assert!(!native_build_rust_override(Some("")));
+        assert!(!native_build_rust_override(None));
     }
 
     #[test]
