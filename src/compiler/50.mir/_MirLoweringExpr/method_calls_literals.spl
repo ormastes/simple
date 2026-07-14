@@ -963,7 +963,21 @@ impl MirLowering:
         # strlen+rt_string_new (like the prefix's own tagging just below)
         # would have on an ALREADY-tagged receiver (e.g. a concat result).
         if method == "starts_with" and args.len() == 1 and resolution_is_unresolved:
-            val sw_receiver = self.ensure_tagged_str(self.lower_expr(receiver))
+            # Bug (native_string_method_var_arg lane, 2026-07-14): un-nest through
+            # an intermediate val, exactly like the `join` fix above documents --
+            # the seed interpreter drops/misevaluates a self-method call nested
+            # directly as an argument to another self-method call
+            # (`self.ensure_tagged_str(self.lower_expr(receiver))`). When the
+            # method's OTHER argument (the prefix) is a plain literal, this
+            # nesting bug was invisible; once a VARIABLE argument is present the
+            # inner `self.lower_expr(receiver)` call gets silently skipped, so
+            # `ensure_tagged_str` receives a garbage/default LocalId(id: 0)
+            # operand -- and its OWN first new_temp also happens to allocate id
+            # 0, producing a self-referencing SSA value (`%l0 = call ptr
+            # @rt_interp_cstr(ptr %l0)`), an LLVM verifier fault ("Only PHI nodes
+            # may reference their own value!").
+            val sw_receiver_raw = self.lower_expr(receiver)
+            val sw_receiver = self.ensure_tagged_str(sw_receiver_raw)
             val sw_prefix_ptr = self.lower_expr(args[0].value)
             val strlen_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_strlen"),
@@ -999,7 +1013,10 @@ impl MirLowering:
         # Also mirrors task #178's receiver-tagging fix above (same silent
         # always-false bug for a raw-literal receiver).
         if method == "ends_with" and args.len() == 1 and resolution_is_unresolved:
-            val ew_receiver = self.ensure_tagged_str(self.lower_expr(receiver))
+            # Same un-nesting fix as starts_with above (native_string_method_var_arg
+            # lane, 2026-07-14) -- avoid `self.X(self.lower_expr(receiver))`.
+            val ew_receiver_raw = self.lower_expr(receiver)
+            val ew_receiver = self.ensure_tagged_str(ew_receiver_raw)
             val ew_suffix_ptr = self.lower_expr(args[0].value)
             val ew_strlen_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_strlen"),
@@ -1239,11 +1256,36 @@ impl MirLowering:
                 case "contains": args.len() == 1
                 case _: args.len() == 0
             if ts_arity_ok:
-                val ts_recv = self.tag_str_local_if_raw(self.lower_expr(receiver))
+                # Bug (native_string_method_var_arg lane, 2026-07-14), part 1:
+                # un-nest `self.tag_str_local_if_raw(self.lower_expr(receiver))`
+                # through an intermediate val -- same seed-interpreter
+                # nested-self-call landmine as starts_with/ends_with above
+                # (`self.X(self.lower_expr(...))` gets silently dropped/
+                # misevaluated when a VARIABLE arg is also present).
+                #
+                # Part 2: use `ensure_tagged_str` (a RUNTIME tagged-or-raw
+                # check via rt_interp_cstr), not `tag_str_local_if_raw` (a
+                # STATIC MIR-type check), for both receiver and args. A
+                # variable bound to a string literal (`val sub = "ell"`) is
+                # genuinely raw at runtime, but the local produced by lowering
+                # a `Var` reference to it does not reliably carry the
+                # Opaque("str") MIR type that `tag_str_local_if_raw` keys off
+                # (confirmed empirically: a literal arg like
+                # `"hello".contains("ell")` got tagged correctly, but the
+                # equivalent `val sub = "ell"; "hello".contains(sub)` did not
+                # -- `rt_string_contains` received the untagged raw arg
+                # alongside the tagged receiver and always returned false).
+                # `ensure_tagged_str` sidesteps the unreliable static check
+                # entirely and is safe for an already-tagged input too (no
+                # double-tag risk), so it is correct for both the literal and
+                # variable cases this arm has to serve.
+                val ts_recv_raw = self.lower_expr(receiver)
+                val ts_recv = self.ensure_tagged_str(ts_recv_raw)
                 var ts_ops: [MirOperand] = [mir_operand_copy(ts_recv)]
                 for ts_arg in args:
                     val ts_arg_local = self.lower_expr(ts_arg.value)
-                    ts_ops = ts_ops.push(mir_operand_copy(self.tag_str_local_if_raw(ts_arg_local)))
+                    val ts_arg_tagged = self.ensure_tagged_str(ts_arg_local)
+                    ts_ops = ts_ops.push(mir_operand_copy(ts_arg_tagged))
                 val ts_sym = match method:
                     case "split": "rt_string_split"
                     case "replace": "rt_string_replace"
