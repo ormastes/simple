@@ -215,6 +215,19 @@ named source reports before claiming completion. If mission-critical prereq or
 RTL/SBY wrappers change, require their `--self-test` forms, and treat missing
 strict RVFI readiness as a completion blocker rather than a formal proof pass.
 
+For SimpleOS QEMU host-GPU external-host evidence, follow the postponement and
+resume contract in `doc/07_guide/platform/simpleos/qemu_system_tests.md` and
+the existing-TODO matrix in
+`doc/03_plan/agent_tasks/simpleos_qemu_host_gpu_external_host_evidence.md`.
+Postpone only prepared Windows DirectX, macOS Metal, NVIDIA CUDA, and the
+non-current native-host portions of TODO 563, TODO 569, and TODO 570; their
+current Linux Vulkan portions remain active.
+Resume only on the prepared native host with a pure-Simple compiler accepted by
+`simple_binary_is_valid`. Never promote source inspection, emulation,
+screenshots, cached reports, synthetic handles, or CPU mirrors to native PASS;
+require device-origin readback, stable identity, exact CPU-oracle parity,
+correlated IDs, and final high-capability review.
+
 For RV32/RV64 baremetal compiler/firmware lanes, keep runtime-value ABI fixes at
 the compiler/runtime owner boundary: do not paper over `rv_type` width bugs with
 firmware-local `rt_*` shims or broad all-`i64` predeclares. Add the smallest IR

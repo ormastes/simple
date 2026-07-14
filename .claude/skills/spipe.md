@@ -954,6 +954,19 @@ PASS: a durable serial transcript with the full ladder — never a verbal claim
 (the 2e "FULL COMPLETE" mislabel was caught exactly this way). Physical-board
 phases: `doc/03_plan/os/simpleos/hw_qemu/clang_board_bringup_x86_64_uefi.md`.
 
+For SimpleOS QEMU host-GPU external-host evidence, use the postponement and
+resume contract in `doc/07_guide/platform/simpleos/qemu_system_tests.md` and
+the authoritative TODO matrix in
+`doc/03_plan/agent_tasks/simpleos_qemu_host_gpu_external_host_evidence.md`.
+Reuse its existing TODO owners: postpone only prepared Windows DirectX, macOS
+Metal, NVIDIA CUDA, and the non-current native-host portions of TODO 563, TODO
+569, and TODO 570; keep their current Linux Vulkan portions active. Resume only
+on the prepared native host with a
+pure-Simple compiler accepted by `simple_binary_is_valid`. Source inspection,
+emulation, screenshots, cached reports, synthetic handles, or CPU mirrors are
+not native PASS evidence; require device-origin readback, stable identity,
+exact CPU-oracle parity, correlated IDs, and final high-capability review.
+
 For memory-perspective work (gc/nogc boundary, leak checks, alloc enforcement):
 the gc-boundary lint (`gc_boundary_crossing`) resolves alias shims via
 `GC_ALIAS_MANIFEST` — kept in sync in BOTH compilers

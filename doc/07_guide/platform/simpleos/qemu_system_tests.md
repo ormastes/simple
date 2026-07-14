@@ -328,6 +328,24 @@ open until prepared native rows execute the now-source-ready 1280x720 fixture;
 TODO 570 remains open until prepared native rows execute the now-source-ready
 ProcessingIR preference contract.
 
+### External-host postponement and resume contract
+
+Prepared Windows DirectX, macOS Metal, and NVIDIA CUDA execution evidence is
+postponed, not complete. The authoritative host prerequisites, commands,
+retained artifacts, existing TODO ownership, and remaining local work are in
+`doc/03_plan/agent_tasks/simpleos_qemu_host_gpu_external_host_evidence.md`
+(TLDR alongside). Do not create replacement TODOs for these rows.
+
+The postponement applies only to non-current prepared-host portions of TODO
+563, TODO 569, and TODO 570. Their current Linux Vulkan measurements remain
+active. Resume an external row only on its prepared native host and only after
+`simple_binary_is_valid` accepts the selected pure-Simple compiler. Source
+presence, API names, translation or emulation, screenshots, cached reports,
+synthetic handles, and CPU mirrors cannot promote a row. A native PASS still
+requires submission, terminal completion, device-origin readback, stable
+device identity, exact CPU-oracle parity, correlated generation/run/frame IDs,
+and final normal/highest-capability review.
+
 Processing receipts distinguish the transient backend resource handle from the
 stable device identity. Vulkan hashes the runtime-selected driver identity,
 which includes the device name and driver metadata, and negotiation fails
