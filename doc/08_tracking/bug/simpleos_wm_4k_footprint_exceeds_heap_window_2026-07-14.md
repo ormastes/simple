@@ -95,3 +95,29 @@ scaling is NEW with the reroute.
 (a) cap the scaling allocation to a bounded budget; (b) apply the memory-map
 widening only if the bounded footprint still needs >~360MB. My heap + memory-map
 experiments were REVERTED (files at origin) — (2) is not heap-fixable.
+
+## Update (RESOLVED root cause + fix landed 2026-07-14, `1fe2653d`): it was an O(n^2) allocation, NOT heap sizing
+The "scaling allocation / footprint > heap window" was a SYMPTOM. Actual root cause,
+found by tracing FramebufferDriver.from_scanout_raw -> `_zero_u32_buffer(width*height)`:
+that helper built the 4K back buffer with `buf = buf + [0u32]` PER ELEMENT.
+Concatenation allocates a fresh array each iteration, so under the freestanding bump
+allocator (no free) it allocated arrays of size 1,2,3,...,N = O(N^2) memory. For a 4K
+back buffer (3840*2160 = 8.29M entries) it exhausts the heap after ~16K iterations
+REGARDLESS of heap size — which is exactly why heap_off filled to heap_size at
+192/320/336/512MB. FIX (landed `1fe2653d`): single `[0u32; count.to_i64()]` allocation
+(33MB, once). VERIFIED: kernel builds, boots past framebuffer init, establishes the
+real 4K scanout, engine2d-ready + keyboard/mouse-ready, and **`[PANIC] heap exhausted`
+is GONE**. No memory-map or heap-size change was needed (all those experiments were
+reverted). NOTE: `browser_backend.spl:196/224/315` have the SAME `buf = buf + [...]`
+O(n^2) pattern — fix them too if their buffers can be large.
+
+## Remaining blocker (separate bug): render-path null-deref, now UNMASKED
+With the heap bug fixed, the WM boots to "mouse ready" then enters a tight fault loop:
+355 EXCEPTION FRAME blocks, all `cr2=0x0` (null deref), cycling 3 RIPs
+(0xb06732, 0xb07158, 0xb07b7e) each "recovered" and immediately re-faulted; harness
+reports `guest-render-fault`, never reaches production-readiness/font-evidence, no PPM.
+This `cr2=0x0` signature matches the ORIGINAL DrawIR-reroute regression (was rip=0x9ca634)
+that the heap-exhaustion had been masking — i.e. the reroute left a null-deref in the
+first-frame desktop render. This is the SimpleOS WM owner's render code (reliable
+symbolization needs their own build). The O(n^2) heap fix is landed and independent;
+this null-deref is what still blocks the 4K PASS.
