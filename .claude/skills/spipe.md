@@ -306,6 +306,48 @@ backend/readback evidence. When vector text is enabled, `FontRenderBatch` is
 transient Engine2D-executor material, not WebRender IR or Draw IR. Reject evidence built on an app-private
 font draw path or on Engine3D HUD/world as a GUI/web/2D shortcut.
 
+### Shared multilingual font evidence
+
+Use `doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md` as the authority.
+Pin the CLDR top ten plus rank-11 cutoff witness, exactly ten product
+categories, and every candidate's immutable revision, license/RFN, hash, size,
+embedded identity, tables, and default axes. Keep the 10x10 matrix sparse and
+promote a cell only through exact-face shaping/corpus evidence.
+
+Reuse `FontRenderer`, transient `FontRenderBatch`, and the common atlas. WebIR
+remains semantic/layout state; Web, GUI, and WM emit `DrawIrComposition`, and
+Engine2D alone materializes its text. Keep Engine3D HUD/world separate. Apply
+the GPU and SimpleOS proof discriminators under `GPU-offload and effect
+discriminators` below; do not duplicate or weaken them here.
+Producer-resolved shaping may cross Draw IR only as handle-free glyph IDs,
+positions, and logical clusters, and SDN round-trip must preserve them exactly.
+`font-shaping=selected-pure-simple` without a valid payload fails closed;
+atlases, live face handles, caches, and backend resources never enter Draw IR.
+For pixel evidence, exercise a nonzero bearing or GPOS offset. Shaped positions
+are +Y-down baseline pens, and quad top-left is
+`(pen_x + bearing_x, ascent + pen_y - bearing_y - height)` after negating the
+OpenType +Y-up offset at the shaper boundary.
+
+Runtime configuration evidence uses one text-layout-owned `FontRenderConfig`;
+WebIR, Draw IR, apps, and backends do not define sibling policy types. Vary and
+assert family/category/language/script, size, weight/style, hinting,
+antialiasing, atlas policy, execution target, and policy through bitmap,
+selected-vector, shaped, Engine2D, and Engine3D paths. `Suggested` tries its
+named target first, then the remaining canonical GPU order, then CPU;
+`Preferred` tries its named target then CPU; `Required` tries only its named
+target. Unsupported modes and CTM reject before
+cache generation, telemetry, upload, or backend mutation. `Suggested(auto)`
+uses the engine's executable font-adapter order; Preferred/Required with
+`auto` and unknown targets reject before mutation. Batch evidence carries
+config identity, target, and policy; the config object itself never crosses
+WebIR or Draw IR.
+
+Freeze these scenario steps: `Load the pinned multilingual font manifest`,
+`Accept exact-face-bound simple-script shaping`, `Prepare one shared font batch
+for 2D and 3D`, `Emit the selected font composite program and plan compilation`,
+and `Prove native submission and device readback`. Lower-model sidecars may own
+bounded lanes, but a higher-capability reviewer owns manual quality and done.
+
 For RenderDoc evidence, use the shared helper interface instead of spelling
 `renderdoccmd` directly in each spec or check script:
 
@@ -542,6 +584,10 @@ observe a pass:
   readback against an absolute CPU oracle. Emitted source, environment payload,
   upload alone, software backend names, simulation, or equal checksums are not
   native proof. Record unavailable hardware as `unavailable`; never promote it.
+  Vulkan promotion additionally requires an accelerated `discrete`, `integrated`,
+  or `virtual` device, stable selected device/driver identity, a real fence wait
+  and destroy, and surface poisoning when completion becomes unknown. CPU/other
+  devices and unfenced submission remain unpromoted.
   Before native promotion, the exact Pure Simple shaping/corpus gate must accept
   the face for the language/script; a codepoint raster/layout witness alone is
   diagnostic and leaves the matrix cell `unavailable`.
@@ -550,7 +596,9 @@ observe a pass:
   the resolved status is `native` or `fallback`.
   Supplementary-plane/emoji claims must exercise a real format-12 cmap witness
   (currently `U+1F600`) and prove the selected run face owns the returned glyph
-  ID; parser-only lookup is not fallback acceptance.
+  ID plus valid canonical `FontRenderBatch` material; parser-only lookup is not
+  fallback acceptance. Keep variation-selector, modifier, ZWJ, color, and
+  multi-codepoint emoji fail-closed unless separately proven.
   Shaped-run rendering must fail closed unless the `OtFont` is explicitly bound
   to the same live runtime face generation, blob/runtime cmap glyph IDs agree
   for every codepoint, and cache/atlas identity includes face + generation +
@@ -560,14 +608,30 @@ observe a pass:
   Preserve absolute source index and cluster identity inside each shaped glyph
   before any reversal/reorder; language/script/direction and current advance/
   offset metadata must stay aligned with glyph order. Cmap parity is direct
-  material evidence only: complex scripts and multi-codepoint emoji sequences
-  remain invalid while substitution/positioning completeness is false.
+  material evidence only. Complex scripts and multi-codepoint emoji sequences
+  remain invalid while substitution/positioning completeness is false, except
+  that the exact Hindi `हिन्दी` `dev2` witness and the exact pinned Arabic
+  `العربية` / Urdu `اردو` lookup-vector cases are accepted. The
+  Arabic/Urdu path is witness-specific after Script/LangSys validation, not
+  general GSUB/GPOS, mark, BiDi, or positioning support. Other complex scripts,
+  sequences, and multi-codepoint emoji remain invalid.
   Engine3D neutral HUD/world acceptance is CPU compatibility evidence only:
   world text projects one anchor into a screen-space billboard. It does not
   prove native texture upload, depth/occlusion, pipeline draw, fence, or
   device-origin readback.
+  An optional Vulkan Engine3D claim must additionally bind logical pipeline and
+  texture IDs to exact native handles, the submitted command and completed/
+  destroyed fence to the exact color image and byte count, and device-only
+  readback to both an atlas-derived HUD bounds/count oracle and a four-frame
+  near/far depth oracle in both draw orders. Source wiring, SPIR-V validation,
+  or CPU parity alone remains unpromoted.
   Distinguish GPU atlas composition from CPU glyph rasterization and from direct
   GPU outline rasterization.
+  WM/GUI/Web/2D selected-font proof also requires one stable manifest identity
+  and identical ordered advances across Web layout and Draw IR paint; family
+  metadata or paint-only TTF selection is insufficient. SimpleOS additionally
+  requires the exact pinned asset in every applicable image builder plus guest
+  path/hash/glyph/framebuffer evidence, not a host path marker.
   The OpenCL adapter must additionally prove the versioned shared source,
   generation-keyed atlas upload with load/unload invalidation, checked dirty-row
   offsets after the initial full upload, full upload on reset/gap/invalid dirty
@@ -617,7 +681,9 @@ observe a pass:
   When font composition accompanies a generated optimization module, require a
   separate font artifact/compile plan, a distinct `_font_atlas` path, and the
   versioned font entry in exported-symbol evidence. Never concatenate WGSL
-  modules whose storage/uniform bindings overlap.
+  modules whose storage/uniform bindings overlap. Runtime promotion must load
+  that verified Simple-emitted artifact; handwritten PTX or independently
+  generated SPIR-V is not emitter provenance.
 
 ### GPU / drawing / event honest backend baseline (2026-07-06)
 

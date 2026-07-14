@@ -365,6 +365,7 @@ class CudaBackend:
     d_font_atlas: i64
     font_atlas_bytes: i64
     font_atlas_generation: i64
+    font_atlas_owner_identity: text
     readback_ptr: i64
     last_probe: BackendProbeResult
 
@@ -385,11 +386,15 @@ class CudaBackend:
             d_font_atlas: 0,
             font_atlas_bytes: 0,
             font_atlas_generation: -1,
+            font_atlas_owner_identity: "",
             readback_ptr: 0,
             last_probe: BackendProbeResult.unavailable("cuda", "not probed")
         )
 
     me init_with_session(width: i32, height: i32, session: CudaSession) -> bool:
+        if self.initialized or self.owns_session:
+            self.last_probe = _cuda_context_failure("CUDA backend already owns an active session")
+            return false
         if width <= 0 or height <= 0:
             self.last_probe = _cuda_context_failure("invalid CUDA framebuffer dimensions")
             self.initialized = false
@@ -508,6 +513,7 @@ class CudaBackend:
             self.d_font_atlas = 0
         self.font_atlas_bytes = 0
         self.font_atlas_generation = -1
+        self.font_atlas_owner_identity = ""
         if self.d_framebuffer != 0:
             self.session.free(self.d_framebuffer)
             self.d_framebuffer = 0
@@ -578,6 +584,7 @@ class CudaBackend:
         if pixel_count <= 0 or pixel_count > 2147483647 or batch.atlas_pixels.len() != pixel_count:
             return false
         val required_bytes = pixel_count * 4
+        val owner_identity = batch.atlas_owner_identity()
         if self.d_font_atlas == 0 or self.font_atlas_bytes != required_bytes:
             val new_atlas = self.session.alloc(required_bytes)
             if new_atlas == 0:
@@ -587,7 +594,9 @@ class CudaBackend:
             self.d_font_atlas = new_atlas
             self.font_atlas_bytes = required_bytes
             self.font_atlas_generation = -1
-        if self.font_atlas_generation == batch.atlas_generation:
+            self.font_atlas_owner_identity = ""
+        if (self.font_atlas_owner_identity == owner_identity and
+            self.font_atlas_generation == batch.atlas_generation):
             return true
         val host_atlas = cuda_backend_alloc(required_bytes)
         if host_atlas == 0:
@@ -597,12 +606,25 @@ class CudaBackend:
         cuda_backend_free(host_atlas, required_bytes)
         if upload_rc != CUDA_SUCCESS:
             self.font_atlas_generation = -1
+            self.font_atlas_owner_identity = ""
             return false
         self.font_atlas_generation = batch.atlas_generation
+        self.font_atlas_owner_identity = owner_identity
         true
 
     me invalidate_font_atlas():
         self.font_atlas_generation = -1
+        self.font_atlas_owner_identity = ""
+
+    me install_font_atlas_ptx(ptx: text) -> bool:
+        if not self.initialized:
+            return false
+        val prior_identity = self.session.font_module_identity
+        if not self.session.install_font_module(ptx):
+            return false
+        if self.session.font_module_identity != prior_identity:
+            self.invalidate_font_atlas()
+        true
 
     me draw_font_batch(origin_x: i32, origin_y: i32, batch: FontRenderBatch) -> i64:
         if not font_atlas_composite_program_version_valid(batch.program_version):
@@ -640,7 +662,7 @@ class CudaBackend:
                 dst_x.?, dst_y.?, quad.color
             )
             val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
-            val rc = self.session.launch_kernel_args("simple_font_atlas_composite_v1_u32", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.font_args_ptr)
+            val rc = self.session.launch_font_kernel_args(grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.font_args_ptr)
             if rc != CUDA_SUCCESS:
                 return submitted
             if self.session.sync() != CUDA_SUCCESS:

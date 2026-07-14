@@ -51,3 +51,13 @@ Keep `FontRenderer` as the shared CPU owner, adapt existing `SkGlyphRun`/`Shaped
 
 - Local reuse was checked by the primary agent and the `font_local_reuse` sidecar.
 - Backend emission/evidence was independently checked by `font_gpu_emission`; its conclusions match the source audit above.
+
+## Current-state addendum — 2026-07-13
+
+The tables above are the pre-selection baseline, not the current implementation.
+The selected tree now bundles the pinned 16-file candidate catalog, exposes the
+exact ten-language/ten-category sparse matrix, prepares one canonical
+`FontRenderBatch`, and has CUDA, Metal, OpenCL, and Vulkan Engine2D adapters plus
+an optional Vulkan Engine3D HUD/world adapter. Web semantic/layout, GUI, WM, and
+SimpleOS converge through Draw IR and Engine2D. Native GPU, QEMU pixel, warm
+performance, and canonical docgen evidence remain fail-closed and unpromoted.

@@ -474,6 +474,7 @@ int main(int argc, char **argv)
     int efi_cluster = alloc_clusters((const unsigned char *)"", 0);
     int boot_cluster = alloc_clusters((const unsigned char *)"", 0);
     int sys_cluster = alloc_clusters((const unsigned char *)"", 0);
+    int fonts_cluster = alloc_clusters((const unsigned char *)"", 0);
     int apps_cluster = alloc_clusters((const unsigned char *)"", 0);
     int perf_cluster = alloc_clusters((const unsigned char *)"", 0);
     int usr_cluster = alloc_clusters((const unsigned char *)"", 0);
@@ -508,6 +509,12 @@ int main(int argc, char **argv)
     struct bytes hello_object_payload = read_file(getenv("SIMPLEOS_HELLO_OBJECT"));
     struct bytes hello_ir_payload = read_file(getenv("SIMPLEOS_HELLO_IR"));
     struct bytes fsexec_payload = read_file(getenv("SIMPLEOS_FSEXEC_BINARY"));
+    const char *font_asset_path = getenv("SIMPLEOS_FONT_ASSET");
+    if (!font_asset_path || font_asset_path[0] == '\0')
+        die("SIMPLEOS_FONT_ASSET is required");
+    struct bytes font_payload = read_file(font_asset_path);
+    if (!font_payload.len)
+        die("SIMPLEOS_FONT_ASSET could not be read");
     struct bytes cfat4k = read_cfat4k_baseline();
     struct bytes kernel = kernel_file.len ? kernel_file : text_bytes("SIMPLEOS_UEFI_KERNEL_MISSING\n");
     struct bytes bootloader = bootloader_file.len ? bootloader_file : text_bytes("SIMPLEOS_UEFI_BOOTLOADER_MISSING\n");
@@ -541,7 +548,8 @@ int main(int argc, char **argv)
         "proof_pipeline=/usr/share/simpleos/toolchain/llvm/pipeline.step\nproof_pipeline=/usr/share/simpleos/toolchain/clang/pipeline.step\nproof_pipeline=/usr/share/simpleos/toolchain/rust/pipeline.step\n"
         "/usr/share/simpleos/toolchain/llvm/hello.ll\n/usr/bin/simple status=standalone-required\n/sys/apps/simple status=standalone-required\n/sys/apps/simple_compiler status=standalone-required\n/sys/apps/simple_interpreter status=standalone-required\n/sys/apps/simple_loader status=standalone-required\n/sys/apps/llvm status=standalone-required\n"
         "/sys/apps/clang status=standalone-required\n/sys/apps/rust status=standalone-required\nSimpleOS LLVM standalone app v1\nclang version 20.0.0\nSimpleOS Rust standalone app v1\n"
-        "/usr/share/simpleos/toolchain/llvm/pipeline.step\n/usr/share/simpleos/toolchain/clang/pipeline.step\n/usr/share/simpleos/toolchain/rust/pipeline.step\n",
+        "/usr/share/simpleos/toolchain/llvm/pipeline.step\n/usr/share/simpleos/toolchain/clang/pipeline.step\n/usr/share/simpleos/toolchain/rust/pipeline.step\n"
+        "SIMPLEOS_FONT_ASSET_PATH=/SYS/FONTS/NOTOSANS.TTF\n",
         lane, lane, platform);
 
     struct bytes llvm_manifest = textf("[toolchain]\napp=llvm\ntitle=LLVM\ntool=/sys/apps/llvm\nlane=%s\nmode=native-filesystem-app\nstatus=standalone-required\ncapability_primary=local-ir-inspection\nproof_primary=/usr/share/simpleos/toolchain/llvm/hello.ll\ncapability_secondary=object-assembly-inspection\nproof_secondary=/usr/share/simpleos/toolchain/llvm/hello.s\npipeline=compile-pipeline-step\nproof_pipeline=/usr/share/simpleos/toolchain/llvm/pipeline.step\n", lane);
@@ -622,6 +630,7 @@ int main(int argc, char **argv)
     int hello_object_cluster = hello_object_payload.len ? alloc_clusters(hello_object_payload.data, hello_object_payload.len) : 0;
     int hello_ir_cluster = hello_ir_payload.len ? alloc_clusters(hello_ir_payload.data, hello_ir_payload.len) : 0;
     int fsexec_cluster = fsexec_payload.len ? alloc_clusters(fsexec_payload.data, fsexec_payload.len) : 0;
+    int font_cluster = font_payload.len ? alloc_clusters(font_payload.data, font_payload.len) : 0;
     int llvm_cluster = alloc_clusters(llvm_app.data, llvm_app.len);
     int clang_cluster = alloc_clusters(clang_app.data, clang_app.len);
     int rust_cluster = alloc_clusters(rust_app.data, rust_app.len);
@@ -629,8 +638,8 @@ int main(int argc, char **argv)
     int cfat4k_cluster = cfat4k.len ? alloc_clusters(cfat4k.data, cfat4k.len) : 0;
     int fat4k_cluster = alloc_clusters(fat4k.data, fat4k.len);
 
-    unsigned char root[4096] = {0}, efi[4096] = {0}, boot[4096] = {0}, sys[4096] = {0}, apps[4096] = {0}, perf[4096] = {0}, usr[4096] = {0}, usr_bin[4096] = {0}, usr_lib[4096] = {0}, bin[4096] = {0}, sysrt[4096] = {0};
-    int root_n = 0, efi_n = 0, boot_n = 0, sys_n = 0, apps_n = 0, perf_n = 0, usr_n = 0, usr_bin_n = 0, usr_lib_n = 0, bin_n = 0, sysrt_n = 0;
+    unsigned char root[4096] = {0}, efi[4096] = {0}, boot[4096] = {0}, sys[4096] = {0}, fonts[4096] = {0}, apps[4096] = {0}, perf[4096] = {0}, usr[4096] = {0}, usr_bin[4096] = {0}, usr_lib[4096] = {0}, bin[4096] = {0}, sysrt[4096] = {0};
+    int root_n = 0, efi_n = 0, boot_n = 0, sys_n = 0, fonts_n = 0, apps_n = 0, perf_n = 0, usr_n = 0, usr_bin_n = 0, usr_lib_n = 0, bin_n = 0, sysrt_n = 0;
     put_dir_entry(root, &root_n, "EFI        ", efi_cluster, 0, 0x10);
     put_dir_entry(root, &root_n, "SYS        ", sys_cluster, 0, 0x10);
     put_dir_entry(root, &root_n, "USR        ", usr_cluster, 0, 0x10);
@@ -658,6 +667,10 @@ int main(int argc, char **argv)
     put_dir_entry(boot, &boot_n, "BOOTX64 EFI", bootloader_cluster, bootloader.len, 0x20);
     put_dir_entry(sys, &sys_n, "APPS       ", apps_cluster, 0, 0x10);
     put_dir_entry(sys, &sys_n, "PERF       ", perf_cluster, 0, 0x10);
+    if (font_cluster) {
+        put_dir_entry(sys, &sys_n, "FONTS      ", fonts_cluster, 0, 0x10);
+        put_dir_entry(fonts, &fonts_n, "NOTOSANSTTF", font_cluster, font_payload.len, 0x20);
+    }
     put_dir_entry(sys, &sys_n, "NVFSVER TXT", nvfs_cluster, nvfs.len, 0x20);
     put_dir_entry(sys, &sys_n, "TOOLSET SDN", toolset_cluster, toolset.len, 0x20);
     if (simple_tool_manifest_cluster)
@@ -723,6 +736,7 @@ int main(int argc, char **argv)
     memcpy(g_image + cluster_offset(efi_cluster), efi, (size_t)efi_n * 32);
     memcpy(g_image + cluster_offset(boot_cluster), boot, (size_t)boot_n * 32);
     memcpy(g_image + cluster_offset(sys_cluster), sys, (size_t)sys_n * 32);
+    memcpy(g_image + cluster_offset(fonts_cluster), fonts, (size_t)fonts_n * 32);
     memcpy(g_image + cluster_offset(apps_cluster), apps, (size_t)apps_n * 32);
     memcpy(g_image + cluster_offset(perf_cluster), perf, (size_t)perf_n * 32);
     memcpy(g_image + cluster_offset(usr_cluster), usr, (size_t)usr_n * 32);

@@ -37,6 +37,15 @@ struct DrawIrStyleProp:
     key: text
     value: text
 
+# Immutable producer-resolved shaping semantics. Glyph IDs and positions are
+# durable layout data; renderer handles, atlases, and caches never cross Draw IR.
+struct DrawIrGlyphRunPayload:
+    glyph_ids: [u32]
+    xs: [i32]
+    ys: [i32]
+    clusters: [i64]
+    valid: bool
+
 struct DrawEdge:
     id: text
     source: text
@@ -74,6 +83,7 @@ struct DrawIrCommand:
     parent_id: text
     image_uri: text
     points: [DrawIrPoint]
+    glyph_run: DrawIrGlyphRunPayload
 
 struct DrawIrSourceInfo:
     source_kind: text
@@ -156,6 +166,14 @@ fn draw_ir_no_rect() -> DrawIrRect:
 fn draw_ir_style_prop(key: text, value: text) -> DrawIrStyleProp:
     DrawIrStyleProp(key: key, value: value)
 
+fn draw_ir_empty_glyph_run_payload() -> DrawIrGlyphRunPayload:
+    DrawIrGlyphRunPayload(glyph_ids: [], xs: [], ys: [], clusters: [], valid: false)
+
+fn draw_ir_glyph_run_payload(glyph_ids: [u32], xs: [i32], ys: [i32], clusters: [i64], valid: bool) -> DrawIrGlyphRunPayload:
+    val lengths_match = glyph_ids.len() == xs.len() and glyph_ids.len() == ys.len() and glyph_ids.len() == clusters.len()
+    DrawIrGlyphRunPayload(glyph_ids: glyph_ids, xs: xs, ys: ys, clusters: clusters,
+        valid: valid and lengths_match and glyph_ids.len() > 0)
+
 fn draw_edge(id: text, source: text, target: text, routing: text, points: [DrawIrPoint], style: [DrawIrStyleProp]) -> DrawEdge:
     DrawEdge(id: id, source: source, target: target, routing: routing, points: points, style: style)
 
@@ -190,7 +208,8 @@ fn draw_ir_rect(component_id: text, x: i32, y: i32, width: i32, height: i32, col
         edge: nil,
         parent_id: "",
         image_uri: "",
-        points: []
+        points: [],
+        glyph_run: draw_ir_empty_glyph_run_payload()
     )
 
 fn draw_ir_text(component_id: text, x: i32, y: i32, text_value: text, color: u32) -> DrawIrCommand:
@@ -211,7 +230,8 @@ fn draw_ir_text(component_id: text, x: i32, y: i32, text_value: text, color: u32
         edge: nil,
         parent_id: "",
         image_uri: "",
-        points: []
+        points: [],
+        glyph_run: draw_ir_empty_glyph_run_payload()
     )
 
 fn draw_ir_text_styled(component_id: text, x: i32, y: i32, text_value: text, color: u32, computed_style: [DrawIrStyleProp]) -> DrawIrCommand:
@@ -235,7 +255,8 @@ fn draw_ir_text_styled(component_id: text, x: i32, y: i32, text_value: text, col
         edge: nil,
         parent_id: "",
         image_uri: "",
-        points: []
+        points: [],
+        glyph_run: draw_ir_empty_glyph_run_payload()
     )
 
 fn draw_ir_text_resolved_font(component_id: text, x: i32, y: i32, text_value: text, color: u32, family: text, identity: text, advance_widths: [i32], width: i32, line_height: i32, font_size: i32) -> DrawIrCommand:
@@ -268,6 +289,17 @@ fn draw_ir_text_resolved_font(component_id: text, x: i32, y: i32, text_value: te
     command.height = line_height
     command
 
+fn draw_ir_text_shaped_font(component_id: text, x: i32, y: i32, text_value: text, color: u32, family: text, identity: text, advance_widths: [i32], width: i32, line_height: i32, font_size: i32, glyph_run: DrawIrGlyphRunPayload) -> DrawIrCommand:
+    var command = draw_ir_text_resolved_font(component_id, x, y, text_value, color,
+        family, identity, advance_widths, width, line_height, font_size)
+    if command.computed_style.len() == 0:
+        return command
+    var style = command.computed_style
+    style.push(draw_ir_style_prop("font-shaping", "selected-pure-simple"))
+    command.computed_style = style
+    command.glyph_run = glyph_run
+    command
+
 fn draw_ir_box_with_style(component_id: text, x: i32, y: i32, width: i32, height: i32, color: u32, border_rect: DrawIrRect, content_rect: DrawIrRect, hit_rect: DrawIrRect, clip_rect: DrawIrRect, computed_style: [DrawIrStyleProp]) -> DrawIrCommand:
     DrawIrCommand(
         kind: DRAW_IR_COMMAND_RECT,
@@ -286,7 +318,8 @@ fn draw_ir_box_with_style(component_id: text, x: i32, y: i32, width: i32, height
         edge: nil,
         parent_id: "",
         image_uri: "",
-        points: []
+        points: [],
+        glyph_run: draw_ir_empty_glyph_run_payload()
     )
 
 fn draw_ir_edge_command(edge: DrawEdge) -> DrawIrCommand:
@@ -307,7 +340,8 @@ fn draw_ir_edge_command(edge: DrawEdge) -> DrawIrCommand:
         edge: edge,
         parent_id: "",
         image_uri: "",
-        points: edge.points
+        points: edge.points,
+        glyph_run: draw_ir_empty_glyph_run_payload()
     )
 
 fn draw_ir_path_command(component_id: text, points: [DrawIrPoint], computed_style: [DrawIrStyleProp]) -> DrawIrCommand:
@@ -328,7 +362,8 @@ fn draw_ir_path_command(component_id: text, points: [DrawIrPoint], computed_styl
         edge: nil,
         parent_id: "",
         image_uri: "",
-        points: points
+        points: points,
+        glyph_run: draw_ir_empty_glyph_run_payload()
     )
 
 fn draw_ir_image_command(component_id: text, x: i32, y: i32, width: i32, height: i32, image_uri: text, computed_style: [DrawIrStyleProp]) -> DrawIrCommand:
@@ -349,7 +384,8 @@ fn draw_ir_image_command(component_id: text, x: i32, y: i32, width: i32, height:
         edge: nil,
         parent_id: "",
         image_uri: image_uri,
-        points: []
+        points: [],
+        glyph_run: draw_ir_empty_glyph_run_payload()
     )
 
 fn draw_ir_group_command(component_id: text, parent_id: text) -> DrawIrCommand:
@@ -370,7 +406,8 @@ fn draw_ir_group_command(component_id: text, parent_id: text) -> DrawIrCommand:
         edge: nil,
         parent_id: parent_id,
         image_uri: "",
-        points: []
+        points: [],
+        glyph_run: draw_ir_empty_glyph_run_payload()
     )
 
 fn draw_ir_port_command(component_id: text, parent_id: text, x: i32, y: i32) -> DrawIrCommand:
@@ -391,7 +428,8 @@ fn draw_ir_port_command(component_id: text, parent_id: text, x: i32, y: i32) -> 
         edge: nil,
         parent_id: parent_id,
         image_uri: "",
-        points: []
+        points: [],
+        glyph_run: draw_ir_empty_glyph_run_payload()
     )
 
 fn draw_ir_source_info(source_kind: text, source_id: text, html_tag: text, html_node_id: text, css_selector: text, css_class: text, style_key: text, style_revision: text) -> DrawIrSourceInfo:

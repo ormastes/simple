@@ -22,10 +22,11 @@ use common.ui.draw_ir.{
     draw_ir_source_info,
     draw_ir_style_prop,
     draw_ir_text,
-    draw_ir_text_resolved_font
+    draw_ir_text_resolved_font,
+    draw_ir_text_shaped_font
 }
 use std.common.encoding.font_registry.{simpleos_default_font_asset_candidate}
-use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
 use common.ui.taskbar_model.{TaskbarModel}
 use common.ui.window_scene.{
     SharedWmScene,
@@ -428,7 +429,7 @@ fn _wm_draw_ir_chrome_revision(scene: SharedWmScene, taskbar: TaskbarModel, dpi_
 fn _wm_draw_ir_window_revision(window: SharedWmWindow) -> text:
     val focused = if window.focused: "1" else: "0"
     val minimized = if window.minimized: "1" else: "0"
-    "wm.window:{window.window_id}:surface={window.surface_id}:xy={window.x},{window.y}:size={window.width}x{window.height}:z={window.z_index}:focused={focused}:minimized={minimized}:title={window.title}"
+    "wm.window:{window.window_id}:surface={window.surface_id}:xy={window.x},{window.y}:size={window.width}x{window.height}:z={window.z_index}:focused={focused}:minimized={minimized}:title={window.title}:lang={window.language}"
 
 fn _wm_draw_ir_window_opacity(window: SharedWmWindow) -> i32:
     if window.focused:
@@ -463,10 +464,14 @@ fn _wm_draw_ir_window_box(window: SharedWmWindow, component_id: text, part: text
         computed_style
     )
 
-fn _wm_draw_ir_text(component_id: text, x: i32, legacy_y: i32, box_y: i32, box_height: i32, value: text, color: u32):
+fn _wm_draw_ir_text(component_id: text, x: i32, legacy_y: i32, box_y: i32, box_height: i32, value: text, color: u32, language: text):
     val candidate = simpleos_default_font_asset_candidate()
-    val metrics = resolve_font_metrics(candidate.family, value, 12)
-    var command = if metrics.valid:
+    val normalized_language = language.trim().lower()
+    val family = if normalized_language != "" and normalized_language != "und": "sans" else: candidate.family
+    val metrics = resolve_font_metrics_with_language(family, value, 12, language)
+    var command = if metrics.valid and metrics.shaping_required:
+        draw_ir_text_shaped_font(component_id, x, legacy_y, value, color, metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, 12, metrics.glyph_run)
+    else if metrics.valid:
         draw_ir_text_resolved_font(component_id, x, legacy_y, value, color, metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, 12)
     else:
         draw_ir_text(component_id, x, legacy_y, value, color)
@@ -614,24 +619,24 @@ fn _wm_draw_ir_taskbar_objects_batch(scene: SharedWmScene, taskbar: TaskbarModel
         val rect = shared_wm_taskbar_object_rect(metrics, scene.width, scene.height, object_index)
         if rect.x >= 0 and rect.x + rect.width <= object_limit:
             commands.push(draw_ir_rect("taskbar-pinned-{app.app_id}", rect.x + 2, rect.y + 4, rect.width - 4, rect.height - 8, theme.title_unfocused))
-            commands.push(_wm_draw_ir_text("taskbar-pinned-label-{app.app_id}", rect.x + 6, rect.y + 14, rect.y + 4, rect.height - 8, app.display_name, theme.text_primary))
+            commands.push(_wm_draw_ir_text("taskbar-pinned-label-{app.app_id}", rect.x + 6, rect.y + 14, rect.y + 4, rect.height - 8, app.display_name, theme.text_primary, "und"))
         object_index = object_index + 1
     for window in taskbar.running:
         val rect = shared_wm_taskbar_object_rect(metrics, scene.width, scene.height, object_index)
         if rect.x >= 0 and rect.x + rect.width <= object_limit:
             val color = if window.minimized: theme.host_window_body else: theme.accent
             commands.push(draw_ir_rect("taskbar-running-{window.window_id}", rect.x + 2, rect.y + 4, rect.width - 4, rect.height - 8, color))
-            commands.push(_wm_draw_ir_text("taskbar-running-label-{window.window_id}", rect.x + 6, rect.y + 14, rect.y + 4, rect.height - 8, window.title, theme.text_primary))
+            commands.push(_wm_draw_ir_text("taskbar-running-label-{window.window_id}", rect.x + 6, rect.y + 14, rect.y + 4, rect.height - 8, window.title, theme.text_primary, "und"))
         object_index = object_index + 1
     var tray_index = 0
     for tray in taskbar.tray:
         val rect = shared_wm_taskbar_tray_object_rect(metrics, scene.width, scene.height, tray_index)
         if rect.x >= 0 and rect.x + rect.width <= scene.width - slot_w:
             commands.push(draw_ir_rect("taskbar-tray-{tray.item_id}", rect.x + 2, rect.y + 4, rect.width - 4, rect.height - 8, theme.host_window_body))
-            commands.push(_wm_draw_ir_text("taskbar-tray-label-{tray.item_id}", rect.x + 6, rect.y + 14, rect.y + 4, rect.height - 8, tray.label, theme.text_primary))
+            commands.push(_wm_draw_ir_text("taskbar-tray-label-{tray.item_id}", rect.x + 6, rect.y + 14, rect.y + 4, rect.height - 8, tray.label, theme.text_primary, "und"))
         tray_index = tray_index + 1
     if scene.width >= slot_w:
-        commands.push(_wm_draw_ir_text("taskbar-clock", scene.width - slot_w + 4, chrome.taskbar.y + 14, chrome.taskbar.y, chrome.taskbar.height, clock_label, theme.text_primary))
+        commands.push(_wm_draw_ir_text("taskbar-clock", scene.width - slot_w + 4, chrome.taskbar.y + 14, chrome.taskbar.y, chrome.taskbar.height, clock_label, theme.text_primary, "und"))
     val embedding = draw_ir_embedding_config("wm-taskbar-objects", "wm-taskbar-objects", 0, 0, scene.width, scene.height, 10000, 1000, false)
     draw_ir_batch_with_source("wm-taskbar-objects", backend_target, embedding, commands, _wm_draw_ir_source("wm.taskbar.objects", "wm.taskbar", _wm_draw_ir_chrome_revision(scene, taskbar, dpi_scale_milli, clock_label, right_icon_count)))
 
@@ -652,9 +657,9 @@ fn _wm_draw_ir_window_batch(window: SharedWmWindow, backend_target: text) -> Dra
             draw_ir_rect("{window.window_id}-traffic-red", 12, 9, 10, 10, 0xFFE74C3Cu32),
             draw_ir_rect("{window.window_id}-traffic-yellow", 30, 9, 10, 10, 0xFFF1C40Fu32),
             draw_ir_rect("{window.window_id}-traffic-green", 48, 9, 10, 10, 0xFF27AE60u32),
-            _wm_draw_ir_text("{window.window_id}-title", 66, 19, 0, 28, window.title, theme.text_primary),
+            _wm_draw_ir_text("{window.window_id}-title", 66, 19, 0, 28, window.title, theme.text_primary, window.language),
             draw_ir_rect("{window.window_id}-close", window.width - 24, 2, 20, 20, theme.close_button),
-            _wm_draw_ir_text("{window.window_id}-close-label", window.width - 18, 17, 2, 20, "X", theme.text_primary)
+            _wm_draw_ir_text("{window.window_id}-close-label", window.width - 18, 17, 2, 20, "X", theme.text_primary, "und")
         ],
         _wm_draw_ir_source("wm.window.{window.window_id}", "wm.window", _wm_draw_ir_window_revision(window))
     )

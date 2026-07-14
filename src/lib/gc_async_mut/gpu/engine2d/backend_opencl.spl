@@ -320,6 +320,7 @@ class OpenClBackend:
     font_atlas_host_ptr: i64
     font_atlas_bytes: i64
     font_atlas_generation: i64
+    font_atlas_owner_identity: text
     device_current: bool
     mirror_current: bool
     last_probe: BackendProbeResult
@@ -339,12 +340,16 @@ class OpenClBackend:
             font_atlas_host_ptr: 0,
             font_atlas_bytes: 0,
             font_atlas_generation: -1,
+            font_atlas_owner_identity: "",
             device_current: false,
             mirror_current: true,
             last_probe: BackendProbeResult.unavailable("opencl", "not probed")
         )
 
     me init_with_session(width: i32, height: i32, session: OpenClSession) -> bool:
+        if self.initialized or self.owns_session:
+            self.last_probe = _opencl_probe_failure("OpenCL backend already owns an active session", "opencl_context")
+            return false
         if width <= 0 or height <= 0:
             self.last_probe = _opencl_probe_failure("invalid OpenCL framebuffer dimensions", "opencl_surface")
             self.initialized = false
@@ -414,6 +419,7 @@ class OpenClBackend:
             self.font_atlas_host_ptr = 0
         self.font_atlas_bytes = 0
         self.font_atlas_generation = -1
+        self.font_atlas_owner_identity = ""
         self.framebuffer_bytes = 0
         self.device_current = false
         self.mirror_current = true
@@ -504,6 +510,7 @@ class OpenClBackend:
                     byte_offset
                 ):
                     self.font_atlas_generation = -1
+                    self.font_atlas_owner_identity = ""
                     return false
                 row = row + 1
         true
@@ -516,6 +523,7 @@ class OpenClBackend:
             return false
         val pixel_count = pixel_count_i64 as i32
         val required_bytes = pixel_count_i64 * 4
+        val owner_identity = batch.atlas_owner_identity()
         var allocated = false
         if self.font_atlas_buffer == 0 or self.font_atlas_host_ptr == 0 or self.font_atlas_bytes != required_bytes:
             val new_host = opencl_host_alloc(required_bytes)
@@ -533,24 +541,30 @@ class OpenClBackend:
             self.font_atlas_host_ptr = new_host
             self.font_atlas_bytes = required_bytes
             self.font_atlas_generation = -1
+            self.font_atlas_owner_identity = ""
             allocated = true
-        if self.font_atlas_generation == batch.atlas_generation:
+        val owner_matches = self.font_atlas_owner_identity == owner_identity
+        if owner_matches and self.font_atlas_generation == batch.atlas_generation:
             return true
         _write_u32_pixels_to_host(self.font_atlas_host_ptr, batch.atlas_pixels, pixel_count)
-        val dirty_upload_bytes = opencl_font_atlas_dirty_upload_bytes(batch, self.font_atlas_generation, allocated)
+        val dirty_upload_bytes = opencl_font_atlas_dirty_upload_bytes(batch, self.font_atlas_generation, allocated or not owner_matches)
         if dirty_upload_bytes > 0:
             if self._write_font_atlas_dirty_rects(batch):
                 self.font_atlas_generation = batch.atlas_generation
+                self.font_atlas_owner_identity = owner_identity
                 return true
             return false
         if not self.session.write_buffer(self.font_atlas_buffer, self.font_atlas_host_ptr, required_bytes):
             self.font_atlas_generation = -1
+            self.font_atlas_owner_identity = ""
             return false
         self.font_atlas_generation = batch.atlas_generation
+        self.font_atlas_owner_identity = owner_identity
         true
 
     me invalidate_font_atlas():
         self.font_atlas_generation = -1
+        self.font_atlas_owner_identity = ""
 
     me draw_font_batch(origin_x: i32, origin_y: i32, batch: FontRenderBatch) -> i64:
         if not font_atlas_composite_program_version_valid(batch.program_version):

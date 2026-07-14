@@ -11,6 +11,7 @@ use common.ui.draw_ir.{
     DrawIrBatch,
     DrawIrCommand,
     DrawIrComposition,
+    DrawIrGlyphRunPayload,
     DrawIrPoint,
     DrawIrRect,
     DrawIrSourceInfo,
@@ -19,6 +20,8 @@ use common.ui.draw_ir.{
     draw_ir_batch_with_source,
     draw_ir_composition,
     draw_ir_embedding_config,
+    draw_ir_empty_glyph_run_payload,
+    draw_ir_glyph_run_payload,
     draw_ir_point,
     draw_ir_rect,
     draw_ir_source_info,
@@ -130,6 +133,18 @@ fn _draw_ir_sdn_emit_points(line: text, key: text, points: [DrawIrPoint]) -> tex
         index = index + 1
     out
 
+fn _draw_ir_sdn_emit_glyph_run(line: text, glyph_run: DrawIrGlyphRunPayload) -> text:
+    val lengths_match = (glyph_run.glyph_ids.len() == glyph_run.xs.len() and
+        glyph_run.glyph_ids.len() == glyph_run.ys.len() and
+        glyph_run.glyph_ids.len() == glyph_run.clusters.len())
+    val count = if glyph_run.valid and lengths_match: glyph_run.glyph_ids.len() else: 0
+    var out = line + " glyph_valid={count > 0} glyph_count={count}"
+    var index = 0
+    while index < count:
+        out = out + " glyph_{index}_id={glyph_run.glyph_ids[index]} glyph_{index}_x={glyph_run.xs[index]} glyph_{index}_y={glyph_run.ys[index]} glyph_{index}_cluster={glyph_run.clusters[index]}"
+        index = index + 1
+    out
+
 fn _draw_ir_sdn_emit_command(command: DrawIrCommand) -> text:
     var line = "\t\tcommand kind={command.kind} id={_draw_ir_sdn_escape(command.component_id)} x={command.x} y={command.y} width={command.width} height={command.height} color={command.color} text={_draw_ir_sdn_escape(command.text_value)} parent_id={_draw_ir_sdn_escape(command.parent_id)} image_uri={_draw_ir_sdn_escape(command.image_uri)}"
     line = _draw_ir_sdn_emit_rect(line, "border", command.border_rect)
@@ -138,6 +153,7 @@ fn _draw_ir_sdn_emit_command(command: DrawIrCommand) -> text:
     line = _draw_ir_sdn_emit_rect(line, "clip", command.clip_rect)
     line = _draw_ir_sdn_emit_styles(line, "style", command.computed_style)
     line = _draw_ir_sdn_emit_points(line, "point", command.points)
+    line = _draw_ir_sdn_emit_glyph_run(line, command.glyph_run)
     line = line + " edge_present={command.edge != nil}"
     if val edge = command.edge:
         line = line + " edge_id={_draw_ir_sdn_escape(edge.id)} edge_source={_draw_ir_sdn_escape(edge.source)} edge_target={_draw_ir_sdn_escape(edge.target)} edge_routing={_draw_ir_sdn_escape(edge.routing)}"
@@ -228,6 +244,31 @@ fn _draw_ir_sdn_parse_points(line: text, key: text) -> [DrawIrPoint]:
         return []
     points
 
+fn _draw_ir_sdn_parse_glyph_run(line: text) -> DrawIrGlyphRunPayload:
+    if not _draw_ir_sdn_bool(line, "glyph_valid"):
+        return draw_ir_empty_glyph_run_payload()
+    val count = _draw_ir_sdn_i32(line, "glyph_count")
+    if count <= 0:
+        return draw_ir_empty_glyph_run_payload()
+    var glyph_ids: [u32] = []
+    var xs: [i32] = []
+    var ys: [i32] = []
+    var clusters: [i64] = []
+    var index = 0
+    while index < count:
+        val id = _draw_ir_sdn_field(line, "glyph_{index}_id")
+        val x = _draw_ir_sdn_field(line, "glyph_{index}_x")
+        val y = _draw_ir_sdn_field(line, "glyph_{index}_y")
+        val cluster = _draw_ir_sdn_field(line, "glyph_{index}_cluster")
+        if id == "" or x == "" or y == "" or cluster == "":
+            return draw_ir_empty_glyph_run_payload()
+        glyph_ids.push(_draw_ir_sdn_parse_u32(id))
+        xs.push(_draw_ir_sdn_parse_i32(x))
+        ys.push(_draw_ir_sdn_parse_i32(y))
+        clusters.push(_draw_ir_sdn_parse_i32(cluster).to_i64())
+        index = index + 1
+    draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, true)
+
 fn _draw_ir_sdn_parse_command(line: text) -> DrawIrCommand:
     var edge: DrawEdge? = nil
     val edge_present = _draw_ir_sdn_field(line, "edge_present")
@@ -267,7 +308,8 @@ fn _draw_ir_sdn_parse_command(line: text) -> DrawIrCommand:
         edge: edge,
         parent_id: _draw_ir_sdn_field(line, "parent_id"),
         image_uri: _draw_ir_sdn_field(line, "image_uri"),
-        points: _draw_ir_sdn_parse_points(line, "point")
+        points: _draw_ir_sdn_parse_points(line, "point"),
+        glyph_run: _draw_ir_sdn_parse_glyph_run(line)
     )
 
 fn _draw_ir_sdn_parse_source(line: text) -> DrawIrSourceInfo:

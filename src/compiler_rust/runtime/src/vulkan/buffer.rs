@@ -107,10 +107,16 @@ pub struct VulkanBuffer {
 impl VulkanBuffer {
     /// Create a new device-local buffer
     pub fn new(device: Arc<VulkanDevice>, size: u64, usage: BufferUsage) -> VulkanResult<Self> {
-        let buffer_info = vk::BufferCreateInfo::default()
+        let queue_families = device.resource_queue_families();
+        let mut buffer_info = vk::BufferCreateInfo::default()
             .size(size)
             .usage(usage.to_vk_usage())
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        if queue_families.len() > 1 {
+            buffer_info = buffer_info
+                .sharing_mode(vk::SharingMode::CONCURRENT)
+                .queue_family_indices(&queue_families);
+        }
 
         let buffer = unsafe {
             device
@@ -187,6 +193,41 @@ impl VulkanBuffer {
             self.device
                 .handle()
                 .cmd_copy_buffer(cmd, staging.handle(), self.buffer, &[region]);
+
+            let mut dst_stage = vk::PipelineStageFlags::empty();
+            let mut dst_access = vk::AccessFlags::empty();
+            if self.usage.vertex || self.usage.index {
+                dst_stage |= vk::PipelineStageFlags::VERTEX_INPUT;
+                dst_access |= vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::INDEX_READ;
+            }
+            if self.usage.uniform || self.usage.storage {
+                dst_stage |= vk::PipelineStageFlags::VERTEX_SHADER
+                    | vk::PipelineStageFlags::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags::COMPUTE_SHADER;
+                dst_access |=
+                    vk::AccessFlags::UNIFORM_READ | vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE;
+            }
+            if dst_stage.is_empty() {
+                dst_stage = vk::PipelineStageFlags::ALL_COMMANDS;
+                dst_access = vk::AccessFlags::MEMORY_READ;
+            }
+            let barrier = vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(dst_access)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(self.buffer)
+                .offset(0)
+                .size(size);
+            self.device.handle().cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                dst_stage,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[barrier],
+                &[],
+            );
         }
 
         self.device.submit_transfer_command(cmd)?;

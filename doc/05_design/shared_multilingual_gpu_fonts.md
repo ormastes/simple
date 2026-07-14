@@ -2,7 +2,8 @@
 # Shared Multilingual GPU Fonts Detail Design
 
 Status: selected design; manifest/assets, persistent atlas, portable emission,
-and 2D/3D CPU compatibility are implemented. Native 3D promotion remains open.
+Engine2D adapters, and optional Vulkan Engine3D source are implemented. Native
+3D promotion remains open pending retained device evidence.
 
 ## Fixed interfaces
 
@@ -11,8 +12,12 @@ The implementation must use these names:
 ```simple
 class FontRenderQuad
 class FontRenderBatch
+class DrawIrGlyphRunPayload
 
+fn selected_font_asset_for_language_category(language: text, category: text) -> FontAssetCandidate?
 me FontRenderer.prepare_text(content: text, color: u32, font_size: i32) -> FontRenderBatch
+me FontRenderer.prepare_text_with_advances(content: text, advance_widths: [i32], color: u32, font_size: i32) -> FontRenderBatch
+me FontRenderer.prepare_selected_glyph_run(payload: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> FontRenderBatch
 fn emit_portable_font_atlas_composite_kernel(target: PortableComputeTarget) -> PortableComputeArtifact
 me Engine3D.draw_text_hud(...)
 me Engine3D.draw_text_world(...)
@@ -47,20 +52,44 @@ and the exact revocable face handle/generation pair into the same renderer.
 It does not claim UTF-8 byte clusters, language, full GSUB/GPOS, or complete
 BiDi.
 
+`DrawIrGlyphRunPayload` is the handle-free producer form: glyph IDs, x/y
+positions, logical clusters, and validity only. It round-trips through Draw IR
+SDN beside `font-identity` and ordered advances. The Engine2D executor first
+resolves that identity to the live selected face, then calls
+`prepare_selected_glyph_run`; unshaped selected text uses
+`prepare_text_with_advances`. Neither form carries a face handle, atlas, cache,
+or backend resource.
+Positions are baseline pen offsets in device coordinates (+Y down). OpenType
+GPOS y offsets are converted from +Y up at the shaper boundary. Rasterizers
+store horizontal bitmap xmin and vertical bitmap bottom/ymin, so the shared
+quad origin is `(pen_x + bearing_x, ascent + pen_y - bearing_y - height)` with
+checked i32 bounds. Both shaped adapters use this formula; native bitmap x/y
+offset accessors preserve the same contract for the legacy handle path.
+
 `selected_font_coverage_cell(language, category)` is the fail-closed policy
 lookup. Unknown axes return `nil`. A witness family is not loadable selection:
 callers may bind an asset only after the returned status is `native` or
-`fallback`. Exact simple-script acceptance now binds 54 native cells and the
-single `zh/mono -> Noto Sans SC` fallback; 45 cells remain unavailable or
-not-designed.
+`fallback`. The policy binds 54 no-feature identity cells plus Noto Sans
+Devanagari for exact Hindi `hi` and Noto Sans Arabic for the exact Arabic/Urdu
+witnesses: 57 native cells and the single `zh/mono -> Noto Sans SC` fallback.
+The other 42 cells are 26 `not-designed-for-script` and 16 `unavailable`.
+The resolver returns a bundled candidate only for those promoted cells. Widget
+Draw IR reads the existing `lang` and `font-family` properties; shared WM
+windows preserve an explicit language field. Missing language remains `und`
+and keeps the previous monospace default, while an explicit language without a
+family requests the multilingual sans fallback.
 
 `ShapedGlyph` now owns absolute source/cluster identity and current advance/
 offset values so reordering cannot detach metadata. `ShapedRun.language` is
 caller metadata (`und` when omitted); script direction remains a per-run flag,
-not UAX#9. Substitution and positioning completeness are true only for the
-executed no-feature Latin/Han/Cyrillic identity profile. Complex-script and
-multi-codepoint emoji material remains incomplete and fails closed even when
-blob/runtime cmap IDs match.
+not UAX#9. Substitution and positioning completeness are true for the executed
+no-feature Latin/Han/Cyrillic identity profile and the exact Hindi `hi`
+witness. A bounded, table-derived Arabic/Urdu path covers only the two pinned
+default-instance witnesses and is cataloged for those exact tuples. A whole-run
+single `U+1F600` scalar has a source-complete exact-face monochrome material gate
+but stays catalog-unavailable until that gate executes successfully. Other
+complex-script, variation-selector, modifier, ZWJ, color, and multi-codepoint
+emoji material remains incomplete even when blob/runtime cmap IDs match.
 
 `Shaper` stores additive OpenType snapshots keyed by exact live face
 handle/generation. Fallback resolves the snapshot after choosing its run font;
@@ -73,21 +102,26 @@ Script/LangSys/Feature lookup selection is available. Unsupported or malformed
 data returns unchanged material and cannot set completion.
 
 The selector and application land together. Accepted scope covers direct Latin,
-Cyrillic, Han, bounded Arabic/Urdu letters, and the exact Hindi `हिन्दी`
-witness. The Hindi path selects `dev2` Script/LangSys records and only ordered
+Cyrillic, Han, and the exact Hindi `हिन्दी` witness. The Hindi path selects
+`dev2` Script/LangSys records and only ordered
 default feature tags; discretionary and inactive lookups cannot set completion.
-Other Indic sequences remain fail-closed.
+Arabic/Urdu outside the two exact selected witnesses and other Indic sequences
+remain fail-closed.
 
-The first native Engine3D HUD prerequisite is a Simple-owned Metal source and
-20-byte vertex contract (`packed_float2` position, `packed_float2` UV, `u32`
-color), with six vertices per validated atlas quad. The atlas format is frozen
-to A8Unorm and render targets to RGBA8/BGRA8. This material is not execution:
-native promotion still requires a compiled pipeline, texture upload, draw,
-successful command completion, and device-origin texture readback. Web
-producers lower through web semantic/layout and GUI producers through canonical
-widget/scene owners; both emit Draw IR. The Engine2D executor may then lower
-text to transient `FontRenderBatch`. They must not consume this Engine3D
-adapter as a parallel rendering path.
+The bounded Arabic/Urdu path validates the selected Script/LangSys metadata,
+then executes witness-specific pinned lookup indices/forms for exactly two
+literals. The two passing HarfBuzz oracles promote only those exact tuples.
+General feature selection, joining, mark attachment, contextual substitution,
+positioning, and BiDi remain fail-closed.
+
+The Metal source and 20-byte vertex contract remain emission-only. The optional
+Vulkan Engine3D adapter owns dedicated HUD/world pipelines, R8 atlas upload,
+depth test/write, zero-coverage discard, fenced submission, and device readback.
+Neither source path is execution evidence: promotion still requires the retained
+native oracle. Web producers lower through web semantic/layout (the current
+WebIR), and GUI producers through canonical widget/scene owners; both emit Draw
+IR. Engine2D alone lowers their text to transient `FontRenderBatch`; they must
+not consume the Engine3D adapter as a parallel rendering path.
 
 The revocable font-face handle/generation is intentionally present as opaque
 rasterizer identity and is validated before use. Engine-owned texture, sampler,
@@ -147,34 +181,64 @@ format for CUDA, HIP, OpenCL, Metal, and WGSL. Each portable backend plan now
 contains a separate optimization/font artifact pair with distinct paths; WGSL
 is never concatenated because the modules own conflicting bindings. Exported-symbol and source/version-hash evidence
 remain promotion gates rather than fields fabricated on the artifact.
-A bounded font-specific Vulkan SPIR-V contract is installed by the retained
-session. Conditional execution evidence remains environment-dependent.
+The native toolchain checker preserves that pair as distinct PTX/HSACO/SPIR-V/
+metallib files and rejects aggregate target readiness when either symbol set is
+missing. It also compiles the canonical Vulkan GLSL into a separately validated
+SPIR-V companion. Runtime promotion still requires loading the verified font
+companion.
+A bounded, embedded font-specific Vulkan SPIR-V contract is auto-installed by
+the retained session. Its 10,772 bytes and SHA-256
+`e25d25b8157fc2554822637603471a442f678eb58e20da167bfb023d7577880a` are pinned.
+Only `precompiled-spirv` may become promotion-ready; runtime GLSL remains a
+diagnostic API path. Conditional execution evidence remains environment-dependent.
 
 Engine2D and Engine3D reuse the same common atlas subrect/color material.
-Engine2D maps batch quads to the shared CUDA, native Metal, or OpenCL atlas-composite launch
-when that backend is active, caching by atlas generation and invalidating on
-font replacement; an unsubmitted suffix uses the image/alpha route. CUDA uses
+Engine2D maps batch quads to the shared CUDA, native Metal, OpenCL, or Vulkan
+atlas-composite launch when that backend is active. Each backend reuses its
+upload only when the batch atlas-owner identity and atlas generation both
+match, and invalidates on font replacement; an unsubmitted suffix uses the
+image/alpha route. CUDA uses
 the existing single PTX module and a 15-slot pointer ABI; OpenCL compiles the
 shared source. CUDA's private runtime ABI is two pointer-valued `u64` slots plus
 thirteen `s64` slots; it is intentionally distinct from compiler-emitted CUDA
-C scalar widths. Other backends retain image/alpha compatibility. Engine3D
-retains CPU HUD/world compatibility; its Vulkan owner now proves the untextured
-mesh/depth/fence/readback prerequisite but cannot promote font textures until
-the graphics pipeline owns a combined-image-sampler descriptor layout.
+C scalar widths, but its pointer array stores bounded values in 8-byte slots so
+their low 32 bits satisfy the emitted `u32`/`i32` parameters. A generated PTX
+companion may be installed into a distinct
+session module keyed by its exact hash; font launches prefer it without
+replacing the optimization module. The embedded PTX remains compatibility-only.
+Other backends retain image/alpha compatibility. Engine3D
+retains CPU HUD/world compatibility and now has dedicated Vulkan font pipeline,
+sampler-descriptor, depth, fence, and device-readback ownership. Its atlas
+texture is warm only when both canonical batch owner identity and dependency
+generation match; replacement, failed upload, and shutdown invalidate that
+authority. Promotion still waits for successful native pixel-oracle execution.
 MetalSession compiles the exact common MSL as an optional separate library and
-owns its pipeline. MetalBackend owns only persistent atlas generation and the
-52-byte parameter policy, dispatching through the leak-free completed-frame
-runtime call. The typed Metal lane is never set for `metal-on-vulkan`.
+owns its pipeline. MetalBackend owns the persistent atlas owner + generation
+pair and the 52-byte parameter policy, dispatching through the leak-free
+completed-frame runtime call. The typed Metal lane is never set for
+`metal-on-vulkan`.
 After the first full OpenCL atlas upload, a consecutive generation with valid
 dirty rectangles writes only the affected rows at checked byte offsets.
 Allocation, invalidation, generation gaps, or invalid/empty dirty metadata use
-the full-upload fail-safe. Required native readback/promotion evidence remains
+the full-upload fail-safe. Engine3D now owns dedicated embedded-SPIR-V HUD and
+depth-tested world font pipelines plus a combined sampler descriptor and device
+readback adapter. Required native execution/readback promotion evidence remains
 unproved.
 
 The Vulkan promotion lane reports a compiled versioned entry,
 nonzero handles, batch/payload hash, submit/draw, completed fence, device-origin
-readback, accelerated device type, and backend/driver identity. A CPU mirror is
-a comparator, never the readback source. Engine3D font promotion remains open.
+readback, accelerated device type, and backend/driver identity. Readback
+authority requires the submitted command, its completed fence, the exact native
+color-image handle and frame byte count, plus byte equality with the public
+Engine3D result. A CPU mirror is a comparator, never the readback source.
+Engine3D world depth is source-complete: the pipeline tests+writes depth,
+zero-coverage fragments are discarded, and a translated-perspective four-frame
+device oracle requires every fully opaque overlap pixel to retain the near
+color in both draw orders. Native evidence resolves resources from logical
+handles, never vector positions. A separate HUD-only oracle derives exact
+nonzero pixel bounds and count from the canonical batch atlas and compares the
+device readback at a fixed origin. Promotion remains open on native run
+evidence.
 
 ## Resolved fonts across legacy UI, WebRender IR, Draw IR, and SimpleOS
 
@@ -198,7 +262,11 @@ it only when the native owner supports concurrent faces.
 SimpleOS uses the existing selected candidate and verified-byte font facade.
 The same Noto Sans Mono payload must be inserted by the release/QEMU disk C
 builder, `ImageBuilder._populate_root_partition`, initramfs staging, and legacy
-disk bake. Required guest evidence is exact path/length/hash, successful glyph
+disk bake. The direct FAT32 builder exposes its 8.3 copy as
+`/SYS/FONTS/NOTOSANS.TTF`; the guest retries that byte source under the
+canonical registry identity, and both VFS implementations permit the pinned
+1,708,408-byte payload within their 4 MiB read ceiling. Required guest evidence
+is exact path/length/hash, successful glyph
 material, WM Draw IR family/identity, and nonblank framebuffer output for Latin
 plus one accepted non-ASCII simple-script witness. Host-repository presence is
 not guest evidence.
@@ -227,6 +295,35 @@ Remaining completion behavior is intentionally narrow:
 Evidence states are `pass`, `unavailable`, `runtime-blocked`, or a concrete
 rejection. Helpers never translate the latter three into success.
 
+## Runtime font configuration
+
+`nogc_sync_mut.text_layout.font_types` owns one immutable `FontRenderConfig`;
+UI, WebIR, Draw IR, Engine2D, and Engine3D must not define sibling font-policy
+types. Its fields are family, category, language, script, size, weight, style,
+hinting, antialiasing, atlas policy, execution target, and
+`FontExecutionPolicy { Suggested, Preferred, Required }`. Registry categories
+and backend targets remain validated text so the sync text-layout layer does
+not depend on Skia or async compute types.
+
+The default preserves today's rendering: `und`/`auto`, normal weight/style,
+no hinting, grayscale antialiasing, the shared 1024 alpha atlas, target `auto`,
+and `Suggested`. A length-delimited identity is part of glyph, shaped-run, and
+atlas keys. Only that default rendering mode and uniform scale with late
+translation are initially valid; rotation, skew, nonuniform/subpixel transform,
+unsupported axes, and unsupported rendering modes reject before cache mutation.
+
+Policy is observable. Engine2D supplies its executable font-adapter order
+`cuda, metal, opencl, vulkan, cpu`; Engine3D supplies `vulkan, cpu`.
+`Suggested(auto)` uses the supplied order, while `Suggested(named)` moves its
+named target first and retains each remaining target once. `Preferred(named)`
+tries the named target then CPU; `Required(named)` tries only the named target.
+Concrete `cpu` is valid. Preferred/Required with `auto`, unknown targets, and
+targets unsupported by that engine reject before mutation. Known-but-unavailable
+targets follow the selected policy after recording the failure. Existing
+size-only calls are default-config compatibility adapters. `FontRenderBatch`
+carries config identity, target, and policy so configured bitmap,
+selected-vector, shaped, Engine2D, and Engine3D paths share one contract.
+
 ## Failure and fallback
 
 - Missing/corrupt manifest, license, hash, or unsupported sfnt data: reject face.
@@ -250,6 +347,13 @@ Promotion gates are the selected NFRs: at least 95% warm cache hits; 1,024 glyph
 p95 no more than 4 ms at 1080p and 8 ms at 4K; equal-semantics 4,096 glyph p95 at
 least 1.25x CPU; no unchanged full-atlas upload; at most 10% RSS growth, 128 MiB
 GPU resources, and 80 MiB bundled core fonts/notices.
+
+The performance SSpec is the sole collector. It overwrites
+`build/shared_multilingual_gpu_fonts_perf/evidence.env`; the shared helper pins
+the schema, fixture, font bytes, collector/helper and renderer/backend source
+bundle hashes, device/driver, all counters, and four raw 11-sample arrays. The system promotion spec only
+loads this record. Missing, stale, partial, malformed, or percentile-mismatched
+records fail closed and never trigger a second measurement.
 
 ## Documentation impacts
 

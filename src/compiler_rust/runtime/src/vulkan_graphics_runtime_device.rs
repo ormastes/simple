@@ -122,15 +122,31 @@ pub extern "C" fn rt_vulkan_device_name(_id: i64) -> *const c_char {
 
 #[no_mangle]
 #[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_selected_device_name() -> *const c_char {
+    let mut state = STATE.lock();
+    let name = state.device.as_ref().map(|device| device.physical_device().name());
+    name.map_or_else(empty_cstr, |name| state.cached_cstr(name))
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_selected_device_name() -> *const c_char {
+    empty_cstr()
+}
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_device_driver_identity(id: i64) -> *const c_char {
     let mut state = STATE.lock();
-    let identity = state.physical_devices.get(id as usize).map(|pd| driver_identity(
+    let identity = state.physical_devices.get(id as usize).map(|pd| {
+        driver_identity(
             &pd.name(),
             pd.properties.vendor_id,
             pd.properties.device_id,
             pd.properties.driver_version,
             pd.properties.api_version,
-        ));
+        )
+    });
     match identity {
         Some(identity) => state.cached_cstr(identity),
         None => empty_cstr(),
@@ -148,15 +164,15 @@ pub extern "C" fn rt_vulkan_device_driver_identity(_id: i64) -> *const c_char {
 pub extern "C" fn rt_vulkan_selected_device_driver_identity() -> *const c_char {
     let mut state = STATE.lock();
     let identity = state.device.as_ref().map(|device| {
-            let pd = device.physical_device();
-            driver_identity(
-                &pd.name(),
-                pd.properties.vendor_id,
-                pd.properties.device_id,
-                pd.properties.driver_version,
-                pd.properties.api_version,
-            )
-        });
+        let pd = device.physical_device();
+        driver_identity(
+            &pd.name(),
+            pd.properties.vendor_id,
+            pd.properties.device_id,
+            pd.properties.driver_version,
+            pd.properties.api_version,
+        )
+    });
     match identity {
         Some(identity) => state.cached_cstr(identity),
         None => empty_cstr(),
@@ -227,19 +243,24 @@ pub extern "C" fn rt_vulkan_device_type(id: i64) -> *const c_char {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_selected_device_type() -> *const c_char {
     let mut state = STATE.lock();
-    let ty = state.device.as_ref().map(|device| match device.physical_device().properties.device_type {
-        vk::PhysicalDeviceType::DISCRETE_GPU => "discrete",
-        vk::PhysicalDeviceType::INTEGRATED_GPU => "integrated",
-        vk::PhysicalDeviceType::VIRTUAL_GPU => "virtual",
-        vk::PhysicalDeviceType::CPU => "cpu",
-        _ => "other",
-    });
+    let ty = state
+        .device
+        .as_ref()
+        .map(|device| match device.physical_device().properties.device_type {
+            vk::PhysicalDeviceType::DISCRETE_GPU => "discrete",
+            vk::PhysicalDeviceType::INTEGRATED_GPU => "integrated",
+            vk::PhysicalDeviceType::VIRTUAL_GPU => "virtual",
+            vk::PhysicalDeviceType::CPU => "cpu",
+            _ => "other",
+        });
     ty.map_or_else(empty_cstr, |ty| state.cached_cstr(ty.to_string()))
 }
 
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
-pub extern "C" fn rt_vulkan_selected_device_type() -> *const c_char { empty_cstr() }
+pub extern "C" fn rt_vulkan_selected_device_type() -> *const c_char {
+    empty_cstr()
+}
 
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]

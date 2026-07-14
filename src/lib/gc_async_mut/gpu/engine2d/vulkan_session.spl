@@ -19,6 +19,7 @@
 use std.gpu.engine2d.backend_vulkan_spirv.{
     spirv_clear, spirv_rect_filled, spirv_noop_storage, spirv_blit
 }
+use std.gpu.engine2d.backend_vulkan_font_spirv.{spirv_font_atlas_composite}
 use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_compile_spirv, vulkan_sffi_destroy_shader,
     vulkan_sffi_compile_glsl,
@@ -32,6 +33,7 @@ use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
 use std.gc_async_mut.io.vulkan_sffi.{vulkan_get_device}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence}
 use std.common.gpu.font_atlas_composite.{font_atlas_composite_vulkan_glsl_source}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 
 # Push constant size in bytes — matches VulkanBackend's VK_PUSH_CONSTANT_SIZE
 val _VS_PUSH_CONSTANT_SIZE: i64 = 64
@@ -95,6 +97,7 @@ class VulkanSession:
     pipe_font_atlas: i64
 
     font_atlas_artifact_mode: text
+    font_atlas_artifact_identity: text
     font_atlas_status: text
     selected_device_index: i64
     device_name: text
@@ -139,6 +142,7 @@ class VulkanSession:
             pipe_blit: 0,
             pipe_font_atlas: 0,
             font_atlas_artifact_mode: "none",
+            font_atlas_artifact_identity: "",
             font_atlas_status: "not-installed",
             selected_device_index: -1,
             device_name: "",
@@ -227,6 +231,7 @@ class VulkanSession:
         self.ref_count = 1
         self.is_initialized = true
         self.generation = self.generation + 1
+        self.install_font_atlas_pipeline(spirv_font_atlas_composite())
         0
 
     me retain() -> VulkanSession:
@@ -282,7 +287,19 @@ class VulkanSession:
                 device_name: self.device_name, device_type: self.device_type,
                 driver_identity: self.driver_identity
             )
+        val artifact_identity = if spirv_bytes.len() > 0:
+            "precompiled-spirv:" + sha256_u8_hex(spirv_bytes)
+        else:
+            "runtime-glsl:" + sha256_text(font_atlas_composite_vulkan_glsl_source())
         if self.pipe_font_atlas > 0 and self.shader_font_atlas > 0:
+            if self.font_atlas_artifact_identity != artifact_identity:
+                return VulkanFontPipelineEvidence(
+                    status: "rejected", reason: "font-pipeline-artifact-mismatch",
+                    artifact_mode: self.font_atlas_artifact_mode,
+                    shader_handle: 0, pipeline_handle: 0,
+                    device_name: self.device_name, device_type: self.device_type,
+                    driver_identity: self.driver_identity
+                )
             return VulkanFontPipelineEvidence(
                 status: "ready", reason: "cached",
                 artifact_mode: self.font_atlas_artifact_mode,
@@ -335,6 +352,7 @@ class VulkanSession:
             )
         self.font_atlas_status = "ready"
         self.font_atlas_artifact_mode = mode
+        self.font_atlas_artifact_identity = artifact_identity
         VulkanFontPipelineEvidence(
             status: "ready", reason: "installed", artifact_mode: mode,
             shader_handle: self.shader_font_atlas, pipeline_handle: self.pipe_font_atlas,
@@ -410,6 +428,7 @@ class VulkanSession:
         self.shader_blit = 0
         self.shader_font_atlas = 0
         self.font_atlas_artifact_mode = "none"
+        self.font_atlas_artifact_identity = ""
         self.font_atlas_status = "not-installed"
         self.selected_device_index = -1
         self.device_name = ""

@@ -25,6 +25,7 @@ use common.ui.draw_ir.{
     draw_ir_batch_with_source,
     draw_ir_box_with_style,
     draw_ir_text_styled,
+    draw_ir_text_shaped_font,
     draw_ir_composition,
     draw_ir_embedding_config,
     draw_ir_rect_bounds,
@@ -33,7 +34,7 @@ use common.ui.draw_ir.{
 }
 use common.render_scene.scene.{SceneCommand, scene_fill_rect}
 use std.nogc_sync_mut.io.env_ops.{env_get}
-use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
 use std.nogc_async_mut.gpu.engine2d.simd_kernels.{engine2d_simd_fill_rows_u32}
 
 # ---------------------------------------------------------------------------
@@ -1828,6 +1829,21 @@ class Style:
     object_fit: text
     object_position: text
     bold: bool
+
+fn _html_text_language(nodes: [HNode], node_index: i32, st: Style) -> text:
+    val override = st.font_language_override.trim()
+    if override != "" and override.lower() != "normal":
+        if override.len() >= 2 and ((override.starts_with("\"") and override.ends_with("\"")) or
+                                   (override.starts_with("'") and override.ends_with("'"))):
+            return override.slice(1, override.len() - 1)
+        return override
+    var current = node_index.to_i64()
+    while current >= 0:
+        val language = attr_value(nodes[current].attrs_raw, "lang").trim()
+        if language != "":
+            return language
+        current = nodes[current].parent
+    "und"
 
 fn renderer_default_style() -> Style:
     Style(bg: 0u32, background_gradient_from: 0u32, background_gradient_to: 0u32, background_repeat: "repeat", background_size_w_px: 0, background_size_h_px: 0, background_position_x_px: 0, background_position_y_px: 0, background_clip: "border-box", background_origin: "padding-box", background_attachment: "scroll", fg: argb(0, 0, 0), font_size: 16, font_family: "sans-serif", resolved_font_identity: "", resolved_font_advances: [], resolved_font_width: 0, resolved_font_line_height: 0, line_height_px: 0, width_px: 0, height_px: 0, border_box: false, min_width_px: 0, max_width_px: 0, min_height_px: 0, max_height_px: 0, min_height_vh: false, flex_fill: false, flex_grow: 0, flex_shrink: 1, flex_basis_px: 0, order: 0, flex_wrap: "nowrap", justify_content: "flex-start", align_items: "stretch", align_self: "auto", align_content: "stretch", pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, outline_w: 0, outline_color: 0u32, outline_offset_px: 0, box_shadow_x_px: 0, box_shadow_y_px: 0, box_shadow_color: 0u32, box_shadow_blur_px: 0, box_shadow_alpha: 255, box_shadow_raw: "", bg_layers_raw: "", border_radius_px: 0, border_radius_tl_px: 0, border_radius_tr_px: 0, border_radius_br_px: 0, border_radius_bl_px: 0, gap_px: 0, row_gap_px: 0, column_gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, margin_l_auto: false, margin_r_auto: false, margin_t_auto: false, margin_b_auto: false, display: "block", overflow_hidden: false, overflow_auto_y: false, scrollbar_thumb_color: 0u32, scrollbar_track_color: 0u32, text_overflow_ellipsis: false, visibility_hidden: false, content_visibility_hidden: false, will_change: "auto", color_adjust: "economy", forced_color_adjust: "auto", print_color_adjust: "economy", orphans: 2, widows: 2, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: "left", text_align_last: "auto", text_justify: "auto", text_transform: "none", text_indent_px: 0, letter_spacing_px: 0, word_spacing_px: 0, font_size_adjust: "none", font_palette: "normal", font_feature_settings: "normal", font_language_override: "normal", font_variation_settings: "normal", font_variant: "normal", font_variant_alternates: "normal", font_variant_caps: "normal", font_variant_east_asian: "normal", font_variant_emoji: "normal", font_variant_ligatures: "normal", font_variant_numeric: "normal", font_variant_position: "normal", font_style_italic: false, font_kerning: "auto", font_optical_sizing: "auto", font_stretch: "normal", font_width: "normal", font_synthesis: "weight style", font_synthesis_small_caps: "auto", font_synthesis_position: "auto", font_synthesis_style: "auto", font_synthesis_weight: "auto", direction_rtl: false, writing_mode: "horizontal-tb", text_orientation: "mixed", text_combine_upright: "none", text_shadow_x_px: 0, text_shadow_y_px: 0, text_shadow_color: 0u32, text_decoration_color: 0u32, text_decoration_underline: false, text_decoration_style: "solid", text_decoration_thickness_px: 1, text_underline_offset_px: 0, text_underline_position: "auto", white_space_nowrap: false, overflow_wrap: "normal", line_break: "auto", hyphens: "manual", word_break: "normal", cursor: "auto", resize: "none", table_layout: "auto", vertical_align: "baseline", caret_color: 0u32, tab_size: 8, unicode_bidi: "normal", transition_property: "none", transition_duration_ms: 0, transition_delay_ms: 0, transition_timing_function: "ease", animation_name: "none", animation_duration_ms: 0, animation_delay_ms: 0, animation_timing_function: "ease", animation_iteration_count: "1", animation_direction: "normal", animation_fill_mode: "none", animation_play_state: "running", transform_origin: "center center", transform_box: "border-box", transform_style: "flat", image_rendering: "auto", object_fit: "fill", object_position: "50% 50%", bold: false)
@@ -5778,7 +5794,7 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex) -> 
             st = apply_decls(st, "background-color:transparent;background-image:none", em_base)
         if nd.tag == "#text":
             val metric_text = if st.white_space_nowrap: nd.text_data else: nd.text_trimmed
-            val metrics = resolve_font_metrics(st.font_family, metric_text, st.font_size)
+            val metrics = resolve_font_metrics_with_language(st.font_family, metric_text, st.font_size, _html_text_language(nodes, i, st))
             if metrics.valid:
                 st.resolved_font_identity = metrics.identity
                 st.resolved_font_advances = metrics.advances
@@ -9203,6 +9219,24 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
     # real text command instead so the executor rasterizes glyphs (on Metal fast
     # mode this routes to the GPU glyph blit) in the node's foreground color.
     if node.tag == "#text" and node.text_trimmed != "":
+        val metrics = resolve_font_metrics_with_language(st.font_family, node.text_trimmed, st.font_size, _html_text_language(nodes, i, st))
+        if metrics.shaping_required:
+            var shaped = draw_ir_text_shaped_font(
+                _html_draw_ir_component_id(node, i), content_x, content_y, node.text_trimmed, st.fg,
+                metrics.family, metrics.identity, metrics.advances, metrics.width,
+                metrics.line_height, st.font_size, metrics.glyph_run
+            )
+            if shaped.computed_style.len() > 0:
+                var merged: [DrawIrStyleProp] = []
+                for prop in computed_style:
+                    if (prop.key != "font-family" and prop.key != "font-identity" and
+                        prop.key != "font-advance-widths" and prop.key != "font-size" and
+                        prop.key != "line-height" and prop.key != "font-shaping"):
+                        merged.push(prop)
+                for prop in shaped.computed_style:
+                    merged.push(prop)
+                shaped.computed_style = merged
+            return shaped
         return draw_ir_text_styled(
             _html_draw_ir_component_id(node, i),
             content_x,

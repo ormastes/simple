@@ -691,6 +691,16 @@ enum CodegenTarget:
 - [GPU Programming Guide](../guide/apps/gpu.md) - Tutorial and examples
 - [GPU Backend Design](../design/gpu_backend_design.md) - Architecture details
 
+### Shared font atlas programs
+
+`common.gpu.font_atlas_composite` emits the versioned atlas-composite program
+for CUDA, HIP, OpenCL, Metal, and WGSL; Vulkan uses its validated precompiled
+SPIR-V contract. These artifacts and compile plans prove generation only.
+Native font promotion additionally requires the exact `FontRenderBatch`, real
+resource handles, submission/draw, completed fence, device-origin readback, and
+CPU-oracle parity. Engine3D consumes the shared batch through its dedicated
+HUD/world adapters; it is not a GUI/Web/DrawIR shortcut.
+
 ---
 
 ## 3D Rendering Engine (std.gpu.engine3d)

@@ -41,16 +41,21 @@ The production x86_64 entry launches process-owned Browser Demo, Hello World, an
 
 SimpleOS packages the pinned Noto Sans Mono candidate at
 `/assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf` through
-the existing rootfs/initramfs payload contracts. The WM does not own a font
-renderer: its scene carries Draw IR family/identity semantics and the persistent
-Engine2D owns `FontRenderer` materialization. Missing guest file support, an
-identity mismatch, or an unavailable vector runtime retains the fixed bitmap
-fallback.
+the existing rootfs/initramfs payload contracts. Direct and legacy FAT32 images
+also stage the same verified 1,708,408 bytes at the 8.3-compatible
+`/SYS/FONTS/NOTOSANS.TTF`; the guest treats that path only as a byte source and
+still validates the canonical registry identity. Both VFS paths allow the file
+under their 4 MiB read ceiling. The WM does not own a font renderer: its scene
+carries Draw IR family/identity semantics and the persistent Engine2D owns
+`FontRenderer` materialization. Missing guest file support, an identity mismatch,
+or an unavailable vector runtime retains the fixed bitmap fallback.
 
-Packaging alone is not a font-rendering PASS. The `Capture SimpleOS pinned-font
-pixels` scenario must record the candidate hash, guest path, WM Draw IR identity,
-and literal nonblank framebuffer region produced inside QEMU. Host rendering,
-serial-only markers, or repository file presence are blockers, not substitutes.
+Packaging alone is not a font-rendering PASS. The guest paints the fixed `A` at
+32 px and emits its font marker only after hashing live MMIO. The `Capture
+SimpleOS pinned-font pixels` scenario must record the candidate path/hash, WM
+Draw IR identity, guest marker, and independently hashed dynamic-scanout QEMU
+`pmemsave` crop. Host rendering, serial-only markers, or repository file
+presence are blockers, not substitutes.
 
 ## Scenario Manuals
 

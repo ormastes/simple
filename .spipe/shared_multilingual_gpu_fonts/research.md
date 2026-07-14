@@ -56,6 +56,18 @@ Engine3D -> DeviceEvidence
 
 `font_local_reuse`, `font_license_coverage`, and `font_gpu_emission` were accepted after primary review against repository paths and authoritative sources.
 
+## Current Implementation Addendum — 2026-07-13
+
+The summary above records the pre-selection baseline. Current source bundles
+the selected 16 candidates, owns the exact 10×10 sparse matrix, emits the shared
+versioned font-atlas program, and routes canonical `FontRenderBatch` material
+through Engine2D CUDA/Metal/OpenCL/Vulkan adapters and the optional Vulkan
+Engine3D adapter. Web semantic/layout, GUI, shared WM, and the SimpleOS desktop
+witness lower through Draw IR/Engine2D. The legacy SimpleOS WM still paints
+direct bitmap/vector text pending a frame-level Draw IR migration. Device
+execution, retained SimpleOS pixels, performance, and
+canonical docgen are still required before promotion.
+
 ## Phase
 
-research-done-selection-required
+research-done-selection-complete

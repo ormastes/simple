@@ -207,12 +207,68 @@ pub extern "C" fn rt_vulkan_bind_texture(_cmd: i64, _slot: i64, image_handle: i6
     }
     // Full texture binding requires pipeline-specific descriptor set layout.
     // Will be completed once shader reflection (compile_spirv -> extract layouts) is done.
-    1
+    0
 }
 
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_bind_texture(_cmd: i64, _slot: i64, _image: i64, _sampler: i64) -> i64 {
+    0
+}
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_bind_font_texture(cmd: i64, pipeline: i64, image: i64, sampler: i64) -> i64 {
+    let state = STATE.lock();
+    let device = match state.require_device() {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+    let resources = match state.font_graphics_resources.get(&pipeline) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let graphics_pipeline = match state.graphics_pipelines.get(&pipeline) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let image = match state.images.get(&image) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let sampler = match state.samplers.get(&sampler) {
+        Some(v) => v,
+        None => return 0,
+    };
+    if resources
+        .set
+        .update_image_sampler(
+            0,
+            image.view(),
+            sampler.handle(),
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        )
+        .is_err()
+    {
+        return 0;
+    }
+    let sets = [resources.set.handle()];
+    unsafe {
+        device.handle().cmd_bind_descriptor_sets(
+            vk::CommandBuffer::from_raw(cmd as u64),
+            vk::PipelineBindPoint::GRAPHICS,
+            graphics_pipeline.layout(),
+            0,
+            &sets,
+            &[],
+        );
+    }
+    1
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_bind_font_texture(_cmd: i64, _pipeline: i64, _image: i64, _sampler: i64) -> i64 {
     0
 }
 

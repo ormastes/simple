@@ -4,7 +4,8 @@ use std.nogc_sync_mut.engine.render.vulkan_commands.{
     vk_cmd3d_begin_render_pass, vk_cmd3d_set_pipeline,
     vk_cmd3d_bind_vertex_buffer, vk_cmd3d_bind_index_buffer,
     vk_cmd3d_bind_texture, vk_cmd3d_bind_uniform_buffer,
-    vk_cmd3d_draw_indexed, vk_cmd3d_end_render_pass
+    vk_cmd3d_bind_font_texture, vk_cmd3d_draw_indexed, vk_cmd3d_draw,
+    vk_cmd3d_end_render_pass
 }
 use std.nogc_sync_mut.engine.render.vulkan_backend3d.{VulkanRenderBackend3D}
 use std.nogc_sync_mut.engine.render.backend3d.{
@@ -34,8 +35,14 @@ fn make_bind_texture_cmd() -> VulkanCommand3D:
 fn make_bind_uniform_buffer_cmd() -> VulkanCommand3D:
     vk_cmd3d_bind_uniform_buffer(4, 0)
 
+fn make_bind_font_texture_cmd() -> VulkanCommand3D:
+    vk_cmd3d_bind_font_texture(5, 3, 7)
+
 fn make_draw_indexed_cmd() -> VulkanCommand3D:
     vk_cmd3d_draw_indexed(36, 0)
+
+fn make_draw_cmd() -> VulkanCommand3D:
+    vk_cmd3d_draw(6)
 
 fn make_end_render_pass_cmd() -> VulkanCommand3D:
     vk_cmd3d_end_render_pass()
@@ -46,7 +53,7 @@ fn make_pipeline_desc() -> PipelineDesc3D:
         fragment_shader_spirv: [],
         vertex_shader_wgsl: "",
         fragment_shader_wgsl: "",
-        vertex_stride: 96,
+        vertex_stride: 32,
         cull_back_faces: true,
         depth_write: true,
         depth_test: true
@@ -126,6 +133,12 @@ describe "Stream B: VulkanCommand3D kind-tag construction":
             val ok = cmd.buffer_id == 4 and cmd.slot == 0
             expect(ok).to_equal(true)
 
+    describe "BindFontTexture":
+        it "records the dedicated pipeline, atlas, and reusable sampler handles":
+            val cmd = make_bind_font_texture_cmd()
+            val ok = cmd.kind == VulkanCommand3DKind.BindFontTexture and cmd.pipeline_id == 5 and cmd.image_id == 3 and cmd.buffer_id == 7
+            expect(ok).to_equal(true)
+
     describe "DrawIndexed":
         it "AC-1: kind is DrawIndexed":
             val cmd = make_draw_indexed_cmd()
@@ -135,6 +148,12 @@ describe "Stream B: VulkanCommand3D kind-tag construction":
         it "AC-1: stores index_count and base_vertex":
             val cmd = make_draw_indexed_cmd()
             val ok = cmd.index_count == 36 and cmd.base_vertex == 0
+            expect(ok).to_equal(true)
+
+    describe "Draw":
+        it "records the six non-indexed vertices of one font quad":
+            val cmd = make_draw_cmd()
+            val ok = cmd.kind == VulkanCommand3DKind.Draw and cmd.index_count == 6
             expect(ok).to_equal(true)
 
     describe "EndRenderPass":
@@ -153,6 +172,25 @@ describe "Stream B: VulkanRenderBackend3D command recording":
             expect(desc.blend_mode).to_equal(1)
 
     describe "native device evidence":
+
+        it "resolves native pipeline and texture handles by logical identity":
+            var backend = VulkanRenderBackend3D.create()
+            backend.pipeline_ids = [11, 22]
+            backend.pipeline_native = [101, 202]
+            backend.texture_ids = [33, 44]
+            backend.texture_native = [303, 404]
+            expect(backend.pipeline_native_handle(PipelineHandle(id: 22))).to_equal(202)
+            expect(backend.pipeline_native_handle(PipelineHandle(id: 99))).to_equal(0)
+            expect(backend.texture_native_handle(TextureHandle(id: 33))).to_equal(303)
+            expect(backend.texture_native_handle(TextureHandle(id: 99))).to_equal(0)
+
+        it "clears prior-frame color and readback provenance at frame start":
+            var backend = VulkanRenderBackend3D.create()
+            backend.last_color_image = 7
+            backend.last_readback_image = 7
+            backend.begin_frame()
+            expect(backend.last_color_image).to_equal(0)
+            expect(backend.last_readback_image).to_equal(0)
 
         it "reuses one framebuffer for repeated passes on the same color target":
             var backend = VulkanRenderBackend3D.create()
@@ -183,6 +221,9 @@ describe "Stream B: VulkanRenderBackend3D command recording":
                 expect(evidence.status).to_equal("unavailable")
                 expect(evidence.reason.len()).to_be_greater_than(0)
             expect(evidence.texture_binding_ready).to_equal(false)
+            expect(evidence.submitted_command_handle).to_equal(0)
+            expect(evidence.color_image_handle).to_equal(0)
+            expect(evidence.readback_source).to_equal("unavailable")
             if initialized:
                 backend.shutdown()
 
@@ -196,6 +237,9 @@ describe "Stream B: VulkanRenderBackend3D command recording":
                 backend.end_frame()
             val evidence = backend.device_evidence()
             expect(evidence.command_handle).to_equal(0)
+            expect(evidence.submitted_command_handle).to_equal(0)
+            expect(evidence.color_image_handle).to_equal(0)
+            expect(evidence.readback_source).to_equal("unavailable")
             expect(evidence.status).to_equal("unavailable")
             expect(evidence.texture_binding_ready).to_equal(false)
             if initialized:
@@ -238,6 +282,17 @@ describe "Stream B: VulkanRenderBackend3D command recording":
             val desc = make_pipeline_desc()
             val pip = backend.create_pipeline(desc)
             expect(pip.id).to_be_greater_than(-1)
+
+    describe "dedicated font pipeline recording":
+        it "keeps sampled-font binding separate from the fail-closed generic texture path":
+            var backend = VulkanRenderBackend3D.create()
+            val pipeline = backend.create_font_pipeline([], [])
+            val atlas = backend.create_texture(4, 2, TextureFormat3D.R8Unorm)
+            val rph = RenderPassHandle.invalid()
+            backend.bind_font_texture(rph, pipeline, atlas)
+            backend.draw_font_vertices(rph, 6)
+            val ok = backend.cmds.len() == 2 and backend.cmds[0].kind == VulkanCommand3DKind.BindFontTexture and backend.cmds[1].kind == VulkanCommand3DKind.Draw
+            expect(ok).to_equal(true)
 
     describe "frame + render pass recording sequence":
         it "AC-1: begin_frame does not crash":

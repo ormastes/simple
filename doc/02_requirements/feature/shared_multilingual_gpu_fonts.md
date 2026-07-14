@@ -60,7 +60,10 @@ Status: selected on 2026-07-11 (`L2+C1+S1+F1+R1+P1+G1`)
   diagnostics are required. Emission/compilation is not execution evidence.
 - **REQ-011 Engine2D:** Preserve `Engine2D.load_font`/`draw_text` behavior through
   the shared owner and atlas material; retain compatibility adapters until
-  parity and reference-removal gates pass.
+  parity and reference-removal gates pass. Web semantic/layout (the current
+  WebIR), GUI widget/scene, WM, and SimpleOS producers must preserve the selected
+  font identity and ordered advances through `DrawIrComposition` and lower text
+  only through Engine2D; no producer-private renderer or atlas is allowed.
 - **REQ-012 Engine3D:** Add the minimum HUD/world text entrypoints after the
   facade selects a real backend. Prove texture creation/upload/bind, sampler and
   pipeline handles, transform/depth behavior, draw/submit, fence, device-origin
@@ -73,6 +76,18 @@ Status: selected on 2026-07-11 (`L2+C1+S1+F1+R1+P1+G1`)
   and native readback. Update affected font/UI/2D/3D guides, notices, and the
   font-specific SPipe evidence recipe. No stubs or fabricated environment-only
   device proof are allowed.
+- **REQ-015 Runtime configuration:** Expose one shared font configuration for
+  family/category/language/script, size, weight/style, hinting, antialiasing,
+  atlas policy, execution target, and `suggested`/`preferred`/`required`
+  execution policy. The configuration identity participates in glyph, run, and
+  atlas cache keys. `suggested` tries the named target first, then the remaining
+  canonical GPU order, then CPU; `preferred` tries the named target then CPU;
+  and `required` tries the named target only, failing without another GPU or CPU
+  attempt. `auto` is valid only with `suggested`, where it means the executable
+  font-adapter order followed by CPU; `preferred` and `required` require a
+  concrete supported target. Unknown targets, unsupported rendering modes, and
+  transforms fail
+  before cache or backend mutation.
 
 ## Exclusions
 

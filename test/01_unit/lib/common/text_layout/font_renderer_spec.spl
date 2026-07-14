@@ -3,18 +3,19 @@ use common.text_layout.font_renderer.{
     browser_chrome_compatible_normal_font_name,
     browser_chrome_compatible_normal_font_path,
     browser_chrome_compatible_vector_font_name,
-    CachedGlyph, GlyphCache, FontRenderer, ResolvedFontMetrics, resolve_font_metrics,
+    CachedGlyph, GlyphCache, FontRenderer, FontRenderBatch, ResolvedFontMetrics, resolve_font_metrics, resolve_font_metrics_with_language,
     browser_font_download_script_path, browser_font_face_source_urls,
     browser_font_face_family_value, browser_font_face_source_from_family_value,
     browser_font_cache_dir, browser_font_face_cached_source_path, ensure_browser_font_face_sources,
     browser_font_candidates_for_family, browser_mono_font_candidates,
     browser_provided_font_paths, browser_sans_font_candidates,
     browser_serif_font_candidates,
-    _font_atlas_dependency_generation_after,
+    _font_atlas_dependency_generation_after, _resolved_font_metric_key, _resolved_font_metrics_cacheable,
     ensure_browser_provided_fonts}
 use common.text_layout.font_provider.{browser_bundled_font_path_for_family}
 use std.common.encoding.font_registry.{selected_font_asset_candidates}
-use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_atlas_composite_program_version_valid}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_atlas_composite_program_version_valid, font_atlas_subrect_pixels}
+use std.common.crypto.sha256.{sha256_u8_hex}
 use common.text_layout.font_rasterizer.{reset_vector_font_raster_stats, vector_font_accelerator_stats}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 
@@ -40,6 +41,15 @@ fn _count_nonzero_alpha(pixels: [u8]) -> i32:
             count = count + 1
     count
 
+fn _black_composite_rgb_bytes(pixels: [u32]) -> [u8]:
+    var rgb: [u8] = []
+    for pixel in pixels:
+        val alpha = ((pixel >> 24) & 0xFF).to_u8()
+        rgb.push(alpha)
+        rgb.push(alpha)
+        rgb.push(alpha)
+    rgb
+
 describe "SFFI font liveness":
     it "rejects nil or stale rasterizers through is_current":
         val source = rt_file_read_text("src/lib/nogc_sync_mut/text_layout/font_renderer.spl")
@@ -55,6 +65,10 @@ describe "SFFI font liveness":
         expect(batch.quads.len()).to_equal(1)
         expect(batch.quads[0].width).to_equal(18)
         expect(batch.quads[0].height).to_equal(23)
+        val quad = batch.quads[0]
+        val pixels = font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width,
+            batch.atlas_height, quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color)
+        expect(sha256_u8_hex(_black_composite_rgb_bytes(pixels))).to_equal("65f5480aa1d19b4496b2f9f45ab0e7a8a0ec9e02c9a9d674879ececa138ff73c")
         renderer.clear_ttf()
 
 describe "font atlas composite program version":
@@ -84,10 +98,65 @@ describe "font atlas dependency generation":
         expect(dirty.atlas_generation).to_be_greater_than(warm.atlas_generation)
         expect(dirty.dirty_rects.len()).to_be_greater_than(0)
 
+    it "keys raster material by canonical font size while preserving warm reuse":
+        var renderer = FontRenderer.new()
+        val small = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
+        val small_warm = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
+        val large = renderer.prepare_text("A", 0xFFFFFFFFu32, 32)
+        val large_warm = renderer.prepare_text("A", 0xFFFFFFFFu32, 32)
+        expect(small_warm.atlas_generation).to_equal(small.atlas_generation)
+        expect(small_warm.dirty_rects.len()).to_equal(0)
+        expect(large.atlas_generation).to_be_greater_than(small.atlas_generation)
+        expect(large.dirty_rects.len()).to_be_greater_than(0)
+        expect(large.quads[0].height).to_be_greater_than(small.quads[0].height)
+        expect(large_warm.atlas_generation).to_equal(large.atlas_generation)
+        expect(large_warm.dirty_rects.len()).to_equal(0)
+
     it "returns zero instead of wrapping an exhausted token":
         expect(_font_atlas_dependency_generation_after(-1)).to_equal(0)
         expect(_font_atlas_dependency_generation_after(9223372036854775806)).to_equal(9223372036854775807)
         expect(_font_atlas_dependency_generation_after(9223372036854775807)).to_equal(0)
+
+    it "keys atlas ownership by font face program dimensions and dependency generation":
+        val base = FontRenderBatch(program_version: 1, font_identity: "sha256=a;axes=wght=400", face_generation: 3,
+            valid: true, atlas_width: 8, atlas_height: 4, atlas_pixels: [], quads: [], atlas_generation: 7, dirty_rects: [])
+        val same = FontRenderBatch(program_version: 1, font_identity: "sha256=a;axes=wght=400", face_generation: 3,
+            valid: true, atlas_width: 8, atlas_height: 4, atlas_pixels: [], quads: [], atlas_generation: 7, dirty_rects: [])
+        val changed_face = FontRenderBatch(program_version: 1, font_identity: "sha256=b;axes=wght=400", face_generation: 3,
+            valid: true, atlas_width: 8, atlas_height: 4, atlas_pixels: [], quads: [], atlas_generation: 7, dirty_rects: [])
+        val changed_face_generation = FontRenderBatch(program_version: 1, font_identity: "sha256=a;axes=wght=400", face_generation: 4,
+            valid: true, atlas_width: 8, atlas_height: 4, atlas_pixels: [], quads: [], atlas_generation: 7, dirty_rects: [])
+        val changed_generation = FontRenderBatch(program_version: 1, font_identity: "sha256=a;axes=wght=400", face_generation: 3,
+            valid: true, atlas_width: 8, atlas_height: 4, atlas_pixels: [], quads: [], atlas_generation: 8, dirty_rects: [])
+        val changed_program = FontRenderBatch(program_version: 2, font_identity: "sha256=a;axes=wght=400", face_generation: 3,
+            valid: true, atlas_width: 8, atlas_height: 4, atlas_pixels: [], quads: [], atlas_generation: 7, dirty_rects: [])
+        val changed_dimensions = FontRenderBatch(program_version: 1, font_identity: "sha256=a;axes=wght=400", face_generation: 3,
+            valid: true, atlas_width: 9, atlas_height: 4, atlas_pixels: [], quads: [], atlas_generation: 7, dirty_rects: [])
+        val changed_config = FontRenderBatch(program_version: 1, font_identity: "sha256=a;axes=wght=400", face_generation: 3,
+            valid: true, atlas_width: 8, atlas_height: 4, atlas_pixels: [], quads: [], atlas_generation: 7, dirty_rects: [],
+            render_config_identity: "coverage8;hint=light;subpixel=none")
+        val changed_transform = FontRenderBatch(program_version: 1, font_identity: "sha256=a;axes=wght=400", face_generation: 3,
+            valid: true, atlas_width: 8, atlas_height: 4, atlas_pixels: [], quads: [], atlas_generation: 7, dirty_rects: [],
+            transform_identity: "nonuniform-scale")
+        expect(base.atlas_owner_identity()).to_equal(same.atlas_owner_identity())
+        expect(base.atlas_cache_identity()).to_equal(same.atlas_cache_identity())
+        expect(base.atlas_owner_identity() == changed_face.atlas_owner_identity()).to_be(false)
+        expect_not(base.atlas_owner_identity() == changed_face_generation.atlas_owner_identity())
+        expect(base.atlas_owner_identity() == changed_program.atlas_owner_identity()).to_be(false)
+        expect_not(base.atlas_owner_identity() == changed_config.atlas_owner_identity())
+        expect_not(base.atlas_owner_identity() == changed_transform.atlas_owner_identity())
+        expect(base.atlas_owner_identity() == changed_dimensions.atlas_owner_identity()).to_be(false)
+        expect(base.atlas_owner_identity()).to_equal(changed_generation.atlas_owner_identity())
+        expect(base.atlas_cache_identity() == changed_generation.atlas_cache_identity()).to_be(false)
+
+    it "includes live font identity in resolved metric keys":
+        val first = _resolved_font_metric_key(" Noto Sans ", "AB", 16, "sha256=a;axes=wght=400")
+        expect(first).to_equal(_resolved_font_metric_key("noto sans", "AB", 16, "sha256=a;axes=wght=400"))
+        expect(first == _resolved_font_metric_key("noto sans", "AB", 16, "sha256=b;axes=wght=400")).to_be(false)
+        expect(first == _resolved_font_metric_key("noto sans", "AB", 16, "sha256=a;axes=wght=700")).to_be(false)
+        expect(_resolved_font_metrics_cacheable("font", "A" * 4096)).to_be(true)
+        expect(_resolved_font_metrics_cacheable("font", "A" * 4097)).to_be(false)
+        expect(_resolved_font_metrics_cacheable("F" * 1025, "A")).to_be(false)
 
 fn _count_full_alpha(pixels: [u8]) -> i32:
     var count = 0
@@ -244,6 +313,35 @@ describe "shared font renderer fallbacks":
         expect(warm.quads[1].dst_x).to_equal(cold.quads[1].dst_x)
         expect(warm.quads[0].color).to_equal(0xFFCC8844u32)
 
+    it "applies Draw IR resolved advances without moving atlas ownership":
+        var renderer = FontRenderer.browser_serif_default()
+        val natural = renderer.prepare_text("AB", 0xFFFFFFFFu32, 16)
+        val advances = renderer.measure_text_advances("AB", 16)
+        val resolved = renderer.prepare_text_with_advances("AB", [advances[0] + 10, advances[1]], 0xFFFFFFFFu32, 16)
+
+        expect(resolved.valid).to_be(true)
+        expect(resolved.quads.len()).to_equal(2)
+        expect(resolved.quads[0].dst_x).to_equal(natural.quads[0].dst_x)
+        expect(resolved.quads[1].dst_x).to_equal(natural.quads[1].dst_x + 10)
+        expect(resolved.quads[0].atlas_x).to_equal(natural.quads[0].atlas_x)
+        expect(resolved.quads[1].atlas_x).to_equal(natural.quads[1].atlas_x)
+        expect(resolved.atlas_cache_identity()).to_equal(natural.atlas_cache_identity())
+
+    it "maps multibyte Draw IR advances by UTF-8 byte offset":
+        var renderer = FontRenderer.browser_serif_default()
+        val natural = renderer.prepare_text("AéB", 0xFFFFFFFFu32, 16)
+        val advances = renderer.measure_text_advances("AéB", 16)
+        val resolved = renderer.prepare_text_with_advances("AéB", [advances[0], advances[1] + 9, advances[2]], 0xFFFFFFFFu32, 16)
+
+        expect(resolved.valid).to_be(true)
+        expect(resolved.quads.len()).to_equal(3)
+        expect(resolved.quads[0].byte_offset).to_equal(0)
+        expect(resolved.quads[1].byte_offset).to_equal(1)
+        expect(resolved.quads[2].byte_offset).to_equal(3)
+        expect(resolved.quads[0].dst_x).to_equal(natural.quads[0].dst_x)
+        expect(resolved.quads[1].dst_x).to_equal(natural.quads[1].dst_x)
+        expect(resolved.quads[2].dst_x).to_equal(natural.quads[2].dst_x + 9)
+
     it "resets and repacks the atlas when the face generation changes":
         var renderer = FontRenderer.browser_serif_default()
         val first = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
@@ -314,6 +412,61 @@ describe "shared font renderer fallbacks":
         val mono_renderer = FontRenderer.browser_default_for_family("monospace")
         expect(mono_renderer.use_vector).to_equal(true)
         expect(mono_renderer.use_bitmap).to_equal(true)
+
+    it "resolves accepted Arabic through a handle-free shaped cluster payload":
+        val metrics = resolve_font_metrics_with_language("sans-serif", "العربية", 32, "ar")
+        expect(metrics.valid).to_equal(true)
+        expect(metrics.family).to_equal("Noto Sans Arabic")
+        expect(metrics.shaping_required).to_equal(true)
+        expect(metrics.glyph_run.valid).to_equal(true)
+        expect(metrics.glyph_run.glyph_ids.len()).to_be_greater_than(0)
+        expect(metrics.glyph_run.glyph_ids.len()).to_equal(metrics.glyph_run.clusters.len())
+        for cluster in metrics.glyph_run.clusters:
+            expect(cluster).to_be_greater_than(-1)
+            expect(cluster).to_be_less_than(metrics.advances.len())
+
+        var renderer = FontRenderer.browser_default_for_family(metrics.family)
+        val rasterizer = renderer.ttf_rasterizer
+        expect(rasterizer != nil).to_equal(true)
+        if rasterizer != nil:
+            val bitmap = rasterizer.rasterize_glyph_index(metrics.glyph_run.glyph_ids[0].to_i64(), 32)
+            expect(bitmap != nil).to_equal(true)
+            val batch = renderer.prepare_selected_glyph_run(metrics.glyph_run, 0xFFFFFFFFu32, 32)
+            expect(batch.valid).to_equal(true)
+            if bitmap != nil:
+                val glyph = bitmap.?
+                val ascent = renderer.horizontal_line_metric(32, 0)
+                expect(glyph.bearing_x != 0 or glyph.bearing_y != 0).to_equal(true)
+                expect(batch.quads[0].dst_x).to_equal(metrics.glyph_run.xs[0] + glyph.bearing_x.to_i32())
+                expect(batch.quads[0].dst_y).to_equal(ascent + metrics.glyph_run.ys[0] - glyph.bearing_y.to_i32() - glyph.height.to_i32())
+                val quad = batch.quads[0]
+                val pixels = font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width,
+                    batch.atlas_height, quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color)
+                expect(pixels.len()).to_equal(glyph.pixels.len())
+                var pixel_index: i64 = 0
+                while pixel_index < pixels.len():
+                    expect((pixels[pixel_index] >> 24) & 0xFFu32).to_equal(glyph.pixels[pixel_index].to_u32())
+                    pixel_index = pixel_index + 1
+        renderer.clear_ttf()
+
+        val unspecified = resolve_font_metrics("sans-serif", "العربية", 32)
+        expect(unspecified.shaping_required).to_equal(true)
+        expect(unspecified.glyph_run.valid).to_equal(false)
+
+    it "selects accepted language faces and the declared Chinese mono fallback":
+        val chinese = resolve_font_metrics_with_language("monospace", "中文", 32, "zh")
+        expect(chinese.valid).to_equal(true)
+        expect(chinese.family).to_equal("Noto Sans SC")
+
+        val hindi = resolve_font_metrics_with_language("sans-serif", "हिन्दी", 32, "hi")
+        expect(hindi.valid).to_equal(true)
+        expect(hindi.family).to_equal("Noto Sans Devanagari")
+        expect(hindi.glyph_run.valid).to_equal(true)
+
+        val urdu = resolve_font_metrics_with_language("sans-serif", "اردو", 32, "ur")
+        expect(urdu.valid).to_equal(true)
+        expect(urdu.family).to_equal("Noto Sans Arabic")
+        expect(urdu.glyph_run.valid).to_equal(true)
 
     it "exposes an opt-in browser default font materialization surface":
         val provided = browser_provided_font_paths()

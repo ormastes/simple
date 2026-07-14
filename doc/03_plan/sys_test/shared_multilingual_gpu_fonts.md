@@ -3,13 +3,15 @@
 
 ## Scope
 
-Four draft SSpec files cover manifest/assets, exact-face shaping, shared 2D/3D
-batch, and portable emission. A fifth native graphics readback scenario remains
-planned and does not exist yet. Unit/integration suites for the
+Six SSpec files cover manifest/assets, exact-face shaping, shared 2D/3D batch,
+legacy Web/GUI/WM routing, portable emission, and native graphics readback. The
+first five exercise host-available contracts; the sixth is a fail-closed
+promotion gate whose three live evidence rows remain unavailable.
+Unit/integration suites for the
 existing shaper, Engine2D, Engine3D texture path, emitter, and backend readback
 remain supporting evidence; they do not replace these end-to-end scenarios.
 The focused Vulkan integration/manual pair exercises the frozen native-proof
-step for Engine2D only; the fifth Engine3D system scenario remains pending.
+step for Engine2D only; it does not satisfy the Engine3D promotion gate.
 
 Planned executable/manual pairs:
 
@@ -18,6 +20,7 @@ Planned executable/manual pairs:
 | `test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/shared_font_manifest_spec.md` |
 | `test/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.md` |
 | `test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/shared_font_surfaces_spec.md` |
+| `test/03_system/app/simple_2d/feature/legacy_web_gui_wm_font_route_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/legacy_web_gui_wm_font_route_spec.md` |
 | `test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/gpu_font_emission_spec.md` |
 | `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.md` |
 
@@ -69,6 +72,12 @@ Shared helpers are `setup_shared_font_fixture`, `setup_selected_shaping_face`,
 assert their named oracle; any pending helper fails explicitly. New assertions
 use built-in matchers only.
 
+REQ-015 reuses `step("Prepare one shared font batch for 2D and 3D")` and
+`expect_shared_font_batch`. The checker exercises
+`prepare_text_configured`, `prepare_text_with_advances_configured`,
+`prepare_glyph_run_configured`, and `prepare_selected_glyph_run_configured`
+with the one `FontRenderConfig`; no parallel step/helper vocabulary is added.
+
 ## Requirement traceability
 
 Each listed case count is a minimum and includes happy, boundary, and failure
@@ -82,14 +91,15 @@ behavior.
 | REQ-004 | `shared_font_manifest_spec.spl` | complete license metadata; checksum/table validation; missing field rejection | 3 |
 | REQ-005 | `shared_font_manifest_spec.spl` | pinned catalog revision; unchanged accepted bytes; corpus rejection | 3 |
 | REQ-006 | `shared_font_surfaces_spec.spl` | one owner; identical batch identity; no duplicate material cache | 3 |
-| REQ-007 | `shared_font_shaping_acceptance_spec.spl` plus focused unit oracle | exact-face simple-script oracle; pinned Arabic/Urdu letters and exact Hindi `dev2` witness; other complex-script cases fail closed | 2/3 |
-| REQ-008 | `shared_font_manifest_spec.spl` plus focused sfnt/bitmap unit specs | compound/default-glyf corpus reconstruction; unsupported-format/axis rejection; literal default-variable + bitmap fixtures | 2/3 source; literal variable oracle/execution blocked |
-| REQ-009 | `shared_font_surfaces_spec.spl` | key separation; bounded eviction/counters; generation/dirty regions | 3 |
-| REQ-010 | `gpu_font_emission_spec.spl` | five source targets; Vulkan contract; deterministic failures/hashes | 3 |
-| REQ-011 | `shared_font_surfaces_spec.spl` | Engine2D API compatibility; DrawIR/batch evidence; CPU parity | 3 |
-| REQ-012 | pending native-readback spec | HUD transform; world depth/transform; texture-to-readback chain | 0/3 |
-| REQ-013 | pending native-readback spec | promoted backend pass; unavailable classification; fake proof rejection | 0/3 |
-| REQ-014 | three present specs plus pending native-readback spec | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 2/3 |
+| REQ-007 | `shared_font_shaping_acceptance_spec.spl` plus focused unit oracle | exact-face simple-script oracle; exact Hindi `dev2`; bounded Arabic/Urdu vectors; exact monochrome single-`U+1F600` candidate material with sequence rejection | 3/3 accepted source/prior oracle; emoji gate source-complete but unpromoted and unexecuted |
+| REQ-008 | `shared_font_manifest_spec.spl` plus focused sfnt/bitmap unit specs | compound/default-glyf corpus reconstruction; unsupported-format/axis rejection; literal default-variable + bitmap fixtures | 3/3 source; refreshed literal variable oracle execution blocked |
+| REQ-009 | `font_renderer_spec.spl`, backend font unit specs, and `shared_font_surfaces_spec.spl` | live font-identity separation; bounded glyph-cache counters; backend-local atlas owner + generation; unit-proven canonical font-size scale; immutable active-session guard; warm/dirty regions | 2/3 source; rotation/skew/subpixel/nonuniform CTM stay unsupported and native execution remains pending; exact Vulkan artifact reuse is source-complete |
+| REQ-010 | `gpu_font_emission_spec.spl` plus portable toolchain checker | five source targets; Vulkan contract; deterministic failures/hashes; native artifact exports the versioned font entry | source-complete; emitter execution/runtime provenance pending |
+| REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl` | Engine2D API compatibility; DrawIR/batch evidence; legacy Web/GUI/WM CPU parity | 4 |
+| REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 0/3; fail-closed gate present |
+| REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 0/3; pending gate fails explicitly |
+| REQ-014 | six present specs/manuals | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 2/3; native docgen pending |
+| REQ-015 | `font_renderer_spec.spl`, `shared_font_surfaces_spec.spl`, and focused Engine2D/Engine3D font specs | validation and length-delimited identity; bitmap/vector/shaped propagation; Suggested/Preferred/Required behavior; unsupported mode/CTM rejects before cache/backend mutation; legacy default equivalence | 0/5; contract frozen, runtime implementation pending |
 
 | NFR | Evidence | Pass condition |
 |---|---|---|
@@ -101,6 +111,24 @@ behavior.
 | NFR-006 | upload/resource/RSS counters | no unchanged full upload; RSS `<=10%`; GPU `<=128 MiB` |
 | NFR-007 | corrupt/device-loss scenarios | stable active identity and unchanged CPU-fixture p95 |
 | NFR-008 | native evidence record | every required stage/handle/hash/fence/readback field is present |
+
+NFR-004/005/006 use one durable contract at
+`build/shared_multilingual_gpu_fonts_perf/evidence.env`. The performance SSpec
+alone measures and overwrites it; the system promotion SSpec only loads it.
+Schema/fixture/font/source hashes, device/driver, every scalar, and four exact
+11-sample arrays are required for a passing record. Parsing is ordered and
+fail-closed, so unknown, duplicate, missing, malformed, stale, or recomputed-p95
+mismatches cannot promote.
+
+The collector at
+`test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl` shapes
+the exact ten witnesses through the pinned Noto Sans SC, Noto Sans Devanagari,
+and Noto Sans Arabic faces, combines the resulting runs in one shared atlas,
+and measures equal 1,024/4,096-glyph CPU and Vulkan work. Its isolated probe at
+`src/app/test/shared_multilingual_gpu_fonts_rss_probe.spl` records paired
+legacy/multiface RSS for both 2D and 3D. `.notdef`/tofu quads and unavailable
+probe rows remain non-evidence; NFR-004/005/006 stay pending until this exact
+collector produces a passing durable record.
 
 ## Oracles and evidence
 
@@ -144,7 +172,7 @@ operator flow without opening source and docgen must report zero stubs.
 
 ## Pass/fail
 
-Pass requires every REQ/NFR row above, five zero-stub manuals, one real promoted
+Pass requires every REQ/NFR row above, six zero-stub manuals, one real promoted
 graphics backend for both 2D and 3D, and all selected thresholds. Missing
 hardware is not a failure for non-promoted rows, but no promoted native row is a
 release failure. Placeholder assertions, environment-only payloads, mirrors, or

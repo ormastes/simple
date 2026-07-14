@@ -46,6 +46,7 @@ use os.kernel.memory.vmm.{vmm_activate, vmm_bootstrap_pd_entry0, vmm_bootstrap_p
 use os.kernel.boot.mmio.{mmio_disable_test_mode}
 use os.kernel.arch.x86_64.host_gpu_ivshmem_vmm.{map_qemu_host_gpu_ivshmem_bar2_active_vmm}
 use common.gpu.simpleos_host_gpu_protocol.{SIMPLEOS_HOST_GPU_ISA_X86_64, SIMPLEOS_HOST_GPU_BACKEND_VULKAN}
+use std.common.crypto.sha256.{sha256_u8_hex}
 
 @export("C", name: "rt_file_exists")
 fn rt_file_exists(path: text) -> bool:
@@ -95,6 +96,20 @@ fn _vram_mapping_probe(fb_addr: i64, pml4_phys: i64):
 
 fn unsafe_cast_probe_color() -> i32:
     2054847231  # 0x7A7B7C7F: distinctive non-black test pattern
+
+fn _font_witness_region_rgb_sha256(fb: FramebufferDriver) -> text:
+    var rgb: [u8] = []
+    var y: u32 = 64
+    while y < 87:
+        var x: u32 = 64
+        while x < 82:
+            val pixel = fb.read_pixel(x, y)
+            rgb.push(((pixel >> 16) & 0xFF).to_u8())
+            rgb.push(((pixel >> 8) & 0xFF).to_u8())
+            rgb.push((pixel & 0xFF).to_u8())
+            x = x + 1
+        y = y + 1
+    sha256_u8_hex(rgb)
 
 var g_vfs_mounted = false
 
@@ -289,8 +304,14 @@ fn spl_start():
     serial_println("[desktop-gui] mouse ready")
 
     val font_path = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
-    val font_bytes = g_vfs_read_file_bytes("/" + font_path)
-    if engine.load_font_bytes(font_path, font_bytes):
+    # load_font_bytes routes through the selected-asset registry validator,
+    # including exact byte length, SHA-256, sfnt tables, names, and axes.
+    var font_loaded = engine.load_font_bytes(font_path, g_vfs_read_file_bytes("/" + font_path))
+    if not font_loaded:
+        # The direct FAT32 builder uses an 8.3 alias. Retry it when the
+        # canonical file is missing or invalid, while retaining canonical identity.
+        font_loaded = engine.load_font_bytes(font_path, g_vfs_read_file_bytes("/SYS/FONTS/NOTOSANS.TTF"))
+    if font_loaded:
         serial_println("[desktop-gui] font identity=sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100 raster=pure-sfnt-glyf")
     else:
         serial_println("[desktop-gui] font unavailable fallback=bitmap")
@@ -353,6 +374,15 @@ fn spl_start():
         serial_println("[production-readiness-failed] reason=simple2d-or-simple-web-frame-invalid")
         port_outb(0xF4, 1)
         return
+    if font_loaded:
+        engine.draw_rect_filled(64, 64, 18, 23, 0xFF000000u32)
+        engine.draw_text(64, 64, "A", 0xFFFFFFFFu32, 32)
+        engine.present()
+        val region_sha256 = _font_witness_region_rgb_sha256(fb)
+        if region_sha256 == "65f5480aa1d19b4496b2f9f45ab0e7a8a0ec9e02c9a9d674879ececa138ff73c":
+            serial_println("[font-evidence] family=Noto Sans Mono asset_sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081 raster=pure-sfnt-glyf font_size=32 codepoint=65 region=x64,y64,w18,h23 region_rgb_sha256={region_sha256}")
+        else:
+            serial_println("[font-evidence-unavailable] reason=region-rgb-sha256-mismatch actual={region_sha256}")
     serial_println("[desktop-gui] desktop-ready")
     serial_println("[production-readiness] wm=live simple_gui=object-tree simple_web=content-frame renderer=engine2d process_owned_surfaces={owned_surface_count} scanout_generation={scanout.generation}")
 

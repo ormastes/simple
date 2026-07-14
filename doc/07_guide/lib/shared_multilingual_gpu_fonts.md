@@ -39,6 +39,10 @@ Here `native` means an accepted direct category face, not native GPU execution;
 `fallback` means an explicit edge to another accepted face. Codepoint coverage
 alone proves neither status.
 Use `selected_font_coverage_cell(language, category)` for exact policy lookup;
+use `selected_font_asset_for_language_category(language, category)` when a
+renderer needs the corresponding bundled face. It returns only promoted
+`native`/`fallback` candidates and returns `nil` for unavailable, not-designed,
+or unknown cells.
 unknown axes return `nil`. Do not load `witness_family` while the cell is
 `unavailable` or `not-designed-for-script`.
 
@@ -67,8 +71,10 @@ asset identity evidence only; it neither enforces names during runtime loading
 nor promotes language/category coverage.
 
 The unchanged binaries and adjacent metadata/licenses are bundled under
-`assets/fonts/google-fonts/` (16 files, 51,764,704 font bytes), but they remain
-**acceptance candidates** where exact executable corpus coverage is pending.
+`assets/fonts/google-fonts/` (16 files, 51,764,704 font bytes). Eleven are
+accepted—nine identity-profile families plus the exact Noto Sans Devanagari
+and Noto Sans Arabic witness faces—and five remain candidates pending exact
+executable coverage.
 The canonical font provider now projects all 16 manifest paths and accepts an
 exact, trimmed, case-insensitive family name as a singleton candidate. Encoded
 `@font-face` sources still take priority; generic CSS family heuristics remain
@@ -81,12 +87,12 @@ preflight before native state changes; it validates directory bounds/overlap,
 required/excluded tables (including legacy `bdat`/`bloc` bitmap strikes), and
 `fvar` defaults. `validate_glyf_font_instance` accepts only `static` or the
 exact declared default-axis tuple; non-default and unknown requests fail closed
-before native loading/cache mutation. Focused source coverage also repeats a
-Pure Simple raster of pinned Pixelify Sans at `wght=400` and pins the built-in
-8×16 monochrome `A` glyph. The real Pixelify witness currently proves repeat
-stability/nonempty metrics but lacks literal dimensions, advance, and checksum,
-so REQ-008 remains partial. The deployed compiler prevents executing these
-refreshed checks; this is not a new runtime PASS claim.
+before native loading/cache mutation. Focused source coverage repeats a Pure
+Simple raster of pinned Pixelify Sans at `wght=400`, pins its `15x21`
+dimensions, `19` advance, and raster SHA-256, and pins the built-in 8×16
+monochrome `A` glyph. The deployed compiler prevents executing these refreshed
+checks, so REQ-008 remains unverified rather than promoted; this source oracle
+is not a new runtime PASS claim.
 
 A complete raw audit found 7,594 compound glyphs (16,194 components) in 14
 candidate faces; the exact witness corpus reaches 76 roots/124 direct
@@ -101,15 +107,23 @@ occurs, and close releases the retained bytes. No coverage cell is promoted.
 
 The manifest scenario prepares exact `CORPUS.sdn` codepoint and raster
 witnesses for all 16 candidates, including Bengali rank 11 and Noto Emoji
-`U+1F600`. The exact-face-bound interpreter shaping gate now passes for 55
-simple-script cells, so the matrix totals are 54 `native`, 1 `fallback`, 26
-`not-designed-for-script`, and 19 `unavailable`. An accepted simple cell means
+`U+1F600`. The current policy/source retains 54 no-feature identity native
+cells and one fallback, selects Noto Sans Devanagari for exact Hindi `hi`, and
+selects Noto Sans Arabic for the exact Arabic/Urdu witnesses. The matrix totals
+are 57 `native`, 1 `fallback`, 26 `not-designed-for-script`, and 16
+`unavailable`.
+An accepted identity cell means
 the exact pinned face stayed live, parsed cmap and runtime glyph IDs agreed for
 the exact language witness, bounded hmtx advances matched, shaping completed,
 and canonical material was produced. The sole fallback is Chinese `mono`:
 live Noto Sans Mono misses `中文`, and the explicit chain selects live Noto Sans
-SC while retaining the Mono request. Arabic, Urdu, and Devanagari completion,
-emoji/category acceptance, and GPU execution remain outside this promotion.
+SC while retaining the Mono request. The exact Hindi `हिन्दी` `dev2` witness
+is accepted separately. The bounded Arabic/Urdu path validates selected
+Script/LangSys metadata, then executes witness-specific pinned lookup
+indices/forms for the two promoted literals. Other complex sequences,
+emoji/category acceptance, and GPU execution remain incomplete. The exact
+single-scalar `U+1F600` shape-to-material gate exists in source, but policy
+remains unavailable until its focused self-hosted run passes.
 
 ## Current shared material
 
@@ -128,11 +142,12 @@ atlas generation, the shared pixels, and only the new dirty rectangles.
 Repeated warm glyphs keep coordinates/generation and
 produce no dirty upload. Face changes or capacity overflow reset and repack the
 atlas. Engine2D uses its established `load_font`/`draw_text` surface, and
-Engine3D consumes the same batch through its CPU HUD/world compatibility path.
-Its `draw_glyph_run_hud` and `draw_glyph_run_world` entrypoints reuse the same
-neutral material, renderer, atlas, and stale-generation rejection. World
-placement projects one anchor and draws a constant-pixel-size billboard; it is
-not depth-tested native 3D text.
+Engine3D consumes the same batch through its CPU fallback or optional Vulkan
+HUD/world adapter. Its `draw_glyph_run_hud` and `draw_glyph_run_world`
+entrypoints reuse the same neutral material, renderer, atlas, and
+stale-generation rejection. CPU world placement is a projected billboard; the
+Vulkan world pipeline tests/writes depth and discards zero-coverage fragments,
+but remains unpromoted until the retained device oracle passes.
 
 The native rasterizer reads generation on both sides of its identity snapshot.
 A stale snapshot is neutral `(0, "")`, and a mid-preparation identity change
@@ -162,14 +177,18 @@ Portuguese witness runs, and mixed-script runs advance instead of overlapping.
 
 Bind each OpenType blob to its runtime face with additive
 `shaper_with_ot_face` calls; rebinding a handle replaces its prior snapshot.
-Latin, Cyrillic, Han, and a single-codepoint emoji run may set
-`glyph_indices_valid` only when the selected live face and blob/runtime cmap
-glyph IDs agree. The pinned Arabic/Urdu letter witnesses additionally use
-presentation-form cmap selection and hmtx advances. The exact Hindi `हिन्दी`
+Latin, Cyrillic, Han, and a whole-run single-codepoint emoji may complete only
+when the selected live face and blob/runtime cmap glyph IDs agree, hmtx advance
+matches, and canonical material is valid. The emoji candidate is limited to
+monochrome `U+1F600` and is not matrix acceptance before a successful focused
+run. The bounded Arabic/Urdu path validates selected Script/LangSys
+metadata and executes witness-specific pinned lookup indices/forms for the two
+promoted literals; it does not claim general substitution/positioning completeness. The exact Hindi `हिन्दी`
 witness selects bounded `dev2` Script/LangSys records and ordered default GSUB/
 GPOS feature tags, with a HarfBuzz glyph/advance oracle; discretionary or
 inactive lookups and other Indic sequences fail closed. Marks, Bengali, Thai,
-Hebrew, and multi-codepoint emoji also fail closed. Convert
+Hebrew, variation-selector/modifier/ZWJ/color emoji, and multi-codepoint emoji
+also fail closed. Convert
 substitution-complete
 accepted runs with
 `shaped_run_to_font_glyph_run`; incomplete runs remain non-renderable even when
@@ -179,15 +198,56 @@ carries a revocable generation token rather than a native face pointer. The
 canonical renderer rejects mismatched or freed face handle/generation pairs and keys cache/atlas
 entries by face + lifetime generation + glyph index + size. This is a bounded
 renderer seam, not complete mixed-face GSUB/GPOS or automatic `draw_text`
-shaping. The accepted simple subset is the 54/1 matrix evidence above.
+shaping. The identity subset is the 54-native/1-fallback evidence above; exact
+Hindi and the exact pinned Arabic/Urdu lookup-vector cases are separately
+bounded to their proven witnesses.
 
 REQ-009 is partial: selected checksum/default-axis identity now fences the
-whole glyph cache and atlas, stats expose that identity, and generation-bound
-wrappers over the process-global face are revocable so stale operations fail
-closed. Conditional real-dylib A-to-B evidence and its manual exist but remain
-unexecuted under the session cap. This is not full rendering-config,
-backend/device, or emitted-program keying, nor concurrent multi-face ownership;
-it does not promote the coverage matrix.
+glyph cache, atlas, and resolved-metrics cache; stats expose that identity, and
+generation-bound wrappers over the process-global face are revocable so stale
+operations fail closed. A batch derives an atlas-owner identity from its live
+font identity, face generation, numeric program version, and dimensions, then
+adds atlas generation for the backend cache identity. CUDA, OpenCL, Metal, and
+Vulkan reuse an upload only when both backend-local owner and generation match.
+Focused unit specs cover these keys and bounded cache counters; the shared
+surface SSpec covers warm generation and dirty regions. Conditional real-dylib
+A-to-B evidence remains unexecuted under the session cap. A shared mutex
+protects the process metrics ring; it retains at most 128 requests and bypasses caching when family length
+exceeds 1,024 or content length exceeds 4,096. Canonical raster scale is
+`font_size` and already participates in the glyph, atlas-entry, and metrics
+keys; translation is late-bound and does not change atlas material. Other CTM
+components remain unsupported. Backend-device and runtime program-artifact
+identity do not share one cache concern: atlas buffers are destroyed before a
+device is destroyed, while an active CUDA, OpenCL, or Vulkan backend rejects
+session replacement and Metal releases font state before device recreation.
+Remaining REQ-009 gaps are configuration identity on every glyph/run entry,
+backend/device/session/artifact identity on every atlas reuse, resolved-run and
+atlas telemetry, explicit unsupported-CTM rejection, native execution evidence,
+and concurrent multi-face ownership. None promotes the coverage matrix.
+
+### Runtime configuration contract
+
+The one planned public surface is `FontRenderConfig` beside `FontRenderBatch`,
+with family/category/language/script, size, weight/style, hinting,
+antialiasing, shared-atlas policy, execution target, and
+`Suggested`/`Preferred`/`Required` policy. The config object, atlas/execution
+policy, caches, and native resources do not cross WebIR or Draw IR. Existing
+semantic family/language/size/style fields and handle-free shaped payloads do;
+Engine2D combines them with runtime-owned config. Existing size-only calls
+remain default-config adapters.
+
+The default is normal style/weight, no hinting, grayscale coverage, the shared
+1024 alpha atlas, target `auto`, and `Suggested`. `Suggested` tries the named
+target first, then the remaining canonical GPU order, then CPU; `Preferred`
+tries its named target then CPU; `Required` tries only its named target and
+fails without another GPU or CPU attempt. `Suggested(auto)` uses Engine2D's
+executable `cuda, metal, opencl, vulkan, cpu` order or Engine3D's
+`vulkan, cpu` order. Preferred/Required require a concrete supported target;
+concrete `cpu` is valid. Unknown targets and unsupported
+rendering modes or nonuniform/rotated/skewed/subpixel transforms must reject
+before changing cache generations or backend state. Until executable Simple
+tests prove this propagation through bitmap, vector, shaped, 2D, and 3D paths,
+REQ-015 remains open.
 
 ## GPU code emission is not execution
 
@@ -197,6 +257,16 @@ Simple compiler code provides
 WGSL. `emit_vulkan_font_atlas_composite_source()` separately returns the
 canonical Vulkan GLSL 450 source for GLSL-to-SPIR-V compilation; Vulkan is not
 a `PortableComputeTarget`, and source emission is not compilation or execution.
+
+```simple
+use compiler.backend.gpu_portable_compute.{PortableComputeTarget, emit_portable_font_atlas_composite_kernel}
+
+val artifact = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.Cuda)
+print artifact.source
+```
+
+Choose another portable target to emit its source; inspect the matching compile
+plan before invoking a toolchain. Printing source proves emission only.
 The Vulkan shader's 15-input ABI is two storage-buffer bindings plus the exact
 contiguous 13-field parameter block, and its entry is `main`.
 `vulkan_font_atlas_compile_plan` records canonical source and external
@@ -209,11 +279,25 @@ Portable backend planning emits a separate optimization artifact and font
 companion artifact for each selected target. The font path uses the
 `_font_atlas` suffix and requires the versioned composite entry; it is not
 concatenated with the optimization module (especially for WGSL, whose bindings
-conflict). CUDA, native Metal, and OpenCL are the implemented runtime adapters.
+conflict). `check-portable-compute-toolchains.shs` splits the two marked Simple
+emitter outputs and compiles distinct native companions; a target is verified
+only when both artifacts export their required symbols. The same checker emits
+canonical Vulkan GLSL, compiles a distinct `.spv` with glslang/glslc, and
+validates SPIR-V magic plus `main`; install those bytes through
+`Engine2D.install_vulkan_font_spirv`. CUDA compile plans use
+`nvcc --ptx -o <output> <source>`; the kernel
+symbol is verified from the artifact rather than passed through a nonexistent
+`--entry` option. CUDA, native Metal, OpenCL, and Vulkan are the implemented
+Engine2D runtime adapters.
 CUDA appends a hand-written bounds-checked PTX companion to the existing single
 2D module, uploads the atlas on generation change, marshals the exact 15-slot
 pointer ABI, synchronizes each submitted quad, and mirrors only completed
 prefixes. This PTX runtime provider is separate from compiler-emitted CUDA C.
+`Engine2D.install_cuda_font_ptx` can install the separately compiled generated
+companion without replacing the optimization module. The session pins its exact
+PTX hash, rejects replacement, launches font quads from it when present, and
+unloads it with the CUDA context. The hand-written compatibility entry remains
+the fallback and is not generated-artifact promotion evidence.
 Metal compiles the exact common MSL helper as an optional separate pipeline,
 uses the fixed 13-word/52-byte parameter block, full-uploads changed atlas
 generations, and dispatches completed 64-thread groups per quad. Only native
@@ -226,17 +310,16 @@ long-scalar ABI, submits one versioned
 composite launch per quad, synchronizes, and falls back from the first
 unsubmitted quad.
 
-Under serialized renderer access, `atlas_generation` is a process-unique,
-positive, sequential dependency token, not a renderer-local edit count. Each
-renderer atlas change reserves a token from the shared sequence, so sequential
-batches from different renderers cannot alias a cached CUDA, Metal, or OpenCL
-atlas. Concurrent token allocation and concurrent renderer ownership remain
-unsupported. A token gap is safe: OpenCL treats
+`atlas_generation` is a process-unique, positive, sequential dependency token,
+not a renderer-local edit count. Each renderer atlas change reserves a token
+with an atomic compare-exchange loop. CUDA, OpenCL, Metal, and Vulkan pair it
+with the batch atlas-owner identity before reusing a backend-local upload.
+Concurrent mutation/use of the same renderer remains unsupported. A token gap is safe: OpenCL treats
 it as a full upload and uses dirty subrects only for the exact next token.
 Sequential means process-local allocation order only; callers must not infer
-time, renderer identity, or persistence across processes. This closes the
-cross-renderer generation collision, but does not complete REQ-009 or promote
-native hardware coverage.
+time or persistence across processes. This closes the bounded atlas-owner and
+generation collision, but does not complete REQ-009 or promote native hardware
+coverage.
 
 Every `FontRenderBatch` now stamps program version `1`, tied to
 `simple_font_atlas_composite_v1_u32`. CUDA, native Metal, and OpenCL reject any
@@ -256,17 +339,19 @@ This source path is implemented but not promoted as native evidence until the
 conditional device test runs and reports device-origin readback.
 
 Vulkan now has a canonical `FontRenderBatch` adapter beside the other Engine2D
-adapters. A session accepts bounded precompiled SPIR-V for the common GLSL
-`main` entry (or attempts runtime GLSL where that compiler exists), creates the
-zero-push-constant three-buffer pipeline, and composites validated quads into
-the real device framebuffer. The adapter validates the complete batch before
+adapters. Session initialization auto-installs the 10,772-byte embedded SPIR-V
+for the common GLSL `main` entry (SHA-256
+`e25d25b8157fc2554822637603471a442f678eb58e20da167bfb023d7577880a`), creates
+the zero-push-constant three-buffer pipeline, and composites validated quads
+into the real device framebuffer. The adapter validates the complete batch before
 atlas/cache mutation, binds atlas/destination/52-byte params buffers, waits for
 each dispatch, reads the framebuffer directly, and compares it with an
 independent CPU oracle. Ordinary unavailable/rejected states replay the CPU
 path; unknown fence completion, rollback, descriptor, fence, or resource-cleanup states replace
 the Engine2D facade with software and permanently disable that Vulkan font lane.
 The conditional integration stops at the first unavailable rung. Promotion now
-requires an accelerated discrete, integrated, or virtual device; a stable
+requires `artifact_mode=precompiled-spirv`; runtime GLSL can execute but cannot
+promote. Promotion also requires an accelerated discrete, integrated, or virtual device; a stable
 selected device/driver identity; real fenced submission and destruction; direct
 device readback; and CPU-oracle parity. CPU Vulkan and unfenced submission stop
 before mutation and replay through software, so they cannot become native evidence.
@@ -285,29 +370,40 @@ Missing hardware is `unavailable`, never a simulated pass.
 Neutral shaped runs bind glyph IDs to the exact live face handle/generation and
 preserve logical codepoint clusters. Those values are not UTF-8 byte offsets;
 face liveness and every parallel vector length must match before rasterization.
+Their x/y values are baseline pen offsets in device coordinates. The shaper
+negates OpenType +Y-up offsets, and `FontRenderer` applies bitmap bearings at
+`x = pen_x + bearing_x`, `y = ascent + pen_y - bearing_y - height`. Do not place
+raw pen coordinates directly into atlas quads.
 
 ## 2D and 3D status
 
 - **2D:** `Engine2D.load_font` and `draw_text` are the supported public surface.
-  CUDA, native Metal, and OpenCL attempt their shared versioned atlas-composite
-  kernels first and retain per-glyph `draw_image_blend` for the unsubmitted
-  suffix. Other backends retain image-blit compatibility. Source wiring alone
-  is not device proof.
+  CUDA, native Metal, OpenCL, and Vulkan attempt their shared versioned
+  atlas-composite path and retain a CPU/image suffix fallback where applicable.
+  Other backends retain image-blit compatibility. Source wiring alone is not
+  device proof.
 - **3D:** `load_font`, `draw_text_hud`, and `draw_text_world` consume the same
-  batch through the CPU fallback; `draw_glyph_run_hud` and
-  `draw_glyph_run_world` do the same for neutral runs, and world points use the
-  stored camera matrices.
-  The native blocker is a real texture upload/bind, sampler/pipeline,
-  HUD/world transform and depth path, draw, fence, and device-origin readback on
-  one graphics backend. Compute dispatch or CPU framebuffer output is not a
-  substitute.
+  batch through the CPU fallback or optional Vulkan adapter;
+  `draw_glyph_run_hud` and `draw_glyph_run_world` do the same for neutral runs.
+  Vulkan source owns texture upload/bind, sampler/pipeline, HUD/world transform
+  and depth, draw, fence, and device-origin readback. The remaining blocker is
+  one retained native run proving those claims; compute dispatch or CPU output
+  is not a substitute.
 
-The Vulkan Engine3D owner now has a real untextured 8×f32 mesh path, color plus
-depth framebuffer, indexed draw, fenced completion, and staged device readback.
-It borrows an existing Vulkan session and caches framebuffer resources. Font
-promotion remains unavailable because texture binding still lacks an owned
-combined-image-sampler descriptor layout; HUD/world therefore retain the CPU
-compatibility path.
+The Vulkan Engine3D owner now has dedicated HUD and depth-tested world font
+pipelines, per-pipeline combined-image-sampler descriptor ownership, R8 atlas
+upload, non-indexed draw, fenced completion, and staged device readback.
+Graphics recording/submission uses the graphics-family pool/queue rather than
+the compute lane. Device selection prefers one graphics+compute queue and uses
+it for staging too; transfer-write barriers establish shader/vertex visibility
+without an unproved cross-queue handoff. Uploads fail closed, repeated draws use
+immutable per-frame vertex buffers released after confirmed completion, and an
+unknown fence result retains all submission resources until device idle. The public
+Engine3D adapter consumes the canonical batch and keeps CPU rendering only as
+fallback or an explicit comparator. Its offscreen font target is still separate
+from the CPU scene color/depth target, so world occlusion and native promotion
+remain unavailable until a retained device/readback oracle proves the shared
+scene behavior; source wiring and validated SPIR-V alone are not device evidence.
 
 The repository also freezes an Engine3D-ready Metal HUD source/vertex contract.
 It emits source and packed vertices only; no Engine3D method selects it and it
@@ -316,32 +412,48 @@ interpreter readback was unsafe, atlas formats were ambiguous, GPU command
 errors were ignored, child cleanup was unproven, and the macOS-only code could
 not be compiled on this host. Web producers lower through web semantic/layout;
 GUI producers lower through canonical widget/scene owners. Both emit Draw IR.
+Here `WebIR` means that existing web semantic/layout layer; it is not a second
+drawing IR or a place to store glyph, atlas, cache, or native material.
 The web semantic style preserves inherited/cascaded `font-family`, including the
-`font` shorthand. A successful selected-face resolution now records the stable
-font identity, exact advances, width, and line height used by layout. Web Draw
-IR carries only `font-family`, `font-identity`, and serialized advances;
-Engine2D resolves the identity back to the pinned candidate, verifies the live
-face generation/identity, and uses its existing `draw_text` path. An absent,
-unknown, failed, or changed identity unloads transient vector state and retains
-the byte-compatible bitmap fallback. Draw IR never owns glyphs, atlas pixels,
-native handles, or cache state.
+`font` shorthand. A successful selected-face resolution records the stable font
+identity, exact advances, width, and line height used by layout. Draw IR carries
+those semantic style values and, for an accepted shaped run, a handle-free
+`DrawIrGlyphRunPayload` containing glyph IDs, positions, and logical clusters;
+the payload also round-trips through Draw IR SDN. Engine2D resolves the identity
+back to the pinned candidate, verifies the live face generation/identity, then
+consumes the shaped payload or applies the serialized advances through the
+canonical `FontRenderer`. An absent, unknown, failed, or changed identity
+unloads transient vector state and retains the byte-compatible bitmap fallback.
+Draw IR never owns face handles, atlas pixels, native resources, or cache state.
+Widget Draw IR reuses existing `lang`/`font-family` properties, and shared WM
+windows preserve explicit language metadata. Missing language remains `und`
+and keeps the prior Noto Sans Mono default; explicit multilingual text without
+a family selects the accepted sans face for its language.
 
 The old framebuffer web painter still rasterizes 5×7 glyphs even when resolved
 metrics shape its boxes. It is therefore compatibility behavior, not final
-legacy vector-font parity. The completion path is to route production legacy
-Web/GUI/WM producers through their canonical semantic/scene owners into the
-same Draw IR executor, not to add paint-local font loading.
+legacy vector-font parity. Host Web/GUI/shared-WM producers use their canonical
+semantic/scene owners and the shared Draw IR executor; the legacy SimpleOS WM
+still uses its direct bitmap text calls. The host route still needs a canonical
+rerun and glyph/pixel parity, while SimpleOS needs an actual WM migration—not a
+paint-local second font loader.
 
 SimpleOS image construction now reuses the exact selected
 `FontAssetCandidate` for Noto Sans Mono. Installer rootfs and initramfs staging
 validate its pinned length and SHA-256 and preserve
 `/assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf`.
-The `mkfs.fat` lane can retain that long path; the legacy 8.3 FAT builder
-explicitly omits the disk copy while the initramfs still carries it. Packaging
-is not guest rendering evidence: PASS still requires the production SimpleOS
-WM to load that exact identity and a QEMU framebuffer oracle to find its literal
-glyph pixels. The bitmap fallback remains supported meanwhile. Do not add a
-second font draw path or reuse Engine3D HUD/world as one.
+The `mkfs.fat` lane can retain that long path. Direct and legacy FAT32 builders
+stage the same bytes at the 8.3-compatible `/SYS/FONTS/NOTOSANS.TTF`; the guest
+uses that path only as a byte-source fallback and still validates and loads the
+canonical registry identity. The VFS read ceiling is 4 MiB, above the pinned
+1,708,408-byte payload. Packaging and a host-side image hash are not guest
+rendering evidence. The SimpleOS desktop evidence entry paints the fixed
+`A`/32 px witness and emits a marker only after hashing live MMIO; this does not
+mean the legacy WM text renderer uses the selected face. The fullscreen QEMU wrapper
+independently hashes the dynamic-scanout `pmemsave` crop and retains its
+artifacts. PASS still requires one successful retained run; the bitmap fallback
+remains supported meanwhile. Do not add a second font draw path or reuse
+Engine3D HUD/world as one.
 
 ## Completion workflow
 
@@ -350,17 +462,29 @@ Keep the remaining work on the frozen public seams:
 1. `FontRenderer` prepares metrics, shaped runs, and `FontRenderBatch`.
 2. Web/GUI/WM producers emit semantic `DrawIrComposition`; Engine2D alone
    materializes vector glyphs and retains bitmap fallback.
-3. Selected Latin, Han, Arabic/Urdu, exact Hindi, and Cyrillic fixtures must
+3. Selected Latin, Han, exact Hindi, exact Arabic/Urdu, and Cyrillic fixtures must
    prove face, glyph, cluster, advance, offset, direction, language, and script
    identity before a matrix cell is accepted.
 4. Engine3D HUD/world promotion requires texture, sampler, pipeline, draw,
    completed fence, depth/transform behavior, and device-origin readback.
 5. SimpleOS proof names the packaged candidate/hash and checks literal guest
-   framebuffer pixels. Pixelify Sans separately needs a literal default-axis
-   dimensions/advance/checksum oracle.
+   framebuffer pixels. Pixelify Sans separately must execute its pinned literal
+   default-axis dimensions/advance/checksum oracle.
 6. Warm performance records cache hit rate and 1,024-glyph p95 at 1080p/4K;
    promotion also records equal-semantics 4,096-glyph CPU/GPU p95, unchanged
    upload behavior, RSS delta, and GPU resource high-water.
+
+The authoritative gate list and evidence boundaries are in
+[`doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`](../../03_plan/sys_test/shared_multilingual_gpu_fonts.md).
+Run focused source evidence with the self-hosted CLI, for example:
+
+```bash
+bin/simple test test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl --mode=interpreter
+bin/simple test test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl --mode=interpreter
+```
+
+These commands do not substitute for the native submission, SimpleOS pixel,
+Engine3D, or performance gates in the test plan.
 
 Run each acceptance gate once per session. Unavailable hardware or the stale
 self-hosted runtime is a blocker record, never a synthetic PASS.

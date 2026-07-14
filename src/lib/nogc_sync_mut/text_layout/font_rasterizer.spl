@@ -3,6 +3,7 @@ use std.nogc_sync_mut.text_layout.font_types.{CachedGlyph}
 use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands, vf_glyph_width}
 use std.nogc_sync_mut.io.font_sffi.{font_face_is_live}
 use std.io_runtime.{env_get}
+use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
 
 # Font Rasterizer — glyph rasterization backends and blit helpers.
 #
@@ -52,6 +53,8 @@ extern fn rt_font_glyph_bitmap(font_handle: i64, codepoint: i64, size: f64) -> i
 extern fn rt_font_glyph_bitmap_index(font_handle: i64, glyph_index: i64, size: f64) -> i64
 extern fn rt_font_bitmap_width(bitmap_handle: i64) -> i64
 extern fn rt_font_bitmap_height(bitmap_handle: i64) -> i64
+extern fn rt_font_bitmap_xoff(bitmap_handle: i64) -> i64
+extern fn rt_font_bitmap_yoff(bitmap_handle: i64) -> i64
 extern fn rt_font_bitmap_get_pixel(bitmap_handle: i64, x: i64, y: i64) -> i64
 extern fn rt_font_bitmap_free(bitmap_handle: i64)
 extern fn rt_font_glyph_advance(font_handle: i64, codepoint: i64, size: f64) -> i64
@@ -63,6 +66,8 @@ fn rasterize_ttf(font_handle: i64, codepoint: i32, font_size: i32) -> CachedGlyp
         return CachedGlyph.empty(codepoint, font_size)
     val w = rt_font_bitmap_width(bmp).to_i32()
     val h = rt_font_bitmap_height(bmp).to_i32()
+    val xoff = rt_font_bitmap_xoff(bmp).to_i32()
+    val yoff = rt_font_bitmap_yoff(bmp).to_i32()
     val adv = rt_font_glyph_advance(font_handle, codepoint.to_i64(), font_size.to_f64()).to_i32()
 
     # Copy bitmap pixels to our cache
@@ -87,8 +92,8 @@ fn rasterize_ttf(font_handle: i64, codepoint: i32, font_size: i32) -> CachedGlyp
         width: w,
         height: h,
         advance: if adv > 0: adv else: w + 1,
-        bearing_x: 0,
-        bearing_y: 0,
+        bearing_x: xoff,
+        bearing_y: -yoff - h,
         pixels: pixels
     )
 
@@ -100,6 +105,8 @@ fn rasterize_ttf_index(font_handle: i64, face_generation: i64, glyph_index: i32,
         return CachedGlyph(codepoint: -1, face_id: font_handle, face_generation: face_generation, glyph_index: glyph_index, font_size: font_size, width: 0, height: 0, advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
     val w = rt_font_bitmap_width(bmp).to_i32()
     val h = rt_font_bitmap_height(bmp).to_i32()
+    val xoff = rt_font_bitmap_xoff(bmp).to_i32()
+    val yoff = rt_font_bitmap_yoff(bmp).to_i32()
     val advance = rt_font_glyph_advance_index(font_handle, glyph_index.to_i64(), font_size.to_f64()).to_i32()
     var pixels: [u8] = []
     var row = 0
@@ -114,7 +121,7 @@ fn rasterize_ttf_index(font_handle: i64, face_generation: i64, glyph_index: i32,
         codepoint: -1, face_id: font_handle, face_generation: face_generation, glyph_index: glyph_index,
         font_size: font_size, width: w, height: h,
         advance: if advance > 0: advance else: w + 1,
-        bearing_x: 0, bearing_y: 0, pixels: pixels
+        bearing_x: xoff, bearing_y: -yoff - h, pixels: pixels
     )
 
 # ============================================================================
@@ -533,8 +540,6 @@ fn vf_point_inside(cmds: [i32], px: i32, py: i32, scale_n: i32, scale_d: i32) ->
 # Bitmap Font Rasterization (8x16 VGA fallback)
 # ============================================================================
 
-extern fn rt_gui_get_glyph_8x16(ch: i32) -> [u8]
-
 fn rasterize_bitmap(codepoint: i32, font_size: i32) -> CachedGlyph:
     # Scale factor from 16px base
     val scale = if font_size > 16: font_size / 16 else: 1
@@ -543,27 +548,16 @@ fn rasterize_bitmap(codepoint: i32, font_size: i32) -> CachedGlyph:
     val out_w = base_w * scale
     val out_h = base_h * scale
 
-    val glyph_data = rt_gui_get_glyph_8x16(codepoint)
-    if glyph_data.len() < 16:
-        return CachedGlyph(
-            codepoint: codepoint,
-            face_id: 0,
-            face_generation: 0,
-            glyph_index: -1,
-            font_size: font_size,
-            width: out_w,
-            height: out_h,
-            advance: out_w,
-            bearing_x: 0,
-            bearing_y: 0,
-            pixels: []
-        )
-
+    val glyph_index = glyph_index_for_char_code(codepoint)
     var pixels: [u8] = []
     var row = 0
     while row < out_h:
         val base_row = row / scale
-        val bits = if base_row < 16: glyph_data[base_row] else: 0
+        val source_row = (base_row - 1) / 2
+        val bits = if base_row > 0 and base_row < 15 and source_row < 7:
+            glyph_row_bits(glyph_index, source_row) << 2
+        else:
+            0
         var col = 0
         while col < out_w:
             val base_col = col / scale

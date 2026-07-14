@@ -1798,6 +1798,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_cmd_set_pipeline", gpu::rt_vulkan_cmd_set_pipeline_fn);
     insert_simple!("rt_vulkan_alloc_buffer", gpu::rt_vulkan_alloc_buffer_fn);
     insert_simple!("rt_vulkan_begin_compute", gpu::rt_vulkan_begin_compute_fn);
+    insert_simple!("rt_vulkan_begin_graphics", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_bind_buffer", gpu::rt_vulkan_bind_buffer_fn);
     insert_simple!("rt_vulkan_bind_descriptors", gpu::rt_vulkan_bind_descriptors_fn);
     insert_simple!("rt_vulkan_bind_pipeline", gpu::rt_vulkan_bind_pipeline_fn);
@@ -1810,6 +1811,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         gpu::rt_vulkan_graphics_unavailable_fn
     );
     insert_simple!("rt_vulkan_discard_command", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!(
+        "rt_vulkan_discard_graphics_command",
+        gpu::rt_vulkan_graphics_unavailable_fn
+    );
     insert_simple!("rt_vulkan_destroy_render_pass", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!(
         "rt_vulkan_destroy_graphics_pipeline",
@@ -1817,6 +1822,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_vulkan_destroy_image", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_create_sampler", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!("rt_vulkan_create_font_sampler", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_destroy_sampler", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_create_framebuffer", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_destroy_framebuffer", gpu::rt_vulkan_graphics_unavailable_fn);
@@ -1832,8 +1838,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_bind_vertex_buffer", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_bind_index_buffer", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_bind_texture", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!("rt_vulkan_bind_font_texture", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_set_viewport", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_set_scissor", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!("rt_vulkan_draw", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_draw_indexed", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_compile_glsl", gpu::rt_vulkan_compile_glsl_fn);
     insert_simple!("rt_vulkan_compile_spirv", gpu::rt_vulkan_compile_spirv_fn);
@@ -1866,10 +1874,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_vulkan_selected_device_driver_identity",
         gpu::rt_vulkan_selected_device_driver_identity_fn
     );
+    insert_simple!("rt_vulkan_selected_device_name", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_device_type", gpu::rt_vulkan_device_type_fn);
     insert_simple!("rt_vulkan_selected_device_type", gpu::rt_vulkan_selected_device_type_fn);
     insert_simple!("rt_vulkan_dispatch", gpu::rt_vulkan_dispatch_fn);
     insert_simple!("rt_vulkan_end_compute", gpu::rt_vulkan_end_compute_fn);
+    insert_simple!("rt_vulkan_end_graphics", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_free_buffer", gpu::rt_vulkan_free_buffer_fn);
     insert_simple!("rt_vulkan_get_device", gpu::rt_vulkan_get_device_fn);
     insert_simple!(
@@ -1919,6 +1929,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_vulkan_submit_and_wait_fence",
         gpu::rt_vulkan_submit_and_wait_fence_fn
     );
+    insert_simple!(
+        "rt_vulkan_submit_graphics_and_wait_fence",
+        gpu::rt_vulkan_graphics_unavailable_fn
+    );
     insert_simple!("rt_vulkan_wait_fence", gpu::rt_vulkan_wait_fence_fn);
     insert_simple!("rt_vulkan_destroy_fence", gpu::rt_vulkan_destroy_fence_fn);
     insert_simple!("rt_vulkan_wait_idle", gpu::rt_vulkan_wait_idle_fn);
@@ -1948,6 +1962,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!(
         "rt_vulkan_create_graphics_pipeline",
         gpu::rt_vulkan_create_graphics_pipeline_fn
+    );
+    insert_simple!(
+        "rt_vulkan_create_font_graphics_pipeline",
+        gpu::rt_vulkan_graphics_unavailable_fn
+    );
+    insert_simple!(
+        "rt_vulkan_create_font_world_graphics_pipeline",
+        gpu::rt_vulkan_graphics_unavailable_fn
     );
     insert_simple!("rt_vulkan_create_image", gpu::rt_vulkan_create_image_fn);
     insert_simple!("rt_vulkan_end_graphics_frame", gpu::rt_vulkan_end_graphics_frame_fn);

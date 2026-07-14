@@ -167,6 +167,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [library/ui.md](library/ui.md) | UI framework (.sui files) |
 | [library/library_smf.md](library/library_smf.md) | Library SMF creation and usage |
 | [library/engine3d.md](library/engine3d.md) | 3D engine library |
+| [lib/shared_multilingual_gpu_fonts.md](lib/shared_multilingual_gpu_fonts.md) | Pinned multilingual fonts, shared rendering, and GPU emission |
 
 ## Theme
 

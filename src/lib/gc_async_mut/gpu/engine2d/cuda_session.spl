@@ -28,6 +28,10 @@ use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{
 }
 use std.gc_async_mut.gpu.engine2d.session_support.{gpu_session_launch_gate_status, gpu_session_readback_status}
 use std.gc_async_mut.gpu.engine2d.sffi_cuda.{CudaFfi}
+use std.common.crypto.sha256.{sha256_text}
+
+val CUDA_FONT_PTX_MAX_BYTES: i64 = 16777216
+val CUDA_FONT_PTX_ENTRY: text = "simple_font_atlas_composite_v1_u32"
 
 # ============================================================================
 # CudaSession
@@ -83,6 +87,8 @@ class CudaSession:
     device: i64          # CUDA device handle
     ctx: i64             # retained primary/explicit context
     module_cache: i64    # PTX module cache (placeholder — first loaded module handle)
+    font_module_cache: i64
+    font_module_identity: text
     kernel_cache: i64    # last resolved CUDA function handle for injected FFI launches
     stream: i64          # default stream (0 = default CUDA stream)
     ref_count: i64       # reference counting
@@ -96,6 +102,8 @@ class CudaSession:
             device: 0,
             ctx: 0,
             module_cache: 0,
+            font_module_cache: 0,
+            font_module_identity: "",
             kernel_cache: 0,
             stream: 0,
             ref_count: 0,
@@ -152,6 +160,8 @@ class CudaSession:
             return 1
 
         self.module_cache = 0
+        self.font_module_cache = 0
+        self.font_module_identity = ""
         self.kernel_cache = 0
         self.stream = 0
         self.ref_count = 1
@@ -179,19 +189,41 @@ class CudaSession:
         """Load a PTX module and return its handle through the CUDA module facade."""
         if self.ffi != nil:
             val module = self.ffi.module_load_ptx(ptx)
-            if module != 0:
+            if module > 0:
                 if self.module_cache != 0:
                     self.ffi.module_unload(self.module_cache)
                     self.module_cache = 0
                 self.module_cache = module
             return module
         val module = cuda_module_load_data(ptx)
-        if module != 0:
+        if module > 0:
             if self.module_cache != 0:
                 cuda_module_unload(self.module_cache)
                 self.module_cache = 0
             self.module_cache = module
-        module
+            return module
+        0
+
+    me install_font_module(ptx: text) -> bool:
+        """Install one immutable Simple-generated font PTX companion."""
+        if (ptx.len() == 0 or ptx.len() > CUDA_FONT_PTX_MAX_BYTES or
+            not ptx.contains(".version") or
+            not ptx.contains(".entry " + CUDA_FONT_PTX_ENTRY + "(")):
+            return false
+        val identity = "generated-ptx:" + sha256_text(ptx)
+        if self.font_module_cache != 0:
+            return self.font_module_identity == identity
+        if not self.is_valid():
+            return false
+        val module = if self.ffi != nil:
+            self.ffi.module_load_ptx(ptx)
+        else:
+            cuda_module_load_data(ptx)
+        if module <= 0:
+            return false
+        self.font_module_cache = module
+        self.font_module_identity = identity
+        true
 
     me sync() -> i64:
         """Synchronize the default CUDA stream. Returns CUDA error code (0 = success)."""
@@ -258,6 +290,20 @@ class CudaSession:
                 return 0
             return 1
         cuda_launch_kernel(self.module_cache, name, gx, gy, gz, bx, by, bz, args_ptr)
+
+    me launch_font_kernel_args(gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, args_ptr: i64) -> i64:
+        """Launch the verified companion when installed, else the compatibility module."""
+        val module = if self.font_module_cache != 0: self.font_module_cache else: self.module_cache
+        if module == 0 or args_ptr == 0:
+            return 1
+        if self.ffi != nil:
+            self.kernel_cache = self.ffi.kernel_get(module, CUDA_FONT_PTX_ENTRY)
+            if self.kernel_cache <= 0:
+                return 1
+            if self.ffi.launch_kernel(module, CUDA_FONT_PTX_ENTRY, gx, gy, gz, bx, by, bz, args_ptr):
+                return 0
+            return 1
+        cuda_launch_kernel(module, CUDA_FONT_PTX_ENTRY, gx, gy, gz, bx, by, bz, args_ptr)
 
     me launch_generated_2d(op: text, width: i64, height: i64, args_ptr: i64) -> i64:
         """Launch a generated portable 2D kernel from the cached CUDA module.
@@ -342,6 +388,13 @@ class CudaSession:
             else:
                 cuda_module_unload(self.module_cache)
             self.module_cache = 0
+        if self.font_module_cache != 0:
+            if self.ffi != nil:
+                self.ffi.module_unload(self.font_module_cache)
+            else:
+                cuda_module_unload(self.font_module_cache)
+            self.font_module_cache = 0
+        self.font_module_identity = ""
         if self.ctx != 0:
             if self.ffi != nil:
                 self.ffi.ctx_destroy(self.ctx)

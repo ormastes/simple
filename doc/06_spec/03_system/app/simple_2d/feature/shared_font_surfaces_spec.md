@@ -16,7 +16,9 @@ GPU texture upload, submission, fence, readback, or presentation.
 
 Requirements: partial REQ-006, REQ-009, and REQ-011 CPU/shared-material
 evidence. This scenario intentionally does not claim REQ-008, REQ-012, or the
-native NFR gates.
+native NFR gates. Focused unit specs, not this system scenario, cover live
+resolved-metrics identity, bounded cache counters, and CUDA/OpenCL/Metal/Vulkan
+atlas owner + generation reuse.
 
 ## Operator flow
 

@@ -10,7 +10,8 @@ Run the focused conditional scenario on the target host. It stops at the first
 unavailable rung; absence is not converted into a pass.
 
 1. Probe the real Vulkan runtime and initialize the canonical retained session.
-2. Install the bounded three-buffer font composite pipeline.
+2. Require session initialization to auto-install the hash-pinned precompiled
+   three-buffer font composite SPIR-V; a missing pipeline stops as unavailable.
 3. Reject CPU/other devices and hosts without fenced submission before font
    batch, atlas, or destination mutation.
 4. On an accelerated device, submit one exact 1×1 white glyph batch into a 2×2 target.
@@ -26,7 +27,7 @@ unavailable rung; absence is not converted into a pass.
 | Vulkan runtime or session | `unavailable`, no device execution |
 | CPU/other device | `accelerated-device-required`, never promoted |
 | Fenced submission unsupported | `fenced-submit-required`, never promoted |
-| Accelerated ready pipeline | `promoted` only after fence, readback, and parity evidence |
+| Accelerated precompiled-SPIR-V pipeline | `promoted` only after fence, readback, and parity evidence |
 
 <details>
 <summary>Executable source</summary>

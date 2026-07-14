@@ -246,6 +246,15 @@ The Simple web renderer has two code paths:
 
 ## Test Fixtures
 
+### Shared font comparisons
+
+Before comparing font pixels, assert that layout and Draw IR carry the same
+pinned `font-identity`, ordered advances, direction, language, and script. Use
+exact RGBA8 for the integer alpha oracle; broader native antialiasing requires
+the fixture's fixed absolute edge/coverage limits. Nonblank pixels, equal
+checksums, upload, or emitted GPU source do not prove native execution; record
+the backend, submitted payload hash, completed fence, and readback origin.
+
 Located in `test/fixtures/pixel_compare/`:
 - `simple_text.html` — "Hello World" in monospace, white background
 - `complex_text.html` — h1 + styled paragraphs with mixed fonts/sizes/colors

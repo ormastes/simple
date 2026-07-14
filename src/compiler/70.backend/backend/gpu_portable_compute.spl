@@ -1,3 +1,4 @@
+#![allow(large_file)] # Intentional: one target-contract table keeps portable GPU source/plan/evidence rules synchronized.
 # Portable GPU compute source emission.
 #
 # This is the first shared surface for CUDA/HIP-like Simple kernels that can be
@@ -5,6 +6,7 @@
 # each kernel body in backend-specific modules.
 
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_ENTRY, font_atlas_composite_opencl_source, font_atlas_composite_metal_source, font_atlas_composite_vulkan_glsl_source}
+use std.common.crypto.sha256.{sha256_text}
 
 enum PortableComputeTarget:
     Cuda
@@ -29,9 +31,16 @@ class PortableComputeArtifact:
     fn is_source_only() -> bool:
         self.binary_format == "source"
 
+    fn source_hash() -> text:
+        sha256_text(self.source)
+
+    fn version_hash() -> text:
+        sha256_text(self.entry_name + "|" + self.binary_format + "|" + self.source)
+
 class PortableComputeCompilePlan:
     target: PortableComputeTarget
     entry_name: text
+    artifact_identity: text
     required_symbols: text
     source_format: text
     binary_format: text
@@ -175,6 +184,7 @@ class PortableComputeOperationMetadata:
         val target_name = portable_compute_target_name(target)
         val binary = portable_compute_binary_format(target)
         val artifact_stem = if generated == FONT_ATLAS_COMPOSITE_ENTRY: "{output_stem}_font_atlas" else: output_stem
+        val artifact_suffix = if target == PortableComputeTarget.WebGpu: "wgsl" else: binary
         PortableComputeOperationMetadata(
             tag_kind: tag_kind,
             backend_order: backend_order,
@@ -184,7 +194,7 @@ class PortableComputeOperationMetadata:
             entry_symbol: generated,
             source_format: portable_compute_source_format(target),
             binary_format: binary,
-            artifact_path_suffix: "{artifact_stem}.{binary}",
+            artifact_path_suffix: "{artifact_stem}.{artifact_suffix}",
             cpu_preprocess_required: portable_compute_operation_needs_cpu_preprocess(operation_family),
             ready: true,
             status: "metadata-ready",
@@ -516,6 +526,7 @@ fn portable_compute_compile_plan(artifact: PortableComputeArtifact, output_stem:
     PortableComputeCompilePlan(
         target: artifact.target,
         entry_name: artifact.entry_name,
+        artifact_identity: artifact.version_hash(),
         required_symbols: artifact.entry_name,
         source_format: portable_compute_source_format(artifact.target),
         binary_format: artifact.binary_format,
@@ -528,6 +539,7 @@ fn portable_compute_compile_plan_with_required_symbols(artifact: PortableCompute
     PortableComputeCompilePlan(
         target: artifact.target,
         entry_name: artifact.entry_name,
+        artifact_identity: artifact.version_hash(),
         required_symbols: required_symbols,
         source_format: portable_compute_source_format(artifact.target),
         binary_format: artifact.binary_format,
@@ -568,9 +580,26 @@ fn portable_compute_required_symbols_reason(required_symbols: text, exported_sym
         return "missing-entry-symbol"
     "pass"
 
+fn portable_compute_compile_plan_contract_reason(plan: PortableComputeCompilePlan) -> text:
+    if plan.artifact_identity == "":
+        return "missing-artifact-identity"
+    if plan.source_format != portable_compute_source_format(plan.target):
+        return "source-format-mismatch"
+    if plan.binary_format != portable_compute_binary_format(plan.target):
+        return "binary-format-mismatch"
+    if plan.tool_hint != portable_compute_tool_hint(plan.target):
+        return "tool-hint-mismatch"
+    val suffix = if plan.target == PortableComputeTarget.WebGpu: ".wgsl" else: ".{plan.binary_format}"
+    if not plan.artifact_path_suffix.ends_with(suffix):
+        return "artifact-suffix-mismatch"
+    "pass"
+
 fn portable_compute_compiled_artifact_reason(plan: PortableComputeCompilePlan, artifact_magic: text, exported_symbols: text, byte_count: i64) -> text:
     if plan.entry_name == "":
         return "missing-entry-name"
+    val contract_reason = portable_compute_compile_plan_contract_reason(plan)
+    if contract_reason != "pass":
+        return contract_reason
     if not plan.produces_binary():
         return "source-only-plan"
     if byte_count <= 0:
@@ -599,6 +628,11 @@ fn portable_compute_default_source_suffix(target: PortableComputeTarget) -> text
 fn portable_compute_toolchain_invocation_reason(plan: PortableComputeCompilePlan, source_path: text, output_path: text, primary_tool_path: text, secondary_tool_path: text) -> text:
     if plan.entry_name == "":
         return "missing-entry-name"
+    val contract_reason = portable_compute_compile_plan_contract_reason(plan)
+    if contract_reason != "pass":
+        return contract_reason
+    if not plan.produces_binary():
+        return "source-only-plan"
     if source_path == "":
         return "missing-source-path"
     if output_path == "":
@@ -611,7 +645,7 @@ fn portable_compute_toolchain_invocation_reason(plan: PortableComputeCompilePlan
 
 fn portable_compute_toolchain_command_line(plan: PortableComputeCompilePlan, source_path: text, output_path: text, primary_tool_path: text, secondary_tool_path: text) -> text:
     if plan.target == PortableComputeTarget.Cuda:
-        return "{primary_tool_path} --ptx --device-c --entry {plan.entry_name} -o {output_path} {source_path}"
+        return "{primary_tool_path} --ptx -o {output_path} {source_path}"
     if plan.target == PortableComputeTarget.Hip:
         return "{primary_tool_path} --genco --offload-arch=gfx1100 -o {output_path} {source_path}"
     if plan.target == PortableComputeTarget.OpenCl:

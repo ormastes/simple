@@ -1,7 +1,7 @@
 #[cfg(feature = "vulkan")]
 use super::vulkan_graphics_runtime_core::{
-    alloc_handle, AddressMode, FilterMode, GraphicsPipeline, ImageUsage, RenderPass, Sampler, ShaderModule,
-    VulkanImage, vk, STATE,
+    alloc_handle, AddressMode, DescriptorPool, DescriptorSet, DescriptorSetLayout, FilterMode, FontGraphicsResources,
+    GraphicsPipeline, ImageUsage, RenderPass, Sampler, ShaderModule, VulkanImage, vk, STATE,
 };
 #[cfg(feature = "vulkan")]
 use crate::value::{byte_array_bytes, byte_array_write, RuntimeValue};
@@ -39,6 +39,77 @@ fn vertex3d_input(
         },
     ];
     (binding, attributes)
+}
+
+#[cfg(feature = "vulkan")]
+fn font_hud_input() -> (
+    vk::VertexInputBindingDescription,
+    [vk::VertexInputAttributeDescription; 3],
+) {
+    let binding = vk::VertexInputBindingDescription {
+        binding: 0,
+        stride: 20,
+        input_rate: vk::VertexInputRate::VERTEX,
+    };
+    let attributes = [
+        vk::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: vk::Format::R32G32_SFLOAT,
+            offset: 0,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 1,
+            binding: 0,
+            format: vk::Format::R32G32_SFLOAT,
+            offset: 8,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 2,
+            binding: 0,
+            format: vk::Format::R8G8B8A8_UNORM,
+            offset: 16,
+        },
+    ];
+    (binding, attributes)
+}
+
+#[cfg(feature = "vulkan")]
+fn font_world_input() -> (
+    vk::VertexInputBindingDescription,
+    [vk::VertexInputAttributeDescription; 3],
+) {
+    let binding = vk::VertexInputBindingDescription {
+        binding: 0,
+        stride: 24,
+        input_rate: vk::VertexInputRate::VERTEX,
+    };
+    let attributes = [
+        vk::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: vk::Format::R32G32B32_SFLOAT,
+            offset: 0,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 1,
+            binding: 0,
+            format: vk::Format::R32G32_SFLOAT,
+            offset: 12,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 2,
+            binding: 0,
+            format: vk::Format::R8G8B8A8_UNORM,
+            offset: 20,
+        },
+    ];
+    (binding, attributes)
+}
+
+#[cfg(feature = "vulkan")]
+fn font_world_depth_state() -> (bool, bool) {
+    (true, true)
 }
 
 // ============================================================================
@@ -247,6 +318,185 @@ pub extern "C" fn rt_vulkan_create_graphics_pipeline(
 }
 
 #[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_create_font_graphics_pipeline(_device: i64, vs: i64, fs: i64, rp: i64) -> i64 {
+    let mut state = STATE.lock();
+    let device = match state.require_device() {
+        Ok(d) => d,
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
+    };
+    let vertex_shader = match state.shader_modules.get(&vs) {
+        Some(v) => v.clone(),
+        None => return 0,
+    };
+    let fragment_shader = match state.shader_modules.get(&fs) {
+        Some(v) => v.clone(),
+        None => return 0,
+    };
+    let render_pass = match state.render_passes.get(&rp) {
+        Some(v) => v.clone(),
+        None => return 0,
+    };
+    let layout = match DescriptorSetLayout::new_combined_image_sampler(device.clone()) {
+        Ok(v) => v,
+        Err(e) => {
+            state.set_error(format!("font pipeline layout: {e}"));
+            return 0;
+        }
+    };
+    let pool = match DescriptorPool::new_for_samplers(device.clone(), 1) {
+        Ok(v) => v,
+        Err(e) => {
+            state.set_error(format!("font descriptor pool: {e}"));
+            return 0;
+        }
+    };
+    let set = match DescriptorSet::new(device.clone(), &pool, &layout) {
+        Ok(v) => v,
+        Err(e) => {
+            state.set_error(format!("font descriptor set: {e}"));
+            return 0;
+        }
+    };
+    let (binding, attributes) = font_hud_input();
+    let bindings = [binding];
+    let pipeline = match GraphicsPipeline::new(
+        device,
+        &render_pass,
+        &vertex_shader,
+        &fragment_shader,
+        &bindings,
+        &attributes,
+        &[&layout],
+        vk::Extent2D {
+            width: 800,
+            height: 600,
+        },
+        vk::PrimitiveTopology::TRIANGLE_LIST,
+        vk::CullModeFlags::NONE,
+        true,
+        false,
+        false,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            state.set_error(format!("font graphics pipeline: {e}"));
+            return 0;
+        }
+    };
+    let handle = alloc_handle();
+    state.graphics_pipelines.insert(handle, pipeline);
+    state.font_graphics_resources.insert(
+        handle,
+        FontGraphicsResources {
+            _layout: layout,
+            _pool: pool,
+            set,
+        },
+    );
+    handle
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_create_font_graphics_pipeline(_device: i64, _vs: i64, _fs: i64, _rp: i64) -> i64 {
+    0
+}
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_create_font_world_graphics_pipeline(_device: i64, vs: i64, fs: i64, rp: i64) -> i64 {
+    let mut state = STATE.lock();
+    let device = match state.require_device() {
+        Ok(d) => d,
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
+    };
+    let vertex_shader = match state.shader_modules.get(&vs) {
+        Some(v) => v.clone(),
+        None => return 0,
+    };
+    let fragment_shader = match state.shader_modules.get(&fs) {
+        Some(v) => v.clone(),
+        None => return 0,
+    };
+    let render_pass = match state.render_passes.get(&rp) {
+        Some(v) => v.clone(),
+        None => return 0,
+    };
+    let layout = match DescriptorSetLayout::new_combined_image_sampler(device.clone()) {
+        Ok(v) => v,
+        Err(e) => {
+            state.set_error(format!("world font pipeline layout: {e}"));
+            return 0;
+        }
+    };
+    let pool = match DescriptorPool::new_for_samplers(device.clone(), 1) {
+        Ok(v) => v,
+        Err(e) => {
+            state.set_error(format!("world font descriptor pool: {e}"));
+            return 0;
+        }
+    };
+    let set = match DescriptorSet::new(device.clone(), &pool, &layout) {
+        Ok(v) => v,
+        Err(e) => {
+            state.set_error(format!("world font descriptor set: {e}"));
+            return 0;
+        }
+    };
+    let (binding, attributes) = font_world_input();
+    let (depth_test, depth_write) = font_world_depth_state();
+    let bindings = [binding];
+    let pipeline = match GraphicsPipeline::new(
+        device,
+        &render_pass,
+        &vertex_shader,
+        &fragment_shader,
+        &bindings,
+        &attributes,
+        &[&layout],
+        vk::Extent2D {
+            width: 800,
+            height: 600,
+        },
+        vk::PrimitiveTopology::TRIANGLE_LIST,
+        vk::CullModeFlags::NONE,
+        true,
+        depth_test,
+        depth_write,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            state.set_error(format!("world font graphics pipeline: {e}"));
+            return 0;
+        }
+    };
+    let handle = alloc_handle();
+    state.graphics_pipelines.insert(handle, pipeline);
+    state.font_graphics_resources.insert(
+        handle,
+        FontGraphicsResources {
+            _layout: layout,
+            _pool: pool,
+            set,
+        },
+    );
+    handle
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_create_font_world_graphics_pipeline(_device: i64, _vs: i64, _fs: i64, _rp: i64) -> i64 {
+    0
+}
+
+#[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_create_graphics_pipeline(
     _device: i64,
@@ -269,6 +519,7 @@ pub extern "C" fn rt_vulkan_create_graphics_pipeline(
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_graphics_pipeline(pipeline: i64) -> i64 {
     let mut state = STATE.lock();
+    state.font_graphics_resources.remove(&pipeline);
     if state.graphics_pipelines.remove(&pipeline).is_some() {
         1
     } else {
@@ -422,6 +673,36 @@ pub extern "C" fn rt_vulkan_create_sampler(_device: i64) -> i64 {
 }
 
 #[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_create_font_sampler(_device: i64) -> i64 {
+    let mut state = STATE.lock();
+    let device = match state.require_device() {
+        Ok(d) => d,
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
+    };
+    match Sampler::new(device, FilterMode::Nearest, AddressMode::ClampToEdge) {
+        Ok(sampler) => {
+            let handle = alloc_handle();
+            state.samplers.insert(handle, sampler);
+            handle
+        }
+        Err(e) => {
+            state.set_error(format!("create_font_sampler: {e}"));
+            0
+        }
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_create_font_sampler(_device: i64) -> i64 {
+    0
+}
+
+#[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_create_sampler(_device: i64) -> i64 {
     0
@@ -459,5 +740,31 @@ mod tests {
         assert_eq!(attributes[2].offset, 24);
         assert_eq!(attributes[0].format, vk::Format::R32G32B32_SFLOAT);
         assert_eq!(attributes[2].format, vk::Format::R32G32_SFLOAT);
+    }
+
+    #[test]
+    fn font_hud_input_matches_twenty_byte_contract() {
+        let (binding, attributes) = font_hud_input();
+        assert_eq!(binding.stride, 20);
+        assert_eq!(attributes[0].offset, 0);
+        assert_eq!(attributes[1].offset, 8);
+        assert_eq!(attributes[2].offset, 16);
+        assert_eq!(attributes[0].format, vk::Format::R32G32_SFLOAT);
+        assert_eq!(attributes[1].format, vk::Format::R32G32_SFLOAT);
+        assert_eq!(attributes[2].format, vk::Format::R8G8B8A8_UNORM);
+    }
+
+    #[test]
+    fn font_world_input_carries_clip_depth() {
+        let (binding, attributes) = font_world_input();
+        assert_eq!(binding.stride, 24);
+        assert_eq!(attributes[0].format, vk::Format::R32G32B32_SFLOAT);
+        assert_eq!(attributes[1].offset, 12);
+        assert_eq!(attributes[2].offset, 20);
+    }
+
+    #[test]
+    fn font_world_pipeline_tests_and_writes_depth() {
+        assert_eq!(font_world_depth_state(), (true, true));
     }
 }

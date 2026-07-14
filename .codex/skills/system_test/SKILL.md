@@ -148,6 +148,42 @@ describe "<Feature Name>":
   backend/readback evidence. When vector text is enabled, `FontRenderBatch`
   remains transient material inside the Engine2D executor; an app-private font draw path or Engine3D HUD/world
   shortcut is not valid GUI/web/2D evidence.
+- Shared multilingual font specs use the frozen steps, setup helpers, and
+  checkers in `doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`; do not
+  rename them or introduce parallel vocabulary. Exact-face acceptance is
+  limited to the witnesses the shaping gate proves: the pinned Hindi `हिन्दी`
+  `dev2` case and the exact pinned Arabic `العربية` / Urdu `اردو` lookup-vector
+  cases are accepted. The Arabic/Urdu acceptance is witness-specific after
+  Script/LangSys validation; it is not general GSUB/GPOS, mark, BiDi, or
+  positioning support. A single pinned monochrome `U+1F600` emoji candidate
+  may promote only after its exact-face shape-to-`FontRenderBatch` gate passes;
+  parser/cmap/raster evidence alone is insufficient. Variation-selector,
+  modifier, ZWJ, color, and multi-codepoint emoji remain fail-closed.
+  Vulkan font promotion requires `artifact_mode=precompiled-spirv`; runtime
+  GLSL may be diagnostic execution but cannot satisfy native promotion.
+  Compiled native evidence must name the Simple-emitted font companion, prove
+  its versioned exported symbol, and prove the promoted runtime loaded that same
+  artifact; a handwritten PTX or independently generated SPIR-V blob is not
+  emitter provenance.
+  When a producer emits selected shaping, assert that the handle-free
+  `DrawIrGlyphRunPayload` survives SDN round-trip with identical glyph IDs,
+  positions, and logical clusters. The Engine2D executor must reject a missing
+  or malformed shaped payload and must consume serialized advances through the
+  canonical `FontRenderer`; do not serialize face handles, atlases, caches, or
+  backend resources into Draw IR.
+  Runtime configuration evidence must use the single text-layout-owned config
+  and prove each identity dimension reaches bitmap, selected-vector, shaped,
+  Engine2D, and Engine3D material. Assert `Suggested` named-target/remaining-
+  canonical-GPUs/CPU, `Preferred` named-target/CPU, and `Required` named-target-
+  only behavior. Assert `Suggested(auto)` uses the engine's executable adapter
+  order; Preferred/Required with `auto` and unknown targets reject before any
+  cache, counter, upload, framebuffer, or backend mutation.
+  Unsupported rendering modes or CTM must fail before cache generation,
+  telemetry, upload, or backend state changes.
+  Shaped pixel evidence must include a nonzero bearing or GPOS offset and check
+  the full CPU/device pixels. Pen positions are +Y-down baseline offsets;
+  OpenType y offsets are negated, and quad top-left is
+  `(pen_x + bearing_x, ascent + pen_y - bearing_y - height)`.
 - For HTML/CSS/WASM-backed surfaces, prefer HTML or DOM-visible-text checks
   before raster checks. Assert semantic text, attributes, layout-relevant
   objects, or canvas/wasm bridge state when available; use GUI screenshots,

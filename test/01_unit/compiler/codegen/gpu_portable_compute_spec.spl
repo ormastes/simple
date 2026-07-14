@@ -1,7 +1,7 @@
 # @cover src/compiler/70.backend/backend/gpu_portable_compute.spl 90%
 # @tag: unit, compiler, gpu, codegen, cuda, hip, opencl, metal
 
-use compiler.backend.gpu_portable_compute.{PortableComputeTarget, emit_portable_u32_fill_kernel, emit_portable_u32_add_kernel, portable_compute_compile_plan, portable_compute_compiled_artifact_evidence, portable_compute_toolchain_invocation, portable_compute_compile_result, emit_portable_2d_copy_u32_kernel, emit_portable_2d_alpha_u32_kernel, emit_portable_2d_scroll_u32_kernel, emit_portable_2d_optimization_kernels, emit_portable_2d_optimization_module, portable_compute_2d_optimization_compile_plan, portable_compute_font_atlas_compile_plan, portable_compute_backend_targets_from_order, portable_compute_2d_optimization_backend_plan, portable_compute_backend_target_diagnostic, portable_compute_operation_metadata, portable_compute_browser_wasm_webgpu_bridge_plan, emit_portable_compute_smoke_matrix, emit_portable_font_atlas_composite_kernel}
+use compiler.backend.gpu_portable_compute.{PortableComputeTarget, PortableComputeArtifact, PortableComputeCompilePlan, emit_portable_u32_fill_kernel, emit_portable_u32_add_kernel, portable_compute_compile_plan, portable_compute_compiled_artifact_evidence, portable_compute_toolchain_invocation, portable_compute_compile_result, emit_portable_2d_copy_u32_kernel, emit_portable_2d_alpha_u32_kernel, emit_portable_2d_scroll_u32_kernel, emit_portable_2d_optimization_kernels, emit_portable_2d_optimization_module, portable_compute_2d_optimization_compile_plan, portable_compute_font_atlas_compile_plan, portable_compute_backend_targets_from_order, portable_compute_2d_optimization_backend_plan, portable_compute_backend_target_diagnostic, portable_compute_operation_metadata, portable_compute_browser_wasm_webgpu_bridge_plan, emit_portable_compute_smoke_matrix, emit_portable_font_atlas_composite_kernel}
 use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_atlas_composite_opencl_source, font_atlas_composite_metal_source, font_atlas_composite_vulkan_glsl_source}
 use std.gc_async_mut.gpu.engine2d.color.{blend}
 
@@ -184,6 +184,43 @@ describe "portable GPU compute emitter":
         expect(missing_symbol.artifact_valid).to_equal(false)
         expect(missing_symbol.reason).to_equal("missing-entry-symbol")
 
+    it "fails closed for malformed and source-only compile plans":
+        val valid_plan = portable_compute_font_atlas_compile_plan(PortableComputeTarget.Cuda, "simple_font")
+        val malformed_plan = PortableComputeCompilePlan(
+            target: valid_plan.target,
+            entry_name: valid_plan.entry_name,
+            artifact_identity: valid_plan.artifact_identity,
+            required_symbols: valid_plan.required_symbols,
+            source_format: valid_plan.source_format,
+            binary_format: "hsaco",
+            tool_hint: valid_plan.tool_hint,
+            artifact_path_suffix: "simple_font_font_atlas.hsaco"
+        )
+        val malformed = portable_compute_compiled_artifact_evidence(
+            malformed_plan, ".version 8.0", ".entry simple_font_atlas_composite_v1_u32", 128)
+        val missing_identity_plan = PortableComputeCompilePlan(
+            target: valid_plan.target,
+            entry_name: valid_plan.entry_name,
+            artifact_identity: "",
+            required_symbols: valid_plan.required_symbols,
+            source_format: valid_plan.source_format,
+            binary_format: valid_plan.binary_format,
+            tool_hint: valid_plan.tool_hint,
+            artifact_path_suffix: valid_plan.artifact_path_suffix
+        )
+        val missing_identity = portable_compute_compiled_artifact_evidence(
+            missing_identity_plan, ".version 8.0", ".entry simple_font_atlas_composite_v1_u32", 128)
+        val webgpu_plan = portable_compute_font_atlas_compile_plan(PortableComputeTarget.WebGpu, "simple_font")
+        val webgpu_invocation = portable_compute_toolchain_invocation(
+            webgpu_plan, "simple_font.wgsl", "simple_font.bin", "browser", "")
+
+        expect(malformed.artifact_valid).to_equal(false)
+        expect(malformed.reason).to_equal("binary-format-mismatch")
+        expect(missing_identity.artifact_valid).to_equal(false)
+        expect(missing_identity.reason).to_equal("missing-artifact-identity")
+        expect(webgpu_invocation.ready).to_equal(false)
+        expect(webgpu_invocation.reason).to_equal("source-only-plan")
+
     it "builds deterministic toolchain invocations for target binary generation":
         val cuda_plan = portable_compute_compile_plan(emit_portable_u32_fill_kernel(PortableComputeTarget.Cuda, "fill_u32"), "fill_u32")
         val hip_plan = portable_compute_compile_plan(emit_portable_u32_fill_kernel(PortableComputeTarget.Hip, "fill_u32"), "fill_u32")
@@ -196,8 +233,7 @@ describe "portable GPU compute emitter":
         val metal = portable_compute_toolchain_invocation(metal_plan, "build/gpu/fill_u32.metal", "build/gpu/fill_u32.metallib", "xcrun metal", "xcrun metallib")
 
         expect(cuda.ready).to_equal(true)
-        expect(cuda.command_line).to_contain("nvcc --ptx")
-        expect(cuda.command_line).to_contain("--entry fill_u32")
+        expect(cuda.command_line).to_equal("nvcc --ptx -o build/gpu/fill_u32.ptx build/gpu/fill_u32.cu")
         expect(hip.command_line).to_contain("hipcc --genco")
         expect(opencl.command_line).to_contain("-emit-spirv")
         expect(metal.command_line).to_contain("xcrun metallib")
@@ -217,7 +253,10 @@ describe "portable GPU compute emitter":
         expect(missing_output.reason).to_equal("missing-output-path")
 
     it "records toolchain compile results without accepting failed or invalid artifacts":
-        val plan = portable_compute_compile_plan(emit_portable_u32_fill_kernel(PortableComputeTarget.Cuda, "fill_u32"), "fill_u32")
+        val artifact = emit_portable_u32_fill_kernel(PortableComputeTarget.Cuda, "fill_u32")
+        val changed_source = PortableComputeArtifact(target: artifact.target, entry_name: artifact.entry_name, source: artifact.source + "\n", binary_format: artifact.binary_format)
+        val plan = portable_compute_compile_plan(artifact, "fill_u32")
+        val changed_plan = portable_compute_compile_plan(changed_source, "fill_u32")
         val request = portable_compute_toolchain_invocation(plan, "build/gpu/fill_u32.cu", "build/gpu/fill_u32.ptx", "nvcc", "")
         val valid = portable_compute_compiled_artifact_evidence(plan, ".version 8.0", ".entry fill_u32", 256)
         val invalid = portable_compute_compiled_artifact_evidence(plan, "ELF", ".entry fill_u32", 256)
@@ -225,6 +264,12 @@ describe "portable GPU compute emitter":
         val failed_tool = portable_compute_compile_result(request, 1, valid)
         val failed_artifact = portable_compute_compile_result(request, 0, invalid)
 
+        expect(plan.artifact_identity).to_equal(artifact.version_hash())
+        expect(plan.artifact_identity == changed_plan.artifact_identity).to_equal(false)
+        expect(request.plan.artifact_identity).to_equal(plan.artifact_identity)
+        expect(valid.plan.artifact_identity).to_equal(plan.artifact_identity)
+        expect(ok.invocation.plan.artifact_identity).to_equal(plan.artifact_identity)
+        expect(ok.evidence.plan.artifact_identity).to_equal(plan.artifact_identity)
         expect(ok.ready).to_equal(true)
         expect(ok.status).to_equal("compiled_artifact_verified")
         expect(ok.diagnostic).to_equal("")
@@ -456,6 +501,7 @@ describe "portable GPU compute emitter":
         expect(plan.rows[4].target_name).to_equal("webgpu")
         expect(plan.rows[4].source_format).to_equal("wgsl")
         expect(plan.rows[4].binary_format).to_equal("source")
+        expect(plan.rows[4].artifact_path_suffix).to_equal("simple_2d_optimization.wgsl")
         expect(plan.rows[4].status).to_equal("metadata-ready")
 
     it "builds browser WASM WebGPU bridge plan after native GPU priority order":

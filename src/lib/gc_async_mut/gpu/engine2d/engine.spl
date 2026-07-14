@@ -57,6 +57,7 @@ use std.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_d
 use std.gc_async_mut.io.mod_stub.{env_get}
 use std.gc_async_mut.text_layout.font_renderer.{FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderer}
 use std.common.encoding.font_registry.{selected_font_asset_candidate_for_identity}
+use std.common.ui.draw_ir.{DrawIrGlyphRunPayload}
 
 # ============================================================================
 # Config / environment backend selection
@@ -166,6 +167,16 @@ class Engine2D:
         val evidence = vulkan.install_font_atlas_pipeline(spirv_bytes)
         self.vulkan_backend = vulkan
         evidence.status == "ready"
+
+    me install_cuda_font_ptx(ptx: text) -> bool:
+        """Install one verified generated font companion on a real CUDA engine."""
+        val active = self.cuda_backend
+        if active == nil:
+            return false
+        val cuda = active
+        val installed = cuda.install_font_atlas_ptx(ptx)
+        self.cuda_backend = cuda
+        installed
 
     me _poison_vulkan_font_surface():
         var software = SoftwareBackend.create()
@@ -811,15 +822,15 @@ class Engine2D:
         self._draw_font_batch(x, y, batch)
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
-        """Draw selected vector text, or the existing bitmap default."""
+        """Draw a selected vector face fail-closed, or use the bitmap default."""
         val selected = self.font_renderer
         if selected != nil:
             val fonts = selected
             if fonts.has_sffi_ttf():
                 val batch = fonts.prepare_text(text_val, color, font_size)
                 self.font_renderer = fonts
-                if self._draw_font_batch(x, y, batch):
-                    return
+                self._draw_font_batch(x, y, batch)
+                return
         if self.vulkan_font_state_unknown:
             return
         if val Some(vg) = self.virtio_gpu_backend:
@@ -828,6 +839,30 @@ class Engine2D:
             bm.draw_text(x, y, text_val, color, font_size)
         else:
             self.backend.draw_text(x, y, text_val, color, font_size)
+
+    me draw_text_with_advances(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, font_size: i32) -> bool:
+        """Draw producer-resolved text through the selected vector face."""
+        val selected = self.font_renderer
+        if selected == nil:
+            return false
+        val fonts = selected
+        if not fonts.has_sffi_ttf():
+            return false
+        val batch = fonts.prepare_text_with_advances(text_val, advance_widths, color, font_size)
+        self.font_renderer = fonts
+        self._draw_font_batch(x, y, batch)
+
+    me draw_shaped_text(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> bool:
+        """Draw a semantic shaped run through the canonical selected face."""
+        val selected = self.font_renderer
+        if selected == nil:
+            return false
+        val fonts = selected
+        if not fonts.has_sffi_ttf():
+            return false
+        val batch = fonts.prepare_selected_glyph_run(glyph_run, color, font_size)
+        self.font_renderer = fonts
+        self._draw_font_batch(x, y, batch)
 
     me load_font(path: text) -> bool:
         """Select one trusted TTF/OTF for process-wide Simple 2D text."""
@@ -870,10 +905,8 @@ class Engine2D:
                 return true
         val candidate = selected_font_asset_candidate_for_identity(identity)
         if candidate == nil:
-            self.unload_font()
             return false
         if not self.load_font(candidate.?.local_path):
-            self.unload_font()
             return false
         val loaded_fonts = self.fonts()
         val loaded_identity = loaded_fonts.current_font_identity()

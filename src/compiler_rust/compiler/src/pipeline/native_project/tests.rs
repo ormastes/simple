@@ -1844,6 +1844,7 @@ fn test_package_bare_exports_resolve_exact_cfg_active_sibling_owners() {
     let main_path = app_root.join("main.spl");
     let init_path = pkg_root.join("__init__.spl");
     let direct_path = pkg_root.join("direct.spl");
+    let facade_path = pkg_root.join("facade.spl");
     let forward_path = pkg_root.join("forward.spl");
     let real_path = app_root.join("z_real.spl");
     let decoy_path = app_root.join("a_decoy.spl");
@@ -1855,10 +1856,15 @@ fn test_package_bare_exports_resolve_exact_cfg_active_sibling_owners() {
         "use app.pkg.{direct_api, forwarded_api}\nuse app.pkg.private.{private_anchor}\nuse app.a_decoy.{decoy_anchor}\nuse app.b_cfg_noise.{cfg_anchor}\nfn main() -> i64:\n    return direct_api() + forwarded_api() + private_anchor() + decoy_anchor() + cfg_anchor()\n",
     )
     .unwrap();
-    std::fs::write(&init_path, "export direct_api, forwarded_api\n").unwrap();
+    std::fs::write(&init_path, "export direct_api, forwarded_api, facade_anchor\n").unwrap();
     std::fs::write(
         &direct_path,
         "fn direct_api() -> i64:\n    return 7\nexport direct_api\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &facade_path,
+        "use app.pkg.direct.{direct_api}\nfn facade_anchor() -> i64:\n    return direct_api()\nexport direct_api, facade_anchor\n",
     )
     .unwrap();
     std::fs::write(&forward_path, "export use app.z_real.*\n").unwrap();
@@ -1898,6 +1904,7 @@ fn test_package_bare_exports_resolve_exact_cfg_active_sibling_owners() {
         "app/main.spl",
         "app/pkg/__init__.spl",
         "app/pkg/direct.spl",
+        "app/pkg/facade.spl",
         "app/pkg/forward.spl",
         "app/pkg/private.spl",
         "app/z_real.spl",

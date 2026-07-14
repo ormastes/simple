@@ -3016,7 +3016,7 @@ fn vulkan_properties_name(props: &vulkan_dlopen::VkPhysicalDeviceProperties) -> 
 
 pub fn rt_vulkan_device_driver_identity_fn(args: &[Value]) -> Result<Value, CompileError> {
     let index = arg_i64(args, 0, "rt_vulkan_device_driver_identity", 1)? as usize;
-    Ok(Value::Str(
+    Ok(Value::text(
         vulkan_device_properties(index)
             .map(|p| {
                 format!(
@@ -3028,8 +3028,7 @@ pub fn rt_vulkan_device_driver_identity_fn(args: &[Value]) -> Result<Value, Comp
                     p.api_version
                 )
             })
-            .unwrap_or_default()
-            .into(),
+            .unwrap_or_default(),
     ))
 }
 
@@ -3039,7 +3038,7 @@ pub fn rt_vulkan_selected_device_driver_identity_fn(_args: &[Value]) -> Result<V
         .unwrap()
         .as_ref()
         .and_then(|s| s.physical_devices.iter().position(|&pd| pd == s.device_physical_device));
-    Ok(Value::Str(
+    Ok(Value::text(
         index
             .and_then(vulkan_device_properties)
             .map(|p| {
@@ -3052,8 +3051,7 @@ pub fn rt_vulkan_selected_device_driver_identity_fn(_args: &[Value]) -> Result<V
                     p.api_version
                 )
             })
-            .unwrap_or_default()
-            .into(),
+            .unwrap_or_default(),
     ))
 }
 
@@ -3069,11 +3067,10 @@ fn vulkan_device_type_name(kind: u32) -> &'static str {
 
 pub fn rt_vulkan_device_type_fn(args: &[Value]) -> Result<Value, CompileError> {
     let index = arg_i64(args, 0, "rt_vulkan_device_type", 1)? as usize;
-    Ok(Value::Str(
+    Ok(Value::text(
         vulkan_device_properties(index)
             .map(|p| vulkan_device_type_name(p.device_type).to_string())
-            .unwrap_or_default()
-            .into(),
+            .unwrap_or_default(),
     ))
 }
 
@@ -3083,12 +3080,11 @@ pub fn rt_vulkan_selected_device_type_fn(_args: &[Value]) -> Result<Value, Compi
         .unwrap()
         .as_ref()
         .and_then(|s| s.physical_devices.iter().position(|&pd| pd == s.device_physical_device));
-    Ok(Value::Str(
+    Ok(Value::text(
         index
             .and_then(vulkan_device_properties)
             .map(|p| vulkan_device_type_name(p.device_type).to_string())
-            .unwrap_or_default()
-            .into(),
+            .unwrap_or_default(),
     ))
 }
 

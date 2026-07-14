@@ -53,6 +53,19 @@ pub enum FencedSubmitError {
     CompletionUnknown(VulkanError),
 }
 
+fn resource_queue_families(compute: u32, transfer: u32, graphics: Option<u32>) -> Vec<u32> {
+    let mut families = vec![compute];
+    if transfer != compute {
+        families.push(transfer);
+    }
+    if let Some(graphics) = graphics {
+        if !families.contains(&graphics) {
+            families.push(graphics);
+        }
+    }
+    families
+}
+
 impl VulkanDevice {
     /// Create a logical device from a physical device
     pub fn new(physical_device: VulkanPhysicalDevice) -> VulkanResult<Arc<Self>> {
@@ -61,7 +74,9 @@ impl VulkanDevice {
         let compute_family = physical_device
             .find_compute_queue_family()
             .ok_or(VulkanError::NoComputeQueue)?;
-        let transfer_family = physical_device.find_transfer_queue_family().unwrap_or(compute_family);
+        // ponytail: one queue avoids cross-queue semaphore ownership; restore a
+        // dedicated transfer queue only with measured benefit and explicit sync.
+        let transfer_family = compute_family;
 
         // Graphics queue support (optional - may not be needed for compute-only devices)
         #[cfg(feature = "vulkan")]
@@ -283,6 +298,15 @@ impl VulkanDevice {
         self.transfer_queue_family
     }
 
+    /// Queue families which may access device-local buffers and images.
+    pub fn resource_queue_families(&self) -> Vec<u32> {
+        #[cfg(feature = "vulkan")]
+        let graphics = self.graphics_queue_family;
+        #[cfg(not(feature = "vulkan"))]
+        let graphics = None;
+        resource_queue_families(self.compute_queue_family, self.transfer_queue_family, graphics)
+    }
+
     /// Get graphics queue family index (if available)
     #[cfg(feature = "vulkan")]
     pub fn graphics_queue_family(&self) -> Option<u32> {
@@ -407,6 +431,32 @@ impl VulkanDevice {
         Ok(cmd)
     }
 
+    /// Begin a graphics command buffer from the graphics-family pool.
+    #[cfg(feature = "vulkan")]
+    pub fn begin_graphics_command(&self) -> VulkanResult<vk::CommandBuffer> {
+        let pool = self
+            .graphics_pool
+            .as_ref()
+            .ok_or_else(|| VulkanError::CommandBufferError("graphics queue unavailable".into()))?
+            .lock();
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(*pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let cmd = unsafe {
+            self.device
+                .allocate_command_buffers(&alloc_info)
+                .map_err(|e| VulkanError::CommandBufferError(format!("Allocate graphics: {:?}", e)))?[0]
+        };
+        let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe {
+            self.device
+                .begin_command_buffer(cmd, &begin_info)
+                .map_err(|e| VulkanError::CommandBufferError(format!("Begin graphics: {:?}", e)))?;
+        }
+        Ok(cmd)
+    }
+
     /// Submit and wait for a compute command buffer
     pub fn submit_compute_command(&self, cmd: vk::CommandBuffer) -> VulkanResult<()> {
         let cmd_buffers = [cmd];
@@ -465,9 +515,59 @@ impl VulkanDevice {
         Ok(())
     }
 
+    #[cfg(feature = "vulkan")]
+    pub fn submit_graphics_command_with_fence(
+        &self,
+        cmd: vk::CommandBuffer,
+        fence: &Fence,
+    ) -> Result<(), FencedSubmitError> {
+        let queue = self.graphics_queue.as_ref().ok_or_else(|| {
+            FencedSubmitError::NotSubmitted(VulkanError::CommandBufferError("graphics queue unavailable".into()))
+        })?;
+        let pool = self.graphics_pool.as_ref().ok_or_else(|| {
+            FencedSubmitError::NotSubmitted(VulkanError::CommandBufferError("graphics pool unavailable".into()))
+        })?;
+        let cmd_buffers = [cmd];
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
+        let queue = queue.lock();
+        if let Err(e) = unsafe { self.device.queue_submit(*queue, &[submit_info], fence.handle()) } {
+            unsafe { self.device.free_command_buffers(*pool.lock(), &[cmd]) };
+            return Err(FencedSubmitError::NotSubmitted(VulkanError::CommandBufferError(
+                format!("Submit graphics: {:?}", e),
+            )));
+        }
+        drop(queue);
+        if let Err(e) = fence.wait(u64::MAX) {
+            return Err(FencedSubmitError::CompletionUnknown(e));
+        }
+        unsafe { self.device.free_command_buffers(*pool.lock(), &[cmd]) };
+        Ok(())
+    }
+
     pub fn free_compute_command(&self, cmd: vk::CommandBuffer) {
         let pool = self.compute_pool.lock();
         unsafe { self.device.free_command_buffers(*pool, &[cmd]) };
+    }
+
+    #[cfg(feature = "vulkan")]
+    pub fn free_graphics_command(&self, cmd: vk::CommandBuffer) -> VulkanResult<()> {
+        let pool = self
+            .graphics_pool
+            .as_ref()
+            .ok_or_else(|| VulkanError::CommandBufferError("graphics pool unavailable".into()))?;
+        unsafe { self.device.free_command_buffers(*pool.lock(), &[cmd]) };
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resource_queue_families;
+
+    #[test]
+    fn resource_queue_families_are_deduplicated() {
+        assert_eq!(resource_queue_families(2, 2, Some(2)), vec![2]);
+        assert_eq!(resource_queue_families(2, 5, Some(7)), vec![2, 5, 7]);
     }
 }
 

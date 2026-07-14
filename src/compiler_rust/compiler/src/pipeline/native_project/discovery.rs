@@ -107,7 +107,7 @@ fn bare_export_names(items: &[simple_parser::ast::Node]) -> Vec<String> {
 fn provided_export_names(
     items: &[simple_parser::ast::Node],
     requested: &[String],
-) -> (Vec<String>, Vec<String>, Vec<String>, bool) {
+) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>, bool) {
     use simple_parser::ast::{Node, Pattern};
 
     let mut defined = Vec::new();
@@ -156,25 +156,25 @@ fn provided_export_names(
 
     let mut explicit: Vec<String> = requested
         .iter()
-        .filter(|name| {
-            forwarded.contains(name)
-                || (bare_exports.contains(name)
-                    && (defined.contains(name)
-                        || extern_decls.contains(name)
-                        || imports_all
-                        || imported.contains(name)))
-        })
+        .filter(|name| forwarded.contains(name) || (bare_exports.contains(name) && defined.contains(name)))
         .cloned()
         .collect();
     explicit.sort();
     explicit.dedup();
-    let mut implicit: Vec<String> = requested
+    let mut definitions: Vec<String> = requested
         .iter()
         .filter(|name| defined.contains(name))
         .cloned()
         .collect();
-    implicit.sort();
-    implicit.dedup();
+    definitions.sort();
+    definitions.dedup();
+    let mut facades: Vec<String> = requested
+        .iter()
+        .filter(|name| bare_exports.contains(name) && (imports_all || imported.contains(name)))
+        .cloned()
+        .collect();
+    facades.sort();
+    facades.dedup();
     let mut extern_weak: Vec<String> = requested
         .iter()
         .filter(|name| extern_decls.contains(name) && !defined.contains(name))
@@ -182,7 +182,7 @@ fn provided_export_names(
         .collect();
     extern_weak.sort();
     extern_weak.dedup();
-    (explicit, implicit, extern_weak, forwards_glob)
+    (explicit, definitions, facades, extern_weak, forwards_glob)
 }
 
 pub(crate) fn visit_ast_nodes(nodes: &[simple_parser::ast::Node], visitor: &mut dyn FnMut(&simple_parser::ast::Node)) {
@@ -959,7 +959,8 @@ impl NativeProjectBuilder {
 
                     let mut explicit_providers: BTreeMap<String, Vec<PathBuf>> =
                         requested.iter().cloned().map(|name| (name, Vec::new())).collect();
-                    let mut implicit_providers = explicit_providers.clone();
+                    let mut definition_providers = explicit_providers.clone();
+                    let mut facade_providers = explicit_providers.clone();
                     let mut extern_weak_providers = explicit_providers.clone();
                     let mut glob_forwarders = Vec::new();
                     for sibling in siblings {
@@ -979,7 +980,7 @@ impl NativeProjectBuilder {
                             Err(_) => continue,
                         };
                         strip_inactive_cfg_arch_fns(&mut sibling_module, target_arch);
-                        let (explicit, implicit, extern_weak, forwards_glob) =
+                        let (explicit, definitions, facades, extern_weak, forwards_glob) =
                             provided_export_names(&sibling_module.items, &requested);
                         if forwards_glob {
                             glob_forwarders.push(sibling.clone());
@@ -987,8 +988,11 @@ impl NativeProjectBuilder {
                         for name in explicit {
                             explicit_providers.entry(name).or_default().push(sibling.clone());
                         }
-                        for name in implicit {
-                            implicit_providers.entry(name).or_default().push(sibling.clone());
+                        for name in definitions {
+                            definition_providers.entry(name).or_default().push(sibling.clone());
+                        }
+                        for name in facades {
+                            facade_providers.entry(name).or_default().push(sibling.clone());
                         }
                         for name in extern_weak {
                             extern_weak_providers.entry(name).or_default().push(sibling.clone());
@@ -997,14 +1001,18 @@ impl NativeProjectBuilder {
                     found_deps.extend(glob_forwarders);
                     for name in requested {
                         let explicit = explicit_providers.remove(&name).unwrap_or_default();
-                        let implicit = implicit_providers.remove(&name).unwrap_or_default();
+                        let definitions = definition_providers.remove(&name).unwrap_or_default();
+                        let facades = facade_providers.remove(&name).unwrap_or_default();
                         let extern_weak = extern_weak_providers.remove(&name).unwrap_or_default();
                         // Tiered resolution: explicit exports beat real
-                        // definitions, which beat extern re-declarations.
+                        // definitions, which beat imported facades and extern
+                        // re-declarations.
                         let owners = if !explicit.is_empty() {
                             explicit
-                        } else if !implicit.is_empty() {
-                            implicit
+                        } else if !definitions.is_empty() {
+                            definitions
+                        } else if !facades.is_empty() {
+                            facades
                         } else {
                             extern_weak
                         };

@@ -1,0 +1,44 @@
+use std.spec.{describe, it, expect}
+use test.helpers.shared_multilingual_gpu_fonts_perf_evidence.{
+    FONT_PERF_CODEPOINTS, FontPerfBudgetEvidence, font_perf_evidence_record,
+    parse_font_perf_evidence, expect_font_perf_budget
+}
+
+fn _samples(start: i64) -> [i64]:
+    var values: [i64] = []
+    var i: i64 = 0
+    while i < 11:
+        values.push(start + i)
+        i = i + 1
+    values
+
+fn _valid_evidence() -> FontPerfBudgetEvidence:
+    FontPerfBudgetEvidence(
+        status: "pass", reason: "pass",
+        warm_1080_p95_ns: 11, warm_4k_p95_ns: 11,
+        cpu_4096_p95_ns: 30, gpu_4096_p95_ns: 11,
+        warm_hits: 22528, warm_requests: 22528, unchanged_upload: true,
+        rss_growth_percent: 10, gpu_resource_high_water_bytes: 1,
+        rss_available: true,
+        legacy_2d_kb: 100, multiface_2d_kb: 110,
+        legacy_3d_kb: 200, multiface_3d_kb: 220,
+        gpu_device_name: "device", gpu_driver_identity: "driver=1",
+        warm_1080_samples_ns: _samples(1), warm_4k_samples_ns: _samples(1),
+        cpu_4096_samples_ns: _samples(20), gpu_4096_samples_ns: _samples(1))
+
+describe "shared multilingual GPU font performance evidence":
+    it "round-trips a fresh record and rejects corrupt or stale fields":
+        expect(FONT_PERF_CODEPOINTS).to_equal("U+0041,U+4E2D,U+00D1,U+0905,U+0628,U+00C9,U+00C3,U+042F,U+0627,U+0049")
+        val record = font_perf_evidence_record(_valid_evidence())
+        expect(record != "").to_be(true)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record))).to_be(true)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record + "\nstatus=pass"))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("unchanged_upload=true", "unchanged_upload=yes")))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("warm_hits=22528", "warm_hits=abc")))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("legacy_2d_kb=100", "legacy_2d_kb=abc")))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("multiface_3d_kb=220", "multiface_3d_kb=221")))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("gpu_4096_samples_ns=1,2,3,4,5,6,7,8,9,10,11", "gpu_4096_samples_ns=1,2,3,4,5,6,7,8,9,10")))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("warm_1080_p95_ns=11", "warm_1080_p95_ns=10")))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("collector_sha256=", "collector_sha256=stale")))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("implementation_sha256=", "implementation_sha256=stale")))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("font_sha256=", "font_sha256=stale")))).to_be(false)

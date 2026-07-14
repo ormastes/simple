@@ -9,10 +9,61 @@ use compiler.backend.gpu_portable_compute.{
     PortableComputeCompiledArtifactEvidence,
     PortableComputeTarget,
     emit_portable_2d_optimization_module,
+    emit_vulkan_font_atlas_composite_source,
     portable_compute_2d_optimization_compile_plan,
     portable_compute_compiled_artifact_evidence,
+    portable_compute_exported_symbol_present,
     portable_compute_target_name
 }
+
+class VulkanFontAtlasCompilePlan:
+    source: text
+    entry_name: text
+    required_symbols: text
+    source_format: text
+    binary_format: text
+    tool_hint: text
+    source_path_suffix: text
+    artifact_path_suffix: text
+
+class VulkanFontAtlasArtifactEvidence:
+    plan: VulkanFontAtlasCompilePlan
+    artifact_magic: text
+    exported_symbols: text
+    byte_count: i64
+    valid: bool
+    reason: text
+
+fn vulkan_font_atlas_compile_plan(output_stem: text) -> VulkanFontAtlasCompilePlan:
+    VulkanFontAtlasCompilePlan(
+        source: emit_vulkan_font_atlas_composite_source(),
+        entry_name: "main",
+        required_symbols: "main",
+        source_format: "vulkan-glsl-450",
+        binary_format: "spirv",
+        tool_hint: "glslangValidator-or-glslc",
+        source_path_suffix: "{output_stem}.comp",
+        artifact_path_suffix: "{output_stem}.spv"
+    )
+
+fn vulkan_font_atlas_artifact_evidence(plan: VulkanFontAtlasCompilePlan, artifact_magic: text,
+                                       exported_symbols: text, byte_count: i64) -> VulkanFontAtlasArtifactEvidence:
+    val reason = if byte_count <= 0:
+        "missing-artifact-bytes"
+    elif not artifact_magic.contains("SPIR-V"):
+        "artifact-magic-mismatch"
+    elif not portable_compute_exported_symbol_present(exported_symbols, plan.required_symbols):
+        "missing-entry-symbol:main"
+    else:
+        "pass"
+    VulkanFontAtlasArtifactEvidence(
+        plan: plan,
+        artifact_magic: artifact_magic,
+        exported_symbols: exported_symbols,
+        byte_count: byte_count,
+        valid: reason == "pass",
+        reason: reason
+    )
 
 class GpuGenerated2DBackendCompileContract:
     backend_name: text

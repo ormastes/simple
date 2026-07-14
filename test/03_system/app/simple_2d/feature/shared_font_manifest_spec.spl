@@ -80,8 +80,12 @@ fn expect_font_license(asset: FontAssetCandidate):
     val license_path = FONT_ASSET_ROOT + asset.license_path
     expect(file_exists(metadata_path)).to_be(true)
     expect(file_exists(license_path)).to_be(true)
-    expect(file_read_text(metadata_path).len()).to_be_greater_than(0)
-    expect(file_read_text(license_path).len()).to_be_greater_than(0)
+    expect(package_sha256(metadata_path)).to_equal("sha256:" + asset.metadata_sha256)
+    expect(package_sha256(license_path)).to_equal("sha256:" + asset.license_sha256)
+    if asset.notice_path != "":
+        expect(package_sha256(FONT_ASSET_ROOT + asset.notice_path)).to_equal("sha256:" + asset.notice_sha256)
+    else:
+        expect(asset.notice_sha256).to_equal("")
 
 fn expect_language_coverage(cells: [FontCoverageCell]):
     expect(selected_font_coverage_languages().len()).to_equal(10)
@@ -102,10 +106,10 @@ fn expect_language_coverage(cells: [FontCoverageCell]):
         elif cell.status == "fallback": fallback_count = fallback_count + 1
         elif cell.status == "not-designed-for-script": not_designed_count = not_designed_count + 1
         elif cell.status == "unavailable": unavailable_count = unavailable_count + 1
-    expect(native_count).to_equal(54)
+    expect(native_count).to_equal(57)
     expect(fallback_count).to_equal(1)
     expect(not_designed_count).to_equal(26)
-    expect(unavailable_count).to_equal(19)
+    expect(unavailable_count).to_equal(16)
     val assets = selected_font_asset_candidates()
     var promoted: i64 = 0
     for cell in cells:
@@ -121,7 +125,7 @@ fn expect_language_coverage(cells: [FontCoverageCell]):
             expect(matches).to_equal(1)
         else:
             expect(cell.witness_family).to_equal("")
-    expect(promoted).to_equal(55)
+    expect(promoted).to_equal(58)
     for asset in assets:
         if asset.coverage_state.starts_with("accepted-simple:"):
             var tuple_count: i64 = 0
@@ -138,7 +142,11 @@ fn expect_language_coverage(cells: [FontCoverageCell]):
                             witnessed = true
                     expect(witnessed).to_be(true)
             expect(tuple_count).to_be_greater_than(0)
-            expect(asset.coverage_state).to_equal("accepted-simple: exact Pure Simple identity shaping accepted for " + accepted_language_list)
+            val prefix = if asset.family == "Noto Sans Devanagari" or asset.family == "Noto Sans Arabic":
+                "accepted-simple: exact Pure Simple selected shaping accepted for "
+            else:
+                "accepted-simple: exact Pure Simple identity shaping accepted for "
+            expect(asset.coverage_state).to_equal(prefix + accepted_language_list)
 
 fn expect_candidate_witness(assets: [FontAssetCandidate], family: text, witness: text):
     var found = false
@@ -334,6 +342,55 @@ describe "shared multilingual font manifest":
         expect(total_bytes).to_equal(51764704)
         expect(total_bytes).to_be_less_than(80 * 1024 * 1024 + 1)
 
+    # @req REQ-005 REQ-009
+    it "should fail closed when a second selected face stales the first wrapper":
+        step("Reject a stale global-face wrapper after loading a second selected face")
+        val assets = setup_shared_font_fixture()
+        val first_asset = assets[13]
+        val second_asset = assets[14]
+        var dylib_available = false
+        var exercised = false
+        for dylib_path in browser_font_dylib_candidates():
+            if file_exists(dylib_path) and not exercised:
+                dylib_available = true
+                val first_loaded = FontRasterizer.load(dylib_path, first_asset.local_path)
+                if first_loaded == nil:
+                    fail("font rasterizer dylib exists but selected face A could not load")
+                var first = first_loaded.?
+                defer:
+                    if first.lib_handle != 0:
+                        first.close()
+                expect(first.is_current()).to_be(true)
+                expect(first.cache_identity()).to_equal("sha256={first_asset.sha256};axes={first_asset.default_axes}")
+
+                val second_loaded = FontRasterizer.load(dylib_path, second_asset.local_path)
+                if second_loaded == nil:
+                    first.close()
+                    fail("font rasterizer dylib exists but selected face B could not load")
+                var second = second_loaded.?
+                defer:
+                    if second.lib_handle != 0:
+                        second.close()
+                expect(second.is_current()).to_be(true)
+                expect(second.cache_identity()).to_equal("sha256={second_asset.sha256};axes={second_asset.default_axes}")
+                expect(first.is_current()).to_be(false)
+                expect(first.cache_identity()).to_equal("")
+                expect(first.has_glyph(65)).to_be(false)
+                expect(first.rasterize(65, 24)).to_be_nil()
+                expect(first.rasterize_subpixel(65, 24)).to_be_nil()
+                expect(first.layout_text("A", 24, 0).len()).to_equal(0)
+                expect(first.horizontal_kern(65, 86, 24)).to_equal(0)
+                expect(first.horizontal_line_metric(24, 0)).to_equal(0)
+                first.close()
+                expect(second.is_current()).to_be(true)
+                expect(second.has_glyph(65)).to_be(true)
+                expect(second.rasterize(65, 24) != nil).to_be(true)
+                second.close()
+                exercised = true
+        if not dylib_available:
+            fail("unavailable: no font rasterizer dylib exists; stale-wrapper evidence did not run")
+        expect(exercised).to_be(true)
+
     # @req REQ-005
     it "should bind accepted-simple policy to the exact candidate corpus":
         step("Check every candidate against its exact CORPUS codepoints and accepted-simple policy")
@@ -347,8 +404,8 @@ describe "shared multilingual font manifest":
                 candidate = candidate + 1
             else:
                 fail("unknown coverage state: " + asset.coverage_state)
-        expect(accepted_simple).to_equal(9)
-        expect(candidate).to_equal(7)
+        expect(accepted_simple).to_equal(11)
+        expect(candidate).to_equal(5)
         expect_candidate_witness(assets, "Noto Sans SC", "English中文EspañolfrançaisPortuguêsРусскийIndonesia")
         expect_candidate_witness(assets, "Noto Sans Devanagari", "EnglishEspañolहिन्दीfrançaisPortuguêsIndonesia")
         expect_candidate_witness(assets, "Noto Sans Arabic", "EnglishEspañolالعربيةfrançaisPortuguêsاردوIndonesia")
@@ -383,7 +440,8 @@ describe "shared multilingual font manifest":
     it "should provide one honest status for all one hundred sparse cells":
         val cells = selected_font_coverage_matrix()
         expect_language_coverage(cells)
-        expect(cells[10].status).to_equal("unavailable")
+        expect(cells[10].status).to_equal("native")
+        expect(cells[10].witness_family).to_equal("Noto Sans SC")
         expect(cells[32].status).to_equal("unavailable")
         expect(cells[73].status).to_equal("not-designed-for-script")
         expect(cells[81].status).to_equal("unavailable")

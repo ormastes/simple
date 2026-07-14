@@ -202,6 +202,7 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
         "runtime_directx_core.c",
         "runtime_legacy_core.c",
         "runtime_mcp_core.c",
+        "runtime_font.c",
         "runtime_pool.c",
         "runtime_simd_utf8.c",
         // engine2d SIMD row kernels (C/NEON) backing rt_engine2d_simd_*_row_u32;

@@ -9,7 +9,8 @@ use common.ui.draw_ir.{
     draw_ir_edge_command, draw_ir_embedding_config, draw_ir_group_command,
     draw_ir_image_command, draw_ir_path_command, draw_ir_point,
     draw_ir_port_command, draw_ir_rect_bounds, draw_ir_style_prop,
-    draw_ir_text_resolved_font
+    draw_ir_glyph_run_payload, draw_ir_text_resolved_font,
+    draw_ir_text_shaped_font
 }
 use common.ui.draw_ir_sdn.{draw_ir_to_sdn, sdn_to_draw_ir}
 use common.ui.taskbar_model.{AppRef, TaskbarModel, TrayItem, WindowRef}
@@ -74,7 +75,8 @@ describe "Draw IR SDN skin":
 
     it "round-trips all command variants and their serialized metadata":
         val styled_rect = draw_ir_box_with_style("box\tone", 1, 2, 30, 40, 0xff123456u32, draw_ir_rect_bounds(1, 2, 30, 40), draw_ir_rect_bounds(3, 4, 26, 36), draw_ir_rect_bounds(0, 1, 32, 42), draw_ir_rect_bounds(0, 0, 100, 80), [draw_ir_style_prop("display mode", "block %= grid\nrow")])
-        val resolved_text = draw_ir_text_resolved_font("label", 5, 6, "AB", 0xffffffffu32, "Noto Sans", "sha256=font-id", [7, 8], 15, 14, 12)
+        val resolved_text = draw_ir_text_shaped_font("label", 5, 6, "اب", 0xffffffffu32, "Noto Sans Arabic", "sha256=font-id", [7, 8], 15, 14, 12,
+            draw_ir_glyph_run_payload([288u32, 85u32, 319u32], [3, 0, 17], [2, 0, 0], [1, 1, 0], true))
         val image = draw_ir_image_command("image", 7, 8, 9, 10, "asset://logo one", [draw_ir_style_prop("fit", "contain")])
         val group = draw_ir_group_command("group", "root")
         val port = draw_ir_port_command("port", "group", 11, 12)
@@ -99,6 +101,11 @@ describe "Draw IR SDN skin":
         expect(commands[1].height).to_equal(14)
         expect(commands[1].computed_style[1].value).to_equal("sha256=font-id")
         expect(commands[1].computed_style[2].value).to_equal("7,8")
+        expect(commands[1].glyph_run.valid).to_equal(true)
+        expect(commands[1].glyph_run.glyph_ids).to_equal([288u32, 85u32, 319u32])
+        expect(commands[1].glyph_run.xs).to_equal([3, 0, 17])
+        expect(commands[1].glyph_run.ys).to_equal([2, 0, 0])
+        expect(commands[1].glyph_run.clusters).to_equal([1, 1, 0])
         expect(commands[2].image_uri).to_equal("asset://logo one")
         expect(commands[2].hit_rect.present).to_equal(true)
         expect(commands[2].computed_style[0].value).to_equal("contain")
@@ -117,6 +124,19 @@ describe "Draw IR SDN skin":
             fail("missing round-tripped edge")
         expect(commands[6].points[0].y).to_equal(14)
         expect(commands[7].edge).to_be_nil()
+
+    it "drops malformed shaped payloads without indexing parallel arrays":
+        val malformed = draw_ir_text_shaped_font("bad", 0, 0, "A", 0xffffffffu32,
+            "Noto Sans", "sha256=font-id", [7], 7, 14, 12,
+            draw_ir_glyph_run_payload([1u32], [], [], [], true))
+        val batch = draw_ir_batch("bad", DRAW_IR_BACKEND_GPU,
+            draw_ir_embedding_config("surface", "component", 0, 0, 10, 10, 0, 1000, false),
+            [malformed])
+        val parsed = sdn_to_draw_ir(draw_ir_to_sdn(
+            draw_ir_composition("bad", "scene", DRAW_IR_BACKEND_GPU, [batch])))
+
+        expect(parsed.batches[0].commands[0].glyph_run.valid).to_equal(false)
+        expect(parsed.batches[0].commands[0].glyph_run.glyph_ids.len()).to_equal(0)
 
     it "parses the legacy version-2 edge fields":
         val legacy = "draw_ir schema=simple-draw-ir-v2\n\tcomposition id=legacy scene_key=scene backend=gpu\n\tbatch id=batch backend=gpu surface=surface component=component x=0 y=0 width=10 height=10 layer=0 opacity=1000 clip=false source_kind=manual source_id=legacy html_tag= html_node_id= css_selector= css_class= style_key= style_revision=\n\t\tcommand kind=edge id=edge-old x=0 y=0 width=0 height=0 color=0 text= source=left target=right routing=orthogonal"

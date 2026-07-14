@@ -86,6 +86,15 @@ kernels before falling back to the generic software path:
 
 ## Source of Truth
 
+### Shared font routing
+
+Backend selection does not change text ownership. Web, GUI, and WM preserve the
+resolved `font-identity` and ordered advances in `DrawIrComposition`; Engine2D
+selects that exact face and materializes transient `FontRenderBatch` data inside
+`draw_text`. A failed nonempty identity is skipped and reported, never repainted
+through the bitmap default. Engine3D HUD/world remains a separate consumer and
+cannot satisfy Web/GUI/2D evidence.
+
 The current shared implementation lives in:
 
 - `src/lib/gc_async_mut/gpu/engine2d/helpers_availability.spl`

@@ -406,27 +406,39 @@ The compute path shares the same resource pool and bind group system as the rend
 The selected font design uses the canonical `FontRenderer` and one
 `FontRenderBatch` for both engines. Current source prepares stable per-glyph
 quads over one bounded persistent white-alpha atlas. Engine3D now exposes
-`load_font`, `unload_font`, `draw_text_hud`, and `draw_text_world`; HUD consumes
-the shared batch through the CPU image path, while world text projects through
-the stored view/projection matrices before using that fallback. These methods
-are compatibility behavior, not native GPU evidence.
+`load_font`, `unload_font`, `draw_text_hud`, and `draw_text_world`. The default
+path consumes the shared batch through the CPU image target; the optional
+Engine3D Vulkan font adapter consumes that same batch through separate HUD and
+world pipelines. Neither source path alone is native GPU evidence.
 
-The native blocker is end-to-end graphics evidence: atlas texture creation and
-upload, texture/sampler/pipeline binding, HUD or world transform and depth
-behavior, draw submission, completed fence, and device-origin readback compared
-with the CPU oracle. Existing CPU delegation, compute dispatch, emitted source,
-or texture upload alone does not establish Engine3D GPU font rendering. Do not
-document a promoted native backend until those source and test gates pass.
+The native blocker is a retained end-to-end execution record: atlas texture
+creation and upload, texture/sampler/pipeline binding, HUD and world transform
+and depth behavior, draw submission, completed fence, and device-origin
+readback compared with the CPU oracle. CPU delegation, emitted source, or
+upload alone cannot establish Engine3D GPU font rendering. Do not document a
+promoted native backend until the executable evidence gate passes.
 
 The completion scenario is `Render Engine3D HUD and world text on the promoted
 backend`, checked by `expect_engine3d_font_readback`. It must use the existing
 `FontRenderer`/`FontRenderBatch` seam and record texture, sampler, pipeline,
 transform/depth, draw, completed fence, and device-origin readback. The Vulkan
 owner now supplies real untextured mesh/depth/fence/readback prerequisites and
-borrows shared device state safely. It still cannot satisfy the font checker:
-the graphics pipeline has no combined-image-sampler descriptor layout, so
-texture binding remains explicitly unavailable and HUD/world stay on the CPU
-compatibility path.
+borrows shared device state safely. Dedicated HUD/world font pipelines now own
+combined-image-sampler descriptor sets, use the selected graphics+compute queue,
+and retain submission resources when fence completion is unknown. Native
+atlas reuse now requires the exact canonical batch owner plus dependency
+generation, and failed upload or shutdown clears both. The world pipeline now
+tests and writes depth, while its fragment shader discards zero-coverage atlas
+texels. A translated-perspective four-frame oracle requires near glyph pixels
+to win in both draw orders. Device-readback provenance is source-complete: the
+record binds an accelerated device/driver, submitted command, completed fence,
+native color-image handle, exact frame byte count, and bytes returned by
+`Engine3D.read_pixels`; prior-frame targets are cleared at frame start. The CPU
+comparator remains color-only and is not used as depth authority. Logical
+pipeline/texture handles resolve to their exact native resources, and a
+HUD-only atlas-derived oracle checks exact nonzero pixel bounds and count at a
+fixed origin. No retained native run has passed, so this is not promotion
+evidence.
 
 See [Shared Multilingual GPU Fonts](../shared_multilingual_gpu_fonts.md) for the
 selected languages, ten-category candidate catalog, and evidence contract.

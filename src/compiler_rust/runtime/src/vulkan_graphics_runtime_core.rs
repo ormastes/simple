@@ -44,6 +44,13 @@ pub(super) use ash::vk;
 
 static NEXT_HANDLE: AtomicI64 = AtomicI64::new(1);
 
+#[cfg(feature = "vulkan")]
+pub(super) struct FontGraphicsResources {
+    pub _layout: Arc<DescriptorSetLayout>,
+    pub _pool: Arc<DescriptorPool>,
+    pub set: Arc<DescriptorSet>,
+}
+
 pub(super) fn alloc_handle() -> i64 {
     NEXT_HANDLE.fetch_add(1, Ordering::Relaxed)
 }
@@ -61,12 +68,14 @@ pub(super) struct VulkanState {
     pub shader_spirv: HashMap<i64, Vec<u8>>,
     pub fences: HashMap<i64, Fence>,
     pub quarantined_compute: Vec<(Fence, vk::CommandBuffer)>,
+    pub quarantined_graphics: Vec<(Fence, vk::CommandBuffer)>,
     pub strings: HashMap<String, CString>,
     pub semaphores: HashMap<i64, Semaphore>,
     pub images: HashMap<i64, Arc<VulkanImage>>,
     pub samplers: HashMap<i64, Arc<Sampler>>,
     pub render_passes: HashMap<i64, Arc<RenderPass>>,
     pub graphics_pipelines: HashMap<i64, Arc<GraphicsPipeline>>,
+    pub font_graphics_resources: HashMap<i64, FontGraphicsResources>,
     pub framebuffers: HashMap<i64, Arc<Framebuffer>>,
     pub swapchains: HashMap<i64, Arc<VulkanSwapchain>>,
     pub descriptor_pools: HashMap<i64, Arc<DescriptorPool>>,
@@ -92,12 +101,14 @@ impl VulkanState {
             shader_spirv: HashMap::new(),
             fences: HashMap::new(),
             quarantined_compute: Vec::new(),
+            quarantined_graphics: Vec::new(),
             strings: HashMap::new(),
             semaphores: HashMap::new(),
             images: HashMap::new(),
             samplers: HashMap::new(),
             render_passes: HashMap::new(),
             graphics_pipelines: HashMap::new(),
+            font_graphics_resources: HashMap::new(),
             framebuffers: HashMap::new(),
             swapchains: HashMap::new(),
             descriptor_pools: HashMap::new(),
@@ -135,6 +146,14 @@ impl VulkanState {
         if let Some(device) = self.device.clone() {
             for (_, cmd) in self.quarantined_compute.drain(..) {
                 device.free_compute_command(cmd);
+            }
+        }
+    }
+
+    pub fn clean_quarantined_graphics(&mut self) {
+        if let Some(device) = self.device.clone() {
+            for (_, cmd) in self.quarantined_graphics.drain(..) {
+                let _ = device.free_graphics_command(cmd);
             }
         }
     }
@@ -223,12 +242,14 @@ pub extern "C" fn rt_vulkan_shutdown() -> i64 {
             return 0;
         }
         state.clean_quarantined_compute();
+        state.clean_quarantined_graphics();
     }
     state.descriptor_sets.clear();
     state.active_compute_layout = None;
     state.descriptor_pools.clear();
     state.descriptor_set_layouts.clear();
     state.framebuffers.clear();
+    state.font_graphics_resources.clear();
     state.graphics_pipelines.clear();
     state.render_passes.clear();
     state.swapchains.clear();
@@ -241,6 +262,7 @@ pub extern "C" fn rt_vulkan_shutdown() -> i64 {
     state.buffers.clear();
     state.fences.clear();
     state.quarantined_compute.clear();
+    state.quarantined_graphics.clear();
     state.semaphores.clear();
     state.semaphore_pool = None;
     state.window_manager = None;

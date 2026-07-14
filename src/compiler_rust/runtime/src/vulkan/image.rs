@@ -113,7 +113,8 @@ impl VulkanImage {
         format: vk::Format,
         usage: ImageUsage,
     ) -> VulkanResult<Arc<Self>> {
-        let image_info = vk::ImageCreateInfo::default()
+        let queue_families = device.resource_queue_families();
+        let mut image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
             .extent(vk::Extent3D {
@@ -128,6 +129,11 @@ impl VulkanImage {
             .usage(usage.to_vk_usage())
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
+        if queue_families.len() > 1 {
+            image_info = image_info
+                .sharing_mode(vk::SharingMode::CONCURRENT)
+                .queue_family_indices(&queue_families);
+        }
 
         let image = unsafe {
             device
@@ -220,7 +226,8 @@ impl VulkanImage {
 
     /// Upload data to the image
     pub fn upload(&self, data: &[u8]) -> VulkanResult<()> {
-        let expected_size = (self.width * self.height * 4) as usize; // Assume 4 bytes per pixel
+        let bytes_per_pixel = if self.format == vk::Format::R8_UNORM { 1 } else { 4 };
+        let expected_size = (self.width * self.height * bytes_per_pixel) as usize;
         if data.len() < expected_size {
             return Err(VulkanError::BufferTooSmall);
         }
@@ -353,33 +360,33 @@ impl VulkanImage {
         // Sampled textures require a transition. Offscreen targets already
         // have the layout and visibility established by the render pass.
         if source_layout != vk::ImageLayout::TRANSFER_SRC_OPTIMAL {
-        let barrier = vk::ImageMemoryBarrier::default()
+            let barrier = vk::ImageMemoryBarrier::default()
                 .old_layout(source_layout)
-            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(self.image)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            })
+                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(self.image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
                 .src_access_mask(source_access)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
+                .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
 
-        unsafe {
-            self.device.handle().cmd_pipeline_barrier(
-                cmd,
+            unsafe {
+                self.device.handle().cmd_pipeline_barrier(
+                    cmd,
                     source_stage,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[barrier],
-            );
-        }
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier],
+                );
+            }
         }
 
         // Copy image to buffer

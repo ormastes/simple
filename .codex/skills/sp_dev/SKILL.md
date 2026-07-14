@@ -409,9 +409,21 @@ font GPU emission, or GUI/Web/2D/3D text.
 5. Web and GUI producers emit `DrawIrComposition`; Engine2D lowers its text
    through `draw_text`. Engine3D HUD/world text is a separate consumer lane,
    never a shortcut for Web, GUI, Draw IR, or 2D.
+   In this lane `WebIR` means the existing web semantic/layout model; do not
+   invent a second drawing IR or store glyph/atlas/native material in it.
+   Producer-resolved shaping may cross Draw IR only as handle-free glyph IDs,
+   positions, and logical clusters. Its SDN form must round-trip those arrays;
+   `font-shaping=selected-pure-simple` without a valid payload fails closed.
+   Atlases, face handles, backend resources, and caches remain transient
+   `FontRenderer`/Engine2D material.
 6. GPU proof climbs `emission -> compile -> submission -> fence -> device-origin
    readback -> CPU parity`; stop and report the first unavailable rung.
    `unavailable` is never PASS.
+   Compile evidence must include the Simple-emitted font companion and its
+   versioned exported symbol; runtime promotion must load that verified artifact,
+   not a handwritten or independently generated parallel blob.
+   Vulkan promotion additionally requires the validated precompiled-SPIR-V
+   artifact mode; runtime GLSL is diagnostic execution only.
 7. Shaping and material preparation fail closed unless every required operation
    completed and the final glyphs remain bound to the exact live face handle
    and generation.
@@ -433,6 +445,18 @@ font GPU emission, or GUI/Web/2D/3D text.
     pinned bytes through every applicable disk/initramfs builder, and prove
     guest path/length/hash plus glyph and framebuffer evidence. Host-repository
     asset presence is not guest proof.
+12. Runtime font configuration uses the one text-layout-owned
+    `FontRenderConfig` beside `FontRenderBatch`. Evidence
+    must vary and assert every family/category/language/script, size,
+    weight/style, hinting, antialiasing, atlas-policy, target, and execution-
+    policy identity dimension through bitmap, selected-vector, shaped, 2D, and
+    3D paths. `Suggested` tries the named target first, then the remaining
+    canonical GPU order, then CPU; `Preferred` tries the named target then CPU;
+    `Required` tries the named target only. Unsupported modes/CTM reject before
+    cache/backend mutation. `Suggested(auto)` uses the engine's executable
+    font-adapter order; Preferred/Required with `auto` and unknown targets
+    reject before mutation. Batch evidence carries config identity, target,
+    and policy; the config object never crosses WebIR or Draw IR.
 
 For UI-test helper work, keep the test-library surface consistent: new SSpec
 manual specs use canonical `use std.spec.*` and `step("...")`, existing

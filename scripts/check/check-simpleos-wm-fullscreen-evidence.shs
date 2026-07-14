@@ -18,13 +18,23 @@ FULLSCREEN_RAW="$FULLSCREEN_PPM.raw"
 RESTORED_RAW="$RESTORED_PPM.raw"
 BASELINE_PPM="$BUILD_DIR/baseline.ppm"
 BASELINE_RAW="$BASELINE_PPM.raw"
+FONT_REGION_RGB="$BUILD_DIR/font-region.rgb"
+FONT_ASSET="${SIMPLEOS_WM_FONT_ASSET:-assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf}"
+FONT_ASSET_EXPECTED_BYTES=1708408
+FONT_ASSET_EXPECTED_SHA256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081
+FONT_REGION_EXPECTED_BYTES=1242
+FONT_REGION_EXPECTED_SHA256=65f5480aa1d19b4496b2f9f45ab0e7a8a0ec9e02c9a9d674879ececa138ff73c
+FONT_ASSET_BYTES=0
+FONT_ASSET_SHA256=""
+DISK_IMAGE=""
+disk_image_status=not-staged
 QEMU_PID=""
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$LAUNCH_OUT" "$SERIAL_LOG" "$QMP_SOCKET" "$CAPTURE_OUT" \
     "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" \
     "$BASELINE_RAW" "$FULLSCREEN_RAW" "$RESTORED_RAW" \
-    "$BUILD_DIR/evidence.env"
+    "$FONT_REGION_RGB" "$BUILD_DIR/evidence.env"
 
 is_rust_seed_simple() {
     case "$1" in
@@ -76,6 +86,18 @@ file_byte_count() {
         wc -c <"$1" | tr -d ' '
     else
         echo 0
+    fi
+}
+
+file_sha256() {
+    if [ ! -f "$1" ]; then
+        echo ""
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo ""
     fi
 }
 
@@ -132,6 +154,14 @@ emit_failure() {
         echo "simpleos_wm_fullscreen_qemu_out=$LAUNCH_OUT"
         echo "simpleos_wm_fullscreen_serial_log=$SERIAL_LOG"
         echo "simpleos_wm_fullscreen_serial_log_bytes=$(file_byte_count "$SERIAL_LOG")"
+        echo "simpleos_wm_fullscreen_disk_image=$DISK_IMAGE"
+        echo "simpleos_wm_fullscreen_disk_image_status=$disk_image_status"
+        echo "simpleos_wm_fullscreen_font_asset=$FONT_ASSET"
+        echo "simpleos_wm_fullscreen_font_asset_bytes=$FONT_ASSET_BYTES"
+        echo "simpleos_wm_fullscreen_font_asset_sha256=$FONT_ASSET_SHA256"
+        echo "simpleos_wm_fullscreen_font_region_rgb=$FONT_REGION_RGB"
+        echo "simpleos_wm_fullscreen_font_region_rgb_bytes=$(file_byte_count "$FONT_REGION_RGB")"
+        echo "simpleos_wm_fullscreen_font_region_rgb_sha256=$(file_sha256 "$FONT_REGION_RGB")"
     } >"$BUILD_DIR/evidence.env"
     {
         echo "# SimpleOS WM Fullscreen Evidence"
@@ -153,6 +183,14 @@ fi
 if [ ! -f "$SIMPLE_BIN" ]; then
     SIMPLE_BIN_STATUS=missing
     emit_failure "simple-bin-missing"
+    exit 1
+fi
+
+FONT_ASSET_BYTES="$(file_byte_count "$FONT_ASSET")"
+FONT_ASSET_SHA256="$(file_sha256 "$FONT_ASSET")"
+if [ "$FONT_ASSET_BYTES" != "$FONT_ASSET_EXPECTED_BYTES" ] || \
+   [ "$FONT_ASSET_SHA256" != "$FONT_ASSET_EXPECTED_SHA256" ]; then
+    emit_failure "pinned-font-asset-invalid"
     exit 1
 fi
 
@@ -231,8 +269,22 @@ fi
 
 rm -f "$QMP_SOCKET" "$SERIAL_LOG"
 
-DISK_IMAGE="${SIMPLEOS_WM_DISK_IMAGE:-build/os/fat32-x86_64.img}"
-if [ ! -f "$DISK_IMAGE" ]; then
+DISK_IMAGE="${SIMPLEOS_WM_DISK_IMAGE:-$BUILD_DIR/fat32-x86_64-font.img}"
+if [ -z "${SIMPLEOS_WM_DISK_IMAGE:-}" ]; then
+    set +e
+    SIMPLEOS_FONT_ASSET="$FONT_ASSET" scripts/os/make_os_disk.shs \
+        26 "$DISK_IMAGE" "$KERNEL_OUTPUT" x86_64 \
+        >"$BUILD_DIR/make-os-disk.out" 2>&1
+    disk_build_code=$?
+    set -e
+    if [ "$disk_build_code" -ne 0 ]; then
+        disk_image_status=build-failed
+        emit_failure "pinned-font-disk-staging-failed"
+        exit 1
+    fi
+fi
+disk_image_status="$(regular_file_status "$DISK_IMAGE")"
+if [ "$disk_image_status" != pass ]; then
     emit_failure "production-fat32-disk-missing"
     exit 1
 fi
@@ -267,6 +319,12 @@ scanout_stride=0
 scanout_pixel_format=""
 scanout_generation=0
 scanout_size=0
+font_marker=""
+font_unavailable_marker=""
+font_marker_valid=false
+font_region_line=""
+font_region_bytes=0
+font_region_sha256=""
 input_nonce="simpleos-wm-$(date +%s)-$$"
 input_submit_marker=""
 input_irq_marker=""
@@ -312,7 +370,10 @@ else
         fi
         scanout_marker="$(marker_line "$SERIAL_LOG" "[scanout-evidence]")"
         ready_marker="$(marker_line "$SERIAL_LOG" "[production-readiness]")"
-        if [ -n "$scanout_marker" ] && [ -n "$ready_marker" ]; then
+        font_marker="$(marker_line "$SERIAL_LOG" "[font-evidence]")"
+        font_unavailable_marker="$(marker_line "$SERIAL_LOG" "[font-evidence-unavailable]")"
+        if [ -n "$scanout_marker" ] && [ -n "$ready_marker" ] && \
+           { [ -n "$font_marker" ] || [ -n "$font_unavailable_marker" ]; }; then
             break
         fi
         if ! kill -0 "$QEMU_PID" 2>/dev/null; then
@@ -328,6 +389,11 @@ else
     scanout_stride="$(marker_field "$scanout_marker" stride)"
     scanout_pixel_format="$(marker_field "$scanout_marker" pixel_format)"
     scanout_generation="$(marker_field "$scanout_marker" generation)"
+    case "$font_marker" in
+        *"[font-evidence] family=Noto Sans Mono asset_sha256=$FONT_ASSET_EXPECTED_SHA256 raster=pure-sfnt-glyf font_size=32 codepoint=65 region=x64,y64,w18,h23 region_rgb_sha256=$FONT_REGION_EXPECTED_SHA256"*)
+            font_marker_valid=true
+            ;;
+    esac
 
     case "$scanout_address:$scanout_width:$scanout_height:$scanout_stride:$scanout_generation" in
         *[!0-9:]*|:*|*::*|*:) metadata_valid=false ;;
@@ -337,6 +403,10 @@ else
         :
     elif [ -z "$scanout_marker" ] || [ -z "${ready_marker:-}" ]; then
         reason="dynamic-scanout-or-desktop-readiness-missing"
+    elif [ -n "$font_unavailable_marker" ]; then
+        reason="guest-pinned-font-evidence-unavailable"
+    elif [ "$font_marker_valid" != true ]; then
+        reason="guest-pinned-font-evidence-invalid"
     elif [ "$metadata_valid" != true ] || [ "$scanout_address" -le 0 ] || \
          [ "$scanout_width" -le 0 ] || [ "$scanout_height" -le 0 ] || \
          [ "$scanout_stride" -le 0 ] || [ "$scanout_generation" -le 0 ] || \
@@ -356,7 +426,7 @@ else
         # Capture baseline, inject two F11 make/break pairs, and map the host
         # nonce to the guest's newly observed monotonic input sequences.
         set +e
-        python3 - "$QMP_SOCKET" "$SERIAL_LOG" "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" "$scanout_address" "$scanout_width" "$scanout_height" "$scanout_stride" "$scanout_pixel_format" "$scanout_size" "$input_nonce" >"$CAPTURE_OUT" 2>&1 <<'PY'
+        python3 - "$QMP_SOCKET" "$SERIAL_LOG" "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" "$FONT_REGION_RGB" "$scanout_address" "$scanout_width" "$scanout_height" "$scanout_stride" "$scanout_pixel_format" "$scanout_size" "$input_nonce" >"$CAPTURE_OUT" 2>&1 <<'PY'
 import hashlib
 import json
 import os
@@ -367,8 +437,9 @@ import time
 
 sock_path, serial_path = sys.argv[1], sys.argv[2]
 baseline_ppm, fullscreen_ppm, restored_ppm = sys.argv[3], sys.argv[4], sys.argv[5]
-address, width, height, pitch = map(int, sys.argv[6:10])
-pixel_format, size, nonce = sys.argv[10], int(sys.argv[11]), sys.argv[12]
+font_region_path = sys.argv[6]
+address, width, height, pitch = map(int, sys.argv[7:11])
+pixel_format, size, nonce = sys.argv[11], int(sys.argv[12]), sys.argv[13]
 
 qmp_id = [0]
 
@@ -469,6 +540,16 @@ f.readline()
 write_qmp(f, {"execute": "qmp_capabilities"})
 baseline_seq = max_input_seq()
 baseline = pmem(f, baseline_ppm)
+if width < 82 or height < 87 or len(baseline) != size:
+    raise RuntimeError("font-region-out-of-bounds")
+font_region = bytearray()
+for y in range(64, 87):
+    for x in range(64, 82):
+        i = y * pitch + x * 4
+        font_region.extend([baseline[i + 2], baseline[i + 1], baseline[i]])
+with open(font_region_path, "wb") as out:
+    out.write(font_region)
+font_region_hash = hashlib.sha256(font_region).hexdigest()
 send_f11(f)
 max_seq, target_window, max_irq, max_state, max_frame = wait_correlation(baseline_seq, "maximize")
 fullscreen = pmem(f, fullscreen_ppm)
@@ -493,6 +574,7 @@ print("simpleos_wm_maximize_frame_marker=" + max_frame)
 print("simpleos_wm_restore_irq_marker=" + restore_irq)
 print("simpleos_wm_restore_state_marker=" + restore_state)
 print("simpleos_wm_restore_frame_marker=" + restore_frame)
+print("font_region=x64,y64,w18,h23 font_region_rgb_bytes=%d font_region_rgb_sha256=%s" % (len(font_region), font_region_hash))
 print("simpleos_wm_fullscreen_delta changed_bytes=%d before_sha256=%s after_sha256=%s restored_sha256=%s" % (changed, base_hash, full_hash, restored_hash))
 PY
         capture1_code=$?
@@ -516,9 +598,18 @@ PY
             before_sha256="$(marker_field "$delta_line" before_sha256)"
             after_sha256="$(marker_field "$delta_line" after_sha256)"
             restored_sha256="$(marker_field "$delta_line" restored_sha256)"
+            font_region_line="$(sed -n '/^font_region=x64,y64,w18,h23 /p' "$CAPTURE_OUT" | tail -n 1)"
+            font_region_bytes="$(marker_field "$font_region_line" font_region_rgb_bytes)"
+            font_region_sha256="$(marker_field "$font_region_line" font_region_rgb_sha256)"
             if serial_has_production_fault; then
                 status=fail
                 reason=guest-render-fault
+            elif [ "$font_region_bytes" != "$FONT_REGION_EXPECTED_BYTES" ] || \
+                 [ "$font_region_sha256" != "$FONT_REGION_EXPECTED_SHA256" ] || \
+                 [ "$(file_byte_count "$FONT_REGION_RGB")" != "$FONT_REGION_EXPECTED_BYTES" ] || \
+                 [ "$(file_sha256 "$FONT_REGION_RGB")" != "$FONT_REGION_EXPECTED_SHA256" ]; then
+                status=fail
+                reason=pinned-font-region-oracle-mismatch
             else
                 status=pass
                 reason=pass
@@ -539,6 +630,17 @@ fi
     echo "simpleos_wm_fullscreen_serial_log_bytes=$(file_byte_count "$SERIAL_LOG")"
     echo "simpleos_wm_fullscreen_qemu_out=$LAUNCH_OUT"
     echo "simpleos_wm_fullscreen_capture_out=$CAPTURE_OUT"
+    echo "simpleos_wm_fullscreen_disk_image=$DISK_IMAGE"
+    echo "simpleos_wm_fullscreen_disk_image_status=$disk_image_status"
+    echo "simpleos_wm_fullscreen_font_asset=$FONT_ASSET"
+    echo "simpleos_wm_fullscreen_font_asset_bytes=$FONT_ASSET_BYTES"
+    echo "simpleos_wm_fullscreen_font_asset_sha256=$FONT_ASSET_SHA256"
+    echo "simpleos_wm_fullscreen_font_marker=$font_marker"
+    echo "simpleos_wm_fullscreen_font_unavailable_marker=$font_unavailable_marker"
+    echo "simpleos_wm_fullscreen_font_region_rgb=$FONT_REGION_RGB"
+    echo "simpleos_wm_fullscreen_font_region_rgb_bytes=$font_region_bytes"
+    echo "simpleos_wm_fullscreen_font_region_rgb_sha256=$font_region_sha256"
+    echo "simpleos_wm_fullscreen_font_region_device_origin=qemu-pmemsave"
     echo "simpleos_wm_fullscreen_scanout_marker=$scanout_marker"
     echo "simpleos_wm_fullscreen_scanout_address=$scanout_address"
     echo "simpleos_wm_fullscreen_scanout_width=$scanout_width"
@@ -585,6 +687,10 @@ fi
     echo "- simple bin source: $SIMPLE_BIN_SOURCE"
     echo "- simple bin status: $SIMPLE_BIN_STATUS"
     echo "- qmp socket: $QMP_SOCKET"
+    echo "- disk image: $DISK_IMAGE ($disk_image_status)"
+    echo "- pinned font asset: $FONT_ASSET ($FONT_ASSET_BYTES bytes, sha256=$FONT_ASSET_SHA256)"
+    echo "- guest font marker: ${font_marker:--}"
+    echo "- font region: $FONT_REGION_RGB (${font_region_bytes:-0} bytes, sha256=${font_region_sha256:--}, origin=qemu-pmemsave)"
     echo "- scanout: address=${scanout_address:--} width=${scanout_width:-0} height=${scanout_height:-0} byte-pitch=${scanout_stride:-0} format=${scanout_pixel_format:--} generation=${scanout_generation:-0}"
     echo "- host nonce: $input_nonce"
     echo "- input sequences: baseline=$baseline_seq maximize=$maximize_seq restore=$restore_seq"

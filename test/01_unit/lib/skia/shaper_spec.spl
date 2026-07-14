@@ -340,14 +340,14 @@ describe "Shaper":
         expect(shaped_run_to_font_glyph_run(run).valid).to_equal(false)
         free_font(handle)
 
-    it "shapes the pinned Arabic and Urdu joining witnesses with stable metadata":
+    it "matches the pinned HarfBuzz Arabic and Urdu default-instance oracles":
         val path = "assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf"
         val loaded = load_font(path)
         expect(loaded).to_not_be_nil()
         val handle = loaded as std.nogc_sync_mut.io.font_ffi.FontHandle
         val parsed = parse_offset_table(rt_file_read_bytes(path))
         expect(parsed).to_not_equal(None)
-        val font = sk_font_new(sk_typeface_from_attached_font("Noto Sans Arabic", sk_font_style_normal(), path, handle.handle), 12.0)
+        val font = sk_font_new(sk_typeface_from_attached_font("Noto Sans Arabic", sk_font_style_normal(), path, handle.handle), 32.0)
         val bound = shaper_with_ot_face(shaper_new(fallback_chain_new(font)), handle.handle, parsed.unwrap())
         val arabic = shaper_shape_with_language(bound, [1575u32, 1604u32, 1593u32, 1585u32, 1576u32, 1610u32, 1577u32], font, 0.0, 0.0, "ar")[0]
         expect arabic.language to_equal "ar"
@@ -355,8 +355,20 @@ describe "Shaper":
         expect arabic.glyph_indices_valid to_equal true
         expect arabic.substitution_complete to_equal true
         expect arabic.positioning_complete to_equal true
-        expect arabic.glyphs[0].cluster to_equal 6
-        expect arabic.glyphs[6].cluster to_equal 0
+        val arabic_ids = [288u32, 85u32, 319u32, 18u32, 317u32, 19u32, 31u32, 48u32, 72u32, 8u32]
+        val arabic_clusters = [6, 6, 5, 5, 4, 4, 3, 2, 1, 0]
+        val arabic_advances = [0.0, 15.552, 0.0, 11.936, 0.0, 8.608, 11.712, 16.672, 8.320, 7.616]
+        val arabic_offsets = [3.232, 0.0, 1.248, 0.0, 0.992, 0.0, -0.960, 0.0, 0.0, 0.0]
+        val arabic_y_offsets = [2.080, 0.0, -0.160, 0.0, -0.096, 0.0, 0.0, 0.0, 0.0, 0.0]
+        var oracle_index: i64 = 0
+        while oracle_index < arabic_ids.len():
+            expect arabic.glyphs[oracle_index].glyph_id to_equal arabic_ids[oracle_index]
+            expect arabic.glyphs[oracle_index].cluster to_equal arabic_clusters[oracle_index]
+            expect arabic.glyphs[oracle_index].x_advance to_equal arabic_advances[oracle_index]
+            expect arabic.glyphs[oracle_index].x_offset to_equal arabic_offsets[oracle_index]
+            expect arabic.glyphs[oracle_index].y_offset to_equal arabic_y_offsets[oracle_index]
+            expect arabic.positions[oracle_index].y to_equal -arabic_y_offsets[oracle_index]
+            oracle_index = oracle_index + 1
         expect shaped_run_to_font_glyph_run(arabic).valid to_equal true
 
         val urdu = shaper_shape_with_language(bound, [1575u32, 1585u32, 1583u32, 1608u32], font, 0.0, 0.0, "ur")[0]
@@ -364,6 +376,18 @@ describe "Shaper":
         expect urdu.glyph_indices_valid to_equal true
         expect urdu.substitution_complete to_equal true
         expect urdu.positioning_complete to_equal true
+        val urdu_ids = [98u32, 28u32, 30u32, 8u32]
+        val urdu_clusters = [3, 2, 1, 0]
+        val urdu_advances = [14.304, 15.264, 10.784, 7.616]
+        val urdu_offsets = [0.0, 0.0, -0.960, 0.0]
+        oracle_index = 0
+        while oracle_index < urdu_ids.len():
+            expect urdu.glyphs[oracle_index].glyph_id to_equal urdu_ids[oracle_index]
+            expect urdu.glyphs[oracle_index].cluster to_equal urdu_clusters[oracle_index]
+            expect urdu.glyphs[oracle_index].x_advance to_equal urdu_advances[oracle_index]
+            expect urdu.glyphs[oracle_index].x_offset to_equal urdu_offsets[oracle_index]
+            expect urdu.glyphs[oracle_index].y_offset to_equal 0.0
+            oracle_index = oracle_index + 1
         expect shaped_run_to_font_glyph_run(urdu).valid to_equal true
 
         val marked = shaper_shape_with_language(bound, [1576u32, 1614u32], font, 0.0, 0.0, "ar")[0]
@@ -382,13 +406,26 @@ describe "Shaper":
         val font = sk_font_new(sk_typeface_from_attached_font("Noto Emoji", sk_font_style_normal(), path, handle.handle), 12.0)
         val bound = shaper_with_ot_face(shaper_new(fallback_chain_new(font)), handle.handle, parsed.unwrap())
         val single = shaper_shape_with_language(bound, [128512u32], font, 0.0, 0.0, "und")[0]
+        expect single.font_handle to_equal handle.handle
+        expect single.font_generation to_equal handle.generation
         expect single.glyph_indices_valid to_equal true
+        expect single.substitution_complete to_equal true
+        expect single.positioning_complete to_equal true
         val single_material = shaped_run_to_font_glyph_run(single)
-        expect single_material.valid to_equal false
+        expect single_material.valid to_equal true
         val sequence = shaper_shape_with_language(bound, [128512u32, 128512u32], font, 0.0, 0.0, "und")[0]
         expect sequence.glyph_indices_valid to_equal false
         val sequence_material = shaped_run_to_font_glyph_run(sequence)
         expect sequence_material.valid to_equal false
+        val other = shaper_shape_with_language(bound, [128513u32], font, 0.0, 0.0, "und")[0]
+        expect other.substitution_complete to_equal false
+        expect shaped_run_to_font_glyph_run(other).valid to_equal false
+        val impostor_font = sk_font_new(sk_typeface_from_attached_font("Not Noto Emoji", sk_font_style_normal(), "not-pinned.ttf", handle.handle), 12.0)
+        val impostor = shaper_with_ot_face(shaper_new(fallback_chain_new(impostor_font)), handle.handle, parsed.unwrap())
+        val wrong_face = shaper_shape_with_language(impostor, [128512u32], impostor_font, 0.0, 0.0, "und")[0]
+        expect wrong_face.glyph_indices_valid to_equal true
+        expect wrong_face.substitution_complete to_equal false
+        expect shaped_run_to_font_glyph_run(wrong_face).valid to_equal false
         free_font(handle)
 
     it "uses OpenType data bound to the face selected by fallback":
@@ -413,7 +450,11 @@ describe "Shaper":
         expect(run.font_handle).to_equal(emoji_handle.handle)
         expect(run.glyph_ids[0]).to_not_equal(128512u32)
         expect(run.glyph_indices_valid).to_equal(true)
-        expect(shaped_run_to_font_glyph_run(run).face_id).to_equal(emoji_handle.handle)
+        expect(run.substitution_complete).to_equal(true)
+        expect(run.positioning_complete).to_equal(true)
+        val emoji_material = shaped_run_to_font_glyph_run(run)
+        expect(emoji_material.valid).to_equal(true)
+        expect(emoji_material.face_id).to_equal(emoji_handle.handle)
         val handleless_chain = fallback_chain_add(fallback_chain_new(sk_font_default()), emoji)
         var mixed = shaper_with_ot_font(shaper_new(handleless_chain), primary_parsed.unwrap())
         mixed = shaper_with_ot_face(mixed, emoji_handle.handle, emoji_parsed.unwrap())

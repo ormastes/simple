@@ -27,6 +27,7 @@ use std.gpu.engine3d.texture3d.{TEX_USAGE_TEXTURE_BINDING, TEX_USAGE_COPY_DST}
 use std.gc_async_mut.text_layout.font_renderer.{FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderer}
 use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_destination_origin}
 use std.gpu.engine3d.color3d.{blend3d}
+use std.gpu.engine3d.vulkan_font_adapter.{VulkanFontAdapter3D, VulkanFontAdapter3DEvidence}
 
 # ============================================================================
 # Engine3D
@@ -57,6 +58,10 @@ class Engine3D:
     _h: i32
     _resources: ResourcePool3D
     _font_renderer: FontRenderer? = nil
+    _vulkan_font: VulkanFontAdapter3D? = nil
+    _vulkan_font_evidence: VulkanFontAdapter3DEvidence? = nil
+    _font_cpu_comparator: bool = false
+    _vulkan_pixels: [u32] = []
     _view: [f32]
     _proj: [f32]
 
@@ -119,6 +124,21 @@ class Engine3D:
         """Get the name of the active backend."""
         self._backend_name
 
+    me install_vulkan_font_backend() -> bool:
+        var adapter = VulkanFontAdapter3D.create(self._w, self._h)
+        if not adapter.ready:
+            adapter.shutdown()
+            return false
+        self._vulkan_font = adapter
+        self._backend_name = "vulkan-font"
+        true
+
+    me enable_font_cpu_comparator(enabled: bool):
+        self._font_cpu_comparator = enabled
+
+    fn vulkan_font_evidence() -> VulkanFontAdapter3DEvidence?:
+        self._vulkan_font_evidence
+
     # ========================================================================
     # Core — Identity & Lifecycle
     # ========================================================================
@@ -135,13 +155,39 @@ class Engine3D:
 
     me shutdown():
         self.unload_font()
+        val active = self._vulkan_font
+        if active != nil:
+            var vulkan = active.?
+            vulkan.shutdown()
+        self._vulkan_font = nil
         self._cpu.shutdown()
 
     me begin_frame():
         self._cpu.begin_frame()
+        val active = self._vulkan_font
+        if active != nil:
+            var vulkan = active.?
+            if not vulkan.begin_frame():
+                vulkan.reason = "vulkan-font-frame-begin-failed"
+            self._vulkan_font = vulkan
 
     me end_frame():
         self._cpu.end_frame()
+        val active = self._vulkan_font
+        if active != nil:
+            var vulkan = active.?
+            val evidence = vulkan.end_frame()
+            self._vulkan_font_evidence = evidence
+            self._vulkan_pixels = []
+            var i: i64 = 0
+            while i + 3 < evidence.pixels_rgba8.len():
+                val r = evidence.pixels_rgba8[i].to_u32()
+                val g = evidence.pixels_rgba8[i + 1].to_u32()
+                val b = evidence.pixels_rgba8[i + 2].to_u32()
+                val a = evidence.pixels_rgba8[i + 3].to_u32()
+                self._vulkan_pixels.push((a << 24u32) | (r << 16u32) | (g << 8u32) | b)
+                i = i + 4
+            self._vulkan_font = vulkan
 
     me present():
         self._cpu.present()
@@ -285,48 +331,91 @@ class Engine3D:
         val fonts = self.fonts()
         val batch = fonts.prepare_glyph_run(run, color, font_size)
         self._font_renderer = fonts
+        val active = self._vulkan_font
+        if active != nil:
+            var vulkan = active.?
+            val drawn = vulkan.draw_hud(x, y, batch)
+            self._vulkan_font = vulkan
+            if self._font_cpu_comparator:
+                self._draw_font_batch_hud(x, y, batch)
+            return drawn
         self._draw_font_batch_hud(x, y, batch)
 
     me draw_text_hud(x: i32, y: i32, content: text, color: u32, font_size: i32) -> bool:
         val fonts = self.fonts()
         val batch = fonts.prepare_text(content, color, font_size)
         self._font_renderer = fonts
+        val active = self._vulkan_font
+        if active != nil:
+            var vulkan = active.?
+            val drawn = vulkan.draw_hud(x, y, batch)
+            self._vulkan_font = vulkan
+            if self._font_cpu_comparator:
+                self._draw_font_batch_hud(x, y, batch)
+            return drawn
         self._draw_font_batch_hud(x, y, batch)
 
-    fn _font_world_screen(x: f32, y: f32, z: f32) -> (bool, i32, i32):
+    fn _font_world_screen(x: f32, y: f32, z: f32) -> (bool, i32, i32, f32):
         val target_w = self._cpu.width()
         val target_h = self._cpu.height()
         if self._view.len() != 16 or self._proj.len() != 16 or target_w <= 0 or target_h <= 0:
-            return (false, 0, 0)
+            return (false, 0, 0, 0.0f32)
         val vp = mat4_mul(self._proj, self._view)
         val clip_x = vp[0] * x + vp[4] * y + vp[8] * z + vp[12]
         val clip_y = vp[1] * x + vp[5] * y + vp[9] * z + vp[13]
         val clip_z = vp[2] * x + vp[6] * y + vp[10] * z + vp[14]
         val clip_w = vp[3] * x + vp[7] * y + vp[11] * z + vp[15]
         if clip_w <= 0.0:
-            return (false, 0, 0)
+            return (false, 0, 0, 0.0f32)
         val ndc_x = clip_x / clip_w
         val ndc_y = clip_y / clip_w
         val ndc_z = clip_z / clip_w
         if ndc_x < -1.0 or ndc_x > 1.0 or ndc_y < -1.0 or ndc_y > 1.0 or ndc_z < -1.0 or ndc_z > 1.0:
-            return (false, 0, 0)
+            return (false, 0, 0, 0.0f32)
         val screen_x = ((ndc_x + 1.0) * (target_w as f32) / 2.0) as i32
         val screen_y = ((1.0 - ndc_y) * (target_h as f32) / 2.0) as i32
-        (true, screen_x, screen_y)
+        (true, screen_x, screen_y, ndc_z)
 
     me draw_text_world(x: f32, y: f32, z: f32, content: text, color: u32, font_size: i32) -> bool:
         val projected = self._font_world_screen(x, y, z)
         if not projected.0:
             return false
-        self.draw_text_hud(projected.1, projected.2, content, color, font_size)
+        val fonts = self.fonts()
+        val batch = fonts.prepare_text(content, color, font_size)
+        self._font_renderer = fonts
+        val active = self._vulkan_font
+        if active != nil:
+            var vulkan = active.?
+            val drawn = vulkan.draw_world(projected.1, projected.2, projected.3, batch)
+            self._vulkan_font = vulkan
+            if self._font_cpu_comparator:
+                self._draw_font_batch_hud(projected.1, projected.2, batch)
+            return drawn
+        self._draw_font_batch_hud(projected.1, projected.2, batch)
 
     me draw_glyph_run_world(x: f32, y: f32, z: f32, run: FontGlyphRun, color: u32, font_size: i32) -> bool:
         val projected = self._font_world_screen(x, y, z)
         if not projected.0:
             return false
-        self.draw_glyph_run_hud(projected.1, projected.2, run, color, font_size)
+        val fonts = self.fonts()
+        val batch = fonts.prepare_glyph_run(run, color, font_size)
+        self._font_renderer = fonts
+        val active = self._vulkan_font
+        if active != nil:
+            var vulkan = active.?
+            val drawn = vulkan.draw_world(projected.1, projected.2, projected.3, batch)
+            self._vulkan_font = vulkan
+            if self._font_cpu_comparator:
+                self._draw_font_batch_hud(projected.1, projected.2, batch)
+            return drawn
+        self._draw_font_batch_hud(projected.1, projected.2, batch)
 
     fn read_pixels() -> [u32]:
+        if self._vulkan_font != nil and self._vulkan_pixels.len() == self._w.to_i64() * self._h.to_i64():
+            return self._vulkan_pixels
+        self._cpu.read_pixels()
+
+    fn read_cpu_comparator_pixels() -> [u32]:
         self._cpu.read_pixels()
 
     fn read_depth() -> [f32]:

@@ -170,7 +170,7 @@ impl GraphicsPipeline {
             .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .color_blend_op(vk::BlendOp::ADD)
             .src_alpha_blend_factor(vk::BlendFactor::ONE)
-            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .alpha_blend_op(vk::BlendOp::ADD);
 
         let attachments = [color_blend_attachment];
@@ -412,12 +412,13 @@ mod tests {
             .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .color_blend_op(vk::BlendOp::ADD)
             .src_alpha_blend_factor(vk::BlendFactor::ONE)
-            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .alpha_blend_op(vk::BlendOp::ADD);
 
         assert_eq!(blend.blend_enable, vk::TRUE);
         assert_eq!(blend.src_color_blend_factor, vk::BlendFactor::SRC_ALPHA);
         assert_eq!(blend.dst_color_blend_factor, vk::BlendFactor::ONE_MINUS_SRC_ALPHA);
+        assert_eq!(blend.dst_alpha_blend_factor, vk::BlendFactor::ONE_MINUS_SRC_ALPHA);
         assert_eq!(blend.color_blend_op, vk::BlendOp::ADD);
     }
 

@@ -25,15 +25,21 @@ val _VULKAN_STORAGE_BUFFER: i64 = 0x80
 fn vulkan_font_elapsed_ns(started_ns: i64, finished_ns: i64) -> i64:
     if finished_ns > started_ns: finished_ns - started_ns else: 0
 
+fn vulkan_font_timed_ns(total_ns: i64, evidence_overhead_ns: i64) -> i64:
+    if total_ns > evidence_overhead_ns: total_ns - evidence_overhead_ns else: 0
+
 fn vulkan_font_gpu_resource_bytes(atlas_bytes: i64, framebuffer_bytes: i64, params_allocated: bool) -> i64:
     if atlas_bytes < 0 or framebuffer_bytes < 0: return 0
     atlas_bytes + framebuffer_bytes + (if params_allocated: VULKAN_FONT_PARAMS_BYTES else: 0)
 
 fn _vulkan_font_pack_i32_le(mut buf: [u8], offset: i32, value: i32) -> i32:
+    val offset_1 = offset + 1
+    val offset_2 = offset + 2
+    val offset_3 = offset + 3
     buf[offset] = (value & 0xFF) as u8
-    buf[offset + 1] = ((value >> 8) & 0xFF) as u8
-    buf[offset + 2] = ((value >> 16) & 0xFF) as u8
-    buf[offset + 3] = ((value >> 24) & 0xFF) as u8
+    buf[offset_1] = ((value >> 8) & 0xFF) as u8
+    buf[offset_2] = ((value >> 16) & 0xFF) as u8
+    buf[offset_3] = ((value >> 24) & 0xFF) as u8
     offset + 4
 
 fn vulkan_font_atlas_composite_params(atlas_width: i32, atlas_height: i32, atlas_count: i64,
@@ -72,15 +78,19 @@ fn vulkan_font_atlas_replacement_status(old_present: bool, old_freed: bool, fres
         "cleanup-failed"
 
 fn _vulkan_font_pixels_to_bytes(pixels: [u32]) -> [u8]:
-    var bytes: [u8] = [0u8; pixels.len() * 4]
+    val byte_count = pixels.len() * 4
+    var bytes: [u8] = [0u8; byte_count]
     var i: i64 = 0
     while i < pixels.len():
         val p = pixels[i]
         val off = i * 4
+        val off_1 = off + 1
+        val off_2 = off + 2
+        val off_3 = off + 3
         bytes[off] = (p & 0xffu32) as u8
-        bytes[off + 1] = ((p >> 8) & 0xffu32) as u8
-        bytes[off + 2] = ((p >> 16) & 0xffu32) as u8
-        bytes[off + 3] = ((p >> 24) & 0xffu32) as u8
+        bytes[off_1] = ((p >> 8) & 0xffu32) as u8
+        bytes[off_2] = ((p >> 16) & 0xffu32) as u8
+        bytes[off_3] = ((p >> 24) & 0xffu32) as u8
         i = i + 1
     bytes
 
@@ -91,10 +101,14 @@ fn _vulkan_font_bytes_to_pixels(bytes: [u8], count: i64) -> [u32]:
     var i: i64 = 0
     while i < count:
         val off = i * 4
-        val b1 = bytes[off + 1] as u32
-        val b2 = bytes[off + 2] as u32
-        val b3 = bytes[off + 3] as u32
-        pixels[i] = bytes[off] as u32 + b1 * 256 + b2 * 65536 + b3 * 16777216
+        val off_1 = off + 1
+        val off_2 = off + 2
+        val off_3 = off + 3
+        val byte_0 = bytes[off] as u32
+        val byte_1 = (bytes[off_1] as u32) << 8
+        val byte_2 = (bytes[off_2] as u32) << 16
+        val byte_3 = (bytes[off_3] as u32) << 24
+        pixels[i] = byte_0 | byte_1 | byte_2 | byte_3
         i = i + 1
     pixels
 
@@ -127,13 +141,14 @@ fn vulkan_font_runtime_classification(runtime_available: bool, evidence: VulkanF
     else:
         "failed"
 
-fn vulkan_font_promotion_ready(dispatch_count: i64, quad_count: i64,
+fn vulkan_font_promotion_ready(artifact_mode: text, dispatch_count: i64, quad_count: i64,
                                submitted: bool, waited: bool, readback_bytes: i64,
                                parity: bool, fence_handle: i64,
                                fence_available: bool, fence_destroyed: bool,
                                device_name: text, device_type: text,
                                driver_identity: text) -> bool:
-    (quad_count > 0 and dispatch_count == quad_count and submitted and waited and
+    (artifact_mode == "precompiled-spirv" and
+     quad_count > 0 and dispatch_count == quad_count and submitted and waited and
      readback_bytes > 0 and parity and fence_handle > 0 and fence_available and
      fence_destroyed and device_name != "" and
      (device_type == "discrete" or device_type == "integrated" or device_type == "virtual") and
@@ -168,7 +183,7 @@ fn _vulkan_font_completion(evidence: VulkanFontCompositeEvidence, fence_handle: 
     result.fence_evidence_available = fence_available
     result.fence_destroyed = fence_destroyed
     result.promotion_ready = vulkan_font_promotion_ready(
-        result.dispatch_count, result.quad_count, result.submitted,
+        result.artifact_mode, result.dispatch_count, result.quad_count, result.submitted,
         result.completion_waited, result.readback_byte_count, result.parity,
         fence_handle, fence_available, fence_destroyed,
         result.device_name, result.device_type, result.driver_identity
@@ -176,6 +191,9 @@ fn _vulkan_font_completion(evidence: VulkanFontCompositeEvidence, fence_handle: 
     if result.promotion_ready:
         result.status = "promoted"
         result.reason = "fence-device-identity-readback-proven"
+    elif result.artifact_mode != "precompiled-spirv" and result.device_executed and result.parity:
+        result.status = "executed-unpromoted"
+        result.reason = "precompiled-spirv-required"
     result
 
 impl VulkanBackend:
@@ -183,7 +201,8 @@ impl VulkanBackend:
                             batch: FontRenderBatch) -> VulkanFontCompositeEvidence:
         val started_ns = time_now_nanos()
         var evidence = self._composite_font_batch_impl(origin_x, origin_y, batch)
-        evidence.elapsed_ns = vulkan_font_elapsed_ns(started_ns, time_now_nanos())
+        val total_ns = vulkan_font_elapsed_ns(started_ns, time_now_nanos())
+        evidence.elapsed_ns = vulkan_font_timed_ns(total_ns, evidence.evidence_overhead_ns)
         evidence.atlas_upload_count = self.font_atlas_upload_count
         evidence.atlas_upload_bytes = self.font_atlas_upload_bytes
         evidence.gpu_resource_high_water_bytes = self.font_gpu_resource_high_water_bytes
@@ -243,14 +262,18 @@ impl VulkanBackend:
             self.font_atlas_width = batch.atlas_width
             self.font_atlas_height = batch.atlas_height
             self.font_atlas_generation = -1
+            self.font_atlas_owner_identity = ""
             val allocated_bytes = vulkan_font_gpu_resource_bytes(atlas_bytes, dst_count * 4, self.d_font_params != 0)
             if allocated_bytes > self.font_gpu_resource_high_water_bytes:
                 self.font_gpu_resource_high_water_bytes = allocated_bytes
-        if self.font_atlas_generation != batch.atlas_generation:
+        val owner_identity = batch.atlas_owner_identity()
+        if self.font_atlas_generation != batch.atlas_generation or self.font_atlas_owner_identity != owner_identity:
             if not vulkan_sffi_copy_to_buffer(self.d_font_atlas, _vulkan_font_pixels_to_bytes(batch.atlas_pixels), 0):
                 self.font_atlas_generation = -1
+                self.font_atlas_owner_identity = ""
                 return _vulkan_font_evidence(pipeline, "failed", "atlas-upload-failed", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
             self.font_atlas_generation = batch.atlas_generation
+            self.font_atlas_owner_identity = owner_identity
             self.font_atlas_upload_count = self.font_atlas_upload_count + 1
             self.font_atlas_upload_bytes = self.font_atlas_upload_bytes + atlas_bytes
         if self.d_font_params == 0:
@@ -263,6 +286,8 @@ impl VulkanBackend:
             self.font_gpu_resource_high_water_bytes = resource_bytes
 
         val byte_count = dst_count * 4
+        var evidence_overhead_ns: i64 = 0
+        val initial_evidence_started = time_now_nanos()
         val before_bytes = _vulkan_font_download(framebuffer, byte_count)
         val before = _vulkan_font_bytes_to_pixels(before_bytes, dst_count)
         if before.len() != dst_count:
@@ -270,6 +295,7 @@ impl VulkanBackend:
         var oracle = SoftwareBackend.create()
         oracle.init(width, height)
         oracle.buf = before
+        evidence_overhead_ns = evidence_overhead_ns + vulkan_font_elapsed_ns(initial_evidence_started, time_now_nanos())
 
         var done: i64 = 0
         var last_params: i64 = 0
@@ -347,9 +373,12 @@ impl VulkanBackend:
                 val restored = vulkan_sffi_copy_to_buffer(framebuffer, before_bytes, 0)
                 val failed = _vulkan_font_evidence(pipeline, "failed", if restored: reason else: "partial-framebuffer-restore-failed", self.d_font_atlas, last_params, last_descriptor, last_command, batch.quads.len(), done, done > 0, done > 0, framebuffer, 0, 0, 0, false)
                 return _vulkan_font_completion(failed, last_fence, last_fence_available, last_fence_destroyed)
+            val oracle_started = time_now_nanos()
             oracle.draw_image_blend(dst_x.?, dst_y.?, q.width, q.height, pixels)
+            evidence_overhead_ns = evidence_overhead_ns + vulkan_font_elapsed_ns(oracle_started, time_now_nanos())
             done = done + 1
 
+        val final_evidence_started = time_now_nanos()
         val after_bytes = _vulkan_font_download(framebuffer, byte_count)
         val after = _vulkan_font_bytes_to_pixels(after_bytes, dst_count)
         val device_checksum = vulkan_font_pixels_checksum(after)
@@ -364,6 +393,8 @@ impl VulkanBackend:
             done == batch.quads.len(), done == batch.quads.len(), framebuffer,
             if after.len() == dst_count: byte_count else: 0, device_checksum, oracle_checksum, parity)
         var result = _vulkan_font_completion(completed, last_fence, last_fence_available, last_fence_destroyed)
+        evidence_overhead_ns = evidence_overhead_ns + vulkan_font_elapsed_ns(final_evidence_started, time_now_nanos())
+        result.evidence_overhead_ns = evidence_overhead_ns
         if result.promotion_ready:
             self.dirty = true
         elif parity:
@@ -380,3 +411,4 @@ export vulkan_font_atlas_composite_params
 export vulkan_font_dispatch_groups, vulkan_font_atlas_replacement_status
 export vulkan_font_pixels_checksum, vulkan_font_runtime_classification
 export vulkan_font_promotion_ready
+export vulkan_font_timed_ns

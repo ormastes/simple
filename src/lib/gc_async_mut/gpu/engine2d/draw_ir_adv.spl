@@ -106,6 +106,44 @@ fn _engine2d_draw_ir_style_value(props: [DrawIrStyleProp], key: text) -> text:
             return prop.value
     ""
 
+fn _engine2d_draw_ir_text_advances(command: DrawIrCommand) -> [i32]:
+    val encoded = _engine2d_draw_ir_style_value(command.computed_style, "font-advance-widths")
+    if encoded == "":
+        return []
+    val parts = encoded.split(",")
+    var advances: [i32] = []
+    var width: i64 = 0
+    for raw in parts:
+        val advance = raw.to_int() ?? -1
+        if advance < 0 or width > 2147483647 - advance.to_i64():
+            return []
+        advances.push(advance)
+        width = width + advance.to_i64()
+    var character_count: i64 = 0
+    for ch in command.text_value:
+        character_count = character_count + 1
+    if advances.len() != character_count or width != command.width.to_i64():
+        return []
+    advances
+
+fn _engine2d_draw_ir_shaping_requested(command: DrawIrCommand) -> bool:
+    _engine2d_draw_ir_style_value(command.computed_style, "font-shaping") == "selected-pure-simple"
+
+fn _engine2d_draw_ir_shaped_payload_valid(command: DrawIrCommand, advances: [i32]) -> bool:
+    val payload = command.glyph_run
+    if (not payload.valid or payload.glyph_ids.len() == 0 or
+        payload.glyph_ids.len() != payload.xs.len() or
+        payload.glyph_ids.len() != payload.ys.len() or
+        payload.glyph_ids.len() != payload.clusters.len()):
+        return false
+    var index: i64 = 0
+    while index < payload.glyph_ids.len():
+        if (payload.glyph_ids[index] == 0u32 or payload.glyph_ids[index] > 2147483647u32 or
+            payload.clusters[index] < 0 or payload.clusters[index] >= advances.len()):
+            return false
+        index = index + 1
+    true
+
 # Scan the nth (0-based) signed integer token out of a free-form value string.
 # Accumulate in i64 so packed u32 color words (up to 4294967295) do not overflow
 # an i32 mid-scan. Returns `fallback` when the nth token is absent.
@@ -301,24 +339,29 @@ fn _engine2d_draw_ir_fresh_device_reason(composition: DrawIrComposition, images:
 
 fn _engine2d_draw_ir_prepare_fresh_device_text(engine: Engine2D, composition: DrawIrComposition, width: i32, height: i32) -> (Engine2D, text):
     var eng = engine
-    var selected_identity = ""
     var pixel_work: i64 = 0
     val max_pixel_work = width.to_i64() * height.to_i64()
     for batch in composition.batches:
         for command in batch.commands:
             if command.kind == DRAW_IR_COMMAND_TEXT:
                 val identity = _engine2d_draw_ir_style_value(command.computed_style, "font-identity")
-                if selected_identity != "" and selected_identity != identity:
-                    return (eng, "fresh-device-single-font-identity-required")
                 if not eng.select_font_identity(identity):
                     return (eng, "fresh-device-font-identity-unavailable")
-                selected_identity = identity
                 val font_size = _engine2d_draw_ir_text_font_size(command.computed_style)
+                val advances = _engine2d_draw_ir_text_advances(command)
+                if advances.len() == 0:
+                    return (eng, "fresh-device-font-advances-invalid")
                 val fonts = eng.fonts()
-                val prepared = fonts.prepare_text(command.text_value, command.color, font_size)
+                val shaped = _engine2d_draw_ir_shaping_requested(command)
+                if shaped and not _engine2d_draw_ir_shaped_payload_valid(command, advances):
+                    return (eng, "fresh-device-font-shaping-invalid")
+                val prepared = if shaped:
+                    fonts.prepare_selected_glyph_run(command.glyph_run, command.color, font_size)
+                else:
+                    fonts.prepare_text_with_advances(command.text_value, advances, command.color, font_size)
                 eng.font_renderer = fonts
-                if not prepared.valid or prepared.font_identity != identity or prepared.quads.len() == 0:
-                    return (eng, "fresh-device-font-batch-invalid")
+                if not prepared.valid or prepared.font_identity != identity:
+                    return (eng, if shaped: "fresh-device-font-shaping-invalid" else: "fresh-device-font-batch-invalid")
                 for quad in prepared.quads:
                     val total = quad.width.to_i64() * quad.height.to_i64()
                     val dst_x = font_destination_origin(command.x, quad.dst_x, quad.width)
@@ -432,10 +475,40 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
             rendered = rendered + 1
         elif command.kind == DRAW_IR_COMMAND_TEXT:
             val font_identity = _engine2d_draw_ir_style_value(command.computed_style, "font-identity")
+            var font_ready = true
+            val shaped = _engine2d_draw_ir_shaping_requested(command)
+            var font_failure_kind = if shaped: "text-font-shaping" else: "text-font-identity"
             if font_identity != "":
-                eng.select_font_identity(font_identity)
-            eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
-            rendered = rendered + 1
+                font_ready = eng.select_font_identity(font_identity)
+            else if shaped:
+                font_ready = false
+            if font_ready:
+                val encoded_advances = _engine2d_draw_ir_style_value(command.computed_style, "font-advance-widths")
+                val advances = _engine2d_draw_ir_text_advances(command)
+                if advances.len() > 0:
+                    font_failure_kind = if shaped: "text-font-shaping" else: "text-font-batch"
+                    val payload_valid = not shaped or _engine2d_draw_ir_shaped_payload_valid(command, advances)
+                    val drawn = if shaped and payload_valid:
+                        eng.draw_shaped_text(x, y, command.glyph_run, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                    else if not shaped:
+                        eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                    else:
+                        false
+                    if drawn:
+                        rendered = rendered + 1
+                    else:
+                        font_ready = false
+                elif encoded_advances != "":
+                    font_ready = false
+                    font_failure_kind = if shaped: "text-font-shaping" else: "text-font-advances"
+                else:
+                    eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                    rendered = rendered + 1
+            if not font_ready:
+                skipped = skipped + 1
+                if unsupported_kinds != "":
+                    unsupported_kinds = unsupported_kinds + ","
+                unsupported_kinds = unsupported_kinds + font_failure_kind
         elif command.kind == DRAW_IR_COMMAND_IMAGE:
             val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
             if image_index >= 0 and _engine2d_draw_ir_valid_resolved_image(images[image_index]):

@@ -8,6 +8,7 @@ use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
 use std.gpu.engine2d.engine.{Engine2D}
 use std.gpu.engine2d.helpers_text.{text_render_to_buf}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderer, FontRenderBatch, FontRenderQuad}
+use std.common.crypto.sha256.{sha256_text}
 
 describe "CudaBackend RenderBackend facade":
 
@@ -49,23 +50,47 @@ describe "CudaBackend RenderBackend facade":
         expect(source).to_contain("sub.u32 %r11, 255, %r8")
         expect(source).to_contain("mad.lo.u32 %r13, %r14, %r11, %r13")
 
+    it "pins an installed generated font companion by exact PTX identity":
+        val ptx = ".version 8.0\n.visible .entry simple_font_atlas_composite_v1_u32() { ret; }\n"
+        var session = CudaSession.create()
+        expect(session.install_font_module("")).to_equal(false)
+        expect(session.install_font_module(".version 8.0\n")).to_equal(false)
+        expect(session.install_font_module(".version 8.0\n.entry simple_font_atlas_composite_v1_u32_suffix() { ret; }\n")).to_equal(false)
+        session.font_module_cache = 17
+        session.font_module_identity = "generated-ptx:" + sha256_text(ptx)
+        expect(session.install_font_module(ptx)).to_equal(true)
+        expect(session.install_font_module(ptx + " ")).to_equal(false)
+
+        var backend = CudaBackend.create()
+        backend.initialized = true
+        backend.font_atlas_generation = 9
+        backend.session = session
+        expect(backend.install_font_atlas_ptx(ptx)).to_equal(true)
+        expect(backend.font_atlas_generation).to_equal(9)
+        expect(backend.install_font_atlas_ptx(ptx + " ")).to_equal(false)
+        expect(backend.font_atlas_generation).to_equal(9)
+
     it "fails closed for invalid font batches and invalidates atlas generations":
         var backend = CudaBackend.create()
         val invalid = FontRenderBatch(program_version: 1, font_identity: "test-font", face_generation: 1, valid: false, atlas_width: 0, atlas_height: 0, atlas_pixels: [], quads: [], atlas_generation: 0, dirty_rects: [])
 
         expect(backend.draw_font_batch(0, 0, invalid)).to_equal(0)
         backend.font_atlas_generation = 7
+        backend.font_atlas_owner_identity = "stale-owner"
         backend.invalidate_font_atlas()
         expect(backend.font_atlas_generation).to_equal(-1)
+        expect(backend.font_atlas_owner_identity).to_equal("")
 
     it "rejects unsupported font programs before CUDA atlas mutation":
         var backend = CudaBackend.create()
         backend.font_atlas_generation = 7
+        backend.font_atlas_owner_identity = "stable-owner"
         for version in [0, -1, 2]:
             val batch = FontRenderBatch(program_version: version, font_identity: "test-font", face_generation: 1, valid: true, atlas_width: 1, atlas_height: 1,
                 atlas_pixels: [1u32], quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 1u32)], atlas_generation: 8, dirty_rects: [])
             expect(backend.draw_font_batch(0, 0, batch)).to_equal(0)
             expect(backend.font_atlas_generation).to_equal(7)
+            expect(backend.font_atlas_owner_identity).to_equal("stable-owner")
 
     it "conditionally composites a shared atlas through CUDA device readback":
         var backend = CudaBackend.create()
@@ -92,6 +117,17 @@ describe "CudaBackend RenderBackend facade":
             )
             expect(backend.draw_font_batch(0, 0, batch)).to_equal(1)
             expect(backend.font_atlas_generation).to_equal(1)
+            expect(backend.font_atlas_owner_identity).to_equal(batch.atlas_owner_identity())
+            val replacement = FontRenderBatch(
+                program_version: 1,
+                font_identity: "replacement-font", face_generation: 1,
+                valid: true, atlas_width: 1, atlas_height: 1,
+                atlas_pixels: [0x80000000u32],
+                quads: [FontRenderQuad(codepoint: 66, byte_offset: 0, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0x80ff0000u32)],
+                atlas_generation: 1, dirty_rects: []
+            )
+            expect(backend.draw_font_batch(0, 0, replacement)).to_equal(1)
+            expect(backend.font_atlas_owner_identity).to_equal(replacement.atlas_owner_identity())
             val readback = backend.read_pixels_with_source()
             expect(readback.source).to_equal("device_readback")
             expect(readback.pixels[5]).to_equal(0xff400000u32)
@@ -175,6 +211,30 @@ describe "CudaBackend RenderBackend facade":
         expect(backend.last_probe.api_name).to_equal("cuda")
         expect(backend.last_probe.feature_gate).to_equal("cuda_context")
         expect(backend.last_probe.status).to_equal(BackendStatus.Failed)
+
+    it "rejects active CUDA session replacement without mutating atlas ownership":
+        var backend = CudaBackend.create()
+        backend.initialized = true
+        backend.owns_session = true
+        backend.d_font_atlas = 77
+        backend.font_atlas_generation = 9
+        backend.font_atlas_owner_identity = "old"
+        var incoming = CudaSession.create()
+        incoming.is_initialized = true
+        incoming.ctx = 1
+        incoming.ref_count = 2
+        expect(backend.init_with_session(4, 4, incoming)).to_equal(false)
+        expect(incoming.ref_count).to_equal(2)
+        expect(backend.d_font_atlas).to_equal(77)
+        expect(backend.font_atlas_generation).to_equal(9)
+        expect(backend.font_atlas_owner_identity).to_equal("old")
+        expect(backend.owns_session).to_equal(true)
+        var invalid = CudaSession.create()
+        expect(backend.init_with_session(0, 4, invalid)).to_equal(false)
+        expect(backend.initialized).to_equal(true)
+        expect(backend.owns_session).to_equal(true)
+        expect(backend.d_font_atlas).to_equal(77)
+        expect(invalid.ref_count).to_equal(0)
 
     it "reports CUDA 2D kernel readiness or the real kernel gap":
         val probe = probe_cuda_2d()
