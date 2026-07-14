@@ -1,9 +1,11 @@
 use app.spipe_docgen.parser.{extract_test_structure, extract_test_structure_with_path}
 use app.spipe_docgen.parser.{parse_spipe_file, extract_metadata}
 use app.spipe_docgen.generator.{generate_feature_doc}
+use app.spipe_docgen.spipe_docgen.main.{run_spipe_docgen}
 use app.spipe_docgen.common.{SspecDoc, FeatureMetadata}
-use app.io.mod (file_write)
+use app.io.mod.{dir_create, dir_remove_all, file_delete, file_exists, file_write}
 use std.io_runtime.{read_file}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
 describe "spipe docgen scenario body extraction":
 
@@ -678,9 +680,9 @@ describe "spipe docgen scenario body extraction":
                     case Err(e):
                         expect(e).to_equal("")
                     case Ok(path):
-                        expect(path).to_equal("/tmp/test/03_system/feature/usage/math_blocks_spec.md")
+                        expect(path).to_equal("/tmp/03_system/feature/usage/math_blocks_spec.md")
 
-    it "writes test manuals under doc test folder except formal verification":
+    it "mirrors test tiers directly under the manual root":
         val unit_doc = SspecDoc(
             file_path: "test/01_unit/app/lint_spec.spl",
             raw_content: "describe \"Lint\":\n    it \"passes\":\n        expect(\"ok\").to_equal(\"ok\")\n",
@@ -694,7 +696,7 @@ describe "spipe docgen scenario body extraction":
             case Err(e):
                 expect(e).to_equal("")
             case Ok(path):
-                expect(path).to_equal("/tmp/test/01_unit/app/lint_spec.md")
+                expect(path).to_equal("/tmp/01_unit/app/lint_spec.md")
 
         val formal_doc = SspecDoc(
             file_path: "test/00_formal_verification/compiler/cache_correctness_spec.spl",
@@ -710,6 +712,85 @@ describe "spipe docgen scenario body extraction":
                 expect(e).to_equal("")
             case Ok(path):
                 expect(path).to_equal("/tmp/00_formal_verification/compiler/cache_correctness_spec.md")
+
+        val absolute_doc = SspecDoc(
+            file_path: "/workspace/test/01_unit/app/absolute_spec.spl",
+            raw_content: "describe \"Absolute\":\n    it \"passes\":\n        expect(1).to_equal(1)\n",
+            doc_blocks: [], feature_title: "Absolute", feature_ids: [], metadata: FeatureMetadata.empty()
+        )
+        match generate_feature_doc(absolute_doc, "/tmp"):
+            case Err(e): expect(e).to_equal("")
+            case Ok(path): expect(path).to_equal("/tmp/01_unit/app/absolute_spec.md")
+
+        val windows_doc = SspecDoc(
+            file_path: "C:\\workspace\\test\\03_system\\app\\windows_spec.spl",
+            raw_content: "describe \"Windows\":\n    it \"passes\":\n        expect(1).to_equal(1)\n",
+            doc_blocks: [], feature_title: "Windows", feature_ids: [], metadata: FeatureMetadata.empty()
+        )
+        match generate_feature_doc(windows_doc, "/tmp"):
+            case Err(e): expect(e).to_equal("")
+            case Ok(path): expect(path).to_equal("/tmp/03_system/app/windows_spec.md")
+
+        val traversal_doc = SspecDoc(
+            file_path: "test/../outside_spec.spl",
+            raw_content: "describe \"Traversal\":\n    it \"fails\":\n        expect(1).to_equal(1)\n",
+            doc_blocks: [], feature_title: "Traversal", feature_ids: [], metadata: FeatureMetadata.empty()
+        )
+        match generate_feature_doc(traversal_doc, "/tmp"):
+            case Err(e): expect(e).to_contain("escapes the documentation root")
+            case Ok(path): expect(path).to_equal("")
+
+    it "fails closed for missing or undocumented inputs":
+        val nonce = time_now_unix_micros().to_string()
+        val root = "/tmp/spipe_docgen_contract_" + nonce
+        val _cleanup_before = dir_remove_all(root)
+        expect(dir_create(root, true)).to_equal(true)
+
+        val documented_dir = root + "/test/03_system/feature/usage"
+        expect(dir_create(documented_dir, true)).to_equal(true)
+        val documented_path = documented_dir + "/documented_" + nonce + "_spec.spl"
+        expect(file_write(documented_path,
+            "\"\"\"\n# Documented Fixture\n\n## Overview\nSelf-contained docgen status fixture.\n\"\"\"\n" +
+            "describe \"Documented\":\n    it \"passes\":\n        expect(1).to_equal(1)\n"
+        )).to_equal(true)
+
+        expect(run_spipe_docgen([
+            documented_path,
+            "--output", root + "/success", "--no-index"
+        ])).to_equal(0)
+
+        val default_output = "doc/06_spec/03_system/feature/usage/documented_" + nonce + "_spec.md"
+        val malformed_status = run_spipe_docgen([documented_path, "--output", "--no-index"])
+        val malformed_wrote_default = file_exists(default_output)
+        if malformed_wrote_default:
+            val _deleted_default = file_delete(default_output)
+        expect(malformed_status).to_equal(1)
+        expect(malformed_wrote_default).to_equal(false)
+
+        val stub_path = root + "/spipe_docgen_undocumented_spec.spl"
+        expect(file_write(stub_path, "describe \"Stub\":\n    it \"passes\":\n        expect(1).to_equal(1)\n")).to_equal(true)
+        expect(run_spipe_docgen([stub_path, "--output", root + "/stub", "--no-index"])).to_equal(1)
+        expect(run_spipe_docgen([root + "/missing_spec.spl", "--no-index"])).to_equal(1)
+
+        val output_file = root + "/output_is_file"
+        expect(file_write(output_file, "not a directory")).to_equal(true)
+        expect(run_spipe_docgen([
+            documented_path,
+            "--output", output_file, "--no-index"
+        ])).to_equal(1)
+
+        val stub_index_output = root + "/stub_index"
+        expect(run_spipe_docgen([stub_path, "--output", stub_index_output])).to_equal(1)
+        expect(file_exists(stub_index_output + "/INDEX.md")).to_equal(false)
+
+        val index_error_output = root + "/index_error"
+        expect(dir_create(index_error_output + "/INDEX.md", true)).to_equal(true)
+        expect(run_spipe_docgen([
+            documented_path,
+            "--output", index_error_output
+        ])).to_equal(1)
+
+        val _cleanup_after = dir_remove_all(root)
 
     it "generates auto docs with scenarios immediately after the title":
         val doc = SspecDoc(
