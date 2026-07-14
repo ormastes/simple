@@ -1280,20 +1280,44 @@ impl MirLowering:
                 self.lower_tuple_lit(elements)
 
             case NullCoalesce(left, right):
+                # `x ?? default` -- Some(v) yields v, nil yields default.
+                # Must branch on rt_is_some(x), NOT on truthiness of the
+                # decoded payload: `Some(0) ?? 3` must yield 0, not 3.
+                #
+                # Merge via a shared result slot (store-in-each-branch, single
+                # load after the merge block) instead of the __simple_ssa_phi
+                # intrinsic: that intrinsic calls translate_operand() on each
+                # arm's value at the point the phi instruction itself is
+                # translated (in the merge block), which re-emits a fresh load
+                # for any memory-backed local right before the `phi` line --
+                # violating LLVM's "phi must be first in the block" rule
+                # ("PHI nodes not grouped at top of basic block!"). Mirror the
+                # ExistsCheck (`.?`) fix just below, which sidesteps this the
+                # same way `lower_if` (mir_lowering_stmts.spl) does.
                 val left_local = self.lower_expr(left)
                 var result_type = MirType.i64()
                 if val expr_type = expr_value.type_:
                     result_type = self.lower_type(expr_type)
                 var b_nc = self.builder
-                val nil_word = if self.runtime_value_locals.has(left_local.id): 3 else: 0
-                val zero_local = b_nc.emit_const_int(nil_word)
-                val cond_local = b_nc.emit_binop(MirBinOp.Ne, mir_operand_copy(left_local), mir_operand_copy(zero_local), MirType.bool())
-                val then_block = b_nc.new_block(Some("null_coalesce_left"))
-                val else_block = b_nc.new_block(Some("null_coalesce_right"))
-                val merge_block = b_nc.new_block(Some("null_coalesce_merge"))
-                val result_local = b_nc.new_temp(result_type)
-                b_nc.terminate_if(mir_operand_copy(cond_local), then_block, else_block)
+                val is_some_func = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_is_some"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
+                    )))
+                ))
+                val is_some_res = b_nc.emit_call(is_some_func, [mir_operand_copy(left_local)], MirType.bool())
                 self.builder = b_nc
+                var is_some_local = LocalId(id: 0)
+                if val isl = is_some_res:
+                    is_some_local = isl
+
+                var b_split = self.builder
+                val then_block = b_split.new_block(Some("null_coalesce_left"))
+                val else_block = b_split.new_block(Some("null_coalesce_right"))
+                val merge_block = b_split.new_block(Some("null_coalesce_merge"))
+                val result_local = b_split.new_temp(result_type)
+                b_split.terminate_if(mir_operand_copy(is_some_local), then_block, else_block)
+                self.builder = b_split
 
                 var b_left = self.builder
                 b_left.switch_to_block(then_block)
@@ -1302,6 +1326,7 @@ impl MirLowering:
                 if self.runtime_value_locals.has(left_local.id):
                     left_value = self.decode_runtime_value(left_local, result_type)
                 b_left = self.builder
+                b_left.emit_copy(result_local, left_value)
                 b_left.terminate_goto(merge_block)
                 self.builder = b_left
 
@@ -1313,9 +1338,11 @@ impl MirLowering:
                 val right_runtime = self.runtime_value_locals.has(right_local.id)
                 if right_runtime:
                     right_value = self.decode_runtime_value(right_local, result_type)
-                var b_right_done = self.builder
-                b_right_done.terminate_goto(merge_block)
-                self.builder = b_right_done
+                b_right = self.builder
+                b_right.emit_copy(result_local, right_value)
+                b_right.terminate_goto(merge_block)
+                self.builder = b_right
+
                 if self.runtime_value_locals.has(left_value.id) or self.runtime_value_locals.has(right_value.id):
                     self.runtime_value_locals[result_local.id] = true
                 if self.runtime_array_locals.has(left_value.id) or self.runtime_array_locals.has(right_value.id):
@@ -1325,15 +1352,6 @@ impl MirLowering:
 
                 var b_merge = self.builder
                 b_merge.switch_to_block(merge_block)
-                b_merge.emit(MirInst(
-                    kind: MirInstKind.Intrinsic(Some(result_local), "__simple_ssa_phi", [
-                        MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(then_block.id), MirType.i64())),
-                        mir_operand_copy(left_value),
-                        MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(b_right_done.current_block.id), MirType.i64())),
-                        mir_operand_copy(right_value)
-                    ]),
-                    span: nil
-                ))
                 self.builder = b_merge
                 result_local
 
