@@ -86,22 +86,31 @@ pub fn app_registry_lookup_by_fat32(fat32_path: text) -> AppEntry?:
     nil
 
 pub fn app_registry_fat32_alias(canonical_path: text) -> text?:
-    val entry = app_registry_lookup(canonical_path)
-    if entry == nil:
-        return nil
-    val e = entry.unwrap()
-    if e.fat32_leaf.len() == 0:
-        return nil
-    Some("/SYS/APPS/" + e.fat32_leaf)
+    # Iterate g_app_entries directly instead of via app_registry_lookup().
+    # native-build miscompiles the `Option<AppEntry> == nil` guard for a
+    # by-value struct payload (the None guard falls through), so the follow-up
+    # `.unwrap()` panics on a legitimately-absent app (e.g. the disk-less WM
+    # harness where no app binary is registered), faulting cr2=0x0. Mirroring
+    # app_registry_cached_bytes' direct-scan pattern avoids Option<struct>
+    # entirely and returns a clean nil when the app is unregistered.
+    val path = _normalize_lookup_path(canonical_path)
+    for entry in g_app_entries:
+        if entry.canonical_path == path:
+            if entry.fat32_leaf.len() == 0:
+                return nil
+            return Some("/SYS/APPS/" + entry.fat32_leaf)
+    nil
 
 pub fn app_registry_root_alias(canonical_path: text) -> text?:
-    val entry = app_registry_lookup(canonical_path)
-    if entry == nil:
-        return nil
-    val e = entry.unwrap()
-    if e.fat32_leaf.len() == 0:
-        return nil
-    Some("/" + e.fat32_leaf)
+    # See app_registry_fat32_alias: direct scan avoids the native-build
+    # Option<AppEntry> nil-guard miscompile + unwrap-on-None fault.
+    val path = _normalize_lookup_path(canonical_path)
+    for entry in g_app_entries:
+        if entry.canonical_path == path:
+            if entry.fat32_leaf.len() == 0:
+                return nil
+            return Some("/" + entry.fat32_leaf)
+    nil
 
 pub fn app_registry_canonical_from_bytes(path_bytes: [u8]) -> text?:
     val path_text = rt_bytes_to_text(path_bytes)
