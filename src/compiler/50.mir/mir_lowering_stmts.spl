@@ -786,6 +786,19 @@ impl MirLowering:
                 body
         """
         # Check if the iterable is a Range expression for direct lowering
+        # NOTE: this arm was previously dead in practice for every native
+        # `for i in start..end:` loop -- NOT because this match is broken,
+        # but because the flat-AST bridge that feeds this pipeline
+        # (_FlatAstBridge/convert_nodes.spl's convert_flat_expr) had no
+        # EXPR_RANGE case, so `iter.kind` arrived here as ExprKind.NilLit
+        # instead of a real Range and always fell to `case _`. That always
+        # sent range-based for-loops into the generic iterator-protocol
+        # fallback (lower_for_iterator), which panics with "for-in over
+        # non-array iterables is not supported" for anything that isn't a
+        # runtime array -- i.e. every native-build `for i in 0..N:` crashed
+        # at runtime. Fixed at the source (convert_nodes.spl now builds
+        # ExprKind.Range for EXPR_RANGE); this match itself needed no change
+        # once the bridge fed it a real Range.
         match iter.kind:
             case Range(start, end, inclusive, step):
                 return self.lower_for_range(var_, start, end, inclusive, step, body)
@@ -881,10 +894,18 @@ impl MirLowering:
         var b_blocks = self.builder
         val cond_block = b_blocks.new_block(Some("for_range_cond"))
         val body_block = b_blocks.new_block(Some("for_range_body"))
+        val inc_block = b_blocks.new_block(Some("for_range_inc"))
         val exit_block = b_blocks.new_block(Some("for_range_exit"))
         self.builder = b_blocks
 
-        self.loop_stack = self.loop_stack.push((cond_block, exit_block))
+        # `continue` must target inc_block, not cond_block directly: the
+        # counter increment (counter = counter + step) is compiler-
+        # synthesized and must run on every iteration, including ones ended
+        # early by `continue` -- otherwise the counter never advances and
+        # the loop spins forever once a `continue` fires. Mirrors the fix
+        # already applied to lower_for_array_indexed (see its loop_stack
+        # push below for the same rationale).
+        self.loop_stack = self.loop_stack.push((inc_block, exit_block))
 
         # Jump to condition check
         var b_goto = self.builder
@@ -908,8 +929,22 @@ impl MirLowering:
         # Lower the loop body
         self.lower_block(body)
 
-        # Increment: counter = counter + step
+        # If the body's last statement already terminated the current block
+        # (an explicit break/continue/return with no trailing code), don't
+        # add a second terminator here -- doing so would silently overwrite
+        # it: e.g. a trailing `break`'s Goto(exit_block) or a `return`'s Ret
+        # would be clobbered by this loop's own fall-through jump, turning
+        # `break`/`return` into a plain backedge. Mirrors the guard already
+        # used by lower_loop/lower_while/lower_for_array_indexed -- this
+        # range-based for-loop was the one lowering missing it.
+        var b_body_end = self.builder
+        if not b_body_end.current_block_has_explicit_terminator():
+            b_body_end.terminate_goto(inc_block)
+        self.builder = b_body_end
+
+        # Increment: counter = counter + step (also the `continue` target)
         var b_inc = self.builder
+        b_inc.switch_to_block(inc_block)
         val incremented = b_inc.emit_binop(
             MirBinOp.Add,
             mir_operand_copy(counter),

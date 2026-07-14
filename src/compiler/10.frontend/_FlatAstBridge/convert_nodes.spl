@@ -737,6 +737,30 @@ fn convert_flat_expr(idx: i64) -> Expr:
                 span: span
             ))
         return Expr(kind: ExprKind.ListComprehension(comp_body, comp_clauses), span: span)
+    elif tag == EXPR_RANGE:
+        # Root cause for the native `--entry` build path: this bridge is the
+        # sole translator from the flat/tree-sitter-style AST (expr_alloc
+        # nodes) into the tree-shaped Expr used by the rest of the pipeline
+        # (resolve -> hir_lowering -> mir lowering). EXPR_RANGE had NO case
+        # here, so every `for i in start..end:` iterable silently fell to
+        # the `else:` catch-all at the bottom of this function and came out
+        # as `ExprKind.NilLit` instead of `ExprKind.Range(...)`. Downstream,
+        # mir_lowering_stmts.spl's `lower_for` never saw a Range `iter.kind`,
+        # so it ALWAYS took the generic iterator-protocol fallback
+        # (lower_for_iterator), which panics with "for-in over non-array
+        # iterables is not supported" for anything that isn't a runtime
+        # array -- i.e. every native-build range-based `for` loop crashed at
+        # runtime. Mirrors the accessor calls already used for the exact
+        # same EXPR_RANGE node shape by the other backends in this
+        # directory (see cg_stmt.spl / cg_expr.spl / eval.spl): LEFT=start,
+        # RIGHT=end, I=inclusive flag. This flat node has no step slot
+        # (expr_range() takes no step argument), so step is always nil here.
+        val range_start_idx = expr_get_left(idx)
+        val range_end_idx = expr_get_right(idx)
+        val range_start: Expr? = if range_start_idx >= 0: convert_flat_expr(range_start_idx) else: nil
+        val range_end: Expr? = if range_end_idx >= 0: convert_flat_expr(range_end_idx) else: nil
+        val range_inclusive = expr_get_int(idx) != 0
+        return Expr(kind: ExprKind.Range(range_start, range_end, range_inclusive, nil), span: span)
     elif tag == EXPR_DICT_COMP:
         val dc_args = expr_get_args(idx)
         if dc_args.len() < 2:
