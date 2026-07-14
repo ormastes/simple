@@ -208,7 +208,21 @@ fn flat_ast_to_module(path: text) -> Module:
                 var fields: [Field] = []
                 var fi = 0
                 while fi < f_names.len():
-                    val ft = Type(kind: TypeKind.Infer, span: span)
+                    # floatstruct fix: `f_types` (decl_get_field_types) was
+                    # fetched above but never consulted here -- every field's
+                    # `type_` was unconditionally Infer regardless of its real
+                    # declared type (e.g. `x: f64`), so downstream HIR/MIR
+                    # lowering silently treated a float field as i64
+                    # (native_float_struct_field_fptosi_corruption bug: `p.x`
+                    # printed as a truncated integer, `Point(x:1.5,y:3.5)`
+                    # print(p.x) -> "1" instead of "1.5"). Convert the real
+                    # flat type-node index through the same convert_flat_type
+                    # used for function params/returns; falls back to Infer
+                    # (unchanged behavior) when a field has no recorded type
+                    # node.
+                    var ft = Type(kind: TypeKind.Infer, span: span)
+                    if fi < f_types.len():
+                        ft = convert_flat_type(f_types[fi])
                     val fd = nil
                     var fb: i64 = -1
                     if fi < f_bits.len():

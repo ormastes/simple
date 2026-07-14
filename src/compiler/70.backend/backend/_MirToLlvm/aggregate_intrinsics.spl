@@ -84,7 +84,7 @@ impl MirToLlvm:
                 self.builder.emit("  {agg} = call ptr @rt_alloc(i64 {n * word_bytes})")
                 for i in 0..n:
                     val raw = self.translate_operand(operands[i])
-                    val v = self.value_as_type(raw, self.get_operand_type(operands[i]), nit)
+                    val v = self.store_field_bits(raw, self.get_operand_type(operands[i]), nit)
                     val fp = self.builder.fresh_local()
                     self.builder.emit("  {fp} = getelementptr inbounds {nit}, ptr {agg}, i32 {i}")
                     self.builder.emit_store(nit, v, fp)
@@ -128,7 +128,7 @@ impl MirToLlvm:
                 self.builder.emit("  {tup_agg} = call ptr @rt_alloc(i64 {tup_n * tup_word_bytes})")
                 for i in 0..tup_n:
                     val tup_raw = self.translate_operand(operands[i])
-                    val tup_v = self.value_as_type(tup_raw, self.get_operand_type(operands[i]), tup_nit)
+                    val tup_v = self.store_field_bits(tup_raw, self.get_operand_type(operands[i]), tup_nit)
                     val tup_fp = self.builder.fresh_local()
                     self.builder.emit("  {tup_fp} = getelementptr inbounds {tup_nit}, ptr {tup_agg}, i32 {i}")
                     self.builder.emit_store(tup_nit, tup_v, tup_fp)
@@ -176,10 +176,25 @@ impl MirToLlvm:
         # registered type. Struct-typed nested fields are unaffected (their
         # declared type stays native_int here today, so get_local_type
         # returns native_int and this branch does not fire).
-        if self.get_local_type(dest_id) == "ptr":
+        val dest_ty = self.valid_llvm_type(self.get_local_type(dest_id))
+        if dest_ty == "ptr":
             val raw_field_val = self.builder.fresh_local()
             self.builder.emit_load(raw_field_val, nit, field_ptr)
             self.builder.emit("  {dest_name} = inttoptr {nit} {raw_field_val} to ptr")
+        elif is_float_type(dest_ty):
+            # float-field fix (native_float_struct_field_fptosi_corruption):
+            # the field's real declared type is float (e.g. f64), but the
+            # physical storage word is still one native-int word (see the
+            # doc comment above / translate_aggregate's Struct case). Loading
+            # straight into `dest_name` typed as `double` while the word's
+            # LLVM-defined type is `i64` is an `llc` type mismatch; loading
+            # it as an integer VALUE (sitofp) would also be wrong -- it
+            # would treat the word's raw bits as a numeric integer instead of
+            # reinterpreting them as the float bits they already are (see
+            # store_field_bits). Load the native-int word, then `bitcast` it
+            # to the field's real float type -- the exact mirror of
+            # store_field_bits on write.
+            self.load_field_bits(dest_name, field_ptr, dest_ty, nit)
         else:
             self.builder.emit_load(dest_name, nit, field_ptr)
 
@@ -188,10 +203,64 @@ impl MirToLlvm:
         val base_val = self.value_as_type(raw_base_val, self.get_operand_type(base), "ptr")
         val raw_value_val = self.translate_operand(value)
         val nit = self.native_int()
-        val value_val = self.value_as_type(raw_value_val, self.get_operand_type(value), nit)
+        val value_val = self.store_field_bits(raw_value_val, self.get_operand_type(value), nit)
         val field_ptr = self.builder.fresh_local()
         self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
         self.builder.emit_store(nit, value_val, field_ptr)
+
+    # === Helpers: bit-preserving float<->native-int-word reinterpret ===
+    #
+    # Struct/tuple aggregates store every field as one native-int word
+    # (translate_aggregate's Struct/Tuple cases, translate_get_field,
+    # translate_set_field). A float-typed field's VALUE must round-trip
+    # through that word's BITS unchanged: `value_as_type`'s normal
+    # float<->int coercion is `fptosi`/`sitofp`, which converts the NUMERIC
+    # value (3.5 -> 3, truncating the fraction) -- correct for an explicit
+    # `as` cast, wrong here, where the int word is just float-bits wearing an
+    # integer LLVM type for storage purposes. `bitcast` reinterprets the same
+    # bits instead (native_float_struct_field_fptosi_corruption bug: `p.x`
+    # constructed from `1.5` printed back as `1`).
+
+    fn float_int_equiv(ty: text) -> text:
+        """The LLVM integer type with the same bit width as a float type,
+        for a bit-preserving `bitcast` (double <-> i64, float <-> i32)."""
+        if ty == "double":
+            return "i64"
+        if ty == "float":
+            return "i32"
+        ty
+
+    me store_field_bits(raw_val: text, operand_ty: text, nit: text) -> text:
+        """Convert an operand's translated value into the native-int WORD
+        used for aggregate field storage. A float source is BIT-PRESERVED
+        via `bitcast` (never `fptosi`); everything else keeps the existing
+        `value_as_type` integer coercion unchanged."""
+        var src_ty = self.valid_llvm_type(operand_ty)
+        val maybe_actual_ty = self.value_types.get(raw_val)
+        if maybe_actual_ty.?:
+            src_ty = self.valid_llvm_type(maybe_actual_ty.unwrap())
+        if not is_float_type(src_ty):
+            return self.value_as_type(raw_val, src_ty, nit)
+        val int_equiv = self.float_int_equiv(src_ty)
+        val bits = self.builder.fresh_local()
+        self.builder.emit("  {bits} = bitcast {src_ty} {raw_val} to {int_equiv}")
+        if int_equiv == nit:
+            return bits
+        self.value_as_type(bits, int_equiv, nit)
+
+    me load_field_bits(dest_name: text, field_ptr: text, dest_ty: text, nit: text):
+        """Load a struct/tuple field's native-int storage word and
+        reinterpret it as the field's real float type (mirror of
+        store_field_bits on read): `bitcast`, never `sitofp` -- the loaded
+        word's bits are already float bits (written by store_field_bits),
+        not a raw integer value to convert."""
+        val int_equiv = self.float_int_equiv(dest_ty)
+        val raw = self.builder.fresh_local()
+        self.builder.emit_load(raw, nit, field_ptr)
+        var bits = raw
+        if int_equiv != nit:
+            bits = self.value_as_type(raw, nit, int_equiv)
+        self.builder.emit("  {dest_name} = bitcast {int_equiv} {bits} to {dest_ty}")
 
     # === Overrides: casts ===
 
