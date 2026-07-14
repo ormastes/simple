@@ -51,52 +51,44 @@ exit, 2c UEFI boot, 2d robustness). 2e is the SSH-invocation capstone.
 `.o` proven by raw-disk extract → `llvm-readobj` (ET_REL/EM_X86_64/main) → `cc .o -o a &&
 ./a; echo $?` == 7. NOT "exit 0". Land exact bytes via plumbing FF push (drift-guarded,
 SSH key). Agents implement + report serial; coordinator reviews + lands.
-<<<<<<< Conflict 1 of 1
-%%%%%%% Changes from base to side #1
- 
- ## Progress (2026-07-12)
- - **Inc 1 DONE + landed 0097ce77629.** clang compiles over real SSH via
-   `x86_64_fs_exec_spawn_heap` → `.o` on real NVMe → exit 7 (raw-disk verified). All 3
-   unknowns proven. Harness `scripts/os/build_clang_over_ssh.shs`.
- - **Inc 2 IN PROGRESS (user chose full-deep = fix the root bug).** Root cause is a
-   cranelift-backend char/text TAG-BOX codegen bug on `--target x86_64-unknown-none
-   --backend cranelift`: `text.char_at(i)` returns a tag-boxed value (`0x12_0000_0001`),
-   `starts_with` returns false, and `rt_string_from_byte_array(...)` stored into a field
-   corrupts (11 B → 2 chars); `len()`/full-`==`/`[u8]`/`i64`/rodata literals are all fine.
-   See `doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md`. Fixing it removes
-   the raw-byte workaround AND unblocks Inc 3 (SFTP OPEN path decode). Worker digging the
-   cranelift lowering (`src/compiler/70.backend/backend/cranelift_*.spl`).
- - **Inc 3 DONE (getfile fallback):** `ssh root@host getfile /hello.o > retrieved.o` returns
-   the raw file bytes as channel stdout in ONE shot (no interactive ack protocol, unlike
-   scp-source). Server reads `/hello.o` off FAT32 (`_scp_read_file_bytes`, mmio_read8 raw-read
-   idiom) and delivers it via `_finish_exec_request_inline`. Verified: `retrieved.o` is
-   BYTE-IDENTICAL to the on-disk `/HELLO.O` (sha256 `d0c481d8…90a8c39b`, 712 B), ELF64
-   ET_REL/EM_X86_64, host-links + runs == exit 7. Harness `scripts/os/scp_retrieve_over_ssh.shs`.
-   TWO root-cause fixes landed with it:
-   1. `_build_channel_data_stable`: the DATA copy used the `payload = rt_push_byte(payload, ..)`
-      reassignment form, which on x86_64 freestanding drops the BYTE_PACKED representation once
-      the array grows large and corrupts the payload (712-byte `/hello.o` delivered as
-      0x53-garbage while small handshake/exit packets, staying inline-packed, delivered fine).
-      Switched the data loop to the `.push` intrinsic (mutates in place, preserves packing) —
-      same idiom `_copy_bytes_stable` already documents.
-   2. `_finish_exec_request_inline`: the chained `output.len().to_u32()` mis-lowers on this lane,
-      so `consume_remote_window()` saw a bogus huge count, rejected the payload, and silently
-      dropped the channel data (empty `retrieved.o`). Bound the length to an intermediate var.
- - **scp-source (`scp -O`) — near-complete, deferred:** the C-record + body path is built
--  (`_scp_read_file_bytes`, `_scp_ctrl_line`, `_scp_step_inline`) but the interactive
--  ready-ack handshake is blocked on x86_64 freestanding by non-persisting nested-`me`
--  mutation (`self.scp_stage` set inside a nested call does not persist) plus flush-before-close
--  timing. `getfile` supersedes it for the file-retrieval goal.
-+  (`_scp_read_file_bytes`, `_scp_ctrl_line`, `_scp_step_inline`, now one-shot). TWO earlier
-+  diagnoses were DISPROVEN: (a) a "non-persisting nested-`me` mutation" (repro prints
-+  `NESTED_ME_OK`; `_finish_exec` mutates `self` via a nested `me` call and works); (b) a
-+  "chained `x.len().to_u32()` mis-lowering" (three standalone probes + a real-code revert all
-+  pass — see the retracted
-+  `doc/08_tracking/bug/x64_freestanding_chained_len_cast_miscompile.md`). The genuine defect in
-+  this whole arc was the `rt_push_byte` reassignment dropping BYTE_PACKED for large `[u8]`
-+  (fixed with `.push`; `doc/08_tracking/bug/x64_freestanding_push_byte_reassign_byte_packed.md`).
-+  The remaining scp-source factor is only that each `scp`/`ssh` invocation opens a fresh
-+  connection (new `SshSession`, `scp_stage=0`). `getfile` supersedes scp for retrieval, so
-+  scp-source is left as-is.
-+++++++ Contents of side #2
->>>>>>> Conflict 1 of 1 ends
+
+## Progress (2026-07-12)
+- **Inc 1 DONE + landed 0097ce77629.** clang compiles over real SSH via
+  `x86_64_fs_exec_spawn_heap` → `.o` on real NVMe → exit 7 (raw-disk verified). All 3
+  unknowns proven. Harness `scripts/os/build_clang_over_ssh.shs`.
+- **Inc 2 IN PROGRESS (user chose full-deep = fix the root bug).** Root cause is a
+  cranelift-backend char/text TAG-BOX codegen bug on `--target x86_64-unknown-none
+  --backend cranelift`: `text.char_at(i)` returns a tag-boxed value (`0x12_0000_0001`),
+  `starts_with` returns false, and `rt_string_from_byte_array(...)` stored into a field
+  corrupts (11 B → 2 chars); `len()`/full-`==`/`[u8]`/`i64`/rodata literals are all fine.
+  See `doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md`. Fixing it removes
+  the raw-byte workaround AND unblocks Inc 3 (SFTP OPEN path decode). Worker digging the
+  cranelift lowering (`src/compiler/70.backend/backend/cranelift_*.spl`).
+- **Inc 3 DONE (getfile fallback):** `ssh root@host getfile /hello.o > retrieved.o` returns
+  the raw file bytes as channel stdout in ONE shot (no interactive ack protocol, unlike
+  scp-source). Server reads `/hello.o` off FAT32 (`_scp_read_file_bytes`, mmio_read8 raw-read
+  idiom) and delivers it via `_finish_exec_request_inline`. Verified: `retrieved.o` is
+  BYTE-IDENTICAL to the on-disk `/HELLO.O` (sha256 `d0c481d8…90a8c39b`, 712 B), ELF64
+  ET_REL/EM_X86_64, host-links + runs == exit 7. Harness `scripts/os/scp_retrieve_over_ssh.shs`.
+  TWO root-cause fixes landed with it:
+  1. `_build_channel_data_stable`: the DATA copy used the `payload = rt_push_byte(payload, ..)`
+     reassignment form, which on x86_64 freestanding drops the BYTE_PACKED representation once
+     the array grows large and corrupts the payload (712-byte `/hello.o` delivered as
+     0x53-garbage while small handshake/exit packets, staying inline-packed, delivered fine).
+     Switched the data loop to the `.push` intrinsic (mutates in place, preserves packing) —
+     same idiom `_copy_bytes_stable` already documents.
+  2. `_finish_exec_request_inline`: the chained `output.len().to_u32()` mis-lowers on this lane,
+     so `consume_remote_window()` saw a bogus huge count, rejected the payload, and silently
+     dropped the channel data (empty `retrieved.o`). Bound the length to an intermediate var.
+- **scp-source (`scp -O`) — near-complete, deferred:** the C-record + body path is built
+  (`_scp_read_file_bytes`, `_scp_ctrl_line`, `_scp_step_inline`, now one-shot). TWO earlier
+  diagnoses were DISPROVEN: (a) a "non-persisting nested-`me` mutation" (repro prints
+  `NESTED_ME_OK`; `_finish_exec` mutates `self` via a nested `me` call and works); (b) a
+  "chained `x.len().to_u32()` mis-lowering" (three standalone probes + a real-code revert all
+  pass — see the retracted
+  `doc/08_tracking/bug/x64_freestanding_chained_len_cast_miscompile.md`). The genuine defect in
+  this whole arc was the `rt_push_byte` reassignment dropping BYTE_PACKED for large `[u8]`
+  (fixed with `.push`; `doc/08_tracking/bug/x64_freestanding_push_byte_reassign_byte_packed.md`).
+  The remaining scp-source factor is only that each `scp`/`ssh` invocation opens a fresh
+  connection (new `SshSession`, `scp_stage=0`). `getfile` supersedes scp for retrieval, so
+  scp-source is left as-is.

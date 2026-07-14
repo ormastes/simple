@@ -164,19 +164,9 @@ decrease only when a lane becomes evidence-backed.
 - The audit reports `pass` when no executable completion placeholders remain
   and all required completion-gate witnesses are present.
 - The current placeholder count is zero.
-<<<<<<< Conflict 1 of 3
-%%%%%%% Changes from base to side #1
--- The audit identifies its assertion mode as `todo-placeholder-count`, not a
--  runner workaround.
-+- The current required-gate count is `17` with zero missing gates.
-+- The audit identifies its assertion mode as
-+  `todo-placeholder-count-plus-required-gate-presence`, not a runner workaround.
-+++++++ Contents of side #2
 - The current required-gate count is `17` with zero missing gates.
 - The audit identifies its assertion mode as
   `todo-placeholder-count-plus-required-gate-presence`, not a runner workaround.
-- The audit identifies its completion scope as `source-shape-only`.
->>>>>>> Conflict 1 of 3 ends
 - The remaining-placeholder evidence is empty.
 - A fixture missing required gates reports
   `reason=completion-required-gates-missing` and a nonzero missing-gate count.
@@ -200,13 +190,7 @@ decrease only when a lane becomes evidence-backed.
 <details>
 <summary>Executable SSpec</summary>
 
-<<<<<<< Conflict 2 of 3
-%%%%%%% Changes from base to side #1
--Runnable source: 19 lines folded for reproduction.
-+Runnable source: 23 lines folded for reproduction.
-+++++++ Contents of side #2
-Runnable source: 22 lines folded for reproduction.
->>>>>>> Conflict 2 of 3 ends
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -224,8 +208,6 @@ expect(evidence).to_contain("gui_web_2d_completion_criteria_required_gate_count=
 expect(evidence).to_contain("gui_web_2d_completion_criteria_missing_required_gate_count=0")
 expect(evidence).to_contain("gui_web_2d_completion_criteria_assertion_mode=todo-placeholder-count-plus-required-gate-presence")
 expect(evidence).to_contain("gui_web_2d_completion_criteria_remaining_placeholders=")
-<<<<<<< Conflict 3 of 3
-+++++++ Contents of side #1
 expect(evidence).to_contain("gui_web_2d_completion_criteria_missing_required_gates=")
 expect_not(evidence.contains("recorded Spark/fallback sidecar outputs"))
 expect_not(evidence.contains("current Linux Vulkan evidence"))
@@ -271,17 +253,6 @@ expect(evidence).to_contain("tauri-mobile-event-sequence")
 expect(evidence).to_contain("headless-handoff-prep-wrapper")
 expect(evidence).to_contain("five-platform-handoff-spec")
 expect(evidence).to_contain("cross-platform-freshness")
-%%%%%%% Changes from base to side #2
-+expect(evidence).to_contain("gui_web_2d_completion_criteria_missing_required_gates=")
- expect(evidence.contains("current Linux Vulkan evidence")).to_equal(false)
- expect(evidence.contains("macOS Metal readback")).to_equal(false)
- expect(evidence.contains("Windows D3D12/DXGI readback")).to_equal(false)
- expect(evidence.contains("strict full HTML/CSS goal assertions")).to_equal(false)
- expect(evidence.contains("production GUI/Web backend readback")).to_equal(false)
- expect(evidence.contains("recorded Spark/fallback sidecar outputs")).to_equal(false)
- expect(evidence.contains("script fails while any `TODO(gui-web-2d-completion)`")).to_equal(false)
- expect(evidence.contains("Replacing one of those")).to_equal(false)
->>>>>>> Conflict 3 of 3 ends
 ```
 
 </details>
