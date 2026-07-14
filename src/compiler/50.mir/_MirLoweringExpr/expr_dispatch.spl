@@ -206,6 +206,69 @@ impl MirLowering:
             case MirTypeKind.F32: true
             case _: false
 
+    me coerce_concat_operand(local: LocalId) -> MirOperand:
+        """strconcat2: `text + scalar` (e.g. `"n=" + 5`) must not hand the raw
+        scalar bit pattern to rt_strcat_tagged -- rt_strcat_tagged unwraps
+        each operand via rt_interp_cstr, which treats any non-tagged-string
+        i64 as a raw char* and derefs it, SIGSEGVing on a plain int/bool/float
+        operand (see bin_is_str_concat below). Mirrors
+        lower_bootstrap_print_call's raw-render dispatch
+        (switch_operators_calls.spl): render the scalar to a TAGGED heap
+        string via rt_raw_i64_to_string/rt_raw_u64_to_string/
+        rt_raw_bool_to_string/rt_raw_f64_to_string BEFORE it becomes a concat
+        operand. Unlike that print path, no extra rt_interp_cstr unwrap is
+        needed afterward: rt_strcat_tagged already runs every operand through
+        rt_interp_cstr itself, and rt_interp_cstr's tagged-or-raw autodetect
+        (bug #136) accepts the freshly tagged string handle directly.
+
+        A str-typed operand passes through unchanged (this is also the
+        text+text control path). An F32 operand is widened to F64 first
+        (emit_cast) so rt_raw_f64_to_string's `double` ABI slot gets real
+        float bits instead of a 32-bit value reinterpreted as 64-bit --
+        widening here, before the value becomes a concat operand, is what
+        sidesteps the separately-flagged double->ptr call-arg coercion bug in
+        core_codegen (the coercion only misfires on an F64-typed operand
+        reaching a call site as a bare arg; this path renders it to a tagged
+        string handle first)."""
+        if self.local_is_str(local):
+            return mir_operand_copy(local)
+        var is_bool = false
+        var is_f32 = false
+        var is_float = false
+        var is_u64 = false
+        var is_numeric = false
+        if val ty = self.local_mir_type_of(local):
+            match ty.kind:
+                case MirTypeKind.Bool: is_bool = true
+                case MirTypeKind.F32:
+                    is_float = true
+                    is_f32 = true
+                case MirTypeKind.F64: is_float = true
+                case MirTypeKind.U64: is_u64 = true
+                case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64
+                   | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32:
+                    is_numeric = true
+                case _: ()
+        if not (is_bool or is_float or is_u64 or is_numeric):
+            return mir_operand_copy(local)
+        val render_fn = if is_bool: "rt_raw_bool_to_string" elif is_float: "rt_raw_f64_to_string" elif is_u64: "rt_raw_u64_to_string" else: "rt_raw_i64_to_string"
+        var render_src = mir_operand_copy(local)
+        if is_f32:
+            var b_widen = self.builder
+            val widened = b_widen.emit_cast(mir_operand_copy(local), MirType.f64())
+            self.builder = b_widen
+            render_src = mir_operand_copy(widened)
+        val num_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str(render_fn),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        var b_num = self.builder
+        val num_res = b_num.emit_call(num_op, [render_src], MirType.i64())
+        self.builder = b_num
+        if val num_local = num_res:
+            return mir_operand_copy(num_local)
+        mir_operand_copy(local)
+
     me box_runtime_value(local: LocalId) -> LocalId:
         if self.nil_locals.has(local.id):
             var nil_builder = self.builder
@@ -1176,12 +1239,21 @@ impl MirLowering:
                             case _:
                                 ()
                         if bin_is_str_concat:
+                            # strconcat2: one operand may be a non-str scalar
+                            # (`"n=" + 5`) -- stringify it via
+                            # coerce_concat_operand BEFORE it reaches
+                            # rt_strcat_tagged (see that helper's comment for
+                            # why a raw scalar SIGSEGVs there). A str operand
+                            # passes through unchanged, so text+text is
+                            # unaffected.
+                            val cat_left = self.coerce_concat_operand(left_local)
+                            val cat_right = self.coerce_concat_operand(right_local)
                             val cat_func = MirOperand(kind: MirOperandKind.Const(
                                 MirConstValue.Str("rt_strcat_tagged"),
                                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
                             ))
                             var b_cat = self.builder
-                            val cat_res = b_cat.emit_call(cat_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], MirType(kind: MirTypeKind.Opaque("str")))
+                            val cat_res = b_cat.emit_call(cat_func, [cat_left, cat_right], MirType(kind: MirTypeKind.Opaque("str")))
                             self.builder = b_cat
                             if val cat_local = cat_res:
                                 return cat_local
