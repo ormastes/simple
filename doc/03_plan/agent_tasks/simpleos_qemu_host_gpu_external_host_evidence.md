@@ -67,7 +67,7 @@ only if a fresh native run exposes a reproducible implementation failure.
 | TODO550 | Execute the stable ProcessingIR device-identity path and retain a fresh live receipt. The owner-level selector is `SIMPLEOS_HOST_GPU_PROCESSING_BACKEND=vulkan sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs`; the forced-Vulkan receipt remains pending. |
 | TODO551 | Host-local owner quarantine/reaping is implemented; run the focused lifecycle and live Vulkan evidence after TODO548 deploys a current pure-Simple compiler. |
 | TODO552 | Select feature/NFR requirements before implementing 4K shared-memory capacity. |
-| TODO554 | Fix canonical Draw IR shadow bounds; currently overlaps another UI/font worktree. |
+| TODO554 | Shadow-inclusive, scene-clamped titled-window DrawIR bounds are implemented without changing hit/layout geometry; focused CPU/device execution remains blocked by TODO 548. |
 | TODO555 | Complete owner-level Metal unknown-completion quarantine and later obtain native failure evidence. |
 | TODO563 | Run current-host Linux Vulkan warm p95 and combined QEMU/daemon RSS evidence after TODO548 unblocks execution. |
 | TODO565 | Complete AArch64/RISC-V production desktop ownership and fresh QEMU proof. |

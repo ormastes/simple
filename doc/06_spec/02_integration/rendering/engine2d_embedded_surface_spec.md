@@ -28,10 +28,15 @@ expected integer alpha result.
 ### Canonical WM shared Vulkan surface
 
 The real content-aware WM Draw IR producer emits one unfocused window at
-`(10,36)`, size `120x80`, opacity `930`, followed by its resolved `120x52`
-content IMAGE. The scenario verifies:
+`(10,36)`, body size `120x80`, shadow-inclusive scene-clamped surface size
+`125x84`, opacity `930`, followed by its resolved `120x52` content IMAGE. The
+scenario verifies:
 
-- clipped leading translucent shadow metadata and resolved title/close TEXT;
+- the first pixel right of the body is shadow-darkened while the pixel after
+  the five-pixel shadow remains desktop background;
+- body/hit geometry stays `120x80`; the last body pixel focuses the window and
+  the first shadow-only pixel dispatches as desktop background;
+- translucent shadow metadata and resolved title/close TEXT;
 - exact content IMAGE URI and placement;
 - child and parent share the same Vulkan or Metal device/session generation;
 - creating and shutting the child increments then restores the session count;
@@ -41,7 +46,8 @@ content IMAGE. The scenario verifies:
 
 Vulkan/Metal absence is an explicit unavailable branch, not a device PASS;
 the explicit Metal-on-Vulkan compatibility name is not native Metal. TODO 554
-tracks the producer geometry that currently clips and overwrites the shadow.
+remains open until the focused CPU/device scenario executes with an accepted
+pure-Simple runtime.
 
 ### Nested embedded output
 
@@ -83,7 +89,7 @@ coordinate behavior.
 | Field | Value |
 |-------|-------|
 | Category | Rendering integration |
-| Status | Active; execution blocked by TODO 548 in this session |
+| Status | Active; candidate unit run exited 139, no parity PASS |
 | Source | `test/02_integration/rendering/engine2d_embedded_surface_spec.spl` |
 | Updated | 2026-07-14 (manual) |
 | Generator | Manual SPipe refresh; rerun `simple spipe-docgen` after TODO 548 |

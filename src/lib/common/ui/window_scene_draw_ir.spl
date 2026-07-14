@@ -53,6 +53,8 @@ use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
 val WM_DRAW_IR_COMPOSITION_ID: text = "wm-composite"
 val WM_DRAW_IR_DESKTOP_SURFACE: text = "wm-desktop"
 val WM_DRAW_IR_CHROME_SURFACE: text = "wm-chrome"
+val WM_WINDOW_SHADOW_OFFSET_X: i32 = 5
+val WM_WINDOW_SHADOW_OFFSET_Y: i32 = 6
 
 # Stage3 baremetal proved the `[u32]` pixels class field is a live corruption
 # boundary: mutations through receiver methods write to a copy, and reading
@@ -226,7 +228,7 @@ class SharedWmPixelBufferBackend:
         if window.minimized:
             return
         val title_color = if window.focused: theme.accent else: theme.title_unfocused
-        self._px_fill_rect(window.x + 5, window.y + 6, window.width, window.height, theme.window_shadow)
+        self._px_fill_rect(window.x + WM_WINDOW_SHADOW_OFFSET_X, window.y + WM_WINDOW_SHADOW_OFFSET_Y, window.width, window.height, theme.window_shadow)
         self._px_fill_rect(window.x, window.y, window.width, window.height, theme.host_window_body)
         self._px_fill_rect(window.x, window.y, window.width, 28, title_color)
         self._px_fill_rect(window.x + 12, window.y + 9, 10, 10, 0xFFE74C3Cu32)
@@ -642,9 +644,13 @@ fn _wm_draw_ir_taskbar_objects_batch(scene: SharedWmScene, taskbar: TaskbarModel
     val embedding = draw_ir_embedding_config("wm-taskbar-objects", "wm-taskbar-objects", 0, 0, scene.width, scene.height, 10000, 1000, false)
     draw_ir_batch_with_source("wm-taskbar-objects", backend_target, embedding, commands, _wm_draw_ir_source("wm.taskbar.objects", "wm.taskbar", _wm_draw_ir_chrome_revision(scene, taskbar, dpi_scale_milli, clock_label, right_icon_count)))
 
-fn _wm_draw_ir_window_batch(window: SharedWmWindow, backend_target: text) -> DrawIrBatch:
+fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backend_target: text) -> DrawIrBatch:
     val theme = wm_chrome_theme()
-    val embedding = draw_ir_embedding_config(window.surface_id, window.window_id, window.x, window.y, window.width, window.height, window.z_index + 10, _wm_draw_ir_window_opacity(window), true)
+    val remaining_width = scene.width - window.x - window.width
+    val remaining_height = scene.height - window.y - window.height
+    val shadow_width = if window.chrome_kind != WM_CHROME_KIND_BORDERLESS and remaining_width > 0: _wm_draw_ir_min_i32(WM_WINDOW_SHADOW_OFFSET_X, remaining_width) else: 0
+    val shadow_height = if window.chrome_kind != WM_CHROME_KIND_BORDERLESS and remaining_height > 0: _wm_draw_ir_min_i32(WM_WINDOW_SHADOW_OFFSET_Y, remaining_height) else: 0
+    val embedding = draw_ir_embedding_config(window.surface_id, window.window_id, window.x, window.y, window.width + shadow_width, window.height + shadow_height, window.z_index + 10, _wm_draw_ir_window_opacity(window), true)
     if window.chrome_kind == WM_CHROME_KIND_BORDERLESS:
         return draw_ir_batch_with_source("window-{window.window_id}", backend_target, embedding, [], _wm_draw_ir_source("wm.window.{window.window_id}", "wm.window", _wm_draw_ir_window_revision(window)))
     val title_color = if window.focused: theme.accent else: theme.title_unfocused
@@ -653,7 +659,7 @@ fn _wm_draw_ir_window_batch(window: SharedWmWindow, backend_target: text) -> Dra
         backend_target,
         embedding,
         [
-            _wm_draw_ir_window_box(window, "{window.window_id}-shadow", "shadow", 5, 6, window.width, window.height, theme.window_shadow),
+            _wm_draw_ir_window_box(window, "{window.window_id}-shadow", "shadow", WM_WINDOW_SHADOW_OFFSET_X, WM_WINDOW_SHADOW_OFFSET_Y, window.width, window.height, theme.window_shadow),
             _wm_draw_ir_window_box(window, "{window.window_id}-body", "body", 0, 0, window.width, window.height, theme.host_window_body),
             _wm_draw_ir_window_box(window, "{window.window_id}-titlebar", "titlebar", 0, 0, window.width, 28, title_color),
             draw_ir_rect("{window.window_id}-traffic-red", 12, 9, 10, 10, 0xFFE74C3Cu32),
@@ -712,7 +718,7 @@ fn shared_wm_scene_draw_ir_composition(scene: SharedWmScene, taskbar: TaskbarMod
     val windows = _wm_draw_ir_visible_windows_by_layer(scene)
     var batches: [DrawIrBatch] = [desktop_batch, _wm_draw_ir_chrome_batch(scene, taskbar, backend_target, dpi_scale_milli, clock_label, right_icon_count)]
     for window in windows:
-        batches.push(_wm_draw_ir_window_batch(window, backend_target))
+        batches.push(_wm_draw_ir_window_batch(scene, window, backend_target))
     batches.push(_wm_draw_ir_taskbar_objects_batch(scene, taskbar, backend_target, dpi_scale_milli, clock_label, right_icon_count))
     draw_ir_composition(WM_DRAW_IR_COMPOSITION_ID, shared_wm_scene_layout_key(scene), backend_target, batches)
 
@@ -834,7 +840,7 @@ fn shared_wm_scene_draw_window_chrome(backend: CompositorBackend, window: Shared
     if window.minimized:
         return
     val title_color = if window.focused: theme.accent else: theme.title_unfocused
-    backend.fill_rect(window.x + 5, window.y + 6, window.width, window.height, theme.window_shadow)
+    backend.fill_rect(window.x + WM_WINDOW_SHADOW_OFFSET_X, window.y + WM_WINDOW_SHADOW_OFFSET_Y, window.width, window.height, theme.window_shadow)
     backend.fill_rect(window.x, window.y, window.width, window.height, theme.host_window_body)
     backend.fill_rect(window.x, window.y, window.width, 28, title_color)
     backend.fill_rect(window.x + 12, window.y + 9, 10, 10, 0xFFE74C3Cu32)

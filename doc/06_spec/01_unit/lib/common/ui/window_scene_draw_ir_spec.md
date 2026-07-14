@@ -44,7 +44,7 @@ window_scene_draw_ir_spec -> common
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -68,6 +68,8 @@ expect(composition.batches[2].source.style_revision).to_contain("xy=10,40")
 expect(composition.batches[2].source.style_revision).to_contain("size=300x200")
 expect(composition.batches[2].embedding.x).to_equal(10)
 expect(composition.batches[2].embedding.y).to_equal(40)
+expect(composition.batches[2].embedding.width).to_equal(305)
+expect(composition.batches[2].embedding.height).to_equal(206)
 expect(composition.batches[3].embedding.x).to_equal(80)
 expect(composition.batches[3].embedding.y).to_equal(120)
 expect(composition.batches[3].commands[0].kind).to_equal(DRAW_IR_COMMAND_RECT)
@@ -102,7 +104,7 @@ expect(second.batches[3].source.style_revision).to_equal(first.batches[3].source
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -113,6 +115,8 @@ val titlebar = window_batch.commands[2]
 
 expect(body.hit_rect.present).to_equal(true)
 expect(body.hit_rect.width).to_equal(300)
+expect(body.width).to_equal(300)
+expect(body.height).to_equal(200)
 expect(body.clip_rect.present).to_equal(true)
 expect(body.clip_rect.height).to_equal(200)
 expect(body.computed_style[0].key).to_equal("source")
@@ -216,9 +220,9 @@ expect(context.backend_target).to_equal(DRAW_IR_BACKEND_GPU)
 | Field | Value |
 |-------|-------|
 | Category | Standard Library |
-| Status | Active |
+| Status | Active; candidate run exited 139 under TODO 548 |
 | Source | `test/01_unit/lib/common/ui/window_scene_draw_ir_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-14 (manual; TODO 548 blocks docgen) |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

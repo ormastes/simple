@@ -46,6 +46,7 @@ use common.ui.taskbar_model.{empty_taskbar_model}
 use common.ui.window_scene.{
     WM_CONTENT_ORIGIN_SIMPLE_WEB,
     WmContentFrame,
+    shared_wm_dispatch_pointer,
     simple_gui_internal_window,
     simple_gui_internal_window_scene,
     wm_content_frame_checksum
@@ -139,12 +140,13 @@ describe "Engine2D embedded render surface":
         it "composites a canonical offset translucent WM window on shared Vulkan and Metal sessions":
             val window = simple_gui_internal_window("surf", "win", 1u64, "app", "One", 10, 36, 120, 80, "", false, false, 1)
             val scene = simple_gui_internal_window_scene(160, 120, DRAW_IR_BACKEND_GPU, [window])
+            val taskbar = empty_taskbar_model()
             val content_pixels: [u32] = [GREEN; 120 * 52]
             val frame = WmContentFrame(window_id: "win", scene_revision: 7, content_revision: 1,
                 origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 120, height: 52,
                 pixels: content_pixels, checksum: wm_content_frame_checksum(content_pixels),
                 parent_window_id: "", offset_x: 0, offset_y: 0)
-            val composition = shared_wm_scene_draw_ir_composition_with_content(scene, empty_taskbar_model(), [frame], DRAW_IR_BACKEND_GPU, 1000, "09:41", 0)
+            val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar, [frame], DRAW_IR_BACKEND_GPU, 1000, "09:41", 0)
             val content_image = engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(frame), 120, 52, content_pixels)
             var window_batches = 0
             var content_batches = 0
@@ -153,12 +155,16 @@ describe "Engine2D embedded render surface":
                     window_batches = window_batches + 1
                     expect(batch.embedding.x).to_equal(10)
                     expect(batch.embedding.y).to_equal(36)
-                    expect(batch.embedding.width).to_equal(120)
-                    expect(batch.embedding.height).to_equal(80)
+                    expect(batch.embedding.width).to_equal(125)
+                    expect(batch.embedding.height).to_equal(84)
                     expect(batch.embedding.opacity_milli).to_equal(930)
                     expect(batch.embedding.clip).to_be(true)
                     expect(batch.commands[0].kind).to_equal(DRAW_IR_COMMAND_RECT)
                     expect((batch.commands[0].color >> 24) & 0xFFu32).to_equal(0x33u32)
+                    expect(batch.commands[1].width).to_equal(120)
+                    expect(batch.commands[1].height).to_equal(80)
+                    expect(batch.commands[1].hit_rect.width).to_equal(120)
+                    expect(batch.commands[1].hit_rect.height).to_equal(80)
                     var resolved_text = 0
                     for command in batch.commands:
                         if command.kind == DRAW_IR_COMMAND_TEXT and command.computed_style.len() > 0:
@@ -175,10 +181,21 @@ describe "Engine2D embedded render surface":
                     expect(batch.commands[0].image_uri).to_equal(content_image.image_uri)
             expect(window_batches).to_equal(1)
             expect(content_batches).to_equal(1)
+            val body_dispatch = shared_wm_dispatch_pointer(scene, taskbar, 129, 70, "left", "down", 1000, "09:41", 0)
+            val shadow_dispatch = shared_wm_dispatch_pointer(scene, taskbar, 130, 70, "left", "down", 1000, "09:41", 0)
+            expect(body_dispatch.action).to_equal("focus_window")
+            expect(body_dispatch.window_id).to_equal("win")
+            expect(shadow_dispatch.action).to_equal("desktop_background")
 
             var cpu = Engine2D.create_with_backend(160, 120, "cpu")
             val expected = engine2d_draw_ir_adv_composition_with_images(cpu, composition, false, [content_image])
             expect(expected.skipped_command_count).to_equal(0)
+            val shadow_pixel = expected.pixels[70 * 160 + 130]
+            val after_shadow = expected.pixels[70 * 160 + 135]
+            expect(color_r(shadow_pixel)).to_be_less_than(color_r(after_shadow))
+            expect(color_g(shadow_pixel)).to_be_less_than(color_g(after_shadow))
+            expect(color_b(shadow_pixel)).to_be_less_than(color_b(after_shadow))
+            expect(after_shadow).to_equal(scene.background.color)
             match Engine2D.create_requested_backend(160, 120, "vulkan"):
                 Err(reason):
                     expect(reason.len()).to_be_greater_than(0)
