@@ -188,3 +188,24 @@ throughput-bound at ~40 min with no JIT acceleration. Confirmed unblock paths (o
 `CastElse` + `_set_u16_be`) so the font path COMPILES, or (2) redeploy Stage-4 so the
 compiled `bin/simple` (which handles all this) runs the showcase. The CSS/layout/paint
 engine itself is PROVEN working (update 5); only the 17MB-font glyph path is the wall.
+
+## Update 2026-07-14 (7): font-load cost fully characterized — sha256 fixed native, sfnt validation is the rest
+Instrumented the font load piece by piece (17MB NotoSansSC blob, interpreter):
+- `file_read_bytes` (17MB): **62ms** — fast, not a factor.
+- `sha256_u8_hex(blob)`: was multi-minute interpreted — **FIXED** by routing to the
+  native `rt_file_hash_sha256(path)` (verified byte-identical digest a3041811... ==
+  registry). Removed one large interpreted cost.
+- REMAINING (each interpreted, JIT can't compile the sfnt module):
+  `font_runtime_ttf_default_supported` = **78s**, `validate_glyf_font_instance` =
+  **199s**, `sfnt_manifest_tables_match` = **58s** (+ `sfnt_manifest_names_match`,
+  untimed) — >5.6 min of pure-Simple sfnt validation per font load. The many
+  read_u16_be/read_u32_be calls over the 17MB font compound into minutes because
+  the JIT defers the whole sfnt module to the interpreter (lowering gaps: `CastElse`
+  on `value+0.5 as i64`, `_set_u16_be` mut-capability, `_sfnt_utf16be_text`).
+
+DEFINITIVE ROOT CAUSE: the 17MB-font validation runs entirely in the tree-walking
+interpreter because the JIT cannot lower the sfnt/font module. Real unblock: make
+the sfnt module JIT-lowerable (fix those three gaps), OR move sfnt validation native
+(as done for sha256), OR redeploy compiled Stage-4 bin/simple. The web layout/paint
+engine itself is proven working (update 5); this validation cost is the only wall
+for the actual text-heavy showcase page.
