@@ -119,6 +119,10 @@ It builds `arch/arm64/gui_entry_desktop.spl` with the `src/os` and `src/lib`
 closure, configures RAMFB, and renders compositor-owned Simple Web content via
 `DesktopShell` and `Engine2dWmFrameExecutor`. The static scenario intentionally
 does not invent a shared-memory path or daemon lifecycle.
+RAMFB fw_cfg DMA is owned by `src/os/kernel/arch/arm64/ramfb.spl`; PL011 input
+is owned by the ARM64 console over the shared PL011 MMIO helper. The canonical
+desktop imports those architecture facades and the shared shortcut mapper, not
+the legacy `wm_entry_io.spl` glass-demo runtime closure.
 The guest is a persistent desktop, so `os run` and `os test` accept its timeout
 only when the captured serial output contains RAMFB configuration, the
 canonical first-frame marker emitted after a positive revision, and the ARM

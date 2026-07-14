@@ -1,0 +1,181 @@
+# ARM64 QEMU ramfb setup through the architecture MMIO owner.
+
+use os.kernel.boot.mmio.{
+    mmio_disable_test_mode,
+    mmio_read8,
+    mmio_write16,
+    mmio_write32,
+    mmio_write8
+}
+use os.kernel.boot.mmio_hardware.{mmio_memory_barrier}
+use os.kernel.arch.arm64.console.{uart_writeln}
+
+val ARM64_RAMFB_WIDTH: u32 = 1024
+val ARM64_RAMFB_HEIGHT: u32 = 768
+val ARM64_RAMFB_SCRATCH_BYTES: i64 = 48
+
+val _FW_CFG_BASE: u64 = 0x09020000
+val _FW_CFG_DATA: u64 = _FW_CFG_BASE
+val _FW_CFG_SELECTOR: u64 = _FW_CFG_BASE + 0x08
+val _FW_CFG_DMA: u64 = _FW_CFG_BASE + 0x10
+val _FW_CFG_FILE_DIR: u16 = 0x0019
+val _RAMFB_FOURCC: u32 = 0x34325258
+val _DMA_SELECT_WRITE: u32 = 0x18
+
+fn arm64_ramfb_framebuffer_bytes(width: u32, height: u32) -> i64:
+    width.to_i64() * height.to_i64() * 4
+
+fn _swap16(value: u16) -> u16:
+    ((value & 0x00FF) << 8) | ((value >> 8) & 0x00FF)
+
+fn _swap32(value: u32) -> u32:
+    ((value & 0x000000FF) << 24) |
+        ((value & 0x0000FF00) << 8) |
+        ((value & 0x00FF0000) >> 8) |
+        ((value & 0xFF000000) >> 24)
+
+fn _be32_byte(value: u32, index: u32) -> u8:
+    if index == 0: return ((value >> 24) & 0xFF).to_u8()
+    if index == 1: return ((value >> 16) & 0xFF).to_u8()
+    if index == 2: return ((value >> 8) & 0xFF).to_u8()
+    (value & 0xFF).to_u8()
+
+fn _ramfb_dma_control(selector: u16) -> u32:
+    (selector.to_u32() << 16) | _DMA_SELECT_WRITE
+
+fn _ramfb_dma_status(status: u32) -> i64:
+    if status == 0: return 1
+    if (status & 1u32) != 0: return -1
+    0
+
+fn _select(selector: u16):
+    mmio_write16(_FW_CFG_SELECTOR, _swap16(selector))
+
+fn _read_byte() -> u8:
+    mmio_read8(_FW_CFG_DATA)
+
+fn _read_be32_stream() -> u32:
+    (_read_byte().to_u32() << 24) |
+        (_read_byte().to_u32() << 16) |
+        (_read_byte().to_u32() << 8) |
+        _read_byte().to_u32()
+
+fn _read_be16_stream() -> u16:
+    (_read_byte().to_u16() << 8) | _read_byte().to_u16()
+
+fn _write_be32(addr: u64, value: u32):
+    mmio_write8(addr, _be32_byte(value, 0))
+    mmio_write8(addr + 1, _be32_byte(value, 1))
+    mmio_write8(addr + 2, _be32_byte(value, 2))
+    mmio_write8(addr + 3, _be32_byte(value, 3))
+
+fn _write_be64(addr: u64, value: u64):
+    _write_be32(addr, ((value >> 32) & 0xFFFFFFFF).to_u32())
+    _write_be32(addr + 4, (value & 0xFFFFFFFF).to_u32())
+
+fn _read_be32_memory(addr: u64) -> u32:
+    (mmio_read8(addr).to_u32() << 24) |
+        (mmio_read8(addr + 1).to_u32() << 16) |
+        (mmio_read8(addr + 2).to_u32() << 8) |
+        mmio_read8(addr + 3).to_u32()
+
+fn _ramfb_name_byte(index: u32) -> u8:
+    if index == 0: return 101u8  # e
+    if index == 1: return 116u8  # t
+    if index == 2: return 99u8   # c
+    if index == 3: return 47u8   # /
+    if index == 4: return 114u8  # r
+    if index == 5: return 97u8   # a
+    if index == 6: return 109u8  # m
+    if index == 7: return 102u8  # f
+    if index == 8: return 98u8   # b
+    0u8
+
+fn _find_ramfb_selector() -> u16:
+    _select(_FW_CFG_FILE_DIR)
+    val count = _read_be32_stream()
+    if count == 0 or count > 1000:
+        return 0u16
+
+    var entry: u32 = 0
+    while entry < count and entry < 200:
+        val _size = _read_be32_stream()
+        val selector = _read_be16_stream()
+        val _reserved = _read_be16_stream()
+        var matches = true
+        var name_index: u32 = 0
+        while name_index < 56:
+            val actual = _read_byte()
+            if name_index < 10 and actual != _ramfb_name_byte(name_index):
+                matches = false
+            name_index = name_index + 1
+        if matches:
+            return selector
+        entry = entry + 1
+    0u16
+
+fn arm64_ramfb_setup(fb_addr: u64, width: u32, height: u32, scratch_addr: u64) -> bool:
+    """Configure QEMU ramfb with a bounded fw_cfg DMA transaction."""
+    mmio_disable_test_mode()
+    val stride = width.to_u64() * 4u64
+    if fb_addr == 0 or width == 0 or height == 0 or stride > 0xFFFFFFFFu64:
+        return false
+    if height.to_u64() > 0xFFFFFFFFFFFFFFFFu64 / stride:
+        return false
+    val framebuffer_bytes = stride * height.to_u64()
+    if scratch_addr < fb_addr or scratch_addr - fb_addr < framebuffer_bytes:
+        return false
+    if scratch_addr > 0xFFFFFFFFFFFFFFFFu64 - ARM64_RAMFB_SCRATCH_BYTES.to_u64():
+        return false
+    if (scratch_addr & 7u64) != 0:
+        return false
+
+    uart_writeln("[WM] Configuring ramfb via fw_cfg...")
+    _select(0u16)
+    val sig0 = _read_byte()
+    val sig1 = _read_byte()
+    val sig2 = _read_byte()
+    val sig3 = _read_byte()
+    uart_writeln("[WM] fw_cfg sig: {sig0} {sig1} {sig2} {sig3}")
+    if sig0 != 81u8 or sig1 != 69u8 or sig2 != 77u8 or sig3 != 85u8:
+        return false
+
+    val selector = _find_ramfb_selector()
+    if selector == 0u16:
+        uart_writeln("[WM] WARNING: etc/ramfb not found -- add -device ramfb to QEMU")
+        return false
+    uart_writeln("[WM] Found etc/ramfb in fw_cfg")
+
+    val config_addr = scratch_addr
+    val descriptor_addr = scratch_addr + 32
+    _write_be64(config_addr, fb_addr)
+    _write_be32(config_addr + 8, _RAMFB_FOURCC)
+    _write_be32(config_addr + 12, 0u32)
+    _write_be32(config_addr + 16, width)
+    _write_be32(config_addr + 20, height)
+    _write_be32(config_addr + 24, stride.to_u32())
+
+    val control = _ramfb_dma_control(selector)
+    _write_be32(descriptor_addr, control)
+    _write_be32(descriptor_addr + 4, 28u32)
+    _write_be64(descriptor_addr + 8, config_addr)
+
+    _select(selector)
+    mmio_memory_barrier()
+    mmio_write32(_FW_CFG_DMA, _swap32(((descriptor_addr >> 32) & 0xFFFFFFFF).to_u32()))
+    mmio_write32(_FW_CFG_DMA + 4, _swap32((descriptor_addr & 0xFFFFFFFF).to_u32()))
+
+    var attempts: u32 = 0
+    while attempts < 1000000:
+        val status = _read_be32_memory(descriptor_addr)
+        val state = _ramfb_dma_status(status)
+        if state == 1:
+            uart_writeln("[WM] ramfb configured successfully via fw_cfg DMA")
+            return true
+        if state == -1:
+            uart_writeln("[WM] ramfb DMA ERROR: fw_cfg rejected config")
+            return false
+        attempts = attempts + 1
+
+    uart_writeln("[WM] ramfb DMA timeout -- DMA never completed")
+    false

@@ -46,7 +46,9 @@ fixture bypasses, synthetic handles, or passing placeholders.
 - x86_64 production and the new AArch64 boot-owned RAMFB entry wire canonical
   `DesktopShell` frames through `Engine2dWmFrameExecutor`. AArch64
   source/build-scenario wiring and correlated production-wrapper source/self-test
-  coverage are present, but real process ownership and
+  coverage are present. Its fw_cfg DMA and PL011 input now pass through
+  architecture-owned facades instead of the legacy `wm_entry_io.spl` closure,
+  but real process ownership and
   fresh compile/QEMU evidence remain open under TODO 565/TODO 548. RISC-V now
   uses an architecture display facade, dynamic VirtIO mode discovery, and a
   contract-v2 canonical-desktop gate; TODO 567 retains the pure-Simple DMA

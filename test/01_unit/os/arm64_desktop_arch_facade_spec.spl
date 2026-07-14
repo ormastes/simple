@@ -1,0 +1,75 @@
+use std.spec.*
+use app.io.mod.{file_read_text}
+use os.kernel.arch.arm.pl011_common.{
+    ARM_VIRT_PL011_BASE,
+    PL011_FR_RXFE,
+    PL011_UARTDR,
+    PL011_UARTFR,
+    pl011_data_ready,
+    pl011_read_char
+}
+use os.kernel.boot.mmio.{mmio_disable_test_mode, mmio_reset_for_test, mmio_write32}
+use os.kernel.arch.arm64.ramfb.{
+    _be32_byte,
+    _ramfb_dma_control,
+    _ramfb_dma_status,
+    _swap16,
+    _swap32
+}
+
+fn arm64_desktop_source_contract():
+    val entry = file_read_text("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
+    val ramfb = file_read_text("src/os/kernel/arch/arm64/ramfb.spl")
+    val console = file_read_text("src/os/kernel/arch/arm64/console.spl")
+
+    expect(entry).to_contain("os.kernel.arch.arm64.ramfb")
+    expect(entry).to_contain("arm64_ramfb_setup(")
+    expect(entry).to_contain("os.kernel.arch.arm64.console")
+    expect(entry).to_contain("os.gui.shortcut.{uart_char_to_action}")
+    expect(entry).to_contain("match action:")
+    expect(entry).to_contain("case WmAction.FocusWindow(idx: surface_index):")
+    expect(entry.contains("wm_entry_io")).to_be(false)
+    expect(entry.contains("setup_ramfb(")).to_be(false)
+    expect(entry.contains("extern fn rt_")).to_be(false)
+    expect(entry.contains("rt_gui_")).to_be(false)
+
+    val uart_init = entry.index_of("uart_init()")
+    val first_log = entry.index_of("uart_writeln(\"[desktop-gui-arm64] boot\")")
+    expect(uart_init).to_be_greater_than(0)
+    expect(first_log).to_be_greater_than(uart_init)
+
+    expect(ramfb).to_contain("mmio_write32(_FW_CFG_DMA")
+    expect(ramfb).to_contain("mmio_memory_barrier()")
+    expect(ramfb).to_contain("_read_be32_memory(descriptor_addr)")
+    expect(ramfb).to_contain("ramfb configured successfully via fw_cfg DMA")
+    expect(ramfb.contains("extern fn rt_")).to_be(false)
+    expect(ramfb.contains("rt_gui_")).to_be(false)
+    expect(console).to_contain("g_uart_ready = pl011_init(PL011_BASE, false)")
+
+describe "AArch64 desktop architecture facades":
+    it "keeps production RAMFB and UART access out of the legacy glass demo":
+        arm64_desktop_source_contract()
+
+    it "reads PL011 input through the shared MMIO owner":
+        mmio_reset_for_test()
+        mmio_write32(ARM_VIRT_PL011_BASE + PL011_UARTFR, PL011_FR_RXFE)
+        expect(pl011_data_ready(ARM_VIRT_PL011_BASE)).to_equal(0u64)
+
+        mmio_write32(ARM_VIRT_PL011_BASE + PL011_UARTFR, 0u32)
+        expect(pl011_data_ready(ARM_VIRT_PL011_BASE)).to_equal(1u64)
+
+        mmio_write32(ARM_VIRT_PL011_BASE + PL011_UARTDR, 0x141u32)
+        expect(pl011_read_char(ARM_VIRT_PL011_BASE)).to_equal(0x41u64)
+        mmio_disable_test_mode()
+
+    it "encodes and classifies the fw_cfg DMA protocol":
+        expect(_swap16(0x0019u16)).to_equal(0x1900u16)
+        expect(_swap32(0x11223344u32)).to_equal(0x44332211u32)
+        expect(_be32_byte(0x11223344u32, 0)).to_equal(0x11u8)
+        expect(_be32_byte(0x11223344u32, 1)).to_equal(0x22u8)
+        expect(_be32_byte(0x11223344u32, 2)).to_equal(0x33u8)
+        expect(_be32_byte(0x11223344u32, 3)).to_equal(0x44u8)
+        expect(_ramfb_dma_control(0x0121u16)).to_equal(0x01210018u32)
+        expect(_ramfb_dma_status(0u32)).to_equal(1)
+        expect(_ramfb_dma_status(1u32)).to_equal(-1)
+        expect(_ramfb_dma_status(0x01210018u32)).to_equal(0)

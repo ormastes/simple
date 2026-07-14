@@ -28,7 +28,7 @@ arm64_wm_qemu_contract_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -39,20 +39,22 @@ arm64_wm_qemu_contract_spec -> os
 
 ### ARM64 SimpleOS WM QEMU contract
 
-#### keeps the guide bound to the ARM64 WM entry and ramfb target
+#### keeps the guide bound to the canonical ARM64 desktop entry and ramfb target
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(rt_file_exists(_guide_path())).to_equal(true)
-expect(rt_file_exists(_entry_path())).to_equal(true)
-expect(rt_file_exists(_io_path())).to_equal(true)
-val guide = rt_file_read_text(_guide_path())
-expect(guide).to_contain("examples/09_embedded/simple_os/arch/arm64/wm_entry.spl")
+expect(file_exists(_guide_path())).to_equal(true)
+expect(file_exists(_entry_path())).to_equal(true)
+expect(file_exists(_ramfb_path())).to_equal(true)
+expect(file_exists(_console_path())).to_equal(true)
+val guide = file_read_text(_guide_path())
+expect(guide).to_contain("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
+expect(guide.contains("examples/09_embedded/simple_os/arch/arm64/wm_entry.spl")).to_equal(false)
 expect(guide).to_contain("--target aarch64-unknown-none")
 expect(guide).to_contain("qemu-system-aarch64")
 expect(guide).to_contain("-machine virt")
@@ -72,44 +74,51 @@ expect(guide).to_contain("bin/simple os test --scenario=arm64-wm-ramfb")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val guide = rt_file_read_text(_guide_path())
-val entry = rt_file_read_text(_entry_path())
-val io = rt_file_read_text(_io_path())
-expect(guide).to_contain("[WM] Framebuffer allocated and registered")
+val guide = file_read_text(_guide_path())
+val entry = file_read_text(_entry_path())
+val ramfb = file_read_text(_ramfb_path())
+expect(guide).to_contain("[desktop-gui-arm64] boot")
 expect(guide).to_contain("[WM] fw_cfg sig: 81 69 77 85")
 expect(guide).to_contain("[WM] Found etc/ramfb in fw_cfg")
 expect(guide).to_contain("[WM] ramfb configured successfully via fw_cfg DMA")
-expect(guide).to_contain("[WM] Glass desktop rendered!")
-expect(entry).to_contain("[WM] Framebuffer allocated and registered")
-expect(entry).to_contain("[WM] Glass desktop rendered!")
-expect(io).to_contain("[WM] fw_cfg sig:")
-expect(io).to_contain("[WM] Found etc/ramfb in fw_cfg")
-expect(io).to_contain("[WM] ramfb configured successfully via fw_cfg DMA")
+expect(guide).to_contain("[desktop-gui-arm64] desktop-ready revision=")
+expect(entry).to_contain("[desktop-gui-arm64] boot")
+expect(entry).to_contain("[desktop-gui-arm64] desktop-ready revision=")
+expect(entry.contains("[WM] Glass desktop rendered!")).to_equal(false)
+expect(ramfb).to_contain("[WM] fw_cfg sig:")
+expect(ramfb).to_contain("[WM] Found etc/ramfb in fw_cfg")
+expect(ramfb).to_contain("[WM] ramfb configured successfully via fw_cfg DMA")
 ```
 
 </details>
 
-#### documents the platform-specific adapter boundary instead of x86 reuse
+#### documents the platform-specific adapter boundary and canonical Engine2D executor
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val entry = rt_file_read_text(_entry_path())
-val io = rt_file_read_text(_io_path())
-expect(entry).to_contain("Framebuffer via QEMU ramfb device")
-expect(entry).to_contain("PL011 UART serial input")
-expect(entry).to_contain("No port I/O")
-expect(entry).to_contain("No mouse support")
-expect(io).to_contain("FW_CFG_BASE: u64 = 0x09020000")
-expect(io).to_contain("etc/ramfb")
+val entry = file_read_text(_entry_path())
+val ramfb = file_read_text(_ramfb_path())
+val console = file_read_text(_console_path())
+expect(entry).to_contain("Canonical ARM64 production desktop entry for QEMU virt ramfb")
+expect(entry).to_contain("FramebufferDriver.from_scanout_raw(")
+expect(entry).to_contain("Engine2dWmFrameExecutor.create(")
+expect(entry).to_contain("uart_data_ready()")
+expect(entry).to_contain("uart_read_char()")
+expect(entry.contains("wm_entry_io")).to_equal(false)
+expect(entry.contains("extern fn rt_")).to_equal(false)
+expect(ramfb).to_contain("_FW_CFG_BASE: u64 = 0x09020000")
+expect(ramfb).to_contain("etc/ramfb")
+expect(ramfb).to_contain("mmio_memory_barrier()")
+expect(console).to_contain("pl011_data_ready")
 ```
 
 </details>
@@ -123,10 +132,10 @@ Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val guide = rt_file_read_text(_guide_path())
-expect(rt_file_exists(_readiness_script_path())).to_equal(true)
+val guide = file_read_text(_guide_path())
+expect(file_exists(_readiness_script_path())).to_equal(true)
 expect(guide).to_contain("scripts/check/check-simpleos-arm64-wm-qemu-readiness.shs")
-val result = rt_process_run_timeout("sh", [_readiness_script_path()], 10000)
+val result = process_run_timeout("sh", [_readiness_script_path()], 10000)
 if result[2] != 0:
     print "[arm64_wm_qemu_contract_spec] readiness probe failed:\n{result[0]}{result[1]}"
 expect(result[2]).to_equal(0)
@@ -135,8 +144,26 @@ expect(result[0]).to_contain("qemu_system: qemu-system-aarch64")
 expect(result[0]).to_contain("machine_virt: true")
 expect(result[0]).to_contain("ramfb_device: true")
 expect(result[0]).to_contain("dry_run_parse: true")
-expect(result[0]).to_contain("accelerator: hvf")
-expect(result[0]).to_contain("cpu: host")
+expect(result[0].contains("accelerator: hvf") or result[0].contains("accelerator: kvm") or
+    result[0].contains("accelerator: tcg")).to_equal(true)
+expect(result[0].contains("cpu: host") or result[0].contains("cpu: cortex-a57")).to_equal(true)
+```
+
+</details>
+
+#### keeps the runner portable across Darwin and Linux hosts
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(arm64_wm_qemu_cpu_for_host("macos", "aarch64")).to_equal("host")
+expect(arm64_wm_qemu_extra_for_host("macos", "aarch64")).to_contain("hvf")
+expect(arm64_wm_qemu_cpu_for_host("linux", "x86_64")).to_equal("cortex-a57")
+expect(arm64_wm_qemu_extra_for_host("linux", "x86_64")).to_contain("tcg")
 ```
 
 </details>
@@ -152,7 +179,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val target = get_arm64_wm_qemu_target()
 val build_args = os_native_build_args(target, "llvm")
-expect(build_args).to_contain("examples/09_embedded/simple_os/arch/arm64/wm_entry.spl")
+expect(build_args).to_contain("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
 expect(build_args).to_contain("aarch64-unknown-none")
 expect(build_args).to_contain("examples/09_embedded/simple_os/arch/arm64/linker.ld")
 expect(build_args).to_contain("build/os/simpleos_arm64_wm.elf")
@@ -165,9 +192,9 @@ expect(qemu_args).to_contain("qemu-system-aarch64")
 expect(qemu_args).to_contain("-machine")
 expect(qemu_args).to_contain("virt")
 expect(qemu_args).to_contain("-accel")
-expect(qemu_args).to_contain("hvf")
+expect(qemu_args).to_contain(target.qemu_extra[1])
 expect(qemu_args).to_contain("-cpu")
-expect(qemu_args).to_contain("host")
+expect(qemu_args).to_contain(target.qemu_cpu)
 expect(qemu_args).to_contain("-kernel")
 expect(qemu_args).to_contain("build/os/simpleos_arm64_wm.elf")
 expect(qemu_args).to_contain("-device")
@@ -195,16 +222,16 @@ if scenario_opt == nil:
     return
 val scenario = scenario_opt
 val target = scenario_target(scenario)
-expect(target.entry).to_equal("examples/09_embedded/simple_os/arch/arm64/wm_entry.spl")
+expect(target.entry).to_equal("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
 expect(target.output).to_equal("build/os/simpleos_arm64_wm.elf")
 val cmd = build_scenario_command(scenario, target.output)
 expect(cmd).to_contain("qemu-system-aarch64")
 expect(cmd).to_contain("-machine")
 expect(cmd).to_contain("virt")
 expect(cmd).to_contain("-cpu")
-expect(cmd).to_contain("host")
+expect(cmd).to_contain(target.qemu_cpu)
 expect(cmd).to_contain("-accel")
-expect(cmd).to_contain("hvf")
+expect(cmd).to_contain(target.qemu_extra[1])
 expect(cmd).to_contain("-m")
 expect(cmd).to_contain("384M")
 expect(cmd).to_contain("-kernel")
@@ -232,10 +259,10 @@ val scenario = scenario_opt
 val complete = _complete_arm64_wm_serial()
 expect(qemu_scenario_serial_acceptance_reason(scenario, "", complete)).to_equal("ready")
 expect(qemu_scenario_serial_acceptance_reason(scenario, "off", complete)).to_equal("ready")
-val missing_ramfb = "[WM] Framebuffer allocated and registered\n" +
+val missing_ramfb = "[desktop-gui-arm64] boot\n" +
     "[WM] fw_cfg sig: 81 69 77 85\n" +
     "[WM] Found etc/ramfb in fw_cfg\n" +
-    "[WM] Glass desktop rendered!\n"
+    "[desktop-gui-arm64] desktop-ready revision=1\n"
 expect(qemu_scenario_serial_acceptance_reason(scenario, "", missing_ramfb)).to_equal(
     "missing-marker:[WM] ramfb configured successfully via fw_cfg DMA"
 )
@@ -253,7 +280,7 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val cli = rt_file_read_text(_cli_path())
+val cli = file_read_text(_cli_path())
 expect(cli).to_contain("os_parse_scenario_arg(args)")
 expect(cli).to_contain("get_scenario(scenario_name)")
 expect(cli).to_contain("val ok = build_scenario(scenario)")
@@ -271,7 +298,7 @@ expect(cli).to_contain("val ok = test_scenario(scenario, scenario_test_timeout_m
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/gui/arm64_wm_qemu_contract_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-14 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

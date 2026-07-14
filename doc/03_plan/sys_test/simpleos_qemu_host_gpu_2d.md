@@ -23,6 +23,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 | resolved TEXT preflight, canonical glyph material, exact CPU/Vulkan parity, and device provenance | REQ-003,005,006,010 |
 | exact device-backed ProcessingIR result after shared fenced Vulkan completion; unknown completion precedes and suppresses teardown | REQ-004,007; NFR-002 |
 | mandatory AArch64 production desktop boot after the unchanged 64x48 render/Draw IR/ProcessingIR probe | REQ-002,003,004,005,006,007,009,010,011,012; NFR-002,008,009 |
+| AArch64 desktop source boundary uses architecture-owned RAMFB/PL011 facades and no legacy WM I/O or direct runtime GUI/MMIO imports | REQ-002,003,009,010 |
 | exact AArch64 production argv with RAMFB and the same daemon/shared-memory/RSS-metrics accumulator lifecycle | REQ-006,011,012; NFR-005,006,008,009 |
 | correlated host-GPU ready -> presented -> first-frame -> desktop-ready production evidence | REQ-003,005,006,009,010,011,012; NFR-001,004,007,008,009 |
 | RV64 dynamic scanout -> canonical Shared WM/Draw IR/Engine2D frame -> checked VirtIO present, with contract-v2 revision and palette evidence | REQ-002,003,005,006,009,010,011,012; NFR-007,008,009 |

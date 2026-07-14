@@ -2,16 +2,16 @@
 # Canonical ARM64 production desktop entry for QEMU virt ramfb.
 
 use std.nogc_sync_mut.ptr.raw.{raw_alloc}
-use examples.simple_os.arch.arm64.wm_entry_io.{
-    FRAMEBUFFER_SIZE,
-    SCREEN_H,
-    SCREEN_W,
-    setup_ramfb,
-    uart_char_to_action,
-    uart_data_ready,
-    uart_read_char
+use os.kernel.arch.arm64.ramfb.{
+    ARM64_RAMFB_HEIGHT,
+    ARM64_RAMFB_SCRATCH_BYTES,
+    ARM64_RAMFB_WIDTH,
+    arm64_ramfb_framebuffer_bytes,
+    arm64_ramfb_setup
 }
-use os.kernel.arch.arm64.console.{uart_writeln}
+use os.kernel.arch.arm64.console.{uart_data_ready, uart_init, uart_read_char, uart_writeln}
+use os.gui.input_event.{WmAction}
+use os.gui.shortcut.{uart_char_to_action}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
 use os.compositor.compositor.{Compositor}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
@@ -28,8 +28,11 @@ use common.gpu.simpleos_host_gpu_protocol.{
 }
 
 fn spl_start():
-    val screen_width = SCREEN_W.to_i32()
-    val screen_height = SCREEN_H.to_i32()
+    uart_init()
+    val screen_width = ARM64_RAMFB_WIDTH.to_i32()
+    val screen_height = ARM64_RAMFB_HEIGHT.to_i32()
+    val framebuffer_size = arm64_ramfb_framebuffer_bytes(ARM64_RAMFB_WIDTH, ARM64_RAMFB_HEIGHT)
+    val FRAMEBUFFER_SIZE = framebuffer_size + ARM64_RAMFB_SCRATCH_BYTES
 
     uart_writeln("[desktop-gui-arm64] boot")
     val framebuffer_address = raw_alloc(FRAMEBUFFER_SIZE.to_i64())
@@ -37,7 +40,13 @@ fn spl_start():
         uart_writeln("[desktop-gui-arm64] fatal reason=framebuffer-allocation")
         return
 
-    if setup_ramfb(framebuffer_address.to_u64()) == 0:
+    val ramfb_scratch = (framebuffer_address + framebuffer_size).to_u64()
+    if not arm64_ramfb_setup(
+        framebuffer_address.to_u64(),
+        ARM64_RAMFB_WIDTH,
+        ARM64_RAMFB_HEIGHT,
+        ramfb_scratch
+    ):
         uart_writeln("[desktop-gui-arm64] ramfb unavailable; rendering remains local")
 
     var framebuffer = FramebufferDriver.from_scanout_raw(
@@ -100,36 +109,38 @@ fn spl_start():
             var input_compositor = shell.compositor
             var changed = false
 
-            if action == 1:
-                input_compositor.cycle_focus()
-                changed = true
-            elif action == 10:
-                input_compositor.focus_window(terminal_id.to_i32())
-                changed = true
-            elif action == 11:
-                input_compositor.focus_window(editor_id.to_i32())
-                changed = true
-            elif action == 12:
-                input_compositor.focus_window(finder_id.to_i32())
-                changed = true
-            elif action == 3:
-                running = false
-            elif action == 4:
-                val focused = input_compositor.focused_idx
-                if focused >= 0 and focused < input_compositor.surfaces.len():
-                    input_compositor.minimize_window(input_compositor.surfaces[focused].id.to_u64())
+            match action:
+                case WmAction.CycleFocus:
+                    input_compositor.cycle_focus()
                     changed = true
-            elif action == 5:
-                val focused = input_compositor.focused_idx
-                if focused >= 0 and focused < input_compositor.surfaces.len():
-                    input_compositor.destroy_window(input_compositor.surfaces[focused].id)
+                case WmAction.FocusWindow(idx: surface_index):
+                    if surface_index < input_compositor.surfaces.len().to_u64():
+                        input_compositor.focus_window(
+                            input_compositor.surfaces[surface_index.to_i64()].id.to_i32()
+                        )
+                        changed = true
+                case WmAction.Quit:
+                    running = false
+                case WmAction.Minimize:
+                    val focused = input_compositor.focused_idx
+                    if focused >= 0 and focused < input_compositor.surfaces.len():
+                        input_compositor.minimize_window(input_compositor.surfaces[focused].id.to_u64())
+                        changed = true
+                case WmAction.Close:
+                    val focused = input_compositor.focused_idx
+                    if focused >= 0 and focused < input_compositor.surfaces.len():
+                        input_compositor.destroy_window(input_compositor.surfaces[focused].id)
+                        changed = true
+                case WmAction.Restore:
+                    var surface_index = 0
+                    while surface_index < input_compositor.surfaces.len():
+                        input_compositor.restore_window(input_compositor.surfaces[surface_index].id.to_u64())
+                        surface_index = surface_index + 1
                     changed = true
-            elif action == 6:
-                var surface_index = 0
-                while surface_index < input_compositor.surfaces.len():
-                    input_compositor.restore_window(input_compositor.surfaces[surface_index].id.to_u64())
-                    surface_index = surface_index + 1
-                changed = true
+                case WmAction.ToggleTheme:
+                    pass
+                case WmAction.None:
+                    pass
 
             if changed:
                 shell.compositor = input_compositor
