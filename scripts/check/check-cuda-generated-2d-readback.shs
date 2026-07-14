@@ -15,6 +15,7 @@ CUDA_ELEMENT_COUNT="${CUDA_ELEMENT_COUNT:-64}"
 CUDA_FILL_VALUE="${CUDA_FILL_VALUE:-16909060}"
 EXPECTED_PIXELS_PATH="$BUILD_DIR/expected-u32.json"
 ACTUAL_PIXELS_PATH="$BUILD_DIR/actual-u32.json"
+PTX_SHA256_BEFORE=""
 
 mkdir -p "$BUILD_DIR" "$TOOLCHAIN_BUILD_DIR" "$(dirname "$REPORT_PATH")"
 
@@ -47,6 +48,53 @@ cuda_positive_decimal() {
     printf '%s\n' "$1" | grep -Eq '[1-9]'
 }
 
+cuda_artifact_sha256() {
+    path="$1"
+    if [ ! -f "$path" ]; then
+        echo "missing"
+    elif generated_2d_have sha256sum; then
+        sha256sum "$path" | awk '{print $1}'
+    elif generated_2d_have shasum; then
+        shasum -a 256 "$path" | awk '{print $1}'
+    else
+        echo "unavailable"
+    fi
+}
+
+cuda_sha256_valid() {
+    printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{64}$'
+}
+
+cuda_append_artifact_hashes() {
+    {
+        echo "cuda_generated_2d_readback_ptx_sha256_before=$PTX_SHA256_BEFORE"
+        echo "cuda_generated_2d_readback_ptx_sha256_after=$(cuda_artifact_sha256 "$PTX_PATH")"
+        echo "cuda_generated_2d_readback_expected_pixels_sha256=$(cuda_artifact_sha256 "$EXPECTED_PIXELS_PATH")"
+        echo "cuda_generated_2d_readback_actual_pixels_sha256=$(cuda_artifact_sha256 "$ACTUAL_PIXELS_PATH")"
+    } >>"$BUILD_DIR/evidence.env"
+}
+
+cuda_identity_inventory_valid() {
+    count="$(cuda_env_value cuda_generated_2d_readback_device_count)"
+    cuda_positive_decimal "$count" || return 1
+    [ "$count" -le 64 ] || return 1
+    fields="$(grep -Ec '^cuda_generated_2d_readback_device_identity_[0-9]+=' "$BUILD_DIR/evidence.env" || true)"
+    [ "$fields" -eq "$count" ] || return 1
+    ordinal=0
+    seen=""
+    while [ "$ordinal" -lt "$count" ]; do
+        identity="$(cuda_env_value "cuda_generated_2d_readback_device_identity_$ordinal")"
+        cuda_positive_decimal "$identity" || return 1
+        case ",$seen," in
+            *",$identity,"*) return 1 ;;
+        esac
+        seen="${seen}${seen:+,}$identity"
+        ordinal=$((ordinal + 1))
+    done
+    [ "$(cuda_env_value cuda_generated_2d_readback_device_identity)" = \
+      "$(cuda_env_value cuda_generated_2d_readback_device_identity_0)" ]
+}
+
 cuda_mark_claimed_pass_failed() {
     reason="$1"
     tmp="$BUILD_DIR/evidence.env.tmp"
@@ -73,7 +121,7 @@ cuda_mark_claimed_pass_failed() {
 cuda_validate_evidence() {
     [ -s "$BUILD_DIR/evidence.env" ] || return 0
     if grep -q '^cuda_generated_2d_readback_status=pass$' "$BUILD_DIR/evidence.env"; then
-        for field in status reason submit_attempted readback_available device_identity expected_checksum actual_checksum mismatch_count fill_expected_checksum fill_actual_checksum fill_mismatch_count copy_expected_checksum copy_actual_checksum copy_mismatch_count alpha_expected_checksum alpha_actual_checksum alpha_mismatch_count scroll_expected_checksum scroll_actual_checksum scroll_mismatch_count; do
+        for field in status reason submit_attempted readback_available device_identity device_count ptx_sha256_before ptx_sha256_after expected_pixels_sha256 actual_pixels_sha256 expected_checksum actual_checksum mismatch_count fill_expected_checksum fill_actual_checksum fill_mismatch_count copy_expected_checksum copy_actual_checksum copy_mismatch_count alpha_expected_checksum alpha_actual_checksum alpha_mismatch_count scroll_expected_checksum scroll_actual_checksum scroll_mismatch_count; do
             count="$(grep -c "^cuda_generated_2d_readback_${field}=" "$BUILD_DIR/evidence.env" || true)"
             if [ "$count" -gt 1 ]; then
                 cuda_mark_claimed_pass_failed "duplicate-evidence-field"
@@ -86,6 +134,10 @@ cuda_validate_evidence() {
     submit="$(cuda_env_value cuda_generated_2d_readback_submit_attempted)"
     readback="$(cuda_env_value cuda_generated_2d_readback_readback_available)"
     identity="$(cuda_env_value cuda_generated_2d_readback_device_identity)"
+    ptx_sha256_before="$(cuda_env_value cuda_generated_2d_readback_ptx_sha256_before)"
+    ptx_sha256_after="$(cuda_env_value cuda_generated_2d_readback_ptx_sha256_after)"
+    expected_pixels_sha256="$(cuda_env_value cuda_generated_2d_readback_expected_pixels_sha256)"
+    actual_pixels_sha256="$(cuda_env_value cuda_generated_2d_readback_actual_pixels_sha256)"
     expected="$(cuda_env_value cuda_generated_2d_readback_expected_checksum)"
     actual="$(cuda_env_value cuda_generated_2d_readback_actual_checksum)"
     mismatches="$(cuda_env_value cuda_generated_2d_readback_mismatch_count)"
@@ -96,6 +148,14 @@ cuda_validate_evidence() {
         cuda_mark_claimed_pass_failed "missing-readback"
     elif ! cuda_positive_decimal "$identity"; then
         cuda_mark_claimed_pass_failed "missing-device-identity"
+    elif ! cuda_identity_inventory_valid; then
+        cuda_mark_claimed_pass_failed "invalid-device-inventory"
+    elif ! cuda_sha256_valid "$ptx_sha256_before" \
+        || ! cuda_sha256_valid "$ptx_sha256_after" \
+        || [ "$ptx_sha256_before" != "$ptx_sha256_after" ] \
+        || ! cuda_sha256_valid "$expected_pixels_sha256" \
+        || ! cuda_sha256_valid "$actual_pixels_sha256"; then
+        cuda_mark_claimed_pass_failed "invalid-artifact-provenance"
     elif ! cuda_positive_decimal "$expected" || ! cuda_positive_decimal "$actual"; then
         cuda_mark_claimed_pass_failed "checksum-missing-or-zero"
     elif [ "$expected" != "$actual" ]; then
@@ -189,6 +249,13 @@ cuda_generated_2d_readback_reason=fake
 cuda_generated_2d_readback_submit_attempted=true
 cuda_generated_2d_readback_readback_available=true
 cuda_generated_2d_readback_device_identity=123
+cuda_generated_2d_readback_device_count=2
+cuda_generated_2d_readback_device_identity_0=123
+cuda_generated_2d_readback_device_identity_1=456
+cuda_generated_2d_readback_ptx_sha256_before=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+cuda_generated_2d_readback_ptx_sha256_after=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+cuda_generated_2d_readback_expected_pixels_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+cuda_generated_2d_readback_actual_pixels_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 cuda_generated_2d_readback_expected_checksum=4
 cuda_generated_2d_readback_actual_checksum=5
 cuda_generated_2d_readback_mismatch_count=0
@@ -219,6 +286,13 @@ cuda_generated_2d_readback_reason=readback-pixels-matched
 cuda_generated_2d_readback_submit_attempted=true
 cuda_generated_2d_readback_readback_available=true
 cuda_generated_2d_readback_device_identity=123
+cuda_generated_2d_readback_device_count=2
+cuda_generated_2d_readback_device_identity_0=123
+cuda_generated_2d_readback_device_identity_1=456
+cuda_generated_2d_readback_ptx_sha256_before=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+cuda_generated_2d_readback_ptx_sha256_after=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+cuda_generated_2d_readback_expected_pixels_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+cuda_generated_2d_readback_actual_pixels_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 cuda_generated_2d_readback_expected_checksum=4
 cuda_generated_2d_readback_actual_checksum=4
 cuda_generated_2d_readback_mismatch_count=0
@@ -241,6 +315,28 @@ EOF
         echo "self_test_reason=valid-readback-rejected"
         exit 1
     fi
+
+    valid_inventory="$BUILD_DIR/evidence.valid.env"
+    cp "$BUILD_DIR/evidence.env" "$valid_inventory"
+    cuda_inventory_case_rejected() {
+        mutation="$1"
+        label="$2"
+        sed "$mutation" "$valid_inventory" >"$BUILD_DIR/evidence.env"
+        cuda_validate_evidence
+        if ! grep -q '^cuda_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
+            || ! grep -q '^cuda_generated_2d_readback_reason=invalid-device-inventory$' "$BUILD_DIR/evidence.env"; then
+            echo "self_test_status=fail"
+            echo "self_test_reason=$label"
+            exit 1
+        fi
+    }
+    cuda_inventory_case_rejected '/^cuda_generated_2d_readback_device_identity_1=/d' missing-device-inventory-accepted
+    cuda_inventory_case_rejected 's/^cuda_generated_2d_readback_device_identity_1=456$/cuda_generated_2d_readback_device_identity_1=123/' duplicate-device-identity-accepted
+    cuda_inventory_case_rejected 's/^cuda_generated_2d_readback_device_identity_1=456$/cuda_generated_2d_readback_device_identity_0=456/' duplicate-device-ordinal-accepted
+    cuda_inventory_case_rejected 's/^cuda_generated_2d_readback_device_identity=123$/cuda_generated_2d_readback_device_identity=456/' primary-device-identity-mismatch-accepted
+    cuda_inventory_case_rejected 's/^cuda_generated_2d_readback_device_count=2$/cuda_generated_2d_readback_device_count=0/' zero-device-count-accepted
+    cuda_inventory_case_rejected 's/^cuda_generated_2d_readback_device_count=2$/cuda_generated_2d_readback_device_count=65/' excessive-device-count-accepted
+    cp "$valid_inventory" "$BUILD_DIR/evidence.env"
 
     echo 'cuda_generated_2d_readback_device_identity=0' >>"$BUILD_DIR/evidence.env"
     cuda_validate_evidence
@@ -273,6 +369,8 @@ EOF
     exit 0
 fi
 
+rm -f "$EXPECTED_PIXELS_PATH" "$ACTUAL_PIXELS_PATH"
+
 if ! generated_2d_module_verified "$PTX_PATH"; then
     REPORT_PATH="$BUILD_DIR/toolchains.md" BUILD_DIR="$TOOLCHAIN_BUILD_DIR" sh scripts/check/check-portable-compute-toolchains.shs >/dev/null
 fi
@@ -280,6 +378,7 @@ fi
 if ! generated_2d_module_verified "$PTX_PATH"; then
     emit_unavailable "missing-verified-ptx"
 else
+    PTX_SHA256_BEFORE="$(cuda_artifact_sha256 "$PTX_PATH")"
     cat >"$BUILD_DIR/cuda_generated_2d_readback.c" <<'C_EOF'
 #include <cuda.h>
 #include <dlfcn.h>
@@ -356,14 +455,15 @@ static uint64_t mismatch_fill_u32(const uint32_t *actual, uint32_t expected, uns
 static int write_json_u32(const char *path, const uint32_t *data, unsigned int count, const char *producer) {
     FILE *f = fopen(path, "w");
     if (!f) return 0;
-    fprintf(f, "{\"count\":%u,\"format\":\"u32\",\"producer\":\"%s\",\"pixels\":[", count, producer);
-    for (unsigned int i = 0; i < count; i++) {
-        if (i > 0) fputc(',', f);
-        fprintf(f, "%u", data[i]);
+    int ok = fprintf(f, "{\"count\":%u,\"format\":\"u32\",\"producer\":\"%s\",\"pixels\":[", count, producer) >= 0;
+    for (unsigned int i = 0; i < count && ok; i++) {
+        if (i > 0 && fputc(',', f) == EOF) ok = 0;
+        if (ok && fprintf(f, "%u", data[i]) < 0) ok = 0;
     }
-    fprintf(f, "]}");
-    fclose(f);
-    return 1;
+    if (ok && fprintf(f, "]}") < 0) ok = 0;
+    if (ferror(f)) ok = 0;
+    if (fclose(f) != 0) ok = 0;
+    return ok;
 }
 
 static uint32_t alpha_pixel(uint32_t s, uint32_t d, uint32_t alpha) {
@@ -424,13 +524,20 @@ int main(int argc, char **argv) {
     for (int ordinal = 0; ordinal < device_count; ordinal++) {
         CUdevice candidate;
         CUuuid uuid;
+        CUuuid repeated_candidate_uuid;
         rc = cuDeviceGet(&candidate, ordinal);
         if (rc == CUDA_SUCCESS) rc = device_get_uuid(&uuid, candidate);
+        if (rc == CUDA_SUCCESS) rc = device_get_uuid(&repeated_candidate_uuid, candidate);
         if (rc != CUDA_SUCCESS) { fail("cuda-device-identity-read-failed", (int)rc, 0, 0); free(device_identities); free(ptx); return 3; }
+        if (memcmp(&uuid, &repeated_candidate_uuid, sizeof(CUuuid)) != 0) { fail("cuda-device-uuid-unstable", -1, 0, 0); free(device_identities); free(ptx); return 3; }
         device_identities[ordinal] = cuda_uuid_identity(&uuid);
         for (int prior = 0; prior < ordinal; prior++) {
             if (device_identities[prior] == device_identities[ordinal]) { fail("cuda-device-identity-collision", -1, device_identities[prior], device_identities[ordinal]); free(device_identities); free(ptx); return 3; }
         }
+    }
+    printf("cuda_generated_2d_readback_device_count=%d\n", device_count);
+    for (int ordinal = 0; ordinal < device_count; ordinal++) {
+        printf("cuda_generated_2d_readback_device_identity_%d=%llu\n", ordinal, (unsigned long long)device_identities[ordinal]);
     }
     free(device_identities);
 
@@ -474,14 +581,15 @@ int main(int argc, char **argv) {
     uint32_t *expected_all = (uint32_t *)calloc((size_t)count * 4u, sizeof(uint32_t));
     uint32_t *actual_all = (uint32_t *)calloc((size_t)count * 4u, sizeof(uint32_t));
     if (!host || !expected_buf || !expected_all || !actual_all) { fail("host-alloc-failed", -1, 0, 0); free(host); free(expected_buf); free(expected_all); free(actual_all); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+#define CUDA_FAIL_BUFFERS(reason, code) do { fail((reason), (int)(code), 0, 0); free(host); free(expected_buf); free(expected_all); free(actual_all); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; } while (0)
 
     void *fill_args[] = { &dst, &value, &count };
     rc = cuLaunchKernel(fn_fill, grid, 1, 1, block, 1, 1, 0, 0, fill_args, 0);
-    if (rc != CUDA_SUCCESS) { fail("cuLaunchKernel-fill-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuLaunchKernel-fill-failed", rc);
     rc = cuCtxSynchronize();
-    if (rc != CUDA_SUCCESS) { fail("cuCtxSynchronize-fill-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuCtxSynchronize-fill-failed", rc);
     rc = cuMemcpyDtoH(host, dst, bytes);
-    if (rc != CUDA_SUCCESS) { fail("cuMemcpyDtoH-fill-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuMemcpyDtoH-fill-failed", rc);
     uint64_t fill_actual = checksum_u32(host, count);
     uint64_t fill_expected = (uint64_t)value * (uint64_t)count;
     uint64_t fill_mismatches = mismatch_fill_u32(host, value, count);
@@ -489,16 +597,16 @@ int main(int argc, char **argv) {
 
     for (unsigned int i = 0; i < count; i++) expected_buf[i] = 1000u + i;
     rc = cuMemcpyHtoD(src, expected_buf, bytes);
-    if (rc != CUDA_SUCCESS) { fail("cuMemcpyHtoD-copy-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuMemcpyHtoD-copy-failed", rc);
     rc = cuMemsetD32(dst, 0, count);
-    if (rc != CUDA_SUCCESS) { fail("cuMemsetD32-copy-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuMemsetD32-copy-failed", rc);
     void *copy_args[] = { &src, &dst, &count };
     rc = cuLaunchKernel(fn_copy, grid, 1, 1, block, 1, 1, 0, 0, copy_args, 0);
-    if (rc != CUDA_SUCCESS) { fail("cuLaunchKernel-copy-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuLaunchKernel-copy-failed", rc);
     rc = cuCtxSynchronize();
-    if (rc != CUDA_SUCCESS) { fail("cuCtxSynchronize-copy-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuCtxSynchronize-copy-failed", rc);
     rc = cuMemcpyDtoH(host, dst, bytes);
-    if (rc != CUDA_SUCCESS) { fail("cuMemcpyDtoH-copy-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuMemcpyDtoH-copy-failed", rc);
     uint64_t copy_actual = checksum_u32(host, count);
     uint64_t copy_expected = checksum_u32(expected_buf, count);
     uint64_t copy_mismatches = mismatch_u32(host, expected_buf, count);
@@ -507,18 +615,18 @@ int main(int argc, char **argv) {
     for (unsigned int i = 0; i < count; i++) expected_buf[i] = 0xff204060u + i;
     for (unsigned int i = 0; i < count; i++) host[i] = 0xff102030u + i;
     rc = cuMemcpyHtoD(src, expected_buf, bytes);
-    if (rc != CUDA_SUCCESS) { fail("cuMemcpyHtoD-alpha-src-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuMemcpyHtoD-alpha-src-failed", rc);
     rc = cuMemcpyHtoD(dst, host, bytes);
-    if (rc != CUDA_SUCCESS) { fail("cuMemcpyHtoD-alpha-dst-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuMemcpyHtoD-alpha-dst-failed", rc);
     unsigned int alpha = 128u;
     for (unsigned int i = 0; i < count; i++) expected_buf[i] = alpha_pixel(expected_buf[i], host[i], alpha);
     void *alpha_args[] = { &src, &dst, &alpha, &count };
     rc = cuLaunchKernel(fn_alpha, grid, 1, 1, block, 1, 1, 0, 0, alpha_args, 0);
-    if (rc != CUDA_SUCCESS) { fail("cuLaunchKernel-alpha-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuLaunchKernel-alpha-failed", rc);
     rc = cuCtxSynchronize();
-    if (rc != CUDA_SUCCESS) { fail("cuCtxSynchronize-alpha-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuCtxSynchronize-alpha-failed", rc);
     rc = cuMemcpyDtoH(host, dst, bytes);
-    if (rc != CUDA_SUCCESS) { fail("cuMemcpyDtoH-alpha-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuMemcpyDtoH-alpha-failed", rc);
     uint64_t alpha_actual = checksum_u32(host, count);
     uint64_t alpha_expected = checksum_u32(expected_buf, count);
     uint64_t alpha_mismatches = mismatch_u32(host, expected_buf, count);
@@ -535,16 +643,16 @@ int main(int argc, char **argv) {
         expected_buf[i] = (sy < 0 || sy >= (int)height) ? 0u : host[(unsigned int)sy * width + x];
     }
     rc = cuMemcpyHtoD(src, host, bytes);
-    if (rc != CUDA_SUCCESS) { fail("cuMemcpyHtoD-scroll-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuMemcpyHtoD-scroll-failed", rc);
     rc = cuMemsetD32(dst, 0, count);
-    if (rc != CUDA_SUCCESS) { fail("cuMemsetD32-scroll-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuMemsetD32-scroll-failed", rc);
     void *scroll_args[] = { &src, &dst, &width, &height, &delta_y };
     rc = cuLaunchKernel(fn_scroll, grid, 1, 1, block, 1, 1, 0, 0, scroll_args, 0);
-    if (rc != CUDA_SUCCESS) { fail("cuLaunchKernel-scroll-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuLaunchKernel-scroll-failed", rc);
     rc = cuCtxSynchronize();
-    if (rc != CUDA_SUCCESS) { fail("cuCtxSynchronize-scroll-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuCtxSynchronize-scroll-failed", rc);
     rc = cuMemcpyDtoH(host, dst, bytes);
-    if (rc != CUDA_SUCCESS) { fail("cuMemcpyDtoH-scroll-failed", (int)rc, 0, 0); free(host); free(expected_buf); cuMemFree(src); cuMemFree(dst); cuModuleUnload(module); cuDevicePrimaryCtxRelease(dev); free(ptx); return 3; }
+    if (rc != CUDA_SUCCESS) CUDA_FAIL_BUFFERS("cuMemcpyDtoH-scroll-failed", rc);
     uint64_t scroll_actual = checksum_u32(host, count);
     uint64_t scroll_expected = checksum_u32(expected_buf, count);
     uint64_t scroll_mismatches = mismatch_u32(host, expected_buf, count);
@@ -589,6 +697,7 @@ int main(int argc, char **argv) {
     } else {
         fail(wrote_expected && wrote_actual ? "readback-pixel-mismatch" : "readback-artifact-write-failed", 0, expected, actual);
     }
+#undef CUDA_FAIL_BUFFERS
 
     free(host);
     free(expected_buf);
@@ -599,7 +708,7 @@ int main(int argc, char **argv) {
     cuModuleUnload(module);
     cuDevicePrimaryCtxRelease(dev);
     free(ptx);
-    return (actual == expected && mismatches == 0) ? 0 : 4;
+    return (actual == expected && mismatches == 0 && wrote_expected && wrote_actual) ? 0 : 4;
 }
 C_EOF
 
@@ -616,12 +725,15 @@ C_EOF
     fi
 fi
 
+cuda_append_artifact_hashes
 cuda_validate_evidence
 
 {
     echo "# CUDA Generated 2D Readback Evidence"
     echo
     echo "Date: $(date -u +%F)"
+    echo
+    echo "This gate proves device execution of the exact hash-bound artifacts below; source-generation provenance is a separate requirement."
     echo
     echo "| Field | Value |"
     echo "|---|---|"
@@ -634,3 +746,4 @@ cuda_validate_evidence
 echo "report_path=$REPORT_PATH"
 echo "cuda_generated_2d_readback_ptx=$PTX_PATH"
 cat "$BUILD_DIR/evidence.env"
+[ "$(cuda_env_value cuda_generated_2d_readback_status)" = "pass" ]
