@@ -30,8 +30,8 @@ No new TODO is created because these rows already have authoritative owners.
 
 | Host | Prerequisites | First commands | Required retained artifacts |
 |---|---|---|---|
-| Windows/MSYS | D3D11 hardware adapter, QEMU for required ISAs, current pure-Simple compiler and host daemon | Run `scripts/check/check-simpleos-qemu-host-gpu-2d.shs`; validate the emitted report | wrapper report, serial logs, daemon log, exact encoded QEMU argv, protocol/backend/device IDs, checksums, elapsed times, QEMU/daemon/combined RSS |
-| macOS | Metal device, QEMU, current pure-Simple compiler and host daemon | Set `SIMPLE_BIN=bin/release/<triple>/simple`; run `"$SIMPLE_BIN" test test/04_smoke/simpleos_metal_processing_ir.spl`, then `SIMPLE_BIN="$SIMPLE_BIN" scripts/check/check-simpleos-qemu-host-gpu-2d.shs` | Metal smoke output plus the same correlated wrapper artifacts for rendering and ProcessingIR |
+| Windows/MSYS | D3D11 hardware adapter, QEMU with WHPX for the matching native ISA, current pure-Simple compiler and host daemon | Run `scripts/check/check-simpleos-qemu-host-gpu-2d.shs`; validate the emitted report | wrapper report, serial logs, daemon log, exact encoded QEMU argv including `-accel`, protocol/backend/device IDs, checksums, elapsed times, QEMU/daemon/combined RSS |
+| macOS | Metal device, QEMU with HVF for the matching native ISA, current pure-Simple compiler and host daemon | Set `SIMPLE_BIN=bin/release/<triple>/simple`; run `"$SIMPLE_BIN" test test/04_smoke/simpleos_metal_processing_ir.spl`, then `SIMPLE_BIN="$SIMPLE_BIN" scripts/check/check-simpleos-qemu-host-gpu-2d.shs` | Metal smoke output plus the same correlated wrapper artifacts for rendering and ProcessingIR, including executed accelerator |
 | NVIDIA Linux | CUDA driver/device; multiple GPUs or MIG where available; current pure-Simple compiler for source regeneration and QEMU | Retained-PTX evidence is already recorded; after compiler recovery run `sh scripts/check/check-cuda-generated-2d-readback.shs && grep -qx 'cuda_generated_2d_readback_status=pass' build/cuda_generated_2d_readback/evidence.env`, then `SIMPLEOS_HOST_GPU_REQUIRE_CUDA=1 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs` | UUID stability/distinction report, CUDA device readback, QEMU receipts, CPU oracle parity, preference timing, and RSS |
 
 Run compiler-independent CUDA checks as soon as their native prerequisites
@@ -49,8 +49,9 @@ only if a fresh native run exposes a reproducible implementation failure.
   macOS Metal evidence.
 - Screenshots, API names, QEMU flags, cached reports, synthetic handles, and
   CPU mirrors cannot promote a row.
-- Cross-ISA TCG proves guest/protocol behavior only; native-host latency and
-  RSS claims require native prepared-host rows.
+- Cross-ISA or same-ISA TCG proves guest/protocol behavior only; native-host
+  latency and RSS claims require a matching prepared-host KVM/HVF/WHPX row and
+  retained executed `-accel` evidence.
 - Negotiation evidence retains the guest device-init start, ordered submitted
   attempts and outcomes, final selection/fallback, guest-observed duration, and
   native applicability. Exactly 500,000 us passes; 500,001 us fails. Daemon

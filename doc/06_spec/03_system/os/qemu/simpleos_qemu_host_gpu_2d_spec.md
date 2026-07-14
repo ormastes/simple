@@ -20,6 +20,9 @@ NFR-006 source and parser evidence now measures one guest-observed interval
 from device initialization through rejected/timed-out attempts and final
 selection or fallback. TODO 566 remains open until fresh native execution proves
 the inclusive 500,000 us budget.
+No warm multi-sample render/readback p95 is produced by these source/parser
+changes; TODO 563 remains open, along with its fresh combined QEMU/daemon RSS
+evidence.
 
 This scenario proves that supported SimpleOS guests use one bounded protocol to
 execute Draw IR and ProcessingIR on a real host device. Unsupported rows retain
@@ -38,10 +41,14 @@ the CPU/software fallback and report a stable reason.
    or RISC-V guest and negotiate protocol version, limits, backend sets,
    readback, and host readiness. Try strict native Metal, DirectX, then Vulkan
    with fresh generations while validating processing against its own mask.
+   Retain the executed `-accel` argument; KVM, HVF, or WHPX is native only for
+   its matching host ISA, while every TCG lane is correctness-only.
 3. **Bound capability negotiation and fallback selection to 500 ms.** Retain
    every ordered guest attempt and exactly one final decision. Accept 500,000 us
    and reject 500,001 us for every transcript; only a matching native ISA closes
-   the latency target. Cross-ISA TCG proves the fail-closed contract, not latency.
+   the latency target. Cross-ISA and same-ISA TCG prove the fail-closed contract,
+   not latency. Two valid equal clock samples are recorded as 1 us so zero
+   remains invalid.
 4. **Render and read back the Simple 2D parity fixture.** Correlate frame ID,
    native device identity, positive backend handle, same-frame output, and the
    exact CPU-oracle checksum. Raw-render and Draw IR receipts must carry the
@@ -59,7 +66,8 @@ the CPU/software fallback and report a stable reason.
    633,600 background pixels, 288,000 rectangle pixels, and zero mismatches.
 8. **Prove the AArch64 production desktop frame.** Build the
    `arm64-desktop-engine2d` guest through the wrapper, require its production
-   QEMU argv lane, and accept exactly one correlated
+   QEMU argv lane, require exactly one scoped `HOST_GPU_MAP_OK` before the first
+   negotiation event, and accept exactly one correlated
    `[wm-frame] host-gpu-presented` marker only after receipt validation and
    checksum-checked MMIO presentation. The marker backend must match the active
    host contract; its positive run and frame identities must match the submitted
@@ -108,7 +116,8 @@ the CPU/software fallback and report a stable reason.
    completion and pointer readback, and never relabel a Metal render clear as
    processing evidence.
 19. **Report device-backed host acceleration evidence.** Publish one row with
-   host, guest ISA, QEMU/device arguments, protocol, backend, device, IDs,
+   host, guest ISA, QEMU/device arguments, selected QEMU accelerator, protocol,
+   backend, device, IDs,
    timing, concurrently sampled daemon/QEMU/combined RSS maxima, checksums,
    status, and reason. For every non-HELLO request, both
    the guest and daemon require a positive numeric run hash and frame ID; a
@@ -122,8 +131,9 @@ the CPU/software fallback and report a stable reason.
    plus the correlated daemon log, CPU/device timings, and preference result,
    with the combined value no smaller than either component; negotiated protocol,
    positive HELLO/render/Draw IR/ProcessingIR timings, and correlated run/frame
-   IDs. The encoded argv must also match the ISA-specific machine, kernel, and
-   exact shared `hostgpu` object/device binding; wrong or extra tokens fail.
+   IDs. The encoded argv must also match the ISA-specific machine, kernel,
+   exact `-accel` attribution, and shared `hostgpu` object/device binding; wrong
+   or extra tokens fail.
    Missing, duplicate, empty, or nonpositive evidence fails closed.
 
 ### Keep native Metal ProcessingIR separate from Engine2D rendering
@@ -186,11 +196,19 @@ compiler overrides do not bypass this liveness/command-surface gate; the real
 build remains authoritative for backend runtime/toolchain availability.
 
 Run the live Linux Vulkan-render/CUDA-processing matrix with a deployed
-pure-Simple compiler and CUDA+Vulkan runtime artifact:
+pure-Simple compiler. After that compiler passes its bounded frontend gate, the
+wrapper validates or builds its lane-owned CUDA+Vulkan host SFFI archive using
+the locked `simple-runtime` bootstrap profile and verifies the active Cargo
+fingerprint contains both features:
 
 ```sh
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
 ```
+
+An explicit `SIMPLEOS_HOST_GPU_RUNTIME_PATH` is validation-only: the wrapper
+never deletes or rebuilds it. Building this host runtime provider does not
+authorize the Rust compiler seed, which remains rejected for every Simple
+check, guest build, and execution step.
 
 Run the same three-ISA matrix with ProcessingIR forced through Vulkan:
 

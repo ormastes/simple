@@ -14,7 +14,8 @@ Status: **external rows postponed; current-host work active; not complete**.
 - Resume only with a prepared host and a compiler accepted by
   `simple_binary_is_valid`.
 - Native PASS requires submission, completion, device readback, stable identity,
-  exact parity, and correlated IDs.
+  exact parity, correlated IDs, and retained executed KVM/HVF/WHPX attribution
+  for the matching host ISA; TCG remains correctness-only even on the same ISA.
 - Translation, screenshots, flags, cached data, and CPU mirrors do not pass.
 - Local TODO529/535/536/537/540/542/547/548/549/550/551/552/554/555/563/565/566/567/568/569/570 remains active.
 - Local retained-PTX CUDA evidence now has fail-closed exits, all-device stability/distinction, and artifact hashes; source regeneration, the Vulkan-only selector, MIG, and QEMU remain open.

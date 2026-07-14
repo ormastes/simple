@@ -289,7 +289,7 @@ The second QEMU argument vector must have this exact token shape (with the
 row-owned shared-memory path substituted for `<row-shm>`):
 
 ```text
--machine virt -cpu cortex-a72 -m 512M
+-machine virt -accel <tcg|native-accelerator> -cpu <cortex-a72|host> -m 512M
 -kernel build/os/simpleos_arm64_desktop_engine2d.elf
 -nographic
 -device ramfb
@@ -297,6 +297,9 @@ row-owned shared-memory path substituted for `<row-shm>`):
 -object memory-backend-file,id=hostgpu,share=on,mem-path=<row-shm>,size=8M
 -device ivshmem-plain,memdev=hostgpu
 ```
+
+The CPU/accelerator pair is exact: TCG uses `cortex-a72`; a validated native
+KVM/HVF/WHPX row uses `host`. The production boot must retain the probe's pair.
 
 A production pass requires the serial
 sequence `[wm-frame] host-gpu-ready` -> `[wm-frame] host-gpu-presented` ->
@@ -318,6 +321,22 @@ without changing the default CUDA preference:
 SIMPLEOS_HOST_GPU_PROCESSING_BACKEND=vulkan \
   sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
 ```
+
+After accepting a pure-Simple full CLI, the Linux wrapper validates the
+dedicated default host-runtime archive and its Cargo fingerprint. If missing,
+it builds only that lane-owned SFFI provider with:
+
+```sh
+CARGO_TARGET_DIR="$PWD/build/simpleos_gpu_host/vulkan-cuda-runtime-target" \
+  cargo build --locked --manifest-path src/compiler_rust/Cargo.toml \
+  --package simple-runtime --lib --profile bootstrap --features vulkan,cuda
+```
+
+The fingerprint proves the CUDA/Vulkan compile features; live negotiation and
+device-readback receipts still prove hardware execution. A user-supplied
+`SIMPLEOS_HOST_GPU_RUNTIME_PATH` is never deleted or rebuilt and fails closed
+when its archive/fingerprint is invalid. This host SFFI build does not permit
+using the Rust compiler seed for Simple checks, guest builds, or execution.
 
 The forced lane must negotiate processing mask `1`, emit a single
 `HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan` receipt, and retain exact
@@ -395,6 +414,19 @@ DirectX, and Vulkan attempt to backend selection or CPU fallback. Daemon HELLO
 the inclusive 500,000 us native target. Report only `current-host scope
 complete`; keep the umbrella host-GPU lane incomplete while any required
 prepared-host row remains postponed.
+
+Accelerator applicability comes from the retained executed QEMU argv, not from
+host/guest ISA equality alone. The wrapper uses KVM on Linux, HVF on macOS, or
+WHPX on Windows only when that accelerator is available, advertised by the
+selected QEMU binary, and the guest ISA matches the host; otherwise it records
+TCG and treats the row as correctness-only. Production negotiation evidence
+also requires exactly one scoped `HOST_GPU_MAP_OK` before the first attempt or
+final decision. Two valid clock samples in the same microsecond are recorded as
+1 us so zero remains an invalid interval.
+
+These source and parser changes do not provide warm multi-sample
+render/readback p95. TODO 563 remains open for that p95 and fresh combined
+QEMU-plus-daemon RSS evidence; NFR-003 and NFR-005 are not newly satisfied.
 
 Processing receipts distinguish the transient backend resource handle from the
 stable device identity. Vulkan hashes the runtime-selected driver identity,

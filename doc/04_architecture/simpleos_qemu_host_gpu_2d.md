@@ -56,6 +56,9 @@ copy. It builds one `auto` Draw IR composition: a valid correlated host receipt
 is presented synchronously, while unavailable mapping, capacity, negotiation,
 receipt, or presentation selects the existing local Engine2D path. The current
 3840x2160 entry therefore remains local under TODO 552's 8 MiB capacity ceiling.
+For a nonzero production BAR, the executor emits exactly one scoped
+`HOST_GPU_MAP_OK` marker before any negotiation attempt or final decision; the
+evidence parser rejects a missing, duplicate, or late mapping marker.
 
 ## Virtual Capsule
 
@@ -87,7 +90,11 @@ and synthetic handles fail closed.
 QEMU argv evidence is reversible but not trusted as an opaque string. The
 canonical wrapper checks the exact per-ISA token shape at live capture and
 cached-report promotion: machine, kernel basename, bounded memory, and the
-shared `hostgpu` memory object/device binding must match the executed lane.
+shared `hostgpu` memory object/device binding must match the executed lane. It
+also retains the executed `-accel` token. KVM, HVF, or WHPX is native evidence
+only when it matches the host OS and guest ISA and is both available and
+advertised by that QEMU binary; every executed TCG lane remains
+correctness-only, including same-ISA TCG.
 
 ### Checked raw Vulkan framebuffer execution
 
@@ -174,7 +181,8 @@ duplicate, stale, or nonpositive attempt evidence fails closed. Daemon HELLO
 service time is diagnostic only and cannot substitute for this guest-observed
 interval. Exactly 500,000 us is within budget; 500,001 us is not. TCG may prove
 ordering, counting, boundary, and rejection semantics but cannot satisfy a
-native latency row.
+native latency row. Two valid samples in the same microsecond are represented
+as a 1 us evidence interval so zero remains reserved for invalid clock input.
 
 Processing preference is a verification classification, not a second runtime
 scheduler or wire protocol. For the existing FillU32 fixture the daemon times

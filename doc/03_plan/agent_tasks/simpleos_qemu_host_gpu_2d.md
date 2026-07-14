@@ -63,8 +63,10 @@ fixture bypasses, synthetic handles, or passing placeholders.
   Metal/DirectX/Vulkan attempts, and final selection/fallback; daemon HELLO time
   is supporting per-attempt evidence only. The local parser/self-test lane and
   current Linux native row remain active; only unavailable Windows/macOS native
-  timing rows are postponed. AArch64 and RV64 TCG validate ordering, counting,
-  boundaries, and fail-closed behavior, but cannot close native latency.
+  timing rows are postponed. Applicability comes from the retained executed
+  `-accel` token plus matching host ISA, not ISA equality; AArch64, RV64, and
+  same-ISA TCG validate ordering, counting, boundaries, and fail-closed behavior
+  but cannot close native latency. Valid equal clock samples use a 1 us floor.
 - NFR-005 evidence now carries concurrently sampled daemon, QEMU, and combined
   maxima across both AArch64 boots; TODO 563 remains open until fresh live rows
   prove the 256 MiB target and warm multi-sample latency p95. NFR-001's exact
@@ -84,7 +86,9 @@ fixture bypasses, synthetic handles, or passing placeholders.
   opacity. Production x86 guest submission now maps BAR2 into the active VMM,
   derives request generations from the idle wire slot, validates device receipts,
   and presents checked readback with local fallback. Fresh QEMU/p95 evidence and
-  TODO 552's selected 4K capacity change remain open. The
+  TODO 552's selected 4K capacity change remain open. The production transcript
+  now emits one scoped `HOST_GPU_MAP_OK` before its first negotiation event and
+  rejects missing or late mapping evidence. The
   reusable checked IMAGE src-over primitive and full-target opacity-1000
   RECT/IMAGE admission plus preflighted canonical TEXT glyph compositing are
   implemented. Smaller/offscreen device surfaces and opacity are covered by the

@@ -34,6 +34,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 | multi-ISA row aggregation and fail-closed parsing | REQ-011,012; NFR-008,009 |
 | cached report validates every host/ISA row and all three Linux serial receipts before promotion | REQ-011,012; NFR-008,009 |
 | live and cached QEMU argv match the ISA machine, kernel, and shared ivshmem binding | REQ-006,011,012; NFR-009 |
+| executed QEMU accelerator is explicit; KVM/HVF/WHPX requires matching host ISA and TCG remains correctness-only | NFR-008,009 |
 | guest-observed device-init through selected-backend/fallback interval, including rejected/timed-out attempts and the 500000/500001 us boundary (TODO 566) | NFR-006 |
 | render latency and concurrent QEMU/daemon RSS evidence | NFR-003,005 |
 | exact 1280x720 canonical Draw IR readback with a positional zero-mismatch oracle (TODO 569) | NFR-001 |
@@ -70,7 +71,9 @@ numeric run-hash/frame-ID predicate; device receipts recheck both expected and
 returned values. The cached-report validator rejects a missing, duplicate,
 empty, or nonpositive field. It also parses the encoded argv tokens and rejects
 the wrong ISA machine/kernel, missing or altered shared-memory object, extra
-arguments, and any ivshmem device not bound to `hostgpu`. This proves evidence
+arguments, any ivshmem device not bound to `hostgpu`, and any missing or
+misattributed `-accel` token. A KVM/HVF/WHPX row is native only for its matching
+host and ISA; same-ISA TCG is still correctness-only. This proves evidence
 completeness only. The isolated `--self-test-metrics` path rejects missing,
 zero, nonnumeric, or internally inconsistent RSS values and proves maxima are
 preserved across the AArch64 probe/production boots. NFR latency and the 256 MiB
@@ -83,7 +86,9 @@ It must emit exactly one final selection/fallback classification. TCG rows may
 exercise those parser and state-machine rules, but only a matching native-ISA
 row can satisfy the latency target. Current Linux native execution remains
 active; unavailable Windows/macOS native rows stay postponed under the external
-host plan.
+host plan. A valid equal-microsecond interval is recorded as 1 us so zero stays
+invalid. Production transcripts additionally require exactly one scoped
+`HOST_GPU_MAP_OK` before their first attempt or final decision.
 
 The AArch64 pass contract has two mandatory boots under one wrapper-owned
 lifecycle. The first retains the 64x48 raw-render/IMAGE regression, then

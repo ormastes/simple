@@ -34,8 +34,10 @@ admission and cached promotion use this owner.
 
 ## Flow
 
-1. The guest maps the QEMU `ivshmem-plain` BAR2 region and negotiates bounded
-   capabilities through its control header.
+1. The guest maps the QEMU `ivshmem-plain` BAR2 region, emits one scoped
+   production `HOST_GPU_MAP_OK` marker for a nonzero BAR, then negotiates
+   bounded capabilities through its control header. Mapping evidence must
+   precede every negotiation attempt and final decision.
 2. Canonical RECT/TEXT/IMAGE Draw IR semantics and ProcessingIR `FillU32` use the payload area.
    Production WM frames first form one `DrawIrComposition`; the local fallback
    resolves checksum-valid top-level `WmContentFrame` pixels as IMAGE resources.
@@ -215,13 +217,17 @@ exact output recovery. The shared runtime accepts completion only when the
 command reaches `MTLCommandBufferStatus::Completed` with no error. A separate
 CPU oracle remains the daemon's final parity gate.
 
-Each row records host OS, guest ISA, QEMU version/arguments, protocol/backend,
-device identity, IDs, timing, concurrently sampled daemon/QEMU/combined max
-RSS, and checksums. The combined maximum is sampled at one instant rather than
+Each row records host OS, guest ISA, QEMU version/arguments, selected QEMU
+accelerator, protocol/backend, device identity, IDs, timing, concurrently
+sampled daemon/QEMU/combined max RSS, and checksums. Native applicability is
+derived from the retained executed `-accel` token plus matching host ISA;
+same-ISA TCG remains correctness-only. The combined maximum is sampled at one instant rather than
 formed from independent peaks, and AArch64 preserves maxima across both boots.
 Native-ISA rows require
 negotiation within 500 ms, render/readback p95 at most 16.7 ms, incremental RSS
 at most 256 MiB, and processing speedup at least 1.5x to become preferred.
+TODO 563 remains open because these source/parser changes provide neither a
+fresh warm multi-sample render/readback p95 nor fresh combined QEMU/daemon RSS.
 Negotiation timing is one guest-observed monotonic interval from device
 initialization through strict Metal -> DirectX -> Vulkan attempts to selected
 backend or CPU fallback. Each submitted attempt is counted once; rejected and
@@ -232,7 +238,9 @@ does not close the native latency target. The source-ready guest path now owns
 the shared deadline and ordered attempt transcript through the narrow boot
 monotonic facade; daemon HELLO timing remains supporting per-attempt evidence,
 not the NFR-006 interval. TODO 566 remains open until fresh matching-native-ISA
-execution proves the complete guest-observed interval within the budget.
+execution proves the complete guest-observed interval within the budget. The
+clock owner reports two valid equal microsecond samples as 1 us, keeping zero
+reserved for invalid or backward samples.
 The daemon measures the current FillU32(256, 7) CPU oracle and device executor
 independently with the canonical time facade. Its single-request,
 post-HELLO-probe, setup-inclusive receipt is correlated by ISA, backend,

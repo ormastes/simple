@@ -9,5 +9,5 @@
 - NFR-005: Incremental QEMU plus host-service max RSS shall be at most 256 MiB for the canonical fixture.
 - NFR-006: Capability negotiation and fallback selection shall finish within 500 ms after guest device initialization.
 - NFR-007: Queue depth, payload size, command count, dimensions, and outstanding batches shall be bounded; overload shall fail or backpressure without unbounded allocation.
-- NFR-008: Cross-ISA TCG rows shall verify correctness and honest provenance but shall not be required to meet native-ISA latency/speedup targets.
-- NFR-009: Evidence shall record host OS, guest ISA, QEMU version/device arguments, protocol version, selected backend, native device identity, frame/run identity, timings, max RSS, and checksums.
+- NFR-008: Cross-ISA TCG rows shall verify correctness and honest provenance but shall not be required to meet native-ISA latency/speedup targets. Applicability shall come from the retained executed QEMU `-accel` argument plus matching host ISA, never ISA equality alone; same-ISA TCG remains correctness-only.
+- NFR-009: Evidence shall record host OS, guest ISA, QEMU version/device arguments, selected QEMU accelerator, protocol version, selected backend, native device identity, frame/run identity, timings, max RSS, and checksums.
