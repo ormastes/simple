@@ -47,7 +47,7 @@ bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
 - External paths: `src/compiler_rust/vendor/**`, `src/runtime/vendor/**`, `src/runtime/miniaudio.h`, `src/runtime/stb_image.h`, `src/runtime/stb_truetype.h`.
 
 ## Detailed Rules & Reference
-- **Rules:** `.claude/rules/` — `language.md`, `testing.md`, `bootstrap.md`, `commands.md`, `structure.md`, `code-style.md`, `vcs.md`
+- **Rules:** `.claude/rules/` — `language.md`, `testing.md`, `bootstrap.md`, `commands.md`, `structure.md`, `code-style.md`, `vcs.md`, `board-runnable.md`
 - **Skills:** `.claude/skills/` — invoke `/skill-name`; Codex development uses `$sp_dev` for the SPipe dev entrypoint
 - **Agents:** `.claude/agents/` — `code`, `test`, `debug`, `explore`, `docs`, `vcs`, `infra`, `build`, `ml`
 - **Memory refs:** `.claude/memory/ref_*.md` — architecture, coding, SFFI, stdlib, CUDA, etc.
