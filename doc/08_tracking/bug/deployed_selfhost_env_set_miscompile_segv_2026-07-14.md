@@ -82,16 +82,46 @@ cache file, object, or candidate, and exited 124 at the outer timeout. Therefore
 the explicit entry-HIR repair remains statically approved but runtime-unproven;
 this attempt was not retried.
 
-## Later strict-stage result
+## Current strict-stage result
 
-Later retained evidence in
-`.spipe/simpleos_filesystem_toolchain_servers/state.md` supersedes the early
-parser/runtime rebuild diagnosis: strict minimal Stage 2 and Stage 3 completed
-with 482 modules and zero compile failures (recorded hashes `35aa0cba...` and
-`1d1ac5ac...`). Those exact binaries are no longer retained, and no gated full
-Stage 4 CLI followed them. The current blocker is therefore production and
-retention of a full current-ABI CLI, not another `rt_env_set` caller or runtime
-shim.
+A fresh 2026-07-14 `--full-bootstrap --backend=cranelift` cycle rebuilt the
+bootstrap producer and runtime from current inputs, then completed both strict
+pure-Simple stages with no seed fallback:
+
+- Stage 2: `a6fbc3948a06f87ea098444a292017e66b19cfe16363a5f82afb86e2f37b3cf8`
+- Stage 3: `e71f8065f817a13cfb1bc52f02ace974005747d0a036fc2524452931e0b712b5`
+
+Both executables are retained under `build/font-req015-bootstrap/`. The first
+Stage 4 attempt then failed before codegen because `std.env.platform` locally
+redeclared `rt_process_run` already owned by `std.env.types`. `platform.spl`
+now imports the canonical owner instead; the focused regression locks that
+single-owner contract. The next Stage 4 attempt passed package discovery and
+object generation, proving that ambiguity fixed.
+
+The final allowed retry reached the full-CLI linker and failed on the broader
+runtime-provider closure. The module closure contains hosted SQLite/HTTP,
+CUDA/ROCm/oneAPI/OpenCL/OpenGL/SDL2, Engine2D SIMD/host-queue, font rasterizer,
+memtrack, database durability, and related extern surfaces without a matching
+provider set. No full CLI was produced. The three-cycle session cap was reached,
+so the retained Stage 2/3 compilers and object cache are the recovery point for
+the next focused runtime-provider/entry-reachability fix.
+
+## Source regeneration hazard fixed
+
+The SFFI workspace generates its `sffi_io` crate from
+`compiler.tools.sffi_gen.specs.io_full`. That canonical spec and its app mirror
+still described `rt_env_get` and `rt_env_set` as NUL-terminated pointer-only
+calls. Regenerating the crate could therefore reintroduce the same obsolete ABI
+even though `simple_sffi.h` and the current Rust runtime use length-delimited
+text.
+
+Both specs now generate `(ptr, len)` text parameters, validate the same 4,095
+byte key and 65,535 byte value ceilings as the runtime, accept the canonical
+zero-length value, and reject invalid names, null non-empty values, embedded
+NUL, or invalid UTF-8. `io_env_text_abi_spec.spl` locks the generated signatures
+and mirror contract.
+This closes the regeneration path; it does not make any retained full CLI a
+valid candidate or resolve the separate full-entry runtime-provider closure.
 
 ## Required fix and gate
 
