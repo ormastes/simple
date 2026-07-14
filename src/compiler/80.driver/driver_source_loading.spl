@@ -63,6 +63,8 @@ pub fn _driver_module_name_from_path(path: text) -> text:
     mod_path.replace("/", ".")
 
 pub fn _driver_module_aliases(path: text, content: text, module_name: text) -> [SourceFile]:
+    # Entry-closure loading adds the requested import name after resolution.
+    # Do not invent lib.* -> std.* aliases here: real src/std mirrors may own them.
     var aliases: [SourceFile] = [SourceFile(path: path, content: content, module_name: module_name)]
     if module_name.starts_with("compiler.10.frontend.core."):
         val core_alias = "compiler.core." + module_name.substring("compiler.10.frontend.core.".len())
@@ -147,7 +149,7 @@ pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
     Candidates are ordered so the module name derived from the returned path
     (_driver_module_name_from_path) matches the import path when possible:
     working-directory-relative first, then src/, then the importing file's
-    directory, then the std -> src/lib alias root."""
+    directory, then the canonical src/lib package root and std aliases."""
     val rel = module_path.replace(".", "/")
     var roots: [text] = ["", "src/"]
     if entry_dir != "":
@@ -160,6 +162,14 @@ pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
             return base + "/mod.spl"
         if rt_file_exists(base + "/__init__.spl"):
             return base + "/__init__.spl"
+    if not module_path.starts_with("std."):
+        val lib_base = "src/lib/" + rel
+        if rt_file_exists(lib_base + ".spl"):
+            return lib_base + ".spl"
+        if rt_file_exists(lib_base + "/mod.spl"):
+            return lib_base + "/mod.spl"
+        if rt_file_exists(lib_base + "/__init__.spl"):
+            return lib_base + "/__init__.spl"
     if module_path.starts_with("std."):
         val lib_base = "src/lib/" + rel.substring(4)
         if rt_file_exists(lib_base + ".spl"):
@@ -177,14 +187,6 @@ pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
                 return family_base + "/mod.spl"
             if rt_file_exists(family_base + "/__init__.spl"):
                 return family_base + "/__init__.spl"
-    if module_path.starts_with("common."):
-        val common_base = "src/lib/" + rel
-        if rt_file_exists(common_base + ".spl"):
-            return common_base + ".spl"
-        if rt_file_exists(common_base + "/mod.spl"):
-            return common_base + "/mod.spl"
-        if rt_file_exists(common_base + "/__init__.spl"):
-            return common_base + "/__init__.spl"
     ""
 
 pub fn _driver_collect_sources(p: text) -> [SourceFile]:
