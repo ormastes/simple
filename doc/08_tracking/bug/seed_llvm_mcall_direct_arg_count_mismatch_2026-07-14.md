@@ -78,6 +78,37 @@ must pass LLVM verification (currently fails). Evidence:
 `scratchpad/inguest_run_recover/llvm_build_errors_summary.txt`,
 `llvm_failing_callees.txt`.
 
+## RESOLVED in the pure-Simple backend (2026-07-14)
+
+Fixed where it matters for the deployed compiler: the **pure-Simple** LLVM IR
+backend (`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl`,
+`translate_call`). It emitted exactly `args.len()` arguments against a
+signature-derived `declare` with **no arity-reconciliation guard** (unlike the
+Rust `compile_call`, which already handled this via an indirect call). Added the
+same reconciliation in IR-text form: when the callee's declared parameter count
+(`lookup_function_param_count`) differs from the call's argument count, emit an
+EXPLICIT function-type signature — `call RET (argtys) @f(args)` — which keeps the
+call well-formed for llc (the callee is treated as a typed pointer). Engages only
+on a KNOWN mismatch, so matching calls are byte-identical to before.
+
+Regression test: `test/01_unit/compiler/backend/llvm_call_arity_reconcile_spec.spl`
+(2/2 under the seed) — a 2-arg call to a 3-param callee emits the explicit
+`(i64, i64)` signature; a 3-arg call to the same callee stays a bare call. No
+regression in the existing LLVM backend specs.
+
+### The Rust seed is intentionally NOT patched
+
+Per project rule ("fix `.spl` not the Rust seed"; the seed is bootstrap-only) and
+explicit direction, the Rust seed's inkwell backend
+(`src/compiler_rust/.../codegen/llvm/functions.rs`, the `mcall_direct` site) is
+left as-is. Its bug is a SEPARATE instance rooted in the inkwell-specific
+`implicit_local_param_slots` param inflation, which the pure-Simple backend does
+not replicate. The fix lands in the real compiler and takes full effect once
+compiled into the deployed binary (a later bootstrap step; the seed's own
+`--backend llvm` inkwell path can be avoided by routing through the llc/text
+path). If a low-level shim is ever needed it belongs in the C runtime, not the
+Rust seed.
+
 ## Context: in-guest RUN is otherwise REACHABLE
 
 This bug does NOT block a plain in-guest run: `/usr/bin/simple --version` runs

@@ -3,7 +3,7 @@ use compiler.backend.backend.mir_to_llvm.*
 # MIR to LLVM IR Translation
 #
 # MirToLlvm class that translates MIR to LLVM IR.
-# Uses the canonical MirToLlvm class layout for shared instruction dispatch.
+# Implements MirTextCodegen trait for shared instruction dispatch.
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirInst}
@@ -14,6 +14,7 @@ use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.llvm_type_mapper.LlvmTypeMapper
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build}
+use compiler.backend.common.mir_text_codegen.MirTextCodegen
 
 extern fn rt_env_get(key: text) -> text
 
@@ -79,7 +80,7 @@ fn llvm_module_is_native_entry(module_name: text) -> bool:
 # MIR to LLVM IR Translation
 # ============================================================================
 
-impl MirToLlvm:
+impl MirTextCodegen for MirToLlvm:
 
     # === Required: top-level translation ===
 
@@ -134,10 +135,7 @@ impl MirToLlvm:
                 print "[llvm-translate] function-done"
                 bootstrap_fni = bootstrap_fni + 1
         else:
-            val functions = module.functions.values()
-            var signature_i = 0
-            while signature_i < functions.len():
-                val fn_ = functions[signature_i]
+            for fn_ in module.functions.values():
                 val body = MirBody.from_function(llvm_bootstrap_ssa_function(fn_))
                 val fn_name = self.llvm_function_symbol_name(fn_.name)
                 val ret_ty = self.llvm_type_text(body.return_ty)
@@ -145,14 +143,10 @@ impl MirToLlvm:
                 self.remember_function_return_type(fn_name, ret_ty)
                 self.remember_function_param_types_from_signature(fn_.name, fn_.signature)
                 self.remember_function_param_types_from_signature(fn_name, fn_.signature)
-                signature_i = signature_i + 1
-            var function_i = 0
-            while function_i < functions.len():
-                val fn_ = functions[function_i]
+            for fn_ in module.functions.values():
                 val body = MirBody.from_function(llvm_bootstrap_ssa_function(fn_))
                 val fn_name = self.llvm_function_symbol_name(fn_.name)
                 self.translate_function(fn_name, body)
-                function_i = function_i + 1
 
         if self.unknown_func_decls.len() > 0:
             self.builder.emit("")
@@ -402,7 +396,7 @@ impl MirToLlvm:
             case SimdHminF32x4(dest, a): self.translate_simd_horizontal(dest, a, "hmin_f32x4")
             case DebugValue(_, _): ()
             case Nop: ()
-            case _: ()
+            case _: self.translate_unsupported(inst)
         self.mark_instruction_dest_defined(inst)
 
     me mark_instruction_dest_defined(inst: MirInst):
@@ -599,14 +593,6 @@ impl MirToLlvm:
                 val str_len = escaped_string_byte_len(v) + 1
                 val nit = self.native_int()
                 self.mark_ptr_local(dest_id)
-                # mark_ptr_local only corrects local_types[dest_id]; value_types
-                # is keyed by the SSA register text and is what value_as_type()
-                # consults for later Store/call-arg conversions. Without this,
-                # a stale "i64" guess (from the up-front local_ty probe above,
-                # which runs before we know this is a Str const) makes
-                # value_as_type emit a bogus `inttoptr i64 %lN to ptr` on a
-                # value LLVM already knows is ptr-typed, which llc rejects.
-                self.value_types[dest_name] = "ptr"
                 self.builder.emit("  {dest_name} = getelementptr inbounds [{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0  ; string const")
             case Zero:
                 if is_float_type(llvm_ty):
@@ -695,23 +681,6 @@ impl MirToLlvm:
             self.builder.emit_alloca(tmp, ty)
             self.builder.emit_store(ty, src_name, tmp)
             self.builder.emit_load(dest_name, ty, tmp)
-
-    me emit_text_ordering_cmp(left_raw: text, right_raw: text) -> text:
-        """Task #178 (text3 lane): emit a call to rt_text_cmp_any(left, right)
-        for a `<`/`<=`/`>`/`>=` comparison whose operands are both `ptr`-typed
-        (text). Returns a strcmp-style signed i64 SSA value; the caller
-        compares it against 0 with the requested integer predicate. Used
-        instead of a raw `icmp ptr` (which compares memory ADDRESSES, not
-        string content -- see translate_binop's Lt/Le/Gt/Ge cases)."""
-        val nit = self.native_int()
-        val cmp_res = self.builder.fresh_local()
-        # Manually-emitted call (not via emit_call/MirOperand), so it never
-        # passes through whatever records a symbol into unknown_func_decls --
-        # without this, no `declare` line is emitted for rt_text_cmp_any and
-        # llc rejects the call as referencing an undefined value.
-        self.unknown_func_decls["rt_text_cmp_any"] = true
-        self.builder.emit("  {cmp_res} = call {nit} @rt_text_cmp_any(ptr {left_raw}, ptr {right_raw})")
-        cmp_res
 
     me translate_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
         """Translate binary operation. Uses nsw for signed int arithmetic."""
@@ -807,44 +776,28 @@ impl MirToLlvm:
                 self.emit_comparison(dest_name, ty, ne_pred, ne_cmp_ty, ne_left, ne_right)
             case Lt:
                 val lt_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
-                if lt_cmp_ty == "ptr":
-                    val lt_str_cmp = self.emit_text_ordering_cmp(left_raw, right_raw)
-                    self.emit_comparison(dest_name, ty, "slt", self.native_int(), lt_str_cmp, "0")
-                else:
-                    val lt_pred = if is_float_type(lt_cmp_ty): "olt" else: "slt"
-                    val lt_left = self.value_as_type(left_raw, self.get_operand_type(left), lt_cmp_ty)
-                    val lt_right = self.value_as_type(right_raw, self.get_operand_type(right), lt_cmp_ty)
-                    self.emit_comparison(dest_name, ty, lt_pred, lt_cmp_ty, lt_left, lt_right)
+                val lt_pred = if is_float_type(lt_cmp_ty): "olt" else: "slt"
+                val lt_left = self.value_as_type(left_raw, self.get_operand_type(left), lt_cmp_ty)
+                val lt_right = self.value_as_type(right_raw, self.get_operand_type(right), lt_cmp_ty)
+                self.emit_comparison(dest_name, ty, lt_pred, lt_cmp_ty, lt_left, lt_right)
             case Le:
                 val le_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
-                if le_cmp_ty == "ptr":
-                    val le_str_cmp = self.emit_text_ordering_cmp(left_raw, right_raw)
-                    self.emit_comparison(dest_name, ty, "sle", self.native_int(), le_str_cmp, "0")
-                else:
-                    val le_pred = if is_float_type(le_cmp_ty): "ole" else: "sle"
-                    val le_left = self.value_as_type(left_raw, self.get_operand_type(left), le_cmp_ty)
-                    val le_right = self.value_as_type(right_raw, self.get_operand_type(right), le_cmp_ty)
-                    self.emit_comparison(dest_name, ty, le_pred, le_cmp_ty, le_left, le_right)
+                val le_pred = if is_float_type(le_cmp_ty): "ole" else: "sle"
+                val le_left = self.value_as_type(left_raw, self.get_operand_type(left), le_cmp_ty)
+                val le_right = self.value_as_type(right_raw, self.get_operand_type(right), le_cmp_ty)
+                self.emit_comparison(dest_name, ty, le_pred, le_cmp_ty, le_left, le_right)
             case Gt:
                 val gt_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
-                if gt_cmp_ty == "ptr":
-                    val gt_str_cmp = self.emit_text_ordering_cmp(left_raw, right_raw)
-                    self.emit_comparison(dest_name, ty, "sgt", self.native_int(), gt_str_cmp, "0")
-                else:
-                    val gt_pred = if is_float_type(gt_cmp_ty): "ogt" else: "sgt"
-                    val gt_left = self.value_as_type(left_raw, self.get_operand_type(left), gt_cmp_ty)
-                    val gt_right = self.value_as_type(right_raw, self.get_operand_type(right), gt_cmp_ty)
-                    self.emit_comparison(dest_name, ty, gt_pred, gt_cmp_ty, gt_left, gt_right)
+                val gt_pred = if is_float_type(gt_cmp_ty): "ogt" else: "sgt"
+                val gt_left = self.value_as_type(left_raw, self.get_operand_type(left), gt_cmp_ty)
+                val gt_right = self.value_as_type(right_raw, self.get_operand_type(right), gt_cmp_ty)
+                self.emit_comparison(dest_name, ty, gt_pred, gt_cmp_ty, gt_left, gt_right)
             case Ge:
                 val ge_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
-                if ge_cmp_ty == "ptr":
-                    val ge_str_cmp = self.emit_text_ordering_cmp(left_raw, right_raw)
-                    self.emit_comparison(dest_name, ty, "sge", self.native_int(), ge_str_cmp, "0")
-                else:
-                    val ge_pred = if is_float_type(ge_cmp_ty): "oge" else: "sge"
-                    val ge_left = self.value_as_type(left_raw, self.get_operand_type(left), ge_cmp_ty)
-                    val ge_right = self.value_as_type(right_raw, self.get_operand_type(right), ge_cmp_ty)
-                    self.emit_comparison(dest_name, ty, ge_pred, ge_cmp_ty, ge_left, ge_right)
+                val ge_pred = if is_float_type(ge_cmp_ty): "oge" else: "sge"
+                val ge_left = self.value_as_type(left_raw, self.get_operand_type(left), ge_cmp_ty)
+                val ge_right = self.value_as_type(right_raw, self.get_operand_type(right), ge_cmp_ty)
+                self.emit_comparison(dest_name, ty, ge_pred, ge_cmp_ty, ge_left, ge_right)
             case MatMul:
                 self.emit_unsupported_panic("LLVM backend does not support MatMul lowering")
             case BroadcastAdd:
@@ -918,6 +871,7 @@ impl MirToLlvm:
         var call_func_name = if bare_name_for_call == "get_args" or bare_name_for_call == "get_cli_args": "@rt_get_args" elif bare_name_for_call == "env_get": "@rt_env_get" elif bare_name_for_call == "eprint": "@rt_eprint" else: func_name
         call_func_name = self.normalize_call_callee(call_func_name)
         var arg_parts: [text] = []
+        var arg_tys: [text] = []
         var arg_i = 0
         while arg_i < args.len():
             val arg = args[arg_i]
@@ -939,8 +893,22 @@ impl MirToLlvm:
             elif arg_val == "0":
                 arg_val = self.ret_value_for_type(arg_ty, "0")
             arg_parts = arg_parts.push("{arg_ty} {arg_val}")
+            arg_tys = arg_tys.push(arg_ty)
             arg_i = arg_i + 1
         val args_str = arg_parts.join(", ")
+        # Reconcile arg count with the callee's declared parameter count. If a
+        # method/short-form call reaches the backend with an argument count that
+        # differs from the callee's `declare`d params, a bare `call @f(args)` is
+        # rejected by llc ("Incorrect number of arguments passed to called
+        # function"). Emitting an EXPLICIT function-type signature —
+        # `call RET (argtys) @f(args)` — keeps the call well-formed regardless
+        # (the callee is treated as a typed pointer): the IR-text equivalent of
+        # the seed backend's indirect-call reconciliation. Only engages on a
+        # KNOWN mismatch, so every matching call is emitted exactly as before.
+        var call_sig = ""
+        val declared_param_count = self.lookup_function_param_count(call_func_name)
+        if declared_param_count >= 0 and declared_param_count != args.len():
+            call_sig = "({arg_tys.join(\", \")}) "
         match dest_name:
             Some(name):
                 var ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
@@ -968,10 +936,10 @@ impl MirToLlvm:
                         self.bool_locals[dest_id] = true
                 ret_ty = self.valid_llvm_type(ret_ty)
                 self.value_types[name] = ret_ty
-                self.builder.emit("  {name} = call {ret_ty} {call_func_name}({args_str})")
+                self.builder.emit("  {name} = call {ret_ty} {call_sig}{call_func_name}({args_str})")
             nil:
                 val ret_ty = "void"
-                self.builder.emit("  call {ret_ty} {call_func_name}({args_str})")
+                self.builder.emit("  call {ret_ty} {call_sig}{call_func_name}({args_str})")
 
     # === Required: helpers ===
 
@@ -1123,6 +1091,22 @@ impl MirToLlvm:
                 return bare_param_tys[index]
             return ""
         ""
+
+    fn lookup_function_param_count(func_name: text) -> i64:
+        """Declared parameter count for `func_name`, or -1 when unknown (extern,
+        indirect callee, or a signature not yet remembered). Mirrors
+        lookup_function_param_type's name resolution: direct key first, then the
+        bare `@`-stripped key."""
+        val direct = self.function_param_types.get(func_name)
+        if direct.?:
+            return direct.unwrap().len()
+        if not func_name.starts_with("@"):
+            return -1
+        val bare = func_name[1:]
+        val bare_hit = self.function_param_types.get(bare)
+        if bare_hit.?:
+            return bare_hit.unwrap().len()
+        -1
 
     me mark_ptr_local(id: i64):
         self.local_types[id] = "ptr"
