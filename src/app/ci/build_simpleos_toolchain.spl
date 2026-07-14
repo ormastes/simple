@@ -233,6 +233,9 @@ fn verify_artifact(path: text, triple: text, want_base: text) -> (text, text):
     val band_lo = hex_to_dec(band_lo_h)
     val band_hi = hex_to_dec(band_hi_h)
     var first_load = ""
+    var first_load_vaddr: i64 = -1
+    var first_load_memsz: i64 = -1
+    var first_load_memsz_h = ""
     var seen_load = false
     for line in lout.split("\n"):
         val toks = split_ws(line)
@@ -240,10 +243,13 @@ fn verify_artifact(path: text, triple: text, want_base: text) -> (text, text):
             seen_load = true
             val vaddr_h = toks[2]
             val memsz_h = toks[5]
-            if first_load == "":
-                first_load = vaddr_h
             val vaddr = hex_to_dec(vaddr_h)
             val memsz = hex_to_dec(memsz_h)
+            if first_load == "":
+                first_load = vaddr_h
+                first_load_vaddr = vaddr
+                first_load_memsz = memsz
+                first_load_memsz_h = memsz_h
             if vaddr < 0 or memsz < 0:
                 return ("unparseable PT_LOAD line: " + line.trim(), first_load)
             if (band_hi > band_lo and
@@ -252,6 +258,15 @@ fn verify_artifact(path: text, triple: text, want_base: text) -> (text, text):
                         " overlaps kernel band [" + band_lo_h + "," + band_hi_h + ")", first_load)
     if not seen_load:
         return ("no PT_LOAD segments found", "")
+    # Entry point must be a mapped executable address inside the first PT_LOAD
+    # segment (which begins at the link base). This allows a legitimately
+    # offset _start (riscv64) while still rejecting an entry that points outside
+    # the loaded image.
+    val egot = hex_to_dec(entry_h)
+    if (egot >= 0 and first_load_vaddr >= 0 and first_load_memsz >= 0 and
+        (egot < first_load_vaddr or egot >= first_load_vaddr + first_load_memsz)):
+        return ("entry point " + entry_h + " outside first PT_LOAD segment [" +
+                first_load + ", +" + first_load_memsz_h + ") (readelf)", first_load)
     if want_base != "":
         val want = hex_to_dec(want_base)
         val got = hex_to_dec(first_load)

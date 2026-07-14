@@ -91,7 +91,14 @@ now matches the oracle on every sanctioned-mutation row.
   unsanctioned mutation "work". See "Documented, out of scope" below.
 - multi-construct test (class + struct + me methods + mut param + plain
   param + loop in one binary) — all three observables correct.
-- Full native smoke matrix: MATRIX_PLACEHOLDER
+- Full native smoke matrix (`sh scripts/check/native-smoke-matrix.shs`):
+  **total=15 pass=14 fail=1 xfail=0 xpass=0 codegen_fallback_hits=0**; the
+  only FAIL is `option_nil_check` (the pre-existing allowed failure) —
+  identical to the pre-fix baseline run of the same matrix in this worktree,
+  including the struct-value-semantics cases (`struct_field` PASS 71/71).
+- Read-only struct `fn` method (`get_x()` on a copied receiver) still
+  returns the right value (7) — copy path for non-`me` struct methods
+  unchanged.
 
 ## Documented, out of scope (from the probe's bonus list)
 

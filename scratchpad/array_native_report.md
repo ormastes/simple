@@ -87,11 +87,11 @@ literal-constant-folding-specific, it is the push lowering itself.
 
 - All 7 characterization cases + the multi-construct case rebuilt and rerun after the fix;
   every native output now matches the oracle byte-for-byte (see table).
-- `sh scripts/check/native-smoke-matrix.shs` run against the fixed worktree — see companion
-  log `scratchpad/smoke_matrix_after_fix.log` for the full PASS/FAIL/XFAIL tally (machine was
-  under heavy concurrent load from unrelated parallel agent sessions during this run, which
-  materially slowed but did not change the per-case pass/fail outcome of the array-related
-  cases: `for_in_array` and `array_index_rw` both PASS).
+- `sh scripts/check/native-smoke-matrix.shs` against the fixed worktree:
+  **total=15 pass=14 fail=1 xfail=0 xpass=0 codegen_fallback_hits=0** — the single FAIL is
+  `option_nil_check` (rc 1 vs want 7), the known pre-existing baseline failure the task
+  explicitly allows. `for_in_array` (rc 15/15) and `array_index_rw` (rc 71/71) both PASS —
+  no regression. Full log copied to `scratchpad/smoke_matrix_after_fix.log`.
 
 ## Deliverables
 
