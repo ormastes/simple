@@ -5,8 +5,6 @@ board hardware, compiling a C file to an object it writes back to disk, retrieva
 over SSH. QEMU is the dev harness; the board is the requirement. No design may depend
 on a QEMU-only mechanism.
 
-<<<<<<< Conflict 1 of 2
-+++++++ Contents of side #1
 **Status (2026-07-13, corrected):** clang compiles `/hello.c`→`/hello.o` over real OpenSSH
 (Inc 1/2) and the object is retrieved BYTE-EXACT via `ssh root@host getfile /hello.o` (Inc 3,
 `cd0418ee39cb`) — sha256 matches on-disk `/HELLO.O`, host-links + runs == exit 7. **This is
@@ -58,17 +56,6 @@ NVMe compile → P3 real NIC driver [the HIGH gap: only virtio-net exists] → P
 `doc/03_plan/os/clang_over_ssh_2e_design.md`.
 
 ✅ **PHASE 1 DONE.** clang runs in ring-3 and COMPILES a C file:
-%%%%%%% Changes from base to side #2
--**Status (2026-07-12):** ✅ **FULL 2e COMPLETE.** All software increments done: clang compiles
--`/hello.c`→`/hello.o` over real OpenSSH (Inc 1/2) and the object is retrieved BYTE-EXACT over
--SSH via `ssh root@host getfile /hello.o` (Inc 3, `cd0418ee39cb`) — sha256 matches on-disk
--`/HELLO.O`, host-links + runs == exit 7. Remaining is physical-hardware bring-up on the actual
--mini-PC (NVMe/serial/NIC provable only there). Details below and in
--`doc/03_plan/os/clang_over_ssh_2e_design.md`.
--
--✅ **PHASE 1 DONE.** clang runs in ring-3 and COMPILES a C file:
-+**Status (2026-07-12):** ✅ **PHASE 1 DONE.** clang runs in ring-3 and COMPILES a C file:
->>>>>>> Conflict 1 of 2 ends
 `clang -cc1 -emit-obj -o /hello.o /hello.c` streams 124 MB clang → ring-3 → reads `/hello.c`
 (28 B off NVMe) → serves `/dev/urandom` → writes a 712-byte `/hello.o` → exit(0). The object
 is byte-valid: base64-dumped at exit, decodes to ELF64 `ET_REL`/`EM_X86_64` with a `main`
@@ -173,12 +160,35 @@ image fresh for the compile pass. Next: Phase 2 (board port).
 
 ## Execution order
 
-<<<<<<< Conflict 2 of 2
-+++++++ Contents of side #1
 1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a ✅ (.o on real NVMe)  →  2b ✅ (board-safe exit)  →  2c ✅ (UEFI boot)  →  2d ✅ (robustness)  →  2e ✅ (compile + byte-exact retrieve over SSH, QEMU `-kernel`)  →  2f ✅ (clang kernel boots under OVMF — the board-proxy capstone; payload/mmap relocated clear of the 128 MB kernel `.bss` band, commit `7cf0b6aec3a`)  →  physical-board bring-up. All software done; only physical-hardware bring-up on the actual mini-PC remains.
-%%%%%%% Changes from base to side #2
--1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a ✅ (.o on real NVMe)  →  2b ✅ (board-safe exit)  →  2c ✅ (UEFI boot)  →  2d ✅ (robustness)  →  2e ✅ (compile + byte-exact retrieve over SSH). ALL SOFTWARE DONE; physical-board bring-up remains.
-+1a → 1b (loop) → 1c → 1d  (Phase 1 done: valid `.o`)  →  2a ✅ (.o on real NVMe)  →  2b ✅ (board-safe exit)  →  2c ✅ (UEFI boot)  →  2d ✅ (robustness)  →  2e.
->>>>>>> Conflict 2 of 2 ends
 Never start Phase 2 before 1d passes. Small model + guide per step; higher-model review +
 the host-link-and-run / gate verification owned by the coordinator.
+
+## Simple compiler/loader on SimpleOS — 3-arch status (2026-07-14)
+
+The parallel goal ("make the *Simple* compiler/loader/interpreter run on SimpleOS
+on board") is proven for **cross-build + boot + FS-exec staging** on all three
+target arches; only the in-guest *run* stays walled.
+
+| Arch | simpleos target | Boot proxy | Result |
+|------|-----------------|-----------|--------|
+| x86_64 | `x86_64-unknown-simpleos` | real OVMF pflash → GRUB-EFI → multiboot (no `-kernel`) | boots to sshd accept loop; OCap security symbols linked into kernel; boot unaffected |
+| aarch64 | `aarch64-unknown-simpleos` | QEMU virt EL1 (`-kernel`; **no EFI-stub yet**) | loader/FS-exec gate PASS (`ARM64_SIMPLE_TOOL_GATE_PASS`) |
+| riscv64 | `riscv64-unknown-simpleos` | real OpenSBI v1.3 (S-mode payload) | full ladder `SIMPLEOS_RISCV_SMF_FS_PASS` |
+| rv32 | (riscv32) | direct M-mode | PASS |
+
+- **Compiler is a registered target OS.** `TargetOS::SimpleOS = 5` sits beside
+  `Linux/Windows/MacOS`; triples resolve; the CI builder
+  (`scripts/ci/build-simpleos-toolchain.shs`) produces a per-arch
+  `bin/release/<arch>-unknown-simpleos/simple` (4 MB static EXEC) that passes a
+  fail-closed `readelf` gate (static, correct `EM_*`, entry inside first PT_LOAD
+  == link base, clears the kernel `.bss` band). NOTE: this is a **separate,
+  opt-in** step — a plain `bin/simple build` produces only the host toolchain.
+- **In-guest RUN is the one remaining wall.** The kernel boots and stages the
+  Simple toolchain ELF off FAT32, but executing it in U-mode is blocked by the
+  deployed-compiler `env_set` miscompile (SEGV on every `native-build`, see
+  `doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`)
+  and the #99 seed-cranelift enum-payload miscompile. Both need the self-hosted
+  redeploy; kernels here were built with `src/compiler_rust/target/bootstrap/simple`.
+- Follow-up bug docs: `aarch64_real_firmware_boot_gap_and_seed_defects_2026-07-14.md`
+  (EFI-stub + 2 arm64 defects), `smf_writer_kernel_trailer_layout_skew.md`.

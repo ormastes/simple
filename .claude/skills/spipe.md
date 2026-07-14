@@ -100,6 +100,17 @@ Require a QEMU or physical-board transcript that runs `/usr/bin/simple
 filesystem. For physical-board claims, also record board identity,
 download/boot path, and serial or SSH transcript; otherwise classify the lane as
 QEMU-only or source-present.
+Ground truth (2026-07-14): cross-build + boot + FS-exec *staging* of the
+target-native Simple compiler is proven on all three simpleos arches
+(`bin/release/<arch>-unknown-simpleos/simple`, 4 MB static EXEC, fail-closed
+`readelf` gate). In-guest *execution* (`/usr/bin/simple --version` + hello) is
+NOT yet reachable — blocked on the deployed-compiler `env_set` SEGV
+(`doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`)
+and the #99 seed-cranelift enum miscompile. So: build the payload with
+`src/compiler_rust/target/bootstrap/simple` (the deployed `bin/simple` SEGVs on
+every `native-build`), and classify a compiler-in-filesystem lane as
+staging-proven (not in-guest-run) until the self-hosted redeploy lands. Do NOT
+mark such a lane PASS on staging alone.
 Starvation, fairness, race-condition, scheduler, channel, lock, or
 resource-lifecycle claims require a concurrency/resource model gate or an
 explicit blocker; a single interleaving test is not formal evidence.
@@ -305,48 +316,6 @@ For GUI/web font work, assert semantic `DrawIrComposition` text/style before
 backend/readback evidence. When vector text is enabled, `FontRenderBatch` is
 transient Engine2D-executor material, not WebRender IR or Draw IR. Reject evidence built on an app-private
 font draw path or on Engine3D HUD/world as a GUI/web/2D shortcut.
-
-### Shared multilingual font evidence
-
-Use `doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md` as the authority.
-Pin the CLDR top ten plus rank-11 cutoff witness, exactly ten product
-categories, and every candidate's immutable revision, license/RFN, hash, size,
-embedded identity, tables, and default axes. Keep the 10x10 matrix sparse and
-promote a cell only through exact-face shaping/corpus evidence.
-
-Reuse `FontRenderer`, transient `FontRenderBatch`, and the common atlas. WebIR
-remains semantic/layout state; Web, GUI, and WM emit `DrawIrComposition`, and
-Engine2D alone materializes its text. Keep Engine3D HUD/world separate. Apply
-the GPU and SimpleOS proof discriminators under `GPU-offload and effect
-discriminators` below; do not duplicate or weaken them here.
-Producer-resolved shaping may cross Draw IR only as handle-free glyph IDs,
-positions, and logical clusters, and SDN round-trip must preserve them exactly.
-`font-shaping=selected-pure-simple` without a valid payload fails closed;
-atlases, live face handles, caches, and backend resources never enter Draw IR.
-For pixel evidence, exercise a nonzero bearing or GPOS offset. Shaped positions
-are +Y-down baseline pens, and quad top-left is
-`(pen_x + bearing_x, ascent + pen_y - bearing_y - height)` after negating the
-OpenType +Y-up offset at the shaper boundary.
-
-Runtime configuration evidence uses one text-layout-owned `FontRenderConfig`;
-WebIR, Draw IR, apps, and backends do not define sibling policy types. Vary and
-assert family/category/language/script, size, weight/style, hinting,
-antialiasing, atlas policy, execution target, and policy through bitmap,
-selected-vector, shaped, Engine2D, and Engine3D paths. `Suggested` tries its
-named target first, then the remaining canonical GPU order, then CPU;
-`Preferred` tries its named target then CPU; `Required` tries only its named
-target. Unsupported modes and CTM reject before
-cache generation, telemetry, upload, or backend mutation. `Suggested(auto)`
-uses the engine's executable font-adapter order; Preferred/Required with
-`auto` and unknown targets reject before mutation. Batch evidence carries
-config identity, target, and policy; the config object itself never crosses
-WebIR or Draw IR.
-
-Freeze these scenario steps: `Load the pinned multilingual font manifest`,
-`Accept exact-face-bound simple-script shaping`, `Prepare one shared font batch
-for 2D and 3D`, `Emit the selected font composite program and plan compilation`,
-and `Prove native submission and device readback`. Lower-model sidecars may own
-bounded lanes, but a higher-capability reviewer owns manual quality and done.
 
 For RenderDoc evidence, use the shared helper interface instead of spelling
 `renderdoccmd` directly in each spec or check script:
@@ -584,10 +553,6 @@ observe a pass:
   readback against an absolute CPU oracle. Emitted source, environment payload,
   upload alone, software backend names, simulation, or equal checksums are not
   native proof. Record unavailable hardware as `unavailable`; never promote it.
-  Vulkan promotion additionally requires an accelerated `discrete`, `integrated`,
-  or `virtual` device, stable selected device/driver identity, a real fence wait
-  and destroy, and surface poisoning when completion becomes unknown. CPU/other
-  devices and unfenced submission remain unpromoted.
   Before native promotion, the exact Pure Simple shaping/corpus gate must accept
   the face for the language/script; a codepoint raster/layout witness alone is
   diagnostic and leaves the matrix cell `unavailable`.
@@ -596,9 +561,7 @@ observe a pass:
   the resolved status is `native` or `fallback`.
   Supplementary-plane/emoji claims must exercise a real format-12 cmap witness
   (currently `U+1F600`) and prove the selected run face owns the returned glyph
-  ID plus valid canonical `FontRenderBatch` material; parser-only lookup is not
-  fallback acceptance. Keep variation-selector, modifier, ZWJ, color, and
-  multi-codepoint emoji fail-closed unless separately proven.
+  ID; parser-only lookup is not fallback acceptance.
   Shaped-run rendering must fail closed unless the `OtFont` is explicitly bound
   to the same live runtime face generation, blob/runtime cmap glyph IDs agree
   for every codepoint, and cache/atlas identity includes face + generation +
@@ -608,30 +571,14 @@ observe a pass:
   Preserve absolute source index and cluster identity inside each shaped glyph
   before any reversal/reorder; language/script/direction and current advance/
   offset metadata must stay aligned with glyph order. Cmap parity is direct
-  material evidence only. Complex scripts and multi-codepoint emoji sequences
-  remain invalid while substitution/positioning completeness is false, except
-  that the exact Hindi `हिन्दी` `dev2` witness and the exact pinned Arabic
-  `العربية` / Urdu `اردو` lookup-vector cases are accepted. The
-  Arabic/Urdu path is witness-specific after Script/LangSys validation, not
-  general GSUB/GPOS, mark, BiDi, or positioning support. Other complex scripts,
-  sequences, and multi-codepoint emoji remain invalid.
+  material evidence only: complex scripts and multi-codepoint emoji sequences
+  remain invalid while substitution/positioning completeness is false.
   Engine3D neutral HUD/world acceptance is CPU compatibility evidence only:
   world text projects one anchor into a screen-space billboard. It does not
   prove native texture upload, depth/occlusion, pipeline draw, fence, or
   device-origin readback.
-  An optional Vulkan Engine3D claim must additionally bind logical pipeline and
-  texture IDs to exact native handles, the submitted command and completed/
-  destroyed fence to the exact color image and byte count, and device-only
-  readback to both an atlas-derived HUD bounds/count oracle and a four-frame
-  near/far depth oracle in both draw orders. Source wiring, SPIR-V validation,
-  or CPU parity alone remains unpromoted.
   Distinguish GPU atlas composition from CPU glyph rasterization and from direct
   GPU outline rasterization.
-  WM/GUI/Web/2D selected-font proof also requires one stable manifest identity
-  and identical ordered advances across Web layout and Draw IR paint; family
-  metadata or paint-only TTF selection is insufficient. SimpleOS additionally
-  requires the exact pinned asset in every applicable image builder plus guest
-  path/hash/glyph/framebuffer evidence, not a host path marker.
   The OpenCL adapter must additionally prove the versioned shared source,
   generation-keyed atlas upload with load/unload invalidation, checked dirty-row
   offsets after the initial full upload, full upload on reset/gap/invalid dirty
@@ -681,9 +628,7 @@ observe a pass:
   When font composition accompanies a generated optimization module, require a
   separate font artifact/compile plan, a distinct `_font_atlas` path, and the
   versioned font entry in exported-symbol evidence. Never concatenate WGSL
-  modules whose storage/uniform bindings overlap. Runtime promotion must load
-  that verified Simple-emitted artifact; handwritten PTX or independently
-  generated SPIR-V is not emitter provenance.
+  modules whose storage/uniform bindings overlap.
 
 ### GPU / drawing / event honest backend baseline (2026-07-06)
 
@@ -936,8 +881,6 @@ Normal bootstrap reuses the Rust seed and never runs cargo. The wrapper has a
 claiming the pure-Simple toolchain is healthy (see `.claude/rules/bootstrap.md`).
 See `doc/07_guide/runtime/process_kill_safety.md`.
 
-<<<<<<< Conflict 1 of 1
-+++++++ Contents of side #1
 ### Bootstrap gate uses the deployed `bin/release`, not the Rust seed
 
 `bin/simple build bootstrap` Stage-1 worker is the **deployed self-hosted**
@@ -989,40 +932,6 @@ PASS: a durable serial transcript with the full ladder — never a verbal claim
 (the 2e "FULL COMPLETE" mislabel was caught exactly this way). Physical-board
 phases: `doc/03_plan/os/simpleos/hw_qemu/clang_board_bringup_x86_64_uefi.md`.
 
-%%%%%%% Changes from base to side #2
-+### Bootstrap gate uses the deployed `bin/release`, not the Rust seed
-+
-+`bin/simple build bootstrap` Stage-1 worker is the **deployed self-hosted**
-+`bin/release/<triple>/simple` (it self-execs — `interpreter: bin/release/.../simple`),
-+NOT `target/release/simple` or `target/bootstrap/simple`. `SEED=`/`SIMPLE_SEED=`
-+redirect only the bootstrap *driver*, not the Stage-1 worker. Consequence: when a
-+new `rt_*` extern lands in `.spl` (e.g. `rt_lexer_source_set` in `lexer.spl`), the
-+worker's stale native-build extern allowlist rejects it (`unknown extern function:
-+rt_lexer_source_set`) even though both Rust seeds accept it — a **circular redeploy
-+wall**: `bin/release` can only be refreshed by a bootstrap that runs `bin/release`.
-+This is the known-hard whole-compiler redeploy (memory: "#99 whole-compiler
-+redeploy — do NOT race"). Unblock by refreshing
-+`bin/release/<triple>/simple` from a CURRENT compiler via the `cp` to `.new` + `mv`
-+pattern (direct `cp` hits "Text file busy" when in use), then re-run the gate. So a
-+central-compiler resolver change is only *verified* after this refresh — a
-+probe-green interpreter run is not the bootstrap gate.
-+
-+### SimpleOS board-proxy evidence: OVMF pflash, never `-kernel`
-+
-+For SimpleOS "board-runnable" claims, QEMU `-kernel` runs are NOT board
-+evidence — they bypass real firmware (the design ban: "no QEMU-only
-+mechanism"). The board-proxy gate is **OVMF pflash + GRUB-EFI**
-+(`scripts/os/scp_retrieve_over_ssh_uefi.shs` is the reference: boots the
-+128 MB-base kernel `linker_128mb.ld`, SSH → in-guest clang compile → `getfile`
-+byte-exact object → exit 7). Layout invariant to respect in any OS spec that
-+links or mmaps user memory: the OVMF kernel `.bss` band is
-+`[0x08000000, ~0x16400000)`; ring-3 payloads link at `0x40000000`, mmap base
-+`0x50000000` (`sysroot.shs` / `syscall.spl`). Evidence bar for any board-proxy
-+PASS: a durable serial transcript with the full ladder — never a verbal claim
-+(the 2e "FULL COMPLETE" mislabel was caught exactly this way). Physical-board
-+phases: `doc/03_plan/os/simpleos/hw_qemu/clang_board_bringup_x86_64_uefi.md`.
-+
->>>>>>> Conflict 1 of 1 ends
 For memory-perspective work (gc/nogc boundary, leak checks, alloc enforcement):
 the gc-boundary lint (`gc_boundary_crossing`) resolves alias shims via
 `GC_ALIAS_MANIFEST` — kept in sync in BOTH compilers

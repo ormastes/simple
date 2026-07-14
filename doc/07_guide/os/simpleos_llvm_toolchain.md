@@ -19,6 +19,26 @@ just not on the `PATH` and not under the name the disk-bake gate expects.
 The cross `clang-20` is a **host executable** (Linux ELF) that emits
 `x86_64-unknown-simpleos` code — a cross-compiler, not a guest-native binary.
 
+## Simple-native toolchain (distinct from clang)
+
+This guide covers the **clang/LLVM** cross-toolchain. There is a separate
+**Simple-native** toolchain: the Simple compiler itself cross-built *for*
+SimpleOS. `TargetOS::SimpleOS = 5` is a first-class target OS beside
+`Linux/Windows/MacOS`, with triples `x86_64-`, `aarch64-`, `riscv64-unknown-simpleos`.
+
+| What | Path | Notes |
+|------|------|-------|
+| Per-arch Simple compiler for SimpleOS | `bin/release/<arch>-unknown-simpleos/simple` | ~4 MB static EXEC, one per arch; built + boot-proven 2026-07-14 |
+| Builder (opt-in, NOT part of `bin/simple build`) | `scripts/ci/build-simpleos-toolchain.shs` → `src/app/ci/build_simpleos_toolchain.spl` | per-arch native-build → fail-closed `readelf` gate → stamp → install |
+
+A plain `bin/simple build` produces only the **host** toolchain
+(`bin/release/x86_64-unknown-linux-gnu/simple`); the SimpleOS artifacts require
+running the CI script explicitly. Boot/FS-exec staging is proven on all three
+arches (x86_64 OVMF, riscv64 OpenSBI, aarch64 EL1); in-guest *run* is blocked on
+the deployed-compiler `env_set` SEGV + #99 redeploy. Full 3-arch status:
+`doc/03_plan/os/in_guest_clang_selfhost_board_plan.md` (§ Simple compiler/loader
+on SimpleOS).
+
 ## Current status (2026-07-13): clang-over-SSH proven under OVMF — software goal DONE
 
 The full ladder is proven under **OVMF pflash (real UEFI firmware, no QEMU
@@ -117,10 +137,7 @@ yet provable**. Two tracked blockers:
    Run it with a proven self-hosted compiler, for example:
    `SIMPLE_BUILD_COMPILER=build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple sh scripts/os/build_clang_disk.shs`.
    The wrapper rejects Rust-seed provenance and requires exact `-c` output `2`
-   before starting the kernel build. Its final handoff pins the shared
-   `execute-artifact` profile and requires exact output
-   `hello-from-simpleos-clang` plus guest exit status 42; canonical Simple
-   version/interpreter profiles do not accept these overrides.
+   before starting the kernel build.
    **On desktop SimpleOS this static path
    is DEPRECATED — see the launch-policy section below.**
 
