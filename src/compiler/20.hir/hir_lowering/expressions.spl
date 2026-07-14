@@ -10,6 +10,8 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.statements.*
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.core.lexer_chars.{is_digit}
+use std.string_core.{char_code}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: Any) -> i64
@@ -19,6 +21,31 @@ fn hir_expr_env_get(key: text) -> text:
 
 fn hir_expr_kind_disc(k: ExprKind) -> i64:
     rt_enum_discriminant(k)
+
+fn is_tuple_positional_field(name: text) -> bool:
+    """True iff `name` is composed entirely of ASCII digits -- the parser's
+    encoding for `.0`, `.1`, ... positional tuple-field access (see the
+    `member_kind == 1` numeric-tuple-field branch in parser_expr.spl). A
+    real struct/named-tuple field name is always an identifier and can
+    never be spelled as a pure-digit string, so this test is unambiguous."""
+    if name.len() == 0:
+        return false
+    var i = 0
+    while i < name.len():
+        if not is_digit(name[i:i + 1]):
+            return false
+        i = i + 1
+    true
+
+fn parse_tuple_field_index(name: text) -> i64:
+    """Parse a digit-only field name (see `is_tuple_positional_field`) into
+    the positional index it denotes."""
+    var idx: i64 = 0
+    var i = 0
+    while i < name.len():
+        idx = idx * 10 + (char_code(name[i:i + 1]) - 48)
+        i = i + 1
+    idx
 
 fn is_interp_builtin_fn(name: text) -> bool:
     """Free-function builtins dispatched by NAME in the HIR interpreter
@@ -263,6 +290,51 @@ impl HirLowering:
                     val fld_base_t: Expr = base
                     val fld_name_t: text = field
                     val fld_lowered_base = self.lower_hir_expr(fld_base_t)
+                    # Numeric tuple positional access (`t.0`, `t.1`, ...):
+                    # route through HirExprKind.Index (rt_array_get at
+                    # runtime) instead of the generic struct-field path
+                    # below. Tuples are rt_arrays at runtime (see
+                    # lower_tuple_destructure in statements.spl) and
+                    # resolve_field_index (MIR function_lowering.spl) has no
+                    # notion of a tuple's positional layout -- left to fall
+                    # through to the struct-field path it silently defaults
+                    # the field index and native codegen emits a
+                    # struct-shaped GEP with the wrong (or a fixed) index,
+                    # which either reads the wrong element or crashes the
+                    # LLVM backend outright ("invalid getelementptr
+                    # indices" -- reproduced with `val t = (3, 5);
+                    # print(t.0 + t.1)` on the native `--entry` path before
+                    # this fix). Index codegen is already proven correct
+                    # for tuple values by the existing (non-literal-init)
+                    # tuple-destructure desugar, which binds a temp tuple
+                    # and reads elements via the same rt_array_get path.
+                    if is_tuple_positional_field(fld_name_t):
+                        val fld_tuple_idx = parse_tuple_field_index(fld_name_t)
+                        # Recover the element's real type from local_tuple_types
+                        # (see doc comment in types.spl) when the base is a
+                        # plain variable bound to a tracked tuple literal --
+                        # without this, a mixed-type tuple's non-i64 element
+                        # (e.g. text) reads back as raw i64 bits downstream
+                        # (MIR's Index case has no per-index element-type table
+                        # for MirTypeKind.Tuple and defaults to i64).
+                        var fld_tuple_elem_type: HirType? = nil
+                        var fld_tuple_base_sym: SymbolId? = nil
+                        match fld_lowered_base.kind:
+                            case HirExprKind.Var(fld_tb_sym):
+                                fld_tuple_base_sym = Some(fld_tb_sym)
+                            case HirExprKind.NamedVar(fld_tb_sym2, _):
+                                fld_tuple_base_sym = Some(fld_tb_sym2)
+                            case _: ()
+                        if val fld_tb_sym3 = fld_tuple_base_sym:
+                            if self.local_tuple_types.has(fld_tb_sym3.id):
+                                val fld_tuple_elem_types = self.local_tuple_types[fld_tb_sym3.id]
+                                if fld_tuple_idx >= 0 and fld_tuple_idx < fld_tuple_elem_types.len():
+                                    fld_tuple_elem_type = Some(fld_tuple_elem_types[fld_tuple_idx])
+                        return HirExpr(
+                            kind: HirExprKind.Index(fld_lowered_base, HirExpr(kind: HirExprKind.IntLit(fld_tuple_idx, nil), type_: nil, span: e.span)),
+                            type_: fld_tuple_elem_type,
+                            span: e.span
+                        )
                     # Nested-field-access support (native --entry path bug --
                     # see struct_field_types_by_name / local_struct_types doc
                     # comments in types.spl). Without this, `type_` stays nil

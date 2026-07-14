@@ -66,6 +66,19 @@ class HirLowering:
     # and MIR fall back to positional-order matching against the struct's
     # OWN declared field order to learn which arg feeds which field.
     struct_field_order_by_name: Dict<text, [text]>
+    # Tuple analogue of local_struct_types: local variable symbol id ->
+    # per-element declared/inferred HirType, populated only for the simple
+    # `val/var t = (lit0, lit1, ...)` binding shape (element types are
+    # inferred straight from each literal's own AAST kind -- IntLit/
+    # FloatLit/StringLit/BoolLit -- since there is no general inference pass
+    # on this path). Lets a later `t.0`/`t.1` positional field access or a
+    # non-literal tuple destructure (`val (a, b) = t`) recover each element's
+    # REAL type instead of defaulting to i64: without this, a tuple element
+    # read through a variable (as opposed to a fresh literal) always decoded
+    # as i64 downstream, silently printing garbage for any non-i64 element
+    # (e.g. a text field) of a mixed-type tuple -- see is_tuple_positional_field
+    # in expressions.spl and lower_tuple_destructure below.
+    local_tuple_types: Dict<i64, [HirType]>
 
 struct LoweringError:
     message: text
@@ -89,6 +102,7 @@ fn hirlowering_new() -> HirLowering:
     val empty_struct_field_types: Dict<text, Dict<text, HirType>> = {}
     val empty_local_struct_types: Dict<i64, text> = {}
     val empty_struct_field_order: Dict<text, [text]> = {}
+    val empty_local_tuple_types: Dict<i64, [HirType]> = {}
     HirLowering(
         symbols: SymbolTable.new(),
         errors: empty_errors,
@@ -104,7 +118,8 @@ fn hirlowering_new() -> HirLowering:
         lowered_traits: empty_traits,
         struct_field_types_by_name: empty_struct_field_types,
         local_struct_types: empty_local_struct_types,
-        struct_field_order_by_name: empty_struct_field_order
+        struct_field_order_by_name: empty_struct_field_order,
+        local_tuple_types: empty_local_tuple_types
     )
 
 fn hirlowering_for_module(filename: text, modules_by_name: Dict<text, Module>) -> HirLowering:

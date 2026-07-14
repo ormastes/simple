@@ -76,6 +76,42 @@ impl MirToLlvm:
                 self.value_types[dest_name] = "ptr"
                 self.builder.emit("  {dest_name} = getelementptr i8, ptr {agg}, {nit} 0  ; struct ptr")
                 return
+            case Tuple:
+                # Tuple value = pointer to N i64 words, IDENTICAL physical
+                # layout to Struct above (mirrored 1:1 -- deliberately
+                # duplicated rather than falling through to the generic
+                # aggregate path below). Falling through here resolves
+                # `valid_llvm_type(get_local_type(dest_id))` to plain "ptr"
+                # for a MirTypeKind.Tuple (no LlvmTypeMapper entry maps Tuple
+                # to a sized LLVM aggregate type), so the generic path below
+                # allocas a bare 8-byte `ptr` slot and then GEPs it with a
+                # 2-index STRUCT-style GEP (`getelementptr inbounds ptr, ptr
+                # %t0, i32 0, i32 {i}`) -- invalid on an opaque `ptr` type
+                # ("invalid getelementptr indices"), reproduced with a native
+                # `--entry` build of `val t = (3, 5); print(t.0 + t.1)`. The
+                # single-index native-int-word layout here is also what tuple
+                # readers already assume: the non-literal tuple-destructure
+                # desugar (lower_tuple_destructure, 20.hir/hir_lowering/
+                # statements.spl) and the `.0`/`.1` positional field-access
+                # fix (HirExprKind.Index routing in 20.hir/hir_lowering/
+                # expressions.spl) both read tuple elements via a single
+                # 8-byte-stride index off one pointer level, matching
+                # translate_get_field / the Index/array read path exactly.
+                val tup_nit = self.native_int()
+                val tup_n = operands.len()
+                val tup_agg = self.builder.fresh_local()
+                self.builder.emit_alloca(tup_agg, "[{tup_n} x {tup_nit}]")
+                for i in 0..tup_n:
+                    val tup_raw = self.translate_operand(operands[i])
+                    val tup_v = self.value_as_type(tup_raw, self.get_operand_type(operands[i]), tup_nit)
+                    val tup_fp = self.builder.fresh_local()
+                    self.builder.emit("  {tup_fp} = getelementptr inbounds {tup_nit}, ptr {tup_agg}, i32 {i}")
+                    self.builder.emit_store(tup_nit, tup_v, tup_fp)
+                self.mark_ptr_local(dest_id)
+                self.local_types[dest_id] = "ptr"
+                self.value_types[dest_name] = "ptr"
+                self.builder.emit("  {dest_name} = getelementptr i8, ptr {tup_agg}, {tup_nit} 0  ; tuple ptr")
+                return
             case _: ()
         val agg_ty = self.valid_llvm_type(self.get_local_type(dest_id))
         val agg_ptr = self.builder.fresh_local()

@@ -76,6 +76,36 @@ impl HirLowering:
                     case _: ()
             case _: ()
 
+    # Tuple analogue of try_register_local_struct_type (see local_tuple_types
+    # doc comment in types.spl). Only handles the simple `val/var t =
+    # (lit0, lit1, ...)` shape: element types are read straight off each
+    # literal element's own AST kind (there is no general inference pass on
+    # this path). A non-literal element (a call, a variable, ...) records nil
+    # for that slot -- callers fall back to the pre-existing untyped i64
+    # default, same as if this tracking did not exist (additive only).
+    me try_register_local_tuple_type(sym: SymbolId, init_expr: Expr):
+        match init_expr.kind:
+            case ExprKind.TupleLit(elements):
+                var elem_types: [HirType] = []
+                for elem in elements:
+                    val elem_hir_type = match elem.kind:
+                        case ExprKind.IntLit(_):
+                            Some(HirType(kind: HirTypeKind.Int(64, true), span: elem.span))
+                        case ExprKind.FloatLit(_):
+                            Some(HirType(kind: HirTypeKind.Float(64), span: elem.span))
+                        case ExprKind.StringLit(_, _):
+                            Some(HirType(kind: HirTypeKind.Str, span: elem.span))
+                        case ExprKind.BoolLit(_):
+                            Some(HirType(kind: HirTypeKind.Bool, span: elem.span))
+                        case _:
+                            nil
+                    if val known_elem_type = elem_hir_type:
+                        elem_types = elem_types.push(known_elem_type)
+                    else:
+                        elem_types = elem_types.push(HirType(kind: HirTypeKind.Int(64, true), span: elem.span))
+                self.local_tuple_types[sym.id] = elem_types
+            case _: ()
+
     fn lower_hir_assign_op(assign_op: AssignOp) -> HirAssignOp:
         match assign_op:
             case AssignOp.Add: HirAssignOp.Add
@@ -230,24 +260,42 @@ impl HirLowering:
     # keys local_map by symbol_id function-wide (no scope dealloc), so the
     # bindings stay visible to later statements. Literal initializers take
     # the per-element fast path in lower_hir_tuple_destructure_val/var above.
-    # NOTE(verify-later): element types are nil, so the bootstrap Index path
-    # defaults elements to text; genuinely-i64 elements (a shell exit code)
-    # are text-typed — bits are i64-repr so it compiles, but confirm integer
-    # uses once the redeploy builds.
+    # Element types: resolved from local_tuple_types (see types.spl doc
+    # comment) when `hir_init` is a plain variable bound to a tracked tuple
+    # literal (`val t = (1, "hi"); val (a, b) = t`); nil (i64 default,
+    # unchanged pre-existing behavior) otherwise -- e.g. a call result like
+    # `rt_process_run(...)`, which this lane cannot statically type. Without
+    # this, every element previously defaulted to i64 downstream, silently
+    # printing garbage for a mixed-type tuple's non-i64 elements (a text
+    # field read back as raw i64 bits).
     me lower_tuple_destructure(name: text, hir_init: HirExpr, is_mut: bool, span: Span) -> HirStmt:
         val inner = name.slice(1, name.len() - 1)
         val parts = inner.split(",")
         var stmts: [HirStmt] = []
         val tmp_sym = self.symbols.define("__tuple_destr", SymbolKind.Variable, nil, span, false, false, nil)
         stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(tmp_sym, nil, hir_init), span: span))
+        var td_elem_types: [HirType] = []
+        var td_base_sym: SymbolId? = nil
+        match hir_init.kind:
+            case HirExprKind.Var(td_sym):
+                td_base_sym = Some(td_sym)
+            case HirExprKind.NamedVar(td_sym2, _):
+                td_base_sym = Some(td_sym2)
+            case _: ()
+        if val td_bs = td_base_sym:
+            if self.local_tuple_types.has(td_bs.id):
+                td_elem_types = self.local_tuple_types[td_bs.id]
         var i = 0
         while i < parts.len():
             val pname = parts[i]
             if pname != "_":
+                var td_idx_type: HirType? = nil
+                if i < td_elem_types.len():
+                    td_idx_type = Some(td_elem_types[i])
                 val idx_expr = HirExpr(kind: HirExprKind.Index(
                     HirExpr(kind: HirExprKind.Var(tmp_sym), type_: nil, span: span),
                     HirExpr(kind: HirExprKind.IntLit(i, nil), type_: nil, span: span)
-                ), type_: nil, span: span)
+                ), type_: td_idx_type, span: span)
                 val psym = self.symbols.define(pname, SymbolKind.Variable, nil, span, false, is_mut, nil)
                 stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(psym, nil, idx_expr), span: span))
             i = i + 1
@@ -296,6 +344,7 @@ impl HirLowering:
             val v_hir_init = self.lower_hir_expr(v_init)
             val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_hir_type, s.span, false, false, nil)
             self.try_register_local_struct_type(v_symbol, v_init)
+            self.try_register_local_tuple_type(v_symbol, v_init)
             return HirStmt(kind: HirStmtKind.Let(v_symbol, v_hir_type, v_hir_init), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", nil, nil)):
             val vr_name = match stmt_kind_value:
@@ -324,6 +373,7 @@ impl HirLowering:
             val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_hir_type, s.span, false, true, nil)
             if val vr_init_present = vr_init:
                 self.try_register_local_struct_type(vr_symbol, vr_init_present)
+                self.try_register_local_tuple_type(vr_symbol, vr_init_present)
             return HirStmt(kind: HirStmtKind.Let(vr_symbol, vr_hir_type, vr_hir_init), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Return(nil)):
             val rt_val: Expr = rt_enum_payload(stmt_kind_value)
@@ -412,14 +462,54 @@ impl HirLowering:
             case StmtKind.For(var_, iter, body):
                 self.symbols.push_scope(ScopeKind.Loop)
                 self.loop_depth = self.loop_depth + 1
-                val symbol = self.symbols.define(var_, SymbolKind.Variable, nil, s.span, false, false, nil)
                 val hir_iter = self.lower_hir_expr(iter)
-                val hir_body = self.lower_hir_block(body)
+                # Tuple destructuring: `for (k, v) in pairs:` -- the parser
+                # (parse_for_stmt, G40) encodes the pattern as the joined
+                # string "(k,v)" in `var_`, mirroring the `val (a, b) = ...`
+                # convention. Without this desugar, `var_` was defined
+                # VERBATIM as a single symbol literally named "(k,v)" and the
+                # loop body's real `k`/`v` references were never bound at
+                # all -- "unresolved name: k" / "unresolved name: v" (loud
+                # HIR fatal, no binary; this replaces that with working
+                # bindings). Mirrors lower_tuple_destructure above: bind the
+                # raw per-iteration element to a fresh loop symbol, then
+                # prepend one `Let name = __elem[i]` per destructured name to
+                # the (already-lowered) loop body so they're in scope for
+                # every statement in it.
+                val for_is_tuple = var_.len() >= 2 and var_.slice(0, 1) == "(" and var_.slice(var_.len() - 1, var_.len()) == ")"
+                val hir_body_kind = if for_is_tuple:
+                    val for_inner = var_.slice(1, var_.len() - 1)
+                    val for_parts = for_inner.split(",")
+                    val for_elem_sym = self.symbols.define("__for_tuple_elem", SymbolKind.Variable, nil, s.span, false, false, nil)
+                    var for_prefix: [HirStmt] = []
+                    var for_pi = 0
+                    while for_pi < for_parts.len():
+                        val for_pname = for_parts[for_pi]
+                        if for_pname != "_":
+                            val for_idx_expr = HirExpr(kind: HirExprKind.Index(
+                                HirExpr(kind: HirExprKind.Var(for_elem_sym), type_: nil, span: s.span),
+                                HirExpr(kind: HirExprKind.IntLit(for_pi, nil), type_: nil, span: s.span)
+                            ), type_: nil, span: s.span)
+                            val for_psym = self.symbols.define(for_pname, SymbolKind.Variable, nil, s.span, false, false, nil)
+                            for_prefix = for_prefix.push(HirStmt(kind: HirStmtKind.Let(for_psym, nil, for_idx_expr), span: s.span))
+                        for_pi = for_pi + 1
+                    val for_hir_body_raw = self.lower_hir_block(body)
+                    val for_hir_body = HirBlock(
+                        stmts: for_prefix.concat(for_hir_body_raw.stmts),
+                        has: for_hir_body_raw.has,
+                        value: for_hir_body_raw.value,
+                        span: for_hir_body_raw.span
+                    )
+                    HirExprKind.For(for_elem_sym, hir_iter, for_hir_body, nil)
+                else:
+                    val symbol = self.symbols.define(var_, SymbolKind.Variable, nil, s.span, false, false, nil)
+                    val hir_body = self.lower_hir_block(body)
+                    HirExprKind.For(symbol, hir_iter, hir_body, nil)
                 self.loop_depth = self.loop_depth - 1
                 self.symbols.pop_scope()
                 # Desugar to loop
                 HirStmtKind.Expr(HirExpr(
-                    kind: HirExprKind.For(symbol, hir_iter, hir_body, nil),
+                    kind: hir_body_kind,
                     type_: nil,
                     span: s.span
                 ))
