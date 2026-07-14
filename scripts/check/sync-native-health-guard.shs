@@ -1,0 +1,108 @@
+#!/bin/sh
+# sync-native-health-guard — Prevent snapshot-commits from shipping broken compilers (#181).
+#
+# Run BEFORE pushing a snapshot commit from an hourly sync flow.
+# Detects compiler/lib changes and validates with a trivial native-build smoke test.
+#
+# Usage:
+#   sh scripts/check/sync-native-health-guard.shs [BASE..TIP]
+#   sh scripts/check/sync-native-health-guard.shs origin/main HEAD
+#   sh scripts/check/sync-native-health-guard.shs  (defaults to origin/main..HEAD)
+#
+# Exit codes:
+#   0  — GREEN (no compiler/lib delta, or delta + smoke PASS)
+#   1  — RED   (compiler/lib delta + smoke FAIL)
+#
+# Rationale: #181 postmortem (b60984e621f, b1efbf95bfe) — parallel session's half-finished
+# rt_lexer_source_set/slice migration was snapshot-committed+pushed, breaking all native builds
+# (error: "semantic: cannot cast array to i64"). This guard detects compiler/lib changes and
+# runs a smoke test (fn main(): print(41)) before allowing the push.
+
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+fail() {
+  echo "sync-native-health-guard_error: $*" >&2
+  exit 1
+}
+
+# Parse args: BASE and TIP
+BASE="${1:-origin/main}"
+TIP="${2:-HEAD}"
+
+# Step 1: Check if outgoing range touches src/compiler/ or src/lib/
+echo "sync-native-health-guard: checking delta ${BASE}..${TIP}"
+
+COMPILER_CHANGES=$(git diff --name-only "${BASE}..${TIP}" -- src/compiler src/lib 2>/dev/null | head -20)
+
+if [ -z "$COMPILER_CHANGES" ]; then
+  echo "sync-native-health-guard: no compiler delta, skip"
+  exit 0
+fi
+
+echo "sync-native-health-guard: compiler/lib delta detected:"
+echo "$COMPILER_CHANGES" | sed 's/^/  /'
+
+# Step 2: Create temp dir for smoke test
+SMOKE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sync-smoke.XXXXXX")
+trap 'rm -rf "$SMOKE_DIR"' EXIT HUP INT TERM
+
+SMOKE_PROG="$SMOKE_DIR/t.spl"
+SMOKE_BIN="$SMOKE_DIR/t_bin"
+SMOKE_LOG="$SMOKE_DIR/build.log"
+
+# Write trivial test program
+cat >"$SMOKE_PROG" <<'EOFPROG'
+fn main():
+  print(41)
+EOFPROG
+
+# Step 3: Run native-build with timeout
+echo "sync-native-health-guard: running smoke test (native-build)..."
+set +e
+timeout 300 env -u SIMPLE_BOOTSTRAP bin/simple native-build \
+  --entry "$SMOKE_PROG" \
+  -o "$SMOKE_BIN" \
+  --clean >"$SMOKE_LOG" 2>&1
+BUILD_RC=$?
+set -e
+
+# Step 4: Check build success
+if [ "$BUILD_RC" -ne 0 ]; then
+  echo "sync-native-health-guard_error: native-build failed (rc=${BUILD_RC})"
+  echo "Affected compiler/lib files:"
+  echo "$COMPILER_CHANGES" | head -20 | sed 's/^/  /'
+  echo ""
+  echo "Build log (tail):"
+  tail -30 "$SMOKE_LOG" | sed 's/^/  /'
+  fail "sync push BLOCKED: snapshot would ship a broken compiler (see #181 postmortem)"
+fi
+
+# Step 5: Check binary exists
+if [ ! -f "$SMOKE_BIN" ]; then
+  echo "sync-native-health-guard_error: binary not created"
+  fail "sync push BLOCKED: snapshot would ship a broken compiler (see #181 postmortem)"
+fi
+
+# Step 6: Run binary and check output
+set +e
+SMOKE_OUT=$("$SMOKE_BIN" 2>&1)
+SMOKE_RC=$?
+set -e
+
+if [ "$SMOKE_RC" -ne 0 ]; then
+  echo "sync-native-health-guard_error: binary failed (rc=${SMOKE_RC})"
+  fail "sync push BLOCKED: snapshot would ship a broken compiler (see #181 postmortem)"
+fi
+
+if [ "$SMOKE_OUT" != "41" ]; then
+  echo "sync-native-health-guard_error: wrong output (expected '41', got '${SMOKE_OUT}')"
+  fail "sync push BLOCKED: snapshot would ship a broken compiler (see #181 postmortem)"
+fi
+
+# All checks passed
+DELTA_COUNT=$(echo "$COMPILER_CHANGES" | wc -l)
+echo "sync-native-health-guard: PASS (delta=${DELTA_COUNT} files, smoke=41)"
+exit 0
