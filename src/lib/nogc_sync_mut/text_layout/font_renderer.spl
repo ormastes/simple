@@ -114,6 +114,34 @@ fn _resolved_font_metric_store(key: text, metrics: ResolvedFontMetrics):
     _resolved_font_metric_cursor = (_resolved_font_metric_cursor + 1) % RESOLVED_FONT_METRICS_CACHE_LIMIT
     _resolved_font_metric_lock.unlock(0)
 
+# Loaded-default-font cache keyed by resolved family. browser_default_for_family
+# does a real dlopen + TTF parse (the universal sans face is 17MB), so without
+# reuse every #text node reparses the whole font — quadratic for a real page and
+# the dominant web-render cost under the interpreter. Cached renderers are NEVER
+# clear_ttf()'d (see _resolve_font_metrics_with_language_config's guarded calls)
+# so the loaded face stays live for the next node of the same family.
+var _browser_default_font_families: [text] = []
+var _browser_default_font_renderers: [FontRenderer] = []
+val _browser_default_font_lock: Mutex = mutex_new(0)
+
+fn _browser_default_for_family_cached(family: text) -> (FontRenderer, bool):
+    _browser_default_font_lock.lock()
+    var index: i64 = 0
+    while index < _browser_default_font_families.len():
+        if _browser_default_font_families[index] == family:
+            val hit = _browser_default_font_renderers[index]
+            _browser_default_font_lock.unlock(0)
+            return (hit, true)
+        index = index + 1
+    _browser_default_font_lock.unlock(0)
+    val loaded = FontRenderer.browser_default_for_family(family)
+    if loaded.has_sffi_ttf():
+        _browser_default_font_lock.lock()
+        _browser_default_font_families.push(family)
+        _browser_default_font_renderers.push(loaded)
+        _browser_default_font_lock.unlock(0)
+    (loaded, false)
+
 val FONT_ATLAS_WIDTH: i32 = 1024
 val FONT_ATLAS_HEIGHT: i32 = 1024
 val _font_atlas_dependency_generation: AtomicI64 = atomic_i64_new(0)
@@ -1207,7 +1235,9 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
         _resolve_selected_shaped_glyph_run(selected_candidate.?, content, font_size, normalized_language)
     else:
         _resolved_font_empty_shaped()
-    var renderer = FontRenderer.browser_default_for_family(resolved_family)
+    val default_font = _browser_default_for_family_cached(resolved_family)
+    var renderer = default_font.0
+    val renderer_from_cache = default_font.1
     if not renderer.has_sffi_ttf():
         return ResolvedFontMetrics(valid: false, family: resolved_family, identity: "", advances: [], width: 0, line_height: 0, reason: "font-runtime-unavailable", glyph_run: draw_ir_empty_glyph_run_payload(), shaping_required: complex_script != 0)
     val identity = renderer.current_font_identity()
@@ -1219,7 +1249,8 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
         ""
     if cacheable:
         if val cached = _resolved_font_metric_cached(cache_key):
-            renderer.clear_ttf()
+            if not renderer_from_cache:
+                renderer.clear_ttf()
             return cached
     val advances = if shaped.valid: shaped.advances else: renderer.measure_text_advances(content, font_size)
     var width = 0
@@ -1231,7 +1262,8 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
     var line_height = renderer.horizontal_line_metric(font_size, 3)
     if line_height <= 0:
         line_height = font_size
-    renderer.clear_ttf()
+    if not renderer_from_cache:
+        renderer.clear_ttf()
     var character_count = 0
     for ch in content:
         character_count = character_count + 1
