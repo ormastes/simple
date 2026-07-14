@@ -18,6 +18,8 @@ use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult,
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
+
+extern fn rt_enum_discriminant(value: Any) -> i64
 use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts}
 use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
 use compiler.frontend.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, custom_primitive_bind_symbol, custom_primitive_is_name}
@@ -85,6 +87,20 @@ fn hir_module_is_bootstrap_entry(module_name: text) -> bool:
     hir_module_logical_name_from_path(entry_path) == hir_module_logical_name_from_path(module_name)
 
 impl HirLowering:
+    # Nested-field-access support (native --entry path bug, see
+    # struct_field_types_by_name doc comment in types.spl): record this
+    # struct's field NAME -> declared HirType, purely from the static
+    # declaration (`struct S: arr: [i64]`), independent of any inference.
+    # Used later by Field-expr lowering to give a chained/array/struct-typed
+    # field access its real MIR type instead of the untyped-path's i64
+    # default (which silently reads garbage for a non-i64 field, e.g. an
+    # array field indexed on the native path).
+    me register_struct_field_types(hir_struct: HirStruct):
+        var field_types: Dict<text, HirType> = {}
+        for f in hir_struct.fields:
+            field_types[f.name] = f.type_
+        self.struct_field_types_by_name[hir_struct.name] = field_types
+
     # Untyped-return inference (native --entry path) -- see the `ReturnScan`
     # doc comment in lowering_helpers.spl for the full rationale. Runs over
     # the raw parser AST (`Function.body`), NOT the HIR, because it has to
@@ -451,6 +467,41 @@ impl HirLowering:
             # SIMPLE_COMPILER_TRACE=1 ("class `Module` has no field named `path`").
             eprint("[hir-lower] lower_module:start module={module.name}")
         self.lowered_impl_functions = {}
+        # Pass -1: pre-scan struct field TYPES (name-keyed, from the raw
+        # pre-HIR declaration -- no symbol resolution needed) before ANY
+        # function body is lowered. Nested-field-access support (see
+        # struct_field_types_by_name doc comment in types.spl) needs this
+        # available while lowering `val s = S(...)higher up in a function
+        # body, but this module's main struct-lowering pass (which fully
+        # resolves each HirStruct, further down in lower_module) runs AFTER
+        # functions are lowered (see the `functions[fn_key] = hir_fn` loop
+        # below) -- too late for that Let-statement lowering to see it. This
+        # pre-scan is deliberately separate from (and superseded by) that
+        # later full pass; it exists purely so the registry is non-empty
+        # early, at whatever partial fidelity self.lower_type can manage
+        # before other symbols are registered.
+        # NOTE: struct field type ANNOTATIONS are unreliable on this path
+        # (`arr: [i64]` parses to TypeKind.Infer, both parser- and HIR-level --
+        # a documented pre-existing limitation, see bug #156's
+        # method_calls_literals.spl comment). This pre-scan is still worth
+        # doing (cheap, and correct for any field shape the parser DOES
+        # preserve); the construction-site inference in
+        # try_register_local_struct_type (statements.spl) is what actually
+        # recovers array-typed fields in practice, and it MERGES into
+        # (overwrites) whatever this pass records.
+        val prescan_struct_names = module.structs.keys()
+        var prescan_idx = 0
+        while prescan_idx < prescan_struct_names.len():
+            val prescan_name = prescan_struct_names[prescan_idx]
+            val prescan_struct: Struct = module.structs[prescan_name]
+            var prescan_field_types: Dict<text, HirType> = {}
+            var prescan_field_order: [text] = []
+            for prescan_field in prescan_struct.fields:
+                prescan_field_types[prescan_field.name] = self.lower_type(prescan_field.type_)
+                prescan_field_order = prescan_field_order.push(prescan_field.name)
+            self.struct_field_types_by_name[prescan_name] = prescan_field_types
+            self.struct_field_order_by_name[prescan_name] = prescan_field_order
+            prescan_idx = prescan_idx + 1
         # Pass 0: pre-register imported type names so explicit `use` paths win
         # over module load order when two modules export the same short name.
         if not bootstrap_mode or bootstrap_closure:
@@ -624,6 +675,7 @@ impl HirLowering:
                     val bootstrap_struct_: Struct = bootstrap_module_structs[bootstrap_struct_keys[bootstrap_struct_idx]]
                     val bootstrap_hir_struct = self.lower_struct(bootstrap_struct_)
                     structs[bootstrap_hir_struct.symbol] = bootstrap_hir_struct
+                    self.register_struct_field_types(bootstrap_hir_struct)
                     bootstrap_struct_idx = bootstrap_struct_idx + 1
 
                 val bootstrap_module_enums = module.enums
@@ -695,6 +747,7 @@ impl HirLowering:
             val struct_: Struct = lower_module_structs[name]
             val hir_struct = self.lower_struct(struct_)
             structs[hir_struct.symbol] = hir_struct
+            self.register_struct_field_types(hir_struct)
             lower_idx = lower_idx + 1
 
         # Imported enum names are registered above, but their definitions used

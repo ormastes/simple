@@ -97,7 +97,30 @@ impl MirToLlvm:
         val nit = self.native_int()
         val field_ptr = self.builder.fresh_local()
         self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
-        self.builder.emit_load(dest_name, nit, field_ptr)
+        # Aggregates store every field as one native-int word (see
+        # lower_struct_construct's docstring), so the physical load is always
+        # native_int. But a field's declared MIR type can be pointer-flavored
+        # (Array/Slice/Dict -- nested-field-access support, see
+        # struct_field_types_by_name in 20.hir/hir_lowering/types.spl), in
+        # which case `dest` was pre-registered (self.ptr_locals / local_types,
+        # from the MIR local declaration) as "ptr" even though the value
+        # physically loaded here is native_int. Loading straight into
+        # `dest_name` in that case leaves a value textually reused as "ptr" at
+        # later use sites (value_as_type trusts the registered type and skips
+        # its own cast) while its REAL LLVM definition is native_int -- an
+        # `llc` type mismatch ("defined with type 'i64' but expected 'ptr'"),
+        # observed indexing a struct's array-typed field on the native
+        # --entry path. Load into a fresh native-int temp and inttoptr it
+        # into `dest_name` so the value's real definition matches its
+        # registered type. Struct-typed nested fields are unaffected (their
+        # declared type stays native_int here today, so get_local_type
+        # returns native_int and this branch does not fire).
+        if self.get_local_type(dest_id) == "ptr":
+            val raw_field_val = self.builder.fresh_local()
+            self.builder.emit_load(raw_field_val, nit, field_ptr)
+            self.builder.emit("  {dest_name} = inttoptr {nit} {raw_field_val} to ptr")
+        else:
+            self.builder.emit_load(dest_name, nit, field_ptr)
 
     me translate_set_field(base: MirOperand, field: i64, value: MirOperand):
         val raw_base_val = self.translate_operand(base)

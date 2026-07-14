@@ -262,7 +262,34 @@ impl HirLowering:
                 case ExprKind.Field(base, field):
                     val fld_base_t: Expr = base
                     val fld_name_t: text = field
-                    return HirExpr(kind: HirExprKind.Field(self.lower_hir_expr(fld_base_t), fld_name_t, nil), type_: nil, span: e.span)
+                    val fld_lowered_base = self.lower_hir_expr(fld_base_t)
+                    # Nested-field-access support (native --entry path bug --
+                    # see struct_field_types_by_name / local_struct_types doc
+                    # comments in types.spl). Without this, `type_` stays nil
+                    # here (no inference pass on this path) and MIR defaults
+                    # the field's MirType to i64 -- silently wrong for a
+                    # non-i64 field (observed: an array-typed struct field
+                    # read as raw i64 -> garbage GEP instead of the runtime
+                    # array accessor). Only resolves the narrow, static
+                    # `val/var x = StructName(...)` local shape; anything else
+                    # falls through to the pre-existing nil/i64-default
+                    # behavior unchanged.
+                    var fld_field_type: HirType? = nil
+                    var fld_base_sym_opt: SymbolId? = nil
+                    match fld_lowered_base.kind:
+                        case HirExprKind.Var(fld_base_sym):
+                            fld_base_sym_opt = Some(fld_base_sym)
+                        case HirExprKind.NamedVar(fld_base_sym2, _):
+                            fld_base_sym_opt = Some(fld_base_sym2)
+                        case _: ()
+                    if val fld_base_sym = fld_base_sym_opt:
+                        if self.local_struct_types.has(fld_base_sym.id):
+                            val fld_struct_name = self.local_struct_types[fld_base_sym.id]
+                            if self.struct_field_types_by_name.has(fld_struct_name):
+                                val fld_struct_fields = self.struct_field_types_by_name[fld_struct_name]
+                                if fld_struct_fields.has(fld_name_t):
+                                    fld_field_type = Some(fld_struct_fields[fld_name_t])
+                    return HirExpr(kind: HirExprKind.Field(fld_lowered_base, fld_name_t, nil), type_: fld_field_type, span: e.span)
                 case _:
                     pass
         if kind_disc_v == 1138084884:  # hash("Block")

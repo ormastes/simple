@@ -25,6 +25,57 @@ fn hir_stmt_kind_disc(k: StmtKind) -> i64:
 # ============================================================================
 
 impl HirLowering:
+    # Nested-field-access support (native --entry path bug -- see
+    # struct_field_types_by_name / local_struct_types doc comments in
+    # types.spl). `val/var x = StructName(...)` is the only local-declared-
+    # type shape this lane can recover without a full inference pass: the
+    # callee name is a compile-time-static struct name IF it is already
+    # registered in struct_field_types_by_name (structs are lowered in a
+    # up-front pass before function bodies, so this dict is fully populated
+    # by the time any function body -- and thus any Let -- is lowered).
+    # Deliberately narrow: only a bare `Ident(...)` call callee: qualified
+    # constructors, method calls, etc. are left untracked (Field-expr
+    # lowering then falls back to its pre-existing untyped i64 default,
+    # same as today -- this is additive, never a regression).
+    me try_register_local_struct_type(sym: SymbolId, init_expr: Expr):
+        match init_expr.kind:
+            case ExprKind.Call(callee, call_args):
+                match callee.kind:
+                    case ExprKind.Ident(callee_name):
+                        if self.struct_field_types_by_name.has(callee_name):
+                            self.local_struct_types[sym.id] = callee_name
+                            # Struct field type ANNOTATIONS are unreliable here
+                            # (`arr: [i64]` parses to TypeKind.Infer on this
+                            # path, both parser- and HIR-level -- a documented
+                            # pre-existing limitation, see bug #156's
+                            # method_calls_literals.spl comment). CallArg's
+                            # has_name/name are ALSO unreliable (observed false
+                            # /empty for every arg regardless of source syntax)
+                            # -- MIR's own lower_struct_construct has the same
+                            # gap and falls back to POSITIONAL order against
+                            # the struct's declared field order, so mirror that
+                            # here: learn each field's shape from the
+                            # CONSTRUCTION SITE argument at its position. An
+                            # ArrayLit argument means the field is array-typed.
+                            # All instances of a struct share layout, so
+                            # recording this once (first construction site
+                            # seen) is globally valid for the struct name.
+                            if self.struct_field_order_by_name.has(callee_name):
+                                val field_order = self.struct_field_order_by_name[callee_name]
+                                var known_fields = self.struct_field_types_by_name[callee_name]
+                                var arg_i = 0
+                                while arg_i < call_args.len() and arg_i < field_order.len():
+                                    val field_name_at_i = field_order[arg_i]
+                                    match call_args[arg_i].value.kind:
+                                        case ExprKind.ArrayLit(_):
+                                            val elem_i64 = HirType(kind: HirTypeKind.Int(64, true), span: call_args[arg_i].span)
+                                            known_fields[field_name_at_i] = HirType(kind: HirTypeKind.Array(elem_i64, nil), span: call_args[arg_i].span)
+                                        case _: ()
+                                    arg_i = arg_i + 1
+                                self.struct_field_types_by_name[callee_name] = known_fields
+                    case _: ()
+            case _: ()
+
     fn lower_hir_assign_op(assign_op: AssignOp) -> HirAssignOp:
         match assign_op:
             case AssignOp.Add: HirAssignOp.Add
@@ -244,6 +295,7 @@ impl HirLowering:
                 nil
             val v_hir_init = self.lower_hir_expr(v_init)
             val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_hir_type, s.span, false, false, nil)
+            self.try_register_local_struct_type(v_symbol, v_init)
             return HirStmt(kind: HirStmtKind.Let(v_symbol, v_hir_type, v_hir_init), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", nil, nil)):
             val vr_name = match stmt_kind_value:
@@ -270,6 +322,8 @@ impl HirLowering:
             else:
                 HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
             val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_hir_type, s.span, false, true, nil)
+            if val vr_init_present = vr_init:
+                self.try_register_local_struct_type(vr_symbol, vr_init_present)
             return HirStmt(kind: HirStmtKind.Let(vr_symbol, vr_hir_type, vr_hir_init), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Return(nil)):
             val rt_val: Expr = rt_enum_payload(stmt_kind_value)

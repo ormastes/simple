@@ -46,6 +46,26 @@ class HirLowering:
     current_method_self_type: HirType?
     lowered_impl_functions: Dict<SymbolId, HirFunction>
     lowered_traits: Dict<text, HirTrait>   # Traits lowered in this module (by name), for injecting defaults into impls
+    # Nested-field-access support (native-build --entry path has no type
+    # inference pass, so a `s.arr` Field expr otherwise gets `type_: nil` and
+    # MIR defaults its result to i64 -- silently wrong for an array/struct
+    # field). struct_field_types_by_name is STATIC (built once from each
+    # struct's own declaration: struct name -> field name -> declared HirType)
+    # so it needs no inference. local_struct_types is the DYNAMIC half (local
+    # variable symbol id -> struct name), populated only for the simple,
+    # common `val/var x = StructName(...)` binding shape -- mirrors the MIR
+    # layer's struct_value_syms/struct_field_type_name propagation, one layer
+    # up, since the actual Field-expr type_ consumer lives in a file this lane
+    # may not edit (see doc/... nestedfield lane notes).
+    struct_field_types_by_name: Dict<text, Dict<text, HirType>>
+    local_struct_types: Dict<i64, text>
+    # Declared field NAME order per struct (parallels MIR's own
+    # struct_field_order). CallArg.has_name/.name are not reliably populated
+    # on this path (observed false/empty for every arg regardless of whether
+    # the source used `field: value` named-arg syntax), so both this layer
+    # and MIR fall back to positional-order matching against the struct's
+    # OWN declared field order to learn which arg feeds which field.
+    struct_field_order_by_name: Dict<text, [text]>
 
 struct LoweringError:
     message: text
@@ -66,6 +86,9 @@ fn hirlowering_new() -> HirLowering:
     val empty_modules_by_name: Dict<text, Module> = {}
     val empty_impl_functions: Dict<SymbolId, HirFunction> = {}
     val empty_traits: Dict<text, HirTrait> = {}
+    val empty_struct_field_types: Dict<text, Dict<text, HirType>> = {}
+    val empty_local_struct_types: Dict<i64, text> = {}
+    val empty_struct_field_order: Dict<text, [text]> = {}
     HirLowering(
         symbols: SymbolTable.new(),
         errors: empty_errors,
@@ -78,7 +101,10 @@ fn hirlowering_new() -> HirLowering:
         modules_by_name: empty_modules_by_name,
         current_method_self_type: nil,
         lowered_impl_functions: empty_impl_functions,
-        lowered_traits: empty_traits
+        lowered_traits: empty_traits,
+        struct_field_types_by_name: empty_struct_field_types,
+        local_struct_types: empty_local_struct_types,
+        struct_field_order_by_name: empty_struct_field_order
     )
 
 fn hirlowering_for_module(filename: text, modules_by_name: Dict<text, Module>) -> HirLowering:
