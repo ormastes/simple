@@ -45,14 +45,22 @@ class Engine2dWmFrameExecutor:
     host_gpu_run_id_hash: i64
     host_gpu_backend: text
     host_gpu_backend_code: i64
+    # Trusted scanout dims threaded in by the caller. native-build shifts
+    # cross-module FramebufferDriver `.width`/`.height` field reads by one slot
+    # (the [u32] back_buffer/host_buffer array fields before them mis-size the
+    # class layout as seen here), so reading fb.width here yields garbage. When
+    # >0 these trusted scalars override the field read. 0 = field-read fallback
+    # (arm64/riscv64 callers that pass no dims — unchanged behavior).
+    fb_w: i64
+    fb_h: i64
 
-    static fn create(engine: Engine2D, framebuffer: FramebufferDriver) -> Engine2dWmFrameExecutor:
-        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0)
+    static fn create(engine: Engine2D, framebuffer: FramebufferDriver, fb_w: i64 = 0, fb_h: i64 = 0) -> Engine2dWmFrameExecutor:
+        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0, fb_w: fb_w, fb_h: fb_h)
 
-    static fn _create_host_gpu_exact(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64) -> Engine2dWmFrameExecutor:
-        var executor = Engine2dWmFrameExecutor.create(engine, framebuffer)
-        val width = framebuffer.width.to_i64()
-        val height = framebuffer.height.to_i64()
+    static fn _create_host_gpu_exact(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64, fb_width: i64 = 0, fb_height: i64 = 0) -> Engine2dWmFrameExecutor:
+        var executor = Engine2dWmFrameExecutor.create(engine, framebuffer, fb_width, fb_height)
+        val width = if fb_width > 0: fb_width else: framebuffer.width.to_i64()
+        val height = if fb_height > 0: fb_height else: framebuffer.height.to_i64()
         val max_pixels = simpleos_host_gpu_max_readback_bytes() / 4
         if base == 0u64 or width <= 0 or height <= 0 or height > max_pixels or width > max_pixels / height:
             serial_println("[wm-frame] host-gpu-fallback reason=unavailable-or-readback-capacity width={width} height={height}")
@@ -79,29 +87,34 @@ class Engine2dWmFrameExecutor:
         serial_println("[wm-frame] host-gpu-ready backend={backend} generation={hello_generation}")
         executor
 
-    static fn create_host_gpu(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64) -> Engine2dWmFrameExecutor:
-        var executor = Engine2dWmFrameExecutor._create_host_gpu_exact(engine, framebuffer, base, guest_isa_code, backend_code)
+    static fn create_host_gpu(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64, fb_width: i64 = 0, fb_height: i64 = 0) -> Engine2dWmFrameExecutor:
+        var executor = Engine2dWmFrameExecutor._create_host_gpu_exact(engine, framebuffer, base, guest_isa_code, backend_code, fb_width, fb_height)
         if executor.host_gpu_base != 0u64 or backend_code != SIMPLEOS_HOST_GPU_BACKEND_METAL:
             return executor
-        executor = Engine2dWmFrameExecutor._create_host_gpu_exact(engine, framebuffer, base, guest_isa_code, SIMPLEOS_HOST_GPU_BACKEND_DIRECTX)
+        executor = Engine2dWmFrameExecutor._create_host_gpu_exact(engine, framebuffer, base, guest_isa_code, SIMPLEOS_HOST_GPU_BACKEND_DIRECTX, fb_width, fb_height)
         if executor.host_gpu_base != 0u64:
             return executor
-        Engine2dWmFrameExecutor._create_host_gpu_exact(engine, framebuffer, base, guest_isa_code, SIMPLEOS_HOST_GPU_BACKEND_VULKAN)
+        Engine2dWmFrameExecutor._create_host_gpu_exact(engine, framebuffer, base, guest_isa_code, SIMPLEOS_HOST_GPU_BACKEND_VULKAN, fb_width, fb_height)
 
     me _render_host_gpu(composition: DrawIrComposition, resources: [SimpleOsHostGpuImageResource]) -> bool:
         val generation = host_gpu_ivshmem_next_generation(self.host_gpu_base)
         if generation <= 0:
             return false
-        val expected_bytes = self.framebuffer.width.to_i64() * self.framebuffer.height.to_i64() * 4
+        # Use trusted scanout dims (native-build shifts cross-module fb field reads).
+        val render_w = if self.fb_w > 0: self.fb_w else: self.framebuffer.width.to_i64()
+        val render_h = if self.fb_h > 0: self.fb_h else: self.framebuffer.height.to_i64()
+        val present_w = if self.fb_w > 0: self.fb_w.to_u32() else: self.framebuffer.width
+        val present_h = if self.fb_h > 0: self.fb_h.to_u32() else: self.framebuffer.height
+        val expected_bytes = render_w * render_h * 4
         val receipt = host_gpu_ivshmem_submit_draw_ir(
             self.host_gpu_base, generation, self.host_gpu_run_id_hash, generation,
-            self.host_gpu_backend, self.framebuffer.width.to_i64(), self.framebuffer.height.to_i64(),
+            self.host_gpu_backend, render_w, render_h,
             composition, resources, HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS
         )
         if not host_gpu_ivshmem_device_receipt_valid(receipt, generation, self.host_gpu_run_id_hash, generation, self.host_gpu_backend_code, expected_bytes):
             serial_println("[wm-frame] host-gpu-fallback reason=receipt status={receipt.status} detail={receipt.reason}")
             return false
-        if not self.framebuffer.present_argb32_from_mmio(receipt.output_addr, self.framebuffer.width, self.framebuffer.height, receipt.output_bytes, receipt.output_checksum):
+        if not self.framebuffer.present_argb32_from_mmio(receipt.output_addr, present_w, present_h, receipt.output_bytes, receipt.output_checksum):
             serial_println("[wm-frame] host-gpu-fallback reason=readback-presentation")
             return false
         serial_println("[wm-frame] host-gpu-presented backend={self.host_gpu_backend} generation={generation} run={self.host_gpu_run_id_hash} frame={generation} checksum={receipt.output_checksum}")
