@@ -870,6 +870,19 @@ int64_t rt_raw_i64_to_string(int64_t raw) {
     return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
 }
 
+/* rt_raw_bool_to_string — same "raw operand, no tag check" contract as
+ * rt_raw_i64_to_string (see its callers in switch_operators_calls.spl's
+ * lower_bootstrap_print_call), but for a bool-typed MIR local: those are
+ * plain 0/1 i64 values at codegen time (not the tagged RT_VALUE_SPECIAL_*
+ * scheme rt_to_string() handles), so routing them through the decimal
+ * i64 renderer prints "1"/"0" instead of "true"/"false" (native print(bool)
+ * divergence from the oracle). Render the raw 0/1 directly as text.
+ */
+int64_t rt_raw_bool_to_string(int64_t raw) {
+    if (raw != 0) return rt_string_new((const uint8_t*)"true", 4);
+    return rt_string_new((const uint8_t*)"false", 5);
+}
+
 int64_t rt_value_to_string(int64_t value) {
     return rt_to_string(value);
 }

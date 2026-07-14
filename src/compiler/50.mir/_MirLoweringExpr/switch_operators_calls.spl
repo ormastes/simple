@@ -627,6 +627,12 @@ impl MirLowering:
         # pass through unchanged (old behavior), not crash differently.
         var print_arg = mir_operand_copy(arg_local)
         var arg_is_numeric = false
+        # bool is rendered through its own raw-render fn (rt_raw_bool_to_string
+        # -> "true"/"false") -- routing it through the plain int/uint branch
+        # below (rt_raw_i64_to_string) would print the raw 0/1 decimal instead,
+        # diverging from the oracle's print(bool) -> "true"/"false" (see
+        # native_bool_print_repr bug).
+        var arg_is_bool = false
         if val arg_ty = self.local_mir_type_of(arg_local):
             match arg_ty.kind:
                 case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64:
@@ -634,12 +640,13 @@ impl MirLowering:
                 case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64:
                     arg_is_numeric = true
                 case MirTypeKind.Bool:
-                    arg_is_numeric = true
+                    arg_is_bool = true
                 case _:
                     ()
-        if arg_is_numeric:
+        if arg_is_numeric or arg_is_bool:
+            val raw_render_fn = if arg_is_bool: "rt_raw_bool_to_string" else: "rt_raw_i64_to_string"
             val num_op = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_raw_i64_to_string"),
+                MirConstValue.Str(raw_render_fn),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
             ))
             var b_num = self.builder
