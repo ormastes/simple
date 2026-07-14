@@ -232,8 +232,18 @@ impl MirLowering:
         if not receiver_is_dict and resolution_is_unresolved and is_dict_method_name:
             dict_recv_local = self.lower_expr(receiver)
             dict_recv_lowered = true
-            if self.runtime_dict_locals.has(dict_recv_local.id):
+            # Bug (native_dict_param_no_dictness): mirrors the `.len()` fix
+            # right below -- `local_is_runtime_dict` also falls back to the
+            # receiver's registered MIR type (correct for a dict-typed
+            # FUNCTION PARAMETER, whose local id never reaches
+            # `runtime_dict_locals` since that map is only seeded at
+            # dict-literal/assignment sites), not just the id-keyed map.
+            # Without this, `d.keys()`/`.has()`/etc. on a `Dict<text,i64>`
+            # param fell through to the generic Unresolved handler, which is
+            # a LOUD "unresolved method call" native-build failure.
+            if self.local_is_runtime_dict(dict_recv_local):
                 receiver_is_dict = true
+                self.runtime_dict_locals[dict_recv_local.id] = true
 
         if receiver_is_dict and (method == "values" or method == "keys") and args.len() == 0:
             val receiver_local = if dict_recv_lowered: dict_recv_local else: self.lower_expr(receiver)
@@ -242,13 +252,43 @@ impl MirLowering:
                 MirConstValue.Str(runtime_name),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
             ))
+            # Bug (native_dict_keys_iter_index): rt_dict_keys/rt_dict_values
+            # return a real element type (the dict's key/value type, e.g.
+            # tagged heap strings for `Dict<text,i64>.keys()`), but this call
+            # was typed as a bare i64 return with no per-element MIR type
+            # recorded on the result local (unlike `lower_dict_lit`, which
+            # builds a typed `Dict(key_type, value_type)` temp). Without an
+            # Array(elem_type,_) type on the result, `for k in d.keys()`
+            # (lower_for_iterator, mir_lowering_stmts.spl) can't find an
+            # element type from the collection's own MIR type and falls back
+            # to i64 -- so decode_runtime_value decoded a TAGGED heap-string
+            # key handle as an INTEGER (right-shift-by-3), corrupting it. The
+            # corrupted `k` then hashed/matched nothing in `d[k]`'s
+            # rt_dict_get, so every native `for k in d.keys(): s += d[k]`
+            # summed to 0. Mirror lower_dict_lit's typed-temp pattern: recover
+            # the dict's key_type/value_type via local_mir_type_of and stamp
+            # an Array(elem_type, 0) type onto a fresh temp copy of the call
+            # result, so the for-loop (and any other Array-typed consumer)
+            # decodes each element correctly.
+            var dict_keys_elem_type = MirType.i64()
+            val dict_keys_recv_type = self.local_mir_type_of(receiver_local)
+            if dict_keys_recv_type != nil:
+                match dict_keys_recv_type.kind:
+                    case Dict(k_type, v_type):
+                        dict_keys_elem_type = if method == "values": v_type else: k_type
+                    case _: ()
             var b_dict = self.builder
             val result = b_dict.emit_call(func_operand, [mir_operand_copy(receiver_local)], MirType.i64())
             self.builder = b_dict
             if val result_local = result:
-                self.runtime_array_locals[result_local.id] = true
-                self.runtime_value_locals[result_local.id] = true
-                return result_local
+                val dict_keys_array_type = MirType(kind: MirTypeKind.Array(dict_keys_elem_type, 0))
+                var b_dict_typed = self.builder
+                val dict_keys_typed = b_dict_typed.new_temp(dict_keys_array_type)
+                b_dict_typed.emit_copy(dict_keys_typed, result_local)
+                self.builder = b_dict_typed
+                self.runtime_array_locals[dict_keys_typed.id] = true
+                self.runtime_value_locals[dict_keys_typed.id] = true
+                return dict_keys_typed
             return receiver_local
 
         # `.has(key)` / `.contains(key)` / `.contains_key(key)` -> rt_dict_contains.
@@ -373,7 +413,25 @@ impl MirLowering:
                         # the generic accessor when it says so.
                         receiver_local = self.lower_expr(receiver)
                         receiver_lowered = true
-                        if self.runtime_dict_locals.has(receiver_local.id):
+                        # Bug (native_dict_param_no_dictness): `runtime_dict_locals`
+                        # is only populated at dict-literal/assignment sites
+                        # (lower_dict_lit / mir_lowering_stmts.spl var-decl
+                        # propagation), so a dict-typed FUNCTION PARAMETER's
+                        # local id never lands in this map even though it holds
+                        # a real dict handle -- `fn f(d: Dict<text,i64>):
+                        # d.len()` silently returned 0 natively (rt_len's
+                        # fallback treats an unrecognized handle as neither a
+                        # string nor an array and hardcodes 0). `local_is_runtime_dict`
+                        # (expr_dispatch.spl) already recovers this correctly
+                        # for the `d[k]` Index path by ALSO consulting the
+                        # local's registered MIR type (begin_function/mir_data.spl
+                        # threads the real `Dict(key,value)` type from
+                        # `signature.params` onto every Arg local, so
+                        # `local_mir_type_of` is authoritative for params even
+                        # though runtime_dict_locals isn't) -- reuse the same
+                        # helper here instead of only checking the id-keyed map.
+                        if self.local_is_runtime_dict(receiver_local):
+                            self.runtime_dict_locals[receiver_local.id] = true
                             len_symbol = "rt_dict_len"
                         else:
                             len_symbol = "rt_len"
@@ -1677,10 +1735,31 @@ impl MirLowering:
         if val dict_local = new_res:
             for entry in entries:
                 val (key_expr, value_expr) = entry
-                val key_local = self.lower_dict_key(key_expr)
+                # Bug (native_dict_keys_iter_index): capture the key's type
+                # from the RAW (pre-box) lowered local, mirroring how
+                # `value_type` below already reads `value_local` BEFORE
+                # `box_runtime_value(value_local)` runs. `lower_dict_key`
+                # lowers AND boxes in one step (`self.box_runtime_value(self.
+                # lower_expr(key_expr))`), so reading its type straight off
+                # its return value picked up the BOXED representation's MIR
+                # type instead -- for a string-literal key that box step is
+                # `rt_string_new`, an `emit_call` typed i64 (the runtime
+                # symbol's declared return type), so `key_type` silently
+                # became `I64` for every string-keyed dict literal (a
+                # `Dict<text,i64>` recorded its OWN type as `Dict(I64,I64)`).
+                # That corrupted every consumer of the dict's recorded key
+                # type -- specifically `.keys()`'s result-array element type
+                # fix just above, which decoded each TAGGED heap-string key
+                # as an INTEGER (right-shift-by-3) instead of a string,
+                # producing a garbage `d[k]` lookup key and a silently-wrong
+                # sum. Lower the key raw first (capturing its true type), box
+                # it after, exactly like the value already does.
+                val key_local_raw = self.lower_expr(key_expr)
+                if first_entry:
+                    key_type = self.local_mir_type_of(key_local_raw) ?? key_type
+                val key_local = self.box_runtime_value(key_local_raw)
                 val value_local = self.lower_expr(value_expr)
                 if first_entry:
-                    key_type = self.local_mir_type_of(key_local) ?? key_type
                     value_type = self.local_mir_type_of(value_local) ?? value_type
                     first_entry = false
                 val boxed_value = self.box_runtime_value(value_local)
