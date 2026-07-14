@@ -327,12 +327,31 @@ impl MirTextCodegen for MirToLlvm:
         # Rename only the requested entry module's main to __simple_main.
         val fn_name = self.llvm_function_symbol_name(name)
         self.defined_func_names[fn_name] = true
-        self.remember_function_return_type(name, ret_ty)
-        self.remember_function_return_type(fn_name, ret_ty)
+
+        # entry_point.spl hardcodes `declare i64 @__simple_main()` and reads
+        # the i64 result as the process exit code. A user `fn main():` with
+        # no declared return type lowers body.return_ty to void here, which
+        # would emit `define void @__simple_main()` / `ret void` against that
+        # i64-typed caller -- the call site then truncates whatever garbage
+        # happened to be sitting in the return register as the exit code
+        # (nondeterministic). Force the true entry symbol's LLVM return type
+        # to i64 so a bare `return` / fall-off-the-end emits `ret i64 0`
+        # instead, matching the documented "no return type => exit 0"
+        # contract. Only the exact global entry symbol is affected --
+        # per-module mains (`__simple_main_<mod>`, not called by
+        # entry_point.spl) keep their real signature.
+        val effective_ret_ty = if fn_name == "__simple_main" and ret_ty == "void":
+            "i64"
+        else:
+            ret_ty
+        self.current_return_type = effective_ret_ty
+
+        self.remember_function_return_type(name, effective_ret_ty)
+        self.remember_function_return_type(fn_name, effective_ret_ty)
         self.remember_function_param_types(name, param_types)
         self.remember_function_param_types(fn_name, param_types)
 
-        self.builder.start_function_opt(fn_name, params, ret_ty, is_readonly, is_small)
+        self.builder.start_function_opt(fn_name, params, effective_ret_ty, is_readonly, is_small)
         if bootstrap_debug:
             print "[mir-to-llvm] function:started {name}"
 
