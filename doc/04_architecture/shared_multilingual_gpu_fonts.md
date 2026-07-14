@@ -32,7 +32,7 @@ plugin interface, renderer factory, or new native dependency.
 | `src/lib/gc_async_mut/gpu/engine2d/engine.spl` | Existing `load_font`/`draw_text` adapter; routes one canonical batch through CUDA, Metal, OpenCL, Vulkan, then the CPU suffix fallback. |
 | `src/lib/gc_async_mut/gpu/engine3d/engine.spl` | HUD/world facade and CPU fallback; an optional Vulkan adapter owns dedicated pipelines, R8 atlas upload, depth, fence, and device readback without changing the shared batch. |
 | `src/lib/gc_async_mut/gpu/engine2d/backend_{cuda,metal,opencl,vulkan}*.spl` | Backend-private upload/submission state keyed by the shared atlas owner and generation. Source wiring is not native promotion evidence. |
-| Web semantic/layout, GUI widget/scene, and shared WM scene producers | Preserve selected identity/advances in `DrawIrComposition`; Engine2D is the sole vector-material executor. “WebIR” names the existing web semantic/layout layer, not a second drawing IR. The canonical SimpleOS runner/readiness targets select the Draw IR/Engine2D desktop. Hosted `HostCompositor` remains on compatibility direct renderers; direct legacy `wm_entry.spl` files are compatibility-only. |
+| Web semantic/layout, GUI widget/scene, and shared WM scene producers | Preserve selected identity/advances in `DrawIrComposition`; Engine2D is the sole vector-material executor. “WebIR” names the existing web semantic/layout layer, not a second drawing IR. Canonical SimpleOS and hosted color-background frames select the Draw IR/Engine2D route. Image/motion and nested hosted content retain compatibility fallback; direct legacy `wm_entry.spl` files are compatibility-only. |
 
 Compatibility re-export trees continue to expose the canonical
 `nogc_sync_mut.text_layout` values. Generated copies must not acquire private
@@ -176,7 +176,7 @@ SharedWmScene ───────┘                           │
 
 Engine3D.draw_text_{hud,world} ─────────────────────> same FontRenderer/FontRenderBatch
 SimpleOS canonical desktop ─> Engine2dWmFrameExecutor ─> path above + staged FontAssetCandidate
-Hosted HostCompositor - - migration pending - -> path above
+Hosted HostCompositor ─> persistent Engine2dCompositorBackend ─> path above (color/top-level content)
 Direct arch/*/wm_entry.spl invocation - - compatibility only; not a canonical target
 ```
 
@@ -194,9 +194,10 @@ optional Vulkan Engine3D HUD/world adapter. Web and widget/GUI producers lower
 through Draw IR and Engine2D. Canonical SimpleOS ARM64/x86_64 runner/readiness
 targets select `gui_entry_desktop.spl`, which lowers its `SharedWmScene` through
 `Engine2dWmFrameExecutor`; direct legacy `wm_entry.spl` files remain
-compatibility-only. Hosted `HostCompositor` still ends in
-`shared_wm_scene_render_taskbar_context_to_{backend,pixel_buffer}`. That
-compatibility renderer is not a selected-font completion path. SimpleOS stages
+compatibility-only. Hosted color/top-level frames use a persistent
+`Engine2dCompositorBackend` to execute `SharedWmScene -> DrawIrComposition ->
+Engine2D`, with direct rendering retained for the programmatic compatibility
+gate, image/motion backgrounds, nested content, or rejected readback. SimpleOS stages
 the pinned face and has a desktop evidence witness, but the canonical QEMU pixel
 gate still needs a retained PASS.
 Widget producers read existing `lang`/`font-family` properties, and

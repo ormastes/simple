@@ -8,17 +8,20 @@
 # runner (same reason engine2d_cpu_metal_parity_run.spl is a run harness).
 #
 # This spec pins the SOURCE contract of that wiring so a regression that
-# silently unhooks the GPU lane (or flips the default lane away from CPU)
+# silently unhooks the Draw IR lane (or flips the default backend away from CPU)
 # fails fast in the normal test suite:
 #   (a) the metal lane must surface typed device_readback provenance,
 #   (b) parity is asserted against the CPU lane by the evidence harness,
-#   (c) the DEFAULT lane stays CPU ("software") when no flag/env is set.
+#   (c) the DEFAULT route is canonical Draw IR while its backend stays CPU
+#       ("software") when no flag/env is set.
 
 use std.spec.{describe, it, expect}
 use std.io_runtime.{file_read}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.host_compositor_entry.{HostCompositor, host_wm_force_direct_chrome}
 use common.window_protocol.geometry.{Size}
+use common.window_protocol.compositor_methods.{COMP_CREATE_WINDOW}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
 
 val SHOWCASE_SRC = "examples/06_io/ui/widget_showcase_gui.spl"
 val COMPOSITOR_BACKEND_SRC = "src/os/compositor/compositor_engine2d.spl"
@@ -26,6 +29,7 @@ val EVIDENCE_SRC = "test/02_integration/rendering/engine2d_gpu_offload_evidence.
 val METAL_MSL_SRC = "src/lib/gc_async_mut/gpu/engine2d/backend_metal_msl.spl"
 val METAL_BACKEND_SRC = "src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl"
 val HOSTED_ENTRY_SRC = "src/os/hosted/hosted_entry.spl"
+val HOST_CORE_SRC = "src/os/compositor/host_compositor_core.spl"
 
 describe "GPU offload wiring contract (showcase + WM compositor)":
 
@@ -106,51 +110,63 @@ describe "GPU offload wiring contract (showcase + WM compositor)":
 # Task #28-A: live WM lane adoption of the persistent Engine2D compositor
 # backend (src/os/hosted/hosted_entry.spl). hosted_entry.spl is a winit-
 # windowed `fn main()` entry (real OS window + event loop) so it cannot be
-# imported and run headless in-process here; its opt-in gate and present
-# seam are pinned as a source contract (same pattern as the showcase/WM
+# imported and run headless in-process here; its default canonical route,
+# compatibility retry, and present seam are pinned as a source contract
+# (same pattern as the showcase/WM
 # checks above), while the underlying Engine2dCompositorBackend construction
 # + provenance API it calls into IS imported and exercised for real below.
 describe "Hosted WM engine2d raster-lane adoption (task #28-A)":
 
-    it "keeps the default hosted WM lane on the existing backend when SIMPLE_WM_RASTER is unset":
-        val src = file_read(HOSTED_ENTRY_SRC)
-        # opt-in gate: only "engine2d" flips the lane, any other/unset value
-        # (including "") keeps the historical HostedWinitBufferBackend path
-        expect(src).to_contain("(rt_env_get(\"SIMPLE_WM_RASTER\") ?? \"\") == \"engine2d\"")
-        expect(src).to_contain("HostedWinitBufferBackend.create(win, WINDOW_WIDTH, WINDOW_HEIGHT")
+    it "routes the default hosted WM frame through SharedWmScene Draw IR and Engine2D":
+        val entry = file_read(HOSTED_ENTRY_SRC)
+        val core = file_read(HOST_CORE_SRC)
+        expect(entry).to_contain("Engine2dCompositorBackend.create_from_env(WINDOW_WIDTH, WINDOW_HEIGHT)")
+        expect(entry).to_contain("comp.render_frame_engine2d(raster)")
+        expect(entry).to_contain("if not comp.render_frame_engine2d(raster):")
+        expect(entry).to_contain("draw-ir-rejected retry=compatibility")
+        expect(entry).to_contain("comp.render_frame()")
+        expect(core).to_contain("shared_wm_scene_draw_ir_composition_with_content(")
+        expect(core).to_contain("executor.render_draw_ir_composition(composition, images)")
+        expect(core).to_contain("host_wm_chrome_force_direct()")
+        expect(core).to_contain("shared_wm_content_frame_image_uri(frame)")
 
-    it "adopts Engine2dCompositorBackend via create_from_env and presents through a winit blit sink":
+    it "reuses one Engine2D session, recreates it on resize, and shuts it down":
         val src = file_read(HOSTED_ENTRY_SRC)
-        expect(src).to_contain("Engine2dCompositorBackend.create_from_env(WINDOW_WIDTH, WINDOW_HEIGHT)")
-        # frame handoff: engine2d draws into its own session; the pixel buffer
-        # is blitted into a plain winit buffer and presented to the OS window
-        expect(src).to_contain("comp.backend.get_pixel_buffer()")
-        expect(src).to_contain("rt_winit_buffer_blit_pixels(present_sink")
-        expect(src).to_contain("rt_winit_buffer_present(win, present_sink)")
-        # provenance surfaced in the WM frame log, and shutdown on exit
-        expect(src).to_contain("comp.backend.frame_provenance()")
-        expect(src).to_contain("comp.backend.shutdown()")
+        expect(src).to_contain("var raster = raster_in")
+        expect(src).to_contain("raster = Engine2dCompositorBackend.create_from_env(physical.width, physical.height)")
+        expect(src).to_contain("raster.shutdown()")
+        expect(src).to_contain("hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer()")
+
+    it "renders the default color frame through the canonical hosted Draw IR route":
+        host_wm_force_direct_chrome(false)
+        val raster = Engine2dCompositorBackend.create_named(240, 180, "software")
+        var comp = HostCompositor.new_headless(Size(width: 240u64, height: 180u64))
+        comp.apply_bridge_request(1, 1, COMP_CREATE_WINDOW.to_i64(), 0, "Docs", 20, 48, 160, 100, "<p>canonical hosted text</p>", 1, "font-route-test")
+        expect(comp.render_frame_engine2d(raster)).to_be(true)
+        val pixels = comp.pure_simple_pixel_buffer()
+        expect(pixels.len()).to_equal(240 * 180)
+        expect(pixels[0]).to_equal(wm_chrome_theme().command_lane)
+        expect(pixels[90 * 240 + 30] == wm_chrome_theme().command_lane).to_be(false)
+        raster.shutdown()
 
     it "produces a software-provenance frame through the same Engine2dCompositorBackend seam hosted_entry adopts":
-        # Pin the direct-draw chrome path (same as the evidence harness's
-        # wm_composite lane) — the fast CSS/GUI-web chrome lane spins up its
-        # own internal Engine2D session for the HTML chrome, which is not the
-        # thing under test here.
+        # Pin the direct compatibility path to preserve its existing backend
+        # provenance contract independently from the canonical hosted route.
         host_wm_force_direct_chrome(true)
         val backend = Engine2dCompositorBackend.create_named(64, 48, "software")
         var comp = HostCompositor.new(backend, Size(width: 64u64, height: 48u64))
         comp.render_frame()
         val pixels = comp.backend.get_pixel_buffer()
         expect(pixels.len()).to_equal(64 * 48)
-        # Content pin (not just length): an empty compositor renders its WM
-        # slate background opaquely and uniformly, so both a corner and the
-        # centre must carry the same non-zero color after render_frame. This
+        # Content pin (not just length): at 48px tall the 56px taskbar clips
+        # across the full target, so both a corner and the centre must carry
+        # the same non-zero taskbar color after render_frame. This
         # proves get_pixel_buffer() returns the Engine2D session's rendered
         # framebuffer — a zeroed/garbage readback (or a get_pixel_buffer that
         # returns an all-zero allocation of the right length) fails here, where
         # a bare length==w*h check would silently pass. Value is the composited
         # opaque slate (alpha=0xFF -> >= 0xFF000000).
-        expect(pixels[0]).to_equal(4279573024u32)
+        expect(pixels[0]).to_equal(wm_chrome_theme().taskbar)
         expect(pixels[64 * 24 + 32]).to_equal(pixels[0])
         val prov = comp.backend.frame_provenance()
         expect(prov).to_contain("backend=software")

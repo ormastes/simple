@@ -16,7 +16,9 @@ This scenario dynamically checks the existing canonical producers:
 - `shared_wm_scene_draw_ir_composition` for WM chrome.
 
 It covers partial REQ-006 and REQ-011. It does not introduce a renderer or
-claim native GPU evidence.
+claim native GPU evidence. The hosted color-frame source/unit contract is
+separately pinned by `test/03_system/gui/engine2d_gpu_offload_contract_spec.spl`;
+neither contract is retained production-run evidence.
 
 ## Operator flow
 

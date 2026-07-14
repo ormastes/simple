@@ -460,9 +460,11 @@ owners. The canonical SimpleOS desktop executes that composition through
 `Engine2dWmFrameExecutor`; canonical ARM64/x86_64 runner/readiness targets now
 select `gui_entry_desktop.spl`. Direct legacy `wm_entry.spl` files still contain
 bitmap text but are compatibility-only, not production-route evidence. Hosted
-`HostCompositor.render_frame` still finishes through direct backend/pixel-buffer
-compatibility renderers and remains the frame-level migration. Do not add a
-paint-local loader, atlas, cache, or private font draw path.
+color/top-level frames now reuse one persistent `Engine2dCompositorBackend` and
+execute `SharedWmScene -> DrawIrComposition -> Engine2D`; the programmatic
+direct-compatibility gate, image/motion backgrounds, nested content, or rejected
+readback use an immediate compatibility retry. Do not add a paint-local loader,
+atlas, cache, or private font draw path.
 
 SimpleOS image construction now reuses the exact selected
 `FontAssetCandidate` for Noto Sans Mono. Installer rootfs and initramfs staging
@@ -501,10 +503,11 @@ Keep the remaining work on the frozen public seams:
    upload behavior, RSS delta, and GPU resource high-water.
 
 Production-route acceptance must exercise the real Web/GUI entry, the hosted
-`HostCompositor` frame owner after its migration, and the canonical SimpleOS
-desktop entry. A synthetic composition-only spec is supporting evidence, not a
-production-route PASS. SimpleOS acceptance additionally requires the retained
-QEMU `pmemsave` pixel oracle.
+`HostCompositor` canonical color-frame owner, and the canonical SimpleOS desktop
+entry. Current hosted coverage is a source/unit contract, not a production-route
+PASS; image/motion and nested content remain compatibility cases. A synthetic
+composition-only spec is supporting evidence, not production proof. SimpleOS
+acceptance additionally requires the retained QEMU `pmemsave` pixel oracle.
 
 The authoritative gate list and evidence boundaries are in
 [`doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`](../../03_plan/sys_test/shared_multilingual_gpu_fonts.md).

@@ -23,6 +23,7 @@ use os.compositor.host_compositor_core.{
     host_compositor_restore_all
 }
 use os.compositor.hosted_backend_winit.{HostedWinitBufferBackend, hosted_winit_present_pure_simple_pixels}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.shared_mdi_setup.{
     shared_mdi_surface_count, shared_mdi_surface_title,
     shared_mdi_surface_app_id, shared_mdi_surface_content,
@@ -182,17 +183,20 @@ fn main() -> i64:
         return 1
     print "[hosted-wm] raster-backend=simple-2d-winit-buffer source=pure-simple-pixel-mirror"
     val comp = HostCompositor.new_headless(Size(width: WINDOW_WIDTH as u64, height: WINDOW_HEIGHT as u64))
-    _run_hosted_wm(comp, backend, el, win)
+    val raster = Engine2dCompositorBackend.create_from_env(WINDOW_WIDTH, WINDOW_HEIGHT)
+    _run_hosted_wm(comp, raster, backend, el, win)
 
 # Dependency-light production event loop. Pure Simple owns scene, Web/GUI/2D
 # raster, and the pixel mirror; winit only presents that final buffer.
-fn _run_hosted_wm(comp_in: HostCompositor, presenter: HostedWinitBufferBackend, el: i64, win: i64) -> i64:
+fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend, presenter: HostedWinitBufferBackend, el: i64, win: i64) -> i64:
     var comp = comp_in
+    var raster = raster_in
     var surface = host_surface_state(_physical_surface_geometry(win))
     var display_nonce: i64 = 0
     val evidence = host_wm_evidence_config_from_env()
     if evidence.enabled and not evidence.valid:
         print "ERROR: hosted WM evidence configuration rejected: {evidence.failure_reason}"
+        raster.shutdown()
         return 2
     val live_proof = _live_proof_mode()
     if live_proof:
@@ -201,9 +205,12 @@ fn _run_hosted_wm(comp_in: HostCompositor, presenter: HostedWinitBufferBackend, 
     else:
         comp = _seed_host_compositor_shared_mdi(comp)
     print "[hosted-wm] windows-ready count={comp.windows.len()}"
-    comp.render_frame()
+    if not comp.render_frame_engine2d(raster):
+        print "[hosted-wm] draw-ir-rejected retry=compatibility"
+        comp.render_frame()
     if not hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer(), comp.width, comp.height):
         print "ERROR: hosted WM initial pure-Simple frame presentation failed"
+        raster.shutdown()
         return 3
     print "[hosted-wm] frame-presented renderer=simple-web host=windowed width={WINDOW_WIDTH} height={WINDOW_HEIGHT} raster=simple-2d-winit-buffer"
     print "Frame presented: shared lifecycle windows + Simple Web MDI content"
@@ -217,6 +224,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, presenter: HostedWinitBufferBackend, 
         val initial_snapshot = host_wm_evidence_snapshot(comp.evidence_compositor_json(), surface, backend_name, false, readback, evidence_nonce, evidence_phase)
         if not host_wm_evidence_write_snapshot(evidence.snapshot_path, initial_snapshot) or not host_wm_evidence_write_capture(evidence.capture_path, comp.width, comp.height, initial_pixels):
             print "ERROR: hosted WM initial evidence write failed"
+            raster.shutdown()
             return 2
         print "[hosted-wm] evidence-ready nonce=0 phase=presented"
 
@@ -291,6 +299,9 @@ fn _run_hosted_wm(comp_in: HostCompositor, presenter: HostedWinitBufferBackend, 
                     surface.geometry = physical
                 if physical.width > 0 and physical.height > 0:
                     comp.resize(physical.width, physical.height)
+                    if raster.w != physical.width or raster.h != physical.height:
+                        raster.shutdown()
+                        raster = Engine2dCompositorBackend.create_from_env(physical.width, physical.height)
                     other_dirty = true
                 print "[hosted-wm] event surface kind={kind} mode={surface.mode} phase={surface.phase} nonce={surface.request_nonce} width={physical.width} height={physical.height} scale_milli={physical.scale_milli}"
             elif kind == EVT_MOVE:
@@ -391,7 +402,9 @@ fn _run_hosted_wm(comp_in: HostCompositor, presenter: HostedWinitBufferBackend, 
                     evidence_phase = "applied"
                 other_dirty = true
         if other_dirty or warmup_frames < 12:
-            comp.render_frame()
+            if not comp.render_frame_engine2d(raster):
+                print "[hosted-wm] draw-ir-rejected retry=compatibility"
+                comp.render_frame()
             hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer(), comp.width, comp.height)
             if warmup_frames < 12:
                 warmup_frames = warmup_frames + 1
@@ -399,7 +412,9 @@ fn _run_hosted_wm(comp_in: HostCompositor, presenter: HostedWinitBufferBackend, 
                     print "[hosted-wm] warmup-frames-presented count={warmup_frames}"
         elif motion_dirty:
             if not comp.render_background_only(motion_due):
-                comp.render_frame()
+                if not comp.render_frame_engine2d(raster):
+                    print "[hosted-wm] draw-ir-rejected retry=compatibility"
+                    comp.render_frame()
             hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer(), comp.width, comp.height)
 
         if evidence.enabled and evidence_nonce > 0 and other_dirty:
@@ -412,6 +427,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, presenter: HostedWinitBufferBackend, 
                 running = false
             else:
                 print "[hosted-wm] evidence-ack nonce={evidence_nonce} phase={evidence_phase} surface_phase={surface.phase}"
+    raster.shutdown()
     rt_winit_window_free(win)
     rt_winit_event_loop_free(el)
     print "SimpleOS shared hosted WM closed"

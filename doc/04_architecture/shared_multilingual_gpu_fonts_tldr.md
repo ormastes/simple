@@ -21,8 +21,9 @@ through every existing image-builder path before guest WM startup. Its canonical
 desktop already executes `SharedWmScene -> DrawIrComposition -> Engine2D` through
 `Engine2dWmFrameExecutor`, and canonical ARM64/x86_64 runner/readiness targets
 select that entry. Direct legacy `wm_entry.spl` files remain compatibility-only.
-Hosted `HostCompositor` still needs frame-level migration; byte staging is not
-runtime proof.
+Hosted color-background frames now lower through the same Draw IR/Engine2D
+route with one persistent raster session. Image/motion backgrounds and nested
+content retain an immediate compatibility retry; source routing is not runtime proof.
 
 The pinned 10-language × 10-category source policy contains 57 native cells,
 4 explicit script-sans mono fallbacks, 26 not-designed cells, and 13 unavailable

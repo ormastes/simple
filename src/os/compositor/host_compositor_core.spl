@@ -13,20 +13,27 @@ use common.ui.window_scene.{
     shared_wm_scene_resolve_background
 }
 use common.ui.window_scene.{WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO}
 use common.ui.window_scene_draw_ir.{
     SharedWmPixelBufferBackend,
+    shared_wm_content_frame_image_uri,
     shared_wm_pixel_buffer_pixels,
     shared_wm_pixel_buffer_resize,
+    shared_wm_scene_draw_ir_composition_with_content,
     shared_wm_scene_render_taskbar_context_to_backend,
     shared_wm_scene_render_taskbar_context_to_pixel_buffer,
-    shared_wm_scene_render_desktop_chrome
+    shared_wm_scene_render_desktop_chrome,
+    shared_wm_top_content_frame_index,
+    shared_wm_scene_window_content_rect_with_titlebar
 }
 use common.ui.taskbar_model.{WindowRef, TrayItem, TaskbarModel}
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.dirty_rect.{DirtyRegion}
 use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_revision, content_paint_full_height}
 use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, shared_mdi_scene_from_render_windows}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, engine2d_resolved_draw_ir_image}
 use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
 use common.ui.wm_chrome_theme.{wm_chrome_theme, WmChromeColors}
 use common.color.convert.{int_to_hex}
@@ -42,10 +49,8 @@ extern fn rt_time_now_unix_micros() -> i64
 
 val HOST_WM_IDLE_SLEEP_MS: i32 = 16
 
-# When true, render_frame() always uses the direct-draw chrome path and never
-# the fast CSS/GUI-web lane, regardless of Metal availability. Lets callers pin
-# the historical byte-identical direct chrome contract (e.g. deterministic unit
-# tests on Metal-capable hosts, or a config that disables GPU chrome).
+# When true, render_frame_engine2d() rejects the canonical Draw IR lane so the
+# caller can select the historical byte-identical direct compatibility renderer.
 var _host_chrome_force_direct: bool = false
 
 fn host_wm_force_direct_chrome(enabled: bool):
@@ -714,65 +719,7 @@ class HostCompositor:
             self.backend.present_rect(bounds.x, bounds.y, bounds.width, bounds.height)
         true
 
-    me render_frame():
-        val theme = wm_chrome_theme()
-        self.render_revision = self.render_revision + 1
-        val total = if self.width > 0 and self.height > 0: self.width * self.height else: 0
-        # Fast CSS/GUI-web chrome lane: express the WM chrome (desktop backdrop,
-        # window bodies, titlebars, close buttons, titles) as ONE HTML/CSS
-        # document whose element colors come from wm_chrome_theme(), rasterize it
-        # on the native Engine2D fast path (Metal -> one-shot readback), blit the
-        # chrome pixels, then compose each window's HTML content on top exactly as
-        # before. This routes the chrome through the same web render lane as the
-        # window content — the "single HTML/CSS representation for WM UI".
-        #
-        # Caching contract: the CSS chrome pixels are re-rendered ONLY when the
-        # chrome-relevant scene state changes — window list / geometry / focus /
-        # minimized / desktop size / theme colors, hashed by
-        # host_chrome_scene_fingerprint(). On an unchanged fingerprint the cached
-        # buffer is reused (a cheap full-frame blit), so a settled desktop costs
-        # one blit per present instead of a full ~1.4s CSS render. Window content
-        # is NOT part of the fingerprint (it is redrawn every frame regardless),
-        # so content updates never invalidate the chrome cache.
-        #
-        # Incremental-frame policy: during an active drag/resize every frame's
-        # geometry differs, which would force a full ~1.4s CSS re-render per frame
-        # (unusably slow for a 60fps interaction). While self.dragging /
-        # self.resizing is set we therefore skip the fast lane and direct-draw the
-        # chrome; the CSS chrome re-renders once on the next settled frame.
-        # kind:"image"/"motion" backgrounds always route through the
-        # direct-draw lane below instead: the CSS/GUI-web lane rasterizes ONE
-        # opaque flat-color backdrop element with no image/motion compositing
-        # seam, so there is no way to blit a resolved background surface
-        # underneath it without redesigning that raster path (out of scope
-        # here). Gating on kind:"color" (the only kind this lane ever handled)
-        # keeps the unset/color-background lane byte-identical.
-        # Production core always uses the shared direct Draw-IR chrome path.
-        # Fallback (Metal unavailable, or active drag/resize): direct-draw the
-        # chrome. BYTE-IDENTICAL to the historical host compositor chrome contract
-        # (plus the taskbar dock, which the hit-test always honored but no
-        # render path ever drew).
-        # Resolve the configured background (color/image/motion) before
-        # drawing chrome — the SAME one-stop resolver the shared-MDI
-        # production lane uses (shared_wm_scene_render_to_backend). For the
-        # default kind:"color" background this resolves to
-        # (theme.compositor_bg, nil surface), which
-        # shared_wm_scene_render_desktop_chrome renders via backend.clear(...)
-        # — byte-identical to the historical hardcoded
-        # render_shared_mdi_desktop_chrome(self.backend, ..., theme) call this
-        # replaces.
-        val resolved_bg = self._resolve_background(theme, rt_time_now_unix_micros())
-        # I-item-4 fast no-op path: only the chrome paint + final scene
-        # composite + present are gated on accumulated damage (ponytail:
-        # full recomposite on any damage; partial/rect-scoped recomposition
-        # is deferred until profiling demands it). The content-frame
-        # building loop below keeps running every call regardless of
-        # `had_damage` -- it owns its own per-window cache hit/miss
-        # bookkeeping (task #15's WebRenderPixelArtifactCache) which must
-        # stay live independent of whether this frame actually presents.
-        val had_damage = not self.dirty.is_empty()
-        if had_damage and not self.native_pixel_lane:
-            shared_wm_scene_render_desktop_chrome(self.backend, self.width, self.height, theme, resolved_bg.color, resolved_bg.surface)
+    me _taskbar_render_input(theme: WmChromeColors, frame_time: i64) -> SharedWmTaskbarRenderInput:
         var shared_windows: [SharedMdiRenderWindow] = []
         val window_count = self.windows.len()
         var i = 0
@@ -781,13 +728,8 @@ class HostCompositor:
             val scroll = self.scroll_offset_for(win.id) as i32
             shared_windows.push(host_window_to_shared_mdi_render_window(win, scroll))
             i = i + 1
-        # Route host WM chrome/taskbar through the shared Simple GUI internal-
-        # window scene projection. Host-only content composition below keeps
-        # its scroll/cache state, but chrome/taskbar geometry and metadata come
-        # from the same SharedWmScene boundary used by SimpleOS framebuffer
-        # rendering.
-        var simple_gui_scene = shared_mdi_scene_from_render_windows(self.width, self.height, "host-compositor", shared_windows)
-        simple_gui_scene.background = if self.background.kind == WM_BACKGROUND_KIND_COLOR: shared_wm_background_color(theme.compositor_bg) else: self.background
+        var scene = shared_mdi_scene_from_render_windows(self.width, self.height, "host-compositor", shared_windows)
+        scene.background = if self.background.kind == WM_BACKGROUND_KIND_COLOR: shared_wm_background_color(theme.compositor_bg) else: self.background
         var content_frames: [WmContentFrame] = []
         i = 0
         while i < window_count:
@@ -800,18 +742,85 @@ class HostCompositor:
                 val cache = self._content_cache_for(win.id, cw, full_h, "auto")
                 val content_revision = simple_web_content_revision(win.title, win.content, cw, ch, scroll)
                 content_frames.push(simple_web_content_frame_cached(cache, win.id.to_text(), self.render_revision, content_revision, HOST_WM_CORE_DEFAULT_THEME_ID, win.title, win.content, cw, ch, scroll))
-                # Native lane keeps caches in the scalar parallel arrays owned
-                # by _content_cache_for; the Dict mirror is only for the
-                # non-native lane (native runtime has no Dict.set owner —
-                # "function not found: set" at runtime).
                 if not self.native_pixel_lane:
                     self.content_caches.set(win.id, cache)
             i = i + 1
         val revision = WmSceneRevision(scene_revision: self.render_revision, input_revision: self.render_revision, taskbar_revision: self.render_revision)
         val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 44)
+        val render_input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: content_frames, metrics: metrics, t_micros: frame_time)
+        SharedWmTaskbarRenderInput(render: render_input, taskbar: self.taskbar_model(), clock_label: host_taskbar_clock_label(frame_time))
+
+    me _reject_engine2d_frame() -> bool:
+        self.render_revision = self.render_revision - 1
+        false
+
+    me render_frame_engine2d(executor: Engine2dCompositorBackend) -> bool:
+        if not self.native_pixel_lane or host_wm_chrome_force_direct() or self.background.kind != WM_BACKGROUND_KIND_COLOR or executor.w != self.width or executor.h != self.height:
+            return false
+        self.render_revision = self.render_revision + 1
+        val had_damage = not self.dirty.is_empty()
+        val taskbar_input = self._taskbar_render_input(wm_chrome_theme(), rt_time_now_unix_micros())
+        if not had_damage:
+            self.skipped_frame_count = self.skipped_frame_count + 1
+            return true
+
+        val scene = taskbar_input.render.scene
+        val frames = taskbar_input.render.content_frames
+        var images: [Engine2dResolvedDrawIrImage] = []
+        var expected_images = 0
+        var wi = 0
+        while wi < scene.windows.len():
+            val window = scene.windows[wi]
+            val content = shared_wm_scene_window_content_rect_with_titlebar(window, 28)
+            if not window.minimized and content.width > 0 and content.height > 0:
+                expected_images = expected_images + 1
+                val frame_index = shared_wm_top_content_frame_index(frames, self.render_revision, window.window_id, content.width, content.height)
+                if frame_index >= 0:
+                    val frame = frames[frame_index]
+                    val image_uri = shared_wm_content_frame_image_uri(frame)
+                    var duplicate_uri = image_uri == ""
+                    var ii = 0
+                    while ii < images.len():
+                        if images[ii].image_uri == image_uri:
+                            duplicate_uri = true
+                        ii = ii + 1
+                    if duplicate_uri:
+                        return self._reject_engine2d_frame()
+                    images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))
+                else:
+                    return self._reject_engine2d_frame()
+            wi = wi + 1
+        if images.len() != expected_images or frames.len() != expected_images:
+            return self._reject_engine2d_frame()
+
+        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar_input.taskbar, frames, DRAW_IR_BACKEND_AUTO, 1000, taskbar_input.clock_label, 0)
+        val result = executor.render_draw_ir_composition(composition, images)
+        if result.fallback_required or result.skipped_command_count != 0 or result.rendered_command_count <= 0 or result.pixels.len() != self.width * self.height:
+            return self._reject_engine2d_frame()
+        self.pixel_backend.blit_pixels(0, 0, self.width, self.height, result.pixels)
+        self.pixel_backend.present()
+        self.dirty.clear()
+        true
+
+    me render_frame():
+        val theme = wm_chrome_theme()
+        self.render_revision = self.render_revision + 1
+        # Compatibility renderer for explicit direct mode, image/motion
+        # backgrounds, and same-frame fallback from render_frame_engine2d.
+        val resolved_bg = self._resolve_background(theme, rt_time_now_unix_micros())
+        # I-item-4 fast no-op path: only the chrome paint + final scene
+        # composite + present are gated on accumulated damage (ponytail:
+        # full recomposite on any damage; partial/rect-scoped recomposition
+        # is deferred until profiling demands it). The content-frame
+        # building loop below keeps running every call regardless of
+        # `had_damage` -- it owns its own per-window cache hit/miss
+        # bookkeeping (task #15's WebRenderPixelArtifactCache) which must
+        # stay live independent of whether this frame actually presents.
+        val had_damage = not self.dirty.is_empty()
+        if had_damage and not self.native_pixel_lane:
+            shared_wm_scene_render_desktop_chrome(self.backend, self.width, self.height, theme, resolved_bg.color, resolved_bg.surface)
         val frame_time = rt_time_now_unix_micros()
-        val render_input = SharedWmRenderInput(scene: simple_gui_scene, revision: revision, content_frames: content_frames, metrics: metrics, t_micros: frame_time)
-        val taskbar_input = SharedWmTaskbarRenderInput(render: render_input, taskbar: self.taskbar_model(), clock_label: host_taskbar_clock_label(frame_time))
+        val taskbar_input = self._taskbar_render_input(theme, frame_time)
         if had_damage:
             if self.native_pixel_lane:
                 shared_wm_scene_render_taskbar_context_to_pixel_buffer(self.pixel_backend, taskbar_input)
