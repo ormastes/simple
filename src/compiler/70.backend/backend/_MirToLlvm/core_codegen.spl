@@ -341,7 +341,7 @@ impl MirTextCodegen for MirToLlvm:
             case Aggregate(dest, kind, operands): self.translate_aggregate(dest, kind, operands)
             case GetField(dest, base, field): self.translate_get_field(dest, base, field)
             case SetField(base, field, value): self.translate_set_field(base, field, value)
-            case Cast(dest, operand, target): self.translate_cast(dest, operand, target)
+            case Cast(dest, operand, target): self.translate_cast_dispatch(dest, operand, target)
             case Bitcast(dest, operand, target): self.translate_bitcast(dest, operand, target)
             case Call(dest, func, args): self.translate_call(dest, func, args)
             case CallIndirect(dest, ptr, args, sig): self.translate_call_indirect(dest, ptr, args, sig)
@@ -496,6 +496,54 @@ impl MirTextCodegen for MirToLlvm:
         val tmp = self.builder.fresh_local()
         self.builder.emit("  {tmp} = {cast_inst} {src_ty} {value} to {dst_ty}")
         tmp
+
+    # floatedge lane (-0.0 sign-loss fix): translate_cast's shared body
+    # (aggregate_intrinsics.spl -- out of scope for this lane, see
+    # CONFLICT-FLAG below) finalizes EVERY Cast MIR instruction's result
+    # with a value-defining identity op: `fadd target_ty, 0.0` for a float
+    # target. That is IEEE754 value-preserving for any finite/nonzero
+    # operand, but NOT for a genuine `-0.0` -- `-0.0 + 0.0 == +0.0` under
+    # the default round-to-nearest rule for opposite-signed zero addition
+    # -- so it silently flips the sign of any negative-zero float that
+    # passes through an `as`-cast, or through the redundant same-type Cast
+    # MIR lowering inserts for a type-annotated `val a: f64 = -0.0`
+    # declaration (confirmed via SIMPLE_KEEP_LLVM_IR=1 dump: the `fneg`
+    # correctly produces -0.0, then the very next `; cast` fadd flips it
+    # back to +0.0 before it ever reaches rt_raw_f64_to_string in
+    # runtime_native.c -- the runtime cannot recover a sign the codegen
+    # already destroyed). `x + (-0.0) == x` for every finite x AND for
+    # both zero signs (same-sign zero addition keeps its sign), so ending
+    # with `-0.0` instead of `0.0` is a strictly safer, universally
+    # correct identity -- not a special case carved out for the literal
+    # -0.0 probe. Only the float-targeted case is intercepted here; every
+    # other Cast (int/ptr) is unaffected and still routes to the existing
+    # translate_cast.
+    #
+    # CONFLICT-FLAG: this duplicates (with one changed constant) the tail
+    # of aggregate_intrinsics.spl's translate_cast, which is out of scope
+    # for this lane's ownership boundary. The canonical fix belongs there
+    # (swap both `fadd {target_ty} {casted}, 0.0  ; cast` occurrences to
+    # `-0.0`) -- once that file is back in scope this shim + the dispatch
+    # override above should be deleted and Cast routed straight back to
+    # self.translate_cast.
+    me translate_cast_dispatch(dest: LocalId, operand: MirOperand, target: MirType):
+        val cast_target_ty = self.valid_llvm_type(self.llvm_type_text(target))
+        if is_float_type(cast_target_ty):
+            self.translate_cast_float_signsafe(dest, operand, target)
+        else:
+            self.translate_cast(dest, operand, target)
+
+    me translate_cast_float_signsafe(dest: LocalId, operand: MirOperand, target: MirType):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val operand_val = self.translate_operand(operand)
+        val src_ty = self.valid_llvm_type(self.get_operand_type(operand))
+        val target_ty = self.valid_llvm_type(self.llvm_type_text(target))
+        self.local_types[dest_id] = target_ty
+        self.value_types[dest_name] = target_ty
+        self.unsigned_locals[dest_id] = self.is_unsigned_mir_kind(target.kind)
+        val casted = self.value_as_type_signed(operand_val, src_ty, target_ty, self.get_operand_unsigned(operand))
+        self.builder.emit("  {dest_name} = fadd {target_ty} {casted}, -0.0  ; cast (sign-safe)")
 
     me remember_function_return_type(name: text, ret_ty: text):
         self.function_return_types[name] = ret_ty
@@ -660,8 +708,13 @@ impl MirTextCodegen for MirToLlvm:
             case Int(v):
                 self.builder.emit("  {dest_name} = add {llvm_ty} {v}, 0  ; const int")
             case Float(v):
+                # -0.0 sign fix: `fadd fv, 0.0` flips a literal -0.0 to
+                # +0.0 (opposite-signed zero addition rounds to +0.0);
+                # `fadd fv, -0.0` is value-identical for every other float
+                # (nonzero finite/inf/nan unaffected by adding either
+                # signed zero) and additionally preserves -0.0's sign.
                 val fv = ensure_float_literal("{v}")
-                self.builder.emit("  {dest_name} = fadd {llvm_ty} {fv}, 0.0  ; const float")
+                self.builder.emit("  {dest_name} = fadd {llvm_ty} {fv}, -0.0  ; const float")
             case Bool(v):
                 val bval = if v: "1" else: "0"
                 self.bool_locals[dest_id] = true
@@ -776,7 +829,11 @@ impl MirTextCodegen for MirToLlvm:
         self.unsigned_locals[dest_id] = self.unsigned_locals.get(src_id) ?? false
 
         if is_float_type(ty):
-            self.builder.emit("  {dest_name} = fadd {ty} {src_name}, 0.0  ; {comment}")
+            # -0.0 sign fix: see translate_cast_float_signsafe above for
+            # the full rationale -- `fadd x, -0.0` is the bit-preserving
+            # identity for every float value including negative zero,
+            # whereas `fadd x, 0.0` silently rounds -0.0 to +0.0.
+            self.builder.emit("  {dest_name} = fadd {ty} {src_name}, -0.0  ; {comment}")
         elif ty == "ptr":
             val nit = self.native_int()
             self.builder.emit("  {dest_name} = getelementptr i8, ptr {src_name}, {nit} 0  ; {comment}")

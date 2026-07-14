@@ -901,24 +901,61 @@ int64_t rt_raw_bool_to_string(int64_t raw) {
  * correct-by-construction with 0.1 -> "0.1", 1.0/3.0 -> "0.3333333333333333"
  * (16 3's). rt_to_string()'s existing tagged/boxed-ANY float path uses raw
  * %.17g (0.1 -> "0.10000000000000001") and does NOT match -- do not reuse it.
- * Algorithm: (1) try the fewest fixed decimal places (0..17) whose %.*f
+ * Algorithm: (1) try the fewest fixed decimal places (0..324) whose %.*f
  * rendering round-trips (strtod) back to the exact same double -- %f (never
  * %e) avoids mismatches like 100.0 -> "1e+02"; (2) if that shortest rendering
  * is integer-looking (no '.', and no letters, so finite -- inf/nan carry
  * letters and pass through untouched), append ".0" (2 -> "2.0", -0 -> "-0.0",
  * 0 -> "0.0"), giving Python-repr float display.
+ *
+ * Bound 324 (not 17): a tiny-magnitude double needs that many fractional
+ * digits before %.*f's fixed-point rendering has enough significant digits
+ * to round-trip -- e.g. 1e-100 needs prec=100, and the smallest subnormal
+ * (~4.94e-324, right down to DBL_MIN) needs prec=324 (verified by brute-force
+ * search over the full double range). The old `<= 17` bound silently fell
+ * through to the `prec > 17` fallback for any |v| below ~1e-17, which
+ * rendered as "0.00000000000000000" (17 zeros) -- a STRING THAT PARSES BACK
+ * TO 0.0, not the original nonzero value: a silent-wrong loss of the entire
+ * value, not merely a shortest-vs-longest cosmetic mismatch against the
+ * oracle. 1e17-magnitude values and above still resolve at prec=0 (integers
+ * at that scale have no fractional part), so raising the bound costs nothing
+ * for the common case and only pays for genuinely tiny magnitudes.
  */
 int64_t rt_raw_f64_to_string(double v) {
-    char buf[400];
+    char buf[512];
     int len = 0;
     int prec;
+    /* NaN never round-trips (`NaN == NaN` is false by IEEE754 definition,
+     * so the strtod-equality check below can never break the loop early --
+     * every one of the 325 iterations would run to no purpose) and glibc's
+     * %f ignores precision for it anyway, always rendering the same "nan"/
+     * "-nan". Handle it up front: skip the wasted search, and rewrite the
+     * libc-lowercase spelling to "NaN"/"-NaN" to match the oracle's actual
+     * print output (verified via `bin/simple run` on `0.0/0.0`), which is
+     * NOT Python's `repr(float('nan'))` (that's lowercase "nan") -- this
+     * oracle is the interpreter, not Python, and its casing is what native
+     * must match. */
+    if (isnan(v)) {
+        len = snprintf(buf, sizeof(buf), "%f", v);
+        if (len > 0 && (size_t)len < sizeof(buf)) {
+            if (buf[0] == '-' && len >= 4) {
+                buf[1] = 'N'; buf[2] = 'a'; buf[3] = 'N';
+                len = 4;
+            } else if (len >= 3) {
+                buf[0] = 'N'; buf[1] = 'a'; buf[2] = 'N';
+                len = 3;
+            }
+        }
+        if (len < 0) len = 0;
+        return rt_string_new((const uint8_t*)buf, (uint64_t)len);
+    }
     /* (1) shortest fixed-point rendering that round-trips exactly. */
-    for (prec = 0; prec <= 17; prec++) {
+    for (prec = 0; prec <= 324; prec++) {
         len = snprintf(buf, sizeof(buf), "%.*f", prec, v);
         if (strtod(buf, NULL) == v) break;
     }
-    if (prec > 17) {
-        len = snprintf(buf, sizeof(buf), "%.17f", v);
+    if (prec > 324) {
+        len = snprintf(buf, sizeof(buf), "%.324f", v);
     }
     if (len < 0) len = 0;
     /* (2) force a ".0" on an integer-looking finite value (no '.', no
