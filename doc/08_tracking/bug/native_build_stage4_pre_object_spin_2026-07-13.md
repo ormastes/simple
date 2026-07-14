@@ -350,6 +350,17 @@ that contract before provider components are accepted. macOS, FreeBSD, and
 Windows full-CLI capsule preparation remain fail-closed until their archive
 localization/constructor gates are ported.
 
+A disabled native-GNU/Linux component-builder slice now stages three independently
+validated archives for timestamp/progress, SQLite, and memtrack ownership. The
+timestamp source is physically split from the core-C clock owner; SQLite uses
+the canonical two-argument core string ABI; each archive is constrained to one
+member, an exact export/undefined-symbol contract, no constructors, pairwise
+definition disjointness, and verified libc/SQLite ownership. Source-level
+behavior probes cover SQLite strings through core-C and the memtrack lifecycle.
+These archives are not selected by any production linker path. The aggregate
+requested-owner validator, cache fingerprint, remaining providers (including
+CUDA/SMF/GPU), and fresh strict runtime evidence remain open.
+
 Related:
 
 - `doc/08_tracking/bug/native_build_entry_closure_quadratic_hang_2026-07-12.md`

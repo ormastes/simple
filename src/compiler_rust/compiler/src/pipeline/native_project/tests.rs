@@ -768,7 +768,14 @@ fn test_entry_closure_resolves_project_src_imports_from_narrow_source_roots() {
 #[test]
 fn test_bootstrap_entry_closure_avoids_driver_package_hub() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest_dir.parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+    let repo_root = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let entry = repo_root.join("src/app/cli/bootstrap_main.spl");
     let builder = NativeProjectBuilder::new(repo_root.clone(), repo_root.join("bin/bootstrap-test"))
         .config(NativeBuildConfig {
@@ -781,11 +788,21 @@ fn test_bootstrap_entry_closure_avoids_driver_package_hub() {
         .entry_file(entry.clone());
 
     let files = builder.discover_files().unwrap();
-    assert!(files.iter().any(|path| same_file_path(path, &repo_root.join("src/compiler/80.driver/driver.spl"))));
-    assert!(files.iter().any(|path| same_file_path(path, &repo_root.join("src/compiler/80.driver/watcher/smf_manifest.spl"))));
-    assert!(!files.iter().any(|path| same_file_path(path, &repo_root.join("src/compiler/80.driver/__init__.spl"))));
-    assert!(!files.iter().any(|path| path.starts_with(repo_root.join("src/app/llm_caret"))));
-    assert!(!files.iter().any(|path| path.starts_with(repo_root.join("src/app/leak_finder"))));
+    assert!(files
+        .iter()
+        .any(|path| same_file_path(path, &repo_root.join("src/compiler/80.driver/driver.spl"))));
+    assert!(files
+        .iter()
+        .any(|path| same_file_path(path, &repo_root.join("src/compiler/80.driver/watcher/smf_manifest.spl"))));
+    assert!(!files
+        .iter()
+        .any(|path| same_file_path(path, &repo_root.join("src/compiler/80.driver/__init__.spl"))));
+    assert!(!files
+        .iter()
+        .any(|path| path.starts_with(repo_root.join("src/app/llm_caret"))));
+    assert!(!files
+        .iter()
+        .any(|path| path.starts_with(repo_root.join("src/app/leak_finder"))));
 }
 
 #[test]
@@ -1377,14 +1394,279 @@ fn test_compiler_backfill_archive_rejects_provider_symbol_overlap() {
         &["void rt_cranelift_requested_hook(void) {}\n"],
     );
 
-    let error = build_compiler_backfill_archive(
-        &compiler,
-        std::slice::from_ref(&provider),
-        &temp.path().join("output"),
-    )
-    .unwrap_err();
+    let error =
+        build_compiler_backfill_archive(&compiler, std::slice::from_ref(&provider), &temp.path().join("output"))
+            .unwrap_err();
     assert!(error.contains(&provider.display().to_string()));
     assert!(error.contains("rt_cranelift_requested_hook"));
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn test_stage4_cli_c_provider_archives_have_exact_members_and_contracts() {
+    let temp = tempfile::tempdir().unwrap();
+    let archives = build_stage4_cli_c_provider_archives(temp.path()).unwrap();
+    let expected = [
+        ("libsimple_stage4_time.a", "runtime_timestamp.o", "runtime_timestamp.c"),
+        ("libsimple_stage4_sqlite.a", "runtime_sqlite.o", "runtime_sqlite.c"),
+        (
+            "libsimple_stage4_memtrack.a",
+            "runtime_memtrack.o",
+            "runtime_memtrack.c",
+        ),
+    ];
+    assert_eq!(archives.len(), expected.len());
+    for (archive, (archive_name, member_name, source_name)) in archives.iter().zip(expected) {
+        assert_eq!(archive.file_name().and_then(|name| name.to_str()), Some(archive_name));
+        assert_eq!(archive_members(archive).unwrap(), [member_name]);
+        super::tools::validate_stage4_cli_c_provider_archive_contract(archive, source_name).unwrap();
+    }
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn test_stage4_cli_c_providers_are_disjoint_from_current_core_c() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = build_core_c_runtime_library(&temp.path().join("core")).unwrap();
+    let compiler = build_compiler_backfill_test_archive(
+        temp.path(),
+        "stage4_clean_compiler",
+        &["void rt_cranelift_requested_hook(void) {}\n"],
+    );
+    let providers = build_stage4_cli_c_provider_archives(&temp.path().join("providers")).unwrap();
+
+    validate_stage4_cli_c_provider_archive_disjointness(&core, &compiler, &providers).unwrap();
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn run_stage4_c_probe(
+    root: &Path,
+    name: &str,
+    source_text: &str,
+    archives: &[&Path],
+    link_args: &[&str],
+    run_args: &[&Path],
+) {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let source = root.join(format!("{name}.c"));
+    let executable = root.join(name);
+    std::fs::write(&source, source_text).unwrap();
+    let mut command = std::process::Command::new(find_c_compiler());
+    command.arg("-I").arg(repo_root.join("src/runtime")).arg(&source);
+    for archive in archives {
+        command.arg(archive);
+    }
+    let compile = command.args(link_args).arg("-o").arg(&executable).output().unwrap();
+    assert!(
+        compile.status.success(),
+        "failed to compile {name}: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let output = std::process::Command::new(&executable).args(run_args).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{name} failed: status={} stdout={:?} stderr={:?}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn test_stage4_memtrack_provider_real_behavior() {
+    let temp = tempfile::tempdir().unwrap();
+    let providers = build_stage4_cli_c_provider_archives(&temp.path().join("providers")).unwrap();
+    let dump = temp.path().join("memtrack.dump");
+    run_stage4_c_probe(
+        temp.path(),
+        "stage4_memtrack_probe",
+        r#"
+#include <stdint.h>
+#include "runtime_memtrack.h"
+
+int main(int argc, char **argv) {
+    int first = 1;
+    int second = 2;
+    if (argc != 2) return 1;
+    spl_memtrack_reset();
+    spl_memtrack_enable();
+    if (!spl_memtrack_is_enabled()) return 2;
+    int64_t snapshot = spl_memtrack_snapshot();
+    spl_memtrack_record(&first, 12, "first");
+    spl_memtrack_record(&second, 20, "second");
+    if (spl_memtrack_count_since(snapshot) != 2) return 3;
+    if (spl_memtrack_bytes_since(snapshot) != 32) return 4;
+    if (spl_memtrack_live_count() != 2 || spl_memtrack_live_bytes() != 32) return 5;
+    spl_memtrack_unrecord(&first);
+    if (spl_memtrack_count_since(snapshot) != 1) return 6;
+    if (spl_memtrack_bytes_since(snapshot) != 20) return 7;
+    if (spl_memtrack_live_count() != 1 || spl_memtrack_live_bytes() != 20) return 8;
+    spl_memtrack_dump_since(snapshot, argv[1]);
+    spl_memtrack_reset();
+    if (spl_memtrack_snapshot() != 0) return 9;
+    if (spl_memtrack_live_count() != 0 || spl_memtrack_live_bytes() != 0) return 10;
+    spl_memtrack_disable();
+    return 0;
+}
+"#,
+        &[providers[2].as_path()],
+        &[],
+        &[dump.as_path()],
+    );
+    let dump_text = std::fs::read_to_string(dump).unwrap();
+    assert!(dump_text.contains("20 second"));
+    assert!(!dump_text.contains("first"));
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn test_stage4_sqlite_provider_round_trips_core_strings() {
+    let temp = tempfile::tempdir().unwrap();
+    let providers = build_stage4_cli_c_provider_archives(&temp.path().join("providers")).unwrap();
+    let core = build_core_c_runtime_library(&temp.path().join("core")).unwrap();
+    run_stage4_c_probe(
+        temp.path(),
+        "stage4_sqlite_probe",
+        r#"
+#include <stdint.h>
+#include <string.h>
+#include "runtime.h"
+
+extern int64_t rt_sqlite_open_memory(void);
+extern int64_t rt_sqlite_close(int64_t handle);
+extern int64_t rt_sqlite_execute(int64_t connection, int64_t sql);
+extern int64_t rt_sqlite_query(int64_t connection, int64_t sql);
+extern int64_t rt_sqlite_query_next(int64_t statement);
+extern void rt_sqlite_query_done(int64_t statement);
+extern int64_t rt_sqlite_column_name(int64_t statement, int64_t index);
+extern int64_t rt_sqlite_column_text(int64_t statement, int64_t index);
+extern int64_t rt_sqlite_error_message(int64_t connection);
+
+static int64_t text(const char *value) {
+    return rt_string_new((const uint8_t *)value, strlen(value));
+}
+
+static int text_equals(int64_t value, const char *expected) {
+    uint64_t len = strlen(expected);
+    return rt_string_len(value) == (int64_t)len && memcmp(rt_string_data(value), expected, len) == 0;
+}
+
+static int text_contains(int64_t value, const char *needle) {
+    uint64_t len = (uint64_t)rt_string_len(value);
+    uint64_t needle_len = strlen(needle);
+    const uint8_t *data = rt_string_data(value);
+    if (!data || needle_len > len) return 0;
+    for (uint64_t i = 0; i + needle_len <= len; i++) {
+        if (memcmp(data + i, needle, needle_len) == 0) return 1;
+    }
+    return 0;
+}
+
+int main(void) {
+    __simple_runtime_init();
+    int64_t connection = rt_sqlite_open_memory();
+    if (connection == rt_value_nil()) return 1;
+    if (rt_sqlite_execute(connection, text("CREATE TABLE item(label TEXT)")) != rt_value_int(0)) return 2;
+    if (rt_sqlite_execute(connection, text("INSERT INTO item VALUES ('hello')")) != rt_value_int(0)) return 3;
+    int64_t statement = rt_sqlite_query(connection, text("SELECT label AS item_name FROM item"));
+    if (statement == rt_value_nil()) return 4;
+    if (rt_sqlite_query_next(statement) != rt_value_bool(1)) return 5;
+    int64_t index = rt_value_int(0);
+    if (!text_equals(rt_sqlite_column_name(statement, index), "item_name")) return 6;
+    if (!text_equals(rt_sqlite_column_text(statement, index), "hello")) return 7;
+    rt_sqlite_query_done(statement);
+    if (rt_sqlite_execute(connection, text("invalid sql")) != rt_value_int(-1)) return 8;
+    if (!text_contains(rt_sqlite_error_message(connection), "syntax")) return 9;
+    if (rt_sqlite_close(connection) != rt_value_int(0)) return 10;
+    __simple_runtime_shutdown();
+    return 0;
+}
+"#,
+        &[providers[1].as_path(), core.as_path()],
+        &["-lsqlite3", "-lpthread", "-ldl", "-lm"],
+        &[],
+    );
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn test_stage4_cli_c_provider_contract_rejects_unexpected_global_and_undefined() {
+    let temp = tempfile::tempdir().unwrap();
+    let archive = build_compiler_backfill_test_archive(
+        temp.path(),
+        "bad_sqlite_provider",
+        &["extern void surprise(void); long rt_sqlite_open(long value) { surprise(); return value; } void unexpected_global(void) {}\n"],
+    );
+
+    let error =
+        super::tools::validate_stage4_cli_c_provider_archive_contract(&archive, "runtime_sqlite.c").unwrap_err();
+    assert!(error.contains("unexpected_global"));
+    assert!(error.contains("missing undefined ["));
+    assert!(error.contains("unexpected undefined [surprise]"));
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn test_stage4_cli_c_provider_contract_rejects_constructor_and_duplicate_definition() {
+    let temp = tempfile::tempdir().unwrap();
+    let constructor = build_compiler_backfill_test_archive(
+        temp.path(),
+        "constructor_provider",
+        &["__attribute__((constructor)) static void start(void) {} void rt_time_now_seconds_f64(void) {}\n"],
+    );
+    let error =
+        super::tools::validate_stage4_cli_c_provider_archive_contract(&constructor, "runtime_timestamp.c").unwrap_err();
+    assert!(error.contains("constructor/destructor sections"));
+
+    let duplicate = build_compiler_backfill_test_archive(
+        temp.path(),
+        "duplicate_provider",
+        &[
+            "void rt_time_now_seconds_f64(void) {}\n",
+            "void rt_time_now_seconds_f64(void) {}\n",
+        ],
+    );
+    let error =
+        super::tools::validate_stage4_cli_c_provider_archive_contract(&duplicate, "runtime_timestamp.c").unwrap_err();
+    assert!(error.contains("rt_time_now_seconds_f64 (2)"));
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn test_stage4_cli_c_provider_disjointness_rejects_overlap() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = build_compiler_backfill_test_archive(
+        temp.path(),
+        "stage4_core",
+        &[r#"
+long rt_string_new(void) { return 0; }
+long rt_string_data(void) { return 0; }
+double rt_time_now_seconds_f64(void) { return 0.0; }
+"#],
+    );
+    let compiler =
+        build_compiler_backfill_test_archive(temp.path(), "stage4_compiler", &["void compiler_only(void) {}\n"]);
+    let providers = build_stage4_cli_c_provider_archives(&temp.path().join("providers")).unwrap();
+
+    let error = validate_stage4_cli_c_provider_archive_disjointness(&core, &compiler, &providers).unwrap_err();
+    assert!(error.contains("`rt_time_now_seconds_f64`"));
+    assert!(error.contains("both core and runtime_timestamp.c"));
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn test_stage4_cli_c_provider_disjointness_requires_exact_component_set() {
+    let missing = Path::new("missing");
+    let error = validate_stage4_cli_c_provider_archive_disjointness(missing, missing, &[]).unwrap_err();
+    assert!(error.contains("requires exactly 3 providers (found 0)"));
 }
 
 #[cfg(target_os = "linux")]

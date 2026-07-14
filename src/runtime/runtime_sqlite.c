@@ -9,9 +9,10 @@
  * Link:  -lsqlite3
  */
 
+#include "runtime.h"
+
 #include <stdint.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sqlite3.h>
 
 /* Tagged value helpers — must match runtime.h / runtime_native.c */
@@ -31,20 +32,20 @@ static inline RtValue from_ptr(void *p) { return (RtValue)((uintptr_t)p | TAG_HE
 static inline void *as_ptr(RtValue v) { return (void *)((uintptr_t)v & ~TAG_MASK); }
 static inline int is_nil(RtValue v) { return v == (RtValue)SPECIAL_NIL; }
 
-/* String helpers — Simple strings are heap-allocated with a length prefix.
-   The runtime's rt_string_new / rt_string_data are the canonical accessors.
-   For the SQLite binding we declare them as extern. */
-extern RtValue rt_string_new(const char *s);
-extern const char *rt_string_data(RtValue s);
+static uint64_t c_string_len(const char *s) {
+    uint64_t len = 0;
+    while (s[len] != '\0') len++;
+    return len;
+}
 
 static RtValue make_string(const char *s) {
     if (!s) return (RtValue)SPECIAL_NIL;
-    return rt_string_new(s);
+    return (RtValue)rt_string_new((const uint8_t *)s, c_string_len(s));
 }
 
 static const char *get_string(RtValue v) {
     if (is_nil(v)) return NULL;
-    if ((v & TAG_MASK) == TAG_HEAP) return rt_string_data(v);
+    if ((v & TAG_MASK) == TAG_HEAP) return (const char *)rt_string_data((int64_t)v);
     return NULL;
 }
 
@@ -219,15 +220,15 @@ void rt_sqlite_finalize(RtValue stmt_val) {
 }
 
 RtValue rt_sqlite_begin(RtValue conn) {
-    return rt_sqlite_execute(conn, rt_string_new("BEGIN"));
+    return rt_sqlite_execute(conn, make_string("BEGIN"));
 }
 
 RtValue rt_sqlite_commit(RtValue conn) {
-    return rt_sqlite_execute(conn, rt_string_new("COMMIT"));
+    return rt_sqlite_execute(conn, make_string("COMMIT"));
 }
 
 RtValue rt_sqlite_rollback(RtValue conn) {
-    return rt_sqlite_execute(conn, rt_string_new("ROLLBACK"));
+    return rt_sqlite_execute(conn, make_string("ROLLBACK"));
 }
 
 RtValue rt_sqlite_last_insert_rowid(RtValue conn) {

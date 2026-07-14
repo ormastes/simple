@@ -622,6 +622,565 @@ fn forbidden_archive_sections(path: &Path) -> Result<Vec<&'static str>, String> 
     .collect())
 }
 
+#[derive(Clone, Copy)]
+enum Stage4CliCUndefinedPolicy {
+    Time,
+    Sqlite,
+    Memtrack,
+}
+
+struct Stage4CliCProviderSpec {
+    source: &'static str,
+    archive: &'static str,
+    definitions: &'static [&'static str],
+    undefined: Stage4CliCUndefinedPolicy,
+}
+
+const STAGE4_C_TIME_DEFINITIONS: &[&str] = &[
+    "rt_progress_get_elapsed_seconds",
+    "rt_progress_init",
+    "rt_progress_reset",
+    "rt_time_now_seconds_f64",
+    "rt_timestamp_add_days",
+    "rt_timestamp_diff_days",
+    "rt_timestamp_from_components",
+    "rt_timestamp_get_day",
+    "rt_timestamp_get_hour",
+    "rt_timestamp_get_microsecond",
+    "rt_timestamp_get_minute",
+    "rt_timestamp_get_month",
+    "rt_timestamp_get_second",
+    "rt_timestamp_get_year",
+];
+
+const STAGE4_C_SQLITE_DEFINITIONS: &[&str] = &[
+    "rt_sqlite_begin",
+    "rt_sqlite_bind_float",
+    "rt_sqlite_bind_int",
+    "rt_sqlite_bind_null",
+    "rt_sqlite_bind_text",
+    "rt_sqlite_changes",
+    "rt_sqlite_close",
+    "rt_sqlite_column_count",
+    "rt_sqlite_column_float",
+    "rt_sqlite_column_int",
+    "rt_sqlite_column_name",
+    "rt_sqlite_column_text",
+    "rt_sqlite_column_type",
+    "rt_sqlite_commit",
+    "rt_sqlite_error_message",
+    "rt_sqlite_execute",
+    "rt_sqlite_execute_batch",
+    "rt_sqlite_finalize",
+    "rt_sqlite_last_insert_rowid",
+    "rt_sqlite_open",
+    "rt_sqlite_open_memory",
+    "rt_sqlite_prepare",
+    "rt_sqlite_query",
+    "rt_sqlite_query_done",
+    "rt_sqlite_query_next",
+    "rt_sqlite_reset",
+    "rt_sqlite_rollback",
+];
+
+const STAGE4_C_TIME_UNDEFINED: &[&str] = &["clock_gettime"];
+
+const STAGE4_C_SQLITE_UNDEFINED: &[&str] = &[
+    "rt_string_data",
+    "rt_string_new",
+    "sqlite3_bind_double",
+    "sqlite3_bind_int64",
+    "sqlite3_bind_null",
+    "sqlite3_bind_text",
+    "sqlite3_changes",
+    "sqlite3_close",
+    "sqlite3_column_count",
+    "sqlite3_column_double",
+    "sqlite3_column_int64",
+    "sqlite3_column_name",
+    "sqlite3_column_text",
+    "sqlite3_column_type",
+    "sqlite3_errmsg",
+    "sqlite3_exec",
+    "sqlite3_finalize",
+    "sqlite3_free",
+    "sqlite3_last_insert_rowid",
+    "sqlite3_open",
+    "sqlite3_prepare_v2",
+    "sqlite3_reset",
+    "sqlite3_step",
+];
+
+const STAGE4_C_MEMTRACK_UNDEFINED: &[&str] = &["calloc", "fclose", "fopen", "fprintf", "free"];
+
+const STAGE4_C_MEMTRACK_DEFINITIONS: &[&str] = &[
+    "g_memtrack_enabled",
+    "spl_memtrack_bytes_since",
+    "spl_memtrack_clear_listener",
+    "spl_memtrack_count_since",
+    "spl_memtrack_disable",
+    "spl_memtrack_dump_since",
+    "spl_memtrack_enable",
+    "spl_memtrack_is_enabled",
+    "spl_memtrack_live_bytes",
+    "spl_memtrack_live_count",
+    "spl_memtrack_record",
+    "spl_memtrack_reset",
+    "spl_memtrack_set_listener",
+    "spl_memtrack_snapshot",
+    "spl_memtrack_unrecord",
+];
+
+const STAGE4_C_PROVIDER_SPECS: &[Stage4CliCProviderSpec] = &[
+    Stage4CliCProviderSpec {
+        source: "runtime_timestamp.c",
+        archive: "libsimple_stage4_time.a",
+        definitions: STAGE4_C_TIME_DEFINITIONS,
+        undefined: Stage4CliCUndefinedPolicy::Time,
+    },
+    Stage4CliCProviderSpec {
+        source: "runtime_sqlite.c",
+        archive: "libsimple_stage4_sqlite.a",
+        definitions: STAGE4_C_SQLITE_DEFINITIONS,
+        undefined: Stage4CliCUndefinedPolicy::Sqlite,
+    },
+    Stage4CliCProviderSpec {
+        source: "runtime_memtrack.c",
+        archive: "libsimple_stage4_memtrack.a",
+        definitions: STAGE4_C_MEMTRACK_DEFINITIONS,
+        undefined: Stage4CliCUndefinedPolicy::Memtrack,
+    },
+];
+
+fn stage4_cli_c_expected_undefined(policy: Stage4CliCUndefinedPolicy) -> &'static [&'static str] {
+    match policy {
+        Stage4CliCUndefinedPolicy::Time => STAGE4_C_TIME_UNDEFINED,
+        Stage4CliCUndefinedPolicy::Sqlite => STAGE4_C_SQLITE_UNDEFINED,
+        Stage4CliCUndefinedPolicy::Memtrack => STAGE4_C_MEMTRACK_UNDEFINED,
+    }
+}
+
+fn stage4_cli_c_provider_spec(source: &str) -> Option<&'static Stage4CliCProviderSpec> {
+    STAGE4_C_PROVIDER_SPECS.iter().find(|spec| spec.source == source)
+}
+
+fn validate_stage4_cli_c_provider_archive(
+    path: &Path,
+    spec: &Stage4CliCProviderSpec,
+) -> Result<BTreeSet<String>, String> {
+    let forbidden_sections = forbidden_archive_sections(path)?;
+    if !forbidden_sections.is_empty() {
+        return Err(format!(
+            "Stage4 C provider {} retained constructor/destructor sections: {}",
+            path.display(),
+            forbidden_sections.join(", ")
+        ));
+    }
+
+    let (raw_defined, raw_undefined) = archive_global_symbols(path)?;
+    let mut defined = BTreeMap::new();
+    for (symbol, count) in raw_defined {
+        *defined
+            .entry(canonical_archive_symbol(&symbol).to_string())
+            .or_insert(0usize) += count;
+    }
+    let expected: BTreeSet<String> = spec.definitions.iter().map(|symbol| (*symbol).to_string()).collect();
+    let actual: BTreeSet<String> = defined.keys().cloned().collect();
+    let missing: Vec<&str> = expected.difference(&actual).map(String::as_str).collect();
+    let unexpected: Vec<&str> = actual.difference(&expected).map(String::as_str).collect();
+    let duplicates: Vec<String> = defined
+        .iter()
+        .filter(|(_, count)| **count != 1)
+        .map(|(symbol, count)| format!("{symbol} ({count})"))
+        .collect();
+    let actual_undefined: BTreeSet<String> = raw_undefined
+        .iter()
+        .map(|symbol| canonical_archive_symbol(symbol))
+        .map(ToOwned::to_owned)
+        .collect();
+    let expected_undefined: BTreeSet<String> = stage4_cli_c_expected_undefined(spec.undefined)
+        .iter()
+        .map(|symbol| (*symbol).to_string())
+        .collect();
+    let missing_undefined: Vec<&str> = expected_undefined
+        .difference(&actual_undefined)
+        .map(String::as_str)
+        .collect();
+    let unexpected_undefined: Vec<&str> = actual_undefined
+        .difference(&expected_undefined)
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty()
+        || !unexpected.is_empty()
+        || !duplicates.is_empty()
+        || !missing_undefined.is_empty()
+        || !unexpected_undefined.is_empty()
+    {
+        return Err(format!(
+            "invalid Stage4 C provider {}: missing definitions [{}]; unexpected definitions [{}]; non-single definitions [{}]; missing undefined [{}]; unexpected undefined [{}]",
+            path.display(),
+            missing.join(", "),
+            unexpected.join(", "),
+            duplicates.join(", "),
+            missing_undefined.join(", "),
+            unexpected_undefined.join(", ")
+        ));
+    }
+    Ok(actual)
+}
+
+#[cfg(test)]
+pub(super) fn validate_stage4_cli_c_provider_archive_contract(path: &Path, source: &str) -> Result<(), String> {
+    let spec =
+        stage4_cli_c_provider_spec(source).ok_or_else(|| format!("unknown Stage4 C provider source {source}"))?;
+    validate_stage4_cli_c_provider_archive(path, spec).map(|_| ())
+}
+
+fn validate_archive_definition_disjointness(archives: &[(&str, &Path)]) -> Result<(), String> {
+    let mut owners = BTreeMap::<String, &str>::new();
+    for (label, archive) in archives {
+        let forbidden_sections = forbidden_archive_sections(archive)?;
+        if !forbidden_sections.is_empty() {
+            return Err(format!(
+                "Stage4 archive {label} retained constructor/destructor sections: {}",
+                forbidden_sections.join(", ")
+            ));
+        }
+        let (defined, _) = archive_global_symbols(archive)?;
+        if defined.is_empty() {
+            return Err(format!("Stage4 archive {label} defines no global symbols"));
+        }
+        for (raw_symbol, count) in defined {
+            let symbol = canonical_archive_symbol(&raw_symbol).to_string();
+            if count != 1 {
+                return Err(format!("Stage4 archive {label} defines `{symbol}` {count} times"));
+            }
+            if let Some(first_owner) = owners.insert(symbol.clone(), label) {
+                return Err(format!(
+                    "Stage4 archive overlap: `{symbol}` is defined by both {first_owner} and {label}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn stage4_system_library_path(cc: &str, name: &str) -> Result<PathBuf, String> {
+    let output = std::process::Command::new(cc)
+        .arg(format!("-print-file-name={name}"))
+        .output()
+        .map_err(|err| format!("failed to ask target compiler {cc} for {name}: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "target compiler {cc} failed to resolve {name}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if path.as_os_str().is_empty() || path.as_path() == Path::new(name) || !path.is_file() {
+        return Err(format!("target compiler {cc} did not resolve {name}"));
+    }
+    Ok(path)
+}
+
+fn stage4_shared_library_definitions(path: &Path) -> Result<BTreeSet<String>, String> {
+    let output = nm_command()
+        .arg("-D")
+        .arg("-g")
+        .arg("--defined-only")
+        .arg(path)
+        .output()
+        .map_err(|err| format!("failed to inspect system library {}: {err}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to inspect system library {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let mut definitions = BTreeSet::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 2 || fields[fields.len() - 2].len() != 1 {
+            continue;
+        }
+        let symbol = canonical_archive_symbol(fields[fields.len() - 1])
+            .split('@')
+            .next()
+            .unwrap_or_default();
+        if !symbol.is_empty() {
+            definitions.insert(symbol.to_string());
+        }
+    }
+    if definitions.is_empty() {
+        return Err(format!(
+            "system library {} exposes no readable definitions",
+            path.display()
+        ));
+    }
+    Ok(definitions)
+}
+
+fn stage4_static_library_definitions(path: &Path) -> Result<BTreeSet<String>, String> {
+    let forbidden_sections = forbidden_archive_sections(path)?;
+    if !forbidden_sections.is_empty() {
+        return Err(format!(
+            "static system library {} retained constructor/destructor sections: {}",
+            path.display(),
+            forbidden_sections.join(", ")
+        ));
+    }
+    let (raw_defined, _) = archive_global_symbols(path)?;
+    let duplicates: Vec<&str> = raw_defined
+        .iter()
+        .filter(|(_, count)| **count != 1)
+        .map(|(symbol, _)| symbol.as_str())
+        .collect();
+    if !duplicates.is_empty() {
+        return Err(format!(
+            "static system library {} has duplicate global definitions: {}",
+            path.display(),
+            duplicates.join(", ")
+        ));
+    }
+    let definitions: BTreeSet<String> = raw_defined
+        .keys()
+        .map(|symbol| {
+            canonical_archive_symbol(symbol)
+                .split('@')
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .filter(|symbol| !symbol.is_empty())
+        .collect();
+    if definitions.is_empty() {
+        return Err(format!(
+            "static system library {} defines no global symbols",
+            path.display()
+        ));
+    }
+    Ok(definitions)
+}
+
+fn resolve_stage4_system_library(cc: &str, candidates: &[(&str, bool)]) -> Result<(PathBuf, BTreeSet<String>), String> {
+    let mut failures = Vec::new();
+    for (name, shared) in candidates {
+        let result = (|| {
+            let path = stage4_system_library_path(cc, name)?;
+            let definitions = if *shared {
+                stage4_shared_library_definitions(&path)?
+            } else {
+                stage4_static_library_definitions(&path)?
+            };
+            Ok((path, definitions))
+        })();
+        match result {
+            Ok(library) => return Ok(library),
+            Err(error) => failures.push(error),
+        }
+    }
+    Err(format!(
+        "cannot resolve a clean Stage4 system library: {}",
+        failures.join("; ")
+    ))
+}
+
+fn validate_stage4_system_library_ownership(
+    archive: &Path,
+    spec: &Stage4CliCProviderSpec,
+    library: &Path,
+    library_definitions: &BTreeSet<String>,
+) -> Result<(), String> {
+    let (_, undefined) = archive_global_symbols(archive)?;
+    let system_undefined: Vec<&str> = undefined
+        .iter()
+        .map(|symbol| canonical_archive_symbol(symbol))
+        .filter(|symbol| {
+            !(matches!(spec.undefined, Stage4CliCUndefinedPolicy::Sqlite)
+                && matches!(*symbol, "rt_string_data" | "rt_string_new"))
+        })
+        .collect();
+    let missing: Vec<&str> = system_undefined
+        .iter()
+        .copied()
+        .filter(|symbol| !library_definitions.contains(*symbol))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "Stage4 C provider {} has undefined symbols not owned by {}: {}",
+            spec.source,
+            library.display(),
+            missing.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// Validate only ABI disjointness for the staged Stage4 C components.
+///
+/// This deliberately does not select the components or prove that their
+/// exports satisfy a complete native-build provider manifest.
+pub(crate) fn validate_stage4_cli_c_provider_archive_disjointness(
+    core_archive: &Path,
+    compiler_archive: &Path,
+    provider_archives: &[PathBuf],
+) -> Result<(), String> {
+    if provider_archives.len() != STAGE4_C_PROVIDER_SPECS.len() {
+        return Err(format!(
+            "Stage4 C provider disjointness requires exactly {} providers (found {})",
+            STAGE4_C_PROVIDER_SPECS.len(),
+            provider_archives.len()
+        ));
+    }
+    for (provider, spec) in provider_archives.iter().zip(STAGE4_C_PROVIDER_SPECS) {
+        validate_stage4_cli_c_provider_archive(provider, spec)?;
+    }
+    let (core_defined, _) = archive_global_symbols(core_archive)?;
+    for core_symbol in ["rt_string_data", "rt_string_new"] {
+        let count: usize = core_defined
+            .iter()
+            .filter(|(symbol, _)| canonical_archive_symbol(symbol) == core_symbol)
+            .map(|(_, count)| *count)
+            .sum();
+        if count != 1 {
+            return Err(format!(
+                "Stage4 core must own `{core_symbol}` exactly once for the SQLite provider (found {count})"
+            ));
+        }
+    }
+    let mut archives = vec![("core", core_archive), ("compiler", compiler_archive)];
+    for (index, provider) in provider_archives.iter().enumerate() {
+        archives.push((
+            STAGE4_C_PROVIDER_SPECS
+                .get(index)
+                .map_or("provider", |spec| spec.source),
+            provider,
+        ));
+    }
+    validate_archive_definition_disjointness(&archives)
+}
+
+/// Build the disabled native GNU/Linux Stage4 C provider components.
+///
+/// Callers must separately validate requested-owner completeness before these
+/// archives may be selected for a link.
+pub(crate) fn build_stage4_cli_c_provider_archives(build_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let target = effective_target();
+    if !cfg!(all(target_os = "linux", target_env = "gnu"))
+        || target.os != simple_common::target::TargetOS::Linux
+        || !target.is_host()
+    {
+        return Err("Stage4 C provider archives currently require the native GNU/Linux host target".to_string());
+    }
+    let runtime_root = find_core_c_runtime_source_root()
+        .ok_or_else(|| "cannot locate src/runtime for Stage4 C providers".to_string())?;
+    std::fs::create_dir_all(build_dir).map_err(|err| {
+        format!(
+            "failed to create Stage4 C provider directory {}: {err}",
+            build_dir.display()
+        )
+    })?;
+    let cc = target_c_compiler(target);
+    let ar = find_archive_tool();
+    let riscv_vector = std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1");
+    let mut archives = Vec::new();
+
+    for spec in STAGE4_C_PROVIDER_SPECS {
+        let object = build_dir.join(format!(
+            "{}.{}",
+            spec.source.trim_end_matches(".c"),
+            host_object_extension()
+        ));
+        let archive = build_dir.join(spec.archive);
+        let _ = std::fs::remove_file(&object);
+        let _ = std::fs::remove_file(&archive);
+        let compile = std::process::Command::new(&cc)
+            .arg("-c")
+            .arg("-Os")
+            .arg("-ffunction-sections")
+            .arg("-fdata-sections")
+            .arg("-fno-unwind-tables")
+            .arg("-fno-asynchronous-unwind-tables")
+            .arg("-fno-stack-protector")
+            .arg("-fno-builtin")
+            .arg("-fPIC")
+            .arg("-std=gnu11")
+            .args(core_c_target_flags(target, spec.source, riscv_vector))
+            .arg(format!("-I{}", runtime_root.display()))
+            .arg(format!("-I{}", runtime_root.join("platform").display()))
+            .arg(runtime_root.join(spec.source))
+            .arg("-o")
+            .arg(&object)
+            .output()
+            .map_err(|err| format!("failed to compile Stage4 C provider {} with {cc}: {err}", spec.source))?;
+        if !compile.status.success() {
+            return Err(format!(
+                "failed to compile Stage4 C provider {}: {}",
+                spec.source,
+                String::from_utf8_lossy(&compile.stderr).trim()
+            ));
+        }
+        validate_stage4_cli_c_provider_archive(&object, spec)?;
+
+        let archived = std::process::Command::new(&ar)
+            .arg("rcsD")
+            .arg(&archive)
+            .arg(&object)
+            .output()
+            .map_err(|err| format!("failed to execute deterministic archive tool {ar}: {err}"))?;
+        if !archived.status.success() {
+            return Err(format!(
+                "failed to create deterministic Stage4 C provider archive {}: {}",
+                archive.display(),
+                String::from_utf8_lossy(&archived.stderr).trim()
+            ));
+        }
+        let members = std::process::Command::new(&ar)
+            .arg("t")
+            .arg(&archive)
+            .output()
+            .map_err(|err| {
+                format!(
+                    "failed to inspect Stage4 C provider archive {}: {err}",
+                    archive.display()
+                )
+            })?;
+        let member_stdout = String::from_utf8_lossy(&members.stdout);
+        let actual_members: Vec<&str> = member_stdout
+            .lines()
+            .map(str::trim)
+            .filter(|member| !member.is_empty())
+            .collect();
+        let expected_member = object.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        if !members.status.success() || actual_members != [expected_member] {
+            return Err(format!(
+                "Stage4 C provider archive {} must contain exactly {} (found {})",
+                archive.display(),
+                expected_member,
+                actual_members.join(", ")
+            ));
+        }
+        validate_stage4_cli_c_provider_archive(&archive, spec)?;
+        archives.push(archive);
+    }
+
+    let labeled: Vec<(&str, &Path)> = STAGE4_C_PROVIDER_SPECS
+        .iter()
+        .zip(archives.iter())
+        .map(|(spec, archive)| (spec.source, archive.as_path()))
+        .collect();
+    validate_archive_definition_disjointness(&labeled)?;
+
+    let (libc, libc_definitions) = resolve_stage4_system_library(&cc, &[("libc.so.6", true)])?;
+    let (sqlite, sqlite_definitions) =
+        resolve_stage4_system_library(&cc, &[("libsqlite3.so", true), ("libsqlite3.a", false)])?;
+    validate_stage4_system_library_ownership(&archives[0], &STAGE4_C_PROVIDER_SPECS[0], &libc, &libc_definitions)?;
+    validate_stage4_system_library_ownership(&archives[1], &STAGE4_C_PROVIDER_SPECS[1], &sqlite, &sqlite_definitions)?;
+    validate_stage4_system_library_ownership(&archives[2], &STAGE4_C_PROVIDER_SPECS[2], &libc, &libc_definitions)?;
+    Ok(archives)
+}
+
 /// Build the Stage-4 compiler hook archive without importing a second runtime.
 ///
 /// The dedicated archive's globally defined `rt_cranelift_*` symbols are the
@@ -688,9 +1247,7 @@ pub(crate) fn build_compiler_backfill_archive(
             .keys()
             .chain(source_undefined.iter())
             .map(|symbol| canonical_archive_symbol(symbol))
-            .filter(|symbol| {
-                (symbol.starts_with("rt_") || symbol.starts_with("spl_")) && !manifest.contains(*symbol)
-            })
+            .filter(|symbol| (symbol.starts_with("rt_") || symbol.starts_with("spl_")) && !manifest.contains(*symbol))
             .collect();
         if !forbidden_source_runtime.is_empty() {
             return Err(format!(
@@ -736,7 +1293,9 @@ pub(crate) fn build_compiler_backfill_archive(
                 .map(|(_, count)| *count)
                 .sum();
             if count != 1 {
-                return Err(format!("compiler backfill closure export `{export}` has {count} definitions"));
+                return Err(format!(
+                    "compiler backfill closure export `{export}` has {count} definitions"
+                ));
             }
         }
         let forbidden_closure_runtime: Vec<&str> = closure_undefined
@@ -810,7 +1369,9 @@ pub(crate) fn build_compiler_backfill_archive(
         for symbol in localized_defined.keys() {
             let canonical = canonical_archive_symbol(symbol);
             if !manifest.contains(canonical) {
-                return Err(format!("compiler backfill retained unexpected global export `{canonical}`"));
+                return Err(format!(
+                    "compiler backfill retained unexpected global export `{canonical}`"
+                ));
             }
         }
         let forbidden_undefined: Vec<&str> = localized_undefined
@@ -879,10 +1440,7 @@ pub(crate) fn build_compiler_backfill_archive(
             .output()
             .map_err(|err| format!("failed to inspect compiler backfill archive members: {err}"))?;
         let member_stdout = String::from_utf8_lossy(&members.stdout);
-        let member_names: Vec<&str> = member_stdout
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .collect();
+        let member_names: Vec<&str> = member_stdout.lines().filter(|line| !line.trim().is_empty()).collect();
         if !members.status.success() || member_names != ["compiler_backfill_local.o"] {
             return Err(format!(
                 "compiler backfill archive must contain exactly compiler_backfill_local.o (found {})",

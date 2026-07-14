@@ -1,4 +1,5 @@
-//! Time SFFI — implementations now live in src/runtime/runtime_time.c.
+//! Time SFFI — clocks live in `runtime_time.c`; timestamp/progress helpers live
+//! in `runtime_timestamp.c` so Stage4 can compose them without duplicate clocks.
 
 mod c_sffi {
     extern "C" {

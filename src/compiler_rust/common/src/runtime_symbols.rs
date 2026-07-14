@@ -479,7 +479,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_utf8_validate",
     "rt_utf8_find_invalid",
     "rt_text_count_codepoints",
-    // Time operations backed by src/runtime/runtime_time.c
+    // Time operations backed by runtime_time.c and runtime_timestamp.c.
     "rt_time_now_nanos",
     "rt_time_now_micros",
     "rt_time_now_unix_micros",
