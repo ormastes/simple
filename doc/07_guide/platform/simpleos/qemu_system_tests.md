@@ -45,6 +45,9 @@ host Draw IR bridge first; only a correlated device receipt followed by checked
 MMIO presentation succeeds, and every other case falls through to local
 Engine2D. The current 3840x2160 frame exceeds the 8 MiB wire, so TODO 552 keeps
 that default entry honestly local without downscale or crop.
+Exact-size opaque IMAGE work may cross a bounded named child edge: the existing
+Vulkan COPY shader clips it to that child without changing DrawIR semantics.
+Scaled IMAGE and transparent-over-existing-child offload remain TODO 549.
 This source path is not compile-verified while TODO 548 blocks the pure-Simple
 checker; no QEMU receipt is claimed by this section.
 

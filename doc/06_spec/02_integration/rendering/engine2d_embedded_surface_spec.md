@@ -56,8 +56,11 @@ path while the opaque pixel is rendered.
 ### Checked full-target Vulkan IMAGE
 
 Preflighted full-target IMAGE compositions require exact pixels, device
-readback, a positive backend handle, and zero fallback. First-transparent,
-partial-target, and opacity-930 initializer cases reject before rendering.
+readback, a positive backend handle, and zero fallback. After opaque root
+initialization, an exact-size opaque IMAGE may cross a bounded named child's
+active clip and must retain exact CPU parity and device provenance. A
+first-transparent or partial root initializer, and an opacity-930 initializer,
+still reject before rendering.
 
 ### Checked resolved Vulkan TEXT
 
@@ -82,5 +85,5 @@ coordinate behavior.
 | Category | Rendering integration |
 | Status | Active; execution blocked by TODO 548 in this session |
 | Source | `test/02_integration/rendering/engine2d_embedded_surface_spec.spl` |
-| Updated | 2026-07-13 |
+| Updated | 2026-07-14 (manual) |
 | Generator | Manual SPipe refresh; rerun `simple spipe-docgen` after TODO 548 |
