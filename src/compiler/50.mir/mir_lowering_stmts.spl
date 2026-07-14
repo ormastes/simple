@@ -948,6 +948,32 @@ impl MirLowering:
                 case nil:
                     ()
 
+        # The loop-variable symbol's HIR type is frequently nil on this
+        # pipeline (native-build's lower_to_mir runs without a full
+        # type-inference pass), so `element_type` silently defaulted to i64
+        # above for EVERY for-in loop whose loop var has no resolved type --
+        # correct by accident for `for n in [1,2,3]` (ints really are i64),
+        # but WRONG for `for s in ["ab","cd"]`: a string array element is a
+        # TAGGED heap-string handle (see box_runtime_value/lower_array_lit),
+        # and decoding it as i64 shifts/truncates the handle into garbage,
+        # which downstream string method calls then dereference as if it
+        # were a raw char* -> SIGSEGV or garbage output.
+        #
+        # The array/slice's OWN lowered MIR type is authoritative and always
+        # populated at construction time (lower_array_lit sets
+        # `Array(first_element's_mir_type, size)`), exactly like the direct
+        # index-read path `arr[i]` already reads element type off
+        # `base_mir_type.kind` (see expr_dispatch.spl `case Index`). Mirror
+        # that here so `for x in arr` and `arr[i]` agree on the element type.
+        if val coll_mir_type = self.local_mir_type_of(collection_local):
+            match coll_mir_type.kind:
+                case MirTypeKind.Array(elem_t, _):
+                    element_type = elem_t
+                case MirTypeKind.Slice(elem_t):
+                    element_type = elem_t
+                case _:
+                    ()
+
         # Runtime-array fast path: lower `for x in arr` to an index-based
         # counted loop over rt_array_len / rt_array_get (mirrors the array
         # index-read call shape in _MirLoweringExpr/expr_dispatch.spl).

@@ -222,6 +222,28 @@ impl MirLowering:
             self.runtime_value_locals[typed.id] = true
             self.builder = b
             return typed
+        if disc == rt_enum_discriminant(MirTypeKind.Opaque("")):
+            # A string element/value read back off an array or dict is a
+            # TAGGED heap-string handle (box_runtime_value tags raw string
+            # literals via rt_strlen + rt_string_new before storing them),
+            # but every OTHER consumer of an Opaque("str")-typed local
+            # (method calls, tag_str_local_if_raw, etc.) assumes Opaque
+            # "str" means a RAW char*. Left undecoded, the tagged handle's
+            # bits get treated as a raw pointer downstream -> SIGSEGV or
+            # garbage (e.g. `for s in ["ab","cd"]: s.len()`). rt_interp_cstr
+            # is the existing bug #136 autodetector: unwraps an
+            # already-tagged handle to its real char* data buffer, or
+            # passes an already-raw char* through unchanged -- so this is
+            # safe regardless of which representation `raw` turns out to be.
+            val cstr_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_interp_cstr"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+            ))
+            val cstr_res = b.emit_call(cstr_op, [mir_operand_copy(raw)], MirType(kind: MirTypeKind.Opaque("str")))
+            self.builder = b
+            if val cstr_local = cstr_res:
+                return cstr_local
+            return raw
         self.runtime_value_locals[raw.id] = true
         self.builder = b
         raw
