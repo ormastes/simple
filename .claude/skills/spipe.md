@@ -59,6 +59,12 @@ interface names, manual `step("...")` flow helper names, and setup/checker
 helper names; placeholder helpers must fail explicitly (`assert(false)` or
 `fail(...)`).
 
+Before accepting done, enumerate every required host/capability row. Each row
+needs fresh native PASS evidence or an explicit linked TODO and plan naming the
+owner, missing prerequisite, exact resume command, and retained artifacts;
+otherwise it remains active or blocked. Postponement is not completion and
+cannot cover a capability executable on the current host.
+
 Final verification must fail stale workflow/tooling documentation instead of
 deferring cleanup to release. If a lane changed workflow, evidence wrappers,
 generated-manual shape, or verification contracts, refresh the matching

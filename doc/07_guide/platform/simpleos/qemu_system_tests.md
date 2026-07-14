@@ -301,9 +301,13 @@ frame must be equal and exactly one newer; its checksum must be positive; and
 the two desktop revisions must be equal and positive.
 
 Linux Vulkan rendering and the native CUDA ProcessingIR executor are
-implemented with Vulkan ProcessingIR fallback;
-refreshed cross-ISA CUDA receipts
-are still required. macOS Metal Draw IR execution is implemented but remains
+implemented with Vulkan ProcessingIR fallback. On a host offering both CUDA
+and Vulkan, a CUDA-preferred receipt does not exercise or close the Vulkan
+ProcessingIR capability row. No owner-level Vulkan-only selector exists yet;
+TODO 550 must add one and document its exact non-hardcoded command before a
+forced Vulkan device-readback receipt can be claimed. TODO 570 retains the
+correlated preference classification; refreshed cross-ISA CUDA receipts are
+also still required. macOS Metal Draw IR execution is implemented but remains
 `unsupported` evidence until a prepared native host produces a fresh receipt.
 Metal ProcessingIR FillU32 is implemented through a dedicated checked MSL
 kernel and device readback, but likewise needs a prepared-host receipt. Windows
@@ -348,8 +352,11 @@ ProcessingIR preference contract.
 ### External-host postponement and resume contract
 
 Prepared Windows DirectX, macOS Metal, and NVIDIA CUDA execution evidence is
-postponed, not complete. The authoritative host prerequisites, commands,
-retained artifacts, existing TODO ownership, and remaining local work are in
+postponed only when the required native capability is unavailable; postponement
+is not completion. Current-host CUDA device readback and UUID/multi-GPU checks
+remain active and do not wait for the Simple compiler, while their QEMU receipts
+do. The authoritative host prerequisites, commands, retained artifacts,
+existing TODO ownership, and remaining local work are in
 `doc/03_plan/agent_tasks/simpleos_qemu_host_gpu_external_host_evidence.md`
 (TLDR alongside). Do not create replacement TODOs for these rows.
 

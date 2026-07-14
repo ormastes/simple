@@ -4,7 +4,10 @@
 ## Status
 
 **RED / execution blocked by TODO548.** TODO529 remains open. Current main has
-one strict x86_64 spec row and no committed oracle. Canonical AArch64 and RV64
+one strict x86_64 spec row and a legacy
+`test/09_baselines/engine2d_in_qemu/verification_scene.ppm`, but no independently
+admitted oracle. The legacy fixture has no acceptable provenance for this gate
+and must not be promoted as TODO529 evidence. Canonical AArch64 and RV64
 production entries exist, but the executable spec has no rows for them. No live
 result is claimed by this plan.
 

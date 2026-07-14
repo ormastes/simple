@@ -3,19 +3,21 @@
 
 ## Status
 
-**Postponed until a prepared host and a valid pure-Simple compiler are available.**
-This postpones execution evidence only. Implemented backends remain fail-closed,
-and the full SimpleOS host-GPU goal remains incomplete.
+**Unavailable native-host rows are postponed until a prepared host is available.**
+QEMU receipts also require a valid pure-Simple compiler. Current-host CUDA
+readback and UUID/multi-GPU checks remain active because they do not require
+that compiler. Implemented backends remain fail-closed, and the full SimpleOS
+host-GPU goal remains incomplete.
 
 ## Existing TODO ownership
 
-| Work | Existing owner | Postponed evidence |
+| Work | Existing owner | Disposition |
 |---|---|---|
 | macOS self-host deployment prerequisite | GPU TODO119, `doc/03_plan/agent_tasks/mac_gpu_backend_evidence_2026-07-10.md` | Fresh-cache pure-Simple Stage 2/3 candidate, hash-bound deployment provenance, redeploy gate, and reviewer approval; this title/path qualification avoids the duplicate numeric ID in `todo_db.sdn` |
 | Windows DirectX rendering and Windows processing rows | TODO544 | Fresh QEMU receipt with D3D11 device readback, adapter identity, exact checksum, and correlated guest IDs |
 | macOS Metal rendering and ProcessingIR | TODO544 | Native Metal smoke followed by fresh QEMU receipts |
-| Prepared NVIDIA CUDA executor and QEMU receipt | TODO544 | CUDA-tagged device readback and correlated ProcessingIR receipt |
-| NVIDIA CUDA UUID, multi-GPU, and MIG identity | TODO564 | Stable nonzero distinct UUID identities and CUDA-tagged QEMU ProcessingIR receipts |
+| NVIDIA CUDA executor and QEMU receipt | TODO544 | Run local generated device readback now; the correlated QEMU ProcessingIR receipt waits for the compiler. Only unavailable native CUDA configurations are postponed. |
+| NVIDIA CUDA UUID, multi-GPU, and MIG identity | TODO564 | Run current-host UUID/multi-GPU evidence now; MIG stays postponed when unavailable, and CUDA-tagged QEMU receipts wait for the compiler. |
 | Exact 1280x720 non-current native-host fixtures | TODO569 | Zero-mismatch device readback on prepared Windows/macOS/NVIDIA rows; current Linux Vulkan work remains active |
 | Non-current ProcessingIR preference classification | TODO570 | Correlated CPU/device timing on prepared Windows/macOS/NVIDIA rows; current Linux Vulkan work remains active |
 | Non-current warm p95 and combined QEMU/daemon RSS | TODO563 | Fresh prepared-host measurements; current Linux Vulkan work remains active |
@@ -28,11 +30,12 @@ No new TODO is created because these rows already have authoritative owners.
 |---|---|---|---|
 | Windows/MSYS | D3D11 hardware adapter, QEMU for required ISAs, current pure-Simple compiler and host daemon | Run `scripts/check/check-simpleos-qemu-host-gpu-2d.shs`; validate the emitted report | wrapper report, serial logs, daemon log, exact encoded QEMU argv, protocol/backend/device IDs, checksums, elapsed times, QEMU/daemon/combined RSS |
 | macOS | Metal device, QEMU, current pure-Simple compiler and host daemon | Set `SIMPLE_BIN=bin/release/<triple>/simple`; run `"$SIMPLE_BIN" test test/04_smoke/simpleos_metal_processing_ir.spl`, then `SIMPLE_BIN="$SIMPLE_BIN" scripts/check/check-simpleos-qemu-host-gpu-2d.shs` | Metal smoke output plus the same correlated wrapper artifacts for rendering and ProcessingIR |
-| NVIDIA Linux | CUDA driver/device; multiple GPUs or MIG where available; current pure-Simple compiler | Run `scripts/check/check-cuda-generated-2d-readback.shs`, then `SIMPLEOS_HOST_GPU_REQUIRE_CUDA=1 scripts/check/check-simpleos-qemu-host-gpu-2d.shs` | UUID stability/distinction report, CUDA device readback, QEMU receipts, CPU oracle parity, preference timing, and RSS |
+| NVIDIA Linux | CUDA driver/device; multiple GPUs or MIG where available; current pure-Simple compiler only for QEMU | Run `scripts/check/check-cuda-generated-2d-readback.shs` now; after compiler recovery run `SIMPLEOS_HOST_GPU_REQUIRE_CUDA=1 scripts/check/check-simpleos-qemu-host-gpu-2d.shs` | UUID stability/distinction report, CUDA device readback, QEMU receipts, CPU oracle parity, preference timing, and RSS |
 
-Resume only when the host prerequisites exist and `simple_binary_is_valid`
-accepts the selected pure-Simple compiler. Patch source only if a fresh native
-run exposes a reproducible implementation failure.
+Run compiler-independent CUDA checks as soon as their native prerequisites
+exist. Resume QEMU or other Simple-compiled rows only when
+`simple_binary_is_valid` accepts the selected pure-Simple compiler. Patch source
+only if a fresh native run exposes a reproducible implementation failure.
 
 ## Fail-closed evidence rules
 
@@ -60,7 +63,7 @@ run exposes a reproducible implementation failure.
 | TODO547 | Continue raw-pointer leaf migration through the existing no-GC owner facade rather than adding direct `rt_*`. |
 | TODO548 | Finish the concurrently owned current-ABI pure-Simple compiler, validate it once, then run focused x86_64/AArch64/RISC-V QEMU probes. |
 | TODO549 | Finish scaled, transparent, and clipped native IMAGE offload without a private renderer. |
-| TODO550 | Execute the stable ProcessingIR device-identity path and retain a fresh live receipt. |
+| TODO550 | Execute the stable ProcessingIR device-identity path and retain a fresh live receipt. First add an owner-level Vulkan-only selector and document its exact command; no selector or forced-Vulkan receipt exists yet. |
 | TODO551 | Add owner-level quarantine/reaping for Vulkan completion-unknown dependencies. |
 | TODO552 | Select feature/NFR requirements before implementing 4K shared-memory capacity. |
 | TODO554 | Fix canonical Draw IR shadow bounds; currently overlaps another UI/font worktree. |
@@ -73,8 +76,11 @@ run exposes a reproducible implementation failure.
 | TODO569 | Run the exact 1280x720 fixture on the current Linux Vulkan row; other prepared-host rows stay postponed. |
 | TODO570 | Measure the current Linux Vulkan ProcessingIR preference row; other prepared-host rows stay postponed. |
 
-Local work may continue without the postponed hosts, but none of the postponed
-native rows may be marked done until its retained artifacts pass review.
+This lane's documentation checkpoint is complete, but current-host work is not:
+CUDA readback/UUID/multi-GPU evidence can run now, and TODO550's Vulkan-only
+selector remains an implementation gap. QEMU work waits for a valid pure-Simple
+compiler or active-file ownership changes. None of the postponed native rows
+may be marked done until its retained artifacts pass review.
 
 ## Review ownership
 
