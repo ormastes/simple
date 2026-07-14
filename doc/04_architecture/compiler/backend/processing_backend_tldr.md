@@ -6,6 +6,10 @@ oracle, and Vulkan device execution/readback used by the SimpleOS QEMU host
 service. It still does not have compiler kernel lowering, CUDA/Metal ProcessingIR
 backends, a public processing API, or a real RV64 Adreno/Mali-like GPGPU.
 
+Vulkan compute dispatch is fenced and tri-state in the canonical SFFI owner.
+ProcessingIR reads only status `1`; unknown completion retains dependencies
+rather than risking teardown while work may still be in flight.
+
 ```text
 Simple @kernel/@draw/@matops
   -> ProcessingIR

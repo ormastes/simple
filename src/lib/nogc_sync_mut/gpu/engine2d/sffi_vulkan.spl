@@ -404,6 +404,61 @@ fn vulkan_sffi_wait_fence(fence: i64, timeout_ns: i64) -> bool:
 fn vulkan_sffi_destroy_fence(fence: i64) -> bool:
     rt_vulkan_destroy_fence(fence)
 
+fn vulkan_sffi_dispatch_buffer_compute_checked(buffer: i64, pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
+    """Dispatch one storage-buffer kernel with fenced, fail-closed completion.
+
+    Returns 1 only after completion and dependency release are proven, 0 when
+    dependency cleanup is safe but no receipt may be promoted, and -1 when
+    completion or dependency release remains unknown.
+    """
+    if buffer <= 0 or pipe <= 0 or push_data.len() == 0 or gx <= 0 or gy <= 0 or gz <= 0:
+        return 0
+    if not vulkan_sffi_fence_submission_supported():
+        return 0
+    val desc = vulkan_sffi_create_descriptor_set(pipe)
+    if desc <= 0:
+        return 0
+
+    var cmd: i64 = 0
+    var ready = vulkan_sffi_bind_buffer(desc, 0, buffer)
+    if ready:
+        cmd = vulkan_sffi_begin_compute()
+        ready = cmd > 0
+    if ready:
+        ready = vulkan_sffi_bind_pipeline(cmd, pipe)
+    if ready:
+        ready = vulkan_sffi_bind_descriptors(cmd, desc)
+    if ready:
+        ready = vulkan_sffi_push_constants(cmd, pipe, push_data)
+    if ready:
+        ready = vulkan_sffi_dispatch(cmd, gx, gy, gz)
+    if ready:
+        ready = vulkan_sffi_end_compute(cmd)
+
+    if not ready:
+        val command_released = cmd <= 0 or vulkan_sffi_discard_command(cmd)
+        if not command_released:
+            return -1
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        return 0
+
+    val fence = vulkan_sffi_submit_and_wait_fence(cmd)
+    if fence < 0:
+        if not vulkan_sffi_wait_idle():
+            return -1
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        return 0
+    if fence == 0:
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        return 0
+
+    val completion_waited = vulkan_sffi_wait_fence(fence, 0)
+    if not completion_waited and not vulkan_sffi_wait_idle():
+        return -1
+    val fence_destroyed = vulkan_sffi_destroy_fence(fence)
+    val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+    if completion_waited and fence_destroyed and descriptor_destroyed: 1 else: 0
+
 fn vulkan_sffi_device_name(id: i64) -> text:
     rt_vulkan_device_name(id)
 

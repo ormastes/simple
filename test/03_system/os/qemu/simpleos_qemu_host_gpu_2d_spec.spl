@@ -39,6 +39,12 @@ fn vulkan_backend_source() -> text:
 fn vulkan_backend_helpers_source() -> text:
     file_read_text("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
 
+fn vulkan_sffi_owner_source() -> text:
+    file_read_text("src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl")
+
+fn vulkan_processing_source() -> text:
+    file_read_text("src/lib/gc_async_mut/processing/vulkan_fill_u32.spl")
+
 fn host_gpu_daemon_source() -> text:
     file_read_text("src/app/simpleos_gpu_host/main.spl")
 
@@ -193,9 +199,12 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         step("Dispatch the raw CLEAR and solid RECT fixture through strict Engine2D selection")
         step("Reject unchecked or fallback raw rendering before device-backed receipt")
         val helpers = vulkan_backend_helpers_source()
+        val owner = vulkan_sffi_owner_source()
         val backend = vulkan_backend_source()
         expect(helpers).to_contain("fn vulkan_dispatch_framebuffer_compute_checked")
-        expect(helpers).to_contain("vulkan_sffi_submit_and_wait_fence(cmd)")
+        expect(helpers).to_contain("vulkan_sffi_dispatch_buffer_compute_checked")
+        expect(owner).to_contain("fn vulkan_sffi_dispatch_buffer_compute_checked")
+        expect(owner).to_contain("vulkan_sffi_submit_and_wait_fence(cmd)")
         expect(helpers.contains("fn vulkan_dispatch_compute(")).to_equal(false)
         expect(helpers).to_contain("if dispatched > 0:")
         expect(helpers).to_contain("if dispatched < 0:")
@@ -226,8 +235,18 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         step("Run the ProcessingIR parity fixture")
         step("Compare the result buffer and correlated completion with the CPU oracle")
         val source = host_gpu_wrapper_source()
+        val vulkan = vulkan_processing_source()
+        val unknown = vulkan.index_of("if dispatch_status < 0:")
+        val cleanup = vulkan.index_of("# Known-safe dispatch statuses may release their dependent resources.")
         expect(source).to_contain("checksum=1792 mismatches=0")
         expect(source).to_contain("PROCESSING_BACKEND")
+        expect(vulkan).to_contain("vulkan_sffi_dispatch_buffer_compute_checked")
+        expect(vulkan).to_contain("if dispatch_status == 1: vulkan_sffi_read_buffer_bytes")
+        expect(vulkan).to_contain("vulkan-dispatch-completion-unknown")
+        expect(unknown).to_be_greater_than(0)
+        expect(unknown).to_be_less_than(cleanup)
+        expect(vulkan.contains("vulkan_submit_and_wait(command)")).to_equal(false)
+        expect(vulkan.contains("vulkan_begin_compute()")).to_equal(false)
         expect(cuda_processing_source()).to_contain("cuda_device_identity(device_handle)")
         expect(cuda_processing_source()).to_contain("if identity <= 0:")
         expect(host_gpu_daemon_source()).to_contain("if not completed or backend_handle <= 0 or device_identity <= 0:")

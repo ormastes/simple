@@ -62,7 +62,9 @@ the CPU/software fallback and report a stable reason.
    readback. Any failure falls through to local Engine2D. The current 4K entry
    honestly selects local rendering until TODO 552 expands the bounded wire.
 10. **Run the ProcessingIR parity fixture.** Correlate the host completion and
-   require exact output-buffer parity with the CPU oracle.
+   require exact output-buffer parity with the CPU oracle. Vulkan uses the
+   canonical SFFI owner's fenced tri-state dispatch: only proven status `1`
+   may read back, while unknown completion retains dependencies and the device.
 11. **Keep native Metal ProcessingIR separate from Engine2D rendering.** Probe
    and execute the dedicated MSL FillU32 owner, require checked command
    completion and pointer readback, and never relabel a Metal render clear as

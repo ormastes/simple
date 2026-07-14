@@ -18,6 +18,11 @@ Fresh x86_64, AArch64, and RV64 QEMU probes report checksum `1792` with zero
 mismatches for 256 elements filled with `7`. CUDA, Metal, compiler kernel
 lowering, and a public device/queue API remain unavailable.
 
+Vulkan ProcessingIR promotes a receipt only after the shared SFFI owner proves
+fenced completion and dependency release. A known-safe but ineligible result is
+torn down without readback; unknown completion retains dependent resources and
+the device for the TODO 551 quarantine/reaper rather than risking use-after-free.
+
 ## Target Stack
 
 ```text

@@ -32,7 +32,11 @@ Backends
 The first runtime-neutral slice now exists. `src/lib/common/processing/processing_ir.spl`
 owns a validated `FillU32` value and CPU oracle;
 `src/lib/gc_async_mut/processing/vulkan_fill_u32.spl` executes that value through
-the existing Vulkan SFFI. The SimpleOS host service accepts the existing bounded
+the existing Vulkan SFFI. Its storage-buffer dispatch shares the Vulkan owner's
+fenced tri-state lifecycle with Engine2D: only status `1` permits readback,
+status `0` is safe to tear down but ineligible for a receipt, and status `-1`
+keeps all dependent handles and the device alive until TODO 551 adds an
+owner-managed quarantine/reaper. The SimpleOS host service accepts the existing bounded
 wire command only after Vulkan negotiation, compares device readback with the
 CPU oracle, and reports device provenance. This is not yet the compiler MIR
 bridge, public `std.processing` API, CUDA/Metal backend, or `simplegpu64`.

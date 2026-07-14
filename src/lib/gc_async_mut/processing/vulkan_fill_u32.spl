@@ -5,12 +5,12 @@ use std.gc_async_mut.io.vulkan_sffi.{
     vulkan_init, vulkan_shutdown, vulkan_alloc_storage, vulkan_free_buffer,
     vulkan_compile_spirv, vulkan_destroy_shader,
     vulkan_create_pipeline_with_push, vulkan_destroy_pipeline,
-    vulkan_create_descriptors, vulkan_bind_buffer, vulkan_destroy_descriptors,
-    vulkan_begin_compute, vulkan_cmd_bind_pipeline, vulkan_cmd_bind_descriptors,
-    vulkan_cmd_push_constants, vulkan_cmd_dispatch, vulkan_end_compute,
-    vulkan_submit_and_wait, vulkan_last_error
+    vulkan_last_error
 }
-use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_read_buffer_bytes, vulkan_sffi_selected_device_driver_identity}
+use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_read_buffer_bytes, vulkan_sffi_selected_device_driver_identity,
+    vulkan_sffi_dispatch_buffer_compute_checked
+}
 use std.common.hash.djb2.{djb2_hash_text}
 use std.gpu.engine2d.backend_vulkan_spirv.{spirv_clear}
 
@@ -82,21 +82,18 @@ fn processing_ir_execute_vulkan(ir: ProcessingIr) -> ProcessingVulkanResult:
         vulkan_free_buffer(buffer)
         vulkan_shutdown()
         return ProcessingVulkanResult(completed: false, reason: reason, values: [], backend_handle: 0, device_identity: 0)
-    val descriptors = vulkan_create_descriptors(pipeline)
-    val command = vulkan_begin_compute()
-    val dispatched = descriptors.is_valid and command.is_valid and
-        vulkan_bind_buffer(descriptors, 0, buffer) and
-        vulkan_cmd_bind_pipeline(command, pipeline) and
-        vulkan_cmd_bind_descriptors(command, descriptors) and
-        vulkan_cmd_push_constants(command, pipeline, _processing_fill_push_constants(ir)) and
-        vulkan_cmd_dispatch(command, (ir.element_count + 255) / 256, 1, 1) and
-        vulkan_end_compute(command) and vulkan_submit_and_wait(command)
-    val bytes = if dispatched: vulkan_sffi_read_buffer_bytes(buffer.handle, byte_count, 0) else: []
+    val dispatch_status = vulkan_sffi_dispatch_buffer_compute_checked(
+        buffer.handle, pipeline.handle, _processing_fill_push_constants(ir),
+        (ir.element_count + 255) / 256, 1, 1)
+    if dispatch_status < 0:
+        # ponytail: keep all dependent handles and the device alive while
+        # completion is unknown; TODO 551 owns runtime quarantine/reaping.
+        return ProcessingVulkanResult(completed: false, reason: "vulkan-dispatch-completion-unknown", values: [], backend_handle: 0, device_identity: 0)
+    val bytes = if dispatch_status == 1: vulkan_sffi_read_buffer_bytes(buffer.handle, byte_count, 0) else: []
     val read = bytes.len().to_i64() == byte_count
-    val failure_reason = if read: "ok" else: vulkan_last_error()
+    val failure_reason = if dispatch_status == 0: "vulkan-dispatch-ineligible" else: if read: "ok" else: vulkan_last_error()
     val handle = buffer.handle
-    if descriptors.is_valid:
-        vulkan_destroy_descriptors(descriptors)
+    # Known-safe dispatch statuses may release their dependent resources.
     vulkan_destroy_pipeline(pipeline)
     vulkan_destroy_shader(shader)
     vulkan_free_buffer(buffer)
