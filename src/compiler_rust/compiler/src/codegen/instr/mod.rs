@@ -1314,7 +1314,7 @@ pub fn compile_instruction<M: Module>(
             // ("field access on nil receiver" in freestanding one-binary builds). Pass
             // it through verbatim; UnboxInt already passes TAG_HEAP through.
             let src_ty = ctx.vreg_types.get(value).copied();
-            if matches!(src_ty, Some(t) if t == TypeId::STRING || t == TypeId::ANY || t.0 >= 16) {
+            if matches!(src_ty, Some(t) if t == TypeId::ANY || t.0 >= 16) {
                 let handle = ctx
                     .vreg_values
                     .get(value)

@@ -690,7 +690,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         // Pass such handles through verbatim; UnboxInt already passes TAG_HEAP through,
         // so both directions stay consistent.
         let src_ty = self.ctx.vreg_types.get(&value).copied();
-        if matches!(src_ty, Some(t) if t == TypeId::STRING || t == TypeId::ANY || t.0 >= 16) {
+        if matches!(src_ty, Some(t) if t == TypeId::ANY || t.0 >= 16) {
             let handle = self
                 .ctx
                 .vreg_values
