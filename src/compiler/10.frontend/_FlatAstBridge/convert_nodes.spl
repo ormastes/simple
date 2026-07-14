@@ -315,6 +315,18 @@ fn op_kind_to_binop(kind: i64) -> BinOp:
     if kind == 122: return BinOp.BitXor
     BinOp.Add
 
+fn flat_compound_assign_op(kind: i64) -> AssignOp:
+    # Op codes match parse_assignment()'s expr_compound_assign() calls in
+    # core/parser_expr.spl (60=+=, 61=-=, 62=*=, 63=/=, 64=%=) -- the same
+    # additive/multiplicative binary-op numbering used by op_kind_to_binop
+    # above.
+    if kind == 60: return AssignOp.Add
+    if kind == 61: return AssignOp.Sub
+    if kind == 62: return AssignOp.Mul
+    if kind == 63: return AssignOp.Div
+    if kind == 64: return AssignOp.Mod
+    AssignOp.Add
+
 # #148: op-kind decode for EXPR_UNARY (see parse_unary in parser_expr.spl for
 # the token-kind -> expr_unary(kind, ...) mapping). kind == TOK_MINUS (61) is
 # `-x` (Neg), kind == TOK_NOT (57) is `not x` (Not), kind == TOK_TILDE (123)
@@ -765,6 +777,22 @@ fn convert_flat_expr(idx: i64) -> Expr:
         val assign_target = convert_flat_expr(expr_get_left(idx))
         val assign_value = convert_flat_expr(expr_get_right(idx))
         return Expr(kind: ExprKind.Assign(assign_target, nil, assign_value), span: span)
+    elif tag == EXPR_COMPOUND_ASSIGN:
+        # `target += value` (and -=, *=, /=, %=) -- the parser already builds
+        # a dedicated EXPR_COMPOUND_ASSIGN node (op code in the I slot, target
+        # in LEFT, value in RIGHT; see expr_compound_assign() in
+        # core/_AstExpr/nodes.spl). This bridge had NO case for it, so every
+        # compound-assign fell through to the final `else` below and silently
+        # became NilLit -- e.g. `x += 5` compiled to a no-op that left `x`
+        # unchanged on the native --entry build path (same silent-drop
+        # pattern as EXPR_CAST/EXPR_ASSIGN/EXPR_RANGE above). Mirrors the
+        # plain EXPR_ASSIGN case just above; HIR lowering
+        # (hir_lowering/statements.spl's lower_hir_assign_op_opt) already
+        # fully supports the AssignOp slot, it just never received one.
+        val compound_target = convert_flat_expr(expr_get_left(idx))
+        val compound_value = convert_flat_expr(expr_get_right(idx))
+        val compound_op = flat_compound_assign_op(expr_get_int(idx))
+        return Expr(kind: ExprKind.Assign(compound_target, Some(compound_op), compound_value), span: span)
     elif tag == EXPR_LIST_COMP:
         val comp_body = convert_flat_expr(expr_get_right(idx))
         val comp_iterable = convert_flat_expr(expr_get_left(idx))
