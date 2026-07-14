@@ -622,9 +622,9 @@ impl MirLowering:
         # type keeps the old (correct) pass-through behavior for text whose
         # type isn't tracked, while still catching the confirmed SIGSEGV
         # case (int literals/vars/exprs, which reliably get an explicit
-        # I64 local type). Float has no raw-render runtime fn yet and is not
-        # covered here (follow-up); an untracked float local would still
-        # pass through unchanged (old behavior), not crash differently.
+        # I64 local type). Float now has a raw-render runtime fn
+        # (rt_raw_f64_to_string, see native_print_float_segv bug) and is
+        # covered below, mirroring the bool split.
         var print_arg = mir_operand_copy(arg_local)
         var arg_is_numeric = false
         # bool is rendered through its own raw-render fn (rt_raw_bool_to_string
@@ -633,6 +633,15 @@ impl MirLowering:
         # diverging from the oracle's print(bool) -> "true"/"false" (see
         # native_bool_print_repr bug).
         var arg_is_bool = false
+        # float (F32/F64) is rendered through its own raw-render fn
+        # (rt_raw_f64_to_string -> Python-repr shortest round-trip decimal,
+        # with a ".0" suffix on integral values: 2.0 -> "2.0", 0.1 -> "0.1")
+        # -- routing it through rt_raw_i64_to_string would reinterpret the
+        # double's raw bit pattern as a decimal integer (garbage), and simply
+        # passing it through unchanged (old behavior) SIGSEGVs rt_print's bare
+        # char* deref on a float bit pattern (see native_print_float_segv bug).
+        var arg_is_float = false
+        var arg_is_f32 = false
         if val arg_ty = self.local_mir_type_of(arg_local):
             match arg_ty.kind:
                 case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64:
@@ -641,16 +650,33 @@ impl MirLowering:
                     arg_is_numeric = true
                 case MirTypeKind.Bool:
                     arg_is_bool = true
+                case MirTypeKind.F32:
+                    arg_is_float = true
+                    arg_is_f32 = true
+                case MirTypeKind.F64:
+                    arg_is_float = true
                 case _:
                     ()
-        if arg_is_numeric or arg_is_bool:
-            val raw_render_fn = if arg_is_bool: "rt_raw_bool_to_string" else: "rt_raw_i64_to_string"
+        if arg_is_numeric or arg_is_bool or arg_is_float:
+            val raw_render_fn = if arg_is_bool: "rt_raw_bool_to_string" elif arg_is_float: "rt_raw_f64_to_string" else: "rt_raw_i64_to_string"
             val num_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str(raw_render_fn),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
             ))
+            # rt_raw_f64_to_string takes a real `double` (see runtime_native.c
+            # comment on it) -- an F32 operand must be widened to F64 first
+            # (emit_cast -> LLVM fpext), NOT passed raw: the call site's LLVM
+            # arg type is taken from the operand's own MIR type, so a bare F32
+            # arg would pass a 32-bit float in the ABI slot rt_raw_f64_to_string
+            # reads as a full 64-bit double, corrupting the value.
+            var render_src = mir_operand_copy(arg_local)
+            if arg_is_f32:
+                var b_widen = self.builder
+                val widened = b_widen.emit_cast(mir_operand_copy(arg_local), MirType.f64())
+                self.builder = b_widen
+                render_src = mir_operand_copy(widened)
             var b_num = self.builder
-            val num_res = b_num.emit_call(num_op, [mir_operand_copy(arg_local)], MirType.i64())
+            val num_res = b_num.emit_call(num_op, [render_src], MirType.i64())
             self.builder = b_num
             var num_src = mir_operand_copy(arg_local)
             if val num_local = num_res:

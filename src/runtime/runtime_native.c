@@ -883,6 +883,65 @@ int64_t rt_raw_bool_to_string(int64_t raw) {
     return rt_string_new((const uint8_t*)"false", 5);
 }
 
+/* rt_raw_f64_to_string — same "raw operand, no tag check" contract as
+ * rt_raw_i64_to_string/rt_raw_bool_to_string (see lower_bootstrap_print_call
+ * in switch_operators_calls.spl), but for an F64/F32-typed MIR local: the
+ * value arrives as an actual `double` (the call-site LLVM arg type is taken
+ * from the operand's own MIR type, not from this function's `declare`), NOT
+ * a raw i64 bit-pattern -- so this takes `double` directly, not int64_t.
+ *
+ * Formatting is Python repr()-style: a shortest-round-trip DECIMAL
+ * representation (never scientific notation), with a ".0" suffix forced on
+ * any integral value. This matches the deployed interpreter oracle for every
+ * case where the oracle is correct -- whole/exactly-representable floats keep
+ * a trailing ".0" (2.0 -> "2.0", 100.0 -> "100.0", 0.5 -> "0.5", 0.125 ->
+ * "0.125") -- and stays correct (round-tripping) where the oracle is provably
+ * broken: the oracle prints the 0.1 literal as "0.09999999999999998" (a string
+ * that parses to a DIFFERENT double -- it does not round-trip), so native is
+ * correct-by-construction with 0.1 -> "0.1", 1.0/3.0 -> "0.3333333333333333"
+ * (16 3's). rt_to_string()'s existing tagged/boxed-ANY float path uses raw
+ * %.17g (0.1 -> "0.10000000000000001") and does NOT match -- do not reuse it.
+ * Algorithm: (1) try the fewest fixed decimal places (0..17) whose %.*f
+ * rendering round-trips (strtod) back to the exact same double -- %f (never
+ * %e) avoids mismatches like 100.0 -> "1e+02"; (2) if that shortest rendering
+ * is integer-looking (no '.', and no letters, so finite -- inf/nan carry
+ * letters and pass through untouched), append ".0" (2 -> "2.0", -0 -> "-0.0",
+ * 0 -> "0.0"), giving Python-repr float display.
+ */
+int64_t rt_raw_f64_to_string(double v) {
+    char buf[400];
+    int len = 0;
+    int prec;
+    /* (1) shortest fixed-point rendering that round-trips exactly. */
+    for (prec = 0; prec <= 17; prec++) {
+        len = snprintf(buf, sizeof(buf), "%.*f", prec, v);
+        if (strtod(buf, NULL) == v) break;
+    }
+    if (prec > 17) {
+        len = snprintf(buf, sizeof(buf), "%.17f", v);
+    }
+    if (len < 0) len = 0;
+    /* (2) force a ".0" on an integer-looking finite value (no '.', no
+     * letters). Guard the buffer so the two appended chars + NUL always fit. */
+    if (len > 0 && len + 3 < (int)sizeof(buf)) {
+        int is_integral = 1;
+        for (int i = 0; i < len; i++) {
+            char c = buf[i];
+            if (c == '.' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+                is_integral = 0;
+                break;
+            }
+        }
+        if (is_integral) {
+            buf[len] = '.';
+            buf[len + 1] = '0';
+            buf[len + 2] = '\0';
+            len += 2;
+        }
+    }
+    return rt_string_new((const uint8_t*)buf, (uint64_t)len);
+}
+
 int64_t rt_value_to_string(int64_t value) {
     return rt_to_string(value);
 }
