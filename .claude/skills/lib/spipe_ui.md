@@ -61,6 +61,52 @@ Backend-specific 2D variants (same scene, different backend) for parity work:
 > template for building an interactive app.) For a real interactive app, do NOT
 > hand-draw one. See the next section.
 
+## Showcase apps — files, surfaces, and honest verification
+
+Each canonical app has a standalone source + `_gui` window wrapper, launchable
+on **3 surfaces** (standalone / host-WM / SimpleOS WM):
+
+| App (canonical ID) | Standalone / `_gui` source | Host-WM adapter |
+|---|---|---|
+| `graphics_2d_showcase` | `examples/06_io/ui/graphics_2d_showcase.spl` + `graphics_2d_showcase_gui.spl` | `wm_graphics_2d_showcase_gui.spl` |
+| `web_standards_showcase` | `web_standards_showcase_gui.spl` / `web_render_page_ppm.spl` rendering `browser_common_elements_showcase.html` | `wm_web_standards_showcase_gui.spl` |
+| `gui_widget_showcase` | `widget_showcase_gui.spl` | `wm_widget_showcase_gui.spl` |
+
+SimpleOS WM surface: no showcase is accepted into the installed launcher yet —
+`simpleos_wm_ready` is `false` for all three.
+
+**Verified headless run recipe** — fresh-seed binary (`bin/simple` traps on
+dict-heavy compiles for these apps; see
+`doc/08_tracking/bug/stage4_compiled_dict_no_growth_2026-07-11.md`):
+
+```bash
+SIMPLE_LIB=src SHOWCASE_RESOLUTION=320x240 \
+  src/compiler_rust/target/bootstrap/simple run examples/06_io/ui/graphics_2d_showcase.spl
+SHOWCASE_PPM=/tmp/widgets.ppm SIMPLE_LIB=src SHOWCASE_RESOLUTION=1280x720 SIMPLE_TIMEOUT_SECONDS=1200 \
+  src/compiler_rust/target/bootstrap/simple run examples/06_io/ui/widget_showcase_gui.spl
+```
+
+`SHOWCASE_RESOLUTION` defaults to 4K (3840x2160), `SHOWCASE_DPI` to 300. Full
+4K/8K is **compiled-lane-gated** (interpreter throughput ~5k px/s) — verify at
+a small explicit rung (e.g. `320x240`) rather than trusting the 4K default to
+finish under the interpreter within `SIMPLE_TIMEOUT_SECONDS`.
+
+**Honest verification — analyze the PPM, never trust file size.** Decode the
+P6 PPM and count distinct colors / nonzero pixels: a uniform background-color
+frame (the interpreter-budget-wall failure mode seen at 4K on the web
+showcase) has a large file size but near-zero distinct colors.
+`graphics_2d_showcase` additionally self-gates: it computes
+`nonzero`/`checksum`/`semantic_differences` (5 independently rendered
+primitive samples that must differ pairwise) from a real
+`read_pixels_with_source()` device readback and exits 1 if any check fails —
+treat that exit code as an anti-fake gate, not just a crash check.
+
+**Lane reality:** the interpreter is the only lane currently reaching these
+apps; full 4K and the web-standards showcase both time out / degrade at full
+resolution — do not claim a 4K or web-showcase PASS without a same-run
+small-rung result or an explicit budget-fix citation. Full per-app lane
+status and all 3 surfaces: `doc/07_guide/ui/showcase_apps.md`.
+
 ## Interactive GUI (the REAL pipeline) — do NOT hand-draw a new one
 
 ⚠️ **Hand-drawing a GUI by calling engine2d primitives (`draw_rect` / `draw_text`,
