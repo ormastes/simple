@@ -116,8 +116,9 @@ concurrency/resource formal gate, and the focused memory-safety formal gate.
 - The latest live QEMU Simple GUI/MDI PPM is parsed directly and must satisfy
   the same probe, header, body, top-lane, and taskbar pixel anchors as the live
   QMP capture spec.
-- The RV64 display-smoke QMP report must prove the 320x240 virtio-gpu
-  framebuffer, nonblack pixels, and all five WM anchor samples.
+- The RV64 display-smoke QMP report must use contract v2 and prove dynamic
+  dimensions/stride, one correlated positive present revision, nonblack
+  pixels, and at least four canonical desktop palette witnesses.
 - Async/thread/process/coroutine regression evidence must be surfaced as a
   counted matrix row with the async hardening wrapper total, passed, failed,
   and missing counts.
@@ -284,9 +285,8 @@ be mistaken for a completed RTL proof pass.
   `build/tmp/gui_entry_engine2d_wm_simple_web_spec_*` capture directory plus
   `test/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.spl` and its generated
   manual.
-- RV64 display-smoke QMP evidence reads
-  `doc/09_report/rv64_display_smoke_qmp_evidence_current_2026-07-02.md` when
-  present, otherwise the date-stamped report for the current run.
+- RV64 display-smoke QMP evidence reads the current date-stamped contract-v2
+  report unless `RV64_DISPLAY_SMOKE_REPORT` selects an explicit source report.
 
 ## Scope Notes
 
@@ -483,9 +483,12 @@ expect(stdout).to_contain("simpleos_hardening_qemu_mdi_status=pass")
 expect(stdout).to_contain("simpleos_hardening_qemu_mdi_ppm_anchor_status=pass")
 expect(stdout).to_contain("simpleos_hardening_qemu_mdi_ppm_nonblack=")
 expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_status=pass")
-expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_width=320")
-expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_height=240")
-expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_anchor_matches=5")
+expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_contract_version=2")
+expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_width=800")
+expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_height=600")
+expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_stride=3200")
+expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_present_revision=7")
+expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_palette_witnesses=5")
 expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_ppm_bytes=2359312")
 expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_raw_bytes=3145728")
 val report = file_read(_report_path(run_id))

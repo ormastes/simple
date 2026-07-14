@@ -265,10 +265,10 @@ netstack, TLS, and HTTP closures.
   older packet-unavailable images.
 - `sh scripts/qemu/qemu_rv64_http_test.shs --elf build/simpleos-rv64.elf --expect-http-only --with-display`
   now exposes QEMU `virtio-gpu-pci`, initializes the RV64 freestanding modern
-  virtio-pci common/notify path, creates a 320x240 BGRA resource, attaches
-  backing memory, sets scanout 0, transfers and flushes a deterministic test
-  pattern, and requires `[display-riscv] Display service ready: 320x240
-  framebuffer` before accepting the live HTTP smoke result.
+  virtio-pci common/notify path, discovers an enabled scanout mode, creates the
+  matching BGRA resource, attaches backing memory, and reports the dynamic
+  display-service dimensions. Presentation is intentionally left to the
+  canonical compositor after Draw IR/Engine2D rendering.
 - `sh scripts/qemu/qemu_rv64_http_test.shs --elf build/simpleos-rv64.elf --expect-http-only --with-display --with-storage`
   now creates a QEMU raw probe disk with NVFS superblock replicas at LBA 0 and
   LBA 1, exposes it through `virtio-blk-pci`, initializes the RV64 freestanding

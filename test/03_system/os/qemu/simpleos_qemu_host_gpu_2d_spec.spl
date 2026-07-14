@@ -33,6 +33,18 @@ fn host_gpu_protocol_source() -> text:
 fn production_wm_executor_source() -> text:
     file_read_text("src/os/compositor/engine2d_wm_frame_executor.spl")
 
+fn rv64_desktop_source() -> text:
+    file_read_text("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl")
+
+fn rv64_display_owner_source() -> text:
+    file_read_text("src/os/kernel/arch/riscv64/display.spl")
+
+fn rv64_display_runtime_source() -> text:
+    file_read_text("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c")
+
+fn rv64_display_evidence_source() -> text:
+    file_read_text("scripts/check/check-rv64-display-smoke-qmp-evidence.shs")
+
 fn vulkan_backend_source() -> text:
     file_read_text("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
 
@@ -193,6 +205,46 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         expect(source).to_contain("[ \"$presented_generation\" -eq \"$((ready_generation + 1))\" ]")
         expect(source).to_contain("[ \"$presented_run\" -eq \"$ready_generation\" ]")
         expect(source).to_contain("[ \"$presented_frame\" -eq \"$presented_generation\" ]")
+
+    # @manual: folded
+    it "routes the RV64 dynamic scanout through the canonical production desktop":
+        step("Initialize the dynamic RISC-V VirtIO scanout")
+        step("Render the canonical Shared WM scene through Draw IR and Engine2D")
+        step("Present the completed framebuffer through VirtIO-GPU")
+        step("Report source-only status until a fresh pure-Simple ELF boots")
+        val entry = rv64_desktop_source()
+        val owner = rv64_display_owner_source()
+        val runtime = rv64_display_runtime_source()
+        val runner = qemu_runner_build_source()
+        val evidence = rv64_display_evidence_source()
+        val render = entry.index_of("shell.render_baremetal_first_frame(executor)")
+        val present = entry.index_of("if not riscv64_display_present():")
+        val ready = entry.index_of("[desktop-gui-riscv64] desktop-ready revision=")
+        expect(runner).to_contain("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl")
+        expect(runner).to_contain("[\"build/os/generated\", \"src/os\", \"src/lib\", \"examples/09_embedded/simple_os\"]")
+        expect(entry).to_contain("FramebufferDriver.from_scanout_raw")
+        expect(entry).to_contain("create_fb_engine_sized")
+        expect(entry).to_contain("Engine2dWmFrameExecutor.create_host_gpu")
+        expect(entry).to_contain("SIMPLEOS_HOST_GPU_ISA_RISCV64")
+        expect(entry).to_contain("map_qemu_host_gpu_ivshmem_bar2")
+        expect(entry.contains("extern fn rt_")).to_equal(false)
+        expect(entry.contains("DISPLAY_WM_ANCHORS_READY")).to_equal(false)
+        expect(render).to_be_greater_than(0)
+        expect(render).to_be_less_than(present)
+        expect(present).to_be_less_than(ready)
+        expect(owner).to_contain("extern fn rt_display_present() -> i64")
+        expect(runtime).to_contain("const spl_u8 *mode = (const spl_u8 *)g_rt_gpu_resp + 24U + scanout * 24U")
+        expect(runtime).to_contain("spl_i64 rt_display_present(void)")
+        expect(runtime).to_contain("RT_GPU_COMMAND_TIMEOUT_US")
+        expect(runtime).to_contain("g_rt_display_ready && !g_rt_display_failed")
+        expect(runtime).to_contain("pages <= g_riscv_pmm_free_pages")
+        expect(runtime.contains("polls < 1000000ULL")).to_equal(false)
+        expect(runtime.contains("RT_GPU_WIDTH")).to_equal(false)
+        expect(runtime.contains("rt_gpu_fill_wm_anchor_scene")).to_equal(false)
+        expect(evidence).to_contain("contract_version=2")
+        expect(evidence).to_contain("--self-test")
+        expect(evidence).to_contain("canonical_palette_witnesses")
+        expect(evidence.contains("wm_anchor_matches")).to_equal(false)
 
     # @capture(protocol)
     it "requires checked raw native backend completion before a device receipt":

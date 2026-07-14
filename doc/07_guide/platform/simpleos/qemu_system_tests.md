@@ -204,21 +204,25 @@ bin/simple os build --scenario=riscv64-display-smoke
 RV64_DISPLAY_SMOKE_BUILD=0 scripts/check/check-rv64-display-smoke-qmp-evidence.shs
 ```
 
-This routes to `examples/09_embedded/simple_os/arch/riscv64/display_entry.spl`
-and `build/os/simpleos_riscv64_display_smoke.elf`. The entry calls only the
-RV64 display runtime (`rt_display_init`, `rt_display_flush_wm_anchor_test`) and then idles
-for QMP capture. Current evidence: `bin/simple os build
---scenario=riscv64-display-smoke` emits the ELF, direct QEMU serial reaches
-`SIMPLEOS_RISCV_DISPLAY_SMOKE_READY`, and QMP `screendump` captured a nonblack
-320x240 PPM at
-`build/os/rv64_display_smoke_evidence-current/screendump.ppm`. Current report:
-`doc/09_report/rv64_display_smoke_qmp_evidence_current_2026-07-02.md`.
+This routes to
+`examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl` and
+`build/os/simpleos_riscv64_display_smoke.elf`. One architecture display facade
+owns the transitional runtime boundary and exposes dynamic mode, framebuffer,
+stride, and checked present operations. The entry constructs
+`FramebufferDriver`, compositor-owned surfaces, `DesktopShell`, and
+`Engine2dWmFrameExecutor`; its completed `DrawIrComposition` is presented by a
+VirtIO-GPU transfer plus flush. TODO 567 retains the pure-Simple DMA/queue
+transport migration, so leaves do not acquire direct `rt_*` paths.
 
-This is an RV64 VirtIO scanout transport probe, not a production WM lifecycle
-gate. `display_entry.spl` prints its WM/Engine2D/Web markers unconditionally and
-the C runtime paints the five fixed anchors. Preserve the QMP result as
-scanout evidence only; production RV64 `SharedWmScene`/Engine2D evidence remains
-open under TODO 565 and the dynamic display-owner migration under TODO 567.
+The wrapper now uses evidence contract v2. It requires ordered scanout,
+first-frame, present, and desktop-ready markers with the same positive scene
+revision, validates the dynamic PPM dimensions and stride, and accepts at least
+four canonical desktop palette witnesses. Run its parser without QEMU via
+`sh scripts/check/check-rv64-display-smoke-qmp-evidence.shs --self-test`.
+The historical 2026-07-02 fixed-anchor report remains scanout-only evidence and
+cannot pass contract v2. Until TODO 548 produces and boots a fresh pure-Simple
+ELF, the canonical RV64 desktop is source-ready only; no live QEMU PASS is
+claimed.
 
 ## Host-GPU rendering and ProcessingIR
 

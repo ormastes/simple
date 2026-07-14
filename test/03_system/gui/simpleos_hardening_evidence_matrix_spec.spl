@@ -71,8 +71,9 @@ gate.
 - The latest live QEMU Simple GUI/MDI PPM is parsed directly and must satisfy
   the same probe, header, body, top-lane, and taskbar pixel anchors as the live
   QMP capture spec.
-- The RV64 display-smoke QMP report must prove the 320x240 virtio-gpu
-  framebuffer, nonblack pixels, and all five WM anchor samples.
+- The RV64 display-smoke QMP report must use contract v2 and prove dynamic
+  scanout dimensions/stride, one correlated canonical-frame revision,
+  nonblack pixels, and at least four canonical desktop palette witnesses.
 - Async/thread/process/coroutine regression evidence must be surfaced as a
   counted matrix row with the async hardening wrapper total, passed, failed,
   and missing counts.
@@ -217,9 +218,8 @@ be mistaken for a completed RTL proof pass.
   `build/tmp/gui_entry_engine2d_wm_simple_web_spec_*` capture directory plus
   `test/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.spl` and its generated
   manual.
-- RV64 display-smoke QMP evidence reads
-  `doc/09_report/rv64_display_smoke_qmp_evidence_current_2026-07-02.md` when
-  present, otherwise the date-stamped report for the current run.
+- RV64 display-smoke QMP evidence reads the current date-stamped contract-v2
+  report unless `RV64_DISPLAY_SMOKE_REPORT` selects an explicit source report.
 
 ## Scope Notes
 
@@ -285,15 +285,33 @@ fn _host_gpu_report_path(run_id: text) -> text:
 fn _async_log_path(run_id: text) -> text:
     _build_dir(run_id) + "/async-library-hardening.log"
 
+fn _rv64_report_path(run_id: text) -> text:
+    _build_dir(run_id) + "/rv64-display-2099-01-01.md"
+
 fn _write_async_log(run_id: text) -> bool:
     process_run_timeout("/bin/sh", ["-c", "mkdir -p " + _build_dir(run_id)], 5000)
-    file_write(_async_log_path(run_id),
+    val async_written = file_write(_async_log_path(run_id),
         "async_library_hardening_total=19\n" +
         "async_library_hardening_passed=19\n" +
         "async_library_hardening_failed=0\n" +
         "async_library_hardening_missing=0\n" +
         "STATUS: PASS async-library-hardening-evidence\n"
     )
+    val rv64_written = file_write(_rv64_report_path(run_id),
+        "- contract_version: 2\n" +
+        "- status: pass\n" +
+        "- reason: rv64-canonical-desktop-qmp-pass\n" +
+        "- ready: 1\n" +
+        "- lifecycle_markers: 1\n" +
+        "- width: 800\n" +
+        "- height: 600\n" +
+        "- stride: 3200\n" +
+        "- present_revision: 7\n" +
+        "- nonblack: 480000\n" +
+        "- canonical_palette_witnesses: 5\n" +
+        "- canonical_palette_names: desktop,command,taskbar,focused-window,window\n"
+    )
+    async_written and rv64_written
 
 fn _run_matrix(run_id: text) -> (text, text, i32):
     _write_async_log(run_id)
@@ -303,6 +321,7 @@ fn _run_matrix(run_id: text) -> (text, text, i32):
             "-c",
             "BUILD_DIR=" + _build_dir(run_id) + " REPORT_PATH=" + _report_path(run_id) +
                 " ASYNC_LIBRARY_HARDENING_LOG=" + _async_log_path(run_id) +
+                " RV64_DISPLAY_SMOKE_REPORT=" + _rv64_report_path(run_id) +
                 " sh scripts/check/check-simpleos-hardening-evidence-matrix.shs"
         ],
         120000
@@ -317,6 +336,7 @@ fn _run_matrix_with_qemu_report(run_id: text, qemu_report_path: text) -> (text, 
             "BUILD_DIR=" + _build_dir(run_id) + " REPORT_PATH=" + _report_path(run_id) +
                 " QEMU_GTK_REPORT=" + qemu_report_path +
                 " ASYNC_LIBRARY_HARDENING_LOG=" + _async_log_path(run_id) +
+                " RV64_DISPLAY_SMOKE_REPORT=" + _rv64_report_path(run_id) +
                 " sh scripts/check/check-simpleos-hardening-evidence-matrix.shs"
         ],
         120000
@@ -331,6 +351,7 @@ fn _run_matrix_with_host_gpu_report(run_id: text, host_gpu_report_path: text) ->
             "BUILD_DIR=" + _build_dir(run_id) + " REPORT_PATH=" + _report_path(run_id) +
                 " SIMPLEOS_HOST_GPU_2D_REPORT=" + host_gpu_report_path +
                 " ASYNC_LIBRARY_HARDENING_LOG=" + _async_log_path(run_id) +
+                " RV64_DISPLAY_SMOKE_REPORT=" + _rv64_report_path(run_id) +
                 " sh scripts/check/check-simpleos-hardening-evidence-matrix.shs"
         ],
         120000
@@ -466,9 +487,12 @@ describe "SimpleOS hardening evidence matrix":
         expect(stdout).to_contain("simpleos_hardening_qemu_mdi_ppm_anchor_status=pass")
         expect(stdout).to_contain("simpleos_hardening_qemu_mdi_ppm_nonblack=")
         expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_status=pass")
-        expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_width=320")
-        expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_height=240")
-        expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_anchor_matches=5")
+        expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_contract_version=2")
+        expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_width=800")
+        expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_height=600")
+        expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_stride=3200")
+        expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_present_revision=7")
+        expect(stdout).to_contain("simpleos_hardening_rv64_display_smoke_qmp_palette_witnesses=5")
         expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_ppm_bytes=2359312")
         expect(stdout).to_contain("simpleos_hardening_gui_entry_capture_raw_bytes=3145728")
         val report = file_read(_report_path(run_id))

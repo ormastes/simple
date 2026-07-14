@@ -85,7 +85,8 @@ Current passing evidence requires:
 - `qemu live bitmap status: pass`
 - `qemu live bitmap reason: live-qmp-screendump-pass`
 - `live capture full-scene mismatches: 0`
-- RV64 `wm_anchor_matches: 5`
+- RV64 evidence contract `2`, one positive correlated present revision, and at
+  least four canonical desktop palette witnesses
 - `host GTK GL WM scene status: pass`
 - `host GTK GL WM scene mismatch count: 0`
 - `host GTK GL WM scene blur/tolerance used: false`

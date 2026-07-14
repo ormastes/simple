@@ -1523,8 +1523,6 @@ typedef struct RtPciDevice {
 #define RT_NVFS_MAGIC 0x4e564653U
 #define RT_NVFS_VERSION 2U
 #define RT_GPU_QUEUE_CAP 64U
-#define RT_GPU_WIDTH 320U
-#define RT_GPU_HEIGHT 240U
 #define RT_GPU_RESOURCE_ID 1U
 #define RT_GPU_CMD_GET_DISPLAY_INFO 0x0100U
 #define RT_GPU_CMD_RESOURCE_CREATE_2D 0x0101U
@@ -1579,10 +1577,15 @@ static spl_u64 g_rt_gpu_desc = 0;
 static spl_u64 g_rt_gpu_avail = 0;
 static spl_u64 g_rt_gpu_used = 0;
 static spl_u16 g_rt_gpu_qsize = 0;
-static spl_u16 g_rt_gpu_last_used = 0;
 static spl_u64 g_rt_gpu_cmd = 0;
 static spl_u64 g_rt_gpu_resp = 0;
 static spl_u64 g_rt_gpu_fb = 0;
+static spl_u32 g_rt_gpu_width = 0;
+static spl_u32 g_rt_gpu_height = 0;
+static spl_u32 g_rt_gpu_pitch = 0;
+static spl_u32 g_rt_gpu_scanout_id = 0;
+static spl_u32 g_rt_gpu_last_response_len = 0;
+static spl_i64 g_rt_display_failed = 0;
 
 static spl_u32 rt_pci_read_config32(spl_u64 bus, spl_u64 dev, spl_u64 func, spl_u64 reg) {
     spl_u64 addr = RT_PCI_ECAM_BASE
@@ -3139,6 +3142,14 @@ static spl_u32 rt_get_le32(const spl_u8 *p) {
         ((spl_u32)p[3] << 24);
 }
 
+#define RT_GPU_COMMAND_TIMEOUT_US 100000ULL
+
+static spl_u64 rt_gpu_time_now_us(void) {
+    spl_u64 ticks;
+    __asm__ volatile("rdtime %0" : "=r"(ticks));
+    return ticks / 10ULL;
+}
+
 static void rt_gpu_ctrl_hdr(spl_u8 *p, spl_u32 cmd) {
     rt_memzero(p, 64);
     rt_put_le32(p, cmd);
@@ -3147,29 +3158,42 @@ static void rt_gpu_ctrl_hdr(spl_u8 *p, spl_u32 cmd) {
 static spl_i64 rt_gpu_send_command(spl_u32 cmd, spl_u32 req_len, spl_u32 resp_len) {
     volatile spl_u16 *used_idx;
     spl_u16 start;
+    spl_u64 started_us;
     if ((!g_rt_gpu_modern && !g_rt_gpu_bar0) || !g_rt_gpu_cmd || !g_rt_gpu_resp || g_rt_gpu_qsize < 2) {
         return -1;
     }
     rt_desc_write(g_rt_gpu_desc, 0, g_rt_gpu_cmd, req_len, RT_VIRTQ_DESC_F_NEXT, 1);
     rt_desc_write(g_rt_gpu_desc, 1, g_rt_gpu_resp, resp_len, RT_VIRTQ_DESC_F_WRITE, 0);
     rt_memzero((void *)g_rt_gpu_resp, resp_len);
-    rt_avail_push(g_rt_gpu_avail, g_rt_gpu_qsize, 0);
     used_idx = (volatile spl_u16 *)(g_rt_gpu_used + 2ULL);
     start = *used_idx;
+    g_rt_gpu_last_response_len = 0;
+    rt_avail_push(g_rt_gpu_avail, g_rt_gpu_qsize, 0);
     __sync_synchronize();
     if (g_rt_gpu_modern) {
         rt_mmio_write16_raw(g_rt_gpu_notify + ((spl_u64)g_rt_gpu_notify_off * (spl_u64)g_rt_gpu_notify_multiplier), 0);
     } else {
         rt_io_write16(g_rt_gpu_bar0, RT_VIRTIO_PCI_QUEUE_NOTIFY, 0);
     }
-    for (spl_u64 polls = 0; polls < 1000000ULL; polls = polls + 1) {
+    started_us = rt_gpu_time_now_us();
+    while (rt_gpu_time_now_us() - started_us < RT_GPU_COMMAND_TIMEOUT_US) {
         __sync_synchronize();
         if (*used_idx != start) {
-            g_rt_gpu_last_used = *used_idx;
+            __sync_synchronize();
+            spl_u64 used_slot = (spl_u64)(start % g_rt_gpu_qsize);
+            volatile spl_u32 *used_elem = (volatile spl_u32 *)(g_rt_gpu_used + 4ULL + used_slot * 8ULL);
+            spl_u32 used_id = used_elem[0];
+            spl_u32 used_len = used_elem[1];
+            if (used_id != 0U || used_len < 24U || used_len > resp_len) {
+                g_rt_display_failed = 1;
+                return -3;
+            }
+            g_rt_gpu_last_response_len = used_len;
             return (spl_i64)rt_get_le32((const spl_u8 *)g_rt_gpu_resp);
         }
     }
     (void)cmd;
+    g_rt_display_failed = 1;
     return -2;
 }
 
@@ -3276,13 +3300,32 @@ static spl_i64 rt_gpu_cmd_get_display_info(void) {
     spl_i64 resp;
     rt_gpu_ctrl_hdr(cmd, RT_GPU_CMD_GET_DISPLAY_INFO);
     resp = rt_gpu_send_command(RT_GPU_CMD_GET_DISPLAY_INFO, 24U, 408U);
-    if (resp == RT_GPU_RESP_OK_DISPLAY_INFO) {
-        return 0;
+    if (resp != RT_GPU_RESP_OK_DISPLAY_INFO) {
+        return resp < 0 ? resp : -3;
     }
-    if (resp < 0) {
-        return resp;
+    if (g_rt_gpu_last_response_len < 408U) {
+        g_rt_display_failed = 1;
+        return -4;
     }
-    return -3;
+    for (spl_u32 scanout = 0; scanout < 16U; scanout = scanout + 1U) {
+        const spl_u8 *mode = (const spl_u8 *)g_rt_gpu_resp + 24U + scanout * 24U;
+        spl_u32 width = rt_get_le32(mode + 8U);
+        spl_u32 height = rt_get_le32(mode + 12U);
+        spl_u32 enabled = rt_get_le32(mode + 16U);
+        spl_u64 bytes = (spl_u64)width * (spl_u64)height * 4ULL;
+        spl_u64 pages = (bytes + 4095ULL) / 4096ULL;
+        if (enabled != 0U && width > 0U && height > 0U
+            && width <= 0x7fffffffU && height <= 0x7fffffffU
+            && width <= 0xffffffffU / 4U && bytes > 0ULL
+            && bytes <= 0xffffffffULL && pages <= g_riscv_pmm_free_pages) {
+            g_rt_gpu_width = width;
+            g_rt_gpu_height = height;
+            g_rt_gpu_pitch = width * 4U;
+            g_rt_gpu_scanout_id = scanout;
+            return 0;
+        }
+    }
+    return -5;
 }
 
 static spl_i64 rt_gpu_cmd_resource_create(void) {
@@ -3290,8 +3333,8 @@ static spl_i64 rt_gpu_cmd_resource_create(void) {
     rt_gpu_ctrl_hdr(cmd, RT_GPU_CMD_RESOURCE_CREATE_2D);
     rt_put_le32(cmd + 24, RT_GPU_RESOURCE_ID);
     rt_put_le32(cmd + 28, RT_GPU_FORMAT_B8G8R8A8_UNORM);
-    rt_put_le32(cmd + 32, RT_GPU_WIDTH);
-    rt_put_le32(cmd + 36, RT_GPU_HEIGHT);
+    rt_put_le32(cmd + 32, g_rt_gpu_width);
+    rt_put_le32(cmd + 36, g_rt_gpu_height);
     return rt_gpu_send_command(RT_GPU_CMD_RESOURCE_CREATE_2D, 40U, 24U) == RT_GPU_RESP_OK_NODATA ? 0 : -1;
 }
 
@@ -3301,7 +3344,7 @@ static spl_i64 rt_gpu_cmd_attach_backing(void) {
     rt_put_le32(cmd + 24, RT_GPU_RESOURCE_ID);
     rt_put_le32(cmd + 28, 1U);
     rt_put_le64(cmd + 32, g_rt_gpu_fb);
-    rt_put_le32(cmd + 40, RT_GPU_WIDTH * RT_GPU_HEIGHT * 4U);
+    rt_put_le32(cmd + 40, g_rt_gpu_width * g_rt_gpu_height * 4U);
     rt_put_le32(cmd + 44, 0U);
     return rt_gpu_send_command(RT_GPU_CMD_RESOURCE_ATTACH_BACKING, 48U, 24U) == RT_GPU_RESP_OK_NODATA ? 0 : -1;
 }
@@ -3311,9 +3354,9 @@ static spl_i64 rt_gpu_cmd_set_scanout(void) {
     rt_gpu_ctrl_hdr(cmd, RT_GPU_CMD_SET_SCANOUT);
     rt_put_le32(cmd + 24, 0U);
     rt_put_le32(cmd + 28, 0U);
-    rt_put_le32(cmd + 32, RT_GPU_WIDTH);
-    rt_put_le32(cmd + 36, RT_GPU_HEIGHT);
-    rt_put_le32(cmd + 40, 0U);
+    rt_put_le32(cmd + 32, g_rt_gpu_width);
+    rt_put_le32(cmd + 36, g_rt_gpu_height);
+    rt_put_le32(cmd + 40, g_rt_gpu_scanout_id);
     rt_put_le32(cmd + 44, RT_GPU_RESOURCE_ID);
     return rt_gpu_send_command(RT_GPU_CMD_SET_SCANOUT, 48U, 24U) == RT_GPU_RESP_OK_NODATA ? 0 : -1;
 }
@@ -3324,8 +3367,8 @@ static spl_i64 rt_gpu_cmd_transfer_flush(void) {
     rt_gpu_ctrl_hdr(cmd, RT_GPU_CMD_TRANSFER_TO_HOST_2D);
     rt_put_le32(cmd + 24, 0U);
     rt_put_le32(cmd + 28, 0U);
-    rt_put_le32(cmd + 32, RT_GPU_WIDTH);
-    rt_put_le32(cmd + 36, RT_GPU_HEIGHT);
+    rt_put_le32(cmd + 32, g_rt_gpu_width);
+    rt_put_le32(cmd + 36, g_rt_gpu_height);
     rt_put_le64(cmd + 40, 0ULL);
     rt_put_le32(cmd + 48, RT_GPU_RESOURCE_ID);
     rt_put_le32(cmd + 52, 0U);
@@ -3336,52 +3379,22 @@ static spl_i64 rt_gpu_cmd_transfer_flush(void) {
     rt_gpu_ctrl_hdr(cmd, RT_GPU_CMD_RESOURCE_FLUSH);
     rt_put_le32(cmd + 24, 0U);
     rt_put_le32(cmd + 28, 0U);
-    rt_put_le32(cmd + 32, RT_GPU_WIDTH);
-    rt_put_le32(cmd + 36, RT_GPU_HEIGHT);
+    rt_put_le32(cmd + 32, g_rt_gpu_width);
+    rt_put_le32(cmd + 36, g_rt_gpu_height);
     rt_put_le32(cmd + 40, RT_GPU_RESOURCE_ID);
     rt_put_le32(cmd + 44, 0U);
     return rt_gpu_send_command(RT_GPU_CMD_RESOURCE_FLUSH, 48U, 24U) == RT_GPU_RESP_OK_NODATA ? 0 : -1;
 }
 
-static void rt_gpu_fill_test_pattern(void) {
-    volatile spl_u32 *fb = (volatile spl_u32 *)g_rt_gpu_fb;
-    for (spl_u32 y = 0; y < RT_GPU_HEIGHT; y = y + 1U) {
-        for (spl_u32 x = 0; x < RT_GPU_WIDTH; x = x + 1U) {
-            spl_u8 r = (spl_u8)(x & 0xffU);
-            spl_u8 g = (spl_u8)(y & 0xffU);
-            spl_u8 b = (spl_u8)((x ^ y) & 0xffU);
-            fb[(spl_u64)y * RT_GPU_WIDTH + x] = 0xff000000U | ((spl_u32)r << 16) | ((spl_u32)g << 8) | (spl_u32)b;
-        }
-    }
-}
-
-static void rt_gpu_fill_rect(spl_u32 x, spl_u32 y, spl_u32 w, spl_u32 h, spl_u32 color) {
-    volatile spl_u32 *fb = (volatile spl_u32 *)g_rt_gpu_fb;
-    spl_u32 max_x = x + w;
-    spl_u32 max_y = y + h;
-    if (max_x > RT_GPU_WIDTH) {
-        max_x = RT_GPU_WIDTH;
-    }
-    if (max_y > RT_GPU_HEIGHT) {
-        max_y = RT_GPU_HEIGHT;
-    }
-    for (spl_u32 py = y; py < max_y; py = py + 1U) {
-        for (spl_u32 px = x; px < max_x; px = px + 1U) {
-            fb[(spl_u64)py * RT_GPU_WIDTH + px] = color;
-        }
-    }
-}
-
-static void rt_gpu_fill_wm_anchor_scene(void) {
-    rt_gpu_fill_rect(0U, 0U, RT_GPU_WIDTH, RT_GPU_HEIGHT, 0xff101418U);
-    rt_gpu_fill_rect(0U, 0U, RT_GPU_WIDTH, 24U, 0xff1f2937U);
-    rt_gpu_fill_rect(24U, 36U, 128U, 20U, 0xff4f46e5U);
-    rt_gpu_fill_rect(24U, 56U, 128U, 72U, 0xfff8fafcU);
-    rt_gpu_fill_rect(168U, 48U, 112U, 88U, 0xff0f766eU);
-    rt_gpu_fill_rect(0U, 212U, RT_GPU_WIDTH, 28U, 0xff22c55eU);
-}
-
 spl_i64 rt_display_init(void) {
+    if (g_rt_display_failed) {
+        return -70;
+    }
+    if (g_rt_display_ready) {
+        return 0;
+    }
+    /* One-shot boot transport: any partial init failure poisons this session. */
+    g_rt_display_failed = 1;
     spl_i64 count = rt_pci_device_count();
     for (spl_i64 i = 0; i < count; i = i + 1) {
         spl_i64 cls = rt_pci_get_field(i, 3);
@@ -3421,19 +3434,24 @@ spl_i64 rt_display_init(void) {
             }
             g_rt_gpu_cmd = rt_riscv_noalloc_alloc_page();
             g_rt_gpu_resp = rt_riscv_noalloc_alloc_page();
-            g_rt_gpu_fb = rt_alloc_contiguous_pages((RT_GPU_WIDTH * RT_GPU_HEIGHT * 4ULL + 4095ULL) / 4096ULL);
-            if (!g_rt_gpu_cmd || !g_rt_gpu_resp || !g_rt_gpu_fb) {
+            if (!g_rt_gpu_cmd || !g_rt_gpu_resp) {
                 g_rt_display_ready = 0;
                 return -5;
             }
             rt_memzero((void *)g_rt_gpu_cmd, 4096ULL);
             rt_memzero((void *)g_rt_gpu_resp, 4096ULL);
-            rt_memzero((void *)g_rt_gpu_fb, RT_GPU_WIDTH * RT_GPU_HEIGHT * 4ULL);
             spl_i64 display_info_rc = rt_gpu_cmd_get_display_info();
             if (display_info_rc < 0) {
                 g_rt_display_ready = 0;
                 return -610 + display_info_rc;
             }
+            spl_u64 framebuffer_bytes = (spl_u64)g_rt_gpu_width * (spl_u64)g_rt_gpu_height * 4ULL;
+            g_rt_gpu_fb = rt_alloc_contiguous_pages((framebuffer_bytes + 4095ULL) / 4096ULL);
+            if (!g_rt_gpu_fb) {
+                g_rt_display_ready = 0;
+                return -61;
+            }
+            rt_memzero((void *)g_rt_gpu_fb, framebuffer_bytes);
             if (rt_gpu_cmd_resource_create() < 0) {
                 g_rt_display_ready = 0;
                 return -62;
@@ -3446,6 +3464,7 @@ spl_i64 rt_display_init(void) {
                 g_rt_display_ready = 0;
                 return -64;
             }
+            g_rt_display_failed = 0;
             g_rt_display_ready = 1;
             return 0;
         }
@@ -3454,28 +3473,37 @@ spl_i64 rt_display_init(void) {
     return -1;
 }
 
-spl_i64 rt_display_flush_test(void) {
-    if (!g_rt_display_ready || !g_rt_gpu_fb) {
+spl_i64 rt_display_present(void) {
+    spl_i64 result;
+    if (g_rt_display_failed || !g_rt_display_ready || !g_rt_gpu_fb) {
         return -1;
     }
-    rt_gpu_fill_test_pattern();
-    return rt_gpu_cmd_transfer_flush();
-}
-
-spl_i64 rt_display_flush_wm_anchor_test(void) {
-    if (!g_rt_display_ready || !g_rt_gpu_fb) {
-        return -1;
+    result = rt_gpu_cmd_transfer_flush();
+    if (result < 0) {
+        g_rt_display_failed = 1;
+        g_rt_display_ready = 0;
     }
-    rt_gpu_fill_wm_anchor_scene();
-    return rt_gpu_cmd_transfer_flush();
+    return result;
 }
 
 spl_i64 rt_display_width(void) {
-    return g_rt_display_ready ? RT_GPU_WIDTH : 0;
+    return g_rt_display_ready && !g_rt_display_failed ? (spl_i64)g_rt_gpu_width : 0;
 }
 
 spl_i64 rt_display_height(void) {
-    return g_rt_display_ready ? RT_GPU_HEIGHT : 0;
+    return g_rt_display_ready && !g_rt_display_failed ? (spl_i64)g_rt_gpu_height : 0;
+}
+
+spl_i64 rt_display_pitch(void) {
+    return g_rt_display_ready && !g_rt_display_failed ? (spl_i64)g_rt_gpu_pitch : 0;
+}
+
+spl_i64 rt_display_bpp(void) {
+    return g_rt_display_ready && !g_rt_display_failed ? 32 : 0;
+}
+
+spl_u64 rt_display_framebuffer_address(void) {
+    return g_rt_display_ready && !g_rt_display_failed ? g_rt_gpu_fb : 0;
 }
 
 /* ========================================================================

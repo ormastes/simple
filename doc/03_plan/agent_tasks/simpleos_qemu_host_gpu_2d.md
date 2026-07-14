@@ -23,7 +23,7 @@
 |---|---|---|
 | protocol codec/validation | Codex Spark | bounded Pure Simple records and malformed-input tests |
 | x86_64 Linux Vulkan slice | Codex Spark | live guest/daemon render and processing receipt |
-| AArch64/RISC-V adapters | Codex Spark | AArch64 production source plus correlated wrapper source/self-test; RISC-V probe remains |
+| AArch64/RISC-V adapters | Codex Spark | canonical AArch64 and dynamic-scanout RV64 production sources plus fail-closed evidence contracts |
 | host backend review | lower-model sidecar | Metal/DirectX/CUDA/Vulkan capability classification |
 | canonical WM command trace | Codex Spark | required RECT/TEXT/IMAGE/embedding subset and exclusions |
 | checked Vulkan provenance trace | Codex Spark | shared tri-state dispatch owner and raw CLEAR/RECT test boundary |
@@ -47,8 +47,11 @@ fixture bypasses, synthetic handles, or passing placeholders.
   `DesktopShell` frames through `Engine2dWmFrameExecutor`. AArch64
   source/build-scenario wiring and correlated production-wrapper source/self-test
   coverage are present, but real process ownership and
-  fresh compile/QEMU evidence remain open under TODO 565/TODO 548;
-  RISC-V remains a protocol/scanout probe pending TODO 567.
+  fresh compile/QEMU evidence remain open under TODO 565/TODO 548. RISC-V now
+  uses an architecture display facade, dynamic VirtIO mode discovery, and a
+  contract-v2 canonical-desktop gate; TODO 567 retains the pure-Simple DMA
+  transport migration rather than treating the historical fixed-anchor probe
+  as production evidence.
 - NFR-006 remains open under TODO 566: receipt timing covers daemon HELLO work,
   not guest-observed device initialization plus all fallback attempts.
 - NFR-005 evidence now carries concurrently sampled daemon, QEMU, and combined

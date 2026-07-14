@@ -228,8 +228,10 @@ selected 1280x720 render gate and TODO 570 owns the processing preference ratio.
 
 1. Pure Simple codec/validator and CPU oracle tests.
 2. x86_64 Linux/Vulkan rendering plus CUDA-preferred, Vulkan-fallback ProcessingIR guest-daemon vertical slice.
-3. AArch64 production RAMFB/Engine2D desktop using the identical protocol;
-   RISC-V follows after its dynamic scanout/present owner replaces fixed C anchors.
+3. AArch64 production RAMFB/Engine2D desktop and the RV64 dynamic VirtIO
+   scanout/present facade, both using the identical canonical executor. RV64
+   contract-v2 evidence correlates one scene revision and palette-bearing QMP
+   capture; fresh execution remains blocked by TODO 548.
 4. macOS Metal and Windows DirectX adapters only on prepared native hosts.
 5. Wire canonical row output into the hardening matrix without changing its
    existing 26-row pass contract.

@@ -9,7 +9,9 @@ Linux/Vulkan live x86_64, AArch64, and RV64 raw-render receipts pass; refreshed
 cross-ISA Draw IR and CUDA ProcessingIR receipts remain pending. Native Metal
 raw rendering, Draw IR, and dedicated ProcessingIR FillU32 execution are implemented, but their
 prepared-macOS receipts remain unavailable. Native Windows receipts remain
-pending while TODO 548 blocks a fresh Simple/QEMU run.
+pending while TODO 548 blocks a fresh Simple/QEMU run. The RV64 canonical
+desktop and contract-v2 evidence parser are source-ready, but no fresh RV64
+live PASS is claimed.
 
 This scenario proves that supported SimpleOS guests use one bounded protocol to
 execute Draw IR and ProcessingIR on a real host device. Unsupported rows retain
@@ -49,33 +51,42 @@ the CPU/software fallback and report a stable reason.
    reports retain the production serial log and exact QEMU
    device arguments under the `_production_serial_log` and
    `_production_qemu_device_args` keys.
-7. **Dispatch the raw CLEAR and solid RECT fixture through strict Engine2D selection.**
+7. **Initialize the dynamic RISC-V VirtIO scanout.** Discover mode and stride
+   through the architecture display facade before framebuffer construction.
+8. **Render the canonical Shared WM scene through Draw IR and Engine2D.** Use
+   compositor-owned surfaces, `DesktopShell`, and `Engine2dWmFrameExecutor`.
+9. **Present the completed framebuffer through VirtIO-GPU.** Transfer and flush
+   only after the correlated canonical frame is complete.
+10. **Report source-only status until a fresh pure-Simple ELF boots.** Contract
+    v2 rejects the historical fixed-resolution/fixed-anchor report; TODO 548
+    remains the execution blocker.
+11. **Dispatch the raw CLEAR and solid RECT fixture through strict Engine2D selection.**
    Route raw QEMU framebuffer mutations through the exact native Metal,
    DirectX, or Vulkan backend selected by HELLO and require checked completion evidence.
-8. **Reject unchecked or fallback raw rendering before device-backed receipt.**
+12. **Reject unchecked or fallback raw rendering before device-backed receipt.**
    Known failure invalidates device provenance; unknown completion poisons the
    frame rather than replaying it.
-9. **Select host presentation or the existing local production renderer.**
+13. **Select host presentation or the existing local production renderer.**
    The x86 desktop maps the full ivshmem BAR into its active VMM, derives a
    fresh generation only from an idle slot, submits the canonical WM Draw IR,
    validates the correlated device receipt, and presents checksum-checked MMIO
    readback. Any failure falls through to local Engine2D. The current 4K entry
    honestly selects local rendering until TODO 552 expands the bounded wire.
-10. **Run the ProcessingIR parity fixture.** Correlate the host completion and
+14. **Run the ProcessingIR parity fixture.** Correlate the host completion and
    require exact output-buffer parity with the CPU oracle. Vulkan uses the
    canonical SFFI owner's fenced tri-state dispatch: only proven status `1`
    may read back, while unknown completion retains dependencies and the device.
-11. **Keep native Metal ProcessingIR separate from Engine2D rendering.** Probe
+15. **Keep native Metal ProcessingIR separate from Engine2D rendering.** Probe
    and execute the dedicated MSL FillU32 owner, require checked command
    completion and pointer readback, and never relabel a Metal render clear as
    processing evidence.
-12. **Report device-backed host acceleration evidence.** Publish one row with
+16. **Report device-backed host acceleration evidence.** Publish one row with
    host, guest ISA, QEMU/device arguments, protocol, backend, device, IDs,
    timing, concurrently sampled daemon/QEMU/combined RSS maxima, checksums,
    status, and reason. For every non-HELLO request, both
    the guest and daemon require a positive numeric run hash and frame ID; a
    zero, negative, stale, or mismatched value fails before PASS admission.
-13. **Validate cached rows before aggregation.** Accept a cached report only
+17. **Validate cached rows before aggregation.** Accept a cached report only
    when all nine host/ISA rows are present and every passing row links to a
    serial log containing the exact render, Draw IR, and ProcessingIR receipts.
    Each passing row also requires a unique QEMU version, a reversible

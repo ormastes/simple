@@ -159,6 +159,10 @@ Host input
   Qualcomm, Vulkan, DirectX, and portable fallback lanes; the automatic probe
   order starts at Metal because native surfaces need a preinitialized
   framebuffer.
+- SimpleOS x86_64, AArch64, and RV64 production desktops all lower the shared
+  WM scene through Draw IR and `Engine2dWmFrameExecutor`. RV64 VirtIO mode
+  discovery/present is an architecture transport facade, not a private render
+  path.
 - Font offload uses `engine2d_font_offload_backend_order()` for vector and
   bitmap glyph preparation, with readback/checksum parity against the CPU
   reference path before a backend is treated as valid.

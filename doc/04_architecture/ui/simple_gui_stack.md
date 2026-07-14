@@ -268,14 +268,17 @@ chrome, taskbar, and visible windows into ordered Draw IR batches keyed by
 `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl`; it executes supported
 `rect`, `text`, and caller-resolved `image` Draw IR commands through the
 existing Engine2D facade, presents the completed composition, and returns
-readback pixels plus CPU/GPU fallback metadata. SimpleOS x86_64 production and
-AArch64 canonical boot-desktop source frames enter through
+readback pixels plus CPU/GPU fallback metadata. SimpleOS x86_64, AArch64, and
+RV64 canonical boot-desktop source frames enter through
 `src/os/compositor/engine2d_wm_frame_executor.spl`; invalid
 or duplicate top-level `WmContentFrame` resources fail closed, and nested IMAGE
 projection remains explicit unfinished work rather than omitted pixels. Real
 host-GPU Draw IR execution remains a backend job. Host runtime-queue integration
 lives separately in `draw_ir_runtime_adv.spl`; importing the core executor does
-not pull host-queue runtime APIs into the baremetal closure.
+not pull host-queue runtime APIs into the baremetal closure. RV64 dynamic
+VirtIO mode discovery and transfer/flush presentation stay in its architecture
+display facade; they are transport around the canonical composition, never a
+parallel GUI/Web/2D renderer.
 
 ### Render Optimization Plugin
 

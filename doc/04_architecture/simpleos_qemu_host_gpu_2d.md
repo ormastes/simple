@@ -15,8 +15,12 @@ maps the complete BAR into the active VMM, negotiates one bounded session, and
 submits that same canonical composition when readback capacity permits. The
 AArch64 entry reuses the same executor over RAMFB and the shared ARM BAR2 mapper;
 its UART loop mutates compositor-owned surfaces and never introduces an
-architecture-specific render path. A
-host daemon selects a supported private backend and
+architecture-specific render path. The RV64 entry obtains dynamic mode and
+stride metadata through one architecture display facade, renders the same
+compositor-owned scene through `Engine2dWmFrameExecutor`, and explicitly
+presents with VirtIO-GPU transfer plus flush. Its transitional C queue/DMA
+transport stays behind that facade and remains tracked by TODO 567. A host
+daemon selects a supported private backend and
 returns a correlated receipt plus output. x86_64, AArch64, and RISC-V adapters
 only own boot/device discovery. They must not define backend-specific public
 APIs.

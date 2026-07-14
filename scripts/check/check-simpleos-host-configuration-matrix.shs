@@ -25,60 +25,13 @@ file_size() {
     fi
 }
 
-ppm_nonblack_count() {
-    [ -f "$1" ] || {
-        echo 0
-        return
-    }
-    python3 - "$1" <<'PY'
-import pathlib, sys
-data = pathlib.Path(sys.argv[1]).read_bytes()
-parts = data.split(None, 4)
-if len(parts) < 5 or parts[0] != b"P6" or parts[3] != b"255":
-    print(0)
-    raise SystemExit
-w, h = int(parts[1]), int(parts[2])
-payload = parts[4][:w * h * 3]
-print(sum(1 for i in range(0, len(payload), 3) if payload[i:i + 3] != b"\0\0\0"))
-PY
-}
-
-ppm_wm_anchor_match_count() {
-    [ -f "$1" ] || {
-        echo 0
-        return
-    }
-    python3 - "$1" <<'PY'
-import pathlib, sys
-data = pathlib.Path(sys.argv[1]).read_bytes()
-parts = data.split(None, 4)
-if len(parts) < 5 or parts[0] != b"P6" or parts[3] != b"255":
-    print(0)
-    raise SystemExit
-w, h = int(parts[1]), int(parts[2])
-payload = parts[4]
-samples = [
-    (10, 10, (31, 41, 55)),
-    (30, 40, (79, 70, 229)),
-    (30, 70, (248, 250, 252)),
-    (180, 70, (15, 118, 110)),
-    (160, 225, (34, 197, 94)),
-]
-matches = 0
-for x, y, expected in samples:
-    i = (y * w + x) * 3
-    if i + 3 <= len(payload) and tuple(payload[i:i + 3]) == expected:
-        matches += 1
-print(matches)
-PY
-}
-
 status_fpga_serial=fail
 status_qemu_network_gui=fail
 status_qemu_riscv64_network_ports=fail
 status_qemu_riscv64_smf_gui_serial=missing
 status_qemu_riscv64_display_smoke=missing
 status_qemu_riscv64_wm_anchor=missing
+status_qemu_riscv64_canonical_desktop=missing
 status_qemu_riscv64_wm_live=missing
 status_qemu_simpleos_wm_live=fail
 status_fpga_network_capacity=planned
@@ -89,8 +42,27 @@ reason_qemu_riscv64_wm="RV64 live WM framebuffer evidence is missing"
 RV64_SMF_SERIAL_LOG="${RV64_SMF_SERIAL_LOG:-build/os/simpleos_riscv64_smf_fs.serial.log}"
 RV64_DISPLAY_SMOKE_SERIAL_LOG="${RV64_DISPLAY_SMOKE_SERIAL_LOG:-build/os/rv64_display_smoke_evidence/serial.log}"
 RV64_DISPLAY_SMOKE_PPM="${RV64_DISPLAY_SMOKE_PPM:-build/os/rv64_display_smoke_evidence/screendump.ppm}"
-RV64_DISPLAY_SMOKE_NONBLACK="$(ppm_nonblack_count "$RV64_DISPLAY_SMOKE_PPM")"
-RV64_DISPLAY_SMOKE_WM_ANCHORS="$(ppm_wm_anchor_match_count "$RV64_DISPLAY_SMOKE_PPM")"
+RV64_DISPLAY_SMOKE_REPORT="${RV64_DISPLAY_SMOKE_REPORT:-doc/09_report/rv64_display_smoke_qmp_evidence_$(date -u +%F).md}"
+RV64_DISPLAY_SMOKE_CONTRACT_VERSION=0
+RV64_DISPLAY_SMOKE_REPORT_SERIAL=
+RV64_DISPLAY_SMOKE_REPORT_PPM=
+RV64_DISPLAY_SMOKE_WIDTH=0
+RV64_DISPLAY_SMOKE_HEIGHT=0
+RV64_DISPLAY_SMOKE_STRIDE=0
+RV64_DISPLAY_SMOKE_REVISION=0
+RV64_DISPLAY_SMOKE_NONBLACK=0
+RV64_DISPLAY_SMOKE_PALETTE=0
+if [ -f "$RV64_DISPLAY_SMOKE_REPORT" ]; then
+    RV64_DISPLAY_SMOKE_CONTRACT_VERSION="$(sed -n 's/^- contract_version: //p' "$RV64_DISPLAY_SMOKE_REPORT" | tail -n 1)"
+    RV64_DISPLAY_SMOKE_REPORT_SERIAL="$(sed -n 's/^- serial_log: //p' "$RV64_DISPLAY_SMOKE_REPORT" | tail -n 1)"
+    RV64_DISPLAY_SMOKE_REPORT_PPM="$(sed -n 's/^- screendump_ppm: //p' "$RV64_DISPLAY_SMOKE_REPORT" | tail -n 1)"
+    RV64_DISPLAY_SMOKE_WIDTH="$(sed -n 's/^- width: //p' "$RV64_DISPLAY_SMOKE_REPORT" | tail -n 1)"
+    RV64_DISPLAY_SMOKE_HEIGHT="$(sed -n 's/^- height: //p' "$RV64_DISPLAY_SMOKE_REPORT" | tail -n 1)"
+    RV64_DISPLAY_SMOKE_STRIDE="$(sed -n 's/^- stride: //p' "$RV64_DISPLAY_SMOKE_REPORT" | tail -n 1)"
+    RV64_DISPLAY_SMOKE_REVISION="$(sed -n 's/^- present_revision: //p' "$RV64_DISPLAY_SMOKE_REPORT" | tail -n 1)"
+    RV64_DISPLAY_SMOKE_NONBLACK="$(sed -n 's/^- nonblack: //p' "$RV64_DISPLAY_SMOKE_REPORT" | tail -n 1)"
+    RV64_DISPLAY_SMOKE_PALETTE="$(sed -n 's/^- canonical_palette_witnesses: //p' "$RV64_DISPLAY_SMOKE_REPORT" | tail -n 1)"
+fi
 
 GUI_DIR="$(latest_gui_dir)"
 gui_mdi_ready=fail
@@ -133,29 +105,35 @@ if contains "$RV64_SMF_SERIAL_LOG" "SMF_WM_GUI_LAUNCH_OK app=/sys/apps/browser_d
     reason_qemu_riscv64_wm="RV64 SMF GUI serial proof exists, but no RV64 QMP/framebuffer capture proves live WM pixels"
 fi
 
-if contains "$RV64_DISPLAY_SMOKE_SERIAL_LOG" "SIMPLEOS_RISCV_DISPLAY_SMOKE_READY" \
-    && [ "$RV64_DISPLAY_SMOKE_NONBLACK" -gt 0 ]; then
-    status_qemu_riscv64_display_smoke=pass
-    reason_qemu_riscv64_wm="RV64 display-smoke QMP framebuffer proof exists, but no RV64 WM-rendered anchor capture proves live WM pixels"
-fi
-if contains "$RV64_DISPLAY_SMOKE_SERIAL_LOG" "DISPLAY_WM_ANCHORS_READY" \
-    && contains "$RV64_DISPLAY_SMOKE_SERIAL_LOG" "[wm-demo] wm-service-ready" \
-    && contains "$RV64_DISPLAY_SMOKE_SERIAL_LOG" "[e2d-demo] engine-core-ready" \
-    && contains "$RV64_DISPLAY_SMOKE_SERIAL_LOG" "[web-demo] pixels-ready expected=" \
-    && contains "$RV64_DISPLAY_SMOKE_SERIAL_LOG" "[mdi-demo] shared-mdi-ready surfaces=5" \
-    && contains "$RV64_DISPLAY_SMOKE_SERIAL_LOG" "[mdi-demo] windows-ready count=5" \
-    && contains "$RV64_DISPLAY_SMOKE_SERIAL_LOG" "[integrated-demo] render-ready" \
+if [ "$RV64_DISPLAY_SMOKE_CONTRACT_VERSION" -eq 2 ] 2>/dev/null \
+    && contains "$RV64_DISPLAY_SMOKE_REPORT" "- status: pass" \
+    && contains "$RV64_DISPLAY_SMOKE_REPORT" "- reason: rv64-canonical-desktop-qmp-pass" \
+    && contains "$RV64_DISPLAY_SMOKE_REPORT" "- ready: 1" \
+    && contains "$RV64_DISPLAY_SMOKE_REPORT" "- lifecycle_markers: 1" \
+    && [ "$RV64_DISPLAY_SMOKE_WIDTH" -gt 0 ] 2>/dev/null \
+    && [ "$RV64_DISPLAY_SMOKE_HEIGHT" -gt 0 ] 2>/dev/null \
+    && [ "$RV64_DISPLAY_SMOKE_STRIDE" -ge "$((RV64_DISPLAY_SMOKE_WIDTH * 4))" ] 2>/dev/null \
+    && [ "$RV64_DISPLAY_SMOKE_REVISION" -gt 0 ] 2>/dev/null \
+    && [ "$RV64_DISPLAY_SMOKE_NONBLACK" -gt 0 ] 2>/dev/null \
+    && [ "$RV64_DISPLAY_SMOKE_PALETTE" -ge 4 ] 2>/dev/null \
+    && [ "$RV64_DISPLAY_SMOKE_REPORT_SERIAL" = "$RV64_DISPLAY_SMOKE_SERIAL_LOG" ] \
+    && [ "$RV64_DISPLAY_SMOKE_REPORT_PPM" = "$RV64_DISPLAY_SMOKE_PPM" ] \
+    && contains "$RV64_DISPLAY_SMOKE_SERIAL_LOG" "[desktop-gui-riscv64] scanout-ready width=$RV64_DISPLAY_SMOKE_WIDTH height=$RV64_DISPLAY_SMOKE_HEIGHT stride=$RV64_DISPLAY_SMOKE_STRIDE" \
+    && contains "$RV64_DISPLAY_SMOKE_SERIAL_LOG" "[desktop-gui] first-frame-rendered scene_revision=$RV64_DISPLAY_SMOKE_REVISION" \
+    && contains "$RV64_DISPLAY_SMOKE_SERIAL_LOG" "[desktop-gui-riscv64] present-ok revision=$RV64_DISPLAY_SMOKE_REVISION" \
+    && contains "$RV64_DISPLAY_SMOKE_SERIAL_LOG" "[desktop-gui-riscv64] desktop-ready revision=$RV64_DISPLAY_SMOKE_REVISION" \
     && contains "$RV64_DISPLAY_SMOKE_SERIAL_LOG" "TEST PASSED" \
-    && [ "$RV64_DISPLAY_SMOKE_WM_ANCHORS" -eq 5 ]; then
-    status_qemu_riscv64_wm_anchor=pass
+    && contains "$RV64_DISPLAY_SMOKE_SERIAL_LOG" "SIMPLEOS_RISCV_DISPLAY_SMOKE_READY"; then
+    status_qemu_riscv64_display_smoke=pass
+    status_qemu_riscv64_canonical_desktop=pass
     status_qemu_riscv64_wm_live=pass
-    reason_qemu_riscv64_wm="RV64 freestanding WM lifecycle markers and QMP WM anchor pixels are present"
+    reason_qemu_riscv64_wm="RV64 contract-v2 canonical Shared WM/Draw IR/Engine2D lifecycle and QMP palette evidence are present"
 fi
 
 if [ "$status_qemu_network_gui" = partial-rv64-wm-missing ] \
     && [ "$status_qemu_riscv64_wm_live" = pass ]; then
     status_qemu_network_gui=pass
-    reason_qemu_network_gui="RV64 network, Vulkan-backed GUI evidence, x86_64 SimpleOS WM framebuffer, and RV64 WM QMP anchor capture are represented"
+    reason_qemu_network_gui="RV64 network, Vulkan-backed GUI evidence, x86_64 SimpleOS WM framebuffer, and RV64 canonical desktop QMP capture are represented"
 fi
 
 if contains doc/07_guide/platform/simpleos/riscv_fpga_simpleos_guide.md "Future Network-Capable FPGA Configuration" \
@@ -199,6 +177,7 @@ fi
     echo "- qemu_riscv64_smf_gui_serial: $status_qemu_riscv64_smf_gui_serial"
     echo "- qemu_riscv64_display_smoke: $status_qemu_riscv64_display_smoke"
     echo "- qemu_riscv64_wm_anchor: $status_qemu_riscv64_wm_anchor"
+    echo "- qemu_riscv64_canonical_desktop: $status_qemu_riscv64_canonical_desktop"
     echo "- qemu_riscv64_wm_live: $status_qemu_riscv64_wm_live"
     echo "- qemu_simpleos_wm_live: $status_qemu_simpleos_wm_live"
     echo "- fpga_network_capacity_config: $status_fpga_network_capacity"
@@ -212,8 +191,12 @@ fi
     echo "- qemu_riscv64_smf_gui_serial_log: $RV64_SMF_SERIAL_LOG"
     echo "- qemu_riscv64_display_smoke_serial_log: $RV64_DISPLAY_SMOKE_SERIAL_LOG"
     echo "- qemu_riscv64_display_smoke_ppm: $RV64_DISPLAY_SMOKE_PPM"
+    echo "- qemu_riscv64_display_smoke_report: $RV64_DISPLAY_SMOKE_REPORT"
+    echo "- qemu_riscv64_display_smoke_contract_version: $RV64_DISPLAY_SMOKE_CONTRACT_VERSION"
+    echo "- qemu_riscv64_display_smoke_stride: $RV64_DISPLAY_SMOKE_STRIDE"
+    echo "- qemu_riscv64_display_smoke_present_revision: $RV64_DISPLAY_SMOKE_REVISION"
     echo "- qemu_riscv64_display_smoke_nonblack: $RV64_DISPLAY_SMOKE_NONBLACK"
-    echo "- qemu_riscv64_display_smoke_wm_anchor_matches: $RV64_DISPLAY_SMOKE_WM_ANCHORS"
+    echo "- qemu_riscv64_display_smoke_canonical_palette_witnesses: $RV64_DISPLAY_SMOKE_PALETTE"
     echo "- qemu_riscv64_display_smoke_wrapper: scripts/check/check-rv64-display-smoke-qmp-evidence.shs"
     echo "- fpga_serial_transport: UART console, telnet/ssh-compatible serial bridge harness"
     echo "- fpga_network_capacity_reason: explicit future lane; not claimed as live silicon evidence"
@@ -229,9 +212,14 @@ echo "simpleos_host_configuration_qemu_riscv64_smf_gui_serial_log=$RV64_SMF_SERI
 echo "simpleos_host_configuration_qemu_riscv64_display_smoke_status=$status_qemu_riscv64_display_smoke"
 echo "simpleos_host_configuration_qemu_riscv64_display_smoke_serial_log=$RV64_DISPLAY_SMOKE_SERIAL_LOG"
 echo "simpleos_host_configuration_qemu_riscv64_display_smoke_ppm=$RV64_DISPLAY_SMOKE_PPM"
+echo "simpleos_host_configuration_qemu_riscv64_display_smoke_report=$RV64_DISPLAY_SMOKE_REPORT"
+echo "simpleos_host_configuration_qemu_riscv64_display_smoke_contract_version=$RV64_DISPLAY_SMOKE_CONTRACT_VERSION"
+echo "simpleos_host_configuration_qemu_riscv64_display_smoke_stride=$RV64_DISPLAY_SMOKE_STRIDE"
+echo "simpleos_host_configuration_qemu_riscv64_display_smoke_present_revision=$RV64_DISPLAY_SMOKE_REVISION"
 echo "simpleos_host_configuration_qemu_riscv64_display_smoke_nonblack=$RV64_DISPLAY_SMOKE_NONBLACK"
 echo "simpleos_host_configuration_qemu_riscv64_wm_anchor_status=$status_qemu_riscv64_wm_anchor"
-echo "simpleos_host_configuration_qemu_riscv64_wm_anchor_matches=$RV64_DISPLAY_SMOKE_WM_ANCHORS"
+echo "simpleos_host_configuration_qemu_riscv64_canonical_desktop_status=$status_qemu_riscv64_canonical_desktop"
+echo "simpleos_host_configuration_qemu_riscv64_canonical_palette_witnesses=$RV64_DISPLAY_SMOKE_PALETTE"
 echo "simpleos_host_configuration_qemu_riscv64_wm_live_status=$status_qemu_riscv64_wm_live"
 echo "simpleos_host_configuration_qemu_riscv64_wm_live_reason=$reason_qemu_riscv64_wm"
 echo "simpleos_host_configuration_qemu_simpleos_wm_live_status=$status_qemu_simpleos_wm_live"
