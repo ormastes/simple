@@ -114,6 +114,9 @@ impl MirTextCodegen for MirToLlvm:
                     val ret_ty = self.llvm_type_text(body.return_ty)
                     self.remember_function_return_type(name, ret_ty)
                     self.remember_function_return_type(fn_name, ret_ty)
+                    val ret_unsigned = self.is_unsigned_mir_kind(body.return_ty.kind)
+                    self.remember_function_return_unsigned(name, ret_unsigned)
+                    self.remember_function_return_unsigned(fn_name, ret_unsigned)
                     self.remember_function_param_types_from_signature(name, bootstrap_fn.signature)
                     self.remember_function_param_types_from_signature(fn_name, bootstrap_fn.signature)
                     bootstrap_return_i = bootstrap_return_i + 1
@@ -141,6 +144,9 @@ impl MirTextCodegen for MirToLlvm:
                 val ret_ty = self.llvm_type_text(body.return_ty)
                 self.remember_function_return_type(fn_.name, ret_ty)
                 self.remember_function_return_type(fn_name, ret_ty)
+                val ret_unsigned = self.is_unsigned_mir_kind(body.return_ty.kind)
+                self.remember_function_return_unsigned(fn_.name, ret_unsigned)
+                self.remember_function_return_unsigned(fn_name, ret_unsigned)
                 self.remember_function_param_types_from_signature(fn_.name, fn_.signature)
                 self.remember_function_param_types_from_signature(fn_name, fn_.signature)
             for fn_ in module.functions.values():
@@ -199,12 +205,24 @@ impl MirTextCodegen for MirToLlvm:
         self.return_locals = {}
         self.bool_locals = {}
         self.ptr_locals = {}
+        # Local ids are reused across functions (see the resets above), so
+        # unsigned_locals/alloca_elem_unsigned must reset per-function too --
+        # otherwise a u8 local id N in one function could leak its unsigned
+        # flag onto an unrelated i32 local id N in the next function.
+        self.unsigned_locals = {}
+        self.alloca_elem_unsigned = {}
         var local_i = 0
         while local_i < body.locals.len():
             val local: MirLocal = body.locals[local_i]
             val llvm_ty: text = self.llvm_type_text(local.type_)
             val local_id = self.local_id_value(local.id)
             self.local_types[local_id] = llvm_ty
+            # Prime every local's unsigned bit upfront from its MIR-declared
+            # type (U8/U16/U32/U64) -- this is what makes an unsigned
+            # function PARAMETER (an Arg-kind local, never Alloc'd) visible
+            # to get_operand_unsigned; without it, print(some_u8_param)
+            # sign-extends the param instead of zero-extending it.
+            self.unsigned_locals[local_id] = self.is_unsigned_mir_kind(local.type_.kind)
             match local.type_.kind:
                 case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_) | MirTypeKind.Function(_, _) | MirTypeKind.Opaque(_):
                     self.ptr_locals[local_id] = true
@@ -422,6 +440,46 @@ impl MirTextCodegen for MirToLlvm:
             return callee
         "@{callee}"
 
+    me value_as_type_signed(value: text, from_ty: text, to_ty: text, src_unsigned: bool) -> text:
+        """Same as value_as_type, but widening picks zext when src_unsigned
+        is set (MIR-level U8/U16/U32 source) instead of always sext'ing.
+        See select_widen_instruction / is_unsigned_mir_kind."""
+        var src_ty = self.valid_llvm_type(from_ty)
+        val maybe_actual_ty = self.value_types.get(value)
+        if maybe_actual_ty.?:
+            src_ty = self.valid_llvm_type(maybe_actual_ty.unwrap())
+        val dst_ty = self.valid_llvm_type(to_ty)
+        if src_ty == dst_ty:
+            return self.ret_value_for_type(dst_ty, value)
+        if value == "0":
+            return self.ret_value_for_type(dst_ty, "0")
+        # Unsigned MIR-level sources (U8/U16/U32) widening to a bigger int
+        # must zext, not sext -- select_cast_instruction has no signedness
+        # input and always sext's i8/i16/i32 widening (only correct for
+        # signed sources). See is_unsigned_mir_kind.
+        var cast_inst = self.select_cast_instruction(src_ty, dst_ty)
+        if src_unsigned and cast_inst == "sext":
+            cast_inst = "zext"
+        val tmp = self.builder.fresh_local()
+        self.builder.emit("  {tmp} = {cast_inst} {src_ty} {value} to {dst_ty}")
+        tmp
+
+    fn get_operand_unsigned(operand: MirOperand) -> bool:
+        """Best-effort MIR-level signedness for an operand: true for a Const
+        of an unsigned MirType, or a Copy/Move of a local whose declared
+        type was recorded as unsigned (see translate_alloc/translate_load).
+        Defaults to false (signed) when unknown -- matches the prior
+        behavior of always-sext widening, so this is only ever additive."""
+        match operand.kind:
+            case Copy(local):
+                self.unsigned_locals.get(self.local_id_value(local)) ?? false
+            case Move(local):
+                self.unsigned_locals.get(self.local_id_value(local)) ?? false
+            case Const(value, type_):
+                self.is_unsigned_mir_kind(type_.kind)
+            case _:
+                false
+
     me value_as_type(value: text, from_ty: text, to_ty: text) -> text:
         var src_ty = self.valid_llvm_type(from_ty)
         # POSITIVE `.?` form only (see get_local_type): Option-match on
@@ -441,6 +499,20 @@ impl MirTextCodegen for MirToLlvm:
 
     me remember_function_return_type(name: text, ret_ty: text):
         self.function_return_types[name] = ret_ty
+
+    me remember_function_return_unsigned(name: text, unsigned: bool):
+        self.function_return_unsigned[name] = unsigned
+
+    fn lookup_function_return_unsigned(func_name: text) -> bool:
+        """Same lookup pattern as lookup_function_return_type (direct name,
+        then bare name with the leading '@' stripped)."""
+        val direct = self.function_return_unsigned.get(func_name)
+        if direct.?:
+            return direct.unwrap()
+        if not func_name.starts_with("@"):
+            return false
+        val bare = func_name[1:]
+        self.function_return_unsigned.get(bare) ?? false
 
     me remember_function_param_types(name: text, param_tys: [text]):
         if name == "":
@@ -541,7 +613,13 @@ impl MirTextCodegen for MirToLlvm:
                     var arg_ty = self.valid_llvm_type(self.get_operand_type(arg))
                     val param_ty = self.lookup_function_param_type(call_func_val, arg_i)
                     if param_ty != "" and param_ty != nil:
-                        arg_val = self.value_as_type(arg_val, arg_ty, param_ty)
+                        # See translate_call: print()'s raw-format runtime
+                        # helpers need signedness-aware widening.
+                        val is_print_raw_fmt = call_func_val == "@rt_raw_i64_to_string" or call_func_val == "@rt_raw_u64_to_string" or call_func_val == "@rt_raw_bool_to_string"
+                        if is_print_raw_fmt:
+                            arg_val = self.value_as_type_signed(arg_val, arg_ty, param_ty, self.get_operand_unsigned(arg))
+                        else:
+                            arg_val = self.value_as_type(arg_val, arg_ty, param_ty)
                         arg_ty = self.valid_llvm_type(param_ty)
                     elif arg_val == "0":
                         arg_val = self.ret_value_for_type(arg_ty, "0")
@@ -665,6 +743,14 @@ impl MirTextCodegen for MirToLlvm:
         # have no MirLocal entry, so a later get_local_type/get_operand_type on
         # them would fall back to i64 (e.g. typing an f64 Store as i64).
         self.local_types[dest_id] = ty
+        # Propagate the unsigned bit too (see is_unsigned_mir_kind /
+        # get_operand_unsigned): `val x: u32 = <cast/binop>` lowers to the
+        # producing instruction writing a temp, then a Copy/Move of that
+        # temp into x's named local. Without this, x's own unsigned_locals
+        # entry stays unset (default false/signed) even though its source
+        # temp was correctly marked unsigned, and a later print(x) would
+        # sign-extend a high-bit-set unsigned value incorrectly.
+        self.unsigned_locals[dest_id] = self.unsigned_locals.get(src_id) ?? false
 
         if is_float_type(ty):
             self.builder.emit("  {dest_name} = fadd {ty} {src_name}, 0.0  ; {comment}")
@@ -690,11 +776,19 @@ impl MirTextCodegen for MirToLlvm:
         val right_raw = self.translate_operand(right)
         val ty = self.valid_llvm_type(self.get_local_type(dest_id))
         self.value_types[dest_name] = ty
+        # When `ty` (the result's tracked width, e.g. i64 for an untyped
+        # temp) is wider than an unsigned narrow operand's own width
+        # (U8/U16/U32), the operand must zext into `ty`, not sext -- e.g.
+        # 4294967289u32 (bit pattern of i32 -7) sign-extended to i64 gives
+        # -7, and an unsigned 64-bit div by 2 of THAT then produces a huge
+        # ~2^63 garbage result instead of the correct 2147483644. See
+        # value_as_type_signed / is_unsigned_mir_kind.
+        val bin_unsigned = self.get_operand_unsigned(left) or self.get_operand_unsigned(right)
 
         match op:
             case Add:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 if is_float_type(ty):
                     self.builder.emit_fadd(dest_name, ty, left_val, right_val)
                 elif is_signed_int_type(ty):
@@ -702,8 +796,8 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     self.builder.emit_add(dest_name, ty, left_val, right_val)
             case Sub:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 if is_float_type(ty):
                     self.builder.emit_fsub(dest_name, ty, left_val, right_val)
                 elif is_signed_int_type(ty):
@@ -711,8 +805,8 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     self.builder.emit_sub(dest_name, ty, left_val, right_val)
             case Mul:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 if is_float_type(ty):
                     self.builder.emit_fmul(dest_name, ty, left_val, right_val)
                 elif is_signed_int_type(ty):
@@ -720,22 +814,30 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     self.builder.emit_mul(dest_name, ty, left_val, right_val)
             case Div:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 if is_float_type(ty):
                     self.builder.emit_fdiv(dest_name, ty, left_val, right_val)
+                elif self.get_operand_unsigned(left) or self.get_operand_unsigned(right):
+                    # MIR-level U8/U16/U32/U64 operand: unsigned division
+                    # (udiv), not sdiv -- e.g. 4294967289u32 / 2u32 must give
+                    # 2147483644, not the sdiv result of treating the bit
+                    # pattern as the negative i32 -7 (-7/2 == -3).
+                    self.builder.emit_udiv(dest_name, ty, left_val, right_val)
                 else:
                     self.builder.emit_div(dest_name, ty, left_val, right_val)
             case Rem:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 if is_float_type(ty):
                     self.builder.emit_frem(dest_name, ty, left_val, right_val)
+                elif self.get_operand_unsigned(left) or self.get_operand_unsigned(right):
+                    self.builder.emit_urem(dest_name, ty, left_val, right_val)
                 else:
                     self.builder.emit_rem(dest_name, ty, left_val, right_val)
             case Pow:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 if is_float_type(ty):
                     val fsuffix = if ty == "double": "f64" else: "f32"
                     self.builder.emit("  {dest_name} = call {ty} @llvm.pow.{fsuffix}({ty} {left_val}, {ty} {right_val})")
@@ -743,24 +845,24 @@ impl MirTextCodegen for MirToLlvm:
                     val nit = self.native_int()
                     self.builder.emit("  {dest_name} = call {nit} @__simple_pow({nit} {left_val}, {nit} {right_val})")
             case BitAnd:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 self.builder.emit_and(dest_name, ty, left_val, right_val)
             case BitOr:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 self.builder.emit_or(dest_name, ty, left_val, right_val)
             case BitXor:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 self.builder.emit_xor(dest_name, ty, left_val, right_val)
             case Shl:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 self.builder.emit_shl(dest_name, ty, left_val, right_val)
             case Shr:
-                val left_val = self.value_as_type(left_raw, self.get_operand_type(left), ty)
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), ty)
+                val left_val = self.value_as_type_signed(left_raw, self.get_operand_type(left), ty, bin_unsigned)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 self.builder.emit_ashr(dest_name, ty, left_val, right_val)
             case Eq:
                 val eq_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
@@ -776,25 +878,29 @@ impl MirTextCodegen for MirToLlvm:
                 self.emit_comparison(dest_name, ty, ne_pred, ne_cmp_ty, ne_left, ne_right)
             case Lt:
                 val lt_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
-                val lt_pred = if is_float_type(lt_cmp_ty): "olt" else: "slt"
+                val lt_unsigned = self.get_operand_unsigned(left) or self.get_operand_unsigned(right)
+                val lt_pred = if is_float_type(lt_cmp_ty): "olt" elif lt_unsigned: "ult" else: "slt"
                 val lt_left = self.value_as_type(left_raw, self.get_operand_type(left), lt_cmp_ty)
                 val lt_right = self.value_as_type(right_raw, self.get_operand_type(right), lt_cmp_ty)
                 self.emit_comparison(dest_name, ty, lt_pred, lt_cmp_ty, lt_left, lt_right)
             case Le:
                 val le_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
-                val le_pred = if is_float_type(le_cmp_ty): "ole" else: "sle"
+                val le_unsigned = self.get_operand_unsigned(left) or self.get_operand_unsigned(right)
+                val le_pred = if is_float_type(le_cmp_ty): "ole" elif le_unsigned: "ule" else: "sle"
                 val le_left = self.value_as_type(left_raw, self.get_operand_type(left), le_cmp_ty)
                 val le_right = self.value_as_type(right_raw, self.get_operand_type(right), le_cmp_ty)
                 self.emit_comparison(dest_name, ty, le_pred, le_cmp_ty, le_left, le_right)
             case Gt:
                 val gt_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
-                val gt_pred = if is_float_type(gt_cmp_ty): "ogt" else: "sgt"
+                val gt_unsigned = self.get_operand_unsigned(left) or self.get_operand_unsigned(right)
+                val gt_pred = if is_float_type(gt_cmp_ty): "ogt" elif gt_unsigned: "ugt" else: "sgt"
                 val gt_left = self.value_as_type(left_raw, self.get_operand_type(left), gt_cmp_ty)
                 val gt_right = self.value_as_type(right_raw, self.get_operand_type(right), gt_cmp_ty)
                 self.emit_comparison(dest_name, ty, gt_pred, gt_cmp_ty, gt_left, gt_right)
             case Ge:
                 val ge_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
-                val ge_pred = if is_float_type(ge_cmp_ty): "oge" else: "sge"
+                val ge_unsigned = self.get_operand_unsigned(left) or self.get_operand_unsigned(right)
+                val ge_pred = if is_float_type(ge_cmp_ty): "oge" elif ge_unsigned: "uge" else: "sge"
                 val ge_left = self.value_as_type(left_raw, self.get_operand_type(left), ge_cmp_ty)
                 val ge_right = self.value_as_type(right_raw, self.get_operand_type(right), ge_cmp_ty)
                 self.emit_comparison(dest_name, ty, ge_pred, ge_cmp_ty, ge_left, ge_right)
@@ -888,7 +994,18 @@ impl MirTextCodegen for MirToLlvm:
                     ()
             val param_ty = self.lookup_function_param_type(call_func_name, arg_i)
             if param_ty != "" and param_ty != nil:
-                arg_val = self.value_as_type(arg_val, arg_ty, param_ty)
+                # print()'s raw-format runtime helpers (lower_bootstrap_print_call
+                # in switch_operators_calls.spl) route every numeric type --
+                # signed AND unsigned -- through the same i64-formatting
+                # callee. A narrower-than-i64 arg must widen with the
+                # *source's* signedness (sext for i8/i16/i32, zext for
+                # u8/u16/u32), not the callee's, or a negative signed value
+                # prints as its unsigned bit pattern (i32 -5 -> 4294967291).
+                val is_print_raw_fmt = call_func_name == "@rt_raw_i64_to_string" or call_func_name == "@rt_raw_u64_to_string" or call_func_name == "@rt_raw_bool_to_string"
+                if is_print_raw_fmt:
+                    arg_val = self.value_as_type_signed(arg_val, arg_ty, param_ty, self.get_operand_unsigned(arg))
+                else:
+                    arg_val = self.value_as_type(arg_val, arg_ty, param_ty)
                 arg_ty = self.valid_llvm_type(param_ty)
             elif arg_val == "0":
                 arg_val = self.ret_value_for_type(arg_ty, "0")
@@ -936,6 +1053,10 @@ impl MirTextCodegen for MirToLlvm:
                         self.bool_locals[dest_id] = true
                 ret_ty = self.valid_llvm_type(ret_ty)
                 self.value_types[name] = ret_ty
+                # A narrower-than-i64 unsigned return (e.g. `fn f() -> u8`)
+                # must be tracked so a later print(f()) zext's instead of
+                # sext's. See is_unsigned_mir_kind / lookup_function_return_unsigned.
+                self.unsigned_locals[dest_id] = self.lookup_function_return_unsigned(call_func_name)
                 self.builder.emit("  {name} = call {ret_ty} {call_sig}{call_func_name}({args_str})")
             nil:
                 val ret_ty = "void"
@@ -1156,6 +1277,7 @@ impl MirTextCodegen for MirToLlvm:
         # typing loads/stores off those temps falls back to i64 and an f64
         # slot value round-trips through fptosi (10.0 -> 10, data loss).
         self.alloca_elem_types[dest_id] = llvm_ty
+        self.alloca_elem_unsigned[dest_id] = self.is_unsigned_mir_kind(ty.kind)
         self.builder.emit_alloca(dest_name, llvm_ty)
 
     fn operand_alloca_elem_type(ptr: MirOperand) -> text:
@@ -1165,6 +1287,15 @@ impl MirTextCodegen for MirToLlvm:
                 self.alloca_elem_types.get(self.local_id_value(local)) ?? ""
             case _:
                 ""
+
+    fn operand_alloca_elem_unsigned(ptr: MirOperand) -> bool:
+        """Unsigned bit of the alloca slot behind `ptr` (see translate_alloc).
+        Defaults to false (signed) when the slot is unknown."""
+        match ptr.kind:
+            case Copy(local) | Move(local):
+                self.alloca_elem_unsigned.get(self.local_id_value(local)) ?? false
+            case _:
+                false
 
     me translate_load(dest: LocalId, ptr: MirOperand):
         val dest_id = self.local_id_value(dest)
@@ -1187,6 +1318,7 @@ impl MirTextCodegen for MirToLlvm:
         # (`ret i64 0`). Mirrors translate_const's dest-type registration.
         self.local_types[dest_id] = load_ty
         self.value_types[dest_name] = load_ty
+        self.unsigned_locals[dest_id] = self.operand_alloca_elem_unsigned(ptr)
         self.builder.emit_load(dest_name, load_ty, ptr_val)
 
     me translate_store(ptr: MirOperand, value: MirOperand):

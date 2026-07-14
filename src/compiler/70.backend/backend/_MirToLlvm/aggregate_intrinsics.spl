@@ -142,11 +142,17 @@ impl MirToLlvm:
         val target_ty = self.valid_llvm_type(self.llvm_type_text(target))
         self.local_types[dest_id] = target_ty
         self.value_types[dest_name] = target_ty
+        self.unsigned_locals[dest_id] = self.is_unsigned_mir_kind(target.kind)
         if target_ty == "ptr":
             self.mark_ptr_local(dest_id)
         elif target_ty == "i1":
             self.bool_locals[dest_id] = true
-        val casted = self.value_as_type(operand_val, src_ty, target_ty)
+        # Explicit `as` widening of an unsigned MIR-level source (u8/u16/u32)
+        # must zext, not sext -- value_as_type always sext's i8/i16/i32
+        # widening (see is_unsigned_mir_kind / value_as_type_signed). Without
+        # this, `(200u8) as i64` sign-extends the high bit and yields -56
+        # instead of 200.
+        val casted = self.value_as_type_signed(operand_val, src_ty, target_ty, self.get_operand_unsigned(operand))
         if casted == operand_val:
             if is_float_type(target_ty):
                 self.builder.emit("  {dest_name} = fadd {target_ty} {casted}, 0.0  ; cast")
