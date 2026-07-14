@@ -186,11 +186,22 @@ impl HirLowering:
         # trapping with "field access on nil receiver" (SIGILL) even for a
         # plain non-method `fn main()`. Short-circuiting via nested ifs keeps
         # the array-indexing operand out of the fused boolean entirely.
+        # `me` is Simple's explicit MUTABLE receiver written in the parameter
+        # list (`fn selfset(me): me.x = 41`) -- the by-reference counterpart of
+        # `self`. The frontend (parser_decls_use.spl parse_class_body_method)
+        # already recognizes a leading `me` as the receiver: it backfills its
+        # struct type and marks the method mutable, so it arrives here as
+        # fn_params[0] named "me" and typed. Treating it like a plain param
+        # (name != "self") wrongly SYNTHESIZED a second implicit `self`,
+        # demoting the real `me` to slot 1 where it received no call argument --
+        # `c.getx()` read `me` as undef (garbage pointer) and `me.x = 41` stored
+        # into nothing (Bug native_me_receiver_no_mutate). Exclude "me" here so
+        # it stays the sole receiver, exactly like an explicit `self`.
         var needs_implicit_self = false
         if fn_.is_method and not fn_.is_static and self.current_method_self_type.?:
             if fn_params.len() == 0:
                 needs_implicit_self = true
-            elif fn_params[0].name != "self":
+            elif fn_params[0].name != "self" and fn_params[0].name != "me":
                 needs_implicit_self = true
         if needs_implicit_self:
             val self_type = self.current_method_self_type.unwrap()

@@ -145,11 +145,38 @@ impl MirLowering:
             var name_bldr = self.builder
             name_bldr.set_local_name(local, param.name)
             self.builder = name_bldr
+            # Bug (native_me_receiver_no_mutate): a `me` method's implicit
+            # receiver is parsed/lowered as an ordinary "self"-named struct
+            # param (parser_decls_use.spl's parse_class_body_method funnels
+            # both `fn get(self)` and `fn set(me)` through the same
+            # synthesized/explicit "self" param slot -- the only surviving
+            # signal that a method used `me` is HirFunction.is_mutable, set
+            # from the parser's static_flag==2 ("me") case). Below, the
+            # Bug #167 struct-value-copy fix (next comment) unconditionally
+            # rebinds ANY Named-struct param's symbol to a fresh per-call
+            # copy for value semantics -- correct for a read-only receiver
+            # or a plain by-value param, but it also silently applied to a
+            # `me` receiver, so `me.field = v` stored into the copy instead
+            # of the caller's struct (verified by construction: native build
+            # printed the pre-call value, never the mutated one). `me` is
+            # the ONLY receiver form that must alias the caller's memory --
+            # a plain `mut s: S` free-function param carries no equivalent
+            # marker post-parse (`parser_skip_mut_if_present` documents `mut`
+            # as a parse-time no-op) so it is out of scope here and keeps
+            # the existing (copy) behavior.
+            val is_me_receiver = fn_.is_mutable and pli == 0 and (param.name == "self" or param.name == "me")
             match param.type_.kind:
                 case Named(type_symbol, _):
                     val parameter_type = self.symbols.get_symbol(type_symbol)
                     val is_named_struct = parameter_type != nil and self.struct_field_order.has(parameter_type.name)
-                    if is_named_struct:
+                    if is_named_struct and is_me_receiver:
+                        # Bind the receiver directly to the raw incoming arg
+                        # local (already mapped via self.local_map above) --
+                        # NO defensive copy, NO local_map rebind -- so a
+                        # `me.field = v` store inside the method body writes
+                        # through to the exact same memory the caller passed.
+                        self.struct_value_syms[local.id] = parameter_type.name
+                    elif is_named_struct:
                         self.struct_value_syms[local.id] = parameter_type.name
                         # Bug #167: structs have VALUE semantics (mirrors the HIR
                         # interpreter's Value.Struct -- see backend/objects.spl,

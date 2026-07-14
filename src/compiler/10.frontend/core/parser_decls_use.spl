@@ -405,9 +405,28 @@ fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i
         # synthesize `self` when it wasn't already written explicitly; when it
         # was, just backfill its type (the parser has no annotation syntax for
         # an explicit `self`, so it always comes in untyped here).
-        if param_names.len() > 0 and param_names[0] == "self":
+        # Bug (native_me_receiver_no_mutate): `me` is Simple's explicit
+        # MUTABLE receiver written in the parameter list (`fn selfset(me):
+        # me.x = 41`), the by-reference counterpart to an implicit/explicit
+        # `self`. It parsed into param_names[0] as an ordinary untyped param
+        # (par_text_get() == "me" for TOK_KW_ME), so the else-branch below
+        # prepended a SECOND synthetic `self`, leaving the real receiver
+        # `me` as a typeless trailing param that received no argument at the
+        # call site -- `c.selfset()` passed `c` into the synthetic self,
+        # `me` read undef, and `me.x = 41` stored into garbage (a READ
+        # `fn getx(me)` returned a wild pointer; the mutating form silently
+        # kept the caller's old value). Treat a leading `me` exactly like a
+        # leading `self`: backfill its receiver type and DON'T synthesize a
+        # duplicate self. Additionally promote static_flag to 2 (mutable
+        # self) so downstream HIR/MIR sees is_mutable -- the MIR receiver
+        # binding (function_lowering.spl) keys the by-reference (no
+        # defensive value-copy) receiver path off is_mutable, which is what
+        # makes `me.field = v` write through to the caller's struct.
+        if param_names.len() > 0 and (param_names[0] == "self" or param_names[0] == "me"):
             if param_types[0] == 0:
                 param_types[0] = self_type
+            if param_names[0] == "me":
+                static_flag = 2
         else:
             var method_param_names: [text] = ["self"]
             var method_param_types: [i64] = [self_type]
