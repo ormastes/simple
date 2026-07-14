@@ -12,17 +12,28 @@ The implementation must use these names:
 ```simple
 class FontRenderQuad
 class FontRenderBatch
+class FontRenderConfig
+class FontGlyphRun
 class DrawIrGlyphRunPayload
 
 fn selected_font_asset_for_language_category(language: text, category: text) -> FontAssetCandidate?
 me FontRenderer.prepare_text(content: text, color: u32, font_size: i32) -> FontRenderBatch
 me FontRenderer.prepare_text_with_advances(content: text, advance_widths: [i32], color: u32, font_size: i32) -> FontRenderBatch
 me FontRenderer.prepare_selected_glyph_run(payload: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> FontRenderBatch
+me FontRenderer.prepare_text_configured(content: text, color: u32, config: FontRenderConfig) -> FontRenderBatch
+me FontRenderer.prepare_text_with_advances_configured(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig) -> FontRenderBatch
+me FontRenderer.prepare_glyph_run_configured(run: FontGlyphRun, color: u32, config: FontRenderConfig) -> FontRenderBatch
+me FontRenderer.prepare_selected_glyph_run_configured(payload: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig) -> FontRenderBatch
 fn emit_portable_font_atlas_composite_kernel(target: PortableComputeTarget) -> PortableComputeArtifact
+me Engine2D.draw_text_configured(...)
+me Engine2D.draw_text_with_advances_configured(...)
+me Engine2D.draw_shaped_text_configured(...)
 me Engine3D.draw_text_hud(...)
 me Engine3D.draw_text_world(...)
 me Engine3D.draw_glyph_run_hud(...)
 me Engine3D.draw_glyph_run_world(...)
+me Engine3D.draw_text_hud_configured(...)
+me Engine3D.draw_text_world_configured(...)
 ```
 
 The canonical values live in

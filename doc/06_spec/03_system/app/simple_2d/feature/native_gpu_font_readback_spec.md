@@ -12,6 +12,12 @@ not substitutes.
 
 ## Operator flow
 
+### Prove native submission and device readback
+
+Treat the first unavailable rung as failure: compiled program, native resource
+creation, submission, completed fence, and device-origin readback are required
+before any backend is promoted.
+
 ### Render Engine3D HUD and world text on the promoted backend
 
 The checker `expect_engine3d_font_readback` requires nonzero native device,

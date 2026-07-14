@@ -565,6 +565,9 @@ observe a pass:
   Before native promotion, the exact Pure Simple shaping/corpus gate must accept
   the face for the language/script; a codepoint raster/layout witness alone is
   diagnostic and leaves the matrix cell `unavailable`.
+  Run shared multilingual font acceptance SSpecs with
+  `SIMPLE_NO_STUB_FALLBACK=1 bin/simple test <spec> --mode=native`; interpreter runs are diagnostics and cannot
+  promote a manifest cell, backend, or performance row.
   Resolve matrix policy by exact language and category. Unknown axes fail
   closed, and `witness_family` must not be treated as a loadable asset unless
   the resolved status is `native` or `fallback`.

@@ -37,7 +37,7 @@ use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 use std.common.encoding.sfnt.{font_runtime_ttf_default_supported, parse_offset_table}
 use std.common.encoding.sfnt_cmap.{sfnt_cmap_glyph_id}
 use std.common.encoding.sfnt_glyf.{rasterize_sfnt_glyf}
-use std.common.encoding.font_registry.{selected_font_asset_candidate_for_path, validate_selected_font_asset}
+use std.common.encoding.font_registry.{selected_font_asset_candidate_for_path, validate_selected_font_asset, load_selected_font_file}
 #
 # Usage:
 #   val maybe = FontRasterizer.load("build/libspl_fonts.dylib",
@@ -153,15 +153,22 @@ impl FontRasterizer:
     static fn load_selected(ttf_path: text) -> FontRasterizer?:
         if selected_font_asset_candidate_for_path(ttf_path) == nil:
             return nil
-        FontRasterizer.load_selected_bytes(ttf_path, file_read_bytes(ttf_path))
+        val loaded = load_selected_font_file(ttf_path)
+        if not loaded.1.valid:
+            return nil
+        FontRasterizer._load_selected_bytes(ttf_path, loaded.0, true)
 
     static fn load_selected_bytes(ttf_path: text, blob: [u8]) -> FontRasterizer?:
+        FontRasterizer._load_selected_bytes(ttf_path, blob, false)
+
+    static fn _load_selected_bytes(ttf_path: text, blob: [u8], file_backed: bool) -> FontRasterizer?:
         val selected = selected_font_asset_candidate_for_path(ttf_path)
         if selected == nil:
             return nil
         val candidate = selected.?
-        val validation = validate_selected_font_asset(ttf_path, blob)
-        if not validation.valid or not font_runtime_ttf_default_supported(blob):
+        if not file_backed and not validate_selected_font_asset(ttf_path, blob).valid:
+            return nil
+        if not font_runtime_ttf_default_supported(blob):
             return nil
         FontRasterizer(
             lib_handle: 0, init_fp: 0, raster_fp: 0, subpixel_raster_fp: 0,
@@ -180,13 +187,16 @@ impl FontRasterizer:
     # Selected assets initialize from this owned blob; unmanaged font paths are
     # marshalled as UTF-8 bytes for the legacy native initializer.
     static fn load(dylib_path: text, ttf_path: text) -> FontRasterizer?:
-        val blob = file_read_bytes(ttf_path)
         val selected = selected_font_asset_candidate_for_path(ttf_path)
+        val blob = if selected != nil:
+            val loaded = load_selected_font_file(ttf_path)
+            if not loaded.1.valid:
+                return nil
+            loaded.0
+        else:
+            file_read_bytes(ttf_path)
         var font_cache_identity = ""
         if val candidate = selected:
-            val validation = validate_selected_font_asset(ttf_path, blob)
-            if not validation.valid:
-                return nil
             font_cache_identity = "sha256={candidate.sha256};axes={candidate.default_axes}"
         if not font_runtime_ttf_default_supported(blob):
             return nil

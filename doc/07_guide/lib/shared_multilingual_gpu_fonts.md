@@ -43,6 +43,13 @@ use `selected_font_asset_for_language_category(language, category)` when a
 renderer needs the corresponding bundled face. It returns only promoted
 `native`/`fallback` candidates and returns `nil` for unavailable, not-designed,
 or unknown cells.
+
+`validate_selected_font_asset(path, blob)` hashes the supplied bytes and is the
+required boundary for byte APIs. File callers use
+`load_selected_font_file(path)` so the validator owns the read and returns the
+same verified bytes. Transformed, cached, or caller-supplied bytes must use the
+strict byte API. Both paths hash the exact returned/supplied bytes and apply the
+same length, sfnt/default-axis, table, and embedded name checks.
 unknown axes return `nil`. Do not load `witness_family` while the cell is
 `unavailable` or `not-designed-for-script`.
 
@@ -527,15 +534,15 @@ acceptance additionally requires the retained QEMU `pmemsave` pixel oracle.
 
 The authoritative gate list and evidence boundaries are in
 [`doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`](../../03_plan/sys_test/shared_multilingual_gpu_fonts.md).
-Run focused source evidence with the self-hosted CLI, for example:
+Run focused acceptance evidence natively with the self-hosted CLI, for example:
 
 ```bash
-bin/simple test test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl --mode=interpreter
-bin/simple test test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl --mode=interpreter
+SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl --mode=native
+SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl --mode=native
 ```
 
-These commands do not substitute for the native submission, SimpleOS pixel,
-Engine3D, or performance gates in the test plan.
+Interpreter runs are diagnostics only. These native source gates still do not
+substitute for submission, SimpleOS pixel, Engine3D, or performance gates.
 
 Run each acceptance gate once per session. Unavailable hardware or the stale
 self-hosted runtime is a blocker record, never a synthetic PASS.

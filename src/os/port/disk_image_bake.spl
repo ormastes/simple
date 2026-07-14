@@ -27,7 +27,7 @@ use std.common.{str_last_index_of}
 use os.port.initramfs_pack.{PackConfig, PayloadEntry as InitramfsPayloadEntry,
     cmd_build, validate_image}
 use os.port.disk_image.{DiskImageConfig, PayloadEntry, build}
-use std.common.encoding.font_registry.{simpleos_default_font_asset_candidate, validate_selected_font_asset}
+use std.common.encoding.font_registry.{simpleos_default_font_asset_candidate, load_selected_font_file}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
@@ -67,14 +67,15 @@ fn _build_initramfs(out_initramfs: text, hello_rs_path: text, hello_c_path: text
             is_dir: false,
         ))
     val font = simpleos_default_font_asset_candidate()
-    val font_blob: [u8] = rt_file_read_bytes(font.local_path) ?? []
-    val font_validation = validate_selected_font_asset(font.local_path, font_blob)
+    val font_loaded = load_selected_font_file(font.local_path)
+    val font_validation = font_loaded.1
     if not font_validation.valid:
         return Err("bake: SimpleOS font asset invalid: " + font_validation.reason)
     payloads.push(InitramfsPayloadEntry(
         host_path: font.local_path,
         guest_path: "/" + font.local_path,
         is_dir: false,
+        data: font_loaded.0,
     ))
 
     val config = PackConfig(
@@ -301,13 +302,15 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
         if _host_tool_available("mkfs.fat"):
             if _host_tool_available("mcopy"):
                 val font = simpleos_default_font_asset_candidate()
-                val font_blob: [u8] = rt_file_read_bytes(font.local_path) ?? []
-                val font_validation = validate_selected_font_asset(font.local_path, font_blob)
+                val font_loaded = load_selected_font_file(font.local_path)
+                val font_validation = font_loaded.1
                 if not font_validation.valid:
                     return Err("bake: SimpleOS font asset invalid: " + font_validation.reason)
-                match _load_payload_at(font.local_path, "NOTOSANSTTF", "/" + font.local_path):
-                    case Ok(e): mkfs_payloads.push(e)
-                    case Err(e): return Err(e)
+                mkfs_payloads.push(PayloadEntry(
+                    path: "NOTOSANSTTF",
+                    data: font_loaded.0,
+                    guest_path: "/" + font.local_path,
+                ))
                 print "bake: using mkfs.fat+mcopy fast path (build/os/.bake_use_mkfs_fat present)"
                 match _bake_via_mkfs_fat(out_disk, mkfs_payloads, size_mb):
                     case Ok(()):

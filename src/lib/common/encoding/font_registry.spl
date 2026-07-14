@@ -23,10 +23,7 @@
 use std.common.encoding.sfnt.{validate_glyf_font_instance, sfnt_manifest_tables_match, sfnt_manifest_names_match}
 use std.common.crypto.sha256.{sha256_u8_hex}
 
-# Native file-hash: computes sha256 of the file at `path` in the runtime instead
-# of hashing a 17MB+ [u8] blob byte-by-byte in the interpreter. Verified to
-# produce the identical lowercase-hex digest as sha256_u8_hex(file_read_bytes(path)).
-extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [u8]
 
 # ============================================================================
 # Font type classification
@@ -637,19 +634,15 @@ fn _font_sha256_hex_valid(value: text) -> bool:
 fn _font_asset_validation(selected: bool, valid: bool, family: text, reason: text) -> FontAssetRuntimeValidation:
     FontAssetRuntimeValidation(selected: selected, valid: valid, family: family, reason: reason)
 
-fn validate_selected_font_asset(path: text, blob: [u8]) -> FontAssetRuntimeValidation:
+fn _validate_selected_font_asset(path: text, blob: [u8]) -> FontAssetRuntimeValidation:
     val maybe_candidate = selected_font_asset_candidate_for_path(path)
     val candidate = match maybe_candidate:
         Some(value): value
         None: return _font_asset_validation(false, true, "", "unmanaged")
     if blob.len() != candidate.byte_len:
         return _font_asset_validation(true, false, candidate.family, "byte-length")
-    # Hash the file natively (rt_file_hash_sha256) rather than the 17MB blob in
-    # the interpreter: sha256_u8_hex(blob) here was the single dominant cost of a
-    # font load (~40 min for the 17MB universal sans face under the tree-walking
-    # interpreter, which the JIT cannot accelerate). blob is always the bytes of
-    # the file at `path` in every load flow, so the digest is identical.
-    if not _font_sha256_hex_valid(candidate.sha256) or rt_file_hash_sha256(path) != candidate.sha256:
+    val actual_sha256 = sha256_u8_hex(blob)
+    if not _font_sha256_hex_valid(candidate.sha256) or actual_sha256 != candidate.sha256:
         return _font_asset_validation(true, false, candidate.family, "sha256")
     val instance = validate_glyf_font_instance(blob, candidate.default_axes)
     if not instance.supported:
@@ -662,6 +655,15 @@ fn validate_selected_font_asset(path: text, blob: [u8]) -> FontAssetRuntimeValid
                                      candidate.embedded_version):
         return _font_asset_validation(true, false, candidate.family, "names")
     _font_asset_validation(true, true, candidate.family, "valid")
+
+fn validate_selected_font_asset(path: text, blob: [u8]) -> FontAssetRuntimeValidation:
+    """Validate the exact supplied bytes for a selected asset identity."""
+    _validate_selected_font_asset(path, blob)
+
+fn load_selected_font_file(path: text) -> ([u8], FontAssetRuntimeValidation):
+    """Read and validate the exact bytes returned to the caller."""
+    val blob = rt_file_read_bytes(path)
+    (blob, _validate_selected_font_asset(path, blob))
 
 class FontCoverageCell:
     language: text

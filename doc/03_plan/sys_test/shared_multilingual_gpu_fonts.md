@@ -103,7 +103,7 @@ behavior.
 | REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, production host route contract, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical SimpleOS pixels | composition, hosted color/top-level frame ownership, and canonical SimpleOS runner/readiness selection source-covered; production execution, hosted image/motion/nested parity, and retained QEMU PASS pending |
 | REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 0/3; fail-closed gate present |
 | REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 0/3; pending gate fails explicitly |
-| REQ-014 | six present specs/manuals | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 2/3; native docgen pending |
+| REQ-014 | six present specs/manuals | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 0/3 canonical manual passes; six drafts exist, but native execution/docgen refresh is pending |
 | REQ-015 | `font_render_config_spec.spl`, `shared_font_surfaces_spec.spl`, and focused Engine2D/Engine3D font specs | validation and length-delimited identity; bitmap/vector/shaped propagation; Suggested/Preferred/Required behavior; unsupported mode/CTM rejects before cache/backend mutation; legacy default equivalence | 5 source-covered; deployed execution blocked by stale `rt_env_set` artifact ABI, then bootstrap-parser/full-CLI runtime-link gaps |
 
 | NFR | Evidence | Pass condition |
@@ -161,7 +161,7 @@ viewport, premultiplication, rounding, warmups, samples, and percentile method.
 For each changed spec, run native execution and generate its manual once:
 
 ```text
-bin/simple test <spec> --native
+SIMPLE_NO_STUB_FALLBACK=1 bin/simple test <spec> --mode=native
 bin/simple spipe-docgen <spec> --output doc/06_spec --no-index
 ```
 
