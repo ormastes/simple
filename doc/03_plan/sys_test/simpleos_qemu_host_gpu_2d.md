@@ -12,6 +12,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 
 | Scenario | Requirements |
 |---|---|
+| compiler eligibility rejects candidates that cannot complete the checked-in frontend smoke within 10 seconds | TODO 548 hardening (no new requirement) |
 | negotiate one bounded architecture-neutral protocol | REQ-001,002,005 |
 | exact device-backed Draw IR readback | REQ-003,006; NFR-001 |
 | checked raw Vulkan CLEAR/RECT completion and fail-closed provenance | REQ-003,005,006,010; NFR-001 |
@@ -41,6 +42,13 @@ cannot pass from QEMU flags, QMP screenshots, VirtIO-GPU scanout, synthetic
 handles, compile-only output, or a CPU mirror. Unsupported and blocked rows are
 valid classifications but do not satisfy a host/ISA combination classified as
 supported.
+
+Before any guest build, both compiler-selection owners must require the exact
+`check test/05_perf/io_parity/startup_simple.spl` frontend smoke to exit zero
+within a 10-second deadline. Unix allows a one-second forced-kill grace for
+candidates that ignore termination; Windows force-kills at its bounded wait
+deadline. Timeout, signal termination, or any nonzero exit makes the candidate
+ineligible even when its version and native-build argument probes succeed.
 
 Every passing row must also record the first-line QEMU version, a reversible
 comma-delimited per-argument hex encoding of the exact QEMU argument vector,
@@ -74,8 +82,10 @@ missing ProcessingIR receipt.
 A passing active AArch64 report must promote both production serial-log and
 production-argv evidence keys and revalidate their contents from disk. Cached
 reports lacking either key are invalid, including reports that passed the old
-three-receipt contract. TODO 548 currently blocks a fresh build and QEMU run,
-so the source-level wiring is not live PASS evidence.
+three-receipt contract. TODO 548 currently blocks a fresh build and QEMU run;
+the bounded frontend eligibility gate prevents the known stale-ABI crash from
+being selected, but a current pure-Simple compiler is still required. The
+source-level wiring is not live PASS evidence.
 
 ## Manual Step
 

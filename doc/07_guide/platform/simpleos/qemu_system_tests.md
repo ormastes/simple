@@ -230,6 +230,15 @@ sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --validate-report build/simpleos_host_gpu_2d/report.env
 ```
 
+Before building a guest, both the wrapper and `_QemuRunner` require a
+candidate pure-Simple compiler to complete
+`check test/05_perf/io_parity/startup_simple.spl` successfully within a
+10-second deadline. Unix allows a one-second forced-kill grace for a process
+that ignores termination; Windows force-kills at its bounded wait deadline. A
+timeout, signal, or nonzero exit rejects the candidate even when it passes the
+version and native-build argument probes; this prevents stale-ABI artifacts
+from reaching the QEMU build path.
+
 It builds `simpleos-host-gpu-x86_64`, `simpleos-host-gpu-aarch64`, and
 `simpleos-host-gpu-riscv64` through `_QemuRunner`, starts the strict host
 daemon over one bounded ivshmem region per row, and requires the existing

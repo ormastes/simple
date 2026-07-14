@@ -9,6 +9,9 @@ QEMU_TIMEOUT=${SIMPLEOS_HOST_GPU_QEMU_TIMEOUT:-20}
 PRODUCTION_QEMU_TIMEOUT=${SIMPLEOS_HOST_GPU_PRODUCTION_QEMU_TIMEOUT:-120}
 REQUIRE_CUDA=${SIMPLEOS_HOST_GPU_REQUIRE_CUDA:-0}
 RSS_SAMPLE_INTERVAL=${SIMPLEOS_HOST_GPU_RSS_SAMPLE_INTERVAL:-0.1}
+COMPILER_PROBE_TIMEOUT_SECONDS=5
+COMPILER_CHECK_TIMEOUT_SECONDS=10
+COMPILER_CHECK_KILL_GRACE_SECONDS=1
 EXPECTED_PROTOCOL_VERSION=$(sed -n 's/^val SIMPLEOS_HOST_GPU_PROTOCOL_VERSION: i64 = \([0-9][0-9]*\)$/\1/p' src/lib/common/gpu/simpleos_host_gpu_protocol.spl)
 [ -n "$EXPECTED_PROTOCOL_VERSION" ] || exit 2
 
@@ -66,13 +69,20 @@ simple_binary_is_valid() {
     [ -x "$candidate" ] || return 1
     timeout_bin=$(find_timeout || true)
     [ -n "$timeout_bin" ] || return 1
-    version=$("$timeout_bin" 5 "$candidate" --version 2>&1) || return 1
+    version=$("$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
+        "${COMPILER_PROBE_TIMEOUT_SECONDS}s" "$candidate" --version 2>&1) || return 1
     [ -n "$version" ] || return 1
     case "$version" in
         *"bootstrap seed only"*) return 1 ;;
     esac
-    if probe=$("$timeout_bin" 5 "$candidate" native-build --backend cranelift \
-        --entry src/app/cli/main.spl --mode definitely-invalid-mode 2>&1)
+    SIMPLE_LIB="$ROOT_DIR/src" "$timeout_bin" \
+        -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
+        "${COMPILER_CHECK_TIMEOUT_SECONDS}s" "$candidate" check \
+        test/05_perf/io_parity/startup_simple.spl >/dev/null 2>&1 || return 1
+    if probe=$("$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
+        "${COMPILER_PROBE_TIMEOUT_SECONDS}s" "$candidate" native-build \
+        --backend cranelift --entry src/app/cli/main.spl \
+        --mode definitely-invalid-mode 2>&1)
     then
         return 1
     else
@@ -668,6 +678,8 @@ self_test() {
     fake_report="$temp_dir/fake.env"
     bad_backend_report="$temp_dir/bad-backend.env"
     valid_simple="$temp_dir/simple-valid"
+    argument_only_simple="$temp_dir/simple-argument-only"
+    frontend_hanging_simple="$temp_dir/simple-frontend-hanging"
     seed_simple="$temp_dir/simple-seed"
     hanging_simple="$temp_dir/simple-hanging"
     failing_simple="$temp_dir/simple-probe-failing"
@@ -692,6 +704,34 @@ if [ "$1" = "--version" ]; then
     echo 'Simple v1.0.0-beta'
     exit 0
 fi
+if [ "$1" = "check" ] && [ "$2" = "test/05_perf/io_parity/startup_simple.spl" ]; then
+    exit 0
+fi
+echo "Error: invalid --mode 'definitely-invalid-mode' (expected dynload or one-binary)" >&2
+exit 1
+EOF
+    cat >"$argument_only_simple" <<'EOF'
+#!/bin/sh
+if [ "$1" = "--version" ]; then
+    echo 'Simple v1.0.0-beta'
+    exit 0
+fi
+if [ "$1" = "check" ] && [ "$2" = "test/05_perf/io_parity/startup_simple.spl" ]; then
+    exit 139
+fi
+echo "Error: invalid --mode 'definitely-invalid-mode' (expected dynload or one-binary)" >&2
+exit 1
+EOF
+    cat >"$frontend_hanging_simple" <<'EOF'
+#!/bin/sh
+if [ "$1" = "--version" ]; then
+    echo 'Simple v1.0.0-beta'
+    exit 0
+fi
+if [ "$1" = "check" ] && [ "$2" = "test/05_perf/io_parity/startup_simple.spl" ]; then
+    trap '' TERM
+    while :; do sleep 1; done
+fi
 echo "Error: invalid --mode 'definitely-invalid-mode' (expected dynload or one-binary)" >&2
 exit 1
 EOF
@@ -702,7 +742,8 @@ echo 'WARNING: this Rust-built Simple binary is a bootstrap seed only' >&2
 EOF
     cat >"$hanging_simple" <<'EOF'
 #!/bin/sh
-sleep 6
+trap '' TERM
+while :; do sleep 1; done
 EOF
     cat >"$failing_simple" <<'EOF'
 #!/bin/sh
@@ -713,8 +754,17 @@ fi
 echo 'native-build probe failed without the expected parser contract' >&2
 exit 1
 EOF
-    chmod +x "$valid_simple" "$seed_simple" "$hanging_simple" "$failing_simple"
+    chmod +x "$valid_simple" "$argument_only_simple" "$frontend_hanging_simple" \
+        "$seed_simple" "$hanging_simple" "$failing_simple"
     simple_binary_is_valid "$valid_simple"
+    if simple_binary_is_valid "$argument_only_simple"; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    if simple_binary_is_valid "$frontend_hanging_simple"; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
     if simple_binary_is_valid "$seed_simple"; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1

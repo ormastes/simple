@@ -15,6 +15,12 @@ use app.io.mod.{file_read_text}
 fn host_gpu_wrapper_source() -> text:
     file_read_text("scripts/check/check-simpleos-qemu-host-gpu-2d.shs")
 
+fn qemu_runner_build_source() -> text:
+    file_read_text("src/os/_QemuRunner/os_build_run.spl")
+
+fn process_ops_source() -> text:
+    file_read_text("src/lib/nogc_sync_mut/io/process_ops.spl")
+
 fn host_gpu_probe_source() -> text:
     file_read_text("examples/09_embedded/simple_os/arch/common/host_gpu_ivshmem_probe_entry.spl")
 
@@ -79,9 +85,12 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
     # @capture(protocol)
     # @capture(log)
     it "negotiates one bounded protocol on x86_64 AArch64 and RISC-V":
+        step("Reject an unusable compiler candidate")
         step("Probe the QEMU guest GPU capability")
         step("Validate version limits backend sets readback and readiness")
         val source = host_gpu_wrapper_source()
+        val runner = qemu_runner_build_source()
+        val process_ops = process_ops_source()
         val probe = host_gpu_probe_source()
         expect(source).to_contain("simpleos-host-gpu-x86_64")
         expect(source).to_contain("simpleos-host-gpu-aarch64")
@@ -92,6 +101,17 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         expect(source).to_contain("bootstrap seed only")
         expect(source).to_contain("--mode definitely-invalid-mode")
         expect(source).to_contain("Error: invalid --mode 'definitely-invalid-mode' (expected dynload or one-binary)")
+        expect(source).to_contain("COMPILER_PROBE_TIMEOUT_SECONDS=5")
+        expect(source).to_contain("COMPILER_CHECK_TIMEOUT_SECONDS=10")
+        expect(source).to_contain("COMPILER_CHECK_KILL_GRACE_SECONDS=1")
+        expect(source).to_contain("version=$(\"$timeout_bin\" -k \"${COMPILER_CHECK_KILL_GRACE_SECONDS}s\" \\\n        \"${COMPILER_PROBE_TIMEOUT_SECONDS}s\" \"$candidate\" --version")
+        expect(source).to_contain("SIMPLE_LIB=\"$ROOT_DIR/src\" \"$timeout_bin\" \\\n        -k \"${COMPILER_CHECK_KILL_GRACE_SECONDS}s\" \\\n        \"${COMPILER_CHECK_TIMEOUT_SECONDS}s\" \"$candidate\" check")
+        expect(source).to_contain("probe=$(\"$timeout_bin\" -k \"${COMPILER_CHECK_KILL_GRACE_SECONDS}s\" \\\n        \"${COMPILER_PROBE_TIMEOUT_SECONDS}s\" \"$candidate\" native-build")
+        expect(source).to_contain("test/05_perf/io_parity/startup_simple.spl >/dev/null 2>&1 || return 1")
+        expect(source).to_contain("frontend_hanging_simple")
+        expect(runner).to_contain("[\"check\", \"test/05_perf/io_parity/startup_simple.spl\"],\n        10000")
+        expect(runner).to_contain("frontend_exit_code == 0")
+        expect(process_ops).to_contain("\"-k\", \"{PROCESS_TIMEOUT_KILL_GRACE_SECONDS}s\"")
         expect(probe).to_contain("render_backend = \"metal\"")
         expect(probe).to_contain("render_backend = \"directx\"")
         expect(probe).to_contain("render_backend = \"vulkan\"")

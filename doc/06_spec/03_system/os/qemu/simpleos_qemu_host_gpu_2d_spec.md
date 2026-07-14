@@ -17,21 +17,28 @@ the CPU/software fallback and report a stable reason.
 
 ## Primary flow
 
-1. **Probe the QEMU guest GPU capability.** Boot the selected x86_64, AArch64,
+1. **Reject an unusable compiler candidate.** Before any guest build, require
+   the candidate to complete
+   `check test/05_perf/io_parity/startup_simple.spl` successfully within 10
+   seconds. Unix allows a one-second forced-kill grace for processes that
+   ignore termination; Windows force-kills at its bounded wait deadline.
+   Timeout, signal termination, or nonzero exit is ineligible even if version
+   and native-build argument probes succeed.
+2. **Probe the QEMU guest GPU capability.** Boot the selected x86_64, AArch64,
    or RISC-V guest and negotiate protocol version, limits, backend sets,
    readback, and host readiness. Try strict native Metal, DirectX, then Vulkan
    with fresh generations while validating processing against its own mask.
-2. **Render and read back the Simple 2D parity fixture.** Correlate frame ID,
+3. **Render and read back the Simple 2D parity fixture.** Correlate frame ID,
    native device identity, positive backend handle, same-frame output, and the
    exact CPU-oracle checksum. Raw-render and Draw IR receipts must carry the
    same execution device identity.
-3. **Submit the canonical full-frame IMAGE composition through the shared guest bridge.**
+4. **Submit the canonical full-frame IMAGE composition through the shared guest bridge.**
    Use the same 64x48 opaque background-and-rectangle oracle as one clipped
    full-target `DrawIrComposition` IMAGE resource.
-4. **Compare Draw IR readback and correlated device receipt across all three ISAs.**
+5. **Compare Draw IR readback and correlated device receipt across all three ISAs.**
    Require the exact checksum and pixel counts with a positive native Metal,
    DirectX, or Vulkan handle and stable device identity before accepting the marker.
-5. **Prove the AArch64 production desktop frame.** Build the
+6. **Prove the AArch64 production desktop frame.** Build the
    `arm64-desktop-engine2d` guest through the wrapper, require its production
    QEMU argv lane, and accept exactly one correlated
    `[wm-frame] host-gpu-presented` marker only after receipt validation and
@@ -42,30 +49,30 @@ the CPU/software fallback and report a stable reason.
    reports retain the production serial log and exact QEMU
    device arguments under the `_production_serial_log` and
    `_production_qemu_device_args` keys.
-6. **Dispatch the raw CLEAR and solid RECT fixture through strict Engine2D selection.**
+7. **Dispatch the raw CLEAR and solid RECT fixture through strict Engine2D selection.**
    Route raw QEMU framebuffer mutations through the exact native Metal,
    DirectX, or Vulkan backend selected by HELLO and require checked completion evidence.
-7. **Reject unchecked or fallback raw rendering before device-backed receipt.**
+8. **Reject unchecked or fallback raw rendering before device-backed receipt.**
    Known failure invalidates device provenance; unknown completion poisons the
    frame rather than replaying it.
-8. **Select host presentation or the existing local production renderer.**
+9. **Select host presentation or the existing local production renderer.**
    The x86 desktop maps the full ivshmem BAR into its active VMM, derives a
    fresh generation only from an idle slot, submits the canonical WM Draw IR,
    validates the correlated device receipt, and presents checksum-checked MMIO
    readback. Any failure falls through to local Engine2D. The current 4K entry
    honestly selects local rendering until TODO 552 expands the bounded wire.
-9. **Run the ProcessingIR parity fixture.** Correlate the host completion and
+10. **Run the ProcessingIR parity fixture.** Correlate the host completion and
    require exact output-buffer parity with the CPU oracle.
-10. **Keep native Metal ProcessingIR separate from Engine2D rendering.** Probe
+11. **Keep native Metal ProcessingIR separate from Engine2D rendering.** Probe
    and execute the dedicated MSL FillU32 owner, require checked command
    completion and pointer readback, and never relabel a Metal render clear as
    processing evidence.
-11. **Report device-backed host acceleration evidence.** Publish one row with
+12. **Report device-backed host acceleration evidence.** Publish one row with
    host, guest ISA, QEMU/device arguments, protocol, backend, device, IDs,
    timing, RSS, checksums, status, and reason. For every non-HELLO request, both
    the guest and daemon require a positive numeric run hash and frame ID; a
    zero, negative, stale, or mismatched value fails before PASS admission.
-12. **Validate cached rows before aggregation.** Accept a cached report only
+13. **Validate cached rows before aggregation.** Accept a cached report only
    when all nine host/ISA rows are present and every passing row links to a
    serial log containing the exact render, Draw IR, and ProcessingIR receipts.
    Each passing row also requires a unique QEMU version, a reversible

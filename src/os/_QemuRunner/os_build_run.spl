@@ -358,17 +358,21 @@ fn _objcopy_path_prefix() -> text:
     ""
 
 fn _simple_binary_is_valid(candidate: text) -> bool:
-    """Validate a candidate `simple` binary by running `<candidate> --version`.
+    """Validate a candidate with version and bounded frontend checks.
 
-    Requires exit code 0 and non-empty stdout. Guards against stale or
-    corrupt bootstrap binaries (e.g. ones that segfault on startup, which
-    the Linux bootstrap binary at src/compiler_rust/target/release/simple
-    was observed to do on 2026-04-13).
+    Guards against seed, stale-ABI, and corrupt binaries before any QEMU build.
     """
     if not rt_file_exists(candidate):
         return false
     val (stdout, stderr, exit_code) = process_run_timeout(candidate, ["--version"], 5000)
-    exit_code == 0 and stdout != "" and not stderr.contains("bootstrap seed only")
+    if exit_code != 0 or stdout == "" or stderr.contains("bootstrap seed only"):
+        return false
+    val (_, _, frontend_exit_code) = process_run_timeout(
+        candidate,
+        ["check", "test/05_perf/io_parity/startup_simple.spl"],
+        10000
+    )
+    frontend_exit_code == 0
 
 fn _simple_binary_has_native_build_contract(candidate: text, backend_name: text) -> bool:
     # This is a bounded CLI liveness/command-surface probe. The real build is
@@ -395,8 +399,8 @@ fn _find_simple_binary() -> text:
     # Probe in priority order. Prefer freshly built local binaries first so
     # QEMU/native-build lanes see the current source tree instead of an older
     # release artifact that merely still passes `--version`.
-    # Each candidate is validated via `<candidate> --version` (exit 0 +
-    # non-empty stdout) so stale or segfaulting binaries fall through.
+    # Each candidate must pass version and a bounded checked-in frontend smoke,
+    # so stale or segfaulting binaries fall through.
     val candidates: [text] = [
         "release/x86_64-unknown-linux-gnu/simple",
         "bin/simple",
