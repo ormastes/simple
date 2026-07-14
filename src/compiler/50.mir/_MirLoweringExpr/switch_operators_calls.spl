@@ -62,6 +62,18 @@ fn enum_pat_binding_sym(payload: HirPatternPayload?) -> SymbolId?:
                 ()
     nil
 
+fn enum_text_payload_marker() -> text:
+    """Sentinel stored in enum_payload_struct_names (which normally holds a
+    STRUCT name) to record, at the enum-construction site, "this single-field
+    payload's lowered value was TEXT" -- keyed the same way
+    ("{enum_name}::{variant}") but a reserved value no real struct name can
+    ever equal. lower_enum_match's single-payload bind arm reads this back to
+    tell "retype the bound local as text" apart from "register a struct
+    name", without adding a new field to the shared MirLowering struct (that
+    struct is built in mir_lowering_types.spl/module_lowering.spl, owned by a
+    different lane this round)."""
+    "$__enum_text_payload__$"
+
 fn enum_pat_binding_syms(payload: HirPatternPayload?) -> [SymbolId]:
     """#164: all payload-binding symbols of `case Pair(a, b, ...):`, in
     declared field order (empty for Unit variants; non-Binding sub-patterns,
@@ -855,7 +867,37 @@ impl MirLowering:
                     # comment for the full landmine this closes).
                     val payload_key = "{enum_name}::{enum_variants[ci]}"
                     val payload_struct = self.enum_payload_struct_names.get(payload_key)
-                    if payload_struct != nil and payload_struct != "":
+                    if payload_struct != nil and payload_struct == enum_text_payload_marker():
+                        # Enum-text bug: this variant's single-field payload
+                        # was observed to be TEXT at the construction site
+                        # (see lower_enum_lit/lower_enum_construct_named).
+                        # `pl` is the raw i64 payload word straight off
+                        # rt_enum_payload -- simply relabeling its STATIC
+                        # type to Opaque("str") in place (tried first) breaks
+                        # the LLVM call typing: rt_enum_payload's real C
+                        # return type is int64_t, so its call-site SSA value
+                        # is genuinely defined as i64, and later text-method
+                        # codegen (e.g. `.len()`'s rt_interp_cstr argument)
+                        # would then see a mismatched "already ptr" static
+                        # type on an actually-i64 SSA value ('%lN defined
+                        # with type i64 but expected ptr'). Instead, mirror
+                        # decode_runtime_value's identical Opaque("") case
+                        # (expr_dispatch.spl): call rt_interp_cstr(pl) to
+                        # produce a GENUINELY new, properly Opaque("str")-typed
+                        # local (rt_interp_cstr's real C signature returns
+                        # `const char*`) -- it auto-detects tagged-vs-raw, so
+                        # this is correct whether the original literal was a
+                        # raw string constant or an already-tagged handle.
+                        var bp_text = self.builder
+                        val text_op = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_interp_cstr"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+                        ))
+                        val text_res = bp_text.emit_call(text_op, [mir_operand_copy(pl)], MirType(kind: MirTypeKind.Opaque("str")))
+                        self.builder = bp_text
+                        if val text_local = text_res:
+                            self.local_map[bind_syms[0].id] = text_local
+                    elif payload_struct != nil and payload_struct != "":
                         self.struct_value_syms[pl.id] = payload_struct ?? ""
             elif bind_syms.len() > 1:
                 # #164 multi-field payload: the scalar payload slot holds a
@@ -1040,6 +1082,12 @@ impl MirLowering:
                         val lit_payload_struct_name = self.struct_value_syms.get(payload_local.id)
                         if lit_payload_struct_name != nil and lit_payload_struct_name != "":
                             self.enum_payload_struct_names["{enum_name}::{variant}"] = lit_payload_struct_name ?? ""
+                        elif self.local_is_str(payload_local):
+                            # Enum-text bug: record that this variant's payload
+                            # is TEXT so lower_enum_match's single-payload bind
+                            # arm retypes the bound local instead of leaving it
+                            # (wrongly) i64. See enum_text_payload_marker.
+                            self.enum_payload_struct_names["{enum_name}::{variant}"] = enum_text_payload_marker()
                     elif values.len() > 1:
                         payload_local = self.box_tuple_payload(values)
                         has_payload = true
@@ -1086,6 +1134,11 @@ impl MirLowering:
             val payload_struct_name = self.struct_value_syms.get(payload_local.id)
             if payload_struct_name != nil and payload_struct_name != "":
                 self.enum_payload_struct_names["{enum_name}::{variant}"] = payload_struct_name ?? ""
+            elif self.local_is_str(payload_local):
+                # Enum-text bug: same marker as lower_enum_lit above, for the
+                # MethodCall-style construction path (`Shape.Circle(7)` via
+                # receiver=Shape/method=Circle).
+                self.enum_payload_struct_names["{enum_name}::{variant}"] = enum_text_payload_marker()
         elif args.len() > 1:
             # #164: 2+ constructor args -- box them into a heap tuple so the
             # single scalar payload slot can still carry all of them.

@@ -2235,14 +2235,71 @@ int64_t rt_tuple_len(int64_t tuple) {
     return array ? array->len : -1;
 }
 
+/* Enum-eq bug (enumtext lane, filed bug #2): `==` on an enum value has no
+ * dedicated MIR routing (falls straight through to a raw integer/pointer
+ * compare of the two tagged handles -- that generic Binary(Eq) dispatch
+ * lives in expr_dispatch.spl, owned by a different lane this round) and
+ * there is no rt_enum_eq. Before this fix, rt_enum_new unconditionally
+ * malloc'd a FRESH RtCoreEnum for every construction -- including
+ * payload-less (Unit) variants -- so two independently-constructed
+ * instances of the exact same variant (`E.B == E.B`) always compared
+ * unequal even though they are structurally identical.
+ *
+ * Fix: intern by (enum_id, discriminant, payload). A Unit variant's payload
+ * is always the constant 0 (see lower_enum_lit/lower_enum_construct_named
+ * in switch_operators_calls.spl), so two Unit constructions of the same
+ * variant always hit the same cache slot and return the SAME pointer --
+ * making the existing raw pointer-compare `==` correctly report equal.
+ * As a side effect this also correctly interns SCALAR payloads with equal
+ * bit patterns (e.g. `Some(3) == Some(3)`), matching value semantics for
+ * i64/bool payloads. A POINTER-typed payload (text/struct) only interns
+ * when the exact same pointer is reused; it never interns two
+ * differently-allocated-but-equal-content payloads, so this is strictly
+ * additive -- it never turns a previously-correct "unequal" result into an
+ * incorrect one, it only fixes previously-wrong "unequal" results for
+ * payload-less/equal-scalar-payload variants. RtCoreEnum has no in-place
+ * mutation API (only rt_enum_discriminant/rt_enum_payload readers exist),
+ * so sharing one allocation across equal constructions is safe.
+ *
+ * Known caveat (pre-existing, not introduced here): every call site passes
+ * enum_id=0 (see switch_operators_calls.spl), so two DIFFERENT enum types
+ * whose colliding variant shares the same discriminant ordinal would also
+ * collide in this cache. No probe this round exercises cross-enum-type
+ * comparison; fixing enum_id assignment is out of this lane's scope
+ * (shared MIR construction-site logic). */
+#define RT_ENUM_INTERN_MAX 4096
+typedef struct RtEnumInternEntry {
+    int32_t enum_id;
+    int32_t discriminant;
+    int64_t payload;
+    int64_t value;
+} RtEnumInternEntry;
+static RtEnumInternEntry rt_enum_intern_table[RT_ENUM_INTERN_MAX];
+static int rt_enum_intern_count = 0;
+
 int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
+    for (int i = 0; i < rt_enum_intern_count; i++) {
+        if (rt_enum_intern_table[i].enum_id == enum_id &&
+            rt_enum_intern_table[i].discriminant == discriminant &&
+            rt_enum_intern_table[i].payload == payload) {
+            return rt_enum_intern_table[i].value;
+        }
+    }
     RtCoreEnum* value = (RtCoreEnum*)calloc(1, sizeof(RtCoreEnum));
     if (!value) return rt_core_nil();
     value->kind = RT_VALUE_HEAP_ENUM;
     value->enum_id = (uint32_t)enum_id;
     value->discriminant = (uint32_t)discriminant;
     value->payload = payload;
-    return (int64_t)(((uint64_t)(uintptr_t)value) | RT_VALUE_TAG_HEAP);
+    int64_t tagged = (int64_t)(((uint64_t)(uintptr_t)value) | RT_VALUE_TAG_HEAP);
+    if (rt_enum_intern_count < RT_ENUM_INTERN_MAX) {
+        rt_enum_intern_table[rt_enum_intern_count].enum_id = enum_id;
+        rt_enum_intern_table[rt_enum_intern_count].discriminant = discriminant;
+        rt_enum_intern_table[rt_enum_intern_count].payload = payload;
+        rt_enum_intern_table[rt_enum_intern_count].value = tagged;
+        rt_enum_intern_count++;
+    }
+    return tagged;
 }
 
 int64_t rt_enum_discriminant(int64_t value) {
