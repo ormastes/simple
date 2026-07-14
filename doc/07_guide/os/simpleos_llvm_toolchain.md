@@ -36,8 +36,17 @@ by passing arch names); it is **opt-in** so a plain `bin/simple build` stays
 host-only and fast (that default produces only
 `bin/release/x86_64-unknown-linux-gnu/simple`). The subcommand and the CI script
 run the same builder. Boot/FS-exec staging is proven on all three arches (x86_64
-OVMF, riscv64 OpenSBI, aarch64 EL1); in-guest *run* is blocked on the
-deployed-compiler `env_set` SEGV + #99 redeploy. Full 3-arch status:
+OVMF, riscv64 OpenSBI, aarch64 EL1). In-guest *run* of the Simple **interpreter**
+is PROVEN on x86_64 under real OVMF (2026-07-14, `fe9fbd8c2285`):
+`ssh root@guest /usr/bin/simple /hello.spl` prints "hello from simple on
+simpleos" (gate `scripts/os/ssh_simple_hello_uefi.shs`, rung L4b PASS). The last
+blocker was the guest lexer's `src[start:pos].join("")` (a native value-type
+array-slice + join) returning `""`, so every identifier token came out empty and
+nothing resolved — fixed with a char-index loop. **Lesson: native array `[s:e]`
+slice + `.join()` is unreliable in guest-run code; use index loops.** The deployed
+*full CLI* still has separate blockers (`env_set` ABI, #99 redeploy); the
+interpreter goal was reached via the focused `simpleos_tool` payload. Full 3-arch
+status:
 `doc/03_plan/os/in_guest_clang_selfhost_board_plan.md` (§ Simple compiler/loader
 on SimpleOS).
 

@@ -131,12 +131,19 @@ QEMU-only or source-present.
 Ground truth (2026-07-14): cross-build + boot + FS-exec *staging* of the
 target-native Simple compiler is proven on all three simpleos arches
 (`bin/release/<arch>-unknown-simpleos/simple`, 4 MB static EXEC, fail-closed
-`readelf` gate). In-guest *execution* (`/usr/bin/simple --version` + hello) is
-NOT yet reachable — blocked on the deployed full CLI's stale two-argument
-`rt_env_set` artifact ABI
+`readelf` gate). In-guest *interpreter execution* is now PROVEN on x86_64 under
+real OVMF (`fe9fbd8c2285`): `ssh root@guest /usr/bin/simple /hello.spl` prints
+"hello from simple on simpleos" — gate `scripts/os/ssh_simple_hello_uefi.shs`
+rung L4b PASS, rc=0, an ARBITRARY program (not a fixed-command fixture). Root of
+the last blocker: the guest lexer's `src[start:pos].join("")` (native value-type
+array-slice + join) returns `""` in the guest, so every identifier token came out
+empty and nothing resolved — fixed with a char-index loop. **Lesson: native array
+`[s:e]` slice + `.join()` is unreliable in guest-run code; use index loops.** The
+interpreter goal was reached via the focused `simpleos_tool` payload built with
+`src/compiler_rust/target/bootstrap/simple` — the deployed *full CLI* still has
+separate blockers (stale two-argument `rt_env_set` artifact ABI
 (`doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`)
-and the #99 seed-cranelift enum miscompile. A current-source rebuild also has
-separate bootstrap-parser and full-CLI closure/runtime link blockers. So: build the payload with
+and the #99 seed-cranelift enum miscompile). So: build the payload with
 `src/compiler_rust/target/bootstrap/simple` (the deployed `bin/simple` SEGVs on
 every `native-build`), and classify a compiler-in-filesystem lane as
 staging-proven (not in-guest-run) until the self-hosted redeploy lands. Do NOT
