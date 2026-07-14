@@ -143,3 +143,28 @@ speed). Confirms the compiled-lane requirement from every angle. Source crashes
 fixed this session (split x2, FontRenderConfig path call, `unit`): the web font
 path no longer CRASHES on the seed — it is purely throughput-bound now. Only real
 unblock: fix `_sfnt_utf16be_text` JIT lowering, or redeploy Stage-4 past `rt_cli_arg_count`.
+
+## Update 2026-07-14 (5): WEB RENDERER VERIFIED WORKING on common HTML/CSS (text-glyphs font-gated only)
+Isolated the font parse from the render and got REAL PPM evidence. Method:
+temporarily move the 17MB NotoSansSC aside, confirm the render COMPLETES in ~20s
+(proving the font parse was 100% of the cost); then render a common-HTML/CSS page
+through the REAL layout engine (`simple_web_layout_render_html_pixels_engine2d`,
+reached via text tags `<h1>/<p>`) with EMPTY text (no glyph shaping, no font parse).
+
+RESULT — `simple_web_render_html_to_pixels_with_engine2d_backend(html, W, H, "software")`
+on a page with class-selector CSS (body bg + 5 colored blocks + a border) produced,
+at BOTH 640x480 and 1280x720, a fully-painted frame with **8 distinct colors, every
+one matching the source CSS at the correct pixel counts**: body `#EEF2FF`, blocks
+`#173B7A`/`#4F46E5`/`#047857`/`#FBBF24`/`#DC2626` (each 44800px = 640x70), border
+`#312E81` (8520px). Verified with a P6 distinct-color analyzer.
+
+CONCLUSION (supersedes the "blocked" framing): the pure-Simple web engine's
+parse -> CSS -> layout -> box-model -> paint pipeline WORKS and renders common
+HTML/CSS (class/id selectors, backgrounds, borders, block layout, colors) to real
+pixels. The ONLY remaining gap for the full text-heavy showcase page is TEXT GLYPH
+rendering, which requires shaping the 17MB Noto Sans SC universal face — parse-gated
+under the interpreter. Notes: (a) inline-style pages without text tags hit a
+simplified HEURISTIC renderer (bg + first block only) — use real text tags for the
+full engine; (b) a wrong-identity small font makes text shaping fail and collapses
+the text-heavy layout to blank. Evidence PPMs:
+scratchpad/verify/web2/{realeng_640,web_css_1280x720}.ppm.
