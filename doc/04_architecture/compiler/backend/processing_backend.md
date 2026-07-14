@@ -35,8 +35,10 @@ owns a validated `FillU32` value and CPU oracle;
 the existing Vulkan SFFI. Its storage-buffer dispatch shares the Vulkan owner's
 fenced tri-state lifecycle with Engine2D: only status `1` permits readback,
 status `0` is safe to tear down but ineligible for a receipt, and status `-1`
-keeps all dependent handles and the device alive until TODO 551 adds an
-owner-managed quarantine/reaper. The SimpleOS host service accepts the existing bounded
+transfers its uniquely owned buffer, pipeline, and shader to the canonical
+Vulkan dependency quarantine while the native runtime retains command/fence
+ownership. The owner reaps only after device-idle and gates shutdown until all
+releases succeed. The SimpleOS host service accepts the existing bounded
 wire command only after Vulkan negotiation, compares device readback with the
 CPU oracle, and reports device provenance. This is not yet the compiler MIR
 bridge, public `std.processing` API, CUDA/Metal backend, or `simplegpu64`.

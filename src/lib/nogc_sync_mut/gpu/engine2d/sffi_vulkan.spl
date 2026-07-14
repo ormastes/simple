@@ -14,6 +14,7 @@ Usage:
 
 use std.sffi.dynamic.{DynLib}
 use std.gpu.engine2d.sffi_dispatch.{GpuFfiMode, FfiDispatchBase, try_load_gpu_lib}
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new}
 
 # ============================================================================
 # Static extern declarations (resolved at link time against Rust runtime)
@@ -404,6 +405,139 @@ fn vulkan_sffi_wait_fence(fence: i64, timeout_ns: i64) -> bool:
 fn vulkan_sffi_destroy_fence(fence: i64) -> bool:
     rt_vulkan_destroy_fence(fence)
 
+struct VulkanSffiDependencyQuarantine:
+    descriptor: i64
+    buffer: i64
+    pipeline: i64
+    shader: i64
+
+struct VulkanSffiOrphanCommand:
+    command: i64
+    descriptor: i64
+    buffer: i64
+
+var _vulkan_sffi_dependency_quarantine: [VulkanSffiDependencyQuarantine] = []
+var _vulkan_sffi_orphan_commands: [VulkanSffiOrphanCommand] = []
+val _vulkan_sffi_dependency_quarantine_lock: Mutex = mutex_new(0)
+
+fn vulkan_sffi_dependency_quarantine_empty(entry: VulkanSffiDependencyQuarantine) -> bool:
+    entry.descriptor <= 0 and entry.buffer <= 0 and entry.pipeline <= 0 and entry.shader <= 0
+
+fn vulkan_sffi_dependency_without_duplicates(requested: VulkanSffiDependencyQuarantine, existing: [VulkanSffiDependencyQuarantine]) -> VulkanSffiDependencyQuarantine:
+    var unique = requested
+    var i: i64 = 0
+    while i < existing.len():
+        val entry = existing[i]
+        if unique.descriptor > 0 and entry.descriptor == unique.descriptor:
+            unique.descriptor = 0
+        if unique.buffer > 0 and entry.buffer == unique.buffer:
+            unique.buffer = 0
+        if unique.pipeline > 0 and entry.pipeline == unique.pipeline:
+            unique.pipeline = 0
+        if unique.shader > 0 and entry.shader == unique.shader:
+            unique.shader = 0
+        i = i + 1
+    unique
+
+fn vulkan_sffi_dependency_after_release(entry: VulkanSffiDependencyQuarantine, idle_proven: bool, descriptor_released: bool, buffer_released: bool, pipeline_released: bool, shader_released: bool) -> VulkanSffiDependencyQuarantine:
+    if not idle_proven:
+        return entry
+    VulkanSffiDependencyQuarantine(
+        descriptor: if descriptor_released: 0 else: entry.descriptor,
+        buffer: if buffer_released: 0 else: entry.buffer,
+        pipeline: if pipeline_released: 0 else: entry.pipeline,
+        shader: if shader_released: 0 else: entry.shader)
+
+fn vulkan_sffi_quarantine_dependencies(descriptor: i64, buffer: i64, pipeline: i64, shader: i64):
+    """Transfer uniquely owned dependencies; native runtime owns commands/fences."""
+    if descriptor <= 0 and buffer <= 0 and pipeline <= 0 and shader <= 0:
+        return
+    _vulkan_sffi_dependency_quarantine_lock.lock()
+    val unique = vulkan_sffi_dependency_without_duplicates(
+        VulkanSffiDependencyQuarantine(descriptor: descriptor, buffer: buffer, pipeline: pipeline, shader: shader),
+        _vulkan_sffi_dependency_quarantine)
+    if not vulkan_sffi_dependency_quarantine_empty(unique):
+        _vulkan_sffi_dependency_quarantine.push(unique)
+    _vulkan_sffi_dependency_quarantine_lock.unlock(0)
+
+fn vulkan_sffi_quarantine_unsubmitted_command(command: i64, descriptor: i64, buffer: i64):
+    """Own a command only when native submission never accepted it."""
+    if command <= 0:
+        return
+    _vulkan_sffi_dependency_quarantine_lock.lock()
+    var duplicate = false
+    var i: i64 = 0
+    while i < _vulkan_sffi_orphan_commands.len():
+        if _vulkan_sffi_orphan_commands[i].command == command:
+            duplicate = true
+        i = i + 1
+    if not duplicate:
+        _vulkan_sffi_orphan_commands.push(VulkanSffiOrphanCommand(
+            command: command, descriptor: descriptor, buffer: buffer))
+    _vulkan_sffi_dependency_quarantine_lock.unlock(0)
+
+fn _vulkan_sffi_reap_dependency_quarantine_locked_after_idle() -> bool:
+    var orphan_remaining: [VulkanSffiOrphanCommand] = []
+    var orphan_index: i64 = 0
+    while orphan_index < _vulkan_sffi_orphan_commands.len():
+        var orphan = _vulkan_sffi_orphan_commands[orphan_index]
+        if orphan.command > 0 and vulkan_sffi_discard_command(orphan.command):
+            orphan.command = 0
+        if orphan.command <= 0:
+            if orphan.descriptor > 0 and vulkan_sffi_destroy_descriptor_set(orphan.descriptor):
+                orphan.descriptor = 0
+            if orphan.buffer > 0 and vulkan_sffi_free_buffer(orphan.buffer):
+                orphan.buffer = 0
+        if orphan.command > 0 or orphan.descriptor > 0 or orphan.buffer > 0:
+            orphan_remaining.push(orphan)
+        orphan_index = orphan_index + 1
+    _vulkan_sffi_orphan_commands = orphan_remaining
+
+    var remaining: [VulkanSffiDependencyQuarantine] = []
+    var i: i64 = 0
+    while i < _vulkan_sffi_dependency_quarantine.len():
+        val entry = _vulkan_sffi_dependency_quarantine[i]
+        val descriptor_released = entry.descriptor <= 0 or vulkan_sffi_destroy_descriptor_set(entry.descriptor)
+        val pipeline_released = entry.pipeline <= 0 or vulkan_sffi_destroy_pipeline(entry.pipeline)
+        val shader_released = entry.shader <= 0 or vulkan_sffi_destroy_shader(entry.shader)
+        val buffer_released = entry.buffer <= 0 or vulkan_sffi_free_buffer(entry.buffer)
+        val next = vulkan_sffi_dependency_after_release(
+            entry, true, descriptor_released, buffer_released, pipeline_released, shader_released)
+        if not vulkan_sffi_dependency_quarantine_empty(next):
+            remaining.push(next)
+        i = i + 1
+    _vulkan_sffi_dependency_quarantine = remaining
+    remaining.len() == 0 and orphan_remaining.len() == 0
+
+fn vulkan_sffi_reap_dependency_quarantine() -> bool:
+    """Release queued ownership only after device-idle is proven."""
+    _vulkan_sffi_dependency_quarantine_lock.lock()
+    if _vulkan_sffi_dependency_quarantine.len() == 0 and _vulkan_sffi_orphan_commands.len() == 0:
+        _vulkan_sffi_dependency_quarantine_lock.unlock(0)
+        return true
+    if not rt_vulkan_wait_idle():
+        _vulkan_sffi_dependency_quarantine_lock.unlock(0)
+        return false
+    val complete = _vulkan_sffi_reap_dependency_quarantine_locked_after_idle()
+    _vulkan_sffi_dependency_quarantine_lock.unlock(0)
+    complete
+
+fn vulkan_sffi_recover_dependency_quarantine() -> bool:
+    """Always prove device-idle before an unknown-completion owner shuts down."""
+    _vulkan_sffi_dependency_quarantine_lock.lock()
+    if not rt_vulkan_wait_idle():
+        _vulkan_sffi_dependency_quarantine_lock.unlock(0)
+        return false
+    val complete = _vulkan_sffi_reap_dependency_quarantine_locked_after_idle()
+    _vulkan_sffi_dependency_quarantine_lock.unlock(0)
+    complete
+
+fn vulkan_sffi_shutdown_reaped() -> bool:
+    """Shut down only after every transferred dependency is released."""
+    if not vulkan_sffi_reap_dependency_quarantine():
+        return false
+    vulkan_sffi_shutdown()
+
 fn vulkan_sffi_dispatch_buffer_compute_checked(buffer: i64, pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
     """Dispatch one storage-buffer kernel with fenced, fail-closed completion.
 
@@ -413,6 +547,8 @@ fn vulkan_sffi_dispatch_buffer_compute_checked(buffer: i64, pipe: i64, push_data
     """
     if buffer <= 0 or pipe <= 0 or push_data.len() == 0 or gx <= 0 or gy <= 0 or gz <= 0:
         return 0
+    if not vulkan_sffi_reap_dependency_quarantine():
+        return -1
     if not vulkan_sffi_fence_submission_supported():
         return 0
     val desc = vulkan_sffi_create_descriptor_set(pipe)
@@ -438,6 +574,7 @@ fn vulkan_sffi_dispatch_buffer_compute_checked(buffer: i64, pipe: i64, push_data
     if not ready:
         val command_released = cmd <= 0 or vulkan_sffi_discard_command(cmd)
         if not command_released:
+            vulkan_sffi_quarantine_unsubmitted_command(cmd, desc, 0)
             return -1
         val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
         return 0
@@ -445,6 +582,7 @@ fn vulkan_sffi_dispatch_buffer_compute_checked(buffer: i64, pipe: i64, push_data
     val fence = vulkan_sffi_submit_and_wait_fence(cmd)
     if fence < 0:
         if not vulkan_sffi_wait_idle():
+            vulkan_sffi_quarantine_dependencies(desc, 0, 0, 0)
             return -1
         val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
         return 0
@@ -454,6 +592,7 @@ fn vulkan_sffi_dispatch_buffer_compute_checked(buffer: i64, pipe: i64, push_data
 
     val completion_waited = vulkan_sffi_wait_fence(fence, 0)
     if not completion_waited and not vulkan_sffi_wait_idle():
+        vulkan_sffi_quarantine_dependencies(desc, 0, 0, 0)
         return -1
     val fence_destroyed = vulkan_sffi_destroy_fence(fence)
     val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)

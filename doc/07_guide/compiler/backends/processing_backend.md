@@ -21,7 +21,11 @@ lowering, and a public device/queue API remain unavailable.
 Vulkan ProcessingIR promotes a receipt only after the shared SFFI owner proves
 fenced completion and dependency release. A known-safe but ineligible result is
 torn down without readback; unknown completion retains dependent resources and
-the device for the TODO 551 quarantine/reaper rather than risking use-after-free.
+the device. The canonical Vulkan SFFI owner serializes and deduplicates those
+transfers, reaps them only after device-idle, and refuses shutdown while a
+dependency remains unreleased. Submitted commands and fences stay exclusively
+owned by the native runtime; a provably unsubmitted command whose discard
+failed remains in the Simple owner until discard can be retried safely.
 
 ## Target Stack
 

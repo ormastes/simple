@@ -19,7 +19,10 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_destroy_fence, vulkan_sffi_free_buffer,
     vulkan_sffi_copy_from_buffer, vulkan_sffi_copy_to_buffer,
     vulkan_sffi_read_buffer_bytes, vulkan_sffi_wait_idle,
-    vulkan_sffi_dispatch_buffer_compute_checked
+    vulkan_sffi_dispatch_buffer_compute_checked,
+    vulkan_sffi_quarantine_dependencies,
+    vulkan_sffi_quarantine_unsubmitted_command,
+    vulkan_sffi_reap_dependency_quarantine
 }
 
 # ============================================================================
@@ -54,6 +57,9 @@ fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src:
         if d_src > 0:
             vulkan_sffi_free_buffer(d_src)
         return 0
+    if not vulkan_sffi_reap_dependency_quarantine():
+        vulkan_sffi_free_buffer(d_src)
+        return -1
     if not vulkan_sffi_fence_submission_supported():
         vulkan_sffi_free_buffer(d_src)
         return 0
@@ -83,8 +89,7 @@ fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src:
     if not ready:
         val command_released = cmd <= 0 or vulkan_sffi_discard_command(cmd)
         if not command_released:
-            # ponytail: keep dependent handles alive when command cleanup is
-            # unknown; add runtime-owned quarantine if recovery must continue.
+            vulkan_sffi_quarantine_unsubmitted_command(cmd, desc, d_src)
             return -1
         val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
         val source_freed = vulkan_sffi_free_buffer(d_src)
@@ -95,6 +100,7 @@ fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src:
         # The runtime quarantines the command/fence. A successful device-idle
         # proves their dependent descriptor/source are now safe to release.
         if not vulkan_sffi_wait_idle():
+            vulkan_sffi_quarantine_dependencies(desc, d_src, 0, 0)
             return -1
         val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
         val source_freed = vulkan_sffi_free_buffer(d_src)
@@ -106,12 +112,13 @@ fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src:
         return 0
 
     val completion_waited = vulkan_sffi_wait_fence(fence, 0)
-    val fence_destroyed = vulkan_sffi_destroy_fence(fence)
     if not completion_waited:
         # submit_and_wait_fence already waited indefinitely before returning a
         # positive fence, but fail closed if its evidence cannot be observed.
         if not vulkan_sffi_wait_idle():
+            vulkan_sffi_quarantine_dependencies(desc, d_src, 0, 0)
             return -1
+    val fence_destroyed = vulkan_sffi_destroy_fence(fence)
     val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
     val source_freed = vulkan_sffi_free_buffer(d_src)
     if completion_waited and fence_destroyed and descriptor_destroyed and source_freed:

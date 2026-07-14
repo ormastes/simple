@@ -16,7 +16,9 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_bind_pipeline, vulkan_sffi_bind_descriptors,
     vulkan_sffi_dispatch, vulkan_sffi_end_compute,
     vulkan_sffi_fence_submission_supported, vulkan_sffi_submit_and_wait_fence,
-    vulkan_sffi_wait_fence, vulkan_sffi_destroy_fence
+    vulkan_sffi_wait_fence, vulkan_sffi_destroy_fence,
+    vulkan_sffi_quarantine_dependencies,
+    vulkan_sffi_quarantine_unsubmitted_command
 }
 
 val VULKAN_FONT_PARAMS_BYTES: i64 = 52
@@ -349,8 +351,13 @@ impl VulkanBackend:
                 elif fence_result < 0:
                     fence_completion_unknown = true
             if fence_completion_unknown:
+                vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
                 val unknown = _vulkan_font_evidence(pipeline, "failed", "fence-completion-unknown", self.d_font_atlas, last_params, descriptor, last_command, batch.quads.len(), done, false, false, framebuffer, 0, 0, 0, false)
                 return _vulkan_font_completion(unknown, -1, false, false)
+            if not prepared and command > 0:
+                vulkan_sffi_quarantine_unsubmitted_command(command, descriptor, 0)
+                val orphaned = _vulkan_font_evidence(pipeline, "failed", "missing-command-cleanup-capability", self.d_font_atlas, last_params, descriptor, last_command, batch.quads.len(), done, false, false, framebuffer, 0, 0, 0, false)
+                return _vulkan_font_completion(orphaned, last_fence, last_fence_available, last_fence_destroyed)
             var descriptor_destroyed = false
             if descriptor > 0:
                 descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(descriptor)
