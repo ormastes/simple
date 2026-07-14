@@ -242,9 +242,28 @@ fn flat_ast_to_module(path: text) -> Module:
                         span: span
                     ))
                     fi = fi + 1
+                # decl_get_type_params returns the struct/class's own `<T, U,
+                # ...>` names (threaded through by parse_struct_decl via
+                # decl_set_type_params -- previously dropped entirely, always
+                # `[]` here regardless of a declared `<T>`, see fn_struct_decls.spl).
+                # Build real [TypeParam] so HIR lowering can register `T` as a
+                # genuine SymbolKind.TypeParam symbol instead of it falling
+                # through to the unrelated bareword-forward-declared-type path.
+                val s_tp_names = decl_get_type_params(idx)
+                var s_type_params: [TypeParam] = []
+                var s_tpi = 0
+                while s_tpi < s_tp_names.len():
+                    s_type_params.push(TypeParam(
+                        name: s_tp_names[s_tpi],
+                        bounds: [],
+                        has_default: false,
+                        default: Type(kind: TypeKind.Infer, span: span),
+                        span: span
+                    ))
+                    s_tpi = s_tpi + 1
                 structs[s_name] = Struct(
                     name: s_name,
-                    type_params: [],
+                    type_params: s_type_params,
                     fields: fields,
                     visibility: s_visibility,
                     is_public: decl_get_visibility_text(idx) == "public",
@@ -282,11 +301,27 @@ fn flat_ast_to_module(path: text) -> Module:
                 val fn_: Function = convert_decl_method_fn(method_id, target_name)
                 methods[fn_.name] = fn_
                 mi = mi + 1
+            # decl_get_type_params(idx) here reads the type params threaded by
+            # parse_struct_decl (decl_set_type_params(impl_d, type_params)) for
+            # the synthesized impl block of a generic struct/class's nested
+            # methods (see fn_struct_decls.spl). Previously hardcoded `[]`.
+            val i_tp_names = decl_get_type_params(idx)
+            var i_type_params: [TypeParam] = []
+            var i_tpi = 0
+            while i_tpi < i_tp_names.len():
+                i_type_params.push(TypeParam(
+                    name: i_tp_names[i_tpi],
+                    bounds: [],
+                    has_default: false,
+                    default: Type(kind: TypeKind.Infer, span: span),
+                    span: span
+                ))
+                i_tpi = i_tpi + 1
             impls.push(Impl(
                 type_: Type(kind: TypeKind.Named(target_name, []), span: span),
                 has_trait_: false,
                 trait_: Type(kind: TypeKind.Infer, span: span),
-                type_params: [],
+                type_params: i_type_params,
                 where_clause: [],
                 methods: methods,
                 assoc_types: [],

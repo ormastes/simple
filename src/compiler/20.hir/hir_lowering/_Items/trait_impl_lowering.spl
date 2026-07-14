@@ -146,6 +146,23 @@ impl HirLowering:
         val type_ = self.lower_type(impl_.type_)
         val trait_ = if impl_.trait_.?: self.lower_type(impl_.trait_) else: nil
 
+        # #158 generics sweep: an impl block for a generic struct/class (e.g.
+        # methods nested inside `struct Box<T>: ... fn get(self) -> T: ...`,
+        # desugared by the parser into a synthetic impl -- see
+        # fn_struct_decls.spl) has no monomorphization support on the native
+        # build path, same as bare generic functions (#158 Phase A). Before
+        # `impl_.type_params` was threaded through (this sweep), this was
+        # silently unreachable dead code (always `[]`) and the method's use of
+        # the struct's own `T` fell through to an unrelated
+        # bareword-forward-declared-type path, producing an opaque zero-field
+        # struct that crashed `llc` downstream with a cryptic, wrong-layer
+        # diagnostic instead of failing loudly here. Mirrors lower_function's
+        # gate exactly: loud-fail-always (regardless of whether a given
+        # method's signature actually mentions `T`), consistent with Phase A's
+        # documented choice, until real Phase B monomorphization lands.
+        if type_params.len() > 0:
+            self.error("generic struct/class methods are not supported on the native build path yet: impl for a type with type parameter(s) declares method(s); monomorphization is not implemented (#158 Phase B)", impl_.span)
+
         var methods: Dict<text, SymbolId> = {}
         # Method name -> declared return type's struct NAME (methchain lane;
         # see HirImpl.method_return_struct_names doc comment). Computed here,

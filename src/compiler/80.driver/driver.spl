@@ -127,6 +127,23 @@ fn dtrace(msg: text) -> ():
 # proceed into monomorphize/MIR/LLVM anyway, resurfacing as a cryptic
 # backend/llc crash instead of a clear diagnostic — real monomorphization is
 # tracked separately (#158 Phase B), so until then this must hard-fail here.
+#
+# #158 generics sweep: tried promoting "unresolved type:" to fatal too, on
+# the theory that a generic struct/class method's `T` return type falling
+# through lower_named_kind's unresolved-name fallback was the failure mode --
+# REVERTED, empirically unsafe: native-smoke-matrix showed "unresolved type:
+# Any" (case 4, for_in_array) and "unresolved type: Option" (case 14,
+# option_nil_check) are both legitimate non-fatal noise on currently-passing
+# builds (same class as the pre-existing "Result type expects 2 type
+# arguments" exemption above -- these pseudo/builtin type names hit this
+# fallback but the build completes correctly via a different path
+# regardless). Do not re-add "unresolved type:" here without auditing every
+# existing caller first. The real, narrower fix for the generic
+# struct/class-method case is the "generic struct/class methods are not
+# supported..." entry below, raised explicitly by lower_impl
+# (20.hir/hir_lowering/_Items/trait_impl_lowering.spl) once impl_.type_params
+# is populated (see that file's comment) -- it does not rely on this
+# catch-all at all.
 fn _format_hir_lowering_error(name: text, err: LoweringError) -> text:
     if err.span.file != "":
         "HIR lowering error in {name} ({err.span.file}:{err.span.line}:{err.span.col}): {err.message}"
@@ -134,7 +151,7 @@ fn _format_hir_lowering_error(name: text, err: LoweringError) -> text:
         "HIR lowering error in {name}: {err.message}"
 
 fn _hir_lowering_error_is_fatal(message: text) -> bool:
-    message.starts_with("unresolved name:") or message.starts_with("generic functions are not supported on the native build path yet") or message.starts_with("untyped function returns a value:")
+    message.starts_with("unresolved name:") or message.starts_with("generic functions are not supported on the native build path yet") or message.starts_with("untyped function returns a value:") or message.starts_with("generic struct/class methods are not supported on the native build path yet")
 
 fn _driver_collect_hir_errors(ctx: CompileContext, name: text, errors: [LoweringError]):
     for err in errors:

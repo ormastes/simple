@@ -40,7 +40,7 @@ use compiler.core.ast.{DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_USE, DECL_EXPO
 use compiler.core.ast.{DECL_VAL, DECL_VAR, DECL_ENUM, DECL_LAZY_VAL}
 use compiler.core.ast.{DECL_CE, decl_ce_block}
 use compiler.core.ast.{decl_fn, decl_extern_fn, decl_struct_def}
-use compiler.core.ast.{decl_set_is_value_type}
+use compiler.core.ast.{decl_set_is_value_type, decl_set_type_params}
 use compiler.core.ast.{decl_set_param_defaults}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_set_lazy}
@@ -724,10 +724,31 @@ fn parse_struct_decl(is_class: bool) -> i64:
     val struct_d = decl_struct_def(struct_name, field_names, field_types, field_defaults, field_bits, 0)
     if is_class:
         decl_set_is_value_type(struct_d, 0)
+    # `type_params` (parsed above, e.g. `struct Box<T>:` / `class Node<T>:`)
+    # was previously parsed and then silently discarded here -- `decl_struct_def`
+    # has no type-params argument, so a generic struct/class's own `<T>` never
+    # reached the flat-AST decl node at all. Thread it through the same
+    # generic per-decl TYPE_PARAMS side-table `decl_fn` already uses (mirrors
+    # the #158 Phase A fix for plain generic functions, which threaded
+    # decl_get_type_params(idx) through convert_decl_fn). Without this, HIR
+    # lowering never registers `T` as a real SymbolKind.TypeParam symbol for
+    # the struct/impl scope, so a struct method's use of `T` (e.g. `fn
+    # get(self) -> T`) silently resolves through the unrelated
+    # bareword-forward-declared-type fallback instead, producing an opaque
+    # zero-field struct that crashes `llc` far downstream with a cryptic
+    # "void type only allowed for function results" instead of a clear
+    # diagnostic at HIR time.
+    if type_params.len() > 0:
+        decl_set_type_params(struct_d, type_params)
 
     # If class had methods, create an impl block for them
     if class_method_ids.len() > 0:
         val impl_d = decl_impl_block(struct_name, class_method_ids, 0)
+        # Same gap as above, for the synthesized impl block: without this,
+        # `Impl.type_params` (module_assembly.spl tag "9") is always `[]`
+        # even when the enclosing struct/class is generic.
+        if type_params.len() > 0:
+            decl_set_type_params(impl_d, type_params)
         module_add_decl(impl_d)
 
     struct_d
