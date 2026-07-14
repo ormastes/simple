@@ -1740,15 +1740,31 @@ impl LlvmBackend {
             // Boxing instructions — tag/untag values per RuntimeValue encoding
             // TAG_INT = 0b000, from_int(i) = i << 3, as_int() = val >> 3
             MirInst::BoxInt { dest, value } => {
-                let val = self.get_vreg(value, vreg_map)?;
-                let i64_type = self.runtime_int_type();
-                let int_val = self
-                    .coerce_value_to_type(val, Some(i64_type.into()), builder)?
-                    .into_int_value();
-                let shifted = builder
-                    .build_left_shift(int_val, i64_type.const_int(3, false), "box_int")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("box_int shift", &e))?;
-                vreg_map.insert(*dest, shifted.into());
+                // DEFECT B (symmetric to the cranelift emit_box_int guard and to
+                // UnboxInt's TAG_HEAP passthrough below): a value that is ALREADY a
+                // tagged RuntimeValue heap handle (a user enum/struct/class =
+                // TypeId >= 16, or ANY) must NOT be re-boxed — `handle << 3` shifts
+                // its TAG_HEAP bits away and corrupts the pointer, so a later
+                // rt_enum_payload/field access on the boxed value reads a garbage/nil
+                // payload ("field access on nil receiver"). Pass such handles through
+                // verbatim. A pure runtime tag-check cannot substitute here: a raw
+                // int with nonzero low bits is indistinguishable from a tagged value,
+                // so BoxInt must rely on the static source type.
+                let src_ty = vreg_types.get(value).copied();
+                if matches!(src_ty, Some(t) if t == crate::hir::TypeId::ANY || t.0 >= 16) {
+                    let val = self.get_vreg(value, vreg_map)?;
+                    vreg_map.insert(*dest, val);
+                } else {
+                    let val = self.get_vreg(value, vreg_map)?;
+                    let i64_type = self.runtime_int_type();
+                    let int_val = self
+                        .coerce_value_to_type(val, Some(i64_type.into()), builder)?
+                        .into_int_value();
+                    let shifted = builder
+                        .build_left_shift(int_val, i64_type.const_int(3, false), "box_int")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("box_int shift", &e))?;
+                    vreg_map.insert(*dest, shifted.into());
+                }
             }
             MirInst::UnboxInt { dest, value } => {
                 let val = self.get_vreg(value, vreg_map)?;

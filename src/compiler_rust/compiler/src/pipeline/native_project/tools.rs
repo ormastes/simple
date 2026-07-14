@@ -964,7 +964,7 @@ fn stage4_static_library_definitions(path: &Path) -> Result<BTreeSet<String>, St
 }
 
 fn resolve_stage4_system_library(cc: &str, candidates: &[(&str, bool)]) -> Result<(PathBuf, BTreeSet<String>), String> {
-    let mut failures = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
     for (name, shared) in candidates {
         let result = (|| {
             let path = stage4_system_library_path(cc, name)?;
