@@ -322,6 +322,34 @@ identifies itself as the Rust bootstrap seed and aborts on unresolved
 Stage4 three-cycle cap remains exhausted, so neither parser PASS nor a capsule,
 host-GPU, or QEMU PASS is claimed.
 
+The Linux compiler-only follow-up is now complete: the dedicated capsule derives and
+exports exactly the 73 `rt_cranelift_*` hooks and rejects runtime/provider
+ownership, overlap, unexpected globals, and constructors. A later strict full
+CLI link still converged at 105 host-provider names with no Simple/source-owned
+names, so TODO 535 no longer tracks compiler-backfill creation.
+
+Independent Spark closure audits and highest-capability review on 2026-07-14
+selected one remaining architecture: an internal, exact-entry
+`stage4-cli-hosted` provider profile. The full CLI's SQLite, HTTP, GPU/font,
+window, memtrack, SMF, and compiler command paths are advertised surfaces, not
+safe import-pruning candidates. Stage4 must therefore link Simple objects, the
+existing compiler capsule, capability-owned provider archives, core-C, and
+system libraries in that order. It must not select or filter native-all, expose
+a public hosted-bundle alias, add stubs, or broaden core-C.
+
+The profile contract is fail-closed: derive requested `rt_*`/`spl_*` names from
+the final object closure, require exactly one provider for each, reject every
+pairwise defined-symbol intersection and constructor/destructor, and allow a
+provider's undefined names only when core-C or system libraries uniquely own
+them. Its cache namespace must include the target/backend/options, Stage2/3
+compiler hash, sorted entry-source hashes, core/capsule/provider hashes, and the
+resolved symbol-to-owner table. The authoritative final 105-name stderr was not
+retained in this worktree, so no symbol manifest is inferred from older caches;
+one fresh strict Stage4 run in a new bounded verification session must capture
+that contract before provider components are accepted. macOS, FreeBSD, and
+Windows full-CLI capsule preparation remain fail-closed until their archive
+localization/constructor gates are ported.
+
 Related:
 
 - `doc/08_tracking/bug/native_build_entry_closure_quadratic_hang_2026-07-12.md`

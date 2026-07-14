@@ -1387,8 +1387,9 @@ fn test_compiler_backfill_archive_rejects_provider_symbol_overlap() {
     assert!(error.contains("rt_cranelift_requested_hook"));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn test_stage4_focused_native_build_authorization_requires_both_envs_and_exact_entry() {
+fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
     let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
@@ -1402,18 +1403,41 @@ fn test_stage4_focused_native_build_authorization_requires_both_envs_and_exact_e
         std::env::remove_var("SIMPLE_BOOTSTRAP");
         std::env::remove_var("SIMPLE_BOOTSTRAP_STAGE4");
     }
-    assert!(!builder.is_authorized_stage4_focused_native_build_entry());
+    assert!(!builder.is_authorized_stage4_compiler_entry());
     unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", "1") };
-    assert!(!builder.is_authorized_stage4_focused_native_build_entry());
+    assert!(!builder.is_authorized_stage4_compiler_entry());
     unsafe { std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", "1") };
-    assert!(builder.is_authorized_stage4_focused_native_build_entry());
+    assert!(builder.is_authorized_stage4_compiler_entry());
 
-    let spoof = temp.path().join("other/src/app/cli/native_build_main.spl");
+    let cli_entry = temp.path().join("src/app/cli/main.spl");
+    std::fs::write(&cli_entry, "fn main() -> i64: 0\n").unwrap();
+    let cli_builder =
+        NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("cli-out")).entry_file(cli_entry);
+    assert!(cli_builder.is_authorized_stage4_compiler_entry());
+
+    let no_entry = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("no-entry-out"));
+    assert!(!no_entry.is_authorized_stage4_compiler_entry());
+    let bootstrap_entry = temp.path().join("src/app/cli/bootstrap_main.spl");
+    std::fs::write(&bootstrap_entry, "fn main() -> i64: 0\n").unwrap();
+    let bootstrap = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("bootstrap-out"))
+        .entry_file(bootstrap_entry);
+    assert!(!bootstrap.is_authorized_stage4_compiler_entry());
+
+    unsafe { std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", "true") };
+    assert!(!builder.is_authorized_stage4_compiler_entry());
+    unsafe {
+        std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", "1");
+        std::env::set_var("SIMPLE_BOOTSTRAP", "true");
+    }
+    assert!(!builder.is_authorized_stage4_compiler_entry());
+    unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", "1") };
+
+    let spoof = temp.path().join("other/src/app/cli/main.spl");
     std::fs::create_dir_all(spoof.parent().unwrap()).unwrap();
     std::fs::write(&spoof, "fn main() -> i64: 0\n").unwrap();
     let spoof_builder =
         NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("spoof-out")).entry_file(spoof);
-    assert!(!spoof_builder.is_authorized_stage4_focused_native_build_entry());
+    assert!(!spoof_builder.is_authorized_stage4_compiler_entry());
 
     match old_bootstrap {
         Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },
@@ -1425,8 +1449,9 @@ fn test_stage4_focused_native_build_authorization_requires_both_envs_and_exact_e
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 #[test]
-fn test_stage4_focused_native_build_selects_only_dedicated_compiler_backfill() {
+fn test_stage4_compiler_entry_is_disabled_without_gnu_binutils_capsule_support() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
     let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
@@ -1434,41 +1459,12 @@ fn test_stage4_focused_native_build_selects_only_dedicated_compiler_backfill() {
         std::env::set_var("SIMPLE_BOOTSTRAP", "1");
         std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", "1");
     }
-
     let temp = tempfile::tempdir().unwrap();
-    let runtime_path = temp.path().join("runtime");
-    let deps = runtime_path.join("deps");
-    std::fs::create_dir_all(&deps).unwrap();
-    std::fs::write(deps.join("libsimple_compiler.a"), b"full-compiler-decoy").unwrap();
-    std::fs::write(runtime_path.join("libsimple_native_all.a"), b"native-all-decoy").unwrap();
-    let config = NativeBuildConfig {
-        runtime_path: Some(runtime_path.clone()),
-        ..Default::default()
-    };
-
-    let focused_entry = temp.path().join("src/app/cli/native_build_main.spl");
-    std::fs::create_dir_all(focused_entry.parent().unwrap()).unwrap();
-    std::fs::write(&focused_entry, "fn main() -> i64: 0\n").unwrap();
-    let focused = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("focused-out"))
-        .config(config.clone())
-        .entry_file(focused_entry);
-
-    let error = focused.selected_stage4_compiler_backfill_archive().unwrap_err();
-    assert!(error.contains("libsimple_compiler_backfill.a"));
-    let dedicated = deps.join("libsimple_compiler_backfill.a");
-    std::fs::write(&dedicated, b"dedicated-backfill").unwrap();
-    assert_eq!(focused.selected_stage4_compiler_backfill_archive().unwrap(), Some(dedicated));
-
-    let full_entry = temp.path().join("src/app/cli/main.spl");
-    std::fs::write(&full_entry, "fn main() -> i64: 0\n").unwrap();
-    let full = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("full-out"))
-        .config(config)
-        .entry_file(full_entry);
-    assert_eq!(full.selected_stage4_compiler_backfill_archive().unwrap(), None);
-    assert_eq!(
-        full.selected_runtime_library(&temp.path().join("full-link")).unwrap(),
-        Some((runtime_path.join("libsimple_native_all.a"), true))
-    );
+    let entry = temp.path().join("src/app/cli/main.spl");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, "fn main() -> i64: 0\n").unwrap();
+    let builder = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("out")).entry_file(entry);
+    assert!(!builder.is_authorized_stage4_compiler_entry());
 
     match old_bootstrap {
         Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },
@@ -1482,7 +1478,7 @@ fn test_stage4_focused_native_build_selects_only_dedicated_compiler_backfill() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn test_stage4_focused_native_build_linker_prepares_dedicated_compiler_backfill_through_gate() {
+fn test_stage4_compiler_entries_select_only_dedicated_compiler_backfill() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
     let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
@@ -1493,35 +1489,73 @@ fn test_stage4_focused_native_build_linker_prepares_dedicated_compiler_backfill_
 
     let temp = tempfile::tempdir().unwrap();
     let runtime_path = temp.path().join("runtime");
-    let deps = runtime_path.join("deps");
-    std::fs::create_dir_all(&deps).unwrap();
-    let dedicated = build_compiler_backfill_test_archive(
-        &deps,
-        "simple_compiler_backfill",
-        &["void hidden_helper(void) {}\nvoid rt_cranelift_requested_hook(void) { hidden_helper(); }\n"],
-    );
-    assert_eq!(dedicated, deps.join("libsimple_compiler_backfill.a"));
-    let provider = build_compiler_backfill_test_archive(temp.path(), "core_provider", &["void core_only(void) {}\n"]);
-    let entry = temp.path().join("src/app/cli/native_build_main.spl");
-    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
-    std::fs::write(&entry, "fn main() -> i64: 0\n").unwrap();
-    let builder = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("out"))
-        .config(NativeBuildConfig {
-            runtime_path: Some(runtime_path),
-            ..Default::default()
-        })
-        .entry_file(entry);
+    std::fs::create_dir_all(&runtime_path).unwrap();
+    std::fs::write(runtime_path.join("libsimple_compiler.a"), b"full-compiler-decoy").unwrap();
+    std::fs::write(runtime_path.join("libsimple_native_all.a"), b"native-all-decoy").unwrap();
+    let config = NativeBuildConfig {
+        runtime_path: Some(runtime_path.clone()),
+        ..Default::default()
+    };
 
-    let output_dir = temp.path().join("prepared");
-    let prepared = builder
-        .prepare_stage4_compiler_backfill_archive(Some(&(provider, false)), &output_dir)
-        .unwrap()
-        .unwrap();
-    assert_eq!(prepared, output_dir.join("libsimple_compiler_backfill.a"));
-    assert_ne!(prepared, dedicated);
-    let (defined, _) = super::tools::archive_global_symbols(&prepared).unwrap();
-    assert_eq!(defined.get("rt_cranelift_requested_hook"), Some(&1));
-    assert!(!defined.contains_key("hidden_helper"));
+    let focused_entry = temp.path().join("src/app/cli/native_build_main.spl");
+    std::fs::create_dir_all(focused_entry.parent().unwrap()).unwrap();
+    std::fs::write(&focused_entry, "fn main() -> i64: 0\n").unwrap();
+    let focused = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("focused-out"))
+        .config(config.clone())
+        .entry_file(focused_entry.clone());
+
+    let error = focused.selected_stage4_compiler_backfill_archive().unwrap_err();
+    assert!(error.contains("libsimple_compiler_backfill.a"));
+
+    let full_entry = temp.path().join("src/app/cli/main.spl");
+    std::fs::write(&full_entry, "fn main() -> i64: 0\n").unwrap();
+    let full = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("full-out"))
+        .config(config)
+        .entry_file(full_entry.clone());
+    let error = full.selected_stage4_compiler_backfill_archive().unwrap_err();
+    assert!(error.contains("libsimple_compiler_backfill.a"));
+
+    let dedicated = runtime_path.join("libsimple_compiler_backfill.a");
+    std::fs::write(&dedicated, b"dedicated-backfill").unwrap();
+    assert_eq!(
+        focused.selected_stage4_compiler_backfill_archive().unwrap(),
+        Some(dedicated.clone())
+    );
+    assert_eq!(
+        full.selected_stage4_compiler_backfill_archive().unwrap(),
+        Some(dedicated)
+    );
+    let native_all = (runtime_path.join("libsimple_native_all.a"), true);
+    assert!(focused.reject_unexpected_native_all(Some(&native_all)).is_err());
+    assert!(full.reject_unexpected_native_all(Some(&native_all)).is_err());
+    for entry in [focused_entry.clone(), full_entry.clone()] {
+        let without_runtime =
+            NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("missing-runtime-out"))
+                .entry_file(entry);
+        assert!(without_runtime
+            .selected_stage4_compiler_backfill_archive()
+            .unwrap_err()
+            .contains("explicit runtime path"));
+    }
+    for entry in [focused_entry, full_entry] {
+        for (bundle, expected) in [
+            ("hosted", "removed Rust-hosted runtime bundles"),
+            ("simple-core", "requires the core-c-bootstrap runtime lane"),
+        ] {
+            let mut rejected = NativeBuildConfig {
+                runtime_path: Some(runtime_path.clone()),
+                ..Default::default()
+            };
+            rejected.runtime_bundle = bundle.to_string();
+            let builder = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("rejected-out"))
+                .config(rejected)
+                .entry_file(entry.clone());
+            assert!(builder
+                .selected_runtime_library(&temp.path().join("rejected-link"))
+                .unwrap_err()
+                .contains(expected));
+        }
+    }
 
     match old_bootstrap {
         Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },
@@ -1533,9 +1567,64 @@ fn test_stage4_focused_native_build_linker_prepares_dedicated_compiler_backfill_
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(target_os = "linux")]
 #[test]
-fn test_stage4_focused_native_build_forces_fresh_core_c_over_runtime_path_decoys() {
+fn test_stage4_compiler_entries_prepare_dedicated_backfill_through_gate() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
+    let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
+    unsafe {
+        std::env::set_var("SIMPLE_BOOTSTRAP", "1");
+        std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", "1");
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_path = temp.path().join("runtime");
+    std::fs::create_dir_all(&runtime_path).unwrap();
+    let dedicated = build_compiler_backfill_test_archive(
+        &runtime_path,
+        "simple_compiler_backfill",
+        &["void hidden_helper(void) {}\nvoid rt_cranelift_requested_hook(void) { hidden_helper(); }\n"],
+    );
+    assert_eq!(dedicated, runtime_path.join("libsimple_compiler_backfill.a"));
+    let provider = build_compiler_backfill_test_archive(temp.path(), "core_provider", &["void core_only(void) {}\n"]);
+    let cli_dir = temp.path().join("src/app/cli");
+    std::fs::create_dir_all(&cli_dir).unwrap();
+    for entry_name in ["main.spl", "native_build_main.spl"] {
+        let entry = cli_dir.join(entry_name);
+        std::fs::write(&entry, "fn main() -> i64: 0\n").unwrap();
+        let builder =
+            NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join(format!("{entry_name}-out")))
+                .config(NativeBuildConfig {
+                    runtime_path: Some(runtime_path.clone()),
+                    ..Default::default()
+                })
+                .entry_file(entry);
+        let output_dir = temp.path().join(format!("{entry_name}-prepared"));
+        let prepared = builder
+            .prepare_stage4_compiler_backfill_archive(Some(&(provider.clone(), false)), &output_dir)
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared, output_dir.join("libsimple_compiler_backfill.a"));
+        assert_ne!(prepared, dedicated);
+        let (defined, _) = super::tools::archive_global_symbols(&prepared).unwrap();
+        assert_eq!(defined.get("rt_cranelift_requested_hook"), Some(&1));
+        assert!(!defined.contains_key("hidden_helper"));
+    }
+
+    match old_bootstrap {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP") },
+    }
+    match old_stage4 {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP_STAGE4") },
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_stage4_compiler_entries_force_fresh_core_c_over_runtime_path_decoys() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
     let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
@@ -1544,22 +1633,26 @@ fn test_stage4_focused_native_build_forces_fresh_core_c_over_runtime_path_decoys
         std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", "1");
     }
     let temp = tempfile::tempdir().unwrap();
-    let entry = temp.path().join("src/app/cli/native_build_main.spl");
-    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
-    std::fs::write(&entry, "fn main() -> i64: 0\n").unwrap();
+    let cli_dir = temp.path().join("src/app/cli");
+    std::fs::create_dir_all(&cli_dir).unwrap();
     std::fs::write(temp.path().join("libsimple_native_all.a"), b"native-all-decoy").unwrap();
     let config = NativeBuildConfig {
         runtime_path: Some(temp.path().to_path_buf()),
         ..Default::default()
     };
-    let builder = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("out"))
-        .config(config)
-        .entry_file(entry);
-    let link_dir = temp.path().join("link");
-    let (selected, is_native_all) = builder.selected_runtime_library(&link_dir).unwrap().unwrap();
-    assert_eq!(selected, link_dir.join("core_c_runtime/libsimple_runtime.a"));
-    assert!(!is_native_all);
-    assert!(runtime_archive_has_bootstrap_cli_symbols(&selected));
+    for entry_name in ["main.spl", "native_build_main.spl"] {
+        let entry = cli_dir.join(entry_name);
+        std::fs::write(&entry, "fn main() -> i64: 0\n").unwrap();
+        let builder =
+            NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join(format!("{entry_name}-out")))
+                .config(config.clone())
+                .entry_file(entry);
+        let link_dir = temp.path().join(format!("{entry_name}-link"));
+        let (selected, is_native_all) = builder.selected_runtime_library(&link_dir).unwrap().unwrap();
+        assert_eq!(selected, link_dir.join("core_c_runtime/libsimple_runtime.a"));
+        assert!(!is_native_all);
+        assert!(runtime_archive_has_bootstrap_cli_symbols(&selected));
+    }
 
     match old_bootstrap {
         Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },

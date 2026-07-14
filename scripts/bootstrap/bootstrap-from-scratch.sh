@@ -35,7 +35,8 @@ Options:
   --mode=<name>      Pure-Simple build mode: dynload or one-binary
                      (default: dynload; env: SIMPLE_BOOTSTRAP_MODE)
                      SIMPLE_NO_STUB_FALLBACK=1 also makes staged failures fatal
-  --full-cli         Relink the full CLI after the staged pure-Simple build.
+  --full-cli         Relink the full CLI after the staged pure-Simple build
+                     (currently Linux-only while the capsule is ported).
                      Implied by --deploy and one-binary mode.
   --fresh-cache      Clear the dynload native cache once before rebuilding
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
@@ -145,6 +146,10 @@ if [ "${pure_simple}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ]; then
   exit 1
 fi
 
+if [ "${deploy}" -eq 1 ] || [ "${bootstrap_mode}" = "one-binary" ]; then
+  full_cli=1
+fi
+
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
 cd "${repo_root}"
@@ -163,6 +168,11 @@ target=$(normalize_target "${target}")
 # ===========================================================================
 
 host_os=$(uname -s 2>/dev/null || echo unknown)
+
+if [ "${full_cli}" -eq 1 ] && [ "${host_os}" != "Linux" ]; then
+  echo "error: Stage 4 full-CLI capsule preparation is currently Linux-only" >&2
+  exit 1
+fi
 
 # FreeBSD must build inside FreeBSD. Linux hosts use the QEMU verifier, which
 # syncs the repository and invokes this same wrapper in the guest.
@@ -429,6 +439,7 @@ bootstrap_native_build_main() {
 
 seed_bin="src/compiler_rust/target/bootstrap/simple${exe_suffix}"
 native_all_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_native_all${archive_suffix}"
+compiler_backfill_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_compiler_backfill${archive_suffix}"
 
 # Detect stale seed OR stale runtime library by CONTENT, not mtime.
 #
@@ -458,6 +469,7 @@ seed_inputs_hash() {
   } | hash_stream
 }
 seed_stale=0
+rust_rebuilt=0
 # (content-hash staleness gate runs below, after backend/llvm_features settle)
 
 # Detect LLVM 18 availability for llvm-lib backend
@@ -512,6 +524,15 @@ if [ "${full_bootstrap}" -eq 0 ]; then
     echo "Normal bootstrap does not rebuild Rust. Re-run with --full-bootstrap to build them." >&2
     exit 1
   fi
+  if [ "${full_cli}" -eq 1 ] && [ ! -f "${compiler_backfill_lib}" ]; then
+    echo "error: full CLI bootstrap needs the compiler backfill archive: ${compiler_backfill_lib}" >&2
+    echo "Re-run with --full-bootstrap to build it." >&2
+    exit 1
+  fi
+  if [ "${full_cli}" -eq 1 ] && [ "${seed_stale}" -eq 1 ]; then
+    echo "error: full CLI bootstrap refuses a stale compiler backfill; re-run with --full-bootstrap" >&2
+    exit 1
+  fi
   if [ "${seed_stale}" -eq 1 ]; then
     echo "WARNING: Rust sources changed; reusing the existing seed because --full-bootstrap was not given."
   fi
@@ -527,10 +548,16 @@ elif [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ] || [ "${seed_stale}"
   # not link). Separate invocations keep simple-runtime's feature set per-bin.
   run_logged rust-seed-build cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver ${llvm_features}
   run_logged rust-native-all-build cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-native-all ${llvm_features}
+  rust_rebuilt=1
   # Record the fingerprint of the inputs we just built from, so the next run
   # can skip cargo when nothing actually changed (only written after a real
   # rebuild — never in pure-Simple or hash-match-skip paths).
   seed_inputs_hash > "${seed_stamp}"
+fi
+
+if [ "${full_bootstrap}" -eq 1 ] \
+   && { [ ! -f "${compiler_backfill_lib}" ] || [ "${seed_stale}" -eq 1 ] || [ "${rust_rebuilt}" -eq 1 ]; }; then
+  run_logged rust-compiler-backfill-build cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-compiler-backfill
 fi
 
 # Force manual bootstrap — ensures SIMPLE_RUNTIME_PATH is used for linking
@@ -703,9 +730,6 @@ fi
 # Fast iteration stops after the pure-Simple dynload stages. Relinking the
 # complete CLI is explicit because it is the dominant cost and is unnecessary
 # for ordinary compiler/app/lib edits that are consumed through dynload caches.
-if [ "${deploy}" -eq 1 ] || [ "${bootstrap_mode}" = "one-binary" ]; then
-  full_cli=1
-fi
 if [ "${full_cli}" -eq 0 ]; then
   echo "Pure-Simple dynload build complete; full CLI relink skipped."
   echo "  cache: ${native_cache_dir}"
