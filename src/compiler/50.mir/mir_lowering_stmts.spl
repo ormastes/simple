@@ -391,6 +391,58 @@ impl MirLowering:
         (shared by the `Var` and `NamedVar` lvalue cases)."""
         if symbol_id < 0:
             self.error("assignment target has no resolved symbol", Some(span))
+        elif self.global_symbol_ids.has(symbol_id) and self.find_global_static(symbol_id).?:
+            # mutglobal2 lane (module-level `var` mutation end-to-end, see
+            # scratchpad/mutglobal_plan.md + scratchpad/mutglobal2 report):
+            # `g = ...` / `g += ...` where `g` is a module-level `var`
+            # (registered by function_lowering.spl's `lower_const`, BEFORE
+            # any function body is lowered) has no per-function SSA local at
+            # all -- write through the backend's real `@g_name` global
+            # storage via `StoreGlobal` instead of the local_map's
+            # emit_copy/alloca path below. Checked BEFORE `local_map` on
+            # purpose: a module-level `var` is deliberately never also
+            # inserted into `local_map` (see the read hook in
+            # expr_dispatch.spl), so the two branches are mutually exclusive
+            # for any given symbol_id; order here is not load-bearing today,
+            # only documents that a global write must never fall through to
+            # the per-function-local path.
+            #
+            # `elif val x = opt:` is NOT used here on purpose: this exact
+            # pattern regressed the smoke matrix's `while_sum`/`for_in_array`
+            # cases (2 failures, "undefined field 'symbol': cannot access
+            # field on value of type 'nil'") -- an ordinary LOCAL loop
+            # counter's `symbol_id` makes `find_global_static` return a bare
+            # `nil` (not a real module global), but the seed interpreter's
+            # `if val <pat> = <optional>`/`elif val` presence check can still
+            # enter the "true" branch with the bound value nil (the same
+            # documented quirk as the `op.?`/`if val assign_op = op` note
+            # just below, and Bug native_i64opt_some0_collapses_to_nil's
+            # class of issue) -- `global_static.symbol` on that nil then
+            # crashed. The explicit `.has(...)`/`.? ` + `.unwrap()` sequence
+            # below never touches that unsafe pattern.
+            val global_static = self.find_global_static(symbol_id).unwrap()
+            val global_symbol = global_static.symbol
+            val g_type = global_static.type_
+            if op.?:
+                # Compound assignment (g += y etc.): load current value,
+                # combine, store back -- mirrors the local_map compound-
+                # assign arm below, but through Load/StoreGlobal.
+                val assign_op = op.unwrap()
+                var b_cur = self.builder
+                val cur_local = b_cur.new_temp(g_type)
+                b_cur.emit(MirInst(kind: MirInstKind.LoadGlobal(cur_local, global_symbol), span: Some(span)))
+                self.builder = b_cur
+                val current = mir_operand_copy(cur_local)
+                val new_val = mir_operand_copy(value_local)
+                val mir_op = self.lower_assign_op(assign_op)
+                var b_op = self.builder
+                val result = b_op.emit_binop(mir_op, current, new_val, g_type)
+                b_op.emit(MirInst(kind: MirInstKind.StoreGlobal(global_symbol, mir_operand_copy(result)), span: Some(span)))
+                self.builder = b_op
+            else:
+                var b_store = self.builder
+                b_store.emit(MirInst(kind: MirInstKind.StoreGlobal(global_symbol, mir_operand_copy(value_local)), span: Some(span)))
+                self.builder = b_store
         elif self.local_map.has(symbol_id):
             val local = self.local_map[symbol_id]
             # Use the positive `op.?` presence test, NOT `if val assign_op = op`:

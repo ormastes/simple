@@ -171,6 +171,36 @@ struct MirLowering:
     # live (possibly SSA-reassigned) one.
     lambda_capture_snapshot: Dict<i64, Dict<i64, LocalId>>
     current_has_vhdl_metadata: bool
+    # mutglobal2 lane (module-level `var`/`val` mutation end-to-end, see
+    # scratchpad/mutglobal_plan.md + scratchpad/mutglobal2 report). Module
+    # symbol id -> true, for EVERY module-level binding (`var` OR `val`).
+    # Populated once per module (function_lowering.spl's `lower_const`,
+    # called from module_lowering.spl's `lower_module` BEFORE any function
+    # body is lowered -- see the reordering there). i64-keyed bool set
+    # (mirrors `runtime_array_locals`/`nil_locals` above) deliberately, NOT
+    # `Dict<SymbolId, MirType>`/`Dict<SymbolId, MirConstant>`: this file's own
+    # `struct_value_syms`/`bitfield_map` comments already document the
+    # symbol-id-vs-struct-key interpreter landmine, and empirically a
+    # `Dict<i64, MirType>` struct FIELD (as opposed to a local var or a
+    # function parameter of type MirType, both of which are used all over
+    # this compiler already) made the seed interpreter's struct-literal
+    # construction silently leave the field as `Value::Nil` instead of an
+    # empty dict (`MirLowering(..., global_static_ids: {}, ...)` failed at
+    # the first `self.global_static_ids[id] = ...` with "cannot index assign
+    # to field `global_static_ids` of type nil" even though the field WAS
+    # present in the constructor call) -- a plain bool-set sidesteps that
+    # entirely (proven pattern, several other bool-set fields already exist
+    # on this exact struct). The actual MirStatic/MirConstant data for a
+    # member of this set is fetched on demand from the already-populated
+    # `self.builder.module.statics`/`.constants` (Dict<SymbolId, ...>) by
+    # VALUE iteration (`.values()`), matching on `.symbol.id` -- iterating a
+    # dict's values list does not hit the struct-key lookup landmine, only
+    # constructing a fresh key to probe `.has()`/`[]` on that dict would.
+    # Consulted by expr_dispatch.spl's NamedVar/Var read hook (to emit
+    # `LoadGlobal`/inline a `Const` instead of erroring) and
+    # mir_lowering_stmts.spl's `lower_assign_var` write hook (to emit
+    # `StoreGlobal` for the mutable subset).
+    global_symbol_ids: Dict<i64, bool>
 
 struct MirError:
     """MIR lowering error."""

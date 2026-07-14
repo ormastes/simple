@@ -35,6 +35,96 @@ fn mir_expr_symbol_id_value(symbol: SymbolId) -> i64:
 # ============================================================================
 
 impl MirLowering:
+    # mutglobal2 lane (module-level `var`/`val` mutation end-to-end, see
+    # scratchpad/mutglobal_plan.md + scratchpad/mutglobal2 report). The prior
+    # lane gave `MirModule.statics`/`LoadGlobal`/`StoreGlobal` real backend
+    # support (module_lowering.spl + core_codegen.spl), but nothing on this
+    # path ever READ a module global -- `Var`/`NamedVar` below only consult
+    # `self.local_map` (the current function's SSA locals) and error
+    # "undefined variable" the moment a module-scope binding is referenced.
+    # `global_static_ids`/`global_const_ids` (populated once per module, in
+    # function_lowering.spl's `lower_const`, BEFORE any function body is
+    # lowered -- see module_lowering.spl's reordered `lower_module`) now
+    # carry that information. Returns `Some(local)` when `symbol_id` names a
+    # known module-level binding, `nil` otherwise (falls through to the
+    # existing "undefined variable" error, unchanged for every non-global
+    # case). A mutable `var` gets a real `LoadGlobal` off the backend's
+    # `@g_name` storage; an immutable `val` has no storage at all (see
+    # `lower_static`'s `is_mutable` gate) so its read is inlined as an
+    # ordinary `Const`, mirroring the existing OUTPUT_LIMIT/
+    # DEFAULT_TIMEOUT_MS hardcoded-name special cases below but general
+    # (driven by the registry, not a literal name match).
+    # Module symbol id -> the `MirStatic` entry from `self.builder.module.
+    # statics` whose `.symbol.id` matches, `nil` if `symbol_id` isn't a
+    # mutable module-level `var`. Found by VALUE iteration deliberately, NOT
+    # a keyed `Dict<SymbolId,...>[...]`/`.has(...)` lookup with a
+    # freshly-built key -- see `global_symbol_ids`'s doc comment
+    # (mir_lowering_types.spl) for the struct-keyed-dict interpreter
+    # landmine that lookup style hits. Shared by the read hook below and
+    # mir_lowering_stmts.spl's write hook (StoreGlobal needs the same type
+    # for a compound `g += y` assignment's LoadGlobal-and-combine sequence).
+    me find_global_static(symbol_id: i64) -> MirStatic?:
+        val static_values = self.builder.module.statics.values()
+        var sti = 0
+        while sti < static_values.len():
+            if static_values[sti].symbol.id == symbol_id:
+                return Some(static_values[sti])
+            sti = sti + 1
+        nil
+
+    me try_lower_global_read(symbol_id: i64) -> LocalId?:
+        if not self.global_symbol_ids.has(symbol_id):
+            return nil
+        # Mutable (`var`) case first: real storage, backed by a LoadGlobal
+        # off the @g_name the backend emits for this MirModule.statics entry.
+        if val static_ = self.find_global_static(symbol_id):
+            var b_glob = self.builder
+            val dest = b_glob.new_temp(static_.type_)
+            b_glob.emit(MirInst(kind: MirInstKind.LoadGlobal(dest, static_.symbol), span: nil))
+            self.builder = b_glob
+            return Some(dest)
+        # Immutable (`val`) case: no real storage (lower_static gates on
+        # is_mutable) -- inline the folded constant value/type instead, the
+        # same way the existing OUTPUT_LIMIT/DEFAULT_TIMEOUT_MS hardcoded
+        # cases already do via `emit_const`. Restricted to SCALAR constant
+        # kinds (Int/Float/Bool/Str/Zero) deliberately: a compound module
+        # `val` (Array/Tuple/Struct) folds fine at the MIR-constant level
+        # (module_lowering.spl's `lower_const`/`lower_const_expr` already
+        # produce a `MirConstValue.Array(...)` etc for it), but `emit_const`'s
+        # backend (`translate_const_value`, core_codegen.spl) only renders a
+        # scalar LLVM literal -- it is not the same lowering strategy as a
+        # real array/struct's runtime construction (`lower_array_lit`'s
+        # rt_array_new-based heap allocation), so inlining a compound value
+        # through it produced a bad LLVM constant and crashed at runtime
+        # (SIGSEGV, confirmed empirically with `val SIZES = [10,20,30]`).
+        # Falling through to `nil` here restores the existing "undefined
+        # variable" COMPILE-time error for that (still unsupported, needs a
+        # real array/struct-constant lowering path as a follow-up) case,
+        # instead of a silent runtime crash -- never turn a clean loud
+        # failure into a worse one.
+        val const_values = self.builder.module.constants.values()
+        var cvi = 0
+        while cvi < const_values.len():
+            val mir_const = const_values[cvi]
+            if mir_const.symbol.id == symbol_id:
+                var is_scalar = false
+                match mir_const.value:
+                    case Int(_): is_scalar = true
+                    case Float(_): is_scalar = true
+                    case Bool(_): is_scalar = true
+                    case Str(_): is_scalar = true
+                    case Zero: is_scalar = true
+                    case _: is_scalar = false
+                if is_scalar:
+                    var b_const_read = self.builder
+                    val const_dest = b_const_read.new_temp(mir_const.type_)
+                    b_const_read.emit_const(const_dest, mir_const.value, mir_const.type_)
+                    self.builder = b_const_read
+                    return Some(const_dest)
+                return nil
+            cvi = cvi + 1
+        nil
+
     fn local_is_runtime_array(local: LocalId) -> bool:
         if self.runtime_array_locals.has(local.id): return true
         for item in self.builder.locals:
@@ -791,6 +881,8 @@ impl MirLowering:
                     nil_tmp
                 elif self.local_map.has(symbol_id):
                     self.local_map[symbol_id]
+                elif val global_local = self.try_lower_global_read(symbol_id):
+                    global_local
                 else:
                     self.error("undefined variable", Some(expr_value.span))
                     var b_err = self.builder
@@ -843,6 +935,8 @@ impl MirLowering:
                         err_tmp3
                     elif self.local_map.has(symbol_id):
                         self.local_map[symbol_id]
+                    elif val global_local2 = self.try_lower_global_read(symbol_id):
+                        global_local2
                     else:
                         self.error("undefined variable: {name}", Some(expr_value.span))
                         var b_err2 = self.builder

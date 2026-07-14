@@ -82,7 +82,8 @@ impl MirLowering:
             enum_variant_index: {},
             lambda_bindings: {},
             lambda_capture_snapshot: {},
-            current_has_vhdl_metadata: false
+            current_has_vhdl_metadata: false,
+            global_symbol_ids: {}
         )
 
     fn symbol_id_value(symbol: SymbolId) -> i64:
@@ -528,6 +529,28 @@ impl MirLowering:
             self.lower_class_type(class_type_values[cti])
             cti = cti + 1
 
+        # Lower module-level constants/statics BEFORE any function body is
+        # lowered (mutglobal2 lane, see scratchpad/mutglobal_plan.md +
+        # scratchpad/mutglobal2 report). This loop used to run AFTER the
+        # function-lowering loop below, which meant `self.global_static_ids`/
+        # `self.global_const_ids` (populated by `lower_const`,
+        # function_lowering.spl -- consulted by expr_dispatch.spl's
+        # NamedVar/Var read hook and mir_lowering_stmts.spl's
+        # lower_assign_var write hook to recognize a module-level `var`/`val`
+        # reference) were still empty while every function body was being
+        # lowered, so a real reference to a module global inside ANY function
+        # would still hit the "undefined variable" fallback. Moving this
+        # loop earlier makes the module-global registry available to every
+        # function body lowered below, module-wide (order-independent, same
+        # rationale as the struct/class/enum prep above and the prescan
+        # pass right after this).
+        val const_vals = module.constants.values()
+        var coni = 0
+        while coni < const_vals.len():
+            self.lower_const(const_vals[coni])
+            self.lower_static(const_vals[coni])
+            coni = coni + 1
+
         # Order-independent pre-pass: walk every function body (read-only,
         # no MIR emitted) to seed struct_field_type_name from its real
         # construction sites BEFORE any function is actually lowered. See
@@ -574,16 +597,65 @@ impl MirLowering:
                     print "[mir-lower] function:added"
                 fni = fni + 1
 
-        # Lower constants
-        val const_vals = module.constants.values()
-        var coni = 0
-        while coni < const_vals.len():
-            self.lower_const(const_vals[coni])
-            coni = coni + 1
-
         if bootstrap_trace:
             print "[mir-lower] lower_module:done"
         self.builder.module
+
+    # mutglobal lane (module-level `var` mutation, see
+    # scratchpad/mutglobal_plan.md): `lower_const` (function_lowering.spl,
+    # owned by another lane) already lowers EVERY module-level HIR binding
+    # (`val` and `var`) into `MirModule.constants` unconditionally -- that
+    # path is untouched here. `MirModule.statics`/`MirStatic` previously had
+    # no producer anywhere in the compiler (pure dead scaffolding: the field
+    # existed on `MirModule`/`MirStatic` but nothing ever wrote to it and no
+    # backend ever read it). This gives module-level `var` bindings (the
+    # MUTABLE subset, `const_.is_mutable`) a real MIR-level representation
+    # distinct from the constant-folded `.constants` entry, so a backend can
+    # emit genuine `@name = global ...` storage for them instead of only
+    # ever seeing an inlinable compile-time value. Does not remove or alter
+    # anything already in `.constants` -- purely additive, so any existing
+    # consumer of `.constants` (e.g. the VHDL backend) is unaffected.
+    #
+    # NOTE (gap, see scratchpad/mutglobal_plan.md): nothing downstream of
+    # this MIR-level population yet READS a global's address for an
+    # identifier reference (MIR expr lowering's `NamedVar` case only
+    # consults the per-function `local_map`) or WRITES to one for a plain
+    # `name = expr` assignment target (statement lowering only knows about
+    # per-function SSA locals) -- both of those hooks live in files owned by
+    # other lanes (`_MirLoweringExpr/expr_dispatch.spl`,
+    # `mir_lowering_stmts.spl`/`var_reassign_ssa.spl`). This method makes
+    # `MirModule.statics` real and populated; wiring an actual read/write
+    # through it is the documented follow-up.
+    me lower_static(const_: HirConst):
+        """Lower a mutable (`var`) module-level HIR binding into a MIR
+        static-storage slot (MirModule.statics), independent of the
+        always-populated `MirModule.constants` entry `lower_const` already
+        produces for the same binding."""
+        if not const_.is_mutable:
+            return
+        val static_type = self.lower_type(const_.type_)
+        val folded = self.lower_const_expr(const_.value)
+        var init_const: MirConstant? = nil
+        if val const_value = folded:
+            init_const = Some(MirConstant(
+                symbol: const_.symbol,
+                name: const_.name,
+                type_: static_type,
+                value: const_value
+            ))
+        var bldr = self.builder
+        var module_ = bldr.module
+        var statics = module_.statics
+        statics[const_.symbol] = MirStatic(
+            symbol: const_.symbol,
+            name: const_.name,
+            type_: static_type,
+            init: init_const,
+            is_mutable: true
+        )
+        module_.statics = statics
+        bldr.module = module_
+        self.builder = bldr
 
     me lower_struct_type(struct_def: HirStruct):
         """Lower a HIR struct definition into MIR type metadata."""

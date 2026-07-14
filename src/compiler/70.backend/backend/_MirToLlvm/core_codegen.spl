@@ -7,6 +7,7 @@ use compiler.backend.backend.mir_to_llvm.*
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirInst}
+use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at}
 use compiler.mir_opt.{ssa_var_transform_blocks, ssa_alloca_transform_blocks}
 use compiler.backend.backend_api.*
@@ -96,6 +97,32 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[llvm-translate] runtime"
         self.emit_runtime_declarations()
+
+        # mutglobal lane (module-level `var` mutation storage, see
+        # scratchpad/mutglobal_plan.md): emit real LLVM `@name = global ...`
+        # storage for every MirModule.statics entry (module-level mutable
+        # bindings) BEFORE any function body is translated, so
+        # LoadGlobal/StoreGlobal instructions in those bodies can resolve
+        # global_static_names/global_static_types. `module.statics` has no
+        # producer yet on the normal HIR/MIR frontend path (see the
+        # gap-analysis doc) other than this lane's own
+        # `_MirLowering/module_lowering.spl:lower_static` addition, so this
+        # loop is a no-op (empty dict) for every existing native-build
+        # program today -- purely additive, cannot regress anything that
+        # currently compiles.
+        if module.statics.len() > 0:
+            self.builder.emit("")
+            self.builder.emit("; Module-level mutable globals")
+            for static_ in module.statics.values():
+                val g_ty = self.valid_llvm_type(self.llvm_type_text(static_.type_))
+                val g_name = "@g_{static_.name}"
+                self.global_static_names[static_.symbol.id] = g_name
+                self.global_static_types[static_.symbol.id] = g_ty
+                var g_init = "zeroinitializer"
+                if static_.init.?:
+                    val init_const: MirConstant = static_.init.unwrap()
+                    g_init = self.translate_const_value(init_const.value)
+                self.builder.emit("{g_name} = global {g_ty} {g_init}")
 
         if bootstrap_debug:
             print "[llvm-translate] keys"
@@ -337,6 +364,8 @@ impl MirTextCodegen for MirToLlvm:
             case Alloc(dest, ty): self.translate_alloc(dest, ty)
             case Load(dest, ptr): self.translate_load(dest, ptr)
             case Store(ptr, value): self.translate_store(ptr, value)
+            case LoadGlobal(dest, symbol): self.translate_load_global(dest, symbol)
+            case StoreGlobal(symbol, value): self.translate_store_global(symbol, value)
             case GetElementPtr(dest, base, indices): self.translate_gep(dest, base, indices)
             case Aggregate(dest, kind, operands): self.translate_aggregate(dest, kind, operands)
             case GetField(dest, base, field): self.translate_get_field(dest, base, field)
@@ -419,7 +448,7 @@ impl MirTextCodegen for MirToLlvm:
 
     me mark_instruction_dest_defined(inst: MirInst):
         match inst.kind:
-            case Copy(dest, _) | Move(dest, _) | BinOp(dest, _, _, _) | CheckedBinOp(dest, _, _, _) | UnaryOp(dest, _, _) | Alloc(dest, _) | Load(dest, _) | GetElementPtr(dest, _, _) | Aggregate(dest, _, _) | GetField(dest, _, _) | Cast(dest, _, _) | Bitcast(dest, _, _) | PipeForward(dest, _, _) | Compose(dest, _, _, _) | Parallel(dest, _) | LayerConnect(dest, _, _) | Ref(dest, _, _) | CreatePromise(dest, _, _) | Await(dest, _) | Spawn(dest, _, _) | Receive(dest, _) | GpuSharedAlloc(dest, _, _) | GpuAtomicOp(dest, _, _, _) | GpuAtomicCas(dest, _, _, _):
+            case Copy(dest, _) | Move(dest, _) | BinOp(dest, _, _, _) | CheckedBinOp(dest, _, _, _) | UnaryOp(dest, _, _) | Alloc(dest, _) | Load(dest, _) | LoadGlobal(dest, _) | GetElementPtr(dest, _, _) | Aggregate(dest, _, _) | GetField(dest, _, _) | Cast(dest, _, _) | Bitcast(dest, _, _) | PipeForward(dest, _, _) | Compose(dest, _, _, _) | Parallel(dest, _) | LayerConnect(dest, _, _) | Ref(dest, _, _) | CreatePromise(dest, _, _) | Await(dest, _) | Spawn(dest, _, _) | Receive(dest, _) | GpuSharedAlloc(dest, _, _) | GpuAtomicOp(dest, _, _, _) | GpuAtomicCas(dest, _, _, _):
                 self.defined_locals[self.local_id_value(dest)] = true
             case Call(dest, _, _) | CallIndirect(dest, _, _, _) | Intrinsic(dest, _, _):
                 if dest.?:
@@ -1412,3 +1441,31 @@ impl MirTextCodegen for MirToLlvm:
         val store_ty = if store_ty_raw == "void": "i64" else: store_ty_raw
         val value_val = self.value_as_type(raw_value_val, self.get_operand_type(value), store_ty)
         self.builder.emit_store(store_ty, value_val, ptr_val)
+
+    # mutglobal lane (module-level `var` mutation storage, see
+    # scratchpad/mutglobal_plan.md): LoadGlobal/StoreGlobal reference a
+    # MirModule.statics slot directly by SymbolId rather than through a
+    # pointer-value MirOperand (there is no "address of a global" operand
+    # kind, so unlike Load/Store there is no alloca/GEP producing the
+    # address first) -- translate_module's static-declaration pass records
+    # the real `@name` LLVM global text and its element type per SymbolId in
+    # global_static_names/global_static_types before any function body is
+    # translated, so these two lookups always resolve for any symbol that
+    # module.statics actually carries.
+    me translate_load_global(dest: LocalId, symbol: SymbolId):
+        val dest_id = self.local_id_value(dest)
+        val dest_name = self.get_local(dest_id)
+        val g_name = self.global_static_names.get(symbol.id) ?? "@g_undeclared_{symbol.id}"
+        val g_ty = self.global_static_types.get(symbol.id) ?? self.native_int_type
+        self.local_types[dest_id] = g_ty
+        self.value_types[dest_name] = g_ty
+        if g_ty == "ptr":
+            self.mark_ptr_local(dest_id)
+        self.builder.emit_load(dest_name, g_ty, g_name)
+
+    me translate_store_global(symbol: SymbolId, value: MirOperand):
+        val g_name = self.global_static_names.get(symbol.id) ?? "@g_undeclared_{symbol.id}"
+        val g_ty = self.global_static_types.get(symbol.id) ?? self.native_int_type
+        val raw_value_val = self.translate_operand(value)
+        val value_val = self.value_as_type(raw_value_val, self.get_operand_type(value), g_ty)
+        self.builder.emit_store(g_ty, value_val, g_name)
