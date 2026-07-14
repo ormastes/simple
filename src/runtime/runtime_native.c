@@ -933,6 +933,27 @@ int64_t rt_native_neq(int64_t left, int64_t right) {
     return !rt_native_eq(left, right);
 }
 
+/* Task #178 (text3 lane): backs native `<`/`<=`/`>`/`>=` on text operands
+ * (core_codegen.spl translate_binop's Lt/Le/Gt/Ge cases). Those previously
+ * had NO string-aware routing at all (unlike Eq/NotEq's rt_text_eq_any
+ * above, added for bug #148) -- the frontend never special-cased ordering
+ * ops for strings, so a `ptr`-typed operand fell straight through to a raw
+ * `icmp slt/sle/sgt/sge ptr, ptr`, comparing the two strings' memory
+ * ADDRESSES instead of their lexicographic content (observed:
+ * `"foo" < "bar"` native said true, oracle interpreter said false --
+ * whichever literal happened to be malloc'd/placed at the lower address
+ * "won", entirely unrelated to alphabetical order). Same tagged-or-raw
+ * normalization as rt_text_eq_any, then a real byte-wise strcmp. Returns a
+ * strcmp-style signed result (the caller compares this against 0 with the
+ * requested predicate). */
+int64_t rt_text_cmp_any(int64_t left, int64_t right) {
+    const char* a = rt_interp_cstr(left);
+    const char* b = rt_interp_cstr(right);
+    if (!a) a = "";
+    if (!b) b = "";
+    return (int64_t)strcmp(a, b);
+}
+
 int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
     if (step == 0) return rt_core_nil();
 
@@ -1017,6 +1038,18 @@ int64_t rt_string_find(int64_t value, int64_t needle) {
         if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) return (int64_t)i;
     }
     return -1;
+}
+
+/* Task #178 (text3 lane): `.contains()` had a frontend extern declaration
+ * (types.spl) and a backend LLVM decl (llvm_lib_translate.spl) but NO C
+ * implementation anywhere in src/runtime/ -- a genuine missing symbol, not
+ * just a missing MIR-lowering case (that gap is fixed separately in
+ * method_calls_literals.spl). Both operands are tagged handles by the time
+ * this is called (method_calls_literals.spl's erased-receiver fallback tags
+ * raw literals first via tag_str_local_if_raw), matching rt_string_find's
+ * own contract, so this is a direct wrapper. */
+int64_t rt_string_contains(int64_t value, int64_t needle) {
+    return rt_string_find(value, needle) >= 0 ? 1 : 0;
 }
 
 static int64_t rt_string_ascii_case(int64_t value, int to_lower) {
@@ -1226,6 +1259,24 @@ int64_t rt_string_to_int(int64_t value) {
     if (n > 0) memcpy(buf, s->data, (size_t)n);
     buf[n] = '\0';
     return (int64_t)strtoll(buf, NULL, 10);
+}
+
+/* Task #178 (text3 lane): backs the `int("42")` global builtin's native MIR
+ * lowering (switch_operators_calls.spl). rt_string_to_int above requires an
+ * ALREADY-tagged receiver (rt_core_as_string-checked, 0 otherwise) -- the
+ * same trap that previously silently broke `.len()`/`.substring()` on a
+ * genuinely-raw string literal argument (e.g. `int("42")`'s "42" is a bare
+ * literal, never wrapped by rt_string_new). Normalize via rt_interp_cstr
+ * first (the same tagged-or-raw runtime autodetection used throughout this
+ * file, bug #136) to get a definite raw buffer regardless of the argument's
+ * actual representation, then strtoll it directly -- safe for both a tagged
+ * runtime string and a raw char* literal, and does not change
+ * rt_string_to_int's own behavior for its existing to_i64()/parse_int()/
+ * to_int() callers. */
+int64_t rt_string_to_int_any(int64_t value) {
+    const char* raw = rt_interp_cstr(value);
+    if (!raw) return 0;
+    return (int64_t)strtoll(raw, NULL, 10);
 }
 
 /* Task #118: sibling of rt_string_to_int() with the canonical `int(text)`

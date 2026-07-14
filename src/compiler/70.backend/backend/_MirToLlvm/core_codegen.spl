@@ -599,6 +599,14 @@ impl MirToLlvm:
                 val str_len = escaped_string_byte_len(v) + 1
                 val nit = self.native_int()
                 self.mark_ptr_local(dest_id)
+                # mark_ptr_local only corrects local_types[dest_id]; value_types
+                # is keyed by the SSA register text and is what value_as_type()
+                # consults for later Store/call-arg conversions. Without this,
+                # a stale "i64" guess (from the up-front local_ty probe above,
+                # which runs before we know this is a Str const) makes
+                # value_as_type emit a bogus `inttoptr i64 %lN to ptr` on a
+                # value LLVM already knows is ptr-typed, which llc rejects.
+                self.value_types[dest_name] = "ptr"
                 self.builder.emit("  {dest_name} = getelementptr inbounds [{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0  ; string const")
             case Zero:
                 if is_float_type(llvm_ty):
@@ -687,6 +695,23 @@ impl MirToLlvm:
             self.builder.emit_alloca(tmp, ty)
             self.builder.emit_store(ty, src_name, tmp)
             self.builder.emit_load(dest_name, ty, tmp)
+
+    me emit_text_ordering_cmp(left_raw: text, right_raw: text) -> text:
+        """Task #178 (text3 lane): emit a call to rt_text_cmp_any(left, right)
+        for a `<`/`<=`/`>`/`>=` comparison whose operands are both `ptr`-typed
+        (text). Returns a strcmp-style signed i64 SSA value; the caller
+        compares it against 0 with the requested integer predicate. Used
+        instead of a raw `icmp ptr` (which compares memory ADDRESSES, not
+        string content -- see translate_binop's Lt/Le/Gt/Ge cases)."""
+        val nit = self.native_int()
+        val cmp_res = self.builder.fresh_local()
+        # Manually-emitted call (not via emit_call/MirOperand), so it never
+        # passes through whatever records a symbol into unknown_func_decls --
+        # without this, no `declare` line is emitted for rt_text_cmp_any and
+        # llc rejects the call as referencing an undefined value.
+        self.unknown_func_decls["rt_text_cmp_any"] = true
+        self.builder.emit("  {cmp_res} = call {nit} @rt_text_cmp_any(ptr {left_raw}, ptr {right_raw})")
+        cmp_res
 
     me translate_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
         """Translate binary operation. Uses nsw for signed int arithmetic."""
@@ -782,28 +807,44 @@ impl MirToLlvm:
                 self.emit_comparison(dest_name, ty, ne_pred, ne_cmp_ty, ne_left, ne_right)
             case Lt:
                 val lt_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
-                val lt_pred = if is_float_type(lt_cmp_ty): "olt" else: "slt"
-                val lt_left = self.value_as_type(left_raw, self.get_operand_type(left), lt_cmp_ty)
-                val lt_right = self.value_as_type(right_raw, self.get_operand_type(right), lt_cmp_ty)
-                self.emit_comparison(dest_name, ty, lt_pred, lt_cmp_ty, lt_left, lt_right)
+                if lt_cmp_ty == "ptr":
+                    val lt_str_cmp = self.emit_text_ordering_cmp(left_raw, right_raw)
+                    self.emit_comparison(dest_name, ty, "slt", self.native_int(), lt_str_cmp, "0")
+                else:
+                    val lt_pred = if is_float_type(lt_cmp_ty): "olt" else: "slt"
+                    val lt_left = self.value_as_type(left_raw, self.get_operand_type(left), lt_cmp_ty)
+                    val lt_right = self.value_as_type(right_raw, self.get_operand_type(right), lt_cmp_ty)
+                    self.emit_comparison(dest_name, ty, lt_pred, lt_cmp_ty, lt_left, lt_right)
             case Le:
                 val le_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
-                val le_pred = if is_float_type(le_cmp_ty): "ole" else: "sle"
-                val le_left = self.value_as_type(left_raw, self.get_operand_type(left), le_cmp_ty)
-                val le_right = self.value_as_type(right_raw, self.get_operand_type(right), le_cmp_ty)
-                self.emit_comparison(dest_name, ty, le_pred, le_cmp_ty, le_left, le_right)
+                if le_cmp_ty == "ptr":
+                    val le_str_cmp = self.emit_text_ordering_cmp(left_raw, right_raw)
+                    self.emit_comparison(dest_name, ty, "sle", self.native_int(), le_str_cmp, "0")
+                else:
+                    val le_pred = if is_float_type(le_cmp_ty): "ole" else: "sle"
+                    val le_left = self.value_as_type(left_raw, self.get_operand_type(left), le_cmp_ty)
+                    val le_right = self.value_as_type(right_raw, self.get_operand_type(right), le_cmp_ty)
+                    self.emit_comparison(dest_name, ty, le_pred, le_cmp_ty, le_left, le_right)
             case Gt:
                 val gt_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
-                val gt_pred = if is_float_type(gt_cmp_ty): "ogt" else: "sgt"
-                val gt_left = self.value_as_type(left_raw, self.get_operand_type(left), gt_cmp_ty)
-                val gt_right = self.value_as_type(right_raw, self.get_operand_type(right), gt_cmp_ty)
-                self.emit_comparison(dest_name, ty, gt_pred, gt_cmp_ty, gt_left, gt_right)
+                if gt_cmp_ty == "ptr":
+                    val gt_str_cmp = self.emit_text_ordering_cmp(left_raw, right_raw)
+                    self.emit_comparison(dest_name, ty, "sgt", self.native_int(), gt_str_cmp, "0")
+                else:
+                    val gt_pred = if is_float_type(gt_cmp_ty): "ogt" else: "sgt"
+                    val gt_left = self.value_as_type(left_raw, self.get_operand_type(left), gt_cmp_ty)
+                    val gt_right = self.value_as_type(right_raw, self.get_operand_type(right), gt_cmp_ty)
+                    self.emit_comparison(dest_name, ty, gt_pred, gt_cmp_ty, gt_left, gt_right)
             case Ge:
                 val ge_cmp_ty = self.valid_llvm_type(self.get_operand_type(left))
-                val ge_pred = if is_float_type(ge_cmp_ty): "oge" else: "sge"
-                val ge_left = self.value_as_type(left_raw, self.get_operand_type(left), ge_cmp_ty)
-                val ge_right = self.value_as_type(right_raw, self.get_operand_type(right), ge_cmp_ty)
-                self.emit_comparison(dest_name, ty, ge_pred, ge_cmp_ty, ge_left, ge_right)
+                if ge_cmp_ty == "ptr":
+                    val ge_str_cmp = self.emit_text_ordering_cmp(left_raw, right_raw)
+                    self.emit_comparison(dest_name, ty, "sge", self.native_int(), ge_str_cmp, "0")
+                else:
+                    val ge_pred = if is_float_type(ge_cmp_ty): "oge" else: "sge"
+                    val ge_left = self.value_as_type(left_raw, self.get_operand_type(left), ge_cmp_ty)
+                    val ge_right = self.value_as_type(right_raw, self.get_operand_type(right), ge_cmp_ty)
+                    self.emit_comparison(dest_name, ty, ge_pred, ge_cmp_ty, ge_left, ge_right)
             case MatMul:
                 self.emit_unsupported_panic("LLVM backend does not support MatMul lowering")
             case BroadcastAdd:

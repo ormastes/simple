@@ -1358,6 +1358,30 @@ impl MirLowering:
                 return self.lower_bootstrap_print_call(args, "rt_print")
             if direct_name == "println":
                 return self.lower_bootstrap_print_call(args, "rt_println")
+            # Task #178 (text3 lane): `int("42")` -- the global value-parsing
+            # builtin call form, distinct from `i64(x)`-style fixed-width
+            # numeric casts (see primitive_cast_type_kind's comment: "int/
+            # float/bool remain calls"). Previously had NO MIR intercept at
+            # all: is_interp_builtin_fn (expressions.spl) didn't list "int"
+            # either, so HIR lowering hard-errored "unresolved name: int"
+            # before MIR lowering was ever reached. Both gaps are now closed
+            # together (that HIR-side allowlist addition is this same
+            # change). rt_string_to_int_any (runtime_native.c) normalizes a
+            # tagged-or-raw text argument via rt_interp_cstr before parsing,
+            # so this is correct whether the argument is a literal (raw) or a
+            # runtime-produced string (tagged).
+            if direct_name == "int" and args.len() == 1:
+                val int_arg_local = self.lower_expr(args[0].value)
+                val int_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_string_to_int_any"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                var b_int = self.builder
+                val int_res = b_int.emit_call(int_op, [mir_operand_copy(int_arg_local)], MirType.i64())
+                self.builder = b_int
+                if val int_local = int_res:
+                    return int_local
+                return int_arg_local
             if is_gpu_intrinsic(direct_name):
                 return self.lower_gpu_intrinsic_call(direct_name, args)
             if self.struct_field_order.has(direct_name):
