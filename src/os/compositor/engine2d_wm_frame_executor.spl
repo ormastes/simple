@@ -14,7 +14,7 @@ use common.gpu.simpleos_host_gpu_protocol.{
 }
 use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO, DrawIrComposition}
 use common.ui.taskbar_model.{TaskbarModel}
-use common.ui.window_scene.{SharedWmScene, WmContentFrame}
+use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WmContentFrame}
 use common.ui.window_scene_draw_ir.{
     shared_wm_content_frame_for_window,
     shared_wm_content_frame_image_uri,
@@ -111,35 +111,61 @@ class Engine2dWmFrameExecutor:
         if scene_revision <= 0 or taskbar_revision <= 0:
             return 0
 
+        # Per-window fail-closed degrade: a window whose content frame is
+        # missing, has an empty URI, or duplicates another window's URI is
+        # dropped from the composition (never painted from unresolved content)
+        # and counted, while the background + remaining windows still compose.
+        # We hand the composition builder a scene + content_frames filtered to
+        # only the resolvable windows so no unresolvable image command is emitted.
         var images: [Engine2dResolvedDrawIrImage] = []
         var host_images: [SimpleOsHostGpuImageResource] = []
+        var good_windows: [SharedWmWindow] = []
+        var good_content_frames: [WmContentFrame] = []
         var expected_images = 0
+        var degraded_window_count = 0
         for window in scene.windows:
-            if not window.minimized:
-                val content = shared_wm_scene_window_content_rect_with_titlebar(window, 28)
-                if content.width > 0 and content.height > 0:
-                    expected_images = expected_images + 1
-                    if val frame = shared_wm_content_frame_for_window(content_frames, scene_revision, window, 28):
-                        val image_uri = shared_wm_content_frame_image_uri(frame)
-                        var duplicate_uri = image_uri == ""
+            val content = shared_wm_scene_window_content_rect_with_titlebar(window, 28)
+            val needs_surface = not window.minimized and content.width > 0 and content.height > 0
+            if not needs_surface:
+                # Minimized / zero-content windows carry no content surface; keep
+                # their chrome by leaving them in the scene unchanged.
+                good_windows.push(window)
+            else:
+                expected_images = expected_images + 1
+                var resolved = false
+                if val frame = shared_wm_content_frame_for_window(content_frames, scene_revision, window, 28):
+                    val image_uri = shared_wm_content_frame_image_uri(frame)
+                    if image_uri != "":
+                        var duplicate_uri = false
                         for image in images:
                             if image.image_uri == image_uri:
                                 duplicate_uri = true
-                        if duplicate_uri:
-                            return 0
-                        images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))
-                        if self.host_gpu_base != 0u64:
-                            host_images.push(simpleos_host_gpu_image_resource(image_uri, frame.width, frame.height, frame.pixels))
+                        if not duplicate_uri:
+                            images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))
+                            if self.host_gpu_base != 0u64:
+                                host_images.push(simpleos_host_gpu_image_resource(image_uri, frame.width, frame.height, frame.pixels))
+                            good_windows.push(window)
+                            good_content_frames.push(frame)
+                            resolved = true
+                if not resolved:
+                    degraded_window_count = degraded_window_count + 1
+                    serial_println("[wm-frame] window-degraded window_id={window.window_id} reason=unresolved-or-duplicate-content")
 
-        if content_frames.len() != expected_images or images.len() != expected_images:
-            serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} content_frames={content_frames.len()} reason=resource-coverage")
+        val renderable_images = expected_images - degraded_window_count
+        if images.len() != renderable_images or good_content_frames.len() != renderable_images:
+            serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} degraded={degraded_window_count} content_frames={content_frames.len()} reason=resource-coverage")
             return 0
-        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar, content_frames, DRAW_IR_BACKEND_AUTO, 1000, clock_label, 0)
+        val filtered_scene = SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: good_windows, background: scene.background)
+        val composition = shared_wm_scene_draw_ir_composition_with_content(filtered_scene, taskbar, good_content_frames, DRAW_IR_BACKEND_AUTO, 1000, clock_label, 0)
         if self.host_gpu_base != 0u64:
             if self._render_host_gpu(composition, host_images):
+                if degraded_window_count > 0:
+                    serial_println("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} path=host-gpu scene_revision={scene_revision}")
                 return scene_revision
         val result = engine2d_draw_ir_adv_composition_present_with_images(self.engine, composition, false, images)
         if result.fallback_required or result.skipped_command_count != 0 or result.rendered_command_count <= 0:
-            serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} skipped={result.skipped_command_count} reason={result.fallback_reason}")
+            serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} degraded={degraded_window_count} skipped={result.skipped_command_count} reason={result.fallback_reason}")
             return 0
+        if degraded_window_count > 0:
+            serial_println("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} rendered={result.rendered_command_count} scene_revision={scene_revision}")
         scene_revision

@@ -22,23 +22,23 @@ use os.services.launcher.launcher.{
 extern fn unsafe_addr_of(ref: any) -> u64
 
 fn push_u32(buf: [u8], value: u32):
-    buf.push((value and 0xFF).to_u8())
-    buf.push(((value >> 8) and 0xFF).to_u8())
-    buf.push(((value >> 16) and 0xFF).to_u8())
-    buf.push(((value >> 24) and 0xFF).to_u8())
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf.push(((value >> 16) & 0xFF).to_u8())
+    buf.push(((value >> 24) & 0xFF).to_u8())
 
 fn push_i32(buf: [u8], value: i32):
     push_u32(buf, value.to_u32())
 
 fn push_u64(buf: [u8], value: u64):
-    buf.push((value and 0xFF).to_u8())
-    buf.push(((value >> 8) and 0xFF).to_u8())
-    buf.push(((value >> 16) and 0xFF).to_u8())
-    buf.push(((value >> 24) and 0xFF).to_u8())
-    buf.push(((value >> 32) and 0xFF).to_u8())
-    buf.push(((value >> 40) and 0xFF).to_u8())
-    buf.push(((value >> 48) and 0xFF).to_u8())
-    buf.push(((value >> 56) and 0xFF).to_u8())
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf.push(((value >> 16) & 0xFF).to_u8())
+    buf.push(((value >> 24) & 0xFF).to_u8())
+    buf.push(((value >> 32) & 0xFF).to_u8())
+    buf.push(((value >> 40) & 0xFF).to_u8())
+    buf.push(((value >> 48) & 0xFF).to_u8())
+    buf.push(((value >> 56) & 0xFF).to_u8())
 
 describe "WmService ownership metadata":
     it "stores explicit process and app identity":
@@ -55,7 +55,11 @@ describe "WmService ownership metadata":
         expect(wm.window_owner_process_id(9)).to_equal(55)
         expect(wm.window_ids_for_owner_port(55).len()).to_equal(1)
 
-    it "parses create-window identity extension when provided":
+    it "uses src_port (not the payload) as process identity, keeping payload app_id as a label":
+        # SECURITY (hardening item 3): process_id ownership identity is
+        # authoritative from the kernel-verified src_port; a payload-supplied
+        # process_id (here 1234, a spoof attempt) must never override it.
+        # app_id remains a display label sourced from the payload.
         val wm = WmService.new()
         var payload: [u8] = []
         push_u32(payload, 7)
@@ -70,13 +74,13 @@ describe "WmService ownership metadata":
         for ch in "/sys/browser":
             payload.push(ch.to_u8())
         val action = wm.parse_create_window(77, unsafe_addr_of(payload), payload.len().to_u32())
-        expect(action.process_id).to_equal(1234)
+        expect(action.process_id).to_equal(77)
         expect(action.app_id).to_equal("/sys/browser")
 
-    it "falls back to launcher-owned app identity when app_id is omitted":
+    it "falls back to launcher-owned app identity when app_id is omitted, still keyed by src_port":
         launcher_init()
         launcher_register("Browser Demo", "/sys/apps/browser_demo", "B", 0x42, 0)
-        val recorded = launcher_record_process(4321, 0, "running", 0, 0, true)
+        val recorded = launcher_record_process(77, 0, "running", 0, 0, true)
         expect(recorded).to_be(true)
 
         val wm = WmService.new()
@@ -91,7 +95,7 @@ describe "WmService ownership metadata":
         push_u64(payload, 4321)
 
         val action = wm.parse_create_window(77, unsafe_addr_of(payload), payload.len().to_u32())
-        expect(action.process_id).to_equal(4321)
+        expect(action.process_id).to_equal(77)
         expect(action.app_id).to_equal("/sys/apps/browser_demo")
 
     it "reuses launcher and WM ownership contract for RISC-V SMF GUI apps":

@@ -23,6 +23,7 @@ use common.ui.window_scene_draw_ir.{
 }
 use common.ui.taskbar_model.{WindowRef, TrayItem, TaskbarModel}
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
+use os.compositor.dirty_rect.{DirtyRegion}
 use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_revision, content_paint_full_height}
 use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, shared_mdi_scene_from_render_windows}
 use std.gc_async_mut.ui.web_render_pixel_software_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache}
@@ -488,9 +489,16 @@ class HostCompositor:
     # trusting this stored default (the theme can change after construction).
     background: BackgroundSpec
     render_revision: i64
+    # I-item-4 damage tracking: accumulates dirty rects across window
+    # create/destroy/move/resize/content-update/focus-change so render_frame
+    # can skip a full recomposite when nothing changed since the last
+    # present. ponytail: full recomposite on any damage; partial/rect-level
+    # recomposition is deferred until profiling demands it (see render_frame).
+    dirty: DirtyRegion
+    skipped_frame_count: i64
 
     static fn new(backend: CompositorBackend, size: Size) -> HostCompositor:
-        HostCompositor(
+        var comp = HostCompositor(
             backend: backend,
             headless_backend: nil,
             pixel_backend: SharedWmPixelBufferBackend.new(0, 0),
@@ -523,8 +531,14 @@ class HostCompositor:
             _chrome_cache_pixels: [],
             content_caches: {},
             background: shared_wm_background_color(0xFF0F172Au32),
-            render_revision: 0
+            render_revision: 0,
+            dirty: DirtyRegion.new(),
+            skipped_frame_count: 0
         )
+        # Seed full-screen damage so the very first render_frame() call always
+        # renders even though nothing has "changed" from an empty prior state.
+        comp.dirty.add_full_screen(comp.width, comp.height)
+        comp
 
     static fn new_headless(size: Size) -> HostCompositor:
         val concrete = HeadlessHostCompositorBackend.new(size.width as i32, size.height as i32)
@@ -628,6 +642,7 @@ class HostCompositor:
     me resize(width: i32, height: i32):
         self.width = width
         self.height = height
+        self.dirty.add_full_screen(width, height)
         if self.native_pixel_lane:
             # Native lane: the pixel mirror is authoritative; the headless
             # trait mirror is unused and its Optional unwrap is a stage3
@@ -747,7 +762,16 @@ class HostCompositor:
         # render_shared_mdi_desktop_chrome(self.backend, ..., theme) call this
         # replaces.
         val resolved_bg = self._resolve_background(theme, rt_time_now_unix_micros())
-        if not self.native_pixel_lane:
+        # I-item-4 fast no-op path: only the chrome paint + final scene
+        # composite + present are gated on accumulated damage (ponytail:
+        # full recomposite on any damage; partial/rect-scoped recomposition
+        # is deferred until profiling demands it). The content-frame
+        # building loop below keeps running every call regardless of
+        # `had_damage` -- it owns its own per-window cache hit/miss
+        # bookkeeping (task #15's WebRenderPixelArtifactCache) which must
+        # stay live independent of whether this frame actually presents.
+        val had_damage = not self.dirty.is_empty()
+        if had_damage and not self.native_pixel_lane:
             shared_wm_scene_render_desktop_chrome(self.backend, self.width, self.height, theme, resolved_bg.color, resolved_bg.surface)
         var shared_windows: [SharedMdiRenderWindow] = []
         val window_count = self.windows.len()
@@ -788,11 +812,15 @@ class HostCompositor:
         val frame_time = rt_time_now_unix_micros()
         val render_input = SharedWmRenderInput(scene: simple_gui_scene, revision: revision, content_frames: content_frames, metrics: metrics, t_micros: frame_time)
         val taskbar_input = SharedWmTaskbarRenderInput(render: render_input, taskbar: self.taskbar_model(), clock_label: host_taskbar_clock_label(frame_time))
-        if self.native_pixel_lane:
-            shared_wm_scene_render_taskbar_context_to_pixel_buffer(self.pixel_backend, taskbar_input)
+        if had_damage:
+            if self.native_pixel_lane:
+                shared_wm_scene_render_taskbar_context_to_pixel_buffer(self.pixel_backend, taskbar_input)
+            else:
+                shared_wm_scene_render_taskbar_context_to_backend(self.backend, taskbar_input)
+                self.backend.present()
+            self.dirty.clear()
         else:
-            shared_wm_scene_render_taskbar_context_to_backend(self.backend, taskbar_input)
-            self.backend.present()
+            self.skipped_frame_count = self.skipped_frame_count + 1
 
     me apply_bridge_request(seq: i64, owner_port: i64, method: i64, window_id: i64, title: text, x: i32, y: i32, w: i32, h: i32, content: text, process_id: i64, app_id: text):
         if method == COMP_MAXIMIZE.to_i64():
@@ -808,6 +836,7 @@ class HostCompositor:
         val i = self._find_window_index(window_id)
         if i < 0:
             return
+        val prior_windows = self.windows
         var win = self.windows[i]
         if not win.maximized:
             win.restore_x = win.x
@@ -827,11 +856,13 @@ class HostCompositor:
             jw.focused = jw.id == window_id
             self.windows[j] = jw
             j = j + 1
+        self._mark_geometry_damage(prior_windows)
 
     me restore_window(window_id: i64):
         val i = self._find_window_index(window_id)
         if i < 0:
             return
+        val prior_windows = self.windows
         var win = self.windows[i]
         if win.maximized and win.restore_w > 0 and win.restore_h > 0:
             win.x = win.restore_x
@@ -842,6 +873,7 @@ class HostCompositor:
         win.maximized = false
         win.focused = true
         self.windows[i] = win
+        self._mark_geometry_damage(prior_windows)
 
     me apply_wm_action(action: WmAction):
         val prior_windows = self.windows
@@ -862,6 +894,7 @@ class HostCompositor:
                     self.windows[i] = iw
                 j = j + 1
             i = i + 1
+        self._mark_geometry_damage(prior_windows)
 
     fn _find_window_index(window_id: i64) -> i32:
         var i = 0
@@ -870,6 +903,33 @@ class HostCompositor:
                 return i
             i = i + 1
         -1
+
+    # I-item-4 damage tracking: diffs `prior_windows` (a snapshot taken
+    # before a mutation) against self.windows (the post-mutation state) and
+    # adds the old + new rect for every window that was added, removed, or
+    # whose visible bounds/state (position, size, minimized, focused,
+    # content, title) changed. Content-only changes (e.g. COMP_UPDATE_TREE)
+    # have no geometry delta but still damage the window's current rect,
+    # since its rendered pixels differ even though x/y/w/h don't.
+    me _mark_geometry_damage(prior_windows: [HostedWindow]):
+        var i = 0
+        while i < self.windows.len():
+            val win = self.windows[i]
+            val prior_idx = _host_find_window_by_id(prior_windows, win.id)
+            if prior_idx < 0:
+                self.dirty.add_rect(win.x, win.y, win.w, win.h)
+            else:
+                val prior = prior_windows[prior_idx]
+                if prior.x != win.x or prior.y != win.y or prior.w != win.w or prior.h != win.h or prior.minimized != win.minimized or prior.focused != win.focused or prior.content != win.content or prior.title != win.title:
+                    self.dirty.add_rect(prior.x, prior.y, prior.w, prior.h)
+                    self.dirty.add_rect(win.x, win.y, win.w, win.h)
+            i = i + 1
+        var j = 0
+        while j < prior_windows.len():
+            if _host_find_window_by_id(self.windows, prior_windows[j].id) < 0:
+                val gone = prior_windows[j]
+                self.dirty.add_rect(gone.x, gone.y, gone.w, gone.h)
+            j = j + 1
 
     me destroy_window(window_id: i64):
         self.apply_wm_action(wm_destroy_action(window_id))
@@ -883,6 +943,7 @@ class HostCompositor:
     me pointer_move(x: i32, y: i32):
         self.pointer_x = x
         self.pointer_y = y
+        val prior_windows = self.windows
         val out = host_compositor_pointer_move(self, x, y)
         self.windows = out.windows
         self.next_window_id = out.next_window_id
@@ -896,11 +957,17 @@ class HostCompositor:
         self.resize_start_y = out.resize_start_y
         self.resize_start_w = out.resize_start_w
         self.resize_start_h = out.resize_start_h
+        # Interactive drag/resize moves window geometry directly through
+        # host_compositor_pointer_move rather than through apply_wm_action,
+        # so it needs its own damage diff — otherwise a dragged window would
+        # freeze on screen once render_frame()'s no-damage skip is live.
+        self._mark_geometry_damage(prior_windows)
 
     me handle_mouse_move(x: i32, y: i32):
         self.pointer_move(x, y)
 
     me handle_left_button(down: bool):
+        val prior_windows = self.windows
         val out = host_compositor_left_button_at(self, down, self.pointer_x, self.pointer_y)
         self.windows = out.windows
         self.next_window_id = out.next_window_id
@@ -916,6 +983,12 @@ class HostCompositor:
         self.resize_start_h = out.resize_start_h
         self.armed_chrome_target = out.armed_chrome_target
         self.armed_chrome_window_id = out.armed_chrome_window_id
+        # host_compositor_left_button_at runs focus/destroy on a byval copy
+        # of `self` (see class doc above re: stage3 free-function-by-value
+        # codegen), so any damage it marked internally lives on that copy's
+        # `dirty` and is never copied back here. Recompute the diff fresh
+        # against the true receiver instead of trying to propagate it.
+        self._mark_geometry_damage(prior_windows)
 
     # Generic pointer-button entry point (0=left, 1=middle, 2=right). Left
     # keeps its full chrome semantics (drag/resize/close/taskbar/focus);
@@ -942,6 +1015,11 @@ class HostCompositor:
             val wid = self.windows[hit_idx].id
             val current = self.scroll_offsets.get(wid) ?? 0.0
             self.scroll_offsets[wid] = current + dy
+            # Scroll changes rendered content without touching self.windows,
+            # so the geometry diff in _mark_geometry_damage would miss it —
+            # mark the scrolled window's own rect dirty directly.
+            val scrolled = self.windows[hit_idx]
+            self.dirty.add_rect(scrolled.x, scrolled.y, scrolled.w, scrolled.h)
 
     me scroll_offset_for(window_id: i64) -> f64:
         self.scroll_offsets.get(window_id) ?? 0.0
@@ -955,6 +1033,7 @@ class HostCompositor:
         val id = self.next_window_id
         self.next_window_id = self.next_window_id + 1
         self.windows.push(HostedWindow(id: id, owner_port: 0, title: proc.title + " failed", x: 40, y: 80, w: 360, h: 180, content: "failed to create a window for " + proc.app_id, process_id: proc.pid, app_id: proc.app_id, minimized: false, focused: true))
+        self.dirty.add_rect(40, 80, 360, 180)
 
 # ============================================================================
 # I8 region-dirty background math (plan item B follow-up 1,
@@ -1185,6 +1264,14 @@ fn host_wm_content_renderer_name(handle: HostWmHandle) -> text:
     if handle.backend == HostBackendKind.Tui:
         return "unsupported"
     WEB_RENDER_TARGET_SIMPLE_WEB
+
+fn _host_find_window_by_id(windows: [HostedWindow], window_id: i64) -> i32:
+    var i = 0
+    while i < windows.len():
+        if windows[i].id == window_id:
+            return i
+        i = i + 1
+    -1
 
 fn host_compositor_find_window_index(comp: HostCompositor, window_id: i64) -> i32:
     var i = 0

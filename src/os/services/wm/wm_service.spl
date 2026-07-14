@@ -300,17 +300,21 @@ impl WmService:
         val y = _read_i32(payload_addr + fields_offset + 4)
         val w = _read_i32(payload_addr + fields_offset + 8)
         val h = _read_i32(payload_addr + fields_offset + 12)
-        var process_id = src_port
+        # SECURITY: process_id is ownership identity and MUST come from the
+        # kernel-verified src_port, never from the client-supplied payload —
+        # a payload process_id is trivially spoofable and would let one
+        # process impersonate another's window ownership (e.g. escaping
+        # process-exit window cleanup, or hijacking focus/terminate actions
+        # keyed by pid in shell.spl). app_id remains payload-sourced since it
+        # is only a display label, not a security boundary.
+        val process_id = src_port
         var app_id = ""
         val identity_offset = fields_offset + 16
         if payload_len.to_u64() >= identity_offset + 8:
-            process_id = _read_u64(payload_addr + identity_offset)
             if payload_len.to_u64() >= identity_offset + 12:
                 val app_id_len = _read_u32(payload_addr + identity_offset + 8)
                 if app_id_len > 0 and payload_len.to_u64() >= identity_offset + 12 + app_id_len.to_u64():
                     app_id = _read_text(payload_addr + identity_offset + 12, app_id_len)
-        if process_id == 0:
-            process_id = src_port
         if app_id == "":
             val launcher_app_id = launcher_get_process_app_id_for_pid(process_id)
             if launcher_app_id != "":
@@ -389,8 +393,18 @@ impl WmService:
         """Parse COMP_FOCUS into a WmAction.
 
         Payload: window_id(u64)
+
+        Ownership is verified the same way as destroy/resize/move/minimize:
+        only the owning port may request focus for its own window.
         """
         val window_id = _read_u64(payload_addr)
+
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            log_raw_println("[wm-service] Focus denied: port {src_port} does not own window {window_id}")
+            self.send_status_reply(src_port, STATUS_ERR)
+            return wm_action_none()
+
         WmAction(kind: "focus", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
     me parse_resize(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
@@ -406,6 +420,19 @@ impl WmService:
         if owner == 0 or owner != src_port:
             self.send_status_reply(src_port, STATUS_ERR)
             return wm_action_none()
+
+        # Wire the resize into the ECS window world so world.geometries
+        # reflects live dimensions (previously only spawn_window ever wrote
+        # this component, leaving it stuck at 0x0 after any resize).
+        val e = self.world.find_entity_for_window(window_id)
+        if not e.is_null():
+            var gx: i32 = 0
+            var gy: i32 = 0
+            val geo_slot = self.world.geometries.get_slot(e)
+            if geo_slot >= 0:
+                gx = self.world.geometries.dense[geo_slot].x
+                gy = self.world.geometries.dense[geo_slot].y
+            self.world.geometries.insert(e, Geometry(x: gx, y: gy, w: width, h: height), self.world.base.now())
 
         WmAction(kind: "resize", window_id: window_id, title: "", x: 0, y: 0, width: width, height: height, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 

@@ -41,6 +41,7 @@ use os.kernel.net.http_route.{http_classify_request, HttpRoute, HttpRouteKind}
 use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
 use std.nogc_sync_mut.http_server.response.{serialize_response}
 use std.nogc_sync_mut.http_server.mime.{mime_from_path}
+use std.nogc_sync_mut.http_server.parser.{content_length_from_text}
 
 extern fn log_raw_println(msg: text)
 extern fn rt_net_socket(proto: i64) -> i64
@@ -53,9 +54,27 @@ extern fn rt_net_close(sock_fd: i64) -> i64
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn rt_string_to_byte_array(s: text) -> [u8]
 
-val HTTP_PORT: i64 = 8080
-val HTTP_MAX_REQUEST_BYTES: i64 = 4096
 val HTTP_STATUS_BODY: text = "{\"status\":\"ok\",\"server\":\"SimpleOS\"}\n"
+
+# HTTP_PORT: no env/config-read facility exists at this boot tier (checked
+# alongside sshd/dbd's own boot services -- they hardcode their ports the
+# same way). Left as a fixed constant per the lane guide rather than
+# inventing a config system; a follow-up can wire this once the boot tier
+# gets a general env facility.
+val HTTP_PORT: i64 = 8080
+
+# Recv-loop limits (Item 3 hardening). Previously a single fixed
+# rt_net_recv_bytes(client, 4096) call assumed the whole request arrived in
+# one read, silently truncating anything split across TCP segments.
+val HTTP_RECV_CHUNK_SIZE: i64 = 4096      # per-recv() read size
+val HTTP_MAX_REQUEST_BYTES: i64 = 65536   # total cap across headers+body
+val HTTP_MAX_RECV_ITERATIONS: i64 = 64    # bounded recv() calls per request
+val HTTP_MAX_KEEPALIVE_REQUESTS: i64 = 32 # requests served per connection
+
+# rt_net_accept error-code convention (see baremetal_stubs.c rt_net_accept):
+# ENCODE_INT(-11) = EAGAIN ("no pending connection", expected/benign);
+# any other negative value is a real socket error worth logging.
+val HTTP_ACCEPT_EAGAIN: i64 = -11
 
 # Decode helper mirroring sshd's decode_net_runtime_i32/fd (see sshd.spl):
 # the direct baremetal net runtime returns ENCODE_INT(value) for successes.
@@ -115,15 +134,146 @@ pub fn http_bind_baremetal() -> i64:
         return listen_rc
     sock_fd
 
+# ============================================================================
+# Recv accumulation (Item 3 hardening)
+# ============================================================================
+
+pub struct HttpRecvAccum:
+    """Pure (socket-free) HTTP request accumulation state.
+
+    Feed raw recv() chunks one at a time via http_recv_accum_feed; check
+    .complete / .error after each feed. Deliberately holds no socket
+    reference so it is directly unit-testable with hand-fed text chunks
+    (headers split mid-line, body split across chunks, oversize input)."""
+    buffer: text
+    header_end: i64      # index of the \r\n\r\n separator once found, else -1
+    content_length: i64  # Content-Length value once known, else -1
+    complete: bool
+    error: text
+
+pub fn http_recv_accum_new() -> HttpRecvAccum:
+    HttpRecvAccum(buffer: "", header_end: -1, content_length: -1, complete: false, error: "")
+
+fn _http_content_length_from_headers(header_text: text) -> i64:
+    """Scan raw CRLF-joined header lines for a Content-Length value.
+    Reuses the shared, spec-tested content_length_from_text parser
+    (std.nogc_sync_mut.http_server.parser) instead of reimplementing digit
+    validation. Returns 0 if absent or invalid (no body expected)."""
+    for line in header_text.split("\r\n"):
+        val colon = line.index_of(":")
+        if colon > 0:
+            val name = line.substring(0, colon).trim().lower()
+            if name == "content-length":
+                val value = line.substring(colon + 1, line.len()).trim()
+                val parsed = content_length_from_text(value)
+                if parsed >= 0:
+                    return parsed
+    0
+
+pub fn http_recv_accum_feed(state: HttpRecvAccum, chunk: text, max_total: i64) -> HttpRecvAccum:
+    """Append one already-decoded recv() chunk and re-check completion.
+
+    Accumulates until the header terminator (\\r\\n\\r\\n) is seen, then --
+    if Content-Length is present -- keeps accumulating until the full body
+    has arrived. Rejects (via .error) once the running total exceeds
+    max_total, so a slow-loris-style unbounded body cannot exhaust boot
+    memory. Pure: no sockets, so testable standalone."""
+    if state.complete or state.error != "":
+        return state
+    val buffer = state.buffer + chunk
+    if buffer.len() > max_total:
+        return HttpRecvAccum(buffer: buffer, header_end: state.header_end,
+                              content_length: state.content_length,
+                              complete: false, error: "request too large")
+    var header_end = state.header_end
+    var content_length = state.content_length
+    if header_end < 0:
+        val found = buffer.index_of("\r\n\r\n")
+        if found >= 0:
+            header_end = found
+            content_length = _http_content_length_from_headers(buffer.substring(0, header_end))
+    if header_end >= 0:
+        val body_start = header_end + 4
+        val have = buffer.len() - body_start
+        val need = if content_length > 0: content_length else: 0
+        if have >= need:
+            return HttpRecvAccum(buffer: buffer, header_end: header_end,
+                                  content_length: content_length, complete: true, error: "")
+    HttpRecvAccum(buffer: buffer, header_end: header_end,
+                  content_length: content_length, complete: false, error: "")
+
+fn _http_recv_request(client: i64) -> (text, text):
+    """Drive http_recv_accum against the real socket with a bounded recv
+    loop (replaces the old single fixed-size rt_net_recv_bytes call).
+
+    Returns (request_text, error). error is "" on a complete request,
+    else a short reason: "closed" (peer closed before sending anything),
+    "request too large" (exceeded HTTP_MAX_REQUEST_BYTES), or "incomplete"
+    (hit the bounded iteration cap without completing)."""
+    var state = http_recv_accum_new()
+    var iterations = 0
+    while iterations < HTTP_MAX_RECV_ITERATIONS:
+        if state.complete:
+            return (state.buffer, "")
+        if state.error != "":
+            return (state.buffer, state.error)
+        val chunk_bytes = rt_net_recv_bytes(client, HTTP_RECV_CHUNK_SIZE)
+        if chunk_bytes.len() == 0:
+            if state.buffer == "":
+                return ("", "closed")
+            break
+        val chunk = rt_string_from_byte_array(chunk_bytes)
+        state = http_recv_accum_feed(state, chunk, HTTP_MAX_REQUEST_BYTES)
+        iterations = iterations + 1
+    if state.complete:
+        return (state.buffer, "")
+    if state.error != "":
+        return (state.buffer, state.error)
+    (state.buffer, "incomplete")
+
+fn _http_request_wants_close(request: text) -> bool:
+    """Check the request's Connection header to decide whether to keep the
+    connection open for another request.
+
+    This boot server's keep-alive contract is deliberately simple (not full
+    HTTP/1.1 semantics): closes after each request unless the client sends
+    an explicit `Connection: keep-alive`."""
+    val header_end = request.index_of("\r\n\r\n")
+    val header_text = if header_end >= 0: request.substring(0, header_end) else: request
+    for line in header_text.split("\r\n"):
+        val colon = line.index_of(":")
+        if colon > 0:
+            val name = line.substring(0, colon).trim().lower()
+            if name == "connection":
+                val value = line.substring(colon + 1, line.len()).trim().lower()
+                return value != "keep-alive"
+    true
+
 pub fn http_accept_and_handle_once(listener: i64) -> bool:
-    """Accept and fully handle a single pending HTTP request, if any."""
+    """Accept a pending connection and handle up to
+    HTTP_MAX_KEEPALIVE_REQUESTS requests on it (honoring
+    `Connection: keep-alive`), then close.
+
+    Differentiates "no pending connection" (EAGAIN, expected on every poll
+    when nothing is waiting) from a real accept() failure: only the latter
+    is logged, so the boot log isn't spammed once per idle poll."""
     val raw_client = rt_net_accept(listener)
     val client = _http_decode_i64(raw_client)
     if client < 0:
+        if client != HTTP_ACCEPT_EAGAIN:
+            log_raw_println("[http_baremetal] ERROR: accept failed")
         return false
-    val request_bytes = rt_net_recv_bytes(client, HTTP_MAX_REQUEST_BYTES)
-    val request = rt_string_from_byte_array(request_bytes)
-    rt_net_send_bytes(client, _http_route(request))
+    var handled = 0
+    while handled < HTTP_MAX_KEEPALIVE_REQUESTS:
+        val recv_result = _http_recv_request(client)
+        val request = recv_result.0
+        val recv_error = recv_result.1
+        if recv_error != "" or request == "":
+            break
+        rt_net_send_bytes(client, _http_route(request))
+        handled = handled + 1
+        if _http_request_wants_close(request):
+            break
     rt_net_close(client)
     true
 

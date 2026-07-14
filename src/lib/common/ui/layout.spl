@@ -94,7 +94,11 @@ fn layout_vbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32) -> [Widge
         else:
             flex_count = flex_count + 1
 
-    val remaining = h - total_fixed
+    # Clamp remaining flex space at 0: when fixed children already overflow the
+    # box, flex children get 0 height, never a negative size.
+    var remaining = h - total_fixed
+    if remaining < 0:
+        remaining = 0
     val flex_h = if flex_count > 0: remaining / flex_count else: 0
     val flex_remainder = if flex_count > 0: remaining - flex_h * flex_count else: 0
 
@@ -112,6 +116,7 @@ fn layout_vbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32) -> [Widge
             else:
                 actual_h = flex_h
 
+        actual_h = clamp_dim(actual_h, get_min_height(child), get_max_height(child))
         if actual_h > 0:
             val child_rects = compute_layout(child, x, cur_y, w, actual_h)
             for cr in child_rects:
@@ -142,7 +147,11 @@ fn layout_hbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32) -> [Widge
             val flex = get_flex(child)
             total_flex = total_flex + flex
 
-    val remaining = w - total_fixed
+    # Clamp remaining flex space at 0: when fixed children already overflow the
+    # box, flex children get 0 width, never a negative size.
+    var remaining = w - total_fixed
+    if remaining < 0:
+        remaining = 0
     val flex_unit = if total_flex > 0: remaining / total_flex else: 0
     val flex_remainder = if total_flex > 0: remaining - flex_unit * total_flex else: 0
 
@@ -161,6 +170,7 @@ fn layout_hbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32) -> [Widge
             else:
                 actual_w = flex * flex_unit
 
+        actual_w = clamp_dim(actual_w, get_min_width(child), get_max_width(child))
         if actual_w > 0:
             val child_rects = compute_layout(child, cur_x, y, actual_w, h)
             for cr in child_rects:
@@ -262,6 +272,46 @@ fn get_flex(node: WidgetNode) -> i32:
     if f != "":
         return f.to_int() ?? 1
     return 1
+
+# Optional size constraints. min_* default 0 (no lower bound); max_* default -1
+# meaning "unset" (no upper bound). max_height doubles as the scroll clip height
+# already, so capping to it is a no-op for scroll containers and a genuine cap
+# elsewhere.
+fn get_min_width(node: WidgetNode) -> i32:
+    val v = node.get_prop("min_width")
+    if v != "":
+        return v.to_int() ?? 0
+    return 0
+
+fn get_max_width(node: WidgetNode) -> i32:
+    val v = node.get_prop("max_width")
+    if v != "":
+        return v.to_int() ?? -1
+    return -1
+
+fn get_min_height(node: WidgetNode) -> i32:
+    val v = node.get_prop("min_height")
+    if v != "":
+        return v.to_int() ?? 0
+    return 0
+
+fn get_max_height(node: WidgetNode) -> i32:
+    val v = node.get_prop("max_height")
+    if v != "":
+        return v.to_int() ?? -1
+    return -1
+
+# Clamp a computed size into [min_v, max_v], with max_v < 0 meaning uncapped.
+# Never returns a negative size.
+fn clamp_dim(size: i32, min_v: i32, max_v: i32) -> i32:
+    var s = size
+    if max_v >= 0 and s > max_v:
+        s = max_v
+    if s < min_v:
+        s = min_v
+    if s < 0:
+        s = 0
+    s
 
 # =========================================================================
 # Layout Lookup

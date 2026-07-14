@@ -150,8 +150,52 @@ fn widget_dispatch_scroll(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, dy
     node.set_prop("scroll_offset", "{offset}")
     target
 
-# Key event to the focused input: printable char appends, "backspace" deletes,
-# updating both `value` and `caret`.
+# Number of Unicode characters in `s`. Counts via the char-based `char_at`,
+# which returns "" once the index passes the last character. Byte-based
+# `slice`/`len` cannot be used to split on a caret that counts characters.
+fn _nchars(s: text) -> i32:
+    var n = 0
+    while s.char_at(n.to_i64()) != "":
+        n = n + 1
+    n
+
+# Characters [a, b) of `s` by CHARACTER index, clamped to [0, char_count].
+fn _char_slice(s: text, a: i32, b: i32) -> text:
+    var lo = a
+    if lo < 0:
+        lo = 0
+    if b <= lo:
+        return ""
+    var out = ""
+    var i = lo
+    while i < b:
+        val ch = s.char_at(i.to_i64())
+        if ch == "":
+            return out
+        out = out + ch
+        i = i + 1
+    out
+
+# Current caret CHARACTER index for the focused node, clamped to [0, len].
+# Absent/invalid `caret` prop defaults to end-of-text (append position).
+fn _caret_of(node: WidgetNode, nchars: i32) -> i32:
+    val raw = node.get_prop("caret")
+    if raw == "":
+        return nchars
+    var c = raw.to_int() ?? nchars.to_i64()
+    if c < 0:
+        return 0
+    if c > nchars.to_i64():
+        return nchars
+    c.to_i32()
+
+# Key event to the focused input, editing at a true caret index. Printable
+# single chars insert AT the caret; "backspace" deletes the char before it,
+# "delete" the char at it; "left"/"right"/"home"/"end" move it. `value` and
+# `caret` (a CHARACTER index) are both updated. Selection/shift are not
+# delivered through this host key path, so this is caret editing without
+# selection; the pure model (widget_interact_model.on_key_mod) carries the
+# spec-tested selection ops for when shift plumbing lands.
 fn widget_dispatch_key(focused_id: text, key: text):
     if focused_id == "":
         return
@@ -160,16 +204,38 @@ fn widget_dispatch_key(focused_id: text, key: text):
         return
     val node = WidgetNode(id: focused_id)
     val value = node.get_prop("value")
-    if key == "backspace":
-        if value.len() > 0:
-            val cut = value.slice(0, value.len() - 1)
-            node.set_prop("value", cut)
-            node.set_prop("caret", "{cut.len()}")
+    val n = _nchars(value)
+    val caret = _caret_of(node, n)
+    if key == "left":
+        if caret > 0:
+            node.set_prop("caret", "{caret - 1}")
         return
-    if key.len() == 1:
-        val joined = value + key
+    if key == "right":
+        if caret < n:
+            node.set_prop("caret", "{caret + 1}")
+        return
+    if key == "home":
+        node.set_prop("caret", "0")
+        return
+    if key == "end":
+        node.set_prop("caret", "{n}")
+        return
+    if key == "backspace":
+        if caret > 0:
+            val cut = _char_slice(value, 0, caret - 1) + _char_slice(value, caret, n)
+            node.set_prop("value", cut)
+            node.set_prop("caret", "{caret - 1}")
+        return
+    if key == "delete":
+        if caret < n:
+            val cut = _char_slice(value, 0, caret) + _char_slice(value, caret + 1, n)
+            node.set_prop("value", cut)
+            node.set_prop("caret", "{caret}")
+        return
+    if _nchars(key) == 1:
+        val joined = _char_slice(value, 0, caret) + key + _char_slice(value, caret, n)
         node.set_prop("value", joined)
-        node.set_prop("caret", "{joined.len()}")
+        node.set_prop("caret", "{caret + 1}")
 
 fn _prop_int_of(node: WidgetNode, key: text) -> i32:
     val raw = node.get_prop(key)

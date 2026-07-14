@@ -72,21 +72,35 @@ struct FramebufferCapabilities:
 # Framebuffer Driver
 # ============================================================================
 
+fn _zero_u32_buffer(count: u32) -> [u32]:
+    """Build a zero-filled `[u32]` of `count` entries."""
+    var buf: [u32] = []
+    var i: u32 = 0
+    while i < count:
+        buf = buf + [0u32]
+        i = i + 1
+    buf
+
 class FramebufferDriver:
     """Double-buffered framebuffer driver.
 
     Three modes:
-    - Direct MMIO (`from_boot_info`): writes via `mmio_write32` against the
-      hardware framebuffer at `front_addr`. `host_buffer` is empty.
+    - Direct MMIO (`from_boot_info`/`from_scanout_raw`): draw ops (`put_pixel`,
+      `fill_rect`, `clear`, `blend_pixel`, and the text/glyph helpers built on
+      top of them) write into the software `back_buffer`. `swap_buffers()`
+      copies the tracked dirty rect from `back_buffer` into hardware MMIO at
+      `front_addr`, so a caller that forgets to swap never tears the visible
+      framebuffer mid-draw. `host_buffer` is empty in this mode.
     - Empty stub (`empty`): no-op for hosted mode where the hardware FB is
       unused.
-    - Host-backed headless (`from_buffer`): writes go to the in-process
-      `host_buffer: [u32]` ARGB array. Used by backend parity tests so the
-      same `FramebufferDriver`-based render path can be exercised without
-      QEMU. See the wm_compare backend parity specs.
+    - Host-backed headless (`from_buffer`): writes go directly to the
+      in-process `host_buffer: [u32]` ARGB array (no back-buffer indirection)
+      — this mode has no real display to tear, and existing wm_compare
+      backend-parity callers read `host_pixels()` immediately after drawing.
+      See the wm_compare backend parity specs.
     """
     front_addr: u64         # Hardware framebuffer address (from Limine), 0 in headless mode
-    back_buffer: [u32]      # Software back buffer (currently unused)
+    back_buffer: [u32]      # Software back buffer for MMIO mode (ARGB8888, len = w*h)
     host_buffer: [u32]      # Host-backed headless buffer (ARGB8888, len = w*h)
     width: u32
     height: u32
@@ -120,12 +134,12 @@ impl FramebufferDriver:
     static fn from_boot_info(fb: FramebufferInfo) -> FramebufferDriver:
         """Create driver from Limine framebuffer info.
 
-        Direct-write mode: no back buffer allocated. All rendering
-        writes directly to the hardware framebuffer via MMIO.
+        Double-buffered MMIO mode: draw ops target `back_buffer`;
+        `swap_buffers()` flushes the dirty rect to hardware MMIO.
         """
         FramebufferDriver(
             front_addr: framebuffer_info_phys_addr(fb),
-            back_buffer: [],
+            back_buffer: _zero_u32_buffer(fb.width * fb.height),
             host_buffer: [],
             width: fb.width,
             height: fb.height,
@@ -139,10 +153,14 @@ impl FramebufferDriver:
         )
 
     static fn from_scanout_raw(front_addr: u64, width: u32, height: u32, pitch: u32, bpp: u32) -> FramebufferDriver:
-        """Create a direct framebuffer without a struct-by-value ABI boundary."""
+        """Create a direct framebuffer without a struct-by-value ABI boundary.
+
+        Double-buffered MMIO mode: draw ops target `back_buffer`;
+        `swap_buffers()` flushes the dirty rect to hardware MMIO.
+        """
         FramebufferDriver(
             front_addr: front_addr,
-            back_buffer: [],
+            back_buffer: _zero_u32_buffer(width * height),
             host_buffer: [],
             width: width,
             height: height,
@@ -165,16 +183,10 @@ impl FramebufferDriver:
 
         See the wm_compare backend parity specs.
         """
-        var buf: [u32] = []
-        var i: u32 = 0
-        val total = width * height
-        while i < total:
-            buf = buf + [0u32]
-            i = i + 1
         FramebufferDriver(
             front_addr: 0,
             back_buffer: [],
-            host_buffer: buf,
+            host_buffer: _zero_u32_buffer(width * height),
             width: width,
             height: height,
             pitch: width * 4,
@@ -310,18 +322,27 @@ impl FramebufferDriver:
                     mmio_write32(self.front_addr + destination_offset, pixel)
                 col = col + 1u64
             row = row + 1u64
+        # This path already wrote the authoritative surface (front MMIO or
+        # host_buffer) directly, bypassing back_buffer — clear the damage
+        # tracking without triggering swap_buffers()'s back->front copy,
+        # which would otherwise stomp what was just written with stale
+        # back_buffer content.
         self.mark_dirty_rect(0u32, 0u32, self.width, self.height)
-        self.swap_buffers()
+        self.clear_dirty()
         true
 
     me put_pixel(x: u32, y: u32, color: Color):
-        """Set a single pixel on the active surface (MMIO or host buffer)."""
+        """Set a single pixel on the active surface (back buffer or host buffer).
+
+        MMIO mode draws into `back_buffer`; call `swap_buffers()` to present.
+        """
         if x >= self.width or y >= self.height:
             return
         val pixel = color.to_u32()
         if self.front_addr != 0:
-            val offset = (y * self.width + x) * 4
-            mmio_write32(self.front_addr + offset.to_u64(), pixel)
+            val idx = (y * self.width + x).to_i64()
+            if idx < self.back_buffer.length().to_i64():
+                self.back_buffer[idx] = pixel
         else:
             val idx = (y * self.width + x).to_i64()
             if idx < self.host_buffer.length().to_i64():
@@ -329,7 +350,10 @@ impl FramebufferDriver:
         self.mark_dirty_rect(x, y, 1, 1)
 
     me fill_rect(x: u32, y: u32, w: u32, h: u32, color: Color):
-        """Fill a rectangle on the active surface (MMIO or host buffer)."""
+        """Fill a rectangle on the active surface (back buffer or host buffer).
+
+        MMIO mode draws into `back_buffer`; call `swap_buffers()` to present.
+        """
         val pixel = color.to_u32()
         val host_backed = self.front_addr == 0
         var row: u32 = 0
@@ -342,13 +366,13 @@ impl FramebufferDriver:
                 while col < w:
                     val px = x + col
                     if px < self.width:
+                        val idx = (py * self.width + px).to_i64()
                         if host_backed:
-                            val idx = (py * self.width + px).to_i64()
                             if idx < self.host_buffer.length().to_i64():
                                 self.host_buffer[idx] = pixel
                         else:
-                            val offset = (py * self.width + px) * 4
-                            mmio_write32(self.front_addr + offset.to_u64(), pixel)
+                            if idx < self.back_buffer.length().to_i64():
+                                self.back_buffer[idx] = pixel
                     col = col + 1
                 row = row + 1
         self.mark_dirty_rect(x, y, w, h)
@@ -382,13 +406,28 @@ impl FramebufferDriver:
             cx = cx + 8
 
     me swap_buffers():
-        """No-op in direct-write mode (already writing to hardware FB)."""
+        """Present the back buffer: copy the tracked dirty rect to hardware MMIO.
+
+        Host-backed mode has no back buffer (writes already landed in
+        `host_buffer`), so this just clears the damage tracking there.
+        """
+        if self.front_addr != 0 and self.dirty:
+            var row: u32 = self.dirty_y1
+            while row < self.dirty_y2:
+                var col: u32 = self.dirty_x1
+                while col < self.dirty_x2:
+                    val idx = (row * self.width + col).to_i64()
+                    if idx < self.back_buffer.length().to_i64():
+                        val offset = ((row * self.width + col) * 4).to_u64()
+                        mmio_write32(self.front_addr + offset, self.back_buffer[idx])
+                    col = col + 1
+                row = row + 1
         self.clear_dirty()
 
     me present_rect(x: u32, y: u32, w: u32, h: u32):
         """Present a bounded region when the backend supports partial flush."""
         self.mark_dirty_rect(x, y, w, h)
-        self.clear_dirty()
+        self.swap_buffers()
 
     me flush_dirty_rects():
         """Flush tracked damage and clear the damage state.
@@ -400,19 +439,22 @@ impl FramebufferDriver:
         self.clear_dirty()
 
     me clear(color: Color):
-        """Clear entire framebuffer (MMIO or host buffer)."""
+        """Clear entire framebuffer (back buffer or host buffer).
+
+        MMIO mode clears `back_buffer`; call `swap_buffers()` to present.
+        """
         val pixel = color.to_u32()
         val total = self.width * self.height
+        val tot_i = total.to_i64()
         if self.front_addr != 0:
-            var i: u32 = 0
-            while i < total:
-                val offset = (i * 4).to_u64()
-                mmio_write32(self.front_addr + offset, pixel)
+            val cap = self.back_buffer.length().to_i64()
+            var i: i64 = 0
+            while i < tot_i and i < cap:
+                self.back_buffer[i] = pixel
                 i = i + 1
         else:
             val cap = self.host_buffer.length().to_i64()
             var j: i64 = 0
-            val tot_i = total.to_i64()
             while j < tot_i and j < cap:
                 self.host_buffer[j] = pixel
                 j = j + 1
@@ -422,19 +464,23 @@ impl FramebufferDriver:
         self.width * self.height
 
     me blend_pixel(x: u32, y: u32, color: Color, alpha: u8):
-        """Alpha-blend a pixel on the active surface (MMIO or host buffer)."""
+        """Alpha-blend a pixel on the active surface (back buffer or host buffer).
+
+        MMIO mode blends into `back_buffer`; call `swap_buffers()` to present.
+        """
         if x >= self.width or y >= self.height:
             return
         val inv = 255 - alpha.to_u32()
         val sr = color.r.to_u32()
         val sg = color.g.to_u32()
         val sb = color.b.to_u32()
+        val idx = (y * self.width + x).to_i64()
         var dst: u32 = 0
         if self.front_addr != 0:
-            val offset = ((y * self.width + x) * 4).to_u64()
-            dst = mmio_read32(self.front_addr + offset)
+            if idx >= self.back_buffer.length().to_i64():
+                return
+            dst = self.back_buffer[idx]
         else:
-            val idx = (y * self.width + x).to_i64()
             if idx >= self.host_buffer.length().to_i64():
                 return
             dst = self.host_buffer[idx]
@@ -446,11 +492,9 @@ impl FramebufferDriver:
         val rb = (sb * alpha.to_u32() + db * inv + 128) >> 8
         val out = 0xFF000000 | (rr << 16) | (rg << 8) | rb
         if self.front_addr != 0:
-            val offset2 = ((y * self.width + x) * 4).to_u64()
-            mmio_write32(self.front_addr + offset2, out)
+            self.back_buffer[idx] = out
         else:
-            val idx2 = (y * self.width + x).to_i64()
-            self.host_buffer[idx2] = out
+            self.host_buffer[idx] = out
         self.mark_dirty_rect(x, y, 1, 1)
 
     me blend_rect(x: u32, y: u32, w: u32, h: u32, color: Color, alpha: u8):

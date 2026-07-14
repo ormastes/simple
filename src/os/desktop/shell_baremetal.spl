@@ -8,7 +8,8 @@ use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use common.ui.taskbar_model.{TaskbarModel}
 use common.ui.window_scene.{SharedWmScene, WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput}
-use common.ui.window_scene_draw_ir.{SharedWmPixelBufferBackend, shared_wm_scene_render_taskbar_context_to_backend, shared_wm_scene_render_taskbar_context_to_pixel_buffer}
+use common.ui.window_scene_draw_ir.{SharedWmPixelBufferBackend, shared_wm_scene_render_taskbar_context_to_backend, shared_wm_scene_render_taskbar_context_to_pixel_buffer, shared_wm_pixel_buffer_pixels}
+use os.gui.render.{render_blit_frame}
 
 # ============================================================================
 # Baremetal Engine2D adapter (shared CompositorBackend contract)
@@ -83,3 +84,14 @@ fn render_baremetal_shared_wm_scene_to_pixel_buffer(backend: SharedWmPixelBuffer
     val render_input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: content_frames, metrics: metrics, t_micros: 0)
     val taskbar_input = SharedWmTaskbarRenderInput(render: render_input, taskbar: taskbar, clock_label: clock)
     shared_wm_scene_render_taskbar_context_to_pixel_buffer(backend, taskbar_input)
+    # Hand the freshly composed pixels to the MMIO framebuffer path so the
+    # widget/compositor output actually reaches the screen. Exactly once per
+    # composed frame.
+    present_pixel_buffer_to_framebuffer(backend)
+
+fn present_pixel_buffer_to_framebuffer(backend: SharedWmPixelBufferBackend):
+    """Copy the pixel-buffer backend's composed frame into the os.gui.render
+    shadow buffer (full-frame dirty) and present it. render_init(fb, w, h) must
+    have run first; render_blit_frame no-ops until the shadow buffer exists."""
+    val pixels = shared_wm_pixel_buffer_pixels(backend)
+    render_blit_frame(pixels, backend.width_px.to_u64(), backend.height_px.to_u64())

@@ -393,9 +393,8 @@ fn execute_command(state: UIState) -> UIState:
 # =========================================================================
 
 fn focus_next(state: UIState) -> UIState:
-    """Move focus to the next widget."""
-    val ids = state.tree.all_widget_ids()
-    val focusable = get_focusable_ids(ids)
+    """Move focus to the next widget (tab_index order)."""
+    val focusable = get_focusable_ordered(state.tree)
     if focusable.len() == 0:
         return state
 
@@ -408,9 +407,8 @@ fn focus_next(state: UIState) -> UIState:
     )
 
 fn focus_prev(state: UIState) -> UIState:
-    """Move focus to the previous widget."""
-    val ids = state.tree.all_widget_ids()
-    val focusable = get_focusable_ids(ids)
+    """Move focus to the previous widget (tab_index order)."""
+    val focusable = get_focusable_ordered(state.tree)
     if focusable.len() == 0:
         return state
 
@@ -428,6 +426,49 @@ fn get_focusable_ids(ids: [text]) -> [text]:
     for id in ids:
         if id != "":
             result = result.push(id)
+    return result
+
+fn get_focusable_ordered(tree: UITree) -> [text]:
+    """Focusable widget IDs in tab order.
+
+    Each widget's sort key is its optional `tab_index` prop when present,
+    otherwise its 0-based declaration position. IDs are ordered by ascending
+    key, with declaration order as a stable tiebreak (so equal keys — and the
+    no-tab_index widgets keyed by position — keep declaration order).
+    """
+    val ids = tree.all_widget_ids()
+    var f_ids: [text] = []
+    var f_keys: [i32] = []
+    var pos = 0
+    for id in ids:
+        if id != "":
+            val raw = WidgetNode(id: id).get_prop("tab_index")
+            var key = pos
+            if raw != "":
+                key = (raw.to_int() ?? pos.to_i64()).to_i32()
+            f_ids = f_ids.push(id)
+            f_keys = f_keys.push(key)
+            pos = pos + 1
+    val n = f_ids.len()
+    # Stable selection sort: scanning candidates in ascending original index
+    # with a strict `<` comparison makes the lowest-index widget win ties.
+    var used: [bool] = []
+    var u = 0
+    while u < n:
+        used = used.push(false)
+        u = u + 1
+    var result: [text] = []
+    var count = 0
+    while count < n:
+        var best = -1
+        var bi = 0
+        while bi < n:
+            if not used[bi] and (best == -1 or f_keys[bi] < f_keys[best]):
+                best = bi
+            bi = bi + 1
+        used[best] = true
+        result = result.push(f_ids[best])
+        count = count + 1
     return result
 
 fn get_next_id(ids: [text], current: text) -> text:

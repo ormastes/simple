@@ -11,6 +11,16 @@ Usage:
     server.run()
 """
 
+use std.json.{json_parse, json_is_object, json_object_keys, json_object_get,
+              json_is_string, json_to_string, json_serialize}
+use std.io.driver.{IoDriver}
+use std.nogc_async_mut.io.tcp_backend.{
+    tcp_backend_bind, tcp_backend_close,
+    tcp_backend_set_nonblocking, tcp_backend_set_nodelay
+}
+use std.http_server.shared.{parse_http_request, serialize_http_response}
+use std.http_server.types.{HttpRequestData}
+
 # ============================================================================
 # HttpRequest
 # ============================================================================
@@ -151,17 +161,100 @@ impl HttpServer:
         self.handler_fn = Some(h)
         self
 
+    fn dispatch_raw(raw_request: text) -> text:
+        """Parse a raw HTTP/1.1 request, run it through the registered
+        handler, and serialize the response back to wire format.
+
+        Delegates parsing/serialization to std.http_server.shared (the
+        same production request parser used by the full async server and
+        by EmbeddedHttpServer), so it stays correct without duplicating
+        HTTP framing logic here. Pure/socket-free, so it is directly
+        unit-testable without binding a real port.
+        """
+        val parsed = parse_http_request(raw_request)
+        if not parsed.?:
+            return serialize_http_response(400, "Bad Request", [("Connection", "close")])
+        val request_data = parsed as HttpRequestData
+        var headers: Dict<text, text> = {}
+        for pair in request_data.headers:
+            headers[pair.0] = pair.1
+        val request = HttpRequest.create(request_data.method, request_data.path,
+                                          headers, request_data.body, request_data.query)
+        val handler = self.handler_fn ?? default_handler
+        val response = handler(request)
+        var out_headers: [(text, text)] = []
+        for key in response.headers.keys():
+            out_headers.push((key, response.headers.get(key) ?? ""))
+        out_headers.push(("Connection", "close"))
+        serialize_http_response(response.status_code, response.body, out_headers)
+
     fn run():
         """Start the server event loop (blocking).
 
-        Binds to host:port and dispatches each accepted connection to
-        the registered handler. Runs until the process is terminated.
-
-        NOTE: This high-level facade does not yet wire to the underlying
-        http_server stack. Use std.nogc_async_mut.http_server for a
-        production server implementation.
+        Binds to host:port, accepts connections via std.io.driver's IoDriver
+        (the same completion-based I/O backend the production async server
+        and EmbeddedHttpServer use), and dispatches each request through
+        `dispatch_raw` to the registered handler. Single-threaded,
+        connection-close-after-response (no keepalive) -- matching this
+        facade's "simple blocking HTTP server" contract. Runs until the
+        process is terminated.
         """
-        pass_dn
+        val listen_fd = tcp_backend_bind("{self.host}:{self.port}")
+        if listen_fd < 0:
+            print "HttpServer: failed to bind {self.host}:{self.port}"
+            return
+        tcp_backend_set_nonblocking(listen_fd, true)
+
+        val driver = IoDriver.new()
+        var accept_op = driver.submit_accept(listen_fd)
+        driver.flush()
+
+        var running = true
+        print "HttpServer listening on {self.host}:{self.port}"
+
+        var op_to_fd: Dict<i64, i64> = {}
+        var op_is_recv: Dict<i64, bool> = {}
+
+        while running:
+            driver.flush()
+            val count = driver.poll_count(64, 50)
+
+            var idx = 0
+            while idx < count:
+                val op_id = driver.poll_id(idx)
+                val result = driver.poll_result(idx)
+
+                if op_id == accept_op:
+                    accept_op = driver.submit_accept(listen_fd)
+                    if result >= 0:
+                        val client_fd = result
+                        tcp_backend_set_nonblocking(client_fd, true)
+                        tcp_backend_set_nodelay(client_fd, true)
+                        val recv_op = driver.submit_recv(client_fd, 8192)
+                        op_to_fd[recv_op] = client_fd
+                        op_is_recv[recv_op] = true
+                else:
+                    val fd_opt = op_to_fd.get(op_id)
+                    if fd_opt.?:
+                        val fd = fd_opt as i64
+                        val is_recv = op_is_recv.get(op_id) ?? false
+                        op_to_fd.remove(op_id)
+                        op_is_recv.remove(op_id)
+                        if is_recv:
+                            if result <= 0:
+                                tcp_backend_close(fd)
+                            else:
+                                val data = driver.poll_data(idx)
+                                val response_text = self.dispatch_raw(data)
+                                val send_op = driver.submit_send(fd, response_text)
+                                op_to_fd[send_op] = fd
+                                op_is_recv[send_op] = false
+                        else:
+                            tcp_backend_close(fd)
+                idx = idx + 1
+
+        tcp_backend_close(listen_fd)
+        driver.close()
 
 # ============================================================================
 # Internal helpers
@@ -173,26 +266,20 @@ fn default_handler(req: HttpRequest) -> HttpResponse:
 fn parse_flat_json(json: text) -> Dict<text, text>:
     """Parse a flat JSON object {"k":"v",...} into Dict<text,text>.
 
-    Does not handle nested objects or arrays — callers needing full
-    JSON must use std.json.
+    Delegates to the shared std.json parser instead of a naive comma-split
+    (the old split-based version broke on commas inside string values, e.g.
+    {"a":"x,y"}). Non-string values (numbers, booleans, null, nested
+    objects/arrays) are converted to their JSON text form rather than
+    dropped -- callers needing full nested JSON should use std.json directly.
     """
     var result: Dict<text, text> = {}
-    val trimmed = json.trim()
-    if not trimmed.starts_with("{"):
+    val parsed = json_parse(json)
+    if not json_is_object(parsed):
         return result
-    # Strip outer braces
-    val inner = trimmed.substring(1, trimmed.len() - 1).trim()
-    if inner.len() == 0:
-        return result
-    # Split on "," — note: does not handle commas inside string values
-    val pairs = inner.split(",")
-    var i = 0
-    while i < pairs.len():
-        val pair = pairs[i].trim()
-        val colon = pair.index_of(":")
-        if colon > 0:
-            val key = pair.substring(0, colon).trim().trim_char('"')
-            val value = pair.substring(colon + 1, pair.len()).trim().trim_char('"')
-            result[key] = value
-        i = i + 1
+    for key in json_object_keys(parsed):
+        val value = json_object_get(parsed, key)
+        if json_is_string(value):
+            result[key] = json_to_string(value) as text
+        else:
+            result[key] = json_serialize(value)
     result

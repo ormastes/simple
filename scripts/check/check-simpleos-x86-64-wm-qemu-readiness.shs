@@ -4,6 +4,13 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 QEMU_BIN="${QEMU_SYSTEM_X86_64:-qemu-system-x86_64}"
 QEMU_TIMEOUT="${X86_64_WM_QEMU_READINESS_TIMEOUT:-3}"
+# Bounded wait (seconds) for the real boot-verification step below.
+BOOT_WAIT="${X86_64_WM_QEMU_BOOT_WAIT:-60}"
+# Earliest reliable serial marker emitted by wm_entry.spl's own entry point
+# (the very first statement of fn spl_start()) — see report_gap below for why
+# this one was picked over the generic "[boot] memory init OK" marker other
+# gates use (that marker belongs to a different entry point).
+BOOT_MARKER="\[WM\] SimpleOS Glass Window Manager starting"
 
 ENTRY="${ROOT_DIR}/examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl"
 # wm_entry_prim.spl plays the same role for x86_64 that wm_entry_io.spl plays
@@ -21,6 +28,8 @@ qemu_path=""
 machine_q35="false"
 vga_std="false"
 dry_run_parse="false"
+boot_verified="false"
+boot_skipped_reason=""
 reason=""
 host_os="$(uname -s 2>/dev/null || echo unknown)"
 host_machine="$(uname -m 2>/dev/null || echo unknown)"
@@ -79,12 +88,74 @@ else
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# Real boot verification: the checks above only prove QEMU can *parse* the
+# q35/std-vga arguments (via -S, paused, never actually running the kernel).
+# That is not proof the kernel boots. If a built kernel ELF is available
+# (SIMPLEOS_KERNEL_ELF — built out-of-band by the coordinator/build step,
+# same convention as the other check-simpleos-*-qemu.shs gates' $KERNEL),
+# actually boot it and wait for its earliest real serial marker. If no
+# kernel ELF is available in this environment, SKIP the boot-verification
+# step explicitly rather than silently reporting "ready".
+# ---------------------------------------------------------------------------
+if [ "$status" = "ready" ]; then
+    KERNEL_ELF="${SIMPLEOS_KERNEL_ELF:-}"
+    if [ -z "$KERNEL_ELF" ] || [ ! -f "$KERNEL_ELF" ]; then
+        status="skip"
+        boot_skipped_reason="SIMPLEOS_KERNEL_ELF not set or file missing (arg-parse pre-check passed, but no kernel was booted)"
+    else
+        SERIAL_LOG="${ROOT_DIR}/build/os/check_simpleos_x86_64_wm_qemu_readiness.serial.log"
+        mkdir -p "$(dirname "$SERIAL_LOG")"
+        rm -f "$SERIAL_LOG"
+        "$QEMU_BIN" -no-user-config -monitor none -nographic -no-reboot \
+            -machine q35 -cpu "$cpu" -accel "$accelerator" -m 512M \
+            -kernel "$KERNEL_ELF" -serial "file:$SERIAL_LOG" \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+            -vga std &
+        QEMU_PID=$!
+
+        i=0
+        found="false"
+        while [ "$i" -lt "$BOOT_WAIT" ]; do
+            if grep -qa -- "$BOOT_MARKER" "$SERIAL_LOG" 2>/dev/null; then
+                found="true"
+                break
+            fi
+            if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 1
+            i=$((i + 1))
+        done
+        if [ "$found" != "true" ]; then
+            grep -qa -- "$BOOT_MARKER" "$SERIAL_LOG" 2>/dev/null && found="true"
+        fi
+
+        kill "$QEMU_PID" 2>/dev/null || true
+        wait "$QEMU_PID" 2>/dev/null || true
+
+        if [ "$found" = "true" ]; then
+            boot_verified="true"
+        else
+            status="not-ready"
+            reason="kernel did not print boot marker within ${BOOT_WAIT}s: ${BOOT_MARKER}"
+            echo "===== serial tail (${SERIAL_LOG}) ====="
+            tail -60 "$SERIAL_LOG" 2>/dev/null || true
+            echo "======================="
+        fi
+    fi
+fi
+
 echo "x86_64_wm_qemu_readiness: $status"
 echo "qemu_system: $QEMU_BIN"
 echo "qemu_path: ${qemu_path:-}"
 echo "machine_q35: $machine_q35"
 echo "vga_std: $vga_std"
 echo "dry_run_parse: $dry_run_parse"
+echo "boot_verified: $boot_verified"
+if [ -n "$boot_skipped_reason" ]; then
+    echo "boot_verification_skipped: $boot_skipped_reason"
+fi
 echo "host_os: $host_os"
 echo "host_machine: $host_machine"
 echo "accelerator: $accelerator"
@@ -97,7 +168,7 @@ if [ -n "$reason" ]; then
     echo "reason: $reason"
 fi
 
-if [ "$status" = "ready" ]; then
-    exit 0
+if [ "$status" = "not-ready" ]; then
+    exit 1
 fi
-exit 1
+exit 0

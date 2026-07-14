@@ -43,6 +43,7 @@ use std.nogc_sync_mut.gpu.engine2d.webgpu_sffi.{
     webgpu_sffi_compute_draw,
     webgpu_sffi_adapter_count, webgpu_sffi_adapter_name, webgpu_sffi_adapter_is_cpu
 }
+use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendProbeResult}
 
 # ============================================================================
 # Availability Check
@@ -218,6 +219,22 @@ fn _wgpu_mask_blocks(backend: WebGpuBackend, x: i32, y: i32) -> bool:
     if mi < 0 or mi >= backend.mask_buf.len():
         return false
     backend.mask_buf[mi] == 0u8
+
+impl WebGpuBackend:
+    # Honest readiness probe. init() intentionally returns true so the CPU
+    # mirror keeps serving read_pixels() on adapterless hosts (the documented
+    # M7 parity floor) — the same contract DirectX-on-Linux keeps by returning
+    # true for its software-emulation path. This probe is the honest external
+    # signal (mirroring probe_directx): it reports Initialized ONLY when a live
+    # WebGPU surface is actually present, and Unavailable (with a recorded
+    # reason) otherwise. A freshly created, un-initialized backend has
+    # gpu_ready == false and so reports Unavailable rather than ready.
+    me probe() -> BackendProbeResult:
+        if self.gpu_ready and self.surface != 0:
+            return BackendProbeResult.success("webgpu", "webgpu surface live")
+        if not webgpu_sffi_is_available():
+            return BackendProbeResult.unavailable("webgpu", "WebGPU runtime not available; CPU mirror in use")
+        BackendProbeResult.unavailable("webgpu", "no WebGPU surface acquired; CPU mirror in use")
 
 impl RenderBackend for WebGpuBackend:
 

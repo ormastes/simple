@@ -1,7 +1,15 @@
-# frame_pacer.spl — frame budget management and vsync-aligned present
+# frame_pacer.spl — frame budget management and budget-paced present
 #
 # FramePacer tracks when each frame started and whether the frame
 # budget has elapsed, preventing busy-wait present loops.
+#
+# Honesty note: this is a monotonic-clock budget sleep, NOT a real
+# vsync/vblank-aligned present — there is no IRQ or hardware scanout
+# signal involved, so a present can still land mid-refresh on real
+# hardware. Upgrading to true vsync alignment requires wiring a vblank
+# IRQ (or virtio-gpu/GPU vendor scanout-complete signal) into
+# mark_frame_start()/should_present() in place of the monotonic clock
+# read; that hardware hookup is out of scope here.
 #
 # Usage pattern:
 #   pacer.mark_frame_start()
@@ -19,6 +27,20 @@ extern fn rt_sleep_ms(ms: i64)
 val FRAME_BUDGET_60HZ_MS: i64 = 16   # 16.666... ms → floor to 16
 val FRAME_BUDGET_30HZ_MS: i64 = 33
 val FRAME_BUDGET_24HZ_MS: i64 = 41
+
+struct FramePacerContract:
+    """Snapshot of FramePacer's pacing state (same fields report_contract prints).
+
+    Returned as data so callers/specs can assert on values directly instead
+    of scraping stdout. `warm_startup_ms` is only meaningful when
+    `warm_startup_available` is true (mirrors the prior "unavailable" print
+    for the zero-frames case).
+    """
+    target_fps: i32
+    frame_budget_ms: i64
+    frame_count: i64
+    warm_startup_ms: i64
+    warm_startup_available: bool
 
 class FramePacer:
     target_fps: i32
@@ -101,11 +123,25 @@ class FramePacer:
         if self.frame_count == 0: return 0
         self.frame_end_ms - self.frame_start_ms
 
+    # Build the pacing snapshot as data (no I/O) — see report_contract() below
+    # for the print wrapper consumed by gate scripts/specs.
+    me contract() -> FramePacerContract:
+        FramePacerContract(
+            target_fps: self.target_fps,
+            frame_budget_ms: self.frame_budget_ms,
+            frame_count: self.frame_count,
+            warm_startup_ms: if self.frame_count > 0: self.warm_startup_ms() else: 0,
+            warm_startup_available: self.frame_count > 0
+        )
+
+    # Thin print wrapper: keeps the exact prior stdout line format for any
+    # existing gate/log scrapers while `contract()` is now the source of truth.
     me report_contract():
-        print("frame_pacer_target_fps={self.target_fps}")
-        print("frame_pacer_frame_budget_ms={self.frame_budget_ms}")
-        print("frame_pacer_frame_count={self.frame_count}")
-        if self.frame_count > 0:
-            print("frame_pacer_warm_startup_ms={self.warm_startup_ms()}")
+        val c = self.contract()
+        print("frame_pacer_target_fps={c.target_fps}")
+        print("frame_pacer_frame_budget_ms={c.frame_budget_ms}")
+        print("frame_pacer_frame_count={c.frame_count}")
+        if c.warm_startup_available:
+            print("frame_pacer_warm_startup_ms={c.warm_startup_ms}")
         else:
             print("frame_pacer_warm_startup_ms=unavailable")

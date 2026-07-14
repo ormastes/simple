@@ -1,0 +1,56 @@
+# @cover src/lib/common/ui/widget.spl 80%
+# @req FR-UI-KEYBINDINGS
+#
+# `UITree.with_keybindings` used to be a stub returning `me`. It now persists
+# mode-scoped bindings (round-tripped through the value-typed UITree) and
+# `bindings()` reconstructs them, so a bound key fires its action through the
+# normal key-dispatch path BEFORE the hardcoded default handling.
+
+use std.spec.*
+use common.ui.widget.{UIState}
+use common.ui.builder.{column, button, build_tree}
+use common.ui.event.{process_event}
+use common.ui.widget.{UIEvent}
+
+fn kb_root() -> UIState:
+    val root = column("kbroot", [
+        button("kb_first", "First", "act_first"),
+        button("kb_second", "Second", "act_second"),
+    ])
+    UIState.new(build_tree(root))
+
+describe "with_keybindings registers real bindings":
+
+    it "round-trips a binding through bindings()":
+        val tree = build_tree(column("rtroot", [button("rt_b", "B", "b")]))
+            .with_keybindings({"normal": {"g": "focus_next"}})
+        val all = tree.bindings()
+        assert_true(all.contains_key("normal"))
+        val mode_map = all["normal"]
+        assert_true(mode_map.contains_key("g"))
+        expect(mode_map["g"]).to_equal("focus_next")
+
+    it "a bound key fires its action instead of the default no-op":
+        # In Normal mode the plain key 'g' is a no-op; binding it to focus_next
+        # must move focus when pressed.
+        var s = kb_root()
+        val bound_tree = s.tree.with_keybindings({"normal": {"g": "focus_next"}})
+        s = UIState(tree: bound_tree, mode: s.mode, focused_id: "kbroot", command_buffer: s.command_buffer)
+        val after = process_event(s, UIEvent.KeyPress(key: "g"))
+        # focus advanced off the root to the first focusable child.
+        expect(after.focused_id).to_equal("kb_first")
+
+    it "an unbound tree leaves the same key as a no-op":
+        var s = kb_root()
+        s = UIState(tree: s.tree, mode: s.mode, focused_id: "kbroot", command_buffer: s.command_buffer)
+        val after = process_event(s, UIEvent.KeyPress(key: "g"))
+        expect(after.focused_id).to_equal("kbroot")
+
+    it "keeps bindings for multiple modes distinct":
+        val tree = build_tree(column("mmroot", [button("mm_b", "B", "b")]))
+            .with_keybindings({"normal": {"g": "focus_next"}, "insert": {"escape": "normal_mode"}})
+        val all = tree.bindings()
+        assert_true(all.contains_key("insert"))
+        val m = all["insert"]
+        assert_true(m.contains_key("escape"))
+        expect(m["escape"]).to_equal("normal_mode")

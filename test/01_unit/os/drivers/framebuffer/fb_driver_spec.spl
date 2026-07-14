@@ -229,7 +229,7 @@ describe "FramebufferDriver MMIO ARGB presenter":
         mmio_write32(source, 0xFF112233u32)
         mmio_write32(destination, 0xFFAABBCCu32)
         var fb = FramebufferDriver.from_scanout_raw(destination, 1u32, 1u32, 4u32, 32u32)
-        expect(fb.present_argb32_from_mmio(source, 1u32, 1u32, 4, 1)).to_be(false)
+        assert_false(fb.present_argb32_from_mmio(source, 1u32, 1u32, 4, 1))
         expect(mmio_read32(destination)).to_equal(0xFFAABBCCu32)
 
     it "rejects invalid dimensions bytes pitch addresses and overlapping ranges":
@@ -243,16 +243,17 @@ describe "FramebufferDriver MMIO ARGB presenter":
         var overlap = FramebufferDriver.from_scanout_raw(0x5008u64, 2u32, 2u32, 8u32, 32u32)
         var short_host = FramebufferDriver.from_buffer(2u32, 2u32)
         short_host.host_buffer = []
-        expect(valid.present_argb32_from_mmio(0u64, 2u32, 2u32, 16, checksum)).to_be(false)
-        expect(valid.present_argb32_from_mmio(0x5002u64, 2u32, 2u32, 16, checksum)).to_be(false)
-        expect(valid.present_argb32_from_mmio(0x5000u64, 1u32, 2u32, 8, checksum)).to_be(false)
-        expect(valid.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 12, checksum)).to_be(false)
-        expect(valid.present_argb32_from_mmio(0xFFFFFFFFFFFFFFFCu64, 2u32, 2u32, 16, checksum)).to_be(false)
-        expect(short_pitch.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum)).to_be(false)
-        expect(unaligned_pitch.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum)).to_be(false)
-        expect(wrong_bpp.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum)).to_be(false)
-        expect(overlap.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum)).to_be(false)
-        expect(short_host.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum)).to_be(false)
+        expect(valid.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum)).to_equal(true)
+        assert_false(valid.present_argb32_from_mmio(0u64, 2u32, 2u32, 16, checksum))
+        assert_false(valid.present_argb32_from_mmio(0x5002u64, 2u32, 2u32, 16, checksum))
+        assert_false(valid.present_argb32_from_mmio(0x5000u64, 1u32, 2u32, 8, checksum))
+        assert_false(valid.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 12, checksum))
+        assert_false(valid.present_argb32_from_mmio(0xFFFFFFFFFFFFFFFCu64, 2u32, 2u32, 16, checksum))
+        assert_false(short_pitch.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum))
+        assert_false(unaligned_pitch.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum))
+        assert_false(wrong_bpp.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum))
+        assert_false(overlap.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum))
+        assert_false(short_host.present_argb32_from_mmio(0x5000u64, 2u32, 2u32, 16, checksum))
 
     it "copies into an existing host-backed buffer without a staging allocation":
         mmio_reset_for_test()
@@ -263,3 +264,59 @@ describe "FramebufferDriver MMIO ARGB presenter":
         var fb = FramebufferDriver.from_buffer(2u32, 1u32)
         expect(fb.present_argb32_from_mmio(source, 2u32, 1u32, 8, simpleos_host_gpu_readback_checksum(pixels, 2))).to_be(true)
         expect(fb.host_pixels()).to_equal(pixels)
+
+
+# ============================================================================
+# Test Group 5: MMIO double buffering (draw targets back_buffer, swap_buffers
+# flushes only the tracked dirty rect to the hardware framebuffer)
+# ============================================================================
+
+describe "FramebufferDriver MMIO double buffering":
+    it "put_pixel does not touch the front buffer until swap_buffers is called":
+        mmio_reset_for_test()
+        val dest = 0x9000u64
+        mmio_write32(dest, 0xDEADBEEFu32)
+        var fb = FramebufferDriver.from_scanout_raw(dest, 1u32, 1u32, 4u32, 32u32)
+        fb.put_pixel(0u32, 0u32, Color.red())
+        expect(mmio_read32(dest)).to_equal(0xDEADBEEFu32)
+        fb.swap_buffers()
+        expect(mmio_read32(dest)).to_equal(Color.red().to_u32())
+
+    it "fill_rect + swap_buffers makes pixels visible in the front buffer":
+        mmio_reset_for_test()
+        val dest = 0xA000u64
+        var fb = FramebufferDriver.from_scanout_raw(dest, 2u32, 2u32, 8u32, 32u32)
+        fb.fill_rect(0u32, 0u32, 2u32, 2u32, Color.blue())
+        expect(mmio_read32(dest)).to_equal(0u32)
+        fb.swap_buffers()
+        expect(mmio_read32(dest)).to_equal(Color.blue().to_u32())
+        expect(mmio_read32(dest + 4u64)).to_equal(Color.blue().to_u32())
+        expect(mmio_read32(dest + 8u64)).to_equal(Color.blue().to_u32())
+        expect(mmio_read32(dest + 12u64)).to_equal(Color.blue().to_u32())
+
+    it "swap_buffers copies only the tracked dirty rect, leaving other front pixels untouched":
+        mmio_reset_for_test()
+        val dest = 0xB000u64
+        val sentinel = 0xCAFEF00Du32
+        var fb = FramebufferDriver.from_scanout_raw(dest, 4u32, 4u32, 16u32, 32u32)
+        var row: u64 = 0u64
+        while row < 4u64:
+            var col: u64 = 0u64
+            while col < 4u64:
+                mmio_write32(dest + (row * 4u64 + col) * 4u64, sentinel)
+                col = col + 1u64
+            row = row + 1u64
+        fb.put_pixel(1u32, 1u32, Color.green())
+        fb.swap_buffers()
+        expect(mmio_read32(dest + (1u64 * 4u64 + 1u64) * 4u64)).to_equal(Color.green().to_u32())
+        expect(mmio_read32(dest)).to_equal(sentinel)
+        expect(mmio_read32(dest + (3u64 * 4u64 + 3u64) * 4u64)).to_equal(sentinel)
+
+    it "clear_dirty via clear_dirty tracking resets after swap":
+        mmio_reset_for_test()
+        val dest = 0xC000u64
+        var fb = FramebufferDriver.from_scanout_raw(dest, 1u32, 1u32, 4u32, 32u32)
+        fb.put_pixel(0u32, 0u32, Color.white())
+        expect(fb.dirty_rect().valid).to_equal(true)
+        fb.swap_buffers()
+        assert_false(fb.dirty_rect().valid)
