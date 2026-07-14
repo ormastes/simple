@@ -119,3 +119,27 @@ through style resolution and only stalls on the raw 17MB font parse. Remaining
 unblock paths (unchanged): fix the `_sfnt_utf16be_text` JIT lowering so the font
 parser compiles, OR redeploy Stage-4, OR ship a small Latin default font ahead
 of the CJK candidate for Latin-script content.
+
+## Update 2026-07-14 (4): _sfnt `unit` seed-crash fixed; font-selection is NOT a viable unblock
+Pushed the smaller-font hypothesis to ground truth. Two findings:
+1. **Real seed-crash fixed:** `_sfnt_utf16be_text` (sfnt.spl) used `val unit =
+   units[index]`; the seed reports `variable 'unit' not found` /
+   `Unknown variable: unit while lowering _sfnt_utf16be_text` — `unit` collides
+   with the unit type in the seed's analyzer. Renamed to `code_unit` (pure,
+   semantics-identical). This unblocked sfnt name-table UTF-16 parsing on the
+   seed (the render progressed past it after the rename).
+2. **Font selection cannot be changed to dodge the 17MB parse.** The default
+   sans face is `Noto Sans SC` for ALL languages incl. Latin — this is BY DESIGN
+   (universal Latin+Cyrillic+CJK sans face) and is LOCKED by acceptance tests:
+   `shared_font_shaping_acceptance_spec.spl:59` and
+   `shared_font_manifest_spec.spl:409/444` assert `Noto Sans SC` as the sans
+   witness for en/es/fr/pt/ru/id. Substituting Nunito (0.3MB) renders faster but
+   REGRESSES those contracts, so it was reverted.
+
+NET: after fixing the `unit` crash, the render still cannot complete a full page
+under the interpreter in practical time — even a 0.3MB font left a 20x15 render
+grinding 6+ min (glyph rasterization + layout + paint per node at interpreter
+speed). Confirms the compiled-lane requirement from every angle. Source crashes
+fixed this session (split x2, FontRenderConfig path call, `unit`): the web font
+path no longer CRASHES on the seed — it is purely throughput-bound now. Only real
+unblock: fix `_sfnt_utf16be_text` JIT lowering, or redeploy Stage-4 past `rt_cli_arg_count`.
