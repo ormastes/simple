@@ -94,3 +94,28 @@ Fix path (either unblocks the web showcase):
   + erased-receiver builtin method resolution, and lower `_sfnt_utf16be_text`.
 - OR redeploy Stage-4 `bin/simple` past the `rt_cli_arg_count` regression, then
   render via the compiled lane where these constructs already work.
+
+## Update 2026-07-14 (3): FINAL root cause — 17MB CJK font parsed in the interpreter
+After the `FontRenderConfig.default_for_size` path call was worked around too
+(free function `font_render_config_default_for_size`, font_types.spl +
+font_renderer.spl 6 sites), instrumentation inside
+`_resolve_font_metrics_with_language_config` pinned the hang EXACTLY: the first
+`#text` node prints `[TRACE-TMP] resolve: before browser_default_for_family
+family=Noto Sans SC` and never returns. The default sans family resolves to
+**Noto Sans SC**, whose first existing candidate on this host is
+`assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf` = **17 MB** CJK
+variable font (Liberation Sans, the small Latin fallback, is not installed).
+Loading+parsing a 17MB font runs in the INTERPRETER because the JIT cannot lower
+the sfnt name-table parser (`Unknown variable: unit while lowering
+_sfnt_utf16be_text`), so what looked like a "compute_styles hang" is really a
+single 17MB font parse at interpreter speed on the first text node.
+
+So the web-showcase PPM is blocked by the INTERSECTION of: (a) a 17MB default
+font, (b) a JIT HIR-lowering gap that forces slow interpretation of the font
+parser, and (c) the deployed-binary `rt_cli_arg_count` regression that rules out
+the compiled lane. Fixed in source this session: the two `.split()` crashes and
+the `FontRenderConfig.default_for_size` path call — the render now progresses
+through style resolution and only stalls on the raw 17MB font parse. Remaining
+unblock paths (unchanged): fix the `_sfnt_utf16be_text` JIT lowering so the font
+parser compiles, OR redeploy Stage-4, OR ship a small Latin default font ahead
+of the CJK candidate for Latin-script content.
