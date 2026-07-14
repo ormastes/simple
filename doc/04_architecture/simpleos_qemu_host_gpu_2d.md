@@ -160,6 +160,15 @@ Vulkan. Prepared hosts therefore exercise the same wire contract on x86_64,
 AArch64, and RISC-V without accepting a compatibility backend under a native
 name.
 
+Processing preference is a verification classification, not a second runtime
+scheduler or wire protocol. For the existing FillU32 fixture the daemon times
+the independent CPU oracle and device executor separately after the HELLO
+probe, emits one run/frame-correlated performance receipt before publishing
+completion, and labels the correct device result `preferred` only at a 1.5x or
+greater speedup. The wrapper recomputes that boundary, rejects missing or
+dishonest evidence, and preserves a correct slower result as
+`available-not-preferred`.
+
 `src/os/compositor/engine2d_wm_frame_executor.spl` is the local production
 fallback owner. It builds and submits the canonical Simple-owned composition,
 resolves only

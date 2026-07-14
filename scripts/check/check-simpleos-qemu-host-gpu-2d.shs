@@ -250,6 +250,67 @@ serial_processing_pair_valid() {
     fi
 }
 
+processing_perf_field() {
+    log=$1
+    isa=$2
+    field=$3
+    awk -v expected_isa="$isa" -v expected_field="$field" '
+        $1 == "HOST_GPU_PROCESS_PERF" && $2 == "isa=" expected_isa {
+            for (i = 3; i <= NF; i++) {
+                if (index($i, expected_field "=") == 1) {
+                    print substr($i, length(expected_field) + 2)
+                }
+            }
+        }
+    ' "$log"
+}
+
+processing_perf_us_valid() {
+    value=$1
+    case "$value" in ''|0|*[!0-9]*) return 1 ;; esac
+    [ "${#value}" -lt 16 ] && return 0
+    [ "${#value}" -eq 16 ] || return 1
+    awk -v value="$value" 'BEGIN {
+        if (("x" value) <= "x9223372036854776") exit 0
+        exit 1
+    }'
+}
+
+processing_perf_evidence_valid() (
+    serial_log=$1
+    daemon_log=$2
+    isa=$3
+    [ -f "$serial_log" ] && [ -f "$daemon_log" ] || return 1
+    [ "$(grep -aEc "^HOST_GPU_PROCESS_PERF isa=$isa backend=(cuda|vulkan|metal) generation=[1-9][0-9]* run=[1-9][0-9]* frame=[1-9][0-9]* cpu_us=[1-9][0-9]* device_us=[1-9][0-9]* preference=(preferred|available-not-preferred)[[:space:]]*$" "$daemon_log")" -eq 1 ] || return 1
+
+    serial_backend=$(sed -n "s/^HOST_GPU_PROCESS_OK isa=$isa backend=\([^[:space:]]*\) .*/\1/p" "$serial_log")
+    serial_generation=$(sed -n "s/^HOST_GPU_PROCESS_OK isa=$isa .* generation=\([1-9][0-9]*\) .*/\1/p" "$serial_log")
+    serial_run=$(sed -n "s/^HOST_GPU_PROCESS_OK isa=$isa .* run=\([1-9][0-9]*\) .*/\1/p" "$serial_log")
+    serial_frame=$(sed -n "s/^HOST_GPU_PROCESS_OK isa=$isa .* frame=\([1-9][0-9]*\) .*/\1/p" "$serial_log")
+    serial_device_us=$(sed -n "s/^HOST_GPU_PROCESS_OK isa=$isa .* elapsed_us=\([1-9][0-9]*\) .*/\1/p" "$serial_log")
+    perf_backend=$(processing_perf_field "$daemon_log" "$isa" backend)
+    perf_generation=$(processing_perf_field "$daemon_log" "$isa" generation)
+    perf_run=$(processing_perf_field "$daemon_log" "$isa" run)
+    perf_frame=$(processing_perf_field "$daemon_log" "$isa" frame)
+    cpu_us=$(processing_perf_field "$daemon_log" "$isa" cpu_us)
+    device_us=$(processing_perf_field "$daemon_log" "$isa" device_us)
+    preference=$(processing_perf_field "$daemon_log" "$isa" preference)
+    case "$cpu_us:$device_us" in *[!0-9:]*|:*|*:) return 1 ;; esac
+    processing_perf_us_valid "$cpu_us" && processing_perf_us_valid "$device_us" || return 1
+
+    expected_preference=available-not-preferred
+    if [ "$cpu_us" -ge "$device_us" ] &&
+       [ "$((cpu_us - device_us))" -ge "$((device_us / 2 + device_us % 2))" ]; then
+        expected_preference=preferred
+    fi
+    [ "$perf_backend" = "$serial_backend" ] &&
+    [ "$perf_generation" = "$serial_generation" ] &&
+    [ "$perf_run" = "$serial_run" ] &&
+    [ "$perf_frame" = "$serial_frame" ] &&
+    [ "$device_us" = "$serial_device_us" ] &&
+    [ "$preference" = "$expected_preference" ]
+)
+
 serial_processing_backend() {
     sed -n "s/.*HOST_GPU_PROCESS_OK isa=$2 backend=\(cuda\|vulkan\|metal\) .*/\1/p" "$1"
 }
@@ -583,6 +644,19 @@ emit_row_execution_evidence() {
     printf '%s\n' "${evidence_prefix}_combined_max_rss_kib=$7"
 }
 
+emit_processing_perf_evidence() {
+    evidence_host=$1
+    evidence_isa=$2
+    evidence_serial=$3
+    evidence_daemon=$4
+    processing_perf_evidence_valid "$evidence_serial" "$evidence_daemon" "$evidence_isa" || return 1
+    evidence_prefix="simpleos_qemu_host_gpu_2d_${evidence_host}_${evidence_isa}"
+    printf '%s\n' "${evidence_prefix}_daemon_log=$evidence_daemon"
+    printf '%s\n' "${evidence_prefix}_processing_cpu_us=$(processing_perf_field "$evidence_daemon" "$evidence_isa" cpu_us)"
+    printf '%s\n' "${evidence_prefix}_processing_device_us=$(processing_perf_field "$evidence_daemon" "$evidence_isa" device_us)"
+    printf '%s\n' "${evidence_prefix}_processing_preference=$(processing_perf_field "$evidence_daemon" "$evidence_isa" preference)"
+}
+
 emit_arm64_production_evidence() {
     evidence_prefix="simpleos_qemu_host_gpu_2d_$1_aarch64"
     printf '%s\n' "${evidence_prefix}_production_serial_log=$2"
@@ -646,15 +720,25 @@ validate_report() {
                     row_daemon_rss=$(report_one "$report" "${prefix}_daemon_max_rss_kib") &&
                     row_qemu_rss=$(report_one "$report" "${prefix}_qemu_max_rss_kib") &&
                     row_combined_rss=$(report_one "$report" "${prefix}_combined_max_rss_kib") &&
+                    row_daemon_log=$(report_one "$report" "${prefix}_daemon_log") &&
+                    row_processing_cpu_us=$(report_one "$report" "${prefix}_processing_cpu_us") &&
+                    row_processing_device_us=$(report_one "$report" "${prefix}_processing_device_us") &&
+                    row_processing_preference=$(report_one "$report" "${prefix}_processing_preference") &&
                     [ -n "$row_qemu_version" ] &&
                     qemu_argv_evidence_valid "$report_isa" "$row_qemu_device_args" &&
                     row_rss_evidence_valid "$row_daemon_rss" "$row_qemu_rss" "$row_combined_rss" &&
+                    processing_perf_evidence_valid "$row_log" "$row_daemon_log" "$report_isa" &&
+                    [ "$row_processing_cpu_us" = "$(processing_perf_field "$row_daemon_log" "$report_isa" cpu_us)" ] &&
+                    [ "$row_processing_device_us" = "$(processing_perf_field "$row_daemon_log" "$report_isa" device_us)" ] &&
+                    [ "$row_processing_preference" = "$(processing_perf_field "$row_daemon_log" "$report_isa" preference)" ] &&
                     { [ "$report_isa" != aarch64 ] || report_arm64_production_evidence_valid "$report" "$prefix" "$report_isa" "$row_log" "$row_qemu_device_args"; }
                 }; then
                     set_host_contract "$saved_row_host"
                     return 1
                 fi
                 set_host_contract "$saved_row_host"
+            elif grep -aEq "^${prefix}_(daemon_log|processing_cpu_us|processing_device_us|processing_preference)=" "$report"; then
+                return 1
             fi
         done
     done
@@ -718,6 +802,21 @@ self_test() {
     directx_wrong_mask_log="$temp_dir/directx-wrong-mask.log"
     directx_wrong_backend_log="$temp_dir/directx-wrong-backend.log"
     directx_wrong_identity_log="$temp_dir/directx-wrong-identity.log"
+    pass_daemon_log="$temp_dir/pass-daemon.log"
+    x86_daemon_log="$temp_dir/x86_64-daemon.log"
+    riscv_daemon_log="$temp_dir/riscv64-daemon.log"
+    metal_daemon_log="$temp_dir/metal-aarch64-daemon.log"
+    metal_x86_daemon_log="$temp_dir/metal-x86_64-daemon.log"
+    metal_riscv_daemon_log="$temp_dir/metal-riscv64-daemon.log"
+    directx_daemon_log="$temp_dir/directx-aarch64-daemon.log"
+    directx_x86_daemon_log="$temp_dir/directx-x86_64-daemon.log"
+    directx_riscv_daemon_log="$temp_dir/directx-riscv64-daemon.log"
+    slow_daemon_log="$temp_dir/slow-daemon.log"
+    dishonest_daemon_log="$temp_dir/dishonest-daemon.log"
+    stale_perf_daemon_log="$temp_dir/stale-perf-daemon.log"
+    duplicate_perf_daemon_log="$temp_dir/duplicate-perf-daemon.log"
+    zero_perf_daemon_log="$temp_dir/zero-perf-daemon.log"
+    oversized_perf_daemon_log="$temp_dir/oversized-perf-daemon.log"
     production_log="$temp_dir/arm64-production.log"
     production_wrong_backend_log="$temp_dir/arm64-production-wrong-backend.log"
     production_wrong_run_log="$temp_dir/arm64-production-wrong-run.log"
@@ -912,6 +1011,34 @@ EOF
     sed 's/render_mask=4/render_mask=1/' "$directx_log" >"$directx_wrong_mask_log"
     sed 's/backend=directx/backend=vulkan/g' "$directx_log" >"$directx_wrong_backend_log"
     sed '/^HOST_GPU_DRAW_IR_OK /s/identity=22/identity=99/' "$directx_log" >"$directx_wrong_identity_log"
+    cat >"$pass_daemon_log" <<'EOF'
+HOST_GPU_PROCESS_PERF isa=aarch64 backend=cuda generation=24 run=1022 frame=24 cpu_us=120 device_us=80 preference=preferred
+EOF
+    sed 's/aarch64/x86_64/; s/generation=24/generation=14/; s/frame=24/frame=14/' "$pass_daemon_log" >"$x86_daemon_log"
+    sed 's/aarch64/riscv64/; s/generation=24/generation=34/; s/frame=24/frame=34/' "$pass_daemon_log" >"$riscv_daemon_log"
+    sed 's/backend=cuda/backend=metal/; s/generation=24/generation=22/; s/run=1022/run=1020/; s/frame=24/frame=22/' "$pass_daemon_log" >"$metal_daemon_log"
+    sed 's/aarch64/x86_64/; s/backend=cuda/backend=metal/; s/generation=24/generation=12/; s/run=1022/run=1020/; s/frame=24/frame=12/' "$pass_daemon_log" >"$metal_x86_daemon_log"
+    sed 's/aarch64/riscv64/; s/backend=cuda/backend=metal/; s/generation=24/generation=32/; s/run=1022/run=1020/; s/frame=24/frame=32/' "$pass_daemon_log" >"$metal_riscv_daemon_log"
+    sed 's/generation=24/generation=23/; s/run=1022/run=1021/; s/frame=24/frame=23/' "$pass_daemon_log" >"$directx_daemon_log"
+    sed 's/aarch64/x86_64/; s/generation=24/generation=13/; s/run=1022/run=1021/; s/frame=24/frame=13/' "$pass_daemon_log" >"$directx_x86_daemon_log"
+    sed 's/aarch64/riscv64/; s/generation=24/generation=33/; s/run=1022/run=1021/; s/frame=24/frame=33/' "$pass_daemon_log" >"$directx_riscv_daemon_log"
+    sed 's/cpu_us=120/cpu_us=119/; s/preference=preferred/preference=available-not-preferred/' "$pass_daemon_log" >"$slow_daemon_log"
+    sed 's/cpu_us=120/cpu_us=119/' "$pass_daemon_log" >"$dishonest_daemon_log"
+    sed 's/generation=24/generation=25/' "$pass_daemon_log" >"$stale_perf_daemon_log"
+    { cat "$pass_daemon_log"; cat "$pass_daemon_log"; } >"$duplicate_perf_daemon_log"
+    sed 's/cpu_us=120/cpu_us=0/' "$pass_daemon_log" >"$zero_perf_daemon_log"
+    sed 's/cpu_us=120/cpu_us=9223372036854775808/; s/preference=preferred/preference=available-not-preferred/' "$pass_daemon_log" >"$oversized_perf_daemon_log"
+    processing_perf_evidence_valid "$pass_log" "$pass_daemon_log" aarch64
+    processing_perf_evidence_valid "$pass_log" "$slow_daemon_log" aarch64
+    if processing_perf_evidence_valid "$pass_log" "$dishonest_daemon_log" aarch64 ||
+       processing_perf_evidence_valid "$pass_log" "$stale_perf_daemon_log" aarch64 ||
+       processing_perf_evidence_valid "$pass_log" "$duplicate_perf_daemon_log" aarch64 ||
+       processing_perf_evidence_valid "$pass_log" "$zero_perf_daemon_log" aarch64 ||
+       processing_perf_evidence_valid "$pass_log" "$oversized_perf_daemon_log" aarch64
+    then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
     serial_has_pass "$pass_log" aarch64
     serial_has_pass "$vulkan_log" aarch64
     REQUIRE_CUDA=1
@@ -978,11 +1105,14 @@ EOF
         done
         emit_row linux x86_64 pass ok "$x86_log" cuda
         emit_row_execution_evidence linux x86_64 "QEMU emulator version 9.0.0" "$x86_qemu_args" 65536 65536 131072
+        emit_processing_perf_evidence linux x86_64 "$x86_log" "$x86_daemon_log"
         emit_row linux aarch64 pass ok "$pass_log" cuda
         emit_row_execution_evidence linux aarch64 "QEMU emulator version 9.0.0" "$arm_qemu_args" 65536 65536 131072
+        emit_processing_perf_evidence linux aarch64 "$pass_log" "$pass_daemon_log"
         emit_arm64_production_evidence linux "$production_log" "$arm_production_qemu_args"
         emit_row linux riscv64 pass ok "$riscv_log" cuda
         emit_row_execution_evidence linux riscv64 "QEMU emulator version 9.0.0" "$rv_qemu_args" 65536 65536 131072
+        emit_processing_perf_evidence linux riscv64 "$riscv_log" "$riscv_daemon_log"
         echo simpleos_qemu_host_gpu_2d_host=linux
         echo simpleos_qemu_host_gpu_2d_status=pass
         echo simpleos_qemu_host_gpu_2d_reason=all-linux-host-gpu-rows-pass
@@ -1048,6 +1178,16 @@ EOF
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
+    grep -v '^simpleos_qemu_host_gpu_2d_linux_aarch64_processing_cpu_us=' "$pass_report" >"$bad_backend_report"
+    if validate_report "$bad_backend_report" >/dev/null 2>&1; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    sed 's/simpleos_qemu_host_gpu_2d_linux_aarch64_processing_preference=preferred/simpleos_qemu_host_gpu_2d_linux_aarch64_processing_preference=available-not-preferred/' "$pass_report" >"$bad_backend_report"
+    if validate_report "$bad_backend_report" >/dev/null 2>&1; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
     sed -e 's/simpleos_qemu_host_gpu_2d_status=pass/simpleos_qemu_host_gpu_2d_status=fail/' \
         -e 's/simpleos_qemu_host_gpu_2d_reason=all-linux-host-gpu-rows-pass/simpleos_qemu_host_gpu_2d_reason=one-or-more-linux-host-gpu-rows-failed/' \
         -e '/^simpleos_qemu_host_gpu_2d_linux_aarch64_qemu_version=/d' "$pass_report" >"$bad_backend_report"
@@ -1087,11 +1227,14 @@ EOF
         done
         emit_row macos x86_64 pass ok "$metal_x86_log" metal
         emit_row_execution_evidence macos x86_64 "QEMU emulator version 9.0.0" "$x86_qemu_args" 65536 65536 131072
+        emit_processing_perf_evidence macos x86_64 "$metal_x86_log" "$metal_x86_daemon_log"
         emit_row macos aarch64 pass ok "$metal_log" metal
         emit_row_execution_evidence macos aarch64 "QEMU emulator version 9.0.0" "$arm_qemu_args" 65536 65536 131072
+        emit_processing_perf_evidence macos aarch64 "$metal_log" "$metal_daemon_log"
         emit_arm64_production_evidence macos "$metal_production_log" "$arm_production_qemu_args"
         emit_row macos riscv64 pass ok "$metal_riscv_log" metal
         emit_row_execution_evidence macos riscv64 "QEMU emulator version 9.0.0" "$rv_qemu_args" 65536 65536 131072
+        emit_processing_perf_evidence macos riscv64 "$metal_riscv_log" "$metal_riscv_daemon_log"
         echo simpleos_qemu_host_gpu_2d_host=macos
         echo simpleos_qemu_host_gpu_2d_status=pass
         echo simpleos_qemu_host_gpu_2d_reason=all-macos-host-gpu-rows-pass
@@ -1122,11 +1265,14 @@ EOF
         done
         emit_row windows x86_64 pass ok "$directx_x86_log" cuda
         emit_row_execution_evidence windows x86_64 "QEMU emulator version 9.0.0" "$x86_qemu_args" 65536 65536 131072
+        emit_processing_perf_evidence windows x86_64 "$directx_x86_log" "$directx_x86_daemon_log"
         emit_row windows aarch64 pass ok "$directx_log" cuda
         emit_row_execution_evidence windows aarch64 "QEMU emulator version 9.0.0" "$arm_qemu_args" 65536 65536 131072
+        emit_processing_perf_evidence windows aarch64 "$directx_log" "$directx_daemon_log"
         emit_arm64_production_evidence windows "$directx_production_log" "$arm_production_qemu_args"
         emit_row windows riscv64 pass ok "$directx_riscv_log" cuda
         emit_row_execution_evidence windows riscv64 "QEMU emulator version 9.0.0" "$rv_qemu_args" 65536 65536 131072
+        emit_processing_perf_evidence windows riscv64 "$directx_riscv_log" "$directx_riscv_daemon_log"
         echo simpleos_qemu_host_gpu_2d_host=windows
         echo simpleos_qemu_host_gpu_2d_status=pass
         echo simpleos_qemu_host_gpu_2d_reason=all-windows-host-gpu-rows-pass
@@ -1393,6 +1539,11 @@ run_guest() {
     qemu_device_args=$(encode_argv_hex "$@")
     run_qemu_with_rss "$QEMU_TIMEOUT" "$serial" "$daemon_pid" "$rss_file" "$qemu_bin" "$@"
     if serial_has_pass "$serial" "$isa"; then probe_valid=1; else probe_valid=0; fi
+    if [ "$probe_valid" = 1 ] && processing_perf_evidence_valid "$serial" "$daemon_log" "$isa"; then
+        processing_perf_valid=1
+    else
+        processing_perf_valid=0
+    fi
     production_serial=
     production_qemu_args=
     if [ "$isa" = aarch64 ] && [ "$probe_valid" = 1 ]; then
@@ -1430,11 +1581,15 @@ run_guest() {
             production_valid=1
         fi
     fi
-    if [ "$probe_valid" = 1 ] && [ "$execution_evidence_valid" = 1 ] && [ "$production_valid" = 1 ]; then
+    if [ "$probe_valid" = 1 ] && [ "$processing_perf_valid" = 1 ] && [ "$execution_evidence_valid" = 1 ] && [ "$production_valid" = 1 ]; then
         emit_row "$host" "$isa" pass ok "$serial" "$(serial_processing_backend "$serial" "$isa")"
+        emit_processing_perf_evidence "$host" "$isa" "$serial" "$daemon_log"
         row_result=0
     elif [ "$probe_valid" != 1 ]; then
         emit_row "$host" "$isa" fail "$(serial_reason "$serial" "$isa")" "$serial"
+        row_result=1
+    elif [ "$processing_perf_valid" != 1 ]; then
+        emit_row "$host" "$isa" fail processing-perf-evidence-missing "$serial" "$(serial_processing_backend "$serial" "$isa")"
         row_result=1
     elif [ "$execution_evidence_valid" != 1 ]; then
         emit_row "$host" "$isa" fail execution-evidence-missing "$serial" "$(serial_processing_backend "$serial" "$isa")"

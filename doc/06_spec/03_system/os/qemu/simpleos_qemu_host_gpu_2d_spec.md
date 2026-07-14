@@ -11,7 +11,9 @@ raw rendering, Draw IR, and dedicated ProcessingIR FillU32 execution are impleme
 prepared-macOS receipts remain unavailable. Native Windows receipts remain
 pending while TODO 548 blocks a fresh Simple/QEMU run. The RV64 canonical
 desktop and contract-v2 evidence parser are source-ready, but no fresh RV64
-live PASS is claimed.
+live PASS is claimed. ProcessingIR CPU/device timing and preference
+classification are source-ready; TODO 570 remains open until prepared native
+rows provide fresh correlated receipts.
 
 This scenario proves that supported SimpleOS guests use one bounded protocol to
 execute Draw IR and ProcessingIR on a real host device. Unsupported rows retain
@@ -76,22 +78,29 @@ the CPU/software fallback and report a stable reason.
    require exact output-buffer parity with the CPU oracle. Vulkan uses the
    canonical SFFI owner's fenced tri-state dispatch: only proven status `1`
    may read back, while unknown completion retains dependencies and the device.
-15. **Keep native Metal ProcessingIR separate from Engine2D rendering.** Probe
+15. **Classify device processing preference.** Time the existing FillU32(256,
+   7) CPU oracle and device executor independently after the HELLO probe. A
+   valid row requires positive correlated microsecond timings and reports
+   `preferred` only when CPU time is at least 1.5 times device time; otherwise
+   it reports `available-not-preferred`. Missing, stale, duplicate, zero, or
+   dishonest evidence fails the row.
+16. **Keep native Metal ProcessingIR separate from Engine2D rendering.** Probe
    and execute the dedicated MSL FillU32 owner, require checked command
    completion and pointer readback, and never relabel a Metal render clear as
    processing evidence.
-16. **Report device-backed host acceleration evidence.** Publish one row with
+17. **Report device-backed host acceleration evidence.** Publish one row with
    host, guest ISA, QEMU/device arguments, protocol, backend, device, IDs,
    timing, concurrently sampled daemon/QEMU/combined RSS maxima, checksums,
    status, and reason. For every non-HELLO request, both
    the guest and daemon require a positive numeric run hash and frame ID; a
    zero, negative, stale, or mismatched value fails before PASS admission.
-17. **Validate cached rows before aggregation.** Accept a cached report only
+18. **Validate cached rows before aggregation.** Accept a cached report only
    when all nine host/ISA rows are present and every passing row links to a
    serial log containing the exact render, Draw IR, and ProcessingIR receipts.
    Each passing row also requires a unique QEMU version, a reversible
    comma-delimited per-argument hex encoding of its exact QEMU argument vector,
    positive maximum-observed daemon RSS, QEMU RSS, and concurrent combined RSS,
+   plus the correlated daemon log, CPU/device timings, and preference result,
    with the combined value no smaller than either component; negotiated protocol,
    positive HELLO/render/Draw IR/ProcessingIR timings, and correlated run/frame
    IDs. The encoded argv must also match the ISA-specific machine, kernel, and

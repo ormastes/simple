@@ -36,7 +36,17 @@ fn _elapsed_us_since(started_nanos: i64) -> i64:
     val elapsed_nanos = time_now_nanos() - started_nanos
     if elapsed_nanos <= 0:
         return 0
-    (elapsed_nanos + 999) / 1000
+    val whole_us = elapsed_nanos / 1000
+    if elapsed_nanos % 1000 == 0:
+        return whole_us
+    whole_us + 1
+
+fn _processing_preference(cpu_us: i64, device_us: i64) -> text:
+    if cpu_us <= 0 or device_us <= 0:
+        return "unmeasured"
+    if cpu_us >= device_us and cpu_us - device_us >= device_us / 2 + device_us % 2:
+        return "preferred"
+    "available-not-preferred"
 
 fn _finish(base: i64, generation: i64, status: i64, reason: i64, handle: i64, output_bytes: i64, checksum: i64, elapsed_us: i64, source: i64, identity: i64):
     if _read(base, SIMPLEOS_HOST_GPU_WIRE_REQUEST_GENERATION) != generation:
@@ -253,8 +263,10 @@ fn _process_request(base: i64) -> i64:
         if not processing_ir_validate(ir).valid:
             _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, 0, 0, 0, 1, 0, 0)
             return 1
+        val cpu_started = time_now_nanos()
         val oracle = processing_ir_cpu_execute(ir)
-        val started = time_now_nanos()
+        val cpu_elapsed_us = _elapsed_us_since(cpu_started)
+        val device_started = time_now_nanos()
         var completed = false
         var values: [u32] = []
         var backend_handle: i64 = 0
@@ -277,6 +289,7 @@ fn _process_request(base: i64) -> i64:
             values = result.values
             backend_handle = result.backend_handle
             device_identity = result.device_identity
+        val device_elapsed_us = _elapsed_us_since(device_started)
         if not completed or backend_handle <= 0 or device_identity <= 0:
             _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK, 0, 0, 0, 1, 0, 0)
             return 1
@@ -286,8 +299,9 @@ fn _process_request(base: i64) -> i64:
         if not _request_generation_matches(base, generation):
             return 0
         val checksum = _write_pixels(base, values, element_count)
-        val elapsed = _elapsed_us_since(started)
-        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, backend_handle, element_count * 4, checksum, elapsed, SIMPLEOS_HOST_GPU_READBACK_DEVICE, device_identity)
+        val preference = _processing_preference(cpu_elapsed_us, device_elapsed_us)
+        print("HOST_GPU_PROCESS_PERF isa={simpleos_host_gpu_guest_isa_name(guest_isa_code)} backend={backend} generation={generation} run={run_id_hash} frame={frame_id} cpu_us={cpu_elapsed_us} device_us={device_elapsed_us} preference={preference}\n")
+        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, backend_handle, element_count * 4, checksum, device_elapsed_us, SIMPLEOS_HOST_GPU_READBACK_DEVICE, device_identity)
         return 1
 
     if kind == SIMPLEOS_HOST_GPU_KIND_DRAW_IR:

@@ -16,6 +16,7 @@
 - Production guest helpers: `map_qemu_host_gpu_ivshmem_bar2_active_vmm`; `host_gpu_ivshmem_next_generation`; `Engine2dWmFrameExecutor._render_host_gpu`
 - Production manual step: `Select host presentation or the existing local production renderer`
 - Metal owner interfaces: `MetalBackend.init_with_session`; `MetalBackend.draw_image_blend_checked`; `Engine2D.create_shared_metal_offscreen`; `Engine2D.draw_metal_image_blend_checked`
+- Processing performance receipt: `HOST_GPU_PROCESS_PERF`; checker: `processing_perf_evidence_valid`; manual step: `Classify device processing preference`; fail-fast placeholder: `fail("ProcessingIR preference evidence missing")`
 
 ## Lanes
 
@@ -30,6 +31,7 @@
 | native Metal Draw IR source | Codex Spark | shared-session surface, checked opacity composite, strict host admission |
 | native Metal ProcessingIR source | Codex Spark | dedicated checked FillU32 kernel, pointer readback, strict daemon probe |
 | QEMU/daemon RSS evidence | Codex Spark | concurrent component/combined sampling and isolated metrics self-test |
+| ProcessingIR preference evidence | Codex Spark sidecars | independent CPU/device timing, correlated receipt, and fail-closed 1.5x classification |
 | merge and generated-manual review | primary `/root` | wrapper/parser/manual accepted; native non-Linux rows remain open |
 | final review | normal/highest-capability Codex | requirements, exclusions, security, NFR, manual quality |
 
@@ -60,7 +62,9 @@ fixture bypasses, synthetic handles, or passing placeholders.
   maxima across both AArch64 boots; TODO 563 remains open until fresh live rows
   prove the 256 MiB target and warm multi-sample latency p95. NFR-001's exact
   1280x720 fixture and NFR-004's 1.5x preference decision are tracked separately
-  by TODO 569 and TODO 570 instead of being inferred from 64x48 parity.
+  by TODO 569 and TODO 570 instead of being inferred from 64x48 parity. The
+  daemon and cached-report checker now implement the correlated classification
+  contract, but TODO 570 stays open until prepared native rows execute it.
 - Final reviewer: primary `/root`; native Metal implementation is present but
   its done mark, DirectX, and remaining CUDA receipts remain rejected without
   prepared-host evidence.

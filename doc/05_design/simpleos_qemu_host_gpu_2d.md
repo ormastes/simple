@@ -221,6 +221,12 @@ formed from independent peaks, and AArch64 preserves maxima across both boots.
 Native-ISA rows require
 negotiation within 500 ms, render/readback p95 at most 16.7 ms, incremental RSS
 at most 256 MiB, and processing speedup at least 1.5x to become preferred.
+The daemon measures the current FillU32(256, 7) CPU oracle and device executor
+independently with the canonical time facade. Its single-request,
+post-HELLO-probe, setup-inclusive receipt is correlated by ISA, backend,
+generation, run, and frame. Cached validation recomputes the overflow-safe
+1.5x boundary; positive correct-but-slower evidence remains
+`available-not-preferred`, while missing or invalid timing cannot pass.
 The current 64x48 fixture proves protocol correctness only; TODO 569 owns the
 selected 1280x720 render gate and TODO 570 owns the processing preference ratio.
 

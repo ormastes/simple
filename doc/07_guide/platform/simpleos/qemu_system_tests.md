@@ -299,7 +299,13 @@ execution, so this source-level contract is not a fresh live PASS.
 Cached reports are accepted only through `--validate-report`: an overall status
 cannot promote the lane unless all nine host/ISA rows are well-formed and a
 passing active host carries three existing serial logs with exact correlated
-render, Draw IR, and ProcessingIR receipts. A passing active AArch64 row must
+render, Draw IR, and ProcessingIR receipts. Each passing row also carries one
+daemon performance receipt correlated by ISA/backend/generation/run/frame.
+The validator requires positive CPU/device microseconds, requires device time
+to match the guest receipt, and independently labels the existing
+FillU32(256, 7) request `preferred` only at 1.5x or greater speedup; a correct
+slower request is `available-not-preferred`. Missing, duplicate, stale, zero,
+or dishonest classification fails closed. A passing active AArch64 row must
 also carry its production serial-log and exact production-argv evidence keys;
 cached reports created before those keys existed are invalid and cannot be
 promoted. Every passing row must also contain
@@ -315,8 +321,8 @@ self-test exercises malformed values and the two-phase maximum carry without
 starting QEMU or a compiler. Fresh live rows are still required before claiming
 the latency or 256 MiB combined QEMU-plus-daemon RSS targets. The 64x48 protocol
 fixture does not satisfy NFR-001's selected 1280x720 dimensions (TODO 569), and
-exact ProcessingIR parity alone does not satisfy NFR-004's 1.5x preference
-threshold (TODO 570).
+TODO 570 remains open until prepared native rows execute the now-source-ready
+ProcessingIR preference contract.
 
 Processing receipts distinguish the transient backend resource handle from the
 stable device identity. Vulkan hashes the runtime-selected driver identity,

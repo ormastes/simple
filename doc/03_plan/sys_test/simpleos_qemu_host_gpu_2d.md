@@ -59,6 +59,11 @@ comma-delimited per-argument hex encoding of the exact QEMU argument vector,
 positive concurrently sampled daemon, QEMU, and combined RSS maxima, negotiated
 protocol version, positive
 HELLO/render/Draw IR/ProcessingIR elapsed times, and correlated run/frame IDs.
+The ProcessingIR row additionally requires exactly one correlated daemon
+performance receipt. CPU and device timings must be positive, device timing
+must equal the guest receipt, and the wrapper must independently classify the
+1.5x boundary as `preferred` or `available-not-preferred`. Duplicate, stale,
+zero, or dishonest performance evidence fails closed.
 Non-HELLO guest submissions and daemon admissions require the shared positive
 numeric run-hash/frame-ID predicate; device receipts recheck both expected and
 returned values. The cached-report validator rejects a missing, duplicate,
