@@ -1,0 +1,620 @@
+#!/bin/sh
+# check-native-seed-parity.shs — dual-backend parity regression harness.
+#
+# Purpose: this is the regression guard for the 2026-07-14 native-build
+# bug-fix batch (~29 bugs fixed in the pure-Simple self-hosted native
+# codegen path this session: nested struct fields, struct/array-of-struct
+# value semantics, `mut`/`me` receivers, tuple access, dict iteration,
+# match or-patterns, sized ints, text methods, and loud-fail diagnostics
+# for constructs unsupported by design). Every case here runs the SAME
+# tiny .spl program through BOTH compilers and asserts they agree (or,
+# where the seed oracle is known-broken, that native alone matches ground
+# truth) so none of these fixes silently regress.
+#
+# Both backends are the SAME deployed self-hosted bin/simple
+# (bin/simple -> bin/release/<triple>/simple):
+#   SEED ORACLE:         env -u SIMPLE_BOOTSTRAP bin/simple run prog.spl
+#   PURE-SIMPLE NATIVE:   env -u SIMPLE_BOOTSTRAP bin/simple native-build \
+#                         --entry prog.spl -o out --clean && ./out
+# SIMPLE_BOOTSTRAP is unset so both invocations exercise the Rust-seed
+# interpreter (`run`) vs the pure-Simple native codegen (`native-build`).
+#
+# NORMALIZATION: native `print()` emits NO trailing newline (Rust-style
+# print, not println), while the seed's `run` adds a newline after every
+# print — the seed's own quirk, not a bug on either side. So stdout is
+# never byte-compared. stdout is captured on its own file descriptor
+# (stderr — banners/diagnostics — is captured separately and never enters
+# the compared value) and normalized via `tr -d '\n' | tr -d ' '` to a
+# canonical, whitespace-insensitive character sequence before comparing.
+#
+# Every seed and native run is wrapped in `timeout` (see SEED_TIMEOUT_S /
+# NATIVE_RUN_TIMEOUT_S below): while authoring this harness the seed
+# interpreter was found to genuinely HANG (infinite loop, confirmed via a
+# 10+ minute 98%-CPU spin) on `continue` inside a `for i in a..b:` range
+# loop (see the `range_for` case) — an unbounded seed run must never be
+# allowed to wedge this gate.
+#
+# THREE CASE MODES:
+#   1. PARITY               — the seed oracle is sound for this construct.
+#      Assert normalize(native_stdout) == normalize(seed_stdout).
+#   2. NATIVE-AUTHORITATIVE — the seed oracle is PROVABLY BROKEN, hangs,
+#      or cannot even parse the construct (documented per-case below,
+#      empirically verified during authoring — not guessed). Assert
+#      normalize(native_stdout) == a fixed EXPECTED literal; the seed run
+#      is executed only to log its (broken) behavior for documentation,
+#      never asserted on.
+#   3. LOUD-FAIL            — native-build MUST refuse to build the
+#      construct (unsupported-by-design, e.g. match guards, out-of-range
+#      integer literals) with a nonzero exit and no binary produced,
+#      rather than silently miscompiling. Assert build rc != 0 AND no
+#      binary exists AND the build log contains the expected diagnostic.
+#
+# Every case's mode was decided by actually RUNNING both backends during
+# authoring, never assumed. Three cases were reclassified away from their
+# originally-expected mode after empirical testing disagreed:
+#   - `mut_param` and `option_nil_check` were expected PARITY but the seed
+#     proved to diverge (mut-capability propagation and `.?` if-let are
+#     both silently broken in the seed's JIT-fallback interpreter path)
+#     -> reclassified NATIVE-AUTHORITATIVE.
+#   - `dict_get` was split out of a would-be parity `dict_methods` case
+#     for the same reason (seed's Dict.get() returns a bogus `0.0` on a
+#     present key — a known landmine, see
+#     reference_interpreter_dict_and_value_quirks).
+#   - `some0` was expected NATIVE-AUTHORITATIVE (spec assumed the seed
+#     prints a `<special:...>` marker for `nil ?? default`) but both
+#     backends actually agree (`0`) -> reclassified PARITY.
+#
+# NOT included (found broken on NATIVE during authoring, reported as new
+# bugs rather than silently omitted or papered over):
+#   - `"x".starts_with(y)` crashes native-build's LLVM backend: "Only PHI
+#     nodes may reference their own value! %l1 = call ptr
+#     @rt_interp_cstr(ptr %l1)" (llc verifier rejects the emitted IR).
+#   - `"x".contains(y)` compiles and runs on native but ALWAYS returns
+#     false/0, even when the substring is present (confirmed with both a
+#     present and an absent substring — both print `0`; seed correctly
+#     prints `true`/`false`).
+#   Both were isolated to minimal single-line repros; see the harness-
+#   authoring report for the full transcript. File follow-up bugs before
+#   relying on either method from native-built code.
+#
+# Usage: sh scripts/check/check-native-seed-parity.shs
+# Env:   SIMPLE_BINARY (default bin/simple), PARITY_WORK_DIR (default
+#        /tmp/check-native-seed-parity.$$), SEED_TIMEOUT_S (default 20),
+#        NATIVE_RUN_TIMEOUT_S (default 20)
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+WORK_DIR="${PARITY_WORK_DIR:-/tmp/check-native-seed-parity.$$}"
+SEED_TIMEOUT_S="${SEED_TIMEOUT_S:-20}"
+NATIVE_RUN_TIMEOUT_S="${NATIVE_RUN_TIMEOUT_S:-20}"
+mkdir -p "$WORK_DIR"
+
+STAMP="$(date +%s)_$$"
+RESULTS_FILE="$WORK_DIR/results.tsv"
+: >"$RESULTS_FILE"
+
+TOTAL=0
+PASS_N=0
+FAIL_N=0
+
+norm() {
+    # Canonicalize stdout: strip newlines and spaces so seed's added
+    # newlines (vs native's newline-less print) never cause a mismatch.
+    tr -d '\n' | tr -d ' '
+}
+
+# ---------------------------------------------------------------------------
+# Case source writers — one tiny .spl program per fixed bug / construct.
+# ---------------------------------------------------------------------------
+
+write_case_struct_nested_field() {
+    cat >"$1" <<'EOF'
+struct Inner:
+    v: i64
+
+struct Outer:
+    inner: Inner
+
+fn main() -> i64:
+    var o = Outer(inner: Inner(v: 7))
+    print(o.inner.v)
+    o.inner.v = 42
+    print(o.inner.v)
+    return 0
+EOF
+}
+
+write_case_struct_return_byval() {
+    cat >"$1" <<'EOF'
+struct P:
+    x: i64
+    y: i64
+
+fn make(n: i64) -> P:
+    return P(x: n, y: n + 1)
+
+fn main() -> i64:
+    print(make(5).y)
+    val p = make(5)
+    print(p.x)
+    print(p.y)
+    return 0
+EOF
+}
+
+write_case_struct_array_field() {
+    cat >"$1" <<'EOF'
+struct S:
+    arr: [i64]
+
+fn main() -> i64:
+    var s = S(arr: [1, 2, 3])
+    print(s.arr[1])
+    s.arr[1] = 99
+    print(s.arr[1])
+    return 0
+EOF
+}
+
+write_case_array_of_structs() {
+    cat >"$1" <<'EOF'
+struct Pt:
+    x: i64
+    y: i64
+
+fn main() -> i64:
+    var pts = [Pt(x: 1, y: 2), Pt(x: 10, y: 20), Pt(x: 100, y: 200)]
+    print(pts[1].y)
+    pts[1].y = 77
+    print(pts[1].y)
+    return 0
+EOF
+}
+
+write_case_array_2d() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    var m = [[1, 2], [3, 4]]
+    print(m[0][1])
+    m[0][1] = 99
+    print(m[0][1])
+    return 0
+EOF
+}
+
+write_case_tuple_access() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val t = (7, 9)
+    print(t.0 + t.1)
+    return 0
+EOF
+}
+
+write_case_tuple_destructure() {
+    cat >"$1" <<'EOF'
+fn mkpair() -> (i64, i64):
+    return (3, 13)
+
+fn main() -> i64:
+    val (a, b) = mkpair()
+    print(a)
+    print(b)
+    return 0
+EOF
+}
+
+write_case_tuple_for() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val pairs = [(1, 10), (2, 20), (3, 30)]
+    var s = 0
+    for (k, v) in pairs:
+        s = s + k + v
+    print(s)
+    return 0
+EOF
+}
+
+write_case_dict_has() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val d = {"a": 1, "b": 2}
+    print(d.has("a"))
+    print(d.has("z"))
+    return 0
+EOF
+}
+
+write_case_dict_keys_iter() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val d = {"a": 1, "b": 2, "c": 3}
+    var s = 0
+    for k in d.keys():
+        s = s + d[k]
+    print(s)
+    return 0
+EOF
+}
+
+write_case_value_match() {
+    cat >"$1" <<'EOF'
+fn classify(n: i64) -> i64:
+    return match n:
+        case 1: 10
+        case _: 99
+
+fn main() -> i64:
+    print(classify(9))
+    return 0
+EOF
+}
+
+write_case_text_match() {
+    cat >"$1" <<'EOF'
+fn classify(s: text) -> i64:
+    return match s:
+        case "red": 1
+        case "green": 2
+        case _: 0
+
+fn main() -> i64:
+    print(classify("green"))
+    return 0
+EOF
+}
+
+write_case_or_pattern() {
+    cat >"$1" <<'EOF'
+fn classify(n: i64) -> i64:
+    return match n:
+        case 1 | 2 | 3: 100
+        case _: 0
+
+fn main() -> i64:
+    print(classify(2))
+    return 0
+EOF
+}
+
+write_case_bool_match() {
+    cat >"$1" <<'EOF'
+fn classify(b: bool) -> i64:
+    return match b:
+        case true: 1
+        case false: 0
+
+fn main() -> i64:
+    print(classify(true))
+    return 0
+EOF
+}
+
+write_case_bool_print() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    print(3 < 5)
+    return 0
+EOF
+}
+
+write_case_sized_int() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val a: i32 = -5
+    print(a)
+    val b: u8 = 200
+    print(b)
+    return 0
+EOF
+}
+
+write_case_text_int_len_methods() {
+    # NOTE: deliberately excludes "x".starts_with(y) and "x".contains(y) —
+    # both were found broken on native during authoring (see header) and
+    # are tracked as separate bugs, not folded into this passing case.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    print(int("42") + 1)
+    print("hi".len())
+    return 0
+EOF
+}
+
+write_case_some0() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val x: i64? = 0
+    print(x ?? 3)
+    return 0
+EOF
+}
+
+write_case_me_receiver() {
+    cat >"$1" <<'EOF'
+struct Counter:
+    x: i64
+
+    fn selfset(me):
+        me.x = 41
+
+fn main() -> i64:
+    var c = Counter(x: 1)
+    c.selfset()
+    print(c.x)
+    return 0
+EOF
+}
+
+write_case_float_print() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    print(2.0)
+    print(0.5)
+    print(0.1)
+    print(3.5)
+    return 0
+EOF
+}
+
+write_case_mut_param() {
+    cat >"$1" <<'EOF'
+struct S:
+    x: i64
+
+fn withmut(mut s: S):
+    s.x = 41
+
+fn plain(s: S):
+    s.x = 999
+
+fn main() -> i64:
+    var a = S(x: 7)
+    withmut(a)
+    print(a.x)
+    var b = S(x: 7)
+    plain(b)
+    print(b.x)
+    return 0
+EOF
+}
+
+write_case_option_nil_check() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val x: i64? = 7
+    if val v = x.?:
+        print(v)
+    return 0
+EOF
+}
+
+write_case_dict_get() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val d = {"a": 1, "b": 2}
+    print(d.get("b"))
+    return 0
+EOF
+}
+
+write_case_range_for() {
+    # Also the seed-hang fixture: `continue` inside a range for-loop spins
+    # the seed interpreter forever (see header). Never run this source
+    # against the seed without a timeout.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    var total = 0
+    for i in 0..5:
+        if i == 2:
+            continue
+        if i == 4:
+            break
+        total = total + i
+    print(total)
+    return 0
+EOF
+}
+
+write_case_int_overflow_loud() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val a = 99999999999999999999
+    print(a)
+    return 0
+EOF
+}
+
+write_case_match_guard_loud() {
+    cat >"$1" <<'EOF'
+fn classify(x: i64) -> i64:
+    return match x:
+        case n if n > 0: 1
+        case _: 0
+
+fn main() -> i64:
+    print(classify(5))
+    return 0
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Runner: shared helpers.
+# ---------------------------------------------------------------------------
+
+record() {
+    id="$1"; mode="$2"; status="$3"; detail="$4"
+    TOTAL=$((TOTAL + 1))
+    case "$status" in
+        PASS) PASS_N=$((PASS_N + 1)) ;;
+        FAIL) FAIL_N=$((FAIL_N + 1)) ;;
+    esac
+    printf '%s\t%s\t%s\t%s\n' "$id" "$mode" "$status" "$detail" >>"$RESULTS_FILE"
+    echo "[$id] mode=$mode -> $status ($detail)"
+}
+
+run_seed() {
+    # $1 = src, writes stdout to $2. Timeout-guarded: the seed interpreter
+    # is known to hang on some constructs (see `range_for`) — never let an
+    # oracle run block the gate. rc is ignored; callers treat the seed as
+    # a best-effort oracle only.
+    src="$1"; out="$2"
+    timeout "$SEED_TIMEOUT_S" env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" run "$src" \
+        >"$out" 2>"$out.stderr" || true
+}
+
+build_native() {
+    # $1 = src, $2 = out bin, $3 = build log. Returns build rc.
+    src="$1"; bin="$2"; log="$3"
+    if env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" native-build \
+        --entry "$src" -o "$bin" --clean >"$log" 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+run_parity_case() {
+    id="$1"; writer="$2"
+    src="$WORK_DIR/case_${id}_${STAMP}.spl"
+    bin="$WORK_DIR/case_${id}_${STAMP}_bin"
+    seed_out="$WORK_DIR/case_${id}_${STAMP}.seed.out"
+    build_log="$WORK_DIR/case_${id}_${STAMP}.build.log"
+
+    "$writer" "$src"
+    run_seed "$src" "$seed_out"
+    seed_norm="$(norm <"$seed_out")"
+
+    if build_native "$src" "$bin" "$build_log"; then
+        native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr" || true)"
+        native_norm="$(printf '%s' "$native_raw" | norm)"
+        if [ "$native_norm" = "$seed_norm" ]; then
+            record "$id" "parity" "PASS" "seed=[$seed_norm] native=[$native_norm]"
+        else
+            record "$id" "parity" "FAIL" "seed=[$seed_norm] native=[$native_norm] MISMATCH"
+        fi
+    else
+        record "$id" "parity" "FAIL" "native build failed unexpectedly; log=$build_log"
+    fi
+}
+
+run_native_authoritative_case() {
+    id="$1"; writer="$2"; expected="$3"; seed_note="$4"
+    src="$WORK_DIR/case_${id}_${STAMP}.spl"
+    bin="$WORK_DIR/case_${id}_${STAMP}_bin"
+    seed_out="$WORK_DIR/case_${id}_${STAMP}.seed.out"
+    build_log="$WORK_DIR/case_${id}_${STAMP}.build.log"
+
+    "$writer" "$src"
+    # Seed run is best-effort/logged only — never asserted on. It may fail
+    # to parse entirely (e.g. `me`), hang (e.g. `continue` in range_for —
+    # guarded by the timeout in run_seed), or run and silently produce
+    # wrong output (documented per-case as $seed_note).
+    run_seed "$src" "$seed_out"
+    seed_norm="$(norm <"$seed_out" 2>/dev/null || echo '')"
+
+    if build_native "$src" "$bin" "$build_log"; then
+        native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr" || true)"
+        native_norm="$(printf '%s' "$native_raw" | norm)"
+        if [ "$native_norm" = "$expected" ]; then
+            record "$id" "native-authoritative" "PASS" \
+                "native=[$native_norm] want=[$expected] (seed diverges: $seed_note; seed_out=[$seed_norm])"
+        else
+            record "$id" "native-authoritative" "FAIL" \
+                "native=[$native_norm] want=[$expected] REGRESSION (seed_out=[$seed_norm])"
+        fi
+    else
+        record "$id" "native-authoritative" "FAIL" "native build failed; log=$build_log"
+    fi
+}
+
+run_loud_fail_case() {
+    id="$1"; writer="$2"; expected_diag="$3"
+    src="$WORK_DIR/case_${id}_${STAMP}.spl"
+    bin="$WORK_DIR/case_${id}_${STAMP}_bin"
+    build_log="$WORK_DIR/case_${id}_${STAMP}.build.log"
+
+    "$writer" "$src"
+    build_rc=0
+    build_native "$src" "$bin" "$build_log" || build_rc=$?
+
+    if [ "$build_rc" -eq 0 ]; then
+        record "$id" "loud-fail" "FAIL" "native build UNEXPECTEDLY SUCCEEDED (was supposed to refuse loudly) — REGRESSION"
+        return
+    fi
+    if [ -x "$bin" ]; then
+        record "$id" "loud-fail" "FAIL" "build rc!=0 but binary exists at $bin — silent partial output, not a loud fail"
+        return
+    fi
+    if grep -qF "$expected_diag" "$build_log"; then
+        record "$id" "loud-fail" "PASS" "build rc=$build_rc, no binary, diagnostic matched: $expected_diag"
+    else
+        record "$id" "loud-fail" "FAIL" "build rc=$build_rc, no binary, but expected diagnostic not found: $expected_diag (log=$build_log)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Case table.
+# ---------------------------------------------------------------------------
+
+# --- PARITY: seed oracle sound, both backends must agree -------------------
+run_parity_case struct_nested_field write_case_struct_nested_field
+run_parity_case struct_return_byval write_case_struct_return_byval
+run_parity_case struct_array_field write_case_struct_array_field
+run_parity_case array_of_structs write_case_array_of_structs
+run_parity_case array_2d write_case_array_2d
+run_parity_case tuple_access write_case_tuple_access
+run_parity_case tuple_destructure write_case_tuple_destructure
+run_parity_case tuple_for write_case_tuple_for
+run_parity_case dict_has write_case_dict_has
+run_parity_case dict_keys_iter write_case_dict_keys_iter
+run_parity_case value_match write_case_value_match
+run_parity_case text_match write_case_text_match
+run_parity_case or_pattern write_case_or_pattern
+run_parity_case bool_match write_case_bool_match
+run_parity_case bool_print write_case_bool_print
+run_parity_case sized_int write_case_sized_int
+run_parity_case text_int_len_methods write_case_text_int_len_methods
+run_parity_case some0 write_case_some0
+
+# --- NATIVE-AUTHORITATIVE: seed oracle broken/unparseable for these --------
+run_native_authoritative_case me_receiver write_case_me_receiver "41" \
+    "seed cannot even PARSE 'me' (Unexpected token: expected identifier, found Me)"
+run_native_authoritative_case float_print write_case_float_print "2.00.50.13.5" \
+    "seed prints 0.1 as the non-round-tripping '0.09999999999999998'"
+run_native_authoritative_case mut_param write_case_mut_param "417" \
+    "seed's JIT falls back to its interpreter on a mutation-capability HIR error and the fallback ignores 'mut' entirely, printing 77 (both unmutated)"
+run_native_authoritative_case option_nil_check write_case_option_nil_check "7" \
+    "seed's 'if val v = x.?:' pattern-bind is broken: it prints a bogus 'false' and never runs either branch body, regardless of x's value"
+run_native_authoritative_case dict_get write_case_dict_get "2" \
+    "seed's Dict.get() returns a bogus 0.0 on a present key (known landmine: Dict.get()-nil on present keys)"
+run_native_authoritative_case range_for write_case_range_for "4" \
+    "seed HANGS forever on 'continue' inside a for-i-in-a..b range loop (confirmed via 10+ minute 98%-CPU spin, killed under timeout) -- this is why every seed run in this harness is timeout-guarded"
+
+# --- LOUD-FAIL: native-build must refuse these constructs, not miscompile --
+run_loud_fail_case int_overflow_loud write_case_int_overflow_loud \
+    "integer literal out of range for i64"
+run_loud_fail_case match_guard_loud write_case_match_guard_loud \
+    "match guards (case x if cond:) are not supported by native codegen yet"
+
+echo ""
+echo "===== check-native-seed-parity summary ====="
+printf '%-24s %-22s %-6s %s\n' "ID" "MODE" "STATUS" "DETAIL"
+while IFS="$(printf '\t')" read -r id mode status detail; do
+    printf '%-24s %-22s %-6s %s\n' "$id" "$mode" "$status" "$detail"
+done <"$RESULTS_FILE"
+
+echo ""
+echo "total=$TOTAL pass=$PASS_N fail=$FAIL_N"
+echo "results_file=$RESULTS_FILE"
+
+if [ "$FAIL_N" -gt 0 ]; then
+    echo "native_seed_parity=false"
+    exit 1
+fi
+
+echo "native_seed_parity=true"
