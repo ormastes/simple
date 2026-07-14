@@ -881,6 +881,59 @@ fn convert_flat_pattern(pat_eid: i64) -> Pattern:
         return Pattern(kind: PatternKind.Binding(nm, false), span: pspan)
     elif ptag == EXPR_INT_LIT or ptag == EXPR_STRING_LIT or ptag == EXPR_BOOL_LIT:
         return Pattern(kind: PatternKind.Literal(convert_flat_expr(pat_eid)), span: pspan)
+    elif ptag == EXPR_BINARY:
+        # `1 | 2 | 3` (or-pattern) parses as a chain of EXPR_BINARY(BitOr)
+        # nodes -- patterns are parsed via the general expression parser
+        # (see this function's docstring), and `|` has no dedicated
+        # pattern-level token. Before this case existed, EXPR_BINARY had NO
+        # match-pattern handling at all and fell through to the Wildcard
+        # catch-all below -- so `case 1 | 2 | 3:` silently became an
+        # UNCONDITIONAL Wildcard arm (matching every scrutinee value, not
+        # just 1/2/3), and a genuine trailing `case _:` then tripped MIR's
+        # "match has multiple wildcard arms" diagnostic -- which native-build
+        # does not gate on, so the build "succeeded" and ran with a garbage
+        # return value (matchpat lane finding). Only BitOr is a genuine
+        # or-pattern; any other binary operator in pattern position has no
+        # pattern meaning and still falls through to Wildcard unchanged
+        # (pre-existing behavior, not tightened here).
+        val pat_bin_op = op_kind_to_binop(expr_get_int(pat_eid))
+        if pat_bin_op == BinOp.BitOr:
+            val pat_bin_left = convert_flat_pattern(expr_get_left(pat_eid))
+            val pat_bin_right = convert_flat_pattern(expr_get_right(pat_eid))
+            var or_alts: [Pattern] = [pat_bin_left]
+            match pat_bin_right.kind:
+                case PatternKind.Or(more_alts):
+                    for m_alt in more_alts:
+                        or_alts.push(m_alt)
+                case _:
+                    or_alts.push(pat_bin_right)
+            return Pattern(kind: PatternKind.Or(or_alts), span: pspan)
+        return Pattern(kind: PatternKind.Wildcard, span: pspan)
+    elif ptag == EXPR_TUPLE:
+        # `(a, b, ...)` tuple-destructure pattern. Before this case existed,
+        # EXPR_TUPLE fell through to the Wildcard catch-all below, so
+        # `case (a, b): return a + b` silently matched anything WITHOUT
+        # binding a/b -- the arm body's `a`/`b` references then resolved to
+        # nothing, which happened to loud-fail downstream as "unresolved
+        # name" (lucky side effect, not by design). Build the real Tuple
+        # pattern so the a/b bindings actually exist.
+        val tup_pat_indices = expr_get_args(pat_eid)
+        var tup_pat_elems: [Pattern] = []
+        var tpi = 0
+        while tpi < tup_pat_indices.len():
+            tup_pat_elems.push(convert_flat_pattern(tup_pat_indices[tpi]))
+            tpi = tpi + 1
+        return Pattern(kind: PatternKind.Tuple(tup_pat_elems), span: pspan)
+    elif ptag == EXPR_RANGE:
+        # `1..5` / `1..=5` range pattern -- mirrors the EXPR_RANGE gap fixed
+        # elsewhere in this file for `for i in start..end:` iterables.
+        # Before this case existed, EXPR_RANGE fell through to Wildcard.
+        val rp_start_idx = expr_get_left(pat_eid)
+        val rp_end_idx = expr_get_right(pat_eid)
+        val rp_start: Expr? = if rp_start_idx >= 0: convert_flat_expr(rp_start_idx) else: nil
+        val rp_end: Expr? = if rp_end_idx >= 0: convert_flat_expr(rp_end_idx) else: nil
+        val rp_inclusive = expr_get_int(pat_eid) != 0
+        return Pattern(kind: PatternKind.Range(rp_start, rp_end, rp_inclusive), span: pspan)
     return Pattern(kind: PatternKind.Wildcard, span: pspan)
 
 # ============================================================================
