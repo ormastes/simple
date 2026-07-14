@@ -72,16 +72,37 @@ pub(crate) fn inline_runtime_len_value(
     // case `d.len()`/`d.is_empty()` on an untyped-receiver dict fall through to
     // the -1 sentinel under the Cranelift JIT fast path.
     let is_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 3);
-    // RuntimeString, RuntimeArray and RuntimeDict all store len at offset 8.
+    // simple-core SplDict (freestanding / SimpleOS native-build) uses tag byte 6
+    // with layout {tag@0, cap@8, len@16, items@32} — unlike RuntimeDict (tag 3,
+    // len@8). Without this case `.len()`/`.values()` on an untyped/ANY-erased
+    // dict hit the -1 sentinel here, silently under-counting iteration and
+    // dropping a synthesized `main` during in-guest HIR lowering (the SimpleOS
+    // interpreter then reports "module has no main function").
+    let is_spldict = builder.ins().icmp_imm(IntCC::Equal, object_type, 6);
+    // RuntimeString, RuntimeArray and RuntimeDict store len at offset 8.
     let has_len_str_arr = builder.ins().bor(is_string, is_array);
-    let has_len = builder.ins().bor(has_len_str_arr, is_dict);
+    let has_len_rt = builder.ins().bor(has_len_str_arr, is_dict);
+    let has_len = builder.ins().bor(has_len_rt, is_spldict);
     builder.ins().brif(has_len, len_block, &[], done_block, &[invalid]);
     builder.seal_block(type_block);
 
     builder.switch_to_block(len_block);
+    // SplDict keeps its entry count at offset 16; everything else at offset 8.
+    // Separate blocks so off16 is never loaded on a (possibly smaller) non-dict.
+    let spldict_len_block = builder.create_block();
+    let other_len_block = builder.create_block();
+    builder.ins().brif(is_spldict, spldict_len_block, &[], other_len_block, &[]);
+    builder.seal_block(len_block);
+
+    builder.switch_to_block(spldict_len_block);
+    let len16 = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 16);
+    builder.ins().jump(done_block, &[len16]);
+    builder.seal_block(spldict_len_block);
+
+    builder.switch_to_block(other_len_block);
     let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
     builder.ins().jump(done_block, &[len]);
-    builder.seal_block(len_block);
+    builder.seal_block(other_len_block);
 
     builder.switch_to_block(done_block);
     let result = builder.block_params(done_block)[0];
