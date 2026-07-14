@@ -1,0 +1,96 @@
+# Native `--entry` Build Correctness — Status & Remaining (2026-07-14)
+
+Tracks the pure-Simple `native-build --entry` correctness campaign that feeds
+self-hosting **#138** (single-file native-build route). Goal: every construct
+the native backend emits must equal the seed interpreter oracle, **or** be
+correct-by-construction where the oracle is provably broken. A loud build
+failure is **never** silently converted to a wrong answer.
+
+## Verification contract (unchanged, in force)
+
+- **Oracle:** `env -u SIMPLE_BOOTSTRAP bin/simple run p.spl` (seed interpreter).
+- **Native:** `env -u SIMPLE_BOOTSTRAP bin/simple native-build --entry p.spl -o out --clean`.
+- **Gate 1 — matrix:** `scripts/check/native-smoke-matrix.shs` must report
+  `total=15 pass=15 fail=0 codegen_fallback_hits=0`.
+- **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
+  regression harness) must report `native_seed_parity=true`, currently **32/32**.
+  Three modes: PARITY (seed==native after newline-normalize), NATIVE-AUTHORITATIVE
+  (oracle provably broken → assert native==known-correct + document divergence),
+  LOUD-FAIL (int-overflow, match-guards must build-fail).
+- Land only via FF-replay onto the `git ls-remote` tip; verify every push with
+  `ls-remote` + content-grep. **No branches.** Seed/compiler **redeploys need
+  explicit user go-ahead** — this campaign edits `src/compiler/*.spl`, which
+  `native-build` interprets live (no rebuild needed).
+
+## Landed this campaign (origin/main, newest first)
+
+| Commit | Fix |
+|--------|-----|
+| `19ac0d5a4e6` | parity harness extended to 32 cases |
+| `99c7f3516b0` | nested/destructuring match (tuple, nested enum+struct payload) |
+| `3434196a876` | `text + number/bool/float` concat auto-stringifies (was SIGSEGV) |
+| `eeba60ee024` | for-in over non-array iterables → loud-fail (was silent+panic) |
+| `13e6f9d63ae` | float struct/tuple fields bit-preserved + typed (was fptosi trunc) |
+| `3cbe3293561` | string methods with a variable argument (was llc crash / always-false) |
+| `54eec04678d` | dual-backend parity harness (initial) |
+| `761bbf4a637` | Option `.is_none/.unwrap/.unwrap_or/.map` wired |
+| `e4dc1760ef4` | float `-0.0` sign, NaN casing, tiny-magnitude silent-zero |
+| `3c87c535c76` | enum text-payload static type + payload-less enum equality |
+| `249476fd257` | unimplemented-lowering stubs → loud build failures |
+| `15ca6fe6190` | struct return-by-value + call-result/payload field access (+determinism) |
+| `5fa6098d842` | match on text/or-patterns/ranges/bool (were silent garbage) |
+| `9647fc190c3` | integer literal overflow loud-fails (was silent garbage) |
+| `1df70c6b9ab` | dict `keys()`-iteration `d[k]` round-trips (was 0) |
+| `ab957b1ae32` | tuple `.0/.1`, mixed-type destructure, `for (k,v)` loop |
+| `33b56152412` | 2D arrays, slices, array-of-structs field access, `.contains` loud-fail |
+| `e2c5d51014b` | sized unsigned/signed ints print + compare + divide correctly |
+| `11f116448d3` | keep explicit test-runner sources |
+
+~45 root causes fixed total (some pre-date this table). Matrix has held 15/15
+throughout.
+
+## Correctness-by-construction divergences (native ≠ seed, native is right)
+
+Oracle proven definitionally broken; native diverges intentionally, documented
+in the parity harness NATIVE-AUTHORITATIVE cases:
+
+- float `0.1` — seed prints non-round-tripping `0.09999999999999998`
+  (`0.1 == 0.09999999999999998` returns FALSE → oracle violates round-trip).
+- `Some(0)` / `rt_is_none` on i64-payload — seed prints `false`.
+- compound-assign — seed gives `5/3/2/3`; native `1512246`.
+- tuple pattern match — seed gives `0`; native `35`.
+- `me` receiver, module globals, string ordering `"a"<"z"` — seed all wrong.
+
+## In flight (7 lanes, 2026-07-14)
+
+Verified-and-landing / verifying against the oracle before FF-push:
+
+- **entrypoint** — bare `fn main():` now emits explicit `ret i64 0`
+  (`xor %eax,%eax`) instead of relying on register garbage. **VERIFIED**
+  (disasm-confirmed, oracle rc=0, single-file `core_codegen.spl` in scope);
+  landing.
+- **exprdispatch2** — `a + [x]` array-concat SIGSEGV + bool/float in string
+  interpolation (`native_array_concat_segv`, `native_interp_bool_float`).
+- **dictcallkeys** — fn-call-returned dict `d[k]` during `keys()` returns 0
+  (`native_dict_from_call_keys_index`): call-result dict local not tagged
+  `runtime_dict_locals`.
+- **numericconv** — int↔float / sized-int conversion & coercion sweep.
+- **closures2** — escaping/capturing closures, IIFE `(\x: x+1)(5)`.
+- **errhandling** — Result / `?` / `.unwrap` edge cases.
+- **collections** — Set/Queue/Stack + un-swept array/dict methods (discovery).
+
+**HARD RULE for every lane:** never run `bootstrap-from-scratch.sh`, `cargo`,
+`bin/simple build bootstrap`, `--deploy`, or anything that writes `bin/release`
+(a rogue redeploy was caught mid-run this session and killed before it clobbered
+the shared binary — deploys require explicit user go-ahead).
+
+## Remaining after the 7 lanes
+
+- Fold a parity-harness case per landed lane fix (inline, not via a sub-lane —
+  the rogue-redeploy incident showed sub-lanes can wander into heavy ops).
+- Open filed bugs still unfixed: see `doc/08_tracking/bug/native_*` (array/dict
+  method gaps, cross-module generic erasure, any-param forwarding).
+- The whole-compiler redeploy (#99 / stage4) remains separate and blocked on
+  seed-backend bugs (cranelift enum miscompile + seed-LLVM mcall_direct arg
+  count) — **not** part of this correctness campaign; see
+  `redeploy_stage4_plan_2026-07-09.md` and `stage4_stub_symbol_plan_2026-07-11.md`.
