@@ -525,7 +525,40 @@ impl MirLowering:
             if dict_keys_recv_type != nil:
                 match dict_keys_recv_type.kind:
                     case Dict(k_type, v_type):
-                        dict_keys_elem_type = if method == "values": v_type else: k_type
+                        val picked_type = if method == "values": v_type else: k_type
+                        # Bug (native_dict_call_result_keys_elem_type):
+                        # a dict-typed local's key/value MIR type is not always
+                        # the SAME string representation. A dict LITERAL's key
+                        # type comes from `local_mir_type_of` on the raw
+                        # (pre-box) key local, which for a string literal is
+                        # `Opaque("str")` -- the representation
+                        # `decode_runtime_value` (expr_dispatch.spl) explicitly
+                        # recognizes and un-tags via rt_interp_cstr. A dict
+                        # returned FROM A FUNCTION instead gets its key/value
+                        # types from `lower_type(HirType)`, whose `Str` case
+                        # always produces the fat-pointer `Tuple([Ptr(U8),
+                        # U64])` representation, NOT `Opaque("str")`.
+                        # `decode_runtime_value` has no case for that Tuple
+                        # shape, so it fell through to the untyped default arm
+                        # and returned the raw TAGGED heap-string handle
+                        # un-decoded. The loop variable was then bound with
+                        # that Tuple type instead of Opaque("str"), so
+                        # `d[k]`'s `box_runtime_value(k)` also skipped its
+                        # str-specific re-tagging step (the local was already
+                        # marked `runtime_value_locals`) -- but `k` was never
+                        # unwrapped to match the key representation
+                        # `rt_dict_get`'s `rt_native_eq` compares against,
+                        # so every lookup silently missed and returned 0.
+                        # Normalize any string-shaped key/value type to
+                        # `Opaque("str")` here (mirroring the representation a
+                        # dict literal's raw string key already carries) so
+                        # decode_runtime_value's existing Opaque("str") branch
+                        # runs for a call-result dict's `.keys()`/`.values()`
+                        # exactly like it already does for a literal dict's.
+                        dict_keys_elem_type = if self.mir_type_is_str(picked_type):
+                            MirType(kind: MirTypeKind.Opaque("str"))
+                        else:
+                            picked_type
                     case _: ()
             var b_dict = self.builder
             val result = b_dict.emit_call(func_operand, [mir_operand_copy(receiver_local)], MirType.i64())
