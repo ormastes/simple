@@ -443,6 +443,47 @@ static int rt_core_is_registered_string(RtCoreString* s) {
     return 0;
 }
 
+/* Bug (native_rt_is_none_heap_tag_collision_segv): a flat (unboxed) i64?/bool?
+ * Option payload is passed through as its bare bit pattern -- it is NOT
+ * NaN-boxed, so a payload value congruent to 1 mod 8 (9, 17, 25, -7, ...)
+ * numerically collides with RT_VALUE_TAG_HEAP (see RT_VALUE_TAG_MASK above).
+ * rt_is_none()/rt_enum_discriminant() used to call rt_core_as_enum() on ANY
+ * non-nil value to test "is this a boxed None enum", and rt_core_as_enum()
+ * trusted the tag bits alone before dereferencing (masked_value)->kind --
+ * for payload 9 that dereferences wild address 0x8 and SIGSEGVs. Negative
+ * payloads (e.g. -7) additionally wrap to a huge unmapped address under the
+ * same flaw, so a plain "low address" guard is not sufficient either.
+ *
+ * Fix: mirror the string registry above. RtCoreEnum objects are created at
+ * exactly one choke point (rt_enum_new) and registered there; rt_core_as_enum
+ * now checks registry membership -- a PURE POINTER COMPARISON, no dereference
+ * -- before ever reading ->kind. A flat payload that merely aliases the HEAP
+ * tag bits is never a member of this registry, so it now resolves to "not an
+ * enum" (NULL) instead of being dereferenced. Real heap-boxed enums (Option
+ * or otherwise) are unaffected since they are always registered at creation. */
+static RtCoreEnum** rt_core_enum_registry = NULL;
+static size_t rt_core_enum_registry_len = 0;
+static size_t rt_core_enum_registry_cap = 0;
+
+static void rt_core_register_enum(RtCoreEnum* e) {
+    if (!e) return;
+    if (rt_core_enum_registry_len == rt_core_enum_registry_cap) {
+        size_t next_cap = rt_core_enum_registry_cap == 0 ? 64 : rt_core_enum_registry_cap * 2;
+        RtCoreEnum** next = (RtCoreEnum**)realloc(rt_core_enum_registry, next_cap * sizeof(RtCoreEnum*));
+        if (!next) return;
+        rt_core_enum_registry = next;
+        rt_core_enum_registry_cap = next_cap;
+    }
+    rt_core_enum_registry[rt_core_enum_registry_len++] = e;
+}
+
+static int rt_core_is_registered_enum(RtCoreEnum* e) {
+    for (size_t i = 0; i < rt_core_enum_registry_len; i++) {
+        if (rt_core_enum_registry[i] == e) return 1;
+    }
+    return 0;
+}
+
 static inline int64_t rt_core_from_special(uint64_t payload) {
     return (int64_t)((payload << 3) | RT_VALUE_TAG_SPECIAL);
 }
@@ -510,7 +551,14 @@ static inline RtCoreArray* rt_core_as_array(int64_t value) {
 static inline RtCoreEnum* rt_core_as_enum(int64_t value) {
     if (!rt_core_is_heap(value)) return NULL;
     RtCoreEnum* e = (RtCoreEnum*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
-    if (!e || e->kind != RT_VALUE_HEAP_ENUM) return NULL;
+    if (!e) return NULL;
+    /* Registry membership is a pure pointer comparison -- it must be checked
+     * BEFORE dereferencing e->kind. A flat i64?/bool? payload that merely
+     * aliases the HEAP tag bits (e.g. 9, 17, -7 -- see comment above the
+     * registry definition) is never registered, so it safely resolves to
+     * NULL here instead of being read as a wild pointer. */
+    if (!rt_core_is_registered_enum(e)) return NULL;
+    if (e->kind != RT_VALUE_HEAP_ENUM) return NULL;
     return e;
 }
 
@@ -2328,6 +2376,7 @@ int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
     value->enum_id = (uint32_t)enum_id;
     value->discriminant = (uint32_t)discriminant;
     value->payload = payload;
+    rt_core_register_enum(value);
     int64_t tagged = (int64_t)(((uint64_t)(uintptr_t)value) | RT_VALUE_TAG_HEAP);
     if (rt_enum_intern_count < RT_ENUM_INTERN_MAX) {
         rt_enum_intern_table[rt_enum_intern_count].enum_id = enum_id;
