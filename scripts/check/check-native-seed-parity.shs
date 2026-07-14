@@ -442,6 +442,119 @@ fn main() -> i64:
 EOF
 }
 
+# --- 2026-07-14 second batch (6 more landed native-build fixes) -------------
+
+write_case_rt_is_none_payload9() {
+    # `rt_is_none` fix (04255754a71): `if val x = a.?:` on an i64? whose
+    # payload aliases the HEAP tag used to SIGSEGV native-build's runtime.
+    # Same `.?` if-let landmine as option_nil_check makes the seed diverge.
+    cat >"$1" <<'EOF'
+fn get(v: i64) -> i64?:
+    return v
+
+fn main() -> i64:
+    val a = get(9)
+    if val x = a.?:
+        print(x)
+    return 0
+EOF
+}
+
+write_case_str_method_var_arg() {
+    # `starts_with`/`contains` with a *variable* argument (3cbe3293561):
+    # previously crashed llc / always returned false on native. Bool results
+    # are funneled through if/else to explicit int literals so the seed's
+    # `true`/`false` vs native's `1`/`0` print formatting never diverges —
+    # the construct under test is the method call, not bool stringification.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val s = "hello"
+    val p = "he"
+    val sub = "ell"
+    if s.starts_with(p):
+        print(1)
+    else:
+        print(0)
+    if s.contains(sub):
+        print(1)
+    else:
+        print(0)
+    if s.contains("zzz"):
+        print(1)
+    else:
+        print(0)
+    return 0
+EOF
+}
+
+write_case_compound_assign() {
+    # Compound assignment += -= *= (61bce1b3357): the seed's frontend
+    # SILENTLY DROPS the arithmetic and just rebinds to the RHS operand, so
+    # `x += 5` stores 5 (not 15), etc. — see $seed_note. Native applies the
+    # op correctly, so this is native-authoritative.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    var x = 10
+    x += 5
+    print(x)
+    x -= 3
+    print(x)
+    x *= 2
+    print(x)
+    var s = 0
+    for i in [1, 2, 3]:
+        s += i
+    print(s)
+    return 0
+EOF
+}
+
+write_case_float_struct_field() {
+    # Float struct fields (13e6f9d63ae): reading an f64 struct field used to
+    # be fptosi-truncated to an int on native (1.5 -> 1). Now bit-preserved
+    # and correctly typed; the seed was already sound here -> parity.
+    cat >"$1" <<'EOF'
+struct Point:
+    x: f64
+    y: f64
+
+fn main() -> i64:
+    val p = Point(x: 1.5, y: 3.5)
+    print(p.x)
+    print(p.y)
+    print(p.x + p.y)
+    return 0
+EOF
+}
+
+write_case_text_num_concat() {
+    # text + number/bool/float auto-stringify (3434196a876): `"n=" + 5` used
+    # to SIGSEGV native-build. Now the non-text operand is stringified; the
+    # seed already did this -> parity.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    print("n=" + 5)
+    print("b=" + true)
+    print("f=" + 3.5)
+    print("a" + 1 + "b")
+    return 0
+EOF
+}
+
+write_case_tuple_pattern_match() {
+    # Destructuring tuple match pattern (99c7f3516b0): `case (a, b):` binds
+    # the tuple elements. The seed does NOT bind them (prints 0); native
+    # binds correctly (a=3,b=5 -> 3*10+5=35) -> native-authoritative.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val p = (3, 5)
+    match p:
+        case (a, b):
+            print(a * 10 + b)
+    return 0
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # Runner: shared helpers.
 # ---------------------------------------------------------------------------
@@ -580,6 +693,9 @@ run_parity_case bool_print write_case_bool_print
 run_parity_case sized_int write_case_sized_int
 run_parity_case text_int_len_methods write_case_text_int_len_methods
 run_parity_case some0 write_case_some0
+run_parity_case str_method_var_arg write_case_str_method_var_arg
+run_parity_case float_struct_field write_case_float_struct_field
+run_parity_case text_num_concat write_case_text_num_concat
 
 # --- NATIVE-AUTHORITATIVE: seed oracle broken/unparseable for these --------
 run_native_authoritative_case me_receiver write_case_me_receiver "41" \
@@ -594,6 +710,12 @@ run_native_authoritative_case dict_get write_case_dict_get "2" \
     "seed's Dict.get() returns a bogus 0.0 on a present key (known landmine: Dict.get()-nil on present keys)"
 run_native_authoritative_case range_for write_case_range_for "4" \
     "seed HANGS forever on 'continue' inside a for-i-in-a..b range loop (confirmed via 10+ minute 98%-CPU spin, killed under timeout) -- this is why every seed run in this harness is timeout-guarded"
+run_native_authoritative_case rt_is_none_payload9 write_case_rt_is_none_payload9 "9" \
+    "seed's 'if val x = a.?:' pattern-bind is broken (same landmine as option_nil_check): it prints a bogus 'false' and never runs the branch body"
+run_native_authoritative_case compound_assign write_case_compound_assign "1512246" \
+    "seed's frontend silently drops the arithmetic in compound assignment and rebinds to the RHS operand, printing 5/3/2/3 instead of 15/12/24/6"
+run_native_authoritative_case tuple_pattern_match write_case_tuple_pattern_match "35" \
+    "seed does not bind the elements of a 'case (a, b):' destructuring tuple pattern, printing 0 instead of 35"
 
 # --- LOUD-FAIL: native-build must refuse these constructs, not miscompile --
 run_loud_fail_case int_overflow_loud write_case_int_overflow_loud \
