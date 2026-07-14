@@ -383,6 +383,15 @@ pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
         val root_cached = app_registry_cached_bytes(root_name)
         if root_cached.len() > 0:
             return root_cached
+    # No root filesystem mounted (disk-less WM harness): every disk-backed
+    # candidate below dispatches through g_root_fat32.unwrap().stat(), and
+    # native-build miscompiles the `Option<SharedFat32Driver> != nil` guard so a
+    # genuinely-nil root reports non-nil, yielding a null driver whose .stat()
+    # faults cr2=0x0 (looped forever by RIP+2 recovery). Gate on the reliable
+    # g_vfs_initialized bool: the registry cache above is the only usable source,
+    # so return empty and let spawn surface a clean ENOENT/negative.
+    if not g_vfs_initialized:
+        return []
     # 2. Try VFS mounted read
     val mounted_bytes = _vfs_read_mounted_exec_candidate(name)
     if mounted_bytes.len() > 0:
@@ -490,6 +499,16 @@ pub fn g_vfs_read_file_bytes(name: text) -> [u8]:
     val seeded_exec = app_registry_cached_bytes(name)
     if seeded_exec.len() > 0:
         return _clone_bytes(seeded_exec)
+    # No root filesystem mounted (e.g. the disk-less WM harness where the NVMe
+    # exec probe failed): the trait-device FAT32 read machinery below dispatches
+    # through g_root_fat32.unwrap().stat(), and native-build miscompiles the
+    # `Option<SharedFat32Driver> != nil` guard on the line below — a genuinely-nil
+    # g_root_fat32 reports non-nil, so .unwrap() yields a null driver and .stat()
+    # faults cr2=0x0, which the x86 RIP+2 fault recovery turns into an infinite
+    # loop. Gate on the reliable g_vfs_initialized bool instead: when no fs is
+    # mounted the registry cache above is the only honest source, so return empty.
+    if not g_vfs_initialized:
+        return []
     if g_root_fat32 != nil:
         val root_bytes = g_vfs_root_read_file_bytes(g_root_fat32.unwrap(), g_vfs_root_path(name))
         if root_bytes.len() > 0:
