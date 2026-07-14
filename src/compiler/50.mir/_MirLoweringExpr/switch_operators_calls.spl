@@ -1064,10 +1064,30 @@ impl MirLowering:
                 if args[ai].has_name and args[ai].name == want:
                     chosen = args[ai].value
                 ai = ai + 1
+            # A Lambda literal in field-initializer position (`Holder(f: \x:
+            # x+1)`) is a first-class function VALUE -- `self.lower_expr` has no
+            # generic Lambda case and returns nil, which then crashed on `v.id`
+            # below (an internal "undefined field 'id' on nil" instead of a
+            # clean diagnostic). NOTE: lifting it to a fnptr via #165's
+            # `lower_lambda_value` was tried here too; the one reachable
+            # end-to-end probe (construct-then-call `h.f(9)`) happens to fail at
+            # build time regardless (struct-field indirect-call is a separate,
+            # unimplemented gap: "unresolved method call: f"), so it wasn't
+            # possible to confirm the fnptr round-trips correctly through a
+            # struct field before something reads it back -- and the sibling
+            # array-literal case demonstrated a silent-successful build that
+            # then SIGSEGVs at runtime for the exact same box/unbox concern.
+            # Staying guard-only here for the same reason: a clean loud build
+            # failure, never a crash, is the only difference this fix makes.
             val v = self.lower_expr(chosen)
-            ops = ops.push(mir_operand_copy(v))
-            val arg_struct = self.struct_value_syms.get(v.id)
-            field_type_names.push(arg_struct ?? "")
+            if v == nil:
+                self.error("unsupported struct field initializer (cannot lower to a value)", nil)
+                ops = ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
+                field_type_names.push("")
+            else:
+                ops = ops.push(mir_operand_copy(v))
+                val arg_struct = self.struct_value_syms.get(v.id)
+                field_type_names.push(arg_struct ?? "")
             fi = fi + 1
         # Only record a non-trivial map (at least one nested struct field), and
         # only when a prior construction has not already recorded richer info.
@@ -1094,6 +1114,112 @@ impl MirLowering:
         self.struct_value_syms[dest.id] = struct_name
         dest
 
+    me lookup_local_type(local: LocalId) -> MirType:
+        """Find `local`'s declared MirType by scanning the current builder's
+        locals (mirrors the linear scan `set_local_name` already does in
+        mir_data.spl). Defaults to i64 -- every local this pipeline currently
+        snapshots for capture-by-value is an i64-ABI value or fnptr word."""
+        var i = 0
+        val locs = self.builder.locals
+        while i < locs.len():
+            if locs[i].id.id == local.id:
+                return locs[i].type_
+            i = i + 1
+        MirType.i64()
+
+    me collect_free_var_syms(body: HirExpr, param_syms: [i64], acc: [i64]) -> [i64]:
+        """Collect free-variable symbol ids referenced by a lambda body that
+        needs a by-value capture snapshot at bind time (see
+        `snapshot_lambda_capture`). Mirrors the exact expression shapes
+        `lambda_body_captures` already recognizes; unrecognized shapes are
+        conservatively left untouched (no new free vars reported) rather than
+        guessed at -- an uncollected free var just keeps today's (pre-existing,
+        already-documented) live-read behavior for that one uncommon shape,
+        never something worse.
+        """
+        match body.kind:
+            case Var(symbol):
+                val sid = mir_expr_symbol_id_value(symbol)
+                if sid >= 0 and not int_list_contains(param_syms, sid) and not int_list_contains(acc, sid):
+                    acc.push(sid)
+                else:
+                    acc
+            case NamedVar(symbol, name):
+                val sid = mir_expr_symbol_id_value(symbol)
+                if sid >= 0 and not int_list_contains(param_syms, sid) and not self.is_known_top_level_function(name) and not int_list_contains(acc, sid):
+                    acc.push(sid)
+                else:
+                    acc
+            case Binary(_, left, right):
+                val acc1 = self.collect_free_var_syms(left, param_syms, acc)
+                self.collect_free_var_syms(right, param_syms, acc1)
+            case Unary(_, operand):
+                self.collect_free_var_syms(operand, param_syms, acc)
+            case Field(base, _, _):
+                self.collect_free_var_syms(base, param_syms, acc)
+            case Index(base, index):
+                val acc1 = self.collect_free_var_syms(base, param_syms, acc)
+                self.collect_free_var_syms(index, param_syms, acc1)
+            case TupleIndex(base, _):
+                self.collect_free_var_syms(base, param_syms, acc)
+            case Cast(expr, _):
+                self.collect_free_var_syms(expr, param_syms, acc)
+            case As(expr, _):
+                self.collect_free_var_syms(expr, param_syms, acc)
+            case Call(callee, call_args, _):
+                var acc1 = self.collect_free_var_syms(callee, param_syms, acc)
+                var i = 0
+                while i < call_args.len():
+                    acc1 = self.collect_free_var_syms(call_args[i].value, param_syms, acc1)
+                    i = i + 1
+                acc1
+            case MethodCall(receiver, _, call_args, _):
+                var acc1 = self.collect_free_var_syms(receiver, param_syms, acc)
+                var i = 0
+                while i < call_args.len():
+                    acc1 = self.collect_free_var_syms(call_args[i].value, param_syms, acc1)
+                    i = i + 1
+                acc1
+            case _:
+                acc
+
+    me snapshot_lambda_capture(lam: HirExpr) -> Dict<i64, LocalId>:
+        """Bind-time by-value capture snapshot for `val f = \\x: ...`.
+
+        For every free variable the body actually references, copies its
+        CURRENT value (not just its symbol->LocalId mapping -- `var` locals
+        are mutable slots in this pipeline, so a later reassignment mutates
+        the existing LocalId's storage in place, not just local_map) into a
+        brand-new frozen temp local. Later calls to this lambda
+        (try_inline_lambda_call) read the frozen temp instead of the live,
+        possibly-since-mutated slot, matching the oracle's by-value capture
+        semantics for `var n = 5; val f = \\x: x+n; n = 100; f(3)` -> 8, not 103.
+        """
+        match lam.kind:
+            case Lambda(params, body, _captures):
+                var param_syms: [i64] = []
+                var pi = 0
+                while pi < params.len():
+                    param_syms = param_syms.push(mir_expr_symbol_id_value(params[pi].symbol))
+                    pi = pi + 1
+                val free_syms: [i64] = self.collect_free_var_syms(body, param_syms, [])
+                var snap: Dict<i64, LocalId> = {}
+                var fi = 0
+                while fi < free_syms.len():
+                    val fsid = free_syms[fi]
+                    if self.local_map.has(fsid):
+                        val live_local = self.local_map[fsid]
+                        val ty = self.lookup_local_type(live_local)
+                        var b = self.builder
+                        val frozen = b.new_temp(ty)
+                        b.emit_copy(frozen, live_local)
+                        self.builder = b
+                        snap[fsid] = frozen
+                    fi = fi + 1
+                snap
+            case _:
+                {}
+
     me try_inline_lambda_call(symbol: SymbolId, args: [HirCallArg]) -> LocalId?:
         """Inline a direct call to a val-bound lambda by beta-reduction.
 
@@ -1111,15 +1237,45 @@ impl MirLowering:
         val lam = self.lambda_bindings[sid]
         match lam.kind:
             case Lambda(params, body, _):
+                # Lower each argument expression FIRST, in the caller's live
+                # (current) scope -- an argument like `f(outer_var)` must
+                # resolve `outer_var` against the call site, never the
+                # lambda's bind-time snapshot.
+                var arg_locals: [LocalId] = []
+                var ai = 0
+                while ai < params.len():
+                    if ai < args.len():
+                        arg_locals = arg_locals.push(self.lower_expr(args[ai].value))
+                    ai = ai + 1
+                # By-value capture: swap in the local_map snapshot taken at
+                # `val f = \x: ...` bind time so free-variable references in
+                # `body` resolve to their bind-time LocalId, matching the
+                # oracle's by-value semantics, instead of the live (possibly
+                # SSA-reassigned-since-bind) ambient map. The live map is
+                # restored after the body is lowered so the rest of the
+                # enclosing scope keeps seeing current values.
+                val live_map = self.local_map
+                if self.lambda_capture_snapshot.has(sid):
+                    # Dict has REFERENCE semantics here: aliasing
+                    # `self.local_map` directly to the stored snapshot would let
+                    # the param-binding writes below (and any body-local `val`s)
+                    # mutate the shared master snapshot in place. Copy it into a
+                    # fresh per-call dict instead.
+                    val snap = self.lambda_capture_snapshot[sid]
+                    var call_map: Dict<i64, LocalId> = {}
+                    for snap_key in snap.keys():
+                        call_map[snap_key] = snap[snap_key]
+                    self.local_map = call_map
                 var pi = 0
                 while pi < params.len():
-                    if pi < args.len():
-                        val arg_local = self.lower_expr(args[pi].value)
+                    if pi < arg_locals.len():
                         val pid = mir_expr_symbol_id_value(params[pi].symbol)
                         if pid >= 0:
-                            self.local_map[pid] = arg_local
+                            self.local_map[pid] = arg_locals[pi]
                     pi = pi + 1
-                Some(self.lower_expr(body))
+                val result = self.lower_expr(body)
+                self.local_map = live_map
+                Some(result)
             case _:
                 nil
 

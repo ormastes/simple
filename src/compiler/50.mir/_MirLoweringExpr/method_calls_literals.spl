@@ -1416,13 +1416,30 @@ impl MirLowering:
         var operands: [MirOperand] = []
         var lowered_elem_type = MirType.i64()
         for elem in elements:
+            # A Lambda literal element (`[\x: x+1, \x: x*2]`) is a first-class
+            # function VALUE -- `self.lower_expr` has no generic Lambda case and
+            # returns nil, which then crashed on `local.id` below (an internal
+            # "undefined field 'id' on nil" instead of a clean diagnostic).
+            # NOTE: lifting it to a fnptr via #165's `lower_lambda_value` (as
+            # the struct-field-initializer fix above does) was tried here too
+            # and made the BUILD succeed, but the resulting binary then
+            # SIGSEGV'd at runtime the first time an element was called back
+            # out of the array -- box_runtime_value/array-element tagging does
+            # not round-trip a raw fnptr constant correctly. A silent-successful
+            # build that crashes at runtime is strictly worse than today's
+            # build-time failure, so that path is NOT taken here; this is a
+            # guard-only fix (still a clean loud build failure, never a crash).
             val local = self.lower_expr(elem)
-            if operands.len() == 0:
-                val local_type = self.local_mir_type_of(local)
-                if local_type != nil:
-                    lowered_elem_type = local_type
-            val boxed = self.box_runtime_value(local)
-            operands = operands.push(mir_operand_copy(boxed))
+            if local == nil:
+                self.error("unsupported array element (cannot lower to a value)", nil)
+                operands = operands.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
+            else:
+                if operands.len() == 0:
+                    val local_type = self.local_mir_type_of(local)
+                    if local_type != nil:
+                        lowered_elem_type = local_type
+                val boxed = self.box_runtime_value(local)
+                operands = operands.push(mir_operand_copy(boxed))
 
         # The lowered local is authoritative. Flat HIR expression metadata may
         # still carry the parser's default i64 for typed variables.
