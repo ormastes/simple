@@ -6,13 +6,16 @@
 Use one bounded, architecture-neutral guest/host protocol over QEMU
 `ivshmem-plain`. The current guest submits bounded canonical RECT/TEXT/IMAGE
 Draw IR semantics, separate bounded IMAGE pixel resources, and a bounded
-ProcessingIR `FillU32` payload. The production x86
-desktop source path routes local frames through `DrawIrComposition`, resolved top-level
+ProcessingIR `FillU32` payload. The production x86 desktop and canonical
+AArch64 boot desktop route local frames through `DrawIrComposition`, resolved top-level
 `WmContentFrame` IMAGE resources, and Engine2D. The host Engine2D path now
 retains one Vulkan or Metal session across smaller per-window device surfaces
 and applies their embedding opacity with checked native src-over. The production x86 executor now
 maps the complete BAR into the active VMM, negotiates one bounded session, and
-submits that same canonical composition when readback capacity permits. A
+submits that same canonical composition when readback capacity permits. The
+AArch64 entry reuses the same executor over RAMFB and the shared ARM BAR2 mapper;
+its UART loop mutates compositor-owned surfaces and never introduces an
+architecture-specific render path. A
 host daemon selects a supported private backend and
 returns a correlated receipt plus output. x86_64, AArch64, and RISC-V adapters
 only own boot/device discovery. They must not define backend-specific public

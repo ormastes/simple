@@ -105,6 +105,28 @@ listed below. The runner uses a persistent serial file for this lane so a guest
 that reaches the WM markers and then keeps running is still usable evidence;
 scenario wiring and command construction alone are not boot evidence.
 
+The legacy glass demo above remains frozen. The canonical Engine2D desktop is
+an additive scenario:
+
+```bash
+bin/simple os build --scenario=arm64-desktop-engine2d
+bin/simple os run --scenario=arm64-desktop-engine2d
+bin/simple os test --scenario=arm64-desktop-engine2d
+```
+
+It builds `arch/arm64/gui_entry_desktop.spl` with the `src/os` and `src/lib`
+closure, configures RAMFB, and renders compositor-owned Simple Web content via
+`DesktopShell` and `Engine2dWmFrameExecutor`. The static scenario intentionally
+does not invent a shared-memory path or daemon lifecycle. Host-GPU wrapper
+integration remains an explicit unfinished gate. Until TODO 548
+allows a fresh build and QEMU run, this is source/scenario wiring, not live
+production evidence.
+The guest is a persistent desktop, so `os run` and `os test` accept its timeout
+only when the captured serial output contains RAMFB configuration, the
+canonical first-frame marker emitted after a positive revision, and the ARM
+desktop-ready marker. This proves local Engine2D composition, not host-GPU
+execution.
+
 `test/03_system/gui/arm64_wm_ramfb_screendump_spec.spl` is the focused framebuffer
 proof target for this lane. It reuses the repo QMP harness, waits for
 `[WM] Glass desktop rendered!`, requests a QMP `screendump`, validates the PPM

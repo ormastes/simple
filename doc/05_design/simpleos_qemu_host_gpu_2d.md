@@ -223,7 +223,8 @@ at most 256 MiB, and processing speedup at least 1.5x to become preferred.
 
 1. Pure Simple codec/validator and CPU oracle tests.
 2. x86_64 Linux/Vulkan rendering plus CUDA-preferred, Vulkan-fallback ProcessingIR guest-daemon vertical slice.
-3. AArch64 and RISC-V transport adapters using the identical protocol.
+3. AArch64 production RAMFB/Engine2D desktop using the identical protocol;
+   RISC-V follows after its dynamic scanout/present owner replaces fixed C anchors.
 4. macOS Metal and Windows DirectX adapters only on prepared native hosts.
 5. Wire canonical row output into the hardening matrix without changing its
    existing 26-row pass contract.

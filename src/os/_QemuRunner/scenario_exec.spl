@@ -537,7 +537,8 @@ fn _run_scenario_impl(scenario: QemuScenario, headless: bool) -> bool:
         print "[run] serial output:\n{serial_output}"
     if stderr != "":
         print "[run] stderr:\n{stderr}"
-    val success = scenario_qemu_exit_success(scenario, exit_code)
+    val persistent_desktop_ready = scenario.name == "arm64-desktop-engine2d" and _scenario_serial_accepts_completion(scenario, serial_output)
+    val success = scenario_qemu_exit_success(scenario, exit_code) or persistent_desktop_ready
     if not success:
         print "[run] FAILED (exit code {exit_code})"
     success
@@ -604,11 +605,11 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
         serial_output.contains("X25519_PROBE_FULL_DONE")
     else if _scenario_uses_catalog_completion_contract(scenario):
         _scenario_serial_accepts_completion_with_optional_protection(scenario, serial_output)
-    else if scenario.name == "arm64-wm-ramfb":
+    else if scenario.name == "arm64-wm-ramfb" or scenario.name == "arm64-desktop-engine2d":
         _scenario_serial_accepts_completion(scenario, serial_output)
     else:
         serial_output.contains("TEST PASSED")
-    val success = accepted and (scenario_qemu_exit_success(scenario, exit_code) or scenario.name == "arm64-wm-ramfb")
+    val success = accepted and (scenario_qemu_exit_success(scenario, exit_code) or scenario.name == "arm64-wm-ramfb" or scenario.name == "arm64-desktop-engine2d")
     if not success:
         if scenario.name == "x64-desktop-uefi":
             print "[test] FAILED: scenario {scenario.name} did not satisfy desktop driver completion markers"
@@ -627,6 +628,9 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
             _print_scenario_missing_markers(scenario, serial_output)
         else if scenario.name == "arm64-wm-ramfb":
             print "[test] FAILED: scenario {scenario.name} did not satisfy ARM64 WM ramfb completion markers"
+            _print_scenario_missing_markers(scenario, serial_output)
+        else if scenario.name == "arm64-desktop-engine2d":
+            print "[test] FAILED: scenario {scenario.name} did not satisfy ARM64 Engine2D desktop completion markers"
             _print_scenario_missing_markers(scenario, serial_output)
         else:
             print "[test] FAILED: scenario {scenario.name} did not report TEST PASSED"
@@ -675,9 +679,18 @@ fn arm64_wm_ramfb_required_marker_fragments() -> [text]:
         "[WM] Glass desktop rendered!"
     ]
 
+fn arm64_desktop_engine2d_required_marker_fragments() -> [text]:
+    [
+        "[WM] ramfb configured successfully via fw_cfg DMA",
+        "[desktop-gui] first-frame-rendered scene_revision=",
+        "[desktop-gui-arm64] desktop-ready revision="
+    ]
+
 fn _scenario_required_marker_fragments(scenario: QemuScenario) -> [text]:
     if scenario.name == "arm64-wm-ramfb":
         return arm64_wm_ramfb_required_marker_fragments()
+    if scenario.name == "arm64-desktop-engine2d":
+        return arm64_desktop_engine2d_required_marker_fragments()
     # Workaround: avoid Option<large-struct> field access (interpreter crash).
     val platform_name = _catalog_platform_name_for_scenario(scenario)
     if platform_name != "":
@@ -777,6 +790,8 @@ fn scenario_test_timeout_ms(scenario: QemuScenario) -> u64:
     if scenario.name == "x64-nvme-fat32":
         return 60000
     if scenario.name == "arm64-wm-ramfb":
+        return 120000
+    if scenario.name == "arm64-desktop-engine2d":
         return 120000
     if scenario.name == "rv64-ssh":
         return 300000

@@ -211,11 +211,11 @@ for QMP capture. Current evidence: `bin/simple os build
 `build/os/rv64_display_smoke_evidence-current/screendump.ppm`. Current report:
 `doc/09_report/rv64_display_smoke_qmp_evidence_current_2026-07-02.md`.
 
-This is the RV64 freestanding WM lifecycle gate used by the host configuration
-matrix. The host configuration and hardening matrices report
-`simpleos_hardening_rv64_display_smoke_qmp_status=pass` when the wrapper sees
-the WM lifecycle serial markers, a nonblack QMP PPM, and all five WM anchor
-sample pixels.
+This is an RV64 VirtIO scanout transport probe, not a production WM lifecycle
+gate. `display_entry.spl` prints its WM/Engine2D/Web markers unconditionally and
+the C runtime paints the five fixed anchors. Preserve the QMP result as
+scanout evidence only; production RV64 `SharedWmScene`/Engine2D evidence remains
+open under TODO 565 and the dynamic display-owner migration under TODO 567.
 
 ## Host-GPU rendering and ProcessingIR
 
@@ -245,6 +245,9 @@ applies canonical embedding opacity through checked native parent src-over.
 The current wrapper fixture remains
 full-frame, so fresh production-WM QEMU evidence is still required even though
 the production selection seam is wired.
+The additive `arm64-desktop-engine2d` scenario now supplies the canonical
+RAMFB/`DesktopShell` build target; the host-GPU wrapper still needs a correlated
+production-frame validator before this source wiring can become live evidence.
 Cached reports are accepted only through `--validate-report`: an overall status
 cannot promote the lane unless all nine host/ISA rows are well-formed and a
 passing active host carries three existing serial logs with exact correlated

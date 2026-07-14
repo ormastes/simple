@@ -268,8 +268,9 @@ chrome, taskbar, and visible windows into ordered Draw IR batches keyed by
 `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl`; it executes supported
 `rect`, `text`, and caller-resolved `image` Draw IR commands through the
 existing Engine2D facade, presents the completed composition, and returns
-readback pixels plus CPU/GPU fallback metadata. SimpleOS production desktop
-source frames enter through `src/os/compositor/engine2d_wm_frame_executor.spl`; invalid
+readback pixels plus CPU/GPU fallback metadata. SimpleOS x86_64 production and
+AArch64 canonical boot-desktop source frames enter through
+`src/os/compositor/engine2d_wm_frame_executor.spl`; invalid
 or duplicate top-level `WmContentFrame` resources fail closed, and nested IMAGE
 projection remains explicit unfinished work rather than omitted pixels. Real
 host-GPU Draw IR execution remains a backend job. Host runtime-queue integration

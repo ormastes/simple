@@ -196,7 +196,7 @@ Host input
 | `src/lib/common/ui/wm_runtime_dispatch.spl` | WM dispatch command adapter for host shells |
 | `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` | Engine2D Draw IR executor (rect/text/resolved image, present, CPU fallback) |
 | `src/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_adv.spl` | Optional host runtime-queue adapter, separate from the baremetal core closure |
-| `src/os/compositor/engine2d_wm_frame_executor.spl` | SimpleOS production WM DrawIR/Engine2D frame owner; invalid or nested-unresolved content fails closed |
+| `src/os/compositor/engine2d_wm_frame_executor.spl` | Shared x86_64 production/AArch64 boot-desktop WM DrawIR/Engine2D frame owner; invalid or nested-unresolved content fails closed |
 | `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl` | Drawing vs processing lane split |
 | `src/app/ui.render/capability.spl` | Implementation-free renderer capabilities |
 | `src/app/ui.render/widgets.spl` | TUI-only compatibility renderer shim |

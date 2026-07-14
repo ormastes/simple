@@ -42,9 +42,11 @@ fixture bypasses, synthetic handles, or passing placeholders.
   RV64 render and ProcessingIR receipts; it is not fresh production evidence.
 - Fresh pure-Simple guest builds and all live QEMU rows remain blocked by TODO
   548's compiler/runtime deployment work. No current live PASS is claimed.
-- x86_64 alone wires the production `DesktopShell` through
-  `Engine2dWmFrameExecutor`; AArch64/RISC-V rows remain protocol probes until
-  TODO 565 supplies canonical production desktop adapters.
+- x86_64 production and the new AArch64 boot-owned RAMFB entry wire canonical
+  `DesktopShell` frames through `Engine2dWmFrameExecutor`. AArch64
+  source/build-scenario wiring is present but real process ownership and fresh
+  compile/QEMU evidence remain open under TODO 565/TODO 548;
+  RISC-V remains a protocol/scanout probe pending TODO 567.
 - NFR-006 remains open under TODO 566: receipt timing covers daemon HELLO work,
   not guest-observed device initialization plus all fallback attempts.
 - Final reviewer: primary `/root`; native Metal implementation is present but

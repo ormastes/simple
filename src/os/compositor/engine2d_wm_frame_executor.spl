@@ -4,6 +4,9 @@ use common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource, simpleos
 use common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_PROTOCOL_VERSION,
     SIMPLEOS_HOST_GPU_STATUS_PASS,
+    SIMPLEOS_HOST_GPU_BACKEND_DIRECTX,
+    SIMPLEOS_HOST_GPU_BACKEND_METAL,
+    SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
     simpleos_host_gpu_backend_name,
     simpleos_host_gpu_backend_mask,
     simpleos_host_gpu_guest_isa_name,
@@ -46,7 +49,7 @@ class Engine2dWmFrameExecutor:
     static fn create(engine: Engine2D, framebuffer: FramebufferDriver) -> Engine2dWmFrameExecutor:
         Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0)
 
-    static fn create_host_gpu(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64) -> Engine2dWmFrameExecutor:
+    static fn _create_host_gpu_exact(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64) -> Engine2dWmFrameExecutor:
         var executor = Engine2dWmFrameExecutor.create(engine, framebuffer)
         val width = framebuffer.width.to_i64()
         val height = framebuffer.height.to_i64()
@@ -76,6 +79,15 @@ class Engine2dWmFrameExecutor:
         serial_println("[wm-frame] host-gpu-ready backend={backend} generation={hello_generation}")
         executor
 
+    static fn create_host_gpu(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64) -> Engine2dWmFrameExecutor:
+        var executor = Engine2dWmFrameExecutor._create_host_gpu_exact(engine, framebuffer, base, guest_isa_code, backend_code)
+        if executor.host_gpu_base != 0u64 or backend_code != SIMPLEOS_HOST_GPU_BACKEND_METAL:
+            return executor
+        executor = Engine2dWmFrameExecutor._create_host_gpu_exact(engine, framebuffer, base, guest_isa_code, SIMPLEOS_HOST_GPU_BACKEND_VULKAN)
+        if executor.host_gpu_base != 0u64:
+            return executor
+        Engine2dWmFrameExecutor._create_host_gpu_exact(engine, framebuffer, base, guest_isa_code, SIMPLEOS_HOST_GPU_BACKEND_DIRECTX)
+
     me _render_host_gpu(composition: DrawIrComposition, resources: [SimpleOsHostGpuImageResource]) -> bool:
         val generation = host_gpu_ivshmem_next_generation(self.host_gpu_base)
         if generation <= 0:
@@ -92,7 +104,7 @@ class Engine2dWmFrameExecutor:
         if not self.framebuffer.present_argb32_from_mmio(receipt.output_addr, self.framebuffer.width, self.framebuffer.height, receipt.output_bytes, receipt.output_checksum):
             serial_println("[wm-frame] host-gpu-fallback reason=readback-presentation")
             return false
-        serial_println("[wm-frame] host-gpu-presented backend={self.host_gpu_backend} generation={generation} checksum={receipt.output_checksum}")
+        serial_println("[wm-frame] host-gpu-presented backend={self.host_gpu_backend} generation={generation} run={self.host_gpu_run_id_hash} frame={generation} checksum={receipt.output_checksum}")
         true
 
     me render(scene: SharedWmScene, taskbar: TaskbarModel, content_frames: [WmContentFrame], scene_revision: i64, taskbar_revision: i64, clock_label: text) -> i64:
