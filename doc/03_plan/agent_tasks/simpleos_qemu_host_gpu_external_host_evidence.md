@@ -51,7 +51,7 @@ run exposes a reproducible implementation failure.
 
 | TODO | Remaining local work |
 |---|---|
-| TODO529 | Capture an independently reviewed Engine2D QEMU PPM oracle and run the exact-pixel QMP gate on all three ISAs. |
+| TODO529 | Follow `doc/03_plan/sys_test/engine2d_qemu_exact_oracle.md`: reconcile the actively owned spec, capture an independently reviewed PPM oracle, and run the exact-pixel QMP gate on all three ISAs. |
 | TODO535 | Finish Stage-4 hosted provider/runtime composition required by a current full pure-Simple CLI. |
 | TODO536 | Keep multiarch entries correctly rooted and resolve any remaining LLD defsym punctuation at its owner. |
 | TODO537 | Fix RV freestanding-runtime object selection and SBI unsafe/inline-assembly lowering at the compiler owner. |

@@ -6,14 +6,31 @@ System-level SSpec tests for SimpleOS boot and execution live in `test/03_system
 
 ## Running System Tests
 
-Export the Simple compiler path, then invoke a specific test:
+Use a current pure-Simple self-hosted compiler, then invoke a specific test:
 
 ```bash
-export SIMPLE_BOOTSTRAP_DRIVER=bin/release/x86_64-unknown-linux-gnu/simple_seed
 bin/simple test test/03_system/os/qemu/sys_qemu_riscv64_fs_exec_spec.spl
 ```
 
-The bootstrap driver is required because system-level tests execute compiled binaries, not interpreter mode.
+The Rust seed is bootstrap-only and is not a test fallback. If `bin/simple`
+cannot resolve a valid current self-hosted compiler, record the compiler blocker
+and stop; do not point `SIMPLE_BOOTSTRAP_DRIVER` at `simple_seed` to turn a
+blocked system-test row into apparent evidence.
+
+## Engine2D Exact-Oracle Gate
+
+TODO529 is governed by
+`doc/03_plan/sys_test/engine2d_qemu_exact_oracle.md`. The executable spec must
+use the pure-Simple QMP capture and exact comparison owners, reject a missing
+independently reviewed oracle, and fail rather than skip when a required QEMU
+target is unavailable. x86_64, AArch64, and RV64 require separate guest-native
+entries and retained serial/capture evidence; an x86-only pass cannot close the
+TODO.
+
+Do not add Python capture, `rt_process_run*`, direct `rt_env_get`, tolerance,
+automatic baseline creation, or `UPDATE_BASELINE` behavior to this gate. While
+the current pure-Simple compiler is unavailable, the live rows remain blocked;
+source inspection or a cached PPM is not a QEMU PASS.
 
 ## Production Desktop DrawIR Path
 
