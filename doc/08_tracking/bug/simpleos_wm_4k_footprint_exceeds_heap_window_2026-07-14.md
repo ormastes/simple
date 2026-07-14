@@ -65,3 +65,33 @@ QEMU runs). The heap-size approach was tested and REVERTED (baremetal_stubs.c le
 at origin 192MB) — it is provably not the fix. Supersedes the earlier "null-deref
 cr2=0x0 rip=0x9ca634" signature, which the peer's hardening commits already
 eliminated (the failure is now this heap-window overflow, not the null-deref).
+
+## Update (refined 2026-07-14): TWO distinct problems — memory-map collision (fix verified) AND a scaling allocation (real blocker)
+
+Two more QEMU-harness runs separated the regression:
+
+### 1. Memory-map collision — root-caused, VERIFIED fix
+`gui_entry_desktop.spl` spl_start(): `total_memory=512MB`, `reserved_end=384MB`.
+`pmm_init_identity_range` places its bitmap + vmm page-table pool at reserved_end,
+so kernel `.bss` (incl `_heap`) must end below 384MB; a heap grown past it collides
+with the page tables (the 640MB-heap triple fault). FIX (tested — clean
+`pmm-bootstrap:ok`/`vmm-bootstrap`/`memory-bootstrap:ok`, no fault): `total_memory`
+512MB->2GB (QEMU -m 2G; crt0.s identity-maps first 4GiB), `reserved_end`
+384MB->640MB so the page-table pool sits ABOVE the heap. 3-constant change.
+
+### 2. Scaling allocation — the ACTUAL blocker (heap sizing cannot fix)
+With the map widened (no collision) the WM STILL `[PANIC] heap exhausted` at
+framebuffer init. Decisive: `heap_off` reaches EXACTLY heap_size every time —
+319.96MB@320, 335.96MB@336, 511.98MB@512 — so a WM/compositor/DrawIR-init
+allocation consumes ~ALL available heap, then a ~72-92KB alloc overflows. NO heap
+size passes. `create_fb_engine_sized`->`BaremetalBackend.create_sized` only stores
+fb+dims (no big buffer), so the culprit is deeper in the framebuffer-driver /
+compositor-scene / canonical-DrawIR init the reroute added. Owner must find the
+allocation sized from free/total/remaining heap (or an unbounded per-op loop) and
+CAP it to a bounded frame budget. 07-12 PASS held the full sequence at 192MB — this
+scaling is NEW with the reroute.
+
+### Fix order (SimpleOS WM owner)
+(a) cap the scaling allocation to a bounded budget; (b) apply the memory-map
+widening only if the bounded footprint still needs >~360MB. My heap + memory-map
+experiments were REVERTED (files at origin) — (2) is not heap-fixable.
