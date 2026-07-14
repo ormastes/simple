@@ -1,6 +1,7 @@
 use os.kernel.ipc.host_gpu_ivshmem_map.{map_qemu_host_gpu_ivshmem_bar2}
-use os.lib.gpu_bridge.host_gpu_ivshmem.{HostGpuIvshmemHelloReceipt, host_gpu_ivshmem_negotiate, host_gpu_ivshmem_submit, host_gpu_ivshmem_submit_draw_ir, host_gpu_ivshmem_fill_u32, host_gpu_ivshmem_device_receipt_valid}
+use os.lib.gpu_bridge.host_gpu_ivshmem.{HostGpuIvshmemHelloReceipt, host_gpu_ivshmem_negotiate, host_gpu_ivshmem_next_generation, host_gpu_ivshmem_submit, host_gpu_ivshmem_submit_draw_ir, host_gpu_ivshmem_fill_u32, host_gpu_ivshmem_device_receipt_valid}
 use os.kernel.boot.mmio_hardware.{mmio_read32}
+use os.kernel.boot.monotonic_hardware.{boot_monotonic_prepare, boot_monotonic_deadline_us, boot_monotonic_elapsed_us, boot_monotonic_now_us}
 use common.gpu.simpleos_host_gpu_protocol.*
 use common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource, simpleos_host_gpu_image_resource}
 use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_image_command, draw_ir_rect}
@@ -56,12 +57,40 @@ fn _host_gpu_probe_fail(isa: text, reason: text):
 
 fn _host_gpu_probe_hello_valid(hello: HostGpuIvshmemHelloReceipt, render_mask: i64, processing_mask: i64) -> bool:
     hello.completed and hello.status == SIMPLEOS_HOST_GPU_STATUS_PASS and
-        hello.version == SIMPLEOS_HOST_GPU_PROTOCOL_VERSION and hello.render_mask == render_mask and
+        hello.reason == 0 and hello.version == SIMPLEOS_HOST_GPU_PROTOCOL_VERSION and hello.render_mask == render_mask and
         hello.processing_mask != 0 and (hello.processing_mask & processing_mask) == hello.processing_mask and
-        hello.elapsed_us > 0
+        hello.max_payload_bytes > 0 and hello.max_readback_bytes >= HOST_GPU_FIXTURE_OUTPUT_BYTES and hello.elapsed_us > 0
+
+fn _host_gpu_probe_hello_retryable(hello: HostGpuIvshmemHelloReceipt) -> bool:
+    hello.completed and hello.status == SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED and
+        hello.reason == SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO and hello.elapsed_us > 0
+
+struct HostGpuProbeAttemptResult:
+    hello: HostGpuIvshmemHelloReceipt
+    total_elapsed_us: i64
+    reason: i64
+
+fn _host_gpu_probe_attempt(base: u64, generation: i64, isa: text, backend: text, render_mask: i64, processing_mask: i64, negotiation_started_us: i64, deadline_us: i64) -> HostGpuProbeAttemptResult:
+    val attempt_started_us = boot_monotonic_now_us()
+    val hello = host_gpu_ivshmem_negotiate(base, generation, isa, backend, processing_mask, HOST_GPU_PROBE_TIMEOUT_POLLS, deadline_us)
+    val attempt_finished_us = boot_monotonic_now_us()
+    val attempt_elapsed_us = boot_monotonic_elapsed_us(attempt_started_us, attempt_finished_us)
+    val total_elapsed_us = boot_monotonic_elapsed_us(negotiation_started_us, attempt_finished_us)
+    val selected = _host_gpu_probe_hello_valid(hello, render_mask, processing_mask) and
+        attempt_elapsed_us > 0 and total_elapsed_us > 0 and total_elapsed_us <= SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US
+    val budget_failed = hello.completed and hello.status == SIMPLEOS_HOST_GPU_STATUS_PASS and hello.reason == 0 and total_elapsed_us > SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US
+    val outcome = if selected: "selected" elif _host_gpu_probe_hello_retryable(hello) and attempt_elapsed_us > 0: "rejected" elif not hello.completed and hello.reason == SIMPLEOS_HOST_GPU_REASON_TIMEOUT: "timeout" elif not hello.completed and hello.reason == SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION: "stale" elif budget_failed: "budget" else: "invalid"
+    val marker_reason = if budget_failed: SIMPLEOS_HOST_GPU_REASON_TIMEOUT elif hello.reason == 0 and not selected: SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO else: hello.reason
+    if hello.published:
+        serial_println("HOST_GPU_NEGOTIATION_ATTEMPT scope=probe isa={isa} backend={backend} generation={generation} outcome={outcome} status={hello.status} reason={marker_reason} daemon_elapsed_us={hello.elapsed_us} guest_elapsed_us={attempt_elapsed_us}")
+    HostGpuProbeAttemptResult(hello: hello, total_elapsed_us: total_elapsed_us, reason: marker_reason)
+
+fn _host_gpu_probe_negotiation_done(isa: text, result: text, backend: text, attempts: i64, first_generation: i64, final_generation: i64, elapsed_us: i64, reason: i64):
+    serial_println("HOST_GPU_NEGOTIATION_DONE scope=probe isa={isa} result={result} backend={backend} attempts={attempts} first_generation={first_generation} final_generation={final_generation} elapsed_us={elapsed_us} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={reason}")
 
 pub fn host_gpu_ivshmem_probe_main():
     val isa = _host_gpu_probe_isa()
+    boot_monotonic_prepare()
     val mapped_slot = map_qemu_host_gpu_ivshmem_bar2()
     if mapped_slot <= 0:
         _host_gpu_probe_fail(isa, "map-bar2-{mapped_slot}")
@@ -71,6 +100,8 @@ pub fn host_gpu_ivshmem_probe_main():
     # this MMIO window. Unlike the canonical alias, this value fits Simple's
     # tagged integer ABI when passed through the guest bridge.
     val base = _host_gpu_probe_window_base(device)
+    val negotiation_started_us = boot_monotonic_now_us()
+    val deadline_us = boot_monotonic_deadline_us(negotiation_started_us, SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US)
     serial_println("HOST_GPU_MAP_OK isa={isa} device={device}")
 
     var hello_generation = _host_gpu_probe_generation() - 1
@@ -78,24 +109,67 @@ pub fn host_gpu_ivshmem_probe_main():
     var render_backend_code = SIMPLEOS_HOST_GPU_BACKEND_METAL
     var render_backend_mask = SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
     var processing_mask = SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
-    var hello = host_gpu_ivshmem_negotiate(base, hello_generation, isa, render_backend, processing_mask, HOST_GPU_PROBE_TIMEOUT_POLLS)
-    if not _host_gpu_probe_hello_valid(hello, render_backend_mask, processing_mask):
+    var attempts = 0
+    var first_generation = 0
+    var final_generation = 0
+    if deadline_us <= 0 or host_gpu_ivshmem_next_generation(base) != hello_generation:
+        val elapsed_us = boot_monotonic_elapsed_us(negotiation_started_us, boot_monotonic_now_us())
+        _host_gpu_probe_negotiation_done(isa, "fallback", "software", attempts, 0, 0, elapsed_us, SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION)
+        _host_gpu_probe_fail(isa, "hello-generation-or-clock")
+        return
+    var attempt = _host_gpu_probe_attempt(base, hello_generation, isa, render_backend, render_backend_mask, processing_mask, negotiation_started_us, deadline_us)
+    var hello = attempt.hello
+    var negotiation_elapsed_us = attempt.total_elapsed_us
+    if hello.published:
+        first_generation = hello_generation
+        final_generation = hello_generation
+        attempts = attempts + 1
+    if not _host_gpu_probe_hello_valid(hello, render_backend_mask, processing_mask) and _host_gpu_probe_hello_retryable(hello) and negotiation_elapsed_us > 0 and negotiation_elapsed_us < SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US:
         hello_generation = hello_generation + 1
         render_backend = "directx"
         render_backend_code = SIMPLEOS_HOST_GPU_BACKEND_DIRECTX
         render_backend_mask = SIMPLEOS_HOST_GPU_BACKEND_MASK_DIRECTX
         processing_mask = SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN | SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA
-        hello = host_gpu_ivshmem_negotiate(base, hello_generation, isa, render_backend, processing_mask, HOST_GPU_PROBE_TIMEOUT_POLLS)
-    if not _host_gpu_probe_hello_valid(hello, render_backend_mask, processing_mask):
+        if host_gpu_ivshmem_next_generation(base) == hello_generation:
+            attempt = _host_gpu_probe_attempt(base, hello_generation, isa, render_backend, render_backend_mask, processing_mask, negotiation_started_us, deadline_us)
+            hello = attempt.hello
+            negotiation_elapsed_us = attempt.total_elapsed_us
+            if hello.published:
+                if attempts == 0:
+                    first_generation = hello_generation
+                final_generation = hello_generation
+                attempts = attempts + 1
+        else:
+            negotiation_elapsed_us = boot_monotonic_elapsed_us(negotiation_started_us, boot_monotonic_now_us())
+            _host_gpu_probe_negotiation_done(isa, "fallback", "software", attempts, first_generation, final_generation, negotiation_elapsed_us, SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION)
+            _host_gpu_probe_fail(isa, "hello-generation")
+            return
+    if not _host_gpu_probe_hello_valid(hello, render_backend_mask, processing_mask) and _host_gpu_probe_hello_retryable(hello) and negotiation_elapsed_us > 0 and negotiation_elapsed_us < SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US:
         hello_generation = hello_generation + 1
         render_backend = "vulkan"
         render_backend_code = SIMPLEOS_HOST_GPU_BACKEND_VULKAN
         render_backend_mask = SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN
         processing_mask = SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN | SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA
-        hello = host_gpu_ivshmem_negotiate(base, hello_generation, isa, render_backend, processing_mask, HOST_GPU_PROBE_TIMEOUT_POLLS)
-    if not _host_gpu_probe_hello_valid(hello, render_backend_mask, processing_mask):
+        if host_gpu_ivshmem_next_generation(base) == hello_generation:
+            attempt = _host_gpu_probe_attempt(base, hello_generation, isa, render_backend, render_backend_mask, processing_mask, negotiation_started_us, deadline_us)
+            hello = attempt.hello
+            negotiation_elapsed_us = attempt.total_elapsed_us
+            if hello.published:
+                if attempts == 0:
+                    first_generation = hello_generation
+                final_generation = hello_generation
+                attempts = attempts + 1
+        else:
+            negotiation_elapsed_us = boot_monotonic_elapsed_us(negotiation_started_us, boot_monotonic_now_us())
+            _host_gpu_probe_negotiation_done(isa, "fallback", "software", attempts, first_generation, final_generation, negotiation_elapsed_us, SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION)
+            _host_gpu_probe_fail(isa, "hello-generation")
+            return
+    if not _host_gpu_probe_hello_valid(hello, render_backend_mask, processing_mask) or negotiation_elapsed_us <= 0 or negotiation_elapsed_us > SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US:
+        val final_reason = if hello.published: attempt.reason elif hello.reason == 0: SIMPLEOS_HOST_GPU_REASON_TIMEOUT else: hello.reason
+        _host_gpu_probe_negotiation_done(isa, "fallback", "software", attempts, first_generation, final_generation, negotiation_elapsed_us, final_reason)
         _host_gpu_probe_fail(isa, "hello-negotiation")
         return
+    _host_gpu_probe_negotiation_done(isa, "selected", render_backend, attempts, first_generation, final_generation, negotiation_elapsed_us, 0)
     serial_println("HOST_GPU_HELLO_OK isa={isa} generation={hello_generation} render_mask={hello.render_mask} processing_mask={hello.processing_mask} protocol={hello.version} elapsed_us={hello.elapsed_us}")
     val generation = hello_generation + 1
     val run_id_hash = 1000 + generation

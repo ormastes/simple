@@ -1,5 +1,5 @@
 # codex-system-test
-# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-008 REQ-009 REQ-010 REQ-011 REQ-012
+# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-008 REQ-009 REQ-010 REQ-011 REQ-012 NFR-006 NFR-008
 # @evidence-display: links
 """# SimpleOS QEMU Host-GPU 2D
 
@@ -32,6 +32,15 @@ fn host_gpu_protocol_source() -> text:
 
 fn production_wm_executor_source() -> text:
     file_read_text("src/os/compositor/engine2d_wm_frame_executor.spl")
+
+fn boot_monotonic_source() -> text:
+    file_read_text("src/os/kernel/boot/monotonic_hardware.spl")
+
+fn x86_boot_runtime_source() -> text:
+    file_read_text("examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c")
+
+fn todo_db_source() -> text:
+    file_read_text("doc/08_tracking/todo/todo_db.sdn")
 
 fn rv64_desktop_source() -> text:
     file_read_text("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl")
@@ -111,10 +120,16 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         step("Reject an unusable compiler candidate")
         step("Probe the QEMU guest GPU capability")
         step("Validate version limits backend sets readback and readiness")
+        step("Bound capability negotiation and fallback selection to 500 ms")
         val source = host_gpu_wrapper_source()
         val runner = qemu_runner_build_source()
         val process_ops = process_ops_source()
         val probe = host_gpu_probe_source()
+        val bridge = host_gpu_guest_bridge_source()
+        val production = production_wm_executor_source()
+        val clock = boot_monotonic_source()
+        val x86_clock = x86_boot_runtime_source()
+        val todos = todo_db_source()
         expect(source).to_contain("simpleos-host-gpu-x86_64")
         expect(source).to_contain("simpleos-host-gpu-aarch64")
         expect(source).to_contain("simpleos-host-gpu-riscv64")
@@ -142,6 +157,23 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         expect(probe.contains("(hello.processing_mask & render_mask) != 0")).to_equal(false)
         expect(probe).to_contain("SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0: \"cuda\"")
         expect(probe).to_contain("SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN) != 0: \"vulkan\"")
+        expect(probe).to_contain("HOST_GPU_NEGOTIATION_ATTEMPT scope=probe")
+        expect(probe).to_contain("HOST_GPU_NEGOTIATION_DONE scope=probe")
+        expect(production).to_contain("HOST_GPU_NEGOTIATION_ATTEMPT scope=production")
+        expect(production).to_contain("HOST_GPU_NEGOTIATION_DONE scope=production")
+        expect(source).to_contain("negotiation_timing_evidence_valid")
+        expect(source).to_contain("NEGOTIATION_MAX_US=$(sed -n")
+        expect(source).to_contain("SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US")
+        expect(source).to_contain("cross-isa-tcg-correctness-only")
+        expect(source).to_contain("simpleos_qemu_host_gpu_2d_host_arch")
+        expect(bridge).to_contain("now_us > 0 and now_us <= deadline_us")
+        expect(probe.contains("rt_time_now_")).to_equal(false)
+        expect(production.contains("rt_time_now_")).to_equal(false)
+        expect(todos).to_contain("571, TODO, simpleos")
+        expect(clock).to_contain("start_us > _BOOT_MONOTONIC_MAX_US - budget_us")
+        expect(x86_clock).to_contain("_cpuid(0x15")
+        expect(x86_clock.contains("elapsed / 2000")).to_equal(false)
+        expect(run_host_gpu_wrapper_self_test()).to_contain("simpleos_qemu_host_gpu_2d_self_test=pass")
         expect(source).to_contain("BACKEND=directx")
         expect(source).to_contain("EXPECTED_PROCESSING_MASK='(1|8|9)'")
         expect(windows_platform_source()).to_contain("DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE;")
@@ -329,7 +361,6 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         expect(cuda_readback_wrapper_source()).to_contain("cuDeviceGetUuid_v2")
         expect(run_cuda_readback_wrapper_self_test()).to_contain("cuda-submit-readback-identity-checksum-gate")
         expect(run_generated_2d_matrix_self_test()).to_contain("submit-readback-checksum-proof-fails-closed")
-        expect(run_host_gpu_wrapper_self_test()).to_contain("simpleos_qemu_host_gpu_2d_self_test=pass")
 
     # @capture(protocol)
     it "keeps native Metal ProcessingIR separate from Engine2D rendering":

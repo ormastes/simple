@@ -1438,8 +1438,81 @@ static inline uint64_t _rdtsc(void) {
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
 }
+
+static inline void _cpuid(uint32_t leaf, uint32_t *a, uint32_t *b,
+                          uint32_t *c, uint32_t *d) {
+    __asm__ volatile("cpuid"
+                     : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d)
+                     : "a"(leaf), "c"(0));
+}
+
+#ifndef SIMPLEOS_BOOT_TSC_PIT_MAX_POLLS
+#define SIMPLEOS_BOOT_TSC_PIT_MAX_POLLS 10000000ULL
+#endif
+
+static inline uint8_t _boot_inb(uint16_t port) {
+    uint8_t value;
+    __asm__ volatile("inb %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
+static inline void _boot_outb(uint16_t port, uint8_t value) {
+    __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static uint64_t _pit_tsc_frequency_hz(void) {
+    const uint16_t pit_count = 11932U;
+    uint8_t original_control = _boot_inb(0x61);
+    uint8_t stopped_control = (uint8_t)(original_control & 0xFEU);
+    _boot_outb(0x61, stopped_control);
+    _boot_outb(0x43, 0xB0);
+    _boot_outb(0x42, (uint8_t)(pit_count & 0xFFU));
+    _boot_outb(0x42, (uint8_t)(pit_count >> 8));
+    uint64_t start = _rdtsc();
+    _boot_outb(0x61, (uint8_t)(stopped_control | 0x01U));
+    uint64_t polls = 0;
+    uint8_t saw_low = 0;
+    uint8_t saw_transition = 0;
+    while (polls < SIMPLEOS_BOOT_TSC_PIT_MAX_POLLS) {
+        uint8_t output_high = (uint8_t)(_boot_inb(0x61) & 0x20U);
+        if (output_high == 0) saw_low = 1;
+        if (saw_low != 0 && output_high != 0) {
+            saw_transition = 1;
+            break;
+        }
+        polls++;
+    }
+    uint64_t end = _rdtsc();
+    _boot_outb(0x61, original_control);
+    if (saw_transition == 0 || end <= start) return 0;
+    return ((end - start) * 1193182ULL) / pit_count;
+}
+
+static uint64_t _tsc_frequency_hz(void) {
+    static uint64_t cached;
+    static uint8_t initialized;
+    uint32_t a, b, c, d;
+    if (initialized != 0) return cached;
+    initialized = 1;
+    _cpuid(0, &a, &b, &c, &d);
+    if (a >= 0x15) {
+        uint32_t max_leaf = a;
+        _cpuid(0x15, &a, &b, &c, &d);
+        if (a != 0 && b != 0 && c != 0) {
+            cached = ((uint64_t)c * b) / a;
+            if (cached != 0) return cached;
+        }
+        if (max_leaf >= 0x16) {
+            _cpuid(0x16, &a, &b, &c, &d);
+            if (a != 0) cached = (uint64_t)a * 1000000ULL;
+        }
+    }
+    if (cached == 0) cached = _pit_tsc_frequency_hz();
+    return cached;
+}
 #else
 static inline uint64_t _rdtsc(void) { return 0; }
+static uint64_t _tsc_frequency_hz(void) { return 0; }
 #endif
 
 static uint64_t _boot_tsc = 0;
@@ -1447,8 +1520,10 @@ static uint64_t _boot_tsc = 0;
 RuntimeValue rt_time_now(void) {
     if (_boot_tsc == 0) _boot_tsc = _rdtsc();
     uint64_t elapsed = _rdtsc() - _boot_tsc;
-    /* Approximate: assume ~2 GHz TSC */
-    return ENCODE_INT((int64_t)(elapsed / 2000000));
+    uint64_t frequency = _tsc_frequency_hz();
+    if (frequency == 0) return ENCODE_INT(0);
+    return ENCODE_INT((int64_t)((elapsed / frequency) * 1000ULL
+        + ((elapsed % frequency) * 1000ULL) / frequency));
 }
 
 RuntimeValue rt_time_ms(void) {
@@ -1462,7 +1537,10 @@ RuntimeValue rt_time_millis(void) {
 RuntimeValue rt_time_now_micros(void) {
     if (_boot_tsc == 0) _boot_tsc = _rdtsc();
     uint64_t elapsed = _rdtsc() - _boot_tsc;
-    return ENCODE_INT((int64_t)(elapsed / 2000));
+    uint64_t frequency = _tsc_frequency_hz();
+    if (frequency == 0) return ENCODE_INT(0);
+    return ENCODE_INT((int64_t)((elapsed / frequency) * 1000000ULL
+        + ((elapsed % frequency) * 1000000ULL) / frequency));
 }
 
 RuntimeValue rt_time_now_unix_micros(void) {

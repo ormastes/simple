@@ -228,8 +228,11 @@ backend or CPU fallback. Each submitted attempt is counted once; rejected and
 timed-out attempts remain inside the interval. Missing, duplicate, stale, or
 nonpositive evidence fails closed. The inclusive boundary is 500,000 us; a
 500,001 us native result fails. Cross-ISA TCG validates the contract only and
-does not close the native latency target. TODO 566 remains open because current
-HELLO timing covers only daemon work for the accepted request.
+does not close the native latency target. The source-ready guest path now owns
+the shared deadline and ordered attempt transcript through the narrow boot
+monotonic facade; daemon HELLO timing remains supporting per-attempt evidence,
+not the NFR-006 interval. TODO 566 remains open until fresh matching-native-ISA
+execution proves the complete guest-observed interval within the budget.
 The daemon measures the current FillU32(256, 7) CPU oracle and device executor
 independently with the canonical time facade. Its single-request,
 post-HELLO-probe, setup-inclusive receipt is correlated by ISA, backend,

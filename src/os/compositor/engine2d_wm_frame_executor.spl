@@ -3,7 +3,13 @@
 use common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource, simpleos_host_gpu_image_resource}
 use common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_PROTOCOL_VERSION,
+    SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US,
     SIMPLEOS_HOST_GPU_STATUS_PASS,
+    SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED,
+    SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST,
+    SIMPLEOS_HOST_GPU_REASON_TIMEOUT,
+    SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO,
+    SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION,
     SIMPLEOS_HOST_GPU_BACKEND_DIRECTX,
     SIMPLEOS_HOST_GPU_BACKEND_METAL,
     SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
@@ -28,6 +34,7 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     engine2d_resolved_draw_ir_image
 }
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use os.kernel.boot.monotonic_hardware.{boot_monotonic_deadline_us, boot_monotonic_elapsed_us, boot_monotonic_now_us}
 use os.lib.gpu_bridge.host_gpu_ivshmem.{
     HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS,
     host_gpu_ivshmem_device_receipt_valid,
@@ -57,44 +64,92 @@ class Engine2dWmFrameExecutor:
     static fn create(engine: Engine2D, framebuffer: FramebufferDriver, fb_w: i64 = 0, fb_h: i64 = 0) -> Engine2dWmFrameExecutor:
         Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0, fb_w: fb_w, fb_h: fb_h)
 
-    static fn _create_host_gpu_exact(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64, fb_width: i64 = 0, fb_height: i64 = 0) -> Engine2dWmFrameExecutor:
+    static fn create_host_gpu(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64, fb_width: i64, fb_height: i64, negotiation_started_us: i64) -> Engine2dWmFrameExecutor:
         var executor = Engine2dWmFrameExecutor.create(engine, framebuffer, fb_width, fb_height)
         val width = if fb_width > 0: fb_width else: framebuffer.width.to_i64()
         val height = if fb_height > 0: fb_height else: framebuffer.height.to_i64()
         val max_pixels = simpleos_host_gpu_max_readback_bytes() / 4
+        val guest_isa = simpleos_host_gpu_guest_isa_name(guest_isa_code)
+        val deadline_us = boot_monotonic_deadline_us(negotiation_started_us, SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US)
+        var attempts = 0
+        var first_generation = 0
+        var final_generation = 0
+        var final_reason = SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST
+        var decision_elapsed = 0
         if base == 0u64 or width <= 0 or height <= 0 or height > max_pixels or width > max_pixels / height:
             serial_println("[wm-frame] host-gpu-fallback reason=unavailable-or-readback-capacity width={width} height={height}")
+            val elapsed = boot_monotonic_elapsed_us(negotiation_started_us, boot_monotonic_now_us())
+            serial_println("HOST_GPU_NEGOTIATION_DONE scope=production isa={guest_isa} result=fallback backend=software attempts=0 first_generation=0 final_generation=0 elapsed_us={elapsed} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={final_reason}")
             return executor
-        val guest_isa = simpleos_host_gpu_guest_isa_name(guest_isa_code)
-        val backend = simpleos_host_gpu_backend_name(backend_code)
-        val backend_mask = simpleos_host_gpu_backend_mask(backend_code)
-        val hello_generation = host_gpu_ivshmem_next_generation(base)
-        if guest_isa == "unsupported" or backend_code == 0 or backend_mask == 0 or hello_generation <= 0:
+        if guest_isa == "unsupported" or backend_code == 0 or simpleos_host_gpu_backend_mask(backend_code) == 0:
             serial_println("[wm-frame] host-gpu-fallback reason=invalid-session")
+            val elapsed = boot_monotonic_elapsed_us(negotiation_started_us, boot_monotonic_now_us())
+            serial_println("HOST_GPU_NEGOTIATION_DONE scope=production isa={guest_isa} result=fallback backend=software attempts=0 first_generation=0 final_generation=0 elapsed_us={elapsed} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={final_reason}")
             return executor
-        val hello = host_gpu_ivshmem_negotiate(base, hello_generation, guest_isa, backend, 0, HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS)
-        if not hello.completed or hello.status != SIMPLEOS_HOST_GPU_STATUS_PASS or hello.version != SIMPLEOS_HOST_GPU_PROTOCOL_VERSION or (hello.render_mask & backend_mask) == 0:
-            serial_println("[wm-frame] host-gpu-fallback reason=negotiation status={hello.status} detail={hello.reason}")
+        if deadline_us <= 0:
+            final_reason = SIMPLEOS_HOST_GPU_REASON_TIMEOUT
+            serial_println("[wm-frame] host-gpu-fallback reason=invalid-clock")
+            val elapsed = boot_monotonic_elapsed_us(negotiation_started_us, boot_monotonic_now_us())
+            serial_println("HOST_GPU_NEGOTIATION_DONE scope=production isa={guest_isa} result=fallback backend=software attempts=0 first_generation=0 final_generation=0 elapsed_us={elapsed} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={final_reason}")
             return executor
+        val backend_codes = [SIMPLEOS_HOST_GPU_BACKEND_METAL, SIMPLEOS_HOST_GPU_BACKEND_DIRECTX, SIMPLEOS_HOST_GPU_BACKEND_VULKAN]
         val expected_bytes = width * height * 4
-        if hello.max_readback_bytes < expected_bytes:
-            serial_println("[wm-frame] host-gpu-fallback reason=negotiated-readback-capacity bytes={expected_bytes} max={hello.max_readback_bytes}")
-            return executor
-        executor.host_gpu_base = base
-        executor.host_gpu_run_id_hash = hello_generation
-        executor.host_gpu_backend = backend
-        executor.host_gpu_backend_code = backend_code
-        serial_println("[wm-frame] host-gpu-ready backend={backend} generation={hello_generation}")
-        executor
-
-    static fn create_host_gpu(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64, fb_width: i64 = 0, fb_height: i64 = 0) -> Engine2dWmFrameExecutor:
-        var executor = Engine2dWmFrameExecutor._create_host_gpu_exact(engine, framebuffer, base, guest_isa_code, backend_code, fb_width, fb_height)
-        if executor.host_gpu_base != 0u64 or backend_code != SIMPLEOS_HOST_GPU_BACKEND_METAL:
-            return executor
-        executor = Engine2dWmFrameExecutor._create_host_gpu_exact(engine, framebuffer, base, guest_isa_code, SIMPLEOS_HOST_GPU_BACKEND_DIRECTX, fb_width, fb_height)
+        for candidate_code in backend_codes:
+            val before_attempt = boot_monotonic_now_us()
+            val before_elapsed = boot_monotonic_elapsed_us(negotiation_started_us, before_attempt)
+            if before_elapsed <= 0 or before_elapsed >= SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US:
+                final_reason = SIMPLEOS_HOST_GPU_REASON_TIMEOUT
+                decision_elapsed = before_elapsed
+                break
+            val generation = host_gpu_ivshmem_next_generation(base)
+            if generation <= 0:
+                final_reason = SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION
+                decision_elapsed = before_elapsed
+                break
+            val candidate = simpleos_host_gpu_backend_name(candidate_code)
+            val candidate_mask = simpleos_host_gpu_backend_mask(candidate_code)
+            val hello = host_gpu_ivshmem_negotiate(base, generation, guest_isa, candidate, 0, HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS, deadline_us)
+            val attempt_finished = boot_monotonic_now_us()
+            val attempt_elapsed = boot_monotonic_elapsed_us(before_attempt, attempt_finished)
+            val total_elapsed = boot_monotonic_elapsed_us(negotiation_started_us, attempt_finished)
+            if not hello.published:
+                final_reason = hello.reason
+                decision_elapsed = total_elapsed
+                break
+            if attempts == 0:
+                first_generation = generation
+            attempts = attempts + 1
+            final_generation = generation
+            val hello_valid = hello.completed and hello.status == SIMPLEOS_HOST_GPU_STATUS_PASS and hello.reason == 0 and
+                hello.version == SIMPLEOS_HOST_GPU_PROTOCOL_VERSION and (hello.render_mask & candidate_mask) != 0 and
+                hello.max_readback_bytes >= expected_bytes and hello.elapsed_us > 0 and attempt_elapsed > 0 and
+                total_elapsed > 0 and total_elapsed <= SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US
+            val retryable = hello.completed and hello.status == SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED and
+                hello.reason == SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO and hello.elapsed_us > 0 and attempt_elapsed > 0
+            val budget_failed = hello.completed and hello.status == SIMPLEOS_HOST_GPU_STATUS_PASS and hello.reason == 0 and total_elapsed > SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US
+            val outcome = if hello_valid: "selected" elif retryable: "rejected" elif not hello.completed and hello.reason == SIMPLEOS_HOST_GPU_REASON_TIMEOUT: "timeout" elif not hello.completed and hello.reason == SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION: "stale" elif budget_failed: "budget" else: "invalid"
+            val marker_reason = if budget_failed: SIMPLEOS_HOST_GPU_REASON_TIMEOUT elif hello.reason == 0 and not hello_valid: SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO else: hello.reason
+            serial_println("HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa={guest_isa} backend={candidate} generation={generation} outcome={outcome} status={hello.status} reason={marker_reason} daemon_elapsed_us={hello.elapsed_us} guest_elapsed_us={attempt_elapsed}")
+            final_reason = marker_reason
+            if hello_valid:
+                executor.host_gpu_base = base
+                executor.host_gpu_run_id_hash = generation
+                executor.host_gpu_backend = candidate
+                executor.host_gpu_backend_code = candidate_code
+                final_reason = 0
+                decision_elapsed = total_elapsed
+                break
+            serial_println("[wm-frame] host-gpu-fallback reason=negotiation status={hello.status} detail={hello.reason}")
+            if not retryable:
+                decision_elapsed = total_elapsed
+                break
+        val elapsed = if decision_elapsed > 0: decision_elapsed else: boot_monotonic_elapsed_us(negotiation_started_us, boot_monotonic_now_us())
+        val result = if executor.host_gpu_base != 0u64: "selected" else: "fallback"
+        val selected_backend = if executor.host_gpu_base != 0u64: executor.host_gpu_backend else: "software"
+        serial_println("HOST_GPU_NEGOTIATION_DONE scope=production isa={guest_isa} result={result} backend={selected_backend} attempts={attempts} first_generation={first_generation} final_generation={final_generation} elapsed_us={elapsed} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={final_reason}")
         if executor.host_gpu_base != 0u64:
-            return executor
-        Engine2dWmFrameExecutor._create_host_gpu_exact(engine, framebuffer, base, guest_isa_code, SIMPLEOS_HOST_GPU_BACKEND_VULKAN, fb_width, fb_height)
+            serial_println("[wm-frame] host-gpu-ready backend={executor.host_gpu_backend} generation={executor.host_gpu_run_id_hash}")
+        executor
 
     me _render_host_gpu(composition: DrawIrComposition, resources: [SimpleOsHostGpuImageResource]) -> bool:
         val generation = host_gpu_ivshmem_next_generation(self.host_gpu_base)
