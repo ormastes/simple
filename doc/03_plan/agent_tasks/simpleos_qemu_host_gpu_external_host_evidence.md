@@ -64,7 +64,7 @@ only if a fresh native run exposes a reproducible implementation failure.
 | TODO547 | Continue raw-pointer leaf migration through the existing no-GC owner facade rather than adding direct `rt_*`. |
 | TODO548 | Finish the concurrently owned current-ABI pure-Simple compiler, validate it once, then run focused x86_64/AArch64/RISC-V QEMU probes. |
 | TODO549 | Finish scaled, transparent, and clipped native IMAGE offload without a private renderer. |
-| TODO550 | Execute the stable ProcessingIR device-identity path and retain a fresh live receipt. First add an owner-level Vulkan-only selector and document its exact command; no selector or forced-Vulkan receipt exists yet. |
+| TODO550 | Execute the stable ProcessingIR device-identity path and retain a fresh live receipt. The owner-level selector is `SIMPLEOS_HOST_GPU_PROCESSING_BACKEND=vulkan sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs`; the forced-Vulkan receipt remains pending. |
 | TODO551 | Add owner-level quarantine/reaping for Vulkan completion-unknown dependencies. |
 | TODO552 | Select feature/NFR requirements before implementing 4K shared-memory capacity. |
 | TODO554 | Fix canonical Draw IR shadow bounds; currently overlaps another UI/font worktree. |
@@ -80,8 +80,8 @@ only if a fresh native run exposes a reproducible implementation failure.
 The current-host retained-PTX run provides fresh partial CUDA readback and
 two-device stability/distinction evidence with hash-bound PTX and pixel
 artifacts. The gate now exits nonzero for every non-PASS. TODO564 still owns MIG
-and correlated QEMU evidence. Current-source regeneration, TODO550's Vulkan-only
-selector, and QEMU work also remain open; QEMU execution waits for a valid
+and correlated QEMU evidence. Current-source regeneration, TODO550's forced
+Vulkan receipt, and QEMU work also remain open; QEMU execution waits for a valid
 pure-Simple compiler or active-file ownership changes. None of the postponed
 native rows may be marked done until its retained artifacts pass review.
 

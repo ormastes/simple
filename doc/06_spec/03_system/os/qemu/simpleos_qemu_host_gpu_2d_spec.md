@@ -85,6 +85,10 @@ the CPU/software fallback and report a stable reason.
    require exact output-buffer parity with the CPU oracle. Vulkan uses the
    canonical SFFI owner's fenced tri-state dispatch: only proven status `1`
    may read back, while unknown completion retains dependencies and the device.
+   The explicit Linux Vulkan-only lane passes
+   `--processing-backend=vulkan` to the daemon, requires negotiated mask `1`,
+   and retains the daemon selector receipt; the default lane remains
+   CUDA-preferred with Vulkan fallback.
 16. **Classify device processing preference.** Time the existing FillU32(256,
    7) CPU oracle and device executor independently after the HELLO probe. A
    valid row requires positive correlated microsecond timings and reports
@@ -178,6 +182,13 @@ pure-Simple compiler and CUDA+Vulkan runtime artifact:
 
 ```sh
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
+```
+
+Run the same three-ISA matrix with ProcessingIR forced through Vulkan:
+
+```sh
+SIMPLEOS_HOST_GPU_PROCESSING_BACKEND=vulkan \
+  sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
 ```
 
 On a prepared macOS host the same command selects the Metal contract, uses the

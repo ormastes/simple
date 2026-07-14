@@ -9,6 +9,7 @@ QEMU_TIMEOUT=${SIMPLEOS_HOST_GPU_QEMU_TIMEOUT:-20}
 PRODUCTION_QEMU_TIMEOUT=${SIMPLEOS_HOST_GPU_PRODUCTION_QEMU_TIMEOUT:-120}
 QEMU_KILL_GRACE_SECONDS=${SIMPLEOS_HOST_GPU_QEMU_KILL_GRACE_SECONDS:-2}
 REQUIRE_CUDA=${SIMPLEOS_HOST_GPU_REQUIRE_CUDA:-0}
+PROCESSING_SELECTOR=${SIMPLEOS_HOST_GPU_PROCESSING_BACKEND:-auto}
 RSS_SAMPLE_INTERVAL=${SIMPLEOS_HOST_GPU_RSS_SAMPLE_INTERVAL:-0.1}
 COMPILER_PROBE_TIMEOUT_SECONDS=5
 COMPILER_CHECK_TIMEOUT_SECONDS=10
@@ -62,7 +63,23 @@ set_host_contract() {
     esac
 }
 
+apply_processing_selector() {
+    case "$1:$ACTIVE_HOST" in
+        auto:*) ;;
+        vulkan:linux)
+            PROCESSING_BACKEND=vulkan
+            EXPECTED_PROCESSING_MASK=1
+            EXPECTED_PROCESSING_RECEIPT=vulkan
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 set_host_contract "$ACTIVE_HOST"
+if ! apply_processing_selector "$PROCESSING_SELECTOR"; then
+    echo "simpleos_qemu_host_gpu_2d: SIMPLEOS_HOST_GPU_PROCESSING_BACKEND must be auto, or vulkan on Linux" >&2
+    exit 2
+fi
 case "$ACTIVE_HOST" in
     macos) DEFAULT_RUNTIME_PATH=src/compiler_rust/target/bootstrap ;;
     windows) DEFAULT_RUNTIME_PATH= ;;
@@ -323,6 +340,14 @@ processing_perf_evidence_valid() (
     [ "$preference" = "$expected_preference" ]
 )
 
+processing_selector_evidence_valid() {
+    log=$1
+    selector=$2
+    [ "$selector" = auto ] && return 0
+    [ -f "$log" ] &&
+    [ "$(grep -ac "^HOST_GPU_DAEMON_SELECTOR processing_backend=$selector[[:space:]]*$" "$log")" -eq 1 ]
+}
+
 serial_processing_backend() {
     sed -n "s/.*HOST_GPU_PROCESS_OK isa=$2 backend=\(cuda\|vulkan\|metal\) .*/\1/p" "$1"
 }
@@ -486,7 +511,14 @@ emit_row() {
     case "$row_host" in
         macos) row_render_backend=metal; row_processing_backend=${row_processing_backend:-metal} ;;
         windows) row_render_backend=directx; row_processing_backend=${row_processing_backend:-cuda} ;;
-        *) row_render_backend=vulkan; row_processing_backend=${row_processing_backend:-cuda-preferred-vulkan-fallback} ;;
+        linux)
+            row_render_backend=vulkan
+            if [ "$row_host" = "$ACTIVE_HOST" ]; then
+                row_processing_backend=${row_processing_backend:-$PROCESSING_BACKEND}
+            else
+                row_processing_backend=${row_processing_backend:-cuda-preferred-vulkan-fallback}
+            fi
+            ;;
     esac
     echo "${row_prefix}_status=$row_status"
     echo "${row_prefix}_reason=$row_reason"
@@ -695,14 +727,21 @@ report_arm64_production_evidence_valid() {
     arm64_production_evidence_valid "$row_log" "$row_qemu_device_args" "$row_production_serial_log" "$row_production_qemu_device_args"
 }
 
-validate_report() {
+validate_report() (
     report=$1
     [ -f "$report" ] || return 1
     status=$(report_one "$report" simpleos_qemu_host_gpu_2d_status) || return 1
     reason=$(report_one "$report" simpleos_qemu_host_gpu_2d_reason) || return 1
     report_active_host=$(report_one "$report" simpleos_qemu_host_gpu_2d_host 2>/dev/null || true)
     [ -n "$report_active_host" ] || report_active_host=linux
+    selector_count=$(grep -ac '^simpleos_qemu_host_gpu_2d_processing_selector=' "$report" 2>/dev/null || true)
+    case "$selector_count" in
+        0) report_processing_selector=auto ;;
+        1) report_processing_selector=$(report_one "$report" simpleos_qemu_host_gpu_2d_processing_selector) || return 1 ;;
+        *) return 1 ;;
+    esac
     case "$report_active_host" in linux|macos|windows) ;; *) return 1 ;; esac
+    case "$report_processing_selector:$report_active_host" in auto:*|vulkan:linux) ;; *) return 1 ;; esac
     [ -n "$reason" ] || return 1
     case "$status" in pass|blocked|fail|unsupported) ;; *) return 1 ;; esac
 
@@ -724,6 +763,9 @@ validate_report() {
             if [ "$row_status" = pass ]; then
                 saved_row_host=$ACTIVE_HOST
                 set_host_contract "$report_host"
+                if [ "$report_host" = "$report_active_host" ]; then
+                    apply_processing_selector "$report_processing_selector" || return 1
+                fi
                 if ! {
                     [ "$row_reason" = ok ] &&
                     [ -f "$row_log" ] && serial_has_pass "$row_log" "$report_isa" &&
@@ -740,6 +782,7 @@ validate_report() {
                     [ -n "$row_qemu_version" ] &&
                     qemu_argv_evidence_valid "$report_isa" "$row_qemu_device_args" &&
                     row_rss_evidence_valid "$row_daemon_rss" "$row_qemu_rss" "$row_combined_rss" &&
+                    processing_selector_evidence_valid "$row_daemon_log" "$report_processing_selector" &&
                     processing_perf_evidence_valid "$row_log" "$row_daemon_log" "$report_isa" &&
                     [ "$row_processing_cpu_us" = "$(processing_perf_field "$row_daemon_log" "$report_isa" cpu_us)" ] &&
                     [ "$row_processing_device_us" = "$(processing_perf_field "$row_daemon_log" "$report_isa" device_us)" ] &&
@@ -759,6 +802,7 @@ validate_report() {
     if [ "$status" = pass ]; then
         saved_host=$ACTIVE_HOST
         set_host_contract "$report_active_host"
+        apply_processing_selector "$report_processing_selector" || { set_host_contract "$saved_host"; return 1; }
         [ "$reason" = "all-$report_active_host-host-gpu-rows-pass" ] || { set_host_contract "$saved_host"; return 1; }
         [ "$(report_one "$report" simpleos_qemu_host_gpu_2d_backend)" = "$BACKEND" ] || { set_host_contract "$saved_host"; return 1; }
         [ "$(report_one "$report" simpleos_qemu_host_gpu_2d_processing_backend)" = "$PROCESSING_BACKEND" ] || { set_host_contract "$saved_host"; return 1; }
@@ -783,7 +827,7 @@ validate_report() {
     echo "simpleos_qemu_host_gpu_2d_report_validation=pass"
     echo "simpleos_qemu_host_gpu_2d_report_status=$status"
     echo "simpleos_qemu_host_gpu_2d_report_reason=$reason"
-}
+)
 
 self_test() {
     set_host_contract linux
@@ -826,6 +870,7 @@ self_test() {
     directx_daemon_log="$temp_dir/directx-aarch64-daemon.log"
     directx_x86_daemon_log="$temp_dir/directx-x86_64-daemon.log"
     directx_riscv_daemon_log="$temp_dir/directx-riscv64-daemon.log"
+    selector_log="$temp_dir/selector.log"
     slow_daemon_log="$temp_dir/slow-daemon.log"
     dishonest_daemon_log="$temp_dir/dishonest-daemon.log"
     stale_perf_daemon_log="$temp_dir/stale-perf-daemon.log"
@@ -852,6 +897,25 @@ self_test() {
     seed_simple="$temp_dir/simple-seed"
     hanging_simple="$temp_dir/simple-hanging"
     failing_simple="$temp_dir/simple-probe-failing"
+    printf '%s\n' 'HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan' >"$selector_log"
+    processing_selector_evidence_valid "$selector_log" vulkan
+    processing_selector_evidence_valid "$selector_log" auto
+    if processing_selector_evidence_valid "$selector_log" metal; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    set_host_contract linux
+    apply_processing_selector vulkan
+    if [ "$PROCESSING_BACKEND:$EXPECTED_PROCESSING_MASK:$EXPECTED_PROCESSING_RECEIPT" != vulkan:1:vulkan ]; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    set_host_contract macos
+    if apply_processing_selector vulkan; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    set_host_contract linux
     x86_qemu_args=$(encode_argv_hex -machine q35 -m 512M -kernel "$(kernel_for_isa x86_64)" -nographic -no-reboot \
         -device virtio-net-pci -object "memory-backend-file,id=hostgpu,share=on,mem-path=$temp_dir/x86 host gpu.shm,size=8M" \
         -device ivshmem-plain,memdev=hostgpu)
@@ -1152,7 +1216,14 @@ EOF
         echo simpleos_qemu_host_gpu_2d_blocked=0
         echo simpleos_qemu_host_gpu_2d_failed=0
     } >"$pass_report"
+    set_host_contract linux
+    apply_processing_selector vulkan
     validate_report "$pass_report" >/dev/null
+    if [ "$PROCESSING_BACKEND:$EXPECTED_PROCESSING_MASK:$EXPECTED_PROCESSING_RECEIPT" != vulkan:1:vulkan ]; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    set_host_contract linux
     sed "s|simpleos_qemu_host_gpu_2d_linux_aarch64_production_serial_log=$production_log|simpleos_qemu_host_gpu_2d_linux_aarch64_production_serial_log=$production_discontinuous_log|" "$pass_report" >"$bad_backend_report"
     if validate_report "$bad_backend_report" >/dev/null 2>&1; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
@@ -1225,6 +1296,11 @@ EOF
         exit 1
     fi
     { cat "$pass_report"; grep '^simpleos_qemu_host_gpu_2d_linux_aarch64_qemu_version=' "$pass_report"; } >"$bad_backend_report"
+    if validate_report "$bad_backend_report" >/dev/null 2>&1; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    { cat "$pass_report"; echo simpleos_qemu_host_gpu_2d_processing_selector=auto; echo simpleos_qemu_host_gpu_2d_processing_selector=auto; } >"$bad_backend_report"
     if validate_report "$bad_backend_report" >/dev/null 2>&1; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
@@ -1545,7 +1621,11 @@ run_guest() {
     kernel=$(kernel_for_isa "$isa")
     rm -f "$shm" "$serial" "$daemon_log" "$rss_file"
     size_shared_file "$shm"
-    "$daemon" --shm="$shm" >"$daemon_log" 2>&1 &
+    set -- "--shm=$shm"
+    if [ "$PROCESSING_SELECTOR" = vulkan ]; then
+        set -- "$@" --processing-backend=vulkan
+    fi
+    "$daemon" "$@" >"$daemon_log" 2>&1 &
     daemon_pid=$!
     case "$isa" in
         x86_64)
@@ -1568,7 +1648,10 @@ run_guest() {
     qemu_device_args=$(encode_argv_hex "$@")
     run_qemu_with_rss "$QEMU_TIMEOUT" "$serial" "$daemon_pid" "$rss_file" "$qemu_bin" "$@"
     if serial_has_pass "$serial" "$isa"; then probe_valid=1; else probe_valid=0; fi
-    if [ "$probe_valid" = 1 ] && processing_perf_evidence_valid "$serial" "$daemon_log" "$isa"; then
+    if [ "$probe_valid" = 1 ] &&
+       processing_selector_evidence_valid "$daemon_log" "$PROCESSING_SELECTOR" &&
+       processing_perf_evidence_valid "$serial" "$daemon_log" "$isa"
+    then
         processing_perf_valid=1
     else
         processing_perf_valid=0
@@ -1683,6 +1766,7 @@ echo "simpleos_qemu_host_gpu_2d_host=$host"
 echo "simpleos_qemu_host_gpu_2d_reason=$(if [ "$overall" = pass ]; then echo "all-$host-host-gpu-rows-pass"; else echo "one-or-more-$host-host-gpu-rows-failed"; fi)"
 echo "simpleos_qemu_host_gpu_2d_backend=$BACKEND"
 echo "simpleos_qemu_host_gpu_2d_processing_backend=$PROCESSING_BACKEND"
+echo "simpleos_qemu_host_gpu_2d_processing_selector=$PROCESSING_SELECTOR"
 echo "simpleos_qemu_host_gpu_2d_rows=3"
 echo "simpleos_qemu_host_gpu_2d_passed=$passed"
 echo "simpleos_qemu_host_gpu_2d_blocked=$blocked"

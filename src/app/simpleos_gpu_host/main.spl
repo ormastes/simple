@@ -123,28 +123,29 @@ fn _render_backend_available(code: i64) -> bool:
             engine.shutdown()
             available
 
-fn _processing_backend_mask(requested: i64) -> i64:
+fn _processing_backend_mask(requested: i64, selector: text) -> i64:
+    val selected = if selector == "vulkan": requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN else: requested
     var available: i64 = 0
-    if (requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN) != 0:
+    if (selected & SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN) != 0:
         val probe_ir = processing_ir_fill_u32(1, 1u32)
         val probe = processing_ir_execute_vulkan(probe_ir)
         if probe.completed and probe.backend_handle > 0 and probe.device_identity > 0 and processing_ir_outputs_equal(probe.values, processing_ir_cpu_execute(probe_ir)):
             available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN
-    if (requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0:
+    if (selected & SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0:
         val probe_ir = processing_ir_fill_u32(1, 1u32)
         val probe = processing_ir_execute_cuda(probe_ir)
         if probe.completed and probe.backend_handle > 0 and probe.device_identity > 0 and processing_ir_outputs_equal(probe.values, processing_ir_cpu_execute(probe_ir)):
             available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA
-    if (requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL) != 0:
+    if (selected & SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL) != 0:
         val probe_ir = processing_ir_fill_u32(1, 1u32)
         val probe = processing_ir_execute_metal(probe_ir)
         if probe.completed and probe.backend_handle > 0 and probe.device_identity > 0 and processing_ir_outputs_equal(probe.values, processing_ir_cpu_execute(probe_ir)):
             available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
     available
 
-fn _process_hello(base: i64, generation: i64, version: i64, guest_isa_code: i64, render_mask: i64, processing_mask: i64, render_code: i64) -> i64:
+fn _process_hello(base: i64, generation: i64, version: i64, guest_isa_code: i64, render_mask: i64, processing_mask: i64, render_code: i64, processing_selector: text) -> i64:
     val started = time_now_nanos()
-    val negotiated_processing_mask = _processing_backend_mask(processing_mask)
+    val negotiated_processing_mask = _processing_backend_mask(processing_mask, processing_selector)
     val hello = SimpleOsHostGpuHello(
         version: version,
         guest_isa: simpleos_host_gpu_guest_isa_name(guest_isa_code),
@@ -172,7 +173,7 @@ fn _process_hello(base: i64, generation: i64, version: i64, guest_isa_code: i64,
     _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, 0, 0, 0, _elapsed_us_since(started), 0, 0)
     1
 
-fn _process_request(base: i64) -> i64:
+fn _process_request(base: i64, processing_selector: text) -> i64:
     val generation = _read(base, SIMPLEOS_HOST_GPU_WIRE_REQUEST_GENERATION)
     val completion = _read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
     if not simpleos_host_gpu_generation_is_fresh(generation, completion):
@@ -210,7 +211,7 @@ fn _process_request(base: i64) -> i64:
     if kind == SIMPLEOS_HOST_GPU_KIND_HELLO:
         if _read(base, SIMPLEOS_HOST_GPU_WIRE_REQUEST_GENERATION) != generation:
             return 0
-        return _process_hello(base, generation, request_version, guest_isa_code, requested_render_mask, requested_processing_mask, backend_code)
+        return _process_hello(base, generation, request_version, guest_isa_code, requested_render_mask, requested_processing_mask, backend_code, processing_selector)
     if not simpleos_host_gpu_wire_correlation_valid(run_id_hash, frame_id):
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, 0, 0, 0, 1, 0, 0)
         return 1
@@ -398,7 +399,12 @@ fn _arg_value(args: [text], prefix: text) -> text:
 fn main() -> i64:
     val args = get_args()
     val path = _arg_value(args, "--shm=")
+    val requested_processing_selector = _arg_value(args, "--processing-backend=")
+    val processing_selector = if requested_processing_selector == "": "auto" else: requested_processing_selector
     val once = args.contains("--once")
+    if processing_selector != "auto" and processing_selector != "vulkan":
+        print("simpleos_gpu_host: --processing-backend must be auto or vulkan\n")
+        return 2
     if path == "" or not file_exists(path) or file_size(path) < SIMPLEOS_HOST_GPU_REGION_BYTES:
         print("simpleos_gpu_host: --shm=<8MiB backing file> required\n")
         return 2
@@ -406,12 +412,13 @@ fn main() -> i64:
     if base <= 0:
         print("simpleos_gpu_host: mmap failed\n")
         return 3
+    print("HOST_GPU_DAEMON_SELECTOR processing_backend={processing_selector}\n")
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION, 0)
     if once:
-        val processed = _process_request(base)
+        val processed = _process_request(base, processing_selector)
         file_munmap(base, SIMPLEOS_HOST_GPU_REGION_BYTES)
         return if processed > 0: 0 else: 4
     while true:
-        if _process_request(base) == 0:
+        if _process_request(base, processing_selector) == 0:
             thread_sleep_ms(1)
     0

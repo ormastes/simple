@@ -303,9 +303,18 @@ the two desktop revisions must be equal and positive.
 Linux Vulkan rendering and the native CUDA ProcessingIR executor are
 implemented with Vulkan ProcessingIR fallback. On a host offering both CUDA
 and Vulkan, a CUDA-preferred receipt does not exercise or close the Vulkan
-ProcessingIR capability row. No owner-level Vulkan-only selector exists yet;
-TODO 550 must add one and document its exact non-hardcoded command before a
-forced Vulkan device-readback receipt can be claimed. TODO 570 retains the
+ProcessingIR capability row. The daemon owner now accepts an explicit
+`--processing-backend=vulkan` filter, and the canonical wrapper applies it
+without changing the default CUDA preference:
+
+```sh
+SIMPLEOS_HOST_GPU_PROCESSING_BACKEND=vulkan \
+  sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
+```
+
+The forced lane must negotiate processing mask `1`, emit a single
+`HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan` receipt, and retain exact
+device readback before TODO 550 can close. TODO 570 retains the
 correlated preference classification; refreshed cross-ISA CUDA receipts are
 also still required. macOS Metal Draw IR execution is implemented but remains
 `unsupported` evidence until a prepared native host produces a fresh receipt.
