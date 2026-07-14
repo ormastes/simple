@@ -416,6 +416,17 @@ broken-native-build Mac). Fallback stopgap: extend the existing `fb_w/fb_h` scal
 nil-guard workaround to the `SharedWmScene`/`TaskbarModel` fields the composition reads, for a
 non-black PPM before the compiler fix lands.
 
+**Render-lane confirmation (same day):** guarding the composition's `scene.background` derefs +
+bypassing the internally-faulting font-metrics call makes the composition BUILD FULLY and reach
+`first-frame-rendered`; the paint step then returns `rendered=0` because the Engine2D CPU
+rasterizer reads shifted `FramebufferDriver.width/height` at creation
+(`src/lib/gc_async_mut/gpu/engine2d/backend_baremetal.spl:59-60`). So the ENTIRE render chain is
+the SAME field-shift root cause — the ready compiler patch fixes composition + Engine2D dims in
+one shot; the `fb_w/fb_h` workaround on main only covered host-gpu present dims. The remaining
+independent blocker is a separate HEAD-seed NVMe-init regression that must be fixed to build a
+HEAD-seed kernel that boots to the render stage (to verify the field fix). Render-lane bisect:
+`scratchpad/render_findings.md`; patches: `scratchpad/screendump_handoff/`.
+
 **Acceptance (D.1).** `check-simpleos-wm-fullscreen-evidence.shs` captures a non-black
 (>1%) 3840×2160 PPM of `gui_entry_desktop`, AND the seed still passes the 3-stage bootstrap gate.
 

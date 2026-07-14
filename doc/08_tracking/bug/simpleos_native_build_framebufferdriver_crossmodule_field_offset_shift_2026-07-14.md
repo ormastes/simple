@@ -312,8 +312,24 @@ no regression (the ambiguous-set is empty outside `--entry-closure`).
    supported background `RECT` renders 0. Plus a scanout mismatch (QMP captures 3840×768 vs
    the desktop's detected 3840×2160).
 
-**Net.** Real non-black desktop PPM is gated on a STACK: (1) field-index fix [patch ready],
-(2) HEAD-seed NVMe regression [separate seed owner], (3) baremetal Engine2D command coverage
-(GROUP/EDGE/PATH) + present-to-scanout, (4) scanout-resolution match. Each is deep and
-independently owned. Both worked source patches are captured under
-`scratchpad/screendump_handoff/` for whoever lands the seed side.
+**Correction (render-lane bisect, same day): the "rendered=0" IS the same field-shift, not a
+separate render bug.** After guarding all 5 `scene.background` derefs + bypassing the internally-
+faulting `resolve_font_metrics_with_language`, the composition BUILDS FULLY
+(`desktop-ok → taskbar-ok → composition-built`) and reaches `first-frame-rendered`. The paint
+step then returns `rendered=0` because the Engine2D CPU rasterizer reads
+`FramebufferDriver.width()/height()` cross-module at creation (`src/lib/gc_async_mut/gpu/
+engine2d/backend_baremetal.spl:59-60`) and gets the SAME one-slot-shifted garbage dims; the
+present-time target-fill/geometry checks (`draw_ir_adv.spl:329,574` via `eng.width()/height()`)
+then reject every command. `DrawIrCommand` geometry is pre-array and reads fine — GROUP/EDGE/PATH
+being "unsupported" is a red herring; the real cause is the garbage framebuffer dims. So the whole
+render chain reduces to ONE root cause — the cross-module field-index shift — which the ready
+`compiler_field_fix.patch` fixes wholesale (the executor's existing `fb_w/fb_h` trusted-dims
+workaround covered only host-gpu present dims, not Engine2D creation / CPU framebuffer addressing).
+Full render-lane bisect notes: `scratchpad/render_findings.md`.
+
+**Net (revised).** Real non-black desktop PPM is gated on essentially TWO things: **(1) the
+field-index fix** [patch ready, bootstrap-safe — fixes composition AND Engine2D-creation dims in
+one shot], and **(2) the separate HEAD-seed NVMe-init regression** that must be resolved to even
+build a HEAD-seed kernel that boots to the render stage and thereby verify (1). Scanout-resolution
+match is likely downstream of (1). Both worked source patches (compiler fix + render nil-guards)
+are captured under `scratchpad/screendump_handoff/`.
