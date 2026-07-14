@@ -7,9 +7,36 @@
 #   lint                  → linter
 #   fmt                   → formatter
 #   check                 → parser/type-check pass
+#   simpleos [arch...]    → build per-arch SimpleOS Simple toolchain (opt-in)
 
 use app.io.cli_ops.{cli_native_build, cli_run_lint, cli_run_fmt}
 use app.cli.check.{run_check}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn build_simpleos_targets(arches: [text]) -> i64:
+    """`bin/simple build simpleos [arch...]` — build the per-arch SimpleOS Simple
+    toolchain (x86_64/aarch64/riscv64-unknown-simpleos) via the CI builder, which
+    native-builds each target, verifies it with a fail-closed readelf gate, and
+    installs it to bin/release/<arch>-unknown-simpleos/simple. Opt-in on purpose:
+    a plain `bin/simple build` stays host-only and fast. Optional args filter the
+    arch set (passed through to the builder)."""
+    var run_args: [text] = ["scripts/ci/build-simpleos-toolchain.shs"]
+    var i = 0
+    while i < arches.len():
+        run_args.push(arches[i])
+        i = i + 1
+    var out = ""
+    var err = ""
+    var rc: i64 = 0
+    # ponytail: capture+print (not streamed); a multi-minute build shows output
+    # only at the end. Switch to an inherit-stdio exec if progress UX matters.
+    (out, err, rc) = rt_process_run("sh", run_args)
+    if out.len() > 0:
+        print(out)
+    if err.len() > 0:
+        print(err)
+    return rc
 
 fn handle_build(args: [text]) -> i64:
     """Dispatch the 'build' subcommand to the appropriate pipeline."""
@@ -23,6 +50,9 @@ fn handle_build(args: [text]) -> i64:
 
     if subcmd == "check":
         return run_check(args[1:])
+
+    if subcmd == "simpleos":
+        return build_simpleos_targets(args[1:])
 
     # Both 'bootstrap' and default invoke the native-build pipeline.
     # For 'bootstrap', strip the subcommand so it isn't treated as a source path.

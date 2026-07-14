@@ -182,8 +182,9 @@ target arches; only the in-guest *run* stays walled.
   (`scripts/ci/build-simpleos-toolchain.shs`) produces a per-arch
   `bin/release/<arch>-unknown-simpleos/simple` (4 MB static EXEC) that passes a
   fail-closed `readelf` gate (static, correct `EM_*`, entry inside first PT_LOAD
-  == link base, clears the kernel `.bss` band). NOTE: this is a **separate,
-  opt-in** step — a plain `bin/simple build` produces only the host toolchain.
+  == link base, clears the kernel `.bss` band). Wired into the build CLI as
+  `bin/simple build simpleos [arch...]` (opt-in — a plain `bin/simple build`
+  stays host-only and fast).
 - **In-guest RUN is the one remaining wall.** The kernel boots and stages the
   Simple toolchain ELF off FAT32, but executing it in U-mode is blocked by the
   deployed-compiler `env_set` miscompile (SEGV on every `native-build`, see

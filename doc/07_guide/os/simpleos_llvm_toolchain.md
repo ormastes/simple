@@ -29,13 +29,15 @@ SimpleOS. `TargetOS::SimpleOS = 5` is a first-class target OS beside
 | What | Path | Notes |
 |------|------|-------|
 | Per-arch Simple compiler for SimpleOS | `bin/release/<arch>-unknown-simpleos/simple` | ~4 MB static EXEC, one per arch; built + boot-proven 2026-07-14 |
-| Builder (opt-in, NOT part of `bin/simple build`) | `scripts/ci/build-simpleos-toolchain.shs` → `src/app/ci/build_simpleos_toolchain.spl` | per-arch native-build → fail-closed `readelf` gate → stamp → install |
+| Builder (opt-in subcommand) | `bin/simple build simpleos [arch...]` → `scripts/ci/build-simpleos-toolchain.shs` → `src/app/ci/build_simpleos_toolchain.spl` | per-arch native-build → fail-closed `readelf` gate → stamp → install |
 
-A plain `bin/simple build` produces only the **host** toolchain
-(`bin/release/x86_64-unknown-linux-gnu/simple`); the SimpleOS artifacts require
-running the CI script explicitly. Boot/FS-exec staging is proven on all three
-arches (x86_64 OVMF, riscv64 OpenSBI, aarch64 EL1); in-guest *run* is blocked on
-the deployed-compiler `env_set` SEGV + #99 redeploy. Full 3-arch status:
+`bin/simple build simpleos` builds all three SimpleOS arches (optionally filter
+by passing arch names); it is **opt-in** so a plain `bin/simple build` stays
+host-only and fast (that default produces only
+`bin/release/x86_64-unknown-linux-gnu/simple`). The subcommand and the CI script
+run the same builder. Boot/FS-exec staging is proven on all three arches (x86_64
+OVMF, riscv64 OpenSBI, aarch64 EL1); in-guest *run* is blocked on the
+deployed-compiler `env_set` SEGV + #99 redeploy. Full 3-arch status:
 `doc/03_plan/os/in_guest_clang_selfhost_board_plan.md` (§ Simple compiler/loader
 on SimpleOS).
 
