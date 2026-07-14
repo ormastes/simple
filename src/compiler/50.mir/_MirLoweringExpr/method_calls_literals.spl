@@ -213,8 +213,30 @@ impl MirLowering:
                 match found_receiver_type.kind:
                     case Dict(_, _): receiver_is_dict = true
                     case _: ()
+
+        # Dict method fallback detection (dictops sweep, same root gap as the
+        # `.len()` fix below): HIR type inference frequently never populates
+        # `receiver.type_` for a Dict-typed local, so `resolution` comes back
+        # Unresolved and the static-type check above misses every dict method
+        # call on such a receiver -- `.keys()`, `.values()`, `.has()`,
+        # `.contains()`/`.contains_key()`, `.get()`, `.remove()`/`.delete()`
+        # all fell through to the generic `case Unresolved:` handler (a loud,
+        # correct-but-avoidable MIR error). Mirror the `.len()` fix: lower the
+        # receiver once up front for this closed set of dict method names and
+        # consult `runtime_dict_locals` (populated at every dict-literal/
+        # assignment site independent of HIR static typing) to recover
+        # dict-ness.
+        var dict_recv_local: LocalId = 0
+        var dict_recv_lowered = false
+        val is_dict_method_name = method == "keys" or method == "values" or method == "has" or method == "contains" or method == "contains_key" or method == "get" or method == "remove" or method == "delete"
+        if not receiver_is_dict and resolution_is_unresolved and is_dict_method_name:
+            dict_recv_local = self.lower_expr(receiver)
+            dict_recv_lowered = true
+            if self.runtime_dict_locals.has(dict_recv_local.id):
+                receiver_is_dict = true
+
         if receiver_is_dict and (method == "values" or method == "keys") and args.len() == 0:
-            val receiver_local = self.lower_expr(receiver)
+            val receiver_local = if dict_recv_lowered: dict_recv_local else: self.lower_expr(receiver)
             val runtime_name = if method == "values": "rt_dict_values" else: "rt_dict_keys"
             val func_operand = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str(runtime_name),
@@ -227,6 +249,77 @@ impl MirLowering:
                 self.runtime_array_locals[result_local.id] = true
                 self.runtime_value_locals[result_local.id] = true
                 return result_local
+            return receiver_local
+
+        # `.has(key)` / `.contains(key)` / `.contains_key(key)` -> rt_dict_contains.
+        # The runtime symbol (int8_t rt_dict_contains(int64_t, int64_t)) is
+        # already linked and already backend-declared (asm_constraints_helpers.spl);
+        # this method call just never routed to it. Result is a raw i64 0/1,
+        # normalized to Bool via `!= 0` (mirrors the lambda-predicate pattern
+        # elsewhere in this file, since `declare i64 @rt_dict_contains` cannot
+        # return an LLVM i1 directly).
+        if receiver_is_dict and (method == "has" or method == "contains" or method == "contains_key") and args.len() == 1:
+            val receiver_local = if dict_recv_lowered: dict_recv_local else: self.lower_expr(receiver)
+            val key_local = self.lower_dict_key(args[0].value)
+            val contains_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_dict_contains"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_has = self.builder
+            val has_call = b_has.emit_call(contains_op, [mir_operand_copy(receiver_local), mir_operand_copy(key_local)], MirType.i64())
+            val has_raw = has_call ?? b_has.new_temp(MirType.i64())
+            val zero_has = b_has.emit_const_int(0)
+            val has_bool = b_has.emit_binop(MirBinOp.Ne, mir_operand_copy(has_raw), mir_operand_copy(zero_has), MirType.bool())
+            self.builder = b_has
+            return has_bool
+
+        # `.get(key)` -> rt_dict_get, decoded exactly like the `d[k]` Index
+        # case in expr_dispatch.spl (same runtime call, same decode_runtime_value
+        # unboxing). Missing-key behavior intentionally mirrors the existing
+        # `d[k]` raw-read path (pre-existing garbage-on-miss behavior documented
+        # in scratchpad/dict_native_report.md item 15 -- not introduced here,
+        # not fixed here, out of scope for this sweep).
+        if receiver_is_dict and method == "get" and args.len() == 1:
+            val receiver_local = if dict_recv_lowered: dict_recv_local else: self.lower_expr(receiver)
+            val key_local = self.lower_dict_key(args[0].value)
+            var get_value_type = MirType.i64()
+            val dict_mir_type_get = self.local_mir_type_of(receiver_local)
+            if dict_mir_type_get != nil:
+                match dict_mir_type_get.kind:
+                    case Dict(_, value_type): get_value_type = value_type
+                    case _: ()
+            val get_op2 = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_dict_get"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_get2 = self.builder
+            val get_res2 = b_get2.emit_call(get_op2, [mir_operand_copy(receiver_local), mir_operand_copy(key_local)], MirType.i64())
+            self.builder = b_get2
+            if val get_local2 = get_res2:
+                return self.decode_runtime_value(get_local2, get_value_type)
+            return receiver_local
+
+        # `.remove(key)` / `.delete(key)` -> rt_dict_remove (mutates in place,
+        # returns whether the key was present -- discarded here). The oracle
+        # (bootstrap-seed interpreter) implements dict methods with a
+        # functional clone-then-mutate style internally, but re-binds the
+        # result back onto the receiver identifier as an interpreter-level
+        # side effect, so `d.remove(key)` is observably a mutation from the
+        # caller's perspective either way (confirmed: `d.remove("a")` as a
+        # bare statement, with no reassignment, still leaves `d.has("a")` ==
+        # false on the oracle). Returning the same dict handle here matches
+        # that observable behavior, including the common `d = d.remove(key)`
+        # idiom (a no-op self-reassignment of the now-mutated handle).
+        if receiver_is_dict and (method == "remove" or method == "delete") and args.len() == 1:
+            val receiver_local = if dict_recv_lowered: dict_recv_local else: self.lower_expr(receiver)
+            val key_local = self.lower_dict_key(args[0].value)
+            val remove_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_dict_remove"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_rm = self.builder
+            b_rm.emit_call(remove_op, [mir_operand_copy(receiver_local), mir_operand_copy(key_local)], MirType.i64())
+            self.builder = b_rm
             return receiver_local
 
         if (method == "len" or method == "length") and args.len() == 0:
