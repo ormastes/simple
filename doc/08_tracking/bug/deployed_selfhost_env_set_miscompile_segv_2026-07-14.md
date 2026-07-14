@@ -60,11 +60,18 @@ stopped by the session budget guard. Its retained log is a local build artifact,
 not release evidence.
 
 Static dependency review then found that the supposedly lightweight entry
-imported the full command hub through `run_commands`. It now imports the
-zero-import `std.nogc_sync_mut.sffi.cli` owner directly; `run_commands` also no
-longer imports its own re-export hub. This source fix has bounded static review
-and regression coverage, but still requires native self-host build/execution
-proof after the rebuild blockers above are repaired.
+imported broad command, CLI utility, and I/O hubs. It now imports only the
+zero-import CLI/environment SFFI owners, calls the runtime fault controls
+directly, and `run_commands` no longer imports its own re-export hub.
+
+Three bounded follow-up build cycles produced no executable. The first was
+stopped before object output after the remaining broad imports were identified.
+The next two reached MIR setup and failed loudly with `bootstrap entry HIR
+module was not set before MIR lowering`, including after normalized value-based
+map selection. The entry HIR is now retained explicitly in `CompileContext` at
+the point where HIR lowering already knows the entry, avoiding rediscovery
+through the seed-fragile HIR dictionary. This source fix and its regression have
+bounded static review, but the three-cycle cap was reached before native proof.
 
 ## Required fix and gate
 

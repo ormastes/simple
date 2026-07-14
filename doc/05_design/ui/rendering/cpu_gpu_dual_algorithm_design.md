@@ -179,7 +179,7 @@ A source-contract gate, modeled on the backend-isolation lint
   the scope-discipline bullet above) — the real CPU per-pixel/per-glyph hot paths: the engine2d
   rasteriser core (`backend_software.spl`, `backend_emu.spl`, `backend_emu_adv.spl`,
   `backend_cpu.spl`, `compositor.spl`, `helpers_text.spl`), the web CPU render path
-  (`simple_web_html_layout_renderer.spl`, `famous_site_glyph_compositor.spl`), and the SimpleOS
+  (`simple_web_html_layout_renderer.spl`), and the SimpleOS
   compositor surfaces (`src/os/compositor/{compositor,compositor_engine2d,browser_compositor_backend}.spl`).
   All under `gc_async_mut`/`src/os`; the `gc_sync_mut` siblings are re-export facades and `engine3d`
   is out of the 2D scope, so neither is scanned. `backend_cpu.spl`/`compositor_engine2d.spl` carry 0

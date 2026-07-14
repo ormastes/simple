@@ -26,7 +26,7 @@ CSS.
   - `simple_web_renderer.spl` — engine2d/Metal presentation shim
     (`simple_web_render_html_to_pixels_with_engine2d_backend`,
     `simple_web_resolved_engine2d_backend_name`).
-  - `famous_site_glyph_compositor.spl` — glyph atlas compositor (separate path).
+  - Browser text uses the shared Draw IR → Engine2D font-renderer path; do not add a private atlas compositor.
 - Consuming feature experts:
   - [web_render_css_parity](../../feature_expert/web_render_css_parity/skill.md)
     (cross-engine widget parity gate).

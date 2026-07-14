@@ -443,13 +443,15 @@ windows preserve explicit language metadata. Missing language remains `und`
 and keeps the prior Noto Sans Mono default; explicit multilingual text without
 a family selects the accepted sans face for its language.
 
-The old framebuffer web painter still rasterizes 5×7 glyphs even when resolved
-metrics shape its boxes. It is therefore compatibility behavior, not final
-legacy vector-font parity. Host Web/GUI/shared-WM producers use their canonical
-semantic/scene owners and the shared Draw IR executor; the legacy SimpleOS WM
-still uses its direct bitmap text calls. The host route still needs a canonical
-rerun and glyph/pixel parity, while SimpleOS needs an actual WM migration—not a
-paint-local second font loader.
+The unused famous-site fixture fallback and its browser-private atlas compositor
+were removed; active host web text uses the existing HTML ->
+`DrawIrComposition` -> Engine2D route. Other old framebuffer web
+paths still rasterize 5×7 glyphs even when resolved metrics shape their boxes,
+so they remain compatibility behavior rather than final legacy vector-font
+parity. Host Web/GUI/shared-WM producers use their canonical semantic/scene
+owners and the shared Draw IR executor; the legacy SimpleOS WM still uses its
+direct bitmap text calls. The host route still needs a canonical rerun, while
+SimpleOS needs an actual WM migration—not a paint-local second font loader.
 
 SimpleOS image construction now reuses the exact selected
 `FontAssetCandidate` for Noto Sans Mono. Installer rootfs and initramfs staging

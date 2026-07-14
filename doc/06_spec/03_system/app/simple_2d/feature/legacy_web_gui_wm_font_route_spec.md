@@ -31,16 +31,20 @@ claim native GPU evidence.
 4. Require every Draw IR command to render with no skipped command.
 5. Re-read the caller-owned producer composition and require identical font
    identity, advances, position, width, and height.
+6. Render an isolated black `A` and an otherwise identical empty document on
+   white 32×24 CPU surfaces; require non-white ink and a pixel difference from
+   the empty baseline, preventing command-count or box-paint-only success.
 
 ## Pass boundary
 
 Passing proves structural font-metadata retention in legacy Web, GUI widget,
 and WM Draw IR plus submission of each complete composition through the shared
-Engine2D CPU route. The executor selects the identity and font size and consumes
-the serialized advances through the canonical `FontRenderer`; accepted shaped
-runs may also carry handle-free glyph IDs, positions, and logical clusters.
-This scenario still does not prove glyph pixels, native GPU submission, device
-readback, or pixel parity.
+Engine2D CPU route. The isolated witness also proves that this route produces
+nonblank CPU text pixels rather than only command metadata. The executor selects
+the identity and font size and consumes the serialized advances through the
+canonical `FontRenderer`; accepted shaped runs may also carry handle-free glyph
+IDs, positions, and logical clusters. This scenario still does not prove native
+GPU submission, device readback, or native CPU/GPU pixel parity.
 
 <details>
 <summary>Folded executable detail</summary>

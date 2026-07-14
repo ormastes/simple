@@ -31,9 +31,10 @@ This is not a font-source failure.
 
 A fresh minimal stage compiler is not a full test CLI. The bounded current-source
 rebuild additionally exposed a bootstrap-parser rejection and a full-CLI
-closure/runtime link gap; the existing focused test-entry build produced no
-artifact within the 20-minute cap. None is a valid replacement for deployed
-pure-Simple verification.
+closure/runtime link gap. The narrowed focused test entry then exposed a
+bootstrap entry-HIR handoff failure; it now carries the entry HIR explicitly in
+`CompileContext`, but the bounded build cap ended before native proof. None is a
+valid replacement for deployed pure-Simple verification.
 
 ## Required fix/evidence
 

@@ -94,10 +94,8 @@ Evidence for absence:
   **zero** kernel-side lookup structures. The only hit is an *aspirational comment*:
   `backend_intel_kernels.spl:132` — "For production use, a glyph atlas would be pre-uploaded to GPU
   memory."
-- A glyph **atlas** exists but is **CPU-side**: `browser_engine/famous_site_glyph_compositor.spl`
-  reads a checked-in atlas file (`test/09_baselines/.../glyph_atlas/arial16_lcd_v1.bin`) and
-  composites ink **on the CPU** (`_load_famous_site_glyph_atlas`, `browser_file_read_bytes`). No
-  atlas is uploaded to device memory; no kernel indexes one.
+- The former browser-private CPU glyph atlas was removed; browser text now owns no parallel
+  compositor path. No browser-private atlas is uploaded to device memory or indexed by a kernel.
 
 Evidence the primitive is **buildable without a seed change**:
 - The MSL kernels already bind multiple device buffers — `buffer(0)` framebuffer, `buffer(1)`
