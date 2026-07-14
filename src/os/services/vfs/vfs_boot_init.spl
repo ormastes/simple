@@ -56,6 +56,8 @@ use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
 use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
 use os.kernel.log.klog_api.{log_raw_println}
 use os.kernel.loader.app_registry.{app_registry_load, app_registry_load_hardcoded_fallback, app_registry_fat32_alias, app_registry_root_alias, app_registry_cached_bytes, app_registry_cache_bytes, app_registry_cache_boot_app_id, app_registry_boot_seed_entries, app_registry_lookup}
+
+val PURE_FAT32_FILE_READ_MAX: u64 = 33554432
 extern fn serial_println(msg: text)
 extern fn rt_text_to_bytes(s: text) -> [u8]
 extern fn rt_time_now_unix_micros() -> i64
@@ -91,6 +93,8 @@ impl BlockDevice for BootNvmeBlockDevice:
         self.sector_size_bytes
 
 var g_adapter: NvmeBlockAdapter = NvmeBlockAdapter.new(g_nvme)
+var g_pure_nvme_root_fat32: Fat32Core = Fat32Core.new(g_adapter)
+var g_pure_nvme_root_fat32_ready: bool = false
 var g_c_adapter: CNvmeBlockAdapter = CNvmeBlockAdapter.new()
 var g_boot_fat32_direct_ready: bool = false
 var g_boot_fat32_bytes_per_sector: u32 = 0u32
@@ -250,6 +254,7 @@ fn _vfs_boot_install_memory_swap() -> text:
 
 fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     """Try the pure-Simple NVMe -> BlockDevice -> FAT32 stack first."""
+    g_pure_nvme_root_fat32_ready = false
     log_raw_println("[vfs-init] Trying pure-Simple NVMe + FAT32 stack...")
     serial_println("[vfs-init] pure-nvme begin")
     val grant_result = pcimgr_grant_device(nvme_idx, 0)
@@ -346,6 +351,15 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
         serial_println("[vfs-init] exec probe failed")
         return false
     g_adapter = adapter
+    g_pure_nvme_root_fat32 = Fat32Core.new(g_adapter)
+    val pure_root_mount = g_pure_nvme_root_fat32.mount("", "")
+    if pure_root_mount.is_ok():
+        g_pure_nvme_root_fat32_ready = true
+        log_raw_println("[vfs-init] shared FAT32 root mounted after direct bootstrap")
+    else:
+        log_raw_println("[vfs-init] shared FAT32 root mount required after direct bootstrap")
+        serial_println("[vfs-init] shared FAT32 root mount failed")
+        return false
     g_root_fat32 = nil
     g_vfs_initialized = true
     g_vfs_boot_storage_provider = "simple-driver"
@@ -907,6 +921,9 @@ fn _vfs_boot_read_short_name_from_dir(start_cluster: u32, short_name: text) -> [
     []
 
 fn _vfs_boot_short_name_for_path(path: text) -> text:
+    val upper = path.upper()
+    if upper.starts_with("/SYS/FONTS/"):
+        return upper.substring(11, upper.len())
     if path == "/VERSION.TXT" or path == "/SYS/VERSION.TXT":
         return "VERSION.TXT"
     if path == "/SYS/NVFSVER.TXT":
@@ -933,7 +950,6 @@ fn _vfs_boot_short_name_for_path(path: text) -> text:
         return "LLVMSMF.SMF"
     if path == "/SYS/APPS/WINHLSMF.SMF":
         return "WINHLSMF.SMF"
-    val upper = path.upper()
     if upper.ends_with("/APPIDX.TXT") or upper == "APPIDX.TXT":
         return "APPIDX.TXT"
     if upper.ends_with("/VERSION.TXT") or upper == "VERSION.TXT":
@@ -949,6 +965,10 @@ fn _vfs_boot_short_name_for_path(path: text) -> text:
     ""
 
 pub fn vfs_boot_read_pure_nvme_fat32_path_bytes(path: text) -> [u8]:
+    if g_pure_nvme_root_fat32_ready:
+        val shared_bytes = _g_vfs_root_read_file_bytes_once(g_pure_nvme_root_fat32, path)
+        if shared_bytes.len() > 0:
+            return shared_bytes
     if not g_boot_fat32_direct_ready:
         return []
     val short_name = _vfs_boot_short_name_for_path(path)
@@ -976,6 +996,13 @@ pub fn vfs_boot_read_pure_nvme_fat32_path_bytes(path: text) -> [u8]:
                 if nested.len() > 0:
                     return nested
         return _vfs_boot_read_short_name_from_dir_raw(g_boot_fat32_root_cluster, short_name)
+    if upper.starts_with("/SYS/FONTS/"):
+        val sys_cluster_fonts = _vfs_boot_find_dirent_cluster(g_boot_fat32_root_cluster, "SYS", true)
+        if sys_cluster_fonts >= 2u32:
+            val fonts_cluster = _vfs_boot_find_dirent_cluster(sys_cluster_fonts, "FONTS", true)
+            if fonts_cluster >= 2u32:
+                return _vfs_boot_read_short_name_from_dir_raw(fonts_cluster, short_name)
+        return []
     if upper.starts_with("/SYS/"):
         val sys_cluster = _vfs_boot_find_dirent_cluster(g_boot_fat32_root_cluster, "SYS", true)
         serial_println("[vfs-init] fat32 sys lookup path={path} cluster={sys_cluster} short={short_name}")
@@ -1953,7 +1980,7 @@ fn _g_vfs_root_read_file_bytes_once(driver: Fat32Core, path: text) -> [u8]:
         log_raw_println("[vfs-root] open_failed path={path}")
         return []
     val handle = open_r.unwrap()
-    val read_r = driver.read(handle, FAT32_PATH_READ_BUFFER_MAX)
+    val read_r = driver.read(handle, PURE_FAT32_FILE_READ_MAX)
     driver.close(handle)
     if read_r.is_err():
         log_raw_println("[vfs-root] read_failed path={path}")

@@ -39,16 +39,21 @@ The production x86_64 entry launches process-owned Browser Demo, Hello World, an
 
 ### Font path
 
-SimpleOS packages the pinned Noto Sans Mono candidate at
-`/assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf` through
-the existing rootfs/initramfs payload contracts. Direct and legacy FAT32 images
-also stage the same verified 1,708,408 bytes at the 8.3-compatible
-`/SYS/FONTS/NOTOSANS.TTF`; the guest treats that path only as a byte source and
-still validates the canonical registry identity. Both VFS paths allow the file
-under their 4 MiB read ceiling. The WM does not own a font renderer: its scene
+SimpleOS rootfs, initramfs, and pure-Simple nested FAT32 builders validate and
+stage all 16 pinned selected candidates under readable registry-owned VFAT long
+names in `/SYS/FONTS`, with unique 8.3 compatibility aliases. The guest treats
+each path only as a byte source and registers the canonical `/assets/fonts/...`
+identity. Pure-Simple FAT32 readers
+use a bounded 32 MiB ceiling, above the largest selected face; the C
+compatibility reader remains bounded at 4 MiB. The WM
+does not own a font renderer: its scene
 carries Draw IR family/identity semantics and the persistent Engine2D owns
 `FontRenderer` materialization. Missing guest file support, an identity mismatch,
 or an unavailable vector runtime retains the fixed bitmap fallback.
+Registered-only complex-script shaping is still unavailable on SimpleOS and
+fails the Browser frame instead of claiming hosted shaping as guest evidence.
+VFAT writing and lookup currently support ASCII long names; nested directories
+chain across clusters, while invalid names and fixed-root overflow fail closed.
 
 Packaging alone is not a font-rendering PASS. The guest paints the fixed `A` at
 32 px and emits its font marker only after hashing live MMIO. The `Capture

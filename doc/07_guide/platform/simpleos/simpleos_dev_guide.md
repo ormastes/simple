@@ -511,9 +511,21 @@ per-platform media is created with:
 sh scripts/os/make_os_disk.shs 64 build/os/fat32-x86_64.img
 ```
 
-That `.shs` entrypoint populates the FAT32 image with host filesystem tools:
-`mtools` is preferred because it works on macOS and Linux without root, and
-Linux loop mount is the fallback.
+That `.shs` entrypoint validates its pinned payloads and invokes the still-live
+C compatibility image writer used by the QEMU/toolchain fixture. The canonical
+nested image path is pure Simple (`src/os/port/disk_image_bake.spl` and
+`src/os/port/disk_image.spl`); it does not require `mtools` or a loop mount.
+The compatibility writer emits the same readable VFAT names and fixed short
+aliases after validating the same pinned font bytes.
+
+Pure-Simple FAT32 supports ASCII VFAT long names for nested files and
+directories. The writer emits checksummed 13-code-unit LFN slots before a
+unique 8.3 alias, grows nested directories across FAT cluster chains, and
+rejects invalid names or fixed-root overflow. On x86_64, the post-bootstrap
+non-optional shared FAT driver must mount after direct bootstrap, then resolves
+LFNs and multi-cluster files first; the raw 8.3 reader remains the early-boot
+fallback. Non-ASCII UTF-16 LFNs are not
+yet supported.
 
 `x64-gpu-2d` routes to
 `examples/09_embedded/simple_os/arch/x86_64/gpu_test_entry.spl`, emits

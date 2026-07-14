@@ -277,17 +277,27 @@ process-global native face at command boundaries; a render-local last-identity
 cache avoids redundant reloads. This serialized ceiling is deliberate; replace
 it only when the native owner supports concurrent faces.
 
-SimpleOS uses the existing selected candidate and verified-byte font facade.
-The same Noto Sans Mono payload must be inserted by the release/QEMU disk C
-builder, `ImageBuilder._populate_root_partition`, initramfs staging, and legacy
-disk bake. The direct FAT32 builder exposes its 8.3 copy as
-`/SYS/FONTS/NOTOSANS.TTF`; the guest retries that byte source under the
-canonical registry identity, and both VFS implementations permit the pinned
-1,708,408-byte payload within their 4 MiB read ceiling. Required guest evidence
-is exact path/length/hash, successful glyph
+SimpleOS uses the selected catalog and verified-byte font facade.
+`ImageBuilder._populate_root_partition`, initramfs staging, and legacy
+pure-Simple nested FAT32 bake must iterate all 16 pinned candidates. Each exact
+blob is stored under its readable registry-owned `/SYS/FONTS` VFAT long name,
+with a unique 8.3 compatibility alias, and registered under the canonical
+repository identity. Pure-Simple FAT32 readers
+use a bounded 32 MiB ceiling, admitting the largest 25,125,512-byte selected
+face; the C compatibility reader remains bounded at 4 MiB. Required guest
+evidence is exact alias/length/hash, successful glyph
 material, WM Draw IR family/identity, and nonblank framebuffer output for Latin
 plus one accepted non-ASCII simple-script witness. Host-repository presence is
 not guest evidence.
+
+The pure-Simple builders and shared LFN reader are canonical. The still-live C
+image writer mirrors the same 16 readable names and fixed short aliases for its
+existing toolchain/evidence payload callers; it does not become a second font
+registry or renderer.
+The writer accepts ASCII VFAT components up to 255 characters, emits standard
+13-code-unit slots and checksums, and sizes nested directory FAT chains from the
+actual slot count. It rejects invalid characters and fixed-root overflow;
+non-ASCII UTF-16 names are outside this slice.
 
 Remaining completion behavior is intentionally narrow:
 
@@ -301,6 +311,9 @@ Remaining completion behavior is intentionally narrow:
   clusters, advances, offsets, language, script, direction, and parallel vector
   lengths agree. Unsupported GSUB/GPOS lookups reject the run rather than
   returning a partial sequence.
+- Registered-only SimpleOS currently cannot obtain hosted shaping handles, so
+  complex-script commands fail closed and make the Browser reject the frame;
+  this is a pending guest capability, not a fallback PASS.
 - Engine3D HUD/world consumes `FontRenderBatch`; promotion requires real
   texture/sampler/pipeline/draw/fence/readback evidence from its chosen backend.
 - SimpleOS validates the staged candidate/hash before boot and checks literal

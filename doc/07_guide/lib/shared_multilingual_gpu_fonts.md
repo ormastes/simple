@@ -473,10 +473,12 @@ and keeps the prior Noto Sans Mono default; explicit multilingual text without
 a family selects the accepted sans face for its language.
 
 The unused famous-site fixture fallback and its browser-private atlas compositor
-were removed; active host web text uses the existing HTML ->
-`DrawIrComposition` -> Engine2D route. Other old framebuffer web paths still
-rasterize 5×7 glyphs even when resolved metrics shape their boxes, so they
-remain compatibility behavior rather than final legacy vector-font parity.
+were removed; active host web text and the production Simple Browser use the
+existing HTML -> `DrawIrComposition` -> Engine2D route. The guest entry registers
+exact validated VFS bytes with the existing `FontRenderer` before layout and
+requires all 16 candidates before rendering; it never calls the browser-private
+software-pixel renderer. Remaining explicitly
+compatibility-only framebuffer fixtures may still rasterize 5×7 glyphs.
 Widget/GUI and shared-WM composition builders use their canonical semantic/scene
 owners. The canonical SimpleOS desktop executes that composition through
 `Engine2dWmFrameExecutor`; canonical ARM64/x86_64 runner/readiness targets now
@@ -489,16 +491,24 @@ direct-compatibility gate, image/motion backgrounds, nested content, and
 rejected-readback retries remain non-completion paths. Do not add a paint-local
 loader, atlas, cache, or private font draw path.
 
-SimpleOS image construction now reuses the exact selected
-`FontAssetCandidate` for Noto Sans Mono. Installer rootfs and initramfs staging
-validate its pinned length and SHA-256 and preserve
-`/assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf`.
-The `mkfs.fat` lane can retain that long path. Direct and legacy FAT32 builders
-stage the same bytes at the 8.3-compatible `/SYS/FONTS/NOTOSANS.TTF`; the guest
-uses that path only as a byte-source fallback and still validates and loads the
-canonical registry identity. The VFS read ceiling is 4 MiB, above the pinned
-1,708,408-byte payload. Packaging and a host-side image hash are not guest
-rendering evidence. The canonical SimpleOS desktop evidence entry paints the
+SimpleOS image construction now iterates the same 16-entry selected candidate
+catalog used by language/category resolution. Installer rootfs, initramfs, and
+pure-Simple nested FAT32 staging validate each exact returned byte array against
+its pinned length and SHA-256, then store it under a readable registry-owned
+VFAT long name in `/SYS/FONTS`, with a unique 8.3 compatibility alias. The
+canonical `/assets/fonts/...` value remains the identity. The pure-Simple image
+writer emits LFN slots and the shared reader resolves them before its raw 8.3
+fallback. Pure-Simple path readers retain a bounded 32 MiB ceiling, above the
+largest pinned 25,125,512-byte face; the C compatibility reader remains at its
+actual 4 MiB bound. The Simple Browser accepts only those validated registered
+bytes and rejects any skipped Draw IR command. Missing or changed assets cannot
+become a selected vector face. Registered-only complex-script shaping remains
+pending because it requires hosted shaping handles and therefore fails closed
+in the guest. Packaging and a host-side image hash are not guest rendering evidence.
+The pure-Simple builders own the canonical path. The still-live C image writer
+mirrors the readable names and fixed short aliases for compatibility with its
+existing toolchain/evidence image callers.
+The canonical SimpleOS desktop evidence entry paints the
 fixed `A`/32 px witness through its Draw IR/Engine2D frame and emits a marker
 only after hashing live MMIO. The fullscreen QEMU wrapper independently hashes
 the dynamic-scanout `pmemsave` crop and retains its artifacts. PASS still

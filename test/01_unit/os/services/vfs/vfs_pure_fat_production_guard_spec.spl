@@ -49,7 +49,25 @@ describe "SimpleOS production FAT purity guard":
         val shared_fat = "SharedFat32" + "Driver"
         val fs_fat = "FsFat32" + "Driver"
         expect(boot_source.contains("use os.services.fat32.shared_fat32_driver.{" + shared_fat + " as Fat32Core}")).to_equal(true)
-        expect(boot_source.contains("boot_nvme_production_handoff_provision(g_adapter, transfer_evidence, lease)\n    var root = Fat32Core.new(g_adapter)")).to_equal(true)
+        expect(boot_source.contains("var g_pure_nvme_root_fat32: Fat32Core = Fat32Core.new(g_adapter)")).to_equal(true)
+        expect(boot_source.contains("var g_pure_nvme_root_fat32_ready: bool = false")).to_equal(true)
+        expect(boot_source.contains("fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:\n    \"\"\"Try the pure-Simple NVMe -> BlockDevice -> FAT32 stack first.\"\"\"\n    g_pure_nvme_root_fat32_ready = false")).to_equal(true)
+        expect(boot_source.contains("g_pure_nvme_root_fat32 = Fat32Core.new(g_adapter)\n    val pure_root_mount = g_pure_nvme_root_fat32.mount(\"\", \"\")")).to_equal(true)
+        expect(boot_source.contains("if pure_root_mount.is_ok():\n        g_pure_nvme_root_fat32_ready = true")).to_equal(true)
+        expect(boot_source.contains("serial_println(\"[vfs-init] shared FAT32 root mount failed\")\n        return false")).to_equal(true)
+        val direct_bootstrap = boot_source.index_of("    if not _vfs_boot_init_direct_fat32_reader_from_addr(boot_shared.cpu_virt_addr):") ?? -1
+        val shared_mount = boot_source.index_of("    g_pure_nvme_root_fat32 = Fat32Core.new(g_adapter)") ?? -1
+        expect(direct_bootstrap).to_be_greater_than(-1)
+        expect(shared_mount).to_be_greater_than(direct_bootstrap)
+        val shared_read = boot_source.index_of("    if g_pure_nvme_root_fat32_ready:") ?? -1
+        val raw_fallback = boot_source.index_of("    if not g_boot_fat32_direct_ready:") ?? -1
+        expect(shared_read).to_be_greater_than(-1)
+        expect(raw_fallback).to_be_greater_than(shared_read)
+        expect(boot_source.contains("_g_vfs_root_read_file_bytes_once(g_pure_nvme_root_fat32, path)")).to_equal(true)
+        expect(boot_source.contains("val short_name = _vfs_boot_short_name_for_path(path)")).to_equal(true)
+        expect(boot_source.contains("if upper.starts_with(\"/SYS/FONTS/\"):")).to_equal(true)
+        expect(boot_source.contains("_vfs_boot_find_dirent_cluster(sys_cluster_fonts, \"FONTS\", true)")).to_equal(true)
+        expect(boot_source.contains("g_root_fat32 = nil")).to_equal(true)
         expect(boot_source.contains("g_vfs_nvme_active_leases = [lease]\n    g_vfs_nvme_direct_adapter_leases = [lease]\n    g_vfs_nvme_direct_adapters = [g_adapter]")).to_equal(true)
         expect(mount_source.contains("use std.fs_driver.fat32_stub.{" + fs_fat + "}")).to_equal(true)
         expect(shared_source.contains("me fn sync() -> Result<bool, text>:")).to_equal(true)

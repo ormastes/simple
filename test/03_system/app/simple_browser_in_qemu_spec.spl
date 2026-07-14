@@ -8,7 +8,7 @@
 # Boots src/os/apps/simple_browser/main.spl directly as a QEMU kernel via
 # native-build --entry-closure (the same proven convention as
 # browser_engine_in_qemu_spec.spl's "browser software smoke ELF" case),
-# and asserts the render marker + PASS/FAIL text on the serial log.
+# and asserts that a kernel with no asset-backed VFS fails closed before paint.
 #
 # This is a direct-kernel-boot smoke gate, NOT the full "/usr/bin/simple-browser
 # staged on a FAT32 disk, SSH-exec'd in ring-3" board gate described in the
@@ -25,11 +25,10 @@ use std.spec
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
 
-val SIMPLE_BIN: text = "src/compiler_rust/target/bootstrap/simple"
+val SIMPLE_BIN: text = "bin/simple"
 val LINKER_SCRIPT: text = "examples/09_embedded/simple_os/arch/x86_64/linker.ld"
 val BUILD_SOURCES_LIB_ONLY: text = "--source src/lib --source src/os"
-val BUILD_PREFIX: text =
-    "SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=\"$(pwd)/src\" PATH=\"/usr/bin:$PATH\" {SIMPLE_BIN} native-build"
+val BUILD_PREFIX: text = "{SIMPLE_BIN} native-build"
 val QEMU_BASE: text =
     "qemu-system-x86_64 -machine q35 -cpu qemu64 -serial stdio -display none -no-reboot"
 val DEBUG_EXIT: text = "-device isa-debug-exit,iobase=0xf4,iosize=0x04"
@@ -56,8 +55,8 @@ fn _run_qemu(kernel: text, memory: text, extra: text, timeout_secs: text) -> tex
 
 describe "Simple Browser in QEMU baremetal ELF execution (direct-kernel-boot smoke gate)":
 
-    it "builds and boots the simple_browser render smoke ELF":
-        val output_path = "build/os/simpleos_simple_browser_soft_32.elf"
+    it "rejects a direct kernel that has no staged font catalog":
+        val output_path = "build/os/simpleos_simple_browser_catalog_guard.elf"
         expect(_build_target(
             "src/os/apps/simple_browser/main.spl",
             output_path
@@ -66,7 +65,9 @@ describe "Simple Browser in QEMU baremetal ELF execution (direct-kernel-boot smo
 
         val output = _run_qemu(output_path, "384M", "-vga std", "15s")
         expect(output.contains("[simple-browser] start")).to_equal(true)
-        expect(output.contains("simple_browser render pid=0 wid=0")).to_equal(true)
-        expect(output.contains("[PASS] simple_browser_entry")).to_equal(true)
-        expect(output.contains("TEST PASSED")).to_equal(true)
-        expect(output.contains("[FAIL]")).to_equal(false)
+        expect(output.contains("font catalog incomplete registered=0 required=16")).to_equal(true)
+        expect(output.contains("simple_browser render pid=0 wid=0")).to_equal(false)
+        expect(output.contains("[PASS] simple_browser_entry")).to_equal(false)
+        expect(output.contains("TEST PASSED")).to_equal(false)
+        expect(output.contains("[FAIL] simple_browser_entry")).to_equal(true)
+        expect(output.contains("TEST FAILED")).to_equal(true)

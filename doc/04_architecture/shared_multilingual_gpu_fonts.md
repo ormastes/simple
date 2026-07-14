@@ -158,13 +158,24 @@ identity/payload fails back to the unchanged bitmap route; paint-only selection
 is forbidden because it would diverge from web wrapping. Legacy WM/GUI/manual
 Draw IR commands without these keys remain byte- and pixel-compatible.
 
-SimpleOS reuses the same `FontAssetCandidate`; it does not define another asset
-record. The first guest face is pinned Noto Sans Mono at
-`/assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf`.
-Release/QEMU disk, installer staging, initramfs, and legacy bake paths must stage
-that exact length/hash through their existing payload contracts. Verified-byte
-loading belongs in the current font facade and must precede WM startup; a guest
-path marker without glyph/framebuffer evidence is not support.
+SimpleOS reuses the same 16 `FontAssetCandidate` records; it does not define
+another asset catalog. Image builders validate every canonical registry
+identity, then store the exact bytes under readable registry-owned VFAT long
+names in `/SYS/FONTS`; unique 8.3 aliases remain compatibility byte sources,
+never alternate identities. The pure-Simple writer emits the LFN slots and the
+shared pure-Simple reader resolves them before the raw 8.3 fallback.
+This writer/reader contract is ASCII VFAT today: nested directories grow by FAT
+cluster chains, while the fixed root cluster rejects more than 16 directory
+slots instead of corrupting data. Non-ASCII UTF-16 LFN support remains pending.
+The production Simple Browser registers those exact VFS bytes with the current
+font facade before Web layout and Engine2D execution and rejects any skipped
+Draw IR command. A guest path marker without glyph/framebuffer evidence is not
+support.
+
+Registered-only SimpleOS rendering currently fails closed for complex-script
+shaping because the shaping owner still requires hosted font handles. Arabic
+and Devanagari commands are skipped and therefore fail the Browser gate; hosted
+Simple shaping support is not evidence of SimpleOS shaping support.
 
 The completion topology keeps all remaining paths on existing owners:
 

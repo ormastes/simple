@@ -4,6 +4,7 @@ use common.text_layout.font_renderer.{
     browser_chrome_compatible_normal_font_path,
     browser_chrome_compatible_vector_font_name,
     CachedGlyph, GlyphCache, FontRenderer, FontRenderBatch, ResolvedFontMetrics, resolve_font_metrics, resolve_font_metrics_with_language,
+    font_renderer_register_selected_bytes,
     browser_font_download_script_path, browser_font_face_source_urls,
     browser_font_face_family_value, browser_font_face_source_from_family_value,
     browser_font_cache_dir, browser_font_face_cached_source_path, ensure_browser_font_face_sources,
@@ -13,7 +14,7 @@ use common.text_layout.font_renderer.{
     _font_atlas_dependency_generation_after, _resolved_font_metric_key, _resolved_font_metrics_cacheable,
     ensure_browser_provided_fonts}
 use common.text_layout.font_provider.{browser_bundled_font_path_for_family}
-use std.common.encoding.font_registry.{selected_font_asset_candidates}
+use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_identity}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_atlas_composite_program_version_valid, font_atlas_subrect_pixels}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use common.text_layout.font_rasterizer.{reset_vector_font_raster_stats, vector_font_accelerator_stats}
@@ -70,6 +71,20 @@ describe "SFFI font liveness":
             batch.atlas_height, quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color)
         expect(sha256_u8_hex(_black_composite_rgb_bytes(pixels))).to_equal("65f5480aa1d19b4496b2f9f45ab0e7a8a0ec9e02c9a9d674879ececa138ff73c")
         renderer.clear_ttf()
+
+    it "registers exact bytes for every selected identity and rejects corruption":
+        val candidates = selected_font_asset_candidates()
+        expect(candidates.len()).to_equal(16)
+        for candidate in candidates:
+            val blob = file_read_bytes(candidate.local_path)
+            var malformed = blob
+            malformed[malformed.len() - 1] = (malformed[malformed.len() - 1].to_i64() ^ 1).to_u8()
+            expect(font_renderer_register_selected_bytes(candidate.local_path, malformed)).to_be(false)
+            expect(font_renderer_register_selected_bytes(candidate.local_path, blob)).to_be(true)
+            var renderer = FontRenderer.new()
+            expect(renderer.try_load_registered_identity(selected_font_asset_identity(candidate))).to_be(true)
+            expect(renderer.current_font_identity()).to_equal(selected_font_asset_identity(candidate))
+            renderer.clear_ttf()
 
 describe "font atlas composite program version":
     it "accepts only version one and stamps every renderer outcome":

@@ -1,38 +1,10 @@
 # Simple Browser — real in-guest entry (Lane BR item 2).
 #
-# Loads an HTML file off the guest VFS and renders it through the same
-# GPU-free software raster path proven on the host in
-# test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_software_no_gpu_spec.spl
-# (`simple_web_layout_render_html_software_pixels`): parse -> CSS cascade ->
-# layout -> paint, directly into a [u32] RGBA framebuffer array. No
-# Electron/Tauri/web backend, no host-GPU import.
+# Loads HTML and pinned font bytes from the guest VFS, then renders through the
+# shared HTML -> Draw IR -> Engine2D path. All pinned staged fonts must validate
+# before rendering; missing or changed catalog bytes fail closed.
 #
-# Deliberately NOT imported here (freestanding-blocking; see the Lane BR
-# tiering report for the traced reason each one is excluded):
-#   - app.ui.browser.{app, backend, ...}        (hosted GUI app: pulls in
-#     nogc_sync_mut.ui.gui_renderer + os.compositor.host_compositor_entry,
-#     the host-window / Electron-Tauri-web GUI stack)
-#   - std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
-#   - std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer
-#   - std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter
-#     (all three transitively `use std.gpu.engine2d.engine.{Engine2D}`, which
-#     unconditionally imports all 11 GPU/compute backends — CUDA, Vulkan,
-#     DirectX, OpenCL, OpenGL, Metal, ROCm, Intel, WebGPU, Qualcomm, plus
-#     backend_emu/backend_baremetal/backend_virtio_gpu. Fine for a hosted
-#     build; not proven freestanding-safe, and unnecessary here since
-#     `simple_web_layout_render_html_software_pixels` already IS the
-#     software raster path and never touches Engine2D on the "software"
-#     backend — see the no-GPU host spec above.)
-#
-# `simple_web_html_layout_renderer.spl`'s own `use` list is exactly
-# common.ui.glyph_bitmap_5x7 / common.ui.draw_ir / common.render_scene.scene
-# (all three have zero further imports) plus 3 externs — rt_time_now_unix_micros,
-# rt_env_get, rt_bytes_to_text — all present in the freestanding runtime
-# (confirmed: rt_env_get is defined in src/runtime/runtime_native.c, which
-# baremetal/kernel builds link; rt_time_now_unix_micros already has a
-# freestanding @export("C") definition in src/os/kernel/net/tls_shim.spl).
-#
-# File loading uses the VFS externs (vfs_open/vfs_read_line/vfs_close,
+# File loading uses the VFS externs (vfs_open/vfs_read_line/vfs_read_all/vfs_close,
 # vfs_create/vfs_write_all) — the same freestanding-shimmed surface
 # coreutils/cat.spl uses — NOT browser_file_ops.spl's rt_file_read_text: on
 # baremetal that extern is a fixed stub that always returns "" (see
@@ -61,13 +33,16 @@
 # gate script for the precise marker.
 
 use os.apps.simple_browser.simple_browser.{simple_browser_render_marker}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
-    simple_web_layout_render_html_software_pixels
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_engine2d_result
 }
+use std.common.encoding.font_registry.{selected_font_asset_candidates, simpleos_font_asset_guest_path, simpleos_font_asset_short_guest_path}
+use std.nogc_sync_mut.text_layout.font_renderer.{font_renderer_register_selected_bytes, font_renderer_use_registered_selected_bytes_only}
 
 extern fn serial_println(msg: text)
 extern fn vfs_open(path: text, flags: i32) -> i64
 extern fn vfs_read_line(handle: i64) -> text
+extern fn vfs_read_all(handle: i64) -> [u8]
 extern fn vfs_close(handle: i64) -> i32
 extern fn vfs_create(path: text, mode: u32) -> i64
 extern fn vfs_write_all(handle: i64, data: [u8]) -> i64
@@ -81,6 +56,9 @@ val SIMPLE_BROWSER_VIEWPORT_W: i32 = 160
 val SIMPLE_BROWSER_VIEWPORT_H: i32 = 120
 val SIMPLE_BROWSER_CAPTURE_PATH: text = "/tmp/simple_browser_fb.ppm"
 val SIMPLE_BROWSER_BG: u32 = 0xFFFFFFFFu32
+# ponytail: one catalog per browser process; add image-generation invalidation
+# only if SimpleOS gains live font package replacement.
+var _staged_font_asset_count: i32 = -1
 
 fn _fallback_html(path: text) -> text:
     "<html><body style='margin:0;background:#ffffff'>" +
@@ -101,6 +79,29 @@ fn _read_file_via_vfs(path: text) -> text?:
         line = vfs_read_line(handle)
     vfs_close(handle)
     text_out.?
+
+fn _read_bytes_via_vfs(path: text) -> [u8]:
+    val guest_path = if path.starts_with("/"): path else: "/" + path
+    val handle = vfs_open(guest_path, _O_RDONLY)
+    if handle < 0:
+        return []
+    val blob = vfs_read_all(handle)
+    vfs_close(handle)
+    blob
+
+fn _register_staged_font_assets() -> i32:
+    if _staged_font_asset_count >= 0:
+        return _staged_font_asset_count
+    font_renderer_use_registered_selected_bytes_only()
+    var registered = 0
+    for candidate in selected_font_asset_candidates():
+        var blob = _read_bytes_via_vfs(simpleos_font_asset_guest_path(candidate))
+        if blob.len() == 0:
+            blob = _read_bytes_via_vfs(simpleos_font_asset_short_guest_path(candidate))
+        if blob.len() > 0 and font_renderer_register_selected_bytes(candidate.local_path, blob):
+            registered = registered + 1
+    _staged_font_asset_count = registered
+    registered
 
 fn _count_non_background_pixels(pixels: [u32], bg: u32) -> i32:
     var count: i32 = 0
@@ -140,26 +141,36 @@ fn _write_capture(path: text, pixels: [u32], width: i32, height: i32) -> bool:
     written == bytes.len() as i64
 
 fn simple_browser_render_page(path: text) -> i32:
-    """Load `path` from the guest VFS, render it through the GPU-free
-    software raster path, capture the framebuffer to a PPM file, and print
-    a render marker. Returns the non-background pixel count (0 = blank /
-    hard failure)."""
+    """Render one guest page through Web Draw IR and Engine2D software."""
     val html = _read_file_via_vfs(path) ?? _fallback_html(path)
-
-    val pixels = simple_web_layout_render_html_software_pixels(
-        html, SIMPLE_BROWSER_VIEWPORT_W, SIMPLE_BROWSER_VIEWPORT_H)
+    val registered_fonts = _register_staged_font_assets()
+    val required_fonts = selected_font_asset_candidates().len() as i32
+    if registered_fonts != required_fonts:
+        serial_println("[simple-browser] font catalog incomplete registered={registered_fonts} required={required_fonts}")
+        return 0
+    val result = simple_web_layout_render_html_engine2d_result(
+        html, SIMPLE_BROWSER_VIEWPORT_W, SIMPLE_BROWSER_VIEWPORT_H, "software")
+    if result.skipped_command_count != 0:
+        serial_println("[simple-browser] Draw IR commands skipped={result.skipped_command_count}")
+        return 0
+    val pixels = result.pixels
+    if pixels.len() != SIMPLE_BROWSER_VIEWPORT_W * SIMPLE_BROWSER_VIEWPORT_H:
+        serial_println("[simple-browser] invalid framebuffer length={pixels.len()}")
+        return 0
     val non_bg = _count_non_background_pixels(pixels, SIMPLE_BROWSER_BG)
     val captured = _write_capture(
         SIMPLE_BROWSER_CAPTURE_PATH, pixels, SIMPLE_BROWSER_VIEWPORT_W, SIMPLE_BROWSER_VIEWPORT_H)
+    if non_bg <= 0 or not captured:
+        serial_println("[simple-browser] render rejected non_bg_pixels={non_bg} capture_ok={captured}")
+        return 0
 
     serial_println(simple_browser_render_marker(0u64, 0u64))
-    serial_println("[simple-browser] page={path} non_bg_pixels={non_bg} capture={SIMPLE_BROWSER_CAPTURE_PATH} capture_ok={captured}")
+    serial_println("[simple-browser] page={path} fonts={registered_fonts} non_bg_pixels={non_bg} capture={SIMPLE_BROWSER_CAPTURE_PATH} capture_ok={captured}")
     non_bg
 
 fn spl_start():
-    """Freestanding entry-closure boot target. See the module doc comment
-    for what this proves (direct-kernel-boot render smoke test) and what it
-    does NOT yet prove (ring-3 userland FS-exec of a Simple-built binary)."""
+    """Freestanding entry; an asset-less direct kernel exercises fail-closed
+    catalog rejection, while a staged SimpleOS VFS may continue to paint."""
     serial_println("[simple-browser] start")
     val non_bg = simple_browser_render_page(SIMPLE_BROWSER_DEFAULT_PAGE_PATH)
     if non_bg > 0:

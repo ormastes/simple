@@ -36,6 +36,18 @@ neither contract is retained production-run evidence.
 6. Render an isolated black `A` and an otherwise identical empty document on
    white 32×24 CPU surfaces; require non-white ink and a pixel difference from
    the empty baseline, preventing command-count or box-paint-only success.
+7. Inspect the production Simple Browser entry and require the shared
+   HTML-to-DrawIR Engine2D helper, exact-byte font registration, and the full
+   selected candidate catalog; reject incomplete registration and the private
+   software-pixel renderer. Require registered-only mode and exact-byte
+   registration to precede the catalog gate, which must precede rendering;
+   reject the frame when the shared executor reports a skipped Draw IR command.
+   Prefer the readable VFAT path and retain the registry-owned short path only
+   for compatibility lookup. Require nonblank pixels and a successful capture
+   before the production Browser emits its render marker.
+8. Require the pure-Simple FAT32 read owners to retain the bounded 32 MiB
+   ceiling needed by the largest pinned 25,125,512-byte selected face, while
+   keeping the C compatibility reader's actual 4 MiB bound explicit.
 
 ## Pass boundary
 
@@ -45,8 +57,11 @@ Engine2D CPU route. The isolated witness also proves that this route produces
 nonblank CPU text pixels rather than only command metadata. The executor selects
 the identity and font size and consumes the serialized advances through the
 canonical `FontRenderer`; accepted shaped runs may also carry handle-free glyph
-IDs, positions, and logical clusters. This scenario still does not prove native
-GPU submission, device readback, or native CPU/GPU pixel parity.
+IDs, positions, and logical clusters. The source contract also proves that the
+Simple Browser registers validated VFS bytes before using that same route; it
+does not replace the pending retained QEMU pixel oracle. This scenario still
+does not prove native GPU submission, device readback, or native CPU/GPU pixel
+parity.
 
 <details>
 <summary>Folded executable detail</summary>

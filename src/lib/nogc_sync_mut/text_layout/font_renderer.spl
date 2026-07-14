@@ -18,7 +18,7 @@ use std.nogc_sync_mut.text_layout.font_advance_layout.{font_batch_apply_advances
 use std.nogc_sync_mut.io.font_sffi.{font_face_ascent, free_font, font_face_identity, font_face_is_live, load_font}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
-use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_language_ranks, selected_font_simple_tuple_accepted}
+use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_language_ranks, selected_font_simple_tuple_accepted}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
 use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
@@ -122,7 +122,65 @@ fn _resolved_font_metric_store(key: text, metrics: ResolvedFontMetrics):
 # so the loaded face stays live for the next node of the same family.
 var _browser_default_font_families: [text] = []
 var _browser_default_font_renderers: [FontRenderer] = []
+var _registered_selected_font_paths: [text] = []
+var _registered_selected_font_blobs: [[u8]] = []
+var _registered_selected_fonts_only: bool = false
 val _browser_default_font_lock: Mutex = mutex_new(0)
+
+fn _registered_selected_font_bytes(path: text) -> ([u8], bool):
+    _browser_default_font_lock.lock()
+    var index: i64 = 0
+    while index < _registered_selected_font_paths.len():
+        if _registered_selected_font_paths[index] == path:
+            val blob = _registered_selected_font_blobs[index]
+            _browser_default_font_lock.unlock(0)
+            return (blob, true)
+        index = index + 1
+    _browser_default_font_lock.unlock(0)
+    ([], false)
+
+fn font_renderer_registered_selected_bytes_only() -> bool:
+    _browser_default_font_lock.lock()
+    val enabled = _registered_selected_fonts_only
+    _browser_default_font_lock.unlock(0)
+    enabled
+
+fn font_renderer_use_registered_selected_bytes_only():
+    """Keep freestanding consumers away from host-only file externs."""
+    _browser_default_font_lock.lock()
+    _registered_selected_fonts_only = true
+    for renderer in _browser_default_font_renderers:
+        renderer.clear_ttf()
+    _browser_default_font_families = []
+    _browser_default_font_renderers = []
+    _browser_default_font_lock.unlock(0)
+    _resolved_font_metric_lock.lock()
+    _resolved_font_metric_keys = []
+    _resolved_font_metric_values = []
+    _resolved_font_metric_cursor = 0
+    _resolved_font_metric_lock.unlock(0)
+
+fn font_renderer_register_selected_bytes(path: text, blob: [u8]) -> bool:
+    """Register exact pinned bytes for producer metrics and executor loading."""
+    val candidate = selected_font_asset_candidate_for_path(path)
+    if candidate == nil:
+        return false
+    var renderer = FontRenderer.new()
+    if not renderer.try_load_selected_bytes(path, blob):
+        return false
+    val identity = renderer.current_font_identity()
+    renderer.clear_ttf()
+    if identity != selected_font_asset_identity(candidate.?):
+        return false
+    _browser_default_font_lock.lock()
+    for registered_path in _registered_selected_font_paths:
+        if registered_path == path:
+            _browser_default_font_lock.unlock(0)
+            return true
+    _registered_selected_font_paths.push(path)
+    _registered_selected_font_blobs.push(blob)
+    _browser_default_font_lock.unlock(0)
+    true
 
 fn _browser_default_for_family_cached(family: text) -> (FontRenderer, bool):
     _browser_default_font_lock.lock()
@@ -352,8 +410,12 @@ class FontRenderer:
 
     static fn browser_default_for_family(family: text) -> FontRenderer:
         var renderer = FontRenderer.new()
+        val registered_only = font_renderer_registered_selected_bytes_only()
         for font_path in browser_font_candidates_for_family(family):
-            if renderer.try_load_runtime_ttf(font_path):
+            val registered = _registered_selected_font_bytes(font_path)
+            if registered.1 and renderer.try_load_selected_bytes(font_path, registered.0):
+                return renderer
+            if not registered_only and renderer.try_load_runtime_ttf(font_path):
                 return renderer
         renderer
 
@@ -401,6 +463,13 @@ class FontRenderer:
 
     me try_load_selected_bytes(ttf_path: text, blob: [u8]) -> bool:
         self._try_install_ttf(FontRasterizer.load_selected_bytes(ttf_path, blob))
+
+    me try_load_registered_identity(identity: text) -> bool:
+        val candidate = selected_font_asset_candidate_for_identity(identity)
+        if candidate == nil:
+            return false
+        val registered = _registered_selected_font_bytes(candidate.?.local_path)
+        registered.1 and self.try_load_selected_bytes(candidate.?.local_path, registered.0)
 
     me clear_ttf():
         val rast = self.ttf_rasterizer
@@ -1158,6 +1227,8 @@ fn _resolved_font_empty_shaped() -> _ResolvedShapedGlyphRun:
 # result leaves the resolver; Draw IR never owns a face handle or atlas data.
 fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: text, font_size: i32, language: text) -> _ResolvedShapedGlyphRun:
     if not selected_font_simple_tuple_accepted(candidate.family, language):
+        return _resolved_font_empty_shaped()
+    if font_renderer_registered_selected_bytes_only():
         return _resolved_font_empty_shaped()
     val decoded = text_codepoints(content)
     if decoded.len() == 0:

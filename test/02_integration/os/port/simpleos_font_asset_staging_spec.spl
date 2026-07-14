@@ -1,6 +1,6 @@
 use std.spec
 use std.io_runtime.{file_read}
-use std.common.encoding.font_registry.{simpleos_default_font_asset_candidate}
+use std.common.encoding.font_registry.{selected_font_asset_candidates, simpleos_default_font_asset_candidate, simpleos_font_asset_guest_path, simpleos_font_asset_short_guest_path, simpleos_font_asset_short_name}
 
 fn expect_simpleos_font_asset():
     val font = simpleos_default_font_asset_candidate()
@@ -10,28 +10,75 @@ fn expect_simpleos_font_asset():
     val image_builder = file_read("src/os/installer/image_builder.spl")
     val initramfs = file_read("src/os/port/initramfs_pack.spl")
     val legacy_bake = file_read("src/os/port/disk_image_bake.spl")
+    val disk_writer = file_read("src/os/port/disk_image.spl")
     val direct_script = file_read("scripts/os/make_os_disk.shs")
     val direct_builder = file_read("scripts/os/make_os_disk.c")
     val guest = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl")
     val vfs = file_read("src/os/services/vfs/vfs_init.spl")
+    val adapter = file_read("src/os/services/vfs/c_nvme_block_adapter.spl")
     val boot_vfs = file_read("src/os/services/vfs/vfs_boot_init.spl")
-    expect(image_builder).to_contain("simpleos_default_font_asset_candidate()")
-    expect(image_builder).to_contain("val font_loaded = load_selected_font_file(font.local_path)")
-    expect(image_builder).to_contain("rt_file_write_bytes(\"{rootfs_root}/\" + font.local_path, font_blob)")
-    expect(image_builder).to_contain("{rootfs_root}/\" + font.local_path")
+    expect(selected_font_asset_candidates().len()).to_equal(16)
+    expect(image_builder).to_contain("for font in selected_font_asset_candidates()")
+    expect(image_builder).to_contain("font_guest_paths.push(simpleos_font_asset_guest_path(font))")
+    expect(image_builder).to_contain("font_blobs.push(loaded.0)")
+    expect(image_builder).to_contain("_ensure_parent_dirs(rootfs_root, font_path)")
+    expect(image_builder).to_contain("rt_file_write_bytes(rootfs_root + font_path, font_blobs[font_index])")
+    expect(image_builder).to_contain("_manifest_file(font_path, \"font-asset\", \"simpleos-core\")")
+    expect(image_builder.contains("rootfs_root, \"/\" + font_path")).to_equal(false)
+    expect(image_builder.contains("{rootfs_root}/\" + font_path")).to_equal(false)
+    expect(initramfs).to_contain("for font in selected_font_asset_candidates()")
     expect(initramfs).to_contain("file_write_bytes(font_dst, font_loaded.0)")
+    expect(legacy_bake).to_contain("for font in selected_font_asset_candidates()")
+    expect(legacy_bake).to_contain("path: simpleos_font_asset_short_name(font)")
     expect(legacy_bake).to_contain("data: font_loaded.0")
-    expect(legacy_bake).to_contain("legacy builder has no long-file-name support")
-    expect(direct_script).to_contain("font_bytes\" != \"1708408")
+    expect(legacy_bake).to_contain("nested_payloads.push(PayloadEntry(")
+    expect(legacy_bake).to_contain("var size_mb: u64 = 128u64")
+    expect(legacy_bake).to_contain("val required_mb = (payload_bytes + 1048575u64) / 1048576u64 + 16u64")
+    expect(legacy_bake.contains("bake_disk_via_mkfs_fat")).to_equal(false)
+    expect(disk_writer).to_contain("fn _build_vfat_lfn_slot(")
+    expect(disk_writer).to_contain("fn _build_named_dir_entry_attr(")
+    expect(disk_writer).to_contain("val dir_cluster_count = cluster_counts[")
+    expect(disk_writer.contains("nested leaf name must be 1-8 chars")).to_equal(false)
+    expect(direct_script).to_contain("validate_font_asset \"$SIMPLEOS_FONT_ASSET_NSANSSC\" 17772300")
+    expect(direct_script).to_contain("validate_font_asset \"$SIMPLEOS_FONT_ASSET_NOTOEMOJ\" 1982596")
+    expect(direct_script).to_contain("if [ \"$size_bits\" -lt 128 ]")
     expect(direct_script).to_contain("shasum -a 256")
     expect(direct_script).to_contain("2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081")
-    expect(direct_builder).to_contain("SIMPLEOS_FONT_ASSET is required")
-    expect(direct_builder).to_contain("SIMPLEOS_FONT_ASSET_PATH=/SYS/FONTS/NOTOSANS.TTF")
-    expect(direct_builder).to_contain("\"NOTOSANSTTF\", font_cluster, font_payload.len")
-    expect(guest).to_contain("g_vfs_read_file_bytes(\"/SYS/FONTS/NOTOSANS.TTF\")")
+    expect(direct_builder).to_contain("FONT_ASSET_COUNT = 16")
+    expect(direct_builder).to_contain("SIMPLEOS_FONT_ASSET_NSANSSC")
+    expect(direct_builder).to_contain("SIMPLEOS_FONT_ASSET_NOTOEMOJ")
+    expect(direct_builder).to_contain("SIMPLEOS_FONT_ASSET_COUNT=16")
+    expect(direct_builder).to_contain("SIMPLEOS_FONT_ASSET_PATH=/SYS/FONTS/NOTOSANS")
+    expect(direct_builder).to_contain("font_long_names[FONT_ASSET_COUNT]")
+    expect(direct_builder).to_contain("NotoSansMono[wdth,wght].ttf")
+    expect(direct_builder).to_contain("put_named_dir_entry(fonts, &fonts_n, font_fat_names[i], font_long_names[i]")
+    expect(guest).to_contain("g_vfs_read_file_bytes(\"/SYS/FONTS/NOTOSANS\")")
+    expect(guest.contains("/SYS/FONTS/NOTOSANS.TTF")).to_equal(false)
     expect(guest).to_contain("if not font_loaded:")
+    expect(vfs).to_contain("FAT32_PATH_READ_BUFFER_MAX: u64 = 33554432")
     expect(vfs).to_contain("driver.read(handle, FAT32_PATH_READ_BUFFER_MAX)")
-    expect(boot_vfs).to_contain("driver.read(handle, FAT32_PATH_READ_BUFFER_MAX)")
+    expect(vfs).to_contain("C_FAT32_PATH_READ_BUFFER_MAX: u64 = 4194304")
+    expect(adapter).to_contain("FAT32_PATH_READ_BUFFER_MAX: u64 = 4194304")
+    expect(boot_vfs).to_contain("PURE_FAT32_FILE_READ_MAX: u64 = 33554432")
+    expect(boot_vfs).to_contain("driver.read(handle, PURE_FAT32_FILE_READ_MAX)")
+
+fn expect_simpleos_font_guest_paths():
+    var paths: [text] = []
+    var short_paths: [text] = []
+    for candidate in selected_font_asset_candidates():
+        val path = simpleos_font_asset_guest_path(candidate)
+        expect(path).to_start_with("/SYS/FONTS/")
+        expect(paths.contains(path)).to_equal(false)
+        paths.push(path)
+        val short_path = simpleos_font_asset_short_guest_path(candidate)
+        expect(short_path).to_start_with("/SYS/FONTS/")
+        expect(short_paths.contains(short_path)).to_equal(false)
+        expect(simpleos_font_asset_short_name(candidate).len()).to_be_less_than(9)
+        short_paths.push(short_path)
+    expect(paths.len()).to_equal(16)
+    expect(short_paths.len()).to_equal(16)
+    expect(paths[8]).to_equal("/SYS/FONTS/NotoSansMono[wdth,wght].ttf")
+    expect(short_paths[8]).to_equal("/SYS/FONTS/NOTOSANS")
 
 describe "SimpleOS pinned font asset staging":
     it "uses the pinned Noto Sans Mono path length and hash":
@@ -40,5 +87,6 @@ describe "SimpleOS pinned font asset staging":
         expect(font.byte_len).to_equal(1708408)
         expect(font.sha256).to_equal("2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081")
 
-    it "stages the same candidate through every Simple image tree builder":
+    it "stages the selected catalog through every Simple image tree builder":
         expect_simpleos_font_asset()
+        expect_simpleos_font_guest_paths()

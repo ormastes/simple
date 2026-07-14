@@ -41,9 +41,10 @@ from their logical handles rather than resource-array positions.
 The checker `expect_simpleos_font_pixel_oracle` requires the pinned Noto Sans
 Mono asset SHA-256, the fixed 18×23 RGB region SHA-256, exactly 1,242 region
 bytes, and `qemu-pmemsave` device origin. The guest now loads registry-validated
-bytes from the canonical image path or the direct builder's 8.3-compatible
-`/SYS/FONTS/NOTOSANS.TTF` byte-source fallback. Both VFS paths use the existing
-4 MiB ceiling, so the pinned 1,708,408-byte payload is not truncated. It paints
+bytes from the canonical image path or the shared extensionless FAT alias
+`/SYS/FONTS/NOTOSANS`. The pure-Simple reader uses a
+32 MiB ceiling and the C compatibility reader uses 4 MiB; both admit this
+pinned 1,708,408-byte payload without truncation. It paints
 the fixed `A`/32 px witness and emits a marker only after hashing live MMIO. The
 fullscreen wrapper independently hashes a dynamic-scanout
 `pmemsave` crop and retains serial, raw/PPM, capture output, and region digest.

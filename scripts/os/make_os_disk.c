@@ -455,6 +455,33 @@ static void maybe_write_esp(const char *img_path, const struct bytes *bootloader
 
 int main(int argc, char **argv)
 {
+    enum { FONT_ASSET_COUNT = 16 };
+    static const char *font_env_names[FONT_ASSET_COUNT] = {
+        "SIMPLEOS_FONT_ASSET_NSANSSC", "SIMPLEOS_FONT_ASSET_NSANSDEV",
+        "SIMPLEOS_FONT_ASSET_NSANSARB", "SIMPLEOS_FONT_ASSET_NSANSBEN",
+        "SIMPLEOS_FONT_ASSET_NSERIFSC", "SIMPLEOS_FONT_ASSET_NSERFDEV",
+        "SIMPLEOS_FONT_ASSET_NNASKHAR", "SIMPLEOS_FONT_ASSET_NSERFBEN",
+        "SIMPLEOS_FONT_ASSET_NOTOSANS", "SIMPLEOS_FONT_ASSET_BUNGEE",
+        "SIMPLEOS_FONT_ASSET_NUNITO", "SIMPLEOS_FONT_ASSET_CAVEAT",
+        "SIMPLEOS_FONT_ASSET_ROBOSLAB", "SIMPLEOS_FONT_ASSET_UNIFRAKT",
+        "SIMPLEOS_FONT_ASSET_PIXELIFY", "SIMPLEOS_FONT_ASSET_NOTOEMOJ"
+    };
+    static const char *font_fat_names[FONT_ASSET_COUNT] = {
+        "NSANSSC    ", "NSANSDEV   ", "NSANSARB   ", "NSANSBEN   ",
+        "NSERIFSC   ", "NSERFDEV   ", "NNASKHAR   ", "NSERFBEN   ",
+        "NOTOSANS   ", "BUNGEE     ", "NUNITO     ", "CAVEAT     ",
+        "ROBOSLAB   ", "UNIFRAKT   ", "PIXELIFY   ", "NOTOEMOJ   "
+    };
+    static const char *font_long_names[FONT_ASSET_COUNT] = {
+        "NotoSansSC[wght].ttf", "NotoSansDevanagari[wdth,wght].ttf",
+        "NotoSansArabic[wdth,wght].ttf", "NotoSansBengali[wdth,wght].ttf",
+        "NotoSerifSC[wght].ttf", "NotoSerifDevanagari[wdth,wght].ttf",
+        "NotoNaskhArabic[wght].ttf", "NotoSerifBengali[wdth,wght].ttf",
+        "NotoSansMono[wdth,wght].ttf", "Bungee-Regular.ttf",
+        "Nunito[wght].ttf", "Caveat[wght].ttf",
+        "RobotoSlab[wght].ttf", "UnifrakturCook-Bold.ttf",
+        "PixelifySans[wght].ttf", "NotoEmoji[wght].ttf"
+    };
     if (argc != 5)
         die("usage: make_os_disk IMAGE PLATFORM SIZE_BITS KERNEL");
     const char *img_path = argv[1];
@@ -509,12 +536,19 @@ int main(int argc, char **argv)
     struct bytes hello_object_payload = read_file(getenv("SIMPLEOS_HELLO_OBJECT"));
     struct bytes hello_ir_payload = read_file(getenv("SIMPLEOS_HELLO_IR"));
     struct bytes fsexec_payload = read_file(getenv("SIMPLEOS_FSEXEC_BINARY"));
-    const char *font_asset_path = getenv("SIMPLEOS_FONT_ASSET");
-    if (!font_asset_path || font_asset_path[0] == '\0')
-        die("SIMPLEOS_FONT_ASSET is required");
-    struct bytes font_payload = read_file(font_asset_path);
-    if (!font_payload.len)
-        die("SIMPLEOS_FONT_ASSET could not be read");
+    struct bytes font_payloads[FONT_ASSET_COUNT];
+    for (int i = 0; i < FONT_ASSET_COUNT; ++i) {
+        const char *font_asset_path = getenv(font_env_names[i]);
+        if (!font_asset_path || font_asset_path[0] == '\0') {
+            fprintf(stderr, "%s is required\n", font_env_names[i]);
+            return 1;
+        }
+        font_payloads[i] = read_file(font_asset_path);
+        if (!font_payloads[i].len) {
+            fprintf(stderr, "%s could not be read\n", font_env_names[i]);
+            return 1;
+        }
+    }
     struct bytes cfat4k = read_cfat4k_baseline();
     struct bytes kernel = kernel_file.len ? kernel_file : text_bytes("SIMPLEOS_UEFI_KERNEL_MISSING\n");
     struct bytes bootloader = bootloader_file.len ? bootloader_file : text_bytes("SIMPLEOS_UEFI_BOOTLOADER_MISSING\n");
@@ -549,7 +583,7 @@ int main(int argc, char **argv)
         "/usr/share/simpleos/toolchain/llvm/hello.ll\n/usr/bin/simple status=standalone-required\n/sys/apps/simple status=standalone-required\n/sys/apps/simple_compiler status=standalone-required\n/sys/apps/simple_interpreter status=standalone-required\n/sys/apps/simple_loader status=standalone-required\n/sys/apps/llvm status=standalone-required\n"
         "/sys/apps/clang status=standalone-required\n/sys/apps/rust status=standalone-required\nSimpleOS LLVM standalone app v1\nclang version 20.0.0\nSimpleOS Rust standalone app v1\n"
         "/usr/share/simpleos/toolchain/llvm/pipeline.step\n/usr/share/simpleos/toolchain/clang/pipeline.step\n/usr/share/simpleos/toolchain/rust/pipeline.step\n"
-        "SIMPLEOS_FONT_ASSET_PATH=/SYS/FONTS/NOTOSANS.TTF\n",
+        "SIMPLEOS_FONT_ASSET_COUNT=16\nSIMPLEOS_FONT_ASSET_PATH=/SYS/FONTS/NOTOSANS\n",
         lane, lane, platform);
 
     struct bytes llvm_manifest = textf("[toolchain]\napp=llvm\ntitle=LLVM\ntool=/sys/apps/llvm\nlane=%s\nmode=native-filesystem-app\nstatus=standalone-required\ncapability_primary=local-ir-inspection\nproof_primary=/usr/share/simpleos/toolchain/llvm/hello.ll\ncapability_secondary=object-assembly-inspection\nproof_secondary=/usr/share/simpleos/toolchain/llvm/hello.s\npipeline=compile-pipeline-step\nproof_pipeline=/usr/share/simpleos/toolchain/llvm/pipeline.step\n", lane);
@@ -630,7 +664,9 @@ int main(int argc, char **argv)
     int hello_object_cluster = hello_object_payload.len ? alloc_clusters(hello_object_payload.data, hello_object_payload.len) : 0;
     int hello_ir_cluster = hello_ir_payload.len ? alloc_clusters(hello_ir_payload.data, hello_ir_payload.len) : 0;
     int fsexec_cluster = fsexec_payload.len ? alloc_clusters(fsexec_payload.data, fsexec_payload.len) : 0;
-    int font_cluster = font_payload.len ? alloc_clusters(font_payload.data, font_payload.len) : 0;
+    int font_clusters[FONT_ASSET_COUNT];
+    for (int i = 0; i < FONT_ASSET_COUNT; ++i)
+        font_clusters[i] = alloc_clusters(font_payloads[i].data, font_payloads[i].len);
     int llvm_cluster = alloc_clusters(llvm_app.data, llvm_app.len);
     int clang_cluster = alloc_clusters(clang_app.data, clang_app.len);
     int rust_cluster = alloc_clusters(rust_app.data, rust_app.len);
@@ -667,10 +703,10 @@ int main(int argc, char **argv)
     put_dir_entry(boot, &boot_n, "BOOTX64 EFI", bootloader_cluster, bootloader.len, 0x20);
     put_dir_entry(sys, &sys_n, "APPS       ", apps_cluster, 0, 0x10);
     put_dir_entry(sys, &sys_n, "PERF       ", perf_cluster, 0, 0x10);
-    if (font_cluster) {
-        put_dir_entry(sys, &sys_n, "FONTS      ", fonts_cluster, 0, 0x10);
-        put_dir_entry(fonts, &fonts_n, "NOTOSANSTTF", font_cluster, font_payload.len, 0x20);
-    }
+    put_dir_entry(sys, &sys_n, "FONTS      ", fonts_cluster, 0, 0x10);
+    for (int i = 0; i < FONT_ASSET_COUNT; ++i)
+        put_named_dir_entry(fonts, &fonts_n, font_fat_names[i], font_long_names[i],
+                            font_clusters[i], font_payloads[i].len, 0x20);
     put_dir_entry(sys, &sys_n, "NVFSVER TXT", nvfs_cluster, nvfs.len, 0x20);
     put_dir_entry(sys, &sys_n, "TOOLSET SDN", toolset_cluster, toolset.len, 0x20);
     if (simple_tool_manifest_cluster)

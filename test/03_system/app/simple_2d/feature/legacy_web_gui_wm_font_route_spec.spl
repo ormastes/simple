@@ -21,6 +21,8 @@ use std.gc_async_mut.gpu.browser_engine.web_render_backend.{WebRenderBackend}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult, engine2d_draw_ir_adv_composition}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 
+extern fn rt_file_read_text(path: text) -> text
+
 fn _text_command(composition: DrawIrComposition, value: text) -> DrawIrCommand:
     var match_count = 0
     for batch in composition.batches:
@@ -167,3 +169,33 @@ describe "legacy Web GUI and WM shared font route":
         expect(ink_result.pixels.len()).to_equal(32 * 24)
         expect(_count_not_color(ink_result.pixels, 0xffffffffu32)).to_be_greater_than(0)
         expect(_count_pixel_differences(ink_result.pixels, blank_result.pixels)).to_be_greater_than(0)
+
+        step("Check the production Simple Browser uses the same DrawIR route")
+        val browser_source = rt_file_read_text("src/os/apps/simple_browser/main.spl")
+        expect(browser_source).to_contain("simple_web_layout_render_html_engine2d_result")
+        expect(browser_source).to_contain("font_renderer_register_selected_bytes")
+        expect(browser_source).to_contain("selected_font_asset_candidates()")
+        expect(browser_source).to_contain("simpleos_font_asset_short_guest_path(candidate)")
+        expect(browser_source).to_contain("if registered_fonts != required_fonts")
+        expect(browser_source).to_contain("if result.skipped_command_count != 0")
+        expect(browser_source).to_contain("if non_bg <= 0 or not captured")
+        expect(browser_source.contains("simple_web_layout_render_html_software_pixels")).to_equal(false)
+        val mode_pos = browser_source.index_of("    font_renderer_use_registered_selected_bytes_only()") ?? -1
+        val register_pos = browser_source.index_of("font_renderer_register_selected_bytes(candidate.local_path, blob)") ?? -1
+        val catalog_pos = browser_source.index_of("if registered_fonts != required_fonts") ?? -1
+        val render_pos = browser_source.index_of("    val result = simple_web_layout_render_html_engine2d_result(") ?? -1
+        val capture_gate_pos = browser_source.index_of("    if non_bg <= 0 or not captured:") ?? -1
+        val marker_pos = browser_source.index_of("    serial_println(simple_browser_render_marker(") ?? -1
+        expect(mode_pos).to_be_greater_than(-1)
+        expect(register_pos).to_be_greater_than(mode_pos)
+        expect(catalog_pos).to_be_greater_than(register_pos)
+        expect(render_pos).to_be_greater_than(catalog_pos)
+        expect(capture_gate_pos).to_be_greater_than(render_pos)
+        expect(marker_pos).to_be_greater_than(capture_gate_pos)
+
+        val vfs_source = rt_file_read_text("src/os/services/vfs/vfs_init.spl")
+        val adapter_source = rt_file_read_text("src/os/services/vfs/c_nvme_block_adapter.spl")
+        val boot_vfs_source = rt_file_read_text("src/os/services/vfs/vfs_boot_init.spl")
+        expect(vfs_source).to_contain("FAT32_PATH_READ_BUFFER_MAX: u64 = 33554432")
+        expect(adapter_source).to_contain("FAT32_PATH_READ_BUFFER_MAX: u64 = 4194304")
+        expect(boot_vfs_source).to_contain("PURE_FAT32_FILE_READ_MAX: u64 = 33554432")
