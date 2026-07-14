@@ -317,7 +317,7 @@ describe "Engine2D embedded render surface":
             expect(fallback_result.rendered_command_count).to_equal(1)
             fallback_parent.shutdown()
 
-        it "uses the Vulkan device path only for preflighted full-target compositions":
+        it "uses the Vulkan device path only for preflighted root and named-child compositions":
             val embedding = draw_ir_embedding_config("surf-device", "win-device", 0, 0, 3, 1, 0, 1000, true)
             val batch = draw_ir_batch("batch-device", "gpu", embedding, [
                 draw_ir_rect("device-background", 0, 0, 3, 1, BG),
@@ -382,6 +382,52 @@ describe "Engine2D embedded render surface":
                     scaled_engine.shutdown()
             scaled_cpu.shutdown()
 
+            val blend_bg = rgb(20, 40, 60)
+            val half_source = rgba(220, 100, 40, 128)
+            val zero_source = rgba(7, 211, 99, 0)
+            step("Blend transparent scaled IMAGE in the full-target named-surface bypass")
+            val scaled_blend_full = draw_ir_embedding_config("surf-scaled-blend-full", "scaled-blend-full", 0, 0, 3, 1, 0, 1000, true)
+            val scaled_blend_full_batch = draw_ir_batch("batch-scaled-blend-full", "cpu", scaled_blend_full, [
+                draw_ir_rect("scaled-blend-full-background", 0, 0, 3, 1, blend_bg),
+                draw_ir_image_command("scaled-blend-full-image", 0, 0, 3, 1, "image://scaled-blend", [])
+            ])
+            val scaled_blend_full_composition = draw_ir_composition("scaled-blend-full-composition", "cpu-scene", "cpu", [scaled_blend_full_batch])
+            val scaled_blend_image = engine2d_resolved_draw_ir_image("image://scaled-blend", 2, 1, [half_source, zero_source])
+            var scaled_blend_full_cpu = Engine2D.create_with_backend(3, 1, "cpu")
+            val scaled_blend_full_result = engine2d_draw_ir_adv_composition_with_images(scaled_blend_full_cpu, scaled_blend_full_composition, false, [scaled_blend_image])
+            expect(scaled_blend_full_result.pixels).to_equal([rgba(120, 70, 49, 255), rgba(120, 70, 49, 255), blend_bg])
+            scaled_blend_full_cpu.shutdown()
+
+            step("Scale transparent IMAGE pixels through Vulkan src-over with CPU-oracle parity")
+            val scaled_blend_root = draw_ir_embedding_config("surf-scaled-blend-root", "scaled-blend-root", 0, 0, 4, 1, 0, 1000, true)
+            val scaled_blend_child = draw_ir_embedding_config("surf-scaled-blend-child", "scaled-blend-child", 1, 0, 3, 1, 0, 1000, true)
+            val scaled_blend_batch = draw_ir_batch("batch-scaled-blend", "gpu", scaled_blend_child, [
+                draw_ir_rect("scaled-blend-background", 0, 0, 3, 1, blend_bg),
+                draw_ir_image_command("scaled-blend-image", 0, 0, 3, 1, "image://scaled-blend", [])
+            ])
+            val scaled_blend_composition = draw_ir_composition("scaled-blend-composition", "device-scene", "gpu", [
+                draw_ir_batch("batch-scaled-blend-root", "gpu", scaled_blend_root, [draw_ir_rect("scaled-blend-root-background", 0, 0, 4, 1, BG)]),
+                scaled_blend_batch
+            ])
+            val scaled_blend_oracle = [BG, rgba(120, 70, 49, 255), rgba(120, 70, 49, 255), blend_bg]
+            var scaled_blend_cpu = Engine2D.create_with_backend(4, 1, "cpu")
+            val scaled_blend_expected = engine2d_draw_ir_adv_fresh_device_composition_with_images(scaled_blend_cpu, scaled_blend_composition, [scaled_blend_image])
+            expect(scaled_blend_expected.pixels).to_equal(scaled_blend_oracle)
+            match Engine2D.create_requested_backend(4, 1, "vulkan"):
+                Err(reason):
+                    expect(reason.len()).to_be_greater_than(0)
+                Ok(scaled_blend_engine):
+                    val scaled_blend_result = engine2d_draw_ir_adv_fresh_device_composition_with_images(scaled_blend_engine, scaled_blend_composition, [scaled_blend_image])
+                    expect(scaled_blend_result.readback_source).to_equal("device_readback")
+                    expect(scaled_blend_result.backend_handle).to_be_greater_than(0)
+                    expect(scaled_blend_result.fallback_required).to_be(false)
+                    expect(scaled_blend_result.rendered_command_count).to_equal(3)
+                    expect(scaled_blend_result.skipped_command_count).to_equal(0)
+                    expect(scaled_blend_result.pixels).to_equal(scaled_blend_oracle)
+                    expect(scaled_blend_result.pixels).to_equal(scaled_blend_expected.pixels)
+                    scaled_blend_engine.shutdown()
+            scaled_blend_cpu.shutdown()
+
             val clipped_root = draw_ir_embedding_config("surf-clipped-root", "clipped-root", 0, 0, 3, 3, 0, 1000, true)
             val clipped_child = draw_ir_embedding_config("surf-clipped-child", "clipped-child", 1, 1, 1, 1, 0, 1000, true)
             val clipped_composition = draw_ir_composition("clipped-composition", "device-scene", "gpu", [
@@ -421,15 +467,18 @@ describe "Engine2D embedded render surface":
             expect(opacity_result.backend_handle).to_equal(0)
             opacity_engine.shutdown()
 
-            val first_transparent_batch = draw_ir_batch("first-transparent", "gpu", exact_embedding, [
-                draw_ir_image_command("first-transparent", 0, 0, 2, 1, "image://first-transparent", [])
+            val first_transparent_batch = draw_ir_batch("first-transparent", "gpu", scaled_embedding, [
+                draw_ir_image_command("first-transparent", 0, 0, 3, 1, "image://first-transparent", [])
             ])
             val first_transparent_composition = draw_ir_composition("first-transparent", "device-scene", "gpu", [first_transparent_batch])
             val first_transparent_image = engine2d_resolved_draw_ir_image("image://first-transparent", 2, 1, [GREEN, rgba(0, 255, 0, 0)])
-            var first_transparent_engine = Engine2D.create_with_backend(2, 1, "cpu")
+            var first_transparent_engine = Engine2D.create_with_backend(3, 1, "cpu")
             val first_transparent_result = engine2d_draw_ir_adv_fresh_device_composition_with_images(first_transparent_engine, first_transparent_composition, [first_transparent_image])
             expect(first_transparent_result.readback_source).to_equal("preflight_rejected")
             expect(first_transparent_result.rendered_command_count).to_equal(0)
+            expect(first_transparent_result.skipped_command_count).to_equal(1)
+            expect(first_transparent_result.pixels.len()).to_equal(0)
+            expect(first_transparent_result.backend_handle).to_equal(0)
             first_transparent_engine.shutdown()
 
             val partial_embedding = draw_ir_embedding_config("surf-partial", "win-partial", 1, 1, 2, 1, 0, 1000, true)

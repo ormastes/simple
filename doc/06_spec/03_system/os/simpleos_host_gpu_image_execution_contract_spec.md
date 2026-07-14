@@ -12,8 +12,8 @@
 - Require a full-target opaque RECT or IMAGE to initialize fresh device memory.
 - Admit bounded smaller surfaces only with a real embedding ID. A Vulkan
   parent retains its session into a transparent per-surface framebuffer.
-- Admit exact IMAGE commands plus bounded opaque nearest-neighbor scaling,
-  including opaque images clipped by a bounded named child surface, resolved
+- Admit exact IMAGE commands plus bounded nearest-neighbor COPY and transparent
+  src-over after opaque initialization, including opaque images clipped by a bounded named child surface, resolved
   TEXT, metadata-only WM RECT styles, and
   one nonzero-alpha first RECT that initializes a fresh transparent child after
   target/clip, font identity, glyph material, and framebuffer-area work
@@ -24,8 +24,8 @@
   Vulkan src-over path; opaque RECTs retain the direct rect kernel.
 - Read each Vulkan child before present, require device provenance, then apply
   embedding opacity through the checked parent Vulkan blend and release it.
-- Reject unresolved, malformed, scaled-transparent, effect-styled, unsupported,
-  unbounded scaled work, source/index arithmetic beyond the checked Vulkan
+- Reject unresolved, malformed, effect-styled, unsupported, unbounded scaled
+  work, source/index arithmetic beyond the checked Vulkan
   shader limits, or target-disjoint work before promotion. Clipping never
   admits an empty intersection or an unnamed child.
 - Require device readback, a positive backend handle, and zero skipped commands
@@ -41,7 +41,7 @@
 ### Standalone and session backends share the validated shader
 
 - Compile `spirv_blit()` in both Vulkan initialization paths.
-- Keep the checked exact and nearest-neighbor scaled IMAGE route common to both
+- Keep the checked exact and nearest-neighbor scaled IMAGE COPY/src-over route common to both
   paths with source dimensions in the validated 15-word/60-byte field layout
   inside the existing 64-byte push payload.
 

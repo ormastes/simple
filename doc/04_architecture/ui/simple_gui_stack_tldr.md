@@ -87,8 +87,8 @@ Host input
   Draw IR through Engine2D with CPU fallback metadata and pixel readback.
   URI-only image commands fail closed until resolved-image input is supplied;
   the advanced path renders caller-provided resolved ARGB buffers, including
-  opaque Vulkan nearest-neighbor scaling, but does not decode PNG, JPEG, or
-  WebP bytes. Transparent scaled-over-existing-content work fails closed.
+  Vulkan nearest-neighbor COPY and checked transparent src-over after opaque
+  initialization, but does not decode PNG, JPEG, or WebP bytes.
 - Engine2D split contract: `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl`.
 - No-GC Draw IR runtime queue owner:
   `src/lib/nogc_async_mut/gpu/engine2d/draw_ir_runtime_queue.spl`.

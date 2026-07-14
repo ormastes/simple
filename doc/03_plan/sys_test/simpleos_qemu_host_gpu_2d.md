@@ -16,7 +16,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 | negotiate one bounded architecture-neutral protocol | REQ-001,002,005 |
 | exact device-backed Draw IR readback | REQ-003,006 |
 | checked raw Vulkan CLEAR/RECT completion and fail-closed provenance | REQ-003,005,006,010 |
-| clipped transparent IMAGE src-over parity and device provenance | REQ-003,005,006,010 |
+| clipped and nearest-neighbor-scaled transparent IMAGE src-over parity and device provenance | REQ-003,005,006,010 |
 | opaque full-target initialization plus shared-session offset/opacity-930 WM surface admission | REQ-003,005,006,010 |
 | strict native Metal creation, transparent device bootstrap, shared-session composite, and exact identity | REQ-003,005,006,008,010 |
 | production x86 active-VMM mapping, idle-generation submission, validated MMIO presentation, and local fallback | REQ-002,003,005,006,009,010 |
@@ -130,8 +130,8 @@ The same boundary composites one partially offscreen transparent IMAGE through
 an active clip and requires exact `SoftwareBackend` parity plus device-only
 readback provenance.
 The embedded-surface integration boundary admits an opaque full-target RECT
-followed by a transparent exact IMAGE and requires device readback, positive
-handle, exact pixels, and no fallback. It also projects a canonical unfocused
+followed by transparent exact and scaled IMAGE work and requires device readback,
+positive handle, absolute CPU-oracle pixels, and no fallback. It also projects a canonical unfocused
 WM window at opacity 930, renders its smaller offset surface through the
 parent's retained Vulkan or Metal session, and requires exact CPU parity plus
 final device provenance. Metal absence is an explicit unavailable branch;

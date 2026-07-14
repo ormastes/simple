@@ -48,8 +48,8 @@ that default entry honestly local without downscale or crop.
 Exact-size opaque IMAGE work may cross a bounded named child edge: the existing
 Vulkan COPY shader clips it to that child without changing DrawIR semantics.
 Opaque scaled IMAGE work uses the same checked Vulkan shader with CPU-matching
-nearest-neighbor sampling. Transparent-over-existing-child offload and fresh
-compiler/QEMU proof remain TODO 549.
+nearest-neighbor sampling. After opaque initialization, transparent scaled work
+uses that shader's checked src-over mode. Fresh compiler/QEMU proof remains TODO 549.
 Titled-window DrawIR surfaces include only the positive shadow offsets that fit
 inside the scene; body, content, hit, and layout bounds retain window geometry.
 This source path is not compile-verified while TODO 548 blocks the pure-Simple

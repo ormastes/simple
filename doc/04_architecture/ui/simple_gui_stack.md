@@ -268,10 +268,11 @@ chrome, taskbar, and visible windows into ordered Draw IR batches keyed by
 `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl`; it executes supported
 `rect`, `text`, and caller-resolved `image` Draw IR commands through the
 existing Engine2D facade, presents the completed composition, and returns
-readback pixels plus CPU/GPU fallback metadata. Resolved opaque IMAGE commands
-may use destination dimensions distinct from their source and lower through
-the same checked Vulkan blit with CPU-matching nearest-neighbor sampling;
-transparent scaled-over-existing-content work remains fail-closed. SimpleOS x86_64, AArch64, and
+readback pixels plus CPU/GPU fallback metadata. Resolved IMAGE commands may use
+destination dimensions distinct from their source and lower through the same
+checked Vulkan blit with CPU-matching nearest-neighbor sampling; non-opaque
+scaled work uses the existing checked src-over mode after opaque initialization.
+SimpleOS x86_64, AArch64, and
 RV64 canonical boot-desktop source frames enter through
 `src/os/compositor/engine2d_wm_frame_executor.spl`; invalid
 or duplicate top-level `WmContentFrame` resources fail closed, and nested IMAGE

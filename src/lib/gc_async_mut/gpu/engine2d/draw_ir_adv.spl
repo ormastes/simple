@@ -298,13 +298,13 @@ fn _engine2d_draw_ir_fresh_device_command_supported(command: DrawIrCommand, imag
     val exact_size = command.width == image.width and command.height == image.height
     val source_work = image.width.to_i64() * image.height.to_i64()
     val scaled_work = command.width.to_i64() * command.height.to_i64()
-    val scaled_work_bounded = scaled_work <= width.to_i64() * height.to_i64()
+    val scaled_work_bounded = scaled_work <= width.to_i64() * height.to_i64() and scaled_work <= 2147483647
     val native_index_bounded = (source_work <= 4294967295 and
         (command.width.to_i64() - 1) * image.width.to_i64() <= 2147483647 and
         (command.height.to_i64() - 1) * image.height.to_i64() <= 2147483647)
     _engine2d_draw_ir_valid_resolved_image(image) and
         native_index_bounded and
-        (exact_size or (_engine2d_draw_ir_image_is_opaque(image) and scaled_work_bounded))
+        (exact_size or scaled_work_bounded)
 
 fn _engine2d_draw_ir_fresh_device_initializes_target(command: DrawIrCommand, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32) -> bool:
     if command.x != 0 or command.y != 0 or command.width != width or command.height != height:
@@ -520,8 +520,11 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
             val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
             if image_index >= 0 and _engine2d_draw_ir_valid_resolved_image(images[image_index]):
                 val image = images[image_index]
-                if blend_images and command.width == image.width and command.height == image.height:
-                    eng.draw_image_blend(x, y, image.width, image.height, image.pixels)
+                if blend_images and not _engine2d_draw_ir_image_is_opaque(image):
+                    if command.width == image.width and command.height == image.height:
+                        eng.draw_image_blend(x, y, image.width, image.height, image.pixels)
+                    else:
+                        eng.draw_image_scaled_blend(x, y, command.width, command.height, image.width, image.height, image.pixels)
                 else:
                     eng.draw_image_scaled(x, y, command.width, command.height, image.width, image.height, image.pixels)
                 rendered = rendered + 1
@@ -574,7 +577,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         val apply_clip = embedding.clip and not fills_target_exactly
         if apply_clip:
             eng.set_clip(embedding.x, embedding.y, embedding.width, embedding.height)
-        val direct = _engine2d_draw_ir_render_commands(eng, batch.commands, embedding.x, embedding.y, images, allow_parent_image)
+        val blend_images = allow_parent_image or (embedding.surface_id != "" and fills_target_exactly)
+        val direct = _engine2d_draw_ir_render_commands(eng, batch.commands, embedding.x, embedding.y, images, blend_images)
         eng = direct.0
         if apply_clip:
             eng.clear_clip()
@@ -597,7 +601,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                 offscreen = created
     else:
         offscreen = Engine2D.create_offscreen(embedding.width, embedding.height)
-    val inner = _engine2d_draw_ir_render_commands(offscreen, batch.commands, 0, 0, images, false)
+    val inner = _engine2d_draw_ir_render_commands(offscreen, batch.commands, 0, 0, images, true)
     offscreen = inner.0
     var composited = true
     if eng.backend_name() == "vulkan":

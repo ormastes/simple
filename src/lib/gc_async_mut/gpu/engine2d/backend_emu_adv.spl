@@ -19,20 +19,49 @@ use std.gpu.engine2d.backend_emu_math.{_emu_min, _emu_max, _emu_overlay_ch}
 # Scaled Image — Nearest-neighbor resample
 # ============================================================================
 
-fn emu_draw_image_scaled(mut core: RenderBackend, dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
-    if dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0:
-        return
-    var result: [u32] = [0u32; dst_w * dst_h]
+fn _emu_scale_image_pixels(dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]) -> [u32]:
+    val src_count = src_w.to_i64() * src_h.to_i64()
+    val dst_count = dst_w.to_i64() * dst_h.to_i64()
+    if (dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0 or
+        src_count <= 0 or pixels.len().to_i64() != src_count or
+        dst_count <= 0 or dst_count > 2147483647 or
+        (dst_w.to_i64() - 1) * src_w.to_i64() > 2147483647 or
+        (dst_h.to_i64() - 1) * src_h.to_i64() > 2147483647):
+        return []
+    var result: [u32] = [0u32; dst_count]
     var dy: i32 = 0
     while dy < dst_h:
-        val sy = dy * src_h / dst_h
+        val sy = dy.to_i64() * src_h.to_i64() / dst_h.to_i64()
         var dx: i32 = 0
         while dx < dst_w:
-            val sx = dx * src_w / dst_w
-            result[dy * dst_w + dx] = pixels[sy * src_w + sx]
+            val sx = dx.to_i64() * src_w.to_i64() / dst_w.to_i64()
+            val dst_index = dy.to_i64() * dst_w.to_i64() + dx.to_i64()
+            val src_index = sy * src_w.to_i64() + sx
+            result[dst_index] = pixels[src_index]
             dx = dx + 1
         dy = dy + 1
+    result
+
+fn _emu_scaled_image_destination_valid(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32) -> bool:
+    val right = dst_x.to_i64() + dst_w.to_i64()
+    val bottom = dst_y.to_i64() + dst_h.to_i64()
+    right - 1 <= 2147483647 and bottom - 1 <= 2147483647
+
+fn emu_draw_image_scaled(mut core: RenderBackend, dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
+    if not _emu_scaled_image_destination_valid(dst_x, dst_y, dst_w, dst_h):
+        return
+    val result = _emu_scale_image_pixels(dst_w, dst_h, src_w, src_h, pixels)
+    if result.len() == 0:
+        return
     core.draw_image(dst_x, dst_y, dst_w, dst_h, result)
+
+fn emu_draw_image_scaled_blend(mut core: RenderBackend, dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
+    if not _emu_scaled_image_destination_valid(dst_x, dst_y, dst_w, dst_h):
+        return
+    val result = _emu_scale_image_pixels(dst_w, dst_h, src_w, src_h, pixels)
+    if result.len() == 0:
+        return
+    core.draw_image_blend(dst_x, dst_y, dst_w, dst_h, result)
 
 # ============================================================================
 # Box Blur — full O((2*radius+1)^2) 2D convolution on framebuffer region

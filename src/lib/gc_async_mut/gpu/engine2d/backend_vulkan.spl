@@ -44,7 +44,7 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_rect_thick, emu_draw_circle_thick, emu_draw_rounded_rect_outline,
     emu_draw_gradient_rect_h, emu_draw_radial_gradient,
     emu_draw_rect_blend, emu_draw_image_blend,
-    emu_draw_image_scaled,
+    emu_draw_image_scaled, emu_draw_image_scaled_blend,
     emu_draw_triangle_outline,
     emu_draw_blur_rect, emu_draw_shadow_rect,
     emu_draw_image_transform,
@@ -146,6 +146,18 @@ fn vulkan_classify_error(err: text) -> VulkanErrorKind:
         VulkanErrorKind.NoDevice
     else:
         VulkanErrorKind.Other
+
+fn _vulkan_scaled_image_args_valid(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]) -> bool:
+    val source_pixel_count = _i64(src_w) * _i64(src_h)
+    val destination_pixel_count = _i64(dst_w) * _i64(dst_h)
+    val right = _i64(dst_x) + _i64(dst_w)
+    val bottom = _i64(dst_y) + _i64(dst_h)
+    (dst_w > 0 and dst_h > 0 and src_w > 0 and src_h > 0 and
+        source_pixel_count > 0 and source_pixel_count <= 4294967295 and pixels.len().to_i64() == source_pixel_count and
+        destination_pixel_count > 0 and destination_pixel_count <= 2147483647 and
+        (_i64(dst_w) - 1) * _i64(src_w) <= 2147483647 and
+        (_i64(dst_h) - 1) * _i64(src_h) <= 2147483647 and
+        right - 1 <= 2147483647 and bottom - 1 <= 2147483647)
 
 # ============================================================================
 # Vulkan Backend
@@ -741,6 +753,10 @@ impl RenderBackend for VulkanBackend:
         """Nearest-neighbor scale and copy an image on the Vulkan device."""
         self._draw_image_composite_native(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels, 1000, VK_IMAGE_COMPOSITE_COPY, false)
 
+    me _draw_image_scaled_blend_native(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]) -> i64:
+        """Nearest-neighbor scale and src-over an image on the Vulkan device."""
+        self._draw_image_composite_native(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels, 1000, VK_IMAGE_COMPOSITE_SRC_OVER, false)
+
     me _draw_image_blend_native(x: i32, y: i32, w: i32, h: i32, pixels: [u32], opacity_milli: i32) -> i64:
         """Composite a clipped straight-ARGB image on the Vulkan device."""
         self._draw_image_composite_native(x, y, w, h, w, h, pixels, opacity_milli, VK_IMAGE_COMPOSITE_SRC_OVER, false)
@@ -927,11 +943,7 @@ impl RenderBackend for VulkanBackend:
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
         if self.completion_unknown: return
-        val source_pixel_count = _i64(src_w) * _i64(src_h)
-        if (dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0 or
-            source_pixel_count <= 0 or source_pixel_count > 4294967295 or pixels.len().to_i64() != source_pixel_count or
-            (_i64(dst_w) - 1) * _i64(src_w) > 2147483647 or
-            (_i64(dst_h) - 1) * _i64(src_h) > 2147483647):
+        if not _vulkan_scaled_image_args_valid(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels):
             return
         val native_status = self._draw_image_scaled_native(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
         if native_status > 0:
@@ -942,6 +954,20 @@ impl RenderBackend for VulkanBackend:
             return
         self.cpu_fallback_used = true
         emu_draw_image_scaled(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+
+    me draw_image_scaled_blend(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
+        if self.completion_unknown: return
+        if not _vulkan_scaled_image_args_valid(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels):
+            return
+        val native_status = self._draw_image_scaled_blend_native(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+        if native_status > 0:
+            return
+        if native_status < 0:
+            self.cpu_fallback_used = true
+            self.completion_unknown = true
+            return
+        self.cpu_fallback_used = true
+        emu_draw_image_scaled_blend(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
 
     me draw_triangle_outline(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, thickness: i32):
         if self.completion_unknown: return

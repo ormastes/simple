@@ -196,10 +196,12 @@ result type, session API, renderer, or Draw IR ownership path.
 The canonical Draw IR SDN skin preserves the complete typed command metadata,
 so styled RECT/TEXT and IMAGE semantics can cross the wire without a producer-
 specific parallel codec; binary image pixels remain separate bounded resources.
-The Vulkan owner uses one two-buffer compute pipeline: mode 0 copies exact-size,
-opaque, wholly bounded IMAGE resources; mode 1 performs clipped straight-ARGB
-src-over for transparent or partially clipped images. Masked or scaled images
-retain CPU semantics and poison device provenance for that request.
+The Vulkan owner uses one two-buffer compute pipeline: mode 0 copies opaque
+IMAGE resources; mode 1 performs straight-ARGB src-over for transparent or
+partially clipped images. Both modes accept exact-size images and bounded
+nearest-neighbor scaling after fresh-device preflight proves the work fits the
+target and signed shader-index bounds. Masked images retain CPU semantics and
+poison device provenance for that request.
 Completion-unknown submissions never replay on the CPU or release potentially
 in-flight dependencies. Metal applies the same rule to framebuffer dispatches
 and staged images by quarantining the command and any source until completion

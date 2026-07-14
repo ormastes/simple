@@ -27,9 +27,9 @@ offscreen surface and composites it honoring `opacity_milli`. Empty
 `surface_id` keeps the legacy translate+clip behavior. Nesting depth cap: 3.
 Note: an embedding at `(0,0)` with full opacity and exactly the target size is
 composited 1:1 without an offscreen round-trip (perf bypass).
-Resolved opaque IMAGE commands may scale through the canonical Engine2D Vulkan
-blit with nearest-neighbor CPU parity. Scaled transparent-over-existing-child
-composition remains fail-closed until the checked scaled src-over path exists.
+Resolved IMAGE commands may scale through the canonical Engine2D Vulkan blit
+with nearest-neighbor CPU parity. Opaque work uses COPY; transparent work after
+opaque initialization uses the same checked shader's src-over mode.
 
 Spec/reference: `test/02_integration/rendering/engine2d_embedded_surface_spec.spl`.
 

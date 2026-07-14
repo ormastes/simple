@@ -56,7 +56,7 @@ SPIR-V blobs. To recover a kernel's real algorithm:
 
 This is how `line` (divisor is `steps+1`, not `steps`) and `gradient` (integer,
 divisor `rh` not `rh-1`) were fixed. The shared two-buffer blit now handles
-exact copy, src-over, and opaque nearest-neighbor scaling; the `line` blob still
+exact copy, src-over, and nearest-neighbor scaled COPY/src-over; the `line` blob still
 ignores thickness (1px only).
 
 ## Verification harnesses
@@ -146,8 +146,6 @@ the reference oracle. Requires `tools/electron-shell/node_modules` + `xvfb-run`;
 skips cleanly otherwise.
 
 ## Known gaps
-- Transparent scaled IMAGE src-over on existing child content remains rejected;
-  opaque scaling uses checked Vulkan COPY semantics.
 - `line` GPU kernel is 1px-only (thickness not implemented in the blob).
 - The web-render path's GPU provenance fix (legacy `simple_web_*` stamp) remains
   diagnosed but unconverted; the new `web_render_html_via_engine2d` is the

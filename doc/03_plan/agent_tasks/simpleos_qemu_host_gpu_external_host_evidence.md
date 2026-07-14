@@ -63,7 +63,7 @@ only if a fresh native run exposes a reproducible implementation failure.
 | TODO542 | Consolidate aggregate argv behind the narrow standard facade used by small native apps. |
 | TODO547 | Continue raw-pointer leaf migration through the existing no-GC owner facade rather than adding direct `rt_*`. |
 | TODO548 | Finish the concurrently owned current-ABI pure-Simple compiler, validate it once, then run focused x86_64/AArch64/RISC-V QEMU probes. |
-| TODO549 | Transparent-over-existing-child native IMAGE offload and fresh compiler/QEMU proof remain; exact/clipped and opaque nearest-neighbor scaled IMAGE work now reuse the canonical Vulkan COPY shader. |
+| TODO549 | Fresh compiler/QEMU proof remains; exact/clipped and nearest-neighbor scaled IMAGE work now reuse the canonical Vulkan COPY/src-over shader with fail-closed provenance. |
 | TODO550 | Execute the stable ProcessingIR device-identity path and retain a fresh live receipt. The owner-level selector is `SIMPLEOS_HOST_GPU_PROCESSING_BACKEND=vulkan sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs`; the forced-Vulkan receipt remains pending. |
 | TODO551 | Host-local owner quarantine/reaping is implemented; run the focused lifecycle and live Vulkan evidence after TODO548 deploys a current pure-Simple compiler. |
 | TODO552 | Select feature/NFR requirements before implementing 4K shared-memory capacity. |
