@@ -62,7 +62,13 @@ path while the opaque pixel is rendered.
 ### Checked full-target Vulkan IMAGE
 
 Preflighted full-target IMAGE compositions require exact pixels, device
-readback, a positive backend handle, and zero fallback. After opaque root
+readback, a positive backend handle, and zero fallback. Opaque IMAGE commands
+may use bounded nearest-neighbor scaling; the 2x1-to-3x1 scenario must produce
+`[red, red, green]` on both the CPU oracle and Vulkan device.
+
+1. Scale IMAGE pixels on the Vulkan device with CPU-oracle parity.
+
+After opaque root
 initialization, an exact-size opaque IMAGE may cross a bounded named child's
 active clip and must retain exact CPU parity and device provenance. A
 first-transparent or partial root initializer, and an opacity-930 initializer,

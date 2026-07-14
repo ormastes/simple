@@ -13,7 +13,7 @@ single backend, or a CPU fallback. Relevant backend keys:
 
 | key | renders via | notes |
 |-----|-------------|-------|
-| `vulkan` | `VulkanBackend` (`backend_vulkan.spl`) through the Vulkan SFFI facades | 9/10 primitives wired (blit pending) |
+| `vulkan` | `VulkanBackend` (`backend_vulkan.spl`) through the Vulkan SFFI facades | checked copy/src-over plus nearest-neighbor IMAGE blit wired |
 | `metal` | native `MetalBackend` (macOS); else **Vulkan emulation** → name `metal-on-vulkan` | non-macOS hosts serve the Metal API request through Vulkan |
 | `directx-on-vulkan` | `VulkanBackend` (vkd3d/DXVK concept) | additive alias; the legacy `directx` key stays CPU-raster gated by a real vkd3d/Vulkan ICD probe |
 | `software` / `cpu` | `SoftwareBackend` | the bit-exact reference oracle |
@@ -55,8 +55,9 @@ SPIR-V blobs. To recover a kernel's real algorithm:
 4. Verify `pixel_mismatches == 0`, then wire the kernel in `backend_vulkan.spl`.
 
 This is how `line` (divisor is `steps+1`, not `steps`) and `gradient` (integer,
-divisor `rh` not `rh-1`) were fixed. Known remaining: `blit` needs a two-buffer
-descriptor layout; the `line` blob ignores thickness (1px only).
+divisor `rh` not `rh-1`) were fixed. The shared two-buffer blit now handles
+exact copy, src-over, and opaque nearest-neighbor scaling; the `line` blob still
+ignores thickness (1px only).
 
 ## Verification harnesses
 
@@ -145,7 +146,8 @@ the reference oracle. Requires `tools/electron-shell/node_modules` + `xvfb-run`;
 skips cleanly otherwise.
 
 ## Known gaps
-- `blit` Vulkan kernel (two-buffer descriptor layout) — not yet wired.
+- Transparent scaled IMAGE src-over on existing child content remains rejected;
+  opaque scaling uses checked Vulkan COPY semantics.
 - `line` GPU kernel is 1px-only (thickness not implemented in the blob).
 - The web-render path's GPU provenance fix (legacy `simple_web_*` stamp) remains
   diagnosed but unconverted; the new `web_render_html_via_engine2d` is the

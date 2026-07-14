@@ -307,6 +307,42 @@ expect(s.rect_count).to_equal(0)
 
 #### 2D primitive rendering with lavapipe or real device
 
+#### Scaled IMAGE clipping keeps device provenance and CPU-oracle pixels
+
+- Scale IMAGE pixels on the Vulkan device with CPU-oracle parity.
+- Nearest-neighbor scale `[red, green]` from 2x1 to 3x1 under clip x=1..2.
+- Require exact framebuffer `[background, red, green, background]`,
+  `device_readback`, a positive backend handle, and no CPU fallback.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var b = VulkanBackend.create()
+if b.init(4, 1):
+    val bg = 0xFF000000u32
+    val red = 0xFFFF0000u32
+    val green = 0xFF00FF00u32
+    b.clear(bg)
+    b.set_clip(1, 0, 2, 1)
+    step("Scale IMAGE pixels on the Vulkan device with CPU-oracle parity")
+    b.draw_image_scaled(0, 0, 3, 1, 2, 1, [red, green])
+    val readback = b.read_pixels_with_source()
+    expect(readback.source).to_equal("device_readback")
+    expect(readback.backend_handle).to_be_greater_than(0)
+    expect(b.cpu_fallback_used).to_be(false)
+    expect(readback.pixels).to_equal([bg, red, green, bg])
+    b.shutdown()
+else:
+    val kind = vulkan_classify_error(b.last_error)
+    assert_not_equal(kind, VulkanErrorKind.None)
+```
+
+</details>
+
 #### draw_line does not crash backend
 
 - var b = VulkanBackend create
@@ -595,10 +631,10 @@ else:
 | Field | Value |
 |-------|-------|
 | Category | Standard Library |
-| Status | Active |
+| Status | Active; candidate run exited 139, no scaled-image PASS |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_drawing_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-14 (manual) |
+| Generator | Manual SPipe refresh; rerun `simple spipe-docgen` after TODO 548 |
 
 ## Overview
 

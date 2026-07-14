@@ -12,7 +12,7 @@
 #
 # Run: bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_drawing_spec.spl
 
-use std.spec.{describe, context, it, expect, assert_true, assert_not_equal}
+use std.spec.{describe, context, it, expect, assert_true, assert_not_equal, step}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{
     VulkanBackend, VulkanErrorKind, vulkan_classify_error
 }
@@ -123,23 +123,21 @@ describe "Vulkan 2D drawing lane — VulkanBackend raster":
 
     context "2D primitive rendering with lavapipe or real device":
 
-        it "image fallback provenance stays sticky across present":
+        it "scaled image clipping keeps device provenance and CPU-oracle pixels":
             var b = VulkanBackend.create()
-            if b.init(8, 8):
-                b.clear(0x101010FFu32)
-                b.draw_image(2, 2, 2, 2, [0xFF0000FFu32, 0x00FF00FFu32, 0x0000FFFFu32, 0xFFFFFFFFu32])
-                val native_readback = b.read_pixels_with_source()
-                expect(native_readback.source).to_equal("device_readback")
-                expect(native_readback.backend_handle).to_be_greater_than(0)
-                assert_false(b.cpu_fallback_used)
-
-                b.draw_image_scaled(0, 0, 3, 3, 2, 2, [0xFF0000FFu32, 0x00FF00FFu32, 0x0000FFFFu32, 0xFFFFFFFFu32])
-                assert_true(b.cpu_fallback_used)
-                b.present()
-                assert_true(b.cpu_fallback_used)
-                val fallback_readback = b.read_pixels_with_source()
-                expect(fallback_readback.source).to_equal("cpu_fallback")
-                expect(fallback_readback.backend_handle).to_equal(0)
+            if b.init(4, 1):
+                val bg = 0xFF000000u32
+                val red = 0xFFFF0000u32
+                val green = 0xFF00FF00u32
+                b.clear(bg)
+                b.set_clip(1, 0, 2, 1)
+                step("Scale IMAGE pixels on the Vulkan device with CPU-oracle parity")
+                b.draw_image_scaled(0, 0, 3, 1, 2, 1, [red, green])
+                val readback = b.read_pixels_with_source()
+                expect(readback.source).to_equal("device_readback")
+                expect(readback.backend_handle).to_be_greater_than(0)
+                expect(b.cpu_fallback_used).to_be(false)
+                expect(readback.pixels).to_equal([bg, red, green, bg])
                 b.shutdown()
             else:
                 val kind = vulkan_classify_error(b.last_error)

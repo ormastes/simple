@@ -17,7 +17,7 @@ child framebuffer retained from the same session and admits only checked
 device readback plus checked parent compositing.
 """
 
-use std.spec.{describe, context, it, expect}
+use std.spec.{describe, context, it, expect, step}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     engine2d_draw_ir_adv_batch,
@@ -357,6 +357,30 @@ describe "Engine2D embedded render surface":
                     expect(exact_result.rendered_command_count).to_equal(1)
                     expect(exact_result.pixels).to_equal([GREEN, RED])
                     exact_engine.shutdown()
+
+            step("Scale IMAGE pixels on the Vulkan device with CPU-oracle parity")
+            val scaled_embedding = draw_ir_embedding_config("surf-scaled", "win-scaled", 0, 0, 3, 1, 0, 1000, true)
+            val scaled_batch = draw_ir_batch("batch-scaled", "gpu", scaled_embedding, [
+                draw_ir_image_command("scaled-image", 0, 0, 3, 1, "image://scaled", [])
+            ])
+            val scaled_composition = draw_ir_composition("scaled-composition", "device-scene", "gpu", [scaled_batch])
+            val scaled_image = engine2d_resolved_draw_ir_image("image://scaled", 2, 1, [RED, GREEN])
+            var scaled_cpu = Engine2D.create_with_backend(3, 1, "cpu")
+            val scaled_expected = engine2d_draw_ir_adv_composition_with_images(scaled_cpu, scaled_composition, false, [scaled_image])
+            expect(scaled_expected.pixels).to_equal([RED, RED, GREEN])
+            match Engine2D.create_requested_backend(3, 1, "vulkan"):
+                Err(reason):
+                    expect(reason.len()).to_be_greater_than(0)
+                Ok(scaled_engine):
+                    val scaled_result = engine2d_draw_ir_adv_fresh_device_composition_with_images(scaled_engine, scaled_composition, [scaled_image])
+                    expect(scaled_result.readback_source).to_equal("device_readback")
+                    expect(scaled_result.backend_handle).to_be_greater_than(0)
+                    expect(scaled_result.fallback_required).to_be(false)
+                    expect(scaled_result.rendered_command_count).to_equal(1)
+                    expect(scaled_result.skipped_command_count).to_equal(0)
+                    expect(scaled_result.pixels).to_equal(scaled_expected.pixels)
+                    scaled_engine.shutdown()
+            scaled_cpu.shutdown()
 
             val clipped_root = draw_ir_embedding_config("surf-clipped-root", "clipped-root", 0, 0, 3, 3, 0, 1000, true)
             val clipped_child = draw_ir_embedding_config("surf-clipped-child", "clipped-child", 1, 1, 1, 1, 0, 1000, true)

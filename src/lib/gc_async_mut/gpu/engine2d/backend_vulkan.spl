@@ -683,19 +683,23 @@ impl RenderBackend for VulkanBackend:
         # texture would be uploaded and sampled by a kernel.
         self._gpu_draw_text_fallback(x, y, text_val, color, font_size)
 
-    me _draw_image_composite_native(x: i32, y: i32, w: i32, h: i32, pixels: [u32], opacity_milli: i32, composite_mode: i32, require_wholly_bounded: bool) -> i64:
+    me _draw_image_composite_native(x: i32, y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32], opacity_milli: i32, composite_mode: i32, require_wholly_bounded: bool) -> i64:
         if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0 or self.pipe_blit <= 0:
             return 0
-        if (w <= 0 or h <= 0 or self.mask_buf.len() > 0 or
+        if (dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0 or self.mask_buf.len() > 0 or
             opacity_milli <= 0 or opacity_milli > 1000 or
             (composite_mode != VK_IMAGE_COMPOSITE_COPY and composite_mode != VK_IMAGE_COMPOSITE_SRC_OVER)):
             return 0
 
-        val pixel_count = _i64(w) * _i64(h)
-        if pixel_count <= 0 or pixel_count > 9223372036854775807 / 4 or pixels.len().to_i64() != pixel_count:
+        val pixel_count = _i64(src_w) * _i64(src_h)
+        val scale_x_product = (_i64(dst_w) - 1) * _i64(src_w)
+        val scale_y_product = (_i64(dst_h) - 1) * _i64(src_h)
+        if (pixel_count <= 0 or pixel_count > 4294967295 or pixel_count > 9223372036854775807 / 4 or
+            pixels.len().to_i64() != pixel_count or
+            scale_x_product > 2147483647 or scale_y_product > 2147483647):
             return 0
-        val right = _i64(x) + _i64(w)
-        val bottom = _i64(y) + _i64(h)
+        val right = _i64(x) + _i64(dst_w)
+        val bottom = _i64(y) + _i64(dst_h)
         if right - 1 > 2147483647 or bottom - 1 > 2147483647:
             return 0
         if require_wholly_bounded and (_i64(x) < 0 or _i64(y) < 0 or right > _i64(self.w) or bottom > _i64(self.h)):
@@ -703,7 +707,7 @@ impl RenderBackend for VulkanBackend:
         if self.clip_enabled:
             val clip_right = _i64(self.clip_x) + _i64(self.clip_w)
             val clip_bottom = _i64(self.clip_y) + _i64(self.clip_h)
-            if self.clip_w <= 0 or self.clip_h <= 0 or clip_right - 1 > 2147483647 or clip_bottom - 1 > 2147483647:
+            if self.clip_w <= 0 or self.clip_h <= 0 or clip_right > 2147483647 or clip_bottom > 2147483647:
                 return 0
             if require_wholly_bounded and (_i64(x) < _i64(self.clip_x) or _i64(y) < _i64(self.clip_y) or
                 right > clip_right or bottom > clip_bottom):
@@ -717,11 +721,11 @@ impl RenderBackend for VulkanBackend:
         if source_bytes.len().to_i64() != src_size or not vulkan_sffi_copy_to_buffer(d_src, source_bytes, 0):
             vulkan_sffi_free_buffer(d_src)
             return 0
-        val pc = _pack_image_composite_pc(x, y, w, h, self.w, self.h,
+        val pc = _pack_image_composite_pc(x, y, dst_w, dst_h, self.w, self.h,
             self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled,
-            opacity_milli, composite_mode)
-        val gx = (_i64(w) + 15) / 16
-        val gy = (_i64(h) + 15) / 16
+            opacity_milli, composite_mode, src_w, src_h)
+        val gx = (_i64(dst_w) + 15) / 16
+        val gy = (_i64(dst_h) + 15) / 16
         val dispatched = vulkan_dispatch_image_composite_checked(self.d_framebuffer, self.pipe_blit, d_src, pc, gx, gy, 1)
         if dispatched > 0:
             self.dirty = true
@@ -731,11 +735,15 @@ impl RenderBackend for VulkanBackend:
 
     me _draw_image_native(x: i32, y: i32, w: i32, h: i32, pixels: [u32]) -> i64:
         """Copy an exact-size image, clipped by the Vulkan target bounds."""
-        self._draw_image_composite_native(x, y, w, h, pixels, 1000, VK_IMAGE_COMPOSITE_COPY, false)
+        self._draw_image_composite_native(x, y, w, h, w, h, pixels, 1000, VK_IMAGE_COMPOSITE_COPY, false)
+
+    me _draw_image_scaled_native(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]) -> i64:
+        """Nearest-neighbor scale and copy an image on the Vulkan device."""
+        self._draw_image_composite_native(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels, 1000, VK_IMAGE_COMPOSITE_COPY, false)
 
     me _draw_image_blend_native(x: i32, y: i32, w: i32, h: i32, pixels: [u32], opacity_milli: i32) -> i64:
         """Composite a clipped straight-ARGB image on the Vulkan device."""
-        self._draw_image_composite_native(x, y, w, h, pixels, opacity_milli, VK_IMAGE_COMPOSITE_SRC_OVER, false)
+        self._draw_image_composite_native(x, y, w, h, w, h, pixels, opacity_milli, VK_IMAGE_COMPOSITE_SRC_OVER, false)
 
     me draw_image_blend_checked(x: i32, y: i32, w: i32, h: i32, pixels: [u32], opacity_milli: i32) -> bool:
         """Composite only when fenced native Vulkan completion is proven."""
@@ -919,14 +927,19 @@ impl RenderBackend for VulkanBackend:
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
         if self.completion_unknown: return
-        if dst_w == src_w and dst_h == src_h:
-            val native_status = self._draw_image_native(dst_x, dst_y, dst_w, dst_h, pixels)
-            if native_status > 0:
-                return
-            if native_status < 0:
-                self.cpu_fallback_used = true
-                self.completion_unknown = true
-                return
+        val source_pixel_count = _i64(src_w) * _i64(src_h)
+        if (dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0 or
+            source_pixel_count <= 0 or source_pixel_count > 4294967295 or pixels.len().to_i64() != source_pixel_count or
+            (_i64(dst_w) - 1) * _i64(src_w) > 2147483647 or
+            (_i64(dst_h) - 1) * _i64(src_h) > 2147483647):
+            return
+        val native_status = self._draw_image_scaled_native(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+        if native_status > 0:
+            return
+        if native_status < 0:
+            self.cpu_fallback_used = true
+            self.completion_unknown = true
+            return
         self.cpu_fallback_used = true
         emu_draw_image_scaled(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
 
