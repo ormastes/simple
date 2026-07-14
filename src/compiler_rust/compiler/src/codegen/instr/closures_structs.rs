@@ -342,6 +342,16 @@ pub(crate) fn compile_method_call_static<M: Module>(
             ("find", 1) => true,
             // length — rt_len (array/string/dict/tuple)
             ("len" | "length", 0) => true,
+            // dict enumeration — rt_dict_keys / rt_dict_values. Like the other
+            // idioms here these are tag-safe (dict_ptr validates the SplDict/
+            // RuntimeDict header and returns an empty array for non-dicts). Without
+            // this, `.keys()`/`.values()` on an ERASED Dict receiver (e.g.
+            // `module.functions.keys()` — Dict<K,V> resolves to TypeId::ANY) fall
+            // through to the receiver-type-blind name resolution below, bind to an
+            // unrelated same-named symbol, and silently return an empty array —
+            // which drops a synthesized `main` during in-guest HIR lowering (the
+            // SimpleOS interpreter then reports "module has no main function").
+            ("keys" | "values", 0) => true,
             _ => false,
         };
     if bare_builtin_collection {
