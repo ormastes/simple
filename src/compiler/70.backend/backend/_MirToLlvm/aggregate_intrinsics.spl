@@ -61,10 +61,27 @@ impl MirToLlvm:
                 # per-field GEP form is byte-identical to translate_get_field
                 # (element type native_int, single index) so construct offsets
                 # exactly match field-read offsets.
+                #
+                # HEAP-allocated via rt_alloc (mirrors the Array case above),
+                # NOT a stack `alloca`: a struct constructed inside a callee
+                # and returned BY VALUE (`fn make() -> P: return P(x:1,y:2)`)
+                # yields a POINTER (see the final getelementptr below) that
+                # outlives the callee's stack frame once the caller reads a
+                # field off the returned value. An alloca's storage is scoped
+                # to the current function -- the pointer aliases a dead frame
+                # the instant the callee returns, and the caller reads
+                # whatever garbage now occupies that stack slot. rt_alloc
+                # gives the storage the same heap lifetime as an array/enum
+                # payload, so a returned-by-value struct's fields stay valid
+                # for as long as any live pointer to it exists.
                 val nit = self.native_int()
                 val n = operands.len()
                 val agg = self.builder.fresh_local()
-                self.builder.emit_alloca(agg, "[{n} x {nit}]")
+                self.remember_function_return_type("rt_alloc", "ptr")
+                self.remember_function_param_types("rt_alloc", ["i64"])
+                self.unknown_func_decls["rt_alloc"] = true
+                val word_bytes = natural_alignment(nit)
+                self.builder.emit("  {agg} = call ptr @rt_alloc(i64 {n * word_bytes})")
                 for i in 0..n:
                     val raw = self.translate_operand(operands[i])
                     val v = self.value_as_type(raw, self.get_operand_type(operands[i]), nit)
@@ -97,10 +114,18 @@ impl MirToLlvm:
                 # expressions.spl) both read tuple elements via a single
                 # 8-byte-stride index off one pointer level, matching
                 # translate_get_field / the Index/array read path exactly.
+                # Same dangling-alloca hazard as the Struct case above applies
+                # here (a tuple returned by value from a callee): HEAP-allocate
+                # via rt_alloc instead of a stack `alloca` so the returned
+                # pointer stays valid past the callee's return.
                 val tup_nit = self.native_int()
                 val tup_n = operands.len()
                 val tup_agg = self.builder.fresh_local()
-                self.builder.emit_alloca(tup_agg, "[{tup_n} x {tup_nit}]")
+                self.remember_function_return_type("rt_alloc", "ptr")
+                self.remember_function_param_types("rt_alloc", ["i64"])
+                self.unknown_func_decls["rt_alloc"] = true
+                val tup_word_bytes = natural_alignment(tup_nit)
+                self.builder.emit("  {tup_agg} = call ptr @rt_alloc(i64 {tup_n * tup_word_bytes})")
                 for i in 0..tup_n:
                     val tup_raw = self.translate_operand(operands[i])
                     val tup_v = self.value_as_type(tup_raw, self.get_operand_type(operands[i]), tup_nit)

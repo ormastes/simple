@@ -73,6 +73,7 @@ impl MirLowering:
             struct_method_ambiguous: {},
             struct_method_return_names: {},
             struct_method_return_is_array: {},
+            enum_payload_struct_names: {},
             runtime_array_locals: {},
             runtime_dict_locals: {},
             array_element_struct_syms: {},
@@ -527,6 +528,25 @@ impl MirLowering:
             self.lower_class_type(class_type_values[cti])
             cti = cti + 1
 
+        # Order-independent pre-pass: walk every function body (read-only,
+        # no MIR emitted) to seed struct_field_type_name from its real
+        # construction sites BEFORE any function is actually lowered. See
+        # prescan_expr_for_struct_types's own comment for the nondeterministic
+        # bug this closes: a nested struct field's chained access
+        # (`q.inner.y` where `q = outer()` and `outer`'s OWN body constructs
+        # `Q(inner: make(3), ...)`) previously depended on whether
+        # module.functions happened to lower `outer` before `main` --
+        # `module.functions.values()` iteration order is not guaranteed
+        # stable, so `q.inner.y` nondeterministically read field 0 (`x`)
+        # instead of field 1 (`y`) on runs where the populating function
+        # (`outer`) had not yet been visited by the real lowering loop below.
+        val prescan_fn_values = module.functions.values()
+        var psi = 0
+        while psi < prescan_fn_values.len():
+            if not prescan_fn_values[psi].is_extern:
+                self.prescan_block_for_struct_types(prescan_fn_values[psi].body)
+            psi = psi + 1
+
         # Lower functions (skip extern declarations - they have no body)
         val fn_values = module.functions.values()
         if bootstrap_trace:
@@ -644,3 +664,211 @@ impl MirLowering:
         module.types = types
         bldr.module = module
         self.builder = bldr
+
+    # ========================================================================
+    # Order-independent struct_field_type_name pre-pass (see call site above)
+    # ========================================================================
+
+    me prescan_enum_owner_for_variant(name: text) -> text:
+        """Which enum owns variant `name`, mirroring lower_call's own Ok/Err/
+        Some/None interception plus its bare-variant enum_variant_index scan.
+        "" when `name` is not a known enum variant at all (an ordinary struct
+        or free-function call)."""
+        if name == "Ok" or name == "Err":
+            return "Result"
+        if name == "Some" or name == "None":
+            return "Option"
+        for ename in self.enum_variant_index.keys():
+            if enum_variant_disc(self.enum_variant_index[ename], name) >= 0:
+                return ename
+        ""
+
+    me prescan_block_for_struct_types(block: HirBlock):
+        """Read-only HIR walk over a function body (no MIR emitted): finds
+        every struct-construct call reachable from `block` and records its
+        nested field struct names into struct_field_type_name, regardless of
+        which function this block belongs to or in what order module.functions
+        happens to be visited by the real per-function lowering loop."""
+        var si = 0
+        while si < block.stmts.len():
+            self.prescan_stmt_for_struct_types(block.stmts[si])
+            si = si + 1
+        if block.has:
+            self.prescan_expr_for_struct_types(block.value)
+
+    me prescan_stmt_for_struct_types(stmt: HirStmt):
+        match stmt.kind:
+            case Expr(expr):
+                self.prescan_expr_for_struct_types(expr)
+            case Let(_, _, init):
+                self.prescan_expr_for_struct_types(init)
+            case Assign(_, _, value):
+                self.prescan_expr_for_struct_types(value)
+            case Block(inner_block):
+                self.prescan_block_for_struct_types(inner_block)
+            case _:
+                ()
+
+    me prescan_expr_for_struct_types(expr: HirExpr) -> text:
+        """Returns the struct NAME `expr` statically denotes (a direct struct
+        construct, or a call to a function whose declared return type is a
+        Named struct), or "" when unknown. Recurses into Call args, Return,
+        Block, and If so a `return Q(inner: make(3), tag: 99)`-shaped function
+        body (the exact case this pre-pass exists for) is fully covered."""
+        match expr.kind:
+            case Call(callee, args, _):
+                var name = ""
+                match callee.kind:
+                    case Var(sym):
+                        val s = self.symbols.get_symbol(sym)
+                        if s.?: name = s.name
+                    case NamedVar(_, n):
+                        name = n
+                    case _:
+                        ()
+                if name != "":
+                    val owner_enum = self.prescan_enum_owner_for_variant(name)
+                    if owner_enum != "" and args.len() == 1:
+                        # Enum/Result payload chain fix: `Ok(make(3))` /
+                        # `Circle(make_point())` constructs a payload that may
+                        # itself be a struct VALUE. Record
+                        # "{owner_enum}::{name}" -> that struct's NAME here too
+                        # (same map lower_enum_construct_named/lower_enum_lit
+                        # populate at real-lowering time), order-independently,
+                        # so `case Ok(p): print(p.y)` resolves correctly no
+                        # matter which function constructs the payload relative
+                        # to which function matches on it.
+                        val nested_payload = self.prescan_expr_for_struct_types(args[0].value)
+                        if nested_payload != "":
+                            self.enum_payload_struct_names["{owner_enum}::{name}"] = nested_payload
+                        return ""
+                if name != "" and self.struct_field_order.has(name):
+                    val field_names = self.struct_field_order[name]
+                    var field_type_names: [text] = []
+                    var fi = 0
+                    while fi < field_names.len():
+                        val want = field_names[fi]
+                        var chosen_idx = if fi < args.len(): fi else: -1
+                        var ai = 0
+                        while ai < args.len():
+                            if args[ai].has_name and args[ai].name == want:
+                                chosen_idx = ai
+                            ai = ai + 1
+                        var nested = ""
+                        if chosen_idx >= 0 and chosen_idx < args.len():
+                            nested = self.prescan_expr_for_struct_types(args[chosen_idx].value)
+                        field_type_names.push(nested)
+                        fi = fi + 1
+                    if not self.struct_field_type_name.has(name):
+                        self.struct_field_type_name[name] = field_type_names
+                    else:
+                        val prev = self.struct_field_type_name[name]
+                        var merged: [text] = []
+                        var mi = 0
+                        while mi < field_type_names.len():
+                            var name_i = field_type_names[mi]
+                            if name_i == "" and mi < prev.len():
+                                name_i = prev[mi]
+                            merged.push(name_i)
+                            mi = mi + 1
+                        self.struct_field_type_name[name] = merged
+                    return name
+                # Not a direct struct construct: maybe a call to a known
+                # function whose declared return type is a Named struct
+                # (mirrors resolved_call_return_type's own symbol lookup).
+                var callee_symbol: SymbolId? = nil
+                match callee.kind:
+                    case Var(sym2):
+                        callee_symbol = Some(sym2)
+                    case NamedVar(sym2, _):
+                        callee_symbol = Some(sym2)
+                    case _:
+                        ()
+                if val cs = callee_symbol:
+                    val fn_sym = self.symbols.get_symbol(cs)
+                    if fn_sym.?:
+                        if val fn_type = fn_sym.type_:
+                            match fn_type.kind:
+                                case HirTypeKind.Function(_, ret, _):
+                                    match ret.kind:
+                                        case Named(ret_sym, _):
+                                            val ret_symbol = self.symbols.get_symbol(ret_sym)
+                                            if ret_symbol.?:
+                                                return ret_symbol.name
+                                        case _:
+                                            ()
+                                case _:
+                                    ()
+                ""
+            case Return(value):
+                if value.is_some():
+                    self.prescan_expr_for_struct_types(value.unwrap())
+                else:
+                    ""
+            case Block(inner_block):
+                self.prescan_block_for_struct_types(inner_block)
+                ""
+            case If(cond, then_, else_):
+                self.prescan_expr_for_struct_types(cond)
+                self.prescan_block_for_struct_types(then_)
+                if val eb = else_:
+                    self.prescan_block_for_struct_types(eb)
+                ""
+            case MethodCall(mc_receiver, mc_method, mc_args, _):
+                # Dot-qualified enum construction (`Shape.Circle(make(9))`)
+                # actually arrives as a MethodCall (receiver=Shape,
+                # method=Circle), reclassified into enum construction only at
+                # REAL-lowering time by method_calls_literals.spl's own
+                # "receiver names a registered enum and method is one of its
+                # variants" check (mirrored here) -- NOT as a distinct EnumLit
+                # node. Recurse into args either way so a struct-returning
+                # call passed as a plain method argument is still discovered.
+                var mc_recv_enum_name = ""
+                match mc_receiver.kind:
+                    case Var(mc_rsym):
+                        val mc_rs = self.symbols.get_symbol(mc_rsym)
+                        if mc_rs.?: mc_recv_enum_name = mc_rs.name
+                    case NamedVar(_, mc_rname):
+                        mc_recv_enum_name = mc_rname
+                    case _:
+                        ()
+                var mc_is_variant = false
+                if mc_recv_enum_name != "" and self.enum_variant_index.has(mc_recv_enum_name):
+                    for mc_vn in self.enum_variant_index[mc_recv_enum_name]:
+                        if mc_vn == mc_method:
+                            mc_is_variant = true
+                if mc_is_variant and mc_args.len() == 1:
+                    val mc_nested = self.prescan_expr_for_struct_types(mc_args[0].value)
+                    if mc_nested != "":
+                        self.enum_payload_struct_names["{mc_recv_enum_name}::{mc_method}"] = mc_nested
+                else:
+                    var mc_ai = 0
+                    while mc_ai < mc_args.len():
+                        self.prescan_expr_for_struct_types(mc_args[mc_ai].value)
+                        mc_ai = mc_ai + 1
+                ""
+            case EnumLit(type_, variant, payload):
+                # Dot-qualified enum construction (`Shape.Circle(make(9))`)
+                # arrives as a distinct HirExprKind.EnumLit node, NOT a Call --
+                # the Call-shaped enum-owner check above never sees this shape
+                # at all. Same struct-value chain fix, mirrors lower_enum_lit's
+                # own single-value Tuple payload handling.
+                var elit_enum_name = ""
+                match type_.kind:
+                    case Named(elit_sym, _):
+                        val elit_s = self.symbols.get_symbol(elit_sym)
+                        if elit_s.?: elit_enum_name = elit_s.name
+                    case _:
+                        ()
+                if val elit_payload = payload:
+                    match elit_payload:
+                        case Tuple(elit_values):
+                            if elit_values.len() == 1 and elit_enum_name != "":
+                                val elit_nested = self.prescan_expr_for_struct_types(elit_values[0])
+                                if elit_nested != "":
+                                    self.enum_payload_struct_names["{elit_enum_name}::{variant}"] = elit_nested
+                        case _:
+                            ()
+                ""
+            case _:
+                ""

@@ -97,6 +97,22 @@ impl MirLowering:
                 case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
                     self.runtime_array_locals[dest.id] = true
                     self.runtime_value_locals[dest.id] = true
+                case MirTypeKind.Struct(struct_symbol):
+                    # A direct call whose declared return type is a Named
+                    # struct (`fn make() -> P: ...`) yields a struct value
+                    # with no HIR type annotation on the Call expr itself (this
+                    # pipeline runs no expression type-inference pass -- see
+                    # struct_value_syms's own field comment). Without this,
+                    # `make(5).y` / `val p = make(5); p.y` fell through
+                    # resolve_field_index's lookup chain and silently
+                    # defaulted to field index 0, reading `x` instead of `y`.
+                    # Record the call result local -> struct NAME here,
+                    # mirroring how lower_struct_construct/function params
+                    # already register direct constructions and typed
+                    # parameters into the same map.
+                    val struct_sym = self.symbols.get_symbol(struct_symbol)
+                    if struct_sym.?:
+                        self.struct_value_syms[dest.id] = struct_sym.name
                 case _: ()
             return dest
         b.emit(MirInst(kind: MirInstKind.Call(nil, func, args), span: nil))
@@ -745,6 +761,10 @@ impl MirLowering:
         var enum_discs: [i64] = []
         var enum_binds: [[SymbolId]] = []
         var enum_bodies: [HirBlock] = []
+        # Parallel to enum_discs: the arm's own variant NAME, so the
+        # single-payload bind below can look up "{enum_name}::{variant}" in
+        # enum_payload_struct_names (see that map's own field comment).
+        var enum_variants: [text] = []
         var has_default = false
         var default_body = HirBlock(stmts: [], value: nil, span: scrutinee.span)
         var enum_name = ""
@@ -785,6 +805,7 @@ impl MirLowering:
                     enum_discs = enum_discs.push(d)
                     enum_binds = enum_binds.push(enum_pat_binding_syms(epayload))
                     enum_bodies = enum_bodies.push(arm.body)
+                    enum_variants = enum_variants.push(variant)
                 case Wildcard:
                     has_default = true
                     default_body = arm.body
@@ -825,6 +846,17 @@ impl MirLowering:
                 self.builder = bp
                 if val pl = pr:
                     self.local_map[bind_syms[0].id] = pl
+                    # Struct-value chain fix: if this variant's payload was
+                    # constructed from a known struct VALUE (recorded in
+                    # enum_payload_struct_names at the construction site),
+                    # register it here too so `case Ok(p): print(p.y)` resolves
+                    # `p`'s real field index instead of resolve_field_index's
+                    # silent default-to-0 fallback (see that map's own field
+                    # comment for the full landmine this closes).
+                    val payload_key = "{enum_name}::{enum_variants[ci]}"
+                    val payload_struct = self.enum_payload_struct_names.get(payload_key)
+                    if payload_struct != nil and payload_struct != "":
+                        self.struct_value_syms[pl.id] = payload_struct ?? ""
             elif bind_syms.len() > 1:
                 # #164 multi-field payload: the scalar payload slot holds a
                 # boxed rt_tuple (see box_tuple_payload); unbox each field by
@@ -1003,6 +1035,11 @@ impl MirLowering:
                     if values.len() == 1:
                         payload_local = self.lower_expr(values[0])
                         has_payload = true
+                        # Same struct-value chain fix as lower_enum_construct_named
+                        # -- see enum_payload_struct_names' own field comment.
+                        val lit_payload_struct_name = self.struct_value_syms.get(payload_local.id)
+                        if lit_payload_struct_name != nil and lit_payload_struct_name != "":
+                            self.enum_payload_struct_names["{enum_name}::{variant}"] = lit_payload_struct_name ?? ""
                     elif values.len() > 1:
                         payload_local = self.box_tuple_payload(values)
                         has_payload = true
@@ -1037,6 +1074,18 @@ impl MirLowering:
         var payload_local = LocalId(id: 0)
         if args.len() == 1:
             payload_local = self.lower_expr(args[0].value)
+            # Struct-value chain fix: a single-field payload (`Ok(make(3))`,
+            # `Circle(make_point())`) may itself be a struct VALUE. Record
+            # "{enum_name}::{variant}" -> that struct's NAME here, at the
+            # construction site, where struct_value_syms still has it for the
+            # just-lowered payload local. `case Ok(p): print(p.y)` binds `p`
+            # to a raw, untyped i64 payload word (see enum_payload_struct_names'
+            # own field comment) -- without this, resolve_field_index had no
+            # way to recover which struct `p` holds and silently defaulted
+            # `p.y` to field 0.
+            val payload_struct_name = self.struct_value_syms.get(payload_local.id)
+            if payload_struct_name != nil and payload_struct_name != "":
+                self.enum_payload_struct_names["{enum_name}::{variant}"] = payload_struct_name ?? ""
         elif args.len() > 1:
             # #164: 2+ constructor args -- box them into a heap tuple so the
             # single scalar payload slot can still carry all of them.
