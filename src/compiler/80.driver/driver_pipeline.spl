@@ -107,6 +107,19 @@ fn _format_mir_error(err: MirError) -> text:
 #     call site's own comment says the fix's whole point is "a clean loud
 #     build failure, never a crash". Matrix's struct_field case only ever
 #     passes int literals.
+#
+# iterators lane (2026-07-14): added "for-in over non-array iterables" —
+# lower_for_iterator (mir_lowering_stmts.spl, #143) already records this via
+# self.error(...) AND emits a belt-and-braces rt_panic call for any `for x in
+# c:` where `c` is neither a Range nor a runtime array (e.g. `for ch in
+# some_string:` — bug #143 confirmed still unimplemented natively). Without
+# this prefix in the allowlist, the message was downgraded to a warning, the
+# build silently SUCCEEDED, and the failure only surfaced as a runtime PANIC
+# when the binary ran — the exact "silent success, loud crash later" shape
+# this allowlist exists to prevent for every other unsupported-construct
+# message. Verified empirically against the full native-smoke-matrix (all 15
+# cases still PASS): no passing case iterates a non-array/non-range
+# collection, so this cannot regress currently-working native-build output.
 fn _mir_error_is_fatal(message: text) -> bool:
     message.starts_with("undefined variable") or
         message.starts_with("unresolved method call:") or
@@ -117,7 +130,8 @@ fn _mir_error_is_fatal(message: text) -> bool:
         message.starts_with("match default binding has no resolved symbol") or
         message.starts_with("enum match:") or
         message.starts_with("enum construction: unregistered enum") or
-        message.starts_with("unsupported struct field initializer")
+        message.starts_with("unsupported struct field initializer") or
+        message.starts_with("for-in over non-array iterables")
 
 fn _driver_collect_mir_errors(ctx: CompileContext, errors: [MirError]):
     for err in errors:
