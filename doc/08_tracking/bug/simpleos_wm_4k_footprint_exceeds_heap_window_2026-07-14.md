@@ -162,3 +162,33 @@ So the compositor is blocked by a CLUSTER of native-build MIR/HIR limitations
 const-0 placeholders), not a single idiom. All workarounds REVERTED. This is
 seed-compiler (SIMPLE_BOOTSTRAP native-build) work — the same class as the web JIT
 gaps. The O(n^2) heap fix (`1fe2653d`) stands and is verified.
+
+## Update (2026-07-14): systemic — failed NVMe/FAT32 mount makes EVERY Fat32Core read null-deref
+The font-load guard (`if g_vfs_mounted:` around gui_entry_desktop.spl's font read)
+WORKS: the desktop now gets past the font load — `[desktop-gui] font unavailable
+fallback=bitmap` → `compositor ready` → `shell initialized`, NO cr2 fault there.
+But it exposed that the fault is SYSTEMIC, not per-call-site: immediately after
+`[desktop-gui] spawn begin app=Browser Demo`, a NEW cr2=0x0 storm fires at the
+app-registry spawn path — `app_registry_fat32_alias` / `app_registry_root_alias`
+→ `Fat32Core.resolve_path`/`_device_read_sector` → `BlockDevice(NVMe).read_sector`
+— the SAME null-deref chain at a DIFFERENT reader.
+
+ROOT: on x86_64 the FAT32 mount fails (`[vfs] mount_failed fat32
+reason=no-nvme-or-bad-fs`) but a non-nil `Fat32Core` wraps an uninitialized NVMe
+`BlockDevice`, and `Fat32Core._device_read_sector` -> `dev.read_sector(lba)`
+null-derefs (cr2=0x0) instead of returning its `Result<..., text>` Err. Every VFS/
+app-registry consumer that reads through this broken mount crashes. Per-call-site
+`if g_vfs_mounted:` guards are whack-a-mole (font load fixed, app spawn next, …).
+
+CLEAN FIXES (VFS/NVMe owner): (a) make `NvmeBlockDevice.read_sector` /
+`Fat32Core._device_read_sector` null-SAFE — return Err when the device/queues are
+not initialized, so readers get an empty/None fallback instead of a fault; and/or
+(b) leave `g_root_fat32 = nil` (not `Some(brokenCore)`) when the NVMe mount fails,
+so the existing `if g_root_fat32 != nil` guards short-circuit everywhere; and/or
+(c) fix the NVMe/FAT32 mount so it actually succeeds (the harness stages the disk;
+`no-nvme-or-bad-fs` means the NVMe namespace/FS isn't being detected on this run).
+
+NET SimpleOS WM 4K: advanced from boot-crash → boots through pmm/vmm/vfs/framebuffer/
+4K-scanout/engine2d/input/compositor/shell-init (via `1fe2653d` O(n^2) + `3e5ef0c9`
+compositor + this font guard); remaining blocker is the systemic null-deref on any
+Fat32Core read against the failed NVMe mount — deep VFS/NVMe-driver work.

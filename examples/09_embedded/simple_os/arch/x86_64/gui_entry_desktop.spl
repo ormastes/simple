@@ -306,11 +306,19 @@ fn spl_start():
     val font_path = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
     # load_font_bytes routes through the selected-asset registry validator,
     # including exact byte length, SHA-256, sfnt tables, names, and axes.
-    var font_loaded = engine.load_font_bytes(font_path, g_vfs_read_file_bytes("/" + font_path))
-    if not font_loaded:
-        # The direct FAT32 builder uses an 8.3 alias. Retry it when the
-        # canonical file is missing or invalid, while retaining canonical identity.
-        font_loaded = engine.load_font_bytes(font_path, g_vfs_read_file_bytes("/SYS/FONTS/NOTOSANS.TTF"))
+    # Only read the font from the VFS when a filesystem actually mounted: on a
+    # failed FAT32/NVMe mount (`[vfs] mount_failed`), g_root_fat32 is a non-nil
+    # Fat32Core wrapping an uninitialized BlockDevice, so g_vfs_read_file_bytes ->
+    # Fat32Core -> NVMe read_sector null-derefs (cr2=0x0) and takes down the first
+    # desktop compose. Skipping the read here lets the desktop fall back to the
+    # built-in bitmap font and still render, instead of crashing.
+    var font_loaded = false
+    if g_vfs_mounted:
+        font_loaded = engine.load_font_bytes(font_path, g_vfs_read_file_bytes("/" + font_path))
+        if not font_loaded:
+            # The direct FAT32 builder uses an 8.3 alias. Retry it when the
+            # canonical file is missing or invalid, while retaining canonical identity.
+            font_loaded = engine.load_font_bytes(font_path, g_vfs_read_file_bytes("/SYS/FONTS/NOTOSANS.TTF"))
     if font_loaded:
         serial_println("[desktop-gui] font identity=sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100 raster=pure-sfnt-glyf")
     else:
