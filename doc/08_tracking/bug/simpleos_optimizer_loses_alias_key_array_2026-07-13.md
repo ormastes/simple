@@ -12,8 +12,10 @@ The current target contains no tuple get/set/new calls in those helpers. `local_
 
 ## Current exact evidence
 
-The caller-specific live marker prints `[var-reassign] count-increment=3` immediately before the fault. `local_alias_root` runs first and emits no invalid-handle marker. `local_count_increment` then reloads `local_ids` directly from `rsp+0x180`, receives `3`, and `local_count_index` faults on the unchecked offset-eight length load.
+The final phase-checkpoint serial output contained only `[var-reassign] count-increment=3` before `local_count_index` faulted at `RIP 0x102a793f` (`CR2=0x8`). That text is a hard-coded low-positive branch label, not the numeric parameter. Caller-side checkpoint silence does not prove their branches were not taken because those diagnostics themselves route through fallible string allocation/output.
 
 Routing typed `.len()` through `rt_array_len_safe` was rejected and reverted: it would hide the invalid producer and let optimizer analysis continue with false empty-state results. A QEMU hardware watchpoint set before the user CR3 became active did not bind; the run reproduced the same marker/fault without new evidence.
 
-Next session must attach GDB only after the serial `[spawn] entering user` marker (when the user CR3 is active), break immediately after the `rsp+0x180` constructor store, and watch that address. Capture the first writing instruction or stack-pointer displacement. Do not re-add safe length, sentinel entries, tuple state, or heap growth.
+Two later GDB attempts reached the active user CR3, but execution breakpoints still did not trap reliably across the handoff. Static disassembly found a fixed analyzer stack, one constructor store for `local_ids`, balanced helper frames, and no callee-saved-register violation. The final ELF also proves the caller compares and reloads the same `rsp+0x298` slot into `RDI`, then the direct callee preserves that register through its low-value test and `local_count_index` call. All FAT Simple aliases match that ELF. The apparent call-boundary corruption is therefore contradicted by machine code.
+
+Do not patch call lowering or spend another live cycle on watchpoints. Next session must capture the actual caller-slot and callee-entry values through a numeric/global diagnostic that cannot fail silently, then reconcile the serial sequence before changing an owner. Do not re-add safe length, sentinel entries, tuple state, heap growth, or string-only runtime probes.
