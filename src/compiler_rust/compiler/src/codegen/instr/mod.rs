@@ -1305,6 +1305,24 @@ pub fn compile_instruction<M: Module>(
         MirInst::BoxInt { dest, value } => {
             // Box integer as RuntimeValue: (value << 3) | TAG_INT
             // TAG_INT is 0, so this is equivalent to value << 3
+            //
+            // DEFECT B (symmetric to UnboxInt Task #123): a value that is ALREADY a
+            // tagged RuntimeValue heap handle (a user enum/struct/class = TypeId >= 16,
+            // or ANY/STRING) must NOT be re-boxed — `handle << 3` shifts its TAG_HEAP
+            // bits away and corrupts the pointer, so a later
+            // rt_enum_discriminant/rt_enum_payload reads a garbage/nil payload
+            // ("field access on nil receiver" in freestanding one-binary builds). Pass
+            // it through verbatim; UnboxInt already passes TAG_HEAP through.
+            let src_ty = ctx.vreg_types.get(value).copied();
+            if matches!(src_ty, Some(t) if t == TypeId::STRING || t == TypeId::ANY || t.0 >= 16) {
+                let handle = ctx
+                    .vreg_values
+                    .get(value)
+                    .copied()
+                    .unwrap_or_else(|| builder.ins().iconst(types::I64, 0));
+                ctx.vreg_values.insert(*dest, handle);
+                return Ok(());
+            }
             let mut val = ctx.vreg_values.get(value).copied().unwrap_or_else(|| {
                 // Missing VReg, use default 0
                 builder.ins().iconst(types::I64, 0)

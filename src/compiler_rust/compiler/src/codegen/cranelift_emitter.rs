@@ -681,6 +681,25 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
     // Boxing
     // =========================================================================
     fn emit_box_int(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
+        // DEFECT B (symmetric to UnboxInt Task #123): a value that is ALREADY a
+        // tagged RuntimeValue heap handle (a user enum/struct/class = TypeId >= 16,
+        // or ANY/STRING) must NOT be re-boxed — `handle << 3` shifts its TAG_HEAP
+        // bits away and corrupts the pointer, so a later
+        // rt_enum_discriminant/rt_enum_payload on the boxed value reads a garbage/nil
+        // payload ("field access on nil receiver" in freestanding one-binary builds).
+        // Pass such handles through verbatim; UnboxInt already passes TAG_HEAP through,
+        // so both directions stay consistent.
+        let src_ty = self.ctx.vreg_types.get(&value).copied();
+        if matches!(src_ty, Some(t) if t == TypeId::STRING || t == TypeId::ANY || t.0 >= 16) {
+            let handle = self
+                .ctx
+                .vreg_values
+                .get(&value)
+                .copied()
+                .unwrap_or_else(|| self.builder.ins().iconst(types::I64, 0));
+            self.ctx.vreg_values.insert(dest, handle);
+            return Ok(());
+        }
         let mut val = self
             .ctx
             .vreg_values
