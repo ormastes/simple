@@ -22,10 +22,18 @@ prints: Checking src/lib/nogc_sync_mut/text_layout/font_types.spl...
 exit=139
 ```
 
-The freshly built `build/bootstrap-font-fresh-origin-stage55/simple` also exits
-139 for the single-file check. Its `test` invocation treats the SSpec as an
-ordinary source file, so it is not a valid replacement for the deployed full
-CLI.
+The tracked deployed CLI crash is now proven to be the stale two-argument
+`rt_env_set` artifact ABI documented in
+`deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`. The current caller
+correctly supplies `(key_ptr, key_len, value_ptr, value_len)`; the old linked
+callee treats `key_len=27` as the value pointer and faults at `strlen(0x1b)`.
+This is not a font-source failure.
+
+A fresh minimal stage compiler is not a full test CLI. The bounded current-source
+rebuild additionally exposed a bootstrap-parser rejection and a full-CLI
+closure/runtime link gap; the existing focused test-entry build produced no
+artifact within the 20-minute cap. None is a valid replacement for deployed
+pure-Simple verification.
 
 ## Required fix/evidence
 

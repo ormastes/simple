@@ -255,7 +255,12 @@ loads the unchanged bundled face; unavailable tuples reject before cache
 mutation. Engine3D fixes one font target per frame and promotes Vulkan from
 `pending` to selected only after end-frame device readback evidence. Focused unit and shared-surface
 specs cover source behavior; REQ-015 remains open until the deployed
-pure-Simple runtime executes those specs successfully.
+pure-Simple runtime executes those specs successfully. The tracked deployed
+artifact currently links an obsolete two-argument `rt_env_set` against
+four-argument callers; the bounded current-source rebuild then reaches separate
+bootstrap-parser and full-CLI closure/runtime link blockers. These are compiler/runtime
+deployment defects, not font-source failures, and no seed or minimal stage
+binary substitutes for the missing execution proof.
 
 ## GPU code emission is not execution
 

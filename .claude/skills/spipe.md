@@ -104,9 +104,11 @@ Ground truth (2026-07-14): cross-build + boot + FS-exec *staging* of the
 target-native Simple compiler is proven on all three simpleos arches
 (`bin/release/<arch>-unknown-simpleos/simple`, 4 MB static EXEC, fail-closed
 `readelf` gate). In-guest *execution* (`/usr/bin/simple --version` + hello) is
-NOT yet reachable — blocked on the deployed-compiler `env_set` SEGV
+NOT yet reachable — blocked on the deployed full CLI's stale two-argument
+`rt_env_set` artifact ABI
 (`doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`)
-and the #99 seed-cranelift enum miscompile. So: build the payload with
+and the #99 seed-cranelift enum miscompile. A current-source rebuild also has
+separate bootstrap-parser and full-CLI closure/runtime link blockers. So: build the payload with
 `src/compiler_rust/target/bootstrap/simple` (the deployed `bin/simple` SEGVs on
 every `native-build`), and classify a compiler-in-filesystem lane as
 staging-proven (not in-guest-run) until the self-hosted redeploy lands. Do NOT

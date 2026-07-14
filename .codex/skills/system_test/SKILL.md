@@ -180,6 +180,11 @@ describe "<Feature Name>":
   cache, counter, upload, framebuffer, or backend mutation.
   Unsupported rendering modes or CTM must fail before cache generation,
   telemetry, upload, or backend state changes.
+  Before accepting deployed font execution, prove the candidate uses the
+  four-argument `rt_env_set(key_ptr, key_len, value_ptr, value_len)` ABI and
+  passes one tiny `check` fixture. A bootstrap-only stage compiler, a Rust
+  seed, or a candidate whose full-CLI closure has unresolved runtime
+  symbols is blocker evidence, not an executable font PASS.
   Shaped pixel evidence must include a nonzero bearing or GPOS offset and check
   the full CPU/device pixels. Pen positions are +Y-down baseline offsets;
   OpenType y offsets are negated, and quad top-left is
