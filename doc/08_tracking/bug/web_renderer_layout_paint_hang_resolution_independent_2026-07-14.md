@@ -66,9 +66,31 @@ the original suspect was incomplete. The memoization was reverted (unproven
 benefit, adds shared mutable state to a peer-active file); only the split
 crash-fix was kept.
 
-Next step (real root-cause): add sub-step `[layout-trace]` markers INSIDE
-`compute_styles` (simple_web_html_layout_renderer.spl:5744) to find which
-per-node operation dominates — candidates now include `measure_text_advances`
-glyph rasterization, `current_font_identity` FFI snapshotting, or a
-cascade/selector-matching loop that is O(nodes x rules). Do not assume font
-loading; the data says otherwise.
+## Update 2026-07-14 (2): NOT a perf hang — a cascade of seed-interpreter-unsupported constructs
+Per-node `[TRACE-TMP]` markers inside `compute_styles` settled it. Setup
+(`build_rule_buckets`/`build_selector_context`/`build_rule_specificities`) is
+instant; nodes 0-4 (#root/html/body/header/strong) process in <1ms each; then
+node 5 (the first `#text`) hits, in order, hard SEED-INTERPRETER errors — not a
+slow loop:
+1. `method 'split' not found on value of type str in nested call context`
+   (fixed: `font_provider.spl:82`, `font_renderer.spl` `_resolved_font_language`).
+2. After that fix: `unsupported path call: ["FontRenderConfig", "default_for_size"]`
+   — the seed interpreter cannot lower the static path call
+   `FontRenderConfig.default_for_size(font_size)` (6 sites in font_renderer.spl:
+   74, 788, 882, 918, 1001, 1256, several chained `.identity()`).
+3. Also present throughout: `HIR lowering error: Unknown variable: unit while
+   lowering _sfnt_utf16be_text` (JIT→interpreter fallback).
+
+CONCLUSION: the earlier "hang" was the interpreter grinding on this cascade, not
+an O(n) font-load or O(nodes×rules) selector cost. The pure-Simple web renderer
+requires the COMPILED lane; the SEED interpreter has multiple unsupported-construct
+gaps in the font/text path (static path calls, erased-receiver method resolution,
+`_sfnt` HIR lowering). The deployed compiled `bin/simple` — which handles these —
+is separately blocked by the `rt_cli_arg_count` unknown-extern regression. So a
+web-showcase PPM is TOOLCHAIN-blocked on BOTH lanes, not a renderer-logic defect.
+
+Fix path (either unblocks the web showcase):
+- Seed: add interpreter support for static path calls (`Type.static_method()`)
+  + erased-receiver builtin method resolution, and lower `_sfnt_utf16be_text`.
+- OR redeploy Stage-4 `bin/simple` past the `rt_cli_arg_count` regression, then
+  render via the compiled lane where these constructs already work.
