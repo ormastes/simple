@@ -28,6 +28,7 @@ use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I1
 use compiler.core.types.{TYPE_DICT, TYPE_FN, TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
 use compiler.core.types.{TYPE_RESULT, TYPE_FUTURE, TYPE_POLL, TYPE_TASK, TYPE_GENERIC_ERASED}
 use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NAMED_BASE, TYPE_UNION_BASE, type_tag_name, int_to_str}
+use compiler.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value}
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
@@ -232,6 +233,18 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
         return Type(kind: TypeKind.Named("nil", []), span: make_span())
     if type_expr_idx == TYPE_DICT:
         return Type(kind: TypeKind.Named("Dict", []), span: make_span())
+    # Dict<K,V> specialization (bug: dicttype): the parser registers each
+    # distinct Dict<K,V> annotation's key/value tags and encodes the result
+    # as TYPE_DICT_BASE + id (see core.types.dict_type_register). Recover the
+    # real key/value Type args here instead of silently collapsing to the
+    # bare, argless Dict above -- this check must precede the generic
+    # `>= TYPE_UNION_BASE` catch-all below since is_dict_tag's range also
+    # satisfies that comparison.
+    if is_dict_tag(type_expr_idx):
+        val did = dict_tag_to_id(type_expr_idx)
+        val key_tag = dict_type_get_key(did)
+        val value_tag = dict_type_get_value(did)
+        return Type(kind: TypeKind.Named("Dict", [convert_flat_type(key_tag), convert_flat_type(value_tag)]), span: make_span())
     if type_expr_idx == TYPE_FN:
         return Type(kind: TypeKind.Named("fn", []), span: make_span())
     if type_expr_idx == TYPE_OPTION:

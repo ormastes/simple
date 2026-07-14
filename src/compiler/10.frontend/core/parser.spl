@@ -46,6 +46,7 @@ use compiler.core.types.{int_to_str}
 use compiler.core.types.{named_type_find}
 use compiler.core.types.{primitive_integer_bit_width_from_name}
 use compiler.core.types.{union_type_register}
+use compiler.core.types.{dict_type_register}
 use std.string_core.{char_code}
 
 # Import from split modules
@@ -443,11 +444,14 @@ fn parser_parse_type() -> i64:
             parser_advance()
             val inner_type = parser_parse_type()
             # Handle multi-param generics: Dict<K, V>, Result<T, E>
+            var extra_type = inner_type
+            var has_extra_type: bool = false
             for i in 0..10:
                 if par_kind_get() != 160:
                     break
                 parser_advance()
-                val extra_type = parser_parse_type()
+                extra_type = parser_parse_type()
+                has_extra_type = true
             parser_expect(83)
             # Handle Option<T>
             if type_name == "Option":
@@ -463,8 +467,13 @@ fn parser_parse_type() -> i64:
             # Handle Result<T, E> (simplified - just return TYPE_RESULT)
             if type_name == "Result":
                 return TYPE_RESULT
-            # Dict<K,V> -> TYPE_DICT
+            # Dict<K,V> -> register the key/value tags (bug: dicttype -- this
+            # used to unconditionally return the bare TYPE_DICT sentinel,
+            # silently dropping K/V so every dict-typed param/local arrived at
+            # the AST bridge as Named("Dict", []) with no generic args).
             if type_name == "Dict":
+                if has_extra_type:
+                    return dict_type_register(inner_type, extra_type)
                 return TYPE_DICT
             # Unknown generic type - check if base is a named struct
             val gid = named_type_find(type_name)
