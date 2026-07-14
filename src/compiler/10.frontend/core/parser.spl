@@ -266,6 +266,38 @@ fn parser_guarded_int_text(t: text) -> i64:
     if not ok:
         parser_error("malformed integer literal token text '" + t + "'")
         return 0
+    # Overflow guard: a decimal literal whose magnitude cannot possibly fit in
+    # i64 must be a LOUD parse error, not a silently-wrapped garbage value
+    # (constedge lane numeric-literal sweep 2026-07-14: native-build accepted
+    # `99999999999999999999` and silently produced 7766279631452241919, while
+    # the oracle correctly rejects it as "Invalid integer"). i64::MAX
+    # ("9223372036854775807") has 19 digits, so any 20+-digit literal is
+    # unambiguously out of range. At exactly 19 digits, allow up to
+    # "9223372036854775808" (2**63, one past i64::MAX) inclusive — that exact
+    # magnitude is required by the `-9223372036854775808` (i64::MIN) literal
+    # idiom, which relies on this text wrapping to i64::MIN here and then
+    # wrapping back to i64::MIN under negation. Anything larger is rejected.
+    if t.len() > 19:
+        parser_error("integer literal out of range for i64: '" + t + "'")
+        return 0
+    if t.len() == 19:
+        val max19 = "9223372036854775808"
+        var ci = 0
+        var too_big = false
+        var still_equal = true
+        while ci < 19:
+            val tc = char_code(t[ci:ci + 1])
+            val mc = char_code(max19[ci:ci + 1])
+            if still_equal:
+                if tc > mc:
+                    too_big = true
+                    still_equal = false
+                elif tc < mc:
+                    still_equal = false
+            ci = ci + 1
+        if too_big:
+            parser_error("integer literal out of range for i64: '" + t + "'")
+            return 0
     # Manual decimal accumulation: the builtin int(text) miscompiles on stage4
     # (returns the FIRST character's char code: int("1")==49, int("12")==49 —
     # print(1+1) printed 98; bug doc iteration 18/20 #87). The input is
