@@ -147,6 +147,13 @@ impl HirLowering:
         val trait_ = if impl_.trait_.?: self.lower_type(impl_.trait_) else: nil
 
         var methods: Dict<text, SymbolId> = {}
+        # Method name -> declared return type's struct NAME (methchain lane;
+        # see HirImpl.method_return_struct_names doc comment). Computed here,
+        # not at MIR time, because HIR lowering has already resolved the
+        # method's `-> Pt` return annotation via self.symbols regardless of
+        # whether the eventual backend path runs expression type-inference.
+        var method_return_struct_names: Dict<text, text> = {}
+        var method_return_is_array: Dict<text, bool> = {}
         val previous_self_type = self.current_method_self_type
         self.current_method_self_type = Some(type_)
         for name in impl_.methods.keys():
@@ -154,6 +161,20 @@ impl HirLowering:
             val hir_fn = self.lower_function(fn_)
             methods[name] = hir_fn.symbol
             self.lowered_impl_functions[hir_fn.symbol] = hir_fn
+            var ret_struct_name = ""
+            var ret_is_array = false
+            match hir_fn.return_type.kind:
+                case Named(ret_type_symbol, _):
+                    val ret_sym = self.symbols.get_symbol(ret_type_symbol)
+                    if ret_sym != nil:
+                        ret_struct_name = ret_sym.name
+                case Array(_, _):
+                    ret_is_array = true
+                case Slice(_):
+                    ret_is_array = true
+                case _: ()
+            method_return_struct_names[name] = ret_struct_name
+            method_return_is_array[name] = ret_is_array
         self.current_method_self_type = previous_self_type
 
         # Inject trait default methods that this impl does NOT override.
@@ -185,6 +206,8 @@ impl HirLowering:
             type_params: type_params,
             where_clause: where_clause,
             methods: methods,
+            method_return_struct_names: method_return_struct_names,
+            method_return_is_array: method_return_is_array,
             assoc_type_impls: assoc_type_impls,
             span: impl_.span
         )

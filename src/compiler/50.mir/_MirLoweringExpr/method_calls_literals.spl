@@ -1030,6 +1030,32 @@ impl MirLowering:
                             im_wb_value = im_result_local
                         self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, im_wb_value)
                         if val im_result_local = im_result:
+                            # Thread the callee's declared return struct name
+                            # onto the result local (methchain lane fix) so a
+                            # chained `.m2()` on THIS call's result resolves
+                            # via the same struct_value_syms lookup the
+                            # receiver used above. Looked up text-keyed (NOT
+                            # via the method SymbolId's HIR .type_, which is
+                            # nil here -- native-build's --entry path never
+                            # runs the HIR type-inference pass that would
+                            # populate it) from struct_method_return_names,
+                            # built at HIR-lowering time in
+                            # trait_impl_lowering.spl where the method's
+                            # `-> Pt` annotation IS resolved regardless of
+                            # path -- see HirImpl.method_return_struct_names.
+                            val im_ret_struct_name = self.struct_method_return_names.get(unresolved_method_key)
+                            if im_ret_struct_name != nil and im_ret_struct_name != "":
+                                self.struct_value_syms[im_result_local.id] = im_ret_struct_name
+                            # Methchain lane construct #5 (`obj.items()[0]`):
+                            # register the result into runtime_array_locals
+                            # when the method's declared return type is
+                            # Array/Slice, so a chained `[idx]` on this call's
+                            # result indexes through the runtime array path
+                            # (see struct_method_return_is_array doc comment)
+                            # instead of silently misreading the raw boxed
+                            # handle as an offset.
+                            if self.struct_method_return_is_array.has(unresolved_method_key):
+                                self.runtime_array_locals[im_result_local.id] = true
                             return im_result_local
                         var im_b2 = self.builder
                         val im_temp = im_b2.new_temp(MirType.i64())
