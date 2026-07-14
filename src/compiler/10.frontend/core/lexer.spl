@@ -55,6 +55,14 @@ var current_core_lexer_slot: [CoreLexer] = []
 var lex_env_save_enabled: [bool] = [false]
 var lex_cur_kind_direct: [i64] = [0]
 var lex_cur_text_direct: [text] = [""]
+# Module-global slot mirror of the active lexer source. current_core_source_get
+# formerly read the source ONLY from the SIMPLE_BOOTSTRAP_LEX_SOURCE env var,
+# which does not function in the SimpleOS guest (native env_set/get is a no-op) —
+# so every lex_source_slice returned "", every identifier came out empty, and the
+# in-guest interpreter could not resolve any name (`print` → unresolved → no
+# output). A module-global slot persists in the guest (like lex_cur_text_direct),
+# so mirror the source here and read it first.
+var lex_inline_source_slot: [text] = [""]
 var lex_cur_line_direct: [i64] = [0]
 var lex_cur_col_direct: [i64] = [0]
 var lex_cur_suffix_direct: [text] = [""]
@@ -123,6 +131,9 @@ fn lex_init_with_path(source: text, source_path: text):
     var core_source = source
     if core_source == "" and source_path != "":
         core_source = rt_file_read_text(source_path) ?? ""
+    if lexer_array_len(lex_inline_source_slot) == 0:
+        lex_inline_source_slot = [""]
+    lex_inline_source_slot[0] = core_source
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", core_source)
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", source_path)
     # Perf signal: bump the source generation so the parser's whole-source cache
@@ -372,6 +383,9 @@ fn current_core_indent_stack_set(values: [i64]):
     lex_state_set("core_indent_stack", parts.join(","))
 
 fn current_core_source_get() -> text:
+    # Guest-first: the module-global slot persists where the env var does not.
+    if lexer_array_len(lex_inline_source_slot) > 0 and lex_inline_source_slot[0] != "":
+        return lex_inline_source_slot[0]
     val inline_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
     if inline_source != "":
         return inline_source

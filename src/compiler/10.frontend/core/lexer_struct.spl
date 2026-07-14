@@ -167,7 +167,18 @@ impl CoreLexer:
             e = n
         if e <= s:
             return ""
-        self.source_chars[s:e].join("")
+        # Build char-by-char via index access instead of `source_chars[s:e].join("")`:
+        # the array-slice `[s:e]` (and/or `.join`) returns an EMPTY string in the
+        # SimpleOS guest (native value-type array-slice bug), so every identifier
+        # token text came out empty and no name resolved in the in-guest
+        # interpreter. Individual index access `source_chars[i]` works, so a manual
+        # concatenation loop is correct on both host and guest.
+        var result: text = ""
+        var i: i64 = s
+        while i < e:
+            result = result + self.source_chars[i]
+            i = i + 1
+        result
 
     fn token_kind() -> i64:
         self.cur_kind
@@ -685,7 +696,9 @@ impl CoreLexer:
         self.pos = pos
         # identifiers never contain newlines
         self.col = self.col + (pos - start)
-        val ident_text: text = src[start:pos].join("")
+        # `src[start:pos].join("")` returns "" in the SimpleOS guest (native
+        # value-type array-slice bug); char_slice builds it via an index loop.
+        val ident_text: text = self.char_slice(start, pos)
 
         # G36: r"..." raw string — backslashes are literal, no escape processing.
         # Matches Rust seed scan_raw_double_string semantics: read until closing "
