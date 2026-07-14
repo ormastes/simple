@@ -23,6 +23,11 @@
 use std.common.encoding.sfnt.{validate_glyf_font_instance, sfnt_manifest_tables_match, sfnt_manifest_names_match}
 use std.common.crypto.sha256.{sha256_u8_hex}
 
+# Native file-hash: computes sha256 of the file at `path` in the runtime instead
+# of hashing a 17MB+ [u8] blob byte-by-byte in the interpreter. Verified to
+# produce the identical lowercase-hex digest as sha256_u8_hex(file_read_bytes(path)).
+extern fn rt_file_hash_sha256(path: text) -> text
+
 # ============================================================================
 # Font type classification
 # ============================================================================
@@ -639,7 +644,12 @@ fn validate_selected_font_asset(path: text, blob: [u8]) -> FontAssetRuntimeValid
         None: return _font_asset_validation(false, true, "", "unmanaged")
     if blob.len() != candidate.byte_len:
         return _font_asset_validation(true, false, candidate.family, "byte-length")
-    if not _font_sha256_hex_valid(candidate.sha256) or sha256_u8_hex(blob) != candidate.sha256:
+    # Hash the file natively (rt_file_hash_sha256) rather than the 17MB blob in
+    # the interpreter: sha256_u8_hex(blob) here was the single dominant cost of a
+    # font load (~40 min for the 17MB universal sans face under the tree-walking
+    # interpreter, which the JIT cannot accelerate). blob is always the bytes of
+    # the file at `path` in every load flow, so the digest is identical.
+    if not _font_sha256_hex_valid(candidate.sha256) or rt_file_hash_sha256(path) != candidate.sha256:
         return _font_asset_validation(true, false, candidate.family, "sha256")
     val instance = validate_glyf_font_instance(blob, candidate.default_axes)
     if not instance.supported:
