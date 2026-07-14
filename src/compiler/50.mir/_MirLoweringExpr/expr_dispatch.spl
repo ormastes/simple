@@ -1338,14 +1338,81 @@ impl MirLowering:
                 result_local
 
             case ExistsCheck(base):
+                # `.?` (existence check) returns T? — the payload itself when
+                # present, nil when absent (doc/07_guide/quick_reference/
+                # syntax_quick_reference.md "Existence Check (.?) - Returns T?").
+                # It must NOT collapse to the bare `rt_is_some` bool: that
+                # discarded the payload (e.g. `if val v = x.?: return v`
+                # returned 1 instead of x's value), the native-smoke-matrix
+                # "(14) Option/nil check (x.?)" regression.
+                #
+                # Merge via a shared result slot (store-in-each-branch, single
+                # load after the merge block) instead of the __simple_ssa_phi
+                # intrinsic used by NullCoalesce just above: that intrinsic
+                # calls translate_operand() on each arm's value at the point
+                # the phi instruction itself is translated (in the merge
+                # block), which re-emits a fresh load for any memory-backed
+                # local right before the `phi` line -- violating LLVM's "phi
+                # must be first in the block" rule ("PHI nodes not grouped at
+                # top of basic block!"). That is a pre-existing bug in the
+                # shared intrinsic, reproducible standalone on plain
+                # `x ?? default` too, not something newly introduced here.
+                # `lower_if` (mir_lowering_stmts.spl) sidesteps it exactly
+                # this way, so mirror that proven pattern.
                 val base_local = self.lower_expr(base)
-                val is_some = MirOperand(kind: MirOperandKind.Const(
+                var result_type = MirType.i64()
+                if val expr_type = expr_value.type_:
+                    result_type = self.lower_type(expr_type)
+                var b_ec = self.builder
+                val is_some_func = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_is_some"),
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(
                         params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
                     )))
                 ))
-                self.emit_resolved_direct_call(is_some, [mir_operand_copy(base_local)], MirType.bool())
+                val is_some_res = b_ec.emit_call(is_some_func, [mir_operand_copy(base_local)], MirType.bool())
+                self.builder = b_ec
+                var is_some_local = LocalId(id: 0)
+                if val isl = is_some_res:
+                    is_some_local = isl
+
+                var b_split = self.builder
+                val then_block = b_split.new_block(Some("exists_check_some"))
+                val else_block = b_split.new_block(Some("exists_check_none"))
+                val merge_block = b_split.new_block(Some("exists_check_merge"))
+                val result_local = b_split.new_temp(result_type)
+                b_split.terminate_if(mir_operand_copy(is_some_local), then_block, else_block)
+                self.builder = b_split
+
+                var b_then = self.builder
+                b_then.switch_to_block(then_block)
+                self.builder = b_then
+                var some_value = base_local
+                if self.runtime_value_locals.has(base_local.id):
+                    some_value = self.decode_runtime_value(base_local, result_type)
+                b_then = self.builder
+                b_then.emit_copy(result_local, some_value)
+                b_then.terminate_goto(merge_block)
+                self.builder = b_then
+
+                var b_else = self.builder
+                b_else.switch_to_block(else_block)
+                self.builder = b_else
+                b_else.emit_const(result_local, MirConstValue.Int(0), result_type)
+                b_else.terminate_goto(merge_block)
+                self.builder = b_else
+
+                if self.runtime_value_locals.has(some_value.id):
+                    self.runtime_value_locals[result_local.id] = true
+                if self.runtime_array_locals.has(some_value.id):
+                    self.runtime_array_locals[result_local.id] = true
+                if self.runtime_dict_locals.has(some_value.id):
+                    self.runtime_dict_locals[result_local.id] = true
+
+                var b_merge = self.builder
+                b_merge.switch_to_block(merge_block)
+                self.builder = b_merge
+                result_local
 
             case Try(try_base):
                 # `expr?` — Err propagates via early return, Ok yields payload.
