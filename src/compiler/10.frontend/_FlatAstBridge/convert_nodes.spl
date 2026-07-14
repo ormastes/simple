@@ -1077,19 +1077,28 @@ fn convert_decl_fn(idx: i64) -> Function:
         eprint("[flat-bridge] fn:start {name}")
     val p_names = decl_get_param_names(idx)
     val p_types = decl_get_param_types(idx)
+    # Per-parameter `mut` marker (native_freefn_mut_param_no_mutate fix),
+    # parallel to p_names/p_types; parser_skip_mut_if_present's PARAM_MUTS
+    # side table (fn_struct_decls.spl) is the only surviving record that a
+    # free-function param was declared `mut name: T` -- thread it onto Param
+    # here so it reaches HirParam (declaration_lowering.spl's lower_param)
+    # and, from there, MIR function_lowering.spl's by-reference bind.
+    val p_muts = decl_get_param_muts(idx)
     val span = make_span()
     var params: [Param] = []
     var pi = 0
     while pi < p_names.len():
         val p_type = if pi < p_types.len(): p_types[pi] else: 0
         val has_t = p_type > 0
+        val p_is_mut = pi < p_muts.len() and p_muts[pi] != 0
         params.push(Param(
             name: p_names[pi],
             has_type_: has_t,
             type_: if has_t: convert_flat_type(p_type) else: Type(kind: TypeKind.Infer, span: span),
             has_default: false,
             default: Expr(kind: ExprKind.NilLit, span: span),
-            span: span
+            span: span,
+            is_mutable: p_is_mut
         ))
         pi = pi + 1
 
@@ -1304,7 +1313,8 @@ fn convert_decl_extern_fn(idx: i64) -> Function:
             type_: if has_t: convert_flat_type(p_type) else: Type(kind: TypeKind.Infer, span: span),
             has_default: false,
             default: Expr(kind: ExprKind.NilLit, span: span),
-            span: span
+            span: span,
+            is_mutable: false
         ))
         pi = pi + 1
 

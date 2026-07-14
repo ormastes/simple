@@ -159,21 +159,30 @@ impl MirLowering:
             # `me` receiver, so `me.field = v` stored into the copy instead
             # of the caller's struct (verified by construction: native build
             # printed the pre-call value, never the mutated one). `me` is
-            # the ONLY receiver form that must alias the caller's memory --
-            # a plain `mut s: S` free-function param carries no equivalent
-            # marker post-parse (`parser_skip_mut_if_present` documents `mut`
-            # as a parse-time no-op) so it is out of scope here and keeps
-            # the existing (copy) behavior.
+            # one by-reference receiver form; the other is a `mut`-marked
+            # struct parameter of a FREE function
+            # (native_freefn_mut_param_no_mutate): `mut s: S` now reaches
+            # here as `param.is_mutable` (threaded from the parser's
+            # PARAM_MUTS side table -- fn_struct_decls.spl's
+            # parser_skip_mut_if_present -> decl_set_param_muts ->
+            # convert_nodes.spl's Param.is_mutable -> declaration_lowering.spl's
+            # lower_param -> HirParam.is_mutable), mirroring how `me`'s
+            # by-reference signal reaches this same lowering step. A PLAIN
+            # (non-`mut`) struct param must keep the Bug #167 copy -- only
+            # `me`/`self` receivers and explicitly `mut`-marked params alias
+            # the caller's memory.
             val is_me_receiver = fn_.is_mutable and pli == 0 and (param.name == "self" or param.name == "me")
+            val is_mut_param = param.is_mutable
             match param.type_.kind:
                 case Named(type_symbol, _):
                     val parameter_type = self.symbols.get_symbol(type_symbol)
                     val is_named_struct = parameter_type != nil and self.struct_field_order.has(parameter_type.name)
-                    if is_named_struct and is_me_receiver:
-                        # Bind the receiver directly to the raw incoming arg
-                        # local (already mapped via self.local_map above) --
-                        # NO defensive copy, NO local_map rebind -- so a
-                        # `me.field = v` store inside the method body writes
+                    if is_named_struct and (is_me_receiver or is_mut_param):
+                        # Bind the receiver/mut-param directly to the raw
+                        # incoming arg local (already mapped via
+                        # self.local_map above) -- NO defensive copy, NO
+                        # local_map rebind -- so a `me.field = v` /
+                        # `mut s: S` store inside the callee body writes
                         # through to the exact same memory the caller passed.
                         self.struct_value_syms[local.id] = parameter_type.name
                     elif is_named_struct:

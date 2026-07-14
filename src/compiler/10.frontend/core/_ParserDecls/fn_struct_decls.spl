@@ -83,7 +83,7 @@ fn parser_skip_tilde_if_present():
     if par_kind_get() == 123:
         parser_advance()
 
-fn parser_skip_mut_if_present():
+fn parser_skip_mut_if_present() -> bool:
     # Skip a leading `mut` modifier in a parameter declaration (`mut buf: [u8]`).
     # `mut` lexes as a plain identifier (kind 6) — it is NOT reserved, so it CAN
     # be used as a parameter name (`fn f(mut: i32)`). Consuming it on a bare
@@ -93,8 +93,10 @@ fn parser_skip_mut_if_present():
     # treat `mut` as the modifier when the following token is itself a valid
     # parameter-name token (identifier or `self`) — i.e. `mut buf`/`mut self`,
     # not `mut:` or `mut)` where `mut` is the parameter name.
-    # The mutability annotation is a no-op at the stage4 self-hosted frontend
-    # (the interpreter already permits reassignment of the bound param name).
+    # Returns true when a `mut` modifier was actually consumed, so callers can
+    # thread the marker into PARAM_MUTS (native_freefn_mut_param_no_mutate):
+    # a free-function `mut` param must reach MIR lowering to bind by-reference
+    # instead of taking the Bug #167 defensive struct-value-copy.
     if par_kind_get() == 6 and par_text_get() == "mut":
         val (mut_snap_nums, mut_snap_txts) = lex_snapshot_save()
         val (mut_tok_nums, mut_tok_text) = parser_tok_save()
@@ -104,6 +106,8 @@ fn parser_skip_mut_if_present():
         parser_tok_restore(mut_tok_nums, mut_tok_text)
         if next_is_param_name:
             parser_advance()
+            return true
+    false
 
 fn parser_expect_param_name():
     # Accept IDENT, SELF, UNDERSCORE, or any keyword as parameter name (e.g. cli, mcp, type)
@@ -322,6 +326,7 @@ fn parse_fn_decl(is_async: i64) -> i64:
     var param_names: [text] = []
     var param_types: [i64] = []
     var param_defaults: [i64] = []
+    var param_muts: [i64] = []
 
     # Canonical zero-argument Simple syntax permits `fn main:` without `()`.
     if par_kind_get() == 140:
@@ -329,10 +334,11 @@ fn parse_fn_decl(is_async: i64) -> i64:
         if par_kind_get() != 141:
             # First parameter (skip ~ keyword-only marker + optional `mut` modifier)
             parser_skip_tilde_if_present()
-            parser_skip_mut_if_present()
+            val p0_is_mut = parser_skip_mut_if_present()
             val pname = par_text_get()
             parser_expect_param_name()
             param_names.push(pname)
+            param_muts.push(if p0_is_mut: 1 else: 0)
             var ptype = 0
             if par_kind_get() == 161:
                 parser_advance()
@@ -352,10 +358,11 @@ fn parse_fn_decl(is_async: i64) -> i64:
                 if par_kind_get() == 141:
                     break
                 parser_skip_tilde_if_present()
-                parser_skip_mut_if_present()
+                val pn_is_mut = parser_skip_mut_if_present()
                 val pn = par_text_get()
                 parser_expect_param_name()
                 param_names.push(pn)
+                param_muts.push(if pn_is_mut: 1 else: 0)
                 var pt = 0
                 if par_kind_get() == 161:
                     parser_advance()
@@ -398,6 +405,7 @@ fn parse_fn_decl(is_async: i64) -> i64:
 
     val fn_decl_idx = decl_fn(fn_name, param_names, param_types, ret_type, body, is_async, type_params, 0)
     decl_set_param_defaults(fn_decl_idx, param_defaults)
+    decl_set_param_muts(fn_decl_idx, param_muts)
     fn_decl_idx
 
 fn parse_extern_fn_decl() -> i64:

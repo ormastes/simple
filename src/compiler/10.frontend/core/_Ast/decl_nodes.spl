@@ -207,6 +207,17 @@ var decl_derives: [[text]] = []      # @derive(Eq, Hash, Debug) trait list
 var decl_is_hardware: [i64] = []     # 1 if @hardware decorated, 0 otherwise
 var decl_clocked_args: [[text]] = [] # @clocked(clk, reset_n) signal names
 var decl_is_value_type: [i64] = []   # 1 = struct (value semantics, copy on bind), 0 = class/actor (reference semantics)
+# Per-parameter `mut` marker (native_freefn_mut_param_no_mutate fix), comma-joined
+# i64 list parallel to PARAM_NAMES/PARAM_TYPES (1 = declared `mut name: T`).
+# Grown alongside the other pools here (decl_push_default_slot/decl_ensure_slot)
+# rather than lazily in its own setter: verified by construction that growing
+# an array via `.push()` and then index-assigning into that same freshly-grown
+# slot INSIDE ONE function call does not reliably persist across the following
+# call in this interpreter, whereas the established pattern used by every
+# other pool here -- grow-with-a-placeholder up front (in decl_ensure_slot),
+# assign the real value later in a separate call with no preceding push in
+# that same call -- does.
+var decl_param_mut_text: [text] = []
 
 fn decl_count() -> i64:
     ast_decl_count_get()
@@ -239,6 +250,7 @@ fn decl_push_default_slot(tag: i64, span_id: i64):
     decl_is_hardware.push(0)
     decl_clocked_args.push([])
     decl_is_value_type.push(1)
+    decl_param_mut_text.push("")
 
 fn decl_ensure_slot(idx: i64, tag: i64, span_id: i64):
     while decl_tag.len() <= idx:
@@ -270,6 +282,7 @@ fn decl_ensure_slot(idx: i64, tag: i64, span_id: i64):
     decl_is_hardware[idx] = 0
     decl_clocked_args[idx] = []
     decl_is_value_type[idx] = 1
+    decl_param_mut_text[idx] = ""
 
 fn decl_alloc(tag: i64, span_id: i64) -> i64:
     if decl_tag == nil:
@@ -658,6 +671,39 @@ fn decl_get_param_defaults(idx: i64) -> [i64]:
     val env_value = ast_decl_text_get(idx, "PARAM_DEFAULTS")
     if env_value != "":
         return ast_i64_list_split(env_value)
+    []
+
+# Per-parameter `mut` marker (parallel to PARAM_NAMES; 1 = the parameter was
+# declared `mut name: T`, 0 = plain). native_freefn_mut_param_no_mutate fix:
+# a free function's `mut` param must reach MIR lowering (function_lowering.spl)
+# so it can bind by-reference instead of taking the Bug #167 defensive
+# struct-value-copy, mirroring how a `me` receiver's is_mutable flag already
+# reaches that same lowering step.
+#
+# NOTE: this does NOT reuse the ast_decl_text_set/get "PARAM_DEFAULTS"-style
+# text-field store used elsewhere in this file. Verified by construction: that
+# store's writer (`ast_decl_text_set`) only actually calls `rt_env_set` for a
+# fixed allowlist of field names (NAME/PARAM_NAMES/PARAM_TYPES/TYPE_PARAMS/
+# BODY) OR when `ast_decl_env_mirror_enabled()` (SIMPLE_BOOTSTRAP=1, no arena
+# mode) -- under a plain `native-build --entry` run (no SIMPLE_BOOTSTRAP, arena
+# mode ON) that condition is false for EVERY field including the allowlisted
+# ones, so `ast_decl_text_set` never calls `rt_env_set` at all in this mode;
+# `decl_get_param_defaults` above has never actually round-tripped a value
+# here. PARAM_MUTS instead uses `decl_param_mut_text` (declared with the other
+# arena pools above), grown alongside them in decl_push_default_slot/
+# decl_ensure_slot -- confirmed by construction that growing an array with
+# `.push()` and then index-assigning into that SAME freshly-grown slot inside
+# ONE function call does not reliably persist once that call returns, whereas
+# growing up front (in the slot-management functions) and assigning the real
+# value later in a separate call, with no preceding push in that call, is the
+# pattern every other pool here already relies on.
+fn decl_set_param_muts(idx: i64, muts: [i64]):
+    if idx >= 0 and idx < decl_param_mut_text.len():
+        decl_param_mut_text[idx] = ast_i64_list_join(muts)
+
+fn decl_get_param_muts(idx: i64) -> [i64]:
+    if idx >= 0 and idx < decl_param_mut_text.len():
+        return ast_i64_list_split(decl_param_mut_text[idx])
     []
 
 fn decl_get_field_bits(idx: i64) -> [i64]:
