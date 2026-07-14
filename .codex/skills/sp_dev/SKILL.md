@@ -414,8 +414,9 @@ font GPU emission, or GUI/Web/2D/3D text.
    compatibility renderers, not equivalent completion paths. Canonical
    SimpleOS runner/readiness targets select `gui_entry_desktop.spl`; direct
    legacy `wm_entry.spl` files remain compatibility-only and are not evidence.
-   Hosted `HostCompositor` remains incomplete until its frame owner uses the
-   canonical composition executor.
+   Hosted `HostCompositor.render_frame_engine2d` now owns the persistent
+   canonical source route. Source ownership is not executable/device proof,
+   and immediate compatibility retries remain non-completion paths.
    In this lane `WebIR` means the existing web semantic/layout model; do not
    invent a second drawing IR or store glyph/atlas/native material in it.
    Producer-resolved shaping may cross Draw IR only as handle-free glyph IDs,

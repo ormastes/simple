@@ -325,11 +325,14 @@ CUDA appends a hand-written bounds-checked PTX companion to the existing single
 2D module, uploads the atlas on generation change, marshals the exact 15-slot
 pointer ABI, synchronizes each submitted quad, and mirrors only completed
 prefixes. This PTX runtime provider is separate from compiler-emitted CUDA C.
-`Engine2D.install_cuda_font_ptx` can install the separately compiled generated
-companion without replacing the optimization module. The session pins its exact
-PTX hash, rejects replacement, launches font quads from it when present, and
-unloads it with the CUDA context. The hand-written compatibility entry remains
-the fallback and is not generated-artifact promotion evidence.
+`Engine2D.install_cuda_font_artifact` accepts compiled PTX plus the
+checker-recorded expected SHA-256 and composite-program version, verifies their
+payload consistency, then delegates to the existing bounded
+`install_cuda_font_ptx` entry-symbol/session gate without
+replacing the optimization module. The session pins the PTX hash, rejects
+replacement, launches font quads from it when present, and unloads it with the
+CUDA context. No production caller or device-origin readback has promoted this
+handoff yet; the hand-written compatibility entry remains the fallback.
 Metal compiles the exact common MSL helper as an optional separate pipeline,
 uses the fixed 13-word/52-byte parameter block, full-uploads changed atlas
 generations, and dispatches completed 64-thread groups per quad. Only native
@@ -472,11 +475,12 @@ owners. The canonical SimpleOS desktop executes that composition through
 `Engine2dWmFrameExecutor`; canonical ARM64/x86_64 runner/readiness targets now
 select `gui_entry_desktop.spl`. Direct legacy `wm_entry.spl` files still contain
 bitmap text but are compatibility-only, not production-route evidence. Hosted
-color/top-level frames now reuse one persistent `Engine2dCompositorBackend` and
-execute `SharedWmScene -> DrawIrComposition -> Engine2D`; the programmatic
-direct-compatibility gate, image/motion backgrounds, nested content, or rejected
-readback use an immediate compatibility retry. Do not add a paint-local loader,
-atlas, cache, or private font draw path.
+`_run_hosted_wm` retains one persistent `Engine2dCompositorBackend` and passes
+it to `HostCompositor.render_frame_engine2d`, which executes `SharedWmScene ->
+DrawIrComposition -> Engine2D`. This source route is not executable/device proof; the programmatic
+direct-compatibility gate, image/motion backgrounds, nested content, and
+rejected-readback retries remain non-completion paths. Do not add a paint-local
+loader, atlas, cache, or private font draw path.
 
 SimpleOS image construction now reuses the exact selected
 `FontAssetCandidate` for Noto Sans Mono. Installer rootfs and initramfs staging

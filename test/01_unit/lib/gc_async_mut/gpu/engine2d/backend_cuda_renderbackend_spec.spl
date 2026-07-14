@@ -8,6 +8,7 @@ use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
 use std.gpu.engine2d.engine.{Engine2D}
 use std.gpu.engine2d.helpers_text.{text_render_to_buf}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderer, FontRenderBatch, FontRenderQuad}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.crypto.sha256.{sha256_text}
 
 describe "CudaBackend RenderBackend facade":
@@ -69,6 +70,29 @@ describe "CudaBackend RenderBackend facade":
         expect(backend.font_atlas_generation).to_equal(9)
         expect(backend.install_font_atlas_ptx(ptx + " ")).to_equal(false)
         expect(backend.font_atlas_generation).to_equal(9)
+
+    it "hands a checker-identified font artifact to Engine2D without invalid mutation":
+        val ptx = ".version 8.0\n.visible .entry simple_font_atlas_composite_v1_u32() { ret; }\n"
+        val artifact_sha256 = sha256_text(ptx)
+        var session = CudaSession.create()
+        session.font_module_cache = 17
+        session.font_module_identity = "generated-ptx:" + artifact_sha256
+        var cuda = CudaBackend.create()
+        cuda.initialized = true
+        cuda.session = session
+        var engine = Engine2D.create_with_backend(1, 1, "software")
+        engine.cuda_backend = cuda
+
+        val wrong_entry = ".version 8.0\n.visible .entry wrong_font_entry() { ret; }\n"
+        expect(engine.install_cuda_font_artifact("", sha256_text(""), FONT_ATLAS_COMPOSITE_PROGRAM_VERSION)).to_equal(false)
+        expect(engine.install_cuda_font_artifact(ptx, "0000000000000000000000000000000000000000000000000000000000000000", FONT_ATLAS_COMPOSITE_PROGRAM_VERSION)).to_equal(false)
+        expect(engine.install_cuda_font_artifact(ptx, artifact_sha256, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION + 1)).to_equal(false)
+        expect(engine.install_cuda_font_artifact(wrong_entry, sha256_text(wrong_entry), FONT_ATLAS_COMPOSITE_PROGRAM_VERSION)).to_equal(false)
+        expect(engine.cuda_backend.?.session.font_module_cache).to_equal(17)
+        expect(engine.cuda_backend.?.session.font_module_identity).to_equal("generated-ptx:" + artifact_sha256)
+        expect(engine.install_cuda_font_artifact(ptx, artifact_sha256, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION)).to_equal(true)
+        engine.cuda_backend = nil
+        engine.shutdown()
 
     it "fails closed for invalid font batches and invalidates atlas generations":
         var backend = CudaBackend.create()
