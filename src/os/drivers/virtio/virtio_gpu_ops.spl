@@ -258,3 +258,123 @@ fn virtio_gpu_draw_rect(drv: VirtioGpuDriver, x: u32, y: u32, w: u32, h: u32, co
     virtio_gpu_draw_hline(drv, x, y + h - 1, w, color)
     virtio_gpu_draw_vline(drv, x, y, h, color)
     virtio_gpu_draw_vline(drv, x + w - 1, y, h, color)
+
+# ============================================================================
+# Error Recovery / Re-negotiation
+# ============================================================================
+#
+# Every GPU command above just logs and returns Err(...) on failure; nothing
+# retries or re-negotiates. This section adds a bounded-retry layer (for
+# transient command failures) and a one-shot re-create/re-negotiate path
+# (for a hard SET_SCANOUT/RESOURCE failure) on top of the existing per-op
+# functions above. The retry-vs-recreate-vs-give-up decision is a pure
+# function over (attempt, error kind, already-recreated?) so it is
+# unit-testable without a virtio-gpu device — see
+# test/01_unit/os/drivers/virtio/virtio_gpu_recovery_spec.spl.
+
+val GPU_RECOVERY_MAX_ATTEMPTS: i32 = 3
+
+enum GpuErrorKind:
+    Transient
+    ScanoutFailure
+    Fatal
+
+# Scripted per-attempt outcome, used by virtio_gpu_recovery_run() to drive
+# the decision loop without a real device (specs build these sequences).
+enum GpuOpOutcome:
+    Success
+    TransientErr
+    ScanoutErr
+    FatalErr
+
+enum RecoveryStep:
+    Retry
+    Recreate
+    GiveUp
+
+struct GpuRecoveryResult:
+    """Outcome of driving the bounded retry/re-negotiate loop to completion."""
+    ok: bool
+    attempts_used: i32
+    recreated: bool
+
+fn virtio_gpu_recovery_next_step(attempt: i32, kind: GpuErrorKind, recreated: bool) -> RecoveryStep:
+    """Pure decision: given the current attempt count, the classified
+    error, and whether a re-create has already been tried this call, decide
+    what to do next.
+    - Fatal errors never retry.
+    - A scanout/resource failure gets exactly one re-create attempt, then
+      gives up if it fails again.
+    - A transient failure retries up to GPU_RECOVERY_MAX_ATTEMPTS attempts.
+    """
+    if kind == GpuErrorKind.Fatal:
+        return RecoveryStep.GiveUp
+    if kind == GpuErrorKind.ScanoutFailure:
+        if recreated:
+            return RecoveryStep.GiveUp
+        return RecoveryStep.Recreate
+    if attempt < GPU_RECOVERY_MAX_ATTEMPTS:
+        return RecoveryStep.Retry
+    RecoveryStep.GiveUp
+
+fn _gpu_outcome_kind(outcome: GpuOpOutcome) -> GpuErrorKind:
+    if outcome == GpuOpOutcome.ScanoutErr:
+        return GpuErrorKind.ScanoutFailure
+    if outcome == GpuOpOutcome.FatalErr:
+        return GpuErrorKind.Fatal
+    GpuErrorKind.Transient
+
+fn virtio_gpu_recovery_run(outcomes: [GpuOpOutcome]) -> GpuRecoveryResult:
+    """Drive virtio_gpu_recovery_next_step() over a scripted outcome
+    sequence (one entry consumed per attempt) until Success or GiveUp.
+    Pure and device-free — this is the exact algorithm the
+    `virtio_gpu_cmd_*_with_recovery` wrappers below run against the real
+    device, just with a scripted outcome list standing in for the device
+    response.
+    """
+    var attempt: i32 = 1
+    var recreated = false
+    var i: i32 = 0
+    while i < outcomes.len():
+        val outcome = outcomes[i]
+        if outcome == GpuOpOutcome.Success:
+            return GpuRecoveryResult(ok: true, attempts_used: attempt, recreated: recreated)
+        val step = virtio_gpu_recovery_next_step(attempt, _gpu_outcome_kind(outcome), recreated)
+        if step == RecoveryStep.GiveUp:
+            return GpuRecoveryResult(ok: false, attempts_used: attempt, recreated: recreated)
+        if step == RecoveryStep.Recreate:
+            recreated = true
+        attempt = attempt + 1
+        i = i + 1
+    GpuRecoveryResult(ok: false, attempts_used: attempt, recreated: recreated)
+
+fn virtio_gpu_cmd_get_display_info_with_recovery(drv: VirtioGpuDriver) -> Result<bool, text>:
+    """GET_DISPLAY_INFO with bounded retry: transient failures are
+    resubmitted up to GPU_RECOVERY_MAX_ATTEMPTS before surfacing Err."""
+    var attempt: i32 = 1
+    while true:
+        val r = virtio_gpu_cmd_get_display_info(drv)
+        if r.is_ok():
+            return r
+        if virtio_gpu_recovery_next_step(attempt, GpuErrorKind.Transient, false) != RecoveryStep.Retry:
+            return r
+        log_info("[virtio] " + "[virtio-gpu] GET_DISPLAY_INFO recovery retry attempt={attempt + 1}")
+        attempt = attempt + 1
+
+fn virtio_gpu_cmd_set_scanout_with_recovery(drv: VirtioGpuDriver, scanout_id: u32, res_id: u32, w: u32, h: u32) -> Result<bool, text>:
+    """SET_SCANOUT with re-negotiation: on a hard SET_SCANOUT failure this
+    re-runs RESOURCE_CREATE_2D + SET_SCANOUT exactly once (re-negotiating
+    the scanout binding) before giving up."""
+    var attempt: i32 = 1
+    var recreated = false
+    while true:
+        val r = virtio_gpu_cmd_set_scanout(drv, scanout_id, res_id, w, h)
+        if r.is_ok():
+            return r
+        val step = virtio_gpu_recovery_next_step(attempt, GpuErrorKind.ScanoutFailure, recreated)
+        if step != RecoveryStep.Recreate:
+            return r
+        log_info("[virtio] " + "[virtio-gpu] SET_SCANOUT failed, re-negotiating: RESOURCE_CREATE_2D + SET_SCANOUT")
+        val _create = virtio_gpu_cmd_resource_create_2d(drv, res_id, w, h)
+        recreated = true
+        attempt = attempt + 1

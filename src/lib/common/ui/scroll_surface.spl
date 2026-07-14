@@ -129,6 +129,40 @@ fn row_color(content_row: i32) -> i64:
         return ROW_A
     return ROW_B
 
+# ============================================================================
+# Virtualization
+# ============================================================================
+# The persistent FrameBuffer is viewport-sized (not content-sized), but
+# `total_rows * ROW_H` (content_height) can be far larger than the viewport —
+# that's the whole scrollable-list point. `visible_range` is the primitive
+# that answers "which absolute content rows does a [scroll_offset,
+# scroll_offset + viewport_h) pixel window cover?" so painting code (and any
+# future caller — e.g. a data-fetching virtualized list) walks only that row
+# window instead of the full row count. Returns `count: 0` for a degenerate
+# (non-positive) viewport_h or row_h.
+#
+# Returns a VisibleRange struct rather than an anonymous labeled tuple
+# (`-> (first: i32, count: i32)`): the interpreter has a confirmed bug where
+# reading `.first`/`.count` back off a labeled-tuple return can yield a STALE
+# value left over from an unrelated earlier call elsewhere in the same loaded
+# program (reproduced with a minimal probe — two different calls with the
+# same field names on a fresh tuple type read back garbage instead of the
+# values just returned). A dedicated struct type does not hit this.
+struct VisibleRange:
+    first: i32
+    count: i32
+
+fn visible_range(scroll_offset: i32, viewport_h: i32, row_h: i32) -> VisibleRange:
+    if viewport_h <= 0 or row_h <= 0:
+        return VisibleRange(first: 0, count: 0)
+    var so = scroll_offset
+    if so < 0:
+        so = 0
+    val first = so / row_h
+    val last_pixel = so + viewport_h - 1
+    val last_row = last_pixel / row_h
+    return VisibleRange(first: first, count: last_row - first + 1)
+
 struct ThumbGeom:
     y: i32
     h: i32
@@ -150,6 +184,8 @@ fn thumb_geom(m: ScrollModel, scroll: i32) -> ThumbGeom:
 # Painting
 # ============================================================================
 # Paint content rows overlapping the viewport band [band_y0, band_y1) at `scroll`.
+# Virtualized via visible_range(): only the rows the band actually covers are
+# walked, never the full total_rows list.
 fn paint_content_band(fb: FrameBuffer, m: ScrollModel, scroll: i32, band_y0: i32, band_y1: i32) -> i64:
     var y0 = band_y0
     var y1 = band_y1
@@ -161,29 +197,27 @@ fn paint_content_band(fb: FrameBuffer, m: ScrollModel, scroll: i32, band_y0: i32
         return 0
     val content_w = m.view_w - SCROLLBAR_W
     var written: i64 = 0
-    var first_row = (scroll + y0) / ROW_H
-    if first_row < 0:
-        first_row = 0
-    var content_row = first_row
-    var done = false
-    while not done:
+    val range = visible_range(scroll + y0, y1 - y0, ROW_H)
+    var count = range.count
+    if range.first + count > m.total_rows:
+        count = m.total_rows - range.first
+    if count < 0:
+        count = 0
+    var i = 0
+    while i < count:
+        val content_row = range.first + i
         val content_y = content_row * ROW_H
         val screen_y = content_y - scroll
-        if screen_y >= y1:
-            done = true
-        elif content_row >= m.total_rows:
-            done = true
-        else:
-            var draw_y0 = screen_y
-            if draw_y0 < y0:
-                draw_y0 = y0
-            var draw_y1 = screen_y + ROW_H
-            if draw_y1 > y1:
-                draw_y1 = y1
-            if draw_y1 > draw_y0:
-                val n = fb.fill_rect(0, draw_y0, content_w, draw_y1 - draw_y0, row_color(content_row))
-                written = written + n
-            content_row = content_row + 1
+        var draw_y0 = screen_y
+        if draw_y0 < y0:
+            draw_y0 = y0
+        var draw_y1 = screen_y + ROW_H
+        if draw_y1 > y1:
+            draw_y1 = y1
+        if draw_y1 > draw_y0:
+            val n = fb.fill_rect(0, draw_y0, content_w, draw_y1 - draw_y0, row_color(content_row))
+            written = written + n
+        i = i + 1
     return written
 
 fn paint_scrollbar(fb: FrameBuffer, m: ScrollModel, scroll: i32) -> i64:

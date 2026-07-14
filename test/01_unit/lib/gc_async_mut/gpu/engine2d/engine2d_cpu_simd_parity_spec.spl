@@ -1,0 +1,103 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 20%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_cpu.spl 30%
+# @tag: unit, engine2d, backend, cpu_simd, honesty
+"""
+# cpu_simd honesty — pixel parity with "cpu"
+
+**Category:** Testing | **Status:** Implemented
+
+## Overview
+
+`Engine2D.create_with_backend(w, h, "cpu_simd")` (src/lib/gc_async_mut/gpu/
+engine2d/engine.spl) and plain `"cpu"` both construct a `CpuBackend` wrapping
+the same `SoftwareBackend` raster code (backend_cpu.spl). The only difference
+`CpuBackend.create_simd()` makes is flipping `SoftwareBackend.native_simd_spans`,
+which lets the fill-span hot path call the native row ABI directly
+(`rt_engine2d_simd_fill_span_u32`) instead of via a row-copy — real routing,
+gated by `native_pixel_rows_enabled()`'s genuine NEON/AVX2/SSE4.2/RVV host
+detection (src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl), and a no-op
+(falls through to the identical scalar path) on hosts without that hardware.
+
+This spec pins the honest claim: whichever host you're on, `cpu_simd` and
+`cpu` MUST produce bit-identical framebuffers for the same draw sequence —
+"cpu_simd" is a routing choice, never a visually different renderer.
+
+Known gap NOT covered here (out of this file's ownership): the
+`record_simd_fill_hit` / `record_simd_copy_hit` / `record_simd_alpha_hit`
+counters (src/lib/gc_async_mut/gpu/engine2d/backend_software.spl,
+`std.gpu.engine2d.simd_provider`) fire unconditionally on every span op for
+BOTH "cpu" and "cpu_simd", regardless of whether `native_pixel_rows_enabled()`
+was true — i.e. they report a "SIMD hit" even when the call fell through to
+the plain scalar loop. That is a fake-evidence pattern per
+doc/04_architecture (see p2_2d.md item 2), but fixing it requires editing
+backend_software.spl / simd_provider.spl, which are owned by a different lane
+in this pass; flagged here for follow-up rather than silently patched.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Direct construct | `CpuBackend.create()` vs `CpuBackend.create_simd()` — no `Engine2D` facade |
+| Parity oracle | Same op sequence on fresh same-size backends; `read_pixels()` compared byte-for-byte |
+| Ops exercised | `draw_rect_filled` (fill span), `draw_image` (copy span), `draw_rect` alpha (blend span), `draw_text` (glyph blit) |
+
+## Syntax
+
+`std.spec` matchers only; direct backend construction (no `Engine2D` facade,
+so the assertion isolates `CpuBackend`/`SoftwareBackend` raster parity from
+backend-selection plumbing).
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend_cpu.{CpuBackend}
+
+val CANVAS: i32 = 32
+
+fn _mism(a: [u32], b: [u32]) -> i32:
+    var n = 0
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+# Runs the same representative op sequence (opaque fill span, alpha-blended
+# fill span, image copy span, text glyph blit) against a fresh backend and
+# returns its framebuffer.
+fn _paint(mut b: CpuBackend) -> [u32]:
+    b.init(CANVAS, CANVAS)
+    b.clear(0xFF102030u32)
+    b.draw_rect_filled(2, 2, 12, 12, 0xFFFF0000u32)
+    b.draw_rect(4, 4, 20, 20, 0x80112233u32)
+    val img: [u32] = [0xFF00FF00u32; 8 * 8]
+    b.draw_image(18, 2, 8, 8, img)
+    b.draw_text(2, 20, "Hi", 0xFFFFFFFFu32, 8)
+    b.present()
+    b.read_pixels()
+
+describe "cpu_simd honesty — pixel parity with cpu (no visual difference, ever)":
+
+    it "cpu_simd and cpu produce byte-identical framebuffers for the same draw sequence":
+        var cpu = CpuBackend.create()
+        var cpu_simd = CpuBackend.create_simd()
+        val got_cpu = _paint(cpu)
+        val got_cpu_simd = _paint(cpu_simd)
+        expect(_mism(got_cpu, got_cpu_simd)).to_equal(0)
+
+    it "both backends report their own honest name() — cpu_simd is a routing choice, not a distinct renderer identity":
+        var cpu = CpuBackend.create()
+        var cpu_simd = CpuBackend.create_simd()
+        expect(cpu.name()).to_equal("cpu")
+        expect(cpu_simd.name()).to_equal("cpu")
+
+    it "cpu_simd draws non-trivial ink (sanity: the parity check above isn't vacuously comparing blank canvases)":
+        var cpu_simd = CpuBackend.create_simd()
+        val pixels = _paint(cpu_simd)
+        var non_bg = 0
+        var i = 0
+        while i < pixels.len():
+            if pixels[i] != 0xFF102030u32:
+                non_bg = non_bg + 1
+            i = i + 1
+        expect(non_bg).to_be_greater_than(0)

@@ -243,6 +243,44 @@ fn _prop_int_of(node: WidgetNode, key: text) -> i32:
         return 0
     raw.to_int() ?? 0
 
+# =========================================================================
+# IME composition (CJK/accented input via a host input-method editor).
+# =========================================================================
+
+# Composition update: shows the in-progress preedit string WITHOUT touching
+# `value`/`caret` — the host IME can still cancel or keep revising it. Stored
+# as a `preedit` prop so a renderer can show it (e.g. underlined at the
+# caret) separately from the committed text.
+fn widget_dispatch_composition_update(focused_id: text, preedit: text):
+    if focused_id == "":
+        return
+    val kind = _kind_of(focused_id)
+    if kind != "input" and kind != "textfield":
+        return
+    WidgetNode(id: focused_id).set_prop("preedit", preedit)
+
+# Composition commit: inserts the full composed STRING at the caret
+# (char-indexed via _char_slice/_nchars, same as widget_dispatch_key's
+# single-char path but for a multi-char string) and clears any preedit —
+# the composition is done, so nothing is left showing as "in progress".
+fn widget_dispatch_composition_commit(focused_id: text, committed: text):
+    if focused_id == "":
+        return
+    val kind = _kind_of(focused_id)
+    if kind != "input" and kind != "textfield":
+        return
+    val node = WidgetNode(id: focused_id)
+    node.set_prop("preedit", "")
+    if committed == "":
+        return
+    val value = node.get_prop("value")
+    val n = _nchars(value)
+    val caret = _caret_of(node, n)
+    val joined = _char_slice(value, 0, caret) + committed + _char_slice(value, caret, n)
+    node.set_prop("value", joined)
+    node.set_prop("caret", "{caret + _nchars(committed)}")
+
 export HitResult, widget_hit_test, widget_scroll_hit
 export widget_set_pressed, widget_clear_pressed, widget_dispatch_hover
 export widget_dispatch_click, widget_dispatch_scroll, widget_dispatch_key
+export widget_dispatch_composition_update, widget_dispatch_composition_commit

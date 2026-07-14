@@ -45,7 +45,8 @@ use os.drivers.virtio.virtio_gpu_ops.{
     virtio_gpu_cmd_resource_detach_backing, virtio_gpu_cmd_resource_unref,
     virtio_gpu_flush, virtio_gpu_flush_rect,
     virtio_gpu_put_pixel, virtio_gpu_fill_rect, virtio_gpu_clear,
-    virtio_gpu_draw_hline, virtio_gpu_draw_vline, virtio_gpu_draw_rect
+    virtio_gpu_draw_hline, virtio_gpu_draw_vline, virtio_gpu_draw_rect,
+    virtio_gpu_cmd_get_display_info_with_recovery, virtio_gpu_cmd_set_scanout_with_recovery
 }
 use os.drivers.virtio.virtio_gpu_regs.{
     VIRTIO_PCI_HOST_FEATURES, VIRTIO_PCI_GUEST_FEATURES, VIRTIO_PCI_QUEUE_PFN,
@@ -675,6 +676,26 @@ impl VirtioGpuDriver:
 
     me cmd_set_scanout(scanout_id: u32, res_id: u32, w: u32, h: u32) -> Result<bool, text>:
         virtio_gpu_cmd_set_scanout(self, scanout_id, res_id, w, h)
+
+    # ========================================================================
+    # GPU Commands — recovery-wrapped callers (bounded retry / re-negotiate)
+    # ========================================================================
+    # These are the recovery-aware counterparts of cmd_get_display_info()
+    # and cmd_set_scanout() above: instead of propagating the first Err to
+    # a caller that ignores it, they retry transient failures and, for a
+    # hard SET_SCANOUT failure, re-negotiate (RESOURCE_CREATE_2D +
+    # SET_SCANOUT) once before giving up. See virtio_gpu_ops.spl's
+    # "Error Recovery / Re-negotiation" section for the decision logic.
+
+    me cmd_get_display_info_recover() -> Result<bool, text>:
+        val r = virtio_gpu_cmd_get_display_info_with_recovery(self)
+        if r.is_ok():
+            self.width = 1280
+            self.height = 800
+        r
+
+    me cmd_set_scanout_recover(scanout_id: u32, res_id: u32, w: u32, h: u32) -> Result<bool, text>:
+        virtio_gpu_cmd_set_scanout_with_recovery(self, scanout_id, res_id, w, h)
 
     me cmd_resource_detach_backing(res_id: u32) -> Result<bool, text>:
         virtio_gpu_cmd_resource_detach_backing(self, res_id)

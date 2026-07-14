@@ -42,6 +42,8 @@ use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
 use std.nogc_sync_mut.http_server.response.{serialize_response}
 use std.nogc_sync_mut.http_server.mime.{mime_from_path}
 use std.nogc_sync_mut.http_server.parser.{content_length_from_text}
+use os.tls13.server.{tls13_accept, Tls13ServerConfig, Tls13AcceptResult, Tls13ServerContext}
+use os.tls13.record13.{RecordKey, record13_encrypt_for_suite, record13_decrypt_for_suite, RecordResult}
 
 extern fn log_raw_println(msg: text)
 extern fn rt_net_socket(proto: i64) -> i64
@@ -277,6 +279,216 @@ pub fn http_accept_and_handle_once(listener: i64) -> bool:
     rt_net_close(client)
     true
 
+# ============================================================================
+# TLS 1.3 wrap (Item 1)
+# ============================================================================
+#
+# HTTP_TLS_ENABLED defaults false: os.tls13's server path requires a
+# Tls13ServerConfig(cert_chain, server_pkcs8, ...), but no server
+# certificate/private key is wireable at this boot tier -- there is no key
+# store and no config-read facility (the same constraint that pins HTTP_PORT
+# above). The transport below is structurally complete and gated behind this
+# flag; once a boot-tier cert-provisioning path exists, flip this to true and
+# call http_accept_and_handle_once_tls(listener, config) from the accept loop
+# in place of the plaintext http_accept_and_handle_once.
+#
+# The security-critical, non-socket logic -- framing an HTTP response into a
+# TLS 1.3 application_data record and reassembling decrypted request bytes --
+# is factored into the pure http_tls_encrypt_app_record /
+# http_tls_decrypt_app_record seam so it is unit-testable over a byte buffer
+# with no live socket (see test/01_unit/os/kernel/boot/http_baremetal_tls_spec.spl).
+val HTTP_TLS_ENABLED: bool = false
+
+# Real content type for a TLS 1.3 application_data record (RFC 8446 §5).
+val HTTP_TLS_APPLICATION_DATA: u8 = 0x17
+
+pub struct HttpTlsSession:
+    """Per-connection TLS 1.3 application-data record state (socket-free).
+
+    Holds the established application-traffic keys from a completed handshake
+    plus the two directional sequence counters. Deliberately holds no socket
+    reference: http_tls_encrypt_app_record / http_tls_decrypt_app_record are
+    pure over this state and the returned (advanced) session, so record framing
+    is testable with hand-built keys and no network."""
+    cipher_suite: u16
+    server_key: RecordKey
+    client_key: RecordKey
+    client_seq: u64
+    server_seq: u64
+
+pub struct HttpTlsSendResult:
+    """Result of encrypting one outbound record: the wire bytes plus the
+    session with server_seq advanced (return-the-object -- the caller must use
+    .session for the next send)."""
+    record: [u8]
+    session: HttpTlsSession
+
+pub struct HttpTlsRecvResult:
+    """Result of decrypting one inbound record: the plaintext + real content
+    type on success, or ok=false with a reason on AEAD/format failure. On
+    failure the sequence is left unchanged (fail-closed)."""
+    ok: bool
+    content_type: i64
+    data: [u8]
+    error: text
+    session: HttpTlsSession
+
+pub fn http_tls_session_from_context(ctx: Tls13ServerContext) -> HttpTlsSession:
+    """Build a record-layer session from the application keys a completed
+    tls13_accept produced."""
+    HttpTlsSession(
+        cipher_suite: ctx.cipher_suite,
+        server_key: RecordKey(key: ctx.server_app_key, iv: ctx.server_app_iv),
+        client_key: RecordKey(key: ctx.client_app_key, iv: ctx.client_app_iv),
+        client_seq: ctx.client_seq,
+        server_seq: ctx.server_seq
+    )
+
+pub fn http_tls_encrypt_app_record(session: HttpTlsSession, plaintext: [u8]) -> HttpTlsSendResult:
+    """Encrypt one plaintext buffer into a TLS 1.3 application_data record and
+    advance server_seq. Reuses the spec-tested os.tls13.record13 AEAD layer;
+    adds no crypto of its own."""
+    val record = record13_encrypt_for_suite(session.cipher_suite, session.server_key, session.server_seq, HTTP_TLS_APPLICATION_DATA, plaintext)
+    val next = HttpTlsSession(
+        cipher_suite: session.cipher_suite,
+        server_key: session.server_key,
+        client_key: session.client_key,
+        client_seq: session.client_seq,
+        server_seq: session.server_seq + 1u64
+    )
+    HttpTlsSendResult(record: record, session: next)
+
+pub fn http_tls_decrypt_app_record(session: HttpTlsSession, raw_record: [u8]) -> HttpTlsRecvResult:
+    """Decrypt one raw TLS 1.3 record into plaintext and advance client_seq.
+    On AEAD-auth or format failure, returns ok=false with the reason and leaves
+    the sequence unchanged so a tampered record cannot desync the counter."""
+    match record13_decrypt_for_suite(session.cipher_suite, session.client_key, session.client_seq, raw_record):
+        case RecordResult.Ok(ct, data):
+            val next = HttpTlsSession(
+                cipher_suite: session.cipher_suite,
+                server_key: session.server_key,
+                client_key: session.client_key,
+                client_seq: session.client_seq + 1u64,
+                server_seq: session.server_seq
+            )
+            HttpTlsRecvResult(ok: true, content_type: ct, data: data, error: "", session: next)
+        case RecordResult.Err(msg):
+            HttpTlsRecvResult(ok: false, content_type: 0, data: [], error: msg, session: session)
+
+fn _http_tls_read_exact(client: i64, n: i64) -> [u8]:
+    """Read exactly n bytes from the socket, looping recv() until satisfied or
+    the peer closes. Returns fewer than n bytes only on close/error."""
+    var out: [u8] = []
+    var iterations = 0
+    while out.len().to_i64() < n and iterations < HTTP_MAX_RECV_ITERATIONS:
+        val want = n - out.len().to_i64()
+        val chunk = rt_net_recv_bytes(client, want)
+        if chunk.len() == 0:
+            break
+        var k = 0
+        while k < chunk.len().to_i64():
+            out.push(chunk[k.to_u64()])
+            k = k + 1
+        iterations = iterations + 1
+    out
+
+fn _http_tls_read_record(client: i64) -> [u8]:
+    """Read exactly one TLS record (5-byte header + length-prefixed payload)
+    off the socket. Returns [] on close or a truncated/short read."""
+    val header = _http_tls_read_exact(client, 5)
+    if header.len().to_i64() < 5:
+        return []
+    val payload_len = ((header[3u64].to_i64() & 0xFF) << 8) | (header[4u64].to_i64() & 0xFF)
+    var out: [u8] = []
+    var i = 0
+    while i < 5:
+        out.push(header[i.to_u64()])
+        i = i + 1
+    if payload_len <= 0:
+        return out
+    val payload = _http_tls_read_exact(client, payload_len)
+    if payload.len().to_i64() < payload_len:
+        return []
+    var j = 0
+    while j < payload.len().to_i64():
+        out.push(payload[j.to_u64()])
+        j = j + 1
+    out
+
+fn _http_tls_recv_request(client: i64, session: HttpTlsSession) -> (text, text, HttpTlsSession):
+    """Decrypt inbound TLS records and feed their application_data payloads
+    into the SAME HttpRecvAccum used by the plaintext path, until a complete
+    HTTP request is assembled. Returns (request_text, error, advanced_session);
+    error is "" on success, else "closed"/"incomplete"/a decrypt reason."""
+    var st = http_recv_accum_new()
+    var sess = session
+    var iterations = 0
+    while iterations < HTTP_MAX_RECV_ITERATIONS:
+        if st.complete:
+            return (st.buffer, "", sess)
+        if st.error != "":
+            return (st.buffer, st.error, sess)
+        val record = _http_tls_read_record(client)
+        if record.len() == 0:
+            if st.buffer == "":
+                return ("", "closed", sess)
+            break
+        val dec = http_tls_decrypt_app_record(sess, record)
+        sess = dec.session
+        if not dec.ok:
+            return (st.buffer, dec.error, sess)
+        # Only application_data (0x17 = 23) carries HTTP; skip post-handshake
+        # messages (tickets/key_update) that share the same wire content type.
+        if dec.content_type == 23:
+            val chunk = rt_string_from_byte_array(dec.data)
+            st = http_recv_accum_feed(st, chunk, HTTP_MAX_REQUEST_BYTES)
+        iterations = iterations + 1
+    if st.complete:
+        return (st.buffer, "", sess)
+    if st.error != "":
+        return (st.buffer, st.error, sess)
+    (st.buffer, "incomplete", sess)
+
+fn _http_tls_serve_connection(client: i64, ctx: Tls13ServerContext):
+    """Run the keep-alive request loop over an established TLS session:
+    decrypt request, route through the SAME _http_route classifier the
+    plaintext path uses, encrypt the response back."""
+    var session = http_tls_session_from_context(ctx)
+    var handled = 0
+    while handled < HTTP_MAX_KEEPALIVE_REQUESTS:
+        val req = _http_tls_recv_request(client, session)
+        val request = req.0
+        val recv_error = req.1
+        session = req.2
+        if recv_error != "" or request == "":
+            break
+        val send = http_tls_encrypt_app_record(session, _http_route(request))
+        session = send.session
+        rt_net_send_bytes(client, send.record)
+        handled = handled + 1
+        if _http_request_wants_close(request):
+            break
+
+pub fn http_accept_and_handle_once_tls(listener: i64, config: Tls13ServerConfig) -> bool:
+    """TLS 1.3 counterpart to http_accept_and_handle_once: accept a pending
+    connection, run the os.tls13 server handshake over it, then serve requests
+    inside the encrypted record layer. On handshake failure it logs and closes
+    the socket (never hangs). Returns false only on the benign EAGAIN "nothing
+    pending" poll, mirroring the plaintext accept path."""
+    val raw_client = rt_net_accept(listener)
+    val client = _http_decode_i64(raw_client)
+    if client < 0:
+        if client != HTTP_ACCEPT_EAGAIN:
+            log_raw_println("[http_baremetal] ERROR: accept failed")
+        return false
+    match tls13_accept(client, config):
+        case Tls13AcceptResult.Failed(reason):
+            log_raw_println("[http_baremetal] TLS handshake failed, closing connection")
+        case Tls13AcceptResult.Accepted(ctx):
+            _http_tls_serve_connection(client, ctx)
+    rt_net_close(client)
+    true
+
 fn start_http_server_baremetal():
     """Start a minimal single-core HTTP loop on the boot core."""
     log_raw_println("[http_baremetal] Starting minimal HTTP loop...")
@@ -287,5 +499,10 @@ fn start_http_server_baremetal():
 
     log_raw_println("[http_baremetal] Listening on 0.0.0.0:8080")
     log_raw_println("[http] serving on 0.0.0.0:8080")
+    if HTTP_TLS_ENABLED:
+        # Reserved for when a boot-tier certificate/key becomes provisionable:
+        # the loop below would call http_accept_and_handle_once_tls(listener,
+        # config). No such config source exists yet, so we stay on plaintext.
+        log_raw_println("[http_baremetal] TLS requested but no boot-tier certificate is provisioned; serving plaintext")
     while true:
         http_accept_and_handle_once(listener)

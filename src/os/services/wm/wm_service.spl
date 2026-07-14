@@ -266,16 +266,27 @@ impl WmService:
                 return wm_action_none()
 
     me parse_test_api_req(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
-        """Bridge the shared /api/test/* LLM-friendly surface into SimpleOS.
-        Wave 7: in-kernel routing to handle_test_request against the
-        focused window's UISession is reserved. Today the compositor
-        replies with STATUS_INVALID and a pointer to the host-socket
-        embedding so callers degrade cleanly instead of hanging.
+        """Answer the shared /api/test/* introspection surface with live WM
+        state instead of a blanket STATUS_INVALID. The window world is
+        reachable right here — self.owner_count tracks owned windows and
+        self.world.win_ids holds the active ECS window entities — so callers
+        get a real reply: status(i32=OK) | window_count(i32) | active_windows(i32).
+
+        The IPC reply is emitted only when the service holds a live port
+        (self.initialized); off-line callers (unit specs) still observe the
+        same introspection via the returned WmAction, so no syscall runs.
         Protocol contract is fixed — see COMP_TEST_API_REQ in
         src/os/userlib/ipc_protocol.spl."""
-        log_raw_println("[wm-service] COMP_TEST_API_REQ received (payload_len={payload_len}); in-kernel bridge not yet wired")
-        self.send_error_reply(src_port, STATUS_INVALID, "COMP_TEST_API_REQ: use host-side /api/test/* socket until Wave 7 kernel bridge lands")
-        return wm_action_none()
+        val window_count = self.window_count()
+        val active_windows = self.world.win_ids.len()
+        log_raw_println("[wm-service] COMP_TEST_API_REQ from port {src_port}: window_count={window_count} active_windows={active_windows} (payload_len={payload_len})")
+        if self.initialized:
+            var buf: [u8] = []
+            _push_i32(buf, STATUS_OK)
+            _push_i32(buf, window_count)
+            _push_i32(buf, active_windows)
+            _ipc_send(src_port, self.port_id, buf)
+        return WmAction(kind: "test_api", window_id: 0, title: "", x: window_count, y: active_windows, width: window_count, height: active_windows, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
     # -- Request Parsers (return WmAction) ------------------------------------
 

@@ -7,21 +7,46 @@
 use common.ui.widget.{WidgetNode, WidgetRect}
 
 # =========================================================================
+# DPI / scale helper
+# =========================================================================
+
+# Scale an i32 by an integer permille factor (1000 = identity, no-op). Kept
+# as an explicit early-out so identity scaling never introduces integer
+# division rounding even though `v * 1000 / 1000 == v` would anyway.
+fn _apply_scale(v: i32, scale_permille: i32) -> i32:
+    if scale_permille == 1000:
+        return v
+    (v * scale_permille) / 1000
+
+# =========================================================================
 # Layout Computation
 # =========================================================================
 
-fn compute_layout(node: WidgetNode, x: i32, y: i32, w: i32, h: i32) -> [WidgetRect]:
-    """Compute layout rectangles for a widget tree."""
-    var rects: [WidgetRect] = [WidgetRect(id: node.id, x: x, y: y, w: w, h: h)]
+fn compute_layout(node: WidgetNode, x: i32, y: i32, w: i32, h: i32, scale_permille: i32 = 1000) -> [WidgetRect]:
+    """Compute layout rectangles for a widget tree.
+
+    `scale_permille` is an integer DPI/UI scale factor in permille (1000 =
+    1.0x, identity default — existing 4-arg callers are unaffected). It scales
+    the requested (x, y, w, h) rect exactly once, at whichever call supplies a
+    non-default value (e.g. the root call from a FormFactorProfile). Every
+    recursive call this function makes to itself (via layout_vbox/hbox/grid/
+    fixed) omits the argument, so it defaults back to identity and the already
+    -scaled coordinates simply propagate down the tree without compounding.
+    """
+    val sx = _apply_scale(x, scale_permille)
+    val sy = _apply_scale(y, scale_permille)
+    val sw = _apply_scale(w, scale_permille)
+    val sh = _apply_scale(h, scale_permille)
+    var rects: [WidgetRect] = [WidgetRect(id: node.id, x: sx, y: sy, w: sw, h: sh)]
 
     if not node.is_visible():
         return rects
 
     # Compute inner area (account for borders on panels)
-    var inner_x = x
-    var inner_y = y
-    var inner_w = w
-    var inner_h = h
+    var inner_x = sx
+    var inner_y = sy
+    var inner_w = sw
+    var inner_h = sh
 
     if node.kind_name() == "panel":
         # Panel has a 1-char border
@@ -55,7 +80,7 @@ fn compute_layout(node: WidgetNode, x: i32, y: i32, w: i32, h: i32) -> [WidgetRe
         for cr in child_rects:
             rects.push(cr)
     elif node.layout_name() == "grid":
-        val child_rects = layout_grid(visible_children, inner_x, inner_y, inner_w, inner_h)
+        val child_rects = layout_grid(visible_children, inner_x, inner_y, inner_w, inner_h, get_grid_columns(node))
         for cr in child_rects:
             rects.push(cr)
     else:
@@ -183,34 +208,83 @@ fn layout_hbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32) -> [Widge
 # Grid Layout
 # =========================================================================
 
-fn layout_grid(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32) -> [WidgetRect]:
+fn layout_grid(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, columns: i32 = 0) -> [WidgetRect]:
     var rects: [WidgetRect] = []
     val count = children.len()
     if count == 0:
         return rects
 
-    # Auto-calculate columns (square-ish grid)
-    var cols = 1
-    while cols * cols < count:
-        cols = cols + 1
-    val rows = (count + cols - 1) / cols
+    var cols = columns
+    if cols <= 0:
+        # No explicit `columns` prop on the grid container — auto-calculate a
+        # square-ish grid the way this function always has.
+        cols = 1
+        while cols * cols < count:
+            cols = cols + 1
 
+    # Placement pass: walk children in order, wrapping to a new row whenever
+    # a child's col_span would overflow the remaining columns in the current
+    # row. Recorded once (row/col/span per child) so the paint pass below
+    # can't drift from this placement with separately-computed indices.
+    var place_row: [i32] = []
+    var place_col: [i32] = []
+    var place_span: [i32] = []
+    var cur_row = 0
+    var cur_col = 0
+    var max_row = 0
+    for child in children:
+        var span = get_col_span(child)
+        if span > cols:
+            span = cols
+        if cur_col + span > cols:
+            cur_row = cur_row + 1
+            cur_col = 0
+        if cur_row > max_row:
+            max_row = cur_row
+        place_row.push(cur_row)
+        place_col.push(cur_col)
+        place_span.push(span)
+        cur_col = cur_col + span
+
+    val rows = max_row + 1
     val cell_w = w / cols
     val cell_h = h / rows
 
     var idx = 0
     for child in children:
-        val grid_row = idx / cols
-        val grid_col = idx - (grid_row * cols)
+        val grid_row = place_row[idx]
+        val grid_col = place_col[idx]
+        val span = place_span[idx]
         val cell_x = x + (grid_col * cell_w)
         val cell_y = y + (grid_row * cell_h)
+        val cell_span_w = cell_w * span
 
-        val child_rects = compute_layout(child, cell_x, cell_y, cell_w, cell_h)
+        val child_rects = compute_layout(child, cell_x, cell_y, cell_span_w, cell_h)
         for cr in child_rects:
             rects.push(cr)
         idx = idx + 1
 
     return rects
+
+# Explicit column count for a grid container (the `columns` prop). 0 (unset
+# or non-positive) means "auto" — layout_grid falls back to the sqrt heuristic.
+fn get_grid_columns(node: WidgetNode) -> i32:
+    val v = node.get_prop("columns")
+    if v != "":
+        return v.to_int() ?? 0
+    return 0
+
+# Per-child column span for a grid cell (the `col_span` prop). Unset or < 1
+# defaults to 1 (a single cell); layout_grid additionally clamps it to the
+# container's column count.
+fn get_col_span(node: WidgetNode) -> i32:
+    val v = node.get_prop("col_span")
+    if v != "":
+        val s = v.to_int() ?? 1
+        if s < 1:
+            return 1
+        return s
+    return 1
 
 # =========================================================================
 # Fixed Layout (absolute positioning)
