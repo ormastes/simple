@@ -68,3 +68,102 @@ Fix the native-build (cranelift freestanding) cross-module class field-offset co
 ## Scope note
 
 The disk-less spawn/load fault (app_registry `Option<struct>` unwrap + `g_vfs` null-driver via `g_root_fat32` nil-compare) and the baremetal `rt_mutex_*` halt are already fixed on `main`; this field-offset shift is the remaining blocker for the WM paint.
+
+---
+
+## 2026-07-14 — Controlled compiler investigation (Claude Opus 4.8, 1M): "field-layout mis-sizing" mechanism DISPROVEN; trigger is full-graph-scale
+
+A read-only compiler scoping pass plus a controlled disassembly experiment
+**disproves** the "Root cause (hypothesis)" above at the isolated level, and
+re-points the investigation. **The workaround stays; this only re-scopes the
+compiler fix.**
+
+### Backend facts (file:line)
+
+- Native field access is a **uniform 1-word-per-field SLOT model**, not byte
+  offsets. `translate_get_field`/`translate_set_field`/`translate_aggregate`
+  in `src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl:92,
+  :125, :39` (LLVM) and `src/compiler/70.backend/backend/native/isel_x86_64.spl:415-422`
+  + `70.backend/codegen.spl:363` (cranelift) all compute address =
+  `field_index * 8`. **A `[u32]`/slice field is exactly ONE 8-byte slot on both
+  construction and read — there is no fat-pointer (ptr+len) 2-slot expansion
+  anywhere in the native backend.** So a field can NOT be "mis-sized" by an
+  array field; only the field *index* can differ.
+- Field index is resolved in **declaration order** by `resolve_field_index`
+  (`src/compiler/50.mir/_MirLowering/function_lowering.spl:582`): `field_map`
+  (by global symbol id) → `struct_field_order` (by NAME) →
+  `struct_value_syms`/`struct_field_type_name` name-recovery fallbacks. The
+  native/bootstrap MIR path has **no expression type inference** (bugs
+  #166/#138/#156, `50.mir/mir_lowering_types.spl:25-90`), so cross-module field
+  reads lean on these fragile NAME-keyed heuristics.
+
+### Controlled experiment — does NOT reproduce
+
+Built a faithful minimal 2-module reproducer: a `class FbDev` with the EXACT
+`FramebufferDriver` field list (`u64, [u32], [u32], u32, u32, u32, u32, bool,
+4×u32`) + `static fn make`; a consumer reading it cross-module via both real
+patterns — a direct typed param (`fb.width`, mirrors executor line 62) and a
+nested `self.fb.width` where `fb` is a class field at index 1 after a class-typed
+field (mirrors `self.framebuffer.width`, executor line 104). Compiled with the
+CURRENT deployed compiler via `bin/simple compile … --emit=object`, carved the
+SMF `.text`, and disassembled the field-read instructions.
+
+**Every read resolves CORRECTLY** — `width`(idx 3)→offset `0x18`, `height`(idx
+4)→offset `0x20` — across ALL axes tested:
+
+| variant | width | height | correct? |
+|---|---|---|---|
+| normal, x86_64-linux | `0x18` | `0x20` | ✓ |
+| `SIMPLE_BOOTSTRAP=1`, x86_64-linux | `0x18` | `0x20` | ✓ |
+| `SIMPLE_BOOTSTRAP=1`, x86_64-**unknown-simpleos** | `0x18` | `0x20` | ✓ |
+| **`SIMPLE_BOOTSTRAP=1`, `--target x86_64-unknown-none --backend cranelift`** (the exact target/backend this bug uses) | `0x18` | `0x20` | ✓ |
+| nested `self.fb.width` (consumer field-of-field) | `0x18(%r10)` | `0x20(%r10)` | ✓ |
+
+No shift in any minimal configuration — **including the exact freestanding
+`x86_64-unknown-none` cranelift target/mode of the live failure.**
+
+### Conclusion / corrected scope
+
+- The "array fields ahead of scalars mis-size the layout" mechanism is **wrong**
+  as stated: array fields are 1 uniform slot and the exact layout + read
+  patterns resolve correctly in isolation, even on the freestanding target.
+- The shift is **real in the full SimpleOS build** (peer evidence above, and
+  `TaskbarModel` too) but **full-graph/scale dependent**. The most likely real
+  mechanism is a collision in the NAME-keyed field-resolution heuristics
+  (`struct_field_order` / `struct_value_syms` / `struct_field_type_name`, all
+  keyed by type NAME) — the documented cross-module same-field-name /
+  same-name-subset collision family (cf.
+  `interp_cross_module_struct_field_collision_2026-07-04.md`). FramebufferDriver's
+  and TaskbarModel's field names (`width`/`height`/`dirty`/`revision`/…) are
+  extremely common across the OS graph; at whole-program scale one of these maps
+  can recover the WRONG type ordering for the receiver at a read site, dropping
+  one leading entry (exactly the -1 signature). This matches the sibling bug
+  `x64_freestanding_module_level_val_u32_desktop_gui_2026-07-12.md`.
+- **Verdict: a minimal, safely-landable compiler fix is NOT available from this
+  pass.** The mechanism is not reproduced in isolation ⇒ the exact miscount site
+  cannot be pinned ⇒ no blind change to `resolve_field_index` (the
+  bootstrap/native hot path) is justified. The 3-stage-byte-identical-bootstrap
+  gate makes a speculative change unacceptable.
+
+### Precise next step to pin it (definitive, bounded)
+
+The real consumer compiles standalone with full closure:
+`SIMPLE_BOOTSTRAP=1 bin/simple compile src/os/compositor/engine2d_wm_frame_executor.spl --emit=object --target=x86_64-unknown-none --backend=cranelift -o real.o`
+(a ~14 MB SMF; `.text` at the descriptor before the `.text` name string in the
+SMF section table). Extract `_Engine2dWmFrameExecutor_dot__render_host_gpu` /
+`…_create_host_gpu_exact` from the SMF symbol table (strtab ~`0xd9d9f0`),
+disassemble ONLY those, and read the `FramebufferDriver.width` load offset — if
+`0x10` (idx 2) instead of `0x18` (idx 3), the shift is confirmed in-build. Then
+add a diagnostic to `resolve_field_index` (function_lowering.spl:582) guarded to
+`FramebufferDriver`/`TaskbarModel`, rebuild the compiler once, and log which
+name-keyed map returns the short/shifted ordering. This needs an SMF-symtab
+parser or a compiler-side diagnostic build — a bounded but non-trivial follow-up,
+NOT a blind hot-path edit.
+
+### Root-fix direction (unchanged, but now scoped)
+
+Make `resolve_field_index` authoritative via the **symbol-id-keyed `field_map`**
+for a typed class receiver (never fall to the NAME-keyed heuristics for an
+imported class whose def is in the compilation closure). The broader
+"preserve class/struct field types through HIR (stop erasing to `Infer`)" rework
+is the durable fix but is out of bounds for a minimal pass.
