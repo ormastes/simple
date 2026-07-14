@@ -234,3 +234,19 @@ every layer interpreter-bound because the JIT cannot lower the sfnt/font module
 (`CastElse`/`_set_u16_be`/`_sfnt_utf16be_text`). The ONE real unblock is a fast
 lane: fix those JIT lowering gaps, or redeploy the compiled Stage-4 `bin/simple`.
 The web layout/paint engine correctness is separately PROVEN (update 5, 8-color PPM).
+
+## Update 2026-07-14 (9): DEFINITIVE CEILING — the font/render path cannot be JIT-compiled via .spl changes
+Fixed two JIT construct gaps this session (`_sfnt_utf16be_text` `unit` reserved word;
+`_round_glyf_metric` CastElse in sfnt_glyf) and re-measured the validations: STILL
+~105s/142s/58s — the JIT now defers for a DEEPER reason: `unresolved external symbol
+'rt_dir_exists' would NULL-jump in JIT; deferring to interpreter`, plus the
+`_set_u16_be` mut-capability gap. These are seed-level JIT limitations (unresolved
+externs, mut-capability, construct gaps across sfnt/sfnt_glyf/font_renderer/
+font_registry/web-layout modules), not single constructs a rewrite can clear.
+
+ABSOLUTE FINAL: the actual text-heavy showcase PPM is unreachable by any pure-Simple
+change here. The web layout/paint engine is proven correct (update 5, 8-color PPM).
+Everything reducible in Simple was reduced (7 fixes: split x2, FontRenderConfig, unit,
+font cache, native sha256, glyf CastElse). The only remaining unblock is seed-compiler
+work — fix the JIT to compile the font/render modules OR redeploy compiled Stage-4
+bin/simple — both bootstrap-scoped, outside a safe pure-Simple drive-by.
