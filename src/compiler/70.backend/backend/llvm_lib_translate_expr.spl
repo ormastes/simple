@@ -585,17 +585,31 @@ fn translate_intrinsic(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
             eprint("[llvm-lib] ERROR: __simple_ssa_phi has {args.len()} args (N-ary join); this backend only supports a single then/else pair")
             return local_value_map
         if dest.? and args.len() >= 4:
+            # NOTE: explicit match, not `if then_block.? and else_block.?:` --
+            # a const block-id operand can legitimately be 0 (the entry block
+            # id); truthiness on the boxed i64? here would falsely report
+            # "malformed" for a phi whose then/else predecessor is block 0.
             val then_block = ssa_phi_const_block_arg(args[0])
             val else_block = ssa_phi_const_block_arg(args[2])
-            if then_block.? and else_block.? and block_map.has(then_block.unwrap()) and block_map.has(else_block.unwrap()):
-                val dest_id = dest.unwrap().id
-                val phi_ty = get_local_type(local_types, tm, dest_id)
-                val phi = llvm_build_phi(builder, phi_ty, "ssa_phi")
-                val then_val = translate_operand(ctx, mod_, builder, tm, args[1], value_map, local_types, func_map)
-                val else_val = translate_operand(ctx, mod_, builder, tm, args[3], value_map, local_types, func_map)
-                llvm_add_incoming(phi, [then_val, else_val], [block_map[then_block.unwrap()], block_map[else_block.unwrap()]])
-                local_value_map[dest_id] = phi
-            else:
+            var matched = false
+            match then_block:
+                case Some(then_id):
+                    match else_block:
+                        case Some(else_id):
+                            if block_map.has(then_id) and block_map.has(else_id):
+                                matched = true
+                                val dest_id = dest.unwrap().id
+                                val phi_ty = get_local_type(local_types, tm, dest_id)
+                                val phi = llvm_build_phi(builder, phi_ty, "ssa_phi")
+                                val then_val = translate_operand(ctx, mod_, builder, tm, args[1], value_map, local_types, func_map)
+                                val else_val = translate_operand(ctx, mod_, builder, tm, args[3], value_map, local_types, func_map)
+                                llvm_add_incoming(phi, [then_val, else_val], [block_map[then_id], block_map[else_id]])
+                                local_value_map[dest_id] = phi
+                        case nil:
+                            pass_do_nothing
+                case nil:
+                    pass_do_nothing
+            if not matched:
                 eprint("[llvm-lib] ERROR: malformed __simple_ssa_phi intrinsic")
         else:
             eprint("[llvm-lib] ERROR: malformed __simple_ssa_phi intrinsic")
