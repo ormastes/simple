@@ -26,6 +26,23 @@ struct HttpRoute:
     kind: HttpRouteKind
     file_path: text   # only meaningful when kind == File
 
+fn _name_has_control_byte(name: text) -> bool:
+    """True if `name` carries any ASCII control byte (< 0x20, or DEL 0x7F).
+
+    path_is_safe() already rejects NUL; this closes the rest of the control
+    range so a raw CR/LF (or other control byte) injected into a /files
+    segment fails closed here instead of riding through as a "safe" filename
+    and becoming a response-header-injection vector downstream. Indexes a
+    `.bytes()` array (reliable) rather than per-char text predicates."""
+    val bs = name.bytes()
+    var i = 0
+    while i < bs.len():
+        val b = bs[i]
+        if b < 32 or b == 127:
+            return true
+        i = i + 1
+    false
+
 pub fn http_classify_request(request: text) -> HttpRoute:
     """Classify a raw HTTP request into a route decision.
 
@@ -53,6 +70,8 @@ pub fn http_classify_request(request: text) -> HttpRoute:
         # Single flat segment only, and reuse the real web server's traversal
         # check so "..%2f", encoded dot-dot, "//", NUL, etc. all fail closed.
         if name.find("/") >= 0:
+            return HttpRoute(kind: HttpRouteKind.NotFound, file_path: "")
+        if _name_has_control_byte(name):
             return HttpRoute(kind: HttpRouteKind.NotFound, file_path: "")
         if not path_is_safe(path):
             return HttpRoute(kind: HttpRouteKind.NotFound, file_path: "")

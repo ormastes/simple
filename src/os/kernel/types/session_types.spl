@@ -94,3 +94,62 @@ fn capset_clone_unpledged(cs: CapabilitySet) -> CapabilitySet:
     for t in cs.caps:
         toks.push(t)
     CapabilitySet(caps: toks, is_pledged: false)
+
+# ============================================================================
+# S5 — Container (CSpace + budget + namespace, session-owned, epoch-bound)
+#
+# A Container is NOT a new authority object; it is a SHAPE of a CSpace
+# (research §3.6/§17): a namespace of visible objects (its cspace), a sub-budget
+# charged from its owning session, and a set of labels. Its keystone property:
+# a container is owned by EXACTLY ONE session and captures that session's epoch
+# at creation, so a session teardown (epoch bump) kills every container it owns
+# in O(1) — the container cap dies with its session (Fuchsia realm kill).
+# ============================================================================
+
+struct Container:
+    """One session-owned container = CSpace + budget + label-namespace.
+
+    id            — unique monotone container id (0 = invalid).
+    owner_session — the Session.id that owns this container (its epoch backs it).
+    cspace        — the container's visible-object namespace. Invariant, enforced
+                    at creation: cspace ⊆ owner_session.current (never wider).
+    budget        — sub-budget charged from the owning session's budget.
+    labels        — role-neutral names of the objects visible in this container.
+    epoch         — the owner session's epoch captured at creation. The container
+                    is live only while owner_session is live at THIS epoch; a
+                    teardown epoch bump revokes it with no per-container walk.
+    """
+    id: u64
+    owner_session: u64
+    cspace: CapabilitySet
+    budget: u64
+    labels: [text]
+    epoch: u64
+
+# ============================================================================
+# S5 — Escrow cap (cross-session single-use cowork)
+#
+# The "scheduler-LLM hands ticketing-LLM a one-shot create-ticket cap" flow
+# (research §17): a single-use attenuated cap MINTED INTO THE RECEIVER'S arena,
+# bound to the RECEIVER'S session epoch (so it dies with the receiver, never
+# leaking authority out of a dead sender), consumed on first use, and monotonic
+# (never exceeds the sender's CURRENT authority).
+# ============================================================================
+
+struct EscrowCap:
+    """A single-use capability escrowed from one session into another.
+
+    id           — unique monotone escrow id (0 = invalid).
+    from_session — the sender session whose CURRENT authorized the cap (monotone).
+    to_session   — the receiver session into whose arena the cap was minted.
+    to_epoch     — the receiver's epoch at mint time; the escrow is live only
+                   while to_session is live at this epoch (dies with the receiver).
+    cap          — the single-use capability token being handed over.
+    consumed     — true once redeemed; a second consume is denied (single-use).
+    """
+    id: u64
+    from_session: u64
+    to_session: u64
+    to_epoch: u64
+    cap: CapabilityToken
+    consumed: bool

@@ -14,7 +14,7 @@ use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, Capabilit
 use os.kernel.types.vmspace_types.{ProcessVmSpace, VMA_READ, VMA_WRITE}
 use os.kernel.memory.vmm.{vma_find, vmm_pt_range_user_readable, vmm_pt_range_user_writable}
 use os.kernel.privilege.privilege_bridge.{two_gate_for_task}
-use os.kernel.types.session_types.{Session, SessionKind, capset_subset, capset_clone_unpledged}
+use os.kernel.types.session_types.{Session, SessionKind, capset_subset, capset_clone_unpledged, Container, EscrowCap}
 
 # ============================================================================
 # Per-Task Capability Record
@@ -62,6 +62,10 @@ class CapabilityManager:
     sessions: [Session]             # S1 privilege-session table
     next_session_id: u64            # Monotone session id allocator
     next_session_epoch: u64         # Monotone session epoch allocator (S3 revoke)
+    containers: [Container]         # S5 session-owned container table
+    next_container_id: u64          # Monotone container id allocator (S5)
+    escrows: [EscrowCap]            # S5 cross-session single-use escrow table
+    next_escrow_id: u64             # Monotone escrow id allocator (S5)
 
 impl CapabilityManager:
     static fn new() -> CapabilityManager:
@@ -72,7 +76,11 @@ impl CapabilityManager:
             next_token_id: 1,
             sessions: [],
             next_session_id: 1,
-            next_session_epoch: 1
+            next_session_epoch: 1,
+            containers: [],
+            next_container_id: 1,
+            escrows: [],
+            next_escrow_id: 1
         )
 
     # -- Checking ------------------------------------------------------------
@@ -541,6 +549,19 @@ impl CapabilityManager:
         val parent = parent_opt
         if parent.sealed:
             return nil
+        # SECURITY (fail-closed): an ambient-full set (is_pledged:false + zero
+        # tokens) represents ALL authority, but capset_subset only iterates its
+        # (empty) token list and would VACUOUSLY pass containment — minting a
+        # child ABOVE its parent (a session-authority escalation). Guard it
+        # explicitly: an ambient ceiling is contained only by an ambient parent,
+        # and an ambient current only by an ambient ceiling.
+        val ceiling_ambient = (not ceiling.is_pledged) and (ceiling.caps.len() == 0)
+        val parent_ambient = (not parent.current.is_pledged) and (parent.current.caps.len() == 0)
+        if ceiling_ambient and (not parent_ambient):
+            return nil
+        val current_ambient = (not current.is_pledged) and (current.caps.len() == 0)
+        if current_ambient and (not ceiling_ambient):
+            return nil
         # Invariant: the child's ceiling must sit within the parent's CURRENT
         # authority, and the child's current within its own ceiling.
         if not capset_subset(ceiling, parent.current):
@@ -716,6 +737,172 @@ impl CapabilityManager:
         if s.epoch != bound_epoch:
             return false
         true
+
+    # ========================================================================
+    # S5 — Container: CSpace + budget + namespace, session-owned, epoch-bound
+    #
+    # A container is the §3.6/§17 SHAPE of a CSpace (cspace + sub-budget + label
+    # namespace) owned by exactly ONE session. It captures that session's epoch
+    # at creation, so session_teardown's epoch bump revokes every container the
+    # session owns in O(1) — a container cap dies with its session.
+    # ========================================================================
+
+    me create_container(owner_session_id: u64, cspace: CapabilitySet, budget: u64, labels: [text]) -> Container?:
+        """S5: create a container owned by `owner_session_id`. Fail-closed unless
+        the owner session exists and is live, cspace ⊆ owner.current (a container
+        can never see wider authority than the session that owns it), AND the
+        container budget fits within the owner's budget (quota). The container
+        captures owner.epoch, so an owner teardown revokes it with no walk."""
+        val owner_opt = self._find_session(owner_session_id)
+        if owner_opt == nil:
+            return nil
+        val owner = owner_opt
+        if owner.sealed:
+            return nil
+        if not capset_subset(cspace, owner.current):
+            return nil
+        if budget > owner.budget:
+            return nil
+        val cid = self.next_container_id
+        self.next_container_id = self.next_container_id + 1
+        val c = Container(
+            id: cid,
+            owner_session: owner_session_id,
+            cspace: cspace,
+            budget: budget,
+            labels: labels,
+            epoch: owner.epoch
+        )
+        self.containers.push(c)
+        c
+
+    fn container_live(c: Container) -> bool:
+        """A container is live iff its owning session is still live at the epoch
+        captured when the container was created. A session teardown bumps that
+        epoch (or seals the session), so every container it owns dies at once."""
+        self._session_live(c.owner_session, c.epoch)
+
+    fn container_of(container_id: u64) -> Container?:
+        """Public accessor: current table state for a container id (or nil)."""
+        for c in self.containers:
+            if c.id == container_id:
+                return c
+        nil
+
+    # ========================================================================
+    # S5 — Escrow: cross-session single-use cowork (powerbox, research §17)
+    #
+    # The "scheduler-LLM hands ticketing-LLM a one-shot create-ticket cap" flow:
+    # a single-use cap minted into the RECEIVER's arena, bound to the RECEIVER's
+    # epoch (so it dies with the receiver, never leaks out of a torn-down sender),
+    # consumed on first use, and monotonic (never exceeds the sender's current).
+    # ========================================================================
+
+    me escrow_cap(from_session_id: u64, to_session_id: u64, cap: CapabilityToken) -> EscrowCap?:
+        """S5: mint a SINGLE-USE cap from `from_session` into `to_session`'s arena.
+
+        Monotonic: the sender must actually hold `cap.kind` in its CURRENT
+        authority (never the sender's max) — an escrow can never exceed the
+        sender. Fail-closed when either session is unknown/sealed or the sender
+        lacks the authority. The escrow is bound to the RECEIVER's epoch, so it
+        dies with the receiver."""
+        val from_opt = self._find_session(from_session_id)
+        if from_opt == nil:
+            return nil
+        val from_s = from_opt
+        if from_s.sealed:
+            return nil
+        val to_opt = self._find_session(to_session_id)
+        if to_opt == nil:
+            return nil
+        val to_s = to_opt
+        if to_s.sealed:
+            return nil
+        if not from_s.current.has(cap.kind):
+            return nil
+        val eid = self.next_escrow_id
+        self.next_escrow_id = self.next_escrow_id + 1
+        val e = EscrowCap(
+            id: eid,
+            from_session: from_session_id,
+            to_session: to_session_id,
+            to_epoch: to_s.epoch,
+            cap: cap,
+            consumed: false
+        )
+        self.escrows.push(e)
+        e
+
+    me consume_escrow(escrow_id: u64, by_session_id: u64) -> CapabilityToken?:
+        """S5: redeem a single-use escrow. Returns the cap on the FIRST consume by
+        the intended receiver while its session is live; every later attempt (a
+        second consume, a wrong receiver, or a torn-down receiver) is DENIED
+        (nil). Single-use is enforced by flipping `consumed` on first success."""
+        var idx = 0
+        while idx < self.escrows.len():
+            var e = self.escrows[idx]
+            if e.id == escrow_id:
+                if e.consumed:
+                    return nil
+                if e.to_session != by_session_id:
+                    return nil
+                if not self._session_live(e.to_session, e.to_epoch):
+                    return nil
+                e.consumed = true
+                self.escrows[idx] = e
+                return e.cap
+            idx = idx + 1
+        nil
+
+    # ========================================================================
+    # S6 — Multi-tenant tree: System → Tenant → User, disjoint arenas + quota
+    #
+    # open_system mints the root of trust with a resource budget; Tenants and
+    # Users are create_child_quota children whose budget can NEVER exceed the
+    # parent's (per-node quota) and whose ceiling ⊆ parent.current (disjoint,
+    # monotone-down arenas). Teardown of a Tenant cascades to all descendants via
+    # the existing session_teardown DFS epoch bump.
+    # ========================================================================
+
+    me open_system(principal: text, ceiling: CapabilitySet, budget: u64) -> Session:
+        """S6: mint the root System session — the top of the multi-tenant tree.
+
+        Like login() but kind == System and with an explicit resource budget that
+        Tenant/User children draw against via create_child_quota. Fresh id +
+        epoch, no parent (parent = 0)."""
+        val sid = self.next_session_id
+        self.next_session_id = self.next_session_id + 1
+        val ep = self.next_session_epoch
+        self.next_session_epoch = self.next_session_epoch + 1
+        val s = Session(
+            id: sid,
+            kind: SessionKind.System,
+            epoch: ep,
+            principal: principal,
+            ceiling: ceiling,
+            current: ceiling,
+            budget: budget,
+            parent: 0u64,
+            children: [],
+            sealed: false
+        )
+        self.sessions.push(s)
+        s
+
+    me create_child_quota(parent_id: u64, kind: SessionKind, principal: text, ceiling: CapabilitySet, current: CapabilitySet, budget: u64) -> Session?:
+        """S6: create a multi-tenant child (System → Tenant → User) enforcing the
+        per-node budget quota ON TOP of the S1 ceiling containment. Returns nil
+        (fail closed) when budget > parent.budget (a child can never be funded
+        above its parent) or when the ceiling(child) ⊆ current(parent) invariant
+        fails. The plain create_child_session keeps its budget-agnostic behavior
+        for callers that account budget separately."""
+        val parent_opt = self._find_session(parent_id)
+        if parent_opt == nil:
+            return nil
+        val parent = parent_opt
+        if budget > parent.budget:
+            return nil
+        self.create_child_session(parent_id, kind, principal, ceiling, current, budget)
 
 fn capability_set_from_sandbox_lowering(task: TaskId, sandbox_lowering_sdn: text) -> CapabilitySet:
     """Map generated sandbox capability handles into kernel capabilities.
