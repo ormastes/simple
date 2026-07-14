@@ -13932,10 +13932,30 @@ TRAP_STUB_RET(rt_thread_join, 1)
 RuntimeValue rt_thread_yield(void)          { return NIL_VALUE; }  /* yield: no-op */
 RuntimeValue rt_thread_current(void)        { return ENCODE_INT(0); }  /* thread ID 0 */
 RuntimeValue rt_thread_sleep(RuntimeValue a) { (void)a; return NIL_VALUE; }  /* sleep: return immediately */
-TRAP_STUB_RET(rt_mutex_new, 0)
-TRAP_STUB_RET(rt_mutex_lock, 1)
-TRAP_STUB_RET(rt_mutex_unlock, 1)
-TRAP_STUB_RET(rt_mutex_try_lock, 1)
+/* Safe single-slot mutex on single-core cooperative bare metal.
+ * There is no preemption or SMP in the kernel's render/service paths, so an
+ * uncontended mutex reduces to a value-guarding cell: new() boxes the initial
+ * value, lock()/try_lock() return the current value, unlock() stores the new
+ * value. This is NOT masking a hosted-only API — it is the correct single-core
+ * semantics, and it unblocks Engine2D present()/glyph paths that guard render
+ * state through std.concurrent.Mutex. (Halting here was a false positive.) */
+RuntimeValue rt_mutex_new(RuntimeValue initial) {
+    RuntimeValue *box = (RuntimeValue *)malloc(sizeof(RuntimeValue));
+    *box = initial;
+    return ENCODE_PTR(box);
+}
+RuntimeValue rt_mutex_lock(RuntimeValue m) {
+    if (!IS_HEAP(m)) { return m; }
+    return *(RuntimeValue *)DECODE_PTR(m);
+}
+RuntimeValue rt_mutex_unlock(RuntimeValue m, RuntimeValue new_value) {
+    if (IS_HEAP(m)) { *(RuntimeValue *)DECODE_PTR(m) = new_value; }
+    return new_value;
+}
+RuntimeValue rt_mutex_try_lock(RuntimeValue m) {
+    if (!IS_HEAP(m)) { return m; }
+    return *(RuntimeValue *)DECODE_PTR(m);
+}
 TRAP_STUB_RET(rt_condvar_new, 0)
 TRAP_STUB_RET(rt_condvar_wait, 1)
 TRAP_STUB_RET(rt_condvar_notify, 1)
