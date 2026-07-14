@@ -1198,7 +1198,19 @@ int64_t rt_unwrap_or_self(int64_t value) {
 }
 
 int8_t rt_is_none(int64_t value) {
-    if (value == 0 || value == rt_core_nil()) return 1;
+    /* Bug (native_i64opt_some0_collapses_to_nil): the `value == 0` fallback
+     * used to treat ANY raw zero as None, colliding with a real `Some(0)`
+     * payload on the flat (non-boxed) primitive `i64?`/`bool?` lane, where
+     * ints/bools are passed through as their bare bit pattern (not the
+     * NaN-boxed RT_VALUE_TAG_INT scheme -- a boxed int 0 would also be 0,
+     * so a bare `value == 0` check can never safely stand in for "is this
+     * the nil sentinel" once nil itself is *not* 0). The MIR-side NilLit
+     * materialization (expr_dispatch.spl `case NilLit:`) now emits the
+     * runtime's actual reserved nil sentinel (`rt_core_nil()`, bit pattern
+     * 3) instead of a bare 0, so nil and Some(0) are now distinct raw
+     * values -- test ONLY against rt_core_nil(); a properly-constructed
+     * Option never legitimately carries raw 0 as its nil marker anymore. */
+    if (value == rt_core_nil()) return 1;
     return rt_enum_discriminant(value) == (int64_t)(uint32_t)2371748697u;
 }
 

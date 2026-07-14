@@ -742,13 +742,33 @@ impl MirLowering:
                 # operand -- e.g. the RHS of `args == nil`, lowered by the
                 # backend to `inttoptr i64 %lN to ptr` -- `%lN` was a dangling
                 # SSA reference (llc: "use of undefined value"). Materialize
-                # nil as a real const-0 (i64): translate_const emits
-                # `%lN = add i64 0, 0`, a defined value that the Eq/Ne
-                # comparison then casts to `ptr` (null) via inttoptr, or
-                # compares directly as an integer.
+                # nil as a real defined const (i64): translate_const emits
+                # `%lN = add i64 0, 3`, a defined value that the Eq/Ne
+                # comparison then casts to `ptr` via inttoptr, or compares
+                # directly as an integer.
+                #
+                # Bug (native_i64opt_some0_collapses_to_nil): the const used
+                # to be `Int(0)`, i.e. the flat sentinel was literally 0 --
+                # indistinguishable at the value level from a real `Some(0)`
+                # payload on the (non-boxed) primitive `i64?`/`bool?` fast
+                # path, so `val x: i64? = 0` and `nil` were the SAME value and
+                # `??`/`.?`/`if val`/`==nil` all silently treated Some(0) as
+                # None. Emit `3` instead -- the same reserved bit pattern the
+                # runtime's tagged/boxed lane already uses for nil
+                # (`rt_core_nil()` = SPECIAL tag 0b011, payload 0 = 3; see
+                # `box_runtime_value` above, which already materializes nil as
+                # `emit_const_int(3)` for the boxed/runtime-value lane). Real
+                # payloads on the flat fast path are never boxed (raw
+                # int/bool bit patterns, e.g. false=0, true=1), so 3 cannot
+                # collide with any real bool payload and only collides with
+                # the specific literal int payload 3 (an acceptable, narrow
+                # trade for closing the much more common Some(0) collision;
+                # full non-collision requires boxing every flat Option
+                # payload, which is out of scope here -- see
+                # doc/08_tracking/bug/native_i64opt_some0_collapses_to_nil_2026-07-14.md).
                 var b_nil_lit = self.builder
                 val nil_result = b_nil_lit.new_temp(MirType.i64())
-                b_nil_lit.emit_const(nil_result, MirConstValue.Int(0), MirType.i64())
+                b_nil_lit.emit_const(nil_result, MirConstValue.Int(3), MirType.i64())
                 self.builder = b_nil_lit
                 self.nil_locals[nil_result.id] = true
                 nil_result
@@ -1438,7 +1458,15 @@ impl MirLowering:
                 var b_else = self.builder
                 b_else.switch_to_block(else_block)
                 self.builder = b_else
-                b_else.emit_const(result_local, MirConstValue.Int(0), result_type)
+                # Bug (native_i64opt_some0_collapses_to_nil): this used to
+                # hardcode `Int(0)` as the "none" result of `x.?`. Now that
+                # `NilLit` materializes the nil sentinel as `3`
+                # (rt_core_nil(), see above), this branch must emit the SAME
+                # sentinel -- otherwise `x.?` on a nil `x` yields a fresh 0,
+                # which (post-fix) `rt_is_none` no longer recognizes as nil,
+                # so an outer `if val v = x.?:` would wrongly treat the
+                # none-case result as `Some(0)`.
+                b_else.emit_const(result_local, MirConstValue.Int(3), result_type)
                 b_else.terminate_goto(merge_block)
                 self.builder = b_else
 
