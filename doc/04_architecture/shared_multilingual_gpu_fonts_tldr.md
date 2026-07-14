@@ -25,10 +25,11 @@ Hosted color-background frames now lower through the same Draw IR/Engine2D
 route with one persistent raster session. Image/motion backgrounds and nested
 content retain an immediate compatibility retry; source routing is not runtime proof.
 
-The pinned 10-language × 10-category source policy contains 57 native cells,
-4 explicit script-sans mono fallbacks, 26 not-designed cells, and 13 unavailable
-serif complex-script/Emoji cells. It accepts sans Hindi and Arabic/Urdu
-witnesses; the refreshed executable proof is pending.
+The pinned 10-language × 10-category source policy contains 67 native cells,
+4 explicit script-sans mono fallbacks, 26 not-designed cells, and 3 unavailable
+serif complex-script cells. It accepts sans Hindi and Arabic/Urdu witnesses plus
+the exact monochrome Noto Emoji `U+1F600` corpus tuple for every selected
+language tag; the focused self-hosted shaping/material scenario exits 0.
 Other complex scripts, emoji sequences/color, general GSUB/GPOS/BiDi, Engine3D native
 execution, executed Web/GUI/WM glyph-pixel parity, retained SimpleOS guest
 pixel evidence, and performance targets remain gated. Atlas and face generations invalidate cached material; unavailable

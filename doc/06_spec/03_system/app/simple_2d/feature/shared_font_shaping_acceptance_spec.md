@@ -64,12 +64,12 @@ stdout. The executable source contains seven scenarios.
 
 ## Expected result
 
-On a successful focused rerun, all 54 native identity rows, the four
+The focused self-hosted scenario exits 0: all 54 native identity rows, the four
 script-sans mono fallbacks, the exact Hindi sans face, and the Arabic/Urdu sans
-face pass without test-side policy mutation. The source-policy matrix is 57
-`native` plus 4 `fallback` cells; the remaining cells are 26
-`not-designed-for-script` and 13 `unavailable`. Execution remains pending, so
-this is not current PASS evidence.
+face pass without test-side policy mutation, as do the ten exact monochrome
+Noto Emoji `U+1F600` corpus tuples. The source-policy matrix is 67 `native`
+plus 4 `fallback` cells; the remaining cells are 26
+`not-designed-for-script` and 3 `unavailable` serif complex-script cells.
 Missing/stale inputs, Arabic marks outside the selected witnesses, other Indic
 sequences, and emoji sequences fail closed. This does not prove general emoji
 or GPU execution.

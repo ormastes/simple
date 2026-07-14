@@ -72,3 +72,19 @@ runner/readiness targets now select `gui_entry_desktop.spl`; direct legacy
 `wm_entry.spl` files remain compatibility-only. The hosted frame owner remains
 migration work. The latest retained SimpleOS fullscreen report also failed before
 QEMU pixel acceptance, so source-complete canonical routing is runtime-unproven.
+
+## Current-state correction — hosted WM and exact-corpus Emoji — 2026-07-14
+
+The hosted color-background and top-level WM frame owner now executes
+`SharedWmScene -> DrawIrComposition -> Engine2D` through one persistent
+`Engine2dCompositorBackend`. Image/motion backgrounds and nested content retain
+an immediate compatibility retry. This corrects the earlier hosted-owner note;
+runtime pixel parity remains unproven.
+
+The pinned monochrome `NotoEmoji[wght].ttf` exact `U+1F600` scenario also exits
+0 under the self-hosted release binary for every selected language tag. REQ-005
+defines acceptance by executable corpus coverage, so those ten exact tuples are
+now native: the matrix is 67 native, 4 fallback, 26 not-designed, and 3
+unavailable serif complex-script cells. This is not general Emoji support:
+multi-codepoint, variation-selector, modifier, ZWJ, and color Emoji remain
+fail-closed.

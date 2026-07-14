@@ -71,8 +71,10 @@ lookup. Unknown axes return `nil`. A witness family is not loadable selection:
 callers may bind an asset only after the returned status is `native` or
 `fallback`. The policy binds 54 no-feature identity cells plus Noto Sans
 Devanagari for exact Hindi `hi` and Noto Sans Arabic for the exact Arabic/Urdu
-witnesses: 57 native cells and the single `zh/mono -> Noto Sans SC` fallback.
-The other 42 cells are 26 `not-designed-for-script` and 16 `unavailable`.
+witnesses, plus exact monochrome Noto Emoji `U+1F600` corpus tuples for all ten
+selected language tags: 67 native cells and 4 explicit script-sans mono
+fallbacks. The other 29 cells are 26 `not-designed-for-script` and 3
+`unavailable` serif complex-script cells.
 The resolver returns a bundled candidate only for those promoted cells. Widget
 Draw IR reads the existing `lang` and `font-family` properties; shared WM
 windows preserve an explicit language field. Missing language remains `und`
@@ -86,8 +88,9 @@ not UAX#9. Substitution and positioning completeness are true for the executed
 no-feature Latin/Han/Cyrillic identity profile and the exact Hindi `hi`
 witness. A bounded, table-derived Arabic/Urdu path covers only the two pinned
 default-instance witnesses and is cataloged for those exact tuples. A whole-run
-single `U+1F600` scalar has a source-complete exact-face monochrome material gate
-but stays catalog-unavailable until that gate executes successfully. Other
+single `U+1F600` scalar has passed the self-hosted exact-face monochrome material
+gate for every selected language tag and is cataloged only as that exact corpus
+tuple. Other
 complex-script, variation-selector, modifier, ZWJ, color, and multi-codepoint
 emoji material remains incomplete even when blob/runtime cmap IDs match.
 

@@ -71,10 +71,10 @@ asset identity evidence only; it neither enforces names during runtime loading
 nor promotes language/category coverage.
 
 The unchanged binaries and adjacent metadata/licenses are bundled under
-`assets/fonts/google-fonts/` (16 files, 51,764,704 font bytes). Eleven are
-accepted in source policy—nine identity-profile families plus the sans
-Devanagari and Arabic witness faces. Serif Devanagari/Arabic, Noto Emoji, and
-two rank-eleven Bengali faces remain candidates.
+`assets/fonts/google-fonts/` (16 files, 51,764,704 font bytes). Twelve are
+accepted in source policy—nine identity-profile families, the sans Devanagari
+and Arabic witness faces, and exact-corpus Noto Emoji. Serif Devanagari/Arabic
+and two rank-eleven Bengali faces remain candidates.
 The canonical font provider now projects all 16 manifest paths and accepts an
 exact, trimmed, case-insensitive family name as a singleton candidate. Encoded
 `@font-face` sources still take priority; generic CSS family heuristics remain
@@ -109,9 +109,10 @@ The manifest scenario prepares exact `CORPUS.sdn` codepoint and raster
 witnesses for all 16 candidates, including Bengali rank 11 and Noto Emoji
 `U+1F600`. The current source policy retains 54 no-feature identity native
 cells, accepts the sans faces for the exact Hindi and Arabic/Urdu witnesses,
-and leaves Emoji unpromoted. The matrix totals are 57 `native`, 4 explicit
-script-sans mono `fallback`, 26 `not-designed-for-script`, and 13
-`unavailable`; refreshed execution remains pending.
+and accepts exact monochrome Noto Emoji `U+1F600` corpus tuples for all ten
+selected language tags. The matrix totals are 67 `native`, 4 explicit
+script-sans mono `fallback`, 26 `not-designed-for-script`, and 3 `unavailable`;
+the focused self-hosted shaping/material scenario exits 0.
 An accepted identity cell means
 the exact pinned face stayed live, parsed cmap and runtime glyph IDs agreed for
 the exact language witness, bounded hmtx advances matched, shaping completed,
@@ -175,9 +176,10 @@ Bind each OpenType blob to its runtime face with additive
 `shaper_with_ot_face` calls; rebinding a handle replaces its prior snapshot.
 Latin, Cyrillic, Han, and a whole-run single-codepoint emoji may complete only
 when the selected live face and blob/runtime cmap glyph IDs agree, hmtx advance
-matches, and canonical material is valid. The emoji candidate is limited to
-monochrome `U+1F600` and is not matrix acceptance before a successful focused
-run. The bounded Arabic/Urdu path validates selected Script/LangSys
+matches, and canonical material is valid. Exact monochrome Noto Emoji
+`U+1F600` has passed that focused self-hosted gate for every selected language
+tag and is matrix acceptance only for that corpus tuple. The bounded
+Arabic/Urdu path validates selected Script/LangSys
 metadata and executes witness-specific pinned lookup indices/forms for the two
 promoted literals; it does not claim general substitution/positioning completeness. The exact Hindi `हिन्दी`
 witness selects bounded `dev2` Script/LangSys records and ordered default GSUB/

@@ -86,18 +86,20 @@ complex shaping, complete REQ-008 format behavior, or GPU execution.
 ### Sparse coverage
 
 - 10 languages × 10 categories = exactly 100 unique cells.
-- Current source-policy totals are 57 `native`, 4 `fallback`, 26
-  `not-designed-for-script`, and 13 `unavailable`.
+- Current source-policy totals are 67 `native`, 4 `fallback`, 26
+  `not-designed-for-script`, and 3 `unavailable`.
 - Chinese mono falls back to Noto Sans SC; Hindi, Arabic, and Urdu mono fall
   back to their accepted script sans faces. Hindi, Arabic, and Urdu serif remain
-  unavailable pending exact per-face oracles. Emoji remains unavailable.
+  unavailable pending exact per-face oracles. Exact monochrome Noto Emoji
+  `U+1F600` corpus tuples are native for all ten selected language tags;
+  sequences and color remain unsupported.
   Russian display remains not designed for that script.
 
 ### Corpus and accepted-simple policy gate
 
-- Eleven manifest entries are accepted: nine identity-profile families plus the
-  sans Devanagari/Arabic selected-shaping faces. The two serif script faces,
-  Noto Emoji, and two Bengali rank-eleven faces remain `candidate:`. Cmap
+- Twelve manifest entries are accepted: nine identity-profile families plus the
+  sans Devanagari/Arabic selected-shaping faces and exact-corpus Noto Emoji. The
+  two serif script faces and two Bengali rank-eleven faces remain `candidate:`. Cmap
   metadata or raster diagnostics alone still cannot accept a cell; the shaping
   gate adds exact Hindi `hi` through the `हिन्दी` `dev2` witness for Noto Sans
   Devanagari and the exact pinned Arabic `العربية` / Urdu `اردو` lookup-vector
@@ -114,9 +116,10 @@ complex shaping, complete REQ-008 format behavior, or GPU execution.
   names from each real binary. Both native loader owners call the
   structural bool preflight before native state mutation; typed reasons are
   retained as scenario evidence.
-- The bound shaping gate promotes 54 identity native cells and three selected-script
-  sans cells, for 57 `native`, 4 explicit script-sans mono `fallback` cells, 26
-  `not-designed-for-script`, and 13 `unavailable`. This manifest validates that
+- The bound shaping gate promotes 54 identity native cells, three selected-script
+  sans cells, and ten exact-corpus Emoji cells, for 67 `native`, 4 explicit
+  script-sans mono `fallback` cells, 26 `not-designed-for-script`, and 3
+  `unavailable`. This manifest validates that
   source policy but adds no shaping rows beyond the shaping gate.
 - The focused shaping SSpec preserves exact CORPUS
   source/cluster/language/script metadata for the 54-cell identity subset and
