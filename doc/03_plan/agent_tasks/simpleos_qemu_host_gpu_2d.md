@@ -59,7 +59,11 @@ fixture bypasses, synthetic handles, or passing placeholders.
   transport migration rather than treating the historical fixed-anchor probe
   as production evidence.
 - NFR-006 remains open under TODO 566: receipt timing covers daemon HELLO work,
-  not guest-observed device initialization plus all fallback attempts.
+  not guest-observed device initialization plus all fallback attempts. The
+  local source/parser/self-test lane and current Linux native row remain active;
+  only unavailable Windows/macOS native timing rows are postponed. AArch64 and
+  RV64 TCG validate ordering, counting, boundaries, and fail-closed behavior,
+  but cannot close native latency.
 - NFR-005 evidence now carries concurrently sampled daemon, QEMU, and combined
   maxima across both AArch64 boots; TODO 563 remains open until fresh live rows
   prove the 256 MiB target and warm multi-sample latency p95. NFR-001's exact

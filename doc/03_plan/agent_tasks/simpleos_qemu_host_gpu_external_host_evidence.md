@@ -22,6 +22,7 @@ remains incomplete.
 | Exact 1280x720 non-current native-host fixtures | TODO569 | Zero-mismatch device readback on prepared Windows/macOS/NVIDIA rows; current Linux Vulkan work remains active |
 | Non-current ProcessingIR preference classification | TODO570 | Correlated CPU/device timing on prepared Windows/macOS/NVIDIA rows; current Linux Vulkan work remains active |
 | Non-current warm p95 and combined QEMU/daemon RSS | TODO563 | Fresh prepared-host measurements; current Linux Vulkan work remains active |
+| Non-current guest-observed negotiation/fallback timing | TODO566 | Windows/macOS native <=500 ms receipts; hardware-independent validation and current Linux native timing remain active |
 
 No new TODO is created because these rows already have authoritative owners.
 
@@ -50,6 +51,10 @@ only if a fresh native run exposes a reproducible implementation failure.
   CPU mirrors cannot promote a row.
 - Cross-ISA TCG proves guest/protocol behavior only; native-host latency and
   RSS claims require native prepared-host rows.
+- Negotiation evidence retains the guest device-init start, ordered submitted
+  attempts and outcomes, final selection/fallback, guest-observed duration, and
+  native applicability. Exactly 500,000 us passes; 500,001 us fails. Daemon
+  HELLO duration and TCG cannot close the native row.
 
 ## Local work that remains active
 
@@ -71,7 +76,7 @@ only if a fresh native run exposes a reproducible implementation failure.
 | TODO555 | Complete owner-level Metal unknown-completion quarantine and later obtain native failure evidence. |
 | TODO563 | Run current-host Linux Vulkan warm p95 and combined QEMU/daemon RSS evidence after TODO548 unblocks execution. |
 | TODO565 | Complete AArch64/RISC-V production desktop ownership and fresh QEMU proof. |
-| TODO566 | Finish guest-observed negotiation timing evidence; preserve the isolated in-progress lane. |
+| TODO566 | Implement and verify the single guest-observed interval plus fail-closed parser self-test locally; after TODO548, run current Linux x86_64 native evidence. Postpone only unavailable Windows/macOS native rows; AArch64/RV64 TCG remain correctness-only. |
 | TODO567 | Replace transitional RISC-V C VirtIO transport with pure-Simple DMA/queue ownership. |
 | TODO568 | Verify the architecture-owned AArch64 RAMFB/input closure with the current compiler. |
 | TODO569 | Run the exact 1280x720 fixture on the current Linux Vulkan row; other prepared-host rows stay postponed. |

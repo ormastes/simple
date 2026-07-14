@@ -386,6 +386,16 @@ requires submission, terminal completion, device-origin readback, stable
 device identity, exact CPU-oracle parity, correlated generation/run/frame IDs,
 and final normal/highest-capability review.
 
+TODO 566 follows the same split: hardware-independent source/parser/self-test
+work and the current Linux native row remain active, while unavailable
+Windows/macOS native timing rows are postponed. Measure one guest-observed
+interval from device initialization through every rejected or timed-out Metal,
+DirectX, and Vulkan attempt to backend selection or CPU fallback. Daemon HELLO
+`elapsed_us` and cross-ISA TCG are correctness evidence only and cannot close
+the inclusive 500,000 us native target. Report only `current-host scope
+complete`; keep the umbrella host-GPU lane incomplete while any required
+prepared-host row remains postponed.
+
 Processing receipts distinguish the transient backend resource handle from the
 stable device identity. Vulkan hashes the runtime-selected driver identity,
 which includes the device name and driver metadata, and negotiation fails

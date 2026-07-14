@@ -34,7 +34,8 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 | multi-ISA row aggregation and fail-closed parsing | REQ-011,012; NFR-008,009 |
 | cached report validates every host/ISA row and all three Linux serial receipts before promotion | REQ-011,012; NFR-008,009 |
 | live and cached QEMU argv match the ISA machine, kernel, and shared ivshmem binding | REQ-006,011,012; NFR-009 |
-| latency, negotiation, and RSS evidence | NFR-003,005,006 |
+| guest-observed device-init through selected-backend/fallback interval, including rejected/timed-out attempts and the 500000/500001 us boundary (TODO 566) | NFR-006 |
+| render latency and concurrent QEMU/daemon RSS evidence | NFR-003,005 |
 | exact 1280x720 canonical Draw IR readback with a positional zero-mismatch oracle (TODO 569) | NFR-001 |
 | measured device-vs-CPU processing preference and `available-not-preferred` classification (TODO 570) | NFR-004 |
 
@@ -74,6 +75,15 @@ completeness only. The isolated `--self-test-metrics` path rejects missing,
 zero, nonnumeric, or internally inconsistent RSS values and proves maxima are
 preserved across the AArch64 probe/production boots. NFR latency and the 256 MiB
 combined-memory target still require fresh measured rows.
+
+TODO 566's hardware-independent evidence must accept exactly one complete
+ordered attempt sequence, accept 500,000 us, reject 500,001 us, and reject
+missing, duplicate, stale, nonpositive, overflowed, or omitted timeout evidence.
+It must emit exactly one final selection/fallback classification. TCG rows may
+exercise those parser and state-machine rules, but only a matching native-ISA
+row can satisfy the latency target. Current Linux native execution remains
+active; unavailable Windows/macOS native rows stay postponed under the external
+host plan.
 
 The AArch64 pass contract has two mandatory boots under one wrapper-owned
 lifecycle. The first retains the 64x48 raw-render/IMAGE regression, then

@@ -60,6 +60,19 @@ Postponement is not completion: it cannot move the row into exclusions, close
 its TODO, or permit a phase, verify report, or goal to be marked done. Postpone
 only native execution that genuinely requires another prepared host; keep all
 host-independent and current-host rows active until finished.
+Keep every unavailable row visible in executable and generated-manual evidence
+as `unsupported` or `blocked`; never omit it, convert it to `skip()`, or count
+it as PASS. `Current-host scope complete` is narrower than feature completion.
+The authoritative resume plan must name the target host/capability,
+prerequisites, exact command, retained artifacts, owner, and final reviewer.
+
+For SimpleOS QEMU host-GPU NFR-006, TODO 566 postpones only unavailable
+non-current native timing rows. Hardware-independent source/parser/self-test
+work and the current Linux native row remain active. Evidence must cover one
+guest-observed interval from device initialization through every rejected or
+timed-out Metal, DirectX, and Vulkan attempt to backend selection or CPU
+fallback. Daemon HELLO `elapsed_us` and cross-ISA TCG prove correctness only,
+not the 500 ms native target.
 
 For SimpleOS compiler-in-filesystem lanes, completion requires the Simple
 compiler/interpreter/loader payload to be embedded in the SimpleOS install image

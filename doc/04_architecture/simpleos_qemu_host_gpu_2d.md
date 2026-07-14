@@ -166,6 +166,16 @@ Vulkan. Prepared hosts therefore exercise the same wire contract on x86_64,
 AArch64, and RISC-V without accepting a compatibility backend under a native
 name.
 
+NFR-006 is measured by one guest monotonic interval beginning at device
+initialization and ending only after backend selection or the final CPU
+fallback decision. The interval includes every submitted Metal, DirectX, and
+Vulkan attempt in order, including rejection and timeout time. Missing,
+duplicate, stale, or nonpositive attempt evidence fails closed. Daemon HELLO
+service time is diagnostic only and cannot substitute for this guest-observed
+interval. Exactly 500,000 us is within budget; 500,001 us is not. TCG may prove
+ordering, counting, boundary, and rejection semantics but cannot satisfy a
+native latency row.
+
 Processing preference is a verification classification, not a second runtime
 scheduler or wire protocol. For the existing FillU32 fixture the daemon times
 the independent CPU oracle and device executor separately after the HELLO

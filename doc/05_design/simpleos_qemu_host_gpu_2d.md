@@ -222,6 +222,14 @@ formed from independent peaks, and AArch64 preserves maxima across both boots.
 Native-ISA rows require
 negotiation within 500 ms, render/readback p95 at most 16.7 ms, incremental RSS
 at most 256 MiB, and processing speedup at least 1.5x to become preferred.
+Negotiation timing is one guest-observed monotonic interval from device
+initialization through strict Metal -> DirectX -> Vulkan attempts to selected
+backend or CPU fallback. Each submitted attempt is counted once; rejected and
+timed-out attempts remain inside the interval. Missing, duplicate, stale, or
+nonpositive evidence fails closed. The inclusive boundary is 500,000 us; a
+500,001 us native result fails. Cross-ISA TCG validates the contract only and
+does not close the native latency target. TODO 566 remains open because current
+HELLO timing covers only daemon work for the accepted request.
 The daemon measures the current FillU32(256, 7) CPU oracle and device executor
 independently with the canonical time facade. Its single-request,
 post-HELLO-probe, setup-inclusive receipt is correlated by ISA, backend,

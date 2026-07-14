@@ -68,6 +68,15 @@ acceptance-criterion IDs: a postponed row stays out of exclusions, keeps its
 TODO open, and blocks any phase, verify report, or goal whose acceptance depends
 on it until resumed and proved.
 
+For cross-host or native-only matrices, keep every unavailable row visible in
+executable and generated-manual evidence as `unsupported` or `blocked`; never
+omit it, convert it to `skip()`, or count it as PASS. A run may report
+`current-host scope complete`, but the umbrella feature, SPipe phase, verify
+report, and goal remain incomplete while a required row lacks fresh native
+evidence. Deferral is valid only while the linked TODO remains open and its
+resume plan records the host/capability, prerequisites, exact command, retained
+artifacts, owner, and final reviewer.
+
 Final verification must fail stale workflow/tooling documentation instead of
 deferring cleanup to release. If a lane changed workflow, evidence wrappers,
 generated-manual shape, or verification contracts, refresh the matching
@@ -969,7 +978,12 @@ the authoritative TODO matrix in
 `doc/03_plan/agent_tasks/simpleos_qemu_host_gpu_external_host_evidence.md`.
 Reuse its existing TODO owners: postpone only prepared Windows DirectX, macOS
 Metal, NVIDIA CUDA, and the non-current native-host portions of TODO 563, TODO
-569, and TODO 570; keep their current Linux Vulkan portions active. Resume only
+569, TODO 570, and TODO 566; keep their current Linux Vulkan portions and all
+hardware-independent TODO 566 source/parser/self-test work active. NFR-006
+requires one guest-observed interval from device initialization through every
+rejected or timed-out backend attempt to selection or CPU fallback. Daemon
+HELLO `elapsed_us` and TCG are correctness evidence only; they cannot close the
+500 ms native row. Resume only
 on the prepared native host with a
 pure-Simple compiler accepted by `simple_binary_is_valid`. Source inspection,
 emulation, screenshots, cached reports, synthetic handles, or CPU mirrors are

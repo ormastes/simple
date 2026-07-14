@@ -16,6 +16,9 @@ classification are source-ready; TODO 570 remains open until prepared native
 rows provide fresh correlated receipts.
 The exact 1280x720 Draw IR fixture and full pixel oracle are source-ready;
 TODO 569 remains open until fresh supported-host rows execute them.
+NFR-006 also remains open under TODO 566: current HELLO timing excludes guest
+device initialization, rejected/timed-out attempts, and final fallback time, so
+it cannot prove the inclusive 500,000 us native budget.
 
 This scenario proves that supported SimpleOS guests use one bounded protocol to
 execute Draw IR and ProcessingIR on a real host device. Unsupported rows retain

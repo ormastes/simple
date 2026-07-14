@@ -7,6 +7,9 @@ Status: **external rows postponed; current-host work active; not complete**.
 - TODO544 owns Windows DirectX, macOS Metal, current-source CUDA, and CUDA QEMU receipts; retained-PTX CUDA readback passed locally.
 - TODO564 retains two distinct local UUID-hash identities; MIG and CUDA QEMU evidence remain open.
 - TODO563/569/570 postpone only non-current prepared-host rows; current Linux Vulkan rows stay active.
+- TODO566 postpones only unavailable non-current native timing rows; its local
+  validation and current Linux native evidence remain active, and TCG cannot
+  close the 500 ms target.
 - TODO550's owner-level selector is implemented; the exact forced-Vulkan command is in the QEMU guide, but no live receipt is claimed.
 - Resume only with a prepared host and a compiler accepted by
   `simple_binary_is_valid`.
@@ -22,7 +25,7 @@ external_host_evidence {
   macos -> TODO544 -> metal_receipt
   nvidia_linux -> TODO544 -> cuda_executor_receipt
   nvidia_linux -> TODO564 -> cuda_uuid_receipt
-  native_rows -> [TODO569, TODO570, TODO563]
+  native_rows -> [TODO569, TODO570, TODO563, TODO566]
   all -> final_high_review
 }
 ```
