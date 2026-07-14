@@ -168,3 +168,23 @@ simplified HEURISTIC renderer (bg + first block only) — use real text tags for
 full engine; (b) a wrong-identity small font makes text shaping fail and collapses
 the text-heavy layout to blank. Evidence PPMs:
 scratchpad/verify/web2/{realeng_640,web_css_1280x720}.ppm.
+
+## Update 2026-07-14 (6): CONFIRMED — real text showcase PPM is impossible in the interpreter (single 17MB parse > 39 min)
+Applied the font-default cache (perf commit `4aa46ab4`: family->FontRenderer memo
+so the 17MB Noto Sans SC loads ONCE per family, not per #text node) and rendered the
+ACTUAL `browser_common_elements_showcase.html` (real text, real font) at 320x240 with
+a 2400s budget. Result: the process ran **39+ minutes at 100% CPU and never produced a
+PPM** — the SINGLE 17MB font parse alone exceeds the budget. The cache correctly
+eliminates the per-node re-parse (confirmed: it's one load now, not 50), but one 17MB
+sfnt parse in the pure interpreter is itself a 40-min operation. The JIT cannot
+accelerate it: lowering the font path hits multiple gaps — `_sfnt_utf16be_text`
+(fixed the `unit` crash but still can't JIT-lower), `CastElse` on `value+0.5 as i64`,
+and `_set_u16_be` mut-capability — so the whole parse runs interpreted.
+
+FINAL: the actual text-heavy showcase page CANNOT be rendered to a PPM in this
+environment. It is not a wait-longer situation — the single font parse is
+throughput-bound at ~40 min with no JIT acceleration. Confirmed unblock paths (only):
+(1) fix the seed's JIT HIR lowering for the sfnt parser (`_sfnt_utf16be_text` +
+`CastElse` + `_set_u16_be`) so the font path COMPILES, or (2) redeploy Stage-4 so the
+compiled `bin/simple` (which handles all this) runs the showcase. The CSS/layout/paint
+engine itself is PROVEN working (update 5); only the 17MB-font glyph path is the wall.
