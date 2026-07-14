@@ -209,3 +209,28 @@ the sfnt module JIT-lowerable (fix those three gaps), OR move sfnt validation na
 (as done for sha256), OR redeploy compiled Stage-4 bin/simple. The web layout/paint
 engine itself is proven working (update 5); this validation cost is the only wall
 for the actual text-heavy showcase page.
+
+## Update 2026-07-14 (8): even a 66s font load can't rescue the real render — per-node paint is also interpreter-bound
+Tested short-circuiting the redundant sfnt re-validation on sha256 match (a
+sha256-verified managed asset is byte-identical to the curated registry entry, so
+validate_glyf_font_instance/tables_match/names_match + font_runtime_ttf_default_supported
+are provably redundant). Measured effect: the NotoSansSC load dropped from >6 min
+(timeout) to **66 seconds**. But rendering the ACTUAL text-heavy
+browser_common_elements_showcase.html at 320x240 with the fast load STILL ran the
+full **25-minute budget without producing a PPM** — after the font is loaded once
+(66s, cached), the per-#text-node cost (measure_text_advances glyph metrics +
+layout + paint, all interpreted because the JIT defers the module) is itself >20
+min for the ~50-node page.
+
+The short-circuit was NOT landed: it changes font-validation semantics, would break
+the source-structure assertions in `test/01_unit/lib/engine/font_ffi_spec.spl`, and
+— decisively — does not unblock the render anyway. Only the clean, committed native
+sha256 fix (`rt_file_hash_sha256`) was kept.
+
+ABSOLUTE FINAL: the actual text-heavy showcase page cannot be rendered to a PPM in
+the interpreter. The cost is layered — sha256 (fixed native), sfnt validation
+(~5.6 min, short-circuitable), AND per-node glyph-measure/layout/paint (>20 min) —
+every layer interpreter-bound because the JIT cannot lower the sfnt/font module
+(`CastElse`/`_set_u16_be`/`_sfnt_utf16be_text`). The ONE real unblock is a fast
+lane: fix those JIT lowering gaps, or redeploy the compiled Stage-4 `bin/simple`.
+The web layout/paint engine correctness is separately PROVEN (update 5, 8-color PPM).
