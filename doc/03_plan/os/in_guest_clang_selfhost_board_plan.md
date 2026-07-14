@@ -185,11 +185,23 @@ target arches; only the in-guest *run* stays walled.
   == link base, clears the kernel `.bss` band). Wired into the build CLI as
   `bin/simple build simpleos [arch...]` (opt-in — a plain `bin/simple build`
   stays host-only and fast).
-- **In-guest RUN is the one remaining wall.** The kernel boots and stages the
-  Simple toolchain ELF off FAT32, but executing it in U-mode is blocked by the
-  deployed-compiler `env_set` miscompile (SEGV on every `native-build`, see
-  `doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`)
-  and the #99 seed-cranelift enum-payload miscompile. Both need the self-hosted
-  redeploy; kernels here were built with `src/compiler_rust/target/bootstrap/simple`.
+- **In-guest RUN is REACHABLE NOW (2026-07-14).** `/usr/bin/simple --version`
+  runs in-guest on SimpleOS x86_64 under real OVMF (ring-3 `cs=0x2b`, prints
+  `Simple v1.0.0-beta`, `rc=0`) — the loader, ring-3 transition, syscalls
+  (open/read/write/exit), and FAT32/VFS file I/O all work in-guest (proven by
+  Lane INGUEST-RUN, harness `scripts/os/ssh_simple_hello_uefi.shs`). This
+  disproves the prior assumption that env_set/#99 block ALL in-guest execution.
+- **Full in-guest INTERPRETATION is the one remaining wall — and it needs the
+  redeploy, blocked on TWO seed-backend bugs (both filed):** running an arbitrary
+  Simple program in-guest traps `field access on nil receiver` — the
+  #99 seed-cranelift enum/tag-box miscompile baked into the guest binary (the
+  release seed has no `--features llvm`). The LLVM-clean rebuild that would dodge
+  it fails too: the seed's LLVM `mcall_direct` emits the wrong argument count
+  (`doc/08_tracking/bug/seed_llvm_mcall_direct_arg_count_mismatch_2026-07-14.md`).
+  So both seed backends are defective (cranelift miscompiles enums; LLVM can't
+  compile the compiler) — the redeploy needs one of them fixed. The `env_set`
+  SEGV (`deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`) only affects
+  the `native-build` path, NOT `--version`/interpret. Kernels + the staged
+  toolchain here were built with `src/compiler_rust/target/bootstrap/simple`.
 - Follow-up bug docs: `aarch64_real_firmware_boot_gap_and_seed_defects_2026-07-14.md`
   (EFI-stub + 2 arm64 defects), `smf_writer_kernel_trailer_layout_skew.md`.
