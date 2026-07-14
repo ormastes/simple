@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 BUILD_DIR=${SIMPLEOS_HOST_GPU_BUILD_DIR:-build/simpleos_host_gpu_2d}
 QEMU_TIMEOUT=${SIMPLEOS_HOST_GPU_QEMU_TIMEOUT:-20}
 PRODUCTION_QEMU_TIMEOUT=${SIMPLEOS_HOST_GPU_PRODUCTION_QEMU_TIMEOUT:-120}
+QEMU_KILL_GRACE_SECONDS=${SIMPLEOS_HOST_GPU_QEMU_KILL_GRACE_SECONDS:-2}
 REQUIRE_CUDA=${SIMPLEOS_HOST_GPU_REQUIRE_CUDA:-0}
 RSS_SAMPLE_INTERVAL=${SIMPLEOS_HOST_GPU_RSS_SAMPLE_INTERVAL:-0.1}
 COMPILER_PROBE_TIMEOUT_SECONDS=5
@@ -285,29 +286,80 @@ size_shared_file() {
     fi
 }
 
-daemon_rss_sample_kib() {
+process_rss_sample_kib() {
     pid=$1
     if [ -r "/proc/$pid/status" ]; then
-        sed -n 's/^VmHWM:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "/proc/$pid/status"
+        sed -n 's/^VmRSS:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "/proc/$pid/status"
     elif command -v ps >/dev/null 2>&1; then
         ps -o rss= -p "$pid" 2>/dev/null | sed -n 's/[[:space:]]*\([0-9][0-9]*\).*/\1/p'
     fi
 }
 
-monitor_daemon_max_rss() {
-    monitored_pid=$1
-    rss_output=$2
-    max_rss_kib=0
-    while kill -0 "$monitored_pid" 2>/dev/null; do
-        sampled_rss_kib=$(daemon_rss_sample_kib "$monitored_pid" || true)
-        case "$sampled_rss_kib" in ''|*[!0-9]*) sampled_rss_kib=0 ;; esac
-        if [ "$sampled_rss_kib" -gt "$max_rss_kib" ]; then
-            max_rss_kib=$sampled_rss_kib
-            printf '%s\n' "$max_rss_kib" >"$rss_output"
-        fi
+rss_metric_value() {
+    metric_file=$1
+    metric_name=$2
+    sed -n "s/^${metric_name}=//p" "$metric_file" 2>/dev/null | sed -n '1p'
+}
+
+monitor_guest_max_rss() {
+    monitored_daemon_pid=$1
+    monitored_timeout_pid=$2
+    monitored_qemu_pid_file=$3
+    rss_output=$4
+    daemon_max_rss_kib=$(rss_metric_value "$rss_output" daemon_max_rss_kib || true)
+    qemu_max_rss_kib=$(rss_metric_value "$rss_output" qemu_max_rss_kib || true)
+    combined_max_rss_kib=$(rss_metric_value "$rss_output" combined_max_rss_kib || true)
+    case "$daemon_max_rss_kib" in ''|*[!0-9]*) daemon_max_rss_kib=0 ;; esac
+    case "$qemu_max_rss_kib" in ''|*[!0-9]*) qemu_max_rss_kib=0 ;; esac
+    case "$combined_max_rss_kib" in ''|*[!0-9]*) combined_max_rss_kib=0 ;; esac
+    while kill -0 "$monitored_timeout_pid" 2>/dev/null; do
+        monitored_qemu_pid=$(sed -n '1p' "$monitored_qemu_pid_file" 2>/dev/null || true)
+        case "$monitored_qemu_pid" in ''|*[!0-9]*|0) sampled_qemu_rss_kib=0 ;; *) sampled_qemu_rss_kib=$(process_rss_sample_kib "$monitored_qemu_pid" || true) ;; esac
+        sampled_daemon_rss_kib=$(process_rss_sample_kib "$monitored_daemon_pid" || true)
+        case "$sampled_daemon_rss_kib" in ''|*[!0-9]*) sampled_daemon_rss_kib=0 ;; esac
+        case "$sampled_qemu_rss_kib" in ''|*[!0-9]*) sampled_qemu_rss_kib=0 ;; esac
+        sampled_combined_rss_kib=$((sampled_daemon_rss_kib + sampled_qemu_rss_kib))
+        [ "$sampled_daemon_rss_kib" -le "$daemon_max_rss_kib" ] || daemon_max_rss_kib=$sampled_daemon_rss_kib
+        [ "$sampled_qemu_rss_kib" -le "$qemu_max_rss_kib" ] || qemu_max_rss_kib=$sampled_qemu_rss_kib
+        [ "$sampled_combined_rss_kib" -le "$combined_max_rss_kib" ] || combined_max_rss_kib=$sampled_combined_rss_kib
+        printf '%s\n' \
+            "daemon_max_rss_kib=$daemon_max_rss_kib" \
+            "qemu_max_rss_kib=$qemu_max_rss_kib" \
+            "combined_max_rss_kib=$combined_max_rss_kib" >"$rss_output"
         sleep "$RSS_SAMPLE_INTERVAL"
     done
-    printf '%s\n' "$max_rss_kib" >"$rss_output"
+}
+
+row_rss_evidence_valid() {
+    daemon_rss=$1
+    qemu_rss=$2
+    combined_rss=$3
+    case "$daemon_rss:$qemu_rss:$combined_rss" in *[!0-9:]*|:*|*:) return 1 ;; esac
+    [ "$daemon_rss" -gt 0 ] && [ "$qemu_rss" -gt 0 ] &&
+        [ "$combined_rss" -ge "$daemon_rss" ] && [ "$combined_rss" -ge "$qemu_rss" ] &&
+        [ "$combined_rss" -le "$((daemon_rss + qemu_rss))" ]
+}
+
+run_qemu_with_rss() {
+    qemu_deadline=$1
+    qemu_output=$2
+    monitored_daemon_pid=$3
+    rss_output=$4
+    qemu_command=$5
+    shift 5
+    qemu_pid_file="$rss_output.qemu-pid"
+    rm -f "$qemu_pid_file"
+    "$TIMEOUT_BIN" -k "${QEMU_KILL_GRACE_SECONDS}s" "$qemu_deadline" \
+        sh -c 'qemu_pid_file=$1; shift; printf "%s\n" "$$" >"$qemu_pid_file"; exec "$@"' \
+        sh "$qemu_pid_file" "$qemu_command" "$@" >"$qemu_output" 2>&1 &
+    qemu_timeout_pid=$!
+    monitor_guest_max_rss "$monitored_daemon_pid" "$qemu_timeout_pid" "$qemu_pid_file" "$rss_output" &
+    rss_monitor_pid=$!
+    wait "$qemu_timeout_pid" 2>/dev/null || true
+    qemu_timeout_pid=
+    wait "$rss_monitor_pid" 2>/dev/null || true
+    rss_monitor_pid=
+    qemu_pid_file=
 }
 
 qemu_bin_for_isa() {
@@ -527,6 +579,8 @@ emit_row_execution_evidence() {
     printf '%s\n' "${evidence_prefix}_qemu_version=$3"
     printf '%s\n' "${evidence_prefix}_qemu_device_args=$4"
     printf '%s\n' "${evidence_prefix}_daemon_max_rss_kib=$5"
+    printf '%s\n' "${evidence_prefix}_qemu_max_rss_kib=$6"
+    printf '%s\n' "${evidence_prefix}_combined_max_rss_kib=$7"
 }
 
 emit_arm64_production_evidence() {
@@ -590,10 +644,11 @@ validate_report() {
                     row_qemu_version=$(report_one "$report" "${prefix}_qemu_version") &&
                     row_qemu_device_args=$(report_one "$report" "${prefix}_qemu_device_args") &&
                     row_daemon_rss=$(report_one "$report" "${prefix}_daemon_max_rss_kib") &&
+                    row_qemu_rss=$(report_one "$report" "${prefix}_qemu_max_rss_kib") &&
+                    row_combined_rss=$(report_one "$report" "${prefix}_combined_max_rss_kib") &&
                     [ -n "$row_qemu_version" ] &&
                     qemu_argv_evidence_valid "$report_isa" "$row_qemu_device_args" &&
-                    case "$row_daemon_rss" in ''|*[!0-9]*) false ;; *) true ;; esac &&
-                    [ "$row_daemon_rss" -gt 0 ] &&
+                    row_rss_evidence_valid "$row_daemon_rss" "$row_qemu_rss" "$row_combined_rss" &&
                     { [ "$report_isa" != aarch64 ] || report_arm64_production_evidence_valid "$report" "$prefix" "$report_isa" "$row_log" "$row_qemu_device_args"; }
                 }; then
                     set_host_contract "$saved_row_host"
@@ -922,12 +977,12 @@ EOF
             done
         done
         emit_row linux x86_64 pass ok "$x86_log" cuda
-        emit_row_execution_evidence linux x86_64 "QEMU emulator version 9.0.0" "$x86_qemu_args" 65536
+        emit_row_execution_evidence linux x86_64 "QEMU emulator version 9.0.0" "$x86_qemu_args" 65536 65536 131072
         emit_row linux aarch64 pass ok "$pass_log" cuda
-        emit_row_execution_evidence linux aarch64 "QEMU emulator version 9.0.0" "$arm_qemu_args" 65536
+        emit_row_execution_evidence linux aarch64 "QEMU emulator version 9.0.0" "$arm_qemu_args" 65536 65536 131072
         emit_arm64_production_evidence linux "$production_log" "$arm_production_qemu_args"
         emit_row linux riscv64 pass ok "$riscv_log" cuda
-        emit_row_execution_evidence linux riscv64 "QEMU emulator version 9.0.0" "$rv_qemu_args" 65536
+        emit_row_execution_evidence linux riscv64 "QEMU emulator version 9.0.0" "$rv_qemu_args" 65536 65536 131072
         echo simpleos_qemu_host_gpu_2d_host=linux
         echo simpleos_qemu_host_gpu_2d_status=pass
         echo simpleos_qemu_host_gpu_2d_reason=all-linux-host-gpu-rows-pass
@@ -1031,12 +1086,12 @@ EOF
             done
         done
         emit_row macos x86_64 pass ok "$metal_x86_log" metal
-        emit_row_execution_evidence macos x86_64 "QEMU emulator version 9.0.0" "$x86_qemu_args" 65536
+        emit_row_execution_evidence macos x86_64 "QEMU emulator version 9.0.0" "$x86_qemu_args" 65536 65536 131072
         emit_row macos aarch64 pass ok "$metal_log" metal
-        emit_row_execution_evidence macos aarch64 "QEMU emulator version 9.0.0" "$arm_qemu_args" 65536
+        emit_row_execution_evidence macos aarch64 "QEMU emulator version 9.0.0" "$arm_qemu_args" 65536 65536 131072
         emit_arm64_production_evidence macos "$metal_production_log" "$arm_production_qemu_args"
         emit_row macos riscv64 pass ok "$metal_riscv_log" metal
-        emit_row_execution_evidence macos riscv64 "QEMU emulator version 9.0.0" "$rv_qemu_args" 65536
+        emit_row_execution_evidence macos riscv64 "QEMU emulator version 9.0.0" "$rv_qemu_args" 65536 65536 131072
         echo simpleos_qemu_host_gpu_2d_host=macos
         echo simpleos_qemu_host_gpu_2d_status=pass
         echo simpleos_qemu_host_gpu_2d_reason=all-macos-host-gpu-rows-pass
@@ -1066,12 +1121,12 @@ EOF
             done
         done
         emit_row windows x86_64 pass ok "$directx_x86_log" cuda
-        emit_row_execution_evidence windows x86_64 "QEMU emulator version 9.0.0" "$x86_qemu_args" 65536
+        emit_row_execution_evidence windows x86_64 "QEMU emulator version 9.0.0" "$x86_qemu_args" 65536 65536 131072
         emit_row windows aarch64 pass ok "$directx_log" cuda
-        emit_row_execution_evidence windows aarch64 "QEMU emulator version 9.0.0" "$arm_qemu_args" 65536
+        emit_row_execution_evidence windows aarch64 "QEMU emulator version 9.0.0" "$arm_qemu_args" 65536 65536 131072
         emit_arm64_production_evidence windows "$directx_production_log" "$arm_production_qemu_args"
         emit_row windows riscv64 pass ok "$directx_riscv_log" cuda
-        emit_row_execution_evidence windows riscv64 "QEMU emulator version 9.0.0" "$rv_qemu_args" 65536
+        emit_row_execution_evidence windows riscv64 "QEMU emulator version 9.0.0" "$rv_qemu_args" 65536 65536 131072
         echo simpleos_qemu_host_gpu_2d_host=windows
         echo simpleos_qemu_host_gpu_2d_status=pass
         echo simpleos_qemu_host_gpu_2d_reason=all-windows-host-gpu-rows-pass
@@ -1087,8 +1142,53 @@ EOF
     echo "simpleos_qemu_host_gpu_2d_self_test=pass"
 }
 
+self_test_metrics() (
+    metrics_dir=$(mktemp -d)
+    metrics_file="$metrics_dir/rss"
+    metrics_daemon_pid=
+    cleanup_metrics_test() {
+        case ${metrics_daemon_pid:-} in ''|*[!0-9]*) ;; *) kill "$metrics_daemon_pid" 2>/dev/null || true; wait "$metrics_daemon_pid" 2>/dev/null || true ;; esac
+        rm -rf "$metrics_dir"
+    }
+    trap 'cleanup_metrics_test' EXIT
+    trap 'exit 130' HUP INT TERM
+    timeout_bin=$(find_timeout)
+    TIMEOUT_BIN=$timeout_bin
+    QEMU_KILL_GRACE_SECONDS=1
+    RSS_SAMPLE_INTERVAL=0.02
+
+    row_rss_evidence_valid 1 2 3
+    if row_rss_evidence_valid 0 2 3 ||
+       row_rss_evidence_valid bad 2 3 ||
+       row_rss_evidence_valid 4 2 3 ||
+       row_rss_evidence_valid 2 2 5
+    then
+        exit 1
+    fi
+
+    sleep 3 &
+    metrics_daemon_pid=$!
+    run_qemu_with_rss 1 "$metrics_dir/qemu-phase-1.log" "$metrics_daemon_pid" "$metrics_file" sleep 2
+    first_qemu_rss=$(rss_metric_value "$metrics_file" qemu_max_rss_kib)
+    first_combined_rss=$(rss_metric_value "$metrics_file" combined_max_rss_kib)
+
+    run_qemu_with_rss 1 "$metrics_dir/qemu-phase-2.log" "$metrics_daemon_pid" "$metrics_file" \
+        sh -c 'trap "" TERM; while :; do sleep 1; done'
+    daemon_rss=$(rss_metric_value "$metrics_file" daemon_max_rss_kib)
+    qemu_rss=$(rss_metric_value "$metrics_file" qemu_max_rss_kib)
+    combined_rss=$(rss_metric_value "$metrics_file" combined_max_rss_kib)
+    row_rss_evidence_valid "$daemon_rss" "$qemu_rss" "$combined_rss"
+    [ "$qemu_rss" -ge "$first_qemu_rss" ]
+    [ "$combined_rss" -ge "$first_combined_rss" ]
+    echo "simpleos_qemu_host_gpu_2d_metrics_self_test=pass"
+)
+
 if [ "${1:-}" = --self-test ]; then
     self_test
+    exit 0
+fi
+if [ "${1:-}" = --self-test-metrics ]; then
+    self_test_metrics
     exit 0
 fi
 if [ "${1:-}" = --validate-report ]; then
@@ -1098,14 +1198,19 @@ if [ "${1:-}" = --validate-report ]; then
 fi
 
 cleanup_active_guest() {
-    case ${daemon_pid:-} in ''|*[!0-9]*) ;; *)
-        if [ "$daemon_pid" -gt 0 ]; then
-            kill "$daemon_pid" 2>/dev/null || true
-            wait "$daemon_pid" 2>/dev/null || true
+    qemu_process_pid=$(sed -n '1p' "${qemu_pid_file:-/dev/null}" 2>/dev/null || true)
+    case ${qemu_process_pid:-} in ''|*[!0-9]*|0) ;; *) kill "$qemu_process_pid" 2>/dev/null || true ;; esac
+    case ${qemu_timeout_pid:-} in ''|*[!0-9]*) ;; *)
+        if [ "$qemu_timeout_pid" -gt 0 ]; then
+            kill "$qemu_timeout_pid" 2>/dev/null || true
+            case ${qemu_process_pid:-} in ''|*[!0-9]*|0) ;; *) kill -9 "$qemu_process_pid" 2>/dev/null || true ;; esac
+            kill -9 "$qemu_timeout_pid" 2>/dev/null || true
+            wait "$qemu_timeout_pid" 2>/dev/null || true
         fi
         ;;
     esac
-    daemon_pid=
+    qemu_timeout_pid=
+    qemu_pid_file=
     case ${rss_monitor_pid:-} in ''|*[!0-9]*) ;; *)
         if [ "$rss_monitor_pid" -gt 0 ]; then
             kill "$rss_monitor_pid" 2>/dev/null || true
@@ -1114,9 +1219,19 @@ cleanup_active_guest() {
         ;;
     esac
     rss_monitor_pid=
+    case ${daemon_pid:-} in ''|*[!0-9]*) ;; *)
+        if [ "$daemon_pid" -gt 0 ]; then
+            kill "$daemon_pid" 2>/dev/null || true
+            wait "$daemon_pid" 2>/dev/null || true
+        fi
+        ;;
+    esac
+    daemon_pid=
 }
 
 daemon_pid=
+qemu_timeout_pid=
+qemu_pid_file=
 rss_monitor_pid=
 trap 'cleanup_active_guest' EXIT
 trap 'exit 130' HUP INT TERM
@@ -1251,14 +1366,12 @@ run_guest() {
     shm="$BUILD_DIR/$isa.shm"
     serial="$BUILD_DIR/$isa-serial.log"
     daemon_log="$BUILD_DIR/$isa-daemon.log"
-    rss_file="$BUILD_DIR/$isa-daemon-max-rss-kib"
+    rss_file="$BUILD_DIR/$isa-rss-metrics"
     kernel=$(kernel_for_isa "$isa")
     rm -f "$shm" "$serial" "$daemon_log" "$rss_file"
     size_shared_file "$shm"
     "$daemon" --shm="$shm" >"$daemon_log" 2>&1 &
     daemon_pid=$!
-    monitor_daemon_max_rss "$daemon_pid" "$rss_file" &
-    rss_monitor_pid=$!
     case "$isa" in
         x86_64)
             set -- -machine q35 -m 512M -kernel "$kernel" -nographic -no-reboot \
@@ -1278,7 +1391,7 @@ run_guest() {
     esac
     qemu_version=$("$qemu_bin" --version 2>&1 | sed -n '1p')
     qemu_device_args=$(encode_argv_hex "$@")
-    "$TIMEOUT_BIN" "$QEMU_TIMEOUT" "$qemu_bin" "$@" >"$serial" 2>&1 || true
+    run_qemu_with_rss "$QEMU_TIMEOUT" "$serial" "$daemon_pid" "$rss_file" "$qemu_bin" "$@"
     if serial_has_pass "$serial" "$isa"; then probe_valid=1; else probe_valid=0; fi
     production_serial=
     production_qemu_args=
@@ -1290,12 +1403,18 @@ run_guest() {
             -object memory-backend-file,id=hostgpu,share=on,mem-path="$shm",size=8M \
             -device ivshmem-plain,memdev=hostgpu
         production_qemu_args=$(encode_argv_hex "$@")
-        "$TIMEOUT_BIN" "$PRODUCTION_QEMU_TIMEOUT" "$qemu_bin" "$@" >"$production_serial" 2>&1 || true
+        run_qemu_with_rss "$PRODUCTION_QEMU_TIMEOUT" "$production_serial" "$daemon_pid" "$rss_file" "$qemu_bin" "$@"
     fi
     cleanup_active_guest
-    rss_kib=$(sed -n '1p' "$rss_file" 2>/dev/null || true)
+    daemon_rss_kib=$(rss_metric_value "$rss_file" daemon_max_rss_kib || true)
+    qemu_rss_kib=$(rss_metric_value "$rss_file" qemu_max_rss_kib || true)
+    combined_rss_kib=$(rss_metric_value "$rss_file" combined_max_rss_kib || true)
     if qemu_argv_evidence_valid "$isa" "$qemu_device_args"; then qemu_args_valid=1; else qemu_args_valid=0; fi
-    case "$rss_kib" in ''|*[!0-9]*|0) execution_evidence_valid=0 ;; *) execution_evidence_valid=1 ;; esac
+    if row_rss_evidence_valid "$daemon_rss_kib" "$qemu_rss_kib" "$combined_rss_kib"; then
+        execution_evidence_valid=1
+    else
+        execution_evidence_valid=0
+    fi
     if [ -z "$qemu_version" ] || [ "$qemu_args_valid" != 1 ]; then
         execution_evidence_valid=0
     fi
@@ -1327,7 +1446,8 @@ run_guest() {
         emit_row "$host" "$isa" fail production-frame-evidence-missing "$production_serial" "$(serial_processing_backend "$serial" "$isa")"
         row_result=1
     fi
-    emit_row_execution_evidence "$host" "$isa" "$qemu_version" "$qemu_device_args" "${rss_kib:-unknown}"
+    emit_row_execution_evidence "$host" "$isa" "$qemu_version" "$qemu_device_args" \
+        "${daemon_rss_kib:-unknown}" "${qemu_rss_kib:-unknown}" "${combined_rss_kib:-unknown}"
     if [ "$isa" = aarch64 ] && [ -n "$production_qemu_args" ]; then
         emit_arm64_production_evidence "$host" "$production_serial" "$production_qemu_args"
     fi

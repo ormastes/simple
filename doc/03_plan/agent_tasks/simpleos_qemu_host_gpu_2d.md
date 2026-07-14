@@ -29,6 +29,7 @@
 | checked Vulkan provenance trace | Codex Spark | shared tri-state dispatch owner and raw CLEAR/RECT test boundary |
 | native Metal Draw IR source | Codex Spark | shared-session surface, checked opacity composite, strict host admission |
 | native Metal ProcessingIR source | Codex Spark | dedicated checked FillU32 kernel, pointer readback, strict daemon probe |
+| QEMU/daemon RSS evidence | Codex Spark | concurrent component/combined sampling and isolated metrics self-test |
 | merge and generated-manual review | primary `/root` | wrapper/parser/manual accepted; native non-Linux rows remain open |
 | final review | normal/highest-capability Codex | requirements, exclusions, security, NFR, manual quality |
 
@@ -50,6 +51,11 @@ fixture bypasses, synthetic handles, or passing placeholders.
   RISC-V remains a protocol/scanout probe pending TODO 567.
 - NFR-006 remains open under TODO 566: receipt timing covers daemon HELLO work,
   not guest-observed device initialization plus all fallback attempts.
+- NFR-005 evidence now carries concurrently sampled daemon, QEMU, and combined
+  maxima across both AArch64 boots; TODO 563 remains open until fresh live rows
+  prove the 256 MiB target and warm multi-sample latency p95. NFR-001's exact
+  1280x720 fixture and NFR-004's 1.5x preference decision are tracked separately
+  by TODO 569 and TODO 570 instead of being inferred from 64x48 parity.
 - Final reviewer: primary `/root`; native Metal implementation is present but
   its done mark, DirectX, and remaining CUDA receipts remain rejected without
   prepared-host evidence.

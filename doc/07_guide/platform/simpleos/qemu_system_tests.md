@@ -226,6 +226,7 @@ The canonical multi-ISA wrapper is:
 
 ```sh
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test
+sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test-metrics
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --validate-report build/simpleos_host_gpu_2d/report.env
 ```
@@ -245,7 +246,9 @@ daemon over one bounded ivshmem region per row, and requires the existing
 64x48 raw-render, Draw IR, and independent ProcessingIR device-readback probe.
 The AArch64 row has a second mandatory phase: after that probe passes, the
 wrapper boots `arm64-desktop-engine2d` while retaining the same daemon, shared
-memory file, and maximum-RSS monitor. The production phase does not replace or
+memory file, and RSS metrics file. Each QEMU phase is sampled concurrently with
+the daemon, and the daemon, QEMU, and combined maxima carry across both boots.
+The production phase does not replace or
 weaken the 64x48 probe. Its ready generation must continue the probe's final
 ProcessingIR generation according to the shared Metal, DirectX, then Vulkan
 negotiation order, proving both boots used one daemon session rather than two
@@ -297,14 +300,19 @@ also carry its production serial-log and exact production-argv evidence keys;
 cached reports created before those keys existed are invalid and cannot be
 promoted. Every passing row must also contain
 the actual QEMU version, a reversible comma-delimited per-argument hex encoding
-of its exact argument vector, positive maximum-observed daemon RSS, protocol
+of its exact argument vector, positive maximum-observed daemon RSS, QEMU RSS,
+and concurrent combined RSS (no smaller than either component), protocol
 version, positive operation timings, and matching run/frame identities. The
 validator checks the encoded token sequence against the ISA-specific machine,
 kernel basename, and exact shared `hostgpu` object/device binding; a syntactic
 hex string with the wrong QEMU semantics fails. It also rejects missing,
-duplicate, empty, or nonpositive fields; fresh live
-rows are still required before claiming the latency or combined QEMU-plus-daemon
-RSS targets.
+duplicate, empty, nonpositive, or inconsistent fields. The isolated metrics
+self-test exercises malformed values and the two-phase maximum carry without
+starting QEMU or a compiler. Fresh live rows are still required before claiming
+the latency or 256 MiB combined QEMU-plus-daemon RSS targets. The 64x48 protocol
+fixture does not satisfy NFR-001's selected 1280x720 dimensions (TODO 569), and
+exact ProcessingIR parity alone does not satisfy NFR-004's 1.5x preference
+threshold (TODO 570).
 
 Processing receipts distinguish the transient backend resource handle from the
 stable device identity. Vulkan hashes the runtime-selected driver identity,

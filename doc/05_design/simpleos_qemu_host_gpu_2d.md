@@ -215,9 +215,14 @@ command reaches `MTLCommandBufferStatus::Completed` with no error. A separate
 CPU oracle remains the daemon's final parity gate.
 
 Each row records host OS, guest ISA, QEMU version/arguments, protocol/backend,
-device identity, IDs, timing, max RSS, and checksums. Native-ISA rows require
+device identity, IDs, timing, concurrently sampled daemon/QEMU/combined max
+RSS, and checksums. The combined maximum is sampled at one instant rather than
+formed from independent peaks, and AArch64 preserves maxima across both boots.
+Native-ISA rows require
 negotiation within 500 ms, render/readback p95 at most 16.7 ms, incremental RSS
 at most 256 MiB, and processing speedup at least 1.5x to become preferred.
+The current 64x48 fixture proves protocol correctness only; TODO 569 owns the
+selected 1280x720 render gate and TODO 570 owns the processing preference ratio.
 
 ## Minimal Implementation Order
 

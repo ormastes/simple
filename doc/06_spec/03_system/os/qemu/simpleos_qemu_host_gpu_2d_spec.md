@@ -69,7 +69,8 @@ the CPU/software fallback and report a stable reason.
    processing evidence.
 12. **Report device-backed host acceleration evidence.** Publish one row with
    host, guest ISA, QEMU/device arguments, protocol, backend, device, IDs,
-   timing, RSS, checksums, status, and reason. For every non-HELLO request, both
+   timing, concurrently sampled daemon/QEMU/combined RSS maxima, checksums,
+   status, and reason. For every non-HELLO request, both
    the guest and daemon require a positive numeric run hash and frame ID; a
    zero, negative, stale, or mismatched value fails before PASS admission.
 13. **Validate cached rows before aggregation.** Accept a cached report only
@@ -77,7 +78,8 @@ the CPU/software fallback and report a stable reason.
    serial log containing the exact render, Draw IR, and ProcessingIR receipts.
    Each passing row also requires a unique QEMU version, a reversible
    comma-delimited per-argument hex encoding of its exact QEMU argument vector,
-   positive maximum-observed daemon RSS, negotiated protocol,
+   positive maximum-observed daemon RSS, QEMU RSS, and concurrent combined RSS,
+   with the combined value no smaller than either component; negotiated protocol,
    positive HELLO/render/Draw IR/ProcessingIR timings, and correlated run/frame
    IDs. The encoded argv must also match the ISA-specific machine, kernel, and
    exact shared `hostgpu` object/device binding; wrong or extra tokens fail.
@@ -134,9 +136,11 @@ sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --validate-report path/to/r
 ```
 
 Status-only or incomplete cached reports fail closed as malformed evidence.
-The wrapper bounds both compiler probes to five seconds, rejects any version
-probe that reports `bootstrap seed only`, and then requires the exact exit-1
-diagnostic from a deliberate invalid-mode native-build command. Explicit
+The wrapper bounds version and invalid-mode probes to five seconds, requires a
+checked-in frontend check to exit zero within ten seconds, and applies a
+one-second forced-kill grace on Unix. It rejects any version probe that reports
+`bootstrap seed only`, then requires the exact exit-1 diagnostic from a
+deliberate invalid-mode native-build command. Explicit
 compiler overrides do not bypass this liveness/command-surface gate; the real
 build remains authoritative for backend runtime/toolchain availability.
 
