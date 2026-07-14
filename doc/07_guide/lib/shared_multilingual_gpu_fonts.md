@@ -220,14 +220,15 @@ components remain unsupported. Backend-device and runtime program-artifact
 identity do not share one cache concern: atlas buffers are destroyed before a
 device is destroyed, while an active CUDA, OpenCL, or Vulkan backend rejects
 session replacement and Metal releases font state before device recreation.
-Remaining REQ-009 gaps are configuration identity on every glyph/run entry,
-backend/device/session/artifact identity on every atlas reuse, resolved-run and
-atlas telemetry, explicit unsupported-CTM rejection, native execution evidence,
+Configuration identity now invalidates and keys canonical glyph material and
+is length-delimited into shaped-run keys and every configured batch/atlas owner. Remaining REQ-009
+gaps are backend/device/session/artifact identity on every atlas reuse, resolved-run and
+atlas telemetry, native execution evidence,
 and concurrent multi-face ownership. None promotes the coverage matrix.
 
 ### Runtime configuration contract
 
-The one planned public surface is `FontRenderConfig` beside `FontRenderBatch`,
+The public surface is `FontRenderConfig` beside `FontRenderBatch`,
 with family/category/language/script, size, weight/style, hinting,
 antialiasing, shared-atlas policy, execution target, and
 `Suggested`/`Preferred`/`Required` policy. The config object, atlas/execution
@@ -245,9 +246,16 @@ executable `cuda, metal, opencl, vulkan, cpu` order or Engine3D's
 `vulkan, cpu` order. Preferred/Required require a concrete supported target;
 concrete `cpu` is valid. Unknown targets and unsupported
 rendering modes or nonuniform/rotated/skewed/subpixel transforms must reject
-before changing cache generations or backend state. Until executable Simple
-tests prove this propagation through bitmap, vector, shaped, 2D, and 3D paths,
-REQ-015 remains open.
+before changing cache generations or backend state. The canonical renderer and
+Engine2D/Engine3D owners now implement those configured entrypoints and retain
+an observable attempt/selected-target trace. A non-default
+family/category/language/script tuple resolves through the pinned sparse matrix,
+requires the exact resolved family (or `auto`), validates the CLDR script, and
+loads the unchanged bundled face; unavailable tuples reject before cache
+mutation. Engine3D fixes one font target per frame and promotes Vulkan from
+`pending` to selected only after end-frame device readback evidence. Focused unit and shared-surface
+specs cover source behavior; REQ-015 remains open until the deployed
+pure-Simple runtime executes those specs successfully.
 
 ## GPU code emission is not execution
 

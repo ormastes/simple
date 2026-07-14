@@ -55,7 +55,10 @@ use std.gpu.engine2d.wm_frame_pacing.{FramePacingCounters, make_frame_pacing_cou
 use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_destination_origin}
 use std.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_default}
 use std.gc_async_mut.io.mod_stub.{env_get}
-use std.gc_async_mut.text_layout.font_renderer.{FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderer}
+use std.gc_async_mut.text_layout.font_renderer.{
+    FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderConfig, FontRenderer,
+    font_execution_plan, font_render_config_selection_supported
+}
 use std.common.encoding.font_registry.{selected_font_asset_candidate_for_identity}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload}
 
@@ -147,6 +150,8 @@ class Engine2D:
     pacing: FramePacingCounters
     selected_backend_name: text
     font_renderer: FontRenderer? = nil
+    last_font_execution_attempts: [text] = []
+    last_font_execution_target: text = ""
 
     me fonts() -> FontRenderer:
         val active = self.font_renderer
@@ -155,6 +160,9 @@ class Engine2D:
         val created = FontRenderer.new()
         self.font_renderer = created
         created
+
+    fn font_execution_attempts() -> [text]: self.last_font_execution_attempts
+    fn font_execution_target() -> text: self.last_font_execution_target
 
     me install_vulkan_font_spirv(spirv_bytes: [u8]) -> bool:
         """Install one bounded precompiled font compositor on a real Vulkan engine."""
@@ -758,62 +766,95 @@ class Engine2D:
             self.backend.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
 
     me _draw_font_batch(x: i32, y: i32, batch: FontRenderBatch) -> bool:
-        if self.vulkan_font_state_unknown or not batch.valid:
+        self._draw_font_batch_plan(x, y, batch, ["cuda", "metal", "opencl", "vulkan", "cpu"])
+
+    me _draw_font_batch_plan(x: i32, y: i32, batch: FontRenderBatch, plan: [text]) -> bool:
+        if self.vulkan_font_state_unknown or not batch.material_supported() or plan.len() == 0:
             return false
         var quad_index: i64 = 0
-        val active_cuda = self.cuda_backend
-        if active_cuda != nil:
-            val cuda = active_cuda
-            quad_index = cuda.draw_font_batch(x, y, batch)
-            self.cuda_backend = cuda
-            if quad_index < 0 or quad_index > batch.quads.len():
-                quad_index = 0
-        val active_opencl = self.opencl_backend
-        val active_metal = self.metal_backend
-        if quad_index == 0 and active_metal != nil:
-            val metal = active_metal
-            quad_index = metal.draw_font_batch(x, y, batch)
-            self.metal_backend = metal
-            if quad_index < 0 or quad_index > batch.quads.len():
-                quad_index = 0
-        if quad_index == 0 and active_opencl != nil:
-            val opencl = active_opencl
-            quad_index = opencl.draw_font_batch(x, y, batch)
-            self.opencl_backend = opencl
-            if quad_index < 0 or quad_index > batch.quads.len():
-                quad_index = 0
-        val active_vulkan = self.vulkan_backend
-        if quad_index == 0 and active_vulkan != nil:
-            val vulkan = active_vulkan
-            val evidence = vulkan.composite_font_batch(x, y, batch)
-            self.last_vulkan_font_evidence = evidence
-            self.vulkan_backend = vulkan
-            if (evidence.reason == "partial-framebuffer-restore-failed" or
-                evidence.reason == "missing-command-cleanup-capability" or
-                evidence.reason == "descriptor-cleanup-failed" or
-                evidence.reason == "atlas-cleanup-failed" or
-                evidence.reason == "fence-completion-unknown" or
-                evidence.reason == "fence-cleanup-failed" or
-                evidence.reason == "fence-wait-evidence-failed" or
-                evidence.reason == "cleanup-failed"):
-                self._poison_vulkan_font_surface()
-                return false
-            if (evidence.promotion_ready and
-                evidence.dispatch_count == batch.quads.len()):
-                quad_index = batch.quads.len()
-        while quad_index < batch.quads.len():
-            val quad = batch.quads[quad_index]
-            val pixels = engine2d_font_atlas_subrect_pixels(
-                batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
-                quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
-            )
-            if pixels.len() == quad.width.to_i64() * quad.height.to_i64():
-                val dst_x = font_destination_origin(x, quad.dst_x, quad.width)
-                val dst_y = font_destination_origin(y, quad.dst_y, quad.height)
-                if dst_x != nil and dst_y != nil:
-                    self.draw_image_blend(dst_x.?, dst_y.?, quad.width, quad.height, pixels)
-            quad_index = quad_index + 1
-        true
+        var attempts: [text] = []
+        var winner = ""
+        for target in plan:
+            if quad_index > 0 and target != "cpu":
+                attempts.push(target + ":skipped-partial")
+            elif target == "cuda":
+                val active = self.cuda_backend
+                if active == nil:
+                    attempts.push("cuda:unavailable")
+                else:
+                    val cuda = active
+                    quad_index = cuda.draw_font_batch(x, y, batch)
+                    self.cuda_backend = cuda
+                    if quad_index < 0 or quad_index > batch.quads.len(): quad_index = 0
+                    attempts.push(if quad_index == batch.quads.len(): "cuda:success" else: "cuda:failed")
+                    if quad_index == batch.quads.len(): winner = "cuda"
+            elif target == "metal":
+                val active = self.metal_backend
+                if active == nil:
+                    attempts.push("metal:unavailable")
+                else:
+                    val metal = active
+                    quad_index = metal.draw_font_batch(x, y, batch)
+                    self.metal_backend = metal
+                    if quad_index < 0 or quad_index > batch.quads.len(): quad_index = 0
+                    attempts.push(if quad_index == batch.quads.len(): "metal:success" else: "metal:failed")
+                    if quad_index == batch.quads.len(): winner = "metal"
+            elif target == "opencl":
+                val active = self.opencl_backend
+                if active == nil:
+                    attempts.push("opencl:unavailable")
+                else:
+                    val opencl = active
+                    quad_index = opencl.draw_font_batch(x, y, batch)
+                    self.opencl_backend = opencl
+                    if quad_index < 0 or quad_index > batch.quads.len(): quad_index = 0
+                    attempts.push(if quad_index == batch.quads.len(): "opencl:success" else: "opencl:failed")
+                    if quad_index == batch.quads.len(): winner = "opencl"
+            elif target == "vulkan":
+                val active = self.vulkan_backend
+                if active == nil:
+                    attempts.push("vulkan:unavailable")
+                else:
+                    val vulkan = active
+                    val evidence = vulkan.composite_font_batch(x, y, batch)
+                    self.last_vulkan_font_evidence = evidence
+                    self.vulkan_backend = vulkan
+                    attempts.push("vulkan:" + evidence.reason)
+                    if (evidence.reason == "partial-framebuffer-restore-failed" or
+                        evidence.reason == "missing-command-cleanup-capability" or
+                        evidence.reason == "descriptor-cleanup-failed" or
+                        evidence.reason == "atlas-cleanup-failed" or
+                        evidence.reason == "fence-completion-unknown" or
+                        evidence.reason == "fence-cleanup-failed" or
+                        evidence.reason == "fence-wait-evidence-failed" or
+                        evidence.reason == "cleanup-failed"):
+                        self.last_font_execution_attempts = attempts
+                        self.last_font_execution_target = ""
+                        self._poison_vulkan_font_surface()
+                        return false
+                    if evidence.promotion_ready and evidence.dispatch_count == batch.quads.len():
+                        quad_index = batch.quads.len()
+                        winner = "vulkan"
+            elif target == "cpu":
+                attempts.push("cpu:success")
+                while quad_index < batch.quads.len():
+                    val quad = batch.quads[quad_index]
+                    val pixels = engine2d_font_atlas_subrect_pixels(
+                        batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                        quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color
+                    )
+                    if pixels.len() == quad.width.to_i64() * quad.height.to_i64():
+                        val dst_x = font_destination_origin(x, quad.dst_x, quad.width)
+                        val dst_y = font_destination_origin(y, quad.dst_y, quad.height)
+                        if dst_x != nil and dst_y != nil:
+                            self.draw_image_blend(dst_x.?, dst_y.?, quad.width, quad.height, pixels)
+                    quad_index = quad_index + 1
+                winner = "cpu"
+            if winner != "":
+                break
+        self.last_font_execution_attempts = attempts
+        self.last_font_execution_target = winner
+        winner != ""
 
     me draw_glyph_run(x: i32, y: i32, run: FontGlyphRun, color: u32, font_size: i32) -> bool:
         val fonts = self.fonts()
@@ -827,9 +868,9 @@ class Engine2D:
         if selected != nil:
             val fonts = selected
             if fonts.has_sffi_ttf():
-                val batch = fonts.prepare_text(text_val, color, font_size)
-                self.font_renderer = fonts
-                self._draw_font_batch(x, y, batch)
+                self.draw_text_configured(
+                    x, y, text_val, color, FontRenderConfig.default_for_size(font_size)
+                )
                 return
         if self.vulkan_font_state_unknown:
             return
@@ -840,29 +881,44 @@ class Engine2D:
         else:
             self.backend.draw_text(x, y, text_val, color, font_size)
 
+    me draw_text_configured(x: i32, y: i32, text_val: text, color: u32, config: FontRenderConfig) -> bool:
+        val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "cpu"])
+        if plan.len() == 0 or not font_render_config_selection_supported(config):
+            return false
+        val fonts = self.fonts()
+        val batch = fonts.prepare_text_configured(text_val, color, config)
+        self.font_renderer = fonts
+        self._draw_font_batch_plan(x, y, batch, plan)
+
     me draw_text_with_advances(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, font_size: i32) -> bool:
         """Draw producer-resolved text through the selected vector face."""
-        val selected = self.font_renderer
-        if selected == nil:
+        self.draw_text_with_advances_configured(
+            x, y, text_val, advance_widths, color, FontRenderConfig.default_for_size(font_size)
+        )
+
+    me draw_text_with_advances_configured(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, config: FontRenderConfig) -> bool:
+        val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "cpu"])
+        if plan.len() == 0 or not font_render_config_selection_supported(config):
             return false
-        val fonts = selected
-        if not fonts.has_sffi_ttf():
-            return false
-        val batch = fonts.prepare_text_with_advances(text_val, advance_widths, color, font_size)
+        val fonts = self.fonts()
+        val batch = fonts.prepare_text_with_advances_configured(text_val, advance_widths, color, config)
         self.font_renderer = fonts
-        self._draw_font_batch(x, y, batch)
+        self._draw_font_batch_plan(x, y, batch, plan)
 
     me draw_shaped_text(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> bool:
         """Draw a semantic shaped run through the canonical selected face."""
-        val selected = self.font_renderer
-        if selected == nil:
+        self.draw_shaped_text_configured(
+            x, y, glyph_run, color, FontRenderConfig.default_for_size(font_size)
+        )
+
+    me draw_shaped_text_configured(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig) -> bool:
+        val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "cpu"])
+        if plan.len() == 0 or not font_render_config_selection_supported(config):
             return false
-        val fonts = selected
-        if not fonts.has_sffi_ttf():
-            return false
-        val batch = fonts.prepare_selected_glyph_run(glyph_run, color, font_size)
+        val fonts = self.fonts()
+        val batch = fonts.prepare_selected_glyph_run_configured(glyph_run, color, config)
         self.font_renderer = fonts
-        self._draw_font_batch(x, y, batch)
+        self._draw_font_batch_plan(x, y, batch, plan)
 
     me load_font(path: text) -> bool:
         """Select one trusted TTF/OTF for process-wide Simple 2D text."""

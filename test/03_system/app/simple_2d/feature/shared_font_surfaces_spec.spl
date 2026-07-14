@@ -8,7 +8,10 @@ surface. CPU output is an oracle and compatibility path, not native GPU proof.
 """
 
 use std.spec.*
-use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer, FontGlyphRun, FontRenderBatch}
+use std.nogc_sync_mut.text_layout.font_renderer.{
+    FontExecutionPolicy, FontRenderer, FontGlyphRun, FontRenderBatch, FontRenderConfig
+}
+use std.common.ui.draw_ir.{draw_ir_empty_glyph_run_payload}
 use std.gc_async_mut.gpu.engine2d.engine.{engine2d_font_atlas_subrect_pixels}
 use std.gpu.engine3d.engine.{Engine3D}
 use std.gpu.engine3d.types3d.{mat4_identity, mat4_perspective}
@@ -51,6 +54,32 @@ describe "shared font surfaces":
         expect(dirty.dirty_rects.len()).to_be_greater_than(0)
         expect(dirty.atlas_owner_identity()).to_equal(warm.atlas_owner_identity())
         expect(dirty.atlas_cache_identity() == warm.atlas_cache_identity()).to_be(false)
+
+    # @req REQ-015
+    it "should carry one validated runtime configuration through every material path":
+        step("Prepare one shared font batch for 2D and 3D")
+        var renderer = setup_shared_font_fixture()
+        val config = FontRenderConfig(
+            family: "Noto Sans Mono", category: "mono", language: "en", script: "latn", size: 16,
+            weight: "normal", style: "normal", hinting: "none", antialiasing: "grayscale",
+            atlas_policy: "shared-alpha-1024", execution_target: "cpu",
+            execution_policy: FontExecutionPolicy.Required
+        )
+        val text_batch = renderer.prepare_text_configured("A", 0xFFFFFFFFu32, config)
+        val advanced_batch = renderer.prepare_text_with_advances_configured(
+            "A", [12], 0xFFFFFFFFu32, config
+        )
+        expect_shared_font_batch(text_batch, 1)
+        expect_shared_font_batch(advanced_batch, 1)
+        expect(text_batch.render_config_identity).to_equal(config.identity())
+        expect(text_batch.execution_target).to_equal("cpu")
+        expect(text_batch.execution_policy).to_equal(FontExecutionPolicy.Required)
+        val run = FontGlyphRun(valid: false, face_id: 0, face_generation: 0,
+            glyph_ids: [], xs: [], ys: [], clusters: [])
+        expect(renderer.prepare_glyph_run_configured(run, 0xFFFFFFFFu32, config).render_config_identity).to_equal(config.identity())
+        expect(renderer.prepare_selected_glyph_run_configured(
+            draw_ir_empty_glyph_run_payload(), 0xFFFFFFFFu32, config
+        ).render_config_identity).to_equal(config.identity())
 
     it "should preserve selected font identity across cold and warm batches":
         var renderer = FontRenderer.browser_serif_default()

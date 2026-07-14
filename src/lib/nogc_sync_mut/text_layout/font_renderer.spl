@@ -18,7 +18,7 @@ use std.nogc_sync_mut.text_layout.font_advance_layout.{font_batch_apply_advances
 use std.nogc_sync_mut.io.font_sffi.{font_face_ascent, free_font, font_face_identity, font_face_is_live, load_font}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
-use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_simple_tuple_accepted}
+use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_language_ranks, selected_font_simple_tuple_accepted}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
 use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
@@ -28,7 +28,11 @@ use std.skia.feature.glyph.ot_parser.{parse_offset_table}
 use std.skia.feature.shaper.font_fallback.{fallback_chain_new}
 use std.skia.feature.shaper.shaper.{shaped_run_to_font_glyph_run, shaper_new, shaper_shape_with_language, shaper_with_ot_face}
 use std.skia.feature.shaper.script_detect.{Script, script_of}
-export use std.nogc_sync_mut.text_layout.font_types.{CachedGlyph, FontCacheStats, FontGlyphRun, FontTextPayload, FontRenderQuad, FontRenderBatch}
+export use std.nogc_sync_mut.text_layout.font_types.{
+    CachedGlyph, FontCacheStats, FontGlyphRun, FontTextPayload, FontRenderQuad, FontRenderBatch,
+    FontRenderConfig, FontExecutionPolicy, font_execution_plan, font_render_category_name,
+    font_render_config_normalize
+}
 
 # Shared Font Renderer — unified buffer text for OS and browser.
 # Backends are TrueType/OpenType, the small built-in vector face, then VGA
@@ -65,8 +69,17 @@ fn _resolved_font_metric_key(family: text, content: text, font_size: i32, identi
     _resolved_font_metric_language_key(family, content, font_size, identity, "und")
 
 fn _resolved_font_metric_language_key(family: text, content: text, font_size: i32, identity: text, language: text) -> text:
+    _resolved_font_metric_language_config_key(
+        family, content, font_size, identity, language,
+        FontRenderConfig.default_for_size(font_size).identity()
+    )
+
+fn _resolved_font_metric_language_config_key(family: text, content: text, font_size: i32,
+                                             identity: text, language: text,
+                                             render_config_identity: text) -> text:
     family.trim().lower() + "\n" + font_size.to_string() + "\n" + language.trim().lower() + "\n" +
-        identity.len().to_string() + ":" + identity + "\n" + content
+        identity.len().to_string() + ":" + identity + "\n" +
+        render_config_identity.len().to_string() + ":" + render_config_identity + "\n" + content
 
 fn _resolved_font_metrics_cacheable(family: text, content: text) -> bool:
     family.len() <= RESOLVED_FONT_METRICS_CACHE_FAMILY_LIMIT and content.len() <= RESOLVED_FONT_METRICS_CACHE_CONTENT_LIMIT
@@ -105,6 +118,54 @@ val FONT_ATLAS_WIDTH: i32 = 1024
 val FONT_ATLAS_HEIGHT: i32 = 1024
 val _font_atlas_dependency_generation: AtomicI64 = atomic_i64_new(0)
 
+fn _font_render_batch_with_config(batch: FontRenderBatch, config: FontRenderConfig) -> FontRenderBatch:
+    FontRenderBatch(
+        program_version: batch.program_version, font_identity: batch.font_identity,
+        face_generation: batch.face_generation, valid: batch.valid,
+        atlas_width: batch.atlas_width, atlas_height: batch.atlas_height,
+        atlas_pixels: batch.atlas_pixels, quads: batch.quads,
+        atlas_generation: batch.atlas_generation, dirty_rects: batch.dirty_rects,
+        render_config_identity: config.identity(), transform_identity: batch.transform_identity,
+        execution_target: font_render_config_normalize(config.execution_target),
+        execution_policy: config.execution_policy
+    )
+
+fn _font_render_config_default_selection(config: FontRenderConfig) -> bool:
+    (font_render_config_normalize(config.family) == "auto" and
+        font_render_category_name(config.category) == "auto" and
+        font_render_config_normalize(config.language) == "und" and
+        font_render_config_normalize(config.script) == "auto")
+
+fn _font_render_config_candidate(config: FontRenderConfig) -> FontAssetCandidate?:
+    if _font_render_config_default_selection(config):
+        return nil
+    val normalized_language = font_render_config_normalize(config.language)
+    val language_parts = normalized_language.split("-")
+    if language_parts.len() == 0 or language_parts[0] == "":
+        return nil
+    val language = language_parts[0]
+    val category = font_render_category_name(config.category)
+    if language == "und" or category == "auto":
+        return nil
+    val selected = selected_font_asset_for_language_category(language, category)
+    if selected == nil:
+        return nil
+    val candidate = selected.?
+    val family = font_render_config_normalize(config.family)
+    if family != "auto" and family != candidate.family.lower():
+        return nil
+    var expected_script = ""
+    for rank in selected_font_language_ranks():
+        if rank.language == language:
+            expected_script = rank.likely_script.lower()
+    val script = font_render_config_normalize(config.script)
+    if expected_script == "" or (script != "auto" and script != expected_script):
+        return nil
+    candidate
+
+fn font_render_config_selection_supported(config: FontRenderConfig) -> bool:
+    config.valid() and (_font_render_config_default_selection(config) or _font_render_config_candidate(config) != nil)
+
 fn _font_atlas_dependency_generation_after(current: i64) -> i64:
     if current < 0 or current >= 9223372036854775807:
         return 0
@@ -132,13 +193,15 @@ class GlyphCache:
     evictions: i64
     observed_generation: i64
     observed_font_identity: text
+    observed_render_config_identity: text
 
     static fn new(max_size: i32) -> GlyphCache:
-        GlyphCache(entries: [], max_entries: max_size, max_bytes: 33554432, payload_bytes: 0, hits: 0, misses: 0, rasterizations: 0, evictions: 0, observed_generation: 0, observed_font_identity: "")
+        GlyphCache(entries: [], max_entries: max_size, max_bytes: 33554432, payload_bytes: 0, hits: 0, misses: 0, rasterizations: 0, evictions: 0, observed_generation: 0, observed_font_identity: "", observed_render_config_identity: "")
 
     me lookup(codepoint: i32, font_size: i32) -> CachedGlyph?:
         for entry in self.entries:
-            if entry.glyph_index < 0 and entry.codepoint == codepoint and entry.font_size == font_size:
+            if (entry.glyph_index < 0 and entry.codepoint == codepoint and entry.font_size == font_size and
+                entry.render_config_identity == self.observed_render_config_identity):
                 self.hits = self.hits + 1
                 return entry
         self.misses = self.misses + 1
@@ -147,7 +210,8 @@ class GlyphCache:
     me lookup_index(face_id: i64, face_generation: i64, glyph_index: i32, font_size: i32) -> CachedGlyph?:
         for entry in self.entries:
             if (entry.face_id == face_id and entry.face_generation == face_generation and
-                entry.glyph_index == glyph_index and entry.font_size == font_size):
+                entry.glyph_index == glyph_index and entry.font_size == font_size and
+                entry.render_config_identity == self.observed_render_config_identity):
                 self.hits = self.hits + 1
                 return entry
         self.misses = self.misses + 1
@@ -167,7 +231,9 @@ class GlyphCache:
             self.entries = self.entries.slice(1, self.entries.len())
             self.evictions = self.evictions + 1
         var entries = self.entries
-        entries.push(glyph)
+        var configured = glyph
+        configured.render_config_identity = self.observed_render_config_identity
+        entries.push(configured)
         self.entries = entries
         self.payload_bytes = self.payload_bytes + glyph_bytes
         true
@@ -185,6 +251,11 @@ class GlyphCache:
     me sync_generation(generation: i64):
         self.sync_face_identity(generation, self.observed_font_identity)
 
+    me sync_render_config_identity(identity: text):
+        if identity != self.observed_render_config_identity:
+            self.invalidate()
+            self.observed_render_config_identity = identity
+
     me reset_stats():
         self.hits = 0
         self.misses = 0
@@ -192,7 +263,7 @@ class GlyphCache:
         self.evictions = 0
 
     fn stats() -> FontCacheStats:
-        FontCacheStats(entries: self.entries.len().to_i64(), bytes: self.payload_bytes, generation: self.observed_generation, font_identity: self.observed_font_identity, hits: self.hits, misses: self.misses, rasterizations: self.rasterizations, evictions: self.evictions)
+        FontCacheStats(entries: self.entries.len().to_i64(), bytes: self.payload_bytes, generation: self.observed_generation, font_identity: self.observed_font_identity, hits: self.hits, misses: self.misses, rasterizations: self.rasterizations, evictions: self.evictions, render_config_identity: self.observed_render_config_identity)
 
 # ============================================================================
 # Font Renderer
@@ -220,6 +291,7 @@ class FontRenderer:
     atlas_generation: i64
     atlas_face_generation: i64
     atlas_font_identity: text
+    active_render_config_identity: text = ""
 
     static fn new() -> FontRenderer:
         FontRenderer(
@@ -327,6 +399,49 @@ class FontRenderer:
         var cache = self.cache
         cache.reset_stats()
         self.cache = cache
+
+    me _activate_render_config(config: FontRenderConfig):
+        val identity = config.identity()
+        if identity != self.active_render_config_identity:
+            var cache = self.cache
+            cache.sync_render_config_identity(identity)
+            self.cache = cache
+            if self.active_render_config_identity != "":
+                self._reset_font_atlas(self.atlas_face_generation, self.atlas_font_identity)
+            self.active_render_config_identity = identity
+
+    fn _invalid_config_batch(config: FontRenderConfig) -> FontRenderBatch:
+        val stats = self.cache.stats()
+        _font_render_batch_with_config(FontRenderBatch(
+            program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION,
+            font_identity: stats.font_identity, face_generation: stats.generation, valid: false,
+            atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT,
+            atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation,
+            dirty_rects: []
+        ), config)
+
+    me _ensure_render_config_face(config: FontRenderConfig) -> bool:
+        if _font_render_config_default_selection(config):
+            return true
+        val selected = _font_render_config_candidate(config)
+        if selected == nil:
+            return false
+        val candidate = selected.?
+        val expected_identity = selected_font_asset_identity(candidate)
+        val active = self.ttf_rasterizer
+        if active != nil:
+            val snapshot = active.?.cache_identity_snapshot()
+            if snapshot.1 == expected_identity:
+                return true
+        if not self.try_load_selected_bytes(candidate.local_path, file_read_bytes(candidate.local_path)):
+            return false
+        self.current_font_identity() == expected_identity
+
+    fn _render_config_matches_run(config: FontRenderConfig, run: FontGlyphRun) -> bool:
+        if _font_render_config_default_selection(config):
+            return true
+        val selected = _font_render_config_candidate(config)
+        selected != nil and font_face_identity(run.face_id, run.face_generation) == selected_font_asset_identity(selected.?)
 
     me try_enable_browser_serif_default() -> bool:
         for dylib_path in browser_font_dylib_candidates():
@@ -670,6 +785,15 @@ class FontRenderer:
         (self.atlas_codepoints.len() - 1).to_i32()
 
     me prepare_text(content: text, color: u32, font_size: i32) -> FontRenderBatch:
+        self.prepare_text_configured(content, color, FontRenderConfig.default_for_size(font_size))
+
+    me prepare_text_configured(content: text, color: u32, config: FontRenderConfig) -> FontRenderBatch:
+        if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
+            return self._invalid_config_batch(config)
+        self._activate_render_config(config)
+        _font_render_batch_with_config(self._prepare_text_active(content, color, config.size), config)
+
+    me _prepare_text_active(content: text, color: u32, font_size: i32) -> FontRenderBatch:
         val cache_stats = self.cache.stats()
         var face_generation = cache_stats.generation
         var font_identity = cache_stats.font_identity
@@ -754,8 +878,19 @@ class FontRenderer:
         FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
 
     me prepare_text_with_advances(content: text, advance_widths: [i32], color: u32, font_size: i32) -> FontRenderBatch:
-        val natural_advances = self.measure_text_advances(content, font_size)
-        font_batch_apply_advances(content, natural_advances, advance_widths, self.prepare_text(content, color, font_size))
+        self.prepare_text_with_advances_configured(
+            content, advance_widths, color, FontRenderConfig.default_for_size(font_size)
+        )
+
+    me prepare_text_with_advances_configured(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig) -> FontRenderBatch:
+        if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
+            return self._invalid_config_batch(config)
+        self._activate_render_config(config)
+        val natural_advances = self.measure_text_advances(content, config.size)
+        _font_render_batch_with_config(
+            font_batch_apply_advances(content, natural_advances, advance_widths,
+                self._prepare_text_active(content, color, config.size)), config
+        )
 
     fn _selected_glyph_index_with_cache(rasterizer: FontRasterizer, generation: i64, glyph_index: i32, font_size: i32, initial_cache: GlyphCache) -> (CachedGlyph, GlyphCache):
         var cache = initial_cache
@@ -779,6 +914,19 @@ class FontRenderer:
         (glyph, cache)
 
     me prepare_selected_glyph_run(payload: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> FontRenderBatch:
+        self.prepare_selected_glyph_run_configured(
+            payload, color, FontRenderConfig.default_for_size(font_size)
+        )
+
+    me prepare_selected_glyph_run_configured(payload: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig) -> FontRenderBatch:
+        if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
+            return self._invalid_config_batch(config)
+        self._activate_render_config(config)
+        _font_render_batch_with_config(
+            self._prepare_selected_glyph_run_active(payload, color, config.size), config
+        )
+
+    me _prepare_selected_glyph_run_active(payload: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> FontRenderBatch:
         val active = self.ttf_rasterizer
         if active == nil:
             return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: "", face_generation: 0, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
@@ -850,6 +998,15 @@ class FontRenderer:
         FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
 
     me prepare_glyph_run(run: FontGlyphRun, color: u32, font_size: i32) -> FontRenderBatch:
+        self.prepare_glyph_run_configured(run, color, FontRenderConfig.default_for_size(font_size))
+
+    me prepare_glyph_run_configured(run: FontGlyphRun, color: u32, config: FontRenderConfig) -> FontRenderBatch:
+        if not font_render_config_selection_supported(config) or not self._render_config_matches_run(config, run):
+            return self._invalid_config_batch(config)
+        self._activate_render_config(config)
+        _font_render_batch_with_config(self._prepare_glyph_run_active(run, color, config.size), config)
+
+    me _prepare_glyph_run_active(run: FontGlyphRun, color: u32, font_size: i32) -> FontRenderBatch:
         val face_id = run.face_id
         var font_identity = font_face_identity(face_id, run.face_generation)
         val face_generation = run.face_generation
@@ -1018,7 +1175,8 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
     val payload = draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, valid and width >= 0)
     _ResolvedShapedGlyphRun(valid: payload.valid, payload: payload, advances: if payload.valid: advances else: [], width: if payload.valid: width else: 0)
 
-fn resolve_font_metrics_with_language(family: text, content: text, font_size: i32, language: text) -> ResolvedFontMetrics:
+fn _resolve_font_metrics_with_language_config(family: text, content: text, font_size: i32,
+                                              language: text, render_config_identity: text) -> ResolvedFontMetrics:
     if family.trim() == "" or font_size <= 0 or font_size > 512:
         return ResolvedFontMetrics(valid: false, family: family, identity: "", advances: [], width: 0, line_height: 0, reason: "invalid-font-request", glyph_run: draw_ir_empty_glyph_run_payload(), shaping_required: false)
     val normalized_language = _resolved_font_language(language)
@@ -1033,7 +1191,9 @@ fn resolve_font_metrics_with_language(family: text, content: text, font_size: i3
     val cacheable = _resolved_font_metrics_cacheable(resolved_family, content)
     val expected_identity = if selected_candidate != nil: selected_font_asset_identity(selected_candidate.?) else: ""
     if cacheable and expected_identity != "":
-        val expected_key = _resolved_font_metric_language_key(resolved_family, content, font_size, expected_identity, normalized_language)
+        val expected_key = _resolved_font_metric_language_config_key(
+            resolved_family, content, font_size, expected_identity, normalized_language, render_config_identity
+        )
         if val cached = _resolved_font_metric_cached(expected_key):
             return cached
     # Shape first: the producer's short-lived font_sffi face must be gone before
@@ -1046,7 +1206,12 @@ fn resolve_font_metrics_with_language(family: text, content: text, font_size: i3
     if not renderer.has_sffi_ttf():
         return ResolvedFontMetrics(valid: false, family: resolved_family, identity: "", advances: [], width: 0, line_height: 0, reason: "font-runtime-unavailable", glyph_run: draw_ir_empty_glyph_run_payload(), shaping_required: complex_script != 0)
     val identity = renderer.current_font_identity()
-    val cache_key = if cacheable: _resolved_font_metric_language_key(resolved_family, content, font_size, identity, normalized_language) else: ""
+    val cache_key = if cacheable:
+        _resolved_font_metric_language_config_key(
+            resolved_family, content, font_size, identity, normalized_language, render_config_identity
+        )
+    else:
+        ""
     if cacheable:
         if val cached = _resolved_font_metric_cached(cache_key):
             renderer.clear_ttf()
@@ -1080,6 +1245,29 @@ fn resolve_font_metrics_with_language(family: text, content: text, font_size: i3
     if resolved.valid and cacheable:
         _resolved_font_metric_store(cache_key, resolved)
     resolved
+
+fn resolve_font_metrics_with_language(family: text, content: text, font_size: i32, language: text) -> ResolvedFontMetrics:
+    _resolve_font_metrics_with_language_config(
+        family, content, font_size, language, FontRenderConfig.default_for_size(font_size).identity()
+    )
+
+fn resolve_font_metrics_configured(config: FontRenderConfig, content: text) -> ResolvedFontMetrics:
+    if not config.valid():
+        return ResolvedFontMetrics(valid: false, family: config.family, identity: "", advances: [],
+            width: 0, line_height: 0, reason: "invalid-font-config",
+            glyph_run: draw_ir_empty_glyph_run_payload(), shaping_required: false)
+    if _font_render_config_default_selection(config):
+        return _resolve_font_metrics_with_language_config(
+            "sans", content, config.size, config.language, config.identity()
+        )
+    val selected = _font_render_config_candidate(config)
+    if selected == nil:
+        return ResolvedFontMetrics(valid: false, family: config.family, identity: "", advances: [],
+            width: 0, line_height: 0, reason: "font-config-unavailable",
+            glyph_run: draw_ir_empty_glyph_run_payload(), shaping_required: false)
+    _resolve_font_metrics_with_language_config(
+        selected.?.family, content, config.size, config.language, config.identity()
+    )
 
 # Compatibility entry point for producers without language metadata.
 fn resolve_font_metrics(family: text, content: text, font_size: i32) -> ResolvedFontMetrics:

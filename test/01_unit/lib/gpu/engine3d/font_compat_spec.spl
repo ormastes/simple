@@ -2,9 +2,9 @@
 # @cover src/lib/gc_async_mut/gpu/engine3d/engine.spl 80%
 
 use std.spec.{describe, it, expect}
-use std.gpu.engine3d.engine.{Engine3D}
+use std.gpu.engine3d.engine.{Engine3D, engine3d_font_completion_target, engine3d_font_frame_target_allows}
 use std.gpu.engine3d.types3d.{mat4_identity, mat4_perspective}
-use std.gc_async_mut.text_layout.font_renderer.{FontGlyphRun, FontRenderer}
+use std.gc_async_mut.text_layout.font_renderer.{FontExecutionPolicy, FontGlyphRun, FontRenderConfig, FontRenderer}
 use std.nogc_sync_mut.io.font_sffi.{load_font, free_font, glyph_index}
 use std.gpu.engine3d.color3d.{blend3d}
 
@@ -16,7 +16,56 @@ fn _any_font_pixel(pixels: [u32]) -> bool:
         i = i + 1
     false
 
+fn _font_config(target: text, policy: FontExecutionPolicy) -> FontRenderConfig:
+    FontRenderConfig(
+        family: "Noto Sans Mono", category: "mono", language: "en", script: "latn", size: 14,
+        weight: "normal", style: "normal", hinting: "none", antialiasing: "grayscale",
+        atlas_policy: "shared-alpha-1024", execution_target: target, execution_policy: policy
+    )
+
 describe "Engine3D font compatibility":
+    it "keeps one font execution target for each frame":
+        expect(engine3d_font_frame_target_allows("", "cpu")).to_be(true)
+        expect(engine3d_font_frame_target_allows("cpu", "cpu")).to_be(true)
+        expect(engine3d_font_frame_target_allows("vulkan", "vulkan")).to_be(true)
+        expect(engine3d_font_frame_target_allows("cpu", "vulkan")).to_be(false)
+        expect(engine3d_font_frame_target_allows("vulkan", "cpu")).to_be(false)
+        expect(engine3d_font_completion_target(true, 1)).to_equal("vulkan")
+        expect(engine3d_font_completion_target(false, 1)).to_equal("cpu")
+        expect(engine3d_font_completion_target(false, 0)).to_equal("unavailable")
+
+    it "falls back by policy and leaves invalid configuration state untouched":
+        var engine = Engine3D.create_with_backend(64, 48, "cpu")
+        engine.clear(0u32)
+        engine.begin_frame()
+        expect(engine.draw_text_hud_configured(
+            4, 4, "A", 0xffffffffu32, _font_config("vulkan", FontExecutionPolicy.Suggested)
+        )).to_be(true)
+        expect(engine.font_execution_attempts()).to_equal(["vulkan:unavailable", "cpu:success"])
+        expect(engine.font_execution_target()).to_equal("cpu")
+        expect(engine.draw_text_hud_configured(
+            4, 4, "A", 0xffffffffu32, _font_config("vulkan", FontExecutionPolicy.Required)
+        )).to_be(false)
+        expect(engine.font_execution_attempts()).to_equal(["vulkan:frame-target=cpu"])
+        engine.end_frame()
+        engine.begin_frame()
+        expect(engine.draw_text_hud_configured(
+            4, 4, "A", 0xffffffffu32, _font_config("vulkan", FontExecutionPolicy.Required)
+        )).to_be(false)
+        expect(engine.font_execution_attempts()).to_equal(["vulkan:unavailable"])
+        val before_stats = engine.font_cache_stats()
+        val before_attempts = engine.font_execution_attempts()
+        expect(engine.draw_text_hud_configured(
+            4, 4, "B", 0xffffffffu32, _font_config("auto", FontExecutionPolicy.Preferred)
+        )).to_be(false)
+        val after_stats = engine.font_cache_stats()
+        expect(after_stats.entries).to_equal(before_stats.entries)
+        expect(after_stats.hits).to_equal(before_stats.hits)
+        expect(after_stats.misses).to_equal(before_stats.misses)
+        expect(engine.font_execution_attempts()).to_equal(before_attempts)
+        engine.end_frame()
+        engine.shutdown()
+
     it "draws live neutral glyph runs and rejects malformed or stale material":
         val loaded = load_font("src/compiler_rust/vendor/ttf-parser/tests/fonts/demo.ttf")
         expect(loaded).to_not_be_nil()

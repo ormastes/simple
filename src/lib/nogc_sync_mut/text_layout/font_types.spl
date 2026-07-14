@@ -13,6 +13,7 @@ class CachedGlyph:
     bearing_x: i32
     bearing_y: i32
     pixels: [u8]
+    render_config_identity: text = ""
 
     static fn empty(cp: i32, fs: i32) -> CachedGlyph:
         CachedGlyph(codepoint: cp, face_id: 0, face_generation: 0, glyph_index: -1, font_size: fs, width: 0, height: 0, advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
@@ -38,6 +39,123 @@ class FontCacheStats:
     misses: i64
     rasterizations: i64
     evictions: i64
+    render_config_identity: text = ""
+
+enum FontExecutionPolicy:
+    Suggested
+    Preferred
+    Required
+
+fn font_execution_policy_name(policy: FontExecutionPolicy) -> text:
+    match policy:
+        FontExecutionPolicy.Suggested: "suggested"
+        FontExecutionPolicy.Preferred: "preferred"
+        FontExecutionPolicy.Required: "required"
+
+fn font_render_config_normalize(value: text) -> text:
+    val trimmed = value.trim()
+    trimmed.lower()
+
+fn font_execution_target_supported(target: text) -> bool:
+    val normalized = font_render_config_normalize(target)
+    (normalized == "auto" or normalized == "cuda" or normalized == "metal" or
+        normalized == "opencl" or normalized == "vulkan" or normalized == "cpu")
+
+fn font_render_category_name(category: text) -> text:
+    val normalized = font_render_config_normalize(category)
+    if normalized == "pixel/bitmap": "pixel" else: normalized
+
+fn font_render_category_supported(category: text) -> bool:
+    val normalized = font_render_category_name(category)
+    (normalized == "auto" or normalized == "sans" or normalized == "serif" or
+        normalized == "mono" or normalized == "display" or normalized == "rounded" or
+        normalized == "handwriting" or normalized == "slab" or normalized == "blackletter" or
+        normalized == "pixel" or normalized == "emoji")
+
+class FontRenderConfig:
+    family: text
+    category: text
+    language: text
+    script: text
+    size: i32
+    weight: text
+    style: text
+    hinting: text
+    antialiasing: text
+    atlas_policy: text
+    execution_target: text
+    execution_policy: FontExecutionPolicy
+
+    static fn default_for_size(size: i32) -> FontRenderConfig:
+        FontRenderConfig(
+            family: "auto", category: "auto", language: "und", script: "auto", size: size,
+            weight: "normal", style: "normal", hinting: "none", antialiasing: "grayscale",
+            atlas_policy: "shared-alpha-1024", execution_target: "auto",
+            execution_policy: FontExecutionPolicy.Suggested
+        )
+
+    fn identity() -> text:
+        val family = font_render_config_normalize(self.family)
+        val category = font_render_category_name(self.category)
+        val language = font_render_config_normalize(self.language)
+        val script = font_render_config_normalize(self.script)
+        val weight = font_render_config_normalize(self.weight)
+        val style = font_render_config_normalize(self.style)
+        val hinting = font_render_config_normalize(self.hinting)
+        val antialiasing = font_render_config_normalize(self.antialiasing)
+        val atlas = font_render_config_normalize(self.atlas_policy)
+        val target = font_render_config_normalize(self.execution_target)
+        "font-config-v1|family=" + family.len().to_string() + ":" + family +
+            "|category=" + category.len().to_string() + ":" + category +
+            "|language=" + language.len().to_string() + ":" + language +
+            "|script=" + script.len().to_string() + ":" + script +
+            "|size=" + self.size.to_string() +
+            "|weight=" + weight.len().to_string() + ":" + weight +
+            "|style=" + style.len().to_string() + ":" + style +
+            "|hinting=" + hinting.len().to_string() + ":" + hinting +
+            "|antialiasing=" + antialiasing.len().to_string() + ":" + antialiasing +
+            "|atlas=" + atlas.len().to_string() + ":" + atlas +
+            "|target=" + target.len().to_string() + ":" + target +
+            "|policy=" + font_execution_policy_name(self.execution_policy)
+
+    fn valid() -> bool:
+        val target = font_render_config_normalize(self.execution_target)
+        (self.size > 0 and self.size <= 512 and self.family.trim() != "" and
+            font_render_category_supported(self.category) and self.language.trim() != "" and
+            self.script.trim() != "" and font_render_config_normalize(self.weight) == "normal" and
+            font_render_config_normalize(self.style) == "normal" and font_render_config_normalize(self.hinting) == "none" and
+            font_render_config_normalize(self.antialiasing) == "grayscale" and
+            font_render_config_normalize(self.atlas_policy) == "shared-alpha-1024" and
+            font_execution_target_supported(target) and
+            (target != "auto" or self.execution_policy == FontExecutionPolicy.Suggested))
+
+fn font_execution_plan(config: FontRenderConfig, executable_targets: [text]) -> [text]:
+    if not config.valid():
+        return []
+    var order: [text] = []
+    for raw in executable_targets:
+        val target = font_render_config_normalize(raw)
+        if target == "auto" or not font_execution_target_supported(target):
+            return []
+        if not order.contains(target):
+            order.push(target)
+    val requested = font_render_config_normalize(config.execution_target)
+    if order.len() == 0 or (requested != "auto" and not order.contains(requested)):
+        return []
+    if config.execution_policy == FontExecutionPolicy.Required:
+        return [requested]
+    if config.execution_policy == FontExecutionPolicy.Preferred:
+        var preferred = [requested]
+        if requested != "cpu" and order.contains("cpu"):
+            preferred.push("cpu")
+        return preferred
+    if requested == "auto":
+        return order
+    var suggested = [requested]
+    for target in order:
+        if target != requested:
+            suggested.push(target)
+    suggested
 
 class FontTextPayload:
     valid: bool
@@ -76,9 +194,14 @@ class FontRenderBatch:
     dirty_rects: [FontRenderQuad]
     render_config_identity: text = "coverage8;hint=none;subpixel=none"
     transform_identity: text = "uniform-scale;translate-late"
+    execution_target: text = "auto"
+    execution_policy: FontExecutionPolicy = FontExecutionPolicy.Suggested
 
     fn is_empty() -> bool:
         self.quads.len() == 0 or self.atlas_pixels.len() == 0
+
+    fn material_supported() -> bool:
+        self.valid and self.transform_identity == "uniform-scale;translate-late"
 
     fn atlas_owner_identity() -> text:
         val identity = self.font_identity

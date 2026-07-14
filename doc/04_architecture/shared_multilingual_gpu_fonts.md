@@ -23,7 +23,7 @@ plugin interface, renderer factory, or new native dependency.
 | `src/lib/common/encoding/font_cldr_rank.spl` | Targeted, exact-arithmetic CLDR ranking core with fixture evidence; validating XML input and pinned-source replay remain gates. |
 | `src/lib/common/encoding/sfnt.spl` | Neutral sfnt directory/fvar owner and typed default-`glyf` preflight shared by both production loaders; the old Skia parser modules are compatibility re-exports. |
 | `src/lib/common/gpu/font_atlas_composite.spl` | Shared atlas subrect/color material plus exact OpenCL, Metal, and Vulkan GLSL sources used by compiler emission and runtime adapters. |
-| `src/lib/nogc_sync_mut/text_layout/font_types.spl` | Canonical shared values; owns `FontGlyphRun`, `FontRenderQuad`, `FontRenderBatch`, and the planned `FontRenderConfig`/`FontExecutionPolicy`. `FontGlyphRun` carries the exact revocable face handle/generation pair plus logical codepoint clusters; consumers validate liveness and never dereference the handle directly. |
+| `src/lib/nogc_sync_mut/text_layout/font_types.spl` | Canonical shared values; owns `FontGlyphRun`, `FontRenderQuad`, `FontRenderBatch`, `FontRenderConfig`, `FontExecutionPolicy`, and the pure execution-plan function. `FontGlyphRun` carries the exact revocable face handle/generation pair plus logical codepoint clusters; consumers validate liveness and never dereference the handle directly. |
 | `src/lib/nogc_sync_mut/text_layout/font_renderer.spl` | Canonical renderer, glyph cache, CPU payload; gains `prepare_text`, the bound glyph-run adapter, and fail-closed sfnt preflight before native loading. |
 | `src/lib/common/ui/draw_ir.spl` and `draw_ir_sdn.spl` | Handle-free `DrawIrGlyphRunPayload` plus selected identity/ordered advances; shaped glyph IDs, positions, and logical clusters round-trip as semantic Draw IR while native faces, atlases, and caches remain executor-private. |
 | `src/lib/skia/feature/shaper/shaper.spl` and `src/lib/skia/feature/text/bidi.spl` | Existing Pure Simple shaping/BiDi owners; exact per-fallback-face `OtFont` binding plus glyph/source/cluster/language/current-placement metadata are present. The 54 no-feature identity cells, exact Hindi `hi` source oracle, and exact pinned Arabic/Urdu lookup-vector witnesses are accepted. One whole-run `U+1F600` scalar now has an exact monochrome candidate material gate but remains unpromoted pending execution. General GSUB/GPOS, marks, positioning, canonical language expansion, full BiDi, and emoji sequences remain gated. |
@@ -117,6 +117,10 @@ tries the named target then CPU; `Required(named)` tries only the named target
 and returns failure. Concrete `cpu` is valid; `auto` with Preferred/Required and
 unknown targets reject. Invalid modes
 or CTM reject before any cache, counter, upload, or device mutation.
+Non-default selection fields resolve through the canonical sparse matrix before
+renderer mutation; the exact candidate identity is loaded or matched to a
+caller-owned glyph run. Engine3D keeps one font target per frame and treats a
+recorded Vulkan draw as pending until end-frame completion and exact readback.
 
 ## Visibility matrix
 
