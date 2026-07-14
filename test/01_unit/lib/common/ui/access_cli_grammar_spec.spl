@@ -2,6 +2,7 @@
 use std.spec.*
 use common.ui.access_cli_grammar.*
 use common.ui.access_types.{UiAccessNode, UiAccessSurface, UiAccessSnapshot}
+use common.ui.access_query.{ui_access_find_nodes_filtered, ui_access_snapshot_to_json}
 
 fn _read_descriptor(min_args: i64) -> AccessCommandDescriptor:
     AccessCommandDescriptor.create(
@@ -99,10 +100,18 @@ describe "Shared UI CLI access grammar":
     it "should normalize and sort window rows through one common projector":
         val result = access_result_from_snapshot(ACCESS_OPERATION_LIST, "simple_ui", "ui-1", _snapshot(), 10)
         expect(result.rows.len()).to_equal(3)
+        expect(result.rows[0]).to_equal(["ID", "TITLE", "OWNER", "KIND", "STATE", "GEOMETRY", "FOCUS", "VISIBLE", "PARENT", "CAPS", "REVISION", "CAPTURED_AT", "GENERATION", "STALE"])
         expect(result.rows[1][0]).to_equal("a")
+        expect(result.rows[1][10]).to_equal("7")
         expect(result.rows[2][0]).to_equal("z")
         expect(result.returned_count).to_equal(2)
         expect(result.truncated).to_be(false)
+
+    it "should apply focused filtering before the bounded result limit":
+        val matches = ui_access_find_nodes_filtered(_snapshot(), "", "", "", true, 1)
+        expect(matches.len()).to_equal(1)
+        expect(matches[0].canonical_id).to_equal("a#root")
+        expect(matches[0].focused).to_be(true)
 
     it "should expose truncation and the same semantic result in both modes":
         val result = access_result_from_snapshot(ACCESS_OPERATION_LIST, "simple_ui", "ui-1", _snapshot(), 1)
@@ -113,6 +122,15 @@ describe "Shared UI CLI access grammar":
         expect(json).to_contain("\"operation\":\"list\"")
         expect(json).to_contain("\"truncated\":true")
         expect(json).to_contain("\"id\":\"a\"")
+
+    it "should reject malformed geometry and serialize duplicate props once":
+        val root = UiAccessNode(canonical_id: "g#root", surface_id: "g", widget_id: "root", kind: "gui", visible: true, focused: false, enabled: true, selected: false, text_value: "Geometry", props: [UiAccessProp(key: "x", value: "bad"), UiAccessProp(key: "x", value: "9"), UiAccessProp(key: "y", value: "2"), UiAccessProp(key: "width", value: "3"), UiAccessProp(key: "height", value: "4")], child_ids: [], action_names: [])
+        val surface = UiAccessSurface(surface_id: "g", title: "Geometry", active: true, window_id: "", app_id: "fixture", root_canonical_id: "g#root")
+        val snapshot = UiAccessSnapshot(protocol_version: 1, snapshot_revision: 1, mode: "gui", active_surface: "g", surfaces: [surface], nodes: [root], recent_events: [])
+        val list_json = access_render_json(access_result_from_snapshot(ACCESS_OPERATION_LIST, "simple_ui", "", snapshot, 1))
+        expect(list_json).to_contain("\"geometry\":null")
+        val snapshot_json = ui_access_snapshot_to_json(snapshot)
+        expect(snapshot_json.split("\"x\":").len()).to_equal(2)
 
     it "should preserve T32-compatible scalar table list and raw rendering":
         expect(access_render_human(AccessResult.scalar_titled("State", "ready"))).to_equal("State: ready")

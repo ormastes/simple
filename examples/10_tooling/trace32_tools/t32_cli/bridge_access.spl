@@ -5,17 +5,21 @@
 use std.io_runtime.{read_file, file_exists}
 use app.t32_cli.types.{T32BridgeResult}
 use app.mcp_t32.session_state.{McpT32Session, MCP_T32_SESSIONS, MCP_T32_CURRENT_SESSION, MCP_T32_CURRENT_CORE, MCP_T32_HISTORY}
-use app.mcp_t32.catalog_key.{t32_key_before_pipe}
 use app.mcp_t32.session_tools.{
-    t32_find_current_session, t32_run_remote, t32_add_history,
+    t32_find_current_session, t32_run_remote, t32_run_remote_with_timeout, t32_add_history, t32_add_history_with_request,
     t32_query_gui_status_json
 }
 use app.mcp_t32.action_tools.{
     t32_field_to_eval, t32_field_to_set_cmd, t32_field_state_set
 }
-use app.mcp_t32.window_tools.{t32_get_window_catalog, t32_get_window_actions, t32_parse_catalog_entry, t32_parse_catalog_entry_with_meta}
+use app.mcp_t32.window_tools.{t32_get_window_catalog, t32_get_action_catalog, t32_find_action, t32_get_window_actions, t32_parse_catalog_entry, t32_parse_catalog_entry_with_meta}
 use common.ui.access_cli_grammar.{access_result_from_snapshot, ACCESS_OPERATION_LIST}
 use common.ui.win_text_access.{WinTextSnapshot, win_text_trace32_snapshot, win_text_merge_snapshots}
+use app.io.mod.{getpid, time_now_unix_micros}
+
+var T32_ACTION_REQUEST_SEQUENCE: i64 = 0
+val T32_ACTION_MAX_ARGS: i64 = 1
+val T32_ACTION_ARG_MAX_LENGTH: i64 = 256
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -31,6 +35,9 @@ fn bridge_require_session() -> Result<McpT32Session, text>:
 # Run a command on the active session and return (stdout, rc)
 fn bridge_exec(session: McpT32Session, cmd: text) -> (text, i64):
     t32_run_remote(session, cmd)
+
+fn bridge_exec_with_timeout(session: McpT32Session, cmd: text, timeout_ms: i64) -> (text, i64):
+    t32_run_remote_with_timeout(session, cmd, timeout_ms)
 
 # Build a gui_status string from the active session, or empty
 fn bridge_gui_status(session: McpT32Session) -> text:
@@ -81,11 +88,6 @@ fn bridge_eval(expression: text) -> Result<T32BridgeResult, text>:
 
 fn bridge_window_list() -> Result<T32BridgeResult, text>:
     val catalog = t32_get_window_catalog()
-    if catalog.len() == 0:
-        var empty = T32BridgeResult.scalar("No windows in catalog.")
-        empty.set_context(ACCESS_OPERATION_LIST, "t32", MCP_T32_CURRENT_SESSION, 0, "", "[]", false)
-        return Ok(empty)
-    var rows: [[text]] = [["Key", "Title", "Kind", "Capture"]]
     var snapshots: [WinTextSnapshot] = []
     for entry in catalog:
         var key = ""
@@ -100,14 +102,9 @@ fn bridge_window_list() -> Result<T32BridgeResult, text>:
         var cap = capture_mode
         if cap == "":
             cap = "print_parse"
-        rows.push([key, title, kind, cap])
         snapshots.push(win_text_trace32_snapshot(key, title, open_cmd, capture_cmd, cap, "", 0, 0, 0))
     val merged = win_text_merge_snapshots("trace32", snapshots)
-    val normalized = access_result_from_snapshot(ACCESS_OPERATION_LIST, "t32", MCP_T32_CURRENT_SESSION, merged.access, 0)
-    var result = T32BridgeResult.table("Windows", rows)
-    result.set_context(ACCESS_OPERATION_LIST, "t32", MCP_T32_CURRENT_SESSION, normalized.revision, "", normalized.payload_json, normalized.truncated)
-    result.returned_count = normalized.returned_count
-    Ok(result)
+    Ok(access_result_from_snapshot(ACCESS_OPERATION_LIST, "t32", MCP_T32_CURRENT_SESSION, merged.access, 0))
 
 fn bridge_window_open(window_key: text) -> Result<T32BridgeResult, text>:
     if window_key == "":
@@ -275,51 +272,128 @@ fn bridge_screenshot(window_key: text, output_path: text) -> Result<T32BridgeRes
 # Action/Field functions (4)
 # ============================================================================
 
-fn bridge_action_invoke(action_key: text, args: text) -> Result<T32BridgeResult, text>:
+fn t32_action_request_id() -> text:
+    T32_ACTION_REQUEST_SEQUENCE = T32_ACTION_REQUEST_SEQUENCE + 1
+    "t32-action-" + str(getpid()) + "-" + str(time_now_unix_micros()) + "-" + str(T32_ACTION_REQUEST_SEQUENCE)
+
+fn bridge_action_invoke_with_request(action_key: text, args: text, request_id: text, timeout_ms: i64, confirmed: bool) -> Result<T32BridgeResult, text>:
+    val actual_request_id = if request_id == "": t32_action_request_id() else: request_id
     if action_key == "":
         return Err("action_key is required.")
-    val session = bridge_require_session()?
-    # Search for action in window catalogs
-    val catalog = t32_get_window_catalog()
+    val history_command = "action:" + action_key
+    t32_add_history_with_request("access_request " + history_command, "request", MCP_T32_CURRENT_SESSION, MCP_T32_CURRENT_CORE, actual_request_id)
+    if not confirmed:
+        t32_add_history_with_request("access_result " + history_command, "code=interaction_required", MCP_T32_CURRENT_SESSION, MCP_T32_CURRENT_CORE, actual_request_id)
+        return Err("explicit confirmation is required")
+    val action_entry = t32_find_action(action_key)
     var found_template = ""
     var found_label = ""
-    for entry in catalog:
-        val wkey = t32_key_before_pipe(entry)
-        val action_entries = t32_get_window_actions(wkey)
-        for aentry in action_entries:
-            val aparts = aentry.split("|")
-            var akey = ""
-            var alabel = ""
-            var atemplate = ""
-            if aparts.len() > 0:
-                akey = aparts[0]
-            if aparts.len() > 1:
-                alabel = aparts[1]
-            if aparts.len() > 3:
-                atemplate = aparts[3]
-            if akey == action_key:
-                found_template = atemplate
-                found_label = alabel
+    val aparts = action_entry.split("|")
+    if aparts.len() > 1:
+        found_label = aparts[1]
+    if aparts.len() > 3:
+        found_template = aparts[3]
     if found_template == "":
+        t32_add_history_with_request("access_result " + history_command, "code=target_not_found", MCP_T32_CURRENT_SESSION, MCP_T32_CURRENT_CORE, actual_request_id)
         return Err("Action not found: {action_key}")
-    var final_cmd = found_template
-    if args != "":
-        final_cmd = final_cmd.replace("%0", args)
+    val final_cmd = match t32_action_command(found_template, args):
+        Err(message):
+            t32_add_history_with_request("access_result " + history_command, "code=invalid_argument", MCP_T32_CURRENT_SESSION, MCP_T32_CURRENT_CORE, actual_request_id)
+            return Err(message)
+        Ok(command): command
+    val session = match bridge_require_session():
+        Err(message):
+            t32_add_history_with_request("access_result " + history_command, "code=source_unavailable", MCP_T32_CURRENT_SESSION, MCP_T32_CURRENT_CORE, actual_request_id)
+            return Err(message)
+        Ok(active_session): active_session
+    if timeout_ms <= 0:
+        t32_add_history_with_request("access_result " + history_command, "code=invalid_argument", session.id, MCP_T32_CURRENT_CORE, actual_request_id)
+        return Err("Invalid action timeout")
+    val deadline_ms = time_now_unix_micros() / 1000 + timeout_ms
     var stdout = ""
     var rc: i64 = 0
-    (stdout, rc) = bridge_exec(session, final_cmd)
-    t32_add_history("action:{action_key} {final_cmd}", stdout.trim(), session.id, MCP_T32_CURRENT_CORE)
+    (stdout, rc) = bridge_exec_with_timeout(session, final_cmd, timeout_ms)
     if rc != 0 and rc != -1:
+        t32_add_history_with_request("access_result " + history_command, "code=source_unavailable;" + stdout.trim(), session.id, MCP_T32_CURRENT_CORE, actual_request_id)
         return Err("Action failed (exit {rc}): {stdout.trim()}")
     if rc == -1:
+        val failure_code = if stdout.to_lower().contains("timeout") or stdout.to_lower().contains("timed out"): "timeout" else: "source_unavailable"
+        t32_add_history_with_request("access_result " + history_command, "code=" + failure_code + ";" + stdout.trim(), session.id, MCP_T32_CURRENT_CORE, actual_request_id)
         return Err(stdout.trim())
+    val remaining_ms = deadline_ms - time_now_unix_micros() / 1000
+    if remaining_ms <= 0:
+        t32_add_history_with_request("access_result " + history_command, "code=timeout;observation=deadline", session.id, MCP_T32_CURRENT_CORE, actual_request_id)
+        return Err("Post-action observation timed out")
+    var observed = ""
+    var observed_rc: i64 = 0
+    (observed, observed_rc) = bridge_exec_with_timeout(session, "EVAL STATE.RUN()", remaining_ms)
+    if observed_rc != 0:
+        val observation_code = if observed_rc == -1 or observed.to_lower().contains("timeout"): "timeout" else: "source_unavailable"
+        t32_add_history_with_request("access_result " + history_command, "code=" + observation_code + ";observation=" + observed.trim(), session.id, MCP_T32_CURRENT_CORE, actual_request_id)
+        return Err("Post-action observation failed: " + observed.trim())
+    val observation = observed.trim()
+    t32_add_history_with_request("access_result " + history_command, "code=ok;observation=" + observation, session.id, MCP_T32_CURRENT_CORE, actual_request_id)
     val pairs = [
         ["action_key", action_key],
         ["label", found_label],
         ["command", final_cmd],
-        ["output", stdout.trim()]
+        ["output", stdout.trim()],
+        ["post_action_observation", observation]
     ]
-    Ok(T32BridgeResult.kv("Action: {found_label}", pairs))
+    var result = T32BridgeResult.kv("Action: {found_label}", pairs)
+    result.correlation_id = actual_request_id
+    Ok(result)
+
+fn t32_action_command(template: text, args: text) -> Result<text, text>:
+    if args != "":
+        if args.len().to_i64() > T32_ACTION_ARG_MAX_LENGTH:
+            return Err("Invalid action argument: maximum length is " + str(T32_ACTION_ARG_MAX_LENGTH))
+        if not t32_action_argument_is_safe(args):
+            return Err("Invalid action argument: unsupported character")
+    var command = ""
+    var used_arg = false
+    var i: i64 = 0
+    while i < template.len():
+        val ch = template.substring(i, i + 1)
+        if ch == "{":
+            var end = i + 1
+            while end < template.len() and template.substring(end, end + 1) != "}":
+                end = end + 1
+            if end >= template.len():
+                return Err("Invalid action template: unresolved placeholder")
+            if end == i + 1:
+                return Err("Invalid action template: empty placeholder")
+            if args == "":
+                return Err("Action argument required for " + template.substring(i, end + 1))
+            command = command + args
+            used_arg = true
+            i = end + 1
+        elif ch == "}":
+            return Err("Invalid action template: unresolved placeholder")
+        elif ch == "%" and i + 1 < template.len() and "0123456789".contains(template.substring(i + 1, i + 2)):
+            val placeholder = template.substring(i, i + 2)
+            if placeholder != "%0":
+                return Err("Invalid action template: at most one argument is supported")
+            if args == "":
+                return Err("Action argument required for %0")
+            command = command + args
+            used_arg = true
+            i = i + 2
+        else:
+            command = command + ch
+            i = i + 1
+    if args != "" and not used_arg:
+        return Err("Action does not accept arguments")
+    Ok(command)
+
+fn t32_action_argument_is_safe(value: text) -> bool:
+    if value.len().to_i64() > T32_ACTION_ARG_MAX_LENGTH: return false
+    for ch in value:
+        if not "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:+@-".contains(ch): return false
+    true
+
+fn bridge_action_invoke(action_key: text, args: text) -> Result<T32BridgeResult, text>:
+    bridge_action_invoke_with_request(action_key, args, "", 5000, false)
 
 fn bridge_action_list(window_key: text) -> Result<T32BridgeResult, text>:
     var rows: [[text]] = [["Key", "Label", "Type", "Window"]]
@@ -338,22 +412,21 @@ fn bridge_action_list(window_key: text) -> Result<T32BridgeResult, text>:
                 atype = parts[2]
             rows.push([akey, alabel, atype, window_key])
     else:
-        val catalog = t32_get_window_catalog()
-        for entry in catalog:
-            val wkey = t32_key_before_pipe(entry)
-            val actions = t32_get_window_actions(wkey)
-            for aentry in actions:
-                val parts = aentry.split("|")
-                var akey = ""
-                var alabel = ""
-                var atype = ""
-                if parts.len() > 0:
-                    akey = parts[0]
-                if parts.len() > 1:
-                    alabel = parts[1]
-                if parts.len() > 2:
-                    atype = parts[2]
-                rows.push([akey, alabel, atype, wkey])
+        for aentry in t32_get_action_catalog():
+            val parts = aentry.split("|")
+            var akey = ""
+            var alabel = ""
+            var atype = ""
+            var target = ""
+            if parts.len() > 0:
+                akey = parts[0]
+            if parts.len() > 1:
+                alabel = parts[1]
+            if parts.len() > 2:
+                atype = parts[2]
+            if parts.len() > 4:
+                target = parts[4]
+            rows.push([akey, alabel, atype, target])
     Ok(T32BridgeResult.table("Actions", rows))
 
 fn bridge_field_get(field_key: text) -> Result<T32BridgeResult, text>:
@@ -418,7 +491,7 @@ fn bridge_history_tail(count: i64) -> Result<T32BridgeResult, text>:
     var start_idx: i64 = 0
     if total > actual_count:
         start_idx = total - actual_count
-    var rows: [[text]] = [["Command", "Result", "Session", "Core"]]
+    var rows: [[text]] = [["Command", "Result", "Session", "Core", "Request ID"]]
     var idx: i64 = 0
     for h in MCP_T32_HISTORY:
         if idx >= start_idx:
@@ -426,7 +499,7 @@ fn bridge_history_tail(count: i64) -> Result<T32BridgeResult, text>:
             var result_text = h.result
             if result_text.len() > 60:
                 result_text = result_text.substring(0, 57) + "..."
-            rows.push([h.command, result_text, h.session_id, h.core_id])
+            rows.push([h.command, result_text, h.session_id, h.core_id, h.request_id])
         idx = idx + 1
     Ok(T32BridgeResult.table("History (last {actual_count})", rows))
 

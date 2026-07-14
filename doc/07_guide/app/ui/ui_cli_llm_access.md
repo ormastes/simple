@@ -1,7 +1,7 @@
 <!-- codex-design -->
 # UI CLI Access for LLMs and Operators
 
-**Status:** implementation is present; final live verification and docgen remain blocked until a current pure-Simple checker can be built.
+**Status:** implementation and static review are accepted; overall PASS remains blocked until a current pure-Simple runtime completes the live gate and TRACE32 GUI evidence is captured.
 
 This interface lets an LLM inspect and safely operate TRACE32 GUI windows,
 Simple GUI/TUI surfaces, and host WM windows with one access grammar. The
@@ -33,7 +33,7 @@ argument dispatcher while sharing descriptors and rendering. These records wrap 
 | Snapshot all | `simple ui snapshot` | `simple play wm-text-snapshot host_wm` | capture each required catalog window |
 | Inspect one | `simple ui surface <surface>` | use `wm-text-find`; v1 snapshot has no per-window filter | `simple t32 window show <key>` |
 | Find | `simple ui find ...` | `simple play wm-text-find host_wm <text>` | query captured window text |
-| Act | `simple ui act ...` | `simple play wm-text-act <id> <action>` | `simple t32 action do <key> [args]` |
+| Act | `simple ui act ... --revision N` | `simple play wm-text-act <id> <action> --generation TOKEN` | `simple t32 action do <key> [args]` |
 | History | `simple ui history ...` | `simple play wm-text-history` | `simple t32 history [count]` |
 
 TRACE32's `window show` is a capture, not a live widget tree. Host WM exposes
@@ -49,7 +49,7 @@ using loopback and the configured port by default:
 ```text
 simple ui windows --port 3000 --json
 simple ui surface main --port 3000 --json
-simple ui act --canonical main#build --action click --port 3000 --timeout 2000 --json
+simple ui act --canonical main#build --action click --revision 42 --port 3000 --timeout 2000 --json
 ```
 
 Use `--ui-access-db PATH` only for captured read-only list/snapshot/surface/find/
@@ -65,14 +65,14 @@ Never act by title alone. A `windows` item ID identifies a surface; use
 
 ```text
 main#build                    # Simple UI widget
-trace32:register#root         # TRACE32 captured window root
+trace32:register_view#root    # TRACE32 captured window root
 wm:0x04a00007#root            # host WM top-level window root
 ```
 
 IDs are source/session scoped, not global desktop identities. Re-list after a
 source restart. Action paths re-resolve current targets and return typed
-not-found/state/action errors rather than guessing; WM v1 does not enforce a
-client-supplied revision token.
+not-found/state/action errors rather than guessing. UI actions require the
+observed snapshot revision; WM actions require the listed window generation.
 
 ## Recommended LLM workflow
 
@@ -87,8 +87,10 @@ simple t32 windows --json
 ```
 
 Check `source.id`, session, revision, and each list item's `capabilities`.
-Capture time and `stale` are item fields when known. Treat `null` as unavailable;
-do not infer geometry, focus, visibility, or descendants.
+Human and JSON lists expose the same ordered fields: ID, title, owner, surface
+kind, state, geometry, focus, visibility, parent, capabilities, captured
+revision/time, generation, and stale state. Treat JSON `null` (human `-`) as
+unavailable; do not infer geometry, focus, visibility, or descendants.
 
 ### 2. Read the smallest useful semantic state
 
@@ -108,7 +110,7 @@ For host WM or TRACE32, ask the adapter for its honest capture:
 
 ```text
 simple play wm-text-snapshot host_wm --json
-simple t32 window show register --json
+simple t32 window show register_view --json
 ```
 
 ### 3. Find a semantic target
@@ -139,13 +141,15 @@ LLM-side check improves explanations; it does not replace server-side safety.
 ### 5. Act once
 
 ```text
-simple ui act --canonical main#build --action click --timeout 2000 --json
-simple play wm-text-act wm:0x04a00007#root focus --json
-simple t32 action do run --json
+simple ui act --canonical main#build --action click --revision 42 --timeout 2000 --json
+simple play wm-text-act wm:0x04a00007#root focus --generation 1234 --json
+simple t32 action do step --confirm --json
 ```
 
 Keep the `request_id`. Do not retry a timeout blindly: the backend may have
-completed after observation expired.
+completed after observation expired. A post-dispatch timeout therefore returns
+the same request ID and the explicit guidance “Action may have dispatched;
+inspect history”.
 
 ### 6. Observe state and correlated history
 
@@ -154,6 +158,7 @@ Refresh the relevant surface, then inspect history:
 ```text
 simple ui surface main --json
 simple ui history --surface main --count 10 --json
+simple play wm-text-history --json
 simple t32 history 10 --json
 ```
 
@@ -168,7 +173,7 @@ from the refreshed semantic state and typed result, not from exit status alone.
 simple ui windows
 simple ui surface main
 simple ui find --surface main --kind button --text build --limit 20
-simple ui act --canonical main#build --action click --timeout 2000
+simple ui act --canonical main#build --action click --revision 42 --timeout 2000
 simple ui history --surface main --count 10
 ```
 
@@ -180,33 +185,57 @@ semantic tree and identity rules do not change with the renderer.
 ```text
 simple play windows
 simple play wm-text-find host_wm "Simple Editor"
-simple play wm-text-act wm:0x04a00007#root focus
+simple play wm-text-act wm:0x04a00007#root focus --generation 1234
+simple play wm-text-act wm:0x04a00007#root --generation 1234 type_text "hello"
 ```
 
-Only actions advertised by the live host adapter are legal. `focus`,
-`type_text`, `click_xy`, and `screenshot` may be available, but availability is
-platform and permission dependent. Internal controls remain unsupported unless
-a semantic adapter supplies them. WM text and paths are limited to 4,096
-characters; coordinates are limited to the signed ±1,000,000 range. WM action
-success also requires its correlated history writes and post-action inventory.
+Only actions advertised by the live host adapter are legal. Host roots expose
+`focus` and `type_text`; typing is sent to the selected native window in one
+bounded operation and fails instead of falling back to global keyboard input.
+Literal text remains data on Linux, macOS, and Windows. Desktop-global click
+and screenshot helpers are not exposed as target actions. Internal controls
+remain unsupported unless a semantic adapter supplies them. WM text is limited
+to 4,096 characters. Linux window geometry is preserved, and a focused window
+is the active surface; no focus means no active surface. macOS lists only
+windows with a stable `AXWindowNumber` and revalidates that identifier and title
+at dispatch, failing closed on missing or ambiguous matches. WM action success
+also requires its correlated history writes and post-action inventory. Copy `generation` from the selected
+`windows --json` record; it may appear before or after action arguments. A
+mismatch fails as `stale_target` before the host adapter runs.
 
 ### TRACE32: inspect and act through its catalog
 
 ```text
 simple t32 sessions
 simple t32 windows
-simple t32 window show register
-simple t32 window describe register
-simple t32 action list register
-simple t32 action do run
+simple t32 window show register_view
+simple t32 window describe register_view
+simple t32 action list register_view
+simple t32 action do step --confirm
 simple t32 history 10
 ```
 
 TRACE32 remains catalog/capture based. `window show` can produce captured text
-lines under canonical IDs such as `trace32:register#line_0`; actions execute
+lines under canonical IDs such as `trace32:register_view#line_0`; actions execute
 cataloged TRACE32 commands, not Simple UI events. Blocking PRACTICE commands and
 prompt boundaries keep TRACE32-specific policy while returning the shared typed
-error envelope.
+error envelope. Session host, port, intercom, backend, and catalog command are
+passed as process argv, never composed into a shell command. The human
+`windows` table is the same normalized 14-field projection used by JSON.
+
+Use one scripted shell process when a live sequence must retain its session and
+correlated history:
+
+```sh
+printf '%s\n' \
+  'session open 127.0.0.1 20000 ui_access unknown' \
+  'windows' 'show register_view' 'describe register_view' \
+  'do step --confirm' 'history 10' 'quit' | simple t32 shell
+```
+
+An action accepts at most one 256-character placeholder argument. Unsafe
+command metacharacters are rejected, and success includes one bounded
+post-action state observation.
 
 ## JSON contract
 
@@ -296,28 +325,52 @@ fixture and the UI CLI itself, never a direct HTTP shortcut.
 Until that gate and docgen run successfully, the synchronized manual source and
 existing capture paths are not final acceptance evidence.
 The focused `check-ui-cli-access` manual-evidence scenario also rejects
-`pass_todo`, `pass_dn`, `pass_do_nothing`, and trivial always-true assertions in its gate/spec
-sources before accepting the generated manual.
+unknown manual `step(...)` names, scenario-count/source drift, missing capture
+links, `pass_todo`, `pass_dn`, `pass_do_nothing`, and trivial always-true
+assertions before accepting the generated manual.
 
-Regenerate the manual before committing the implementation:
+Evidence collection order is strict: run the separate-process live transport
+once with the deployed Pure-Simple runtime, regenerate the manual from those
+captures, then run the primary native SSpec once on the committed converged
+revision. Do not use the Rust seed or rerun a green primary SSpec.
+The live script launches installed `simple ui gui` and `simple ui tui_web`
+routes and records the resolved `simple_ui_backend` path and digest. Raw
+backend-entry source execution is not acceptance evidence.
+
+That backend path must be the executable sibling of the deployed runtime; a
+static routing marker is not artifact evidence. If the self-hosted runtime
+crashes or reaches the session retry cap, stop and record a blocked handoff for
+a fresh verification session. The Rust compiler is the bootstrap seed only: it
+must never replace the deployed pure-Simple runtime for UI access, docgen, live
+transport, or final-review evidence.
 
 ```sh
-bin/simple run src/app/spipe_docgen/main.spl \
+SIMPLE_BIN=/absolute/path/to/release/<triple>/simple
+SIMPLE_BIN="$SIMPLE_BIN" sh scripts/check/check-ui-cli-live-transport.shs
+```
+
+The transport gate must report `runtime=pure-simple-self-hosted`,
+`runtime_probe=pass`, and `rust_seed_used=false`. It creates the GUI, TUI-web,
+and protocol inputs linked by docgen. Regenerate the manual next:
+
+```sh
+SIMPLE_BINARY="$SIMPLE_BIN" "$SIMPLE_BIN" run src/app/spipe_docgen/main.spl \
   test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_spec.spl \
   test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_final_review_spec.spl \
   --output doc/06_spec/03_system/app/ui_cli_llm_access/feature --no-index
 ```
 
-Review and commit the implementation and regenerated manual. On that revision,
-run the primary SSpec exactly once and save its transcript:
+Review and commit the implementation, tracked captures, and regenerated manual.
+On that revision, run the primary SSpec exactly once and save its transcript:
 
 ```sh
 set -eu
 FEATURE=build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access
 mkdir -p "$FEATURE"
-bin/simple test \
+SIMPLE_BINARY="$SIMPLE_BIN" "$SIMPLE_BIN" test \
   test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_spec.spl \
   --mode=native --clean --force-rebuild > "$FEATURE/focused-checks.txt" 2>&1
+printf '%s\n' 'STATUS: PASS ui-cli-focused-checks' >> "$FEATURE/focused-checks.txt"
 ```
 
 With the repo-managed TRACE32 GUI running on the current `DISPLAY`, record its
@@ -333,6 +386,7 @@ mkdir -p "$T32_OUT"
     'font_match=%{family}|%{style}|%{pixelsize}|%{fontformat}|%{file}\n' \
     't32:style=lss:pixelsize=16:fontformat=PCF:antialias=false:hinting=false'
   bash config/t32/trace32_x11_container.shs status
+  "$T32_RUNTIME" logs --tail 200 "$T32_NAME"
   bash config/t32/trace32_x11_container.shs ping
   xwininfo -display "$DISPLAY" -root -tree
 } > "$T32_OUT/t32-gui-status.txt" 2>&1
@@ -340,7 +394,9 @@ import -display "$DISPLAY" -window root "$T32_OUT/t32-gui.png"
 ```
 
 The first line must resolve to family `t32`, format `PCF`, and a file below
-`/opt/t32/fonts`; a DejaVu/TrueType fallback is a failure.
+`/opt/t32/fonts`; the log must report `PowerView RCL ready on port 20000`, the
+ping must succeed, and the X11 tree must contain the PowerView window. A
+DejaVu/TrueType fallback is a failure.
 
 If the run creates or updates tracked GUI evidence images, commit only those
 generated assets; do not rerun the already-green primary spec. With the working
@@ -351,11 +407,14 @@ set -eu
 FEATURE=build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access
 sh scripts/audit/direct-env-runtime-guard.shs --working \
   > "$FEATURE/direct-runtime-working.txt" 2>&1
+printf '%s\n' 'STATUS: PASS direct-runtime-working' >> "$FEATURE/direct-runtime-working.txt"
 sh scripts/audit/direct-env-runtime-guard.shs --staged \
   > "$FEATURE/direct-runtime-staged.txt" 2>&1
+printf '%s\n' 'STATUS: PASS direct-runtime-staged' >> "$FEATURE/direct-runtime-staged.txt"
 count=$(find doc/06_spec -name '*_spec.spl' | wc -l)
 printf 'doc06_spec_spl_count=%s\n' "$count" > "$FEATURE/spec-layout.txt"
 test "$count" -eq 0
+printf '%s\n' 'STATUS: PASS spec-layout' >> "$FEATURE/spec-layout.txt"
 sh scripts/check/check-ui-cli-final-review.shs --write-manifest
 ```
 
@@ -394,7 +453,7 @@ highest_capability_review=accepted
 After the reviewer writes that receipt, run the bound final scenario once:
 
 ```sh
-bin/simple test \
+SIMPLE_BINARY="$SIMPLE_BIN" "$SIMPLE_BIN" test \
   test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_final_review_spec.spl \
   --mode=native --clean --force-rebuild
 ```

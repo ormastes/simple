@@ -423,7 +423,7 @@ bootstrap_native_build_main() {
     SIMPLE_BINARY="$(absolute_path "${compiler}")" \
     "${compiler}" native-build \
     --backend "${stage4_backend}" \
-    --source src/compiler --source src/app --source src/lib \
+    --source src/compiler --source src/app --source src/lib --source examples/10_tooling \
     --entry-closure \
     --threads "${jobs}" \
     --cache-dir "${native_cache_dir}" \
@@ -788,6 +788,22 @@ fi
 run_logged stage4-redeploy-gate run_timeout_kill 180 sh \
   scripts/check/cert/redeploy_gate/redeploy_gate.shs "${full_bin}"
 
+echo "Stage 4b: compiling cached UI backend..."
+ui_backend_bin="${full_dir}/simple_ui_backend${exe_suffix}"
+prepare_native_cache stage4b-ui-backend
+run_logged stage4b-ui-backend env RUST_LOG="${RUST_LOG:-error}" \
+  SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+  LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+  SIMPLE_STUB_MISSING_RT=1 \
+  SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
+  "${full_bin}" native-build \
+  --backend "${stage4_backend}" \
+  --source src/compiler --source src/app --source src/lib \
+  --entry-closure --threads "${jobs}" --cache-dir "${native_cache_dir}" \
+  --mode "${bootstrap_mode}" --entry src/app/ui/main.spl \
+  --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
+  -o "${ui_backend_bin}"
+[ -x "${ui_backend_bin}" ] || { echo "error: failed to compile cached UI backend" >&2; exit 1; }
 echo "Full CLI binary: ${full_bin}"
 
 # ===========================================================================
@@ -895,6 +911,8 @@ if [ "${deploy}" -eq 1 ]; then
     exit 1
   fi
   rm -f "${prev_bin}"
+  install -m755 "${ui_backend_bin}" "${deploy_dir}/simple_ui_backend${exe_suffix}"
+  echo "Deployed cached UI backend to ${deploy_dir}/simple_ui_backend${exe_suffix}"
 
   # Deploy MCP servers if they were built successfully
   if [ "${build_mcp}" -eq 1 ] && [ "${mcp_build_ok}" -eq 1 ]; then

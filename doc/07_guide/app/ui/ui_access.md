@@ -18,6 +18,13 @@ Runtime note:
   location
 - set `SIMPLE_UI_ACCESS_DB_PATH=0` to disable runtime store attachment
 
+The live transport gate covers both the web fixture and the canonical TUI-web
+backend as separate server processes. Both are inspected through the same
+`simple ui windows|snapshot|surface|find|act|history` client protocol; retained
+TUI-web evidence is written to `protocol/tui-web.json`. Acceptance runs on the
+Pure-Simple self-hosted `bin/simple`; the Rust compiler is bootstrap seed only
+and is rejected as UI-access evidence.
+
 ---
 
 ## What It Exposes
@@ -236,9 +243,13 @@ Example action body:
 {
   "surface_id": "popup",
   "canonical_id": "popup#ok_btn",
-  "action": "click"
+  "action": "click",
+  "expected_revision": 42
 }
 ```
+
+CLI actions always send `expected_revision` from the observed snapshot. Direct
+API clients should do the same; a mismatch returns `stale_target` before dispatch.
 
 Compatibility rules:
 

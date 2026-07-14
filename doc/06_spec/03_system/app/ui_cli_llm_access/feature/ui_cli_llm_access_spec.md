@@ -34,6 +34,25 @@ ui_cli_llm_access_spec -> std
 
 # Ui Cli Llm Access Specification
 
+## Evidence
+
+Display policy: `embed_tui`
+
+The final gate parses the runtime receipt, semantic before/after state, TRACE32
+font/RCL/window-tree status, and screenshot pixels before accepting these
+captures. Missing or stale files fail closed.
+
+| Item | Kind | Path |
+|------|------|------|
+| `tui/` | TUI captures | `build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/tui/` |
+| `protocol.json` | GUI protocol | `build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/protocol/protocol.json` |
+| `tui-web.json` | TUI-web protocol | `build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/protocol/tui-web.json` |
+| `t32-gui-status.txt` | TRACE32 status | `build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/t32/t32-gui-status.txt` |
+| `t32-gui.png` | TRACE32 GUI | `build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/t32/t32-gui.png` |
+| `gui-before.png` | GUI before action | `doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/gui-before.png` |
+| `gui-after.png` | GUI after action | `doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/gui-after.png` |
+| `tui-web.png` | TUI-web rendering | `doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/tui-web.png` |
+
 ## Scenarios
 
 ### UI CLI access for LLM operators
@@ -89,7 +108,7 @@ _check_gate("shared-grammar", [
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -101,7 +120,11 @@ _check_gate("t32-compatibility", [
     "result_mapping=pass",
     "error_mapping=pass",
     "safety_mapping=pass",
-    "output_mapping=pass"
+    "output_mapping=pass",
+    "history_request_id=pass",
+    "t32_process_argv=pass",
+    "t32_shell_concat=0",
+    "t32_human_json_list_fields=equal"
 ])
 ```
 
@@ -143,6 +166,7 @@ _check_gate("live-tui-loop", [
     "source=simple_ui",
     "surface_kind=tui",
     "canonical_id=",
+    "stale_revision=stale_target",
     "action_result=ok",
     "history_correlation=pass",
     "capture_kind=tui"
@@ -184,6 +208,7 @@ _check_gate("live-gui-loop", [
     "source=simple_ui",
     "surface_kind=gui",
     "canonical_id=",
+    "stale_revision=stale_target",
     "action_result=ok",
     "history_correlation=pass",
     "capture_kind=gui"
@@ -221,6 +246,12 @@ _check_gate("live-wm-loop", [
     "one_host_root_per_owner_window=true",
     "empty_windows=pass",
     "missing_target=target_not_found",
+    "generation_guard=pass",
+    "focused_surface=pass",
+    "no_synthetic_focus=pass",
+    "geometry_preserved=pass",
+    "target_scoped_literal_type=pass",
+    "macos_stable_identity=pass",
     "owner_adapter_action=pass",
     "history_correlation=pass"
 ])
@@ -256,6 +287,7 @@ _check_gate("identity-ordering-staleness", [
     "deterministic_order=pass",
     "unavailable_fields=explicit",
     "removed_target=target_not_found",
+    "reused_target=stale_target",
     "stale_metadata=true"
 ])
 ```
@@ -281,6 +313,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("List active windows")
 _check_gate("output-modes", [
     "human_json_fixture_fields=equal",
+    "human_json_required_fields=equal",
     "utf8_fields=preserved",
     "json_single_line=true",
     "schema_version=1",
@@ -319,6 +352,7 @@ _check_gate("error-taxonomy", [
     "target_busy",
     "timeout",
     "invalid_argument",
+    "post_dispatch_timeout_correlation=pass",
     "typed_error_json=pass"
 ])
 ```
@@ -382,7 +416,7 @@ _check_gate("action-safety", [
     "queried_target_used=true",
     "capability_checked=true",
     "state_checked=true",
-    "invalid_coordinates=rejected",
+    "untargeted_desktop_actions=rejected",
     "confirmation_required=true",
     "correlated_result=true"
 ])
@@ -412,7 +446,10 @@ _check_gate("common-ownership", [
     "frontend_owner_redefinitions=0",
     "common_host_backend_imports=0",
     "raw_runtime_string_guard=pass",
-    "renderer_ir_string_guard=pass"
+    "renderer_ir_string_guard=pass",
+    "compiled_backend_routing_contract=pass",
+    "installed_path_fallback_contract=pass",
+    "raw_backend_source_exec=0"
 ])
 ```
 
@@ -553,11 +590,29 @@ step("Inspect TUI rendering")
 step("Inspect GUI rendering")
 step("Act on the target")
 _check_gate("live-ui-transport", [
+    "runtime=pure-simple-self-hosted",
+    "runtime_probe=pass",
+    "runtime_provenance=pass",
+    "rust_seed_used=false",
+    "compiled_backend_artifact=pass",
+    "gui_backend_route=simple-ui-gui",
+    "tui_web_backend_route=simple-ui-tui_web",
+    "t32_deployed_route=pass",
+    "t32_invalid_json=invalid_argument",
+    "t32_live_windows=pass",
+    "t32_live_show=pass",
+    "t32_live_describe=pass",
+    "t32_live_action=pass",
+    "t32_live_history=pass",
     "transport=existing-test-api",
     "client_process=separate",
     "loopback_default=true",
     "help_operations=pass",
     "human_json_fixture_fields=equal",
+    "human_json_required_fields=equal",
+    "gui_screenshot_dimensions=1280x800",
+    "gui_screenshot_nonblank=pass",
+    "gui_semantic_delta=unfocused_to_focused",
     "malformed_args=invalid_argument",
     "unknown_target=target_not_found",
     "live_windows=pass",
@@ -567,7 +622,19 @@ _check_gate("live-ui-transport", [
     "correlated_history=pass",
     "service_stop=source_unavailable",
     "db_fallback=read_only",
-    "db_act=source_unavailable"
+    "db_act=source_unavailable",
+    "tui_web_transport=separate_process",
+    "tui_web_html=visible",
+    "tui_web_screenshot_dimensions=1280x800",
+    "tui_web_screenshot_nonblank=pass",
+    "tui_web_windows=pass",
+    "tui_web_snapshot=pass",
+    "tui_web_surface=pass",
+    "tui_web_find=pass",
+    "tui_web_act=pass",
+    "tui_web_post_action_state=pass",
+    "tui_web_correlated_history=pass",
+    "tui_web_request_id=present"
 ])
 ```
 
@@ -601,6 +668,8 @@ _check_gate("manual-evidence", [
     "capture_kind=gui",
     "capture_kind=protocol",
     "manual_steps=7",
+    "manual_source_fresh=pass",
+    "capture_links=pass",
     "placeholder_passes=0"
 ])
 ```

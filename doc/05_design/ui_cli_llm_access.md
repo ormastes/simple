@@ -22,8 +22,10 @@ Implement the selected `REQ-UCLA-001..025` and `NFR-UCLA-001..022` by extracting
 | `examples/10_tooling/trace32_tools/t32_mcp/diagnostics.spl` | Route legacy MCP diagnostics through structured logging | T32 runtime |
 | `config/t32/trace32_x11_container.Dockerfile` | Admit and register vendor PCF fonts for the real Xft GUI path | T32 runtime |
 | `examples/10_tooling/trace32_tools/t32_cli/mod.spl` | Dispatch the CLI, parse output mode, and re-export the T32 error mapper | T32 adapter |
+| `src/app/cli/_CliMain/main_and_help.spl` | Dispatch `ui` through the existing source-command runner | unified CLI |
 | `src/app/ui/access_cli.spl` | New UI descriptor catalog and live test-API/read-only-store adapter | UI adapter |
 | `src/app/ui/cli_entry.spl` | Dispatch access verbs before backend modes; preserve existing modes | UI entry |
+| `src/app/ui/backend_loader.spl` | Launch the deployed sibling `simple_ui_backend`; never execute backend `.spl` source in production | UI entry |
 | `src/app/play/wm_access_cli.spl` | New live WM conversion/dispatch owner | WM adapter |
 | `src/app/play/main.spl` | Replace planned WM branches with live calls; preserve spellings | play entry |
 | `scripts/check/check-ui-cli-access.spl` | Pure Simple focused scenario checker | evidence |
@@ -127,6 +129,16 @@ minimum arguments, timeout positivity, confirmation policy, and snapshot action 
 - Session types and mutable session/current/core/history state live in a non-entrypoint owner imported explicitly by MCP and CLI bridge modules. Entrypoints do not own reusable state.
 - Session configuration loads `config/t32/t32_mcp.sdn` once, then applies environment overrides; ctypes keeps API-library path ownership behind a setter.
 - T32-only sessions/CMM/jobs/dialog commands retain their existing dispatch and safety checks.
+- Shared `action do` resolves the authoritative global/targeted action catalog,
+  executes through the existing bounded process facade using the descriptor's
+  timeout, and exposes the same request ID in request/result history rows. It
+  accepts at most one 256-character placeholder argument, rejects command
+  metacharacters before interpolation, and records one bounded `STATE.RUN()`
+  observation before reporting success.
+- T32 subprocess owners pass the backend executable, host, port, intercom, and
+  complete catalog command as separate argv values; no session field is
+  concatenated into a shell command. `windows` returns the common normalized
+  14-field list result directly in both human and JSON modes.
 
 ## Live UI adapter
 
@@ -137,10 +149,21 @@ minimum arguments, timeout positivity, confirmation policy, and snapshot action 
 | `windows`, `snapshot` | `GET /api/test/ui/snapshot` |
 | `surface` | `GET /api/test/ui/surface?id=...` |
 | `find` | `GET /api/test/ui/query?...` |
-| `act` | `POST /api/test/ui/act` followed by one surface/history observation |
+| `act` | `POST /api/test/ui/act` with the observed revision, followed by one surface/history observation |
 | `history` | `GET /api/test/ui/history?...` |
 
-Default endpoint is loopback plus configured `--port`; timeout is finite. HTTP status/body errors map once to `AccessError`. One read operation makes one request. Live GUI/web and TUI-web fixtures use their already-mounted test API.
+Default endpoint is loopback plus configured `--port`; timeout is finite. HTTP status/body errors map once to `AccessError`. One read operation makes one request. After action dispatch, aggregate-timeout exhaustion and observation failure preserve the action request ID and explicitly direct the caller to inspect history before retrying. Live GUI/web and TUI-web fixtures use their already-mounted test API. The CLI requires `--revision N` from the preceding list/snapshot/find result; the server rejects a changed revision as `stale_target` before dispatch.
+
+Backend rendering runs from the bootstrap-built, deployed `simple_ui_backend`
+sibling artifact. The unified CLI never interprets `backend_entry_*.spl` at
+runtime and never falls back to the Rust seed.
+
+The launcher resolves the running `simple` executable through the existing CLI
+owner, including bare-PATH, POSIX, Windows drive, and UNC forms, then derives
+only the adjacent `simple_ui_backend[.exe]`. Environment-only, cwd-relative,
+raw-source, and seed fallbacks are forbidden. Static routing checks prove this
+contract; only the live gate's executable path, digest, sibling relationship,
+and production `simple ui gui|tui_web` launches prove the deployed artifact.
 
 When `--ui-access-db` is explicitly chosen, the adapter opens the existing `UiAccessStore`, reads surfaces/nodes/events, reconstructs a captured snapshot, and reports capture/staleness. It implements windows/snapshot/surface/find/history only. `act` returns `source_unavailable`; no DB command queue is created.
 
@@ -149,10 +172,21 @@ When `--ui-access-db` is explicitly chosen, the adapter opens the existing `UiAc
 `wm_access_cli.spl` calls the WM owner for each inventory operation, converts
 private `WindowInfo` values to a `UiAccessSurface` plus root `UiAccessNode`, then
 uses common projection/query/rendering. Actions inventory once before dispatch
-and once for post-action observation. Text/path/coordinate inputs are bounded,
-each owner subprocess is capped at two seconds, and the adapter stops later
-phases when the 20-second request deadline expires. Correlation-store failure
-is an action failure, not best-effort success. No host type crosses into common UI.
+and once for post-action observation. Text input is bounded,
+each owner subprocess is capped at two seconds and shares the request's remaining
+budget, and the adapter stops at the 20-second deadline. Correlation-store failure
+is an action failure, not best-effort success. Each list record exposes a
+deterministic generation token derived from available native identity metadata;
+`wm-text-act` requires that token and rejects a mismatch before dispatch. No host
+type crosses into common UI. The owner reports focused state from one bounded
+platform inventory operation. Host roots advertise only target-scoped `focus`
+and `type_text`; the owner binds literal text to the selected native window in
+one bounded platform operation and fails if that exact target cannot receive
+input. Linux geometry is retained and the focused window becomes the active
+surface; no window is marked active when the owner reports no focus. macOS
+lists only windows with `AXWindowNumber`, combines it with the process PID, and
+requires one matching window plus the observed title again at dispatch.
+Desktop-global click and screenshot helpers are not exposed as target actions.
 
 ## Identity and ordering
 
@@ -160,11 +194,18 @@ is an action failure, not best-effort success. No host type crosses into common 
 - T32 identity combines session plus catalog/live-window disambiguator; titles remain labels.
 - WM identity uses the current native target identifier; title is never the key where a native handle exists.
 - A single-source list is ordered by `surface_id`.
-- UI may return `stale_target`; WM v1 has revision `0` and re-resolves to typed not-found/state/action errors.
+- UI compares the observed snapshot revision. WM keeps revision `0` but compares
+  the listed per-window generation token before using the native target ID.
 
 ## Rendering and exits
 
 Human and JSON output derive from one `AccessResult`. Human missing values render `-`; JSON uses `null`. JSON stdout is one UTF-8 envelope, never log text. Usage/schema failure exits 2, runtime failure exits 1, and success exits 0. Diagnostics use structured logging/stderr; no production `print` is added outside the intentional CLI output owner.
+
+The unified CLI links the UI, Play/WM, and T32 entry functions into the
+pure-Simple `simple` artifact and calls them directly. These production routes
+do not interpret raw `.spl` entrypoints or launch a seed binary. The stage-4
+entry-closure source roots include `examples/10_tooling`, which owns the CMM
+parser transitively required by the T32 dialog commands.
 
 ## Safety and history
 
@@ -180,10 +221,20 @@ The Pure Simple checker `scripts/check/check-ui-cli-access.spl` owns determinist
 
 After the primary SSpec run, `scripts/check/check-ui-cli-final-review.shs --write-manifest` hashes its transcript, T32 GUI font/status/window-tree/screenshot proof, and the other canonical evidence. The highest-capability reviewer records that manifest digest and the full reviewed revision in the receipt. A separate final-review SSpec invokes `--check`, which rejects dirty, stale, altered, or incomplete evidence before invoking the final Pure Simple scenario. This preserves one execution per acceptance scenario.
 
-`scripts/check/check-ui-cli-live-transport.shs` separately launches
-`test/fixtures/ui_cli_access/live_server.spl`, drives windows/find/act/history
-through a second CLI process, stops the service, and verifies read-only database
-fallback plus fail-closed database action.
+`scripts/check/check-ui-cli-live-transport.shs` launches deployed `simple ui
+gui`, drives windows/find/act/history through a second CLI process, stops the
+service, and verifies read-only database fallback plus fail-closed database
+action. It then launches deployed `simple ui tui_web` and drives the same common
+windows/snapshot/surface/find/act/history protocol, retaining HTML, screenshot,
+and `protocol/tui-web.json` evidence. The wrapper hashes and validates the
+installed `simple_ui_backend` sibling, accepts only a recognized Pure-Simple
+self-hosted runtime, and rejects every `src/compiler_rust` seed path.
+
+Static review may accept implementation and evidence contracts, but it cannot
+promote the feature to done. Completion requires one fresh live/runtime run and
+live TRACE32 GUI evidence. If the self-hosted runtime retry cap is exhausted,
+record the lane as blocked and stop; never substitute the Rust seed or reuse a
+stale PASS artifact.
 
 ## Performance plan
 

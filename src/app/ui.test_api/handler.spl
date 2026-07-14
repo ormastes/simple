@@ -6,7 +6,7 @@
 
 use common.ui.widget.{UIState, UIEvent, WidgetNode, get_widget_record}
 use nogc_sync_mut.ui.session.{UISession}
-use common.ui.access.{UiAccessSnapshot, UiAccessNode, UiAccessSurface, ui_access_snapshot_from_state, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_surface_id_from_canonical, ui_access_widget_id_from_canonical, ui_access_find_node, ui_access_find_nodes, ui_access_node_value, ui_access_resolve_action_name, ui_access_snapshot_to_text, ui_access_supports_value, access_validate_snapshot_action}
+use common.ui.access.{UiAccessSnapshot, UiAccessNode, UiAccessSurface, ui_access_snapshot_from_state, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_surface_id_from_canonical, ui_access_widget_id_from_canonical, ui_access_find_node, ui_access_find_nodes_filtered, ui_access_node_value, ui_access_resolve_action_name, ui_access_snapshot_to_text, ui_access_supports_value, access_validate_snapshot_action}
 use common.ui.access_source.{ui_access_snapshot_envelope_to_json}
 use common.ui.access_adapter.{ui_access_default_adapter_registry}
 use common.ui.access_vision.{ui_access_vision_capture_to_json}
@@ -246,6 +246,7 @@ fn _handle_ui_act(body: text, inject_event: fn(UIEvent), session: UISession?) ->
     val canonical_id = extract_json_field(body, "canonical_id")
     val action = extract_json_field(body, "action")
     var request_id = extract_json_field(body, "request_id")
+    val expected_revision_text = extract_json_field(body, "expected_revision")
     val widget_id = ui_access_widget_id_from_canonical(canonical_id)
     if action == "":
         return (400, "application/json", "{\"error\":\"missing_field\",\"message\":\"Missing required field: action\"}")
@@ -261,10 +262,18 @@ fn _handle_ui_act(body: text, inject_event: fn(UIEvent), session: UISession?) ->
     if session != nil and not session.has_surface(resolved_surface_id):
         return (404, "application/json", "{\"error\":\"element_not_found\",\"message\":\"Surface not found: {resolved_surface_id}\"}")
     val action_name = if session != nil:
+        val current_snapshot = session.access_snapshot()
         if request_id == "":
-            request_id = "ui-act-" + (session.access_snapshot().snapshot_revision + 1).to_text()
-        session.record_access_correlation(resolved_surface_id, widget_id, request_id, "request", extract_json_field(body, "action"))
-        match access_validate_snapshot_action(session.access_snapshot(), canonical_id, action):
+            request_id = "ui-act-" + (current_snapshot.snapshot_revision + 1).to_text()
+        session.record_access_correlation(resolved_surface_id, widget_id, request_id, "request", action)
+        val expected_revision = expected_revision_text.to_int()
+        if expected_revision_text != "" and (expected_revision == nil or expected_revision < 0):
+            session.record_access_correlation(resolved_surface_id, widget_id, request_id, "result", "invalid_argument")
+            return (400, "application/json", "{\"error\":\"invalid_field\",\"message\":\"expected_revision must be a non-negative integer\",\"request_id\":\"{escape_json(request_id)}\"}")
+        if expected_revision != nil and expected_revision != current_snapshot.snapshot_revision:
+            session.record_access_correlation(resolved_surface_id, widget_id, request_id, "result", "stale_target")
+            return (409, "application/json", "{\"error\":\"stale_target\",\"message\":\"UI snapshot revision changed; inspect the target again\",\"expected_revision\":{expected_revision_text},\"actual_revision\":{current_snapshot.snapshot_revision},\"request_id\":\"{escape_json(request_id)}\"}")
+        match access_validate_snapshot_action(current_snapshot, canonical_id, action):
             Ok(_):
                 extract_json_field(body, "action")
             Err(error):
@@ -453,7 +462,7 @@ fn _handle_ui_observe(surface_id: text, canonical_id: text, kind: text, text_que
         return (200, "application/json", ui_access_snapshot_to_json(filtered))
     if kind != "" or text_query != "" or focused_only != "":
         val focused = _is_truthy(focused_only)
-        val matches = _ui_access_find_nodes(snapshot, surface_id, kind, text_query, focused, 50)
+        val matches = ui_access_find_nodes_filtered(snapshot, surface_id, kind, text_query, focused, 50)
         val filtered = UiAccessSnapshot(
             protocol_version: snapshot.protocol_version,
             mode: snapshot.mode,
@@ -832,26 +841,6 @@ fn _find_surface(snapshot: UiAccessSnapshot, surface_id: text) -> UiAccessSurfac
             return surface
     return nil
 
-fn _ui_access_find_nodes(snapshot: UiAccessSnapshot, surface_id: text, kind: text, text_query: text, focused_only: bool, limit: i32) -> [UiAccessNode]:
-    val found = ui_access_find_nodes(snapshot, surface_id, kind, text_query, limit)
-    if not focused_only:
-        return found
-    var focused_count = 0
-    for node in found:
-        if node.focused:
-            focused_count = focused_count + 1
-    if focused_count == 0:
-        return []
-    var filtered: [UiAccessNode] = [found[0]; focused_count]
-    var write_idx = 0
-    for node in found:
-        if node.focused:
-            filtered[write_idx] = node
-            write_idx = write_idx + 1
-            if write_idx >= focused_count:
-                return filtered
-    filtered
-
 fn _ui_access_nodes_snapshot(snapshot: UiAccessSnapshot, nodes: [UiAccessNode]) -> UiAccessSnapshot:
     UiAccessSnapshot(
         protocol_version: snapshot.protocol_version,
@@ -870,7 +859,7 @@ fn _ui_access_query_response_json(snapshot: UiAccessSnapshot, surface_id: text, 
         if node != nil:
             matches = [node]
     else:
-        matches = _ui_access_find_nodes(snapshot, surface_id, kind, text_query, focused_only, limit)
+        matches = ui_access_find_nodes_filtered(snapshot, surface_id, kind, text_query, focused_only, limit)
     val filtered = _ui_access_nodes_snapshot(snapshot, matches)
     "{\"surface_id\":\"{escape_json(surface_id)}\",\"canonical_id\":\"{escape_json(canonical_id)}\",\"kind\":\"{escape_json(kind)}\",\"text\":\"{escape_json(text_query)}\",\"focused_only\":{_json_bool(focused_only)},\"match_count\":{matches.len()},\"snapshot\":{ui_access_snapshot_to_json(filtered)}}"
 
@@ -889,7 +878,7 @@ fn _ui_access_find_for_ensure(snapshot: UiAccessSnapshot, surface_id: text, cano
         if focused_only and not node.focused:
             return []
         return [node]
-    _ui_access_find_nodes(snapshot, surface_id, kind, text_query, focused_only, limit)
+    ui_access_find_nodes_filtered(snapshot, surface_id, kind, text_query, focused_only, limit)
 
 fn _ui_access_expectation_satisfied(matches: [UiAccessNode], expectation: text, expected_value: text) -> bool:
     val count = matches.len()

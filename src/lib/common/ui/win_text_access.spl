@@ -12,6 +12,7 @@ use common.ui.access_types.{
     ui_access_canonical_id
 }
 use common.ui.access_query.{ui_access_find_nodes, ui_access_find_node}
+use common.hash.djb2.{djb2_hash_text}
 
 val WIN_TEXT_SOURCE_TRACE32 = "trace32"
 val WIN_TEXT_SOURCE_SIMPLE_UI = "simple_ui"
@@ -121,12 +122,13 @@ pub fn win_text_simple_ui_snapshot(snapshot: UiAccessSnapshot, captured_at_ms: i
     )
     WinTextSnapshot(access: snapshot, sources: [source])
 
-pub fn win_text_host_wm_single_window_snapshot(window_id: text, target_id: text, title: text, url: text, width: i64, height: i64, focused: bool, captured_at_ms: i64, max_age_ms: i64, now_ms: i64) -> WinTextSnapshot:
+pub fn win_text_host_wm_single_window_snapshot(window_id: text, target_id: text, title: text, url: text, x: i64, y: i64, width: i64, height: i64, focused: bool, captured_at_ms: i64, max_age_ms: i64, now_ms: i64) -> WinTextSnapshot:
+    val generation = djb2_hash_text(window_id + "\n" + target_id + "\n" + title + "\n" + url + "\n" + x.to_text() + "," + y.to_text() + " " + width.to_text() + "x" + height.to_text()).to_text()
     val source = win_text_source(
         source_id: "host_wm",
         source_kind: "top_level_wm",
         confidence: "medium",
-        capabilities: ["list", "focus", "type_text", "click_xy", "screenshot"],
+        capabilities: ["list", "focus", "type_text"],
         captured_at_ms: captured_at_ms,
         max_age_ms: max_age_ms,
         now_ms: now_ms
@@ -156,16 +158,19 @@ pub fn win_text_host_wm_single_window_snapshot(window_id: text, target_id: text,
             UiAccessProp(key: "source", value: "host_wm"),
             UiAccessProp(key: "surface_kind", value: "host_window"),
             UiAccessProp(key: "target_id", value: target_id),
+            UiAccessProp(key: "generation", value: generation),
             UiAccessProp(key: "url", value: url),
+            UiAccessProp(key: "x", value: "{x}"),
+            UiAccessProp(key: "y", value: "{y}"),
             UiAccessProp(key: "width", value: "{width}"),
             UiAccessProp(key: "height", value: "{height}"),
             UiAccessProp(key: "captured_at", value: captured_at_ms.to_text()),
             UiAccessProp(key: "stale", value: if source.stale: "true" else: "false")
         ],
         child_ids: [],
-        action_names: ["focus", "type_text", "click_xy", "screenshot"]
+        action_names: ["focus", "type_text"]
     ))
-    val active_surface = if surfaces.len() > 0: surfaces[0].surface_id else: ""
+    val active_surface = if focused: surface_id else: ""
     win_text_snapshot_from_parts(mode: "host_wm", active_surface: active_surface, surfaces: surfaces, nodes: nodes, sources: [source])
 
 pub fn win_text_snapshot_from_parts(mode: text, active_surface: text, surfaces: [UiAccessSurface], nodes: [UiAccessNode], sources: [WinTextSource]) -> WinTextSnapshot:
@@ -250,7 +255,10 @@ pub fn win_text_merge_snapshots(mode: text, snapshots: [WinTextSnapshot]) -> Win
             nodes = nodes.push(node)
         for source in snapshot.sources:
             sources = sources.push(source)
-    val active_surface = if surfaces.len() > 0: surfaces[0].surface_id else: ""
+    var active_surface = ""
+    for surface in surfaces:
+        if active_surface == "" and surface.active:
+            active_surface = surface.surface_id
     win_text_snapshot_from_parts(mode: mode, active_surface: active_surface, surfaces: surfaces, nodes: nodes, sources: sources)
 
 pub struct GttiSurface:

@@ -12,6 +12,11 @@ The repository does not ship bundled TRACE32 GUI compatibility shared
 libraries; the GUI path relies on the locally installed vendor runtime under
 `/opt/t32` plus host X11 access.
 
+CLI actions are fail-closed: use `simple t32 action do <key> [arg] --confirm`.
+The optional argument fills the named placeholder advertised by
+`catalogs/actions.sdn`; missing or unused arguments are rejected before TRACE32
+execution.
+
 The container image registers `/opt/t32/fonts` with Fontconfig and enables the
 distro's forced-bitmap rule because TRACE32 requests its vendor PCF faces
 through Xft. After changing the vendor font directory or Dockerfile, rebuild

@@ -112,11 +112,20 @@ fn _cli_eprint(msg: text):
     eprint(msg)
 
 pub fn _cli_resolve_argv0(cwd_path: text, argv0: text) -> text:
-    if argv0.starts_with("/"):
+    val drive_absolute = argv0.len() >= 3 and (argv0.substring(1, 3) == ":/" or argv0.substring(1, 3) == ":\\")
+    val unc_absolute = argv0.starts_with("//") or argv0.starts_with("\\\\")
+    if argv0.starts_with("/") or drive_absolute or unc_absolute:
         return argv0
-    if (argv0.last_index_of("/") ?? -1) >= 0 and cwd_path.len() > 0:
+    if ((argv0.last_index_of("/") ?? -1) >= 0 or (argv0.last_index_of("\\") ?? -1) >= 0) and cwd_path.len() > 0:
         return cwd_path + "/" + argv0
     ""
+
+fn _cli_find_on_path(argv0: text) -> text:
+    val command = if _cli_is_windows_platform(): "where" else: "which"
+    val found = rt_process_run(command, [argv0])
+    if found.2 != 0:
+        return ""
+    found.0.split("\n")[0].trim()
 
 fn _cli_resolve_symlink(path: text) -> text:
     # Resolve symlinks (e.g. the bin/simple symlink) so seed-sibling lookups
@@ -130,12 +139,16 @@ fn _cli_resolve_symlink(path: text) -> text:
     if resolved.len() > 0: resolved else: path
 
 fn _cli_current_exe_path() -> text:
-    if _cli_is_windows_platform():
-        return ""
     val args = rt_cli_get_args() ?? []
     if args.len() > 0:
-        return _cli_resolve_symlink(_cli_resolve_argv0(cwd(), args[0]))
+        var resolved = _cli_resolve_argv0(cwd(), args[0])
+        if resolved == "":
+            resolved = _cli_find_on_path(args[0])
+        return _cli_resolve_symlink(resolved)
     ""
+
+pub fn cli_current_exe_path() -> text:
+    _cli_current_exe_path()
 
 fn _cli_seed_sibling_path(exe_path: text) -> text:
     val slash = exe_path.last_index_of("/") ?? -1

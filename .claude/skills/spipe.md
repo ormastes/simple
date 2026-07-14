@@ -26,6 +26,16 @@ mirrored through SPipe.
 > bug/feature request — don't switch the runner back to the seed. See
 > `.claude/rules/bootstrap.md` § "Default tooling runs on pure-Simple".
 
+For installed UI/GUI/TUI CLI evidence, drive the production command (for
+example `simple ui gui` or `simple ui tui_web`) and bind the receipt to the
+resolved compiled sibling artifact path and digest. Running a raw
+`backend_entry_*.spl` file or checking source strings proves only routing
+intent, not the deployed product. Static review may accept code and evidence
+contracts, but completion still requires the fresh pure-Simple live gate and
+any required external GUI evidence. When the self-hosted retry cap is reached,
+record the lane as blocked and stop; never substitute the Rust seed or reuse a
+stale PASS artifact.
+
 > **Interpreter-mode verification caveat.** The file summary can print
 > `Passed: N / Failed: 0` (and `PASS`, exit 0) even when `it` blocks failed —
 > per-block output shows the red `✗` marks the aggregate drops. When verifying

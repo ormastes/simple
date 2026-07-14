@@ -6,13 +6,14 @@
 use app.t32_cli.error_codes.{T4010, T4013, T4070, T4071, T4082, T4200, t32_err_not_found, t32_err_no_session_mcp, t32_err_missing_param, t32_err_backend_not_found, t32_err_cmd_failed, t32_err_connection_failed}
 use app.mcp_t32.session_state.{McpT32Session, McpT32HistoryItem, MCP_T32_SESSIONS, MCP_T32_CURRENT_SESSION, MCP_T32_CURRENT_CORE, MCP_T32_HISTORY, MCP_T32_AREA_READY, MCP_T32_AREA_NAME}
 use app.mcp_t32.ctypes_bridge.{t32_ctypes_load, t32_ctypes_available, t32_ctypes_init, t32_ctypes_eval, t32_ctypes_get_message, t32_ctypes_get_practice_state, t32_ctypes_run_remote, t32_ctypes_set_api_lib_path}
-use std.io_runtime.{read_file, env_get}
+use std.io_runtime.{read_file, env_get, thread_sleep}
+use app.io.mod.{process_run_timeout}
 use app.mcp_t32.json_helpers.{t32_LB, t32_RB, t32_SB_L, t32_SB_R, t32_js, t32_jp, t32_jo2, t32_extract_field, t32_make_tool_result, t32_make_tool_error}
 
 # --- Backend detection (t32rem primary, python t32-rcl fallback) ---
 
 var MCP_T32_BACKEND_TYPE = ""    # "ctypes" | "t32rem" | "python_rcl" | ""
-var MCP_T32_BACKEND_CMD = ""     # Cached command path/prefix
+var MCP_T32_BACKEND_CMD = ""     # Cached executable or bridge-script path
 var MCP_T32_LAST_STDERR = ""     # Last subprocess stderr (preserved for error reporting)
 var T32_DEFAULT_PORT: i64 = 20000
 var T32_DEFAULT_HOST = "localhost"
@@ -65,17 +66,17 @@ fn t32_find_python_rcl_bridge() -> text:
     # Check if python has lauterbach.trace32.rcl installed
     var py_stdout = ""
     var py_stderr = ""
-    var py_rc: i64 = 0
-    (py_stdout, py_stderr, py_rc) = rt_process_run("/bin/sh", ["-c", python_bin + " -c 'import lauterbach.trace32.rcl' 2>/dev/null"])
+    var py_rc: i32 = 0
+    (py_stdout, py_stderr, py_rc) = process_run_timeout(python_bin, ["-c", "import lauterbach.trace32.rcl"], 5000)
     if py_rc != 0:
         return ""
     # Check T32_PYTHON_BRIDGE_PATH module global (set from SDN config)
     if T32_PYTHON_BRIDGE_PATH != "" and rt_file_exists(T32_PYTHON_BRIDGE_PATH):
-        return "sh " + T32_PYTHON_BRIDGE_PATH
+        return T32_PYTHON_BRIDGE_PATH
     # Check T32_PYTHON_BRIDGE env var
     val bridge_env = rt_env_get("T32_PYTHON_BRIDGE") ?? ""
     if bridge_env != "" and rt_file_exists(bridge_env):
-        return "sh " + bridge_env
+        return bridge_env
     # Search common paths for bridge script
     val candidates = [
         "examples/10_tooling/trace32_tools/t32_mcp/t32_python_bridge.shs",
@@ -84,14 +85,14 @@ fn t32_find_python_rcl_bridge() -> text:
     ]
     for path in candidates:
         if rt_file_exists(path):
-            return "sh " + path
+            return path
     # Try PATH
     var which_stdout = ""
     var which_stderr = ""
-    var which_rc: i64 = 0
-    (which_stdout, which_stderr, which_rc) = rt_process_run("/bin/sh", ["-c", "which t32_python_bridge.shs 2>/dev/null"])
+    var which_rc: i32 = 0
+    (which_stdout, which_stderr, which_rc) = process_run_timeout("which", ["t32_python_bridge.shs"], 5000)
     if which_rc == 0 and which_stdout.trim() != "":
-        return "sh " + which_stdout.trim()
+        return which_stdout.trim()
     ""
 
 fn t32_find_backend() -> text:
@@ -133,8 +134,8 @@ fn t32_find_backend() -> text:
     # Try PATH
     var stdout = ""
     var stderr = ""
-    var rc: i64 = 0
-    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", "which t32rem 2>/dev/null"])
+    var rc: i32 = 0
+    (stdout, stderr, rc) = process_run_timeout("which", ["t32rem"], 5000)
     if rc == 0 and stdout.trim() != "":
         MCP_T32_BACKEND_TYPE = "t32rem"
         MCP_T32_BACKEND_CMD = stdout.trim()
@@ -363,7 +364,18 @@ fn t32_append_status_bar_json(r: text, session: McpT32Session) -> text:
         result = result + "," + t32_jp("target_state", t32_js(target_state))
     t32_append_errors_json(result, session)
 
-fn t32_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
+fn t32_run_remote_process(program: text, args: [text], timeout_ms: i64) -> (text, i64):
+    var stdout = ""
+    var stderr = ""
+    var rc: i32 = 0
+    (stdout, stderr, rc) = process_run_timeout(program, args, timeout_ms)
+    MCP_T32_LAST_STDERR = stderr.trim()
+    if rc != 0 and stderr != "":
+        val backend_label = MCP_T32_BACKEND_TYPE
+        return (backend_label + " error (exit " + str(rc) + "): " + stderr.trim(), rc.to_i64())
+    (stdout, rc.to_i64())
+
+fn t32_run_remote_with_timeout(session: McpT32Session, cmd: text, timeout_ms: i64) -> (text, i64):
     val backend = t32_find_backend()
     if backend == "":
         return (t32_err_backend_not_found(), -1)
@@ -376,20 +388,16 @@ fn t32_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
         MCP_T32_LAST_STDERR = ""
         return t32_ctypes_run_remote(session, cmd)
     # --- subprocess dispatch (t32rem / python_rcl) ---
-    val intercom = session.intercom_name
-    var full_cmd = backend + " " + session.host + " port=" + str(session.port)
-    if intercom != "":
-        full_cmd = full_cmd + " INTERCOM=" + intercom
-    full_cmd = full_cmd + " " + cmd
-    var stdout = ""
-    var stderr = ""
-    var rc: i64 = 0
-    (stdout, stderr, rc) = rt_process_run("/bin/sh", ["-c", full_cmd + " < /dev/null"])
-    MCP_T32_LAST_STDERR = stderr.trim()
-    if rc != 0 and stderr != "":
-        val backend_label = MCP_T32_BACKEND_TYPE
-        return (backend_label + " error (exit " + str(rc) + "): " + stderr.trim(), rc)
-    (stdout, rc)
+    var args = [session.host, "port=" + str(session.port)]
+    if session.intercom_name != "":
+        args.push("INTERCOM=" + session.intercom_name)
+    args.push(cmd)
+    if MCP_T32_BACKEND_TYPE == "python_rcl":
+        return t32_run_remote_process("sh", [backend] + args, timeout_ms)
+    t32_run_remote_process(backend, args, timeout_ms)
+
+fn t32_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
+    t32_run_remote_with_timeout(session, cmd, 30000)
 
 fn t32_find_current_session() -> Option<McpT32Session>:
     if MCP_T32_CURRENT_SESSION == "":
@@ -412,19 +420,23 @@ fn t32_mcp_session_ids() -> [text]:
     ids
 
 fn t32_add_history(command: text, result: text, session_id: text, core_id: text):
+    t32_add_history_with_request(command, result, session_id, core_id, "")
+
+fn t32_add_history_with_request(command: text, result: text, session_id: text, core_id: text, request_id: text):
     val entry = McpT32HistoryItem(
         command: command,
         result: result,
         session_id: session_id,
-        core_id: core_id
+        core_id: core_id,
+        request_id: request_id
     )
     MCP_T32_HISTORY = MCP_T32_HISTORY + [entry]
-    # Cap history to 500 entries
+    # Shared UI-access history is recent operational evidence, not a durable log.
     var count: i64 = 0
     for _h in MCP_T32_HISTORY:
         count = count + 1
-    if count > 500:
-        MCP_T32_HISTORY = MCP_T32_HISTORY[250..]
+    if count > 64:
+        MCP_T32_HISTORY = MCP_T32_HISTORY[count - 64..]
 
 var MCP_T32_NEXT_SESSION_ID: i64 = 1
 
@@ -616,11 +628,7 @@ fn handle_t32_session_open(id: text, body: text) -> text:
         attempt = attempt + 1
         # Sleep with exponential backoff before next attempt (skip sleep after last attempt)
         if attempt < max_attempts:
-            val delay_secs = backoff_ms[attempt - 1] / 1000
-            var sleep_stdout = ""
-            var sleep_stderr = ""
-            var sleep_rc: i64 = 0
-            (sleep_stdout, sleep_stderr, sleep_rc) = rt_process_run("/bin/sh", ["-c", "sleep " + str(delay_secs)])
+            thread_sleep(backoff_ms[attempt - 1])
     val backend_attempts = attempt + 1
     if not connected:
         # All attempts failed — return error without creating a duplicate session
@@ -913,10 +921,7 @@ fn t32_poll_practice_state(session: McpT32Session, timeout_ms: i64) -> text:
         if state_trimmed == "0" or state_trimmed == "0.":
             return "idle"
         # Sleep 500ms between polls
-        var sleep_stdout = ""
-        var sleep_stderr = ""
-        var sleep_rc: i64 = 0
-        (sleep_stdout, sleep_stderr, sleep_rc) = rt_process_run("/bin/sh", ["-c", "sleep 0.5"])
+        thread_sleep(500)
         polls = polls + 1
     "timeout"
 
@@ -984,6 +989,6 @@ export handle_t32_sessions_list, handle_t32_session_open, handle_t32_session_res
 export handle_t32_core_list, handle_t32_core_select, handle_t32_cmd_run, handle_t32_cmm_run, handle_t32_eval
 export handle_t32_error_check
 export t32_find_backend, t32_get_backend_type, t32_query_gui_status_json, t32_query_errors
-export t32_run_remote, t32_find_current_session, t32_add_history
+export t32_run_remote, t32_run_remote_with_timeout, t32_run_remote_process, t32_find_current_session, t32_add_history, t32_add_history_with_request
 export t32_mcp_session_ids, t32_append_status_bar_json, t32_block_contains_word
 export t32_check_blocking, t32_has_blocking, t32_scan_cmm_file, t32_poll_practice_state

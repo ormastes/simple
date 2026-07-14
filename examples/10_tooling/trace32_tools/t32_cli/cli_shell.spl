@@ -5,9 +5,10 @@
 extern fn rt_stdin_read_line() -> text
 
 use app.t32_cli.types.{T32BridgeResult, T32HistoryEntry}
-use app.t32_cli.bridge.{bridge_sessions_list, bridge_session_resume, bridge_session_info, bridge_core_list, bridge_core_select, bridge_cmd_run, bridge_cmm_run, bridge_eval, bridge_window_list, bridge_window_open, bridge_window_capture, bridge_window_describe, bridge_screenshot, bridge_action_invoke, bridge_action_list, bridge_field_get, bridge_field_set, bridge_history_tail, bridge_resources_list, bridge_resource_read, bridge_setup_headless, bridge_area_read, bridge_cmm_commands, bridge_cmm_validate, bridge_status_snapshot, bridge_error_check, bridge_job_list, bridge_job_get, bridge_job_cancel, bridge_job_result, bridge_dialog_parse, bridge_dialog_get, bridge_dialog_set, bridge_dialog_click}
+use app.t32_cli.bridge.{bridge_sessions_list, bridge_session_open, bridge_session_resume, bridge_session_info, bridge_core_list, bridge_core_select, bridge_cmd_run, bridge_cmm_run, bridge_eval, bridge_window_list, bridge_window_open, bridge_window_capture, bridge_window_describe, bridge_screenshot, bridge_action_invoke_with_request, t32_action_request_id, bridge_action_list, bridge_field_get, bridge_field_set, bridge_history_tail, bridge_resources_list, bridge_resource_read, bridge_setup_headless, bridge_area_read, bridge_cmm_commands, bridge_cmm_validate, bridge_status_snapshot, bridge_error_check, bridge_job_list, bridge_job_get, bridge_job_cancel, bridge_job_result, bridge_dialog_parse, bridge_dialog_get, bridge_dialog_set, bridge_dialog_click}
 use app.t32_cli.render.{render_result, render_error}
-use app.t32_cli.session.{CLI_CURRENT_SESSION, CLI_CURRENT_CORE}
+use app.t32_cli.bridge_access.{T32_ACTION_MAX_ARGS, t32_action_argument_is_safe}
+use app.mcp_t32.session_state.{MCP_T32_CURRENT_SESSION, MCP_T32_CURRENT_CORE}
 use app.t32_cli.error_codes.{t32_err_unknown_shell_cmd}
 
 # Shell history
@@ -39,18 +40,18 @@ fn start_t32_shell():
             print result
 
         # Record in history
-        val entry = T32HistoryEntry.create(line, result, CLI_CURRENT_SESSION, CLI_CURRENT_CORE)
+        val entry = T32HistoryEntry.create(line, result, MCP_T32_CURRENT_SESSION, MCP_T32_CURRENT_CORE)
         SHELL_HISTORY.push(entry)
 
 # Build the shell prompt showing current session and core
 fn shell_prompt() -> text:
     var session_part = "(none)"
-    if CLI_CURRENT_SESSION != "":
-        session_part = CLI_CURRENT_SESSION
+    if MCP_T32_CURRENT_SESSION != "":
+        session_part = MCP_T32_CURRENT_SESSION
 
     var core_part = ""
-    if CLI_CURRENT_CORE != "":
-        core_part = ":{CLI_CURRENT_CORE}"
+    if MCP_T32_CURRENT_CORE != "":
+        core_part = ":{MCP_T32_CURRENT_CORE}"
 
     "{session_part}{core_part}> "
 
@@ -77,6 +78,7 @@ fn shell_dispatch(line: text) -> text:
 
     match cmd:
         "help": shell_help()
+        "session": shell_session(args)
         "sessions": bridge_to_text(bridge_sessions_list())
         "use": shell_use(args)
         "info": shell_info(args)
@@ -110,6 +112,8 @@ fn shell_dispatch(line: text) -> text:
 fn shell_help() -> text:
     var out = "Available commands:\n"
     out = out + "\n  Session:\n"
+    out = out + "  session open [host] [port] [name] [arch]  Open and select a session\n"
+    out = out + "  session resume <id>  Resume an in-process session\n"
     out = out + "  sessions              List all sessions\n"
     out = out + "  use <id>              Switch active session\n"
     out = out + "  info <id>             Show session details\n"
@@ -127,7 +131,7 @@ fn shell_help() -> text:
     out = out + "  screenshot <win> [path]  Save window screenshot\n"
     out = out + "\n  Field/Action:\n"
     out = out + "  set <field> <value>   Set a field value\n"
-    out = out + "  do <action> [args]    Execute an action\n"
+    out = out + "  do <action> [args] --confirm  Execute an action\n"
     out = out + "\n  Observability:\n"
     out = out + "  status                Show CPU run state\n"
     out = out + "  history [count]       Show command history\n"
@@ -147,6 +151,24 @@ fn shell_help() -> text:
     out
 
 # --- Session/Core ---
+
+fn shell_session(args: [text]) -> text:
+    if args.len() == 0:
+        return "Usage: session <open|resume> [args]"
+    if args[0] == "resume":
+        if args.len() != 2: return "Usage: session resume <session_id>"
+        return bridge_to_text(bridge_session_resume(args[1]))
+    if args[0] != "open" or args.len() > 5:
+        return "Usage: session open [host] [port] [name] [arch]"
+    val host = if args.len() > 1: args[1] else: "localhost"
+    if not t32_action_argument_is_safe(host): return "Error: invalid session host"
+    if args.len() > 3 and not t32_action_argument_is_safe(args[3]): return "Error: invalid session name"
+    if args.len() > 4 and not t32_action_argument_is_safe(args[4]): return "Error: invalid session architecture"
+    val port = if args.len() > 2: shell_parse_int(args[2]) else: 20000
+    if port <= 0: return "Error: invalid session port"
+    val name = if args.len() > 3: args[3] else: ""
+    val arch = if args.len() > 4: args[4] else: "unknown"
+    bridge_to_text(bridge_session_open(host, port, name, arch))
 
 fn shell_use(args: [text]) -> text:
     if args.len() == 0:
@@ -198,9 +220,22 @@ fn shell_set(args: [text]) -> text:
 
 fn shell_do(args: [text]) -> text:
     if args.len() == 0:
-        return "Usage: do <action_key> [args]"
-    val extra = if args.len() > 1: args[1] else: ""
-    bridge_to_text(bridge_action_invoke(args[0], extra))
+        return "Usage: do <action_key> [args] --confirm"
+    var confirmed = false
+    var values: [text] = []
+    for arg in args:
+        if arg == "--confirm":
+            confirmed = true
+        else:
+            values.push(arg)
+    if not confirmed:
+        return "Error: explicit confirmation is required"
+    if values.len() == 0:
+        return "Usage: do <action_key> [args] --confirm"
+    if values.len().to_i64() > T32_ACTION_MAX_ARGS + 1:
+        return "Error: action accepts at most " + str(T32_ACTION_MAX_ARGS) + " argument"
+    val extra = if values.len() > 1: values[1] else: ""
+    bridge_to_text(bridge_action_invoke_with_request(values[0], extra, t32_action_request_id(), 5000, true))
 
 # --- Execution ---
 

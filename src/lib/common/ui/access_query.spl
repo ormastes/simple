@@ -10,6 +10,9 @@ use common.ui.access_types.{
 }
 
 fn ui_access_find_nodes(snapshot: UiAccessSnapshot, surface_id: text, kind: text, text_query: text, limit: i32) -> [UiAccessNode]:
+    ui_access_find_nodes_filtered(snapshot, surface_id, kind, text_query, false, limit)
+
+fn ui_access_find_nodes_filtered(snapshot: UiAccessSnapshot, surface_id: text, kind: text, text_query: text, focused_only: bool, limit: i32) -> [UiAccessNode]:
     val node_count = snapshot.nodes.len()
     if node_count == 0:
         return []
@@ -17,7 +20,7 @@ fn ui_access_find_nodes(snapshot: UiAccessSnapshot, surface_id: text, kind: text
     var read_idx = 0
     while read_idx < node_count:
         val node = snapshot.nodes[read_idx]
-        if _access_node_matches_query(node, surface_id, kind, text_query):
+        if _access_node_matches_query(node, surface_id, kind, text_query, focused_only):
             match_count = match_count + 1
             if limit > 0 and match_count >= limit:
                 break
@@ -29,7 +32,7 @@ fn ui_access_find_nodes(snapshot: UiAccessSnapshot, surface_id: text, kind: text
     read_idx = 0
     while read_idx < node_count:
         val node = snapshot.nodes[read_idx]
-        if _access_node_matches_query(node, surface_id, kind, text_query):
+        if _access_node_matches_query(node, surface_id, kind, text_query, focused_only):
             out[write_idx] = node
             write_idx = write_idx + 1
             if write_idx >= match_count:
@@ -37,12 +40,14 @@ fn ui_access_find_nodes(snapshot: UiAccessSnapshot, surface_id: text, kind: text
         read_idx = read_idx + 1
     out
 
-fn _access_node_matches_query(node: UiAccessNode, surface_id: text, kind: text, text_query: text) -> bool:
+fn _access_node_matches_query(node: UiAccessNode, surface_id: text, kind: text, text_query: text, focused_only: bool) -> bool:
     if surface_id != "" and node.surface_id != surface_id:
         return false
     if kind != "" and node.kind != kind:
         return false
     if text_query != "" and not node.text_value.contains(text_query) and not node.widget_id.contains(text_query) and not node.canonical_id.contains(text_query):
+        return false
+    if focused_only and not node.focused:
         return false
     true
 
@@ -188,10 +193,17 @@ fn _access_node_to_json(node: UiAccessNode) -> text:
     parts.join("")
 
 fn _access_props_to_json(props: [UiAccessProp]) -> text:
-    var parts: [text] = [""; props.len()]
+    var parts: [text] = []
     var i = 0
     while i < props.len():
-        parts[i] = _access_json_pair(props[i].key, _access_json_str(props[i].value))
+        var duplicate = false
+        var prior = 0
+        while prior < i:
+            if props[prior].key == props[i].key:
+                duplicate = true
+            prior = prior + 1
+        if not duplicate:
+            parts = parts.push(_access_json_pair(props[i].key, _access_json_str(props[i].value)))
         i = i + 1
     "{" + parts.join(",") + "}"
 
