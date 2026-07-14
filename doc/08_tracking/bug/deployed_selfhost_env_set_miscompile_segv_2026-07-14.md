@@ -1,8 +1,10 @@
-# Deployed self-hosted `bin/simple` links a stale `rt_env_set` ABI
+# Tracked self-hosted release artifact links a stale `rt_env_set` ABI
 
-The deployed full pure-Simple CLI crashes before parsing `check` input and
-before `native-build` reaches user code. The defect is an artifact/runtime ABI
-mismatch, not a dropped Simple call argument.
+The tracked full pure-Simple CLI under `release/` crashes before parsing
+`check` input and before `native-build` reaches user code. The defect is an
+artifact/runtime ABI mismatch, not a dropped Simple call argument. It must not
+be confused with a current shared `bin/simple` deployment that identifies
+itself as the Rust bootstrap seed.
 
 ## Symptom
 
@@ -80,11 +82,23 @@ cache file, object, or candidate, and exited 124 at the outer timeout. Therefore
 the explicit entry-HIR repair remains statically approved but runtime-unproven;
 this attempt was not retried.
 
+## Later strict-stage result
+
+Later retained evidence in
+`.spipe/simpleos_filesystem_toolchain_servers/state.md` supersedes the early
+parser/runtime rebuild diagnosis: strict minimal Stage 2 and Stage 3 completed
+with 482 modules and zero compile failures (recorded hashes `35aa0cba...` and
+`1d1ac5ac...`). Those exact binaries are no longer retained, and no gated full
+Stage 4 CLI followed them. The current blocker is therefore production and
+retention of a full current-ABI CLI, not another `rt_env_set` caller or runtime
+shim.
+
 ## Required fix and gate
 
-Rebuild the bootstrap parser/runtime from current sources, make the full CLI
-entry closure and selected runtime bundle agree on their reachable SFFI surface,
-then build and deploy one full pure-Simple CLI. Before replacement, the
+Use a retained strict Stage 2 or Stage 3 pure-Simple compiler, make the full CLI
+entry closure and selected runtime bundle agree on their reachable SFFI
+surface, then build one full pure-Simple CLI. The bootstrap wrapper must refuse
+a Rust-seed fallback for this Stage 4/deploy lane. Before replacement, the
 candidate must pass:
 
 1. disassembly or an executable probe proving four-argument `rt_env_set`;

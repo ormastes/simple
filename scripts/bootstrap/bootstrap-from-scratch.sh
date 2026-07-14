@@ -253,6 +253,18 @@ run_timeout() {
   fi
 }
 
+run_timeout_kill() {
+  timeout_seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 1s "${timeout_seconds}s" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout -k 1s "${timeout_seconds}s" "$@"
+  else
+    "$@"
+  fi
+}
+
 absolute_path() {
   case "$1" in
     /*) printf '%s\n' "$1" ;;
@@ -376,6 +388,39 @@ run_logged() {
     echo "error: see log ${log_file}" >&2
     exit "${status}"
   fi
+}
+
+simple_binary_is_valid() {
+  candidate=$1
+  [ -x "${candidate}" ] || return 1
+  version="$(run_timeout_kill 5 "${candidate}" --version 2>&1)" || return 1
+  [ -n "${version}" ] || return 1
+  case "${version}" in
+    *"bootstrap seed only"*) return 1 ;;
+  esac
+  SIMPLE_LIB="${repo_root}/src" run_timeout_kill 10 "${candidate}" check \
+    scripts/check/cert/redeploy_gate/fixtures/p2_add.spl >/dev/null 2>&1
+}
+
+bootstrap_native_build_main() {
+  compiler=$1
+  output=$2
+  env RUST_LOG="${RUST_LOG:-error}" \
+    SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+    SIMPLE_BOOTSTRAP_STAGE4=1 \
+    LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_BINARY="$(absolute_path "${compiler}")" \
+    "${compiler}" native-build \
+    --backend "${stage4_backend}" \
+    --source src/compiler --source src/app --source src/lib \
+    --entry-closure \
+    --threads "${jobs}" \
+    --cache-dir "${native_cache_dir}" \
+    --mode "${bootstrap_mode}" \
+    --entry src/app/cli/main.spl \
+    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
+    -o "${output}"
 }
 
 # ===========================================================================
@@ -671,16 +716,11 @@ if [ "${full_cli}" -eq 0 ]; then
   exit 0
 fi
 
-# When stage 4 uses the Rust seed, --backend llvm-lib triggers the
-# interpreter dispatch path (native_build_should_use_simple returns true),
-# where rt_native_build is a stub that fails.  Use cranelift for the seed.
-# Compiled binaries (stage2/stage3) call rt_native_build from libsimple_native_all.a
-# and handle all backends correctly.
 if [ "${stage4_is_seed}" -eq 1 ]; then
-  stage4_backend="cranelift"
-else
-  stage4_backend="cranelift"
+  echo "error: full CLI build requires a verified pure-Simple stage2/stage3 compiler; refusing seed fallback" >&2
+  exit 2
 fi
+stage4_backend="cranelift"
 
 # ===========================================================================
 # Stage 4: Compile full CLI (main.spl) with verified bootstrap compiler
@@ -691,45 +731,8 @@ full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 prepare_native_cache stage4
 rm -f "${full_dir}/simple${exe_suffix}"
-if [ "${stage4_is_seed}" -eq 1 ]; then
-  # An explicit target routes the seed directly to its Rust bootstrap builder.
-  # Without it, native-build is treated as a pure-Simple tool and can spin in
-  # the interpreted worker before object discovery.
-  run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
-    SIMPLE_NO_DEPRECATED_WARNINGS=1 \
-    SIMPLE_BOOTSTRAP_STAGE4=1 \
-    LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
-    SIMPLE_NO_STUB_FALLBACK=1 \
-    SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
-    "${stage_for_build}" native-build \
-    --target "${PLATFORM}" \
-    --backend "${stage4_backend}" \
-    --source src/compiler --source src/app --source src/lib \
-    --entry-closure \
-    --threads "${jobs}" \
-    --cache-dir "${native_cache_dir}" \
-    --mode "${bootstrap_mode}" \
-    --entry src/app/cli/main.spl \
-    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
-    -o "${full_dir}/simple${exe_suffix}"
-else
-  run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
-    SIMPLE_NO_DEPRECATED_WARNINGS=1 \
-    SIMPLE_BOOTSTRAP_STAGE4=1 \
-    LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
-    SIMPLE_NO_STUB_FALLBACK=1 \
-    SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
-    "${stage_for_build}" native-build \
-    --backend "${stage4_backend}" \
-    --source src/compiler --source src/app --source src/lib \
-    --entry-closure \
-    --threads "${jobs}" \
-    --cache-dir "${native_cache_dir}" \
-    --mode "${bootstrap_mode}" \
-    --entry src/app/cli/main.spl \
-    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
-    -o "${full_dir}/simple${exe_suffix}"
-fi
+run_logged stage4-native-build bootstrap_native_build_main \
+  "${stage_for_build}" "${full_dir}/simple${exe_suffix}"
 
 full_bin="${full_dir}/simple${exe_suffix}"
 if [ ! -x "${full_bin}" ]; then
@@ -752,6 +755,14 @@ if ! run_timeout 60 "${full_bin}" check src/app/cli/bootstrap_main.spl >/dev/nul
   echo "error: stage4 binary failed source-check smoke (MCP/LSP would not start)" >&2
   exit 1
 fi
+
+if ! simple_binary_is_valid "${full_bin}"; then
+  echo "error: stage4 binary failed the current frontend candidate gate" >&2
+  exit 1
+fi
+
+run_logged stage4-redeploy-gate run_timeout_kill 180 sh \
+  scripts/check/cert/redeploy_gate/redeploy_gate.shs "${full_bin}"
 
 echo "Full CLI binary: ${full_bin}"
 
@@ -777,41 +788,22 @@ if [ "${build_mcp}" -eq 1 ]; then
     echo "  Stage 5${mcp_stage}: ${mcp_name}"
     prepare_native_cache "stage5${mcp_stage}"
     set +e
-    if [ "${stage4_is_seed}" -eq 1 ]; then
-      env RUST_LOG="${RUST_LOG:-error}" \
-        SIMPLE_NO_DEPRECATED_WARNINGS=1 \
-        LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
-        SIMPLE_STUB_MISSING_RT=1 \
-        SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
-        "${stage_for_build}" run src/app/cli/native_build_main.spl -- \
-        --backend "${stage4_backend}" \
-        --source src/compiler --source src/app --source src/lib \
-        --entry-closure \
-        --threads "${jobs}" \
-        --cache-dir "${native_cache_dir}" \
-        --mode "${bootstrap_mode}" \
-        --entry "${mcp_spl}" \
-        --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
-        -o "${full_dir}/${mcp_name}${exe_suffix}" \
-        >"${log_dir}/${mcp_log}.log" 2>&1
-    else
-      env RUST_LOG="${RUST_LOG:-error}" \
-        SIMPLE_NO_DEPRECATED_WARNINGS=1 \
-        LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
-        SIMPLE_STUB_MISSING_RT=1 \
-        SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
-        "${stage_for_build}" native-build \
-        --backend "${stage4_backend}" \
-        --source src/compiler --source src/app --source src/lib \
-        --entry-closure \
-        --threads "${jobs}" \
-        --cache-dir "${native_cache_dir}" \
-        --mode "${bootstrap_mode}" \
-        --entry "${mcp_spl}" \
-        --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
-        -o "${full_dir}/${mcp_name}${exe_suffix}" \
-        >"${log_dir}/${mcp_log}.log" 2>&1
-    fi
+    env RUST_LOG="${RUST_LOG:-error}" \
+      SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+      LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+      SIMPLE_STUB_MISSING_RT=1 \
+      SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
+      "${stage_for_build}" native-build \
+      --backend "${stage4_backend}" \
+      --source src/compiler --source src/app --source src/lib \
+      --entry-closure \
+      --threads "${jobs}" \
+      --cache-dir "${native_cache_dir}" \
+      --mode "${bootstrap_mode}" \
+      --entry "${mcp_spl}" \
+      --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
+      -o "${full_dir}/${mcp_name}${exe_suffix}" \
+      >"${log_dir}/${mcp_log}.log" 2>&1
     mcp_status=$?
     set -e
     echo "  ${mcp_log} log: ${log_dir}/${mcp_log}.log"
