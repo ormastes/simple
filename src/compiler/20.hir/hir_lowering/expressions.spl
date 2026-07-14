@@ -831,28 +831,73 @@ impl HirLowering:
                 HirPatternKind.Struct(hir_type, hir_fields)
 
             case Enum(enum_, variant, payload):
-                val symbol = self.symbols.lookup_or_invalid(enum_)
-                val hir_type = if symbol.is_valid():
-                    HirType(kind: HirTypeKind.Named(symbol, []), span: p.span)
+                # nestedmatch lane: bare positional struct-pattern
+                # reinterpretation. `case Point(x, y):` and a nested payload
+                # sub-pattern like `case Circle(Point(x, y)):` both parse
+                # IDENTICALLY to a bare (unqualified) enum-variant pattern --
+                # convert_flat_pattern (frontend, _FlatAstBridge/
+                # convert_nodes.spl) has no dedicated struct-positional-
+                # pattern grammar and none is invented here (brace `Point{x,
+                # y}` pattern syntax does not parse either -- matchpat lane
+                # finding). When the unqualified `variant` name is a
+                # REGISTERED STRUCT (struct_field_order_by_name is populated
+                # in the up-front declarations pass before any function body
+                # is lowered -- see try_register_local_struct_type's
+                # identical read of this same map in statements.spl),
+                # reinterpret this pattern as a genuine Struct pattern,
+                # reusing the SAME positional-field-order convention already
+                # established for struct CONSTRUCTION call sites (`Point(3,
+                # 4)`) -- not new grammar, just an existing convention
+                # applied symmetrically to pattern position. A bare pattern
+                # whose name matches neither a struct nor any registered enum
+                # variant still falls through unchanged to the plain Enum
+                # path below, which the MIR enum-match lowering already
+                # rejects with a genuine "unknown variant" compile error
+                # (verified empirically: build fails loudly, no binary --
+                # never silently wrong), so this branch is purely additive.
+                if enum_ == "" and self.struct_field_order_by_name.has(variant):
+                    val field_order = self.struct_field_order_by_name[variant]
+                    var sub_patterns: [Pattern] = []
+                    if val pl_s = payload:
+                        match pl_s:
+                            case Tuple(patterns_s):
+                                sub_patterns = patterns_s
+                            case Struct(_):
+                                ()
+                    val struct_symbol = self.symbols.lookup_or_invalid(variant)
+                    val struct_hir_type = if struct_symbol.is_valid():
+                        HirType(kind: HirTypeKind.Named(struct_symbol, []), span: p.span)
+                    else:
+                        HirType(kind: HirTypeKind.Error, span: p.span)
+                    var struct_hir_fields: [(text, HirPattern)] = []
+                    var sfi = 0
+                    while sfi < sub_patterns.len() and sfi < field_order.len():
+                        struct_hir_fields = struct_hir_fields.push((field_order[sfi], self.lower_pattern(sub_patterns[sfi])))
+                        sfi = sfi + 1
+                    HirPatternKind.Struct(struct_hir_type, struct_hir_fields)
                 else:
-                    HirType(kind: HirTypeKind.Error, span: p.span)
-                # No `.map(\pl: ...)` lambda here: the seed interpreter does not
-                # bind `self` inside a lambda body, so `self.lower_pattern` in a
-                # closure fails native-build with "variable `self` not found".
-                var hir_payload: HirPatternPayload? = nil
-                if val pl = payload:
-                    match pl:
-                        case Tuple(patterns):
-                            var hir_patterns: [HirPattern] = []
-                            for pat in patterns:
-                                hir_patterns = hir_patterns.push(self.lower_pattern(pat))
-                            hir_payload = Some(HirPatternPayload.Tuple(hir_patterns))
-                        case Struct(fields):
-                            var hir_fields: [(text, HirPattern)] = []
-                            for (fname, fpat) in fields:
-                                hir_fields = hir_fields.push((fname, self.lower_pattern(fpat)))
-                            hir_payload = Some(HirPatternPayload.Struct(hir_fields))
-                HirPatternKind.Enum(hir_type, variant, hir_payload)
+                    val symbol = self.symbols.lookup_or_invalid(enum_)
+                    val hir_type = if symbol.is_valid():
+                        HirType(kind: HirTypeKind.Named(symbol, []), span: p.span)
+                    else:
+                        HirType(kind: HirTypeKind.Error, span: p.span)
+                    # No `.map(\pl: ...)` lambda here: the seed interpreter does not
+                    # bind `self` inside a lambda body, so `self.lower_pattern` in a
+                    # closure fails native-build with "variable `self` not found".
+                    var hir_payload: HirPatternPayload? = nil
+                    if val pl = payload:
+                        match pl:
+                            case Tuple(patterns):
+                                var hir_patterns: [HirPattern] = []
+                                for pat in patterns:
+                                    hir_patterns = hir_patterns.push(self.lower_pattern(pat))
+                                hir_payload = Some(HirPatternPayload.Tuple(hir_patterns))
+                            case Struct(fields):
+                                var hir_fields: [(text, HirPattern)] = []
+                                for (fname, fpat) in fields:
+                                    hir_fields = hir_fields.push((fname, self.lower_pattern(fpat)))
+                                hir_payload = Some(HirPatternPayload.Struct(hir_fields))
+                    HirPatternKind.Enum(hir_type, variant, hir_payload)
 
             case Or(patterns):
                 var hir_patterns: [HirPattern] = []
@@ -1137,6 +1182,114 @@ impl HirLowering:
         val chain_value = self.build_if_chain(scrut_var, hir_arms, 0, span)
         HirExprKind.Block(HirBlock(stmts: [let_stmt], has: true, value: chain_value, span: span))
 
+    me flatten_enum_match_arm(arm: HirMatchArm, span: Span) -> HirMatchArm:
+        """nestedmatch lane: rewrite a `case Variant(sub0, sub1, ...):` arm
+        whose payload contains a non-Binding/Wildcard sub-pattern (e.g. the
+        nested struct-positional reinterpretation in lower_pattern above,
+        `case Circle(Point(x, y)):`) into an equivalent arm the pre-existing,
+        TESTED single-level enum-match MIR lowering (lower_enum_match /
+        enum_pat_binding_syms, switch_operators_calls.spl -- fenced, not
+        edited here) already handles correctly: each complex sub-pattern
+        position is replaced by a fresh plain Binding, so the fenced
+        payload-binding extraction sees an ordinary Binding -- exactly like a
+        hand-written `case Circle(pt):` arm (proven working, including its
+        struct-value field-index fix for `pt.x`) -- and the REAL destructure
+        is instead done by ordinary Field/Index-access Let statements
+        prepended to the arm body, via the already-tested
+        destructure_pattern_prelude helper (the same one the if-chain
+        fallback above uses for top-level Tuple/Struct patterns). Without
+        this flatten, the fenced enum_pat_binding_syms silently SKIPS any
+        non-Binding sub-pattern (documented in its own comment: "non-Binding
+        sub-patterns...are skipped and simply left unbound"), which left `x`/
+        `y` referencing a never-populated local -- observed as a MIR/
+        interpreter crash ("undefined field 'id': cannot access field on
+        value of type 'nil'"), not a clean compile error. A sub-pattern that
+        needs a genuine runtime TEST (Literal/Range/Or/Enum) has no
+        single-dispatch-arm fallthrough semantics available here and is NOT
+        silently accepted: it is a loud compile error instead (self.error),
+        never a silently-wrong bind. Only Tuple/Struct sub-patterns are
+        flattened (the two kinds destructure_pattern_prelude actually
+        destructures); everything else hits the explicit error() case below
+        rather than being inferred from pattern_test_condition's nil/non-nil
+        split (both a genuinely-irrefutable AND several genuinely-refutable
+        kinds return nil there, so that split alone is not a safe signal for
+        this dispatch). Arms with no complex sub-pattern (the pre-existing,
+        already-working shape) pass through completely unchanged."""
+        match arm.pattern.kind:
+            case Enum(etype, variant, payload):
+                var out_arm = arm
+                if val pl = payload:
+                    match pl:
+                        case Tuple(patterns):
+                            var any_complex = false
+                            for pat in patterns:
+                                match pat.kind:
+                                    case Wildcard:
+                                        ()
+                                    case Binding(_, _):
+                                        ()
+                                    case _:
+                                        any_complex = true
+                            if any_complex:
+                                var new_patterns: [HirPattern] = []
+                                var prelude: [HirStmt] = []
+                                for pat in patterns:
+                                    match pat.kind:
+                                        case Wildcard:
+                                            new_patterns = new_patterns.push(pat)
+                                        case Binding(_, _):
+                                            new_patterns = new_patterns.push(pat)
+                                        case _:
+                                            val fresh = self.symbols.define("__mp_nested_flat", SymbolKind.Variable, nil, span, false, false, nil)
+                                            val fresh_pat = HirPattern(kind: HirPatternKind.Binding(fresh, false), type_: nil, span: span)
+                                            new_patterns = new_patterns.push(fresh_pat)
+                                            val fresh_var = HirExpr(kind: HirExprKind.Var(fresh), type_: nil, span: span)
+                                            # ONLY Tuple/Struct sub-patterns are safe to flatten this
+                                            # way: they are the sole two kinds destructure_pattern_
+                                            # prelude actually destructures (everything else --
+                                            # Literal/Range/Or/Enum/Error -- is a documented no-op
+                                            # there, and pattern_test_condition's catch-all ALSO
+                                            # returns nil for those same kinds -- so relying on
+                                            # "test == nil means irrefutable" is NOT a safe signal
+                                            # for this dispatch; a nested Enum sub-pattern in
+                                            # particular genuinely needs a runtime variant test with
+                                            # no fallthrough-to-next-arm semantics available here, and
+                                            # must not be silently treated as always-matching). Match
+                                            # explicitly on the sub-pattern kind instead of trusting
+                                            # pattern_test_condition's nil/non-nil split.
+                                            match pat.kind:
+                                                case Tuple(_):
+                                                    val sub_stmts = self.destructure_pattern_prelude(fresh_var, pat, span)
+                                                    var si = 0
+                                                    while si < sub_stmts.len():
+                                                        prelude = prelude.push(sub_stmts[si])
+                                                        si = si + 1
+                                                case Struct(_, _):
+                                                    val sub_stmts2 = self.destructure_pattern_prelude(fresh_var, pat, span)
+                                                    var si2 = 0
+                                                    while si2 < sub_stmts2.len():
+                                                        prelude = prelude.push(sub_stmts2[si2])
+                                                        si2 = si2 + 1
+                                                case _:
+                                                    self.error("nested match pattern kind not supported inside an enum payload here (only Tuple/Struct destructure, e.g. `Circle(Point(x, y))` or `Circle((a, b))`, are supported -- a nested Literal/Range/Or/Enum sub-pattern would need a runtime test with no fallthrough-to-next-arm semantics available) -- unsupported construct", pat.span)
+                                var new_body_stmts: [HirStmt] = []
+                                var pi = 0
+                                while pi < prelude.len():
+                                    new_body_stmts = new_body_stmts.push(prelude[pi])
+                                    pi = pi + 1
+                                var bi = 0
+                                while bi < arm.body.stmts.len():
+                                    new_body_stmts = new_body_stmts.push(arm.body.stmts[bi])
+                                    bi = bi + 1
+                                val new_body = HirBlock(stmts: new_body_stmts, has: arm.body.has, value: arm.body.value, span: arm.body.span)
+                                val new_pattern = HirPattern(kind: HirPatternKind.Enum(etype, variant, Some(HirPatternPayload.Tuple(new_patterns))), type_: nil, span: arm.pattern.span)
+                                out_arm = HirMatchArm(pattern: new_pattern, has_guard: arm.has_guard, guard: arm.guard, body: new_body, span: arm.span)
+                        case Struct(_):
+                            ()
+                out_arm
+            case _:
+                arm
+
     me build_match_expr(hir_scrutinee: HirExpr, hir_arms: [HirMatchArm], span: Span) -> HirExprKind:
         var has_enum = false
         var needs_general_fallback = false
@@ -1150,14 +1303,16 @@ impl HirLowering:
                 needs_general_fallback = true
 
         if has_enum:
-            # Unchanged pass-through: the pre-existing, tested enum-match
-            # MIR lowering handles these arms already (including simple
-            # payload bindings, e.g. `case Shape.Circle(r):`). Nested
-            # non-Binding payload sub-patterns (e.g. `Maybe.Some(Point(x,
-            # y))`) are not flattened here -- see pattern_is_mir_native's
-            # Enum case above -- and remain an unsupported, loud-fail
-            # construct exactly as before this lane's changes.
-            return HirExprKind.MatchCase(hir_scrutinee, hir_arms)
+            # Pre-existing, tested enum-match MIR lowering handles simple
+            # payload bindings unchanged (e.g. `case Shape.Circle(r):`).
+            # Arms whose payload contains a nested non-Binding sub-pattern
+            # (e.g. `Circle(Point(x, y))`) are flattened first -- see
+            # flatten_enum_match_arm's doc comment -- so they also reach the
+            # same tested lowering as an ordinary single-binding arm.
+            var flat_arms: [HirMatchArm] = []
+            for a in hir_arms:
+                flat_arms = flat_arms.push(self.flatten_enum_match_arm(a, span))
+            return HirExprKind.MatchCase(hir_scrutinee, flat_arms)
 
         if needs_general_fallback:
             return self.desugar_match_to_if_chain(hir_scrutinee, hir_arms, span)
