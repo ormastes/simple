@@ -338,8 +338,13 @@ payload consistency, then delegates to the existing bounded
 `install_cuda_font_ptx` entry-symbol/session gate without
 replacing the optimization module. The session pins the PTX hash, rejects
 replacement, launches font quads from it when present, and unloads it with the
-CUDA context. No production caller or device-origin readback has promoted this
-handoff yet; the hand-written compatibility entry remains the fallback.
+CUDA context. The conditional native font evidence scenario authenticates the
+checker-recorded Simple invocation/runtime binaries, current emitter
+source/version hashes, retained generated `.cu` source/hash, and PTX path/hash;
+installs the PTX through this public handoff; dispatches one canonical
+`FontRenderBatch`; and compares device-origin readback with its CPU oracle. A
+retained native PASS is still required for promotion; the hand-written
+compatibility entry remains the fallback.
 Metal compiles the exact common MSL helper as an optional separate pipeline,
 uses the fixed 13-word/52-byte parameter block, full-uploads changed atlas
 generations, and dispatches completed 64-thread groups per quad. Only native

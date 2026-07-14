@@ -1,14 +1,16 @@
 # Native GPU Font Readback
 
 **Status:** release-blocking and currently unavailable
-**Traceability:** REQ-012, REQ-013, REQ-014; NFR-002, NFR-004, NFR-005, NFR-006, NFR-008
+**Traceability:** REQ-010, REQ-012, REQ-013, REQ-014; NFR-002, NFR-004, NFR-005, NFR-006, NFR-008
 **Executable:** `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl`
 
-This scenario promotes a native font route only after one real graphics device
-renders both Engine3D HUD and world text, SimpleOS supplies a pinned-font guest
-framebuffer oracle, and the warm performance/resource budgets pass. CPU
-rendering, source emission, upload-only evidence, and environment claims are
-not substitutes.
+This scenario has four independent live evidence rows. CUDA Engine2D executes
+the checker-produced font artifact on its native compute backend/device;
+Vulkan Engine3D separately renders HUD and world text on its graphics
+backend/device; SimpleOS supplies a pinned-font guest framebuffer oracle; and
+the warm performance/resource budgets pass. The CUDA and Vulkan rows neither
+require nor imply the same device or backend. CPU rendering, source emission,
+upload-only evidence, and environment claims are not substitutes.
 
 ## Operator flow
 
@@ -17,6 +19,15 @@ not substitutes.
 Treat the first unavailable rung as failure: compiled program, native resource
 creation, submission, completed fence, and device-origin readback are required
 before any backend is promoted.
+
+For CUDA, the retained toolchain record must identify the Simple invocation and
+resolved native compiler binaries with exact SHA-256, the current emitter
+source/version hashes, the exact retained generated `.cu` source/hash, a
+verified PTX artifact/hash, and the versioned font entry. The scenario installs
+that artifact through `Engine2D.install_cuda_font_artifact`, dispatches one
+canonical `FontRenderBatch`, and requires the pinned module identity, CUDA
+execution target, nonzero backend handle, device-origin readback, and exact CPU
+pixels. This Engine2D compute row is independent of the Vulkan Engine3D row.
 
 ### Render Engine3D HUD and world text on the promoted backend
 
@@ -72,5 +83,5 @@ record; missing, stale, partial, or non-passing evidence fails closed.
 - Performance evidence: raw samples and stage counters for shaping, material,
   upload, queue, sync, readback, RSS, and GPU resource high-water.
 
-The executable spec is the authority. Regenerate this manual after its three
+The executable spec is the authority. Regenerate this manual after its four
 scenarios pass and require SPipe docgen to report zero stubs.

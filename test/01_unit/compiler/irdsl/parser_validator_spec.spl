@@ -1,0 +1,38 @@
+# @tag: unit, compiler, irdsl
+
+use std.spec.{describe, it, expect}
+use compiler.backend.irdsl.parser.{parse_irdsl_file}
+use compiler.backend.irdsl.validator.{IrValidator, check_coverage, validate_instructions}
+
+describe "IRDSL parser and validator":
+    it "parses member-backed fields and validates partial backend errors":
+        val source = "instruction Add:\n" +
+            "params: lhs:i64, rhs:i64\n" +
+            "backends: cranelift, llvm\n" +
+            "description: Add two values\n" +
+            "rust_pattern: Add(lhs, rhs)\n" +
+            "category: arithmetic\n\n"
+        val instructions = parse_irdsl_file(source)
+
+        expect(instructions.len()).to_equal(1)
+        expect(instructions[0].name).to_equal("Add")
+        expect(instructions[0].params.len()).to_equal(2)
+        expect(instructions[0].backends).to_contain("llvm")
+        expect(validate_instructions(instructions)).to_contain("missing_error")
+
+        val validator = IrValidator(
+            instructions: instructions,
+            errors: []
+        )
+        validator.validate()
+        expect(validator.has_errors()).to_equal(true)
+        expect(validator.error_count()).to_equal(1)
+
+        val empty_coverage = check_coverage([])
+        expect(empty_coverage).to_contain("| Cranelift | 0/0 | 0% |")
+        expect(empty_coverage).to_contain("| Interpreter | 0/0 | 0% |")
+
+        val coverage = check_coverage(instructions)
+        expect(coverage).to_contain("| Cranelift | 1/1 | 100% |")
+        expect(coverage).to_contain("| LLVM | 1/1 | 100% |")
+        expect(coverage).to_contain("| Vulkan | 0/1 | 0% |")
