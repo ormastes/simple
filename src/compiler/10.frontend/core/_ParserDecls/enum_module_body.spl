@@ -63,6 +63,23 @@ fn parse_enum_decl() -> i64:
     # Parse optional type parameters: enum Result<T, E>:
     val type_params = parse_type_params()
 
+    # Pre-register enum name so type references resolve during parsing (same
+    # reason struct decls do this -- see parse_struct_decl). Without this,
+    # `named_type_find(enum_name)` never finds the enum, so any type-annotation
+    # use of it (e.g. `-> MyEnum`, `x: MyEnum`, a struct/enum field of enum
+    # type) falls through parser_parse_type's identifier branch all the way to
+    # `return TYPE_VOID` -- an enum name silently types as void everywhere.
+    # Most of the time this goes unnoticed because enum match/construct is
+    # dispatched dynamically off the runtime-boxed value, not the static
+    # declared type. But a function whose declared return type resolves to
+    # TYPE_VOID reads as "no `-> T` was written" to decl_get_ret_type's
+    # `ret > 0` check, so the flat-AST bridge's `has_ret` goes false and HIR
+    # lowering picks the untyped-return-inference path
+    # (`infer_untyped_return_type`), which hard-errors with "returns a value
+    # but declares no return type" the moment the body actually returns one --
+    # e.g. `fn make(n: i64) -> MyEnum: return MyEnum.A(n)`.
+    val enum_type_id = named_type_register(enum_name, [], [])
+
     parser_expect(161)
     parser_skip_newlines()
     parser_expect(181)
