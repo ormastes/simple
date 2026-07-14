@@ -52,6 +52,15 @@ complete when workflow/tooling behavior changed and the matching guide, skill,
 agent, command, or generated/manual spec docs are still stale. Update the docs
 first, then run focused verification evidence once.
 
+For work spanning multiple host or capability rows, keep every unavailable
+row's acceptance-criterion IDs active. Reuse its authoritative TODO and plan,
+or create them when none exist, and record the missing prerequisite, exact
+resume command, and retained artifacts.
+Postponement is not completion: it cannot move the row into exclusions, close
+its TODO, or permit a phase, verify report, or goal to be marked done. Postpone
+only native execution that genuinely requires another prepared host; keep all
+host-independent and current-host rows active until finished.
+
 For SimpleOS compiler-in-filesystem lanes, completion requires the Simple
 compiler/interpreter/loader payload to be embedded in the SimpleOS install image
 and executed from the SimpleOS filesystem. SPipe specs must prove the target
