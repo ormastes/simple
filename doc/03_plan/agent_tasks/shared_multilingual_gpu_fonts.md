@@ -90,3 +90,13 @@ checking source and executable evidence.
   framebuffer pixels.
 - H: all REQ-001–015 and NFR-001–008 trace to authoritative current evidence;
   direct-env runtime guards pass and verification reports `STATUS: PASS`.
+
+## Serif probe sidecar record — 2026-07-14
+
+- Spark Devanagari audit supplied the independent Noto Serif Devanagari
+  HarfBuzz glyph/advance oracle and caught aggregate-only material checking.
+- Spark Naskh audit supplied the exact GSUB/GPOS lookup order, Arabic/Urdu
+  glyph/cluster/advance/offset vectors, and profile-drift negatives.
+- Highest-capability review accepted both bounded algorithms but rejected
+  registry promotion without executable pure-Simple evidence. Merge ownership
+  therefore keeps all three serif cells candidate/unavailable.

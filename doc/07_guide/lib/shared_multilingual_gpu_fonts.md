@@ -75,6 +75,10 @@ The unchanged binaries and adjacent metadata/licenses are bundled under
 accepted in source policy—nine identity-profile families, the sans Devanagari
 and Arabic witness faces, and exact-corpus Noto Emoji. Serif Devanagari/Arabic
 and two rank-eleven Bengali faces remain candidates.
+The two serif script candidates have bounded default-instance source profiles
+and independent glyph/advance/offset probes. They remain unavailable to normal
+selection because the retained full pure-Simple CLI has not executed those
+probes; do not substitute the Rust seed or infer acceptance from source review.
 The canonical font provider now projects all 16 manifest paths and accepts an
 exact, trimmed, case-insensitive family name as a singleton candidate. Encoded
 `@font-face` sources still take priority; generic CSS family heuristics remain
@@ -112,7 +116,9 @@ cells, accepts the sans faces for the exact Hindi and Arabic/Urdu witnesses,
 and accepts exact monochrome Noto Emoji `U+1F600` corpus tuples for all ten
 selected language tags. The matrix totals are 67 `native`, 4 explicit
 script-sans mono `fallback`, 26 `not-designed-for-script`, and 3 `unavailable`;
-the focused self-hosted shaping/material scenario exits 0.
+the last promoted-baseline shaping/material scenario exited 0. The refreshed
+scenario with pending serif probes exits 139 in the tracked stale-ABI
+pure-Simple CLI before assertions.
 An accepted identity cell means
 the exact pinned face stayed live, parsed cmap and runtime glyph IDs agreed for
 the exact language witness, bounded hmtx advances matched, shaping completed,
@@ -121,6 +127,10 @@ use explicit fallbacks to their accepted script sans faces while retaining the
 Mono request. Exact Hindi `हिन्दी` and Arabic/Urdu witnesses cover the accepted
 sans faces; serif remains candidate-only. Other complex sequences, general emoji sequences/color,
 GPU execution, and the refreshed source-policy run remain incomplete.
+The pending serif probes pin Noto Serif Devanagari glyphs and Noto Naskh
+Arabic/Urdu GSUB/GPOS results, reject wrong-language pairs, marks, profile
+drift, and non-default axes, and require nonzero canonical material per glyph.
+They are readiness evidence only until a current-ABI pure-Simple CLI runs them.
 
 ## Current shared material
 

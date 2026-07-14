@@ -55,21 +55,32 @@ stdout. The executable source contains seven scenarios.
    and x/y offsets; those exact language/face tuples are cataloged as native.
 2. Shape the exact Hindi `हिन्दी` witness through Noto Sans Devanagari with the
    bounded selected `dev2` path and require a complete, renderable exact-face run.
-3. Require Arabic marks and the unselected Hindi `र्क` sequence to remain
+3. Probe the same Hindi witness through Noto Serif Devanagari and the exact
+   Arabic/Urdu witnesses through Noto Naskh Arabic. Pin their independent
+   glyph/cluster/advance/offset oracles and require nonzero material per glyph,
+   while keeping all three policy cells unavailable pending executable proof.
+4. Require wrong-language Naskh pairs, Arabic marks, axis/lookup drift, and the
+   unselected Hindi `र्क` sequence to remain
    incomplete and invalid.
-4. Build the exact Noto Emoji `U+1F600` run under all ten selected language
+5. Build the exact Noto Emoji `U+1F600` run under all ten selected language
    tags, require live-face cmap/runtime agreement and nonempty canonical atlas
    material, catalog those exact single-scalar tuples as native, and keep
    VS/modifier/ZWJ/multi-codepoint sequences invalid.
 
 ## Expected result
 
-The focused self-hosted scenario exits 0: all 54 native identity rows, the four
+The last promoted-baseline self-hosted scenario exited 0: all 54 native identity rows, the four
 script-sans mono fallbacks, the exact Hindi sans face, and the Arabic/Urdu sans
 face pass without test-side policy mutation, as do the ten exact monochrome
 Noto Emoji `U+1F600` corpus tuples. The source-policy matrix is 67 `native`
 plus 4 `fallback` cells; the remaining cells are 26
 `not-designed-for-script` and 3 `unavailable` serif complex-script cells.
+The refreshed scenario containing the pending serif probes currently exits 139
+in the tracked stale-ABI pure-Simple CLI before reaching assertions.
+The executable source also probes the exact default Noto Serif Devanagari and
+Noto Naskh Arabic/Urdu faces, including independent glyph/advance/offset
+oracles and nonzero material per glyph. Those probes are not selection-policy
+PASS evidence until a current-ABI pure-Simple CLI reaches their assertions.
 Missing/stale inputs, Arabic marks outside the selected witnesses, other Indic
 sequences, and emoji sequences fail closed. This does not prove general emoji
 or GPU execution.

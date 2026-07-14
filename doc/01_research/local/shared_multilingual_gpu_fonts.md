@@ -88,3 +88,19 @@ now native: the matrix is 67 native, 4 fallback, 26 not-designed, and 3
 unavailable serif complex-script cells. This is not general Emoji support:
 multi-codepoint, variation-selector, modifier, ZWJ, and color Emoji remain
 fail-closed.
+
+## Current-state serif probe addendum — 2026-07-14
+
+Noto Serif Devanagari needs no second shaping path: the existing exact `dev2`
+logic is face-structural, and an independent HarfBuzz oracle now pins glyphs,
+clusters, and advances for `हिन्दी`. Noto Naskh Arabic needs one private profile
+behind the existing `selected_arabic_glyphs` entrypoint; source now pins its
+one-axis default, exact Arabic/Urdu lookup sequence, glyphs, advances, mark
+offsets, RTL order, and malformed/wrong-language negatives. Both feed the same
+canonical `FontRenderer` material gate.
+
+The retained full pure-Simple CLI still embeds the tracked obsolete
+`rt_env_set` ABI and then faults in another stale runtime boundary. Focused
+font tests therefore exit 139 before assertions. The serif implementation and
+oracles remain candidate readiness work; the 67/4/26/3 selection policy is
+unchanged until a rebuilt current-ABI pure-Simple CLI executes them.

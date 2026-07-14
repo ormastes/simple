@@ -196,7 +196,19 @@ fn expect_selected_unicode_shaping(fixture: SelectedShapingFixture, content: tex
     expect(run.positioning_complete).to_be(true)
     expect(run.glyph_ids.len()).to_equal(run.positions.len())
     expect(run.glyph_ids.len()).to_equal(run.glyphs.len())
-    expect(shaped_run_to_font_glyph_run(run).valid).to_be(true)
+    val glyph_run = shaped_run_to_font_glyph_run(run)
+    expect(glyph_run.valid).to_be(true)
+    val batch = fixture.renderer.prepare_glyph_run(glyph_run, 0xFFFFFFFFu32, 32)
+    expect(batch.valid).to_be(true)
+    expect(batch.font_identity).to_equal(selected_font_asset_identity(fixture.asset))
+    expect(batch.face_generation).to_equal(fixture.handle.generation)
+    expect(batch.quads.len()).to_equal(run.glyph_ids.len())
+    for quad in batch.quads:
+        var quad_nonzero: i64 = 0
+        for pixel in font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                                               quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color):
+            if pixel != 0u32: quad_nonzero = quad_nonzero + 1
+        expect(quad_nonzero).to_be_greater_than(0)
 
 fn expect_simple_row_material(fixture: SelectedShapingFixture, row: SimpleShapingRow):
     expect(fixture.asset.family).to_equal(row.family)
@@ -321,10 +333,14 @@ describe "shared font shaping acceptance":
         step("Shape selected Unicode scripts with the pinned face")
         expect(selected_font_simple_tuple_accepted("Noto Sans Arabic", "ar")).to_be(true)
         expect(selected_font_simple_tuple_accepted("Noto Sans Arabic", "ur")).to_be(true)
+        expect(selected_font_simple_tuple_accepted("Noto Naskh Arabic", "ar")).to_be(false)
+        expect(selected_font_simple_tuple_accepted("Noto Naskh Arabic", "ur")).to_be(false)
         expect(selected_font_coverage_cell("ar", "sans").?.status).to_equal("native")
         expect(selected_font_coverage_cell("ur", "sans").?.status).to_equal("native")
         expect(selected_font_coverage_cell("ar", "serif").?.status).to_equal("unavailable")
         expect(selected_font_coverage_cell("ur", "serif").?.status).to_equal("unavailable")
+        expect(selected_font_asset_for_language_category("ar", "serif")).to_be_nil()
+        expect(selected_font_asset_for_language_category("ur", "serif")).to_be_nil()
         expect(selected_font_coverage_cell("ar", "mono").?.status).to_equal("fallback")
         expect(selected_font_coverage_cell("ar", "mono").?.witness_family).to_equal("Noto Sans Arabic")
         expect(selected_font_coverage_cell("ur", "mono").?.status).to_equal("fallback")
@@ -334,18 +350,31 @@ describe "shared font shaping acceptance":
         expect_selected_unicode_shaping(arabic, "اردو", "ur", Script.Arabic)
         expect_complex_run_pending(arabic, "بَ", "ar")
         free_font(arabic.handle)
+        val naskh = setup_selected_shaping_face("Noto Naskh Arabic")
+        expect_selected_unicode_shaping(naskh, "العربية", "ar", Script.Arabic)
+        expect_selected_unicode_shaping(naskh, "اردو", "ur", Script.Arabic)
+        expect_complex_run_pending(naskh, "العربية", "ur")
+        expect_complex_run_pending(naskh, "اردو", "ar")
+        expect_complex_run_pending(naskh, "بَ", "ar")
+        free_font(naskh.handle)
 
     # @req REQ-007
     it "should accept the exact Hindi dev2 witness and reject other complex sequences":
         expect(selected_font_simple_tuple_accepted("Noto Sans Devanagari", "hi")).to_be(true)
+        expect(selected_font_simple_tuple_accepted("Noto Serif Devanagari", "hi")).to_be(false)
         expect(selected_font_coverage_cell("hi", "sans").?.status).to_equal("native")
         expect(selected_font_coverage_cell("hi", "serif").?.status).to_equal("unavailable")
+        expect(selected_font_asset_for_language_category("hi", "serif")).to_be_nil()
         expect(selected_font_coverage_cell("hi", "mono").?.status).to_equal("fallback")
         expect(selected_font_coverage_cell("hi", "mono").?.witness_family).to_equal("Noto Sans Devanagari")
         val devanagari = setup_selected_shaping_face("Noto Sans Devanagari")
         expect_selected_unicode_shaping(devanagari, "हिन्दी", "hi", Script.Devanagari)
         expect_complex_run_pending(devanagari, "र्क", "hi")
         free_font(devanagari.handle)
+        val serif_devanagari = setup_selected_shaping_face("Noto Serif Devanagari")
+        expect_selected_unicode_shaping(serif_devanagari, "हिन्दी", "hi", Script.Devanagari)
+        expect_complex_run_pending(serif_devanagari, "र्क", "hi")
+        free_font(serif_devanagari.handle)
 
     # @req REQ-007
     it "should accept exact single-codepoint emoji material and reject sequences":

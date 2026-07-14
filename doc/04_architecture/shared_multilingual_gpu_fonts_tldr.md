@@ -29,7 +29,9 @@ The pinned 10-language × 10-category source policy contains 67 native cells,
 4 explicit script-sans mono fallbacks, 26 not-designed cells, and 3 unavailable
 serif complex-script cells. It accepts sans Hindi and Arabic/Urdu witnesses plus
 the exact monochrome Noto Emoji `U+1F600` corpus tuple for every selected
-language tag; the focused self-hosted shaping/material scenario exits 0.
+language tag; the last promoted-baseline self-hosted shaping/material scenario
+exited 0. The refreshed scenario with
+pending serif probes exits 139 in the tracked stale-ABI CLI before assertions.
 Other complex scripts, emoji sequences/color, general GSUB/GPOS/BiDi, Engine3D native
 execution, executed Web/GUI/WM glyph-pixel parity, retained SimpleOS guest
 pixel evidence, and performance targets remain gated. Atlas and face generations invalidate cached material; unavailable

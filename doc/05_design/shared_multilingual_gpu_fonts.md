@@ -75,6 +75,10 @@ witnesses, plus exact monochrome Noto Emoji `U+1F600` corpus tuples for all ten
 selected language tags: 67 native cells and 4 explicit script-sans mono
 fallbacks. The other 29 cells are 26 `not-designed-for-script` and 3
 `unavailable` serif complex-script cells.
+The shaper now contains bounded, exact-default-instance Serif Devanagari and
+Noto Naskh paths with independent HarfBuzz-pinned oracle probes. Selection does
+not expose those three cells until the normal pure-Simple test CLI executes the
+oracles and per-glyph canonical material checks successfully.
 The resolver returns a bundled candidate only for those promoted cells. Widget
 Draw IR reads the existing `lang` and `font-family` properties; shared WM
 windows preserve an explicit language field. Missing language remains `und`
