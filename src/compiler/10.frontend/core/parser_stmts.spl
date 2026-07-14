@@ -919,7 +919,13 @@ fn parse_match_stmt() -> i64:
     parser_advance()
     return parse_match_stmt_tail()
 
-fn parse_match_stmt_tail() -> i64:
+# Shared arm-parsing core for both `match` in STATEMENT position
+# (parse_match_stmt_tail -> stmt_match_stmt, a side-effecting match with no
+# value) and `match` in EXPRESSION position (parse_match_expr_tail ->
+# expr_match_expr, a value-producing match, e.g. `val r = match n: ...`).
+# Returns (scrutinee_expr_id, arm_indices) so each caller only differs in
+# which AST constructor it wraps the result in.
+fn parse_match_arms_common() -> (i64, [i64]):
     val scrutinee = parse_expr()
     parser_expect(161)
     parser_skip_newlines()
@@ -1042,7 +1048,25 @@ fn parse_match_stmt_tail() -> i64:
                 val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, arm_body, pattern_binding, rationale)
                 arm_indices.push(arm_idx)
 
-    stmt_match_stmt(scrutinee, arm_indices, 0)
+    (scrutinee, arm_indices)
+
+fn parse_match_stmt_tail() -> i64:
+    val parsed = parse_match_arms_common()
+    stmt_match_stmt(parsed[0], parsed[1], 0)
+
+# `match` used as a VALUE (expression position), e.g. `val r = match n:
+# case 1: 10 case _: 99`. Bug: expression-position `match` used to call
+# parse_match_stmt_tail() and return its STATEMENT id directly as if it were
+# an expr id -- stmt-arena and expr-arena indices overlap, so the caller
+# (parse_primary_expr, expecting an expr id) silently read whatever unrelated
+# EXPR happened to occupy that numeric slot (a wrong-arena type confusion),
+# producing a garbage constant with no branches at all instead of the real
+# match value. Building a genuine expr_match_expr node here (mirroring the
+# stmt path exactly, just wrapped in the expr constructor) fixes this at the
+# source instead of downstream.
+fn parse_match_expr_tail() -> i64:
+    val parsed = parse_match_arms_common()
+    expr_match_expr(parsed[0], parsed[1], 0)
 
 fn parse_receive_stmt() -> i64:
     # Already consumed 'receive' keyword
@@ -1434,6 +1458,6 @@ fn parse_gpu_launch_stmt() -> i64:
 export parse_block, parse_statement
 export parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt
 export parse_if_stmt, parse_for_stmt, parse_while_stmt, parse_match_stmt
-export parse_match_stmt_tail, g33_kw_ident_follow
+export parse_match_stmt_tail, parse_match_expr_tail, g33_kw_ident_follow
 export parse_receive_stmt, parse_bind_stmt
 export parse_if_expr, parse_for_expr, parse_while_expr

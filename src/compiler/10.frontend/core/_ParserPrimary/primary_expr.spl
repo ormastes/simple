@@ -54,7 +54,7 @@ use compiler.core.parser.{parser_parse_type}
 
 # Forward declarations for mutual recursion
 use compiler.frontend.core.parser_stmts.{parse_block, parse_statement, parse_match_stmt, parse_if_expr}
-use compiler.frontend.core.parser_stmts.{parse_match_stmt_tail, g33_kw_ident_follow}
+use compiler.frontend.core.parser_stmts.{parse_match_stmt_tail, parse_match_expr_tail, g33_kw_ident_follow}
 use compiler.frontend.core.parser_expr.{parse_expr, parse_not, parse_unary}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
@@ -760,7 +760,17 @@ fn parse_primary_expr() -> i64:
         parser_advance()
         if g33_kw_ident_follow(par_kind_get()):
             return expr_ident("match", 0)
-        return parse_match_stmt_tail()
+        # `match` used as a VALUE (e.g. `val r = match n: case 1: 10 case _:
+        # 99`). Bug fix: this used to call parse_match_stmt_tail() and return
+        # its STATEMENT id here as if it were an expr id -- stmt-arena and
+        # expr-arena indices overlap, so the caller (expecting an expr id)
+        # silently read whatever unrelated EXPR happened to occupy that
+        # numeric slot (wrong-arena type confusion) instead of the match's
+        # real value, with no branches emitted downstream at all. Build a
+        # genuine expr_match_expr node instead so match-as-a-value is a real
+        # expression the rest of the pipeline (HIR MatchCase lowering, the
+        # flat-AST bridge) can consume like any other expr.
+        return parse_match_expr_tail()
     if par_kind_get() == 40:
         return parse_if_expr()
 

@@ -572,6 +572,47 @@ fn convert_flat_expr(idx: i64) -> Expr:
             val else_block = flat_if_branch_block(if_else_idx, span)
             return Expr(kind: ExprKind.If(cond, then_block, else_block), span: span)
         return Expr(kind: ExprKind.If(cond, then_block, nil), span: span)
+    elif tag == EXPR_MATCH:
+        # `match` used as a VALUE, e.g. `val r = match n: case 1: 10 case _:
+        # 99`. Mirrors the STMT_MATCH conversion below (same arm-id/pattern/
+        # guard/body accessors -- expr_match_expr's parser constructor stores
+        # scrutinee in LEFT and arms in ARGS, exactly like stmt_match_stmt
+        # stores them in EXPR/BODY) but returns a real ExprKind.MatchCase
+        # directly instead of wrapping a statement, so match-as-a-value
+        # reaches HIR/MIR lowering as a genuine value-producing expression
+        # instead of being silently dropped by the fallback NilLit case below.
+        val em_scrut = convert_flat_expr(expr_get_left(idx))
+        val em_arm_ids = expr_get_args(idx)
+        var em_arms: [MatchArm] = []
+        var emi = 0
+        while emi < em_arm_ids.len():
+            val em_arm_id = em_arm_ids[emi]
+            val em_pat = convert_flat_pattern(arm_get_pattern(em_arm_id))
+            val em_body_ids: [i64] = arm_get_body(em_arm_id)
+            var em_arm_body: [Stmt] = []
+            var embi = 0
+            while embi < em_body_ids.len():
+                val em_expanded = convert_flat_stmt_in_list(em_body_ids[embi], false)
+                var emk = 0
+                while emk < em_expanded.len():
+                    em_arm_body.push(em_expanded[emk])
+                    emk = emk + 1
+                embi = embi + 1
+            val em_guard_eid = arm_get_guard(em_arm_id)
+            var em_g_has = false
+            var em_g_expr = Expr(kind: ExprKind.NilLit, span: span)
+            if em_guard_eid >= 0:
+                em_g_has = true
+                em_g_expr = convert_flat_expr(em_guard_eid)
+            em_arms.push(MatchArm(
+                pattern: em_pat,
+                has_guard: em_g_has,
+                guard: em_g_expr,
+                body: Block(stmts: em_arm_body, span: span),
+                span: span
+            ))
+            emi = emi + 1
+        return Expr(kind: ExprKind.MatchCase(em_scrut, em_arms), span: span)
     elif tag == EXPR_RETURN:
         val ret_expr = convert_flat_expr(expr_get_left(idx))
         return Expr(kind: ExprKind.Return(ret_expr), span: span)
