@@ -167,3 +167,98 @@ for a typed class receiver (never fall to the NAME-keyed heuristics for an
 imported class whose def is in the compilation closure). The broader
 "preserve class/struct field types through HIR (stop erasing to `Infer`)" rework
 is the durable fix but is out of bounds for a minimal pass.
+
+---
+
+## 2026-07-14 (later) — instrument→pin→fix loop ATTEMPTED; blocked by local environment. Ready diagnostic handed off.
+
+Followed the decisive instrument→pin→fix plan. Two independent pinning methods
+were attempted; both are blocked ON THIS MAC (aarch64-apple-darwin), not by the
+compiler logic.
+
+### Extended disproof (added the exact live target/backend)
+
+Re-ran the controlled disassembly repro on **`--target x86_64-unknown-none
+--backend cranelift`** (the EXACT freestanding target+backend the live SimpleOS
+build uses) under `SIMPLE_BOOTSTRAP=1`, with `framebuffer` as a class field at
+index 1 (after a class-typed field, mirroring the real executor). Result:
+`width`→`movl 0x18` (idx 3), `height`→`movl 0x20` (idx 4), nested and direct,
+all correct. So the resolution is correct in isolation even on the precise
+live target. The shift is confirmed **full-graph-scale only**.
+
+### Pinning method 1 (instrument + rebuild): BLOCKED — bootstrap native-build is pre-existing-broken on this Mac
+
+A behavior-preserving `[FIDX]` diagnostic was added to `resolve_field_index`
+(logs which name-keyed table resolves the index, the recovered receiver type,
+and the index — see patch below). To make it take effect the compiler must be
+rebuilt. `bin/simple build bootstrap` **fails at Stage 1** with
+`error: native-build failed without diagnostics` / `native-build worker exited
+with code 1`. Re-ran on a CLEAN tree (diagnostic reverted): **identical Stage 1
+failure**. So the bootstrap native-build is broken in THIS environment
+independent of any edit (same root as the host `--native` link failures:
+`ld.lld: error: unable to find library -lSystem`, `_main_shim.o: unknown file
+type`). The compiler cannot be rebuilt here, so the diagnostic cannot be
+captured on the real build here.
+
+### Pinning method 2 (disassemble the real object): BLOCKED — SMF symtab not hand-parseable
+
+The real consumer compiles standalone with full closure
+(`bin/simple compile src/os/compositor/engine2d_wm_frame_executor.spl
+--emit=object --target=x86_64-unknown-none` → ~14 MB SMF). But `--emit=object`
+wraps output in Simple's **SMF** format (not ELF), the symbol-table record
+format is defined in a runtime extern (`rt_smf_write`, not readable Simple
+source), and the `.text` is ~12 MB — so the specific `_Engine2dWmFrameExecutor_*`
+function cannot be reliably located/attributed by hand to read its
+`FramebufferDriver.width` load offset. (`objdump`/`llvm-objdump` on this Mac
+cannot read SMF and lack `-b binary`; no `objcopy`/`gobjdump`/radare available.)
+
+### Consequence
+
+Both the "pin the collision" step AND the PPM verification gate
+(`check-simpleos-wm-fullscreen-evidence.shs`, which needs a working native-build
++ QEMU) require an environment where SimpleOS native-build actually links. **This
+Mac is not that environment.** The next pass must run on a Linux/working-
+native-build host (the same host the peer used to observe the live fault).
+
+### READY-TO-USE diagnostic (drop-in, pins it in ONE executor compile on a working host)
+
+Insert into `src/compiler/50.mir/_MirLowering/function_lowering.spl` inside
+`resolve_field_index` (right after the docstring, before `val type_sym =
+self.expr_type_symbol(base)`), add the `fidx_watch` guard, and add the four
+`print "[FIDX] …"` lines at each `return`/default branch:
+
+```
+val fidx_watch = field_name == "width" or field_name == "height" or field_name == "revision" or field_name == "pinned" or field_name == "running" or field_name == "tray" or field_name == "scene_revision" or field_name == "front_addr" or field_name == "back_buffer" or field_name == "host_buffer" or field_name == "windows" or field_name == "background"
+# ... at the field_map hit:
+if fidx_watch: print "[FIDX] field={field_name} via=field_map sym={sym_id} idx={idx} list={fields.join(\",\")}"
+# ... at the struct_field_order-by-name hit:
+if fidx_watch: print "[FIDX] field={field_name} via=struct_field_order.byname recv={type_symbol.name} idx={named_idx} list={named_fields.join(\",\")}"
+# ... at the struct_value_syms hit:
+if fidx_watch: print "[FIDX] field={field_name} via=struct_value_syms recv={nm} idx={vidx} list={vfields.join(\",\")}"
+# ... at the default:
+if fidx_watch: print "[FIDX] field={field_name} via=DEFAULT idx=0 (receiver type unrecovered)"
+```
+
+Then on a working-native-build host: rebuild the compiler once, and
+`bin/simple compile src/os/compositor/engine2d_wm_frame_executor.spl --emit=object
+--target=x86_64-unknown-none 2>&1 | grep '\[FIDX\] field=width'`. The line tells
+you, in one shot: the resolved `idx` (0x18/idx3 = correct, anything less =
+shifted), which name-keyed table produced it (`via=`), and the recovered
+receiver class (`recv=`) + the field `list=`. If `recv=` is NOT
+`FramebufferDriver`, it is a wrong-receiver-recovery (then the low-risk fix is to
+make `resolve_field_index` reach `field_map[sym_id]` for the typed receiver, or
+rename the confused field); if `recv=FramebufferDriver` but the `list=` is short
+by one, the field-list registration dropped an entry (investigate
+`struct_field_order`/`field_map` population for that class in the full closure).
+Repeat the grep for `field=revision`/`field=pinned` (TaskbarModel path).
+
+### Verdict
+
+- **Layout-arithmetic / fat-pointer hypothesis: DISPROVEN** (uniform 1-slot
+  backend; correct in isolation on the exact live target).
+- **Exact collision: NOT yet pinned** — both pinning methods are blocked by the
+  local Mac's broken native-build, not by lack of a plan. The drop-in diagnostic
+  above turns pinning into a single compile on a Linux host.
+- **No compiler change is landable from this environment** (cannot satisfy the
+  byte-identical-bootstrap gate or the PPM gate here). Handing off to a
+  working-native-build host with the diagnostic + procedure above.
