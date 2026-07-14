@@ -117,15 +117,42 @@ bin/simple os test --scenario=arm64-desktop-engine2d
 It builds `arch/arm64/gui_entry_desktop.spl` with the `src/os` and `src/lib`
 closure, configures RAMFB, and renders compositor-owned Simple Web content via
 `DesktopShell` and `Engine2dWmFrameExecutor`. The static scenario intentionally
-does not invent a shared-memory path or daemon lifecycle. Host-GPU wrapper
-integration remains an explicit unfinished gate. Until TODO 548
-allows a fresh build and QEMU run, this is source/scenario wiring, not live
-production evidence.
+does not invent a shared-memory path or daemon lifecycle.
 The guest is a persistent desktop, so `os run` and `os test` accept its timeout
 only when the captured serial output contains RAMFB configuration, the
 canonical first-frame marker emitted after a positive revision, and the ARM
 desktop-ready marker. This proves local Engine2D composition, not host-GPU
 execution.
+
+The host-GPU evidence owner remains
+`scripts/check/check-simpleos-qemu-host-gpu-2d.shs`. Its AArch64 row must first
+pass the existing 64x48 raw-render, Draw IR, and independent ProcessingIR probe.
+It then boots `arm64-desktop-engine2d` as a second guest while reusing the same
+host daemon, 8 MiB shared-memory file, and maximum-RSS monitor. The production
+QEMU argument evidence must name the desktop ELF and exact ARM `virt`,
+`cortex-a72`, 512 MiB memory, `-nographic`, `ramfb`, `virtio-net-pci`,
+`memory-backend-file,id=hostgpu,share=on,mem-path=<row-shm>,size=8M`, and
+`ivshmem-plain,memdev=hostgpu` tokens in that order; the shared-memory path must
+be the same one used by the probe and no extra argument is admitted. The
+production ready generation must continue from the probe's final ProcessingIR
+generation: plus one for Metal, plus two for DirectX, or plus three for Vulkan,
+matching the executor's Metal, DirectX, then Vulkan negotiation order.
+
+That wrapper row passes only when RAMFB configures and the serial stream orders
+the correlated production markers:
+
+```text
+[wm-frame] host-gpu-ready backend=<host-backend> generation=<ready>
+[wm-frame] host-gpu-presented backend=<host-backend> generation=<ready+1> run=<ready> frame=<ready+1> checksum=<positive>
+[desktop-gui] first-frame-rendered scene_revision=<positive>
+[desktop-gui-arm64] desktop-ready revision=<same-positive-revision>
+```
+
+This production gate is additive: it never substitutes for the 64x48
+ProcessingIR receipt. TODO 548 still prevents a fresh compiler build and QEMU
+execution, so the wrapper contract is source-level and no fresh live PASS is
+claimed. Cached wrapper reports without the AArch64 production serial-log and
+production-argv evidence keys are invalid and must fail `--validate-report`.
 
 `test/03_system/gui/arm64_wm_ramfb_screendump_spec.spl` is the focused framebuffer
 proof target for this lane. It reuses the repo QMP harness, waits for

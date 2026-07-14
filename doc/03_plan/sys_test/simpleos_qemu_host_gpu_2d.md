@@ -21,6 +21,9 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 | production x86 active-VMM mapping, idle-generation submission, validated MMIO presentation, and local fallback | REQ-002,003,005,006,009,010; NFR-001,004 |
 | resolved TEXT preflight, canonical glyph material, exact CPU/Vulkan parity, and device provenance | REQ-003,005,006,010; NFR-001 |
 | exact device-backed ProcessingIR result | REQ-004,007; NFR-002,004 |
+| mandatory AArch64 production desktop boot after the unchanged 64x48 render/Draw IR/ProcessingIR probe | REQ-002,003,004,005,006,007,009,010,011,012; NFR-001,002,004,008,009 |
+| exact AArch64 production argv with RAMFB and the same daemon/shared-memory/RSS-monitor lifecycle | REQ-006,011,012; NFR-005,006,008,009 |
+| correlated host-GPU ready -> presented -> first-frame -> desktop-ready production evidence | REQ-003,005,006,009,010,011,012; NFR-001,004,007,008,009 |
 | native Metal nonzero FillU32, terminal command status, pointer readback, identity, and CPU parity | REQ-004,007,008; NFR-002,004 |
 | honest cross-host backend classification | REQ-008,009 |
 | malformed and stale input rejection | REQ-010; NFR-007 |
@@ -51,6 +54,36 @@ the wrong ISA machine/kernel, missing or altered shared-memory object, extra
 arguments, and any ivshmem device not bound to `hostgpu`. This proves evidence
 completeness only; NFR latency and combined QEMU-plus-daemon RSS targets still
 require fresh measured rows.
+
+The AArch64 pass contract has two mandatory boots under one wrapper-owned
+lifecycle. The first remains the 64x48 raw-render, Draw IR, and independent
+ProcessingIR probe. Only after it passes may the wrapper boot
+`arm64-desktop-engine2d` against the same daemon, shared-memory file, and
+maximum-RSS monitor. The second encoded argv must select the desktop ELF,
+`virt`, `cortex-a72`, 512 MiB memory, `-nographic`, `ramfb`,
+`virtio-net-pci`, and the exact shared `hostgpu` object/device binding in the
+wrapper-defined order, with no extra argument. Its serial evidence must order host-GPU ready, correlated presented
+frame, positive canonical first frame, and matching positive desktop-ready
+revision. Ready generation equals presented run; presented generation equals
+frame and is exactly ready generation plus one; backend matches the active host
+contract; checksum is positive. Ready also continues the probe's final
+ProcessingIR generation by the shared Metal/DirectX/Vulkan attempt position,
+proving one daemon lifecycle. The production phase cannot replace or excuse a
+missing ProcessingIR receipt.
+
+A passing active AArch64 report must promote both production serial-log and
+production-argv evidence keys and revalidate their contents from disk. Cached
+reports lacking either key are invalid, including reports that passed the old
+three-receipt contract. TODO 548 currently blocks a fresh build and QEMU run,
+so the source-level wiring is not live PASS evidence.
+
+## Manual Step
+
+The exact manual SSpec step is:
+
+```text
+Prove the AArch64 production desktop frame
+```
 
 The focused Vulkan unit boundary renders CLEAR plus solid RECT on a real or
 lavapipe device and requires exact pixels, `device_readback`, a positive

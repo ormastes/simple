@@ -232,9 +232,40 @@ sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --validate-report build/sim
 
 It builds `simpleos-host-gpu-x86_64`, `simpleos-host-gpu-aarch64`, and
 `simpleos-host-gpu-riscv64` through `_QemuRunner`, starts the strict host
-daemon over one bounded ivshmem region per row, and requires exact Vulkan
-render plus ProcessingIR device readback. Linux Vulkan rendering and the native
-CUDA ProcessingIR executor are implemented with Vulkan ProcessingIR fallback;
+daemon over one bounded ivshmem region per row, and requires the existing
+64x48 raw-render, Draw IR, and independent ProcessingIR device-readback probe.
+The AArch64 row has a second mandatory phase: after that probe passes, the
+wrapper boots `arm64-desktop-engine2d` while retaining the same daemon, shared
+memory file, and maximum-RSS monitor. The production phase does not replace or
+weaken the 64x48 probe. Its ready generation must continue the probe's final
+ProcessingIR generation according to the shared Metal, DirectX, then Vulkan
+negotiation order, proving both boots used one daemon session rather than two
+independent valid logs.
+
+The second QEMU argument vector must have this exact token shape (with the
+row-owned shared-memory path substituted for `<row-shm>`):
+
+```text
+-machine virt -cpu cortex-a72 -m 512M
+-kernel build/os/simpleos_arm64_desktop_engine2d.elf
+-nographic
+-device ramfb
+-device virtio-net-pci
+-object memory-backend-file,id=hostgpu,share=on,mem-path=<row-shm>,size=8M
+-device ivshmem-plain,memdev=hostgpu
+```
+
+A production pass requires the serial
+sequence `[wm-frame] host-gpu-ready` -> `[wm-frame] host-gpu-presented` ->
+`[desktop-gui] first-frame-rendered` ->
+`[desktop-gui-arm64] desktop-ready`, together with successful RAMFB
+configuration. The selected backend must match the host contract; the
+presented run must equal the ready generation; the presented generation and
+frame must be equal and exactly one newer; its checksum must be positive; and
+the two desktop revisions must be equal and positive.
+
+Linux Vulkan rendering and the native CUDA ProcessingIR executor are
+implemented with Vulkan ProcessingIR fallback;
 refreshed cross-ISA CUDA receipts
 are still required. macOS Metal Draw IR execution is implemented but remains
 `unsupported` evidence until a prepared native host produces a fresh receipt.
@@ -245,16 +276,17 @@ fresh receipts; a bounded native D3D11 owner is implemented, but its API name
 alone is not proof. The host Draw IR executor retains the parent Vulkan or Metal
 session for bounded smaller WM surfaces, requires child device readback, and
 applies canonical embedding opacity through checked native parent src-over.
-The current wrapper fixture remains
-full-frame, so fresh production-WM QEMU evidence is still required even though
-the production selection seam is wired.
-The additive `arm64-desktop-engine2d` scenario now supplies the canonical
-RAMFB/`DesktopShell` build target; the host-GPU wrapper still needs a correlated
-production-frame validator before this source wiring can become live evidence.
+The additive `arm64-desktop-engine2d` scenario supplies the canonical
+RAMFB/`DesktopShell` build target, and the wrapper source now defines the
+correlated production-frame gate above. TODO 548 still blocks a fresh build and
+execution, so this source-level contract is not a fresh live PASS.
 Cached reports are accepted only through `--validate-report`: an overall status
 cannot promote the lane unless all nine host/ISA rows are well-formed and a
 passing active host carries three existing serial logs with exact correlated
-render, Draw IR, and ProcessingIR receipts. Every passing row must also contain
+render, Draw IR, and ProcessingIR receipts. A passing active AArch64 row must
+also carry its production serial-log and exact production-argv evidence keys;
+cached reports created before those keys existed are invalid and cannot be
+promoted. Every passing row must also contain
 the actual QEMU version, a reversible comma-delimited per-argument hex encoding
 of its exact argument vector, positive maximum-observed daemon RSS, protocol
 version, positive operation timings, and matching run/frame identities. The
