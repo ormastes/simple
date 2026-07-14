@@ -144,3 +144,21 @@ refactor — both bootstrap-scoped / WM owner's call. Same class as the web JIT 
 
 NET: O(n^2) heap bug FIXED+VERIFIED; full 4K PASS still blocked by the compositor
 native-build failure.
+
+## Update (2026-07-14): compositor native-build failure is a CLUSTER of seed limitations (pure-Simple workarounds exhausted)
+Tried a free-function extractor workaround (pass the ANY-erased poll_mouse() result
+to `fn _mouse_event_abs_x(ev: MouseEvent) -> i32`) — the typed parameter DID clear
+the `struct 'ANY' field 'abs_x'` field-access error. But native-build then surfaced
+MORE seed gaps in the same code, each a separate limitation:
+- `ev.left_down()` and `ev.abs_x.to_i32()` METHOD calls lower to `const-0`
+  placeholders (`[mir-lower] WARNING: unresolved method call ... lowered to const-0
+  placeholder (silent-null risk, Task #145)`) — i.e. even if it linked, the mouse
+  coords/button would be constant 0 (broken), because `ev.abs_x`'s result type is
+  not propagated so the chained `.to_i32()` receiver is unresolved.
+- inlining `left_down()` to `(ev.button_state & 1) != 0` cleared that one, but
+  `to_i32` const-0 remained.
+So the compositor is blocked by a CLUSTER of native-build MIR/HIR limitations
+(trait-method-return ANY erasure + field-result-type non-propagation + method
+const-0 placeholders), not a single idiom. All workarounds REVERTED. This is
+seed-compiler (SIMPLE_BOOTSTRAP native-build) work — the same class as the web JIT
+gaps. The O(n^2) heap fix (`1fe2653d`) stands and is verified.
