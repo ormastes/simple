@@ -86,19 +86,22 @@ complex shaping, complete REQ-008 format behavior, or GPU execution.
 ### Sparse coverage
 
 - 10 languages × 10 categories = exactly 100 unique cells.
-- Current status totals are 57 `native`, 1 `fallback`, 26
-  `not-designed-for-script`, and 16 `unavailable`.
-- Chinese sans is native and Chinese mono is the sole fallback. Hindi mono,
-  Urdu serif, and emoji remain unavailable; Russian display remains not
-  designed for that script.
+- Current source-policy totals are 57 `native`, 4 `fallback`, 26
+  `not-designed-for-script`, and 13 `unavailable`.
+- Chinese mono falls back to Noto Sans SC; Hindi, Arabic, and Urdu mono fall
+  back to their accepted script sans faces. Hindi, Arabic, and Urdu serif remain
+  unavailable pending exact per-face oracles. Emoji remains unavailable.
+  Russian display remains not designed for that script.
 
 ### Corpus and accepted-simple policy gate
 
-- Eleven manifest entries are accepted: nine identity-profile families plus
-  Noto Sans Devanagari and Noto Sans Arabic. Five remain `candidate:`. Cmap
+- Eleven manifest entries are accepted: nine identity-profile families plus the
+  sans Devanagari/Arabic selected-shaping faces. The two serif script faces,
+  Noto Emoji, and two Bengali rank-eleven faces remain `candidate:`. Cmap
   metadata or raster diagnostics alone still cannot accept a cell; the shaping
-  gate adds exact Hindi `hi` through the `हिन्दी` `dev2` witness and the exact
-  pinned Arabic `العربية` / Urdu `اردو` lookup-vector witnesses.
+  gate adds exact Hindi `hi` through the `हिन्दी` `dev2` witness for Noto Sans
+  Devanagari and the exact pinned Arabic `العربية` / Urdu `اردو` lookup-vector
+  witnesses for Noto Sans Arabic.
 - The existing `FontRasterizer` facade loads every pinned face and exercises its
   exact applicable `CORPUS.sdn` codepoints across Latin, Han, Devanagari,
   Arabic, Urdu, Cyrillic, Bengali rank 11, and Common `U+1F600` emoji.
@@ -111,15 +114,16 @@ complex shaping, complete REQ-008 format behavior, or GPU execution.
   names from each real binary. Both native loader owners call the
   structural bool preflight before native state mutation; typed reasons are
   retained as scenario evidence.
-- The bound shaping gate promotes 54 identity native cells, one exact Hindi
-  selected-script native cell, and two exact Arabic/Urdu cells, for 57
-  `native`, 1 `fallback`, 26 `not-designed-for-script`, and 16 `unavailable`. This manifest validates
-  that policy but adds no shaping rows beyond the shaping gate.
+- The bound shaping gate promotes 54 identity native cells and three selected-script
+  sans cells, for 57 `native`, 4 explicit script-sans mono `fallback` cells, 26
+  `not-designed-for-script`, and 13 `unavailable`. This manifest validates that
+  source policy but adds no shaping rows beyond the shaping gate.
 - The focused shaping SSpec preserves exact CORPUS
   source/cluster/language/script metadata for the 54-cell identity subset and
-  separately checks exact Hindi `हिन्दी` and the two exact Arabic/Urdu
-  witnesses; other complex sequences remain incomplete. This manifest does not
-  extend that evidence or substitute for the shaping spec's current run.
+  separately checks exact Hindi `हिन्दी` and Arabic/Urdu witnesses through the
+  accepted sans faces, plus exact single-`U+1F600` material; other complex and emoji
+  sequences remain incomplete. This manifest does not extend that evidence or
+  substitute for the shaping spec's current run.
 - A test-only raw sfnt oracle independently identifies 14 compound-bearing
   faces and the exact 76 compound corpus roots/124 direct components. Every
   mapped root must produce a nonempty Pure Simple outline; this adds no native

@@ -19,20 +19,20 @@ plugin interface, renderer factory, or new native dependency.
 
 | Existing path | Kept responsibility |
 |---|---|
-| `src/lib/common/encoding/font_registry.spl` | Static pinned language/category catalog; nine identity-profile families plus the exact Noto Sans Devanagari and Noto Sans Arabic witness faces are accepted (11 total), while five candidates remain gated. `selected_font_asset_for_language_category` resolves only accepted `native`/`fallback` cells to bundled candidates. |
+| `src/lib/common/encoding/font_registry.spl` | Static pinned language/category catalog; nine identity-profile families plus sans Devanagari/Arabic witness faces are accepted (11 total). Serif Devanagari/Arabic, Noto Emoji, and two rank-eleven Bengali faces remain candidates. `selected_font_asset_for_language_category` resolves only accepted `native`/`fallback` cells to bundled candidates. |
 | `src/lib/common/encoding/font_cldr_rank.spl` | Targeted, exact-arithmetic CLDR ranking core with fixture evidence; validating XML input and pinned-source replay remain gates. |
 | `src/lib/common/encoding/sfnt.spl` | Neutral sfnt directory/fvar owner and typed default-`glyf` preflight shared by both production loaders; the old Skia parser modules are compatibility re-exports. |
 | `src/lib/common/gpu/font_atlas_composite.spl` | Shared atlas subrect/color material plus exact OpenCL, Metal, and Vulkan GLSL sources used by compiler emission and runtime adapters. |
 | `src/lib/nogc_sync_mut/text_layout/font_types.spl` | Canonical shared values; owns `FontGlyphRun`, `FontRenderQuad`, `FontRenderBatch`, `FontRenderConfig`, `FontExecutionPolicy`, and the pure execution-plan function. `FontGlyphRun` carries the exact revocable face handle/generation pair plus logical codepoint clusters; consumers validate liveness and never dereference the handle directly. |
 | `src/lib/nogc_sync_mut/text_layout/font_renderer.spl` | Canonical renderer, glyph cache, CPU payload; gains `prepare_text`, the bound glyph-run adapter, and fail-closed sfnt preflight before native loading. |
 | `src/lib/common/ui/draw_ir.spl` and `draw_ir_sdn.spl` | Handle-free `DrawIrGlyphRunPayload` plus selected identity/ordered advances; shaped glyph IDs, positions, and logical clusters round-trip as semantic Draw IR while native faces, atlases, and caches remain executor-private. |
-| `src/lib/skia/feature/shaper/shaper.spl` and `src/lib/skia/feature/text/bidi.spl` | Existing Pure Simple shaping/BiDi owners; exact per-fallback-face `OtFont` binding plus glyph/source/cluster/language/current-placement metadata are present. The 54 no-feature identity cells, exact Hindi `hi` source oracle, and exact pinned Arabic/Urdu lookup-vector witnesses are accepted. One whole-run `U+1F600` scalar now has an exact monochrome candidate material gate but remains unpromoted pending execution. General GSUB/GPOS, marks, positioning, canonical language expansion, full BiDi, and emoji sequences remain gated. |
+| `src/lib/skia/feature/shaper/shaper.spl` and `src/lib/skia/feature/text/bidi.spl` | Existing Pure Simple shaping/BiDi owners; exact per-fallback-face `OtFont` binding plus glyph/source/cluster/language/current-placement metadata are present. Source policy accepts the 54 no-feature identity cells, sans Hindi and Arabic/Urdu witnesses, and four script-sans mono fallbacks. Serif complex-script faces, Emoji, general GSUB/GPOS, marks, positioning, canonical language expansion, full BiDi, and the refreshed execution proof remain gated. |
 | `src/compiler/70.backend/backend/gpu_portable_compute.spl` | Portable CUDA/HIP/OpenCL/Metal/WGSL artifacts; gains the atlas-composite emitter. |
 | `src/compiler/70.backend/backend/gpu_generated_2d_contract.spl` | Version, symbol, compile-plan, and artifact evidence. |
 | `src/lib/gc_async_mut/gpu/engine2d/engine.spl` | Existing `load_font`/`draw_text` adapter; routes one canonical batch through CUDA, Metal, OpenCL, Vulkan, then the CPU suffix fallback. |
 | `src/lib/gc_async_mut/gpu/engine3d/engine.spl` | HUD/world facade and CPU fallback; an optional Vulkan adapter owns dedicated pipelines, R8 atlas upload, depth, fence, and device readback without changing the shared batch. |
 | `src/lib/gc_async_mut/gpu/engine2d/backend_{cuda,metal,opencl,vulkan}*.spl` | Backend-private upload/submission state keyed by the shared atlas owner and generation. Source wiring is not native promotion evidence. |
-| Web semantic/layout, GUI widget/scene, and shared WM scene producers | Preserve selected identity/advances in `DrawIrComposition`; Engine2D is the sole vector-material executor. “WebIR” names the existing web semantic/layout layer, not a second drawing IR. The legacy SimpleOS WM remains bitmap/direct text pending migration. |
+| Web semantic/layout, GUI widget/scene, and shared WM scene producers | Preserve selected identity/advances in `DrawIrComposition`; Engine2D is the sole vector-material executor. “WebIR” names the existing web semantic/layout layer, not a second drawing IR. The canonical SimpleOS runner/readiness targets select the Draw IR/Engine2D desktop. Hosted `HostCompositor` remains on compatibility direct renderers; direct legacy `wm_entry.spl` files are compatibility-only. |
 
 Compatibility re-export trees continue to expose the canonical
 `nogc_sync_mut.text_layout` values. Generated copies must not acquire private
@@ -171,12 +171,13 @@ The completion topology keeps all remaining paths on existing owners:
 ```text
 Web semantic/layout ─┐
 Widget/GUI scene ────┼─> DrawIrComposition ─> Engine2D.draw_text
-WM scene ────────────┘                           │
+SharedWmScene ───────┘                           │
                                                  └─> FontRenderer/FontRenderBatch
 
 Engine3D.draw_text_{hud,world} ─────────────────────> same FontRenderer/FontRenderBatch
-SimpleOS desktop witness ─> Engine2D ─> staged FontAssetCandidate
-SimpleOS legacy WM - - planned migration - -> DrawIrComposition/Engine2D
+SimpleOS canonical desktop ─> Engine2dWmFrameExecutor ─> path above + staged FontAssetCandidate
+Hosted HostCompositor - - migration pending - -> path above
+Direct arch/*/wm_entry.spl invocation - - compatibility only; not a canonical target
 ```
 
 Legacy commands without `font-identity` retain bitmap text. Identified commands
@@ -189,9 +190,15 @@ timers rather than adding a benchmark-only renderer, cache, or upload path.
 
 Current source includes the pinned catalog/matrix, canonical CPU preparation,
 CUDA/Metal/OpenCL/Vulkan Engine2D atlas submission with suffix fallback, and an
-optional Vulkan Engine3D HUD/world adapter. Host Web/GUI/shared-WM producers
-lower through Draw IR and Engine2D. SimpleOS stages the pinned face and has a
-single desktop evidence witness; its legacy WM text path is not yet migrated.
+optional Vulkan Engine3D HUD/world adapter. Web and widget/GUI producers lower
+through Draw IR and Engine2D. Canonical SimpleOS ARM64/x86_64 runner/readiness
+targets select `gui_entry_desktop.spl`, which lowers its `SharedWmScene` through
+`Engine2dWmFrameExecutor`; direct legacy `wm_entry.spl` files remain
+compatibility-only. Hosted `HostCompositor` still ends in
+`shared_wm_scene_render_taskbar_context_to_{backend,pixel_buffer}`. That
+compatibility renderer is not a selected-font completion path. SimpleOS stages
+the pinned face and has a desktop evidence witness, but the canonical QEMU pixel
+gate still needs a retained PASS.
 Widget producers read existing `lang`/`font-family` properties, and
 `SharedWmWindow.language` preserves explicit WM language; absent metadata stays
 `und` and retains the previous Noto Sans Mono behavior.

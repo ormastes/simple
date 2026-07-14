@@ -316,8 +316,15 @@ setup/readback, but it must contain real assertions and must not replace
 
 For GUI/web font work, assert semantic `DrawIrComposition` text/style before
 backend/readback evidence. When vector text is enabled, `FontRenderBatch` is
-transient Engine2D-executor material, not WebRender IR or Draw IR. Reject evidence built on an app-private
-font draw path or on Engine3D HUD/world as a GUI/web/2D shortcut.
+transient Engine2D-executor material, not WebRender IR or Draw IR. The canonical
+WM frame route is `SharedWmScene -> DrawIrComposition -> Engine2D`;
+`shared_wm_scene_render_*_to_backend` and `_to_pixel_buffer` are compatibility
+renderers, not selected-font completion. Reject evidence built on an app-private
+font draw path or on Engine3D HUD/world as a GUI/web/2D shortcut. A synthetic
+composition is supporting evidence only: production acceptance must exercise
+the real hosted frame owner, canonical SimpleOS entry wiring, and the retained
+QEMU framebuffer crop, with platform backends limited to final-pixel
+presentation.
 
 For RenderDoc evidence, use the shared helper interface instead of spelling
 `renderdoccmd` directly in each spec or check script:

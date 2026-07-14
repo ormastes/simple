@@ -61,3 +61,14 @@ exact ten-language/ten-category sparse matrix, prepares one canonical
 an optional Vulkan Engine3D HUD/world adapter. Web semantic/layout, GUI, WM, and
 SimpleOS converge through Draw IR and Engine2D. Native GPU, QEMU pixel, warm
 performance, and canonical docgen evidence remain fail-closed and unpromoted.
+
+## Current-state correction — 2026-07-14
+
+The final sentence above was too broad. Web and widget/GUI composition producers
+and the canonical SimpleOS desktop use the intended Draw IR/Engine2D ownership.
+The hosted `HostCompositor.render_frame` still lowers its `SharedWmScene` through
+the compatibility backend/pixel-buffer renderers. Canonical ARM64/x86_64
+runner/readiness targets now select `gui_entry_desktop.spl`; direct legacy
+`wm_entry.spl` files remain compatibility-only. The hosted frame owner remains
+migration work. The latest retained SimpleOS fullscreen report also failed before
+QEMU pixel acceptance, so source-complete canonical routing is runtime-unproven.

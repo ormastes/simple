@@ -356,17 +356,25 @@ Hard-won lessons for this live lane (each cost hours):
   stdlib module, and for the general interpret-mode-extern /
   baked-module-table constraints behind it.
 
-- **Common.ui window-scene render executor is now the single render funnel
-  for host + SimpleOS internal windows (task #27):**
-  `src/lib/common/ui/window_scene.spl` gained a `shared_wm_scene_render_to_backend`
-  executor path (backed by the Draw IR builder in
-  `src/lib/common/ui/window_scene_draw_ir.spl`) that both the host compositor
-  lane (`os.compositor.host_compositor_entry`, via the
-  `shared_mdi_scene_from_render_windows` /
-  `shared_mdi_render_windows_from_simple_gui_scene` bridge functions in
-  `src/os/compositor/shared_mdi_framebuffer_scene.spl`) and SimpleOS's
-  internal-window rendering now funnel through, instead of each lane building
-  its own titlebar/background paint logic. Per-window `chrome_kind` is
+- **Current frame/font ownership correction (2026-07-14):** the canonical
+  selected-font funnel is `SharedWmScene -> DrawIrComposition -> Engine2D`,
+  using `shared_wm_scene_draw_ir_composition_with_content` and an Engine2D frame
+  executor. The canonical SimpleOS desktop uses it. Hosted
+  `HostCompositor.render_frame` still ends in
+  `shared_wm_scene_render_taskbar_context_to_{backend,pixel_buffer}`, and legacy
+  architecture `wm_entry.spl` targets still draw bitmap text directly. Those
+  functions are compatibility renderers, not an equivalent Draw IR executor;
+  migrate their frame owners rather than adding a backend-private font loader,
+  atlas, cache, or draw path. Production evidence must cover the real hosted
+  frame owner and retain the independent SimpleOS QEMU framebuffer crop; a
+  builder-only composition fixture is supporting evidence.
+
+- **Historical shared compatibility funnel (task #27):**
+  `src/lib/common/ui/window_scene.spl` added a
+  `shared_wm_scene_render_to_backend` path that consolidated titlebar/background
+  paint logic before the canonical composition executor existed. It remains
+  useful for bitmap compatibility and pixel-parity tests, but must not be cited
+  as selected-font completion. Per-window `chrome_kind` is
   `"titled"` (default, paints the titlebar band) or `"borderless"` (no
   titlebar chrome pixels — for taskbar-like or frameless windows). Background
   painting goes through a `BackgroundSpec` provider: `kind: "color"` is

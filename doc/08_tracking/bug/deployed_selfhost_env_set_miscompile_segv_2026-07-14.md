@@ -73,6 +73,13 @@ the point where HIR lowering already knows the entry, avoiding rediscovery
 through the seed-fragile HIR dictionary. This source fix and its regression have
 bounded static review, but the three-cycle cap was reached before native proof.
 
+A later one-shot proof used the newest available pure-Simple stage-55 driver,
+the repaired narrow test entry, an isolated cache, one worker, and a 30-minute
+hard timeout. It stayed CPU-active, reached about 31.8 GiB RSS, emitted no log,
+cache file, object, or candidate, and exited 124 at the outer timeout. Therefore
+the explicit entry-HIR repair remains statically approved but runtime-unproven;
+this attempt was not retried.
+
 ## Required fix and gate
 
 Rebuild the bootstrap parser/runtime from current sources, make the full CLI

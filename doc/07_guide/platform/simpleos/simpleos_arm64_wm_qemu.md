@@ -1,18 +1,16 @@
 # SimpleOS ARM64 WM QEMU Verification
 
-This lane verifies the pure Simple ARM64 glass window manager entry under
+This lane verifies the canonical Simple ARM64 Engine2D desktop entry under
 `qemu-system-aarch64` with QEMU `ramfb`.
 
 ## Build
 
-Use an LLVM-enabled Simple driver. On macOS with Homebrew LLVM 18:
+Use an LLVM-enabled pure-Simple self-hosted release driver. The Rust driver is
+bootstrap-only and is not a verification fallback. On Apple Silicon, set:
 
 ```bash
-LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18 \
-PATH=/opt/homebrew/opt/llvm@18/bin:$PATH \
-LIBRARY_PATH=/opt/homebrew/opt/zstd/lib:$LIBRARY_PATH \
-cargo build --manifest-path src/compiler_rust/Cargo.toml \
-  -p simple-driver --features llvm
+SIMPLE=bin/release/aarch64-apple-darwin/simple
+test -x "$SIMPLE"
 ```
 
 Build the WM kernel:
@@ -22,10 +20,10 @@ SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=src SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
 LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18 \
 PATH=/opt/homebrew/opt/llvm@18/bin:$PATH \
 LIBRARY_PATH=/opt/homebrew/opt/zstd/lib:$LIBRARY_PATH \
-src/compiler_rust/target/debug/simple native-build \
-  --source build/os/generated --source src/os --source examples/09_embedded/simple_os \
+"$SIMPLE" native-build \
+  --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os \
   --backend llvm --opt-level=aggressive --log on --timeout 180 \
-  --entry-closure --entry examples/09_embedded/simple_os/arch/arm64/wm_entry.spl \
+  --entry-closure --entry examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl \
   --target aarch64-unknown-none \
   -o build/os/simpleos_arm64_wm.elf \
   --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld
@@ -80,14 +78,16 @@ The repo QEMU runner exposes the same lane as the named scenario
 builds/runs:
 
 ```text
-examples/09_embedded/simple_os/arch/arm64/wm_entry.spl
+examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl
 build/os/simpleos_arm64_wm.elf
-qemu-system-aarch64 -machine virt -cpu <host|cortex-a57> -accel <hvf|kvm|tcg> -m 384M -kernel build/os/simpleos_arm64_wm.elf -device ramfb
+qemu-system-aarch64 -machine virt -cpu <host|cortex-a57> -accel <hvf|tcg> -m 384M -kernel build/os/simpleos_arm64_wm.elf -device ramfb
 ```
 
-This is a build/run command contract for the existing scenario machinery. It
-does not replace the serial-marker acceptance gate below and does not claim
-that the ARM64 WM kernel currently boots to a rendered frame.
+The runner selects HVF/`host` on Apple Silicon and portable TCG/`cortex-a57`
+otherwise. The separate readiness script may select KVM on a capable Linux
+ARM64 host. This build/run command contract does not replace the serial-marker
+acceptance gate below or claim that the kernel currently boots to a rendered
+frame.
 
 ## Runner CLI Contract
 
@@ -105,8 +105,9 @@ listed below. The runner uses a persistent serial file for this lane so a guest
 that reaches the WM markers and then keeps running is still usable evidence;
 scenario wiring and command construction alone are not boot evidence.
 
-The legacy glass demo above remains frozen. The canonical Engine2D desktop is
-an additive scenario:
+The WM RAMFB lane above and the dedicated desktop scenario both select the
+canonical Engine2D desktop entry while retaining their distinct output and
+QEMU launch contracts:
 
 ```bash
 bin/simple os build --scenario=arm64-desktop-engine2d
@@ -156,7 +157,7 @@ production-argv evidence keys are invalid and must fail `--validate-report`.
 
 `test/03_system/gui/arm64_wm_ramfb_screendump_spec.spl` is the focused framebuffer
 proof target for this lane. It reuses the repo QMP harness, waits for
-`[WM] Glass desktop rendered!`, requests a QMP `screendump`, validates the PPM
+`[desktop-gui-arm64] desktop-ready revision=`, requests a QMP `screendump`, validates the PPM
 header, and asserts that a real framebuffer image was produced. If the ARM64
 native build is blocked, this spec writes
 `build/os/arm64_wm_ramfb_screendump.blocker.txt` before any framebuffer claim
@@ -167,18 +168,16 @@ can be made.
 The serial log must include:
 
 ```text
-[WM] Framebuffer allocated and registered
+[desktop-gui-arm64] boot
 [WM] fw_cfg sig: 81 69 77 85
 [WM] Found etc/ramfb in fw_cfg
 [WM] ramfb configured successfully via fw_cfg DMA
-[WM] Glass desktop rendered!
-[WM] Controls (UART): Tab=cycle, 1/2/3=focus, t=theme, m=minimize, r=restore, q=quit
+[desktop-gui-arm64] desktop-ready revision=<positive>
 ```
 
 Notes:
 - QEMU `virt` fw_cfg MMIO is accessed at `0x09020000`.
 - `ramfb` uses fw_cfg selector discovery for `etc/ramfb`, then writes the
   framebuffer descriptor with fw_cfg DMA.
-- The ARM64 verification path keeps the WM in Simple and uses direct bar/dock
-  drawing primitives so the QEMU render lane does not depend on the layout
-  engine.
+- The ARM64 verification path renders compositor-owned surfaces through
+  `DesktopShell` and `Engine2dWmFrameExecutor`.

@@ -409,6 +409,13 @@ font GPU emission, or GUI/Web/2D/3D text.
 5. Web and GUI producers emit `DrawIrComposition`; Engine2D lowers its text
    through `draw_text`. Engine3D HUD/world text is a separate consumer lane,
    never a shortcut for Web, GUI, Draw IR, or 2D.
+   The canonical WM frame path is `SharedWmScene -> DrawIrComposition ->
+   Engine2D`; `shared_wm_scene_render_*_to_backend` and `_to_pixel_buffer` are
+   compatibility renderers, not equivalent completion paths. Canonical
+   SimpleOS runner/readiness targets select `gui_entry_desktop.spl`; direct
+   legacy `wm_entry.spl` files remain compatibility-only and are not evidence.
+   Hosted `HostCompositor` remains incomplete until its frame owner uses the
+   canonical composition executor.
    In this lane `WebIR` means the existing web semantic/layout model; do not
    invent a second drawing IR or store glyph/atlas/native material in it.
    Producer-resolved shaping may cross Draw IR only as handle-free glyph IDs,
@@ -440,11 +447,15 @@ font GPU emission, or GUI/Web/2D/3D text.
 10. WM/GUI/Web/2D selected-font evidence must bind Web layout and Draw IR paint
     to one stable manifest identity and the same ordered advances. Preserving
     `font-family` metadata or selecting a TTF only during paint is incomplete;
-    unstyled legacy Draw IR must remain bitmap-compatible.
+    unstyled legacy Draw IR must remain bitmap-compatible. A synthetic
+    composition proves the contract only; production-route acceptance must
+    exercise the real hosted frame owner and canonical SimpleOS entry, with
+    platform backends limited to final-pixel presentation.
 11. SimpleOS font-host claims must reuse `FontAssetCandidate`, stage the exact
     pinned bytes through every applicable disk/initramfs builder, and prove
     guest path/length/hash plus glyph and framebuffer evidence. Host-repository
-    asset presence is not guest proof.
+    asset presence is not guest proof. Source wiring or a serial marker is not
+    pixel proof; retain the independent QEMU `pmemsave` crop and evidence record.
 12. Runtime font configuration uses the one text-layout-owned
     `FontRenderConfig` beside `FontRenderBatch`. Evidence
     must vary and assert every family/category/language/script, size,

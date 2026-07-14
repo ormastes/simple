@@ -36,6 +36,10 @@ bootstrap entry-HIR handoff failure; it now carries the entry HIR explicitly in
 `CompileContext`, but the bounded build cap ended before native proof. None is a
 valid replacement for deployed pure-Simple verification.
 
+The subsequent isolated proof with the latest pure-Simple stage-55 driver also
+timed out after 30 minutes with no log, cache file, candidate, or executable
+font-spec result. It retained no positive evidence and was not retried.
+
 ## Required fix/evidence
 
 Fix and redeploy the pure-Simple CLI, then run each once:

@@ -21,8 +21,8 @@ stdout. The executable source contains seven scenarios.
    face to its live handle/generation.
 2. Load each of the nine identity-profile families once, require every
    handle/generation live, and exercise 55 unique language/category cells:
-   54 native identity cells and one Chinese mono fallback. Noto Sans Devanagari
-   is loaded separately by the selected-script flow.
+   54 native identity cells and one Chinese mono fallback. The selected-script
+   and exact emoji faces are loaded separately by their focused flows.
 3. Shape the exact corpus witnesses `English`, `中文`, `Español`, `français`,
    `Português`, `Русский`, and `Indonesia` for every applicable category.
 4. Require distinct live Noto Sans Mono and Noto Sans SC handles, Chinese to
@@ -49,27 +49,27 @@ stdout. The executable source contains seven scenarios.
 
 ## Shape selected Unicode scripts with the pinned face
 
-1. Shape the pinned Arabic and Urdu joining witnesses through the bounded,
-   table-derived candidate and require complete, renderable runs. The focused
-   unit oracle independently pins glyphs, duplicate clusters, advances, and
-   x/y offsets; those exact language/face tuples are cataloged as native.
-2. Shape the exact Hindi `हिन्दी` witness through the bounded selected `dev2`
-   path and require a complete, renderable exact-face run.
+1. Shape the pinned Arabic and Urdu joining witnesses through Noto Sans Arabic
+   and require complete, renderable runs. The
+   focused unit oracle independently pins glyphs, duplicate clusters, advances,
+   and x/y offsets; those exact language/face tuples are cataloged as native.
+2. Shape the exact Hindi `हिन्दी` witness through Noto Sans Devanagari with the
+   bounded selected `dev2` path and require a complete, renderable exact-face run.
 3. Require Arabic marks and the unselected Hindi `र्क` sequence to remain
    incomplete and invalid.
 4. Build the exact Noto Emoji `U+1F600` run under all ten selected language
    tags, require live-face cmap/runtime agreement and nonempty canonical atlas
-   material, and keep VS/modifier/ZWJ/multi-codepoint sequences invalid. This is
-   a candidate gate, not matrix promotion before execution.
+   material, catalog those exact single-scalar tuples as native, and keep
+   VS/modifier/ZWJ/multi-codepoint sequences invalid.
 
 ## Expected result
 
-On a successful focused rerun, all 54 native identity rows, the single Chinese
-mono fallback, the Noto Sans Devanagari exact Hindi `hi` row, and both bounded
-Arabic/Urdu candidates pass without test-side policy mutation. The promoted
-matrix is 57 `native` plus 1 `fallback`; the remaining cells are 26
-`not-designed-for-script` and 16 `unavailable`. Missing/stale inputs, Arabic
-marks outside the selected witnesses, and other Indic sequences fail closed.
-The new exact emoji candidate must pass this rerun before its ten category
-cells or asset status change; until then the 57/1/26/16 policy remains
-authoritative. This does not prove general emoji or GPU execution.
+On a successful focused rerun, all 54 native identity rows, the four
+script-sans mono fallbacks, the exact Hindi sans face, and the Arabic/Urdu sans
+face pass without test-side policy mutation. The source-policy matrix is 57
+`native` plus 4 `fallback` cells; the remaining cells are 26
+`not-designed-for-script` and 13 `unavailable`. Execution remains pending, so
+this is not current PASS evidence.
+Missing/stale inputs, Arabic marks outside the selected witnesses, other Indic
+sequences, and emoji sequences fail closed. This does not prove general emoji
+or GPU execution.

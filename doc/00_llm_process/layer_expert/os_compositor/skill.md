@@ -45,9 +45,25 @@ When this layer's public contract, source ownership, tests, architecture, or
 verification requirements change, update this skill with the new links and
 handoff notes.
 
-## Handoff Notes (2026-07-03)
+## Current Frame and Font Ownership (2026-07-14)
 
-- Both WM lanes route through the shared CSS/GUI-web renderer
+- The canonical font-capable frame route is `SharedWmScene ->
+  DrawIrComposition -> Engine2D`. `FontRenderBatch` remains transient Engine2D
+  material; platform compositor backends present final pixels and must not own
+  a private font loader, renderer, atlas, or cache.
+- The canonical SimpleOS desktop uses `Engine2dWmFrameExecutor`, and canonical
+  ARM64/x86_64 runner/readiness targets select `gui_entry_desktop.spl`. Direct
+  legacy `wm_entry.spl` files remain compatibility-only, not production-route
+  evidence. Hosted `HostCompositor.render_frame` still ends in the compatibility
+  `shared_wm_scene_render_taskbar_context_to_{backend,pixel_buffer}` calls and
+  remains pending.
+- Route evidence must include the production hosted frame contract and the
+  independent SimpleOS QEMU framebuffer crop. Synthetic composition tests and
+  serial markers are supporting evidence only.
+
+## Historical Handoff Notes (2026-07-03)
+
+- At that point both WM lanes routed through the shared CSS/GUI-web renderer
   (`std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast` /
   `simple_web_html_layout_renderer.spl`, owned by an adjacent browser_engine
   layer, not this one) whenever `engine2d_fast_metal_available()` — that

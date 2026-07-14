@@ -146,8 +146,14 @@ describe "<Feature Name>":
   expected surface exists.
 - GUI/web font specs assert semantic `DrawIrComposition` text/style before
   backend/readback evidence. When vector text is enabled, `FontRenderBatch`
-  remains transient material inside the Engine2D executor; an app-private font draw path or Engine3D HUD/world
-  shortcut is not valid GUI/web/2D evidence.
+  remains transient material inside the Engine2D executor; an app-private font
+  draw path or Engine3D HUD/world shortcut is not valid GUI/web/2D evidence.
+  WM route evidence must distinguish the canonical `SharedWmScene ->
+  DrawIrComposition -> Engine2D` executor from compatibility direct
+  backend/pixel-buffer renderers. A builder-only fixture is supporting evidence:
+  production acceptance must exercise the real hosted frame owner, canonical
+  SimpleOS entry wiring, and independent QEMU framebuffer pixels. Platform
+  backends present final pixels; they do not own a second font path.
 - Shared multilingual font specs use the frozen steps, setup helpers, and
   checkers in `doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`; do not
   rename them or introduce parallel vocabulary. Exact-face acceptance is

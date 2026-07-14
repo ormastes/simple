@@ -72,9 +72,9 @@ nor promotes language/category coverage.
 
 The unchanged binaries and adjacent metadata/licenses are bundled under
 `assets/fonts/google-fonts/` (16 files, 51,764,704 font bytes). Eleven are
-accepted—nine identity-profile families plus the exact Noto Sans Devanagari
-and Noto Sans Arabic witness faces—and five remain candidates pending exact
-executable coverage.
+accepted in source policy—nine identity-profile families plus the sans
+Devanagari and Arabic witness faces. Serif Devanagari/Arabic, Noto Emoji, and
+two rank-eleven Bengali faces remain candidates.
 The canonical font provider now projects all 16 manifest paths and accepts an
 exact, trimmed, case-insensitive family name as a singleton candidate. Encoded
 `@font-face` sources still take priority; generic CSS family heuristics remain
@@ -107,23 +107,19 @@ occurs, and close releases the retained bytes. No coverage cell is promoted.
 
 The manifest scenario prepares exact `CORPUS.sdn` codepoint and raster
 witnesses for all 16 candidates, including Bengali rank 11 and Noto Emoji
-`U+1F600`. The current policy/source retains 54 no-feature identity native
-cells and one fallback, selects Noto Sans Devanagari for exact Hindi `hi`, and
-selects Noto Sans Arabic for the exact Arabic/Urdu witnesses. The matrix totals
-are 57 `native`, 1 `fallback`, 26 `not-designed-for-script`, and 16
-`unavailable`.
+`U+1F600`. The current source policy retains 54 no-feature identity native
+cells, accepts the sans faces for the exact Hindi and Arabic/Urdu witnesses,
+and leaves Emoji unpromoted. The matrix totals are 57 `native`, 4 explicit
+script-sans mono `fallback`, 26 `not-designed-for-script`, and 13
+`unavailable`; refreshed execution remains pending.
 An accepted identity cell means
 the exact pinned face stayed live, parsed cmap and runtime glyph IDs agreed for
 the exact language witness, bounded hmtx advances matched, shaping completed,
-and canonical material was produced. The sole fallback is Chinese `mono`:
-live Noto Sans Mono misses `中文`, and the explicit chain selects live Noto Sans
-SC while retaining the Mono request. The exact Hindi `हिन्दी` `dev2` witness
-is accepted separately. The bounded Arabic/Urdu path validates selected
-Script/LangSys metadata, then executes witness-specific pinned lookup
-indices/forms for the two promoted literals. Other complex sequences,
-emoji/category acceptance, and GPU execution remain incomplete. The exact
-single-scalar `U+1F600` shape-to-material gate exists in source, but policy
-remains unavailable until its focused self-hosted run passes.
+and canonical material was produced. Chinese, Hindi, Arabic, and Urdu `mono`
+use explicit fallbacks to their accepted script sans faces while retaining the
+Mono request. Exact Hindi `हिन्दी` and Arabic/Urdu witnesses cover the accepted
+sans faces; serif remains candidate-only. Other complex sequences, general emoji sequences/color,
+GPU execution, and the refreshed source-policy run remain incomplete.
 
 ## Current shared material
 
@@ -294,10 +290,21 @@ companion artifact for each selected target. The font path uses the
 concatenated with the optimization module (especially for WGSL, whose bindings
 conflict). `check-portable-compute-toolchains.shs` splits the two marked Simple
 emitter outputs and compiles distinct native companions; a target is verified
-only when both artifacts export their required symbols. The same checker emits
-canonical Vulkan GLSL, compiles a distinct `.spv` with glslang/glslc, and
-validates SPIR-V magic plus `main`; install those bytes through
-`Engine2D.install_vulkan_font_spirv`. CUDA compile plans use
+only when both artifacts export their required symbols. Its retained
+`evidence.env` records the configured Simple invocation path/SHA-256 separately
+from its resolved native ELF or Mach-O runtime path/SHA-256, canonical emitter source/version
+hashes, generated-source SHA-256, compiler executable/version,
+and compiled artifact SHA-256/bytes/required symbols. The same checker emits
+canonical Vulkan GLSL and compiles a distinct Vulkan 1.1 `.spv`, preferring the
+pinned artifact's `glslc` recipe with glslang as a fallback, but accepts it only
+when the canonical source and fresh artifact
+match the pinned
+`c94b13736bdf7022835c008c09d714507da4cd0b6ef4607a5eadc9a23549cd2c`
+and `e25d25b8157fc2554822637603471a442f678eb58e20da167bfb023d7577880a`
+identities exactly. A mismatch
+fails closed; the checker does not install its fresh artifact. Production keeps
+using the independently pinned embedded SPIR-V installed by `VulkanSession`.
+CUDA compile plans use
 `nvcc --ptx -o <output> <source>`; the kernel
 symbol is verified from the artifact rather than passed through a nonexistent
 `--entry` option. CUDA, native Metal, OpenCL, and Vulkan are the implemented
@@ -445,13 +452,17 @@ a family selects the accepted sans face for its language.
 
 The unused famous-site fixture fallback and its browser-private atlas compositor
 were removed; active host web text uses the existing HTML ->
-`DrawIrComposition` -> Engine2D route. Other old framebuffer web
-paths still rasterize 5×7 glyphs even when resolved metrics shape their boxes,
-so they remain compatibility behavior rather than final legacy vector-font
-parity. Host Web/GUI/shared-WM producers use their canonical semantic/scene
-owners and the shared Draw IR executor; the legacy SimpleOS WM still uses its
-direct bitmap text calls. The host route still needs a canonical rerun, while
-SimpleOS needs an actual WM migration—not a paint-local second font loader.
+`DrawIrComposition` -> Engine2D route. Other old framebuffer web paths still
+rasterize 5×7 glyphs even when resolved metrics shape their boxes, so they
+remain compatibility behavior rather than final legacy vector-font parity.
+Widget/GUI and shared-WM composition builders use their canonical semantic/scene
+owners. The canonical SimpleOS desktop executes that composition through
+`Engine2dWmFrameExecutor`; canonical ARM64/x86_64 runner/readiness targets now
+select `gui_entry_desktop.spl`. Direct legacy `wm_entry.spl` files still contain
+bitmap text but are compatibility-only, not production-route evidence. Hosted
+`HostCompositor.render_frame` still finishes through direct backend/pixel-buffer
+compatibility renderers and remains the frame-level migration. Do not add a
+paint-local loader, atlas, cache, or private font draw path.
 
 SimpleOS image construction now reuses the exact selected
 `FontAssetCandidate` for Noto Sans Mono. Installer rootfs and initramfs staging
@@ -462,12 +473,12 @@ stage the same bytes at the 8.3-compatible `/SYS/FONTS/NOTOSANS.TTF`; the guest
 uses that path only as a byte-source fallback and still validates and loads the
 canonical registry identity. The VFS read ceiling is 4 MiB, above the pinned
 1,708,408-byte payload. Packaging and a host-side image hash are not guest
-rendering evidence. The SimpleOS desktop evidence entry paints the fixed
-`A`/32 px witness and emits a marker only after hashing live MMIO; this does not
-mean the legacy WM text renderer uses the selected face. The fullscreen QEMU wrapper
-independently hashes the dynamic-scanout `pmemsave` crop and retains its
-artifacts. PASS still requires one successful retained run; the bitmap fallback
-remains supported meanwhile. Do not add a second font draw path or reuse
+rendering evidence. The canonical SimpleOS desktop evidence entry paints the
+fixed `A`/32 px witness through its Draw IR/Engine2D frame and emits a marker
+only after hashing live MMIO. The fullscreen QEMU wrapper independently hashes
+the dynamic-scanout `pmemsave` crop and retains its artifacts. PASS still
+requires one successful retained run; source routing, a marker, and the bitmap
+fallback are not that runtime proof. Do not add a second font draw path or reuse
 Engine3D HUD/world as one.
 
 ## Completion workflow
@@ -488,6 +499,12 @@ Keep the remaining work on the frozen public seams:
 6. Warm performance records cache hit rate and 1,024-glyph p95 at 1080p/4K;
    promotion also records equal-semantics 4,096-glyph CPU/GPU p95, unchanged
    upload behavior, RSS delta, and GPU resource high-water.
+
+Production-route acceptance must exercise the real Web/GUI entry, the hosted
+`HostCompositor` frame owner after its migration, and the canonical SimpleOS
+desktop entry. A synthetic composition-only spec is supporting evidence, not a
+production-route PASS. SimpleOS acceptance additionally requires the retained
+QEMU `pmemsave` pixel oracle.
 
 The authoritative gate list and evidence boundaries are in
 [`doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`](../../03_plan/sys_test/shared_multilingual_gpu_fonts.md).

@@ -134,6 +134,11 @@ rendering **Simple Web MDI app content** through `HostedWinitBufferBackend`
 `comp.pointer_move(x, y)`, `comp.handle_left_button(pressed)` (click-focus,
 titlebar drag, close-X) and keyboard Tab/W/M/R/Esc. (Known bug: its render-on-dirty
 loop leaves content blank on macOS — needs the continuous re-present above.)
+For selected-font claims, this hosted lane is still a compatibility path:
+`HostCompositor.render_frame` lowers through direct backend/pixel-buffer
+renderers. Do not call it canonical until the real frame owner executes
+`SharedWmScene -> DrawIrComposition -> Engine2D`; do not add a private font
+loader, renderer, atlas, or cache to the platform backend.
 
 **The real widget → pixels pipeline** (used by the office apps word/sheets/mail/
 planner and the WM — model app `src/app/wm_compare/production_gui_web_renderer_parity.spl`):

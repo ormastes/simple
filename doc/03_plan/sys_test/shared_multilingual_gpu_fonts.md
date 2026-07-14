@@ -4,7 +4,7 @@
 ## Scope
 
 Six SSpec files cover manifest/assets, exact-face shaping, shared 2D/3D batch,
-legacy Web/GUI/WM routing, portable emission, and native graphics readback. The
+Web/GUI/WM routing, portable emission, and native graphics readback. The
 first five exercise host-available contracts; the sixth is a fail-closed
 promotion gate whose three live evidence rows remain unavailable.
 Unit/integration suites for the
@@ -12,6 +12,11 @@ existing shaper, Engine2D, Engine3D texture path, emitter, and backend readback
 remain supporting evidence; they do not replace these end-to-end scenarios.
 The focused Vulkan integration/manual pair exercises the frozen native-proof
 step for Engine2D only; it does not satisfy the Engine3D promotion gate.
+The route spec's synthetic compositions are supporting contract evidence. A
+production-route PASS additionally requires the real hosted frame owner to use
+`SharedWmScene -> DrawIrComposition -> Engine2D`, canonical SimpleOS entry
+wiring, and retained QEMU framebuffer pixels. Compatibility direct renderers or
+an app-private font path cannot satisfy that gate.
 
 Planned executable/manual pairs:
 
@@ -91,11 +96,11 @@ behavior.
 | REQ-004 | `shared_font_manifest_spec.spl` | complete license metadata; checksum/table validation; missing field rejection | 3 |
 | REQ-005 | `shared_font_manifest_spec.spl` | pinned catalog revision; unchanged accepted bytes; corpus rejection | 3 |
 | REQ-006 | `shared_font_surfaces_spec.spl` | one owner; identical batch identity; no duplicate material cache | 3 |
-| REQ-007 | `shared_font_shaping_acceptance_spec.spl` plus focused unit oracle | exact-face simple-script oracle; exact Hindi `dev2`; bounded Arabic/Urdu vectors; exact monochrome single-`U+1F600` candidate material with sequence rejection | 3/3 accepted source/prior oracle; emoji gate source-complete but unpromoted and unexecuted |
+| REQ-007 | `shared_font_shaping_acceptance_spec.spl` plus focused unit and renderer oracles | exact-face simple-script oracle; exact Hindi `dev2` and bounded Arabic/Urdu vectors on sans; explicit hi/ar/ur mono fallback; Emoji candidate diagnostics | sans source-policy promoted; serif and Emoji faces remain unavailable; focused execution remains pending |
 | REQ-008 | `shared_font_manifest_spec.spl` plus focused sfnt/bitmap unit specs | compound/default-glyf corpus reconstruction; unsupported-format/axis rejection; literal default-variable + bitmap fixtures | 3/3 source; refreshed literal variable oracle execution blocked |
 | REQ-009 | `font_renderer_spec.spl`, backend font unit specs, and `shared_font_surfaces_spec.spl` | live font-identity separation; bounded glyph-cache counters; backend-local atlas owner + generation; unit-proven canonical font-size scale; immutable active-session guard; warm/dirty regions | 2/3 source; rotation/skew/subpixel/nonuniform CTM stay unsupported and native execution remains pending; exact Vulkan artifact reuse is source-complete |
-| REQ-010 | `gpu_font_emission_spec.spl` plus portable toolchain checker | five source targets; Vulkan contract; deterministic failures/hashes; native artifact exports the versioned font entry | source-complete; emitter execution/runtime provenance pending |
-| REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl` | Engine2D API compatibility; DrawIR/batch evidence; legacy Web/GUI/WM CPU parity | 3/4 source: host metadata plus nonblank CPU text oracle; direct SimpleOS/remaining bitmap routes and executable proof pending |
+| REQ-010 | `gpu_font_emission_spec.spl` plus portable toolchain checker | five source targets; Vulkan contract; deterministic failures/hashes; native artifact exports the versioned font entry | source-complete; retained checker provenance and exact pinned-Vulkan identity gates are source-covered; host compiler execution evidence remains pending |
+| REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, production host route contract, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical SimpleOS pixels | composition and canonical SimpleOS runner/readiness selection source-covered; hosted `HostCompositor`, production-route execution, and retained QEMU PASS pending |
 | REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 0/3; fail-closed gate present |
 | REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 0/3; pending gate fails explicitly |
 | REQ-014 | six present specs/manuals | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 2/3; native docgen pending |
@@ -168,7 +173,10 @@ Then run the existing UI SSpec evidence audit and require
 Primary frozen steps stay visible. Fixture construction and reusable checks are
 `@inline`/`@prev`; matrix, corruption, stress, and performance detail is folded.
 Executable SSpec is folded by default. Each generated manual must read as an
-operator flow without opening source and docgen must report zero stubs.
+operator flow without opening source and docgen must report zero stubs. The
+REQ-011 manual must expose the production hosted-frame contract and link the
+retained SimpleOS QEMU pixel artifacts; it must label synthetic compositions and
+compatibility bitmap renderers as supporting evidence rather than PASS.
 
 ## Pass/fail
 
@@ -177,3 +185,8 @@ graphics backend for both 2D and 3D, and all selected thresholds. Missing
 hardware is not a failure for non-promoted rows, but no promoted native row is a
 release failure. Placeholder assertions, environment-only payloads, mirrors, or
 upload-only evidence fail.
+For REQ-011, a builder-only composition fixture is not sufficient: the hosted
+frame owner must execute the canonical composition, platform backends must only
+present final pixels, and the SimpleOS row must retain the independent QEMU
+framebuffer crop. No private renderer, font loader, atlas, or cache may be added
+to close the evidence gap.

@@ -17,14 +17,18 @@ carries handle-free semantic family/identity/advances and shaped glyph IDs,
 positions, and logical clusters, and Engine2D verifies the same identity before
 paint. Unstyled legacy commands remain bitmap-compatible.
 SimpleOS reuses `FontAssetCandidate` and must stage pinned Noto Sans Mono bytes
-through every existing image-builder path before guest WM startup. Its legacy
-WM still needs frame-level Draw IR migration; byte staging is not that proof.
+through every existing image-builder path before guest WM startup. Its canonical
+desktop already executes `SharedWmScene -> DrawIrComposition -> Engine2D` through
+`Engine2dWmFrameExecutor`, and canonical ARM64/x86_64 runner/readiness targets
+select that entry. Direct legacy `wm_entry.spl` files remain compatibility-only.
+Hosted `HostCompositor` still needs frame-level migration; byte staging is not
+runtime proof.
 
-The pinned 10-language × 10-category policy currently proves 57 native cells:
-54 no-feature identity cells, Noto Sans Devanagari for exact Hindi `hi`, and
-Noto Sans Arabic for the exact Arabic/Urdu witnesses; `zh/mono` is the one
-fallback to Noto Sans SC.
-Other complex scripts, emoji sequences/color and the unexecuted single-`U+1F600` promotion, general GSUB/GPOS/BiDi, Engine3D native
+The pinned 10-language × 10-category source policy contains 57 native cells,
+4 explicit script-sans mono fallbacks, 26 not-designed cells, and 13 unavailable
+serif complex-script/Emoji cells. It accepts sans Hindi and Arabic/Urdu
+witnesses; the refreshed executable proof is pending.
+Other complex scripts, emoji sequences/color, general GSUB/GPOS/BiDi, Engine3D native
 execution, executed Web/GUI/WM glyph-pixel parity, retained SimpleOS guest
 pixel evidence, and performance targets remain gated. Atlas and face generations invalidate cached material; unavailable
 hardware or stale handles fail closed.

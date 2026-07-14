@@ -846,7 +846,7 @@ gui_entry.spl (x86_64 Multiboot entry)
 | Entry | File | Purpose |
 |-------|------|---------|
 | GUI Desktop | `examples/09_embedded/simple_os/arch/x86_64/gui_entry.spl` | Full desktop shell + all 28 apps |
-| Glass WM | `examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl` | Self-contained glass window manager |
+| Production WM | `examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl` | DesktopShell through `Engine2dWmFrameExecutor` |
 | GPU Test | `examples/09_embedded/simple_os/arch/x86_64/gpu_test_entry.spl` | VirtIO-GPU testing |
 | Minimal GUI | `examples/09_embedded/simple_os/arch/x86_64/gui_entry_minimal.spl` | Minimal framebuffer test |
 
