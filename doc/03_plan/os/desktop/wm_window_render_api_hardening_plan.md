@@ -1,6 +1,9 @@
 # WM Window-Render API Hardening — Phase 2 Plan
 
-**Status:** DRAFT (2026-07-07) · **Owner:** OS/desktop + UI/rendering · **Scope:** the
+**Status:** DRAFT (2026-07-07) · updated 2026-07-14 — see [§D.1](#d1--2026-07-14-status-update-full-desktop-native-build-lane):
+full-desktop `gui_entry_desktop` native build perf SOLVED (~87 s) and the hardened lane BOOTS
++ `first-frame-rendered`; real screendump now gated only on a rust-seed cross-module
+field-index-misresolution fix (in flight). · **Owner:** OS/desktop + UI/rendering · **Scope:** the
 next hardening wave on top of the landed window-render executor.
 
 **Reads-with:**
@@ -364,6 +367,60 @@ the blocker on SimpleOS visual proof for A/B, and (b) hand the fix directions to
 **Risk + rollback:** until fixed, host lane is the visual-proof vehicle for A/B; SimpleOS proof
 stays on the current worked-around chrome/text evidence. Do NOT convert the bug record to a NOTE
 and do NOT remove the workaround comment in `gui_entry_engine2d.spl` until the fix lands.
+
+### D.1 — 2026-07-14 status update (full-desktop native-build lane)
+
+The visual-proof target moved from the single-window `gui_entry_engine2d.spl` (item D above)
+to the **full desktop** `gui_entry_desktop.spl` (created 2026-07-11: launcher + 15 apps +
+taskbar + `SharedWmScene`/`TaskbarModel`/`FramebufferDriver` graph, native 3840×2160). Status:
+
+**Solved — build perf (was mis-blamed on "lexer O(n²)").** The multi-hour SimpleOS GUI kernel
+build was the gate selecting the **aarch64 self-hosted compiler run under qemu-user emulation**
+(`bin/release/*/simple` glob picks aarch64 alphabetically) — ~1500× slower (>100s / 200 lines).
+Building with the **native x86 compiler** (`bin/release/x86_64-unknown-linux-gnu/simple`, rust
+seed) + gate env (`SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=$PWD/src SIMPLE_ALLOW_FREESTANDING_STUBS=1`,
+llvm-objcopy on PATH) builds the whole kernel in **~87 s**. Native lint is O(n) (8000 lines /
+0.077 s) — there is no lexer quadratic in the deployed compiler. Full recipe: session scratchpad
+`screendump_repro.md`.
+
+**Proven — the hardened lane boots.** The 87 s native kernel boots under QEMU (q35/max/2G,
+`-vga std -global VGA.vgamem_mb=64`, nvme FAT32 font disk) to: `engine2d-ready
+backend=baremetal-framebuffer → compositor ready → shell initialized → 15 apps → [wm-frame]
+executor → first-frame-rendered`. So the phase-1/phase-2 hardened Engine2D/compositor/shell
+lane executes on real SimpleOS.
+
+**Remaining blocker (NEW, deeper than item D's primitive-global shift) — rust-seed cross-module
+FIELD-INDEX misresolution.** Screendump is black + `cr2=0x0` nil-receiver panic cascade
+("field access on nil receiver"). Root cause (team-confirmed):
+`src/compiler_rust/compiler/src/hir/lower/type_resolver.rs:155` registers imported struct fields
+as `TypeId::ANY`, so nested field chains yield ANY receivers; for an ANY receiver the field
+INDEX is resolved by a receiver-BLIND "struct with the MOST fields declaring this name wins"
+scan (`type_resolver.rs:548-564`/`:599-625`; `expr/access.rs:337-346` keeps the wrong index,
+only degrading the TYPE to ANY). With 57 structs declaring `background`, 801 `width` at
+differing indices, the scan picks the wrong struct → one-slot shift → nil → panic. First victim:
+`scene.background` (SharedWmScene field after the `windows:[]` array) in `_wm_draw_ir_desktop_batch`.
+CONFIRMED source-UNworkaroundable at the field level: reordering fields only MOVES the victim
+(background→windows). Full-graph-only (isolated 2-module repro reads correctly). The `.spl`
+`resolve_field_index` is DEAD CODE here (MIR consumes a pre-resolved HIR `field_index`) — the fix
+is RUST-seed only. This is NOT a regression: the Jul-6 1024×768 proof (`wm_shared_evidence/
+fullscreen.ppm`) was the smaller `gui_entry_engine2d.spl`, whose closure lacked the collisions.
+Bug record: `doc/08_tracking/bug/simpleos_native_build_framebufferdriver_crossmodule_field_offset_shift_2026-07-14.md`.
+
+**Fix (in flight).** Make ambiguous-field resolution use the receiver's REAL struct
+(`access.rs try_resolve_receiver_struct_name_from_expr` → `try_resolve_global_field_index_by_name`)
+instead of most-fields-wins, and extend the `AmbiguousFieldNames` computation (over
+`imports.struct_defs` today) to also flag index-disagreements in local `module.types`. Requires a
+cargo seed rebuild (~2–6 min incremental, no parallel cargo) + the 3-stage byte-identical bootstrap
+gate + this PPM gate — all runnable on this Linux host (the prior attempt was blocked on a
+broken-native-build Mac). Fallback stopgap: extend the existing `fb_w/fb_h` scalar-threading /
+nil-guard workaround to the `SharedWmScene`/`TaskbarModel` fields the composition reads, for a
+non-black PPM before the compiler fix lands.
+
+**Acceptance (D.1).** `check-simpleos-wm-fullscreen-evidence.shs` captures a non-black
+(>1%) 3840×2160 PPM of `gui_entry_desktop`, AND the seed still passes the 3-stage bootstrap gate.
+
+**Owner.** Rust-seed HIR-lowering maintainer (same as item D's linker/lowering owner). This UI
+wave supplies the fast native-build repro loop + the confirmed root cause; it does not own the seed fix.
 
 ---
 

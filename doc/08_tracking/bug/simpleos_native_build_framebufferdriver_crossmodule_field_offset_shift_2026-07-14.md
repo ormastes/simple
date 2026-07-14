@@ -262,3 +262,58 @@ Repeat the grep for `field=revision`/`field=pinned` (TaskbarModel path).
 - **No compiler change is landable from this environment** (cannot satisfy the
   byte-identical-bootstrap gate or the PPM gate here). Handing off to a
   working-native-build host with the diagnostic + procedure above.
+
+---
+
+## 2026-07-14 — Linux-host team follow-up (handoff accepted; ROOT PINNED, patch ready, but 2 MORE blockers found downstream)
+
+On a Linux host with a working native build (recipe: session scratchpad
+`screendump_repro.md` — build the kernel with the NATIVE x86 rust seed
+`bin/release/x86_64-unknown-linux-gnu/simple`, NOT the emulated aarch64 self-hosted
+binary the gates pick; ~87 s vs never), a team pinned the root and tested fixes.
+
+**ROOT PINNED (rust seed, not `.spl`).** The `.spl` `resolve_field_index` NEVER runs
+in this path — MIR consumes a pre-resolved HIR `field_index` (`hir/lower/expr/…
+lowering_expr.rs:216`). The misresolution is in the RUST seed's HIR lowering:
+`src/compiler_rust/compiler/src/hir/lower/type_resolver.rs:155` registers imported
+struct fields as `TypeId::ANY`; for an ANY receiver the field INDEX is resolved by a
+receiver-BLIND "struct with the MOST fields declaring this name wins" scan
+(`type_resolver.rs:548-564`/`:599-625`; `expr/access.rs:337-346` keeps the wrong
+index, only degrading the TYPE to ANY). 57 structs declare `background`, 801 `width`
+at differing indices → wrong struct → one-slot shift. Isolated repro = ~1 struct/name
+⇒ correct; full desktop closure ⇒ wrong. Fully explains "full-graph-only". The
+`is_ambiguous_global_field` guard is defeated (computed only over `imports.struct_defs`,
+and it sits AFTER the scan).
+
+**PATCH READY (uncommitted; captured at `scratchpad/screendump_handoff/compiler_field_fix.patch`).**
+In `access.rs` before `get_field_info`: when the receiver erased to ANY AND the field is
+globally ambiguous, recover the receiver's real struct
+(`try_resolve_receiver_struct_name_from_expr` → `try_resolve_global_field_index_by_name`)
+and use THAT index. Bootstrap-SAFE: seed rebuild 3m29s, `widget_text_edit_spec` 7/7,
+no regression (the ambiguous-set is empty outside `--entry-closure`).
+
+**BUT the patch is UNVERIFIED for the PPM, because 2 more downstream blockers surfaced:**
+1. **HEAD rust-seed NVMe-init regression (separate, newer).** A seed built from CURRENT
+   `src/compiler_rust` HEAD produces a SMALLER kernel (652 units / 17 MB vs the deployed
+   Jul-11 seed's 670 units / 41 MB) that dies in `NvmeDriver.init_from_grant` BEFORE the
+   render stage — a *pristine* HEAD seed faults identically, so it is pre-existing, not the
+   field patch. Coincides with the Jul-13 `fix(native-build):` closure-discovery churn
+   (nested-import following / bare-export / production-check imports) that shrank the kernel.
+   This blocks verifying ANY render fix with a HEAD seed. (The field patch also does not
+   fire on the HEAD seed — `_wm_draw_ir_desktop_batch` disassembles byte-identically to
+   pristine — so HEAD already resolves that call differently.)
+2. **Baremetal Engine2D executor renders 0 commands.** Using the deployed Jul-11 seed (which
+   DOES boot to the render stage) plus a source-level nil-guard workaround for the field
+   shift (`scratchpad/screendump_handoff/render_nilguard.patch`), the desktop gets PAST the
+   nil-receiver panic and reaches `first-frame-rendered` — but the frame is still black:
+   `[wm-frame] engine2d-draw-ir-rejected … rendered=0 skipped=5 … unsupported Draw IR
+   commands skipped: 3`. The baremetal preflight (`draw_ir_adv.spl:385-398`) supports only
+   `RECT`/`TEXT`/`IMAGE`; the composition also emits `GROUP`/`EDGE`/`PATH`, and even the
+   supported background `RECT` renders 0. Plus a scanout mismatch (QMP captures 3840×768 vs
+   the desktop's detected 3840×2160).
+
+**Net.** Real non-black desktop PPM is gated on a STACK: (1) field-index fix [patch ready],
+(2) HEAD-seed NVMe regression [separate seed owner], (3) baremetal Engine2D command coverage
+(GROUP/EDGE/PATH) + present-to-scanout, (4) scanout-resolution match. Each is deep and
+independently owned. Both worked source patches are captured under
+`scratchpad/screendump_handoff/` for whoever lands the seed side.
