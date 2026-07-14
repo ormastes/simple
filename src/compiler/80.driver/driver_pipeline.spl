@@ -70,11 +70,54 @@ fn _format_mir_error(err: MirError) -> text:
 # targets (a bare `nosuchfn(1)` call, or a first-class lambda value passed
 # where only a direct call is supported) — and leaves everything else as a
 # non-fatal warning.
+#
+# silentfactory audit (2026-07-14): widened this allowlist after reading
+# every self.error(...) call site in 50.mir/_MirLoweringExpr/expr_dispatch.spl
+# and switch_operators_calls.spl. Added, each confirmed unreachable by any
+# currently-passing native-smoke-matrix case (verified empirically, not just
+# by inspection):
+#   - "undefined variable" (was "undefined variable:" only — the Var(symbol)
+#     case in expr_dispatch.spl pushes the bare, colon-less "undefined
+#     variable" string with no name, so it fell through this prefix check
+#     entirely and silently produced an i64 nil temp).
+#   - "unsupported array/string slice index" — a[start:end] has no native
+#     lowering; was silently producing a garbage value.
+#   - "B5b" — every int-literal `match` Phase-2 diagnostic in
+#     lower_int_match's arm loop (non-IntLit literal/Or, Tuple/Array/Struct/
+#     Range/Error pattern kinds, missing wildcard default, duplicate
+#     default arms) shares this prefix; none of these pattern shapes appear
+#     in the matrix's enum_match/result_try_op cases, which route through
+#     lower_enum_match instead and never reach this arm loop.
+#   - "match default binding has no resolved symbol" — an internal
+#     invariant violation (the `if val default_symbol = default_binding`
+#     bind succeeded but the value is nil), never a normal fallback.
+#   - "enum match:" — bare/ambiguous/unknown variant and unsupported arm
+#     pattern in lower_enum_match; the function's own comment already says
+#     "emit a LOUD error instead of silently falling through", it just
+#     wasn't wired to this allowlist. Matrix's enum_match/result_try_op
+#     cases use fully-qualified, registered variants and never hit this.
+#   - "enum construction: unregistered enum" — lower_enum_lit only runs for
+#     the explicit `EnumName.Variant(...)` HIR shape with a resolved Named
+#     type; Ok/Err/Option construction is gated separately (see the
+#     enum_variant_index.has("Result"/"Option") checks in
+#     switch_operators_calls.spl) and never reaches this function, so
+#     result_try_op is unaffected.
+#   - "unsupported struct field initializer" — a Lambda literal (or other
+#     value lower_expr can't handle) in field-initializer position; that
+#     call site's own comment says the fix's whole point is "a clean loud
+#     build failure, never a crash". Matrix's struct_field case only ever
+#     passes int literals.
 fn _mir_error_is_fatal(message: text) -> bool:
-    message.starts_with("undefined variable:") or
+    message.starts_with("undefined variable") or
         message.starts_with("unresolved method call:") or
         message.starts_with("unsupported MIR expression:") or
-        message.starts_with("match guards (case x if cond:) are not supported")
+        message.starts_with("match guards (case x if cond:) are not supported") or
+        message.starts_with("unsupported array/string slice index") or
+        message.starts_with("B5b") or
+        message.starts_with("match default binding has no resolved symbol") or
+        message.starts_with("enum match:") or
+        message.starts_with("enum construction: unregistered enum") or
+        message.starts_with("unsupported struct field initializer")
 
 fn _driver_collect_mir_errors(ctx: CompileContext, errors: [MirError]):
     for err in errors:
