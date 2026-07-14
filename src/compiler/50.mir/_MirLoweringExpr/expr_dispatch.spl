@@ -1235,6 +1235,30 @@ impl MirLowering:
                 self.lower_dict_lit(entries)
 
             case Index(base, index):
+                # Bug (array-slice-index SIGSEGV, CONFLICT-FLAG: expr_dispatch.spl
+                # is fenced, touched here per the fence rule's "CONFLICT-FLAG if
+                # must touch" allowance): `a[1:3]` where `a` is a runtime array
+                # parses as an ordinary Index with `index` being a Range HIR
+                # expr. lower_expr(Range) unconditionally calls lower_range
+                # (function_lowering.spl), which is a KNOWN-incomplete stub --
+                # its emitted call operand is a bare `MirConstValue.Int(0)`
+                # ("function symbol -- will be resolved in codegen") that never
+                # actually resolves to a real rt_range/array-slice runtime
+                # symbol. The backend then has no valid callee and the whole
+                # subtree silently collapses to a placeholder `0`, which this
+                # Index arm then treats as a genuine index/pointer value --
+                # inttoptr'ing and GEP/load'ing off address 0 at runtime
+                # (SIGSEGV), the worst form of "silent wrong -> then crash"
+                # this lane must never ship. Array-slice indexing has no
+                # working native lowering today; fail the BUILD loudly and
+                # cleanly (mirrors the existing unsupported-array-element
+                # convention in lower_array_lit) instead of emitting IR that
+                # crashes at runtime.
+                match index.kind:
+                    case Range(_, _, _, _):
+                        self.error("unsupported array/string slice index a[start:end] (no native array-slice lowering; cannot safely lower to a value)", nil)
+                        return self.builder.emit_const_int(0)
+                    case _: ()
                 # Runtime arrays are tagged handles, not raw element pointers.
                 val base_local = self.lower_expr(base)
                 # Dict handles compare keys as tagged heap values, so a `d[k]`
@@ -1301,7 +1325,20 @@ impl MirLowering:
                     val getter_result = bg.emit_call(getter, [mir_operand_copy(base_local), mir_operand_copy(index_local)], MirType.i64())
                     self.builder = bg
                     if val getter_local = getter_result:
-                        self.decode_runtime_value(getter_local, result_type)
+                        val decoded_elem = self.decode_runtime_value(getter_local, result_type)
+                        # Bug (array-of-structs field misread): propagate the
+                        # array's known element struct name (registered by
+                        # lower_array_lit in array_element_struct_syms) onto
+                        # THIS decoded element so a further `.field` access
+                        # (resolve_field_index's struct_value_syms fallback)
+                        # can find the real field order instead of silently
+                        # defaulting to field index 0 for every field name.
+                        val elem_struct_name = self.array_element_struct_syms.get(base_local.id)
+                        if elem_struct_name != nil:
+                            val esn = elem_struct_name ?? ""
+                            if esn != "":
+                                self.struct_value_syms[decoded_elem.id] = esn
+                        decoded_elem
                     else:
                         base_local
                 else:

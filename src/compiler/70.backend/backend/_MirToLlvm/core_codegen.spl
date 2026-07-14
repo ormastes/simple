@@ -731,6 +731,29 @@ impl MirTextCodegen for MirToLlvm:
             self.valid_llvm_type(recorded_src_ty.unwrap())
         else:
             self.valid_llvm_type(self.get_local_type(src_id))
+        # Bug (nested-array/dict handle unbox): a destination local PRIMED
+        # ptr-classified at function entry (its MIR-declared type is an
+        # aggregate -- Array/Dict/Struct/etc -- e.g. decode_runtime_value's
+        # `b.new_temp(result_type)` for a nested array/dict element read off
+        # an ANY-boxed outer array, `m[i]` where `m` is `[[i64]]`) can receive
+        # a Copy whose SOURCE is a raw i64 (the untyped tagged-handle return
+        # of rt_array_get/rt_dict_get). The scalar-copy path below emits a
+        # plain `add i64 src, 0`, defining the destination as i64 in the LLVM
+        # text -- but `get_local_type` (below) trusts the STICKY `ptr_locals`
+        # priming flag (never cleared here) and reports "ptr" to every OTHER
+        # consumer, e.g. a later `rt_array_len(m[i])` bounds-check callsite.
+        # That produced an invalid "%lN defined with type 'i64' but expected
+        # 'ptr'" llc rejection on any nested array-of-arrays/dict-of-arrays
+        # read or write (`m[0][1]`, 2D array literals). Since the destination
+        # IS semantically a pointer (an array/dict/struct handle unboxed from
+        # its i64 ANY slot), bridge with a genuine `inttoptr` reinterpretation
+        # instead of i64 arithmetic, so the SSA definition's real LLVM type
+        # matches what ptr_locals promises downstream.
+        if ty != "ptr" and is_integer_type(ty) and self.ptr_locals.has(dest_id):
+            self.local_types[dest_id] = "ptr"
+            self.value_types[dest_name] = "ptr"
+            self.builder.emit("  {dest_name} = inttoptr {ty} {src_name} to ptr  ; {if is_move: \"move\" else: \"copy\"} (handle unbox)")
+            return
         if ty == "ptr":
             self.local_types[dest_id] = "ptr"
             self.ptr_locals[dest_id] = true

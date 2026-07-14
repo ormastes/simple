@@ -535,6 +535,38 @@ fn convert_flat_expr(idx: i64) -> Expr:
         val obj = convert_flat_expr(expr_get_left(idx))
         val index = convert_flat_expr(expr_get_right(idx))
         return Expr(kind: ExprKind.Index(obj, index), span: span)
+    elif tag == EXPR_SLICE:
+        # Bug (array/string slice-index silently -> NilLit -> SIGSEGV): a
+        # bracket-colon slice `a[1:3]` parses as a DEDICATED EXPR_SLICE flat
+        # node (LEFT=base, RIGHT=start, EXTRA=end) -- NOT an EXPR_INDEX over
+        # an EXPR_RANGE, and NOT any node handled by this if/elif chain at
+        # all. It fell all the way to the final `else: return
+        # Expr(kind: ExprKind.NilLit, ...)` fallback below, silently
+        # producing a bare nil/0 value in place of the sliced result. On the
+        # ARRAY-index read path (expr_dispatch.spl's `case Index`) that nil
+        # then got inttoptr'd and GEP/load'd as if it were a real array
+        # pointer -- a NULL-pointer dereference (SIGSEGV) instead of a clean
+        # build error, the worst form of "silent wrong" this lane must catch.
+        # `ExprKind` (parser_types_expr.spl) has no dedicated Slice variant
+        # of its own to preserve the 3-operand shape, but `lower_method_call`
+        # (method_calls_literals.spl) already has a real, tested `"slice"`/
+        # `"substring"` implementation for STRING receivers (spl_str_slice) --
+        # reusing that MethodCall shape here both (a) makes `s[1:3]` on a
+        # string receiver actually WORK for the first time (previously it hit
+        # this same NilLit fallback), and (b) makes an ARRAY receiver (which
+        # that method-call arm does not special-case) fall through cleanly to
+        # the existing generic `case Unresolved:` "unresolved method call:
+        # slice" LOUD build failure -- matching the established loud-fail
+        # convention for other genuinely-unsupported array operations
+        # (.pop()/.first()/.last()) instead of crashing at runtime.
+        val slice_obj = convert_flat_expr(expr_get_left(idx))
+        val slice_start = convert_flat_expr(expr_get_right(idx))
+        val slice_end = convert_flat_expr(expr_get_extra(idx))
+        val slice_call_args: [CallArg] = [
+            CallArg(has_name: false, name: "", value: slice_start, span: span),
+            CallArg(has_name: false, name: "", value: slice_end, span: span)
+        ]
+        return Expr(kind: ExprKind.MethodCall(slice_obj, "slice", slice_call_args), span: span)
     elif tag == EXPR_ARRAY_LIT:
         val elem_indices = expr_get_args(idx)
         var elems: [Expr] = []

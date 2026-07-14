@@ -241,6 +241,23 @@ impl MirLowering:
                                 self.runtime_value_locals[local.id] = true
                             if self.nil_locals.has(init_local.id):
                                 self.nil_locals[local.id] = true
+                            # Bug (array-of-structs field misread), CONFLICT-FLAG
+                            # (mir_lowering_stmts.spl is fenced, touched per the
+                            # fence rule's "CONFLICT-FLAG if must touch"
+                            # allowance): array_element_struct_syms (see
+                            # lower_array_lit / expr_dispatch.spl's Index case)
+                            # must propagate the SAME way runtime_array_locals
+                            # does above -- otherwise `val pts = [Point(...),
+                            # ...]` rebinds the array literal's result to a NEW
+                            # local id that has no entry in
+                            # array_element_struct_syms, silently losing the
+                            # element struct name and reverting `pts[i].y` to
+                            # the field-index-0 misread this fix exists to stop.
+                            val ael_sym = self.array_element_struct_syms.get(init_local.id)
+                            if ael_sym != nil:
+                                val ael_name = ael_sym ?? ""
+                                if ael_name != "":
+                                    self.array_element_struct_syms[local.id] = ael_name
                             var b2 = self.builder
                             b2.emit_copy(local, init_local)
                             self.builder = b2
@@ -339,6 +356,18 @@ impl MirLowering:
                                 self.runtime_value_locals[local.id] = true
                             if has_init and self.nil_locals.has(init_local.id):
                                 self.nil_locals[local.id] = true
+                            # Bug (array-of-structs field misread), CONFLICT-FLAG
+                            # (mir_lowering_stmts.spl is fenced): mirror the same
+                            # array_element_struct_syms propagation as the other
+                            # Let-lowering arm above, so `val pts = [Point(...),
+                            # ...]` (this Let path) doesn't lose the element
+                            # struct name when it rebinds to a fresh local id.
+                            if has_init:
+                                val ael_sym2 = self.array_element_struct_syms.get(init_local.id)
+                                if ael_sym2 != nil:
+                                    val ael_name2 = ael_sym2 ?? ""
+                                    if ael_name2 != "":
+                                        self.array_element_struct_syms[local.id] = ael_name2
                             if has_init:
                                 var b2 = self.builder
                                 b2.emit_copy(local, init_local)
@@ -403,6 +432,16 @@ impl MirLowering:
                     self.nil_locals[local.id] = true
                 else:
                     self.nil_locals = self.nil_locals.remove(local.id)
+                # Bug (array-of-structs field misread), CONFLICT-FLAG
+                # (mir_lowering_stmts.spl is fenced): a `var`-reassignment
+                # (`pts = pts.push(...)`, etc.) must carry
+                # array_element_struct_syms forward the same way
+                # runtime_array_locals does above, or a reassigned
+                # array-of-structs variable loses its element struct name.
+                if self.array_element_struct_syms.has(value_local.id):
+                    self.array_element_struct_syms[local.id] = self.array_element_struct_syms[value_local.id]
+                else:
+                    self.array_element_struct_syms = self.array_element_struct_syms.remove(local.id)
 
     me lower_assign(target: HirExpr, op: HirAssignOp?, value_local: LocalId):
         """Lower assignment."""
@@ -1161,6 +1200,21 @@ impl MirLowering:
             self.error("for loop variable has no resolved symbol", Some(body.span))
         else:
             self.local_map[loop_var_id] = loop_var
+            # Bug (array-of-structs field misread), CONFLICT-FLAG
+            # (mir_lowering_stmts.spl is fenced): `for p in pts` over an
+            # array of structs desugars to this counted-index loop, whose
+            # decoded per-iteration element is a SEPARATE decode_runtime_value
+            # call site from expr_dispatch.spl's Index case (which already
+            # got the array_element_struct_syms -> struct_value_syms
+            # propagation). Without the SAME propagation here, `p.y` inside
+            # the loop body silently defaulted to field index 0 (reading
+            # `.x`'s slot) exactly like the standalone `pts[i].y` bug this
+            # lane fixed, just reached via the for-loop desugaring instead.
+            val for_elem_struct_name = self.array_element_struct_syms.get(collection_local.id)
+            if for_elem_struct_name != nil:
+                val fesn = for_elem_struct_name ?? ""
+                if fesn != "":
+                    self.struct_value_syms[loop_var.id] = fesn
 
         # Lower the loop body
         self.lower_block(body)
