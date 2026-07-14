@@ -338,11 +338,12 @@ payload consistency, then delegates to the existing bounded
 `install_cuda_font_ptx` entry-symbol/session gate without
 replacing the optimization module. The session pins the PTX hash, rejects
 replacement, launches font quads from it when present, and unloads it with the
-CUDA context. The conditional native font evidence scenario authenticates the
-checker-recorded Simple invocation/runtime binaries, current emitter
-source/version hashes, retained generated `.cu` source/hash, and PTX path/hash;
-installs the PTX through this public handoff; dispatches one canonical
-`FontRenderBatch`; and compares device-origin readback with its CPU oracle. A
+CUDA context. The focused `cuda_generated_font_handoff_spec.spl` scenario
+authenticates the checker-recorded Simple invocation/runtime binaries, current
+emitter source/version hashes, retained generated `.cu` source/hash, and PTX
+path/hash; installs the PTX through this public handoff; dispatches one
+canonical `FontRenderBatch`; and compares device-origin readback with its CPU
+oracle. It is independent of the Vulkan Engine3D native evidence rows. A
 retained native PASS is still required for promotion; the hand-written
 compatibility entry remains the fallback.
 Metal compiles the exact common MSL helper as an optional separate pipeline,

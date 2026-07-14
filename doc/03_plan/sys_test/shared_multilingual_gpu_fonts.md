@@ -3,10 +3,11 @@
 
 ## Scope
 
-Six SSpec files cover manifest/assets, exact-face shaping, shared 2D/3D batch,
-Web/GUI/WM routing, portable emission, and native graphics readback. The
-first five exercise host-available contracts; the sixth is a fail-closed
-promotion gate whose four live evidence rows remain unavailable.
+Seven SSpec files cover manifest/assets, exact-face shaping, shared 2D/3D batch,
+Web/GUI/WM routing, portable emission, generated CUDA handoff, and native
+graphics readback. The first five exercise host-available contracts; the sixth
+is a focused conditional CUDA gate, and the seventh is a fail-closed promotion
+gate whose three independent live evidence rows remain unavailable.
 Unit/integration suites for the
 existing shaper, Engine2D, Engine3D texture path, emitter, and backend readback
 remain supporting evidence; they do not replace these end-to-end scenarios.
@@ -27,6 +28,7 @@ Planned executable/manual pairs:
 | `test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/shared_font_surfaces_spec.md` |
 | `test/03_system/app/simple_2d/feature/legacy_web_gui_wm_font_route_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/legacy_web_gui_wm_font_route_spec.md` |
 | `test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/gpu_font_emission_spec.md` |
+| `test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.md` |
 | `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.md` |
 
 Supporting conditional pair: `test/02_integration/rendering/vulkan_font_composite_classification_spec.spl`
@@ -99,11 +101,11 @@ behavior.
 | REQ-007 | `shared_font_shaping_acceptance_spec.spl` plus focused unit and renderer oracles | exact-face simple-script oracle; exact Hindi `dev2` and bounded Arabic/Urdu vectors on sans; explicit hi/ar/ur mono fallback; exact monochrome Noto Emoji `U+1F600` corpus tuple under all ten selected language tags; pending exact Serif Devanagari/Naskh default-instance probes | sans and exact-corpus Emoji source policy promoted; serif probes are source-complete but cells remain unavailable because the stale-ABI pure-Simple CLI crashes before assertions; sequence/color Emoji remains fail-closed |
 | REQ-008 | `shared_font_manifest_spec.spl` plus focused sfnt/bitmap unit specs | compound/default-glyf corpus reconstruction; unsupported-format/axis rejection; literal default-variable + bitmap fixtures | 3/3 source; refreshed literal variable oracle execution blocked |
 | REQ-009 | `font_renderer_spec.spl`, backend font unit specs, and `shared_font_surfaces_spec.spl` | live font-identity separation; bounded glyph-cache counters; backend-local atlas owner + generation; unit-proven canonical font-size scale; immutable active-session guard; warm/dirty regions | 2/3 source; rotation/skew/subpixel/nonuniform CTM stay unsupported and native execution remains pending; exact Vulkan artifact reuse is source-complete |
-| REQ-010 | `gpu_font_emission_spec.spl`, `native_gpu_font_readback_spec.spl`, plus portable toolchain checker | five source targets; Vulkan contract; deterministic failures/hashes; native artifact exports the versioned font entry; checker CUDA artifact installs and wins device-readback dispatch | source-complete; retained checker provenance, exact pinned-Vulkan identity, and conditional generated-CUDA handoff gates are source-covered; host compiler/device execution evidence remains pending |
+| REQ-010 | `gpu_font_emission_spec.spl`, `cuda_generated_font_handoff_spec.spl`, plus portable toolchain checker | five source targets; Vulkan contract; deterministic failures/hashes; native artifact exports the versioned font entry; checker CUDA artifact installs and wins device-readback dispatch | source-complete; retained checker provenance, exact pinned-Vulkan identity, and conditional generated-CUDA handoff gates are source-covered; host compiler/device execution evidence remains pending |
 | REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, production host route contract, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical SimpleOS pixels | composition, hosted color/top-level frame ownership, production Simple Browser DrawIR/font-byte route, all-candidate image staging, ASCII VFAT writer/shared-reader routing, and canonical SimpleOS runner/readiness selection source-covered; writer/runtime execution, hosted image/motion/nested parity, and retained QEMU PASS pending |
 | REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 0/3; fail-closed gate present |
 | REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 0/3; pending gate fails explicitly |
-| REQ-014 | six present specs/manuals | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 0/3 canonical manual passes; six drafts exist, but native execution/docgen refresh is pending |
+| REQ-014 | seven present specs/manuals | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 0/3 canonical manual passes; seven drafts exist, but native execution/docgen refresh is pending |
 | REQ-015 | `font_render_config_spec.spl`, `shared_font_surfaces_spec.spl`, and focused Engine2D/Engine3D font specs | validation and length-delimited identity; bitmap/vector/shaped propagation; Suggested/Preferred/Required behavior; unsupported mode/CTM rejects before cache/backend mutation; legacy default equivalence | 5 source-covered; deployed execution blocked by stale `rt_env_set` artifact ABI, then bootstrap-parser/full-CLI runtime-link gaps |
 
 | NFR | Evidence | Pass condition |
@@ -180,7 +182,7 @@ compatibility bitmap renderers as supporting evidence rather than PASS.
 
 ## Pass/fail
 
-Pass requires every REQ/NFR row above, six zero-stub manuals, one real promoted
+Pass requires every REQ/NFR row above, seven zero-stub manuals, one real promoted
 graphics backend for both 2D and 3D, and all selected thresholds. Missing
 hardware is not a failure for non-promoted rows, but no promoted native row is a
 release failure. Placeholder assertions, environment-only payloads, mirrors, or
