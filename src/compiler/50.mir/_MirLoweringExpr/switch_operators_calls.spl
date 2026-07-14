@@ -1407,6 +1407,40 @@ impl MirLowering:
             case _:
                 nil
 
+    me lower_iife_call(params: [HirParam], body: HirExpr, args: [HirCallArg]) -> LocalId:
+        """Lower an Immediately-Invoked Function Expression: a raw lambda
+        literal used directly as a call callee, `(\x: x + 1)(5)`.
+
+        Unlike `try_inline_lambda_call` (which replays a `val f = \x: ...`
+        binding's bind-time by-value snapshot), there is no bound name and no
+        snapshot to replay here -- the lambda is defined and invoked at the
+        exact same point, so free variables in `body` should simply resolve
+        against the CURRENT live scope. This mirrors `try_inline_lambda_call`'s
+        param-binding step (copy local_map, bind params to lowered arg locals,
+        lower the body, restore local_map) minus the capture-snapshot swap.
+        """
+        var arg_locals: [LocalId] = []
+        var ai = 0
+        while ai < params.len():
+            if ai < args.len():
+                arg_locals = arg_locals.push(self.lower_expr(args[ai].value))
+            ai = ai + 1
+        val live_map = self.local_map
+        var call_map: Dict<i64, LocalId> = {}
+        for k in live_map.keys():
+            call_map[k] = live_map[k]
+        self.local_map = call_map
+        var pi = 0
+        while pi < params.len():
+            if pi < arg_locals.len():
+                val pid = mir_expr_symbol_id_value(params[pi].symbol)
+                if pid >= 0:
+                    self.local_map[pid] = arg_locals[pi]
+            pi = pi + 1
+        val result = self.lower_expr(body)
+        self.local_map = live_map
+        result
+
     me lambda_body_captures(body: HirExpr, param_syms: [i64]) -> bool:
         """Conservative free-variable scan for a lambda body being lifted to a
         top-level function.
@@ -1624,6 +1658,22 @@ impl MirLowering:
                     direct_symbol = symbol
                     direct_name = name
                     is_direct = true
+                case _:
+                    pass
+        elif callee_disc == rt_enum_discriminant(HirExprKind.Lambda([], callee, [])):
+            # IIFE: a raw lambda literal used directly as the call callee,
+            # `(\x: x + 1)(5)`. try_inline_lambda_call below only fires for a
+            # `Var`/`NamedVar` callee resolved through `lambda_bindings` (a
+            # `val f = \x: ...` binding); a bare literal callee never reaches
+            # it, so this was previously falling through to the generic
+            # `self.lower_expr(callee)` path and hitting the loud
+            # `unsupported MIR expression: Lambda` failure. Beta-reduce it
+            # directly here instead -- no bind-time snapshot is needed since
+            # the lambda is defined and invoked at the same point, so free
+            # variables should simply see the current live scope.
+            match callee.kind:
+                case HirExprKind.Lambda(params, body, _captures):
+                    return self.lower_iife_call(params, body, args)
                 case _:
                     pass
 
