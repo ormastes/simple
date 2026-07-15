@@ -3,7 +3,7 @@
 **Date:** 2026-07-02
 **Component:** Rust seed JIT (cranelift path) — dict lowering / runtime dict SFFI
 **Severity:** Critical — blocks stage2 bootstrap
-**Status:** Open
+**Status:** source fixed; focused interpreter/JIT execution pending
 
 ## Symptom
 
@@ -109,3 +109,13 @@ Still no stage2 binary produced. This next failure is a separate issue
 (tracked separately, not chased further here) and may itself be another
 symptom of the same underlying int-keyed Dict corruption (e.g. a
 function-list/module dict losing entries).
+
+## Resolution status (2026-07-15)
+
+The shared runtime dictionary hashes and compares tagged values. Current MIR
+index writes and reads box integer keys, and builtin `get`/`set`/`has` call
+paths use the same value-wrapping owner before reaching `rt_dict_*`; the
+original insert/lookup representation mismatch is therefore source-fixed.
+A focused `interp_jit` driver regression now inserts an integer key and checks
+`has`, `len`, and lookup through the real backend path. Its execution remains
+pending a runnable Rust test artifact, so no JIT PASS is claimed.

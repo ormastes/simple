@@ -1554,6 +1554,22 @@ main = d["a"] + d["b"]
     42
 );
 
+backend_test!(
+    mir_dict_integer_key_round_trip,
+    interp_jit,
+    r#"
+fn main() -> i64:
+    var d: Dict<i64, i64> = {}
+    d[1] = 7
+    if not d.has(1):
+        return -1
+    if d.len() != 1:
+        return -2
+    return d[1]
+"#,
+    7
+);
+
 // =============================================================================
 // 54. Float index result unboxing
 // =============================================================================
