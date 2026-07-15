@@ -27,6 +27,11 @@ self-test contract is ready. TODO 563 remains open because fresh current-host
 native/TCG execution and combined QEMU/daemon RSS evidence are still missing;
 TCG is correctness-only and native timing must be bound to exact retained QEMU
 argv acceleration evidence.
+Direct guest GPU passthrough is now classified independently: the current host
+has IOMMU and QEMU `vfio-pci`, but both GPUs are host-bound,
+`virtio-gpu-gl` has a broken module dependency, and no validated SimpleOS guest
+Vulkan/CUDA device-readback evidence exists. TODO575 remains open; no device was
+unbound or reassigned.
 
 This scenario proves that supported SimpleOS guests use one bounded protocol to
 execute Draw IR and ProcessingIR on a real host device. Unsupported rows retain
@@ -177,6 +182,15 @@ the CPU/software fallback and report a stable reason.
    exact `-accel` attribution, and shared `hostgpu` object/device binding; wrong
    or extra tokens fail.
    Missing, duplicate, empty, or nonpositive evidence fails closed.
+23. **Classify guest GPU passthrough without changing devices.** Inspect IOMMU
+    groups, QEMU VFIO/virtio-gpu capabilities, display-device ownership,
+    selected-device readiness, and validated SimpleOS guest-driver evidence.
+    Until a canonical guest receipt producer exists, caller-authored text and
+    hashes must never promote the row to ready. Probe only trusted root-owned,
+    non-writable system QEMU binaries. Require `mutation_attempted=false`.
+24. **Keep ivshmem offload separate from passthrough.** A working host Vulkan or
+    CUDA daemon is valid ivshmem offload evidence only. It cannot promote VFIO,
+    virtio-gpu/Venus, or guest-native Vulkan/CUDA.
 
 ### Keep native Metal ProcessingIR separate from Engine2D rendering
 
@@ -221,6 +235,20 @@ sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test
 The self-test also exercises the production AArch64 frame parser and rejects
 missing, duplicate, wrong-backend, and mismatched run/frame production markers
 without starting QEMU.
+
+Classify direct guest access without changing PCI ownership:
+
+```sh
+sh scripts/check/check-simpleos-qemu-guest-gpu-passthrough.shs --self-test
+sh scripts/check/check-simpleos-qemu-guest-gpu-passthrough.shs --preflight
+```
+
+The current-host preflight reports `unavailable` with reason
+`simpleos-guest-vulkan-cuda-evidence-missing`, identifies the broken
+`virtio-gpu-gl` module, reports the trusted QEMU 8.2.2 probe, identifies the
+selected NVIDIA group as host-bound, retains the separate ivshmem checker path,
+and proves `mutation_attempted=false`. Its self-test passes; no live guest or
+PCI ownership change was attempted.
 
 Validate a cached wrapper report before another checker consumes it:
 

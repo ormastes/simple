@@ -402,3 +402,17 @@ using capability-owned Simple or C archives with disjoint ownership and a
 provider-aware cache fingerprint. No deploy/live PASS is claimed, and
 fail-closed release-bundle enforcement was deliberately not landed because it
 would remove existing launch links before a valid replacement bundle exists.
+
+## 2026-07-15 bounded strict rerun
+
+One fresh full-bootstrap cycle completed strict pure-Simple Stage 2 and Stage 3
+with hashes `0309eadf67a61b80331d20ac4a03d949042c26c3bf6f539db93994a49f4ee908`
+and `21058880e0c4d6533b38a8060e56047eedf968e05a3e62bbb5b5d0b8589e37db`.
+Stage 4 reached the linker and failed on the already-owned provider closure,
+including dynamic-load/font WFFI, sleep/string helpers, platform window
+backends, and process-timeout symbols. It did not spin or crash. A subsequent
+Stage2/3-only rebuild after the narrow bootstrap admission-contract fix
+produced the admitted Stage 3 hash
+`1764d74b2ff77f558b07cdf27a041d5e3e96824a7ef4b563151a6c29ba7a6816`.
+No full CLI, deployment, native-all selection, stub, or ignored symbol is
+claimed; TODO535 remains the provider-composition owner.

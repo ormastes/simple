@@ -15,8 +15,14 @@ use app.io.mod.{file_read_text}
 fn host_gpu_wrapper_source() -> text:
     file_read_text("scripts/check/check-simpleos-qemu-host-gpu-2d.shs")
 
+fn guest_gpu_passthrough_source() -> text:
+    file_read_text("scripts/check/check-simpleos-qemu-guest-gpu-passthrough.shs")
+
 fn candidate_frontend_admission_source() -> text:
     file_read_text("scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs")
+
+fn bootstrap_main_source() -> text:
+    file_read_text("src/app/cli/bootstrap_main.spl")
 
 fn qemu_runner_build_source() -> text:
     file_read_text("src/os/_QemuRunner/os_build_run.spl")
@@ -116,6 +122,11 @@ fn run_host_gpu_metrics_self_test() -> text:
     expect(code).to_equal(0)
     out
 
+fn run_guest_gpu_passthrough_self_test() -> text:
+    val (out, err, code) = process_run("/bin/sh", ["scripts/check/check-simpleos-qemu-guest-gpu-passthrough.shs", "--self-test"])
+    expect(code).to_equal(0)
+    out
+
 describe "SimpleOS QEMU host-GPU rendering and processing":
     # @capture(protocol)
     # @capture(log)
@@ -154,6 +165,10 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         expect(admission).to_contain("bootstrap seed only")
         expect(admission).to_contain("--mode definitely-invalid-mode")
         expect(admission).to_contain("Error: invalid --mode 'definitely-invalid-mode' (expected dynload or one-binary)")
+        val bootstrap = bootstrap_main_source()
+        expect(bootstrap).to_contain("fn native_build_mode_from_args")
+        expect(bootstrap).to_contain("mode != \"dynload\" and mode != \"one-binary\"")
+        expect(bootstrap).to_contain("Error: invalid --mode '{mode}' (expected dynload or one-binary)")
         expect(source).to_contain("COMPILER_PROBE_TIMEOUT_SECONDS=5")
         expect(source).to_contain("COMPILER_BUILD_TIMEOUT_SECONDS=60")
         expect(source).to_contain("COMPILER_EXEC_TIMEOUT_SECONDS=5")
@@ -289,6 +304,37 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         expect(windows_platform_source()).to_contain("DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE;")
         expect(windows_native_linker_source()).to_contain("\"d3d11.lib\", \"dxgi.lib\"")
         expect(windows_shared_linker_source()).to_contain("\"d3d11\", \"dxgi\"")
+
+    # @capture(log)
+    it "classifies direct guest GPU access without changing host devices":
+        step("Classify guest GPU passthrough without changing devices")
+        val source = guest_gpu_passthrough_source()
+        expect(run_guest_gpu_passthrough_self_test()).to_contain("simpleos_qemu_guest_gpu_passthrough_self_test=pass")
+        expect(source).to_contain("--preflight")
+        expect(source).to_contain("qemu_vfio_pci_status")
+        expect(source).to_contain("qemu_virtio_gpu_gl_status")
+        expect(source).to_contain("QEMU emulator version ")
+        expect(source).to_contain("host=<str>")
+        expect(source).to_contain("simpleos_guest_vulkan_cuda_evidence_status")
+        expect(source).to_contain("No canonical SimpleOS guest Vulkan/CUDA receipt producer exists yet")
+        expect(source).to_contain("qemu_path_metadata_is_trusted")
+        expect(source).to_contain("trusted_directory /usr/bin")
+        expect(source).to_contain("QEMU_PROBE_TIMEOUT_SECONDS")
+        expect(source).to_contain("qemu_trust_status")
+        expect(source).to_contain("selected_device_status")
+        expect(source).to_contain("selected_iommu_group_inventory")
+        expect(source).to_contain("mutation_attempted=false")
+        expect(source.contains("/driver/unbind")).to_equal(false)
+        expect(source.contains("driver_override")).to_equal(false)
+        expect(source.contains("modprobe")).to_equal(false)
+        expect(source.contains("virsh nodedev-detach")).to_equal(false)
+        expect(source.contains("driverctl")).to_equal(false)
+        expect(source.contains("/sys/bus/pci/drivers/")).to_equal(false)
+
+        step("Keep ivshmem offload separate from passthrough")
+        expect(source).to_contain("ivshmem_offload_status=checker-present-separate-path")
+        expect(source).to_contain("simpleos-guest-vulkan-cuda-evidence-missing")
+        expect(todo_db_source()).to_contain("575, TODO, simpleos")
 
     # @capture(artifact)
     it "returns an exact device-backed Simple 2D readback":

@@ -513,3 +513,34 @@ identity.
 The guest bridge captures the completion once and validates its typed receipt,
 including the device readback source and run/frame/backend correlation. Host
 and guest checksum loops share the same masked modular checksum primitives.
+
+### Direct guest GPU passthrough
+
+Direct guest Vulkan/CUDA access is distinct from the supported ivshmem
+host-daemon offload path. Inspect it without changing device ownership:
+
+```sh
+sh scripts/check/check-simpleos-qemu-guest-gpu-passthrough.shs --self-test
+sh scripts/check/check-simpleos-qemu-guest-gpu-passthrough.shs --preflight
+```
+
+The preflight reports IOMMU groups, display-device driver ownership, QEMU
+`vfio-pci` and `virtio-gpu-gl` status, selected-device and whole-IOMMU-group
+readiness, validated SimpleOS guest device-readback evidence, and the separate
+ivshmem checker path. It never loads
+modules or unbinds/rebinds a PCI device. A live VFIO attempt requires an
+explicitly selected spare GPU or approved maintenance window, every function in
+its IOMMU group, recovery console access, and a matching SimpleOS guest driver.
+The checker executes bounded probes only for root-owned, non-group/world-writable
+QEMU binaries whose trusted parent directories are under `/usr/bin` or
+`/usr/local/bin`. It deliberately rejects every purported
+guest receipt until a canonical SimpleOS guest producer exists; caller-authored
+text and hashes are not execution provenance.
+
+The dated 2026-07-15 Linux preflight found IOMMU and QEMU `vfio-pci`, both
+NVIDIA GPUs bound to host drivers, a broken `virtio-gpu-gl` module dependency,
+and no validated SimpleOS guest Vulkan/CUDA device-readback evidence. The result
+is therefore `unavailable`; the separately verified ivshmem design remains the
+viable implementation path, while this checker reports only its presence.
+TODO575 owns future direct-passthrough work and cannot be closed by host Vulkan,
+CUDA, QEMU flags, or host-daemon receipts.

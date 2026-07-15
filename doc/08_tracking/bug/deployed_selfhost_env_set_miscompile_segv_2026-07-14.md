@@ -137,3 +137,17 @@ candidate must pass:
 4. the normal deployed `test` and `native-build` smoke gates.
 
 The Rust seed remains bootstrap-only and is not verification evidence.
+
+## 2026-07-15 source-matched admission result
+
+A fresh strict Cranelift bootstrap completed Stage 2 and self-hosted Stage 3
+without a SIGSEGV or seed fallback. The first candidate exposed a separate
+bootstrap CLI contract bug: explicit-entry native builds forwarded an invalid
+`--mode` into the provider instead of returning the full CLI's bounded
+diagnostic. `bootstrap_main.spl` now validates that shared command contract.
+The rebuilt Stage 3 candidate
+`1764d74b2ff77f558b07cdf27a041d5e3e96824a7ef4b563151a6c29ba7a6816`
+passed `simple_binary_is_valid`, including the isolated Cranelift `p2_add`
+build/run and five-second invalid-mode probe. This resolves the focused
+candidate-admission crash; it does not deploy a full CLI or close the separate
+Stage 4 provider-composition work.
