@@ -694,6 +694,11 @@ spl_i64 rt_enum_new(spl_u32 enum_id, spl_u32 discriminant, spl_i64 payload) {
     return rt_heap(value);
 }
 
+spl_i64 rt_enum_id(spl_i64 value) {
+    RtEnum *enum_value = rt_as_enum(value);
+    return enum_value ? (spl_i64)enum_value->enum_id : -1;
+}
+
 spl_i64 rt_enum_payload(spl_i64 value) {
     RtEnum *enum_value = rt_as_enum(value);
     return enum_value ? enum_value->payload : rt_nil();

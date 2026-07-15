@@ -70,6 +70,18 @@ and method calls, unannotated local aliases, and single evaluation. It also
 requires incompatible return containers and unknown operands to build-fail
 without artifacts, plus unchanged Result Ok/Err propagation controls.
 
+## Additive prerequisite (2026-07-15)
+
+The behavior-neutral `rt_enum_id(i64) -> i64` API is now implemented across
+the C, hosted, Rust-seed, and pure-Simple runtime owners and their LLVM,
+llvm-lib, Cranelift/runtime-symbol, ELF-resolution, and strict-stub surfaces.
+Focused API/link assertions cover valid enum IDs and supported null/non-enum
+`-1` results in the weak C, hosted C, Rust, and pure-Simple owners.
+This does not change Option producers, predicates, coercion, or `?` behavior,
+and therefore does not close the bug. Execution remains pending a valid
+pure-Simple artifact; the tagged Option producer/consumer switch must still
+land atomically with the full dual-backend acceptance matrix.
+
 ## Reproduce
 
 `/tmp/wt_errhandling/` probes (Option `?` alongside Result `?`).

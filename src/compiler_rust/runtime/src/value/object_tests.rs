@@ -7,6 +7,7 @@ use super::{
     rt_closure_new,
     rt_closure_set_capture,
     rt_enum_discriminant,
+    rt_enum_id,
     // Enum functions
     rt_enum_new,
     rt_enum_payload,
@@ -199,6 +200,7 @@ fn test_enum_new_with_payload() {
     let enum_val = rt_enum_new(enum_id, discriminant, payload);
 
     assert!(enum_val.is_heap());
+    assert_eq!(rt_enum_id(enum_val), enum_id as i64);
     assert_eq!(rt_enum_discriminant(enum_val), discriminant as i64);
     assert_eq!(rt_enum_payload(enum_val).as_int(), 42);
 }
@@ -210,6 +212,7 @@ fn test_enum_new_nil_payload() {
     let enum_val = rt_enum_new(enum_id, discriminant, RuntimeValue::NIL);
 
     assert!(enum_val.is_heap());
+    assert_eq!(rt_enum_id(enum_val), enum_id as i64);
     assert_eq!(rt_enum_discriminant(enum_val), discriminant as i64);
     assert!(rt_enum_payload(enum_val).is_nil());
 }
@@ -240,6 +243,7 @@ fn test_enum_multiple_variants() {
 fn test_enum_invalid_value() {
     let not_an_enum = RuntimeValue::from_int(42);
 
+    assert_eq!(rt_enum_id(not_an_enum), -1);
     assert_eq!(rt_enum_discriminant(not_an_enum), -1);
     assert!(rt_enum_payload(not_an_enum).is_nil());
 }

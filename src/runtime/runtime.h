@@ -345,6 +345,7 @@ int8_t   rt_tuple_set(int64_t tuple, int64_t idx, int64_t value);
 int64_t  rt_tuple_get(int64_t tuple, int64_t idx);
 int64_t  rt_tuple_len(int64_t tuple);
 int64_t  rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload);
+int64_t  rt_enum_id(int64_t value);
 int64_t  rt_enum_discriminant(int64_t value);
 int64_t  rt_enum_payload(int64_t value);
 int64_t  rt_closure_new(int64_t func_ptr, int64_t capture_count);

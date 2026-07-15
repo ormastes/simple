@@ -1491,6 +1491,106 @@ fn run_stage4_c_probe(
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
+fn test_enum_id_hosted_c_runtime_behavior() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = build_core_c_runtime_library(&temp.path().join("core")).unwrap();
+    run_stage4_c_probe(
+        temp.path(),
+        "hosted_enum_id_probe",
+        r#"
+#include <stdint.h>
+#include "runtime.h"
+
+int main(void) {
+    int64_t value = rt_enum_new(7, 2, 11);
+    if (rt_enum_id(value) != 7) return 1;
+    if (rt_enum_id(0) != -1) return 2;
+    return 0;
+}
+"#,
+        &[core.as_path()],
+        &["-lpthread", "-ldl", "-lm"],
+        &[],
+    );
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn test_enum_id_weak_c_runtime_behavior() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let runtime_root = repo_root.join("src/runtime");
+    let temp = tempfile::tempdir().unwrap();
+    let probe = temp.path().join("weak_enum_id_probe.c");
+    let probe_object = temp.path().join("weak_enum_id_probe.o");
+    let runtime_object = temp.path().join("runtime.o");
+    let memtrack_object = temp.path().join("runtime_memtrack.o");
+    let executable = temp.path().join("weak_enum_id_probe");
+    let runtime_source = runtime_root.join("runtime.c");
+    let memtrack_source = runtime_root.join("runtime_memtrack.c");
+    std::fs::write(
+        &probe,
+        r#"
+#include <stdint.h>
+#include "runtime.h"
+
+int main(void) {
+    int64_t value = rt_enum_new(9, 3, 17);
+    if (rt_enum_id(value) != 9) return 1;
+    if (rt_enum_id(0) != -1) return 2;
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+    let cc = find_c_compiler();
+    for (source, object) in [
+        (probe.as_path(), probe_object.as_path()),
+        (runtime_source.as_path(), runtime_object.as_path()),
+        (memtrack_source.as_path(), memtrack_object.as_path()),
+    ] {
+        let output = std::process::Command::new(&cc)
+            .args(["-c", "-ffunction-sections", "-fdata-sections"])
+            .arg("-I")
+            .arg(&runtime_root)
+            .arg(source)
+            .arg("-o")
+            .arg(object)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "failed to compile {}: {}",
+            source.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let output = std::process::Command::new(&cc)
+        .args(["-Wl,--gc-sections"])
+        .arg(&probe_object)
+        .arg(&runtime_object)
+        .arg(&memtrack_object)
+        .args(["-lpthread", "-ldl", "-lm"])
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "failed to link weak enum probe: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(std::process::Command::new(&executable).status().unwrap().success());
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
 fn test_stage4_memtrack_provider_real_behavior() {
     let temp = tempfile::tempdir().unwrap();
     let providers = build_stage4_cli_c_provider_archives(&temp.path().join("providers")).unwrap();
@@ -3717,6 +3817,7 @@ int main(void) {
 
     int64_t none = rt_enum_new(1, (int32_t)2371748697u, 3);
     int64_t some = rt_enum_new(1, (int32_t)4053299545u, rt_value_int(9));
+    if (rt_enum_id(none) != 1 || rt_enum_id(some) != 1 || rt_enum_id(rt_value_int(9)) != -1) return 104;
     if (!rt_is_none(none) || rt_is_some(none)) return 94;
     if (rt_is_none(some) || !rt_is_some(some)) return 95;
     if ((uint32_t)rt_enum_discriminant(some) != 4053299545u) return 96;

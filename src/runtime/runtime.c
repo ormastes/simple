@@ -1169,6 +1169,12 @@ int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
 }
 
 __attribute__((weak))
+int64_t rt_enum_id(int64_t value) {
+    SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
+    return enum_value ? enum_value->enum_id : -1;
+}
+
+__attribute__((weak))
 int64_t rt_enum_discriminant(int64_t value) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
     return enum_value ? enum_value->discriminant : -1;

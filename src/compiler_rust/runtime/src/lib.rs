@@ -531,6 +531,7 @@ pub use value::{
     // Enum operations
     rt_enum_check_discriminant,
     rt_enum_discriminant,
+    rt_enum_id,
     rt_enum_new,
     rt_enum_payload,
     rt_free,
