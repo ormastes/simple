@@ -101,6 +101,7 @@ fn eval_call(eid: i64) -> i64:
     val e_node = expr_get(eid)
     val callee_eid = e_node.left
     val arg_eids = e_node.args
+    val arg_names = expr_get_arg_names(eid)
 
     # Evaluate callee
     val callee_node = expr_get(callee_eid)
@@ -115,7 +116,7 @@ fn eval_call(eid: i64) -> i64:
         if first_ch >= "A" and first_ch <= "Z":
             val struct_decl = struct_table_lookup(name)
             if struct_decl >= 0:
-                return eval_struct_constructor(name, struct_decl, arg_eids)
+                return eval_struct_constructor(name, struct_decl, arg_eids, arg_names)
 
         # Check for builtin
         val builtin_result = eval_builtin_call(name, arg_eids)
@@ -145,7 +146,7 @@ fn eval_call(eid: i64) -> i64:
             if first_ch2 >= "A" and first_ch2 <= "Z":
                 val struct_decl2 = struct_table_lookup(name)
                 if struct_decl2 >= 0:
-                    return eval_struct_constructor(name, struct_decl2, arg_eids)
+                    return eval_struct_constructor(name, struct_decl2, arg_eids, arg_names)
 
         eval_set_error("undefined function: " + name)
         return -1
@@ -178,7 +179,7 @@ fn eval_call(eid: i64) -> i64:
             # Check struct constructor with module prefix: Module.Struct(args)
             val struct_decl2 = struct_table_lookup(member_name)
             if struct_decl2 >= 0:
-                return eval_struct_constructor(member_name, struct_decl2, arg_eids)
+                return eval_struct_constructor(member_name, struct_decl2, arg_eids, arg_names)
 
             # Try deferred (lazy) modules for Type.method or Enum.Variant
             val forced_path = try_force_any_deferred_for(type_name)
@@ -202,7 +203,7 @@ fn eval_call(eid: i64) -> i64:
                 # Retry struct constructor
                 val struct_decl3 = struct_table_lookup(member_name)
                 if struct_decl3 >= 0:
-                    return eval_struct_constructor(member_name, struct_decl3, arg_eids)
+                    return eval_struct_constructor(member_name, struct_decl3, arg_eids, arg_names)
 
     # Indirect call (call on expression result)
     val callee_val = eval_expr(callee_eid)
@@ -377,41 +378,56 @@ fn val_struct_deep_copy(vid: i64) -> i64:
             new_values.push(fv)
     val_make_struct(name, fields, new_values)
 
-fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64]) -> i64:
+fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
     val d_node = decl_get(decl_id)
     val field_names = d_node.field_names
     val field_defaults = d_node.field_defaults
     var field_values: [i64] = []
+    for fname in field_names:
+        field_values.push(-1)
 
-    # Check for struct update spread (..base) - usually the last arg
     var base_struct: i64 = -1
-    var spread_at: i64 = -1
-    var spread_idx: i64 = 0
+    var arg_index: i64 = 0
+    var next_pos: i64 = 0
     for aeid in arg_eids:
         val etag = expr_get_tag(aeid)
         if etag == EXPR_SPREAD:
-            spread_at = spread_idx
-        spread_idx = spread_idx + 1
-
-    # Evaluate non-spread arguments (positional mapping to fields)
-    var explicit_pos: i64 = 0
-    for aeid in arg_eids:
-        val etag = expr_get_tag(aeid)
-        if etag == EXPR_SPREAD:
-            # Evaluate base struct for spread
             val inner_eid = expr_get_left(aeid)
             base_struct = eval_expr(inner_eid)
             if eval_had_error: return -1
         else:
             val av = eval_expr(aeid)
             if eval_had_error: return -1
-            field_values.push(av)
+            val arg_name = if arg_index < arg_names.len(): arg_names[arg_index] else: ""
+            var target: i64 = -1
+            if arg_name != "":
+                var fi: i64 = 0
+                while fi < field_names.len():
+                    if field_names[fi] == arg_name:
+                        target = fi
+                        break
+                    fi = fi + 1
+                if target < 0:
+                    eval_set_error("unknown field '" + arg_name + "' in " + name + " constructor")
+                    return -1
+                if field_values[target] >= 0:
+                    eval_set_error("duplicate field '" + arg_name + "' in " + name + " constructor")
+                    return -1
+            else:
+                while next_pos < field_values.len() and field_values[next_pos] >= 0:
+                    next_pos = next_pos + 1
+                if next_pos >= field_values.len():
+                    eval_set_error("too many arguments for " + name + " constructor")
+                    return -1
+                target = next_pos
+                next_pos = next_pos + 1
+            field_values[target] = av
+        arg_index = arg_index + 1
 
     # Fill remaining fields: use base struct then defaults then nil
-    val num_filled = field_values.len()
     var i: i64 = 0
     for fname in field_names:
-        if i >= num_filled:
+        if field_values[i] < 0:
             var fv: i64 = -1
             # Try base struct field
             if base_struct >= 0:
@@ -427,7 +443,7 @@ fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64]) -> i64:
                         if eval_had_error: return -1
             if fv < 0:
                 fv = val_make_nil()
-            field_values.push(fv)
+            field_values[i] = fv
         i = i + 1
 
     val_make_struct(name, field_names, field_values)

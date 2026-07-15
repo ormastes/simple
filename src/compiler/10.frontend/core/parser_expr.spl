@@ -46,8 +46,8 @@ use compiler.core.ast.{EXPR_NULL_COALESCE, EXPR_SLICE, EXPR_INTERPOLATED_STRING}
 use compiler.core.ast.{EXPR_AWAIT, EXPR_YIELD, EXPR_SPAWN, EXPR_DO_BLOCK, EXPR_ATOM}
 use compiler.core.ast.{expr_int_lit, expr_float_lit, expr_string_lit}
 use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_ident}
-use compiler.core.ast.{expr_binary, expr_unary, expr_call, expr_index}
-use compiler.core.ast.{expr_field_access, expr_method_call, expr_array_lit}
+use compiler.core.ast.{expr_binary, expr_unary, expr_call, expr_call_named, expr_index}
+use compiler.core.ast.{expr_field_access, expr_method_call, expr_method_call_named, expr_array_lit}
 use compiler.core.ast.{expr_struct_lit}
 use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr}
 use compiler.core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
@@ -60,7 +60,7 @@ use compiler.core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_a
 use compiler.core.ast.{expr_cast, EXPR_CAST}
 use compiler.core.tokens.{TOK_KW_AS}
 use compiler.core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
-use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_args}
+use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_args, expr_get_arg_names, expr_call_args_set}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
 use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_restore}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
@@ -153,23 +153,29 @@ fn parse_pipe() -> i64:
         val right = parse_postfix()
         if expr_get_tag(right) == EXPR_CALL:
             # x |> f(a) → f(x, a) — prepend left as first arg
-            val old_args = expr_args[right]
+            val old_args = expr_get_args(right)
+            val old_names = expr_get_arg_names(right)
             var new_args: [i64] = [left]
+            var new_names: [text] = [""]
             var j = 0
             while j < old_args.len():
                 new_args.push(old_args[j])
+                new_names.push(if j < old_names.len(): old_names[j] else: "")
                 j = j + 1
-            expr_args[right] = new_args
+            expr_call_args_set(right, new_args, new_names)
             left = right
         elif expr_get_tag(right) == EXPR_METHOD_CALL:
             # x |> obj.method(a) → obj.method(x, a) — prepend
-            val old_args = expr_args[right]
+            val old_args = expr_get_args(right)
+            val old_names = expr_get_arg_names(right)
             var new_args: [i64] = [left]
+            var new_names: [text] = [""]
             var j = 0
             while j < old_args.len():
                 new_args.push(old_args[j])
+                new_names.push(if j < old_names.len(): old_names[j] else: "")
                 j = j + 1
-            expr_args[right] = new_args
+            expr_call_args_set(right, new_args, new_names)
             left = right
         else:
             # x |> f → f(x), also handles placeholder: x |> (_1 * 3) → transform first
@@ -609,37 +615,43 @@ fn parse_binary_from(base: i64) -> i64:
         parser_advance()
         val pipe_right = parse_postfix()
         if expr_get_tag(pipe_right) == EXPR_CALL:
-            val old_args = expr_args[pipe_right]
+            val old_args = expr_get_args(pipe_right)
+            val old_names = expr_get_arg_names(pipe_right)
             var new_args: [i64] = [left]
+            var new_names: [text] = [""]
             var j = 0
             while j < old_args.len():
                 new_args.push(old_args[j])
+                new_names.push(if j < old_names.len(): old_names[j] else: "")
                 j = j + 1
-            expr_args[pipe_right] = new_args
+            expr_call_args_set(pipe_right, new_args, new_names)
             left = pipe_right
         elif expr_get_tag(pipe_right) == EXPR_METHOD_CALL:
-            val old_args = expr_args[pipe_right]
+            val old_args = expr_get_args(pipe_right)
+            val old_names = expr_get_arg_names(pipe_right)
             var new_args: [i64] = [left]
+            var new_names: [text] = [""]
             var j = 0
             while j < old_args.len():
                 new_args.push(old_args[j])
+                new_names.push(if j < old_names.len(): old_names[j] else: "")
                 j = j + 1
-            expr_args[pipe_right] = new_args
+            expr_call_args_set(pipe_right, new_args, new_names)
             left = pipe_right
         else:
             left = expr_call(transform_placeholder_lambda(pipe_right), [left], 0)
     left
 
-fn parse_call_arg() -> i64:
-    val raw = parse_call_arg_raw()
-    transform_placeholder_lambda(raw)
+fn parse_call_arg() -> (i64, text):
+    val (raw, name) = parse_call_arg_raw()
+    (transform_placeholder_lambda(raw), name)
 
-fn parse_call_arg_raw() -> i64:
+fn parse_call_arg_raw() -> (i64, text):
     # Struct update spread: ..base_expr
     if par_kind_get() == 165:
         parser_advance()
         val spread_inner = parse_expr()
-        return expr_spread(spread_inner, 0)
+        return (expr_spread(spread_inner, 0), "")
     # Check for bool-suffixed identifiers: true_abs, false_mut
     if par_kind_get() == 6:
         val ident = par_text_get()
@@ -649,33 +661,34 @@ fn parse_call_arg_raw() -> i64:
             if prefix5 == "true_":
                 val suffix = ident[5:]
                 parser_advance()
-                return expr_suffixed_bool(1, suffix, 0)
+                return (expr_suffixed_bool(1, suffix, 0), "")
         if ident_len > 6:
             val prefix6 = ident[0:6]
             if prefix6 == "false_":
                 val suffix = ident[6:]
                 parser_advance()
-                return expr_suffixed_bool(0, suffix, 0)
-        # Named argument: ident COLON expr -> strip name, return value
+                return (expr_suffixed_bool(0, suffix, 0), "")
+        # Named argument: retain the name beside the value in the call node.
         parser_advance()
-        if par_kind_get() == 161:
+        if par_kind_get() == 161 or par_kind_get() == 100:
             parser_advance()
-            return parse_expr()
+            return (parse_expr(), ident)
         # Not a named arg: already consumed ident, continue with postfix+binary
         val ident_node = expr_ident(ident, 0)
         val postfix_result = parse_postfix_on(ident_node)
-        return parse_binary_from(postfix_result)
+        return (parse_binary_from(postfix_result), "")
     # Keyword used as named arg name: keyword falls through pe_is_kw to EXPR_IDENT,
     # then ':' follows. Detect post-hoc: if parse_expr() produced EXPR_IDENT and
     # next token is ':', consume ':' and return the value expression.
     val ca_kw_result = parse_expr()
-    if par_kind_get() == 161:
+    if par_kind_get() == 161 or par_kind_get() == 100:
         # numeric tag 6 = EXPR_IDENT — imported-const compares misevaluate in
         # compiled stage4 (doc/08_tracking/bug/stage4_imported_const_compare_2026-06-12.md)
         if expr_get_tag(ca_kw_result) == 6:
+            val arg_name = expr_get_str(ca_kw_result)
             parser_advance()
-            return parse_expr()
-    ca_kw_result
+            return (parse_expr(), arg_name)
+    (ca_kw_result, "")
 
 fn extract_dotted_path(eid: i64) -> text:
     val ep_tag = expr_get_tag(eid)
@@ -905,9 +918,12 @@ fn parse_postfix_on(base_expr: i64) -> i64:
             if ppo_after_member == 140:
                 parser_advance()
                 var call_args: [i64] = []
+                var call_arg_names: [text] = []
                 var ppo_after_lparen = par_kind_get()
                 if ppo_after_lparen != 141:
-                    call_args.push(parse_call_arg())
+                    val first_arg = parse_call_arg()
+                    call_args.push(first_arg.0)
+                    call_arg_names.push(first_arg.1)
                     ppo_after_lparen = par_kind_get()
                     for j in 0..10000:
                         if ppo_after_lparen != 160:
@@ -916,10 +932,12 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                         ppo_after_lparen = par_kind_get()
                         if ppo_after_lparen == 141:
                             break
-                        call_args.push(parse_call_arg())
+                        val next_arg = parse_call_arg()
+                        call_args.push(next_arg.0)
+                        call_arg_names.push(next_arg.1)
                         ppo_after_lparen = par_kind_get()
                 parser_expect(141)
-                base = expr_method_call(base, field_name, call_args, 0)
+                base = expr_method_call_named(base, field_name, call_args, call_arg_names, 0)
             else:
                 base = expr_field_access(base, field_name, 0)
         elif (kind == 142 and
@@ -960,9 +978,12 @@ fn parse_postfix_on(base_expr: i64) -> i64:
         elif kind == 140:
             parser_advance()
             var call_args: [i64] = []
+            var call_arg_names: [text] = []
             var ppo_after_lparen = par_kind_get()
             if ppo_after_lparen != 141:
-                call_args.push(parse_call_arg())
+                val first_arg = parse_call_arg()
+                call_args.push(first_arg.0)
+                call_arg_names.push(first_arg.1)
                 ppo_after_lparen = par_kind_get()
                 for j in 0..10000:
                     if ppo_after_lparen != 160:
@@ -971,10 +992,12 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                     ppo_after_lparen = par_kind_get()
                     if ppo_after_lparen == 141:
                         break
-                    call_args.push(parse_call_arg())
+                    val next_arg = parse_call_arg()
+                    call_args.push(next_arg.0)
+                    call_arg_names.push(next_arg.1)
                     ppo_after_lparen = par_kind_get()
             parser_expect(141)
-            base = expr_call(base, call_args, 0)
+            base = expr_call_named(base, call_args, call_arg_names, 0)
         elif kind == 131:
             parser_advance()
             val field_name = par_text_get()
@@ -1087,9 +1110,12 @@ fn parse_postfix() -> i64:
             if pp_after_member == 140:
                 parser_advance()
                 var call_args: [i64] = []
+                var call_arg_names: [text] = []
                 var pp_after_lparen = par_kind_get()
                 if pp_after_lparen != 141:
-                    call_args.push(parse_call_arg())
+                    val first_arg = parse_call_arg()
+                    call_args.push(first_arg.0)
+                    call_arg_names.push(first_arg.1)
                     pp_after_lparen = par_kind_get()
                     for j in 0..10000:
                         if pp_after_lparen != 160:
@@ -1098,10 +1124,12 @@ fn parse_postfix() -> i64:
                         pp_after_lparen = par_kind_get()
                         if pp_after_lparen == 141:
                             break
-                        call_args.push(parse_call_arg())
+                        val next_arg = parse_call_arg()
+                        call_args.push(next_arg.0)
+                        call_arg_names.push(next_arg.1)
                         pp_after_lparen = par_kind_get()
                 parser_expect(141)
-                base = expr_method_call(base, field_name, call_args, 0)
+                base = expr_method_call_named(base, field_name, call_args, call_arg_names, 0)
             else:
                 base = expr_field_access(base, field_name, 0)
         elif (kind == 142 and
@@ -1148,9 +1176,12 @@ fn parse_postfix() -> i64:
                 eprint("[parser-expr] call:start callee={expr_get_str(base)} line={par_line_get()} col={par_col_get()}")
             parser_advance()
             var call_args: [i64] = []
+            var call_arg_names: [text] = []
             var pp_after_lparen = par_kind_get()
             if pp_after_lparen != 141:
-                call_args.push(parse_call_arg())
+                val first_arg = parse_call_arg()
+                call_args.push(first_arg.0)
+                call_arg_names.push(first_arg.1)
                 pp_after_lparen = par_kind_get()
                 for j in 0..10000:
                     if pp_after_lparen != 160:
@@ -1159,10 +1190,12 @@ fn parse_postfix() -> i64:
                     pp_after_lparen = par_kind_get()
                     if pp_after_lparen == 141:
                         break
-                    call_args.push(parse_call_arg())
+                    val next_arg = parse_call_arg()
+                    call_args.push(next_arg.0)
+                    call_arg_names.push(next_arg.1)
                     pp_after_lparen = par_kind_get()
             parser_expect(141)
-            base = expr_call(base, call_args, 0)
+            base = expr_call_named(base, call_args, call_arg_names, 0)
             if parser_expr_trace_line_enabled():
                 eprint("[parser-expr] call:done callee={expr_get_str(base)} argc={call_args.len()}")
         elif kind == 131:

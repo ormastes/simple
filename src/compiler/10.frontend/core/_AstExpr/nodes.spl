@@ -90,6 +90,7 @@ var expr_left: [i64] = []
 var expr_right: [i64] = []
 var expr_extra: [i64] = []
 var expr_args: [[i64]] = []
+var expr_arg_names: [[text]] = []
 var expr_stmts: [[i64]] = []
 
 extern fn rt_env_get(key: text) -> text
@@ -185,6 +186,16 @@ fn expr_list_set(idx: i64, field: text, values: [i64]):
 fn expr_list_get(idx: i64, field: text) -> [i64]:
     expr_i64_list_split(rt_env_get(expr_key(idx, field)) ?? "")
 
+fn expr_text_list_set(idx: i64, field: text, values: [text]):
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        rt_env_set(expr_key(idx, field), values.join("\n"))
+
+fn expr_call_args_set(idx: i64, call_args: [i64], arg_names: [text]):
+    expr_args[idx] = call_args
+    expr_arg_names[idx] = arg_names
+    expr_list_set(idx, "ARGS", call_args)
+    expr_text_list_set(idx, "ARG_NAMES", arg_names)
+
 fn expr_count() -> i64:
     val env_count = expr_count_env()
     if env_count > 0:
@@ -203,6 +214,7 @@ fn expr_reset():
     expr_right = []
     expr_extra = []
     expr_args = []
+    expr_arg_names = []
     expr_stmts = []
     asm_arm_archs = []
     asm_arm_os = []
@@ -232,6 +244,8 @@ fn expr_reset():
         expr_extra = []
     if expr_args == nil:
         expr_args = []
+    if expr_arg_names == nil:
+        expr_arg_names = []
     if expr_stmts == nil:
         expr_stmts = []
     if asm_arm_archs == nil:
@@ -263,6 +277,7 @@ fn expr_reset():
     expr_right.clear()
     expr_extra.clear()
     expr_args.clear()
+    expr_arg_names.clear()
     expr_stmts.clear()
     asm_arm_archs.clear()
     asm_arm_os.clear()
@@ -289,6 +304,7 @@ fn expr_alloc(tag: i64, span_id: i64) -> i64:
     expr_right.push(-1)
     expr_extra.push(-1)
     expr_args.push([])
+    expr_arg_names.push([])
     expr_stmts.push([])
     expr_i64_set(idx, "TAG", tag)
     expr_i64_set(idx, "SPAN", span_id)
@@ -299,6 +315,7 @@ fn expr_alloc(tag: i64, span_id: i64) -> i64:
     expr_i64_set(idx, "RIGHT", -1)
     expr_i64_set(idx, "EXTRA", -1)
     expr_list_set(idx, "ARGS", [])
+    expr_text_list_set(idx, "ARG_NAMES", [])
     expr_list_set(idx, "STMTS", [])
     val trace_expr_tags = rt_env_get("SIMPLE_TRACE_EXPR_TAGS") ?? ""
     if trace_expr_tags != "" and (idx < 8 or tag <= 0):
@@ -361,6 +378,9 @@ fn expr_unary(op: i64, operand: i64, span_id: i64) -> i64:
     idx
 
 fn expr_call(callee: i64, call_args: [i64], span_id: i64) -> i64:
+    expr_call_named(callee, call_args, [], span_id)
+
+fn expr_call_named(callee: i64, call_args: [i64], arg_names: [text], span_id: i64) -> i64:
     if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
         eprint("[ast-expr] call-alloc:start callee={callee} argc={call_args.len()}")
     val idx = expr_alloc(9, span_id)
@@ -370,10 +390,9 @@ fn expr_call(callee: i64, call_args: [i64], span_id: i64) -> i64:
     expr_i64_set(idx, "LEFT", callee)
     if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
         eprint("[ast-expr] call-alloc:left idx={idx}")
-    expr_args[idx] = call_args
+    expr_call_args_set(idx, call_args, arg_names)
     if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
         eprint("[ast-expr] call-alloc:args-memory idx={idx}")
-    expr_list_set(idx, "ARGS", call_args)
     if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
         eprint("[ast-expr] call-alloc:args-env idx={idx}")
     if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
@@ -399,13 +418,15 @@ fn expr_field_access(base: i64, field_name: text, span_id: i64) -> i64:
     idx
 
 fn expr_method_call(receiver: i64, method_name: text, call_args: [i64], span_id: i64) -> i64:
+    expr_method_call_named(receiver, method_name, call_args, [], span_id)
+
+fn expr_method_call_named(receiver: i64, method_name: text, call_args: [i64], arg_names: [text], span_id: i64) -> i64:
     val idx = expr_alloc(12, span_id)
     expr_left[idx] = receiver
     expr_i64_set(idx, "LEFT", receiver)
     expr_s_val[idx] = method_name
     expr_text_set(idx, "S", method_name)
-    expr_args[idx] = call_args
-    expr_list_set(idx, "ARGS", call_args)
+    expr_call_args_set(idx, call_args, arg_names)
     idx
 
 fn expr_array_lit(elements: [i64], span_id: i64) -> i64:

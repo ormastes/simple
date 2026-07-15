@@ -3,7 +3,7 @@
 **Date:** 2026-06-30
 **Severity:** medium
 **Component:** compiler/interpreter (class literal construction with named args)
-**Status:** open
+**Status:** source fix implemented; executable verification pending
 
 ## Summary
 
@@ -61,9 +61,30 @@ expanded.len=2                # group expansion
 decoded.ok=true; tokens=1     # SDN encode → decode round-trip
 ```
 
-## Suggested fix (unverified)
+## Root cause
 
-In the interpreter's class-literal evaluation, bind each named argument to its
-field **by name** (match the declared field set), not positionally. Likely in
-the semantic/eval path for struct/class literal construction. Out of scope for
-the PrivilegeStore task (pure-Simple lib work, no compiler rebuild).
+The flat core parser recognized `name: value` but returned only the value
+expression. The flat-to-rich bridge therefore emitted every `CallArg` as
+positional, and both core-interpreter evaluator mirrors filled declaration
+fields only by argument position.
+
+## Source fix
+
+The flat expression arena now retains an argument-name list parallel to the
+existing argument-expression list. The parser preserves both `name: value`
+and `name = value`; the flat bridge and bootstrap flat HIR path transfer those
+names through the existing `CallArg`/`HirCallArg` types. Constructor evaluation
+binds named arguments to matching declared fields, while positional arguments
+fill the next field not already supplied by name. Unknown, duplicate, and
+excess arguments now produce interpreter errors. Pipe rewrites use one call-arg
+setter so prepended positional values and retained names stay aligned in both
+the in-memory arena and bootstrap environment mirror.
+
+A direct `core_interpret` regression in
+`src/compiler/10.frontend/core/interpreter/test_interp.spl` constructs both
+`Point(y: 20, x: 10)` and `Principal(kind: 7, id: "alice")`, `=` spelling,
+mixed positional/named arguments, pipe-prepended arguments, and an ordinary
+function call. It also verifies unknown, duplicate, and excess constructor
+arguments fail with explicit errors. This lane performed static source checks
+only; the owning integration lane must execute that regression after deploying
+a new pure-Simple compiler.
