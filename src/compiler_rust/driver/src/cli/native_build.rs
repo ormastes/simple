@@ -44,6 +44,9 @@ fn is_valid_runtime_bundle(value: &str) -> bool {
             | "core"
             | "core-c"
             | "core_c"
+            | "host-gpu"
+            | "host_gpu"
+            | "gpu"
     )
 }
 
@@ -255,7 +258,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                     runtime_bundle = args[i + 1].clone();
                     i += 2;
                 } else {
-                    eprintln!("error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap)");
+                    eprintln!("error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap, host-gpu)");
                     return 1;
                 }
             }
@@ -378,7 +381,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
             return 1;
         }
         eprintln!(
-            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, runtime",
+            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, host-gpu, runtime",
             runtime_bundle
         );
         return 1;
