@@ -128,15 +128,10 @@ pub fn install_seccomp_profile(profile: LinuxSeccompProfile) -> SandboxResult<()
     if profile.deny_process_spawn {
         deny_syscalls(
             &mut filter,
-            &[
-                libc::SYS_execve,
-                libc::SYS_execveat,
-                libc::SYS_clone,
-                libc::SYS_clone3,
-                libc::SYS_fork,
-                libc::SYS_vfork,
-            ],
+            &[libc::SYS_execve, libc::SYS_execveat, libc::SYS_clone, libc::SYS_clone3],
         );
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "arm"))]
+        deny_syscalls(&mut filter, &[libc::SYS_fork, libc::SYS_vfork]);
     }
 
     filter.push(bpf_stmt((libc::BPF_RET | libc::BPF_K) as u16, libc::SECCOMP_RET_ALLOW));
