@@ -366,3 +366,39 @@ Related:
 - `doc/08_tracking/bug/native_build_entry_closure_quadratic_hang_2026-07-12.md`
 - `doc/08_tracking/bug/cpu_simd_direct_fill_full_bootstrap_stage4_spin_2026-07-08.md`
 - TODO 548
+
+## 2026-07-15 UI-access deployment follow-up
+
+A cache-preserving strict bootstrap reached verified pure-Simple Stage 3, then
+failed at the full-CLI Stage 4 link. The command used the Stage-2 compiler with
+`--entry-closure`, `SIMPLE_NO_STUB_FALLBACK=1`, the exact
+`src/app/cli/main.spl` entry, core-C, and the dedicated compiler backfill. It
+did not select `native_all` or another Rust-hosted runtime.
+
+- Stage 2 SHA-256: `de30977f2e7284c722b275e7e29401da7c760228b0c46ecfc6be5b2a1e553e13`
+- Stage 3 SHA-256: `5ab6582155d53e12e486aee57aae5cc9271757bda5aea963a21cb64b475f667e`
+- Pure-Simple `simple-core` archive SHA-256:
+  `637f2c2be4a44857f17e1a1464998ac19d9729505da0720ab4535896ac8bd2c2`
+- Unique unresolved names from the retained Stage-4 linker log: 207
+- Names supplied by the generated pure-Simple archive: 11 (`panic`,
+  `rt_array_extend_i64`, `rt_array_first`, `rt_array_sort`, `rt_dir_list`,
+  `rt_file_copy`, `rt_file_stat`, `rt_getpid`,
+  `rt_is_debug_mode_enabled`, `rt_string_rfind`, and
+  `rt_time_now_monotonic_ms`)
+
+The unresolved set groups into 105 GPU/accelerator names, 25 SQLite names, 18
+platform-window names, 10 process/thread names, 6 HTTP names, 29 core host
+helpers, and 14 other command/runtime hooks. This supersedes the earlier
+105-name observation for the current UI/play/T32-expanded full-CLI closure; it
+does not invalidate that earlier retained evidence.
+
+The bounded third cycle built the pure-Simple archive successfully but proved
+that selecting it alone cannot close this graph. Rust-hosted/native-all
+selection, generated stubs, ignored undefined symbols, or import pruning would
+respectively violate Rust-as-seed-only, strict no-stub verification, runtime
+safety, or advertised CLI compatibility. The next implementation remains the
+exact-entry `stage4-cli-hosted` provider composition already specified above,
+using capability-owned Simple or C archives with disjoint ownership and a
+provider-aware cache fingerprint. No deploy/live PASS is claimed, and
+fail-closed release-bundle enforcement was deliberately not landed because it
+would remove existing launch links before a valid replacement bundle exists.
