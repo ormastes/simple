@@ -14,6 +14,12 @@ fn self_exe() -> text:
     val (out, _err, code) = process_run_timeout("readlink", ["-f", "/proc/{pid}/exe"], 2000)
     if code == 0 and out != "":
         return out.trim()
+    # Darwin has no /proc. `ps ... -o comm=` returns the executable path
+    # without the argv tail, so bootstrap workers keep using the compiler that
+    # invoked native-build instead of silently falling back to stale bin/simple.
+    val (darwin_out, _darwin_err, darwin_code) = process_run_timeout("ps", ["-p", "{pid}", "-o", "comm="], 2000)
+    if darwin_code == 0 and darwin_out != "":
+        return darwin_out.trim()
     ""
 
 # Absolutize a repo-relative path for the timeout wrapper.
@@ -46,7 +52,7 @@ fn resolve_simple_binary() -> text:
     # Prefer the binary that invoked us during bootstrap.
     val se = self_exe()
     if se != "" and rt_file_exists(se):
-        return se
+        return abs_if_needed(se)
     if rt_file_exists("bin/simple"):
         return abs_path("bin/simple")
     if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):

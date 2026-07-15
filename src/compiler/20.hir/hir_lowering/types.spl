@@ -30,6 +30,14 @@ struct ModuleResolverPort:
     name: text
     resolve_fn: any
 
+type HirModulesByName = {text: Module}
+type HirImplFunctions = {SymbolId: HirFunction}
+type HirTraitsByName = {text: HirTrait}
+type HirFieldTypesByName = {text: {text: HirType}}
+type HirLocalStructTypes = {i64: text}
+type HirFieldOrderByName = {text: [text]}
+type HirLocalTupleTypes = {i64: [HirType]}
+
 # HIR Lowering Context
 # ============================================================================
 
@@ -42,10 +50,10 @@ class HirLowering:
     module_filename: text          # Filename/path for visibility matching and defining_module population
     module_resolver: ModuleResolverPort?   # Optional resolver for 2-pass import resolution (FR-COMPILER-003)
     loaded_modules: [text]         # Paths of modules already loaded (for cycle detection in A2 resolve pass)
-    modules_by_name: Dict<text, Module>       # All parsed modules keyed by module name (for resolve_import_symbols)
+    modules_by_name: HirModulesByName       # All parsed modules keyed by module name (for resolve_import_symbols)
     current_method_self_type: HirType?
-    lowered_impl_functions: Dict<SymbolId, HirFunction>
-    lowered_traits: Dict<text, HirTrait>   # Traits lowered in this module (by name), for injecting defaults into impls
+    lowered_impl_functions: HirImplFunctions
+    lowered_traits: HirTraitsByName   # Traits lowered in this module (by name), for injecting defaults into impls
     # Nested-field-access support (native-build --entry path has no type
     # inference pass, so a `s.arr` Field expr otherwise gets `type_: nil` and
     # MIR defaults its result to i64 -- silently wrong for an array/struct
@@ -57,15 +65,15 @@ class HirLowering:
     # layer's struct_value_syms/struct_field_type_name propagation, one layer
     # up, since the actual Field-expr type_ consumer lives in a file this lane
     # may not edit (see doc/... nestedfield lane notes).
-    struct_field_types_by_name: Dict<text, Dict<text, HirType>>
-    local_struct_types: Dict<i64, text>
+    struct_field_types_by_name: HirFieldTypesByName
+    local_struct_types: HirLocalStructTypes
     # Declared field NAME order per struct (parallels MIR's own
     # struct_field_order). CallArg.has_name/.name are not reliably populated
     # on this path (observed false/empty for every arg regardless of whether
     # the source used `field: value` named-arg syntax), so both this layer
     # and MIR fall back to positional-order matching against the struct's
     # OWN declared field order to learn which arg feeds which field.
-    struct_field_order_by_name: Dict<text, [text]>
+    struct_field_order_by_name: HirFieldOrderByName
     # Tuple analogue of local_struct_types: local variable symbol id ->
     # per-element declared/inferred HirType, populated only for the simple
     # `val/var t = (lit0, lit1, ...)` binding shape (element types are
@@ -78,7 +86,7 @@ class HirLowering:
     # as i64 downstream, silently printing garbage for any non-i64 element
     # (e.g. a text field) of a mixed-type tuple -- see is_tuple_positional_field
     # in expressions.spl and lower_tuple_destructure below.
-    local_tuple_types: Dict<i64, [HirType]>
+    local_tuple_types: HirLocalTupleTypes
 
 struct LoweringError:
     message: text
@@ -96,13 +104,13 @@ enum LoweringErrorKind:
 fn hirlowering_new() -> HirLowering:
     val empty_errors: [LoweringError] = []
     val empty_loaded_modules: [text] = []
-    val empty_modules_by_name: Dict<text, Module> = {}
-    val empty_impl_functions: Dict<SymbolId, HirFunction> = {}
-    val empty_traits: Dict<text, HirTrait> = {}
-    val empty_struct_field_types: Dict<text, Dict<text, HirType>> = {}
-    val empty_local_struct_types: Dict<i64, text> = {}
-    val empty_struct_field_order: Dict<text, [text]> = {}
-    val empty_local_tuple_types: Dict<i64, [HirType]> = {}
+    val empty_modules_by_name: HirModulesByName = {}
+    val empty_impl_functions: HirImplFunctions = {}
+    val empty_traits: HirTraitsByName = {}
+    val empty_struct_field_types: HirFieldTypesByName = {}
+    val empty_local_struct_types: HirLocalStructTypes = {}
+    val empty_struct_field_order: HirFieldOrderByName = {}
+    val empty_local_tuple_types: HirLocalTupleTypes = {}
     HirLowering(
         symbols: SymbolTable.new(),
         errors: empty_errors,
@@ -122,7 +130,7 @@ fn hirlowering_new() -> HirLowering:
         local_tuple_types: empty_local_tuple_types
     )
 
-fn hirlowering_for_module(filename: text, modules_by_name: Dict<text, Module>) -> HirLowering:
+fn hirlowering_for_module(filename: text, modules_by_name: HirModulesByName) -> HirLowering:
     var lowering = hirlowering_new()
     lowering.module_filename = filename
     lowering.modules_by_name = modules_by_name

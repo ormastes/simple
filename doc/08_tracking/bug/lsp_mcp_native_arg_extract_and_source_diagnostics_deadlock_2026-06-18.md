@@ -86,3 +86,20 @@ printf '%s\n' \
 # source diagnostics: hang (zombie child + parent futex_wait) — only with the gate disabled
 SIMPLE_LSP_ENABLE_DIAGNOSTICS=1 SIMPLE_LIB=$PWD/src bin/simple run src/app/simple_lsp_mcp/main.spl  # then send lsp_diagnostics
 ```
+
+## 2026-07-16 hardening evidence
+
+- The arm64 Darwin native artifact still lists all 11 tools but returns
+  `Missing tool name` for an exact `lsp_symbols` call. This confirms the
+  advertised-tool false green on the current macOS artifact.
+- `json_helpers.spl` now uses direct text slices for field extraction. The
+  previous character-by-character concatenation is the AOT-sensitive path;
+  focused source checking passes and a regression spec covers a standard
+  `tools/call` plus numeric and string request IDs. A fresh native artifact is
+  still required before this source correction can close the bug.
+- The generated wrapper probe cache version is bumped and a native candidate
+  must now pass initialize, tools/list, and a correlated real `lsp_symbols`
+  call. Both existing Darwin candidates were rejected by that probe, so
+  `SIMPLE_LSP_MCP_PREFER_NATIVE=1` fails closed instead of caching a broken
+  binary. Standard Darwin release candidates are checked before the legacy
+  Mach-O platform directory.

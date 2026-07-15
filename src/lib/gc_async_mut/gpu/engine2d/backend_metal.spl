@@ -22,7 +22,8 @@ use std.gc_async_mut.io.metal_sffi.{
     metal_sffi_wait_completed, metal_sffi_dispatch_compute,
     metal_sffi_create_compute_encoder, metal_sffi_end_compute_encoder,
     metal_sffi_destroy_compute_encoder,
-    metal_sffi_set_buffer, metal_sffi_set_bytes
+    metal_sffi_set_buffer, metal_sffi_set_bytes,
+    metal_sffi_quarantine_submission, metal_sffi_reap_submission_quarantine
 }
 
 extern fn rt_alloc(size: i64) -> i64
@@ -367,6 +368,9 @@ impl RenderBackend for MetalBackend:
             self.gpu_frame_complete = false
             self.last_error = "Metal requires macOS"
             return false
+        if not metal_sffi_reap_submission_quarantine():
+            self.last_error = "deferred Metal submission cleanup is still pending"
+            return false
         self.font.release()
         if not self.session.init():
             val status = self.session.error_code()
@@ -444,6 +448,9 @@ impl RenderBackend for MetalBackend:
         if not session.is_valid():
             self.last_error = "Metal shared session is not initialized"
             return false
+        if not metal_sffi_reap_submission_quarantine():
+            self.last_error = "deferred Metal submission cleanup is still pending"
+            return false
 
         self.session = session.retain()
         self.command_queue = self.session.command_queue
@@ -491,19 +498,30 @@ impl RenderBackend for MetalBackend:
     me shutdown():
         if self.pending_composite_command != 0:
             if not metal_sffi_wait_completed(self.pending_composite_command):
-                # ponytail: quarantine the surface and staged source until the
-                # runtime can prove command completion; freeing either may race
-                # an in-flight Metal command. TODO 555 tracks a runtime-owned
-                # deferred completion reaper for deterministic reclamation.
-                return
-            if self.pending_composite_source != 0:
-                metal_sffi_free_buffer(self.pending_composite_source)
-            if self.pending_composite_encoder != 0:
-                metal_sffi_destroy_compute_encoder(self.pending_composite_encoder)
-            metal_sffi_destroy_command_buffer(self.pending_composite_command)
-            self.pending_composite_command = 0
-            self.pending_composite_encoder = 0
-            self.pending_composite_source = 0
+                if not metal_sffi_quarantine_submission(
+                    self.pending_composite_command,
+                    self.pending_composite_encoder,
+                    self.pending_composite_source,
+                    self.d_framebuffer
+                ):
+                    return
+                self.pending_composite_command = 0
+                self.pending_composite_encoder = 0
+                self.pending_composite_source = 0
+                self.d_framebuffer = 0
+                # A terminal Metal error is reclaimable immediately; a truly
+                # unknown registry handle remains owned by the global facade
+                # and blocks the next surface initialization until proven safe.
+                metal_sffi_reap_submission_quarantine()
+            else:
+                if self.pending_composite_source != 0:
+                    metal_sffi_free_buffer(self.pending_composite_source)
+                if self.pending_composite_encoder != 0:
+                    metal_sffi_destroy_compute_encoder(self.pending_composite_encoder)
+                metal_sffi_destroy_command_buffer(self.pending_composite_command)
+                self.pending_composite_command = 0
+                self.pending_composite_encoder = 0
+                self.pending_composite_source = 0
         self.mirror.shutdown()
         self.font.release()
         if self.d_framebuffer != 0:
@@ -1317,9 +1335,8 @@ impl MetalBackend:
             metal_host_write_i32(params, 24, 1)
         else:
             metal_host_write_i32(params, 24, 0)
-        # Hoist the pipeline handle into a local: the interpreter loses the `self`
-        # binding when a self.* field is passed inline as a call argument after a
-        # prior extern call (same workaround as _dispatch_metal_1d).
+        # Snapshot the selected pipeline before command allocation so dispatch
+        # uses one stable session state throughout the submission.
         var ok = true
         if filled:
             # Filled circle: per-pixel distance test over the (2r+1)^2 bounding box.
@@ -1541,10 +1558,8 @@ impl MetalBackend:
         true
 
     me _dispatch_metal_1d(pipeline: i64, threads: i64, block_x: i64, params: i64, params_len: i64) -> bool:
-        # TODO: [runtime][P2] Interpreter loses the `self` binding when a struct
-        # field is passed inline as a call argument after a prior extern call in
-        # the same method ("variable `self` not found"). Hoisting self.* into
-        # locals first is the workaround applied here and in _dispatch_metal_2d.
+        # Snapshot queue and framebuffer handles before allocating command
+        # objects so all failure paths operate on one submission state.
         if self.pending_composite_command != 0:
             return false
         val q = self.command_queue

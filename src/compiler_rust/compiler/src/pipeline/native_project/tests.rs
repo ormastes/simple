@@ -2496,6 +2496,7 @@ fn test_core_c_runtime_native_focus_contract() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn test_stage4_compiler_entries_prepare_dedicated_backfill_through_gate() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();

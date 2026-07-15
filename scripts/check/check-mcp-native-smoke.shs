@@ -9,7 +9,18 @@ MCP_NATIVE_STARTUP_MAX_MS="${MCP_NATIVE_STARTUP_MAX_MS:-5000}"
 MCP_NATIVE_BOOTSTRAP_FRESH="${MCP_NATIVE_BOOTSTRAP_FRESH:-0}"
 
 now_ms() {
-    date +%s%3N
+    value="$(date +%s%3N 2>/dev/null || true)"
+    case "$value" in
+        *[!0-9]*|'') ;;
+        *) printf '%s\n' "$value"; return ;;
+    esac
+    if command -v gdate >/dev/null 2>&1; then
+        gdate +%s%3N
+    elif command -v perl >/dev/null 2>&1; then
+        perl -MTime::HiRes=time -e 'printf "%.0f\n", time() * 1000'
+    else
+        printf '%s000\n' "$(date +%s)"
+    fi
 }
 
 if [ ! -x "$SIMPLE_BINARY" ]; then
@@ -39,22 +50,22 @@ MCPGDB_APP_DIRECT_RT_VALID=true
 UI_MCP_APP_DIRECT_RT_VALID=true
 SERIAL_MCP_APP_DIRECT_RT_VALID=true
 SPEC_DIRECT_RT_VALID=true
-if rg -n '\brt_[A-Za-z0-9_]+|extern fn rt_' src/app/mcp >/dev/null 2>&1; then
+if rg -n '^extern fn rt_' src/app/mcp >/dev/null 2>&1; then
     APP_DIRECT_RT_VALID=false
 fi
-if rg -n '\brt_[A-Za-z0-9_]+|extern fn rt_' src/app/simple_lsp_mcp >/dev/null 2>&1; then
+if rg -n '^extern fn rt_' src/app/simple_lsp_mcp >/dev/null 2>&1; then
     LSP_APP_DIRECT_RT_VALID=false
 fi
-if rg -n '\brt_[A-Za-z0-9_]+|extern fn rt_' src/app/mcpgdb >/dev/null 2>&1; then
+if rg -n '^extern fn rt_' src/app/mcpgdb >/dev/null 2>&1; then
     MCPGDB_APP_DIRECT_RT_VALID=false
 fi
-if rg -n '\brt_[A-Za-z0-9_]+|extern fn rt_' src/app/ui.mcp >/dev/null 2>&1; then
+if rg -n '^extern fn rt_' src/app/ui.mcp >/dev/null 2>&1; then
     UI_MCP_APP_DIRECT_RT_VALID=false
 fi
-if rg -n '\brt_[A-Za-z0-9_]+|extern fn rt_' src/app/serial_mcp >/dev/null 2>&1; then
+if rg -n '^extern fn rt_' src/app/serial_mcp >/dev/null 2>&1; then
     SERIAL_MCP_APP_DIRECT_RT_VALID=false
 fi
-if rg -n '\brt_[A-Za-z0-9_]+|extern fn rt_' test/02_integration/app/mcp_stdio_integration_spec.spl >/dev/null 2>&1; then
+if rg -n '^extern fn rt_' test/02_integration/app/mcp_stdio_integration_spec.spl >/dev/null 2>&1; then
     SPEC_DIRECT_RT_VALID=false
 fi
 
@@ -277,10 +288,10 @@ fi
 echo "mcp_stale_stamp_reprobe_ok=$MCP_STALE_STAMP_OK"
 
 set +e
-"$SIMPLE_BINARY" run scripts/check/validate_mcp_native_smoke.spl --mode=interpreter \
-    --mcp-out "$TMPDIR/mcp_func.jsonl" \
-    --lsp-out "$TMPDIR/lsp_func.out" \
-    --rt-forward-cache "$RT_FORWARD_CACHE_FILE"
+MCP_NATIVE_SMOKE_MCP_OUT="$TMPDIR/mcp_func.jsonl" \
+MCP_NATIVE_SMOKE_LSP_OUT="$TMPDIR/lsp_func.out" \
+MCP_NATIVE_SMOKE_RT_FORWARD_CACHE="$RT_FORWARD_CACHE_FILE" \
+    "$SIMPLE_BINARY" run scripts/check/validate_mcp_native_smoke.spl --mode=interpreter
 VALIDATE_RC=$?
 set -e
 

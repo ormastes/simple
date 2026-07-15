@@ -1,6 +1,7 @@
 # Validate MCP native smoke outputs without Python.
 
-use std.nogc_sync_mut.io_runtime.{env_get, file_read, get_args}
+use std.nogc_sync_mut.io_runtime.{env_get, file_read}
+use std.common.base_encoding.{text_to_bytes}
 
 struct SmokeResult:
     json_valid: bool
@@ -36,57 +37,70 @@ fn parse_nonnegative_i64(value: text) -> i64:
     n
 
 fn validate_content_length_frames(raw: text) -> bool:
-    val prefix = "Content-Length: "
+    val bytes = text_to_bytes(raw)
+    val prefix = text_to_bytes("Content-Length: ")
     var pos: i64 = 0
     var count: i64 = 0
-    while pos < raw.len():
-        if raw.substring(pos, pos + prefix.len()) != prefix:
+    while pos < bytes.len():
+        if pos + prefix.len() > bytes.len() or bytes[pos:pos + prefix.len()] != prefix:
             return false
-        val tail = raw.substring(pos, raw.len())
-        var sep = "\r\n\r\n"
-        var sep_rel = tail.find(sep)
-        if sep_rel < 0:
-            sep = "\n\n"
-            sep_rel = tail.find(sep)
-        if sep_rel < 0:
+        var len_end = pos + prefix.len()
+        while len_end < bytes.len() and bytes[len_end] >= 48u8 and bytes[len_end] <= 57u8:
+            len_end = len_end + 1
+        if len_end == pos + prefix.len():
             return false
-        val len_start = pos + prefix.len()
-        val len_end = pos + sep_rel
-        val declared = parse_nonnegative_i64(raw.substring(len_start, len_end))
-        if declared <= 0 or declared > raw.len():
+        var declared: i64 = 0
+        var digit_pos = pos + prefix.len()
+        while digit_pos < len_end:
+            declared = declared * 10 + (bytes[digit_pos] as i64) - 48
+            digit_pos = digit_pos + 1
+        if declared <= 0:
             return false
-        val body_start = pos + sep_rel + sep.len()
+        var body_start = len_end
+        if body_start + 4 <= bytes.len() and bytes[body_start:body_start + 4] == text_to_bytes("\r\n\r\n"):
+            body_start = body_start + 4
+        elif body_start + 2 <= bytes.len() and bytes[body_start:body_start + 2] == text_to_bytes("\n\n"):
+            body_start = body_start + 2
+        else:
+            return false
         val body_end = body_start + declared
-        if body_end > raw.len():
+        if body_end > bytes.len():
             return false
-        val body = raw.substring(body_start, body_end)
-        if body.len() != declared or not body.starts_with("{"):
+        if bytes[body_start] != 123u8:
             return false
         pos = body_end
         count = count + 1
     count > 0
 
 fn count_content_length_frames(raw: text) -> i64:
-    val prefix = "Content-Length: "
+    val bytes = text_to_bytes(raw)
+    val prefix = text_to_bytes("Content-Length: ")
     var pos: i64 = 0
     var count: i64 = 0
-    while pos < raw.len():
-        if raw.substring(pos, pos + prefix.len()) != prefix:
+    while pos < bytes.len():
+        if pos + prefix.len() > bytes.len() or bytes[pos:pos + prefix.len()] != prefix:
             return count
-        val tail = raw.substring(pos, raw.len())
-        var sep = "\r\n\r\n"
-        var sep_rel = tail.find(sep)
-        if sep_rel < 0:
-            sep = "\n\n"
-            sep_rel = tail.find(sep)
-        if sep_rel < 0:
+        var len_end = pos + prefix.len()
+        while len_end < bytes.len() and bytes[len_end] >= 48u8 and bytes[len_end] <= 57u8:
+            len_end = len_end + 1
+        if len_end == pos + prefix.len():
             return count
-        val declared = parse_nonnegative_i64(raw.substring(pos + prefix.len(), pos + sep_rel))
+        var declared: i64 = 0
+        var digit_pos = pos + prefix.len()
+        while digit_pos < len_end:
+            declared = declared * 10 + (bytes[digit_pos] as i64) - 48
+            digit_pos = digit_pos + 1
         if declared <= 0:
             return count
-        val body_start = pos + sep_rel + sep.len()
+        var body_start = len_end
+        if body_start + 4 <= bytes.len() and bytes[body_start:body_start + 4] == text_to_bytes("\r\n\r\n"):
+            body_start = body_start + 4
+        elif body_start + 2 <= bytes.len() and bytes[body_start:body_start + 2] == text_to_bytes("\n\n"):
+            body_start = body_start + 2
+        else:
+            return count
         val body_end = body_start + declared
-        if body_end > raw.len():
+        if body_end > bytes.len():
             return count
         pos = body_end
         count = count + 1
@@ -321,25 +335,10 @@ fn validate_rt_forward_cache(path: text) -> bool:
     val raw = file_read(path)
     raw.contains("std.mcp_sdk.transport.stdio.mcp_stdio_read_line") and raw.contains("rt_stdin_read_line_text") and raw.contains("std.mcp_sdk.transport.stdio.mcp_stdio_read_bytes") and raw.contains("rt_stdin_read_chars_text") and raw.contains("std.mcp_sdk.transport.stdio.mcp_stdio_read_message") and raw.contains("rt_stdin_read_mcp_message_text") and raw.contains("std.mcp_sdk.transport.stdio.mcp_stdio_is_json_lines") and raw.contains("cached_transport_mode")
 
-fn arg_value(args: [text], key: text) -> text:
-    var i: i64 = 0
-    while i + 1 < args.len():
-        if args[i] == key:
-            return args[i + 1]
-        i = i + 1
-    ""
-
-fn env_or_arg(args: [text], env_key: text, arg_key: text) -> text:
-    val from_arg = arg_value(args, arg_key)
-    if from_arg != "":
-        return from_arg
-    env_get(env_key) ?? ""
-
 fn main() -> i32:
-    val args = get_args()
-    val mcp_path = env_or_arg(args, "MCP_NATIVE_SMOKE_MCP_OUT", "--mcp-out")
-    val lsp_path = env_or_arg(args, "MCP_NATIVE_SMOKE_LSP_OUT", "--lsp-out")
-    val rt_forward_cache_path = env_or_arg(args, "MCP_NATIVE_SMOKE_RT_FORWARD_CACHE", "--rt-forward-cache")
+    val mcp_path = env_get("MCP_NATIVE_SMOKE_MCP_OUT")
+    val lsp_path = env_get("MCP_NATIVE_SMOKE_LSP_OUT")
+    val rt_forward_cache_path = env_get("MCP_NATIVE_SMOKE_RT_FORWARD_CACHE")
     if mcp_path == "" or lsp_path == "":
         print_missing_args()
         return 1

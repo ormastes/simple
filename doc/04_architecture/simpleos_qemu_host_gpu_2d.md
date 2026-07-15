@@ -239,8 +239,13 @@ Completion-unknown submissions never replay on the CPU or release potentially
 in-flight dependencies. Metal applies the same rule to framebuffer dispatches
 and staged images by quarantining the command and any source until completion
 is known. Known completion and pre-commit failure remove encoder/command
-registry handles through the Metal owner facade; TODO 555 tracks deferred
-reclamation when shutdown still cannot prove completion.
+registry handles through the Metal owner facade. The facade owns a process-wide
+deferred queue containing command, encoder, staged-source, and framebuffer
+handles. Shutdown transfers an unresolved submission into that queue; a reap
+releases dependencies only after completion succeeds or command-registry
+release proves a terminal error. An entry with neither proof remains retained
+and blocks the next Metal surface initialization. TODO 555 retains only the
+native failure-injection evidence needed to validate this owner path.
 Fresh-device admission is all-or-nothing before mutation: the first command
 must overwrite the full target opaquely; later batches may be full-target or a
 bounded named embedded surface with opacity in `(0, 1000]`. Commands are

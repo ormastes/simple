@@ -124,7 +124,7 @@ only if a fresh native run exposes a reproducible implementation failure.
 | TODO551 | Host-local owner quarantine/reaping is implemented; run the focused lifecycle and live Vulkan evidence after TODO548 deploys a current pure-Simple compiler. |
 | TODO552 | Select feature/NFR requirements before implementing 4K shared-memory capacity. |
 | TODO554 | Shadow-inclusive, scene-clamped titled-window DrawIR bounds are implemented without changing hit/layout geometry; focused CPU/device execution remains blocked by TODO 548. |
-| TODO555 | Complete owner-level Metal unknown-completion quarantine and later obtain native failure evidence. |
+| TODO555 | Owner-level Metal unknown-completion quarantine/reaping is implemented; obtain native terminal-error and retained-unknown failure evidence before closure. |
 | TODO563 | Source/parser/self-test support is ready for 20 warm samples and nearest-rank p95. After TODO548, run current-host Linux Vulkan native and TCG rows and retain combined QEMU/daemon RSS; only native evidence bound to exact KVM argv can close the 16.7 ms target. If the extra samples expose a real timeout, adjust `SIMPLEOS_HOST_GPU_QEMU_TIMEOUT` for that run without changing its default. |
 | TODO565 | Complete AArch64/RISC-V production desktop ownership and fresh QEMU proof. |
 | TODO566 | Implement and verify the single guest-observed interval plus fail-closed parser self-test locally; after TODO548, run current Linux x86_64 native evidence. Postpone only unavailable Windows/macOS native rows; AArch64/RV64 TCG remain correctness-only. |

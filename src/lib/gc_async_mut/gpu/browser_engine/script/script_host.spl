@@ -16,6 +16,38 @@ use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
 use std.gc_async_mut.gpu.browser_engine.script.script_runner.{ScriptRunner, run_script, run_script_file, script_runner_dom_dirty, script_runner_clear_dirty}
 use std.gc_async_mut.gpu.browser_engine.script.event_api.{event_dispatch}
 use std.gc_async_mut.gpu.browser_engine.net.fetch_dispatch.{FetchDispatch}
+use std.gc_async_mut.gpu.browser_engine.script.network_api.{ScriptFetchRequest,
+    ScriptFetchResponse, fetch_send, script_fetch_to_net_request,
+    script_response_from_net}
+use std.gc_async_mut.gpu.browser_engine.script.dom_api.{node_set_text_content,
+    node_class_list_add, node_class_list_remove, node_class_list_contains}
+
+pub fn script_host_apply_event_action(node: BeDomNode, action: text) -> BeDomNode:
+    """Apply one deterministic listener action to the target DOM node."""
+    if action.starts_with("set-text:"):
+        return node_set_text_content(node, action.substring(9, action.len()))
+    if action.starts_with("set-attr:"):
+        val payload = action.substring(9, action.len())
+        val separator = payload.index_of("=")
+        if separator >= 0:
+            var next = node
+            next.set_attr(payload.substring(0, separator), payload.substring(separator + 1, payload.len()))
+            return next
+        return node
+    if action.starts_with("remove-attr:"):
+        var next = node
+        next.remove_attr(action.substring(12, action.len()))
+        return next
+    if action.starts_with("add-class:"):
+        return node_class_list_add(node, action.substring(10, action.len()))
+    if action.starts_with("remove-class:"):
+        return node_class_list_remove(node, action.substring(13, action.len()))
+    if action.starts_with("toggle-class:"):
+        val cls = action.substring(13, action.len())
+        if node_class_list_contains(node, cls):
+            return node_class_list_remove(node, cls)
+        return node_class_list_add(node, cls)
+    node
 
 pub class ScriptHost:
     """Host that manages Simple-script execution, event loop, and console buffer.
@@ -92,8 +124,11 @@ pub class ScriptHost:
         Collects triggered action strings from target-phase dispatch.
         """
         val actions = event_dispatch(self._dom_root, event)
-        if actions.len() > 0:
-            self._dom_dirty = true
+        for action in actions:
+            self._dom_root = script_host_apply_event_action(self._dom_root, action)
+        if actions.len() == 0:
+            return
+        self._dom_dirty = true
 
     me dom_root() -> BeDomNode:
         """Return the current (possibly script-mutated) DOM root."""
@@ -122,3 +157,9 @@ pub class ScriptHost:
     me set_fetch_dispatch(d: FetchDispatch):
         """Wire a FetchDispatch implementation for fetch() calls (D-4)."""
         self.fetch_dispatch = Some(d)
+
+    me fetch(request: ScriptFetchRequest) -> ScriptFetchResponse:
+        """Dispatch a fetch request or return the fail-closed zero response."""
+        if val dispatch = self.fetch_dispatch:
+            return script_response_from_net(dispatch.dispatch(script_fetch_to_net_request(request)))
+        fetch_send(request)
