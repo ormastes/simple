@@ -4,8 +4,8 @@ use super::super::interpreter_helpers::{bind_pattern_value, handle_method_call_w
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    evaluate_expr, exec_augmented_assignment, exec_with, get_type_name, pattern_matches, BLOCK_SCOPED_ENUMS,
-    CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, EXTERN_FUNCTIONS, GLOBAL_ENUMS, IMMUTABLE_VARS,
+    evaluate_expr, exec_assignment, exec_augmented_assignment, exec_with, get_type_name, pattern_matches,
+    BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, EXTERN_FUNCTIONS, GLOBAL_ENUMS, IMMUTABLE_VARS,
     MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS, TRAIT_IMPLS, TRAITS, USER_MACROS,
 };
 use crate::value::*;
@@ -223,142 +223,43 @@ pub(super) fn exec_block_closure_into(
                 last_value = Value::Nil;
             }
             Node::Assignment(assign_stmt) => {
-                if assign_stmt.op != simple_parser::ast::AssignOp::Assign {
-                    match exec_augmented_assignment(
-                        assign_stmt,
-                        &mut local_env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    )? {
-                        crate::interpreter::Control::Next => {
-                            last_value = Value::Nil;
-                        }
-                        crate::interpreter::Control::Return(value) => return Ok(value),
-                        crate::interpreter::Control::Break(value, _) => {
-                            return Err(CompileError::LoopBreak(value));
-                        }
-                        crate::interpreter::Control::Continue(_) => {
-                            return Err(CompileError::LoopContinue);
-                        }
-                    }
-                    continue;
-                }
-
-                let val = evaluate_expr(
-                    &assign_stmt.value,
-                    &mut local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
-                if let simple_parser::ast::Expr::Identifier(name) = &assign_stmt.target {
-                    // Check if this is a module-level global variable
-                    let is_global = MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
-                    if is_global {
-                        // Always update MODULE_GLOBALS for global vars
-                        MODULE_GLOBALS.with(|cell| {
-                            cell.borrow_mut().insert(name.clone(), val);
-                        });
-                        // Remove from local env so reads always go through MODULE_GLOBALS
-                        // This ensures mutations by called functions are visible
-                        local_env.remove(name);
-                    } else {
-                        // Update or create local variable
-                        local_env.insert(name.clone(), val);
-                    }
-                } else if let simple_parser::ast::Expr::FieldAccess { receiver, field } = &assign_stmt.target {
-                    // Handle field assignment: obj.field = value
-                    if let simple_parser::ast::Expr::Identifier(obj_name) = receiver.as_ref() {
-                        if let Some(Value::Object { class, fields }) = local_env.get(obj_name).cloned() {
-                            let object = Value::Object {
-                                class: class.clone(),
-                                fields: fields.clone(),
-                            };
-                            if let Some(updated) =
-                                crate::interpreter::update_bitfield_field(&object, field, val.clone())
-                            {
-                                local_env.insert(obj_name.clone(), updated);
-                                last_value = Value::Nil;
-                                continue;
-                            }
-                            let mut fields = fields;
-                            Arc::make_mut(&mut fields).insert(field.clone(), val);
-                            local_env.insert(obj_name.clone(), Value::Object { class, fields });
-                        } else if let Some(Value::Object { class, fields }) =
-                            MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned())
+                let global_name = if assign_stmt.op == simple_parser::ast::AssignOp::Assign {
+                    match &assign_stmt.target {
+                        simple_parser::ast::Expr::Identifier(name)
+                            if MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name)) =>
                         {
-                            let object = Value::Object {
-                                class: class.clone(),
-                                fields: fields.clone(),
-                            };
-                            if let Some(updated) =
-                                crate::interpreter::update_bitfield_field(&object, field, val.clone())
-                            {
-                                MODULE_GLOBALS.with(|cell| {
-                                    cell.borrow_mut().insert(obj_name.clone(), updated);
-                                });
-                                last_value = Value::Nil;
-                                continue;
-                            }
-                            let mut fields = fields;
-                            Arc::make_mut(&mut fields).insert(field.clone(), val);
-                            MODULE_GLOBALS.with(|cell| {
-                                cell.borrow_mut()
-                                    .insert(obj_name.clone(), Value::Object { class, fields });
-                            });
+                            Some(name.clone())
                         }
+                        _ => None,
                     }
-                } else if let simple_parser::ast::Expr::Index { receiver, index } = &assign_stmt.target {
-                    // Handle index assignment: arr[i] = value or dict["key"] = value
-                    let index_val = evaluate_expr(index, &mut local_env, functions, classes, enums, impl_methods)?;
-                    if let simple_parser::ast::Expr::Identifier(container_name) = receiver.as_ref() {
-                        let local_container = local_env.get(container_name).cloned();
-                        let is_global = local_container.is_none();
-                        let container = local_container
-                            .or_else(|| MODULE_GLOBALS.with(|cell| cell.borrow().get(container_name).cloned()));
-                        if let Some(container) = container {
-                            let new_container = match container {
-                                Value::Array(mut arc) => {
-                                    let arr = std::sync::Arc::make_mut(&mut arc);
-                                    let idx = index_val.as_int()? as usize;
-                                    if idx < arr.len() {
-                                        arr[idx] = val;
-                                    } else {
-                                        while arr.len() < idx {
-                                            arr.push(Value::Nil);
-                                        }
-                                        arr.push(val);
-                                    }
-                                    Value::Array(arc)
-                                }
-                                Value::Dict(mut dict) => {
-                                    let key = index_val.to_key_string();
-                                    Arc::make_mut(&mut dict).insert(key, val);
-                                    Value::Dict(dict)
-                                }
-                                Value::Tuple(mut tup) => {
-                                    let idx = index_val.as_int()? as usize;
-                                    if idx < tup.len() {
-                                        tup[idx] = val;
-                                    }
-                                    Value::Tuple(tup)
-                                }
-                                _ => container,
-                            };
-                            if is_global {
+                } else {
+                    None
+                };
+                let control = if assign_stmt.op != simple_parser::ast::AssignOp::Assign {
+                    exec_augmented_assignment(assign_stmt, &mut local_env, functions, classes, enums, impl_methods)
+                } else {
+                    exec_assignment(assign_stmt, &mut local_env, functions, classes, enums, impl_methods)
+                }?;
+                match control {
+                    crate::interpreter::Control::Next => {
+                        if let Some(name) = global_name {
+                            if let Some(value) = local_env.remove(&name) {
                                 MODULE_GLOBALS.with(|cell| {
-                                    cell.borrow_mut().insert(container_name.clone(), new_container);
+                                    cell.borrow_mut().insert(name, value);
                                 });
-                            } else {
-                                local_env.insert(container_name.clone(), new_container);
                             }
                         }
+                        last_value = Value::Nil;
+                    }
+                    crate::interpreter::Control::Return(value) => return Ok(value),
+                    crate::interpreter::Control::Break(value, _) => {
+                        return Err(CompileError::LoopBreak(value));
+                    }
+                    crate::interpreter::Control::Continue(_) => {
+                        return Err(CompileError::LoopContinue);
                     }
                 }
-                last_value = Value::Nil;
+                continue;
             }
             Node::Context(ctx_stmt) => {
                 let context_obj = evaluate_expr(
@@ -1071,136 +972,24 @@ fn exec_block_closure_mut(
                 last_value = Value::Nil;
             }
             Node::Assignment(assign_stmt) => {
-                if assign_stmt.op != simple_parser::ast::AssignOp::Assign {
-                    match exec_augmented_assignment(assign_stmt, local_env, functions, classes, enums, impl_methods)? {
-                        crate::interpreter::Control::Next => {
-                            last_value = Value::Nil;
-                        }
-                        crate::interpreter::Control::Return(value) => return Ok(value),
-                        crate::interpreter::Control::Break(value, _) => {
-                            return Err(CompileError::LoopBreak(value));
-                        }
-                        crate::interpreter::Control::Continue(_) => {
-                            return Err(CompileError::LoopContinue);
-                        }
+                let control = if assign_stmt.op != simple_parser::ast::AssignOp::Assign {
+                    exec_augmented_assignment(assign_stmt, local_env, functions, classes, enums, impl_methods)
+                } else {
+                    exec_assignment(assign_stmt, local_env, functions, classes, enums, impl_methods)
+                }?;
+                match control {
+                    crate::interpreter::Control::Next => {
+                        last_value = Value::Nil;
                     }
-                    continue;
-                }
-
-                // Handle method calls with self-update for assignment RHS
-                let (val, update) = handle_method_call_with_self_update(
-                    &assign_stmt.value,
-                    local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
-                if let Some((obj_name, new_self)) = update {
-                    local_env.insert(obj_name, new_self);
-                }
-                if let simple_parser::ast::Expr::Identifier(name) = &assign_stmt.target {
-                    // Check if this is a module-level global variable
-                    let is_global = MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
-                    if is_global && !local_env.contains_key(name) {
-                        // Update module-level global
-                        MODULE_GLOBALS.with(|cell| {
-                            cell.borrow_mut().insert(name.clone(), val);
-                        });
-                    } else {
-                        // Update or create local variable
-                        local_env.insert(name.clone(), val);
+                    crate::interpreter::Control::Return(value) => return Ok(value),
+                    crate::interpreter::Control::Break(value, _) => {
+                        return Err(CompileError::LoopBreak(value));
                     }
-                } else if let simple_parser::ast::Expr::FieldAccess { receiver, field } = &assign_stmt.target {
-                    // Handle field assignment: obj.field = value
-                    if let simple_parser::ast::Expr::Identifier(obj_name) = receiver.as_ref() {
-                        if let Some(Value::Object { class, fields }) = local_env.get(obj_name).cloned() {
-                            let object = Value::Object {
-                                class: class.clone(),
-                                fields: fields.clone(),
-                            };
-                            if let Some(updated) =
-                                crate::interpreter::update_bitfield_field(&object, field, val.clone())
-                            {
-                                local_env.insert(obj_name.clone(), updated);
-                                last_value = Value::Nil;
-                                continue;
-                            }
-                            let mut fields = fields;
-                            Arc::make_mut(&mut fields).insert(field.clone(), val);
-                            local_env.insert(obj_name.clone(), Value::Object { class, fields });
-                        } else if let Some(Value::Object { class, fields }) =
-                            MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned())
-                        {
-                            let object = Value::Object {
-                                class: class.clone(),
-                                fields: fields.clone(),
-                            };
-                            if let Some(updated) =
-                                crate::interpreter::update_bitfield_field(&object, field, val.clone())
-                            {
-                                MODULE_GLOBALS.with(|cell| {
-                                    cell.borrow_mut().insert(obj_name.clone(), updated);
-                                });
-                                last_value = Value::Nil;
-                                continue;
-                            }
-                            let mut fields = fields;
-                            Arc::make_mut(&mut fields).insert(field.clone(), val);
-                            MODULE_GLOBALS.with(|cell| {
-                                cell.borrow_mut()
-                                    .insert(obj_name.clone(), Value::Object { class, fields });
-                            });
-                        }
-                    }
-                } else if let simple_parser::ast::Expr::Index { receiver, index } = &assign_stmt.target {
-                    // Handle index assignment: arr[i] = value or dict["key"] = value
-                    let index_val = evaluate_expr(index, local_env, functions, classes, enums, impl_methods)?;
-                    if let simple_parser::ast::Expr::Identifier(container_name) = receiver.as_ref() {
-                        let local_container = local_env.get(container_name).cloned();
-                        let is_global = local_container.is_none();
-                        let container = local_container
-                            .or_else(|| MODULE_GLOBALS.with(|cell| cell.borrow().get(container_name).cloned()));
-                        if let Some(container) = container {
-                            let new_container = match container {
-                                Value::Array(mut arc) => {
-                                    let arr = std::sync::Arc::make_mut(&mut arc);
-                                    let idx = index_val.as_int()? as usize;
-                                    if idx < arr.len() {
-                                        arr[idx] = val;
-                                    } else {
-                                        while arr.len() < idx {
-                                            arr.push(Value::Nil);
-                                        }
-                                        arr.push(val);
-                                    }
-                                    Value::Array(arc)
-                                }
-                                Value::Dict(mut dict) => {
-                                    let key = index_val.to_key_string();
-                                    Arc::make_mut(&mut dict).insert(key, val);
-                                    Value::Dict(dict)
-                                }
-                                Value::Tuple(mut tup) => {
-                                    let idx = index_val.as_int()? as usize;
-                                    if idx < tup.len() {
-                                        tup[idx] = val;
-                                    }
-                                    Value::Tuple(tup)
-                                }
-                                _ => container,
-                            };
-                            if is_global {
-                                MODULE_GLOBALS.with(|cell| {
-                                    cell.borrow_mut().insert(container_name.clone(), new_container);
-                                });
-                            } else {
-                                local_env.insert(container_name.clone(), new_container);
-                            }
-                        }
+                    crate::interpreter::Control::Continue(_) => {
+                        return Err(CompileError::LoopContinue);
                     }
                 }
-                last_value = Value::Nil;
+                continue;
             }
             Node::If(if_stmt) => {
                 // `handled` gates the `elif_branches` walk: when neither the main

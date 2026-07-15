@@ -534,7 +534,7 @@ pub(crate) fn exec_node(
 }
 
 // Helper function for regular assignment
-fn exec_assignment(
+pub(crate) fn exec_assignment(
     assign: &simple_parser::ast::AssignmentStmt,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
