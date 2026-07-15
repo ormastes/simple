@@ -28,7 +28,7 @@ gpu_offload_payload_gating_spec -> test
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -48,20 +48,17 @@ A claim that work ran on the GPU must be *discriminated*, not merely observed.
 | Design | N/A |
 | Research | N/A |
 | Source | `test/02_integration/lib/gpu/gpu_offload_payload_gating_spec.spl` |
-| Updated | 2026-07-06 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-15 |
+| Generator | manually synchronized; `simple spipe-docgen` refresh pending |
 
 A claim that work ran on the GPU must be *discriminated*, not merely observed.
-Two honest gates exist and are both proven here across backends:
+One honest gate is proven here across backends:
 
 1. **std.compute** is a payload-gated simulation: it always computes the CPU
    reference and only reports GPU provenance. With no payload the CPU ran; with
    a payload the provenance flips — the value must equal the CPU oracle in
    BOTH branches. ExecTarget enforcement is proven too: `suggest` falls back
    (resolved), `require` of an absent GPU fails closed (unresolved).
-2. **Font glyph offload** transports a checksum-verified payload; a corrupt
-   checksum must be rejected and fall back to the CPU.
-
 Every backend runs the SAME shared body, so backend coverage is data-driven.
 
 ## Scenarios
@@ -222,109 +219,12 @@ assert_require_absent_fails_closed()
 
 </details>
 
-### font glyph offload payload discrimination
-
-#### falls back to CPU when no CUDA glyph payload is present
-
-- Rasterize a bitmap glyph with the CUDA payload cleared
-- assert bitmap no payload
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Rasterize a bitmap glyph with the CUDA payload cleared")
-assert_bitmap_no_payload("CUDA", 65)
-```
-
-</details>
-
-#### accepts a matching CUDA glyph payload before CPU fallback
-
-- Publish a checksum-valid CUDA glyph payload and rasterize it
-- assert bitmap matching
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Publish a checksum-valid CUDA glyph payload and rasterize it")
-assert_bitmap_matching("CUDA", "cuda-bitmap-font-glyph-pixels-returned")
-```
-
-</details>
-
-#### rejects a CUDA glyph payload whose checksum does not match
-
-- Corrupt the CUDA glyph checksum and confirm CPU fallback
-- assert bitmap corrupt rejected
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Corrupt the CUDA glyph checksum and confirm CPU fallback")
-assert_bitmap_corrupt_rejected("CUDA", "cuda-bitmap-font-glyph-pixels-returned")
-```
-
-</details>
-
-#### falls back to CPU when no OpenCL glyph payload is present
-
-- Rasterize a bitmap glyph with the OpenCL payload cleared
-- assert bitmap no payload
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Rasterize a bitmap glyph with the OpenCL payload cleared")
-assert_bitmap_no_payload("OPENCL", 65)
-```
-
-</details>
-
-#### accepts a matching OpenCL glyph payload before CPU fallback
-
-- Publish a checksum-valid OpenCL glyph payload and rasterize it
-- assert bitmap matching
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Publish a checksum-valid OpenCL glyph payload and rasterize it")
-assert_bitmap_matching("OPENCL", "opencl-bitmap-font-glyph-pixels-returned")
-```
-
-</details>
-
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

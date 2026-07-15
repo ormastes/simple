@@ -220,6 +220,13 @@ source-wired but its expected hash and retained PASS remain pending.
 Widget producers read existing `lang`/`font-family` properties, and
 `SharedWmWindow.language` preserves explicit WM language; absent metadata stays
 `und` and retains the previous Noto Sans Mono behavior.
+The bounded current-source bootstrap now links Stage 2 and completes Stage 3,
+but Stage 4 full-CLI linking still fails closed on 208 unresolved
+hosted-provider symbols. This is a compiler/runtime deployment defect, not
+font-source failure, and neither a seed nor a minimal-stage binary is native
+acceptance evidence. Canonical `FontRenderer` fallback glyphs are rasterized on
+CPU; environment-published accelerator pixels cannot enter `FontRenderBatch`
+or its cache. GPU backends only compose the prepared alpha atlas.
 The steps below remain the full promotion contract, not current native-execution
 evidence.
 

@@ -1,23 +1,16 @@
 # @cover src/lib/nogc_sync_mut/text_layout/font_rasterizer.spl 70%
-# @tag: unit, ui, font, gpu, offload
+# @tag: unit, ui, font, rasterization
 #
-# Bitmap-font GPU offload parity spec.
+# Canonical bitmap-font rasterization policy spec.
 #
-# Mirrors the vector-font ROCm payload test: a bitmap glyph rasterized on a GPU
-# backend is published through the `{PREFIX}_BITMAP_FONT_*` env transport. The
-# discriminating property is payload-gating:
-#   - with NO payload  -> CPU fallback (gpu_returned_glyphs == 0, cpu_fallback > 0)
-#   - with a payload   -> GPU stats     (gpu_returned_glyphs == 1, cpu_fallback == 0)
-# If the implementation reported GPU offload regardless of payload it would be a
-# cover-up; this spec fails in that case.
+# Glyphs are rasterized on CPU. GPU work begins after FontRenderer has prepared
+# its transient atlas batch, so environment-published pixels cannot enter the
+# canonical renderer or its cache.
 
 use std.spec.{describe, it, expect}
 use common.text_layout.font_renderer.{FontRenderer}
-use common.text_layout.font_rasterizer.{
-    reset_bitmap_font_raster_stats,
-    bitmap_font_accelerator_stats,
-    rasterize_bitmap
-}
+use common.text_layout.font_rasterizer.{rasterize_bitmap}
+use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels}
 
 extern fn rt_env_set(key: text, value: text) -> bool
 
@@ -58,7 +51,7 @@ fn _set_rocm_bitmap_glyph_payload():
     rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_PIXELS", "255,0,0,255")
     rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_CHECKSUM", checksum.to_text())
 
-describe "bitmap font GPU offload":
+describe "canonical bitmap font rasterization":
     it "keeps the built-in monochrome VGA glyph deterministic":
         val glyph = rasterize_bitmap(65, 16)
         expect(glyph.width).to_equal(8)
@@ -67,56 +60,41 @@ describe "bitmap font GPU offload":
         expect(glyph.pixels.len()).to_equal(128)
         expect(_bitmap_checksum(glyph.pixels, glyph.width, glyph.height, glyph.advance)).to_equal(563568)
 
-    it "falls back to CPU when no GPU payload is present":
+    it "ignores forged bitmap glyph environment when preparing a batch":
         _clear_rocm_bitmap_glyph_payload()
-        reset_bitmap_font_raster_stats()
-        var renderer = FontRenderer.new()
-        renderer.use_vector = false
-        renderer.use_bitmap = true
-
-        val glyph = renderer.get_glyph(65, 16)
-        val stats = bitmap_font_accelerator_stats()
-
-        expect(glyph.width).to_be_greater_than(0)
-        expect(stats.gpu_returned_glyphs).to_equal(0)
-        expect(stats.cpu_fallback_hits).to_be_greater_than(0)
-        expect(stats.unavailable_reason).to_equal("production-gpu-dispatch-not-wired")
-
-    it "accepts a ROCm bitmap glyph payload before CPU fallback":
-        _clear_rocm_bitmap_glyph_payload()
-        reset_bitmap_font_raster_stats()
+        var expected_renderer = FontRenderer.new()
+        expected_renderer.use_vector = false
+        expected_renderer.use_bitmap = true
+        val expected = expected_renderer.prepare_text("B", 0xFFFFFFFFu32, 16)
         _set_rocm_bitmap_glyph_payload()
         var renderer = FontRenderer.new()
         renderer.use_vector = false
         renderer.use_bitmap = true
 
-        val glyph = renderer.get_glyph(66, 16)
-        val stats = bitmap_font_accelerator_stats()
-
-        expect(glyph.width).to_equal(2)
-        expect(glyph.height).to_equal(2)
-        expect(glyph.advance).to_equal(3)
-        expect(glyph.pixels[0].to_i32()).to_equal(255)
-        expect(glyph.pixels[1].to_i32()).to_equal(0)
-        expect(stats.gpu_returned_glyphs).to_equal(1)
-        expect(stats.gpu_returned_glyph_pixels).to_equal(4)
-        expect(stats.cpu_fallback_hits).to_equal(0)
-        expect(stats.unavailable_reason).to_equal("rocm-bitmap-font-glyph-pixels-returned")
-        _clear_rocm_bitmap_glyph_payload()
-
-    it "rejects a payload whose checksum does not match (anti-spoof)":
-        _clear_rocm_bitmap_glyph_payload()
-        reset_bitmap_font_raster_stats()
-        _set_rocm_bitmap_glyph_payload()
-        # Corrupt the checksum so the payload must be rejected.
-        rt_env_set("ROCM_BITMAP_FONT_GLYPH_0_CHECKSUM", "1")
-        var renderer = FontRenderer.new()
-        renderer.use_vector = false
-        renderer.use_bitmap = true
-
-        val glyph = renderer.get_glyph(66, 16)
-        val stats = bitmap_font_accelerator_stats()
-
-        expect(stats.gpu_returned_glyphs).to_equal(0)
-        expect(stats.cpu_fallback_hits).to_be_greater_than(0)
+        val actual = renderer.prepare_text("B", 0xFFFFFFFFu32, 16)
+        expect(expected.valid).to_be(true)
+        expect(actual.valid).to_be(true)
+        expect(actual.program_version).to_equal(expected.program_version)
+        expect(actual.font_identity).to_equal(expected.font_identity)
+        expect(actual.render_config_identity).to_equal(expected.render_config_identity)
+        expect(actual.atlas_width).to_equal(expected.atlas_width)
+        expect(actual.atlas_height).to_equal(expected.atlas_height)
+        expect(expected.quads.len()).to_equal(1)
+        expect(actual.quads.len()).to_equal(1)
+        val expected_quad = expected.quads[0]
+        val actual_quad = actual.quads[0]
+        expect(actual_quad.width).to_equal(expected_quad.width)
+        expect(actual_quad.height).to_equal(expected_quad.height)
+        expect(actual_quad.dst_x).to_equal(expected_quad.dst_x)
+        expect(actual_quad.dst_y).to_equal(expected_quad.dst_y)
+        expect(actual_quad.atlas_x).to_equal(expected_quad.atlas_x)
+        expect(actual_quad.atlas_y).to_equal(expected_quad.atlas_y)
+        expect(actual_quad.color).to_equal(expected_quad.color)
+        val expected_pixels = font_atlas_subrect_pixels(expected.atlas_pixels, expected.atlas_width,
+            expected.atlas_height, expected_quad.atlas_x, expected_quad.atlas_y,
+            expected_quad.width, expected_quad.height, expected_quad.color)
+        val actual_pixels = font_atlas_subrect_pixels(actual.atlas_pixels, actual.atlas_width,
+            actual.atlas_height, actual_quad.atlas_x, actual_quad.atlas_y,
+            actual_quad.width, actual_quad.height, actual_quad.color)
+        expect(actual_pixels).to_equal(expected_pixels)
         _clear_rocm_bitmap_glyph_payload()

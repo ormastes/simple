@@ -82,7 +82,10 @@ review-team:    explore -> docs          (sequential)
 
 ### Phase 8: Implementation
 1. Implement in `src/**/<feature>.spl`, follow `/coding` rules
-2. **Stub Prevention Gate** (mandatory):
+2. Shared-font work follows `.codex/skills/sp_dev/SKILL.md` “Shared multilingual font work”:
+   preserve `FontRenderer`, transient `FontRenderBatch`, `WebIR`,
+   `DrawIrComposition`, and its five frozen SSpec step phrases.
+3. **Stub Prevention Gate** (mandatory):
    - `bin/simple build lint` on touched files
    - `bin/simple query workspace-symbols --query pass_todo` to find stubs
    - No function ignoring all params (STUB001 = hard fail)

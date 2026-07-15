@@ -275,12 +275,16 @@ loads the unchanged bundled face; unavailable tuples reject before cache
 mutation. Engine3D fixes one font target per frame and promotes Vulkan from
 `pending` to selected only after end-frame device readback evidence. Focused unit and shared-surface
 specs cover source behavior; REQ-015 remains open until the deployed
-pure-Simple runtime executes those specs successfully. The tracked deployed
-artifact currently links an obsolete two-argument `rt_env_set` against
-four-argument callers; the bounded current-source rebuild then reaches separate
-bootstrap-parser and full-CLI closure/runtime link blockers. These are compiler/runtime
-deployment defects, not font-source failures, and no seed or minimal stage
-binary substitutes for the missing execution proof.
+pure-Simple runtime executes those specs successfully. The bounded current-source
+bootstrap now links Stage 2 and completes Stage 3, but Stage 4 full-CLI linking
+still fails closed on 208 unresolved hosted-provider symbols. This is a
+compiler/runtime deployment defect, not font-source failure, and neither a seed
+nor a minimal-stage binary is native acceptance evidence.
+
+Canonical `FontRenderer` fallback glyphs are rasterized on CPU. Environment-
+published accelerator pixels are compatibility-only diagnostics and cannot
+enter `FontRenderBatch` or its cache; GPU backends only compose the prepared
+alpha atlas.
 
 ## GPU code emission is not execution
 

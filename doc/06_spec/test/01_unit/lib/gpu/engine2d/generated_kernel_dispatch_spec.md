@@ -473,7 +473,7 @@ expect(cpu_bitmap_font.entry_name).to_equal("RenderBackend.draw_text_or_text_bli
 expect(cpu_vector_font.ready).to_equal(true)
 expect(cpu_vector_font.generated_operation).to_equal(GENERATED_2D_COPY)
 expect(cpu_vector_font.cpu_preprocess_required).to_equal(true)
-expect(cpu_vector_font.entry_name).to_equal("FontRasterizer.rasterize_vector_accelerated")
+expect(cpu_vector_font.entry_name).to_equal("FontRasterizer.rasterize_vector")
 expect(cuda_text.ready).to_equal(true)
 expect(cuda_text.generated_operation).to_equal(GENERATED_2D_COPY)
 expect(cuda_text.cpu_preprocess_required).to_equal(true)

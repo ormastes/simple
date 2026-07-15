@@ -7,14 +7,13 @@
 #   - a device-availability probe (honest host-unavailable(reason) on CI),
 #   - a read_pixels()->PPM (P6) oracle wrapper, and
 #   - parameterized scenario bodies for kernel emission, compute payload-gating,
-#     ExecTarget enforcement, font-offload discrimination, and CPU/SW readback.
+#     ExecTarget enforcement, and CPU/SW readback.
 #
 # All I/O routes through the std.io_runtime env facade (no raw rt_* in test
 # code). Every scenario body carries an absolute oracle (a known fixed pixel /
 # value, or proof the producer ran) so a no-op fallback can never pass green.
 
 use std.spec.*
-use std.io_runtime.{env_set}
 use compiler.backend.gpu_portable_compute.{
     PortableComputeTarget,
     emit_portable_u32_fill_kernel, emit_portable_u32_add_kernel,
@@ -29,10 +28,6 @@ use std.nogc_async_mut.compute.exec_target.{
 }
 use std.nogc_async_mut.compute.backend_dispatch.{
     dispatch_reduce_i64_forced, dispatch_is_device, dispatch_backend_name
-}
-use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
-use std.nogc_sync_mut.text_layout.font_rasterizer.{
-    reset_bitmap_font_raster_stats, bitmap_font_accelerator_stats
 }
 
 # Opaque black is the SoftwareBackend init() background (backend_software.spl:112).
@@ -191,97 +186,6 @@ fn assert_require_absent_fails_closed():
     val t = resolve_exec_target(DeviceClass.Gpu, ComputeBackend.NoneBackend, EnforceMode.Require, BackendCaps.none())
     assert_false(t.resolved)
     expect(t.backend).to_equal(ComputeBackend.NoneBackend)
-
-# ---------------------------------------------------------------------------
-# Font-offload discrimination shared body (env-transport, real reject path).
-# ---------------------------------------------------------------------------
-# The bitmap-font rasterizer proves GPU offload via a checksum-verified payload
-# published through {PREFIX}_BITMAP_FONT_* env vars (PREFIX in
-# CUDA/ROCM/HIP/METAL/OPENCL). no-payload -> CPU, matching -> GPU, corrupt
-# checksum -> rejected (falls back). A payload-agnostic "GPU offloaded" report
-# would be a cover-up and these bodies fail it.
-fn _bitmap_checksum(pixels: [u8], width: i32, height: i32, advance: i32) -> i64:
-    var sum: i64 = 0
-    var i = 0
-    while i < pixels.len():
-        val alpha = pixels[i].to_i32().to_i64()
-        if alpha > 0:
-            sum = sum + alpha * ((i + 1) as i64)
-        i = i + 1
-    sum + (width.to_i64() * 31) + (height.to_i64() * 17) + advance.to_i64()
-
-fn clear_bitmap_payload(prefix: text):
-    env_set(prefix + "_BITMAP_FONT_STATUS", "")
-    env_set(prefix + "_BITMAP_FONT_REASON", "")
-    env_set(prefix + "_BITMAP_FONT_GLYPH_COUNT", "")
-    env_set(prefix + "_BITMAP_FONT_GLYPH_0_CODEPOINT", "")
-    env_set(prefix + "_BITMAP_FONT_GLYPH_0_FONT_SIZE", "")
-    env_set(prefix + "_BITMAP_FONT_GLYPH_0_WIDTH", "")
-    env_set(prefix + "_BITMAP_FONT_GLYPH_0_HEIGHT", "")
-    env_set(prefix + "_BITMAP_FONT_GLYPH_0_ADVANCE", "")
-    env_set(prefix + "_BITMAP_FONT_GLYPH_0_PIXELS", "")
-    env_set(prefix + "_BITMAP_FONT_GLYPH_0_CHECKSUM", "")
-
-fn set_bitmap_payload(prefix: text, codepoint: text, reason: text):
-    var px: [u8] = [255u8, 0u8, 0u8, 255u8]
-    val checksum = _bitmap_checksum(px, 2, 2, 3)
-    env_set(prefix + "_BITMAP_FONT_STATUS", "pass")
-    env_set(prefix + "_BITMAP_FONT_REASON", reason)
-    env_set(prefix + "_BITMAP_FONT_GLYPH_COUNT", "1")
-    env_set(prefix + "_BITMAP_FONT_GLYPH_0_CODEPOINT", codepoint)
-    env_set(prefix + "_BITMAP_FONT_GLYPH_0_FONT_SIZE", "16")
-    env_set(prefix + "_BITMAP_FONT_GLYPH_0_WIDTH", "2")
-    env_set(prefix + "_BITMAP_FONT_GLYPH_0_HEIGHT", "2")
-    env_set(prefix + "_BITMAP_FONT_GLYPH_0_ADVANCE", "3")
-    env_set(prefix + "_BITMAP_FONT_GLYPH_0_PIXELS", "255,0,0,255")
-    env_set(prefix + "_BITMAP_FONT_GLYPH_0_CHECKSUM", checksum.to_text())
-
-fn _bitmap_renderer() -> FontRenderer:
-    var renderer = FontRenderer.new()
-    renderer.use_vector = false
-    renderer.use_bitmap = true
-    return renderer
-
-fn assert_bitmap_no_payload(prefix: text, codepoint: i32):
-    clear_bitmap_payload(prefix)
-    reset_bitmap_font_raster_stats()
-    var renderer = _bitmap_renderer()
-    val glyph = renderer.get_glyph(codepoint, 16)
-    val stats = bitmap_font_accelerator_stats()
-    expect(glyph.width).to_be_greater_than(0)
-    expect(stats.gpu_returned_glyphs).to_equal(0)
-    expect(stats.cpu_fallback_hits).to_be_greater_than(0)
-    expect(stats.unavailable_reason).to_equal("production-gpu-dispatch-not-wired")
-
-fn assert_bitmap_matching(prefix: text, reason: text):
-    clear_bitmap_payload(prefix)
-    reset_bitmap_font_raster_stats()
-    set_bitmap_payload(prefix, "66", reason)
-    var renderer = _bitmap_renderer()
-    val glyph = renderer.get_glyph(66, 16)
-    val stats = bitmap_font_accelerator_stats()
-    expect(glyph.width).to_equal(2)
-    expect(glyph.height).to_equal(2)
-    expect(glyph.advance).to_equal(3)
-    expect(stats.gpu_returned_glyphs).to_equal(1)
-    expect(stats.gpu_returned_glyph_pixels).to_equal(4)
-    expect(stats.cpu_fallback_hits).to_equal(0)
-    expect(stats.unavailable_reason).to_equal(reason)
-    clear_bitmap_payload(prefix)
-
-fn assert_bitmap_corrupt_rejected(prefix: text, reason: text):
-    clear_bitmap_payload(prefix)
-    reset_bitmap_font_raster_stats()
-    set_bitmap_payload(prefix, "66", reason)
-    # Corrupt the checksum: the payload must be rejected and CPU must run.
-    env_set(prefix + "_BITMAP_FONT_GLYPH_0_CHECKSUM", "1")
-    var renderer = _bitmap_renderer()
-    val glyph = renderer.get_glyph(66, 16)
-    val stats = bitmap_font_accelerator_stats()
-    expect(glyph.width).to_be_greater_than(0)
-    expect(stats.gpu_returned_glyphs).to_equal(0)
-    expect(stats.cpu_fallback_hits).to_be_greater_than(0)
-    clear_bitmap_payload(prefix)
 
 # ---------------------------------------------------------------------------
 # CPU / software per-primitive readback shared body (absolute pixel oracle).

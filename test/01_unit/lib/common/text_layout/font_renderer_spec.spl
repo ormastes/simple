@@ -17,7 +17,6 @@ use common.text_layout.font_provider.{browser_bundled_font_path_for_family}
 use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_identity}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_atlas_composite_program_version_valid, font_atlas_subrect_pixels}
 use std.common.crypto.sha256.{sha256_u8_hex}
-use common.text_layout.font_rasterizer.{reset_vector_font_raster_stats, vector_font_accelerator_stats}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 
 fn expect_resolved_font_metrics(metrics: ResolvedFontMetrics):
@@ -271,24 +270,41 @@ describe "shared font renderer fallbacks":
         expect(_count_nonzero_alpha(glyph.pixels)).to_be_greater_than(0)
         expect(_count_partial_alpha(glyph.pixels)).to_be_greater_than(0)
 
-    it "accepts ROCm vector font glyph payloads before CPU fallback":
+    it "ignores forged vector glyph environment when preparing a batch":
         _clear_rocm_vector_glyph_payload()
-        reset_vector_font_raster_stats()
+        var expected_renderer = FontRenderer.new()
+        expected_renderer.use_bitmap = false
+        val expected = expected_renderer.prepare_text("A", 0xFFFFFFFFu32, 24)
         _set_rocm_vector_glyph_payload()
         var renderer = FontRenderer.new()
         renderer.use_bitmap = false
 
-        val glyph = renderer.get_glyph(65, 24)
-        val stats = vector_font_accelerator_stats()
-
-        expect(glyph.width).to_equal(3)
-        expect(glyph.height).to_equal(2)
-        expect(glyph.advance).to_equal(4)
-        expect(glyph.pixels[1]).to_equal(64u8)
-        expect(stats.gpu_returned_glyphs).to_equal(1)
-        expect(stats.gpu_returned_glyph_pixels).to_equal(6)
-        expect(stats.cpu_fallback_hits).to_equal(0)
-        expect(stats.unavailable_reason).to_equal("rocm-vector-font-glyph-pixels-returned")
+        val actual = renderer.prepare_text("A", 0xFFFFFFFFu32, 24)
+        expect(expected.valid).to_be(true)
+        expect(actual.valid).to_be(true)
+        expect(actual.program_version).to_equal(expected.program_version)
+        expect(actual.font_identity).to_equal(expected.font_identity)
+        expect(actual.render_config_identity).to_equal(expected.render_config_identity)
+        expect(actual.atlas_width).to_equal(expected.atlas_width)
+        expect(actual.atlas_height).to_equal(expected.atlas_height)
+        expect(expected.quads.len()).to_equal(1)
+        expect(actual.quads.len()).to_equal(1)
+        val expected_quad = expected.quads[0]
+        val actual_quad = actual.quads[0]
+        expect(actual_quad.width).to_equal(expected_quad.width)
+        expect(actual_quad.height).to_equal(expected_quad.height)
+        expect(actual_quad.dst_x).to_equal(expected_quad.dst_x)
+        expect(actual_quad.dst_y).to_equal(expected_quad.dst_y)
+        expect(actual_quad.atlas_x).to_equal(expected_quad.atlas_x)
+        expect(actual_quad.atlas_y).to_equal(expected_quad.atlas_y)
+        expect(actual_quad.color).to_equal(expected_quad.color)
+        val expected_pixels = font_atlas_subrect_pixels(expected.atlas_pixels, expected.atlas_width,
+            expected.atlas_height, expected_quad.atlas_x, expected_quad.atlas_y,
+            expected_quad.width, expected_quad.height, expected_quad.color)
+        val actual_pixels = font_atlas_subrect_pixels(actual.atlas_pixels, actual.atlas_width,
+            actual.atlas_height, actual_quad.atlas_x, actual_quad.atlas_y,
+            actual_quad.width, actual_quad.height, actual_quad.color)
+        expect(actual_pixels).to_equal(expected_pixels)
         _clear_rocm_vector_glyph_payload()
 
     it "renders Simple Vector Outline glyphs into an ARGB buffer":
