@@ -35,6 +35,16 @@ fn parse_inline_assignment_else_if_chain() {
     parse_ok("if a: reason = \"a\"\nelse if b: reason = \"b\"\nelse if c: reason = \"c\"\nelse: reason = \"d\"");
 }
 
+#[test]
+fn parse_inline_assignment_elif_then_else() {
+    parse_ok("if a: reason = \"a\"\nelif b: reason = \"b\"\nelse: reason = \"c\"");
+}
+
+#[test]
+fn parse_block_then_inline_elif_and_else_if_chain() {
+    parse_ok("if a:\n    reason = \"a\"\nelif b: reason = \"b\"\nelse if c: reason = \"c\"\nelse: reason = \"d\"");
+}
+
 // While loop
 #[test]
 fn parse_while_loop() {

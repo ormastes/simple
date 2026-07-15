@@ -7,11 +7,13 @@ inspector execution remain pending.
 
 ## Resolution status (2026-07-15)
 
-The Rust seed parser now consumes a complete single-line `else if` chain instead
-of leaving the later `Else` token for expression parsing. The pure-Simple parser
-already follows the intended chain shape and required no parallel rewrite.
-Neither the focused parser regression nor the full inspector source was
-executed in this source-only audit, so no runtime PASS is claimed.
+The Rust seed parser now consumes complete inline continuation chains after
+both inline-first and block-first `if` arms instead of leaving a later `Else`
+token for expression parsing. One block-first regression combines inline
+`elif`, `else if`, and final `else` arms so both continuation loops are covered.
+The pure-Simple parser already follows the intended chain shape and required no
+parallel rewrite. Neither focused parser regression nor the full inspector
+source was executed in this source-only audit, so no runtime PASS is claimed.
 
 ## Reproduction
 

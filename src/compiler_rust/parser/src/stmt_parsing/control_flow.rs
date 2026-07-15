@@ -179,6 +179,14 @@ impl<'a> Parser<'a> {
                     self.expect(&TokenKind::Colon)?;
                     let elif_block = self.parse_inline_or_block()?;
                     elif_branches.push((elif_pattern, elif_condition, elif_block));
+                    if self.check(&TokenKind::Newline)
+                        && (self.peek_through_newlines_and_indents_is(&TokenKind::Elif)
+                            || self.peek_through_newlines_and_indents_is(&TokenKind::Else))
+                    {
+                        while self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
+                    }
                 }
 
                 let mut else_block = None;
@@ -339,6 +347,14 @@ impl<'a> Parser<'a> {
             self.expect(&TokenKind::Colon)?;
             let elif_block = self.parse_inline_or_block()?;
             elif_branches.push((elif_pattern, elif_condition, elif_block));
+            if self.check(&TokenKind::Newline)
+                && (self.peek_through_newlines_and_indents_is(&TokenKind::Elif)
+                    || self.peek_through_newlines_and_indents_is(&TokenKind::Else))
+            {
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+            }
         }
 
         // Handle 'else if' as 'elif' (support both syntaxes)
@@ -354,6 +370,12 @@ impl<'a> Parser<'a> {
                 self.expect(&TokenKind::Colon)?;
                 let elif_block = self.parse_inline_or_block()?;
                 elif_branches.push((elif_pattern, elif_condition, elif_block));
+
+                if self.check(&TokenKind::Newline) && self.peek_through_newlines_and_indents_is(&TokenKind::Else) {
+                    while self.check(&TokenKind::Newline) {
+                        self.advance();
+                    }
+                }
 
                 // Check if there's another 'else if' or final 'else'
                 if self.check(&TokenKind::Else) {

@@ -52,7 +52,7 @@ source fixes from executable proof.
 | 18 | Pure-Simple Cranelift dynload globals now declare, initialize, load, and store writable scalar data; strict LLVM+Cranelift init/mutation proof pending. |
 | 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, and test-only deterministic requested-symbol owner validation are implemented; aggregate final-closure derivation, full cache fingerprint, remaining providers, production selection/link wiring, and strict execution remain. |
 | 20 | C-owned host-GPU queue facade and fail-closed archive ownership checks implemented; native queue execution proof remains. |
-| 21 | Reduced to the Rust seed parser's single-`else if` consumption bug; the Rust-seed source fix and focused chained-inline regression are implemented, while regression and real inspector execution remain pending. The pure-Simple parser needed no rewrite. |
+| 21 | Reduced to the Rust seed parser's inline-continuation consumption bug; inline-first and block-first source fixes plus focused chained-inline regressions are implemented, while regression and real inspector execution remain pending. The pure-Simple parser needed no rewrite. |
 
 ---
 
