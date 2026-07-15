@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-04
 **Severity:** medium (silent; errors surface on the NEXT statement)
-**Status:** open — workaround: only `#` comments
+**Status:** source fixed 2026-07-15; executable lexer proof pending a runnable
+pure-Simple compiler artifact
 
 ## Symptom
 
@@ -29,3 +30,9 @@ debugging time.
 Lex `//` at statement start (or after whitespace) as a hard error with a
 "use # for comments" hint — or accept it as a comment. Silence is the only
 wrong option.
+
+## Resolution
+
+The active `CoreLexer` now emits error token 191 with `use # for comments`
+at the first slash. Division and `/=` retain their existing token kinds. A
+focused lexer spec covers the diagnostic text/location and both controls.
