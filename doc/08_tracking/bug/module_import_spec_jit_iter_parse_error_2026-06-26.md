@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-26
 **Spec:** test/01_unit/lib/common/module_import_spec.spl
-**Status:** Open
+**Status:** Source fixed; execution verification pending
 
 ## Symptom
 
@@ -27,3 +27,10 @@ Either:
 1. Fix the parser in the Rust seed (`src/compiler_rust/`) to accept `impl Type: Trait` header form on a single line
 2. Or update `iter.spl` to use the form the parser accepts
 3. Or fix the test fallback path to still emit the expected warning even when JIT fails
+
+## Resolution (2026-07-15)
+
+The five iterator implementations in `core/iter.spl` now use the
+canonical `impl Trait for Type` grammar. The seed parser retains its strict
+grammar. The existing module-import spec covers the original JIT/import path;
+its execution remains pending an authorized runtime test run.
