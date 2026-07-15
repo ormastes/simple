@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use simple_common::gc::GcAllocator;
-use simple_common::target::Target;
+use simple_common::target::{Target, TargetArch};
 use simple_parser::ast::{Module, Node};
 use simple_type::check as type_check;
 use tracing::instrument;
