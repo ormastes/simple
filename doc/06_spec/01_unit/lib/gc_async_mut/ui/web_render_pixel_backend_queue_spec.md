@@ -28,7 +28,7 @@ web_render_pixel_backend_queue_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -84,6 +84,16 @@ software scenario asserts the same artifact fields remain queue-neutral.
 ## Scenarios
 
 ### web render pixel backend runtime queue provenance
+
+#### rejects an invalid Draw IR viewport before Engine2D creation
+
+The shared composition artifact helper rejects a zero viewport with empty
+pixels, unavailable Engine2D status, and no runtime queue submission.
+
+#### preserves the executor readback source without fabricating queue dispatch
+
+A software Draw IR rectangle retains `cpu_mirror` readback provenance and a
+64-pixel result while queue submit and dispatch remain `not_requested`.
 
 #### stamps GPU web render artifacts with runtime queue submit and drain evidence
 

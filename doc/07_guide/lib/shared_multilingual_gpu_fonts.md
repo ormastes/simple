@@ -570,6 +570,14 @@ entry. Current hosted coverage is a source/unit contract, not a production-route
 PASS; image/motion and nested content remain compatibility cases. A synthetic
 composition-only spec is supporting evidence, not production proof. SimpleOS
 acceptance additionally requires the retained QEMU `pmemsave` pixel oracle.
+The shared host Web renderer now routes both pixel and readback requests through
+the existing HTML-to-DrawIR Engine2D entry; its heuristic renderer remains only
+as an explicit compatibility oracle.
+`ui.browser` now prepares one canonical `widget_tree_to_draw_ir` composition
+and executes it through Engine2D for pure-Simple pixels. The private widget
+command list is deleted; Chromium remains an explicit compatibility renderer.
+Queue dispatch stays `not_requested` until the composition itself is submitted;
+a separate frame event cannot be labeled as Draw IR dispatch evidence.
 
 Vulkan device-loss or unknown completion poisons only the Vulkan surface. When
 policy permits CPU, Engine2D replays the same immutable `FontRenderBatch` from

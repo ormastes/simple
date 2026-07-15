@@ -36,8 +36,13 @@ neither contract is retained production-run evidence.
 6. Render an isolated black `A` and an otherwise identical empty document on
    white 32×24 CPU surfaces; require non-white ink and a pixel difference from
    the empty baseline, preventing command-count or box-paint-only success.
-7. Inspect the production Simple Browser entry and require the shared
-   HTML-to-DrawIR Engine2D helper, exact-byte font registration, and the full
+7. Inspect the shared host Web renderer and require both pixel and readback
+   requests to use the HTML-to-DrawIR Engine2D helper instead of the heuristic
+   pixel path. Require `ui.browser` to execute one canonical
+   `widget_tree_to_draw_ir` composition and reject both its deleted private
+   widget command collector and any fabricated runtime-dispatch label. Inspect
+   the production Simple Browser entry and require the same
+   helper, exact-byte font registration, and the full
    selected candidate catalog; reject incomplete registration and the private
    software-pixel renderer. Require registered-only mode and exact-byte
    registration to precede the catalog gate, which must precede rendering;

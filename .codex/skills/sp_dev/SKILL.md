@@ -483,6 +483,8 @@ font GPU emission, or GUI/Web/2D/3D text.
 10. WM/GUI/Web/2D selected-font evidence must bind Web layout and Draw IR paint
     to one stable manifest identity and the same ordered advances. Preserving
     `font-family` metadata or selecting a TTF only during paint is incomplete;
+    Web producers use the HTML/WebIR-to-DrawIR owner and GUI producers use
+    `widget_tree_to_draw_ir`; a private widget command collector is not evidence.
     unstyled legacy Draw IR must remain bitmap-compatible. A synthetic
     composition proves the contract only; production-route acceptance must
     exercise the real hosted frame owner and canonical SimpleOS entry, with

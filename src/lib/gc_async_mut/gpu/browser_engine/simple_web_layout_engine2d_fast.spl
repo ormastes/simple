@@ -2,8 +2,8 @@
 #
 # This is the native-accelerated counterpart to the software layout renderer
 # (simple_web_layout_render_html_software_pixels) and the pinned heuristic
-# renderer (simple_web_engine2d_render_html_pixels). Neither of those is touched
-# here — the bit-exact gates depend on them. This entry runs the real
+# renderer (simple_web_engine2d_render_html_pixels), which remain explicit
+# compatibility oracles. This entry runs the real
 # layout/paint Draw IR on an Engine2D created in no-mirror fast mode, so the
 # per-op interpreted framebuffer mirror (the entire render cost at desktop
 # resolution — see
@@ -14,6 +14,7 @@
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult, engine2d_draw_ir_adv_composition}
+use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
 
 # Render `html` to a flat ARGB [u32] framebuffer through the layout Draw IR on an
@@ -36,7 +37,21 @@ pub fn simple_web_layout_render_html_engine2d_result(html: text, width: i32, hei
 pub fn simple_web_layout_render_html_pixels_engine2d(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     if width <= 0 or height <= 0:
         return []
-    simple_web_layout_render_html_engine2d_result(html, width, height, backend_name).pixels
+    val result = simple_web_layout_render_html_engine2d_result(html, width, height, backend_name)
+    if result.skipped_command_count != 0:
+        return []
+    result.pixels
+
+pub fn simple_web_layout_render_html_readback_engine2d(html: text, width: i32, height: i32, backend_name: text) -> Engine2DReadback:
+    if width <= 0 or height <= 0:
+        return engine2d_readback([], "unavailable")
+    val result = simple_web_layout_render_html_engine2d_result(html, width, height, backend_name)
+    if result.skipped_command_count != 0:
+        return engine2d_readback([], "unavailable")
+    val pixel_count = result.pixels.len().to_i64()
+    Engine2DReadback(pixels: result.pixels, source: result.readback_source,
+        backend_handle: result.backend_handle, device_identity: result.device_identity,
+        pixel_count: pixel_count, checksum: result.readback_checksum)
 
 # True when the Metal native fast path is genuinely available, so callers (e.g.
 # the WM compositor at desktop resolution) can gate on it before routing a large
@@ -47,5 +62,6 @@ pub fn engine2d_fast_metal_available() -> bool:
     probe.status == BackendStatus.Initialized
 
 export simple_web_layout_render_html_pixels_engine2d
+export simple_web_layout_render_html_readback_engine2d
 export simple_web_layout_render_html_engine2d_result
 export engine2d_fast_metal_available

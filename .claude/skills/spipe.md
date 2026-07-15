@@ -364,7 +364,9 @@ For GUI/web font work, reuse the canonical `FontRenderer` and assert semantic
 `DrawIrComposition` text/style before backend/readback evidence. `WebIR` remains
 the existing semantic/layout model; transient `FontRenderBatch` atlas/device
 material belongs only to Engine2D, never WebIR or Draw IR. The canonical
-WM frame route is `SharedWmScene -> DrawIrComposition -> Engine2D`;
+Web producer uses the HTML/WebIR-to-DrawIR owner; the canonical GUI producer
+uses `widget_tree_to_draw_ir`, never a private widget command collector. The
+canonical WM frame route is `SharedWmScene -> DrawIrComposition -> Engine2D`;
 `shared_wm_scene_render_*_to_backend` and `_to_pixel_buffer` are compatibility
 renderers, not selected-font completion. Reject evidence built on an app-private
 font draw path or on Engine3D HUD/world as a GUI/web/2D shortcut. A synthetic

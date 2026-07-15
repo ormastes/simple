@@ -1,35 +1,34 @@
 # Browser Engine Render Backend
 #
-# Bridges the UI render library to the browser engine + 2D engine pipeline.
-# Converts widget trees to DOM nodes, runs CSS layout, and paints to a
-# GPU-backed (or software) framebuffer via the 2D engine.
+# Bridges the UI render library to the canonical widget Draw IR + Engine2D
+# pipeline. DOM/CSS remains for semantics, hit testing, and Chromium
+# compatibility; pure-Simple pixels come from the widget composition.
 #
 # Architecture:
-#   App -> BrowserBackend -> BrowserRenderer (browser_engine)
-#                         -> Engine2D (engine2d)
+#   App -> BrowserBackend -> widget_tree_to_draw_ir -> Engine2D
 
 use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect, widget_store_revision}
 use common.ui.widget.{UIMode}
 use common.layout.box_model.{LayoutBox, BoxKind, BoxModel}
 use common.ui.semantic_contract.{SEMANTIC_UI_STAGE_RENDERER, SEMANTIC_UI_STATUS_AVAILABLE, SemanticUiSnapshot, semantic_ui_snapshot_from_state_with_capabilities, semantic_ui_snapshot_to_json}
 use common.ui.semantic_contract.{semantic_ui_snapshot_transport_json}
-use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DrawIrCommand, DrawIrStyleProp, draw_ir_batch_with_source, draw_ir_embedding_config, draw_ir_image_command, draw_ir_rect, draw_ir_rect_bounds, draw_ir_source_gui_ast, draw_ir_style_prop, draw_ir_text, draw_ir_box_with_style}
-use common.ui.web_render_api.{WEB_RENDER_ENGINE2D_STATUS_NOT_REQUESTED, WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED, WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderArtifact, WebRenderHostWindowCommand, WebRenderPatchEnvelope, WebRenderSnapshotEnvelope, web_render_adapter_request, web_render_artifact_with_runtime_dispatch_payload, web_render_body_html, web_render_full_html, web_render_capabilities_for_target, web_render_host_window_command_to_json, web_render_input_envelope_from_event, web_render_input_envelope_to_json, web_render_ipc_json_with_html_and_semantic, web_render_patch_envelope_to_json, web_render_snapshot_envelope_to_json, web_render_optimization_profile}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir}
+use common.ui.web_render_api.{WEB_RENDER_ENGINE2D_STATUS_NOT_REQUESTED, WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED, WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderArtifact, WebRenderHostWindowCommand, WebRenderPatchEnvelope, WebRenderSnapshotEnvelope, web_render_adapter_request, web_render_body_html, web_render_full_html, web_render_capabilities_for_target, web_render_host_window_command_to_json, web_render_input_envelope_from_event, web_render_input_envelope_to_json, web_render_ipc_json_with_html_and_semantic, web_render_patch_envelope_to_json, web_render_snapshot_envelope_to_json, web_render_optimization_profile}
 use common.ui.web_render_api.{WebRenderRequest, web_render_pixel_artifact, web_render_engine2d_compatibility_artifact}
 use app.ui.render.html_widgets.{render_html_tree}
 use app.ui.web.html.{generate_css}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event, hit_test}
-use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache, web_render_resolved_engine2d_backend_name}
+use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_draw_ir_request_to_pixel_artifact, web_render_resolved_engine2d_backend_name}
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{web_render_backend, web_render_backend_names}
-use std.nogc_async_mut.gpu.engine2d.draw_ir_runtime_queue.{engine2d_draw_ir_payload_summary}
-use std.nogc_async_mut.gpu.engine2d.host_gpu_draw_ir_event_flow.{engine2d_host_gpu_draw_ir_event_flow, engine2d_host_gpu_draw_ir_event_flow_summary, engine2d_sosix_gpu_lane_enabled, engine2d_host_gpu_seal_draw_ir_payload, draw_ir_payload_read}
+use std.nogc_async_mut.gpu.engine2d.host_gpu_draw_ir_event_flow.{engine2d_host_gpu_draw_ir_event_flow, engine2d_host_gpu_draw_ir_event_flow_summary}
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name}
 use std.io_runtime.{write_file, time_now_unix_micros}
 
 # Gap B (backend_isolation_plan.md): WebRenderer facade selector, distinct
 # from the Engine2D `--backend` selector above. "pure_simple" (default)
-# keeps routing through the WebRenderPixelArtifactCache cache-first path
-# (unchanged perf anchor); "chromium" routes html through the
+# executes the canonical widget Draw IR composition through Engine2D;
+# "chromium" routes HTML through the
 # WebRenderBackend facade's real offscreen-Chromium engine instead.
 pub val WEB_RENDER_ENGINE_PURE_SIMPLE: text = "pure_simple"
 pub val WEB_RENDER_ENGINE_CHROMIUM: text = "chromium"
@@ -56,133 +55,6 @@ fn browser_semantic_render_ipc_json(state: UIState, viewport_w: i32, viewport_h:
     val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "", "", body_html, css, "", viewport_w, viewport_h)
     web_render_ipc_json_with_html_and_semantic(req, web_render_full_html(req), semantic_ui_snapshot_to_json(browser_semantic_snapshot(state)))
 
-fn browser_backend_layout_draw_ir_color(layout: LayoutBox) -> u32:
-    match layout.kind:
-        BoxKind.Inline => 0xffe0e0e0u32
-        BoxKind.Block => 0xff2d2d2du32
-        _ => 0xff20262du32
-
-fn browser_backend_i32_at_least_one(value: i32) -> i32:
-    if value <= 0:
-        return 1
-    value
-
-fn browser_backend_collect_layout_draw_ir_commands(layout: LayoutBox, commands: [DrawIrCommand], max_commands: i32) -> [DrawIrCommand]:
-    if commands.len() >= max_commands:
-        return commands
-    val command_index = commands.len()
-    val x = layout.x.to_i32()
-    val y = layout.y.to_i32()
-    val w = browser_backend_i32_at_least_one(layout.width.to_i32())
-    val h = browser_backend_i32_at_least_one(layout.height.to_i32())
-    var next = commands.push(draw_ir_rect("browser-layout-{command_index}-{layout.node_id}", x, y, w, h, browser_backend_layout_draw_ir_color(layout)))
-    for child in layout.children:
-        if next.len() < max_commands:
-            next = browser_backend_collect_layout_draw_ir_commands(child, next, max_commands)
-    next
-
-fn browser_backend_widget_text_value(node: WidgetNode) -> text:
-    var text_val = node.get_prop("text")
-    if text_val == "":
-        text_val = node.get_prop("content")
-    if text_val == "":
-        text_val = node.get_prop("label")
-    if text_val == "":
-        text_val = node.get_prop("value")
-    if text_val == "":
-        val left = node.get_prop("left")
-        val right = node.get_prop("right")
-        if left != "" or right != "":
-            text_val = "{left} {right}".strip()
-    if text_val == "":
-        text_val = node.get_prop("title")
-    text_val
-
-fn browser_backend_widget_image_uri(node: WidgetNode) -> text:
-    var image_uri = node.get_prop("src")
-    if image_uri == "":
-        image_uri = node.get_prop("url")
-    if image_uri == "":
-        image_uri = node.get_prop("image_uri")
-    if image_uri == "":
-        image_uri = node.get_prop("asset")
-    image_uri
-
-fn browser_backend_widget_draw_ir_color(kind: text) -> u32:
-    match kind:
-        "panel" => 0xff3a3a3au32
-        "button" => 0xff4b6f9fu32
-        "text" => 0xffe0e0e0u32
-        "label" => 0xffe0e0e0u32
-        "heading" => 0xffd8e8ffu32
-        "image" => 0xff303844u32
-        "statusbar" => 0xff202a33u32
-        "progress" => 0xff66cc88u32
-        _ => 0xff2d2d2du32
-
-fn browser_backend_widget_text_color(kind: text) -> u32:
-    match kind:
-        "text" => 0xff303030u32
-        "label" => 0xff303030u32
-        _ => 0xfff2f2f2u32
-
-fn browser_backend_widget_draw_ir_style(node: WidgetNode, kind: text) -> [DrawIrStyleProp]:
-    var style: [DrawIrStyleProp] = []
-    style = style.push(draw_ir_style_prop("widget_id", node.id))
-    style = style.push(draw_ir_style_prop("widget_kind", kind))
-    style
-
-fn browser_backend_widget_command_height(kind: text, text_value: text) -> i32:
-    if kind == "panel":
-        return 14
-    if kind == "button":
-        return 14
-    if kind == "image":
-        return 24
-    if text_value != "":
-        return 12
-    10
-
-fn browser_backend_collect_widget_draw_ir_commands(node: WidgetNode, x: i32, y: i32, width: i32, depth: i32, commands: [DrawIrCommand], max_commands: i32) -> ([DrawIrCommand], i32):
-    if commands.len() >= max_commands:
-        return (commands, y)
-    val kind = node.kind_name()
-    val indent = depth * 4
-    val left = x + indent
-    var usable_width = width - indent
-    if usable_width < 12:
-        usable_width = 12
-    val text_value = browser_backend_widget_text_value(node)
-    val height = browser_backend_widget_command_height(kind, text_value)
-    val hit = draw_ir_rect_bounds(left, y, usable_width, height)
-    val style = browser_backend_widget_draw_ir_style(node, kind)
-    var next = commands
-    if kind == "image":
-        val image_uri = browser_backend_widget_image_uri(node)
-        if image_uri != "":
-            next = next.push(draw_ir_image_command(node.id, left, y, usable_width, height, image_uri, style))
-        else:
-            next = next.push(draw_ir_box_with_style(node.id, left, y, usable_width, height, browser_backend_widget_draw_ir_color(kind), hit, hit, hit, hit, style))
-    else:
-        next = next.push(draw_ir_box_with_style(node.id, left, y, usable_width, height, browser_backend_widget_draw_ir_color(kind), hit, hit, hit, hit, style))
-    if text_value != "" and next.len() < max_commands:
-        next = next.push(draw_ir_text("{node.id}:text", left + 3, y + 3, text_value, browser_backend_widget_text_color(kind)))
-    var cursor = y + height + 2
-    for child in node.children():
-        if next.len() < max_commands:
-            val child_result = browser_backend_collect_widget_draw_ir_commands(child, x, cursor, width, depth + 1, next, max_commands)
-            next = child_result.0
-            cursor = child_result.1
-    (next, cursor)
-
-fn browser_backend_layout_draw_ir_commands(root_node: WidgetNode, layout: LayoutBox) -> [DrawIrCommand]:
-    val background = draw_ir_rect("browser-frame-root-{layout.node_id}", 0, 0, browser_backend_i32_at_least_one(layout.width.to_i32()), browser_backend_i32_at_least_one(layout.height.to_i32()), 0xff20262du32)
-    val semantic = browser_backend_collect_widget_draw_ir_commands(root_node, 0, 0, browser_backend_i32_at_least_one(layout.width.to_i32()), 0, [background], 32)
-    val commands = semantic.0
-    if commands.len() == 0:
-        return [draw_ir_rect("browser-layout-empty", 0, 0, 1, 1, 0xff20262du32)]
-    commands
-
 fn browser_backend_chromium_pixel_artifact(req: WebRenderRequest, width: i32, height: i32, full_html: text) -> WebRenderArtifact:
     """Gap B chromium lane: render through the real WebRenderBackend facade
     (offscreen Chromium) instead of the pure_simple Engine2D cache path, and
@@ -199,28 +71,6 @@ fn browser_backend_chromium_pixel_artifact(req: WebRenderRequest, width: i32, he
         WEB_RENDER_ENGINE_CHROMIUM,
         "rendered via WebRenderBackend facade (chromium engine, not Engine2D)"
     )
-
-fn browser_backend_dispatch_prepared_draw_ir(artifact: WebRenderArtifact, root_node: WidgetNode, layout: LayoutBox, width: i32, height: i32, revision: i64) -> WebRenderArtifact:
-    if artifact.queue_backend_handle <= 0:
-        return artifact
-    if artifact.queue_submit_status != "submitted" or artifact.queue_drain_status != "drained":
-        return artifact
-    val source = draw_ir_source_gui_ast("browser-frame", "browser-frame", "{revision}")
-    val embedding = draw_ir_embedding_config("browser-frame", "browser-frame", 0, 0, width, height, 0, 1000, true)
-    val commands = browser_backend_layout_draw_ir_commands(root_node, layout)
-    val batch = draw_ir_batch_with_source("browser-frame-{revision}", DRAW_IR_BACKEND_GPU, embedding, commands, source)
-    val packet_bytes = commands.len().to_i64() * 64
-    val payload = engine2d_draw_ir_payload_summary(batch, packet_bytes)
-    if engine2d_sosix_gpu_lane_enabled():
-        # SOSIX seal-before-share (#39 Gap #2): route the browser's existing
-        # GPU-offload draw-IR payload through the immutable command-buffer gate
-        # before it is recorded as dispatched. Byte-preserving —
-        # draw_ir_payload_read(sealed) == payload.payload_sdn — so the dispatched
-        # bytes and rendered pixels are unchanged; only the discipline (one-way
-        # sealed buffer) and the diagnostic differ. Default OFF: legacy path below.
-        val sealed = engine2d_host_gpu_seal_draw_ir_payload(payload.payload_sdn)
-        return web_render_artifact_with_runtime_dispatch_payload(artifact, "dispatched", "Draw IR sealed (sosix) + dispatched to Engine2D backend", payload.packet_bytes, payload.command_checksum, draw_ir_payload_read(sealed))
-    web_render_artifact_with_runtime_dispatch_payload(artifact, "dispatched", "Draw IR runtime packet dispatched to Engine2D backend", payload.packet_bytes, payload.command_checksum, payload.payload_sdn)
 
 # =========================================================================
 # Framebuffer — CPU-side pixel buffer for software and GPU readback
@@ -383,7 +233,6 @@ class BrowserBackend:
     present_pixels_cache_valid: bool
     present_pixels_cache_hits: i32
     present_pixels_cache_stores: i32
-    web_render_pixel_cache: WebRenderPixelArtifactCache
     last_render_dom_layout_us: i64
     last_render_html_us: i64
     last_render_pixel_artifact_us: i64
@@ -396,7 +245,7 @@ class BrowserBackend:
 
         backend: "cuda", "vulkan", "cpu", "software", or "auto" (auto-detect).
         web_engine: WebRenderer facade engine name — "pure_simple" (default,
-        cache-first Engine2D pipeline) or "chromium" (real offscreen Chromium
+        canonical widget Draw IR Engine2D pipeline) or "chromium" (real offscreen Chromium
         via the WebRenderBackend facade). Unknown names loud-fail (Err) rather
         than silently falling back to the default engine.
         """
@@ -483,7 +332,6 @@ class BrowserBackend:
             present_pixels_cache_valid: false,
             present_pixels_cache_hits: 0,
             present_pixels_cache_stores: 0,
-            web_render_pixel_cache: web_render_pixel_artifact_cache(w, h, resolved),
             last_render_dom_layout_us: 0,
             last_render_html_us: 0,
             last_render_pixel_artifact_us: 0,
@@ -588,9 +436,9 @@ class BrowserBackend:
         self.layout_cache = collect_layout_entries(layout, [])
         self.last_render_dom_layout_us = browser_backend_time_us() - dom_layout_start_us
 
-        # Step 4: Render the generated UI HTML through the shared SimpleWeb
-        # Engine2D pixel path, then mirror those pixels into this backend's
-        # legacy framebuffer for host-window present and snapshots.
+        # Step 4: Render canonical widget Draw IR through Engine2D for the
+        # pure-Simple lane; Chromium remains an explicit HTML compatibility
+        # renderer. Mirror the selected pixels into the legacy host framebuffer.
         val html_start_us = browser_backend_time_us()
         var full_html = ""
         if profile.cacheable_static_shell and self.static_shell_cache_key == profile.cache_key and self.static_shell_full_html != "":
@@ -605,21 +453,19 @@ class BrowserBackend:
         self.last_render_html_us = browser_backend_time_us() - html_start_us
         val pixel_start_us = browser_backend_time_us()
         # Gap B: engine selection happens here, through the WebRenderer facade
-        # shape. Default ("pure_simple") keeps calling the cache-first
-        # WebRenderPixelArtifactCache path unchanged (perf anchor, byte-
-        # identical output). "chromium" instead renders through the real
+        # shape. Default ("pure_simple") executes `widget_tree_to_draw_ir`.
+        # "chromium" instead renders through the real
         # WebRenderBackend facade and reports honest provenance (engine2d
         # status "compatibility_renderer" + backend "chromium"). The former
         # `web_backend_env_get` alias-resolution failure is fixed in
         # web_render_backend.spl by using the direct env facade import.
+        val composition = widget_tree_to_draw_ir(root_node, self.width, self.height, DRAW_IR_BACKEND_GPU)
         var artifact = if self.web_render_engine == WEB_RENDER_ENGINE_CHROMIUM:
             browser_backend_chromium_pixel_artifact(req, self.width, self.height, full_html)
         else:
-            self.web_render_pixel_cache.html_request_to_pixel_artifact(req, full_html)
+            web_render_draw_ir_request_to_pixel_artifact(req, composition, self.gpu_backend_name)
         self.last_render_pixel_artifact_us = browser_backend_time_us() - pixel_start_us
-        val dispatch_start_us = browser_backend_time_us()
-        artifact = browser_backend_dispatch_prepared_draw_ir(artifact, root_node, layout, self.width, self.height, revision)
-        self.last_render_draw_ir_dispatch_us = browser_backend_time_us() - dispatch_start_us
+        self.last_render_draw_ir_dispatch_us = 0
         val framebuffer_start_us = browser_backend_time_us()
         self.framebuffer = framebuffer_from_argb_pixels(self.width, self.height, artifact.pixels)
         self.present_pixels_cache_valid = false
@@ -743,7 +589,6 @@ class BrowserBackend:
         self.static_frame_state_valid = false
         self.present_pixels_cache = []
         self.present_pixels_cache_valid = false
-        self.web_render_pixel_cache = web_render_pixel_artifact_cache(w, h, self.gpu_backend_name)
 
     me shutdown():
         """Release resources."""
