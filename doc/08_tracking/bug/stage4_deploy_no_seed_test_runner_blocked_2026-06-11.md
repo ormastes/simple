@@ -131,8 +131,10 @@ source contract; no `rt_*` alias was added.
 Bootstrap retains its focused `check src/app/cli/bootstrap_main.spl`, but the
 whole-tree check is no longer part of admission. The wrapper self-test and
 shared-shell syntax check pass, but runner source parity is not current-source
-compiler, QEMU, or GPU execution evidence. TODO 573 owns the shared
-native-Windows process/temp and remaining direct-runtime facade work.
+compiler, QEMU, or GPU execution evidence. `os_build_run.spl` now uses shared
+file/dir/env facades and removes its unused time declaration; TODO 573 retains
+sibling `_QemuRunner` direct-runtime migration plus native child-env,
+unique-temp, and cross-platform timeout process ownership.
 
 The former `check test/05_perf/io_parity/startup_simple.spl` probe is not valid
 candidate evidence. `src/app/cli/check.spl::run_check` unconditionally runs the

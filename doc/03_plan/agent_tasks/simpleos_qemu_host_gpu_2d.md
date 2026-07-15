@@ -72,8 +72,10 @@ fixture bypasses, synthetic handles, or passing placeholders.
   candidates such as `bin/simple`; the focused
   `test/01_unit/app/io/cli_argv0_resolution_spec.spl` contract adds no `rt_*` alias.
   Source presence is not a PASS.
-- TODO 573 owns native-Windows child environment/temp support and migration of
-  the runner's remaining direct file/env/time runtime calls to shared facades.
+- `os_build_run.spl` direct file/dir/env access now uses shared facades and its
+  unused local time declaration is removed. TODO 573 stays open for sibling
+  `_QemuRunner` direct-runtime migration, native child-scoped environment,
+  platform-neutral temporary directories, and cross-platform safe timeouts.
 - The existing foreign-parser/Stage-4 recovery lane remains under
   `doc/08_tracking/bug/native_build_stage4_pre_object_spin_2026-07-13.md`; this
   admission work does not duplicate it.

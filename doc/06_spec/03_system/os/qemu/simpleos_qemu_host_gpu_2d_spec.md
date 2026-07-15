@@ -50,6 +50,8 @@ the CPU/software fallback and report a stable reason.
    `build_os_with_backend` then applies target settings through
    `_apply_build_env` and runs the authoritative guest native-build through
    `_run_candidate_pinned`, so it cannot re-enter a sibling or seed delegate.
+   `os_build_run.spl` imports the shared dir/env/file facades, has no direct
+   file/dir/env runtime calls, and removes its unused local time declaration.
    Shared CLI `_cli_is_current_exe` resolves a candidate override through
    existing `_cli_resolve_symlink`, making authoritative worker delegation safe
    for symlinks such as `bin/simple`. The focused

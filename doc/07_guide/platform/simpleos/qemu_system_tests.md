@@ -309,8 +309,10 @@ longer uses the whole-tree check for candidate admission. The wrapper self-test
 and shared-shell syntax check pass; `_QemuRunner` source parity is present. TODO
 548 remains open until a current-source pure-Simple CLI executes the runner
 gate; no live compiler, QEMU, or GPU PASS is implied. Native-Windows
-child-environment/temp ownership and remaining runner `rt_*` migration are
-tracked by TODO 573 rather than a local alias.
+child-environment, platform-neutral unique-temp, and argv-preserving timeout
+ownership are tracked by TODO 573 together with sibling `_QemuRunner`
+direct-runtime migration. `os_build_run.spl` now uses shared file/dir/env
+facades and removes its unused local time declaration.
 
 Candidate admission does not make focused SSpec execution pure-Simple.
 Current `simple test` reaches `rt_cli_run_tests`; directly entering the

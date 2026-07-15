@@ -314,7 +314,10 @@ retains only its focused `check src/app/cli/bootstrap_main.spl` before shared
 admission. The wrapper self-test and shared-shell syntax check pass, and
 `_QemuRunner` source parity is present. A
 current-source pure-Simple runner execution is still required; TODO 573 owns
-native-Windows/process/temp facade parity and remaining direct-runtime cleanup.
+native child-env, platform-neutral unique-temp, and argv-preserving timeout
+process parity plus sibling `_QemuRunner` direct-runtime migration.
+`os_build_run.spl` itself now uses shared file/dir/env facades and has no local
+time declaration.
 
 This does not design around the test-runner blocker. TODO 572 separately wires
 the pure-Simple compiler interpreter's BDD result into
