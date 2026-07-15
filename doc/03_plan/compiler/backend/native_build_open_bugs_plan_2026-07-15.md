@@ -25,9 +25,10 @@ Effort key: **S** ≤1 lane/hunk · **M** multi-hunk, one subsystem · **L** cro
 
 ## Current audit (2026-07-15)
 
-The original tables remain the remediation order. This audit prevents already
-landed fixes from being reimplemented and distinguishes source fixes from
-executable proof.
+The original tables remain the historical root-cause/effort record; Current
+execution order below supersedes their implementation order. This audit
+prevents already landed fixes from being reimplemented and distinguishes
+source fixes from executable proof.
 
 | # | Current disposition |
 |---|---------------------|
@@ -42,16 +43,16 @@ executable proof.
 | 9 | Capturing and non-capturing stored/passed lambda values implemented with a membership-checked closure ABI; strict hosted/simple-core default-LLVM + explicit-Cranelift proof added, execution pending. |
 | 10 | Captured scalar/struct closure storage implemented through the same closure ABI; strict dual-runtime/backend proof added, execution pending. |
 | 11 | Fixed by Unit-arm merge suppression and backend void-spill protection. |
-| 12 | Fixed; lifecycle hooks are optional and weak/null-guarded. |
+| 12 | Source implemented; lifecycle hooks are optional and weak/null-guarded; fresh native-all bootstrap execution pending. |
 | 13 | Fail-closed seed compatibility implemented with a stale-cache regression; test execution pending. |
 | 14 | Pure-Simple cache scope now includes the running compiler hash; focused runtime test pending. |
-| 15 | Fixed; the seed object key includes a cached executable fingerprint. |
+| 15 | Seed cache-key source fix and focused regression implemented; fresh executable cache proof pending. |
 | 16 | Target-aware global cfg selection implemented across native, driver/JIT, imports, and module loading; AArch64/RISC-V LLVM object regressions added, execution pending. |
 | 17 | Module+owner-qualified method identity implemented through imports, HIR, MIR, bootstrap, trait defaults, and static methods; strict LLVM+Cranelift dispatch proof pending. |
 | 18 | Pure-Simple Cranelift dynload globals now declare, initialize, load, and store writable scalar data; strict LLVM+Cranelift init/mutation proof pending. |
-| 19 | Open/partial; dispatch/spin fixed, strict Stage-4 provider composition remains. |
+| 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, and test-only deterministic requested-symbol owner validation are implemented; aggregate final-closure derivation, full cache fingerprint, remaining providers, production selection/link wiring, and strict execution remain. |
 | 20 | C-owned host-GPU queue facade and fail-closed archive ownership checks implemented; native queue execution proof remains. |
-| 21 | Reduced to the Rust seed parser's single-`else if` consumption bug and fixed with a focused chained-inline regression; pure-Simple parser needed no rewrite. |
+| 21 | Reduced to the Rust seed parser's single-`else if` consumption bug; the Rust-seed source fix and focused chained-inline regression are implemented, while regression and real inspector execution remain pending. The pure-Simple parser needed no rewrite. |
 
 ---
 
@@ -105,6 +106,19 @@ though the compiler itself is right.
 | 18 | `native_dynload_module_var_static_init_dropped` | Dynload build drops static initializers on module-level `var` globals (repro: WM render-event gate). Emit + run the init in the dynload path (ties to #3). | dynload codegen | M |
 | 19 | `native_build_stage4_pre_object_spin` | Stage-4 dispatch + strict-link blockers (pre-object spin). Mitigations documented in-doc; finish the strict-link path. | driver stage4 | M |
 
+**#19 production-path note:** Stage 4 executes the verified pure-Simple compiler,
+whose `driver_aot_output.spl` calls `llvm_native_link.spl`; Rust
+`native_project` validators are test-only prerequisites and are not production
+wiring. The exact CLI profile must derive its final requested `rt_*`/`spl_*`
+closure after entry-object creation, validate unique archive ownership, and then
+order Simple objects → compiler capsule → capability providers → core-C → system
+libraries. The current provider inventory covers compiler hooks, time/progress,
+SQLite, and memtrack only; GPU/font/dynload, window, HTTP, process/thread,
+SMF/CUDA, and other CLI owners remain. Core-C currently overlaps memtrack, raw
+`libsimple_native_all.a` selection and allow-multiple-definition are still
+invalid for the strict profile, and provider ownership needs a separate link
+profile fingerprint rather than changing per-module object keys.
+
 ---
 
 ## Wave 4 — App/lane-specific (scoped, lower priority)
@@ -129,22 +143,24 @@ though the compiler itself is right.
 
 ---
 
-## Execution order & batching
+## Current execution order
 
-1. **Wave 1 #1–#6** — 6 independent single-file/single-subsystem codegen fixes;
-   ideal for a parallel lane batch (one bug per lane, distinct files where
-   possible). Each: probe vs oracle → matrix 15/15 → parity case → FF-push.
-2. **Wave 3 #14+#15** — one combined cache-key change (highest leverage, small).
-   #13 next (stale-skip → loud).
-3. **Wave 2 #11, #12** — small loud→supported wins.
-4. **Wave 1 #7 (generics erasure)** and **#8 (Option ABI)** and **Wave 2 #9/#10
-   (closures)** — the three **L** items. These need design + a runnable
-   pure-Simple verification gate and should each be a dedicated pass, not folded
-   into a sweep. #8 has its ABI design + acceptance matrix already written.
-5. **Wave 3 #16–#19, Wave 4** — as capacity allows.
+The original wave tables above preserve root-cause history; this list supersedes
+their implementation order.
 
-**Redeploy dependency:** the three **L** items (#7, #8, #9/#10) and any fix whose
-verification needs the self-hosted CLI to *run* in-guest are gated on a working
-pure-Simple `native-build` redeploy (currently blocked; needs explicit user
-go-ahead). Everything in Waves 1 (#1–#6), 2 (#11–#12), and 3 (#13–#15) is
-verifiable against the current deployed binary today.
+1. Run each row's recorded focused/native/parity gate for execution-proof-only
+   rows #2–#7, #9–#10, #12–#18, and #20–#21. Native/parity gates wait for a
+   valid pure-Simple executable; do not reimplement landed source fixes.
+2. Implement #8 as one atomic uniform tagged Option ABI change, including every
+   producer/consumer boundary and the full Result-preservation matrix. Do not
+   land another partial representation change.
+3. Finish #19's aggregate final-symbol closure, complete provider inventory,
+   production archive selection/link wiring, and cache fingerprint before its
+   strict execution gate.
+
+**Redeploy dependency:** pending native/parity proof and the atomic #8 ABI gate
+require a working pure-Simple `native-build` artifact; focused Rust/source-level
+regressions can execute independently. Rebuild/deploy remains an explicitly
+authorized operation; source status must not be promoted to fixed until its
+recorded gate runs. #19 may continue with source-only fail-closed composition
+prerequisites, but production enablement still requires strict native proof.
