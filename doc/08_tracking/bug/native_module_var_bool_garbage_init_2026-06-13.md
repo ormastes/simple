@@ -5,6 +5,11 @@
 **Area:** native codegen (module-level var initialization)
 **Related:** baremetal module-level `val` zeroing (`feedback_baremetal_module_val_zero`), native env_get raw pointer (`native_env_get_raw_pointer_2026-06-12.md`)
 
+**Status (2026-07-15):** Pure-Simple scalar-global initialization fix landed.
+Strict default-LLVM + explicit-Cranelift direct/getter first-read regression added to
+`scripts/check/check-native-seed-parity.shs`; execution awaits a fresh
+pure-Simple compiler binary.
+
 ## Repro
 
 ```simple

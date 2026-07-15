@@ -1,11 +1,14 @@
 # Bug: Native Any Parameter Forwarding Corrupts Pointer
 
-Status: Open compiler bug; std and nogc_sync_mut thread wrappers hardened.
+Status: One-word Any ABI supersedes the reported two-slot premise; strict
+default-LLVM + explicit-Cranelift forwarding proof added, execution pending.
 
 **Date:** 2026-06-05
 **Severity:** High
 **Component:** compiler/codegen (Cranelift native)
-**Status:** Open compiler bug; std and nogc_sync_mut thread wrappers hardened.
+**Status:** Pure-Simple one-word ABI source fixed; strict default-LLVM + explicit-Cranelift
+wrapper-to-extern regression added to `scripts/check/check-native-seed-parity.shs`;
+execution awaits a fresh pure-Simple compiler binary.
 
 ## Description
 

@@ -1,5 +1,10 @@
 # Native enum text payload becomes a decimal pointer
 
+**Status (2026-07-15):** Pure-Simple enum payload typing fix landed. Strict
+default-LLVM + explicit-Cranelift callback/match/field-assignment regression added to
+`scripts/check/check-native-seed-parity.shs`; execution awaits a fresh
+pure-Simple compiler binary.
+
 ## Symptom
 
 In the compiled UI access checker, `UIEvent.Action(name: "run")` reaches

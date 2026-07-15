@@ -1,6 +1,6 @@
 # Native AOT: cross-module generic `Result<[u8], E>` payload type erasure
 
-**Status:** OPEN — blocked on a large prerequisite (not a contained fix).
+**Status:** IMPLEMENTED 2026-07-15 — strict LLVM/Cranelift execution pending a fresh pure-Simple compiler.
 **Date:** 2026-06-22 (supersedes the 2026-06-21 doc dropped by parallel churn).
 **Mode:** native AOT only (`bin/simple <file> --compile` / `native-build`). Interpreter and `check` are unaffected.
 
@@ -37,7 +37,7 @@ The real chain:
    (`60.mir_opt/mir_opt/collection_opt_core.spl:368`) → dynamic `rt_index_get`
    path → unlinked convert → fault.
 
-## Why this is NOT a contained fix
+## 2026-06-22 assessment (superseded)
 Recovering `[u8]` at HIR-lowering time needs the match subject's *instantiated*
 generic type (`Result<[u8], E>`). With the no-op checker, that type exists
 nowhere by HIR time. A real fix requires either (a) real generic type
@@ -47,14 +47,28 @@ a real type checker **and** fixing variant-payload extraction there
 whole subject type, not the payload). Both are major compiler subsystems —
 disproportionate to the payoff (un-gating two svllm byte tests).
 
-## Current mitigation (in place, sufficient)
-- Production svllm byte-load uses `match` destructuring (no `is_err`/`unwrap`)
-  and typed `[[u8]]` containers; the heavy path lives in the gc tier
-  (`gc_async_mut/svllm/nvfs_client/std_fs.spl`, no `is_err`/`unwrap`).
-- The two byte-value tests stay gated behind `native_u8_fixed == 1`
-  (`test/01_unit/lib/nogc_async_mut/svllm/nvfs_client/std_fs_transport_spec.spl`,
-  `test/03_system/tools/svllm_fs_loader_system_spec.spl`). Honestly gated — not
-  silently failing.
+## 2026-07-15 resolution
+
+The imported function symbol already retains its concrete
+`Result<[u8], E>` return type through HIR and the no-op monomorphization pass.
+The remaining erasure was contained to MIR enum-pattern binding:
+`rt_enum_payload` necessarily returns an `i64` word, but the bound local lost
+the existing runtime-array marker. `lower_enum_match` now recovers the selected
+`Ok`/`Err` payload type from the scrutinee signature and preserves that marker
+for Array/Slice payloads, routing `data[i]` through `rt_array_get`.
+
+`scripts/check/check-native-crossmodule-result-u8.shs` builds the focused
+cross-module fixture with both LLVM and Cranelift under
+`SIMPLE_NO_STUB_FALLBACK=1` and checks exact execution output. The checker was
+added but not executed in this source-only lane; bootstrap/build/deploy was
+explicitly out of scope.
+
+## Historical mitigation
+
+Production svllm previously avoided the erased leaf with typed `[[u8]]`
+containers and gated byte-value tests behind `native_u8_fixed`. Those named
+gates are no longer present in the current tree; the focused dual-backend
+checker above is their replacement regression.
 
 ## Deploy note for whoever takes the real fix
 `bin/simple build bootstrap` only determinism-checks the 30 KB `bootstrap_main`

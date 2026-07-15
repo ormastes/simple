@@ -33,11 +33,11 @@ executable proof.
 |---|---------------------|
 | 1 | Fixed and native-regressed (`e4471d60acb6`). |
 | 2 | Fixed and native-regressed (`58b0f33701fb`, `135bb60cf0e7`, `8205cacec41a`). |
-| 3 | Scalar-global source fix landed; exact native `var flag = false` proof remains. |
-| 4 | Enum text-payload source fix landed; persistent exact native proof remains. |
+| 3 | Scalar-global source fix landed; strict default-LLVM + explicit-Cranelift direct/getter first-read proof added, execution pending. |
+| 4 | Enum text-payload source fix landed; strict default-LLVM + explicit-Cranelift callback/match/field-assignment proof added, execution pending. |
 | 5 | Subject-enum variant precedence implemented for expression and statement match; focused Rust tests pending execution. |
-| 6 | Old two-slot `Any` premise is superseded by the one-word ABI; direct forwarding proof remains. |
-| 7 | Open; generic-result provenance remains blocked on a runnable pure-Simple gate. |
+| 6 | Old two-slot `Any` premise is superseded by the one-word ABI; strict default-LLVM + explicit-Cranelift wrapper-to-extern forwarding proof added, execution pending. |
+| 7 | Source implemented at the contained MIR enum-bind owner; strict default-LLVM + explicit-Cranelift proof added, execution pending. |
 | 8 | Open; uniform tagged Option ABI remains blocked. Flat text unwrap is implemented but unexecuted. |
 | 9 | Non-capturing stored/passed lambda values implemented with strict LLVM+Cranelift parity coverage; capturing closure values remain open. |
 | 10 | Rust captured-closure hang fixed; remaining pure-Simple captured storage is tracked by #9. |
@@ -67,7 +67,7 @@ A wrong-but-silent result is the worst failure class; these go first.
 | 4 | `native_enum_text_payload_decimalized` | Enum text payload prints as a decimal pointer — payload typed as int not str. Thread the variant's declared text payload type into the print/`to_text` dispatch. | `switch_operators_calls.spl` | S |
 | 5 | `native_const_pattern_lowers_irrefutably` | `case CONST:` match arm lowers as irrefutable (always taken), skipping the equality test. Emit the `rt_native_eq`/`icmp` guard for const patterns. | `expressions.spl` (build_match) | S |
 | 6 | `native_any_param_forwarding_corruption` (High) | Forwarding an `Any` parameter corrupts the pointer (tag/box mismatch on pass-through). Preserve the tagged handle across the call boundary; no re-box. | `core_codegen.spl` call lowering | M |
-| 7 | `native_codegen_crossmodule_generic_result_u8_erasure` | Cross-module generic `Result<[u8],E>` payload erases to a wrong repr; only reproduces in a generics-heavy unit (minimal repros pass). Needs monomorphization-time payload-type retention. First reproduce reliably, then fix. | monomorph + MIR lower | L |
+| 7 | `native_codegen_crossmodule_generic_result_u8_erasure` | Imported function signatures already retain concrete `Result<[u8],E>` through HIR and the no-op monomorphization pass; MIR `rt_enum_payload` binding dropped the existing runtime-array marker. Recover the selected Result payload type in `lower_enum_match` and preserve array provenance. | `switch_operators_calls.spl` (`lower_enum_match`) | S |
 | 8 | Option ABI pair: `native_try_op_on_option_silent_wrong` + `native_text_option_unwrap_pointer_value` | Flat `i64?` payload `3` collides with the nil sentinel; `?`/unwrap on Option mis-dispatch. Needs a uniform tagged Option handle (`OPTION_ENUM_ID=1`, `Some=0/None=1`), `rt_enum_id` in both runtimes, and declared-type provenance for locals/calls. Design already recorded in the two bug docs. | HIR Optional canon + MIR + runtime | L |
 
 **Note on #8:** blocked on a runnable pure-Simple `native-build` verification gate

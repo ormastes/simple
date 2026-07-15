@@ -784,24 +784,19 @@ impl MirLowering:
             case _: ()
         nil
 
-    me result_variant_payload_text_state(scrutinee: HirExpr, variant: text) -> i64:
-        """Return 1 for text, 0 for known non-text, -1 when not a typed Result."""
+    me result_variant_payload_type(scrutinee: HirExpr, variant: text) -> HirType?:
+        """Recover the selected payload from an instantiated Result type."""
         val scrutinee_type = self.enum_match_expr_type(scrutinee)
         if scrutinee_type != nil:
             val found_type = scrutinee_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
             match found_type.kind:
                 case HirTypeKind.Result(ok_type, err_type):
                     if variant == "Ok":
-                        match ok_type.kind:
-                            case HirTypeKind.Str: return 1
-                            case _: return 0
+                        return Some(ok_type)
                     if variant == "Err":
-                        match err_type.kind:
-                            case HirTypeKind.Str: return 1
-                            case _: return 0
-                    return 0
+                        return Some(err_type)
                 case _: ()
-        -1
+        nil
 
     me lower_enum_match(scrutinee: HirExpr, arms: [HirMatchArm]) -> LocalId:
         """Lower `match e: case Variant(x): ...` for enum patterns. Dispatches on
@@ -917,8 +912,21 @@ impl MirLowering:
                     # comment for the full landmine this closes).
                     val payload_key = "{enum_name}::{enum_variants[ci]}"
                     val payload_struct = self.enum_payload_struct_names.get(payload_key)
-                    val result_text_state = self.result_variant_payload_text_state(scrutinee, enum_variants[ci])
-                    if result_text_state == 1 or (result_text_state < 0 and payload_struct != nil and payload_struct == enum_text_payload_marker()):
+                    val result_payload_type = self.result_variant_payload_type(scrutinee, enum_variants[ci])
+                    var result_payload_is_text = false
+                    if result_payload_type != nil:
+                        val payload_type = result_payload_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
+                        match payload_type.kind:
+                            case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                                # Result payloads are stored as erased i64 words,
+                                # but an array word remains the same tagged runtime
+                                # handle. Keep that provenance across the pattern
+                                # bind so indexing uses rt_array_get.
+                                self.runtime_array_locals[pl.id] = true
+                            case HirTypeKind.Str:
+                                result_payload_is_text = true
+                            case _: ()
+                    if result_payload_is_text or (result_payload_type == nil and payload_struct != nil and payload_struct == enum_text_payload_marker()):
                         # Enum-text bug: this variant's single-field payload
                         # was observed to be TEXT at the construction site
                         # (see lower_enum_lit/lower_enum_construct_named).
@@ -1568,6 +1576,33 @@ impl MirLowering:
             i = i + 1
         false
 
+    me lambda_capture_scan_supported(body: HirExpr) -> bool:
+        """True when collect_free_var_syms traverses the whole expression."""
+        match body.kind:
+            case IntLit(_, _) | FloatLit(_, _) | BoolLit(_) | CharLit(_) | UnitLit | NilLit | Var(_) | NamedVar(_, _): true
+            case StringLit(_, interps): not interps.?
+            case Binary(_, left, right):
+                self.lambda_capture_scan_supported(left) and self.lambda_capture_scan_supported(right)
+            case Unary(_, operand): self.lambda_capture_scan_supported(operand)
+            case Field(base, _, _): self.lambda_capture_scan_supported(base)
+            case Index(base, index):
+                self.lambda_capture_scan_supported(base) and self.lambda_capture_scan_supported(index)
+            case TupleIndex(base, _): self.lambda_capture_scan_supported(base)
+            case Cast(expr, _) | As(expr, _): self.lambda_capture_scan_supported(expr)
+            case Call(callee, call_args, _):
+                self.lambda_capture_scan_supported(callee) and self.call_args_capture_scan_supported(call_args)
+            case MethodCall(receiver, _, call_args, _):
+                self.lambda_capture_scan_supported(receiver) and self.call_args_capture_scan_supported(call_args)
+            case _: false
+
+    me call_args_capture_scan_supported(call_args: [HirCallArg]) -> bool:
+        var i = 0
+        while i < call_args.len():
+            if not self.lambda_capture_scan_supported(call_args[i].value):
+                return false
+            i = i + 1
+        true
+
     me is_known_top_level_function(name: text) -> bool:
         for fn_name in self.current_function_names:
             if fn_name == name:
@@ -1575,7 +1610,7 @@ impl MirLowering:
         false
 
     me lower_lambda_value(lam: HirExpr) -> MirOperand?:
-        """Materialize a non-capturing `Lambda` used as a first-class VALUE.
+        """Materialize a `Lambda` used as a first-class value.
 
         Lifts the lambda to a synthesized top-level MIR function
         `__lambda_lift_<n>` (appended to the bootstrap MIR function accumulator
@@ -1585,10 +1620,10 @@ impl MirLowering:
         named function passed as a value, which the backend already lowers to
         `@name` + an indirect `call`.
 
-        Returns nil (caller falls through to the existing loud
-        `unsupported MIR expression: Lambda` failure) when the lambda captures a
-        free variable -- capturing closures need a heap environment (Phase C)
-        and must never be lifted to a fnptr that reads garbage.
+        Capturing lambdas use the runtime closure handle as a heap environment;
+        the lifted function receives that handle as a hidden first argument.
+        Unsupported expression/capture shapes return nil and retain the existing
+        loud failure instead of creating a partial environment.
         """
         match lam.kind:
             case Lambda(params, body, _captures):
@@ -1597,13 +1632,32 @@ impl MirLowering:
                 while pi < params.len():
                     param_syms = param_syms.push(mir_expr_symbol_id_value(params[pi].symbol))
                     pi = pi + 1
-                # Capturing lambda -> not liftable to a bare fnptr. Loud-fail.
-                if self.lambda_body_captures(body, param_syms):
+                val captures = self.lambda_body_captures(body, param_syms)
+                if captures and not self.lambda_capture_scan_supported(body):
                     return nil
+                val free_syms = self.collect_free_var_syms(body, param_syms, [])
+                var capture_syms: [i64] = []
+                var ci = 0
+                while ci < free_syms.len():
+                    val fsid = free_syms[ci]
+                    if self.local_map.has(fsid):
+                        val capture_ty = self.lookup_local_type(self.local_map[fsid])
+                        match capture_ty.kind:
+                            case F32 | F64:
+                                # Closure slots are raw native words. Float
+                                # captures need a bitcast ABI, not numeric cast.
+                                return nil
+                            case _:
+                                capture_syms = capture_syms.push(fsid)
+                    elif not self.global_symbol_ids.has(fsid):
+                        return nil
+                    ci = ci + 1
                 val arity = params.len()
                 # Force the flat i64 runtime ABI on params/return: lambda params
                 # are `Infer` and the whole native call path passes i64 operands.
                 var mir_params: [MirType] = []
+                if capture_syms.len() > 0:
+                    mir_params = mir_params.push(MirType.i64())
                 var mpi = 0
                 while mpi < arity:
                     mir_params = mir_params.push(MirType.i64())
@@ -1621,6 +1675,16 @@ impl MirLowering:
                 var lw = MirLowering.new(self.symbols)
                 lw.current_function_names = self.current_function_names
                 lw.current_function_symbols = self.current_function_symbols
+                lw.field_map = self.field_map
+                lw.bitfield_map = self.bitfield_map
+                lw.struct_field_order = self.struct_field_order
+                lw.struct_field_type_name = self.struct_field_type_name
+                lw.struct_method_syms = self.struct_method_syms
+                lw.struct_method_return_names = self.struct_method_return_names
+                lw.struct_method_return_is_array = self.struct_method_return_is_array
+                lw.enum_payload_struct_names = self.enum_payload_struct_names
+                lw.enum_variant_index = self.enum_variant_index
+                lw.global_symbol_ids = self.global_symbol_ids
                 var b = lw.builder
                 b.begin_function(gen_symbol, gen_name, sig, lam.span)
                 lw.builder = b
@@ -1634,6 +1698,28 @@ impl MirLowering:
                     if psym >= 0:
                         lw.local_map[psym] = LocalId(id: qi + offset)
                     qi = qi + 1
+                if capture_syms.len() > 0:
+                    val env_local = LocalId(id: offset - 1)
+                    var cap_i = 0
+                    while cap_i < capture_syms.len():
+                        val get_capture = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_closure_get_capture"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                        ))
+                        var lb = lw.builder
+                        val index_local = lb.emit_const_int(cap_i)
+                        val loaded = lb.emit_call(get_capture, [mir_operand_copy(env_local), mir_operand_copy(index_local)], MirType.i64())
+                        lw.builder = lb
+                        if loaded == nil:
+                            return nil
+                        val loaded_local = loaded.unwrap()
+                        val capture_sid = capture_syms[cap_i]
+                        lw.local_map[capture_sid] = loaded_local
+                        val source_local = self.local_map[capture_sid]
+                        val capture_struct = self.struct_value_syms.get(source_local.id)
+                        if capture_struct != nil:
+                            lw.struct_value_syms[loaded_local.id] = capture_struct ?? ""
+                        cap_i = cap_i + 1
                 val result = lw.lower_expr(body)
                 var b2 = lw.builder
                 if not b2.current_block_has_explicit_terminator():
@@ -1657,10 +1743,44 @@ impl MirLowering:
                 host_mod.functions = host_fns
                 host_b.module = host_mod
                 self.builder = host_b
-                Some(MirOperand(kind: MirOperandKind.Const(
+                val lifted_operand = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str(gen_name),
                     MirType(kind: MirTypeKind.FuncPtr(sig))
-                )))
+                ))
+                if capture_syms.len() == 0:
+                    return Some(lifted_operand)
+
+                val closure_new = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_closure_new"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                var host_closure_b = self.builder
+                val capture_count = host_closure_b.emit_const_int(capture_syms.len())
+                val closure_result = host_closure_b.emit_call(
+                    closure_new,
+                    [lifted_operand, mir_operand_copy(capture_count)],
+                    MirType.i64()
+                )
+                self.builder = host_closure_b
+                if closure_result == nil:
+                    return nil
+                val closure_local = closure_result.unwrap()
+                var set_i = 0
+                while set_i < capture_syms.len():
+                    val closure_set = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_closure_set_capture"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var set_b = self.builder
+                    val index_local = set_b.emit_const_int(set_i)
+                    set_b.emit_call(
+                        closure_set,
+                        [mir_operand_copy(closure_local), mir_operand_copy(index_local), mir_operand_copy(self.local_map[capture_syms[set_i]])],
+                        MirType.i64()
+                    )
+                    self.builder = set_b
+                    set_i = set_i + 1
+                Some(mir_operand_copy(closure_local))
             case _:
                 nil
 
@@ -1832,15 +1952,63 @@ impl MirLowering:
         if callee.has_type_:
             ret_type = self.lower_type(callee.type_)
         val sig = MirSignature(params: param_types, return_type: ret_type, is_variadic: false)
+        # A function-typed value can be either the existing raw function
+        # pointer or a capturing closure handle. Keep raw ABI compatibility,
+        # but call a closure's lifted target with its environment first.
+        val closure_target_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_closure_func_ptr"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
         var b = self.builder
-        val result = b.emit_call_indirect(mir_operand_copy(callee_local), arg_operands, sig, ret_type)
-        if val result_local = result:
+        val closure_target_result = b.emit_call(closure_target_fn, [mir_operand_copy(callee_local)], MirType.i64())
+        if closure_target_result == nil:
+            val fallback = b.emit_call_indirect(mir_operand_copy(callee_local), arg_operands, sig, ret_type)
             self.builder = b
-            result_local
-        else:
-            val temp = b.new_temp(MirType.unit())
+            if fallback != nil:
+                return fallback.unwrap()
+            val unit_local = b.new_temp(MirType.unit())
             self.builder = b
-            temp
+            return unit_local
+        val closure_target = closure_target_result.unwrap()
+        val zero = b.emit_const_int(0)
+        val is_closure = b.emit_binop(MirBinOp.Ne, mir_operand_copy(closure_target), mir_operand_copy(zero), MirType.bool())
+        val closure_block = b.new_block(Some("closure_call"))
+        val raw_block = b.new_block(Some("raw_fn_call"))
+        val merge_block = b.new_block(Some("indirect_call_merge"))
+        val result_slot: LocalId? = if ret_type.kind != MirTypeKind.Unit: Some(b.new_temp(ret_type)) else: nil
+        b.terminate_if(mir_operand_copy(is_closure), closure_block, raw_block)
+        self.builder = b
+
+        var closure_b = self.builder
+        closure_b.switch_to_block(closure_block)
+        var closure_params: [MirType] = [MirType.i64()]
+        var closure_args: [MirOperand] = [mir_operand_copy(callee_local)]
+        for arg_op in arg_operands:
+            closure_params = closure_params.push(MirType.i64())
+            closure_args = closure_args.push(arg_op)
+        val closure_sig = MirSignature(params: closure_params, return_type: ret_type, is_variadic: false)
+        val closure_call_result = closure_b.emit_call_indirect(mir_operand_copy(closure_target), closure_args, closure_sig, ret_type)
+        if closure_call_result != nil and result_slot != nil:
+            closure_b.emit_copy(result_slot.unwrap(), closure_call_result.unwrap())
+        closure_b.terminate_goto(merge_block)
+        self.builder = closure_b
+
+        var raw_b = self.builder
+        raw_b.switch_to_block(raw_block)
+        val raw_call_result = raw_b.emit_call_indirect(mir_operand_copy(callee_local), arg_operands, sig, ret_type)
+        if raw_call_result != nil and result_slot != nil:
+            raw_b.emit_copy(result_slot.unwrap(), raw_call_result.unwrap())
+        raw_b.terminate_goto(merge_block)
+        self.builder = raw_b
+
+        var merge_b = self.builder
+        merge_b.switch_to_block(merge_block)
+        if result_slot != nil:
+            self.builder = merge_b
+            return result_slot.unwrap()
+        val unit_local = merge_b.new_temp(MirType.unit())
+        self.builder = merge_b
+        unit_local
 
     me is_mutating_method(name: text) -> bool:
         """Allow-list of methods that mutate `self`.
