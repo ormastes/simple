@@ -1,51 +1,47 @@
-# Note: rt_tls13_x25519 bare extern unregistered — pure fallback runs in test mode
+# X25519 unregistered bare extern removed
 
 **ID:** x25519_extern_not_registered_interp_2026-06-15
 **Date:** 2026-06-15
-**Severity:** P3 — cosmetic / dead-code extern declaration; no runtime impact on test runner
+**Severity:** P3 — dead unimplemented optimization path; standalone interpreter failure
+**Status:** Source fixed 2026-07-15; existing KAT and standalone run verification pending
 
 ## Summary
 
-`src/lib/nogc_async_mut_noalloc/tls/x25519.spl` declares:
+`src/lib/nogc_async_mut_noalloc/tls/x25519.spl` declared:
 
 ```
 extern fn rt_tls13_x25519(scalar: [u8], u_coord: [u8]) -> [u8]
 ```
 
-This extern is NOT registered in the interpreter's SFFI dispatch table
-(`src/compiler_rust/compiler/src/interpreter_extern/`).  The registered
-externs use different names:
+This extern was not implemented or registered in the interpreter's SFFI
+dispatch table (`src/compiler_rust/compiler/src/interpreter_extern/`). Related
+runtime manifest symbols use different names:
 - `rt_tls13_x25519_public_key`
 - `rt_tls13_x25519_shared_secret`
 
-(registered in `runtime_symbols.rs` lines 1045–1046, used in `ssh_session_kex.spl`).
+(listed in `runtime_symbols.rs` and used separately by `ssh_session_kex.spl`).
 
-## Actual behaviour
+## Historical behaviour
 
-**X25519 IS pure under the test runner.**  Because `rt_tls13_x25519` is
-unregistered, the `if fast.len()==32` fast-path guard inside `x25519.spl`
-always fails (the extern call returns an empty/error result), and the
-pure-Simple Montgomery-ladder fallback executes.  KAT values
-(RFC 7748 §5.2 and §6.1) match exactly under `bin/simple test` — verified
-13/13 PASS at 76 s under `SIMPLE_BOOTSTRAP_DRIVER=seed`.
+The unimplemented extern was called before the pure-Simple Montgomery ladder.
+Interpreter modes did not share a reliable unknown-extern fallback contract,
+so standalone run mode could fail before reaching the ladder.
 
-**Only `bin/simple run` is affected.**  Run-mode is strict about unknown
-externs and raises "unknown extern function: rt_tls13_x25519" if
-`x25519_typed` is called directly from a standalone script.
+The existing typed-wrapper spec contains RFC 7748 §5.2 and §6.1 assertions,
+but those assertions have not been rerun for the current source change.
 
-## Impact
+## Resolution
 
-- `x25519_typed` and `x25519_typed_pubkey` run **pure** under the interpreter
-  test runner (Montgomery-ladder fallback) and produce correct KAT outputs.
-- KAT asserts in `asym_spec.spl` ARE executed under the seed interpreter.
-- `bin/simple run` on a script that calls x25519_typed directly will crash
-  with "unknown extern function: rt_tls13_x25519".
+- Removed the `rt_tls13_x25519` declaration and its unconditional fast-path
+  call.
+- Reused the existing pure-Simple Montgomery ladder as the sole implementation.
+- Kept the existing RFC 7748 KAT assertions; no new test framework or fixture
+  was added.
 
-## Fix Options
+## Verification remaining
 
-1. Register `rt_tls13_x25519` in `interpreter_extern/tls13.rs` using the
-   existing `ring` X25519 implementation — eliminates the dead extern.
-2. Rename `x25519.spl`'s extern to match the registered names
-   (`rt_tls13_x25519_shared_secret` / `rt_tls13_x25519_public_key`).
-3. Remove the fast-path extern entirely from `x25519.spl` if it is never
-   registered anywhere and the pure fallback is acceptable.
+- Run `test/01_unit/lib/common/crypto/typed/asym_spec.spl` and record the RFC
+  KAT result.
+- Run a standalone interpreter path through the existing typed wrapper and
+  confirm that no unknown-extern diagnostic occurs.
+- No runtime PASS is claimed by this source-only update.
