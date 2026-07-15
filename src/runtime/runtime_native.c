@@ -94,6 +94,7 @@ bool rt_dir_create(const char* path, bool recursive) {
 #define RT_VALUE_SPECIAL_FALSE 0x2ULL
 #define RT_VALUE_HEAP_STRING 0x53545231U
 #define RT_VALUE_HEAP_ARRAY 0x02U
+#define RT_VALUE_HEAP_CLOSURE 0x03U
 #define RT_VALUE_HEAP_ENUM 0x04U
 #define RT_VALUE_HEAP_DICT 0x06U
 #define RT_CORE_ARRAY_FLAG_BYTES 0x08U
@@ -392,6 +393,14 @@ typedef struct RtCoreEnum {
     int64_t payload;
 } RtCoreEnum;
 
+typedef struct RtCoreClosure {
+    uint8_t kind;
+    uint8_t reserved[7];
+    int64_t func_ptr;
+    int64_t capture_count;
+    int64_t captures[];
+} RtCoreClosure;
+
 /* RtCore-native dictionary: open-addressing hash table over the tagged-int64
  * value representation. Keys and values are stored as tagged RtCore values, so
  * int keys (e.g. Dict<i64,V>) and string keys both work natively — unlike the
@@ -482,6 +491,35 @@ static int rt_core_is_registered_enum(RtCoreEnum* e) {
         if (rt_core_enum_registry[i] == e) return 1;
     }
     return 0;
+}
+
+static RtCoreClosure** rt_core_closure_registry = NULL;
+static size_t rt_core_closure_registry_len = 0;
+static size_t rt_core_closure_registry_cap = 0;
+
+static void rt_core_register_closure(RtCoreClosure* closure) {
+    if (!closure) return;
+    if (rt_core_closure_registry_len == rt_core_closure_registry_cap) {
+        size_t next_cap = rt_core_closure_registry_cap == 0 ? 32 : rt_core_closure_registry_cap * 2;
+        RtCoreClosure** next =
+            (RtCoreClosure**)realloc(rt_core_closure_registry, next_cap * sizeof(RtCoreClosure*));
+        if (!next) return;
+        rt_core_closure_registry = next;
+        rt_core_closure_registry_cap = next_cap;
+    }
+    rt_core_closure_registry[rt_core_closure_registry_len++] = closure;
+}
+
+static RtCoreClosure* rt_core_as_closure(int64_t value) {
+    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
+    RtCoreClosure* closure = (RtCoreClosure*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    if (!closure) return NULL;
+    for (size_t i = 0; i < rt_core_closure_registry_len; i++) {
+        if (rt_core_closure_registry[i] == closure) {
+            return closure->kind == RT_VALUE_HEAP_CLOSURE ? closure : NULL;
+        }
+    }
+    return NULL;
 }
 
 static inline int64_t rt_core_from_special(uint64_t payload) {
@@ -2401,6 +2439,38 @@ bool rt_enum_check_discriminant(int64_t value, int64_t expected) {
 int64_t rt_enum_payload(int64_t value) {
     RtCoreEnum* e = rt_core_as_enum(value);
     return e ? e->payload : rt_core_nil();
+}
+
+int64_t rt_closure_new(int64_t func_ptr, int64_t capture_count) {
+    if (!func_ptr || capture_count < 0) return rt_core_nil();
+    size_t count = (size_t)capture_count;
+    if (count > (SIZE_MAX - sizeof(RtCoreClosure)) / sizeof(int64_t)) return rt_core_nil();
+    RtCoreClosure* closure =
+        (RtCoreClosure*)calloc(1, sizeof(RtCoreClosure) + count * sizeof(int64_t));
+    if (!closure) return rt_core_nil();
+    closure->kind = RT_VALUE_HEAP_CLOSURE;
+    closure->func_ptr = func_ptr;
+    closure->capture_count = capture_count;
+    rt_core_register_closure(closure);
+    return (int64_t)(((uint64_t)(uintptr_t)closure) | RT_VALUE_TAG_HEAP);
+}
+
+int64_t rt_closure_set_capture(int64_t closure_value, int64_t index, int64_t value) {
+    RtCoreClosure* closure = rt_core_as_closure(closure_value);
+    if (!closure || index < 0 || index >= closure->capture_count) return 0;
+    closure->captures[index] = value;
+    return 1;
+}
+
+int64_t rt_closure_get_capture(int64_t closure_value, int64_t index) {
+    RtCoreClosure* closure = rt_core_as_closure(closure_value);
+    if (!closure || index < 0 || index >= closure->capture_count) return rt_core_nil();
+    return closure->captures[index];
+}
+
+int64_t rt_closure_func_ptr(int64_t closure_value) {
+    RtCoreClosure* closure = rt_core_as_closure(closure_value);
+    return closure ? closure->func_ptr : 0;
 }
 
 static int64_t rt_bdd_passed = 0;
