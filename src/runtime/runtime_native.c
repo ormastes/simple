@@ -496,29 +496,54 @@ static int rt_core_is_registered_enum(RtCoreEnum* e) {
 static RtCoreClosure** rt_core_closure_registry = NULL;
 static size_t rt_core_closure_registry_len = 0;
 static size_t rt_core_closure_registry_cap = 0;
+static atomic_flag rt_core_closure_registry_lock = ATOMIC_FLAG_INIT;
 
-static void rt_core_register_closure(RtCoreClosure* closure) {
-    if (!closure) return;
+static void rt_core_closure_registry_acquire(void) {
+    while (atomic_flag_test_and_set_explicit(&rt_core_closure_registry_lock, memory_order_acquire)) {}
+}
+
+static void rt_core_closure_registry_release(void) {
+    atomic_flag_clear_explicit(&rt_core_closure_registry_lock, memory_order_release);
+}
+
+static int rt_core_register_closure(RtCoreClosure* closure) {
+    if (!closure) return 0;
+    rt_core_closure_registry_acquire();
     if (rt_core_closure_registry_len == rt_core_closure_registry_cap) {
+        if (rt_core_closure_registry_cap > SIZE_MAX / 2 / sizeof(RtCoreClosure*)) {
+            rt_core_closure_registry_release();
+            return 0;
+        }
         size_t next_cap = rt_core_closure_registry_cap == 0 ? 32 : rt_core_closure_registry_cap * 2;
         RtCoreClosure** next =
             (RtCoreClosure**)realloc(rt_core_closure_registry, next_cap * sizeof(RtCoreClosure*));
-        if (!next) return;
+        if (!next) {
+            rt_core_closure_registry_release();
+            return 0;
+        }
         rt_core_closure_registry = next;
         rt_core_closure_registry_cap = next_cap;
     }
     rt_core_closure_registry[rt_core_closure_registry_len++] = closure;
+    rt_core_closure_registry_release();
+    return 1;
 }
 
 static RtCoreClosure* rt_core_as_closure(int64_t value) {
     if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
     RtCoreClosure* closure = (RtCoreClosure*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
     if (!closure) return NULL;
+    /* Membership is a pointer-only comparison. Do not dereference a raw
+     * function pointer that merely collides with the heap tag. */
+    rt_core_closure_registry_acquire();
     for (size_t i = 0; i < rt_core_closure_registry_len; i++) {
         if (rt_core_closure_registry[i] == closure) {
-            return closure->kind == RT_VALUE_HEAP_CLOSURE ? closure : NULL;
+            RtCoreClosure* result = closure->kind == RT_VALUE_HEAP_CLOSURE ? closure : NULL;
+            rt_core_closure_registry_release();
+            return result;
         }
     }
+    rt_core_closure_registry_release();
     return NULL;
 }
 
@@ -2451,7 +2476,10 @@ int64_t rt_closure_new(int64_t func_ptr, int64_t capture_count) {
     closure->kind = RT_VALUE_HEAP_CLOSURE;
     closure->func_ptr = func_ptr;
     closure->capture_count = capture_count;
-    rt_core_register_closure(closure);
+    if (!rt_core_register_closure(closure)) {
+        free(closure);
+        return rt_core_nil();
+    }
     return (int64_t)(((uint64_t)(uintptr_t)closure) | RT_VALUE_TAG_HEAP);
 }
 
