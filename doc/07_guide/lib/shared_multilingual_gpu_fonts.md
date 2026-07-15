@@ -578,6 +578,8 @@ and executes it through Engine2D for pure-Simple pixels. The private widget
 command list is deleted; Chromium remains an explicit compatibility renderer.
 Queue dispatch stays `not_requested` until the composition itself is submitted;
 a separate frame event cannot be labeled as Draw IR dispatch evidence.
+The artifact retains the executor's exact readback source (`cpu_mirror`,
+`device_readback`, or the backend's other explicit source) without normalization.
 
 Vulkan device-loss or unknown completion poisons only the Vulkan surface. When
 policy permits CPU, Engine2D replays the same immutable `FontRenderBatch` from

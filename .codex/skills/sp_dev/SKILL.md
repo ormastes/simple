@@ -485,7 +485,9 @@ font GPU emission, or GUI/Web/2D/3D text.
     `font-family` metadata or selecting a TTF only during paint is incomplete;
     Web producers use the HTML/WebIR-to-DrawIR owner and GUI producers use
     `widget_tree_to_draw_ir`; a private widget command collector is not evidence.
-    unstyled legacy Draw IR must remain bitmap-compatible. A synthetic
+    A dispatch PASS must submit that exact composition; an unrelated frame event
+    leaves dispatch `not_requested`. Preserve the executor's exact readback source.
+    Unstyled legacy Draw IR must remain bitmap-compatible. A synthetic
     composition proves the contract only; production-route acceptance must
     exercise the real hosted frame owner and canonical SimpleOS entry, with
     platform backends limited to final-pixel presentation.

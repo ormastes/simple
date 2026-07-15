@@ -366,6 +366,9 @@ the existing semantic/layout model; transient `FontRenderBatch` atlas/device
 material belongs only to Engine2D, never WebIR or Draw IR. The canonical
 Web producer uses the HTML/WebIR-to-DrawIR owner; the canonical GUI producer
 uses `widget_tree_to_draw_ir`, never a private widget command collector. The
+submitted payload must be that exact composition before dispatch can pass; a
+separate frame event leaves dispatch `not_requested`. Preserve the executor's
+exact readback source instead of replacing it with generic provenance. The
 canonical WM frame route is `SharedWmScene -> DrawIrComposition -> Engine2D`;
 `shared_wm_scene_render_*_to_backend` and `_to_pixel_buffer` are compatibility
 renderers, not selected-font completion. Reject evidence built on an app-private

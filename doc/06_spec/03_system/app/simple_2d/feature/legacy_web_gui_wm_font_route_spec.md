@@ -40,7 +40,8 @@ neither contract is retained production-run evidence.
    requests to use the HTML-to-DrawIR Engine2D helper instead of the heuristic
    pixel path. Require `ui.browser` to execute one canonical
    `widget_tree_to_draw_ir` composition and reject both its deleted private
-   widget command collector and any fabricated runtime-dispatch label. Inspect
+   widget command collector and any fabricated runtime-dispatch label. Preserve
+   the executor's exact readback source. Inspect
    the production Simple Browser entry and require the same
    helper, exact-byte font registration, and the full
    selected candidate catalog; reject incomplete registration and the private

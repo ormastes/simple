@@ -20,8 +20,9 @@ wiring, and retained QEMU framebuffer pixels. Compatibility direct renderers or
 an app-private font path cannot satisfy that gate.
 Host Web pixels/readback now execute the HTML/WebIR Draw IR owner, and
 `ui.browser` executes one canonical `widget_tree_to_draw_ir` composition. Queue
-dispatch remains neutral until that composition is actually submitted. These
-source gates do not replace a retained production-frame run.
+dispatch remains neutral until that composition is actually submitted, and the
+artifact preserves the executor's exact readback source. These source gates do
+not replace a retained production-frame run.
 
 Planned executable/manual pairs:
 
