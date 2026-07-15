@@ -50,9 +50,11 @@ the CPU/software fallback and report a stable reason.
    `build_os_with_backend` then applies target settings through
    `_apply_build_env` and runs the authoritative guest native-build through
    `_run_candidate_pinned`, so it cannot re-enter a sibling or seed delegate.
-   `os_build_run.spl` and `runner_targets.spl` import shared I/O/time facades,
-   contain no direct process/file/dir/env/time runtime calls, and read the
-   retained x86 baseline through `file_read` rather than shell `cat`.
+   Across all five split `_QemuRunner` modules, every I/O/process/time use
+   routes through shared owners; the modules contain no direct
+   process/file/dir/env/time runtime calls;
+   `runner_targets` reads the retained x86 baseline through `file_read` rather
+   than shell `cat`.
    Shared CLI `_cli_is_current_exe` resolves a candidate override through
    existing `_cli_resolve_symlink`, making authoritative worker delegation safe
    for symlinks such as `bin/simple`. The focused
@@ -242,9 +244,9 @@ shared-shell syntax check pass, and
 `_run_candidate_admission_pinned`; the real guest build separately uses
 `_run_candidate_pinned` after `_apply_build_env`. No current-source runner
 execution is available, so no live candidate is promoted by this manual. TODO
-573 retains the three `scenario_*` direct-runtime migrations plus native
-child-env, unique-temp, and cross-platform timeout ownership. TODO 574 retains
-the monotonic-elapsed/wall-clock split and runtime-provider safety audit.
+573 retains only native child-env, unique-temp, and cross-platform timeout
+ownership. TODO 574 retains the monotonic-elapsed/wall-clock split and
+runtime-provider safety audit.
 
 Focused SSpec execution is a separate unresolved compiler contract. Current
 `simple test` dispatch uses `rt_cli_run_tests`, while the alternate

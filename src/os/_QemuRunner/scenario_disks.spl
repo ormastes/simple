@@ -1,6 +1,8 @@
 # SimpleOS QEMU runner — scenario target resolution, fs-exec targets, desktop
 # disk/ISO image management, and board bundle/lane testing.
 use os.qemu_runner.*
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
 # SimpleOS QEMU Runner — Multi-Architecture Boot & Test
 #
 # Provides build + run + test functionality for all 6 architectures.
@@ -54,17 +56,6 @@ use os.toolchain_vfs_probe_contract.{
 }
 use os.ssh_qemu_contract.{run_x64_ssh_probe}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
-
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_env_get(key: text) -> text?
-extern fn rt_env_set(key: text, value: text) -> bool
-extern fn rt_env_cwd() -> text
-extern fn rt_time_now_unix_micros() -> i64
 
 fn _is_arm_fs_exec_scenario_name(name: text) -> bool:
     name == "arm64-virtio-fat32-smf" or name == "arm32-virtio-fat32-smf"
@@ -315,10 +306,10 @@ fn desktop_installer_iso_candidates() -> [text]:
 
 fn desktop_disk_image_path_in(release_root: text) -> text:
     val release_path = desktop_release_disk_image_path_in(release_root)
-    if rt_file_exists(release_path):
+    if file_exists(release_path):
         return release_path
     val platform_path = simpleos_platform_disk_image_output("x86_64")
-    if rt_file_exists(platform_path):
+    if file_exists(platform_path):
         return platform_path
     "build/os/fat32.img"
 
@@ -343,7 +334,7 @@ fn _x64_nvme_fs_test_disk_args() -> [text]:
 
 fn desktop_installer_iso_path_in(release_root: text) -> text?:
     val iso_path = desktop_release_installer_iso_path_in(release_root)
-    if rt_file_exists(iso_path):
+    if file_exists(iso_path):
         return iso_path
     nil
 
@@ -413,14 +404,14 @@ fn ensure_desktop_disk_image() -> bool:
     `scripts/os/make_os_disk.shs` if needed.
     """
     val release_img = desktop_release_disk_image_path()
-    if rt_file_exists(release_img):
+    if file_exists(release_img):
         print "[ensure_desktop_disk_image] using release disk image {release_img}"
         return true
     val img_path = simpleos_platform_disk_image_output("x86_64")
-    if rt_file_exists(img_path) and _desktop_disk_image_has_required_manifests(img_path):
+    if file_exists(img_path) and _desktop_disk_image_has_required_manifests(img_path):
         return true
     print "[ensure_desktop_disk_image] {img_path} missing or incomplete, invoking scripts/os/make_os_disk.shs"
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(
+    val (stdout, stderr, exit_code) = process_run_timeout(
         "/bin/sh", desktop_disk_make_script_args(img_path), 60000)
     if stdout != "":
         print "[ensure_desktop_disk_image] stdout:\n{stdout}"
@@ -430,12 +421,12 @@ fn ensure_desktop_disk_image() -> bool:
         print "[ensure_desktop_disk_image] make_os_disk.shs exited {exit_code}"
         print "[ensure_desktop_disk_image] prerequisite: install mtools or python3 for unprivileged FAT32 population; qemu-img is optional but preferred for raw image creation"
         return false
-    if not rt_file_exists(img_path):
+    if not file_exists(img_path):
         print "[ensure_desktop_disk_image] expected disk image was not created: {img_path}"
         return false
     if not _desktop_disk_image_has_required_manifests(img_path):
         val legacy_img = "build/os/fat32.img"
-        if rt_file_exists(legacy_img) and _desktop_disk_image_has_required_manifests(legacy_img):
+        if file_exists(legacy_img) and _desktop_disk_image_has_required_manifests(legacy_img):
             print "[ensure_desktop_disk_image] using legacy disk image {legacy_img}"
             return true
         print "[ensure_desktop_disk_image] image exists but required app manifest markers are missing"
@@ -449,12 +440,12 @@ fn ensure_removable_disk_image() -> bool:
     testing install-from-removable flows.
     """
     val img_path = "build/os/removable.img"
-    if rt_file_exists(img_path):
+    if file_exists(img_path):
         return true
     print "[ensure_removable_disk_image] creating {img_path}"
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(
+    val (stdout, stderr, exit_code) = process_run_timeout(
         "/bin/sh", ["-c", "mkdir -p build/os && dd if=/dev/zero of={img_path} bs=1M count=4 2>/dev/null && mkfs.fat -F 32 -n REMOVABLE {img_path} >/dev/null 2>&1 && mmd -i {img_path} ::APPS 2>/dev/null; true"], 30000)
-    if not rt_file_exists(img_path):
+    if not file_exists(img_path):
         print "[ensure_removable_disk_image] failed to create {img_path}"
         if stderr != "":
             print "[ensure_removable_disk_image] stderr: {stderr}"
@@ -562,7 +553,7 @@ pub fn desktop_uefi_disk_image_tool_app_validation_command(img_path: text) -> te
 fn _desktop_uefi_disk_image_has_required_tool_apps(img_path: text) -> bool:
     """Validate seeded filesystem-loaded tool app payloads in the desktop UEFI FAT image."""
     val cmd = desktop_uefi_disk_image_tool_app_validation_command(img_path)
-    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 30000)
+    val (_stdout, _stderr, exit_code) = process_run_timeout("/bin/sh", ["-c", cmd], 30000)
     exit_code == 0
 
 fn ensure_desktop_uefi_boot_image(kernel_path: text) -> bool:
@@ -570,12 +561,12 @@ fn ensure_desktop_uefi_boot_image(kernel_path: text) -> bool:
     if ovmf_code_path() == "":
         print "[ensure_desktop_uefi_boot_image] OVMF firmware not found; set SIMPLEOS_OVMF_CODE to an x86_64 OVMF_CODE.fd path"
         return false
-    if not rt_file_exists(kernel_path):
+    if not file_exists(kernel_path):
         print "[ensure_desktop_uefi_boot_image] kernel image not found: {kernel_path}"
         return false
     val img_path = desktop_uefi_disk_image_path()
     print "[ensure_desktop_uefi_boot_image] rebuilding {img_path} with UEFI kernel {kernel_path}"
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(
+    val (stdout, stderr, exit_code) = process_run_timeout(
         "/bin/sh", desktop_uefi_disk_make_script_args(img_path, kernel_path), 120000)
     if stdout != "":
         print "[ensure_desktop_uefi_boot_image] stdout:\n{stdout}"
@@ -658,7 +649,7 @@ pub fn ensure_board_bundle(platform_name: text, kernel_path: text, output_path: 
     while i < cmd.len() as i64:
         exec_args.push(cmd[i as i32])
         i = i + 1
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(exec_cmd, exec_args, timeout_ms)
+    val (stdout, stderr, exit_code) = process_run_timeout(exec_cmd, exec_args, timeout_ms)
     if stdout != "":
         print "[ensure_board_bundle] stdout:\n{stdout}"
     if stderr != "":
@@ -667,7 +658,7 @@ pub fn ensure_board_bundle(platform_name: text, kernel_path: text, output_path: 
         print "[ensure_board_bundle] command exited {exit_code}"
         return false
     val expected = _board_bundle_expected_artifact(platform_name, output_path)
-    if not rt_file_exists(expected):
+    if not file_exists(expected):
         print "[ensure_board_bundle] expected artifact missing: {expected}"
         return false
     true
@@ -691,7 +682,7 @@ pub fn test_board_lane(platform_name: text, kernel_path: text, output_path: text
         exec_args.push(cmd[i as i32])
         i = i + 1
     val timeout_ms = 900000
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(exec_cmd, exec_args, timeout_ms)
+    val (stdout, stderr, exit_code) = process_run_timeout(exec_cmd, exec_args, timeout_ms)
     if stdout != "":
         print "[test_board_lane] stdout:\n{stdout}"
     if stderr != "":
@@ -700,7 +691,7 @@ pub fn test_board_lane(platform_name: text, kernel_path: text, output_path: text
         print "[test_board_lane] command exited {exit_code}"
         return false
     val expected = _board_bundle_expected_artifact(platform_name, output_path)
-    if not rt_file_exists(expected):
+    if not file_exists(expected):
         print "[test_board_lane] expected artifact missing after board run: {expected}"
         return false
     true
@@ -742,10 +733,10 @@ fn ensure_fs_test_disk_image() -> bool:
     need the resident app manifests and may prefer release-built media.
     """
     val img_path = fs_test_disk_image_path()
-    if rt_file_exists(img_path) and _fs_test_disk_image_has_required_fixtures(img_path):
+    if file_exists(img_path) and _fs_test_disk_image_has_required_fixtures(img_path):
         return true
     print "[ensure_fs_test_disk_image] {img_path} missing or incomplete, invoking scripts/os/make_os_disk.shs"
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(
+    val (stdout, stderr, exit_code) = process_run_timeout(
         "/bin/sh", ["scripts/os/make_os_disk.shs", "64", img_path], 60000)
     if stdout != "":
         print "[ensure_fs_test_disk_image] stdout:\n{stdout}"
@@ -754,7 +745,7 @@ fn ensure_fs_test_disk_image() -> bool:
     if exit_code != 0:
         print "[ensure_fs_test_disk_image] make_os_disk.shs exited {exit_code}"
         return false
-    if not rt_file_exists(img_path):
+    if not file_exists(img_path):
         return false
     if not _fs_test_disk_image_has_required_fixtures(img_path):
         print "[ensure_fs_test_disk_image] image exists but required fixture markers are missing"

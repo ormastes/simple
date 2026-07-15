@@ -310,10 +310,9 @@ and shared-shell syntax check pass; `_QemuRunner` source parity is present. TODO
 548 remains open until a current-source pure-Simple CLI executes the runner
 gate; no live compiler, QEMU, or GPU PASS is implied. Native-Windows
 child-environment, platform-neutral unique-temp, and argv-preserving timeout
-ownership are tracked by TODO 573 together with direct-runtime migration in the
-three `scenario_*` runner modules. `os_build_run.spl` and `runner_targets.spl`
-now use shared I/O/time facades; the latter reads its baseline without shell
-`cat`. TODO 574 retains overflow-safe monotonic elapsed timing.
+ownership are tracked by TODO 573. All five split `_QemuRunner` modules now use
+shared I/O/process/time owners; `runner_targets` reads its baseline without
+shell `cat`. TODO 574 retains overflow-safe monotonic elapsed timing.
 
 Candidate admission does not make focused SSpec execution pure-Simple.
 Current `simple test` reaches `rt_cli_run_tests`; directly entering the

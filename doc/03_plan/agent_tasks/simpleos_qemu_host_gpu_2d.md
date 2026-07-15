@@ -72,10 +72,10 @@ fixture bypasses, synthetic handles, or passing placeholders.
   candidates such as `bin/simple`; the focused
   `test/01_unit/app/io/cli_argv0_resolution_spec.spl` contract adds no `rt_*` alias.
   Source presence is not a PASS.
-- `os_build_run.spl` and `runner_targets.spl` now use shared I/O/time facades;
-  the latter also replaces shell `cat` with `file_read`. TODO 573 stays open for
-  the three `scenario_*` runner modules, native child-scoped environment,
-  platform-neutral temporary directories, and cross-platform safe timeouts.
+- All five split `_QemuRunner` modules now use shared I/O/process/time owners;
+  `runner_targets` also replaces shell `cat` with `file_read`. TODO 573 stays
+  open only for native child-scoped environment, platform-neutral temporary
+  directories, and cross-platform safe timeout execution.
 - TODO 574 owns overflow-safe Windows monotonic conversion and a later split of
   elapsed timing from wall-clock artifact names; this slice preserves `_now_ms`.
 - The existing foreign-parser/Stage-4 recovery lane remains under
