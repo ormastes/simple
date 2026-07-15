@@ -710,7 +710,9 @@ pub extern "C" fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64 {
 pub extern "C" fn rt_process_kill(pid: i64) -> bool {
     if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
         if let Some(mut child) = map.remove(&pid) {
-            child.kill().is_ok()
+            let killed = child.kill().is_ok();
+            let reaped = child.wait().is_ok();
+            killed && reaped
         } else {
             false
         }
@@ -1242,6 +1244,21 @@ mod tests {
             assert!(stderr.len() >= 200000);
             assert_ne!(stderr, "TIMEOUT");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_process_kill_reaps_child() {
+        let child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i64;
+        SPAWNED_CHILDREN.lock().unwrap().insert(pid, child);
+
+        assert!(rt_process_kill(pid));
+
+        let mut status = 0;
+        let result = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        assert_eq!(result, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
     }
 
     #[test]

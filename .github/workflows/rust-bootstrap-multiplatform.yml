@@ -2,9 +2,23 @@ name: Rust Bootstrap Multiplatform
 
 on:
   push:
-    paths: ['src/compiler_rust/**']
+    paths:
+      - 'src/compiler_rust/**'
+      - 'src/compiler/**'
+      - 'src/app/cli/**'
+      - 'src/lib/**'
+      - 'src/runtime/**'
+      - 'scripts/check/check-core-runtime-smoke.shs'
+      - '.github/workflows/rust-bootstrap-multiplatform.yml'
   pull_request:
-    paths: ['src/compiler_rust/**']
+    paths:
+      - 'src/compiler_rust/**'
+      - 'src/compiler/**'
+      - 'src/app/cli/**'
+      - 'src/lib/**'
+      - 'src/runtime/**'
+      - 'scripts/check/check-core-runtime-smoke.shs'
+      - '.github/workflows/rust-bootstrap-multiplatform.yml'
   workflow_dispatch:
 
 concurrency:
@@ -35,6 +49,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Fix MSVC linker PATH
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          if [ -f /usr/bin/link ]; then
+            mv /usr/bin/link /usr/bin/link.bak
+          fi
+
       - uses: dtolnay/rust-toolchain@nightly
 
       - name: Cache Cargo
@@ -52,9 +78,41 @@ jobs:
         working-directory: src/compiler_rust
         run: cargo build --profile bootstrap -p simple-driver
 
+      - name: Build native_all library
+        working-directory: src/compiler_rust
+        run: cargo build --profile bootstrap -p simple-native-all --features driver-compat
+
       - name: Test
         working-directory: src/compiler_rust
         run: cargo test --workspace --lib
+
+      - name: Build pure-Simple Stage 2
+        shell: bash
+        env:
+          SIMPLE_BOOTSTRAP: "1"
+          SIMPLE_PROJECT_ROOT: ${{ github.workspace }}
+        run: |
+          suffix=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            suffix=".exe"
+            export SIMPLE_LINKER_FLAVOR=msvc
+          fi
+
+          seed="src/compiler_rust/target/bootstrap/simple${suffix}"
+          stage="build/bootstrap/simple_stage2${suffix}"
+          test -x "$seed"
+          mkdir -p build/bootstrap
+          "$seed" native-build \
+            --source-dir src \
+            --entry-closure \
+            --entry src/app/cli/bootstrap_main.spl \
+            --output "$stage"
+          test -x "$stage"
+          echo "SIMPLE_STAGE=$stage" >> "$GITHUB_ENV"
+
+      - name: Smoke pure-Simple Stage 2
+        shell: bash
+        run: sh scripts/check/check-core-runtime-smoke.shs "$SIMPLE_STAGE"
 
       - name: Upload binary
         uses: actions/upload-artifact@v4

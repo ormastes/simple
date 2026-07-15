@@ -10,7 +10,7 @@
 #   2. QEMU smoke test for Linux ARM64/RISC-V
 #   3. Wine smoke test for Windows targets
 
-use app.io.mod.{shell, shell_bool, shell_output, cwd, file_exists, get_args, exit, ProcessResult}
+use app.io.mod.{shell, shell_bool, shell_output, process_run_timeout, cwd, file_exists, get_args, exit, ProcessResult}
 use std.text.{contains, starts_with, trim, split, replace}
 use std.path.{join}
 
@@ -52,8 +52,8 @@ fn verify_target(target: text, project_dir: text, quick: bool):
     val qemu_cmd = config[4]
 
     if seed_bin == "":
-        print "  SKIP (unknown target)"
-        return true
+        print "  FAIL (unknown target)"
+        return false
 
     # Check seed binary
     if file_exists(seed_bin):
@@ -67,6 +67,7 @@ fn verify_target(target: text, project_dir: text, quick: bool):
             return false
     else:
         print "  seed:    MISSING ({seed_bin})"
+        return false
 
     # Check full compiler binary
     if file_exists(full_bin):
@@ -81,34 +82,64 @@ fn verify_target(target: text, project_dir: text, quick: bool):
             return false
     else:
         print "  simple:  NOT BUILT (run cross_compile.spl first)"
+        return false
+
+    # Execute the pure-Simple compiler directly when this target matches the host.
+    var native_host = false
+    if target == "linux-x86_64":
+        native_host = shell_bool("uname -s | grep -q '^Linux$' && uname -m | grep -q '^x86_64$'")
+    else if target == "linux-arm64":
+        native_host = shell_bool("uname -s | grep -q '^Linux$' && uname -m | grep -Eq '^(aarch64|arm64)$'")
+    else if target == "linux-riscv64":
+        native_host = shell_bool("uname -s | grep -q '^Linux$' && uname -m | grep -q '^riscv64$'")
+    else if target == "freebsd-x86_64":
+        native_host = shell_bool("uname -s | grep -q '^FreeBSD$' && uname -m | grep -q '^amd64$'")
+    else if target == "freebsd-x86":
+        native_host = shell_bool("uname -s | grep -q '^FreeBSD$' && uname -m | grep -Eq '^(i386|i686)$'")
+    else if target == "macos-arm64":
+        native_host = shell_bool("uname -s | grep -q '^Darwin$' && uname -m | grep -q '^arm64$'")
+    else if target == "windows-x86_64":
+        native_host = shell_bool("uname -s | grep -Eq '^(MINGW|MSYS|CYGWIN)' && uname -m | grep -q '^x86_64$'")
+    else if target == "windows-x86":
+        native_host = shell_bool("uname -s | grep -Eq '^(MINGW|MSYS|CYGWIN)' && uname -m | grep -Eq '^(i386|i686|x86_64)$'")
+    if not quick and native_host:
+        val (_native_stdout, _native_stderr, native_exit_code) = process_run_timeout(full_bin, ["--help"], 10000)
+        if native_exit_code == 0:
+            print "  native:  OK (pure-Simple compiler runs)"
+        else:
+            print "  native:  FAIL or no --help support"
+            return false
 
     # QEMU smoke test (only if not quick mode and QEMU available)
     if (not quick and
+        not native_host and
         qemu_cmd != "" and
-        file_exists(seed_bin)):
+        file_exists(full_bin)):
         val qemu_parts = split(qemu_cmd, " ")
         val qemu_bin = qemu_parts[0]
         val has_qemu = shell_bool("command -v {qemu_bin}")
         if has_qemu:
-            val qemu_test = shell("timeout 10 {qemu_cmd} {seed_bin} --help 2>/dev/null")
+            val qemu_test = shell("timeout 10 {qemu_cmd} {full_bin} --help 2>/dev/null")
             if qemu_test.exit_code == 0:
-                print "  qemu:    OK (seed runs under QEMU)"
+                print "  qemu:    OK (pure-Simple compiler runs under QEMU)"
             else:
                 print "  qemu:    FAIL or no --help support"
+                return false
         else:
             print "  qemu:    SKIP (QEMU not installed)"
 
     # Wine test for Windows
     if (not quick and
         starts_with(target, "windows-") and
-        file_exists(seed_bin)):
+        file_exists(full_bin)):
         val has_wine = shell_bool("command -v wine")
         if has_wine:
-            val wine_test = shell("timeout 10 wine {seed_bin} --help 2>/dev/null")
+            val wine_test = shell("timeout 10 wine {full_bin} --help 2>/dev/null")
             if wine_test.exit_code == 0:
-                print "  wine:    OK (seed runs under Wine)"
+                print "  wine:    OK (pure-Simple compiler runs under Wine)"
             else:
                 print "  wine:    FAIL or no --help support"
+                return false
         else:
             print "  wine:    SKIP (Wine not installed)"
 
@@ -144,9 +175,7 @@ fn main():
 
     val targets = split(targets_str, " ")
     for target in targets:
-        if target == "":
-            pass_dn
-        else:
+        if target != "":
             val ok = verify_target(target, project_dir, quick)
             if ok:
                 pass_count = pass_count + 1

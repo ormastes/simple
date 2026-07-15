@@ -599,7 +599,17 @@ bool rt_process_kill(int64_t pid) {
 
     /* If still running, send SIGKILL */
     if (rt_process_is_running(pid)) {
-        kill((pid_t)pid, SIGKILL);
+        if (kill((pid_t)pid, SIGKILL) != 0) return false;
+
+        /* Reap the child after the forced kill.  Leaving this wait to callers
+         * leaks a zombie because the process has already reached a terminal
+         * state by the time this function returns. */
+        int status;
+        while (waitpid((pid_t)pid, &status, 0) < 0) {
+            if (errno == EINTR) continue;
+            if (errno == ECHILD) break;
+            return false;
+        }
     }
 
     return true;

@@ -14,9 +14,13 @@ use std.process
 use std.spec
 
 val BUILD_SPL = "src/os/port/llvm/build.spl"
+val CROSS_VERIFIER = "src/compiler/90.tools/verify/cross_builds.spl"
 
 fn build_source() -> text:
     process.run("cat", [BUILD_SPL]).stdout
+
+fn verifier_source() -> text:
+    process.run("cat", [CROSS_VERIFIER]).stdout
 
 fn check(condition: bool):
     expect(condition).to_equal(true)
@@ -101,3 +105,36 @@ describe "SimpleOS LLVM cross-build --print-plan scaffolding":
     it "per-target build dir is cross-<triple>":
         val src = build_source()
         check(src.contains("cross-"))
+
+    it "rejects unsupported target overrides instead of skipping them":
+        val src = build_source()
+        check(src.contains("fn cross_target_supported"))
+        check(src.contains("if not cross_target_supported(triple):"))
+        check(src.contains("Unsupported SimpleOS target"))
+        check(!src.contains("Skip non-SimpleOS triple"))
+
+    it "requires compiler-rt to produce an archive before installation":
+        val src = build_source()
+        check(src.contains("val archive_probe = process.run"))
+        check(src.contains("-type f -name 'libclang_rt.builtins*.a' -print -quit"))
+        check(src.contains("find {{rt_dir}} -name 'libclang_rt.builtins*.a' -exec cp"))
+        check(src.contains("archive_probe.stdout.trim() == \"\""))
+        check(src.contains("No builtins archive produced"))
+
+    it "makes cross-binary verification fail closed":
+        val src = verifier_source()
+        check(src.contains("FAIL (unknown target)"))
+        check(!src.contains("SKIP (unknown target)"))
+        check(src.contains("seed:    MISSING ({{seed_bin}})\"\n        return false"))
+        check(src.contains("simple:  NOT BUILT (run cross_compile.spl first)\"\n        return false"))
+        check(src.contains("qemu:    FAIL or no --help support\"\n                return false"))
+        check(src.contains("wine:    FAIL or no --help support\"\n                return false"))
+        check(src.contains("process_run_timeout(full_bin, [\"--help\"], 10000)"))
+        check(src.contains("target == \"macos-arm64\""))
+        check(src.contains("target == \"windows-x86_64\""))
+        check(src.contains("target == \"windows-x86\""))
+        check(src.contains("native:  FAIL or no --help support\"\n            return false"))
+        check(src.contains("{{qemu_cmd}} {{full_bin}} --help"))
+        check(src.contains("wine {{full_bin}} --help"))
+        check(!src.contains("{{qemu_cmd}} {{seed_bin}} --help"))
+        check(!src.contains("wine {{seed_bin}} --help"))

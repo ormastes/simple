@@ -57,32 +57,52 @@ fn process_run(cmd: text, args: [text]) -> (text, text, i64):
     proc_slot_release()
     result
 
-val PROCESS_TIMEOUT_KILL_GRACE_SECONDS: i64 = 1
-
 fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
-    """Unix implementation using 'timeout' command"""
-    val timeout_secs = if timeout_ms <= 0:
-        120
-    else:
-        val secs = timeout_ms / 1000
-        if secs < 1: 1 else: secs
+    """Unix implementation using the native async process facade."""
+    val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
 
-    var timeout_args: [text] = [
-        "-k", "{PROCESS_TIMEOUT_KILL_GRACE_SECONDS}s",
-        "{timeout_secs}s",
-        cmd
-    ]
+    var temp_dir = rt_env_get("TMPDIR")
+    if temp_dir == nil or temp_dir == "":
+        temp_dir = "/tmp"
+
+    val pid_str = "{rt_getpid()}"
+    val time_str = "{rt_time_now_unix_micros()}"
+    val stdout_file = "{temp_dir}/simple_out_{pid_str}_{time_str}.txt"
+    val stderr_file = "{temp_dir}/simple_err_{pid_str}_{time_str}.txt"
+
+    var command_parts: [text] = []
+    val cmd_escaped = cmd.replace("'", "'\\''")
+    command_parts.push("'{cmd_escaped}'")
     for arg in args:
-        timeout_args.push(arg)
+        val arg_escaped = arg.replace("'", "'\\''")
+        command_parts.push("'{arg_escaped}'")
+    val command_line = command_parts.join(" ")
+    val redirected_cmd = "exec {command_line} > '{stdout_file}' 2> '{stderr_file}'"
 
     proc_slot_acquire()
-    val (out, err, code) = rt_process_run("timeout", timeout_args)
+    val pid = rt_process_spawn_async("/bin/sh", ["-c", redirected_cmd])
+    val exit_code = if pid <= 0: -1 else: rt_process_wait(pid, effective_timeout)
+    val timed_out = pid > 0 and (exit_code == -2 or (exit_code == -1 and rt_process_is_running(pid)))
+    if timed_out:
+        rt_process_kill(pid)
     proc_slot_release()
 
-    if code == 124:
-        (out, err + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
+    var stdout = ""
+    var stderr = ""
+    if rt_file_exists(stdout_file):
+        stdout = rt_file_read_text(stdout_file)
+        rt_file_delete(stdout_file)
+    if rt_file_exists(stderr_file):
+        stderr = rt_file_read_text(stderr_file)
+        rt_file_delete(stderr_file)
+
+    if pid <= 0:
+        (stdout, stderr + "\n[ERROR: failed to spawn process '{cmd}']", -1)
+    else if timed_out:
+        val timeout_secs = (effective_timeout + 999) / 1000
+        (stdout, stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
     else:
-        (out, err, code)
+        (stdout, stderr, exit_code)
 
 fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     """Windows implementation using async spawn + temp files"""
