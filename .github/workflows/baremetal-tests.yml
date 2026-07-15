@@ -6,6 +6,9 @@ on:
     paths:
       - 'src/lib/nogc_async_mut_noalloc/**'
       - 'src/compiler_rust/**'
+      - 'src/compiler/70.backend/baremetal/cortex_m33/**'
+      - 'src/os/kernel/arch/cortex_m33/**'
+      - 'scripts/os/run_simpleos_cortex_m33_qemu.shs'
       - 'test/baremetal/**'
       - '.github/workflows/baremetal-tests.yml'
   pull_request:
@@ -13,7 +16,11 @@ on:
     paths:
       - 'src/lib/nogc_async_mut_noalloc/**'
       - 'src/compiler_rust/**'
+      - 'src/compiler/70.backend/baremetal/cortex_m33/**'
+      - 'src/os/kernel/arch/cortex_m33/**'
+      - 'scripts/os/run_simpleos_cortex_m33_qemu.shs'
       - 'test/baremetal/**'
+      - '.github/workflows/baremetal-tests.yml'
   schedule:
     # Run weekly on Sundays at 02:00 UTC
     - cron: '0 2 * * 0'
@@ -183,10 +190,10 @@ jobs:
         fi
 
   # ============================================================================
-  # ARM32 (Cortex-M) Bare-Metal Tests
+  # ARM32 Cortex-M33 C-shim QEMU Smoke
   # ============================================================================
   arm32-baremetal:
-    name: ARM32 Bare-Metal Tests
+    name: ARM32 Cortex-M33 C-shim QEMU Smoke
     runs-on: ubuntu-latest
     needs: verify-qemu
 
@@ -194,64 +201,13 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Setup bootstrap runtime
-      run: |
-        if [ -f "bin/release/simple" ]; then
-          chmod +x bin/release/simple
-          echo "✓ Bootstrap runtime ready"
-        else
-          echo "✗ No bootstrap runtime"
-          exit 1
-        fi
-
-    - name: Install QEMU
+    - name: Install Cortex-M33 smoke dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y qemu-system-arm
+        sudo apt-get install -y clang lld qemu-system-arm
 
-    - name: Test ARM32 boot code
-      run: |
-        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
-        simple test test/baremetal/arm32_boot_spec.spl || echo "Boot tests may not all pass yet"
-      continue-on-error: true
-
-    - name: Test ARM32 interrupts (NVIC)
-      run: |
-        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
-        simple test test/baremetal/arm32_nvic_spec.spl || echo "NVIC tests may not all pass yet"
-      continue-on-error: true
-
-    - name: Test ARM32 inline assembly
-      run: |
-        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
-        simple test test/baremetal/arm32_asm_spec.spl || echo "ASM tests may not all pass yet"
-      continue-on-error: true
-
-    - name: Build ARM32 examples
-      run: |
-        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
-        if [ -f examples/baremetal/blinky_stm32f4.spl ]; then
-          simple build examples/baremetal/blinky_stm32f4.spl --bare-metal --board=stm32f407_discovery -o build/blinky.elf
-          echo "✅ Built ARM32 example"
-        else
-          echo "⚠️ ARM32 example not found"
-        fi
-      continue-on-error: true
-
-    - name: Run QEMU boot test (ARM Cortex-M3)
-      run: |
-        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
-        if [ -f build/blinky.elf ]; then
-          timeout 10s qemu-system-arm \
-            -machine lm3s6965evb \
-            -kernel build/blinky.elf \
-            -serial stdio \
-            -nographic \
-            -no-reboot || true
-          echo "✅ QEMU boot test completed"
-        else
-          echo "⚠️ No ARM32 kernel to test"
-        fi
+    - name: Run Cortex-M33 C-shim QEMU smoke
+      run: timeout 30s sh scripts/os/run_simpleos_cortex_m33_qemu.shs --smoke
 
   # ============================================================================
   # ARM64 (AArch64) Bare-Metal Tests
@@ -496,7 +452,7 @@ jobs:
         echo "|--------------|------------|-----------------|-----------------|" >> $GITHUB_STEP_SUMMARY
         echo "| x86 | ${{ needs.x86-baremetal.result }} | ${{ needs.x86-baremetal.result }} | - |" >> $GITHUB_STEP_SUMMARY
         echo "| x86_64 | ${{ needs.x86_64-baremetal.result }} | ${{ needs.x86_64-baremetal.result }} | - |" >> $GITHUB_STEP_SUMMARY
-        echo "| ARM32 | ${{ needs.arm32-baremetal.result }} | ${{ needs.arm32-baremetal.result }} | - |" >> $GITHUB_STEP_SUMMARY
+        echo "| ARM32 Cortex-M33 C-shim | ${{ needs.arm32-baremetal.result }} | - | - |" >> $GITHUB_STEP_SUMMARY
         echo "| ARM64 | ${{ needs.arm64-baremetal.result }} | ${{ needs.arm64-baremetal.result }} | - |" >> $GITHUB_STEP_SUMMARY
         echo "| RISC-V 32 | ${{ needs.riscv32-baremetal.result }} | ${{ needs.riscv32-baremetal.result }} | ${{ needs.gdb-integration.result }} |" >> $GITHUB_STEP_SUMMARY
         echo "| RISC-V 64 | ${{ needs.riscv64-baremetal.result }} | ${{ needs.riscv64-baremetal.result }} | - |" >> $GITHUB_STEP_SUMMARY
