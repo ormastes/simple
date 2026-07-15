@@ -11,7 +11,7 @@ canonical WM/Draw IR/Engine2D route.
 1. Validate dynamic scanout and register the selected font bytes before the
    first x86_64 desktop frame.
 2. Require the taskbar-clock `SharedWmScene -> DrawIrComposition -> Engine2D`
-   marker and its future pinned-hash success branch.
+   marker to bind the selected asset hash, rasterizer, size, text, and crop hash.
 3. Reject private post-frame `draw_text`, probe rectangle, or `present`
    paths.
 4. Keep AArch64 and RV64 production entries on their canonical Engine2D owners

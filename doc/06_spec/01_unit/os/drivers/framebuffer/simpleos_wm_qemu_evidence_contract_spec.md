@@ -12,7 +12,8 @@ Six scenarios inspect the production wrapper without booting QEMU.
    guest scanout metadata.
 3. Capture the canonical taskbar-clock rightmost 56×48 slot (8,064 RGB bytes).
 4. Keep the expected font-region hash empty until a trusted retained capture;
-   the guest may emit `[font-evidence]` only after the pinned hash matches.
+   after it matches, require the guest marker to bind the Noto Sans Mono asset
+   hash, pure `glyf` rasterizer, Draw IR route, size, text, crop, and crop hash.
 5. Drive QMP input, correlate the host nonce with monotonic guest input
    sequence, and prove F11 maximize/restore.
 6. Fail closed on malformed QMP replies, capture errors, invalid geometry, or

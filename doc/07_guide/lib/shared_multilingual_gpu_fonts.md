@@ -353,6 +353,10 @@ oracle. It is independent of the Vulkan Engine3D native evidence rows. A
 retained native PASS is still required for promotion. If the generated
 companion is missing, stale, or rejected, CUDA fails before atlas mutation and
 Engine2D replays from quad zero through CPU where the selected policy permits.
+Normal Engine2D construction does not auto-load ignored `build/` output. CUDA
+font production deployment still needs a packaged PTX plus an immutable trusted
+manifest/hash; once that exists, the canonical `create_requested_backend`
+factory can call the existing installer after CUDA initialization.
 Metal compiles the exact common MSL helper as an optional separate pipeline,
 uses the fixed 13-word/52-byte parameter block, full-uploads changed atlas
 generations, and dispatches completed 64-thread groups per quad. Only native

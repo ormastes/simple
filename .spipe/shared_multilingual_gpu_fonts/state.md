@@ -161,10 +161,10 @@ Provide one configurable, license-audited multilingual font pipeline shared by S
 
 ## Phase
 
-REQ-015 runtime configuration is not yet implemented. Self-hosted execution,
-canonical docgen, native Engine3D promotion, retained SimpleOS pixels,
-performance evidence, and the legacy SimpleOS WM Draw IR migration remain
-release-blocking.
+REQ-015 runtime configuration is implemented in source; canonical execution is
+pending. Self-hosted execution, canonical docgen, native Engine3D promotion,
+retained SimpleOS pixels, performance evidence, and the legacy x86
+`wm_entry.spl` Draw IR migration remain release-blocking.
 
 ## Log
 
@@ -1309,3 +1309,17 @@ release-blocking.
   No Simple runtime, docgen, native GPU, QEMU, or performance command ran after
   the three-cycle cap; retained generated-device evidence remains pending.
   STATUS: FAIL.
+
+- SimpleOS font-evidence schema repair (2026-07-15): the canonical desktop
+  success marker now binds the selected Noto Sans Mono hash, pure `glyf`
+  rasterizer, Draw IR route, font size, text, crop, and crop hash exactly as the
+  host evidence wrapper requires. Source-contract tests and manuals match.
+  The expected crop hash and retained QEMU run are still pending; no runtime or
+  QEMU command ran after the three-cycle cap. STATUS: FAIL.
+
+- CUDA production deployment audit (2026-07-15): all Engine2D constructors
+  converge on `create_requested_backend`, but no tracked trusted font PTX or
+  immutable deployment manifest exists. The checker output under ignored
+  `build/` is mutable evidence, not a production trust anchor, so automatic
+  loading was not added. Package the generated PTX with a pinned manifest/hash,
+  then reuse the existing installer in the canonical factory. STATUS: FAIL.
