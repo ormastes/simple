@@ -11,13 +11,11 @@ Simple CI building the per-arch SimpleOS binaries.
   streams its own ELF from NVMe, reads `/hello.spl` (39B), then FAULTS at
   `cr2=0x8` in `rt_string_join` (nil array in the print path). Serial-proven.
 - Bug: `doc/08_tracking/bug/simpleos_freestanding_nil_array_init_optimizer_guard_fold.md`.
-- Build route: Rust seed `src/compiler_rust/target/release/simple` with
-  `--target <triple>` (NOT the broken `bin/simple`, NOT `build bootstrap`).
-  **KEY:** building + board-testing the simpleos binary needs only the SEED —
-  it does NOT need the bootstrap gate. Only LANDING central-compiler .spl
-  changes to origin needs the gate (to protect the parallel redeploy). So the
-  critical path (make `simple /hello.spl` print on-board) is executable NOW;
-  we hold the source changes for the gate and re-land after redeploy settles.
+- Current build route (updated 2026-07-15): the committed `bin/release/simple`
+  launcher selects the pure-Simple self-hosted compiler for
+  `native-build --target <triple>`. `SIMPLE_BUILD_COMPILER` remains
+  an explicit bootstrap/debug override; architecture wrappers no longer
+  select the Rust seed automatically.
 
 ## Critical-path bug fix (keystone — all arches share it)
 
@@ -36,7 +34,8 @@ skip module-global array initializers; the seed optimizer folds guards on
 
 ### Lane BX — x86_64 complete (critical path)
 1. Apply fix (b) to core_string.spl (+ any sibling rt_string_* the print path
-   hits). 2. Rebuild the simpleos binary with the seed. 3. Re-run
+   hits). 2. Rebuild the SimpleOS binary with the selected pure-Simple compiler.
+   3. Re-run
    `scripts/os/ssh_simple_hello_uefi.shs` (OVMF, no -kernel) → assert
    `/hello.spl` prints "hello from simple on simpleos" over SSH. 4. Stretch:
    `simple compile --emit-object /hello2.spl -o /hello2.o` in-guest → getfile
@@ -44,8 +43,9 @@ skip module-global array initializers; the seed optimizer folds guards on
    gate.
 
 ### Lane BA — aarch64
-Cross-build `simpleos_tool` for `aarch64-unknown-simpleos` with the seed (arm
-has FS-exec infra: `services/vfs/arm_fs_exec_*`, virtio-blk). Board gate:
+Cross-build `simpleos_tool` for `aarch64-unknown-simpleos` with the selected
+compiler (arm has FS-exec infra: `services/vfs/arm_fs_exec_*`, virtio-blk).
+Board gate:
 QEMU `-machine virt -cpu cortex-a72` (+ UEFI/EDK2 aarch64 if available, else
 the arm boot path the existing arm64 lanes use — NOT a QEMU-only shortcut that
 bypasses firmware). Inherit BX's fix once landed; until then, confirm
@@ -60,7 +60,8 @@ firmware path, board-representative). Inherit BX's fix.
 ### Lane CI — Simple CI builds the three SimpleOS binaries
 Add a CI entry (Simple-native, e.g. under `src/app/ci/` or a
 `scripts/ci/build-simpleos-toolchain.shs`) that, for each of
-{x86_64,aarch64,riscv64}-unknown-simpleos, invokes the seed native-build of
+{x86_64,aarch64,riscv64}-unknown-simpleos, invokes the selected pure-Simple
+compiler for `native-build` of
 `src/app/simpleos_tool/main.spl`, verifies the artifact (static ELF, correct
 link base, no PT_LOAD in the kernel band), writes a build stamp, and publishes
 to `bin/release/<triple>/simple`. Gate: all three artifacts produced +
@@ -76,7 +77,8 @@ binary to support simple os" deliverable.
 ## Rules
 - Board-proxy = real firmware (OVMF x86, EDK2/UEFI or arch boot for arm,
   OpenSBI for riscv). No `-kernel` pass semantics on x86; no isa-debug-exit.
-- Build with the SEED; do NOT run `bin/simple build bootstrap` (stale worker).
+- Build with the pure-Simple self-hosted compiler. Use the Rust seed only for
+  an explicit bootstrap/debug override, never as an automatic fallback.
 - Central-compiler .spl changes: HOLD for the bootstrap gate; land only after
   the parallel redeploy settles. Harness/CI/arch-build scripts land freely.
 - Evidence = serial transcript quoted per arch; artifact readelf verified.
