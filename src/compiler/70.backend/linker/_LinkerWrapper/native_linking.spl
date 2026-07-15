@@ -536,6 +536,12 @@ fn _cc_fallback_runtime_lib_args(config: NativeLinkConfig) -> [text]:
         args.push("-Wl,-rpath,{runtime_dir}")
     args
 
+fn cc_fallback_object_args(object_files: [text]) -> [text]:
+    var args: [text] = []
+    for obj in object_files:
+        args.push(obj)
+    args
+
 fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     # SimpleOS targets must NEVER reach this function. SimpleOS has no
     # fork/exec, so subprocess cc is unavailable — in-process LLD is the
@@ -552,7 +558,6 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     # the log backend before the fallback command is assembled.
     if object_files.len() == 0:
         return Err("cc fallback requires at least one object file")
-    val obj0 = object_files[0]
 
     val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     val hosted_cross = target.starts_with("aarch64-") or target.starts_with("riscv64-")
@@ -575,9 +580,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         # Link ALL object files (user objects + compiled runtime objects +
         # generated entry shim). Passing only obj0 dropped the entry-point
         # object -> "Undefined symbols: _main" on Mach-O.
-        var args: [text] = []
-        for obj in object_files:
-            args.push(obj)
+        var args = cc_fallback_object_args(object_files)
         for flag in [
             "-lc", "-lpthread", "-lm", "-lSystem", "-lSDL2",
             "-L/opt/homebrew/lib",
@@ -593,7 +596,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         val err_msg = if stderr != "": stderr else: "Unknown linking error"
         return Err("cc linking failed: {err_msg}")
     elif os_name == "freebsd":
-        var args: [text] = [obj0]
+        var args = cc_fallback_object_args(object_files)
         if not config.pie:
             args.push("-no-pie")
         for flag in _cc_fallback_runtime_lib_args(config):
