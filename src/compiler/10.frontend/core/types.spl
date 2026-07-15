@@ -259,8 +259,10 @@ val TYPE_REFINEMENT_BASE = 700
 # refinement registries above (bug: dicttype -- generic args were silently
 # dropped, turning every dict-typed param/local into a plain TYPE_DICT with
 # no key/value info by the time it reached the AST bridge).
-val TYPE_DICT_BASE = 800
-val TYPE_NAMED_BASE = 1000
+val TYPE_DICT_BASE = 1000
+val TYPE_RESULT_BASE = 2000
+val TYPE_RESULT_LIMIT = 3000
+val TYPE_NAMED_BASE = 10000
 
 # Helper predicates for encoded type tags
 fn is_union_tag(tag: i64) -> bool:
@@ -282,10 +284,16 @@ fn refinement_tag_to_id(tag: i64) -> i64:
     tag - TYPE_REFINEMENT_BASE
 
 fn is_dict_tag(tag: i64) -> bool:
-    tag >= TYPE_DICT_BASE and tag < TYPE_NAMED_BASE
+    tag >= TYPE_DICT_BASE and tag < TYPE_RESULT_BASE
 
 fn dict_tag_to_id(tag: i64) -> i64:
     tag - TYPE_DICT_BASE
+
+fn is_result_tag(tag: i64) -> bool:
+    tag >= TYPE_RESULT_BASE and tag < TYPE_RESULT_LIMIT
+
+fn result_tag_to_id(tag: i64) -> i64:
+    tag - TYPE_RESULT_BASE
 
 fn type_tag_name(tag: i64) -> text:
     if tag >= TYPE_NAMED_BASE:
@@ -381,6 +389,9 @@ fn type_tag_name(tag: i64) -> text:
         val key_name = type_tag_name(dict_type_get_key(did))
         val value_name = type_tag_name(dict_type_get_value(did))
         return "Dict<" + key_name + "," + value_name + ">"
+    if is_result_tag(tag):
+        val rid = result_tag_to_id(tag)
+        return "Result<" + type_tag_name(result_type_get_ok(rid)) + "," + type_tag_name(result_type_get_err(rid)) + ">"
     "unknown"
 
 fn type_tag_to_c(tag: i64) -> text:
@@ -461,6 +472,8 @@ fn type_tag_to_c(tag: i64) -> text:
         return "SplValue"
     if is_dict_tag(tag):
         return "SplDict*"
+    if is_result_tag(tag):
+        return "SplResult*"
     if tag >= TYPE_NAMED_BASE:
         val nid = tag - TYPE_NAMED_BASE
         val nm = named_type_name(nid)
@@ -834,6 +847,8 @@ var dict_type_values: [i64] = []
 
 fn dict_type_register(key_tag: i64, value_tag: i64) -> i64:
     val idx = dict_type_keys.len()
+    if idx >= TYPE_RESULT_BASE - TYPE_DICT_BASE:
+        return -1
     dict_type_keys.push(key_tag)
     dict_type_values.push(value_tag)
     TYPE_DICT_BASE + idx
@@ -846,6 +861,29 @@ fn dict_type_get_key(dict_id: i64) -> i64:
 fn dict_type_get_value(dict_id: i64) -> i64:
     if dict_id < dict_type_values.len():
         return dict_type_values[dict_id]
+    TYPE_ANY
+
+# ===== Result Specialization Registry =====
+
+var result_type_ok: [i64] = []
+var result_type_err: [i64] = []
+
+fn result_type_register(ok_tag: i64, err_tag: i64) -> i64:
+    val idx = result_type_ok.len()
+    if idx >= TYPE_RESULT_LIMIT - TYPE_RESULT_BASE:
+        return -1
+    result_type_ok.push(ok_tag)
+    result_type_err.push(err_tag)
+    TYPE_RESULT_BASE + idx
+
+fn result_type_get_ok(result_id: i64) -> i64:
+    if result_id < result_type_ok.len():
+        return result_type_ok[result_id]
+    TYPE_ANY
+
+fn result_type_get_err(result_id: i64) -> i64:
+    if result_id < result_type_err.len():
+        return result_type_err[result_id]
     TYPE_ANY
 
 # ===== Pool Reset =====
@@ -886,6 +924,8 @@ fn reset_all_pools():
     refinement_predicates = []
     dict_type_keys = []
     dict_type_values = []
+    result_type_ok = []
+    result_type_err = []
 
 export TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT
 export TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32
@@ -897,5 +937,7 @@ export TYPE_FUTURE, TYPE_POLL, TYPE_TASK, TYPE_GENERIC_ERASED
 export TYPE_UNION_BASE, TYPE_INTERSECTION_BASE, TYPE_REFINEMENT_BASE
 export TYPE_DICT_BASE, is_dict_tag, dict_tag_to_id
 export dict_type_register, dict_type_get_key, dict_type_get_value
+export TYPE_RESULT_BASE, is_result_tag, result_tag_to_id
+export result_type_register, result_type_get_ok, result_type_get_err
 export SYM_UNKNOWN, SYM_FN, SYM_VAL, SYM_VAR, SYM_STRUCT, SYM_ENUM, SYM_CLASS
 export scope_push, scope_pop, scope_depth

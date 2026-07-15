@@ -47,6 +47,7 @@ use compiler.core.types.{named_type_find}
 use compiler.core.types.{primitive_integer_bit_width_from_name}
 use compiler.core.types.{union_type_register}
 use compiler.core.types.{dict_type_register}
+use compiler.core.types.{result_type_register}
 use std.string_core.{char_code}
 
 # Import from split modules
@@ -464,8 +465,14 @@ fn parser_parse_type() -> i64:
                 if inner_type == TYPE_BOOL:
                     return TYPE_OPTION_BOOL
                 return TYPE_OPTION
-            # Handle Result<T, E> (simplified - just return TYPE_RESULT)
+            # Preserve Result<T,E> generic args for match payload typing.
             if type_name == "Result":
+                if has_extra_type:
+                    val result_tag = result_type_register(inner_type, extra_type)
+                    if result_tag < 0:
+                        parser_error("too many distinct Result<T,E> annotations")
+                        return TYPE_RESULT
+                    return result_tag
                 return TYPE_RESULT
             # Dict<K,V> -> register the key/value tags (bug: dicttype -- this
             # used to unconditionally return the bare TYPE_DICT sentinel,
@@ -473,7 +480,11 @@ fn parser_parse_type() -> i64:
             # the AST bridge as Named("Dict", []) with no generic args).
             if type_name == "Dict":
                 if has_extra_type:
-                    return dict_type_register(inner_type, extra_type)
+                    val dict_tag = dict_type_register(inner_type, extra_type)
+                    if dict_tag < 0:
+                        parser_error("too many distinct Dict<K,V> annotations")
+                        return TYPE_DICT
+                    return dict_tag
                 return TYPE_DICT
             # Unknown generic type - check if base is a named struct
             val gid = named_type_find(type_name)

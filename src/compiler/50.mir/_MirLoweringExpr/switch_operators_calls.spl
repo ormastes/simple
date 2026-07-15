@@ -753,6 +753,56 @@ impl MirLowering:
         self.builder = b
         boot_temp
 
+    me enum_match_expr_type(expr: HirExpr) -> HirType?:
+        """Recover a match scrutinee type without depending on lowering order."""
+        if expr.type_ != nil:
+            val explicit_type = expr.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
+            match explicit_type.kind:
+                case HirTypeKind.Infer(_, _): ()
+                case HirTypeKind.Error: ()
+                case _: return Some(explicit_type)
+        match expr.kind:
+            case Var(symbol):
+                val sym = self.symbols.get_symbol(symbol)
+                if val found = sym:
+                    if found.type_ != nil:
+                        val found_type = found.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
+                        return Some(found_type)
+            case NamedVar(symbol, _):
+                val sym = self.symbols.get_symbol(symbol)
+                if val found = sym:
+                    if found.type_ != nil:
+                        val found_type = found.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
+                        return Some(found_type)
+            case Call(callee, _, _):
+                val callee_type = self.enum_match_expr_type(callee)
+                if callee_type != nil:
+                    val found_callee_type = callee_type ?? HirType(kind: HirTypeKind.Error, span: callee.span)
+                    match found_callee_type.kind:
+                        case HirTypeKind.Function(_, ret, _): return Some(ret)
+                        case _: ()
+            case _: ()
+        nil
+
+    me result_variant_payload_text_state(scrutinee: HirExpr, variant: text) -> i64:
+        """Return 1 for text, 0 for known non-text, -1 when not a typed Result."""
+        val scrutinee_type = self.enum_match_expr_type(scrutinee)
+        if scrutinee_type != nil:
+            val found_type = scrutinee_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
+            match found_type.kind:
+                case HirTypeKind.Result(ok_type, err_type):
+                    if variant == "Ok":
+                        match ok_type.kind:
+                            case HirTypeKind.Str: return 1
+                            case _: return 0
+                    if variant == "Err":
+                        match err_type.kind:
+                            case HirTypeKind.Str: return 1
+                            case _: return 0
+                    return 0
+                case _: ()
+        -1
+
     me lower_enum_match(scrutinee: HirExpr, arms: [HirMatchArm]) -> LocalId:
         """Lower `match e: case Variant(x): ...` for enum patterns. Dispatches on
         rt_enum_discriminant(e) compared to each variant's index; binds a single
@@ -867,7 +917,8 @@ impl MirLowering:
                     # comment for the full landmine this closes).
                     val payload_key = "{enum_name}::{enum_variants[ci]}"
                     val payload_struct = self.enum_payload_struct_names.get(payload_key)
-                    if payload_struct != nil and payload_struct == enum_text_payload_marker():
+                    val result_text_state = self.result_variant_payload_text_state(scrutinee, enum_variants[ci])
+                    if result_text_state == 1 or (result_text_state < 0 and payload_struct != nil and payload_struct == enum_text_payload_marker()):
                         # Enum-text bug: this variant's single-field payload
                         # was observed to be TEXT at the construction site
                         # (see lower_enum_lit/lower_enum_construct_named).
