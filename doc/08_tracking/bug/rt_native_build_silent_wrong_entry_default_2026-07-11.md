@@ -1,6 +1,7 @@
 # BUG: rt_native_build arg parser silently compiles the wrong entry (defaults to src/app/cli/main.spl)
 
-**Status:** OPEN (found 2026-07-11 during #138 self-host probe)
+**Status:** source fixed 2026-07-15 in the pure-Simple bootstrap wrapper and
+Rust seed parser; executable native-build proof pending
 
 ## Symptom
 
@@ -24,3 +25,16 @@ the explicit entry flag the Rust parser understands (in progress under #138).
 Longer term this call site is removed entirely when the rt_native_build seed
 FFI is cut. The Rust parser's silent wrong-entry default should still be made
 loud (error, not fallback) if it survives.
+
+## Resolution
+
+The pure-Simple bootstrap wrapper detects only the isolated single bare `.spl`
+form and compiles it as the entry. Commands containing `--source` or positional
+source directories stay on the full native builder so those inputs are not
+dropped. The surviving Rust seed parser now applies entry inference at its
+trust boundary: one bare `.spl` becomes the entry, explicit `--entry` wins, and
+multiple bare `.spl` inputs without an explicit entry fail with an ambiguity
+diagnostic. Directory-only stage builds retain their legacy CLI entry default.
+Focused pure-Simple classification and Rust resolver regressions cover these
+decisions; compile/run marker proof remains pending a runnable bootstrap
+artifact.

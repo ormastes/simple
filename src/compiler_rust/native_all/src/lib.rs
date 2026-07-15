@@ -100,6 +100,20 @@ fn extract_rt_string_array(arr: RuntimeValue) -> Vec<String> {
     result
 }
 
+fn resolve_native_build_entry(
+    explicit: Option<PathBuf>,
+    bare_spl: &[PathBuf],
+) -> Result<Option<PathBuf>, &'static str> {
+    if explicit.is_some() {
+        return Ok(explicit);
+    }
+    match bare_spl {
+        [] => Ok(None),
+        [entry] => Ok(Some(entry.clone())),
+        _ => Err("multiple bare .spl inputs are ambiguous; use --entry <file>"),
+    }
+}
+
 /// SFFI entry point for native-build command.
 ///
 /// Args is a Simple runtime array of strings:
@@ -114,6 +128,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     }
 
     let mut source_dirs: Vec<PathBuf> = Vec::new();
+    let mut bare_spl: Vec<PathBuf> = Vec::new();
     let mut output: Option<PathBuf> = None;
     let mut entry_file: Option<PathBuf> = None;
     let mut verbose = false;
@@ -437,6 +452,8 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     runtime_bundle = val.to_string();
                 } else if other.starts_with("--") {
                     eprintln!("warning: unknown option '{}', ignoring", other);
+                } else if other.ends_with(".spl") {
+                    bare_spl.push(PathBuf::from(other));
                 } else {
                     source_dirs.push(PathBuf::from(other));
                 }
@@ -444,6 +461,14 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
             }
         }
     }
+
+    let entry_file = match resolve_native_build_entry(entry_file, &bare_spl) {
+        Ok(entry) => entry,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return 1;
+        }
+    };
 
     let bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
     if !is_allowed_runtime_bundle(&runtime_bundle, bootstrap) {
@@ -1968,6 +1993,25 @@ pub extern "C" fn rt_cli_run_file(path: RuntimeValue, args: RuntimeValue, gc_log
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_build_entry_infers_single_bare_spl() {
+        let entry = resolve_native_build_entry(None, &[PathBuf::from("probe.spl")]).unwrap();
+        assert_eq!(entry, Some(PathBuf::from("probe.spl")));
+    }
+
+    #[test]
+    fn native_build_explicit_entry_wins_over_bare_spl() {
+        let entry =
+            resolve_native_build_entry(Some(PathBuf::from("main.spl")), &[PathBuf::from("ignored.spl")]).unwrap();
+        assert_eq!(entry, Some(PathBuf::from("main.spl")));
+    }
+
+    #[test]
+    fn native_build_entry_rejects_multiple_bare_spl_inputs() {
+        let error = resolve_native_build_entry(None, &[PathBuf::from("a.spl"), PathBuf::from("b.spl")]).unwrap_err();
+        assert!(error.contains("use --entry"));
+    }
 
     fn array_values(raw_array: i64) -> Vec<RuntimeValue> {
         let array = to_rv(raw_array);
