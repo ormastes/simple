@@ -13,6 +13,7 @@ use super::NativeProjectBuilder;
 pub(crate) enum NativeRuntimeLane {
     SimpleCore,
     CoreCBootstrap,
+    HostGpu,
 }
 
 impl NativeRuntimeLane {
@@ -20,6 +21,7 @@ impl NativeRuntimeLane {
         match self {
             Self::SimpleCore => "simple-core",
             Self::CoreCBootstrap => "core-c-bootstrap",
+            Self::HostGpu => "host-gpu",
         }
     }
 }
@@ -33,6 +35,10 @@ fn runtime_bundle_requests_core_c_bootstrap(value: &str) -> bool {
         value,
         "core-c-bootstrap" | "core_c_bootstrap" | "runtime" | "core" | "core-c" | "core_c"
     )
+}
+
+fn runtime_bundle_requests_host_gpu(value: &str) -> bool {
+    matches!(value, "host-gpu" | "host_gpu" | "gpu")
 }
 
 fn runtime_bundle_requests_hosted(value: &str) -> bool {
@@ -131,6 +137,7 @@ impl NativeProjectBuilder {
         match self.config.runtime_bundle.as_str() {
             value if runtime_bundle_requests_simple_core(value) => return NativeRuntimeLane::SimpleCore,
             value if runtime_bundle_requests_core_c_bootstrap(value) => return NativeRuntimeLane::CoreCBootstrap,
+            value if runtime_bundle_requests_host_gpu(value) => return NativeRuntimeLane::HostGpu,
             _ => {}
         }
         if std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE")
@@ -186,7 +193,7 @@ impl NativeProjectBuilder {
         selected_runtime: Option<&(PathBuf, bool)>,
     ) -> Result<(), String> {
         if let Some((runtime_lib, true)) = selected_runtime {
-            if is_bootstrap_main_entry(&self.entry_file) {
+            if is_bootstrap_main_entry(&self.entry_file) || self.resolve_runtime_lane() == NativeRuntimeLane::HostGpu {
                 return Ok(());
             }
             let entry = self
@@ -243,6 +250,17 @@ impl NativeProjectBuilder {
             }
         }
 
+        if runtime_bundle_requests_host_gpu(&self.config.runtime_bundle) {
+            let provider = self
+                .config
+                .runtime_path
+                .as_ref()
+                .map(|path| path.join("host-gpu").join("libsimple_host_gpu.a"))
+                .filter(|path| path.is_file())
+                .ok_or_else(|| "native-build requested host-gpu but host-gpu/libsimple_host_gpu.a is missing".to_string())?;
+            return Ok(Some((provider, false)));
+        }
+
         let mut saw_core_c_runtime_path_archive = false;
         let mut push_runtime_candidates = |dir: &Path| {
             let runtime_deps = dir.join("deps").join(runtime_name);
@@ -275,6 +293,7 @@ impl NativeProjectBuilder {
                         }
                     }
                 }
+                NativeRuntimeLane::HostGpu => {}
             }
         };
 
@@ -297,6 +316,7 @@ impl NativeProjectBuilder {
                         }
                     }
                 }
+                NativeRuntimeLane::HostGpu => {}
             }
         }
 
