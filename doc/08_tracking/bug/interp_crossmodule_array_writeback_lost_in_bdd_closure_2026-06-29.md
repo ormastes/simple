@@ -6,7 +6,7 @@ that mutate an array parameter in place, but ONLY under the BDD test runner.
 **Component:** Rust seed interpreter — function-call / closure execution
 (`src/compiler_rust/compiler/src/interpreter_call/block_execution.rs`,
 `interpreter_call/core/function_exec.rs` Bug #19 write-back).
-**Status:** OPEN (worked around in libraries; see below).
+**Status:** Source fixed; execution verification pending.
 
 ## Symptom
 
@@ -75,10 +75,20 @@ now 0 failures. This is the documented Simple idiom for the broader
 "array-arg mutation lost in interpreter" family
 (see `.claude/memory/feedback_interp_array_arg_mutation_and_run_interpret.md`).
 
-## Proper fix (deferred)
+## Proper fix
 
 Make the it-block → cross-module call path preserve argument write-back the same
-way `main()` does (don't route through the throwaway-clone wrapper, or have it
-propagate `out_env`). Deferred: fragile area (Bugs #19/#28), needs seed rebuild
-+ full regression pass; the library workaround is lower-risk and unblocks the
-specs now.
+way `main()` does. This remains a fragile area (Bugs #19/#28), so execution
+verification requires a seed rebuild and the focused regression pass.
+
+## Resolution (2026-07-15)
+
+Imported functions execute through `exec_function_with_captured_env`, which
+bound and ran arguments but omitted the mutable-container write-back already
+owned by ordinary function execution. That write-back is now one shared helper
+called after successful ordinary and captured function bodies. It preserves
+self filtering and value-struct semantics, and conservatively skips positional
+reconstruction after spread or variadic binding when provenance is ambiguous.
+A focused two-module BDD spec uses module-qualified calls to force the captured
+function path and also covers the original imported-builder symptom.
+Execution remains pending an authorized seed/runtime test run.

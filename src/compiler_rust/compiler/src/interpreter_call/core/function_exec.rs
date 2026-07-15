@@ -461,7 +461,7 @@ pub(crate) fn exec_function_with_captured_env(
             self_mode,
         )?;
 
-        execute_function_body(
+        let result = execute_function_body(
             func,
             bound_args,
             &mut local_env,
@@ -470,7 +470,11 @@ pub(crate) fn exec_function_with_captured_env(
             enums,
             impl_methods,
             false,
-        )
+        );
+        if result.is_ok() {
+            write_back_mutable_arguments(func, args, outer_env, &local_env, classes, self_mode);
+        }
+        result
     })
 }
 
@@ -506,6 +510,156 @@ pub(crate) fn return_type_unwraps_option_some(t: &Type) -> bool {
 /// written back. Task #91.
 fn is_value_type_struct(v: &Value, classes: &HashMap<String, Arc<ClassDef>>) -> bool {
     matches!(v, Value::Object { class, .. } if classes.get(class).is_some_and(|cd| cd.is_value_type))
+}
+
+// Bug #19 fix: write back mutable-container parameters to caller's bindings.
+//
+// When a function is called with a simple identifier argument (e.g., `f(a)`)
+// and the parameter is a mutable container type (Array / Dict / Object /
+// Tuple), any mutation the callee performed to its local parameter binding
+// should be observed by the caller. The interpreter stores arrays / dicts /
+// objects as `Arc<_>` with copy-on-write semantics, so mutations inside the
+// callee produce a new Arc in the callee's local env and are NOT visible to
+// the caller unless we explicitly propagate the final callee value back.
+//
+// This is only done for identifier arguments and positional one-level field
+// arguments, and only for container types; primitives keep value semantics.
+fn write_back_mutable_arguments(
+    func: &FunctionDef,
+    args: &[Argument],
+    outer_env: &mut Env,
+    local_env: &Env,
+    classes: &HashMap<String, Arc<ClassDef>>,
+    self_mode: SelfMode,
+) {
+    let params_to_bind: Vec<_> = func
+        .params
+        .iter()
+        .filter(|p| !(self_mode == SelfMode::SkipSelf && p.name == METHOD_SELF))
+        .collect();
+    let mut positional_idx = 0usize;
+    let mut positional_mapping_valid = true;
+    for arg in args {
+        // A spread can bind multiple parameters, so later positional arguments
+        // cannot be reconstructed safely without binder provenance. Named
+        // arguments remain safe because they identify their parameter.
+        if matches!(&arg.value, simple_parser::ast::Expr::Spread(_)) {
+            positional_mapping_valid = false;
+            continue;
+        }
+        // Determine the caller binding name and the callee parameter name.
+        // For FieldAccess args (e.g., `self.values`), we track separately
+        // so we can write back into the object field after the call.
+        enum ArgSource {
+            Ident {
+                caller_name: String,
+                param_name: String,
+            },
+            Field {
+                obj_name: String,
+                field_name: String,
+                param_name: String,
+            },
+        }
+        let source = if let Some(name) = &arg.name {
+            // Named argument: match param by name
+            if params_to_bind.iter().any(|p| p.name == name.as_str() && p.variadic) {
+                continue;
+            }
+            if let simple_parser::ast::Expr::Identifier(caller) = &arg.value {
+                ArgSource::Ident {
+                    caller_name: caller.clone(),
+                    param_name: name.clone(),
+                }
+            } else {
+                continue;
+            }
+        } else {
+            if !positional_mapping_valid {
+                continue;
+            }
+            let param = match params_to_bind.get(positional_idx) {
+                Some(p) => p,
+                None => {
+                    positional_idx += 1;
+                    continue;
+                }
+            };
+            positional_idx += 1;
+            if param.variadic {
+                positional_mapping_valid = false;
+                continue;
+            }
+            if let simple_parser::ast::Expr::Identifier(caller) = &arg.value {
+                ArgSource::Ident {
+                    caller_name: caller.clone(),
+                    param_name: param.name.clone(),
+                }
+            } else if let simple_parser::ast::Expr::FieldAccess { receiver, field } = &arg.value {
+                if let simple_parser::ast::Expr::Identifier(obj) = receiver.as_ref() {
+                    ArgSource::Field {
+                        obj_name: obj.clone(),
+                        field_name: field.clone(),
+                        param_name: param.name.clone(),
+                    }
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        };
+        match source {
+            ArgSource::Ident {
+                caller_name,
+                param_name,
+            } => {
+                if caller_name == METHOD_SELF && self_mode == SelfMode::SkipSelf {
+                    continue;
+                }
+                if let Some(callee_val) = local_env.get(&param_name) {
+                    // Value-type structs (task #91) keep VALUE semantics: never
+                    // write callee mutations back to the caller's binding.
+                    if !is_value_type_struct(callee_val, classes)
+                        && matches!(
+                            callee_val,
+                            Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                        )
+                        && outer_env.contains_key(&caller_name)
+                    {
+                        let new_val = callee_val.clone();
+                        outer_env.insert(caller_name, new_val);
+                    }
+                }
+            }
+            ArgSource::Field {
+                obj_name,
+                field_name,
+                param_name,
+            } => {
+                // Write back mutated field value into the caller's object.
+                // e.g., `write_first(self.values, next)` — after the call,
+                // write the callee's `values` param back into `self.values`.
+                if let Some(callee_val) = local_env.get(&param_name).cloned() {
+                    // Value-type structs (task #91) keep VALUE semantics: a
+                    // struct passed as `obj.field` is not mutated back either.
+                    if !is_value_type_struct(&callee_val, classes)
+                        && matches!(
+                            callee_val,
+                            Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                        )
+                    {
+                        if let Some(obj_val) = outer_env.get(&obj_name).cloned() {
+                            if let Value::Object { class, mut fields } = obj_val {
+                                Arc::make_mut(&mut fields).insert(field_name, callee_val);
+                                outer_env.insert(obj_name, Value::Object { class, fields });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn exec_function_inner(
@@ -598,134 +752,8 @@ fn exec_function_inner(
         true,
     );
 
-    // Bug #19 fix: write back mutable-container parameters to caller's bindings.
-    //
-    // When a function is called with a simple identifier argument (e.g., `f(a)`)
-    // and the parameter is a mutable container type (Array / Dict / Object /
-    // Tuple), any mutation the callee performed to its local parameter binding
-    // should be observed by the caller. The interpreter stores arrays / dicts /
-    // objects as `Arc<_>` with copy-on-write semantics, so mutations inside the
-    // callee produce a new Arc in the callee's local env and are NOT visible to
-    // the caller unless we explicitly propagate the final callee value back.
-    //
-    // This is only done for identifier arguments (pass-by-name) and only for
-    // container types; primitives keep value semantics.
     if result.is_ok() {
-        let params_to_bind: Vec<_> = func
-            .params
-            .iter()
-            .filter(|p| !(self_ctx.is_some() && p.name == METHOD_SELF))
-            .collect();
-        let mut positional_idx = 0usize;
-        for arg in args {
-            // Skip spread expressions — they don't map 1:1 to a caller binding.
-            if matches!(&arg.value, simple_parser::ast::Expr::Spread(_)) {
-                positional_idx += 1;
-                continue;
-            }
-            // Determine the caller binding name and the callee parameter name.
-            // For FieldAccess args (e.g., `self.values`), we track separately
-            // so we can write back into the object field after the call.
-            enum ArgSource {
-                Ident {
-                    caller_name: String,
-                    param_name: String,
-                },
-                Field {
-                    obj_name: String,
-                    field_name: String,
-                    param_name: String,
-                },
-            }
-            let source = if let Some(name) = &arg.name {
-                // Named argument: match param by name
-                if let simple_parser::ast::Expr::Identifier(caller) = &arg.value {
-                    ArgSource::Ident {
-                        caller_name: caller.clone(),
-                        param_name: name.clone(),
-                    }
-                } else {
-                    continue;
-                }
-            } else {
-                let param = match params_to_bind.get(positional_idx) {
-                    Some(p) => p,
-                    None => {
-                        positional_idx += 1;
-                        continue;
-                    }
-                };
-                positional_idx += 1;
-                if let simple_parser::ast::Expr::Identifier(caller) = &arg.value {
-                    ArgSource::Ident {
-                        caller_name: caller.clone(),
-                        param_name: param.name.clone(),
-                    }
-                } else if let simple_parser::ast::Expr::FieldAccess { receiver, field } = &arg.value {
-                    if let simple_parser::ast::Expr::Identifier(obj) = receiver.as_ref() {
-                        ArgSource::Field {
-                            obj_name: obj.clone(),
-                            field_name: field.clone(),
-                            param_name: param.name.clone(),
-                        }
-                    } else {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            };
-            match source {
-                ArgSource::Ident {
-                    caller_name,
-                    param_name,
-                } => {
-                    if caller_name == METHOD_SELF && self_ctx.is_some() {
-                        continue;
-                    }
-                    if let Some(callee_val) = local_env.get(&param_name) {
-                        // Value-type structs (task #91) keep VALUE semantics: never
-                        // write callee mutations back to the caller's binding.
-                        if !is_value_type_struct(callee_val, classes)
-                            && matches!(
-                                callee_val,
-                                Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
-                            )
-                            && outer_env.contains_key(&caller_name)
-                        {
-                            let new_val = callee_val.clone();
-                            outer_env.insert(caller_name, new_val);
-                        }
-                    }
-                }
-                ArgSource::Field {
-                    obj_name,
-                    field_name,
-                    param_name,
-                } => {
-                    // Write back mutated field value into the caller's object.
-                    // e.g., `write_first(self.values, next)` — after the call,
-                    // write the callee's `values` param back into `self.values`.
-                    if let Some(callee_val) = local_env.get(&param_name).cloned() {
-                        // Value-type structs (task #91) keep VALUE semantics: a
-                        // struct passed as `obj.field` is not mutated back either.
-                        if !is_value_type_struct(&callee_val, classes)
-                            && matches!(
-                                callee_val,
-                                Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
-                            )
-                        {
-                            if let Some(obj_val) = outer_env.get(&obj_name).cloned() {
-                                if let Value::Object { class, mut fields } = obj_val {
-                                    Arc::make_mut(&mut fields).insert(field_name, callee_val);
-                                    outer_env.insert(obj_name, Value::Object { class, fields });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        write_back_mutable_arguments(func, args, outer_env, &local_env, classes, self_mode);
     }
 
     // Runtime profiler return hook
