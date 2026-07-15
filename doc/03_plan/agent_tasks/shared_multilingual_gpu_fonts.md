@@ -82,7 +82,7 @@ checking source and executable evidence.
   claims.
 - D: one real graphics backend with texture/bind/draw/fence/device-readback proof
   for both 2D and 3D, plus selected performance/resource evidence.
-- E: six SSpecs, six mirrored zero-stub manuals, updated guides/notices,
+- E: seven SSpecs, seven mirrored zero-stub manuals, updated guides/notices,
   and no executable spec under `doc/06_spec`.
 - F: legacy WebIR, GUI, and WM text preserve resolved face identity through
   DrawIR and the canonical Engine2D font path.

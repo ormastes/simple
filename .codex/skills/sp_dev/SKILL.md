@@ -466,7 +466,8 @@ font GPU emission, or GUI/Web/2D/3D text.
    versioned exported symbol; runtime promotion must load that verified artifact,
    not a handwritten or independently generated parallel blob.
    Vulkan promotion additionally requires the validated precompiled-SPIR-V
-   artifact mode; runtime GLSL is diagnostic execution only.
+   artifact mode and its exact pinned hash; runtime GLSL is diagnostic execution
+   only.
 7. Shaping and material preparation fail closed unless every required operation
    completed and the final glyphs remain bound to the exact live face handle
    and generation.

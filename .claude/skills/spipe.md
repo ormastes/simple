@@ -390,6 +390,8 @@ through `read_font_perf_evidence` and `expect_font_perf_budget`. `queue_device`
 is one fused submit-through-device-completion interval; the later `sync` field
 is fence observation, not disjoint device time. Offscreen rendering records
 `not-applicable-offscreen` presentation and still requires device readback.
+Vulkan promotion also requires the exact pinned precompiled-SPIR-V hash;
+magic-valid alternative modules and runtime GLSL remain unpromoted.
 
 For RenderDoc evidence, use the shared helper interface instead of spelling
 `renderdoccmd` directly in each spec or check script:

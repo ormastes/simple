@@ -165,8 +165,9 @@ describe "<Feature Name>":
   may promote only after its exact-face shape-to-`FontRenderBatch` gate passes;
   parser/cmap/raster evidence alone is insufficient. Variation-selector,
   modifier, ZWJ, color, and multi-codepoint emoji remain fail-closed.
-  Vulkan font promotion requires `artifact_mode=precompiled-spirv`; runtime
-  GLSL may be diagnostic execution but cannot satisfy native promotion.
+  Vulkan font promotion requires `artifact_mode=precompiled-spirv` and the exact
+  pinned artifact hash; runtime GLSL may be diagnostic execution but cannot
+  satisfy native promotion.
   Compiled native evidence must name the Simple-emitted font companion, prove
   its versioned exported symbol, and prove the promoted runtime loaded that same
   artifact; a handwritten PTX or independently generated SPIR-V blob is not

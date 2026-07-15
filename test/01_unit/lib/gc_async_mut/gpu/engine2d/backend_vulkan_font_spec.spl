@@ -10,7 +10,9 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{
 }
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontCompositeEvidence}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
-use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_spirv.{spirv_font_atlas_composite}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_spirv.{
+    FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256, spirv_font_atlas_composite
+}
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend}
 use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
@@ -35,7 +37,7 @@ fn _complete_stage_evidence() -> VulkanFontCompositeEvidence:
         readback_source: "device_readback", readback_buffer_handle: 7,
         readback_byte_count: 4, device_checksum: -7, oracle_checksum: -7,
         parity: true, device_executed: true, promotion_ready: true,
-        artifact_identity: "precompiled-spirv:0000000000000000000000000000000000000000000000000000000000000000",
+        artifact_identity: "precompiled-spirv:" + FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256,
         entry_name: "main", program_version: 1, emission_compile_ns: 1,
         batch_identity: "batch", atlas_payload_sha256: "1111111111111111111111111111111111111111111111111111111111111111",
         dirty_upload_ns: 0, queue_device_ns: 1, sync_wait_ns: 1,
@@ -109,6 +111,9 @@ describe "Vulkan font atlas composite companion":
         evidence = _complete_stage_evidence()
         evidence.parity = false
         expect(vulkan_font_stage_evidence_ready(evidence)).to_be(false)
+        evidence = _complete_stage_evidence()
+        evidence.artifact_identity = "precompiled-spirv:0000000000000000000000000000000000000000000000000000000000000000"
+        expect(vulkan_font_stage_evidence_ready(evidence)).to_be(false)
 
     it "wraps deterministically for a large pixel input":
         val pixels: [u32] = [0xfeedbeefu32; 65536]
@@ -137,7 +142,7 @@ describe "Vulkan font atlas composite companion":
         expect(blob[1]).to_equal(0x02u8)
         expect(blob[2]).to_equal(0x23u8)
         expect(blob[3]).to_equal(0x07u8)
-        expect(sha256_u8_hex(blob)).to_equal("e25d25b8157fc2554822637603471a442f678eb58e20da167bfb023d7577880a")
+        expect(sha256_u8_hex(blob)).to_equal(FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256)
         expect(sha256_text(font_atlas_composite_vulkan_glsl_source())).to_equal("c94b13736bdf7022835c008c09d714507da4cd0b6ef4607a5eadc9a23549cd2c")
         val session = file_read("src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl")
         expect(session).to_contain("self.install_font_atlas_pipeline(spirv_font_atlas_composite())")
@@ -280,14 +285,15 @@ describe "Vulkan font atlas composite companion":
         expect(session.font_atlas_artifact_identity).to_equal("retained")
 
     it "reuses only the exact cached Vulkan font artifact":
-        val first = [0x03u8, 0x02u8, 0x23u8, 0x07u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]
-        val changed = [0x03u8, 0x02u8, 0x23u8, 0x07u8, 2u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]
+        val first = spirv_font_atlas_composite()
+        var changed = spirv_font_atlas_composite()
+        changed[4] = changed[4] + 1u8
         var session = VulkanSession.create()
         session.shader_font_atlas = 11
         session.pipe_font_atlas = 22
         session.font_atlas_status = "ready"
         session.font_atlas_artifact_mode = "precompiled-spirv"
-        session.font_atlas_artifact_identity = "precompiled-spirv:" + sha256_u8_hex(first)
+        session.font_atlas_artifact_identity = "precompiled-spirv:" + FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256
         session.font_atlas_emission_compile_ns = 5
         val cached = session.install_font_atlas_pipeline(first)
         val rejected = session.install_font_atlas_pipeline(changed)
@@ -297,10 +303,10 @@ describe "Vulkan font atlas composite companion":
         expect(cached.program_version).to_equal(1)
         expect(cached.emission_compile_ns).to_equal(5)
         expect(rejected.status).to_equal("rejected")
-        expect(rejected.reason).to_equal("font-pipeline-artifact-mismatch")
+        expect(rejected.reason).to_equal("font-pipeline-artifact-hash-mismatch")
         expect(session.shader_font_atlas).to_equal(11)
         expect(session.pipe_font_atlas).to_equal(22)
-        expect(session.font_atlas_artifact_identity).to_equal("precompiled-spirv:" + sha256_u8_hex(first))
+        expect(session.font_atlas_artifact_identity).to_equal("precompiled-spirv:" + FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256)
 
     it "rejects unsupported program versions before atlas mutation":
         var state = VulkanBackend.create()

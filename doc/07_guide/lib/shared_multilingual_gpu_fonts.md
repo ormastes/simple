@@ -182,7 +182,8 @@ including bundled Noto Emoji `U+1F600`. Mixed-face fallback is accepted only
 for the exact Chinese-mono-to-Noto-Sans-SC row; broader per-script fallback
 still requires complete GSUB/GPOS and corpus evidence.
 The shaper binds OpenType data by exact fallback face handle/generation; an
-unbound or stale attached face never borrows another face's blob.
+unbound or stale attached face never borrows another face's blob. Binding also
+requires the OpenType blob SHA-256 to match the live face identity.
 
 The opt-in shaped path now keeps each `ShapedGlyph`'s absolute source index,
 cluster, current advance, and explicit zero offset through Arabic reversal,
@@ -402,8 +403,8 @@ independent CPU oracle, requiring every packed-ARGB `u32` pixel to match. Ordina
 path; unknown fence completion, rollback, descriptor, fence, or resource-cleanup states replace
 the Engine2D facade with software and permanently disable that Vulkan font lane.
 The conditional integration stops at the first unavailable rung. Promotion now
-requires `artifact_mode=precompiled-spirv`; runtime GLSL can execute but cannot
-promote. Promotion also requires an accelerated discrete, integrated, or virtual device; a stable
+requires `artifact_mode=precompiled-spirv` with the exact pinned artifact hash;
+runtime GLSL can execute but cannot promote. Promotion also requires an accelerated discrete, integrated, or virtual device; a stable
 selected device/driver identity; real fenced submission and destruction; direct
 device readback; and exact CPU-oracle pixel equality. CPU Vulkan and unfenced submission stop
 before mutation and replay through software, so they cannot become native evidence.

@@ -92,7 +92,8 @@ complex shaping, complete REQ-008 format behavior, or GPU execution.
   `not-designed-for-script`, and 3 `unavailable`.
 - Chinese mono falls back to Noto Sans SC; Hindi, Arabic, and Urdu mono fall
   back to their accepted script sans faces. Hindi, Arabic, and Urdu serif remain
-  unavailable pending exact per-face oracles. Exact monochrome Noto Emoji
+  unavailable pending executable proof of their existing exact per-face
+  oracles. Exact monochrome Noto Emoji
   `U+1F600` corpus tuples are native for all ten selected language tags;
   sequences and color remain unsupported.
   Russian display remains not designed for that script.

@@ -1287,3 +1287,27 @@ release-blocking.
   SimpleOS still requires a frame-level Draw IR migration rather than another
   private font adapter. No accepted self-host, verify PASS, commit, rebase, or
   push exists. STATUS: FAIL.
+
+- Exact-identity static hardening (2026-07-15): lower-model shaping and GPU
+  audits found two shared-boundary gaps, and the primary high-capability review
+  accepted the minimal fixes. `shaper_with_ot_face` now rejects an OpenType
+  blob whose SHA-256 does not match the live face identity. Vulkan font
+  installation and promotion now require the exact pinned SPIR-V hash rather
+  than accepting any magic-valid module, and CUDA reuses the common versioned
+  entry constant. Focused source tests cover cross-bound faces, blob drift,
+  unpinned SPIR-V, and exact stage evidence. No Simple runtime, docgen, native
+  GPU, QEMU, or performance command ran after the three-cycle cap; the three
+  serif cells, seven manual regenerations, and retained device evidence remain
+  pending. STATUS: FAIL.
+
+- Exact-identity static hardening (2026-07-15): lower-model shaping and GPU
+  audits found two shared-boundary gaps, and the primary high-capability review
+  accepted the minimal fixes. `shaper_with_ot_face` now rejects an OpenType
+  blob whose SHA-256 does not match the live face identity. Vulkan font
+  installation and promotion now require the exact pinned SPIR-V hash rather
+  than accepting any magic-valid module, and CUDA reuses the common versioned
+  entry constant. Focused source tests cover cross-bound faces, blob drift,
+  unpinned SPIR-V, and exact stage evidence. No Simple runtime, docgen, native
+  GPU, QEMU, or performance command ran after the three-cycle cap; the three
+  serif cells, seven manual regenerations, and retained device evidence remain
+  pending. STATUS: FAIL.
