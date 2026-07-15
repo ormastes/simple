@@ -83,8 +83,9 @@ the in-memory arena and bootstrap environment mirror.
 A direct `core_interpret` regression in
 `src/compiler/10.frontend/core/interpreter/test_interp.spl` constructs both
 `Point(y: 20, x: 10)` and `Principal(kind: 7, id: "alice")`, `=` spelling,
-mixed positional/named arguments, pipe-prepended arguments, and an ordinary
-function call. It also verifies unknown, duplicate, and excess constructor
+mixed positional/named arguments, pipe-prepended arguments, and reordered
+ordinary/static/indirect function calls. It also verifies unknown, duplicate,
+and excess constructor
 arguments fail with explicit errors. This lane performed static source checks
 only; the owning integration lane must execute that regression after deploying
 a new pure-Simple compiler.

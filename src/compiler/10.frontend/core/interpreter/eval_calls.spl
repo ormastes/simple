@@ -126,21 +126,21 @@ fn eval_call(eid: i64) -> i64:
         # Check function table
         val decl_id = func_table_lookup(name)
         if decl_id >= 0:
-            return eval_function_call(decl_id, arg_eids)
+            return eval_function_call(decl_id, arg_eids, arg_names)
 
         # Check environment for function value
         val fn_vid = env_lookup(name)
         if fn_vid >= 0:
             if val_is_function(fn_vid):
                 val fn_decl = val_get_func_decl(fn_vid)
-                return eval_function_call(fn_decl, arg_eids)
+                return eval_function_call(fn_decl, arg_eids, arg_names)
 
         # Try deferred (lazy) modules before giving up
         val forced_ok = try_force_any_deferred_for(name)
         if forced_ok == 1:
             val decl_id2 = func_table_lookup(name)
             if decl_id2 >= 0:
-                return eval_function_call(decl_id2, arg_eids)
+                return eval_function_call(decl_id2, arg_eids, arg_names)
             # Maybe it's a struct constructor after forcing
             val first_ch2 = name[0]
             if first_ch2 >= "A" and first_ch2 <= "Z":
@@ -175,7 +175,7 @@ fn eval_call(eid: i64) -> i64:
             val static_fn_name = type_name + "__" + member_name
             val static_decl = func_table_lookup(static_fn_name)
             if static_decl >= 0:
-                return eval_function_call(static_decl, arg_eids)
+                return eval_function_call(static_decl, arg_eids, arg_names)
             # Check struct constructor with module prefix: Module.Struct(args)
             val struct_decl2 = struct_table_lookup(member_name)
             if struct_decl2 >= 0:
@@ -199,7 +199,7 @@ fn eval_call(eid: i64) -> i64:
                 val static_fn2 = type_name + "__" + member_name
                 val static_decl2 = func_table_lookup(static_fn2)
                 if static_decl2 >= 0:
-                    return eval_function_call(static_decl2, arg_eids)
+                    return eval_function_call(static_decl2, arg_eids, arg_names)
                 # Retry struct constructor
                 val struct_decl3 = struct_table_lookup(member_name)
                 if struct_decl3 >= 0:
@@ -210,12 +210,12 @@ fn eval_call(eid: i64) -> i64:
     if eval_had_error: return -1
     if val_is_function(callee_val):
         val fn_decl = val_get_func_decl(callee_val)
-        return eval_function_call(fn_decl, arg_eids)
+        return eval_function_call(fn_decl, arg_eids, arg_names)
 
     eval_set_error("value is not callable")
     -1
 
-fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
+fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
     val d_node = decl_get(decl_id)
     val fn_name = d_node.name
     val param_names = d_node.param_names
@@ -232,6 +232,53 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
         val av = eval_expr(aeid)
         if eval_had_error: return -1
         arg_values.push(av)
+
+    var has_named_args = false
+    for arg_name in arg_names:
+        if arg_name != "":
+            has_named_args = true
+            break
+    if has_named_args:
+        if arg_values.len() > param_names.len():
+            eval_set_error("too many arguments for function '" + fn_name + "'")
+            return -1
+        var ordered_values: [i64] = []
+        for pname in param_names:
+            ordered_values.push(-1)
+        var next_pos: i64 = 0
+        var ai: i64 = 0
+        while ai < arg_values.len():
+            val arg_name = if ai < arg_names.len(): arg_names[ai] else: ""
+            var target: i64 = -1
+            if arg_name != "":
+                var pi: i64 = 0
+                while pi < param_names.len():
+                    if param_names[pi] == arg_name:
+                        target = pi
+                        break
+                    pi = pi + 1
+                if target < 0:
+                    eval_set_error("unknown argument '" + arg_name + "' in function '" + fn_name + "'")
+                    return -1
+                if ordered_values[target] >= 0:
+                    eval_set_error("duplicate argument '" + arg_name + "' in function '" + fn_name + "'")
+                    return -1
+            else:
+                while next_pos < ordered_values.len() and ordered_values[next_pos] >= 0:
+                    next_pos = next_pos + 1
+                if next_pos >= ordered_values.len():
+                    eval_set_error("too many arguments for function '" + fn_name + "'")
+                    return -1
+                target = next_pos
+                next_pos = next_pos + 1
+            ordered_values[target] = arg_values[ai]
+            ai = ai + 1
+        var pi: i64 = 0
+        while pi < ordered_values.len():
+            if ordered_values[pi] < 0:
+                ordered_values[pi] = val_make_nil()
+            pi = pi + 1
+        arg_values = ordered_values
 
     # Check if function is generic (has type parameters)
     # If so, look up or create monomorphic instance

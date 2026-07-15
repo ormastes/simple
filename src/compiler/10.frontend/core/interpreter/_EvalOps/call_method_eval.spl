@@ -149,14 +149,14 @@ fn eval_call(eid: i64) -> i64:
         # Check function table
         val decl_id = func_table_lookup(name)
         if decl_id >= 0:
-            return eval_function_call(decl_id, arg_eids)
+            return eval_function_call(decl_id, arg_eids, arg_names)
 
         # Check environment for function value
         val fn_vid = env_lookup(name)
         if fn_vid >= 0:
             if val_is_function(fn_vid):
                 val fn_decl = val_get_func_decl(fn_vid)
-                return eval_function_call(fn_decl, arg_eids)
+                return eval_function_call(fn_decl, arg_eids, arg_names)
 
         eval_set_error("undefined function: " + name)
         return -1
@@ -177,7 +177,7 @@ fn eval_call(eid: i64) -> i64:
             val static_fn_name = type_name + "__" + member_name
             val static_decl = func_table_lookup(static_fn_name)
             if static_decl >= 0:
-                return eval_function_call(static_decl, arg_eids)
+                return eval_function_call(static_decl, arg_eids, arg_names)
             # Check struct constructor with module prefix: Module.Struct(args)
             val struct_decl2 = struct_table_lookup(member_name)
             if struct_decl2 >= 0:
@@ -188,7 +188,7 @@ fn eval_call(eid: i64) -> i64:
     if eval_had_error: return -1
     if val_is_function(callee_val):
         val fn_decl = val_get_func_decl(callee_val)
-        return eval_function_call(fn_decl, arg_eids)
+        return eval_function_call(fn_decl, arg_eids, arg_names)
 
     eval_set_error("value is not callable")
     -1
@@ -222,7 +222,7 @@ fn eval_host_gpu_lane_call(name: text, arg_eids: [i64]) -> i64:
 
     result
 
-fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
+fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
     val d_node = decl_get(decl_id)
     val fn_name = d_node.name
     val param_names = d_node.param_names
@@ -239,6 +239,53 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
         val av = eval_expr(aeid)
         if eval_had_error: return -1
         arg_values.push(av)
+
+    var has_named_args = false
+    for arg_name in arg_names:
+        if arg_name != "":
+            has_named_args = true
+            break
+    if has_named_args:
+        if arg_values.len() > param_names.len():
+            eval_set_error("too many arguments for function '" + fn_name + "'")
+            return -1
+        var ordered_values: [i64] = []
+        for pname in param_names:
+            ordered_values.push(-1)
+        var next_pos: i64 = 0
+        var ai: i64 = 0
+        while ai < arg_values.len():
+            val arg_name = if ai < arg_names.len(): arg_names[ai] else: ""
+            var target: i64 = -1
+            if arg_name != "":
+                var pi: i64 = 0
+                while pi < param_names.len():
+                    if param_names[pi] == arg_name:
+                        target = pi
+                        break
+                    pi = pi + 1
+                if target < 0:
+                    eval_set_error("unknown argument '" + arg_name + "' in function '" + fn_name + "'")
+                    return -1
+                if ordered_values[target] >= 0:
+                    eval_set_error("duplicate argument '" + arg_name + "' in function '" + fn_name + "'")
+                    return -1
+            else:
+                while next_pos < ordered_values.len() and ordered_values[next_pos] >= 0:
+                    next_pos = next_pos + 1
+                if next_pos >= ordered_values.len():
+                    eval_set_error("too many arguments for function '" + fn_name + "'")
+                    return -1
+                target = next_pos
+                next_pos = next_pos + 1
+            ordered_values[target] = arg_values[ai]
+            ai = ai + 1
+        var pi: i64 = 0
+        while pi < ordered_values.len():
+            if ordered_values[pi] < 0:
+                ordered_values[pi] = val_make_nil()
+            pi = pi + 1
+        arg_values = ordered_values
 
     # Check if function is generic (has type parameters)
     # If so, look up or create monomorphic instance
@@ -505,6 +552,7 @@ fn eval_method_call(eid: i64) -> i64:
     val receiver_eid = e_node.left
     val method_name = e_node.s_val
     val arg_eids = e_node.args
+    val arg_names = expr_get_arg_names(eid)
 
     val receiver = eval_expr(receiver_eid)
     if eval_had_error: return -1
@@ -537,22 +585,81 @@ fn eval_method_call(eid: i64) -> i64:
                 val av = eval_expr(aeid)
                 if eval_had_error: return -1
                 arg_values.push(av)
-            return eval_method_with_args(decl_id, arg_values, arg_eids)
+            return eval_method_with_args(decl_id, arg_values, arg_eids, arg_names)
 
         # Callable field fallback — if method_name is a fn-typed field, call it
         val field_val = val_struct_get_field(receiver, method_name)
         if field_val >= 0:
             if val_is_function(field_val):
                 val fn_decl = val_get_func_decl(field_val)
-                return eval_function_call(fn_decl, arg_eids)
+                return eval_function_call(fn_decl, arg_eids, expr_get_arg_names(eid))
 
     eval_set_error("no method '" + method_name + "' on " + val_kind_name(kind))
     -1
 
-fn eval_method_with_args(decl_id: i64, arg_values: [i64], arg_eids: [i64]) -> i64:
+fn eval_method_with_args(decl_id: i64, arg_values: [i64], arg_eids: [i64], arg_names: [text]) -> i64:
     val d_node = decl_get(decl_id)
     val param_names = d_node.param_names
     val body_stmts = d_node.body_stmts
+
+    var bound_values: [i64] = arg_values
+    var bound_eids: [i64] = arg_eids
+    var has_named_args = false
+    for arg_name in arg_names:
+        if arg_name != "":
+            has_named_args = true
+            break
+    if has_named_args:
+        if arg_eids.len() + 1 > param_names.len():
+            eval_set_error("too many arguments for method '" + d_node.name + "'")
+            return -1
+        var ordered_values: [i64] = []
+        var ordered_eids: [i64] = []
+        var remap_pi: i64 = 0
+        while remap_pi < param_names.len():
+            if remap_pi == 0 and arg_values.len() > 0:
+                ordered_values.push(arg_values[0])
+            else:
+                ordered_values.push(-1)
+            if remap_pi > 0:
+                ordered_eids.push(-1)
+            remap_pi = remap_pi + 1
+        var next_pos: i64 = 1
+        var ai: i64 = 0
+        while ai < arg_eids.len():
+            val arg_name = if ai < arg_names.len(): arg_names[ai] else: ""
+            var target: i64 = -1
+            if arg_name != "":
+                remap_pi = 1
+                while remap_pi < param_names.len():
+                    if param_names[remap_pi] == arg_name:
+                        target = remap_pi
+                        break
+                    remap_pi = remap_pi + 1
+                if target < 0:
+                    eval_set_error("unknown argument '" + arg_name + "' in method '" + d_node.name + "'")
+                    return -1
+                if ordered_values[target] >= 0:
+                    eval_set_error("duplicate argument '" + arg_name + "' in method '" + d_node.name + "'")
+                    return -1
+            else:
+                while next_pos < ordered_values.len() and ordered_values[next_pos] >= 0:
+                    next_pos = next_pos + 1
+                if next_pos >= ordered_values.len():
+                    eval_set_error("too many arguments for method '" + d_node.name + "'")
+                    return -1
+                target = next_pos
+                next_pos = next_pos + 1
+            ordered_values[target] = arg_values[ai + 1]
+            ordered_eids[target - 1] = arg_eids[ai]
+            ai = ai + 1
+        remap_pi = 1
+        while remap_pi < ordered_values.len():
+            if ordered_values[remap_pi] < 0:
+                ordered_values[remap_pi] = val_make_nil()
+            remap_pi = remap_pi + 1
+        bound_values = ordered_values
+        bound_eids = ordered_eids
 
     var write_back_names: [text] = []
     var write_back_values: [i64] = []
@@ -561,8 +668,8 @@ fn eval_method_with_args(decl_id: i64, arg_values: [i64], arg_eids: [i64]) -> i6
     # Bind self + params
     var pi: i64 = 0
     for pname in param_names:
-        if pi < arg_values.len():
-            env_define(pname, arg_values[pi])
+        if pi < bound_values.len():
+            env_define(pname, bound_values[pi])
         else:
             env_define(pname, val_make_nil())
         pi = pi + 1
@@ -579,11 +686,11 @@ fn eval_method_with_args(decl_id: i64, arg_values: [i64], arg_eids: [i64]) -> i6
         eval_return_value = -1
 
     var arg_i: i64 = 0
-    while arg_i < arg_eids.len():
+    while arg_i < bound_eids.len():
         val param_i = arg_i + 1
         if param_i < param_names.len():
-            val arg_eid = arg_eids[arg_i]
-            if expr_get_tag(arg_eid) == EXPR_IDENT:
+            val arg_eid = bound_eids[arg_i]
+            if arg_eid >= 0 and expr_get_tag(arg_eid) == EXPR_IDENT:
                 val current_val = env_lookup(param_names[param_i])
                 val current_kind = val_get_kind(current_val)
                 if current_kind == VAL_ARRAY or current_kind == VAL_STRUCT:
@@ -635,7 +742,7 @@ fn eval_array_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
                 val fn_decl = val_get_func_decl(fn_vid)
                 var map_result: [i64] = []
                 for item in elements:
-                    val mapped = eval_method_with_args(fn_decl, [item], [])
+                    val mapped = eval_method_with_args(fn_decl, [item], [], [])
                     if eval_had_error: return -1
                     map_result.push(mapped)
                 return val_make_array(map_result)
@@ -649,7 +756,7 @@ fn eval_array_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
                 val fn_decl = val_get_func_decl(fn_vid)
                 var filter_result: [i64] = []
                 for item in elements:
-                    val keep = eval_method_with_args(fn_decl, [item], [])
+                    val keep = eval_method_with_args(fn_decl, [item], [], [])
                     if eval_had_error: return -1
                     if val_is_truthy(keep):
                         filter_result.push(item)
@@ -664,7 +771,7 @@ fn eval_array_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
                 val fn_decl = val_get_func_decl(fn_vid)
                 var flat_result: [i64] = []
                 for item in elements:
-                    val sub = eval_method_with_args(fn_decl, [item], [])
+                    val sub = eval_method_with_args(fn_decl, [item], [], [])
                     if eval_had_error: return -1
                     if val_is_array(sub):
                         val sub_elems = val_get_array(sub)
@@ -682,7 +789,7 @@ fn eval_array_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             if val_is_function(fn_vid):
                 val fn_decl = val_get_func_decl(fn_vid)
                 for item in elements:
-                    val ok = eval_method_with_args(fn_decl, [item], [])
+                    val ok = eval_method_with_args(fn_decl, [item], [], [])
                     if eval_had_error: return -1
                     if val_is_truthy(ok): return val_make_bool(true)
                 return val_make_bool(false)
@@ -695,7 +802,7 @@ fn eval_array_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             if val_is_function(fn_vid):
                 val fn_decl = val_get_func_decl(fn_vid)
                 for item in elements:
-                    val ok = eval_method_with_args(fn_decl, [item], [])
+                    val ok = eval_method_with_args(fn_decl, [item], [], [])
                     if eval_had_error: return -1
                     if not val_is_truthy(ok): return val_make_bool(false)
                 return val_make_bool(true)
