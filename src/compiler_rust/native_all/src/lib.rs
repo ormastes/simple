@@ -54,6 +54,9 @@ fn is_valid_runtime_bundle(value: &str) -> bool {
             | "core"
             | "core-c"
             | "core_c"
+            | "host-gpu"
+            | "host_gpu"
+            | "gpu"
     )
 }
 
@@ -452,7 +455,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
             return 1;
         }
         eprintln!(
-            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, runtime",
+            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, host-gpu, runtime",
             runtime_bundle
         );
         return 1;
