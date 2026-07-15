@@ -1,7 +1,7 @@
 # Interpreter: `for` cannot iterate `List<T>` — "cannot iterate over this type"
 
 Date: 2026-07-02
-Status: open
+Status: fixed in source; direct interpreter execution pending a fresh pure-Simple runtime
 Severity: P2
 Found by: W6c lane agent (HUD-over-3D composition)
 
@@ -30,3 +30,12 @@ is lost and subsequent `tree.create_layer` returns colliding layer ids
 
 `examples/11_advanced/game3d_hud/main.spl` uses LayerTree only for ids +
 `z_paint_order`, and composites via a direct SoftwareBackend blit.
+
+## Source fix (2026-07-15)
+
+The interpreter now uses one iterable-array extractor for statement `for`,
+`static_for`, and list comprehensions. Native arrays remain unchanged; a
+canonical `List` is accepted only when its `items` field is an array. Text and
+unsupported-value behavior, including existing diagnostics, are unchanged.
+`src/compiler/10.frontend/core/interpreter/test_interp.spl` directly covers all
+three List-backed forms.
