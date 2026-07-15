@@ -38,3 +38,19 @@ Simple-generated PTX and pinned digest before it can be tracked honestly.
 
 Do not solve this by embedding handwritten PTX, trusting an adjacent evidence
 file, or adding a second font renderer, cache, or kernel.
+
+## Fresh-session resume
+
+After deploying a current pure-Simple self-hosted binary, run this once from the
+repository root on the NVIDIA host:
+
+```sh
+CUDA_ARCH=compute_75 SIMPLE_BIN=bin/simple \
+  sh scripts/check/check-portable-compute-toolchains.shs
+```
+
+Accept the generation input only when `evidence.env` reports
+`cuda_font_status=compiled_artifact_verified`, the exact versioned font symbol,
+and current Simple invocation/runtime plus emitter/source/artifact SHA-256 rows.
+The adjacent hash remains test provenance; independently pin the accepted PTX
+in its package manifest or tracked generated module before factory installation.

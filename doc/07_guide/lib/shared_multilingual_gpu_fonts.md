@@ -365,6 +365,13 @@ or configure a production process to load them directly. Production admission
 requires a package-owned expected hash and program version, verification before
 Engine2D construction, tamper rejection, and device-origin readback from the
 authenticated bytes.
+On the current NVIDIA promotion host, a fresh-session generation attempt is
+bounded to one invocation:
+`CUDA_ARCH=compute_75 SIMPLE_BIN=bin/simple sh scripts/check/check-portable-compute-toolchains.shs`.
+First verify that `bin/simple` resolves to the current pure-Simple self-hosted
+runtime. Promote only a `cuda_font_status=compiled_artifact_verified` record
+with current Simple/emitter/source/artifact provenance; then bind the accepted
+PTX to an independently owned immutable hash before installation.
 Metal compiles the exact common MSL helper as an optional separate pipeline,
 uses the fixed 13-word/52-byte parameter block, full-uploads changed atlas
 generations, and dispatches completed 64-thread groups per quad. Only native

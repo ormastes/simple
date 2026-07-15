@@ -1373,3 +1373,11 @@ pixels, and performance evidence remain release-blocking.
   The rule remains single-owned by the existing Codex system-test and Claude
   SPipe skills; no duplicate loader or policy implementation was added. No
   runtime or device command ran after the three-cycle cap. STATUS: FAIL.
+
+- Fresh-session CUDA resume contract (2026-07-15): the tracking bug and shared
+  font guide now give one bounded NVIDIA-host checker command using the current
+  pure-Simple `bin/simple` and `CUDA_ARCH=compute_75`. Acceptance requires the
+  font-specific compiled status, exact entry, and current Simple/emitter/source/
+  artifact provenance; the checker-adjacent hash remains evidence and cannot
+  replace an independent package/tracked trust anchor. The command was not run
+  after the three-cycle cap. STATUS: FAIL.
