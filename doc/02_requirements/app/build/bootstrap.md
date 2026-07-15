@@ -70,5 +70,11 @@ source import edge, so cache reuse is allowed only when those inputs match.
 - REQ-MCP-CMD-001: The exact cached native Simple MCP server built by fresh
   pure Stage 2 at `build/bootstrap/mcp-package/simple_mcp_server` must answer
   `initialize`, `notifications/initialized`, and `tools/list`, then serve
-  representative `simple_pipe` and `simple_search` calls without source-mode
-  or Rust-seed fallback.
+  representative `simple_pipe` and `simple_search` calls without runtime stubs,
+  source-mode fallback, or Rust-seed fallback.
+- REQ-MCP-CMD-002: Every bootstrap route that reaches the full server-producing
+  Stage 5 must delete and rebuild the exact cached native MCP/LSP pair, with
+  runtime stub fallback disabled, before deployment. Both servers must answer
+  `initialize`, `notifications/initialized`, and `tools/list`; the MCP server
+  must serve `simple_status` and the LSP server must serve `lsp_symbols`, with
+  correlated string response IDs and no source-mode or Rust-seed fallback.

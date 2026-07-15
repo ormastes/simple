@@ -826,7 +826,7 @@ if [ "${build_mcp}" -eq 1 ]; then
     env RUST_LOG="${RUST_LOG:-error}" \
       SIMPLE_NO_DEPRECATED_WARNINGS=1 \
       LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
-      SIMPLE_STUB_MISSING_RT=1 \
+      SIMPLE_NO_STUB_FALLBACK=1 \
       SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
       "${stage_for_build}" native-build \
       --backend "${stage4_backend}" \

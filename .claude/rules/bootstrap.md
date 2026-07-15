@@ -57,6 +57,12 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
   automation (`SIMPLE_BOOTSTRAP=1`), explicit seed maintenance
   (`SIMPLE_RUST_SEED_WARNING=0`), or an acknowledged seed command
   (`--seed-ok` / `--rust-seed-ok`).
+- Every bootstrap route that reaches the full server-producing stage must build
+  the fresh MCP/LSP pair with `SIMPLE_NO_STUB_FALLBACK=1` and run the exact
+  `initialize` -> `notifications/initialized` -> `tools/list` handshake plus
+  `simple_status` and `lsp_symbols` before deploy. Earlier stages run their
+  native fixture sanity; the separate Stage 2 MCP system spec covers its single
+  cached MCP artifact but does not substitute for the Stage 5 pair gate.
 
 ## Bootstrap Commands
 ```bash

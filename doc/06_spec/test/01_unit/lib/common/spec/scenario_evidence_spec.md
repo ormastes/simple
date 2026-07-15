@@ -433,14 +433,14 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val artifact = scenario_exec_evidence(
     "Bootstrap command",
-    "simple test test/system/bootstrap_mcp_spec.spl",
+    "simple test test/03_system/tools/bootstrap_mcp_spec.spl",
     0,
     "stdout: all passed",
     "bootstrap",
     "run"
 )
 expect(artifact.kind).to_equal(ScenarioCaptureKind.exec)
-expect(artifact.body).to_contain("$ simple test test/system/bootstrap_mcp_spec.spl")
+expect(artifact.body).to_contain("$ simple test test/03_system/tools/bootstrap_mcp_spec.spl")
 expect(artifact.body).to_contain("exit: 0")
 ```
 

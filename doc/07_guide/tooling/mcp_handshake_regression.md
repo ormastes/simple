@@ -29,12 +29,16 @@ source regression.
 
 ## Fresh bootstrap artifacts
 
-Stage 5 removes both MCP destinations before building, then runs this same
-native smoke once against the exact fresh `simple_mcp_server` and
+Every bootstrap route that reaches the full server-producing Stage 5 removes
+both MCP destinations before building, then runs this same native smoke once
+against the exact fresh `simple_mcp_server` and
 `simple_lsp_mcp_server` paths before deploy. The probe disables source fallback,
+sends only the exact string request IDs expected by the validator,
 sends `initialize`, `notifications/initialized`, and `tools/list`, then requires
 successful `simple_status` and `lsp_symbols` calls with correlated response IDs
 and semantic results. A missing or stale output, nonzero build or process exit,
 timeout, malformed frame, JSON-RPC error, or MCP `isError` result fails the
-bootstrap. Stages 2 through 4 do not duplicate this artifact gate; `--no-mcp`
-skips Stage 5 and makes no MCP health claim.
+bootstrap. Both native builds use `SIMPLE_NO_STUB_FALLBACK=1`. Stages 2 and 3
+run their own compiler/native fixture sanity and do not claim full-pair MCP/LSP
+health; the separate Stage 2 MCP system spec covers its single cached MCP
+artifact. `--no-mcp` likewise makes no Stage 5 MCP/LSP health claim.

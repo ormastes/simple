@@ -80,8 +80,8 @@ Restart Claude Desktop after config changes.
 ### Verify Installation
 
 ```bash
-# Test server startup
-echo '{"jsonrpc":"2.0","id":"2","method":"tools/list"}' | bin/simple_mcp_server
+# Test the deployed server pair with the full protocol sequence and feature probes
+sh scripts/check/check-mcp-native-smoke.shs
 
 # Run integration tests
 SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
@@ -202,10 +202,12 @@ bin/simple_mcp_server
 - **Protocol**: JSON-RPC 2.0 over stdio
 - **MCP Version**: 2025-06-18
 - **Startup**: < 1s (optimized single-process)
-- **Tool count**: 151 tools in the current source fallback path
-- **Wrapper fallback**: `bin/simple_mcp_server` delegates to the native binary
-  first, then falls back to the source MCP entrypoint when native `tools/list`
-  is stale or a `play_wm_text_*` request needs the current source handlers.
+- **Tool count**: determined from the deployed native server's `tools/list`
+- **MCP wrapper behavior**: `simple_mcp_server` launches a cached compiled
+  artifact and fails closed by default. Its explicit
+  `SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=1` mode is debugging-only and supplies no
+  production or bootstrap evidence. LSP wrapper fallback policy is separate;
+  the Stage 5 gate bypasses both wrappers and probes the exact fresh native pair.
 
 ---
 

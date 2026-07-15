@@ -265,10 +265,12 @@ describe "<Feature Name>":
   Include all local Simple-created MCP wrappers in one system spec when the
   contract is "launch by command line and handshake within a time limit".
   Bootstrap acceptance parameterizes that same checker with the exact fresh
-  Stage 5 MCP/LSP paths, requires one successful semantic `tools/call` per
-  server, and fails on missing/stale artifacts, nonzero exit, timeout, malformed
-  or error responses. Run it once per output pair, not once per compiler stage;
-  `--no-mcp` supplies no MCP acceptance evidence.
+  Stage 5 MCP/LSP paths, requires successful `simple_status` and `lsp_symbols`
+  calls, and fails on missing/stale artifacts, runtime stubs, source or Rust-seed
+  fallback, nonzero exit, timeout, malformed frames, or error responses. Run it
+  for every bootstrap route that produces a full MCP/LSP output pair. The
+  separate Stage 2 MCP spec covers only its single cached MCP artifact; earlier
+  stages and `--no-mcp` supply no full-pair MCP/LSP acceptance evidence.
 - Short grammar features must have runtime-specific coverage:
   - Interpreter specs may cover pipe-forward, composition, placeholder lambdas, method references, optional access, and compact DSL forms.
   - Native specs must cover only compact forms intended to work in native mode.
