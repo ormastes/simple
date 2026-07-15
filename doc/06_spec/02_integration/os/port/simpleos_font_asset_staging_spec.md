@@ -27,6 +27,10 @@ short aliases, and multi-cluster directory chains; the shared reader resolves
 the long path first and preserves the raw short-name reader as boot fallback.
 Before the canonical WM DrawIR frame, the desktop enables registered-only font
 resolution and registers the exact VFS bytes; it has no private post-frame text draw.
+The Simple Browser independently iterates the same 16-candidate registry, reads
+each readable long path with its short alias as the only fallback, registers
+bytes under the canonical repository identity, and refuses to render when the
+registered count differs from the selected catalog count.
 
 Every Simple builder validates the exact returned byte array before staging.
 The still-live C compatibility wrapper mirrors the 16 readable VFAT names and

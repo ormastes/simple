@@ -160,10 +160,12 @@ collector produces a passing durable record.
 
 ## Environment and order
 
-Use the self-hosted release binary. Run manifest first, then shaping, shared
-surfaces, emission, and native readback. Native specs require a declared promoted graphics
-backend/driver; other backends may provide compile-only rows. Pin fixtures,
-viewport, premultiplication, rounding, warmups, samples, and percentile method.
+Use the self-hosted release binary. Run the seven feature specs in this order:
+manifest, shaping, shared surfaces, legacy Web/GUI/WM route, emission, CUDA
+generated handoff, and native readback. Native specs require a declared promoted
+graphics backend/driver; other backends may provide compile-only rows. Pin
+fixtures, viewport, premultiplication, rounding, warmups, samples, and percentile
+method.
 
 For each changed spec, run native execution and generate its manual once:
 

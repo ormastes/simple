@@ -1348,3 +1348,21 @@ pixels, and performance evidence remain release-blocking.
   runtime, docgen, native GPU, QEMU, or performance command ran after the
   three-cycle cap; production CUDA packaging and device evidence remain pending.
   STATUS: FAIL.
+
+- Catalog and SimpleOS static coverage repair (2026-07-15): parallel catalog,
+  GPU-owner, and SPipe/manual audits revalidated all 16 licensed assets, the
+  exact top-ten language order, all ten categories, the honest 67/4/26/3 matrix,
+  one shared 2D/3D batch owner, and all six source-emission contracts. The
+  manifest scenario now asserts every candidate's pinned script metadata, and
+  the SimpleOS integration scenario now covers the Simple Browser's long-path
+  then short-alias lookup, canonical registration, and exact 16-face fail-closed
+  gate. The system-test plan now lists all seven feature specs in execution
+  order. The provisional manual vocabulary near the start of this state is
+  superseded; the five frozen phrases remain exactly:
+  `Load the pinned multilingual font manifest`,
+  `Accept exact-face-bound simple-script shaping`,
+  `Prepare one shared font batch for 2D and 3D`,
+  `Emit the selected font composite program and plan compilation`, and
+  `Prove native submission and device readback`.
+  No Simple runtime, docgen, native GPU, QEMU, or performance command ran after
+  the three-cycle cap; executable evidence remains pending. STATUS: FAIL.

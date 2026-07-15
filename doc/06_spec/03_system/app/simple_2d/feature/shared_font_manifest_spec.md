@@ -70,8 +70,9 @@ complex shaping, complete REQ-008 format behavior, or GPU execution.
 - Every binary's SHA-256 is recomputed through the package facade and equals
   `sha256:` plus its pinned manifest digest.
 - Every font is unchanged, records `cmap` and `glyf`, and has nonempty
-  copyright text plus an RFN state. The manifest also pins extracted style,
-  full/PostScript names, version, default axes, and a closed fallback role.
+  copyright text, RFN state, and script metadata. The manifest also pins
+  extracted style, full/PostScript names, version, default axes, and a closed
+  fallback role.
 - Every binary replays its pinned family, subfamily, full, PostScript, and
   version identity directly from the sfnt `name` table; Noto Emoji's embedded
   full name is `Noto Emoji Regular`.
