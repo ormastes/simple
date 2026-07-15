@@ -124,6 +124,7 @@ fn create_console_logger_class() -> ClassDef {
         invariant: None,
         macro_invocations: vec![],
         mixins: vec![],
+        is_value_type: false,
     }
 }
 
