@@ -2,6 +2,7 @@
 
 **Severity:** high (silent-wrong — violates the never-loud→silent discipline)
 **Found:** 2026-07-14, errhandling lane
+**Resolved:** 2026-07-15
 **Backend:** native-build `--entry` (pure-Simple MIR lowering)
 
 ## Symptom
@@ -25,14 +26,23 @@ is the **Option** runtime representation. There is no case for `Result`'s
 `rt_enum_new`/`rt_enum_discriminant` representation, so the payload extraction
 reads the wrong slot and yields a constant.
 
-## Fix direction
+## Resolution
 
-Dispatch on `receiver.type_` (populated by MIR-lowering time — the same pattern
-the method already uses to read the receiver): when the receiver is a `Result`,
-extract via `rt_enum_discriminant`/`rt_enum_payload` (Ok = variant 0 payload);
-`.unwrap()` on `Err` should **loud-fail** (build-time is fine, or a runtime
-panic), never return a constant. `.is_ok()/.is_err()` are already correctly
-loud-unsupported and can be wired at the same time.
+MIR now recovers a receiver's declared `Result<Ok,Err>` type through the same
+typed-expression/symbol/call-return helper used by Result match lowering. A
+shared Result-only unwrap path branches on `rt_enum_discriminant`, extracts the
+raw Ok payload through `rt_enum_payload`, lazily evaluates the `unwrap_or`
+default for Err, and calls `rt_panic` for `Err.unwrap()`.
+
+The existing Option implementation remains unchanged. The first safe scope is
+`i64` and `text` Ok payloads; other Result payload shapes fail compilation with
+`unsupported Result unwrap payload type` instead of being silently coerced.
+
+`scripts/check/check-native-seed-parity.shs` covers numeric/text `unwrap`, both
+`unwrap_or` branches, unchanged numeric Option behavior, an unsupported
+`u64` loud failure, and a required runtime panic diagnostic in the 43-case
+gate. The Result case is native-authoritative because the seed oracle's
+`Result.unwrap_or` behavior is itself broken.
 
 ## Reproduce
 

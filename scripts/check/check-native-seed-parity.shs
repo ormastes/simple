@@ -34,7 +34,7 @@
 # loop (see the `range_for` case) — an unbounded seed run must never be
 # allowed to wedge this gate.
 #
-# THREE CASE MODES:
+# FOUR CASE MODES:
 #   1. PARITY               — the seed oracle is sound for this construct.
 #      Assert normalize(native_stdout) == normalize(seed_stdout).
 #   2. NATIVE-AUTHORITATIVE — the seed oracle is PROVABLY BROKEN, hangs,
@@ -48,6 +48,8 @@
 #      integer literals) with a nonzero exit and no binary produced,
 #      rather than silently miscompiling. Assert build rc != 0 AND no
 #      binary exists AND the build log contains the expected diagnostic.
+#   4. RUNTIME-FAIL         — native-build must succeed, then the program
+#      must exit nonzero with the expected runtime diagnostic.
 #
 # Every case's mode was decided by actually RUNNING both backends during
 # authoring, never assumed. Three cases were reclassified away from their
@@ -210,6 +212,43 @@ fn main() -> i64:
     match int_error():
         case Ok(value): print(value)
         case Err(code): print(code)
+    return 0
+EOF
+}
+
+write_case_result_unwrap() {
+    cat >"$1" <<'EOF'
+fn ok_num() -> Result<i64, text>: Ok(7)
+fn err_num() -> Result<i64, text>: Err("boom")
+fn ok_text() -> Result<text, i64>: Ok("yes")
+
+fn main() -> i64:
+    print(ok_num().unwrap())
+    print(ok_num().unwrap_or(9))
+    print(err_num().unwrap_or(9))
+    print(ok_text().unwrap())
+    val some_num: i64? = 0
+    val none_num: i64? = nil
+    print(some_num.unwrap())
+    print(none_num.unwrap_or(8))
+    return 0
+EOF
+}
+
+write_case_result_unwrap_err_runtime() {
+    cat >"$1" <<'EOF'
+fn err_num() -> Result<i64, text>: Err("boom")
+fn main() -> i64:
+    print(err_num().unwrap())
+    return 0
+EOF
+}
+
+write_case_result_unwrap_u64_loud() {
+    cat >"$1" <<'EOF'
+fn wide() -> Result<u64, text>: Ok(1)
+fn main() -> i64:
+    print(wide().unwrap())
     return 0
 EOF
 }
@@ -736,9 +775,12 @@ run_parity_case() {
     seed_norm="$(norm <"$seed_out")"
 
     if build_native "$src" "$bin" "$build_log"; then
-        native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr" || true)"
+        native_rc=0
+        native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
         native_norm="$(printf '%s' "$native_raw" | norm)"
-        if [ "$native_norm" = "$seed_norm" ]; then
+        if [ "$native_rc" -ne 0 ]; then
+            record "$id" "parity" "FAIL" "native run rc=$native_rc; stderr=$build_log.run.stderr"
+        elif [ "$native_norm" = "$seed_norm" ]; then
             record "$id" "parity" "PASS" "seed=[$seed_norm] native=[$native_norm]"
         else
             record "$id" "parity" "FAIL" "seed=[$seed_norm] native=[$native_norm] MISMATCH"
@@ -764,9 +806,13 @@ run_native_authoritative_case() {
     seed_norm="$(norm <"$seed_out" 2>/dev/null || echo '')"
 
     if build_native "$src" "$bin" "$build_log"; then
-        native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr" || true)"
+        native_rc=0
+        native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
         native_norm="$(printf '%s' "$native_raw" | norm)"
-        if [ "$native_norm" = "$expected" ]; then
+        if [ "$native_rc" -ne 0 ]; then
+            record "$id" "native-authoritative" "FAIL" \
+                "native run rc=$native_rc; stderr=$build_log.run.stderr"
+        elif [ "$native_norm" = "$expected" ]; then
             record "$id" "native-authoritative" "PASS" \
                 "native=[$native_norm] want=[$expected] (seed diverges: $seed_note; seed_out=[$seed_norm])"
         else
@@ -792,7 +838,7 @@ run_loud_fail_case() {
         record "$id" "loud-fail" "FAIL" "native build UNEXPECTEDLY SUCCEEDED (was supposed to refuse loudly) — REGRESSION"
         return
     fi
-    if [ -x "$bin" ]; then
+    if [ -e "$bin" ]; then
         record "$id" "loud-fail" "FAIL" "build rc!=0 but binary exists at $bin — silent partial output, not a loud fail"
         return
     fi
@@ -800,6 +846,30 @@ run_loud_fail_case() {
         record "$id" "loud-fail" "PASS" "build rc=$build_rc, no binary, diagnostic matched: $expected_diag"
     else
         record "$id" "loud-fail" "FAIL" "build rc=$build_rc, no binary, but expected diagnostic not found: $expected_diag (log=$build_log)"
+    fi
+}
+
+run_runtime_fail_case() {
+    id="$1"; writer="$2"; expected_diag="$3"
+    src="$WORK_DIR/case_${id}_${STAMP}.spl"
+    bin="$WORK_DIR/case_${id}_${STAMP}_bin"
+    build_log="$WORK_DIR/case_${id}_${STAMP}.build.log"
+    run_out="$WORK_DIR/case_${id}_${STAMP}.run.out"
+    run_err="$WORK_DIR/case_${id}_${STAMP}.run.err"
+
+    "$writer" "$src"
+    if ! build_native "$src" "$bin" "$build_log"; then
+        record "$id" "runtime-fail" "FAIL" "native build failed unexpectedly; log=$build_log"
+        return
+    fi
+    run_rc=0
+    timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" >"$run_out" 2>"$run_err" || run_rc=$?
+    if [ "$run_rc" -eq 0 ]; then
+        record "$id" "runtime-fail" "FAIL" "native run unexpectedly succeeded"
+    elif grep -qF "$expected_diag" "$run_err"; then
+        record "$id" "runtime-fail" "PASS" "run rc=$run_rc, diagnostic matched: $expected_diag"
+    else
+        record "$id" "runtime-fail" "FAIL" "run rc=$run_rc, expected diagnostic not found: $expected_diag"
     fi
 }
 
@@ -856,6 +926,8 @@ run_native_authoritative_case compound_assign write_case_compound_assign "151224
     "seed's frontend silently drops the arithmetic in compound assignment and rebinds to the RHS operand, printing 5/3/2/3 instead of 15/12/24/6"
 run_native_authoritative_case tuple_pattern_match write_case_tuple_pattern_match "35" \
     "seed does not bind the elements of a 'case (a, b):' destructuring tuple pattern, printing 0 instead of 35"
+run_native_authoritative_case result_unwrap write_case_result_unwrap "779yes08" \
+    "seed's Result.unwrap_or does not preserve Result payload/tag semantics (observed raw value marker and Err payload)"
 
 # --- LOUD-FAIL: native-build must refuse these constructs, not miscompile --
 run_loud_fail_case int_overflow_loud write_case_int_overflow_loud \
@@ -864,6 +936,10 @@ run_loud_fail_case match_guard_loud write_case_match_guard_loud \
     "match guards (case x if cond:) are not supported by native codegen yet"
 run_loud_fail_case static_ctor_ambiguous_loud write_case_static_ctor_ambiguous_loud \
     "ambiguous static method call"
+run_loud_fail_case result_unwrap_u64_loud write_case_result_unwrap_u64_loud \
+    "unsupported Result unwrap payload type"
+run_runtime_fail_case result_unwrap_err_runtime write_case_result_unwrap_err_runtime \
+    'called `.unwrap()` on an Err Result'
 
 echo ""
 echo "===== check-native-seed-parity summary ====="

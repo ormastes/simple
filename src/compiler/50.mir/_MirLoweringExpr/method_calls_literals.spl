@@ -109,6 +109,106 @@ impl MirLowering:
                 return ets_new_local
         ets_raw
 
+    me result_ok_hir_type(receiver: HirExpr) -> HirType?:
+        val receiver_type = self.enum_match_expr_type(receiver)
+        if receiver_type != nil:
+            val found_type = receiver_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+            match found_type.kind:
+                case HirTypeKind.Result(ok_type, _): return Some(ok_type)
+                case _: ()
+        nil
+
+    me lower_result_unwrap(receiver: HirExpr, ok_type: HirType, default_expr: HirExpr?) -> LocalId:
+        var result_type = MirType.i64()
+        var is_text = false
+        var supported = false
+        match ok_type.kind:
+            case HirTypeKind.Int(bits, signed):
+                if bits == 64 and signed:
+                    supported = true
+            case HirTypeKind.Str:
+                result_type = self.bootstrap_text_type()
+                is_text = true
+                supported = true
+            case _: ()
+        if not supported:
+            self.error("unsupported Result unwrap payload type", Some(receiver.span))
+            var b_bad = self.builder
+            val bad = b_bad.emit_const_int(0)
+            self.builder = b_bad
+            return bad
+
+        val receiver_local = self.lower_expr(receiver)
+        var b_disc = self.builder
+        val disc_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_discriminant"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val disc_res = b_disc.emit_call(disc_op, [mir_operand_copy(receiver_local)], MirType.i64())
+        var disc_local = LocalId(id: 0)
+        if val found_disc = disc_res:
+            disc_local = found_disc
+        val ok_key = b_disc.emit_const_int(0)
+        val is_ok = b_disc.emit_binop(MirBinOp.Eq, mir_operand_copy(disc_local), mir_operand_copy(ok_key), MirType.bool())
+        val ok_block = b_disc.new_block(Some("result_unwrap_ok"))
+        val err_block = b_disc.new_block(Some("result_unwrap_err"))
+        val merge_block = b_disc.new_block(Some("result_unwrap_merge"))
+        val result_local = b_disc.new_temp(result_type)
+        b_disc.terminate_if(mir_operand_copy(is_ok), ok_block, err_block)
+        self.builder = b_disc
+
+        var b_ok = self.builder
+        b_ok.switch_to_block(ok_block)
+        val payload_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_payload"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val payload_res = b_ok.emit_call(payload_op, [mir_operand_copy(receiver_local)], MirType.i64())
+        self.builder = b_ok
+        var ok_value = receiver_local
+        if val payload_local = payload_res:
+            ok_value = payload_local
+        if is_text:
+            var b_text = self.builder
+            val text_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_interp_cstr"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: result_type, is_variadic: false)))
+            ))
+            val text_res = b_text.emit_call(text_op, [mir_operand_copy(ok_value)], result_type)
+            self.builder = b_text
+            if val text_local = text_res:
+                ok_value = text_local
+        b_ok = self.builder
+        b_ok.emit_copy(result_local, ok_value)
+        b_ok.terminate_goto(merge_block)
+        self.builder = b_ok
+
+        var b_err = self.builder
+        b_err.switch_to_block(err_block)
+        self.builder = b_err
+        if default_expr != nil:
+            val fallback_expr = default_expr ?? HirExpr(kind: HirExprKind.NilLit, type_: nil, span: receiver.span)
+            var fallback = self.lower_expr(fallback_expr)
+            if is_text and self.runtime_value_locals.has(fallback.id):
+                fallback = self.decode_runtime_value(fallback, result_type)
+            b_err = self.builder
+            b_err.emit_copy(result_local, fallback)
+        else:
+            val panic_msg = b_err.emit_const_str("called `.unwrap()` on an Err Result")
+            val panic_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_panic"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))
+            ))
+            b_err.emit_call(panic_op, [mir_operand_copy(panic_msg)], MirType.unit())
+            b_err.emit_const(result_local, MirConstValue.Zero, result_type)
+        b_err.terminate_goto(merge_block)
+        self.builder = b_err
+
+        var b_merge = self.builder
+        b_merge.switch_to_block(merge_block)
+        self.builder = b_merge
+        result_local
+
     me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution) -> LocalId:
         """Lower method call based on resolution.
 
@@ -154,6 +254,9 @@ impl MirLowering:
         # correctly returns 0 (native_i64opt_some0_collapses_to_nil class of
         # bug) instead of being misread as None.
         if method == "unwrap" and args.len() == 0:
+            val result_ok_type = self.result_ok_hir_type(receiver)
+            if result_ok_type != nil:
+                return self.lower_result_unwrap(receiver, result_ok_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span), nil)
             val receiver_local = self.lower_expr(receiver)
             var unwrap_result_type = MirType.i64()
             val maybe_recv_ty_uw = receiver.type_
@@ -226,6 +329,9 @@ impl MirLowering:
         # "PHI nodes not grouped at top of basic block" hazard documented
         # there).
         if method == "unwrap_or" and args.len() == 1:
+            val result_ok_type = self.result_ok_hir_type(receiver)
+            if result_ok_type != nil:
+                return self.lower_result_unwrap(receiver, result_ok_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span), Some(args[0].value))
             val receiver_local = self.lower_expr(receiver)
             var uo_result_type = MirType.i64()
             val maybe_recv_ty_uo = receiver.type_

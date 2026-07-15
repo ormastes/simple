@@ -13,11 +13,12 @@ failure is **never** silently converted to a wrong answer.
 - **Gate 1 — matrix:** `scripts/check/native-smoke-matrix.shs` must report
   `total=15 pass=15 fail=0 codegen_fallback_hits=0`.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
-  regression harness) must report `native_seed_parity=true`, currently **40/40**.
-  Three modes: PARITY (seed==native after newline-normalize), NATIVE-AUTHORITATIVE
+  regression harness) must report `native_seed_parity=true`, currently **43/43**.
+  Four modes: PARITY (seed==native after newline-normalize), NATIVE-AUTHORITATIVE
   (oracle provably broken → assert native==known-correct + document divergence),
   LOUD-FAIL (int-overflow, match-guards, and ambiguous static constructors must
-  build-fail without leaving a binary).
+  build-fail without leaving a binary), and RUNTIME-FAIL (build succeeds, then
+  runtime exits nonzero with the required diagnostic).
 - Land only via FF-replay onto the `git ls-remote` tip; verify every push with
   `ls-remote` + content-grep. **No branches.** Seed/compiler **redeploys need
   explicit user go-ahead** — this campaign edits `src/compiler/*.spl`, which
@@ -88,8 +89,8 @@ the shared binary — deploys require explicit user go-ahead).
 - Fold a parity-harness case per landed lane fix (inline, not via a sub-lane —
   the rogue-redeploy incident showed sub-lanes can wander into heavy ops).
 - Open filed bugs still unfixed, in bottom-up order:
-  - `native_result_unwrap_silent_wrong_161_2026-07-14.md`
   - `native_try_op_on_option_silent_wrong_2026-07-14.md`
+  - `native_text_option_unwrap_pointer_value_2026-07-15.md`
 - The whole-compiler redeploy (#99 / stage4) remains separate and blocked on
   seed-backend bugs (cranelift enum miscompile + seed-LLVM mcall_direct arg
   count) — **not** part of this correctness campaign; see
