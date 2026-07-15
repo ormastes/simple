@@ -125,12 +125,9 @@ impl MirLowering:
                         if symbol_value_id < 0:
                             self.error("let binding has no resolved symbol", Some(span))
                             return
-                        # `val f = \x: ...` -- record the lambda for inline
-                        # beta-reduction at direct call sites (see lower_call's
-                        # try_inline_lambda_call). Emitting no binding here is
-                        # deliberate: the seed's expr lowering has no closure
-                        # representation, so a direct call is the only supported
-                        # use. First-class lambda values remain a gap.
+                        # `val f = \x: ...` -- keep the existing bind-time
+                        # capture snapshot, and materialize non-capturing lambdas
+                        # through the same lifted FuncPtr used for lambda args.
                         val is_lambda_bind = match let_init.kind:
                             case Lambda(_, _, _):
                                 true
@@ -146,6 +143,17 @@ impl MirLowering:
                             # this pipeline's MIR mutates in place, not via SSA
                             # renaming) does not leak into calls of this lambda.
                             self.lambda_capture_snapshot[symbol_value_id] = self.snapshot_lambda_capture(let_init)
+                            val lambda_operand = self.lower_lambda_value(let_init)
+                            if lambda_operand != nil:
+                                val lifted_lambda = lambda_operand.unwrap()
+                                match lifted_lambda.kind:
+                                    case Const(_, lambda_type):
+                                        var lambda_builder = self.builder
+                                        val lambda_local = lambda_builder.emit_cast(lifted_lambda, lambda_type)
+                                        self.builder = lambda_builder
+                                        self.local_map[symbol_value_id] = lambda_local
+                                    case _:
+                                        pass
                             return
                         val mir_type = match let_type:
                             case Some(type_value):

@@ -17,6 +17,10 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_hash_text(content: text) -> i64
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_getpid() -> i64
 
 fn incremental_file_exists(path: text) -> bool:
     rt_file_exists(path)
@@ -33,7 +37,16 @@ fn incremental_parse_file(path: text):
 fn incremental_hash_text(content: text) -> i64:
     rt_hash_text(content)
 
-fn native_build_cache_scope_key(backend: text?, target_cpu: text?, target_features: [text], optimization: i32) -> text:
+fn native_build_compiler_identity() -> text:
+    val args = rt_cli_get_args()
+    if args.len() > 0:
+        val hash = rt_file_hash_sha256(args[0])
+        if hash.len() == 64:
+            return hash
+    # Fail closed: an unknown compiler must not reuse another compiler's cache.
+    "uncacheable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+
+fn native_build_cache_scope_key(backend: text?, target_cpu: text?, target_features: [text], optimization: i32, compiler_identity: text) -> text:
     val backend_text = match backend:
         case Some(name): name
         case nil: "smf"
@@ -41,7 +54,7 @@ fn native_build_cache_scope_key(backend: text?, target_cpu: text?, target_featur
         case Some(cpu): cpu
         case nil: "native"
     val feature_text = target_features.join(",")
-    "backend={backend_text};cpu={cpu_text};features={feature_text};opt={optimization}"
+    "backend={backend_text};cpu={cpu_text};features={feature_text};opt={optimization};compiler={compiler_identity}"
 
 fn incremental_mkdir_p(path: text) -> bool:
     rt_dir_create_all(path)
@@ -595,4 +608,4 @@ fn merge_mir(cached_fns: {text: text}, new_fns: {text: text}) -> {text: text}:
 
 export FileFingerprint, DependencyEntry, ChangeKind, IncrChangeSet
 export BuildCache, IncrementalCompiler
-export merge_mir, native_build_cache_scope_key
+export merge_mir, native_build_cache_scope_key, native_build_compiler_identity

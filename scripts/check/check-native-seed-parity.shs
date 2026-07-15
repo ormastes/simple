@@ -681,6 +681,21 @@ fn main() -> i64:
 EOF
 }
 
+write_case_local_lambda_value() {
+    # A non-capturing lambda remains callable after storage and can be passed
+    # through an ordinary fn-typed parameter.
+    cat >"$1" <<'EOF'
+fn apply(f: fn(i64) -> i64, x: i64) -> i64:
+    return f(x)
+
+fn main() -> i64:
+    val f = \x: x + 1
+    print(f(5))
+    print(apply(f, 10))
+    return 0
+EOF
+}
+
 write_case_dict_from_call_keys() {
     # dict returned from a function, keys()-iter index (abde1838e3e): the call
     # -result dict's string keys came back un-decoded so every d[k] returned 0;
@@ -770,14 +785,45 @@ run_seed() {
 }
 
 build_native() {
-    # $1 = src, $2 = out bin, $3 = build log. Returns build rc.
+    # $1 = src, $2 = out bin, $3 = build log, optional $4 = strict backend.
     src="$1"; bin="$2"; log="$3"
-    if env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" native-build \
-        --entry "$src" -o "$bin" --clean >"$log" 2>&1; then
-        return 0
+    if [ "$#" -ge 4 ]; then
+        backend="$4"
+        env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build \
+            --backend="$backend" --entry "$src" -o "$bin" --clean >"$log" 2>&1
     else
-        return 1
+        env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build \
+            --entry "$src" -o "$bin" --clean >"$log" 2>&1
     fi
+}
+
+run_strict_dual_backend_case() {
+    id="$1"; writer="$2"; expected="$3"
+    src="$WORK_DIR/case_${id}_${STAMP}.spl"
+    "$writer" "$src"
+
+    for backend in llvm cranelift; do
+        bin="$WORK_DIR/case_${id}_${backend}_${STAMP}_bin"
+        build_log="$WORK_DIR/case_${id}_${backend}_${STAMP}.build.log"
+        if build_native "$src" "$bin" "$build_log" "$backend"; then
+            native_rc=0
+            native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
+            native_norm="$(printf '%s' "$native_raw" | norm)"
+            if [ "$native_rc" -ne 0 ]; then
+                record "${id}_${backend}" "strict-$backend" "FAIL" \
+                    "native run rc=$native_rc; stderr=$build_log.run.stderr"
+            elif [ "$native_norm" = "$expected" ]; then
+                record "${id}_${backend}" "strict-$backend" "PASS" \
+                    "native=[$native_norm] want=[$expected]"
+            else
+                record "${id}_${backend}" "strict-$backend" "FAIL" \
+                    "native=[$native_norm] want=[$expected] REGRESSION"
+            fi
+        else
+            record "${id}_${backend}" "strict-$backend" "FAIL" \
+                "native build failed; log=$build_log"
+        fi
+    done
 }
 
 run_parity_case() {
@@ -920,6 +966,7 @@ run_parity_case str_method_var_arg write_case_str_method_var_arg
 run_parity_case float_struct_field write_case_float_struct_field
 run_parity_case text_num_concat write_case_text_num_concat
 run_parity_case iife write_case_iife
+run_strict_dual_backend_case local_lambda_value write_case_local_lambda_value "611"
 run_parity_case dict_from_call_keys write_case_dict_from_call_keys
 run_parity_case array_concat write_case_array_concat
 run_parity_case interp_bool_float write_case_interp_bool_float

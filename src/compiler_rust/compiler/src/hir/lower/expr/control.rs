@@ -507,10 +507,17 @@ impl Lowerer {
                 // check must NOT fire — it would call rt_enum_check_discriminant on an
                 // object pointer and always return false (silent no-match).
                 // The type system already guarantees the object is of that class at the
-                // call site, so the condition is always true.
-                let is_class_pattern = self.module.types.lookup(variant.as_str()).map_or(false, |tid| {
-                    matches!(self.module.types.get(tid), Some(HirType::Struct { .. }))
-                });
+                // call site, so the condition is always true unless the subject enum
+                // itself owns this variant name.
+                let subject_enum_owns_variant = matches!(
+                    self.module.types.get(subject_ty),
+                    Some(HirType::Enum { variants, .. })
+                        if variants.iter().any(|(name, _)| name == variant)
+                );
+                let is_class_pattern = !subject_enum_owns_variant
+                    && self.module.types.lookup(variant.as_str()).map_or(false, |tid| {
+                        matches!(self.module.types.get(tid), Some(HirType::Struct { .. }))
+                    });
                 if is_class_pattern {
                     return Ok(HirExpr {
                         kind: HirExprKind::Bool(true),

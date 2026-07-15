@@ -1,6 +1,7 @@
 use std.spec
 use std.io_runtime.{file_read}
-use compiler.driver.driver_build.incremental.{native_build_cache_scope_key}
+use std.common.validation.{is_hex_string}
+use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_compiler_identity}
 use compiler.driver.driver_aot_output.{driver_native_module_is_export_facade}
 use compiler.frontend.parser_types.{Module, Export, DomainBlock}
 use compiler.mir.mir_data.{MirModule}
@@ -133,10 +134,10 @@ describe "native-build cache plumbing policy":
         expect(seed_src).to_contain("\"rt_enum_discriminant\"")
 
     it "changes the cache scope when backend, target, or optimization changes":
-        val base = native_build_cache_scope_key(nil, nil, [], 0)
-        val backend = native_build_cache_scope_key(Some("llvm"), nil, [], 0)
-        val target = native_build_cache_scope_key(nil, Some("x86-64-v3"), ["+avx2"], 0)
-        val opt = native_build_cache_scope_key(nil, nil, [], 2)
+        val base = native_build_cache_scope_key(nil, nil, [], 0, "compiler-a")
+        val backend = native_build_cache_scope_key(Some("llvm"), nil, [], 0, "compiler-a")
+        val target = native_build_cache_scope_key(nil, Some("x86-64-v3"), ["+avx2"], 0, "compiler-a")
+        val opt = native_build_cache_scope_key(nil, nil, [], 2, "compiler-a")
         expect(base).to_contain("backend=smf")
         expect(base).to_contain("cpu=native")
         expect(base).to_contain("opt=0")
@@ -144,6 +145,26 @@ describe "native-build cache plumbing policy":
         expect(target).to_contain("cpu=x86-64-v3")
         expect(target).to_contain("features=+avx2")
         expect(opt).to_contain("opt=2")
+
+    it "changes the cache scope when compiler identity changes":
+        val first = native_build_cache_scope_key(Some("llvm"), nil, [], 2, "compiler-a")
+        val same = native_build_cache_scope_key(Some("llvm"), nil, [], 2, "compiler-a")
+        val changed = native_build_cache_scope_key(Some("llvm"), nil, [], 2, "compiler-b")
+        expect(first).to_equal(same)
+        expect(first == changed).to_equal(false)
+        expect(first).to_contain("compiler=compiler-a")
+        val incremental_src = file_read("src/compiler/80.driver/driver_build/incremental.spl")
+        val driver_src = file_read("src/compiler/80.driver/driver_aot_output.spl")
+        expect(incremental_src).to_contain("rt_file_hash_sha256(args[0])")
+        expect(incremental_src).to_contain("uncacheable-{rt_getpid()}-{rt_time_now_unix_micros()}")
+        expect(driver_src).to_contain("native_build_compiler_identity()")
+
+    it "keeps the running compiler identity stable and content-derived":
+        val first = native_build_compiler_identity()
+        val second = native_build_compiler_identity()
+        expect(first).to_equal(second)
+        expect(first.len()).to_equal(64)
+        expect(is_hex_string(first)).to_equal(true)
 
     it "no longer hardcodes build/smf in the cache-aware native builder":
         val src = file_read("src/compiler/70.backend/build_native.spl")

@@ -221,3 +221,43 @@ fn test_enum_variant_pattern_condition_still_uses_discriminant() {
         "enum variant pattern condition should use rt_enum_check_discriminant; got: {repr}"
     );
 }
+
+#[test]
+fn test_subject_enum_const_variant_beats_unrelated_const_struct() {
+    let source = "class Const:\n    value: i64\n\nenum Inst:\n    Const(i64, i64, i64)\n    Other\n\nfn destination(inst: Inst) -> i64:\n    val result = match inst:\n        case Const(dest, _, _):\n            dest\n        case _:\n            -1\n    return result\n";
+    let module = parse_and_lower(source).unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(matches!(
+        module.types.lookup("Const").and_then(|tid| module.types.get(tid)),
+        Some(HirType::Struct { .. })
+    ));
+    assert!(
+        repr.contains("rt_enum_check_discriminant"),
+        "subject-owned Const variant must remain refutable despite unrelated Const struct: {repr}"
+    );
+    assert!(
+        repr.contains("rt_enum_payload"),
+        "subject-owned Const variant must extract its payload fields: {repr}"
+    );
+}
+
+#[test]
+fn test_standalone_match_subject_enum_const_variant_beats_unrelated_const_struct() {
+    let source = "class Const:\n    value: i64\n\nenum Inst:\n    Const(i64, i64, i64)\n    Other\n\nfn destination(inst: Inst) -> i64:\n    match inst:\n        case Const(dest, _, _):\n            return dest\n        case _:\n            return -1\n";
+    let module = parse_and_lower(source).unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(matches!(
+        module.types.lookup("Const").and_then(|tid| module.types.get(tid)),
+        Some(HirType::Struct { .. })
+    ));
+    assert!(
+        repr.contains("rt_enum_check_discriminant"),
+        "standalone match must discriminate its subject-owned Const variant: {repr}"
+    );
+    assert!(
+        repr.contains("rt_enum_payload"),
+        "standalone match must extract its subject-owned Const payload: {repr}"
+    );
+}

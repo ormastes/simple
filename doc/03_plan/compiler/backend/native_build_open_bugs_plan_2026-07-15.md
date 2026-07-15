@@ -23,6 +23,36 @@ companion doc.
 Effort key: **S** ≤1 lane/hunk · **M** multi-hunk, one subsystem · **L** cross-cutting
 (ABI / cache-format / new lowering path).
 
+## Current audit (2026-07-15)
+
+The original tables remain the remediation order. This audit prevents already
+landed fixes from being reimplemented and distinguishes source fixes from
+executable proof.
+
+| # | Current disposition |
+|---|---------------------|
+| 1 | Fixed and native-regressed (`e4471d60acb6`). |
+| 2 | Fixed and native-regressed (`58b0f33701fb`, `135bb60cf0e7`, `8205cacec41a`). |
+| 3 | Scalar-global source fix landed; exact native `var flag = false` proof remains. |
+| 4 | Enum text-payload source fix landed; persistent exact native proof remains. |
+| 5 | Subject-enum variant precedence implemented for expression and statement match; focused Rust tests pending execution. |
+| 6 | Old two-slot `Any` premise is superseded by the one-word ABI; direct forwarding proof remains. |
+| 7 | Open; generic-result provenance remains blocked on a runnable pure-Simple gate. |
+| 8 | Open; uniform tagged Option ABI remains blocked. Flat text unwrap is implemented but unexecuted. |
+| 9 | Non-capturing stored/passed lambda values implemented with strict LLVM+Cranelift parity coverage; capturing closure values remain open. |
+| 10 | Rust captured-closure hang fixed; remaining pure-Simple captured storage is tracked by #9. |
+| 11 | Fixed by Unit-arm merge suppression and backend void-spill protection. |
+| 12 | Fixed; lifecycle hooks are optional and weak/null-guarded. |
+| 13 | Fail-closed seed compatibility implemented with a stale-cache regression; test execution pending. |
+| 14 | Pure-Simple cache scope now includes the running compiler hash; focused runtime test pending. |
+| 15 | Fixed; the seed object key includes a cached executable fingerprint. |
+| 16 | Open; cfg stripping still ignores duplicate target-gated globals. |
+| 17 | Open/regressed; ambiguous `compiled.cleanup()` callers returned. |
+| 18 | Open/partial; scalar storage landed, but Cranelift dynload initialization remains worked around. |
+| 19 | Open/partial; dispatch/spin fixed, strict Stage-4 provider composition remains. |
+| 20 | Open/partial; host-GPU runtime selection landed, symbol ownership and native queue proof remain. |
+| 21 | Open; reduce with source-location diagnostics before any further syntax rewrite. |
+
 ---
 
 ## Wave 1 — Codegen silent-wrong (highest priority: wrong answers, no diagnostic)

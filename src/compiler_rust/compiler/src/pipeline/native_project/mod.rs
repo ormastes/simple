@@ -727,92 +727,14 @@ impl NativeProjectBuilder {
                 eprintln!("  - {} => {}", path.display(), msg);
             }
             eprintln!(); // spacer
-        }
-
-        let strict_entry_failure = self.entry_file.is_some();
-
-        if failed > 0 {
-            // Only abort if compiler-critical files failed (src/compiler/, src/app/)
-            // Exclude non-essential app modules (dashboards, examples)
-            let non_critical = [
-                "llm_dashboard",
-                "web_dashboard",
-                "obsidian",
-                "korean_stock",
-                "theme_sync",
-                "90.tools",
-                "cli_commands_part1",
-                // app modules not needed for bootstrap
-                "src/app/editor",
-                "src/app/dap",
-                "src/app/debug",
-                "src/app/game",
-                "src/app/office",
-                "src/app/osffice",
-                "src/app/semihost",
-                "src/app/js",
-                "src/app/mcpgdb",
-                "src/app/simple_process_manager",
-                "src/app/sj_daemon",
-                "src/app/wm_compare",
-                "src/app/package",
-                "src/app/md_lsp",
-                "src/app/gc",
-                "src/app/stats",
-                "src/app/test_daemon",
-                "src/app/test_runner_new",
-                "src/app/test/ssh",
-                "src/app/check",
-                "src/app/lint",
-                "src/app/sdn",
-                "src/app/dashboard",
-                "src/app/vscode_extension",
-                "src/app/mcp",
-                // lib modules with unresolved types
-                "src/lib/editor",
-                "src/lib/gc_async_mut",
-                "src/lib/nogc_async_mut_noalloc",
-                // compiler subsystems (use short names to match through numbered prefixes)
-                "/c_import/",
-                "gc_analysis",
-                "/mdsoc/",
-                "/watcher/",
-                "/shb/",
-                "wasm_type_mapper",
-                "wat_codegen",
-                "interpreter_type_mapper",
-                "ui.browser",
-                "ui.web",
-                "ui.test_api",
-            ];
-            let critical_failures: Vec<_> = failures
+            let summary = failures
                 .iter()
-                .filter(|(path, _)| {
-                    let p = path.display().to_string();
-                    if non_critical.iter().any(|s| p.contains(s)) {
-                        return false;
-                    }
-                    p.contains("/src/compiler/")
-                        || p.contains("\\src\\compiler\\")
-                        || p.contains("/src/app/")
-                        || p.contains("\\src\\app\\")
-                })
-                .collect();
-
-            if !critical_failures.is_empty() {
-                let summary = critical_failures
-                    .iter()
-                    .map(|(path, msg)| format!("{}: {}", path.display(), msg))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return Err(format!(
-                    "native-build aborted: {} critical file(s) failed to compile\n{}",
-                    critical_failures.len(),
-                    summary
-                ));
-            }
-
-            eprintln!("\nWarning: {failed} non-critical file(s) failed to compile (skipped)");
+                .map(|(path, msg)| format!("{}: {}", path.display(), msg))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(format!(
+                "native-build aborted: {failed} file(s) failed to compile\n{summary}"
+            ));
         }
 
         if self.config.verbose {
@@ -825,90 +747,6 @@ impl NativeProjectBuilder {
                 failed,
                 compile_time.as_secs_f64()
             );
-        }
-
-        if failed > 0 {
-            // Only abort if compiler-critical files failed (src/compiler/, src/app/)
-            // Exclude non-essential app modules (dashboards, examples)
-            let non_critical = [
-                "llm_dashboard",
-                "web_dashboard",
-                "obsidian",
-                "korean_stock",
-                "theme_sync",
-                "90.tools",
-                "cli_commands_part1",
-                // app modules not needed for bootstrap
-                "src/app/editor",
-                "src/app/dap",
-                "src/app/debug",
-                "src/app/game",
-                "src/app/office",
-                "src/app/osffice",
-                "src/app/semihost",
-                "src/app/js",
-                "src/app/mcpgdb",
-                "src/app/simple_process_manager",
-                "src/app/sj_daemon",
-                "src/app/wm_compare",
-                "src/app/package",
-                "src/app/md_lsp",
-                "src/app/gc",
-                "src/app/stats",
-                "src/app/test_daemon",
-                "src/app/test_runner_new",
-                "src/app/test/ssh",
-                "src/app/check",
-                "src/app/lint",
-                "src/app/sdn",
-                "src/app/dashboard",
-                "src/app/vscode_extension",
-                "src/app/mcp",
-                // lib modules with unresolved types
-                "src/lib/editor",
-                "src/lib/gc_async_mut",
-                "src/lib/nogc_async_mut_noalloc",
-                // compiler subsystems (use short names to match through numbered prefixes)
-                "/c_import/",
-                "gc_analysis",
-                "/mdsoc/",
-                "/watcher/",
-                "/shb/",
-                "wasm_type_mapper",
-                "wat_codegen",
-                "interpreter_type_mapper",
-                "ui.browser",
-                "ui.web",
-                "ui.test_api",
-            ];
-            let critical_failures: Vec<_> = failures
-                .iter()
-                .filter(|(path, _)| {
-                    let p = path.display().to_string();
-                    if non_critical.iter().any(|s| p.contains(s)) {
-                        return false;
-                    }
-                    p.contains("/src/compiler/")
-                        || p.contains("\\src\\compiler\\")
-                        || p.contains("/src/app/")
-                        || p.contains("\\src\\app\\")
-                })
-                .collect();
-
-            if !critical_failures.is_empty() {
-                let summary = critical_failures
-                    .iter()
-                    .map(|(path, msg)| format!("{}: {}", path.display(), msg))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return Err(format!(
-                    "native-build aborted: {} critical file(s) failed to compile\n{}",
-                    critical_failures.len(),
-                    summary
-                ));
-            }
-
-            eprintln!("\nWarning: {failed} non-critical file(s) failed to compile (skipped)");
         }
 
         if object_paths.is_empty() {

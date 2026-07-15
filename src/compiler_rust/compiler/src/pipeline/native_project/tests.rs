@@ -3974,6 +3974,55 @@ fn test_freestanding_spl_main_is_entry_fallback() {
     assert_eq!(entry, Some("spl_main".to_string()));
 }
 
+/// A failed module must abort before cached objects can be linked into a
+/// successful-looking output.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_compile_failure_does_not_link_cached_objects() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_dir = temp.path().join("src");
+    std::fs::create_dir_all(&source_dir).unwrap();
+
+    std::fs::write(
+        source_dir.join("cached.spl"),
+        "fn cached_probe() -> i64:\n    return 101\n",
+    )
+    .unwrap();
+    let failing = source_dir.join("failing.spl");
+    std::fs::write(&failing, "fn failing_probe() -> i64:\n    return 202\n").unwrap();
+
+    let cache_dir = temp.path().join(".simple_native_cache_fail_closed");
+    let archive = temp.path().join("libfail_closed.a");
+    let config = || NativeBuildConfig {
+        emit_archive: true,
+        incremental: true,
+        parallel: false,
+        no_mangle: true,
+        cache_dir: Some(cache_dir.clone()),
+        ..NativeBuildConfig::default()
+    };
+
+    NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+        .config(config())
+        .source_dir(source_dir.clone())
+        .build()
+        .unwrap();
+    assert!(cache_dir.join("objects").is_dir());
+
+    std::fs::remove_file(&archive).unwrap();
+    std::fs::write(&failing, "fn failing_probe() -> i64:\n    return )\n").unwrap();
+
+    let error = NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+        .config(config())
+        .source_dir(source_dir)
+        .build()
+        .unwrap_err();
+
+    assert!(error.contains("native-build aborted: 1 file(s) failed to compile"));
+    assert!(error.contains("failing.spl"));
+    assert!(!archive.exists(), "cached objects were linked after a module failed");
+}
+
 /// Regression test for a suspected cache hit/miss mix bug (issue #64): when an
 /// incremental native-project build has some modules served from the object
 /// cache and others freshly compiled (because only one module's source
