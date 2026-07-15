@@ -251,13 +251,12 @@ impl NativeProjectBuilder {
         }
 
         if runtime_bundle_requests_host_gpu(&self.config.runtime_bundle) {
-            let provider = self
-                .config
-                .runtime_path
-                .as_ref()
-                .map(|path| path.join("host-gpu").join("libsimple_host_gpu.a"))
-                .filter(|path| path.is_file())
-                .ok_or_else(|| "native-build requested host-gpu but host-gpu/libsimple_host_gpu.a is missing".to_string())?;
+            let provider = self.config.runtime_path.as_ref().and_then(|path| {
+                [path.join("bootstrap").join("libsimple_runtime.a"), path.join("libsimple_runtime.a")]
+                    .into_iter()
+                    .find(|candidate| candidate.is_file())
+            })
+                .ok_or_else(|| "native-build requested host-gpu but a feature-built libsimple_runtime.a is missing".to_string())?;
             return Ok(Some((provider, false)));
         }
 
