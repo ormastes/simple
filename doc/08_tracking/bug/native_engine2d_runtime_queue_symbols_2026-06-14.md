@@ -1,7 +1,8 @@
 # Native Engine2D Runtime Queue Symbols Missing From Linked Runtime
 
 Date: 2026-06-14
-Status: Open
+Status (2026-07-15): source ownership implemented; native queue execution
+remains pending.
 
 ## Symptom
 
@@ -28,3 +29,10 @@ Regenerate or rebuild the selected native runtime archive from the current
 `src/runtime/runtime_native.c`, then add `rt_host_gpu_queue_*` to the simple-core
 required-symbol check. After that, split a CPU-only Engine2D/Draw IR import path
 so the runtime queue spec does not drag unrelated backend SFFI/WFFI imports.
+
+## Resolution status (2026-07-15)
+
+The queue facade is C-owned and runtime selection rejects archives that do not
+provide its required symbols. This closes the source-ownership portion only;
+the focused native Engine2D queue execution remains required before the bug is
+fully verified.

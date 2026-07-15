@@ -1,5 +1,8 @@
 # Native-build cache omits compiler identity
 
+**Status (2026-07-15):** source implemented; focused pure-Simple runtime test
+execution remains pending.
+
 ## Symptom
 
 After changing compiler lowering or code generation and bootstrapping a new
@@ -26,3 +29,10 @@ an older compiler, while repeated builds with the same compiler retain hits.
 Build one fixture into a cache, change the compiler identity while leaving the
 fixture unchanged, and require a miss; repeat with the same identity and
 require a hit.
+
+## Resolution (2026-07-15)
+
+The pure-Simple cache scope includes the running compiler content hash, so a
+compiler change invalidates otherwise unchanged module objects while repeated
+runs of the same compiler retain the same scope. The focused runtime test was
+added but not executed in this source-only audit.

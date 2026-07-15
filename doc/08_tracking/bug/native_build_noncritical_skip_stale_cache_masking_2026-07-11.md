@@ -1,6 +1,7 @@
 # BUG: native-build "non-critical file skipped" + stale cache object silently links OLD code
 
-**Status:** open
+**Status (2026-07-15):** source implemented fail-closed; focused regression
+execution remains pending.
 **Severity:** high (false build success; deployed kernels can run code that no longer matches any source revision)
 **Component:** seed native-build pipeline — per-module compile skip + `.simple/native_cache` object reuse (`src/compiler_rust/compiler/src/pipeline/native_project/mod.rs`, dirty-set/cached-object path around line 573)
 **Found:** 2026-07-11, SimpleOS RV64 DB gate investigation
@@ -55,6 +56,13 @@ A module that fails to compile must fail the build (or at minimum must never
 be substituted by a cache object whose source hash does not match current
 source). "Non-critical" skipping should be opt-in and loudly reflected in the
 exit status when the skipped module is in the entry closure.
+
+## Resolution (2026-07-15)
+
+Both the seed compatibility path and pure-Simple native driver now reject a
+failed current-source compilation instead of accepting a stale cached object.
+The focused stale-cache regression exists but was not executed in this
+source-only audit.
 
 ## Related
 

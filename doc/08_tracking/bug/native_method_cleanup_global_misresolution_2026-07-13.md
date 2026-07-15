@@ -1,5 +1,8 @@
 # Native method cleanup global misresolution
 
+**Status (2026-07-15):** source implemented; strict LLVM/Cranelift dispatch
+execution remains pending.
+
 Strict `bootstrap_main` linking showed calls authored as `compiled.cleanup()` in a module
 with a conflicting wildcard-imported `backend_types.CompiledModule` resolving to
 `interp.execution.tiered_jit.TieredJitManager.cleanup` instead of `codegen.CompiledModule.cleanup`.
@@ -24,3 +27,6 @@ uses the same owner-qualified accumulator names. Explicit/glob imports register 
 selected type's impl methods under the defining module, including concrete-owner copies
 of trait defaults. `release_codegen_module` remains only as Rust-seed bootstrap
 compatibility until a fresh self-hosted stage proves the old seed ambiguity is absent.
+
+The focused owner-dispatch regression is present but was not executed in the
+2026-07-15 source-only audit.

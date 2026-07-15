@@ -2,7 +2,16 @@
 
 ## Status
 
-Open; focused implementation blocker for `simple_2d_renderdoc_backend_equivalence`.
+Rust-seed parser source fix implemented; focused regression and real RenderDoc
+inspector execution remain pending.
+
+## Resolution status (2026-07-15)
+
+The Rust seed parser now consumes a complete single-line `else if` chain instead
+of leaving the later `Else` token for expression parsing. The pure-Simple parser
+already follows the intended chain shape and required no parallel rewrite.
+Neither the focused parser regression nor the full inspector source was
+executed in this source-only audit, so no runtime PASS is claimed.
 
 ## Reproduction
 

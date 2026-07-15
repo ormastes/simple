@@ -7,8 +7,9 @@
 
 **Status (2026-07-15):** Pure-Simple scalar-global initialization fix landed.
 Strict default-LLVM + explicit-Cranelift direct/getter first-read regression added to
-`scripts/check/check-native-seed-parity.shs`; execution awaits a fresh
-pure-Simple compiler binary.
+`scripts/check/check-native-seed-parity.shs`. The same regression now covers
+read-then-write name resolution and interpolation of the module slot; execution
+awaits a fresh pure-Simple compiler binary.
 
 ## Repro
 
@@ -60,8 +61,15 @@ Use i64 0/1 module-level flags; keep bool-returning accessor fns
 
 ## Second finding (same session): read+write same fn → read sees nil (BOTH modes)
 
-A fn that both READS and ASSIGNS the same module-level var sees `nil` on the
-read — in interpreter AND native. A read-only getter fn in between fixes it:
+**Resolved in source (2026-07-15):** MIR global reads and writes now route the
+resolved module binding through the shared symbol id. The strict dual-backend
+case now proves a read followed by a write in one function and a subsequent
+interpolated read of the same module slot. Runtime execution remains pending the
+fresh pure-Simple compiler binary noted above.
+
+The original failure was that a fn which both READS and ASSIGNS the same
+module-level var saw `nil` on the read — in interpreter AND native. A read-only
+getter fn in between fixed it:
 
 ```simple
 var F = 0

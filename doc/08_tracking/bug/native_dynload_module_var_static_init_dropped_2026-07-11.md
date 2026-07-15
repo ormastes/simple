@@ -1,7 +1,16 @@
 # Native dynload build drops static initializers on module-level `var` globals
 
 ## Status
-Open. Worked around in source (`examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl`).
+Source implemented for scalar initialization, load, and store. Strict
+LLVM/Cranelift initialization and mutation execution remains pending; retain
+the source workaround until that proof passes.
+
+## Resolution (2026-07-15)
+
+The pure-Simple Cranelift dynload adapter now declares writable scalar globals,
+applies their initial values, and routes global loads/stores through the shared
+SFFI bridge. The focused initialization/mutation regression was added but not
+executed in this source-only audit.
 
 ## Severity
 High — any zero/constant-initialized module-level mutable global comes up holding

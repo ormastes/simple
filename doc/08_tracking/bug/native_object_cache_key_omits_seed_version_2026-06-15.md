@@ -1,5 +1,8 @@
 # Bug: native-build incremental object cache key omits the compiler/seed version
 
+**Status (2026-07-15):** source implemented; fresh executable cache proof was
+not run in the source-only audit.
+
 - **ID:** native_object_cache_key_omits_seed_version_2026-06-15
 - **Severity:** P2 (silent: stale `.o` from an older compiler are reused after a
   codegen change, so the new codegen never reaches the link)
@@ -38,3 +41,9 @@ seed's codegen changes but the source does not, the key is unchanged → stale h
 Any future codegen change to the Rust seed silently no-ops on cached modules
 until the cache is manually cleared — easy to mistake for "my change didn't
 work."
+
+## Resolution (2026-07-15)
+
+The seed object-cache key now includes a cached fingerprint of the running
+compiler executable. Source and build options may remain unchanged, but a
+different compiler executable selects a different object key.

@@ -1,6 +1,8 @@
 # BUG: native path — `.push()` on untyped arrays fatal + `[""; N]` fill-literal emits invalid IR
 
-**Status:** OPEN (found 2026-07-11 during #138 Phase-2 --entry injection attempt)
+**Status (2026-07-15):** source implemented for all three facets. Historical
+native evidence covers push/fill; strict concat-forwarding execution remains
+pending.
 
 ## Symptom 1: .push() unresolved
 
@@ -21,6 +23,15 @@ A string-concat result passed through `extract_rt_string_array` into
 `rt_native_build` vanished (injected token lost; the build silently flipped to
 a full 10862-file compile — the wrong-entry default in
 `rt_native_build_silent_wrong_entry_default_2026-07-11.md` compounding).
+
+**Resolved in source:** text `+` lowers to `rt_strcat_tagged`, whose C owner
+returns a registered tagged `RtCoreString`; the pure-Simple runtime mirrors the
+same ABI via `rt_string_concat`. The real Rust `extract_rt_string_array`
+consumer is covered by
+`scripts/check/check-native-concat-string-array-forward.shs`, using
+`rt_execute_native` to distinguish a preserved concat argument from a dropped
+one under default LLVM and explicit Cranelift. Execution requires the bootstrap
+`SIMPLE_RUNTIME_PATH/libsimple_native_all.a` provider and remains pending.
 
 ## Context
 

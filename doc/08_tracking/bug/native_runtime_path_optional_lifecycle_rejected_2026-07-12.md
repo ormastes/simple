@@ -1,5 +1,8 @@
 # Native runtime path rejects archives without optional lifecycle hooks
 
+**Status (2026-07-15):** source implemented; fresh native-all bootstrap
+execution remains pending.
+
 The native runtime selector rejected the established Vulkan-capable
 `libsimple_runtime.a` because it required optional `__simple_runtime_init`,
 `__simple_runtime_shutdown`, `rt_cli_arg_count`, and `rt_cli_arg_at` symbols.

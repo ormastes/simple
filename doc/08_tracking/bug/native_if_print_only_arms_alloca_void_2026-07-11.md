@@ -1,6 +1,14 @@
 # BUG: native path — statement-form `if` with print-only arms emits `%lN = alloca void` (invalid IR)
 
-**Status:** OPEN (found 2026-07-11 by #138 Wall-3 agent)
+**Status (2026-07-15):** source implemented; historical native/oracle
+regression evidence is recorded in `3f6dbe1b4abd`.
+
+## Resolution
+
+Statement-form Unit results no longer require an LLVM `void` stack slot. The
+backend materializes any dead spill slot as the universal `i64` word, while
+value-producing `if` and `match` expressions retain their real type. No fresh
+execution was performed during the 2026-07-15 source audit.
 
 ## Symptom
 

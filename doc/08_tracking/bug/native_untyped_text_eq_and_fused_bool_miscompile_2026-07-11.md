@@ -1,6 +1,14 @@
 # BUG: native path — untyped text `==` never matches + fused boolean conditions evaluate wrong
 
-**Status:** OPEN (found 2026-07-11 during #138 Phase-2 --entry injection attempt)
+**Status (2026-07-15):** source implemented; historical native/oracle
+regression evidence is recorded in `e4471d60acb6`.
+
+## Resolution
+
+Erased text equality now uses the shared runtime content comparison instead of
+comparing handles. The frontend preserves the actual unary operator, and LLVM
+widens logical `not` through the existing comparison helper. No fresh
+execution was performed during the 2026-07-15 source audit.
 
 ## Symptoms (in the natively-compiled bootstrap_main binary)
 
