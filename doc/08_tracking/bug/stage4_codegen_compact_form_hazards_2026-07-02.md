@@ -1146,8 +1146,11 @@ Binaries: scratchpad/stage4_it17{,b..o}; build cmd unchanged (NEVER omit
   NamedVar eval arm (env lookup, Function-by-name fallback).
 - Qualified ALL bare patterns in interpreter.spl/interpreter_calls.spl
   (Value.*, HirBinOp.*, HirUnaryOp.*, HirAssignOp.*, MethodResolution.*) and
-  lower_binop/lower_unaryop (BinOp.*/UnaryOp.*, + defensive `case _` net).
-- eval_binop: op nil-guard (kept, harmless).
+  lower_binop/lower_unaryop (BinOp.*/UnaryOp.*). Unknown flat/AST binary
+  operators now fail before backend execution instead of using a defensive
+  `Add` value.
+- eval_binop: a missing HIR operator now returns a span-bearing internal error
+  instead of silently executing `Add`; fresh stage4 execution remains pending.
 - Probe cleanup done (deploy precondition): all ungated [LHE*]/[LGL]/[LBO]/
   [LBU]/[LST*]/[LM]/[FBC]/[FBS]/[MS*] eprints removed; the `[frontend] parsed
   module` STDOUT print is now gated behind SIMPLE_COMPILER_TRACE

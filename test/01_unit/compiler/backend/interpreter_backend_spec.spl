@@ -1,5 +1,7 @@
 use compiler.feature.codegen.backends.interpreter.backend.{create_interpreter_backend}
 use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
+use compiler.backend.backend_types.{BackendErrorKind, Value}
+use compiler.common.diagnostics.span.{Span}
 use std.io_runtime.{file_read}
 
 describe "Interpreter Backend":
@@ -33,6 +35,24 @@ describe "Interpreter Backend":
         val backend = InterpreterBackendImpl.new()
 
         expect(backend.name()).to_equal("interpreter")
+
+    it "rejects a missing binary operator":
+        val backend = InterpreterBackendImpl.new()
+        val result = backend.eval_binop(nil, Value.Int(1), Value.Int(2), Span.default())
+        var failed_closed = false
+        match result:
+            case Err(err):
+                failed_closed = err.kind == BackendErrorKind.Internal and err.span.? and err.message.contains("missing HIR binary operator")
+            case Ok(_):
+                failed_closed = false
+        expect(failed_closed).to_equal(true)
+
+    it "rejects unknown binary operators before evaluation":
+        val flat_source = file_read("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
+        val hir_source = file_read("src/compiler/20.hir/hir_lowering/expressions.spl")
+        val driver_source = file_read("src/compiler/80.driver/driver.spl")
+        val guarded = flat_source.contains("assert false, \"unsupported flat binary operator kind") and hir_source.contains("self.error(\"invalid binary operator\"") and driver_source.contains("message.starts_with(\"invalid binary operator\")")
+        expect(guarded).to_equal(true)
 
     it "keeps function lookup off shared optional mutation":
         val calls_source = file_read("src/compiler/70.backend/backend/interpreter_calls.spl")
