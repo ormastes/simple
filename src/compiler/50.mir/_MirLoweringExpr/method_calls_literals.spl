@@ -1516,18 +1516,7 @@ impl MirLowering:
 
                 val method_operand = self.symbol_to_operand(method_id)
                 val return_type = self.resolved_call_return_type(method_id)
-                var b = self.builder
-                val result = b.emit_call(method_operand, arg_operands, return_type)
-                if val result_local = result:
-                    self.builder = b
-                    result_local
-                else:
-                    val temp = b.new_temp(MirType.i64())
-                    # void call: define the placeholder so a consumer never
-                    # reads an undefined local (use-before-def -> llvm-lib NULL)
-                    b.emit_const(temp, MirConstValue.Int(0), MirType.i64())
-                    self.builder = b
-                    temp
+                self.emit_resolved_direct_call(method_operand, arg_operands, return_type)
 
             case Unresolved:
                 # Bug #138/#156 keystone: minimal-viable native resolution of
@@ -1552,6 +1541,42 @@ impl MirLowering:
                 # ONCE here (reused below by the `push` special-case, which
                 # previously re-lowered it) to avoid double-evaluating a
                 # side-effecting receiver expression.
+                var static_receiver_name = ""
+                match receiver.kind:
+                    case NamedVar(static_symbol, static_name):
+                        val static_def = self.symbols.get_symbol(static_symbol)
+                        if static_def != nil:
+                            match static_def.kind:
+                                case Class | Struct | Enum: static_receiver_name = static_name
+                                case _: ()
+                    case Var(static_symbol):
+                        val static_def = self.symbols.get_symbol(static_symbol)
+                        if static_def != nil:
+                            match static_def.kind:
+                                case Class | Struct | Enum: static_receiver_name = static_def.name
+                                case _: ()
+                    case _: ()
+                val static_method_key = "static::{static_receiver_name}::{method}"
+                if static_receiver_name != "" and self.struct_method_syms.has(static_method_key):
+                    if self.struct_method_ambiguous.has(method):
+                        panic("compile error: ambiguous static method call: {static_receiver_name}.{method}")
+                    val static_method_id = self.struct_method_syms[static_method_key]
+                    var static_args: [MirOperand] = []
+                    for arg in args:
+                        val static_arg = self.lower_expr(arg.value)
+                        static_args.push(mir_operand_copy(static_arg))
+                    var static_return_type = self.resolved_call_return_type(static_method_id)
+                    val static_result_name = self.struct_method_return_names.get("{static_receiver_name}::{method}")
+                    if static_result_name != nil and static_result_name != "":
+                        for static_result_symbol in self.symbols.symbols.values():
+                            if static_result_symbol.name == static_result_name:
+                                match static_result_symbol.kind:
+                                    case Class | Struct | Enum:
+                                        static_return_type = MirType(kind: MirTypeKind.Struct(static_result_symbol.id))
+                                    case _: ()
+                    val static_result = self.emit_resolved_direct_call(self.symbol_to_operand(static_method_id), static_args, static_return_type)
+                    return static_result
+
                 val unresolved_receiver_local = if wb_kind != 0: wb_receiver else: self.lower_expr(receiver)
                 val unresolved_struct_name = self.struct_value_syms.get(unresolved_receiver_local.id)
                 if unresolved_struct_name != nil and unresolved_struct_name != "":

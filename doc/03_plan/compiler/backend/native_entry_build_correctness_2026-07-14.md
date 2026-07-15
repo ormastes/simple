@@ -13,10 +13,11 @@ failure is **never** silently converted to a wrong answer.
 - **Gate 1 — matrix:** `scripts/check/native-smoke-matrix.shs` must report
   `total=15 pass=15 fail=0 codegen_fallback_hits=0`.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
-  regression harness) must report `native_seed_parity=true`, currently **32/32**.
+  regression harness) must report `native_seed_parity=true`, currently **38/38**.
   Three modes: PARITY (seed==native after newline-normalize), NATIVE-AUTHORITATIVE
   (oracle provably broken → assert native==known-correct + document divergence),
-  LOUD-FAIL (int-overflow, match-guards must build-fail).
+  LOUD-FAIL (int-overflow, match-guards, and ambiguous static constructors must
+  build-fail without leaving a binary).
 - Land only via FF-replay onto the `git ls-remote` tip; verify every push with
   `ls-remote` + content-grep. **No branches.** Seed/compiler **redeploys need
   explicit user go-ahead** — this campaign edits `src/compiler/*.spl`, which
@@ -61,23 +62,21 @@ in the parity harness NATIVE-AUTHORITATIVE cases:
 - tuple pattern match — seed gives `0`; native `35`.
 - `me` receiver, module globals, string ordering `"a"<"z"` — seed all wrong.
 
-## In flight (7 lanes, 2026-07-14)
+## Seven-lane sweep outcome (2026-07-14)
 
-Verified-and-landing / verifying against the oracle before FF-push:
+Landed results from the sweep:
 
 - **entrypoint** — bare `fn main():` now emits explicit `ret i64 0`
-  (`xor %eax,%eax`) instead of relying on register garbage. **VERIFIED**
-  (disasm-confirmed, oracle rc=0, single-file `core_codegen.spl` in scope);
-  landing.
+  (`xor %eax,%eax`) instead of relying on register garbage (`7b92cf8a5459`).
 - **exprdispatch2** — `a + [x]` array-concat SIGSEGV + bool/float in string
-  interpolation (`native_array_concat_segv`, `native_interp_bool_float`).
+  interpolation fixed (`e9165c53a667`).
 - **dictcallkeys** — fn-call-returned dict `d[k]` during `keys()` returns 0
-  (`native_dict_from_call_keys_index`): call-result dict local not tagged
-  `runtime_dict_locals`.
-- **numericconv** — int↔float / sized-int conversion & coercion sweep.
-- **closures2** — escaping/capturing closures, IIFE `(\x: x+1)(5)`.
-- **errhandling** — Result / `?` / `.unwrap` edge cases.
-- **collections** — Set/Queue/Stack + un-swept array/dict methods (discovery).
+  fixed by tagging call-result dict locals (`abde1838e3e4`).
+- **closures2** — IIFE lowering landed (`bc33ade0120a`).
+- **parity** — the sweep cases landed in the shared harness (`e7282ee52f42`).
+- **errhandling/collections** — discovery produced the durable bug files listed
+  below; the static constructor crash is resolved by the 2026-07-15 bottom-up
+  fix and its parity cases.
 
 **HARD RULE for every lane:** never run `bootstrap-from-scratch.sh`, `cargo`,
 `bin/simple build bootstrap`, `--deploy`, or anything that writes `bin/release`
@@ -88,8 +87,11 @@ the shared binary — deploys require explicit user go-ahead).
 
 - Fold a parity-harness case per landed lane fix (inline, not via a sub-lane —
   the rogue-redeploy incident showed sub-lanes can wander into heavy ops).
-- Open filed bugs still unfixed: see `doc/08_tracking/bug/native_*` (array/dict
-  method gaps, cross-module generic erasure, any-param forwarding).
+- Open filed bugs still unfixed, in bottom-up order:
+  - `native_toplevel_script_len_collapses_to_zero_2026-07-14.md`
+  - `native_cross_fn_result_text_payload_race_2026-07-14.md`
+  - `native_result_unwrap_silent_wrong_161_2026-07-14.md`
+  - `native_try_op_on_option_silent_wrong_2026-07-14.md`
 - The whole-compiler redeploy (#99 / stage4) remains separate and blocked on
   seed-backend bugs (cranelift enum miscompile + seed-LLVM mcall_direct arg
   count) — **not** part of this correctness campaign; see
