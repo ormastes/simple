@@ -267,7 +267,17 @@ impl<'a> Parser<'a> {
             | TokenKind::Elif
             | TokenKind::Match
             | TokenKind::Dollar => self.parse_primary_control(),
-            TokenKind::Grid => self.parse_primary_math(),
+            TokenKind::Grid => {
+                let next = self.peek_next();
+                let starts_literal = next.kind == TokenKind::Colon
+                    || matches!(&next.kind, TokenKind::Identifier { name, .. } if name == "device");
+                if starts_literal {
+                    self.parse_primary_math()
+                } else {
+                    self.advance();
+                    Ok(Expr::Identifier("grid".to_string()))
+                }
+            }
             TokenKind::At => {
                 // SFFI call prefix: @rt_function_name
                 // No ambiguity: decorators only appear before declarations, not in expressions

@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-04
 **Severity:** high (silent parser corruption, error points nowhere near the cause)
-**Status:** open — workaround: never name anything `grid` (or `unit`)
+**Status:** source fixed in Rust parser 2026-07-15; focused execution pending
 
 ## Symptom
 
@@ -33,6 +33,17 @@ Either make `grid`/`unit` hard keywords with a proper "reserved word used as
 identifier" diagnostic at the declaration site, or fix the grammar so they
 parse as ordinary identifiers. The current middle state (accepted at
 declaration, corrupts later use) is the worst option.
+
+## Resolution
+
+The Rust parser now treats `grid` as a grid literal only when lookahead starts
+the literal grammar (`:` or `device`). In every other value position it becomes
+an ordinary identifier, so field access, indexing, named arguments, and bare
+reads no longer enter grid-literal parsing. `unit` was already contextual, and
+the pure-Simple lexer never reserved either spelling.
+
+Focused Rust regressions cover the original parameter/named-field/method/index
+shape and preserve `grid:` literals. Execution is pending.
 
 ## Cross-refs
 

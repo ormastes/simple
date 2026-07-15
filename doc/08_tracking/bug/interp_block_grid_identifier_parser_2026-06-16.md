@@ -1,7 +1,8 @@
 # Bug: `block` / `grid` as identifier names trip the parser near named-field construction
 
 **Found:** 2026-06-16 · **Severity:** P3 (parser ergonomics) · **Area:** parser / frontend
-**Status:** OPEN (worked around by renaming)
+**Status:** source fixed for `grid` in Rust parser 2026-07-15; focused execution
+pending (`block` was not reserved)
 
 ## Summary
 Using `block` (and apparently `grid`) as a function **parameter / local name** causes a
@@ -33,6 +34,14 @@ Either (a) allow `block`/`grid` as ordinary identifiers in value position (they 
 the documented reserved list: gen, val, def, exists, actor, assert, join, pass_*), or
 (b) emit a precise diagnostic at the identifier with a "reserved/soft-keyword" message
 instead of a misleading colon-expected error at a downstream comma.
+
+## Resolution
+
+The collision was specific to the Rust parser's `grid` token; `block` is an
+ordinary identifier and was incidental. Grid-literal parsing is now selected
+only by its contextual lookahead, while other `grid` uses produce an identifier.
+The pure-Simple parser already handled both names normally. A focused regression
+uses the original function-parameter and named-field construction shape.
 
 ## Discovered by
 std.compute runtime-pipeline build (`src/lib/gc_async_mut/compute/compute_run.spl`).

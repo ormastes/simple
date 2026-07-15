@@ -106,12 +106,25 @@ fn test_method_call() {
 }
 
 #[test]
+fn grid_is_an_identifier_outside_grid_literal_syntax() {
+    parse(
+        "fn f(grid: i64, block: i64) -> i64:\n    val cfg = GpuLaunchConfig(grid_x: grid, block_x: block)\n    grid.len()\n    grid[0]\n",
+    )
+    .expect("grid identifier uses should parse");
+}
+
+#[test]
+fn grid_literal_remains_contextual() {
+    for source in ["grid:\n    | 1 | 2 |\n", "grid device=\"cuda\":\n    | 1 | 2 |\n"] {
+        let module = parse(source).expect("grid literal should parse");
+        assert!(matches!(module.items[0], Node::Expression(Expr::GridLiteral { .. })));
+    }
+}
+
+#[test]
 fn test_constant_method_call_is_not_parsed_as_static_type_path() {
     let module = parse("FRAME_HEADER_WORDS.to_u32()").unwrap();
-    let Node::Expression(Expr::MethodCall {
-        receiver, method, ..
-    }) = &module.items[0]
-    else {
+    let Node::Expression(Expr::MethodCall { receiver, method, .. }) = &module.items[0] else {
         panic!("Expected method call, got {:?}", module.items[0]);
     };
     assert_eq!(**receiver, Expr::Identifier("FRAME_HEADER_WORDS".to_string()));
