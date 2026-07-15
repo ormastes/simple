@@ -42,6 +42,17 @@ fn parse_while_loop() {
     assert!(matches!(&items[0], Node::While(_)));
 }
 
+#[test]
+fn parse_inline_while_loop() {
+    let items = parse("while x < 10: x = x + 1");
+    let Node::While(while_stmt) = &items[0] else {
+        panic!("Expected While node");
+    };
+
+    assert_eq!(while_stmt.body.statements.len(), 1);
+    assert!(matches!(&while_stmt.body.statements[0], Node::Assignment(_)));
+}
+
 // For loop
 #[test]
 fn parse_for_loop() {

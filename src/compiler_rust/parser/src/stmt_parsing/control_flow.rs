@@ -539,31 +539,36 @@ impl<'a> Parser<'a> {
         let (let_pattern, condition) = self.parse_optional_let_pattern()?;
         self.expect(&TokenKind::Colon)?;
 
-        // Parse block header (NEWLINE then INDENT)
-        self.expect(&TokenKind::Newline)?;
-        // Consume deferred Dedent tokens from multi-line condition expression.
-        // When a while condition spans multiple lines (e.g., `while expr and\n   expr:`),
-        // the expression parser consumes Indent tokens for line continuation, and
-        // matching Dedents appear between Newline and the block's Indent.
-        while self.deferred_dedent_count > 0 {
-            match &self.current.kind {
-                TokenKind::Newline => {
-                    self.advance();
+        let (body, invariants) = if self.check(&TokenKind::Newline) {
+            // Parse block header (NEWLINE then INDENT)
+            self.expect(&TokenKind::Newline)?;
+            // Consume deferred Dedent tokens from multi-line condition expression.
+            // When a while condition spans multiple lines (e.g., `while expr and\n   expr:`),
+            // the expression parser consumes Indent tokens for line continuation, and
+            // matching Dedents appear between Newline and the block's Indent.
+            while self.deferred_dedent_count > 0 {
+                match &self.current.kind {
+                    TokenKind::Newline => {
+                        self.advance();
+                    }
+                    TokenKind::Dedent => {
+                        self.advance();
+                        self.deferred_dedent_count -= 1;
+                    }
+                    _ => break,
                 }
-                TokenKind::Dedent => {
-                    self.advance();
-                    self.deferred_dedent_count -= 1;
-                }
-                _ => break,
             }
-        }
-        self.expect(&TokenKind::Indent)?;
+            self.expect(&TokenKind::Indent)?;
 
-        // Parse loop invariants at the start of the block body
-        let invariants = self.parse_loop_invariants()?;
+            // Parse loop invariants at the start of the block body
+            let invariants = self.parse_loop_invariants()?;
 
-        // Parse rest of block body
-        let body = self.parse_block_body()?;
+            // Parse rest of block body
+            let body = self.parse_block_body()?;
+            (body, invariants)
+        } else {
+            (self.parse_inline_or_block()?, vec![])
+        };
 
         Ok(Node::While(WhileStmt {
             span: Span::new(

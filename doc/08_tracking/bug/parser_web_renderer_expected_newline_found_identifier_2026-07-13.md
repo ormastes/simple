@@ -2,10 +2,12 @@
 
 **ID:** parser_web_renderer_expected_newline_found_identifier_2026-07-13
 **Filed:** 2026-07-13
-**Status:** WORKED AROUND (source rewritten to block form); parser gap NOT fixed
+**Status:** Rust parser source fixed 2026-07-15; focused regression added,
+execution pending
 **Severity:** P2 — load-path parse failure blocking a showcase app
-**Component:** compiler frontend / parser (both deployed self-hosted `bin/simple`
-and the fresh seed reject the same input)
+**Component:** compiler frontend / Rust seed parser. The pure-Simple parser was
+already correct because its shared `parse_block()` accepts an inline statement
+when no indent follows the colon.
 
 ## Symptom
 
@@ -21,10 +23,9 @@ triggers it.
 
 ## Root cause (bisected + minimal repro)
 
-Unlike `if COND: STMT`, which the parser accepts as a single-line inline-body
-form, `while COND: STMT` is NOT supported at all — regardless of what `STMT`
-is (assignment, `break`, function call). Minimal isolated repro (fails to
-parse with the exact same error):
+The Rust `parse_while_with_label` path unconditionally required `Newline` and
+`Indent` after the colon, unlike the adjacent inline-capable `if` and `for`
+paths. Minimal isolated repro (previously failed with the exact same error):
 ```simple
 fn f() -> i64:
     var j = 0
@@ -43,7 +44,15 @@ gap from the cast/generic-misparse family documented in
 ambiguity, no `and`/`or` line continuation involved; the bare presence of a
 single-line `while` body is the trigger.
 
-## Fix applied
+## Source fix (2026-07-15)
+
+The Rust while parser now preserves its existing newline/deferred-dedent/
+invariant block path and uses the existing `parse_inline_or_block()` owner when
+the token after `:` is not a newline. Inline bodies carry no loop invariants.
+The focused AST regression parses `while x < 10: x = x + 1` and requires one
+assignment in the resulting `WhileStmt` body.
+
+## Workaround applied
 
 `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`,
 `parse_font_shorthand_family` (the only occurrences in the file, all 6 within
@@ -58,16 +67,10 @@ Semantics-preserving — same loop body, just indented onto its own line.
 6 instances fixed (lines 1880, 1883, 1886, 1889, 1890, 1891 in the original
 file).
 
-## Requested fix
-
-Either support single-line `while COND: STMT` symmetrically with `if COND:
-STMT`, or emit a targeted diagnostic ("single-line while bodies are not
-supported; use an indented block") instead of the generic "expected Newline,
-found Identifier" token error, which gives no hint about the actual
-construct at fault.
+The source workaround may remain: block form is explicit, equivalent, and
+continues to exercise the unchanged block parser.
 
 ## Verification
 
-Harness (`use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.*`
-then `print("ok")`) now loads and prints `ok` on both `bin/simple` and the
-fresh seed `src/compiler_rust/target/bootstrap/simple`.
+The focused Rust parser regression and a standalone seed parse remain to be
+run for this source change. No runtime PASS is claimed by this update.
