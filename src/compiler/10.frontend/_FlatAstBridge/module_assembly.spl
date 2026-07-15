@@ -390,6 +390,16 @@ fn flat_ast_to_module(path: text) -> Module:
                 top_level_stmts.push(Stmt(kind: StmtKind.Expr(init), span: span))
             else:
                 constants[c_name] = decl_const
+                # If this file is later recognized as a script (it has bare
+                # expressions and no explicit main), replay its bindings in
+                # the synthetic main too. That preserves source order and
+                # gives compound values normal local runtime metadata instead
+                # of forcing arrays/structs through scalar global constants.
+                val script_binding_type = Type(kind: TypeKind.Infer, span: span)
+                if tag_text == "5":
+                    top_level_stmts.push(Stmt(kind: StmtKind.Var(c_name, script_binding_type, init), span: span))
+                else:
+                    top_level_stmts.push(Stmt(kind: StmtKind.Val(c_name, script_binding_type, init), span: span))
         elif tag_text == "6":
             val module_path = decl_get_name(idx)
             val items_list = decl_get_imports(idx)
@@ -464,7 +474,7 @@ fn flat_ast_to_module(path: text) -> Module:
     # Synthetic main: wrap bare top-level statements so script-style sources
     # (`-c` snippets, single files without `fn main`) actually execute instead
     # of the interpreter backend returning Unit (no `main` found).
-    if top_level_stmts.len() > 0:
+    if top_level_stmt_names.len() > 0:
         if not functions.contains("main"):
             val main_span = make_span()
             functions["main"] = parser_function_new(

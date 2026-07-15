@@ -13,7 +13,7 @@ failure is **never** silently converted to a wrong answer.
 - **Gate 1 — matrix:** `scripts/check/native-smoke-matrix.shs` must report
   `total=15 pass=15 fail=0 codegen_fallback_hits=0`.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
-  regression harness) must report `native_seed_parity=true`, currently **38/38**.
+  regression harness) must report `native_seed_parity=true`, currently **39/39**.
   Three modes: PARITY (seed==native after newline-normalize), NATIVE-AUTHORITATIVE
   (oracle provably broken → assert native==known-correct + document divergence),
   LOUD-FAIL (int-overflow, match-guards, and ambiguous static constructors must
@@ -88,7 +88,6 @@ the shared binary — deploys require explicit user go-ahead).
 - Fold a parity-harness case per landed lane fix (inline, not via a sub-lane —
   the rogue-redeploy incident showed sub-lanes can wander into heavy ops).
 - Open filed bugs still unfixed, in bottom-up order:
-  - `native_toplevel_script_len_collapses_to_zero_2026-07-14.md`
   - `native_cross_fn_result_text_payload_race_2026-07-14.md`
   - `native_result_unwrap_silent_wrong_161_2026-07-14.md`
   - `native_try_op_on_option_silent_wrong_2026-07-14.md`
