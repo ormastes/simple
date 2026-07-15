@@ -32,8 +32,9 @@ use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
 }
 use std.gc_async_mut.io.vulkan_sffi.{vulkan_get_device}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence}
-use std.common.gpu.font_atlas_composite.{font_atlas_composite_vulkan_glsl_source}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_atlas_composite_vulkan_glsl_source}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.gc_async_mut.io.time_ops.{time_now_nanos}
 
 # Push constant size in bytes — matches VulkanBackend's VK_PUSH_CONSTANT_SIZE
 val _VS_PUSH_CONSTANT_SIZE: i64 = 64
@@ -98,6 +99,7 @@ class VulkanSession:
 
     font_atlas_artifact_mode: text
     font_atlas_artifact_identity: text
+    font_atlas_emission_compile_ns: i64
     font_atlas_status: text
     selected_device_index: i64
     device_name: text
@@ -143,6 +145,7 @@ class VulkanSession:
             pipe_font_atlas: 0,
             font_atlas_artifact_mode: "none",
             font_atlas_artifact_identity: "",
+            font_atlas_emission_compile_ns: 0,
             font_atlas_status: "not-installed",
             selected_device_index: -1,
             device_name: "",
@@ -306,7 +309,10 @@ class VulkanSession:
                 shader_handle: self.shader_font_atlas,
                 pipeline_handle: self.pipe_font_atlas,
                 device_name: self.device_name, device_type: self.device_type,
-                driver_identity: self.driver_identity
+                driver_identity: self.driver_identity,
+                artifact_identity: self.font_atlas_artifact_identity,
+                entry_name: "main", program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION,
+                emission_compile_ns: self.font_atlas_emission_compile_ns
             )
         if not self.is_valid():
             return VulkanFontPipelineEvidence(
@@ -316,6 +322,7 @@ class VulkanSession:
                 driver_identity: self.driver_identity
             )
 
+        val emission_compile_started = time_now_nanos()
         var mode = "runtime-glsl"
         if spirv_bytes.len() > 0:
             mode = "precompiled-spirv"
@@ -353,11 +360,19 @@ class VulkanSession:
         self.font_atlas_status = "ready"
         self.font_atlas_artifact_mode = mode
         self.font_atlas_artifact_identity = artifact_identity
+        val emission_compile_finished = time_now_nanos()
+        self.font_atlas_emission_compile_ns = if emission_compile_finished > emission_compile_started:
+            emission_compile_finished - emission_compile_started
+        else:
+            0
         VulkanFontPipelineEvidence(
             status: "ready", reason: "installed", artifact_mode: mode,
             shader_handle: self.shader_font_atlas, pipeline_handle: self.pipe_font_atlas,
-                device_name: self.device_name, device_type: self.device_type,
-                driver_identity: self.driver_identity
+            device_name: self.device_name, device_type: self.device_type,
+            driver_identity: self.driver_identity,
+            artifact_identity: self.font_atlas_artifact_identity,
+            entry_name: "main", program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION,
+            emission_compile_ns: self.font_atlas_emission_compile_ns
         )
 
     me font_atlas_pipeline_evidence() -> VulkanFontPipelineEvidence:
@@ -369,7 +384,10 @@ class VulkanSession:
                 shader_handle: self.shader_font_atlas,
                 pipeline_handle: self.pipe_font_atlas,
                 device_name: self.device_name, device_type: self.device_type,
-                driver_identity: self.driver_identity
+                driver_identity: self.driver_identity,
+                artifact_identity: self.font_atlas_artifact_identity,
+                entry_name: "main", program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION,
+                emission_compile_ns: self.font_atlas_emission_compile_ns
             )
         VulkanFontPipelineEvidence(
             status: "unavailable",
@@ -429,6 +447,7 @@ class VulkanSession:
         self.shader_font_atlas = 0
         self.font_atlas_artifact_mode = "none"
         self.font_atlas_artifact_identity = ""
+        self.font_atlas_emission_compile_ns = 0
         self.font_atlas_status = "not-installed"
         self.selected_device_index = -1
         self.device_name = ""

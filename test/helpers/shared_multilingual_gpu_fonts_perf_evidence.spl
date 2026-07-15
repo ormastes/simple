@@ -12,7 +12,7 @@ val FONT_PERF_FACE_DEVANAGARI_SHA256 = "9ce7b04f60e363d8870e5997744cf85cf69d38a4
 val FONT_PERF_FACE_ARABIC_PATH = "assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf"
 val FONT_PERF_FACE_ARABIC_SHA256 = "63111b5b2e074dd48cc67692e0a2726d86ee94c1c37fe8598257b7b4e87e869e"
 val FONT_PERF_SAMPLE_COUNT: i64 = 11
-# Compatibility identifier retained for existing helper callers; v4 pins the
+# Compatibility identifier retained for existing helper callers; v5 pins the
 # complete witnesses below rather than pretending one scalar proves a language.
 val FONT_PERF_CODEPOINTS = "U+0041,U+4E2D,U+00D1,U+0905,U+0628,U+00C9,U+00C3,U+042F,U+0627,U+0049"
 val FONT_PERF_WITNESS_MAPPING = "en:English|zh:中文|es:Español|hi:हिन्दी|ar:العربية|fr:français|pt:Português|ru:Русский|ur:اردو|id:Indonesia"
@@ -54,6 +54,48 @@ class FontPerfBudgetEvidence:
     device_loss_batch_identity_after: text
     cpu_after_device_loss_p95_ns: i64
     cpu_after_device_loss_samples_ns: [i64]
+    stage_shaping_p95_ns: i64 = 0
+    stage_material_p95_ns: i64 = 0
+    stage_emission_compile_ns: i64 = 0
+    stage_dirty_upload_p95_ns: i64 = 0
+    stage_queue_device_p95_ns: i64 = 0
+    stage_sync_p95_ns: i64 = 0
+    stage_present_readback_p95_ns: i64 = 0
+    stage_cpu_oracle_p95_ns: i64 = 0
+    stage_shaping_samples_ns: [i64] = []
+    stage_material_samples_ns: [i64] = []
+    stage_dirty_upload_samples_ns: [i64] = []
+    stage_queue_device_samples_ns: [i64] = []
+    stage_sync_samples_ns: [i64] = []
+    stage_present_readback_samples_ns: [i64] = []
+    stage_cpu_oracle_samples_ns: [i64] = []
+    promotion_artifact_identity: text = ""
+    promotion_entry_name: text = ""
+    promotion_program_version: i64 = 0
+    promotion_batch_identity: text = ""
+    promotion_atlas_payload_sha256: text = ""
+    promotion_shader_handle: i64 = 0
+    promotion_pipeline_handle: i64 = 0
+    promotion_atlas_buffer_handle: i64 = 0
+    promotion_params_buffer_handle: i64 = 0
+    promotion_command_handle: i64 = 0
+    promotion_fence_handle: i64 = 0
+    promotion_readback_buffer_handle: i64 = 0
+    promotion_quad_count: i64 = 0
+    promotion_dispatch_count: i64 = 0
+    promotion_submitted: bool = false
+    promotion_completion_waited: bool = false
+    promotion_fence_evidence_available: bool = false
+    promotion_fence_destroyed: bool = false
+    promotion_readback_source: text = ""
+    promotion_readback_byte_count: i64 = 0
+    promotion_readback_nonblank_pixels: i64 = 0
+    promotion_device_checksum: i64 = 0
+    promotion_oracle_checksum: i64 = 0
+    promotion_parity: bool = false
+    promotion_device_executed: bool = false
+    promotion_ready: bool = false
+    promotion_present_mode: text = ""
 
 fn unavailable_font_perf_evidence(reason: text) -> FontPerfBudgetEvidence:
     FontPerfBudgetEvidence(
@@ -96,6 +138,16 @@ fn _parse_samples(value: text) -> [i64]:
         samples.push(parsed)
     samples
 
+fn _parse_stage_samples(value: text) -> [i64]:
+    if value == "": return []
+    val parts = value.split(",")
+    var samples: [i64] = []
+    for part in parts:
+        val parsed = part.to_i64() ?? -1
+        if parsed < 0: return []
+        samples.push(parsed)
+    samples
+
 fn _valid_samples_text(value: text) -> bool:
     if value == "": return true
     val parts = value.split(",")
@@ -103,6 +155,26 @@ fn _valid_samples_text(value: text) -> bool:
     for part in parts:
         if (part.to_i64() ?? -1) <= 0: return false
     true
+
+fn _valid_stage_samples_text(value: text) -> bool:
+    if value == "": return true
+    val parts = value.split(",")
+    if parts.len() > FONT_PERF_SAMPLE_COUNT: return false
+    for part in parts:
+        if (part.to_i64() ?? -1) < 0: return false
+    true
+
+fn _valid_nonnegative_samples(samples: [i64]) -> bool:
+    for sample in samples:
+        if sample < 0: return false
+    true
+
+fn _valid_sha256(value: text) -> bool:
+    value.len() == 64
+
+fn _valid_precompiled_spirv_identity(value: text) -> bool:
+    val prefix = "precompiled-spirv:"
+    value.starts_with(prefix) and _valid_sha256(value.substring(prefix.len(), value.len()))
 
 fn _safe_record_text(value: text) -> bool:
     not value.contains("\n") and not value.contains("\r")
@@ -147,19 +219,73 @@ fn _valid_shape(evidence: FontPerfBudgetEvidence) -> bool:
     if (not _safe_record_text(evidence.reason) or not _safe_record_text(evidence.gpu_device_name) or
         not _safe_record_text(evidence.gpu_driver_identity) or not _safe_record_text(evidence.device_loss_status) or
         not _safe_record_text(evidence.device_loss_batch_identity_before) or
-        not _safe_record_text(evidence.device_loss_batch_identity_after)):
+        not _safe_record_text(evidence.device_loss_batch_identity_after) or
+        not _safe_record_text(evidence.promotion_artifact_identity) or
+        not _safe_record_text(evidence.promotion_entry_name) or
+        not _safe_record_text(evidence.promotion_batch_identity) or
+        not _safe_record_text(evidence.promotion_atlas_payload_sha256) or
+        not _safe_record_text(evidence.promotion_readback_source) or
+        not _safe_record_text(evidence.promotion_present_mode)):
         return false
     if evidence.warm_1080_p95_ns < 0 or evidence.warm_1080_p95_ns > 1000000000000 or evidence.warm_4k_p95_ns < 0 or evidence.warm_4k_p95_ns > 1000000000000: return false
     if evidence.cpu_4096_p95_ns < 0 or evidence.cpu_4096_p95_ns > 1000000000000 or evidence.gpu_4096_p95_ns < 0 or evidence.gpu_4096_p95_ns > 1000000000000: return false
     if evidence.cpu_after_device_loss_p95_ns < 0 or evidence.cpu_after_device_loss_p95_ns > 1000000000000: return false
+    if (evidence.stage_shaping_p95_ns < 0 or evidence.stage_shaping_p95_ns > 1000000000000 or
+        evidence.stage_material_p95_ns < 0 or evidence.stage_material_p95_ns > 1000000000000 or
+        evidence.stage_emission_compile_ns < 0 or evidence.stage_emission_compile_ns > 1000000000000 or
+        evidence.stage_dirty_upload_p95_ns < 0 or evidence.stage_dirty_upload_p95_ns > 1000000000000 or
+        evidence.stage_queue_device_p95_ns < 0 or evidence.stage_queue_device_p95_ns > 1000000000000 or
+        evidence.stage_sync_p95_ns < 0 or evidence.stage_sync_p95_ns > 1000000000000 or
+        evidence.stage_present_readback_p95_ns < 0 or evidence.stage_present_readback_p95_ns > 1000000000000 or
+        evidence.stage_cpu_oracle_p95_ns < 0 or evidence.stage_cpu_oracle_p95_ns > 1000000000000):
+        return false
     if evidence.warm_hits < 0 or evidence.warm_requests < 0 or evidence.rss_growth_percent < 0 or evidence.gpu_resource_high_water_bytes < 0: return false
     if not _valid_paired_rss(evidence): return false
     if evidence.warm_hits > evidence.warm_requests: return false
     if evidence.warm_1080_samples_ns.len() > FONT_PERF_SAMPLE_COUNT or evidence.warm_4k_samples_ns.len() > FONT_PERF_SAMPLE_COUNT: return false
     if evidence.cpu_4096_samples_ns.len() > FONT_PERF_SAMPLE_COUNT or evidence.gpu_4096_samples_ns.len() > FONT_PERF_SAMPLE_COUNT: return false
     if evidence.cpu_after_device_loss_samples_ns.len() > FONT_PERF_SAMPLE_COUNT: return false
+    if (evidence.stage_shaping_samples_ns.len() > FONT_PERF_SAMPLE_COUNT or
+        evidence.stage_material_samples_ns.len() > FONT_PERF_SAMPLE_COUNT or
+        evidence.stage_dirty_upload_samples_ns.len() > FONT_PERF_SAMPLE_COUNT or
+        evidence.stage_queue_device_samples_ns.len() > FONT_PERF_SAMPLE_COUNT or
+        evidence.stage_sync_samples_ns.len() > FONT_PERF_SAMPLE_COUNT or
+        evidence.stage_present_readback_samples_ns.len() > FONT_PERF_SAMPLE_COUNT or
+        evidence.stage_cpu_oracle_samples_ns.len() > FONT_PERF_SAMPLE_COUNT):
+        return false
+    if (not _valid_nonnegative_samples(evidence.stage_shaping_samples_ns) or
+        not _valid_nonnegative_samples(evidence.stage_material_samples_ns) or
+        not _valid_nonnegative_samples(evidence.stage_dirty_upload_samples_ns) or
+        not _valid_nonnegative_samples(evidence.stage_queue_device_samples_ns) or
+        not _valid_nonnegative_samples(evidence.stage_sync_samples_ns) or
+        not _valid_nonnegative_samples(evidence.stage_present_readback_samples_ns) or
+        not _valid_nonnegative_samples(evidence.stage_cpu_oracle_samples_ns)):
+        return false
     if evidence.status == "pass":
-        return evidence.warm_1080_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and evidence.warm_4k_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and evidence.cpu_4096_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and evidence.gpu_4096_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and evidence.cpu_after_device_loss_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and evidence.warm_1080_p95_ns == font_perf_p95(evidence.warm_1080_samples_ns) and evidence.warm_4k_p95_ns == font_perf_p95(evidence.warm_4k_samples_ns) and evidence.cpu_4096_p95_ns == font_perf_p95(evidence.cpu_4096_samples_ns) and evidence.gpu_4096_p95_ns == font_perf_p95(evidence.gpu_4096_samples_ns) and evidence.cpu_after_device_loss_p95_ns == font_perf_p95(evidence.cpu_after_device_loss_samples_ns)
+        return (evidence.warm_1080_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and
+            evidence.warm_4k_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and
+            evidence.cpu_4096_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and
+            evidence.gpu_4096_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and
+            evidence.cpu_after_device_loss_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and
+            evidence.stage_shaping_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and
+            evidence.stage_material_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and
+            evidence.stage_dirty_upload_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and
+            evidence.stage_queue_device_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and
+            evidence.stage_sync_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and
+            evidence.stage_present_readback_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and
+            evidence.stage_cpu_oracle_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and
+            evidence.warm_1080_p95_ns == font_perf_p95(evidence.warm_1080_samples_ns) and
+            evidence.warm_4k_p95_ns == font_perf_p95(evidence.warm_4k_samples_ns) and
+            evidence.cpu_4096_p95_ns == font_perf_p95(evidence.cpu_4096_samples_ns) and
+            evidence.gpu_4096_p95_ns == font_perf_p95(evidence.gpu_4096_samples_ns) and
+            evidence.cpu_after_device_loss_p95_ns == font_perf_p95(evidence.cpu_after_device_loss_samples_ns) and
+            evidence.stage_shaping_p95_ns == font_perf_p95(evidence.stage_shaping_samples_ns) and
+            evidence.stage_material_p95_ns == font_perf_p95(evidence.stage_material_samples_ns) and
+            evidence.stage_dirty_upload_p95_ns == font_perf_p95(evidence.stage_dirty_upload_samples_ns) and
+            evidence.stage_queue_device_p95_ns == font_perf_p95(evidence.stage_queue_device_samples_ns) and
+            evidence.stage_sync_p95_ns == font_perf_p95(evidence.stage_sync_samples_ns) and
+            evidence.stage_present_readback_p95_ns == font_perf_p95(evidence.stage_present_readback_samples_ns) and
+            evidence.stage_cpu_oracle_p95_ns == font_perf_p95(evidence.stage_cpu_oracle_samples_ns))
     true
 
 fn expect_font_perf_budget(evidence: FontPerfBudgetEvidence) -> bool:
@@ -175,6 +301,28 @@ fn expect_font_perf_budget(evidence: FontPerfBudgetEvidence) -> bool:
         evidence.device_loss_batch_identity_after == evidence.device_loss_batch_identity_before and
         evidence.cpu_after_device_loss_p95_ns > 0 and
         evidence.cpu_after_device_loss_p95_ns <= evidence.cpu_4096_p95_ns and
+        evidence.stage_shaping_p95_ns > 0 and evidence.stage_material_p95_ns > 0 and
+        evidence.stage_emission_compile_ns > 0 and evidence.stage_dirty_upload_p95_ns == 0 and
+        evidence.stage_queue_device_p95_ns > 0 and evidence.stage_sync_p95_ns > 0 and
+        evidence.stage_present_readback_p95_ns > 0 and evidence.stage_cpu_oracle_p95_ns > 0 and
+        _valid_precompiled_spirv_identity(evidence.promotion_artifact_identity) and
+        evidence.promotion_entry_name == "main" and evidence.promotion_program_version == 1 and
+        evidence.promotion_batch_identity != "" and _valid_sha256(evidence.promotion_atlas_payload_sha256) and
+        evidence.promotion_shader_handle > 0 and evidence.promotion_pipeline_handle > 0 and
+        evidence.promotion_atlas_buffer_handle > 0 and evidence.promotion_params_buffer_handle > 0 and
+        evidence.promotion_command_handle > 0 and evidence.promotion_fence_handle > 0 and
+        evidence.promotion_readback_buffer_handle > 0 and evidence.promotion_quad_count > 0 and
+        evidence.promotion_dispatch_count == evidence.promotion_quad_count and
+        evidence.promotion_submitted and evidence.promotion_completion_waited and
+        evidence.promotion_fence_evidence_available and evidence.promotion_fence_destroyed and
+        evidence.promotion_readback_source == "device_readback" and
+        evidence.promotion_readback_byte_count == 1920 * 1080 * 4 and
+        evidence.promotion_readback_nonblank_pixels > 0 and
+        evidence.promotion_readback_nonblank_pixels <= 1920 * 1080 and
+        evidence.promotion_device_checksum != 0 and
+        evidence.promotion_device_checksum == evidence.promotion_oracle_checksum and
+        evidence.promotion_parity and evidence.promotion_device_executed and evidence.promotion_ready and
+        evidence.promotion_present_mode == "not-applicable-offscreen" and
         evidence.gpu_resource_high_water_bytes > 0 and evidence.gpu_resource_high_water_bytes <= 134217728
 
 fn _font_perf_implementation_sha256() -> text:
@@ -226,8 +374,11 @@ fn font_perf_evidence_record(evidence: FontPerfBudgetEvidence) -> text:
     val evidence_host_arch = host_arch()
     if sc_sha != FONT_PERF_FACE_SC_SHA256 or devanagari_sha != FONT_PERF_FACE_DEVANAGARI_SHA256 or arabic_sha != FONT_PERF_FACE_ARABIC_SHA256 or font_sha.len() != 64 or collector_sha.len() != 64 or helper_sha.len() != 64 or implementation_sha.len() != 64 or evidence_host_os == "" or evidence_host_arch == "": return ""
     val rss_comparison = if evidence.rss_available: "paired-2d-3d-legacy" else: "unavailable"
-    val base = "schema=shared-multilingual-gpu-font-perf/v4\nfixture=top-10-language-witnesses\nwitness_mapping={FONT_PERF_WITNESS_MAPPING}\nface_mapping={FONT_PERF_FACE_MAPPING}\nrepresentative_codepoints={FONT_PERF_CODEPOINTS}\nglyphs_1080=1024\nglyphs_4k=1024\nglyphs_compare=4096\nsample_count=11\nwarm_backend=vulkan\nviewport_1080=1920x1080\nviewport_4k=3840x2160\ncompare_viewport=1920x1080\ncolor_space=srgb-byte-domain-no-linearization\npixel_format=argb8888-packed-u32\nalpha_mode=straight-argb-src-over-opaque-destination\nrounding=mask-alpha-nearest-blend-floor\nwarmup_frames_per_route=1\npercentile_method=sorted-index-floor-n-times-95-over-100\ncomparator=exact-packed-argb-u32-cpu-oracle\nhost_os={evidence_host_os}\nhost_arch={evidence_host_arch}\nfont_path_0={FONT_PERF_FACE_SC_PATH}\nfont_sha256_0={sc_sha}\nfont_path_1={FONT_PERF_FACE_DEVANAGARI_PATH}\nfont_sha256_1={devanagari_sha}\nfont_path_2={FONT_PERF_FACE_ARABIC_PATH}\nfont_sha256_2={arabic_sha}\nfont_sha256={font_sha}\ncollector_path={FONT_PERF_COLLECTOR_PATH}\ncollector_sha256={collector_sha}\nhelper_path={FONT_PERF_HELPER_PATH}\nhelper_sha256={helper_sha}\nimplementation_sha256={implementation_sha}\nstatus={evidence.status}\nreason={evidence.reason}\nwarm_1080_p95_ns={evidence.warm_1080_p95_ns}\nwarm_4k_p95_ns={evidence.warm_4k_p95_ns}\ncpu_4096_p95_ns={evidence.cpu_4096_p95_ns}\ngpu_4096_p95_ns={evidence.gpu_4096_p95_ns}\nwarm_hits={evidence.warm_hits}\nwarm_requests={evidence.warm_requests}\nunchanged_upload={evidence.unchanged_upload}\nrss_growth_percent={evidence.rss_growth_percent}\ngpu_resource_high_water_bytes={evidence.gpu_resource_high_water_bytes}\nrss_available={evidence.rss_available}\nlegacy_2d_kb={evidence.legacy_2d_kb}\nmultiface_2d_kb={evidence.multiface_2d_kb}\nlegacy_3d_kb={evidence.legacy_3d_kb}\nmultiface_3d_kb={evidence.multiface_3d_kb}\nrss_comparison={rss_comparison}\ngpu_device_name={evidence.gpu_device_name}\ngpu_driver_identity={evidence.gpu_driver_identity}\nwarm_1080_samples_ns={_samples_text(evidence.warm_1080_samples_ns)}\nwarm_4k_samples_ns={_samples_text(evidence.warm_4k_samples_ns)}\ncpu_4096_samples_ns={_samples_text(evidence.cpu_4096_samples_ns)}\ngpu_4096_samples_ns={_samples_text(evidence.gpu_4096_samples_ns)}"
-    base + "\ndevice_loss_status={evidence.device_loss_status}\ndevice_loss_batch_identity_before={evidence.device_loss_batch_identity_before}\ndevice_loss_batch_identity_after={evidence.device_loss_batch_identity_after}\ncpu_after_device_loss_p95_ns={evidence.cpu_after_device_loss_p95_ns}\ncpu_after_device_loss_samples_ns={_samples_text(evidence.cpu_after_device_loss_samples_ns)}"
+    val base = "schema=shared-multilingual-gpu-font-perf/v5\nfixture=top-10-language-witnesses\nwitness_mapping={FONT_PERF_WITNESS_MAPPING}\nface_mapping={FONT_PERF_FACE_MAPPING}\nrepresentative_codepoints={FONT_PERF_CODEPOINTS}\nglyphs_1080=1024\nglyphs_4k=1024\nglyphs_compare=4096\nsample_count=11\nwarm_backend=vulkan\nviewport_1080=1920x1080\nviewport_4k=3840x2160\ncompare_viewport=1920x1080\ncolor_space=srgb-byte-domain-no-linearization\npixel_format=argb8888-packed-u32\nalpha_mode=straight-argb-src-over-opaque-destination\nrounding=mask-alpha-nearest-blend-floor\nwarmup_frames_per_route=1\npercentile_method=sorted-index-floor-n-times-95-over-100\ncomparator=exact-packed-argb-u32-cpu-oracle\nhost_os={evidence_host_os}\nhost_arch={evidence_host_arch}\nfont_path_0={FONT_PERF_FACE_SC_PATH}\nfont_sha256_0={sc_sha}\nfont_path_1={FONT_PERF_FACE_DEVANAGARI_PATH}\nfont_sha256_1={devanagari_sha}\nfont_path_2={FONT_PERF_FACE_ARABIC_PATH}\nfont_sha256_2={arabic_sha}\nfont_sha256={font_sha}\ncollector_path={FONT_PERF_COLLECTOR_PATH}\ncollector_sha256={collector_sha}\nhelper_path={FONT_PERF_HELPER_PATH}\nhelper_sha256={helper_sha}\nimplementation_sha256={implementation_sha}\nstatus={evidence.status}\nreason={evidence.reason}\nwarm_1080_p95_ns={evidence.warm_1080_p95_ns}\nwarm_4k_p95_ns={evidence.warm_4k_p95_ns}\ncpu_4096_p95_ns={evidence.cpu_4096_p95_ns}\ngpu_4096_p95_ns={evidence.gpu_4096_p95_ns}\nwarm_hits={evidence.warm_hits}\nwarm_requests={evidence.warm_requests}\nunchanged_upload={evidence.unchanged_upload}\nrss_growth_percent={evidence.rss_growth_percent}\ngpu_resource_high_water_bytes={evidence.gpu_resource_high_water_bytes}\nrss_available={evidence.rss_available}\nlegacy_2d_kb={evidence.legacy_2d_kb}\nmultiface_2d_kb={evidence.multiface_2d_kb}\nlegacy_3d_kb={evidence.legacy_3d_kb}\nmultiface_3d_kb={evidence.multiface_3d_kb}\nrss_comparison={rss_comparison}\ngpu_device_name={evidence.gpu_device_name}\ngpu_driver_identity={evidence.gpu_driver_identity}\nwarm_1080_samples_ns={_samples_text(evidence.warm_1080_samples_ns)}\nwarm_4k_samples_ns={_samples_text(evidence.warm_4k_samples_ns)}\ncpu_4096_samples_ns={_samples_text(evidence.cpu_4096_samples_ns)}\ngpu_4096_samples_ns={_samples_text(evidence.gpu_4096_samples_ns)}"
+    val recovery = "\ndevice_loss_status={evidence.device_loss_status}\ndevice_loss_batch_identity_before={evidence.device_loss_batch_identity_before}\ndevice_loss_batch_identity_after={evidence.device_loss_batch_identity_after}\ncpu_after_device_loss_p95_ns={evidence.cpu_after_device_loss_p95_ns}\ncpu_after_device_loss_samples_ns={_samples_text(evidence.cpu_after_device_loss_samples_ns)}"
+    val stages = "\nstage_shaping_p95_ns={evidence.stage_shaping_p95_ns}\nstage_material_p95_ns={evidence.stage_material_p95_ns}\nstage_emission_compile_ns={evidence.stage_emission_compile_ns}\nstage_dirty_upload_p95_ns={evidence.stage_dirty_upload_p95_ns}\nstage_queue_device_p95_ns={evidence.stage_queue_device_p95_ns}\nstage_sync_p95_ns={evidence.stage_sync_p95_ns}\nstage_present_readback_p95_ns={evidence.stage_present_readback_p95_ns}\nstage_cpu_oracle_p95_ns={evidence.stage_cpu_oracle_p95_ns}\nstage_shaping_samples_ns={_samples_text(evidence.stage_shaping_samples_ns)}\nstage_material_samples_ns={_samples_text(evidence.stage_material_samples_ns)}\nstage_dirty_upload_samples_ns={_samples_text(evidence.stage_dirty_upload_samples_ns)}\nstage_queue_device_samples_ns={_samples_text(evidence.stage_queue_device_samples_ns)}\nstage_sync_samples_ns={_samples_text(evidence.stage_sync_samples_ns)}\nstage_present_readback_samples_ns={_samples_text(evidence.stage_present_readback_samples_ns)}\nstage_cpu_oracle_samples_ns={_samples_text(evidence.stage_cpu_oracle_samples_ns)}"
+    val promotion = "\npromotion_artifact_identity={evidence.promotion_artifact_identity}\npromotion_entry_name={evidence.promotion_entry_name}\npromotion_program_version={evidence.promotion_program_version}\npromotion_batch_identity={evidence.promotion_batch_identity}\npromotion_atlas_payload_sha256={evidence.promotion_atlas_payload_sha256}\npromotion_shader_handle={evidence.promotion_shader_handle}\npromotion_pipeline_handle={evidence.promotion_pipeline_handle}\npromotion_atlas_buffer_handle={evidence.promotion_atlas_buffer_handle}\npromotion_params_buffer_handle={evidence.promotion_params_buffer_handle}\npromotion_command_handle={evidence.promotion_command_handle}\npromotion_fence_handle={evidence.promotion_fence_handle}\npromotion_readback_buffer_handle={evidence.promotion_readback_buffer_handle}\npromotion_quad_count={evidence.promotion_quad_count}\npromotion_dispatch_count={evidence.promotion_dispatch_count}\npromotion_submitted={evidence.promotion_submitted}\npromotion_completion_waited={evidence.promotion_completion_waited}\npromotion_fence_evidence_available={evidence.promotion_fence_evidence_available}\npromotion_fence_destroyed={evidence.promotion_fence_destroyed}\npromotion_readback_source={evidence.promotion_readback_source}\npromotion_readback_byte_count={evidence.promotion_readback_byte_count}\npromotion_readback_nonblank_pixels={evidence.promotion_readback_nonblank_pixels}\npromotion_device_checksum={evidence.promotion_device_checksum}\npromotion_oracle_checksum={evidence.promotion_oracle_checksum}\npromotion_parity={evidence.promotion_parity}\npromotion_device_executed={evidence.promotion_device_executed}\npromotion_ready={evidence.promotion_ready}\npromotion_present_mode={evidence.promotion_present_mode}"
+    base + recovery + stages + promotion
 
 fn _line_value(lines: [text], index: i64, key: text) -> text:
     val prefix = key + "="
@@ -236,8 +387,8 @@ fn _line_value(lines: [text], index: i64, key: text) -> text:
 
 fn parse_font_perf_evidence(record: text) -> FontPerfBudgetEvidence:
     val lines = record.split("\n")
-    if lines.len() != 62: return unavailable_font_perf_evidence("durable performance record is malformed")
-    if _line_value(lines, 0, "schema") != "shared-multilingual-gpu-font-perf/v4" or _line_value(lines, 1, "fixture") != "top-10-language-witnesses": return unavailable_font_perf_evidence("durable performance schema or fixture mismatch")
+    if lines.len() != 104: return unavailable_font_perf_evidence("durable performance record is malformed")
+    if _line_value(lines, 0, "schema") != "shared-multilingual-gpu-font-perf/v5" or _line_value(lines, 1, "fixture") != "top-10-language-witnesses": return unavailable_font_perf_evidence("durable performance schema or fixture mismatch")
     if _line_value(lines, 2, "witness_mapping") != FONT_PERF_WITNESS_MAPPING or _line_value(lines, 3, "face_mapping") != FONT_PERF_FACE_MAPPING or _line_value(lines, 4, "representative_codepoints") != FONT_PERF_CODEPOINTS: return unavailable_font_perf_evidence("durable performance witness mapping mismatch")
     if _line_value(lines, 5, "glyphs_1080") != "1024" or _line_value(lines, 6, "glyphs_4k") != "1024" or _line_value(lines, 7, "glyphs_compare") != "4096" or _line_value(lines, 8, "sample_count") != "11" or _line_value(lines, 9, "warm_backend") != "vulkan": return unavailable_font_perf_evidence("durable performance dimensions or backend mismatch")
     if (_line_value(lines, 10, "viewport_1080") != "1920x1080" or
@@ -271,6 +422,32 @@ fn parse_font_perf_evidence(record: text) -> FontPerfBudgetEvidence:
         not _valid_samples_text(_line_value(lines, 56, "gpu_4096_samples_ns")) or
         not _valid_samples_text(_line_value(lines, 61, "cpu_after_device_loss_samples_ns"))):
         return unavailable_font_perf_evidence("durable performance samples are malformed")
+    if (not _valid_stage_samples_text(_line_value(lines, 70, "stage_shaping_samples_ns")) or
+        not _valid_stage_samples_text(_line_value(lines, 71, "stage_material_samples_ns")) or
+        not _valid_stage_samples_text(_line_value(lines, 72, "stage_dirty_upload_samples_ns")) or
+        not _valid_stage_samples_text(_line_value(lines, 73, "stage_queue_device_samples_ns")) or
+        not _valid_stage_samples_text(_line_value(lines, 74, "stage_sync_samples_ns")) or
+        not _valid_stage_samples_text(_line_value(lines, 75, "stage_present_readback_samples_ns")) or
+        not _valid_stage_samples_text(_line_value(lines, 76, "stage_cpu_oracle_samples_ns"))):
+        return unavailable_font_perf_evidence("durable performance stage samples are malformed")
+    val promotion_submitted_text = _line_value(lines, 91, "promotion_submitted")
+    val promotion_completion_waited_text = _line_value(lines, 92, "promotion_completion_waited")
+    val promotion_fence_available_text = _line_value(lines, 93, "promotion_fence_evidence_available")
+    val promotion_fence_destroyed_text = _line_value(lines, 94, "promotion_fence_destroyed")
+    val promotion_parity_text = _line_value(lines, 100, "promotion_parity")
+    val promotion_device_executed_text = _line_value(lines, 101, "promotion_device_executed")
+    val promotion_ready_text = _line_value(lines, 102, "promotion_ready")
+    if ((promotion_submitted_text != "true" and promotion_submitted_text != "false") or
+        (promotion_completion_waited_text != "true" and promotion_completion_waited_text != "false") or
+        (promotion_fence_available_text != "true" and promotion_fence_available_text != "false") or
+        (promotion_fence_destroyed_text != "true" and promotion_fence_destroyed_text != "false") or
+        (promotion_parity_text != "true" and promotion_parity_text != "false") or
+        (promotion_device_executed_text != "true" and promotion_device_executed_text != "false") or
+        (promotion_ready_text != "true" and promotion_ready_text != "false")):
+        return unavailable_font_perf_evidence("durable performance promotion boolean is malformed")
+    if _line_value(lines, 98, "promotion_device_checksum").to_i64() == nil or
+        _line_value(lines, 99, "promotion_oracle_checksum").to_i64() == nil:
+        return unavailable_font_perf_evidence("durable performance promotion checksum is malformed")
     val evidence = FontPerfBudgetEvidence(
         status: _line_value(lines, 34, "status"), reason: _line_value(lines, 35, "reason"),
         warm_1080_p95_ns: _line_value(lines, 36, "warm_1080_p95_ns").to_i64() ?? -1,
@@ -297,7 +474,49 @@ fn parse_font_perf_evidence(record: text) -> FontPerfBudgetEvidence:
         device_loss_batch_identity_before: _line_value(lines, 58, "device_loss_batch_identity_before"),
         device_loss_batch_identity_after: _line_value(lines, 59, "device_loss_batch_identity_after"),
         cpu_after_device_loss_p95_ns: _line_value(lines, 60, "cpu_after_device_loss_p95_ns").to_i64() ?? -1,
-        cpu_after_device_loss_samples_ns: _parse_samples(_line_value(lines, 61, "cpu_after_device_loss_samples_ns")))
+        cpu_after_device_loss_samples_ns: _parse_samples(_line_value(lines, 61, "cpu_after_device_loss_samples_ns")),
+        stage_shaping_p95_ns: _line_value(lines, 62, "stage_shaping_p95_ns").to_i64() ?? -1,
+        stage_material_p95_ns: _line_value(lines, 63, "stage_material_p95_ns").to_i64() ?? -1,
+        stage_emission_compile_ns: _line_value(lines, 64, "stage_emission_compile_ns").to_i64() ?? -1,
+        stage_dirty_upload_p95_ns: _line_value(lines, 65, "stage_dirty_upload_p95_ns").to_i64() ?? -1,
+        stage_queue_device_p95_ns: _line_value(lines, 66, "stage_queue_device_p95_ns").to_i64() ?? -1,
+        stage_sync_p95_ns: _line_value(lines, 67, "stage_sync_p95_ns").to_i64() ?? -1,
+        stage_present_readback_p95_ns: _line_value(lines, 68, "stage_present_readback_p95_ns").to_i64() ?? -1,
+        stage_cpu_oracle_p95_ns: _line_value(lines, 69, "stage_cpu_oracle_p95_ns").to_i64() ?? -1,
+        stage_shaping_samples_ns: _parse_stage_samples(_line_value(lines, 70, "stage_shaping_samples_ns")),
+        stage_material_samples_ns: _parse_stage_samples(_line_value(lines, 71, "stage_material_samples_ns")),
+        stage_dirty_upload_samples_ns: _parse_stage_samples(_line_value(lines, 72, "stage_dirty_upload_samples_ns")),
+        stage_queue_device_samples_ns: _parse_stage_samples(_line_value(lines, 73, "stage_queue_device_samples_ns")),
+        stage_sync_samples_ns: _parse_stage_samples(_line_value(lines, 74, "stage_sync_samples_ns")),
+        stage_present_readback_samples_ns: _parse_stage_samples(_line_value(lines, 75, "stage_present_readback_samples_ns")),
+        stage_cpu_oracle_samples_ns: _parse_stage_samples(_line_value(lines, 76, "stage_cpu_oracle_samples_ns")),
+        promotion_artifact_identity: _line_value(lines, 77, "promotion_artifact_identity"),
+        promotion_entry_name: _line_value(lines, 78, "promotion_entry_name"),
+        promotion_program_version: _line_value(lines, 79, "promotion_program_version").to_i64() ?? -1,
+        promotion_batch_identity: _line_value(lines, 80, "promotion_batch_identity"),
+        promotion_atlas_payload_sha256: _line_value(lines, 81, "promotion_atlas_payload_sha256"),
+        promotion_shader_handle: _line_value(lines, 82, "promotion_shader_handle").to_i64() ?? -1,
+        promotion_pipeline_handle: _line_value(lines, 83, "promotion_pipeline_handle").to_i64() ?? -1,
+        promotion_atlas_buffer_handle: _line_value(lines, 84, "promotion_atlas_buffer_handle").to_i64() ?? -1,
+        promotion_params_buffer_handle: _line_value(lines, 85, "promotion_params_buffer_handle").to_i64() ?? -1,
+        promotion_command_handle: _line_value(lines, 86, "promotion_command_handle").to_i64() ?? -1,
+        promotion_fence_handle: _line_value(lines, 87, "promotion_fence_handle").to_i64() ?? -1,
+        promotion_readback_buffer_handle: _line_value(lines, 88, "promotion_readback_buffer_handle").to_i64() ?? -1,
+        promotion_quad_count: _line_value(lines, 89, "promotion_quad_count").to_i64() ?? -1,
+        promotion_dispatch_count: _line_value(lines, 90, "promotion_dispatch_count").to_i64() ?? -1,
+        promotion_submitted: promotion_submitted_text == "true",
+        promotion_completion_waited: promotion_completion_waited_text == "true",
+        promotion_fence_evidence_available: promotion_fence_available_text == "true",
+        promotion_fence_destroyed: promotion_fence_destroyed_text == "true",
+        promotion_readback_source: _line_value(lines, 95, "promotion_readback_source"),
+        promotion_readback_byte_count: _line_value(lines, 96, "promotion_readback_byte_count").to_i64() ?? -1,
+        promotion_readback_nonblank_pixels: _line_value(lines, 97, "promotion_readback_nonblank_pixels").to_i64() ?? -1,
+        promotion_device_checksum: _line_value(lines, 98, "promotion_device_checksum").to_i64() ?? 0,
+        promotion_oracle_checksum: _line_value(lines, 99, "promotion_oracle_checksum").to_i64() ?? 0,
+        promotion_parity: promotion_parity_text == "true",
+        promotion_device_executed: promotion_device_executed_text == "true",
+        promotion_ready: promotion_ready_text == "true",
+        promotion_present_mode: _line_value(lines, 103, "promotion_present_mode"))
     if not _valid_shape(evidence): return unavailable_font_perf_evidence("durable performance fields are incomplete")
     evidence
 

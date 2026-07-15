@@ -40,5 +40,5 @@ exited 0. The refreshed scenario with
 pending serif probes exits 139 in the tracked stale-ABI CLI before assertions.
 Other complex scripts, emoji sequences/color, general GSUB/GPOS/BiDi, Engine3D native
 execution, executed Web/GUI/WM glyph-pixel parity, retained SimpleOS guest
-pixel evidence, and performance targets remain gated. Atlas and face generations invalidate cached material; unavailable
+pixel evidence, retained native v5 stage/promotion evidence, and performance targets remain gated. Transient Vulkan evidence owns fused queue/device, fence observation, readback, and CPU-oracle timings; durable records never make captured handles reusable authority. Atlas and face generations invalidate cached material; unavailable
 hardware or stale handles fail closed.

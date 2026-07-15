@@ -550,13 +550,19 @@ Keep the remaining work on the frozen public seams:
    default-axis dimensions/advance/checksum oracle.
 6. Warm performance records cache hit rate and 1,024-glyph p95 at 1080p/4K;
    promotion also records equal-semantics 4,096-glyph CPU/GPU p95, unchanged
-   upload behavior, RSS delta, and GPU resource high-water. Durable schema v4
+   upload behavior, RSS delta, and GPU resource high-water. Durable schema v5
    also pins viewport, byte-domain packed-ARGB/straight-alpha and rounding
    semantics, per-route warmup, percentile policy, exact packed-ARGB CPU-oracle
    comparison, same-host OS/architecture, and device/driver; FNV64 remains a
    runtime diagnostic and any field drift fails closed. The same record requires
    controlled Vulkan-poison CPU fallback, unchanged prepared-batch identity, and
    eleven post-loss CPU samples whose p95 does not exceed the baseline CPU row.
+   It also retains one emission/compile-install scalar and seven 11-sample
+   stage arrays for shaping, material, unchanged dirty upload, fused
+   submit-through-device-completion `queue_device`, later fence observation,
+   offscreen device readback, and CPU oracle. The fused and fence-observation
+   intervals overlap and are never summed. `not-applicable-offscreen` records
+   the absence of swapchain present, not the absence of required readback.
 
 Production-route acceptance must exercise the real Web/GUI entry, the hosted
 `HostCompositor` canonical color-frame owner, and the canonical SimpleOS desktop
@@ -568,7 +574,7 @@ acceptance additionally requires the retained QEMU `pmemsave` pixel oracle.
 Vulkan device-loss or unknown completion poisons only the Vulkan surface. When
 policy permits CPU, Engine2D replays the same immutable `FontRenderBatch` from
 quad zero through the replacement software surface; required GPU-only policy
-still fails closed. The v4 source gate retains post-loss CPU p95 and identity;
+still fails closed. The v5 source gate retains post-loss CPU p95 and identity;
 native device-loss injection remains the NFR-007 execution gate.
 
 Keep the five manual-facing SSpec steps exact: `Load the pinned multilingual

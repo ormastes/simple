@@ -32,6 +32,7 @@ plugin interface, renderer factory, or new native dependency.
 | `src/lib/gc_async_mut/gpu/engine2d/engine.spl` | Existing `load_font`/`draw_text` adapter; routes one canonical batch through CUDA, Metal, OpenCL, Vulkan, then the CPU suffix fallback. |
 | `src/lib/gc_async_mut/gpu/engine3d/engine.spl` | HUD/world facade and CPU fallback; an optional Vulkan adapter owns dedicated pipelines, R8 atlas upload, depth, fence, and device readback without changing the shared batch. |
 | `src/lib/gc_async_mut/gpu/engine2d/backend_{cuda,metal,opencl,vulkan}*.spl` | Backend-private upload/submission state keyed by the shared atlas owner and generation. Source wiring is not native promotion evidence. |
+| `backend_vulkan_font_types.spl` plus `test/helpers/shared_multilingual_gpu_fonts_perf_evidence.spl` | Transient pipeline/composite stage observations stay with the Vulkan owner; ordered durable v5 serialization retains stage distributions and promotion facts without turning handles into reusable authority. |
 | Web semantic/layout, GUI widget/scene, and shared WM scene producers | Preserve selected identity/advances in `DrawIrComposition`; Engine2D is the sole vector-material executor. “WebIR” names the existing web semantic/layout layer, not a second drawing IR. Canonical SimpleOS and hosted color-background frames select the Draw IR/Engine2D route. Image/motion and nested hosted content retain compatibility fallback; direct legacy `wm_entry.spl` files are compatibility-only. |
 
 Compatibility re-export trees continue to expose the canonical

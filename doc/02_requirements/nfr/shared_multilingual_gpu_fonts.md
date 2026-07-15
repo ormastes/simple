@@ -26,7 +26,10 @@ Status: selected NFR A on 2026-07-11
   identity or regressing unchanged CPU-fixture p95.
 - **NFR-008 Evidence:** Report shaping, material, emission/compile, dirty upload,
   queue, device, sync, present/readback, CPU, RSS, and GPU resource stages.
+  A fused submit-through-device-completion API may report queue/device as one
+  explicit interval; it must not be presented as disjoint queue and device
+  time. Offscreen rendering reports present as not applicable while retaining
+  mandatory device-origin readback.
   Promotion requires compiled versioned entry, nonzero handles, payload hash,
   submit/draw, completed fence, device-origin nonblank absolute readback, and
   CPU-oracle comparison.
-

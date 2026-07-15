@@ -504,6 +504,13 @@ font GPU emission, or GUI/Web/2D/3D text.
     font-adapter order; Preferred/Required with `auto` and unknown targets
     reject before mutation. Batch evidence carries config identity, target,
     and policy; the config object never crosses WebIR or Draw IR.
+13. NFR-008 promotion uses `VulkanFontCompositeEvidence` and
+    `vulkan_font_stage_evidence_ready`, then persists the observation through
+    `FontPerfBudgetEvidence`, `read_font_perf_evidence`, and
+    `expect_font_perf_budget`. Treat `queue_device` as the fused
+    submit-through-device-completion interval, never sum it with the later
+    fence-observation `sync` interval, and record offscreen presentation as
+    `not-applicable-offscreen` while still requiring device readback.
 
 For UI-test helper work, keep the test-library surface consistent: new SSpec
 manual specs use canonical `use std.spec.*` and `step("...")`, existing

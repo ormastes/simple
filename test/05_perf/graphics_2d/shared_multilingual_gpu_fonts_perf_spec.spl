@@ -1,5 +1,5 @@
 # @tag: rendering, font, performance
-# @req NFR-002 NFR-004 NFR-005 NFR-006 NFR-007
+# @req NFR-002 NFR-004 NFR-005 NFR-006 NFR-007 NFR-008
 
 """# Shared Multilingual Font Performance Evidence
 
@@ -9,6 +9,10 @@ and Vulkan run sequences. One discarded frame warms shaping material, glyph
 cache entries, and the backend atlas before the retained eleven samples.
 The same prepared batch identity is captured before and after controlled Vulkan
 surface poison, then the unchanged 4,096-glyph CPU route retains eleven samples.
+Schema v5 also retains seven 4,096-glyph Vulkan stage arrays and the final
+compiled-artifact, batch/payload, handle, fence, changed-pixel, and parity
+observation. `queue_device` is the fused submit-through-completion interval;
+`sync` is the later fence observation, and present is not applicable offscreen.
 
 The 2D rows are real measurements. Four fresh child processes provide paired
 legacy/multiface RSS rows for 2D and Engine3D Vulkan HUD/world material; a
@@ -95,6 +99,41 @@ class _FontPerfRouteEvidence:
     device_loss_status: text = ""
     batch_identity_before: text = ""
     batch_identity_after: text = ""
+    stage_shaping_samples_ns: [i64] = []
+    stage_material_samples_ns: [i64] = []
+    stage_dirty_upload_samples_ns: [i64] = []
+    stage_queue_device_samples_ns: [i64] = []
+    stage_sync_samples_ns: [i64] = []
+    stage_present_readback_samples_ns: [i64] = []
+    stage_cpu_oracle_samples_ns: [i64] = []
+    promotion_artifact_identity: text = ""
+    promotion_entry_name: text = ""
+    promotion_program_version: i64 = 0
+    stage_emission_compile_ns: i64 = 0
+    promotion_batch_identity: text = ""
+    promotion_atlas_payload_sha256: text = ""
+    promotion_shader_handle: i64 = 0
+    promotion_pipeline_handle: i64 = 0
+    promotion_atlas_buffer_handle: i64 = 0
+    promotion_params_buffer_handle: i64 = 0
+    promotion_command_handle: i64 = 0
+    promotion_fence_handle: i64 = 0
+    promotion_readback_buffer_handle: i64 = 0
+    promotion_quad_count: i64 = 0
+    promotion_dispatch_count: i64 = 0
+    promotion_submitted: bool = false
+    promotion_completion_waited: bool = false
+    promotion_fence_evidence_available: bool = false
+    promotion_fence_destroyed: bool = false
+    promotion_readback_source: text = ""
+    promotion_readback_byte_count: i64 = 0
+    promotion_readback_nonblank_pixels: i64 = 0
+    promotion_device_checksum: i64 = 0
+    promotion_oracle_checksum: i64 = 0
+    promotion_parity: bool = false
+    promotion_device_executed: bool = false
+    promotion_ready: bool = false
+    promotion_present_mode: text = ""
 
 class _FontPerfRssProbeRecord:
     valid: bool
@@ -106,6 +145,12 @@ class _FontPerfRssProbeRecord:
 var _multiface_perf_fixture: MultiFacePerfFixture? = nil
 var _multiface_perf_reason = "multiface-fixture-not-initialized"
 var _multiface_last_evidence_overhead_ns: i64 = 0
+var _multiface_last_material_ns: i64 = 0
+var _multiface_last_dirty_upload_ns: i64 = 0
+var _multiface_last_queue_device_ns: i64 = 0
+var _multiface_last_sync_ns: i64 = 0
+var _multiface_last_present_readback_ns: i64 = 0
+var _multiface_last_cpu_oracle_ns: i64 = 0
 
 fn _failed_route(reason: text, samples: [i64]) -> _FontPerfRouteEvidence:
     _FontPerfRouteEvidence(ok: false, p95_ns: 0, hits: 0, misses: 0,
@@ -311,8 +356,19 @@ fn draw_multiface_runs(engine: Engine2D, runs: [FontGlyphRun], color: u32, size:
         _multiface_perf_reason = "multiface-material-run-count-mismatch"
         return false
     _multiface_last_evidence_overhead_ns = 0
+    _multiface_last_material_ns = 0
+    _multiface_last_dirty_upload_ns = 0
+    _multiface_last_queue_device_ns = 0
+    _multiface_last_sync_ns = 0
+    _multiface_last_present_readback_ns = 0
+    _multiface_last_cpu_oracle_ns = 0
+    var fonts = engine.fonts()
     for run in runs:
-        if not run.valid or not engine.draw_glyph_run(0, 0, run, color, size):
+        val material_started = time_now_nanos()
+        val batch = fonts.prepare_glyph_run(run, color, size)
+        _multiface_last_material_ns = _multiface_last_material_ns + (time_now_nanos() - material_started)
+        engine.font_renderer = fonts
+        if not run.valid or not batch.material_supported() or not engine._draw_font_batch(0, 0, batch):
             _multiface_perf_reason = "multiface-draw-failed"
             return false
         if engine.backend_name() == "vulkan":
@@ -324,6 +380,11 @@ fn draw_multiface_runs(engine: Engine2D, runs: [FontGlyphRun], color: u32, size:
                     _multiface_perf_reason = evidence.?.reason
                 return false
             _multiface_last_evidence_overhead_ns = _multiface_last_evidence_overhead_ns + evidence.?.evidence_overhead_ns
+            _multiface_last_dirty_upload_ns = _multiface_last_dirty_upload_ns + evidence.?.dirty_upload_ns
+            _multiface_last_queue_device_ns = _multiface_last_queue_device_ns + evidence.?.queue_device_ns
+            _multiface_last_sync_ns = _multiface_last_sync_ns + evidence.?.sync_wait_ns
+            _multiface_last_present_readback_ns = _multiface_last_present_readback_ns + evidence.?.present_readback_ns
+            _multiface_last_cpu_oracle_ns = _multiface_last_cpu_oracle_ns + evidence.?.cpu_oracle_ns
     _multiface_perf_reason = "pass"
     true
 
@@ -396,15 +457,44 @@ fn _measure_route(width: i32, height: i32, backend: text,
             return _failed_route("missing-vulkan-font-evidence", [])
         uploads_before = warm_evidence.?.atlas_upload_count
     var samples: [i64] = []
+    var stage_shaping_samples: [i64] = []
+    var stage_material_samples: [i64] = []
+    var stage_dirty_upload_samples: [i64] = []
+    var stage_queue_device_samples: [i64] = []
+    var stage_sync_samples: [i64] = []
+    var stage_present_readback_samples: [i64] = []
+    var stage_cpu_oracle_samples: [i64] = []
+    var stable_artifact_identity = ""
+    var stable_batch_identity = ""
+    var stable_atlas_payload_sha256 = ""
+    var stable_pipeline_handle: i64 = 0
     var sample: i64 = 0
     while sample < SAMPLE_COUNT:
         engine.clear(rgb(0, 0, 0))
         val started = time_now_nanos()
+        val shaping_started = time_now_nanos()
         val runs = prepare_multiface_runs(content, 32)
+        val shaping_ns = time_now_nanos() - shaping_started
         if (_run_glyph_count(runs) != glyph_count or
             not draw_multiface_runs(engine, runs, 0xffffffffu32, 32)):
             engine.shutdown()
             return _failed_route(_multiface_perf_reason, samples)
+        if backend == "vulkan":
+            val sample_evidence = engine.vulkan_font_performance_evidence()
+            if sample_evidence == nil or not sample_evidence.?.promotion_ready:
+                engine.shutdown()
+                return _failed_route("incomplete-vulkan-stage-evidence", samples)
+            if stable_artifact_identity == "":
+                stable_artifact_identity = sample_evidence.?.artifact_identity
+                stable_batch_identity = sample_evidence.?.batch_identity
+                stable_atlas_payload_sha256 = sample_evidence.?.atlas_payload_sha256
+                stable_pipeline_handle = sample_evidence.?.pipeline_handle
+            elif (sample_evidence.?.artifact_identity != stable_artifact_identity or
+                sample_evidence.?.batch_identity != stable_batch_identity or
+                sample_evidence.?.atlas_payload_sha256 != stable_atlas_payload_sha256 or
+                sample_evidence.?.pipeline_handle != stable_pipeline_handle):
+                engine.shutdown()
+                return _failed_route("unstable-vulkan-stage-identity", samples)
         val total_elapsed = time_now_nanos() - started
         var elapsed = total_elapsed
         if backend == "vulkan" and total_elapsed > _multiface_last_evidence_overhead_ns:
@@ -413,6 +503,14 @@ fn _measure_route(width: i32, height: i32, backend: text,
             engine.shutdown()
             return _failed_route("multiface-elapsed-time-invalid", samples)
         samples.push(elapsed)
+        stage_shaping_samples.push(shaping_ns)
+        stage_material_samples.push(_multiface_last_material_ns)
+        if backend == "vulkan":
+            stage_dirty_upload_samples.push(_multiface_last_dirty_upload_ns)
+            stage_queue_device_samples.push(_multiface_last_queue_device_ns)
+            stage_sync_samples.push(_multiface_last_sync_ns)
+            stage_present_readback_samples.push(_multiface_last_present_readback_ns)
+            stage_cpu_oracle_samples.push(_multiface_last_cpu_oracle_ns)
         sample = sample + 1
     val stats = engine.font_cache_stats()
     val final_fonts = engine.fonts()
@@ -420,6 +518,34 @@ fn _measure_route(width: i32, height: i32, backend: text,
     var resources: i64 = 0
     var device = ""
     var driver = ""
+    var promotion_artifact_identity = ""
+    var promotion_entry_name = ""
+    var promotion_program_version: i64 = 0
+    var stage_emission_compile_ns: i64 = 0
+    var promotion_batch_identity = ""
+    var promotion_atlas_payload_sha256 = ""
+    var promotion_shader_handle: i64 = 0
+    var promotion_pipeline_handle: i64 = 0
+    var promotion_atlas_buffer_handle: i64 = 0
+    var promotion_params_buffer_handle: i64 = 0
+    var promotion_command_handle: i64 = 0
+    var promotion_fence_handle: i64 = 0
+    var promotion_readback_buffer_handle: i64 = 0
+    var promotion_quad_count: i64 = 0
+    var promotion_dispatch_count: i64 = 0
+    var promotion_submitted = false
+    var promotion_completion_waited = false
+    var promotion_fence_evidence_available = false
+    var promotion_fence_destroyed = false
+    var promotion_readback_source = ""
+    var promotion_readback_byte_count: i64 = 0
+    var promotion_readback_nonblank_pixels: i64 = 0
+    var promotion_device_checksum: i64 = 0
+    var promotion_oracle_checksum: i64 = 0
+    var promotion_parity = false
+    var promotion_device_executed = false
+    var promotion_ready = false
+    var promotion_present_mode = ""
     if backend == "vulkan":
         val final_evidence = engine.vulkan_font_performance_evidence()
         if final_evidence == nil:
@@ -430,6 +556,34 @@ fn _measure_route(width: i32, height: i32, backend: text,
         resources = final_evidence.?.gpu_resource_high_water_bytes
         device = final_evidence.?.device_name
         driver = final_evidence.?.driver_identity
+        promotion_artifact_identity = final_evidence.?.artifact_identity
+        promotion_entry_name = final_evidence.?.entry_name
+        promotion_program_version = final_evidence.?.program_version
+        stage_emission_compile_ns = final_evidence.?.emission_compile_ns
+        promotion_batch_identity = final_evidence.?.batch_identity
+        promotion_atlas_payload_sha256 = final_evidence.?.atlas_payload_sha256
+        promotion_shader_handle = final_evidence.?.shader_handle
+        promotion_pipeline_handle = final_evidence.?.pipeline_handle
+        promotion_atlas_buffer_handle = final_evidence.?.atlas_buffer_handle
+        promotion_params_buffer_handle = final_evidence.?.params_buffer_handle
+        promotion_command_handle = final_evidence.?.command_handle
+        promotion_fence_handle = final_evidence.?.fence_handle
+        promotion_readback_buffer_handle = final_evidence.?.readback_buffer_handle
+        promotion_quad_count = final_evidence.?.quad_count
+        promotion_dispatch_count = final_evidence.?.dispatch_count
+        promotion_submitted = final_evidence.?.submitted
+        promotion_completion_waited = final_evidence.?.completion_waited
+        promotion_fence_evidence_available = final_evidence.?.fence_evidence_available
+        promotion_fence_destroyed = final_evidence.?.fence_destroyed
+        promotion_readback_source = final_evidence.?.readback_source
+        promotion_readback_byte_count = final_evidence.?.readback_byte_count
+        promotion_readback_nonblank_pixels = final_evidence.?.readback_nonblank_pixels
+        promotion_device_checksum = final_evidence.?.device_checksum
+        promotion_oracle_checksum = final_evidence.?.oracle_checksum
+        promotion_parity = final_evidence.?.parity
+        promotion_device_executed = final_evidence.?.device_executed
+        promotion_ready = final_evidence.?.promotion_ready
+        promotion_present_mode = final_evidence.?.present_mode
     engine.shutdown()
     _FontPerfRouteEvidence(ok: true, p95_ns: font_perf_p95(samples),
         hits: stats.hits, misses: stats.misses, unchanged_upload: unchanged_upload,
@@ -437,7 +591,42 @@ fn _measure_route(width: i32, height: i32, backend: text,
         reason: "pass", device_name: device, driver_identity: driver,
         device_loss_status: device_loss_status,
         batch_identity_before: batch_identity_before,
-        batch_identity_after: batch_identity_after)
+        batch_identity_after: batch_identity_after,
+        stage_shaping_samples_ns: stage_shaping_samples,
+        stage_material_samples_ns: stage_material_samples,
+        stage_dirty_upload_samples_ns: stage_dirty_upload_samples,
+        stage_queue_device_samples_ns: stage_queue_device_samples,
+        stage_sync_samples_ns: stage_sync_samples,
+        stage_present_readback_samples_ns: stage_present_readback_samples,
+        stage_cpu_oracle_samples_ns: stage_cpu_oracle_samples,
+        promotion_artifact_identity: promotion_artifact_identity,
+        promotion_entry_name: promotion_entry_name,
+        promotion_program_version: promotion_program_version,
+        stage_emission_compile_ns: stage_emission_compile_ns,
+        promotion_batch_identity: promotion_batch_identity,
+        promotion_atlas_payload_sha256: promotion_atlas_payload_sha256,
+        promotion_shader_handle: promotion_shader_handle,
+        promotion_pipeline_handle: promotion_pipeline_handle,
+        promotion_atlas_buffer_handle: promotion_atlas_buffer_handle,
+        promotion_params_buffer_handle: promotion_params_buffer_handle,
+        promotion_command_handle: promotion_command_handle,
+        promotion_fence_handle: promotion_fence_handle,
+        promotion_readback_buffer_handle: promotion_readback_buffer_handle,
+        promotion_quad_count: promotion_quad_count,
+        promotion_dispatch_count: promotion_dispatch_count,
+        promotion_submitted: promotion_submitted,
+        promotion_completion_waited: promotion_completion_waited,
+        promotion_fence_evidence_available: promotion_fence_evidence_available,
+        promotion_fence_destroyed: promotion_fence_destroyed,
+        promotion_readback_source: promotion_readback_source,
+        promotion_readback_byte_count: promotion_readback_byte_count,
+        promotion_readback_nonblank_pixels: promotion_readback_nonblank_pixels,
+        promotion_device_checksum: promotion_device_checksum,
+        promotion_oracle_checksum: promotion_oracle_checksum,
+        promotion_parity: promotion_parity,
+        promotion_device_executed: promotion_device_executed,
+        promotion_ready: promotion_ready,
+        promotion_present_mode: promotion_present_mode)
 
 fn _measure_font_perf_budget() -> FontPerfBudgetEvidence:
     if setup_multiface_perf_fixture() == nil:
@@ -496,7 +685,49 @@ fn _measure_font_perf_budget() -> FontPerfBudgetEvidence:
         device_loss_batch_identity_before: cpu_after_device_loss.batch_identity_before,
         device_loss_batch_identity_after: cpu_after_device_loss.batch_identity_after,
         cpu_after_device_loss_p95_ns: cpu_after_device_loss.p95_ns,
-        cpu_after_device_loss_samples_ns: cpu_after_device_loss.samples_ns)
+        cpu_after_device_loss_samples_ns: cpu_after_device_loss.samples_ns,
+        stage_shaping_p95_ns: font_perf_p95(gpu_4096.stage_shaping_samples_ns),
+        stage_material_p95_ns: font_perf_p95(gpu_4096.stage_material_samples_ns),
+        stage_emission_compile_ns: gpu_4096.stage_emission_compile_ns,
+        stage_dirty_upload_p95_ns: font_perf_p95(gpu_4096.stage_dirty_upload_samples_ns),
+        stage_queue_device_p95_ns: font_perf_p95(gpu_4096.stage_queue_device_samples_ns),
+        stage_sync_p95_ns: font_perf_p95(gpu_4096.stage_sync_samples_ns),
+        stage_present_readback_p95_ns: font_perf_p95(gpu_4096.stage_present_readback_samples_ns),
+        stage_cpu_oracle_p95_ns: font_perf_p95(gpu_4096.stage_cpu_oracle_samples_ns),
+        stage_shaping_samples_ns: gpu_4096.stage_shaping_samples_ns,
+        stage_material_samples_ns: gpu_4096.stage_material_samples_ns,
+        stage_dirty_upload_samples_ns: gpu_4096.stage_dirty_upload_samples_ns,
+        stage_queue_device_samples_ns: gpu_4096.stage_queue_device_samples_ns,
+        stage_sync_samples_ns: gpu_4096.stage_sync_samples_ns,
+        stage_present_readback_samples_ns: gpu_4096.stage_present_readback_samples_ns,
+        stage_cpu_oracle_samples_ns: gpu_4096.stage_cpu_oracle_samples_ns,
+        promotion_artifact_identity: gpu_4096.promotion_artifact_identity,
+        promotion_entry_name: gpu_4096.promotion_entry_name,
+        promotion_program_version: gpu_4096.promotion_program_version,
+        promotion_batch_identity: gpu_4096.promotion_batch_identity,
+        promotion_atlas_payload_sha256: gpu_4096.promotion_atlas_payload_sha256,
+        promotion_shader_handle: gpu_4096.promotion_shader_handle,
+        promotion_pipeline_handle: gpu_4096.promotion_pipeline_handle,
+        promotion_atlas_buffer_handle: gpu_4096.promotion_atlas_buffer_handle,
+        promotion_params_buffer_handle: gpu_4096.promotion_params_buffer_handle,
+        promotion_command_handle: gpu_4096.promotion_command_handle,
+        promotion_fence_handle: gpu_4096.promotion_fence_handle,
+        promotion_readback_buffer_handle: gpu_4096.promotion_readback_buffer_handle,
+        promotion_quad_count: gpu_4096.promotion_quad_count,
+        promotion_dispatch_count: gpu_4096.promotion_dispatch_count,
+        promotion_submitted: gpu_4096.promotion_submitted,
+        promotion_completion_waited: gpu_4096.promotion_completion_waited,
+        promotion_fence_evidence_available: gpu_4096.promotion_fence_evidence_available,
+        promotion_fence_destroyed: gpu_4096.promotion_fence_destroyed,
+        promotion_readback_source: gpu_4096.promotion_readback_source,
+        promotion_readback_byte_count: gpu_4096.promotion_readback_byte_count,
+        promotion_readback_nonblank_pixels: gpu_4096.promotion_readback_nonblank_pixels,
+        promotion_device_checksum: gpu_4096.promotion_device_checksum,
+        promotion_oracle_checksum: gpu_4096.promotion_oracle_checksum,
+        promotion_parity: gpu_4096.promotion_parity,
+        promotion_device_executed: gpu_4096.promotion_device_executed,
+        promotion_ready: gpu_4096.promotion_ready,
+        promotion_present_mode: gpu_4096.promotion_present_mode)
     if measured.status == "pass" and not expect_font_perf_budget(measured):
         measured.status = "failed"
         measured.reason = "performance-budget-exceeded"
@@ -512,5 +743,6 @@ describe "shared multilingual font performance evidence":
         val durable = read_font_perf_evidence()
         print "font_perf status={evidence.status} reason={evidence.reason} fixture=top-10-language-witnesses faces=3 glyphs_1080=1024 glyphs_4k=1024 glyphs_compare=4096 warm_backend=vulkan warm_1080_p95_ns={evidence.warm_1080_p95_ns} warm_4k_p95_ns={evidence.warm_4k_p95_ns} cpu_4096_p95_ns={evidence.cpu_4096_p95_ns} gpu_4096_p95_ns={evidence.gpu_4096_p95_ns} device_loss_status={evidence.device_loss_status} cpu_after_device_loss_p95_ns={evidence.cpu_after_device_loss_p95_ns} warm_hits={evidence.warm_hits}/{evidence.warm_requests} unchanged_upload={evidence.unchanged_upload} rss_available={evidence.rss_available} legacy_2d_kb={evidence.legacy_2d_kb} multiface_2d_kb={evidence.multiface_2d_kb} legacy_3d_kb={evidence.legacy_3d_kb} multiface_3d_kb={evidence.multiface_3d_kb} rss_growth_percent={evidence.rss_growth_percent} gpu_resource_high_water_bytes={evidence.gpu_resource_high_water_bytes} gpu_device={evidence.gpu_device_name} gpu_driver={evidence.gpu_driver_identity}"
         print "font_perf_samples warm_1080_ns={font_perf_samples_text(evidence.warm_1080_samples_ns)} warm_4k_ns={font_perf_samples_text(evidence.warm_4k_samples_ns)} cpu_4096_ns={font_perf_samples_text(evidence.cpu_4096_samples_ns)} gpu_4096_ns={font_perf_samples_text(evidence.gpu_4096_samples_ns)} cpu_after_device_loss_ns={font_perf_samples_text(evidence.cpu_after_device_loss_samples_ns)}"
+        print "font_perf_stages shaping_p95_ns={evidence.stage_shaping_p95_ns} material_p95_ns={evidence.stage_material_p95_ns} emission_compile_ns={evidence.stage_emission_compile_ns} dirty_upload_p95_ns={evidence.stage_dirty_upload_p95_ns} queue_device_p95_ns={evidence.stage_queue_device_p95_ns} sync_p95_ns={evidence.stage_sync_p95_ns} present_readback_p95_ns={evidence.stage_present_readback_p95_ns} cpu_oracle_p95_ns={evidence.stage_cpu_oracle_p95_ns} artifact={evidence.promotion_artifact_identity} entry={evidence.promotion_entry_name} batch={evidence.promotion_batch_identity} payload={evidence.promotion_atlas_payload_sha256} present_mode={evidence.promotion_present_mode}"
         expect(durable.status).to_equal("pass")
         expect(expect_font_perf_budget(durable)).to_be(true)

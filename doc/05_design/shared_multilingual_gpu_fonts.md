@@ -374,9 +374,15 @@ emission/compile, dirty upload, queue, device, synchronization, present/readback
 and CPU. Benchmark records include fixture hashes, viewport, color space,
 premultiplication/rounding, warmups, samples, percentile method, host,
 device/driver, RSS, and GPU resource high-water.
-Schema v4 also records controlled Vulkan-poison CPU fallback, the prepared batch
+Schema v5 also records controlled Vulkan-poison CPU fallback, the prepared batch
 identity before/after poison, and eleven post-loss CPU samples with recomputed
-p95 bounded by the unchanged baseline fixture.
+p95 bounded by the unchanged baseline fixture. It adds one retained
+emission/compile-install scalar; shaping, material, dirty-upload, fused
+submit-through-device-completion `queue_device`, later fence-observation
+`sync`, offscreen readback, and CPU-oracle p95s plus seven 11-sample arrays.
+`present_mode=not-applicable-offscreen` means no swapchain present occurred;
+device-origin readback remains mandatory, and fused `queue_device` is never
+summed with `sync` as if the intervals were disjoint.
 
 Promotion gates are the selected NFRs: at least 95% warm cache hits; 1,024 glyph
 p95 no more than 4 ms at 1080p and 8 ms at 4K; equal-semantics 4,096 glyph p95 at
@@ -388,8 +394,9 @@ The performance SSpec is the sole collector. It overwrites
 the schema, fixture, font bytes, collector/helper and renderer/backend source
 bundle hashes, exact viewport/packed-ARGB/straight-alpha/rounding/per-route
 warmup/percentile/exact packed-ARGB comparator metadata, same-host OS/architecture,
-device/driver, all counters, and five raw
-11-sample arrays. The system promotion spec only
+device/driver, all counters, five raw budget/recovery arrays, seven raw stage
+arrays, and the observed promotion identities, handles, fence, changed pixels,
+checksums, and parity. The system promotion spec only
 loads this record. Missing, stale, partial, malformed, or percentile-mismatched
 records fail closed and never trigger a second measurement.
 

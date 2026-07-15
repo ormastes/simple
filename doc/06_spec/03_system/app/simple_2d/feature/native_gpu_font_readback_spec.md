@@ -1,7 +1,7 @@
 # Native GPU Font Readback
 
 **Status:** release-blocking and currently unavailable
-**Traceability:** REQ-011, REQ-012, REQ-013, REQ-014; NFR-002, NFR-004, NFR-005, NFR-006, NFR-007
+**Traceability:** REQ-011, REQ-012, REQ-013, REQ-014; NFR-002, NFR-004, NFR-005, NFR-006, NFR-007, NFR-008
 **Executable:** `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl`
 
 This scenario has two fail-closed classification rows and three independent
@@ -88,7 +88,7 @@ least 1.25× faster than the CPU oracle; no unchanged full-atlas upload; at most
 Vulkan-poison CPU fallback; unchanged prepared-batch identity; and eleven
 post-loss CPU samples whose recomputed p95 does not exceed baseline.
 
-The performance SSpec is the sole collector and overwrites the strict v4
+The performance SSpec is the sole collector and overwrites the strict v5
 run/host/source/font/device-pinned durable record. This system scenario only loads that
 record; missing, stale, partial, or non-passing evidence fails closed.
 
@@ -98,8 +98,11 @@ record; missing, stale, partial, or non-passing evidence fails closed.
   readback bytes/source, absolute pixels, and CPU diff.
 - SimpleOS evidence: guest serial log plus QEMU `pmemsave` PPM and fixed-region
   digest.
-- Performance evidence: five raw sample arrays, recovery identity, upload/RSS,
-  and GPU resource high-water. Per-stage timing remains the NFR-008 gap.
+- Performance evidence: five budget/recovery arrays, seven stage arrays,
+  recovery identity, upload/RSS, GPU resource high-water, compiled artifact and
+  batch/payload identities, observed handles/fence, changed device pixels, and
+  exact CPU parity. NFR-008 source/schema coverage is present; the retained
+  native v5 record remains pending.
 
 The executable spec is the authority. Regenerate this manual after all five
 scenarios pass and require SPipe docgen to report zero stubs.

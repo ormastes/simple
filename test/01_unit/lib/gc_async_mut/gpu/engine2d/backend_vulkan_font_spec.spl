@@ -5,8 +5,10 @@ use std.io_runtime.{file_read}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{
     VULKAN_FONT_PARAMS_BYTES,
     vulkan_font_atlas_composite_params, vulkan_font_dispatch_groups, vulkan_font_atlas_replacement_status,
-    vulkan_font_pixels_checksum, vulkan_font_pixels_equal, vulkan_font_promotion_ready
+    vulkan_font_pixels_checksum, vulkan_font_pixels_equal, vulkan_font_promotion_ready,
+    vulkan_font_changed_pixel_count, vulkan_font_stage_evidence_ready
 }
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontCompositeEvidence}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_spirv.{spirv_font_atlas_composite}
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend}
@@ -21,6 +23,24 @@ fn _font_quad_batch(version: i64) -> FontRenderBatch:
         quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
             width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0xffffffffu32)],
         atlas_generation: 1, dirty_rects: [])
+
+fn _complete_stage_evidence() -> VulkanFontCompositeEvidence:
+    VulkanFontCompositeEvidence(status: "promoted", reason: "pass",
+        artifact_mode: "precompiled-spirv", shader_handle: 1, pipeline_handle: 2,
+        atlas_buffer_handle: 3, params_buffer_handle: 4, descriptor_handle: 0,
+        descriptor_created: true, descriptor_destroyed: true, command_handle: 5,
+        quad_count: 1, dispatch_count: 1, submitted: true, completion_waited: true,
+        fence_handle: 6, fence_evidence_available: true, fence_destroyed: true,
+        device_name: "device", device_type: "discrete", driver_identity: "driver",
+        readback_source: "device_readback", readback_buffer_handle: 7,
+        readback_byte_count: 4, device_checksum: -7, oracle_checksum: -7,
+        parity: true, device_executed: true, promotion_ready: true,
+        artifact_identity: "precompiled-spirv:0000000000000000000000000000000000000000000000000000000000000000",
+        entry_name: "main", program_version: 1, emission_compile_ns: 1,
+        batch_identity: "batch", atlas_payload_sha256: "1111111111111111111111111111111111111111111111111111111111111111",
+        dirty_upload_ns: 0, queue_device_ns: 1, sync_wait_ns: 1,
+        present_readback_ns: 1, cpu_oracle_ns: 1,
+        present_mode: "not-applicable-offscreen", readback_nonblank_pixels: 1)
 
 describe "Vulkan font atlas composite companion":
     it "packs the frozen 13-word ABI into 52 little-endian bytes":
@@ -62,6 +82,33 @@ describe "Vulkan font atlas composite companion":
         expect(vulkan_font_pixels_equal([0u32, 1u32], [0u32, 1u32])).to_equal(true)
         expect(vulkan_font_pixels_equal([0u32, 1u32], [0u32, 2u32])).to_equal(false)
         expect(vulkan_font_pixels_equal([0u32], [0u32, 1u32])).to_equal(false)
+
+    it "counts glyph changes instead of opaque background pixels":
+        expect(vulkan_font_changed_pixel_count(
+            [0xff000000u32, 0xff000000u32],
+            [0xff000000u32, 0xffffffffu32])).to_equal(1)
+        expect(vulkan_font_changed_pixel_count([0u32], [0u32, 1u32])).to_equal(0)
+
+    it "requires complete stage and promotion observations":
+        var evidence = _complete_stage_evidence()
+        expect(vulkan_font_stage_evidence_ready(evidence)).to_be(true)
+        evidence.atlas_payload_sha256 = "short"
+        expect(vulkan_font_stage_evidence_ready(evidence)).to_be(false)
+        evidence = _complete_stage_evidence()
+        evidence.queue_device_ns = 0
+        expect(vulkan_font_stage_evidence_ready(evidence)).to_be(false)
+        evidence = _complete_stage_evidence()
+        evidence.readback_nonblank_pixels = 0
+        expect(vulkan_font_stage_evidence_ready(evidence)).to_be(false)
+        evidence = _complete_stage_evidence()
+        evidence.submitted = false
+        expect(vulkan_font_stage_evidence_ready(evidence)).to_be(false)
+        evidence = _complete_stage_evidence()
+        evidence.readback_source = "host_snapshot"
+        expect(vulkan_font_stage_evidence_ready(evidence)).to_be(false)
+        evidence = _complete_stage_evidence()
+        evidence.parity = false
+        expect(vulkan_font_stage_evidence_ready(evidence)).to_be(false)
 
     it "wraps deterministically for a large pixel input":
         val pixels: [u32] = [0xfeedbeefu32; 65536]
@@ -241,10 +288,14 @@ describe "Vulkan font atlas composite companion":
         session.font_atlas_status = "ready"
         session.font_atlas_artifact_mode = "precompiled-spirv"
         session.font_atlas_artifact_identity = "precompiled-spirv:" + sha256_u8_hex(first)
+        session.font_atlas_emission_compile_ns = 5
         val cached = session.install_font_atlas_pipeline(first)
         val rejected = session.install_font_atlas_pipeline(changed)
         expect(cached.status).to_equal("ready")
         expect(cached.reason).to_equal("cached")
+        expect(cached.entry_name).to_equal("main")
+        expect(cached.program_version).to_equal(1)
+        expect(cached.emission_compile_ns).to_equal(5)
         expect(rejected.status).to_equal("rejected")
         expect(rejected.reason).to_equal("font-pipeline-artifact-mismatch")
         expect(session.shader_font_atlas).to_equal(11)

@@ -3,10 +3,15 @@
 > Manually synchronized on 2026-07-13 because the self-hosted Simple/docgen
 > lane is blocked. This is reviewed source evidence, not native execution.
 
-The 20 active scenarios cover the frozen parameter ABI, bounded dispatch,
+The 22 active scenarios cover the frozen parameter ABI, bounded dispatch,
 atlas replacement, checksums, exact packed-pixel equality, promotion classification, full atlas upload,
 session lifecycle, artifact validation, batch validation, and idempotent shared
 session cleanup.
+
+Stage promotion additionally requires retained precompiled artifact identity,
+`main` plus program version, batch/payload identity, positive fused queue/device,
+fence-observation, readback, and CPU-oracle timing, observed handles, changed
+device pixels rather than opaque background pixels, and exact checksum/parity.
 
 An active backend rejects session replacement before dimensions or incoming
 session validation, retaining its atlas and reference ownership unchanged. A

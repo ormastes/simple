@@ -1,7 +1,7 @@
 # Shared Multilingual GPU Font Performance Evidence
 
 **Status:** release-blocking and currently unavailable
-**Traceability:** NFR-002, NFR-004, NFR-005, NFR-006, NFR-007
+**Traceability:** NFR-002, NFR-004, NFR-005, NFR-006, NFR-007, NFR-008
 **Executable:** `test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl`
 
 The sole visible scenario shapes the ten selected language witnesses through
@@ -18,11 +18,18 @@ CPU/Vulkan routes.
 4. Require unchanged warm atlas upload, paired isolated 2D/3D RSS growth ≤10%,
    and GPU high-water in `(0, 128 MiB]`.
 5. Overwrite `build/shared_multilingual_gpu_fonts_perf/evidence.env` using
-   strict schema v4. The record pins viewports, byte-domain packed-ARGB,
+   strict schema v5. The record pins viewports, byte-domain packed-ARGB,
    straight-alpha/rounding semantics, one warmup frame per route, the exact
    percentile formula, exact packed-ARGB CPU-oracle comparator, same-host
    OS/architecture, fonts/source hashes, device/driver, raw
    samples, RSS, upload stability, and GPU resource high-water.
+6. Retain one emission/compile-install scalar and seven 11-sample stage arrays
+   for shaping, material, unchanged dirty upload, fused queue/device completion,
+   later fence observation, offscreen device readback, and CPU oracle. Require
+   stable artifact/batch/payload identity, nonzero observed handles, completed
+   fence, changed device pixels, and exact parity. The fused queue/device and
+   fence-observation intervals overlap and are not summed; present is
+   `not-applicable-offscreen`, while readback remains mandatory.
 
 Missing hardware, malformed records, stale hashes, or failed thresholds remain
 `unavailable`/failed and cannot promote a backend.

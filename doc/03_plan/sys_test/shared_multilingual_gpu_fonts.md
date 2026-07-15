@@ -111,19 +111,19 @@ behavior.
 | NFR | Evidence | Pass condition | Current evidence |
 |---|---|---|---|
 | NFR-001 | `shared_font_manifest_spec.spl` plus regeneration hashes | all immutable and byte-identical; corruption fails closed | source gate present; current regeneration pending |
-| NFR-002 | `native_gpu_font_readback_spec.spl` comparator | exact integer-alpha RGBA8; bounded documented AA edges | Vulkan promotion now requires exact packed-ARGB pixel-array equality; FNV64 remains a runtime diagnostic. v4 pins the exact comparator plus viewport, color/alpha/rounding, warmup, percentile, current host OS/architecture, and device/driver; retained native readback remains pending |
+| NFR-002 | `native_gpu_font_readback_spec.spl` comparator | exact integer-alpha RGBA8; bounded documented AA edges | Vulkan promotion now requires exact packed-ARGB pixel-array equality; FNV64 remains a runtime diagnostic. v5 pins the exact comparator plus viewport, color/alpha/rounding, warmup, percentile, current host OS/architecture, and device/driver; retained native readback remains pending |
 | NFR-003 | `shared_font_manifest_spec.spl` asset-size total | core fonts plus notices `<= 80 MiB` | source gate sums unique font, metadata, license, and notice bytes; current manifest execution remains pending |
 | NFR-004 | `build/shared_multilingual_gpu_fonts_perf/evidence.env` | warm hits `>=95%`; p95 `<=4 ms` 1080p and `<=8 ms` 4K | record missing; pending |
 | NFR-005 | `build/shared_multilingual_gpu_fonts_perf/evidence.env` | 4,096 glyph end-to-end p95 `>=1.25x` CPU | record missing; pending |
 | NFR-006 | `build/shared_multilingual_gpu_fonts_perf/evidence.env` | no unchanged full upload; RSS `<=10%`; GPU `<=128 MiB` | record missing; pending |
-| NFR-007 | native corrupt/device-loss scenarios | stable active identity and unchanged CPU-fixture p95 | source classifies Vulkan device loss, replays the same batch through software with exact pixels, and v4 requires equal before/after batch identity plus 11 post-loss CPU samples whose recomputed p95 does not exceed baseline; retained native loss execution remains pending |
-| NFR-008 | promoted native evidence record | every required stage/handle/hash/fence/readback field is present | per-stage durable schema and retained record are incomplete; pending |
+| NFR-007 | native corrupt/device-loss scenarios | stable active identity and unchanged CPU-fixture p95 | source classifies Vulkan device loss, replays the same batch through software with exact pixels, and v5 requires equal before/after batch identity plus 11 post-loss CPU samples whose recomputed p95 does not exceed baseline; retained native loss execution remains pending |
+| NFR-008 | promoted native evidence record | every required stage/handle/hash/fence/readback field is present | v5 source/parser coverage uses `VulkanFontCompositeEvidence`/`vulkan_font_stage_evidence_ready` and `FontPerfBudgetEvidence`/`read_font_perf_evidence`/`expect_font_perf_budget`; retained native record remains pending |
 
 NFR-004/005/006/007 use one durable contract at
 `build/shared_multilingual_gpu_fonts_perf/evidence.env`. The performance SSpec
 alone measures and overwrites it; the system promotion SSpec only loads it.
-Schema/fixture/font/source hashes, device/driver, every scalar, and five exact
-11-sample arrays are required for a passing record. Parsing is ordered and
+Schema/fixture/font/source hashes, device/driver, every scalar, five exact
+budget/recovery arrays, and seven exact stage arrays are required for a passing record. Parsing is ordered and
 fail-closed, so unknown, duplicate, missing, malformed, stale, or recomputed-p95
 mismatches cannot promote.
 
