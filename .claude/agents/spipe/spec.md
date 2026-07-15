@@ -48,6 +48,8 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
    Interpreter diagnostics must reuse calibrated
    `src/app/test/font_evidence_runner.spl`; never trust outer PASS/exit without
    executed-count and spec-exit counters.
+   CUDA font production specs must apply the canonical artifact-trust rule in
+   `.claude/skills/spipe.md`.
 10. Append the spec file list, generated manual paths, coverage matrix, and
     manual rendering policy to state file
 

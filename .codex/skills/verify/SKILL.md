@@ -52,6 +52,8 @@ release must not create, rewrite, or weaken SPipe evidence after verification.
   scenarios are folded or skipped according to policy.
 - Shared interface names and manual-facing setup/checker helper names match the
   accepted architecture/design/spec/manual references.
+- CUDA font production trust must satisfy the canonical artifact rule in
+  `.codex/skills/system_test/SKILL.md` before PASS.
 - Placeholder helpers for shared interfaces or manual setup/checker flow fail
   explicitly with `assert(false)` or `fail(...)` until implemented; silent
   placeholder passes are a FAIL.

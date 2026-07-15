@@ -1366,3 +1366,10 @@ pixels, and performance evidence remain release-blocking.
   `Prove native submission and device readback`.
   No Simple runtime, docgen, native GPU, QEMU, or performance command ran after
   the three-cycle cap; executable evidence remains pending. STATUS: FAIL.
+
+- Verifier mirror synchronization (2026-07-15): Codex, generic-agent, Claude
+  SPipe spec/verify, and Gemini verification surfaces now reference their
+  canonical CUDA font artifact-trust rule before accepting production PASS.
+  The rule remains single-owned by the existing Codex system-test and Claude
+  SPipe skills; no duplicate loader or policy implementation was added. No
+  runtime or device command ran after the three-cycle cap. STATUS: FAIL.

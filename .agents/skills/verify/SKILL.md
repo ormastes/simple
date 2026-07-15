@@ -40,6 +40,8 @@ not create, rewrite, or weaken SPipe after verification.
 - Every BDD scenario has an executable or intentionally skipped SPipe `it` block with a concrete reason
 - Stale, missing, placeholder, or requirement-disconnected SPipe is a FAIL
 - Shared interface/manual helper names match the design/spec/manual references
+- CUDA font production trust must satisfy the canonical artifact rule in
+  `.codex/skills/system_test/SKILL.md` before PASS.
 - Placeholder helper definitions fail explicitly with `assert(false)` or
   `fail(...)`; silent no-op helpers are a FAIL
 - For broad SPipe lanes, the recorded cooperative review plan is complete or
