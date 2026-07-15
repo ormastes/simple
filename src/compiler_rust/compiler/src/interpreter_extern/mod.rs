@@ -59,6 +59,7 @@ pub mod pty;
 pub mod time;
 pub mod math;
 pub mod random;
+pub mod serial;
 pub mod layout;
 pub mod system;
 pub mod io;
@@ -234,6 +235,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("arc_box_size", rc::arc_box_size);
     insert_simple!("arc_box_strong_count", rc::arc_box_strong_count);
     insert_simple!("arc_box_weak_count", rc::arc_box_weak_count);
+    insert_simple!("bytes_to_string", conversion::rt_bytes_to_text_fn);
     insert_simple!("bytes_to_u16_be", conversion::bytes_to_u16_be_fn);
     insert_simple!("bytes_to_u16_le", conversion::bytes_to_u16_le_fn);
     insert_simple!("bytes_to_u32_be", conversion::bytes_to_u32_be_fn);
@@ -1504,6 +1506,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         sandbox::rt_sandbox_set_network_blocklist_fn
     );
     insert_simple!("rt_sandbox_set_thread_limit", sandbox::rt_sandbox_set_thread_limit_fn);
+    insert_simple!("rt_serial_close", serial::rt_serial_close);
+    insert_simple!("rt_serial_flush", serial::rt_serial_flush);
+    insert_simple!("rt_serial_open", serial::rt_serial_open);
+    insert_simple!("rt_serial_read", serial::rt_serial_read);
+    insert_simple!("rt_serial_relay", serial::rt_serial_relay);
+    insert_simple!("rt_serial_set_timeout", serial::rt_serial_set_timeout);
+    insert_simple!("rt_serial_write", serial::rt_serial_write);
     insert_simple!("rt_sdn_check", sdn::rt_sdn_check);
     insert_simple!("rt_sdn_fmt", sdn::rt_sdn_fmt);
     insert_simple!("rt_sdn_from_json", sdn::rt_sdn_from_json);
@@ -2426,10 +2435,40 @@ pub(crate) fn call_extern_function_with_values(
 
 #[cfg(test)]
 mod tests {
-    use super::EXTERN_DISPATCH;
+    use super::*;
 
     #[test]
     fn dispatch_registers_cranelift_emit_object_raw() {
         assert!(EXTERN_DISPATCH.contains_key("rt_cranelift_emit_object_raw"));
+    }
+
+    #[test]
+    fn dispatch_registers_serial_runtime_family() {
+        for name in [
+            "rt_serial_open",
+            "rt_serial_close",
+            "rt_serial_read",
+            "rt_serial_write",
+            "rt_serial_set_timeout",
+            "rt_serial_flush",
+            "rt_serial_relay",
+        ] {
+            assert!(EXTERN_DISPATCH.contains_key(name), "missing {name}");
+        }
+    }
+
+    #[test]
+    fn bytes_to_string_dispatches_through_shared_converter() {
+        let handler = EXTERN_DISPATCH.get("bytes_to_string").expect("registered converter");
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        let bytes = Value::array(vec![Value::Int(0x68), Value::Int(0xc3), Value::Int(0xa9)]);
+
+        let result = handler(&[bytes], &mut env, &mut functions, &mut classes, &enums, &impl_methods).unwrap();
+
+        assert_eq!(result, Value::text("hé"));
     }
 }

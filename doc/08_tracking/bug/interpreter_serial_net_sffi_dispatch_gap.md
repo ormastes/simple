@@ -2,7 +2,8 @@
 
 **ID:** interpreter_serial_net_sffi_dispatch_gap
 **Severity:** P2
-**Status:** Open
+**Status:** Partially source fixed 2026-07-15; serial and `bytes_to_string`
+execution proof pending, TCP/file ABI-owner lanes remain open
 **Found:** 2026-06-13 (KV260 telnet-over-serial system test bring-up)
 
 ## Symptom
@@ -47,11 +48,25 @@ extern dispatch table
   `rt_bytes_to_text`, `rt_sleep_ms`.
 - `std.nogc_sync_mut.io.telnet_serial_bridge` is built on exactly this set.
 
-## Proposed fix
+## Resolution status
 
-Wire the missing families into `interpreter_extern` (delegating to the same
-implementations the native runtime uses), or invert the lib wrappers
-(`net/sffi.spl`, `io/serial_sffi.spl`) to call the `native_*`/dispatched
-names so both modes share one path (pattern: invert rather than
-dual-maintain). Requires seed rebuild + bootstrap redeploy per
-`.claude/memory` extern-rebuild rule.
+The interpreter now delegates all seven `rt_serial_*` calls to the existing
+runtime owner through the shared value bridge, with typed argument checks and
+invalid-handle regressions. `bytes_to_string` is registered as an alias of the
+existing `rt_bytes_to_text` converter. Focused execution remains pending a
+runnable compiler test artifact.
+
+The legacy `tcp_listener_*`/`tcp_stream_*` declarations cannot safely alias the
+current `native_tcp_*` family because their handle and result ABIs differ. The
+`rt_io_file_*` handle family likewise has no shared production implementation;
+`rt_file_open` remains a stub. These require real shared owners and behavioral
+tests, not interpreter-only dispatch entries. The obsolete
+`native_tcp_listener_close` warning survives only in legacy mirrored source.
+
+## Remaining fix direction
+
+Invert the live library TCP wrappers onto a single canonical `native_tcp_*` or
+`rt_io_tcp_*` ABI with explicit handle/result conversion. Implement one shared
+file-handle registry for the complete `rt_io_file_*` family. Both lanes need
+loopback/tempfile lifecycle tests before registration. Seed rebuild and
+bootstrap redeploy remain required for executable proof.
