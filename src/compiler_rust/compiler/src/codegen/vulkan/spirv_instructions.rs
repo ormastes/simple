@@ -392,6 +392,13 @@ impl SpirvModule {
                     inst
                 )));
             }
+
+            MirInst::InlineAsm { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Inline assembly is not supported in SPIR-V kernels: {:?}",
+                    inst
+                )));
+            }
         }
 
         Ok(())
