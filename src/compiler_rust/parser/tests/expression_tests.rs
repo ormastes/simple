@@ -35,6 +35,22 @@ fn test_binary_expression() {
 }
 
 #[test]
+fn cast_before_bitwise_or_is_binary() {
+    let module = parse("bytes[off] as u32 | ((bytes[off + 1] as u32) << 8)").unwrap();
+    let Node::Expression(Expr::Binary {
+        op: BinOp::BitOr, left, ..
+    }) = &module.items[0]
+    else {
+        panic!("Expected bitwise-or expression, got {:?}", module.items[0]);
+    };
+    let Expr::Cast { target_type, .. } = &**left else {
+        panic!("Expected cast on left side, got {left:?}");
+    };
+
+    assert_eq!(target_type, &Type::Simple("u32".to_string()));
+}
+
+#[test]
 fn test_operator_precedence() {
     let module = parse("1 + 2 * 3").unwrap();
     // Should parse as 1 + (2 * 3)

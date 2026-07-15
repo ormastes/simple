@@ -2,9 +2,11 @@
 
 ## Status
 
-Root cause localized and worked around 2026-07-13 (see "Root cause" below).
-Parser gap itself is NOT fixed — this is a source-level workaround. Re-open if
-another instance of the same construct appears elsewhere.
+Rust seed parser source fixed 2026-07-15; focused regression added, execution
+pending. The pure-Simple parser was already correct: expression casts use
+`parser_parse_type`, while union-aware parsing is limited to declaration type
+positions through `parser_parse_type_with_union`. The Vulkan source workaround
+may remain because it is explicit and harmless.
 
 ## Root cause (found via bisection, 2026-07-13)
 
@@ -27,7 +29,14 @@ val a = (bytes[off] as u32) | ((bytes[off + 1] as u32) << 8) # parses fine
 Parenthesizing the cast (`(EXPR as TYPE) | ...`) removes the ambiguity because
 the parser closes the cast at `)` before ever reaching the `|`.
 
-## Fix applied
+## Source fix (2026-07-15)
+
+The Rust postfix cast parser now uses `parse_single_type()` instead of
+union-aware `parse_type()`. A following `|` therefore remains available to the
+binary-expression parser. The focused AST regression uses the isolated repro
+above and requires an outer `BitOr` whose left operand is a cast to `u32`.
+
+## Workaround applied
 
 `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl`,
 `_vulkan_font_bytes_to_pixels`: parenthesized the first cast in the pixel
@@ -43,12 +52,16 @@ No other `as TYPE |` occurrences remain in this file
 the showcase now proceeds past this parse error (it currently stops on an
 unrelated 10s example-runner timeout, tracked separately).
 
-## Requested fix
+The current source subsequently split the byte casts and shifts into named
+locals before combining them. That equivalent workaround does not need to be
+reverted now that the parser source is fixed.
 
-Same request as the sibling bug: either make `as TYPE` unambiguously close
-before a following infix operator unless parenthesized as a type union, or
-require explicit parens for `(TYPE | TYPE2)` unions so `EXPR as TYPE | EXPR2`
-is never speculatively read as a type.
+## Resolution boundary
+
+The `|` ambiguity is fixed by making `as TYPE` close after one type. The
+separate `<` ambiguity remains tracked by
+`parser_sfnt_glyf_expected_comma_found_plus_2026-07-13.md` and is not claimed
+fixed here.
 
 ## Prior investigation (unresolved as of first filing)
 
