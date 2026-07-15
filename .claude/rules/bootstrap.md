@@ -69,6 +69,9 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
 - Multiplatform bootstrap CI exercises both LLVM and Cranelift through that
   wrapper and uploads only the resulting pure-Simple Stage 2/Stage 3 binaries,
   never the Rust seed as a platform artifact.
+- The Linux Stage 3 artifact owns the strict x86_64/AArch64/RISC-V LLVM
+  execution gate through `check-llvm-simd-row-native-arch.shs`; Rust cross-build
+  success alone is not pure-Simple architecture evidence.
 
 ## Bootstrap Commands
 ```bash

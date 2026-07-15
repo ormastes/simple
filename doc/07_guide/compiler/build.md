@@ -194,6 +194,12 @@ LLVM on Linux x86_64 and macOS AArch64, and with explicit Cranelift on macOS
 x86_64 and Windows x86_64. It uploads Stage 2/Stage 3 pure-Simple artifacts,
 never the Rust seed as the platform result.
 
+The Linux Stage 3 artifact then runs
+`scripts/check/check-llvm-simd-row-native-arch.shs`: native x86_64 plus QEMU
+AArch64 and RISC-V exact-output execution, with target-specific SIMD/RVV
+instruction checks. This is the hosted Engine2D native-row architecture gate;
+it does not introduce a parallel WebIR, Draw IR, or rendering path.
+
 Current implementation note: Stage 2/Stage 3 are fail-closed while
 `bootstrap_main.spl` self-host lowering is still being repaired. When Stage 3
 is unavailable, the wrapper reports incomplete pure-Simple evidence and exits
