@@ -23,6 +23,9 @@ Primary interfaces are frozen before sidecar work:
 - Their checkers are `expect_legacy_draw_ir_font_parity`,
   `expect_selected_unicode_shaping`, `expect_engine3d_font_readback`,
   `expect_simpleos_font_pixel_oracle`, and `expect_font_perf_budget`.
+- In these step names, `legacy` means compatibility producer APIs. Direct
+  `arch/*/wm_entry.spl` demos remain compatibility-only and outside canonical
+  production evidence.
 - Temporary helpers must call `assert(false)` or `fail(...)`.
 
 No lane may add `SharedFontRenderer`, `GpuFontEmitter`, another atlas/cache,

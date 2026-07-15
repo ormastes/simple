@@ -161,10 +161,11 @@ Provide one configurable, license-audited multilingual font pipeline shared by S
 
 ## Phase
 
-REQ-015 runtime configuration is implemented in source; canonical execution is
-pending. Self-hosted execution, canonical docgen, native Engine3D promotion,
-retained SimpleOS pixels, performance evidence, and the legacy x86
-`wm_entry.spl` Draw IR migration remain release-blocking.
+REQ-011 canonical routing and REQ-015 runtime configuration are implemented in
+source; canonical execution is pending. Direct `arch/*/wm_entry.spl` demos are
+explicitly compatibility-only and are not release blockers. Self-hosted
+execution, canonical docgen, native Engine3D promotion, retained SimpleOS
+pixels, and performance evidence remain release-blocking.
 
 ## Log
 
@@ -1323,3 +1324,10 @@ retained SimpleOS pixels, performance evidence, and the legacy x86
   `build/` is mutable evidence, not a production trust anchor, so automatic
   loading was not added. Package the generated PTX with a pinned manifest/hash,
   then reuse the existing installer in the canonical factory. STATUS: FAIL.
+
+- Legacy direct-entry scope audit (2026-07-15): the x86 compatibility demo has
+  192 static private text sites but only nine reachable calls, all through one
+  private vector helper. Selected REQ-011 already routes canonical producers
+  through `DrawIrComposition` and Engine2D and explicitly excludes direct
+  `arch/*/wm_entry.spl` from production evidence, so no duplicate migration was
+  added. Retained canonical QEMU pixels remain pending. STATUS: FAIL.
