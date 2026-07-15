@@ -285,6 +285,18 @@ ProcessingIR generation according to the shared Metal, DirectX, then Vulkan
 negotiation order, proving both boots used one daemon session rather than two
 independent valid logs.
 
+After the full positional oracle, the probe submits exactly 20 additional
+identical 1280x720 Draw IR generations. The serial log must contain samples
+1..20 with consecutive generation/frame IDs, positive elapsed time, matching
+run/backend/device identity/dimensions/output bytes/checksum, and zero
+mismatches. The wrapper computes nearest-rank p95 at rank 19. It enforces the
+16,700 us limit only when the same row's exact retained QEMU argv marker proves
+matching KVM/HVF/WHPX acceleration; every TCG row is correctness-only. The
+source, parser, cached validator, and self-test are ready, but fresh current-host
+native/TCG execution remains required. Twenty extra samples may expose a real
+wall-time need; set `SIMPLEOS_HOST_GPU_QEMU_TIMEOUT` for that run if necessary,
+without changing the checked-in default.
+
 The second QEMU argument vector must have this exact token shape (with the
 row-owned shared-memory path substituted for `<row-shm>`):
 
@@ -424,9 +436,10 @@ also requires exactly one scoped `HOST_GPU_MAP_OK` before the first attempt or
 final decision. Two valid clock samples in the same microsecond are recorded as
 1 us so zero remains an invalid interval.
 
-These source and parser changes do not provide warm multi-sample
-render/readback p95. TODO 563 remains open for that p95 and fresh combined
-QEMU-plus-daemon RSS evidence; NFR-003 and NFR-005 are not newly satisfied.
+The 20-sample warm render/readback p95 contract is source/parser/self-test
+ready. TODO 563 remains open for fresh current-host native and TCG execution
+and fresh combined QEMU-plus-daemon RSS evidence; source readiness does not
+satisfy NFR-003 or NFR-005.
 
 Processing receipts distinguish the transient backend resource handle from the
 stable device identity. Vulkan hashes the runtime-selected driver identity,

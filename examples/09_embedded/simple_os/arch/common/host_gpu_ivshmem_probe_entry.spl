@@ -19,6 +19,7 @@ val HOST_GPU_FIXTURE_RECT_WIDTH: i64 = 800
 val HOST_GPU_FIXTURE_RECT_HEIGHT: i64 = 360
 val HOST_GPU_FIXTURE_RECT_PIXELS: i64 = HOST_GPU_FIXTURE_RECT_WIDTH * HOST_GPU_FIXTURE_RECT_HEIGHT
 val HOST_GPU_FIXTURE_BACKGROUND_PIXELS: i64 = HOST_GPU_FIXTURE_PIXEL_COUNT - HOST_GPU_FIXTURE_RECT_PIXELS
+val HOST_GPU_WARM_SAMPLE_COUNT: i64 = 20
 
 fn host_gpu_fixture_expected_pixel(index: i64, background: u32, foreground: u32) -> u32:
     val x = index % HOST_GPU_FIXTURE_WIDTH
@@ -306,12 +307,28 @@ pub fn host_gpu_ivshmem_probe_main():
         return
     serial_println("HOST_GPU_FIXTURE_OK isa={isa} backend={render_backend} generation={fixture_generation} run={fixture_receipt.run_id_hash} frame={fixture_receipt.frame_id} protocol={hello.version} width={HOST_GPU_FIXTURE_WIDTH} height={HOST_GPU_FIXTURE_HEIGHT} elapsed_us={fixture_receipt.elapsed_us} handle={fixture_receipt.native_handle} identity={fixture_receipt.device_identity} checksum={fixture_receipt.output_checksum} bg={background_count} rect={foreground_count} mismatches={fixture_mismatches}")
 
+    var warm_sample: i64 = 1
+    while warm_sample <= HOST_GPU_WARM_SAMPLE_COUNT:
+        val warm_generation = fixture_generation + warm_sample
+        val warm_receipt = host_gpu_ivshmem_submit_draw_ir(
+            base, warm_generation, run_id_hash, warm_generation, render_backend,
+            HOST_GPU_FIXTURE_WIDTH, HOST_GPU_FIXTURE_HEIGHT, fixture_composition, fixture_image_resources, HOST_GPU_PROBE_TIMEOUT_POLLS
+        )
+        if not host_gpu_ivshmem_device_receipt_valid(warm_receipt, warm_generation, run_id_hash, warm_generation, render_backend_code, HOST_GPU_FIXTURE_OUTPUT_BYTES) or warm_receipt.device_identity != fixture_receipt.device_identity:
+            _host_gpu_probe_fail(isa, "warm-fixture-receipt")
+            return
+        if warm_receipt.output_checksum != fixture_receipt.output_checksum:
+            _host_gpu_probe_fail(isa, "warm-fixture-checksum")
+            return
+        serial_println("HOST_GPU_FIXTURE_SAMPLE isa={isa} backend={render_backend} sample={warm_sample} generation={warm_generation} run={warm_receipt.run_id_hash} frame={warm_receipt.frame_id} protocol={hello.version} width={HOST_GPU_FIXTURE_WIDTH} height={HOST_GPU_FIXTURE_HEIGHT} elapsed_us={warm_receipt.elapsed_us} handle={warm_receipt.native_handle} identity={warm_receipt.device_identity} checksum={warm_receipt.output_checksum} mismatches=0")
+        warm_sample = warm_sample + 1
+
     val processing_backend = if (hello.processing_mask & SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0: "cuda" elif (hello.processing_mask & SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL) != 0: "metal" elif (hello.processing_mask & SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN) != 0: "vulkan" else: ""
     if processing_backend == "":
         _host_gpu_probe_fail(isa, "processing-ir-unavailable")
         return
 
-    val processing_generation = generation + 3
+    val processing_generation = fixture_generation + HOST_GPU_WARM_SAMPLE_COUNT + 1
     val processing_receipt = host_gpu_ivshmem_fill_u32(
         base, processing_generation, run_id_hash, processing_generation,
         processing_backend, 256, 7u32, HOST_GPU_PROBE_TIMEOUT_POLLS

@@ -20,9 +20,11 @@ NFR-006 source and parser evidence now measures one guest-observed interval
 from device initialization through rejected/timed-out attempts and final
 selection or fallback. TODO 566 remains open until fresh native execution proves
 the inclusive 500,000 us budget.
-No warm multi-sample render/readback p95 is produced by these source/parser
-changes; TODO 563 remains open, along with its fresh combined QEMU/daemon RSS
-evidence.
+The 20-sample warm render/readback source, parser, cached validation, and
+self-test contract is ready. TODO 563 remains open because fresh current-host
+native/TCG execution and combined QEMU/daemon RSS evidence are still missing;
+TCG is correctness-only and native timing must be bound to exact retained QEMU
+argv acceleration evidence.
 
 This scenario proves that supported SimpleOS guests use one bounded protocol to
 execute Draw IR and ProcessingIR on a real host device. Unsupported rows retain
@@ -64,6 +66,14 @@ the CPU/software fallback and report a stable reason.
    `DrawIrComposition -> Engine2D` path. Compare all 921,600 device-readback
    pixels against the positional CPU oracle and require checksum 1417723768,
    633,600 background pixels, 288,000 rectangle pixels, and zero mismatches.
+   Then submit exactly 20 identical warm generations without repeating the full
+   pixel scan. Require samples 1..20, consecutive generation/frame IDs, stable
+   run/backend/device/dimensions/bytes/checksum, positive elapsed time, and zero
+   mismatches. Compute nearest-rank p95 at rank 19 and require at most 16,700 us
+   only for a matching native accelerator proven by the exact retained argv;
+   TCG rows are correctness-only. If a real run needs more wall time, set
+   `SIMPLEOS_HOST_GPU_QEMU_TIMEOUT` for that invocation without changing the
+   default.
 8. **Prove the AArch64 production desktop frame.** Build the
    `arm64-desktop-engine2d` guest through the wrapper, require its production
    QEMU argv lane, require exactly one scoped `HOST_GPU_MAP_OK` before the first

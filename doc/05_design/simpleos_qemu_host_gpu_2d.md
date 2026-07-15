@@ -226,8 +226,16 @@ formed from independent peaks, and AArch64 preserves maxima across both boots.
 Native-ISA rows require
 negotiation within 500 ms, render/readback p95 at most 16.7 ms, incremental RSS
 at most 256 MiB, and processing speedup at least 1.5x to become preferred.
-TODO 563 remains open because these source/parser changes provide neither a
-fresh warm multi-sample render/readback p95 nor fresh combined QEMU/daemon RSS.
+The source-ready probe follows the fully scanned 1280x720 oracle with exactly
+20 identical warm submissions. It requires samples 1..20, consecutive
+generations, positive device receipts, and stable dimensions, run, backend,
+identity, bytes, checksum, and zero-mismatch provenance; the wrapper computes
+nearest-rank p95 at rank 19. Native enforcement is bound to the row's exact
+retained QEMU argv marker and matching KVM/HVF/WHPX acceleration; TCG validates
+correctness only. TODO 563 remains open because no fresh current-host native or
+TCG row and no fresh combined QEMU/daemon RSS evidence has executed this
+contract. If real execution needs more than the current timeout, the operator
+may set `SIMPLEOS_HOST_GPU_QEMU_TIMEOUT`; the default is intentionally unchanged.
 Negotiation timing is one guest-observed monotonic interval from device
 initialization through strict Metal -> DirectX -> Vulkan attempts to selected
 backend or CPU fallback. Each submitted attempt is counted once; rejected and

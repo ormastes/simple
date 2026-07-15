@@ -67,9 +67,18 @@ fixture bypasses, synthetic handles, or passing placeholders.
   `-accel` token plus matching host ISA, not ISA equality; AArch64, RV64, and
   same-ISA TCG validate ordering, counting, boundaries, and fail-closed behavior
   but cannot close native latency. Valid equal clock samples use a 1 us floor.
-- NFR-005 evidence now carries concurrently sampled daemon, QEMU, and combined
-  maxima across both AArch64 boots; TODO 563 remains open until fresh live rows
-  prove the 256 MiB target and warm multi-sample latency p95. NFR-001's exact
+- NFR-003 source, parser, and self-test evidence now carries exactly 20 warm
+  1280x720 render/readback samples after the full positional oracle, validates
+  consecutive generations and stable run/backend/device/checksum provenance,
+  and computes nearest-rank p95 with the 16,700 us native limit. Native
+  applicability is bound to the row's exact retained QEMU argv marker and a
+  matching KVM/HVF/WHPX host/ISA; TCG remains correctness-only. NFR-005 evidence
+  carries concurrently sampled daemon, QEMU, and combined maxima across both
+  AArch64 boots. TODO 563 remains open until fresh current-host native and TCG
+  rows exercise the contract and a native row proves both the p95 and 256 MiB
+  targets. If the 20 extra samples expose a real timeout, the operator may set
+  `SIMPLEOS_HOST_GPU_QEMU_TIMEOUT` for that run; the default remains unchanged.
+  NFR-001's exact
   1280x720 fixture and NFR-004's 1.5x preference decision are tracked separately
   by TODO 569 and TODO 570 instead of being inferred from 64x48 parity. The
   daemon and cached-report checker now implement the correlated classification

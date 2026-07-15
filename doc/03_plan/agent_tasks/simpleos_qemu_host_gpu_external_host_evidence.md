@@ -21,7 +21,7 @@ remains incomplete.
 | NVIDIA CUDA UUID, multi-GPU, and MIG identity | TODO564 | The same report retains two distinct nonzero UUID-hash identities. MIG stays open, and CUDA-tagged QEMU receipts wait for the compiler. |
 | Exact 1280x720 non-current native-host fixtures | TODO569 | Zero-mismatch device readback on prepared Windows/macOS/NVIDIA rows; current Linux Vulkan work remains active |
 | Non-current ProcessingIR preference classification | TODO570 | Correlated CPU/device timing on prepared Windows/macOS/NVIDIA rows; current Linux Vulkan work remains active |
-| Non-current warm p95 and combined QEMU/daemon RSS | TODO563 | Fresh prepared-host measurements; current Linux Vulkan work remains active |
+| Non-current warm p95 and combined QEMU/daemon RSS | TODO563 | The 20-sample nearest-rank p95 source/parser/self-test contract is ready; fresh prepared-native measurements remain postponed, while current Linux native/TCG execution and combined RSS stay active |
 | Non-current guest-observed negotiation/fallback timing | TODO566 | Windows/macOS native <=500 ms receipts; hardware-independent validation and current Linux native timing remain active |
 
 No new TODO is created because these rows already have authoritative owners.
@@ -52,6 +52,10 @@ only if a fresh native run exposes a reproducible implementation failure.
 - Cross-ISA or same-ISA TCG proves guest/protocol behavior only; native-host
   latency and RSS claims require a matching prepared-host KVM/HVF/WHPX row and
   retained executed `-accel` evidence.
+- Warm latency evidence requires exactly 20 additional correlated 1280x720
+  render/readback receipts after the full positional oracle. The wrapper binds
+  their nearest-rank p95 to the row's exact retained QEMU argv marker; TCG may
+  prove parsing and correctness but cannot satisfy the 16,700 us native limit.
 - Negotiation evidence retains the guest device-init start, ordered submitted
   attempts and outcomes, final selection/fallback, guest-observed duration, and
   native applicability. Exactly 500,000 us passes; 500,001 us fails. Daemon
@@ -75,7 +79,7 @@ only if a fresh native run exposes a reproducible implementation failure.
 | TODO552 | Select feature/NFR requirements before implementing 4K shared-memory capacity. |
 | TODO554 | Shadow-inclusive, scene-clamped titled-window DrawIR bounds are implemented without changing hit/layout geometry; focused CPU/device execution remains blocked by TODO 548. |
 | TODO555 | Complete owner-level Metal unknown-completion quarantine and later obtain native failure evidence. |
-| TODO563 | Run current-host Linux Vulkan warm p95 and combined QEMU/daemon RSS evidence after TODO548 unblocks execution. |
+| TODO563 | Source/parser/self-test support is ready for 20 warm samples and nearest-rank p95. After TODO548, run current-host Linux Vulkan native and TCG rows and retain combined QEMU/daemon RSS; only native evidence bound to exact KVM argv can close the 16.7 ms target. If the extra samples expose a real timeout, adjust `SIMPLEOS_HOST_GPU_QEMU_TIMEOUT` for that run without changing its default. |
 | TODO565 | Complete AArch64/RISC-V production desktop ownership and fresh QEMU proof. |
 | TODO566 | Implement and verify the single guest-observed interval plus fail-closed parser self-test locally; after TODO548, run current Linux x86_64 native evidence. Postpone only unavailable Windows/macOS native rows; AArch64/RV64 TCG remain correctness-only. |
 | TODO567 | Replace transitional RISC-V C VirtIO transport with pure-Simple DMA/queue ownership. |

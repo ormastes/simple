@@ -41,6 +41,16 @@ separate synchronous generation after the retained 64x48 full-frame IMAGE
 regression, so exact NFR evidence does not expand protocol v1 or weaken IMAGE
 transport coverage.
 
+After that full oracle, the same architecture-neutral probe submits exactly 20
+additional identical Draw IR generations without rescanning every pixel. Each
+device receipt must preserve dimensions, run, backend, device identity, output
+bytes, checksum, and consecutive frame/generation correlation. The wrapper
+retains all positive elapsed samples and computes nearest-rank p95; native
+admission is bound to the same row's exact retained QEMU argv marker and a
+matching KVM/HVF/WHPX accelerator. TCG remains correctness-only. This contract
+is source/parser/self-test ready, but TODO 563 remains open for fresh native/TCG
+execution and combined RSS evidence.
+
 Completed readback presentation remains owned by `Engine2dWmFrameExecutor`
 and routes through `FramebufferDriver.present_argb32_from_mmio`. The driver
 validates the complete source checksum before the first scanout write, then

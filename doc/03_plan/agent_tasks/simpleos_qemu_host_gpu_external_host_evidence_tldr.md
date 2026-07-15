@@ -6,7 +6,12 @@ Status: **external rows postponed; current-host work active; not complete**.
 - GPU TODO119 (`mac_gpu_backend_evidence_2026-07-10.md`) owns macOS deployment.
 - TODO544 owns Windows DirectX, macOS Metal, current-source CUDA, and CUDA QEMU receipts; retained-PTX CUDA readback passed locally.
 - TODO564 retains two distinct local UUID-hash identities; MIG and CUDA QEMU evidence remain open.
-- TODO563/569/570 postpone only non-current prepared-host rows; current Linux Vulkan rows stay active.
+- TODO563's 20-sample nearest-rank p95 source/parser/self-test contract is ready;
+  non-current native measurements are postponed, while current Linux native/TCG
+  execution and combined RSS remain open. Only exact-argv KVM evidence may close
+  latency; TCG is correctness-only. Raise `SIMPLEOS_HOST_GPU_QEMU_TIMEOUT` only
+  if a real 20-sample run needs it; do not change the default.
+- TODO569/570 postpone only non-current prepared-host rows; current Linux Vulkan rows stay active.
 - TODO566 postpones only unavailable non-current native timing rows; its local
   validation and current Linux native evidence remain active, and TCG cannot
   close the 500 ms target.

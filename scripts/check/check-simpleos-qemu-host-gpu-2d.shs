@@ -23,6 +23,9 @@ HOST_GPU_FIXTURE_HEIGHT=720
 HOST_GPU_FIXTURE_CHECKSUM=1417723768
 HOST_GPU_FIXTURE_BACKGROUND_PIXELS=633600
 HOST_GPU_FIXTURE_RECT_PIXELS=288000
+HOST_GPU_WARM_SAMPLE_COUNT=$(sed -n 's/^val HOST_GPU_WARM_SAMPLE_COUNT: i64 = \([0-9][0-9]*\)$/\1/p' examples/09_embedded/simple_os/arch/common/host_gpu_ivshmem_probe_entry.spl)
+[ "$HOST_GPU_WARM_SAMPLE_COUNT" = 20 ] || exit 2
+RENDER_READBACK_P95_MAX_US=16700
 
 case "$(uname -s)" in
     Linux) ACTIVE_HOST=linux ;;
@@ -203,7 +206,9 @@ serial_has_pass() {
     [ "$(grep -aEc "^HOST_GPU_PROCESS_OK isa=$isa .*[[:space:]]*$" "$log")" -eq 1 ] &&
     [ "$(grep -aEc "^SIMPLEOS_HOST_GPU_2D_PASS isa=$isa[[:space:]]*$" "$log")" -eq 1 ] &&
     [ "$(grep -aEc "^TEST PASSED[[:space:]]*$" "$log")" -eq 1 ] &&
+    serial_qemu_execution_valid "$log" "$qemu_args" &&
     serial_receipts_valid "$log" "$isa" &&
+    render_latency_evidence_valid "$log" "$isa" "$qemu_args" "$BACKEND" &&
     negotiation_timing_evidence_valid "$log" "$isa" probe "$(negotiation_applicability "$isa" "$qemu_args")" "$BACKEND" &&
     serial_processing_pair_valid "$log" "$isa" &&
     { [ "$ACTIVE_HOST" != linux ] || [ "$REQUIRE_CUDA" != 1 ] || grep -aFq "HOST_GPU_PROCESS_OK isa=$isa backend=cuda " "$log"; } &&
@@ -211,10 +216,19 @@ serial_has_pass() {
     ! grep -aEq "^TEST FAILED[[:space:]]*$" "$log"
 }
 
+serial_qemu_execution_valid() {
+    log=$1
+    encoded=$2
+    encoded_argv_valid "$encoded" &&
+    [ "$(grep -aFxc "HOST_GPU_QEMU_EXECUTION argv=$encoded" "$log")" -eq 1 ] &&
+    [ "$(grep -aEc '^HOST_GPU_QEMU_EXECUTION argv=.*$' "$log")" -eq 1 ]
+}
+
 arm64_production_serial_has_correlated_frame() {
     log=$1
     qemu_args=$2
     [ -f "$log" ] || return 1
+    serial_qemu_execution_valid "$log" "$qemu_args" || return 1
     ramfb_pattern='^\[WM\] ramfb configured successfully via fw_cfg DMA[[:space:]]*$'
     ready_pattern="^\\[wm-frame\\] host-gpu-ready backend=$BACKEND generation=[1-9][0-9]*[[:space:]]*$"
     presented_pattern="^\\[wm-frame\\] host-gpu-presented backend=$BACKEND generation=[1-9][0-9]* run=[1-9][0-9]* frame=[1-9][0-9]* checksum=[1-9][0-9]*[[:space:]]*$"
@@ -300,7 +314,7 @@ serial_receipts_valid() {
     [ "$render_generation" -eq "$((hello_generation + 1))" ] &&
     [ "$draw_ir_generation" -eq "$((render_generation + 1))" ] &&
     [ "$fixture_generation" -eq "$((draw_ir_generation + 1))" ] &&
-    [ "$process_generation" -eq "$((fixture_generation + 1))" ] &&
+    [ "$process_generation" -eq "$((fixture_generation + HOST_GPU_WARM_SAMPLE_COUNT + 1))" ] &&
     [ "$render_run" = "$draw_ir_run" ] && [ "$render_run" = "$fixture_run" ] && [ "$render_run" = "$process_run" ] &&
     [ "$render_frame" = "$render_generation" ] &&
     [ "$draw_ir_frame" = "$draw_ir_generation" ] &&
@@ -323,6 +337,77 @@ negotiation_applicability() {
     [ -n "$expected_native" ] && [ "$isa" = "$HOST_ARCH" ] && [ "$accel" = "$(encoded_arg "$expected_native")" ] || return 1
     echo native-isa
 }
+
+render_latency_p95_us() {
+    log=$1
+    isa=$2
+    backend=$3
+    values=$(awk -v expected_isa="$isa" -v expected_backend="$backend" '
+        $1 == "HOST_GPU_FIXTURE_SAMPLE" && $2 == "isa=" expected_isa && $3 == "backend=" expected_backend {
+            if ($11 ~ /^elapsed_us=[1-9][0-9]*$/) print substr($11, 12)
+        }
+    ' "$log")
+    count=$(printf '%s\n' "$values" | awk 'NF { count++ } END { print count + 0 }')
+    [ "$count" -eq "$HOST_GPU_WARM_SAMPLE_COUNT" ] || return 1
+    rank=$((($HOST_GPU_WARM_SAMPLE_COUNT * 95 + 99) / 100))
+    printf '%s\n' "$values" | LC_ALL=C sort -n | sed -n "${rank}p"
+}
+
+render_latency_evidence_valid() (
+    log=$1
+    isa=$2
+    qemu_args=$3
+    expected_backend=$4
+    [ -f "$log" ] || return 1
+    applicability=$(negotiation_applicability "$isa" "$qemu_args") || return 1
+    serial_render_fixture_valid "$log" "$isa" || return 1
+    awk -v expected_isa="$isa" -v expected_backend="$expected_backend" \
+        -v expected_protocol="$EXPECTED_PROTOCOL_VERSION" \
+        -v expected_width="$HOST_GPU_FIXTURE_WIDTH" -v expected_height="$HOST_GPU_FIXTURE_HEIGHT" \
+        -v expected_checksum="$HOST_GPU_FIXTURE_CHECKSUM" -v expected_count="$HOST_GPU_WARM_SAMPLE_COUNT" '
+        function field(n, prefix) {
+            if (index($n, prefix) != 1) { bad = 1; return "" }
+            return substr($n, length(prefix) + 1)
+        }
+        $1 == "HOST_GPU_FIXTURE_OK" && $2 == "isa=" expected_isa && $3 == "backend=" expected_backend {
+            fixture_count++
+            fixture_line = NR
+            fixture_generation = field(4, "generation=")
+            fixture_run = field(5, "run=")
+            fixture_identity = field(12, "identity=")
+            if (fixture_generation !~ /^[1-9][0-9]*$/ || fixture_run !~ /^[1-9][0-9]*$/ || fixture_identity !~ /^[1-9][0-9]*$/) bad = 1
+        }
+        $1 == "HOST_GPU_FIXTURE_SAMPLE" {
+            sample_count++
+            sample = field(4, "sample=")
+            generation = field(5, "generation=")
+            run = field(6, "run=")
+            frame = field(7, "frame=")
+            protocol = field(8, "protocol=")
+            width = field(9, "width=")
+            height = field(10, "height=")
+            elapsed = field(11, "elapsed_us=")
+            handle = field(12, "handle=")
+            identity = field(13, "identity=")
+            checksum = field(14, "checksum=")
+            mismatches = field(15, "mismatches=")
+            if (NF != 15 || $2 != "isa=" expected_isa || $3 != "backend=" expected_backend ||
+                sample !~ /^[1-9][0-9]*$/ || generation !~ /^[1-9][0-9]*$/ || run !~ /^[1-9][0-9]*$/ || frame !~ /^[1-9][0-9]*$/ ||
+                elapsed !~ /^[1-9][0-9]*$/ || handle !~ /^[1-9][0-9]*$/ || identity !~ /^[1-9][0-9]*$/ || checksum !~ /^[1-9][0-9]*$/ ||
+                sample + 0 != sample_count || protocol + 0 != expected_protocol || width + 0 != expected_width || height + 0 != expected_height ||
+                frame + 0 != generation + 0 || checksum + 0 != expected_checksum || mismatches != "0") bad = 1
+            if (sample_count == 1) {
+                if (fixture_count != 1 || NR != fixture_line + 1 || generation + 0 != fixture_generation + 1 || run != fixture_run || identity != fixture_identity) bad = 1
+            } else if (NR != previous_line + 1 || generation + 0 != previous_generation + 1 || run != fixture_run || identity != fixture_identity) bad = 1
+            previous_line = NR
+            previous_generation = generation + 0
+        }
+        END { exit bad || fixture_count != 1 || sample_count != expected_count ? 1 : 0 }
+    ' "$log" || return 1
+    p95=$(render_latency_p95_us "$log" "$isa" "$expected_backend") || return 1
+    case "$p95" in ''|0|*[!0-9]*) return 1 ;; esac
+    [ "$applicability" != native-isa ] || [ "$p95" -le "$RENDER_READBACK_P95_MAX_US" ]
+)
 
 negotiation_timing_evidence_valid() (
     log=$1
@@ -943,6 +1028,7 @@ arm64_production_evidence_valid() (
     probe_args=$2
     production_log=$3
     production_args=$4
+    serial_qemu_execution_valid "$probe_log" "$probe_args" || return 1
     arm64_production_serial_has_correlated_frame "$production_log" "$production_args" || return 1
     qemu_argv_evidence_valid aarch64 "$probe_args" || return 1
     qemu_argv_evidence_valid aarch64 "$production_args" production || return 1
@@ -983,6 +1069,18 @@ emit_processing_perf_evidence() {
     printf '%s\n' "${evidence_prefix}_processing_cpu_us=$(processing_perf_field "$evidence_daemon" "$evidence_isa" cpu_us)"
     printf '%s\n' "${evidence_prefix}_processing_device_us=$(processing_perf_field "$evidence_daemon" "$evidence_isa" device_us)"
     printf '%s\n' "${evidence_prefix}_processing_preference=$(processing_perf_field "$evidence_daemon" "$evidence_isa" preference)"
+}
+
+emit_render_latency_evidence() {
+    evidence_host=$1
+    evidence_isa=$2
+    evidence_serial=$3
+    evidence_qemu_args=$4
+    render_latency_evidence_valid "$evidence_serial" "$evidence_isa" "$evidence_qemu_args" "$BACKEND" || return 1
+    evidence_prefix="simpleos_qemu_host_gpu_2d_${evidence_host}_${evidence_isa}"
+    printf '%s\n' "${evidence_prefix}_render_sample_count=$HOST_GPU_WARM_SAMPLE_COUNT"
+    printf '%s\n' "${evidence_prefix}_render_readback_p95_us=$(render_latency_p95_us "$evidence_serial" "$evidence_isa" "$BACKEND")"
+    printf '%s\n' "${evidence_prefix}_render_latency_applicability=$(negotiation_applicability "$evidence_isa" "$evidence_qemu_args")"
 }
 
 emit_arm64_production_evidence() {
@@ -1058,6 +1156,9 @@ validate_report() (
                     [ -f "$row_log" ] && serial_has_pass "$row_log" "$report_isa" "$row_qemu_device_args" &&
                     [ "$row_processing_backend" = "$(serial_processing_backend "$row_log" "$report_isa")" ] &&
                     row_qemu_version=$(report_one "$report" "${prefix}_qemu_version") &&
+                    row_render_sample_count=$(report_one "$report" "${prefix}_render_sample_count") &&
+                    row_render_readback_p95_us=$(report_one "$report" "${prefix}_render_readback_p95_us") &&
+                    row_render_latency_applicability=$(report_one "$report" "${prefix}_render_latency_applicability") &&
                     row_daemon_rss=$(report_one "$report" "${prefix}_daemon_max_rss_kib") &&
                     row_qemu_rss=$(report_one "$report" "${prefix}_qemu_max_rss_kib") &&
                     row_combined_rss=$(report_one "$report" "${prefix}_combined_max_rss_kib") &&
@@ -1067,6 +1168,9 @@ validate_report() (
                     row_processing_preference=$(report_one "$report" "${prefix}_processing_preference") &&
                     [ -n "$row_qemu_version" ] &&
                     qemu_argv_evidence_valid "$report_isa" "$row_qemu_device_args" &&
+                    [ "$row_render_sample_count" = "$HOST_GPU_WARM_SAMPLE_COUNT" ] &&
+                    [ "$row_render_readback_p95_us" = "$(render_latency_p95_us "$row_log" "$report_isa" "$BACKEND")" ] &&
+                    [ "$row_render_latency_applicability" = "$(negotiation_applicability "$report_isa" "$row_qemu_device_args")" ] &&
                     row_rss_evidence_valid "$row_daemon_rss" "$row_qemu_rss" "$row_combined_rss" &&
                     processing_selector_evidence_valid "$row_daemon_log" "$report_processing_selector" &&
                     processing_perf_evidence_valid "$row_log" "$row_daemon_log" "$report_isa" &&
@@ -1079,7 +1183,7 @@ validate_report() (
                     return 1
                 fi
                 set_host_contract "$saved_row_host"
-            elif grep -aEq "^${prefix}_(daemon_log|processing_cpu_us|processing_device_us|processing_preference)=" "$report"; then
+            elif grep -aEq "^${prefix}_(render_sample_count|render_readback_p95_us|render_latency_applicability|daemon_log|processing_cpu_us|processing_device_us|processing_preference)=" "$report"; then
                 return 1
             fi
         done
@@ -1114,6 +1218,47 @@ validate_report() (
     echo "simpleos_qemu_host_gpu_2d_report_status=$status"
     echo "simpleos_qemu_host_gpu_2d_report_reason=$reason"
 )
+
+append_render_latency_fixture() {
+    fixture_log=$1
+    fixture_isa=$2
+    fixture_backend=$3
+    fixture_first_generation=$4
+    fixture_run=$5
+    fixture_identity=$6
+    fixture_elapsed_us=$7
+    fixture_sample=1
+    while [ "$fixture_sample" -le "$HOST_GPU_WARM_SAMPLE_COUNT" ]; do
+        fixture_generation=$((fixture_first_generation + fixture_sample - 1))
+        printf '%s\n' "HOST_GPU_FIXTURE_SAMPLE isa=$fixture_isa backend=$fixture_backend sample=$fixture_sample generation=$fixture_generation run=$fixture_run frame=$fixture_generation protocol=$EXPECTED_PROTOCOL_VERSION width=$HOST_GPU_FIXTURE_WIDTH height=$HOST_GPU_FIXTURE_HEIGHT elapsed_us=$fixture_elapsed_us handle=$fixture_generation identity=$fixture_identity checksum=$HOST_GPU_FIXTURE_CHECKSUM mismatches=0" >>"$fixture_log"
+        fixture_sample=$((fixture_sample + 1))
+    done
+}
+
+append_qemu_execution_fixture() {
+    printf '%s\n' "HOST_GPU_QEMU_EXECUTION argv=$2" >>"$1"
+}
+
+shift_probe_fixture() {
+    fixture_source=$1
+    fixture_target=$2
+    fixture_isa=$3
+    fixture_delta=$4
+    fixture_qemu_args=$5
+    awk -v target_isa="$fixture_isa" -v delta="$fixture_delta" '
+        $1 != "HOST_GPU_QEMU_EXECUTION" {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "isa=aarch64") $i = "isa=" target_isa
+                if ($i ~ /^(generation|first_generation|final_generation|frame)=[1-9][0-9]*$/) {
+                    split($i, parts, "=")
+                    $i = parts[1] "=" (parts[2] + delta)
+                }
+            }
+            print
+        }
+    ' "$fixture_source" >"$fixture_target"
+    append_qemu_execution_fixture "$fixture_target" "$fixture_qemu_args"
+}
 
 self_test() {
     set_host_contract linux
@@ -1152,6 +1297,14 @@ self_test() {
     wrong_generation_log="$temp_dir/wrong-generation.log"
     wrong_fixture_log="$temp_dir/wrong-fixture.log"
     wrong_fixture_correlation_log="$temp_dir/wrong-fixture-correlation.log"
+    missing_latency_log="$temp_dir/render-latency-missing.log"
+    duplicate_latency_log="$temp_dir/render-latency-duplicate.log"
+    stale_latency_log="$temp_dir/render-latency-stale.log"
+    zero_latency_log="$temp_dir/render-latency-zero.log"
+    slow_latency_log="$temp_dir/render-latency-slow.log"
+    native_limit_latency_log="$temp_dir/render-latency-native-limit.log"
+    native_over_limit_latency_log="$temp_dir/render-latency-native-over-limit.log"
+    tcg_over_limit_latency_log="$temp_dir/render-latency-tcg-over-limit.log"
     stale_generation_log="$temp_dir/stale-generation.log"
     trailing_log="$temp_dir/trailing.log"
     contradictory_terminal_log="$temp_dir/contradictory-terminal.log"
@@ -1220,6 +1373,8 @@ self_test() {
     directx_pass_report="$temp_dir/directx-pass.env"
     fake_report="$temp_dir/fake.env"
     bad_backend_report="$temp_dir/bad-backend.env"
+    native_report="$temp_dir/native.env"
+    relabeled_report="$temp_dir/native-relabeled-as-tcg.env"
     valid_simple="$temp_dir/simple-valid"
     argument_only_simple="$temp_dir/simple-argument-only"
     frontend_hanging_simple="$temp_dir/simple-frontend-hanging"
@@ -1357,7 +1512,10 @@ HOST_GPU_HELLO_OK isa=aarch64 generation=21 render_mask=1 processing_mask=9 prot
 HOST_GPU_RENDER_OK isa=aarch64 backend=vulkan generation=22 run=1022 frame=22 protocol=1 elapsed_us=100 handle=22 identity=22 checksum=405589360 bg=2112 rect=960 other=0
 HOST_GPU_DRAW_IR_OK isa=aarch64 backend=vulkan generation=23 run=1022 frame=23 protocol=1 elapsed_us=110 handle=24 identity=22 checksum=405589360 bg=2112 image=960 other=0
 HOST_GPU_FIXTURE_OK isa=aarch64 backend=vulkan generation=24 run=1022 frame=24 protocol=1 width=1280 height=720 elapsed_us=120 handle=25 identity=22 checksum=1417723768 bg=633600 rect=288000 mismatches=0
-HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=25 run=1022 frame=25 protocol=1 elapsed_us=80 handle=1 identity=23 checksum=1792 mismatches=0
+EOF
+    append_render_latency_fixture "$pass_log" aarch64 vulkan 25 1022 22 16000
+    cat >>"$pass_log" <<EOF
+HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=45 run=1022 frame=45 protocol=1 elapsed_us=80 handle=1 identity=23 checksum=1792 mismatches=0
 SIMPLEOS_HOST_GPU_2D_PASS isa=aarch64
 TEST PASSED
 EOF
@@ -1365,27 +1523,28 @@ EOF
 [WM] ramfb configured successfully via fw_cfg DMA
 HOST_GPU_MAP_OK scope=production isa=aarch64 base=4096
 [wm-frame] host-gpu-fallback reason=negotiation status=2 detail=2
-HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa=aarch64 backend=metal generation=26 outcome=rejected status=2 reason=9 daemon_elapsed_us=10 guest_elapsed_us=20
-HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa=aarch64 backend=directx generation=27 outcome=rejected status=2 reason=9 daemon_elapsed_us=10 guest_elapsed_us=20
-HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa=aarch64 backend=vulkan generation=28 outcome=selected status=1 reason=0 daemon_elapsed_us=40 guest_elapsed_us=60
-HOST_GPU_NEGOTIATION_DONE scope=production isa=aarch64 result=selected backend=vulkan attempts=3 first_generation=26 final_generation=28 elapsed_us=$((NEGOTIATION_MAX_US - 1)) budget_us=$NEGOTIATION_MAX_US reason=0
-[wm-frame] host-gpu-ready backend=vulkan generation=28
-[wm-frame] host-gpu-presented backend=vulkan generation=29 run=28 frame=29 checksum=123456
+HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa=aarch64 backend=metal generation=46 outcome=rejected status=2 reason=9 daemon_elapsed_us=10 guest_elapsed_us=20
+HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa=aarch64 backend=directx generation=47 outcome=rejected status=2 reason=9 daemon_elapsed_us=10 guest_elapsed_us=20
+HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa=aarch64 backend=vulkan generation=48 outcome=selected status=1 reason=0 daemon_elapsed_us=40 guest_elapsed_us=60
+HOST_GPU_NEGOTIATION_DONE scope=production isa=aarch64 result=selected backend=vulkan attempts=3 first_generation=46 final_generation=48 elapsed_us=$((NEGOTIATION_MAX_US - 1)) budget_us=$NEGOTIATION_MAX_US reason=0
+[wm-frame] host-gpu-ready backend=vulkan generation=48
+[wm-frame] host-gpu-presented backend=vulkan generation=49 run=48 frame=49 checksum=123456
 [desktop-gui] first-frame-rendered scene_revision=1
 [desktop-gui-arm64] desktop-ready revision=1
 EOF
+    append_qemu_execution_fixture "$production_log" "$arm_production_qemu_args"
     sed 's/backend=vulkan/backend=metal/g' "$production_log" >"$production_wrong_backend_log"
-    sed 's/run=28/run=99/' "$production_log" >"$production_wrong_run_log"
-    sed 's/frame=29/frame=99/' "$production_log" >"$production_wrong_frame_log"
-    sed -e '/^HOST_GPU_NEGOTIATION_/s/generation=26/generation=29/g' \
-        -e '/^HOST_GPU_NEGOTIATION_/s/generation=27/generation=30/g' \
-        -e '/^HOST_GPU_NEGOTIATION_/s/generation=28/generation=31/g' \
-        -e 's/generation=28$/generation=31/' \
-        -e 's/generation=29 run=28 frame=29/generation=32 run=31 frame=32/' \
+    sed 's/run=48/run=99/' "$production_log" >"$production_wrong_run_log"
+    sed 's/frame=49/frame=99/' "$production_log" >"$production_wrong_frame_log"
+    sed -e '/^HOST_GPU_NEGOTIATION_/s/generation=46/generation=49/g' \
+        -e '/^HOST_GPU_NEGOTIATION_/s/generation=47/generation=50/g' \
+        -e '/^HOST_GPU_NEGOTIATION_/s/generation=48/generation=51/g' \
+        -e 's/generation=48$/generation=51/' \
+        -e 's/generation=49 run=48 frame=49/generation=52 run=51 frame=52/' \
         "$production_log" >"$production_discontinuous_log"
-    sed -e '/^HOST_GPU_NEGOTIATION_/s/generation=26/generation=100/g' \
-        -e '/^HOST_GPU_NEGOTIATION_/s/generation=27/generation=101/g' \
-        -e '/^HOST_GPU_NEGOTIATION_/s/generation=28/generation=102/g' \
+    sed -e '/^HOST_GPU_NEGOTIATION_/s/generation=46/generation=100/g' \
+        -e '/^HOST_GPU_NEGOTIATION_/s/generation=47/generation=101/g' \
+        -e '/^HOST_GPU_NEGOTIATION_/s/generation=48/generation=102/g' \
         "$production_log" >"$production_stale_negotiation_log"
     { cat "$production_log"; grep '^\[wm-frame\] host-gpu-presented ' "$production_log"; } >"$production_duplicate_log"
     grep -v '^\[desktop-gui-arm64\] desktop-ready ' "$production_log" >"$production_missing_log"
@@ -1395,26 +1554,54 @@ EOF
     cat >"$metal_production_log" <<EOF
 [WM] ramfb configured successfully via fw_cfg DMA
 HOST_GPU_MAP_OK scope=production isa=aarch64 base=4096
-HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa=aarch64 backend=metal generation=24 outcome=selected status=1 reason=0 daemon_elapsed_us=40 guest_elapsed_us=60
-HOST_GPU_NEGOTIATION_DONE scope=production isa=aarch64 result=selected backend=metal attempts=1 first_generation=24 final_generation=24 elapsed_us=$((NEGOTIATION_MAX_US - 1)) budget_us=$NEGOTIATION_MAX_US reason=0
-[wm-frame] host-gpu-ready backend=metal generation=24
-[wm-frame] host-gpu-presented backend=metal generation=25 run=24 frame=25 checksum=123456
+HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa=aarch64 backend=metal generation=44 outcome=selected status=1 reason=0 daemon_elapsed_us=40 guest_elapsed_us=60
+HOST_GPU_NEGOTIATION_DONE scope=production isa=aarch64 result=selected backend=metal attempts=1 first_generation=44 final_generation=44 elapsed_us=$((NEGOTIATION_MAX_US - 1)) budget_us=$NEGOTIATION_MAX_US reason=0
+[wm-frame] host-gpu-ready backend=metal generation=44
+[wm-frame] host-gpu-presented backend=metal generation=45 run=44 frame=45 checksum=123456
 [desktop-gui] first-frame-rendered scene_revision=1
 [desktop-gui-arm64] desktop-ready revision=1
 EOF
+    append_qemu_execution_fixture "$metal_production_log" "$arm_production_qemu_args"
     cat >"$directx_production_log" <<EOF
 [WM] ramfb configured successfully via fw_cfg DMA
 HOST_GPU_MAP_OK scope=production isa=aarch64 base=4096
-HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa=aarch64 backend=metal generation=25 outcome=rejected status=2 reason=9 daemon_elapsed_us=10 guest_elapsed_us=20
-HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa=aarch64 backend=directx generation=26 outcome=selected status=1 reason=0 daemon_elapsed_us=40 guest_elapsed_us=60
-HOST_GPU_NEGOTIATION_DONE scope=production isa=aarch64 result=selected backend=directx attempts=2 first_generation=25 final_generation=26 elapsed_us=$((NEGOTIATION_MAX_US - 1)) budget_us=$NEGOTIATION_MAX_US reason=0
-[wm-frame] host-gpu-ready backend=directx generation=26
-[wm-frame] host-gpu-presented backend=directx generation=27 run=26 frame=27 checksum=123456
+HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa=aarch64 backend=metal generation=45 outcome=rejected status=2 reason=9 daemon_elapsed_us=10 guest_elapsed_us=20
+HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa=aarch64 backend=directx generation=46 outcome=selected status=1 reason=0 daemon_elapsed_us=40 guest_elapsed_us=60
+HOST_GPU_NEGOTIATION_DONE scope=production isa=aarch64 result=selected backend=directx attempts=2 first_generation=45 final_generation=46 elapsed_us=$((NEGOTIATION_MAX_US - 1)) budget_us=$NEGOTIATION_MAX_US reason=0
+[wm-frame] host-gpu-ready backend=directx generation=46
+[wm-frame] host-gpu-presented backend=directx generation=47 run=46 frame=47 checksum=123456
 [desktop-gui] first-frame-rendered scene_revision=1
 [desktop-gui-arm64] desktop-ready revision=1
 EOF
-    sed 's/aarch64/x86_64/g; s/generation=19/generation=9/g; s/generation=20/generation=10/g; s/generation=21/generation=11/g; s/generation=22/generation=12/g; s/generation=23/generation=13/g; s/generation=24/generation=14/g; s/generation=25/generation=15/g; s/frame=22/frame=12/g; s/frame=23/frame=13/g; s/frame=24/frame=14/g; s/frame=25/frame=15/g' "$pass_log" >"$x86_log"
-    sed 's/aarch64/riscv64/g; s/generation=19/generation=29/g; s/generation=20/generation=30/g; s/generation=21/generation=31/g; s/generation=22/generation=32/g; s/generation=23/generation=33/g; s/generation=24/generation=34/g; s/generation=25/generation=35/g; s/frame=22/frame=32/g; s/frame=23/frame=33/g; s/frame=24/frame=34/g; s/frame=25/frame=35/g' "$pass_log" >"$riscv_log"
+    append_qemu_execution_fixture "$directx_production_log" "$arm_production_qemu_args"
+    shift_probe_fixture "$pass_log" "$x86_log" x86_64 -10 "$x86_qemu_args"
+    shift_probe_fixture "$pass_log" "$riscv_log" riscv64 10 "$rv_qemu_args"
+    append_qemu_execution_fixture "$pass_log" "$arm_qemu_args"
+    grep -v '^HOST_GPU_FIXTURE_SAMPLE .* sample=20 ' "$x86_log" >"$missing_latency_log"
+    { cat "$x86_log"; grep '^HOST_GPU_FIXTURE_SAMPLE .* sample=10 ' "$x86_log"; } >"$duplicate_latency_log"
+    sed '/^HOST_GPU_FIXTURE_SAMPLE .* sample=10 /s/generation=24/generation=23/' "$x86_log" >"$stale_latency_log"
+    sed '/^HOST_GPU_FIXTURE_SAMPLE .* sample=10 /s/elapsed_us=16000/elapsed_us=0/' "$x86_log" >"$zero_latency_log"
+    sed '/^HOST_GPU_FIXTURE_SAMPLE /s/elapsed_us=16000/elapsed_us=18000/' "$x86_log" >"$slow_latency_log"
+    sed -e '/^HOST_GPU_FIXTURE_SAMPLE /s/elapsed_us=16000/elapsed_us=16700/' \
+        -e "s|^HOST_GPU_QEMU_EXECUTION argv=$x86_qemu_args$|HOST_GPU_QEMU_EXECUTION argv=$x86_native_qemu_args|" \
+        "$x86_log" >"$native_limit_latency_log"
+    sed '/^HOST_GPU_FIXTURE_SAMPLE /s/elapsed_us=16700/elapsed_us=16701/' "$native_limit_latency_log" >"$native_over_limit_latency_log"
+    sed '/^HOST_GPU_FIXTURE_SAMPLE /s/elapsed_us=16000/elapsed_us=16701/' "$x86_log" >"$tcg_over_limit_latency_log"
+    render_latency_evidence_valid "$x86_log" x86_64 "$x86_native_qemu_args" vulkan
+    [ "$(render_latency_p95_us "$x86_log" x86_64 vulkan)" -eq 16000 ]
+    render_latency_evidence_valid "$slow_latency_log" x86_64 "$x86_qemu_args" vulkan
+    serial_has_pass "$native_limit_latency_log" x86_64 "$x86_native_qemu_args"
+    serial_has_pass "$tcg_over_limit_latency_log" x86_64 "$x86_qemu_args"
+    if render_latency_evidence_valid "$missing_latency_log" x86_64 "$x86_native_qemu_args" vulkan ||
+       render_latency_evidence_valid "$duplicate_latency_log" x86_64 "$x86_native_qemu_args" vulkan ||
+       render_latency_evidence_valid "$stale_latency_log" x86_64 "$x86_native_qemu_args" vulkan ||
+       render_latency_evidence_valid "$zero_latency_log" x86_64 "$x86_native_qemu_args" vulkan ||
+       render_latency_evidence_valid "$slow_latency_log" x86_64 "$x86_native_qemu_args" vulkan ||
+       serial_has_pass "$native_over_limit_latency_log" x86_64 "$x86_native_qemu_args"
+    then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
     sed 's/checksum=1792/checksum=1793/' "$pass_log" >"$corrupt_log"
     sed '/^HOST_GPU_DRAW_IR_OK /s/checksum=405589360/checksum=405589361/' "$pass_log" >"$corrupt_draw_ir_log"
     sed 's/processing_mask=9/processing_mask=1/; s/backend=cuda/backend=vulkan/' "$pass_log" >"$vulkan_log"
@@ -1446,12 +1633,16 @@ HOST_GPU_HELLO_OK isa=aarch64 generation=19 render_mask=2 processing_mask=2 prot
 HOST_GPU_RENDER_OK isa=aarch64 backend=metal generation=20 run=1020 frame=20 protocol=1 elapsed_us=100 handle=22 identity=22 checksum=405589360 bg=2112 rect=960 other=0
 HOST_GPU_DRAW_IR_OK isa=aarch64 backend=metal generation=21 run=1020 frame=21 protocol=1 elapsed_us=110 handle=24 identity=22 checksum=405589360 bg=2112 image=960 other=0
 HOST_GPU_FIXTURE_OK isa=aarch64 backend=metal generation=22 run=1020 frame=22 protocol=1 width=1280 height=720 elapsed_us=120 handle=25 identity=22 checksum=1417723768 bg=633600 rect=288000 mismatches=0
-HOST_GPU_PROCESS_OK isa=aarch64 backend=metal generation=23 run=1020 frame=23 protocol=1 elapsed_us=80 handle=1 identity=23 checksum=1792 mismatches=0
+EOF
+    append_render_latency_fixture "$metal_log" aarch64 metal 23 1020 22 16000
+    cat >>"$metal_log" <<EOF
+HOST_GPU_PROCESS_OK isa=aarch64 backend=metal generation=43 run=1020 frame=43 protocol=1 elapsed_us=80 handle=1 identity=23 checksum=1792 mismatches=0
 SIMPLEOS_HOST_GPU_2D_PASS isa=aarch64
 TEST PASSED
 EOF
-    sed 's/aarch64/x86_64/g; s/generation=19/generation=9/g; s/generation=20/generation=10/g; s/generation=21/generation=11/g; s/generation=22/generation=12/g; s/generation=23/generation=13/g; s/frame=20/frame=10/g; s/frame=21/frame=11/g; s/frame=22/frame=12/g; s/frame=23/frame=13/g' "$metal_log" >"$metal_x86_log"
-    sed 's/aarch64/riscv64/g; s/generation=19/generation=29/g; s/generation=20/generation=30/g; s/generation=21/generation=31/g; s/generation=22/generation=32/g; s/generation=23/generation=33/g; s/frame=20/frame=30/g; s/frame=21/frame=31/g; s/frame=22/frame=32/g; s/frame=23/frame=33/g' "$metal_log" >"$metal_riscv_log"
+    shift_probe_fixture "$metal_log" "$metal_x86_log" x86_64 -10 "$x86_qemu_args"
+    shift_probe_fixture "$metal_log" "$metal_riscv_log" riscv64 10 "$rv_qemu_args"
+    append_qemu_execution_fixture "$metal_log" "$arm_qemu_args"
     sed 's/render_mask=2/render_mask=1/' "$metal_log" >"$metal_wrong_mask_log"
     sed 's/backend=metal/backend=vulkan/g' "$metal_log" >"$metal_wrong_backend_log"
     sed 's/backend=metal generation=20/backend=metal generation=999/' "$metal_log" >"$metal_wrong_generation_log"
@@ -1464,12 +1655,16 @@ HOST_GPU_HELLO_OK isa=aarch64 generation=20 render_mask=4 processing_mask=8 prot
 HOST_GPU_RENDER_OK isa=aarch64 backend=directx generation=21 run=1021 frame=21 protocol=1 elapsed_us=100 handle=22 identity=22 checksum=405589360 bg=2112 rect=960 other=0
 HOST_GPU_DRAW_IR_OK isa=aarch64 backend=directx generation=22 run=1021 frame=22 protocol=1 elapsed_us=110 handle=24 identity=22 checksum=405589360 bg=2112 image=960 other=0
 HOST_GPU_FIXTURE_OK isa=aarch64 backend=directx generation=23 run=1021 frame=23 protocol=1 width=1280 height=720 elapsed_us=120 handle=25 identity=22 checksum=1417723768 bg=633600 rect=288000 mismatches=0
-HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=24 run=1021 frame=24 protocol=1 elapsed_us=80 handle=1 identity=23 checksum=1792 mismatches=0
+EOF
+    append_render_latency_fixture "$directx_log" aarch64 directx 24 1021 22 16000
+    cat >>"$directx_log" <<EOF
+HOST_GPU_PROCESS_OK isa=aarch64 backend=cuda generation=44 run=1021 frame=44 protocol=1 elapsed_us=80 handle=1 identity=23 checksum=1792 mismatches=0
 SIMPLEOS_HOST_GPU_2D_PASS isa=aarch64
 TEST PASSED
 EOF
-    sed 's/aarch64/x86_64/g; s/generation=19/generation=9/g; s/generation=20/generation=10/g; s/generation=21/generation=11/g; s/generation=22/generation=12/g; s/generation=23/generation=13/g; s/generation=24/generation=14/g; s/frame=21/frame=11/g; s/frame=22/frame=12/g; s/frame=23/frame=13/g; s/frame=24/frame=14/g' "$directx_log" >"$directx_x86_log"
-    sed 's/aarch64/riscv64/g; s/generation=19/generation=29/g; s/generation=20/generation=30/g; s/generation=21/generation=31/g; s/generation=22/generation=32/g; s/generation=23/generation=33/g; s/generation=24/generation=34/g; s/frame=21/frame=31/g; s/frame=22/frame=32/g; s/frame=23/frame=33/g; s/frame=24/frame=34/g' "$directx_log" >"$directx_riscv_log"
+    shift_probe_fixture "$directx_log" "$directx_x86_log" x86_64 -10 "$x86_qemu_args"
+    shift_probe_fixture "$directx_log" "$directx_riscv_log" riscv64 10 "$rv_qemu_args"
+    append_qemu_execution_fixture "$directx_log" "$arm_qemu_args"
     sed 's/processing_mask=8/processing_mask=1/; s/backend=cuda/backend=vulkan/' "$directx_log" >"$directx_vulkan_log"
     sed 's/render_mask=4/render_mask=1/' "$directx_log" >"$directx_wrong_mask_log"
     sed 's/backend=directx/backend=vulkan/g' "$directx_log" >"$directx_wrong_backend_log"
@@ -1506,19 +1701,19 @@ HOST_GPU_NEGOTIATION_DONE scope=probe isa=aarch64 result=fallback backend=softwa
 EOF
     sed 's/first_generation=0/first_generation=19/' "$zero_attempt_fallback_log" >"$dishonest_zero_attempt_log"
     cat >"$pass_daemon_log" <<'EOF'
-HOST_GPU_PROCESS_PERF isa=aarch64 backend=cuda generation=25 run=1022 frame=25 cpu_us=120 device_us=80 preference=preferred
+HOST_GPU_PROCESS_PERF isa=aarch64 backend=cuda generation=45 run=1022 frame=45 cpu_us=120 device_us=80 preference=preferred
 EOF
-    sed 's/aarch64/x86_64/; s/generation=25/generation=15/; s/frame=25/frame=15/' "$pass_daemon_log" >"$x86_daemon_log"
-    sed 's/aarch64/riscv64/; s/generation=25/generation=35/; s/frame=25/frame=35/' "$pass_daemon_log" >"$riscv_daemon_log"
-    sed 's/backend=cuda/backend=metal/; s/generation=25/generation=23/; s/run=1022/run=1020/; s/frame=25/frame=23/' "$pass_daemon_log" >"$metal_daemon_log"
-    sed 's/aarch64/x86_64/; s/backend=cuda/backend=metal/; s/generation=25/generation=13/; s/run=1022/run=1020/; s/frame=25/frame=13/' "$pass_daemon_log" >"$metal_x86_daemon_log"
-    sed 's/aarch64/riscv64/; s/backend=cuda/backend=metal/; s/generation=25/generation=33/; s/run=1022/run=1020/; s/frame=25/frame=33/' "$pass_daemon_log" >"$metal_riscv_daemon_log"
-    sed 's/generation=25/generation=24/; s/run=1022/run=1021/; s/frame=25/frame=24/' "$pass_daemon_log" >"$directx_daemon_log"
-    sed 's/aarch64/x86_64/; s/generation=25/generation=14/; s/run=1022/run=1021/; s/frame=25/frame=14/' "$pass_daemon_log" >"$directx_x86_daemon_log"
-    sed 's/aarch64/riscv64/; s/generation=25/generation=34/; s/run=1022/run=1021/; s/frame=25/frame=34/' "$pass_daemon_log" >"$directx_riscv_daemon_log"
+    sed 's/aarch64/x86_64/; s/generation=45/generation=35/; s/frame=45/frame=35/' "$pass_daemon_log" >"$x86_daemon_log"
+    sed 's/aarch64/riscv64/; s/generation=45/generation=55/; s/frame=45/frame=55/' "$pass_daemon_log" >"$riscv_daemon_log"
+    sed 's/backend=cuda/backend=metal/; s/generation=45/generation=43/; s/run=1022/run=1020/; s/frame=45/frame=43/' "$pass_daemon_log" >"$metal_daemon_log"
+    sed 's/aarch64/x86_64/; s/backend=cuda/backend=metal/; s/generation=45/generation=33/; s/run=1022/run=1020/; s/frame=45/frame=33/' "$pass_daemon_log" >"$metal_x86_daemon_log"
+    sed 's/aarch64/riscv64/; s/backend=cuda/backend=metal/; s/generation=45/generation=53/; s/run=1022/run=1020/; s/frame=45/frame=53/' "$pass_daemon_log" >"$metal_riscv_daemon_log"
+    sed 's/generation=45/generation=44/; s/run=1022/run=1021/; s/frame=45/frame=44/' "$pass_daemon_log" >"$directx_daemon_log"
+    sed 's/aarch64/x86_64/; s/generation=45/generation=34/; s/run=1022/run=1021/; s/frame=45/frame=34/' "$pass_daemon_log" >"$directx_x86_daemon_log"
+    sed 's/aarch64/riscv64/; s/generation=45/generation=54/; s/run=1022/run=1021/; s/frame=45/frame=54/' "$pass_daemon_log" >"$directx_riscv_daemon_log"
     sed 's/cpu_us=120/cpu_us=119/; s/preference=preferred/preference=available-not-preferred/' "$pass_daemon_log" >"$slow_daemon_log"
     sed 's/cpu_us=120/cpu_us=119/' "$pass_daemon_log" >"$dishonest_daemon_log"
-    sed 's/generation=25/generation=26/' "$pass_daemon_log" >"$stale_perf_daemon_log"
+    sed 's/generation=45/generation=46/' "$pass_daemon_log" >"$stale_perf_daemon_log"
     { cat "$pass_daemon_log"; cat "$pass_daemon_log"; } >"$duplicate_perf_daemon_log"
     sed 's/cpu_us=120/cpu_us=0/' "$pass_daemon_log" >"$zero_perf_daemon_log"
     sed 's/cpu_us=120/cpu_us=9223372036854775808/; s/preference=preferred/preference=available-not-preferred/' "$pass_daemon_log" >"$oversized_perf_daemon_log"
@@ -1633,13 +1828,16 @@ EOF
         done
         emit_row linux x86_64 pass ok "$x86_log" cuda
         emit_row_execution_evidence linux x86_64 "QEMU emulator version 9.0.0" "$x86_qemu_args" 65536 65536 131072
+        emit_render_latency_evidence linux x86_64 "$x86_log" "$x86_qemu_args"
         emit_processing_perf_evidence linux x86_64 "$x86_log" "$x86_daemon_log"
         emit_row linux aarch64 pass ok "$pass_log" cuda
         emit_row_execution_evidence linux aarch64 "QEMU emulator version 9.0.0" "$arm_qemu_args" 65536 65536 131072
+        emit_render_latency_evidence linux aarch64 "$pass_log" "$arm_qemu_args"
         emit_processing_perf_evidence linux aarch64 "$pass_log" "$pass_daemon_log"
         emit_arm64_production_evidence linux "$production_log" "$arm_production_qemu_args"
         emit_row linux riscv64 pass ok "$riscv_log" cuda
         emit_row_execution_evidence linux riscv64 "QEMU emulator version 9.0.0" "$rv_qemu_args" 65536 65536 131072
+        emit_render_latency_evidence linux riscv64 "$riscv_log" "$rv_qemu_args"
         emit_processing_perf_evidence linux riscv64 "$riscv_log" "$riscv_daemon_log"
         echo simpleos_qemu_host_gpu_2d_host=linux
         echo simpleos_qemu_host_gpu_2d_host_arch=$HOST_ARCH
@@ -1655,12 +1853,30 @@ EOF
     set_host_contract linux
     apply_processing_selector vulkan
     validate_report "$pass_report" >/dev/null
+    sed -e "s|simpleos_qemu_host_gpu_2d_linux_x86_64_serial_log=$x86_log|simpleos_qemu_host_gpu_2d_linux_x86_64_serial_log=$native_limit_latency_log|" \
+        -e "s|simpleos_qemu_host_gpu_2d_linux_x86_64_qemu_device_args=$x86_qemu_args|simpleos_qemu_host_gpu_2d_linux_x86_64_qemu_device_args=$x86_native_qemu_args|" \
+        -e 's/simpleos_qemu_host_gpu_2d_linux_x86_64_render_readback_p95_us=16000/simpleos_qemu_host_gpu_2d_linux_x86_64_render_readback_p95_us=16700/' \
+        -e 's/simpleos_qemu_host_gpu_2d_linux_x86_64_render_latency_applicability=cross-isa-tcg-correctness-only/simpleos_qemu_host_gpu_2d_linux_x86_64_render_latency_applicability=native-isa/' \
+        "$pass_report" >"$native_report"
+    validate_report "$native_report" >/dev/null
+    sed -e "s|simpleos_qemu_host_gpu_2d_linux_x86_64_qemu_device_args=$x86_native_qemu_args|simpleos_qemu_host_gpu_2d_linux_x86_64_qemu_device_args=$x86_qemu_args|" \
+        -e 's/simpleos_qemu_host_gpu_2d_linux_x86_64_render_latency_applicability=native-isa/simpleos_qemu_host_gpu_2d_linux_x86_64_render_latency_applicability=cross-isa-tcg-correctness-only/' \
+        "$native_report" >"$relabeled_report"
+    if validate_report "$relabeled_report" >/dev/null 2>&1; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
     if [ "$PROCESSING_BACKEND:$EXPECTED_PROCESSING_MASK:$EXPECTED_PROCESSING_RECEIPT" != vulkan:1:vulkan ]; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
     set_host_contract linux
     sed "s|simpleos_qemu_host_gpu_2d_linux_aarch64_production_serial_log=$production_log|simpleos_qemu_host_gpu_2d_linux_aarch64_production_serial_log=$production_discontinuous_log|" "$pass_report" >"$bad_backend_report"
+    if validate_report "$bad_backend_report" >/dev/null 2>&1; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
+    sed 's/simpleos_qemu_host_gpu_2d_linux_x86_64_render_readback_p95_us=16000/simpleos_qemu_host_gpu_2d_linux_x86_64_render_readback_p95_us=15999/' "$pass_report" >"$bad_backend_report"
     if validate_report "$bad_backend_report" >/dev/null 2>&1; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
@@ -1772,13 +1988,16 @@ EOF
         done
         emit_row macos x86_64 pass ok "$metal_x86_log" metal
         emit_row_execution_evidence macos x86_64 "QEMU emulator version 9.0.0" "$x86_qemu_args" 65536 65536 131072
+        emit_render_latency_evidence macos x86_64 "$metal_x86_log" "$x86_qemu_args"
         emit_processing_perf_evidence macos x86_64 "$metal_x86_log" "$metal_x86_daemon_log"
         emit_row macos aarch64 pass ok "$metal_log" metal
         emit_row_execution_evidence macos aarch64 "QEMU emulator version 9.0.0" "$arm_qemu_args" 65536 65536 131072
+        emit_render_latency_evidence macos aarch64 "$metal_log" "$arm_qemu_args"
         emit_processing_perf_evidence macos aarch64 "$metal_log" "$metal_daemon_log"
         emit_arm64_production_evidence macos "$metal_production_log" "$arm_production_qemu_args"
         emit_row macos riscv64 pass ok "$metal_riscv_log" metal
         emit_row_execution_evidence macos riscv64 "QEMU emulator version 9.0.0" "$rv_qemu_args" 65536 65536 131072
+        emit_render_latency_evidence macos riscv64 "$metal_riscv_log" "$rv_qemu_args"
         emit_processing_perf_evidence macos riscv64 "$metal_riscv_log" "$metal_riscv_daemon_log"
         echo simpleos_qemu_host_gpu_2d_host=macos
         echo simpleos_qemu_host_gpu_2d_host_arch=$HOST_ARCH
@@ -1811,13 +2030,16 @@ EOF
         done
         emit_row windows x86_64 pass ok "$directx_x86_log" cuda
         emit_row_execution_evidence windows x86_64 "QEMU emulator version 9.0.0" "$x86_qemu_args" 65536 65536 131072
+        emit_render_latency_evidence windows x86_64 "$directx_x86_log" "$x86_qemu_args"
         emit_processing_perf_evidence windows x86_64 "$directx_x86_log" "$directx_x86_daemon_log"
         emit_row windows aarch64 pass ok "$directx_log" cuda
         emit_row_execution_evidence windows aarch64 "QEMU emulator version 9.0.0" "$arm_qemu_args" 65536 65536 131072
+        emit_render_latency_evidence windows aarch64 "$directx_log" "$arm_qemu_args"
         emit_processing_perf_evidence windows aarch64 "$directx_log" "$directx_daemon_log"
         emit_arm64_production_evidence windows "$directx_production_log" "$arm_production_qemu_args"
         emit_row windows riscv64 pass ok "$directx_riscv_log" cuda
         emit_row_execution_evidence windows riscv64 "QEMU emulator version 9.0.0" "$rv_qemu_args" 65536 65536 131072
+        emit_render_latency_evidence windows riscv64 "$directx_riscv_log" "$rv_qemu_args"
         emit_processing_perf_evidence windows riscv64 "$directx_riscv_log" "$directx_riscv_daemon_log"
         echo simpleos_qemu_host_gpu_2d_host=windows
         echo simpleos_qemu_host_gpu_2d_host_arch=$HOST_ARCH
@@ -2109,6 +2331,7 @@ run_guest() {
     qemu_version=$("$qemu_bin" --version 2>&1 | sed -n '1p')
     qemu_device_args=$(encode_argv_hex "$@")
     run_qemu_with_rss "$QEMU_TIMEOUT" "$serial" "$daemon_pid" "$rss_file" "$qemu_bin" "$@"
+    printf '\n%s\n' "HOST_GPU_QEMU_EXECUTION argv=$qemu_device_args" >>"$serial"
     if serial_has_pass "$serial" "$isa" "$qemu_device_args"; then probe_valid=1; else probe_valid=0; fi
     if [ "$probe_valid" = 1 ] &&
        processing_selector_evidence_valid "$daemon_log" "$PROCESSING_SELECTOR" &&
@@ -2130,6 +2353,7 @@ run_guest() {
             -device ivshmem-plain,memdev=hostgpu
         production_qemu_args=$(encode_argv_hex "$@")
         run_qemu_with_rss "$PRODUCTION_QEMU_TIMEOUT" "$production_serial" "$daemon_pid" "$rss_file" "$qemu_bin" "$@"
+        printf '\n%s\n' "HOST_GPU_QEMU_EXECUTION argv=$production_qemu_args" >>"$production_serial"
     fi
     cleanup_active_guest
     daemon_rss_kib=$(rss_metric_value "$rss_file" daemon_max_rss_kib || true)
@@ -2158,6 +2382,7 @@ run_guest() {
     fi
     if [ "$probe_valid" = 1 ] && [ "$processing_perf_valid" = 1 ] && [ "$execution_evidence_valid" = 1 ] && [ "$production_valid" = 1 ]; then
         emit_row "$host" "$isa" pass ok "$serial" "$(serial_processing_backend "$serial" "$isa")"
+        emit_render_latency_evidence "$host" "$isa" "$serial" "$qemu_device_args"
         emit_processing_perf_evidence "$host" "$isa" "$serial" "$daemon_log"
         row_result=0
     elif [ "$probe_valid" != 1 ]; then

@@ -36,7 +36,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 | live and cached QEMU argv match the ISA machine, kernel, and shared ivshmem binding | REQ-006,011,012; NFR-009 |
 | executed QEMU accelerator is explicit; KVM/HVF/WHPX requires matching host ISA and TCG remains correctness-only | NFR-008,009 |
 | guest-observed device-init through selected-backend/fallback interval, including rejected/timed-out attempts and the 500000/500001 us boundary (TODO 566) | NFR-006 |
-| render latency and concurrent QEMU/daemon RSS evidence | NFR-003,005 |
+| exactly 20 post-oracle warm 1280x720 render/readback samples, nearest-rank p95, exact-argv native applicability, and concurrent QEMU/daemon RSS evidence (TODO 563) | NFR-003,005,008,009 |
 | exact 1280x720 canonical Draw IR readback with a positional zero-mismatch oracle (TODO 569) | NFR-001 |
 | measured device-vs-CPU processing preference and `available-not-preferred` classification (TODO 570) | NFR-004 |
 
@@ -78,6 +78,17 @@ completeness only. The isolated `--self-test-metrics` path rejects missing,
 zero, nonnumeric, or internally inconsistent RSS values and proves maxima are
 preserved across the AArch64 probe/production boots. NFR latency and the 256 MiB
 combined-memory target still require fresh measured rows.
+
+The source-ready warm gate requires exactly 20 additional 1280x720 receipts
+after the fully scanned positional oracle. Samples must be numbered 1 through
+20 with consecutive generations and matching dimensions, run, backend, device
+identity, checksum, device-origin bytes, and zero mismatches. The wrapper
+computes nearest-rank p95 (rank 19) and admits at most 16,700 us only when the
+same row's exact retained QEMU argv proves matching KVM/HVF/WHPX acceleration.
+TCG rows validate correctness and fail-closed parsing only. TODO 563 remains
+open for fresh current-host native/TCG runs and combined RSS. A real run may set
+`SIMPLEOS_HOST_GPU_QEMU_TIMEOUT` if the extra samples exceed the default; the
+checked-in default must not be raised speculatively.
 
 TODO 566's hardware-independent evidence must accept exactly one complete
 ordered attempt sequence, accept 500,000 us, reject 500,001 us, and reject

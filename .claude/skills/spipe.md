@@ -80,11 +80,13 @@ resume plan records the host/capability, prerequisites, exact command, retained
 artifacts, owner, and final reviewer.
 
 For QEMU timing evidence, derive native applicability from the retained,
-validated argv that was actually executed. Matching host and guest ISAs alone
-do not prove native execution: require an explicit available KVM, HVF, or WHPX
-accelerator; classify explicit TCG as correctness-only even on the same ISA.
-Keep mapping, negotiation, and completion receipts ordered and correlated, and
-do not promote a single timing sample to warm p95 evidence.
+validated argv that was actually executed, and bind that exact argv to the same
+serial artifact as the timing samples. Cached evidence must fail if its argv or
+applicability is relabeled. Matching host and guest ISAs alone do not prove
+native execution: require an explicit available KVM, HVF, or WHPX accelerator;
+classify explicit TCG as correctness-only even on the same ISA. Keep mapping,
+negotiation, and completion receipts ordered and correlated, and do not promote
+a single timing sample to warm p95 evidence.
 
 Final verification must fail stale workflow/tooling documentation instead of
 deferring cleanup to release. If a lane changed workflow, evidence wrappers,
