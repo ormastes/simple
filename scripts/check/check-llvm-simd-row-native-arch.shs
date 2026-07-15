@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
 BUILD_DIR="${BUILD_DIR:-build/check/llvm-simd-row-native-arch}"
 PROBE="test/fixtures/compiler/llvm_simd_row_native_probe.spl"
+CROSSMODULE_PROBE="test/fixtures/native_crossmodule_result_u8/main.spl"
 ENV_FILE="$BUILD_DIR/evidence.env"
 
 mkdir -p "$BUILD_DIR"
@@ -65,9 +66,37 @@ build_arch() {
     echo "llvm_simd_row_native_arch_${arch}_status=pass" >>"$ENV_FILE"
 }
 
+build_crossmodule_arch() {
+    arch="$1"
+    target="$2"
+    out="$BUILD_DIR/$arch/result-u8"
+    cache="$BUILD_DIR/$arch/result-u8-cache"
+    rm -rf "$cache" "$out"
+
+    SIMPLE_NO_STUB_FALLBACK=1 timeout 300 "$SIMPLE_BIN" native-build \
+        --source test/fixtures --source src/lib --entry-closure \
+        --entry "$CROSSMODULE_PROBE" --backend llvm --target "$target" \
+        --mode one-binary --cache-dir "$cache" --output "$out" \
+        >"$BUILD_DIR/$arch/result-u8-build.log" 2>&1
+
+    case "$arch" in
+        aarch64)
+            actual="$(qemu-aarch64 -cpu max -L /usr/aarch64-linux-gnu "$out")"
+            ;;
+        riscv64_rvv)
+            actual="$(qemu-riscv64 -cpu rv64,v=true,vlen=128,elen=64 \
+                -L /usr/riscv64-linux-gnu "$out")"
+            ;;
+    esac
+    [ "$actual" = "result-u8-ok" ]
+    echo "llvm_simd_row_native_arch_${arch}_crossmodule_status=pass" >>"$ENV_FILE"
+}
+
 build_arch x86_64 x86_64-unknown-linux-gnu
 build_arch aarch64 aarch64-unknown-linux-gnu
+build_crossmodule_arch aarch64 aarch64-unknown-linux-gnu
 build_arch riscv64_rvv riscv64-unknown-linux-gnu
+build_crossmodule_arch riscv64_rvv riscv64-unknown-linux-gnu
 echo "llvm_simd_row_native_arch_status=pass" >>"$ENV_FILE"
-echo "llvm_simd_row_native_arch_reason=all-binaries-exact-and-vectorized" >>"$ENV_FILE"
+echo "llvm_simd_row_native_arch_reason=all-binaries-exact-vectorized-and-crossmodule" >>"$ENV_FILE"
 cat "$ENV_FILE"
