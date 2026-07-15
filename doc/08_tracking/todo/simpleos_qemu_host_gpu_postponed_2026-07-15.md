@@ -2,8 +2,9 @@
 
 Host-only work completed on 2026-07-15:
 
-- Current pure-Simple Stage 2 and Stage 3 bootstrap succeeded.
-- The explicit `host-gpu` runtime lane and Vulkan/CUDA provider feature checks passed.
+- A diagnostic pure-Simple Stage 2/3 bootstrap succeeded; final source-matched admission remains postponed under TODO548.
+- The explicit `host-gpu` runtime lane and Vulkan/CUDA provider checks passed at source/static level; no live GPU receipt is claimed.
+- Host-side passthrough preflight classified unavailable guest-direct passthrough; live passthrough remains postponed.
 - Linux host-daemon linking reached the Engine2D provider-closure boundary.
 
 Postponed until the required lane or hardware is available:
