@@ -2,6 +2,9 @@
 
 > <details>
 
+Device-readback scenarios require a positive immutable Vulkan session
+`device_identity` in addition to the concrete readback handle.
+
 <!-- sdn-diagram:id=backend_vulkan_drawing_spec.arch -->
 <details class="sdn-source">
 <summary>SDN source</summary>

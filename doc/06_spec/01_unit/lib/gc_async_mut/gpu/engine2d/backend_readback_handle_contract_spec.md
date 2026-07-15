@@ -1,6 +1,6 @@
 # Engine2D backend readback handle contract
 
-> Prevents Engine2D backends from reporting `device_readback` through the zero-handle helper. A backend may use `device_readback` only when it also uses `engine2d_readback_with_handle(...)` with a concrete backend handle, or when a platform-specific runtime test proves equivalent handle propagation.
+> Prevents Engine2D backends from reporting `device_readback` through the zero-handle helper. Vulkan must use `engine2d_readback_with_identity(..., session.device)`; other backends must preserve a concrete handle or prove equivalent identity propagation.
 
 <!-- sdn-diagram:id=backend_readback_handle_contract_spec.arch -->
 <details class="sdn-source">
@@ -54,9 +54,10 @@ Prevents Engine2D backends from reporting `device_readback` through the zero-han
 ## Overview
 
 Prevents Engine2D backends from reporting `device_readback` through the
-zero-handle helper. A backend may use `device_readback` only when it also uses
-`engine2d_readback_with_handle(...)` with a concrete backend handle, or when a
-platform-specific runtime test proves equivalent handle propagation.
+zero-handle helper. Vulkan uses
+`engine2d_readback_with_identity(..., session.device)` so the readback retains
+the immutable backend-session identity; other backends preserve a concrete
+handle or prove equivalent identity propagation.
 
 This spec is intentionally source-contract evidence because several backends
 require platform runtimes that are not available on every CI host. Runtime

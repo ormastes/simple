@@ -25,6 +25,8 @@ use a bounded 32 MiB ceiling, large enough for the largest pinned
 The pure-Simple disk writer emits checksummed ASCII VFAT slots, collision-safe
 short aliases, and multi-cluster directory chains; the shared reader resolves
 the long path first and preserves the raw short-name reader as boot fallback.
+Before the canonical WM DrawIR frame, the desktop enables registered-only font
+resolution and registers the exact VFS bytes; it has no private post-frame text draw.
 
 Every Simple builder validates the exact returned byte array before staging.
 The still-live C compatibility wrapper mirrors the 16 readable VFAT names and

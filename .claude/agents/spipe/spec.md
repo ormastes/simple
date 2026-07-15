@@ -45,6 +45,9 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
 8. Every spec MUST fail right now — the code does not exist yet
 9. Run `simple spipe-docgen <spec> --output doc/06_spec --no-index` for each
    changed spec and require complete documentation with `0 stubs`
+   Interpreter diagnostics must reuse calibrated
+   `src/app/test/font_evidence_runner.spl`; never trust outer PASS/exit without
+   executed-count and spec-exit counters.
 10. Append the spec file list, generated manual paths, coverage matrix, and
     manual rendering policy to state file
 

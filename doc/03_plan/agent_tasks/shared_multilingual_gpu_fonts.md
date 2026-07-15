@@ -36,7 +36,7 @@ raw `rt_*` shortcuts, a new dependency, or a fake device-success path.
 | B — shared material | implementation agent; small sidecar may review shaping fixtures | canonical text-layout types/renderer/rasterizer and existing shaper/BiDi | REQ-006–009 and REQ-015 shared-surface/configuration scenarios and cache counters |
 | C — emission | implementation agent; Spark-style sidecar may inspect target markers read-only | existing compiler portable-compute/generated-artifact files | REQ-010 deterministic emission/compile scenarios |
 | D — 2D/3D native | implementation agent; small sidecar may audit evidence completeness read-only | existing Engine2D/Engine3D adapters and backend facade only | REQ-011–013 plus NFR-002/004–008 native evidence |
-| E — specs/manuals/docs | test/doc owner; small sidecar may review generated-manual readability | six planned SSpecs/manuals, affected guides, SPipe recipe | REQ-014, zero stubs, freshness audits |
+| E — specs/manuals/docs | test/doc owner; small sidecar may review generated-manual readability | seven planned SSpecs/manuals, affected guides, SPipe recipe | REQ-014, zero stubs, freshness audits |
 | F — resolved UI fonts | Spark metric sidecar + Spark Draw IR sidecar | `ResolvedFontMetrics`, Web layout advances, Draw IR identity verification; no font material in IR | legacy + WebRender IR/Draw IR parity |
 | G — SimpleOS font host | Spark image-builder sidecar | existing `FontAssetCandidate`, four existing image payload paths, verified-byte startup | guest path/hash/glyph/framebuffer evidence |
 | H — final verification | primary/best available reviewer only | verification report; fixes returned to owning lane | requirement-by-requirement PASS/WARN/FAIL |

@@ -26,11 +26,10 @@ render-ready marker, and captures the visible QEMU framebuffer.
 - QMP injects a deterministic host keyboard event with `input-send-event` and a second `pmemsave`
   proves the live framebuffer changed after guest input handling, so the
   scenario cannot pass from a static MDI screenshot alone.
-- Pinned-font promotion additionally requires the guest marker naming the exact
-  Noto Sans Mono asset hash and Pure-Simple sfnt/glyf raster, plus an exact
-  18x23 RGB glyph-region hash from QMP. Until the guest emits and paints that
-  contract, the font evidence reports `unavailable`; ordinary WM pixels do not
-  promote it.
+- The canonical pinned-font pixel oracle is owned by
+  `check-simpleos-wm-fullscreen-evidence.shs` and
+  `native_gpu_font_readback_spec.spl`; this older WM/Web gate does not duplicate
+  that release decision.
 - A failed serial marker, failed QMP capture, blank framebuffer, or stale MDI
   surface count fails the scenario explicitly.
 
@@ -90,16 +89,6 @@ use app.io.mod.{cwd, file_delete, file_write, thread_sleep, process_run_timeout}
 use test.system.qemu.os.common.qemu_os_harness.{
     can_run_target, file_exists, spawn_guest_with_qmp, stop_guest,
     wait_for_serial_marker, read_serial_log, read_qemu_stderr_log}
-
-val SIMPLEOS_FONT_ASSET_SHA256 = "2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081"
-val SIMPLEOS_FONT_REGION_RGB_SHA256 = "65f5480aa1d19b4496b2f9f45ab0e7a8a0ec9e02c9a9d674879ececa138ff73c"
-
-fn expect_simpleos_font_pixel_oracle(serial: text, capture: text) -> bool:
-    val marker = "[font-evidence] family=Noto Sans Mono asset_sha256=" + SIMPLEOS_FONT_ASSET_SHA256 +
-        " raster=pure-sfnt-glyf font_size=32 codepoint=65 region=x64,y64,w18,h23 region_rgb_sha256=" + SIMPLEOS_FONT_REGION_RGB_SHA256
-    serial.contains(marker) and capture.contains("font_region=x64,y64,w18,h23") and
-        capture.contains("font_region_rgb_bytes=1242") and
-        capture.contains("font_region_rgb_sha256=" + SIMPLEOS_FONT_REGION_RGB_SHA256)
 
 fn _build_once(target: OsTarget) -> bool:
     val _removed_output = file_delete(target.output)
@@ -217,7 +206,7 @@ fn _qmp_input_and_assert_framebuffer_delta(qmp_socket: text, before_path: text, 
         print "[gui_entry_engine2d_wm_simple_web_spec] qmp input stderr: {result[1]}"
     result[2] == 0 and file_exists(before_path) and file_exists(after_path) and result[0].contains("qmp_keyboard_input") and result[0].contains("framebuffer_changed_bytes=")
 
-fn _qmp_capture_and_assert_web_ppm_with_input_delta(qmp_socket: text, capture_path: text, before_path: text, after_path: text, serial: text) -> bool:
+fn _qmp_capture_and_assert_web_ppm_with_input_delta(qmp_socket: text, capture_path: text, before_path: text, after_path: text) -> bool:
     val script = "import hashlib,json,os,socket,sys,time;" +
         "sock,capture,before,after=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4];" +
         "cap_raw=capture+'.raw';before_raw=before+'.raw';after_raw=after+'.raw';" +
@@ -238,11 +227,8 @@ fn _qmp_capture_and_assert_web_ppm_with_input_delta(qmp_socket: text, capture_pa
         "bodyb=near(rgb(cap_pix,450,269),bytes([0x1F,0x29,0x37]),8);" +
         "top=near(rgb(cap_pix,64,20),bytes([0x20,0x50,0xA0]),8) and near(rgb(cap_pix,500,42),bytes([0x34,0x98,0xDB]),8) and near(rgb(cap_pix,900,20),bytes([0x1F,0x29,0x37]),8);" +
         "task=near(rgb(cap_pix,346,750),bytes([0x34,0x98,0xDB]),8) and near(rgb(cap_pix,500,740),bytes([0x17,0x20,0x2A]),8) and near(rgb(cap_pix,920,748),bytes([0x24,0x34,0x47]),8);" +
-        "font_region=b''.join(bytes(rgb(cap_pix,x,y)) for y in range(64,87) for x in range(64,82));" +
-        "font_region_sha=hashlib.sha256(font_region).hexdigest();" +
         "cap_sha=hashlib.sha256(open(capture,'rb').read()).hexdigest() if os.path.exists(capture) else '';" +
         "print('capture_method=pmemsave pmem_addr=0xfd000000 pmem_size=3145728 pmem_raw_bytes=%d ppm_dims=1024x768 nonblack=%d ppm_bytes=%d ppm_sha256=%s checks=[probe=%s,header=%s,bodyA=%s,bodyB=%s,top=%s,taskbar=%s]' % (len(cap_mem),non,os.path.getsize(capture) if os.path.exists(capture) else 0,cap_sha,probe,head,bodya,bodyb,top,task));" +
-        "print('font_region=x64,y64,w18,h23 font_region_rgb_bytes=%d font_region_rgb_sha256=%s' % (len(font_region),font_region_sha));" +
         "\ndef key_a():\n q(dict(execute='input-send-event',arguments=dict(events=[dict(type='key',data=dict(down=True,key=dict(type='qcode',data='a'))),dict(type='key',data=dict(down=False,key=dict(type='qcode',data='a')))])));hmp('sendkey a')\n" +
         "mem0,pix0=pmem(before_raw,before);" +
         "key_a();time.sleep(1.25);" +
@@ -259,12 +245,8 @@ fn _qmp_capture_and_assert_web_ppm_with_input_delta(qmp_socket: text, capture_pa
         print "[gui_entry_engine2d_wm_simple_web_spec] qmp capture/input {result[0]}"
     if result[1] != "":
         print "[gui_entry_engine2d_wm_simple_web_spec] qmp capture/input stderr: {result[1]}"
-    val font_oracle = expect_simpleos_font_pixel_oracle(serial, result[0])
-    val font_status = if font_oracle: "pass" else: "unavailable"
-    val font_reason = if font_oracle: "pass" else: "guest-pinned-font-render-marker-or-literal-region-missing"
-    print "[gui_entry_engine2d_wm_simple_web_spec] simpleos_font_pixel_oracle_status={font_status} reason={font_reason}"
-    file_write(capture_path + ".qmp_result.txt", "exit_code={result[2]}\nfont_oracle_status={font_status}\nfont_oracle_reason={font_reason}\nstdout:\n{result[0]}\nstderr:\n{result[1]}\n")
-    result[2] == 0 and font_oracle and file_exists(capture_path) and file_exists(before_path) and file_exists(after_path) and result[0].contains("capture_method=pmemsave") and result[0].contains("qmp_keyboard_input")
+    file_write(capture_path + ".qmp_result.txt", "exit_code={result[2]}\nstdout:\n{result[0]}\nstderr:\n{result[1]}\n")
+    result[2] == 0 and file_exists(capture_path) and file_exists(before_path) and file_exists(after_path) and result[0].contains("capture_method=pmemsave") and result[0].contains("qmp_keyboard_input")
 
 fn _print_guest_diagnostics(prefix: text, serial: text, stderr: text):
     print "{prefix} serial_len={serial.len()} stderr_len={stderr.len()}"
@@ -320,8 +302,8 @@ describe "WM Simple Web Engine2D BGA QEMU check":
                     stop_guest(handle)
                     expect(_pass_fail(saw_probe and saw_wm and saw_engine and saw_web and saw_web_contract and saw_mdi and saw_top and saw_taskbar and saw_html and saw_ready)).to_equal("pass")
                 else:
-                    step("Capture SimpleOS pinned-font pixels")
-                    val captured_input = _qmp_capture_and_assert_web_ppm_with_input_delta(qmp_socket, capture_ppm, before_input_ppm, after_input_ppm, serial)
+                    step("Capture the WM/Web framebuffer and replay input")
+                    val captured_input = _qmp_capture_and_assert_web_ppm_with_input_delta(qmp_socket, capture_ppm, before_input_ppm, after_input_ppm)
                     if not captured_input:
                         print "[gui_entry_engine2d_wm_simple_web_spec] QMP framebuffer capture or input replay assertion failed"
                         _print_guest_diagnostics("[gui_entry_engine2d_wm_simple_web_spec]", serial, read_qemu_stderr_log(handle))

@@ -73,7 +73,7 @@ and SimpleOS evidence records; they must not introduce another renderer or
 test-only success channel.
 
 Shared helpers are `setup_shared_font_fixture`, `setup_selected_shaping_face`,
-`expect_simple_identity_run`, `expect_complex_run_pending`, `expect_font_license`,
+`expect_simple_identity_run`, `expect_complex_run_rejected`, `expect_font_license`,
 `expect_language_coverage`, `expect_shared_font_batch`,
 `expect_backend_emission`, and `expect_font_render_parity`. Implemented helpers
 assert their named oracle; any pending helper fails explicitly. New assertions
@@ -90,34 +90,34 @@ with the one `FontRenderConfig`; no parallel step/helper vocabulary is added.
 Each listed case count is a minimum and includes happy, boundary, and failure
 behavior.
 
-| Requirement | Spec | Required cases | Current/required |
+| Requirement | Executable/manual | Required cases | Current evidence |
 |---|---|---|---:|
-| REQ-001 | `shared_font_manifest_spec.spl` | pinned hashes/top ten; script totals; tenth/eleventh boundary | 3 |
-| REQ-002 | `shared_font_manifest_spec.spl` | fixed decimal/fallback; alias/macrolanguage policy; double regeneration | 3 |
-| REQ-003 | `shared_font_manifest_spec.spl` | complete sparse cells; honest fallback; unavailable/not-designed distinction | 3 |
-| REQ-004 | `shared_font_manifest_spec.spl` | complete license metadata; checksum/table validation; missing field rejection | 3 |
-| REQ-005 | `shared_font_manifest_spec.spl` | pinned catalog revision; unchanged accepted bytes; corpus rejection | 3 |
-| REQ-006 | `shared_font_surfaces_spec.spl` | one owner; identical batch identity; no duplicate material cache | 3 |
+| REQ-001 | `shared_font_manifest_spec.spl` / `shared_font_manifest_spec.md` | pinned hashes/top ten; script totals; tenth/eleventh boundary | 3 source cases; fresh regeneration and native execution pending |
+| REQ-002 | `shared_font_manifest_spec.spl` / `shared_font_manifest_spec.md` | fixed decimal/fallback; alias/macrolanguage policy; double regeneration | 3 source cases; fresh regeneration and native execution pending |
+| REQ-003 | `shared_font_manifest_spec.spl` / `shared_font_manifest_spec.md` | complete sparse cells; honest fallback; unavailable/not-designed distinction | 3 source cases; fresh regeneration and native execution pending |
+| REQ-004 | `shared_font_manifest_spec.spl` / `shared_font_manifest_spec.md` | complete license metadata; checksum/table validation; missing field rejection | 3 source cases; fresh byte/license validation pending |
+| REQ-005 | `shared_font_manifest_spec.spl` / `shared_font_manifest_spec.md` | pinned catalog revision; unchanged accepted bytes; corpus rejection | 3 source cases; current pure-Simple corpus execution pending |
+| REQ-006 | `shared_font_surfaces_spec.spl` / `shared_font_surfaces_spec.md` | one owner; identical batch identity; no duplicate material cache | 3 source cases; interpreter diagnostic and native route execution pending |
 | REQ-007 | `shared_font_shaping_acceptance_spec.spl` plus focused unit and renderer oracles | exact-face simple-script oracle; exact Hindi `dev2` and bounded Arabic/Urdu vectors on sans; explicit hi/ar/ur mono fallback; exact monochrome Noto Emoji `U+1F600` corpus tuple under all ten selected language tags; pending exact Serif Devanagari/Naskh default-instance probes | sans and exact-corpus Emoji source policy promoted; serif probes are source-complete but cells remain unavailable because the stale-ABI pure-Simple CLI crashes before assertions; sequence/color Emoji remains fail-closed |
 | REQ-008 | `shared_font_manifest_spec.spl` plus focused sfnt/bitmap unit specs | compound/default-glyf corpus reconstruction; unsupported-format/axis rejection; literal default-variable + bitmap fixtures | 3/3 source; refreshed literal variable oracle execution blocked |
-| REQ-009 | `font_renderer_spec.spl`, backend font unit specs, and `shared_font_surfaces_spec.spl` | live font-identity separation; bounded glyph-cache counters; backend-local atlas owner + generation; unit-proven canonical font-size scale; immutable active-session guard; warm/dirty regions | 2/3 source; rotation/skew/subpixel/nonuniform CTM stay unsupported and native execution remains pending; exact Vulkan artifact reuse is source-complete |
+| REQ-009 | `font_renderer_spec.spl`, backend font unit specs, and `shared_font_surfaces_spec.spl` | live font-identity separation; bounded glyph-cache counters; backend-local atlas owner + generation; shared program-version/transform rejection; warm/dirty regions | 3/3 source gate; rotation/skew/subpixel/nonuniform CTM stay unsupported and retained native execution remains pending |
 | REQ-010 | `gpu_font_emission_spec.spl`, `cuda_generated_font_handoff_spec.spl`, plus portable toolchain checker | five source targets; Vulkan contract; deterministic failures/hashes; native artifact exports the versioned font entry; checker CUDA artifact installs and wins device-readback dispatch | source-complete; retained checker provenance, exact pinned-Vulkan identity, and conditional generated-CUDA handoff gates are source-covered; host compiler/device execution evidence remains pending |
-| REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, production host route contract, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical SimpleOS pixels | composition, hosted color/top-level frame ownership, production Simple Browser DrawIR/font-byte route, all-candidate image staging, ASCII VFAT writer/shared-reader routing, and canonical SimpleOS runner/readiness selection source-covered; writer/runtime execution, hosted image/motion/nested parity, and retained QEMU PASS pending |
-| REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 0/3; fail-closed gate present |
-| REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 0/3; pending gate fails explicitly |
+| REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, production host route contract, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical SimpleOS pixels | canonical `taskbar-clock` WM DrawIR source route and 56x48 dynamic crop are source-covered; expected hash, hosted image/motion/nested parity, and retained QEMU PASS pending |
+| REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 3/3 source gates with facade selection, distinct HUD/world pipelines, atlas owner/generation/hash, fenced submission, and readback checks; native execution pending |
+| REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 1/3 source gate: live Engine2D/Engine3D tuple promotion is wired; controlled unavailable classification, forged-proof rejection, and retained native PASS are pending |
 | REQ-014 | seven present specs/manuals | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 0/3 canonical manual passes; seven drafts exist, but native execution/docgen refresh is pending |
 | REQ-015 | `font_render_config_spec.spl`, `shared_font_surfaces_spec.spl`, and focused Engine2D/Engine3D font specs | validation and length-delimited identity; bitmap/vector/shaped propagation; Suggested/Preferred/Required behavior; unsupported mode/CTM rejects before cache/backend mutation; legacy default equivalence | 5 source-covered; deployed execution blocked by stale `rt_env_set` artifact ABI, then bootstrap-parser/full-CLI runtime-link gaps |
 
-| NFR | Evidence | Pass condition |
-|---|---|---|
-| NFR-001 | manifest spec and regeneration hashes | all immutable and byte-identical; corruption fails closed |
-| NFR-002 | native readback comparator fixture | exact integer-alpha RGBA8; bounded documented AA edges |
-| NFR-003 | manifest asset-size total | core fonts plus notices `<= 80 MiB` |
-| NFR-004 | surfaces benchmark | warm hits `>=95%`; p95 `<=4 ms` 1080p and `<=8 ms` 4K |
-| NFR-005 | native equal-semantics benchmark | 4,096 glyph end-to-end p95 `>=1.25x` CPU |
-| NFR-006 | upload/resource/RSS counters | no unchanged full upload; RSS `<=10%`; GPU `<=128 MiB` |
-| NFR-007 | corrupt/device-loss scenarios | stable active identity and unchanged CPU-fixture p95 |
-| NFR-008 | native evidence record | every required stage/handle/hash/fence/readback field is present |
+| NFR | Evidence | Pass condition | Current evidence |
+|---|---|---|---|
+| NFR-001 | `shared_font_manifest_spec.spl` plus regeneration hashes | all immutable and byte-identical; corruption fails closed | source gate present; current regeneration pending |
+| NFR-002 | `native_gpu_font_readback_spec.spl` comparator | exact integer-alpha RGBA8; bounded documented AA edges | durable schema still lacks viewport, color-space, premultiplication, rounding, warmup, percentile-method, and host fields; native readback pending |
+| NFR-003 | `shared_font_manifest_spec.spl` asset-size total | core fonts plus notices `<= 80 MiB` | 51,764,704 font bytes are pinned; notice bytes and current manifest execution remain pending |
+| NFR-004 | `build/shared_multilingual_gpu_fonts_perf/evidence.env` | warm hits `>=95%`; p95 `<=4 ms` 1080p and `<=8 ms` 4K | record missing; pending |
+| NFR-005 | `build/shared_multilingual_gpu_fonts_perf/evidence.env` | 4,096 glyph end-to-end p95 `>=1.25x` CPU | record missing; pending |
+| NFR-006 | `build/shared_multilingual_gpu_fonts_perf/evidence.env` | no unchanged full upload; RSS `<=10%`; GPU `<=128 MiB` | record missing; pending |
+| NFR-007 | native corrupt/device-loss scenarios | stable active identity and unchanged CPU-fixture p95 | font-lane device-loss/identity/p95 source scenario and native execution are pending |
+| NFR-008 | promoted native evidence record | every required stage/handle/hash/fence/readback field is present | per-stage durable schema and retained record are incomplete; pending |
 
 NFR-004/005/006 use one durable contract at
 `build/shared_multilingual_gpu_fonts_perf/evidence.env`. The performance SSpec
@@ -167,6 +167,14 @@ SIMPLE_NO_STUB_FALLBACK=1 bin/simple test <spec> --mode=native
 bin/simple spipe-docgen <spec> --output doc/06_spec --no-index
 ```
 
+If a focused `interpret_file` runner is used, its wrapper must inspect the
+canonical spec module's `get_executed_test_count` and `get_exit_code` after execution.
+`CompileResult.Success` alone is inadmissible. A deliberate failing fixture and
+a zero-executed-example fixture must both exit nonzero before any focused result counts;
+the runner remains `interpret-diagnostic` and cannot satisfy native or
+performance rows. Retain the runner digest and focused logs under
+`build/shared_multilingual_gpu_fonts_interpret/`.
+
 Then run the existing UI SSpec evidence audit and require
 `find doc/06_spec -name '*_spec.spl'` to return no paths.
 
@@ -187,6 +195,8 @@ graphics backend for both 2D and 3D, and all selected thresholds. Missing
 hardware is not a failure for non-promoted rows, but no promoted native row is a
 release failure. Placeholder assertions, environment-only payloads, mirrors, or
 upload-only evidence fail.
+Zero executed examples, an uncalibrated focused runner, or
+`CompileResult.Success` without executed/failure counter guards also fail.
 For REQ-011, a builder-only composition fixture is not sufficient: the hosted
 frame owner must execute the canonical composition, platform backends must only
 present final pixels, and the SimpleOS row must retain the independent QEMU

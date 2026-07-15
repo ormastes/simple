@@ -36,12 +36,14 @@ any required external GUI evidence. When the self-hosted retry cap is reached,
 record the lane as blocked and stop; never substitute the Rust seed or reuse a
 stale PASS artifact.
 
-> **Interpreter-mode verification caveat.** The file summary can print
-> `Passed: N / Failed: 0` (and `PASS`, exit 0) even when `it` blocks failed —
-> per-block output shows the red `✗` marks the aggregate drops. When verifying
-> spec runs (especially from scripts/agents), grep the output for `✗` or
-> `[1-9][0-9]* failures`, never just `^PASS` or the exit code. Tracked:
+> **Interpreter-mode verification caveat.** `it` bodies may execute, but the
+> outer file summary can still print `PASS`/exit 0 after matcher failures. A
+> focused `interpret_file` wrapper must inspect same-compilation-unit
+> `get_executed_test_count` and `get_exit_code`; `CompileResult.Success` alone
+> is never PASS. Calibrate with deliberate-red and zero-executed fixtures, and
+> keep interpreter evidence diagnostic. Tracked:
 > `doc/08_tracking/bug/test_runner_interpreter_file_summary_greenwash_2026-07-03.md`.
+> Reuse `src/app/test/font_evidence_runner.spl`; do not create another wrapper.
 
 The SPipe dev entrypoint lives at:
 
@@ -610,6 +612,13 @@ observe a pass:
   Run shared multilingual font acceptance SSpecs with
   `SIMPLE_NO_STUB_FALLBACK=1 bin/simple test <spec> --mode=native`; interpreter runs are diagnostics and cannot
   promote a manifest cell, backend, or performance row.
+  The canonical `src/app/test/font_evidence_runner.spl` runner must append `print_summary`,
+  `get_executed_test_count`, and `get_exit_code` checks to the interpreted source.
+  `CompileResult.Success` alone is false green: matcher failures only update
+  spec state. Prove deliberate-red and zero-executed-example fixtures exit nonzero
+  before using that runner as diagnostic evidence. It must use the existing
+  file facade, map every non-success `CompileResult` nonzero, and delete its
+  temporary wrapper.
   Resolve matrix policy by exact language and category. Unknown axes fail
   closed, and `witness_family` must not be treated as a loadable asset unless
   the resolved status is `native` or `fallback`.

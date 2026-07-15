@@ -49,9 +49,9 @@ implementations.
    cache statistics, runtime font configuration/policy, and fallback.
    Rasterizer/shaper internals stay tree-private.
 4. **Program artifacts:** the existing compiler portable-compute contract emits
-   CUDA/HIP/OpenCL/Metal/WGSL font source and compile plans. A font-specific
-   Vulkan SPIR-V artifact is still required; neither emission path may claim
-   execution.
+   CUDA/HIP/OpenCL/Metal/WGSL font source and compile plans. Vulkan remains a
+   separate pinned SPIR-V path for Engine2D atlas composition and Engine3D
+   HUD/world rendering. No emitted or validated artifact may claim execution.
 5. **Engine adapters:** Engine2D and Engine3D translate a `FontRenderBatch` into
    their own texture, sampler, transform, depth, submit, fence, and readback
    operations. Neither engine reads the other's private state.
@@ -117,6 +117,9 @@ tries the named target then CPU; `Required(named)` tries only the named target
 and returns failure. Concrete `cpu` is valid; `auto` with Preferred/Required and
 unknown targets reject. Invalid modes
 or CTM reject before any cache, counter, upload, or device mutation.
+The shared `FontRenderBatch.material_supported()` root also rejects unknown
+atlas-composite program versions and noncanonical transforms before either
+engine adapter can mutate native state.
 Non-default selection fields resolve through the canonical sparse matrix before
 renderer mutation; the exact candidate identity is loaded or matched to a
 caller-owned glyph run. Engine3D keeps one font target per frame and treats a
@@ -208,9 +211,11 @@ targets select `gui_entry_desktop.spl`, which lowers its `SharedWmScene` through
 compatibility-only. Hosted color/top-level frames use a persistent
 `Engine2dCompositorBackend` to execute `SharedWmScene -> DrawIrComposition ->
 Engine2D`, with direct rendering retained for the programmatic compatibility
-gate, image/motion backgrounds, nested content, or rejected readback. SimpleOS stages
-the pinned face and has a desktop evidence witness, but the canonical QEMU pixel
-gate still needs a retained PASS.
+gate, image/motion backgrounds, nested content, or rejected readback. The
+x86_64 SimpleOS entry registers the pinned face before composition and its `taskbar-clock` witness now
+originates in `SharedWmScene -> DrawIrComposition -> Engine2D`. The old private
+post-frame draw path is removed. The dynamic rightmost 56x48 QEMU crop is
+source-wired but its expected hash and retained PASS remain pending.
 Widget producers read existing `lang`/`font-family` properties, and
 `SharedWmWindow.language` preserves explicit WM language; absent metadata stays
 `und` and retains the previous Noto Sans Mono behavior.
@@ -248,7 +253,8 @@ and generations; batches report dirty regions. Raster scale is the canonical
 keys. Translation is applied after atlas lookup and intentionally does not
 invalidate atlas pixels. Rotation, skew, subpixel phase, and nonuniform scale
 remain absent from the public renderer; distinct material identities no longer
-alias, but explicit request rejection is still required. Complete target
+alias, and the shared batch gate rejects unknown program versions and
+noncanonical transforms. Complete target
 keys must still add runtime program-artifact identity. Backend atlas resources
 are bound to one immutable backend session: CUDA, OpenCL, and Vulkan reject
 active reinitialization before retaining another session, and Metal releases

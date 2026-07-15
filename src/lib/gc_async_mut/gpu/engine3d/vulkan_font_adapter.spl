@@ -13,6 +13,7 @@ use std.gpu.engine3d.font_vulkan_spirv.{
     font_hud_vulkan_vertex_spirv, font_world_vulkan_vertex_spirv,
     font_vulkan_fragment_spirv
 }
+use std.common.crypto.sha256.{sha256_u8_hex}
 
 class VulkanFontAdapter3DEvidence:
     ready: bool
@@ -21,6 +22,9 @@ class VulkanFontAdapter3DEvidence:
     hud_pipeline_handle: i64
     world_pipeline_handle: i64
     atlas_handle: i64
+    atlas_owner_identity: text
+    atlas_generation: i64
+    atlas_payload_sha256: text
     sampler_handle: i64
     hud_draws: i64
     world_draws: i64
@@ -41,6 +45,7 @@ class VulkanFontAdapter3D:
     atlas_height: i32
     atlas_generation: i64
     atlas_owner_identity: text
+    atlas_payload_sha256: text
     pass_handle: RenderPassHandle
     width: i32
     height: i32
@@ -83,6 +88,7 @@ class VulkanFontAdapter3D:
             atlas_height: 0,
             atlas_generation: -1,
             atlas_owner_identity: "",
+            atlas_payload_sha256: "",
             pass_handle: RenderPassHandle.invalid(),
             width: width,
             height: height,
@@ -113,7 +119,7 @@ class VulkanFontAdapter3D:
         true
 
     me _upload_atlas(batch: FontRenderBatch) -> bool:
-        if (not batch.valid or batch.atlas_width <= 0 or batch.atlas_height <= 0 or
+        if (not batch.material_supported() or batch.atlas_width <= 0 or batch.atlas_height <= 0 or
             batch.atlas_pixels.len() != batch.atlas_width.to_i64() * batch.atlas_height.to_i64()):
             return false
         if (self.atlas.id < 0 or self.atlas_width != batch.atlas_width or
@@ -125,6 +131,7 @@ class VulkanFontAdapter3D:
             self.atlas_height = batch.atlas_height
             self.atlas_generation = -1
             self.atlas_owner_identity = ""
+            self.atlas_payload_sha256 = ""
         if vulkan_font_atlas_upload_required(self.atlas_owner_identity, self.atlas_generation, batch):
             var alpha: [u8] = []
             for pixel in batch.atlas_pixels:
@@ -132,9 +139,11 @@ class VulkanFontAdapter3D:
             if not self.backend.upload_texture_checked(self.atlas, alpha):
                 self.atlas_generation = -1
                 self.atlas_owner_identity = ""
+                self.atlas_payload_sha256 = ""
                 return false
             self.atlas_generation = batch.atlas_generation
             self.atlas_owner_identity = batch.atlas_owner_identity()
+            self.atlas_payload_sha256 = sha256_u8_hex(alpha)
         self.atlas.id >= 0
 
     me draw_hud(origin_x: i32, origin_y: i32, batch: FontRenderBatch) -> bool:
@@ -193,6 +202,9 @@ class VulkanFontAdapter3D:
             hud_pipeline_handle: self.backend.pipeline_native_handle(self.hud_pipeline),
             world_pipeline_handle: self.backend.pipeline_native_handle(self.world_pipeline),
             atlas_handle: self.backend.texture_native_handle(self.atlas),
+            atlas_owner_identity: self.atlas_owner_identity,
+            atlas_generation: self.atlas_generation,
+            atlas_payload_sha256: self.atlas_payload_sha256,
             sampler_handle: self.backend.sampler_handle,
             hud_draws: if device.status == "font-ready": self.hud_draws else: 0,
             world_draws: if device.status == "font-ready": self.world_draws else: 0,
@@ -206,6 +218,7 @@ class VulkanFontAdapter3D:
         self.atlas_height = 0
         self.atlas_generation = -1
         self.atlas_owner_identity = ""
+        self.atlas_payload_sha256 = ""
         self.ready = false
         self.frame_active = false
 

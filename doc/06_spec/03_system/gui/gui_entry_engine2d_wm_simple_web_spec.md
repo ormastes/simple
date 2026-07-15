@@ -71,6 +71,8 @@ render-ready marker, and captures the visible QEMU framebuffer.
 - QMP injects a deterministic host keyboard event with `input-send-event` and a second `pmemsave`
   proves the live framebuffer changed after guest input handling, so the
   scenario cannot pass from a static MDI screenshot alone.
+- This older WM/Web gate does not own or promote the pinned-font pixel oracle;
+  the fullscreen evidence wrapper and native font readback spec own that decision.
 - A failed serial marker, failed QMP capture, blank framebuffer, or stale MDI
   surface count fails the scenario explicitly.
 
@@ -84,7 +86,7 @@ test runs.
 
 ## Examples
 
-Run the live gate with:
+Diagnostic interpreter invocation (outer PASS/exit alone is not acceptance):
 
 ```bash
 timeout 420s bin/simple test \

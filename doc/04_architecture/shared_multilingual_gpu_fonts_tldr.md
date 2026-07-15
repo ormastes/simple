@@ -4,6 +4,8 @@ One canonical `FontRenderer` prepares generation-bound `FontRenderBatch`
 material for GUI/Web through Draw IR and for Engine2D/Engine3D consumers.
 Simple emits the shared atlas-composite programs; backend adapters own device
 resources and may claim execution only after submission and device readback.
+The shared batch gate rejects unknown atlas-composite program versions and
+noncanonical transforms before either engine mutates native state.
 
 `font_types.spl` also owns the one immutable `FontRenderConfig` and
 `FontExecutionPolicy`. `Suggested(auto)` uses the engine's executable adapter
@@ -21,6 +23,9 @@ through every existing image-builder path before guest WM startup. Its canonical
 desktop already executes `SharedWmScene -> DrawIrComposition -> Engine2D` through
 `Engine2dWmFrameExecutor`, and canonical ARM64/x86_64 runner/readiness targets
 select that entry. Direct legacy `wm_entry.spl` files remain compatibility-only.
+On x86_64 the pinned face is registered before that frame and the existing
+`taskbar-clock` DrawIR slot is the witness; its 56x48 QEMU hash remains unset
+until retained capture evidence exists.
 Hosted color-background frames now lower through the same Draw IR/Engine2D
 route with one persistent raster session. Image/motion backgrounds and nested
 content retain an immediate compatibility retry; source routing is not runtime proof.

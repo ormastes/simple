@@ -3,7 +3,7 @@
 # High-level entry point that auto-selects the best available 3D rendering
 # backend and delegates all operations to it.
 #
-# Backend priority: cpu (only backend for now)
+# Backend priority: CPU scene renderer plus optional Vulkan font adapter.
 #
 # Usage:
 #   use std.gpu.engine3d.engine.{Engine3D}
@@ -102,8 +102,8 @@ class Engine3D:
     static fn create(width: i32, height: i32) -> Engine3D:
         """Create engine with auto-detected best backend.
 
-        Currently always selects the CPU backend. As hardware backends
-        are added, this will probe in priority order.
+        The CPU scene renderer remains the portable default. Call
+        `create_with_backend(..., "vulkan")` for native font composition.
 
         Args:
             width: Framebuffer width in pixels
@@ -120,15 +120,16 @@ class Engine3D:
         Args:
             width: Framebuffer width in pixels
             height: Framebuffer height in pixels
-            backend_name: Backend name ("cpu" for now)
+            backend_name: `"cpu"`, `"vulkan"`, or `"vulkan-font"`; both
+                Vulkan aliases install the font adapter while retaining the
+                CPU scene renderer
 
         Returns:
             Initialized Engine3D (falls back to cpu for unknown names)
         """
-        # For now, all paths lead to CPU backend
         var cpu = CpuBackend3D.create()
         cpu.init(width, height)
-        Engine3D(
+        var engine = Engine3D(
             _cpu: cpu,
             _backend_name: "cpu",
             _w: width,
@@ -137,16 +138,22 @@ class Engine3D:
             _view: mat4_identity(),
             _proj: mat4_identity()
         )
+        if backend_name == "vulkan" or backend_name == "vulkan-font":
+            engine.install_vulkan_font_backend()
+        engine
 
     # ========================================================================
     # Backend Info
     # ========================================================================
 
     fn backend_name() -> text:
-        """Get the name of the active backend."""
+        """Get the honest scene/font backend identity."""
         self._backend_name
 
     me install_vulkan_font_backend() -> bool:
+        val installed = self._vulkan_font
+        if installed != nil:
+            return installed.?.ready
         var adapter = VulkanFontAdapter3D.create(self._w, self._h)
         if not adapter.ready:
             adapter.shutdown()

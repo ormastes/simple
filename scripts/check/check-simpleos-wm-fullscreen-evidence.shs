@@ -22,8 +22,9 @@ FONT_REGION_RGB="$BUILD_DIR/font-region.rgb"
 FONT_ASSET="${SIMPLEOS_WM_FONT_ASSET:-assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf}"
 FONT_ASSET_EXPECTED_BYTES=1708408
 FONT_ASSET_EXPECTED_SHA256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081
-FONT_REGION_EXPECTED_BYTES=1242
-FONT_REGION_EXPECTED_SHA256=65f5480aa1d19b4496b2f9f45ab0e7a8a0ec9e02c9a9d674879ececa138ff73c
+FONT_REGION_EXPECTED_BYTES=8064
+# Filled only after a retained QEMU pmemsave proves the canonical taskbar clock.
+FONT_REGION_EXPECTED_SHA256=""
 FONT_ASSET_BYTES=0
 FONT_ASSET_SHA256=""
 DISK_IMAGE=""
@@ -322,6 +323,7 @@ scanout_size=0
 font_marker=""
 font_unavailable_marker=""
 font_marker_valid=false
+font_oracle_pending=false
 font_region_line=""
 font_region_bytes=0
 font_region_sha256=""
@@ -390,8 +392,13 @@ else
     scanout_pixel_format="$(marker_field "$scanout_marker" pixel_format)"
     scanout_generation="$(marker_field "$scanout_marker" generation)"
     case "$font_marker" in
-        *"[font-evidence] family=Noto Sans Mono asset_sha256=$FONT_ASSET_EXPECTED_SHA256 raster=pure-sfnt-glyf font_size=32 codepoint=65 region=x64,y64,w18,h23 region_rgb_sha256=$FONT_REGION_EXPECTED_SHA256"*)
+        *"[font-evidence] family=Noto Sans Mono asset_sha256=$FONT_ASSET_EXPECTED_SHA256 raster=pure-sfnt-glyf route=shared-wm-draw-ir component_id=taskbar-clock font_size=12 text=00:00 region=right56,bottom48 region_rgb_sha256=$FONT_REGION_EXPECTED_SHA256"*)
             font_marker_valid=true
+            ;;
+    esac
+    case "$font_unavailable_marker" in
+        *"[font-evidence-unavailable] reason=canonical-taskbar-clock-oracle-pending route=shared-wm-draw-ir component_id=taskbar-clock region=right56,bottom48 region_rgb_sha256="*)
+            font_oracle_pending=true
             ;;
     esac
 
@@ -403,9 +410,11 @@ else
         :
     elif [ -z "$scanout_marker" ] || [ -z "${ready_marker:-}" ]; then
         reason="dynamic-scanout-or-desktop-readiness-missing"
-    elif [ -n "$font_unavailable_marker" ]; then
+    elif [ -n "$font_unavailable_marker" ] && \
+         { [ "$font_oracle_pending" != true ] || [ -n "$FONT_REGION_EXPECTED_SHA256" ]; }; then
         reason="guest-pinned-font-evidence-unavailable"
-    elif [ "$font_marker_valid" != true ]; then
+    elif [ "$font_marker_valid" != true ] && \
+         { [ "$font_oracle_pending" != true ] || [ -n "$FONT_REGION_EXPECTED_SHA256" ]; }; then
         reason="guest-pinned-font-evidence-invalid"
     elif [ "$metadata_valid" != true ] || [ "$scanout_address" -le 0 ] || \
          [ "$scanout_width" -le 0 ] || [ "$scanout_height" -le 0 ] || \
@@ -540,11 +549,11 @@ f.readline()
 write_qmp(f, {"execute": "qmp_capabilities"})
 baseline_seq = max_input_seq()
 baseline = pmem(f, baseline_ppm)
-if width < 82 or height < 87 or len(baseline) != size:
+if width < 56 or height < 48 or len(baseline) != size:
     raise RuntimeError("font-region-out-of-bounds")
 font_region = bytearray()
-for y in range(64, 87):
-    for x in range(64, 82):
+for y in range(height - 48, height):
+    for x in range(width - 56, width):
         i = y * pitch + x * 4
         font_region.extend([baseline[i + 2], baseline[i + 1], baseline[i]])
 with open(font_region_path, "wb") as out:
@@ -574,7 +583,7 @@ print("simpleos_wm_maximize_frame_marker=" + max_frame)
 print("simpleos_wm_restore_irq_marker=" + restore_irq)
 print("simpleos_wm_restore_state_marker=" + restore_state)
 print("simpleos_wm_restore_frame_marker=" + restore_frame)
-print("font_region=x64,y64,w18,h23 font_region_rgb_bytes=%d font_region_rgb_sha256=%s" % (len(font_region), font_region_hash))
+print("font_region=right56,bottom48 font_region_rgb_bytes=%d font_region_rgb_sha256=%s" % (len(font_region), font_region_hash))
 print("simpleos_wm_fullscreen_delta changed_bytes=%d before_sha256=%s after_sha256=%s restored_sha256=%s" % (changed, base_hash, full_hash, restored_hash))
 PY
         capture1_code=$?
@@ -598,12 +607,15 @@ PY
             before_sha256="$(marker_field "$delta_line" before_sha256)"
             after_sha256="$(marker_field "$delta_line" after_sha256)"
             restored_sha256="$(marker_field "$delta_line" restored_sha256)"
-            font_region_line="$(sed -n '/^font_region=x64,y64,w18,h23 /p' "$CAPTURE_OUT" | tail -n 1)"
+            font_region_line="$(sed -n '/^font_region=right56,bottom48 /p' "$CAPTURE_OUT" | tail -n 1)"
             font_region_bytes="$(marker_field "$font_region_line" font_region_rgb_bytes)"
             font_region_sha256="$(marker_field "$font_region_line" font_region_rgb_sha256)"
             if serial_has_production_fault; then
                 status=fail
                 reason=guest-render-fault
+            elif [ -z "$FONT_REGION_EXPECTED_SHA256" ]; then
+                status=fail
+                reason=canonical-taskbar-clock-oracle-pending
             elif [ "$font_region_bytes" != "$FONT_REGION_EXPECTED_BYTES" ] || \
                  [ "$font_region_sha256" != "$FONT_REGION_EXPECTED_SHA256" ] || \
                  [ "$(file_byte_count "$FONT_REGION_RGB")" != "$FONT_REGION_EXPECTED_BYTES" ] || \

@@ -191,6 +191,13 @@ describe "<Feature Name>":
   passes one tiny `check` fixture. A bootstrap-only stage compiler, a Rust
   seed, or a candidate whose full-CLI closure has unresolved runtime
   symbols is blocker evidence, not an executable font PASS.
+  The canonical `src/app/test/font_evidence_runner.spl` runner must append `print_summary`,
+  `get_executed_test_count`, and `get_exit_code` checks inside the interpreted source.
+  `CompileResult.Success` alone is false green because matcher failures update
+  spec state without raising. Before trusting the runner, prove a deliberate
+  failing spec and a zero-executed-example spec both exit nonzero. The canonical
+  calibrations are `scripts/check/fixtures/font_evidence_runner_fail.spl` and
+  `scripts/check/fixtures/font_evidence_runner_empty.spl`.
   Shaped pixel evidence must include a nonzero bearing or GPOS offset and check
   the full CPU/device pixels. Pen positions are +Y-down baseline offsets;
   OpenType y offsets are negated, and quad top-left is
@@ -333,11 +340,12 @@ Output: `doc/03_plan/sys_test/<feature>.md`
 
 ## Interpreter Mode Limitation
 
-**Important:** The test runner in interpreter mode only verifies file loading, NOT `it` block execution. The `it` block bodies do not execute in interpreter mode. Use compiled mode for actual test execution:
+Interpreter `it` bodies may execute, but the outer summary, exit status, and
+`CompileResult.Success` are not trustworthy assertion results without the
+counter guards above. Native acceptance uses:
 
 ```bash
-bin/simple test path/to/spec.spl          # Interpreter mode (loading only)
-bin/simple test path/to/spec.spl --native  # Compiled mode (full execution)
+SIMPLE_NO_STUB_FALLBACK=1 bin/simple test path/to/spec.spl --mode=native
 ```
 
 ## Multi-LLM Collaboration

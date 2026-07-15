@@ -1,15 +1,17 @@
 # Native GPU Font Readback
 
 **Status:** release-blocking and currently unavailable
-**Traceability:** REQ-012, REQ-013, REQ-014; NFR-002, NFR-004, NFR-005, NFR-006, NFR-008
+**Traceability:** REQ-011, REQ-012, REQ-013, REQ-014; NFR-002, NFR-004, NFR-005, NFR-006, NFR-008
 **Executable:** `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl`
 
-This scenario has three independent live evidence rows. Vulkan Engine3D renders
-HUD and world text on its graphics backend/device; SimpleOS supplies a
+This scenario has three independent live evidence rows. Vulkan Engine2D and
+the Engine3D font adapter render on a consistent device name/type/driver tuple;
+SimpleOS supplies a
 pinned-font guest framebuffer oracle; and the warm performance/resource
 budgets pass. CUDA Engine2D generated-artifact evidence is owned by the
 separate `cuda_generated_font_handoff_spec.spl` pair. That CUDA row and this
-Vulkan row neither require nor imply the same device or backend. CPU rendering,
+Vulkan row neither require nor imply the same device or backend. The Vulkan
+tuple check is not a device UUID or retained execution proof. CPU rendering,
 upload-only evidence, and environment claims are not substitutes.
 
 ## Operator flow
@@ -20,17 +22,23 @@ Treat the first unavailable rung as failure: compiled program, native resource
 creation, submission, completed fence, and device-origin readback are required
 before any backend is promoted.
 
-### Render Engine3D HUD and world text on the promoted backend
+### Render Engine2D plus Engine3D HUD/world text on Vulkan
+
+Engine2D requires a native pipeline, atlas buffer, submitted command, completed
+fence, concrete device-readback handle and device identity, nonblank pixels,
+and CPU parity.
 
 The checker `expect_engine3d_font_readback` requires nonzero native device,
-pipeline, texture, sampler, and fence handles; HUD and world draws; verified
+distinct HUD/world pipelines, texture, sampler, and fence handles; HUD and world draws; verified
 HUD placement and world transform/depth behavior; a completed and destroyed
 fence; device-origin nonblank readback; and CPU-oracle parity.
 
 Current expected result is an explicit failure until native execution is
 retained. Source now owns dedicated HUD/world pipelines, combined sampler
 binding, depth test+write, zero-coverage fragment discard, fenced device-image
-readback, and exact public-pixel comparison. The depth oracle uses a translated
+readback, exact atlas owner/generation/payload hash, and public-pixel comparison.
+The public selector reports the honest hybrid identity `vulkan-font`; repeated
+installation must retain the same HUD/world pipelines and sampler. The depth oracle uses a translated
 perspective camera and four native frames (near-only, far-only, and both draw
 orders); every fully opaque overlap pixel must keep the near color.
 The independent HUD-only frame derives the expected nonzero pixel count and
@@ -41,15 +49,18 @@ from their logical handles rather than resource-array positions.
 ### Capture SimpleOS pinned-font pixels
 
 The checker `expect_simpleos_font_pixel_oracle` requires the pinned Noto Sans
-Mono asset SHA-256, the fixed 18×23 RGB region SHA-256, exactly 1,242 region
-bytes, and `qemu-pmemsave` device origin. The guest now loads registry-validated
+Mono asset SHA-256, the canonical taskbar-clock 56×48 RGB region SHA-256,
+exactly 8,064 region bytes, and `qemu-pmemsave` device origin. The guest loads registry-validated
 bytes from the canonical image path or the shared extensionless FAT alias
 `/SYS/FONTS/NOTOSANS`. The pure-Simple reader uses a
 32 MiB ceiling and the C compatibility reader uses 4 MiB; both admit this
-pinned 1,708,408-byte payload without truncation. It paints
-the fixed `A`/32 px witness and emits a marker only after hashing live MMIO. The
-fullscreen wrapper independently hashes a dynamic-scanout
-`pmemsave` crop and retains serial, raw/PPM, capture output, and region digest.
+pinned 1,708,408-byte payload without truncation. The existing 12 px
+`taskbar-clock` command is emitted by the canonical WM DrawIR frame; no private
+post-frame font draw remains. The fullscreen wrapper independently hashes the
+dynamic rightmost 56×48 `pmemsave` crop and retains serial, raw/PPM, capture
+output, and region digest. The expected canonical hash is intentionally unset
+until a trusted retained capture establishes it; promotion stays fail-closed
+until the value is pinned and reproduced.
 A disposable host-built FAT32 image contains the fallback at the exact pinned
 length and SHA-256, but no successful QEMU artifact is retained yet; missing
 any durable guest artifact is `unavailable` and fails this promotion gate.
@@ -67,7 +78,7 @@ record; missing, stale, partial, or non-passing evidence fails closed.
 
 ## Evidence artifacts
 
-- Engine3D evidence: native device identity, resource/fence handles, draw counts,
+- Engine2D/Engine3D evidence: consistent device tuple, native resource/fence handles, draw counts,
   readback bytes/source, absolute pixels, and CPU diff.
 - SimpleOS evidence: guest serial log plus QEMU `pmemsave` PPM and fixed-region
   digest.

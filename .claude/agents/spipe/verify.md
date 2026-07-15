@@ -23,6 +23,9 @@
    retry or enter a test-fix loop.
 3. Run feature specs first: `set -o pipefail; bin/simple test <spec_file> 2>&1 | tail -40` for each spec from Phase 4
 4. Run full test suite with capped output: `set -o pipefail; bin/simple test 2>&1 | tail -60` (pipefail preserves test exit code; check last lines for pass/fail summary)
+   Interpreter PASS/exit alone is not evidence. Focused interpreter diagnostics
+   must use calibrated `src/app/test/font_evidence_runner.spl` counters; native
+   acceptance remains authoritative.
 5. Run build checks: `set -o pipefail; bin/simple build check 2>&1 | tail -30`
 6. Run numbered artifact guard:
    `sh scripts/audit/numbered-artifact-guard.shs --working`

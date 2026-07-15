@@ -73,9 +73,9 @@ embedded version, default variation axes, fallback role, and a hashed reference
 to the canonical multilingual witness corpus.
 
 The manifest scenario replays the pinned family, subfamily, full, PostScript,
-and version strings from every real binary's sfnt `name` table. This is exact
-asset identity evidence only; it neither enforces names during runtime loading
-nor promotes language/category coverage.
+and version strings from every real binary's sfnt `name` table. Runtime
+loading enforces the same embedded names. This exact identity check does not
+promote language/category coverage.
 
 The unchanged binaries and adjacent metadata/licenses are bundled under
 `assets/fonts/google-fonts/` (16 files, 51,764,704 font bytes). Twelve are
@@ -217,7 +217,7 @@ shaping. The identity subset is the 54-native/1-fallback evidence above; exact
 Hindi and the exact pinned Arabic/Urdu lookup-vector cases are separately
 bounded to their proven witnesses.
 
-REQ-009 is partial: selected checksum/default-axis identity now fences the
+REQ-009 source cases are complete: selected checksum/default-axis identity now fences the
 glyph cache, atlas, and resolved-metrics cache; stats expose that identity, and
 generation-bound wrappers over the process-global face are revocable so stale
 operations fail closed. A batch derives an atlas-owner identity from its live
@@ -236,8 +236,10 @@ identity do not share one cache concern: atlas buffers are destroyed before a
 device is destroyed, while an active CUDA, OpenCL, or Vulkan backend rejects
 session replacement and Metal releases font state before device recreation.
 Configuration identity now invalidates and keys canonical glyph material and
-is length-delimited into shaped-run keys and every configured batch/atlas owner. Remaining REQ-009
-gaps are backend/device/session/artifact identity on every atlas reuse, resolved-run and
+is length-delimited into shaped-run keys and every configured batch/atlas owner.
+`FontRenderBatch.material_supported()` rejects unknown atlas-composite program
+versions and noncanonical transforms before Engine2D or Engine3D mutation.
+Remaining REQ-009 gaps are runtime compiled-artifact identity, resolved-run and
 atlas telemetry, native execution evidence,
 and concurrent multi-face ownership. None promotes the coverage matrix.
 
@@ -438,6 +440,13 @@ raw pen coordinates directly into atlas quads.
   one retained native run proving those claims; compute dispatch or CPU output
   is not a substitute.
 
+`Engine3D.create_with_backend(..., "vulkan")` installs only the Vulkan font
+adapter and honestly reports `backend_name() == "vulkan-font"`; the scene
+renderer remains CPU. Repeated installation reuses the live HUD/world pipelines
+and sampler. The native source gate compares Engine2D and Engine3D device
+name/type/driver tuples, which is a same-device consistency check rather than a
+device UUID or retained execution proof.
+
 The Vulkan Engine3D owner now has dedicated HUD and depth-tested world font
 pipelines, per-pipeline combined-image-sampler descriptor ownership, R8 atlas
 upload, non-indexed draw, fenced completion, and staged device readback.
@@ -514,13 +523,13 @@ in the guest. Packaging and a host-side image hash are not guest rendering evide
 The pure-Simple builders own the canonical path. The still-live C image writer
 mirrors the readable names and fixed short aliases for compatibility with its
 existing toolchain/evidence image callers.
-The canonical SimpleOS desktop evidence entry paints the
-fixed `A`/32 px witness through its Draw IR/Engine2D frame and emits a marker
-only after hashing live MMIO. The fullscreen QEMU wrapper independently hashes
-the dynamic-scanout `pmemsave` crop and retains its artifacts. PASS still
-requires one successful retained run; source routing, a marker, and the bitmap
-fallback are not that runtime proof. Do not add a second font draw path or reuse
-Engine3D HUD/world as one.
+The x86_64 SimpleOS witness is now the existing 12 px `taskbar-clock` command in the
+real `SharedWmScene -> DrawIrComposition -> Engine2D` frame; the private
+post-frame `A`/32 px draw was deleted. The fullscreen QEMU wrapper captures the
+dynamic rightmost 56x48 slot (8,064 RGB bytes) and retains the candidate hash,
+but the expected hash is intentionally unset until a trusted QEMU run records
+it. Source routing is complete; REQ-011 pixel promotion remains unavailable.
+Do not add another font draw path or reuse Engine3D HUD/world.
 
 ## Completion workflow
 
@@ -559,6 +568,15 @@ SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/03_system/app/simple_2d/feature/g
 
 Interpreter runs are diagnostics only. These native source gates still do not
 substitute for submission, SimpleOS pixel, Engine3D, or performance gates.
+
+A focused runner using `interpret_file` is trustworthy only when its wrapper
+checks `get_executed_test_count` and `get_exit_code` inside the interpreted source;
+`CompileResult.Success` by itself is false green for matcher failures. First
+prove deliberate-red and zero-executed-example fixtures exit nonzero, and bind
+the log to the fresh pure-Simple runner digest. The result may be labeled only
+`interpret-diagnostic`; it cannot promote manifest, native GPU, SimpleOS pixel,
+Engine3D, or performance evidence. Use the two calibration fixtures under
+`scripts/check/fixtures/font_evidence_runner_{fail,empty}.spl`.
 
 Run each acceptance gate once per session. Unavailable hardware or the stale
 self-hosted runtime is a blocker record, never a synthetic PASS.
