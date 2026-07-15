@@ -34,13 +34,17 @@ the CPU/software fallback and report a stable reason.
 
 ## Primary flow
 
-1. **Reject an unusable compiler candidate.** Before any guest build, require
-   the candidate to complete
-   `check test/05_perf/io_parity/startup_simple.spl` successfully within 10
-   seconds. Unix allows a one-second forced-kill grace for processes that
-   ignore termination; Windows force-kills at its bounded wait deadline.
-   Timeout, signal termination, or nonzero exit is ineligible even if version
-   and native-build argument probes succeed.
+1. **Reject an unusable compiler candidate.** Before any guest build, run the
+   wrapper's implemented private `candidate_frontend_smoke`: self-pin
+   `SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`, and
+   `SIMPLE_FRONTEND_DELEGATE` to the candidate; neutralize inherited
+   execution/worker/bootstrap modes; disable stub fallback; and native-build the checked-in
+   `p2_add.spl` fixture with Cranelift/core-C-bootstrap/entry-closure/one-binary
+   within 60 seconds, run it within 5 seconds, and require status zero plus
+   stdout exactly `5`. Use private cache/output/log state and EXIT cleanup.
+   The old `check startup_simple.spl` probe is invalid because it
+   unconditionally appends global repository hygiene and Git subguards that do
+   not describe a jj-only workspace without `.git`.
 2. **Probe the QEMU guest GPU capability.** Boot the selected x86_64, AArch64,
    or RISC-V guest and negotiate protocol version, limits, backend sets,
    readback, and host readiness. Try strict native Metal, DirectX, then Vulkan
@@ -206,13 +210,23 @@ sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --validate-report path/to/r
 ```
 
 Status-only or incomplete cached reports fail closed as malformed evidence.
-The wrapper bounds version and invalid-mode probes to five seconds, requires a
-checked-in frontend check to exit zero within ten seconds, and applies a
-one-second forced-kill grace on Unix. It rejects any version probe that reports
-`bootstrap seed only`, then requires the exact exit-1 diagnostic from a
-deliberate invalid-mode native-build command. Explicit
-compiler overrides do not bypass this liveness/command-surface gate; the real
-build remains authoritative for backend runtime/toolchain availability.
+The wrapper bounds version and invalid-mode probes to five seconds and rejects
+any version probe that reports `bootstrap seed only`. The implemented wrapper
+admission self-pins `SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`,
+and `SIMPLE_FRONTEND_DELEGATE` to the candidate; sets
+`SIMPLE_FRONTEND_DELEGATED=1`, `SIMPLE_NO_STUB_FALLBACK=1`, and the repository
+`SIMPLE_LIB`; and neutralizes inherited worker/bootstrap selection with
+`SIMPLE_EXECUTION_MODE=''`, `SIMPLE_NATIVE_BUILD_FORCE_WORKER=0`, and
+`SIMPLE_BOOTSTRAP=0`. It then applies the 60-second exact build and 5-second exact run
+contract above. The deliberate invalid-mode command uses the same pins.
+Explicit overrides do not bypass admission. The wrapper self-test passes;
+`_QemuRunner` parity remains pending, so no live candidate is promoted by this manual.
+
+Focused SSpec execution is a separate unresolved compiler contract. Current
+`simple test` dispatch uses `rt_cli_run_tests`, while the alternate
+pure-Simple orchestrator ultimately uses the Rust `rt_cli_run_file`
+interpreter. TODO 572 owns the result-bearing no-seed path. Do not infer an
+SSpec, compiler, QEMU, or GPU PASS from candidate source inspection.
 
 Run the live Linux Vulkan-render/CUDA-processing matrix with a deployed
 pure-Simple compiler. After that compiler passes its bounded frontend gate, the

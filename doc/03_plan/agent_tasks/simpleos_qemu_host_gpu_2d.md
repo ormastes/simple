@@ -34,6 +34,8 @@
 | QEMU/daemon RSS evidence | Codex Spark | concurrent component/combined sampling and isolated metrics self-test |
 | ProcessingIR preference evidence | Codex Spark sidecars | independent CPU/device timing, correlated receipt, and fail-closed 1.5x classification |
 | exact 1280x720 Draw IR fixture | Codex Spark sidecars | wire/memory audit, positional oracle, cached evidence exclusions, and manual review |
+| compiler candidate admission | compiler/tooling owner | `candidate_frontend_smoke` self-pins the candidate and proves exact `p2_add` build+run without global hygiene |
+| pure-Simple SSpec execution | compiler/test-runner owner (TODO 572) | result-bearing no-seed single-spec path; separate from host-GPU admission |
 | merge and generated-manual review | primary `/root` | wrapper/parser/manual accepted; native non-Linux rows remain open |
 | final review | normal/highest-capability Codex | requirements, exclusions, security, NFR, manual quality |
 
@@ -43,6 +45,22 @@ fixture bypasses, synthetic handles, or passing placeholders.
 ## Current Handoff
 
 - Wrapper and fail-closed self-test: implemented.
+- The wrapper now contains `candidate_frontend_smoke`, while `_QemuRunner`
+  still needs the same admission contract. The wrapper self-test passes.
+  Its exact contract uses a private temporary cache/output/log; self-pins
+  `SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`, and
+  `SIMPLE_FRONTEND_DELEGATE` to the candidate; neutralizes inherited
+  execution/worker/bootstrap selection with `SIMPLE_EXECUTION_MODE=''`,
+  `SIMPLE_NATIVE_BUILD_FORCE_WORKER=0`, and `SIMPLE_BOOTSTRAP=0`; forbids stub
+  fallback; and builds the checked-in `p2_add.spl` with
+  Cranelift/core-C-bootstrap/entry-closure/one-binary under 60 seconds, executes
+  it under 5 seconds, and requires exact stdout `5`. The old
+  `check startup_simple.spl` result is invalid because it always appends global
+  repository hygiene and Git subguards that are not authoritative in a
+  jj-only workspace without `.git`. Source presence is not a PASS.
+- Pure-Simple focused SSpec execution remains unavailable and is not part of
+  the admission patch. TODO 572 owns replacing `rt_cli_run_tests` and the Rust
+  `rt_cli_run_file` interpreter with a result-bearing pure-Simple runner path.
 - Retained cached Linux/Vulkan evidence contains exact x86_64, AArch64, and
   RV64 render and ProcessingIR receipts; it is not fresh production evidence.
 - Fresh pure-Simple guest builds and all live QEMU rows remain blocked by TODO

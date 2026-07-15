@@ -268,14 +268,34 @@ sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --validate-report build/simpleos_host_gpu_2d/report.env
 ```
 
-Before building a guest, both the wrapper and `_QemuRunner` require a
-candidate pure-Simple compiler to complete
-`check test/05_perf/io_parity/startup_simple.spl` successfully within a
-10-second deadline. Unix allows a one-second forced-kill grace for a process
-that ignores termination; Windows force-kills at its bounded wait deadline. A
-timeout, signal, or nonzero exit rejects the candidate even when it passes the
-version and native-build argument probes; this prevents stale-ABI artifacts
-from reaching the QEMU build path.
+Before building a guest, both compiler selectors must use the private
+`candidate_frontend_smoke`. The wrapper implements it; `_QemuRunner` still
+needs parity. It self-pins `SIMPLE_BINARY`, `SIMPLE_BIN`,
+`SIMPLE_BOOTSTRAP_DRIVER`, and `SIMPLE_FRONTEND_DELEGATE` to the candidate;
+sets `SIMPLE_FRONTEND_DELEGATED=1`, `SIMPLE_NO_STUB_FALLBACK=1`, and
+`SIMPLE_LIB=$ROOT_DIR/src`; and neutralizes inherited worker/bootstrap modes
+with `SIMPLE_EXECUTION_MODE=''`, `SIMPLE_NATIVE_BUILD_FORCE_WORKER=0`, and
+`SIMPLE_BOOTSTRAP=0`. It then native-builds the checked-in
+`scripts/check/cert/redeploy_gate/fixtures/p2_add.spl` with Cranelift,
+core-C-bootstrap, entry closure, and one-binary mode. The build has 60 seconds;
+the resulting program has 5 seconds and must exit zero with stdout exactly
+`5`. The subshell owns a private temporary cache/output/build log and EXIT
+cleanup. The invalid-mode probe uses the same pins, so a sibling seed cannot
+answer for the candidate.
+
+Do not use `check test/05_perf/io_parity/startup_simple.spl` as admission
+evidence. `run_check` always appends whole-tree repository hygiene, so
+unrelated tracked-policy failures can reject a correct frontend, and its Git
+subguards are not authoritative in a jj workspace with `.jj` and no `.git`.
+The wrapper self-test passes; `_QemuRunner` parity is pending. TODO 548 remains
+open, and no live compiler, QEMU, or GPU PASS is implied.
+
+Candidate admission does not make focused SSpec execution pure-Simple.
+Current `simple test` reaches `rt_cli_run_tests`; directly entering the
+pure-Simple orchestrator still reaches the Rust `rt_cli_run_file` interpreter.
+TODO 572 owns the dedicated result-bearing pure-Simple compiler/test-runner
+path. Until it is implemented, record focused SSpec verification as blocked;
+never set `SIMPLE_BOOTSTRAP_DRIVER` to a Rust seed as a workaround.
 
 It builds `simpleos-host-gpu-x86_64`, `simpleos-host-gpu-aarch64`, and
 `simpleos-host-gpu-riscv64` through `_QemuRunner`, starts the strict host

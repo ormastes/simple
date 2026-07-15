@@ -12,7 +12,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 
 | Scenario | Requirements |
 |---|---|
-| compiler eligibility rejects candidates that cannot complete the checked-in frontend smoke within 10 seconds | TODO 548 hardening (no new requirement) |
+| compiler eligibility self-pins a candidate, privately native-builds checked-in `p2_add.spl` within 60 seconds, runs it within 5 seconds, and requires exact stdout `5` | TODO 548 hardening (no new requirement) |
 | negotiate one bounded architecture-neutral protocol | REQ-001,002,005 |
 | exact device-backed Draw IR readback | REQ-003,006 |
 | checked raw Vulkan CLEAR/RECT completion and fail-closed provenance | REQ-003,005,006,010 |
@@ -50,12 +50,33 @@ handles, compile-only output, or a CPU mirror. Unsupported and blocked rows are
 valid classifications but do not satisfy a host/ISA combination classified as
 supported.
 
-Before any guest build, both compiler-selection owners must require the exact
-`check test/05_perf/io_parity/startup_simple.spl` frontend smoke to exit zero
-within a 10-second deadline. Unix allows a one-second forced-kill grace for
-candidates that ignore termination; Windows force-kills at its bounded wait
-deadline. Timeout, signal termination, or any nonzero exit makes the candidate
-ineligible even when its version and native-build argument probes succeed.
+Before any guest build, both compiler-selection owners must use the
+`candidate_frontend_smoke` contract in a private subshell. The wrapper now
+implements it; `_QemuRunner` still needs parity. It creates one
+private temporary directory, cache, output, and build log with EXIT cleanup;
+self-pins `SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`, and
+`SIMPLE_FRONTEND_DELEGATE` to the candidate; sets
+`SIMPLE_FRONTEND_DELEGATED=1`, `SIMPLE_NO_STUB_FALLBACK=1`, and
+`SIMPLE_LIB=$ROOT_DIR/src`; neutralizes inherited execution/worker/bootstrap
+modes with `SIMPLE_EXECUTION_MODE=''`, `SIMPLE_NATIVE_BUILD_FORCE_WORKER=0`,
+and `SIMPLE_BOOTSTRAP=0`; and native-builds
+`scripts/check/cert/redeploy_gate/fixtures/p2_add.spl` with Cranelift,
+core-C-bootstrap, entry closure, and one-binary mode within 60 seconds; then
+executes it within 5 seconds and requires status zero plus exact stdout `5`.
+The deliberate invalid-mode full-CLI probe uses the same delegation pins.
+
+The former `check test/05_perf/io_parity/startup_simple.spl` gate is not valid
+admission evidence: `run_check` unconditionally appends whole-tree repository
+hygiene, so unrelated tracked policy failures can reject a correct candidate,
+and its Git subguards do not describe a jj workspace with `.jj` and no `.git`.
+The wrapper self-test passes; `_QemuRunner` parity remains pending. Source
+inspection does not satisfy TODO 548.
+
+Candidate admission also does not prove that `simple test` is pure-Simple.
+Current dispatch still reaches `rt_cli_run_tests`; the alternate pure-Simple
+orchestrator reaches the Rust `rt_cli_run_file` interpreter. TODO 572 separately
+requires a result-bearing pure-Simple pass/fail path for one SSpec. Until both
+lanes execute, no focused SSpec, compiler, QEMU, or GPU PASS may be claimed.
 
 Every passing row must also record the first-line QEMU version, a reversible
 comma-delimited per-argument hex encoding of the exact QEMU argument vector,

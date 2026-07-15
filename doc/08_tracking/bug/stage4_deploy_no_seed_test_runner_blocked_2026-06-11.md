@@ -1,8 +1,13 @@
 # stage4 deploy left no seed driver — `bin/simple test` blocked host-wide
 
 Date: 2026-06-11
-Status: resolved (2026-06-12 — seed rebuilt; deploy-gate implemented in bootstrap-from-scratch.sh)
+Status: reopened (2026-07-15 — current policy requires a no-seed pure-Simple test path)
 Owner: stage4 deploy lane
+
+The 2026-06-12 resolution below is retained as historical evidence. It restored
+the then-supported seed-delegated workflow, but it does not satisfy the current
+rule that normal checks and SSpec execution use the pure-Simple self-hosted
+toolchain without `SIMPLE_BOOTSTRAP_DRIVER` or a Rust-seed fallback.
 
 ## Resolution (2026-06-12)
 
@@ -65,3 +70,55 @@ Deploy script should refuse to switch `bin/simple` to the self-hosted binary
 unless a working seed driver exists at one of the two documented paths (probe
 by actually running `<seed> --version`), keeping the delegation contract it
 advertises.
+
+## Reopened audit (2026-07-15)
+
+The authoritative `simple test <spec>` call chain is still seed-owned:
+
+1. `src/app/cli/main.spl` exports
+   `src/app/cli/_CliMain/main_and_help.spl::main`.
+2. Its `test` arm calls
+   `src/app/io/_CliCommands/run_commands.spl::cli_run_tests`.
+3. That wrapper calls `rt_cli_run_tests`.
+4. `src/compiler_rust/runtime/src/value/cli_sffi.rs::rt_cli_run_tests`
+   selects and spawns a seed driver and sets `SIMPLE_TEST_RUNNER_RUST=1`.
+
+The pure-Simple orchestrator under `src/app/test_runner_new/` does not close
+this gap. Its interpreter path spawns the selected binary with `run`, while
+the fork path and minimal child runner ultimately call `rt_cli_run_file`; the
+driver-compatible implementation in `src/compiler_rust/native_all/src/lib.rs`
+explicitly executes through the Rust interpreter. The unused pure-Simple
+compiler path begins at
+`src/compiler/80.driver/driver_api_interpret.spl::interpret_file`, but no test
+runner consumes a result-bearing BDD contract from it. The generic
+`InterpreterExecutionEngine.execute_file` facade in
+`src/compiler/80.driver/init.spl` is also explicitly unwired.
+
+The smallest honest dedicated fix is therefore outside the host-GPU feature
+lane: expose a result-bearing pure-Simple single-spec execution contract from
+the compiler interpreter, make `run_test_file_interpreter` consume it with the
+existing timeout/result safeguards, and route the CLI `test` arm to the
+pure-Simple runner instead of `rt_cli_run_tests`. Acceptance needs one passing
+and one deliberately failing SSpec with the candidate self-pinned, no seed
+available, and no current-binary respawn loop. TODO 572 owns that work.
+
+Separately, TODO 548's wrapper-side compiler-admission replacement is now
+implemented as `candidate_frontend_smoke`: a private temporary
+directory/cache/output/log,
+60-second build and 5-second run bounds, EXIT cleanup, and a self-pinned
+candidate (`SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`, and
+`SIMPLE_FRONTEND_DELEGATE` all equal the candidate;
+`SIMPLE_FRONTEND_DELEGATED=1`; `SIMPLE_NO_STUB_FALLBACK=1`;
+`SIMPLE_EXECUTION_MODE=''`; `SIMPLE_NATIVE_BUILD_FORCE_WORKER=0`;
+`SIMPLE_BOOTSTRAP=0`; and `SIMPLE_LIB=$ROOT_DIR/src`). It must native-build the checked-in
+`scripts/check/cert/redeploy_gate/fixtures/p2_add.spl` with Cranelift,
+core-C-bootstrap, entry closure, and one-binary mode, then run it and require
+status zero plus exact stdout `5`. `_QemuRunner` still has the historical
+check probe and must adopt the same contract. The wrapper self-test passes, but
+that hardware-independent result is not live compiler, QEMU, or GPU evidence.
+
+The former `check test/05_perf/io_parity/startup_simple.spl` probe is not valid
+candidate evidence. `src/app/cli/check.spl::run_check` unconditionally runs the
+whole-tree repository-hygiene tail, so unrelated tracked-policy failures can
+reject a correct frontend. Its Git subguards are also not authoritative in a
+jj-only workspace containing `.jj` but no `.git`.

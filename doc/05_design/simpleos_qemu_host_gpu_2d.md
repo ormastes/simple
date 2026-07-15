@@ -276,6 +276,31 @@ awaits fresh processing preference evidence.
 
 ## Minimal Implementation Order
 
+### Compiler admission prerequisite
+
+The wrapper's implemented `candidate_frontend_smoke(candidate)` runs in a
+private subshell with one temporary directory/cache/output/build log and EXIT
+cleanup. It pins `SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`, and
+`SIMPLE_FRONTEND_DELEGATE` to `candidate`; sets
+`SIMPLE_FRONTEND_DELEGATED=1`, `SIMPLE_NO_STUB_FALLBACK=1`, and
+`SIMPLE_LIB=$ROOT_DIR/src`; and neutralizes inherited execution/worker/bootstrap
+modes with `SIMPLE_EXECUTION_MODE=''`, `SIMPLE_NATIVE_BUILD_FORCE_WORKER=0`,
+and `SIMPLE_BOOTSTRAP=0`. It gives the checked-in `p2_add.spl` fixture a
+60-second Cranelift/core-C-bootstrap/entry-closure/one-binary build deadline.
+The produced binary has a 5-second deadline and must exit zero with stdout
+exactly `5`. The invalid-mode probe receives the same self-pins.
+
+Do not reuse the former `check startup_simple.spl` result: its unconditional
+repository-hygiene tail and Git subguards conflate frontend behavior with
+global policy and are invalid in a jj-only workspace without `.git`.
+`_QemuRunner` still needs the same replacement. The wrapper self-test passes.
+
+This does not design around the test-runner blocker. TODO 572 separately wires
+the pure-Simple compiler interpreter's BDD result into
+`run_test_file_interpreter` and routes the CLI test arm away from both
+`rt_cli_run_tests` and the Rust `rt_cli_run_file` interpreter. The host-GPU
+lane must wait for that owner path rather than adding a feature-local runner.
+
 1. Pure Simple codec/validator and CPU oracle tests.
 2. x86_64 Linux/Vulkan rendering plus CUDA-preferred, Vulkan-fallback ProcessingIR guest-daemon vertical slice.
 3. AArch64 production RAMFB/Engine2D desktop and the RV64 dynamic VirtIO

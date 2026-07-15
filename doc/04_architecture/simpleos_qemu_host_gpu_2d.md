@@ -262,3 +262,32 @@ TODO 548 blocks the pure-Simple checker.
 The QEMU build owner accepts only a runnable pure-Simple compiler. A candidate
 whose version probe identifies it as a bootstrap seed is rejected, and absence
 of a valid compiler fails the build before spawning any architecture worker.
+
+## Compiler Admission and SSpec Ownership (2026-07-15)
+
+Compiler admission is a tooling boundary, not a GPU receipt. The wrapper's
+implemented `candidate_frontend_smoke` owns one disposable cache/output/log;
+self-pins `SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`, and
+`SIMPLE_FRONTEND_DELEGATE` to the candidate; and neutralizes inherited
+execution/worker/bootstrap modes with `SIMPLE_EXECUTION_MODE=''`,
+`SIMPLE_NATIVE_BUILD_FORCE_WORKER=0`, and `SIMPLE_BOOTSTRAP=0`. With frontend
+delegation marked and stub fallback disabled,
+it must native-build the repository's `p2_add.spl` fixture using
+Cranelift/core-C-bootstrap/entry-closure/one-binary within 60 seconds, run the
+result within 5 seconds, and observe exactly `5`. Cleanup is trap-owned. The
+same self-pins apply to the invalid-mode probe so a sibling seed cannot answer
+for the candidate.
+
+The earlier whole-tree `check startup_simple.spl` path crosses the wrong trust
+boundary: it always runs repository hygiene and Git-specific subguards, so an
+unrelated policy failure or a jj-only workspace without `.git` can determine
+the result. It cannot admit or reject a frontend.
+
+SSpec execution is a separate compiler/test-runner capsule. Today the CLI test
+arm reaches `rt_cli_run_tests`, and the pure-Simple orchestrator still reaches
+the Rust `rt_cli_run_file` interpreter. TODO 572 owns a result-bearing
+pure-Simple interpreter contract and CLI/runner routing. The host-GPU capsule
+must consume its eventual verdict; it must not add a local runner, runtime
+alias, or seed fallback. The wrapper self-test passes; `_QemuRunner` parity and
+the no-seed SSpec implementation remain pending, so this architecture change
+is not live compiler, QEMU, or GPU evidence.
