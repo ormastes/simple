@@ -541,6 +541,70 @@ fn main() -> i64:
 EOF
 }
 
+write_case_iife() {
+    # IIFE (bc33ade0120): a raw lambda-literal callee `(\x: x+1)(5)` used to
+    # loud-fail native-build; now beta-reduces in the live scope. Seed evaluates
+    # it too -> parity (expect 6, 15). (A curried `(\a: \b: ..)(4)(9)` is left
+    # out on purpose: the inner lambda escapes+captures, which correctly
+    # loud-fails native codegen -- not an IIFE the fix targets.)
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    print((\x: x + 1)(5))
+    val n = 9
+    print((\x: x + n)(6))
+    return 0
+EOF
+}
+
+write_case_dict_from_call_keys() {
+    # dict returned from a function, keys()-iter index (abde1838e3e): the call
+    # -result dict's string keys came back un-decoded so every d[k] returned 0;
+    # now they round-trip. Seed handles it too -> parity (expect 3).
+    cat >"$1" <<'EOF'
+fn mk() -> Dict<text, i64>:
+    var d = {}
+    d["a"] = 1
+    d["b"] = 2
+    return d
+fn main() -> i64:
+    val d = mk()
+    var t = 0
+    for k in d.keys():
+        t = t + d[k]
+    print(t)
+    return 0
+EOF
+}
+
+write_case_array_concat() {
+    # array `+` concat (e9165c53a66): `a + [x]` used to integer-add two
+    # SplArray* pointers -> SIGSEGV; now routes to rt_array_concat. Seed
+    # concatenates too -> parity (expect 4, 1, 4, 5).
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val a = [1, 2]
+    val c = a + [3, 4]
+    print(c.len())
+    print(c[0])
+    print(c[3])
+    val e = a + [3, 4] + [5]
+    print(e.len())
+    return 0
+EOF
+}
+
+write_case_interp_bool_float() {
+    # bool/float in string interpolation (e9165c53a66): operands used to route
+    # through rt_raw_i64_to_string, misrendering bools and floats; now use the
+    # bool/f64 dispatch. Seed renders them the same -> parity.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    print("n={5} b={true} f={1.5}")
+    print("{3 < 5}")
+    return 0
+EOF
+}
+
 write_case_tuple_pattern_match() {
     # Destructuring tuple match pattern (99c7f3516b0): `case (a, b):` binds
     # the tuple elements. The seed does NOT bind them (prints 0); native
@@ -696,6 +760,10 @@ run_parity_case some0 write_case_some0
 run_parity_case str_method_var_arg write_case_str_method_var_arg
 run_parity_case float_struct_field write_case_float_struct_field
 run_parity_case text_num_concat write_case_text_num_concat
+run_parity_case iife write_case_iife
+run_parity_case dict_from_call_keys write_case_dict_from_call_keys
+run_parity_case array_concat write_case_array_concat
+run_parity_case interp_bool_float write_case_interp_bool_float
 
 # --- NATIVE-AUTHORITATIVE: seed oracle broken/unparseable for these --------
 run_native_authoritative_case me_receiver write_case_me_receiver "41" \
