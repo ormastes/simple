@@ -1,5 +1,5 @@
 # Tests for platform_defaults.spl - Single source of truth for link data
-# No imports - uses module-level helper functions to replicate logic.
+use compiler.backend.linker.platform_defaults.{default_crt_search_dirs, default_dynamic_linker_candidates, elf_emulation, gcc_triplet}
 
 # ============================================================================
 # Module-level helpers (replicate platform_defaults.spl logic)
@@ -28,6 +28,8 @@ fn helper_default_crt_search_dirs(os: text, arch: text) -> [text]:
         return ["/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/lib/x86_64-linux-gnu", "/lib64"]
     elif arch == "aarch64":
         return ["/usr/lib/aarch64-linux-gnu", "/usr/aarch64-linux-gnu/lib", "/lib/aarch64-linux-gnu"]
+    elif arch == "armv7l" or arch == "armv7" or arch == "arm":
+        return ["/usr/lib/arm-linux-gnueabihf", "/usr/arm-linux-gnueabihf/lib", "/lib/arm-linux-gnueabihf"]
     elif arch == "riscv64":
         return ["/usr/lib/riscv64-linux-gnu", "/usr/riscv64-linux-gnu/lib", "/lib/riscv64-linux-gnu"]
     ["/usr/lib"]
@@ -140,6 +142,17 @@ describe "platform_defaults":
             expect(dirs.len()).to_equal(3)
             expect(dirs[0]).to_equal("/usr/lib/aarch64-linux-gnu")
 
+        it "arm32_crt: arm aliases use the hard-float GNU triplet":
+            val armv7_dirs = default_crt_search_dirs("linux", "armv7")
+            val arm_dirs = default_crt_search_dirs("linux", "arm")
+            val native_dirs = default_crt_search_dirs("linux", "armv7l")
+            expect(armv7_dirs.len()).to_equal(3)
+            expect(armv7_dirs[0]).to_equal("/usr/lib/arm-linux-gnueabihf")
+            expect(arm_dirs.len()).to_equal(3)
+            expect(arm_dirs[0]).to_equal("/usr/lib/arm-linux-gnueabihf")
+            expect(native_dirs.len()).to_equal(3)
+            expect(native_dirs[0]).to_equal("/usr/lib/arm-linux-gnueabihf")
+
         it "riscv64_crt: riscv64 has 3 search dirs":
             val dirs = helper_default_crt_search_dirs("linux", "riscv64")
             expect(dirs.len()).to_equal(3)
@@ -167,6 +180,11 @@ describe "platform_defaults":
             val candidates = helper_default_dynamic_linker_candidates("linux", "riscv64")
             expect(candidates.len()).to_equal(2)
 
+        it "linux_arm32_dynlinker: native ARM alias uses armhf loader":
+            val candidates = default_dynamic_linker_candidates("linux", "armv7l")
+            expect(candidates.len()).to_equal(2)
+            expect(candidates[0]).to_equal("/lib/ld-linux-armhf.so.3")
+
         it "freebsd_dynlinker: FreeBSD has 1 candidate":
             val candidates = helper_default_dynamic_linker_candidates("freebsd", "x86_64")
             expect(candidates.len()).to_equal(1)
@@ -189,6 +207,9 @@ describe "platform_defaults":
         it "i686_emulation: i686 returns elf_i386":
             expect(helper_elf_emulation("i686")).to_equal("elf_i386")
 
+        it "arm32_emulation: native ARM alias returns ARM ELF mode":
+            expect(elf_emulation("armv7l")).to_equal("armelf_linux_eabi")
+
         it "unknown_emulation: unknown arch returns empty":
             expect(helper_elf_emulation("mips")).to_equal("")
 
@@ -201,6 +222,9 @@ describe "platform_defaults":
 
         it "riscv64_triplet: riscv64 returns riscv64-linux-gnu":
             expect(helper_gcc_triplet("riscv64")).to_equal("riscv64-linux-gnu")
+
+        it "arm32_triplet: native ARM alias returns hard-float GNU triplet":
+            expect(gcc_triplet("armv7l")).to_equal("arm-linux-gnueabihf")
 
         it "unknown_triplet: unknown arch defaults to x86_64-linux-gnu":
             expect(helper_gcc_triplet("mips")).to_equal("x86_64-linux-gnu")

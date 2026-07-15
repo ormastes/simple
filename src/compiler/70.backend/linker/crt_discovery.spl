@@ -2,9 +2,10 @@
 #
 # Discovers C runtime startup files (crt1.o, crti.o, crtn.o, crtbegin.o, crtend.o)
 # and the dynamic linker path by probing the filesystem. Supports x86_64, aarch64,
-# and riscv64 architectures on Linux.
+# ARM32, and riscv64 architectures on Linux.
 
-use std.io_runtime.{file_exists, shell_output, shell, host_arch, env_get}
+use std.io_runtime.{file_exists, shell_output, shell, host_arch, host_os, env_get}
+use compiler.backend.linker.platform_defaults.{default_crt_search_dirs, default_dynamic_linker_candidates, gcc_triplet}
 
 struct CrtFiles:
     crt1: text
@@ -27,16 +28,7 @@ fn find_crt_files(pie: bool, verbose: bool) -> CrtFiles:
     if trace:
         print "[CRT] arch={arch}"
 
-    # Build candidate search directories based on architecture
-    var candidates: [text] = []
-    if arch == "x86_64":
-        candidates = ["/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/lib/x86_64-linux-gnu", "/lib64"]
-    elif arch == "aarch64":
-        candidates = ["/usr/lib/aarch64-linux-gnu", "/usr/aarch64-linux-gnu/lib", "/lib/aarch64-linux-gnu"]
-    elif arch == "riscv64":
-        candidates = ["/usr/lib/riscv64-linux-gnu", "/usr/riscv64-linux-gnu/lib", "/lib/riscv64-linux-gnu"]
-    else:
-        candidates = ["/usr/lib"]
+    val candidates = default_crt_search_dirs(host_os(), arch)
     if trace:
         print "[CRT] candidates={candidates.len()}"
 
@@ -141,25 +133,7 @@ fn find_crt_files(pie: bool, verbose: bool) -> CrtFiles:
 
 fn find_dynamic_linker() -> text:
     val arch = host_arch()
-
-    # Architecture-specific dynamic linker candidates
-    var candidates: [text] = []
-    if arch == "x86_64":
-        candidates = [
-            "/lib64/ld-linux-x86-64.so.2",
-            "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-            "/lib/ld-linux-x86-64.so.2"
-        ]
-    elif arch == "aarch64":
-        candidates = [
-            "/lib/ld-linux-aarch64.so.1",
-            "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
-        ]
-    elif arch == "riscv64":
-        candidates = [
-            "/lib/ld-linux-riscv64-lp64d.so.1",
-            "/lib/riscv64-linux-gnu/ld-linux-riscv64-lp64d.so.1"
-        ]
+    val candidates = default_dynamic_linker_candidates(host_os(), arch)
 
     # Probe each candidate
     for path in candidates:
@@ -232,12 +206,7 @@ fn find_gcc_lib_dirs() -> [text]:
     if dirs.len() == 0:
         if trace:
             print "[GCC] method 3: probing common paths..."
-        val arch = host_arch()
-        var triplet = "x86_64-linux-gnu"
-        if arch == "aarch64":
-            triplet = "aarch64-linux-gnu"
-        elif arch == "riscv64":
-            triplet = "riscv64-linux-gnu"
+        val triplet = gcc_triplet(host_arch())
 
         # Try GCC versions 14 down to 9
         var ver = 14
