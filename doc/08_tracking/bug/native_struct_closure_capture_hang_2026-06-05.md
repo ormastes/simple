@@ -1,8 +1,8 @@
 # native_struct_closure_capture_hang
 
-Status: open
+Status: source fix implemented; strict execution pending
 
-**Status:** open
+**Status:** source fix implemented; strict execution pending
 **Severity:** medium
 **Date:** 2026-06-05
 
@@ -43,3 +43,14 @@ fn worker(seed: i64, ch_id: i64):
 ## Likely Location
 
 - `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`
+
+## Resolution (2026-07-15)
+
+The pure-Simple MIR path now lifts capturing lambdas with an environment-first
+hidden argument and stores scalar or struct handles by value in a portable,
+membership-checked closure runtime. The C registry is synchronized and
+fail-closed; the pure-Simple runtime checks membership before dereference.
+
+The strict regression is shared with the first-class-lambda bug and covers
+hosted/simple-core runtimes under default LLVM and explicit Cranelift. Execution
+awaits a fresh runnable pure-Simple compiler artifact.

@@ -39,8 +39,8 @@ executable proof.
 | 6 | Old two-slot `Any` premise is superseded by the one-word ABI; strict default-LLVM + explicit-Cranelift wrapper-to-extern forwarding proof added, execution pending. |
 | 7 | Source implemented at the contained MIR enum-bind owner; strict default-LLVM + explicit-Cranelift proof added, execution pending. |
 | 8 | Open; uniform tagged Option ABI remains blocked. Flat text unwrap is implemented but unexecuted. |
-| 9 | Non-capturing stored/passed lambda values implemented with strict LLVM+Cranelift parity coverage; capturing closure values remain open. |
-| 10 | Rust captured-closure hang fixed; remaining pure-Simple captured storage is tracked by #9. |
+| 9 | Capturing and non-capturing stored/passed lambda values implemented with a membership-checked closure ABI; strict hosted/simple-core default-LLVM + explicit-Cranelift proof added, execution pending. |
+| 10 | Captured scalar/struct closure storage implemented through the same closure ABI; strict dual-runtime/backend proof added, execution pending. |
 | 11 | Fixed by Unit-arm merge suppression and backend void-spill protection. |
 | 12 | Fixed; lifecycle hooks are optional and weak/null-guarded. |
 | 13 | Fail-closed seed compatibility implemented with a stale-cache regression; test execution pending. |
