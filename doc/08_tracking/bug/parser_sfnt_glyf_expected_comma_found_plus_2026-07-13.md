@@ -2,7 +2,8 @@
 
 **ID:** parser_sfnt_glyf_expected_comma_found_plus_2026-07-13
 **Filed:** 2026-07-13
-**Status:** WORKED AROUND (source parenthesized); parser gap NOT fixed
+**Status:** SOURCE FIXED in Rust and pure-Simple parser owners (2026-07-15);
+focused test execution pending
 **Severity:** P2 — load-path-only parse failure blocking a showcase app
 **Component:** compiler frontend / parser (both deployed self-hosted `bin/simple`
 and the fresh seed reject the same input)
@@ -49,13 +50,22 @@ operator is `|` for union types instead of `<` for generics).
 +    if (glyph_id as i64) < long_metrics:
 ```
 
-## Requested fix
+## Parser fix (2026-07-15)
 
-Make the parser close a cast expression (`EXPR as TYPE`) before attempting to
-read a following `<` as generic-argument-list syntax, unless the type is
-immediately followed by `<` with no space/operator ambiguity resolvable only
-by full expression-vs-type disambiguation (turbofish-style). At minimum, emit
-a targeted diagnostic instead of "expected Comma, found Plus/Colon".
+Both parser owners now use a scoped cast-type entrypoint. In cast context,
+`TYPE<...>` remains a generic type only when `<` is adjacent to the type name;
+a spaced `<` closes the cast and is left for expression parsing. Normal type
+and declaration parsing still accepts spaced generic syntax, so this does not
+globally tighten the language grammar.
+
+- Rust: `parse_cast_type()` delegates to the shared single-type parser with
+  spaced generics disabled; ordinary `parse_single_type()` keeps them enabled.
+- Pure Simple: `parser_parse_cast_type()` delegates to
+  `parser_parse_type_impl(false)`. A plain `TOK_LT` remains generic in cast
+  types only when its source offset is adjacent to the type name; normal type
+  parsing continues to accept spacing.
+- Only the two `as` expression sites use the new Simple entrypoint; the `is`
+  path and recursive inner-type parsing remain unchanged.
 
 ## Verification
 
@@ -63,3 +73,8 @@ Harness `use std.common.encoding.sfnt_glyf.*` now loads with no parse error.
 Showcase (`examples/06_io/ui/graphics_2d_showcase.spl`) proceeds past this
 file and the sibling `backend_vulkan_font.spl` parse error; it currently stops
 on an unrelated 10s example-runner timeout (non-parse), reported separately.
+
+Focused Rust regressions cover the less-than AST shape, adjacent generic casts,
+and spaced generic declarations. The canonical pure-Simple parser spec covers
+the less-than/cast AST shape and adjacent generic casts. These tests were added
+with the source fix; execution is pending the parent bootstrap/build lane.

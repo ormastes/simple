@@ -46,6 +46,14 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn parse_single_type(&mut self) -> Result<Type, ParseError> {
+        self.parse_single_type_with_spaced_generics(true)
+    }
+
+    pub(crate) fn parse_cast_type(&mut self) -> Result<Type, ParseError> {
+        self.parse_single_type_with_spaced_generics(false)
+    }
+
+    fn parse_single_type_with_spaced_generics(&mut self, allow_spaced_generics: bool) -> Result<Type, ParseError> {
         // Handle function type: fn(T) -> U or bare fn (callable type)
         if self.check(&TokenKind::Fn) {
             self.advance();
@@ -401,7 +409,8 @@ impl<'a> Parser<'a> {
         }
 
         // Check for generic arguments - support both [] and <> syntax
-        let using_angle_brackets = self.check(&TokenKind::Lt);
+        let using_angle_brackets =
+            self.check(&TokenKind::Lt) && (allow_spaced_generics || self.previous.span.end == self.current.span.start);
         let using_square_brackets = self.check(&TokenKind::LBracket);
 
         if using_angle_brackets || using_square_brackets {
@@ -792,5 +801,65 @@ impl<'a> Parser<'a> {
                 self.current.span,
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cast_stops_before_spaced_less_than_expression() {
+        let expression = Parser::new("x as i64 < (a + 1) * b")
+            .parse_expression()
+            .expect("expression should parse");
+
+        let Expr::Binary {
+            op: BinOp::Lt, left, ..
+        } = expression
+        else {
+            panic!("expected less-than expression");
+        };
+        let Expr::Cast { expr, target_type } = *left else {
+            panic!("expected cast on the left side");
+        };
+        assert_eq!(*expr, Expr::Identifier("x".to_string()));
+        assert_eq!(target_type, Type::Simple("i64".to_string()));
+    }
+
+    #[test]
+    fn cast_keeps_adjacent_angle_generic_type() {
+        let expression = Parser::new("value as Box<i64>")
+            .parse_expression()
+            .expect("generic cast should parse");
+
+        let Expr::Cast { target_type, .. } = expression else {
+            panic!("expected cast expression");
+        };
+        assert_eq!(
+            target_type,
+            Type::Generic {
+                name: "Box".to_string(),
+                args: vec![Type::Simple("i64".to_string())],
+            }
+        );
+    }
+
+    #[test]
+    fn declaration_keeps_spaced_angle_generic_type() {
+        let module = Parser::new("fn keep(value: Box < i64>):\n    pass\n")
+            .parse()
+            .expect("spaced generic declaration should parse");
+
+        let Node::Function(function) = &module.items[0] else {
+            panic!("expected function declaration");
+        };
+        assert_eq!(
+            function.params[0].ty,
+            Some(Type::Generic {
+                name: "Box".to_string(),
+                args: vec![Type::Simple("i64".to_string())],
+            })
+        );
     }
 }

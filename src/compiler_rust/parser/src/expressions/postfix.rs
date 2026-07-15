@@ -584,7 +584,7 @@ impl<'a> Parser<'a> {
                 TokenKind::As => {
                     // Type cast: expr as Type [or: default | else: fn | or_return:]
                     self.advance();
-                    let target_type = self.parse_single_type()?;
+                    let target_type = self.parse_cast_type()?;
 
                     // Check for fallback suffix
                     match &self.current.kind {
