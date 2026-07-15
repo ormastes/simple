@@ -1,7 +1,8 @@
 # Interpreter: `if val x = <Option-returning fn>:` enters the body when the result is nil
 
 Date: 2026-07-02
-Status: open
+Status: source fixed 2026-07-15; executable interpreter proof pending a
+runnable pure-Simple compiler artifact
 Severity: P2 (silently wrong control flow; workaround exists)
 Found by: W4b lane agent (browser link-click navigation work)
 
@@ -52,3 +53,12 @@ Applied in `simple_browser_anchor_href_at` and
 - Same-file `Option` uses with `found.?` checks (e.g. `be_dom_find_by_id`)
   behave; only the `if val <name> = <call>:` binding form misfires.
 - Verified via `bin/simple run` (JIT fell back to interpreter for the module).
+
+## Resolution
+
+Plain `if val`/`while val` desugars now mark their synthetic binding for
+Option-only normalization. The interpreter returns nil for `Option::None` and
+the payload for `Option::Some`; Result wrappers and ordinary empty values retain
+their prior behavior, while explicit `.?` keeps its broader presence semantics.
+Mirrored interpreter regression specs cover both if-expression and statement
+forms, the None while-binding case, Result, and empty-value controls.

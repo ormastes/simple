@@ -1,7 +1,7 @@
 # Interpreter `if val x = <nil Option>:` Wrongly Takes the Match Branch - 2026-07-03
 
-Status: OPEN (workaround applied at the one call site hit during P1 game-library
-extraction; root cause not yet fixed in the compiler)
+Status: SOURCE FIXED (2026-07-15); executable interpreter proof pending a
+runnable pure-Simple compiler artifact.
 
 ## Symptom
 
@@ -70,3 +70,12 @@ Compare interpreter-mode lowering/evaluation of `if val` pattern-binding
 against the JIT path's handling of the same node — the JIT path (or whatever
 lowering `world.spl`'s passing specs exercise) evidently distinguishes
 `Some`/`nil` correctly; the plain tree-walking interpreter fallback does not.
+
+## Resolution
+
+Plain `if val`/`while val` desugars now mark their synthetic binding for
+Option-only normalization. The interpreter maps `Option::None` to nil and
+`Option::Some` to its payload while preserving Result wrappers and ordinary
+empty text/arrays. The explicit `.?` operator keeps its broader not-empty
+semantics. Mirrored interpreter system tests cover statement, expression,
+while, Result, and ordinary-empty-value forms.
