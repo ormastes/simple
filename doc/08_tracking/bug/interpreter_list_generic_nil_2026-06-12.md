@@ -2,7 +2,8 @@
 
 **Date:** 2026-06-12
 **Severity:** P2 (blocks interpreter-mode specs for all `core.collections.List`-backed modules)
-**Status:** Open compiler bug; owned src usage hardened 2026-06-22
+**Status:** Source fixed; direct-constructor regression added 2026-07-15,
+execution pending
 
 ## Symptom
 
@@ -35,6 +36,18 @@ or bare local `List` values.
   (`.claude/skills/lib/spipe_ui.md`).
 - Any compositor unit spec running in interpreter mode has the same ceiling.
 
+## Resolution
+
+Generic-call parsing now preserves `List<i64>()` as a call to `List`, and the
+shared class-instantiation path honors the object returned by an implicit
+zero-argument `new`. `List.new()` therefore returns `List(items: [])` instead
+of falling back to a preinitialized object whose `items` field is nil.
+
+`test/01_unit/lib/core/list_constructor_hardening_spec.spl` now exercises the
+original spelling directly, pushes one item, and reads it back. This replaces
+the earlier source scan that merely banned the crashing spelling. Execution is
+pending the canonical pure-Simple test lane.
+
 ## Notes
 
 - `dict`/array-backed modules are unaffected (audio_bus_spec 30/0,
@@ -45,7 +58,4 @@ or bare local `List` values.
 - Fix belongs in the interpreter generic-class instantiation path; pure-Simple
   first if the constructor lowering lives in `src/compiler`, seed otherwise.
 - 2026-06-22: owned `src/` uses of the crashing direct constructor spelling
-  `List<T>()` were rewritten to the working `List<T>.new()` form, covering the
-  compositor modules called out above. Guarded by
-  `test/01_unit/lib/core/list_constructor_hardening_spec.spl`. Root interpreter
-  constructor lowering remains open.
+  `List<T>()` were rewritten to `List<T>.new()` as a temporary workaround.
