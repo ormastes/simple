@@ -314,6 +314,12 @@ ownership are tracked by TODO 573. All five split `_QemuRunner` modules now use
 shared I/O/process/time owners; `runner_targets` reads its baseline without
 shell `cat`. TODO 574 retains overflow-safe monotonic elapsed timing.
 
+Do not replace `process_ops` with the Rust SFFI timeout wrapper alone. It is not
+available in every hosted runtime provider, its Unix timeout child lacks group
+setup for orphan cleanup, and Windows lacks process-tree cleanup. TODO 573 must
+prove provider-complete argv/output/deadline/orphan behavior, then child-env
+isolation and atomic host-temp creation, before removing POSIX `env`/`mktemp`.
+
 Candidate admission does not make focused SSpec execution pure-Simple.
 Current `simple test` reaches `rt_cli_run_tests`; directly entering the
 pure-Simple orchestrator still reaches the Rust `rt_cli_run_file` interpreter.

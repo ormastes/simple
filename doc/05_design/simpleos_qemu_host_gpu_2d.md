@@ -319,6 +319,12 @@ process parity. All five split `_QemuRunner` modules now use shared
 I/O/process/time owners; TODO 574 separately retains overflow-safe monotonic
 elapsed timing.
 
+The existing Rust SFFI `rt_process_run_timeout` is not yet the replacement:
+core-C has no matching provider, the spawned timeout child does not establish the
+Unix process group that its cleanup tries to kill, and Windows has no Job
+Object tree cleanup. TODO 573 therefore sequences provider parity and process
+tree semantics before child-env/temp APIs and runner POSIX-dependency removal.
+
 This does not design around the test-runner blocker. TODO 572 separately wires
 the pure-Simple compiler interpreter's BDD result into
 `run_test_file_interpreter` and routes the CLI test arm away from both

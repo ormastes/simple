@@ -313,3 +313,7 @@ is present; current-source runner execution and the no-seed SSpec implementation
 remain pending, so this architecture change is not live compiler, QEMU, or GPU
 evidence. TODO 573 owns the shared cross-platform process/temp facade rather
 than widening this capsule with native-Windows or direct-runtime shortcuts.
+Provider order is fixed: first make timeout/capture available in every hosted
+runtime family, then prove Unix process-group and Windows Job Object cleanup,
+then add child-env overlay and atomic host-temp ownership, and only then remove
+the runner's POSIX `env`/`mktemp` use. A Rust-runtime-only wrapper is not parity.

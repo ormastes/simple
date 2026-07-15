@@ -93,6 +93,12 @@ owners, and `runner_targets` reads its baseline without a shell process. TODO
 573 retains only cross-platform child-env, unique-temp, and timeout ownership;
 TODO 574 retains monotonic elapsed safety.
 
+TODO 573 cannot close on a source wrapper. Its behavioral gate must preserve
+argv containing spaces/quotes, separate stdout/stderr, millisecond deadlines,
+timeout status, and orphan-grandchild cleanup through the canonical facade on
+each native provider. Windows additionally requires process-tree cleanup;
+child-env isolation and concurrent unique-temp creation need native evidence.
+
 Candidate admission also does not prove that `simple test` is pure-Simple.
 Current dispatch still reaches `rt_cli_run_tests`; the alternate pure-Simple
 orchestrator reaches the Rust `rt_cli_run_file` interpreter. TODO 572 separately

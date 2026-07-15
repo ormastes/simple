@@ -248,6 +248,12 @@ execution is available, so no live candidate is promoted by this manual. TODO
 ownership. TODO 574 retains the monotonic-elapsed/wall-clock split and
 runtime-provider safety audit.
 
+TODO 573 is intentionally postponed across unavailable native hosts. A future
+PASS requires provider-complete timeout/capture, argv with spaces and quotes,
+separate stdout/stderr, deadline status, Unix orphan cleanup, Windows process
+tree cleanup, child-env isolation, and concurrent unique host-temp creation.
+The current Rust SFFI timeout lacks group setup and core-C provider parity.
+
 Focused SSpec execution is a separate unresolved compiler contract. Current
 `simple test` dispatch uses `rt_cli_run_tests`, while the alternate
 pure-Simple orchestrator ultimately uses the Rust `rt_cli_run_file`

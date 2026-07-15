@@ -76,6 +76,10 @@ fixture bypasses, synthetic handles, or passing placeholders.
   `runner_targets` also replaces shell `cat` with `file_read`. TODO 573 stays
   open only for native child-scoped environment, platform-neutral temporary
   directories, and cross-platform safe timeout execution.
+- TODO 573 implementation order is provider-complete timeout/capture, Unix
+  process-group plus Windows Job Object cleanup, child-env overlay, atomic host
+  temp creation, then runner `env`/`mktemp` removal. The Rust SFFI timeout alone
+  is insufficient because core-C lacks it and its timeout child lacks group setup.
 - TODO 574 owns overflow-safe Windows monotonic conversion and a later split of
   elapsed timing from wall-clock artifact names; this slice preserves `_now_ms`.
 - The existing foreign-parser/Stage-4 recovery lane remains under
