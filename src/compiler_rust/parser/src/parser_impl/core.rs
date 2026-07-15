@@ -450,9 +450,6 @@ impl<'a> Parser<'a> {
             && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
         let is_capability_policy_decl = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "capability")
             && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
-        let is_danger_scope = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "danger")
-            && self.peek_is(&TokenKind::Colon);
-
         match &self.current.kind {
             // Route @ and legacy #[...] to attributed_item.
             TokenKind::At | TokenKind::Hash => self.parse_attributed_item_with_doc(doc_comment),
@@ -726,19 +723,6 @@ impl<'a> Parser<'a> {
                     // Just an identifier named "calc" - parse as expression
                     self.parse_expression_or_assignment()
                 }
-            }
-            TokenKind::Identifier { .. } if is_danger_scope => {
-                self.advance();
-                self.expect(&TokenKind::Colon)?;
-                let mut body = self.parse_block()?.statements;
-                if body.is_empty() {
-                    return Ok(Node::Pass(PassStmt {
-                        span: self.previous.span,
-                    }));
-                }
-                let first = body.remove(0);
-                self.pending_statements.splice(0..0, body);
-                Ok(first)
             }
             TokenKind::Context => {
                 // Check if this is a context statement (context expr:) or function call (context(...)) or BDD DSL (context "string":)
