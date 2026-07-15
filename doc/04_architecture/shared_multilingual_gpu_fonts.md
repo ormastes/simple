@@ -268,6 +268,15 @@ no font entry. If the companion is absent or rejected, CUDA font dispatch is
 unavailable and Engine2D replays the batch from quad zero through its CPU
 fallback policy.
 
+Production deployment has a separate trust boundary from toolchain evidence.
+Ignored `build/portable_compute_toolchains` output may prove emission and device
+execution, but Engine2D must never discover it automatically. A package owner
+must authenticate an immutable manifest, then supply the PTX bytes, expected
+SHA-256, and common program version to `install_cuda_font_artifact`. The current
+package verifier skips checksum validation and its builder emits a placeholder
+checksum, so it is not an admissible owner. Until a real package trust anchor
+exists, canonical CUDA construction remains font-companion-free.
+
 ## Rejected structures
 
 - A second renderer/emitter/cache hierarchy: duplicates current owners.

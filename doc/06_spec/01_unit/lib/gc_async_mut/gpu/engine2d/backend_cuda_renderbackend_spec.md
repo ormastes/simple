@@ -27,7 +27,7 @@ backend_cuda_renderbackend_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -348,16 +348,37 @@ the focused CUDA handoff system scenario.
 
 Checks that generic CUDA 2D PTX does not embed the generated font entry.
 
+#### pins an installed generated font companion by exact PTX identity
+
+Rejects empty, entry-less, suffix-only, and changed companion payloads while
+allowing an already-pinned identical generated PTX module.
+
+#### hands a checker-identified font artifact to Engine2D without invalid mutation
+
+Rejects empty payloads, wrong digests, wrong program versions, and wrong entry
+symbols before delegating one exact checker-identified artifact to the existing
+CUDA session installer.
+
 #### fails closed for invalid font batches and invalidates atlas generations
 
 Rejects an invalid batch before launch and proves font replacement can force
 the next atlas generation upload.
+
+#### rejects unsupported font programs before CUDA atlas mutation
+
+Rejects zero, negative, and unknown program versions while retaining the prior
+atlas generation and owner identity.
 
 #### requires the generated companion before CUDA font dispatch
 
 When CUDA initializes without a generated font companion, a valid batch fails
 before changing atlas generation or ownership. When CUDA is unavailable, the
 scenario records that state without claiming native evidence.
+
+#### rejects active CUDA session replacement without mutating atlas ownership
+
+Keeps an initialized CUDA backend bound to its existing session and atlas owner
+when a replacement session is offered.
 
 ## At a Glance
 
@@ -378,8 +399,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

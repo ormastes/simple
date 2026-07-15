@@ -36,6 +36,14 @@ The default CUDA 2D module has no font entry. Without the verified generated
 companion, normal Engine2D policy records CUDA failure and replays from quad
 zero on CPU; a CUDA-required evidence row fails rather than accepting fallback.
 
+This scenario authenticates retained checker provenance for conditional native
+evidence; it does not prove production packaging. The checker-recorded hash is
+payload consistency metadata, not an independent package trust anchor.
+Production completion additionally requires an immutable package-owned expected
+hash/program-version binding, checksum verification before installation, tamper
+rejection, and the same device-readback proof using authenticated package bytes.
+Normal Engine2D creation must not discover the files listed below automatically.
+
 ## Evidence artifacts
 
 - `build/portable_compute_toolchains/evidence.env`

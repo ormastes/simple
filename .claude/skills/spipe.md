@@ -676,6 +676,9 @@ observe a pass:
   module provides no font entry; all 15 value/pointer slots are ordered exactly,
   atlas generation is invalidated on font replacement, each accepted prefix is synchronized before
   CPU-mirror parity is updated, and final pixels come from `device_readback`.
+  Production loading additionally requires packaged or tracked Simple-generated
+  PTX bound to an immutable trusted hash and program version; ignored `build/`
+  output and caller-provided adjacent hashes are not trust anchors.
   The Metal adapter must prove compiler/runtime source equality, the optional
   native pipeline, exact 13-word/52-byte ABI, native-only typed routing (never
   `metal-on-vulkan`), completed prefix dispatch, and device-origin readback.

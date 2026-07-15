@@ -1331,3 +1331,20 @@ pixels, and performance evidence remain release-blocking.
   through `DrawIrComposition` and Engine2D and explicitly excludes direct
   `arch/*/wm_entry.spl` from production evidence, so no duplicate migration was
   added. Retained canonical QEMU pixels remain pending. STATUS: FAIL.
+
+- CUDA trust-boundary documentation review (2026-07-15): three parallel
+  read-only audits and primary review confirmed that all canonical Engine2D
+  construction converges on `create_requested_backend`, but the generated PTX
+  and adjacent evidence are missing ignored build outputs whose co-produced
+  hash is not an independent trust anchor. The tracked embedded Vulkan artifact
+  is the reusable production pattern; no generic trusted artifact loader exists.
+  The current package verifier skips checksum comparison and its builder emits
+  `checksum_placeholder`, so no automatic CUDA install was added. Architecture,
+  design, guide, system manual, test plan, tracking bug, Codex SPipe skills, and
+  the Claude mirror now require packaged or tracked Simple-generated PTX bound
+  to an immutable hash/program version, forbid production loading from ignored
+  build output, and keep conditional checker evidence distinct from deployment.
+  The stale CUDA backend manual now lists all 18 source scenarios. No Simple
+  runtime, docgen, native GPU, QEMU, or performance command ran after the
+  three-cycle cap; production CUDA packaging and device evidence remain pending.
+  STATUS: FAIL.

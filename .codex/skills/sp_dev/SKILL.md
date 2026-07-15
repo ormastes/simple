@@ -101,6 +101,9 @@ matching guide/process documentation in the same lane. For GPU, Engine2D, Simple
 Web, Electron/Tauri, QEMU, or backend readback evidence, update the relevant
 `doc/03_plan`, `doc/07_guide`, and `doc/09_report` references so future agents
 can find the canonical wrapper instead of repeating stale commands.
+Production CUDA font loading may use only Simple-generated PTX bound to an
+immutable package/tracked manifest hash and program version. Ignored `build/`
+output and a caller-provided adjacent hash are evidence, not trust anchors.
 For HTML-backed GUI modernization, pair screenshot or bitmap evidence with
 structured Electron interaction evidence. A pass needs visible controls to
 receive focus, keyboard/input, pointer, and click events, or the wrapper must

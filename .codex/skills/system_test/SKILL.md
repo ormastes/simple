@@ -174,6 +174,9 @@ describe "<Feature Name>":
   emitter provenance. CUDA font execution must use the separately installed,
   checker-authenticated generated companion; the default CUDA 2D module must
   not provide the font entry.
+  Production CUDA loading additionally requires packaged or tracked generated
+  PTX bound to an immutable trusted hash and program version; ignored `build/`
+  output and caller-provided adjacent hashes cannot satisfy that trust gate.
   When a producer emits selected shaping, assert that the handle-free
   `DrawIrGlyphRunPayload` survives SDN round-trip with identical glyph IDs,
   positions, and logical clusters. The Engine2D executor must reject a missing

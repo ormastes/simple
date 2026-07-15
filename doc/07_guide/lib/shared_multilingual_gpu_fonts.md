@@ -357,6 +357,14 @@ Normal Engine2D construction does not auto-load ignored `build/` output. CUDA
 font production deployment still needs a packaged PTX plus an immutable trusted
 manifest/hash; once that exists, the canonical `create_requested_backend`
 factory can call the existing installer after CUDA initialization.
+The current Simple package path is not that trust anchor: `PackageVerify` warns
+that checksum verification is skipped, and the package builder still emits
+`checksum_placeholder`. Treat checker artifacts as retained evidence only. Do
+not copy them into a package, pass their adjacent self-reported hash as trust,
+or configure a production process to load them directly. Production admission
+requires a package-owned expected hash and program version, verification before
+Engine2D construction, tamper rejection, and device-origin readback from the
+authenticated bytes.
 Metal compiles the exact common MSL helper as an optional separate pipeline,
 uses the fixed 13-word/52-byte parameter block, full-uploads changed atlas
 generations, and dispatches completed 64-thread groups per quad. Only native
