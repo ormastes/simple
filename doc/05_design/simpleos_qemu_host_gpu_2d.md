@@ -53,6 +53,18 @@ admission and cached promotion use this owner.
 5. Any unavailable service/backend or invalid receipt returns a stable reason
    and selects the existing software/CPU path without preventing boot.
 
+The RV64 production input loop has no new runtime need. After module
+initialization it calls the existing `serial_init`, polls `serial_read_byte`,
+and continues immediately when no byte is available. The shared
+`uart_char_to_action`/`WmAction` mapping mutates a local compositor copy; only a
+changed action commits the copy, calls `DesktopShell.render_baremetal_frame`
+through the existing `Engine2dWmFrameExecutor`, and then requires
+`riscv64_display_present`. WFI is deliberately absent because the 16550 UART
+IER is zero. Root/higher review caught that deadlock and the requirement that
+serial initialization follow module initialization. The two exact folded
+manual steps are `Handle non-blocking UART window actions` and
+`Present each changed frame through VirtIO-GPU`.
+
 `FramebufferDriver.present_argb32_from_mmio` is the bounded production
 presentation primitive. It rejects invalid or
 unaligned source addresses, mismatched dimensions/byte counts, non-ARGB32 or

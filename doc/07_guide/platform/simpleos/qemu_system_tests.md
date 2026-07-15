@@ -238,6 +238,15 @@ stride, and checked present operations. The entry constructs
 VirtIO-GPU transfer plus flush. TODO 567 retains the pure-Simple DMA/queue
 transport migration, so leaves do not acquire direct `rt_*` paths.
 
+The source-ready interactive loop reuses `serial_init`/`serial_read_byte` and
+the shared `uart_char_to_action`/`WmAction` mapping. It initializes serial only
+after module initialization, polls without blocking, and for each changed
+action rerenders through `DesktopShell`/`Engine2dWmFrameExecutor` before a
+checked VirtIO-GPU present. It intentionally does not use WFI: the 16550 UART
+IER is zero, so serial input cannot wake a sleeping CPU. The folded manual steps
+are `Handle non-blocking UART window actions` and
+`Present each changed frame through VirtIO-GPU`.
+
 The wrapper now uses evidence contract v2. It requires ordered scanout,
 first-frame, present, and desktop-ready markers with the same positive scene
 revision, validates the dynamic PPM dimensions and stride, and accepts at least
@@ -246,7 +255,7 @@ four canonical desktop palette witnesses. Run its parser without QEMU via
 The historical 2026-07-02 fixed-anchor report remains scanout-only evidence and
 cannot pass contract v2. Until TODO 548 produces and boots a fresh pure-Simple
 ELF, the canonical RV64 desktop is source-ready only; no live QEMU PASS is
-claimed.
+claimed. TODO 565 and TODO 548 remain open for live proof.
 
 ## Host-GPU rendering and ProcessingIR
 

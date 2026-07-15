@@ -17,7 +17,9 @@ use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.engine2d_display.{create_fb_engine_sized}
 use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
 use os.desktop.shell.{DesktopShell}
-use os.kernel.boot.riscv_noalloc_handoff.{riscv_noalloc_boot_idle}
+use os.kernel.arch.riscv64.console.{serial_init, serial_read_byte}
+use os.gui.input_event.{WmAction}
+use os.gui.shortcut.{uart_char_to_action}
 use os.kernel.ipc.host_gpu_ivshmem_map.{
     map_qemu_host_gpu_ivshmem_bar2,
     qemu_host_gpu_ivshmem_window_base
@@ -40,6 +42,7 @@ fn boot_main(hart_id: u64, dtb_addr: u64):
         serial_println("[desktop-gui-riscv64] fatal reason=display-memory")
         return
     __simple_call_module_inits()
+    serial_init()
     if not riscv64_display_initialize():
         serial_println("[desktop-gui-riscv64] fatal reason=scanout-init")
         return
@@ -112,6 +115,59 @@ fn boot_main(hart_id: u64, dtb_addr: u64):
     serial_println("[backend-evidence] present=virtio-gpu-transfer+flush source=shared-wm-draw-ir-engine2d")
     serial_println("TEST PASSED")
     serial_println("SIMPLEOS_RISCV_DISPLAY_SMOKE_READY")
+    serial_println("[desktop-gui-riscv64] controls Tab=cycle 1/2/3=focus m=minimize w=close r=restore q=quit")
 
-    # ponytail: architecture-owned WFI hold until the RV input adapter lands.
-    riscv_noalloc_boot_idle()
+    var running = true
+    while running:
+        val input_byte = serial_read_byte()
+        if input_byte < 0:
+            continue
+
+        val action = uart_char_to_action(input_byte.to_u64())
+        var input_compositor = shell.compositor
+        var changed = false
+
+        match action:
+            case WmAction.CycleFocus:
+                input_compositor.cycle_focus()
+                changed = true
+            case WmAction.FocusWindow(idx: surface_index):
+                if surface_index < input_compositor.surfaces.len().to_u64():
+                    input_compositor.focus_window(
+                        input_compositor.surfaces[surface_index.to_i64()].id.to_i32()
+                    )
+                    changed = true
+            case WmAction.Quit:
+                running = false
+            case WmAction.Minimize:
+                val focused = input_compositor.focused_idx
+                if focused >= 0 and focused < input_compositor.surfaces.len():
+                    input_compositor.minimize_window(input_compositor.surfaces[focused].id.to_u64())
+                    changed = true
+            case WmAction.Close:
+                val focused = input_compositor.focused_idx
+                if focused >= 0 and focused < input_compositor.surfaces.len():
+                    input_compositor.destroy_window(input_compositor.surfaces[focused].id)
+                    changed = true
+            case WmAction.Restore:
+                var surface_index = 0
+                while surface_index < input_compositor.surfaces.len():
+                    input_compositor.restore_window(input_compositor.surfaces[surface_index].id.to_u64())
+                    surface_index = surface_index + 1
+                changed = true
+            case WmAction.ToggleTheme:
+                pass
+            case WmAction.None:
+                pass
+
+        if changed:
+            shell.compositor = input_compositor
+            val rendered_revision = shell.render_baremetal_frame(executor)
+            if rendered_revision <= 0:
+                serial_println("[desktop-gui-riscv64] fatal reason=changed-frame")
+                running = false
+            elif not riscv64_display_present():
+                serial_println("[desktop-gui-riscv64] fatal reason=changed-present")
+                running = false
+
+    serial_println("[desktop-gui-riscv64] shutdown")

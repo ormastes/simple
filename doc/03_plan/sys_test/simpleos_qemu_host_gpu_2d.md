@@ -27,6 +27,7 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 | exact AArch64 production argv with RAMFB and the same daemon/shared-memory/RSS-metrics accumulator lifecycle | REQ-006,011,012; NFR-005,006,008,009 |
 | correlated host-GPU ready -> presented -> first-frame -> desktop-ready production evidence | REQ-003,005,006,009,010,011,012; NFR-001,004,007,008,009 |
 | RV64 dynamic scanout -> canonical Shared WM/Draw IR/Engine2D frame -> checked VirtIO present, with contract-v2 revision and palette evidence | REQ-002,003,005,006,009,010,011,012; NFR-007,008,009 |
+| RV64 nonblocking UART actions -> changed canonical frame -> checked VirtIO present, without WFI while UART IER is zero | REQ-002,003,005,009,010 |
 | native Metal nonzero FillU32, terminal command status, pointer readback, identity, and CPU parity | REQ-004,007,008; NFR-002,004 |
 | honest cross-host backend classification | REQ-008,009 |
 | malformed and stale input rejection | REQ-010; NFR-007 |
@@ -132,8 +133,15 @@ allocation, renders compositor-owned surfaces through the same canonical
 executor, and presents only after the first frame completes. Evidence contract
 v2 correlates one positive revision across ordered render/present/ready markers
 and validates dynamic PPM dimensions plus canonical palette witnesses. The
-historical fixed-anchor report cannot pass. TODO 548 still blocks the fresh
-pure-Simple ELF/QEMU proof, so this row remains source-only.
+existing `serial_init`/`serial_read_byte` owner is initialized after module
+initialization and polled without blocking; shared `uart_char_to_action` and
+`WmAction` mutate compositor state, and every changed action must rerender via
+`DesktopShell`/`Engine2dWmFrameExecutor` before checked
+`riscv64_display_present`. WFI is forbidden in this loop because the 16550 UART
+IER is zero and could never wake it. Root/higher review caught both the WFI
+deadlock and module-init ordering. The historical fixed-anchor report cannot
+pass. TODO 565 and TODO 548 still block fresh pure-Simple ELF/QEMU proof, and
+TODO 567 retains pure-Simple DMA ownership, so this row remains source-only.
 
 ## Manual Step
 
@@ -144,6 +152,8 @@ Prove the AArch64 production desktop frame
 Initialize the dynamic RISC-V VirtIO scanout
 Render the canonical Shared WM scene through Draw IR and Engine2D
 Present the completed framebuffer through VirtIO-GPU
+Handle non-blocking UART window actions
+Present each changed frame through VirtIO-GPU
 Report source-only status until a fresh pure-Simple ELF boots
 ```
 

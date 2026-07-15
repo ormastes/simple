@@ -55,9 +55,15 @@ fixture bypasses, synthetic handles, or passing placeholders.
   but real process ownership and
   fresh compile/QEMU evidence remain open under TODO 565/TODO 548. RISC-V now
   uses an architecture display facade, dynamic VirtIO mode discovery, and a
-  contract-v2 canonical-desktop gate; TODO 567 retains the pure-Simple DMA
-  transport migration rather than treating the historical fixed-anchor probe
-  as production evidence.
+  contract-v2 canonical-desktop gate. Its source-ready UART loop reuses the
+  existing nonblocking 16550 owner and shared `WmAction` mapper, rerenders only
+  changed compositor state through `Engine2dWmFrameExecutor`, and requires a
+  checked VirtIO-GPU present for each changed frame. WFI is intentionally
+  excluded because UART interrupts are disabled (`IER=0`); root/higher review
+  also placed `serial_init` after module initialization. TODO 567 retains the
+  pure-Simple DMA transport migration rather than treating the historical
+  fixed-anchor probe as production evidence. TODO 565 and TODO 548 remain open
+  for compiled/live proof; this source contract is not a QEMU or GPU PASS.
 - NFR-006 remains open under TODO 566: the source-ready probe and production
   owners now retain one boot-monotonic device-init-to-decision interval, ordered
   Metal/DirectX/Vulkan attempts, and final selection/fallback; daemon HELLO time

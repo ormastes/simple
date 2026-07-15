@@ -10,8 +10,10 @@ cross-ISA Draw IR and CUDA ProcessingIR receipts remain pending. Native Metal
 raw rendering, Draw IR, and dedicated ProcessingIR FillU32 execution are implemented, but their
 prepared-macOS receipts remain unavailable. Native Windows receipts remain
 pending while TODO 548 blocks a fresh Simple/QEMU run. The RV64 canonical
-desktop and contract-v2 evidence parser are source-ready, but no fresh RV64
-live PASS is claimed. ProcessingIR CPU/device timing and preference
+desktop, nonblocking UART action loop, checked changed-frame present contract,
+and contract-v2 evidence parser are source-ready, but no fresh RV64 live PASS
+is claimed. WFI is excluded because UART IER is zero, and serial initialization
+follows module initialization. ProcessingIR CPU/device timing and preference
 classification are source-ready; TODO 570 remains open until prepared native
 rows provide fresh correlated receipts.
 The exact 1280x720 Draw IR fixture and full pixel oracle are source-ready;
@@ -92,22 +94,29 @@ the CPU/software fallback and report a stable reason.
    compositor-owned surfaces, `DesktopShell`, and `Engine2dWmFrameExecutor`.
 11. **Present the completed framebuffer through VirtIO-GPU.** Transfer and flush
    only after the correlated canonical frame is complete.
-12. **Report source-only status until a fresh pure-Simple ELF boots.** Contract
+12. **Handle non-blocking UART window actions.** Initialize the existing 16550
+    owner after module initialization, poll `serial_read_byte`, continue when
+    no byte is available, and map input through `uart_char_to_action` and
+    `WmAction`. Do not use WFI while UART IER is zero.
+13. **Present each changed frame through VirtIO-GPU.** Commit only changed
+    compositor state, rerender through `DesktopShell` and
+    `Engine2dWmFrameExecutor`, and require checked `riscv64_display_present`.
+14. **Report source-only status until a fresh pure-Simple ELF boots.** Contract
     v2 rejects the historical fixed-resolution/fixed-anchor report; TODO 548
     remains the execution blocker.
-13. **Dispatch the raw CLEAR and solid RECT fixture through strict Engine2D selection.**
+15. **Dispatch the raw CLEAR and solid RECT fixture through strict Engine2D selection.**
    Route raw QEMU framebuffer mutations through the exact native Metal,
    DirectX, or Vulkan backend selected by HELLO and require checked completion evidence.
-14. **Reject unchecked or fallback raw rendering before device-backed receipt.**
+16. **Reject unchecked or fallback raw rendering before device-backed receipt.**
    Known failure invalidates device provenance; unknown completion poisons the
    frame rather than replaying it.
-15. **Select host presentation or the existing local production renderer.**
+17. **Select host presentation or the existing local production renderer.**
    The x86 desktop maps the full ivshmem BAR into its active VMM, derives a
    fresh generation only from an idle slot, submits the canonical WM Draw IR,
    validates the correlated device receipt, and presents checksum-checked MMIO
    readback. Any failure falls through to local Engine2D. The current 4K entry
    honestly selects local rendering until TODO 552 expands the bounded wire.
-16. **Run the ProcessingIR parity fixture.** Correlate the host completion and
+18. **Run the ProcessingIR parity fixture.** Correlate the host completion and
    require exact output-buffer parity with the CPU oracle. Vulkan uses the
    canonical SFFI owner's fenced tri-state dispatch: only proven status `1`
    may read back, while unknown completion retains dependencies and the device.
@@ -115,24 +124,24 @@ the CPU/software fallback and report a stable reason.
    `--processing-backend=vulkan` to the daemon, requires negotiated mask `1`,
    and retains the daemon selector receipt; the default lane remains
    CUDA-preferred with Vulkan fallback.
-17. **Classify device processing preference.** Time the existing FillU32(256,
+19. **Classify device processing preference.** Time the existing FillU32(256,
    7) CPU oracle and device executor independently after the HELLO probe. A
    valid row requires positive correlated microsecond timings and reports
    `preferred` only when CPU time is at least 1.5 times device time; otherwise
    it reports `available-not-preferred`. Missing, stale, duplicate, zero, or
    dishonest evidence fails the row.
-18. **Keep native Metal ProcessingIR separate from Engine2D rendering.** Probe
+20. **Keep native Metal ProcessingIR separate from Engine2D rendering.** Probe
    and execute the dedicated MSL FillU32 owner, require checked command
    completion and pointer readback, and never relabel a Metal render clear as
    processing evidence.
-19. **Report device-backed host acceleration evidence.** Publish one row with
+21. **Report device-backed host acceleration evidence.** Publish one row with
    host, guest ISA, QEMU/device arguments, selected QEMU accelerator, protocol,
    backend, device, IDs,
    timing, concurrently sampled daemon/QEMU/combined RSS maxima, checksums,
    status, and reason. For every non-HELLO request, both
    the guest and daemon require a positive numeric run hash and frame ID; a
    zero, negative, stale, or mismatched value fails before PASS admission.
-20. **Validate cached rows before aggregation.** Accept a cached report only
+22. **Validate cached rows before aggregation.** Accept a cached report only
    when all nine host/ISA rows are present and every passing row links to a
    serial log containing the exact render, Draw IR, 1280x720 fixture, and ProcessingIR receipts.
    Each passing row also requires a unique QEMU version, a reversible
