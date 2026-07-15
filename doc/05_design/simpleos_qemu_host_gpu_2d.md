@@ -278,22 +278,37 @@ awaits fresh processing preference evidence.
 
 ### Compiler admission prerequisite
 
-The wrapper's implemented `candidate_frontend_smoke(candidate)` runs in a
-private subshell with one temporary directory/cache/output/build log and EXIT
-cleanup. It pins `SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`, and
-`SIMPLE_FRONTEND_DELEGATE` to `candidate`; sets
+Wrapper `candidate_frontend_smoke(candidate)` runs in a private subshell with
+EXIT cleanup. Runner `_candidate_frontend_smoke(candidate)` uses bounded
+`mktemp` scratch, one cache/output/build log, required recursive cleanup, and
+`_run_candidate_admission_pinned`. Both pin `SIMPLE_BINARY`, `SIMPLE_BIN`,
+`SIMPLE_BOOTSTRAP_DRIVER`, and `SIMPLE_FRONTEND_DELEGATE` to `candidate`; set
 `SIMPLE_FRONTEND_DELEGATED=1`, `SIMPLE_NO_STUB_FALLBACK=1`, and
 `SIMPLE_LIB=$ROOT_DIR/src`; and neutralizes inherited execution/worker/bootstrap
 modes with `SIMPLE_EXECUTION_MODE=''`, `SIMPLE_NATIVE_BUILD_FORCE_WORKER=0`,
 and `SIMPLE_BOOTSTRAP=0`. It gives the checked-in `p2_add.spl` fixture a
 60-second Cranelift/core-C-bootstrap/entry-closure/one-binary build deadline.
 The produced binary has a 5-second deadline and must exit zero with stdout
-exactly `5`. The invalid-mode probe receives the same self-pins.
+exactly `5`. The runner invalid-mode probe also uses
+`_run_candidate_admission_pinned`.
+
+For the real guest build, `build_os_with_backend` retains the architecture and
+target values installed by `_apply_build_env`, then calls
+`_run_candidate_pinned`. That helper overlays the accepted compiler's identity
+and no-stub pins only, so the authoritative native-build cannot re-enter a
+sibling or seed delegate after admission.
+The shared CLI identity check resolves an override with existing
+`_cli_resolve_symlink` before comparing it to the canonical current executable.
+That keeps authoritative worker delegation on an admitted symlink candidate
+such as `bin/simple`; `test/01_unit/app/io/cli_driver_identity_spec.spl`
+records the source contract with no new `rt_*` alias.
 
 Do not reuse the former `check startup_simple.spl` result: its unconditional
 repository-hygiene tail and Git subguards conflate frontend behavior with
 global policy and are invalid in a jj-only workspace without `.git`.
-`_QemuRunner` still needs the same replacement. The wrapper self-test passes.
+The wrapper self-test passes and `_QemuRunner` source parity is present. A
+current-source pure-Simple runner execution is still required; TODO 573 owns
+native-Windows/process/temp facade parity and remaining direct-runtime cleanup.
 
 This does not design around the test-runner blocker. TODO 572 separately wires
 the pure-Simple compiler interpreter's BDD result into

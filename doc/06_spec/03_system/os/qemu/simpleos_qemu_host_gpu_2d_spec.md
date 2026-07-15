@@ -35,13 +35,24 @@ the CPU/software fallback and report a stable reason.
 ## Primary flow
 
 1. **Reject an unusable compiler candidate.** Before any guest build, run the
-   wrapper's implemented private `candidate_frontend_smoke`: self-pin
+   wrapper's private `candidate_frontend_smoke` or the runner's matching
+   `_candidate_frontend_smoke`: self-pin
    `SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`, and
    `SIMPLE_FRONTEND_DELEGATE` to the candidate; neutralize inherited
    execution/worker/bootstrap modes; disable stub fallback; and native-build the checked-in
    `p2_add.spl` fixture with Cranelift/core-C-bootstrap/entry-closure/one-binary
    within 60 seconds, run it within 5 seconds, and require status zero plus
-   stdout exactly `5`. Use private cache/output/log state and EXIT cleanup.
+   stdout exactly `5`. Use private cache/output/log state; wrapper EXIT cleanup
+   and runner recursive cleanup are both fail-closed. Runner `p2_add` admission
+   and invalid-mode probing use `_run_candidate_admission_pinned`.
+   `build_os_with_backend` then applies target settings through
+   `_apply_build_env` and runs the authoritative guest native-build through
+   `_run_candidate_pinned`, so it cannot re-enter a sibling or seed delegate.
+   Shared CLI `_cli_is_current_exe` resolves a candidate override through
+   existing `_cli_resolve_symlink`, making authoritative worker delegation safe
+   for symlinks such as `bin/simple`. The focused
+   `test/01_unit/app/io/cli_driver_identity_spec.spl` source contract adds no
+   `rt_*` alias.
    The old `check startup_simple.spl` probe is invalid because it
    unconditionally appends global repository hygiene and Git subguards that do
    not describe a jj-only workspace without `.git`.
@@ -219,8 +230,12 @@ and `SIMPLE_FRONTEND_DELEGATE` to the candidate; sets
 `SIMPLE_EXECUTION_MODE=''`, `SIMPLE_NATIVE_BUILD_FORCE_WORKER=0`, and
 `SIMPLE_BOOTSTRAP=0`. It then applies the 60-second exact build and 5-second exact run
 contract above. The deliberate invalid-mode command uses the same pins.
-Explicit overrides do not bypass admission. The wrapper self-test passes;
-`_QemuRunner` parity remains pending, so no live candidate is promoted by this manual.
+Explicit overrides do not bypass admission. The wrapper self-test passes and
+`_QemuRunner` source parity uses `_candidate_frontend_smoke` plus
+`_run_candidate_admission_pinned`; the real guest build separately uses
+`_run_candidate_pinned` after `_apply_build_env`. No current-source runner
+execution is available, so no live candidate is promoted by this manual. TODO
+573 retains the native-Windows and shared process/temp facade gap.
 
 Focused SSpec execution is a separate unresolved compiler contract. Current
 `simple test` dispatch uses `rt_cli_run_tests`, while the alternate

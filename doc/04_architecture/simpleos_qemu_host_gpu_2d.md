@@ -265,8 +265,9 @@ of a valid compiler fails the build before spawning any architecture worker.
 
 ## Compiler Admission and SSpec Ownership (2026-07-15)
 
-Compiler admission is a tooling boundary, not a GPU receipt. The wrapper's
-implemented `candidate_frontend_smoke` owns one disposable cache/output/log;
+Compiler admission is a tooling boundary, not a GPU receipt. Wrapper
+`candidate_frontend_smoke` and runner `_candidate_frontend_smoke` each own one
+disposable cache/output/log;
 self-pins `SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`, and
 `SIMPLE_FRONTEND_DELEGATE` to the candidate; and neutralizes inherited
 execution/worker/bootstrap modes with `SIMPLE_EXECUTION_MODE=''`,
@@ -274,9 +275,23 @@ execution/worker/bootstrap modes with `SIMPLE_EXECUTION_MODE=''`,
 delegation marked and stub fallback disabled,
 it must native-build the repository's `p2_add.spl` fixture using
 Cranelift/core-C-bootstrap/entry-closure/one-binary within 60 seconds, run the
-result within 5 seconds, and observe exactly `5`. Cleanup is trap-owned. The
-same self-pins apply to the invalid-mode probe so a sibling seed cannot answer
-for the candidate.
+result within 5 seconds, and observe exactly `5`. Wrapper cleanup is trap-owned;
+runner admission requires bounded scratch cleanup. Runner
+`_run_candidate_admission_pinned` owns both this build and the invalid-mode
+probe, so a sibling seed cannot answer for the candidate.
+
+The authoritative build has a distinct boundary: `build_os_with_backend`
+first applies architecture and target settings through `_apply_build_env`, then
+calls `_run_candidate_pinned` for the guest native-build. That helper overlays
+the candidate identity and no-stub pins while inheriting those target settings.
+Consequently, the real guest build cannot re-enter a sibling or seed delegate
+after admission.
+For worker delegation, shared CLI `_cli_is_current_exe` resolves candidate
+overrides through existing `_cli_resolve_symlink` before canonical identity
+comparison. Symlink candidates such as `bin/simple` therefore remain on the
+admitted executable instead of being mistaken for a sibling; the focused
+`test/01_unit/app/io/cli_driver_identity_spec.spl` contract adds no `rt_*`
+alias.
 
 The earlier whole-tree `check startup_simple.spl` path crosses the wrong trust
 boundary: it always runs repository hygiene and Git-specific subguards, so an
@@ -288,6 +303,8 @@ arm reaches `rt_cli_run_tests`, and the pure-Simple orchestrator still reaches
 the Rust `rt_cli_run_file` interpreter. TODO 572 owns a result-bearing
 pure-Simple interpreter contract and CLI/runner routing. The host-GPU capsule
 must consume its eventual verdict; it must not add a local runner, runtime
-alias, or seed fallback. The wrapper self-test passes; `_QemuRunner` parity and
-the no-seed SSpec implementation remain pending, so this architecture change
-is not live compiler, QEMU, or GPU evidence.
+alias, or seed fallback. The wrapper self-test passes and runner source parity
+is present; current-source runner execution and the no-seed SSpec implementation
+remain pending, so this architecture change is not live compiler, QEMU, or GPU
+evidence. TODO 573 owns the shared cross-platform process/temp facade rather
+than widening this capsule with native-Windows or direct-runtime shortcuts.

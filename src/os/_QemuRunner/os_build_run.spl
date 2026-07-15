@@ -51,6 +51,10 @@ use os.toolchain_vfs_probe_contract.{
 use os.ssh_qemu_contract.{run_x64_ssh_probe}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
 use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_sync_mut.io.env_ops.{env_get, cwd}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_write}
+use std.nogc_sync_mut.ffi.io.{path_absolute}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
@@ -228,11 +232,9 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val old_log_mode = rt_env_get("SIMPLE_OS_LOG_MODE") ?? ""
     val old_path = rt_env_get("PATH") ?? ""
     val old_build_marker = rt_env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? ""
-    val old_simple_binary = rt_env_get("SIMPLE_BINARY") ?? ""
     if not _prepare_build_output(target, build_marker):
         _cleanup_generated_build_helpers(build_marker)
         _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
-        rt_env_set("SIMPLE_BINARY", old_simple_binary)
         print "[build][{arch_label}] phase=prepare FAILED output={target.output}"
         return false
 
@@ -241,7 +243,6 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
         print "[build][{arch_label}] phase=tooling FAILED: llvm-objcopy not found for {target.entry}"
         _cleanup_generated_build_helpers(build_marker)
         _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
-        rt_env_set("SIMPLE_BINARY", old_simple_binary)
         return false
 
     val env_prefix = _build_env_prefix(target, objcopy_prefix)
@@ -249,15 +250,13 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
         print "[build][{arch_label}] phase=env FAILED could not export build environment"
         _cleanup_generated_build_helpers(build_marker)
         _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
-        rt_env_set("SIMPLE_BINARY", old_simple_binary)
         return false
     val started_ms = _now_ms()
-    rt_env_set("SIMPLE_BINARY", simple_bin)
     print "[build][{arch_label}] phase=spawn timeout_ms={timeout_ms}"
     if env_prefix != "":
         print "[build][{arch_label}] env: {env_prefix}"
     print "[build][{arch_label}] cmd: {simple_bin} {args.join(" ")}"
-    val (stdout, stderr, exit_code) = process_run_timeout(simple_bin, args, timeout_ms)
+    val (stdout, stderr, exit_code) = _run_candidate_pinned(simple_bin, args, timeout_ms)
     val elapsed_ms = _now_ms() - started_ms
     if exit_code != 0:
         _write_bootstrap_result(target, false, false, backend_name)
@@ -270,7 +269,6 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
             print "[build][{arch_label}] stderr tail:\n{_tail_lines(stderr, 40)}"
         _cleanup_generated_build_helpers(build_marker)
         _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
-        rt_env_set("SIMPLE_BINARY", old_simple_binary)
         return false
     print "[build][{arch_label}] phase=native-build OK elapsed_ms={elapsed_ms}"
     if not rt_file_exists(target.output):
@@ -278,7 +276,6 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
         print "[build][{arch_label}] phase=artifact FAILED output missing: {target.output}"
         _cleanup_generated_build_helpers(build_marker)
         _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
-        rt_env_set("SIMPLE_BINARY", old_simple_binary)
         return false
     if build_marker != "":
         print "[build][{arch_label}] phase=artifact OK marker={build_marker}"
@@ -290,7 +287,6 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     if build_marker == "":
         _write_native_build_stamp(target, stamp_content)
     _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
-    rt_env_set("SIMPLE_BINARY", old_simple_binary)
     true
 
 fn _native_build_stamp_path(target: OsTarget) -> text:
@@ -357,6 +353,82 @@ fn _objcopy_path_prefix() -> text:
         return "/usr/lib/llvm-17/bin"
     ""
 
+fn _candidate_identity_env_args(candidate: text) -> [text]:
+    var pinned_candidate = path_absolute(candidate)
+    if pinned_candidate == "":
+        pinned_candidate = candidate
+    [
+        "SIMPLE_BINARY={pinned_candidate}",
+        "SIMPLE_BIN={pinned_candidate}",
+        "SIMPLE_BOOTSTRAP_DRIVER={pinned_candidate}",
+        "SIMPLE_FRONTEND_DELEGATE={pinned_candidate}",
+        "SIMPLE_FRONTEND_DELEGATED=1",
+        "SIMPLE_NO_STUB_FALLBACK=1",
+    ]
+
+fn _candidate_admission_env_args(candidate: text) -> [text]:
+    var env_args = _candidate_identity_env_args(candidate)
+    env_args.push("SIMPLE_EXECUTION_MODE=")
+    env_args.push("SIMPLE_NATIVE_BUILD_FORCE_WORKER=0")
+    env_args.push("SIMPLE_BOOTSTRAP=0")
+    env_args.push("SIMPLE_LIB={cwd()}/src")
+    env_args
+
+fn _run_candidate_with_env(candidate: text, args: [text], timeout_ms: i64, env_args: [text]) -> (text, text, i32):
+    var command_args = env_args
+    command_args.push(candidate)
+    for arg in args:
+        command_args.push(arg)
+    process_run_timeout("env", command_args, timeout_ms)
+
+fn _run_candidate_pinned(candidate: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    _run_candidate_with_env(candidate, args, timeout_ms, _candidate_identity_env_args(candidate))
+
+fn _run_candidate_admission_pinned(candidate: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    _run_candidate_with_env(candidate, args, timeout_ms, _candidate_admission_env_args(candidate))
+
+fn _candidate_exact_five(stdout: text) -> bool:
+    stdout == "5" or stdout == "5\n" or stdout == "5\r\n"
+
+fn _candidate_frontend_smoke(candidate: text) -> bool:
+    var temp_root = env_get("TMPDIR") ?? ""
+    if temp_root == "":
+        temp_root = "/tmp"
+    while temp_root.len() > 1 and temp_root.ends_with("/"):
+        temp_root = temp_root[0:temp_root.len() - 1]
+    val probe_prefix = "{temp_root}/simpleos-qemu-admission."
+    val (probe_dir_stdout, _, probe_dir_exit) = process_run_timeout(
+        "mktemp", ["-d", probe_prefix + "XXXXXX"], 5000
+    )
+    if probe_dir_exit != 0:
+        return false
+    val probe_dir = probe_dir_stdout.trim()
+    if not probe_dir.starts_with(probe_prefix) or not file_exists(probe_dir):
+        return false
+
+    val probe_output = probe_dir + "/p2_add"
+    val probe_log = probe_dir + "/build.log"
+    val build_args = [
+        "native-build",
+        "--backend", "cranelift",
+        "--runtime-bundle", "core-c-bootstrap",
+        "--entry-closure",
+        "--entry", "scripts/check/cert/redeploy_gate/fixtures/p2_add.spl",
+        "--cache-dir", probe_dir + "/cache",
+        "--mode", "one-binary",
+        "--output", probe_output,
+    ]
+    val (build_stdout, build_stderr, build_exit) = _run_candidate_admission_pinned(
+        candidate, build_args, 60000
+    )
+    val log_ok = file_write(probe_log, build_stdout + "\n" + build_stderr)
+    var accepted = false
+    if build_exit == 0 and log_ok and file_exists(probe_output):
+        val (run_stdout, _, run_exit) = process_run_timeout(probe_output, [], 5000)
+        accepted = run_exit == 0 and _candidate_exact_five(run_stdout)
+    val cleanup_ok = dir_remove_all(probe_dir) == 0
+    accepted and cleanup_ok
+
 fn _simple_binary_is_valid(candidate: text) -> bool:
     """Validate a candidate with version and bounded frontend checks.
 
@@ -365,14 +437,10 @@ fn _simple_binary_is_valid(candidate: text) -> bool:
     if not rt_file_exists(candidate):
         return false
     val (stdout, stderr, exit_code) = process_run_timeout(candidate, ["--version"], 5000)
-    if exit_code != 0 or stdout == "" or stderr.contains("bootstrap seed only"):
+    val version = stdout + "\n" + stderr
+    if exit_code != 0 or version.trim() == "" or version.contains("bootstrap seed only"):
         return false
-    val (_, _, frontend_exit_code) = process_run_timeout(
-        candidate,
-        ["check", "test/05_perf/io_parity/startup_simple.spl"],
-        10000
-    )
-    frontend_exit_code == 0
+    _candidate_frontend_smoke(candidate)
 
 fn _simple_binary_has_native_build_contract(candidate: text, backend_name: text) -> bool:
     # This is a bounded CLI liveness/command-surface probe. The real build is
@@ -385,7 +453,7 @@ fn _simple_binary_has_native_build_contract(candidate: text, backend_name: text)
         "--entry", "src/app/cli/main.spl",
         "--mode", "definitely-invalid-mode"
     ]
-    val (stdout, stderr, exit_code) = process_run_timeout(candidate, probe_args, 5000)
+    val (stdout, stderr, exit_code) = _run_candidate_admission_pinned(candidate, probe_args, 5000)
     val diagnostic = "Error: invalid --mode 'definitely-invalid-mode' (expected dynload or one-binary)"
     exit_code == 1 and (stdout + "\n" + stderr).contains(diagnostic)
 

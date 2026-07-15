@@ -268,9 +268,9 @@ sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --validate-report build/simpleos_host_gpu_2d/report.env
 ```
 
-Before building a guest, both compiler selectors must use the private
-`candidate_frontend_smoke`. The wrapper implements it; `_QemuRunner` still
-needs parity. It self-pins `SIMPLE_BINARY`, `SIMPLE_BIN`,
+Before building a guest, both compiler selectors use the same private
+candidate-admission contract: shell `candidate_frontend_smoke` in the wrapper
+and `_candidate_frontend_smoke` in `_QemuRunner`. Each self-pins `SIMPLE_BINARY`, `SIMPLE_BIN`,
 `SIMPLE_BOOTSTRAP_DRIVER`, and `SIMPLE_FRONTEND_DELEGATE` to the candidate;
 sets `SIMPLE_FRONTEND_DELEGATED=1`, `SIMPLE_NO_STUB_FALLBACK=1`, and
 `SIMPLE_LIB=$ROOT_DIR/src`; and neutralizes inherited worker/bootstrap modes
@@ -279,16 +279,33 @@ with `SIMPLE_EXECUTION_MODE=''`, `SIMPLE_NATIVE_BUILD_FORCE_WORKER=0`, and
 `scripts/check/cert/redeploy_gate/fixtures/p2_add.spl` with Cranelift,
 core-C-bootstrap, entry closure, and one-binary mode. The build has 60 seconds;
 the resulting program has 5 seconds and must exit zero with stdout exactly
-`5`. The subshell owns a private temporary cache/output/build log and EXIT
-cleanup. The invalid-mode probe uses the same pins, so a sibling seed cannot
-answer for the candidate.
+`5`. The wrapper subshell owns EXIT cleanup; the runner uses bounded `mktemp`
+scratch and requires recursive cleanup before acceptance. The invalid-mode
+probe goes through runner `_run_candidate_admission_pinned`, so a sibling seed
+cannot answer for the candidate.
+
+The admitted candidate is pinned again for the authoritative guest build.
+`build_os_with_backend` first installs target-specific settings through
+`_apply_build_env`, then calls `_run_candidate_pinned`; those inherited target
+settings remain intact while compiler/delegate identity and no-stub behavior
+are pinned. The real guest native-build therefore cannot re-enter a sibling or
+seed delegate after admission.
+If the candidate is a symlink such as `bin/simple`, shared CLI
+`_cli_is_current_exe` first resolves it through existing
+`_cli_resolve_symlink`. Authoritative worker delegation then recognizes the
+admitted executable rather than redirecting to a sibling. The focused
+`test/01_unit/app/io/cli_driver_identity_spec.spl` source contract adds no
+`rt_*` alias.
 
 Do not use `check test/05_perf/io_parity/startup_simple.spl` as admission
 evidence. `run_check` always appends whole-tree repository hygiene, so
 unrelated tracked-policy failures can reject a correct frontend, and its Git
 subguards are not authoritative in a jj workspace with `.jj` and no `.git`.
-The wrapper self-test passes; `_QemuRunner` parity is pending. TODO 548 remains
-open, and no live compiler, QEMU, or GPU PASS is implied.
+The wrapper self-test passes and `_QemuRunner` source parity is present. TODO
+548 remains open until a current-source pure-Simple CLI executes the runner
+gate; no live compiler, QEMU, or GPU PASS is implied. Native-Windows
+child-environment/temp ownership and remaining runner `rt_*` migration are
+tracked by TODO 573 rather than a local alias.
 
 Candidate admission does not make focused SSpec execution pure-Simple.
 Current `simple test` reaches `rt_cli_run_tests`; directly entering the

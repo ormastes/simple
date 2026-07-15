@@ -113,9 +113,21 @@ candidate (`SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`, and
 `SIMPLE_BOOTSTRAP=0`; and `SIMPLE_LIB=$ROOT_DIR/src`). It must native-build the checked-in
 `scripts/check/cert/redeploy_gate/fixtures/p2_add.spl` with Cranelift,
 core-C-bootstrap, entry closure, and one-binary mode, then run it and require
-status zero plus exact stdout `5`. `_QemuRunner` still has the historical
-check probe and must adopt the same contract. The wrapper self-test passes, but
-that hardware-independent result is not live compiler, QEMU, or GPU evidence.
+status zero plus exact stdout `5`. `_QemuRunner` now mirrors that contract with
+`_candidate_frontend_smoke` and child-scoped
+`_run_candidate_admission_pinned`; both the `p2_add` build and invalid-mode
+probe use those admission pins, and the old whole-tree check is removed.
+`build_os_with_backend` separately applies `_apply_build_env` target settings
+before `_run_candidate_pinned` overlays the authoritative guest-build identity,
+so the real build cannot re-enter a sibling or seed delegate after admission.
+Shared CLI `_cli_is_current_exe` now resolves candidate overrides through the
+existing `_cli_resolve_symlink` owner before canonical comparison, so
+authoritative worker delegation also stays on symlink candidates such as
+`bin/simple`. `test/01_unit/app/io/cli_driver_identity_spec.spl` records that
+source contract; no `rt_*` alias was added.
+The wrapper self-test passes, but runner source parity is not current-source
+compiler, QEMU, or GPU execution evidence. TODO 573 owns the shared
+native-Windows process/temp and remaining direct-runtime facade work.
 
 The former `check test/05_perf/io_parity/startup_simple.spl` probe is not valid
 candidate evidence. `src/app/cli/check.spl::run_check` unconditionally runs the

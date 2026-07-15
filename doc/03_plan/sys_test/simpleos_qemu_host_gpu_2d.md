@@ -50,10 +50,12 @@ handles, compile-only output, or a CPU mirror. Unsupported and blocked rows are
 valid classifications but do not satisfy a host/ISA combination classified as
 supported.
 
-Before any guest build, both compiler-selection owners must use the
-`candidate_frontend_smoke` contract in a private subshell. The wrapper now
-implements it; `_QemuRunner` still needs parity. It creates one
-private temporary directory, cache, output, and build log with EXIT cleanup;
+Before any guest build, both compiler-selection owners use the same admission
+contract. The wrapper's `candidate_frontend_smoke` uses a private subshell;
+the runner's `_candidate_frontend_smoke` uses bounded scratch and
+`_run_candidate_admission_pinned` for both the `p2_add` build and deliberate
+invalid-mode probe. Each creates one private temporary directory, cache,
+output, and build log with required cleanup;
 self-pins `SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`, and
 `SIMPLE_FRONTEND_DELEGATE` to the candidate; sets
 `SIMPLE_FRONTEND_DELEGATED=1`, `SIMPLE_NO_STUB_FALLBACK=1`, and
@@ -63,14 +65,27 @@ and `SIMPLE_BOOTSTRAP=0`; and native-builds
 `scripts/check/cert/redeploy_gate/fixtures/p2_add.spl` with Cranelift,
 core-C-bootstrap, entry closure, and one-binary mode within 60 seconds; then
 executes it within 5 seconds and requires status zero plus exact stdout `5`.
-The deliberate invalid-mode full-CLI probe uses the same delegation pins.
+
+Admission is not the last identity boundary. `build_os_with_backend` applies
+the target-specific environment through `_apply_build_env`, then executes the
+authoritative guest native-build through `_run_candidate_pinned`. That helper
+adds the candidate identity and no-stub pins without replacing the target
+settings, so an admitted compiler cannot re-enter a sibling or seed delegate
+during the real guest build.
+The shared CLI `_cli_is_current_exe` resolves an override through existing
+`_cli_resolve_symlink` before canonical comparison, so authoritative worker
+delegation is also safe when the admitted candidate is a symlink such as
+`bin/simple`. `test/01_unit/app/io/cli_driver_identity_spec.spl` locks that
+source contract without adding an `rt_*` alias.
 
 The former `check test/05_perf/io_parity/startup_simple.spl` gate is not valid
 admission evidence: `run_check` unconditionally appends whole-tree repository
 hygiene, so unrelated tracked policy failures can reject a correct candidate,
 and its Git subguards do not describe a jj workspace with `.jj` and no `.git`.
-The wrapper self-test passes; `_QemuRunner` parity remains pending. Source
-inspection does not satisfy TODO 548.
+The wrapper self-test passes and `_QemuRunner` source parity is present. Source
+inspection still does not satisfy TODO 548; current-source runner execution is
+required. TODO 573 owns cross-platform process/temp facades and the remaining
+runner direct-runtime migration.
 
 Candidate admission also does not prove that `simple test` is pure-Simple.
 Current dispatch still reaches `rt_cli_run_tests`; the alternate pure-Simple
