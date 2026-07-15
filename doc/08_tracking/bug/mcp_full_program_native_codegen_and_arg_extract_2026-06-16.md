@@ -1,8 +1,29 @@
 # simple-mcp broken in Claude Code + bootstrap stage4 produces broken full CLI (2026-06-16)
 
-Status: OPEN
-Severity: P1 (simple-mcp tool calls unusable; self-hosted bootstrap deploy broken)
+Status: OPEN (bootstrap defect C and portability defect D remain)
+Severity: P1 (self-hosted bootstrap deploy); native simple-mcp path resolved 2026-07-15
 Owned-code scope: src/app/mcp, src/lib/nogc_sync_mut/mcp_sdk, seed/cranelift codegen, scripts/bootstrap
+
+## 2026-07-15 MCP resolution update
+
+The historical A/B evidence below is preserved, but it no longer describes the
+current production MCP path:
+
+- A fresh pure-Simple Stage 2 strictly native-builds
+  `src/app/mcp/main.spl` to
+  `build/bootstrap/mcp-package/simple_mcp_server` without stub fallback.
+- The exact artifact now passes `initialize`, `notifications/initialized`, and
+  `tools/list`, then serves argument-taking `simple_pipe` and `simple_search`
+  calls in the pure-Simple system SSpec (3 examples, 0 failures).
+- POSIX setup, MCP installers, and the Windows launcher now default to the
+  cached native artifact. Exact overrides fail closed. Raw-source execution is
+  explicit debugging only and may use only a deployed pure-Simple runtime.
+- Defect A is resolved for current sources/artifacts. Defect B's old interpreter
+  reproduction is not production mitigation and remains historical/unverified;
+  native nested argument extraction is covered by the new feature-call cases.
+
+Bootstrap defect C and LLVM detection defect D remain open and keep this issue
+open.
 
 ## Summary
 
@@ -94,11 +115,11 @@ regardless of backend. Worth fixing separately (probe `llvm-config-18 --prefix` 
 `/usr/lib/llvm-18` on Linux).
 
 ## Impact
-- simple-mcp is unusable for tool calls in Claude Code (native) regardless of which built
-  binary `.mcp.json` selects.
+- The former simple-mcp native tool-call impact is resolved by the 2026-07-15
+  pure-Stage2 artifact and system-test evidence above.
 - `--deploy` cannot produce a working self-hosted CLI on this host via the current path.
 
-## Mitigations applied this session (not fixes)
+## Historical mitigations applied in the original session
 - Restored the prior working `bin/release/<triple>/simple` (461 MB) after `--deploy` left
   the broken 248 binary live. `bin/simple -c 'print(1+1)'` → 2 again.
 - `bin/simple_mcp_server`: added a source-mode memory floor (100 MB tripped the RSS
@@ -110,9 +131,10 @@ regardless of backend. Worth fixing separately (probe `llvm-config-18 --prefix` 
   (commit 67ab978) — correct for a healthy repo; does not address the codegen bugs here.
 
 ## Suggested fix order
-1. Root-cause the full-program native/cranelift codegen crash (A + C are likely the same
-   family). A minimal repro is the full `main.spl` via seed+cranelift.
-2. Fix the interpreter nested-arg extraction (B) so source mode is a viable fallback.
-3. Fix the bootstrap smoke-test `set -e` gap so a failing stage4 binary triggers the
+1. Fix the bootstrap smoke-test `set -e` gap so a failing stage4 binary triggers the
    restore path instead of aborting the script before it.
-4. Fix Linux LLVM-18 detection (D).
+2. Root-cause the remaining full-program Stage 4/cranelift failure (C).
+3. Fix Linux LLVM-18 detection (D).
+4. Keep the exact native MCP build/handshake/feature SSpec as the regression gate;
+   investigate the historical interpreter-only nested-argument repro separately
+   if source debugging becomes a supported production lane.

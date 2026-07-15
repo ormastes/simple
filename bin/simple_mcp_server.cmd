@@ -1,23 +1,34 @@
 @echo off
 setlocal
-rem The native simple_mcp_server.exe core-dumps on every tools/call (full-program
-rem codegen bug; only the initialize/tools/list handshake survives). Default to
-rem source mode, which is a FULL fallback. Opt back into native with
-rem SIMPLE_MCP_PREFER_NATIVE=1 once a real tools/call probe passes.
-rem See doc/08_tracking/bug/mcp_full_program_native_codegen_and_arg_extract_2026-06-16.md
-if not "%SIMPLE_MCP_PREFER_NATIVE%"=="1" goto :source
-
 set "EXE=%~dp0release\x86_64-pc-windows-msvc\simple_mcp_server.exe"
+if not "%SIMPLE_MCP_NATIVE%"=="" set "EXE=%SIMPLE_MCP_NATIVE%"
 if exist "%EXE%" (
     "%EXE%" %*
     exit /b %ERRORLEVEL%
 )
-call "%~dp0release\x86_64-pc-windows-msvc\simple_mcp_server.cmd" %*
-exit /b %ERRORLEVEL%
+if not "%SIMPLE_MCP_NATIVE%"=="" (
+    echo error: SIMPLE_MCP_NATIVE not found: %SIMPLE_MCP_NATIVE% 1>&2
+    exit /b 127
+)
+set "NATIVE_CMD=%~dp0release\x86_64-pc-windows-msvc\simple_mcp_server.cmd"
+if exist "%NATIVE_CMD%" (
+    call "%NATIVE_CMD%" %*
+    exit /b %ERRORLEVEL%
+)
+if "%SIMPLE_MCP_ALLOW_SOURCE_FALLBACK%"=="1" goto :source
+echo error: cached native simple_mcp_server not found 1>&2
+echo source fallback disabled; set SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=1 only for debugging 1>&2
+exit /b 127
 
 :source
 if "%SIMPLE_LIB%"=="" set "SIMPLE_LIB=%~dp0..\src"
 if "%SIMPLE_LOG%"=="" set "SIMPLE_LOG=error"
 if "%RUST_LOG%"=="" set "RUST_LOG=error"
-call "%~dp0simple.cmd" run "%~dp0..\src\app\mcp\main.spl" %*
+set "SIMPLE_RUNTIME=%~dp0release\x86_64-pc-windows-msvc\simple.exe"
+if not "%SIMPLE_BINARY%"=="" set "SIMPLE_RUNTIME=%SIMPLE_BINARY%"
+if not exist "%SIMPLE_RUNTIME%" (
+    echo error: deployed pure-Simple runtime not found for source debugging 1>&2
+    exit /b 127
+)
+"%SIMPLE_RUNTIME%" run "%~dp0..\src\app\mcp\main.spl" %*
 exit /b %ERRORLEVEL%

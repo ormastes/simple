@@ -63,3 +63,12 @@ source import edge, so cache reuse is allowed only when those inputs match.
   the Rust seed/runtime before pure-Simple stages.
 - Direct execution of the Rust seed prints the seed warning outside bootstrap
   mode.
+- REQ-BOOT-STAGE-001: Every retained Stage 2 and Stage 3 pure-Simple compiler
+  must start, compile the canonical tiny redeploy fixture with stub fallback
+  disabled, run the produced native binary successfully, and reject unsupported
+  commands without misrouting them to `native-build`.
+- REQ-MCP-CMD-001: The exact cached native Simple MCP server built by fresh
+  pure Stage 2 at `build/bootstrap/mcp-package/simple_mcp_server` must answer
+  `initialize`, `notifications/initialized`, and `tools/list`, then serve
+  representative `simple_pipe` and `simple_search` calls without source-mode
+  or Rust-seed fallback.

@@ -85,7 +85,7 @@ if [ "${1:-}" = "--json" ]; then
   exit 0
 fi
 
-if [ "${SIMPLE_MCP_FULL:-0}" != "1" ]; then
+if [ "${SIMPLE_MCP_FULL:-1}" != "1" ]; then
   transport_mode="framed"
   tool_set="${SIMPLE_MCP_TOOL_SET:-core}"
   tool_name="simple_pipe"
@@ -213,43 +213,10 @@ if [ "${SIMPLE_MCP_FULL:-0}" != "1" ]; then
   exit 0
 fi
 
-# The native simple_mcp_server core-dumps on every tools/call (full-program
-# native/cranelift codegen bug — only the initialize/tools/list handshake
-# survives, so `claude mcp list` shows "Connected" while every tool fails).
-# Default to source mode, which is a FULL fallback (arg-taking tools fixed
-# 2026-06-17). Opt back into native with SIMPLE_MCP_PREFER_NATIVE=1, but only
-# after verifying a real tools/call works — not just the handshake. See
-# doc/08_tracking/bug/mcp_full_program_native_codegen_and_arg_extract_2026-06-16.md
-if [ "${SIMPLE_MCP_PREFER_NATIVE:-0}" != "1" ]; then
-  export SIMPLE_LIB="${SIMPLE_LIB:-${repo_root}/src}"
-  export SIMPLE_LOG="${SIMPLE_LOG:-error}"
-  export RUST_LOG="${RUST_LOG:-error}"
-  export SIMPLE_MCP_TOOL_SET="${SIMPLE_MCP_TOOL_SET:-core}"
-  smf_entry="${repo_root}/build/mcp-script/simple_mcp_server.smf"
-  smf_runtime="${SIMPLE_MCP_SMF_RUNTIME:-${repo_root}/src/compiler_rust/target/bootstrap/simple}"
-  if [ "${SIMPLE_MCP_DISABLE_SMF:-1}" != "1" ] && [ -f "${smf_entry}" ] && [ -x "${smf_runtime}" ]; then
-    exec "${smf_runtime}" "${smf_entry}" "$@"
-  fi
-  mkdir -p "${log_dir}"
-  src_entry="${repo_root}/src/app/mcp/main.spl"
-  for src_runtime in \
-    "${SIMPLE_BINARY:-}" \
-    "${repo_root}/src/compiler_rust/target/bootstrap/simple" \
-    "${script_dir}/simple" \
-    "${script_dir}/release/simple" \
-    "${script_dir}/release/x86_64-unknown-linux-gnu/simple" \
-    "${script_dir}/release/linux-x86_64/simple"
-  do
-    if [ -n "${src_runtime}" ] && [ -x "${src_runtime}" ] && [ -f "${src_entry}" ]; then
-      printf 'startup wrapper=simple_mcp_server mode=source-default runtime=%s cwd=%s\n' "${src_runtime}" "$(pwd)" >>"${log_dir}/simple_mcp_startup.log"
-      exec "${src_runtime}" "${src_entry}" "$@" 2>>"${log_dir}/simple_mcp_stderr.log"
-    fi
-  done
-  printf '%s\n' "error: simple runtime not found for MCP source mode" >&2
-  exit 127
-fi
+# Production launches the cached native server. Source execution is an
+# explicit debugging fallback and may use only a deployed pure-Simple runtime.
 
-_MCP_PROBE_WRAPPER_VERSION="simple_mcp_server:4.0.0"
+_MCP_PROBE_WRAPPER_VERSION="simple_mcp_server:4.1.0-tools-call"
 
 _mcp_probe_stat() {
   # Returns "mtime size" for a file; portable Linux/macOS
@@ -314,42 +281,50 @@ mcp_probe_native() {
     "${probe_native}" --probe </dev/null 2>>"${log_dir}/simple_mcp_stderr.log")" && \
   _probe_rc=0 || _probe_rc=$?
   if [ "${_probe_rc}" = "0" ] && printf '%s' "${_probe_out}" | grep -q 'probe ok'; then
-    _mcp_probe_stamp_write "${probe_native}" || true
-    printf 'probe_quick_ok wrapper=simple_mcp_server native=%s stamp=written\n' "${probe_native}" >>"${log_dir}/simple_mcp_startup.log"
-    return 0
+    printf 'probe_quick_ok wrapper=simple_mcp_server native=%s next=tools_call\n' "${probe_native}" >>"${log_dir}/simple_mcp_startup.log"
+  else
+    printf 'probe_quick_fallback wrapper=simple_mcp_server native=%s rc=%s reason=no_probe_ok\n' "${probe_native}" "${_probe_rc}" >>"${log_dir}/simple_mcp_startup.log"
   fi
-  printf 'probe_quick_fallback wrapper=simple_mcp_server native=%s rc=%s reason=no_probe_ok\n' "${probe_native}" "${_probe_rc}" >>"${log_dir}/simple_mcp_startup.log"
 
   # --- Full-handshake fallback (original path, unchanged) ---
   probe_tmp="$(mktemp "${TMPDIR:-/tmp}/simple_mcp_probe.XXXXXX")" || probe_tmp=""
   if [ -z "${probe_tmp}" ]; then
     return 1
   fi
-  printf '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"wrapper-probe","version":"1"}}}\n{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}\n' \
+  printf '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"wrapper-probe","version":"1"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}\n{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}\n{"jsonrpc":"2.0","id":"3","method":"tools/call","params":{"name":"simple_pipe","arguments":{"surface":"spipe"}}}\n' \
     | probe_timeout "${SIMPLE_MCP_NATIVE_PROBE_TIMEOUT:-5}" "${probe_native}" >"${probe_tmp}" 2>>"${log_dir}/simple_mcp_stderr.log" || true
-  if grep -q '"play_wm_text_status"' "${probe_tmp}"; then
+  if grep -q '"simple_pipe"' "${probe_tmp}" && grep -q 'spipe: linked' "${probe_tmp}"; then
     rm -f "${probe_tmp}"
     _mcp_probe_stamp_write "${probe_native}" || true
-    printf 'probe_cache_miss wrapper=simple_mcp_server native=%s stamp=written\n' "${probe_native}" >>"${log_dir}/simple_mcp_startup.log"
+    printf 'probe_tools_call_ok wrapper=simple_mcp_server native=%s stamp=written\n' "${probe_native}" >>"${log_dir}/simple_mcp_startup.log"
     return 0
   fi
-  printf 'native_probe_failed wrapper=simple_mcp_server native=%s reason=missing_wm_text_tools fallback=next_candidate\n' "${probe_native}" >>"${log_dir}/simple_mcp_stderr.log"
+  printf 'native_probe_failed wrapper=simple_mcp_server native=%s reason=simple_pipe_tools_call_failed fallback=next_candidate\n' "${probe_native}" >>"${log_dir}/simple_mcp_stderr.log"
   rm -f "${probe_tmp}"
   return 1
 }
 
 native=""
-for candidate in \
-  "${repo_root}/build/bootstrap/mcp-package/simple_mcp_server" \
-  "${script_dir}/release/x86_64-unknown-linux-gnu/simple_mcp_server" \
-  "${script_dir}/release/linux-x86_64/simple_mcp_server" \
-  "${repo_root}/build/bootstrap/full/x86_64-unknown-linux-gnu/simple_mcp_server"
-do
-  if [ -x "${candidate}" ] && mcp_probe_native "${candidate}"; then
-    native="${candidate}"
-    break
+if [ -n "${SIMPLE_MCP_NATIVE:-}" ]; then
+  if [ -x "${SIMPLE_MCP_NATIVE}" ] && mcp_probe_native "${SIMPLE_MCP_NATIVE}"; then
+    native="${SIMPLE_MCP_NATIVE}"
+  else
+    printf '%s\n' "error: SIMPLE_MCP_NATIVE is missing or failed its MCP probe: ${SIMPLE_MCP_NATIVE}" >&2
+    exit 127
   fi
-done
+else
+  for candidate in \
+    "${repo_root}/build/bootstrap/mcp-package/simple_mcp_server" \
+    "${script_dir}/release/x86_64-unknown-linux-gnu/simple_mcp_server" \
+    "${script_dir}/release/linux-x86_64/simple_mcp_server" \
+    "${repo_root}/build/bootstrap/full/x86_64-unknown-linux-gnu/simple_mcp_server"
+  do
+    if [ -x "${candidate}" ] && mcp_probe_native "${candidate}"; then
+      native="${candidate}"
+      break
+    fi
+  done
+fi
 
 runtime=""
 for candidate in \

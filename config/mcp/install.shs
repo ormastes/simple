@@ -28,39 +28,10 @@ esac
 if [ "$EXT" = "" ]; then
     SIMPLE_MCP_CMD="$PROJECT_ROOT/bin/simple_mcp_server"
     SIMPLE_LSP_MCP_CMD="$PROJECT_ROOT/bin/simple_lsp_mcp_server"
-    # Resolve native MCP binaries from the canonical deploy dir first.
-    # bootstrap-from-scratch.sh deploys both simple_mcp_server and
-    # simple_lsp_mcp_server to bin/release/<platform-triple>/; the legacy
-    # bin/release/linux-x86_64/ alias and the build/bootstrap/mcp-package copy
-    # are only fallbacks. Pinning a fixed path (as simple-mcp did before) left
-    # .mcp.json pointing at a stale hand-copied binary after every rebuild.
-    # See doc/07_guide/app/mcp/lsp_mcp_deploy_path_fix.md
-    . "$PROJECT_ROOT/scripts/setup/platform-detect.shs"
-    resolve_native_mcp() {
-        # $1 = binary base name. Echoes the first existing candidate, or the
-        # canonical deploy path if none exist yet (so a later rebuild lands there).
-        _name="$1"
-        for _cand in \
-            "$PROJECT_ROOT/bin/release/${PLATFORM_TRIPLE}/${_name}" \
-            "$PROJECT_ROOT/bin/release/${PLATFORM_TRIPLE}-macho/${_name}" \
-            "$PROJECT_ROOT/bin/release/linux-x86_64/${_name}" \
-            "$PROJECT_ROOT/build/bootstrap/mcp-package/${_name}"; do
-            if [ -x "$_cand" ]; then
-                printf '%s' "$_cand"
-                return 0
-            fi
-        done
-        printf '%s' "$PROJECT_ROOT/bin/release/${PLATFORM_TRIPLE}/${_name}"
-    }
-    # simple-mcp: the native simple_mcp_server core-dumps on every tools/call
-    # (full-program native/cranelift codegen bug — only initialize/tools/list
-    # survive the handshake; a green `claude mcp list` does NOT mean tools work).
-    # Run from source instead: `bin/simple run src/app/mcp/main.spl` is a FULL
-    # fallback (arg-taking tools fixed 2026-06-17). Do NOT repoint this at
-    # `resolve_native_mcp simple_mcp_server` until a real tools/call probe passes.
-    # See doc/08_tracking/bug/mcp_full_program_native_codegen_and_arg_extract_2026-06-16.md
+    # simple-mcp: the wrapper admits cached native artifacts only after a real
+    # tools/call probe. Source execution is explicit debugging fallback only.
+    SIMPLE_MCP_CMD="$PROJECT_ROOT/bin/simple_mcp_server"
     SIMPLE_RUNTIME_CMD="$PROJECT_ROOT/bin/simple"
-    SIMPLE_MCP_ENTRY="$PROJECT_ROOT/src/app/mcp/main.spl"
     # simple-lsp-mcp: the native simple_lsp_mcp_server ALSO fails every tools/call
     # ("Missing tool name", same AOT arg-extraction codegen bug as simple-mcp).
     # Run from source — 10/11 LSP tools work; lsp_diagnostics is gated off (it
@@ -69,7 +40,7 @@ if [ "$EXT" = "" ]; then
     SIMPLE_LSP_MCP_ENTRY="$PROJECT_ROOT/src/app/simple_lsp_mcp/main.spl"
     BRIDGE_CMD="$PROJECT_ROOT/bin/mcp_stdio_bridge.js"
     STITCH_CMD="$PROJECT_ROOT/bin/codex_stitch_mcp.js"
-    SIMPLE_MCP_LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec node $(shell_quote "$BRIDGE_CMD") -- $(shell_quote "$SIMPLE_RUNTIME_CMD") run $(shell_quote "$SIMPLE_MCP_ENTRY")"
+    SIMPLE_MCP_LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec $(shell_quote "$SIMPLE_MCP_CMD")"
     SIMPLE_LSP_MCP_LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && SIMPLE_EXECUTION_MODE=interpreter exec node $(shell_quote "$BRIDGE_CMD") -- $(shell_quote "$SIMPLE_RUNTIME_CMD") run $(shell_quote "$SIMPLE_LSP_MCP_ENTRY")"
     STITCH_LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec node $(shell_quote "$BRIDGE_CMD") -- node $(shell_quote "$STITCH_CMD")"
     cat > "$PROJECT_ROOT/.mcp.json" <<EOF
@@ -78,7 +49,7 @@ if [ "$EXT" = "" ]; then
 
   "mcpServers": {
     "simple-pipe-mcp": {
-      "_info": "Simple Pipe MCP server run from source (src/app/mcp/main.spl). Same server as simple-mcp, exposed under the SPipe-linked name.",
+      "_info": "Cached native Simple MCP server, exposed under the SPipe-linked name.",
       "command": "/bin/sh",
       "args": ["-lc", "$SIMPLE_MCP_LAUNCH"],
       "env": {
@@ -88,7 +59,7 @@ if [ "$EXT" = "" ]; then
       }
     },
     "simple-mcp": {
-      "_info": "Simple MCP server run from source (src/app/mcp/main.spl). The native simple_mcp_server core-dumps on every tools/call (full-program codegen bug); repoint here only after a real tools/call probe passes.",
+      "_info": "Cached native Simple MCP server.",
       "command": "/bin/sh",
       "args": ["-lc", "$SIMPLE_MCP_LAUNCH"],
       "env": {
@@ -175,9 +146,8 @@ if command -v codex >/dev/null 2>&1; then
         WRAPPER=$(echo "$NAME" | sed 's/-/_/g')_server
         CMD="$PROJECT_ROOT/bin/${WRAPPER}${EXT}"
         if { [ "$NAME" = "simple-mcp" ] || [ "$NAME" = "simple-pipe-mcp" ]; } && [ "$EXT" = "" ]; then
-            # Source mode — native simple_mcp_server core-dumps on tools/call (see above).
-            CMD="$SIMPLE_RUNTIME_CMD"
-            LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec node $(shell_quote "$BRIDGE_CMD") -- $(shell_quote "$CMD") run $(shell_quote "$SIMPLE_MCP_ENTRY")"
+            CMD="$PROJECT_ROOT/bin/simple_mcp_server"
+            LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec $(shell_quote "$CMD")"
         elif [ "$NAME" = "simple-lsp-mcp" ] && [ "$EXT" = "" ]; then
             # Source mode — native simple_lsp_mcp_server fails all tools/call (see above).
             CMD="$SIMPLE_RUNTIME_CMD"
