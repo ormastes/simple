@@ -145,6 +145,28 @@ main = x + y
 }
 
 #[test]
+fn interpreter_generic_array_element_inequality() {
+    let code = r#"
+fn dedup<T>(data: [T]) -> [T]:
+    var out: [T] = []
+    if data.len() == 0:
+        return out
+    out.push(data[0])
+    var i = 1
+    while i < data.len():
+        if data[i] != data[i - 1]:
+            out.push(data[i])
+        i = i + 1
+    return out
+
+val out = dedup([1, 1, 2, 3, 3, 3, 1])
+main = out.len() * 10000 + out[0] * 1000 + out[1] * 100 + out[2] * 10 + out[3]
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 41231);
+}
+
+#[test]
 fn interpreter_generic_struct() {
     // Generic struct: struct Box<T>
     let code = r#"

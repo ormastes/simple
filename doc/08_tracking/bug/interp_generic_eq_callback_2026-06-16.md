@@ -1,7 +1,7 @@
 # Bug: generic `!=` / 2-arg `==` on `[T]` elements mis-evaluates in interpreter
 
 **Found:** 2026-06-16 · **Severity:** P2 (correctness) · **Area:** interpreter / generics
-**Status:** OPEN (worked around in caller)
+**Status:** source fixed; focused seed-interpreter execution pending
 
 ## Summary
 Inside a generic function `fn f<T>(data: [T], ...)`, comparing two array elements of the
@@ -50,3 +50,14 @@ Investigate generic operator lowering for `==`/`!=` on type parameters in the in
 ## Discovered by
 The std.compute parity build (feature `gpu_containers_unified`) while implementing
 `compute_unique`. Co-goal: "find + fix bugs while building the compute stdlib."
+
+## Resolution status (2026-07-15)
+
+Current seed-interpreter array indexing preserves the element `Value`, generic
+function calls bind those values directly, and shared equality handles integer
+elements without a monomorphized callback path. Multi-field pattern binding also
+uses the current tuple-payload field order. No production equality patch is
+therefore justified without a fresh failing execution. A focused driver
+regression runs the original generic `dedup<T>` form and encodes the complete
+`[1, 2, 3, 1]` result as `41231`; execution remains pending a runnable Rust
+test artifact.
