@@ -118,6 +118,25 @@ impl MirLowering:
                 case _: ()
         nil
 
+    me option_inner_hir_type(receiver: HirExpr) -> HirType?:
+        val receiver_type = self.enum_match_expr_type(receiver)
+        if receiver_type != nil:
+            val found_type = receiver_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+            match found_type.kind:
+                case HirTypeKind.Optional(inner_type): return Some(inner_type)
+                case _: ()
+        nil
+
+    me option_text_value(value_local: LocalId, result_type: MirType) -> LocalId:
+        val text_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_interp_cstr"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: result_type, is_variadic: false)))
+        ))
+        var b_text = self.builder
+        val text_res = b_text.emit_call(text_op, [mir_operand_copy(value_local)], result_type)
+        self.builder = b_text
+        text_res ?? value_local
+
     me lower_result_unwrap(receiver: HirExpr, ok_type: HirType, default_expr: HirExpr?) -> LocalId:
         var result_type = MirType.i64()
         var is_text = false
@@ -246,26 +265,30 @@ impl MirLowering:
             ))
             return self.emit_resolved_direct_call(is_none, [mir_operand_copy(receiver_local)], MirType.bool())
 
-        # `.unwrap()` -- Some(v) yields v (decoded exactly like ExistsCheck's
-        # `.?` then-branch in expr_dispatch.spl); nil PANICS via rt_panic
-        # (matching Rust's `Option::unwrap` semantics and this lane's mandate
-        # to never silently emit wrong values for a nil unwrap). Must branch
-        # on rt_is_some(receiver), never on truthiness, so `Some(0).unwrap()`
-        # correctly returns 0 (native_i64opt_some0_collapses_to_nil class of
-        # bug) instead of being misread as None.
+        # `.unwrap()` for the flat nullable ABI: a present value yields itself
+        # and nil panics. Branch on rt_is_some(receiver), never truthiness, so
+        # a present numeric zero is preserved. Explicit enum `Some`/`None`
+        # still needs the separately tracked uniform Option ABI redesign.
         if method == "unwrap" and args.len() == 0:
             val result_ok_type = self.result_ok_hir_type(receiver)
             if result_ok_type != nil:
                 return self.lower_result_unwrap(receiver, result_ok_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span), nil)
             val receiver_local = self.lower_expr(receiver)
             var unwrap_result_type = MirType.i64()
-            val maybe_recv_ty_uw = receiver.type_
-            if maybe_recv_ty_uw != nil:
-                val recv_ty_uw = maybe_recv_ty_uw
-                if recv_ty_uw != nil:
-                    match recv_ty_uw.kind:
-                        case Optional(inner_uw): unwrap_result_type = self.lower_type(inner_uw)
-                        case _: unwrap_result_type = self.lower_type(recv_ty_uw)
+            var unwrap_is_text = false
+            val inner_type_uw = self.option_inner_hir_type(receiver)
+            if inner_type_uw != nil:
+                val found_inner_uw = inner_type_uw ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+                match found_inner_uw.kind:
+                    case HirTypeKind.Str:
+                        unwrap_result_type = self.bootstrap_text_type()
+                        unwrap_is_text = true
+                    case _: unwrap_result_type = self.lower_type(found_inner_uw)
+            elif self.local_is_str(receiver_local):
+                unwrap_result_type = self.bootstrap_text_type()
+                unwrap_is_text = true
+            elif val receiver_mir_type_uw = self.local_mir_type_of(receiver_local):
+                unwrap_result_type = receiver_mir_type_uw
 
             var b_uw_chk = self.builder
             val is_some_uw_op = MirOperand(kind: MirOperandKind.Const(
@@ -292,7 +315,9 @@ impl MirLowering:
             b_some_uw.switch_to_block(some_block_uw)
             self.builder = b_some_uw
             var some_val_uw = receiver_local
-            if self.runtime_value_locals.has(receiver_local.id):
+            if unwrap_is_text:
+                some_val_uw = self.option_text_value(receiver_local, unwrap_result_type)
+            elif self.runtime_value_locals.has(receiver_local.id):
                 some_val_uw = self.decode_runtime_value(receiver_local, unwrap_result_type)
             b_some_uw = self.builder
             b_some_uw.emit_copy(result_local_uw, some_val_uw)
@@ -320,7 +345,9 @@ impl MirLowering:
             self.builder = b_merge_uw
             return result_local_uw
 
-        # `.unwrap_or(default)` -- Some(v) yields v, nil yields `default`.
+        # `.unwrap_or(default)` for the flat nullable ABI: a present value
+        # yields itself and nil yields `default`. Explicit enum `Some`/`None`
+        # remains in the separately tracked uniform Option ABI redesign.
         # Structurally identical to the `NullCoalesce` (`x ?? default`)
         # lowering in expr_dispatch.spl: branch on rt_is_some (not
         # truthiness, so `Some(0).unwrap_or(9)` yields 0), lower the default
@@ -334,13 +361,20 @@ impl MirLowering:
                 return self.lower_result_unwrap(receiver, result_ok_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span), Some(args[0].value))
             val receiver_local = self.lower_expr(receiver)
             var uo_result_type = MirType.i64()
-            val maybe_recv_ty_uo = receiver.type_
-            if maybe_recv_ty_uo != nil:
-                val recv_ty_uo = maybe_recv_ty_uo
-                if recv_ty_uo != nil:
-                    match recv_ty_uo.kind:
-                        case Optional(inner_uo): uo_result_type = self.lower_type(inner_uo)
-                        case _: uo_result_type = self.lower_type(recv_ty_uo)
+            var uo_is_text = false
+            val inner_type_uo = self.option_inner_hir_type(receiver)
+            if inner_type_uo != nil:
+                val found_inner_uo = inner_type_uo ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+                match found_inner_uo.kind:
+                    case HirTypeKind.Str:
+                        uo_result_type = self.bootstrap_text_type()
+                        uo_is_text = true
+                    case _: uo_result_type = self.lower_type(found_inner_uo)
+            elif self.local_is_str(receiver_local):
+                uo_result_type = self.bootstrap_text_type()
+                uo_is_text = true
+            elif val receiver_mir_type_uo = self.local_mir_type_of(receiver_local):
+                uo_result_type = receiver_mir_type_uo
 
             var b_uo_chk = self.builder
             val is_some_uo_op = MirOperand(kind: MirOperandKind.Const(
@@ -367,7 +401,9 @@ impl MirLowering:
             b_some_uo.switch_to_block(some_block_uo)
             self.builder = b_some_uo
             var some_val_uo = receiver_local
-            if self.runtime_value_locals.has(receiver_local.id):
+            if uo_is_text:
+                some_val_uo = self.option_text_value(receiver_local, uo_result_type)
+            elif self.runtime_value_locals.has(receiver_local.id):
                 some_val_uo = self.decode_runtime_value(receiver_local, uo_result_type)
             b_some_uo = self.builder
             b_some_uo.emit_copy(result_local_uo, some_val_uo)
@@ -379,7 +415,9 @@ impl MirLowering:
             self.builder = b_none_uo
             val default_local_uo = self.lower_expr(args[0].value)
             var default_val_uo = default_local_uo
-            if self.runtime_value_locals.has(default_local_uo.id):
+            if uo_is_text:
+                default_val_uo = self.option_text_value(default_local_uo, uo_result_type)
+            elif self.runtime_value_locals.has(default_local_uo.id):
                 default_val_uo = self.decode_runtime_value(default_local_uo, uo_result_type)
             b_none_uo = self.builder
             b_none_uo.emit_copy(result_local_uo, default_val_uo)

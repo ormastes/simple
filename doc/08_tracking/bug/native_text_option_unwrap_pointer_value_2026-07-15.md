@@ -2,7 +2,8 @@
 
 **Severity:** high (silent wrong value)
 **Found:** 2026-07-15 while adding Result unwrap preservation controls
-**Status:** open
+**Status:** flat nullable fix implemented; executable verification blocked by
+the pre-existing pure-Simple CLI exit 139
 **Backend:** pure-Simple `native-build --entry` MIR lowering
 
 ## Reproduction
@@ -29,3 +30,18 @@ native path. It therefore does not decode the text runtime value as text.
 Recover the declared Optional inner type without dynamic enum guessing, decode
 text through the canonical runtime-value path, keep numeric Option behavior
 unchanged, and add positive native-authoritative controls before closing.
+
+## Scope boundary
+
+This bug covers the flat nullable form produced by `val value: text? = "opt"`
+and `nil`. Explicit enum `Some("opt")` / `None` uses a different, currently
+inconsistent representation and remains blocked by
+`native_try_op_on_option_silent_wrong_2026-07-14.md`; this fix does not claim
+that path.
+
+The implementation now recovers the declared inner type through the existing
+symbol provenance path, uses the bootstrap text MIR type, and normalizes the
+selected present/default value with `rt_interp_cstr`. The parity harness adds
+present, absent, lazy-default, and nil-panic controls. A cached pure-Simple
+`native-build` attempt exited 139 before producing an artifact, so the bug
+remains open until those controls execute after the runner is repaired.

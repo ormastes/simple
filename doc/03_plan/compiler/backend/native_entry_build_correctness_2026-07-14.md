@@ -88,9 +88,12 @@ the shared binary — deploys require explicit user go-ahead).
 
 - Fold a parity-harness case per landed lane fix (inline, not via a sub-lane —
   the rogue-redeploy incident showed sub-lanes can wander into heavy ops).
-- Open filed bugs still unfixed, in bottom-up order:
-  - `native_try_op_on_option_silent_wrong_2026-07-14.md`
-  - `native_text_option_unwrap_pointer_value_2026-07-15.md`
+- Open filed bugs, in bottom-up order:
+  - `native_try_op_on_option_silent_wrong_2026-07-14.md` remains blocked on a
+    uniform Option producer/consumer ABI.
+  - `native_text_option_unwrap_pointer_value_2026-07-15.md` has a flat-nullable
+    implementation and harness controls; executable verification is pending
+    repair of the pure-Simple CLI exit 139.
 - The whole-compiler redeploy (#99 / stage4) remains separate and blocked on
   seed-backend bugs (cranelift enum miscompile + seed-LLVM mcall_direct arg
   count) — **not** part of this correctness campaign; see
