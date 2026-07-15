@@ -26,6 +26,16 @@ use app.io.time_ops.{time_now_nanos}
 use app.io.args_ops.{get_args}
 use app.io.thread.{thread_sleep_ms}
 
+@cfg(linux)
+fn _create_render_backend(width: i32, height: i32, backend: text) -> Result<Engine2D, text>:
+    if backend != "vulkan":
+        return Err("linux-host-daemon-requires-vulkan")
+    Engine2D.create_vulkan_backend(width, height)
+
+@cfg(not(linux))
+fn _create_render_backend(width: i32, height: i32, backend: text) -> Result<Engine2D, text>:
+    Engine2D.create_requested_backend(width, height, backend)
+
 fn _read(base: i64, offset: i64) -> i64:
     volatile_read_u64_required(base + offset)
 
@@ -114,7 +124,7 @@ fn _render_device_identity(backend: text) -> i64:
 
 fn _render_backend_available(code: i64) -> bool:
     val name = simpleos_host_gpu_backend_name(code)
-    match Engine2D.create_requested_backend(1, 1, name):
+    match _create_render_backend(1, 1, name):
         Err(reason):
             print("HOST_GPU_DAEMON_RENDER_UNAVAILABLE backend={name} reason={reason}\n")
             false
@@ -323,7 +333,7 @@ fn _process_request(base: i64, processing_selector: text) -> i64:
             resolved_images.push(engine2d_resolved_draw_ir_image(image.image_uri, image.width, image.height, image.pixels))
         if not _request_generation_matches(base, generation):
             return 0
-        match Engine2D.create_requested_backend(width.to_i32(), height.to_i32(), backend):
+        match _create_render_backend(width.to_i32(), height.to_i32(), backend):
             Err(_):
                 _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_UNSUPPORTED_BACKEND, 0, 0, 0, 1, 0, 0)
                 return 1
@@ -348,7 +358,7 @@ fn _process_request(base: i64, processing_selector: text) -> i64:
                 _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, result.backend_handle, output_count * 4, checksum, elapsed, SIMPLEOS_HOST_GPU_READBACK_DEVICE, device_identity)
                 return 1
 
-    match Engine2D.create_requested_backend(width.to_i32(), height.to_i32(), backend):
+    match _create_render_backend(width.to_i32(), height.to_i32(), backend):
         Err(_):
             _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_UNSUPPORTED_BACKEND, 0, 0, 0, 1, 0, 0)
             return 1

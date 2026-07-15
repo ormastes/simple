@@ -78,6 +78,9 @@ fn vulkan_processing_source() -> text:
 fn host_gpu_daemon_source() -> text:
     file_read_text("src/app/simpleos_gpu_host/main.spl")
 
+fn engine2d_source() -> text:
+    file_read_text("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+
 fn time_ops_source() -> text:
     file_read_text("src/app/io/time_ops.spl")
 
@@ -151,7 +154,7 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         val todos = todo_db_source()
         val accepted_compiler = source.index_of("simple_bin=$(find_simple || true)")
         val runtime_prepare = source.index_of("if prepare_linux_runtime; then runtime_ready=1; fi")
-        val daemon_build = source.index_of("SIMPLE_LIB=\"$ROOT_DIR/src\" SIMPLE_NO_STUB_FALLBACK=1 \"$simple_bin\" native-build")
+        val daemon_build = source.index_of("--entry src/app/simpleos_gpu_host/main.spl")
         val production_map = production.index_of("HOST_GPU_MAP_OK scope=production isa={guest_isa} base={base}")
         val production_attempt = production.index_of("HOST_GPU_NEGOTIATION_ATTEMPT scope=production")
         val production_done = production.index_of("HOST_GPU_NEGOTIATION_DONE scope=production")
@@ -216,12 +219,25 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         expect(source).to_contain("SIMPLE_BOOTSTRAP=1")
         expect(source).to_contain("[ ! -e \"$poison_marker\" ]")
         expect(source).to_contain("linux_runtime_artifact_is_valid")
+        expect(source).to_contain("LINUX_RUNTIME_TARGET=build/simpleos_gpu_host/$HOST_ARCH-vulkan-cuda-runtime-target")
         expect(source).to_contain("[ \"$RUNTIME_PATH_IS_DEFAULT\" = 1 ] || return 1")
         expect(source).to_contain("[ \"$RUNTIME_PATH\" = \"$LINUX_DEFAULT_RUNTIME_PATH\" ] || return 1")
         expect(source).to_contain("CARGO_TARGET_DIR=\"$ROOT_DIR/$LINUX_RUNTIME_TARGET\" cargo build --locked")
         expect(source).to_contain("--manifest-path \"$ROOT_DIR/src/compiler_rust/Cargo.toml\"")
         expect(source).to_contain("--package simple-runtime --lib --profile bootstrap --features vulkan,cuda")
         expect(source).to_contain(".fingerprint/simple-runtime-*/lib-simple_runtime.json")
+        expect(source).to_contain("run_pinned_native_build()")
+        expect(source).to_contain("SIMPLE_BOOTSTRAP_DRIVER=\"$simple_bin\"")
+        expect(source).to_contain("SIMPLE_FRONTEND_DELEGATE=\"$simple_bin\"")
+        expect(source).to_contain("SIMPLE_FRONTEND_DELEGATED=1")
+        expect(source).to_contain("SIMPLEOS_HOST_GPU_NATIVE_BUILD_TIMEOUT")
+        expect(source).to_contain("bin/release/$HOST_ARCH-unknown-linux-gnu/simple")
+        expect(source).to_contain("cp src/generated/simpleos_log_config.spl build/os/generated/generated/simpleos_log_config.spl")
+        expect(source).to_contain("examples/09_embedded/simple_os/arch/x86_64/host_gpu_smoke_entry.spl")
+        expect(source).to_contain("examples/09_embedded/simple_os/arch/arm64/host_gpu_smoke_entry.spl")
+        expect(source).to_contain("examples/09_embedded/simple_os/arch/riscv64/host_gpu_smoke_entry.spl")
+        expect(source).to_contain("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
+        expect(source.contains("\"$simple_bin\" os build")).to_equal(false)
         expect(accepted_compiler).to_be_greater_than(0)
         expect(accepted_compiler).to_be_less_than(runtime_prepare)
         expect(runtime_prepare).to_be_less_than(daemon_build)
@@ -503,13 +519,16 @@ describe "SimpleOS QEMU host-GPU rendering and processing":
         expect(backend).to_contain("self._dispatch_framebuffer_checked")
         expect(backend.contains("vulkan_dispatch_compute(")).to_equal(false)
         val daemon = host_gpu_daemon_source()
-        expect(daemon).to_contain("Engine2D.create_requested_backend(width.to_i32(), height.to_i32(), backend)")
+        expect(daemon).to_contain("_create_render_backend(width.to_i32(), height.to_i32(), backend)")
+        expect(daemon).to_contain("@cfg(linux)\nfn _create_render_backend")
+        expect(daemon).to_contain("Engine2D.create_vulkan_backend(width, height)")
+        expect(engine2d_source()).to_contain("static fn create_vulkan_backend(width: i32, height: i32)")
         expect(daemon).to_contain("engine.backend_name() != backend")
 
     # @capture(protocol)
     it "admits only strict native Metal Draw IR with stable device identity":
         val daemon = host_gpu_daemon_source()
-        expect(daemon).to_contain("Engine2D.create_requested_backend(1, 1, name)")
+        expect(daemon).to_contain("_create_render_backend(1, 1, name)")
         expect(daemon).to_contain("engine.backend_name() == name")
         expect(daemon).to_contain("metal_device_info(0)")
         expect(daemon).to_contain("processing_metal_device_identity(info.name, info.total_memory)")

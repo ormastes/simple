@@ -393,17 +393,18 @@ SIMPLEOS_HOST_GPU_PROCESSING_BACKEND=vulkan \
   sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
 ```
 
-After accepting a pure-Simple full CLI, the Linux wrapper validates the
-dedicated default host-runtime archive and its Cargo fingerprint. If missing,
+After accepting a current pure-Simple compiler, the Linux wrapper directly
+builds the canonical guest entries with that compiler and validates the
+architecture-tagged host-runtime archive and its Cargo fingerprint. If missing,
 it builds only that lane-owned SFFI provider with:
 
 ```sh
-CARGO_TARGET_DIR="$PWD/build/simpleos_gpu_host/vulkan-cuda-runtime-target" \
+CARGO_TARGET_DIR="$PWD/build/simpleos_gpu_host/$(uname -m)-vulkan-cuda-runtime-target" \
   cargo build --locked --manifest-path src/compiler_rust/Cargo.toml \
   --package simple-runtime --lib --profile bootstrap --features vulkan,cuda
 ```
 
-The fingerprint proves the CUDA/Vulkan compile features; live negotiation and
+The fingerprint proves these compile features; live negotiation and
 device-readback receipts still prove hardware execution. A user-supplied
 `SIMPLEOS_HOST_GPU_RUNTIME_PATH` is never deleted or rebuilt and fails closed
 when its archive/fingerprint is invalid. This host SFFI build does not permit
@@ -424,8 +425,12 @@ session for bounded smaller WM surfaces, requires child device readback, and
 applies canonical embedding opacity through checked native parent src-over.
 The additive `arm64-desktop-engine2d` scenario supplies the canonical
 RAMFB/`DesktopShell` build target, and the wrapper source now defines the
-correlated production-frame gate above. TODO 548 still blocks a fresh build and
-execution, so this source-level contract is not a fresh live PASS.
+correlated production-frame gate above. On 2026-07-15 a fresh Stage3 compiler
+passed admission, but the bounded live run stopped at the host-daemon link.
+The broad Engine2D module retains optional core-C providers whose untagged
+array ABI cannot be mixed safely with the Rust Vulkan/CUDA runtime archive.
+TODO576 owns an ABI-compatible module/runtime boundary; no live receipt is
+claimed.
 Cached reports are accepted only through `--validate-report`: an overall status
 cannot promote the lane unless all nine host/ISA rows are well-formed and a
 passing active host carries three existing serial logs with exact correlated

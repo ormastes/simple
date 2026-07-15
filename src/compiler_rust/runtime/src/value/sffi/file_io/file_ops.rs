@@ -11,8 +11,8 @@
 //! - Rename/Move: Move or rename files
 
 use crate::value::collections::{
-    alloc_runtime_string, rt_array_new, rt_array_push, rt_byte_array_new, rt_string_data, rt_string_len, rt_string_new,
-    rt_string_new_with_len_hash, RuntimeArray,
+    alloc_runtime_string, rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_byte_array_new, rt_string_data,
+    rt_string_len, rt_string_new, rt_string_new_with_len_hash, RuntimeArray,
 };
 use crate::value::{HeapHeader, RuntimeValue};
 use memmap2::MmapOptions;
@@ -1023,6 +1023,24 @@ pub unsafe extern "C" fn rt_u32s_from_raw(ptr: i64, count: i64) -> RuntimeValue 
     array
 }
 
+/// Copy a Simple `[u32]` into caller-owned native memory.
+#[no_mangle]
+pub unsafe extern "C" fn rt_write_u32s_to_raw(ptr: i64, values: RuntimeValue) -> i64 {
+    if ptr == 0 {
+        return 0;
+    }
+    let len = rt_array_len(values);
+    if len <= 0 {
+        return 0;
+    }
+    let dst = ptr as usize as *mut u32;
+    for index in 0..len {
+        dst.add(index as usize)
+            .write(rt_array_get(values, index).as_int() as u32);
+    }
+    len
+}
+
 /// Convert a text RuntimeValue to a byte array ([u8]).
 #[no_mangle]
 pub extern "C" fn rt_text_to_bytes(text: RuntimeValue) -> RuntimeValue {
@@ -1624,6 +1642,20 @@ sandbox_lowering:
             let count = crate::value::collections::rt_array_len(result);
             assert_eq!(count, 5);
         }
+    }
+
+    #[test]
+    fn test_write_u32s_to_raw_is_bit_exact() {
+        let values = rt_array_new(3);
+        rt_array_push(values, RuntimeValue::from_int(0));
+        rt_array_push(values, RuntimeValue::from_int(0x7fff_ffff));
+        rt_array_push(values, RuntimeValue::from_int(0xffff_ffff));
+        let mut output = [0u32; 3];
+
+        let written = unsafe { rt_write_u32s_to_raw(output.as_mut_ptr() as i64, values) };
+
+        assert_eq!(written, 3);
+        assert_eq!(output, [0, 0x7fff_ffff, 0xffff_ffff]);
     }
 
     #[test]

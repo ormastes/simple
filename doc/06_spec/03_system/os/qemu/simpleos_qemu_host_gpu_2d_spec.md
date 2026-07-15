@@ -290,9 +290,9 @@ SSpec, compiler, QEMU, or GPU PASS from candidate source inspection.
 
 Run the live Linux Vulkan-render/CUDA-processing matrix with a deployed
 pure-Simple compiler. After that compiler passes its bounded frontend gate, the
-wrapper validates or builds its lane-owned CUDA+Vulkan host SFFI archive using
-the locked `simple-runtime` bootstrap profile and verifies the active Cargo
-fingerprint contains both features:
+wrapper validates or builds its architecture-tagged CUDA+Vulkan host SFFI
+archive using the locked `simple-runtime` bootstrap profile and verifies the
+active Cargo fingerprint contains `cuda` and `vulkan`:
 
 ```sh
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
@@ -302,6 +302,12 @@ An explicit `SIMPLEOS_HOST_GPU_RUNTIME_PATH` is validation-only: the wrapper
 never deletes or rebuilds it. Building this host runtime provider does not
 authorize the Rust compiler seed, which remains rejected for every Simple
 check, guest build, and execution step.
+
+The 2026-07-15 current-source Stage3 compiler passes admission. Three bounded
+live cycles identified an unresolved host-daemon module/runtime ABI boundary:
+core-C Engine2D providers use untagged array words and must not be linked into
+the tagged Rust Vulkan/CUDA runtime. TODO576 must provide an ABI-compatible
+owner before this command can capture fresh QEMU receipts.
 
 Run the same three-ISA matrix with ProcessingIR forced through Vulkan:
 

@@ -8,6 +8,7 @@ BUILD_DIR=${SIMPLEOS_HOST_GPU_BUILD_DIR:-build/simpleos_host_gpu_2d}
 QEMU_TIMEOUT=${SIMPLEOS_HOST_GPU_QEMU_TIMEOUT:-20}
 PRODUCTION_QEMU_TIMEOUT=${SIMPLEOS_HOST_GPU_PRODUCTION_QEMU_TIMEOUT:-120}
 QEMU_KILL_GRACE_SECONDS=${SIMPLEOS_HOST_GPU_QEMU_KILL_GRACE_SECONDS:-2}
+NATIVE_BUILD_TIMEOUT=${SIMPLEOS_HOST_GPU_NATIVE_BUILD_TIMEOUT:-900}
 REQUIRE_CUDA=${SIMPLEOS_HOST_GPU_REQUIRE_CUDA:-0}
 PROCESSING_SELECTOR=${SIMPLEOS_HOST_GPU_PROCESSING_BACKEND:-auto}
 RSS_SAMPLE_INTERVAL=${SIMPLEOS_HOST_GPU_RSS_SAMPLE_INTERVAL:-0.1}
@@ -29,6 +30,7 @@ HOST_GPU_FIXTURE_RECT_PIXELS=288000
 HOST_GPU_WARM_SAMPLE_COUNT=$(sed -n 's/^val HOST_GPU_WARM_SAMPLE_COUNT: i64 = \([0-9][0-9]*\)$/\1/p' examples/09_embedded/simple_os/arch/common/host_gpu_ivshmem_probe_entry.spl)
 [ "$HOST_GPU_WARM_SAMPLE_COUNT" = 20 ] || exit 2
 RENDER_READBACK_P95_MAX_US=16700
+case "$NATIVE_BUILD_TIMEOUT" in ''|0|*[!0-9]*) exit 2 ;; esac
 
 case "$(uname -s)" in
     Linux) ACTIVE_HOST=linux ;;
@@ -94,10 +96,11 @@ if ! apply_processing_selector "$PROCESSING_SELECTOR"; then
     echo "simpleos_qemu_host_gpu_2d: SIMPLEOS_HOST_GPU_PROCESSING_BACKEND must be auto, or vulkan on Linux" >&2
     exit 2
 fi
+LINUX_RUNTIME_TARGET=build/simpleos_gpu_host/$HOST_ARCH-vulkan-cuda-runtime-target
 case "$ACTIVE_HOST" in
     macos) DEFAULT_RUNTIME_PATH=src/compiler_rust/target/bootstrap ;;
     windows) DEFAULT_RUNTIME_PATH= ;;
-    *) DEFAULT_RUNTIME_PATH=build/simpleos_gpu_host/vulkan-cuda-runtime-target/bootstrap ;;
+    *) DEFAULT_RUNTIME_PATH=$LINUX_RUNTIME_TARGET/bootstrap ;;
 esac
 if [ "${SIMPLEOS_HOST_GPU_RUNTIME_PATH+x}" = x ]; then
     RUNTIME_PATH=$SIMPLEOS_HOST_GPU_RUNTIME_PATH
@@ -106,7 +109,6 @@ else
     RUNTIME_PATH=$DEFAULT_RUNTIME_PATH
     RUNTIME_PATH_IS_DEFAULT=1
 fi
-LINUX_RUNTIME_TARGET=build/simpleos_gpu_host/vulkan-cuda-runtime-target
 LINUX_DEFAULT_RUNTIME_PATH=$LINUX_RUNTIME_TARGET/bootstrap
 
 linux_runtime_artifact_is_valid() {
@@ -154,9 +156,9 @@ bin/release/x86_64-pc-windows-gnu/simple.exe
 bin/release/windows-x86_64/simple.exe"
             ;;
         *)
-            candidates="bin/release/x86_64-unknown-linux-gnu/simple
-build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple
-build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple"
+            candidates="bin/release/$HOST_ARCH-unknown-linux-gnu/simple
+build/bootstrap/stage3/$HOST_ARCH-unknown-linux-gnu/simple
+build/bootstrap/stage2/$HOST_ARCH-unknown-linux-gnu/simple"
             ;;
     esac
     for candidate in $candidates
@@ -167,6 +169,20 @@ build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple"
         fi
     done
     return 1
+}
+
+run_pinned_native_build() {
+    timeout_bin=$(find_timeout || true)
+    [ -n "$timeout_bin" ] || return 127
+    SIMPLE_BINARY="$simple_bin" \
+    SIMPLE_BIN="$simple_bin" \
+    SIMPLE_BOOTSTRAP_DRIVER="$simple_bin" \
+    SIMPLE_FRONTEND_DELEGATE="$simple_bin" \
+    SIMPLE_FRONTEND_DELEGATED=1 \
+    SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_LIB="$ROOT_DIR/src" \
+        "$timeout_bin" -k "${QEMU_KILL_GRACE_SECONDS}s" \
+        "${NATIVE_BUILD_TIMEOUT}s" "$simple_bin" native-build "$@"
 }
 
 serial_has_pass() {
@@ -2250,7 +2266,7 @@ if [ -z "${SIMPLEOS_GPU_HOST_BIN:-}" ]; then
         echo "simpleos_qemu_host_gpu_2d_reason=$runtime_reason"
         exit 1
     fi
-    if ! SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_NO_STUB_FALLBACK=1 "$simple_bin" native-build \
+    if ! run_pinned_native_build \
         --backend cranelift --source src/app --source src/lib --entry-closure \
         --entry src/app/simpleos_gpu_host/main.spl --runtime-bundle core-c-bootstrap \
         --runtime-path "$RUNTIME_PATH" --cache-dir "$BUILD_DIR/daemon-cache" \
@@ -2292,11 +2308,6 @@ build_guest() {
     isa=$1
     GUEST_BUILD_REASON=guest-build-failed
     GUEST_BUILD_LOG="$BUILD_DIR/$isa-build.log"
-    case "$isa" in
-        x86_64) scenario=simpleos-host-gpu-x86_64 ;;
-        aarch64) scenario=simpleos-host-gpu-aarch64 ;;
-        riscv64) scenario=simpleos-host-gpu-riscv64 ;;
-    esac
     if [ "${SIMPLEOS_HOST_GPU_USE_EXISTING_GUESTS:-0}" = 1 ]; then
         if [ ! -f "$(kernel_for_isa "$isa")" ]; then
             GUEST_BUILD_REASON=guest-artifact-missing
@@ -2310,21 +2321,55 @@ build_guest() {
         fi
         return 0
     fi
-    if SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_BIN="$simple_bin" SIMPLE_BINARY="$simple_bin" \
-        "$simple_bin" os build --scenario="$scenario" >"$GUEST_BUILD_LOG" 2>&1
+    mkdir -p build/os/generated/generated build/os
+    cp src/generated/simpleos_log_config.spl build/os/generated/generated/simpleos_log_config.spl
+    case "$isa" in
+        x86_64)
+            entry=examples/09_embedded/simple_os/arch/x86_64/host_gpu_smoke_entry.spl
+            target=x86_64-unknown-none
+            output=build/os/simpleos_x86_64_host_gpu_probe.elf
+            linker=examples/09_embedded/simple_os/arch/x86_64/linker.ld
+            set -- --cpu x86-64-v1
+            ;;
+        aarch64)
+            entry=examples/09_embedded/simple_os/arch/arm64/host_gpu_smoke_entry.spl
+            target=aarch64-unknown-none
+            output=build/os/simpleos_arm64_host_gpu_probe.elf
+            linker=examples/09_embedded/simple_os/arch/arm64/linker.ld
+            set --
+            ;;
+        riscv64)
+            entry=examples/09_embedded/simple_os/arch/riscv64/host_gpu_smoke_entry.spl
+            target=riscv64-unknown-none
+            output=build/os/simpleos_riscv64_host_gpu_probe.elf
+            linker=examples/09_embedded/simple_os/arch/riscv64/linker.ld
+            set --
+            ;;
+    esac
+    rm -f "$output"
+    if ! SIMPLE_BOOT_MINIMAL=1 SIMPLE_OS_LOG_MODE=on run_pinned_native_build \
+        --source build/os/generated --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os --backend cranelift "$@" \
+        --opt-level=aggressive --log on --entry-closure --entry "$entry" \
+        --target "$target" -o "$output" --linker-script "$linker" \
+        >"$GUEST_BUILD_LOG" 2>&1
     then
-        if [ "$isa" != aarch64 ]; then
-            return 0
-        fi
-        GUEST_BUILD_REASON=production-guest-build-failed
-        GUEST_BUILD_LOG="$BUILD_DIR/aarch64-production-build.log"
-        if SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_BIN="$simple_bin" SIMPLE_BINARY="$simple_bin" \
-            "$simple_bin" os build --scenario=arm64-desktop-engine2d >"$GUEST_BUILD_LOG" 2>&1
-        then
-            return 0
-        fi
+        return 1
     fi
-    return 1
+    if [ "$isa" != aarch64 ]; then
+        return 0
+    fi
+    GUEST_BUILD_REASON=production-guest-build-failed
+    GUEST_BUILD_LOG="$BUILD_DIR/aarch64-production-build.log"
+    rm -f build/os/simpleos_arm64_desktop_engine2d.elf
+    SIMPLE_BOOTSTRAP=1 SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLE_OS_LOG_MODE=on run_pinned_native_build \
+        --source build/os/generated --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os --backend cranelift \
+        --opt-level=aggressive --log on --timeout 870 --entry-closure \
+        --entry examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl \
+        --target aarch64-unknown-none -o build/os/simpleos_arm64_desktop_engine2d.elf \
+        --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld \
+        >"$GUEST_BUILD_LOG" 2>&1
 }
 
 run_guest() {
