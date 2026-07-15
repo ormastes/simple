@@ -7,7 +7,7 @@ val FIXTURE_DIR = "/tmp/simple_check_log_mode_fixture"
 fn _setup_fixture():
     val (_out, _err, _code) = rt_process_run("/bin/sh", [
         "-c",
-        "rm -rf " + FIXTURE_DIR + " && mkdir -p " + FIXTURE_DIR + " && cat > " + FIXTURE_DIR + "/sample.spl <<'EOF'\nfn answer() -> i64:\n    42\nEOF"
+        "rm -rf " + FIXTURE_DIR + " && mkdir -p " + FIXTURE_DIR + " && cat > " + FIXTURE_DIR + "/sample.spl <<'EOF'\nfn answer() -> i64:\n    42\nEOF\ncat > " + FIXTURE_DIR + "/sample_spec.spl <<'EOF'\nuse std.spec.{describe, it, expect}\n\ndescribe \"sample\":\n    it \"works\":\n        expect(1).to_equal(1)\nEOF\ncat > " + FIXTURE_DIR + "/not_spec.spl <<'EOF'\nuse std.specification\n\nval example = \"\"\"\nuse std.spec\ndescribe \"inside string\":\n\"\"\"\n\ndescribe \"ordinary non-spec source\":\n\nfn example_body():\n    use std.spec\n    describe \"indented\":\nEOF"
     ])
 
 fn _run_check(args: [text]) -> (text, text, i64):
@@ -39,6 +39,21 @@ describe "check log mode CLI options":
         expect(code).to_equal(1)
         expect(out).to_contain(".")
         expect(out).to_contain("ERROR: file not found: missing.spl")
+
+    it "directs SSpec command blocks to the test runner before parsing":
+        _setup_fixture()
+        val (out, err, code) = _run_check(["sample_spec.spl"])
+        val combined = out + "\n" + err
+        expect(code).to_equal(1)
+        expect(combined).to_contain("bin/simple test sample_spec.spl --mode=interpreter")
+        expect(combined.contains("unexpected token in expression: : ':'")).to_equal(false)
+
+    it "does not classify prefixes, strings, or indented text as SSpec":
+        _setup_fixture()
+        val (out, err, code) = _run_check(["not_spec.spl"])
+        val combined = out + "\n" + err
+        expect(code).to_equal(1)
+        expect(combined.contains("error[E-SSPEC-CHECK]")).to_equal(false)
 
     it "rejects invalid log mode":
         _setup_fixture()

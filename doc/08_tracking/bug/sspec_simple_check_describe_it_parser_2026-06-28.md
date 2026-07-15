@@ -1,7 +1,7 @@
 # Bug: `bin/simple check` rejects SSpec `describe`/`it` DSL files
 
 Date: 2026-06-28
-Status: open
+Status: fixed for text output in source; focused execution pending a fresh pure-Simple runtime
 Owner: compiler / SSpec tooling
 
 ## Summary
@@ -62,3 +62,15 @@ pass; it is intentionally a native-platform completion gate.
 
 `doc/07_guide/app/mcp/mcp.md` was updated to use `bin/simple test ... --mode=interpreter`
 for the MCP command-line handshake SSpec instead of `bin/simple check`.
+
+## Source fix (2026-07-15)
+
+Both pure-Simple check entrypoints now share one bounded SSpec source detector
+for text output. A file with a column-zero `std.spec` import and a top-level
+`describe ...:` block returns the documented actionable `bin/simple test
+<path> --mode=interpreter` guidance before invoking the general parser. The
+detector ignores triple-string bodies, indented text, and import-name prefixes;
+JSON behavior and general parser grammar are unchanged.
+`test/02_integration/app/check_log_modes_spec.spl` guards the standalone check
+entry, rejects the former generic colon-token diagnostic, and covers those
+negative cases.
