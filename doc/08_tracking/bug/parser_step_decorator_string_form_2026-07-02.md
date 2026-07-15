@@ -1,7 +1,7 @@
 # Parser: `@step "label"` decorator form fails — "expected Fn, found FString"
 
 Date: 2026-07-02
-Status: open (workaround in place)
+Status: source fix implemented; focused execution pending
 Severity: P3
 Related: .claude/templates/spipe_template.spl, SPipe SSpec authoring
 
@@ -35,3 +35,11 @@ e.g. the pre-fix version of
 ## Workaround
 
 Converted the spec's `@step "..."` lines to `# @step: ...`.
+
+## Resolution (2026-07-15)
+
+The shared declaration parser now consumes the one string label following a
+`step` decorator before continuing with stacked decorators or the function.
+`parser_attribute_spec.spl` covers `@step "..."` followed by `@inline` and
+asserts both a clean parse and the expected declaration. Execution awaits a
+runnable pure-Simple test artifact.

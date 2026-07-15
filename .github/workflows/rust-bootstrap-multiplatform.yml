@@ -13,6 +13,7 @@ on:
       - 'scripts/check/cert/redeploy_gate/fixtures/p2_add.spl'
       - 'scripts/check/check-bootstrap-portability.shs'
       - 'scripts/check/check-llvm-simd-row-native-arch.shs'
+      - 'scripts/check/native-smoke-matrix.shs'
       - 'scripts/setup/platform-detect.shs'
       - 'test/fixtures/compiler/llvm_simd_row_native_probe.spl'
       - '.github/workflows/rust-bootstrap-multiplatform.yml'
@@ -28,6 +29,7 @@ on:
       - 'scripts/check/cert/redeploy_gate/fixtures/p2_add.spl'
       - 'scripts/check/check-bootstrap-portability.shs'
       - 'scripts/check/check-llvm-simd-row-native-arch.shs'
+      - 'scripts/check/native-smoke-matrix.shs'
       - 'scripts/setup/platform-detect.shs'
       - 'test/fixtures/compiler/llvm_simd_row_native_probe.spl'
       - '.github/workflows/rust-bootstrap-multiplatform.yml'
@@ -51,12 +53,24 @@ jobs:
           - os: ubuntu-latest
             name: Linux x86_64
             backend: llvm
+          - os: ubuntu-latest
+            name: Linux x86_64
+            backend: cranelift
           - os: macos-latest
             name: macOS aarch64
+            backend: llvm
+          - os: macos-latest
+            name: macOS aarch64
+            backend: cranelift
+          - os: macos-15-intel
+            name: macOS x86_64
             backend: llvm
           - os: macos-15-intel
             name: macOS x86_64
             backend: cranelift
+          - os: windows-latest
+            name: Windows x86_64
+            backend: llvm
           - os: windows-latest
             name: Windows x86_64
             backend: cranelift
@@ -94,13 +108,18 @@ jobs:
             echo "LLVM_SYS_180_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
           fi
 
-      - name: Install FreeType (Windows)
+      - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           vcpkg install freetype:x64-windows
           "RUSTFLAGS=-L native=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib" >> $env:GITHUB_ENV
           "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> $env:GITHUB_PATH
+          if ("${{ matrix.backend }}" -eq "llvm") {
+            choco install llvm --version=18.1.8 -y --no-progress
+            "LLVM_SYS_180_PREFIX=C:\Program Files\LLVM" >> $env:GITHUB_ENV
+            "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+          }
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -144,10 +163,22 @@ jobs:
             --no-mcp \
             --jobs=2
 
+      - name: Run strict staged native smoke matrix
+        shell: bash
+        run: |
+          stage3="$(find build/bootstrap/stage3 -type f \( -name simple -o -name simple.exe \) -print -quit)"
+          test -n "$stage3"
+          chmod +x "$stage3"
+          SIMPLE_RUNTIME_PATH="$PWD/src/compiler_rust/target/bootstrap" \
+            SIMPLE_BINARY="$stage3" \
+            NATIVE_SMOKE_BACKEND=${{ matrix.backend }} \
+            NATIVE_SMOKE_WORK_DIR="build/check/native-smoke-${{ matrix.backend }}" \
+            sh scripts/check/native-smoke-matrix.shs
+
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: bootstrap-${{ matrix.name }}-${{ github.sha }}
+          name: bootstrap-${{ matrix.name }}-${{ matrix.backend }}-${{ github.sha }}
           path: |
             build/bootstrap/stage2/**/simple*
             build/bootstrap/stage3/**/simple*
@@ -163,7 +194,7 @@ jobs:
       - name: Download Linux pure-Simple stages
         uses: actions/download-artifact@v4
         with:
-          name: bootstrap-Linux x86_64-${{ github.sha }}
+          name: bootstrap-Linux x86_64-llvm-${{ github.sha }}
           path: build/bootstrap-linux
 
       - name: Install LLVM cross-execution toolchains
