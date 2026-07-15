@@ -836,8 +836,8 @@ pub(super) fn validate_stage4_cli_c_provider_archive_contract(path: &Path, sourc
     validate_stage4_cli_c_provider_archive(path, spec).map(|_| ())
 }
 
-fn validate_archive_definition_disjointness(archives: &[(&str, &Path)]) -> Result<(), String> {
-    let mut owners = BTreeMap::<String, &str>::new();
+fn archive_definition_owners(archives: &[(&str, &Path)]) -> Result<BTreeMap<String, String>, String> {
+    let mut owners = BTreeMap::<String, String>::new();
     for (label, archive) in archives {
         let forbidden_sections = forbidden_archive_sections(archive)?;
         if !forbidden_sections.is_empty() {
@@ -855,14 +855,45 @@ fn validate_archive_definition_disjointness(archives: &[(&str, &Path)]) -> Resul
             if count != 1 {
                 return Err(format!("Stage4 archive {label} defines `{symbol}` {count} times"));
             }
-            if let Some(first_owner) = owners.insert(symbol.clone(), label) {
+            if let Some(first_owner) = owners.insert(symbol.clone(), (*label).to_string()) {
                 return Err(format!(
                     "Stage4 archive overlap: `{symbol}` is defined by both {first_owner} and {label}"
                 ));
             }
         }
     }
-    Ok(())
+    Ok(owners)
+}
+
+fn validate_archive_definition_disjointness(archives: &[(&str, &Path)]) -> Result<(), String> {
+    archive_definition_owners(archives).map(|_| ())
+}
+
+pub(super) fn validate_requested_symbol_owners(
+    archives: &[(&str, &Path)],
+    requested_symbols: &[&str],
+) -> Result<BTreeMap<String, String>, String> {
+    let requested = requested_symbols.iter().copied().collect::<BTreeSet<_>>();
+    if requested.is_empty() {
+        return Err("Stage4 requested symbol set is empty".to_string());
+    }
+    let all_owners = archive_definition_owners(archives)?;
+    let mut requested_owners = BTreeMap::new();
+    let mut missing = Vec::new();
+    for symbol in requested {
+        if let Some(owner) = all_owners.get(symbol) {
+            requested_owners.insert(symbol.to_string(), owner.clone());
+        } else {
+            missing.push(symbol);
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "Stage4 requested symbols have no archive owner: {}",
+            missing.join(", ")
+        ));
+    }
+    Ok(requested_owners)
 }
 
 fn stage4_system_library_path(cc: &str, name: &str) -> Result<PathBuf, String> {

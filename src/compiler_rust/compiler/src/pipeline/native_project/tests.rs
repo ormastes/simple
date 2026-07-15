@@ -1290,6 +1290,74 @@ fn test_find_native_all_library_does_not_search_compiler_rust_target() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn test_requested_symbol_owners_reject_empty_request() {
+    let error = super::tools::validate_requested_symbol_owners(&[], &[]).unwrap_err();
+
+    assert_eq!(error, "Stage4 requested symbol set is empty");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_requested_symbol_owners_are_stable_sorted_and_unique() {
+    let temp = tempfile::tempdir().unwrap();
+    let later = build_compiler_backfill_test_archive(temp.path(), "later", &["void requested_z(void) {}\n"]);
+    let earlier = build_compiler_backfill_test_archive(temp.path(), "earlier", &["void requested_a(void) {}\n"]);
+
+    let owners = super::tools::validate_requested_symbol_owners(
+        &[("later", &later), ("earlier", &earlier)],
+        &["requested_z", "requested_a", "requested_z"],
+    )
+    .unwrap();
+
+    assert_eq!(
+        owners.into_iter().collect::<Vec<_>>(),
+        vec![
+            ("requested_a".to_string(), "earlier".to_string()),
+            ("requested_z".to_string(), "later".to_string()),
+        ]
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_requested_symbol_owners_reject_missing_symbols_in_stable_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let archive = build_compiler_backfill_test_archive(temp.path(), "owned", &["void requested_owned(void) {}\n"]);
+
+    let error = super::tools::validate_requested_symbol_owners(
+        &[("owned", &archive)],
+        &["requested_missing_z", "requested_missing_a"],
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        "Stage4 requested symbols have no archive owner: requested_missing_a, requested_missing_z"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_requested_symbol_owners_reject_duplicate_owners() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = build_compiler_backfill_test_archive(temp.path(), "first_owner", &["void requested_shared(void) {}\n"]);
+    let second =
+        build_compiler_backfill_test_archive(temp.path(), "second_owner", &["void requested_shared(void) {}\n"]);
+
+    let error = super::tools::validate_requested_symbol_owners(
+        &[("first", &first), ("second", &second)],
+        &["requested_shared"],
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        "Stage4 archive overlap: `requested_shared` is defined by both first and second"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn test_compiler_backfill_archive_keeps_exact_manifest_and_localizes_dependency_closure() {
     let temp = tempfile::tempdir().unwrap();
     let compiler = build_compiler_backfill_test_archive(
