@@ -651,6 +651,7 @@ fn load_matching_package_siblings(
     use_stmt: &UseStmt,
     visited: &mut HashSet<PathBuf>,
     importing_capabilities: Option<&[Capability]>,
+    target_arch: simple_common::target::TargetArch,
 ) -> Result<Vec<Node>, CompileError> {
     let Some(package_dir) = package_init_path.parent() else {
         return Ok(Vec::new());
@@ -678,7 +679,8 @@ fn load_matching_package_siblings(
 
     let mut collected = Vec::new();
     for sibling_path in sibling_files {
-        let imported = load_module_with_imports_validated(&sibling_path, visited, importing_capabilities)?;
+        let imported =
+            load_module_with_imports_internal(&sibling_path, visited, importing_capabilities, true, target_arch)?;
         collected.extend(imported.items);
     }
 
@@ -1122,7 +1124,15 @@ pub fn check_import_compatibility(
 ///
 /// Recursively loads sibling modules and flattens their items into the root module.
 pub fn load_module_with_imports(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Module, CompileError> {
-    let module = load_module_with_imports_internal(path, visited, None, true)?;
+    load_module_with_imports_for_target(path, visited, simple_common::target::TargetArch::host())
+}
+
+pub fn load_module_with_imports_for_target(
+    path: &Path,
+    visited: &mut HashSet<PathBuf>,
+    target_arch: simple_common::target::TargetArch,
+) -> Result<Module, CompileError> {
+    let module = load_module_with_imports_internal(path, visited, None, true, target_arch)?;
     warn_duplicate_private_signatures(&module);
     Ok(module)
 }
@@ -1221,7 +1231,13 @@ pub fn load_module_with_imports_validated(
     visited: &mut HashSet<PathBuf>,
     importing_capabilities: Option<&[Capability]>,
 ) -> Result<Module, CompileError> {
-    load_module_with_imports_internal(path, visited, importing_capabilities, true)
+    load_module_with_imports_internal(
+        path,
+        visited,
+        importing_capabilities,
+        true,
+        simple_common::target::TargetArch::host(),
+    )
 }
 
 /// Collect resolved imported module file paths in dependency-first order.
@@ -1242,10 +1258,13 @@ pub fn collect_direct_imported_module_paths(path: &Path) -> Result<Vec<PathBuf>,
         source = source.replace('\r', "");
     }
 
+    source =
+        crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&source, simple_common::target::TargetArch::host());
     let mut parser = simple_parser::Parser::new(&source);
-    let module = parser
+    let mut module = parser
         .parse()
         .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+    crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut module);
     display_parser_hints(&parser, &source, &path);
 
     let base_dir = path.parent().unwrap_or(Path::new("."));
@@ -1291,10 +1310,13 @@ fn collect_imported_module_paths_internal(
         source = source.replace('\r', "");
     }
 
+    source =
+        crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&source, simple_common::target::TargetArch::host());
     let mut parser = simple_parser::Parser::new(&source);
-    let module = parser
+    let mut module = parser
         .parse()
         .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+    crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut module);
     display_parser_hints(&parser, &source, &path);
 
     let base_dir = path.parent().unwrap_or(Path::new("."));
@@ -1439,6 +1461,7 @@ fn load_module_with_imports_internal(
     visited: &mut HashSet<PathBuf>,
     importing_capabilities: Option<&[Capability]>,
     flatten_imports: bool,
+    target_arch: simple_common::target::TargetArch,
 ) -> Result<Module, CompileError> {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if !visited.insert(path.clone()) {
@@ -1462,10 +1485,12 @@ fn load_module_with_imports_internal(
         source = source.replace("text?", "text");
         source = strip_optionals(source);
     }
+    source = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&source, target_arch);
     let mut parser = simple_parser::Parser::new(&source);
     let mut module = parser
         .parse()
         .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+    crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns(&mut module, target_arch);
 
     // Display error hints (warnings, etc.) from parser
     display_parser_hints(&parser, &source, &path);
@@ -1500,6 +1525,7 @@ fn load_module_with_imports_internal(
                         visited,
                         Some(effective_caps),
                         flatten_this_import,
+                        target_arch,
                     )?;
                     if flatten_this_import && resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                         imported.items.extend(load_matching_package_siblings(
@@ -1507,6 +1533,7 @@ fn load_module_with_imports_internal(
                             use_stmt,
                             visited,
                             Some(effective_caps),
+                            target_arch,
                         )?);
                     }
 
@@ -1558,6 +1585,7 @@ fn load_module_with_imports_internal(
                         visited,
                         Some(effective_caps),
                         flatten_this_import,
+                        target_arch,
                     )?;
                     if flatten_this_import && resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                         imported.items.extend(load_matching_package_siblings(
@@ -1565,6 +1593,7 @@ fn load_module_with_imports_internal(
                             &temp_use,
                             visited,
                             Some(effective_caps),
+                            target_arch,
                         )?);
                     }
 
@@ -1607,6 +1636,7 @@ fn load_module_with_imports_internal(
                         visited,
                         Some(effective_caps),
                         flatten_this_import,
+                        target_arch,
                     )?;
                     if flatten_this_import && resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                         imported.items.extend(load_matching_package_siblings(
@@ -1614,6 +1644,7 @@ fn load_module_with_imports_internal(
                             &temp_use,
                             visited,
                             Some(effective_caps),
+                            target_arch,
                         )?);
                     }
 
@@ -1658,6 +1689,7 @@ fn load_module_with_imports_internal(
                             visited,
                             Some(effective_caps),
                             flatten_this_import,
+                            target_arch,
                         )?;
                         if flatten_this_import && resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                             imported.items.extend(load_matching_package_siblings(
@@ -1665,6 +1697,7 @@ fn load_module_with_imports_internal(
                                 &temp_use,
                                 visited,
                                 Some(effective_caps),
+                                target_arch,
                             )?);
                         }
 

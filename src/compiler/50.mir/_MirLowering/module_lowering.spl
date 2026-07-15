@@ -70,7 +70,6 @@ impl MirLowering:
             struct_field_type_name: {},
             struct_value_syms: {},
             struct_method_syms: {},
-            struct_method_ambiguous: {},
             struct_method_return_names: {},
             struct_method_return_is_array: {},
             enum_payload_struct_names: {},
@@ -273,12 +272,9 @@ impl MirLowering:
             function_names.push(function.name)
         self.current_function_names = function_names
         # Entry-closure lowering reuses one MirLowering while replacing its
-        # active SymbolTable for every module. Method SymbolIds and collision
-        # flags are therefore module-local state and must not survive that
-        # boundary: a retained ID belongs to the previous symbol table, while
-        # a retained ambiguity would reject an unrelated later module.
+        # active SymbolTable for every module. Method SymbolIds are therefore
+        # module-local state and must not survive that boundary.
         self.struct_method_syms = {}
-        self.struct_method_ambiguous = {}
         self.struct_method_return_names = {}
         self.struct_method_return_is_array = {}
         val bootstrap_mode = (mir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
@@ -420,47 +416,15 @@ impl MirLowering:
         # in method_calls_literals.spl recovers the receiver's struct NAME
         # from struct_value_syms and looks it up here to dispatch the real
         # method instead of failing.
-        # struct_method_first_owner and free_function_names are both LOCAL to
-        # this lower_module call (deliberately NOT MirLowering fields
-        # accumulated across --entry-closure's many modules). Confirmed
-        # empirically that a whole-closure accumulator regresses ordinary,
-        # non-colliding struct methods: names like "get" are independently
-        # defined as instance methods on many UNRELATED stdlib structs
-        # across different modules (Map.get, FixedVec.get, ThemeRegistry.get,
-        # ...) and free functions of common names exist all over the huge
-        # transitive stdlib closure `--entry-closure` pulls in (module.
-        # functions there includes every parsed-but-maybe-dead function, not
-        # just ones the backend actually emits) -- a global accumulator
-        # immediately (and wrongly) marked those names ambiguous everywhere.
-        # Scoping both to a single module still catches the collision this
-        # guard exists for -- confirmed empirically: `impl C: fn value(self)`
-        # alongside a top-level `fn value()` IN THE SAME FILE silently
-        # dispatched `c.value()` to the free function's body instead of the
-        # method's, and two structs with the same method name IN THE SAME
-        # FILE silently dispatched to whichever won the link. A collision
-        # spanning two DIFFERENT modules is therefore a known, accepted gap
-        # (see #156 follow-up notes) -- resolving it precisely needs
-        # backend-level qualified (mangled) symbol naming, out of scope for
-        # this minimal-viable fix.
-        var struct_method_first_owner: Dict<text, text> = {}
-        var free_function_names: Dict<text, bool> = {}
         var static_method_symbol_ids: Dict<i64, bool> = {}
         val module_fn_values = module.functions.values()
         var mfi = 0
         while mfi < module_fn_values.len():
-            # module.functions ALSO contains every impl method (merged in via
-            # lowered_impl_functions -- see hir module_lowering.spl), so this
-            # scan must skip instance and static method entries. Without the
-            # guard, EVERY method's own bare name always appears in module.
-            # functions too, making it collide with ITSELF and disabling the
-            # fast dispatch universally (confirmed empirically: `get`/`inc`
-            # both regressed to "unresolved method call" with no actual
-            # free-function collision present).
+            # module.functions also contains impl methods; retain their static
+            # marker for the separate static receiver lookup below.
             val module_fn = module_fn_values[mfi]
             if module_fn.is_static:
                 static_method_symbol_ids[self.symbol_id_value(module_fn.symbol)] = true
-            elif not module_fn.is_method:
-                free_function_names[module_fn.name] = true
             mfi = mfi + 1
 
         var impl_mi = 0
@@ -482,8 +446,7 @@ impl MirLowering:
                     val impl_method_key = "{impl_type_name}::{impl_method_name}"
                     self.struct_method_syms[impl_method_key] = impl_method_id
                     val impl_method_is_static = static_method_symbol_ids.has(self.symbol_id_value(impl_method_id))
-                    val impl_static_return_name = impl_def.method_return_struct_names.get(impl_method_name)
-                    if impl_method_is_static and impl_static_return_name != nil and impl_static_return_name != "":
+                    if impl_method_is_static:
                         self.struct_method_syms["static::{impl_method_key}"] = impl_method_id
                     # Methchain lane: thread the method's declared return-type
                     # struct name (resolved during HIR lowering -- see
@@ -500,14 +463,6 @@ impl MirLowering:
                     val impl_ret_is_array = impl_def.method_return_is_array.get(impl_method_name)
                     if impl_ret_is_array != nil and impl_ret_is_array:
                         self.struct_method_return_is_array["{impl_type_name}::{impl_method_name}"] = true
-                    val existing_owner = struct_method_first_owner.get(impl_method_name)
-                    if existing_owner != nil:
-                        if existing_owner != impl_type_name:
-                            self.struct_method_ambiguous[impl_method_name] = true
-                    else:
-                        struct_method_first_owner[impl_method_name] = impl_type_name
-                    if free_function_names.has(impl_method_name):
-                        self.struct_method_ambiguous[impl_method_name] = true
                     mni = mni + 1
             impl_mi = impl_mi + 1
 

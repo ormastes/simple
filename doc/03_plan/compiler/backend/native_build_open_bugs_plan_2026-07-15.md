@@ -46,12 +46,12 @@ executable proof.
 | 13 | Fail-closed seed compatibility implemented with a stale-cache regression; test execution pending. |
 | 14 | Pure-Simple cache scope now includes the running compiler hash; focused runtime test pending. |
 | 15 | Fixed; the seed object key includes a cached executable fingerprint. |
-| 16 | Open; cfg stripping still ignores duplicate target-gated globals. |
-| 17 | Open/regressed; ambiguous `compiled.cleanup()` callers returned. |
-| 18 | Open/partial; scalar storage landed, but Cranelift dynload initialization remains worked around. |
+| 16 | Target-aware global cfg selection implemented across native, driver/JIT, imports, and module loading; AArch64/RISC-V LLVM object regressions added, execution pending. |
+| 17 | Module+owner-qualified method identity implemented through imports, HIR, MIR, bootstrap, trait defaults, and static methods; strict LLVM+Cranelift dispatch proof pending. |
+| 18 | Pure-Simple Cranelift dynload globals now declare, initialize, load, and store writable scalar data; strict LLVM+Cranelift init/mutation proof pending. |
 | 19 | Open/partial; dispatch/spin fixed, strict Stage-4 provider composition remains. |
-| 20 | Open/partial; host-GPU runtime selection landed, symbol ownership and native queue proof remain. |
-| 21 | Open; reduce with source-location diagnostics before any further syntax rewrite. |
+| 20 | C-owned host-GPU queue facade and fail-closed archive ownership checks implemented; native queue execution proof remains. |
+| 21 | Reduced to the Rust seed parser's single-`else if` consumption bug and fixed with a focused chained-inline regression; pure-Simple parser needed no rewrite. |
 
 ---
 

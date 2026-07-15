@@ -6,10 +6,10 @@
 # Architecture:
 #   MirModule -> for each MirFunction -> build Cranelift function -> emit .o file
 #
-# The adapter calls SFFI functions defined in src/lib/nogc_sync_mut/ffi/codegen.spl
+# The adapter calls SFFI functions defined in src/lib/nogc_sync_mut/sffi/codegen.spl
 # which delegate to Rust code in src/compiler_rust/compiler/src/codegen/cranelift_sffi.rs.
 
-use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature, MirConstValue, LocalId, LocalKind, MirLocal}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature, MirConstValue, MirStatic, LocalId, LocalKind, MirLocal}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBody, MirBlock, BlockId, MirInst, MirInstKind, MirBinOp, MirUnaryOp,
     MirOperand, MirOperandKind, MirTerminator, SwitchCase}
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, CompileOptions, CompileError, compileerror_backend_error}
@@ -89,6 +89,13 @@ pub fn cranelift_compile_module_direct(options: CompileOptions, module: MirModul
             "Failed to create Cranelift AOT module"))
     print "[cranelift-direct] module"
 
+    val global_handles_opt = declare_module_statics(cl_module, module)
+    if not global_handles_opt.?:
+        cranelift_free_module(cl_module)
+        return Err(compileerror_backend_error(BackendKind.Cranelift,
+            "Failed to declare module statics"))
+    val global_handles = global_handles_opt.unwrap()
+
     var func_handles: Dict<text, i64> = {}
     for func in module.functions.values():
         val emit_name = if func.name == "main": "__simple_main" else: func.name
@@ -99,7 +106,7 @@ pub fn cranelift_compile_module_direct(options: CompileOptions, module: MirModul
 
     for func in module.functions.values():
         print "[cranelift-direct] compile {func.name}"
-        val result = compile_function(cl_module, func, func_handles)
+        val result = compile_function(cl_module, func, func_handles, global_handles)
         if not result:
             cranelift_free_module(cl_module)
             return Err(compileerror_backend_error(BackendKind.Cranelift,
@@ -141,6 +148,13 @@ impl Codegen for CraneliftCodegenAdapter:
             return Err(compileerror_backend_error(BackendKind.Cranelift,
                 "Failed to create Cranelift AOT module"))
 
+        val global_handles_opt = declare_module_statics(cl_module, module)
+        if not global_handles_opt.?:
+            cranelift_free_module(cl_module)
+            return Err(compileerror_backend_error(BackendKind.Cranelift,
+                "Failed to declare module statics"))
+        val global_handles = global_handles_opt.unwrap()
+
         # First pass: declare all functions so forward references work
         var func_handles: Dict<text, i64> = {}
         for func in module.functions.values():
@@ -150,7 +164,7 @@ impl Codegen for CraneliftCodegenAdapter:
 
         # Second pass: compile each function
         for func in module.functions.values():
-            val result = compile_function(cl_module, func, func_handles)
+            val result = compile_function(cl_module, func, func_handles, global_handles)
             if not result:
                 cranelift_free_module(cl_module)
                 return Err(compileerror_backend_error(BackendKind.Cranelift,
@@ -223,11 +237,38 @@ fn build_signature(sig: MirSignature, is_main: bool) -> i64:
         cranelift_sig_set_return(cl_sig, mir_type_to_cl(sig.return_type))
     cl_sig
 
+fn cranelift_static_init_bits(static_: MirStatic) -> i64?:
+    match static_.type_.kind:
+        case I8 | U8 | I16 | U16 | I32 | U32 | I64 | U64 | Bool:
+            ()
+        case _:
+            return nil
+    if not static_.init.?:
+        return nil
+    match static_.init.unwrap().value:
+        case Int(value): Some(value)
+        case Bool(value): Some(if value: 1 else: 0)
+        case Zero: Some(0)
+        case _: nil
+
+fn declare_module_statics(cl_module: i64, module: MirModule) -> Dict<i64, i64>?:
+    var handles: Dict<i64, i64> = {}
+    for static_ in module.statics.values():
+        val initial_bits = cranelift_static_init_bits(static_)
+        if not initial_bits.?:
+            return nil
+        val name = "__simple_global_{static_.name}_{static_.symbol.id}"
+        val handle = cranelift_declare_global_data(cl_module, name, mir_type_to_cl(static_.type_), initial_bits.unwrap())
+        if handle == 0:
+            return nil
+        handles[static_.symbol.id] = handle
+    Some(handles)
+
 # ============================================================================
 # Function Compilation
 # ============================================================================
 
-fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, i64>) -> bool:
+fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, i64>, global_handles: Dict<i64, i64>) -> bool:
     val emit_name = if func.name == "main": "__simple_main" else: func.name
     val sig = build_signature(func.signature, func.name == "main")
     val ctx = cranelift_begin_function(cl_module, emit_name, sig)
@@ -320,7 +361,7 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
                         cranelift_store(ctx, result, addr, 0)
                     inst_index = inst_index + 2
                     continue
-            cl_translate_instruction(ctx, inst, value_map, slot_map, block_map, cl_module, func_handles, func)
+            cl_translate_instruction(ctx, inst, value_map, slot_map, block_map, cl_module, func_handles, global_handles, func)
             inst_index = inst_index + 1
 
         # Compile terminator
@@ -355,6 +396,7 @@ fn cl_translate_instruction(
     block_map: Dict<i64, i64>,
     cl_module: i64,
     func_handles: Dict<text, i64>,
+    global_handles: Dict<i64, i64>,
     func: MirFunction
 ):
     match inst.kind:
@@ -418,6 +460,25 @@ fn cl_translate_instruction(
             val addr = cl_translate_operand(ctx, cl_module, ptr, value_map, slot_map, func)
             val val_ = cl_translate_operand(ctx, cl_module, value, value_map, slot_map, func)
             cranelift_store(ctx, val_, addr, 0)
+
+        case LoadGlobal(dest, symbol):
+            if not global_handles.has(symbol.id):
+                panic("Cranelift global load missing declaration: {symbol.id}")
+            val addr = cranelift_data_addr_in_func(ctx, global_handles[symbol.id])
+            if addr == 0:
+                panic("Cranelift global address unavailable: {symbol.id}")
+            val result = cranelift_load(ctx, mir_type_to_cl(local_type(dest.id, func)), addr, 0)
+            value_map[dest.id] = result
+            store_local_result(ctx, dest, result, slot_map, func)
+
+        case StoreGlobal(symbol, value):
+            if not global_handles.has(symbol.id):
+                panic("Cranelift global store missing declaration: {symbol.id}")
+            val addr = cranelift_data_addr_in_func(ctx, global_handles[symbol.id])
+            if addr == 0:
+                panic("Cranelift global address unavailable: {symbol.id}")
+            val value_ = cl_translate_operand(ctx, cl_module, value, value_map, slot_map, func)
+            cranelift_store(ctx, value_, addr, 0)
 
         case GetElementPtr(dest, base, indices):
             # GEP: base + index * element_size

@@ -14,7 +14,7 @@ use tracing::instrument;
 use super::core::CompilerPipeline;
 use crate::compilability::{analyze_module, boxed_return_functions};
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::import_loader::{has_script_statements, load_module_with_imports};
+use crate::import_loader::{has_script_statements, load_module_with_imports, load_module_with_imports_for_target};
 use crate::interpreter::evaluate_module_with_di_and_aop;
 use crate::mir;
 use crate::monomorphize::{monomorphize_module, specialize_bindings};
@@ -303,8 +303,8 @@ impl CompilerPipeline {
     /// Lint diagnostics are stored and can be retrieved via `lint_diagnostics()`.
     #[instrument(skip(self, source))]
     pub fn compile_source_to_memory(&mut self, source: &str) -> Result<Vec<u8>, CompileError> {
-        let mut parser = simple_parser::Parser::new(source);
-        let module = parser.parse().map_err(|e| CompileError::Parse(format!("{e}")))?;
+        let module = crate::pipeline::cfg_strip::parse_cfg_filtered_module(source, TargetArch::host())
+            .map_err(CompileError::Parse)?;
 
         // Emit AST if requested (LLM-friendly #885)
         if let Some(path) = &self.emit_ast {
@@ -432,8 +432,8 @@ impl CompilerPipeline {
     /// Lint diagnostics are stored and can be retrieved via `lint_diagnostics()`.
     #[instrument(skip(self, source))]
     pub fn compile_source_to_memory_native(&mut self, source: &str) -> Result<Vec<u8>, CompileError> {
-        let mut parser = simple_parser::Parser::new(source);
-        let ast_module = parser.parse().map_err(|e| CompileError::Parse(format!("{e}")))?;
+        let ast_module = crate::pipeline::cfg_strip::parse_cfg_filtered_module(source, TargetArch::host())
+            .map_err(CompileError::Parse)?;
 
         // Emit AST if requested (LLM-friendly #885)
         if let Some(path) = &self.emit_ast {
@@ -581,8 +581,8 @@ impl CompilerPipeline {
         source: &str,
         target: Target,
     ) -> Result<Vec<u8>, CompileError> {
-        let mut parser = simple_parser::Parser::new(source);
-        let ast_module = parser.parse().map_err(|e| CompileError::Parse(format!("{e}")))?;
+        let ast_module =
+            crate::pipeline::cfg_strip::parse_cfg_filtered_module(source, target.arch).map_err(CompileError::Parse)?;
         self.compile_module_to_memory_for_target_with_context(ast_module, target, None)
     }
 
@@ -596,7 +596,7 @@ impl CompilerPipeline {
         source_path: &Path,
         target: Target,
     ) -> Result<Vec<u8>, CompileError> {
-        let ast_module = load_module_with_imports(source_path, &mut HashSet::new())?;
+        let ast_module = load_module_with_imports_for_target(source_path, &mut HashSet::new(), target.arch)?;
         self.compile_module_to_memory_for_target_with_context(ast_module, target, Some(source_path))
     }
 
@@ -750,8 +750,8 @@ impl CompilerPipeline {
         self.validate_release_config()?;
 
         // Parse source
-        let mut parser = simple_parser::Parser::new(source);
-        let ast_module = parser.parse().map_err(|e| CompileError::Parse(format!("{e}")))?;
+        let ast_module = crate::pipeline::cfg_strip::parse_cfg_filtered_module(source, TargetArch::host())
+            .map_err(CompileError::Parse)?;
 
         // Emit AST if requested
         if let Some(path) = &self.emit_ast {

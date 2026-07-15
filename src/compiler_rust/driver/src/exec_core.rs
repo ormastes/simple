@@ -331,6 +331,10 @@ impl ExecCore {
         } else {
             source
         };
+        let source = simple_compiler::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(
+            &source,
+            simple_common::target::TargetArch::host(),
+        );
         let mut parser = Parser::new(&source);
         let parse_result = parser.parse();
 
@@ -474,12 +478,16 @@ impl ExecCore {
         use simple_compiler::mir::lower_to_mir;
         use simple_parser::Parser;
 
-        // Parse source code
-        let mut parser = Parser::new(source);
+        // Parse the same cfg-filtered text used for diagnostics and lowering.
+        let source = simple_compiler::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(
+            source,
+            simple_common::target::TargetArch::host(),
+        );
+        let mut parser = Parser::new(&source);
         let parse_result = parser.parse();
 
         // Display error hints (even if parsing failed)
-        self.display_error_hints(&parser, source);
+        self.display_error_hints(&parser, &source);
 
         // Now check if parsing succeeded
         let mut ast = parse_result.map_err(|e| format!("parse error: {}", e))?;

@@ -264,6 +264,7 @@ pub(crate) fn compile_file_to_object(
         // Non-bootstrap: just normalize text? -> text for basic compat
         source.replace("text?", "text")
     };
+    source = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&source, effective_target().arch);
 
     // Parse
     let mut parser = simple_parser::Parser::new(&source);

@@ -252,6 +252,44 @@ mod tests {
 
     #[cfg(feature = "llvm")]
     #[test]
+    fn cfg_duplicate_globals_match_target_selected_object() {
+        let temp = tempfile::tempdir().unwrap();
+        let entry = temp.path().join("main.spl");
+        let cfg_source = "\
+@align(8)\n@cfg(riscv64)\n# inactive on aarch64\n\nval BASE = 11\n\
+@align(8)\n@cfg(aarch64)\n# inactive on riscv64\n\nval BASE = 12\n\
+@cfg(riscv64)\nconst LIMIT = 21\n@cfg(aarch64)\nconst LIMIT = 22\n\
+@cfg(riscv64)\nstatic STEP = 31\n@cfg(aarch64)\nstatic STEP = 32\n\
+@cfg(riscv64)\nval DATA = [\n    41,\n    42\n]\n\
+@cfg(aarch64)\nval DATA = [\n    43,\n    44\n]\n\
+fn main() -> i64:\n    return BASE + LIMIT + STEP + DATA[0]\n";
+
+        let compile = |source: &str, target: Target| {
+            std::fs::write(&entry, source).unwrap();
+            CompilerPipeline::new()
+                .expect("pipeline")
+                .compile_file_to_memory_for_target(&entry, target)
+                .expect("target object")
+        };
+        for (arch, canonical) in [
+            (
+                TargetArch::Aarch64,
+                "val BASE = 12\nconst LIMIT = 22\nstatic STEP = 32\nval DATA = [43, 44]\nfn main() -> i64:\n    return BASE + LIMIT + STEP + DATA[0]\n",
+            ),
+            (
+                TargetArch::Riscv64,
+                "val BASE = 11\nconst LIMIT = 21\nstatic STEP = 31\nval DATA = [41, 42]\nfn main() -> i64:\n    return BASE + LIMIT + STEP + DATA[0]\n",
+            ),
+        ] {
+            let target = Target::new(arch, TargetOS::Linux);
+            let selected = compile(cfg_source, target);
+            let expected = compile(canonical, target);
+            assert_eq!(selected, expected, "cfg-selected object differs for {arch:?}");
+        }
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
     fn test_pipeline_pure_simple_math_core_emits_real_wasm() {
         let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
         let target = Target::new_wasm(TargetArch::Wasm32, simple_common::target::WasmRuntime::Wasi);

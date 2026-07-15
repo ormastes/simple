@@ -1025,6 +1025,16 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
         core_c_symbols.contains("rt_array_concat"),
         "core-c runtime archive must include the array concatenation ABI emitted for array +"
     );
+    for symbol in simple_common::RUNTIME_SYMBOL_NAMES
+        .iter()
+        .copied()
+        .filter(|symbol| symbol.starts_with("rt_host_gpu_queue_"))
+    {
+        assert!(
+            core_c_symbols.contains(symbol),
+            "core-c runtime archive must own the Engine2D queue symbol {symbol}"
+        );
+    }
     let core_c_members = archive_members(&core_c).expect("core-c runtime archive members should be readable");
     let directx_object = format!("runtime_directx_core.{}", test_host_object_extension());
     assert!(
@@ -2021,6 +2031,29 @@ fn test_runtime_bundle_hosted_is_allowed_for_bootstrap_entry_only() {
         Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },
         None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP") },
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_rejects_missing_engine2d_queue_symbols() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    build_compiler_backfill_test_archive(
+        temp.path(),
+        "simple_runtime",
+        &["void rt_host_gpu_queue_reset(void) {}\n"],
+    );
+
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("engine2d")).config(config);
+
+    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(error.contains("missing Engine2D queue symbols"));
+    assert!(error.contains("rt_host_gpu_queue_emit_payload"));
 }
 
 #[test]
@@ -4222,10 +4255,9 @@ fn test_incremental_cache_hit_miss_mix_parallel_wide_matrix() {
     );
 }
 
-/// Unit coverage for issue #57's `file_arch_cfg_gate` helper: full-scan
-/// native-project discovery previously ignored `@cfg(arch)` entirely (see
-/// src/os/kernel/arch/hal.spl header), so a cross-arch build could pull
-/// wrong-arch files into compilation. Covers the documented alias groups
+/// Syntax coverage for the test-only leading-cfg recognizer. Production
+/// discovery does not treat this as a whole-file gate because `@cfg` owns one
+/// declaration. Covers the documented alias groups
 /// (mirroring parser_preprocessor.spl's `_pp_cfg_condition_matches`),
 /// `not(...)` negation, and the "leave ungated" cases (no leading @cfg,
 /// non-arch condition name, `"key", "value"` pairs) that must NOT be
@@ -4417,22 +4449,10 @@ fn test_strip_inactive_cfg_arch_fns_for_host_run_path_semantics() {
     assert!(stripped_fn_hint("never_defined").is_none());
 }
 
-/// End-to-end fixture for issue #57: a two-arch source tree with one file
-/// gated `@cfg(x86_64)` and one gated `@cfg(riscv64)`, discovered via
-/// `discover_files_full_scan` (the full-scan path, not entry-closure).
-/// Relies on this test environment's host arch being x86_64 (verified via
-/// `Target::host()`) rather than mutating the process-global
-/// `TARGET_OVERRIDE`, which is a `OnceLock` that other tests in this same
-/// binary must not have set already.
+/// Full-scan discovery must retain files for per-declaration cfg filtering.
+/// A leading inactive declaration is not a whole-file gate.
 #[test]
-fn test_discover_files_full_scan_respects_arch_cfg_gate() {
-    use simple_common::target::{Target, TargetArch};
-
-    if Target::host().arch != TargetArch::X86_64 {
-        eprintln!("skipping: this fixture assumes an x86_64 host (matches --target x86_64-unknown-linux-gnu)");
-        return;
-    }
-
+fn test_discover_files_full_scan_keeps_declaration_cfg_files() {
     let temp = tempfile::tempdir().unwrap();
     let project_root = temp.path().join("project");
     let src_dir = project_root.join("src");
@@ -4449,6 +4469,11 @@ fn test_discover_files_full_scan_respects_arch_cfg_gate() {
     )
     .unwrap();
     std::fs::write(src_dir.join("arch_neutral.spl"), "fn neutral_probe(): pass\n").unwrap();
+    std::fs::write(
+        src_dir.join("mixed.spl"),
+        "@cfg(riscv64)\nval ARCH_VALUE = 1\nfn must_still_be_discovered(): pass\n",
+    )
+    .unwrap();
 
     let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool")).source_dir(src_dir);
 
@@ -4460,7 +4485,7 @@ fn test_discover_files_full_scan_respects_arch_cfg_gate() {
 
     assert!(
         names.contains(&"only_x86_64.spl".to_string()),
-        "expected x86_64-gated file to be discovered for an x86_64 target: {:?}",
+        "cfg-decorated declarations are filtered after discovery: {:?}",
         names
     );
     assert!(
@@ -4469,8 +4494,13 @@ fn test_discover_files_full_scan_respects_arch_cfg_gate() {
         names
     );
     assert!(
-        !names.contains(&"only_riscv64.spl".to_string()),
-        "riscv64-gated file must NOT be discovered when building for x86_64: {:?}",
+        names.contains(&"only_riscv64.spl".to_string()),
+        "a declaration cfg must not become a whole-file gate: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"mixed.spl".to_string()),
+        "mixed file missing: {:?}",
         names
     );
 }

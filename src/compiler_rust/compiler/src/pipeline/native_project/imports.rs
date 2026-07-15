@@ -238,7 +238,9 @@ pub(crate) fn build_import_map(
         }
         let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
         let prefix = module_prefix_from_path(path, &per_file_root);
-        let mut parser = simple_parser::Parser::new(source);
+        let filtered_source =
+            crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(source, super::effective_target().arch);
+        let mut parser = simple_parser::Parser::new(&filtered_source);
         if let Ok(mut ast) = parser.parse() {
             // Keep the arity/return-type map consistent with the codegen unit:
             // drop wrong-arch `@cfg` function variants so a non-target variant
@@ -493,7 +495,9 @@ pub(crate) fn build_import_map(
         }
         let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
         let prefix = module_prefix_from_path(path, &per_file_root);
-        let mut parser = simple_parser::Parser::new(source);
+        let filtered_source =
+            crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(source, super::effective_target().arch);
+        let mut parser = simple_parser::Parser::new(&filtered_source);
         if let Ok(mut ast) = parser.parse() {
             super::discovery::strip_inactive_cfg_arch_fns(&mut ast, super::effective_target().arch);
             let mut item_metadata = ExportMetadata {

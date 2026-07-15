@@ -696,6 +696,54 @@ fn main() -> i64:
 EOF
 }
 
+write_case_method_owner_dispatch() {
+    cat >"$1" <<'EOF'
+struct CodegenCompiledModule:
+    handle: i64
+
+impl CodegenCompiledModule:
+    fn cleanup(self) -> i64: 17
+    static fn code() -> i64: 18
+
+struct TieredJitManager:
+    handle: i64
+
+impl TieredJitManager:
+    fn cleanup(self) -> i64: 99
+    static fn code() -> i64: 100
+
+fn main() -> i64:
+    val compiled = CodegenCompiledModule(handle: 1)
+    val jit = TieredJitManager(handle: 2)
+    print(compiled.cleanup())
+    print(jit.cleanup())
+    print(CodegenCompiledModule.code())
+    print(TieredJitManager.code())
+    0
+EOF
+}
+
+write_case_module_global_static_init() {
+    # First reads must observe both nonzero and zero static initialization;
+    # compound writes must then persist through StoreGlobal/LoadGlobal.
+    cat >"$1" <<'EOF'
+var g_nonzero: i64 = 17
+var g_zero: i64 = 0
+
+fn main() -> i64:
+    print(g_nonzero)
+    print("/")
+    print(g_zero)
+    g_nonzero += 5
+    g_zero += 5
+    print("|")
+    print(g_nonzero)
+    print("/")
+    print(g_zero)
+    return 0
+EOF
+}
+
 write_case_dict_from_call_keys() {
     # dict returned from a function, keys()-iter index (abde1838e3e): the call
     # -result dict's string keys came back un-decoded so every d[k] returned 0;
@@ -785,9 +833,14 @@ run_seed() {
 }
 
 build_native() {
-    # $1 = src, $2 = out bin, $3 = build log, optional $4 = strict backend.
+    # $1 = src, $2 = out bin, $3 = build log, optional $4 = strict backend,
+    # optional $5 = native-build mode.
     src="$1"; bin="$2"; log="$3"
-    if [ "$#" -ge 4 ]; then
+    if [ "$#" -ge 5 ]; then
+        backend="$4"; mode="$5"
+        env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build \
+            --backend="$backend" --mode="$mode" --entry "$src" -o "$bin" --clean >"$log" 2>&1
+    elif [ "$#" -ge 4 ]; then
         backend="$4"
         env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build \
             --backend="$backend" --entry "$src" -o "$bin" --clean >"$log" 2>&1
@@ -798,14 +851,24 @@ build_native() {
 }
 
 run_strict_dual_backend_case() {
-    id="$1"; writer="$2"; expected="$3"
+    id="$1"; writer="$2"; expected="$3"; mode="${4:-}"
     src="$WORK_DIR/case_${id}_${STAMP}.spl"
     "$writer" "$src"
 
     for backend in llvm cranelift; do
         bin="$WORK_DIR/case_${id}_${backend}_${STAMP}_bin"
         build_log="$WORK_DIR/case_${id}_${backend}_${STAMP}.build.log"
-        if build_native "$src" "$bin" "$build_log" "$backend"; then
+        build_ok=0
+        if [ "$mode" != "" ]; then
+            if build_native "$src" "$bin" "$build_log" "$backend" "$mode"; then
+                build_ok=1
+            fi
+        else
+            if build_native "$src" "$bin" "$build_log" "$backend"; then
+                build_ok=1
+            fi
+        fi
+        if [ "$build_ok" -eq 1 ]; then
             native_rc=0
             native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
             native_norm="$(printf '%s' "$native_raw" | norm)"
@@ -967,6 +1030,8 @@ run_parity_case float_struct_field write_case_float_struct_field
 run_parity_case text_num_concat write_case_text_num_concat
 run_parity_case iife write_case_iife
 run_strict_dual_backend_case local_lambda_value write_case_local_lambda_value "611"
+run_strict_dual_backend_case method_owner_dispatch write_case_method_owner_dispatch "179918100"
+run_strict_dual_backend_case module_global_static_init write_case_module_global_static_init "17/0|22/5" dynload
 run_parity_case dict_from_call_keys write_case_dict_from_call_keys
 run_parity_case array_concat write_case_array_concat
 run_parity_case interp_bool_float write_case_interp_bool_float

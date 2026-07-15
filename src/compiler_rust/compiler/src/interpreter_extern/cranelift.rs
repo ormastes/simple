@@ -197,6 +197,22 @@ pub fn rt_cranelift_declare_string_data(args: &[Value]) -> Result<Value, Compile
     Ok(Value::Int(handle))
 }
 
+pub fn rt_cranelift_declare_global_data(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 5 {
+        return Ok(Value::Int(0));
+    }
+    let handle = unsafe {
+        cranelift_sffi::rt_cranelift_declare_global_data(
+            value_to_i64(&args[0]),
+            value_to_i64(&args[1]),
+            value_to_i64(&args[2]),
+            value_to_i64(&args[3]),
+            value_to_i64(&args[4]),
+        )
+    };
+    Ok(Value::Int(handle))
+}
+
 /// Materialize a previously-declared data object's address as an SSA value
 /// in the function currently being built.
 /// Args: ctx (i64), data_handle (i64)

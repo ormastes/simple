@@ -508,15 +508,20 @@ pub fn run_jit(code: &str) -> Result<RunResult, String> {
     use simple_compiler::mir::lower_to_mir;
     use simple_parser::Parser;
 
-    // Parse source code
-    let mut parser = Parser::new(code);
+    // Parse the same host-cfg-filtered text used for diagnostics and lowering.
+    let code = simple_compiler::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(
+        code,
+        simple_common::target::TargetArch::host(),
+    );
+    let mut parser = Parser::new(&code);
     let parse_result = parser.parse();
 
     // Display error hints (even if parsing failed)
-    display_error_hints(&parser, code);
+    display_error_hints(&parser, &code);
 
     // Now check if parsing succeeded
-    let ast = parse_result.map_err(|e| format!("parse error: {}", e))?;
+    let mut ast = parse_result.map_err(|e| format!("parse error: {}", e))?;
+    simple_compiler::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut ast);
 
     // Lower to HIR
     let hir_module = hir::lower(&ast).map_err(|e| format!("HIR lowering error: {}", e))?;

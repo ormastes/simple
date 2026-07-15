@@ -1702,8 +1702,6 @@ impl MirLowering:
                     case _: ()
                 val static_method_key = "static::{static_receiver_name}::{method}"
                 if static_receiver_name != "" and self.struct_method_syms.has(static_method_key):
-                    if self.struct_method_ambiguous.has(method):
-                        panic("compile error: ambiguous static method call: {static_receiver_name}.{method}")
                     val static_method_id = self.struct_method_syms[static_method_key]
                     var static_args: [MirOperand] = []
                     for arg in args:
@@ -1725,17 +1723,9 @@ impl MirLowering:
                 val unresolved_struct_name = self.struct_value_syms.get(unresolved_receiver_local.id)
                 if unresolved_struct_name != nil and unresolved_struct_name != "":
                     val unresolved_method_key = "{unresolved_struct_name}::{method}"
-                    # struct_method_ambiguous guard: refuse the fast dispatch
-                    # when `method`'s bare name is shared by >1 distinct
-                    # struct's impl -- the backend links direct calls by bare
-                    # name, so dispatching here would silently call whichever
-                    # same-named body won the link, corrupting the OTHER
-                    # struct's result (verified empirically: two structs both
-                    # defining `get()` with different bodies -- without this
-                    # guard the second struct's call returned the first
-                    # struct's answer). Falling through preserves the
-                    # existing (loud) "unresolved method call" error instead.
-                    if self.struct_method_syms.has(unresolved_method_key) and not self.struct_method_ambiguous.has(method):
+                    # Method symbols are owner-qualified during HIR lowering,
+                    # so unrelated types may safely expose the same method name.
+                    if self.struct_method_syms.has(unresolved_method_key):
                         val resolved_method_id = self.struct_method_syms[unresolved_method_key]
                         var im_arg_operands: [MirOperand] = [mir_operand_copy(unresolved_receiver_local)]
                         for arg in args:
@@ -2102,6 +2092,7 @@ impl MirLowering:
         # Look up function name from symbol table for direct calls
         val sym = self.symbols.get_symbol(symbol)
         var name = if sym.?: sym.name else: self.bootstrap_symbol_name(symbol)
+        name = name.replace("::", ".")
         if name == "":
             name = "unknown_{self.symbol_id_value(symbol)}"
         var signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)

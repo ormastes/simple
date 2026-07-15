@@ -182,7 +182,7 @@ impl<'a> Parser<'a> {
                 }
 
                 let mut else_block = None;
-                if self.check(&TokenKind::Else) {
+                while self.check(&TokenKind::Else) {
                     self.advance();
                     if self.check(&TokenKind::If) {
                         // else if -> treat as elif
@@ -191,9 +191,17 @@ impl<'a> Parser<'a> {
                         self.expect(&TokenKind::Colon)?;
                         let elif_block = self.parse_inline_or_block()?;
                         elif_branches.push((elif_pattern, elif_condition, elif_block));
+                        if self.check(&TokenKind::Newline)
+                            && self.peek_through_newlines_and_indents_is(&TokenKind::Else)
+                        {
+                            while self.check(&TokenKind::Newline) {
+                                self.advance();
+                            }
+                        }
                     } else {
                         self.expect(&TokenKind::Colon)?;
                         else_block = Some(self.parse_inline_or_block()?);
+                        break;
                     }
                 }
 

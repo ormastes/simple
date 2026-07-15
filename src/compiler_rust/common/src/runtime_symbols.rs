@@ -1525,6 +1525,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_host_gpu_lane_last_phase",
     "rt_host_gpu_queue_reset",
     "rt_host_gpu_queue_emit",
+    "rt_host_gpu_queue_emit_payload",
     "rt_host_gpu_queue_drain",
     "rt_host_gpu_queue_submit",
     "rt_host_gpu_queue_complete",

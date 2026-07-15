@@ -251,12 +251,39 @@ impl NativeProjectBuilder {
         }
 
         if runtime_bundle_requests_host_gpu(&self.config.runtime_bundle) {
-            let provider = self.config.runtime_path.as_ref().and_then(|path| {
-                [path.join("bootstrap").join("libsimple_runtime.a"), path.join("libsimple_runtime.a")]
+            let provider = self
+                .config
+                .runtime_path
+                .as_ref()
+                .and_then(|path| {
+                    [
+                        path.join("bootstrap").join("libsimple_runtime.a"),
+                        path.join("libsimple_runtime.a"),
+                    ]
                     .into_iter()
                     .find(|candidate| candidate.is_file())
-            })
-                .ok_or_else(|| "native-build requested host-gpu but a feature-built libsimple_runtime.a is missing".to_string())?;
+                })
+                .ok_or_else(|| {
+                    "native-build requested host-gpu but a feature-built libsimple_runtime.a is missing".to_string()
+                })?;
+            let symbols = archive_defined_symbols(&provider).ok_or_else(|| {
+                format!(
+                    "native-build could not inspect host-gpu runtime archive `{}`",
+                    provider.display()
+                )
+            })?;
+            let missing = simple_common::RUNTIME_SYMBOL_NAMES
+                .iter()
+                .copied()
+                .filter(|symbol| symbol.starts_with("rt_host_gpu_queue_") && !symbols.contains(*symbol))
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "native-build host-gpu runtime archive `{}` is missing Engine2D queue symbols: {}",
+                    provider.display(),
+                    missing.join(", ")
+                ));
+            }
             return Ok(Some((provider, false)));
         }
 

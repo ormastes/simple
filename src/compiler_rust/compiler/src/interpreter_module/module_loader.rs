@@ -700,7 +700,7 @@ pub fn load_and_merge_module(
     let _load_guard = crate::memory_guard::ModuleLoadGuard::enter(&module_path);
 
     // Read and parse the module
-    let source = match fs::read_to_string(&module_path) {
+    let mut source = match fs::read_to_string(&module_path) {
         Ok(s) => {
             // Normalize CRLF → LF so indentation-sensitive parsing works on all platforms
             if s.contains('\r') {
@@ -715,6 +715,8 @@ pub fn load_and_merge_module(
             return Err(CompileError::Io(format!("Cannot read module {:?}: {}", module_path, e)));
         }
     };
+    source =
+        crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&source, simple_common::target::TargetArch::host());
 
     let mut parser = simple_parser::Parser::new(&source);
     let module = match parser.parse() {
@@ -856,14 +858,19 @@ pub fn load_and_merge_module(
                             None => fs::read_to_string(sibling_path),
                         };
                         if let Ok(sib_source) = sib_source_result {
-                            let sib_source = if sib_source.contains('\r') {
+                            let mut sib_source = if sib_source.contains('\r') {
                                 sib_source.replace('\r', "")
                             } else {
                                 sib_source
                             };
+                            sib_source = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(
+                                &sib_source,
+                                simple_common::target::TargetArch::host(),
+                            );
                             let mut sib_parser = simple_parser::Parser::new(&sib_source);
                             match sib_parser.parse() {
-                                Ok(sib_module) => {
+                                Ok(mut sib_module) => {
+                                    crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut sib_module);
                                     // Evaluate sibling exports in isolation. Preloading is only
                                     // meant to seed __init__.spl bare exports; it should not let
                                     // helper/fallback files mutate the caller's global symbol

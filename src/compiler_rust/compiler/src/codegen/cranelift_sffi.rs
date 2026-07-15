@@ -568,6 +568,64 @@ pub unsafe extern "C" fn rt_cranelift_declare_string_data(module: i64, bytes_ptr
     handle
 }
 
+/// Declare and define a writable scalar data object. `initial_bits` is the
+/// target scalar's bit pattern, truncated to `type_code`'s width.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cranelift_declare_global_data(
+    module: i64,
+    name_ptr: i64,
+    name_len: i64,
+    type_code: i64,
+    initial_bits: i64,
+) -> i64 {
+    let name = string_from_ptr(name_ptr, name_len);
+    if name.is_empty() {
+        return 0;
+    }
+    let bytes: Vec<u8> = match type_code {
+        CL_TYPE_I8 | CL_TYPE_B1 => vec![initial_bits as u8],
+        CL_TYPE_I16 => (initial_bits as i16).to_le_bytes().to_vec(),
+        CL_TYPE_I32 | CL_TYPE_F32 => (initial_bits as i32).to_le_bytes().to_vec(),
+        CL_TYPE_I64 | CL_TYPE_F64 | CL_TYPE_PTR => initial_bits.to_le_bytes().to_vec(),
+        _ => return 0,
+    };
+    let mut desc = DataDescription::new();
+    desc.set_align(bytes.len().min(8) as u64);
+    desc.define(bytes.into_boxed_slice());
+
+    let data_id = {
+        let mut jit = JIT_MODULES.lock().unwrap();
+        if let Some(mod_ctx) = jit.get_mut(&module) {
+            let id = match mod_ctx.module.declare_data(&name, Linkage::Local, true, false) {
+                Ok(id) => id,
+                Err(_) => return 0,
+            };
+            if mod_ctx.module.define_data(id, &desc).is_err() {
+                return 0;
+            }
+            id
+        } else {
+            drop(jit);
+            let mut aot = AOT_MODULES.lock().unwrap();
+            let Some(mod_ctx) = aot.get_mut(&module) else {
+                return 0;
+            };
+            let id = match mod_ctx.module.declare_data(&name, Linkage::Local, true, false) {
+                Ok(id) => id,
+                Err(_) => return 0,
+            };
+            if mod_ctx.module.define_data(id, &desc).is_err() {
+                return 0;
+            }
+            id
+        }
+    };
+
+    let handle = next_handle();
+    DECLARED_DATA.lock().unwrap().insert(handle, data_id);
+    handle
+}
+
 /// Materialize a previously-declared data object's address as an SSA value
 /// inside the function currently being built by `ctx`. Mirrors
 /// `rt_cranelift_iconst`'s handle-return convention (the returned handle
@@ -1627,6 +1685,10 @@ pub fn register_cranelift_sffi_functions(builder: &mut JITBuilder) {
         rt_cranelift_declare_string_data as *const u8,
     );
     builder.symbol(
+        "rt_cranelift_declare_global_data",
+        rt_cranelift_declare_global_data as *const u8,
+    );
+    builder.symbol(
         "rt_cranelift_data_addr_in_func",
         rt_cranelift_data_addr_in_func as *const u8,
     );
@@ -1798,6 +1860,51 @@ mod tests {
                 "data at the returned address must be the exact declared bytes"
             );
 
+            rt_cranelift_free_module(module);
+        }
+    }
+
+    #[test]
+    fn test_mutable_global_data_roundtrip() {
+        unsafe {
+            let module_name = "test_mutable_global";
+            let module =
+                rt_cranelift_new_module(module_name.as_ptr() as i64, module_name.len() as i64, CL_TARGET_X86_64);
+            assert!(module > 0);
+
+            let data_name = "counter";
+            let data = rt_cranelift_declare_global_data(
+                module,
+                data_name.as_ptr() as i64,
+                data_name.len() as i64,
+                CL_TYPE_I64,
+                17,
+            );
+            assert!(data > 0);
+
+            let sig = rt_cranelift_new_signature(0);
+            rt_cranelift_sig_set_return(sig, CL_TYPE_I64);
+            let fname = "increment";
+            let ctx = rt_cranelift_begin_function(module, fname.as_ptr() as i64, fname.len() as i64, sig);
+            let entry = rt_cranelift_create_block(ctx);
+            rt_cranelift_switch_to_block(ctx, entry);
+            rt_cranelift_seal_block(ctx, entry);
+
+            let addr = rt_cranelift_data_addr_in_func(ctx, data);
+            let current = rt_cranelift_load(ctx, CL_TYPE_I64, addr, 0);
+            let five = rt_cranelift_iconst(ctx, CL_TYPE_I64, 5);
+            let next = rt_cranelift_iadd(ctx, current, five);
+            rt_cranelift_store(ctx, next, addr, 0);
+            rt_cranelift_return(ctx, next);
+
+            let func_id = rt_cranelift_end_function(ctx);
+            assert!(rt_cranelift_define_function(module, func_id, ctx));
+            rt_cranelift_finalize_module(module);
+
+            let fptr = rt_cranelift_get_function_ptr(module, fname.as_ptr() as i64, fname.len() as i64);
+            let func: extern "C" fn() -> i64 = std::mem::transmute(fptr as *const ());
+            assert_eq!(func(), 22);
+            assert_eq!(func(), 27);
             rt_cranelift_free_module(module);
         }
     }

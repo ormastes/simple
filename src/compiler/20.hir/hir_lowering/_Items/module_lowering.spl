@@ -326,11 +326,17 @@ impl HirLowering:
         val as_const: Const? = imported_mod.constants.get(imported_name)
 
         if as_cls != nil:
-            self.symbols.define(local_name, SymbolKind.Class, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+            val imported_type = self.symbols.define(local_name, SymbolKind.Class, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+            self.symbols.rename_symbol(imported_type, imported_name)
+            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, import_span)
         elif as_str != nil:
-            self.symbols.define(local_name, SymbolKind.Struct, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+            val imported_type = self.symbols.define(local_name, SymbolKind.Struct, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+            self.symbols.rename_symbol(imported_type, imported_name)
+            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, import_span)
         elif as_enum != nil:
-            self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+            val imported_type = self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+            self.symbols.rename_symbol(imported_type, imported_name)
+            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, import_span)
         elif as_trait != nil:
             self.symbols.define(local_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
         elif as_fn != nil:
@@ -353,6 +359,27 @@ impl HirLowering:
             self.qualify_imported_function_symbol(imported_fn_sym, imported_mod_name, imported_name)
         elif as_const != nil:
             self.symbols.define(local_name, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+
+    me register_imported_type_methods(imported_mod: Module, imported_mod_name: text, imported_name: text, import_span: Span):
+        val owner_module = hir_module_logical_name_from_path(imported_mod_name)
+        for impl_ in imported_mod.impls:
+            if parser_type_kind_named_name(impl_.type_.kind) != imported_name:
+                continue
+            for method_name in impl_.methods.keys():
+                val method = impl_.methods[method_name]
+                val symbol_name = "{owner_module}.{imported_name}::{method_name}"
+                if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
+                    val kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
+                    self.symbols.define(symbol_name, kind, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+            if impl_.has_trait_:
+                val trait_name = parser_type_kind_named_name(impl_.trait_.kind)
+                val trait_: Trait? = imported_mod.traits.get(trait_name)
+                if trait_ != nil:
+                    for trait_method in trait_.methods:
+                        val symbol_name = "{owner_module}.{imported_name}::{trait_method.name}"
+                        if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
+                            val kind = if trait_method.is_static: SymbolKind.Function else: SymbolKind.Method
+                            self.symbols.define(symbol_name, kind, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
 
     me qualify_imported_function_symbol(sym_id: SymbolId, imported_mod_name: text, imported_name: text):
         """Under a --entry-closure bootstrap build, rename a cross-module
@@ -704,6 +731,15 @@ impl HirLowering:
                     val bootstrap_hir_trait = self.lower_trait(bootstrap_trait_)
                     traits[bootstrap_hir_trait.symbol] = bootstrap_hir_trait
                     bootstrap_trait_idx = bootstrap_trait_idx + 1
+
+                var bootstrap_impl_idx = 0
+                while bootstrap_impl_idx < module.impls.len():
+                    impls = impls.push(self.lower_impl(module.impls[bootstrap_impl_idx]))
+                    bootstrap_impl_idx = bootstrap_impl_idx + 1
+                var bootstrap_impl_fn_key = functions.len()
+                for bootstrap_impl_sym in self.lowered_impl_functions.keys():
+                    functions[SymbolId(id: bootstrap_impl_fn_key)] = self.lowered_impl_functions[bootstrap_impl_sym]
+                    bootstrap_impl_fn_key = bootstrap_impl_fn_key + 1
             if bootstrap_diag:
                 eprint("[hir-lower] bootstrap-functions:count module={module.name} count={_bootstrap_hir_functions.len()}")
             return HirModule(
@@ -719,7 +755,7 @@ impl HirLowering:
                 enums: enums,
                 bitfields: bitfields,
                 traits: traits,
-                impls: [],
+                impls: impls,
                 constants: {},
                 static_asserts: [],
                 aop_advices: [],
@@ -995,11 +1031,16 @@ impl HirLowering:
         var impl_idx = 0
         while impl_idx < module.impls.len():
             val impl_ = module.impls[impl_idx]
+            val owner_name = parser_type_kind_named_name(impl_.type_.kind)
             val meth_keys = impl_.methods.keys()
             var mi = 0
             while mi < meth_keys.len():
                 val name = meth_keys[mi]
-                self.symbols.define(name, SymbolKind.Method, nil, decl_span, decl_visibility, false, mod_name)
+                val method = impl_.methods[name]
+                val owner_symbol = self.symbols.lookup_or_invalid(owner_name)
+                val symbol_name = if owner_symbol.is_valid(): self.symbols.method_symbol_name(owner_symbol, name) else: name
+                val symbol_kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
+                self.symbols.define(symbol_name, symbol_kind, nil, decl_span, decl_visibility, false, mod_name)
                 mi = mi + 1
             impl_idx = impl_idx + 1
 

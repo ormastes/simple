@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 use simple_common::target::TargetArch;
 
 use super::{
@@ -17,8 +18,14 @@ use super::{
 // `x64_freestanding_cfg_multivariant_misdispatch`). Re-exported here for the
 // existing native_project call sites (compiler.rs, imports.rs, tests.rs).
 pub(crate) use crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns;
+#[cfg(test)]
 use crate::pipeline::cfg_strip::cfg_name_to_arch;
 
+/// Test-only recognition of a leading arch cfg.
+///
+/// This is deliberately not a production file gate: Simple `@cfg` applies to
+/// the following declaration, so an inactive first declaration must not hide
+/// later active declarations in the same file.
 /// Extract the arch-gating verdict for a `.spl` source, if its first
 /// meaningful line is a whole-file `@cfg(<arch>)` (optionally
 /// `@cfg(not(<arch>))`) decorator.
@@ -36,6 +43,7 @@ use crate::pipeline::cfg_strip::cfg_name_to_arch;
 /// narrower goal is just to stop native-project discovery from being
 /// completely blind to the common "this whole file is one arch's HAL
 /// implementation" pattern documented in `src/os/kernel/arch/hal.spl`.
+#[cfg(test)]
 pub(crate) fn file_arch_cfg_gate(source: &str, target_arch: TargetArch) -> Option<bool> {
     for line in source.lines() {
         let trimmed = line.trim_start();
@@ -795,29 +803,6 @@ impl NativeProjectBuilder {
         }
         files.sort();
 
-        // Drop files whose leading `@cfg(<arch>)` gate does not match the
-        // build's effective target arch (see `file_arch_cfg_gate`). Full-scan
-        // discovery previously ignored `@cfg` entirely, so a cross-arch build
-        // (e.g. --target x86_64 over a source tree containing riscv64-only
-        // HAL files) could pull wrong-arch files into compilation and, via
-        // `collected_inline_asm_blocks()`, wrong-arch inline asm into the
-        // link (see src/os/kernel/arch/hal.spl header). The entry file is
-        // always kept regardless of its own gate, matching entry-closure's
-        // unconditional inclusion of the requested entry point.
-        let target_arch = super::effective_target().arch;
-        let canonical_entry = self.entry_file.as_ref().map(|p| safe_canonicalize(p));
-        files.retain(|path| {
-            if let Some(entry) = &canonical_entry {
-                if same_file_path(path, entry) {
-                    return true;
-                }
-            }
-            let source = match std::fs::read_to_string(path) {
-                Ok(s) => s,
-                Err(_) => return true,
-            };
-            file_arch_cfg_gate(&source, target_arch).unwrap_or(true)
-        });
         files
     }
 
@@ -906,6 +891,8 @@ impl NativeProjectBuilder {
             if source.contains('\r') {
                 source = source.replace('\r', "");
             }
+            let target_arch = super::effective_target().arch;
+            source = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&source, target_arch);
 
             let mut parser = simple_parser::Parser::new(&source);
             let mut module = parser.parse().map_err(|e| {
@@ -920,7 +907,6 @@ impl NativeProjectBuilder {
                     e
                 )
             })?;
-            let target_arch = super::effective_target().arch;
             strip_inactive_cfg_arch_fns(&mut module, target_arch);
             let mut found_deps: HashSet<PathBuf> = HashSet::new();
 
@@ -971,9 +957,8 @@ impl NativeProjectBuilder {
                         if sibling_source.contains('\r') {
                             sibling_source = sibling_source.replace('\r', "");
                         }
-                        if file_arch_cfg_gate(&sibling_source, target_arch) == Some(false) {
-                            continue;
-                        }
+                        sibling_source =
+                            crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&sibling_source, target_arch);
                         let mut sibling_parser = simple_parser::Parser::new(&sibling_source);
                         let mut sibling_module = match sibling_parser.parse() {
                             Ok(module) => module,

@@ -927,10 +927,13 @@ fn security_registry_sdn_from_sources(file_sources: &[(PathBuf, String)]) -> Res
         if !source_may_declare_security(source) {
             continue;
         }
-        let mut parser = Parser::new(source);
-        let ast = parser
+        let filtered_source =
+            crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(source, effective_target().arch);
+        let mut parser = Parser::new(&filtered_source);
+        let mut ast = parser
             .parse()
             .map_err(|err| format!("parse security registry source {}: {}", path.display(), err))?;
+        crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns(&mut ast, effective_target().arch);
         let module = crate::hir::lower_with_context_lenient(&ast, path)
             .map_err(|err| format!("lower security registry source {}: {}", path.display(), err))?;
         let inventory = build_security_inventory(&module);
