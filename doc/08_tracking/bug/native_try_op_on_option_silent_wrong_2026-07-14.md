@@ -38,6 +38,38 @@ raw/boxed zero, payload `3`, explicit `Some`/`None`, compatible and incompatible
 return containers, unannotated locals, Result method calls, and unchanged
 Result Ok/Err propagation. The incomplete MIR-only prototype was reverted.
 
+## Reviewed ABI design (2026-07-15)
+
+Implementation is deferred until a runnable pure-Simple `native-build` gate is
+available. Source-only landing cannot prove the absence of double wrapping,
+payload-3 collisions, or Result regressions across this ABI boundary.
+
+The coherent fix requires both layers below:
+
+1. Canonicalize `Option<T>` to HIR Optional and add MIR
+   `Optional(inner)` as static container metadata. Its backend ABI is one `i64`
+   tagged handle, not the current unused physical `(Bool, T)` tuple. Preserve
+   function-return and MIR-local HIR container metadata across annotated and
+   unannotated locals, direct calls, and method calls. `?` must accept only
+   Option-to-Option or Result-to-compatible-Result propagation and loudly
+   reject unknown or mismatched containers.
+2. Reserve `OPTION_ENUM_ID = 1` with `Some = 0` and `None = 1`. Every typed
+   boundary (let/assign/field/argument/return/call) converts `T` to the same
+   outer `rt_enum_new` handle, passes an existing Option through without
+   double-wrapping, and converts nil to the same None handle. Explicit
+   `Some`/`None` use that helper. The outer handle makes raw payloads `0` and
+   `3` unambiguous; inner payload boxing is needed only for erased `Any`.
+3. Add `rt_enum_id` consistently to the C and pure-Simple runtimes. Option
+   predicates and unwrap require the reserved enum id plus ordinal
+   discriminant. Result keeps its existing Ok/Err path and must not be
+   reclassified by generic Option predicates.
+
+Required executable acceptance covers `Some(0)`, `Some(3)`, text, raw nil,
+explicit `Some`/`None`, lets, assignments, fields, parameters, returns, direct
+and method calls, unannotated local aliases, and single evaluation. It also
+requires incompatible return containers and unknown operands to build-fail
+without artifacts, plus unchanged Result Ok/Err propagation controls.
+
 ## Reproduce
 
 `/tmp/wt_errhandling/` probes (Option `?` alongside Result `?`).
