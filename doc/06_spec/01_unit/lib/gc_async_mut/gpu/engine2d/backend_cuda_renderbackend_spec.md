@@ -335,30 +335,29 @@ if probe.status != BackendStatus.Initialized:
 
 ### CUDA font PTX addendum
 
-> Manually synchronized on 2026-07-12; no Simple/docgen or CUDA device command
+> Manually synchronized on 2026-07-15; no Simple/docgen or CUDA device command
 > ran in this session.
 
-The added scenarios require the single CUDA 2D PTX module to contain the exact
-15-parameter `simple_font_atlas_composite_v1_u32` entry, dimensional/count
-bounds, and integer source-over operations; reject invalid batches and reset
-atlas generations; and conditionally require exact device readback when CUDA is
-available. An unavailable device remains an honest non-promotion result.
+The synchronized scenarios require the default CUDA 2D PTX module to exclude
+`simple_font_atlas_composite_v1_u32`; reject invalid batches and reset atlas
+generations; and reject font dispatch before atlas mutation until the verified
+generated companion is installed. Native generated-device success remains in
+the focused CUDA handoff system scenario.
 
-#### embeds the bounds-checked shared font composite PTX entry
+#### keeps the generated font entry out of the default CUDA module
 
-Checks the exact 15-parameter PTX signature, dimensional/count guards, and
-integer source-over instructions in the single loaded CUDA module.
+Checks that generic CUDA 2D PTX does not embed the generated font entry.
 
 #### fails closed for invalid font batches and invalidates atlas generations
 
 Rejects an invalid batch before launch and proves font replacement can force
 the next atlas generation upload.
 
-#### conditionally composites a shared atlas through CUDA device readback
+#### requires the generated companion before CUDA font dispatch
 
-When CUDA initializes, clears a 4×4 device framebuffer, composites one 1×1
-atlas quad, and requires exact `device_readback` pixel `0xff400000`. When CUDA is
-unavailable, the scenario records the unavailable state without claiming pass.
+When CUDA initializes without a generated font companion, a valid batch fails
+before changing atlas generation or ownership. When CUDA is unavailable, the
+scenario records that state without claiming native evidence.
 
 ## At a Glance
 
@@ -367,7 +366,7 @@ unavailable, the scenario records the unavailable state without claiming pass.
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl` |
-| Updated | 2026-07-12 (manual static synchronization) |
+| Updated | 2026-07-15 (manual static synchronization) |
 | Generator | `simple spipe-docgen` baseline; manual addendum pending docgen |
 
 ## Overview

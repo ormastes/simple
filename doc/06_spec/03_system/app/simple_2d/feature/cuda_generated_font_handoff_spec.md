@@ -32,6 +32,10 @@ readback handle, and exact equality with the 4×4 CPU pixel oracle. Missing or
 stale provenance, fallback rendering, an unavailable CUDA device, or a pixel
 mismatch fails explicitly.
 
+The default CUDA 2D module has no font entry. Without the verified generated
+companion, normal Engine2D policy records CUDA failure and replays from quad
+zero on CPU; a CUDA-required evidence row fails rather than accepting fallback.
+
 ## Evidence artifacts
 
 - `build/portable_compute_toolchains/evidence.env`

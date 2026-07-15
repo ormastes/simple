@@ -671,9 +671,10 @@ observe a pass:
   metadata, exact 0..14
   argument binding, submit/synchronize, and `device_readback`; conditional unit
   execution is not a release PASS when the device is unavailable.
-  The CUDA adapter must prove the versioned PTX entry is in the same loaded 2D
-  module, all 15 value/pointer slots are ordered exactly, atlas generation is
-  invalidated on font replacement, each accepted prefix is synchronized before
+  The CUDA adapter must prove a separately installed, checker-authenticated
+  generated PTX companion provides the versioned entry while the default 2D
+  module provides no font entry; all 15 value/pointer slots are ordered exactly,
+  atlas generation is invalidated on font replacement, each accepted prefix is synchronized before
   CPU-mirror parity is updated, and final pixels come from `device_readback`.
   The Metal adapter must prove compiler/runtime source equality, the optional
   native pipeline, exact 13-word/52-byte ABI, native-only typed routing (never

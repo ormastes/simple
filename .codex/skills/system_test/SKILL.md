@@ -171,7 +171,9 @@ describe "<Feature Name>":
   Compiled native evidence must name the Simple-emitted font companion, prove
   its versioned exported symbol, and prove the promoted runtime loaded that same
   artifact; a handwritten PTX or independently generated SPIR-V blob is not
-  emitter provenance.
+  emitter provenance. CUDA font execution must use the separately installed,
+  checker-authenticated generated companion; the default CUDA 2D module must
+  not provide the font entry.
   When a producer emits selected shaping, assert that the handle-free
   `DrawIrGlyphRunPayload` survives SDN round-trip with identical glyph IDs,
   positions, and logical clusters. The Engine2D executor must reject a missing

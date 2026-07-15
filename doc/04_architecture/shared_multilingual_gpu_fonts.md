@@ -262,10 +262,11 @@ active reinitialization before retaining another session, and Metal releases
 font state before device recreation. Thus an upload cache never crosses
 device/context ownership. Engines do not cache shaping or raster output
 independently.
-CUDA's optional generated font companion is a distinct session module with an
-immutable PTX hash; font launches prefer it when installed. The embedded
-compatibility entry has no generated-artifact identity and cannot satisfy
-promotion.
+CUDA font execution requires a verified generated PTX companion in a distinct
+session module with an immutable PTX hash. The default CUDA 2D module contains
+no font entry. If the companion is absent or rejected, CUDA font dispatch is
+unavailable and Engine2D replays the batch from quad zero through its CPU
+fallback policy.
 
 ## Rejected structures
 

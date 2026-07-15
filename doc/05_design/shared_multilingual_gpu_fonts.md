@@ -215,18 +215,19 @@ diagnostic API path. Conditional execution evidence remains environment-dependen
 
 Engine2D and Engine3D reuse the same common atlas subrect/color material.
 Engine2D maps batch quads to the shared CUDA, native Metal, OpenCL, or Vulkan
-atlas-composite launch when that backend is active. Each backend reuses its
-upload only when the batch atlas-owner identity and atlas generation both
+atlas-composite launch when that backend is active and ready. Each backend
+reuses its upload only when the batch atlas-owner identity and atlas generation both
 match, and invalidates on font replacement; an unsubmitted suffix uses the
-image/alpha route. CUDA uses
-the existing single PTX module and a 15-slot pointer ABI; OpenCL compiles the
-shared source. CUDA's private runtime ABI is two pointer-valued `u64` slots plus
-thirteen `s64` slots; it is intentionally distinct from compiler-emitted CUDA
+image/alpha route. CUDA requires a separately installed, checker-authenticated
+generated PTX companion and a 15-slot pointer ABI; the default 2D module has no
+font entry. OpenCL compiles the shared source. CUDA's private runtime ABI is two
+pointer-valued `u64` slots plus thirteen `s64` slots; it is intentionally distinct from compiler-emitted CUDA
 C scalar widths, but its pointer array stores bounded values in 8-byte slots so
-their low 32 bits satisfy the emitted `u32`/`i32` parameters. A generated PTX
-companion may be installed into a distinct
-session module keyed by its exact hash; font launches prefer it without
-replacing the optimization module. The embedded PTX remains compatibility-only.
+their low 32 bits satisfy the emitted `u32`/`i32` parameters. The generated PTX
+companion is installed into a distinct session module keyed by its exact hash
+without replacing the optimization module. Missing, stale, or rejected
+companions fail before atlas mutation so Engine2D can replay from quad zero on
+CPU where policy permits. No handwritten font PTX is a runtime provider.
 Other backends retain image/alpha compatibility. Engine3D
 retains CPU HUD/world compatibility and now has dedicated Vulkan font pipeline,
 sampler-descriptor, depth, fence, and device-readback ownership. Its atlas

@@ -1,5 +1,6 @@
 use std.spec.{describe, it, expect}
 use std.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.backend_cuda.{CudaBackend}
 use std.gc_async_mut.text_layout.font_renderer.{
     FontExecutionPolicy, FontRenderBatch, FontRenderConfig, FontRenderQuad
 }
@@ -12,6 +13,29 @@ fn _font_config(target: text, policy: FontExecutionPolicy) -> FontRenderConfig:
     )
 
 describe "Engine2D configured font execution":
+    it "applies policy when CUDA is attached but its generated font companion is absent":
+        var engine = Engine2D.create_with_backend(64, 48, "cpu")
+        var cuda = CudaBackend.create()
+        cuda.initialized = true
+        engine.cuda_backend = cuda
+
+        expect(engine.draw_text_configured(
+            2, 2, "A", 0xffffffffu32, _font_config("cuda", FontExecutionPolicy.Suggested)
+        )).to_be(true)
+        expect(engine.font_execution_attempts()).to_equal(
+            ["cuda:failed", "metal:unavailable", "opencl:unavailable", "vulkan:unavailable", "cpu:success"]
+        )
+        expect(engine.draw_text_configured(
+            2, 2, "A", 0xffffffffu32, _font_config("cuda", FontExecutionPolicy.Preferred)
+        )).to_be(true)
+        expect(engine.font_execution_attempts()).to_equal(["cuda:failed", "cpu:success"])
+        expect(engine.draw_text_configured(
+            2, 2, "A", 0xffffffffu32, _font_config("cuda", FontExecutionPolicy.Required)
+        )).to_be(false)
+        expect(engine.font_execution_attempts()).to_equal(["cuda:failed"])
+        engine.cuda_backend = nil
+        engine.shutdown()
+
     it "applies exact fallback policy and rejects invalid config before mutation":
         var engine = Engine2D.create_with_backend(64, 48, "cpu")
         expect(engine.draw_text_configured(

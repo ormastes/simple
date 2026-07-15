@@ -7,8 +7,8 @@ use std.gpu.engine2d.backend_probe.{BackendStatus}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
 use std.gpu.engine2d.engine.{Engine2D}
 use std.gpu.engine2d.helpers_text.{text_render_to_buf}
-use std.gc_async_mut.text_layout.font_renderer.{FontRenderer, FontRenderBatch, FontRenderQuad}
-use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_ENTRY, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.crypto.sha256.{sha256_text}
 
 describe "CudaBackend RenderBackend facade":
@@ -41,15 +41,9 @@ describe "CudaBackend RenderBackend facade":
         expect(source).to_contain("param_width")
         expect(source).to_contain("param_height")
 
-    it "embeds the bounds-checked shared font composite PTX entry":
+    it "keeps the generated font entry out of the default CUDA module":
         val source = cuda_2d_ptx_source()
-        val signature = ".visible .entry simple_font_atlas_composite_v1_u32(\n    .param .u64 param_atlas,\n    .param .u64 param_dst,\n    .param .s64 param_atlas_width,\n    .param .s64 param_atlas_height,\n    .param .s64 param_atlas_count,\n    .param .s64 param_atlas_x,\n    .param .s64 param_atlas_y,\n    .param .s64 param_quad_width,\n    .param .s64 param_quad_height,\n    .param .s64 param_dst_width,\n    .param .s64 param_dst_height,\n    .param .s64 param_dst_count,\n    .param .s64 param_dst_x,\n    .param .s64 param_dst_y,\n    .param .s64 param_color"
-
-        expect(source).to_contain(signature)
-        expect(source).to_contain("setp.ne.s64 %p0, %rd5, %rd16")
-        expect(source).to_contain("setp.ge.s64 %p1, %rd28, %rd12")
-        expect(source).to_contain("sub.u32 %r11, 255, %r8")
-        expect(source).to_contain("mad.lo.u32 %r13, %r14, %r11, %r13")
+        expect(source.contains(FONT_ATLAS_COMPOSITE_ENTRY)).to_equal(false)
 
     it "pins an installed generated font companion by exact PTX identity":
         val ptx = ".version 8.0\n.visible .entry simple_font_atlas_composite_v1_u32() { ret; }\n"
@@ -57,6 +51,8 @@ describe "CudaBackend RenderBackend facade":
         expect(session.install_font_module("")).to_equal(false)
         expect(session.install_font_module(".version 8.0\n")).to_equal(false)
         expect(session.install_font_module(".version 8.0\n.entry simple_font_atlas_composite_v1_u32_suffix() { ret; }\n")).to_equal(false)
+        session.module_cache = 9
+        expect(session.launch_font_kernel_args(1, 1, 1, 1, 1, 1, 1)).to_equal(1)
         session.font_module_cache = 17
         session.font_module_identity = "generated-ptx:" + sha256_text(ptx)
         expect(session.install_font_module(ptx)).to_equal(true)
@@ -116,21 +112,10 @@ describe "CudaBackend RenderBackend facade":
             expect(backend.font_atlas_generation).to_equal(7)
             expect(backend.font_atlas_owner_identity).to_equal("stable-owner")
 
-    it "conditionally composites a shared atlas through CUDA device readback":
+    it "requires the generated companion before CUDA font dispatch":
         var backend = CudaBackend.create()
         val ok = backend.init(4, 4)
         if ok:
-            backend.clear(0xff000000u32)
-            val unsupported = FontRenderBatch(
-                program_version: 2,
-                font_identity: "test-font", face_generation: 1,
-                valid: true, atlas_width: 1, atlas_height: 1,
-                atlas_pixels: [0x80000000u32],
-                quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 1, dst_y: 1, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0x80ff0000u32)],
-                atlas_generation: 1, dirty_rects: []
-            )
-            expect(backend.draw_font_batch(0, 0, unsupported)).to_equal(0)
-            expect(backend.font_atlas_generation).to_equal(-1)
             val batch = FontRenderBatch(
                 program_version: 1,
                 font_identity: "test-font", face_generation: 1,
@@ -139,35 +124,10 @@ describe "CudaBackend RenderBackend facade":
                 quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 1, dst_y: 1, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0x80ff0000u32)],
                 atlas_generation: 1, dirty_rects: []
             )
-            expect(backend.draw_font_batch(0, 0, batch)).to_equal(1)
-            expect(backend.font_atlas_generation).to_equal(1)
-            expect(backend.font_atlas_owner_identity).to_equal(batch.atlas_owner_identity())
-            val replacement = FontRenderBatch(
-                program_version: 1,
-                font_identity: "replacement-font", face_generation: 1,
-                valid: true, atlas_width: 1, atlas_height: 1,
-                atlas_pixels: [0x80000000u32],
-                quads: [FontRenderQuad(codepoint: 66, byte_offset: 0, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0x80ff0000u32)],
-                atlas_generation: 1, dirty_rects: []
-            )
-            expect(backend.draw_font_batch(0, 0, replacement)).to_equal(1)
-            expect(backend.font_atlas_owner_identity).to_equal(replacement.atlas_owner_identity())
-            val readback = backend.read_pixels_with_source()
-            expect(readback.source).to_equal("device_readback")
-            expect(readback.pixels[5]).to_equal(0xff400000u32)
-            var first_renderer = FontRenderer.new()
-            var second_renderer = FontRenderer.new()
-            val first = first_renderer.prepare_text("A", 0xffffffffu32, 16)
-            val second = second_renderer.prepare_text("B", 0xffffffffu32, 16)
-            expect(first.is_empty()).to_equal(false)
-            expect(second.is_empty()).to_equal(false)
-            expect(first.atlas_generation).to_be_greater_than(0)
-            expect(second.atlas_generation).to_be_greater_than(0)
-            expect(second.atlas_generation == first.atlas_generation).to_equal(false)
-            expect(backend.draw_font_batch(0, 0, first)).to_equal(1)
-            expect(backend.font_atlas_generation).to_equal(first.atlas_generation)
-            expect(backend.draw_font_batch(0, 0, second)).to_equal(1)
-            expect(backend.font_atlas_generation).to_equal(second.atlas_generation)
+            expect(backend.session.font_module_cache).to_equal(0)
+            expect(backend.draw_font_batch(0, 0, batch)).to_equal(0)
+            expect(backend.font_atlas_generation).to_equal(-1)
+            expect(backend.font_atlas_owner_identity).to_equal("")
         else:
             expect(backend.initialized).to_equal(false)
         backend.shutdown()

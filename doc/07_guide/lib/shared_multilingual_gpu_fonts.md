@@ -333,10 +333,11 @@ CUDA compile plans use
 symbol is verified from the artifact rather than passed through a nonexistent
 `--entry` option. CUDA, native Metal, OpenCL, and Vulkan are the implemented
 Engine2D runtime adapters.
-CUDA appends a hand-written bounds-checked PTX companion to the existing single
-2D module, uploads the atlas on generation change, marshals the exact 15-slot
-pointer ABI, synchronizes each submitted quad, and mirrors only completed
-prefixes. This PTX runtime provider is separate from compiler-emitted CUDA C.
+CUDA font execution requires a separately installed, checker-authenticated
+Simple-generated PTX companion. The default CUDA 2D module contains no font
+entry. Once installed, CUDA uploads the atlas on generation change, marshals
+the exact 15-slot pointer ABI, synchronizes each submitted quad, and mirrors
+only completed prefixes.
 `Engine2D.install_cuda_font_artifact` accepts compiled PTX plus the
 checker-recorded expected SHA-256 and composite-program version, verifies their
 payload consistency, then delegates to the existing bounded
@@ -349,8 +350,9 @@ emitter source/version hashes, retained generated `.cu` source/hash, and PTX
 path/hash; installs the PTX through this public handoff; dispatches one
 canonical `FontRenderBatch`; and compares device-origin readback with its CPU
 oracle. It is independent of the Vulkan Engine3D native evidence rows. A
-retained native PASS is still required for promotion; the hand-written
-compatibility entry remains the fallback.
+retained native PASS is still required for promotion. If the generated
+companion is missing, stale, or rejected, CUDA fails before atlas mutation and
+Engine2D replays from quad zero through CPU where the selected policy permits.
 Metal compiles the exact common MSL helper as an optional separate pipeline,
 uses the fixed 13-word/52-byte parameter block, full-uploads changed atlas
 generations, and dispatches completed 64-thread groups per quad. Only native
@@ -431,9 +433,10 @@ raw pen coordinates directly into atlas quads.
 ## 2D and 3D status
 
 - **2D:** `Engine2D.load_font` and `draw_text` are the supported public surface.
-  CUDA, native Metal, OpenCL, and Vulkan attempt their shared versioned
-  atlas-composite path and retain a CPU/image suffix fallback where applicable.
-  Other backends retain image-blit compatibility. Source wiring alone is not
+  CUDA attempts its shared versioned atlas-composite path only with the
+  verified generated companion; native Metal, OpenCL, and Vulkan attempt their
+  corresponding shared path. All retain CPU/image suffix fallback where
+  applicable. Other backends retain image-blit compatibility. Source wiring alone is not
   device proof.
 - **3D:** `load_font`, `draw_text_hud`, and `draw_text_world` consume the same
   batch through the CPU fallback or optional Vulkan adapter;

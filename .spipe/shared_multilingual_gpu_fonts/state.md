@@ -1244,9 +1244,9 @@ release-blocking.
   the generated kernel's bounded low-32-bit scalar ABI. The shared CUDA loader
   also now rejects negative runtime error codes instead of caching them as module
   handles. A focused source test
-  covers validation and immutable identity without CUDA hardware. The default
-  handwritten entry remains compatibility-only, and the unexecuted install/
-  device-readback path is not promotion evidence. STATUS: FAIL.
+  covers validation and immutable identity without CUDA hardware. The later
+  generated-only hardening removed the default handwritten entry; the
+  unexecuted install/device-readback path is not promotion evidence. STATUS: FAIL.
 
 - Stage-54/55 bounded bootstrap continuation (2026-07-13): the three explicit
   `ComponentStats.get_metric -> f64?` repairs cleared the verifier fallback;
@@ -1300,14 +1300,12 @@ release-blocking.
   serif cells, seven manual regenerations, and retained device evidence remain
   pending. STATUS: FAIL.
 
-- Exact-identity static hardening (2026-07-15): lower-model shaping and GPU
-  audits found two shared-boundary gaps, and the primary high-capability review
-  accepted the minimal fixes. `shaper_with_ot_face` now rejects an OpenType
-  blob whose SHA-256 does not match the live face identity. Vulkan font
-  installation and promotion now require the exact pinned SPIR-V hash rather
-  than accepting any magic-valid module, and CUDA reuses the common versioned
-  entry constant. Focused source tests cover cross-bound faces, blob drift,
-  unpinned SPIR-V, and exact stage evidence. No Simple runtime, docgen, native
-  GPU, QEMU, or performance command ran after the three-cycle cap; the three
-  serif cells, seven manual regenerations, and retained device evidence remain
-  pending. STATUS: FAIL.
+- Generated-only CUDA font dispatch (2026-07-15): parallel static audits and
+  primary review removed the handwritten font PTX from the default CUDA 2D
+  module. Font launch now requires the distinct installed generated-PTX module
+  and fails before atlas mutation when it is absent, preserving CPU replay from
+  quad zero for Suggested/Preferred policy and fail-closed Required behavior.
+  Unit/manual SPipe, architecture, design, guide, and skill contracts now match.
+  No Simple runtime, docgen, native GPU, QEMU, or performance command ran after
+  the three-cycle cap; retained generated-device evidence remains pending.
+  STATUS: FAIL.

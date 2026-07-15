@@ -463,8 +463,9 @@ font GPU emission, or GUI/Web/2D/3D text.
    readback -> CPU parity`; stop and report the first unavailable rung.
    `unavailable` is never PASS.
    Compile evidence must include the Simple-emitted font companion and its
-   versioned exported symbol; runtime promotion must load that verified artifact,
-   not a handwritten or independently generated parallel blob.
+   versioned exported symbol; CUDA font GPU execution and runtime promotion must
+   load that verified artifact, not a handwritten or independently generated
+   parallel blob.
    Vulkan promotion additionally requires the validated precompiled-SPIR-V
    artifact mode and its exact pinned hash; runtime GLSL is diagnostic execution
    only.
