@@ -51,6 +51,33 @@ fn test_host_object_extension() -> &'static str {
     }
 }
 
+#[test]
+fn hosted_freebsd_cross_target_build_fails_closed() {
+    use simple_common::target::{Target, TargetArch, TargetOS};
+
+    let arch = if TargetArch::host() == TargetArch::X86_64 {
+        TargetArch::Aarch64
+    } else {
+        TargetArch::X86_64
+    };
+    for emit_archive in [false, true] {
+        let config = NativeBuildConfig {
+            target: Some(Target::new(arch, TargetOS::FreeBSD)),
+            emit_archive,
+            ..Default::default()
+        };
+        let error = NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/tool"))
+            .config(config)
+            .build()
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "cross-target FreeBSD executable and archive builds are unsupported without a FreeBSD toolchain and sysroot; build on FreeBSD or emit an object instead"
+        );
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn build_compiler_backfill_test_archive(root: &Path, name: &str, sources: &[&str]) -> PathBuf {
     let mut objects = Vec::new();

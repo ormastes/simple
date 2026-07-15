@@ -459,6 +459,14 @@ impl NativeProjectBuilder {
     /// Returns an error when file discovery, source loading, incremental cache
     /// setup, compilation, or linking fails.
     pub fn build(self) -> Result<NativeBuildResult, String> {
+        if self
+            .config
+            .target
+            .is_some_and(|target| target.os == simple_common::target::TargetOS::FreeBSD && !target.is_host())
+        {
+            return Err("cross-target FreeBSD executable and archive builds are unsupported without a FreeBSD toolchain and sysroot; build on FreeBSD or emit an object instead".to_string());
+        }
+
         crate::codegen::inline_asm::clear_inline_asm_blocks();
 
         let rust_trace = native_project_rust_trace_enabled();
