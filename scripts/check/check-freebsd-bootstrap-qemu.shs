@@ -385,12 +385,21 @@ else
     if [ "$STAGE_EXISTS" != "yes" ]; then
         fail "Canonical bootstrap produced no stage3 dynload binary"
     fi
-    info "Running core runtime smoke with the FreeBSD stage3 binary..."
-    SMOKE_OUT=$($VM_SSH "cd ${VM_HOME}/simple && sh scripts/check/check-core-runtime-smoke.shs ${STAGE_BIN} 2>&1; echo EXIT:\$?" 2>/dev/null)
+    info "Running FreeBSD stage3 bootstrap compiler smoke..."
+    STAGE_VERSION=$($VM_SSH "${STAGE_BIN} --version" 2>/dev/null) || fail "FreeBSD stage3 --version failed"
+    [ "$STAGE_VERSION" = "simple-bootstrap 1.0.0-beta" ] || fail "Unexpected FreeBSD stage3 version: $STAGE_VERSION"
+
+    SMOKE_DIR="/tmp/simple-freebsd-stage3-smoke"
+    $VM_SSH "rm -rf ${SMOKE_DIR} && mkdir -p ${SMOKE_DIR} && printf 'fn main():\n    print 6 * 7\n' > ${SMOKE_DIR}/main.spl" \
+        2>/dev/null || fail "Failed to create FreeBSD stage3 smoke source"
+    SMOKE_OUT=$($VM_SSH "cd ${VM_HOME}/simple && ${STAGE_BIN} native-build ${SMOKE_DIR}/main.spl --backend cranelift --output ${SMOKE_DIR}/probe 2>&1; echo EXIT:\$?" 2>/dev/null)
     SMOKE_EXIT=$(printf '%s' "$SMOKE_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
     printf '%s\n' "$SMOKE_OUT" | grep -v '^EXIT:' | tail -10
-    [ "$SMOKE_EXIT" = "0" ] || fail "FreeBSD stage3 core runtime smoke failed (exit $SMOKE_EXIT)"
-    pass "Canonical Rust + pure-Simple dynload bootstrap and runtime smoke completed"
+    [ "$SMOKE_EXIT" = "0" ] || fail "FreeBSD stage3 native-build smoke failed (exit $SMOKE_EXIT)"
+    SMOKE_RESULT=$($VM_SSH "test -x ${SMOKE_DIR}/probe && ${SMOKE_DIR}/probe" 2>/dev/null) || fail "FreeBSD stage3 smoke executable failed"
+    [ "$SMOKE_RESULT" = "42" ] || fail "Unexpected FreeBSD stage3 smoke output: $SMOKE_RESULT"
+    $VM_SSH "rm -rf ${SMOKE_DIR}" 2>/dev/null || true
+    pass "Canonical Rust + pure-Simple dynload bootstrap and stage3 compiler smoke completed"
 
     # Retrieve binary
     FREEBSD_BIN_DIR="${ROOT_DIR}/bin/release/freebsd-x86_64"

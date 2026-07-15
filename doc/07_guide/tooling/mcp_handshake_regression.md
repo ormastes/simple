@@ -26,3 +26,15 @@ handshake and previously allowed its ID parser to regress unnoticed.
 `check-mcp-wrapper-contract.shs` extracts the generated wrapper from tracked
 `setup.shs` into a temporary directory, so a stale `bin/` wrapper cannot mask a
 source regression.
+
+## Fresh bootstrap artifacts
+
+Stage 5 removes both MCP destinations before building, then runs this same
+native smoke once against the exact fresh `simple_mcp_server` and
+`simple_lsp_mcp_server` paths before deploy. The probe disables source fallback,
+sends `initialize`, `notifications/initialized`, and `tools/list`, then requires
+successful `simple_status` and `lsp_symbols` calls with correlated response IDs
+and semantic results. A missing or stale output, nonzero build or process exit,
+timeout, malformed frame, JSON-RPC error, or MCP `isError` result fails the
+bootstrap. Stages 2 through 4 do not duplicate this artifact gate; `--no-mcp`
+skips Stage 5 and makes no MCP health claim.

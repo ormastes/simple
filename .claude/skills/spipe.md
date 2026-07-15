@@ -789,6 +789,14 @@ e.g. a probe handshake), then remove work in order — no double start, exec
 compiled artifacts, lazy tool registry, SHB interface-only loading, thin
 host-wrapper imports — before moving work (background compile, keep-warm).
 Startup gates bound startup only; MCP stdio reads must never gain timeouts.
+For bootstrap MCP acceptance, run the shared bounded checker once after both
+Stage 5 outputs exist and before deploy. Point it at the exact fresh MCP/LSP
+paths, disable fallback, send initialize/initialized/tools-list, and require
+successful semantic `simple_status` and `lsp_symbols` results. Missing or stale
+artifacts, crashes, timeouts, malformed/error responses, and nonzero exits fail
+closed. Do not copy this gate into compiler Stages 2 through 4; `--no-mcp`
+makes no MCP health claim. See
+`doc/07_guide/tooling/mcp_handshake_regression.md`.
 
 ### dynSMF Background Compile Startup
 

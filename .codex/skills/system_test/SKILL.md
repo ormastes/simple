@@ -264,6 +264,11 @@ describe "<Feature Name>":
   whose shared transport is known to support multi-message framed stdin.
   Include all local Simple-created MCP wrappers in one system spec when the
   contract is "launch by command line and handshake within a time limit".
+  Bootstrap acceptance parameterizes that same checker with the exact fresh
+  Stage 5 MCP/LSP paths, requires one successful semantic `tools/call` per
+  server, and fails on missing/stale artifacts, nonzero exit, timeout, malformed
+  or error responses. Run it once per output pair, not once per compiler stage;
+  `--no-mcp` supplies no MCP acceptance evidence.
 - Short grammar features must have runtime-specific coverage:
   - Interpreter specs may cover pipe-forward, composition, placeholder lambdas, method references, optional access, and compact DSL forms.
   - Native specs must cover only compact forms intended to work in native mode.

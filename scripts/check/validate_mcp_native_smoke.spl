@@ -6,6 +6,8 @@ struct SmokeResult:
     json_valid: bool
     framing_valid: bool
     schema_valid: bool
+    correlation_valid: bool
+    feature_valid: bool
     tool_count: i64
     wm_text_valid: bool
 
@@ -251,13 +253,29 @@ fn last_tools_payload(payloads: [text]) -> text:
         i = i - 1
     return ""
 
+fn payload_for_id(payloads: [text], id: text) -> text:
+    val quoted_id = "\"id\":\"" + id + "\""
+    val numeric_id = "\"id\":" + id
+    for payload in payloads:
+        if payload.contains(quoted_id) or payload.contains(numeric_id):
+            return payload
+    ""
+
 fn validate_payload_file(path: text, prefix: text) -> SmokeResult:
     val raw = file_read(path)
-    val expected_frames: i64 = if prefix == "mcp": 2 else: 1
+    val expected_frames: i64 = if prefix == "mcp": 4 else: 3
     val frame_count = count_occurrences(raw, "Content-Length:")
-    val framing_valid = frame_count >= expected_frames and not raw.contains("Content-Length: 2305843009213693951")
+    val framing_valid = frame_count >= expected_frames and validate_content_length_frames(raw) and not raw.contains("Content-Length: 2305843009213693951")
     val payloads = extract_json_payloads(raw)
     var json_valid = payloads.len() >= expected_frames and frame_count >= expected_frames
+    val initialize_frame = payload_for_id(payloads, "1")
+    val first_tools_frame = payload_for_id(payloads, "2")
+    val feature_id = if prefix == "mcp": "4" else: "3"
+    val feature_frame = payload_for_id(payloads, feature_id)
+    val correlation_valid = initialize_frame.contains("\"protocolVersion\"") and first_tools_frame.contains("\"tools\":") and feature_frame != ""
+    val feature_marker = if prefix == "mcp": "Project Diagnostics" else: "\\\"name\\\":\\\"main\\\""
+    val feature_valid = feature_frame.contains("\"result\":") and feature_frame.contains(feature_marker) and not feature_frame.contains("\"error\":") and not feature_frame.contains("\"isError\":true")
+    json_valid = json_valid and correlation_valid
     var schema_valid = json_valid
     var tool_count: i64 = 0
     val tools_frame = last_tools_payload(payloads)
@@ -271,12 +289,14 @@ fn validate_payload_file(path: text, prefix: text) -> SmokeResult:
     var wm_text_valid = true
     if prefix == "mcp":
         wm_text_valid = tools_frame.contains("\"name\":\"play_wm_text_status\"") and tools_frame.contains("\"name\":\"play_wm_text_snapshot\"") and tools_frame.contains("\"name\":\"play_wm_text_find\"") and tools_frame.contains("\"name\":\"play_wm_text_act\"")
-    SmokeResult(json_valid: json_valid, framing_valid: framing_valid, schema_valid: schema_valid, tool_count: tool_count, wm_text_valid: wm_text_valid)
+    SmokeResult(json_valid: json_valid, framing_valid: framing_valid, schema_valid: schema_valid, correlation_valid: correlation_valid, feature_valid: feature_valid, tool_count: tool_count, wm_text_valid: wm_text_valid)
 
 fn print_result(prefix: text, result: SmokeResult):
     print prefix + "_tools_json_valid=" + result.json_valid.to_string()
     print prefix + "_framing_valid=" + result.framing_valid.to_string()
     print prefix + "_tools_schema_valid=" + result.schema_valid.to_string()
+    print prefix + "_correlated_ids_valid=" + result.correlation_valid.to_string()
+    print prefix + "_main_feature_call_valid=" + result.feature_valid.to_string()
     print prefix + "_tools_count=" + result.tool_count.to_string()
     if prefix == "mcp":
         print prefix + "_wm_text_tools_present=" + result.wm_text_valid.to_string()
@@ -285,11 +305,15 @@ fn print_missing_args():
     print "mcp_tools_json_valid=false"
     print "mcp_framing_valid=false"
     print "mcp_tools_schema_valid=false"
+    print "mcp_correlated_ids_valid=false"
+    print "mcp_main_feature_call_valid=false"
     print "mcp_tools_count=0"
     print "mcp_wm_text_tools_present=false"
     print "lsp_tools_json_valid=false"
     print "lsp_framing_valid=false"
     print "lsp_tools_schema_valid=false"
+    print "lsp_correlated_ids_valid=false"
+    print "lsp_main_feature_call_valid=false"
     print "lsp_tools_count=0"
 
 fn validate_rt_forward_cache(path: text) -> bool:
@@ -326,6 +350,6 @@ fn main() -> i32:
     print_result("mcp", mcp)
     print_result("lsp", lsp)
     print "rt_forward_cache_valid=" + rt_forward_cache_valid.to_string()
-    if mcp.json_valid and mcp.framing_valid and mcp.schema_valid and mcp.wm_text_valid and lsp.json_valid and lsp.framing_valid and lsp.schema_valid and rt_forward_cache_valid:
+    if mcp.json_valid and mcp.framing_valid and mcp.schema_valid and mcp.correlation_valid and mcp.feature_valid and mcp.wm_text_valid and lsp.json_valid and lsp.framing_valid and lsp.schema_valid and lsp.correlation_valid and lsp.feature_valid and rt_forward_cache_valid:
         return 0
     1

@@ -94,9 +94,12 @@ SIMPLE_LIB=src bin/simple test test/03_system/app/mcp_cmdline/mcp_cmdline_handsh
 bin/simple test test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl --native
 ```
 
-That spec launches each Simple-created MCP wrapper, runs `--json` readiness,
-sends `initialize`, `notifications/initialized`, and `tools/list`, and requires
-the response inside the configured time limit. The helper is pure Simple
+That spec builds and launches the exact pure-Simple MCP artifact, runs `--json`
+readiness, sends `initialize`, `notifications/initialized`, and `tools/list`,
+and requires two successful core feature calls inside the configured time
+limit. Bootstrap Stage 5 separately applies the same fail-closed protocol to
+the exact fresh MCP and LSP artifact pair before deploy, including successful
+`simple_status` and `lsp_symbols` calls. The helper is pure Simple
 stdlib code: no Node.js wrapper and no direct `rt_*` extern declarations. The
 matching plan and generated/manual page are:
 
@@ -108,6 +111,7 @@ When updating MCP specs, also regenerate and review their scenario manuals:
 ```bash
 bin/simple spipe-docgen test/03_system/feature/app/mcp_protocol_runtime_spec.spl --output doc/06_spec
 bin/simple spipe-docgen test/02_integration/app/mcp_stdio_integration_spec.spl --output doc/06_spec
+bin/release/simple spipe-docgen test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl --output doc/06_spec
 ```
 
 The generated manual should be useful without opening the test source. If it

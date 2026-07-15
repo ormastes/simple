@@ -809,9 +809,8 @@ mcp_build_ok=1
 if [ "${build_mcp}" -eq 1 ]; then
   echo "Stage 5: compiling MCP servers..."
 
-  # Build each MCP server with non-blocking failure.
-  # Note: run commands directly (not via run_logged) because run_logged
-  # calls exit on failure, and MCP build failure must be non-blocking.
+  # Build both servers before failing so both logs are available. The shared
+  # fresh-artifact smoke below is the single fail-closed Stage 5 gate.
   mcp_stage=0
   for mcp_entry in "simple_mcp_server:src/app/mcp/main.spl" \
                     "simple_lsp_mcp_server:src/app/simple_lsp_mcp/main.spl"; do
@@ -822,6 +821,7 @@ if [ "${build_mcp}" -eq 1 ]; then
 
     echo "  Stage 5${mcp_stage}: ${mcp_name}"
     prepare_native_cache "stage5${mcp_stage}"
+    rm -f "${full_dir}/${mcp_name}${exe_suffix}"
     set +e
     env RUST_LOG="${RUST_LOG:-error}" \
       SIMPLE_NO_DEPRECATED_WARNINGS=1 \
@@ -852,6 +852,22 @@ if [ "${build_mcp}" -eq 1 ]; then
       echo "  ${mcp_name}: ${full_dir}/${mcp_name}${exe_suffix}"
     fi
   done
+
+  if [ "${mcp_build_ok}" -ne 1 ]; then
+    echo "error: Stage 5 MCP server build failed; refusing stale artifacts" >&2
+    exit 1
+  fi
+
+  echo "Stage 5 smoke: fresh MCP initialize/list/call gate"
+  if ! env \
+    SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
+    MCP_SERVER="$(absolute_path "${full_dir}/simple_mcp_server${exe_suffix}")" \
+    LSP_MCP_SERVER="$(absolute_path "${full_dir}/simple_lsp_mcp_server${exe_suffix}")" \
+    MCP_NATIVE_BOOTSTRAP_FRESH=1 \
+    sh scripts/check/check-mcp-native-smoke.shs; then
+    echo "error: fresh Stage 5 MCP server smoke failed" >&2
+    exit 1
+  fi
 else
   echo "Skipping MCP server builds (--no-mcp)"
 fi
