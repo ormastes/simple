@@ -856,10 +856,7 @@ impl NativeProjectBuilder {
                 .map_err(|e| format!("remove existing archive {}: {e}", self.output.display()))?;
         }
         let ar = find_archive_tool();
-        let output = std::process::Command::new(&ar)
-            .arg("rcs")
-            .arg(&self.output)
-            .args(object_paths)
+        let output = archive_create_command(&ar, &self.output, object_paths, false, false)
             .output()
             .map_err(|e| format!("run archive tool {ar}: {e}"))?;
         if output.status.success() {

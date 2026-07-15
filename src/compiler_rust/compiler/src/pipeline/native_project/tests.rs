@@ -22,11 +22,8 @@ fn process_dir_lock() -> &'static Mutex<()> {
 }
 
 fn archive_members(path: &Path) -> Option<Vec<String>> {
-    let output = std::process::Command::new(find_archive_tool())
-        .arg("t")
-        .arg(path)
-        .output()
-        .ok()?;
+    let tool = find_archive_tool();
+    let output = archive_list_command(&tool, path).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -38,6 +35,43 @@ fn archive_members(path: &Path) -> Option<Vec<String>> {
             .map(ToOwned::to_owned)
             .collect(),
     )
+}
+
+fn command_args(command: &std::process::Command) -> Vec<String> {
+    command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn msvc_lib_archive_commands_use_native_argument_forms() {
+    let archive = PathBuf::from("out.lib");
+    let objects = vec![PathBuf::from("one.obj"), PathBuf::from("two.obj")];
+
+    let create = archive_create_command("/opt/msvc/lib.exe", &archive, &objects, false, true);
+    assert_eq!(command_args(&create), ["/NOLOGO", "/OUT:out.lib", "one.obj", "two.obj"]);
+
+    let append = archive_create_command("lib", &archive, &objects[..1], true, false);
+    assert_eq!(command_args(&append), ["/NOLOGO", "/OUT:out.lib", "out.lib", "one.obj"]);
+
+    let list = archive_list_command("lib.exe", &archive);
+    assert_eq!(command_args(&list), ["/NOLOGO", "/LIST", "out.lib"]);
+}
+
+#[test]
+fn llvm_ar_archive_commands_keep_gnu_argument_forms() {
+    let archive = PathBuf::from("libout.a");
+    let objects = vec![PathBuf::from("one.o")];
+
+    let create = archive_create_command("llvm-ar", &archive, &objects, false, true);
+    assert_eq!(command_args(&create), ["rcsD", "libout.a", "one.o"]);
+
+    let append = archive_create_command("llvm-ar", &archive, &objects, true, false);
+    assert_eq!(command_args(&append), ["rs", "libout.a", "one.o"]);
+
+    let list = archive_list_command("llvm-ar", &archive);
+    assert_eq!(command_args(&list), ["t", "libout.a"]);
 }
 
 fn test_host_object_extension() -> &'static str {
@@ -96,10 +130,8 @@ fn build_compiler_backfill_test_archive(root: &Path, name: &str, sources: &[&str
         objects.push(object_path);
     }
     let archive = root.join(format!("lib{name}.a"));
-    assert!(std::process::Command::new(find_archive_tool())
-        .arg("rcs")
-        .arg(&archive)
-        .args(&objects)
+    let tool = find_archive_tool();
+    assert!(archive_create_command(&tool, &archive, &objects, false, false)
         .status()
         .unwrap()
         .success());
@@ -946,13 +978,13 @@ void rt_process_run(void) {}
         .status()
         .unwrap()
         .success());
-    assert!(std::process::Command::new(find_archive_tool())
-        .arg("rcs")
-        .arg(&runtime)
-        .arg(&object)
-        .status()
-        .unwrap()
-        .success());
+    let tool = find_archive_tool();
+    assert!(
+        archive_create_command(&tool, &runtime, std::slice::from_ref(&object), false, false)
+            .status()
+            .unwrap()
+            .success()
+    );
 
     let config = NativeBuildConfig {
         runtime_path: Some(temp.path().to_path_buf()),
@@ -2995,13 +3027,13 @@ int main(void) { app_call(); return 0; }
         .status()
         .unwrap()
         .success());
-    assert!(std::process::Command::new(find_archive_tool())
-        .arg("crs")
-        .arg(&runtime_a)
-        .arg(&runtime_o)
-        .status()
-        .unwrap()
-        .success());
+    let tool = find_archive_tool();
+    assert!(
+        archive_create_command(&tool, &runtime_a, std::slice::from_ref(&runtime_o), false, false)
+            .status()
+            .unwrap()
+            .success()
+    );
     assert!(std::process::Command::new(&cc)
         .args(["-c", "-ffunction-sections", "-fdata-sections"])
         .arg(&app_c)

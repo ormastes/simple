@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
-    build_compiler_backfill_archive, find_archive_tool, find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler,
-    find_native_all_library, find_objcopy_tool, is_system_symbol, nm_command, strip_llvm_constructors,
-    target_c_compiler, target_cxx_compiler,
+    archive_create_command, build_compiler_backfill_archive, find_archive_tool, find_c_compiler,
+    find_compiler_rt_builtins, find_cxx_compiler, find_native_all_library, find_objcopy_tool, is_system_symbol,
+    nm_command, strip_llvm_constructors, target_c_compiler, target_cxx_compiler,
 };
 
 impl NativeProjectBuilder {
@@ -20,9 +20,7 @@ impl NativeProjectBuilder {
         let Some(source) = self.selected_stage4_compiler_backfill_archive()? else {
             return Ok(None);
         };
-        let providers = selected_runtime
-            .map(|(path, _)| vec![path.clone()])
-            .unwrap_or_default();
+        let providers = selected_runtime.map(|(path, _)| vec![path.clone()]).unwrap_or_default();
         build_compiler_backfill_archive(&source, &providers, temp_dir).map(Some)
     }
 
@@ -931,30 +929,13 @@ int main(int argc, char** argv) {
             {
                 let archive_path = temp_dir.join("libspl_objects.a");
                 let ar_tool = find_archive_tool();
-                let is_msvc_lib = ar_tool == "lib";
 
                 const BATCH_SIZE: usize = 200;
                 let mut ar_ok = true;
                 for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
-                    let status = if is_msvc_lib {
-                        let mut lib_cmd = std::process::Command::new(&ar_tool);
-                        lib_cmd.arg(format!("/OUT:{}", archive_path.display()));
-                        if i > 0 {
-                            lib_cmd.arg(&archive_path);
-                        }
-                        lib_cmd
-                            .args(chunk)
-                            .status()
-                            .map_err(|e| format!("lib batch {i}: {e}"))?
-                    } else {
-                        let flag = if i == 0 { "rcs" } else { "rs" };
-                        std::process::Command::new(&ar_tool)
-                            .arg(flag)
-                            .arg(&archive_path)
-                            .args(chunk)
-                            .status()
-                            .map_err(|e| format!("ar batch {i}: {e}"))?
-                    };
+                    let status = archive_create_command(&ar_tool, &archive_path, chunk, i > 0, false)
+                        .status()
+                        .map_err(|e| format!("archive batch {i}: {e}"))?;
                     if !status.success() {
                         ar_ok = false;
                         break;

@@ -25,10 +25,8 @@ fn archive_is_fresh_for_runtime_inputs(archive: &Path, runtime_root: &Path, inpu
 }
 
 fn archive_has_exact_runtime_members(archive: &Path, inputs: &[&str]) -> bool {
-    let output = std::process::Command::new(find_archive_tool())
-        .arg("t")
-        .arg(archive)
-        .output();
+    let tool = find_archive_tool();
+    let output = archive_list_command(&tool, archive).output();
     let Ok(output) = output else {
         return false;
     };
@@ -96,6 +94,49 @@ pub(crate) fn find_c_compiler() -> String {
 /// Find an archive tool -- delegates to `simple_common::platform::cc_detect`.
 pub(crate) fn find_archive_tool() -> String {
     simple_common::platform::cc_detect::find_archive_tool()
+}
+
+fn is_msvc_archive_tool(tool: &str) -> bool {
+    Path::new(tool)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("lib"))
+}
+
+pub(super) fn archive_create_command(
+    tool: &str,
+    archive: &Path,
+    objects: &[PathBuf],
+    append: bool,
+    deterministic: bool,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(tool);
+    if is_msvc_archive_tool(tool) {
+        command.arg("/NOLOGO").arg(format!("/OUT:{}", archive.display()));
+        if append {
+            command.arg(archive);
+        }
+    } else {
+        let mode = match (append, deterministic) {
+            (false, false) => "rcs",
+            (true, false) => "rs",
+            (false, true) => "rcsD",
+            (true, true) => "rsD",
+        };
+        command.arg(mode).arg(archive);
+    }
+    command.args(objects);
+    command
+}
+
+pub(super) fn archive_list_command(tool: &str, archive: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(tool);
+    if is_msvc_archive_tool(tool) {
+        command.arg("/NOLOGO").arg("/LIST").arg(archive);
+    } else {
+        command.arg("t").arg(archive);
+    }
+    command
 }
 
 pub(crate) fn find_cxx_compiler() -> String {
@@ -262,10 +303,7 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
         objects.push(object);
     }
 
-    let status = std::process::Command::new(&ar)
-        .arg("rcs")
-        .arg(&archive)
-        .args(&objects)
+    let status = archive_create_command(&ar, &archive, &objects, false, false)
         .status()
         .ok()?;
     if status.success() && has_nonempty_archive_payload(&archive) {
@@ -1154,10 +1192,7 @@ pub(crate) fn build_stage4_cli_c_provider_archives(build_dir: &Path) -> Result<V
         }
         validate_stage4_cli_c_provider_archive(&object, spec)?;
 
-        let archived = std::process::Command::new(&ar)
-            .arg("rcsD")
-            .arg(&archive)
-            .arg(&object)
+        let archived = archive_create_command(&ar, &archive, std::slice::from_ref(&object), false, true)
             .output()
             .map_err(|err| format!("failed to execute deterministic archive tool {ar}: {err}"))?;
         if !archived.status.success() {
@@ -1167,16 +1202,12 @@ pub(crate) fn build_stage4_cli_c_provider_archives(build_dir: &Path) -> Result<V
                 String::from_utf8_lossy(&archived.stderr).trim()
             ));
         }
-        let members = std::process::Command::new(&ar)
-            .arg("t")
-            .arg(&archive)
-            .output()
-            .map_err(|err| {
-                format!(
-                    "failed to inspect Stage4 C provider archive {}: {err}",
-                    archive.display()
-                )
-            })?;
+        let members = archive_list_command(&ar, &archive).output().map_err(|err| {
+            format!(
+                "failed to inspect Stage4 C provider archive {}: {err}",
+                archive.display()
+            )
+        })?;
         let member_stdout = String::from_utf8_lossy(&members.stdout);
         let actual_members: Vec<&str> = member_stdout
             .lines()
@@ -1453,21 +1484,22 @@ pub(crate) fn build_compiler_backfill_archive(
         }
 
         let archive_tool = find_archive_tool();
-        let archive_result = std::process::Command::new(&archive_tool)
-            .arg("rcsD")
-            .arg(&output)
-            .arg(&localized_object)
-            .output()
-            .map_err(|err| format!("failed to execute deterministic archive tool {archive_tool}: {err}"))?;
+        let archive_result = archive_create_command(
+            &archive_tool,
+            &output,
+            std::slice::from_ref(&localized_object),
+            false,
+            true,
+        )
+        .output()
+        .map_err(|err| format!("failed to execute deterministic archive tool {archive_tool}: {err}"))?;
         if !archive_result.status.success() {
             return Err(format!(
                 "failed to create compiler backfill archive: {}",
                 String::from_utf8_lossy(&archive_result.stderr).trim()
             ));
         }
-        let members = std::process::Command::new(&archive_tool)
-            .arg("t")
-            .arg(&output)
+        let members = archive_list_command(&archive_tool, &output)
             .output()
             .map_err(|err| format!("failed to inspect compiler backfill archive members: {err}"))?;
         let member_stdout = String::from_utf8_lossy(&members.stdout);
