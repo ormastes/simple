@@ -30,6 +30,7 @@ No new TODO is created because these rows already have authoritative owners.
 
 | Host | Prerequisites | First commands | Required retained artifacts |
 |---|---|---|---|
+| Current Linux/x86_64 | KVM for the native x86_64 row, QEMU x86_64/AArch64/RISC-V, Vulkan device, optional NVIDIA CUDA, and a current pure-Simple compiler accepted by `simple_binary_is_valid` | `SIMPLE_BIN=bin/release/x86_64-unknown-linux-gnu/simple sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs`; then `SIMPLE_BIN=bin/release/x86_64-unknown-linux-gnu/simple SIMPLEOS_HOST_GPU_PROCESSING_BACKEND=vulkan sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs` | x86_64 KVM native receipt; AArch64/RV64 TCG correctness receipts; exact argv, serial/daemon logs, device identities, checksums, 20-sample p95 applicability, and daemon/QEMU/combined RSS |
 | Windows/MSYS | D3D11 hardware adapter, QEMU with WHPX for the matching native ISA, current pure-Simple compiler and host daemon | Run `scripts/check/check-simpleos-qemu-host-gpu-2d.shs`; validate the emitted report | wrapper report, serial logs, daemon log, exact encoded QEMU argv including `-accel`, protocol/backend/device IDs, checksums, elapsed times, QEMU/daemon/combined RSS |
 | macOS | Metal device, QEMU with HVF for the matching native ISA, current pure-Simple compiler and host daemon | Set `SIMPLE_BIN=bin/release/<triple>/simple`; run `"$SIMPLE_BIN" test test/04_smoke/simpleos_metal_processing_ir.spl`, then `SIMPLE_BIN="$SIMPLE_BIN" scripts/check/check-simpleos-qemu-host-gpu-2d.shs` | Metal smoke output plus the same correlated wrapper artifacts for rendering and ProcessingIR, including executed accelerator |
 | NVIDIA Linux | CUDA driver/device; multiple GPUs or MIG where available; current pure-Simple compiler for source regeneration and QEMU | Retained-PTX evidence is already recorded; after compiler recovery run `sh scripts/check/check-cuda-generated-2d-readback.shs && grep -qx 'cuda_generated_2d_readback_status=pass' build/cuda_generated_2d_readback/evidence.env`, then `SIMPLEOS_HOST_GPU_REQUIRE_CUDA=1 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs` | UUID stability/distinction report, CUDA device readback, QEMU receipts, CPU oracle parity, preference timing, and RSS |
@@ -86,6 +87,10 @@ only if a fresh native run exposes a reproducible implementation failure.
 | TODO568 | Verify the architecture-owned AArch64 RAMFB/input closure with the current compiler. |
 | TODO569 | Run the exact 1280x720 fixture on the current Linux Vulkan row; other prepared-host rows stay postponed. |
 | TODO570 | Measure the current Linux Vulkan ProcessingIR preference row; other prepared-host rows stay postponed. |
+
+The compiler's foreign-parser/Stage-4 recovery remains owned by
+`doc/08_tracking/bug/native_build_stage4_pre_object_spin_2026-07-13.md`; this
+host-evidence plan does not create or duplicate that lane.
 
 The current-host retained-PTX run provides fresh partial CUDA readback and
 two-device stability/distinction evidence with hash-bound PTX and pixel

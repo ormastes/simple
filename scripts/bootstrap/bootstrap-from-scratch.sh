@@ -400,17 +400,12 @@ run_logged() {
   fi
 }
 
-simple_binary_is_valid() {
-  candidate=$1
-  [ -x "${candidate}" ] || return 1
-  version="$(run_timeout_kill 5 "${candidate}" --version 2>&1)" || return 1
-  [ -n "${version}" ] || return 1
-  case "${version}" in
-    *"bootstrap seed only"*) return 1 ;;
-  esac
-  SIMPLE_LIB="${repo_root}/src" run_timeout_kill 10 "${candidate}" check \
-    scripts/check/cert/redeploy_gate/fixtures/p2_add.spl >/dev/null 2>&1
-}
+CANDIDATE_FRONTEND_ROOT=${repo_root}
+COMPILER_PROBE_TIMEOUT_SECONDS=5
+COMPILER_BUILD_TIMEOUT_SECONDS=60
+COMPILER_EXEC_TIMEOUT_SECONDS=5
+COMPILER_CHECK_KILL_GRACE_SECONDS=1
+. "${repo_root}/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
 
 bootstrap_native_build_main() {
   compiler=$1

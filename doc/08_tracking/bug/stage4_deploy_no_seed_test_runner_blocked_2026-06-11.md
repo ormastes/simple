@@ -102,8 +102,11 @@ pure-Simple runner instead of `rt_cli_run_tests`. Acceptance needs one passing
 and one deliberately failing SSpec with the candidate self-pinned, no seed
 available, and no current-binary respawn loop. TODO 572 owns that work.
 
-Separately, TODO 548's wrapper-side compiler-admission replacement is now
-implemented as `candidate_frontend_smoke`: a private temporary
+Separately, TODO 548's shell compiler-admission replacement is now shared by
+bootstrap and the QEMU wrapper. `candidate_frontend_smoke` and
+`simple_binary_is_valid` live in
+`scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs`;
+the smoke uses a private temporary
 directory/cache/output/log,
 60-second build and 5-second run bounds, EXIT cleanup, and a self-pinned
 candidate (`SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`, and
@@ -123,9 +126,11 @@ so the real build cannot re-enter a sibling or seed delegate after admission.
 Shared CLI `_cli_is_current_exe` now resolves candidate overrides through the
 existing `_cli_resolve_symlink` owner before canonical comparison, so
 authoritative worker delegation also stays on symlink candidates such as
-`bin/simple`. `test/01_unit/app/io/cli_driver_identity_spec.spl` records that
+`bin/simple`. `test/01_unit/app/io/cli_argv0_resolution_spec.spl` records that
 source contract; no `rt_*` alias was added.
-The wrapper self-test passes, but runner source parity is not current-source
+Bootstrap retains its focused `check src/app/cli/bootstrap_main.spl`, but the
+whole-tree check is no longer part of admission. The wrapper self-test and
+shared-shell syntax check pass, but runner source parity is not current-source
 compiler, QEMU, or GPU execution evidence. TODO 573 owns the shared
 native-Windows process/temp and remaining direct-runtime facade work.
 

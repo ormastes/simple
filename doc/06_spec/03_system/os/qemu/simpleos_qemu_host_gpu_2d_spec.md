@@ -34,8 +34,10 @@ the CPU/software fallback and report a stable reason.
 
 ## Primary flow
 
-1. **Reject an unusable compiler candidate.** Before any guest build, run the
-   wrapper's private `candidate_frontend_smoke` or the runner's matching
+1. **Reject an unusable compiler candidate.** Before any guest build, use the
+   shared shell `candidate_frontend_smoke`/`simple_binary_is_valid` from
+   `scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs`, sourced
+   by bootstrap and the QEMU wrapper, or the runner's matching pure-Simple
    `_candidate_frontend_smoke`: self-pin
    `SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`, and
    `SIMPLE_FRONTEND_DELEGATE` to the candidate; neutralize inherited
@@ -51,11 +53,12 @@ the CPU/software fallback and report a stable reason.
    Shared CLI `_cli_is_current_exe` resolves a candidate override through
    existing `_cli_resolve_symlink`, making authoritative worker delegation safe
    for symlinks such as `bin/simple`. The focused
-   `test/01_unit/app/io/cli_driver_identity_spec.spl` source contract adds no
+   `test/01_unit/app/io/cli_argv0_resolution_spec.spl` source contract adds no
    `rt_*` alias.
-   The old `check startup_simple.spl` probe is invalid because it
+   The old whole-tree `check startup_simple.spl` probe is invalid because it
    unconditionally appends global repository hygiene and Git subguards that do
-   not describe a jj-only workspace without `.git`.
+   not describe a jj-only workspace without `.git`. Bootstrap retains only its
+   focused `check src/app/cli/bootstrap_main.spl` before shared admission.
 2. **Probe the QEMU guest GPU capability.** Boot the selected x86_64, AArch64,
    or RISC-V guest and negotiate protocol version, limits, backend sets,
    readback, and host readiness. Try strict native Metal, DirectX, then Vulkan
@@ -221,16 +224,17 @@ sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --validate-report path/to/r
 ```
 
 Status-only or incomplete cached reports fail closed as malformed evidence.
-The wrapper bounds version and invalid-mode probes to five seconds and rejects
-any version probe that reports `bootstrap seed only`. The implemented wrapper
-admission self-pins `SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`,
+The shared shell helper bounds version and invalid-mode probes to five seconds,
+rejects any version probe that reports `bootstrap seed only`, and self-pins
+`SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`,
 and `SIMPLE_FRONTEND_DELEGATE` to the candidate; sets
 `SIMPLE_FRONTEND_DELEGATED=1`, `SIMPLE_NO_STUB_FALLBACK=1`, and the repository
 `SIMPLE_LIB`; and neutralizes inherited worker/bootstrap selection with
 `SIMPLE_EXECUTION_MODE=''`, `SIMPLE_NATIVE_BUILD_FORCE_WORKER=0`, and
 `SIMPLE_BOOTSTRAP=0`. It then applies the 60-second exact build and 5-second exact run
 contract above. The deliberate invalid-mode command uses the same pins.
-Explicit overrides do not bypass admission. The wrapper self-test passes and
+Explicit overrides do not bypass admission. The wrapper self-test and
+shared-shell syntax check pass, and
 `_QemuRunner` source parity uses `_candidate_frontend_smoke` plus
 `_run_candidate_admission_pinned`; the real guest build separately uses
 `_run_candidate_pinned` after `_apply_build_env`. No current-source runner

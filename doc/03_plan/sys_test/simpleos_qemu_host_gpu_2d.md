@@ -51,7 +51,9 @@ valid classifications but do not satisfy a host/ISA combination classified as
 supported.
 
 Before any guest build, both compiler-selection owners use the same admission
-contract. The wrapper's `candidate_frontend_smoke` uses a private subshell;
+contract. Shell `candidate_frontend_smoke` and `simple_binary_is_valid` live in
+`scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs`, sourced by
+both bootstrap and the QEMU wrapper. The shared smoke uses a private subshell;
 the runner's `_candidate_frontend_smoke` uses bounded scratch and
 `_run_candidate_admission_pinned` for both the `p2_add` build and deliberate
 invalid-mode probe. Each creates one private temporary directory, cache,
@@ -75,14 +77,16 @@ during the real guest build.
 The shared CLI `_cli_is_current_exe` resolves an override through existing
 `_cli_resolve_symlink` before canonical comparison, so authoritative worker
 delegation is also safe when the admitted candidate is a symlink such as
-`bin/simple`. `test/01_unit/app/io/cli_driver_identity_spec.spl` locks that
+`bin/simple`. `test/01_unit/app/io/cli_argv0_resolution_spec.spl` locks that
 source contract without adding an `rt_*` alias.
 
-The former `check test/05_perf/io_parity/startup_simple.spl` gate is not valid
+The former whole-tree `check test/05_perf/io_parity/startup_simple.spl` gate is not valid
 admission evidence: `run_check` unconditionally appends whole-tree repository
 hygiene, so unrelated tracked policy failures can reject a correct candidate,
 and its Git subguards do not describe a jj workspace with `.jj` and no `.git`.
-The wrapper self-test passes and `_QemuRunner` source parity is present. Source
+Bootstrap retains only its focused `check src/app/cli/bootstrap_main.spl`
+before the shared admission gate. The wrapper self-test and shared-shell syntax
+check pass, and `_QemuRunner` source parity is present. Source
 inspection still does not satisfy TODO 548; current-source runner execution is
 required. TODO 573 owns cross-platform process/temp facades and the remaining
 runner direct-runtime migration.

@@ -265,9 +265,12 @@ of a valid compiler fails the build before spawning any architecture worker.
 
 ## Compiler Admission and SSpec Ownership (2026-07-15)
 
-Compiler admission is a tooling boundary, not a GPU receipt. Wrapper
-`candidate_frontend_smoke` and runner `_candidate_frontend_smoke` each own one
-disposable cache/output/log;
+Compiler admission is a tooling boundary, not a GPU receipt. Shell
+`candidate_frontend_smoke` and `simple_binary_is_valid` are owned by
+`scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs` and sourced
+by both bootstrap and the QEMU wrapper. Runner `_candidate_frontend_smoke`
+keeps the equivalent pure-Simple contract. Each path owns one disposable
+cache/output/log;
 self-pins `SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`, and
 `SIMPLE_FRONTEND_DELEGATE` to the candidate; and neutralizes inherited
 execution/worker/bootstrap modes with `SIMPLE_EXECUTION_MODE=''`,
@@ -290,20 +293,22 @@ For worker delegation, shared CLI `_cli_is_current_exe` resolves candidate
 overrides through existing `_cli_resolve_symlink` before canonical identity
 comparison. Symlink candidates such as `bin/simple` therefore remain on the
 admitted executable instead of being mistaken for a sibling; the focused
-`test/01_unit/app/io/cli_driver_identity_spec.spl` contract adds no `rt_*`
+`test/01_unit/app/io/cli_argv0_resolution_spec.spl` contract adds no `rt_*`
 alias.
 
 The earlier whole-tree `check startup_simple.spl` path crosses the wrong trust
 boundary: it always runs repository hygiene and Git-specific subguards, so an
 unrelated policy failure or a jj-only workspace without `.git` can determine
-the result. It cannot admit or reject a frontend.
+the result. It cannot admit or reject a frontend. Bootstrap retains only its
+focused `check src/app/cli/bootstrap_main.spl` before the shared gate.
 
 SSpec execution is a separate compiler/test-runner capsule. Today the CLI test
 arm reaches `rt_cli_run_tests`, and the pure-Simple orchestrator still reaches
 the Rust `rt_cli_run_file` interpreter. TODO 572 owns a result-bearing
 pure-Simple interpreter contract and CLI/runner routing. The host-GPU capsule
 must consume its eventual verdict; it must not add a local runner, runtime
-alias, or seed fallback. The wrapper self-test passes and runner source parity
+alias, or seed fallback. The wrapper self-test and shared-shell syntax check
+pass, and runner source parity
 is present; current-source runner execution and the no-seed SSpec implementation
 remain pending, so this architecture change is not live compiler, QEMU, or GPU
 evidence. TODO 573 owns the shared cross-platform process/temp facade rather

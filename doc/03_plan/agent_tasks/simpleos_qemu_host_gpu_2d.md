@@ -45,9 +45,11 @@ fixture bypasses, synthetic handles, or passing placeholders.
 ## Current Handoff
 
 - Wrapper and fail-closed self-test: implemented.
-- The wrapper `candidate_frontend_smoke` and `_QemuRunner`
-  `_candidate_frontend_smoke` now share the same admission contract. The
-  wrapper self-test passes; runner execution remains unproved until a current
+- Shell `candidate_frontend_smoke` and `simple_binary_is_valid` now live in
+  `scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs`, sourced
+  by both bootstrap and the QEMU wrapper. `_QemuRunner`
+  `_candidate_frontend_smoke` keeps the equivalent pure-Simple contract. The
+  wrapper self-test and shared-shell syntax check pass; runner execution remains unproved until a current
   pure-Simple CLI is available.
   Runner admission routes both `p2_add` and invalid-mode probes through
   `_run_candidate_admission_pinned`. Its exact contract uses a private
@@ -59,18 +61,22 @@ fixture bypasses, synthetic handles, or passing placeholders.
   fallback; and builds the checked-in `p2_add.spl` with
   Cranelift/core-C-bootstrap/entry-closure/one-binary under 60 seconds, executes
   it under 5 seconds, and requires exact stdout `5`. The old
-  `check startup_simple.spl` result is invalid because it always appends global
+  whole-tree `check startup_simple.spl` result is invalid because it always appends global
   repository hygiene and Git subguards that are not authoritative in a
-  jj-only workspace without `.git`. After admission, `build_os_with_backend`
+  jj-only workspace without `.git`; bootstrap retains only its focused
+  `check src/app/cli/bootstrap_main.spl`. After admission, `build_os_with_backend`
   applies `_apply_build_env` and routes the real guest native-build through
   `_run_candidate_pinned`, preserving target settings while pinning compiler
   identity. The build therefore cannot re-enter a sibling or seed delegate.
   Shared CLI symlink resolution makes authoritative worker delegation safe for
   candidates such as `bin/simple`; the focused
-  `cli_driver_identity_spec.spl` contract adds no `rt_*` alias.
+  `test/01_unit/app/io/cli_argv0_resolution_spec.spl` contract adds no `rt_*` alias.
   Source presence is not a PASS.
 - TODO 573 owns native-Windows child environment/temp support and migration of
   the runner's remaining direct file/env/time runtime calls to shared facades.
+- The existing foreign-parser/Stage-4 recovery lane remains under
+  `doc/08_tracking/bug/native_build_stage4_pre_object_spin_2026-07-13.md`; this
+  admission work does not duplicate it.
 - Pure-Simple focused SSpec execution remains unavailable and is not part of
   the admission patch. TODO 572 owns replacing `rt_cli_run_tests` and the Rust
   `rt_cli_run_file` interpreter with a result-bearing pure-Simple runner path.

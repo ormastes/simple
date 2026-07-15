@@ -278,8 +278,12 @@ awaits fresh processing preference evidence.
 
 ### Compiler admission prerequisite
 
-Wrapper `candidate_frontend_smoke(candidate)` runs in a private subshell with
-EXIT cleanup. Runner `_candidate_frontend_smoke(candidate)` uses bounded
+Shared shell `candidate_frontend_smoke(candidate)` and
+`simple_binary_is_valid(candidate)` live in
+`scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs`; bootstrap
+and the QEMU wrapper source that owner. The shell smoke runs in a private
+subshell with EXIT cleanup. Runner `_candidate_frontend_smoke(candidate)` keeps
+the equivalent pure-Simple contract and uses bounded
 `mktemp` scratch, one cache/output/build log, required recursive cleanup, and
 `_run_candidate_admission_pinned`. Both pin `SIMPLE_BINARY`, `SIMPLE_BIN`,
 `SIMPLE_BOOTSTRAP_DRIVER`, and `SIMPLE_FRONTEND_DELEGATE` to `candidate`; set
@@ -300,13 +304,15 @@ sibling or seed delegate after admission.
 The shared CLI identity check resolves an override with existing
 `_cli_resolve_symlink` before comparing it to the canonical current executable.
 That keeps authoritative worker delegation on an admitted symlink candidate
-such as `bin/simple`; `test/01_unit/app/io/cli_driver_identity_spec.spl`
+such as `bin/simple`; `test/01_unit/app/io/cli_argv0_resolution_spec.spl`
 records the source contract with no new `rt_*` alias.
 
-Do not reuse the former `check startup_simple.spl` result: its unconditional
+Do not reuse the former whole-tree `check startup_simple.spl` result: its unconditional
 repository-hygiene tail and Git subguards conflate frontend behavior with
-global policy and are invalid in a jj-only workspace without `.git`.
-The wrapper self-test passes and `_QemuRunner` source parity is present. A
+global policy and are invalid in a jj-only workspace without `.git`. Bootstrap
+retains only its focused `check src/app/cli/bootstrap_main.spl` before shared
+admission. The wrapper self-test and shared-shell syntax check pass, and
+`_QemuRunner` source parity is present. A
 current-source pure-Simple runner execution is still required; TODO 573 owns
 native-Windows/process/temp facade parity and remaining direct-runtime cleanup.
 
