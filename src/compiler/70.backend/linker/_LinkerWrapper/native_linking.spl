@@ -110,6 +110,13 @@ fn unresolved_symbol_flags_for_cc(os_name: text) -> [text]:
 fn msvc_duplicate_symbol_flag() -> text:
     "/FORCE:MULTIPLE"
 
+fn macos_homebrew_prefix(configured: text, arch: text) -> text:
+    if configured != "":
+        return configured
+    if arch == "aarch64":
+        return "/opt/homebrew"
+    "/usr/local"
+
 fn linker_trace_enabled() -> bool:
     (env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
@@ -290,7 +297,7 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         # Homebrew prefix so -lzstd resolves (no libzstd.tbd ships in the SDK).
         # The bootstrap wrapper exports HOMEBREW_PREFIX for both Apple Silicon
         # and Intel hosts; keep a standard Intel fallback for direct use.
-        val brew_prefix = env_get("HOMEBREW_PREFIX") ?? "/usr/local"
+        val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
         args.push("-L{brew_prefix}/lib")
         # C libraries referenced by libsimple_native_all.a / vendor crates:
         # libffi (dynamic FFI), libedit (REPL), zlib/zstd (compression),
@@ -579,14 +586,16 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     val os_name = host_os()
     if os_name == "macos" or os_name == "darwin":
         # External libs/frameworks referenced by libsimple_native_all.a (see
-        # link_native macos branch). -L/opt/homebrew/lib so -lzstd resolves.
+        # link_native macos branch). Respect the bootstrap-exported Homebrew
+        # prefix so Intel and custom installations resolve zstd.
         # Link ALL object files (user objects + compiled runtime objects +
         # generated entry shim). Passing only obj0 dropped the entry-point
         # object -> "Undefined symbols: _main" on Mach-O.
         var args = cc_fallback_object_args(object_files)
+        val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
         for flag in [
             "-lc", "-lpthread", "-lm", "-lSystem", "-lSDL2",
-            "-L/opt/homebrew/lib",
+            "-L{brew_prefix}/lib",
             "-lc++", "-lz", "-lffi", "-ledit", "-lzstd", "-lxml2", "-lncurses", "-lobjc", "-liconv",
             "-framework", "Metal", "-framework", "CoreGraphics",
             "-Wl,-dead_strip",
