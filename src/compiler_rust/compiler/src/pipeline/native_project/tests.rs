@@ -2711,7 +2711,7 @@ fn test_duplicate_struct_sidecar_resolves_unique_compiler_context_handle() {
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
-fn test_runtime_retention_symbols_include_object_undefineds_and_roots() {
+fn test_runtime_retention_symbols_leave_strong_references_to_section_gc() {
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     if std::process::Command::new(&cc).arg("--version").output().is_err() {
         return;
@@ -2729,6 +2729,7 @@ fn test_runtime_retention_symbols_include_object_undefineds_and_roots() {
         &runtime_c,
         r#"
 void rt_used(void) {}
+void rt_dead(void) {}
 void rt_unused(void) {}
 void __simple_runtime_init(void) {}
 void __simple_runtime_shutdown(void) {}
@@ -2741,6 +2742,7 @@ void rt_string_bytes(void) {}
 void rt_array_new(void) {}
 void rt_array_len(void) {}
 void rt_declared_only(void) {}
+void rt_security_load_registry_sdn(void) {}
 "#,
     )
     .unwrap();
@@ -2748,8 +2750,10 @@ void rt_declared_only(void) {}
         &app_c,
         r#"
 extern void rt_used(void);
+extern void rt_dead(void);
 __asm__(".weak rt_declared_only");
 void app_call(void) { rt_used(); }
+void dead_call(void) { rt_dead(); }
 int main(void) { app_call(); return 0; }
 "#,
     )
@@ -2805,12 +2809,14 @@ int main(void) { app_call(); return 0; }
     )
     .unwrap();
 
-    assert!(roots.contains(&"rt_used".to_string()));
+    assert!(!roots.contains(&"rt_used".to_string()));
+    assert!(!roots.contains(&"rt_dead".to_string()));
     assert!(roots.contains(&"__simple_runtime_init".to_string()));
     assert!(roots.contains(&"rt_function_not_found".to_string()));
     assert!(roots.contains(&"rt_string_bytes".to_string()));
     assert!(!roots.contains(&"rt_unused".to_string()));
     assert!(!roots.contains(&"rt_declared_only".to_string()));
+    assert!(!roots.contains(&"rt_security_load_registry_sdn".to_string()));
 
     let mut link = std::process::Command::new(&cc);
     link.arg(&app_o);
@@ -2829,6 +2835,12 @@ int main(void) { app_call(); return 0; }
     assert!(String::from_utf8_lossy(&symbols.stdout)
         .lines()
         .any(|line| line.split_whitespace().last() == Some("rt_string_bytes")));
+    assert!(String::from_utf8_lossy(&symbols.stdout)
+        .lines()
+        .any(|line| line.split_whitespace().last() == Some("rt_used")));
+    assert!(!String::from_utf8_lossy(&symbols.stdout)
+        .lines()
+        .any(|line| line.split_whitespace().last() == Some("rt_dead")));
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]

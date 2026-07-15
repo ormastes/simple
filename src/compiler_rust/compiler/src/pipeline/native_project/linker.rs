@@ -381,57 +381,6 @@ impl NativeProjectBuilder {
         Ok(symbols)
     }
 
-    fn read_strong_undefined_symbol_set(obj: &Path) -> Result<HashSet<String>, String> {
-        Ok(Self::read_global_symbol_types(obj)?
-            .into_iter()
-            .filter(|(kind, _)| kind == "U")
-            .map(|(_, name)| name)
-            .collect())
-    }
-
-    fn normalize_relocation_symbol(raw_name: &str) -> String {
-        let mut name = raw_name.split('@').next().unwrap_or(raw_name).trim().to_string();
-        for marker in ["+0x", "-0x", "+0X", "-0X"] {
-            if let Some((base, _)) = name.split_once(marker) {
-                name = base.to_string();
-                break;
-            }
-        }
-        if cfg!(target_os = "macos") {
-            name.strip_prefix('_').unwrap_or(&name).to_string()
-        } else {
-            name
-        }
-    }
-
-    fn read_relocated_symbol_set(obj: &Path) -> Result<HashSet<String>, String> {
-        let output = std::process::Command::new("objdump")
-            .arg("-r")
-            .arg(obj)
-            .output()
-            .map_err(|e| format!("objdump relocations: {e}"))?;
-        if !output.status.success() {
-            return Self::read_undefined_symbol_set(obj);
-        }
-        let mut symbols = HashSet::new();
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 3 {
-                continue;
-            }
-            let Some(reloc) = parts.get(1) else {
-                continue;
-            };
-            if !reloc.starts_with("R_") {
-                continue;
-            }
-            if let Some(raw_name) = parts.get(2) {
-                symbols.insert(Self::normalize_relocation_symbol(raw_name));
-            }
-        }
-        Ok(symbols)
-    }
-
     fn is_libm_symbol(sym: &str) -> bool {
         matches!(
             sym,
@@ -527,36 +476,19 @@ impl NativeProjectBuilder {
     }
 
     pub(crate) fn runtime_retention_symbols(
-        object_paths: &[PathBuf],
-        main_o: &Path,
+        _object_paths: &[PathBuf],
+        _main_o: &Path,
         init_o: Option<&PathBuf>,
         runtime_lib: &Path,
         _imports: &ModuleImports,
     ) -> Result<Vec<String>, String> {
         let runtime_defined = Self::read_defined_symbol_set(runtime_lib)?;
         let mut required = BTreeSet::new();
-        for obj in object_paths.iter().map(|p| p.as_path()).chain(std::iter::once(main_o)) {
-            let mut referenced = Self::read_relocated_symbol_set(obj)?;
-            referenced.extend(Self::read_strong_undefined_symbol_set(obj)?);
-            for sym in referenced {
-                if runtime_defined.contains(&sym) {
-                    required.insert(sym);
-                }
-            }
-        }
-        if let Some(init) = init_o {
-            let mut referenced = Self::read_relocated_symbol_set(init)?;
-            referenced.extend(Self::read_strong_undefined_symbol_set(init)?);
-            for sym in referenced {
-                if runtime_defined.contains(&sym) {
-                    required.insert(sym);
-                }
-            }
-        }
 
-        // Lifecycle, argv capture, fallback dispatch, and synthesized method
-        // GOT slots may not appear as direct object undefineds. Other runtime
-        // functions should be retained only when entry objects reference them.
+        // Strong runtime references in live function sections extract their own
+        // archive members. Rooting every object relocation here defeats
+        // --gc-sections by retaining optional backends referenced only by dead
+        // functions. Keep only weak or indirect runtime entry points.
         for root in [
             "__simple_runtime_init",
             "__simple_runtime_shutdown",
@@ -566,6 +498,14 @@ impl NativeProjectBuilder {
         ] {
             if runtime_defined.contains(root) {
                 required.insert(root.to_string());
+            }
+        }
+        let security_loader = "rt_security_load_registry_sdn";
+        if let Some(init) = init_o {
+            if Self::read_undefined_symbol_set(init)?.contains(security_loader)
+                && runtime_defined.contains(security_loader)
+            {
+                required.insert(security_loader.to_string());
             }
         }
 
@@ -1510,7 +1450,15 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
                             for c_cc in &asm_compilers {
                                 let mut c_cmd = std::process::Command::new(c_cc);
                                 c_cmd
-                                    .args(["-c", "-ffreestanding", "-nostdlib", "-fno-pie", "-o"])
+                                    .args([
+                                        "-c",
+                                        "-ffreestanding",
+                                        "-nostdlib",
+                                        "-fno-pie",
+                                        "-ffunction-sections",
+                                        "-fdata-sections",
+                                        "-o",
+                                    ])
                                     .arg(&out)
                                     .arg(&path)
                                     .arg(format!("--target={}", triple));

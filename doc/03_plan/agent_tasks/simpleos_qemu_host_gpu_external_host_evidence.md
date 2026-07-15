@@ -4,9 +4,13 @@
 ## Status
 
 **Unavailable native-host rows are postponed until a prepared host is available.**
-QEMU receipts require a valid pure-Simple compiler. A fresh current-source
-Stage3 compiler now passes admission. The focused Vulkan/CUDA host-daemon link
-still needs an ABI-compatible Engine2D provider boundary under TODO576.
+QEMU receipts require a valid pure-Simple compiler. Diagnostic Stage3 hash
+`ff192f9d90af905c6ff460646afa380b4af7bb212106ab72195d07015239df9c`
+passes admission, and the Vulkan/CUDA daemon links through the corrected
+section-retention boundary. Final source removes a rejected x86 runtime
+admission and still needs one source-matched rebuild under TODO548. Remaining blockers are daemon
+startup/HELLO progress under TODO577 and single-owner x86 minimal runtime
+composition under TODO578.
 Current-host CUDA
 readback and two-device UUID-hash distinction passed on 2026-07-14 using a
 hash-bound retained PTX; current-source regeneration still needs that compiler.
@@ -14,8 +18,8 @@ Implemented backends remain fail-closed, and the full SimpleOS host-GPU goal
 remains incomplete.
 
 The current Linux host is prepared for KVM, Vulkan, and CUDA. The earlier
-retained candidates remain rejected, but fresh Stage3 hash
-`e22368ad2b2d978b3a72a6f84494865bf73a39edc988ffb387857dd35002c2b8`
+retained candidates remain rejected; diagnostic Stage3 hash
+`ff192f9d90af905c6ff460646afa380b4af7bb212106ab72195d07015239df9c`
 passes the shared admission gate. Direct guest GPU passthrough is a
 separate requested lane under TODO575; it must not be inferred from the working
 ivshmem host-daemon protocol.
@@ -52,10 +56,13 @@ scope. All other rows reuse their existing authoritative TODOs.
    The 2026-07-15 current-host result is `unavailable`: trusted QEMU VFIO help
    exists, virtio-gpu-gl is broken, the selected NVIDIA IOMMU group remains
    host-bound, and no canonical SimpleOS guest Vulkan/CUDA producer exists.
-3. **Fix the daemon module/runtime boundary (TODO576), then run the supported
-   offload matrix.** Do not mix core-C untagged Engine2D array providers into
-   the tagged Rust Vulkan/CUDA archive. After the focused daemon link passes,
-   run one CUDA-required wrapper invocation and retain its QEMU receipts.
+3. **Resume the daemon HELLO service loop (TODO577).** TODO576 is complete:
+   ordinary strong runtime references are no longer forced roots, section GC
+   drops optional backends, and the tagged Vulkan/CUDA daemon links without
+   core-C ABI mixing. The retained AArch64 run sees generation zero and no
+   negotiation attempts; diagnose daemon startup before a new CUDA-required
+   matrix. TODO578 must first replace the rejected x86 `rt_extras.c` whole-file
+   admission with one duplicate-free minimal runtime owner.
 4. **Attempt passthrough only when safe.** A live VFIO run requires an explicitly
    selected spare GPU or approved maintenance window, complete IOMMU-group
    ownership, recovery console access, and a matching SimpleOS guest driver.
@@ -108,8 +115,10 @@ only if a fresh native run exposes a reproducible implementation failure.
 | TODO540 | Fix target-gated duplicate global selection affecting AArch64 PCI/ECAM builds. |
 | TODO542 | Consolidate aggregate argv behind the narrow standard facade used by small native apps. |
 | TODO547 | Continue raw-pointer leaf migration through the existing no-GC owner facade rather than adding direct `rt_*`. |
-| TODO548 | Fresh Stage3 admission is complete. After TODO576 links the daemon safely, retain one x86_64/AArch64/RISC-V QEMU probe run; do not repeat bootstrap/admission. |
-| TODO576 | Split or provide the broad Engine2D host-daemon closure through a tagged-RuntimeValue-compatible owner; reject core-C/Rust array ABI mixing. |
+| TODO548 | Diagnostic strict Stage2/3 runs without SIGSEGV and AArch64 reaches QEMU; after the rejected x86 admission was removed, one final source-matched rebuild remains. X86/RV64 runtime ownership stays under TODO578/TODO537. |
+| TODO576 | DONE: relocation-derived roots were removed, explicit weak/indirect roots remain, section GC drops optional backends, and the tagged Vulkan/CUDA daemon links without core-C ABI mixing. |
+| TODO577 | Make the linked daemon enter the ivshmem service loop and advance HELLO generation; retain the first correlated Vulkan/CUDA receipt in one bounded rerun. |
+| TODO578 | Extract or select one duplicate-free x86 minimal freestanding runtime owner; never rely on `-z muldefs` ordering between `baremetal_stubs.c` and `rt_extras.c`. |
 | TODO549 | Fresh compiler/QEMU proof remains; exact/clipped and nearest-neighbor scaled IMAGE work now reuse the canonical Vulkan COPY/src-over shader with fail-closed provenance. |
 | TODO550 | Execute the stable ProcessingIR device-identity path and retain a fresh live receipt. The owner-level selector is `SIMPLEOS_HOST_GPU_PROCESSING_BACKEND=vulkan sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs`; the forced-Vulkan receipt remains pending. |
 | TODO551 | Host-local owner quarantine/reaping is implemented; run the focused lifecycle and live Vulkan evidence after TODO548 deploys a current pure-Simple compiler. |
@@ -132,9 +141,11 @@ host-evidence plan does not create or duplicate that lane.
 The current-host retained-PTX run provides fresh partial CUDA readback and
 two-device stability/distinction evidence with hash-bound PTX and pixel
 artifacts. The gate now exits nonzero for every non-PASS. TODO564 still owns MIG
-and correlated QEMU evidence. Current-source Stage3 admission passes, while
-TODO576 owns the focused daemon link blocker. TODO550's forced Vulkan receipt
-and CUDA-required QEMU work remain open because the three-cycle live cap was
+and correlated QEMU evidence. Diagnostic Stage3 admission and the daemon link
+pass; final-source bootstrap remains under TODO548. TODO577 owns the observed zero-generation HELLO blocker; TODO578
+owns x86 minimal runtime composition and TODO537 owns the RV64 provider closure.
+TODO550's forced Vulkan receipt and
+CUDA-required QEMU work remain open because the three-cycle live cap was
 reached. None of the postponed
 native rows may be marked done until its retained artifacts pass review.
 

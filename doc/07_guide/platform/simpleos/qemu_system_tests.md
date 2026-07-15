@@ -425,12 +425,17 @@ session for bounded smaller WM surfaces, requires child device readback, and
 applies canonical embedding opacity through checked native parent src-over.
 The additive `arm64-desktop-engine2d` scenario supplies the canonical
 RAMFB/`DesktopShell` build target, and the wrapper source now defines the
-correlated production-frame gate above. On 2026-07-15 a fresh Stage3 compiler
-passed admission, but the bounded live run stopped at the host-daemon link.
-The broad Engine2D module retains optional core-C providers whose untagged
-array ABI cannot be mixed safely with the Rust Vulkan/CUDA runtime archive.
-TODO576 owns an ABI-compatible module/runtime boundary; no live receipt is
-claimed.
+correlated production-frame gate above. On 2026-07-15 diagnostic full-bootstrap
+Stage3 hash `ff192f9d...` passed admission. The runtime root fix lets section GC
+discard dead optional backends, and the tagged Vulkan/CUDA daemon now links
+without core-C ABI mixing. The bounded AArch64 run builds, boots, maps ivshmem,
+and reports generation zero, zero negotiation attempts, and reason 7 because
+the daemon does not enter the HELLO service loop. Reject the x86 diagnostic
+that admitted all of `rt_extras.c`: it duplicates strong providers already in
+`baremetal_stubs.c`, and `-z muldefs` makes ownership order-dependent. TODO577
+owns daemon HELLO, TODO578 owns the x86 minimal runtime split, and TODO537 owns
+RV64. Final source removes the rejected admission and still needs one
+source-matched rebuild under TODO548. No live GPU receipt is claimed.
 Cached reports are accepted only through `--validate-report`: an overall status
 cannot promote the lane unless all nine host/ISA rows are well-formed and a
 passing active host carries three existing serial logs with exact correlated

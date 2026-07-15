@@ -303,11 +303,18 @@ never deletes or rebuilds it. Building this host runtime provider does not
 authorize the Rust compiler seed, which remains rejected for every Simple
 check, guest build, and execution step.
 
-The 2026-07-15 current-source Stage3 compiler passes admission. Three bounded
-live cycles identified an unresolved host-daemon module/runtime ABI boundary:
-core-C Engine2D providers use untagged array words and must not be linked into
-the tagged Rust Vulkan/CUDA runtime. TODO576 must provide an ABI-compatible
-owner before this command can capture fresh QEMU receipts.
+The 2026-07-15 diagnostic full-bootstrap Stage3 compiler passes admission. The compiler no
+longer forces every object relocation into the runtime root set, so existing
+function sections and `--gc-sections` drop dead optional backends; the tagged
+Vulkan/CUDA daemon links without core-C ABI mixing. A bounded AArch64 run then
+builds, boots, maps ivshmem, and observes zero HELLO generation and zero
+negotiation attempts because the daemon never enters the service loop. The
+x86 diagnostic that admitted all of `rt_extras.c` is inadmissible because it
+duplicates strong tuple/RDRAND providers already in `baremetal_stubs.c`; the
+change was removed. TODO577 owns daemon HELLO, TODO578 owns a single-owner x86
+minimal runtime, and TODO537 retains RV64. Because the final source removes
+that rejected admission, TODO548 retains one source-matched rebuild. No live
+GPU receipt is claimed.
 
 Run the same three-ISA matrix with ProcessingIR forced through Vulkan:
 
