@@ -429,6 +429,44 @@ the same production wrapper, Metal and ROCm/HIP may be host-unavailable, and
 DirectX/WebGPU remain presentation/upload provenance until they have positive
 same-frame device-readback evidence.
 
+SimpleOS RV64 desktop uses the same evidence shape for the QEMU GPU lane. The
+multi-config contract in `src/os/simpleos_config_matrix.spl` exposes
+`simpleos_engine2d_vulkan_required_evidence_keys()`: runtime backend must be
+`vulkan`, scene must be `vulkan-engine2d`, Simple2D command evidence must pass,
+a Vulkan device name and viewport must be recorded, readback must have a
+checksum and nonblank status, and QEMU GPU readback must pass. CPU/software
+fallback is useful diagnostic evidence, but it is not a Simple2D-over-Engine2D
+Vulkan pass for SimpleOS.
+
+The same module exposes `qemu_riscv64_engine2d_vulkan_bridge_plan()` as the
+implementation-facing bridge for this path. It binds QEMU SimpleOS to the
+`qemu-riscv64-desktop` profile, `virtio_gpu` framebuffer drawing,
+`vulkan` Engine2D processing, `virtio-gpu-device`, the `vulkan-engine2d`
+scene, `draw_ir-to-engine2d` Simple2D commands, Engine2D device readback, QMP
+screendump readback, RenderDoc `capture-simple`, and the
+`simpleos-desktop-four-windows` WM comparison scene. A CPU processing fallback,
+missing QMP screendump requirement, or non-Simple RenderDoc mode leaves the
+bridge blocked.
+
+On Windows, `scripts/check/check-simpleos-engine2d-renderdoc-evidence.ps1`
+normalizes the available artifacts into that contract. It reads
+`build/gui-web-2d-vulkan-env/evidence.env` when present, checks QEMU
+`qemu-screendump.ppm` for nonblank readback, validates SimpleOS RenderDoc
+`.rdc` magic and capture logs, and emits the `simpleos_engine2d_*` plus
+`simpleos_renderdoc_*` rows consumed by
+`scripts/check/check_simpleos_multiconfig_live_evidence.spl`. The aggregate
+checker also reports `simpleos_engine2d_vulkan_bridge_status`; this is a bridge
+alignment diagnostic, while `simpleos_engine2d_vulkan_evidence_status` remains
+the live Vulkan/readback completion gate.
+
+The same Windows normalizer supports `-ProbeHostVulkan` for host readiness
+diagnostics. That mode records `vulkaninfo --summary`, visible SDK tools
+(`glslangValidator`, `spirv-as`, `dxc`), Chrome/Electron presence, RenderDoc
+tool presence, and the focused browser-backing rows. These rows do not satisfy
+the SimpleOS gate by themselves: a source evidence file can be present while
+the runtime backend, viewport, checksum, QEMU readback, browser backing, and
+RenderDoc capture remain blocked.
+
 Backend preference has two layers. `backend_full_preference_order()` records the
 stable user-visible order, with explicit native surfaces first:
 `baremetal`, `virtio_gpu`, Metal, CUDA, ROCm/HIP, Qualcomm, Vulkan, DirectX,

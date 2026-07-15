@@ -21,17 +21,6 @@ typedef unsigned char spl_u8;
 #define RT_HEAP_ARRAY 0x02U
 #define RT_HEAP_TUPLE 0x04U
 #define RT_HEAP_ENUM 0x07U
-/* Mapped RAM window for the riscv (rv32/rv64) freestanding boot image: the
- * kernel is loaded at 0x80000000 and the value-heap arena lives below
- * 0x88000000 (see g_freestanding_heap_*). A real heap object -- runtime-
- * allocated or an rt_extern_heap-wrapped C static -- is always inside this
- * window. Any candidate header outside it is a misclassified integer, so
- * rt_as_heap must reject it BEFORE dereferencing header->object_type,
- * otherwise the load faults (no trap vector during early boot -> silent hang).
- * The seed compiler routes scalar i64 ==/!= through rt_native_eq, feeding raw
- * integer operands here; without this bound those faulted mid-selftest. */
-#define RT_RAM_WINDOW_BASE 0x80000000ULL
-#define RT_RAM_WINDOW_END 0x88000000ULL
 
 typedef struct RtHeapHeader {
     spl_u8 object_type;
@@ -67,7 +56,7 @@ typedef struct RtEnum {
     spl_i64 payload;
 } RtEnum;
 
-#ifndef SIMPLE_RUNTIME_NO_ENTRY
+#ifndef SIMPLE_FREESTANDING_RUNTIME_NO_ENTRY
 __asm__(
     ".section .text.entry,\"ax\",@progbits\n"
     ".globl _start\n"
@@ -76,9 +65,7 @@ __asm__(
 );
 #endif
 
-#ifndef SIMPLE_RUNTIME_NO_WEAK_HEAP
 extern spl_i64 kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(spl_i64 size) __attribute__((weak));
-#endif
 
 static spl_u64 g_freestanding_heap_next = 0x87000000ULL;
 static spl_u64 g_freestanding_heap_limit = 0x88000000ULL;
@@ -94,14 +81,12 @@ void *rt_alloc(spl_i64 size) {
     if (size <= 0) {
         return (void *)0;
     }
-#ifndef SIMPLE_RUNTIME_NO_WEAK_HEAP
     if (kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc) {
         boot_alloc = (void *)(spl_u64)kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(size);
         if (boot_alloc) {
             return boot_alloc;
         }
     }
-#endif
     bytes = rt_align8((spl_u64)size);
     next = rt_align8(g_freestanding_heap_next);
     if (next + bytes > g_freestanding_heap_limit) {
@@ -154,25 +139,6 @@ static spl_i64 rt_nil(void) {
     return rt_special(RT_VALUE_SPECIAL_NIL);
 }
 
-spl_i64 rt_memory_barrier(void) {
-    __asm__ volatile("fence rw, rw" ::: "memory");
-    return rt_nil();
-}
-
-spl_i64 rt_function_not_found(const spl_u8 *name, spl_u64 len) {
-    (void)name;
-    (void)len;
-    return rt_nil();
-}
-
-spl_i64 rt_method_not_found(const spl_u8 *type_name, spl_u64 type_len, const spl_u8 *method_name, spl_u64 method_len) {
-    (void)type_name;
-    (void)type_len;
-    (void)method_name;
-    (void)method_len;
-    return rt_nil();
-}
-
 static spl_i64 rt_heap(void *ptr) {
     if (!ptr) {
         return rt_nil();
@@ -180,44 +146,14 @@ static spl_i64 rt_heap(void *ptr) {
     return (spl_i64)(((spl_u64)ptr) | RT_VALUE_TAG_HEAP);
 }
 
-static spl_i64 rt_extern_heap(void *ptr) {
-    if (!ptr) {
-        return rt_nil();
-    }
-    return (spl_i64)(spl_u64)ptr;
-}
-
-static spl_i64 rt_extern_array(spl_i64 value) {
-    RtHeapHeader *header = (RtHeapHeader *)((spl_u64)value & ~RT_VALUE_TAG_MASK);
-    if ((((spl_u64)value) & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP &&
-        header &&
-        header->object_type == RT_HEAP_ARRAY) {
-        return (spl_i64)(spl_u64)header;
-    }
-    return value;
-}
-
 static RtHeapHeader *rt_as_heap(spl_i64 value, spl_u8 kind) {
     spl_u64 raw = (spl_u64)value;
     RtHeapHeader *header;
-    if ((raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP) {
-        header = (RtHeapHeader *)(raw & ~RT_VALUE_TAG_MASK);
-    } else if ((raw & RT_VALUE_TAG_MASK) == 0ULL && raw >= 0x10000ULL) {
-        header = (RtHeapHeader *)raw;
-    } else {
+    if ((raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) {
         return (RtHeapHeader *)0;
     }
-    /* Reject any candidate that falls outside the mapped RAM window before the
-     * header->object_type load. A real heap object (runtime-allocated or an
-     * rt_extern_heap C static) always lives in [RT_RAM_WINDOW_BASE,
-     * RT_RAM_WINDOW_END); a misclassified integer operand (e.g. a heap-TAGGED
-     * value like 0x9 masking to header 0x8, or a raw scalar the seed's
-     * rt_native_eq lowering passes here) points elsewhere and would fault the
-     * load during early boot, before any trap vector is installed -> silent hang. */
-    if (!header ||
-        (spl_u64)header < RT_RAM_WINDOW_BASE ||
-        (spl_u64)header >= RT_RAM_WINDOW_END ||
-        header->object_type != kind) {
+    header = (RtHeapHeader *)(raw & ~RT_VALUE_TAG_MASK);
+    if (!header || header->object_type != kind) {
         return (RtHeapHeader *)0;
     }
     return header;
@@ -420,50 +356,7 @@ spl_i64 rt_array_get_text(spl_i64 collection, spl_i64 index_value) {
     return rt_array_get(collection, index_value);
 }
 
-/* Untag a tagged runtime value to its raw integer payload (mirrors the hosted
- * rt_value_as_int in compiler_rust value_ops.rs). Reuses rt_index_arg so an
- * already-raw value passes through unchanged.
- *
- * These three are `weak`: the per-arch examples baremetal_stubs.c already
- * provides strong rt_array_pop/rt_string_char_at for the riscv64 lane (which
- * links both that file and this one), so a strong definition here would be a
- * duplicate symbol. Weak lets the arch-specific strong def win where present
- * and supplies the implementation for lanes (e.g. the rv32 boot.spl kernel,
- * which links only this runtime) that would otherwise be undefined. */
-__attribute__((weak)) spl_i64 rt_value_as_int(spl_i64 value) {
-    return rt_index_arg(value);
-}
-
-/* Return the character at `index` as a 1-character STRING (nil on out-of-bounds
- * or negative index). char_at is the string-returning contract; the int byte
- * value is the separate rt_string_char_code_at. Matches the canonical
- * core_string.spl rt_string_char_at and the sibling examples baremetal_stubs.c:
- * byte-indexed, negative is out of bounds (no Python-style wrap — that is
- * subscript/rt_index_get's job). */
-__attribute__((weak)) spl_i64 rt_string_char_at(spl_i64 string_value, spl_i64 index_value) {
-    RtString *string = rt_as_string(string_value);
-    spl_i64 index = rt_index_arg(index_value);
-    if (!string || index < 0 || (spl_u64)index >= string->len) {
-        return rt_nil();
-    }
-    return rt_string_new((spl_i64)(spl_u64)&string->data[index], 1);
-}
-
-/* Remove and return the last element (already a tagged value); nil if empty. */
-__attribute__((weak)) spl_i64 rt_array_pop(spl_i64 array_value) {
-    RtArray *array = rt_as_array(array_value);
-    if (!array || array->len == 0) {
-        return rt_nil();
-    }
-    array->len = array->len - 1;
-    return array->data[array->len];
-}
-
 spl_i64 rt_array_new_with_cap_u64(spl_i64 capacity_value) {
-    return rt_array_new(capacity_value);
-}
-
-spl_i64 rt_array_new_with_cap(spl_i64 capacity_value) {
     return rt_array_new(capacity_value);
 }
 
@@ -694,11 +587,6 @@ spl_i64 rt_enum_new(spl_u32 enum_id, spl_u32 discriminant, spl_i64 payload) {
     return rt_heap(value);
 }
 
-spl_i64 rt_enum_id(spl_i64 value) {
-    RtEnum *enum_value = rt_as_enum(value);
-    return enum_value ? (spl_i64)enum_value->enum_id : -1;
-}
-
 spl_i64 rt_enum_payload(spl_i64 value) {
     RtEnum *enum_value = rt_as_enum(value);
     return enum_value ? enum_value->payload : rt_nil();
@@ -858,10 +746,6 @@ spl_i64 rt_string_to_int(spl_i64 value) {
     return sign * acc;
 }
 
-spl_i64 rt_string_to_int_lenient(spl_i64 value) {
-    return rt_string_to_int(value);
-}
-
 /* Mirrors src/runtime/simple_core/core_string.spl rt_contains:
  * substring membership when both operands are strings, else array membership
  * via element-wise rt_native_eq. Returns raw 0/1 (matching rt_native_eq).
@@ -967,8 +851,8 @@ spl_i64 rt_string_from_byte_array(spl_i64 array_value) {
 
 spl_i64 rt_bytes_slice(spl_i64 array_value, spl_i64 start_value, spl_i64 len_value) {
     RtArray *array = rt_as_array(array_value);
-    spl_i64 start = start_value;
-    spl_i64 len = len_value;
+    spl_i64 start = rt_index_arg(start_value);
+    spl_i64 len = rt_index_arg(len_value);
     spl_i64 out;
     if (!array || len <= 0) {
         return rt_array_new(0);
@@ -1079,12 +963,6 @@ void rt_riscv_uart_put(spl_u64 byte) {
     uart_put_byte((spl_u8)byte);
 }
 
-/* RV64 equivalent of x86 invlpg: per-address TLB invalidate via sfence.vma. */
-spl_i64 rt_invlpg(spl_i64 addr) {
-    __asm__ volatile("sfence.vma %0, zero" : : "r"(addr) : "memory");
-    return 0;
-}
-
 static void uart_write_bytes(const char *data, spl_u64 len) {
     if (!data) {
         return;
@@ -1098,11 +976,6 @@ static void uart_write_hex_byte(spl_u8 value) {
     static const char hex[] = "0123456789abcdef";
     uart_put_byte((spl_u8)hex[(value >> 4) & 0x0fU]);
     uart_put_byte((spl_u8)hex[value & 0x0fU]);
-}
-
-static void uart_write_hex_u16(spl_u16 value) {
-    uart_write_hex_byte((spl_u8)(value >> 8));
-    uart_write_hex_byte((spl_u8)value);
 }
 
 static void uart_line_tcp_read5(const spl_u8 *data, spl_u64 len) {
@@ -1131,50 +1004,8 @@ void log_raw_println(spl_i64 msg) {
     uart_put_byte(10);
 }
 
-void rt_cstr_println(const char *msg) {
-    if (!msg) {
-        uart_put_byte(13);
-        uart_put_byte(10);
-        return;
-    }
-    while (*msg) {
-        uart_put_byte((spl_u8)*msg);
-        msg = msg + 1;
-    }
-    uart_put_byte(13);
-    uart_put_byte(10);
-}
-
 void serial_println(spl_i64 msg) {
     log_raw_println(msg);
-}
-
-void rt_riscv_wfi_forever(void) {
-    for (;;) {
-        __asm__ volatile("wfi");
-    }
-}
-
-spl_i64 rt_eprintln_str(spl_i64 msg) {
-    log_raw_println(msg);
-    return rt_nil();
-}
-
-__attribute__((noreturn))
-void rt_exit(spl_i64 code) {
-    char buf[20];
-    spl_u64 len = 0;
-    uart_write_bytes("[exit] rt_exit(", 16);
-    if (code < 0) {
-        uart_put_byte('-');
-        code = -code;
-    }
-    rt_write_decimal(buf, &len, (spl_u64)code);
-    uart_write_bytes(buf, len);
-    uart_write_bytes(") -- halting\r\n", 14);
-    for (;;) {
-        __asm__ volatile("wfi");
-    }
 }
 
 spl_i64 rt_string_len(spl_i64 value) {
@@ -1517,7 +1348,7 @@ typedef struct RtPciDevice {
 #define RT_VIRTIO_NET_F_MAC (1U << 5)
 #define RT_VIRTQ_DESC_F_NEXT 1U
 #define RT_VIRTQ_DESC_F_WRITE 2U
-#define RT_NET_QUEUE_CAP 256U
+#define RT_NET_QUEUE_CAP 1024U
 #define RT_NET_RX_POST_COUNT 8U
 #define RT_NET_BUFFER_SIZE 2048U
 #define RT_VIRTIO_BLK_QUEUE 0U
@@ -1528,6 +1359,8 @@ typedef struct RtPciDevice {
 #define RT_NVFS_MAGIC 0x4e564653U
 #define RT_NVFS_VERSION 2U
 #define RT_GPU_QUEUE_CAP 64U
+#define RT_GPU_WIDTH 320U
+#define RT_GPU_HEIGHT 240U
 #define RT_GPU_RESOURCE_ID 1U
 #define RT_GPU_CMD_GET_DISPLAY_INFO 0x0100U
 #define RT_GPU_CMD_RESOURCE_CREATE_2D 0x0101U
@@ -1545,6 +1378,8 @@ static spl_i64 g_rt_net_ready = 0;
 static spl_i64 g_rt_net_tx_ready = 0;
 static spl_i64 g_rt_net_rx_ready = 0;
 static spl_i64 g_rt_net_tx_probe_code = -1;
+static spl_i64 g_rt_net_debug_stage = 0;
+static spl_i64 g_rt_net_debug_queue_max = 0;
 static spl_u64 g_rt_net_bar0 = 0;
 static spl_u64 g_rt_rx_desc = 0;
 static spl_u64 g_rt_rx_avail = 0;
@@ -1582,15 +1417,10 @@ static spl_u64 g_rt_gpu_desc = 0;
 static spl_u64 g_rt_gpu_avail = 0;
 static spl_u64 g_rt_gpu_used = 0;
 static spl_u16 g_rt_gpu_qsize = 0;
+static spl_u16 g_rt_gpu_last_used = 0;
 static spl_u64 g_rt_gpu_cmd = 0;
 static spl_u64 g_rt_gpu_resp = 0;
 static spl_u64 g_rt_gpu_fb = 0;
-static spl_u32 g_rt_gpu_width = 0;
-static spl_u32 g_rt_gpu_height = 0;
-static spl_u32 g_rt_gpu_pitch = 0;
-static spl_u32 g_rt_gpu_scanout_id = 0;
-static spl_u32 g_rt_gpu_last_response_len = 0;
-static spl_i64 g_rt_display_failed = 0;
 
 static spl_u32 rt_pci_read_config32(spl_u64 bus, spl_u64 dev, spl_u64 func, spl_u64 reg) {
     spl_u64 addr = RT_PCI_ECAM_BASE
@@ -1723,9 +1553,7 @@ static void rt_avail_push(spl_u64 avail_base, spl_u16 qsize, spl_u16 desc_idx) {
     spl_u16 idx = *idxp;
     volatile spl_u16 *slot = (volatile spl_u16 *)(avail_base + 4ULL + ((spl_u64)(idx % qsize) * 2ULL));
     *slot = desc_idx;
-    __sync_synchronize();
     *idxp = idx + 1U;
-    __sync_synchronize();
 }
 
 static spl_i64 rt_setup_virtqueue(spl_u64 bar0, spl_u16 queue, spl_u64 *desc, spl_u64 *avail, spl_u64 *used, spl_u16 *qsize) {
@@ -1737,6 +1565,7 @@ static spl_i64 rt_setup_virtqueue(spl_u64 bar0, spl_u16 queue, spl_u64 *desc, sp
     spl_u64 desc_avail;
     rt_io_write16(bar0, RT_VIRTIO_PCI_QUEUE_SEL, queue);
     max_size = rt_io_read16(bar0, RT_VIRTIO_PCI_QUEUE_SIZE);
+    g_rt_net_debug_queue_max = (spl_i64)max_size;
     if (max_size == 0) {
         return -1;
     }
@@ -1859,9 +1688,6 @@ static spl_i64 g_boot_tcp_response_kind = 0;
 static spl_u8 g_boot_tcp_rx_buf[4096];
 static spl_u64 g_boot_tcp_rx_len = 0;
 static spl_u64 g_boot_tcp_rx_off = 0;
-static spl_u64 g_boot_tcp_arp_log_count = 0;
-static spl_u64 g_boot_tcp_ipv4_log_count = 0;
-static spl_u64 g_boot_tcp_tcp_diag_log_count = 0;
 
 spl_i64 rt_boot_tcp_bind_port(spl_i64 port);
 
@@ -2049,13 +1875,6 @@ static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
     spl_u64 tcp_hlen;
     spl_u64 payload_len;
     if (len < 54 || ip[9] != 6) {
-        if (g_boot_tcp_tcp_diag_log_count < 8ULL) {
-            uart_write_bytes("BTCP IPP ", 9);
-            uart_write_hex_byte(ip[9]);
-            uart_put_byte(13);
-            uart_put_byte(10);
-            g_boot_tcp_tcp_diag_log_count = g_boot_tcp_tcp_diag_log_count + 1ULL;
-        }
         return;
     }
     ip_hlen = (spl_u64)(ip[0] & 0x0fU) * 4ULL;
@@ -2066,15 +1885,6 @@ static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
     tcp = ip + ip_hlen;
     src_port = rt_be16(tcp);
     dst_port = rt_be16(tcp + 2);
-    if (g_boot_tcp_tcp_diag_log_count < 8ULL) {
-        uart_write_bytes("BTCP TCP d=", 11);
-        uart_write_hex_u16(dst_port);
-        uart_write_bytes(" f=", 3);
-        uart_write_hex_byte(tcp[13]);
-        uart_put_byte(13);
-        uart_put_byte(10);
-        g_boot_tcp_tcp_diag_log_count = g_boot_tcp_tcp_diag_log_count + 1ULL;
-    }
     if (dst_port != g_boot_tcp_listen_port) {
         return;
     }
@@ -2161,17 +1971,9 @@ static void rt_process_rx_frame(const spl_u8 *frame, spl_u64 len) {
     if (ethertype == 0x0806U && len >= 42) {
         const spl_u8 *arp = frame + 14;
         if (rt_be16(arp + 6) == 1 && rt_be32(arp + 24) == 0x0a00020fU) {
-            if (g_boot_tcp_arp_log_count < 4ULL) {
-                uart_line("BTCP ARP");
-                g_boot_tcp_arp_log_count = g_boot_tcp_arp_log_count + 1ULL;
-            }
             rt_send_arp_reply(frame);
         }
     } else if (ethertype == 0x0800U) {
-        if (g_boot_tcp_ipv4_log_count < 4ULL) {
-            uart_line("BTCP IPv4");
-            g_boot_tcp_ipv4_log_count = g_boot_tcp_ipv4_log_count + 1ULL;
-        }
         rt_process_tcp(frame, len);
     }
 }
@@ -2188,9 +1990,7 @@ static spl_i64 rt_poll_rx_once(void) {
     if (!g_rt_net_ready || !g_rt_net_rx_ready) {
         return -1;
     }
-    __sync_synchronize();
     used_idx = *used_idxp;
-    __sync_synchronize();
     if (used_idx == g_rt_rx_last_used) {
         return 0;
     }
@@ -2311,6 +2111,7 @@ spl_i64 rt_pci_get_field(spl_i64 index, spl_i64 field) {
 
 spl_i64 rt_net_init(void) {
     spl_i64 count = rt_pci_device_count();
+    g_rt_net_debug_stage = 10;
     for (spl_i64 i = 0; i < count; i = i + 1) {
         spl_i64 cls = rt_pci_get_field(i, 3);
         spl_i64 sub = rt_pci_get_field(i, 4);
@@ -2318,10 +2119,13 @@ spl_i64 rt_net_init(void) {
         spl_i64 device_id = rt_pci_get_field(i, 6);
         if (rt_pci_is_virtio_net(cls, sub, vendor, device_id)) {
             RtPciDevice *dev = &g_rt_pci_devices[i];
+            g_rt_net_debug_stage = 20;
             if (device_id != RT_VIRTIO_NET_LEGACY_DEVICE_ID) {
                 g_rt_net_ready = 0;
+                g_rt_net_debug_stage = 21;
                 return -2;
             }
+            g_rt_net_debug_stage = 30;
             rt_pci_write_config32((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, 0x10, (spl_u32)(RT_PCI_LEGACY_NET_IO_PORT | 1ULL));
             rt_pci_write_config32((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, 0x04, RT_PCI_CMD_IO | RT_PCI_CMD_MEM | RT_PCI_CMD_BUS_MASTER);
             g_rt_net_bar0 = RT_PCI_IO_BASE + RT_PCI_LEGACY_NET_IO_PORT;
@@ -2333,19 +2137,25 @@ spl_i64 rt_net_init(void) {
                 RT_VIRTIO_PCI_GUEST_FEATURES,
                 rt_io_read32(g_rt_net_bar0, RT_VIRTIO_PCI_HOST_FEATURES) & RT_VIRTIO_NET_F_MAC
             );
+            g_rt_net_debug_stage = 40;
             if (rt_setup_virtqueue(g_rt_net_bar0, RT_VIRTIO_NET_RX_QUEUE, &g_rt_rx_desc, &g_rt_rx_avail, &g_rt_rx_used, &g_rt_rx_qsize) < 0) {
                 rt_io_write8(g_rt_net_bar0, RT_VIRTIO_PCI_STATUS, RT_VIRTIO_STATUS_FAILED);
                 g_rt_net_ready = 0;
+                g_rt_net_debug_stage = 41;
                 return -4;
             }
+            g_rt_net_debug_stage = 50;
             if (rt_setup_virtqueue(g_rt_net_bar0, RT_VIRTIO_NET_TX_QUEUE, &g_rt_tx_desc, &g_rt_tx_avail, &g_rt_tx_used, &g_rt_tx_qsize) < 0) {
                 rt_io_write8(g_rt_net_bar0, RT_VIRTIO_PCI_STATUS, RT_VIRTIO_STATUS_FAILED);
                 g_rt_net_ready = 0;
+                g_rt_net_debug_stage = 51;
                 return -5;
             }
+            g_rt_net_debug_stage = 60;
             if (rt_prepost_rx(g_rt_net_bar0) < 0) {
                 rt_io_write8(g_rt_net_bar0, RT_VIRTIO_PCI_STATUS, RT_VIRTIO_STATUS_FAILED);
                 g_rt_net_ready = 0;
+                g_rt_net_debug_stage = 61;
                 return -6;
             }
             rt_io_write8(
@@ -2367,11 +2177,21 @@ spl_i64 rt_net_init(void) {
             g_rt_net_tx_ready = 1;
             g_rt_net_rx_ready = 1;
             g_rt_net_ready = 1;
+            g_rt_net_debug_stage = 100;
             return 0;
         }
     }
     g_rt_net_ready = 0;
+    g_rt_net_debug_stage = 11;
     return -1;
+}
+
+spl_i64 rt_net_debug_stage(void) {
+    return g_rt_net_debug_stage;
+}
+
+spl_i64 rt_net_debug_queue_max(void) {
+    return g_rt_net_debug_queue_max;
 }
 
 spl_i64 rt_net_tx_test(void) {
@@ -2628,9 +2448,6 @@ spl_i64 rt_boot_tcp_bind_port(spl_i64 port) {
     g_boot_tcp_send_next = 0x10203040U;
     g_boot_tcp_rx_len = 0;
     g_boot_tcp_rx_off = 0;
-    g_boot_tcp_arp_log_count = 0;
-    g_boot_tcp_ipv4_log_count = 0;
-    g_boot_tcp_tcp_diag_log_count = 0;
     uart_line("BTCP PORT OK");
     return 100;
 }
@@ -2893,7 +2710,7 @@ spl_i64 rt_boot_tcp_take_version_text(spl_i64 fd) {
 spl_i64 rt_boot_tcp_take_version_bytes(spl_i64 fd) {
     spl_u64 line_end = 0ULL;
     if (fd != 200 || !g_boot_tcp_client_open) {
-        return rt_extern_array(rt_byte_array_new_len(rt_int(0)));
+        return rt_byte_array_new_len(rt_int(0));
     }
     for (spl_u64 polls = 0ULL; polls < 50000ULL; polls = polls + 1ULL) {
         while (line_end < g_boot_tcp_rx_len) {
@@ -2906,7 +2723,7 @@ spl_i64 rt_boot_tcp_take_version_bytes(spl_i64 fd) {
                 spl_i64 out = rt_byte_array_new_len(rt_int((spl_i64)text_len));
                 spl_i64 *data = (spl_i64 *)(spl_u64)rt_array_data_ptr(out);
                 if (!data) {
-                    return rt_extern_array(rt_byte_array_new_len(rt_int(0)));
+                    return rt_byte_array_new_len(rt_int(0));
                 }
                 for (spl_u64 i = 0ULL; i < text_len; i = i + 1ULL) {
                     data[i] = rt_int((spl_i64)g_boot_tcp_rx_buf[i]);
@@ -2917,20 +2734,17 @@ spl_i64 rt_boot_tcp_take_version_bytes(spl_i64 fd) {
                 }
                 g_boot_tcp_rx_len = unread;
                 g_boot_tcp_rx_off = 0ULL;
-                return rt_extern_array(out);
+                return out;
             }
             line_end = line_end + 1ULL;
         }
         rt_poll_rx_once();
     }
-    return rt_extern_array(rt_byte_array_new_len(rt_int(0)));
+    return rt_byte_array_new_len(rt_int(0));
 }
 
 spl_i64 rt_boot_tcp_close(spl_i64 fd) {
     if (fd == 200) {
-        if (g_boot_tcp_client_open) {
-            rt_send_tcp_packet(0x11U, (const spl_u8 *)0, 0);
-        }
         g_boot_tcp_client_open = 0;
         g_boot_tcp_client_announced = 0;
         g_boot_tcp_rx_len = 0;
@@ -3004,36 +2818,31 @@ spl_i64 rt_boot_tcp_read_ssh_plain_packet_payload(spl_i64 fd) {
     spl_u32 remaining_len;
     spl_u32 payload_len;
     spl_i64 out;
-    spl_i64 *data;
     if (fd != 200 || !g_boot_tcp_client_open) {
-        return rt_extern_array(rt_array_new(0));
+        return rt_array_new(0);
     }
     if (rt_boot_tcp_read_raw(header, 5ULL) != 5ULL) {
-        return rt_extern_array(rt_array_new(0));
+        return rt_array_new(0);
     }
     uart_line_tcp_read5(header, 5ULL);
     packet_len = ((spl_u32)header[0] << 24) | ((spl_u32)header[1] << 16) | ((spl_u32)header[2] << 8) | (spl_u32)header[3];
     padding_len = (spl_u32)header[4];
     if (packet_len < 1U || padding_len + 1U > packet_len) {
-        return rt_extern_array(rt_array_new(0));
+        return rt_array_new(0);
     }
     remaining_len = packet_len - 1U;
     if ((spl_u64)remaining_len > sizeof(body)) {
-        return rt_extern_array(rt_array_new(0));
+        return rt_array_new(0);
     }
     if (rt_boot_tcp_read_raw(body, (spl_u64)remaining_len) != (spl_u64)remaining_len) {
-        return rt_extern_array(rt_array_new(0));
+        return rt_array_new(0);
     }
     payload_len = remaining_len - padding_len;
-    out = rt_byte_array_new_len(rt_int((spl_i64)payload_len));
-    data = (spl_i64 *)(spl_u64)rt_array_data_ptr(out);
-    if (!data) {
-        return rt_extern_array(rt_byte_array_new_len(rt_int(0)));
-    }
+    out = rt_array_new((spl_i64)payload_len);
     for (spl_u32 i = 0U; i < payload_len; i = i + 1U) {
-        data[i] = rt_int((spl_i64)body[i]);
+        rt_array_push(out, rt_int((spl_i64)body[i]));
     }
-    return rt_extern_array(out);
+    return out;
 }
 
 spl_i64 rt_boot_tcp_read_ssh_encrypted_packet(spl_i64 fd) {
@@ -3042,36 +2851,31 @@ spl_i64 rt_boot_tcp_read_ssh_encrypted_packet(spl_i64 fd) {
     spl_u32 packet_len;
     spl_u32 body_len;
     spl_i64 out;
-    spl_i64 *data;
     if (fd != 200 || !g_boot_tcp_client_open) {
-        return rt_extern_array(rt_array_new(0));
+        return rt_array_new(0);
     }
     if (rt_boot_tcp_read_raw(header, 4ULL) != 4ULL) {
-        return rt_extern_array(rt_array_new(0));
+        return rt_array_new(0);
     }
     packet_len = ((spl_u32)header[0] << 24) | ((spl_u32)header[1] << 16) | ((spl_u32)header[2] << 8) | (spl_u32)header[3];
     if (packet_len < 1U || packet_len > 4096U) {
-        return rt_extern_array(rt_array_new(0));
+        return rt_array_new(0);
     }
     body_len = packet_len + 16U;
     if ((spl_u64)body_len > sizeof(body)) {
-        return rt_extern_array(rt_array_new(0));
+        return rt_array_new(0);
     }
     if (rt_boot_tcp_read_raw(body, (spl_u64)body_len) != (spl_u64)body_len) {
-        return rt_extern_array(rt_array_new(0));
+        return rt_array_new(0);
     }
-    out = rt_byte_array_new_len(rt_int((spl_i64)(4U + body_len)));
-    data = (spl_i64 *)(spl_u64)rt_array_data_ptr(out);
-    if (!data) {
-        return rt_extern_array(rt_byte_array_new_len(rt_int(0)));
-    }
+    out = rt_array_new((spl_i64)(4U + body_len));
     for (spl_u32 i = 0U; i < 4U; i = i + 1U) {
-        data[i] = rt_int((spl_i64)header[i]);
+        rt_array_push(out, rt_int((spl_i64)header[i]));
     }
     for (spl_u32 i = 0U; i < body_len; i = i + 1U) {
-        data[4U + i] = rt_int((spl_i64)body[i]);
+        rt_array_push(out, rt_int((spl_i64)body[i]));
     }
-    return rt_extern_array(out);
+    return out;
 }
 
 spl_i64 rt_boot_tcp_read_bytes(spl_i64 max_len) {
@@ -3079,7 +2883,7 @@ spl_i64 rt_boot_tcp_read_bytes(spl_i64 max_len) {
     spl_u64 available;
     spl_i64 out;
     if (want == 0ULL) {
-        return rt_extern_array(rt_array_new(0));
+        return rt_array_new(0);
     }
     if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
         for (spl_u64 polls = 0ULL; polls < 50000ULL; polls = polls + 1ULL) {
@@ -3090,7 +2894,7 @@ spl_i64 rt_boot_tcp_read_bytes(spl_i64 max_len) {
         }
     }
     if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
-        return rt_extern_array(rt_array_new(0));
+        return rt_array_new(0);
     }
     available = g_boot_tcp_rx_len - g_boot_tcp_rx_off;
     if (want > available) {
@@ -3108,7 +2912,7 @@ spl_i64 rt_boot_tcp_read_bytes(spl_i64 max_len) {
         g_boot_tcp_rx_len = 0;
         g_boot_tcp_rx_off = 0;
     }
-    return rt_extern_array(out);
+    return out;
 }
 
 __attribute__((weak)) spl_i64 rt_io_tcp_bind(spl_i64 addr) {
@@ -3147,14 +2951,6 @@ static spl_u32 rt_get_le32(const spl_u8 *p) {
         ((spl_u32)p[3] << 24);
 }
 
-#define RT_GPU_COMMAND_TIMEOUT_US 100000ULL
-
-static spl_u64 rt_gpu_time_now_us(void) {
-    spl_u64 ticks;
-    __asm__ volatile("rdtime %0" : "=r"(ticks));
-    return ticks / 10ULL;
-}
-
 static void rt_gpu_ctrl_hdr(spl_u8 *p, spl_u32 cmd) {
     rt_memzero(p, 64);
     rt_put_le32(p, cmd);
@@ -3163,42 +2959,29 @@ static void rt_gpu_ctrl_hdr(spl_u8 *p, spl_u32 cmd) {
 static spl_i64 rt_gpu_send_command(spl_u32 cmd, spl_u32 req_len, spl_u32 resp_len) {
     volatile spl_u16 *used_idx;
     spl_u16 start;
-    spl_u64 started_us;
     if ((!g_rt_gpu_modern && !g_rt_gpu_bar0) || !g_rt_gpu_cmd || !g_rt_gpu_resp || g_rt_gpu_qsize < 2) {
         return -1;
     }
     rt_desc_write(g_rt_gpu_desc, 0, g_rt_gpu_cmd, req_len, RT_VIRTQ_DESC_F_NEXT, 1);
     rt_desc_write(g_rt_gpu_desc, 1, g_rt_gpu_resp, resp_len, RT_VIRTQ_DESC_F_WRITE, 0);
     rt_memzero((void *)g_rt_gpu_resp, resp_len);
+    rt_avail_push(g_rt_gpu_avail, g_rt_gpu_qsize, 0);
     used_idx = (volatile spl_u16 *)(g_rt_gpu_used + 2ULL);
     start = *used_idx;
-    g_rt_gpu_last_response_len = 0;
-    rt_avail_push(g_rt_gpu_avail, g_rt_gpu_qsize, 0);
     __sync_synchronize();
     if (g_rt_gpu_modern) {
         rt_mmio_write16_raw(g_rt_gpu_notify + ((spl_u64)g_rt_gpu_notify_off * (spl_u64)g_rt_gpu_notify_multiplier), 0);
     } else {
         rt_io_write16(g_rt_gpu_bar0, RT_VIRTIO_PCI_QUEUE_NOTIFY, 0);
     }
-    started_us = rt_gpu_time_now_us();
-    while (rt_gpu_time_now_us() - started_us < RT_GPU_COMMAND_TIMEOUT_US) {
+    for (spl_u64 polls = 0; polls < 1000000ULL; polls = polls + 1) {
         __sync_synchronize();
         if (*used_idx != start) {
-            __sync_synchronize();
-            spl_u64 used_slot = (spl_u64)(start % g_rt_gpu_qsize);
-            volatile spl_u32 *used_elem = (volatile spl_u32 *)(g_rt_gpu_used + 4ULL + used_slot * 8ULL);
-            spl_u32 used_id = used_elem[0];
-            spl_u32 used_len = used_elem[1];
-            if (used_id != 0U || used_len < 24U || used_len > resp_len) {
-                g_rt_display_failed = 1;
-                return -3;
-            }
-            g_rt_gpu_last_response_len = used_len;
+            g_rt_gpu_last_used = *used_idx;
             return (spl_i64)rt_get_le32((const spl_u8 *)g_rt_gpu_resp);
         }
     }
     (void)cmd;
-    g_rt_display_failed = 1;
     return -2;
 }
 
@@ -3305,32 +3088,13 @@ static spl_i64 rt_gpu_cmd_get_display_info(void) {
     spl_i64 resp;
     rt_gpu_ctrl_hdr(cmd, RT_GPU_CMD_GET_DISPLAY_INFO);
     resp = rt_gpu_send_command(RT_GPU_CMD_GET_DISPLAY_INFO, 24U, 408U);
-    if (resp != RT_GPU_RESP_OK_DISPLAY_INFO) {
-        return resp < 0 ? resp : -3;
+    if (resp == RT_GPU_RESP_OK_DISPLAY_INFO) {
+        return 0;
     }
-    if (g_rt_gpu_last_response_len < 408U) {
-        g_rt_display_failed = 1;
-        return -4;
+    if (resp < 0) {
+        return resp;
     }
-    for (spl_u32 scanout = 0; scanout < 16U; scanout = scanout + 1U) {
-        const spl_u8 *mode = (const spl_u8 *)g_rt_gpu_resp + 24U + scanout * 24U;
-        spl_u32 width = rt_get_le32(mode + 8U);
-        spl_u32 height = rt_get_le32(mode + 12U);
-        spl_u32 enabled = rt_get_le32(mode + 16U);
-        spl_u64 bytes = (spl_u64)width * (spl_u64)height * 4ULL;
-        spl_u64 pages = (bytes + 4095ULL) / 4096ULL;
-        if (enabled != 0U && width > 0U && height > 0U
-            && width <= 0x7fffffffU && height <= 0x7fffffffU
-            && width <= 0xffffffffU / 4U && bytes > 0ULL
-            && bytes <= 0xffffffffULL && pages <= g_riscv_pmm_free_pages) {
-            g_rt_gpu_width = width;
-            g_rt_gpu_height = height;
-            g_rt_gpu_pitch = width * 4U;
-            g_rt_gpu_scanout_id = scanout;
-            return 0;
-        }
-    }
-    return -5;
+    return -3;
 }
 
 static spl_i64 rt_gpu_cmd_resource_create(void) {
@@ -3338,8 +3102,8 @@ static spl_i64 rt_gpu_cmd_resource_create(void) {
     rt_gpu_ctrl_hdr(cmd, RT_GPU_CMD_RESOURCE_CREATE_2D);
     rt_put_le32(cmd + 24, RT_GPU_RESOURCE_ID);
     rt_put_le32(cmd + 28, RT_GPU_FORMAT_B8G8R8A8_UNORM);
-    rt_put_le32(cmd + 32, g_rt_gpu_width);
-    rt_put_le32(cmd + 36, g_rt_gpu_height);
+    rt_put_le32(cmd + 32, RT_GPU_WIDTH);
+    rt_put_le32(cmd + 36, RT_GPU_HEIGHT);
     return rt_gpu_send_command(RT_GPU_CMD_RESOURCE_CREATE_2D, 40U, 24U) == RT_GPU_RESP_OK_NODATA ? 0 : -1;
 }
 
@@ -3349,7 +3113,7 @@ static spl_i64 rt_gpu_cmd_attach_backing(void) {
     rt_put_le32(cmd + 24, RT_GPU_RESOURCE_ID);
     rt_put_le32(cmd + 28, 1U);
     rt_put_le64(cmd + 32, g_rt_gpu_fb);
-    rt_put_le32(cmd + 40, g_rt_gpu_width * g_rt_gpu_height * 4U);
+    rt_put_le32(cmd + 40, RT_GPU_WIDTH * RT_GPU_HEIGHT * 4U);
     rt_put_le32(cmd + 44, 0U);
     return rt_gpu_send_command(RT_GPU_CMD_RESOURCE_ATTACH_BACKING, 48U, 24U) == RT_GPU_RESP_OK_NODATA ? 0 : -1;
 }
@@ -3359,9 +3123,9 @@ static spl_i64 rt_gpu_cmd_set_scanout(void) {
     rt_gpu_ctrl_hdr(cmd, RT_GPU_CMD_SET_SCANOUT);
     rt_put_le32(cmd + 24, 0U);
     rt_put_le32(cmd + 28, 0U);
-    rt_put_le32(cmd + 32, g_rt_gpu_width);
-    rt_put_le32(cmd + 36, g_rt_gpu_height);
-    rt_put_le32(cmd + 40, g_rt_gpu_scanout_id);
+    rt_put_le32(cmd + 32, RT_GPU_WIDTH);
+    rt_put_le32(cmd + 36, RT_GPU_HEIGHT);
+    rt_put_le32(cmd + 40, 0U);
     rt_put_le32(cmd + 44, RT_GPU_RESOURCE_ID);
     return rt_gpu_send_command(RT_GPU_CMD_SET_SCANOUT, 48U, 24U) == RT_GPU_RESP_OK_NODATA ? 0 : -1;
 }
@@ -3372,8 +3136,8 @@ static spl_i64 rt_gpu_cmd_transfer_flush(void) {
     rt_gpu_ctrl_hdr(cmd, RT_GPU_CMD_TRANSFER_TO_HOST_2D);
     rt_put_le32(cmd + 24, 0U);
     rt_put_le32(cmd + 28, 0U);
-    rt_put_le32(cmd + 32, g_rt_gpu_width);
-    rt_put_le32(cmd + 36, g_rt_gpu_height);
+    rt_put_le32(cmd + 32, RT_GPU_WIDTH);
+    rt_put_le32(cmd + 36, RT_GPU_HEIGHT);
     rt_put_le64(cmd + 40, 0ULL);
     rt_put_le32(cmd + 48, RT_GPU_RESOURCE_ID);
     rt_put_le32(cmd + 52, 0U);
@@ -3384,22 +3148,79 @@ static spl_i64 rt_gpu_cmd_transfer_flush(void) {
     rt_gpu_ctrl_hdr(cmd, RT_GPU_CMD_RESOURCE_FLUSH);
     rt_put_le32(cmd + 24, 0U);
     rt_put_le32(cmd + 28, 0U);
-    rt_put_le32(cmd + 32, g_rt_gpu_width);
-    rt_put_le32(cmd + 36, g_rt_gpu_height);
+    rt_put_le32(cmd + 32, RT_GPU_WIDTH);
+    rt_put_le32(cmd + 36, RT_GPU_HEIGHT);
     rt_put_le32(cmd + 40, RT_GPU_RESOURCE_ID);
     rt_put_le32(cmd + 44, 0U);
     return rt_gpu_send_command(RT_GPU_CMD_RESOURCE_FLUSH, 48U, 24U) == RT_GPU_RESP_OK_NODATA ? 0 : -1;
 }
 
+static void rt_gpu_fill_test_pattern(void) {
+    volatile spl_u32 *fb = (volatile spl_u32 *)g_rt_gpu_fb;
+    for (spl_u32 y = 0; y < RT_GPU_HEIGHT; y = y + 1U) {
+        for (spl_u32 x = 0; x < RT_GPU_WIDTH; x = x + 1U) {
+            spl_u8 r = (spl_u8)(x & 0xffU);
+            spl_u8 g = (spl_u8)(y & 0xffU);
+            spl_u8 b = (spl_u8)((x ^ y) & 0xffU);
+            fb[(spl_u64)y * RT_GPU_WIDTH + x] = 0xff000000U | ((spl_u32)r << 16) | ((spl_u32)g << 8) | (spl_u32)b;
+        }
+    }
+}
+
+static void rt_gpu_fill_rect(spl_u32 x, spl_u32 y, spl_u32 w, spl_u32 h, spl_u32 color) {
+    volatile spl_u32 *fb = (volatile spl_u32 *)g_rt_gpu_fb;
+    spl_u32 y_end = y + h;
+    spl_u32 x_end = x + w;
+    if (x >= RT_GPU_WIDTH || y >= RT_GPU_HEIGHT) {
+        return;
+    }
+    if (x_end > RT_GPU_WIDTH) {
+        x_end = RT_GPU_WIDTH;
+    }
+    if (y_end > RT_GPU_HEIGHT) {
+        y_end = RT_GPU_HEIGHT;
+    }
+    for (spl_u32 py = y; py < y_end; py = py + 1U) {
+        for (spl_u32 px = x; px < x_end; px = px + 1U) {
+            fb[(spl_u64)py * RT_GPU_WIDTH + px] = color;
+        }
+    }
+}
+
+static void rt_gpu_fill_wm_scene(void) {
+    volatile spl_u32 *fb = (volatile spl_u32 *)g_rt_gpu_fb;
+    for (spl_u32 y = 0; y < RT_GPU_HEIGHT; y = y + 1U) {
+        for (spl_u32 x = 0; x < RT_GPU_WIDTH; x = x + 1U) {
+            fb[(spl_u64)y * RT_GPU_WIDTH + x] = 0xff0a2540U;
+        }
+    }
+
+    rt_gpu_fill_rect(0U, 0U, RT_GPU_WIDTH, 44U, 0xff101820U);
+    rt_gpu_fill_rect(0U, 42U, RT_GPU_WIDTH, 2U, 0xff3498dbU);
+    rt_gpu_fill_rect(0U, RT_GPU_HEIGHT - 56U, RT_GPU_WIDTH, 56U, 0xff101820U);
+    rt_gpu_fill_rect(0U, RT_GPU_HEIGHT - 56U, RT_GPU_WIDTH, 2U, 0xff3498dbU);
+
+    rt_gpu_fill_rect(24U, 72U, 272U, 112U, 0x66000000U);
+    rt_gpu_fill_rect(18U, 66U, 272U, 112U, 0xff1e293bU);
+    rt_gpu_fill_rect(18U, 66U, 272U, 28U, 0xff2050a0U);
+    rt_gpu_fill_rect(30U, 75U, 10U, 10U, 0xffe74c3cU);
+    rt_gpu_fill_rect(48U, 75U, 10U, 10U, 0xfff1c40fU);
+    rt_gpu_fill_rect(66U, 75U, 10U, 10U, 0xff27ae60U);
+    rt_gpu_fill_rect(266U, 66U, 24U, 28U, 0xffcc3333U);
+
+    rt_gpu_fill_rect(26U, 102U, 256U, 68U, 0xff182230U);
+    rt_gpu_fill_rect(36U, 114U, 96U, 10U, 0xff22c55eU);
+    rt_gpu_fill_rect(36U, 134U, 154U, 10U, 0xff60a5faU);
+    rt_gpu_fill_rect(36U, 154U, 126U, 10U, 0xfff59e0bU);
+    rt_gpu_fill_rect(196U, 114U, 64U, 50U, 0xff243447U);
+
+    rt_gpu_fill_rect(16U, RT_GPU_HEIGHT - 42U, 72U, 28U, 0xff1e293bU);
+    rt_gpu_fill_rect(96U, RT_GPU_HEIGHT - 42U, 72U, 28U, 0xff243447U);
+    rt_gpu_fill_rect(176U, RT_GPU_HEIGHT - 42U, 72U, 28U, 0xff243447U);
+    rt_gpu_fill_rect(256U, RT_GPU_HEIGHT - 35U, 42U, 14U, 0xff3498dbU);
+}
+
 spl_i64 rt_display_init(void) {
-    if (g_rt_display_failed) {
-        return -70;
-    }
-    if (g_rt_display_ready) {
-        return 0;
-    }
-    /* One-shot boot transport: any partial init failure poisons this session. */
-    g_rt_display_failed = 1;
     spl_i64 count = rt_pci_device_count();
     for (spl_i64 i = 0; i < count; i = i + 1) {
         spl_i64 cls = rt_pci_get_field(i, 3);
@@ -3439,24 +3260,19 @@ spl_i64 rt_display_init(void) {
             }
             g_rt_gpu_cmd = rt_riscv_noalloc_alloc_page();
             g_rt_gpu_resp = rt_riscv_noalloc_alloc_page();
-            if (!g_rt_gpu_cmd || !g_rt_gpu_resp) {
+            g_rt_gpu_fb = rt_alloc_contiguous_pages((RT_GPU_WIDTH * RT_GPU_HEIGHT * 4ULL + 4095ULL) / 4096ULL);
+            if (!g_rt_gpu_cmd || !g_rt_gpu_resp || !g_rt_gpu_fb) {
                 g_rt_display_ready = 0;
                 return -5;
             }
             rt_memzero((void *)g_rt_gpu_cmd, 4096ULL);
             rt_memzero((void *)g_rt_gpu_resp, 4096ULL);
+            rt_memzero((void *)g_rt_gpu_fb, RT_GPU_WIDTH * RT_GPU_HEIGHT * 4ULL);
             spl_i64 display_info_rc = rt_gpu_cmd_get_display_info();
             if (display_info_rc < 0) {
                 g_rt_display_ready = 0;
                 return -610 + display_info_rc;
             }
-            spl_u64 framebuffer_bytes = (spl_u64)g_rt_gpu_width * (spl_u64)g_rt_gpu_height * 4ULL;
-            g_rt_gpu_fb = rt_alloc_contiguous_pages((framebuffer_bytes + 4095ULL) / 4096ULL);
-            if (!g_rt_gpu_fb) {
-                g_rt_display_ready = 0;
-                return -61;
-            }
-            rt_memzero((void *)g_rt_gpu_fb, framebuffer_bytes);
             if (rt_gpu_cmd_resource_create() < 0) {
                 g_rt_display_ready = 0;
                 return -62;
@@ -3469,7 +3285,6 @@ spl_i64 rt_display_init(void) {
                 g_rt_display_ready = 0;
                 return -64;
             }
-            g_rt_display_failed = 0;
             g_rt_display_ready = 1;
             return 0;
         }
@@ -3478,37 +3293,20 @@ spl_i64 rt_display_init(void) {
     return -1;
 }
 
-spl_i64 rt_display_present(void) {
-    spl_i64 result;
-    if (g_rt_display_failed || !g_rt_display_ready || !g_rt_gpu_fb) {
+spl_i64 rt_display_flush_test(void) {
+    if (!g_rt_display_ready || !g_rt_gpu_fb) {
         return -1;
     }
-    result = rt_gpu_cmd_transfer_flush();
-    if (result < 0) {
-        g_rt_display_failed = 1;
-        g_rt_display_ready = 0;
-    }
-    return result;
+    rt_gpu_fill_wm_scene();
+    return rt_gpu_cmd_transfer_flush();
 }
 
 spl_i64 rt_display_width(void) {
-    return g_rt_display_ready && !g_rt_display_failed ? (spl_i64)g_rt_gpu_width : 0;
+    return g_rt_display_ready ? RT_GPU_WIDTH : 0;
 }
 
 spl_i64 rt_display_height(void) {
-    return g_rt_display_ready && !g_rt_display_failed ? (spl_i64)g_rt_gpu_height : 0;
-}
-
-spl_i64 rt_display_pitch(void) {
-    return g_rt_display_ready && !g_rt_display_failed ? (spl_i64)g_rt_gpu_pitch : 0;
-}
-
-spl_i64 rt_display_bpp(void) {
-    return g_rt_display_ready && !g_rt_display_failed ? 32 : 0;
-}
-
-spl_u64 rt_display_framebuffer_address(void) {
-    return g_rt_display_ready && !g_rt_display_failed ? g_rt_gpu_fb : 0;
+    return g_rt_display_ready ? RT_GPU_HEIGHT : 0;
 }
 
 /* ========================================================================

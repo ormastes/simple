@@ -39,7 +39,7 @@ use std.gc_async_mut.gpu.engine2d.cuda_session.{CUDA_FONT_PTX_MAX_BYTES}
 use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gpu.engine2d.backend_vulkan_font
 use std.gpu.engine2d.backend_vulkan_font_types.{VulkanFontCompositeEvidence}
-use std.gpu.engine2d.vulkan_session.{VulkanSession}
+use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
 use std.gpu.engine2d.backend_directx.{DirectXBackend}
 use std.gpu.engine2d.backend_opencl.{OpenClBackend}
 use std.gpu.engine2d.backend_opengl.{OpenGLBackend}
@@ -353,12 +353,9 @@ class Engine2D:
                 return Ok(Engine2D(backend: cuda, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: cuda, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cuda"))
 
         if requested_backend == "vulkan":
-            var session = VulkanSession.create()
             var vulkan = VulkanBackend.create()
-            if session.init() == 0 and vulkan.init_with_session(width, height, session):
-                session.release()
+            if vulkan.init(width, height):
                 return Ok(Engine2D(backend: vulkan, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, vulkan_backend: vulkan, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "vulkan"))
-            session.release()
 
         if requested_backend == "directx":
             var directx = DirectXBackend.create()
@@ -449,12 +446,9 @@ class Engine2D:
 
     static fn create_vulkan_backend(width: i32, height: i32) -> Result<Engine2D, text>:
         """Create canonical Vulkan without retaining unrelated backend factories."""
-        var session = VulkanSession.create()
         var vulkan = VulkanBackend.create()
-        if session.init() == 0 and vulkan.init_with_session(width, height, session):
-            session.release()
+        if vulkan.init(width, height):
             return Ok(Engine2D(backend: vulkan, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, vulkan_backend: vulkan, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "vulkan"))
-        session.release()
         Err("backend unavailable: vulkan")
 
     static fn create_with_baremetal_backend(backend: BaremetalBackend) -> Engine2D:
@@ -493,7 +487,11 @@ class Engine2D:
         """
         var probe = Engine2D.probe_backend(width, height, backend_name)
         if probe.status == BackendStatus.Initialized:
-            Ok(Engine2D.create_with_backend(width, height, backend_name))
+            match Engine2D.create_requested_backend(width, height, backend_name):
+                Ok(engine):
+                    Ok(engine)
+                Err(message):
+                    Err(BackendProbeResult.failed(backend_canonical_name(backend_name), message))
         else:
             Err(probe)
 
@@ -686,7 +684,7 @@ class Engine2D:
     # Backend Info
     # ========================================================================
 
-    fn backend_name() -> text:
+    me backend_name() -> text:
         """Get the name of the active backend."""
         if val Some(vg) = self.virtio_gpu_backend:
             if self.selected_backend_name != "":
@@ -701,10 +699,10 @@ class Engine2D:
                 return self.selected_backend_name
             return self.backend.name()
 
-    fn width() -> i32:
+    me width() -> i32:
         self.w
 
-    fn height() -> i32:
+    me height() -> i32:
         self.h
 
     # ========================================================================
@@ -717,6 +715,10 @@ class Engine2D:
             vg.clear(color)
         elif val Some(bm) = self.baremetal_backend:
             bm.clear(color)
+        elif val Some(vulkan) = self.vulkan_backend:
+            vulkan.clear(color)
+            self.vulkan_backend = vulkan
+            self.backend = vulkan
         else:
             self.backend.clear(color)
 
@@ -735,6 +737,10 @@ class Engine2D:
             vg.draw_rect_filled(x, y, w, h, color)
         elif val Some(bm) = self.baremetal_backend:
             bm.draw_rect_filled(x, y, w, h, color)
+        elif val Some(vulkan) = self.vulkan_backend:
+            vulkan.draw_rect_filled(x, y, w, h, color)
+            self.vulkan_backend = vulkan
+            self.backend = vulkan
         else:
             self.backend.draw_rect_filled(x, y, w, h, color)
 
@@ -1073,6 +1079,10 @@ class Engine2D:
             vg.draw_image(x, y, w, h, pixels)
         elif val Some(bm) = self.baremetal_backend:
             bm.draw_image(x, y, w, h, pixels)
+        elif val Some(vulkan) = self.vulkan_backend:
+            vulkan.draw_image(x, y, w, h, pixels)
+            self.vulkan_backend = vulkan
+            self.backend = vulkan
         else:
             self.backend.draw_image(x, y, w, h, pixels)
 
@@ -1330,10 +1340,14 @@ class Engine2D:
             vg.present()
         elif val Some(bm) = self.baremetal_backend:
             bm.present()
+        elif val Some(vulkan) = self.vulkan_backend:
+            vulkan.present()
+            self.vulkan_backend = vulkan
+            self.backend = vulkan
         else:
             self.backend.present()
 
-    fn read_pixels() -> [u32]:
+    me read_pixels() -> [u32]:
         # Checksum-free readback: delegate straight to the backend's read_pixels
         # (which, for the Metal GPU-only/native path, is a single-FFI download
         # returning the [u32] framebuffer). read_pixels_with_source() still
@@ -1343,15 +1357,25 @@ class Engine2D:
             return vg.read_pixels()
         elif val Some(bm) = self.baremetal_backend:
             return bm.read_pixels()
+        elif val Some(vulkan) = self.vulkan_backend:
+            val pixels = vulkan.read_pixels()
+            self.vulkan_backend = vulkan
+            self.backend = vulkan
+            return pixels
         else:
             return self.backend.read_pixels()
 
-    fn read_pixels_with_source() -> Engine2DReadback:
+    me read_pixels_with_source() -> Engine2DReadback:
         """Read the framebuffer contents as a flat u32 array."""
         if val Some(vg) = self.virtio_gpu_backend:
             vg.read_pixels_with_source()
         elif val Some(bm) = self.baremetal_backend:
             bm.read_pixels_with_source()
+        elif val Some(vulkan) = self.vulkan_backend:
+            val readback = vulkan.read_pixels_with_source()
+            self.vulkan_backend = vulkan
+            self.backend = vulkan
+            readback
         else:
             self.backend.read_pixels_with_source()
 

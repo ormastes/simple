@@ -138,6 +138,24 @@ Host input
   source / checksum row plus DirectX native verdict and gate fields.
   Linux Metal and ROCm/HIP remain typed unavailable without matching host
   runtimes.
+- SimpleOS RV64 desktop uses the same backend-readback bar:
+  `simpleos_engine2d_vulkan_required_evidence_keys()` requires Vulkan backend,
+  `vulkan-engine2d` scene, Simple2D command status, Vulkan device name,
+  viewport, checksum, nonblank readback, and QEMU GPU readback before the QEMU
+  Simple2D/Engine2D path can pass.
+- `qemu_riscv64_engine2d_vulkan_bridge_plan()` is the SimpleOS bridge target:
+  QEMU `virtio_gpu` drawing, Vulkan Engine2D processing, `draw_ir-to-engine2d`
+  Simple2D commands, device readback, QMP screendump readback,
+  `capture-simple`, and the shared WM comparison scene are all required.
+- Windows artifact normalization uses
+  `scripts/check/check-simpleos-engine2d-renderdoc-evidence.ps1` to emit
+  Engine2D Vulkan, SimpleOS RenderDoc, and bridge rows for the aggregate
+  checker. `simpleos_engine2d_vulkan_bridge_status` is diagnostic; live
+  completion still depends on the Engine2D Vulkan/readback gate.
+- Add `-ProbeHostVulkan` to that normalizer or to the combined SimpleOS wrapper
+  for Windows host readiness rows. Passing `vulkaninfo` and installed browsers
+  are diagnostics only; SDK tools, focused browser backing, SimpleOS readback,
+  and RenderDoc capture still gate Vulkan claims.
 - Current runtime gaps: compiler/interpreter GPU packets consume the active
   backend handle, submit at lane begin, and complete after lane end, but still
   complete as typed `UNAVAILABLE` when none is registered; `SUBMITTED` is

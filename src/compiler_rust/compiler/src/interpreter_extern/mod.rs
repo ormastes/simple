@@ -1861,6 +1861,16 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_compile_spirv", gpu::rt_vulkan_compile_spirv_fn);
     insert_simple!("rt_vulkan_read_buffer_bytes", gpu::rt_vulkan_read_buffer_bytes_fn);
     insert_simple!(
+        "rt_vulkan_fence_submission_supported",
+        gpu::rt_vulkan_fence_submission_supported_fn
+    );
+    insert_simple!(
+        "rt_vulkan_submit_and_wait_fence",
+        gpu::rt_vulkan_submit_and_wait_fence_fn
+    );
+    insert_simple!("rt_vulkan_wait_fence", gpu::rt_vulkan_wait_fence_fn);
+    insert_simple!("rt_vulkan_destroy_fence", gpu::rt_vulkan_destroy_fence_fn);
+    insert_simple!(
         "rt_vulkan_create_compute_pipeline",
         gpu::rt_vulkan_create_compute_pipeline_fn
     );

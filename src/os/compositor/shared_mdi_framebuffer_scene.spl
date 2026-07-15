@@ -1,21 +1,9 @@
 # Shared MDI framebuffer scene renderer for hosted/QEMU evidence paths.
 
-use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
 use os.compositor.shared_mdi_setup.{shared_mdi_surfaces}
-use common.ui.window_scene.{WM_CHROME_KIND_BORDERLESS, SharedWmScene, SharedWmWindow, SharedWmRenderInput, SharedWmTaskbarRenderInput, simple_gui_internal_window, simple_gui_internal_window_scene}
-use common.ui.wm_chrome_theme.{wm_chrome_theme, WmChromeColors}
-use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
-# Compatibility exports below still serve hosted/QEMU evidence callers. The
-# production SimpleOS shell now projects its live compositor directly and does
-# not seed windows through this module.
-use common.ui.window_scene_draw_ir.{
-    shared_wm_scene_render_to_backend,
-    shared_wm_scene_render_taskbar_context_to_backend,
-    shared_wm_scene_render_desktop_chrome,
-    shared_wm_scene_draw_window_chrome,
-    shared_wm_scene_render_taskbar
-}
-use os.compositor.wm_action_lifecycle.{WmLifecycleWindowState}
+use os.compositor.simple_web_window_renderer.{render_simple_web_app_content}
 
 class SharedMdiFramebufferScene:
     width: i32
@@ -27,20 +15,6 @@ class SharedMdiFramebufferScene:
     fallback_reason: text
     readback_status: text
 
-class SharedMdiRenderWindow:
-    id: i64
-    title: text
-    app_id: text
-    content: text
-    x: i32
-    y: i32
-    w: i32
-    h: i32
-    process_id: i64
-    minimized: bool
-    focused: bool
-    scroll_y: i32
-
 class SharedMdiFramebufferBackend:
     w: i32
     h: i32
@@ -49,12 +23,7 @@ class SharedMdiFramebufferBackend:
 
     static fn create(width: i32, height: i32, fill: u32) -> SharedMdiFramebufferBackend:
         val total = if width > 0 and height > 0: width * height else: 0
-        var pixels: [u32] = []
-        var i = 0
-        while i < total:
-            pixels.push(fill)
-            i = i + 1
-        SharedMdiFramebufferBackend(w: width, h: height, pixels: pixels, web_pixel_count: 0)
+        SharedMdiFramebufferBackend(w: width, h: height, pixels: [fill; total], web_pixel_count: 0)
 
 impl CompositorBackend for SharedMdiFramebufferBackend:
 
@@ -65,55 +34,38 @@ impl CompositorBackend for SharedMdiFramebufferBackend:
         self.h
 
     me clear(color: u32):
-        val total = self.pixels.len()
         var i = 0
-        while i < total:
+        while i < self.pixels.len():
             self.pixels[i] = color
             i = i + 1
 
     me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
-        var x0 = if x < 0: 0 else: x
-        var y0 = if y < 0: 0 else: y
-        var x1 = x + w
-        var y1 = y + h
-        if x1 > self.w:
-            x1 = self.w
-        if y1 > self.h:
-            y1 = self.h
-        if x1 <= x0 or y1 <= y0:
-            return
-        var yy = y0
-        while yy < y1:
-            var idx = yy * self.w + x0
-            var xx = x0
-            while xx < x1:
-                self.pixels[idx] = color
-                idx = idx + 1
-                xx = xx + 1
-            yy = yy + 1
+        var y0 = y
+        while y0 < y + h:
+            var x0 = x
+            while x0 < x + w:
+                self.put_pixel(x0, y0, color)
+                x0 = x0 + 1
+            y0 = y0 + 1
 
     me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
         var cx = x
         var i = 0
-        val n = text_str.len()
-        while i < n:
-            self.draw_char_8x16(cx, y, text_str.char_at(i).ord().to_u8(), fg, bg)
+        while i < text_str.len():
+            self.draw_char_8x16(cx, y, text_str.char_code_at(i).to_u8(), fg, bg)
             cx = cx + 8
             i = i + 1
 
     me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
-        if x >= self.w or y >= self.h or x + 12 <= 0 or y + 16 <= 0:
-            return
-        self.fill_rect(x, y, 12, 16, bg)
-        val gi = glyph_index_for_char_code(ch.to_i32())
+        val glyph = get_glyph_8x16(ch)
         var row: i32 = 0
-        while row < 7:
-            val bits = glyph_row_bits(gi, row)
+        while row < 16:
+            val bits = glyph[row]
             var col: i32 = 0
-            while col < 5:
-                val mask = 1 << (4 - col)
-                if (bits & mask) != 0:
-                    self.fill_rect(x + col * 2, y + row * 2 + 1, 2, 2, fg)
+            while col < 8:
+                val mask = 0x80 >> col
+                val color = if (bits & mask.to_u8()) != 0u8: fg else: bg
+                self.put_pixel(x + col, y + row, color)
                 col = col + 1
             row = row + 1
 
@@ -125,35 +77,14 @@ impl CompositorBackend for SharedMdiFramebufferBackend:
             self.pixels[idx] = color
 
     me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
-        if w <= 0 or h <= 0:
-            return
         self.web_pixel_count = self.web_pixel_count + pixels.len().to_i64()
-        val src_len = pixels.len()
-        if src_len <= 0:
-            return
-        var row0 = if y < 0: 0 - y else: 0
-        var row1 = h
-        if y + row1 > self.h:
-            row1 = self.h - y
-        val available_rows = src_len / w
-        if row1 > available_rows:
-            row1 = available_rows
-        var col0 = if x < 0: 0 - x else: 0
-        var col1 = w
-        if x + col1 > self.w:
-            col1 = self.w - x
-        if row1 <= row0 or col1 <= col0:
-            return
-        var row = row0
-        while row < row1:
-            val dy = y + row
-            var col = col0
-            var src = row * w + col0
-            var dst = dy * self.w + x + col0
-            while col < col1:
-                self.pixels[dst] = pixels[src]
-                src = src + 1
-                dst = dst + 1
+        var row = 0
+        while row < h:
+            var col = 0
+            while col < w:
+                val src_idx = row * w + col
+                if src_idx >= 0 and src_idx < pixels.len():
+                    self.put_pixel(x + col, y + row, pixels[src_idx])
                 col = col + 1
             row = row + 1
 
@@ -166,263 +97,45 @@ impl CompositorBackend for SharedMdiFramebufferBackend:
     fn as_glass_capable() -> CompositorGlassCapable?:
         nil
 
-fn shared_mdi_render_window(id: i64, title: text, app_id: text, content: text, x: i32, y: i32, w: i32, h: i32, process_id: i64, minimized: bool, focused: bool, scroll_y: i32) -> SharedMdiRenderWindow:
-    SharedMdiRenderWindow(id: id, title: title, app_id: app_id, content: content, x: x, y: y, w: w, h: h, process_id: process_id, minimized: minimized, focused: focused, scroll_y: scroll_y)
-
-fn _shared_mdi_simple_gui_window_id(id: i64) -> text:
-    id.to_text()
-
-fn _shared_mdi_to_simple_gui_window(win: SharedMdiRenderWindow, z_index: i32) -> SharedWmWindow:
-    simple_gui_internal_window(
-        "mdi-{win.id}",
-        _shared_mdi_simple_gui_window_id(win.id),
-        win.process_id as u64,
-        win.app_id,
-        win.title,
-        win.x,
-        win.y,
-        win.w,
-        win.h,
-        win.content,
-        win.minimized,
-        win.focused,
-        z_index
-    )
-
-fn _shared_mdi_from_simple_gui_window(id: i64, win: SharedWmWindow, scroll_y: i32) -> SharedMdiRenderWindow:
-    shared_mdi_render_window(
-        id,
-        win.title,
-        win.app_id,
-        win.html,
-        win.x,
-        win.y,
-        win.width,
-        win.height,
-        win.process_id as i64,
-        win.minimized,
-        win.focused,
-        scroll_y
-    )
-
-fn _shared_mdi_scene_from_render_windows(width: i32, height: i32, backend_kind: text, windows: [SharedMdiRenderWindow]) -> SharedWmScene:
-    var gui_windows: [SharedWmWindow] = []
-    var i = 0
-    val count = windows.len()
-    while i < count:
-        gui_windows.push(_shared_mdi_to_simple_gui_window(windows[i], i))
-        i = i + 1
-    simple_gui_internal_window_scene(width, height, backend_kind, gui_windows)
-
-fn shared_mdi_scene_from_render_windows(width: i32, height: i32, backend_kind: text, windows: [SharedMdiRenderWindow]) -> SharedWmScene:
-    _shared_mdi_scene_from_render_windows(width, height, backend_kind, windows)
-
-fn _shared_mdi_render_windows_from_scene(scene: SharedWmScene) -> [SharedMdiRenderWindow]:
-    var out: [SharedMdiRenderWindow] = []
-    var i = 0
-    val count = scene.windows.len()
-    while i < count:
-        val win = scene.windows[i]
-        val parsed_id = win.window_id.to_i64() ?? (i + 1).to_i64()
-        out.push(_shared_mdi_from_simple_gui_window(parsed_id, win, 0))
-        i = i + 1
-    out
-
-fn shared_mdi_render_windows_from_simple_gui_scene(scene: SharedWmScene) -> [SharedMdiRenderWindow]:
-    _shared_mdi_render_windows_from_scene(scene)
-
-fn shared_mdi_seed_windows() -> [SharedMdiRenderWindow]:
-    val surfaces = shared_mdi_surfaces()
-    val count = surfaces.len()
-    var windows: [SharedMdiRenderWindow] = []
-    var i = 0
-    while i < count:
-        val surface = surfaces[i]
-        val id = (i + 1).to_i64()
-        val gui_window = simple_gui_internal_window(
-            "mdi-{id}",
-            id.to_text(),
-            surface.process_id as u64,
-            surface.app_id,
-            surface.title,
-            surface.x,
-            surface.y,
-            surface.w,
-            surface.h,
-            surface.content,
-            false,
-            i == count - 1,
-            i
-        )
-        windows.push(_shared_mdi_from_simple_gui_window(id, gui_window, 0))
-        i = i + 1
-    windows
-
-fn shared_mdi_lifecycle_seed_windows() -> [WmLifecycleWindowState]:
-    val render_windows = shared_mdi_seed_windows()
-    var windows: [WmLifecycleWindowState] = []
-    var i = 0
-    val count = render_windows.len()
-    while i < count:
-        val win = render_windows[i]
-        windows.push(WmLifecycleWindowState(
-            id: win.id,
-            owner_port: 0,
-            title: win.title,
-            x: win.x,
-            y: win.y,
-            w: win.w,
-            h: win.h,
-            content: win.content,
-            process_id: win.process_id,
-            app_id: win.app_id,
-            minimized: win.minimized,
-            focused: win.focused
-        ))
-        i = i + 1
-    windows
-
-fn shared_mdi_render_windows_from_lifecycle(windows: [WmLifecycleWindowState]) -> [SharedMdiRenderWindow]:
-    var out: [SharedMdiRenderWindow] = []
-    var i = 0
-    val count = windows.len()
-    while i < count:
-        val win = windows[i]
-        out.push(shared_mdi_render_window(
-            win.id,
-            win.title,
-            win.app_id,
-            win.content,
-            win.x,
-            win.y,
-            win.w,
-            win.h,
-            win.process_id,
-            win.minimized,
-            win.focused,
-            0
-        ))
-        i = i + 1
-    out
-
-# --- Legacy SharedMdiRenderWindow entrypoints (kept as the compat layer;
-# chrome/content/taskbar pixel drawing now lives in the common.ui
-# SharedWmScene->CompositorBackend executor, common.ui.window_scene_draw_ir).
-# These delegate by converting to/from SharedWmWindow via
-# _shared_mdi_to_simple_gui_window so callers (e.g. host_compositor_entry.spl)
-# see byte-identical output.
-
-fn render_shared_mdi_desktop_chrome(backend: CompositorBackend, width: i32, height: i32, theme: WmChromeColors):
-    shared_wm_scene_render_desktop_chrome(backend, width, height, theme, theme.compositor_bg)
-
-fn draw_shared_mdi_window_chrome(backend: CompositorBackend, win: SharedMdiRenderWindow, theme: WmChromeColors):
-    if win.minimized:
-        return
-    shared_wm_scene_draw_window_chrome(backend, _shared_mdi_to_simple_gui_window(win, 0), theme)
-
-fn draw_shared_mdi_taskbar(backend: CompositorBackend, windows: [SharedMdiRenderWindow], width: i32, height: i32, theme: WmChromeColors):
-    var gui_windows: [SharedWmWindow] = []
-    var i = 0
-    val count = windows.len()
-    while i < count:
-        gui_windows.push(_shared_mdi_to_simple_gui_window(windows[i], i))
-        i = i + 1
-    shared_wm_scene_render_taskbar(backend, gui_windows, width, height, theme)
-
-# Deprecated compatibility API. Remaining callers render canonical seed/demo
-# surfaces that do not yet produce revisioned WmContentFrame values:
-# render_shared_mdi_framebuffer_scene_for_windows and lifecycle wrappers.
-fn render_shared_mdi_windows_to_backend(backend: CompositorBackend, windows: [SharedMdiRenderWindow], width: i32, height: i32):
-    shared_wm_scene_render_to_backend(backend, _shared_mdi_scene_from_render_windows(width, height, "legacy-render-windows-to-backend", windows))
+fn _draw_shared_window_chrome(backend: SharedMdiFramebufferBackend, x: i32, y: i32, w: i32, h: i32, focused: bool):
+    val title_color = if focused: 0xFF2050A0u32 else: 0xFF243447u32
+    backend.fill_rect(x + 5, y + 6, w, h, 0x66000000u32)
+    backend.fill_rect(x, y, w, h, 0xFF1E293Bu32)
+    backend.fill_rect(x, y, w, 28, title_color)
+    backend.fill_rect(x + 12, y + 9, 10, 10, 0xFFE74C3Cu32)
+    backend.fill_rect(x + 30, y + 9, 10, 10, 0xFFF1C40Fu32)
+    backend.fill_rect(x + 48, y + 9, 10, 10, 0xFF27AE60u32)
 
 fn render_shared_mdi_framebuffer_scene(width: i32, height: i32, backend_kind: text) -> SharedMdiFramebufferScene:
     render_shared_mdi_framebuffer_scene_limited(width, height, backend_kind, 0, 0)
 
-# `t_micros` (default 0) is threaded straight through to
-# render_shared_mdi_framebuffer_scene_for_simple_gui_scene: it is only
-# consumed if the scene's background resolves to kind:"motion" (see
-# common.ui.window_scene_draw_ir / shared_wm_scene_resolve_background), so
-# every existing caller that never passes a real wall-clock value keeps
-# byte-identical output. This is the ONE production (non-test) entry point
-# that turns render windows into a rasterized shared-MDI framebuffer, so a
-# hardcoded 0 here would make kind:"motion" backgrounds structurally unable
-# to animate through this API no matter what a future caller wired up
-# upstream — a caller with real time access must be able to reach the
-# resolver, not just tests constructing a SharedWmScene directly.
-# Deprecated compatibility API for shared MDI seed/evidence and lifecycle
-# callers. New production callers must construct SharedWmTaskbarRenderInput and
-# call render_shared_mdi_framebuffer_scene_for_taskbar_render_input.
-fn render_shared_mdi_framebuffer_scene_for_windows(width: i32, height: i32, backend_kind: text, windows: [SharedMdiRenderWindow], t_micros: i64 = 0) -> SharedMdiFramebufferScene:
-    render_shared_mdi_framebuffer_scene_for_simple_gui_scene(_shared_mdi_scene_from_render_windows(width, height, backend_kind, windows), t_micros)
-
-# `t_micros` (default 0) is consumed only by a kind:"motion" scene background
-# (common.ui.window_scene_draw_ir / shared_wm_scene_resolve_background); every
-# existing caller keeps byte-identical output.
-# Deprecated compatibility API: title-derived canned content remains here only
-# for render_shared_mdi_framebuffer_scene_for_windows and direct legacy tests.
-fn render_shared_mdi_framebuffer_scene_for_simple_gui_scene(scene: SharedWmScene, t_micros: i64 = 0) -> SharedMdiFramebufferScene:
-    val theme = wm_chrome_theme()
-    val backend = SharedMdiFramebufferBackend.create(scene.width, scene.height, theme.compositor_bg)
-    val stats = shared_wm_scene_render_to_backend(backend, scene, t_micros)
-    backend.web_pixel_count = stats.content_pixel_count
+fn render_shared_mdi_framebuffer_scene_limited(width: i32, height: i32, backend_kind: text, max_surface_w: i32, max_surface_h: i32) -> SharedMdiFramebufferScene:
+    val backend = SharedMdiFramebufferBackend.create(width, height, 0xFF0A2540u32)
+    backend.fill_rect(0, 0, width, 44, 0xFF101820u32)
+    backend.fill_rect(0, 42, width, 2, 0xFF3498DBu32)
+    backend.fill_rect(0, height - 56, width, 56, 0xFF101820u32)
+    backend.fill_rect(0, height - 56, width, 2, 0xFF3498DBu32)
+    val surfaces = shared_mdi_surfaces()
+    var i = 0
+    while i < surfaces.len():
+        val surface = surfaces[i]
+        val focused = i == surfaces.len() - 1
+        val sw = if max_surface_w > 0 and surface.w > max_surface_w: max_surface_w else: surface.w
+        val sh = if max_surface_h > 0 and surface.h > max_surface_h: max_surface_h else: surface.h
+        _draw_shared_window_chrome(backend, surface.x, surface.y, sw, sh, focused)
+        val cx = surface.x + 4
+        val cy = surface.y + 32
+        val cw = sw - 8
+        val ch = sh - 36
+        render_simple_web_app_content(backend, surface.title, cx, cy, cw, ch, surface.content)
+        i = i + 1
     SharedMdiFramebufferScene(
-        width: scene.width,
-        height: scene.height,
+        width: width,
+        height: height,
         pixels: backend.pixels,
-        surface_count: scene.windows.len(),
+        surface_count: surfaces.len(),
         web_pixel_count: backend.web_pixel_count,
-        backend_kind: scene.backend,
+        backend_kind: backend_kind,
         fallback_reason: "",
         readback_status: "unavailable:qemu-framebuffer-write-only"
     )
-
-# Production framebuffer entry point. Unlike the compatibility wrappers above,
-# this consumes revision-validated Simple Web frames and the authoritative
-# taskbar object model through the rich common.ui executor.
-fn render_shared_mdi_framebuffer_scene_for_taskbar_render_input(input: SharedWmTaskbarRenderInput) -> SharedMdiFramebufferScene:
-    val scene = input.render.scene
-    val theme = wm_chrome_theme()
-    val backend = SharedMdiFramebufferBackend.create(scene.width, scene.height, theme.compositor_bg)
-    val stats = shared_wm_scene_render_taskbar_context_to_backend(backend, input)
-    backend.web_pixel_count = stats.content_pixel_count
-
-    var expected_content_pixel_count: i64 = 0
-    for window in scene.windows:
-        if not window.minimized:
-            val content_width = if window.chrome_kind == WM_CHROME_KIND_BORDERLESS: window.width else: window.width - 8
-            val titlebar_height = if input.render.metrics.titlebar_height > 0: input.render.metrics.titlebar_height else: 28
-            val content_height = if window.chrome_kind == WM_CHROME_KIND_BORDERLESS: window.height else: window.height - titlebar_height - 8
-            if content_width > 0 and content_height > 0:
-                expected_content_pixel_count = expected_content_pixel_count + content_width.to_i64() * content_height.to_i64()
-
-    val fallback_reason = if stats.content_pixel_count == expected_content_pixel_count:
-        ""
-    else:
-        "rejected-invalid-simple-web-content-frame"
-    SharedMdiFramebufferScene(
-        width: scene.width,
-        height: scene.height,
-        pixels: backend.pixels,
-        surface_count: scene.windows.len(),
-        web_pixel_count: stats.content_pixel_count,
-        backend_kind: scene.backend,
-        fallback_reason: fallback_reason,
-        readback_status: "verified:cpu-framebuffer-mirror"
-    )
-
-fn render_shared_mdi_framebuffer_scene_for_lifecycle_windows(width: i32, height: i32, backend_kind: text, windows: [WmLifecycleWindowState]) -> SharedMdiFramebufferScene:
-    render_shared_mdi_framebuffer_scene_for_windows(width, height, backend_kind, shared_mdi_render_windows_from_lifecycle(windows))
-
-fn render_shared_mdi_framebuffer_scene_limited(width: i32, height: i32, backend_kind: text, max_surface_w: i32, max_surface_h: i32) -> SharedMdiFramebufferScene:
-    var windows = shared_mdi_seed_windows()
-    val count = windows.len()
-    var i = 0
-    while i < count:
-        var win = windows[i]
-        if max_surface_w > 0 and win.w > max_surface_w:
-            win.w = max_surface_w
-        if max_surface_h > 0 and win.h > max_surface_h:
-            win.h = max_surface_h
-        windows[i] = win
-        i = i + 1
-    render_shared_mdi_framebuffer_scene_for_windows(width, height, backend_kind, windows)

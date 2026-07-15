@@ -158,6 +158,121 @@ dxdiag /whql:off /t "$env:TEMP\dxdiag-simple-vulkan.txt"
 `vulkaninfo --summary` proves host Vulkan runtime/device discovery. It does not
 prove Simple, Chrome, or Electron render through Vulkan.
 
+For the SimpleOS multi-config lane, the Windows evidence wrapper can record the
+same host readiness diagnostics without claiming browser or SimpleOS Vulkan
+proof:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\check\check-simpleos-multiconfig-live-evidence.ps1 -ProbeHostVulkan
+```
+
+Expected diagnostic rows include `simpleos_windows_vulkaninfo_status`,
+`simpleos_windows_vulkan_sdk_tools_status`,
+`simpleos_windows_renderdoc_tool_status`,
+`simpleos_windows_vulkan_host_readiness_status`, and the required
+`gui_web_2d_vulkan_browser_backing_*` rows. A passing `vulkaninfo` row is host
+readiness only; missing SDK tools, missing RenderDoc, or failed focused browser
+backing keeps the Vulkan/RenderDoc evidence incomplete.
+
+When the SimpleOS multi-config Engine2D/RenderDoc normalizer consumes
+`build/gui-web-2d-vulkan-env/evidence.env`, it also emits
+`simpleos_engine2d_source_evidence_usable_status` and
+`simpleos_engine2d_source_evidence_usable_reason`. A source file produced only
+by `--browser-backing`, especially with `gui_web_2d_vulkan_simple_status=not-run`,
+must remain blocked as `source-browser-backing-only-simple-not-run`; it is not
+SimpleOS Engine2D Vulkan proof. Missing `.rdc` and WM RenderDoc logs are exposed
+through `simpleos_renderdoc_artifact_blocker_reason` and
+`simpleos_wm_renderdoc_log_compare_reason`.
+
+On Windows, where `sh` may be unavailable, use the native Simple Vulkan
+readback probe instead of the Unix `.shs` wrapper:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-vulkan-engine2d-readback.ps1 -SimpleBinary bin\simple.exe
+```
+
+The SimpleOS Engine2D/RenderDoc normalizer can run that probe directly:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-simpleos-engine2d-renderdoc-evidence.ps1 -RunSimpleVulkanProbe -SimpleBinary bin\simple.exe -ProbeHostVulkan
+```
+
+or through the combined SimpleOS wrapper with `-RunSimpleVulkanProbe`. Passing
+evidence requires `vulkan_engine2d_readback_status=pass`,
+`vulkan_engine2d_readback_spec_status=pass`, and
+`vulkan_engine2d_readback_backend_name=vulkan`. A timeout is recorded as
+`vulkan_engine2d_readback_reason=evidence-program-timeout` and remains blocked;
+the normalizer reports
+`simpleos_engine2d_source_evidence_usable_reason=direct-simple-vulkan-readback-evidence-program-timeout`.
+The Windows wrapper also refuses to launch a new Simple child when the host
+already has more than 128 `simple.exe` processes, unless explicitly overridden
+with `-AllowHighSimpleProcessCount`. That condition is reported as
+`vulkan_engine2d_readback_reason=existing-simple-process-count-high` plus the
+count/limit rows, and the SimpleOS aggregate echoes
+`simpleos_engine2d_direct_readback_existing_simple_process_count` and
+`simpleos_engine2d_direct_readback_existing_simple_process_limit`.
+Use `-PreflightOnly -AllowHighSimpleProcessCount` to record only the process
+state without launching a Simple child; the normalizer reports
+`simpleos_engine2d_direct_readback_reason=preflight-only`. The SimpleOS
+aggregate also echoes the Engine2D bridge/backend rows, Vulkan device name,
+viewport, checksum, nonblank status, and QEMU GPU readback path/dimensions from
+that merged file. A preflight-only run can prove the current QEMU framebuffer
+artifact is present and nonblank while still leaving
+`simpleos_engine2d_vulkan_evidence_status` blocked until a real Simple Vulkan
+Engine2D readback passes.
+The Engine2D normalizer also emits source-audit rows:
+`simpleos_engine2d_source_qemu_entry_status`,
+`simpleos_engine2d_source_baremetal_core_status`,
+`simpleos_engine2d_source_virtio_surface_status`,
+`simpleos_engine2d_source_vulkan_session_status`, and
+`simpleos_engine2d_source_bridge_audit_status`. The current expected blocked
+audit is `blocked:desktop-service-not-wired-to-vulkan-engine2d-session`; it
+means the source surfaces are present but the QEMU desktop-service draw path is
+still the freestanding display runtime, not proven Vulkan Engine2D.
+
+For a standalone process inventory, run the dry-run helper:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-simple-process-inventory.ps1
+```
+
+It writes `simple_process_inventory_*` rows and does not terminate processes by
+default. Cleanup is intentionally explicit: use `-Kill
+-ConfirmText KILL_SIMPLE_PROCESSES` only after reviewing the dry-run evidence
+and deciding those `simple.exe` processes are safe to stop.
+
+The same SimpleOS multi-config Windows wrapper can record FPGA serial-port
+inventory diagnostics without claiming a board boot:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-simpleos-multiconfig-live-evidence.ps1 -ProbeFpgaSerialPorts
+```
+
+This forwards `-ProbeSerialPorts` to
+`scripts\check\check-simpleos-fpga-rv64-serial-evidence.ps1` and emits
+`simpleos_fpga_serial_port_probe_*` plus
+`simpleos_fpga_serial_device_candidate_status`. These rows are inventory only;
+the FPGA UART terminal gate still requires a real serial log containing the
+boot marker.
+
+To collect that UART log directly from Windows, use the opt-in bounded capture
+mode:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-simpleos-fpga-rv64-serial-evidence.ps1 -CaptureSerial -SerialDevice COM3 -CaptureTimeoutSeconds 30
+```
+
+or through the combined wrapper:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-simpleos-multiconfig-live-evidence.ps1 -CaptureFpgaSerial -FpgaSerialDevice COM3 -FpgaSerialCaptureTimeoutSeconds 30
+```
+
+Capture writes `simpleos_fpga_serial_capture_*` rows. It is still fail-closed:
+the FPGA UART terminal gate passes only when the captured or supplied log
+contains `SIMPLEOS_FPGA_RISCV64_SERIAL_BOOT` and the toolchain/bitstream rows
+also pass.
+
 ## Browser Vulkan Proof
 
 Chrome or Electron being installed is not enough. A bitmap, screenshot, or

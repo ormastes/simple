@@ -16,6 +16,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#ifdef _WIN32
+#include <direct.h>
+#endif
 
 enum {
     SECTOR_SIZE = 512,
@@ -409,11 +412,19 @@ static void mkdir_p(const char *path)
     for (char *p = tmp + 1; *p; ++p) {
         if (*p == '/') {
             *p = '\0';
+#ifdef _WIN32
+            _mkdir(tmp);
+#else
             mkdir(tmp, 0777);
+#endif
             *p = '/';
         }
     }
+#ifdef _WIN32
+    _mkdir(tmp);
+#else
     mkdir(tmp, 0777);
+#endif
 }
 
 static void write_file_path(const char *path, const unsigned char *data, size_t len)

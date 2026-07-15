@@ -2267,6 +2267,14 @@ mod vulkan_dlopen {
         pub(super) src_access_mask: u32,
         pub(super) dst_access_mask: u32,
     }
+    #[repr(C)]
+    pub(super) struct VkMappedMemoryRange {
+        pub(super) s_type: i32,
+        pub(super) p_next: *const c_void,
+        pub(super) memory: VkDeviceMemory,
+        pub(super) offset: u64,
+        pub(super) size: u64,
+    }
 
     // ---- Function pointer types ----
     type FnVkCreateInstance =
@@ -2291,6 +2299,8 @@ mod vulkan_dlopen {
     type FnVkBindBufferMemory = unsafe extern "C" fn(VkDevice, VkBuffer, VkDeviceMemory, u64) -> VkResult;
     type FnVkMapMemory = unsafe extern "C" fn(VkDevice, VkDeviceMemory, u64, u64, u32, *mut *mut c_void) -> VkResult;
     type FnVkUnmapMemory = unsafe extern "C" fn(VkDevice, VkDeviceMemory);
+    type FnVkFlushMappedMemoryRanges = unsafe extern "C" fn(VkDevice, u32, *const VkMappedMemoryRange) -> VkResult;
+    type FnVkInvalidateMappedMemoryRanges = unsafe extern "C" fn(VkDevice, u32, *const VkMappedMemoryRange) -> VkResult;
     type FnVkCreateShaderModule =
         unsafe extern "C" fn(VkDevice, *const VkShaderModuleCreateInfo, *const c_void, *mut VkShaderModule) -> VkResult;
     type FnVkDestroyShaderModule = unsafe extern "C" fn(VkDevice, VkShaderModule, *const c_void);
@@ -2401,6 +2411,8 @@ mod vulkan_dlopen {
         pub bind_buffer_memory: FnVkBindBufferMemory,
         pub map_memory: FnVkMapMemory,
         pub unmap_memory: FnVkUnmapMemory,
+        pub flush_mapped_memory_ranges: FnVkFlushMappedMemoryRanges,
+        pub invalidate_mapped_memory_ranges: FnVkInvalidateMappedMemoryRanges,
         pub create_shader_module: FnVkCreateShaderModule,
         pub destroy_shader_module: FnVkDestroyShaderModule,
         pub create_descriptor_set_layout: FnVkCreateDescriptorSetLayout,
@@ -2548,6 +2560,8 @@ mod vulkan_dlopen {
             bind_buffer_memory: sym!("vkBindBufferMemory"),
             map_memory: sym!("vkMapMemory"),
             unmap_memory: sym!("vkUnmapMemory"),
+            flush_mapped_memory_ranges: sym!("vkFlushMappedMemoryRanges"),
+            invalidate_mapped_memory_ranges: sym!("vkInvalidateMappedMemoryRanges"),
             create_shader_module: sym!("vkCreateShaderModule"),
             destroy_shader_module: sym!("vkDestroyShaderModule"),
             create_descriptor_set_layout: sym!("vkCreateDescriptorSetLayout"),
@@ -2639,6 +2653,7 @@ mod vulkan_dlopen {
         pub buffer: VkBuffer,
         pub memory: VkDeviceMemory,
         pub size: u64,
+        pub mapped: *mut c_void,
     }
 
     pub struct PipelineEntry {
@@ -3156,10 +3171,17 @@ pub fn rt_vulkan_alloc_buffer_fn(args: &[Value]) -> Result<Value, CompileError> 
             (s.fns.destroy_buffer)(s.device, buf, ptr::null());
             return Ok(Value::Int(0));
         }
+        let mut mapped: *mut std::os::raw::c_void = ptr::null_mut();
+        if (s.fns.map_memory)(s.device, mem, 0, reqs.size, 0, &mut mapped) != VK_SUCCESS || mapped.is_null() {
+            (s.fns.free_memory)(s.device, mem, ptr::null());
+            (s.fns.destroy_buffer)(s.device, buf, ptr::null());
+            return Ok(Value::Int(0));
+        }
         s.buffers.push(Some(BufferEntry {
             buffer: buf,
             memory: mem,
             size,
+            mapped,
         }));
         Ok(Value::Int(s.buffers.len() as i64))
     }
@@ -3175,6 +3197,7 @@ pub fn rt_vulkan_free_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
         if h > 0 && h <= s.buffers.len() {
             if let Some(e) = s.buffers[h - 1].take() {
                 unsafe {
+                    (s.fns.unmap_memory)(s.device, e.memory);
                     (s.fns.destroy_buffer)(s.device, e.buffer, ptr::null());
                     (s.fns.free_memory)(s.device, e.memory, ptr::null());
                 }
@@ -3214,14 +3237,19 @@ pub fn rt_vulkan_copy_to_buffer_fn(args: &[Value]) -> Result<Value, CompileError
     }
 
     unsafe {
-        let mut mapped: *mut std::os::raw::c_void = std::ptr::null_mut();
-        let ok = (s.fns.map_memory)(s.device, buffer.memory, offset_u, count_u, 0, &mut mapped);
-        if ok != VK_SUCCESS || mapped.is_null() {
+        if buffer.mapped.is_null() {
             return Ok(Value::Int(0));
         }
-        let dst = std::slice::from_raw_parts_mut(mapped as *mut u8, bytes.len());
+        let dst = std::slice::from_raw_parts_mut((buffer.mapped as *mut u8).add(offset_u as usize), bytes.len());
         dst.copy_from_slice(&bytes);
-        (s.fns.unmap_memory)(s.device, buffer.memory);
+        let range = vulkan_dlopen::VkMappedMemoryRange {
+            s_type: 6,
+            p_next: std::ptr::null(),
+            memory: buffer.memory,
+            offset: 0,
+            size: u64::MAX,
+        };
+        let _ = (s.fns.flush_mapped_memory_ranges)(s.device, 1, &range);
     }
     Ok(Value::Int(1))
 }
@@ -3376,12 +3404,18 @@ pub fn rt_vulkan_read_buffer_bytes_fn(args: &[Value]) -> Result<Value, CompileEr
     }
 
     unsafe {
-        let mut mapped: *mut std::os::raw::c_void = std::ptr::null_mut();
-        let ok = (s.fns.map_memory)(s.device, buffer.memory, offset_u, count_u, 0, &mut mapped);
-        if ok != VK_SUCCESS || mapped.is_null() {
+        if buffer.mapped.is_null() {
             return Ok(Value::Array(Arc::new(Vec::new())));
         }
-        let bytes = std::slice::from_raw_parts(mapped as *const u8, count_u as usize);
+        let range = vulkan_dlopen::VkMappedMemoryRange {
+            s_type: 6,
+            p_next: std::ptr::null(),
+            memory: buffer.memory,
+            offset: 0,
+            size: u64::MAX,
+        };
+        let _ = (s.fns.invalidate_mapped_memory_ranges)(s.device, 1, &range);
+        let bytes = std::slice::from_raw_parts((buffer.mapped as *const u8).add(offset_u as usize), count_u as usize);
         let values = bytes
             .iter()
             .map(|b| Value::UInt {
@@ -3389,7 +3423,6 @@ pub fn rt_vulkan_read_buffer_bytes_fn(args: &[Value]) -> Result<Value, CompileEr
                 width: 8,
             })
             .collect();
-        (s.fns.unmap_memory)(s.device, buffer.memory);
         Ok(Value::Array(Arc::new(values)))
     }
 }
@@ -3656,6 +3689,7 @@ pub fn rt_vulkan_destroy_descriptor_set_fn(args: &[Value]) -> Result<Value, Comp
                 unsafe {
                     (s.fns.destroy_descriptor_pool)(s.device, e.pool, ptr::null());
                 }
+                return Ok(Value::Int(1));
             }
         }
     }
@@ -3835,7 +3869,7 @@ pub fn rt_vulkan_dispatch_fn(args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
         (s.fns.cmd_dispatch)(cmd, x, y, z);
         let memory_barrier = vulkan_dlopen::VkMemoryBarrier {
-            s_type: 6,
+            s_type: 46,
             p_next: ptr::null(),
             src_access_mask: 0x40,   // VK_ACCESS_SHADER_WRITE_BIT
             dst_access_mask: 0x2000, // VK_ACCESS_HOST_READ_BIT

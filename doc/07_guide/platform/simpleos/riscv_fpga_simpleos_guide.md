@@ -148,6 +148,72 @@ SimpleOS boots in **minimal host mode** on FPGA — a constrained OS layer above
 
 Boot sequence: `fpga_boot.spl` → M-mode setup → `riscv_noalloc_handoff.spl` → S-mode → `litex_fpga.spl` / `fpga.spl` platform init → scheduler idle loop.
 
+### Multi-Config Evidence Contract
+
+The multi-config QEMU/FPGA lane keeps FPGA RV64 on the
+`fpga-riscv64-serial` profile until board evidence expands the capability
+matrix. FPGA wrappers must emit the rows named by
+`simpleos_fpga_serial_required_evidence_keys()` from
+`src/os/simpleos_config_matrix.spl`:
+
+- `simpleos_fpga_board_profile`;
+- `simpleos_fpga_expected_entry`;
+- `simpleos_fpga_expected_kernel_path`;
+- `simpleos_fpga_uart_terminal_status`;
+- `simpleos_fpga_serial_device`;
+- `simpleos_fpga_serial_boot_marker`;
+- `simpleos_fpga_toolchain_status`;
+- `simpleos_fpga_bitstream_status`;
+- `simpleos_fpga_ssh_status`;
+- `simpleos_fpga_http_status`;
+- `simpleos_fpga_gpu_status`;
+- `simpleos_fpga_wm_status`;
+- `simpleos_fpga_vulkan_status`;
+- `simpleos_fpga_renderdoc_status`.
+
+The pass condition is intentionally serial-only: UART terminal, serial device,
+boot marker, toolchain, and bitstream must pass, while SSH, HTTP, GPU, WM,
+Vulkan, and RenderDoc must remain `blocked`. Do not promote QEMU desktop gates
+to FPGA until a board-specific lane adds hardware inventory, boot logs, and
+focused regression evidence for that capability.
+
+On Windows, write the FPGA serial rows with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\check\check-simpleos-fpga-rv64-serial-evidence.ps1 `
+  -SerialDevice COM3 `
+  -SerialLogPath build\os\systest\fpga-rv64-serial\serial.log `
+  -ToolchainStatus pass `
+  -BitstreamPath build\os\fpga\simpleos-rv64.bit
+```
+
+The wrapper also reads `SIMPLEOS_FPGA_SERIAL_DEVICE`,
+`SIMPLEOS_FPGA_SERIAL_LOG`, `SIMPLEOS_FPGA_TOOLCHAIN_STATUS`,
+`SIMPLEOS_FPGA_BITSTREAM`, and `SIMPLEOS_FPGA_BITSTREAM_STATUS`. It writes
+`build/simpleos_multiconfig_live_evidence/fpga-rv64-serial.env` by default and
+exits nonzero until the serial device, serial log boot marker, toolchain, and
+bitstream rows all pass. The default boot marker is
+`SIMPLEOS_FPGA_RISCV64_SERIAL_BOOT`; override `-BootMarker` only when the board
+runbook has a newer canonical marker.
+
+To rebuild the current-source FPGA serial kernel before checking UART evidence,
+use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\check\check-simpleos-fpga-rv64-serial-evidence.ps1 `
+  -BuildFpgaSerialKernel `
+  -BuildBackend cranelift `
+  -BuildCc C:\dev\install\clang+llvm-18.1.8-x86_64-pc-windows-msvc\bin\clang.exe
+```
+
+This builds `examples/09_embedded/simple_os/arch/riscv64/fpga_serial_entry.spl`
+to `build/os/simpleos_riscv64_fpga.elf` and emits
+`simpleos_fpga_build_status=pass` when the ELF is produced. It is build
+evidence only; the FPGA serial gate still requires a real UART device/log,
+toolchain status, and bitstream status. The entry emits the canonical
+`SIMPLEOS_FPGA_RISCV64_SERIAL_BOOT` marker plus `TEST PASSED` and keeps SSH,
+HTTP, GPU, WM, Vulkan, and RenderDoc explicitly blocked for this profile.
+
 ---
 
 ## Future Network-Capable FPGA Configuration

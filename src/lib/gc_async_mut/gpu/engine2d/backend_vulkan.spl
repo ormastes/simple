@@ -22,7 +22,7 @@ use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback,
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a}
 use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, render_text_to_buffer}
 use std.gpu.engine2d.helpers_text.{text_blit_buffer}
-use std.gpu.engine2d.backend_vulkan_helpers.{
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
     _pack_clear_pc, _pack_rect_pc, _pack_circle_pc,
     _pack_triangle_pc, _pack_gradient_pc, _pack_image_composite_pc,
     _pixels_to_bytes, _bytes_to_pixels, _bytes_to_pixel_array, _i64, _i32_to_u32, _u32_to_u8,
@@ -597,7 +597,15 @@ impl RenderBackend for VulkanBackend:
         val total = _i64(self.w) * _i64(self.h)
         val workgroups = (total + 255) / 256
         val pc = _pack_clear_pc(color, self.w, self.h)
-        self._dispatch_framebuffer_checked(self.pipe_clear, pc, workgroups, 1, 1)
+        val dispatched = vulkan_dispatch_framebuffer_compute_checked(self.d_framebuffer, self.pipe_clear, pc, workgroups, 1, 1)
+        if dispatched > 0:
+            self.dirty = true
+        else:
+            self.cpu_fallback_used = true
+            if dispatched < 0:
+                self.completion_unknown = true
+            elif self.initialized and self.d_framebuffer > 0:
+                self.dirty = true
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         if self.completion_unknown: return
@@ -621,7 +629,15 @@ impl RenderBackend for VulkanBackend:
         val pc = _pack_rect_pc(x, y, w, h, color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
-        self._dispatch_framebuffer_checked(self.pipe_rect_filled, pc, gx, gy, 1)
+        val dispatched = vulkan_dispatch_framebuffer_compute_checked(self.d_framebuffer, self.pipe_rect_filled, pc, gx, gy, 1)
+        if dispatched > 0:
+            self.dirty = true
+        else:
+            self.cpu_fallback_used = true
+            if dispatched < 0:
+                self.completion_unknown = true
+            elif self.initialized and self.d_framebuffer > 0:
+                self.dirty = true
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         if self.completion_unknown: return
@@ -852,10 +868,10 @@ impl RenderBackend for VulkanBackend:
             self.host_buf = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
             self.dirty = false
 
-    fn read_pixels() -> [u32]:
+    me read_pixels() -> [u32]:
         self.read_pixels_with_source().pixels
 
-    fn read_pixels_with_source() -> Engine2DReadback:
+    me read_pixels_with_source() -> Engine2DReadback:
         if self.completion_unknown:
             return engine2d_readback([], "completion_unknown")
         # fn contract forbids self mutation: dirty reads fetch straight from the
@@ -880,10 +896,10 @@ impl RenderBackend for VulkanBackend:
         else:
             engine2d_readback(copy, "host_cache_after_device_present")
 
-    fn width() -> i32:
+    me width() -> i32:
         self.w
 
-    fn height() -> i32:
+    me height() -> i32:
         self.h
 
     me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
