@@ -278,6 +278,10 @@ impl<'a> Parser<'a> {
                     Ok(Expr::Identifier("grid".to_string()))
                 }
             }
+            TokenKind::Parallel => Err(ParseError::syntax_error_with_span(
+                "parallel operator // requires a left operand; use # for comments",
+                self.current.span,
+            )),
             TokenKind::At => {
                 // SFFI call prefix: @rt_function_name
                 // No ambiguity: decorators only appear before declarations, not in expressions

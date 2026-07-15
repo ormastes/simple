@@ -2,8 +2,8 @@
 
 **Date:** 2026-07-04
 **Severity:** medium (silent; errors surface on the NEXT statement)
-**Status:** source fixed 2026-07-15; executable lexer proof pending a runnable
-pure-Simple compiler artifact
+**Status:** source fixed 2026-07-15 in the pure-Simple and Rust-seed parsers;
+executable lexer/parser proof pending runnable compiler artifacts
 
 ## Symptom
 
@@ -36,3 +36,8 @@ wrong option.
 The active `CoreLexer` now emits error token 191 with `use # for comments`
 at the first slash. Division and `/=` retain their existing token kinds. A
 focused lexer spec covers the diagnostic text/location and both controls.
+
+The Rust seed retains `//` as the valid infix Parallel operator. Its primary
+expression parser now rejects prefix/statement-position `//` at that token with
+the same `use # for comments` guidance, while the existing infix parse remains
+covered. A focused parser regression preserves the diagnostic.

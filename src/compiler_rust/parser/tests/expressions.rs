@@ -52,6 +52,11 @@ fn parse_binary_operations() {
     parse_ok("let x = 7 // 3");
 }
 
+#[test]
+fn parse_parallel_operator_requires_left_operand() {
+    parse_err("// this explains the next line\nval y = 2", "use # for comments");
+}
+
 // Comparison operations
 #[test]
 fn parse_comparison_operations() {
