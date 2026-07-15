@@ -26,7 +26,7 @@ SimpleOS / --target=simpleos-x86_64:
 Output: <output>/stage{1,2,3}/<arch>-<vendor>-<os>-<abi>/simple
 
 Options:
-  --backend=<name>   Backend for stage2/stage3/stage4 (default: llvm-lib)
+  --backend=<name>   Backend for stage2/stage3/stage4 (default: llvm; cranelift also supported)
   --output=<dir>     Output directory for bootstrap artifacts (default: build/bootstrap)
   --full-bootstrap   Rebuild the Rust seed/runtime when missing or stale, then
                      rebuild the pure-Simple stages. Without this flag bootstrap
@@ -51,7 +51,7 @@ Options:
 EOF
 }
 
-backend="llvm-lib"
+backend="llvm"
 output_dir="build/bootstrap"
 deploy=0
 build_mcp=1
@@ -132,6 +132,14 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+case "${backend}" in
+  llvm|llvm-lib|cranelift) ;;
+  *)
+    echo "error: unsupported bootstrap backend '${backend}' (expected llvm, llvm-lib, or cranelift)" >&2
+    exit 1
+    ;;
+esac
 
 case "${bootstrap_mode}" in
   dynload|one-binary) ;;
@@ -407,6 +415,23 @@ COMPILER_EXEC_TIMEOUT_SECONDS=5
 COMPILER_CHECK_KILL_GRACE_SECONDS=1
 . "${repo_root}/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
 
+bootstrap_stage_sanity() (
+  candidate=$1
+  version=$(run_timeout 10 "${candidate}" --version 2>&1) || return 1
+  [ "${version}" = "simple-bootstrap 1.0.0-beta" ] || return 1
+  if unsupported=$(run_timeout 10 "${candidate}" run scripts/check/cert/redeploy_gate/fixtures/p2_add.spl 2>&1); then
+    return 1
+  else
+    unsupported_status=$?
+  fi
+  [ "${unsupported_status}" -eq 1 ] || return 1
+  case "${unsupported}" in
+    *"unknown command 'run'"*) ;;
+    *) return 1 ;;
+  esac
+  CANDIDATE_FRONTEND_BACKEND="${backend}" candidate_frontend_smoke "${candidate}"
+)
+
 bootstrap_native_build_main() {
   compiler=$1
   output=$2
@@ -417,7 +442,7 @@ bootstrap_native_build_main() {
     SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_BINARY="$(absolute_path "${compiler}")" \
     "${compiler}" native-build \
-    --backend "${stage4_backend}" \
+    --backend "${backend}" \
     --source src/compiler --source src/app --source src/lib --source examples/10_tooling \
     --entry-closure \
     --threads "${jobs}" \
@@ -467,7 +492,7 @@ seed_stale=0
 rust_rebuilt=0
 # (content-hash staleness gate runs below, after backend/llvm_features settle)
 
-# Detect LLVM 18 availability for llvm-lib backend
+# Detect LLVM 18 availability for LLVM backends.
 llvm_features=""
 if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
   # LLVM is resolved once by the shared platform interface
@@ -486,8 +511,9 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
       export SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path 2>/dev/null || true)}"
     fi
   else
-    echo "LLVM not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-18}); falling back to cranelift backend"
-    backend="cranelift"
+    echo "error: LLVM not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-18})" >&2
+    echo "error: install LLVM or select --backend=cranelift explicitly" >&2
+    exit 1
   fi
 fi
 
@@ -589,14 +615,12 @@ else
   fi
 
   # Stage 2: seed compiles bootstrap_main.spl
-  # Always use cranelift for stage 2: the seed interpreter intercepts
-  # --backend llvm-lib and dispatches to bootstrap_main.spl via the
-  # interpreter, where rt_native_build is a stub that fails.  With
-  # cranelift the seed uses its Rust handle_native_build directly.
+  # Stage 2 uses the configured backend; LLVM is the default and Cranelift is
+  # an explicit supported alternative.
   mkdir -p "${output_dir}/stage2/${PLATFORM}"
   echo "Stage 2: seed → bootstrap_main.spl"
   prepare_native_cache stage2
-  # Stage 2 failure is tolerated (loud warning + seed fallback for stage 4):
+  # Stage 2 failure is reported before Stage 3; no later stage may claim it.
   # the self-hosting frontend now fails closed instead of linking a ret-0 stub
   # (doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md), so a
   # stage-2 build error must not abort the whole pipeline.
@@ -610,7 +634,7 @@ else
     SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_BINARY="$(absolute_path "${seed_bin}")" \
     "${seed_bin}" native-build \
-    --backend cranelift \
+    --backend "${backend}" \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${jobs}" \
@@ -623,19 +647,27 @@ else
   stage2_status=$?
   set -e
   echo "  stage2-native-build log: ${log_dir}/stage2-native-build.log"
+  if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
+    echo "  Stage 2: running bootstrap compiler sanity"
+    if ! bootstrap_stage_sanity "${stage2_bin}"; then
+      echo "error: Stage 2 bootstrap compiler sanity failed" >&2
+      stage2_status=2
+      rm -f "${stage2_bin}"
+    fi
+  fi
   if [ "${stage2_status}" -ne 0 ]; then
     if [ "${strict_bootstrap}" -eq 1 ]; then
       echo "error: strict bootstrap stage2 failed (exit ${stage2_status}); refusing seed fallback" >&2
       exit "${stage2_status}"
     fi
-    echo "  warning: stage2 native-build failed (exit ${stage2_status}); using seed for stage 4" >&2
+    echo "  warning: stage2 native-build failed (exit ${stage2_status}); Stage 3/full CLI unavailable" >&2
     echo "  warning: see doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md" >&2
   fi
 
   # Stage 3: stage2 recompiles bootstrap_main.spl (self-host verification)
   # Note: Stage3 is optional — the stage2 binary may lack features needed for
   # self-hosting (e.g., --entry-closure support in rt_native_build, or LLVM
-  # symbol conflicts). When stage3 fails, we fall back to the seed for stage4.
+  # symbol conflicts). When Stage 3 fails, the wrapper stops before Stage 4.
   mkdir -p "${output_dir}/stage3/${PLATFORM}"
   echo "Stage 3: stage2 → bootstrap_main.spl (self-host)"
   prepare_native_cache stage3
@@ -651,7 +683,7 @@ else
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_BINARY="$(absolute_path "${stage2_bin}")" \
     "${stage2_bin}" native-build \
-    --backend cranelift \
+    --backend "${backend}" \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${jobs}" \
@@ -666,9 +698,16 @@ else
 
   echo "  stage3-native-build log: ${log_dir}/stage3-native-build.log"
   if [ "${stage3_status}" -eq 0 ] && [ -x "${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}" ]; then
-    stage3_ok=1
-    echo "  Stage 3 succeeded"
-  else
+    if bootstrap_stage_sanity "${stage3_bin}"; then
+      stage3_ok=1
+      echo "  Stage 3 succeeded and passed bootstrap compiler sanity"
+    else
+      stage3_status=2
+      rm -f "${stage3_bin}"
+      echo "error: Stage 3 bootstrap compiler sanity failed" >&2
+    fi
+  fi
+  if [ "${stage3_ok}" -ne 1 ]; then
     if [ "${strict_bootstrap}" -eq 1 ]; then
       echo "error: strict bootstrap stage3 failed; refusing seed fallback" >&2
       if [ "${stage3_status}" -ne 0 ]; then
@@ -677,9 +716,9 @@ else
       exit 2
     fi
     if [ "${stage3_status}" -eq 0 ]; then
-      echo "  warning: stage3 self-host produced no executable; using seed for stage 4"
+      echo "  warning: stage3 self-host produced no executable; Stage 4 unavailable"
     else
-      echo "  warning: stage3 self-host failed (exit ${stage3_status}); using seed for stage 4"
+      echo "  warning: stage3 self-host failed (exit ${stage3_status}); Stage 4 unavailable"
     fi
   fi
 fi
@@ -697,7 +736,7 @@ else
 fi
 
 if [ ! -x "${stage2}" ]; then
-  echo "warning: stage2 binary was not produced; falling back to seed for stage 4" >&2
+  echo "warning: stage2 binary was not produced; Stage 3/full CLI unavailable" >&2
   stage3_ok=0
 fi
 
@@ -717,8 +756,8 @@ if [ "${stage3_ok:-0}" -eq 1 ] && [ -x "${stage3}" ]; then
     stage_for_build="${stage3}"
   fi
 else
-  echo "Stage 3 unavailable — using seed for stage 4"
-  stage_for_build="${seed_bin}"
+  echo "Stage 3 unavailable — no verified compiler for Stage 4"
+  stage_for_build=""
   stage4_is_seed=1
 fi
 
@@ -739,8 +778,6 @@ if [ "${stage4_is_seed}" -eq 1 ]; then
   echo "error: full CLI build requires a verified pure-Simple stage2/stage3 compiler; refusing seed fallback" >&2
   exit 2
 fi
-stage4_backend="cranelift"
-
 # ===========================================================================
 # Stage 4: Compile full CLI (main.spl) with verified bootstrap compiler
 # ===========================================================================
@@ -792,7 +829,7 @@ run_logged stage4b-ui-backend env RUST_LOG="${RUST_LOG:-error}" \
   SIMPLE_STUB_MISSING_RT=1 \
   SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
   "${full_bin}" native-build \
-  --backend "${stage4_backend}" \
+    --backend "${backend}" \
   --source src/compiler --source src/app --source src/lib \
   --entry-closure --threads "${jobs}" --cache-dir "${native_cache_dir}" \
   --mode "${bootstrap_mode}" --entry src/app/ui/main.spl \
@@ -829,7 +866,7 @@ if [ "${build_mcp}" -eq 1 ]; then
       SIMPLE_NO_STUB_FALLBACK=1 \
       SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
       "${stage_for_build}" native-build \
-      --backend "${stage4_backend}" \
+      --backend "${backend}" \
       --source src/compiler --source src/app --source src/lib \
       --entry-closure \
       --threads "${jobs}" \

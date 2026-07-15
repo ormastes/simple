@@ -19,6 +19,13 @@ Simple bootstrap has two public pure-Simple build modes:
 
 No third mode should be added without a separate requirements decision.
 
+## Backend Selection
+
+LLVM is the default bootstrap backend. `llvm`, `llvm-lib`, and `cranelift` are
+supported explicit selections, and every retained stage must use the same
+selection. Missing LLVM is a setup error; the wrapper must not silently change
+an LLVM request to Cranelift.
+
 ## Rust Seed Boundary
 
 Normal bootstrap must not rebuild Rust. It reuses:
@@ -63,6 +70,9 @@ source import edge, so cache reuse is allowed only when those inputs match.
   the Rust seed/runtime before pure-Simple stages.
 - Direct execution of the Rust seed prints the seed warning outside bootstrap
   mode.
+- REQ-BOOT-BACKEND-001: Bootstrap defaults to LLVM, honors explicit LLVM or
+  Cranelift selection through every stage, and fails rather than silently
+  changing the requested backend.
 - REQ-BOOT-STAGE-001: Every retained Stage 2 and Stage 3 pure-Simple compiler
   must start, compile the canonical tiny redeploy fixture with stub fallback
   disabled, run the produced native binary successfully, and reject unsupported

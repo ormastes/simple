@@ -127,13 +127,15 @@ The compiler supports multiple code generation backends:
 | Compiler (`build`, `native-build`) | LLVM | Optimized native binary output |
 | Explicit (`--backend=X`) | User choice | No auto-selection |
 
-**Fallback chain for compiler builds:** `llvm-lib` (if `libLLVM` available) -> `llvm` (if `llc` available) -> `cranelift`.
+Bootstrap defaults to `llvm`. `llvm-lib` and `cranelift` remain explicit
+supported selections. A missing LLVM installation fails with a direct setup
+error; the wrapper never silently changes the requested backend.
 
 ### Platform Notes
 
 - **Linux:** LLVM most commonly available. Install `libllvm-18-dev` for `llvm-lib` backend. Preferred linker: `mold`.
-- **macOS:** Needs Homebrew LLVM (`brew install llvm`) for LLVM backend. Without it, all builds use Cranelift. Linker: system `ld` (ld64).
-- **Windows:** LLVM rarely available; typically falls back to Cranelift. Supports both MSVC and MinGW toolchains.
+- **macOS:** Needs Homebrew LLVM (`brew install llvm`) for the default LLVM backend. Select `--backend=cranelift` explicitly when desired. Linker: system `ld` (ld64).
+- **Windows:** Install LLVM for the default backend or select `--backend=cranelift` explicitly. Both MSVC and MinGW toolchains remain supported.
 
 ### SimpleOS Multi-Platform Binaries
 
@@ -168,24 +170,30 @@ Stage 1: Rust Seed Binary
 Stage 2: Pure Simple (compiled by Rust seed)
   seed native-build --entry bootstrap_main.spl
   -> build/bootstrap/stage2/<triple>/simple
-  -> Backend: llvm-lib (default)
+  -> Backend: selected backend (LLVM default; Cranelift supported)
 
 Stage 3: Self-Hosted (compiled by Stage 2)
   stage2 native-build --entry bootstrap_main.spl
   -> build/bootstrap/stage3/<triple>/simple
-  -> Backend: llvm-lib (default)
+  -> Backend: selected backend (LLVM default; Cranelift supported)
 
 Stage 4: Full CLI (compiled by verified stage when available)
   stage3 native-build --entry main.spl
   -> build/bootstrap/full/<triple>/simple
-  -> Backend: llvm-lib (default)
+  -> Backend: selected backend (LLVM default; Cranelift supported)
 ```
+
+Before Stage 2 is used to build Stage 3, and before Stage 3 is accepted, the
+wrapper runs the shared bootstrap compiler sanity: exact bootstrap version,
+fail-closed rejection of unsupported `run`, then strict native-build and
+execution of the canonical `p2_add.spl` fixture. A failed sanity removes that
+stage from consideration on Linux, macOS, Windows/POSIX-shell, and FreeBSD.
 
 Current implementation note: Stage 2/Stage 3 are fail-closed while
 `bootstrap_main.spl` self-host lowering is still being repaired. When Stage 3
-is unavailable, the wrapper may use the Rust seed for Stage 4 and report the
-fallback instead of claiming a verified pure self-host pass. Treat that state as
-incomplete Pure-Simple bootstrap evidence, not release-ready convergence.
+is unavailable, the wrapper reports incomplete pure-Simple evidence and exits
+before producing a Stage 4 full CLI; it does not publish a seed fallback as a
+self-hosted result.
 
 ### Quick Bootstrap
 
@@ -259,7 +267,7 @@ build/bootstrap/full/<triple>/simple
 
 | Flag | Description |
 |------|-------------|
-| `--backend=X` | Override bootstrap backend (`auto` by default) |
+| `--backend=X` | Select `llvm` (default), `llvm-lib`, or `cranelift` |
 | `--output=DIR` | Write stage outputs to a custom directory |
 | `--seed=PATH` | Seed compiler binary. Use `.exe` on Windows. |
 

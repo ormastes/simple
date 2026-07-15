@@ -63,6 +63,9 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
   `simple_status` and `lsp_symbols` before deploy. Earlier stages run their
   native fixture sanity; the separate Stage 2 MCP system spec covers its single
   cached MCP artifact but does not substitute for the Stage 5 pair gate.
+- The bootstrap wrapper itself runs the shared compiler sanity before using
+  Stage 2 and before accepting Stage 3: exact bootstrap version, unsupported
+  `run` rejection, and strict native build/execute of `p2_add.spl`.
 
 ## Bootstrap Commands
 ```bash

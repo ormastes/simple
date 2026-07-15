@@ -74,8 +74,9 @@ Verification for tooling changes should include:
 - direct env/process facade guard;
 - bounded-output smoke for performance-sensitive tools such as `native-build`.
 
-For staged compiler or MCP changes, run the stage sanity SSpec and the MCP
-command-line handshake SSpec. `bin/simple_mcp_server` defaults to the cached
+For staged compiler or MCP changes, the bootstrap wrapper must pass its built-in
+Stage 2 and Stage 3 compiler sanity, then run the matching stage sanity SSpec
+and MCP command-line handshake SSpec. `bin/simple_mcp_server` defaults to the cached
 native server; `SIMPLE_MCP_NATIVE` selects an exact artifact for reproducible
 verification. Raw-source execution is an explicit debug fallback controlled by
 `SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=1` and may use only a deployed pure-Simple
