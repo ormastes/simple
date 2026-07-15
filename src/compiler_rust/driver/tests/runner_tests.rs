@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 // Import shared test helpers
 mod test_helpers;
-use test_helpers::{run_expect, run_expect_compile_error, run_expect_interp};
+use test_helpers::{run_expect, run_expect_compile_error, run_expect_interp, run_on_stdout, Backend};
 
 #[test]
 fn runner_compiles_and_runs_stub() {
@@ -60,6 +60,15 @@ fn runner_supports_variables() {
     run_expect("let a = 5\nmain = a * a", 25);
     run_expect("let x = 7\nlet y = x + 3\nmain = y", 10);
     run_expect("let a = 2\nlet b = 3\nlet c = 4\nmain = a + b * c", 14);
+}
+
+#[test]
+fn interpreter_formats_integer_rhs_in_text_addition() {
+    run_on_stdout(
+        Backend::Interpreter,
+        "fn main():\n    val v: i64 = 42\n    print \"\" + v",
+        "42\n",
+    );
 }
 
 #[test]
