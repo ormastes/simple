@@ -65,7 +65,11 @@ impl PlatformLinkConfig {
 
     fn linux() -> Self {
         Self {
-            libraries: vec!["pthread", "dl", "m", "unwind", "sqlite3"],
+            // Static LLVM objects retained from `libsimple_native_all.a` depend on
+            // compression and terminal-info libraries. Cargo supplies these when it
+            // links the seed; native-build must carry the same transitive contract.
+            // `--as-needed` keeps them out of binaries that do not retain LLVM code.
+            libraries: vec!["pthread", "dl", "m", "unwind", "sqlite3", "z", "zstd", "tinfo"],
             library_search_paths: vec![],
             system_scan_libs: vec![
                 "/lib/x86_64-linux-gnu/libc.so.6",
@@ -354,5 +358,14 @@ mod tests {
 
         assert!(config.is_valid_asm_label("rt_hashmap_new"));
         assert!(!config.is_valid_asm_label("rt_hashmap_ñ"));
+    }
+
+    #[test]
+    fn linux_links_static_llvm_transitive_libraries() {
+        let config = PlatformLinkConfig::linux();
+
+        for library in ["z", "zstd", "tinfo"] {
+            assert!(config.libraries.contains(&library));
+        }
     }
 }
