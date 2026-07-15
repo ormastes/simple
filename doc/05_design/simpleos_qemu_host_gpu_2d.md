@@ -315,9 +315,9 @@ admission. The wrapper self-test and shared-shell syntax check pass, and
 `_QemuRunner` source parity is present. A
 current-source pure-Simple runner execution is still required; TODO 573 owns
 native child-env, platform-neutral unique-temp, and argv-preserving timeout
-process parity plus sibling `_QemuRunner` direct-runtime migration.
-`os_build_run.spl` itself now uses shared file/dir/env facades and has no local
-time declaration.
+process parity plus direct-runtime migration in the three `scenario_*` runner
+modules. `os_build_run.spl` and `runner_targets.spl` now use shared I/O/time
+facades; TODO 574 separately retains overflow-safe monotonic elapsed timing.
 
 This does not design around the test-runner blocker. TODO 572 separately wires
 the pure-Simple compiler interpreter's BDD result into

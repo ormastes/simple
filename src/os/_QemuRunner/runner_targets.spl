@@ -1,6 +1,11 @@
 # SimpleOS QEMU runner — result-path/log helpers, run options, and the OsTarget
 # catalog plus per-scenario target getters.
 use os.qemu_runner.*
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.nogc_sync_mut.ffi.io.{file_write_text}
 # SimpleOS QEMU Runner — Multi-Architecture Boot & Test
 #
 # Provides build + run + test functionality for all 6 architectures.
@@ -55,17 +60,6 @@ use os.toolchain_vfs_probe_contract.{
 use os.ssh_qemu_contract.{run_x64_ssh_probe}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
 
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_env_get(key: text) -> text?
-extern fn rt_env_set(key: text, value: text) -> bool
-extern fn rt_env_cwd() -> text
-extern fn rt_time_now_unix_micros() -> i64
-
 val _MULTIARCH_RESULT_ROOT: text = "build/multiarch"
 
 # Default native-build timeout for `os build` lane.
@@ -101,10 +95,10 @@ fn _parse_timeout_ms(raw: text, default_ms: i64) -> i64:
 fn _os_build_timeout_ms() -> i64:
     """Resolve the active native-build timeout, honoring SIMPLE_OS_BUILD_TIMEOUT_MS.
 
-    rt_env_get returns NIL when the variable is unset; coerce to empty string so
+    env_get returns NIL when the variable is unset; coerce to empty string so
     the parser takes the empty/default branch instead of failing to iterate NIL.
     """
-    val raw = rt_env_get("SIMPLE_OS_BUILD_TIMEOUT_MS") ?? ""
+    val raw = env_get("SIMPLE_OS_BUILD_TIMEOUT_MS") ?? ""
     _parse_timeout_ms(raw, _OS_BUILD_DEFAULT_TIMEOUT_MS)
 
 fn _normalize_os_log_mode(raw: text) -> text:
@@ -115,7 +109,7 @@ fn _normalize_os_log_mode(raw: text) -> text:
     _OS_BUILD_DEFAULT_LOG_MODE
 
 fn _os_build_log_mode() -> text:
-    val raw = rt_env_get("SIMPLE_OS_LOG_MODE") ?? ""
+    val raw = env_get("SIMPLE_OS_LOG_MODE") ?? ""
     _normalize_os_log_mode(raw)
 
 fn _os_build_backend_for_target(target: OsTarget) -> text:
@@ -125,7 +119,7 @@ fn _os_build_backend_for_target(target: OsTarget) -> text:
     object targets, so those OS lanes default to LLVM. The environment
     override still wins for diagnostics and experiments.
     """
-    val raw = rt_env_get("SIMPLE_OS_BUILD_BACKEND") ?? ""
+    val raw = env_get("SIMPLE_OS_BUILD_BACKEND") ?? ""
     if raw == "llvm":
         return "llvm"
     if raw == "cranelift":
@@ -147,7 +141,7 @@ fn default_os_build_backend_for_target(target: OsTarget) -> text:
     _os_build_backend_for_target(target)
 
 fn _now_ms() -> i64:
-    rt_time_now_unix_micros() / 1000
+    current_time_ms()
 
 fn _result_arch_slug(arch: Architecture) -> text:
     match arch:
@@ -224,7 +218,7 @@ fn _image_path_for_target(target: OsTarget) -> text:
     simpleos_platform_disk_image_output(_platform_name_for_arch(target.arch))
 
 fn _ensure_result_dir(arch: Architecture) -> bool:
-    rt_dir_create_all(_result_arch_dir(arch))
+    dir_create_all(_result_arch_dir(arch))
 
 fn _smoke_result_body(target: OsTarget, success: bool, has_banner: bool, nvfs_mounted: bool, serial_output: text, exit_code: i32, baseline_match: bool) -> text:
     "{\n" +
@@ -260,30 +254,30 @@ fn _write_smoke_result(target: OsTarget, success: bool, has_banner: bool, serial
         print "[test] WARNING: could not create multiarch result dir for {arch_display_name(target.arch)}"
         return
     val baseline_path = "{_result_arch_dir(target.arch)}/baseline_smoke.json"
-    val baseline_match = target.arch != Architecture.X86_64 or rt_file_exists(baseline_path)
+    val baseline_match = target.arch != Architecture.X86_64 or file_exists(baseline_path)
     # Do not infer storage readiness from a generic boot PASS.  This field is
     # evidence for a filesystem marker, not an alias for "QEMU exited OK".
     val nvfs_mounted = serial_output.contains("nvfs") or serial_output.contains("NVFS") or serial_output.contains("[vfs] mounted")
     val body = _smoke_result_body(target, success, has_banner, nvfs_mounted, serial_output, exit_code, baseline_match)
-    if not rt_file_write_text(_smoke_result_path(target.arch), body):
+    if not file_write_text(_smoke_result_path(target.arch), body):
         print "[test] WARNING: could not write smoke result for {arch_display_name(target.arch)}"
     if serial_output != "":
-        val _latest_ok = rt_file_write_text(_smoke_serial_log_path(target.arch), serial_output)
-        val _sample_ok = rt_file_write_text(_smoke_serial_sample_path(target.arch), serial_output)
+        val _latest_ok = file_write_text(_smoke_serial_log_path(target.arch), serial_output)
+        val _sample_ok = file_write_text(_smoke_serial_sample_path(target.arch), serial_output)
     if target.arch == Architecture.X86_64 and success:
-        var refresh_baseline = not rt_file_exists(baseline_path)
+        var refresh_baseline = not file_exists(baseline_path)
         if not refresh_baseline:
-            val (stdout, _stderr, read_exit) = rt_process_run_timeout("/bin/sh", ["-c", "cat \"" + baseline_path + "\""], 5000)
-            refresh_baseline = read_exit != 0 or not stdout.contains("\"status\": \"pass\"")
+            val baseline = file_read(baseline_path)
+            refresh_baseline = not baseline.contains("\"status\": \"pass\"")
         if refresh_baseline:
-            val _ = rt_file_write_text(baseline_path, body)
+            val _ = file_write_text(baseline_path, body)
 
 fn _write_bootstrap_result(target: OsTarget, build_ok: bool, smoke_ok: bool, backend: text):
     if not _ensure_result_dir(target.arch):
         print "[build] WARNING: could not create multiarch result dir for {arch_display_name(target.arch)}"
         return
     val body = _bootstrap_result_body(target, build_ok, smoke_ok, backend)
-    if not rt_file_write_text(_bootstrap_result_path(target.arch), body):
+    if not file_write_text(_bootstrap_result_path(target.arch), body):
         print "[build] WARNING: could not write bootstrap result for {arch_display_name(target.arch)}"
 
 fn _write_native_build_failure_log(target: OsTarget, backend: text, args: [text], stdout: text, stderr: text, exit_code: i32, elapsed_ms: i64):
@@ -299,7 +293,7 @@ fn _write_native_build_failure_log(target: OsTarget, backend: text, args: [text]
         "elapsed_ms={elapsed_ms}\n" +
         "args={args.join(\" \")}\n" +
         "\n[stdout]\n{stdout}\n[stderr]\n{stderr}\n"
-    val _ = rt_file_write_text(_native_build_failure_log_path(target.arch), body)
+    val _ = file_write_text(_native_build_failure_log_path(target.arch), body)
 
 fn _tail_lines(s: text, n: i64) -> text:
     """Return the last n newline-delimited lines of s, for compact diagnostic prints."""

@@ -88,9 +88,10 @@ Bootstrap retains only its focused `check src/app/cli/bootstrap_main.spl`
 before the shared admission gate. The wrapper self-test and shared-shell syntax
 check pass, and `_QemuRunner` source parity is present. Source
 inspection still does not satisfy TODO 548; current-source runner execution is
-required. `os_build_run.spl` now uses shared file/dir/env facades and removes its
-unused local time declaration. TODO 573 retains sibling `_QemuRunner` runtime
-migration plus cross-platform child-env, unique-temp, and timeout ownership.
+required. `os_build_run.spl` and `runner_targets.spl` now use shared I/O/time
+facades, and the latter reads its baseline without a shell process. TODO 573
+retains the three `scenario_*` modules plus cross-platform child-env,
+unique-temp, and timeout ownership; TODO 574 retains monotonic elapsed safety.
 
 Candidate admission also does not prove that `simple test` is pure-Simple.
 Current dispatch still reaches `rt_cli_run_tests`; the alternate pure-Simple
