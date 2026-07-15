@@ -24,7 +24,12 @@ fn _valid_evidence() -> FontPerfBudgetEvidence:
         legacy_3d_kb: 200, multiface_3d_kb: 220,
         gpu_device_name: "device", gpu_driver_identity: "driver=1",
         warm_1080_samples_ns: _samples(1), warm_4k_samples_ns: _samples(1),
-        cpu_4096_samples_ns: _samples(20), gpu_4096_samples_ns: _samples(1))
+        cpu_4096_samples_ns: _samples(20), gpu_4096_samples_ns: _samples(1),
+        device_loss_status: "controlled-poison-cpu-fallback",
+        device_loss_batch_identity_before: "font-batch-v1",
+        device_loss_batch_identity_after: "font-batch-v1",
+        cpu_after_device_loss_p95_ns: 20,
+        cpu_after_device_loss_samples_ns: _samples(10))
 
 describe "shared multilingual GPU font performance evidence":
     it "round-trips a fresh record and rejects corrupt or stale fields":
@@ -32,6 +37,15 @@ describe "shared multilingual GPU font performance evidence":
         val record = font_perf_evidence_record(_valid_evidence())
         expect(record != "").to_be(true)
         expect(expect_font_perf_budget(parse_font_perf_evidence(record))).to_be(true)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("viewport_1080=1920x1080", "viewport_1080=1x1")))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("alpha_mode=straight-argb-src-over-opaque-destination", "alpha_mode=unknown")))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("warmup_frames_per_route=1", "warmup_frames_per_route=0")))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("comparator=exact-packed-argb-u32-cpu-oracle", "comparator=fnv64-only")))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("host_arch=", "host_arch=forged-")))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("device_loss_status=controlled-poison-cpu-fallback", "device_loss_status=native-device-loss")))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("device_loss_batch_identity_after=font-batch-v1", "device_loss_batch_identity_after=changed")))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("cpu_after_device_loss_p95_ns=20", "cpu_after_device_loss_p95_ns=31")))).to_be(false)
+        expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("cpu_after_device_loss_samples_ns=10,11,12,13,14,15,16,17,18,19,20", "cpu_after_device_loss_samples_ns=10,11,12,13,14,15,16,17,18,19,21")))).to_be(false)
         expect(expect_font_perf_budget(parse_font_perf_evidence(record + "\nstatus=pass"))).to_be(false)
         expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("unchanged_upload=true", "unchanged_upload=yes")))).to_be(false)
         expect(expect_font_perf_budget(parse_font_perf_evidence(record.replace("warm_hits=22528", "warm_hits=abc")))).to_be(false)

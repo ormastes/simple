@@ -1,4 +1,4 @@
-use std.io_runtime.{file_read, file_write, file_exists, file_delete, file_hash_sha256}
+use std.io_runtime.{file_read, file_write, file_exists, file_delete, file_hash_sha256, host_os, host_arch}
 use std.common.crypto.sha256.{sha256_text}
 
 val FONT_PERF_EVIDENCE_PATH = "build/shared_multilingual_gpu_fonts_perf/evidence.env"
@@ -12,7 +12,7 @@ val FONT_PERF_FACE_DEVANAGARI_SHA256 = "9ce7b04f60e363d8870e5997744cf85cf69d38a4
 val FONT_PERF_FACE_ARABIC_PATH = "assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf"
 val FONT_PERF_FACE_ARABIC_SHA256 = "63111b5b2e074dd48cc67692e0a2726d86ee94c1c37fe8598257b7b4e87e869e"
 val FONT_PERF_SAMPLE_COUNT: i64 = 11
-# Compatibility identifier retained for existing helper callers; v2 pins the
+# Compatibility identifier retained for existing helper callers; v4 pins the
 # complete witnesses below rather than pretending one scalar proves a language.
 val FONT_PERF_CODEPOINTS = "U+0041,U+4E2D,U+00D1,U+0905,U+0628,U+00C9,U+00C3,U+042F,U+0627,U+0049"
 val FONT_PERF_WITNESS_MAPPING = "en:English|zh:中文|es:Español|hi:हिन्दी|ar:العربية|fr:français|pt:Português|ru:Русский|ur:اردو|id:Indonesia"
@@ -49,6 +49,11 @@ class FontPerfBudgetEvidence:
     warm_4k_samples_ns: [i64]
     cpu_4096_samples_ns: [i64]
     gpu_4096_samples_ns: [i64]
+    device_loss_status: text
+    device_loss_batch_identity_before: text
+    device_loss_batch_identity_after: text
+    cpu_after_device_loss_p95_ns: i64
+    cpu_after_device_loss_samples_ns: [i64]
 
 fn unavailable_font_perf_evidence(reason: text) -> FontPerfBudgetEvidence:
     FontPerfBudgetEvidence(
@@ -62,7 +67,12 @@ fn unavailable_font_perf_evidence(reason: text) -> FontPerfBudgetEvidence:
         legacy_3d_kb: 0, multiface_3d_kb: 0,
         gpu_device_name: "", gpu_driver_identity: "",
         warm_1080_samples_ns: [], warm_4k_samples_ns: [],
-        cpu_4096_samples_ns: [], gpu_4096_samples_ns: [])
+        cpu_4096_samples_ns: [], gpu_4096_samples_ns: [],
+        device_loss_status: "unavailable",
+        device_loss_batch_identity_before: "",
+        device_loss_batch_identity_after: "",
+        cpu_after_device_loss_p95_ns: 0,
+        cpu_after_device_loss_samples_ns: [])
 
 fn _samples_text(values: [i64]) -> text:
     var out = ""
@@ -134,16 +144,22 @@ fn _valid_paired_rss(evidence: FontPerfBudgetEvidence) -> bool:
 
 fn _valid_shape(evidence: FontPerfBudgetEvidence) -> bool:
     if not _valid_status(evidence.status) or evidence.reason == "": return false
-    if not _safe_record_text(evidence.reason) or not _safe_record_text(evidence.gpu_device_name) or not _safe_record_text(evidence.gpu_driver_identity): return false
+    if (not _safe_record_text(evidence.reason) or not _safe_record_text(evidence.gpu_device_name) or
+        not _safe_record_text(evidence.gpu_driver_identity) or not _safe_record_text(evidence.device_loss_status) or
+        not _safe_record_text(evidence.device_loss_batch_identity_before) or
+        not _safe_record_text(evidence.device_loss_batch_identity_after)):
+        return false
     if evidence.warm_1080_p95_ns < 0 or evidence.warm_1080_p95_ns > 1000000000000 or evidence.warm_4k_p95_ns < 0 or evidence.warm_4k_p95_ns > 1000000000000: return false
     if evidence.cpu_4096_p95_ns < 0 or evidence.cpu_4096_p95_ns > 1000000000000 or evidence.gpu_4096_p95_ns < 0 or evidence.gpu_4096_p95_ns > 1000000000000: return false
+    if evidence.cpu_after_device_loss_p95_ns < 0 or evidence.cpu_after_device_loss_p95_ns > 1000000000000: return false
     if evidence.warm_hits < 0 or evidence.warm_requests < 0 or evidence.rss_growth_percent < 0 or evidence.gpu_resource_high_water_bytes < 0: return false
     if not _valid_paired_rss(evidence): return false
     if evidence.warm_hits > evidence.warm_requests: return false
     if evidence.warm_1080_samples_ns.len() > FONT_PERF_SAMPLE_COUNT or evidence.warm_4k_samples_ns.len() > FONT_PERF_SAMPLE_COUNT: return false
     if evidence.cpu_4096_samples_ns.len() > FONT_PERF_SAMPLE_COUNT or evidence.gpu_4096_samples_ns.len() > FONT_PERF_SAMPLE_COUNT: return false
+    if evidence.cpu_after_device_loss_samples_ns.len() > FONT_PERF_SAMPLE_COUNT: return false
     if evidence.status == "pass":
-        return evidence.warm_1080_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and evidence.warm_4k_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and evidence.cpu_4096_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and evidence.gpu_4096_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and evidence.warm_1080_p95_ns == font_perf_p95(evidence.warm_1080_samples_ns) and evidence.warm_4k_p95_ns == font_perf_p95(evidence.warm_4k_samples_ns) and evidence.cpu_4096_p95_ns == font_perf_p95(evidence.cpu_4096_samples_ns) and evidence.gpu_4096_p95_ns == font_perf_p95(evidence.gpu_4096_samples_ns)
+        return evidence.warm_1080_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and evidence.warm_4k_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and evidence.cpu_4096_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and evidence.gpu_4096_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and evidence.cpu_after_device_loss_samples_ns.len() == FONT_PERF_SAMPLE_COUNT and evidence.warm_1080_p95_ns == font_perf_p95(evidence.warm_1080_samples_ns) and evidence.warm_4k_p95_ns == font_perf_p95(evidence.warm_4k_samples_ns) and evidence.cpu_4096_p95_ns == font_perf_p95(evidence.cpu_4096_samples_ns) and evidence.gpu_4096_p95_ns == font_perf_p95(evidence.gpu_4096_samples_ns) and evidence.cpu_after_device_loss_p95_ns == font_perf_p95(evidence.cpu_after_device_loss_samples_ns)
     true
 
 fn expect_font_perf_budget(evidence: FontPerfBudgetEvidence) -> bool:
@@ -154,6 +170,11 @@ fn expect_font_perf_budget(evidence: FontPerfBudgetEvidence) -> bool:
         evidence.unchanged_upload and evidence.rss_available and
         evidence.rss_growth_percent == _paired_rss_growth_percent(evidence) and evidence.rss_growth_percent <= 10 and
         evidence.gpu_device_name != "" and evidence.gpu_driver_identity != "" and
+        evidence.device_loss_status == "controlled-poison-cpu-fallback" and
+        evidence.device_loss_batch_identity_before != "" and
+        evidence.device_loss_batch_identity_after == evidence.device_loss_batch_identity_before and
+        evidence.cpu_after_device_loss_p95_ns > 0 and
+        evidence.cpu_after_device_loss_p95_ns <= evidence.cpu_4096_p95_ns and
         evidence.gpu_resource_high_water_bytes > 0 and evidence.gpu_resource_high_water_bytes <= 134217728
 
 fn _font_perf_implementation_sha256() -> text:
@@ -201,9 +222,12 @@ fn font_perf_evidence_record(evidence: FontPerfBudgetEvidence) -> text:
     val collector_sha = file_hash_sha256(FONT_PERF_COLLECTOR_PATH)
     val helper_sha = file_hash_sha256(FONT_PERF_HELPER_PATH)
     val implementation_sha = _font_perf_implementation_sha256()
-    if sc_sha != FONT_PERF_FACE_SC_SHA256 or devanagari_sha != FONT_PERF_FACE_DEVANAGARI_SHA256 or arabic_sha != FONT_PERF_FACE_ARABIC_SHA256 or font_sha.len() != 64 or collector_sha.len() != 64 or helper_sha.len() != 64 or implementation_sha.len() != 64: return ""
+    val evidence_host_os = host_os()
+    val evidence_host_arch = host_arch()
+    if sc_sha != FONT_PERF_FACE_SC_SHA256 or devanagari_sha != FONT_PERF_FACE_DEVANAGARI_SHA256 or arabic_sha != FONT_PERF_FACE_ARABIC_SHA256 or font_sha.len() != 64 or collector_sha.len() != 64 or helper_sha.len() != 64 or implementation_sha.len() != 64 or evidence_host_os == "" or evidence_host_arch == "": return ""
     val rss_comparison = if evidence.rss_available: "paired-2d-3d-legacy" else: "unavailable"
-    "schema=shared-multilingual-gpu-font-perf/v2\nfixture=top-10-language-witnesses\nwitness_mapping={FONT_PERF_WITNESS_MAPPING}\nface_mapping={FONT_PERF_FACE_MAPPING}\nrepresentative_codepoints={FONT_PERF_CODEPOINTS}\nglyphs_1080=1024\nglyphs_4k=1024\nglyphs_compare=4096\nsample_count=11\nwarm_backend=vulkan\nfont_path_0={FONT_PERF_FACE_SC_PATH}\nfont_sha256_0={sc_sha}\nfont_path_1={FONT_PERF_FACE_DEVANAGARI_PATH}\nfont_sha256_1={devanagari_sha}\nfont_path_2={FONT_PERF_FACE_ARABIC_PATH}\nfont_sha256_2={arabic_sha}\nfont_sha256={font_sha}\ncollector_path={FONT_PERF_COLLECTOR_PATH}\ncollector_sha256={collector_sha}\nhelper_path={FONT_PERF_HELPER_PATH}\nhelper_sha256={helper_sha}\nimplementation_sha256={implementation_sha}\nstatus={evidence.status}\nreason={evidence.reason}\nwarm_1080_p95_ns={evidence.warm_1080_p95_ns}\nwarm_4k_p95_ns={evidence.warm_4k_p95_ns}\ncpu_4096_p95_ns={evidence.cpu_4096_p95_ns}\ngpu_4096_p95_ns={evidence.gpu_4096_p95_ns}\nwarm_hits={evidence.warm_hits}\nwarm_requests={evidence.warm_requests}\nunchanged_upload={evidence.unchanged_upload}\nrss_growth_percent={evidence.rss_growth_percent}\ngpu_resource_high_water_bytes={evidence.gpu_resource_high_water_bytes}\nrss_available={evidence.rss_available}\nlegacy_2d_kb={evidence.legacy_2d_kb}\nmultiface_2d_kb={evidence.multiface_2d_kb}\nlegacy_3d_kb={evidence.legacy_3d_kb}\nmultiface_3d_kb={evidence.multiface_3d_kb}\nrss_comparison={rss_comparison}\ngpu_device_name={evidence.gpu_device_name}\ngpu_driver_identity={evidence.gpu_driver_identity}\nwarm_1080_samples_ns={_samples_text(evidence.warm_1080_samples_ns)}\nwarm_4k_samples_ns={_samples_text(evidence.warm_4k_samples_ns)}\ncpu_4096_samples_ns={_samples_text(evidence.cpu_4096_samples_ns)}\ngpu_4096_samples_ns={_samples_text(evidence.gpu_4096_samples_ns)}"
+    val base = "schema=shared-multilingual-gpu-font-perf/v4\nfixture=top-10-language-witnesses\nwitness_mapping={FONT_PERF_WITNESS_MAPPING}\nface_mapping={FONT_PERF_FACE_MAPPING}\nrepresentative_codepoints={FONT_PERF_CODEPOINTS}\nglyphs_1080=1024\nglyphs_4k=1024\nglyphs_compare=4096\nsample_count=11\nwarm_backend=vulkan\nviewport_1080=1920x1080\nviewport_4k=3840x2160\ncompare_viewport=1920x1080\ncolor_space=srgb-byte-domain-no-linearization\npixel_format=argb8888-packed-u32\nalpha_mode=straight-argb-src-over-opaque-destination\nrounding=mask-alpha-nearest-blend-floor\nwarmup_frames_per_route=1\npercentile_method=sorted-index-floor-n-times-95-over-100\ncomparator=exact-packed-argb-u32-cpu-oracle\nhost_os={evidence_host_os}\nhost_arch={evidence_host_arch}\nfont_path_0={FONT_PERF_FACE_SC_PATH}\nfont_sha256_0={sc_sha}\nfont_path_1={FONT_PERF_FACE_DEVANAGARI_PATH}\nfont_sha256_1={devanagari_sha}\nfont_path_2={FONT_PERF_FACE_ARABIC_PATH}\nfont_sha256_2={arabic_sha}\nfont_sha256={font_sha}\ncollector_path={FONT_PERF_COLLECTOR_PATH}\ncollector_sha256={collector_sha}\nhelper_path={FONT_PERF_HELPER_PATH}\nhelper_sha256={helper_sha}\nimplementation_sha256={implementation_sha}\nstatus={evidence.status}\nreason={evidence.reason}\nwarm_1080_p95_ns={evidence.warm_1080_p95_ns}\nwarm_4k_p95_ns={evidence.warm_4k_p95_ns}\ncpu_4096_p95_ns={evidence.cpu_4096_p95_ns}\ngpu_4096_p95_ns={evidence.gpu_4096_p95_ns}\nwarm_hits={evidence.warm_hits}\nwarm_requests={evidence.warm_requests}\nunchanged_upload={evidence.unchanged_upload}\nrss_growth_percent={evidence.rss_growth_percent}\ngpu_resource_high_water_bytes={evidence.gpu_resource_high_water_bytes}\nrss_available={evidence.rss_available}\nlegacy_2d_kb={evidence.legacy_2d_kb}\nmultiface_2d_kb={evidence.multiface_2d_kb}\nlegacy_3d_kb={evidence.legacy_3d_kb}\nmultiface_3d_kb={evidence.multiface_3d_kb}\nrss_comparison={rss_comparison}\ngpu_device_name={evidence.gpu_device_name}\ngpu_driver_identity={evidence.gpu_driver_identity}\nwarm_1080_samples_ns={_samples_text(evidence.warm_1080_samples_ns)}\nwarm_4k_samples_ns={_samples_text(evidence.warm_4k_samples_ns)}\ncpu_4096_samples_ns={_samples_text(evidence.cpu_4096_samples_ns)}\ngpu_4096_samples_ns={_samples_text(evidence.gpu_4096_samples_ns)}"
+    base + "\ndevice_loss_status={evidence.device_loss_status}\ndevice_loss_batch_identity_before={evidence.device_loss_batch_identity_before}\ndevice_loss_batch_identity_after={evidence.device_loss_batch_identity_after}\ncpu_after_device_loss_p95_ns={evidence.cpu_after_device_loss_p95_ns}\ncpu_after_device_loss_samples_ns={_samples_text(evidence.cpu_after_device_loss_samples_ns)}"
 
 fn _line_value(lines: [text], index: i64, key: text) -> text:
     val prefix = key + "="
@@ -212,45 +236,68 @@ fn _line_value(lines: [text], index: i64, key: text) -> text:
 
 fn parse_font_perf_evidence(record: text) -> FontPerfBudgetEvidence:
     val lines = record.split("\n")
-    if lines.len() != 45: return unavailable_font_perf_evidence("durable performance record is malformed")
-    if _line_value(lines, 0, "schema") != "shared-multilingual-gpu-font-perf/v2" or _line_value(lines, 1, "fixture") != "top-10-language-witnesses": return unavailable_font_perf_evidence("durable performance schema or fixture mismatch")
+    if lines.len() != 62: return unavailable_font_perf_evidence("durable performance record is malformed")
+    if _line_value(lines, 0, "schema") != "shared-multilingual-gpu-font-perf/v4" or _line_value(lines, 1, "fixture") != "top-10-language-witnesses": return unavailable_font_perf_evidence("durable performance schema or fixture mismatch")
     if _line_value(lines, 2, "witness_mapping") != FONT_PERF_WITNESS_MAPPING or _line_value(lines, 3, "face_mapping") != FONT_PERF_FACE_MAPPING or _line_value(lines, 4, "representative_codepoints") != FONT_PERF_CODEPOINTS: return unavailable_font_perf_evidence("durable performance witness mapping mismatch")
     if _line_value(lines, 5, "glyphs_1080") != "1024" or _line_value(lines, 6, "glyphs_4k") != "1024" or _line_value(lines, 7, "glyphs_compare") != "4096" or _line_value(lines, 8, "sample_count") != "11" or _line_value(lines, 9, "warm_backend") != "vulkan": return unavailable_font_perf_evidence("durable performance dimensions or backend mismatch")
-    if _line_value(lines, 10, "font_path_0") != FONT_PERF_FACE_SC_PATH or _line_value(lines, 11, "font_sha256_0") != FONT_PERF_FACE_SC_SHA256 or file_hash_sha256(FONT_PERF_FACE_SC_PATH) != FONT_PERF_FACE_SC_SHA256: return unavailable_font_perf_evidence("durable performance SC face mismatch")
-    if _line_value(lines, 12, "font_path_1") != FONT_PERF_FACE_DEVANAGARI_PATH or _line_value(lines, 13, "font_sha256_1") != FONT_PERF_FACE_DEVANAGARI_SHA256 or file_hash_sha256(FONT_PERF_FACE_DEVANAGARI_PATH) != FONT_PERF_FACE_DEVANAGARI_SHA256: return unavailable_font_perf_evidence("durable performance Devanagari face mismatch")
-    if _line_value(lines, 14, "font_path_2") != FONT_PERF_FACE_ARABIC_PATH or _line_value(lines, 15, "font_sha256_2") != FONT_PERF_FACE_ARABIC_SHA256 or file_hash_sha256(FONT_PERF_FACE_ARABIC_PATH) != FONT_PERF_FACE_ARABIC_SHA256: return unavailable_font_perf_evidence("durable performance Arabic face mismatch")
-    if _line_value(lines, 16, "font_sha256") != _font_perf_face_manifest_sha256(): return unavailable_font_perf_evidence("durable performance face manifest mismatch")
-    if _line_value(lines, 17, "collector_path") != FONT_PERF_COLLECTOR_PATH or _line_value(lines, 18, "collector_sha256") != file_hash_sha256(FONT_PERF_COLLECTOR_PATH): return unavailable_font_perf_evidence("durable performance collector is stale")
-    if _line_value(lines, 19, "helper_path") != FONT_PERF_HELPER_PATH or _line_value(lines, 20, "helper_sha256") != file_hash_sha256(FONT_PERF_HELPER_PATH): return unavailable_font_perf_evidence("durable performance schema implementation is stale")
-    if _line_value(lines, 21, "implementation_sha256") != _font_perf_implementation_sha256(): return unavailable_font_perf_evidence("durable performance implementation is stale")
-    val unchanged_text = _line_value(lines, 30, "unchanged_upload")
-    val rss_available_text = _line_value(lines, 33, "rss_available")
-    val rss_comparison = _line_value(lines, 38, "rss_comparison")
+    if (_line_value(lines, 10, "viewport_1080") != "1920x1080" or
+        _line_value(lines, 11, "viewport_4k") != "3840x2160" or
+        _line_value(lines, 12, "compare_viewport") != "1920x1080" or
+        _line_value(lines, 13, "color_space") != "srgb-byte-domain-no-linearization" or
+        _line_value(lines, 14, "pixel_format") != "argb8888-packed-u32" or
+        _line_value(lines, 15, "alpha_mode") != "straight-argb-src-over-opaque-destination" or
+        _line_value(lines, 16, "rounding") != "mask-alpha-nearest-blend-floor" or
+        _line_value(lines, 17, "warmup_frames_per_route") != "1" or
+        _line_value(lines, 18, "percentile_method") != "sorted-index-floor-n-times-95-over-100" or
+        _line_value(lines, 19, "comparator") != "exact-packed-argb-u32-cpu-oracle" or
+        _line_value(lines, 20, "host_os") != host_os() or
+        _line_value(lines, 21, "host_arch") != host_arch()):
+        return unavailable_font_perf_evidence("durable performance run metadata mismatch")
+    if _line_value(lines, 22, "font_path_0") != FONT_PERF_FACE_SC_PATH or _line_value(lines, 23, "font_sha256_0") != FONT_PERF_FACE_SC_SHA256 or file_hash_sha256(FONT_PERF_FACE_SC_PATH) != FONT_PERF_FACE_SC_SHA256: return unavailable_font_perf_evidence("durable performance SC face mismatch")
+    if _line_value(lines, 24, "font_path_1") != FONT_PERF_FACE_DEVANAGARI_PATH or _line_value(lines, 25, "font_sha256_1") != FONT_PERF_FACE_DEVANAGARI_SHA256 or file_hash_sha256(FONT_PERF_FACE_DEVANAGARI_PATH) != FONT_PERF_FACE_DEVANAGARI_SHA256: return unavailable_font_perf_evidence("durable performance Devanagari face mismatch")
+    if _line_value(lines, 26, "font_path_2") != FONT_PERF_FACE_ARABIC_PATH or _line_value(lines, 27, "font_sha256_2") != FONT_PERF_FACE_ARABIC_SHA256 or file_hash_sha256(FONT_PERF_FACE_ARABIC_PATH) != FONT_PERF_FACE_ARABIC_SHA256: return unavailable_font_perf_evidence("durable performance Arabic face mismatch")
+    if _line_value(lines, 28, "font_sha256") != _font_perf_face_manifest_sha256(): return unavailable_font_perf_evidence("durable performance face manifest mismatch")
+    if _line_value(lines, 29, "collector_path") != FONT_PERF_COLLECTOR_PATH or _line_value(lines, 30, "collector_sha256") != file_hash_sha256(FONT_PERF_COLLECTOR_PATH): return unavailable_font_perf_evidence("durable performance collector is stale")
+    if _line_value(lines, 31, "helper_path") != FONT_PERF_HELPER_PATH or _line_value(lines, 32, "helper_sha256") != file_hash_sha256(FONT_PERF_HELPER_PATH): return unavailable_font_perf_evidence("durable performance schema implementation is stale")
+    if _line_value(lines, 33, "implementation_sha256") != _font_perf_implementation_sha256(): return unavailable_font_perf_evidence("durable performance implementation is stale")
+    val unchanged_text = _line_value(lines, 42, "unchanged_upload")
+    val rss_available_text = _line_value(lines, 45, "rss_available")
+    val rss_comparison = _line_value(lines, 50, "rss_comparison")
     if (unchanged_text != "true" and unchanged_text != "false") or (rss_available_text != "true" and rss_available_text != "false"): return unavailable_font_perf_evidence("durable performance boolean is malformed")
     if (rss_available_text == "true" and rss_comparison != "paired-2d-3d-legacy") or (rss_available_text == "false" and rss_comparison != "unavailable"): return unavailable_font_perf_evidence("durable performance RSS comparison mismatch")
-    if not _valid_samples_text(_line_value(lines, 41, "warm_1080_samples_ns")) or not _valid_samples_text(_line_value(lines, 42, "warm_4k_samples_ns")) or not _valid_samples_text(_line_value(lines, 43, "cpu_4096_samples_ns")) or not _valid_samples_text(_line_value(lines, 44, "gpu_4096_samples_ns")): return unavailable_font_perf_evidence("durable performance samples are malformed")
+    if (not _valid_samples_text(_line_value(lines, 53, "warm_1080_samples_ns")) or
+        not _valid_samples_text(_line_value(lines, 54, "warm_4k_samples_ns")) or
+        not _valid_samples_text(_line_value(lines, 55, "cpu_4096_samples_ns")) or
+        not _valid_samples_text(_line_value(lines, 56, "gpu_4096_samples_ns")) or
+        not _valid_samples_text(_line_value(lines, 61, "cpu_after_device_loss_samples_ns"))):
+        return unavailable_font_perf_evidence("durable performance samples are malformed")
     val evidence = FontPerfBudgetEvidence(
-        status: _line_value(lines, 22, "status"), reason: _line_value(lines, 23, "reason"),
-        warm_1080_p95_ns: _line_value(lines, 24, "warm_1080_p95_ns").to_i64() ?? -1,
-        warm_4k_p95_ns: _line_value(lines, 25, "warm_4k_p95_ns").to_i64() ?? -1,
-        cpu_4096_p95_ns: _line_value(lines, 26, "cpu_4096_p95_ns").to_i64() ?? -1,
-        gpu_4096_p95_ns: _line_value(lines, 27, "gpu_4096_p95_ns").to_i64() ?? -1,
-        warm_hits: _line_value(lines, 28, "warm_hits").to_i64() ?? -1,
-        warm_requests: _line_value(lines, 29, "warm_requests").to_i64() ?? -1,
+        status: _line_value(lines, 34, "status"), reason: _line_value(lines, 35, "reason"),
+        warm_1080_p95_ns: _line_value(lines, 36, "warm_1080_p95_ns").to_i64() ?? -1,
+        warm_4k_p95_ns: _line_value(lines, 37, "warm_4k_p95_ns").to_i64() ?? -1,
+        cpu_4096_p95_ns: _line_value(lines, 38, "cpu_4096_p95_ns").to_i64() ?? -1,
+        gpu_4096_p95_ns: _line_value(lines, 39, "gpu_4096_p95_ns").to_i64() ?? -1,
+        warm_hits: _line_value(lines, 40, "warm_hits").to_i64() ?? -1,
+        warm_requests: _line_value(lines, 41, "warm_requests").to_i64() ?? -1,
         unchanged_upload: unchanged_text == "true",
-        rss_growth_percent: _line_value(lines, 31, "rss_growth_percent").to_i64() ?? -1,
-        gpu_resource_high_water_bytes: _line_value(lines, 32, "gpu_resource_high_water_bytes").to_i64() ?? -1,
+        rss_growth_percent: _line_value(lines, 43, "rss_growth_percent").to_i64() ?? -1,
+        gpu_resource_high_water_bytes: _line_value(lines, 44, "gpu_resource_high_water_bytes").to_i64() ?? -1,
         rss_available: rss_available_text == "true",
-        legacy_2d_kb: _line_value(lines, 34, "legacy_2d_kb").to_i64() ?? -1,
-        multiface_2d_kb: _line_value(lines, 35, "multiface_2d_kb").to_i64() ?? -1,
-        legacy_3d_kb: _line_value(lines, 36, "legacy_3d_kb").to_i64() ?? -1,
-        multiface_3d_kb: _line_value(lines, 37, "multiface_3d_kb").to_i64() ?? -1,
-        gpu_device_name: _line_value(lines, 39, "gpu_device_name"),
-        gpu_driver_identity: _line_value(lines, 40, "gpu_driver_identity"),
-        warm_1080_samples_ns: _parse_samples(_line_value(lines, 41, "warm_1080_samples_ns")),
-        warm_4k_samples_ns: _parse_samples(_line_value(lines, 42, "warm_4k_samples_ns")),
-        cpu_4096_samples_ns: _parse_samples(_line_value(lines, 43, "cpu_4096_samples_ns")),
-        gpu_4096_samples_ns: _parse_samples(_line_value(lines, 44, "gpu_4096_samples_ns")))
+        legacy_2d_kb: _line_value(lines, 46, "legacy_2d_kb").to_i64() ?? -1,
+        multiface_2d_kb: _line_value(lines, 47, "multiface_2d_kb").to_i64() ?? -1,
+        legacy_3d_kb: _line_value(lines, 48, "legacy_3d_kb").to_i64() ?? -1,
+        multiface_3d_kb: _line_value(lines, 49, "multiface_3d_kb").to_i64() ?? -1,
+        gpu_device_name: _line_value(lines, 51, "gpu_device_name"),
+        gpu_driver_identity: _line_value(lines, 52, "gpu_driver_identity"),
+        warm_1080_samples_ns: _parse_samples(_line_value(lines, 53, "warm_1080_samples_ns")),
+        warm_4k_samples_ns: _parse_samples(_line_value(lines, 54, "warm_4k_samples_ns")),
+        cpu_4096_samples_ns: _parse_samples(_line_value(lines, 55, "cpu_4096_samples_ns")),
+        gpu_4096_samples_ns: _parse_samples(_line_value(lines, 56, "gpu_4096_samples_ns")),
+        device_loss_status: _line_value(lines, 57, "device_loss_status"),
+        device_loss_batch_identity_before: _line_value(lines, 58, "device_loss_batch_identity_before"),
+        device_loss_batch_identity_after: _line_value(lines, 59, "device_loss_batch_identity_after"),
+        cpu_after_device_loss_p95_ns: _line_value(lines, 60, "cpu_after_device_loss_p95_ns").to_i64() ?? -1,
+        cpu_after_device_loss_samples_ns: _parse_samples(_line_value(lines, 61, "cpu_after_device_loss_samples_ns")))
     if not _valid_shape(evidence): return unavailable_font_perf_evidence("durable performance fields are incomplete")
     evidence
 

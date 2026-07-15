@@ -258,7 +258,7 @@ nonzero pixel bounds and count from the canonical batch atlas and compares the
 device readback at a fixed origin. Promotion remains open on native run
 evidence.
 
-## Resolved fonts across legacy UI, WebRender IR, Draw IR, and SimpleOS
+## Resolved fonts across legacy UI, WebIR, Draw IR, and SimpleOS
 
 The shared interface names are fixed:
 
@@ -361,7 +361,8 @@ selected-vector, shaped, Engine2D, and Engine3D paths share one contract.
 - Missing glyph: use only the declared fallback chain; otherwise report an
   unavailable cell and render the existing missing-glyph behavior.
 - Compile, device, submit, fence, or device-loss failure: preserve the prepared
-  batch and render through the CPU path when policy permits.
+  batch and render from quad zero through the CPU path when policy permits;
+  poisoned Vulkan state skips later GPU attempts rather than disabling fonts.
 - `required` execution policy returns an error instead of silently falling back;
   `preferred` and `suggested` record the reason and use CPU.
 - Any temporary SSpec helper calls `assert(false)` or `fail(...)`; no no-op pass.
@@ -373,6 +374,9 @@ emission/compile, dirty upload, queue, device, synchronization, present/readback
 and CPU. Benchmark records include fixture hashes, viewport, color space,
 premultiplication/rounding, warmups, samples, percentile method, host,
 device/driver, RSS, and GPU resource high-water.
+Schema v4 also records controlled Vulkan-poison CPU fallback, the prepared batch
+identity before/after poison, and eleven post-loss CPU samples with recomputed
+p95 bounded by the unchanged baseline fixture.
 
 Promotion gates are the selected NFRs: at least 95% warm cache hits; 1,024 glyph
 p95 no more than 4 ms at 1080p and 8 ms at 4K; equal-semantics 4,096 glyph p95 at
@@ -382,7 +386,10 @@ GPU resources, and 80 MiB bundled core fonts/notices.
 The performance SSpec is the sole collector. It overwrites
 `build/shared_multilingual_gpu_fonts_perf/evidence.env`; the shared helper pins
 the schema, fixture, font bytes, collector/helper and renderer/backend source
-bundle hashes, device/driver, all counters, and four raw 11-sample arrays. The system promotion spec only
+bundle hashes, exact viewport/packed-ARGB/straight-alpha/rounding/per-route
+warmup/percentile/exact packed-ARGB comparator metadata, same-host OS/architecture,
+device/driver, all counters, and five raw
+11-sample arrays. The system promotion spec only
 loads this record. Missing, stale, partial, malformed, or percentile-mismatched
 records fail closed and never trigger a second measurement.
 

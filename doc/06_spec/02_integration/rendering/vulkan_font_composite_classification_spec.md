@@ -16,7 +16,7 @@ unavailable rung; absence is not converted into a pass.
    batch, atlas, or destination mutation.
 4. On an accelerated device, submit one exact 1×1 white glyph batch into a 2×2 target.
 5. Require full dispatch, a completed and destroyed real fence, stable selected
-   device/type/driver identity, direct device readback, and CPU-oracle parity.
+   device/type/driver identity, direct device readback, and exact packed-pixel CPU-oracle equality.
 6. Require the absolute oracle checksum `-1242373024502763654`; matching unknown
    pixels alone is insufficient.
 

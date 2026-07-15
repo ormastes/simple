@@ -4,6 +4,8 @@
 
 Device-readback scenarios require a positive immutable Vulkan session
 `device_identity` in addition to the concrete readback handle.
+The scaled-image clipping scenario keeps native device provenance and exact
+CPU-oracle pixels; it may not downgrade to the compatibility fallback.
 
 <!-- sdn-diagram:id=backend_vulkan_drawing_spec.arch -->
 <details class="sdn-source">
@@ -320,7 +322,7 @@ expect(s.rect_count).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -336,6 +338,7 @@ if b.init(4, 1):
     val readback = b.read_pixels_with_source()
     expect(readback.source).to_equal("device_readback")
     expect(readback.backend_handle).to_be_greater_than(0)
+    expect(readback.device_identity).to_be_greater_than(0)
     expect(b.cpu_fallback_used).to_be(false)
     expect(readback.pixels).to_equal([bg, red, green, bg])
     b.shutdown()

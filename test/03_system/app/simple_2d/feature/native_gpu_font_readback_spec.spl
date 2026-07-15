@@ -1,5 +1,5 @@
 # @tag: rendering, font, engine3d, simpleos, performance
-# @req REQ-011 REQ-012 REQ-013 REQ-014 NFR-002 NFR-004 NFR-005 NFR-006 NFR-008
+# @req REQ-011 REQ-012 REQ-013 REQ-014 NFR-002 NFR-004 NFR-005 NFR-006 NFR-007
 # @evidence-display: links
 
 """# Native GPU Font Readback
@@ -92,6 +92,20 @@ fn _engine2d_unavailable(reason: text) -> Engine2DFontReadbackEvidence:
         readback_source: "none", readback_handle: 0, readback_bytes: 0,
         execution_target: "", nonblank_pixels: false, cpu_oracle_parity: false)
 
+fn _engine3d_unavailable(reason: text) -> Engine3DFontReadbackEvidence:
+    Engine3DFontReadbackEvidence(
+        status: "unavailable", reason: reason,
+        device_handle: 0, device_name: "", device_type: "", driver_identity: "",
+        submitted_command_handle: 0, pipeline_handle: 0, world_pipeline_handle: 0,
+        texture_handle: 0, texture_binding_ready: false, atlas_owner_identity: "",
+        atlas_generation: -1, atlas_payload_sha256: "", sampler_handle: 0,
+        hud_draws: 0, hud_placement_verified: false, world_draws: 0,
+        world_depth_transform_verified: false, fence_handle: 0,
+        fence_waited: false, fence_destroyed: false, readback_source: "none",
+        color_image_handle: 0, readback_bytes: 0,
+        readback_matches_evidence: false, nonblank_pixels: false,
+        cpu_oracle_parity: false)
+
 fn expect_engine2d_font_readback(evidence: Engine2DFontReadbackEvidence) -> bool:
     evidence.status == "pass" and evidence.device_identity > 0 and
         evidence.device_name != "" and
@@ -119,6 +133,22 @@ fn expect_engine3d_font_readback(evidence: Engine3DFontReadbackEvidence) -> bool
         evidence.color_image_handle > 0 and evidence.readback_bytes == 16384 and
         evidence.readback_matches_evidence and evidence.nonblank_pixels and
         evidence.cpu_oracle_parity
+
+fn classify_native_font_promotion(engine2d: Engine2DFontReadbackEvidence,
+                                  engine3d: Engine3DFontReadbackEvidence) -> text:
+    if ((engine2d.status == "pass" and not expect_engine2d_font_readback(engine2d)) or
+        (engine3d.status == "pass" and not expect_engine3d_font_readback(engine3d))):
+        return "rejected"
+    if ((engine2d.status != "pass" and engine2d.status != "unavailable") or
+        (engine3d.status != "pass" and engine3d.status != "unavailable")):
+        return "rejected"
+    if engine2d.status == "unavailable" or engine3d.status == "unavailable":
+        return "unavailable"
+    if (engine2d.device_name != engine3d.device_name or
+        engine2d.device_type != engine3d.device_type or
+        engine2d.driver_identity != engine3d.driver_identity):
+        return "rejected"
+    "pass"
 
 fn expect_simpleos_font_pixel_oracle(evidence: SimpleOsFontPixelEvidence) -> bool:
     FONT_REGION_RGB_SHA256.len() == 64 and evidence.status == "pass" and evidence.asset_sha256 == FONT_ASSET_SHA256 and
@@ -178,22 +208,10 @@ fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
     var engine = Engine3D.create_with_backend(64, 64, "vulkan")
     if engine.backend_name() != "vulkan-font":
         engine.shutdown()
-        return Engine3DFontReadbackEvidence(
-            status: "unavailable", reason: "public-vulkan-font-install-failed",
-            device_handle: 0, device_name: "", device_type: "", driver_identity: "", submitted_command_handle: 0, pipeline_handle: 0, world_pipeline_handle: 0,
-            texture_handle: 0, texture_binding_ready: false, atlas_owner_identity: "", atlas_generation: -1, atlas_payload_sha256: "", sampler_handle: 0, hud_draws: 0, hud_placement_verified: false, world_draws: 0,
-            world_depth_transform_verified: false, fence_handle: 0,
-            fence_waited: false, fence_destroyed: false, readback_source: "none",
-            color_image_handle: 0, readback_bytes: 0, readback_matches_evidence: false, nonblank_pixels: false, cpu_oracle_parity: false)
+        return _engine3d_unavailable("public-vulkan-font-install-failed")
     if not engine.load_font(FONT_PATH):
         engine.shutdown()
-        return Engine3DFontReadbackEvidence(
-            status: "unavailable", reason: "runtime-font-face-unavailable",
-            device_handle: 0, device_name: "", device_type: "", driver_identity: "", submitted_command_handle: 0, pipeline_handle: 0, world_pipeline_handle: 0, texture_handle: 0,
-            texture_binding_ready: false, atlas_owner_identity: "", atlas_generation: -1, atlas_payload_sha256: "", sampler_handle: 0, hud_draws: 0, hud_placement_verified: false, world_draws: 0,
-            world_depth_transform_verified: false, fence_handle: 0,
-            fence_waited: false, fence_destroyed: false, readback_source: "none",
-            color_image_handle: 0, readback_bytes: 0, readback_matches_evidence: false, nonblank_pixels: false, cpu_oracle_parity: false)
+        return _engine3d_unavailable("runtime-font-face-unavailable")
     engine.set_camera(mat4_translate(-0.5, 0.0, -2.0), mat4_perspective(1.0, 1.0, 0.1, 100.0))
     engine.begin_frame()
     val near_only_drawn = engine.draw_text_world(0.5, 0.0, 0.0, "A", 0xff00ff00u32, 14)
@@ -287,13 +305,7 @@ fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
     val installed = engine.vulkan_font_evidence()
     if installed == nil:
         engine.shutdown()
-        return Engine3DFontReadbackEvidence(
-            status: "unavailable", reason: "native-vulkan-font-evidence-missing",
-            device_handle: 0, device_name: "", device_type: "", driver_identity: "", submitted_command_handle: 0, pipeline_handle: 0, world_pipeline_handle: 0, texture_handle: 0,
-            texture_binding_ready: false, atlas_owner_identity: "", atlas_generation: -1, atlas_payload_sha256: "", sampler_handle: 0, hud_draws: 0, hud_placement_verified: false, world_draws: 0,
-            world_depth_transform_verified: false, fence_handle: 0,
-            fence_waited: false, fence_destroyed: false, readback_source: "none",
-            color_image_handle: 0, readback_bytes: 0, readback_matches_evidence: false, nonblank_pixels: false, cpu_oracle_parity: false)
+        return _engine3d_unavailable("native-vulkan-font-evidence-missing")
     val native = installed.?
     val distinct_pipelines = (native.hud_pipeline_handle > 0 and
         native.world_pipeline_handle > 0 and
@@ -402,26 +414,58 @@ fn _collect_simpleos_pixel_evidence() -> SimpleOsFontPixelEvidence:
         region_rgb_bytes: if valid: 8064 else: 0)
 
 describe "native GPU font promotion evidence":
+    # @req REQ-013
+    it "should classify controlled missing native graphics hardware as unavailable":
+        step("Prove native submission and device readback")
+        val unavailable_2d = _engine2d_unavailable("controlled-device-unavailable")
+        val unavailable_3d = _engine3d_unavailable("controlled-device-unavailable")
+        expect(classify_native_font_promotion(unavailable_2d, unavailable_3d)).to_equal("unavailable")
+        expect(expect_engine2d_font_readback(unavailable_2d)).to_be(false)
+        expect(expect_engine3d_font_readback(unavailable_3d)).to_be(false)
+
+    # @req REQ-013
+    it "should reject forged pass labels without native device proof":
+        step("Prove native submission and device readback")
+        val forged_2d = Engine2DFontReadbackEvidence(
+            status: "pass", reason: "forged", device_identity: 1,
+            device_name: "forged-device", device_type: "virtual",
+            driver_identity: "forged-driver", pipeline_handle: 1, atlas_handle: 1,
+            command_handle: 1, fence_handle: 1, fence_waited: true,
+            fence_destroyed: true, readback_source: "cpu_fallback",
+            readback_handle: 1, readback_bytes: 16384, execution_target: "vulkan",
+            nonblank_pixels: true, cpu_oracle_parity: true)
+        val forged_3d = Engine3DFontReadbackEvidence(
+            status: "pass", reason: "forged", device_handle: 1,
+            device_name: "forged-device", device_type: "virtual",
+            driver_identity: "forged-driver", submitted_command_handle: 1,
+            pipeline_handle: 1, world_pipeline_handle: 2, texture_handle: 1,
+            texture_binding_ready: true, atlas_owner_identity: "forged-owner",
+            atlas_generation: 1, atlas_payload_sha256: FONT_ASSET_SHA256,
+            sampler_handle: 1, hud_draws: 1, hud_placement_verified: true,
+            world_draws: 1, world_depth_transform_verified: true,
+            fence_handle: 1, fence_waited: true, fence_destroyed: true,
+            readback_source: "device_image_readback", color_image_handle: 1,
+            readback_bytes: 16384, readback_matches_evidence: false,
+            nonblank_pixels: true, cpu_oracle_parity: true)
+        expect(classify_native_font_promotion(forged_2d, forged_3d)).to_equal("rejected")
+        expect(expect_engine2d_font_readback(forged_2d)).to_be(false)
+        expect(expect_engine3d_font_readback(forged_3d)).to_be(false)
+
     it "should promote Engine2D and Engine3D fonts with a consistent Vulkan device tuple":
         step("Prove native submission and device readback")
         step("Render Engine2D text on the promoted backend")
         step("Render Engine3D HUD and world text on the promoted backend")
         val engine2d = _collect_engine2d_font_readback()
         val engine3d = _collect_engine3d_font_readback()
-        val consistent_device_tuple = (engine2d.device_name == engine3d.device_name and
-            engine2d.device_type == engine3d.device_type and
-            engine2d.driver_identity == engine3d.driver_identity)
+        val promotion = classify_native_font_promotion(engine2d, engine3d)
         print "engine2d_font status={engine2d.status} reason={engine2d.reason} device={engine2d.device_identity} pipeline={engine2d.pipeline_handle} atlas={engine2d.atlas_handle} fence={engine2d.fence_handle} readback_bytes={engine2d.readback_bytes}"
         print "engine3d_font status={engine3d.status} reason={engine3d.reason} device={engine3d.device_handle} hud_pipeline={engine3d.pipeline_handle} world_pipeline={engine3d.world_pipeline_handle} texture={engine3d.texture_handle} atlas_owner={engine3d.atlas_owner_identity} atlas_generation={engine3d.atlas_generation} atlas_sha256={engine3d.atlas_payload_sha256} sampler={engine3d.sampler_handle} fence={engine3d.fence_handle} readback_bytes={engine3d.readback_bytes}"
-        if not expect_engine2d_font_readback(engine2d):
-            fail_test("Engine2D native font promotion unavailable: " + engine2d.reason)
-        if not expect_engine3d_font_readback(engine3d):
-            fail_test("Engine3D native font promotion unavailable: " + engine3d.reason)
-        if not consistent_device_tuple:
-            fail_test("Engine2D and Engine3D Vulkan device name/type/driver tuples differ")
+        if promotion != "pass":
+            fail_test("native font promotion " + promotion + ": Engine2D=" +
+                engine2d.reason + " Engine3D=" + engine3d.reason)
         expect(expect_engine2d_font_readback(engine2d)).to_be(true)
         expect(expect_engine3d_font_readback(engine3d)).to_be(true)
-        expect(consistent_device_tuple).to_be(true)
+        expect(promotion).to_equal("pass")
 
     it "should capture the pinned SimpleOS glyph from guest framebuffer memory":
         step("Boot SimpleOS with the pinned font asset")
@@ -431,7 +475,8 @@ describe "native GPU font promotion evidence":
             fail_test("SimpleOS pinned-font pixel oracle unavailable: " + evidence.reason)
         expect(expect_simpleos_font_pixel_oracle(evidence)).to_be(true)
 
-    it "should meet warm latency, GPU benefit, upload, RSS, and resource budgets":
+    # @req NFR-004 NFR-005 NFR-006 NFR-007
+    it "should meet warm latency, recovery, GPU benefit, upload, RSS, and resource budgets":
         step("Measure warm font rendering and resource bounds")
         val evidence = read_font_perf_evidence()
         if not expect_font_perf_budget(evidence):

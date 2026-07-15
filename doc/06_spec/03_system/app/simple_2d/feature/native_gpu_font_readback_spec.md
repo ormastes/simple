@@ -1,10 +1,11 @@
 # Native GPU Font Readback
 
 **Status:** release-blocking and currently unavailable
-**Traceability:** REQ-011, REQ-012, REQ-013, REQ-014; NFR-002, NFR-004, NFR-005, NFR-006, NFR-008
+**Traceability:** REQ-011, REQ-012, REQ-013, REQ-014; NFR-002, NFR-004, NFR-005, NFR-006, NFR-007
 **Executable:** `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl`
 
-This scenario has three independent live evidence rows. Vulkan Engine2D and
+This scenario has two fail-closed classification rows and three independent
+live evidence rows. Vulkan Engine2D and
 the Engine3D font adapter render on a consistent device name/type/driver tuple;
 SimpleOS supplies a
 pinned-font guest framebuffer oracle; and the warm performance/resource
@@ -16,6 +17,19 @@ upload-only evidence, and environment claims are not substitutes.
 
 ## Operator flow
 
+### Classify unavailable hardware
+
+The shared promotion classifier returns `unavailable` when controlled
+Engine2D and Engine3D records both report missing native graphics hardware.
+Unavailable is never pass.
+
+### Reject forged native proof
+
+The same classifier returns `rejected` for an Engine2D record whose pixels
+came from `cpu_fallback` and an Engine3D record whose claimed readback does
+not match its device evidence. These rows do not require hardware and cannot
+promote a backend.
+
 ### Prove native submission and device readback
 
 Treat the first unavailable rung as failure: compiled program, native resource
@@ -26,7 +40,7 @@ before any backend is promoted.
 
 Engine2D requires a native pipeline, atlas buffer, submitted command, completed
 fence, concrete device-readback handle and device identity, nonblank pixels,
-and CPU parity.
+and exact packed-ARGB CPU pixel equality.
 
 The checker `expect_engine3d_font_readback` requires nonzero native device,
 distinct HUD/world pipelines, texture, sampler, and fence handles; HUD and world draws; verified
@@ -70,10 +84,12 @@ any durable guest artifact is `unavailable` and fails this promotion gate.
 The checker `expect_font_perf_budget` requires at least 95% warm cache hits;
 1,024-glyph p95 at most 4 ms at 1080p and 8 ms at 4K; 4,096-glyph native p95 at
 least 1.25× faster than the CPU oracle; no unchanged full-atlas upload; at most
-10% RSS growth; and a nonzero GPU high-water mark at most 128 MiB.
+10% RSS growth; a nonzero GPU high-water mark at most 128 MiB; controlled
+Vulkan-poison CPU fallback; unchanged prepared-batch identity; and eleven
+post-loss CPU samples whose recomputed p95 does not exceed baseline.
 
-The performance SSpec is the sole collector and overwrites the strict
-source/font/device-pinned durable record. This system scenario only loads that
+The performance SSpec is the sole collector and overwrites the strict v4
+run/host/source/font/device-pinned durable record. This system scenario only loads that
 record; missing, stale, partial, or non-passing evidence fails closed.
 
 ## Evidence artifacts
@@ -82,8 +98,8 @@ record; missing, stale, partial, or non-passing evidence fails closed.
   readback bytes/source, absolute pixels, and CPU diff.
 - SimpleOS evidence: guest serial log plus QEMU `pmemsave` PPM and fixed-region
   digest.
-- Performance evidence: raw samples and stage counters for shaping, material,
-  upload, queue, sync, readback, RSS, and GPU resource high-water.
+- Performance evidence: five raw sample arrays, recovery identity, upload/RSS,
+  and GPU resource high-water. Per-stage timing remains the NFR-008 gap.
 
-The executable spec is the authority. Regenerate this manual after its three
+The executable spec is the authority. Regenerate this manual after all five
 scenarios pass and require SPipe docgen to report zero stubs.

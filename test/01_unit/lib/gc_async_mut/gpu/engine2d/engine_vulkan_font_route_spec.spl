@@ -15,19 +15,30 @@ describe "Engine2D Vulkan font routing":
         expect(engine.install_vulkan_font_spirv([0u8; 20])).to_equal(false)
         engine.shutdown()
 
-    it "moves a poisoned Vulkan surface to software but keeps fonts disabled":
+    it "replays the same font batch through software after Vulkan poison":
         var engine = Engine2D.create_with_backend(8, 8, "software")
         engine.selected_backend_name = "vulkan"
         engine.vulkan_backend = VulkanBackend.create()
-        engine._poison_vulkan_font_surface()
+        engine.clear(0xff010203u32)
+        engine.draw_rect_filled(7, 7, 1, 1, 0xffabcdefu32)
+        val fallback_pixels = engine.read_pixels()
+        engine._poison_vulkan_font_surface(fallback_pixels)
         expect(engine.selected_backend_name).to_equal("vulkan-poisoned-software")
         expect(engine.vulkan_backend != nil).to_equal(true)
         expect(engine.vulkan_backend.?.completion_unknown).to_equal(true)
-        engine.clear(0xff010203u32)
-        engine.draw_rect_filled(7, 7, 1, 1, 0xffabcdefu32)
+        val batch = FontRenderBatch(
+            program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION,
+            font_identity: "poison-replay", face_generation: 7, valid: true,
+            atlas_width: 1, atlas_height: 1, atlas_pixels: [0xffffffffu32],
+            quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+                width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0xff123456u32)],
+            atlas_generation: 9, dirty_rects: [])
+        val identity_before = batch.atlas_cache_identity()
+        expect(engine._draw_font_batch(0, 0, batch)).to_equal(true)
+        expect(batch.atlas_cache_identity()).to_equal(identity_before)
+        expect(engine.read_pixels()[0]).to_equal(0xff123456u32)
         expect(engine.read_pixels()[63]).to_equal(0xffabcdefu32)
-        engine.draw_text(0, 0, "A", 0xffffffffu32, 8)
-        expect(engine.read_pixels()[0]).to_equal(0xff010203u32)
+        expect(engine.last_font_execution_target).to_equal("cpu")
         engine.shutdown()
 
     it "replays an unavailable Vulkan font batch through software from quad zero":
@@ -52,6 +63,7 @@ describe "Engine2D Vulkan font routing":
 
     it "routes only the canonical Vulkan constructor and preserves CPU replay":
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+        val font_source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
         expect(source).to_contain("use std.gpu.engine2d.backend_vulkan_font")
         expect(source).to_contain("vulkan_backend: VulkanBackend? = nil")
         expect(source).to_contain("vulkan_backend: vulkan")
@@ -67,7 +79,10 @@ describe "Engine2D Vulkan font routing":
         expect(source).to_contain("if (evidence.promotion_ready and")
         expect(source.contains("evidence.device_executed and evidence.parity")).to_equal(false)
         expect(source).to_contain("self.selected_backend_name = \"vulkan-poisoned-software\"")
-        expect(source).to_contain("if self.vulkan_font_state_unknown:")
+        expect(source).to_contain("self._poison_vulkan_font_surface(evidence.fallback_pixels)")
+        expect(font_source).to_contain("_vulkan_font_with_fallback")
+        expect(source).to_contain("target + \":poisoned-skip\"")
+        expect(source).to_contain("evidence.reason == \"device-lost\"")
         expect(source).to_contain("vulkan.shutdown()")
-        expect(source).to_contain("if self.vulkan_font_state_unknown or not batch.valid")
+        expect(source).to_contain("if self.vulkan_font_state_unknown and target != \"cpu\"")
         expect(source).to_contain("while quad_index < batch.quads.len()")

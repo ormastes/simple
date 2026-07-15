@@ -89,6 +89,9 @@ Skip if exist. See `design` skill for details.
 - For generated GPU backends, fail closed on unsupported MIR or artifact
   states. Do not emit target source containing placeholder unsupported-operation
   comments; return a typed diagnostic and add/refresh backend contract coverage.
+- Shared-font work follows `$sp_dev` “Shared multilingual font work”: preserve
+  `FontRenderer`, transient `FontRenderBatch`, `WebIR`, `DrawIrComposition`, and
+  its five frozen SSpec step phrases.
 - Use short grammar deliberately:
   - Prefer expression-bodied functions for small pure helpers.
   - Prefer placeholder lambdas (`_`, `_1`, `_2`) and method references (`&:name`) only for single-expression transforms.

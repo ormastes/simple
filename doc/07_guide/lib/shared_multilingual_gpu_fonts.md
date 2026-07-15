@@ -82,6 +82,8 @@ The unchanged binaries and adjacent metadata/licenses are bundled under
 accepted in source policy—nine identity-profile families, the sans Devanagari
 and Arabic witness faces, and exact-corpus Noto Emoji. Serif Devanagari/Arabic
 and two rank-eleven Bengali faces remain candidates.
+The distribution-size gate counts unique binaries, metadata, licenses, and the
+Roboto Slab copyright notice together against the 80 MiB ceiling.
 The two serif script candidates have bounded default-instance source profiles
 and independent glyph/advance/offset probes. They remain unavailable to normal
 selection because the retained full pure-Simple CLI has not executed those
@@ -396,14 +398,14 @@ the zero-push-constant three-buffer pipeline, and composites validated quads
 into the real device framebuffer. The adapter validates the complete batch before
 atlas/cache mutation, binds atlas/destination/52-byte params buffers, waits for
 each dispatch, reads the framebuffer directly, and compares it with an
-independent CPU oracle. Ordinary unavailable/rejected states replay the CPU
+independent CPU oracle, requiring every packed-ARGB `u32` pixel to match. Ordinary unavailable/rejected states replay the CPU
 path; unknown fence completion, rollback, descriptor, fence, or resource-cleanup states replace
 the Engine2D facade with software and permanently disable that Vulkan font lane.
 The conditional integration stops at the first unavailable rung. Promotion now
 requires `artifact_mode=precompiled-spirv`; runtime GLSL can execute but cannot
 promote. Promotion also requires an accelerated discrete, integrated, or virtual device; a stable
 selected device/driver identity; real fenced submission and destruction; direct
-device readback; and CPU-oracle parity. CPU Vulkan and unfenced submission stop
+device readback; and exact CPU-oracle pixel equality. CPU Vulkan and unfenced submission stop
 before mutation and replay through software, so they cannot become native evidence.
 
 Do not add the entry name to metadata alone. Native CUDA/HIP uses a pointer-array
@@ -548,7 +550,13 @@ Keep the remaining work on the frozen public seams:
    default-axis dimensions/advance/checksum oracle.
 6. Warm performance records cache hit rate and 1,024-glyph p95 at 1080p/4K;
    promotion also records equal-semantics 4,096-glyph CPU/GPU p95, unchanged
-   upload behavior, RSS delta, and GPU resource high-water.
+   upload behavior, RSS delta, and GPU resource high-water. Durable schema v4
+   also pins viewport, byte-domain packed-ARGB/straight-alpha and rounding
+   semantics, per-route warmup, percentile policy, exact packed-ARGB CPU-oracle
+   comparison, same-host OS/architecture, and device/driver; FNV64 remains a
+   runtime diagnostic and any field drift fails closed. The same record requires
+   controlled Vulkan-poison CPU fallback, unchanged prepared-batch identity, and
+   eleven post-loss CPU samples whose p95 does not exceed the baseline CPU row.
 
 Production-route acceptance must exercise the real Web/GUI entry, the hosted
 `HostCompositor` canonical color-frame owner, and the canonical SimpleOS desktop
@@ -556,6 +564,17 @@ entry. Current hosted coverage is a source/unit contract, not a production-route
 PASS; image/motion and nested content remain compatibility cases. A synthetic
 composition-only spec is supporting evidence, not production proof. SimpleOS
 acceptance additionally requires the retained QEMU `pmemsave` pixel oracle.
+
+Vulkan device-loss or unknown completion poisons only the Vulkan surface. When
+policy permits CPU, Engine2D replays the same immutable `FontRenderBatch` from
+quad zero through the replacement software surface; required GPU-only policy
+still fails closed. The v4 source gate retains post-loss CPU p95 and identity;
+native device-loss injection remains the NFR-007 execution gate.
+
+Keep the five manual-facing SSpec steps exact: `Load the pinned multilingual
+font manifest`; `Accept exact-face-bound simple-script shaping`; `Prepare one
+shared font batch for 2D and 3D`; `Emit the selected font composite program and
+plan compilation`; `Prove native submission and device readback`.
 
 The authoritative gate list and evidence boundaries are in
 [`doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`](../../03_plan/sys_test/shared_multilingual_gpu_fonts.md).

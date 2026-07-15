@@ -17,7 +17,8 @@ WM/GUI/Web/2D resolution also stays under `FontRenderer`: Web layout consumes
 `ResolvedFontMetrics` (stable candidate identity plus exact advances), Draw IR
 carries handle-free semantic family/identity/advances and shaped glyph IDs,
 positions, and logical clusters, and Engine2D verifies the same identity before
-paint. Unstyled legacy commands remain bitmap-compatible.
+paint. `WebIR` remains the existing semantic/layout model, never a second draw
+IR or a carrier for atlas/device material. Unstyled legacy commands remain bitmap-compatible.
 SimpleOS reuses `FontAssetCandidate` and must stage pinned Noto Sans Mono bytes
 through every existing image-builder path before guest WM startup. Its canonical
 desktop already executes `SharedWmScene -> DrawIrComposition -> Engine2D` through

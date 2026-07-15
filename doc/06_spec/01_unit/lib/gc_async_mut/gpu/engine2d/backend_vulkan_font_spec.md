@@ -3,8 +3,8 @@
 > Manually synchronized on 2026-07-13 because the self-hosted Simple/docgen
 > lane is blocked. This is reviewed source evidence, not native execution.
 
-The 17 active scenarios cover the frozen parameter ABI, bounded dispatch,
-atlas replacement, checksums, promotion classification, full atlas upload,
+The 20 active scenarios cover the frozen parameter ABI, bounded dispatch,
+atlas replacement, checksums, exact packed-pixel equality, promotion classification, full atlas upload,
 session lifecycle, artifact validation, batch validation, and idempotent shared
 session cleanup.
 

@@ -81,7 +81,9 @@ complex shaping, complete REQ-008 format behavior, or GPU execution.
 - Allowed licenses are `OFL-1.1` and `Apache-2.0`.
 - Roboto Slab's separate `apache/robotoslab/COPYRIGHT.txt` exists, is nonempty,
   and names the 2018 Roboto Slab Project Authors.
-- Exact binary total: `51,764,704` bytes, below the selected 80 MiB ceiling.
+- Exact binary total: `51,764,704` bytes. The distribution gate separately
+  sums every unique binary, `METADATA.pb`, license, and copyright notice and
+  requires the complete package to remain below 80 MiB.
 
 ### Sparse coverage
 

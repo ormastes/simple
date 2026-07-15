@@ -360,9 +360,10 @@ helper functions inside normal SSpec `it` blocks. The helper may wrap repeated
 setup/readback, but it must contain real assertions and must not replace
 `expect`, `describe`, `it`, or the canonical matchers.
 
-For GUI/web font work, assert semantic `DrawIrComposition` text/style before
-backend/readback evidence. When vector text is enabled, `FontRenderBatch` is
-transient Engine2D-executor material, not WebRender IR or Draw IR. The canonical
+For GUI/web font work, reuse the canonical `FontRenderer` and assert semantic
+`DrawIrComposition` text/style before backend/readback evidence. `WebIR` remains
+the existing semantic/layout model; transient `FontRenderBatch` atlas/device
+material belongs only to Engine2D, never WebIR or Draw IR. The canonical
 WM frame route is `SharedWmScene -> DrawIrComposition -> Engine2D`;
 `shared_wm_scene_render_*_to_backend` and `_to_pixel_buffer` are compatibility
 renderers, not selected-font completion. Reject evidence built on an app-private
@@ -371,6 +372,13 @@ composition is supporting evidence only: production acceptance must exercise
 the real hosted frame owner, canonical SimpleOS entry wiring, and the retained
 QEMU framebuffer crop, with platform backends limited to final-pixel
 presentation.
+
+Shared-font SSpec manuals freeze these exact steps: `Load the pinned multilingual
+font manifest`; `Accept exact-face-bound simple-script shaping`; `Prepare one
+shared font batch for 2D and 3D`; `Emit the selected font composite program and
+plan compilation`; `Prove native submission and device readback`. Engine3D
+HUD/world stays a separate consumer lane. Full rules live in `$sp_dev` under
+“Shared multilingual font work.”
 
 For RenderDoc evidence, use the shared helper interface instead of spelling
 `renderdoccmd` directly in each spec or check script:

@@ -1,5 +1,5 @@
 # @tag: rendering, font, performance
-# @req NFR-004 NFR-005 NFR-006 NFR-008
+# @req NFR-002 NFR-004 NFR-005 NFR-006 NFR-007
 
 """# Shared Multilingual Font Performance Evidence
 
@@ -7,6 +7,8 @@ Shapes the ten selected language witnesses through three pinned live faces,
 materializes them in one FontRenderer atlas, and measures identical warm CPU
 and Vulkan run sequences. One discarded frame warms shaping material, glyph
 cache entries, and the backend atlas before the retained eleven samples.
+The same prepared batch identity is captured before and after controlled Vulkan
+surface poison, then the unchanged 4,096-glyph CPU route retains eleven samples.
 
 The 2D rows are real measurements. Four fresh child processes provide paired
 legacy/multiface RSS rows for 2D and Engine3D Vulkan HUD/world material; a
@@ -18,6 +20,7 @@ use std.io_runtime.{file_hash_sha256, file_read_bytes}
 use app.io.mod.{process_run_timeout}
 use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gc_async_mut.gpu.engine2d.color.{rgb}
 use std.gc_async_mut.io.time_ops.{time_now_nanos}
 use std.nogc_sync_mut.io.font_sffi.{FontHandle, load_font, free_font}
@@ -89,6 +92,9 @@ class _FontPerfRouteEvidence:
     reason: text
     device_name: text
     driver_identity: text
+    device_loss_status: text = ""
+    batch_identity_before: text = ""
+    batch_identity_after: text = ""
 
 class _FontPerfRssProbeRecord:
     valid: bool
@@ -327,7 +333,8 @@ fn _run_glyph_count(runs: [FontGlyphRun]) -> i64:
     count
 
 fn _measure_route(width: i32, height: i32, backend: text,
-                  content: text, glyph_count: i64) -> _FontPerfRouteEvidence:
+                  content: text, glyph_count: i64,
+                  controlled_device_loss: bool) -> _FontPerfRouteEvidence:
     val active = _multiface_perf_fixture
     if active == nil: return _failed_route("multiface-fixture-not-initialized", [])
     var fixture = active.?
@@ -355,6 +362,28 @@ fn _measure_route(width: i32, height: i32, backend: text,
     if not draw_multiface_runs(engine, warm_runs, 0xffffffffu32, 32):
         engine.shutdown()
         return _failed_route(_multiface_perf_reason, [])
+    var device_loss_status = ""
+    var batch_identity_before = ""
+    var batch_identity_after = ""
+    if controlled_device_loss:
+        var recovery_fonts = engine.fonts()
+        val recovery_batch = recovery_fonts.prepare_glyph_run(warm_runs[0], 0xffffffffu32, 32)
+        engine.font_renderer = recovery_fonts
+        if not recovery_batch.material_supported():
+            engine.shutdown()
+            return _failed_route("controlled-poison-batch-identity-unavailable", [])
+        batch_identity_before = recovery_batch.atlas_cache_identity()
+        engine.selected_backend_name = "vulkan-controlled-poison"
+        engine.vulkan_backend = VulkanBackend.create()
+        engine._poison_vulkan_font_surface(engine.read_pixels())
+        if not engine._draw_font_batch(0, 0, recovery_batch):
+            engine.shutdown()
+            return _failed_route("controlled-poison-cpu-replay-failed", [])
+        batch_identity_after = recovery_batch.atlas_cache_identity()
+        if batch_identity_after != batch_identity_before:
+            engine.shutdown()
+            return _failed_route("controlled-poison-batch-identity-changed", [])
+        device_loss_status = "controlled-poison-cpu-fallback"
     var warm_fonts = engine.fonts()
     val warm_generation = warm_fonts.atlas_generation
     warm_fonts.reset_cache_stats()
@@ -405,25 +434,30 @@ fn _measure_route(width: i32, height: i32, backend: text,
     _FontPerfRouteEvidence(ok: true, p95_ns: font_perf_p95(samples),
         hits: stats.hits, misses: stats.misses, unchanged_upload: unchanged_upload,
         gpu_resource_high_water_bytes: resources, samples_ns: samples,
-        reason: "pass", device_name: device, driver_identity: driver)
+        reason: "pass", device_name: device, driver_identity: driver,
+        device_loss_status: device_loss_status,
+        batch_identity_before: batch_identity_before,
+        batch_identity_after: batch_identity_after)
 
 fn _measure_font_perf_budget() -> FontPerfBudgetEvidence:
     if setup_multiface_perf_fixture() == nil:
         return unavailable_font_perf_evidence(_multiface_perf_reason)
     val content_1024 = _mixed_fixture(1024)
     val content_4096 = _mixed_fixture(4096)
-    val warm_1080 = _measure_route(1920, 1080, "vulkan", content_1024, 1024)
-    val warm_4k = _measure_route(3840, 2160, "vulkan", content_1024, 1024)
-    val cpu_4096 = _measure_route(1920, 1080, "cpu", content_4096, 4096)
-    val gpu_4096 = _measure_route(1920, 1080, "vulkan", content_4096, 4096)
+    val warm_1080 = _measure_route(1920, 1080, "vulkan", content_1024, 1024, false)
+    val warm_4k = _measure_route(3840, 2160, "vulkan", content_1024, 1024, false)
+    val cpu_4096 = _measure_route(1920, 1080, "software", content_4096, 4096, false)
+    val gpu_4096 = _measure_route(1920, 1080, "vulkan", content_4096, 4096, false)
+    val cpu_after_device_loss = _measure_route(1920, 1080, "software", content_4096, 4096, true)
     _close_multiface_perf_fixture()
-    val routes_ready = warm_1080.ok and warm_4k.ok and cpu_4096.ok and gpu_4096.ok
+    val routes_ready = warm_1080.ok and warm_4k.ok and cpu_4096.ok and gpu_4096.ok and cpu_after_device_loss.ok
     val rss = if routes_ready: collect_font_perf_rss_isolated()
         else: _failed_rss("2d-route-unavailable")
     val route_reason = if not warm_1080.ok: warm_1080.reason
         elif not warm_4k.ok: warm_4k.reason
         elif not cpu_4096.ok: cpu_4096.reason
         elif not gpu_4096.ok: gpu_4096.reason
+        elif not cpu_after_device_loss.ok: cpu_after_device_loss.reason
         elif not rss.available: rss.reason
         else: "pass"
     var resources = warm_1080.gpu_resource_high_water_bytes
@@ -457,7 +491,12 @@ fn _measure_font_perf_budget() -> FontPerfBudgetEvidence:
         warm_1080_samples_ns: warm_1080.samples_ns,
         warm_4k_samples_ns: warm_4k.samples_ns,
         cpu_4096_samples_ns: cpu_4096.samples_ns,
-        gpu_4096_samples_ns: gpu_4096.samples_ns)
+        gpu_4096_samples_ns: gpu_4096.samples_ns,
+        device_loss_status: cpu_after_device_loss.device_loss_status,
+        device_loss_batch_identity_before: cpu_after_device_loss.batch_identity_before,
+        device_loss_batch_identity_after: cpu_after_device_loss.batch_identity_after,
+        cpu_after_device_loss_p95_ns: cpu_after_device_loss.p95_ns,
+        cpu_after_device_loss_samples_ns: cpu_after_device_loss.samples_ns)
     if measured.status == "pass" and not expect_font_perf_budget(measured):
         measured.status = "failed"
         measured.reason = "performance-budget-exceeded"
@@ -471,7 +510,7 @@ describe "shared multilingual font performance evidence":
         val evidence = _measure_font_perf_budget()
         expect(write_font_perf_evidence(evidence)).to_be(true)
         val durable = read_font_perf_evidence()
-        print "font_perf status={evidence.status} reason={evidence.reason} fixture=top-10-language-witnesses faces=3 glyphs_1080=1024 glyphs_4k=1024 glyphs_compare=4096 warm_backend=vulkan warm_1080_p95_ns={evidence.warm_1080_p95_ns} warm_4k_p95_ns={evidence.warm_4k_p95_ns} cpu_4096_p95_ns={evidence.cpu_4096_p95_ns} gpu_4096_p95_ns={evidence.gpu_4096_p95_ns} warm_hits={evidence.warm_hits}/{evidence.warm_requests} unchanged_upload={evidence.unchanged_upload} rss_available={evidence.rss_available} legacy_2d_kb={evidence.legacy_2d_kb} multiface_2d_kb={evidence.multiface_2d_kb} legacy_3d_kb={evidence.legacy_3d_kb} multiface_3d_kb={evidence.multiface_3d_kb} rss_growth_percent={evidence.rss_growth_percent} gpu_resource_high_water_bytes={evidence.gpu_resource_high_water_bytes} gpu_device={evidence.gpu_device_name} gpu_driver={evidence.gpu_driver_identity}"
-        print "font_perf_samples warm_1080_ns={font_perf_samples_text(evidence.warm_1080_samples_ns)} warm_4k_ns={font_perf_samples_text(evidence.warm_4k_samples_ns)} cpu_4096_ns={font_perf_samples_text(evidence.cpu_4096_samples_ns)} gpu_4096_ns={font_perf_samples_text(evidence.gpu_4096_samples_ns)}"
+        print "font_perf status={evidence.status} reason={evidence.reason} fixture=top-10-language-witnesses faces=3 glyphs_1080=1024 glyphs_4k=1024 glyphs_compare=4096 warm_backend=vulkan warm_1080_p95_ns={evidence.warm_1080_p95_ns} warm_4k_p95_ns={evidence.warm_4k_p95_ns} cpu_4096_p95_ns={evidence.cpu_4096_p95_ns} gpu_4096_p95_ns={evidence.gpu_4096_p95_ns} device_loss_status={evidence.device_loss_status} cpu_after_device_loss_p95_ns={evidence.cpu_after_device_loss_p95_ns} warm_hits={evidence.warm_hits}/{evidence.warm_requests} unchanged_upload={evidence.unchanged_upload} rss_available={evidence.rss_available} legacy_2d_kb={evidence.legacy_2d_kb} multiface_2d_kb={evidence.multiface_2d_kb} legacy_3d_kb={evidence.legacy_3d_kb} multiface_3d_kb={evidence.multiface_3d_kb} rss_growth_percent={evidence.rss_growth_percent} gpu_resource_high_water_bytes={evidence.gpu_resource_high_water_bytes} gpu_device={evidence.gpu_device_name} gpu_driver={evidence.gpu_driver_identity}"
+        print "font_perf_samples warm_1080_ns={font_perf_samples_text(evidence.warm_1080_samples_ns)} warm_4k_ns={font_perf_samples_text(evidence.warm_4k_samples_ns)} cpu_4096_ns={font_perf_samples_text(evidence.cpu_4096_samples_ns)} gpu_4096_ns={font_perf_samples_text(evidence.gpu_4096_samples_ns)} cpu_after_device_loss_ns={font_perf_samples_text(evidence.cpu_after_device_loss_samples_ns)}"
         expect(durable.status).to_equal("pass")
         expect(expect_font_perf_budget(durable)).to_be(true)

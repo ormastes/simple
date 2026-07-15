@@ -39,6 +39,9 @@ type metadata. `LLVM001` must stay clean in LLVM emitter files.
 
 - All code in `.spl` — no Python, no Bash
 - Stub Prevention: no `pass_todo` in final code, STUB001 = hard fail
+- Shared-font work follows `.codex/skills/sp_dev/SKILL.md` “Shared multilingual
+  font work”: preserve `FontRenderer`, transient `FontRenderBatch`, `WebIR`,
+  `DrawIrComposition`, and its five frozen SSpec step phrases.
 - 80%+ branch coverage target
 - For scenario-oriented specs, run the generated-manual review loop before
   claiming completion:

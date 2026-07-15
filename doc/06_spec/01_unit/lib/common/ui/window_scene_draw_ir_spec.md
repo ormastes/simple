@@ -1,5 +1,9 @@
 # Window Scene Draw Ir Specification
 
+The taskbar batch must contain the canonical `09:41` clock text resolved as
+Noto Sans Mono at 12 px; this is the semantic oracle used by the SimpleOS
+rightmost 56×48 framebuffer crop.
+
 > <details>
 
 <!-- sdn-diagram:id=window_scene_draw_ir_spec.arch -->
@@ -44,7 +48,7 @@ window_scene_draw_ir_spec -> common
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -60,6 +64,14 @@ expect(composition.batches[1].embedding.component_id).to_equal("wm-chrome")
 expect(composition.batches[2].embedding.surface_id).to_equal("surf1")
 expect(composition.batches[3].embedding.surface_id).to_equal("surf2")
 expect(composition.batches[4].embedding.component_id).to_equal("wm-taskbar-objects")
+val clock = composition.batches[4].commands[10]
+expect(clock.component_id).to_equal("taskbar-clock")
+expect(clock.kind).to_equal(DRAW_IR_COMMAND_TEXT)
+expect(clock.text_value).to_equal("09:41")
+expect(clock.computed_style.len()).to_be_greater_than(3)
+expect(clock.computed_style[0].value).to_equal("Noto Sans Mono")
+expect(clock.computed_style[1].value).to_start_with("sha256=")
+expect(clock.computed_style[3].value).to_equal("12")
 expect(composition.batches[0].source.source_kind).to_equal(DRAW_IR_SOURCE_WM_SCENE)
 expect(composition.batches[1].source.source_id).to_equal("wm.chrome")
 expect(composition.batches[2].source.source_id).to_equal("wm.window.win1")

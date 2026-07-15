@@ -199,12 +199,14 @@ class Engine2D:
         # exact entry-symbol gate before its session cache can mutate.
         self.install_cuda_font_ptx(ptx)
 
-    me _poison_vulkan_font_surface():
+    me _poison_vulkan_font_surface(fallback_pixels: [u32]):
         if val Some(vulkan) = self.vulkan_backend:
             vulkan.completion_unknown = true
             self.vulkan_backend = vulkan
         var software = SoftwareBackend.create()
         software.init(self.w, self.h)
+        if fallback_pixels.len() == self.w.to_i64() * self.h.to_i64():
+            software.buf = fallback_pixels
         self.capability = software.capability()
         self.backend = software
         self.selected_backend_name = "vulkan-poisoned-software"
@@ -784,13 +786,15 @@ class Engine2D:
         self._draw_font_batch_plan(x, y, batch, ["cuda", "metal", "opencl", "vulkan", "cpu"])
 
     me _draw_font_batch_plan(x: i32, y: i32, batch: FontRenderBatch, plan: [text]) -> bool:
-        if self.vulkan_font_state_unknown or not batch.material_supported() or plan.len() == 0:
+        if not batch.material_supported() or plan.len() == 0:
             return false
         var quad_index: i64 = 0
         var attempts: [text] = []
         var winner = ""
         for target in plan:
-            if quad_index > 0 and target != "cpu":
+            if self.vulkan_font_state_unknown and target != "cpu":
+                attempts.push(target + ":poisoned-skip")
+            elif quad_index > 0 and target != "cpu":
                 attempts.push(target + ":skipped-partial")
             elif target == "cuda":
                 val active = self.cuda_backend
@@ -840,13 +844,17 @@ class Engine2D:
                         evidence.reason == "descriptor-cleanup-failed" or
                         evidence.reason == "atlas-cleanup-failed" or
                         evidence.reason == "fence-completion-unknown" or
+                        evidence.reason == "device-lost" or
                         evidence.reason == "fence-cleanup-failed" or
                         evidence.reason == "fence-wait-evidence-failed" or
                         evidence.reason == "cleanup-failed"):
                         self.last_font_execution_attempts = attempts
                         self.last_font_execution_target = ""
-                        self._poison_vulkan_font_surface()
-                        return false
+                        self._poison_vulkan_font_surface(evidence.fallback_pixels)
+                        evidence.fallback_pixels = []
+                        self.last_vulkan_font_evidence = evidence
+                        quad_index = 0
+                        continue
                     if evidence.promotion_ready and evidence.dispatch_count == batch.quads.len():
                         quad_index = batch.quads.len()
                         winner = "vulkan"

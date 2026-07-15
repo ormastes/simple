@@ -104,25 +104,25 @@ behavior.
 | REQ-010 | `gpu_font_emission_spec.spl`, `cuda_generated_font_handoff_spec.spl`, plus portable toolchain checker | five source targets; Vulkan contract; deterministic failures/hashes; native artifact exports the versioned font entry; checker CUDA artifact installs and wins device-readback dispatch | source-complete; retained checker provenance, exact pinned-Vulkan identity, and conditional generated-CUDA handoff gates are source-covered; host compiler/device execution evidence remains pending |
 | REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, production host route contract, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical SimpleOS pixels | canonical `taskbar-clock` WM DrawIR source route and 56x48 dynamic crop are source-covered; expected hash, hosted image/motion/nested parity, and retained QEMU PASS pending |
 | REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 3/3 source gates with facade selection, distinct HUD/world pipelines, atlas owner/generation/hash, fenced submission, and readback checks; native execution pending |
-| REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 1/3 source gate: live Engine2D/Engine3D tuple promotion is wired; controlled unavailable classification, forged-proof rejection, and retained native PASS are pending |
+| REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 3/3 source gate: live tuple promotion, controlled unavailable classification, and forged-proof rejection are wired; retained native PASS is pending |
 | REQ-014 | seven present specs/manuals | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 0/3 canonical manual passes; seven drafts exist, but native execution/docgen refresh is pending |
 | REQ-015 | `font_render_config_spec.spl`, `shared_font_surfaces_spec.spl`, and focused Engine2D/Engine3D font specs | validation and length-delimited identity; bitmap/vector/shaped propagation; Suggested/Preferred/Required behavior; unsupported mode/CTM rejects before cache/backend mutation; legacy default equivalence | 5 source-covered; deployed execution blocked by stale `rt_env_set` artifact ABI, then bootstrap-parser/full-CLI runtime-link gaps |
 
 | NFR | Evidence | Pass condition | Current evidence |
 |---|---|---|---|
 | NFR-001 | `shared_font_manifest_spec.spl` plus regeneration hashes | all immutable and byte-identical; corruption fails closed | source gate present; current regeneration pending |
-| NFR-002 | `native_gpu_font_readback_spec.spl` comparator | exact integer-alpha RGBA8; bounded documented AA edges | durable schema still lacks viewport, color-space, premultiplication, rounding, warmup, percentile-method, and host fields; native readback pending |
-| NFR-003 | `shared_font_manifest_spec.spl` asset-size total | core fonts plus notices `<= 80 MiB` | 51,764,704 font bytes are pinned; notice bytes and current manifest execution remain pending |
+| NFR-002 | `native_gpu_font_readback_spec.spl` comparator | exact integer-alpha RGBA8; bounded documented AA edges | Vulkan promotion now requires exact packed-ARGB pixel-array equality; FNV64 remains a runtime diagnostic. v4 pins the exact comparator plus viewport, color/alpha/rounding, warmup, percentile, current host OS/architecture, and device/driver; retained native readback remains pending |
+| NFR-003 | `shared_font_manifest_spec.spl` asset-size total | core fonts plus notices `<= 80 MiB` | source gate sums unique font, metadata, license, and notice bytes; current manifest execution remains pending |
 | NFR-004 | `build/shared_multilingual_gpu_fonts_perf/evidence.env` | warm hits `>=95%`; p95 `<=4 ms` 1080p and `<=8 ms` 4K | record missing; pending |
 | NFR-005 | `build/shared_multilingual_gpu_fonts_perf/evidence.env` | 4,096 glyph end-to-end p95 `>=1.25x` CPU | record missing; pending |
 | NFR-006 | `build/shared_multilingual_gpu_fonts_perf/evidence.env` | no unchanged full upload; RSS `<=10%`; GPU `<=128 MiB` | record missing; pending |
-| NFR-007 | native corrupt/device-loss scenarios | stable active identity and unchanged CPU-fixture p95 | font-lane device-loss/identity/p95 source scenario and native execution are pending |
+| NFR-007 | native corrupt/device-loss scenarios | stable active identity and unchanged CPU-fixture p95 | source classifies Vulkan device loss, replays the same batch through software with exact pixels, and v4 requires equal before/after batch identity plus 11 post-loss CPU samples whose recomputed p95 does not exceed baseline; retained native loss execution remains pending |
 | NFR-008 | promoted native evidence record | every required stage/handle/hash/fence/readback field is present | per-stage durable schema and retained record are incomplete; pending |
 
-NFR-004/005/006 use one durable contract at
+NFR-004/005/006/007 use one durable contract at
 `build/shared_multilingual_gpu_fonts_perf/evidence.env`. The performance SSpec
 alone measures and overwrites it; the system promotion SSpec only loads it.
-Schema/fixture/font/source hashes, device/driver, every scalar, and four exact
+Schema/fixture/font/source hashes, device/driver, every scalar, and five exact
 11-sample arrays are required for a passing record. Parsing is ordered and
 fail-closed, so unknown, duplicate, missing, malformed, stale, or recomputed-p95
 mismatches cannot promote.
