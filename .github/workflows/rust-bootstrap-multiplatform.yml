@@ -8,7 +8,11 @@ on:
       - 'src/app/cli/**'
       - 'src/lib/**'
       - 'src/runtime/**'
-      - 'scripts/check/check-core-runtime-smoke.shs'
+      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
+      - 'scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs'
+      - 'scripts/check/cert/redeploy_gate/fixtures/p2_add.spl'
+      - 'scripts/check/check-bootstrap-portability.shs'
+      - 'scripts/setup/platform-detect.shs'
       - '.github/workflows/rust-bootstrap-multiplatform.yml'
   pull_request:
     paths:
@@ -17,7 +21,11 @@ on:
       - 'src/app/cli/**'
       - 'src/lib/**'
       - 'src/runtime/**'
-      - 'scripts/check/check-core-runtime-smoke.shs'
+      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
+      - 'scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs'
+      - 'scripts/check/cert/redeploy_gate/fixtures/p2_add.spl'
+      - 'scripts/check/check-bootstrap-portability.shs'
+      - 'scripts/setup/platform-detect.shs'
       - '.github/workflows/rust-bootstrap-multiplatform.yml'
   workflow_dispatch:
 
@@ -38,14 +46,18 @@ jobs:
         include:
           - os: ubuntu-latest
             name: Linux x86_64
+            backend: llvm
           - os: macos-latest
             name: macOS aarch64
-          - os: macos-13
+            backend: llvm
+          - os: macos-15-intel
             name: macOS x86_64
+            backend: cranelift
           - os: windows-latest
             name: Windows x86_64
+            backend: cranelift
     runs-on: ${{ matrix.os }}
-    name: Native — ${{ matrix.name }}
+    name: Native — ${{ matrix.name }} (${{ matrix.backend }})
     steps:
       - uses: actions/checkout@v4
 
@@ -65,13 +77,18 @@ jobs:
 
       - name: Install FreeType (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libfreetype6-dev
+        run: sudo apt-get update && sudo apt-get install -y clang-18 lld-18 llvm-18-dev libfreetype6-dev
 
       - name: Install FreeType (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install freetype
+          brew install freetype ${{ matrix.backend == 'llvm' && 'llvm@18' || '' }}
           echo "RUSTFLAGS=-L native=$(brew --prefix freetype)/lib" >> "$GITHUB_ENV"
+          if [ "${{ matrix.backend }}" = "llvm" ]; then
+            llvm_prefix=$(brew --prefix llvm@18)
+            echo "$llvm_prefix/bin" >> "$GITHUB_PATH"
+            echo "LLVM_SYS_180_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
+          fi
 
       - name: Install FreeType (Windows)
         if: runner.os == 'Windows'
@@ -92,45 +109,36 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-bootstrap-
 
-      - name: Build
+      - name: Build seed and native_all library
+        shell: bash
         working-directory: src/compiler_rust
-        run: cargo build --profile bootstrap -p simple-driver
-
-      - name: Build native_all library
-        working-directory: src/compiler_rust
-        run: cargo build --profile bootstrap -p simple-native-all --features driver-compat
+        run: |
+          if [ "${{ matrix.backend }}" = "llvm" ]; then
+            cargo build --profile bootstrap -p simple-driver --features llvm
+            cargo build --profile bootstrap -p simple-native-all --features driver-compat,llvm
+          else
+            cargo build --profile bootstrap -p simple-driver
+            cargo build --profile bootstrap -p simple-native-all --features driver-compat
+          fi
 
       - name: Test
         working-directory: src/compiler_rust
         run: cargo test --workspace --lib
 
-      - name: Build pure-Simple Stage 2
+      - name: Build and sanity-check pure-Simple stages
         shell: bash
         env:
-          SIMPLE_BOOTSTRAP: "1"
           SIMPLE_PROJECT_ROOT: ${{ github.workspace }}
+          SIMPLE_NO_STUB_FALLBACK: "1"
         run: |
-          suffix=""
           if [ "$RUNNER_OS" = "Windows" ]; then
-            suffix=".exe"
             export SIMPLE_LINKER_FLAVOR=msvc
           fi
-
-          seed="src/compiler_rust/target/bootstrap/simple${suffix}"
-          stage="build/bootstrap/simple_stage2${suffix}"
-          test -x "$seed"
-          mkdir -p build/bootstrap
-          "$seed" native-build \
-            --source-dir src \
-            --entry-closure \
-            --entry src/app/cli/bootstrap_main.spl \
-            --output "$stage"
-          test -x "$stage"
-          echo "SIMPLE_STAGE=$stage" >> "$GITHUB_ENV"
-
-      - name: Smoke pure-Simple Stage 2
-        shell: bash
-        run: sh scripts/check/check-core-runtime-smoke.shs "$SIMPLE_STAGE"
+          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+            --backend=${{ matrix.backend }} \
+            --mode=dynload \
+            --no-mcp \
+            --jobs=2
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
@@ -138,7 +146,8 @@ jobs:
         with:
           name: bootstrap-${{ matrix.name }}-${{ github.sha }}
           path: |
-            src/compiler_rust/target/bootstrap/simple*
+            build/bootstrap/stage2/**/simple*
+            build/bootstrap/stage3/**/simple*
           retention-days: 7
 
   # Cross-compilation builds from Linux x86_64

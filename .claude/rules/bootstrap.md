@@ -66,6 +66,9 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
 - The bootstrap wrapper itself runs the shared compiler sanity before using
   Stage 2 and before accepting Stage 3: exact bootstrap version, unsupported
   `run` rejection, and strict native build/execute of `p2_add.spl`.
+- Multiplatform bootstrap CI exercises both LLVM and Cranelift through that
+  wrapper and uploads only the resulting pure-Simple Stage 2/Stage 3 binaries,
+  never the Rust seed as a platform artifact.
 
 ## Bootstrap Commands
 ```bash

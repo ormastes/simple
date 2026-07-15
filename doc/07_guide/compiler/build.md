@@ -189,6 +189,11 @@ fail-closed rejection of unsupported `run`, then strict native-build and
 execution of the canonical `p2_add.spl` fixture. A failed sanity removes that
 stage from consideration on Linux, macOS, Windows/POSIX-shell, and FreeBSD.
 
+The `Rust Bootstrap Multiplatform` workflow runs this canonical stage path with
+LLVM on Linux x86_64 and macOS AArch64, and with explicit Cranelift on macOS
+x86_64 and Windows x86_64. It uploads Stage 2/Stage 3 pure-Simple artifacts,
+never the Rust seed as the platform result.
+
 Current implementation note: Stage 2/Stage 3 are fail-closed while
 `bootstrap_main.spl` self-host lowering is still being repaired. When Stage 3
 is unavailable, the wrapper reports incomplete pure-Simple evidence and exits

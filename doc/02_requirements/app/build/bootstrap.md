@@ -73,6 +73,9 @@ source import edge, so cache reuse is allowed only when those inputs match.
 - REQ-BOOT-BACKEND-001: Bootstrap defaults to LLVM, honors explicit LLVM or
   Cranelift selection through every stage, and fails rather than silently
   changing the requested backend.
+- REQ-BOOT-BACKEND-002: Native platform CI must exercise LLVM on Linux and
+  Apple Silicon, Cranelift on Intel macOS and Windows, run the canonical Stage
+  2/Stage 3 sanity, and publish only the pure-Simple stage artifacts.
 - REQ-BOOT-STAGE-001: Every retained Stage 2 and Stage 3 pure-Simple compiler
   must start, compile the canonical tiny redeploy fixture with stub fallback
   disabled, run the produced native binary successfully, and reject unsupported
