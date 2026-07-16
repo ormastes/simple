@@ -8,7 +8,7 @@ use app.test_daemon.session_types.{
     LEASE_IDLE, LEASE_ACTIVE, LEASE_RESETTING, LEASE_STOPPING,
     SESSION_KIND_QEMU_VM, SESSION_KIND_CONTAINER, SESSION_KIND_SERVICE,
     SESSION_KIND_GUI, SESSION_KIND_BROWSER, SESSION_KIND_OPENOCD,
-    SESSION_KIND_TRACE32, SESSION_KIND_SIMULATOR,
+    SESSION_KIND_TRACE32, SESSION_KIND_SIMULATOR, SESSION_KIND_REMOTE_PC,
     REUSE_FRESH_PER_TEST,
     session_key_to_id, session_key_matches, session_lease_new,
     session_descriptor_new, session_kind_name, meta_to_session_key
@@ -21,6 +21,7 @@ use app.test_daemon.adapters.gui_adapter.{GuiAdapter}
 use app.test_daemon.adapters.hardware_adapter.{
     OpenocdAdapter, Trace32Adapter
 }
+use app.test_daemon.adapters.remote_pc_adapter.{RemotePcAdapter}
 
 extern fn rt_time_now_unix_micros() -> i64
 
@@ -35,6 +36,7 @@ class SessionBroker:
     gui: GuiAdapter?
     openocd: OpenocdAdapter?
     trace32: Trace32Adapter?
+    remote_pcs: [RemotePcAdapter]
     leases: [SessionLease]
     max_sessions: Dict<text, i64>
     idle_timeout_ms: i64
@@ -56,6 +58,7 @@ fn session_broker_new() -> SessionBroker:
         gui: nil,
         openocd: nil,
         trace32: nil,
+        remote_pcs: [],
         leases: [],
         max_sessions: max,
         idle_timeout_ms: 300000,
@@ -70,6 +73,7 @@ impl SessionBroker:
     me register_gui(adapter: GuiAdapter): self.gui = adapter
     me register_openocd(adapter: OpenocdAdapter): self.openocd = adapter
     me register_trace32(adapter: Trace32Adapter): self.trace32 = adapter
+    me register_remote_pc(adapter: RemotePcAdapter): self.remote_pcs.push(adapter)
 
     fn session_key_for_meta(meta: TestSessionMeta) -> SessionKey:
         val kind = meta.session_kind
@@ -356,6 +360,12 @@ impl SessionBroker:
             if val adapter = self.openocd: return adapter.start(desc)
         if kind == SESSION_KIND_TRACE32:
             if val adapter = self.trace32: return adapter.start(desc)
+        if kind == SESSION_KIND_REMOTE_PC:
+            var i = 0
+            while i < self.remote_pcs.len():
+                if self.remote_pcs[i].terminal_config.name == desc.key.target:
+                    return self.remote_pcs[i].start(desc)
+                i = i + 1
         session_lease_new(desc.key)
 
     me execute_adapter(lease: SessionLease, test_path: text, timeout_ms: i64) -> TestResult:
@@ -372,6 +382,12 @@ impl SessionBroker:
             if val adapter = self.openocd: return adapter.execute(lease, test_path, timeout_ms)
         if kind == SESSION_KIND_TRACE32:
             if val adapter = self.trace32: return adapter.execute(lease, test_path, timeout_ms)
+        if kind == SESSION_KIND_REMOTE_PC:
+            var i = 0
+            while i < self.remote_pcs.len():
+                if self.remote_pcs[i].terminal_config.name == lease.key.target:
+                    return self.remote_pcs[i].execute(lease, test_path, timeout_ms)
+                i = i + 1
         TestResult(
             test_path: test_path,
             status: TRESP_FAILED,
@@ -397,6 +413,12 @@ impl SessionBroker:
             if val adapter = self.openocd: return adapter.reset(lease, policy)
         if kind == SESSION_KIND_TRACE32:
             if val adapter = self.trace32: return adapter.reset(lease, policy)
+        if kind == SESSION_KIND_REMOTE_PC:
+            var i = 0
+            while i < self.remote_pcs.len():
+                if self.remote_pcs[i].terminal_config.name == lease.key.target:
+                    return self.remote_pcs[i].reset(lease, policy)
+                i = i + 1
         false
 
     fn health_adapter(lease: SessionLease) -> bool:
@@ -413,6 +435,12 @@ impl SessionBroker:
             if val adapter = self.openocd: return adapter.health(lease)
         if kind == SESSION_KIND_TRACE32:
             if val adapter = self.trace32: return adapter.health(lease)
+        if kind == SESSION_KIND_REMOTE_PC:
+            var i = 0
+            while i < self.remote_pcs.len():
+                if self.remote_pcs[i].terminal_config.name == lease.key.target:
+                    return self.remote_pcs[i].health(lease)
+                i = i + 1
         false
 
     me stop_adapter(lease: SessionLease) -> bool:
@@ -429,6 +457,12 @@ impl SessionBroker:
             if val adapter = self.openocd: return adapter.stop(lease)
         if kind == SESSION_KIND_TRACE32:
             if val adapter = self.trace32: return adapter.stop(lease)
+        if kind == SESSION_KIND_REMOTE_PC:
+            var i = 0
+            while i < self.remote_pcs.len():
+                if self.remote_pcs[i].terminal_config.name == lease.key.target:
+                    return self.remote_pcs[i].stop(lease)
+                i = i + 1
         false
 
     me evict_oldest_idle(kind: i64) -> bool:

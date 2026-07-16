@@ -1,6 +1,6 @@
 # Test daemon remaining transport safety
 
-Status: Open.
+Status: Closed for the reviewed transport scope.
 
 Date: 2026-07-16
 
@@ -29,6 +29,6 @@ Date: 2026-07-16
 
 ## Remaining work
 
-- Remote-PC remains unreachable from production registration because no
-  terminal configuration source is defined for the daemon.
-The remaining fix belongs in the shared daemon configuration owner.
+- None in the reviewed transport scope. Production daemon startup parses the
+  canonical `config/t32/t32_terminal.sdn`, registers SSH/Telnet terminals by
+  name, and dispatches remote-PC metadata targets to the matching adapter.
