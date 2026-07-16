@@ -2,7 +2,8 @@
 # Communicates with Lauterbach Trace32 via t32rem CLI.
 # Returns parsed data structs (VarInfo, FrameInfo, etc.) matching GdbMiClient.
 
-use app.io.{shell, ProcessResult}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 use app.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
 use app.debug.remote.types.{DebugConfig, DebugError}
 
@@ -45,43 +46,47 @@ impl Trace32Client:
     # Find t32rem binary
     static fn find_t32rem() -> text:
         val repo_wrapper = "scripts/t32_remote_cmd.shs"
-        val wrapper_check = shell("test -x '{repo_wrapper}' && echo yes")
-        if wrapper_check.stdout.trim() == "yes":
+        val (_wrapper_out, _wrapper_err, wrapper_code) = process_run_timeout("test", ["-x", repo_wrapper], 5000)
+        if wrapper_code == 0:
             return repo_wrapper
 
         # Check T32_PATH env var first
-        val env_check = shell("echo $T32_PATH")
-        val t32_path = env_check.stdout.trim()
+        val t32_path = env_get("T32_PATH").trim()
         if t32_path.len() > 0:
             val candidate = "{t32_path}/bin/pc_linux64/t32rem"
-            val exists = shell("test -x {candidate} && echo yes")
-            if exists.stdout.trim() == "yes":
+            val (_candidate_out, _candidate_err, candidate_code) = process_run_timeout("test", ["-x", candidate], 5000)
+            if candidate_code == 0:
                 return candidate
 
         # Try system PATH
-        val which = shell("which t32rem 2>/dev/null")
-        if which.exit_code == 0:
-            return which.stdout.trim()
+        val (which_out, _which_err, which_code) = process_run_timeout("which", ["t32rem"], 5000)
+        if which_code == 0:
+            return which_out.trim()
 
         val bundled = "/opt/t32/bin/pc_linux64/t32rem"
-        val bundled_check = shell("test -x '{bundled}' && echo yes")
-        if bundled_check.stdout.trim() == "yes":
+        val (_bundled_out, _bundled_err, bundled_code) = process_run_timeout("test", ["-x", bundled], 5000)
+        if bundled_code == 0:
             return bundled
 
         ""
 
+    static fn command_args(host: text, port: i32, cmd: text) -> [text]:
+        [host, "port={port}", cmd]
+
     # Execute a t32rem command and return raw output
     fn run_command(cmd: text) -> Result<text, text>:
-        val full_cmd = "{self.t32rem_path} {self.host} port={self.port} {cmd}"
-        val result = shell(full_cmd)
-        if result.exit_code != 0:
-            return Err("t32rem error: {result.stderr}")
-        val stdout_trimmed = result.stdout.trim()
-        val stderr_trimmed = result.stderr.trim()
+        val args = Trace32Client.command_args(self.host, self.port, cmd)
+        val (stdout, stderr, exit_code) = process_run_timeout(self.t32rem_path, args, 30000)
+        if exit_code == -1:
+            return Err("t32rem timed out after 30000ms")
+        if exit_code != 0:
+            return Err("t32rem error: {stderr}")
+        val stdout_trimmed = stdout.trim()
+        val stderr_trimmed = stderr.trim()
         val error_text = if stderr_trimmed != "": stderr_trimmed else: stdout_trimmed
         if Trace32Parser.looks_like_error(error_text):
             return Err(error_text)
-        Ok(result.stdout.trim())
+        Ok(stdout_trimmed)
 
     # --- Execution Control ---
 

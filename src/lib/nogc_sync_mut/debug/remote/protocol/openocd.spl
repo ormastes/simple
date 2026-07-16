@@ -5,6 +5,27 @@
 use std.nogc_sync_mut.debug.remote.types.{DebugConfig, Architecture}
 use std.nogc_sync_mut.debug.remote.protocol.gdb_mi.GdbMiClient
 use std.nogc_async_mut.debug.coordinator.{VarInfo, FrameInfo}
+use std.nogc_sync_mut.net.telnet.{telnet_connect, telnet_command, telnet_close}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_is_running, process_kill}
+
+fn openocd_telnet_command(host: text, port: i64, cmd: text, timeout_ms: i64) -> Result<text, text>:
+    val effective_timeout = if timeout_ms > 0: timeout_ms else: 5000
+    val connected = telnet_connect(host, port, effective_timeout)
+    match connected:
+        Err(_): Err("OpenOCD telnet connection failed: {host}:{port}")
+        Ok(conn):
+            val output = telnet_command(conn, cmd, effective_timeout)
+            telnet_close(conn)
+            Ok(output)
+
+fn openocd_program_command(elf_path: text) -> Result<text, text>:
+    if elf_path == "":
+        return Err("OpenOCD program path is empty")
+    for ch in elf_path:
+        if not (ch.is_alphanumeric() or ch == "_" or ch == "-" or
+                ch == "." or ch == "/" or ch == ":"):
+            return Err("OpenOCD program path contains unsupported characters")
+    Ok("program {elf_path} verify reset")
 
 # Manages an OpenOCD process and its telnet interface
 class OpenocdProcess:
@@ -28,11 +49,18 @@ impl OpenocdProcess:
 
     # Start OpenOCD process in background
     me start() -> Result<text, text>:
-        val serial_cmd = if self.serial.len() > 0: " -c \"adapter serial {self.serial}\"" else: ""
-        val cmd = "openocd -f {self.cfg_path}{serial_cmd} -c \"gdb_port {self.gdb_port}\" -c \"telnet_port {self.telnet_port}\" &"
-        val result = rt_system(cmd)
-        if result < 0:
-            return Err("failed to start openocd: exit code {result}")
+        var args = ["-f", self.cfg_path]
+        if self.serial != "":
+            args.push("-c")
+            args.push("adapter serial {self.serial}")
+        args.push("-c")
+        args.push("gdb_port {self.gdb_port}")
+        args.push("-c")
+        args.push("telnet_port {self.telnet_port}")
+        val pid = process_spawn_async("openocd", args)
+        if pid <= 0:
+            return Err("failed to start openocd")
+        self.pid = pid
         self.running = true
         # Wait for OpenOCD to initialize
         rt_sleep_ms(500)
@@ -42,13 +70,12 @@ impl OpenocdProcess:
     fn send_telnet_command(cmd: text) -> Result<text, text>:
         if not self.running:
             return Err("openocd not running")
-        val telnet_cmd = "echo '{cmd}' | nc -q 1 localhost {self.telnet_port}"
-        val output = rt_command_output(telnet_cmd)
-        Ok(output)
+        openocd_telnet_command("localhost", self.telnet_port, cmd, 5000)
 
     # Flash an ELF file to target
     fn flash_elf(elf_path: text) -> Result<text, text>:
-        self.send_telnet_command("program {elf_path} verify reset")
+        val command = openocd_program_command(elf_path)?
+        self.send_telnet_command(command)
 
     # Reset and halt target
     fn reset_halt() -> Result<text, text>:
@@ -69,7 +96,10 @@ impl OpenocdProcess:
     # Stop OpenOCD process
     me stop():
         if self.running:
-            self.send_telnet_command("shutdown")
+            val _shutdown = self.send_telnet_command("shutdown")
+            rt_sleep_ms(200)
+            if process_is_running(self.pid):
+                process_kill(self.pid)
             self.running = false
 
     fn is_running() -> bool:
@@ -257,7 +287,4 @@ fn rt_hex(value: i64) -> text:
         v = v / 16
     result
 
-# SFFI declarations for process management
-extern fn rt_system(cmd: text) -> i64
-extern fn rt_command_output(cmd: text) -> text
 extern fn rt_sleep_ms(ms: i64)

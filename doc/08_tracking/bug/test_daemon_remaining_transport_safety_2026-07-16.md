@@ -17,16 +17,21 @@ Date: 2026-07-16
   execution. Core C lacks `rt_env_remove`, so previously absent keys restore to
   the portable empty value; exact absence and concurrent dispatch require a
   runtime env-aware run API.
+- Remote-PC execution now uses the shared bounded SSH/Telnet dispatcher and
+  POSIX-quotes the test path. Telnet reads share one absolute deadline.
+- OpenOCD uses the shared bounded telnet client, validates program paths, and
+  starts with structured argv. All three TRACE32 profile owners use bounded
+  structured argv for discovery and commands.
 
 ## Remaining work
 
-- Remote-PC execution calls a nonexistent three-argument `terminal_execute`;
-  the terminal owner needs a real timeout API before the adapter can honor its
-  contract. Remote shell commands also need centrally validated repo-relative
-  test paths.
-- OpenOCD telnet and the std TRACE32 client still build shell command strings.
-  Move their protocol execution to bounded TCP/argv owners before accepting
-  artifact or command text from metadata.
+- Remote-PC remains unreachable from production registration because no
+  terminal configuration source is defined for the daemon.
+- T32 and relay terminal kinds cannot truthfully enforce a command deadline;
+  the bounded dispatcher fails them explicitly until their protocol owners
+  expose cancellation.
+- Remote test paths are safely shell-quoted but are not yet restricted to a
+  centrally validated repo-relative policy.
 
-Do not patch these sites with ad-hoc quoting. The required fixes belong in the
-shared environment/process and terminal/protocol owners.
+The remaining fixes belong in the shared configuration and terminal/protocol
+owners.

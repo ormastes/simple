@@ -180,6 +180,15 @@ runtime remains unavailable, so executable qualification is still blocked.
   reset, execution, and teardown now share structured argv plus bounded host
   execution. Fixed resource limits remain explicit argv entries; test paths,
   images, and lease IDs never pass through a shell.
+- **Remote terminal transport:** the terminal owner now exposes bounded
+  execution for SSH and Telnet. Telnet uses one absolute deadline across all
+  reads, and the remote-PC adapter quotes the test path before sending the
+  unavoidable remote shell command. T32/relay fail the bounded dispatch until
+  they gain cancellation, and production remote-PC configuration remains open.
+- **Hardware protocol transport:** OpenOCD process startup and every TRACE32
+  profile now use structured argv with explicit deadlines. OpenOCD commands
+  share the bounded Telnet owner, and program paths reject command-language
+  metacharacters before transmission.
 
 ## Latest bounded verification
 
@@ -226,6 +235,9 @@ runtime remains unavailable, so executable qualification is still blocked.
 - Environment-bearing GUI/service/hardware child execution now shares bounded
   argv execution and restores the parent environment; focused hostile-value
   and restoration coverage is SOURCE IMPLEMENTED but NOT RUN.
+- OpenOCD/Telnet, TRACE32 argv, and remote SSH/Telnet deadline ownership are
+  SOURCE IMPLEMENTED with focused hostile-input contracts; executable verdicts
+  are NOT RUN because no admitted runtime exists.
 - New Simple unit/system behavior and the PowerShell contract: NOT RUN because
   no admitted pure-Simple runtime or PowerShell host exists. Previously passed
   global gates were not repeated after their session limit.

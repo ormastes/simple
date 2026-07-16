@@ -18,13 +18,12 @@ use app.test_daemon.{
 use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new, run_test_child_env}
 use app.test_daemon.types.{TestResult}
 use std.debug.remote.protocol.trace32.{Trace32Client}
+use std.debug.remote.protocol.openocd.{openocd_telnet_command, openocd_program_command}
 use app.debug.remote.types.{DebugConfig}
 use app.io.mod.{process_spawn_async_env, process_is_alive, process_kill}
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_sleep_ms(ms: i64)
-extern fn rt_shell_exec(cmd: text) -> text
-extern fn rt_shell_exit_code() -> i64
 extern fn rt_tcp_connect(host: text, port: i64) -> bool
 
 # ============================================================================
@@ -91,11 +90,18 @@ impl OpenocdAdapter:
 
         val gdb_port_str = desc.config["gdb_port"] ?? "{self.gdb_port}"
         val telnet_port_str = desc.config["telnet_port"] ?? "{self.telnet_port}"
+        val effective_gdb_port = gdb_port_str.to_i64() ?? 0
+        val effective_telnet_port = telnet_port_str.to_i64() ?? 0
+        if (effective_gdb_port < 1 or effective_gdb_port > 65535 or
+                effective_telnet_port < 1 or effective_telnet_port > 65535):
+            return lease
+        self.gdb_port = effective_gdb_port
+        self.telnet_port = effective_telnet_port
 
         val args = [
             "-f", effective_cfg,
-            "-c", "gdb_port {gdb_port_str}",
-            "-c", "telnet_port {telnet_port_str}"
+            "-c", "gdb_port {effective_gdb_port}",
+            "-c", "telnet_port {effective_telnet_port}"
         ]
 
         val env: {text: text} = {}
@@ -107,7 +113,6 @@ impl OpenocdAdapter:
         # Wait for OpenOCD to start and listen on GDB port
         rt_sleep_ms(OPENOCD_STARTUP_WAIT_MS)
 
-        val effective_gdb_port = gdb_port_str.to_i64() ?? self.gdb_port
         val connected = self.wait_for_gdb_port("localhost", effective_gdb_port, 10)
 
         if not connected:
@@ -152,25 +157,31 @@ impl OpenocdAdapter:
         RESET_RELOAD_BINARY: sends reset + reflash
         """
         if policy == RESET_HARD:
-            val cmd = "echo 'reset halt' | nc localhost {self.telnet_port}"
-            rt_shell_exec(cmd)
-            val exit_code = rt_shell_exit_code()
+            val result = openocd_telnet_command("localhost", self.telnet_port, "reset halt", 5000)
             rt_sleep_ms(500)
-            return exit_code == 0
+            match result:
+                Ok(_): return true
+                Err(_): return false
 
         if policy == RESET_RELOAD_BINARY:
             # Reset and reload the binary
             val binary = lease.key.artifact_hash
-            val reset_cmd = "echo 'reset halt' | nc localhost {self.telnet_port}"
-            rt_shell_exec(reset_cmd)
+            val reset = openocd_telnet_command("localhost", self.telnet_port, "reset halt", 5000)
+            if reset.is_err():
+                return false
             rt_sleep_ms(500)
 
             if binary != "":
-                val flash_cmd = "echo 'program {binary} verify reset' | nc localhost {self.telnet_port}"
-                rt_shell_exec(flash_cmd)
-                val exit_code = rt_shell_exit_code()
+                val command = openocd_program_command(binary)
+                if command.is_err():
+                    return false
+                val flashed = openocd_telnet_command(
+                    "localhost", self.telnet_port, command.unwrap(), 30000
+                )
                 rt_sleep_ms(1000)
-                return exit_code == 0
+                match flashed:
+                    Ok(_): return true
+                    Err(_): return false
             return true
 
         false
@@ -188,8 +199,7 @@ impl OpenocdAdapter:
         Shuts down OpenOCD cleanly via telnet, then kills the process.
         """
         # Try graceful shutdown via telnet
-        val shutdown_cmd = "echo 'shutdown' | nc localhost {self.telnet_port}"
-        rt_shell_exec(shutdown_cmd)
+        val _shutdown = openocd_telnet_command("localhost", self.telnet_port, "shutdown", 5000)
         rt_sleep_ms(500)
 
         if lease.pid > 0:
