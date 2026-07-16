@@ -119,7 +119,7 @@ pub fn stage4_forbidden_archive_sections(section_headers: text) -> [text]:
     found
 
 pub fn stage4_resolve_requested_archive_owners(requested: [text], archive_labels: [text], archive_nm_outputs: [text], macho_prefixes: bool) -> Result<([i64], [text]), text>:
-    """Validate unique ownership and return selected archives plus requested owner rows."""
+    """Validate transitive runtime ownership and return selected archives plus owner rows."""
     if requested.len() == 0:
         return Err("Stage4 requested symbol closure is empty")
     if archive_labels.len() == 0 or archive_labels.len() != archive_nm_outputs.len():
@@ -147,17 +147,42 @@ pub fn stage4_resolve_requested_archive_owners(requested: [text], archive_labels
         archive_i = archive_i + 1
 
     var requested_seen: Dict<text, bool> = {}
+    var queued: Dict<text, bool> = {}
     var selected_by_index: Dict<i64, bool> = {}
+    var expanded_by_index: Dict<i64, bool> = {}
     var owner_rows: [text] = []
+    var pending_symbols: [text] = []
+    var pending_sources: [text] = []
     for symbol in requested:
+        if queued.has(symbol):
+            continue
+        queued[symbol] = true
+        pending_symbols = pending_symbols.push(symbol)
+        pending_sources = pending_sources.push("")
+
+    var pending_i = 0
+    while pending_i < pending_symbols.len():
+        val symbol = pending_symbols[pending_i]
+        val source = pending_sources[pending_i]
+        pending_i = pending_i + 1
         if requested_seen.has(symbol):
             continue
         requested_seen[symbol] = true
         if not owner_by_symbol.has(symbol):
+            if source != "":
+                return Err("Stage4 archive '" + source + "' runtime dependency '" + symbol + "' has no archive owner")
             return Err("Stage4 requested symbol '" + symbol + "' has no archive owner")
         val owner_i = owner_by_symbol[symbol]
         selected_by_index[owner_i] = true
         owner_rows = owner_rows.push(symbol + "=" + archive_labels[owner_i])
+        if not expanded_by_index.has(owner_i):
+            expanded_by_index[owner_i] = true
+            val dependencies = stage4_requested_from_nm_output(archive_nm_outputs[owner_i], macho_prefixes)
+            for dependency in dependencies:
+                if not queued.has(dependency):
+                    queued[dependency] = true
+                    pending_symbols = pending_symbols.push(dependency)
+                    pending_sources = pending_sources.push(archive_labels[owner_i])
 
     var selected: [i64] = []
     archive_i = 0
