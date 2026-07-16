@@ -1056,7 +1056,23 @@ impl MirLowering:
                         b_rhs_done.emit_store(mir_operand_copy(result_slot), mir_operand_copy(right_value))
                         b_rhs_done.terminate_goto(merge_block)
                         b_rhs_done.switch_to_block(merge_block)
-                        val logic_result = b_rhs_done.emit_load(mir_operand_copy(result_slot), MirType.i64())
+                        # The merge slot itself stays i64 (both arms store 0/1
+                        # ints; a Bool rhs is zext'd above), but the RESULT
+                        # local must be typed Bool: downstream type dispatch --
+                        # lower_bootstrap_print_call, coerce_concat_operand --
+                        # keys off local_mir_type_of, and an I64-typed result
+                        # routes print(a and b) to rt_raw_i64_to_string ("0"/
+                        # "1") instead of rt_raw_bool_to_string ("true"/
+                        # "false") (strict-llvm parity case
+                        # logical_short_circuit). Normalize via `!= 0` -- a
+                        # compare with i64 operands and a Bool dest is the
+                        # established legal pattern (see the tagged-bool decode
+                        # above: emit_binop(Eq, raw, true_value, bool)); it
+                        # avoids the illegal i64->i1 narrowing bitcast that
+                        # loading the slot directly as Bool would risk.
+                        val merged_int = b_rhs_done.emit_load(mir_operand_copy(result_slot), MirType.i64())
+                        val logic_zero = b_rhs_done.emit_const_int(0)
+                        val logic_result = b_rhs_done.emit_binop(MirBinOp.Ne, mir_operand_copy(merged_int), mir_operand_copy(logic_zero), MirType.bool())
                         self.builder = b_rhs_done
                         logic_result
                     case _:
