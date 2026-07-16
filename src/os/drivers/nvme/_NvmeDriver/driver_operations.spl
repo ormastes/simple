@@ -85,9 +85,16 @@ impl NvmeDriver:
 
         # Step 1: Map BAR0 via syscall
         val bar0_result = syscall(SYS_MAP_BAR, grant.bar0_phys, grant.bar0_size, 0, 0, 0)
-        if bar0_result < 0:
+        # Reject a non-positive BAR mapping: a 0 result (no NVMe device / SYS_MAP_BAR
+        # unsatisfied on this platform) is as invalid as a negative errno. Without
+        # this, self.bar0_virt becomes 0 and the very next controller-register MMIO
+        # dereferences address 0 (cr2=0x0 null fault) instead of failing gracefully,
+        # taking down NVMe boot before the desktop can degrade to no-disk and render.
+        if bar0_result <= 0:
             return Result.Err("NVMe: failed to map BAR0")
         self.bar0_virt = bar0_result.to_u64()
+        if self.bar0_virt == 0u64:
+            return Result.Err("NVMe: BAR0 mapped to null address")
         log_info("[nvme] " + "NVMe: BAR0 mapped")
 
         # Step 2: Read controller registers and validate CAP before queue setup.
