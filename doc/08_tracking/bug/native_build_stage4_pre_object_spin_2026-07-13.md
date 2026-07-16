@@ -505,6 +505,15 @@ functions remain the public runtime ABI. This removes a future archive-owner
 collision prerequisite; it does not yet create or select a font provider
 archive.
 
+Explicit candidate validation now accepts `.a` and `.lib` archive path forms,
+normalizes Windows path separators and extension case, rejects `.dll.a` import
+archives, and detects case/separator-equivalent Windows duplicates. Canonical
+Unix and Windows names for the forbidden broad runtime and `native_all`
+aggregates both fail closed before filesystem or symbol scans; later member and
+symbol inspection still owns `.lib` static/import semantics. Production hosted
+native-all discovery now uses `simple_native_all.lib` on Windows and
+`libsimple_native_all.a` elsewhere.
+
 ## 2026-07-16 canonical core-C HTTP ownership
 
 The legacy `runtime.c` definition of `rt_http_get` returned a raw C string even
