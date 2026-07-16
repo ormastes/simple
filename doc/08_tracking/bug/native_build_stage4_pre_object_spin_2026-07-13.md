@@ -506,6 +506,9 @@ symbols instead of discarding that closure and falling through to the ordinary
 runtime-object link. Temporary runtime, entry, and bootstrap-support objects
 are cleaned before the error. Production linking remains disabled until the
 complete inventory, unique-owner selection, and fingerprint are wired.
+The fail-closed diagnostic includes the sorted requested symbol closure so the
+next authorized run yields the exact required-symbol contract instead of
+discarding it.
 
 The font runtime now defines `STBTT_STATIC` before instantiating the vendored
 `stb_truetype` implementation. Its internal `stbtt_*` implementation symbols
