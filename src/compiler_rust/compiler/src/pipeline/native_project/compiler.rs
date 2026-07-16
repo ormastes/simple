@@ -689,13 +689,55 @@ fn apply_bootstrap_rewrite(source: &str) -> String {
         s.replace_range(len - 2.., " != nil");
     }
 
-    // Strip `?` suffix from nullable types (Type? -> Type)
-    for pat in ["? ", "?\n", "?\r\n", "?\t", "?,", "?)", "?]", "?>", "?:", "?=", "?;"] {
-        while s.contains(pat) {
-            s = s.replace(pat, &pat[1..]);
+    // Strip `?` suffix from nullable types (Type? -> Type).
+    //
+    // ROOT FIX (bug simpleos_native_build_bare_len_dynamic_dispatch_symbol_collision,
+    // 2026-07-16): this used to be a blind `s.replace(pat, &pat[1..])` over
+    // every `"?" + terminator` pattern, with NO way to distinguish a genuine
+    // optional-type suffix (`Type?`, `[T]?`) from the `?` TRY OPERATOR on a
+    // call result (`f(args)?`). Under SIMPLE_BOOTSTRAP=1 (required for
+    // --entry-closure/freestanding native-build) this silently ate the `?`
+    // off of every `some_call(...)?` whose closing paren was immediately
+    // followed by a stripped terminator (most commonly newline) — e.g.
+    // `val resp = _vfs_request(VFS_READDIR, path)?` became
+    // `val resp = _vfs_request(VFS_READDIR, path)`, so `resp` kept the raw
+    // `Result<text,text>` wrapper instead of the unwrapped `text` payload.
+    // `resp.len()` then qualified against the wrapper's own type name
+    // ("Result.len", a method that doesn't exist) and fell through to
+    // suffix-based symbol resolution, binding to an unrelated `.len()` in
+    // the link (e.g. `BinaryWriter.len`) and crashing at runtime.
+    //
+    // A `?` immediately preceded by `)` is (in this grammar) always the Try
+    // operator on a call/index result — a bare optional TUPLE type ending in
+    // `)?` is not a supported/used pattern here — so skip stripping in that
+    // one case and leave every other terminator pattern's behavior
+    // unchanged (this still strips `Type?`, `[T]?`, etc.).
+    {
+        let terminators: &[&str] = &[" ", "\n", "\r\n", "\t", ",", ")", "]", ">", ":", "=", ";"];
+        let bytes = s.as_bytes();
+        // Operate on raw bytes (never re-encoding through `char`) so
+        // multi-byte UTF-8 content (unicode identifiers, comments, string
+        // literals) passes through untouched — only ASCII '?' bytes are
+        // ever inspected or dropped below.
+        let mut result: Vec<u8> = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if c == b'?' {
+                let preceded_by_call_close = result.last() == Some(&b')');
+                let matched_terminator = terminators.iter().any(|t| s[i + 1..].starts_with(*t));
+                if matched_terminator && !preceded_by_call_close {
+                    // Strip: drop the '?', keep the terminator for the next iteration.
+                    i += 1;
+                    continue;
+                }
+            }
+            result.push(c);
+            i += 1;
         }
+        s = String::from_utf8(result).expect("byte-preserving rewrite stays valid UTF-8");
     }
-    if s.ends_with('?') {
+    if s.ends_with('?') && !s.ends_with(")?") {
         s.pop();
     }
 

@@ -54,14 +54,22 @@ fn erased_receiver_should_fall_through_ambiguous_method(receiver_ty: Option<Type
     matches!(receiver_ty, None | Some(TypeId::ANY)) && matches!(method, "to_string" | "to_text" | "str")
 }
 
-fn is_bare_builtin_collection_method(method: &str, arg_count: usize) -> bool {
+// `pub(crate)` so `mir/lower/lowering_expr_method.rs` can reuse the exact
+// same builtin-collision name set for its own defense-in-depth guard (bug
+// simpleos_native_build_bare_len_dynamic_dispatch_symbol_collision) instead
+// of maintaining a second, potentially-drifting list.
+pub(crate) fn is_bare_builtin_collection_method(method: &str, arg_count: usize) -> bool {
     matches!(
         (method, arg_count),
         ("get", 1)
             | ("has" | "contains" | "contains_key" | "has_key", 1)
             | ("remove", 1)
             | ("find", 1)
-            | ("len" | "length" | "keys" | "values", 0)
+            // `is_empty` is handled below (compiled as `rt_len(receiver) == 0`)
+            // but was missing from this gate, so a bare (erased-receiver)
+            // `.is_empty()` fell all the way through to suffix-based symbol
+            // resolution instead of the safe tag-dispatching path.
+            | ("len" | "length" | "keys" | "values" | "is_empty", 0)
     )
 }
 

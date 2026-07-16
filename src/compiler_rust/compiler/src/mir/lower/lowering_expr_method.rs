@@ -522,7 +522,40 @@ impl<'a> MirLowerer<'a> {
         // from `TypeRegistry` — no synthesis — and the recursion
         // terminates at a Local (or an expression whose own `ty`
         // is already named).
-        let func_name = if let Some(registry) = self.type_registry {
+        //
+        // DEFENSE-IN-DEPTH (bug simpleos_native_build_bare_len_dynamic_dispatch_symbol_collision,
+        // 2026-07-16): `Result`/`Option` are builtin wrapper enums with no
+        // real methods of their own. If a `?`-unwrap (or any other upstream
+        // bug) ever leaves a receiver still typed as the wrapper instead of
+        // its unwrapped payload, qualifying a builtin-collision method
+        // (`len`/`is_empty`/`contains`/...) as "Result.<method>" would still
+        // not exist as a real symbol: `get_type_name` succeeds (the type
+        // genuinely IS named "Result"), so none of the erased-receiver
+        // fallbacks below ever fire, and codegen's suffix-based resolution
+        // binds the qualified-but-nonexistent name to an unrelated
+        // same-named method elsewhere in the link (e.g. `BinaryWriter.len`,
+        // observed crashing on a tagged text value). Treat a Result/Option
+        // receiver as erased for exactly these collision-prone names so it
+        // is forced through the safe runtime tag-dispatching path instead
+        // (mirrors the existing `receiver_is_array` -> `rt_array_len`
+        // special case, generalized via `is_bare_builtin_collection_method`
+        // + `try_compile_builtin_method_call` / `rt_len` in codegen).
+        let wrapper_enum_builtin_collision = [Some(receiver.ty), receiver_local_ty]
+            .into_iter()
+            .flatten()
+            .find_map(|ty| self.type_registry.and_then(|r| r.get_type_name(ty)))
+            .is_some_and(|name| name == "Result" || name == "Option")
+            && crate::codegen::instr::closures_structs::is_bare_builtin_collection_method(method, args.len());
+
+        let func_name = if wrapper_enum_builtin_collision {
+            if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
+                eprintln!(
+                    "[MIR-METHOD-DISPATCH] '{}' receiver resolved to Result/Option wrapper; routing as erased builtin instead of a nonexistent qualified method",
+                    method
+                );
+            }
+            method.to_string()
+        } else if let Some(registry) = self.type_registry {
             if let Some(type_name) = registry.get_type_name(receiver.ty) {
                 format!("{}.{}", type_name, method)
             } else if let Some(type_name) = self.builtin_method_receiver_name(receiver.ty) {
