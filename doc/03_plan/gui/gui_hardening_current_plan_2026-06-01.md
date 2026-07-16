@@ -132,6 +132,12 @@
   `windows_native_mdi_evidence_titlebar_css_pixels=6784`, and
   `windows_native_mdi_evidence_rendered_titlebar_css_pixels=6784` in
   `build/tmp/windows_native_mdi_evidence_ps_semantic.md`.
+- Windows verification backstop: `scripts/audit/direct-env-runtime-guard.ps1`
+  mirrors the required `direct-env-runtime-guard.shs` working/staged checks for
+  PowerShell-only hosts where `sh` is unavailable. The 2026-07-16 Windows run
+  reports `STATUS: PASS direct-env-runtime-guard self-test`, `STATUS: PASS
+  direct-env-runtime-guard` for `--working`, and `STATUS: PASS
+  direct-env-runtime-guard` for `--staged`.
  - Pure GUI release/perf evidence now defines a WM/web/native-runtime-free command
    boundary, SMF/dynlib performance contract, and fail-closed probe row. Current
    Linux-host evidence intentionally reports `pass=false` without a real
