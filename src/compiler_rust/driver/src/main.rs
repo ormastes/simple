@@ -973,6 +973,41 @@ const COMMAND_TABLE: &[CommandEntry] = &[
 ];
 
 // ---------------------------------------------------------------------------
+// Canonical CLI-argument providers for the seed binary
+// ---------------------------------------------------------------------------
+// The runtime (cli_sffi.rs) declares `spl_arg_count`/`spl_get_arg` as extern
+// symbols normally provided by Simple-generated native code (Stage4 runtime
+// providers). The pure-Rust seed has no generated code in its link, so provide
+// them here from std::env::args. Bin-crate-only: these cannot collide with the
+// Simple-side providers linked into user native binaries.
+
+static SEED_PROCESS_ARGS: std::sync::OnceLock<Vec<std::ffi::CString>> = std::sync::OnceLock::new();
+
+fn seed_process_args() -> &'static [std::ffi::CString] {
+    SEED_PROCESS_ARGS.get_or_init(|| {
+        std::env::args()
+            .map(|a| std::ffi::CString::new(a).unwrap_or_default())
+            .collect()
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn spl_arg_count() -> i64 {
+    seed_process_args().len() as i64
+}
+
+#[no_mangle]
+pub extern "C" fn spl_get_arg(index: i64) -> *const std::os::raw::c_char {
+    if index < 0 {
+        return std::ptr::null();
+    }
+    seed_process_args()
+        .get(index as usize)
+        .map(|a| a.as_ptr())
+        .unwrap_or(std::ptr::null())
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
