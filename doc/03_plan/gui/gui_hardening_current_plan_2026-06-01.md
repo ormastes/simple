@@ -138,6 +138,12 @@
   reports `STATUS: PASS direct-env-runtime-guard self-test`, `STATUS: PASS
   direct-env-runtime-guard` for `--working`, and `STATUS: PASS
   direct-env-runtime-guard` for `--staged`.
+- Windows DirectX Web/2D evidence now has a current real-launch/capture pass in
+  `doc/09_report/gui_web_2d_directx_windows_current_2026-07-16.md`. The
+  PowerShell wrapper reports D3D11 native staging readback pass with matching
+  checksum `1023148974`, Electron and Chrome browser-backing pass with D3D11
+  hints present, and DXCap GPU capture pass with `GFXA` artifact magic in
+  `build/gui-web-2d-directx-env-windows-current-gpucap/dxcap_chrome_d3d11.vsglog`.
  - Pure GUI release/perf evidence now defines a WM/web/native-runtime-free command
    boundary, SMF/dynlib performance contract, and fail-closed probe row. Current
    Linux-host evidence intentionally reports `pass=false` without a real
