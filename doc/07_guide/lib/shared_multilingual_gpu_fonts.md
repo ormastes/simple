@@ -362,45 +362,39 @@ CUDA compile plans use
 symbol is verified from the artifact rather than passed through a nonexistent
 `--entry` option. CUDA, native Metal, OpenCL, and Vulkan are the implemented
 Engine2D runtime adapters.
-CUDA font execution requires a separately installed, checker-authenticated
-Simple-generated PTX companion. The default CUDA 2D module contains no font
-entry. Once installed, CUDA uploads the atlas on generation change, marshals
-the exact 15-slot pointer ABI, synchronizes each submitted quad, and mirrors
-only completed prefixes.
-`Engine2D.install_cuda_font_artifact` accepts compiled PTX plus the
-checker-recorded expected SHA-256 and composite-program version, verifies their
-payload consistency, then delegates to the existing bounded
-`install_cuda_font_ptx` entry-symbol/session gate without
-replacing the optimization module. The session pins the PTX hash, rejects
-replacement, launches font quads from it when present, and unloads it with the
-CUDA context. The focused `cuda_generated_font_handoff_spec.spl` scenario
-authenticates the checker-recorded Simple invocation/runtime binaries, current
-emitter source/version hashes, retained generated `.cu` source/hash, and PTX
-path/hash; installs the PTX through this public handoff; dispatches one
-canonical `FontRenderBatch`; and compares device-origin readback with its CPU
-oracle. It is independent of the Vulkan Engine3D native evidence rows. A
-retained native PASS is still required for promotion. If the generated
-companion is missing, stale, or rejected, CUDA fails before atlas mutation and
-Engine2D replays from quad zero through CPU where the selected policy permits.
-Normal Engine2D construction does not auto-load ignored `build/` output. CUDA
-font production deployment still needs a packaged PTX plus an immutable trusted
-manifest/hash; once that exists, the canonical `create_requested_backend`
-factory can call the existing installer after CUDA initialization.
+CUDA font execution uses the separately source-tracked Simple-generated PTX
+companion in `backend_cuda_font_ptx.spl`. The default CUDA 2D module contains
+no font entry. Canonical CUDA construction verifies the compiled source,
+emitter-version, PTX-hash, entry, and program-version tuple, then installs it
+through `Engine2D.install_cuda_font_artifact`. Once installed, CUDA uploads the
+atlas on generation change, marshals the exact 15-slot pointer ABI,
+synchronizes each submitted quad, and mirrors only completed prefixes.
+The installer rechecks payload consistency, then delegates to the existing
+bounded `install_cuda_font_ptx` entry-symbol/session gate without replacing the
+optimization module. The session pins the PTX hash, rejects replacement,
+launches font quads from it when present, and unloads it with the CUDA context.
+The focused `cuda_generated_font_handoff_spec.spl` authenticates the
+source-tracked tuple, proves tampered bytes reject, confirms canonical
+construction installed the pinned identity, dispatches one canonical
+`FontRenderBatch`, and compares device-origin readback with its CPU oracle. It
+is independent of the Vulkan Engine3D native evidence rows. A retained native
+PASS is still required for promotion. If the companion is missing, stale, or
+rejected, CUDA construction fails before rendering. Normal Engine2D
+construction never loads ignored `build/` output.
 The current Simple package path is not that trust anchor: `PackageVerify` warns
 that checksum verification is skipped, and the package builder still emits
 `checksum_placeholder`. Treat checker artifacts as retained evidence only. Do
 not copy them into a package, pass their adjacent self-reported hash as trust,
-or configure a production process to load them directly. Production admission
-requires a package-owned expected hash and program version, verification before
-Engine2D construction, tamper rejection, and device-origin readback from the
-authenticated bytes.
+or configure a production process to load them directly. A future external
+package route must authenticate its own manifest and bytes before calling the
+same installer.
 On the current NVIDIA promotion host, a fresh-session generation attempt is
 bounded to one invocation:
 `CUDA_ARCH=compute_75 SIMPLE_BIN=bin/simple sh scripts/check/check-portable-compute-toolchains.shs`.
 First verify that `bin/simple` resolves to the current pure-Simple self-hosted
 runtime. Promote only a `cuda_font_status=compiled_artifact_verified` record
-with current Simple/emitter/source/artifact provenance; then bind the accepted
-PTX to an independently owned immutable hash before installation.
+whose Simple/emitter/source/artifact provenance matches the source-tracked
+tuple.
 Metal compiles the exact common MSL helper as an optional separate pipeline,
 uses the fixed 13-word/52-byte parameter block, full-uploads changed atlas
 generations, and dispatches completed 64-thread groups per quad. Only native

@@ -30,6 +30,7 @@ plugin interface, renderer factory, or new native dependency.
 | `src/lib/skia/feature/shaper/shaper.spl` and `src/lib/skia/feature/text/bidi.spl` | Existing Pure Simple shaping/BiDi owners; exact per-fallback-face `OtFont` binding plus glyph/source/cluster/language/current-placement metadata are present. Source policy accepts the 54 no-feature identity cells, sans Hindi and Arabic/Urdu witnesses, four script-sans mono fallbacks, and the exact monochrome Noto Emoji `U+1F600` corpus tuple for all ten selected language tags. Exact default-instance Serif Devanagari and Naskh profiles plus independent oracle probes exist in source, but remain candidate-only until the pure-Simple runtime executes them. General GSUB/GPOS, marks, positioning, canonical language expansion, full BiDi, and Emoji sequences/color remain gated. |
 | `src/compiler/70.backend/backend/gpu_portable_compute.spl` | Portable CUDA/HIP/OpenCL/Metal/WGSL artifacts; gains the atlas-composite emitter. |
 | `src/app/portable_compute_emit/main.spl` | Stable pure-Simple CLI handoff to the existing portable/Vulkan emitters; emits source and identity markers only. |
+| `src/lib/gc_async_mut/gpu/engine2d/backend_cuda_font_ptx.spl` | Source-tracked CUDA font companion and independently compiled trust tuple; no renderer, cache, or discovery logic. |
 | `src/compiler/70.backend/backend/gpu_generated_2d_contract.spl` | Version, symbol, compile-plan, and artifact evidence. |
 | `src/lib/gc_async_mut/gpu/engine2d/engine.spl` | Existing `load_font`/`draw_text` adapter; routes one canonical batch through CUDA, Metal, OpenCL, Vulkan, then the CPU suffix fallback. |
 | `src/lib/gc_async_mut/gpu/engine3d/engine.spl` | HUD/world facade and CPU fallback; an optional Vulkan adapter owns dedicated pipelines, R8 atlas upload, depth, fence, and device readback without changing the shared batch. |
@@ -279,12 +280,13 @@ fallback policy.
 
 Production deployment has a separate trust boundary from toolchain evidence.
 Ignored `build/portable_compute_toolchains` output may prove emission and device
-execution, but Engine2D must never discover it automatically. A package owner
-must authenticate an immutable manifest, then supply the PTX bytes, expected
-SHA-256, and common program version to `install_cuda_font_artifact`. The current
-package verifier skips checksum validation and its builder emits a placeholder
-checksum, so it is not an admissible owner. Until a real package trust anchor
-exists, canonical CUDA construction remains font-companion-free.
+execution, but Engine2D never discovers it. The source-tracked
+`backend_cuda_font_ptx.spl` owns the immutable PTX bytes, source/emitter hashes,
+expected PTX SHA-256, entry, and common program version. Canonical CUDA
+construction verifies that compiled trust tuple before passing the same values
+to `install_cuda_font_artifact`; failure tears down the CUDA engine. The current
+package verifier remains inadmissible because it skips checksum validation and
+its builder emits a placeholder checksum.
 
 ## Rejected structures
 

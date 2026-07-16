@@ -277,17 +277,18 @@ evidence.
 
 The portable-toolchain checker owns mutable generation evidence, not production
 installation. Engine2D owns only bounded validation and session installation
-through `install_cuda_font_artifact`. A future package/bootstrap caller must
-authenticate an immutable manifest first and pass PTX bytes, exact SHA-256, and
-`FONT_ATLAS_COMPOSITE_PROGRAM_VERSION` together. Engine2D must not read an
-environment variable, evidence file, or ignored build path from
-`create_requested_backend`.
+through `install_cuda_font_artifact`. The source-tracked
+`backend_cuda_font_ptx.spl` is the production owner: it binds generated PTX to
+the exact source hash, emitter-version hash, PTX SHA-256, entry, and
+`FONT_ATLAS_COMPOSITE_PROGRAM_VERSION`. `create_requested_backend` verifies
+that tuple and calls the existing installer after CUDA initialization; it never
+reads an environment variable, evidence file, or ignored build path.
 
-The existing package verifier cannot satisfy this contract because checksum
-verification is explicitly skipped, while the package builder still produces
-`checksum_placeholder`. Admission requires real package checksum verification,
-a packaged PTX entry bound to its hash and program version, tamper rejection,
-and the existing device-readback scenario using authenticated package bytes.
+The existing package verifier is not an alternative owner because checksum
+verification is explicitly skipped and its builder still produces
+`checksum_placeholder`. A future external package route must first implement
+real manifest/extraction/checksum verification and pass the same tamper and
+device-readback gates.
 
 ## Resolved fonts across legacy UI, WebIR, Draw IR, and SimpleOS
 

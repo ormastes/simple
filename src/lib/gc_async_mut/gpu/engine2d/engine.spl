@@ -35,6 +35,7 @@ use std.gpu.engine2d.backend_baremetal.{BaremetalBackend}
 use std.gpu.engine2d.backend_virtio_gpu.{VirtioGpuBackend}
 use std.gpu.engine2d.backend_cpu.{CpuBackend}
 use std.gpu.engine2d.backend_cuda.{CudaBackend}
+use std.gpu.engine2d.backend_cuda_font_ptx.{FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256, FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION, cuda_font_atlas_composite_ptx, cuda_font_atlas_composite_ptx_trusted}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CUDA_FONT_PTX_MAX_BYTES}
 use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gpu.engine2d.backend_vulkan_font
@@ -190,7 +191,7 @@ class Engine2D:
         installed
 
     me install_cuda_font_artifact(ptx: text, artifact_sha256: text, program_version: i64) -> bool:
-        """Install checker-produced PTX only when its immutable contract matches."""
+        """Install caller-provided PTX only when its payload contract matches."""
         if (ptx.len() == 0 or ptx.len() > CUDA_FONT_PTX_MAX_BYTES or
             not font_atlas_composite_program_version_valid(program_version) or
             artifact_sha256.len() != 64 or sha256_text(ptx) != artifact_sha256):
@@ -198,6 +199,13 @@ class Engine2D:
         # install_cuda_font_ptx performs the existing bounded `.version` and
         # exact entry-symbol gate before its session cache can mutate.
         self.install_cuda_font_ptx(ptx)
+
+    me install_pinned_cuda_font_artifact() -> bool:
+        """Install the source-tracked CUDA font companion through the existing gate."""
+        val ptx = cuda_font_atlas_composite_ptx()
+        if not cuda_font_atlas_composite_ptx_trusted(ptx):
+            return false
+        self.install_cuda_font_artifact(ptx, FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256, FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION)
 
     me _poison_vulkan_font_surface(fallback_pixels: [u32]):
         if val Some(vulkan) = self.vulkan_backend:
@@ -350,7 +358,11 @@ class Engine2D:
         if requested_backend == "cuda":
             var cuda = CudaBackend.create()
             if cuda.init(width, height):
-                return Ok(Engine2D(backend: cuda, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: cuda, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cuda"))
+                var engine = Engine2D(backend: cuda, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: cuda, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cuda")
+                if engine.install_pinned_cuda_font_artifact():
+                    return Ok(engine)
+                engine.shutdown()
+                return Err("backend unavailable: cuda font artifact rejected")
 
         if requested_backend == "vulkan":
             var vulkan = VulkanBackend.create()
