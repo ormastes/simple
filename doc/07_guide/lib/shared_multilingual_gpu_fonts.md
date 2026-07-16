@@ -278,11 +278,14 @@ unit and shared-surface specs cover source behavior; REQ-015 remains open until
 the deployed pure-Simple runtime executes those specs successfully. The exact
 Stage 4 provider work resolved the earlier 208-symbol link failure and produced
 one full CLI before the scalar test-argv bridge landed. That older binary is not
-current acceptance evidence. Two bounded current-source rebuilds then SIGSEGV'd
-before logging or emitting a candidate, including one after the bootstrap
-runtime archive was refreshed with the scalar bridge. This is a compiler/runtime
-deployment defect, not font-source failure, and neither a seed, minimal-stage
-binary, nor the pre-bridge full CLI is native acceptance evidence.
+current acceptance evidence. Bounded current-source rebuilds then SIGSEGV'd
+before logging or emitting a candidate, including after the bootstrap runtime
+archive was refreshed with the scalar bridge. A debugger located the crash in
+`llvm::DataLayout::setAlignment` during LLVM module construction. One-worker
+mode reproduced it, and a full-CLI build without `examples/10_tooling` also
+reproduced it with no new cache objects. This is a compiler/runtime deployment
+defect, not font-source failure, and neither a seed, minimal-stage binary, nor
+the pre-bridge full CLI is native acceptance evidence.
 
 Canonical `FontRenderer` fallback glyphs are rasterized on CPU. Environment-
 published accelerator pixels are compatibility-only diagnostics and cannot

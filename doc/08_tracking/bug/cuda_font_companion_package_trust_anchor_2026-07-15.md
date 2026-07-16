@@ -92,3 +92,23 @@ the verified Stage 3 compiler reproduced the pre-log SIGSEGV, emitted no
 candidate, and did not modify the 1,164-object cache. No core was retained.
 The CUDA checker was therefore not rerun and the trust-anchor criteria remain
 unchanged.
+
+## 2026-07-16 debugger evidence
+
+A cache-preserving debugger run captured the pre-log SIGSEGV in
+`LLVMModuleCreateWithNameInContext`, specifically at
+`llvm::DataLayout::setAlignment`, from `LlvmBackend::create_module`. This is the
+observed crash site, not yet a proven root cause. The initial eight-worker trace
+showed multiple LLVM module constructors. A one-worker rebuild still failed
+deterministically while compiling
+`examples/10_tooling/trace32_tools/cmm_lsp/cmm_ast.spl`, so `--threads 1` is not
+a workaround. A final one-worker full-CLI build omitted `examples/10_tooling`
+entirely and still SIGSEGV'd before useful logging, binary output, or any change
+to the 1,164-object cache. The tooling closure is therefore not necessary to
+trigger the defect.
+
+These three bounded isolation variants exhausted the session cap. Diagnose and
+repair the compiler/backend defect, then rebuild the current Stage 3/Stage 4
+chain before resuming the scalar-argv sentinel and CUDA checker. Do not
+generate, pin, or install CUDA PTX until the current full CLI passes that
+sentinel.
