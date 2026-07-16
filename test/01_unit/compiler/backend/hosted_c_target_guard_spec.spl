@@ -1,7 +1,7 @@
 use std.spec.*
 use compiler.backend.backend.llvm_native_link.{hosted_c_target_matches_host}
 use compiler.backend.linker.linker_wrapper.{hosted_native_link_arch_supported, hosted_cross_cc_required}
-use compiler.backend.backend.llvm_cross_target.{toolchain_x86_64_native}
+use compiler.backend.backend.llvm_cross_target.{toolchain_x86_64_native, toolchain_aarch64, toolchain_armv7, toolchain_riscv64}
 use std.io_runtime.{rt_file_read_text}
 
 describe "hosted C target guard":
@@ -27,21 +27,106 @@ describe "hosted C target guard":
         expect(hosted_c_target_matches_host("x86_64-pc-windows-msvc", "windows", "x86_64")).to_be(true)
         expect(hosted_c_target_matches_host("x86_64-unknown-freebsd", "freebsd", "x86_64")).to_be(true)
 
-    it "rejects only the hosted architecture whose linker ABI is not implemented":
+    it "admits only hosted architectures with implemented linker and CRT ownership":
+        expect(hosted_native_link_arch_supported("linux", "x86_64")).to_be(true)
+        expect(hosted_native_link_arch_supported("linux", "aarch64")).to_be(true)
+        expect(hosted_native_link_arch_supported("linux", "riscv64")).to_be(true)
+        expect(hosted_native_link_arch_supported("linux", "rv64gc")).to_be(false)
+        expect(hosted_native_link_arch_supported("linux", "armv7")).to_be(false)
         expect(hosted_native_link_arch_supported("windows", "x86_64")).to_be(true)
+        expect(hosted_native_link_arch_supported("windows", "i686")).to_be(false)
         expect(hosted_native_link_arch_supported("windows", "aarch64")).to_be(false)
         expect(hosted_native_link_arch_supported("windows", "arm64")).to_be(false)
         expect(hosted_native_link_arch_supported("macos", "x86_64")).to_be(true)
         expect(hosted_native_link_arch_supported("macos", "aarch64")).to_be(true)
+        expect(hosted_native_link_arch_supported("macos", "armv7l")).to_be(false)
+        expect(hosted_native_link_arch_supported("macos", "riscv64")).to_be(false)
         expect(hosted_native_link_arch_supported("freebsd", "x86_64")).to_be(true)
         expect(hosted_native_link_arch_supported("freebsd", "aarch64")).to_be(true)
+        expect(hosted_native_link_arch_supported("freebsd", "arm")).to_be(false)
+        expect(hosted_native_link_arch_supported("freebsd", "armv7")).to_be(false)
+        expect(hosted_native_link_arch_supported("freebsd", "armv7l")).to_be(false)
+        expect(hosted_native_link_arch_supported("freebsd", "riscv64")).to_be(false)
 
-    it "uses FreeBSD rather than Linux defaults on a native x86_64 host":
-        val toolchain = toolchain_x86_64_native("freebsd")
-        expect(toolchain.triple).to_equal("x86_64-unknown-freebsd")
-        expect(toolchain.linker).to_equal("ld")
-        expect(toolchain.crt_dir).to_equal("/usr/lib")
-        expect(toolchain.install_hint).to_equal("FreeBSD base system toolchain")
+    it "uses exact native x86_64 descriptors for each supported desktop OS":
+        val freebsd = toolchain_x86_64_native("freebsd")
+        expect(freebsd.triple).to_equal("x86_64-unknown-freebsd")
+        expect(freebsd.linker).to_equal("ld")
+        expect(freebsd.crt_dir).to_equal("/usr/lib")
+        expect(freebsd.install_hint).to_equal("FreeBSD base system toolchain")
+
+        val windows = toolchain_x86_64_native("windows")
+        expect(windows.triple).to_equal("x86_64-pc-windows-msvc")
+        expect(windows.linker).to_equal("link.exe")
+        expect(windows.default_flags.contains("/MACHINE:X64")).to_be(true)
+
+        val macos = toolchain_x86_64_native("macos")
+        expect(macos.triple).to_equal("x86_64-apple-darwin")
+        expect(macos.linker_flavor).to_equal("macho")
+        expect(macos.default_flags.contains("-arch")).to_be(true)
+
+    it "uses native AArch64 descriptors only on supported hosts":
+        val freebsd = toolchain_aarch64("freebsd", "aarch64")
+        expect(freebsd.triple).to_equal("aarch64-unknown-freebsd")
+        expect(freebsd.linker).to_equal("ld")
+        expect(freebsd.linker_flavor).to_equal("gnu")
+        expect(freebsd.crt_dir).to_equal("/usr/lib")
+        expect(freebsd.requires_external).to_be(false)
+        expect(freebsd.install_hint).to_equal("FreeBSD base system toolchain")
+
+        val macos = toolchain_aarch64("macos", "aarch64")
+        expect(macos.triple).to_equal("aarch64-apple-darwin")
+        expect(macos.linker_flavor).to_equal("macho")
+        expect(macos.default_flags.contains("arm64")).to_be(true)
+
+        val windows = toolchain_aarch64("windows", "aarch64")
+        expect(windows.triple).to_equal("aarch64-pc-windows-msvc")
+        expect(windows.linker).to_equal("")
+        expect(windows.requires_external).to_be(true)
+        expect(windows.is_available()).to_be(false)
+        expect(windows.install_hint).to_contain("unsupported")
+
+    it "fails every hosted ARMv7 descriptor closed":
+        val linux = toolchain_armv7("linux", "armv7")
+        val macos = toolchain_armv7("macos", "armv7l")
+        val windows = toolchain_armv7("windows", "arm")
+        val freebsd = toolchain_armv7("freebsd", "armv7")
+        expect(linux.linker).to_equal("")
+        expect(macos.linker).to_equal("")
+        expect(windows.linker).to_equal("")
+        expect(freebsd.linker).to_equal("")
+        expect(linux.triple).to_equal("armv7-unknown-linux-gnueabihf")
+        expect(macos.triple).to_equal("armv7-apple-darwin")
+        expect(windows.triple).to_equal("armv7-pc-windows-msvc")
+        expect(freebsd.triple).to_equal("armv7-unknown-freebsd")
+        expect(linux.is_available()).to_be(false)
+        expect(macos.is_available()).to_be(false)
+        expect(windows.is_available()).to_be(false)
+        expect(freebsd.is_available()).to_be(false)
+
+    it "routes RV64 only through Linux descriptors":
+        val linux_native = toolchain_riscv64("linux", "riscv64")
+        expect(linux_native.triple).to_equal("riscv64-unknown-linux-gnu")
+        expect(linux_native.linker).to_equal("ld")
+        expect(linux_native.requires_external).to_be(false)
+
+        val linux_cross = toolchain_riscv64("linux", "x86_64")
+        expect(linux_cross.triple).to_equal("riscv64-unknown-linux-gnu")
+        expect(linux_cross.linker).to_equal("riscv64-linux-gnu-ld")
+        expect(linux_cross.requires_external).to_be(true)
+
+        val macos = toolchain_riscv64("macos", "riscv64")
+        val windows = toolchain_riscv64("windows", "riscv64")
+        val freebsd = toolchain_riscv64("freebsd", "riscv64")
+        expect(macos.linker).to_equal("")
+        expect(windows.linker).to_equal("")
+        expect(freebsd.linker).to_equal("")
+        expect(macos.triple).to_equal("riscv64-apple-darwin")
+        expect(windows.triple).to_equal("riscv64-pc-windows-msvc")
+        expect(freebsd.triple).to_equal("riscv64-unknown-freebsd")
+        expect(macos.is_available()).to_be(false)
+        expect(windows.is_available()).to_be(false)
+        expect(freebsd.is_available()).to_be(false)
 
     it "uses a cross C compiler only for a Linux architecture mismatch":
         expect(hosted_cross_cc_required("aarch64-apple-darwin", "macos", "aarch64")).to_be(false)

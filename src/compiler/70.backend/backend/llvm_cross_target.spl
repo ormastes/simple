@@ -12,8 +12,8 @@
 
 use compiler.backend.backend.io_compat.{backend_shell_tuple}
 use compiler.backend.backend.riscv_target.{riscv_linux_target_contract}
-use std.platform.{get_host_os}
-use std.io_runtime.{file_exists, host_arch}
+use std.platform.{get_host_os, host_arch}
+use std.io_runtime.{file_exists}
 use compiler.backend.backend.backend_types.{CodegenTarget}
 
 # ============================================================================
@@ -78,6 +78,19 @@ impl TargetToolchain:
             msg = msg + "  - {issue}\n"
         msg = msg + "\n  Install: {self.install_hint}\n"
         msg
+
+fn unsupported_target_toolchain(target: CodegenTarget, triple: text, hint: text) -> TargetToolchain:
+    TargetToolchain(
+        target: target,
+        triple: triple,
+        linker: "",
+        linker_flavor: "unsupported",
+        sysroot: "",
+        crt_dir: "",
+        default_flags: [],
+        requires_external: true,
+        install_hint: hint
+    )
 
 # ============================================================================
 # Built-in Toolchain Descriptors
@@ -212,21 +225,43 @@ fn toolchain_aarch64(os: text, host: text) -> TargetToolchain:
             requires_external: false,
             install_hint: "Xcode Command Line Tools: xcode-select --install"
         )
-    elif host == "aarch64":
-        # Native aarch64 Linux
+    elif os == "windows":
+        unsupported_target_toolchain(
+            CodegenTarget.AArch64,
+            "aarch64-pc-windows-msvc",
+            "Windows ARM64 linking is unsupported: MSVC linker and CRT discovery are x64-only"
+        )
+    elif os == "freebsd":
+        if host != "aarch64" and host != "arm64":
+            return unsupported_target_toolchain(
+                CodegenTarget.AArch64,
+                "aarch64-unknown-freebsd",
+                "FreeBSD AArch64 cross-linking is unsupported; use a native AArch64 host"
+            )
         TargetToolchain(
             target: CodegenTarget.AArch64,
-            triple: "aarch64-unknown-linux-gnu",
-            linker: "mold",
+            triple: "aarch64-unknown-freebsd",
+            linker: "ld",
             linker_flavor: "gnu",
             sysroot: "",
-            crt_dir: "/usr/lib/aarch64-linux-gnu",
+            crt_dir: "/usr/lib",
             default_flags: ["-pie", "--eh-frame-hdr"],
             requires_external: false,
-            install_hint: "apt install mold (native build)"
+            install_hint: "FreeBSD base system toolchain"
         )
-    else:
-        # Cross-compile to aarch64
+    elif os == "linux":
+        if host == "aarch64" or host == "arm64":
+            return TargetToolchain(
+                target: CodegenTarget.AArch64,
+                triple: "aarch64-unknown-linux-gnu",
+                linker: "mold",
+                linker_flavor: "gnu",
+                sysroot: "",
+                crt_dir: "/usr/lib/aarch64-linux-gnu",
+                default_flags: ["-pie", "--eh-frame-hdr"],
+                requires_external: false,
+                install_hint: "apt install mold (native build)"
+            )
         TargetToolchain(
             target: CodegenTarget.AArch64,
             triple: "aarch64-unknown-linux-gnu",
@@ -238,38 +273,40 @@ fn toolchain_aarch64(os: text, host: text) -> TargetToolchain:
             requires_external: true,
             install_hint: "apt install gcc-aarch64-linux-gnu libc6-dev-arm64-cross"
         )
-
-fn toolchain_armv7(os: text, host: text) -> TargetToolchain:
-    if host == "armv7l" or host == "armv7" or host == "arm":
-        # Native ARM build
-        TargetToolchain(
-            target: CodegenTarget.Arm,
-            triple: "armv7-unknown-linux-gnueabihf",
-            linker: "ld",
-            linker_flavor: "gnu",
-            sysroot: "",
-            crt_dir: "/usr/lib/arm-linux-gnueabihf",
-            default_flags: ["-pie"],
-            requires_external: false,
-            install_hint: "Native ARM build"
-        )
     else:
-        # Cross-compile to ARM
-        TargetToolchain(
-            target: CodegenTarget.Arm,
-            triple: "armv7-unknown-linux-gnueabihf",
-            linker: "arm-linux-gnueabihf-ld",
-            linker_flavor: "gnu",
-            sysroot: "/usr/arm-linux-gnueabihf",
-            crt_dir: "/usr/lib/arm-linux-gnueabihf",
-            default_flags: ["--sysroot=/usr/arm-linux-gnueabihf", "-pie"],
-            requires_external: true,
-            install_hint: "apt install gcc-arm-linux-gnueabihf libc6-dev-armhf-cross"
+        unsupported_target_toolchain(
+            CodegenTarget.AArch64,
+            "aarch64-unknown-{os}",
+            "AArch64 linking is unsupported on host OS '{os}'"
         )
+
+fn toolchain_armv7(os: text, _host: text) -> TargetToolchain:
+    val triple = match os:
+        case "macos": "armv7-apple-darwin"
+        case "windows": "armv7-pc-windows-msvc"
+        case "freebsd": "armv7-unknown-freebsd"
+        case "linux": "armv7-unknown-linux-gnueabihf"
+        case _: "armv7-unknown-{os}"
+    unsupported_target_toolchain(
+        CodegenTarget.Arm,
+        triple,
+        "Hosted ARMv7 is unsupported on '{os}': hard-float ABI and sysroot are not portable"
+    )
 
 fn toolchain_riscv64(os: text, host: text) -> TargetToolchain:
     val contract = riscv_linux_target_contract(CodegenTarget.Riscv64)
-    if host == "riscv64":
+    if os != "linux":
+        val triple = match os:
+            case "macos": "riscv64-apple-darwin"
+            case "windows": "riscv64-pc-windows-msvc"
+            case "freebsd": "riscv64-unknown-freebsd"
+            case _: "riscv64-unknown-{os}"
+        return unsupported_target_toolchain(
+            CodegenTarget.Riscv64,
+            triple,
+            "Hosted RISC-V 64 targets are Linux-only; host OS '{os}' is unsupported"
+        )
+    if host == "riscv64" or host == "rv64":
         TargetToolchain(
             target: CodegenTarget.Riscv64,
             triple: contract.triple(),
