@@ -8,6 +8,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-directx-
 powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-directx-env.ps1 --gpu-capture -BuildDir build\gui-web-2d-directx-env-windows-current-gpucap -EvidencePath build\gui-web-2d-directx-env-windows-current-gpucap\evidence.env -TimeoutSecs 160
 powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-directx-env.ps1 --gpu-capture -BuildDir build\gui-web-2d-directx-env-windows-event-gpucap -EvidencePath build\gui-web-2d-directx-env-windows-event-gpucap\evidence.env -TimeoutSecs 160
 powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-directx-env.ps1 --gpu-capture -BuildDir build\gui-web-2d-directx-env-windows-event-strict-gpucap -EvidencePath build\gui-web-2d-directx-env-windows-event-strict-gpucap\evidence.env -TimeoutSecs 160
+powershell -ExecutionPolicy Bypass -File scripts\check\check-gui-web-2d-directx-strict-evidence.ps1 -EvidencePath build\gui-web-2d-directx-env-windows-event-strict-gpucap\evidence.env -RequireGpuCapture
 ```
 
 Result:
@@ -45,6 +46,9 @@ Result:
 - `gui_web_2d_directx_gpu_debugger_capture_status=pass`
 - `gui_web_2d_directx_gpu_debugger_capture_reason=vsglog-gfxa-magic-pass`
 - `gui_web_2d_directx_gpu_debugger_capture_artifact_magic=GFXA`
+- `gui_web_2d_directx_strict_evidence_status=pass`
+- `gui_web_2d_directx_strict_evidence_reason=pass`
+- `gui_web_2d_directx_strict_evidence_gpu_capture_artifact_magic=GFXA`
 
 Primary artifacts:
 
@@ -62,6 +66,7 @@ Primary artifacts:
 - `build/gui-web-2d-directx-env-windows-event-strict-gpucap/electron_argb_proof.json`
 - `build/gui-web-2d-directx-env-windows-event-strict-gpucap/chrome_argb_proof.json`
 - `build/gui-web-2d-directx-env-windows-event-strict-gpucap/dxcap_chrome_d3d11.vsglog`
+- `scripts/check/check-gui-web-2d-directx-strict-evidence.ps1`
 
 The event-enabled capture records focus, keyboard, text input, pointer down/up,
 and click delivery in both Electron and Chrome before the ARGB readback and
@@ -70,3 +75,9 @@ pixel proof alone. The strict wrapper gate now requires
 `gui_web_2d_directx_browser_event_status=pass` for `--browser-backing` and
 `--gpu-capture`; browser pixels and GPU backing are not sufficient without
 event-routing evidence.
+
+The strict evidence checker validates existing env files without rerunning live
+capture. It passes on the strict artifact above and fails closed on the older
+`build/gui-web-2d-directx-env-windows-current-gpucap/evidence.env` artifact
+with `gui_web_2d_directx_strict_evidence_reason=browser-events`, because that
+older file predates browser event proof rows.

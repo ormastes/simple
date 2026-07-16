@@ -148,6 +148,8 @@
   `build/gui-web-2d-directx-env-windows-event-strict-gpucap/dxcap_chrome_d3d11.vsglog`.
   The DirectX and Vulkan browser wrappers now require browser event proof for
   live browser pass status; static pixels and GPU backing no longer pass alone.
+  `scripts/check/check-gui-web-2d-directx-strict-evidence.ps1` validates saved
+  evidence files and fails closed on stale pre-event DirectX artifacts.
 - Windows Vulkan Web/2D evidence is recorded in
   `doc/09_report/gui_web_2d_vulkan_windows_current_2026-07-16.md`. The wrapper
   now discovers Windows Kit `dxc.exe`, and the current host proves Simple Vulkan
