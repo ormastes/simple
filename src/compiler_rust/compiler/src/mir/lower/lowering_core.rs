@@ -297,6 +297,13 @@ pub struct MirLowerer<'a> {
     pub(super) singleton_cache: HashMap<String, super::super::instructions::VReg>,
     /// Dependency graph for cycle detection (#1009)
     pub(super) dependency_graph: crate::di::DependencyGraph,
+    /// Trait impls declared in THIS module only. Concrete-receiver method
+    /// calls devirtualize unless the impl is local: cross-module concrete
+    /// receivers must stay direct calls (bug: SimpleOS desktop fb-init
+    /// triple-fault — global impls turned `cpu.init(...)` into vtable
+    /// dispatch, erased the static refs, and let --gc-sections prune every
+    /// Engine2D backend).
+    pub(super) local_trait_impls: HashMap<String, HashSet<String>>,
     /// Current DI resolution stack for cycle detection
     pub(super) di_resolution_stack: Vec<String>,
     /// Coverage instrumentation mode
@@ -352,6 +359,7 @@ impl<'a> MirLowerer<'a> {
             function_value_globals: HashSet::new(),
             singleton_cache: HashMap::new(),
             dependency_graph: crate::di::DependencyGraph::default(),
+            local_trait_impls: HashMap::new(),
             di_resolution_stack: Vec::new(),
             coverage_enabled: false,
             decision_counter: 0,
@@ -391,6 +399,7 @@ impl<'a> MirLowerer<'a> {
             function_value_globals: HashSet::new(),
             singleton_cache: HashMap::new(),
             dependency_graph: crate::di::DependencyGraph::default(),
+            local_trait_impls: HashMap::new(),
             di_resolution_stack: Vec::new(),
             coverage_enabled: false,
             tagged_vregs: std::collections::HashSet::new(),
@@ -975,14 +984,21 @@ impl<'a> MirLowerer<'a> {
         if self.available_functions.contains(&format!("{}.{}", recv, method_name)) {
             return None;
         }
-        // Concrete receiver: virtual only via a trait it is known to implement
-        // (e.g. inherited default trait methods with no concrete definition).
+        // Concrete receiver: virtual only via a trait it implements IN THIS
+        // MODULE (e.g. inherited default trait methods with no concrete
+        // definition). Cross-module (global) impls must NOT virtualize here:
+        // the receiver's static type is exact, so the pre-existing direct
+        // cross-module call is always correct, keeps the callee symbol
+        // statically referenced (so --gc-sections cannot prune it), and
+        // avoids vtable dispatch that faults in freestanding kernels (bug:
+        // SimpleOS desktop fb-init triple-fault, regression from feeding
+        // project-wide trait_impls into dependency_graph).
         for (trait_name, info) in infos {
             if let Some(sig) = info.get_method(method_name) {
                 let implements = self
-                    .dependency_graph
-                    .get_implementations(trait_name)
-                    .is_some_and(|impls| impls.iter().any(|t| t == recv));
+                    .local_trait_impls
+                    .get(trait_name)
+                    .is_some_and(|impls| impls.contains(recv));
                 if implements {
                     return Some((sig.vtable_slot, sig.param_types.clone(), sig.return_type));
                 }
@@ -1197,10 +1213,15 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
+        self.local_trait_impls.clear();
         for hir_impl in &hir.impls {
             if let Some(trait_name) = &hir_impl.trait_name {
                 self.dependency_graph
                     .add_implementation(trait_name.clone(), hir_impl.type_name.clone());
+                self.local_trait_impls
+                    .entry(trait_name.clone())
+                    .or_default()
+                    .insert(hir_impl.type_name.clone());
             }
         }
 

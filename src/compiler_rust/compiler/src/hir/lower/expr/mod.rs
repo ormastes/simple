@@ -278,15 +278,13 @@ impl Lowerer {
                 ty,
             })
         } else if let Some(ty) = self.named_callable_value_type(name) {
-            let global_name = self.resolve_function_alias(name).unwrap_or(name).to_string();
             Ok(HirExpr {
-                kind: HirExprKind::Global(global_name),
+                kind: HirExprKind::Global(name.to_string()),
                 ty,
             })
         } else if let Some(ty) = self.globals.get(name).copied() {
-            let global_name = self.resolve_function_alias(name).unwrap_or(name).to_string();
             Ok(HirExpr {
-                kind: HirExprKind::Global(global_name),
+                kind: HirExprKind::Global(name.to_string()),
                 ty,
             })
         } else {
@@ -681,35 +679,6 @@ impl Lowerer {
                 }
             }
         }
-        // Trait names currently alias to ANY, so a field declared as a trait
-        // loses its nominal receiver name here. Recover the return type only
-        // when every imported trait declaring this method agrees.
-        if recv_ty == TypeId::ANY {
-            let mut trait_return = None;
-            let mut traits_disagree = false;
-            for trait_info in self.module.trait_infos.values() {
-                let Some(signature) = trait_info.methods.get(method) else {
-                    continue;
-                };
-                let return_type = signature.return_type;
-                if return_type == TypeId::ANY || return_type == TypeId::VOID {
-                    continue;
-                }
-                match trait_return {
-                    None => trait_return = Some(return_type),
-                    Some(previous) if previous != return_type => {
-                        traits_disagree = true;
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-            if !traits_disagree {
-                if let Some(return_type) = trait_return {
-                    return return_type;
-                }
-            }
-        }
         // Search pre-registered methods for ".method" suffix
         // Sort matches by name length (shortest = most specific) for deterministic resolution
         let suffix = format!(".{}", method);
@@ -909,14 +878,7 @@ impl Lowerer {
             }
         }
 
-        // `text` is declared as a struct in the standard library, but it uses
-        // the same runtime representation and string intrinsics as the builtin
-        // String type. Keep its methods on the string lowering path.
-        let is_string = matches!(self.module.types.get(receiver.ty), Some(HirType::String))
-            || matches!(
-                self.module.types.get(receiver.ty),
-                Some(HirType::Struct { name, .. }) if name == "String" || name == "text" || name == "str"
-            );
+        let is_string = matches!(self.module.types.get(receiver.ty), Some(HirType::String));
         let is_array = matches!(self.module.types.get(receiver.ty), Some(HirType::Array { .. }));
 
         if let Some(ty) = self.builtin_numeric_method_result_type(receiver.ty, method) {
@@ -935,8 +897,8 @@ impl Lowerer {
         if is_string {
             let result_ty = match method {
                 "len" => Some(TypeId::I64),
-                "starts_with" | "ends_with" | "contains" | "is_empty" => Some(TypeId::BOOL),
-                "concat" | "slice" | "trim" | "replace" => Some(TypeId::STRING),
+                "starts_with" | "ends_with" | "contains" => Some(TypeId::BOOL),
+                "concat" | "slice" | "replace" => Some(TypeId::STRING),
                 // find/rfind return -1 if not found, position if found (raw i64 from rt_string_find)
                 "find" | "index_of" | "find_str" | "rfind" | "last_index_of" => Some(TypeId::I64),
                 _ => None,
