@@ -118,7 +118,7 @@ so executable qualification is still blocked.
 | P1 | Lint still carries dead legacy registries and unqualified global violations | Delete the unused parallel lint modules after an admitted compile, repair classified UI/hot-loop violations, and run focused policy fixtures |
 | P1 | Exact duplicate signal detection is not lexer-aware inside multiline strings/comments | Drive signal classification from canonical lexer spans while retaining exact indentation-sensitive window keys |
 | P1 | Process cleanup handlers are advertised but inactive | Install one tracker-owned signal/crash cleanup hook per process |
-| P2 | Broker records failed leases and synthetic QEMU identity | Commit leases only after successful start and retain real PID/QMP metadata |
+| P2 | Direct broker callers can retain inactive leases | Production request/execution paths now reject and remove inactive leases; refactor broker-only tests before enforcing active-only retention inside `SessionBroker.acquire` |
 
 ## Latest primary review decisions
 
@@ -199,6 +199,10 @@ so executable qualification is still blocked.
   instance suffix. Fresh concurrent acquisitions can no longer target the same
   container name or QMP socket, and metadata cannot inject path separators or
   shell syntax into resource IDs.
+- **QEMU session ownership:** production status, admission snapshots, cleanup,
+  and shutdown now use the typed `SessionBroker` that owns real adapter PID/QMP
+  leases. The never-acquired legacy `QemuBroker` was removed from the daemon;
+  failed production acquisitions are rejected and removed immediately.
 - **Container transport:** Docker/Podman detection, lifecycle, inspection,
   reset, execution, and teardown now share structured argv plus bounded host
   execution. Fixed resource limits remain explicit argv entries; test paths,

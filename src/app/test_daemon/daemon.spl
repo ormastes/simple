@@ -23,7 +23,6 @@ use app.test_daemon.{
 }
 use app.test_daemon.agent_pool.{AgentPool, agent_pool_new}
 use app.test_incremental_state_shared.{IncrementalTestState, incremental_test_state_load}
-use app.test_daemon.qemu_broker.{QemuBroker, qemu_broker_new}
 use app.test_daemon.resource_policy.{
     test_daemon_can_accept_client, test_daemon_can_start_qemu,
     test_daemon_effective_qemu_limit, test_daemon_poll_sleep_ms
@@ -34,7 +33,8 @@ use app.test_daemon.session_adapter.{run_test_child}
 use app.test_daemon.session_types.{
     TestSessionMeta, test_session_meta_default,
     session_kind_from_name, reuse_mode_from_name, reset_policy_from_name,
-    meta_needs_session, LEASE_ACTIVE, REUSE_FRESH_PER_TEST, RESET_NONE
+    session_kind_name, meta_needs_session, SESSION_KIND_QEMU_VM,
+    LEASE_ACTIVE, REUSE_FRESH_PER_TEST, RESET_NONE
 }
 use std.test_runner.test_classification.{classify_test_session}
 use app.test_daemon.adapters.qemu_adapter.{qemu_adapter_new}
@@ -60,7 +60,6 @@ class TestDaemon:
     runner: DaemonRunner
     config: TestDaemonConfig
     incremental_state: IncrementalTestState
-    qemu_broker: QemuBroker
     agent_pool: AgentPool
     session_broker: SessionBroker
     active_requests: {text: text}
@@ -81,7 +80,6 @@ impl TestDaemon:
             # Periodic session broker cleanup every 50 cycles
             val state = self.runner.get_state()
             if state.cycle_count % 50 == 0:
-                self.qemu_broker.cleanup_idle(self.config.qemu_session_timeout_ms)
                 self.session_broker.cleanup_idle()
 
             # Periodic agent stale cleanup every 30 cycles
@@ -254,8 +252,8 @@ impl TestDaemon:
         resp.fields["errors_count"] = "{state.errors_count}"
         resp.fields["cycle_count"] = "{state.cycle_count}"
         resp.fields["cache_entries"] = "{self.incremental_state.entries.keys().len()}"
-        resp.fields["qemu_active"] = "{self.qemu_broker.active_count()}"
-        resp.fields["qemu_idle"] = "{self.qemu_broker.idle_count()}"
+        resp.fields["qemu_active"] = "{self.session_broker.active_count_by_kind(SESSION_KIND_QEMU_VM)}"
+        resp.fields["qemu_idle"] = "{self.session_broker.idle_count_by_kind(SESSION_KIND_QEMU_VM)}"
         val snap = self.current_resource_snapshot()
         resp.fields["resource_cpu_percent"] = "{snap.cpu_percent}"
         resp.fields["resource_memory_percent"] = "{snap.memory_percent}"
@@ -269,7 +267,6 @@ impl TestDaemon:
 
     fn handle_stop(req: DaemonRequest) -> DaemonResponse:
         self.incremental_state.save()
-        self.qemu_broker.shutdown_all()
         self.session_broker.shutdown_all()
         self.runner.shutdown()
         daemon_response_new(req.id, TRESP_COMPLETED)
@@ -358,6 +355,12 @@ impl TestDaemon:
         )
 
         val lease = self.session_broker.acquire(meta)
+        if lease.status != LEASE_ACTIVE or lease.session_id == "":
+            if lease.session_id != "":
+                self.session_broker.stop_session(lease.session_id)
+            var failed = daemon_response_new(req.id, TRESP_FAILED)
+            failed.fields["error"] = "could not acquire {kind_name} session"
+            return failed
         var resp = daemon_response_new(req.id, TRESP_COMPLETED)
         resp.fields["session_id"] = lease.session_id
         resp.fields["pid"] = "{lease.pid}"
@@ -436,6 +439,8 @@ impl TestDaemon:
         if meta_needs_session(meta):
             val lease = self.session_broker.acquire(meta)
             if lease.status != LEASE_ACTIVE or lease.session_id == "":
+                if lease.session_id != "":
+                    self.session_broker.stop_session(lease.session_id)
                 result = TestResult(
                     test_path: test_path, status: TRESP_FAILED,
                     passed: 0, failed: 1, skipped: 0, duration_ms: 0,
@@ -482,8 +487,8 @@ impl TestDaemon:
     fn current_resource_snapshot():
         test_daemon_resource_snapshot(
             self.active_request_count(),
-            self.qemu_broker.active_count() + self.session_broker.active_count(),
-            self.qemu_broker.idle_count() + self.session_broker.idle_count()
+            self.session_broker.active_count(),
+            self.session_broker.idle_count()
         )
 
 # ============================================================================
@@ -495,7 +500,6 @@ fn test_daemon_start(config: TestDaemonConfig) -> TestDaemon:
 
     val runner = daemon_runner_start(config.daemon)
     val incremental_state = incremental_test_state_load(config.cache_path, config.dep_graph_path, true)
-    val qemu_broker = qemu_broker_new(config.resource_policy.max_qemu_sessions)
     val pool = agent_pool_new(5)
 
     # Initialize session broker with all adapters
@@ -522,7 +526,6 @@ fn test_daemon_start(config: TestDaemonConfig) -> TestDaemon:
         runner: runner,
         config: config,
         incremental_state: incremental_state,
-        qemu_broker: qemu_broker,
         agent_pool: pool,
         session_broker: broker,
         active_requests: {}
