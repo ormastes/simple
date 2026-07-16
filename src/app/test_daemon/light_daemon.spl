@@ -4,6 +4,7 @@ use app.io.process_ops.{process_run_timeout}
 use app.io.mod.{env_get, env_set}
 use app.test_incremental_state_shared.{IncrementalTestState, incremental_test_state_new}
 use app.test_daemon.binary.{test_daemon_simple_binary}
+use app.test_daemon.session_adapter.{test_result_from_child_output}
 
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_dir_list(path: text) -> [text]
@@ -77,7 +78,11 @@ fn handle_request(binary: text, name: text, state: IncrementalTestState):
     var body = stdout
     if stderr != "":
         body = body + stderr
-    state.record_daemon_result(test_path, code as i64, 0, if code == 0: 0 else: 1, 0, 0, body)
+    val result = test_result_from_child_output(test_path, stdout, stderr, code as i64, 0, 600000)
+    state.record_daemon_result(
+        test_path, result.status, result.passed, result.failed,
+        result.skipped, result.duration_ms, result.output
+    )
     state.save()
     val cache_state = if clean: "clean" else: "miss"
     atomic_write_text(response_path(name), "{code}\n{body}\ntest_daemon_cache={cache_state}")

@@ -42,7 +42,7 @@ so executable qualification is still blocked.
 | Format/fix | SOURCE GUARDED | Writes are atomic and checked; formatter output now passes a CoreLexer token/literal/comment/raw-gap equivalence gate or fails closed | Replace heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
 | Check | BLOCKED | Command is parse/validation only; full type inference is not enforced | Implement enforcing type analysis, then qualify the production probe | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
-| Test daemon | SOURCE FIXED | CLI/client now share the full daemon protocol, request IDs/timeouts survive transport, and classified sessions use acquire/execute/reset-or-release; dynamic qualification and truthful per-example counts remain | Run local/session/timeout/stop protocol fixtures, then replace child exit-code count synthesis with parsed runner results | P0 |
+| Test daemon | SOURCE FIXED | CLI/client share the full daemon protocol; local, container, remote, lightweight, and agent paths now retain canonical passed/failed/skipped counts and fail closed on malformed outer summaries; dynamic qualification remains | Run the authored local/session/count-cache/timeout/stop protocol fixtures with an admitted runtime | P0 |
 | SPipe/docgen | WARN | Executable spec/manual exist; generated-doc validation blocked by seed | Regenerate once with admitted runtime | P1 |
 | MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P1 |
 | LSP MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P0 |
@@ -102,9 +102,10 @@ so executable qualification is still blocked.
    the global findings remain an explicit P1 cleanup lane.
 4. `simple check` now states its actual parse/validation behavior. Enforced full
    type inference remains an open P1 implementation bug.
-5. The default test-daemon rendezvous and lifecycle bypass are source-fixed.
-   Runtime protocol, shutdown, adapter, and timeout evidence remains NOT RUN,
-   so daemon claims are not yet dynamically qualified.
+5. The default test-daemon rendezvous, lifecycle bypass, result parsing, and
+   cache count retention are source-fixed. Runtime protocol, shutdown, adapter,
+   count-cache, and timeout evidence remains NOT RUN, so daemon claims are not
+   yet dynamically qualified.
 6. Formatter edits still infer syntax from raw text, but semantics-changing
    proposals are now rejected at the shared `format_source` boundary. Dynamic
    preservation/idempotence evidence remains NOT RUN.
@@ -113,7 +114,6 @@ so executable qualification is still blocked.
 
 | Rank | Defect | Concrete solution |
 |---|---|---|
-| P1 | Test daemon result counts are synthesized from child exit status | Parse the child runner result protocol and retain real passed/failed/skipped counts |
 | P1 | Formatter heuristics are contained but not token-gap-native | Replace them incrementally with edits limited to lexer-approved whitespace gaps |
 | P1 | Lint still carries dead legacy registries and unqualified global violations | Delete the unused parallel lint modules after an admitted compile, repair classified UI/hot-loop violations, and run focused policy fixtures |
 | P1 | Exact duplicate signal detection is not lexer-aware inside multiline strings/comments | Drive signal classification from canonical lexer spans while retaining exact indentation-sensitive window keys |

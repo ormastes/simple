@@ -10,6 +10,7 @@ use app.test_daemon.session_types.{
 }
 use app.test_daemon.types.{TestResult, TRESP_COMPLETED, TRESP_FAILED}
 use app.io.mod.{process_run_timeout, env_set, env_vars}
+use lazy std.test_runner.test_executor_parsing.{make_result_from_output}
 
 extern fn rt_time_now_unix_micros() -> i64
 
@@ -23,17 +24,38 @@ fn run_test_child(test_path: text, timeout_ms: i64, extra_args: [text]) -> TestR
     val start = rt_time_now_unix_micros()
     val (stdout, stderr, exit_code) = process_run_timeout("bin/simple", args, timeout_ms)
     val duration_ms = (rt_time_now_unix_micros() - start) / 1000
-    val output = if stderr == "": stdout
+    test_result_from_child_output(test_path, stdout, stderr, exit_code as i64, duration_ms, timeout_ms)
+
+fn test_result_from_child_output(
+    test_path: text,
+    stdout: text,
+    stderr: text,
+    exit_code: i64,
+    duration_ms: i64,
+    timeout_ms: i64
+) -> TestResult:
+    val parsed = make_result_from_output(
+        test_path,
+        stdout,
+        stderr,
+        exit_code as i32,
+        duration_ms,
+        timeout_ms / 1000
+    )
+    var output = if stderr == "": stdout
         elif stdout == "": stderr
         else: stdout + "\n" + stderr
-    val passed = if exit_code == 0: 1 else: 0
-    val failed = if exit_code == 0: 0 else: 1
+    if parsed.error != "":
+        if output != "":
+            output = output + "\n" + parsed.error
+        else:
+            output = parsed.error
     TestResult(
         test_path: test_path,
-        status: if exit_code == 0: TRESP_COMPLETED else: TRESP_FAILED,
-        passed: passed,
-        failed: failed,
-        skipped: 0,
+        status: if parsed.is_ok(): TRESP_COMPLETED else: TRESP_FAILED,
+        passed: parsed.passed,
+        failed: parsed.failed,
+        skipped: parsed.skipped,
         duration_ms: duration_ms,
         output: output,
         cached: false

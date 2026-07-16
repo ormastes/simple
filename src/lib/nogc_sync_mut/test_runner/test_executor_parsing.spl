@@ -135,6 +135,14 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
     var total_pending = 0
     var summary_passed = -1
     var summary_failed = -1
+    var summary_skipped = -1
+    var summary_pending = -1
+    var results_count = 0
+    var results_valid = false
+    var results_passed = 0
+    var results_failed = 0
+    var results_skipped = 0
+    var results_pending = 0
     var pos = 0
     val output_len = output.len()
     while pos <= output_len:
@@ -142,7 +150,20 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
         val line = if next >= 0: output[pos:next] else: output[pos:]
         val clean = strip_ansi(line)
         val trimmed = clean.trim()
-        if trimmed.starts_with("Passed:"):
+        if trimmed.starts_with("Results:"):
+            results_count = results_count + 1
+            val result_total = extract_number_before(s: trimmed, keyword: "total")
+            val result_passed = extract_number_before(s: trimmed, keyword: "passed")
+            val result_failed = extract_number_before(s: trimmed, keyword: "failed")
+            if result_total >= 0 and result_passed >= 0 and result_failed >= 0 and result_total == result_passed + result_failed:
+                results_valid = true
+                results_passed = result_passed
+                results_failed = result_failed
+                val parsed_skipped = extract_number_before(s: trimmed, keyword: "skipped")
+                val parsed_pending = extract_number_before(s: trimmed, keyword: "pending")
+                results_skipped = if parsed_skipped >= 0: parsed_skipped else: 0
+                results_pending = if parsed_pending >= 0: parsed_pending else: 0
+        elif trimmed.starts_with("Passed:"):
             summary_passed = extract_number_after_colon(s: trimmed, prefix: "Passed:")
         elif trimmed.starts_with("Failed:"):
             summary_failed = extract_number_after_colon(s: trimmed, prefix: "Failed:")
@@ -162,23 +183,31 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
                     total_passed = total_passed + passed
                 total_failed = total_failed + failures_count
         # Parse summary line: "Pending: N" from spec.spl print_summary
-        if clean.trim().starts_with("Pending:"):
-            val pending_count = extract_number_after_colon(s: clean, prefix: "Pending:")
-            if pending_count > 0:
-                total_pending = total_pending + pending_count
+        if trimmed.starts_with("Pending:"):
+            summary_pending = extract_number_after_colon(s: trimmed, prefix: "Pending:")
+        elif trimmed.starts_with("Skipped:"):
+            summary_skipped = extract_number_after_colon(s: trimmed, prefix: "Skipped:")
         # Count individual "... pending" test lines
-        elif clean.contains("... pending"):
+        elif not trimmed.starts_with("Results:") and clean.contains("... pending"):
             total_pending = total_pending + 1
         # Count skipped (separate from pending)
-        if clean.contains("skipped"):
+        if not trimmed.starts_with("Results:") and not trimmed.starts_with("Skipped:") and clean.contains("skipped"):
             val skip_count2 = extract_number_before(s: clean, keyword: "skipped")
             if skip_count2 > 0:
                 total_skipped = total_skipped + skip_count2
         if next < 0:
             break
         pos = next + 1
+    # The outer runner summary is authoritative. Multiple or malformed outer
+    # summaries are ambiguous and must not fall back to an earlier green line.
+    if results_count > 0:
+        if results_count != 1 or not results_valid:
+            return (0, 0, 0, 0)
+        return (results_passed, results_failed, results_skipped, results_pending)
     if summary_passed >= 0 and summary_failed >= 0:
-        return (summary_passed, summary_failed, total_skipped, total_pending)
+        val skipped = if summary_skipped >= 0: summary_skipped else: total_skipped
+        val pending = if summary_pending >= 0: summary_pending else: total_pending
+        return (summary_passed, summary_failed, skipped, pending)
     (total_passed, total_failed, total_skipped, total_pending)
 
 fn output_has_zero_pass_summary(output: text) -> bool:

@@ -1,4 +1,4 @@
-use app.test_daemon.session_adapter.{run_test_child, run_test_child_env}
+use app.test_daemon.session_adapter.{run_test_child, run_test_child_env, test_result_from_child_output}
 use app.test_daemon.adapters.container_adapter.{container_create_args}
 use app.test_daemon.adapters.remote_pc_adapter.{remote_pc_adapter_new, remote_test_command, remote_test_path_is_valid}
 use app.test_daemon.session_broker.{session_broker_new}
@@ -10,6 +10,37 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 
 describe "test daemon child execution":
+    it "retains real runner counts and fails closed on unparseable output":
+        val counted = test_result_from_child_output(
+            "test/sample_spec.spl",
+            "Results: 3 total, 2 passed, 1 failed, 2 skipped\n",
+            "",
+            1,
+            25,
+            1000
+        )
+        expect(counted.passed).to_equal(2)
+        expect(counted.failed).to_equal(1)
+        expect(counted.skipped).to_equal(2)
+
+        val green = test_result_from_child_output(
+            "test/sample_spec.spl", "Passed: 2\nFailed: 0\nSkipped: 1\n", "", 0, 10, 1000
+        )
+        expect(green.passed).to_equal(2)
+        expect(green.failed).to_equal(0)
+        expect(green.skipped).to_equal(1)
+
+        val crashed_after_green = test_result_from_child_output(
+            "test/sample_spec.spl", "Passed: 2\nFailed: 0\n", "crash", 7, 10, 1000
+        )
+        expect(crashed_after_green.failed).to_equal(1)
+
+        val unparseable = test_result_from_child_output(
+            "test/sample_spec.spl", "child exited quietly", "", 0, 5, 1000
+        )
+        expect(unparseable.passed).to_equal(0)
+        expect(unparseable.failed).to_equal(1)
+
     it "retains configured remote PC adapters by terminal name":
         var broker = session_broker_new()
         broker.register_remote_pc(remote_pc_adapter_new(

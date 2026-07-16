@@ -1,0 +1,58 @@
+use std.spec.{describe, it, expect, after_each}
+use std.daemon_sdk.types.{daemon_request_new}
+use app.test_daemon.daemon.{test_daemon_start}
+use app.test_daemon.types.{test_daemon_config_default}
+use app.test_daemon.{TREQ_RUN_SINGLE, TREQ_STOP, TRESP_COMPLETED, TRESP_CACHED}
+use app.io.mod.{dir_create_all, dir_remove_all, file_write}
+
+val count_cache_root = "/tmp/simple_test_daemon_count_cache_spec"
+
+fn count_cache_cleanup():
+    dir_remove_all(count_cache_root)
+
+describe "test daemon result count cache":
+    after_each:
+        count_cache_cleanup()
+
+    it "returns and caches both sibling example counts":
+        count_cache_cleanup()
+        dir_create_all(count_cache_root)
+        val test_path = "{count_cache_root}/two_siblings_spec.spl"
+        file_write(
+            test_path,
+            "describe \"siblings\":\n" +
+            "    it \"first\":\n" +
+            "        expect(1).to_equal(1)\n" +
+            "    it \"second\":\n" +
+            "        expect(2).to_equal(2)\n"
+        )
+
+        var config = test_daemon_config_default()
+        config.daemon.lock_path = "{count_cache_root}/daemon.lock"
+        config.daemon.request_dir = "{count_cache_root}/requests"
+        config.daemon.response_dir = "{count_cache_root}/responses"
+        config.cache_path = "{count_cache_root}/cache.sdn"
+        config.dep_graph_path = "{count_cache_root}/deps.sdn"
+        config.resource_policy.min_free_cpu_pct = 0
+        config.resource_policy.min_free_memory_pct = 0
+        var daemon = test_daemon_start(config)
+
+        var first_req = daemon_request_new(TREQ_RUN_SINGLE)
+        first_req.fields["test_path"] = test_path
+        first_req.fields["clean"] = "true"
+        val first = daemon.handle_request(first_req)
+        expect(first.status).to_equal(TRESP_COMPLETED)
+        expect(first.fields["passed"] ?? "").to_equal("2")
+        expect(first.fields["failed"] ?? "").to_equal("0")
+        expect(first.fields["skipped"] ?? "").to_equal("0")
+
+        var cached_req = daemon_request_new(TREQ_RUN_SINGLE)
+        cached_req.fields["test_path"] = test_path
+        val cached = daemon.handle_request(cached_req)
+        expect(cached.status).to_equal(TRESP_CACHED)
+        expect(cached.fields["passed"] ?? "").to_equal("2")
+        expect(cached.fields["failed"] ?? "").to_equal("0")
+        expect(cached.fields["skipped"] ?? "").to_equal("0")
+
+        val stop_req = daemon_request_new(TREQ_STOP)
+        daemon.handle_request(stop_req)
