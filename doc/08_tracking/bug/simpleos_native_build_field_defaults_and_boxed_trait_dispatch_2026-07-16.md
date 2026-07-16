@@ -1,5 +1,24 @@
 # Bug: entry-closure cranelift — omitted `= nil` field defaults retain garbage; trait dispatch on boxed SoftwareBackend faults
 
+- **Status update (2026-07-16, later):** Symptom A ROOT-FIXED in `6b59a8c4bf7` —
+  NOT entry-closure-specific: BOTH HIR struct-construction sites (brace form in
+  `collections.rs::lower_struct_init`, paren form in `calls.rs` which lowered
+  named args as POSITIONAL initializers) emitted fields in source-literal order
+  while MIR/codegen zip values against the FULL DECLARED field list — omitting
+  interspersed defaulted fields shifted every later value into the wrong slot
+  and left tail fields as heap poison. Fix: shared `lower_struct_init_fields`
+  resolves declared order (registry + cross-module `global_struct_defs`
+  fallback), matches named args by name, nil-fills omissions. Hosted repro
+  (both forms) confirmed wrong-before/correct-after; positional and
+  out-of-order-named regression checks pass. **Symptoms A and B are TWO
+  separate roots.** B remains OPEN: `SoftwareBackend`'s `impl RenderBackend`
+  IS registered in its declaring module (`HIT type_id=TypeId(155)`,
+  instrumentation-verified) — remaining hypothesis is
+  `ctx.vtable_type_ids.get(type_id)` resolution at the SoftwareBackend
+  struct-init codegen site, or the emitted vtable data object being stripped
+  by `--gc-sections` despite registration. The fault cluster after
+  `launcher apps=15` now follows the SECOND `create_offscreen()` (the first no
+  longer faults post-A-fix).
 - **Date:** 2026-07-16
 - **Severity:** critical (LAST blocker for SimpleOS x86_64 desktop first frame — screendump still black)
 - **Component:** rust seed codegen (cranelift, `native-build --entry-closure`, freestanding)
