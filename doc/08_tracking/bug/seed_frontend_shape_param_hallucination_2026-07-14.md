@@ -1,9 +1,10 @@
 # Seed interpreter regression: qualified `Span.empty()` dispatches to `empty(shape)`
 
 **Status:** root cause fixed and bootstrap seed rebuilt on 2026-07-16. The
-focused runner reached final link, and the four missing `core-c-bootstrap`
-owners now have a source fix plus archive-symbol evidence. A rebuilt runner is
-still required.
+four missing `core-c-bootstrap` owners now have a source fix plus
+archive-symbol evidence. The third and final bounded full-CLI rebuild exposed
+a separate pure-parser tuple-destructuring gap; no candidate reached seedless
+runner admission.
 
 ## Symptom
 
@@ -96,7 +97,39 @@ font workaround.
 - Rust test harness startup remains independently blocked before test execution
   by its existing undefined `spl_arg_count`/`spl_get_arg` link baseline.
 
-Do not fall back to the removed Rust-hosted bundle. The next bounded session
-must rebuild the bootstrap seed, build the focused runner once, and execute the
-calibration. A PASS still requires runner SHA-256 plus distinct deliberate-fail
-and zero-example exit-1 logs.
+## Full-CLI bootstrap follow-up (2026-07-16)
+
+The first bounded full-CLI build passed Stages 2 and 3, then exposed a pure
+frontend gap at Stage 4: flat module parsing consumed `pub` but did not skip the
+resolver-owned `mod` declaration. `parse_module_body` now skips both public and
+private dotted child-module declarations, and the regression asserts that the
+following function remains visible and that parsing records no error.
+
+The second bounded build again passed Stages 2 and 3 and advanced substantially
+farther through Stage 4. It exposed the next pure lexer gap on raw triple-quoted
+docstrings (`r"""..."""`). `CoreLexer.scan_raw_string` now recognizes the
+combined delimiter, preserves dollar signs and backslashes literally, consumes
+the closing triple delimiter, and reports unterminated input. A focused lexer
+regression covers the literal behavior.
+
+Stage 4 in that cycle spent roughly 50 minutes compiling one binary. A sample
+at 35:59 CPU showed 3,589,152 KiB RSS. The final bounded cycle subsequently
+exceeded one hour of continuous CPU time and 5,619,552 KiB RSS without emitting
+a phase-progress message or candidate ELF before failing in phase 2. This is a
+concrete bootstrap performance bug: native-build
+needs phase timing and memory attribution, followed by an incremental/cache or
+peak-memory fix. It is not acceptable to hide the cost by falling back to the
+Rust seed.
+
+The third build was the final verify/fix cycle allowed for this session. It
+failed parsing `src/compiler/15.blocks/blocks/unified_registry.spl:74` at
+`for name, lit_def in literals_config.custom`: the pure Stage-4 parser expected
+`in` after `name` and rejected the comma. Retain that diagnostic and continue
+the tuple-destructuring grammar fix in a fresh bounded session; do not restart
+bootstrap here. A later successful candidate must still be copied without a
+sibling seed and run a real focused SSpec through `test` before admission.
+
+Do not fall back to the removed Rust-hosted bundle. After a pure CLI candidate
+passes admission, build the focused runner once and execute the calibration. A
+PASS still requires runner SHA-256 plus distinct deliberate-fail and
+zero-example exit-1 logs.

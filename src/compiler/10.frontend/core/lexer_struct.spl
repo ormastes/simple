@@ -647,10 +647,32 @@ impl CoreLexer:
 
     me scan_raw_string(start_line: i64, start_col: i64):
         # Consume the opening double-quote (the `r` was already consumed by scan_ident).
-        # No escape processing: backslashes and all chars are literal.
-        # Terminated by the first unescaped `"`.  Cannot span newlines.
         self.cur_start = self.pos
         self.advance()  # consume opening "
+        # Raw triple strings preserve backslashes/interpolation markers and may
+        # span lines, matching the Rust seed's r"""...""" grammar.
+        if self.peek() == "\"" and self.peek_next() == "\"":
+            self.advance()
+            self.advance()
+            val raw_start: i64 = self.pos
+            for i in 0..1000000:
+                if self.at_end():
+                    self.make_token(191, "unterminated string", start_line, start_col)
+                    return
+                if self.peek() == "\"" and self.peek_next() == "\"" and self.peek_at(2) == "\"":
+                    val raw_triple = self.char_slice(raw_start, self.pos)
+                    self.advance()
+                    self.advance()
+                    self.advance()
+                    self.at_line_start = false
+                    self.make_token(3, raw_triple, start_line, start_col)
+                    self.cur_text = raw_triple
+                    core_token_text_save(raw_triple)
+                    return
+                self.advance()
+
+        # No escape processing: backslashes and all chars are literal.
+        # Terminated by the first `"`.  Cannot span newlines.
         var raw_parts: [text] = []
         var raw_done: bool = false
         for i in 0..100000:
