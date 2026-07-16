@@ -147,6 +147,14 @@
   until Vulkan SDK/RenderDoc browser capture and D3D12/PIX evidence are
   available. Current details are in
   `doc/09_report/windows_gui_web_2d_evidence_bundle_current_2026-07-16.md`.
+- The GUI RenderDoc feature-coverage aggregate now discovers the current
+  Windows D3D12 fail-closed evidence at
+  `build/windows-d3d12-render-log-env-strict-current/evidence.env` instead of
+  reporting the old `build/windows-d3d12-render-log-compare/evidence.env` path
+  as missing. The refreshed 2026-07-16 aggregate report records
+  `windows_d3d12_render_log_compare_env_file_status=pass`,
+  `windows_d3d12_render_log_compare_status=fail`, and the five remaining D3D12
+  gates, so Windows D3D12 remains incomplete but no longer looks absent.
 - Windows DirectX Web/2D evidence now has a current real-launch/capture pass in
   `doc/09_report/gui_web_2d_directx_windows_current_2026-07-16.md`. The
   PowerShell wrapper reports D3D11 native staging readback pass with matching
