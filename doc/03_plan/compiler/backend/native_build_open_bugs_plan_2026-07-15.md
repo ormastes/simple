@@ -50,7 +50,7 @@ source fixes from executable proof.
 | 16 | Target-aware global cfg selection implemented across native, driver/JIT, imports, and module loading; AArch64/RISC-V LLVM object regressions added, execution pending. |
 | 17 | Module+owner-qualified method identity implemented through imports, HIR, MIR, bootstrap, trait defaults, and static methods; strict LLVM+Cranelift dispatch proof pending. |
 | 18 | Pure-Simple Cranelift dynload globals now declare, initialize, load, and store writable scalar data; strict LLVM+Cranelift init/mutation proof pending. |
-| 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, POSIX/macOS/BSD and Windows core-C process-timeout ownership, canonical core-C HTTP tuple ownership, private vendored font symbols, conditional pure-C dynamic-loader ownership with shared LLVM/Cranelift hosted-platform regression, pure-Simple aggregate final-request derivation, deterministic unique-owner archive selection, cross-platform archive-path/native-all discovery and hosted transitive link policy, explicit-entry dispatch, and a fail-closed barrier against ordinary-link fallthrough are source-implemented; full link-profile fingerprint, remaining providers, production inventory/link wiring, and strict execution remain. Windows compile/native proof is pending. |
+| 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, POSIX/macOS/BSD and Windows core-C process-timeout ownership, canonical core-C HTTP tuple ownership, private vendored font symbols, conditional pure-C dynamic-loader ownership with shared LLVM/Cranelift hosted-platform regression, pure-Simple aggregate final-request derivation, deterministic unique-owner archive selection, cross-platform archive-path/native-all discovery and hosted transitive link policy, explicit-entry dispatch, and a fail-closed barrier against ordinary-link fallthrough are source-implemented; full link-profile fingerprint, remaining providers, production inventory/link wiring, and strict execution remain. The LLVM-configured Windows job now selects the existing strict LLVM/Cranelift `dynload_tagged_text` proof and forbids backend XFAIL; execution is pending. |
 | 20 | C-owned host-GPU queue facade and fail-closed archive ownership checks implemented; native queue execution proof remains. |
 | 21 | Rust-seed inline-continuation fix and focused chained-inline regression are verified (`simple-parser` control-flow test: 19 passed); real inspector execution remains pending behind the unrelated pure-Simple `rt_cli_arg_count` bootstrap failure. |
 
@@ -146,7 +146,9 @@ remain test-only prerequisites. The exact CLI profile now derives its final requ
 archive ownership and order Simple objects → compiler capsule → capability
 providers → core-C → system libraries. The current provider inventory covers
 compiler hooks, time/progress, SQLite, memtrack, and POSIX/macOS/BSD plus Windows
-process-timeout source ownership (Windows compile/native proof pending); GPU/font/dynload,
+process-timeout source ownership. The LLVM-configured Windows job now runs the focused strict-dual
+dynamic-loader case through the staged compiler; its first CI execution remains
+pending. GPU/font/dynload,
 window, HTTP, remaining process/thread,
 SMF/CUDA, and other CLI owners remain. Core-C currently overlaps memtrack, raw
 `libsimple_native_all.a` selection and allow-multiple-definition are still

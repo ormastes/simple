@@ -80,8 +80,10 @@
 #
 # Usage: sh scripts/check/check-native-seed-parity.shs
 # Env:   SIMPLE_BINARY (default bin/simple), PARITY_WORK_DIR (default
-#        /tmp/check-native-seed-parity.$$), SEED_TIMEOUT_S (default 20),
-#        NATIVE_RUN_TIMEOUT_S (default 20)
+#        /tmp/check-native-seed-parity.$$), NATIVE_PARITY_CASES (optional
+#        space-separated case IDs), NATIVE_PARITY_FAIL_ON_XFAIL=1 (optional
+#        strict gate), SEED_TIMEOUT_S (default 20), and NATIVE_RUN_TIMEOUT_S
+#        (default 20)
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -101,6 +103,7 @@ TOTAL=0
 PASS_N=0
 FAIL_N=0
 XFAIL_N=0
+MATCHED_PARITY_CASES=""
 
 norm() {
     # Canonicalize stdout: strip newlines and spaces so seed's added
@@ -1311,6 +1314,17 @@ record() {
     echo "[$id] mode=$mode -> $status ($detail)"
 }
 
+case_selected() {
+    [ -z "${NATIVE_PARITY_CASES:-}" ] && return 0
+    for wanted in $NATIVE_PARITY_CASES; do
+        if [ "$1" = "$wanted" ]; then
+            MATCHED_PARITY_CASES="$MATCHED_PARITY_CASES $1"
+            return 0
+        fi
+    done
+    return 1
+}
+
 run_seed() {
     # $1 = src, writes stdout to $2. Timeout-guarded: the seed interpreter
     # is known to hang on some constructs (see `range_for`) — never let an
@@ -1372,6 +1386,7 @@ cranelift_seed_supported() {
 
 run_strict_dual_backend_case() {
     id="$1"; writer="$2"; expected="$3"; mode="${4:-}"
+    case_selected "$id" || return 0
     src="$WORK_DIR/case_${id}_${STAMP}.spl"
     "$writer" "$src"
 
@@ -1425,6 +1440,7 @@ run_strict_dual_backend_case() {
 
 run_parity_case() {
     id="$1"; writer="$2"
+    case_selected "$id" || return 0
     src="$WORK_DIR/case_${id}_${STAMP}.spl"
     bin="$WORK_DIR/case_${id}_${STAMP}_bin"
     seed_out="$WORK_DIR/case_${id}_${STAMP}.seed.out"
@@ -1452,6 +1468,7 @@ run_parity_case() {
 
 run_native_authoritative_case() {
     id="$1"; writer="$2"; expected="$3"; seed_note="$4"
+    case_selected "$id" || return 0
     src="$WORK_DIR/case_${id}_${STAMP}.spl"
     bin="$WORK_DIR/case_${id}_${STAMP}_bin"
     seed_out="$WORK_DIR/case_${id}_${STAMP}.seed.out"
@@ -1486,6 +1503,7 @@ run_native_authoritative_case() {
 
 run_loud_fail_case() {
     id="$1"; writer="$2"; expected_diag="$3"
+    case_selected "$id" || return 0
     src="$WORK_DIR/case_${id}_${STAMP}.spl"
     bin="$WORK_DIR/case_${id}_${STAMP}_bin"
     build_log="$WORK_DIR/case_${id}_${STAMP}.build.log"
@@ -1511,6 +1529,7 @@ run_loud_fail_case() {
 
 run_runtime_fail_case() {
     id="$1"; writer="$2"; expected_diag="$3"
+    case_selected "$id" || return 0
     src="$WORK_DIR/case_${id}_${STAMP}.spl"
     bin="$WORK_DIR/case_${id}_${STAMP}_bin"
     build_log="$WORK_DIR/case_${id}_${STAMP}.build.log"
@@ -1652,6 +1671,24 @@ done <"$RESULTS_FILE"
 echo ""
 echo "total=$TOTAL pass=$PASS_N fail=$FAIL_N xfail=$XFAIL_N"
 echo "results_file=$RESULTS_FILE"
+
+if [ -n "${NATIVE_PARITY_CASES:-}" ]; then
+    for wanted in $NATIVE_PARITY_CASES; do
+        matched=false
+        for found in $MATCHED_PARITY_CASES; do
+            [ "$wanted" = "$found" ] && matched=true
+        done
+        if [ "$matched" != true ]; then
+            echo "native_seed_parity=false (unknown requested case: $wanted)"
+            exit 1
+        fi
+    done
+fi
+
+if [ "${NATIVE_PARITY_FAIL_ON_XFAIL:-0}" = 1 ] && [ "$XFAIL_N" -gt 0 ]; then
+    echo "native_seed_parity=false (xfail is forbidden by NATIVE_PARITY_FAIL_ON_XFAIL)"
+    exit 1
+fi
 
 if [ "$FAIL_N" -gt 0 ]; then
     echo "native_seed_parity=false"
