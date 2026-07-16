@@ -31,6 +31,16 @@ Current Windows refresh for
   `simpleos_qemu_gpu_readback_status=pass`,
   `simpleos_qemu_wm_marker_status=pass`, and
   `simpleos_qemu_rv64_blocker=pass`.
+- Desktop-service rebuild bootstrap: blocked with explicit compiler diagnostics.
+  The wrapper now accepts and records `-BuildCxx` in addition to `-BuildCc`,
+  probes both compilers before native-build, and stops with
+  `simpleos_qemu_rv64_desktop_service_build_status=blocked:build-cc-launch-failed`
+  when the Windows MSYS2 LLVM tools cannot load. Current probe rows show
+  `simpleos_qemu_rv64_desktop_service_build_cc_launch_exit_code=-1073741515`
+  and `simpleos_qemu_rv64_desktop_service_build_cxx_launch_exit_code=-1073741515`.
+  `objdump -p` shows the installed `clang++.exe` imports `libLLVM-19.dll`,
+  while that DLL is absent from `C:\dev\tool\msys2`; this is the concrete local
+  rebuild blocker.
 
 ## Evidence Command
 
@@ -39,8 +49,11 @@ Push-Location $env:TEMP
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\ormas\dev\simple\scripts\check\check-simpleos-qemu-rv64-desktop-evidence.ps1 -EvidencePath build\simpleos_multiconfig_live_evidence\qemu-rv64-desktop-out-of-tree.env
 Pop-Location
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-simpleos-qemu-rv64-desktop-evidence.ps1 -EvidencePath build\simpleos_multiconfig_live_evidence\qemu-rv64-desktop-live-current.env -RunLiveBoot -BootTimeoutSeconds 60
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-simpleos-qemu-rv64-desktop-evidence.ps1 -EvidencePath build\simpleos_multiconfig_live_evidence\qemu-rv64-desktop-build-toolchain-current.env -BuildDesktopServiceKernel -BuildCc C:\dev\tool\msys2\mingw64\bin\clang.exe -BuildCxx C:\dev\tool\msys2\mingw64\bin\clang++.exe
 ```
 
 The live command proves the Windows QEMU launch, network probes, QMP screendump,
 GPU readback, and WM marker path. RenderDoc `.rdc` and structured QEMU/host
-RenderDoc log evidence remain separate gates.
+RenderDoc log evidence remain separate gates. The build-toolchain command
+proves the current Windows RV64 rebuild blocker without attempting a native-build
+through a compiler that cannot start.

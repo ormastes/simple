@@ -18,6 +18,7 @@ param(
     [string]$BuildLogPath = "",
     [string]$BuildBackend = $env:SIMPLE_OS_BUILD_BACKEND,
     [string]$BuildCc = $env:CC,
+    [string]$BuildCxx = $env:CXX,
     [switch]$BuildDesktopServiceKernel,
     [string]$DesktopServiceKernelPath = "build/os/simpleos_riscv64_desktop_service.elf",
     [string]$DesktopServiceEntry = "examples/09_embedded/simple_os/arch/riscv64/desktop_service_entry.spl",
@@ -33,6 +34,35 @@ $ErrorActionPreference = "Stop"
 
 function Write-Row($rows, [string]$key, [string]$value) {
     $rows.Add("$key=$value") | Out-Null
+}
+
+function Resolve-BuildCxx([string]$cc, [string]$cxx) {
+    if (-not [string]::IsNullOrWhiteSpace($cxx)) {
+        return $cxx
+    }
+    return $cc
+}
+
+function Test-BuildToolLaunch([string]$toolPath) {
+    if ([string]::IsNullOrWhiteSpace($toolPath)) {
+        return @{ status = "missing"; exit_code = "" }
+    }
+    if (-not (Test-Path -LiteralPath $toolPath)) {
+        return @{ status = "missing"; exit_code = "" }
+    }
+    $stdoutPath = [System.IO.Path]::GetTempFileName()
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    try {
+        $process = Start-Process -FilePath $toolPath -ArgumentList @("--version") -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -Wait -PassThru
+        if ($process.ExitCode -eq 0) {
+            return @{ status = "pass"; exit_code = "$($process.ExitCode)" }
+        }
+        return @{ status = "launch-failed"; exit_code = "$($process.ExitCode)" }
+    } catch {
+        return @{ status = "launch-failed"; exit_code = "exception" }
+    } finally {
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Test-TcpPort([string]$hostName, [int]$port, [int]$timeoutMs) {
@@ -331,9 +361,17 @@ $nestedSimpleBinaryUsed = ""
 $nestedSimpleBinarySource = "not-requested"
 $buildCcUsed = ""
 $buildCcSource = "not-requested"
+$buildCxxUsed = ""
+$buildCxxSource = "not-requested"
 $desktopServiceBuildAttempted = $false
 $desktopServiceBuildStatus = "not-requested"
 $desktopServiceBuildExitCode = ""
+$desktopServiceBuildCc = ""
+$desktopServiceBuildCxx = ""
+$desktopServiceBuildCcLaunchStatus = "not-requested"
+$desktopServiceBuildCcLaunchExitCode = ""
+$desktopServiceBuildCxxLaunchStatus = "not-requested"
+$desktopServiceBuildCxxLaunchExitCode = ""
 $desktopServiceBuildCommand = "$BuildSimpleBinary native-build --source build/os/generated --source examples/09_embedded/simple_os/arch/riscv64 --backend cranelift --opt-level=aggressive --log on --timeout 180 --entry-closure --entry $DesktopServiceEntry --target riscv64-unknown-none -o $DesktopServiceKernelPath --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld"
 if ([string]::IsNullOrWhiteSpace($DesktopServiceBuildLogPath)) {
     $DesktopServiceBuildLogPath = Join-Path $ArtifactDir "rv64-desktop-service-build.log"
@@ -348,6 +386,7 @@ if ($AttemptBuild) {
         $oldBackend = $env:SIMPLE_OS_BUILD_BACKEND
         $oldSimpleBinary = $env:SIMPLE_BINARY
         $oldCc = $env:CC
+        $oldCxx = $env:CXX
         try {
             if (-not [string]::IsNullOrWhiteSpace($BuildBackend)) {
                 $env:SIMPLE_OS_BUILD_BACKEND = $BuildBackend
@@ -371,6 +410,12 @@ if ($AttemptBuild) {
             } elseif (-not [string]::IsNullOrWhiteSpace($env:CC)) {
                 $buildCcUsed = $env:CC
                 $buildCcSource = "environment"
+            }
+            $effectiveBuildCxx = Resolve-BuildCxx $buildCcUsed $BuildCxx
+            if (-not [string]::IsNullOrWhiteSpace($effectiveBuildCxx)) {
+                $env:CXX = $effectiveBuildCxx
+                $buildCxxUsed = $effectiveBuildCxx
+                $buildCxxSource = $(if ([string]::IsNullOrWhiteSpace($BuildCxx)) { "cc-fallback" } else { "param-or-environment" })
             }
             $buildStdoutPath = "$BuildLogPath.stdout"
             $buildStderrPath = "$BuildLogPath.stderr"
@@ -407,6 +452,11 @@ if ($AttemptBuild) {
             } else {
                 $env:CC = $oldCc
             }
+            if ($null -eq $oldCxx) {
+                Remove-Item Env:CXX -ErrorAction SilentlyContinue
+            } else {
+                $env:CXX = $oldCxx
+            }
         } catch {
             $buildStatus = "blocked:build-launch-failed"
             $buildError = $_.Exception.Message
@@ -425,6 +475,11 @@ if ($AttemptBuild) {
             } else {
                 $env:CC = $oldCc
             }
+            if ($null -eq $oldCxx) {
+                Remove-Item Env:CXX -ErrorAction SilentlyContinue
+            } else {
+                $env:CXX = $oldCxx
+            }
         }
     }
 }
@@ -436,16 +491,33 @@ if ($BuildDesktopServiceKernel) {
         $desktopServiceBuildStatus = "blocked:missing-simple-build-binary"
     } elseif ([string]::IsNullOrWhiteSpace($BuildCc) -or -not (Test-Path -LiteralPath $BuildCc)) {
         $desktopServiceBuildStatus = "blocked:missing-build-cc"
+    } elseif ([string]::IsNullOrWhiteSpace((Resolve-BuildCxx $BuildCc $BuildCxx)) -or -not (Test-Path -LiteralPath (Resolve-BuildCxx $BuildCc $BuildCxx))) {
+        $desktopServiceBuildStatus = "blocked:missing-build-cxx"
     } elseif (-not (Test-Path -LiteralPath $DesktopServiceEntry)) {
         $desktopServiceBuildStatus = "blocked:missing-desktop-service-entry"
     } else {
+        $desktopServiceBuildCc = $BuildCc
+        $desktopServiceBuildCxx = Resolve-BuildCxx $BuildCc $BuildCxx
+        $ccProbe = Test-BuildToolLaunch $desktopServiceBuildCc
+        $cxxProbe = Test-BuildToolLaunch $desktopServiceBuildCxx
+        $desktopServiceBuildCcLaunchStatus = $ccProbe.status
+        $desktopServiceBuildCcLaunchExitCode = $ccProbe.exit_code
+        $desktopServiceBuildCxxLaunchStatus = $cxxProbe.status
+        $desktopServiceBuildCxxLaunchExitCode = $cxxProbe.exit_code
+        if ($desktopServiceBuildCcLaunchStatus -ne "pass") {
+            $desktopServiceBuildStatus = "blocked:build-cc-launch-failed"
+        } elseif ($desktopServiceBuildCxxLaunchStatus -ne "pass") {
+            $desktopServiceBuildStatus = "blocked:build-cxx-launch-failed"
+        } else {
         $oldBackend = $env:SIMPLE_OS_BUILD_BACKEND
         $oldSimpleLib = $env:SIMPLE_LIB
         $oldCc = $env:CC
+        $oldCxx = $env:CXX
         try {
             $env:SIMPLE_OS_BUILD_BACKEND = $(if ([string]::IsNullOrWhiteSpace($BuildBackend)) { "cranelift" } else { $BuildBackend })
             $env:SIMPLE_LIB = "src"
             $env:CC = $BuildCc
+            $env:CXX = $desktopServiceBuildCxx
             $desktopStdoutPath = "$DesktopServiceBuildLogPath.stdout"
             $desktopStderrPath = "$DesktopServiceBuildLogPath.stderr"
             Remove-Item -LiteralPath $desktopStdoutPath, $desktopStderrPath -Force -ErrorAction SilentlyContinue
@@ -482,6 +554,8 @@ if ($BuildDesktopServiceKernel) {
             if ($null -eq $oldBackend) { Remove-Item Env:SIMPLE_OS_BUILD_BACKEND -ErrorAction SilentlyContinue } else { $env:SIMPLE_OS_BUILD_BACKEND = $oldBackend }
             if ($null -eq $oldSimpleLib) { Remove-Item Env:SIMPLE_LIB -ErrorAction SilentlyContinue } else { $env:SIMPLE_LIB = $oldSimpleLib }
             if ($null -eq $oldCc) { Remove-Item Env:CC -ErrorAction SilentlyContinue } else { $env:CC = $oldCc }
+            if ($null -eq $oldCxx) { Remove-Item Env:CXX -ErrorAction SilentlyContinue } else { $env:CXX = $oldCxx }
+        }
         }
     }
 }
@@ -748,12 +822,20 @@ Write-Row $rows "simpleos_qemu_rv64_nested_simple_binary" "$nestedSimpleBinaryUs
 Write-Row $rows "simpleos_qemu_rv64_nested_simple_binary_source" "$nestedSimpleBinarySource"
 Write-Row $rows "simpleos_qemu_rv64_build_cc" "$buildCcUsed"
 Write-Row $rows "simpleos_qemu_rv64_build_cc_source" "$buildCcSource"
+Write-Row $rows "simpleos_qemu_rv64_build_cxx" "$buildCxxUsed"
+Write-Row $rows "simpleos_qemu_rv64_build_cxx_source" "$buildCxxSource"
 if (-not [string]::IsNullOrWhiteSpace($buildError)) {
     Write-Row $rows "simpleos_qemu_rv64_build_error" "$buildError"
 }
 Write-Row $rows "simpleos_qemu_rv64_desktop_service_build_attempted" $(if ($desktopServiceBuildAttempted) { "true" } else { "false" })
 Write-Row $rows "simpleos_qemu_rv64_desktop_service_build_status" "$desktopServiceBuildStatus"
 Write-Row $rows "simpleos_qemu_rv64_desktop_service_build_exit_code" "$desktopServiceBuildExitCode"
+Write-Row $rows "simpleos_qemu_rv64_desktop_service_build_cc" "$desktopServiceBuildCc"
+Write-Row $rows "simpleos_qemu_rv64_desktop_service_build_cxx" "$desktopServiceBuildCxx"
+Write-Row $rows "simpleos_qemu_rv64_desktop_service_build_cc_launch_status" "$desktopServiceBuildCcLaunchStatus"
+Write-Row $rows "simpleos_qemu_rv64_desktop_service_build_cc_launch_exit_code" "$desktopServiceBuildCcLaunchExitCode"
+Write-Row $rows "simpleos_qemu_rv64_desktop_service_build_cxx_launch_status" "$desktopServiceBuildCxxLaunchStatus"
+Write-Row $rows "simpleos_qemu_rv64_desktop_service_build_cxx_launch_exit_code" "$desktopServiceBuildCxxLaunchExitCode"
 Write-Row $rows "simpleos_qemu_rv64_desktop_service_build_command" "$desktopServiceBuildCommand"
 Write-Row $rows "simpleos_qemu_rv64_desktop_service_build_log_path" "$DesktopServiceBuildLogPath"
 Write-Row $rows "simpleos_qemu_rv64_desktop_service_entry" "$DesktopServiceEntry"

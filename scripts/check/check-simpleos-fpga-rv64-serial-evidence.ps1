@@ -11,6 +11,7 @@ param(
     [string]$BuildSimpleBinary = "src\compiler_rust\target\debug\simple.exe",
     [string]$BuildBackend = $env:SIMPLE_OS_BUILD_BACKEND,
     [string]$BuildCc = $env:CC,
+    [string]$BuildCxx = $env:CXX,
     [string]$BuildLogPath = "",
     [string]$ToolchainStatus = $env:SIMPLEOS_FPGA_TOOLCHAIN_STATUS,
     [string]$BitstreamPath = $env:SIMPLEOS_FPGA_BITSTREAM,
@@ -32,6 +33,35 @@ function Write-Row($rows, [string]$key, [string]$value) {
         }
     }
     $rows.Add("$key=$value") | Out-Null
+}
+
+function Resolve-BuildCxx([string]$cc, [string]$cxx) {
+    if (-not [string]::IsNullOrWhiteSpace($cxx)) {
+        return $cxx
+    }
+    return $cc
+}
+
+function Test-BuildToolLaunch([string]$toolPath) {
+    if ([string]::IsNullOrWhiteSpace($toolPath)) {
+        return @{ status = "missing"; exit_code = "" }
+    }
+    if (-not (Test-Path -LiteralPath $toolPath)) {
+        return @{ status = "missing"; exit_code = "" }
+    }
+    $stdoutPath = [System.IO.Path]::GetTempFileName()
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    try {
+        $process = Start-Process -FilePath $toolPath -ArgumentList @("--version") -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -Wait -PassThru
+        if ($process.ExitCode -eq 0) {
+            return @{ status = "pass"; exit_code = "$($process.ExitCode)" }
+        }
+        return @{ status = "launch-failed"; exit_code = "$($process.ExitCode)" }
+    } catch {
+        return @{ status = "launch-failed"; exit_code = "exception" }
+    } finally {
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Test-FileNonEmpty([string]$path) {
@@ -229,6 +259,12 @@ if ($CaptureSerial -and [string]::IsNullOrWhiteSpace($SerialLogPath)) {
 $buildAttempted = $false
 $buildStatus = "not-requested"
 $buildExitCode = ""
+$buildCcUsed = ""
+$buildCxxUsed = ""
+$buildCcLaunchStatus = "not-requested"
+$buildCcLaunchExitCode = ""
+$buildCxxLaunchStatus = "not-requested"
+$buildCxxLaunchExitCode = ""
 $buildCommand = "$BuildSimpleBinary native-build --source build/os/generated --source examples/09_embedded/simple_os/arch/riscv64 --backend cranelift --opt-level=aggressive --log on --timeout 180 --entry-closure --entry $ExpectedEntry --target riscv64-unknown-none -o $ExpectedKernelPath --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld"
 
 if ($BuildFpgaSerialKernel) {
@@ -237,17 +273,34 @@ if ($BuildFpgaSerialKernel) {
         $buildStatus = "blocked:missing-simple-build-binary"
     } elseif ([string]::IsNullOrWhiteSpace($BuildCc) -or -not (Test-Path -LiteralPath $BuildCc)) {
         $buildStatus = "blocked:missing-build-cc"
+    } elseif ([string]::IsNullOrWhiteSpace((Resolve-BuildCxx $BuildCc $BuildCxx)) -or -not (Test-Path -LiteralPath (Resolve-BuildCxx $BuildCc $BuildCxx))) {
+        $buildStatus = "blocked:missing-build-cxx"
     } elseif (-not (Test-Path -LiteralPath $ExpectedEntry)) {
         $buildStatus = "blocked:missing-fpga-serial-entry"
     } else {
+        $buildCcUsed = $BuildCc
+        $buildCxxUsed = Resolve-BuildCxx $BuildCc $BuildCxx
+        $ccProbe = Test-BuildToolLaunch $buildCcUsed
+        $cxxProbe = Test-BuildToolLaunch $buildCxxUsed
+        $buildCcLaunchStatus = $ccProbe.status
+        $buildCcLaunchExitCode = $ccProbe.exit_code
+        $buildCxxLaunchStatus = $cxxProbe.status
+        $buildCxxLaunchExitCode = $cxxProbe.exit_code
+        if ($buildCcLaunchStatus -ne "pass") {
+            $buildStatus = "blocked:build-cc-launch-failed"
+        } elseif ($buildCxxLaunchStatus -ne "pass") {
+            $buildStatus = "blocked:build-cxx-launch-failed"
+        } else {
         $oldBackend = $env:SIMPLE_OS_BUILD_BACKEND
         $oldSimpleLib = $env:SIMPLE_LIB
         $oldCc = $env:CC
+        $oldCxx = $env:CXX
         try {
             $backend = $(if ([string]::IsNullOrWhiteSpace($BuildBackend)) { "cranelift" } else { $BuildBackend })
             $env:SIMPLE_OS_BUILD_BACKEND = $backend
             $env:SIMPLE_LIB = "src"
             $env:CC = $BuildCc
+            $env:CXX = $buildCxxUsed
             $stdoutPath = "$BuildLogPath.stdout"
             $stderrPath = "$BuildLogPath.stderr"
             Remove-Item -LiteralPath $stdoutPath, $stderrPath, $BuildLogPath -Force -ErrorAction SilentlyContinue
@@ -282,6 +335,8 @@ if ($BuildFpgaSerialKernel) {
             if ($null -eq $oldBackend) { Remove-Item Env:SIMPLE_OS_BUILD_BACKEND -ErrorAction SilentlyContinue } else { $env:SIMPLE_OS_BUILD_BACKEND = $oldBackend }
             if ($null -eq $oldSimpleLib) { Remove-Item Env:SIMPLE_LIB -ErrorAction SilentlyContinue } else { $env:SIMPLE_LIB = $oldSimpleLib }
             if ($null -eq $oldCc) { Remove-Item Env:CC -ErrorAction SilentlyContinue } else { $env:CC = $oldCc }
+            if ($null -eq $oldCxx) { Remove-Item Env:CXX -ErrorAction SilentlyContinue } else { $env:CXX = $oldCxx }
+        }
         }
     }
 }
@@ -348,6 +403,12 @@ Write-Row $rows "simpleos_fpga_board_profile" "$BoardProfile"
 Write-Row $rows "simpleos_fpga_build_attempted" $(if ($buildAttempted) { "true" } else { "false" })
 Write-Row $rows "simpleos_fpga_build_status" "$buildStatus"
 Write-Row $rows "simpleos_fpga_build_exit_code" "$buildExitCode"
+Write-Row $rows "simpleos_fpga_build_cc" "$buildCcUsed"
+Write-Row $rows "simpleos_fpga_build_cxx" "$buildCxxUsed"
+Write-Row $rows "simpleos_fpga_build_cc_launch_status" "$buildCcLaunchStatus"
+Write-Row $rows "simpleos_fpga_build_cc_launch_exit_code" "$buildCcLaunchExitCode"
+Write-Row $rows "simpleos_fpga_build_cxx_launch_status" "$buildCxxLaunchStatus"
+Write-Row $rows "simpleos_fpga_build_cxx_launch_exit_code" "$buildCxxLaunchExitCode"
 Write-Row $rows "simpleos_fpga_build_command" "$buildCommand"
 Write-Row $rows "simpleos_fpga_build_log_path" "$BuildLogPath"
 Write-Row $rows "simpleos_fpga_expected_entry" "$ExpectedEntry"
