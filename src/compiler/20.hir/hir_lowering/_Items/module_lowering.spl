@@ -117,6 +117,40 @@ impl HirLowering:
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
         HirType(kind: hir_type_kind_from_simple_name(scan.resolved_name.unwrap()), span: fn_decl.span)
 
+    me declared_callable_type(fn_decl: Function, owner_symbol: SymbolId?) -> HirType?:
+        # Generic callables keep the existing untyped-symbol behavior until
+        # monomorphization supplies a concrete signature.
+        if fn_decl.type_params.len() > 0:
+            return nil
+
+        var param_types: [HirType] = []
+        val raw_params = fn_decl.params
+        var first_raw_param = 0
+        match owner_symbol:
+            case Some(owner_id):
+                if not fn_decl.is_static:
+                    param_types.push(HirType(
+                        kind: HirTypeKind.Named(owner_id, []),
+                        span: fn_decl.span
+                    ))
+                    if raw_params.len() > 0:
+                        if raw_params[0].name == "self" or raw_params[0].name == "me":
+                            first_raw_param = 1
+            case None:
+                ()
+        while first_raw_param < raw_params.len():
+            param_types.push(self.lower_type(raw_params[first_raw_param].type_))
+            first_raw_param = first_raw_param + 1
+
+        val return_type = if fn_decl.has_return_type:
+            self.lower_type(fn_decl.return_type)
+        else:
+            self.infer_untyped_return_type(fn_decl)
+        Some(HirType(
+            kind: HirTypeKind.Function(param_types, return_type, []),
+            span: fn_decl.span
+        ))
+
     me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:
         match e.kind:
             case ExprKind.IntLit(_):
@@ -328,39 +362,25 @@ impl HirLowering:
         if as_cls != nil:
             val imported_type = self.symbols.define(local_name, SymbolKind.Class, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
             self.symbols.rename_symbol(imported_type, imported_name)
-            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, import_span)
+            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span)
         elif as_str != nil:
             val imported_type = self.symbols.define(local_name, SymbolKind.Struct, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
             self.symbols.rename_symbol(imported_type, imported_name)
-            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, import_span)
+            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span)
         elif as_enum != nil:
             val imported_type = self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
             self.symbols.rename_symbol(imported_type, imported_name)
-            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, import_span)
+            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span)
         elif as_trait != nil:
             self.symbols.define(local_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
         elif as_fn != nil:
-            if as_fn.type_params.len() > 0:
-                val generic_fn_sym = self.symbols.define(local_name, SymbolKind.Function, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
-                self.qualify_imported_function_symbol(generic_fn_sym, imported_mod_name, imported_name)
-                return
-            var param_types: [HirType] = []
-            for param in as_fn.params:
-                param_types = param_types.push(self.lower_type(param.type_))
-            val return_type = if as_fn.has_return_type:
-                self.lower_type(as_fn.return_type)
-            else:
-                self.infer_untyped_return_type(as_fn)
-            val fn_type = HirType(
-                kind: HirTypeKind.Function(param_types, return_type, []),
-                span: import_span
-            )
-            val imported_fn_sym = self.symbols.define(local_name, SymbolKind.Function, Some(fn_type), import_span, Visibility.Public, false, Some(imported_mod_name))
+            val fn_type = self.declared_callable_type(as_fn, nil)
+            val imported_fn_sym = self.symbols.define(local_name, SymbolKind.Function, fn_type, import_span, Visibility.Public, false, Some(imported_mod_name))
             self.qualify_imported_function_symbol(imported_fn_sym, imported_mod_name, imported_name)
         elif as_const != nil:
             self.symbols.define(local_name, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
 
-    me register_imported_type_methods(imported_mod: Module, imported_mod_name: text, imported_name: text, import_span: Span):
+    me register_imported_type_methods(imported_mod: Module, imported_mod_name: text, imported_name: text, local_owner: SymbolId, import_span: Span):
         val owner_module = hir_module_logical_name_from_path(imported_mod_name)
         for impl_ in imported_mod.impls:
             if parser_type_kind_named_name(impl_.type_.kind) != imported_name:
@@ -370,7 +390,8 @@ impl HirLowering:
                 val symbol_name = "{owner_module}.{imported_name}::{method_name}"
                 if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
                     val kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
-                    self.symbols.define(symbol_name, kind, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+                    val method_type = self.declared_callable_type(method, Some(local_owner))
+                    self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, Some(imported_mod_name))
             if impl_.has_trait_:
                 val trait_name = parser_type_kind_named_name(impl_.trait_.kind)
                 val trait_: Trait? = imported_mod.traits.get(trait_name)
@@ -379,7 +400,8 @@ impl HirLowering:
                         val symbol_name = "{owner_module}.{imported_name}::{trait_method.name}"
                         if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
                             val kind = if trait_method.is_static: SymbolKind.Function else: SymbolKind.Method
-                            self.symbols.define(symbol_name, kind, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+                            val method_type = self.declared_callable_type(trait_method, Some(local_owner))
+                            self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, Some(imported_mod_name))
 
     me qualify_imported_function_symbol(sym_id: SymbolId, imported_mod_name: text, imported_name: text):
         """Under a --entry-closure bootstrap build, rename a cross-module
@@ -1014,22 +1036,8 @@ impl HirLowering:
             if (hir_module_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") ?? "") == "1":
                 val return_name: text = parser_type_kind_named_name(fn_decl.return_type.kind)
                 eprint("[flat-function-roundtrip] phase=hir name={fn_decl.name} return={return_name}")
-            if fn_decl.type_params.len() > 0:
-                self.symbols.define(name, SymbolKind.Function, nil, decl_span, decl_visibility, false, mod_name)
-                idx = idx + 1
-                continue
-            var param_types: [HirType] = []
-            for param in fn_decl.params:
-                param_types = param_types.push(self.lower_type(param.type_))
-            val return_type = if fn_decl.has_return_type:
-                self.lower_type(fn_decl.return_type)
-            else:
-                self.infer_untyped_return_type(fn_decl)
-            val fn_type = HirType(
-                kind: HirTypeKind.Function(param_types, return_type, []),
-                span: fn_decl.span
-            )
-            self.symbols.define(name, SymbolKind.Function, Some(fn_type), decl_span, decl_visibility, false, mod_name)
+            val fn_type = self.declared_callable_type(fn_decl, nil)
+            self.symbols.define(name, SymbolKind.Function, fn_type, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 
         val module_constants = module.constants
@@ -1053,7 +1061,9 @@ impl HirLowering:
                 val owner_symbol = self.symbols.lookup_or_invalid(owner_name)
                 val symbol_name = if owner_symbol.is_valid(): self.symbols.method_symbol_name(owner_symbol, name) else: name
                 val symbol_kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
-                self.symbols.define(symbol_name, symbol_kind, nil, decl_span, decl_visibility, false, mod_name)
+                val owner_context: SymbolId? = if owner_symbol.is_valid(): Some(owner_symbol) else: nil
+                val method_type = self.declared_callable_type(method, owner_context)
+                self.symbols.define(symbol_name, symbol_kind, method_type, decl_span, decl_visibility, false, mod_name)
                 mi = mi + 1
             impl_idx = impl_idx + 1
 

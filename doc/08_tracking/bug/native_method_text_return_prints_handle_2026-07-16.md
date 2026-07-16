@@ -1,7 +1,8 @@
 # Native: method returning text prints raw handle integer
 
-**Status (2026-07-16):** open. Reproduced at main tip c8f4b62261a (after the
-rt_dict/rt_tuple extern-migration revert). Found while verifying
+**Status (2026-07-16):** source fixed; strict LLVM/Cranelift execution pending.
+Originally reproduced at main tip c8f4b62261a (after the rt_dict/rt_tuple
+extern-migration revert). Found while verifying
 `native_method_cleanup_global_misresolution_2026-07-13` (lane method_cleanup).
 
 A struct impl method returning `text` builds and dispatches correctly under
@@ -38,3 +39,13 @@ area: method-call result typing in
 `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` (result local
 not registered as text/runtime-string, so `print` lowers to the integer
 variant).
+
+## Source fix
+
+HIR callable predeclaration now records complete signatures for local and
+imported instance/static methods, including implicit receivers and inherited
+trait defaults. MIR method-call lowering therefore receives the declared text
+return shape instead of its former untyped `i64` fallback. Focused HIR/MIR
+tests cover local, aliased-import, static, and inherited-default paths; the
+native parity harness now includes `method_text_return` for both LLVM and
+Cranelift.

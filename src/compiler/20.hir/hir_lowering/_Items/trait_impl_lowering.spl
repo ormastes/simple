@@ -93,6 +93,10 @@ impl HirLowering:
         # Separate methods into abstract (no body) and defaults (with body)
         var abstract_methods: [HirFunction] = []
         var defaults: [HirFunction] = []
+        for method in trait_.methods:
+            val method_kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
+            val method_type = self.declared_callable_type(method, Some(symbol))
+            self.symbols.define(method.name, method_kind, method_type, method.span, method.visibility, false, self.module_filename)
         for m in trait_.methods:
             val hir_fn = self.lower_function(m)
             # Check if method has a body (default implementation)
@@ -213,6 +217,21 @@ impl HirLowering:
                                 val concrete_symbol_name = match type_.kind:
                                     case Named(owner_symbol, _): self.symbols.method_symbol_name(owner_symbol, default_fn.name)
                                     case _: default_fn.name
+                                if not default_fn.is_static and concrete_symbol_type != nil:
+                                    match concrete_symbol_type.unwrap().kind:
+                                        case Function(default_params, default_return, default_effects):
+                                            if default_params.len() > 0:
+                                                var concrete_params: [HirType] = [type_]
+                                                var concrete_param_i = 1
+                                                while concrete_param_i < default_params.len():
+                                                    concrete_params.push(default_params[concrete_param_i])
+                                                    concrete_param_i = concrete_param_i + 1
+                                                concrete_symbol_type = Some(HirType(
+                                                    kind: HirTypeKind.Function(concrete_params, default_return, default_effects),
+                                                    span: default_fn.span
+                                                ))
+                                        case _:
+                                            ()
                                 val concrete_symbol = self.symbols.define(
                                     concrete_symbol_name,
                                     if default_fn.is_static: SymbolKind.Function else: SymbolKind.Method,
