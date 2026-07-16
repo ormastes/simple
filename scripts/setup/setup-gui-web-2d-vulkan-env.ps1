@@ -79,6 +79,24 @@ function Tool-Source([string[]]$names, [string[]]$paths = @()) {
     return Existing-Path $paths
 }
 
+function WindowsKit-Tool([string]$toolName) {
+    $kitRoot = Candidate-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+    if ([string]::IsNullOrWhiteSpace($kitRoot) -or -not (Test-Path -LiteralPath $kitRoot)) {
+        return ""
+    }
+    $versions = Get-ChildItem -LiteralPath $kitRoot -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending
+    foreach ($version in $versions) {
+        foreach ($arch in @("x64", "x86", "arm64")) {
+            $candidate = Join-Path $version.FullName (Join-Path $arch $toolName)
+            if (Test-Path -LiteralPath $candidate) {
+                return $candidate
+            }
+        }
+    }
+    return ""
+}
+
 function Tool-Status([string]$source) {
     if ($source -ne "") { return "pass" }
     return "missing"
@@ -255,7 +273,8 @@ $spirvAsSource = Tool-Source @("spirv-as", "spirv-as.exe") @(
     (Candidate-Path $vulkanSdkBin "spirv-as.exe")
 )
 $dxcSource = Tool-Source @("dxc", "dxc.exe") @(
-    (Candidate-Path $vulkanSdkBin "dxc.exe")
+    (Candidate-Path $vulkanSdkBin "dxc.exe"),
+    (WindowsKit-Tool "dxc.exe")
 )
 $chromeSource = Tool-Source @("chrome", "chrome.exe") @(
     (Candidate-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),

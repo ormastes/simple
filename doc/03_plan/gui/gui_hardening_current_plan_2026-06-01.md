@@ -144,6 +144,14 @@
   checksum `1023148974`, Electron and Chrome browser-backing pass with D3D11
   hints present, and DXCap GPU capture pass with `GFXA` artifact magic in
   `build/gui-web-2d-directx-env-windows-current-gpucap/dxcap_chrome_d3d11.vsglog`.
+- Windows Vulkan Web/2D evidence is recorded in
+  `doc/09_report/gui_web_2d_vulkan_windows_current_2026-07-16.md`. The wrapper
+  now discovers Windows Kit `dxc.exe`, and the current host proves Simple Vulkan
+  readback plus `vulkaninfo`; live browser/RenderDoc evidence remains blocked
+  because `glslangValidator`, `spirv-as`, and RenderDoc are not installed. The
+  attempted `KhronosGroup.VulkanSDK` winget install reached the administrator
+  UAC step and was canceled by the user, so the Vulkan SDK/RenderDoc bootstrap
+  is an environment action rather than a code pass.
  - Pure GUI release/perf evidence now defines a WM/web/native-runtime-free command
    boundary, SMF/dynlib performance contract, and fail-closed probe row. Current
    Linux-host evidence intentionally reports `pass=false` without a real
