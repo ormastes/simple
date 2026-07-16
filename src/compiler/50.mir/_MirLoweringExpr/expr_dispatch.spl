@@ -1051,51 +1051,46 @@ impl MirLowering:
                             self.builder = b_special
                             temp
                     case And | Or:
-                        # Bug #137: HirBinOp.And/Or have no entry in
-                        # lower_binop's explicit case list, so they used to
-                        # fall through to `case _: MirBinOp.Add`. `(a + b) != 0`
-                        # is OR semantics, not AND -- `a=1,b=0` wrongly
-                        # evaluates true. Combine the operands with a real
-                        # bitwise `and`/`or` instead.
-                        #
-                        # `and`/`or` operands are boolean by the type system
-                        # (each is a 0/1 value: a comparison result, a bool
-                        # local, or a bool-returning call), so a bitwise
-                        # and/or of the two is exactly logical and/or -- no
-                        # truthiness `!= 0` normalization is needed, and adding
-                        # one is actively harmful: an i1 comparison operand vs.
-                        # an i64 zero forces the backend to reconcile types
-                        # with an illegal `bitcast i64 -> i1` (llc: "invalid
-                        # cast opcode").
-                        #
-                        # Result type is i64 (not bool/i1): the two operands
-                        # can have MIXED backend types -- `a` from an inline
-                        # `==` is tracked i1, while `b` from a method call
-                        # (e.g. `.starts_with(...)`) is i64. translate_binop's
-                        # `value_as_type` legally `zext`s an i1 operand up to
-                        # the i64 dest but has NO legal cast to narrow an i64
-                        # operand down to i1, so a bool/i1 dest would
-                        # reintroduce the illegal bitcast. With an i64 dest both
-                        # operands widen cleanly and the `if`/`while` terminator
-                        # converts the i64 result to a branch via `icmp ne i64
-                        # result, 0` (core_codegen If-terminator else branch).
-                        #
-                        # This arm IS reached on the normal (non-bootstrap)
-                        # native path too -- HIR keeps `and`/`or` as a plain
-                        # Binary(And/Or) node (no short-circuit control-flow
-                        # desugaring upstream) and the interpreter backend also
-                        # evaluates both operands eagerly. The prior `case _`
-                        # add-fallthrough was ALSO eager, so switching to a
-                        # bitwise combine changes NO evaluation order -- it only
-                        # corrects the combine operator. Hence safe ungated.
                         val left_local = self.lower_expr(left)
-                        val right_local = self.lower_expr(right)
                         var b_logic = self.builder
-                        val combine_op = match op:
-                            case And: MirBinOp.BitAnd
-                            case _: MirBinOp.BitOr
-                        val logic_result = b_logic.emit_binop(combine_op, mir_operand_copy(left_local), mir_operand_copy(right_local), MirType.i64())
+                        val rhs_block = b_logic.new_block(Some("logic_rhs"))
+                        val short_block = b_logic.new_block(Some("logic_short"))
+                        val merge_block = b_logic.new_block(Some("logic_merge"))
+                        # The merge slot has function lifetime. Keep its alloca in
+                        # entry so a logical expression inside a loop does not grow
+                        # the native stack on every iteration.
+                        val result_slot = b_logic.emit_entry_alloc(MirType.i64())
+                        match op:
+                            case And: b_logic.terminate_if(mir_operand_copy(left_local), rhs_block, short_block)
+                            case _: b_logic.terminate_if(mir_operand_copy(left_local), short_block, rhs_block)
                         self.builder = b_logic
+
+                        var b_short = self.builder
+                        b_short.switch_to_block(short_block)
+                        val short_int = match op:
+                            case And: 0
+                            case _: 1
+                        val short_value = b_short.emit_const_int(short_int)
+                        b_short.emit_store(mir_operand_copy(result_slot), mir_operand_copy(short_value))
+                        b_short.terminate_goto(merge_block)
+                        self.builder = b_short
+
+                        var b_rhs = self.builder
+                        b_rhs.switch_to_block(rhs_block)
+                        self.builder = b_rhs
+                        val right_local = self.lower_expr(right)
+                        var right_value = right_local
+                        var b_rhs_done = self.builder
+                        if val right_type = self.local_mir_type_of(right_local):
+                            match right_type.kind:
+                                case MirTypeKind.Bool:
+                                    right_value = b_rhs_done.emit_cast(mir_operand_copy(right_local), MirType.i64())
+                                case _: ()
+                        b_rhs_done.emit_store(mir_operand_copy(result_slot), mir_operand_copy(right_value))
+                        b_rhs_done.terminate_goto(merge_block)
+                        b_rhs_done.switch_to_block(merge_block)
+                        val logic_result = b_rhs_done.emit_load(mir_operand_copy(result_slot), MirType.i64())
+                        self.builder = b_rhs_done
                         logic_result
                     case _:
                         val left_local = self.lower_expr(left)

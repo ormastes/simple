@@ -20,4 +20,12 @@ The unsafe string fast path was redundant and has been deleted. The remaining pa
 
 Runtime archive and sysroot SHA-256 are both `eff65d42dec1ce2824494d657ce00b784cc7a76460226c3ea718b7c8b5de5ab5`. Target disassembly contains no old `0x53545231` fast-path compare; every remaining header read is branch-dominated. Live execution passed the former `rt_index_get` PC and reached the separately tracked optimizer `local_count_index` failure.
 
-The broader native eager-`and`/`or` defect remains. Existing side-effect assertions live in `src/compiler/test/simple_coverage_test.spl`; repair `_MirLoweringExpr/expr_dispatch.spl` with branch-and-join lowering when a known-good full native test CLI is available.
+The broader native eager-`and`/`or` source defect is now fixed at the shared MIR
+binary-expression owner with branch-and-join lowering. The RHS is isolated in a
+conditional block and boolean results merge as i64 for LLVM/Cranelift parity.
+The fixed-lifetime merge slot is emitted in function entry so a loop does not
+allocate it on every iteration. The textual-LLVM SSA repair accepts those MIR
+`Alloc`/`Store` instructions, rewrites both store operands, and renames a
+cross-block allocation destination before spilling it. Focused MIR CFG, combined
+SSA/loop, and dual-backend parity regressions are present; executable proof
+remains pending a known-good pure-Simple native test CLI.

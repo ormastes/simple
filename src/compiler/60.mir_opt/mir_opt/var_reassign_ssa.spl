@@ -823,6 +823,10 @@ fn ssa_instructions_supported_for_alloca(blocks: [MirBlock]) -> bool:
                 match inst.kind:
                     case CallIndirect(_, _, _, _):
                         pass_do_nothing
+                    case Alloc(_, _):
+                        pass_do_nothing
+                    case Store(_, _):
+                        pass_do_nothing
                     case _:
                         return false
     true
@@ -1196,6 +1200,13 @@ fn ssa_alloca_rewrite_inst_operands(inst: MirInst, slot_keys: [i64], slot_values
         case Load(dest, ptr):
             val r = ssa_alloca_rewrite_operand(ptr, slot_keys, slot_values, next_temp)
             (MirInst(kind: MirInstKind.Load(dest, r[0]), span: inst.span), r[1], r[2])
+        case Store(ptr, value):
+            val rp = ssa_alloca_rewrite_operand(ptr, slot_keys, slot_values, next_temp)
+            val rv = ssa_alloca_rewrite_operand(value, slot_keys, slot_values, rp[2])
+            var prepend = rp[1]
+            for p in rv[1]:
+                prepend = prepend.push(p)
+            (MirInst(kind: MirInstKind.Store(rp[0], rv[0]), span: inst.span), prepend, rv[2])
         case GetElementPtr(dest, base, indices):
             val rb = ssa_alloca_rewrite_operand(base, slot_keys, slot_values, next_temp)
             val ri = ssa_alloca_rewrite_operand_list(indices, slot_keys, slot_values, rb[2])
@@ -1279,6 +1290,11 @@ fn ssa_alloca_rename_dest(inst: MirInst, original_id: i64, new_id: i64) -> MirIn
         case Load(dest, ptr):
             if ssa_local_id_value(dest) == original_id:
                 MirInst(kind: MirInstKind.Load(ssa_local(new_id), ptr), span: inst.span)
+            else:
+                inst
+        case Alloc(dest, type_):
+            if ssa_local_id_value(dest) == original_id:
+                MirInst(kind: MirInstKind.Alloc(ssa_local(new_id), type_), span: inst.span)
             else:
                 inst
         case GetElementPtr(dest, base, indices):

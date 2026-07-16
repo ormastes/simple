@@ -32,7 +32,7 @@ source fixes from executable proof.
 
 | # | Current disposition |
 |---|---------------------|
-| 1 | Fixed and native-regressed (`e4471d60acb6`). |
+| 1 | Text equality was native-regressed (`e4471d60acb6`); shared MIR `and`/`or` now uses true short-circuit CFG lowering, entry-hoisted merge slots, and compatible textual-LLVM SSA repair. Focused dual-backend proof is present and pending execution. |
 | 2 | Push/fill fixed and native-regressed (`58b0f33701fb`, `135bb60cf0e7`, `8205cacec41a`); concat-array forwarding source fix landed and strict default-LLVM + explicit-Cranelift proof added, execution pending. |
 | 3 | Scalar-global source fix landed; strict default-LLVM + explicit-Cranelift direct/getter first-read proof added, execution pending. |
 | 4 | Enum text-payload source fix landed; strict default-LLVM + explicit-Cranelift callback/match/field-assignment proof added, execution pending. |
