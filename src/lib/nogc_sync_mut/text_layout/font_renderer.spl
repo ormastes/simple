@@ -231,7 +231,13 @@ fn _browser_default_for_family_cached(family: text) -> (FontRenderer, bool):
 
 val FONT_ATLAS_WIDTH: i32 = 1024
 val FONT_ATLAS_HEIGHT: i32 = 1024
-val _font_atlas_dependency_generation: AtomicI64 = atomic_i64_new(0)
+# Plain literal-initialized counter, NOT `val ...: AtomicI64 = atomic_i64_new(0)`.
+# A module-level function-call initializer (atomic_i64_new) does NOT run on the
+# freestanding/baremetal native-build (only literal 0/[]/nil inits execute), so
+# the AtomicI64 stayed a null receiver whose .load() derefs null (cr2=0x0) and
+# killed the first WM compose the moment any text command rendered. Single-core
+# baremetal needs no atomic; a literal `var: i64 = 0` initializes correctly.
+var _font_atlas_dependency_generation_counter: i64 = 0
 
 fn _font_render_batch_with_config(batch: FontRenderBatch, config: FontRenderConfig) -> FontRenderBatch:
     FontRenderBatch(
@@ -287,15 +293,12 @@ fn _font_atlas_dependency_generation_after(current: i64) -> i64:
     current + 1
 
 fn _next_font_atlas_dependency_generation() -> i64:
-    var current = _font_atlas_dependency_generation.load(MemoryOrdering.Relaxed)
-    while current >= 0 and current < 9223372036854775807:
-        val next = current + 1
-        if _font_atlas_dependency_generation.compare_exchange(
-            current, next, MemoryOrdering.SeqCst, MemoryOrdering.Relaxed
-        ):
-            return next
-        current = _font_atlas_dependency_generation.load(MemoryOrdering.Relaxed)
-    0
+    # Single-core baremetal: plain increment, no atomic CAS. Return the freshly
+    # computed local so the result is correct even if the module-var write does
+    # not persist through the native-build's constant-folded global read path.
+    val next = _font_atlas_dependency_generation_after(_font_atlas_dependency_generation_counter)
+    _font_atlas_dependency_generation_counter = next
+    next
 
 class GlyphCache:
     entries: [CachedGlyph]
@@ -409,8 +412,9 @@ class FontRenderer:
     active_render_config_identity: text = ""
 
     static fn new() -> FontRenderer:
-        FontRenderer(
-            cache: GlyphCache.new(512),
+        val cache = GlyphCache.new(512)
+        val renderer = FontRenderer(
+            cache: cache,
             ttf_handle: 0,
             use_vector: true,
             use_bitmap: true,
@@ -420,10 +424,12 @@ class FontRenderer:
             atlas_cursor_x: 0, atlas_cursor_y: 0, atlas_row_height: 0,
             atlas_generation: 0, atlas_face_generation: -1, atlas_font_identity: ""
         )
+        renderer
 
     static fn with_ttf(handle: i64) -> FontRenderer:
-        FontRenderer(
-            cache: GlyphCache.new(512),
+        val cache = GlyphCache.new(512)
+        val renderer = FontRenderer(
+            cache: cache,
             ttf_handle: handle,
             use_vector: true,
             use_bitmap: true,
@@ -433,20 +439,27 @@ class FontRenderer:
             atlas_cursor_x: 0, atlas_cursor_y: 0, atlas_row_height: 0,
             atlas_generation: 0, atlas_face_generation: -1, atlas_font_identity: ""
         )
+        renderer
 
     static fn browser_serif_default() -> FontRenderer:
         FontRenderer.browser_default_for_family("serif")
 
     static fn browser_default_for_family(family: text) -> FontRenderer:
-        var renderer = FontRenderer.new()
         val registered_only = font_renderer_registered_selected_bytes_only()
-        for font_path in browser_font_candidates_for_family(family):
+        val candidates = browser_font_candidates_for_family(family)
+        for font_path in candidates:
             val registered = _registered_selected_font_bytes(font_path)
-            if registered.1 and renderer.try_load_selected_bytes(font_path, registered.0):
-                return renderer
-            if not registered_only and renderer.try_load_runtime_ttf(font_path):
-                return renderer
-        renderer
+            val registered_blob = registered.0
+            val has_registered_blob = registered_blob.len() > 0
+            if has_registered_blob:
+                var renderer = FontRenderer.new()
+                if renderer.try_load_selected_bytes(font_path, registered_blob):
+                    return renderer
+            if not registered_only:
+                var renderer = FontRenderer.new()
+                if renderer.try_load_runtime_ttf(font_path):
+                    return renderer
+        FontRenderer.new()
 
     fn has_ttf() -> bool:
         self.ttf_handle > 0
@@ -480,18 +493,22 @@ class FontRenderer:
         true
 
     me try_enable_ttf(dylib_path: text, ttf_path: text) -> bool:
-        self._try_install_ttf(FontRasterizer.load(dylib_path, ttf_path))
+        val rasterizer = FontRasterizer.load(dylib_path, ttf_path)
+        self._try_install_ttf(rasterizer)
 
     me try_load_runtime_ttf(ttf_path: text) -> bool:
         if ttf_path.trim() == "":
             return false
-        for dylib_path in browser_font_dylib_candidates():
+        val dylib_candidates = browser_font_dylib_candidates()
+        for dylib_path in dylib_candidates:
             if self.try_enable_ttf(dylib_path, ttf_path):
                 return true
-        self._try_install_ttf(FontRasterizer.load_selected(ttf_path))
+        val selected_rasterizer = FontRasterizer.load_selected(ttf_path)
+        self._try_install_ttf(selected_rasterizer)
 
     me try_load_selected_bytes(ttf_path: text, blob: [u8]) -> bool:
-        self._try_install_ttf(FontRasterizer.load_selected_bytes(ttf_path, blob))
+        val rasterizer = FontRasterizer.load_selected_bytes(ttf_path, blob)
+        self._try_install_ttf(rasterizer)
 
     me try_load_registered_identity(identity: text) -> bool:
         val candidate = selected_font_asset_candidate_for_identity(identity)
@@ -1387,9 +1404,10 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
     resolved
 
 fn resolve_font_metrics_with_language(family: text, content: text, font_size: i32, language: text) -> ResolvedFontMetrics:
-    _resolve_font_metrics_with_language_config(
-        family, content, font_size, language, font_render_config_default_for_size(font_size).identity()
-    )
+    val config = font_render_config_default_for_size(font_size)
+    val config_identity = config.identity()
+    val resolved = _resolve_font_metrics_with_language_config(family, content, font_size, language, config_identity)
+    resolved
 
 fn resolve_font_metrics_configured(config: FontRenderConfig, content: text) -> ResolvedFontMetrics:
     if not config.valid():
