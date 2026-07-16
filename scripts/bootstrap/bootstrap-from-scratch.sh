@@ -445,6 +445,10 @@ bootstrap_native_build_main() {
   env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_BOOTSTRAP_STAGE4=1 \
+    SIMPLE_NATIVE_BUILD_TARGET="${PLATFORM}" \
+    SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}" \
+    SIMPLE_NATIVE_BUILD_CACHE_DIR="${native_cache_dir}" \
+    SIMPLE_RUNTIME_PATH= \
     SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
@@ -452,14 +456,13 @@ bootstrap_native_build_main() {
     "${compiler}" native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
-    --runtime-bundle rust-hosted \
+    --runtime-bundle core-c-bootstrap \
     --source src/compiler --source src/app --source src/lib --source examples/10_tooling \
     --entry-closure \
     --threads "${selfhost_jobs}" \
     --cache-dir "${native_cache_dir}" \
-    --mode "${bootstrap_mode}" \
+    --mode one-binary \
     --entry src/app/cli/main.spl \
-    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${output}"
 }
 

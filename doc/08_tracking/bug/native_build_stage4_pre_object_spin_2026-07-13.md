@@ -6,6 +6,13 @@ Dispatch fixed; strict Stage-4 link blocked. The earlier quadratic entry-closure
 scan and canonical Rust-seed dispatch bug are fixed. A fresh bounded build now
 emits every object and fails honestly at the unresolved-symbol gate.
 
+The 2026-07-15 source follow-up also routes the canonical Stage4 one-binary
+`--entry` through the existing in-process pure-Simple project driver and clears
+the raw native-all runtime path. Previously that shape still
+called Rust `rt_native_build`, despite the production-path plan saying otherwise.
+The route has static regression coverage; a fresh executable Stage-4 proof is
+still pending and the provider-profile blocker below is unchanged.
+
 ## Reproducer
 
 Run the Rust seed only as the bootstrap interpreter, with a fresh cache:

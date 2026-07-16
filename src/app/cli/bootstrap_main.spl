@@ -9,8 +9,9 @@ extern fn rt_native_build(args: [text]) -> i64
 # Importing driver.spl directly lets discovery pull the driver and its
 # transitive imports statically. (2026-07-13 redeploy)
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use compiler.driver.bootstrap_api.{aot_native_project_with_backend_fixed}
 use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native, compile_result_is_success, compile_result_errors)
-use std.nogc_sync_mut.io_runtime.{env_set}
+use std.nogc_sync_mut.io_runtime.{env_get, env_set}
 
 # Keep in sync with ./VERSION file
 fn bootstrap_version() -> text:
@@ -71,15 +72,15 @@ fn native_build_flag_needs_value(flag: text) -> i64:
     else:
         0
 
-fn native_build_has_explicit_entry(args: [text]) -> i64:
-    var i = 0
-    var found = 0
-    while i < args.len():
-        val arg = args[i]
-        if arg == "--entry" or arg.starts_with("--entry="):
-            found = 1
-        i = i + 1
-    found
+fn native_build_entry_from_args(args: [text], i: i64) -> text:
+    if i >= args.len():
+        ""
+    elif args[i] == "--entry" and i + 1 < args.len():
+        args[i + 1]
+    elif args[i].starts_with("--entry="):
+        args[i].substring(8)
+    else:
+        native_build_entry_from_args(args, i + 1)
 
 # rt_native_build's Rust arg parser (src/compiler_rust/native_all/src/lib.rs)
 # treats any bare positional that isn't consumed by a value-taking flag as a
@@ -146,18 +147,39 @@ fn native_build_mode_from_args(args: [text], i: i64) -> text:
     else:
         native_build_mode_from_args(args, i + 1)
 
-# #138: for the single-file positional shape (no --entry, no --source dirs --
-# i.e. `bm native-build foo.spl -o out`), run the compile THROUGH THE
-# PURE-SIMPLE IN-PROCESS PIPELINE (compiler_driver_create /
-# compiler_driver_run_compile) instead of the Rust rt_native_build FFI seed.
-# The in-process failure surfaces loudly; it never silently retries the seed.
+# #138/#19: the authorized Stage4 explicit entry and the single-file positional
+# shape (no --source dirs -- i.e. `bm native-build foo.spl -o out`) compile
+# THROUGH THE PURE-SIMPLE IN-PROCESS PIPELINE instead of the Rust
+# rt_native_build FFI seed. The in-process failure surfaces loudly; it never
+# silently retries the seed.
 fn run_native_build_bootstrap(args: [text]) -> i64:
     val mode = native_build_mode_from_args(args, 0)
     if mode != "" and mode != "dynload" and mode != "one-binary":
         print "Error: invalid --mode '{mode}' (expected dynload or one-binary)"
         return 1
-    if native_build_has_explicit_entry(args) == 1:
-        return rt_native_build(args)
+    val explicit_entry = native_build_entry_from_args(args, 0)
+    if explicit_entry != "":
+        if env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1":
+            return rt_native_build(args)
+        if explicit_entry != "src/app/cli/main.spl":
+            print "Error: Stage4 entry must be src/app/cli/main.spl"
+            return 1
+        if mode != "one-binary":
+            print "Error: Stage4 full CLI requires --mode one-binary"
+            return 1
+        val stage4_output = bootstrap_output_from_args(args, 0)
+        val stage4_backend = native_build_backend_from_args(args, 0)
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY", explicit_entry)
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+        val stage4_result = aot_native_project_with_backend_fixed(
+            "src/compiler", "src/app", "src/lib", "examples/10_tooling", "", 4,
+            explicit_entry, stage4_output, stage4_backend, true, true, 3
+        )
+        if compile_result_is_success(stage4_result):
+            return 0
+        for err in compile_result_errors(stage4_result):
+            print "error: in-process Stage4 native-build: {err}"
+        return 1
     val entry_path = native_build_single_spl_positional(args)
     if entry_path == "":
         return rt_native_build(args)

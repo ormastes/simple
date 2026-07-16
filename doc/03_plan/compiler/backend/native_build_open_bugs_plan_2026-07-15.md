@@ -50,7 +50,7 @@ source fixes from executable proof.
 | 16 | Target-aware global cfg selection implemented across native, driver/JIT, imports, and module loading; AArch64/RISC-V LLVM object regressions added, execution pending. |
 | 17 | Module+owner-qualified method identity implemented through imports, HIR, MIR, bootstrap, trait defaults, and static methods; strict LLVM+Cranelift dispatch proof pending. |
 | 18 | Pure-Simple Cranelift dynload globals now declare, initialize, load, and store writable scalar data; strict LLVM+Cranelift init/mutation proof pending. |
-| 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, and test-only deterministic requested-symbol owner validation are implemented; aggregate final-closure derivation, full cache fingerprint, remaining providers, production selection/link wiring, and strict execution remain. |
+| 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, test-only deterministic requested-symbol owner validation, and pure-Simple explicit-entry dispatch are source-implemented; aggregate final-closure derivation, full link-profile fingerprint, remaining providers, production provider selection/link wiring, and strict execution remain. |
 | 20 | C-owned host-GPU queue facade and fail-closed archive ownership checks implemented; native queue execution proof remains. |
 | 21 | Reduced to the Rust seed parser's inline-continuation consumption bug; inline-first and block-first source fixes plus focused chained-inline regressions are implemented, while regression and real inspector execution remain pending. The pure-Simple parser needed no rewrite. |
 
@@ -106,10 +106,14 @@ though the compiler itself is right.
 | 18 | `native_dynload_module_var_static_init_dropped` | Dynload build drops static initializers on module-level `var` globals (repro: WM render-event gate). Emit + run the init in the dynload path (ties to #3). | dynload codegen | M |
 | 19 | `native_build_stage4_pre_object_spin` | Stage-4 dispatch + strict-link blockers (pre-object spin). Mitigations documented in-doc; finish the strict-link path. | driver stage4 | M |
 
-**#19 production-path note:** Stage 4 executes the verified pure-Simple compiler,
-whose `driver_aot_output.spl` calls `llvm_native_link.spl`; Rust
-`native_project` validators are test-only prerequisites and are not production
-wiring. The exact CLI profile must derive its final requested `rt_*`/`spl_*`
+**#19 production-path note:** Before the explicit-entry dispatch fix,
+`bootstrap_main.spl` sent Stage 4 through Rust `rt_native_build`; the
+pure-Simple `driver_aot_output.spl` → `llvm_native_link.spl` path was therefore
+not production wiring for that bootstrap shape. Current source now routes the
+canonical Stage4 one-binary `--entry src/app/cli/main.spl` through the in-process
+pure-Simple project driver without a silent seed retry or raw native-all path;
+executable proof remains pending. Rust `native_project` validators
+remain test-only prerequisites. The exact CLI profile must derive its final requested `rt_*`/`spl_*`
 closure after entry-object creation, validate unique archive ownership, and then
 order Simple objects → compiler capsule → capability providers → core-C → system
 libraries. The current provider inventory covers compiler hooks, time/progress,
