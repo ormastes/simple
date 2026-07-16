@@ -34,7 +34,7 @@
 # loop (see the `range_for` case) — an unbounded seed run must never be
 # allowed to wedge this gate.
 #
-# FOUR CASE MODES:
+# FIVE CASE MODES:
 #   1. PARITY               — the seed oracle is sound for this construct.
 #      Assert normalize(native_stdout) == normalize(seed_stdout).
 #   2. NATIVE-AUTHORITATIVE — the seed oracle is PROVABLY BROKEN, hangs,
@@ -43,17 +43,21 @@
 #      normalize(native_stdout) == a fixed EXPECTED literal; the seed run
 #      is executed only to log its (broken) behavior for documentation,
 #      never asserted on.
-#   3. LOUD-FAIL            — native-build MUST refuse to build the
+#   3. STRICT-DUAL          — both LLVM and Cranelift native builds must
+#      run and match a fixed expected value. Used where the seed is not a
+#      dependable oracle and backend parity is the contract.
+#   4. LOUD-FAIL            — native-build MUST refuse to build the
 #      construct (unsupported-by-design, e.g. match guards, out-of-range
 #      integer literals) with a nonzero exit and no binary produced,
 #      rather than silently miscompiling. Assert build rc != 0 AND no
 #      binary exists AND the build log contains the expected diagnostic.
-#   4. RUNTIME-FAIL         — native-build must succeed, then the program
+#   5. RUNTIME-FAIL         — native-build must succeed, then the program
 #      must exit nonzero with the expected runtime diagnostic.
 #
-# Every case's mode was decided by actually RUNNING both backends during
-# authoring, never assumed. Three cases were reclassified away from their
-# originally-expected mode after empirical testing disagreed:
+# Every original case's mode was decided by actually running its required
+# backends during authoring. The nine cases added on 2026-07-15 have bounded
+# source review and await execution with the expanded matrix. Three original
+# cases were reclassified after empirical testing disagreed:
 #   - `mut_param` and `option_nil_check` were expected PARITY but the seed
 #     proved to diverge (mut-capability propagation and `.?` if-let are
 #     both silently broken in the seed's JIT-fallback interpreter path)
@@ -65,19 +69,6 @@
 #   - `some0` was expected NATIVE-AUTHORITATIVE (spec assumed the seed
 #     prints a `<special:...>` marker for `nil ?? default`) but both
 #     backends actually agree (`0`) -> reclassified PARITY.
-#
-# NOT included (found broken on NATIVE during authoring, reported as new
-# bugs rather than silently omitted or papered over):
-#   - `"x".starts_with(y)` crashes native-build's LLVM backend: "Only PHI
-#     nodes may reference their own value! %l1 = call ptr
-#     @rt_interp_cstr(ptr %l1)" (llc verifier rejects the emitted IR).
-#   - `"x".contains(y)` compiles and runs on native but ALWAYS returns
-#     false/0, even when the substring is present (confirmed with both a
-#     present and an absent substring — both print `0`; seed correctly
-#     prints `true`/`false`).
-#   Both were isolated to minimal single-line repros; see the harness-
-#   authoring report for the full transcript. File follow-up bugs before
-#   relying on either method from native-built code.
 #
 # Usage: sh scripts/check/check-native-seed-parity.shs
 # Env:   SIMPLE_BINARY (default bin/simple), PARITY_WORK_DIR (default
@@ -894,6 +885,127 @@ fn main() -> i64:
 EOF
 }
 
+write_case_nested_enum_struct_match() {
+    cat >"$1" <<'EOF'
+struct Point:
+    x: i64
+    y: i64
+
+enum Shape:
+    Circle(Point)
+    Empty
+
+fn main() -> i64:
+    val s = Shape.Circle(Point(x: 3, y: 5))
+    match s:
+        case Shape.Circle(Point(x, y)): print(x * 10 + y)
+        case Shape.Empty: print(0)
+    return 0
+EOF
+}
+
+write_case_nonarray_iterable_loud() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val s = "ab"
+    for ch in s:
+        print(ch)
+    return 0
+EOF
+}
+
+write_case_float_tuple_field() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val t = (1.5, 3.5)
+    print(t.0)
+    print(t.1)
+    print(t.0 + t.1)
+    return 0
+EOF
+}
+
+write_case_option_is_none_map() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val some: i64? = 5
+    val none: i64? = nil
+    if some.is_none():
+        print(1)
+    else:
+        print(0)
+    if none.is_none():
+        print(1)
+    else:
+        print(0)
+    print(some.map(\x: x * 2).unwrap_or(99))
+    print(none.map(\x: x * 2).unwrap_or(99))
+    return 0
+EOF
+}
+
+write_case_float_edges() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    print(-0.0)
+    print(0.0 / 0.0)
+    print(0.000000000000000001)
+    return 0
+EOF
+}
+
+write_case_payloadless_enum_equality() {
+    cat >"$1" <<'EOF'
+enum Color:
+    Red
+    Green
+
+fn bit(v: bool) -> i64:
+    if v: return 1
+    return 0
+
+fn main() -> i64:
+    print(bit(Color.Red == Color.Red))
+    print(bit(Color.Red == Color.Green))
+    return 0
+EOF
+}
+
+write_case_range_pattern_match() {
+    cat >"$1" <<'EOF'
+fn classify(n: i64) -> i64:
+    return match n:
+        case 0..10: 1
+        case 10..=20: 2
+        case _: 3
+
+fn main() -> i64:
+    print(classify(9))
+    print(classify(10))
+    print(classify(20))
+    print(classify(21))
+    return 0
+EOF
+}
+
+write_case_array_contains_loud() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val a = [10, 20, 30]
+    print(a.contains(30))
+    return 0
+EOF
+}
+
+write_case_array_slice_loud() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val a = [10, 20, 30]
+    print(a[1:3])
+    return 0
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # Runner: shared helpers.
 # ---------------------------------------------------------------------------
@@ -1101,6 +1213,7 @@ run_runtime_fail_case() {
 
 # --- PARITY: seed oracle sound, both backends must agree -------------------
 run_parity_case struct_nested_field write_case_struct_nested_field
+run_parity_case nested_enum_struct_match write_case_nested_enum_struct_match
 run_parity_case struct_return_byval write_case_struct_return_byval
 run_parity_case static_ctor_field write_case_static_ctor_field
 run_parity_case toplevel_array_len write_case_toplevel_array_len
@@ -1116,6 +1229,7 @@ run_parity_case dict_keys_iter write_case_dict_keys_iter
 run_parity_case value_match write_case_value_match
 run_parity_case text_match write_case_text_match
 run_parity_case or_pattern write_case_or_pattern
+run_parity_case range_pattern_match write_case_range_pattern_match
 run_parity_case bool_match write_case_bool_match
 run_parity_case bool_print write_case_bool_print
 run_parity_case sized_int write_case_sized_int
@@ -1123,6 +1237,8 @@ run_parity_case text_int_len_methods write_case_text_int_len_methods
 run_parity_case some0 write_case_some0
 run_parity_case str_method_var_arg write_case_str_method_var_arg
 run_parity_case float_struct_field write_case_float_struct_field
+run_parity_case float_tuple_field write_case_float_tuple_field
+run_parity_case float_edges write_case_float_edges
 run_parity_case text_num_concat write_case_text_num_concat
 run_strict_dual_backend_case bare_main write_case_bare_main "ok"
 run_parity_case iife write_case_iife
@@ -1131,10 +1247,12 @@ run_strict_dual_backend_case method_owner_dispatch write_case_method_owner_dispa
 run_strict_dual_backend_case module_global_static_init write_case_module_global_static_init "17/0|22/5" dynload
 run_strict_dual_backend_case module_global_false_first_read write_case_module_global_false_first_read "00|73|state=3"
 run_strict_dual_backend_case enum_text_callback write_case_enum_text_callback "run"
+run_strict_dual_backend_case option_is_none_map write_case_option_is_none_map "011099"
 run_strict_dual_backend_case any_forwarding write_case_any_forwarding "10"
 run_parity_case dict_from_call_keys write_case_dict_from_call_keys
 run_parity_case array_concat write_case_array_concat
 run_parity_case interp_bool_float write_case_interp_bool_float
+run_parity_case payloadless_enum_equality write_case_payloadless_enum_equality
 
 # --- NATIVE-AUTHORITATIVE: seed oracle broken/unparseable for these --------
 run_native_authoritative_case me_receiver write_case_me_receiver "41" \
@@ -1167,6 +1285,12 @@ run_loud_fail_case static_ctor_ambiguous_loud write_case_static_ctor_ambiguous_l
     "ambiguous static method call"
 run_loud_fail_case result_unwrap_u64_loud write_case_result_unwrap_u64_loud \
     "unsupported Result unwrap payload type"
+run_loud_fail_case nonarray_iterable_loud write_case_nonarray_iterable_loud \
+    "for-in over non-array iterables is not supported by native codegen yet (#143); iterate an array or use while"
+run_loud_fail_case array_contains_loud write_case_array_contains_loud \
+    "unresolved method call: contains"
+run_loud_fail_case array_slice_loud write_case_array_slice_loud \
+    "unresolved method call: slice"
 run_runtime_fail_case result_unwrap_err_runtime write_case_result_unwrap_err_runtime \
     'called `.unwrap()` on an Err Result'
 run_runtime_fail_case option_text_unwrap_nil_runtime write_case_option_text_unwrap_nil_runtime \
