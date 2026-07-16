@@ -3752,6 +3752,21 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
 }
 #endif
 
+int64_t rt_http_get(int64_t url_value) {
+    RtCoreString* url = rt_core_as_string(url_value);
+    if (!url) return rt_http_tuple(-1, NULL, 0, "invalid HTTP URL text argument");
+#if defined(_WIN32)
+    return rt_http_tuple(-1, NULL, 0, "native HTTP is unavailable on Windows core runtime");
+#else
+    int64_t status = -1; uint8_t* body = NULL; size_t body_len = 0; char error[160] = {0};
+    int ok = rt_http_perform("GET", url->data, NULL, NULL, 0,
+                             &status, &body, &body_len, error, sizeof(error));
+    int64_t result = ok ? rt_http_tuple(status, body, body_len, "")
+                        : rt_http_tuple(-1, NULL, 0, error);
+    free(body); return result;
+#endif
+}
+
 int64_t rt_http_request(int64_t method_value, int64_t url_value, int64_t headers_value,
                         int64_t body_value) {
     RtCoreString* method = rt_core_as_string(method_value);

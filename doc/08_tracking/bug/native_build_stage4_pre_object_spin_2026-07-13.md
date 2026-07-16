@@ -453,3 +453,21 @@ selector is intentionally not wired to raw compiler/provider archives. HTTP ABI
 ownership, the remaining provider families, platform-specific constructor
 gates, final link-profile fingerprinting, and strict native proof are still
 required before Stage4 composition can be enabled.
+
+## 2026-07-16 canonical core-C HTTP ownership
+
+The legacy `runtime.c` definition of `rt_http_get` returned a raw C string even
+though canonical Simple callers declare a one-word tuple handle. It is removed.
+`runtime_native.c` now solely owns `rt_http_get`, `rt_http_request`, and
+`rt_http_download` on the same `int64_t` runtime-handle ABI, with a structured
+unavailable tuple on Windows and the existing POSIX transport on
+Linux/macOS/FreeBSD. Text-header clients route through the pure-Simple adapter,
+the test-daemon health check consumes the typed response facade, seed-library
+reload uses the tuple signature, and raw-C-string generator compatibility has a
+separate `rt_http_get_cstr` name.
+
+Focused C and static source contracts cover GET status/body/error shape, sole C
+ownership, caller declarations, reload compatibility, and generator naming.
+Executable compiler/native proof remains pending under the existing bootstrap
+restriction; this closes one provider ABI collision but does not enable the
+incomplete Stage4 provider profile.

@@ -358,6 +358,7 @@ int64_t  rt_tuple_len(int64_t tuple);
 int64_t  rt_path_parent(const uint8_t* path_ptr, int64_t path_len);
 int64_t  rt_path_filename(int64_t path_value);
 int64_t  rt_path_extension(int64_t path_value);
+int64_t  rt_http_get(int64_t url);
 int64_t  rt_http_request(int64_t method, int64_t url, int64_t headers, int64_t body);
 int64_t  rt_http_download(int64_t url, int64_t output_path);
 int64_t  rt_gui_get_glyph_8x16(int32_t codepoint);

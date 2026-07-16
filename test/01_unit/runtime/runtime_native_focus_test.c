@@ -229,9 +229,17 @@ int main(void) {
     pid_t child = start_server(&port, "hello");
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%u/", port);
-    int64_t response = rt_http_request(text("GET"), text(url), (int64_t)rt_array_new(0), text(""));
+    int64_t response = rt_http_get(text(url));
     assert(rt_value_as_int(rt_tuple_get(response, 0)) == 200);
     assert(strcmp((const char*)rt_string_data(rt_tuple_get(response, 1)), "hello") == 0);
+    assert(strcmp((const char*)rt_string_data(rt_tuple_get(response, 2)), "") == 0);
+    assert(waitpid(child, NULL, 0) == child);
+
+    child = start_server(&port, "request");
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/", port);
+    response = rt_http_request(text("GET"), text(url), (int64_t)rt_array_new(0), text(""));
+    assert(rt_value_as_int(rt_tuple_get(response, 0)) == 200);
+    assert(strcmp((const char*)rt_string_data(rt_tuple_get(response, 1)), "request") == 0);
     assert(waitpid(child, NULL, 0) == child);
 
     unsigned short download_port;
