@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("--check", "--run", "--print-install")]
+    [ValidateSet("--check", "--run", "--renderdoc", "--print-install")]
     [string]$Mode = "--check",
     [string]$BuildDir = "build\gui-web-2d-vulkan-env-windows",
     [string]$EvidencePath = "",
@@ -18,6 +18,8 @@ if ($RemainingArgs -contains "--print-install" -or $MyInvocation.Line -match '(^
     $Mode = "--print-install"
 } elseif ($RemainingArgs -contains "--run" -or $MyInvocation.Line -match '(^|\s)--run(\s|$)') {
     $Mode = "--run"
+} elseif ($RemainingArgs -contains "--renderdoc" -or $MyInvocation.Line -match '(^|\s)--renderdoc(\s|$)') {
+    $Mode = "--renderdoc"
 } elseif ($RemainingArgs -contains "--check" -or $MyInvocation.Line -match '(^|\s)--check(\s|$)') {
     $Mode = "--check"
 }
@@ -42,6 +44,7 @@ Required checks:
   Get-Command renderdoccmd
   powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-vulkan-env.ps1 --check
   powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-vulkan-env.ps1 --run
+  powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-vulkan-env.ps1 --renderdoc
 "@
 }
 
@@ -142,6 +145,47 @@ function Wait-ForFile([string]$path, [int]$timeoutMs = 5000) {
         Start-Sleep -Milliseconds 100
     }
     return (Test-Path -LiteralPath $path)
+}
+
+function Quote-Arg([string]$arg) {
+    if ($arg -match '[\s"]') {
+        return '"' + ($arg -replace '"', '\"') + '"'
+    }
+    return $arg
+}
+
+function Has-RdocMagic([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) { return $false }
+    $stream = [System.IO.File]::OpenRead($path)
+    try {
+        if ($stream.Length -lt 4) { return $false }
+        $bytes = New-Object byte[] 4
+        [void]$stream.Read($bytes, 0, 4)
+        return ([System.Text.Encoding]::ASCII.GetString($bytes) -eq "RDOC")
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Invoke-ProcessBound([string]$exe, [string[]]$argList, [string]$stdoutPath, [string]$stderrPath, [int]$timeoutSecs) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $exe
+    $psi.Arguments = (($argList | ForEach-Object { Quote-Arg $_ }) -join " ")
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $psi
+    [void]$process.Start()
+    if (-not $process.WaitForExit($timeoutSecs * 1000)) {
+        try { $process.Kill() } catch {}
+        "timeout" | Set-Content -Encoding ASCII -Path $stderrPath
+        return 124
+    }
+    $process.StandardOutput.ReadToEnd() | Set-Content -Encoding ASCII -Path $stdoutPath
+    $process.StandardError.ReadToEnd() | Set-Content -Encoding ASCII -Path $stderrPath
+    return $process.ExitCode
 }
 
 function Invoke-Capture([string]$exe, [string[]]$argList, [hashtable]$envMap, [string]$stdoutPath, [string]$stderrPath, [int]$timeoutSecs) {
@@ -249,7 +293,7 @@ if ($vulkanInfoStatus -ne "pass") {
     $hostReadiness = "pass"
 }
 
-Add-Row $rows "gui_web_2d_vulkan_mode" $(if ($Mode -eq "--run") { "windows-run" } else { "windows-check" })
+Add-Row $rows "gui_web_2d_vulkan_mode" $(if ($Mode -eq "--renderdoc") { "windows-renderdoc" } elseif ($Mode -eq "--run") { "windows-run" } else { "windows-check" })
 Add-Row $rows "gui_web_2d_vulkan_build_dir" "$BuildFullDir"
 Add-Row $rows "gui_web_2d_vulkan_evidence_path" "$EvidencePath"
 Add-Row $rows "gui_web_2d_vulkan_windows_setup_wrapper" "scripts/setup/setup-gui-web-2d-vulkan-env.ps1"
@@ -279,7 +323,7 @@ Add-Row $rows "gui_web_2d_vulkan_sdk_tools_status" "$sdkToolsStatus"
 Add-Row $rows "gui_web_2d_vulkan_host_readiness_status" "$hostReadiness"
 
 $runStatus = "not-run"
-if ($Mode -eq "--run") {
+if ($Mode -eq "--run" -or $Mode -eq "--renderdoc") {
     $runStatus = "fail"
     $electronOut = Join-Path $BuildFullDir "electron.out"
     $electronLog = Join-Path $BuildFullDir "electron.log"
@@ -369,10 +413,59 @@ if ($Mode -eq "--run") {
     Add-Row $rows "gui_web_2d_vulkan_direct_run_status" "$runStatus"
 }
 
+$renderdocCaptureStatus = "not-run"
+if ($Mode -eq "--renderdoc") {
+    $renderdocOut = Join-Path $BuildFullDir "renderdoc-chrome.out"
+    $renderdocLog = Join-Path $BuildFullDir "renderdoc-chrome.log"
+    $renderdocPrefix = Join-Path $BuildFullDir "renderdoc_chrome"
+    $renderdocRdc = "$renderdocPrefix.rdc"
+    Add-Row $rows "gui_web_2d_vulkan_renderdoc_capture_prefix" "$renderdocPrefix"
+    Add-Row $rows "gui_web_2d_vulkan_renderdoc_capture_rdc" "$renderdocRdc"
+    Add-Row $rows "gui_web_2d_vulkan_renderdoc_capture_stdout" "$renderdocOut"
+    Add-Row $rows "gui_web_2d_vulkan_renderdoc_capture_log" "$renderdocLog"
+    if ($renderdocStatus -ne "pass") {
+        $renderdocCaptureStatus = "blocked:renderdoc-tools-missing"
+        Add-Row $rows "gui_web_2d_vulkan_renderdoc_capture_status" "$renderdocCaptureStatus"
+        Add-Row $rows "gui_web_2d_vulkan_renderdoc_capture_reason" "missing-renderdoccmd-or-qrenderdoc"
+    } elseif ($chromeStatus -ne "pass") {
+        $renderdocCaptureStatus = "blocked:chrome-missing"
+        Add-Row $rows "gui_web_2d_vulkan_renderdoc_capture_status" "$renderdocCaptureStatus"
+        Add-Row $rows "gui_web_2d_vulkan_renderdoc_capture_reason" "missing-chrome"
+    } else {
+        $chromeUserData = Join-Path $BuildFullDir "renderdoc-chrome-user-data"
+        New-Item -ItemType Directory -Force -Path $chromeUserData | Out-Null
+        $chromeFlagsForRenderDoc = @(
+            "--headless=new",
+            "--no-sandbox",
+            "--disable-gpu-sandbox",
+            "--disable-dev-shm-usage",
+            "--enable-features=Vulkan",
+            "--use-angle=vulkan",
+            "--user-data-dir=$chromeUserData",
+            "--window-size=$Width,$Height",
+            "--screenshot=$(Join-Path $BuildFullDir 'renderdoc_chrome.png')",
+            "file:///$($HtmlFullPath -replace '\\', '/')"
+        )
+        $renderdocArgs = @("capture", "-w", "-c", "$renderdocPrefix", "$chromeSource") + $chromeFlagsForRenderDoc
+        $renderdocCode = Invoke-ProcessBound $renderdocSource $renderdocArgs $renderdocOut $renderdocLog $TimeoutSecs
+        Wait-ForFile $renderdocRdc 5000 | Out-Null
+        Add-Row $rows "gui_web_2d_vulkan_renderdoc_capture_exit_code" "$renderdocCode"
+        if (Has-RdocMagic $renderdocRdc) {
+            $renderdocCaptureStatus = "pass"
+            Add-Row $rows "gui_web_2d_vulkan_renderdoc_capture_status" "$renderdocCaptureStatus"
+            Add-Row $rows "gui_web_2d_vulkan_renderdoc_capture_reason" "rdc-magic-pass"
+        } else {
+            $renderdocCaptureStatus = "fail"
+            Add-Row $rows "gui_web_2d_vulkan_renderdoc_capture_status" "$renderdocCaptureStatus"
+            Add-Row $rows "gui_web_2d_vulkan_renderdoc_capture_reason" "missing-rdoc-magic"
+        }
+    }
+}
+
 $rows | Set-Content -Encoding ASCII -Path $EvidencePath
 $rows | ForEach-Object { Write-Output $_ }
 
-if (($Mode -eq "--check" -and $hostReadiness -eq "pass" -and $simpleStatus -eq "pass") -or ($Mode -eq "--run" -and $runStatus -eq "pass")) {
+if (($Mode -eq "--check" -and $hostReadiness -eq "pass" -and $simpleStatus -eq "pass") -or ($Mode -eq "--run" -and $runStatus -eq "pass") -or ($Mode -eq "--renderdoc" -and $runStatus -eq "pass" -and $renderdocCaptureStatus -eq "pass")) {
     exit 0
 }
 exit 1
