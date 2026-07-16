@@ -37,7 +37,7 @@ so executable qualification is still blocked.
 |---|---|---|---|---|
 | Production runtime | BLOCKED | Stage 4 was found parsing 10,503 files before closure pruning; source fix is unverified because the final cycle stopped on a stale compiler-backfill guard | In a fresh session run one bounded `--full-bootstrap`, require closure-sized phase input, then admit and atomically deploy | P0 |
 | Test runner | PARTIAL | POSIX parallel argv is injection-safe and tracked, but Windows parallel capture now fails closed pending a native redirected-spawn API; signal cleanup remains incomplete | Add runtime redirected argv spawn, use it on every host, then run timeout/RSS evidence | P0 |
-| Duplicate checker | PARTIAL | Fast exact-window buckets are linear, token-cache reads are content-hash fresh, missing targets fail, unavailable parallel/incremental modes are rejected, and adjacent one-line docs remain distinct; exact-mode fidelity remains suspect | Make exact mode indentation/comment/string aware and collapse shifted overlaps | P0 |
+| Duplicate checker | PARTIAL | Fast exact-window buckets are linear, indentation-sensitive, and collapse shifted clone regions; token-cache reads are content-hash fresh, missing targets fail, unavailable modes are rejected, and adjacent one-line docs remain distinct; string/comment lexical context remains approximate | Replace line-shaped signal detection with lexer-aware spans before full qualification | P1 |
 | Lint | SOURCE FIXED | Production CLI now delegates file policy to the canonical linter, severity/profile overrides work in both directions, fix rules run once, and `--all` preserves earlier failures; global gates still report 30 UI and 45 hot-loop violations | Repair classified violations, then run the focused policy/uniqueness fixtures | P1 |
 | Format/fix | SOURCE GUARDED | Writes are atomic and checked; formatter output now passes a CoreLexer token/literal/comment/raw-gap equivalence gate or fails closed | Replace heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
 | Check | BLOCKED | Command is parse/validation only; full type inference is not enforced | Implement enforcing type analysis, then qualify the production probe | P1 |
@@ -116,7 +116,7 @@ so executable qualification is still blocked.
 | P1 | Test daemon result counts are synthesized from child exit status | Parse the child runner result protocol and retain real passed/failed/skipped counts |
 | P1 | Formatter heuristics are contained but not token-gap-native | Replace them incrementally with edits limited to lexer-approved whitespace gaps |
 | P1 | Lint still carries dead legacy registries and unqualified global violations | Delete the unused parallel lint modules after an admitted compile, repair classified UI/hot-loop violations, and run focused policy fixtures |
-| P0 | Exact duplicate mode ignores indentation/comment/string context and counts shifted overlaps | Drive windows from lexer-aware lines and merge overlapping occurrences before applying `max-allowed` |
+| P1 | Exact duplicate signal detection is not lexer-aware inside multiline strings/comments | Drive signal classification from canonical lexer spans while retaining exact indentation-sensitive window keys |
 | P1 | Process cleanup handlers are advertised but inactive | Install one tracker-owned signal/crash cleanup hook per process |
 | P2 | Broker records failed leases and synthetic QEMU identity | Commit leases only after successful start and retain real PID/QMP metadata |
 
@@ -271,6 +271,8 @@ so executable qualification is still blocked.
   verdict is NOT RUN without an admitted pure-Simple runtime.
 - Default semantic adjacent-function extraction with one-line docs: SOURCE
   IMPLEMENTED; executable verdict is NOT RUN without an admitted runtime.
+- Exact duplicate indentation preservation, code-shaped signal filtering, and
+  shifted-window collapse: SOURCE IMPLEMENTED; executable verdict is NOT RUN.
 - Shell syntax, scoped diff hygiene, and the MCP/LSP native wrapper contract:
   PASS.
 - Working and staged direct environment/runtime facade guards: PASS.
