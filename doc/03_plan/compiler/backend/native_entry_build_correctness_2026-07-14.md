@@ -31,6 +31,8 @@ failure is **never** silently converted to a wrong answer.
 
 | Commit | Fix |
 |--------|-----|
+| `13ef81cdde86` | `.map` probes reuse the lowered receiver so side-effecting array producers execute once |
+| `7f28b8ebfd14` | FreeBSD QEMU workflow path filters now track strict native smoke matrix changes |
 | `19ac0d5a4e6` | parity harness extended to 32 cases |
 | `99c7f3516b0` | nested/destructuring match (tuple, nested enum+struct payload) |
 | `3434196a876` | `text + number/bool/float` concat auto-stringifies (was SIGSEGV) |
@@ -99,6 +101,12 @@ the shared binary — deploys require explicit user go-ahead).
   - `native_text_option_unwrap_pointer_value_2026-07-15.md` has a flat-nullable
     implementation and harness controls; executable verification is pending
     repair of the pure-Simple CLI exit 139.
+- Option `.map` now evaluates a side-effecting receiver exactly once. Option
+  `.map` transforms producing non-i64 results remain open: lifted lambdas
+  currently expose an i64 call ABI, and
+  a blanket non-i64 rejection would incorrectly reject supported boolean
+  predicates used by array `filter`. Finish this with caller-aware lambda
+  return typing and value-preserving conversion/boxing, not an Option-only cast.
 - The whole-compiler redeploy (#99 / stage4) remains separate and blocked on
   seed-backend bugs (cranelift enum miscompile + seed-LLVM mcall_direct arg
   count) — **not** part of this correctness campaign; see
