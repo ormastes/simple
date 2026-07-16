@@ -2,7 +2,7 @@
 
 **Severity:** high (silent-wrong on BOTH oracle and native — no diagnostic)
 **Found:** 2026-07-14, errhandling lane
-**Status:** typed local/direct-call forms now fail closed; tagged Option support open
+**Status:** typed local/direct-call/resolved-method forms now fail closed; tagged Option support open
 **Backend:** native-build `--entry` and seed interpreter
 
 ## Symptom
@@ -22,8 +22,9 @@ oracle / 209 native for a case that should be deterministic).
 A reviewed prototype proved that `Option<T>` first needs canonical HIR lowering:
 the flat bridge preserves `Option<i64>`, but `lower_named_kind` currently turns
 it into unresolved `HirTypeKind.Error`. Direct-call recovery then works, while
-unannotated locals and method-call results still lack authoritative container
-metadata and would regress valid Result `?` if unknown operands were rejected.
+unannotated locals and unresolved method-call results still lack authoritative
+container metadata and would regress valid Result `?` if unknown operands were
+rejected.
 
 The deeper blocker is the native flat primitive Option ABI. Raw `i64?` payloads
 use their bare bits while nil uses sentinel `3`, so a valid present payload `3`
@@ -96,9 +97,13 @@ plus explicit-Cranelift Result `?` control preserves Ok and Err propagation.
 The diagnostic is fatal in the native driver, so no binary survives this known
 wrong path.
 
-This removes silent wrongness for the proven typed forms but does not implement
-the tagged Option ABI. Unknown/unannotated method-result provenance remains
-open and is not guessed, because rejecting it could break valid Result `?`.
+The source now recovers resolved method return types through the existing
+`MethodResolution` symbol before the same guard. This source-implements the
+fail-closed path for typed locals, direct calls, and resolved methods without
+changing the Option representation or Result decoder. Unresolved late-dispatch
+methods remain open and are not guessed, because rejecting them could break
+valid Result `?`. Default-LLVM and explicit-Cranelift execution proof remains
+pending the pure-Simple native gate; this does not validate the tagged ABI.
 
 ## Diagnostic degraded to "MIR error: nil" — fixed (2026-07-16, q_optiontry_dynload lane)
 

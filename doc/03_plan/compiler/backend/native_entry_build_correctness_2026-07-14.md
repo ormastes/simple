@@ -97,10 +97,12 @@ the shared binary — deploys require explicit user go-ahead).
   closure, dict-call, collection, interpolation, and constructor fixes. The
   expanded dual-backend matrix still requires the executable gate above.
 - Open filed bugs, in bottom-up order:
-  - `native_try_op_on_option_silent_wrong_2026-07-14.md` now fails closed for
-    authoritatively typed locals and direct-call returns instead of entering
-    Result decoding. Full support remains blocked on a uniform Option
-    producer/consumer ABI and a runnable pure-Simple `native-build` gate.
+  - `native_try_op_on_option_silent_wrong_2026-07-14.md` source-implements a
+    fail-closed path for authoritatively typed locals, direct-call returns, and
+    resolved-method returns before Result decoding. Unresolved late-dispatch
+    methods are deliberately not guessed. Default-LLVM and explicit-Cranelift
+    execution proof and full tagged-Option support remain blocked on a runnable
+    pure-Simple `native-build` gate.
   - `native_text_option_unwrap_pointer_value_2026-07-15.md` has a flat-nullable
     implementation and harness controls. The historical CLI exit 139 has no
     retained current reproducer; executable verification remains pending the
