@@ -3,7 +3,7 @@
 # src / app / cli / lint_entry.spl starts quickly and reliably.
 
 use lazy compiler.tools.formatter.main.{make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
-use lazy compiler.tools.lint.main.{Linter, LintLevel}
+use lazy compiler.tools.lint.main.{run_lint_file}
 use lazy compiler.tools.fix.main.{collect_fixes_from_source, FixApplicator}
 use lazy compiler.tools.fix.rules.{check_simd_opportunities, check_short_grammar_refactor, easyfix_id_text, easyfix_description_text}
 use std.tooling.easy_fix.{FixConfidence}
@@ -57,13 +57,13 @@ fn cli_run_lint(args: [text]) -> i64:
             print(stdout)
         if stderr.len() > 0:
             _cli_eprint(stderr)
+        if perf_exit != 0 and exit_code == 0:
+            exit_code = perf_exit
         if files.len() == 0:
-            return perf_exit
-        if perf_exit != 0:
-            exit_code = 1
+            return exit_code
 
     if files.len() == 0:
-        print "Usage: simple lint <file.spl> [file2.spl...] [--mcp-perf] [--simd]"
+        print "Usage: simple lint <file.spl> [file2.spl...] [--deny-all] [--warn-all] [--profile=TIER] [--mcp-perf] [--simd]"
         print ""
         print "Runs lint passes on Simple source files."
         print "Checks for:"
@@ -72,33 +72,26 @@ fn cli_run_lint(args: [text]) -> i64:
         print "  - Bare primitive types in public APIs"
         print "  - MCP wrapper, hot-path, and invalidation regressions (--mcp-perf)"
         print "  - SIMD vectorisation opportunities L-SIMD-001..011 (--simd, info only)"
+        print "  - Repository UI/hot-loop gates and MCP performance (--all)"
+        print "Use 'simple fix' to apply source changes."
         return 1
 
-    var total_warnings = 0
+    var failed_files = 0
     for file_path in files:
         if not file_exists(file_path):
             _cli_eprint("Error: File not found: {file_path}")
             exit_code = 1
             continue
 
-        val source = file_read(file_path)
-        var linter = Linter.new()
-        val results = linter.lint_source(file_path, source)
-        var visible_count = 0
-        for result in results:
-            visible_count = visible_count + 1
-            var level_text = "info"
-            match result.lint.level:
-                case LintLevel.Deny:
-                    level_text = "error"
-                case LintLevel.Warn:
-                    level_text = "warning"
-                case LintLevel.Allow:
-                    level_text = "info"
-            _cli_eprint("{file_path}:{result.line}: {level_text}[{result.lint.code}]: {result.lint.message}")
+        val file_exit = run_lint_file(file_path, args)
+        if file_exit != 0:
+            if exit_code == 0:
+                exit_code = file_exit
+            failed_files = failed_files + 1
 
         # SIMD opportunity pass — info severity, never increments exit code
         if run_simd:
+            val source = file_read(file_path)
             val simd_fixes = check_simd_opportunities(source, file_path)
             var si = 0
             while si < simd_fixes.len():
@@ -108,15 +101,9 @@ fn cli_run_lint(args: [text]) -> i64:
                 print "{file_path}:{line_str2}: info[simd_opportunity]: {easyfix_description_text(sf)}"
                 si = si + 1
 
-        if visible_count == 0:
-            print "lint: {file_path} OK"
-        else:
-            exit_code = 1
-            total_warnings = total_warnings + 1
-
-    if total_warnings > 0:
+    if failed_files > 0:
         print ""
-        print "Lint found issues in {total_warnings} file(s)"
+        print "Lint failed in {failed_files} file(s)"
     elif exit_code == 0:
         print ""
         print "Lint passed: all files clean"

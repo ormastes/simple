@@ -38,7 +38,7 @@ so executable qualification is still blocked.
 | Production runtime | BLOCKED | Stage 4 was found parsing 10,503 files before closure pruning; source fix is unverified because the final cycle stopped on a stale compiler-backfill guard | In a fresh session run one bounded `--full-bootstrap`, require closure-sized phase input, then admit and atomically deploy | P0 |
 | Test runner | PARTIAL | POSIX parallel argv is injection-safe and tracked, but Windows parallel capture now fails closed pending a native redirected-spawn API; signal cleanup remains incomplete | Add runtime redirected argv spawn, use it on every host, then run timeout/RSS evidence | P0 |
 | Duplicate checker | PARTIAL | Cosine no longer silently drops blocks above 320, but advertised parallel/incremental switches are inert; fast-token bucketing and cache freshness remain defective | Remove or implement inert flags, make the token index linear, and key cache reads by real freshness | P0 |
-| Lint | SOURCE FIXED | Focused/global ownership is correct; global gates still report 30 UI and 45 hot-loop violations | Repair classified violations, then qualify canonical fixtures | P1 |
+| Lint | SOURCE FIXED | Production CLI now delegates file policy to the canonical linter, severity/profile overrides work in both directions, fix rules run once, and `--all` preserves earlier failures; global gates still report 30 UI and 45 hot-loop violations | Repair classified violations, then run the focused policy/uniqueness fixtures | P1 |
 | Format/fix | SOURCE GUARDED | Writes are atomic and checked; formatter output now passes a CoreLexer token/literal/comment/raw-gap equivalence gate or fails closed | Replace heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
 | Check | BLOCKED | Command is parse/validation only; full type inference is not enforced | Implement enforcing type analysis, then qualify the production probe | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
@@ -115,7 +115,7 @@ so executable qualification is still blocked.
 |---|---|---|
 | P1 | Test daemon result counts are synthesized from child exit status | Parse the child runner result protocol and retain real passed/failed/skipped counts |
 | P1 | Formatter heuristics are contained but not token-gap-native | Replace them incrementally with edits limited to lexer-approved whitespace gaps |
-| P1 | Lint ignores severity/options, duplicates fix collection, and `--all` can mask earlier failures | Make the canonical registry return one result set and aggregate exit status monotonically |
+| P1 | Lint still carries dead legacy registries and unqualified global violations | Delete the unused parallel lint modules after an admitted compile, repair classified UI/hot-loop violations, and run focused policy fixtures |
 | P1 | Duplicate fast-token bucket construction is quadratic and cache freshness is false | Build buckets in one pass and persist/compare content hash or mtime before reuse |
 | P1 | Duplicate CLI accepts inert parallel/cache flags and missing paths can exit zero | Reject unsupported flags, return usage/error status, or implement the promised modes |
 | P1 | Process cleanup handlers are advertised but inactive | Install one tracker-owned signal/crash cleanup hook per process |
@@ -264,6 +264,9 @@ so executable qualification is still blocked.
 - Formatter token/literal/comment/raw-gap equivalence and idempotence fixtures:
   SOURCE IMPLEMENTED; executable verdict is NOT RUN without an admitted
   pure-Simple runtime.
+- Lint canonical severity/profile policy, unique shared-rule collection, and
+  monotonic fileless `--all` aggregation: SOURCE IMPLEMENTED; executable
+  verdict is NOT RUN without an admitted pure-Simple runtime.
 - Shell syntax, scoped diff hygiene, and the MCP/LSP native wrapper contract:
   PASS.
 - Working and staged direct environment/runtime facade guards: PASS.
