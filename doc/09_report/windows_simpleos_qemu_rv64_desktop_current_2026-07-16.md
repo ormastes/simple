@@ -18,8 +18,15 @@ Current Windows refresh for
   `simpleos_qemu_rv64_canonical_kernel_status=pass`.
 - Disk image preflight: pass. `simpleos_qemu_rv64_image_status=pass` and
   `simpleos_qemu_rv64_canonical_image_status=pass`.
-- Live boot/capture: not run in this evidence slice. The wrapper exits
-  fail-closed with `simpleos_qemu_rv64_blocker=live-boot-not-run-by-preflight`.
+- Live boot serial: pass. `-RunLiveBoot` launches QEMU, captures OpenSBI and
+  SimpleOS serial output, and reports `simpleos_qemu_serial_console_status=pass`
+  after `SIMPLEOS_RISCV_SMF_FS_PASS` / `TEST PASSED`.
+- Live service/capture probes: fail closed. The guest exits after the serial
+  pass before SSH, HTTP, QMP screendump, or structured WM/GPU readback can be
+  probed, so the current evidence reports
+  `simpleos_qemu_rv64_live_boot_status=guest-exited-before-service-probes`,
+  `simpleos_qemu_rv64_qemu_exit_status=exited:unknown`, and
+  `simpleos_qemu_rv64_blocker=guest-exited-before-service-probes`.
 
 ## Evidence Command
 
@@ -27,7 +34,9 @@ Current Windows refresh for
 Push-Location $env:TEMP
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\ormas\dev\simple\scripts\check\check-simpleos-qemu-rv64-desktop-evidence.ps1 -EvidencePath build\simpleos_multiconfig_live_evidence\qemu-rv64-desktop-out-of-tree.env
 Pop-Location
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-simpleos-qemu-rv64-desktop-evidence.ps1 -EvidencePath build\simpleos_multiconfig_live_evidence\qemu-rv64-desktop-live-current.env -RunLiveBoot -BootTimeoutSeconds 60
 ```
 
-This does not replace the live QEMU boot/capture gate; it hardens and proves the
-direct Windows preflight entrypoint used by the broader live evidence chain.
+The live command proves the Windows QEMU launch and serial boot path, but it
+does not complete the release capture gate because the guest exits before
+network and GPU/WM capture probes.

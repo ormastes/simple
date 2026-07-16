@@ -593,9 +593,10 @@ if ($RunLiveBoot) {
                     $qemuProcess.WaitForExit()
                     $qemuProcess.Refresh()
                     $exitCode = $qemuProcess.ExitCode
-                    $qemuExitStatus = "exited:$exitCode"
-                    if ($exitCode -ne 0) {
-                        $liveBootStatus = "blocked:qemu-exit-$exitCode"
+                    $exitCodeText = if ($null -eq $exitCode -or "$exitCode" -eq "") { "unknown" } else { "$exitCode" }
+                    $qemuExitStatus = "exited:$exitCodeText"
+                    if ($exitCodeText -ne "0" -and $exitCodeText -ne "unknown") {
+                        $liveBootStatus = "blocked:qemu-exit-$exitCodeText"
                     }
                     break
                 }
@@ -651,9 +652,10 @@ if ($RunLiveBoot) {
                 $qemuProcess.WaitForExit()
                 $qemuProcess.Refresh()
                 $exitCode = $qemuProcess.ExitCode
-                $qemuExitStatus = "exited:$exitCode"
-                if ($exitCode -ne 0 -and $liveBootStatus -eq "running") {
-                    $liveBootStatus = "blocked:qemu-exit-$exitCode"
+                $exitCodeText = if ($null -eq $exitCode -or "$exitCode" -eq "") { "unknown" } else { "$exitCode" }
+                $qemuExitStatus = "exited:$exitCodeText"
+                if ($exitCodeText -ne "0" -and $exitCodeText -ne "unknown" -and $liveBootStatus -eq "running") {
+                    $liveBootStatus = "blocked:qemu-exit-$exitCodeText"
                 }
             } elseif ($qemuExitStatus -eq "not-started" -and $qemuProcess) {
                 $qemuExitStatus = "running"
@@ -662,7 +664,7 @@ if ($RunLiveBoot) {
             if ((Test-TextContains $finalSerialText "SIMPLEOS_RISCV_SMF_FS_PASS") -or
                 (Test-TextContains $finalSerialText "TEST PASSED")) {
                 $serialConsoleStatus = "pass"
-                if ($liveBootStatus -eq "blocked:boot-timeout") {
+                if ($liveBootStatus -eq "blocked:boot-timeout" -or $liveBootStatus.StartsWith("blocked:qemu-exit")) {
                     $liveBootStatus = "guest-exited-before-service-probes"
                 }
             }
@@ -819,6 +821,8 @@ if (-not $qemuPresent) {
     Write-Row $rows "simpleos_qemu_rv64_blocker" "missing-disk-image"
 } elseif ($RunLiveBoot -and $serialConsoleStatus -ne "pass") {
     Write-Row $rows "simpleos_qemu_rv64_blocker" "$liveBootStatus"
+} elseif ($RunLiveBoot -and $liveBootStatus -eq "guest-exited-before-service-probes") {
+    Write-Row $rows "simpleos_qemu_rv64_blocker" "guest-exited-before-service-probes"
 } elseif ($RunLiveBoot -and $sshProbeStatus -ne "pass") {
     Write-Row $rows "simpleos_qemu_rv64_blocker" "missing-live-ssh-probe"
 } elseif ($RunLiveBoot -and $httpProbeStatus -ne "pass") {
