@@ -237,6 +237,15 @@
   saved D3D12 evidence files: default mode accepts the current fail-closed shape
   with strict upstream DirectX support, while `-RequireD3D12Completion` fails on
   the remaining native D3D12/browser/pairwise/ARGB/PIX gates.
+- Windows SimpleOS WM host-compare evidence is recorded in
+  `doc/09_report/windows_simpleos_wm_host_compare_current_2026-07-16.md`. The
+  wrapper now resolves repo-relative inputs from `$PSScriptRoot` and was
+  verified from outside the checkout. Hosted stdout capture completes with
+  `simpleos_host_wm_capture_status=pass`, both QEMU and host PPMs pass as
+  `320x240` WM rect scenes, and strict ARGB comparison reports
+  `simpleos_wm_argb_diff_status=pass` with
+  `simpleos_wm_argb_mismatch_count=0`. The release compare gate remains
+  fail-closed on missing QEMU/host RenderDoc logs and `.rdc` capture.
  - Pure GUI release/perf evidence now defines a WM/web/native-runtime-free command
    boundary, SMF/dynlib performance contract, and fail-closed probe row. Current
    Linux-host evidence intentionally reports `pass=false` without a real

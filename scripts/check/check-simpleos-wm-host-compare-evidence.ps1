@@ -20,6 +20,30 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+
+function Resolve-RepoPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return $path
+    }
+    if ([System.IO.Path]::IsPathRooted($path)) {
+        return $path
+    }
+    return Join-Path $repoRoot $path
+}
+
+$EvidencePath = Resolve-RepoPath $EvidencePath
+$BaseEvidencePath = Resolve-RepoPath $BaseEvidencePath
+$QemuPpmPath = Resolve-RepoPath $QemuPpmPath
+$HostPpmPath = Resolve-RepoPath $HostPpmPath
+$QemuRenderdocLogPath = Resolve-RepoPath $QemuRenderdocLogPath
+$HostRenderdocLogPath = Resolve-RepoPath $HostRenderdocLogPath
+$SimpleRdcPath = Resolve-RepoPath $SimpleRdcPath
+$CaptureLogPath = Resolve-RepoPath $CaptureLogPath
+$SimpleBinary = Resolve-RepoPath $SimpleBinary
+$HostCaptureEntry = Resolve-RepoPath $HostCaptureEntry
+$HostCaptureLogPath = Resolve-RepoPath $HostCaptureLogPath
+
 function Write-Row($rows, [string]$key, [string]$value) {
     $prefix = "$key="
     for ($i = $rows.Count - 1; $i -ge 0; $i--) {
@@ -407,7 +431,7 @@ function Write-RectScenePpmCapture([string[]]$lines, [string]$capturePath) {
     $bytes = New-Object byte[] ($header.Length + $body.Length)
     [Array]::Copy($header, 0, $bytes, 0, $header.Length)
     [Array]::Copy($body, 0, $bytes, $header.Length, $body.Length)
-    [System.IO.File]::WriteAllBytes((Join-Path (Get-Location).Path $capturePath), $bytes)
+    [System.IO.File]::WriteAllBytes($capturePath, $bytes)
     return (Test-FileNonEmpty $capturePath)
 }
 
@@ -467,7 +491,7 @@ function Invoke-HostWmCapture([string]$simpleBinary, [string]$entryPath, [string
         $psi = [System.Diagnostics.ProcessStartInfo]::new()
         $psi.FileName = (Resolve-Path -LiteralPath $simpleBinary).Path
         $psi.Arguments = "`"$entryPath`" --interpret"
-        $psi.WorkingDirectory = (Get-Location).Path
+        $psi.WorkingDirectory = $repoRoot
         $psi.UseShellExecute = $false
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
