@@ -131,7 +131,7 @@
   `windows_native_mdi_evidence_window_found=true`,
   `windows_native_mdi_evidence_titlebar_css_pixels=6784`, and
   `windows_native_mdi_evidence_rendered_titlebar_css_pixels=6784` in
-  `build/tmp/windows_native_mdi_evidence_ps_semantic.md`.
+  `doc/09_report/windows_native_mdi_evidence_2026-07-16.md`.
 - Windows verification backstop: `scripts/audit/direct-env-runtime-guard.ps1`
   mirrors the required `direct-env-runtime-guard.shs` working/staged checks for
   PowerShell-only hosts where `sh` is unavailable. The 2026-07-16 Windows run

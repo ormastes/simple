@@ -72,6 +72,35 @@ function Is-RustSeedSimple([string]$path) {
     return $path -match '(^|[\\/])src[\\/]compiler_rust[\\/]'
 }
 
+function Test-SimpleBinCandidate([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) { return $false }
+    try {
+        return ((Get-Item -LiteralPath $path).Length -gt 0)
+    } catch {
+        return $false
+    }
+}
+
+function Copy-CurrentDriverCandidate {
+    foreach ($candidate in @(
+        "src\compiler_rust\target\debug\simple.exe",
+        "src\compiler_rust\target\bootstrap\simple.exe"
+    )) {
+        if (Test-SimpleBinCandidate $candidate) {
+            $driverDir = Join-Path $BuildDir "simple_driver_current"
+            New-Item -ItemType Directory -Force -Path $driverDir | Out-Null
+            $driverPath = Join-Path $driverDir "simple.exe"
+            Copy-Item -LiteralPath $candidate -Destination $driverPath -Force
+            if (Test-SimpleBinCandidate $driverPath) {
+                $script:SimpleBinSource = "copied-current-driver:$candidate"
+                $script:SimpleBinStatus = "pass"
+                return $driverPath
+            }
+        }
+    }
+    return ""
+}
+
 function Resolve-SimpleBin {
     if (-not [string]::IsNullOrWhiteSpace($SimpleBin)) {
         $script:SimpleBinSource = "explicit-env"
@@ -79,8 +108,16 @@ function Resolve-SimpleBin {
             $script:SimpleBinStatus = "forbidden"
             return $SimpleBin
         }
+        if (-not (Test-SimpleBinCandidate $SimpleBin)) {
+            $script:SimpleBinStatus = "invalid"
+            return $SimpleBin
+        }
         $script:SimpleBinStatus = "pass"
         return $SimpleBin
+    }
+    $copiedDriver = Copy-CurrentDriverCandidate
+    if (-not [string]::IsNullOrWhiteSpace($copiedDriver)) {
+        return $copiedDriver
     }
     $script:SimpleBinSource = "missing"
     $script:SimpleBinStatus = "missing"
@@ -91,7 +128,7 @@ function Resolve-SimpleBin {
         "build\bootstrap\stage2\x86_64-pc-windows-msvc\simple.exe",
         "build\bootstrap\stage1\simple.exe"
     )) {
-        if (Test-Path -LiteralPath $candidate) {
+        if (Test-SimpleBinCandidate $candidate) {
             $script:SimpleBinSource = "self-hosted:$candidate"
             $script:SimpleBinStatus = "pass"
             return $candidate
@@ -171,15 +208,17 @@ if ([string]::IsNullOrWhiteSpace($script:ResolvedSimpleBin) -or -not (Test-Path 
     Emit-And-Exit "fail" "missing-simple-bin" 1 "false"
 }
 if (-not (Test-Path -LiteralPath $Entry)) { Emit-And-Exit "fail" "missing-entry" 1 "false" }
+$ResolvedEntry = (Resolve-Path -LiteralPath $Entry).Path
 
 $startInfo = New-Object System.Diagnostics.ProcessStartInfo
 $startInfo.FileName = (Resolve-Path -LiteralPath $script:ResolvedSimpleBin).Path
-$startInfo.Arguments = Join-ProcessArgs @($Entry, "--interpret")
+$startInfo.Arguments = Join-ProcessArgs @($ResolvedEntry, "--interpret")
 $startInfo.WorkingDirectory = (Get-Location).Path
 $startInfo.RedirectStandardOutput = $true
 $startInfo.RedirectStandardError = $true
 $startInfo.UseShellExecute = $false
 $startInfo.CreateNoWindow = $true
+$startInfo.Environment["SIMPLE_HOME"] = (Get-Location).Path
 $startInfo.Environment["SIMPLE_WIN32_MDI_PROOF_PATH"] = $ProofPath
 $startInfo.Environment["SIMPLE_WIN32_MDI_HOLD_MS"] = "12000"
 $probe = New-Object System.Diagnostics.Process
