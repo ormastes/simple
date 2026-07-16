@@ -334,7 +334,10 @@
   `320x240` WM rect scenes, including the fresh desktop-service QEMU
   screendump. Strict ARGB comparison reports
   `simpleos_wm_argb_diff_status=pass` with
-  `simpleos_wm_argb_mismatch_count=0`. The release compare gate remains
+  `simpleos_wm_argb_mismatch_count=0`. The checker now records nonempty file
+  status, byte size, and SHA-256 for both the QEMU and hosted PPM inputs; the
+  current live artifacts are both 230,415 bytes with SHA-256
+  `f816071a30e6ef3a36b43699cb42f4c1ba35a317040572825ea88d35458d35b9`. The release compare gate remains
   fail-closed on missing QEMU/host RenderDoc logs and `.rdc` capture.
  - Pure GUI release/perf evidence now defines a WM/web/native-runtime-free command
    boundary, SMF/dynlib performance contract, and fail-closed probe row. Current

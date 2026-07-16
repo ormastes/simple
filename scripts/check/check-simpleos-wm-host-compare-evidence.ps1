@@ -151,6 +151,21 @@ function Get-FileSizeText([string]$path) {
     return ((Get-Item -LiteralPath $path).Length).ToString()
 }
 
+function Get-FileSha256Text([string]$path) {
+    if (-not (Test-FileNonEmpty $path)) {
+        return "missing"
+    }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $path))
+    try {
+        $hash = $sha.ComputeHash($stream)
+        return (($hash | ForEach-Object { $_.ToString("x2") }) -join "")
+    } finally {
+        $stream.Dispose()
+        $sha.Dispose()
+    }
+}
+
 function Read-Ppm([string]$path) {
     if (-not (Test-FileNonEmpty $path)) {
         return @{ status = "missing"; width = 0; height = 0; body = @(); reason = "missing" }
@@ -582,12 +597,18 @@ if (-not [string]::IsNullOrWhiteSpace($evidenceDir)) {
 
 Write-Row $rows "simpleos_wm_host_compare_wrapper" "check-simpleos-wm-host-compare-evidence.ps1"
 Write-Row $rows "simpleos_wm_qemu_ppm_path" "$QemuPpmPath"
+Write-Row $rows "simpleos_wm_qemu_ppm_file_status" $(if (Test-FileNonEmpty $QemuPpmPath) { "pass" } else { "missing" })
+Write-Row $rows "simpleos_wm_qemu_ppm_size_bytes" (Get-FileSizeText $QemuPpmPath)
+Write-Row $rows "simpleos_wm_qemu_ppm_sha256" (Get-FileSha256Text $QemuPpmPath)
 Write-Row $rows "simpleos_wm_qemu_ppm_status" "$($qemu.status)"
 Write-Row $rows "simpleos_wm_qemu_ppm_reason" "$($qemu.reason)"
 Write-Row $rows "simpleos_wm_qemu_ppm_width" "$($qemu.width)"
 Write-Row $rows "simpleos_wm_qemu_ppm_height" "$($qemu.height)"
 Write-Row $rows "simpleos_wm_qemu_capture_kind" "$qemuCaptureKind"
 Write-Row $rows "simpleos_wm_host_ppm_path" "$HostPpmPath"
+Write-Row $rows "simpleos_wm_host_ppm_file_status" $(if (Test-FileNonEmpty $HostPpmPath) { "pass" } else { "missing" })
+Write-Row $rows "simpleos_wm_host_ppm_size_bytes" (Get-FileSizeText $HostPpmPath)
+Write-Row $rows "simpleos_wm_host_ppm_sha256" (Get-FileSha256Text $HostPpmPath)
 Write-Row $rows "simpleos_wm_host_ppm_status" "$($hostCapture.status)"
 Write-Row $rows "simpleos_wm_host_ppm_reason" "$($hostCapture.reason)"
 Write-Row $rows "simpleos_wm_host_ppm_width" "$($hostCapture.width)"
