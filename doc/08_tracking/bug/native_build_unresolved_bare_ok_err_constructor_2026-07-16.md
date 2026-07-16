@@ -201,3 +201,44 @@ NEXT (peer's os/wm lane — bf3d89e755 regression): fix the native-build codegen
 lowering), OR have bga fall back to the 16-bit I/O-port path + fallback LFB (0xFD000000) instead
 of the 32-bit pci_config scan, so `bga_init_scanout` returns and emits `[scanout-evidence]`. That
 is the last step to a real SimpleOS WM PPM — the boot otherwise reaches framebuffer init cleanly.
+
+## SESSION ARC (2026-07-17): SimpleOS WM boot driven from crash to first-frame render
+
+Rebuilding the seed from current source (`cargo build -p simple-driver`) FIXED the
+32-bit PCI-config `port_outl` hang (a stale-seed codegen bug, now fixed upstream) —
+bga completes, `[scanout-evidence] 3840x2160` emits, framebuffer is writable
+(`[vram-probe] write-readback` ok). With that, the boot advances through the FULL
+init and into the first-frame render. A chain of fixes cleared successive blockers:
+
+1. `io not ready` degrade guard (vfs_boot_init) — NVMe I/O-not-ready → degrade no-disk.
+2. `rt_file_read_bytes` weak stub returns empty [u8] instead of halting.
+3. font_renderer: two module-level `val: Mutex = mutex_new(0)` → raw handles behind
+   `var: Any = 0` (literal-init works on baremetal; function-call-init does NOT).
+4. FontRasterizer.load: dlopen viability gate FIRST (bail before font-asset access).
+
+Each fix moved the fault deeper. Faults: 226 → 5 → (fresh seed) → 10 → 5 → 4 → now
+the render itself. **Final fault (this session): a NULL FUNCTION-POINTER call in the
+render path** — `DesktopShell.render_baremetal_first_frame → Engine2dWmFrameExecutor.render
+→ engine2d_draw_ir_adv_composition_present_with_images → ...render_batch_embedded →
+render_commands → _engine2d_draw_ir_render_box` jumps through null (RIP walks 0x100+).
+
+## SYSTEMIC ROOT (confirmed): missing freestanding module-init
+
+Every one of these is the SAME defect: on the freestanding/baremetal native-build,
+module-level globals with a **function-call initializer** (`mutex_new(0)`, and any
+global holding a function/closure ref or a registry built at init) are NOT run —
+only **literal** initializers (`0`, `[]`, `nil`, `""`) execute at module-init. So
+those globals stay null and any deref / call-through-them faults (cr2=0x0 or a
+null-function-pointer jump). The native-build emits globals as static LLVM constants
+(core_codegen.spl:122) but does not emit+call a `__module_init` that runs the
+non-constant initializers for lib modules. This is an UNBOUNDED cascade across the
+font + engine2d render stacks — per-site workarounds (raw-handle-literal-0, dlopen
+gate) each clear one site but reveal the next.
+
+**The real fix is native-build codegen: generate a module-init routine that runs
+every function-call/non-constant global initializer (in dependency order) and call
+it from the boot entry (the main shim already calls `__module_init`; it must cover
+lib modules).** That single fix unblocks the whole cascade and the SimpleOS WM render.
+Until then, the boot reaches the first-frame render but faults through uninit-global
+function pointers in `_engine2d_draw_ir_render_box`. NVMe/port_outl/file-read/font
+blockers are all cleared and on origin.
