@@ -4,15 +4,7 @@
 //! They are part of the runtime library so they can be linked into native binaries.
 
 use super::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_string_new, RuntimeValue};
-use std::ffi::CStr;
 use std::process::{Command, Stdio};
-
-unsafe extern "C" {
-    #[link_name = "spl_arg_count"]
-    fn canonical_arg_count() -> i64;
-    #[link_name = "spl_get_arg"]
-    fn canonical_arg_at(index: i64) -> *const std::os::raw::c_char;
-}
 
 /// CLI version string from VERSION file (set by build.rs), falls back to Cargo.toml
 const CLI_VERSION: &str = match option_env!("SIMPLE_VERSION") {
@@ -397,17 +389,12 @@ pub extern "C" fn rt_cli_run_tests(args: RuntimeValue, gc_log: u8, gc_off: u8) -
     run_tests_with_args(&arg_strings, gc_log, gc_off)
 }
 
-/// Stage4 scalar-only test bridge. Read argv through the canonical C runtime's
-/// scalar/raw ABI, never through a container RuntimeValue from another heap.
+/// Stage4 test bridge. Read an owned argv snapshot from this runtime's
+/// canonical argument store, never through a container RuntimeValue from
+/// another heap or symbols supplied only by an executable host.
 #[no_mangle]
 pub extern "C" fn rt_cli_run_tests_process_args(gc_log: u8, gc_off: u8) -> i64 {
-    let count = unsafe { canonical_arg_count() }.max(0);
-    let process_args: Vec<String> = (0..count)
-        .filter_map(|index| {
-            let ptr = unsafe { canonical_arg_at(index) };
-            (!ptr.is_null()).then(|| unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
-        })
-        .collect();
+    let process_args = super::args::cli_args_snapshot();
     let arg_strings = test_args_from_process(&process_args);
     run_tests_with_args(&arg_strings, gc_log, gc_off)
 }
@@ -501,16 +488,6 @@ fn run_tests_with_args(arg_strings: &[String], gc_log: u8, gc_off: u8) -> i64 {
 mod test_process_arg_bridge_tests {
     use super::test_args_from_process;
 
-    #[no_mangle]
-    extern "C" fn spl_arg_count() -> i64 {
-        0
-    }
-
-    #[no_mangle]
-    extern "C" fn spl_get_arg(_index: i64) -> *const std::os::raw::c_char {
-        std::ptr::null()
-    }
-
     #[test]
     fn slices_only_arguments_after_the_test_command() {
         let process_args = ["simple", "test", "focused_spec.spl", "--gc-log", "--fail-fast"].map(String::from);
@@ -529,7 +506,10 @@ mod test_process_arg_bridge_tests {
     #[test]
     fn skips_a_global_option_value_named_test() {
         let process_args = ["simple", "--run-config", "test", "test", "focused_spec.spl"].map(String::from);
-        assert_eq!(test_args_from_process(&process_args), ["focused_spec.spl"].map(String::from));
+        assert_eq!(
+            test_args_from_process(&process_args),
+            ["focused_spec.spl"].map(String::from)
+        );
     }
 }
 
