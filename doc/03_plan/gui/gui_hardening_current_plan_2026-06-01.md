@@ -247,6 +247,14 @@
   fail-closed preflight slice; live boot/capture remains
   `simpleos_qemu_rv64_blocker=live-boot-not-run-by-preflight` until
   `-RunLiveBoot` evidence is produced.
+- Windows SimpleOS FPGA RV64 serial evidence is recorded in
+  `doc/09_report/windows_simpleos_fpga_rv64_serial_current_2026-07-16.md`.
+  The direct PowerShell wrapper now anchors itself to the checkout root and was
+  verified from outside the checkout. Current preflight evidence reports
+  `simpleos_fpga_expected_entry_status=pass` and
+  `simpleos_fpga_expected_kernel_status=pass` with repo-root absolute paths.
+  The hardware lane remains fail-closed on missing serial device, missing boot
+  marker, missing toolchain status, and missing bitstream status.
 - Windows SimpleOS Engine2D RenderDoc evidence is recorded in
   `doc/09_report/windows_simpleos_engine2d_renderdoc_current_2026-07-16.md`.
   The wrapper now resolves repo-relative source evidence, QEMU readback,

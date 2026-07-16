@@ -180,6 +180,29 @@ function Capture-SerialLog([string]$device, [string]$path, [int]$baudRate, [int]
     }
 }
 
+$scriptDir = Split-Path -Parent $PSCommandPath
+$repoRoot = Resolve-Path -LiteralPath (Join-Path $scriptDir "..\..")
+Set-Location $repoRoot
+
+function Resolve-RepoPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return $path
+    }
+    if ([System.IO.Path]::IsPathRooted($path)) {
+        return $path
+    }
+    return Join-Path $repoRoot $path
+}
+
+$EvidencePath = Resolve-RepoPath $EvidencePath
+$BaseEvidencePath = Resolve-RepoPath $BaseEvidencePath
+$SerialLogPath = Resolve-RepoPath $SerialLogPath
+$ExpectedEntry = Resolve-RepoPath $ExpectedEntry
+$ExpectedKernelPath = Resolve-RepoPath $ExpectedKernelPath
+$BuildSimpleBinary = Resolve-RepoPath $BuildSimpleBinary
+$BuildLogPath = Resolve-RepoPath $BuildLogPath
+$SerialPortInventoryPath = Resolve-RepoPath $SerialPortInventoryPath
+
 $rows = [System.Collections.Generic.List[string]]::new()
 if (-not [string]::IsNullOrWhiteSpace($BaseEvidencePath) -and (Test-Path -LiteralPath $BaseEvidencePath)) {
     Get-Content -LiteralPath $BaseEvidencePath | ForEach-Object {
