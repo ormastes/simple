@@ -91,8 +91,11 @@ the shared binary — deploys require explicit user go-ahead).
 
 ## Remaining after the 7 lanes
 
-- Fold a parity-harness case per landed lane fix (inline, not via a sub-lane —
-  the rogue-redeploy incident showed sub-lanes can wander into heavy ops).
+- Parity-harness closure is source-complete for every landed sweep lane:
+  `bare_main`, `iife`, `dict_from_call_keys`, `array_concat`,
+  `interp_bool_float`, and `static_ctor_disambiguated` pin the entrypoint,
+  closure, dict-call, collection, interpolation, and constructor fixes. The
+  expanded dual-backend matrix still requires the executable gate above.
 - Open filed bugs, in bottom-up order:
   - `native_try_op_on_option_silent_wrong_2026-07-14.md` now fails closed for
     authoritatively typed locals and direct-call returns instead of entering

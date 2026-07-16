@@ -144,7 +144,7 @@ fn _eval(formula: text) -> text:
 
 - **`grid` local corrupts the parser** — not a clean reserved-word error: declaring a local `grid` then using `grid.len()`/`grid[i]` derails the parse with a no-line-number `Unexpected token: expected Colon, found Dot` (or a segfault). Same family: `unit`. Name spill grids `rgrid`/`out_rows`. Bug: parser_grid_identifier_corrupts_parse_2026-07-04.md
 - **`//` is not a comment** — its words parse as code and the error surfaces on the NEXT line as `variable X not found`. Only `#`. Bug: parser_double_slash_comment_misparse_2026-07-04.md
-- **Top-level `it` outside `describe` is silently ignored** — deliberate-fail probes MUST be nested in a describe. Bug: test_runner_orphan_it_silently_ignored_2026-07-04.md
+- **Top-level `it` is executable** — the runner treats file scope as an implicit suite and fails closed when authored and recorded example counts differ. Nest examples in `describe` for readable grouping. Fixed: test_runner_orphan_it_silently_ignored_2026-07-04.md
 - **Bare-boolean assertions are no-ops** — `"x" == y` alone in an it-block is silently ignored; always `expect(...)` / `assert_*` matchers.
 - **Function-evaluator cursor contract** — every `_eval_*` must return `next_pos` PAST its closing paren; returning the paren's own index corrupts the caller's parse (symptom: enclosing function reports wrong arity).
 - **Numeric fns never go in `_is_text_function`** — a name listed there is hijacked to the text dispatcher before `_dispatch_function` sees it ("unknown text function").
