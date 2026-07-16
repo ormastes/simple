@@ -180,6 +180,10 @@ runtime remains unavailable, so executable qualification is still blocked.
   reset, execution, and teardown now share structured argv plus bounded host
   execution. Fixed resource limits remain explicit argv entries; test paths,
   images, and lease IDs never pass through a shell.
+- **Container runner backend:** standalone container detection, image lookup,
+  test execution, image build, version, and volume cleanup now use bounded
+  structured argv. Runtime duration uses the real runtime clock instead of
+  the former constant-zero placeholder.
 - **Remote terminal transport:** the terminal owner now exposes bounded
   execution for SSH and Telnet. Telnet uses one absolute deadline across all
   reads, and the remote-PC adapter quotes the test path before sending the
@@ -244,6 +248,9 @@ runtime remains unavailable, so executable qualification is still blocked.
 - OpenOCD/Telnet, TRACE32 argv, and remote SSH/Telnet deadline ownership are
   SOURCE IMPLEMENTED with focused hostile-input contracts; executable verdicts
   are NOT RUN because no admitted runtime exists.
+- Standalone container-runner argv boundaries and real duration accounting are
+  SOURCE IMPLEMENTED with hostile-value coverage; executable Docker/Podman
+  verdict is NOT RUN without an admitted runtime.
 - New Simple unit/system behavior and the PowerShell contract: NOT RUN because
   no admitted pure-Simple runtime or PowerShell host exists. Previously passed
   global gates were not repeated after their session limit.

@@ -3,8 +3,9 @@
 # Container-based test execution using Docker or Podman.
 # Provides isolation and resource limits via container runtime.
 
-use std.io.{shell, shell_bool, shell_output_trimmed, ProcessResult}
-use std.io.{file_exists}
+use std.io.{file_exists, process_run_timeout}
+
+extern fn rt_time_now_unix_micros() -> i64
 
 # =========================================================================
 # Container Detection
@@ -16,12 +17,12 @@ fn container_detect_runtime() -> text:
 
     Returns: "docker", "podman", or "none"
     """
-    val docker_check = shell_bool("docker --version")
-    if docker_check:
+    val (_docker_out, _docker_err, docker_code) = process_run_timeout("docker", ["--version"], 5000)
+    if docker_code == 0:
         return "docker"
 
-    val podman_check = shell_bool("podman --version")
-    if podman_check:
+    val (_podman_out, _podman_err, podman_code) = process_run_timeout("podman", ["--version"], 5000)
+    if podman_code == 0:
         return "podman"
 
     "none"
@@ -36,12 +37,10 @@ fn container_check_image(image: text, runtime: text) -> bool:
 
     Returns: true if image exists, false otherwise
     """
-    if runtime == "docker":
-        return shell_bool("docker images -q {image} | grep -q .")
-    elif runtime == "podman":
-        return shell_bool("podman images -q {image} | grep -q .")
-    else:
+    if runtime != "docker" and runtime != "podman":
         return false
+    val (_out, _err, code) = process_run_timeout(runtime, ["image", "inspect", image], 30000)
+    code == 0
 
 # =========================================================================
 # Container Execution
@@ -77,23 +76,22 @@ fn container_run_test(
         val error = "Container runtime '{runtime}' not supported. Use 'docker' or 'podman'."
         return ("", error, 1, 0)
 
-    val mount_flag = if readonly: "ro" else: "rw"
-
-    var cmd = "{runtime} run --rm "
-    cmd = cmd + "--memory={memory_mb}m "
-    cmd = cmd + "--cpus={cpu_count} "
-    cmd = cmd + "--network={network} "
-    cmd = cmd + "-v {workspace}:/workspace:{mount_flag} "
-    cmd = cmd + "-w /workspace "
-    cmd = cmd + "{image} "
-    cmd = cmd + "test {test_file}"
+    val args = container_run_args(test_file, image, memory_mb, cpu_count, network, readonly, workspace)
 
     val start_time = time_now_ms()
-    val result = shell(cmd)
+    val (stdout, stderr, exit_code) = process_run_timeout(runtime, args, 300000)
     val end_time = time_now_ms()
     val duration = end_time - start_time
 
-    (result.stdout, result.stderr, result.exit_code, duration)
+    (stdout, stderr, exit_code as i64, duration)
+
+fn container_run_args(test_file: text, image: text, memory_mb: i64, cpu_count: f64, network: text, readonly: bool, workspace: text) -> [text]:
+    val mount_flag = if readonly: "ro" else: "rw"
+    [
+        "run", "--rm", "--memory={memory_mb}m", "--cpus={cpu_count}",
+        "--network={network}", "-v", "{workspace}:/workspace:{mount_flag}",
+        "-w", "/workspace", image, "test", test_file
+    ]
 
 fn container_build_test_image(runtime: text, dockerfile_path: text, image_name: text) -> bool:
     """
@@ -110,15 +108,18 @@ fn container_build_test_image(runtime: text, dockerfile_path: text, image_name: 
         print "ERROR: Dockerfile not found: {dockerfile_path}"
         return false
 
-    val build_cmd = "{runtime} build -f {dockerfile_path} -t {image_name} ."
+    if runtime != "docker" and runtime != "podman":
+        return false
     print "Building container image: {image_name}"
 
-    val result = shell(build_cmd)
-    if result.exit_code == 0:
+    val (_stdout, stderr, exit_code) = process_run_timeout(
+        runtime, ["build", "-f", dockerfile_path, "-t", image_name, "."], 600000
+    )
+    if exit_code == 0:
         print "Successfully built image: {image_name}"
         return true
     else:
-        print "Failed to build image: {result.stderr}"
+        print "Failed to build image: {stderr}"
         return false
 
 # =========================================================================
@@ -126,10 +127,8 @@ fn container_build_test_image(runtime: text, dockerfile_path: text, image_name: 
 # =========================================================================
 
 fn time_now_ms() -> i64:
-    """Get current time in milliseconds (stub for runtime compatibility)"""
-    # In real implementation, would use rt_time_now_unix_micros() / 1000
-    # For now, return 0 as placeholder
-    0
+    """Get current time in milliseconds."""
+    rt_time_now_unix_micros() / 1000
 
 fn container_get_version(runtime: text) -> text:
     """
@@ -140,12 +139,10 @@ fn container_get_version(runtime: text) -> text:
 
     Returns: Version string or empty string on error
     """
-    if runtime == "docker":
-        return shell_output_trimmed("docker --version", "")
-    elif runtime == "podman":
-        return shell_output_trimmed("podman --version", "")
-    else:
+    if runtime != "docker" and runtime != "podman":
         return ""
+    val (stdout, _stderr, exit_code) = process_run_timeout(runtime, ["--version"], 5000)
+    if exit_code == 0: stdout.trim() else: ""
 
 fn container_cleanup_volumes(runtime: text) -> bool:
     """
@@ -156,14 +153,11 @@ fn container_cleanup_volumes(runtime: text) -> bool:
 
     Returns: true on success, false on failure
     """
-    if runtime == "docker":
-        return shell_bool("docker volume prune -f")
-    elif runtime == "podman":
-        return shell_bool("podman volume prune -f")
-    else:
+    if runtime != "docker" and runtime != "podman":
         return false
+    val (_stdout, _stderr, exit_code) = process_run_timeout(runtime, ["volume", "prune", "-f"], 30000)
+    exit_code == 0
 
 # =========================================================================
 # Exports
 # =========================================================================
-
