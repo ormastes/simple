@@ -1,9 +1,13 @@
 param(
-    [ValidateSet("--check", "--print-install")]
+    [ValidateSet("--check", "--run", "--print-install")]
     [string]$Mode = "--check",
     [string]$BuildDir = "build\gui-web-2d-vulkan-env-windows",
     [string]$EvidencePath = "",
     [string]$SimpleReadbackEvidencePath = "build\simpleos_multiconfig_live_evidence\vulkan-engine2d-readback-final.env",
+    [string]$HtmlPath = "test\fixtures\html_css\generated_gui_vulkan_renderdoc_fixture.html",
+    [int]$Width = 1280,
+    [int]$Height = 720,
+    [int]$TimeoutSecs = 45,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$RemainingArgs = @()
 )
@@ -12,6 +16,8 @@ $ErrorActionPreference = "Stop"
 
 if ($RemainingArgs -contains "--print-install" -or $MyInvocation.Line -match '(^|\s)--print-install(\s|$)') {
     $Mode = "--print-install"
+} elseif ($RemainingArgs -contains "--run" -or $MyInvocation.Line -match '(^|\s)--run(\s|$)') {
+    $Mode = "--run"
 } elseif ($RemainingArgs -contains "--check" -or $MyInvocation.Line -match '(^|\s)--check(\s|$)') {
     $Mode = "--check"
 }
@@ -35,6 +41,7 @@ Required checks:
   Get-Command dxc
   Get-Command renderdoccmd
   powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-vulkan-env.ps1 --check
+  powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-vulkan-env.ps1 --run
 "@
 }
 
@@ -99,6 +106,65 @@ function Add-Row($rows, [string]$key, [string]$value) {
     $rows.Add("$key=$value") | Out-Null
 }
 
+function Json-Value-Or([string]$path, [string[]]$keys, [string]$defaultValue = "") {
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) { return $defaultValue }
+    try {
+        $json = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        foreach ($key in $keys) {
+            $value = $json
+            foreach ($part in $key.Split(".")) {
+                if ($null -eq $value) { break }
+                $value = $value.$part
+            }
+            if ($null -ne $value -and "$value" -ne "") { return "$value" }
+        }
+    } catch {
+        return $defaultValue
+    }
+    return $defaultValue
+}
+
+function Proof-Status([string]$proofPath, [string]$argbPath) {
+    $status = Json-Value-Or $proofPath @("status") ""
+    $written = Json-Value-Or $proofPath @("captured_argb_written") ""
+    if ($status -eq "pass" -and ($written -eq "True" -or $written -eq "true") -and (Test-Path -LiteralPath $argbPath)) {
+        return "pass"
+    }
+    if (-not (Test-Path -LiteralPath $argbPath)) { return "missing" }
+    if ($status -ne "") { return $status }
+    return "unknown"
+}
+
+function Wait-ForFile([string]$path, [int]$timeoutMs = 5000) {
+    $deadline = (Get-Date).AddMilliseconds($timeoutMs)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path -LiteralPath $path) { return $true }
+        Start-Sleep -Milliseconds 100
+    }
+    return (Test-Path -LiteralPath $path)
+}
+
+function Invoke-Capture([string]$exe, [string[]]$argList, [hashtable]$envMap, [string]$stdoutPath, [string]$stderrPath, [int]$timeoutSecs) {
+    $oldValues = @{}
+    foreach ($key in $envMap.Keys) {
+        $oldValues[$key] = (Get-Item -LiteralPath "Env:\$key" -ErrorAction SilentlyContinue).Value
+        Set-Item -LiteralPath "Env:\$key" -Value "$($envMap[$key])"
+    }
+    try {
+        & $exe @argList > $stdoutPath 2> $stderrPath
+        if ($null -ne $global:LASTEXITCODE) { return [int]$global:LASTEXITCODE }
+        return 0
+    } finally {
+        foreach ($key in $oldValues.Keys) {
+            if ($null -eq $oldValues[$key]) {
+                Remove-Item -LiteralPath "Env:\$key" -ErrorAction SilentlyContinue
+            } else {
+                Set-Item -LiteralPath "Env:\$key" -Value $oldValues[$key]
+            }
+        }
+    }
+}
+
 if ($Mode -eq "--print-install") {
     Write-Install
     exit 0
@@ -108,10 +174,19 @@ if ([string]::IsNullOrWhiteSpace($EvidencePath)) {
     $EvidencePath = Join-Path $BuildDir "evidence.env"
 }
 
+$RootDir = Resolve-Path (Join-Path $PSScriptRoot "..\..")
+$BuildFullDir = if ([System.IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $RootDir $BuildDir }
+$EvidencePath = if ([System.IO.Path]::IsPathRooted($EvidencePath)) { $EvidencePath } else { Join-Path $RootDir $EvidencePath }
+
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $EvidencePath) | Out-Null
+New-Item -ItemType Directory -Force -Path $BuildFullDir | Out-Null
 
 $rows = New-Object System.Collections.Generic.List[string]
 $simple = Read-KeyValueFile $SimpleReadbackEvidencePath
+$HtmlFullPath = if ([System.IO.Path]::IsPathRooted($HtmlPath)) { $HtmlPath } else { Join-Path $RootDir $HtmlPath }
+$NodeSource = Command-Source "node"
+$ElectronCaptureScript = Join-Path $RootDir "tools\electron-live-bitmap\capture_html_argb.js"
+$ChromeCaptureScript = Join-Path $RootDir "tools\chrome-live-bitmap\capture_html_argb.js"
 
 $vulkanSdkBin = Candidate-Path $env:VULKAN_SDK "Bin"
 $vulkanInfoSource = Tool-Source @("vulkaninfo", "vulkaninfo.exe") @(
@@ -131,7 +206,12 @@ $chromeSource = Tool-Source @("chrome", "chrome.exe") @(
     (Candidate-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe"),
     (Candidate-Path $env:LocalAppData "Google\Chrome\Application\chrome.exe")
 )
-$electronSource = Tool-Source @("electron", "electron.exe") @()
+$electronSource = Existing-Path @(
+    (Join-Path $RootDir "tools\electron-shell\node_modules\electron\dist\electron.exe")
+)
+if ($electronSource -eq "") {
+    $electronSource = Tool-Source @("electron.cmd", "electron.exe", "electron") @()
+}
 $renderdocSource = Tool-Source @("renderdoccmd", "renderdoccmd.exe", "qrenderdoc", "qrenderdoc.exe") @(
     (Candidate-Path $env:RDOC_HOME "renderdoccmd.exe"),
     (Candidate-Path $env:RDOC_HOME "qrenderdoc.exe"),
@@ -169,10 +249,14 @@ if ($vulkanInfoStatus -ne "pass") {
     $hostReadiness = "pass"
 }
 
-Add-Row $rows "gui_web_2d_vulkan_mode" "windows-check"
-Add-Row $rows "gui_web_2d_vulkan_build_dir" "$BuildDir"
+Add-Row $rows "gui_web_2d_vulkan_mode" $(if ($Mode -eq "--run") { "windows-run" } else { "windows-check" })
+Add-Row $rows "gui_web_2d_vulkan_build_dir" "$BuildFullDir"
 Add-Row $rows "gui_web_2d_vulkan_evidence_path" "$EvidencePath"
 Add-Row $rows "gui_web_2d_vulkan_windows_setup_wrapper" "scripts/setup/setup-gui-web-2d-vulkan-env.ps1"
+Add-Row $rows "gui_web_2d_vulkan_html_path" "$HtmlFullPath"
+Add-Row $rows "gui_web_2d_vulkan_width" "$Width"
+Add-Row $rows "gui_web_2d_vulkan_height" "$Height"
+Add-Row $rows "gui_web_2d_vulkan_timeout_secs" "$TimeoutSecs"
 Add-Row $rows "gui_web_2d_vulkan_simple_readback_evidence_path" "$SimpleReadbackEvidencePath"
 Add-Row $rows "gui_web_2d_vulkan_simple_status" "$simpleStatus"
 Add-Row $rows "gui_web_2d_vulkan_simple_backend_name" "$simpleBackend"
@@ -194,10 +278,101 @@ Add-Row $rows "gui_web_2d_vulkan_renderdoc_cmd" "$renderdocSource"
 Add-Row $rows "gui_web_2d_vulkan_sdk_tools_status" "$sdkToolsStatus"
 Add-Row $rows "gui_web_2d_vulkan_host_readiness_status" "$hostReadiness"
 
+$runStatus = "not-run"
+if ($Mode -eq "--run") {
+    $runStatus = "fail"
+    $electronOut = Join-Path $BuildFullDir "electron.out"
+    $electronLog = Join-Path $BuildFullDir "electron.log"
+    $electronArgb = Join-Path $BuildFullDir "electron_argb.json"
+    $electronProof = Join-Path $BuildFullDir "electron_argb_proof.json"
+    $chromeOut = Join-Path $BuildFullDir "chrome_argb.out"
+    $chromeLog = Join-Path $BuildFullDir "chrome_argb.log"
+    $chromeArgb = Join-Path $BuildFullDir "chrome_argb.json"
+    $chromeProof = Join-Path $BuildFullDir "chrome_argb_proof.json"
+    $chromeGeometry = Join-Path $BuildFullDir "chrome_geometry.json"
+
+    $electronFlags = @("--no-sandbox", "--disable-gpu-sandbox", "--disable-dev-shm-usage", "--enable-features=Vulkan", "--use-angle=vulkan")
+    $chromeFlags = "--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan"
+
+    Add-Row $rows "gui_web_2d_vulkan_node_status" (Tool-Status $NodeSource)
+    Add-Row $rows "gui_web_2d_vulkan_node_path" "$NodeSource"
+    Add-Row $rows "gui_web_2d_vulkan_electron_requested_api" "vulkan"
+    Add-Row $rows "gui_web_2d_vulkan_electron_requested_angle" "vulkan"
+    Add-Row $rows "gui_web_2d_vulkan_electron_launch_flags" ($electronFlags -join " ")
+    Add-Row $rows "gui_web_2d_vulkan_chrome_requested_api" "vulkan"
+    Add-Row $rows "gui_web_2d_vulkan_chrome_requested_angle" "vulkan"
+    Add-Row $rows "gui_web_2d_vulkan_chrome_launch_flags" "$chromeFlags"
+
+    if ($electronStatus -eq "pass" -and (Test-Path -LiteralPath $ElectronCaptureScript)) {
+        $electronEnv = @{
+            ELECTRON_CAPTURE_HTML = "$HtmlFullPath"
+            ELECTRON_CAPTURE_WIDTH = "$Width"
+            ELECTRON_CAPTURE_HEIGHT = "$Height"
+            ELECTRON_CAPTURE_OUTPUT = "$electronArgb"
+            ELECTRON_CAPTURE_PROOF_PATH = "$electronProof"
+            ELECTRON_CAPTURE_SETTLE_MS = "1000"
+            ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT = "38217"
+            ELECTRON_ENABLE_LOGGING = "1"
+        }
+        $electronCode = Invoke-Capture $electronSource ($electronFlags + @("$ElectronCaptureScript")) $electronEnv $electronOut $electronLog $TimeoutSecs
+        Wait-ForFile $electronArgb | Out-Null
+        Wait-ForFile $electronProof | Out-Null
+        Add-Row $rows "gui_web_2d_vulkan_electron_exit_code" "$electronCode"
+        Add-Row $rows "gui_web_2d_vulkan_electron_stdout" "$electronOut"
+        Add-Row $rows "gui_web_2d_vulkan_electron_log" "$electronLog"
+        Add-Row $rows "gui_web_2d_vulkan_electron_argb_path" "$electronArgb"
+        Add-Row $rows "gui_web_2d_vulkan_electron_argb_proof" "$electronProof"
+        Add-Row $rows "gui_web_2d_vulkan_electron_argb_status" (Proof-Status $electronProof $electronArgb)
+        Add-Row $rows "gui_web_2d_vulkan_electron_argb_checksum" (Json-Value-Or $electronProof @("checksum", "captured_argb_sha256") "")
+        Add-Row $rows "gui_web_2d_vulkan_electron_vulkan" (Json-Value-Or $electronProof @("gpu_feature_status.vulkan", "gpuFeatureStatus.vulkan") "")
+    } else {
+        Add-Row $rows "gui_web_2d_vulkan_electron_exit_code" ""
+        Add-Row $rows "gui_web_2d_vulkan_electron_argb_status" "unavailable"
+        Add-Row $rows "gui_web_2d_vulkan_electron_argb_reason" "missing-electron-or-capture-script"
+    }
+
+    if ($chromeStatus -eq "pass" -and $NodeSource -ne "" -and (Test-Path -LiteralPath $ChromeCaptureScript)) {
+        $chromeEnv = @{
+            CHROME_CAPTURE_HTML = "$HtmlFullPath"
+            CHROME_CAPTURE_WIDTH = "$Width"
+            CHROME_CAPTURE_HEIGHT = "$Height"
+            CHROME_CAPTURE_OUTPUT = "$chromeArgb"
+            CHROME_CAPTURE_PROOF_PATH = "$chromeProof"
+            CHROME_CAPTURE_GEOMETRY_OUTPUT = "$chromeGeometry"
+            CHROME_CAPTURE_BIN = "$chromeSource"
+            CHROME_CAPTURE_DISABLE_GPU = "false"
+            CHROME_CAPTURE_EXTRA_ARGS = "$chromeFlags"
+            CHROME_CAPTURE_TIMEOUT_MS = "$($TimeoutSecs * 1000)"
+        }
+        $chromeCode = Invoke-Capture $NodeSource @("$ChromeCaptureScript") $chromeEnv $chromeOut $chromeLog $TimeoutSecs
+        Wait-ForFile $chromeArgb | Out-Null
+        Wait-ForFile $chromeProof | Out-Null
+        Add-Row $rows "gui_web_2d_vulkan_chrome_argb_exit_code" "$chromeCode"
+        Add-Row $rows "gui_web_2d_vulkan_chrome_argb_stdout" "$chromeOut"
+        Add-Row $rows "gui_web_2d_vulkan_chrome_argb_log" "$chromeLog"
+        Add-Row $rows "gui_web_2d_vulkan_chrome_argb_path" "$chromeArgb"
+        Add-Row $rows "gui_web_2d_vulkan_chrome_argb_proof" "$chromeProof"
+        Add-Row $rows "gui_web_2d_vulkan_chrome_geometry" "$chromeGeometry"
+        Add-Row $rows "gui_web_2d_vulkan_chrome_argb_status" (Proof-Status $chromeProof $chromeArgb)
+        Add-Row $rows "gui_web_2d_vulkan_chrome_argb_checksum" (Json-Value-Or $chromeProof @("checksum") "")
+    } else {
+        Add-Row $rows "gui_web_2d_vulkan_chrome_argb_exit_code" ""
+        Add-Row $rows "gui_web_2d_vulkan_chrome_argb_status" "unavailable"
+        Add-Row $rows "gui_web_2d_vulkan_chrome_argb_reason" "missing-chrome-node-or-capture-script"
+    }
+
+    $electronArgbStatus = ($rows | Where-Object { $_ -like "gui_web_2d_vulkan_electron_argb_status=*" } | Select-Object -Last 1) -replace '^.*=', ''
+    $chromeArgbStatus = ($rows | Where-Object { $_ -like "gui_web_2d_vulkan_chrome_argb_status=*" } | Select-Object -Last 1) -replace '^.*=', ''
+    if ($simpleStatus -eq "pass" -and $electronArgbStatus -eq "pass" -and $chromeArgbStatus -eq "pass") {
+        $runStatus = "pass"
+    }
+    Add-Row $rows "gui_web_2d_vulkan_direct_run_status" "$runStatus"
+}
+
 $rows | Set-Content -Encoding ASCII -Path $EvidencePath
 $rows | ForEach-Object { Write-Output $_ }
 
-if ($hostReadiness -eq "pass" -and $simpleStatus -eq "pass") {
+if (($Mode -eq "--check" -and $hostReadiness -eq "pass" -and $simpleStatus -eq "pass") -or ($Mode -eq "--run" -and $runStatus -eq "pass")) {
     exit 0
 }
 exit 1

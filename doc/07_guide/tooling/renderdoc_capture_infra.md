@@ -59,6 +59,12 @@ per-run output.
   install paths before reporting a tool as missing. Use `--print-install` for
   Windows install hints; do not claim RenderDoc capture until `renderdoccmd` is
   present and a valid `.rdc` artifact is produced.
+- `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 --run` launches the Windows
+  direct evidence path: repo-local Electron, installed Chrome, and the latest
+  Simple Vulkan readback evidence. It writes Electron/Chrome ARGB and proof
+  files under the selected build directory and reports
+  `gui_web_2d_vulkan_direct_run_status=pass` only when all direct lanes produce
+  real artifacts. This is direct launch evidence, not a RenderDoc `.rdc` claim.
 
 Compatibility wrappers remain:
 
