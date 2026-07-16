@@ -1,9 +1,27 @@
-use compiler.backend.backend.stage4_symbol_closure.{stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs}
 use std.spec.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
 
 describe "Stage4 aggregate final symbol closure":
+    it "rejects hosted constructor and destructor section families":
+        val headers = ".preinit_array .init_array.42 .ctors .fini_array .dtors __mod_init_func __mod_term_func .CRT$XIA .CRT$XCU .CRT$XPU .CRT$XTU .CRT$XLB"
+        val found = stage4_forbidden_archive_sections(headers)
+        val joined = found.join(" ")
+        expect(joined).to_contain(".preinit_array")
+        expect(joined).to_contain(".init_array")
+        expect(joined).to_contain(".ctors")
+        expect(joined).to_contain(".fini_array")
+        expect(joined).to_contain(".dtors")
+        expect(joined).to_contain("__mod_init_func")
+        expect(joined).to_contain("__mod_term_func")
+        expect(joined).to_contain(".CRT$XI")
+        expect(joined).to_contain(".CRT$XC")
+        expect(joined).to_contain(".CRT$XP")
+        expect(joined).to_contain(".CRT$XT")
+        expect(joined).to_contain(".CRT$XL")
+        expect(stage4_forbidden_archive_sections(".text .data .bss").len()).to_equal(0)
+
     it "subtracts sibling definitions and returns sorted unique runtime requests":
         val rows = """
 first.o:
@@ -285,12 +303,21 @@ not-an-address W rt_malformed
         val validate_pos = inventory_source.find("stage4_validate_candidate_archive_inputs(")
         val exists_pos = inventory_source.find("rt_file_exists(")
         val resolver_pos = inventory_source.find("find_nm_portable()")
+        val section_resolver_pos = inventory_source.find("find_objdump_portable()")
+        val section_scan_pos = inventory_source.find("rt_process_run(section_reader")
+        val forbidden_pos = inventory_source.find("stage4_forbidden_archive_sections(section_out)")
         val scan_pos = inventory_source.find("rt_process_run(nm")
         expect(validate_pos).to_be_greater_than(-1)
         expect(resolver_pos).to_be_greater_than(validate_pos)
+        expect(section_resolver_pos).to_be_greater_than(resolver_pos)
         expect(exists_pos).to_be_greater_than(validate_pos)
+        expect(section_scan_pos).to_be_greater_than(exists_pos)
+        expect(forbidden_pos).to_be_greater_than(section_scan_pos)
         expect(scan_pos).to_be_greater_than(resolver_pos)
-        expect(scan_pos).to_be_greater_than(exists_pos)
+        expect(scan_pos).to_be_greater_than(forbidden_pos)
+        expect(inventory_source).to_contain("section scan failed")
+        expect(inventory_source).to_contain("section scan was empty")
+        expect(inventory_source).to_contain("retained constructor/destructor sections")
         val occurrences = source.split("llvm_stage4_candidate_archive_inventory").len() - 1
         expect(occurrences).to_equal(1)
 
@@ -319,3 +346,18 @@ not-an-address W rt_malformed
         expect(newest_pos).to_be_greater_than(override_pos)
         expect(fallback_pos).to_be_greater_than(newest_pos)
         expect(source).to_contain("for path in out.split(\"\\n\")")
+
+    it "keeps the portable section-reader override and platform-safe fallbacks":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_capability.spl") ?? ""
+        val resolver_pos = source.find("pub fn find_objdump_portable")
+        val detect_pos = source.find("# Detect libLLVM availability")
+        val resolver_source = source.substring(resolver_pos, detect_pos)
+        val override_pos = resolver_source.find("env_get(\"SIMPLE_OBJDUMP\")")
+        val newest_pos = resolver_source.last_index_of("\"llvm-objdump-22\"") ?? -1
+        val readelf_pos = resolver_source.last_index_of("\"readelf\"") ?? -1
+        val fallback_pos = resolver_source.last_index_of("\"objdump\"") ?? -1
+        expect(override_pos).to_be_greater_than(-1)
+        expect(newest_pos).to_be_greater_than(override_pos)
+        expect(readelf_pos).to_be_greater_than(newest_pos)
+        expect(fallback_pos).to_be_greater_than(readelf_pos)
+        expect(resolver_source).to_contain("/opt/homebrew/opt/llvm/bin/llvm-objdump")

@@ -13,11 +13,11 @@ use app.io.sysinfo_ops.{getpid}
 use compiler.backend.backend.entry_point.{generate_entry_point_ir}
 use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
-use compiler.backend.backend.llvm_capability.{find_nm_portable}
+use compiler.backend.backend.llvm_capability.{find_nm_portable, find_objdump_portable}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, _get_temp_dir, _obj_ext, _is_windows, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
-use compiler.backend.backend.stage4_symbol_closure.{stage4_requested_from_nm_output, stage4_validate_candidate_archive_inputs}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_validate_candidate_archive_inputs}
 use std.platform.{host_arch, host_os, is_macos}
 
 # TODO(compiler-native-link-facades): replace these direct runtime imports with
@@ -58,6 +58,9 @@ pub fn llvm_stage4_candidate_archive_inventory(labels: [text], paths: [text]) ->
     val nm = find_nm_portable()
     if nm == "":
         return Err("Stage4 candidate archive scan requires llvm-nm or nm")
+    val section_reader = find_objdump_portable()
+    if section_reader == "":
+        return Err("Stage4 candidate archive scan requires llvm-objdump, readelf, or objdump")
     var scans: [text] = []
     var i = 0
     while i < paths.len():
@@ -65,6 +68,15 @@ pub fn llvm_stage4_candidate_archive_inventory(labels: [text], paths: [text]) ->
         val path = paths[i]
         if not rt_file_exists(path):
             return Err("Stage4 candidate archive '" + label + "' is missing at '" + path + "'")
+        val section_flag = if section_reader.lower().contains("readelf"): "-S" else: "-h"
+        val (section_out, section_err, section_code) = rt_process_run(section_reader, [section_flag, path])
+        if section_code != 0:
+            return Err("Stage4 candidate archive '" + label + "' section scan failed at '" + path + "': " + section_err)
+        if section_out.trim() == "":
+            return Err("Stage4 candidate archive '" + label + "' section scan was empty at '" + path + "'")
+        val forbidden_sections = stage4_forbidden_archive_sections(section_out)
+        if forbidden_sections.len() > 0:
+            return Err("Stage4 candidate archive '" + label + "' retained constructor/destructor sections at '" + path + "': " + forbidden_sections.join(", "))
         val (nm_out, nm_err, nm_code) = rt_process_run(nm, ["-g", path])
         if nm_code != 0:
             return Err("Stage4 candidate archive '" + label + "' scan failed at '" + path + "': " + nm_err)
