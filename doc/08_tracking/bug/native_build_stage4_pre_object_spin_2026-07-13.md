@@ -576,3 +576,23 @@ ownership, caller declarations, reload compatibility, and generator naming.
 Executable compiler/native proof remains pending under the existing bootstrap
 restriction; this closes one provider ABI collision but does not enable the
 incomplete Stage4 provider profile.
+
+## 2026-07-16 target-explicit dynamic-loader provider policy
+
+The pure-Simple Stage4 closure contract now names the dedicated dynamic-loader
+archive for Linux, macOS, FreeBSD, Windows MinGW, and Windows MSVC without
+building or selecting it. A target-explicit symbol validator accepts synthetic
+ELF, Mach-O, COFF-MSVC, and COFF-MinGW scans only when the archive exposes
+exactly `spl_dlopen`, `spl_dlsym`, and `spl_dlclose` and imports exactly
+`rt_interp_cstr` plus the hosted loader APIs. It normalizes Mach-O prefixes,
+COFF import thunks, MinGW decoration, and ignores COFF `@feat.00` metadata.
+The eventual link owner is `libdl` on Linux, libSystem on macOS, libc without
+`-ldl` on the current FreeBSD path, and the kernel32 import library on Windows.
+
+This is policy evidence, not archive evidence. Production remains fail-closed:
+the compiler does not yet create or select this archive. Compile/archive/scan
+proof must establish one-member composition, deterministic bytes, forbidden-
+section absence, and the measured symbol contract on each hosted platform
+before the provider can enter the inventory. Apple/BSD archiver behavior and
+MSVC/MinGW archive formats are therefore still pending, as are the remaining
+providers and production hash/digest/cache/link wiring.

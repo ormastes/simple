@@ -1,9 +1,49 @@
-use compiler.backend.backend.stage4_symbol_closure.{stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_validate_dynload_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
 use std.spec.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
 
 describe "Stage4 aggregate final symbol closure":
+    it "defines target-explicit dynamic-loader archive identities without building them":
+        expect(stage4_dynload_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_dynload.a")
+        expect(stage4_dynload_provider_archive_file("macos", false).unwrap()).to_equal("libsimple_stage4_dynload.a")
+        expect(stage4_dynload_provider_archive_file("freebsd", false).unwrap()).to_equal("libsimple_stage4_dynload.a")
+        expect(stage4_dynload_provider_archive_file("windows", false).unwrap()).to_equal("libsimple_stage4_dynload.a")
+        expect(stage4_dynload_provider_archive_file("windows", true).unwrap()).to_equal("simple_stage4_dynload.lib")
+        expect(stage4_dynload_provider_archive_file("linux", true).is_err()).to_be(true)
+        expect(stage4_dynload_provider_archive_file("plan9", false).is_err()).to_be(true)
+
+    it "accepts exact ELF Mach-O and COFF dynamic-loader provider contracts":
+        val elf = "0000000000000000 T spl_dlopen\n0000000000000010 T spl_dlsym\n0000000000000020 T spl_dlclose\n                 U rt_interp_cstr\n                 U dlopen\n                 U dlsym\n                 U dlclose"
+        val macho = "0000000000000000 T _spl_dlopen\n0000000000000010 T _spl_dlsym\n0000000000000020 T _spl_dlclose\n                 U _rt_interp_cstr\n                 U _dlopen\n                 U _dlsym\n                 U _dlclose"
+        val msvc = "00000000 T spl_dlopen\n00000010 T spl_dlsym\n00000020 T spl_dlclose\n00000000 A @feat.00\n         U rt_interp_cstr\n         U __imp_LoadLibraryA\n         U __imp_GetProcAddress\n         U __imp_FreeLibrary"
+        val mingw = "00000000 T _spl_dlopen\n00000010 T _spl_dlsym\n00000020 T _spl_dlclose\n         U _rt_interp_cstr\n         U __imp__LoadLibraryA@4\n         U __imp__GetProcAddress@8\n         U __imp__FreeLibrary@4"
+        expect(stage4_validate_dynload_provider_symbol_contract(elf, "elf").is_ok()).to_be(true)
+        expect(stage4_validate_dynload_provider_symbol_contract(macho, "macho").is_ok()).to_be(true)
+        expect(stage4_validate_dynload_provider_symbol_contract(msvc, "coff-msvc").is_ok()).to_be(true)
+        expect(stage4_validate_dynload_provider_symbol_contract(mingw, "coff-mingw").is_ok()).to_be(true)
+
+    it "rejects incomplete extra repeated and unknown dynamic-loader provider contracts":
+        val exact = "0000000000000000 T spl_dlopen\n0000000000000010 T spl_dlsym\n0000000000000020 T spl_dlclose\n                 U rt_interp_cstr\n                 U dlopen\n                 U dlsym\n                 U dlclose"
+        val missing = exact.replace("0000000000000020 T spl_dlclose\n", "")
+        val extra_definition = exact + "\n0000000000000030 T spl_hidden"
+        val extra_undefined = exact + "\n                 U __stack_chk_fail"
+        val repeated = exact + "\n0000000000000040 T spl_dlopen"
+        val repeated_undefined = exact + "\n                 U dlopen"
+        val coff = "00000000 T spl_dlopen\n00000010 T spl_dlsym\n00000020 T spl_dlclose\n00000000 A @feat.00\n         U rt_interp_cstr\n         U __imp_LoadLibraryA\n         U __imp_GetProcAddress\n         U __imp_FreeLibrary"
+        val false_decoration = coff.replace("__imp_LoadLibraryA", "__imp_LoadLibraryA@evil")
+        val wrong_arity = coff.replace("__imp_LoadLibraryA", "__imp_LoadLibraryA@8")
+        val repeated_import_alias = coff + "\n         U LoadLibraryA"
+        expect(stage4_validate_dynload_provider_symbol_contract(missing, "elf").is_err()).to_be(true)
+        expect(stage4_validate_dynload_provider_symbol_contract(extra_definition, "elf").is_err()).to_be(true)
+        expect(stage4_validate_dynload_provider_symbol_contract(extra_undefined, "elf").is_err()).to_be(true)
+        expect(stage4_validate_dynload_provider_symbol_contract(repeated, "elf").is_err()).to_be(true)
+        expect(stage4_validate_dynload_provider_symbol_contract(repeated_undefined, "elf").is_err()).to_be(true)
+        expect(stage4_validate_dynload_provider_symbol_contract(false_decoration, "coff-msvc").is_err()).to_be(true)
+        expect(stage4_validate_dynload_provider_symbol_contract(wrong_arity, "coff-msvc").is_err()).to_be(true)
+        expect(stage4_validate_dynload_provider_symbol_contract(repeated_import_alias, "coff-msvc").is_err()).to_be(true)
+        expect(stage4_validate_dynload_provider_symbol_contract(exact, "wasm").is_err()).to_be(true)
+
     it "rejects hosted constructor and destructor section families":
         val headers = ".preinit_array .init_array.42 .ctors .fini_array .dtors __mod_init_func __mod_term_func .CRT$XIA .CRT$XCU .CRT$XPU .CRT$XTU .CRT$XLB"
         val found = stage4_forbidden_archive_sections(headers)
