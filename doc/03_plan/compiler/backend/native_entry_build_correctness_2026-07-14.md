@@ -13,8 +13,8 @@ failure is **never** silently converted to a wrong answer.
 - **Gate 1 — matrix:** `scripts/check/native-smoke-matrix.shs` must report
   `total=15 pass=15 fail=0 codegen_fallback_hits=0`.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
-  regression harness) must report `native_seed_parity=true`. It defines **72
-  logical cases / 88 recorded checks** because strict-dual cases record LLVM
+  regression harness) must report `native_seed_parity=true`. It defines **73
+  logical cases / 90 recorded checks** because strict-dual cases record LLVM
   and Cranelift separately; execution of the expanded matrix is pending.
   Five modes: PARITY (seed==native after newline-normalize), NATIVE-AUTHORITATIVE
   (oracle provably broken → assert native==known-correct + document divergence),
@@ -106,8 +106,8 @@ the shared binary — deploys require explicit user go-ahead).
     repair of the pure-Simple CLI exit 139.
   - `native_mixed_numeric_ordering_codegen_2026-07-16.md` is source-fixed for
     signed integers through shared MIR coercion before LLVM or Cranelift.
-    Strict dual-backend execution is pending the same runnable CLI; unsigned
-    integer/float ordering remains separately tracked.
+    Strict dual-backend execution is pending the same runnable CLI. Unsigned
+    high-bit casts are also source-fixed and covered by a separate strict case.
 - Option `.map` now evaluates a side-effecting receiver exactly once. Option
   `.map` transforms producing non-i64 results remain open: lifted lambdas
   currently expose an i64 call ABI, and

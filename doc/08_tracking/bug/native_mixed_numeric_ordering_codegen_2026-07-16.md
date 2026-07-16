@@ -18,5 +18,5 @@ constant result only after both operands have been evaluated. The strict-dual
 harness covers both operand orders, equal boundaries, signed zero, NaN, and
 strict equality. Executable evidence awaits a runnable pure-Simple CLI.
 
-Unsigned integer/float ordering requires unsigned-aware casts and remains in
+Unsigned integer/float ordering is source-fixed separately in
 `native_unsigned_float_ordering_codegen_2026-07-16.md`.
