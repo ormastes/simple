@@ -886,6 +886,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_host_gpu_lane_last_phase", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_reset", &[], &[]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_emit", &[I64, I64, I64, I64], &[I64]),
+    // Native Draw IR queue packets carry their serialized payload across the
+    // runtime boundary as a text pointer (the C facade owns the storage).
+    RuntimeFuncSpec::new("rt_host_gpu_queue_emit_payload_text", &[I64, I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_drain", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_submit", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_complete", &[I64], &[I64]),
@@ -1906,6 +1909,17 @@ mod tests {
             .expect("raw Cranelift object emission must be registered for native codegen");
         assert_eq!(spec.params, [I64, I64, I64]);
         assert_eq!(spec.returns, [I8]);
+        assert_eq!(spec.tier(), RuntimeFuncTier::Ext);
+    }
+
+    #[test]
+    fn host_gpu_payload_text_queue_signature_is_registered() {
+        let spec = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_host_gpu_queue_emit_payload_text")
+            .expect("native Draw IR queue payload emission must be registered");
+        assert_eq!(spec.params, [I64, I64, I64, I64, I64, I64]);
+        assert_eq!(spec.returns, [I64]);
         assert_eq!(spec.tier(), RuntimeFuncTier::Ext);
     }
 

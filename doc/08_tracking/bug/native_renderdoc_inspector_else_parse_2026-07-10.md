@@ -2,8 +2,9 @@
 
 ## Status
 
-Rust-seed parser source fix implemented; focused regression and real RenderDoc
-inspector execution remain pending.
+Rust-seed parser source fix and focused regression are verified; real RenderDoc
+inspector execution remains pending because the application-level bootstrap
+wrapper is blocked by an unrelated `rt_cli_arg_count` failure.
 
 ## Resolution status (2026-07-15)
 
@@ -12,8 +13,10 @@ both inline-first and block-first `if` arms instead of leaving a later `Else`
 token for expression parsing. One block-first regression combines inline
 `elif`, `else if`, and final `else` arms so both continuation loops are covered.
 The pure-Simple parser already follows the intended chain shape and required no
-parallel rewrite. Neither focused parser regression nor the full inspector
-source was executed in this source-only audit, so no runtime PASS is claimed.
+parallel rewrite. Focused Rust parser coverage now passes:
+`cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-parser
+--test control_flow` (19 tests). The full inspector source remains unexecuted;
+no application-level runtime PASS is claimed.
 
 ## Reproduction
 

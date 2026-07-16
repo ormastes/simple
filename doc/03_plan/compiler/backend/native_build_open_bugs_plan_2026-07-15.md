@@ -52,7 +52,7 @@ source fixes from executable proof.
 | 18 | Pure-Simple Cranelift dynload globals now declare, initialize, load, and store writable scalar data; strict LLVM+Cranelift init/mutation proof pending. |
 | 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, POSIX/macOS/BSD and Windows core-C process-timeout ownership, canonical core-C HTTP tuple ownership, pure-Simple aggregate final-request derivation, deterministic unique-owner archive selection, test-only requested-symbol validation, and pure-Simple explicit-entry dispatch are source-implemented; full link-profile fingerprint, remaining providers, production inventory/link wiring, and strict execution remain. Windows compile/native proof is pending. |
 | 20 | C-owned host-GPU queue facade and fail-closed archive ownership checks implemented; native queue execution proof remains. |
-| 21 | Reduced to the Rust seed parser's inline-continuation consumption bug; inline-first and block-first source fixes plus focused chained-inline regressions are implemented, while regression and real inspector execution remain pending. The pure-Simple parser needed no rewrite. |
+| 21 | Rust-seed inline-continuation fix and focused chained-inline regression are verified (`simple-parser` control-flow test: 19 passed); real inspector execution remains pending behind the unrelated pure-Simple `rt_cli_arg_count` bootstrap failure. |
 
 ## Verification update (2026-07-16)
 
@@ -141,7 +141,7 @@ profile fingerprint rather than changing per-module object keys.
 
 | # | Bug | Note |
 |---|-----|------|
-| 20 | `native_engine2d_runtime_queue_symbols` | Engine2D runtime queue symbols missing from the linked runtime — add to the runtime facade export set. |
+| 20 | `native_engine2d_runtime_queue_symbols` | Runtime SFFI now registers `rt_host_gpu_queue_emit_payload_text` with a focused ABI regression; end-to-end native Engine2D queue execution remains pending. |
 | 21 | `native_renderdoc_inspector_else_parse` | `Else` parse failure in the RenderDoc inspector source — parser edge case. |
 
 ---

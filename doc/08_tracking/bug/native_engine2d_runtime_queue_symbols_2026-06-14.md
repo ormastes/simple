@@ -1,8 +1,8 @@
 # Native Engine2D Runtime Queue Symbols Missing From Linked Runtime
 
 Date: 2026-06-14
-Status (2026-07-15): source ownership implemented; native queue execution
-remains pending.
+Status (2026-07-16): runtime SFFI registration and focused ABI regression are
+implemented; end-to-end native queue execution remains pending.
 
 ## Symptom
 
@@ -33,6 +33,8 @@ so the runtime queue spec does not drag unrelated backend SFFI/WFFI imports.
 ## Resolution status (2026-07-15)
 
 The queue facade is C-owned and runtime selection rejects archives that do not
-provide its required symbols. This closes the source-ownership portion only;
-the focused native Engine2D queue execution remains required before the bug is
+provide its required symbols. The missing
+`rt_host_gpu_queue_emit_payload_text` SFFI entry is now registered with its
+six-argument pointer-compatible ABI and covered by a focused Rust regression.
+The focused native Engine2D queue execution remains required before the bug is
 fully verified.
