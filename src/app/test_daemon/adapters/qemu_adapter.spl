@@ -15,13 +15,11 @@ use app.test_daemon.{
 }
 use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new, run_test_child}
 use app.test_daemon.types.{TestResult}
-use std.qemu.qmp_client.{QmpClient, qmp_connect, qmp_savevm, qmp_loadvm}
-use app.io.mod.{process_spawn_async, process_kill}
+use std.qemu.qmp_client.{qmp_connect, qmp_disconnect, qmp_savevm, qmp_loadvm, qmp_query_status}
+use app.io.mod.{dir_create_all, file_delete, process_spawn_async, process_is_running, process_kill}
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_hash_text(s: text) -> i64
-extern fn rt_shell_exec(cmd: text) -> text
-extern fn rt_shell_exit_code() -> i64
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_sleep_ms(ms: i64)
 
@@ -93,7 +91,8 @@ impl QemuAdapter:
         val qemu_binary = qemu_binary_for_arch(arch)
 
         # Ensure QMP socket directory exists
-        rt_shell_exec("mkdir -p {QMP_SOCKET_DIR}")
+        if not dir_create_all(QMP_SOCKET_DIR):
+            return lease
 
         # Build QMP socket path
         val session_id = desc.config["session_id"] ?? session_key_to_id(desc.key)
@@ -143,6 +142,7 @@ impl QemuAdapter:
             # Wait a bit for the VM to fully boot before snapshotting
             rt_sleep_ms(QEMU_BOOT_WAIT_MS)
             val saved = qmp_savevm(client, GOLDEN_SNAPSHOT_NAME)
+            qmp_disconnect(client)
             if saved:
                 snapshot_name = GOLDEN_SNAPSHOT_NAME
             else:
@@ -172,12 +172,12 @@ impl QemuAdapter:
         if lease.qmp_socket == "":
             return false
         # Check if process is still running
-        val check_output = rt_shell_exec("kill -0 {lease.pid} 2>&1; echo $?")
-        if check_output.trim() != "0":
+        if not process_is_running(lease.pid):
             return false
         # Verify QMP socket responds
         val client = qmp_connect(lease.qmp_socket)
-        val status = qmp_query_status_text(client)
+        val status = qmp_query_status(client)
+        qmp_disconnect(client)
         not status.starts_with("error")
 
     me reset(lease: SessionLease, policy: i64) -> bool:
@@ -195,7 +195,9 @@ impl QemuAdapter:
                 return false
             val snapshot = if lease.snapshot_name != "": lease.snapshot_name else: GOLDEN_SNAPSHOT_NAME
             val client = qmp_connect(lease.qmp_socket)
-            return qmp_loadvm(client, snapshot)
+            val loaded = qmp_loadvm(client, snapshot)
+            qmp_disconnect(client)
+            return loaded
 
         if policy == RESET_HARD:
             # Kill existing process
@@ -226,7 +228,9 @@ impl QemuAdapter:
             print "[qemu_adapter] no QMP socket for snapshot_create"
             return false
         val client = qmp_connect(lease.qmp_socket)
-        qmp_savevm(client, name)
+        val saved = qmp_savevm(client, name)
+        qmp_disconnect(client)
+        saved
 
     me snapshot_restore(lease: SessionLease, name: text) -> bool:
         """
@@ -236,7 +240,9 @@ impl QemuAdapter:
             print "[qemu_adapter] no QMP socket for snapshot_restore"
             return false
         val client = qmp_connect(lease.qmp_socket)
-        qmp_loadvm(client, name)
+        val loaded = qmp_loadvm(client, name)
+        qmp_disconnect(client)
+        loaded
 
     me stop(lease: SessionLease) -> bool:
         """
@@ -249,15 +255,14 @@ impl QemuAdapter:
         # Kill the QEMU process
         val killed = process_kill(lease.pid)
         if not killed:
-            # Force kill
-            rt_shell_exec("kill -9 {lease.pid} 2>/dev/null")
             rt_sleep_ms(200)
+        val stopped = killed or not process_is_running(lease.pid)
 
         # Clean up QMP socket file
         if lease.qmp_socket != "":
-            rt_shell_exec("rm -f {lease.qmp_socket}")
+            file_delete(lease.qmp_socket)
 
-        true
+        stopped
 
 # ============================================================================
 # Helper Functions
@@ -287,22 +292,10 @@ fn wait_for_qmp(socket_path: text, max_retries: i64, poll_ms: i64) -> bool:
         if rt_file_exists(socket_path):
             # Try QMP handshake
             val client = qmp_connect(socket_path)
-            val status = qmp_query_status_text(client)
+            val status = qmp_query_status(client)
+            qmp_disconnect(client)
             if not status.starts_with("error"):
                 return true
         rt_sleep_ms(poll_ms)
         attempt = attempt + 1
     false
-
-fn qmp_query_status_text(client: QmpClient) -> text:
-    """
-    Queries QEMU status via QMP. Returns status text or error string.
-    Wraps the shell-based QMP query from qmp_client.
-    """
-    val json = "{\"execute\": \"query-status\"}"
-    val cmd = "echo '{json}' | socat - UNIX-CONNECT:{client.socket_path}"
-    val output = rt_shell_exec(cmd)
-    val exit_code = rt_shell_exit_code()
-    if exit_code != 0:
-        return "error: exit_code {exit_code}"
-    output

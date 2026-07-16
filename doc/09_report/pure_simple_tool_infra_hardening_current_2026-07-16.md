@@ -159,8 +159,8 @@ runtime remains unavailable, so executable qualification is still blocked.
   share argv-preserving `process_run_timeout` execution. Test paths and QMP
   sockets are no longer shell-interpreted, and the requested deadline owns the
   child. GUI/service/hardware children use the same owner with scoped parent
-  environment restoration while dispatch remains synchronous. Remote terminal
-  execution and QMP/OpenOCD protocol shell sites remain explicit follow-ups.
+  environment restoration while dispatch remains synchronous. Remote terminal,
+  QMP, and OpenOCD operations now use their shared protocol/process owners.
 - **Native walker parity:** no wrapper-only patch was accepted. Traversal occurs
   entirely inside `rt_dir_walk`, and every available Simple type probe follows
   symlinks, so cycle prevention and file-only parity require coordinated C,
@@ -192,6 +192,9 @@ runtime remains unavailable, so executable qualification is still blocked.
   profile now use structured argv with explicit deadlines. OpenOCD commands
   share the bounded Telnet owner, and program paths reject command-language
   metacharacters before transmission.
+- **QEMU protocol transport:** the daemon adapter now reuses the persistent QMP
+  client for status, snapshots, and restore; process/file/directory facades
+  replace its remaining shell calls, and each short-lived QMP fd is closed.
 
 ## Latest bounded verification
 
