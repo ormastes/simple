@@ -524,6 +524,14 @@ dedicated Stage4 provider archive and measured undefined-symbol contract remain
 open. The Rust seed's Windows close path now follows the same documented
 zero-on-success contract.
 
+The native parity harness now has one strict dual-backend dynamic-loader case.
+It constructs library and symbol names at runtime to exercise tagged text,
+selects libc/libSystem/Kernel32 for Linux, macOS, FreeBSD, or Windows, and
+checks open, lookup, missing-symbol, invalid-handle, and close behavior. The
+same case covers default LLVM and explicit Cranelift; execution evidence is
+still pending. Native parity builds explicitly unset `SIMPLE_RUNTIME_PATH` so
+an ambient seed archive cannot bypass the C owner under test.
+
 ## 2026-07-16 canonical core-C HTTP ownership
 
 The legacy `runtime.c` definition of `rt_http_get` returned a raw C string even
