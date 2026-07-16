@@ -255,6 +255,35 @@ function First-ExistingPath([string[]]$paths) {
     return ""
 }
 
+$scriptDir = Split-Path -Parent $PSCommandPath
+$repoRoot = Resolve-Path -LiteralPath (Join-Path $scriptDir "..\..")
+Set-Location $repoRoot
+
+function Resolve-RepoPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return $path
+    }
+    if ([System.IO.Path]::IsPathRooted($path)) {
+        return $path
+    }
+    return Join-Path $repoRoot $path
+}
+
+$EvidencePath = Resolve-RepoPath $EvidencePath
+$KernelPath = Resolve-RepoPath $KernelPath
+$ImagePath = Resolve-RepoPath $ImagePath
+$ArtifactDir = Resolve-RepoPath $ArtifactDir
+$SerialLogPath = Resolve-RepoPath $SerialLogPath
+$ScreendumpPath = Resolve-RepoPath $ScreendumpPath
+$BuildSimpleBinary = Resolve-RepoPath $BuildSimpleBinary
+$NestedSimpleBinary = Resolve-RepoPath $NestedSimpleBinary
+$BuildLogPath = Resolve-RepoPath $BuildLogPath
+$DesktopServiceKernelPath = Resolve-RepoPath $DesktopServiceKernelPath
+$DesktopServiceEntry = Resolve-RepoPath $DesktopServiceEntry
+$DesktopServiceBuildLogPath = Resolve-RepoPath $DesktopServiceBuildLogPath
+$DiskImageBuilderPath = Resolve-RepoPath $DiskImageBuilderPath
+$DiskImageBuilderSource = Resolve-RepoPath $DiskImageBuilderSource
+
 if ([string]::IsNullOrWhiteSpace($QemuBinary)) {
     $cmd = Get-Command qemu-system-riscv64 -ErrorAction SilentlyContinue
     if ($cmd) {
@@ -279,11 +308,11 @@ $qemuStderrPath = Join-Path $ArtifactDir "qemu.stderr.log"
 
 $qemuPresent = -not [string]::IsNullOrWhiteSpace($QemuBinary) -and (Test-Path -LiteralPath $QemuBinary)
 
-$canonicalKernelPath = "build/os/simpleos_riscv64_smf_fs.elf"
-$legacyKernelPath = "build/os/simpleos_riscv64.elf"
-$fpgaKernelPath = "build/os/simpleos_riscv64_fpga.elf"
-$canonicalImagePath = "build/os/fat32-riscv64.img"
-$storageProbeImagePath = "build/qemu-rv64-storage-probe.img"
+$canonicalKernelPath = Resolve-RepoPath "build/os/simpleos_riscv64_smf_fs.elf"
+$legacyKernelPath = Resolve-RepoPath "build/os/simpleos_riscv64.elf"
+$fpgaKernelPath = Resolve-RepoPath "build/os/simpleos_riscv64_fpga.elf"
+$canonicalImagePath = Resolve-RepoPath "build/os/fat32-riscv64.img"
+$storageProbeImagePath = Resolve-RepoPath "build/qemu-rv64-storage-probe.img"
 if ([string]::IsNullOrWhiteSpace($BuildLogPath)) {
     $BuildLogPath = Join-Path $ArtifactDir "rv64-build.log"
 }

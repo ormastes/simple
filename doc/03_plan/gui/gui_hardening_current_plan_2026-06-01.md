@@ -237,6 +237,16 @@
   saved D3D12 evidence files: default mode accepts the current fail-closed shape
   with strict upstream DirectX support, while `-RequireD3D12Completion` fails on
   the remaining native D3D12/browser/pairwise/ARGB/PIX gates.
+- Windows SimpleOS QEMU RV64 desktop evidence is recorded in
+  `doc/09_report/windows_simpleos_qemu_rv64_desktop_current_2026-07-16.md`.
+  The direct PowerShell wrapper now anchors itself to the checkout root and was
+  verified from outside the checkout. Current preflight evidence discovers
+  `qemu-system-riscv64.exe`, reports `simpleos_qemu_rv64_kernel_status=pass`
+  and `simpleos_qemu_rv64_image_status=pass`, and records repo-root absolute
+  kernel, disk image, artifact, log, and build helper paths. This is still a
+  fail-closed preflight slice; live boot/capture remains
+  `simpleos_qemu_rv64_blocker=live-boot-not-run-by-preflight` until
+  `-RunLiveBoot` evidence is produced.
 - Windows SimpleOS Engine2D RenderDoc evidence is recorded in
   `doc/09_report/windows_simpleos_engine2d_renderdoc_current_2026-07-16.md`.
   The wrapper now resolves repo-relative source evidence, QEMU readback,
