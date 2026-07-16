@@ -75,6 +75,13 @@ per-run output.
   `renderdoccmd` or `qrenderdoc` is available. It emits
   `gui_web_2d_vulkan_renderdoc_capture_*` rows and fails closed unless the
   captured `.rdc` exists and starts with `RDOC` magic.
+- `scripts/setup/setup-gui-web-2d-directx-env.ps1 --check|--browser-backing`
+  is the Windows PowerShell counterpart for the DirectX/D3D11 lane. It records
+  native D3D11 readback evidence through the existing Rust hosted probe when
+  available, launches repo-local Electron and installed Chrome with
+  `--use-angle=d3d11`, and forwards the shared DirectX browser-backing validator
+  rows. Passing browser pixels without native D3D11 readback remains a failed
+  aggregate gate.
 
 Compatibility wrappers remain:
 
