@@ -10,9 +10,9 @@
 # - Heartbeat monitoring for orphan detection
 # - Process group management
 
-use std.test_runner.process_tracker.{tracker_register_pid, tracker_get_pids, tracker_unregister_pid, tracker_register_container, tracker_unregister_container, tracker_kill_all_children, tracker_stop_all_containers, is_docker_available, get_running_containers, tracker_enable_heartbeat, tracker_send_heartbeat, tracker_check_heartbeat_alive}
+use std.test_runner.process_tracker.{tracker_register_pid, tracker_get_pids, tracker_unregister_pid, tracker_register_container, tracker_unregister_container, tracker_kill_all_children, tracker_stop_all_containers, tracker_container_runtime, get_running_containers, tracker_enable_heartbeat, tracker_send_heartbeat, tracker_check_heartbeat_alive}
 use std.test_runner.checkpoint.{checkpoint_save}
-use std.io.{process_spawn_async, process_wait, process_kill}
+use std.io.{process_spawn_async, process_run_timeout}
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release, proc_slot_reset)
 use std.io_runtime.{exit}
 use std.io.{time_now_unix_micros}
@@ -93,20 +93,16 @@ fn run_tracked_container(
         # ... later ...
         stop_tracked_container(container_id)
     """
-    # Build docker/podman run command
-    var cmd_parts: [text] = ["{runtime} run -d"]
-    cmd_parts.push("--memory={memory_mb}m")
-    cmd_parts.push("--cpus={cpu_count}")
-
+    if runtime != "docker" and runtime != "podman":
+        return ""
+    var run_args = [
+        "run", "-d", "--label", "simple-test-runner=1",
+        "--memory={memory_mb}m", "--cpus={cpu_count}", image
+    ]
     for arg in args:
-        cmd_parts.push("\"{arg}\"")
-
-    cmd_parts.push("{image}")
-    val cmd = cmd_parts.join(" ")
-
-    # NOTE: In real implementation, would use shell() and parse container ID
-    # For now, return stub value
-    val container_id = "stub-container-id"
+        run_args.push(arg)
+    val (stdout, _stderr, exit_code) = process_run_timeout(runtime, run_args, 60000)
+    val container_id = if exit_code == 0: stdout.trim() else: ""
 
     if container_id != "" and container_id != nil:
         tracker_register_container(container_id)
@@ -119,13 +115,16 @@ fn stop_tracked_container(container_id: text):
 
     Call this after container completes successfully.
     """
-    val runtime = if is_docker_available(): "docker" else: "podman"
+    val runtime = tracker_container_runtime()
+    if runtime == "none":
+        return
 
     # Try graceful stop
-    val stop_cmd = "{runtime} stop -t 10 {container_id}"
-    # NOTE: In real implementation, would use shell()
-
-    tracker_unregister_container(container_id)
+    val (_stdout, _stderr, exit_code) = process_run_timeout(
+        runtime, ["stop", "-t", "10", container_id], 15000
+    )
+    if exit_code == 0:
+        tracker_unregister_container(container_id)
 
 # ============================================================================
 # Cleanup on Exit
@@ -232,48 +231,34 @@ fn lifecycle_check_parent_alive() -> bool:
 
 fn cleanup_orphaned_processes():
     """
-    Cleanup processes that are still running but no longer tracked.
+    Cleanup tracked processes that are still alive.
 
-    This is useful when runner crashes and leaves orphaned children.
-
-    NOTE: Requires process group ID (PGID) tracking for safe implementation.
-    Current stub version only cleans tracked processes.
+    Process-group discovery remains outside this owner's safe PID registry.
     """
-    # Get all tracked PIDs
-    val pids = tracker_get_pids()
-
-    var orphans_killed = 0
-
-    for pid in pids:
-        # Check if process is still running but shouldn't be
-        # (e.g., test timeout exceeded, runner restarted)
-        # NOTE: Real implementation would check process group, parent PID, etc.
-
-        orphans_killed = orphans_killed + 1
-
-    orphans_killed
+    tracker_kill_all_children()
 
 fn cleanup_orphaned_containers():
     """
     Cleanup containers that are still running but no longer tracked.
 
-    Looks for containers with label "simple-test-runner" that have
-    been running for >1 hour.
+    Removes running containers carrying the `simple-test-runner=1` ownership
+    label. Unlabelled user containers are never selected.
     """
-    val runtime = if is_docker_available(): "docker" else: "podman"
-
     # Get all running containers
     val all_containers = get_running_containers()
 
+    val runtime = tracker_container_runtime()
+    if runtime == "none":
+        return 0
     var orphans_stopped = 0
 
     for container_id in all_containers:
-        # NOTE: Real implementation would:
-        # 1. Check container labels for "simple-test-runner"
-        # 2. Check container start time (>1 hour ago)
-        # 3. Stop only if conditions match
-
-        orphans_stopped = orphans_stopped + 1
+        val (_stdout, _stderr, exit_code) = process_run_timeout(
+            runtime, ["rm", "-f", container_id], 15000
+        )
+        if exit_code == 0:
+            tracker_unregister_container(container_id)
+            orphans_stopped = orphans_stopped + 1
 
     orphans_stopped
 
@@ -314,7 +299,4 @@ fn cleanup_orphaned_containers():
 # ============================================================================
 # Exports
 # ============================================================================
-
-
-
 

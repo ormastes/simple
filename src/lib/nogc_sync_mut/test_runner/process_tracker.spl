@@ -9,7 +9,7 @@
 # - Cleanup happens on shutdown (SIGTERM/SIGINT handlers)
 # - Heartbeat monitoring detects orphaned children
 
-use std.io.{process_kill, process_is_running, shell_bool, shell_lines, shell_output}
+use std.io.{process_kill, process_is_running, process_run_timeout, time_now_unix_micros}
 
 # ============================================================================
 # Module State - Active Tracking
@@ -146,17 +146,19 @@ fn tracker_stop_all_containers() -> i64:
     """
     var stopped = 0
 
-    val runtime = if is_docker_available(): "docker" else: "podman"
+    val runtime = tracker_container_runtime()
+    if runtime == "none":
+        return 0
 
     for container_id in _tracked_containers:
         # Try graceful stop (10s timeout)
-        val stop_ok = shell_bool("{runtime} stop -t 10 {container_id}")
-        if stop_ok:
+        val (_stop_out, _stop_err, stop_code) = process_run_timeout(runtime, ["stop", "-t", "10", container_id], 15000)
+        if stop_code == 0:
             stopped = stopped + 1
         else:
             # Force remove if stop failed
-            val force_ok = shell_bool("{runtime} rm -f {container_id}")
-            if force_ok:
+            val (_rm_out, _rm_err, rm_code) = process_run_timeout(runtime, ["rm", "-f", container_id], 15000)
+            if rm_code == 0:
                 stopped = stopped + 1
 
     # Clear tracking list
@@ -170,21 +172,31 @@ fn tracker_stop_all_containers() -> i64:
 
 fn is_docker_available() -> bool:
     """Check if Docker runtime is available"""
-    shell_bool("docker --version")
+    val (_out, _err, code) = process_run_timeout("docker", ["--version"], 5000)
+    code == 0
+
+fn tracker_container_runtime() -> text:
+    if is_docker_available():
+        return "docker"
+    val (_out, _err, code) = process_run_timeout("podman", ["--version"], 5000)
+    if code == 0: "podman" else: "none"
 
 fn get_running_containers() -> [text]:
     """
-    Get list of all running containers (not just tracked ones).
+    Get running containers created by the tracked-runner owner.
 
     Useful for orphan detection and cleanup.
 
     Returns: Array of container IDs
     """
-    val runtime = if is_docker_available(): "docker" else: "podman"
+    val runtime = tracker_container_runtime()
+    if runtime == "none":
+        return []
 
-    # Get container IDs: docker ps -q
-    val output = shell_output("{runtime} ps -q", "")
-    if output == "" or output == nil:
+    val (output, _stderr, exit_code) = process_run_timeout(
+        runtime, ["ps", "-q", "--filter", "label=simple-test-runner=1"], 15000
+    )
+    if exit_code != 0 or output == "" or output == nil:
         return []
 
     # Split by newlines and filter empty
@@ -209,7 +221,7 @@ fn tracker_enable_heartbeat():
     Useful for detecting runner crashes from child perspective.
     """
     _heartbeat_enabled = true
-    # In real implementation: _last_heartbeat_ms = rt_time_now_unix_micros() / 1000
+    _last_heartbeat_ms = time_now_unix_micros() / 1000
 
 fn tracker_send_heartbeat():
     """
@@ -218,8 +230,7 @@ fn tracker_send_heartbeat():
     Should be called periodically by runner main loop (every 5-10s).
     """
     if _heartbeat_enabled:
-        # In real implementation: _last_heartbeat_ms = rt_time_now_unix_micros() / 1000
-        _last_heartbeat_ms = 0
+        _last_heartbeat_ms = time_now_unix_micros() / 1000
 
 fn tracker_check_heartbeat_alive(timeout_ms: i64) -> bool:
     """
@@ -235,12 +246,8 @@ fn tracker_check_heartbeat_alive(timeout_ms: i64) -> bool:
     if not _heartbeat_enabled:
         return true  # Assume alive if heartbeat disabled
 
-    # In real implementation:
-    # val now = rt_time_now_unix_micros() / 1000
-    # val elapsed = now - _last_heartbeat_ms
-    # return elapsed < timeout_ms
-
-    true  # Stub for runtime compatibility
+    val now = time_now_unix_micros() / 1000
+    now - _last_heartbeat_ms < timeout_ms
 
 # ============================================================================
 # Signal Handlers (Future Enhancement)
@@ -269,8 +276,6 @@ fn tracker_check_heartbeat_alive(timeout_ms: i64) -> bool:
 # ============================================================================
 # Exports
 # ============================================================================
-
-
 
 
 

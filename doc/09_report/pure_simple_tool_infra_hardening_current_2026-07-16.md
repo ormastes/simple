@@ -187,6 +187,10 @@ runtime remains unavailable, so executable qualification is still blocked.
 - **Composite hardware runner:** WCH-Link discovery/status uses bounded argv,
   and STM32H7 logging/sleeping use native output/timing owners instead of
   launching shells.
+- **Runner lifecycle:** tracked containers now launch/stop through bounded argv
+  with an ownership label instead of returning a fake ID. Cleanup only selects
+  that label, and heartbeat timestamps use the runtime clock instead of
+  constant stub values.
 - **Remote terminal transport:** the terminal owner now exposes bounded
   execution for SSH and Telnet. Telnet uses one absolute deadline across all
   reads, and the remote-PC adapter quotes the test path before sending the
