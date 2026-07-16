@@ -7,16 +7,14 @@
 use std.daemon_sdk.types.{DaemonRequest, DaemonResponse, daemon_request_new}
 use std.daemon_sdk.client.{daemon_submit_and_wait}
 use app.test_daemon.types.{TestDaemonConfig}
+use app.test_daemon.session_adapter.{run_test_child}
 use app.test_daemon.{
     TREQ_AGENT_REGISTER, TREQ_AGENT_CLAIM_BATCH,
     TREQ_AGENT_REPORT_RESULT, TREQ_AGENT_DEREGISTER,
     TRESP_COMPLETED, TRESP_ERROR
 }
 
-extern fn rt_shell_exec(cmd: text) -> text
-extern fn rt_shell_exit_code() -> i64
 extern fn rt_sleep_ms(ms: i64)
-extern fn rt_time_now_unix_micros() -> i64
 
 # ============================================================================
 # Agent API
@@ -85,15 +83,8 @@ fn agent_run_loop(config: TestDaemonConfig, agent_id: text, capabilities: text):
         idle_count = 0
         for test_path in batch:
             print "[agent {agent_id}] Running: {test_path}"
-            val start = rt_time_now_unix_micros()
-            val cmd = "bin/simple test {test_path} --no-session-daemon --sequential 2>&1"
-            val output = rt_shell_exec(cmd)
-            val exit_code = rt_shell_exit_code()
-            val elapsed = (rt_time_now_unix_micros() - start) / 1000
-
-            val passed = if exit_code == 0: 1 else: 0
-            val failed = if exit_code != 0: 1 else: 0
-            agent_report_result(config, agent_id, test_path, passed, failed, elapsed, output)
+            val result = run_test_child(test_path, 120000, [])
+            agent_report_result(config, agent_id, test_path, result.passed, result.failed, result.duration_ms, result.output)
 
     print "[agent {agent_id}] No more work, deregistering"
     agent_deregister(config, agent_id)

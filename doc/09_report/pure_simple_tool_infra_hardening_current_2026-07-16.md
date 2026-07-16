@@ -151,6 +151,19 @@ runtime remains unavailable, so executable qualification is still blocked.
 - **Lint/fmt/fix review:** no import rewrite was accepted. `cli_ops` already
   re-exports `cli_lint_commands`, `run_commands.spl` has no duplicate handlers,
   and `simple.cmd` already resolves the admitted pure-Simple executable.
+- **Duplicate cache ownership:** `TokenCacheManager` now has reference identity
+  and owns writes behind capability-correct `me` methods. Compatibility free
+  functions preserve callers while eliminating the W1006 value-copy path;
+  persistent incremental mode remains separately disabled.
+- **Test child execution:** daemon, worker-agent, and QEMU test children now
+  share argv-preserving `process_run_timeout` execution. Test paths and QMP
+  sockets are no longer shell-interpreted, and the requested deadline owns the
+  child. Environment-bearing GUI/service/hardware paths, container/remote
+  transports, and QMP/OpenOCD protocol shell sites remain explicit follow-ups.
+- **Native walker parity:** no wrapper-only patch was accepted. Traversal occurs
+  entirely inside `rt_dir_walk`, and every available Simple type probe follows
+  symlinks, so cycle prevention and file-only parity require coordinated C,
+  Rust SFFI, interpreter, and Windows runtime-owner changes.
 
 ## Latest bounded verification
 
@@ -187,6 +200,9 @@ runtime remains unavailable, so executable qualification is still blocked.
 - Fast duplicate native discovery, full cycle-safe test dependency closure,
   checker-to-Lake deadline propagation, and the shared shell-timeout facade:
   PASS by scoped source contracts and diff hygiene. Their focused Simple specs
+  are NOT RUN because no admitted runtime exists.
+- Token-cache reference ownership and shared argv-safe daemon/agent/QEMU child
+  execution: SOURCE IMPLEMENTED; executable cache/hostile-path/timeout verdicts
   are NOT RUN because no admitted runtime exists.
 - New Simple unit/system behavior and the PowerShell contract: NOT RUN because
   no admitted pure-Simple runtime or PowerShell host exists. Previously passed

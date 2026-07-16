@@ -26,3 +26,9 @@ only, classify children without following symlinks, and add parity coverage for
 a regular file, nested directory, directory named `x.spl`, file symlink, and
 directory-symlink cycle. Keep sorting in callers that require deterministic
 report order.
+
+A pure-Simple wrapper cannot close this bug: `rt_dir_walk` completes traversal
+before returning, while the available Simple file-kind probes also follow
+symlinks. The fix must therefore land in the C, Rust SFFI, and interpreter
+runtime owners (`lstat`/`DirEntry.file_type()`/Windows reparse metadata), with
+the wrapper remaining only the shared caller facade.

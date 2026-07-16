@@ -8,9 +8,36 @@ use app.test_daemon.session_types.{
     LEASE_IDLE, LEASE_ACTIVE, LEASE_STOPPING,
     session_lease_new, session_key_to_id, meta_to_session_key
 }
-use app.test_daemon.types.{TestResult, TRESP_FAILED}
+use app.test_daemon.types.{TestResult, TRESP_COMPLETED, TRESP_FAILED}
+use app.io.process_ops.{process_run_timeout}
 
 extern fn rt_time_now_unix_micros() -> i64
+
+fn run_test_child(test_path: text, timeout_ms: i64, extra_args: [text]) -> TestResult:
+    var args = ["test", test_path]
+    for arg in extra_args:
+        args.push(arg)
+    args.push("--no-session-daemon")
+    args.push("--sequential")
+
+    val start = rt_time_now_unix_micros()
+    val (stdout, stderr, exit_code) = process_run_timeout("bin/simple", args, timeout_ms)
+    val duration_ms = (rt_time_now_unix_micros() - start) / 1000
+    val output = if stderr == "": stdout
+        elif stdout == "": stderr
+        else: stdout + "\n" + stderr
+    val passed = if exit_code == 0: 1 else: 0
+    val failed = if exit_code == 0: 0 else: 1
+    TestResult(
+        test_path: test_path,
+        status: if exit_code == 0: TRESP_COMPLETED else: TRESP_FAILED,
+        passed: passed,
+        failed: failed,
+        skipped: 0,
+        duration_ms: duration_ms,
+        output: output,
+        cached: false
+    )
 
 # ============================================================================
 # Adapter Interface

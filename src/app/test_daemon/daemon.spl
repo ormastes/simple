@@ -30,6 +30,7 @@ use app.test_daemon.resource_policy.{
 }
 use app.test_daemon.resource_snapshot.{test_daemon_resource_snapshot}
 use app.test_daemon.session_broker.{SessionBroker, session_broker_new}
+use app.test_daemon.session_adapter.{run_test_child}
 use app.test_daemon.session_types.{
     TestSessionMeta, test_session_meta_default,
     session_kind_from_name, reuse_mode_from_name, reset_policy_from_name
@@ -419,34 +420,21 @@ impl TestDaemon:
     # --- Execute a test ---
 
     fn execute_test(test_path: text) -> DaemonResponse:
-        # Shell out to the local child runner; the daemon owns scheduling.
-        extern fn rt_shell_exec(cmd: text) -> text
-        extern fn rt_shell_exit_code() -> i64
-
         val setup_start = rt_time_now_unix_micros()
-        val cmd = "bin/simple test {test_path} --no-session-daemon --sequential 2>&1"
         val setup_ms = (rt_time_now_unix_micros() - setup_start) / 1000
-
-        val test_start = rt_time_now_unix_micros()
-        val output = rt_shell_exec(cmd)
-        val exit_code = rt_shell_exit_code()
-        val duration_ms = (rt_time_now_unix_micros() - test_start) / 1000
-
-        val status = if exit_code == 0: TRESP_COMPLETED else: TRESP_FAILED
-        val passed = if exit_code == 0: 1 else: 0
-        val failed = if exit_code != 0: 1 else: 0
+        val result = run_test_child(test_path, 120000, [])
 
         # Record in cache
-        self.incremental_state.record_daemon_result(test_path, status, passed, failed, 0, duration_ms, output)
+        self.incremental_state.record_daemon_result(test_path, result.status, result.passed, result.failed, result.skipped, result.duration_ms, result.output)
 
-        var resp = daemon_response_new("", status)
+        var resp = daemon_response_new("", result.status)
         resp.fields["test_path"] = test_path
-        resp.fields["passed"] = "{passed}"
-        resp.fields["failed"] = "{failed}"
-        resp.fields["skipped"] = "0"
-        resp.fields["duration_ms"] = "{duration_ms}"
+        resp.fields["passed"] = "{result.passed}"
+        resp.fields["failed"] = "{result.failed}"
+        resp.fields["skipped"] = "{result.skipped}"
+        resp.fields["duration_ms"] = "{result.duration_ms}"
         resp.fields["setup_ms"] = "{setup_ms}"
-        resp.fields["output"] = output
+        resp.fields["output"] = result.output
         resp.fields["cached"] = "false"
         resp
 

@@ -11,10 +11,9 @@ use app.test_daemon.session_types.{
 use app.test_daemon.{
     SESSION_KIND_QEMU_VM, LEASE_IDLE, LEASE_ACTIVE,
     REUSE_SHARED_READ_ONLY, REUSE_SHARED_WITH_SNAPSHOT, REUSE_FRESH_PER_TEST,
-    RESET_NONE, RESET_SNAPSHOT_RESTORE, RESET_HARD,
-    TRESP_COMPLETED, TRESP_FAILED
+    RESET_NONE, RESET_SNAPSHOT_RESTORE, RESET_HARD
 }
-use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
+use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new, run_test_child}
 use app.test_daemon.types.{TestResult}
 use std.qemu.qmp_client.{QmpClient, qmp_connect, qmp_savevm, qmp_loadvm}
 use app.io.mod.{process_spawn_async, process_kill}
@@ -214,43 +213,10 @@ impl QemuAdapter:
     me execute(lease: SessionLease, test_path: text, timeout_ms: i64) -> TestResult:
         """
         Executes a test inside the QEMU session.
-        Shells out to run the test binary/script via QEMU's serial or SSH.
+        Runs the test child with the QEMU session socket as a structured argument.
         Returns TestResult with pass/fail status and duration.
         """
-        val start_time = rt_time_now_unix_micros()
-
-        # Build the command to execute inside QEMU
-        # Uses the session's QMP socket to identify which VM to target
-        val timeout_sec = timeout_ms / 1000
-        val cmd = "timeout {timeout_sec} bin/simple test {test_path} --qemu-socket {lease.qmp_socket} --no-session-daemon --sequential 2>&1"
-        val output = rt_shell_exec(cmd)
-        val exit_code = rt_shell_exit_code()
-
-        val end_time = rt_time_now_unix_micros()
-        val duration_ms = (end_time - start_time) / 1000
-
-        if exit_code == 0:
-            TestResult(
-                test_path: test_path,
-                status: TRESP_COMPLETED,
-                passed: 1,
-                failed: 0,
-                skipped: 0,
-                duration_ms: duration_ms,
-                output: output,
-                cached: false
-            )
-        else:
-            TestResult(
-                test_path: test_path,
-                status: TRESP_FAILED,
-                passed: 0,
-                failed: 1,
-                skipped: 0,
-                duration_ms: duration_ms,
-                output: output,
-                cached: false
-            )
+        run_test_child(test_path, timeout_ms, ["--qemu-socket", lease.qmp_socket])
 
     me snapshot_create(lease: SessionLease, name: text) -> bool:
         """
