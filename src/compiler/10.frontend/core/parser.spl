@@ -29,6 +29,7 @@ use compiler.frontend.core.lexer.{lex_init, lex_init_with_path, lex_next}
 use compiler.frontend.core.lexer.{lex_token_kind, lex_token_text, lex_token_line, lex_token_col}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
 use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get}
+use compiler.frontend.core.lexer.{lex_mark_current_token_as_generic_close}
 use compiler.core.ast.{module_set_path, module_get_path}
 use compiler.core.ast.{ast_reset}
 extern fn rt_env_get(key: text) -> text
@@ -479,27 +480,29 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                 parser_advance()
                 extra_type = parser_parse_type()
                 has_extra_type = true
-            parser_expect(83)
+            if par_kind_get() == TOK_GT:
+                lex_mark_current_token_as_generic_close()
+            parser_expect(TOK_GT)
             # Handle Option<T>
             if type_name == "Option":
                 if inner_type == TYPE_I64:
-                    return TYPE_OPTION_I64
+                    return parser_absorb_optional_suffix(TYPE_OPTION_I64)
                 if inner_type == TYPE_F64:
-                    return TYPE_OPTION_F64
+                    return parser_absorb_optional_suffix(TYPE_OPTION_F64)
                 if inner_type == TYPE_TEXT:
-                    return TYPE_OPTION_TEXT
+                    return parser_absorb_optional_suffix(TYPE_OPTION_TEXT)
                 if inner_type == TYPE_BOOL:
-                    return TYPE_OPTION_BOOL
-                return TYPE_OPTION
+                    return parser_absorb_optional_suffix(TYPE_OPTION_BOOL)
+                return parser_absorb_optional_suffix(TYPE_OPTION)
             # Preserve Result<T,E> generic args for match payload typing.
             if type_name == "Result":
                 if has_extra_type:
                     val result_tag = result_type_register(inner_type, extra_type)
                     if result_tag < 0:
                         parser_error("too many distinct Result<T,E> annotations")
-                        return TYPE_RESULT
-                    return result_tag
-                return TYPE_RESULT
+                        return parser_absorb_optional_suffix(TYPE_RESULT)
+                    return parser_absorb_optional_suffix(result_tag)
+                return parser_absorb_optional_suffix(TYPE_RESULT)
             # Dict<K,V> -> register the key/value tags (bug: dicttype -- this
             # used to unconditionally return the bare TYPE_DICT sentinel,
             # silently dropping K/V so every dict-typed param/local arrived at
@@ -509,14 +512,14 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                     val dict_tag = dict_type_register(inner_type, extra_type)
                     if dict_tag < 0:
                         parser_error("too many distinct Dict<K,V> annotations")
-                        return TYPE_DICT
-                    return dict_tag
-                return TYPE_DICT
+                        return parser_absorb_optional_suffix(TYPE_DICT)
+                    return parser_absorb_optional_suffix(dict_tag)
+                return parser_absorb_optional_suffix(TYPE_DICT)
             # Unknown generic type - check if base is a named struct
             val gid = named_type_find(type_name)
             if gid >= 0:
-                return TYPE_NAMED_BASE + gid
-            return TYPE_VOID
+                return parser_absorb_optional_suffix(TYPE_NAMED_BASE + gid)
+            return parser_absorb_optional_suffix(TYPE_VOID)
         # Check for postfix ? for Option shorthand: i64? -> Option<i64>
         kind = par_kind_get()
         if kind == 130:

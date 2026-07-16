@@ -53,6 +53,7 @@ var lex_source_code_base_slot: [i64] = [0]
 var lex_source_codes: [i64] = []
 var current_core_lexer_slot: [CoreLexer] = []
 var lex_env_save_enabled: [bool] = [false]
+var lex_generic_close_pending: [bool] = [false]
 var lex_cur_kind_direct: [i64] = [0]
 var lex_cur_text_direct: [text] = [""]
 # Module-global slot mirror of the active lexer source. current_core_source_get
@@ -108,6 +109,8 @@ fn lex_init_with_path(source: text, source_path: text):
         current_core_lexer_slot = []
     if lexer_array_len(lex_env_save_enabled) == 0:
         lex_env_save_enabled = [false]
+    if lexer_array_len(lex_generic_close_pending) == 0:
+        lex_generic_close_pending = [false]
     if lexer_array_len(lex_cur_kind_direct) == 0:
         lex_cur_kind_direct = [0]
     if lexer_array_len(lex_cur_text_direct) == 0:
@@ -123,6 +126,7 @@ fn lex_init_with_path(source: text, source_path: text):
     if lexer_array_len(lex_token_end_direct) == 0:
         lex_token_end_direct = [0]
     lex_env_save_enabled[0] = (rt_env_get("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1"
+    lex_generic_close_pending[0] = false
     core_token_env_save_set(lex_env_save_enabled[0])
     # Keep the active lexer and parser's offset-based token-text cache on the
     # exact same source buffer. Rereading a non-empty caller source from disk can
@@ -718,7 +722,12 @@ fn lex_next() -> i64:
     if lexer_array_len(current_core_lexer_slot) == 0:
         current_core_lexer_slot = [current_core_lexer_load()]
     var loaded = current_core_lexer_slot[0]
-    val _scan_kind = loaded.next_token()
+    var _scan_kind: i64 = 0
+    if lex_generic_close_pending[0]:
+        lex_generic_close_pending[0] = false
+        _scan_kind = loaded.next_token_after_generic_close()
+    else:
+        _scan_kind = loaded.next_token()
     val kind = loaded.cur_kind
     current_core_lexer_slot[0] = loaded
     current_core_lexer_save(loaded)
@@ -749,6 +758,16 @@ fn lex_next() -> i64:
         lex_cur_line_direct[0] = core_lexer_last_line_get()
         lex_cur_col_direct[0] = core_lexer_last_col_get()
     kind
+
+# The parser calls this after recognizing `>` as a generic type close. Without
+# the handoff, CoreLexer still classifies the current token as the binary `>`
+# operator when it scans the following newline, so token_requires_rhs suppresses
+# the structural newline/dedent and the next top-level declaration is parsed as
+# a member of the preceding owner.
+fn lex_mark_current_token_as_generic_close():
+    if lexer_array_len(lex_generic_close_pending) == 0:
+        lex_generic_close_pending = [false]
+    lex_generic_close_pending[0] = true
 
 fn lex_token_kind() -> i64:
     lex_cur_kind_get_slot()

@@ -2,10 +2,17 @@
 
 ## Status
 
-Open. A pure-Simple bootstrap entry-closure parse repeatedly leaves the next
-top-level declaration inside the preceding struct/class/enum after parsing a
-raw `Dict<K, V>` annotation. Named `{K: V}` aliases avoid the failure, but are
-only containment; the parser/runtime root cause remains.
+Root fix implemented; full bootstrap verification pending. A pure-Simple
+bootstrap entry-closure parse previously left the next top-level declaration
+inside the preceding struct/class/enum after parsing a raw `Dict<K, V>`
+annotation. Named `{K: V}` aliases were containment used to isolate the cause.
+
+The parser now marks a recognized generic close before advancing. A one-shot
+lexer flag routes the next scan through the `CoreLexer` owner method, which
+clears the prior `>` kind without transporting or mutating the lexer struct
+across the stale interpreter ABI. Generic results also pass through the shared
+optional-suffix absorber. The raw-map behavioral regression passes 7/7 and the
+trailing-operator continuation regression passes 8/8, including binary `>`.
 
 ## Current evidence
 
@@ -24,15 +31,18 @@ alias correction:
 
 All failures occur in parse phase before object emission. The focused source
 checks pass after each named-map correction, and
-`generic_dict_struct_adjacency_spec.spl` passes six examples.
+`generic_dict_struct_adjacency_spec.spl` now passes seven examples.
 
-## Root-fix investigation
+## Root cause
 
-Inspect the interaction between:
-
-- `parser_parse_type_impl`'s early generic return and optional-suffix handling;
-- `dict_type_register` and its bootstrap-interpreted array state;
-- lexer indentation/dedent state immediately after `Dict<...>` annotations.
+Generic type closing and binary greater-than share the `>` token. When the
+parser advanced after a generic close, `CoreLexer` still treated the prior
+token as an operator requiring a right-hand side, suppressed the structural
+newline/dedent, and delivered the next top-level declaration inside the prior
+owner. The generic type branch also returned before calling
+`parser_absorb_optional_suffix`, leaving `Dict<K, V>?`'s question mark in the
+enum body. The handoff must execute through a `CoreLexer` owner method because
+the stale deployed interpreter cannot safely mutate an imported lexer struct.
 
 Do not continue converting every production field to an alias. A read-only
 scan found many later raw generic fields, so that approach does not converge.
