@@ -237,6 +237,16 @@
   saved D3D12 evidence files: default mode accepts the current fail-closed shape
   with strict upstream DirectX support, while `-RequireD3D12Completion` fails on
   the remaining native D3D12/browser/pairwise/ARGB/PIX gates.
+- Windows SimpleOS Engine2D RenderDoc evidence is recorded in
+  `doc/09_report/windows_simpleos_engine2d_renderdoc_current_2026-07-16.md`.
+  The wrapper now resolves repo-relative source evidence, QEMU readback,
+  RenderDoc artifact/log, nested Simple Vulkan probe, and output evidence paths
+  from `$PSScriptRoot` and was verified from outside the checkout. The current
+  run finds the saved Vulkan source evidence and reports
+  `simpleos_qemu_gpu_readback_status=pass` at `320x240`, while remaining
+  fail-closed on `blocked:desktop-service-not-wired-to-vulkan-engine2d-session`,
+  `simpleos_engine2d_readback_nonblank_status=blocked:source-evidence-not-usable`,
+  missing `.rdc`, and missing QEMU/host RenderDoc logs.
 - Windows SimpleOS WM host-compare evidence is recorded in
   `doc/09_report/windows_simpleos_wm_host_compare_current_2026-07-16.md`. The
   wrapper now resolves repo-relative inputs from `$PSScriptRoot` and was

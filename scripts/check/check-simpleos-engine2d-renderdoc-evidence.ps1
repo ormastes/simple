@@ -285,6 +285,30 @@ function Wm-Renderdoc-Log-Compare-Reason([string]$qemuLogPath, [string]$hostLogP
 
 $scriptDir = Split-Path -Parent $PSCommandPath
 $repoRoot = Resolve-Path -LiteralPath (Join-Path $scriptDir "..\..")
+
+function Resolve-RepoPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return $path
+    }
+    if ([System.IO.Path]::IsPathRooted($path)) {
+        return $path
+    }
+    return Join-Path $repoRoot $path
+}
+
+$EvidencePath = Resolve-RepoPath $EvidencePath
+$BaseEvidencePath = Resolve-RepoPath $BaseEvidencePath
+$Engine2dEvidencePath = Resolve-RepoPath $Engine2dEvidencePath
+$QemuReadbackPath = Resolve-RepoPath $QemuReadbackPath
+$SimpleRdcPath = Resolve-RepoPath $SimpleRdcPath
+$CaptureLogPath = Resolve-RepoPath $CaptureLogPath
+$QemuRenderdocLogPath = Resolve-RepoPath $QemuRenderdocLogPath
+$HostRenderdocLogPath = Resolve-RepoPath $HostRenderdocLogPath
+$SimpleBinary = Resolve-RepoPath $SimpleBinary
+$SimpleVulkanProbeWorkDir = Resolve-RepoPath $SimpleVulkanProbeWorkDir
+$SimpleVulkanProbeEvidencePath = Resolve-RepoPath $SimpleVulkanProbeEvidencePath
+$HostVulkanLogPath = Resolve-RepoPath $HostVulkanLogPath
+
 if ([string]::IsNullOrWhiteSpace($SimpleVulkanProbeEvidencePath)) {
     $SimpleVulkanProbeEvidencePath = Join-Path $SimpleVulkanProbeWorkDir "evidence.env"
 }
