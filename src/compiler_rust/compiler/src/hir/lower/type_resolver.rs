@@ -176,7 +176,10 @@ impl Lowerer {
                         }))
                     }
                     "tuple" => return Ok(self.module.types.register(HirType::Tuple(vec![]))),
-                    "dict" | "set" => return Ok(TypeId::ANY),
+                    // Bare container names occur in legacy annotations when
+                    // generic arguments were omitted. Keep them dynamically
+                    // typed, matching the generic Dict/Map fallback below.
+                    "Dict" | "Map" | "HashMap" | "dict" | "set" => return Ok(TypeId::ANY),
                     "Option" => {
                         return Ok(self.module.types.register(HirType::Enum {
                             name: "Option".to_string(),
