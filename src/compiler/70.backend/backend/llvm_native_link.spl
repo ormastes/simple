@@ -16,7 +16,7 @@ use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_s
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, _get_temp_dir, _obj_ext, _is_windows, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
-use compiler.backend.backend.stage4_symbol_closure.{stage4_requested_from_nm_output}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_requested_from_nm_output, stage4_validate_candidate_archive_inputs}
 use std.platform.{host_arch, host_os, is_macos}
 
 # TODO(compiler-native-link-facades): replace these direct runtime imports with
@@ -46,6 +46,26 @@ fn llvm_stage4_final_requested_symbols(objects: [text]) -> Result<[text], text>:
     if requested.len() == 0:
         return Err("Stage4 final runtime symbol request closure is empty")
     Ok(requested)
+
+pub fn llvm_stage4_candidate_archive_inventory(labels: [text], paths: [text]) -> Result<[text], text>:
+    match stage4_validate_candidate_archive_inputs(labels, paths):
+        case Err(err): return Err(err)
+        case Ok(()): ()
+    var scans: [text] = []
+    var i = 0
+    while i < paths.len():
+        val label = labels[i]
+        val path = paths[i]
+        if not rt_file_exists(path):
+            return Err("Stage4 candidate archive '" + label + "' is missing at '" + path + "'")
+        val (nm_out, nm_err, nm_code) = rt_process_run("nm", ["-g", path])
+        if nm_code != 0:
+            return Err("Stage4 candidate archive '" + label + "' scan failed at '" + path + "': " + nm_err)
+        if nm_out.trim() == "":
+            return Err("Stage4 candidate archive '" + label + "' scan was empty at '" + path + "'")
+        scans = scans.push(nm_out)
+        i = i + 1
+    Ok(scans)
 
 # ============================================================================
 # Configuration

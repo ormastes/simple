@@ -474,6 +474,24 @@ the actual digest/store boundary, invalidation proof, and strict native evidence
 remain open. No manifest is inferred, and raw `native_all`, generated stubs, or
 broad core-C are not accepted as substitutes for the missing inventory.
 
+## 2026-07-16 explicit-input archive inventory boundary
+
+The pure Stage4 contract now validates an explicit pair of archive labels and
+paths before any filesystem probe or `nm` scan. Empty or mismatched inputs,
+duplicate labels, duplicate paths, raw `libsimple_native_all`, and broad
+`libsimple_runtime` candidates fail closed. The LLVM adapter preserves the
+caller's declared order, requires every named path to exist, and returns only
+the corresponding symbol scans. It does not search directories, infer a
+provider manifest, or manufacture missing candidates.
+
+This boundary is intentionally not called from the production
+`link_llvm_native` body. The complete capability-owned provider archive set is
+still missing, so candidate inventory, unique-owner selection, archive hashing,
+link-profile cache keys, and selected archive inputs remain unwired. The
+validation boundary alone therefore makes no production-link or cache-
+correctness claim and does not permit stubs, `native_all`, or broad core-C as a
+fallback.
+
 ## 2026-07-16 canonical core-C HTTP ownership
 
 The legacy `runtime.c` definition of `rt_http_get` returned a raw C string even
