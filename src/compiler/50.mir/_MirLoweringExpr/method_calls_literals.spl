@@ -127,6 +127,47 @@ impl MirLowering:
                 case _: ()
         nil
 
+    me option_inner_hir_type_for_local(receiver: HirExpr, local: LocalId) -> HirType?:
+        val declared = self.option_inner_hir_type(receiver)
+        if declared != nil:
+            return declared
+        if self.local_hir_types.has(local.id):
+            val local_type = self.local_hir_types[local.id]
+            match local_type.kind:
+                case HirTypeKind.Optional(inner_type): return Some(inner_type)
+                case _: ()
+        nil
+
+    me option_map_value_hir_type(local: LocalId, span: Span) -> HirType?:
+        """Recover the primitive type needed to decode an Option.map result."""
+        if self.local_hir_types.has(local.id):
+            val known = self.local_hir_types[local.id]
+            match known.kind:
+                case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str:
+                    return Some(known)
+                case _: ()
+        if self.struct_value_syms.has(local.id) or self.runtime_array_locals.has(local.id) or self.runtime_dict_locals.has(local.id) or self.runtime_value_locals.has(local.id):
+            return nil
+        if val type_ = self.local_mir_type_of(local):
+            val kind = match type_.kind:
+                case MirTypeKind.I8: HirTypeKind.Int(8, true)
+                case MirTypeKind.U8: HirTypeKind.Int(8, false)
+                case MirTypeKind.I16: HirTypeKind.Int(16, true)
+                case MirTypeKind.U16: HirTypeKind.Int(16, false)
+                case MirTypeKind.I32: HirTypeKind.Int(32, true)
+                case MirTypeKind.U32: HirTypeKind.Int(32, false)
+                case MirTypeKind.I64: HirTypeKind.Int(64, true)
+                case MirTypeKind.U64: HirTypeKind.Int(64, false)
+                case MirTypeKind.F32: HirTypeKind.Float(32)
+                case MirTypeKind.F64: HirTypeKind.Float(64)
+                case MirTypeKind.Bool: HirTypeKind.Bool
+                case MirTypeKind.Char: HirTypeKind.Char
+                case MirTypeKind.Opaque(name):
+                    if name == "str": HirTypeKind.Str else: return nil
+                case _: return nil
+            return Some(HirType(kind: kind, span: span))
+        nil
+
     me option_text_value(value_local: LocalId, result_type: MirType) -> LocalId:
         val text_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_interp_cstr"),
@@ -289,7 +330,7 @@ impl MirLowering:
             val receiver_local = self.lower_expr(receiver)
             var unwrap_result_type = MirType.i64()
             var unwrap_is_text = false
-            val inner_type_uw = self.option_inner_hir_type(receiver)
+            val inner_type_uw = self.option_inner_hir_type_for_local(receiver, receiver_local)
             if inner_type_uw != nil:
                 val found_inner_uw = inner_type_uw ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
                 match found_inner_uw.kind:
@@ -375,7 +416,7 @@ impl MirLowering:
             val receiver_local = self.lower_expr(receiver)
             var uo_result_type = MirType.i64()
             var uo_is_text = false
-            val inner_type_uo = self.option_inner_hir_type(receiver)
+            val inner_type_uo = self.option_inner_hir_type_for_local(receiver, receiver_local)
             if inner_type_uo != nil:
                 val found_inner_uo = inner_type_uo ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
                 match found_inner_uo.kind:
@@ -469,73 +510,79 @@ impl MirLowering:
             prelowered_method_receiver = recv_probe_local_map
             has_prelowered_method_receiver = true
             if not self.local_is_runtime_array(recv_probe_local_map) and not self.local_is_runtime_dict(recv_probe_local_map):
-                val map_lambda_operand_opt = self.lower_lambda_value(args[0].value)
-                if val map_lambda_operand = map_lambda_operand_opt:
-                    val receiver_local = recv_probe_local_map
-                    var map_inner_type = MirType.i64()
-                    val map_inner_ty_local = self.local_mir_type_of(receiver_local)
-                    if map_inner_ty_local != nil:
-                        map_inner_type = map_inner_ty_local
-                    # Result of `.map` is Option<U>: represented the same flat
-                    # way as the receiver Option (nil sentinel vs. payload).
-                    # Absent a call-site expected type for `U`, fall back to
-                    # i64 (matches the receiver's own default-typing fallback
-                    # elsewhere in this function) -- correct for the common
-                    # numeric-transform case this sweep targets; a non-i64
-                    # `U` is a follow-on gap, not a silent miscompile (the
-                    # merge/decode machinery below is type-driven off this
-                    # value either way).
-                    var map_result_type = MirType.i64()
+                match args[0].value.kind:
+                    case Lambda(map_params, map_body, _):
+                        val receiver_local = recv_probe_local_map
+                        var map_inner_type = MirType.i64()
+                        val map_inner_hir = self.option_inner_hir_type_for_local(receiver, receiver_local)
+                        if map_inner_hir != nil:
+                            val found_inner_map = map_inner_hir ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+                            match found_inner_map.kind:
+                                case HirTypeKind.Str: map_inner_type = self.bootstrap_text_type()
+                                case _: map_inner_type = self.lower_type(found_inner_map)
+                        elif val map_inner_ty_local = self.local_mir_type_of(receiver_local):
+                            map_inner_type = map_inner_ty_local
 
-                    var b_map_chk = self.builder
-                    val is_some_map_op = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("rt_is_some"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
-                            params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
-                        )))
-                    ))
-                    val is_some_map_res = b_map_chk.emit_call(is_some_map_op, [mir_operand_copy(receiver_local)], MirType.bool())
-                    self.builder = b_map_chk
-                    var is_some_map_local = LocalId(id: 0)
-                    if val isl = is_some_map_res:
-                        is_some_map_local = isl
+                        var b_map_chk = self.builder
+                        val is_some_map_op = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_is_some"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                                params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
+                            )))
+                        ))
+                        val is_some_map_res = b_map_chk.emit_call(is_some_map_op, [mir_operand_copy(receiver_local)], MirType.bool())
+                        self.builder = b_map_chk
+                        var is_some_map_local = LocalId(id: 0)
+                        if val isl = is_some_map_res:
+                            is_some_map_local = isl
 
-                    var b_split_map = self.builder
-                    val some_block_map = b_split_map.new_block(Some("option_map_some"))
-                    val none_block_map = b_split_map.new_block(Some("option_map_none"))
-                    val merge_block_map = b_split_map.new_block(Some("option_map_merge"))
-                    val result_local_map = b_split_map.new_temp(map_result_type)
-                    b_split_map.terminate_if(mir_operand_copy(is_some_map_local), some_block_map, none_block_map)
-                    self.builder = b_split_map
+                        var b_split_map = self.builder
+                        val some_block_map = b_split_map.new_block(Some("option_map_some"))
+                        val none_block_map = b_split_map.new_block(Some("option_map_none"))
+                        val merge_block_map = b_split_map.new_block(Some("option_map_merge"))
+                        val result_local_map = b_split_map.new_temp(MirType.i64())
+                        b_split_map.terminate_if(mir_operand_copy(is_some_map_local), some_block_map, none_block_map)
+                        self.builder = b_split_map
 
-                    var b_some_map = self.builder
-                    b_some_map.switch_to_block(some_block_map)
-                    self.builder = b_some_map
-                    var some_val_map = receiver_local
-                    if self.runtime_value_locals.has(receiver_local.id):
-                        some_val_map = self.decode_runtime_value(receiver_local, map_inner_type)
-                    b_some_map = self.builder
-                    val map_call_res = b_some_map.emit_call(map_lambda_operand, [mir_operand_copy(some_val_map)], map_result_type)
-                    self.builder = b_some_map
-                    var map_call_local = result_local_map
-                    if val mcr = map_call_res:
-                        map_call_local = mcr
-                    var b_some_map2 = self.builder
-                    b_some_map2.emit_copy(result_local_map, map_call_local)
-                    b_some_map2.terminate_goto(merge_block_map)
-                    self.builder = b_some_map2
+                        var b_some_map = self.builder
+                        b_some_map.switch_to_block(some_block_map)
+                        self.builder = b_some_map
+                        var some_val_map = receiver_local
+                        if self.runtime_value_locals.has(receiver_local.id):
+                            some_val_map = self.decode_runtime_value(receiver_local, map_inner_type)
+                        val map_call_local = self.lower_inline_lambda_with_locals(map_params, map_body, [some_val_map])
+                        val map_value_type = self.option_map_value_hir_type(map_call_local, map_body.span)
+                        var map_call_tagged = map_call_local
+                        if map_value_type == nil:
+                            self.error("unsupported Option.map result type", Some(map_body.span))
+                            var b_bad_map = self.builder
+                            map_call_tagged = b_bad_map.emit_const_int(3)
+                            self.builder = b_bad_map
+                        else:
+                            map_call_tagged = self.box_runtime_value(map_call_local)
+                        var b_some_map2 = self.builder
+                        b_some_map2.emit_copy(result_local_map, map_call_tagged)
+                        b_some_map2.terminate_goto(merge_block_map)
+                        self.builder = b_some_map2
 
-                    var b_none_map = self.builder
-                    b_none_map.switch_to_block(none_block_map)
-                    self.builder = b_none_map
-                    b_none_map.emit_const(result_local_map, MirConstValue.Int(3), map_result_type)
-                    b_none_map.terminate_goto(merge_block_map)
-                    self.builder = b_none_map
+                        var b_none_map = self.builder
+                        b_none_map.switch_to_block(none_block_map)
+                        self.builder = b_none_map
+                        b_none_map.emit_const(result_local_map, MirConstValue.Int(3), MirType.i64())
+                        b_none_map.terminate_goto(merge_block_map)
+                        self.builder = b_none_map
 
-                    var b_merge_map = self.builder
-                    b_merge_map.switch_to_block(merge_block_map)
-                    self.builder = b_merge_map
-                    return result_local_map
+                        var b_merge_map = self.builder
+                        b_merge_map.switch_to_block(merge_block_map)
+                        self.builder = b_merge_map
+                        self.runtime_value_locals[result_local_map.id] = true
+                        if val found_map_value_type = map_value_type:
+                            self.local_hir_types[result_local_map.id] = HirType(
+                                kind: HirTypeKind.Optional(found_map_value_type),
+                                span: receiver.span
+                            )
+                        return result_local_map
+                    case _: ()
 
         # Reclassify `Shape.Circle(7)` — parsed as a MethodCall — into enum
         # construction when the receiver names a registered enum and `method` is

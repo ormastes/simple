@@ -1518,6 +1518,24 @@ impl MirLowering:
             case _:
                 nil
 
+    me lower_inline_lambda_with_locals(params: [HirParam], body: HirExpr, arg_locals: [LocalId]) -> LocalId:
+        """Lower a lambda body at its call site with already-lowered args."""
+        val live_map = self.local_map
+        var call_map: Dict<i64, LocalId> = {}
+        for k in live_map.keys():
+            call_map[k] = live_map[k]
+        self.local_map = call_map
+        var pi = 0
+        while pi < params.len():
+            if pi < arg_locals.len():
+                val pid = mir_expr_symbol_id_value(params[pi].symbol)
+                if pid >= 0:
+                    self.local_map[pid] = arg_locals[pi]
+            pi = pi + 1
+        val result = self.lower_expr(body)
+        self.local_map = live_map
+        result
+
     me lower_iife_call(params: [HirParam], body: HirExpr, args: [HirCallArg]) -> LocalId:
         """Lower an Immediately-Invoked Function Expression: a raw lambda
         literal used directly as a call callee, `(\x: x + 1)(5)`.
@@ -1536,21 +1554,7 @@ impl MirLowering:
             if ai < args.len():
                 arg_locals = arg_locals.push(self.lower_expr(args[ai].value))
             ai = ai + 1
-        val live_map = self.local_map
-        var call_map: Dict<i64, LocalId> = {}
-        for k in live_map.keys():
-            call_map[k] = live_map[k]
-        self.local_map = call_map
-        var pi = 0
-        while pi < params.len():
-            if pi < arg_locals.len():
-                val pid = mir_expr_symbol_id_value(params[pi].symbol)
-                if pid >= 0:
-                    self.local_map[pid] = arg_locals[pi]
-            pi = pi + 1
-        val result = self.lower_expr(body)
-        self.local_map = live_map
-        result
+        self.lower_inline_lambda_with_locals(params, body, arg_locals)
 
     me lambda_body_captures(body: HirExpr, param_syms: [i64]) -> bool:
         """Conservative free-variable scan for a lambda body being lifted to a

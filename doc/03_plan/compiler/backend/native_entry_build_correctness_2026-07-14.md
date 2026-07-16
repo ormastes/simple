@@ -108,12 +108,12 @@ the shared binary — deploys require explicit user go-ahead).
     signed integers through shared MIR coercion before LLVM or Cranelift.
     Strict dual-backend execution is pending the same runnable CLI. Unsigned
     high-bit casts are also source-fixed and covered by a separate strict case.
-- Option `.map` now evaluates a side-effecting receiver exactly once. Option
-  `.map` transforms producing non-i64 results remain open: lifted lambdas
-  currently expose an i64 call ABI, and
-  a blanket non-i64 rejection would incorrectly reject supported boolean
-  predicates used by array `filter`. Finish this with caller-aware lambda
-  return typing and value-preserving conversion/boxing, not an Option-only cast.
+- Option `.map` now evaluates a side-effecting receiver exactly once and
+  inlines its literal lambda with the decoded payload, preserving primitive
+  text/float/bool/integer results through the tagged runtime-value merge.
+  Array `map`/`filter`/`fold` retain their existing lifted i64 ABI. The strict
+  dual-backend typed-output/filter control is source-complete; executable proof
+  remains pending the runnable pure-Simple gate.
 - The whole-compiler redeploy (#99 / stage4) remains separate and blocked on
   seed-backend bugs (cranelift enum miscompile + seed-LLVM mcall_direct arg
   count) — **not** part of this correctness campaign; see
