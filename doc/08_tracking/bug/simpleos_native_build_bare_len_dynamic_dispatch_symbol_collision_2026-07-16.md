@@ -1,5 +1,21 @@
 # Bug: erased-receiver `.len()` emits bare `MethodCallStatic("len")` → links to arbitrary `_dot_len` symbol (entry-closure)
 
+- **Status:** FIXED — `610b4572a32` (2026-07-16)
+- **True root cause (superseding the hypothesis below):** the `?` Try operator
+  never reached the parser. Under `SIMPLE_BOOTSTRAP=1`,
+  `apply_bootstrap_rewrite()` (`pipeline/native_project/compiler.rs`) blindly
+  stripped any `?`+terminator pattern (meant for `Type?` optional suffixes),
+  silently deleting `val resp = _vfs_request(...)?`'s Try — `resp` stayed the
+  raw `Result<text,text>` wrapper, `resp.len()` qualified as the nonexistent
+  `Result.len`, and suffix-based symbol resolution bound it to
+  `BinaryWriter.len`. Fix: byte-safe scanner that never strips `?` preceded by
+  `)`, plus defense-in-depth in MIR (Result/Option-wrapper receivers with
+  builtin-collision names route through erased-builtin tag dispatch) and
+  `is_empty` added to `is_bare_builtin_collection_method`. Verified: exception
+  frames 2→0; boot proceeds through pkg_service to the separate fb-init
+  regression. Residual risk noted: bare-variable Try (`resp?` with no `)`)
+  would still be stripped by the rewrite — none exist in the kernel closure
+  today.
 - **Date:** 2026-07-16
 - **Severity:** critical (SimpleOS x86_64: fat32 `exec probe failed` → `mount_failed` → diskless desktop)
 - **Component:** rust seed — HIR `?`-unwrap type propagation + MIR dynamic method dispatch
