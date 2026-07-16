@@ -86,6 +86,13 @@ FreeBSD QEMU `--full` now runs the complete 15-case default-LLVM native-entry
 matrix after the focused explicit-Cranelift probe and requires zero codegen
 fallback hits; the cross-module Result control continues to cover both backends.
 
+The existing Linux x86_64 LLVM bootstrap CI leg now enables canonical Stage 5,
+which builds both pure-Simple MCP servers and runs their fresh-artifact
+initialize/list/call smoke. Other host/backend legs still skip that duplicate
+build. The pure-Simple architecture job also executes the existing ARM32 LLVM
+compiler-surface specification, closing the static matrix gap alongside x86_64,
+AArch64, and RISC-V; hosted ARM32 linking remains explicitly unsupported.
+
 ---
 
 ## Wave 1 — Codegen silent-wrong (highest priority: wrong answers, no diagnostic)
