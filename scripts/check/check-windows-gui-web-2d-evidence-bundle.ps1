@@ -9,11 +9,30 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
+function Resolve-RepoPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return $path
+    }
+    if ([System.IO.Path]::IsPathRooted($path)) {
+        return $path
+    }
+    return Join-Path $repoRoot $path
+}
+
+$DirectXEvidencePath = Resolve-RepoPath $DirectXEvidencePath
+$VulkanEvidencePath = Resolve-RepoPath $VulkanEvidencePath
+$D3D12EvidencePath = Resolve-RepoPath $D3D12EvidencePath
+
 function Invoke-Checker([string]$scriptPath, [string[]]$argsList) {
-    $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $scriptPath @argsList 2>&1
-    return @{
-        ExitCode = $LASTEXITCODE
-        Output = @($output | ForEach-Object { "$_" })
+    Push-Location $repoRoot
+    try {
+        $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $scriptPath @argsList 2>&1
+        return @{
+            ExitCode = $LASTEXITCODE
+            Output = @($output | ForEach-Object { "$_" })
+        }
+    } finally {
+        Pop-Location
     }
 }
 

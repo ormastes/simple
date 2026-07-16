@@ -6,6 +6,7 @@ Current Windows PowerShell run:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-windows-gui-web-2d-evidence-bundle.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-windows-gui-web-2d-evidence-bundle.ps1 -RequireFullCompletion
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\ormas\dev\simple\scripts\check\check-windows-gui-web-2d-evidence-bundle.ps1
+Push-Location $env:TEMP; powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\ormas\dev\simple\scripts\check\check-windows-gui-web-2d-evidence-bundle.ps1; Pop-Location
 ```
 
 Default result:
@@ -34,8 +35,10 @@ D3D12/PIX evidence are available.
 
 The DirectX, Vulkan, and D3D12 leaf PowerShell checkers now resolve relative
 evidence and capture artifact paths from the repository root derived from
-`$PSScriptRoot`, so the bundle also passes when launched by absolute script path
-from outside the checkout root.
+`$PSScriptRoot`. The bundle now also resolves its own evidence-path arguments
+from that repository root, runs child checkers from that root, reports absolute
+evidence paths, and passes when launched by absolute script path from outside
+the checkout root.
 
 Primary artifacts:
 

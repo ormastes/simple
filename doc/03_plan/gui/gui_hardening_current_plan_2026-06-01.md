@@ -175,8 +175,10 @@
   `-RequireFullCompletion` mode fails as expected on `vulkan-full,d3d12-full`
   until Vulkan SDK/RenderDoc browser capture and D3D12/PIX evidence are
   available. The DirectX, Vulkan, and D3D12 leaf PowerShell checkers now anchor
-  relative evidence and capture artifact paths to the repository root, and the
-  bundle was verified from outside the checkout via absolute script path.
+  relative evidence and capture artifact paths to the repository root; the
+  bundle now also anchors its own evidence inputs, runs leaf checkers from the
+  repository root, reports absolute evidence paths, and was verified from
+  outside the checkout via absolute script path.
   Current details are in
   `doc/09_report/windows_gui_web_2d_evidence_bundle_current_2026-07-16.md`.
 - The GUI RenderDoc feature-coverage aggregate now discovers the current
