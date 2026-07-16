@@ -104,6 +104,10 @@ changing the Option representation or Result decoder. Unresolved late-dispatch
 methods remain open and are not guessed, because rejecting them could break
 valid Result `?`. Default-LLVM and explicit-Cranelift execution proof remains
 pending the pure-Simple native gate; this does not validate the tagged ABI.
+The hosted Linux/macOS/Windows matrix and FreeBSD x86_64 full gate now select
+the existing annotated-local and direct-call loud-fail cases for both backends,
+requiring a nonzero build, no artifact, and the exact diagnostic. Their CI
+execution is pending; resolved-method coverage remains source-contract only.
 
 ## Diagnostic degraded to "MIR error: nil" — fixed (2026-07-16, q_optiontry_dynload lane)
 

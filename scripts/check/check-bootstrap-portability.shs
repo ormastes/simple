@@ -144,6 +144,11 @@ fi
 grep -Fq 'run: sh scripts/check/check-freebsd-bootstrap-qemu.shs --full --download' "${freebsd_workflow}" || fail "FreeBSD full execution wiring missing"
 grep -Eq '^[[:space:]]*SMOKE_OUT=.*native-build .*--backend cranelift .*--output \$\{SMOKE_DIR\}/probe' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD explicit Cranelift probe build missing"
 grep -Eq '^[[:space:]]*SMOKE_RESULT=.*test -x \$\{SMOKE_DIR\}/probe && \$\{SMOKE_DIR\}/probe' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD explicit Cranelift probe execution missing"
+grep -Fq 'NATIVE_PARITY_BACKEND=${PARITY_BACKEND}' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity backend selection missing"
+grep -Fq "NATIVE_PARITY_CASES='option_try_annotated_loud option_try_direct_loud'" scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity cases missing"
+grep -Fq 'for PARITY_BACKEND in llvm cranelift; do' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity does not cover both backends"
+grep -Fq '[ "$PARITY_EXIT" = "0" ]' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity exit status is not enforced"
+grep -Fq 'total=2 pass=2 fail=0 xfail=0' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Option parity strict summary missing"
 [ "$(grep -c "test/fixtures/compiler/llvm_simd_row_native_probe.spl" "${multiplatform}")" -eq 2 ] || fail "native architecture probe trigger missing"
 grep -q 'bootstrap-from-scratch.sh' "${multiplatform}" || fail "multiplatform workflow bypasses canonical bootstrap"
 grep -q '^  native-architectures:' "${multiplatform}" || fail "pure-Simple native architecture job missing"
@@ -159,6 +164,27 @@ if grep -Fq -- '--backend "$NATIVE_SMOKE_BACKEND"' scripts/check/native-smoke-ma
   fail "native smoke does not exercise default LLVM"
 fi
 grep -Fq 'record_id="$1"; record_mode="$2"; record_status="$3"; record_detail="$4"' scripts/check/check-native-seed-parity.shs || fail "native parity result recording clobbers caller state"
+grep -Fq 'NATIVE_PARITY_BACKEND="${NATIVE_PARITY_BACKEND:-llvm}"' scripts/check/check-native-seed-parity.shs || fail "native parity backend default missing"
+parity_build_native=$(sed -n '/^build_native() {$/,/^}$/p' scripts/check/check-native-seed-parity.shs)
+if printf '%s\n' "${parity_build_native}" | grep -Fq 'NATIVE_PARITY_BACKEND'; then
+  fail "native parity backend selector leaks into shared dual-backend builds"
+fi
+parity_loud_fail=$(sed -n '/^run_loud_fail_case() {$/,/^}$/p' scripts/check/check-native-seed-parity.shs)
+printf '%s\n' "${parity_loud_fail}" | grep -Fq 'if [ "$NATIVE_PARITY_BACKEND" = cranelift ]; then' || fail "loud-fail parity backend selection missing"
+printf '%s\n' "${parity_loud_fail}" | grep -Fq 'build_native "$src" "$bin" "$build_log" cranelift' || fail "loud-fail parity does not select Cranelift explicitly"
+printf '%s\n' "${parity_loud_fail}" | grep -Fq 'build_native "$src" "$bin" "$build_log" || build_rc=$?' || fail "loud-fail parity does not preserve flagless LLVM"
+option_parity_body=$(sed -n '/- name: Run strict Option fail-closed parity/,/- name: Run Windows strict dynload parity/p' "${multiplatform}")
+for required in \
+  'SIMPLE_BINARY="$stage3"' \
+  'NATIVE_PARITY_BACKEND=${{ matrix.backend }}' \
+  'NATIVE_PARITY_CASES="option_try_annotated_loud option_try_direct_loud"' \
+  'NATIVE_PARITY_FAIL_ON_XFAIL=1' \
+  'sh scripts/check/check-native-seed-parity.shs'; do
+  printf '%s\n' "${option_parity_body}" | grep -Fq -- "${required}" || fail "hosted Option parity gate missing: ${required}"
+done
+if printf '%s\n' "${option_parity_body}" | grep -Eq '^[[:space:]]*if:|continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true'; then
+  fail "hosted Option parity gate is optional"
+fi
 arch_gate=scripts/check/check-llvm-simd-row-native-arch.shs
 for invocation in \
   'build_object_arch arm32 armv7-unknown-linux-gnueabihf' \

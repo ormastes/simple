@@ -81,9 +81,9 @@
 # Usage: sh scripts/check/check-native-seed-parity.shs
 # Env:   SIMPLE_BINARY (default bin/simple), PARITY_WORK_DIR (default
 #        /tmp/check-native-seed-parity.$$), NATIVE_PARITY_CASES (optional
-#        space-separated case IDs), NATIVE_PARITY_FAIL_ON_XFAIL=1 (optional
-#        strict gate), SEED_TIMEOUT_S (default 20), and NATIVE_RUN_TIMEOUT_S
-#        (default 20)
+#        space-separated case IDs), NATIVE_PARITY_BACKEND (llvm default or
+#        cranelift for loud-fail cases), NATIVE_PARITY_FAIL_ON_XFAIL=1 (optional strict gate),
+#        SEED_TIMEOUT_S (default 20), and NATIVE_RUN_TIMEOUT_S (default 20)
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -93,6 +93,11 @@ SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
 WORK_DIR="${PARITY_WORK_DIR:-/tmp/check-native-seed-parity.$$}"
 SEED_TIMEOUT_S="${SEED_TIMEOUT_S:-20}"
 NATIVE_RUN_TIMEOUT_S="${NATIVE_RUN_TIMEOUT_S:-20}"
+NATIVE_PARITY_BACKEND="${NATIVE_PARITY_BACKEND:-llvm}"
+case "$NATIVE_PARITY_BACKEND" in
+    llvm|cranelift) ;;
+    *) echo "unsupported NATIVE_PARITY_BACKEND: $NATIVE_PARITY_BACKEND" >&2; exit 2 ;;
+esac
 mkdir -p "$WORK_DIR"
 
 STAMP="$(date +%s)_$$"
@@ -1610,7 +1615,11 @@ run_loud_fail_case() {
 
     "$writer" "$src"
     build_rc=0
-    build_native "$src" "$bin" "$build_log" || build_rc=$?
+    if [ "$NATIVE_PARITY_BACKEND" = cranelift ]; then
+        build_native "$src" "$bin" "$build_log" cranelift || build_rc=$?
+    else
+        build_native "$src" "$bin" "$build_log" || build_rc=$?
+    fi
 
     if [ "$build_rc" -eq 0 ]; then
         record "$id" "loud-fail" "FAIL" "native build UNEXPECTEDLY SUCCEEDED (was supposed to refuse loudly) — REGRESSION"
