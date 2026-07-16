@@ -1,6 +1,8 @@
 import std.spec
 
 use compiler.backend.{CodegenTarget, riscv_linux_target_contract, riscv_baremetal_target_contract}
+use compiler.backend.backend.llvm_cross_target.{toolchain_for_target}
+use compiler.backend.backend.llvm_support_matrix.{get_support_matrix}
 use hardware.rv32gc.top.rv32_machine.{qemu_virt_rv32_platform_profile}
 use hardware.rv64gc.top.rv64_machine.{qemu_virt_rv64_platform_profile}
 
@@ -19,6 +21,31 @@ describe "RISC-V backend target contracts":
         expect(contract.abi.to_text()).to_equal("ilp32d")
         expect(contract.march).to_equal("rv32gc")
         expect(contract.pointer_bits).to_equal(32)
+        expect(contract.linker).to_equal("")
+        expect(contract.sysroot).to_equal("")
+        expect(contract.crt_dir).to_equal("")
+
+    it "fails hosted RV32 linking closed and points to bare metal":
+        val toolchain = toolchain_for_target(CodegenTarget.Riscv32)
+        expect(toolchain.triple).to_equal("riscv32-unknown-linux-gnu")
+        expect(toolchain.linker).to_equal("")
+        expect(toolchain.sysroot).to_equal("")
+        expect(toolchain.crt_dir).to_equal("")
+        expect(toolchain.default_flags.len()).to_equal(0)
+        expect(toolchain.requires_external).to_equal(true)
+        expect(toolchain.install_hint).to_contain("unsupported")
+        expect(toolchain.install_hint).to_contain("riscv32-unknown-none-elf")
+        expect(toolchain.diagnostic()).to_contain("No linker configured")
+
+    it "does not advertise RV64 link tools for unsupported RV32 rows":
+        var rv32_rows = 0
+        for entry in get_support_matrix():
+            if entry.target == CodegenTarget.Riscv32:
+                rv32_rows = rv32_rows + 1
+                expect(entry.level.is_usable()).to_equal(false)
+                for tool in entry.required_tools:
+                    expect(tool.contains("riscv64-linux-gnu")).to_equal(false)
+        expect(rv32_rows).to_equal(2)
 
     it "keeps compiler and hardware aligned on the RV32 Linux contract":
         val compiler_contract = riscv_linux_target_contract(CodegenTarget.Riscv32)
