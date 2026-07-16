@@ -14182,10 +14182,15 @@ TRAP_STUB_RET(rt_file_is_file, 1)
  * asset is present; halting here killed the first desktop compose. */
 __attribute__((weak)) RuntimeValue rt_file_read_bytes(RuntimeValue _a) {
     (void)_a;
-    serial_puts("[TRAP] rt_file_read_bytes called on baremetal -- halting\r\n");
-    _bt_dump_from((uint64_t)__builtin_frame_address(0));
-    for (;;) { __asm__ volatile("hlt"); }
-    return 0;
+    /* No VFS mounted (degraded no-disk boot): a file read cannot succeed, so
+     * return an EMPTY [u8] instead of halting. Callers (e.g.
+     * font_registry.load_selected_font_file during first-frame render) treat
+     * empty bytes as "asset unavailable" and fall back to the bitmap font, so
+     * the WM still composes and renders. A VFS-mounting kernel overrides this
+     * weak symbol with the g_vfs_read_file_bytes-backed @export("C") and wins.
+     * Halting here killed the first desktop compose (SimpleOS WM render). */
+    serial_puts("[nvme-degraded] rt_file_read_bytes: no VFS, returning empty\r\n");
+    return rt_bytes_alloc_packed_empty();
 }
 TRAP_STUB_RET(rt_file_write_bytes, 2)
 TRAP_STUB_RET(rt_file_stat, 1)
