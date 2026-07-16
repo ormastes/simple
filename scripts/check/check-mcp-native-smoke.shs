@@ -72,6 +72,16 @@ fi
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT INT TERM
 
+MCP_STARTUP_LOG="${MCP_SERVER%/*}/../.simple/logs/simple_mcp_startup.log"
+log_line_count() {
+    if [ -f "$1" ]; then
+        wc -l < "$1" | tr -d ' '
+    else
+        printf '0\n'
+    fi
+}
+MCP_LOG_BASELINE="$(log_line_count "$MCP_STARTUP_LOG")"
+
 RT_FORWARD_CACHE_FILE=""
 if [ -x "scripts/setup/refresh-rt-forward-cache.shs" ]; then
     refresh_out="$(sh scripts/setup/refresh-rt-forward-cache.shs)"
@@ -115,10 +125,12 @@ fi
 
 set +e
 MCP_START_MS="$(now_ms)"
+MCP_FIRST_LOG_LINE="$(log_line_count "$MCP_STARTUP_LOG")"
 SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp.in" > "$TMPDIR/mcp.jsonl" 2> "$TMPDIR/mcp.err"
 MCP_RC=$?
 MCP_END_MS="$(now_ms)"
 set -e
+sed -n "$((MCP_FIRST_LOG_LINE + 1)),\$p" "$MCP_STARTUP_LOG" 2>/dev/null > "$TMPDIR/mcp_first.log" || true
 
 lsp_init='{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
 lsp_initialized='{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
@@ -151,10 +163,9 @@ set -e
 MCP_STARTUP_MS=$((MCP_END_MS - MCP_START_MS))
 LSP_STARTUP_MS=$((LSP_END_MS - LSP_START_MS))
 
-# Detect whether the first MCP run was a cache hit or miss via startup log
-MCP_STARTUP_LOG="${MCP_SERVER%/*}/../.simple/logs/simple_mcp_startup.log"
+# Detect only the log records appended by the measured first MCP run.
 MCP_PROBE_CACHE_HIT_FIRST=false
-if [ -f "$MCP_STARTUP_LOG" ] && grep -q 'probe_cache_hit wrapper=simple_mcp_server' "$MCP_STARTUP_LOG"; then
+if grep -q 'probe_cache_hit wrapper=simple_mcp_server' "$TMPDIR/mcp_first.log"; then
     MCP_PROBE_CACHE_HIT_FIRST=true
 fi
 
@@ -166,10 +177,12 @@ MCP_SECOND_START_MS=0
 if [ "$MCP_NATIVE_BOOTSTRAP_FRESH" != "1" ]; then
     set +e
     MCP_START2_MS="$(now_ms)"
+    MCP_SECOND_LOG_LINE="$(log_line_count "$MCP_STARTUP_LOG")"
     SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp.in" > "$TMPDIR/mcp2.jsonl" 2>> "$TMPDIR/mcp.err"
     MCP_RC2=$?
     MCP_END2_MS="$(now_ms)"
     set -e
+    sed -n "$((MCP_SECOND_LOG_LINE + 1)),\$p" "$MCP_STARTUP_LOG" 2>/dev/null > "$TMPDIR/mcp_second.log" || true
     MCP_SECOND_START_MS=$((MCP_END2_MS - MCP_START2_MS))
 fi
 
@@ -193,9 +206,9 @@ SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SER
 MCP_FUNC_RC=$?
 set -e
 
-# Detect cache hit on second run
+# Detect cache hit only in records appended by the second run.
 MCP_PROBE_CACHE_HIT=false
-if [ -f "$MCP_STARTUP_LOG" ] && grep -q 'probe_cache_hit wrapper=simple_mcp_server' "$MCP_STARTUP_LOG"; then
+if [ -f "$TMPDIR/mcp_second.log" ] && grep -q 'probe_cache_hit wrapper=simple_mcp_server' "$TMPDIR/mcp_second.log"; then
     MCP_PROBE_CACHE_HIT=true
 fi
 
@@ -266,24 +279,31 @@ if [ "$MCP_NATIVE_BOOTSTRAP_FRESH" = "1" ]; then
     MCP_STALE_STAMP_OK=true
     echo "mcp_stale_stamp_note=not_applicable_exact_destination_removed_before_build"
 elif [ -d "${_mcp_probe_cache_dir}" ]; then
-    _stale_stamp="$(ls "${_mcp_probe_cache_dir}"/*.stamp 2>/dev/null | head -1)"
-    if [ -n "${_stale_stamp}" ]; then
+    sed -n "$((MCP_LOG_BASELINE + 1)),\$p" "$MCP_STARTUP_LOG" 2>/dev/null > "$TMPDIR/mcp_smoke.log" || true
+    _selected_native="$(sed -n 's/.* wrapper=simple_mcp_server native=\([^ ]*\).*/\1/p' "$TMPDIR/mcp_smoke.log" | tail -1)"
+    _stamp_key="$(printf '%s' "${_selected_native}" | tr -c 'A-Za-z0-9.' '_')"
+    _stale_stamp="${_mcp_probe_cache_dir}/${_stamp_key}.stamp"
+    if [ -n "${_selected_native}" ] && [ -f "${_stale_stamp}" ]; then
         printf 'corrupted_stamp_for_test\n' > "${_stale_stamp}"
+        _stale_log_line="$(log_line_count "$MCP_STARTUP_LOG")"
         set +e
         SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp_func.in" > "$TMPDIR/mcp_stale.jsonl" 2>> "$TMPDIR/mcp.err"
         _stale_rc=$?
         set -e
-        if [ "$_stale_rc" -eq 0 ] && grep -q '"play_wm_text_status"' "$TMPDIR/mcp_stale.jsonl" 2>/dev/null; then
+        sed -n "$((_stale_log_line + 1)),\$p" "$MCP_STARTUP_LOG" 2>/dev/null > "$TMPDIR/mcp_stale.log" || true
+        _expected_hash="$(awk 'NR == 1 { print $1 }' "${_selected_native}.sha256" 2>/dev/null || true)"
+        _repaired_hash="$(sed -n '1p' "${_stale_stamp}" 2>/dev/null || true)"
+        if [ "$_stale_rc" -eq 0 ] \
+            && grep -q '"play_wm_text_status"' "$TMPDIR/mcp_stale.jsonl" 2>/dev/null \
+            && grep -q 'probe_tools_call_ok wrapper=simple_mcp_server' "$TMPDIR/mcp_stale.log" \
+            && [ -n "${_expected_hash}" ] && [ "${_repaired_hash}" = "${_expected_hash}" ]; then
             MCP_STALE_STAMP_OK=true
         fi
     else
-        # No stamp exists (e.g. SKIP_NATIVE_PROBE was set); mark as n/a but not a failure
-        MCP_STALE_STAMP_OK=true
-        echo "mcp_stale_stamp_note=no_stamp_found_skipping_stale_test"
+        echo "mcp_stale_stamp_note=selected_candidate_stamp_missing"
     fi
 else
-    MCP_STALE_STAMP_OK=true
-    echo "mcp_stale_stamp_note=cache_dir_absent_skipping_stale_test"
+    echo "mcp_stale_stamp_note=cache_dir_absent"
 fi
 echo "mcp_stale_stamp_reprobe_ok=$MCP_STALE_STAMP_OK"
 
@@ -300,6 +320,9 @@ if [ "$APP_DIRECT_RT_VALID" != "true" ] || [ "$LSP_APP_DIRECT_RT_VALID" != "true
 fi
 
 if [ "$MCP_CORE_RC" -ne 0 ] || [ "$MCP_CORE_IDS_OK" != "true" ] || [ "$MCP_RC" -ne 0 ] || [ "$MCP_FUNC_RC" -ne 0 ] || [ "$LSP_RC" -ne 0 ] || [ "$LSP_FUNC_RC" -ne 0 ]; then
+    exit 1
+fi
+if [ "$MCP_NATIVE_BOOTSTRAP_FRESH" != "1" ] && { [ "$MCP_RC2" -ne 0 ] || [ "$MCP_PROBE_CACHE_HIT" != "true" ]; }; then
     exit 1
 fi
 if [ "$MCP_STARTUP_MS" -gt "$MCP_NATIVE_STARTUP_MAX_MS" ] || [ "$LSP_STARTUP_MS" -gt "$MCP_NATIVE_STARTUP_MAX_MS" ]; then

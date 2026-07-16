@@ -106,6 +106,9 @@ runtime remains unavailable, so executable qualification is still blocked.
 - MCP/LSP wrapper contract: PASS with fresh-layout log creation, explicit
   override rejection, content-hash cache invalidation, correlated protocol
   results, and atomic probe stamps.
+- Native smoke evidence no longer accepts historical cache-hit log lines or an
+  arbitrary candidate stamp; it requires current-run records and verified
+  repair of the selected candidate's exact content-hash stamp.
 - Isolated clean bootstrap: Stage 2 and Stage 3 self-hosting PASS in all three
   bounded cycles. Cycle 1 proved the typed `rt_dict_keys` repair and found the
   generic-close layout bug. Cycle 2 proved that repair and found missing

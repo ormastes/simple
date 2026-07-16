@@ -48,6 +48,9 @@ MCP and LSP launchers select validated cached native artifacts. A missing or
 failed native probe is an explicit failure, never permission to run source,
 debug, or seed fallbacks. Probe stamps are keyed by the validated SHA-256
 identity, and production has no environment switch that bypasses probing.
+Native smoke evidence reads only log records appended by its current invocation
+and corrupts the selected candidate's exact stamp. It passes stale-stamp repair
+only when the current re-probe succeeds and rewrites the expected content hash.
 Windows routes all three launchers through one bounded SHA-256/protocol
 admission helper and preserves argument forwarding.
 
