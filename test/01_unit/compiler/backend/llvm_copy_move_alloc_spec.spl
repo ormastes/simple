@@ -239,6 +239,67 @@ fn build_declared_undefined_copy_module() -> MirModule:
     functions[fn_.symbol] = fn_
     MirModule(name: "test.llvm.declared_undefined_copy", functions: functions, statics: {}, constants: {}, types: {})
 
+fn build_cross_block_string_const_module() -> MirModule:
+    val ptr_type = MirType(kind: MirTypeKind.Opaque("str"))
+    val bool_type = MirType.bool()
+    val fn_ = MirFunction(
+        symbol: SymbolId(id: 6),
+        name: "cross_block_string_const",
+        signature: MirSignature(params: [], return_type: ptr_type, is_variadic: false),
+        locals: [
+            MirLocal(id: LocalId(id: 0), name: Some("value"), type_: ptr_type, kind: LocalKind.Temp, is_ghost: false),
+            MirLocal(id: LocalId(id: 1), name: Some("cond"), type_: bool_type, kind: LocalKind.Temp, is_ghost: false)
+        ],
+        blocks: [
+            MirBlock(
+                id: BlockId.entry(),
+                label: Some("entry"),
+                instructions: [
+                    MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Str("v="), ptr_type), span: nil),
+                    MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Bool(true), bool_type), span: nil)
+                ],
+                terminator: MirTerminator.If(
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                    BlockId(id: 1),
+                    BlockId(id: 2)
+                )
+            ),
+            MirBlock(
+                id: BlockId(id: 1),
+                label: Some("then"),
+                instructions: [],
+                terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+            ),
+            MirBlock(
+                id: BlockId(id: 2),
+                label: Some("else"),
+                instructions: [],
+                terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+            )
+        ],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[fn_.symbol] = fn_
+    MirModule(name: "test.llvm.cross_block_string_const", functions: functions, statics: {}, constants: {}, types: {})
+
 describe "LLVM alloc copy move":
     it "keeps alloc results pointer-typed across copy and move chains":
         val translator = MirToLlvm.create("test.llvm.alloc_copy_move", CodegenTarget.X86_64, nil)
@@ -276,3 +337,12 @@ describe "LLVM alloc copy move":
 
         expect(output).to_contain("%l3 = add i64 undef, 0  ; copy")
         expect(output.contains("add i64 %l2, 0")).to_equal(false)
+
+    it "keeps a fresh slotted string constant pointer-typed":
+        val translator = MirToLlvm.create("test.llvm.cross_block_string_const", CodegenTarget.X86_64, nil)
+        val output = translator.translate_module(build_cross_block_string_const_module())
+
+        expect(output).to_contain("%l2 = alloca ptr")
+        expect(output).to_contain("%l3 = getelementptr inbounds [3 x i8]")
+        expect(output).to_contain("store ptr %l3, ptr %l2")
+        expect(output.contains("inttoptr i64 %l3 to ptr")).to_equal(false)

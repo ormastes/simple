@@ -746,8 +746,14 @@ impl MirTextCodegen for MirToLlvm:
     me translate_const(dest: LocalId, value: MirConstValue, ty: MirType):
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
-        val local_ty = self.get_local_type(dest_id)
-        val llvm_ty = if local_ty != nil and local_ty != "": self.valid_llvm_type(local_ty) else: self.valid_llvm_type(self.llvm_type_text(ty))
+        # SSA rewrites create fresh destinations that have no MirLocal entry.
+        # For those, get_local_type falls back to native int and can poison a
+        # pointer constant before its Store into an alloca slot.  The Const
+        # instruction's own type is authoritative until a local is registered.
+        val llvm_ty = if self.local_types.has(dest_id):
+            self.valid_llvm_type(self.get_local_type(dest_id))
+        else:
+            self.valid_llvm_type(self.llvm_type_text(ty))
         self.local_types[dest_id] = llvm_ty
         self.value_types[dest_name] = llvm_ty
         self.defined_locals[dest_id] = true
