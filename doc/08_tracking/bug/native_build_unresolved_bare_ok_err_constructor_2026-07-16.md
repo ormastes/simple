@@ -99,3 +99,35 @@ the page, or probe CAP without a faulting deref), so `_vfs_boot_init_pure_nvme_f
 (vfs_boot_init.spl:255, called from vfs_boot_init.spl:163->191) returns false and
 the desktop degrades-no-disk and renders. The desktop already has degraded-no-disk
 font/spawn guards, so this is the minimal path to a nonblank PPM.
+
+## ROOT TRACE (2026-07-16 final): SYS_MAP_BAR maps, but the vaddr is unreachable from active CR3
+
+Empirically ruled out source-level guards: NVMe-module `log_info`/`log_raw_println`
+go to klog, NOT serial, so internal markers are invisible — and more importantly
+the fault is at the MMIO **instruction** (mmio_read/write to the BAR vaddr), where
+the kernel's RIP+2 fault-recovery corrupts execution before any Simple-level guard
+(CAP-validity, bar0_virt==0) can run. A guard in `init_from_grant` therefore
+cannot fix this; verified by adding a CAP==0/all-ones presence guard — the fault
+persisted (still ~226 faults inside `init_from_grant`).
+
+Traced to the root: `_handle_map_bar` (syscall 83, `syscall_device.spl:264`) is
+CORRECT — it loops `vmm_map_page(virt, phys, VM_PRESENT|WRITABLE|CACHE_DISABLE|
+NO_EXECUTE)` over the BAR pages and returns `base_virt` (from `_next_mmap_addr`).
+So the BAR IS mapped into a page-table tree. Yet MMIO to that returned vaddr
+page-faults with cr2=0x0 and the fault dumps show `cr3=0x18004000` (the FIXED boot
+page tables). => The pages `vmm_map_page` establishes are **not reachable from the
+active CR3** (the boot tables at 0x18000000/384MB), OR the mapping lands but the TLB
+isn't flushed, OR `_next_mmap_addr` sits in a PML4/PDPT region absent from the boot
+CR3. This is a VMM / page-table-reachability gap in the freestanding native-build,
+NOT an NVMe-driver logic bug and NOT the field/Ok-Err issues.
+
+NEXT (deep VMM kernel work, peer's os lane, fast-iteration host): use the existing
+`_vram_mapping_probe` page-walk technique in
+`examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl` (it walks
+PML4->PDPT->PD from the live CR3 for the framebuffer vaddr) to walk the NVMe BAR
+vaddr returned by SYS_MAP_BAR and confirm whether the PT entry is present under
+cr3=0x18004000. If absent: `vmm_map_page` must map into the ACTIVE boot CR3 (or the
+boot must switch to the vmm-managed CR3) and flush TLB. Fixing SYS_MAP_BAR's
+mapping-reachability unblocks REAL NVMe -> FAT32 mount -> full SimpleOS render with
+font+apps (not just degraded). This is the single remaining blocker for the
+SimpleOS showcase surface.
