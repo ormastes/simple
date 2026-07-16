@@ -68,3 +68,10 @@ Candidate next features, roughly by value:
 
 Each item: implement in pure Simple, spec in interpreter mode, review before
 commit.
+
+## Verification update (2026-07-16)
+
+Wiki embed extraction now skips embeds inside both backtick and tilde fenced
+blocks; a focused regression covers a fenced false positive beside a real
+embed. The Simple test runner is blocked before spec loading by the known
+`rt_cli_arg_count` admission failure.

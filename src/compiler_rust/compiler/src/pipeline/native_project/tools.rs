@@ -2159,6 +2159,13 @@ fn is_windows_system_name(name: &str) -> bool {
             | "remove"
             | "rename"
             | "rewind"
+            // Objective-C runtime / Darwin libc names may appear in
+            // cross-platform unresolved-symbol scans; never synthesize stubs
+            // for these ABI-owned symbols on non-Darwin hosts.
+            | "class_addMethod"
+            | "ivar_getName"
+            | "method_getImplementation"
+            | "protocol_getName"
             | "stat"
             | "strtoll"
             | "_lseeki64"
