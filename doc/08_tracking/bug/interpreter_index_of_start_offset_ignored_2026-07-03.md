@@ -2,6 +2,7 @@
 
 - **Date:** 2026-07-03
 - **Severity:** P2 (silent wrong result; turns scan loops into infinite loops)
+- **Status:** source fixed in the active pure-Simple evaluator; execution pending
 - **Repro:**
 
 ```spl
@@ -27,3 +28,12 @@ this pattern and works compiled).
 
 Use `split("\n")` iteration instead of offset scanning in code that must run
 interpreted (applied in `src/lib/nogc_sync_mut/test_runner/test_runner_single.spl`).
+
+## Resolution (2026-07-16)
+
+The active `_EvalOps` text-method owner now evaluates the second argument,
+propagates evaluation errors, and forwards the integer start offset to the
+host string search. One-argument behavior is unchanged and missing matches
+normalize to `-1`. Focused behavior and source-owner contracts cover offsets
+before, between, and after matches. Executable self-host verification remains
+pending under the current no-build restriction.
