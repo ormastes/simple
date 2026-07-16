@@ -9,6 +9,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-directx-
 powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-directx-env.ps1 --gpu-capture -BuildDir build\gui-web-2d-directx-env-windows-event-gpucap -EvidencePath build\gui-web-2d-directx-env-windows-event-gpucap\evidence.env -TimeoutSecs 160
 powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-directx-env.ps1 --gpu-capture -BuildDir build\gui-web-2d-directx-env-windows-event-strict-gpucap -EvidencePath build\gui-web-2d-directx-env-windows-event-strict-gpucap\evidence.env -TimeoutSecs 160
 powershell -ExecutionPolicy Bypass -File scripts\check\check-gui-web-2d-directx-strict-evidence.ps1 -EvidencePath build\gui-web-2d-directx-env-windows-event-strict-gpucap\evidence.env -RequireGpuCapture
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\ormas\dev\simple\scripts\setup\setup-gui-web-2d-directx-env.ps1 --check -BuildDir build\gui-web-2d-directx-env-out-of-tree-check
 ```
 
 Result:
@@ -81,3 +82,11 @@ capture. It passes on the strict artifact above and fails closed on the older
 `build/gui-web-2d-directx-env-windows-current-gpucap/evidence.env` artifact
 with `gui_web_2d_directx_strict_evidence_reason=browser-events`, because that
 older file predates browser event proof rows.
+
+The DirectX setup wrapper now runs child processes from the repository root.
+The out-of-tree `--check` command above was launched from
+`C:\Users\ormas\AppData\Local\Temp` by absolute script path and still executed
+the native D3D11 readback probe, reporting
+`gui_web_2d_directx_native_readback_status=pass`,
+`gui_web_2d_directx_native_readback_expected_checksum=1023148974`, and
+`gui_web_2d_directx_native_readback_actual_checksum=1023148974`.

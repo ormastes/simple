@@ -197,6 +197,9 @@
   `build/gui-web-2d-directx-env-windows-event-strict-gpucap/dxcap_chrome_d3d11.vsglog`.
   The DirectX and Vulkan browser wrappers now require browser event proof for
   live browser pass status; static pixels and GPU backing no longer pass alone.
+  The DirectX setup wrapper now runs child processes from the repository root
+  and was verified from outside the checkout by absolute script path in
+  `--check` mode with native D3D11 readback still passing.
   `scripts/check/check-gui-web-2d-directx-strict-evidence.ps1` validates saved
   evidence files and fails closed on stale pre-event DirectX artifacts.
 - Windows Vulkan Web/2D evidence is recorded in
@@ -207,6 +210,10 @@
   attempted `KhronosGroup.VulkanSDK` winget install reached the administrator
   UAC step and was canceled by the user, so the Vulkan SDK/RenderDoc bootstrap
   is an environment action rather than a code pass.
+  The Vulkan setup wrapper now resolves the default Simple readback evidence
+  path from the repository root, runs child processes from the repository root,
+  and was verified from outside the checkout by absolute script path with the
+  generated env passing the default strict evidence checker.
   `scripts/check/check-gui-web-2d-vulkan-strict-evidence.ps1` now validates
   saved Vulkan evidence files: partial Simple Vulkan/vulkaninfo/Windows Kit
   `dxc` evidence passes, while `-RequireHostReadiness` fails closed on the

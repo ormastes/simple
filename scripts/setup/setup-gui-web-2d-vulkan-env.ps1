@@ -200,6 +200,7 @@ function Invoke-ProcessBound([string]$exe, [string[]]$argList, [string]$stdoutPa
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $exe
     $psi.Arguments = (($argList | ForEach-Object { Quote-Arg $_ }) -join " ")
+    $psi.WorkingDirectory = $script:RootDirForProcess
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
@@ -247,9 +248,11 @@ if ([string]::IsNullOrWhiteSpace($EvidencePath)) {
     $EvidencePath = Join-Path $BuildDir "evidence.env"
 }
 
-$RootDir = Resolve-Path (Join-Path $PSScriptRoot "..\..")
+$RootDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$script:RootDirForProcess = $RootDir
 $BuildFullDir = if ([System.IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $RootDir $BuildDir }
 $EvidencePath = if ([System.IO.Path]::IsPathRooted($EvidencePath)) { $EvidencePath } else { Join-Path $RootDir $EvidencePath }
+$SimpleReadbackEvidencePath = if ([System.IO.Path]::IsPathRooted($SimpleReadbackEvidencePath)) { $SimpleReadbackEvidencePath } else { Join-Path $RootDir $SimpleReadbackEvidencePath }
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $EvidencePath) | Out-Null
 New-Item -ItemType Directory -Force -Path $BuildFullDir | Out-Null

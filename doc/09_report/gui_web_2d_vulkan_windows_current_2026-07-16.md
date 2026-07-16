@@ -6,6 +6,8 @@ Current Windows PowerShell run:
 powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-vulkan-env.ps1 --check -BuildDir build\gui-web-2d-vulkan-env-windows-current-check -EvidencePath build\gui-web-2d-vulkan-env-windows-current-check\evidence.env -TimeoutSecs 90
 powershell -ExecutionPolicy Bypass -File scripts\check\check-gui-web-2d-vulkan-strict-evidence.ps1 -EvidencePath build\gui-web-2d-vulkan-env-windows-current-check\evidence.env
 powershell -ExecutionPolicy Bypass -File scripts\check\check-gui-web-2d-vulkan-strict-evidence.ps1 -EvidencePath build\gui-web-2d-vulkan-env-windows-current-check\evidence.env -RequireHostReadiness
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\ormas\dev\simple\scripts\setup\setup-gui-web-2d-vulkan-env.ps1 --check -BuildDir build\gui-web-2d-vulkan-env-out-of-tree-check
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-gui-web-2d-vulkan-strict-evidence.ps1 -EvidencePath build\gui-web-2d-vulkan-env-out-of-tree-check\evidence.env
 ```
 
 Result:
@@ -54,3 +56,12 @@ Code change:
   live capture. Its default mode accepts the partial evidence currently present
   on this host; `-RequireHostReadiness` fails closed until `glslangValidator`,
   `spirv-as`, and RenderDoc are installed.
+- The Vulkan setup wrapper now resolves the default Simple readback evidence
+  path from the repository root and runs child processes from the repository
+  root. The out-of-tree `--check` command above was launched from
+  `C:\Users\ormas\AppData\Local\Temp` by absolute script path and still
+  reported `gui_web_2d_vulkan_simple_status=pass`,
+  `gui_web_2d_vulkan_simple_backend_name=vulkan`,
+  `gui_web_2d_vulkan_vulkaninfo_status=pass`, and
+  `gui_web_2d_vulkan_dxc_status=pass`; the generated env passed the default
+  strict checker.
