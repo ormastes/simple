@@ -6,7 +6,7 @@ use crate::cli::examples_safety::{
 use crate::runner::Runner;
 use crate::watcher::watch;
 use simple_common::target::Target;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Create a runner with appropriate GC configuration
 pub fn create_runner(gc_log: bool, gc_off: bool) -> Runner {
@@ -54,6 +54,49 @@ pub fn with_strict_runtime_family_imports<T>(enabled: bool, run: impl FnOnce() -
 /// Run a closure with strict runtime-family imports for baremetal/SimpleOS targets.
 pub fn with_strict_runtime_family_for_target<T>(target: Option<&Target>, run: impl FnOnce() -> T) -> T {
     with_strict_runtime_family_imports(target.is_some_and(|target| target.is_baremetal()), run)
+}
+
+/// Resolve a user-provided source path from common launch locations.
+///
+/// Windows release binaries are often launched from `bin/release` while callers
+/// pass repo-relative paths such as `src/app/main.spl`. Check the current
+/// directory first, then walk executable ancestors so installed and bootstrap
+/// layouts can still run repo-local sources.
+pub fn resolve_existing_input_path(path: &Path) -> Option<PathBuf> {
+    if path.exists() {
+        return Some(path.to_path_buf());
+    }
+
+    if path.is_absolute() {
+        return None;
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let mut ancestor = Some(exe_dir);
+            let mut depth = 0;
+            while let Some(dir) = ancestor {
+                let candidate = dir.join(path);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+                ancestor = dir.parent();
+                depth += 1;
+                if depth >= 8 {
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Ok(home) = std::env::var("SIMPLE_HOME") {
+        let candidate = PathBuf::from(home).join(path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 /// Run a source file (.spl) or compiled binary (.smf)
@@ -278,6 +321,7 @@ pub fn watch_file(path: &Path) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn classify_undefined_function_error() {
@@ -318,6 +362,26 @@ mod tests {
         // Bare expressions still echo their value.
         assert!(should_print_code_result("1+1"));
         assert!(should_print_code_result("main = 1+1"));
+    }
+
+    #[test]
+    fn resolves_repo_relative_input_from_simple_home() {
+        let root = std::env::temp_dir().join(format!("simple-driver-input-path-test-{}", std::process::id()));
+        let source_dir = root.join("src").join("app");
+        std::fs::create_dir_all(&source_dir).expect("create source dir");
+        let source = source_dir.join("probe.spl");
+        std::fs::write(&source, "print 1\n").expect("write source");
+
+        let previous = std::env::var("SIMPLE_HOME").ok();
+        std::env::set_var("SIMPLE_HOME", &root);
+        let resolved = resolve_existing_input_path(&PathBuf::from("src/app/probe.spl"));
+        match previous {
+            Some(value) => std::env::set_var("SIMPLE_HOME", value),
+            None => std::env::remove_var("SIMPLE_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(resolved, Some(source));
     }
 
     #[test]

@@ -103,7 +103,11 @@ pub fn handle_run(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
         eprintln!("error: run requires a file");
         return 1;
     }
-    let path = PathBuf::from(&args[1]);
+    let requested_path = PathBuf::from(&args[1]);
+    let path = match crate::cli::basic::resolve_existing_input_path(&requested_path) {
+        Some(path) => path,
+        None => requested_path,
+    };
     let mut file_args = vec![args[1].clone()];
     if args.len() > 2 {
         file_args.extend(args[2..].iter().cloned());

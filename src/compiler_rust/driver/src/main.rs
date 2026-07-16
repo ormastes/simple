@@ -73,7 +73,8 @@ use simple_common::target::Target;
 use simple_driver::cli::analysis::{run_info, run_query};
 use simple_driver::cli::audit::{run_replay, run_spec_coverage};
 use simple_driver::cli::basic::{
-    create_runner, run_code, run_file_with_args, watch_file, with_strict_runtime_family_for_target,
+    create_runner, resolve_existing_input_path, run_code, run_file_with_args, watch_file,
+    with_strict_runtime_family_for_target,
 };
 use simple_driver::cli::check::{CheckOptions, run_check};
 use simple_driver::cli::code_quality::{run_fmt, run_lint};
@@ -1589,8 +1590,8 @@ fn handle_file_execution(
     wait_for_prefetch(prefetch_handle, metrics);
 
     // Assume it's a file to run
-    let path = PathBuf::from(first);
-    if path.exists() {
+    let requested_path = PathBuf::from(first);
+    if let Some(path) = resolve_existing_input_path(&requested_path) {
         let (target, program_args) = match parse_file_execution_options(args) {
             Ok(parsed) => parsed,
             Err(error) => {
@@ -1611,7 +1612,7 @@ fn handle_file_execution(
         metrics.record(simple_driver::StartupPhase::FileExecution, exec_start.elapsed());
         exit_code
     } else {
-        eprintln!("error: file not found: {}", path.display());
+        eprintln!("error: file not found: {}", requested_path.display());
         eprintln!();
         print_help();
         1

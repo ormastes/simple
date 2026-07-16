@@ -122,12 +122,15 @@
   window, screenshot semantic coverage, in-process drag/focus/minimize/restore
   lifecycle actions, and titlebar button/body button/body input markup
   presence. The PowerShell wrapper is the Windows-native entrypoint for hosts
-  without `/bin/sh`; on the 2026-07-16 Windows host it fails fast with
-  `simple-source-launch-failed` because the available self-hosted `simple.exe`
-  artifacts reject repo-local `.spl` source paths before opening the Win32 MDI
-  probe. Native Windows titlebar button/input/CSS/event verification remains
-  incomplete until that Simple source-launch bootstrap issue is fixed and the
-  wrapper reports `windows_native_mdi_evidence_status=pass`.
+  without `/bin/sh`. On the 2026-07-16 Windows host, the Rust driver
+  source-launch path was fixed to resolve repo-relative `.spl` paths from
+  executable ancestors and `SIMPLE_HOME`; with a freshly built driver copied
+  outside `src/compiler_rust`, the wrapper now moves past
+  `simple-source-launch-failed` and reaches the later `window-not-found`
+  blocker while no proof file is produced. Native Windows titlebar
+  button/input/CSS/event verification remains incomplete until the Win32 MDI
+  probe opens a discoverable window and the wrapper reports
+  `windows_native_mdi_evidence_status=pass`.
  - Pure GUI release/perf evidence now defines a WM/web/native-runtime-free command
    boundary, SMF/dynlib performance contract, and fail-closed probe row. Current
    Linux-host evidence intentionally reports `pass=false` without a real
