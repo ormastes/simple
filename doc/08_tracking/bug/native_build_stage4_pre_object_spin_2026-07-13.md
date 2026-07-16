@@ -514,6 +514,16 @@ symbol inspection still owns `.lib` static/import semantics. Production hosted
 native-all discovery now uses `simple_native_all.lib` on Windows and
 `libsimple_native_all.a` elsewhere.
 
+Pure hosted builds now compile a C owner for `spl_dlopen`, `spl_dlsym`, and
+`spl_dlclose`. It accepts the tagged one-word text ABI through
+`rt_interp_cstr`, uses the native Unix or Windows loader, and is shared by LLVM
+and Cranelift. When `native_all` is present the C object is omitted entirely so
+the Rust archive remains the sole owner; this avoids archive-member duplicate
+definitions. The unused raw-string platform-header helpers are removed. A
+dedicated Stage4 provider archive and measured undefined-symbol contract remain
+open. The Rust seed's Windows close path now follows the same documented
+zero-on-success contract.
+
 ## 2026-07-16 canonical core-C HTTP ownership
 
 The legacy `runtime.c` definition of `rt_http_get` returned a raw C string even

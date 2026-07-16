@@ -287,6 +287,7 @@ void     rt_panic(const char* msg);
 int64_t  rt_string_new(const uint8_t* bytes, uint64_t len);
 int64_t  rt_string_len(int64_t string);
 const uint8_t* rt_string_data(int64_t string);
+const char* rt_interp_cstr(int64_t value);
 int64_t  rt_string_bytes(int64_t string);
 int64_t  rt_string_chars(int64_t string);
 int64_t  rt_string_builder_new(void);
@@ -575,14 +576,9 @@ int         rt_dir_create_all(const char* path);
 int         rt_mkdir_p(const char* path);
 
 /* ===== Dynamic Loading (WFFI) ===== */
-/* Now provided by Rust wffi_native.rs (accepts tagged RuntimeValues).
- * C-only builds can use the static *_c variants in platform headers / runtime.c.
- *
- * void*    spl_dlopen(const char* path);
- * void*    spl_dlsym(void* handle, const char* name);
- * int64_t  spl_dlclose(void* handle);
- * int64_t  spl_wffi_call_i64(void* fptr, int64_t* args, int64_t nargs);
- */
+int64_t spl_dlopen(int64_t path_value);
+int64_t spl_dlsym(int64_t handle, int64_t name_value);
+int64_t spl_dlclose(int64_t handle);
 
 /* ===== JIT Exec Manager (stubs) ===== */
 

@@ -475,26 +475,6 @@ int64_t rt_time_now_unix_micros(void) {
 }
 
 /* ----------------------------------------------------------------
- * Dynamic Loading
- * ---------------------------------------------------------------- */
-
-/* spl_dlopen, spl_dlsym, spl_dlclose are now provided by Rust
- * (wffi_native.rs) which accepts tagged RuntimeValues.
- * These static versions are kept for C-only builds that do not link
- * the Rust runtime. */
-static void* spl_dlopen_c(const char* path) {
-    return dlopen(path, RTLD_NOW);
-}
-
-static void* spl_dlsym_c(void* handle, const char* name) {
-    return dlsym(handle, name);
-}
-
-static int64_t spl_dlclose_c(void* handle) {
-    return (int64_t)dlclose(handle);
-}
-
-/* ----------------------------------------------------------------
  * Process Async
  * ---------------------------------------------------------------- */
 

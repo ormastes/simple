@@ -1,0 +1,31 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "hosted dynamic-loader ownership":
+    it "uses one tagged C owner only when native-all is absent":
+        val owner = rt_file_read_text("src/runtime/runtime_dynload.c")
+        val header = rt_file_read_text("src/runtime/runtime.h")
+        val compiler = rt_file_read_text("src/compiler/70.backend/backend/runtime_compiler.spl")
+        val linker = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl")
+        val seed = rt_file_read_text("src/compiler_rust/runtime/src/value/wsffi_native.rs")
+        val unix = rt_file_read_text("src/runtime/platform/unix_common.h")
+        val windows = rt_file_read_text("src/runtime/platform/platform_win.h")
+
+        for name in ["spl_dlopen", "spl_dlsym", "spl_dlclose"]:
+            expect(owner).to_contain("int64_t " + name + "(")
+            expect(header).to_contain("int64_t " + name + "(")
+        expect(owner).to_contain("rt_interp_cstr(path_value)")
+        expect(owner).to_contain("rt_interp_cstr(name_value)")
+        expect(owner).to_contain("if (!path) return 0;")
+        expect(owner).to_contain("if (!handle || !name) return 0;")
+        expect(owner).to_contain("if (!handle) return 0;")
+        expect(owner).to_contain("RTLD_NOW | RTLD_LOCAL")
+        expect(owner).to_contain("LoadLibraryA(path)")
+        expect(owner).to_contain("FreeLibrary((HMODULE)(intptr_t)handle) ? 0 : -1")
+        expect(compiler).to_contain("include_dynload: bool = true")
+        expect(compiler).to_contain("if include_dynload:\n        sources = sources.push(\"runtime_dynload\")")
+        expect(linker).to_contain("compile_runtime_objects(verbose, options.opt_level, bootstrap_native_all == \"\")")
+        expect(seed).to_contain("if unsafe { FreeLibrary(handle as _) } != 0 { 0 } else { -1 }")
+        expect(unix.contains("spl_dlopen_c")).to_be(false)
+        expect(windows.contains("spl_dlopen_c")).to_be(false)

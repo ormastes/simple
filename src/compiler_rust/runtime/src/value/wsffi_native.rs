@@ -97,7 +97,7 @@ pub extern "C" fn spl_dlclose(handle: i64) -> i64 {
     #[cfg(windows)]
     {
         use windows_sys::Win32::Foundation::FreeLibrary;
-        unsafe { FreeLibrary(handle as _) as i64 }
+        if unsafe { FreeLibrary(handle as _) } != 0 { 0 } else { -1 }
     }
 }
 
