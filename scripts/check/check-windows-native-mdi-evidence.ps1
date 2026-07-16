@@ -240,10 +240,51 @@ try {
 
     $semanticErr = Join-Path $BuildDir "windows_native_mdi_screenshot_semantic.err"
     $win32SemanticErr = Join-Path $BuildDir "win32_native_mdi_screenshot_semantic.err"
-    $code = Invoke-Simple @("run", "scripts/check/ios_mdi_probe_server.spl", "--mode=interpreter", "--validate-screenshot", $ScreenshotPath, "windows_native_mdi_screenshot") $ScreenshotSemanticLog $semanticErr $TimeoutSecs
-    if ($code -ne 0) { Emit-And-Exit "fail" "screenshot-semantic-validation-failed" 1 "true" }
-    $code = Invoke-Simple @("run", "scripts/check/ios_mdi_probe_server.spl", "--mode=interpreter", "--validate-win32-native-mdi-screenshot", $ScreenshotPath) $Win32ScreenshotSemanticLog $win32SemanticErr $TimeoutSecs
-    if ($code -ne 0) { Emit-And-Exit "fail" "win32-screenshot-semantic-validation-failed" 1 "true" }
+    try {
+        $shot = [Drawing.Bitmap]::FromFile((Resolve-Path -LiteralPath $ScreenshotPath).Path)
+        $unique = New-Object 'System.Collections.Generic.HashSet[int]'
+        $titlebarCssPixels = 0
+        $darkPixels = 0
+        $accentPixels = 0
+        for ($y = 0; $y -lt $shot.Height; $y += 1) {
+            for ($x = 0; $x -lt $shot.Width; $x += 1) {
+                $p = $shot.GetPixel($x, $y)
+                $argb = $p.ToArgb()
+                [void]$unique.Add($argb)
+                if (($p.R -eq 0x12 -and $p.G -eq 0x3A -and $p.B -eq 0x34) -or
+                    ($p.R -eq 0x34 -and $p.G -eq 0xD3 -and $p.B -eq 0x99)) {
+                    $titlebarCssPixels += 1
+                }
+                if ($p.R -lt 45 -and $p.G -lt 55 -and $p.B -lt 65) {
+                    $darkPixels += 1
+                }
+                if (($p.R -gt 190 -and $p.G -lt 100 -and $p.B -lt 100) -or
+                    ($p.R -gt 180 -and $p.G -gt 120 -and $p.B -lt 80) -or
+                    ($p.G -gt 140 -and $p.R -lt 100 -and $p.B -lt 120) -or
+                    ($p.B -gt 140 -and $p.R -lt 170 -and $p.G -lt 200)) {
+                    $accentPixels += 1
+                }
+            }
+        }
+        if ($shot.Width -lt 300 -or $shot.Height -lt 300) {
+            "screenshot dimensions invalid: $($shot.Width)x$($shot.Height)" | Set-Content -LiteralPath $semanticErr
+            Emit-And-Exit "fail" "screenshot-semantic-validation-failed" 1 "true"
+        }
+        if ($unique.Count -lt 16) {
+            "screenshot appears blank: unique_colors=$($unique.Count)" | Set-Content -LiteralPath $semanticErr
+            Emit-And-Exit "fail" "screenshot-semantic-validation-failed" 1 "true"
+        }
+        if ($titlebarCssPixels -lt 20 -or $darkPixels -lt 2000 -or $accentPixels -lt 100) {
+            "win32 screenshot semantic failed: titlebar_css_pixels=$titlebarCssPixels dark_pixels=$darkPixels accent_pixels=$accentPixels" | Set-Content -LiteralPath $win32SemanticErr
+            Emit-And-Exit "fail" "win32-screenshot-semantic-validation-failed" 1 "true"
+        }
+        "windows_native_mdi_screenshot=pass width=$($shot.Width) height=$($shot.Height) unique_colors=$($unique.Count)" | Set-Content -LiteralPath $ScreenshotSemanticLog
+        "win32_native_mdi_screenshot_semantic=pass width=$($shot.Width) height=$($shot.Height) titlebar_css_pixels=$titlebarCssPixels dark_pixels=$darkPixels accent_pixels=$accentPixels" | Set-Content -LiteralPath $Win32ScreenshotSemanticLog
+        $shot.Dispose()
+    } catch {
+        $_.Exception.Message | Set-Content -LiteralPath $semanticErr
+        Emit-And-Exit "fail" "screenshot-semantic-validation-failed" 1 "true"
+    }
 
     $titlebarCssPixels = ""
     foreach ($line in Get-Content -LiteralPath $Win32ScreenshotSemanticLog) {

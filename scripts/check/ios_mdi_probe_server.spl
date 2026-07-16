@@ -95,6 +95,21 @@ fn has_command(name: text) -> bool:
     val result = rt_process_run("/bin/sh", ["-c", "command -v " + shell_quote(name) + " >/dev/null 2>&1"])
     result.2 == 0
 
+fn python_can_run(command: text) -> bool:
+    val result = rt_process_run("/bin/sh", ["-c", command + " - <<'PY'\nfrom PIL import Image\nPY"])
+    result.2 == 0
+
+fn python_command() -> text:
+    if python_can_run("C:/dev/tool/Python312/python.exe"):
+        return "C:/dev/tool/Python312/python.exe"
+    if has_command("python") and python_can_run("python"):
+        return "python"
+    if has_command("py") and python_can_run("py -3"):
+        return "py -3"
+    if has_command("python3") and python_can_run("python3"):
+        return "python3"
+    "python3"
+
 fn image_info(path: text) -> [i64]:
     if not has_command("identify"):
         return image_info_python(path)
@@ -105,7 +120,7 @@ fn image_info(path: text) -> [i64]:
     [parse_i64_prefix(parts[0]), parse_i64_prefix(parts[1]), parse_i64_prefix(parts[2])]
 
 fn image_info_python(path: text) -> [i64]:
-    val out = run_shell("python3 - " + shell_quote(path) + " <<'PY'\nfrom PIL import Image\nimport sys\nimg = Image.open(sys.argv[1]).convert('RGBA')\nprint(img.width, img.height, len(set(img.getdata())))\nPY")
+    val out = run_shell(python_command() + " - " + shell_quote(path) + " <<'PY'\nfrom PIL import Image\nimport sys\nimg = Image.open(sys.argv[1]).convert('RGBA')\nprint(img.width, img.height, len(set(img.getdata())))\nPY")
     val parts = out.split(" ")
     if parts.len() < 3:
         die("python image info output malformed: " + out)
@@ -121,7 +136,7 @@ fn pixel_count(path: text, crop: text, expr: text) -> i64:
     parse_i64_prefix(run_shell(command))
 
 fn pixel_count_python(path: text, crop: text, expr: text) -> i64:
-    val command = "python3 - " + shell_quote(path) + " " + shell_quote(crop) + " " + shell_quote(expr) + " <<'PY'\nfrom PIL import Image\nimport re\nimport sys\npath, crop, expr = sys.argv[1], sys.argv[2], sys.argv[3]\nimg = Image.open(path).convert('RGBA')\nif crop:\n    m = re.search(r'-crop\\s+(\\d+)x(\\d+)\\+(\\d+)\\+(\\d+)', crop)\n    if m:\n        w, h, x, y = map(int, m.groups())\n        img = img.crop((x, y, x + w, y + h))\ndef pred(px):\n    pr, pg, pb, pa = px\n    r, g, b, a = pr / 255.0, pg / 255.0, pb / 255.0, pa / 255.0\n    if expr == 'r<0.176&&g<0.216&&b<0.255?1:0': return r < 0.176 and g < 0.216 and b < 0.255\n    if expr == 'r<0.156&&g<0.196&&b<0.235?1:0': return r < 0.156 and g < 0.196 and b < 0.235\n    if expr == 'r<0.137&&g<0.176&&b<0.216?1:0': return r < 0.137 and g < 0.176 and b < 0.216\n    if expr == 'r>0.862&&g>0.862&&b>0.862?1:0': return r > 0.862 and g > 0.862 and b > 0.862\n    if expr == 'r>0.745&&g>0.784&&b>0.823?1:0': return r > 0.745 and g > 0.784 and b > 0.823\n    if expr == 'r>0.705&&g>0.725&&b>0.745?1:0': return r > 0.705 and g > 0.725 and b > 0.745\n    if expr == '(r>0.745&&g<0.392&&b<0.392)||(r>0.705&&g>0.470&&b<0.313)||(g>0.549&&r<0.392&&b<0.470)||(b>0.549&&r<0.666&&g<0.784)?1:0': return (r > 0.745 and g < 0.392 and b < 0.392) or (r > 0.705 and g > 0.470 and b < 0.313) or (g > 0.549 and r < 0.392 and b < 0.470) or (b > 0.549 and r < 0.666 and g < 0.784)\n    if expr == '(b>0.549&&r<0.666&&g<0.784)||(g>0.470&&r<0.666&&b<0.705)||(r>0.686&&g>0.392&&b<0.509)||(r>0.686&&g<0.509&&b<0.588)?1:0': return (b > 0.549 and r < 0.666 and g < 0.784) or (g > 0.470 and r < 0.666 and b < 0.705) or (r > 0.686 and g > 0.392 and b < 0.509) or (r > 0.686 and g < 0.509 and b < 0.588)\n    if expr == '(b>0.588&&r<0.588&&g<0.745)||(g>0.509&&r<0.588&&b<0.666)||(r>0.705&&g>0.431&&b<0.431)||(r>0.705&&g<0.470&&b<0.549)?1:0': return (b > 0.588 and r < 0.588 and g < 0.745) or (g > 0.509 and r < 0.588 and b < 0.666) or (r > 0.705 and g > 0.431 and b < 0.431) or (r > 0.705 and g < 0.470 and b < 0.549)\n    if expr == '((r>0.160&&r<0.250&&g>0.760&&g<0.870&&b>0.540&&b<0.680)||(r>0.045&&r<0.095&&g>0.190&&g<0.265&&b>0.165&&b<0.245))?1:0': return ((r > 0.160 and r < 0.250 and g > 0.760 and g < 0.870 and b > 0.540 and b < 0.680) or (r > 0.045 and r < 0.095 and g > 0.190 and g < 0.265 and b > 0.165 and b < 0.245))\n    raise SystemExit('unsupported-expr:' + expr)\nprint(sum(1 for px in img.getdata() if pred(px)))\nPY"
+    val command = python_command() + " - " + shell_quote(path) + " " + shell_quote(crop) + " " + shell_quote(expr) + " <<'PY'\nfrom PIL import Image\nimport re\nimport sys\npath, crop, expr = sys.argv[1], sys.argv[2], sys.argv[3]\nimg = Image.open(path).convert('RGBA')\nif crop:\n    m = re.search(r'-crop\\s+(\\d+)x(\\d+)\\+(\\d+)\\+(\\d+)', crop)\n    if m:\n        w, h, x, y = map(int, m.groups())\n        img = img.crop((x, y, x + w, y + h))\ndef pred(px):\n    pr, pg, pb, pa = px\n    r, g, b, a = pr / 255.0, pg / 255.0, pb / 255.0, pa / 255.0\n    if expr == 'r<0.176&&g<0.216&&b<0.255?1:0': return r < 0.176 and g < 0.216 and b < 0.255\n    if expr == 'r<0.156&&g<0.196&&b<0.235?1:0': return r < 0.156 and g < 0.196 and b < 0.235\n    if expr == 'r<0.137&&g<0.176&&b<0.216?1:0': return r < 0.137 and g < 0.176 and b < 0.216\n    if expr == 'r>0.862&&g>0.862&&b>0.862?1:0': return r > 0.862 and g > 0.862 and b > 0.862\n    if expr == 'r>0.745&&g>0.784&&b>0.823?1:0': return r > 0.745 and g > 0.784 and b > 0.823\n    if expr == 'r>0.705&&g>0.725&&b>0.745?1:0': return r > 0.705 and g > 0.725 and b > 0.745\n    if expr == '(r>0.745&&g<0.392&&b<0.392)||(r>0.705&&g>0.470&&b<0.313)||(g>0.549&&r<0.392&&b<0.470)||(b>0.549&&r<0.666&&g<0.784)?1:0': return (r > 0.745 and g < 0.392 and b < 0.392) or (r > 0.705 and g > 0.470 and b < 0.313) or (g > 0.549 and r < 0.392 and b < 0.470) or (b > 0.549 and r < 0.666 and g < 0.784)\n    if expr == '(b>0.549&&r<0.666&&g<0.784)||(g>0.470&&r<0.666&&b<0.705)||(r>0.686&&g>0.392&&b<0.509)||(r>0.686&&g<0.509&&b<0.588)?1:0': return (b > 0.549 and r < 0.666 and g < 0.784) or (g > 0.470 and r < 0.666 and b < 0.705) or (r > 0.686 and g > 0.392 and b < 0.509) or (r > 0.686 and g < 0.509 and b < 0.588)\n    if expr == '(b>0.588&&r<0.588&&g<0.745)||(g>0.509&&r<0.588&&b<0.666)||(r>0.705&&g>0.431&&b<0.431)||(r>0.705&&g<0.470&&b<0.549)?1:0': return (b > 0.588 and r < 0.588 and g < 0.745) or (g > 0.509 and r < 0.588 and b < 0.666) or (r > 0.705 and g > 0.431 and b < 0.431) or (r > 0.705 and g < 0.470 and b < 0.549)\n    if expr == '((r>0.160&&r<0.250&&g>0.760&&g<0.870&&b>0.540&&b<0.680)||(r>0.045&&r<0.095&&g>0.190&&g<0.265&&b>0.165&&b<0.245))?1:0': return ((r > 0.160 and r < 0.250 and g > 0.760 and g < 0.870 and b > 0.540 and b < 0.680) or (r > 0.045 and r < 0.095 and g > 0.190 and g < 0.265 and b > 0.165 and b < 0.245))\n    raise SystemExit('unsupported-expr:' + expr)\nprint(sum(1 for px in img.getdata() if pred(px)))\nPY"
     parse_i64_prefix(run_shell(command))
 
 fn dark_row_count(path: text, crop: text, height: i64, expr: text, threshold_percent: i64) -> i64:
@@ -134,7 +149,7 @@ fn dark_row_count(path: text, crop: text, height: i64, expr: text, threshold_per
     parse_i64_prefix(run_shell(command))
 
 fn dark_row_count_python(path: text, crop: text, expr: text, threshold_percent: i64) -> i64:
-    val command = "python3 - " + shell_quote(path) + " " + shell_quote(crop) + " " + shell_quote(expr) + " " + threshold_percent.to_string() + " <<'PY'\nfrom PIL import Image\nimport re\nimport sys\npath, crop, expr, threshold = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]) / 100.0\nimg = Image.open(path).convert('RGBA')\nif crop:\n    m = re.search(r'-crop\\s+(\\d+)x(\\d+)\\+(\\d+)\\+(\\d+)', crop)\n    if m:\n        w, h, x, y = map(int, m.groups())\n        img = img.crop((x, y, x + w, y + h))\ndef pred(px):\n    pr, pg, pb, pa = px\n    r, g, b = pr / 255.0, pg / 255.0, pb / 255.0\n    if expr == 'r<0.176&&g<0.216&&b<0.255?1:0': return r < 0.176 and g < 0.216 and b < 0.255\n    if expr == 'r<0.137&&g<0.176&&b<0.216?1:0': return r < 0.137 and g < 0.176 and b < 0.216\n    raise SystemExit('unsupported-row-expr:' + expr)\nrows = 0\nwidth, height = img.size\npixels = img.load()\nfor y in range(height):\n    row_count = 0\n    for x in range(width):\n        if pred(pixels[x, y]):\n            row_count += 1\n    if width > 0 and (row_count / width) > threshold:\n        rows += 1\nprint(rows)\nPY"
+    val command = python_command() + " - " + shell_quote(path) + " " + shell_quote(crop) + " " + shell_quote(expr) + " " + threshold_percent.to_string() + " <<'PY'\nfrom PIL import Image\nimport re\nimport sys\npath, crop, expr, threshold = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]) / 100.0\nimg = Image.open(path).convert('RGBA')\nif crop:\n    m = re.search(r'-crop\\s+(\\d+)x(\\d+)\\+(\\d+)\\+(\\d+)', crop)\n    if m:\n        w, h, x, y = map(int, m.groups())\n        img = img.crop((x, y, x + w, y + h))\ndef pred(px):\n    pr, pg, pb, pa = px\n    r, g, b = pr / 255.0, pg / 255.0, pb / 255.0\n    if expr == 'r<0.176&&g<0.216&&b<0.255?1:0': return r < 0.176 and g < 0.216 and b < 0.255\n    if expr == 'r<0.137&&g<0.176&&b<0.216?1:0': return r < 0.137 and g < 0.176 and b < 0.216\n    raise SystemExit('unsupported-row-expr:' + expr)\nrows = 0\nwidth, height = img.size\npixels = img.load()\nfor y in range(height):\n    row_count = 0\n    for x in range(width):\n        if pred(pixels[x, y]):\n            row_count += 1\n    if width > 0 and (row_count / width) > threshold:\n        rows += 1\nprint(rows)\nPY"
     parse_i64_prefix(run_shell(command))
 
 fn validate_screenshot(path: text, label: text) -> i32:

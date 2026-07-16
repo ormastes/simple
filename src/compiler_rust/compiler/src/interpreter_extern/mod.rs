@@ -118,6 +118,7 @@ pub mod io_driver;
 pub mod qmp_socket;
 pub mod host_wm_bridge;
 pub mod host_gpu_lane;
+pub mod win32_hosted;
 pub mod enum_sffi;
 
 // Import parent interpreter types
@@ -1147,6 +1148,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_fd_close", qmp_socket::rt_fd_close);
     insert_simple!("rt_fd_read_until", qmp_socket::rt_fd_read_until);
     insert_simple!("rt_fd_write", qmp_socket::rt_fd_write);
+    insert_simple!("rt_win32_window_new", win32_hosted::rt_win32_window_new);
+    insert_simple!("rt_win32_window_close", win32_hosted::rt_win32_window_close);
+    insert_simple!("rt_win32_dib_create", win32_hosted::rt_win32_dib_create);
+    insert_simple!("rt_win32_dib_fill_rect", win32_hosted::rt_win32_dib_fill_rect);
+    insert_simple!("rt_win32_dib_present", win32_hosted::rt_win32_dib_present);
+    insert_simple!("rt_win32_dib_free", win32_hosted::rt_win32_dib_free);
+    insert_simple!("rt_win32_dib_read_pixel", win32_hosted::rt_win32_dib_read_pixel);
+    insert_simple!("rt_win32_message_pump", win32_hosted::rt_win32_message_pump);
     insert_simple!("rt_file_append_text", file_io::rt_file_append_text);
     insert_simple!("rt_file_atomic_write", file_io::rt_file_atomic_write);
     insert_simple!("rt_file_canonicalize", file_io::rt_file_canonicalize);

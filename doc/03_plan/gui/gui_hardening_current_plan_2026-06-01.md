@@ -124,13 +124,14 @@
   presence. The PowerShell wrapper is the Windows-native entrypoint for hosts
   without `/bin/sh`. On the 2026-07-16 Windows host, the Rust driver
   source-launch path was fixed to resolve repo-relative `.spl` paths from
-  executable ancestors and `SIMPLE_HOME`; with a freshly built driver copied
-  outside `src/compiler_rust`, the wrapper now moves past
-  `simple-source-launch-failed` and reaches the later `window-not-found`
-  blocker while no proof file is produced. Native Windows titlebar
-  button/input/CSS/event verification remains incomplete until the Win32 MDI
-  probe opens a discoverable window and the wrapper reports
-  `windows_native_mdi_evidence_status=pass`.
+  executable ancestors and `SIMPLE_HOME`, and the interpreter now exposes the
+  Win32 hosted DIB/window externs needed by the probe. With a freshly built
+  driver copied outside `src/compiler_rust`, the wrapper reports
+  `windows_native_mdi_evidence_status=pass`,
+  `windows_native_mdi_evidence_window_found=true`,
+  `windows_native_mdi_evidence_titlebar_css_pixels=6784`, and
+  `windows_native_mdi_evidence_rendered_titlebar_css_pixels=6784` in
+  `build/tmp/windows_native_mdi_evidence_ps_semantic.md`.
  - Pure GUI release/perf evidence now defines a WM/web/native-runtime-free command
    boundary, SMF/dynlib performance contract, and fail-closed probe row. Current
    Linux-host evidence intentionally reports `pass=false` without a real
