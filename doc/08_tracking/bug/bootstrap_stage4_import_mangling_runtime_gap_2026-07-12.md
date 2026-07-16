@@ -12,9 +12,10 @@ Two independent owner classes remain:
 
 The POSIX/macOS/BSD core-C owner now provides `rt_process_run_timeout` with the
 canonical tagged tuple ABI, concurrent stdout/stderr capture, monotonic timeout,
-and process-group cleanup. Windows remains explicitly unsupported until its
-capture path owns a kill-on-close Job Object. Strict LLVM/Cranelift execution
-of the new provider is pending, so this closes source ownership only.
+and process-group cleanup. The Windows source path uses restricted inherited
+stdio handles, suspended launch, and a kill-on-close Job Object for descendant
+cleanup. Windows compile/native proof and strict LLVM/Cranelift execution remain
+pending, so this closes source ownership only; POSIX parity is not Windows proof.
 
 The duplicated `ffi_gen.specs/process_mod.spl` timeout entries and
 `sffi_gen.templates/simple_sffi.h` still describe a legacy generated string ABI

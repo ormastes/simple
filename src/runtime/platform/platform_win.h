@@ -717,34 +717,46 @@ static bool win_cmd_append_arg(char* out, size_t cap, size_t* pos, const char* a
     return win_cmd_append_char(out, cap, pos, '"');
 }
 
-int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count) {
-    if (!cmd) return -1;
+char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t arg_count) {
+    if (!cmd || arg_count < 0) return NULL;
 
-    size_t total = (strlen(cmd) * 2) + 4;
+    size_t cmd_len = strlen(cmd);
+    if (cmd_len > (SIZE_MAX - 4) / 2) return NULL;
+    size_t total = (cmd_len * 2) + 4;
     for (int64_t i = 0; i < arg_count; i++) {
         const char* a = args ? args[i] : "";
-        total += (strlen(a ? a : "") * 2) + 4;
+        size_t arg_len = strlen(a ? a : "");
+        if (arg_len > (SIZE_MAX - 4) / 2) return NULL;
+        size_t addition = (arg_len * 2) + 4;
+        if (total > SIZE_MAX - addition) return NULL;
+        total += addition;
     }
 
     char* cmdline = (char*)malloc(total);
-    if (!cmdline) return -1;
+    if (!cmdline) return NULL;
     cmdline[0] = '\0';
     size_t pos = 0;
 
     if (!win_cmd_append_arg(cmdline, total, &pos, cmd)) {
         free(cmdline);
-        return -1;
+        return NULL;
     }
     for (int64_t i = 0; i < arg_count; i++) {
         if (!win_cmd_append_char(cmdline, total, &pos, ' ')) {
             free(cmdline);
-            return -1;
+            return NULL;
         }
         if (!win_cmd_append_arg(cmdline, total, &pos, args ? args[i] : "")) {
             free(cmdline);
-            return -1;
+            return NULL;
         }
     }
+    return cmdline;
+}
+
+int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count) {
+    char* cmdline = rt_windows_build_command_line(cmd, args, arg_count);
+    if (!cmdline) return -1;
 
     STARTUPINFOA si = {0};
     PROCESS_INFORMATION pi = {0};
