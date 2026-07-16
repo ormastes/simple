@@ -27,7 +27,7 @@ fn parse(source: text) -> Result<SdnValue, text>:
     # top-level separator so collection entries like `items = [1, 2, 3]` (which
     # contain no top-level `:`) are still parsed as a mapping, not a bare string.
     if _sdn_top_sep(trimmed) >= 0:
-        return Ok(_sdn_parse_mapping(trimmed))
+        return _sdn_parse_mapping(trimmed)
     # Integer
     if _looks_like_int(trimmed):
         return Ok(SdnValue.Int(trimmed.to_int()))
@@ -111,10 +111,11 @@ fn _sdn_split_lines(s: text) -> [text]:
     out.push(cur)
     out
 
-fn _sdn_parse_mapping(source: text) -> SdnValue:
+fn _sdn_parse_mapping(source: text) -> Result<SdnValue, text>:
     val lines = _sdn_split_lines(source)
-    val result = _sdn_parse_block(lines, 0, 0)
-    result.0
+    match _sdn_parse_block(lines, 0, 0):
+        case Ok(result): Ok(result.0)
+        case Err(e): Err(e)
 
 # Count leading-space indentation of a line.
 fn _sdn_indent(line: text) -> i64:
@@ -132,7 +133,7 @@ fn _sdn_indent(line: text) -> i64:
 # >= `indent` into a Dict. A key with an empty value followed by more-indented
 # lines nests those lines as its value (indent-based hierarchy). Returns the
 # Dict and the index of the first line NOT consumed by this block.
-fn _sdn_parse_block(lines: [text], start: i64, indent: i64) -> (SdnValue, i64):
+fn _sdn_parse_block(lines: [text], start: i64, indent: i64) -> Result<(SdnValue, i64), text>:
     var m = {}
     var i = start
     var running = true
@@ -154,17 +155,74 @@ fn _sdn_parse_block(lines: [text], start: i64, indent: i64) -> (SdnValue, i64):
                     val valstr = t.slice(ci + 1, t.len()).trim()
                     if valstr == "":
                         # Nested block: consume the deeper-indented following lines.
-                        val child = _sdn_parse_block(lines, i + 1, ind + 1)
-                        m[key] = child.0
-                        i = child.1
+                        match _sdn_parse_block(lines, i + 1, ind + 1):
+                            case Ok(child):
+                                m[key] = child.0
+                                i = child.1
+                            case Err(e):
+                                return Err(e)
                     else:
-                        match parse(valstr):
+                        var value_source = valstr
+                        if valstr.starts_with("[") or valstr.starts_with("{"):
+                            match _sdn_collection_depth(value_source):
+                                case Err(e):
+                                    return Err(e)
+                                case Ok(initial_depth):
+                                    var depth = initial_depth
+                                    while depth > 0:
+                                        i = i + 1
+                                        if i >= lines.len():
+                                            return Err("unterminated collection for key '" + key + "'")
+                                        value_source = value_source + "\n" + lines[i].trim()
+                                        match _sdn_collection_depth(value_source):
+                                            case Err(e):
+                                                return Err(e)
+                                            case Ok(next_depth):
+                                                depth = next_depth
+                        match parse(value_source):
                             case Ok(v):
                                 m[key] = v
-                            case Err(_):
-                                m[key] = SdnValue.String(valstr)
+                            case Err(e):
+                                return Err(e)
                         i = i + 1
-    (SdnValue.Dict(m), i)
+    Ok((SdnValue.Dict(m), i))
+
+# Return the number of unclosed collection delimiters, rejecting mismatched
+# closers. Delimiters inside quoted strings, including after escaped quotes,
+# are data rather than structure.
+fn _sdn_collection_depth(s: text) -> Result<i64, text>:
+    val b = s.bytes()
+    var stack: [i64] = []
+    var in_str = false
+    var escaped = false
+    var i = 0
+    while i < b.len():
+        val c = b[i].to_i64()
+        if in_str:
+            if escaped:
+                escaped = false
+            else:
+                if c == 92:       # \
+                    escaped = true
+                else:
+                    if c == 34:   # "
+                        in_str = false
+        else:
+            if c == 34:
+                in_str = true
+            else:
+                if c == 123 or c == 91:       # { or [
+                    stack.push(c)
+                else:
+                    if c == 125 or c == 93:   # } or ]
+                        if stack.len() == 0:
+                            return Err("unexpected collection closer")
+                        val opener = stack[stack.len() - 1]
+                        if (c == 125 and opener != 123) or (c == 93 and opener != 91):
+                            return Err("mismatched collection closer")
+                        stack.pop()
+        i = i + 1
+    Ok(stack.len())
 
 # Index of the first top-level `=` or `:` separator, skipping any that sit
 # inside an inline {}/[] collection or a "" string. Returns -1 if none.
@@ -173,13 +231,23 @@ fn _sdn_top_sep(s: text) -> i64:
     val b = s.bytes()
     var depth = 0
     var in_str = false
+    var escaped = false
     var i = 0
     while i < b.len():
         val c = b[i].to_i64()
-        if c == 34:           # "
-            in_str = not in_str
+        if in_str:
+            if escaped:
+                escaped = false
+            else:
+                if c == 92:
+                    escaped = true
+                else:
+                    if c == 34:
+                        in_str = false
         else:
-            if not in_str:
+            if c == 34:
+                in_str = true
+            else:
                 if c == 123 or c == 91:        # { or [
                     depth = depth + 1
                 else:
@@ -191,7 +259,9 @@ fn _sdn_top_sep(s: text) -> i64:
         i = i + 1
     -1
 
-# Split on top-level commas, ignoring commas inside nested {}/[] or "".
+# Split on top-level commas or newlines, ignoring separators inside nested
+# {}/[] or "". The newline form supports SDN arrays whose entries are written
+# one per line without commas.
 # Returns trimmed, non-empty parts.
 # ponytail: ASCII structural chars only.
 fn _sdn_split_top_commas(s: text) -> [text]:
@@ -199,22 +269,34 @@ fn _sdn_split_top_commas(s: text) -> [text]:
     val b = s.bytes()
     var depth = 0
     var in_str = false
+    var escaped = false
     var start = 0
     var i = 0
     while i < b.len():
         val c = b[i].to_i64()
-        if c == 34:           # "
-            in_str = not in_str
+        if in_str:
+            if escaped:
+                escaped = false
+            else:
+                if c == 92:
+                    escaped = true
+                else:
+                    if c == 34:
+                        in_str = false
         else:
-            if not in_str:
+            if c == 34:
+                in_str = true
+            else:
                 if c == 123 or c == 91:
                     depth = depth + 1
                 else:
                     if c == 125 or c == 93:
                         depth = depth - 1
                     else:
-                        if depth == 0 and c == 44:  # ,
-                            out.push(s.slice(start, i).trim())
+                        if depth == 0 and (c == 44 or c == 10):  # , or newline
+                            val part = s.slice(start, i).trim()
+                            if part != "":
+                                out.push(part)
                             start = i + 1
         i = i + 1
     val last = s.slice(start, s.len()).trim()

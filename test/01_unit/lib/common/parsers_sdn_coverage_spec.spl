@@ -458,6 +458,58 @@ describe "SDN Parser":
                 case Err(e):
                     expect("parse failed").to_equal("should not fail")
 
+        it "parses multiline nested array entries without commas":
+            val source = "version: 9\nentries: [\n  { source: \"a.spl\", fingerprint: { hash: \"abc\", size: 1 }, dependencies: [\"d.spl\"], outputs: [\"a.o\"] }\n  { source: \"b.spl\", fingerprint: { hash: \"def\", size: 2 }, dependencies: [], outputs: [\"b.o\"] }\n]\nstatus: ready"
+            match parse(source):
+                case Ok(v):
+                    match v.get("entries"):
+                        case Some(entries):
+                            expect(entries.len()).to_equal(2)
+                        case None:
+                            expect("entries").to_equal("present")
+                    match v.get_path("entries.0.fingerprint.hash"):
+                        case Some(SdnValue.String(hash)):
+                            expect(hash).to_equal("abc")
+                        case _:
+                            expect("first hash").to_equal("present")
+                    match v.get_path("entries.1.outputs.0"):
+                        case Some(SdnValue.String(output)):
+                            expect(output).to_equal("b.o")
+                        case _:
+                            expect("second output").to_equal("present")
+                    match v.get("status"):
+                        case Some(SdnValue.String(status)):
+                            expect(status).to_equal("ready")
+                        case _:
+                            expect("following sibling").to_equal("preserved")
+                case Err(e):
+                    expect("parse failed").to_equal("should not fail")
+
+        it "ignores escaped quotes and delimiters while collecting multiline values":
+            val source = "entries: [\n  { source: \"a\\\" ] } still quoted\", outputs: [\"a.o\"] }\n]\nstatus: kept"
+            match parse(source):
+                case Ok(v):
+                    match v.get("entries"):
+                        case Some(entries):
+                            expect(entries.len()).to_equal(1)
+                        case None:
+                            expect("entries").to_equal("present")
+                    match v.get("status"):
+                        case Some(SdnValue.String(status)):
+                            expect(status).to_equal("kept")
+                        case _:
+                            expect("following sibling").to_equal("preserved")
+                case Err(e):
+                    expect("parse failed").to_equal("should not fail")
+
+        it "rejects an unterminated multiline mapping value":
+            val source = "entries: [\n  { source: \"a.spl\" }\nstatus: must_not_escape"
+            match parse(source):
+                case Ok(_):
+                    expect("unterminated collection").to_equal("rejected")
+                case Err(e):
+                    expect(e).to_contain("unterminated collection")
+
     context "parse_untrusted":
         it "parses with size limits":
             val result = parse_untrusted("name: Alice")

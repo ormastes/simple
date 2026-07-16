@@ -1,7 +1,7 @@
 # Bug: native-build BuildCache loses all entries on cross-process reload
 
-**Status (2026-07-16):** Open. Found while regression-testing
-`native_build_cache_omits_compiler_identity_2026-07-13.md`.
+**Status (2026-07-16):** Source-fixed; executable two-build proof pending. Found
+while regression-testing `native_build_cache_omits_compiler_identity_2026-07-13.md`.
 
 - **Severity:** P2 (perf, silent: the incremental native object cache NEVER
   hits across processes in the live-interpreted pipeline — every native-build
@@ -52,3 +52,17 @@ Deduplicate `BuildCache` (make `driver/incremental.spl` re-export the
 SDN entry parse (e.g. one entry per line with a flat key=value encoding).
 Regression gate: build twice with the same compiler binary and require
 `[NATIVE] cache: 1 hits, 0 misses` on the second run.
+
+## Source fix
+
+- The unused legacy driver cache is now `LegacyBuildCache`, leaving
+  `driver_build.BuildCache` as the only `BuildCache` type identity.
+- The common SDN mapping parser now collects balanced multiline arrays and
+  dictionaries, including the cache writer's newline-separated array entries,
+  before parsing them. Delimiters inside escaped quoted text are ignored;
+  mismatched or unterminated mapping collections return `Err`.
+- Focused parser coverage exercises two nested cache-shaped entries, escaped
+  delimiters, the following sibling key, and the unterminated-input failure.
+
+Runtime/native execution was not authorized in this session, so the two-build
+cache-hit gate above remains required before closing this bug.
