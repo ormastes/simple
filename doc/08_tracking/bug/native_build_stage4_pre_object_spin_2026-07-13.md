@@ -436,3 +436,20 @@ derivation is backend-neutral. Unique production owner selection, capability
 archive wiring, the separate link-profile fingerprint, and fresh strict/native
 proof remain open; this change does not infer a manifest from the historical
 207-symbol grouped baseline.
+
+## 2026-07-16 pure-Simple unique-owner selection
+
+The shared Stage4 closure module now validates candidate archive symbol scans
+without linking them. It rejects empty or mismatched inventories, archives with
+no global definitions, repeated definitions within one archive, every
+cross-archive definition overlap, and requested symbols without exactly one
+owner. Selected archive indexes remain in declared order, duplicate requests
+are harmless, and Mach-O runtime prefixes normalize through the same closure
+rule. The focused contract includes the current core-C/memtrack overlap as a
+rejection case.
+
+Production inventory discovery and archive localization remain open, so the
+selector is intentionally not wired to raw compiler/provider archives. HTTP ABI
+ownership, the remaining provider families, platform-specific constructor
+gates, final link-profile fingerprinting, and strict native proof are still
+required before Stage4 composition can be enabled.

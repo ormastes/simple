@@ -50,3 +50,66 @@ pub fn stage4_requested_from_nm_output(nm_output: text, macho_prefixes: bool) ->
             requested = requested.push(symbol)
     requested.sort()
     requested
+
+fn stage4_global_definitions_from_nm_output(nm_output: text, macho_prefixes: bool, owner: text) -> Result<[text], text>:
+    var seen: Dict<text, bool> = {}
+    var definitions: [text] = []
+    for line in nm_output.split("\n"):
+        val parts = line.split_whitespace()
+        if parts.len() < 3:
+            continue
+        val type_index = parts.len() - 2
+        val type_code = parts[type_index]
+        if type_code == "U" or not stage4_nm_has_address(parts, type_index):
+            continue
+        val symbol = stage4_canonical_host_symbol(parts[parts.len() - 1], macho_prefixes)
+        if seen.has(symbol):
+            return Err("Stage4 archive '" + owner + "' repeats global definition '" + symbol + "'")
+        seen[symbol] = true
+        definitions = definitions.push(symbol)
+    if definitions.len() == 0:
+        return Err("Stage4 archive '" + owner + "' has no global definitions")
+    definitions.sort()
+    Ok(definitions)
+
+pub fn stage4_select_requested_archive_indices(requested: [text], archive_labels: [text], archive_nm_outputs: [text], macho_prefixes: bool) -> Result<[i64], text>:
+    """Validate unique symbol ownership and return selected archives in declared order."""
+    if requested.len() == 0:
+        return Err("Stage4 requested symbol closure is empty")
+    if archive_labels.len() == 0 or archive_labels.len() != archive_nm_outputs.len():
+        return Err("Stage4 archive labels and symbol scans must be non-empty and have equal length")
+
+    var owner_by_symbol: Dict<text, i64> = {}
+    var archive_i = 0
+    while archive_i < archive_labels.len():
+        val label = archive_labels[archive_i]
+        if label == "":
+            return Err("Stage4 archive label is empty")
+        val definitions_result = stage4_global_definitions_from_nm_output(archive_nm_outputs[archive_i], macho_prefixes, label)
+        val definitions = match definitions_result:
+            case Ok(symbols): symbols
+            case Err(err): return Err(err)
+        for symbol in definitions:
+            if owner_by_symbol.has(symbol):
+                val previous_i = owner_by_symbol[symbol]
+                return Err("Stage4 global definition '" + symbol + "' overlaps archives '" + archive_labels[previous_i] + "' and '" + label + "'")
+            owner_by_symbol[symbol] = archive_i
+        archive_i = archive_i + 1
+
+    var requested_seen: Dict<text, bool> = {}
+    var selected_by_index: Dict<i64, bool> = {}
+    for symbol in requested:
+        if requested_seen.has(symbol):
+            continue
+        requested_seen[symbol] = true
+        if not owner_by_symbol.has(symbol):
+            return Err("Stage4 requested symbol '" + symbol + "' has no archive owner")
+        selected_by_index[owner_by_symbol[symbol]] = true
+
+    var selected: [i64] = []
+    archive_i = 0
+    while archive_i < archive_labels.len():
+        if selected_by_index.has(archive_i):
+            selected = selected.push(archive_i)
+        archive_i = archive_i + 1
+    Ok(selected)
