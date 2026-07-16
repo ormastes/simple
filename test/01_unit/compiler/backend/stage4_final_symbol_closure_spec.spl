@@ -1,4 +1,4 @@
-use compiler.backend.backend.stage4_symbol_closure.{stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
 use std.spec.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -293,9 +293,10 @@ not-an-address W rt_malformed
                 "/stage4/libsimple_stage4_memtrack.a"
             ]
         )
-        val windows = stage4_validate_candidate_archive_inputs(
+        val windows = stage4_validate_candidate_archive_inputs_for_platform(
             ["compiler", "font"],
-            ["C:\\stage4\\simple_compiler_backfill.LIB", "C:\\stage4\\simple_stage4_font.lib"]
+            ["C:\\stage4\\simple_compiler_backfill.LIB", "C:\\stage4\\simple_stage4_font.lib"],
+            true
         )
         expect(unix.is_ok()).to_be(true)
         expect(windows.is_ok()).to_be(true)
@@ -313,13 +314,35 @@ not-an-address W rt_malformed
             ["compiler", "compiler-copy"],
             ["/stage4/libsimple_compiler_backfill.a", "/stage4/libsimple_compiler_backfill.a"]
         )
-        val windows_duplicate_path = stage4_validate_candidate_archive_inputs(
+        val windows_duplicate_path = stage4_validate_candidate_archive_inputs_for_platform(
             ["compiler", "compiler-copy"],
-            ["C:\\Stage4\\Provider.LIB", "c:/stage4/provider.lib"]
+            ["C:\\Stage4\\Provider.LIB", "c:/stage4/provider.lib"],
+            true
         )
-        val windows_duplicate_a_path = stage4_validate_candidate_archive_inputs(
+        val windows_duplicate_a_path = stage4_validate_candidate_archive_inputs_for_platform(
             ["compiler", "compiler-copy"],
-            ["C:\\Stage4\\Provider.A", "c:/stage4/provider.a"]
+            ["C:\\Stage4\\Provider.A", "c:/stage4/provider.a"],
+            true
+        )
+        val windows_relative_duplicate_a_path = stage4_validate_candidate_archive_inputs_for_platform(
+            ["compiler", "compiler-copy"],
+            ["build/Provider.a", "build/provider.a"],
+            true
+        )
+        val unix_relative_case_distinct_a_path = stage4_validate_candidate_archive_inputs_for_platform(
+            ["compiler", "compiler-copy"],
+            ["build/Provider.a", "build/provider.a"],
+            false
+        )
+        val windows_relative_duplicate_lib_path = stage4_validate_candidate_archive_inputs_for_platform(
+            ["compiler", "compiler-copy"],
+            ["build/Provider.lib", "build/provider.lib"],
+            true
+        )
+        val unix_relative_case_distinct_lib_path = stage4_validate_candidate_archive_inputs_for_platform(
+            ["compiler", "compiler-copy"],
+            ["build/Provider.lib", "build/provider.lib"],
+            false
         )
         val native_all = stage4_validate_candidate_archive_inputs(
             ["runtime"], ["/stage4/LIBSIMPLE_NATIVE_ALL.A"]
@@ -327,17 +350,17 @@ not-an-address W rt_malformed
         val broad_core = stage4_validate_candidate_archive_inputs(
             ["core-c"], ["/stage4/libsimple_runtime.a"]
         )
-        val windows_native_all = stage4_validate_candidate_archive_inputs(
-            ["runtime"], ["C:\\stage4\\SIMPLE_NATIVE_ALL.LIB"]
+        val windows_native_all = stage4_validate_candidate_archive_inputs_for_platform(
+            ["runtime"], ["C:\\stage4\\SIMPLE_NATIVE_ALL.LIB"], true
         )
-        val windows_broad_core = stage4_validate_candidate_archive_inputs(
-            ["core-c"], ["C:\\stage4\\simple_runtime.lib"]
+        val windows_broad_core = stage4_validate_candidate_archive_inputs_for_platform(
+            ["core-c"], ["C:\\stage4\\simple_runtime.lib"], true
         )
         val shared_object = stage4_validate_candidate_archive_inputs(
             ["provider"], ["/stage4/libprovider.so"]
         )
-        val import_archive = stage4_validate_candidate_archive_inputs(
-            ["provider"], ["C:\\stage4\\provider.dll.a"]
+        val import_archive = stage4_validate_candidate_archive_inputs_for_platform(
+            ["provider"], ["C:\\stage4\\provider.dll.a"], true
         )
         expect(empty.is_err()).to_be(true)
         expect(mismatched.is_err()).to_be(true)
@@ -345,6 +368,10 @@ not-an-address W rt_malformed
         expect(duplicate_path.is_err()).to_be(true)
         expect(windows_duplicate_path.is_err()).to_be(true)
         expect(windows_duplicate_a_path.is_err()).to_be(true)
+        expect(windows_relative_duplicate_a_path.is_err()).to_be(true)
+        expect(unix_relative_case_distinct_a_path.is_ok()).to_be(true)
+        expect(windows_relative_duplicate_lib_path.is_err()).to_be(true)
+        expect(unix_relative_case_distinct_lib_path.is_ok()).to_be(true)
         expect(native_all.is_err()).to_be(true)
         expect(broad_core.is_err()).to_be(true)
         expect(windows_native_all.is_err()).to_be(true)
@@ -363,7 +390,7 @@ not-an-address W rt_malformed
         expect(inventory_pos).to_be_greater_than(-1)
         expect(config_pos).to_be_greater_than(inventory_pos)
         val inventory_source = source.substring(inventory_pos, config_pos)
-        val validate_pos = inventory_source.find("stage4_validate_candidate_archive_inputs(")
+        val validate_pos = inventory_source.find("stage4_validate_candidate_archive_inputs_for_platform(")
         val exists_pos = inventory_source.find("rt_file_exists(")
         val resolver_pos = inventory_source.find("find_nm_portable()")
         val section_resolver_pos = inventory_source.find("find_objdump_portable()")
@@ -381,6 +408,7 @@ not-an-address W rt_malformed
         expect(inventory_source).to_contain("section scan failed")
         expect(inventory_source).to_contain("section scan was empty")
         expect(inventory_source).to_contain("retained constructor/destructor sections")
+        expect(inventory_source).to_contain("stage4_validate_candidate_archive_inputs_for_platform(labels, paths, host_os() == \"windows\")")
         val occurrences = source.split("llvm_stage4_candidate_archive_inventory").len() - 1
         expect(occurrences).to_equal(1)
 

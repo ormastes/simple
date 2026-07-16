@@ -493,6 +493,12 @@ caller's declared order, requires every named path to exist, and returns only
 the corresponding symbol scans. It does not search directories, infer a
 provider manifest, or manufacture missing candidates.
 
+The LLVM adapter now supplies hosted path semantics explicitly. On Windows,
+all candidate paths—including relative MinGW `.a` paths—normalize separators
+and case before duplicate detection; Unix candidates retain case-sensitive
+identity. This closes a source-only ambiguity where `build/Provider.a` and
+`build/provider.a` could select the same Windows archive twice.
+
 This boundary is intentionally not called from the production
 `link_llvm_native` body. The complete capability-owned provider archive set is
 still missing, so candidate inventory, unique-owner selection, archive hashing,
@@ -518,9 +524,10 @@ collision prerequisite; it does not yet create or select a font provider
 archive.
 
 Explicit candidate validation now accepts `.a` and `.lib` archive path forms,
-normalizes Windows path separators and extension case, rejects `.dll.a` import
-archives, and detects case/separator-equivalent Windows duplicates. Canonical
-Unix and Windows names for the forbidden broad runtime and `native_all`
+normalizes all hosted-Windows path separators and case, rejects `.dll.a` import
+archives, and detects case/separator-equivalent Windows duplicates while
+preserving Unix case sensitivity. Canonical Unix and Windows names for the
+forbidden broad runtime and `native_all`
 aggregates both fail closed before filesystem or symbol scans; later member and
 symbol inspection still owns `.lib` static/import semantics. Production hosted
 native-all discovery now uses `simple_native_all.lib` on Windows and
