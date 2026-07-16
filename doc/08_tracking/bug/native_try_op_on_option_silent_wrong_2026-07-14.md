@@ -82,6 +82,11 @@ and therefore does not close the bug. Execution remains pending a valid
 pure-Simple artifact; the tagged Option producer/consumer switch must still
 land atomically with the full dual-backend acceptance matrix.
 
+The emergency MIR call-lowering registration now also uses the canonical
+`Some = 0`, `None = 1` order instead of reversing the variants when module
+registration is missing. A focused source-contract spec keeps both owners in
+lockstep; this prerequisite likewise does not close the ABI bug.
+
 ## Reproduce
 
 `/tmp/wt_errhandling/` probes (Option `?` alongside Result `?`).
