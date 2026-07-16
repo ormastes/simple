@@ -2,8 +2,8 @@
 
 **Severity:** high (silent wrong value)
 **Found:** 2026-07-15 while adding Result unwrap preservation controls
-**Status:** flat nullable fix implemented; executable verification blocked by
-the pre-existing pure-Simple CLI exit 139
+**Status:** flat nullable source fix complete; executable verification blocked
+by the pre-existing pure-Simple CLI exit 139
 **Backend:** pure-Simple `native-build --entry` MIR lowering
 
 ## Reproduction
@@ -42,6 +42,8 @@ that path.
 The implementation now recovers the declared inner type through the existing
 symbol provenance path, uses the bootstrap text MIR type, and normalizes the
 selected present/default value with `rt_interp_cstr`. The parity harness adds
-present, absent, lazy-default, and nil-panic controls. A cached pure-Simple
-`native-build` attempt exited 139 before producing an artifact, so the bug
-remains open until those controls execute after the runner is repaired.
+present, absent, lazy-default, and nil-panic controls. The nil-panic arm now
+uses the type-neutral `MirConstValue.Zero` dead merge value, avoiding invalid
+LLVM such as `add ptr 3, 0` for `text?`. A cached pure-Simple `native-build`
+attempt exited 139 before producing an artifact, so the bug remains open until
+those controls execute after the runner is repaired.
