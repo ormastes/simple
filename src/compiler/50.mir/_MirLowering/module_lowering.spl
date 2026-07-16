@@ -24,7 +24,6 @@ use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_boots
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
-use std.alloc.sffi.{rt_dict_contains, rt_dict_keys, rt_dict_values}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -60,8 +59,6 @@ impl MirLowering:
             builder: MirBuilder.new(),
             symbols: symbols,
             local_map: {},
-            local_symbol_ids: [],
-            local_symbol_values: [],
             current_function_symbols: [],
             current_function_names: [],
             loop_stack: empty_loop_stack,
@@ -90,7 +87,9 @@ impl MirLowering:
         )
 
     fn symbol_id_value(symbol: SymbolId) -> i64:
-        symbol.id
+        match symbol:
+            case SymbolId(id): id
+            case _: -1
 
     fn hir_bitfield_fields(bitfield_def: HirBitfield) -> [HirBitfieldField]:
         match bitfield_def:
@@ -128,8 +127,7 @@ impl MirLowering:
                 doc_comment: "",
                 span: Span.empty()
             )
-        val function_values: [HirFunction] = rt_dict_values(module.functions)
-        for fn_ in function_values:
+        for fn_ in module.functions.values():
             val fn_id = self.symbol_id_value(fn_.symbol)
             if fn_id == target_id:
                 return fn_
@@ -218,8 +216,6 @@ impl MirLowering:
         if mir_lower_trace_enabled():
             print "[mir-lower] bootstrap-flat:start {name}"
         self.local_map = {}
-        self.local_symbol_ids = []
-        self.local_symbol_values = []
         self.runtime_array_locals = {}
         self.runtime_dict_locals = {}
         self.runtime_value_locals = {}
@@ -273,9 +269,8 @@ impl MirLowering:
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""
         var function_names: [text] = []
-        val initial_function_values: [HirFunction] = rt_dict_values(module.functions)
-        for function_def in initial_function_values:
-            function_names.push(function_def.name)
+        for function in module.functions.values():
+            function_names.push(function.name)
         self.current_function_names = function_names
         # Entry-closure lowering reuses one MirLowering while replacing its
         # active SymbolTable for every module. Method SymbolIds are therefore
@@ -333,7 +328,7 @@ impl MirLowering:
             if bootstrap_trace:
                 print "[mir-lower] fn-list:start"
             bootstrap_mir_functions_reset()
-            val bootstrap_function_keys: [SymbolId] = rt_dict_keys(module.functions)
+            val bootstrap_function_keys = module.functions.keys()
             val bootstrap_function_count = bootstrap_function_keys.len()
             if bootstrap_trace:
                 print "[mir-lower] functions:count {bootstrap_function_count}"
@@ -368,7 +363,7 @@ impl MirLowering:
 
         # Build field map from struct and class definitions
         # (use while loops - for-in broken in compiled native code)
-        val struct_values: [HirStruct] = rt_dict_values(module.structs)
+        val struct_values = module.structs.values()
         var si = 0
         while si < struct_values.len():
             val struct_def = struct_values[si]
@@ -387,7 +382,7 @@ impl MirLowering:
 
         # Build enum variant-index registry (enum NAME -> ordered variant names).
         # A variant's index is its runtime discriminant. Name-keyed like structs.
-        val enum_values: [HirEnum] = rt_dict_values(module.enums)
+        val enum_values = module.enums.values()
         var ei = 0
         while ei < enum_values.len():
             val enum_def = enum_values[ei]
@@ -404,7 +399,7 @@ impl MirLowering:
         # discriminants (Ok=0, Err=1) as user enums. Result is not carried in
         # module.enums, so without this the variants lowered as indirect calls
         # to an undefined callee. Skip if user code shadows the name.
-        if not rt_dict_contains(self.enum_variant_index, "Result"):
+        if not self.enum_variant_index.has("Result"):
             self.enum_variant_index["Result"] = ["Ok", "Err"]
 
         # Register the built-in Option enum so bare-variant construction
@@ -424,31 +419,7 @@ impl MirLowering:
         # from struct_value_syms and looks it up here to dispatch the real
         # method instead of failing.
         var static_method_symbol_ids: Dict<i64, bool> = {}
-        # struct_method_first_owner and free_function_names are both LOCAL to
-         # this lower_module call (deliberately NOT MirLowering fields
-         # accumulated across --entry-closure's many modules). Confirmed
-         # empirically that a whole-closure accumulator regresses ordinary,
-         # non-colliding struct methods: names like "get" are independently
-         # defined as instance methods on many UNRELATED stdlib structs
-         # across different modules (Map.get, FixedVec.get, ThemeRegistry.get,
-         # ...) and free functions of common names exist all over the huge
-         # transitive stdlib closure `--entry-closure` pulls in (module.
-         # functions there includes every parsed-but-maybe-dead function, not
-         # just ones the backend actually emits) -- a global accumulator
-         # immediately (and wrongly) marked those names ambiguous everywhere.
-         # Scoping both to a single module still catches the collision this
-         # guard exists for -- confirmed empirically: `impl C: fn value(self)`
-         # alongside a top-level `fn value()` IN THE SAME FILE silently
-         # dispatched `c.value()` to the free function's body instead of the
-         # method's, and two structs with the same method name IN THE SAME
-         # FILE silently dispatched to whichever won the link. A collision
-         # spanning two DIFFERENT modules is therefore a known, accepted gap
-         # (see #156 follow-up notes) -- resolving it precisely needs
-         # backend-level qualified (mangled) symbol naming, out of scope for
-         # this minimal-viable fix.
-        var struct_method_first_owner: Dict<text, text> = {}
-        var free_function_names: Dict<text, bool> = {}
-        val module_fn_values: [HirFunction] = rt_dict_values(module.functions)
+        val module_fn_values = module.functions.values()
         var mfi = 0
         while mfi < module_fn_values.len():
             # module.functions also contains impl methods; retain their static
@@ -469,7 +440,7 @@ impl MirLowering:
                         impl_type_name = impl_type_symbol.name
                 case _: ()
             if impl_type_name != "":
-                val impl_method_names: [text] = rt_dict_keys(impl_def.methods)
+                val impl_method_names = impl_def.methods.keys()
                 var mni = 0
                 while mni < impl_method_names.len():
                     val impl_method_name = impl_method_names[mni]
@@ -494,20 +465,10 @@ impl MirLowering:
                     val impl_ret_is_array = impl_def.method_return_is_array.get(impl_method_name)
                     if impl_ret_is_array != nil and impl_ret_is_array:
                         self.struct_method_return_is_array["{impl_type_name}::{impl_method_name}"] = true
-                    var existing_owner: text? = nil
-                    if rt_dict_contains(struct_method_first_owner, impl_method_name):
-                        existing_owner = struct_method_first_owner[impl_method_name]
-                    if existing_owner != nil:
-                        if existing_owner != impl_type_name:
-                            self.struct_method_ambiguous[impl_method_name] = true
-                    else:
-                        struct_method_first_owner[impl_method_name] = impl_type_name
-                    if rt_dict_contains(free_function_names, impl_method_name):
-                        self.struct_method_ambiguous[impl_method_name] = true
                     mni = mni + 1
             impl_mi = impl_mi + 1
 
-        val class_values: [HirClass] = rt_dict_values(module.classes)
+        val class_values = module.classes.values()
         var ci = 0
         while ci < class_values.len():
             val class_def = class_values[ci]
@@ -520,7 +481,7 @@ impl MirLowering:
             self.field_map[self.symbol_id_value(sym_id)] = field_names
             ci = ci + 1
 
-        val bitfield_values: [HirBitfield] = rt_dict_values(module.bitfields)
+        val bitfield_values = module.bitfields.values()
         var bi = 0
         while bi < bitfield_values.len():
             val bitfield_def = bitfield_values[bi]
@@ -532,13 +493,13 @@ impl MirLowering:
             bi = bi + 1
 
         # Lower type definitions so headers/export wrappers can consume real MIR types.
-        val struct_type_values: [HirStruct] = rt_dict_values(module.structs)
+        val struct_type_values = module.structs.values()
         var sti = 0
         while sti < struct_type_values.len():
             self.lower_struct_type(struct_type_values[sti])
             sti = sti + 1
 
-        val class_type_values: [HirClass] = rt_dict_values(module.classes)
+        val class_type_values = module.classes.values()
         var cti = 0
         while cti < class_type_values.len():
             self.lower_class_type(class_type_values[cti])
@@ -586,7 +547,7 @@ impl MirLowering:
             psi = psi + 1
 
         # Lower functions (skip extern declarations - they have no body)
-        val fn_values: [HirFunction] = rt_dict_values(module.functions)
+        val fn_values = module.functions.values()
         if bootstrap_trace:
             print "[mir-lower] function-keys"
         var fni = 0

@@ -33,7 +33,6 @@ use compiler.mir_opt.mir_opt.tco (create_tco_pass, tco_run_on_function)
 use compiler.mir_opt.mir_opt.gvn (create_gvn_pass, gvn_run_on_function)
 use compiler.mir_opt.mir_opt.predicate_promote (run_predicate_promote)
 use compiler.mir_opt.mir_opt.auto_vectorize (run_auto_vectorize)
-use std.alloc.sffi.{rt_dict_contains, rt_dict_keys, rt_dict_values}
 use compiler.mir_opt.mir_opt.pattern_dispatch (run_pattern_idiom_pass, run_pattern_idiom_pass_x86, run_pattern_idiom_pass_generic, run_narrow_form_pass)
 extern fn rt_env_get(key: text) -> text
 
@@ -388,7 +387,7 @@ fn passstatistics_new() -> PassStatistics:
 fn passstatistics_record_pass_run(stats: PassStatistics, pass_name: text) -> PassStatistics:
         var pass_run_count = stats.pass_run_count
         var current_count = 0
-        if rt_dict_contains(pass_run_count, pass_name):
+        if pass_run_count.has(pass_name):
             current_count = pass_run_count[pass_name]
         pass_run_count[pass_name] = current_count + 1
         PassStatistics(
@@ -718,8 +717,7 @@ fn apply_bulk_recognizers(module: MirModule) -> MirModule:
     # function is returned unchanged. Twice adversarially reviewed; non-firing safety proof
     # in bulk_copy_elision_spec.spl. (fill/cmp are NOT elided — only copy is sound here.)
     var result = module
-    val function_symbols: [SymbolId] = rt_dict_keys(result.functions)
-    for sym in function_symbols:
+    for sym in result.functions.keys():
         var stats = OptimizationStats.create()
         var f = result.functions[sym]
         f = elide_bulk_copy(f, stats)
@@ -904,7 +902,13 @@ fn run_pass_on_module(pass_name: text, module: MirModule) -> MirModule:
 fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
     """Typed module-level pass runner.  Dispatches on PassKind, not strings."""
     var result_module = module
-    val functions: [MirFunction] = rt_dict_values(module.functions)
+    val raw_functions = module.functions.values()
+    var functions: [MirFunction] = []
+    var function_index = 0
+    while function_index < raw_functions.len():
+        val typed_func: MirFunction = raw_functions[function_index]
+        functions.push(typed_func)
+        function_index = function_index + 1
     match kind:
         case DeadCodeElimination:
             for func in functions:

@@ -16,21 +16,19 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
-use std.alloc.sffi.{rt_dict_contains}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: Any) -> i64
-extern fn rt_enum_payload(value: Any) -> i64
-extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
-extern fn rt_array_get_text(array: i64, index: i64) -> text
 
 fn mir_expr_env_get(key: text) -> text:
     rt_env_get(key)
 
 fn mir_expr_symbol_id_value(symbol: SymbolId) -> i64:
-    symbol.id
+    match symbol:
+        case SymbolId(id): id
+        case _: -1
 
 # ============================================================================
 # Expression Lowering
@@ -128,20 +126,17 @@ impl MirLowering:
         nil
 
     fn local_is_runtime_array(local: LocalId) -> bool:
-        if rt_dict_contains(self.runtime_array_locals, local.id): return true
-        var local_i = 0
-        while local_i < self.builder.locals.len():
-            val item = self.builder.locals[local_i]
+        if self.runtime_array_locals.has(local.id): return true
+        for item in self.builder.locals:
             if item.id.id == local.id:
                 match item.type_.kind:
                     case MirTypeKind.Array(_, _): return true
                     case MirTypeKind.Slice(_): return true
                     case _: return false
-            local_i = local_i + 1
         false
 
     fn local_is_runtime_dict(local: LocalId) -> bool:
-        if rt_dict_contains(self.runtime_dict_locals, local.id):
+        if self.runtime_dict_locals.has(local.id):
             return true
         val type_ = self.local_mir_type_of(local)
         if type_ == nil:
@@ -183,12 +178,9 @@ impl MirLowering:
         Keyed off the MIR local type because type-inferred HIR `.type_` is
         frequently nil on this path (flat HIR), so string-directed lowering of
         `+` (concat) and `.len` must key off the MIR local type instead."""
-        var local_i = 0
-        while local_i < self.builder.locals.len():
-            val item = self.builder.locals[local_i]
+        for item in self.builder.locals:
             if item.id.id == local.id:
                 return self.mir_type_is_str(item.type_)
-            local_i = local_i + 1
         false
 
     fn local_is_float(local: LocalId) -> bool:
@@ -199,14 +191,11 @@ impl MirLowering:
         lowering must key off the MIR local type. Without this, arithmetic on
         floats gets an i64 dest from infer_binop_type and the backend emits
         integer add/mul on double BIT PATTERNS (garbage results)."""
-        var local_i = 0
-        while local_i < self.builder.locals.len():
-            val item = self.builder.locals[local_i]
+        for item in self.builder.locals:
             if item.id.id == local.id:
                 match item.type_.kind:
                     case MirTypeKind.F32 | MirTypeKind.F64: return true
                     case _: return false
-            local_i = local_i + 1
         false
 
     fn local_is_f32(local: LocalId) -> bool:
@@ -281,13 +270,13 @@ impl MirLowering:
         mir_operand_copy(local)
 
     me box_runtime_value(local: LocalId) -> LocalId:
-        if rt_dict_contains(self.nil_locals, local.id):
+        if self.nil_locals.has(local.id):
             var nil_builder = self.builder
             val tagged_nil = nil_builder.emit_const_int(3)
             self.builder = nil_builder
             self.runtime_value_locals[tagged_nil.id] = true
             return tagged_nil
-        if rt_dict_contains(self.runtime_value_locals, local.id) or rt_dict_contains(self.runtime_array_locals, local.id) or rt_dict_contains(self.runtime_dict_locals, local.id):
+        if self.runtime_value_locals.has(local.id) or self.runtime_array_locals.has(local.id) or self.runtime_dict_locals.has(local.id):
             return local
         if self.local_is_str(local):
             val strlen = MirOperand(kind: MirOperandKind.Const(
@@ -609,12 +598,13 @@ impl MirLowering:
 
     me resolved_call_return_type(symbol: SymbolId) -> MirType:
         val sym = self.symbols.get_symbol(symbol)
-        if sym != nil and sym.type_ != nil:
-            match sym.type_.kind:
-                case HirTypeKind.Function(_, ret, _):
-                    return self.lower_type(ret)
-                case _:
-                    ()
+        if val found_sym = sym:
+            if val sym_type = found_sym.type_:
+                match sym_type.kind:
+                    case HirTypeKind.Function(_, ret, _):
+                        return self.lower_type(ret)
+                    case _:
+                        ()
         MirType.i64()
 
     me bitfield_field_mask(bit_width: i64) -> i64:
@@ -668,7 +658,7 @@ impl MirLowering:
                             enum_name = field_base_name
                         case _:
                             pass
-                    if enum_name != "" and rt_dict_contains(self.enum_variant_index, enum_name):
+                    if enum_name != "" and self.enum_variant_index.has(enum_name):
                         for variant_name in self.enum_variant_index[enum_name]:
                             if variant_name == field_name:
                                 return self.lower_enum_construct_named(enum_name, field_name, [])
@@ -732,7 +722,7 @@ impl MirLowering:
                     # `x`'s slot because `r.origin`'s type was otherwise unknown).
                     val base_struct_name = self.resolve_base_struct_name(base, base_local)
                     if val bsn = base_struct_name:
-                        if rt_dict_contains(self.struct_field_type_name, bsn):
+                        if self.struct_field_type_name.has(bsn):
                             val nested_types = self.struct_field_type_name[bsn]
                             if field_idx >= 0 and field_idx < nested_types.len():
                                 val nested_name = nested_types[field_idx]
@@ -804,9 +794,8 @@ impl MirLowering:
             match expr_value.kind:
                 case HirExprKind.Var(pre_symbol):
                     val pre_symbol_id = mir_expr_symbol_id_value(pre_symbol)
-                    val pre_local = self.find_local(pre_symbol_id)
-                    if pre_symbol_id >= 0 and pre_local.id >= 0:
-                        return pre_local
+                    if pre_symbol_id >= 0 and self.local_map.has(pre_symbol_id):
+                        return self.local_map[pre_symbol_id]
                 case _:
                     pass
         val namedvar_pre_disc = rt_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ""))
@@ -821,40 +810,18 @@ impl MirLowering:
                         # below never resolves locals. mir_expr_symbol_id_value
                         # nil-guards the seed's `if val`-binds-nil hazard.
                         val pre_sym_id = mir_expr_symbol_id_value(pre_symbol)
-                        val pre_named_local = self.find_local(pre_sym_id)
-                        if pre_sym_id >= 0 and pre_named_local.id >= 0:
-                            return pre_named_local
+                        if pre_sym_id >= 0 and self.local_map.has(pre_sym_id):
+                            return self.local_map[pre_sym_id]
                         val pre_resolved = self.symbols.lookup(pre_name)
                         if pre_resolved != nil:
                             val pre_nv_id = pre_resolved.id
-                            val resolved_named_local = self.find_local(pre_nv_id)
-                            if pre_nv_id >= 0 and resolved_named_local.id >= 0:
-                                return resolved_named_local
+                            if pre_nv_id >= 0 and self.local_map.has(pre_nv_id):
+                                return self.local_map[pre_nv_id]
                         # Built-in nullary Option `None` used as a value (not a
-                        # call). A local of the same name shadows it above.
-                        if pre_name == "None" and rt_dict_contains(self.enum_variant_index, "Option") and not (pre_sym_id >= 0 and pre_named_local.id >= 0):
+                        # call): construct Option.None (disc 1) via rt_enum_new.
+                        # A local of the same name shadows it (handled above).
+                        if pre_name == "None" and self.enum_variant_index.has("Option") and not (pre_sym_id >= 0 and self.local_map.has(pre_sym_id)):
                             return self.lower_enum_construct_named("Option", "None", [])
-                case _:
-                    pass
-            # Native stage compilers can recognize NamedVar's discriminant but
-            # silently land in an unrelated match arm. Recover its required
-            # SymbolId directly from the enum payload before falling through to
-            # the name-based path, whose symbol-table scope is no longer active.
-            val named_var_payload = rt_enum_payload(expr_value.kind)
-            val named_var_symbol: SymbolId = rt_tuple_get(named_var_payload, 0)
-            val named_var_symbol_id = mir_expr_symbol_id_value(named_var_symbol)
-            val raw_named_local = self.find_local(named_var_symbol_id)
-            if (mir_expr_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                val named_var_name = rt_array_get_text(named_var_payload, 1)
-                print "[mir-namedvar-id] name={named_var_name} symbol={named_var_symbol_id} local={raw_named_local.id}"
-            if named_var_symbol_id >= 0 and raw_named_local.id >= 0:
-                return raw_named_local
-
-        val match_case_pre_disc = rt_enum_discriminant(HirExprKind.MatchCase(nil_expr, []))
-        if expr_disc == match_case_pre_disc:
-            match expr_value.kind:
-                case HirExprKind.MatchCase(match_scrutinee, match_arms):
-                    return self.lower_match_case(match_scrutinee, match_arms)
                 case _:
                     pass
 
@@ -973,8 +940,8 @@ impl MirLowering:
                     val nil_tmp = b_nil.new_temp(MirType.i64())
                     self.builder = b_nil
                     nil_tmp
-                elif self.find_local(symbol_id).id >= 0:
-                    self.find_local(symbol_id)
+                elif self.local_map.has(symbol_id):
+                    self.local_map[symbol_id]
                 elif val global_local = self.try_lower_global_read(symbol_id):
                     global_local
                 else:
@@ -1027,8 +994,8 @@ impl MirLowering:
                         val err_tmp3 = b_err3.new_temp(MirType.i64())
                         self.builder = b_err3
                         err_tmp3
-                    elif self.find_local(symbol_id).id >= 0:
-                        self.find_local(symbol_id)
+                    elif self.local_map.has(symbol_id):
+                        self.local_map[symbol_id]
                     elif val global_local2 = self.try_lower_global_read(symbol_id):
                         global_local2
                     else:
@@ -1477,11 +1444,11 @@ impl MirLowering:
                             right_binop = b.emit_cast(mir_operand_copy(right_binop), left_binop_type)
                         elif comparison and left_i64 and right_narrow_int:
                             left_binop = b.emit_cast(mir_operand_copy(left_binop), right_binop_type)
-                        if comparison and rt_dict_contains(self.runtime_value_locals, left_binop.id) and rt_dict_contains(self.nil_locals, right_binop.id):
+                        if comparison and self.runtime_value_locals.has(left_binop.id) and self.nil_locals.has(right_binop.id):
                             self.builder = b
                             right_binop = self.box_runtime_value(right_binop)
                             b = self.builder
-                        elif comparison and rt_dict_contains(self.nil_locals, left_binop.id) and rt_dict_contains(self.runtime_value_locals, right_binop.id):
+                        elif comparison and self.nil_locals.has(left_binop.id) and self.runtime_value_locals.has(right_binop.id):
                             self.builder = b
                             left_binop = self.box_runtime_value(left_binop)
                             b = self.builder
@@ -1683,7 +1650,7 @@ impl MirLowering:
                 b_left.switch_to_block(then_block)
                 self.builder = b_left
                 var left_value = left_local
-                if rt_dict_contains(self.runtime_value_locals, left_local.id):
+                if self.runtime_value_locals.has(left_local.id):
                     left_value = self.decode_runtime_value(left_local, result_type)
                 b_left = self.builder
                 b_left.emit_copy(result_local, left_value)
@@ -1695,7 +1662,7 @@ impl MirLowering:
                 self.builder = b_right
                 val right_local = self.lower_expr(right)
                 var right_value = right_local
-                val right_runtime = rt_dict_contains(self.runtime_value_locals, right_local.id)
+                val right_runtime = self.runtime_value_locals.has(right_local.id)
                 if right_runtime:
                     right_value = self.decode_runtime_value(right_local, result_type)
                 b_right = self.builder
@@ -1703,11 +1670,11 @@ impl MirLowering:
                 b_right.terminate_goto(merge_block)
                 self.builder = b_right
 
-                if rt_dict_contains(self.runtime_value_locals, left_value.id) or rt_dict_contains(self.runtime_value_locals, right_value.id):
+                if self.runtime_value_locals.has(left_value.id) or self.runtime_value_locals.has(right_value.id):
                     self.runtime_value_locals[result_local.id] = true
-                if rt_dict_contains(self.runtime_array_locals, left_value.id) or rt_dict_contains(self.runtime_array_locals, right_value.id):
+                if self.runtime_array_locals.has(left_value.id) or self.runtime_array_locals.has(right_value.id):
                     self.runtime_array_locals[result_local.id] = true
-                if rt_dict_contains(self.runtime_dict_locals, left_value.id) or rt_dict_contains(self.runtime_dict_locals, right_value.id):
+                if self.runtime_dict_locals.has(left_value.id) or self.runtime_dict_locals.has(right_value.id):
                     self.runtime_dict_locals[result_local.id] = true
 
                 var b_merge = self.builder
@@ -1909,7 +1876,7 @@ impl MirLowering:
                     case NamedVar(_, fa_name):
                         fa_enum_name = fa_name
                     case _: ()
-                if fa_enum_name != "" and rt_dict_contains(self.enum_variant_index, fa_enum_name):
+                if fa_enum_name != "" and self.enum_variant_index.has(fa_enum_name):
                     var fa_is_variant = false
                     for fa_vn in self.enum_variant_index[fa_enum_name]:
                         if fa_vn == field_name:
@@ -1969,7 +1936,7 @@ impl MirLowering:
                 # Field arm above, kept in sync for this fallback dispatch path.
                 val base_struct_name2 = self.resolve_base_struct_name(base, base_local)
                 if val bsn2 = base_struct_name2:
-                    if rt_dict_contains(self.struct_field_type_name, bsn2):
+                    if self.struct_field_type_name.has(bsn2):
                         val nested_types2 = self.struct_field_type_name[bsn2]
                         if field_idx >= 0 and field_idx < nested_types2.len():
                             val nested_name2 = nested_types2[field_idx]
@@ -2083,16 +2050,17 @@ impl MirLowering:
 
         # Route enum-pattern matches (case Variant(x):) to the enum path, which
         # dispatches on rt_enum_discriminant + binds payloads via rt_enum_payload.
-        val enum_pattern_disc = rt_enum_discriminant(HirPatternKind.Enum(
-            HirType(kind: HirTypeKind.Error, span: Span.empty()),
-            "",
-            nil
-        ))
+        var has_enum_arm = false
         var scan_i = 0
         while scan_i < norm_arms.len():
-            if rt_enum_discriminant(norm_arms[scan_i].pattern.kind) == enum_pattern_disc:
-                return self.lower_enum_match(scrutinee, norm_arms)
+            match norm_arms[scan_i].pattern.kind:
+                case Enum(_, _, _):
+                    has_enum_arm = true
+                case _:
+                    ()
             scan_i = scan_i + 1
+        if has_enum_arm:
+            return self.lower_enum_match(scrutinee, norm_arms)
 
         # Phase 1+2a gate: every arm must be (Wildcard | Binding |
         # Literal(IntLit) | Or(of IntLit)) with no guard. If anything else

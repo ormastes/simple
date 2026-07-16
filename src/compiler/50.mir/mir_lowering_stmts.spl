@@ -16,10 +16,14 @@ use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 extern fn rt_enum_discriminant(value: HirStmtKind) -> i64
 
 fn mir_stmt_symbol_id_value(symbol: SymbolId) -> i64:
-    symbol.id
+    match symbol:
+        case SymbolId(id): id
+        case _: -1
 
 fn mir_stmt_local_id_value(local: LocalId) -> i64:
-    local.id
+    match local:
+        case LocalId(id): id
+        case _: -1
 
 fn mir_hir_stmt_kind_disc(k: HirStmtKind) -> i64:
     rt_enum_discriminant(k)
@@ -35,12 +39,9 @@ impl MirLowering:
         real Array/Slice type onto an un-annotated `var xs = [...]` binding,
         instead of the i64 default that would send later `xs[i]` reads down the
         wrong raw-GEP path (they must take rt_array_get)."""
-        var local_i = 0
-        while local_i < self.builder.locals.len():
-            val item = self.builder.locals[local_i]
+        for item in self.builder.locals:
             if item.id.id == local.id:
                 return Some(item.type_)
-            local_i = local_i + 1
         nil
 
     fn local_is_float(local: LocalId) -> bool:
@@ -51,15 +52,12 @@ impl MirLowering:
         unreliably a non-nil i64 on this path. Without threading the real
         F64/F32 type onto the binding, its spill slot is alloca'd i64 and the
         float round-trips through an i64 store (10.0 -> 10)."""
-        var local_i = 0
-        while local_i < self.builder.locals.len():
-            val item = self.builder.locals[local_i]
+        for item in self.builder.locals:
             if item.id.id == local.id:
                 match item.type_.kind:
                     case MirTypeKind.F32: return true
                     case MirTypeKind.F64: return true
                     case _: return false
-            local_i = local_i + 1
         false
 
     fn local_is_unit(local: LocalId) -> bool:
@@ -239,12 +237,12 @@ impl MirLowering:
                         # .id) stays valid for a later `p.x` field read.
                         val struct_sym = self.struct_value_syms.get(init_local.id)
                         if bf_sym != nil or struct_sym != nil:
-                            self.bind_local(symbol_value_id, init_local)
+                            self.local_map[symbol_value_id] = init_local
                         else:
                             var b = self.builder
                             val local = b.new_local(nil, effective_type, LocalKind.Var)
                             self.builder = b
-                            self.bind_local(symbol_value_id, local)
+                            self.local_map[symbol_value_id] = local
                             if self.runtime_array_locals.has(init_local.id):
                                 self.runtime_array_locals[local.id] = true
                             if self.runtime_dict_locals.has(init_local.id):
@@ -354,12 +352,12 @@ impl MirLowering:
                         else:
                             mir_type
                         if bf_sym != nil or struct_sym != nil:
-                            self.bind_local(symbol_id, init_local)
+                            self.local_map[symbol_id] = init_local
                         else:
                             var b = self.builder
                             val local = b.new_local(nil, effective_type, LocalKind.Var)
                             self.builder = b
-                            self.bind_local(symbol_id, local)
+                            self.local_map[symbol_id] = local
                             if has_init and self.runtime_array_locals.has(init_local.id):
                                 self.runtime_array_locals[local.id] = true
                             if has_init and self.runtime_dict_locals.has(init_local.id):
@@ -455,11 +453,8 @@ impl MirLowering:
                 var b_store = self.builder
                 b_store.emit(MirInst(kind: MirInstKind.StoreGlobal(global_symbol, mir_operand_copy(value_local)), span: Some(span)))
                 self.builder = b_store
-        else:
-            val local = self.find_local(symbol_id)
-            if local.id < 0:
-                self.error("assignment target is not a local", Some(span))
-                return
+        elif self.local_map.has(symbol_id):
+            val local = self.local_map[symbol_id]
             # Use the positive `op.?` presence test, NOT `if val assign_op = op`:
             # the seed interpreter's `if val <pat> = <optional>` presence check
             # can wrongly enter the true branch when the optional is nil (the
@@ -994,7 +989,7 @@ impl MirLowering:
         if range_var_id < 0:
             self.error("for range loop variable has no resolved symbol", Some(body.span))
         else:
-            self.bind_local(range_var_id, counter)
+            self.local_map[range_var_id] = counter
 
         # Create loop blocks
         var b_blocks = self.builder
@@ -1266,7 +1261,7 @@ impl MirLowering:
         if loop_var_id < 0:
             self.error("for loop variable has no resolved symbol", Some(body.span))
         else:
-            self.bind_local(loop_var_id, loop_var)
+            self.local_map[loop_var_id] = loop_var
             # Bug (array-of-structs field misread), CONFLICT-FLAG
             # (mir_lowering_stmts.spl is fenced): `for p in pts` over an
             # array of structs desugars to this counted-index loop, whose

@@ -18,7 +18,6 @@ use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
 use compiler.backend.backend.cranelift_gemm_fusion.{GemmAddFusion, detect_gemm_add_pair}
 use compiler.backend.backend.cranelift_runtime_imports.{translate_runtime_import_call_i64}
 use std.sffi.codegen.*
-use std.alloc.sffi.{rt_dict_contains, rt_dict_values}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
 
@@ -98,15 +97,14 @@ pub fn cranelift_compile_module_direct(options: CompileOptions, module: MirModul
     val global_handles = global_handles_opt.unwrap()
 
     var func_handles: Dict<text, i64> = {}
-    val functions: [MirFunction] = rt_dict_values(module.functions)
-    for func in functions:
+    for func in module.functions.values():
         val emit_name = if func.name == "main": "__simple_main" else: func.name
         print "[cranelift-direct] declare {emit_name}"
         val sig = build_signature(func.signature, func.name == "main")
         val handle = cranelift_declare_function(cl_module, emit_name, sig, CL_LINKAGE_EXPORT)
         func_handles[func.name] = handle
 
-    for func in functions:
+    for func in module.functions.values():
         print "[cranelift-direct] compile {func.name}"
         val result = compile_function(cl_module, func, func_handles, global_handles)
         if not result:
@@ -159,14 +157,13 @@ impl Codegen for CraneliftCodegenAdapter:
 
         # First pass: declare all functions so forward references work
         var func_handles: Dict<text, i64> = {}
-        val functions: [MirFunction] = rt_dict_values(module.functions)
-        for func in functions:
+        for func in module.functions.values():
             val sig = build_signature(func.signature, func.name == "main")
             val handle = cranelift_declare_function(cl_module, func.name, sig, CL_LINKAGE_EXPORT)
             func_handles[func.name] = handle
 
         # Second pass: compile each function
-        for func in functions:
+        for func in module.functions.values():
             val result = compile_function(cl_module, func, func_handles, global_handles)
             if not result:
                 cranelift_free_module(cl_module)
@@ -328,7 +325,7 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
         match local.kind:
             case Arg(index):
                 val param_val = cranelift_block_param(ctx, entry_block, index)
-                if rt_dict_contains(slot_map, local.id.id):
+                if slot_map.has(local.id.id):
                     val addr = cranelift_stack_addr(ctx, slot_map[local.id.id], 0)
                     cranelift_store(ctx, param_val, addr, 0)
                 value_map[local.id.id] = param_val
@@ -359,7 +356,7 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
                     val c = cl_translate_operand(ctx, cl_module, plan.addend, value_map, slot_map, func)
                     val result = translate_runtime_import_call_i64(ctx, cl_module, "__simple_runtime_gemm_add", [a, b, c])
                     value_map[plan.dest.id] = result
-                    if rt_dict_contains(slot_map, plan.dest.id):
+                    if slot_map.has(plan.dest.id):
                         val addr = cranelift_stack_addr(ctx, slot_map[plan.dest.id], 0)
                         cranelift_store(ctx, result, addr, 0)
                     inst_index = inst_index + 2
@@ -387,7 +384,7 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
 
 fn store_local_result(ctx: i64, dest: LocalId, value: i64, slot_map: Dict<i64, i64>, func: MirFunction):
     val type_ = local_type(dest.id, func)
-    if rt_dict_contains(slot_map, dest.id) and (not type_is_aggregate(type_) or type_is_runtime_handle(type_)):
+    if slot_map.has(dest.id) and (not type_is_aggregate(type_) or type_is_runtime_handle(type_)):
         val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
         cranelift_store(ctx, value, addr, 0)
 
@@ -406,21 +403,21 @@ fn cl_translate_instruction(
         case Const(dest, value, type_):
             val cl_val = cl_translate_const_value(ctx, cl_module, value, type_)
             value_map[dest.id] = cl_val
-            if rt_dict_contains(slot_map, dest.id):
+            if slot_map.has(dest.id):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                 cranelift_store(ctx, cl_val, addr, 0)
 
         case Copy(dest, src):
             val src_val = load_local(ctx, src.id, value_map, slot_map, func)
             value_map[dest.id] = src_val
-            if rt_dict_contains(slot_map, dest.id) and (not type_is_aggregate(local_type(dest.id, func)) or type_is_runtime_handle(local_type(dest.id, func))):
+            if slot_map.has(dest.id) and (not type_is_aggregate(local_type(dest.id, func)) or type_is_runtime_handle(local_type(dest.id, func))):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                 cranelift_store(ctx, src_val, addr, 0)
 
         case Move(dest, src):
             val src_val = load_local(ctx, src.id, value_map, slot_map, func)
             value_map[dest.id] = src_val
-            if rt_dict_contains(slot_map, dest.id) and (not type_is_aggregate(local_type(dest.id, func)) or type_is_runtime_handle(local_type(dest.id, func))):
+            if slot_map.has(dest.id) and (not type_is_aggregate(local_type(dest.id, func)) or type_is_runtime_handle(local_type(dest.id, func))):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                 cranelift_store(ctx, src_val, addr, 0)
 
@@ -429,7 +426,7 @@ fn cl_translate_instruction(
             val b = cl_translate_operand(ctx, cl_module, right, value_map, slot_map, func)
             val result = cl_translate_binop(ctx, cl_module, op, a, b, left, func)
             value_map[dest.id] = result
-            if rt_dict_contains(slot_map, dest.id):
+            if slot_map.has(dest.id):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                 cranelift_store(ctx, result, addr, 0)
 
@@ -448,7 +445,7 @@ fn cl_translate_instruction(
 
         case Alloc(dest, type_):
             # Alloc is handled by stack slot
-            if rt_dict_contains(slot_map, dest.id):
+            if slot_map.has(dest.id):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                 value_map[dest.id] = addr
 
@@ -521,7 +518,7 @@ fn cl_translate_instruction(
                         val value = cl_translate_operand(ctx, cl_module, op, value_map, slot_map, func)
                         translate_runtime_import_call_i64(ctx, cl_module, "rt_array_push", [array, value])
                     value_map[dest.id] = array
-                    if rt_dict_contains(slot_map, dest.id):
+                    if slot_map.has(dest.id):
                         val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                         cranelift_store(ctx, array, addr, 0)
                 case Struct(_):
@@ -535,11 +532,11 @@ fn cl_translate_instruction(
                     val heap_tag = cranelift_iconst(ctx, CL_TYPE_I64, 1)
                     val tagged = cranelift_bor(ctx, base, heap_tag)
                     value_map[dest.id] = tagged
-                    if rt_dict_contains(slot_map, dest.id):
+                    if slot_map.has(dest.id):
                         val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                         cranelift_store(ctx, tagged, addr, 0)
                 case _:
-                    if rt_dict_contains(slot_map, dest.id):
+                    if slot_map.has(dest.id):
                         val base = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                         var offset = 0
                         for op in operands:
@@ -566,7 +563,7 @@ fn cl_translate_instruction(
             if dest.?:
                 val dest_id = dest.unwrap().id
                 value_map[dest_id] = result
-                if rt_dict_contains(slot_map, dest_id):
+                if slot_map.has(dest_id):
                     val addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
                     cranelift_store(ctx, result, addr, 0)
 
@@ -580,7 +577,7 @@ fn cl_translate_instruction(
             if dest.?:
                 val dest_id = dest.unwrap().id
                 value_map[dest_id] = result
-                if rt_dict_contains(slot_map, dest_id):
+                if slot_map.has(dest_id):
                     val dest_addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
                     cranelift_store(ctx, result, dest_addr, 0)
 
@@ -598,11 +595,11 @@ fn cl_translate_instruction(
                 # first pair. No caller currently emits N-ary joins through
                 # this backend, so this is latent; guard it loudly rather
                 # than miscompiling silently if that ever changes.
-                if args.len() > 4 and not rt_dict_contains(slot_map, dest.unwrap().id):
+                if args.len() > 4 and not slot_map.has(dest.unwrap().id):
                     eprint("[cranelift] ERROR: __simple_ssa_phi has {args.len()} args (N-ary join) with no stack slot; this fallback only supports a single then/else pair")
                     return
                 val dest_id = dest.unwrap().id
-                if rt_dict_contains(slot_map, dest_id):
+                if slot_map.has(dest_id):
                     val addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
                     val ty = mir_type_to_cl(local_type(dest_id, func))
                     value_map[dest_id] = cranelift_load(ctx, ty, addr, 0)
@@ -671,7 +668,7 @@ fn store_phi_incomings_for_edge(
                     case Intrinsic(dest, name, args):
                         if name == "__simple_ssa_phi" and dest.?:
                             val incoming = cranelift_phi_incoming_for_predecessor(pred.id, args)
-                            if incoming.? and rt_dict_contains(slot_map, dest.unwrap().id):
+                            if incoming.? and slot_map.has(dest.unwrap().id):
                                 val val_ = cl_translate_operand(ctx, cl_module, incoming.unwrap(), value_map, slot_map, func)
                                 val addr = cranelift_stack_addr(ctx, slot_map[dest.unwrap().id], 0)
                                 cranelift_store(ctx, val_, addr, 0)
@@ -690,7 +687,7 @@ fn cl_translate_terminator(
 ):
     match term:
         case Goto(target):
-            if rt_dict_contains(block_map, target.id):
+            if block_map.has(target.id):
                 store_phi_incomings_for_edge(ctx, cl_module, current_block, target, value_map, slot_map, func)
                 cranelift_jump(ctx, block_map[target.id])
 
@@ -757,10 +754,10 @@ fn cl_translate_terminator(
             if dest.?:
                 val dest_id = dest.unwrap().id
                 value_map[dest_id] = result
-                if rt_dict_contains(slot_map, dest_id):
+                if slot_map.has(dest_id):
                     val addr = cranelift_stack_addr(ctx, slot_map[dest_id], 0)
                     cranelift_store(ctx, result, addr, 0)
-            if rt_dict_contains(block_map, normal.id):
+            if block_map.has(normal.id):
                 store_phi_incomings_for_edge(ctx, cl_module, current_block, normal, value_map, slot_map, func)
                 cranelift_jump(ctx, block_map[normal.id])
 
@@ -799,14 +796,14 @@ fn load_local(
     # Runtime handles may be assigned on multiple control-flow edges. Their
     # slot contains the value selected at runtime; value_map reflects only the
     # backend's block compilation order.
-    if type_is_runtime_handle(local_ty) and rt_dict_contains(slot_map, local_id):
+    if type_is_runtime_handle(local_ty) and slot_map.has(local_id):
         val handle_addr = cranelift_stack_addr(ctx, slot_map[local_id], 0)
         return cranelift_load(ctx, CL_TYPE_PTR, handle_addr, 0)
     # Prefer SSA value if available
-    if rt_dict_contains(value_map, local_id):
+    if value_map.has(local_id):
         return value_map[local_id]
     # Fall back to loading from stack slot
-    if rt_dict_contains(slot_map, local_id):
+    if slot_map.has(local_id):
         val addr = cranelift_stack_addr(ctx, slot_map[local_id], 0)
         if type_is_aggregate(local_ty) and not type_is_runtime_handle(local_ty):
             return addr
@@ -946,7 +943,7 @@ fn cl_call_runtime_i64(ctx: i64, cl_module: i64, func_handles: Dict<text, i64>, 
     """Call a runtime C function by NAME with i64 args/return, declaring it
     as an external import if it isn't already a known function handle.
     Mirrors the external-function branch of cl_translate_call."""
-    if rt_dict_contains(func_handles, name):
+    if func_handles.has(name):
         val handle = func_handles[name]
         val func_ref = cranelift_import_function(ctx, handle)
         return cranelift_call(ctx, func_ref, args)
@@ -1070,7 +1067,7 @@ fn cl_translate_call(
                     if (method == "unwrap" or method == "unwrap_err" or method == "unwrap_or") and arg_vals.len() > 0:
                         return arg_vals[0]
                     # Named function call
-                    if rt_dict_contains(func_handles, name):
+                    if func_handles.has(name):
                         val handle = func_handles[name]
                         val func_ref = cranelift_import_function(ctx, handle)
                         cranelift_call(ctx, func_ref, arg_vals)

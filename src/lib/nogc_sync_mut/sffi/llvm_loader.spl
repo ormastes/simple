@@ -16,17 +16,6 @@ extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_memcpy(dest: i64, src: i64, len: i64)
 extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
-extern fn rt_string_data(value: text) -> i64
-extern fn rt_interp_cstr(value: text) -> i64
-extern fn rt_array_get_i64_raw(values: [i64], index: i64) -> i64
-
-fn llvm_text_ptr(value: text) -> i64:
-    val data = rt_string_data(value)
-    if data != 0: data else: rt_interp_cstr(value)
-
-fn llvm_cstr_ptr(value: text) -> i64:
-    val terminated = value + "\0"
-    llvm_text_ptr(terminated)
 
 # SFFI primitives for cached calls
 extern fn spl_dlsym(handle: i64, name: text) -> i64
@@ -158,26 +147,38 @@ fn _lcn(name: text, args: [i64]) -> i64:
 # Helper: build contiguous i64 array for C API
 # ============================================================================
 
+# Scratch buffer for small arrays (avoids alloc/free for <= 8 elements)
+var _scratch_buf: i64 = 0
+
+fn _ensure_scratch() -> i64:
+    if _scratch_buf == 0:
+        _scratch_buf = rt_alloc(64)
+    _scratch_buf
+
 fn llvm_make_array(values: [i64]) -> i64:
     val n = values.len()
     if n == 0:
         return 0
+    # Use scratch buffer for small arrays (up to 8 elements)
+    if n <= 8:
+        val buf = _ensure_scratch()
+        if buf == 0:
+            return 0
+        for i in 0..n:
+            rt_ptr_write_i64(buf, i * 8, values[i])
+        return buf
     val ptr = rt_alloc(n * 8)
     if ptr == 0:
         return 0
     for i in 0..n:
-        rt_ptr_write_i64(ptr, i * 8, rt_array_get_i64_raw(values, i))
+        rt_ptr_write_i64(ptr, i * 8, values[i])
     ptr
 
-fn llvm_call_arg_push(values: [i64], value: i64):
-    values.push(value)
-
 fn llvm_free_array(ptr: i64):
-    if ptr != 0:
+    if ptr != 0 and ptr != _scratch_buf:
         rt_free(ptr)
 
 export llvm_load, llvm_available, llvm_lib
 export _llvm_resolve, _lc0, _lc1, _lc2, _lc3, _lc4, _lcn
-export llvm_make_array, llvm_free_array, llvm_call_arg_push
+export llvm_make_array, llvm_free_array
 export rt_alloc, rt_free, rt_ptr_write_i64, rt_ptr_read_i64
-export llvm_text_ptr, llvm_cstr_ptr

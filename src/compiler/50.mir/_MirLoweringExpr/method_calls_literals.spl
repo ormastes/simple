@@ -16,14 +16,10 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
-use std.alloc.sffi.{rt_dict_contains}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 
 extern fn rt_env_get(key: text) -> text
-extern fn rt_enum_discriminant(value: Any) -> i64
-extern fn rt_enum_payload(value: Any) -> i64
-extern fn rt_array_get_text(array: i64, index: i64) -> text
 
 # ============================================================================
 # Expression Lowering
@@ -536,26 +532,18 @@ impl MirLowering:
         # one of its variants. Real static methods (method NOT a variant) fall
         # through. Name-keyed to dodge the interpreter symbol_id_value(-1) quirk.
         var recv_enum_name = ""
-        val receiver_kind = receiver.kind
-        val receiver_disc = rt_enum_discriminant(receiver_kind)
-        val fallback_receiver_symbol = SymbolId(id: -1)
-        if receiver_disc == rt_enum_discriminant(HirExprKind.Var(fallback_receiver_symbol)):
-            match receiver_kind:
-                case Var(rsym):
-                    val rs = self.symbols.get_symbol(rsym)
-                    if rs.?: recv_enum_name = rs.name
-                case _: ()
-        elif receiver_disc == rt_enum_discriminant(HirExprKind.NamedVar(fallback_receiver_symbol, "")):
-            val named_receiver_payload = rt_enum_payload(receiver_kind)
-            recv_enum_name = rt_array_get_text(named_receiver_payload, 1)
-        if recv_enum_name != "" and rt_dict_contains(self.enum_variant_index, recv_enum_name):
+        match receiver.kind:
+            case Var(rsym):
+                val rs = self.symbols.get_symbol(rsym)
+                if rs.?: recv_enum_name = rs.name
+            case NamedVar(_, rname):
+                recv_enum_name = rname
+            case _: ()
+        if recv_enum_name != "" and self.enum_variant_index.has(recv_enum_name):
             var is_variant = false
-            val variant_names = self.enum_variant_index[recv_enum_name]
-            var variant_i = 0
-            while variant_i < variant_names.len():
-                if variant_names[variant_i] == method:
+            for vn in self.enum_variant_index[recv_enum_name]:
+                if vn == method:
                     is_variant = true
-                variant_i = variant_i + 1
             if is_variant:
                 return self.lower_enum_construct_named(recv_enum_name, method, args)
 
@@ -619,6 +607,7 @@ impl MirLowering:
                 match found_receiver_type.kind:
                     case Dict(_, _): receiver_is_dict = true
                     case _: ()
+
         # Dict method fallback detection (dictops sweep, same root gap as the
         # `.len()` fix below): HIR type inference frequently never populates
         # `receiver.type_` for a Dict-typed local, so `resolution` comes back
@@ -631,16 +620,12 @@ impl MirLowering:
         # consult `runtime_dict_locals` (populated at every dict-literal/
         # assignment site independent of HIR static typing) to recover
         # dict-ness.
-        var prelowered_method_receiver: LocalId = 0
-        var has_prelowered_method_receiver = false
         var dict_recv_local: LocalId = 0
         var dict_recv_lowered = false
         val is_dict_method_name = method == "keys" or method == "values" or method == "has" or method == "contains" or method == "contains_key" or method == "get" or method == "remove" or method == "delete"
         if not receiver_is_dict and resolution_is_unresolved and is_dict_method_name:
             dict_recv_local = self.lower_expr(receiver)
             dict_recv_lowered = true
-            prelowered_method_receiver = dict_recv_local
-            has_prelowered_method_receiver = true
             # Bug (native_dict_param_no_dictness): mirrors the `.len()` fix
             # right below -- `local_is_runtime_dict` also falls back to the
             # receiver's registered MIR type (correct for a dict-typed
@@ -804,7 +789,7 @@ impl MirLowering:
             self.builder = b_rm
             return receiver_local
 
-        if (method == "len" or method == "length" or method == "is_empty") and args.len() == 0:
+        if (method == "len" or method == "length") and args.len() == 0:
             var len_symbol = ""
             if maybe_receiver_type_for_call != nil:
                 val found_receiver_type = maybe_receiver_type_for_call
@@ -812,16 +797,7 @@ impl MirLowering:
                     len_symbol = self.len_runtime_symbol_for_hir_type(found_receiver_type)
             var receiver_local: LocalId = 0
             var receiver_lowered = false
-            if method == "is_empty":
-                receiver_local = self.lower_expr(receiver)
-                receiver_lowered = true
-                prelowered_method_receiver = receiver_local
-                has_prelowered_method_receiver = true
-                if len_symbol == "" and self.local_is_runtime_array(receiver_local):
-                    len_symbol = "rt_array_len"
-                if len_symbol == "" and self.local_is_str(receiver_local):
-                    len_symbol = "rt_strlen"
-            if len_symbol == "" and method != "is_empty":
+            if len_symbol == "":
                 match resolution:
                     case Unresolved:
                         # Bug #137/#138 (follow-up): an untyped receiver (no HIR
@@ -952,20 +928,9 @@ impl MirLowering:
                 ))
                 var b_len = self.builder
                 val result = b_len.emit_call(func_operand, [mir_operand_copy(receiver_local)], MirType.i64())
-                if val result_local = result:
-                    if method == "is_empty":
-                        val zero_local = b_len.emit_const_int(0)
-                        val empty_local = b_len.emit_binop(
-                            MirBinOp.Eq,
-                            mir_operand_copy(result_local),
-                            mir_operand_copy(zero_local),
-                            MirType.bool()
-                        )
-                        self.builder = b_len
-                        return empty_local
-                    self.builder = b_len
-                    return result_local
                 self.builder = b_len
+                if val result_local = result:
+                    return result_local
                 return receiver_local
 
         # `.to_text()` on a numeric receiver (task #178 text3 probe #5: int -> string
@@ -1615,8 +1580,6 @@ impl MirLowering:
                 # Direct method call on type
                 val arg_operands = if wb_kind != 0:
                     self.build_args_from_receiver(wb_receiver, args)
-                elif has_prelowered_method_receiver:
-                    self.build_args_from_receiver(prelowered_method_receiver, args)
                 else:
                     self.lower_receiver_and_args(receiver, args)
                 val method_operand = self.symbol_to_operand(method_id)
@@ -1642,8 +1605,6 @@ impl MirLowering:
             case TraitMethod(trait_id, method_id):
                 val arg_operands = if wb_kind != 0:
                     self.build_args_from_receiver(wb_receiver, args)
-                elif has_prelowered_method_receiver:
-                    self.build_args_from_receiver(prelowered_method_receiver, args)
                 else:
                     self.lower_receiver_and_args(receiver, args)
                 val method_operand = self.symbol_to_operand(method_id)
@@ -1669,8 +1630,6 @@ impl MirLowering:
             case FreeFunction(func_id):
                 val arg_operands = if wb_kind != 0:
                     self.build_args_from_receiver(wb_receiver, args)
-                elif has_prelowered_method_receiver:
-                    self.build_args_from_receiver(prelowered_method_receiver, args)
                 else:
                     self.lower_receiver_and_args(receiver, args)
                 val func_operand = self.symbol_to_operand(func_id)
@@ -1742,7 +1701,7 @@ impl MirLowering:
                                 case _: ()
                     case _: ()
                 val static_method_key = "static::{static_receiver_name}::{method}"
-                if static_receiver_name != "" and rt_dict_contains(self.struct_method_syms, static_method_key):
+                if static_receiver_name != "" and self.struct_method_syms.has(static_method_key):
                     val static_method_id = self.struct_method_syms[static_method_key]
                     var static_args: [MirOperand] = []
                     for arg in args:
@@ -1760,20 +1719,13 @@ impl MirLowering:
                     val static_result = self.emit_resolved_direct_call(self.symbol_to_operand(static_method_id), static_args, static_return_type)
                     return static_result
 
-                val unresolved_receiver_local = if wb_kind != 0:
-                    wb_receiver
-                elif has_prelowered_method_receiver:
-                    prelowered_method_receiver
-                else:
-                    self.lower_expr(receiver)
-                var unresolved_struct_name: text? = nil
-                if rt_dict_contains(self.struct_value_syms, unresolved_receiver_local.id):
-                    unresolved_struct_name = self.struct_value_syms[unresolved_receiver_local.id]
+                val unresolved_receiver_local = if wb_kind != 0: wb_receiver else: self.lower_expr(receiver)
+                val unresolved_struct_name = self.struct_value_syms.get(unresolved_receiver_local.id)
                 if unresolved_struct_name != nil and unresolved_struct_name != "":
                     val unresolved_method_key = "{unresolved_struct_name}::{method}"
                     # Method symbols are owner-qualified during HIR lowering,
                     # so unrelated types may safely expose the same method name.
-                    if rt_dict_contains(self.struct_method_syms, unresolved_method_key):
+                    if self.struct_method_syms.has(unresolved_method_key):
                         val resolved_method_id = self.struct_method_syms[unresolved_method_key]
                         var im_arg_operands: [MirOperand] = [mir_operand_copy(unresolved_receiver_local)]
                         for arg in args:

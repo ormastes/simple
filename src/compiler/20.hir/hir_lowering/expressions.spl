@@ -15,12 +15,6 @@ use std.string_core.{char_code}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: Any) -> i64
-extern fn rt_enum_payload(value: Any) -> i64
-extern fn rt_array_get_text(array: i64, index: i64) -> text
-extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
-extern fn rt_is_none(value: i64) -> bool
-extern fn rt_unwrap_or_self(value: i64) -> i64
-extern fn rt_value_as_int(value: i64) -> i64
 
 fn hir_expr_env_get(key: text) -> text:
     rt_env_get(key)
@@ -52,9 +46,6 @@ fn parse_tuple_field_index(name: text) -> i64:
         idx = idx * 10 + (char_code(name[i:i + 1]) - 48)
         i = i + 1
     idx
-
-fn hir_pattern_kind_disc(k: PatternKind) -> i64:
-    rt_enum_discriminant(k)
 
 fn is_interp_builtin_fn(name: text) -> bool:
     """Free-function builtins dispatched by NAME in the HIR interpreter
@@ -438,13 +429,54 @@ impl HirLowering:
                 # Typed rebind: extracted ANY-ish payload misreads on stage4
                 # when consumed directly (bug doc iteration 18).
                 val ident_name_t: text = name
-                val found_symbol = self.symbols.lookup_or_invalid(ident_name_t)
-                if found_symbol.is_valid():
-                    # Capture a same-pass qualified rename in the NamedVar
-                    # payload; later MIR lowering cannot rely on that class
-                    # mutation surviving the HIR pass boundary.
-                    val display_name = self.symbols.symbol_display_name(found_symbol, ident_name_t)
-                    HirExprKind.NamedVar(found_symbol, display_name)
+                val symbol = self.symbols.lookup(ident_name_t)
+                if val found_symbol = symbol:
+                    # NOTE: `if val found_symbol = symbol:` is not sufficient
+                    # here -- same class of bug fixed in 413d121a011 for MIR
+                    # `if val ... .type_:` sites: the seed interpreter's
+                    # `if val` presence check can still enter this true
+                    # branch with `found_symbol` bound to nil when the
+                    # lookup actually failed. Downstream consumers of
+                    # HirExprKind.NamedVar (e.g. MIR lowering's `symbol.id`
+                    # access) assume `symbol` is never nil, so a redundant
+                    # explicit nil re-check here avoids constructing a
+                    # NamedVar with a nil symbol and crashing later with
+                    # "undefined field 'id': cannot access field on value
+                    # of type 'nil'".
+                    if found_symbol == nil:
+                        self.lower_unresolved_ident(ident_name_t, e.span)
+                    else:
+                        # Under a --entry-closure bootstrap build, a
+                        # cross-module imported (or same-module,
+                        # non-entry-module) function's stored symbol name may
+                        # have been rewritten to a qualified `module.function`
+                        # form (qualify_imported_function_symbol /
+                        # bootstrap_decl_idx's rename_symbol call, both in
+                        # this file's `impl HirLowering` block) so it stays
+                        # distinct from a same-named function in a DIFFERENT
+                        # module -- the flat MIR accumulator
+                        # (bootstrap_lower_extra_hir_module_to_mir,
+                        # bootstrap_globals.spl) keys/emits every closure
+                        # helper module's functions the same qualified way.
+                        # Bake the CURRENT stored name into this NamedVar's
+                        # payload text HERE (same HIR-lowering pass as the
+                        # rename, so the mutation is still visible) rather
+                        # than deferring to a fresh `self.symbols` lookup at
+                        # MIR-lowering time: a symbol-table rename applied
+                        # during HIR lowering does not survive the trip
+                        # through the bootstrap entry-HIR-module global into
+                        # that later, separate pass (the interpreter's known
+                        # "mutating a class held inside a value-type struct
+                        # across a pass boundary" landmine) even though it IS
+                        # visible to a same-pass lookup like this one (bug
+                        # bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe
+                        # B). A name that was never rewritten (the common
+                        # case: normal compiles, single-entry bootstrap
+                        # builds, and the entry closure module's own
+                        # same-module calls) round-trips to `ident_name_t`
+                        # unchanged, so this is a no-op there.
+                        val display_name = self.symbols.symbol_display_name(found_symbol, ident_name_t)
+                        HirExprKind.NamedVar(found_symbol, display_name)
                 else:
                     self.lower_unresolved_ident(ident_name_t, e.span)
 
@@ -529,19 +561,11 @@ impl HirLowering:
                     # (40.mono, 30.types) does the same rebind. guard is a
                     # DESUGARED (has_guard, guard) pair — not an Option.
                     val typed_arm: MatchArm = arm
-                    # Pattern lowering defines the arm's binding symbols. Keep
-                    # these calls in explicit statement order: native struct
-                    # constructor argument evaluation is not a sequencing
-                    # boundary, and lowering the body first leaves bindings
-                    # such as `case Item(_, _, result)` unresolved.
-                    val hir_pattern = self.lower_pattern(typed_arm.pattern)
-                    val hir_guard = self.lower_hir_expr(typed_arm.guard)
-                    val hir_body = self.lower_hir_block(typed_arm.body)
                     hir_arms = hir_arms.push(HirMatchArm(
-                        pattern: hir_pattern,
+                        pattern: self.lower_pattern(typed_arm.pattern),
                         has_guard: typed_arm.has_guard,
-                        guard: hir_guard,
-                        body: hir_body,
+                        guard: self.lower_hir_expr(typed_arm.guard),
+                        body: self.lower_hir_block(typed_arm.body),
                         span: typed_arm.span
                     ))
                 self.build_match_expr(self.lower_hir_expr(scrutinee), hir_arms, scrutinee.span)
@@ -556,13 +580,7 @@ impl HirLowering:
                         symbol: symbol,
                         name: p.name,
                         type_: type_,
-                        has_default: false,
-                        default: HirExpr(
-                            kind: HirExprKind.NilLit,
-                            has_type_: true,
-                            type_: HirType(kind: HirTypeKind.Unit, span: p.span),
-                            span: p.span
-                        ),
+                        default: nil,
                         span: p.span,
                         is_mutable: false
                     ))
@@ -776,56 +794,7 @@ impl HirLowering:
         HirUnaryOp.Neg
 
     me lower_pattern(p: Pattern) -> HirPattern:
-        val pattern_kind_value: PatternKind = p.kind
-        val pattern_disc = hir_pattern_kind_disc(pattern_kind_value)
-        if pattern_disc == hir_pattern_kind_disc(PatternKind.Wildcard):
-            return HirPattern(kind: HirPatternKind.Wildcard, type_: nil, span: p.span)
-        if pattern_disc == hir_pattern_kind_disc(PatternKind.Binding("", false)):
-            val raw_payload = rt_enum_payload(pattern_kind_value)
-            val binding_name = rt_array_get_text(raw_payload, 0)
-            val mutable_slot = rt_tuple_get(raw_payload, 1)
-            val binding_mutable = if mutable_slot == 0:
-                false
-            elif mutable_slot == 1:
-                true
-            else:
-                rt_value_as_int(mutable_slot) != 0
-            val binding_symbol = self.symbols.define(binding_name, SymbolKind.Variable, nil, p.span, false, binding_mutable, nil)
-            return HirPattern(kind: HirPatternKind.Binding(binding_symbol, binding_mutable), type_: nil, span: p.span)
-        if pattern_disc == hir_pattern_kind_disc(PatternKind.Enum("", "", nil)):
-            val raw_payload = rt_enum_payload(pattern_kind_value)
-            val enum_name = rt_array_get_text(raw_payload, 0)
-            val variant_name = rt_array_get_text(raw_payload, 1)
-            val payload_slot = rt_tuple_get(raw_payload, 2)
-            val enum_symbol = self.symbols.lookup_or_invalid(enum_name)
-            val enum_type = if enum_symbol.is_valid():
-                HirType(kind: HirTypeKind.Named(enum_symbol, []), span: p.span)
-            else:
-                HirType(kind: HirTypeKind.Error, span: p.span)
-            var hir_payload: HirPatternPayload? = nil
-            if not rt_is_none(payload_slot):
-                var payload_value = payload_slot
-                var payload_disc = rt_enum_discriminant(payload_value)
-                val tuple_disc = rt_enum_discriminant(EnumPatternPayload.Tuple([]))
-                val struct_disc = rt_enum_discriminant(EnumPatternPayload.Struct([]))
-                if payload_disc != tuple_disc and payload_disc != struct_disc:
-                    payload_value = rt_unwrap_or_self(payload_slot)
-                    payload_disc = rt_enum_discriminant(payload_value)
-                if payload_disc == tuple_disc:
-                    val patterns = rt_enum_payload(payload_value) as [Pattern]
-                    var hir_patterns: [HirPattern] = []
-                    for pat in patterns:
-                        hir_patterns = hir_patterns.push(self.lower_pattern(pat))
-                    hir_payload = Some(HirPatternPayload.Tuple(hir_patterns))
-                elif payload_disc == struct_disc:
-                    val fields = rt_enum_payload(payload_value) as [(text, Pattern)]
-                    var hir_fields: [(text, HirPattern)] = []
-                    for (fname, fpat) in fields:
-                        hir_fields = hir_fields.push((fname, self.lower_pattern(fpat)))
-                    hir_payload = Some(HirPatternPayload.Struct(hir_fields))
-            return HirPattern(kind: HirPatternKind.Enum(enum_type, variant_name, hir_payload), type_: nil, span: p.span)
-
-        val kind = match pattern_kind_value:
+        val kind = match p.kind:
             case Wildcard:
                 HirPatternKind.Wildcard
 

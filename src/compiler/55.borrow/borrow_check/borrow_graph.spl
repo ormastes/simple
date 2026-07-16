@@ -9,7 +9,6 @@
 # Based on Rust's MIR borrow checker.
 
 use compiler.borrow.borrow_check.lifetime.*
-use std.alloc.sffi.{rt_dict_contains, rt_dict_keys}
 
 # ============================================================================
 # Place (Memory Location)
@@ -271,57 +270,41 @@ pub class BorrowSet:
     me remove_borrow(id: i64):
         """Remove a borrow."""
         var next: Dict<i64, Borrow> = {}
-        val borrow_ids: [i64] = rt_dict_keys(self.borrows)
-        var borrow_index = 0
-        while borrow_index < borrow_ids.len():
-            val key = borrow_ids[borrow_index]
+        for key in self.borrows.keys():
             if key != id:
                 next[key] = self.borrows[key]
-            borrow_index = borrow_index + 1
         self.borrows = next
 
     fn get_borrow(id: i64) -> Borrow?:
         """Get a borrow by ID."""
-        if rt_dict_contains(self.borrows, id):
+        if self.borrows.has(id):
             return self.borrows[id]
         nil
 
     fn active_borrows() -> [Borrow]:
         """Get all active borrows."""
         var result: [Borrow] = []
-        val borrow_ids: [i64] = rt_dict_keys(self.borrows)
-        var borrow_index = 0
-        while borrow_index < borrow_ids.len():
-            val id = borrow_ids[borrow_index]
+        for id in self.borrows.keys():
             val borrow = self.borrows[id]
             result = result.push(borrow)
-            borrow_index = borrow_index + 1
         result
 
     fn borrows_of(place: Place) -> [Borrow]:
         """Get all borrows of a place (or prefix/suffix)."""
         var result: [Borrow] = []
-        val borrow_ids: [i64] = rt_dict_keys(self.borrows)
-        var borrow_index = 0
-        while borrow_index < borrow_ids.len():
-            val id = borrow_ids[borrow_index]
+        for id in self.borrows.keys():
             val borrow = self.borrows[id]
             if place_conflicts_with(borrow.place, place):
                 result = result.push(borrow)
-            borrow_index = borrow_index + 1
         result
 
     fn has_conflicting_borrow(place: Place, kind: BorrowKind) -> Borrow?:
         """Check if there's a conflicting borrow."""
-        val borrow_ids: [i64] = rt_dict_keys(self.borrows)
-        var borrow_index = 0
-        while borrow_index < borrow_ids.len():
-            val id = borrow_ids[borrow_index]
+        for id in self.borrows.keys():
             val borrow = self.borrows[id]
             if place_conflicts_with(borrow.place, place):
                 if kind_conflicts_with(borrow.kind, kind):
                     return borrow
-            borrow_index = borrow_index + 1
         nil
 
 # ============================================================================
@@ -378,9 +361,8 @@ pub class BorrowGraph:
 
     Nodes are program points, edges represent borrow flow.
     """
-    # Parallel arrays avoid erased aggregate values in native dictionaries.
-    point_borrow_ids: [i64]
-    point_borrows: [BorrowSet]
+    # Borrows active at each program point
+    point_borrows: Dict<i64, BorrowSet>
 
     # Places that have been moved
     moved_places: Dict<i64, [Place]>
@@ -393,8 +375,7 @@ pub class BorrowGraph:
 
     static fn create() -> BorrowGraph:
         BorrowGraph(
-            point_borrow_ids: [],
-            point_borrows: [],
+            point_borrows: {},
             moved_places: {},
             errors: [],
             lifetimes: LifetimeEnv.create()
@@ -402,29 +383,11 @@ pub class BorrowGraph:
 
     me get_or_create_borrows(point: i64) -> BorrowSet:
         """Get or create borrow set for a program point."""
-        val existing = self.find_point_borrows(point)
-        if existing >= 0:
-            return self.point_borrows[existing]
+        if self.point_borrows.has(point):
+            return self.point_borrows[point]
         val set = BorrowSet.create()
-        self.point_borrow_ids = self.point_borrow_ids.push(point)
-        self.point_borrows = self.point_borrows.push(set)
+        self.point_borrows[point] = set
         set
-
-    fn find_point_borrows(point: i64) -> i64:
-        var index = 0
-        while index < self.point_borrow_ids.len():
-            if self.point_borrow_ids[index] == point:
-                return index
-            index = index + 1
-        -1
-
-    me set_point_borrows(point: i64, borrow_set: BorrowSet):
-        val existing = self.find_point_borrows(point)
-        if existing >= 0:
-            self.point_borrows[existing] = borrow_set
-            return
-        self.point_borrow_ids = self.point_borrow_ids.push(point)
-        self.point_borrows = self.point_borrows.push(borrow_set)
 
     me record_borrow(point: i64, place: Place, kind: BorrowKind) -> Borrow?:
         """Record a borrow at a program point.
@@ -450,7 +413,7 @@ pub class BorrowGraph:
         # Create the borrow
         val lifetime = self.lifetimes.fresh_lifetime()
         val borrow = borrow_set.add_borrow(place, kind, lifetime, point)
-        self.set_point_borrows(point, borrow_set)
+        self.point_borrows[point] = borrow_set
 
         borrow
 
@@ -494,24 +457,20 @@ pub class BorrowGraph:
         """End a borrow at a program point."""
         var borrow_set = self.get_or_create_borrows(point)
         borrow_set.remove_borrow(borrow_id)
-        self.set_point_borrows(point, borrow_set)
+        self.point_borrows[point] = borrow_set
 
     me propagate_borrows(from_point: i64, to_point: i64):
         """Propagate borrows from one point to another (control flow)."""
         val from_set = self.get_or_create_borrows(from_point)
         var to_set = self.get_or_create_borrows(to_point)
 
-        val borrow_ids: [i64] = rt_dict_keys(from_set.borrows)
-        var borrow_index = 0
-        while borrow_index < borrow_ids.len():
-            val id = borrow_ids[borrow_index]
+        for id in from_set.borrows.keys():
             val borrow = from_set.borrows[id]
             # Check if borrow is still live at to_point
             # (simplified: copy all borrows)
             to_set.borrows[borrow.id] = borrow
-            borrow_index = borrow_index + 1
 
-        self.set_point_borrows(to_point, to_set)
+        self.point_borrows[to_point] = to_set
 
     fn get_errors() -> [BorrowError]:
         """Get all borrow errors."""
