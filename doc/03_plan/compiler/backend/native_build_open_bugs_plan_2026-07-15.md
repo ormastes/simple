@@ -89,9 +89,11 @@ fallback hits; the cross-module Result control continues to cover both backends.
 The existing Linux x86_64 LLVM bootstrap CI leg now enables canonical Stage 5,
 which builds both pure-Simple MCP servers and runs their fresh-artifact
 initialize/list/call smoke. Other host/backend legs still skip that duplicate
-build. The pure-Simple architecture job also executes the existing ARM32 LLVM
-compiler-surface specification, closing the static matrix gap alongside x86_64,
-AArch64, and RISC-V; hosted ARM32 linking remains explicitly unsupported.
+build. The pure-Simple architecture job now requires a default-LLVM ARM32
+ELF32/ARM relocatable object from the staged compiler and proves explicit
+Cranelift rejects ARM32 without leaving an object. AArch64 and RISC-V retain
+their dual-backend QEMU execution gates; hosted ARM32 linking remains
+explicitly unsupported.
 
 ---
 

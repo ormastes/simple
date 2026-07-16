@@ -90,8 +90,9 @@ grep -q '^  native-architectures:' "${multiplatform}" || fail "pure-Simple nativ
 grep -q 'name: bootstrap-Linux x86_64-llvm-' "${multiplatform}" || fail "native architecture job does not consume Linux LLVM pure stage"
 grep -q 'chmod +x "$compiler"' "${multiplatform}" || fail "downloaded pure-Simple compiler executable mode is not restored"
 grep -q 'SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BIN="$compiler"' "${multiplatform}" || fail "native architecture gate permits stub fallback"
-grep -Fq 'SIMPLE_LIB=src SIMPLE_LLVM_TEST=1 "$compiler" test \' "${multiplatform}" || fail "ARM32 compiler-surface gate missing"
-grep -Fq 'test/03_system/feature/usage/llvm_backend_arm32_spec.spl \' "${multiplatform}" || fail "ARM32 specification is not wired"
+grep -Fq 'binutils-arm-linux-gnueabihf' "${multiplatform}" || fail "ARM32 object inspection toolchain missing"
+grep -Fq 'check_unsupported_arm32' scripts/check/check-cranelift-aot-aggregate-cross.shs || fail "Cranelift ARM32 rejection gate missing"
+grep -Fq "does not support target.*arm" scripts/check/check-cranelift-aot-aggregate-cross.shs || fail "Cranelift ARM32 rejection diagnostic is not checked"
 grep -Fq 'if [ "$NATIVE_SMOKE_BACKEND" = cranelift ]; then' scripts/check/native-smoke-matrix.shs || fail "native smoke lacks explicit Cranelift branch"
 grep -Fq 'set -- "$@" --backend=cranelift' scripts/check/native-smoke-matrix.shs || fail "native smoke does not select Cranelift explicitly"
 if grep -Fq -- '--backend "$NATIVE_SMOKE_BACKEND"' scripts/check/native-smoke-matrix.shs; then
@@ -100,6 +101,7 @@ fi
 grep -Fq 'record_id="$1"; record_mode="$2"; record_status="$3"; record_detail="$4"' scripts/check/check-native-seed-parity.shs || fail "native parity result recording clobbers caller state"
 arch_gate=scripts/check/check-llvm-simd-row-native-arch.shs
 for invocation in \
+  'build_object_arch arm32 armv7-unknown-linux-gnueabihf' \
   'build_arch x86_64 x86_64-unknown-linux-gnu' \
   'build_arch aarch64 aarch64-unknown-linux-gnu' \
   'build_crossmodule_arch aarch64 aarch64-unknown-linux-gnu' \
@@ -107,6 +109,14 @@ for invocation in \
   'build_crossmodule_arch riscv64_rvv riscv64-unknown-linux-gnu'; do
   grep -Fq "${invocation}" "${arch_gate}" || fail "native architecture invocation missing: ${invocation}"
 done
+arm_object_body=$(sed -n '/^build_object_arch() {$/,/^}$/p' "${arch_gate}")
+printf '%s\n' "${arm_object_body}" | grep -Fq -- '--emit-object' || fail "ARM32 object gate does not emit an object"
+if printf '%s\n' "${arm_object_body}" | grep -Fq -- '--backend'; then
+  fail "ARM32 object gate does not exercise default LLVM"
+fi
+grep -Fq "Machine:[[:space:]]+ARM" "${arch_gate}" || fail "ARM32 object gate does not inspect the ELF machine"
+grep -Fq "Class:[[:space:]]+ELF32" "${arch_gate}" || fail "ARM32 object gate does not require ELF32"
+grep -Fq "Type:[[:space:]]+REL" "${arch_gate}" || fail "ARM32 object gate does not require a relocatable object"
 grep -q 'build/bootstrap/stage2/\*\*/simple\*' "${multiplatform}" || fail "multiplatform Stage 2 artifact missing"
 grep -q 'build/bootstrap/stage3/\*\*/simple\*' "${multiplatform}" || fail "multiplatform Stage 3 artifact missing"
 if grep -q 'src/compiler_rust/target/bootstrap/simple\*' "${multiplatform}"; then
