@@ -2,7 +2,7 @@
 
 **ID:** interp_expect_to_equal_swallows_failures_multi_describe_2026-06-15
 **Severity:** P1
-**Status:** Open
+**Status:** source-resolved; regression pinned, execution pending
 **Discovered:** 2026-06-15
 
 ## Symptom
@@ -48,3 +48,13 @@ equal to whatever is there.
 
 - `interp_run_enum_single_field_payload_corrupt_2026-06-15.md` — single-field enum payload
   corruption in `bin/simple run` (separate issue; absent in seed test runner)
+
+## Resolution (2026-07-16)
+
+Current `std.spec` resets `current_test_error` only when an `it` starts and
+passing matchers never clear it. The child runner also sums every describe
+summary instead of trusting the last one. The shared red sibling fixture now
+runs a passing expectation after its failure; the existing system contract
+still requires two examples and one failure, covering both failure retention
+inside one `it` and aggregation across sibling describes. Execution is pending
+a permitted pure-Simple test binary.
