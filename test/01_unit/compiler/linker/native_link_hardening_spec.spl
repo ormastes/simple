@@ -5,9 +5,14 @@ use compiler.backend.linker.linker_wrapper.{
     unresolved_symbol_flags_for_cc,
     cc_fallback_object_args,
     msvc_duplicate_symbol_flag,
-    macos_homebrew_prefix
+    macos_homebrew_prefix,
+    native_all_input_present,
+    native_all_gnu_support_args,
+    native_all_msvc_support_libraries
 }
 use testing.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
 
 describe "Native linker hardening":
     it "preserves every object in cc fallback arguments":
@@ -46,3 +51,46 @@ describe "Native linker hardening":
 
     it "skips cc fallback unresolved-symbol flags on Darwin":
         expect(unresolved_symbol_flags_for_cc("Darwin")).to_equal([])
+
+    it "recognizes only canonical native-all archive leaves":
+        expect(native_all_input_present(["/tmp/libsimple_native_all.a"])).to_be(true)
+        expect(native_all_input_present(["C:\\runtime\\SIMPLE_NATIVE_ALL.LIB"])).to_be(true)
+        expect(native_all_input_present(["/tmp/libsimple_runtime.a"])).to_be(false)
+        expect(native_all_input_present(["/tmp/libsimple_native_all.dll.a"])).to_be(false)
+        expect(native_all_input_present(["/tmp/libsimple_native_all.a.tmp"])).to_be(false)
+        expect(native_all_input_present(["/tmp/my_libsimple_native_all.a"])).to_be(false)
+
+    it "keeps native-all support out of core-only links":
+        for os in ["linux", "macos", "freebsd", "windows-mingw"]:
+            expect(native_all_gnu_support_args(["runtime.o"], os, "/brew")).to_equal([])
+        expect(native_all_msvc_support_libraries(["runtime.obj"])).to_equal([])
+
+    it "supplies hosted native-all transitive dependencies":
+        val archive = ["/runtime/libsimple_native_all.a"]
+        expect(native_all_gnu_support_args(archive, "linux", "")).to_equal([
+            "-lstdc++", "-lunwind", "-lsqlite3", "-lz", "-lzstd", "-ltinfo", "-lffi", "-lxml2", "-lncurses"
+        ])
+        val macos = native_all_gnu_support_args(archive, "macos", "/custom/brew")
+        expect(macos).to_contain("-L/custom/brew/lib")
+        expect(macos).to_contain("CoreFoundation")
+        expect(macos).to_contain("AppKit")
+        expect(macos).to_contain("CoreGraphics")
+        expect(native_all_gnu_support_args(archive, "freebsd", "")).to_equal([
+            "-L/usr/local/lib", "-lc++", "-lexecinfo", "-lz", "-lzstd", "-lutil", "-lrt"
+        ])
+        val mingw = native_all_gnu_support_args(["C:\\runtime\\simple_native_all.lib"], "windows-mingw", "")
+        expect(mingw).to_contain("-ldbghelp")
+        expect(mingw).to_contain("-lruntimeobject")
+        expect(mingw).to_contain("-lgcc")
+        val msvc = native_all_msvc_support_libraries(["C:\\runtime\\simple_native_all.lib"])
+        expect(msvc).to_contain("dbghelp.lib")
+        expect(msvc).to_contain("gdi32.lib")
+        expect(msvc).to_contain("vcruntime.lib")
+
+    it "wires the shared policy into every native and shared linker path":
+        val native = rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl")
+        val shared = rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/shared_linking.spl")
+        expect(native.split("native_all_gnu_support_args").len() - 1).to_equal(4)
+        expect(shared.split("native_all_gnu_support_args").len() - 1).to_equal(3)
+        expect(native.split("native_all_msvc_support_libraries").len() - 1).to_equal(1)
+        expect(shared.split("native_all_msvc_support_libraries").len() - 1).to_equal(1)

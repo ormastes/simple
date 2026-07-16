@@ -322,31 +322,6 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("-lm")
         args.push("-lSystem")
         args.push("-lSDL2")
-        # Homebrew prefix so -lzstd resolves (no libzstd.tbd ships in the SDK).
-        # The bootstrap wrapper exports HOMEBREW_PREFIX for both Apple Silicon
-        # and Intel hosts; keep a standard Intel fallback for direct use.
-        val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
-        args.push("-L{brew_prefix}/lib")
-        # C libraries referenced by libsimple_native_all.a / vendor crates:
-        # libffi (dynamic FFI), libedit (REPL), zlib/zstd (compression),
-        # libxml2 (XML helpers), libncurses (terminfo), libobjc (Obj-C runtime),
-        # libiconv (text transcoding). Mirror of the Rust seed macos() set.
-        args.push("-lc++")
-        args.push("-lz")
-        args.push("-lffi")
-        args.push("-ledit")
-        args.push("-lzstd")
-        args.push("-lxml2")
-        args.push("-lncurses")
-        args.push("-lobjc")
-        args.push("-liconv")
-        # Apple frameworks. Metal/CoreGraphics are referenced by the graphics
-        # runtime baked into libsimple_native_all.a (e.g. _MTLCreateSystemDefaultDevice);
-        # without them those symbols stay unresolved at link time.
-        args.push("-framework")
-        args.push("Metal")
-        args.push("-framework")
-        args.push("CoreGraphics")
     elif os == "freebsd":
         args.push("-lc")
         args.push("-lpthread")
@@ -354,6 +329,10 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("-lm")
         args.push("-lSDL2")
         args.push("--no-as-needed")
+
+    val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
+    for flag in native_all_gnu_support_args(object_files, os, brew_prefix):
+        args.push(flag)
 
     # Libraries from config
     for lib in config.libraries:
@@ -631,14 +610,11 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         # object -> "Undefined symbols: _main" on Mach-O.
         var args = cc_fallback_object_args(object_files)
         val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
-        for flag in [
-            "-lc", "-lpthread", "-lm", "-lSystem", "-lSDL2",
-            "-L{brew_prefix}/lib",
-            "-lc++", "-lz", "-lffi", "-ledit", "-lzstd", "-lxml2", "-lncurses", "-lobjc", "-liconv",
-            "-framework", "Metal", "-framework", "CoreGraphics",
-            "-Wl,-dead_strip",
-            "-o", output
-        ]:
+        for flag in ["-lc", "-lpthread", "-lm", "-lSystem", "-lSDL2"]:
+            args.push(flag)
+        for flag in native_all_gnu_support_args(object_files, os_name, brew_prefix):
+            args.push(flag)
+        for flag in ["-Wl,-dead_strip", "-o", output]:
             args.push(flag)
         val (stdout, stderr, code) = process_run(cc, args)
         if code == 0:
@@ -657,6 +633,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         args.push("-lm")
         args.push("-lSDL2")
         args.push("-Wl,--no-as-needed")
+        for flag in native_all_gnu_support_args(object_files, os_name, ""):
+            args.push(flag)
         args.push("-Wl,--allow-multiple-definition")
         args.push("-Wl,--gc-sections")
         args.push("-o")
@@ -670,10 +648,6 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         var args: [text] = []
         if not hosted_cross:
             args.push("-fuse-ld=lld")
-        var has_native_all = false
-        for obj in object_files:
-            if obj.ends_with("libsimple_native_all.a"):
-                has_native_all = true
         if not config.pie:
             args.push("-no-pie")
         for obj in object_files:
@@ -683,13 +657,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         args.push("-lc")
         args.push("-lpthread")
         args.push("-ldl")
-        if has_native_all:
-            args.push("-lstdc++")
-            args.push("-lz")
-            args.push("-lzstd")
-            args.push("-lxml2")
-            args.push("-lncurses")
-            args.push("-lffi")
+        for flag in native_all_gnu_support_args(object_files, os_name, ""):
+            args.push(flag)
         args.push("-Wl,--as-needed")
         args.push("-lm")
         if not hosted_cross:
@@ -751,6 +720,9 @@ fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfi
     # Add essential Windows libraries
     val win_libs = ["kernel32.lib", "ws2_32.lib", "bcrypt.lib", "userenv.lib", "ntdll.lib", "advapi32.lib", "d3d11.lib", "dxgi.lib", "SDL2.lib"]
     for wlib in win_libs:
+        if not msvc_config.libs.contains(wlib):
+            msvc_config.libs.push(wlib)
+    for wlib in native_all_msvc_support_libraries(object_files):
         if not msvc_config.libs.contains(wlib):
             msvc_config.libs.push(wlib)
 

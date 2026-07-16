@@ -532,6 +532,14 @@ same case covers default LLVM and explicit Cranelift; execution evidence is
 still pending. Native parity builds explicitly unset `SIMPLE_RUNTIME_PATH` so
 an ambient seed archive cannot bypass the C owner under test.
 
+Native and shared hosted linkers now share exact-leaf native-all detection and
+add transitive libraries only when that archive is present. Linux receives the
+default-LLVM C++/unwind/SQLite/compression/terminfo/FFI/XML set; macOS receives
+the matching libraries, Homebrew path, and all nine required frameworks;
+FreeBSD receives its C++/execinfo/compression/util/rt set; and MinGW/MSVC use
+their authoritative Windows library sets. Core-only links receive no helper
+arguments. Executable platform proof remains pending.
+
 ## 2026-07-16 canonical core-C HTTP ownership
 
 The legacy `runtime.c` definition of `rt_http_get` returned a raw C string even
