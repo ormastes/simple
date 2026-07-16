@@ -3,17 +3,11 @@
 # src / app / cli / lint_entry.spl starts quickly and reliably.
 
 use lazy compiler.tools.formatter.main.{make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
+use lazy compiler.tools.lint.main.{Linter, LintLevel}
 use lazy compiler.tools.fix.main.{collect_fixes_from_source, FixApplicator}
 use lazy compiler.tools.fix.rules.{check_simd_opportunities, check_short_grammar_refactor}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
 use app.io.cli_ops.{_cli_eprint, _cli_process_run, _cli_run_workspace_root_guard}
-
-fn file_allows_lint(source: text, lint_name: text) -> bool:
-    val compact = source.replace(" ", "").replace("\n", "")
-    compact.contains("@allow({lint_name})") or
-        compact.contains("@allow({lint_name}, ") or
-        compact.contains(", {lint_name})") or
-        compact.contains(", {lint_name}, ")
 
 fn cli_run_lint(args: [text]) -> i64:
     var files: [text] = []
@@ -68,18 +62,20 @@ fn cli_run_lint(args: [text]) -> i64:
             continue
 
         val source = file_read(file_path)
-        val source_fixes = collect_fixes_from_source(file_path, source)
-        var visible_fix_count = 0
-        for fix in source_fixes:
-            val id_parts = fix.id.split(":")
-            if id_parts.len() < 2:
-                continue
-            val lint_name = id_parts[1]
-            if file_allows_lint(source, lint_name):
-                continue
-            val line_str = if id_parts.len() > 2: id_parts[2] else: "?"
-            visible_fix_count = visible_fix_count + 1
-            _cli_eprint("{file_path}:{line_str}: warning[{lint_name}]: {fix.description}")
+        var linter = Linter.new()
+        val results = linter.lint_source(file_path, source)
+        var visible_count = 0
+        for result in results:
+            visible_count = visible_count + 1
+            var level_text = "info"
+            match result.lint.level:
+                case LintLevel.Deny:
+                    level_text = "error"
+                case LintLevel.Warn:
+                    level_text = "warning"
+                case LintLevel.Allow:
+                    level_text = "info"
+            _cli_eprint("{file_path}:{result.line}: {level_text}[{result.lint.code}]: {result.lint.message}")
 
         # SIMD opportunity pass — info severity, never increments exit code
         if run_simd:
@@ -92,7 +88,7 @@ fn cli_run_lint(args: [text]) -> i64:
                 print "{file_path}:{line_str2}: info[simd_opportunity]: {sf.description}"
                 si = si + 1
 
-        if visible_fix_count == 0:
+        if visible_count == 0:
             print "lint: {file_path} OK"
         else:
             exit_code = 1

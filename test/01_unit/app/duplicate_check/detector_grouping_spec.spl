@@ -1,9 +1,11 @@
-use compiler.tools.duplicate_check.detector.{find_duplicates, collect_files}
+use compiler.tools.duplicate_check.detector.{find_duplicates, collect_files, read_detector_source}
 use compiler.tools.duplicate_check.cache.{new_token_cache_manager}
 use compiler.tools.duplicate_check.config.{default_config, apply_analysis_mode}
 use app.io.mod.{shell}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 
 fn ensure_clean_dir(path: text):
@@ -88,3 +90,23 @@ describe "duplicate_check detector grouping regressions":
         expect(contains_path(files, keep)).to_equal(true)
         expect(contains_path(files, spec)).to_equal(false)
         expect(contains_path(files, nested)).to_equal(false)
+
+    it "does not execute shell metacharacters in a collection path":
+        val sentinel = "/tmp/simple_duplicate_detector_shell_injection"
+        val _ = rt_file_delete(sentinel)
+        val hostile_path = "/tmp/missing; touch {sentinel} #"
+
+        val files = collect_files(hostile_path, lexical_config())
+
+        expect(files.len()).to_equal(0)
+        expect(rt_file_exists(sentinel)).to_equal(false)
+
+    it "does not execute shell metacharacters in a source path":
+        val sentinel = "/tmp/simple_duplicate_detector_read_shell_injection"
+        val _ = rt_file_delete(sentinel)
+        val hostile_path = "/tmp/missing'; touch {sentinel}; #"
+
+        val source = read_detector_source(hostile_path)
+
+        expect(source).to_equal("")
+        expect(rt_file_exists(sentinel)).to_equal(false)

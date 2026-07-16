@@ -20,6 +20,25 @@ Before submitting, the client verifies that the daemon answers a status ping.
 If the PID exists but the daemon does not answer, the client restarts it and
 pings again.
 
+The production CLI exposes the same lifecycle directly:
+
+```bash
+bin/simple test-daemon status
+bin/simple test-daemon run test/01_unit/example_spec.spl
+bin/simple test-daemon clean test/01_unit/example_spec.spl
+bin/simple test-daemon stop
+```
+
+`run` may reuse a dependency-fresh result and reports
+`test_daemon_cache=hit` or `test_daemon_cache=miss`. `clean` always executes,
+refreshes the entry, and reports `test_daemon_cache=clean`. Source or imported
+dependency changes invalidate the entry through the shared incremental-state
+owner. A daemon-owned child sets `SIMPLE_TEST_DAEMON_CHILD=1`; nested test
+commands detect it and bypass the same serial daemon.
+
+The daemon launches only the current production `simple` runtime. It does not
+fall back to `src/compiler_rust/target/{bootstrap,debug}`.
+
 ## Resource Safety
 
 The daemon checks current host CPU and memory before starting work. Requests are
@@ -55,6 +74,18 @@ interval. While work is active, it switches to the shorter busy poll interval.
 - `qemu_effective_limit`
 
 Use these fields when diagnosing queued QEMU or test requests.
+
+## Stable test outcomes
+
+The top-level runner publishes `Outcome:` and exits with: pass `0`, assertion
+or child failure `1`, usage error `2`, internal error `3`, empty discovery `4`,
+and timeout/resource failure `124`. A nonzero child exit and an
+authored/executed example-count mismatch always fail closed.
+
+For large suites, `--batch-size=N` re-executes bounded worker batches through
+the normal result wrapper and aggregates the full typed results. Each boundary
+prints worker/parent PID and parent peak RSS evidence. The production 1,000
+example qualification is `sh scripts/check/check-test-runner-rss-batch.shs`.
 
 ## Session Debug TUI
 

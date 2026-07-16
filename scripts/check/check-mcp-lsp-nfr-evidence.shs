@@ -1,0 +1,154 @@
+#!/bin/sh
+set -eu
+
+MCP_SERVER="${MCP_SERVER:-bin/simple_mcp_server}"
+LSP_MCP_SERVER="${LSP_MCP_SERVER:-bin/simple_lsp_mcp_server}"
+SAMPLES="${MCP_LSP_NFR_SAMPLES:-20}"
+STARTUP_MAX_MS="${MCP_LSP_NFR_STARTUP_MAX_MS:-1000}"
+REQUEST_P95_MAX_MS="${MCP_LSP_NFR_REQUEST_P95_MAX_MS:-200}"
+RSS_MAX_KIB="${MCP_LSP_NFR_RSS_MAX_KIB:-1048576}"
+
+case "$SAMPLES" in ''|*[!0-9]*) echo "error=invalid_sample_count:$SAMPLES"; exit 2 ;; esac
+[ "$SAMPLES" -gt 0 ] || { echo "error=invalid_sample_count:$SAMPLES"; exit 2; }
+[ -x /usr/bin/time ] || { echo "error=gnu_time_required"; exit 2; }
+/usr/bin/time -f %M -o /dev/null true 2>/dev/null || { echo "error=gnu_time_required"; exit 2; }
+command -v timeout >/dev/null 2>&1 || { echo "error=timeout_required"; exit 2; }
+
+now_ms() {
+    value="$(date +%s%3N 2>/dev/null || true)"
+    case "$value" in *[!0-9]*|'') perl -MTime::HiRes=time -e 'printf "%.0f\n", time()*1000' ;; *) printf '%s\n' "$value" ;; esac
+}
+
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+wait_for_id() {
+    id=$1
+    output=$2
+    deadline=$(( $(now_ms) + 5000 ))
+    while [ "$(now_ms)" -le "$deadline" ]; do
+        grep -Fq "\"id\":\"$id\"" "$output" 2>/dev/null && return 0
+        sleep 0.005
+    done
+    return 1
+}
+
+send_json() {
+    printf '%s\n' "$1" >&3
+}
+
+run_session() {
+    label=$1
+    kind=$2
+    wrapper=$3
+    count=$4
+    retain=$5
+    input="$TMP/$label.in"
+    output="$TMP/$label.out"
+    rss="$TMP/$label.rss"
+    latencies="$TMP/$label.latencies"
+    mkfifo "$input"
+    : >"$output"
+    : >"$latencies"
+
+    # Open both ends in the parent so startup timing includes wrapper launch
+    # without blocking on the FIFO rendezvous. The child closes fd 3.
+    exec 3<>"$input"
+    start="$(now_ms)"
+    /usr/bin/time -f %M -o "$rss" timeout 30 "$wrapper" 3>&- <"$input" >"$output" 2>"$TMP/$label.err" &
+    pid=$!
+    init_id="$label-init"
+    send_json "{\"jsonrpc\":\"2.0\",\"id\":\"$init_id\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"nfr-evidence\",\"version\":\"1\"}}}"
+    wait_for_id "$init_id" "$output" || { exec 3>&-; wait "$pid" || true; echo "error=${label}_initialize_timeout"; exit 1; }
+    startup_ms=$(( $(now_ms) - start ))
+    send_json '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+
+    i=1
+    while [ "$i" -le "$count" ]; do
+        request_id="$label-request-$i"
+        if [ "$kind" = mcp ]; then
+            request="{\"jsonrpc\":\"2.0\",\"id\":\"$request_id\",\"method\":\"tools/call\",\"params\":{\"name\":\"simple_status\",\"arguments\":{\"paths\":\"src/app/mcp/main.spl\"}}}"
+        else
+            request="{\"jsonrpc\":\"2.0\",\"id\":\"$request_id\",\"method\":\"tools/call\",\"params\":{\"name\":\"lsp_symbols\",\"arguments\":{\"file\":\"src/app/simple_lsp_mcp/main.spl\"}}}"
+        fi
+        request_start="$(now_ms)"
+        send_json "$request"
+        wait_for_id "$request_id" "$output" || { exec 3>&-; wait "$pid" || true; echo "error=${label}_request_timeout:$request_id"; exit 1; }
+        printf '%s\n' "$(( $(now_ms) - request_start ))" >>"$latencies"
+        i=$((i + 1))
+    done
+    exec 3>&-
+    wait "$pid" || { echo "error=${label}_server_failed"; exit 1; }
+    grep -Fq '"error":' "$output" && { echo "error=${label}_protocol_error"; exit 1; }
+    grep -Fq '"isError":true' "$output" && { echo "error=${label}_tool_error"; exit 1; }
+
+    [ "$retain" = true ] || return 0
+    rank=$(( (count * 95 + 99) / 100 ))
+    p95="$(sort -n "$latencies" | sed -n "${rank}p")"
+    max_rss="$(sed -n '1p' "$rss")"
+    eval "${label}_startup_ms=$startup_ms"
+    eval "${label}_request_p95_ms=$p95"
+    eval "${label}_max_rss_kib=$max_rss"
+}
+
+record_provenance() {
+    label=$1
+    wrapper=$2
+    log=$3
+    line="$(grep "startup wrapper=$label mode=native native=" "$log" | tail -1)"
+    native="$(printf '%s\n' "$line" | sed 's/^.* mode=native native=//; s/ cwd=.*$//')"
+    [ -x "$native" ] || { echo "error=${label}_native_provenance_missing"; exit 1; }
+    sidecar="${native}.sha256"
+    [ -f "$sidecar" ] || { echo "error=${label}_native_sha256_sidecar_missing:$sidecar"; exit 1; }
+    expected="$(awk 'NR == 1 { print $1 }' "$sidecar")"
+    actual="$(hash_file "$native")"
+    [ "$expected" = "$actual" ] || { echo "error=${label}_native_sha256_mismatch"; exit 1; }
+    eval "${label}_wrapper_sha256=$(hash_file "$wrapper")"
+    eval "${label}_native_path=\$native"
+    eval "${label}_native_sha256=\$actual"
+    eval "${label}_native_sha256_sidecar=\$sidecar"
+}
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT INT TERM
+mkdir -p .simple/logs
+[ -x "$MCP_SERVER" ] || { echo "error=missing_wrapper:$MCP_SERVER"; exit 1; }
+[ -x "$LSP_MCP_SERVER" ] || { echo "error=missing_wrapper:$LSP_MCP_SERVER"; exit 1; }
+
+# One discarded session warms the wrapper probe and server filesystem caches.
+run_session mcp_warmup mcp "$MCP_SERVER" 1 false
+run_session lsp_warmup lsp "$LSP_MCP_SERVER" 1 false
+run_session mcp mcp "$MCP_SERVER" "$SAMPLES" true
+run_session lsp lsp "$LSP_MCP_SERVER" "$SAMPLES" true
+
+# Wrapper startup logs bind protocol behavior to the exact selected artifact.
+record_provenance simple_mcp_server "$MCP_SERVER" .simple/logs/simple_mcp_startup.log
+record_provenance simple_lsp_mcp_server "$LSP_MCP_SERVER" .simple/logs/simple_lsp_mcp_startup.log
+
+echo "mcp_wrapper=$MCP_SERVER"
+echo "mcp_wrapper_sha256=$simple_mcp_server_wrapper_sha256"
+echo "mcp_native_path=$simple_mcp_server_native_path"
+echo "mcp_native_sha256=$simple_mcp_server_native_sha256"
+echo "mcp_native_sha256_sidecar=$simple_mcp_server_native_sha256_sidecar"
+echo "mcp_startup_ms=$mcp_startup_ms"
+echo "mcp_request_p95_ms=$mcp_request_p95_ms"
+echo "mcp_max_rss_kib=$mcp_max_rss_kib"
+echo "lsp_wrapper=$LSP_MCP_SERVER"
+echo "lsp_wrapper_sha256=$simple_lsp_mcp_server_wrapper_sha256"
+echo "lsp_native_path=$simple_lsp_mcp_server_native_path"
+echo "lsp_native_sha256=$simple_lsp_mcp_server_native_sha256"
+echo "lsp_native_sha256_sidecar=$simple_lsp_mcp_server_native_sha256_sidecar"
+echo "lsp_startup_ms=$lsp_startup_ms"
+echo "lsp_request_p95_ms=$lsp_request_p95_ms"
+echo "lsp_max_rss_kib=$lsp_max_rss_kib"
+
+[ "$mcp_startup_ms" -lt "$STARTUP_MAX_MS" ]
+[ "$lsp_startup_ms" -lt "$STARTUP_MAX_MS" ]
+[ "$mcp_request_p95_ms" -lt "$REQUEST_P95_MAX_MS" ]
+[ "$lsp_request_p95_ms" -lt "$REQUEST_P95_MAX_MS" ]
+[ "$mcp_max_rss_kib" -lt "$RSS_MAX_KIB" ]
+[ "$lsp_max_rss_kib" -lt "$RSS_MAX_KIB" ]
+echo "mcp_lsp_nfr_status=pass"

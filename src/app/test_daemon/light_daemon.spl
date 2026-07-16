@@ -2,6 +2,8 @@
 
 use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run_timeout}
+use app.io.mod.{env_get, env_set}
+use app.test_incremental_state_shared.{IncrementalTestState, incremental_test_state_new}
 
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_dir_list(path: text) -> [text]
@@ -23,20 +25,19 @@ fn atomic_write_text(path: text, content: text) -> bool:
         if rt_file_rename(tmp_path, path):
             return true
         rt_file_delete(tmp_path)
-    rt_file_write_text(path, content)
+    false
 
 val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
 val LIGHT_REQ_DIR: text = ".build/test_daemon_light/requests"
 val LIGHT_RESP_DIR: text = ".build/test_daemon_light/responses"
 val LIGHT_LOCK: text = ".build/test_daemon_light/daemon.lock"
 val LIGHT_STOP: text = ".build/test_daemon_light/stop"
+val LIGHT_DEP_GRAPH: text = ".build/test_daemon_light/dep_graph.sdn"
 
 fn simple_binary() -> text:
     val raw = cli_get_args()
     if raw.len() > 0 and rt_file_exists(raw[0]):
         return raw[0]
-    if rt_file_exists("src/compiler_rust/target/debug/simple"):
-        return "src/compiler_rust/target/debug/simple"
     if rt_file_exists("bin/simple"):
         return "bin/simple"
     if rt_file_exists("/proc/self/exe"):
@@ -57,30 +58,46 @@ fn basename(path: text) -> text:
         return path
     parts[parts.len() - 1]
 
-fn handle_request(binary: text, name: text):
+fn handle_request(binary: text, name: text, state: IncrementalTestState):
     if not name.ends_with(".req"):
         return
     val req_path = if name.contains("/"): name else: "{LIGHT_REQ_DIR}/{name}"
-    val test_path = (rt_file_read_text(req_path) ?? "").trim()
+    val request = (rt_file_read_text(req_path) ?? "").trim()
+    val lines = request.split("\n")
+    val clean = lines.len() > 1 and lines[0] == "clean"
+    val test_path = if lines.len() > 1: lines[1].trim() else: request
     if test_path == "":
         atomic_write_text(response_path(name), "1\nmissing test path")
         rt_file_delete(req_path)
         return
+    if not clean:
+        val cached = state.check_freshness(test_path)
+        if cached.test_path != "":
+            atomic_write_text(response_path(name), "{cached.result_status}\n{cached.output}\ntest_daemon_cache=hit")
+            rt_file_delete(req_path)
+            return
+    val previous_child_marker = env_get("SIMPLE_TEST_DAEMON_CHILD") ?? ""
+    env_set("SIMPLE_TEST_DAEMON_CHILD", "1")
     val (stdout, stderr, code) = process_run_timeout(
         binary,
         ["run", "src/app/test_runner_new/test_runner_single.spl", test_path, "--no-session-daemon", "--sequential"],
         600000
     )
+    env_set("SIMPLE_TEST_DAEMON_CHILD", previous_child_marker)
     var body = stdout
     if stderr != "":
         body = body + stderr
-    atomic_write_text(response_path(name), "{code}\n{body}")
+    state.record_daemon_result(test_path, code as i64, 0, if code == 0: 0 else: 1, 0, 0, body)
+    state.save()
+    val cache_state = if clean: "clean" else: "miss"
+    atomic_write_text(response_path(name), "{code}\n{body}\ntest_daemon_cache={cache_state}")
     rt_file_delete(req_path)
 
 fn main() -> i64:
     ensure_dirs()
     rt_file_write_text(LIGHT_LOCK, "{rt_getpid()}")
     val binary = simple_binary()
+    val state = incremental_test_state_new("", LIGHT_DEP_GRAPH, true)
     var idle = 0
     while idle < 240:
         if rt_file_exists(LIGHT_STOP):
@@ -95,7 +112,7 @@ fn main() -> i64:
         idle = 0
         var i = 0
         while i < entries.len():
-            handle_request(binary, entries[i])
+            handle_request(binary, entries[i], state)
             i = i + 1
     rt_file_delete(LIGHT_LOCK)
     0

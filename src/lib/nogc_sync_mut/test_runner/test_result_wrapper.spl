@@ -9,14 +9,50 @@ fn result_wrapper_path(file_path: text) -> text:
     val base = if slash >= 0: file_path.substring(slash + 1) else: file_path
     dir + ".simple_result_{time_now_unix_micros()}_" + base
 
+fn count_authored_examples(source: text) -> i64:
+    var count = 0
+    var in_doc = false
+    for line in source.split("\n"):
+        var marker_count = 0
+        var pos = 0
+        while pos < line.len():
+            val marker = line.index_of("\"\"\"", pos) ?? -1
+            if marker < 0:
+                break
+            marker_count = marker_count + 1
+            pos = marker + 3
+        if marker_count > 0:
+            if marker_count % 2 == 1:
+                in_doc = not in_doc
+            continue
+        if in_doc:
+            continue
+        val trimmed = line.trim()
+        if trimmed.starts_with("#"):
+            continue
+        if trimmed.starts_with("it ") or trimmed.starts_with("it(") or
+            trimmed.starts_with("test ") or trimmed.starts_with("test(") or
+            trimmed.starts_with("example ") or trimmed.starts_with("example(") or
+            trimmed.starts_with("specify ") or trimmed.starts_with("specify(") or
+            trimmed.starts_with("slow_it ") or trimmed.starts_with("slow_it(") or
+            trimmed.starts_with("slow_it_with_limits ") or trimmed.starts_with("slow_it_with_limits(") or
+            trimmed.starts_with("skip_it ") or trimmed.starts_with("skip_it(") or
+            trimmed.starts_with("pending_it ") or trimmed.starts_with("pending_it(") or
+            trimmed.starts_with("pending ") or trimmed.starts_with("pending("):
+            count = count + 1
+    count
+
 fn build_interpreter_result_wrapper(file_path: text) -> (text, text):
     if not file_exists(file_path):
         return ("", "")
     val source = file_read(file_path)
     val wrapped = result_wrapper_path(file_path)
-    val harness = "use std.spec.{print_summary, get_exit_code, get_executed_test_count}\n" +
+    val authored = count_authored_examples(source)
+    val harness = "use std.spec.{print_summary, get_exit_code, get_executed_test_count, get_test_count}\n" +
+        "use std.io_runtime.{env_get}\n" +
         source + "\nprint_summary()\n" +
         "if get_executed_test_count() == 0:\n    panic(\"test-runner: no examples executed\")\n" +
+        "if (env_get(\"SIMPLE_TEST_FILTER\") ?? \"\") == \"\" and get_test_count() != {authored}:\n    panic(\"test-runner: authored/executed example-count mismatch: authored={authored}\")\n" +
         "if get_exit_code() != 0:\n    panic(\"test-runner: spec failed\")\n"
     if not file_write(wrapped, harness):
         if file_exists(wrapped):
@@ -24,4 +60,4 @@ fn build_interpreter_result_wrapper(file_path: text) -> (text, text):
         return ("", "")
     (wrapped, wrapped)
 
-export build_interpreter_result_wrapper
+export build_interpreter_result_wrapper, count_authored_examples

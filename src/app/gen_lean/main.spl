@@ -1,10 +1,10 @@
 # Simple CLI - gen-lean command
-# Startup-light wrapper that delegates real work to the Rust CLI.
+# Startup-light wrapper that delegates real work to the pure-Simple verifier.
 
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
-use app.io.mod.{process_run}
+use app.io.process_ops.{process_run_timeout}
 
 fn print_help():
     print "Usage: simple gen-lean [options]"
@@ -53,15 +53,27 @@ fn main() -> i64:
     delegate_gen_lean(args)
 
 fn delegate_gen_lean(args: [text]) -> i64:
-    var forwarded: [text] = ["gen-lean"]
-    for arg in args:
+    val subcommand = args[0]
+    var worker_command = subcommand
+    if subcommand == "write":
+        worker_command = "regenerate"
+    elif subcommand == "verify":
+        worker_command = "check"
+
+    var forwarded: [text] = ["run", "src/compiler/90.tools/verify/main.spl", worker_command]
+    for arg in args[1:]:
         forwarded.push(arg)
-    val (stdout, stderr, code) = process_run("./bin/simple", forwarded)
+    # Dispatch to a distinct worker command with a hard deadline. Re-entering
+    # `gen-lean` here caused an unbounded self-recursion chain.
+    val (stdout, stderr, code) = process_run_timeout("./bin/simple", forwarded, 30000)
     if stdout != "":
         print stdout
     if stderr != "":
         print stderr
-    code
+    if code == -1:
+        error("gen-lean", "verification worker timed out")
+        return 124
+    code as i64
 
 fn gen_lean_is_log_option(arg: text) -> bool:
     arg == "--human" or arg == "--llm" or arg == "--json" or

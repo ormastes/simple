@@ -1,0 +1,35 @@
+# @cover src/lib/nogc_sync_mut/test_runner/test_batch_protocol.spl 80%
+
+use std.io.{dir_create_all, dir_remove_all}
+use std.spec.*
+use std.test_runner.test_batch_protocol.{write_test_batch_manifest, read_test_batch_manifest, write_test_batch_result, read_test_batch_result}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.test_runner.test_runner_types.{TestFileResult, TestRunResult}
+
+describe "bounded test runner batch protocol":
+    it "round trips manifests and machine-readable results":
+        val root = "build/test-runner-batch-protocol"
+        dir_remove_all(root)
+        dir_create_all(root)
+        val files = ["test/a path_spec.spl", "test/tab\tnewline\nslash\\_spec.spl"]
+        expect(write_test_batch_manifest("{root}/manifest", files)).to_equal(true)
+        expect(read_test_batch_manifest("{root}/manifest")).to_equal(files)
+
+        val file_result = TestFileResult(path: files[1], passed: 2, failed: 0, skipped: 1, pending: 0, duration_ms: 9, setup_ms: 3, error: "detail\tline\nslash\\", timed_out: false, cached: true)
+        val run_result = TestRunResult(files: [file_result], total_passed: 2, total_failed: 0, total_skipped: 1, total_pending: 0, total_timed_out: 0, total_duration_ms: 9, total_setup_ms: 3, total_cached: 1)
+        expect(write_test_batch_result("{root}/result", run_result)).to_equal(true)
+        val decoded = read_test_batch_result("{root}/result")
+        expect(decoded.valid).to_equal(true)
+        expect(decoded.result.total_passed).to_equal(2)
+        expect(decoded.result.files[0].path).to_equal(files[1])
+        expect(decoded.result.files[0].error).to_equal(file_result.error)
+        expect(decoded.result.files[0].cached).to_equal(true)
+        expect(read_test_batch_result("{root}/missing").valid).to_equal(false)
+        dir_remove_all(root)
+
+    it "parses hidden batch controls without changing the public path":
+        val options = parse_test_args(["test/01_unit", "--batch-size=100", "--batch-manifest=build/m", "--batch-result=build/r"])
+        expect(options.path).to_equal("test/01_unit")
+        expect(options.batch_size).to_equal(100)
+        expect(options.batch_manifest).to_equal("build/m")
+        expect(options.batch_result).to_equal("build/r")

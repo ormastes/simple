@@ -1,6 +1,6 @@
 # Tests for semantic doc similarity analysis
 
-use compiler.tools.duplicate_check.doc_extractor.{DocEntry, extract_docs_from_file, process_doc_text, build_embedding_key, content_hash}
+use compiler.tools.duplicate_check.doc_extractor.{DocEntry, extract_docs_from_file, extract_docs_from_directory, process_doc_text, build_embedding_key, content_hash}
 use compiler.tools.duplicate_check.config.{default_config}
 use compiler.tools.duplicate_check.ollama_client.{EmbeddingResult, parse_embedding_response, parse_float_safe}
 use compiler.tools.duplicate_check.embedding_cache.{EmbeddingCacheManager, EmbeddingCacheEntry, load_embedding_cache, save_embedding_cache, get_cached, lookup_cached, set_cached, csv_to_floats, floats_to_csv}
@@ -8,6 +8,8 @@ use compiler.tools.duplicate_check.semantic.{SemanticMatch, SemanticReport, cosi
 use compiler.tools.duplicate_check.semantic_formatter.{format_match_line, severity_label}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
 # ============================================================================
 # Doc Extractor Tests
 # ============================================================================
@@ -84,6 +86,26 @@ describe "doc_extractor":
         val h2 = content_hash("world")
         val same = h1 == h2
         expect(same).to_equal(false)
+
+    it "does not execute shell metacharacters while reading one file":
+        val sentinel = "/tmp/simple_duplicate_doc_file_shell_injection"
+        val _ = rt_file_delete(sentinel)
+        val hostile_path = "/tmp/missing'; touch {sentinel}; #"
+
+        val entries = extract_docs_from_file(hostile_path)
+
+        expect(entries.len()).to_equal(0)
+        expect(rt_file_exists(sentinel)).to_equal(false)
+
+    it "does not execute shell metacharacters during directory extraction":
+        val sentinel = "/tmp/simple_duplicate_doc_dir_shell_injection"
+        val _ = rt_file_delete(sentinel)
+        val hostile_path = "/tmp/missing; touch {sentinel} #"
+
+        val entries = extract_docs_from_directory(hostile_path, [])
+
+        expect(entries.len()).to_equal(0)
+        expect(rt_file_exists(sentinel)).to_equal(false)
 
 # ============================================================================
 # Ollama Client Tests

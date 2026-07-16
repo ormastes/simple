@@ -33,6 +33,18 @@ enum OutputFormat:
     Both  # seed-compiler duplicate-name compatibility
 
 # =========================================================================
+# Stable top-level outcome
+# =========================================================================
+
+enum TestRunOutcome:
+    Pass
+    AssertionOrChildFailure
+    UsageError
+    InternalError
+    EmptySelection
+    TimeoutResourceFailure
+
+# =========================================================================
 # Test Options
 # =========================================================================
 
@@ -115,6 +127,10 @@ struct TestOptions:
     assert_ran: bool
     # Coverage annotation check
     no_cover_check: bool
+    # Hidden parent-RSS batch transport.
+    batch_size: i64
+    batch_manifest: text
+    batch_result: text
 
 # =========================================================================
 # Test File Result
@@ -154,6 +170,40 @@ struct TestRunResult:
 impl TestRunResult:
     fn is_ok() -> bool:
         self.total_failed == 0 and self.total_timed_out == 0
+
+fn classify_test_run_result(result: TestRunResult, empty_is_success: bool) -> TestRunOutcome:
+    if result.total_timed_out > 0:
+        return TestRunOutcome.TimeoutResourceFailure
+    if result.files.len() == 0:
+        if result.total_failed > 0:
+            return TestRunOutcome.InternalError
+        if not empty_is_success:
+            return TestRunOutcome.EmptySelection
+        return TestRunOutcome.Pass
+    for file_result in result.files:
+        if file_result.error != "" and file_result.failed == 0:
+            return TestRunOutcome.InternalError
+    if result.total_failed > 0:
+        return TestRunOutcome.AssertionOrChildFailure
+    TestRunOutcome.Pass
+
+fn test_run_outcome_exit_code(outcome: TestRunOutcome) -> i64:
+    match outcome:
+        case Pass: 0
+        case AssertionOrChildFailure: 1
+        case UsageError: 2
+        case InternalError: 3
+        case EmptySelection: 4
+        case TimeoutResourceFailure: 124
+
+fn test_run_outcome_name(outcome: TestRunOutcome) -> text:
+    match outcome:
+        case Pass: "pass"
+        case AssertionOrChildFailure: "assertion_or_child_failure"
+        case UsageError: "usage_error"
+        case InternalError: "internal_error"
+        case EmptySelection: "empty_selection"
+        case TimeoutResourceFailure: "timeout_resource_failure"
 
 # =========================================================================
 # Skip Feature Info

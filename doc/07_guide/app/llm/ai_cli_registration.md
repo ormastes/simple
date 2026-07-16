@@ -53,6 +53,22 @@ claude mcp add simple-mcp -- bin/simple_mcp_server
 claude mcp add simple-lsp-mcp -- bin/simple_lsp_mcp_server
 ```
 
+These checked-in launchers are the production boundary. They select a probed
+cached native server from `bin/release/<triple>/` and fail closed when no valid
+artifact exists. They do not execute raw `.spl` server sources or a Rust
+bootstrap/debug compiler. Run `sh config/mcp/install.shs` to register the same
+wrappers for supported local AI CLIs; do not register `bin/simple run
+src/app/.../main.spl` directly.
+
+Each native server has an adjacent `.sha256` sidecar emitted by bootstrap and
+deployed with it. The wrapper verifies that hash before its protocol probe or
+`exec`; a missing or mismatched sidecar is a provenance failure.
+
+Before installation, `scripts/setup/setup.shs` admits the deployed
+`bin/release/<triple>/simple` with the shared frontend/provenance gate. A
+version string identifying a bootstrap seed, Rust build, or debug build is a
+hard failure.
+
 ### Package for Distribution
 
 ```bash
@@ -184,6 +200,15 @@ mcp-publisher publish tools/mcp-registry/server.json
 
 Check your server appears at:
 - `https://registry.modelcontextprotocol.io/servers/@simple-lang/mcp-server`
+
+For a local checkout, also run the launcher contract once:
+
+```bash
+sh scripts/check/check-mcp-wrapper-contract.shs
+```
+
+It checks generated/checked wrapper parity, native selection, argument
+forwarding, and fail-closed behavior when the cached artifact is absent.
 
 ### User Installation (after registration)
 
