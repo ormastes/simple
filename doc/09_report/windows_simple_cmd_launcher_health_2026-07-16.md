@@ -44,3 +44,18 @@
 - terminal_after_x=140
 - terminal_before_y=60
 - terminal_after_y=100
+
+## Out-of-tree Invocation Proof
+
+The 2026-07-16 Windows PowerShell wrapper was rerun from
+`C:\Users\ormas\AppData\Local\Temp` by absolute script path:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\ormas\dev\simple\scripts\check\check-windows-simple-cmd-launcher-health.ps1
+```
+
+The rerun kept the `bin/simple.cmd` source-launch proof green with
+`windows_simple_cmd_launcher_health_status=pass`,
+`windows_simple_cmd_launcher_health_source_exit_code=0`,
+`windows_simple_cmd_launcher_health_version=Simple v0.9.6`, and
+`windows_simple_cmd_launcher_health_probe_rendered_titlebar_css_applied=true`.

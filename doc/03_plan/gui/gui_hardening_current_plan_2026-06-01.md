@@ -130,7 +130,9 @@
   `windows_native_mdi_evidence_status=pass`,
   `windows_native_mdi_evidence_window_found=true`,
   `windows_native_mdi_evidence_titlebar_css_pixels=6784`, and
-  `windows_native_mdi_evidence_rendered_titlebar_css_pixels=6784` in
+  `windows_native_mdi_evidence_rendered_titlebar_css_pixels=6784`. The wrapper
+  now anchors repo-relative paths to `$PSScriptRoot` and was verified from
+  outside the checkout by absolute script path in
   `doc/09_report/windows_native_mdi_evidence_2026-07-16.md`.
 - Windows `bin/simple.cmd` source launches now skip zero-byte runtime candidates
   and route `.spl` source files through the current built Rust driver when
@@ -141,6 +143,8 @@
   `windows_simple_cmd_launcher_health_source_exit_code=0`,
   `windows_simple_cmd_launcher_health_probe_backend=win32-native`, and
   `windows_simple_cmd_launcher_health_probe_rendered_titlebar_css_applied=true`.
+  The wrapper now anchors repo-relative paths to `$PSScriptRoot` and was
+  verified from outside the checkout by absolute script path.
   This is a Windows source-launch fallback, not pure-Simple release-binary
   completion. See
   `doc/09_report/windows_simple_cmd_launcher_health_2026-07-16.md`.
@@ -153,7 +157,10 @@
   `web_wm_modern_shell_evidence_bitmap_nonblank_status=pass`,
   `web_wm_modern_shell_evidence_audit_pass=pass`,
   `web_wm_modern_shell_evidence_interaction_pass=pass`, and
-  `web_wm_modern_shell_evidence_interaction_event_count=13`.
+  `web_wm_modern_shell_evidence_interaction_event_count=13`. The live
+  Electron/`bin/simple.cmd` wrapper now anchors repo-relative paths to
+  `$PSScriptRoot` and was verified from outside the checkout by absolute script
+  path.
 - Windows verification backstop: `scripts/audit/direct-env-runtime-guard.ps1`
   mirrors the required `direct-env-runtime-guard.shs` working/staged checks for
   PowerShell-only hosts where `sh` is unavailable. The 2026-07-16 Windows run

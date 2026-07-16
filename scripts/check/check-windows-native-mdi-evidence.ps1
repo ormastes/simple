@@ -9,9 +9,24 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+
+function Resolve-RepoPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return $path
+    }
+    if ([System.IO.Path]::IsPathRooted($path)) {
+        return $path
+    }
+    return Join-Path $repoRoot $path
+}
+
+$BuildDir = Resolve-RepoPath $BuildDir
 if ([string]::IsNullOrWhiteSpace($ReportPath)) {
     $ReportPath = Join-Path $BuildDir "report.md"
 }
+$ReportPath = Resolve-RepoPath $ReportPath
+$Entry = Resolve-RepoPath $Entry
 
 $EvidencePath = Join-Path $BuildDir "evidence.env"
 $ProofPath = Join-Path $BuildDir "windows_native_mdi_proof.env"
@@ -73,6 +88,7 @@ function Is-RustSeedSimple([string]$path) {
 }
 
 function Test-SimpleBinCandidate([string]$path) {
+    $path = Resolve-RepoPath $path
     if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) { return $false }
     try {
         return ((Get-Item -LiteralPath $path).Length -gt 0)
@@ -86,11 +102,12 @@ function Copy-CurrentDriverCandidate {
         "src\compiler_rust\target\debug\simple.exe",
         "src\compiler_rust\target\bootstrap\simple.exe"
     )) {
-        if (Test-SimpleBinCandidate $candidate) {
+        $candidatePath = Resolve-RepoPath $candidate
+        if (Test-SimpleBinCandidate $candidatePath) {
             $driverDir = Join-Path $BuildDir "simple_driver_current"
             New-Item -ItemType Directory -Force -Path $driverDir | Out-Null
             $driverPath = Join-Path $driverDir "simple.exe"
-            Copy-Item -LiteralPath $candidate -Destination $driverPath -Force
+            Copy-Item -LiteralPath $candidatePath -Destination $driverPath -Force
             if (Test-SimpleBinCandidate $driverPath) {
                 $script:SimpleBinSource = "copied-current-driver:$candidate"
                 $script:SimpleBinStatus = "pass"
@@ -103,17 +120,18 @@ function Copy-CurrentDriverCandidate {
 
 function Resolve-SimpleBin {
     if (-not [string]::IsNullOrWhiteSpace($SimpleBin)) {
+        $resolvedExplicit = Resolve-RepoPath $SimpleBin
         $script:SimpleBinSource = "explicit-env"
-        if (Is-RustSeedSimple $SimpleBin) {
+        if (Is-RustSeedSimple $resolvedExplicit) {
             $script:SimpleBinStatus = "forbidden"
-            return $SimpleBin
+            return $resolvedExplicit
         }
-        if (-not (Test-SimpleBinCandidate $SimpleBin)) {
+        if (-not (Test-SimpleBinCandidate $resolvedExplicit)) {
             $script:SimpleBinStatus = "invalid"
-            return $SimpleBin
+            return $resolvedExplicit
         }
         $script:SimpleBinStatus = "pass"
-        return $SimpleBin
+        return $resolvedExplicit
     }
     $copiedDriver = Copy-CurrentDriverCandidate
     if (-not [string]::IsNullOrWhiteSpace($copiedDriver)) {
@@ -128,10 +146,11 @@ function Resolve-SimpleBin {
         "build\bootstrap\stage2\x86_64-pc-windows-msvc\simple.exe",
         "build\bootstrap\stage1\simple.exe"
     )) {
-        if (Test-SimpleBinCandidate $candidate) {
+        $candidatePath = Resolve-RepoPath $candidate
+        if (Test-SimpleBinCandidate $candidatePath) {
             $script:SimpleBinSource = "self-hosted:$candidate"
             $script:SimpleBinStatus = "pass"
-            return $candidate
+            return $candidatePath
         }
     }
     return ""
@@ -168,7 +187,7 @@ function Invoke-Simple([string[]]$arguments, [string]$stdoutPath, [string]$stder
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = (Resolve-Path -LiteralPath $script:ResolvedSimpleBin).Path
     $startInfo.Arguments = Join-ProcessArgs $arguments
-    $startInfo.WorkingDirectory = (Get-Location).Path
+    $startInfo.WorkingDirectory = $repoRoot
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     $startInfo.UseShellExecute = $false
@@ -213,12 +232,12 @@ $ResolvedEntry = (Resolve-Path -LiteralPath $Entry).Path
 $startInfo = New-Object System.Diagnostics.ProcessStartInfo
 $startInfo.FileName = (Resolve-Path -LiteralPath $script:ResolvedSimpleBin).Path
 $startInfo.Arguments = Join-ProcessArgs @($ResolvedEntry, "--interpret")
-$startInfo.WorkingDirectory = (Get-Location).Path
+$startInfo.WorkingDirectory = $repoRoot
 $startInfo.RedirectStandardOutput = $true
 $startInfo.RedirectStandardError = $true
 $startInfo.UseShellExecute = $false
 $startInfo.CreateNoWindow = $true
-$startInfo.Environment["SIMPLE_HOME"] = (Get-Location).Path
+$startInfo.Environment["SIMPLE_HOME"] = $repoRoot
 $startInfo.Environment["SIMPLE_WIN32_MDI_PROOF_PATH"] = $ProofPath
 $startInfo.Environment["SIMPLE_WIN32_MDI_HOLD_MS"] = "12000"
 $probe = New-Object System.Diagnostics.Process

@@ -6,16 +6,30 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+
+function Resolve-RepoPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return $path
+    }
+    if ([System.IO.Path]::IsPathRooted($path)) {
+        return $path
+    }
+    return Join-Path $repoRoot $path
+}
+
+$BuildDir = Resolve-RepoPath $BuildDir
 if ([string]::IsNullOrWhiteSpace($ReportPath)) {
     $ReportPath = Join-Path $BuildDir "report.md"
 }
+$ReportPath = Resolve-RepoPath $ReportPath
 
 $EvidencePath = Join-Path $BuildDir "evidence.env"
 $ProofPath = Join-Path $BuildDir "bin_simple_cmd_source_probe.env"
 $SourceOutPath = Join-Path $BuildDir "bin_simple_cmd_source_probe.out"
 $VersionOutPath = Join-Path $BuildDir "bin_simple_cmd_version.out"
-$SimpleCmd = "bin\simple.cmd"
-$Entry = "src\os\hosted\hosted_win32_mdi_probe.spl"
+$SimpleCmd = Resolve-RepoPath "bin\simple.cmd"
+$Entry = Resolve-RepoPath "src\os\hosted\hosted_win32_mdi_probe.spl"
 
 function Add-Row($rows, [string]$key, [string]$value) {
     $rows.Add("$key=$value") | Out-Null
@@ -49,11 +63,12 @@ function Invoke-Cmd([string[]]$arguments, [string]$stdoutPath, [int]$timeoutSecs
     $startInfo.Arguments = ($cmdArgs | ForEach-Object {
         if ($_ -match '[\s"]') { '"' + $_.Replace('"', '\"') + '"' } else { $_ }
     }) -join " "
-    $startInfo.WorkingDirectory = (Get-Location).Path
+    $startInfo.WorkingDirectory = $repoRoot
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
+    $startInfo.Environment["SIMPLE_HOME"] = $repoRoot
     $startInfo.Environment["SIMPLE_WIN32_MDI_PROOF_PATH"] = $ProofPath
     $startInfo.Environment["SIMPLE_WIN32_MDI_HOLD_MS"] = "100"
     $process = New-Object System.Diagnostics.Process

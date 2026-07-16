@@ -9,8 +9,23 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+
+function Resolve-RepoPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return $path
+    }
+    if ([System.IO.Path]::IsPathRooted($path)) {
+        return $path
+    }
+    return Join-Path $repoRoot $path
+}
+
+$BuildDir = Resolve-RepoPath $BuildDir
 if ([string]::IsNullOrWhiteSpace($EvidencePath)) { $EvidencePath = Join-Path $BuildDir "evidence.env" }
 if ([string]::IsNullOrWhiteSpace($ReportPath)) { $ReportPath = Join-Path $BuildDir "report.md" }
+$EvidencePath = Resolve-RepoPath $EvidencePath
+$ReportPath = Resolve-RepoPath $ReportPath
 
 $HtmlPath = Join-Path $BuildDir "simple_wm_modern_preview.html"
 $ArgbPath = Join-Path $BuildDir "simple_wm_modern_preview_argb.json"
@@ -22,7 +37,8 @@ $InteractionPngPath = Join-Path $BuildDir "simple_wm_modern_preview_after_intera
 $InteractionLogPath = Join-Path $BuildDir "electron_interaction.log"
 $PreviewSourcePath = Join-Path $BuildDir "write_preview.spl"
 $PreviewLogPath = Join-Path $BuildDir "preview.log"
-$ElectronBin = "tools\electron-shell\node_modules\electron\dist\electron.exe"
+$SimpleCmdPath = Resolve-RepoPath "bin\simple.cmd"
+$ElectronBin = Resolve-RepoPath "tools\electron-shell\node_modules\electron\dist\electron.exe"
 $Selectors = "#wm-desktop,.wm-window,.wm-titlebar,.wm-command-palette,.wm-effect-controls,.wm-quality-inspector,.wm-traffic-lights button,.wm-command-palette-input,.wm-command-item,.wm-effect-control"
 
 function Add-Row($rows, [string]$key, [string]$value) {
@@ -127,9 +143,9 @@ function Finish([string]$status, [string]$reason, [int]$exitCode) {
 
 function Invoke-Process([string]$fileName, [string[]]$arguments, [string]$logPath, [int]$timeoutSecs) {
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = (Resolve-Path -LiteralPath $fileName).Path
+    $startInfo.FileName = (Resolve-Path -LiteralPath (Resolve-RepoPath $fileName)).Path
     $startInfo.Arguments = Join-ProcessArgs $arguments
-    $startInfo.WorkingDirectory = (Get-Location).Path
+    $startInfo.WorkingDirectory = $repoRoot
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     $startInfo.UseShellExecute = $false
@@ -160,7 +176,7 @@ fn main():
         print "preview_failed"
 "@
     [System.IO.File]::WriteAllText($PreviewSourcePath, $source, [System.Text.Encoding]::ASCII)
-    return Invoke-Process "bin\simple.cmd" @($PreviewSourcePath, "--interpret") $PreviewLogPath $TimeoutSecs
+    return Invoke-Process $SimpleCmdPath @($PreviewSourcePath, "--interpret") $PreviewLogPath $TimeoutSecs
 }
 
 function Set-CaptureEnv {
@@ -207,7 +223,7 @@ $script:InteractionPointer = "not-run"
 $script:InteractionClicks = "not-run"
 $script:InteractionEventCount = "not-run"
 
-if (-not (Test-Path -LiteralPath "bin\simple.cmd")) { Finish "environment-unavailable" "simple-cmd-missing" 0 }
+if (-not (Test-Path -LiteralPath $SimpleCmdPath)) { Finish "environment-unavailable" "simple-cmd-missing" 0 }
 if (-not (Test-Path -LiteralPath $ElectronBin)) { Finish "environment-unavailable" "electron-missing" 0 }
 
 $previewCode = Invoke-SimplePreview
