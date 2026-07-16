@@ -1,7 +1,6 @@
 # Bug: native-build broken under deployed seed since ca1e18c1744 (dict-extern migration)
 
-**Status (2026-07-16):** Open. Blocks `scripts/check/native-smoke-matrix.shs`
-(15/15 FAIL at 8ac25987333) for every lane using the deployed binary.
+**Status (2026-07-16):** RESOLVED — verified fixed at origin tip 8932fcb3a148.
 
 - **Severity:** P1 (the default tooling path `bin/simple native-build --entry`
   fails for ANY source with `error: semantic: type mismatch: cannot convert
@@ -44,3 +43,7 @@ the file list alone is sufficient (multi-file interaction), and
 
 `sh scripts/check/native-smoke-matrix.shs` must return
 `total=15 pass=15 fail=0` with the deployed binary.
+
+## Verification (2026-07-16)
+
+Verified fixed at origin tip 8932fcb3a148 via independent probe: `probe01_dict_extern_regression_a.spl` (trivial two-function program: `helper()->42`, `main` prints it). Oracle: `bin/simple run` → `42`. Native: `native-build --entry --clean` exit 0, binary built, run → `42`. No "type mismatch: cannot convert dict to int" error at any stage; native-build succeeds with correct output.

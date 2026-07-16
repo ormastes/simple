@@ -48,3 +48,7 @@ Same bind-zeros landmine class as the seed's `case (a, b):` tuple pattern
 oracle is provably broken here and the seed is Rust (rebuild forbidden in the
 native-build campaign; fix belongs in `src/compiler_rust` interpreter pattern
 binding when the seed is next rebuilt).
+
+## Verification (2026-07-16)
+
+Still reproduces at origin tip 8932fcb3a148: `probe12_nested_struct_pattern_a.spl` (doc's exact repro: `Shape.Circle(Point(x:3,y:5))` matched via `case Shape.Circle(Point(x, y)): print(x*10+y)`). Oracle: `bin/simple run` → `0` (should be `35`). Nested struct pattern binds `x=0, y=0` instead of real field values; matches seed landmine exactly, still OPEN.

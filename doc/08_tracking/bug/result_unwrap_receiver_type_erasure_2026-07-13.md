@@ -48,3 +48,7 @@ current no-build/no-compiler-command constraint. Keep the explicit annotation
 workaround in bootstrap-critical callers until that execution proof exists.
 
 Tracked by TODO 558.
+
+## Verification (2026-07-16)
+
+Verified fixed at origin tip 8932fcb3a148: `probe03_result_unwrap_erasure_a.spl` (two structs `A`/`B` each defining `emit_object`, `make() -> Result<A, text>` returns `Ok(A(x:1))`, unannotated `val module = compiled.unwrap(); module.emit_object()`). Oracle: `bin/simple run` → `111`. Native: `native-build --entry --clean` exit 0, binary built, run → `111`. No ambiguous-method-call error; MIR retains declared return type through unannotated bindings and correctly disambiguates.

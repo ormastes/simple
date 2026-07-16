@@ -1,10 +1,8 @@
 # native-build: text Option unwrap returns a pointer integer
 
-**Severity:** high (silent wrong value)
+**Severity:** high (silent wrong value, now FIXED at tip)
 **Found:** 2026-07-15 while adding Result unwrap preservation controls
-**Status:** flat nullable source fix complete; executable verification pending
-the repaired staged pure-Simple native/parity CI. The historical exit 139 has no
-retained command, log, or backtrace proving a current blocker.
+**Status:** RESOLVED — verified fixed at origin tip 8932fcb3a148.
 **Backend:** pure-Simple `native-build --entry` MIR lowering
 
 ## Reproduction
@@ -48,3 +46,7 @@ uses the type-neutral `MirConstValue.Zero` dead merge value, avoiding invalid
 LLVM such as `add ptr 3, 0` for `text?`. A cached pure-Simple `native-build`
 attempt exited 139 before producing an artifact, so the bug remains open until
 those controls execute after the runner is repaired.
+
+## Verification (2026-07-16)
+
+Verified fixed at origin tip 8932fcb3a148: `probe02_text_option_unwrap_a.spl` (doc's exact repro: `val value: text? = "opt"; print(value.unwrap())`). Native: `native-build --entry --clean` exit 0, binary built, run → `opt` (correct, matches intended expectation). Note: oracle itself has an unrelated flat-nullable `.unwrap()` landmine for both text and i64; filed separately as `seed_interp_flat_nullable_unwrap_wrong_value_2026-07-16.md`.

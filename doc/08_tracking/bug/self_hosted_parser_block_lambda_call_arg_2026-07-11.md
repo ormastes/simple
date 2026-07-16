@@ -86,3 +86,7 @@ parentheses, terminated by the dedented closing `)` — mirroring the seed gramm
 Owner: compiler 10.frontend parser layer. Do NOT normalize the mailbox.spl call sites as
 a workaround; the construct is legal per the seed grammar and is idiomatic for
 filter/map with stateful bodies.
+
+## Verification (2026-07-16)
+
+Still reproduces at origin tip 8932fcb3a148: `probe09_block_lambda_a.spl` (doc's exact minimal repro). Self-hosted parser via native-build: `[parser_error] line 8:13: expected ), got BoolLit 'false'` then cascading errors, exit 1, no binary produced. Matches documented divergence from seed grammar exactly.
