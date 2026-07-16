@@ -644,7 +644,7 @@ prove deliberate-red and zero-executed-example fixtures exit nonzero, and bind
 the log to the fresh pure-Simple runner digest. The result may be labeled only
 `interpret-diagnostic`; it cannot promote manifest, native GPU, SimpleOS pixel,
 Engine3D, or performance evidence. Use the two calibration fixtures under
-`scripts/check/fixtures/font_evidence_runner_{fail,empty}.spl`.
+`scripts/check/fixtures/font_evidence_runner_{fail,empty}_spec.spl`.
 
 Run each acceptance gate once per session. Unavailable hardware or the stale
 self-hosted runtime is a blocker record, never a synthetic PASS.

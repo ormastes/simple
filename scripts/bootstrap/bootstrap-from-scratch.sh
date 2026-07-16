@@ -470,6 +470,7 @@ bootstrap_native_build_main() {
     --cache-dir "${native_cache_dir}" \
     --mode one-binary \
     --entry src/app/cli/main.spl \
+    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${output}"
 }
 
