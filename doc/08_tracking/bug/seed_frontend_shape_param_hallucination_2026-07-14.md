@@ -1,50 +1,46 @@
-# Seed frontend regression: spurious "expects argument for parameter 'shape'" blocks all native-builds
+# Seed interpreter regression: qualified `Span.empty()` dispatches to `empty(shape)`
 
-**Introduced by** a parallel mid-flight change committed in the current Rust
-source (around `b1efbf95bfe` "wip: working-copy snapshot (session sync)"). Any
-seed built from current-origin `src/compiler_rust` fails to `native-build` even a
-trivial program.
+**Status:** candidate root fix in source; executable regression and focused
+runner rebuild remain pending.
 
 ## Symptom
 
-A freshly-built seed (`cargo build --profile bootstrap -p simple-driver` from
-current origin) fails on EVERY `native-build` with:
+A freshly-built seed can fail during the first HIR declaration with:
 
 ```
 error: semantic: function expects argument for parameter 'shape', but none was provided
-  --> src/compiler/50.mir/mir_data.spl:64  (the MirFunction(...) constructor)
-  --> src/compiler/60.mir_opt/mir_opt/mod.spl:363-365
 ```
 
-## It is a FRONTEND HALLUCINATION, not a real missing field
+The focused font runner reached this after parsing its six-module closure and
+entering HIR declaration for `sffi/cli.spl`.
 
-- There is **no `shape` field** in `MirFunction` (mir_instructions.spl:588),
-  `MirSignature` (mir_types.spl:50), or any MIR struct — grep for `^\s+shape:`
-  in `src/compiler/50.mir/*.spl` is empty.
-- The **old** bootstrap seed (`src/compiler_rust/target/bootstrap/simple`,
-  Jul-13) compiles the SAME current `.spl` source cleanly (e.g. a trivial enum
-  program builds and runs `a=16`). So the `.spl` source is correct.
-- Therefore the defect is in the **Rust frontend** (semantic analysis) as of the
-  current committed source — it fabricates a `shape` parameter requirement.
+## Root cause
+
+The diagnostic is real argument binding against the wrong function. The first
+executable HIR-declaration call is `Span.empty()`. Multiple bare-name `Span`
+types overwrite the interpreter's flat class registry. For an uppercase
+receiver the parser uses the `Path` call route; when the surviving `Span` lacks
+`empty`, that route used to fall through to the unrelated global tensor factory
+`empty(shape)`. The binder then correctly reported its missing `shape` argument.
 
 ## Impact (critical for the redeploy)
 
-Every seed built from current origin cannot native-build anything → the staged
-redeploy cannot produce a working compiled pure-Simple compiler from this source
-state, and independent verification of backend fixes (e.g. the box_int DEFECT B
-fix `38809ec11790`) is blocked: the old seed has the pre-fix backend, and a new
-seed built with the fix inherits this frontend regression.
+The defect blocks strict native-builds before MIR/object emission, including the
+focused font evidence runner needed to calibrate pure-Simple SSpec execution.
 
 ## Fix
 
-Bisect the Rust frontend commits since the last good seed (Jul-13) to find the
-change that injected a spurious `shape` parameter into constructor/call semantic
-checking (likely near tensor/VHDL/shape-typed handling that leaked into general
-struct-constructor arg validation). Restore correct behavior: a struct
-constructor must only require its declared fields.
+For known type receivers, the Rust interpreter now consults preserved
+`CLASS_OVERLOADS` definitions when the flat class lacks the requested static
+method, and it no longer degrades that qualified call to a bare global function.
+The regression source combines two `CollisionSpan` definitions with an unrelated
+`empty(shape)` and requires `CollisionSpan.empty()` to return its static marker.
 
 ## Verification handle
 
-`<fresh seed> native-build --entry <trivial enum program>` must succeed (old seed
-does). Evidence: build log in session scratchpad `seed_build.log` (SEED_BUILD_RC=0
-but every subsequent native-build errors on 'shape').
+`cargo check -p simple-compiler` passes. Rust test binaries are currently blocked
+before execution by unrelated undefined `spl_arg_count`/`spl_get_arg` symbols.
+After that linker defect is cleared, run the focused runner build once and
+require HIR declaration to pass without the `shape` diagnostic; no PASS is
+claimed until the resulting runner is calibrated against deliberate-fail and
+zero-example fixtures.

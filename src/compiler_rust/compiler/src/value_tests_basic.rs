@@ -543,6 +543,26 @@ main = if original == " Abc " and upper == " ABC " and replaced == " Axc " and s
 }
 
 #[test]
+fn qualified_static_call_survives_type_name_collision() {
+    let source = r#"class CollisionSpan:
+    static fn empty() -> i32:
+        17
+
+class CollisionSpan:
+    marker: i64
+
+fn empty(shape: i64) -> i32:
+    shape as i32
+
+main = CollisionSpan.empty()"#;
+    let module = simple_parser::Parser::new(source).parse().expect("parse static collision");
+    assert_eq!(
+        crate::interpreter::evaluate_module(&module.items).expect("resolve qualified static method"),
+        17
+    );
+}
+
+#[test]
 fn test_value_equality_mismatch() {
     assert_ne!(Value::Int(42), Value::Float(42.0));
     assert_ne!(Value::Int(42), Value::text("42"));

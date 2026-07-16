@@ -25,7 +25,8 @@ use std::io::Write;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     call_extern_function, dispatch_context_method, evaluate_expr, BUILTIN_CHANNEL, CONTEXT_OBJECT, EXTERN_FUNCTIONS,
-    FUNCTION_OVERLOADS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, BITFIELDS, CURRENT_EXEC_MODULE, FUNCTION_MODULE_OWNER,
+    CLASS_OVERLOADS, FUNCTION_OVERLOADS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, BITFIELDS, CURRENT_EXEC_MODULE,
+    FUNCTION_MODULE_OWNER,
 };
 use crate::interpreter::module_cache::MODULE_CLASSES_CACHE;
 use crate::runtime_profile;
@@ -798,6 +799,38 @@ pub(crate) fn evaluate_call(
                 }
             }
 
+            // The flat class registry is last-write-wins. If its same-named
+            // type does not define this method, search the preserved class
+            // definitions before any legacy bare-function fallback.
+            let flat_class_has_method = classes
+                .get(type_name)
+                .map(|class_def| class_def.methods.iter().any(|method| method.name == *method_name))
+                .unwrap_or(false);
+            let path_overloaded_classes = CLASS_OVERLOADS.with(|cell| cell.borrow().get(type_name).cloned());
+            if !flat_class_has_method {
+                if let Some(class_defs) = path_overloaded_classes.as_ref() {
+                    let evaluated_args: Vec<Value> = args
+                        .iter()
+                        .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if let Some(func) = select_named_static_overload(
+                        class_defs.iter().flat_map(|class_def| class_def.methods.iter()),
+                        method_name,
+                        &evaluated_args,
+                    ) {
+                        return core::exec_function_with_values(
+                            &func,
+                            &evaluated_args,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        );
+                    }
+                }
+            }
+
             // Check for class associated function (static method)
             if let Some(class_def) = classes.get(type_name).cloned() {
                 let evaluated_args: Vec<Value> = args
@@ -827,11 +860,20 @@ pub(crate) fn evaluate_call(
                 }
             }
 
-            // Legacy fallbacks
-            if let Some(func) = functions.get(method_name).cloned() {
-                return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
-            } else if classes.contains_key(method_name) {
-                return core::instantiate_class(method_name, args, env, functions, classes, enums, impl_methods);
+            // A known type must not degrade `Span.empty()` into an unrelated
+            // global `empty(shape)` call. Keep the legacy fallback only for
+            // unresolved module-style receivers.
+            let path_receiver_is_type = classes.contains_key(type_name)
+                || path_overloaded_classes.is_some()
+                || enums.contains_key(type_name)
+                || GLOBAL_ENUMS.with(|cell| cell.borrow().contains_key(type_name))
+                || BITFIELDS.with(|cell| cell.borrow().contains_key(type_name));
+            if !path_receiver_is_type {
+                if let Some(func) = functions.get(method_name).cloned() {
+                    return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+                } else if classes.contains_key(method_name) {
+                    return core::instantiate_class(method_name, args, env, functions, classes, enums, impl_methods);
+                }
             }
 
             // Special handling for built-in Option and Result types
