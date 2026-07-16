@@ -7,6 +7,25 @@ bugs (array-concat, dict-from-call keys, Result.unwrap→161, top-level `.len()`
 cross-fn text-payload race, static-ctor nil-crash) are excluded — see the
 companion doc.
 
+## Status update (2026-07-16): parity gate GREEN
+
+`check-native-seed-parity.shs` at `a7454f2be8a`: **total=90 pass=73 fail=0
+xfail=17, native_seed_parity=true** — first fail=0 full board. All 17 XFAILs
+are the strict-cranelift legs gated on the deployed seed's missing
+`rt_cranelift_*` externs (auto-re-enable on a capable seed; the permanent fix
+is a seed redeploy at/after `d3204d3a3b9`, which needs explicit user
+go-ahead). Landed since the 2026-07-15 tables: outage revert (rt_dict extern
+class, twice re-broken and re-fixed: `desugar_async.spl`, `process_ops.spl`),
+Option-HIR + try-diagnostic span, short-circuit bool typing, static-fn owner
+symbols, process_run_timeout ABI chain, crossmodule field-index SEGV (MIR
+prescan + HIR field pre-scan ordering), text-return HIR typing, cache
+compiler-source fingerprint + entry-scoped `--clean`, re-export chase +
+extern-only MIR facades + docstring-interp strip, fn-type registry
+(`TYPE_FN_BASE`), native `text.find`, loud undeclared field types,
+Option.map ptr↔i1 bridges, and suffixed-literal decay (`255u8` → 3) + hex
+suffix loss. Remaining open classes: seed redeploy (extern-compat +
+cranelift), generics erasure (#158 Phase B), Option ABI full implementation.
+
 ## Verification contract (per fix, unchanged)
 
 - **Oracle:** `env -u SIMPLE_BOOTSTRAP bin/simple run p.spl`.
