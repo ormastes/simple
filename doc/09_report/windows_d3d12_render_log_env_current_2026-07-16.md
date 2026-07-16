@@ -5,6 +5,8 @@ Current Windows PowerShell run:
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\setup\setup-windows-d3d12-render-log-env.ps1 --refresh-directx -BuildDir build\windows-d3d12-render-log-env-current -TimeoutSecs 160
 powershell -ExecutionPolicy Bypass -File scripts\setup\setup-windows-d3d12-render-log-env.ps1 --refresh-directx -BuildDir build\windows-d3d12-render-log-env-strict-current -TimeoutSecs 160
+powershell -ExecutionPolicy Bypass -File scripts\check\check-windows-d3d12-render-log-evidence.ps1 -EvidencePath build\windows-d3d12-render-log-env-strict-current\evidence.env
+powershell -ExecutionPolicy Bypass -File scripts\check\check-windows-d3d12-render-log-evidence.ps1 -EvidencePath build\windows-d3d12-render-log-env-strict-current\evidence.env -RequireD3D12Completion
 ```
 
 Result:
@@ -23,6 +25,10 @@ Result:
 - `windows_d3d12_pix_capture_tool=`
 - `windows_d3d12_gpu_debugger_capture_tool=C:\WINDOWS\system32\DXCap.exe`
 - `windows_d3d12_gpu_debugger_directx_diagnostic_status=pass`
+- Default checker: `windows_d3d12_render_log_evidence_status=pass`
+- Default checker: `windows_d3d12_render_log_evidence_reason=pass`
+- Completion checker: `windows_d3d12_render_log_evidence_status=fail`
+- Completion checker: `windows_d3d12_render_log_evidence_reason=compare-status,native-d3d12-readback,browser-d3d12-backing,pairwise-argb-diff,argb-source-evidence,pix-gpu-debugger-gate,pix-or-gpu-debugger-status,pix-or-gpu-debugger-artifact`
 
 The wrapper now runs on Windows PowerShell without throwing on
 `ProcessStartInfo.ArgumentList`, refreshes the DirectX diagnostic evidence, and
@@ -51,6 +57,7 @@ Primary artifacts:
 - `build/windows-d3d12-render-log-env-current/report.md`
 - `build/windows-d3d12-render-log-env-strict-current/evidence.env`
 - `build/windows-d3d12-render-log-env-strict-current/directx-diagnostic/evidence.env`
+- `scripts/check/check-windows-d3d12-render-log-evidence.ps1`
 
 Code change:
 
@@ -62,3 +69,8 @@ Code change:
   status is `pass` only when DirectX browser backing, browser event routing, and
   DXCap GPU capture all pass; stale DirectX evidence without event proof no
   longer looks equivalent in D3D12 reports.
+- The D3D12 evidence checker validates saved env files. Default mode accepts the
+  current fail-closed D3D12 evidence shape when strict upstream DirectX
+  diagnostics are present; `-RequireD3D12Completion` fails until native D3D12
+  readback, D3D12 browser backing, pairwise ARGB evidence, ARGB source evidence,
+  and PIX/GPU debugger artifact proof all pass.
