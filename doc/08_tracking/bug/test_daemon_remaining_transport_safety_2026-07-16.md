@@ -22,16 +22,14 @@ Date: 2026-07-16
 - OpenOCD uses the shared bounded telnet client, validates program paths, and
   starts with structured argv. All three TRACE32 profile owners use bounded
   structured argv for discovery and commands.
+- T32 SWD forwards caller deadlines into the TRACE32 process owner. Relay
+  scripts use bounded structured argv for execute, send, and receive.
 
 ## Remaining work
 
 - Remote-PC remains unreachable from production registration because no
   terminal configuration source is defined for the daemon.
-- T32 and relay terminal kinds cannot truthfully enforce a command deadline;
-  the bounded dispatcher fails them explicitly until their protocol owners
-  expose cancellation.
 - Remote test paths are safely shell-quoted but are not yet restricted to a
   centrally validated repo-relative policy.
 
-The remaining fixes belong in the shared configuration and terminal/protocol
-owners.
+The remaining fixes belong in the shared configuration and path-policy owners.
