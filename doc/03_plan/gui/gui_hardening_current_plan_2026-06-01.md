@@ -142,8 +142,10 @@
   `doc/09_report/gui_web_2d_directx_windows_current_2026-07-16.md`. The
   PowerShell wrapper reports D3D11 native staging readback pass with matching
   checksum `1023148974`, Electron and Chrome browser-backing pass with D3D11
-  hints present, and DXCap GPU capture pass with `GFXA` artifact magic in
-  `build/gui-web-2d-directx-env-windows-current-gpucap/dxcap_chrome_d3d11.vsglog`.
+  hints present, structured browser event routing pass for focus, keyboard,
+  text input, pointer down/up, and click delivery in both Electron and Chrome,
+  and DXCap GPU capture pass with `GFXA` artifact magic in
+  `build/gui-web-2d-directx-env-windows-event-gpucap/dxcap_chrome_d3d11.vsglog`.
 - Windows Vulkan Web/2D evidence is recorded in
   `doc/09_report/gui_web_2d_vulkan_windows_current_2026-07-16.md`. The wrapper
   now discovers Windows Kit `dxc.exe`, and the current host proves Simple Vulkan

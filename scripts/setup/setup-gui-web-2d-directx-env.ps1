@@ -330,6 +330,15 @@ if ($Mode -eq "--browser-backing" -or $Mode -eq "--gpu-capture") {
         Add-Row $rows "gui_web_2d_directx_electron_argb_proof" "$electronProof"
         Add-Row $rows "gui_web_2d_directx_electron_argb_status" (Proof-Status $electronProof $electronArgb)
         Add-Row $rows "gui_web_2d_directx_electron_argb_checksum" (Json-Value-Or $electronProof @("checksum", "captured_argb_sha256") "")
+        Add-Row $rows "gui_web_2d_directx_electron_event_status" (Json-Value-Or $electronProof @("event_status", "event_proof.status") "missing")
+        Add-Row $rows "gui_web_2d_directx_electron_event_reason" (Json-Value-Or $electronProof @("event_reason", "event_proof.reason") "")
+        Add-Row $rows "gui_web_2d_directx_electron_event_sequence" (Json-Value-Or $electronProof @("event_sequence") "")
+        Add-Row $rows "gui_web_2d_directx_electron_focus_event_count" (Json-Value-Or $electronProof @("focus_event_count", "event_proof.focus_count") "0")
+        Add-Row $rows "gui_web_2d_directx_electron_keyboard_event_count" (Json-Value-Or $electronProof @("keyboard_event_count", "event_proof.keyboard_count") "0")
+        Add-Row $rows "gui_web_2d_directx_electron_input_event_count" (Json-Value-Or $electronProof @("input_event_count", "event_proof.input_count") "0")
+        Add-Row $rows "gui_web_2d_directx_electron_pointer_down_event_count" (Json-Value-Or $electronProof @("pointer_down_event_count", "event_proof.pointer_down_count") "0")
+        Add-Row $rows "gui_web_2d_directx_electron_pointer_up_event_count" (Json-Value-Or $electronProof @("pointer_up_event_count", "event_proof.pointer_up_count") "0")
+        Add-Row $rows "gui_web_2d_directx_electron_click_event_count" (Json-Value-Or $electronProof @("click_event_count", "event_proof.click_count") "0")
         if ($NodeSource -ne "" -and (Test-Path -LiteralPath $DirectxBackingScript)) {
             Add-EnvRows $rows @(& $NodeSource "$DirectxBackingScript" "$electronProof" "gui_web_2d_directx_electron")
         }
@@ -367,6 +376,15 @@ if ($Mode -eq "--browser-backing" -or $Mode -eq "--gpu-capture") {
         Add-Row $rows "gui_web_2d_directx_chrome_geometry" "$chromeGeometry"
         Add-Row $rows "gui_web_2d_directx_chrome_argb_status" (Proof-Status $chromeProof $chromeArgb)
         Add-Row $rows "gui_web_2d_directx_chrome_argb_checksum" (Json-Value-Or $chromeProof @("checksum") "")
+        Add-Row $rows "gui_web_2d_directx_chrome_event_status" (Json-Value-Or $chromeProof @("event_status", "event_proof.status") "missing")
+        Add-Row $rows "gui_web_2d_directx_chrome_event_reason" (Json-Value-Or $chromeProof @("event_reason", "event_proof.reason") "")
+        Add-Row $rows "gui_web_2d_directx_chrome_event_sequence" (Json-Value-Or $chromeProof @("event_sequence") "")
+        Add-Row $rows "gui_web_2d_directx_chrome_focus_event_count" (Json-Value-Or $chromeProof @("focus_event_count", "event_proof.focus_count") "0")
+        Add-Row $rows "gui_web_2d_directx_chrome_keyboard_event_count" (Json-Value-Or $chromeProof @("keyboard_event_count", "event_proof.keyboard_count") "0")
+        Add-Row $rows "gui_web_2d_directx_chrome_input_event_count" (Json-Value-Or $chromeProof @("input_event_count", "event_proof.input_count") "0")
+        Add-Row $rows "gui_web_2d_directx_chrome_pointer_down_event_count" (Json-Value-Or $chromeProof @("pointer_down_event_count", "event_proof.pointer_down_count") "0")
+        Add-Row $rows "gui_web_2d_directx_chrome_pointer_up_event_count" (Json-Value-Or $chromeProof @("pointer_up_event_count", "event_proof.pointer_up_count") "0")
+        Add-Row $rows "gui_web_2d_directx_chrome_click_event_count" (Json-Value-Or $chromeProof @("click_event_count", "event_proof.click_count") "0")
         if ($NodeSource -ne "" -and (Test-Path -LiteralPath $DirectxBackingScript)) {
             Add-EnvRows $rows @(& $NodeSource "$DirectxBackingScript" "$chromeProof" "gui_web_2d_directx_chrome")
         }
@@ -378,6 +396,11 @@ if ($Mode -eq "--browser-backing" -or $Mode -eq "--gpu-capture") {
 
     $electronBacking = ($rows | Where-Object { $_ -like "gui_web_2d_directx_electron_browser_backing_status=*" } | Select-Object -Last 1) -replace '^.*=', ''
     $chromeBacking = ($rows | Where-Object { $_ -like "gui_web_2d_directx_chrome_browser_backing_status=*" } | Select-Object -Last 1) -replace '^.*=', ''
+    $electronEventStatus = ($rows | Where-Object { $_ -like "gui_web_2d_directx_electron_event_status=*" } | Select-Object -Last 1) -replace '^.*=', ''
+    $chromeEventStatus = ($rows | Where-Object { $_ -like "gui_web_2d_directx_chrome_event_status=*" } | Select-Object -Last 1) -replace '^.*=', ''
+    $browserEventStatus = if ($electronEventStatus -eq "pass" -and $chromeEventStatus -eq "pass") { "pass" } else { "fail" }
+    Add-Row $rows "gui_web_2d_directx_browser_event_status" "$browserEventStatus"
+    Add-Row $rows "gui_web_2d_directx_browser_event_reason" $(if ($browserEventStatus -eq "pass") { "electron-chrome-events-pass" } else { "electron-or-chrome-event-proof-missing" })
     if ($nativeGate -eq "pass" -and $electronBacking -eq "pass" -and $chromeBacking -eq "pass") {
         $browserBackingStatus = "pass"
         Add-Row $rows "gui_web_2d_directx_browser_backing_status" "pass"

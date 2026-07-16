@@ -401,6 +401,15 @@ if ($Mode -eq "--run" -or $Mode -eq "--browser-backing" -or $Mode -eq "--renderd
         Add-Row $rows "gui_web_2d_vulkan_electron_argb_status" (Proof-Status $electronProof $electronArgb)
         Add-Row $rows "gui_web_2d_vulkan_electron_argb_checksum" (Json-Value-Or $electronProof @("checksum", "captured_argb_sha256") "")
         Add-Row $rows "gui_web_2d_vulkan_electron_vulkan" (Json-Value-Or $electronProof @("gpu_feature_status.vulkan", "gpuFeatureStatus.vulkan") "")
+        Add-Row $rows "gui_web_2d_vulkan_electron_event_status" (Json-Value-Or $electronProof @("event_status", "event_proof.status") "missing")
+        Add-Row $rows "gui_web_2d_vulkan_electron_event_reason" (Json-Value-Or $electronProof @("event_reason", "event_proof.reason") "")
+        Add-Row $rows "gui_web_2d_vulkan_electron_event_sequence" (Json-Value-Or $electronProof @("event_sequence") "")
+        Add-Row $rows "gui_web_2d_vulkan_electron_focus_event_count" (Json-Value-Or $electronProof @("focus_event_count", "event_proof.focus_count") "0")
+        Add-Row $rows "gui_web_2d_vulkan_electron_keyboard_event_count" (Json-Value-Or $electronProof @("keyboard_event_count", "event_proof.keyboard_count") "0")
+        Add-Row $rows "gui_web_2d_vulkan_electron_input_event_count" (Json-Value-Or $electronProof @("input_event_count", "event_proof.input_count") "0")
+        Add-Row $rows "gui_web_2d_vulkan_electron_pointer_down_event_count" (Json-Value-Or $electronProof @("pointer_down_event_count", "event_proof.pointer_down_count") "0")
+        Add-Row $rows "gui_web_2d_vulkan_electron_pointer_up_event_count" (Json-Value-Or $electronProof @("pointer_up_event_count", "event_proof.pointer_up_count") "0")
+        Add-Row $rows "gui_web_2d_vulkan_electron_click_event_count" (Json-Value-Or $electronProof @("click_event_count", "event_proof.click_count") "0")
     } else {
         Add-Row $rows "gui_web_2d_vulkan_electron_exit_code" ""
         Add-Row $rows "gui_web_2d_vulkan_electron_argb_status" "unavailable"
@@ -431,6 +440,15 @@ if ($Mode -eq "--run" -or $Mode -eq "--browser-backing" -or $Mode -eq "--renderd
         Add-Row $rows "gui_web_2d_vulkan_chrome_geometry" "$chromeGeometry"
         Add-Row $rows "gui_web_2d_vulkan_chrome_argb_status" (Proof-Status $chromeProof $chromeArgb)
         Add-Row $rows "gui_web_2d_vulkan_chrome_argb_checksum" (Json-Value-Or $chromeProof @("checksum") "")
+        Add-Row $rows "gui_web_2d_vulkan_chrome_event_status" (Json-Value-Or $chromeProof @("event_status", "event_proof.status") "missing")
+        Add-Row $rows "gui_web_2d_vulkan_chrome_event_reason" (Json-Value-Or $chromeProof @("event_reason", "event_proof.reason") "")
+        Add-Row $rows "gui_web_2d_vulkan_chrome_event_sequence" (Json-Value-Or $chromeProof @("event_sequence") "")
+        Add-Row $rows "gui_web_2d_vulkan_chrome_focus_event_count" (Json-Value-Or $chromeProof @("focus_event_count", "event_proof.focus_count") "0")
+        Add-Row $rows "gui_web_2d_vulkan_chrome_keyboard_event_count" (Json-Value-Or $chromeProof @("keyboard_event_count", "event_proof.keyboard_count") "0")
+        Add-Row $rows "gui_web_2d_vulkan_chrome_input_event_count" (Json-Value-Or $chromeProof @("input_event_count", "event_proof.input_count") "0")
+        Add-Row $rows "gui_web_2d_vulkan_chrome_pointer_down_event_count" (Json-Value-Or $chromeProof @("pointer_down_event_count", "event_proof.pointer_down_count") "0")
+        Add-Row $rows "gui_web_2d_vulkan_chrome_pointer_up_event_count" (Json-Value-Or $chromeProof @("pointer_up_event_count", "event_proof.pointer_up_count") "0")
+        Add-Row $rows "gui_web_2d_vulkan_chrome_click_event_count" (Json-Value-Or $chromeProof @("click_event_count", "event_proof.click_count") "0")
     } else {
         Add-Row $rows "gui_web_2d_vulkan_chrome_argb_exit_code" ""
         Add-Row $rows "gui_web_2d_vulkan_chrome_argb_status" "unavailable"
@@ -439,6 +457,11 @@ if ($Mode -eq "--run" -or $Mode -eq "--browser-backing" -or $Mode -eq "--renderd
 
     $electronArgbStatus = ($rows | Where-Object { $_ -like "gui_web_2d_vulkan_electron_argb_status=*" } | Select-Object -Last 1) -replace '^.*=', ''
     $chromeArgbStatus = ($rows | Where-Object { $_ -like "gui_web_2d_vulkan_chrome_argb_status=*" } | Select-Object -Last 1) -replace '^.*=', ''
+    $electronEventStatus = ($rows | Where-Object { $_ -like "gui_web_2d_vulkan_electron_event_status=*" } | Select-Object -Last 1) -replace '^.*=', ''
+    $chromeEventStatus = ($rows | Where-Object { $_ -like "gui_web_2d_vulkan_chrome_event_status=*" } | Select-Object -Last 1) -replace '^.*=', ''
+    $browserEventStatus = if ($electronEventStatus -eq "pass" -and $chromeEventStatus -eq "pass") { "pass" } else { "fail" }
+    Add-Row $rows "gui_web_2d_vulkan_browser_event_status" "$browserEventStatus"
+    Add-Row $rows "gui_web_2d_vulkan_browser_event_reason" $(if ($browserEventStatus -eq "pass") { "electron-chrome-events-pass" } else { "electron-or-chrome-event-proof-missing" })
     if ($simpleStatus -eq "pass" -and $electronArgbStatus -eq "pass" -and $chromeArgbStatus -eq "pass") {
         $runStatus = "pass"
     }

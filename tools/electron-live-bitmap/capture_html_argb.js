@@ -248,6 +248,100 @@ async function applyEmulatedMediaFeatures(win, features) {
   await dbg.sendCommand("Emulation.setEmulatedMedia", { features });
 }
 
+async function collectEventProof(win) {
+  const setup = await win.webContents.executeJavaScript(`
+    (() => {
+      const button = document.querySelector("button");
+      const input = document.querySelector("input, textarea, [contenteditable='true']");
+      const state = {
+        proof_source: "tools/electron-live-bitmap/capture_html_argb.js",
+        focus_count: 0,
+        keyboard_count: 0,
+        input_count: 0,
+        pointer_down_count: 0,
+        pointer_up_count: 0,
+        click_count: 0,
+        sequence: [],
+        button_rect: null,
+        input_rect: null,
+        input_value_before: input ? String(input.value || input.textContent || "") : "",
+        input_value_after: "",
+      };
+      const record = name => {
+        state.sequence.push(name);
+        if (name === "focus") state.focus_count += 1;
+        if (name === "keydown" || name === "keyup") state.keyboard_count += 1;
+        if (name === "input") state.input_count += 1;
+        if (name === "pointerdown" || name === "mousedown") state.pointer_down_count += 1;
+        if (name === "pointerup" || name === "mouseup") state.pointer_up_count += 1;
+        if (name === "click") state.click_count += 1;
+      };
+      for (const name of ["focus", "keydown", "keyup", "input", "pointerdown", "pointerup", "mousedown", "mouseup", "click"]) {
+        document.addEventListener(name, () => record(name), true);
+      }
+      if (button) {
+        const rect = button.getBoundingClientRect();
+        state.button_rect = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height };
+      }
+      if (input) {
+        const rect = input.getBoundingClientRect();
+        state.input_rect = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height };
+      }
+      window.__simpleCaptureEventProof = state;
+      return {
+        button_found: Boolean(button),
+        input_found: Boolean(input),
+        button_rect: state.button_rect,
+        input_rect: state.input_rect,
+      };
+    })()
+  `);
+  if (!setup || !setup.button_found || !setup.input_found || !setup.button_rect || !setup.input_rect) {
+    return {
+      status: "fail",
+      reason: "missing-visible-button-or-input",
+      button_found: Boolean(setup && setup.button_found),
+      input_found: Boolean(setup && setup.input_found),
+    };
+  }
+  win.focus();
+  win.webContents.focus();
+  win.webContents.sendInputEvent({ type: "mouseMove", x: Math.round(setup.button_rect.x), y: Math.round(setup.button_rect.y) });
+  win.webContents.sendInputEvent({ type: "mouseDown", x: Math.round(setup.button_rect.x), y: Math.round(setup.button_rect.y), button: "left", clickCount: 1 });
+  win.webContents.sendInputEvent({ type: "mouseUp", x: Math.round(setup.button_rect.x), y: Math.round(setup.button_rect.y), button: "left", clickCount: 1 });
+  await win.webContents.executeJavaScript(`document.querySelector("input, textarea, [contenteditable='true']").focus()`);
+  win.webContents.sendInputEvent({ type: "keyDown", keyCode: "X" });
+  win.webContents.sendInputEvent({ type: "char", keyCode: "X" });
+  win.webContents.sendInputEvent({ type: "keyUp", keyCode: "X" });
+  await win.webContents.insertText("X");
+  await new Promise(r => setTimeout(r, 100));
+  const proof = await win.webContents.executeJavaScript(`
+    (() => {
+      const state = window.__simpleCaptureEventProof || {};
+      const input = document.querySelector("input, textarea, [contenteditable='true']");
+      state.input_value_after = input ? String(input.value || input.textContent || "") : "";
+      return state;
+    })()
+  `);
+  const focusPass = Number(proof.focus_count || 0) >= 1;
+  const keyboardPass = Number(proof.keyboard_count || 0) >= 2;
+  const inputPass = Number(proof.input_count || 0) >= 1 && String(proof.input_value_after || "").includes("X");
+  const pointerPass = Number(proof.pointer_down_count || 0) >= 1 && Number(proof.pointer_up_count || 0) >= 1;
+  const clickPass = Number(proof.click_count || 0) >= 1;
+  return {
+    ...proof,
+    button_found: true,
+    input_found: true,
+    focus_pass: focusPass,
+    keyboard_pass: keyboardPass,
+    input_pass: inputPass,
+    pointer_pass: pointerPass,
+    click_pass: clickPass,
+    status: focusPass && keyboardPass && inputPass && pointerPass && clickPass ? "pass" : "fail",
+    reason: focusPass && keyboardPass && inputPass && pointerPass && clickPass ? "pass" : "event-contract-missing",
+  };
+}
+
 function bitmapToLogicalArgb(image) {
   const size = image.getSize();
   const native = image.toBitmap({ scaleFactor: 1 });
@@ -737,6 +831,9 @@ async function main() {
   stage("before-geometry");
   const geometry = geometryOutputPath ? await collectGeometry(win) : null;
   stage("after-geometry");
+  stage("before-event-proof");
+  const eventProof = await collectEventProof(win);
+  stage("after-event-proof");
   let image = null;
   if (useOffscreenPaint && latestPaintImage) {
     stage("using-offscreen-paint");
@@ -783,6 +880,7 @@ async function main() {
   };
   if (audit) payload.audit = audit;
   if (geometry) payload.geometry = geometry;
+  payload.event_proof = eventProof;
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   stage("before-write-argb");
@@ -828,6 +926,16 @@ async function main() {
       browser_target_gpu_info: browserTargetGpuInfo,
       browser_target_gpu_info_status: browserTargetGpuInfo && !browserTargetGpuInfo.error ? "pass" : (remoteDebuggingPort ? "fail" : "not-run"),
       remote_debugging_port: remoteDebuggingPort,
+      event_proof: eventProof,
+      event_status: eventProof.status,
+      event_reason: eventProof.reason,
+      event_sequence: Array.isArray(eventProof.sequence) ? eventProof.sequence.join(",") : "",
+      focus_event_count: eventProof.focus_count || 0,
+      keyboard_event_count: eventProof.keyboard_count || 0,
+      input_event_count: eventProof.input_count || 0,
+      pointer_down_event_count: eventProof.pointer_down_count || 0,
+      pointer_up_event_count: eventProof.pointer_up_count || 0,
+      click_event_count: eventProof.click_count || 0,
     }));
   }
   console.log("captured=" + outputPath);
