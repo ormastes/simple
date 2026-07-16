@@ -122,8 +122,9 @@ runtime remains unavailable, so executable qualification is still blocked.
   parity coverage are recorded in the mutable-array extern bug.
 - **Browser raster:** the reviewed next owner fixes are clipped iframe blit via
   `simd_blit_rect`, row fill ownership through `fill_span`, and piece-buffered
-  numeric-entity decoding. They remain unmodified in this source-only lane
-  because clipping and framebuffer mutation parity cannot be executed with an
+  numeric-entity decoding. Numeric decoding now uses buffered pieces with a
+  focused repeated decimal/hexadecimal entity spec. Clipping and framebuffer
+  mutation remain unmodified because their parity cannot be executed with an
   admitted runtime.
 
 ## Latest bounded verification
@@ -153,6 +154,8 @@ runtime remains unavailable, so executable qualification is still blocked.
 - Compositor exact-ID lookup consolidation and its focused behavior spec:
   SOURCE IMPLEMENTED; executable verdict blocked by the unavailable admitted
   pure-Simple runtime.
+- Numeric entity piece-buffering and repeated decimal/hexadecimal Draw IR spec:
+  SOURCE IMPLEMENTED; executable verdict blocked by the same runtime gate.
 - New Simple unit/system behavior and the PowerShell contract: NOT RUN because
   no admitted pure-Simple runtime or PowerShell host exists. Previously passed
   global gates were not repeated after their session limit.

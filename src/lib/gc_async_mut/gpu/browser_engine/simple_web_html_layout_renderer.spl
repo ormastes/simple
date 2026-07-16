@@ -650,10 +650,11 @@ fn _decode_numeric_entities(s: text) -> text:
     if start < 0:
         return s
     val n = s.len()
-    var out = ""
+    var parts: [text] = []
     var i = 0
+    # cpu-lane-loop-ok: linear numeric-entity control scan with buffered output
     while start >= 0:
-        out = out + s.substring(i, start)
+        parts = parts.push(s.substring(i, start))
         var j = start + 2
         var is_hex = false
         if j < n and (s[j] == "x" or s[j] == "X"):
@@ -662,6 +663,7 @@ fn _decode_numeric_entities(s: text) -> text:
         var cp = 0i64
         var digits = 0
         var valid = true
+        # cpu-lane-loop-ok: numeric entity payload is bounded to eight digits
         while j < n and digits <= 7:
             val c = s[j]
             if c == ";":
@@ -680,14 +682,15 @@ fn _decode_numeric_entities(s: text) -> text:
             digits = digits + 1
             j = j + 1
         if valid and digits > 0 and j < n and s[j] == ";":
-            out = out + _codepoint_to_text(cp)
+            parts = parts.push(_codepoint_to_text(cp))
             i = j + 1
         else:
             # Not a well-formed reference: emit "&#" literally and move on.
-            out = out + "&#"
+            parts = parts.push("&#")
             i = start + 2
         start = find_from(s, "&#", i)
-    out + s.substring(i, n)
+    parts = parts.push(s.substring(i, n))
+    parts.join("")
 
 # Decode the HTML character entities the markdown/office HTML emitters produce
 # (markdown_escape_html: & < > " '). Text nodes carry escaped content, so the
