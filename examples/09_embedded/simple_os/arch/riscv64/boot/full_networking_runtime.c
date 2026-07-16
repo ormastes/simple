@@ -17,3 +17,13 @@
 #define rt_display_width rt_desktop_pci_display_width
 #define rt_display_height rt_desktop_pci_display_height
 #include "../../../../../../src/os/kernel/arch/riscv64/boot/freestanding_runtime.c"
+
+extern spl_i64 desktop_service_entry__spl_start(void) __attribute__((weak));
+
+spl_i64 spl_start(void) __attribute__((weak));
+spl_i64 spl_start(void) {
+    if (desktop_service_entry__spl_start) {
+        return desktop_service_entry__spl_start();
+    }
+    return 0;
+}

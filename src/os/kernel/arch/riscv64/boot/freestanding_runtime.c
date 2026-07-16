@@ -146,6 +146,9 @@ static spl_i64 rt_heap(void *ptr) {
     return (spl_i64)(((spl_u64)ptr) | RT_VALUE_TAG_HEAP);
 }
 
+spl_i64 rt_array_new(spl_i64 capacity_value);
+spl_i64 rt_array_push(spl_i64 array_value, spl_i64 value);
+
 static RtHeapHeader *rt_as_heap(spl_i64 value, spl_u8 kind) {
     spl_u64 raw = (spl_u64)value;
     RtHeapHeader *header;
@@ -290,6 +293,167 @@ spl_i64 rt_string_concat(spl_i64 left, spl_i64 right) {
     }
     out->data[out->len] = 0;
     return rt_heap(out);
+}
+
+spl_i64 rt_string_bytes(spl_i64 value) {
+    RtString *s = rt_as_string(value);
+    spl_i64 out = rt_array_new(s ? (spl_i64)s->len : 0);
+    if (!s) {
+        return out;
+    }
+    for (spl_u64 i = 0; i < s->len; i = i + 1) {
+        rt_array_push(out, rt_int((spl_i64)(spl_u8)s->data[i]));
+    }
+    return out;
+}
+
+typedef struct RtStringBuilder {
+    spl_u64 len;
+    spl_u64 capacity;
+    char *data;
+} RtStringBuilder;
+
+spl_i64 rt_string_builder_new(void) {
+    RtStringBuilder *builder = (RtStringBuilder *)rt_alloc((spl_i64)sizeof(RtStringBuilder));
+    if (!builder) {
+        return 0;
+    }
+    builder->len = 0;
+    builder->capacity = 0;
+    builder->data = (char *)0;
+    return (spl_i64)(spl_u64)builder;
+}
+
+spl_i64 rt_string_builder_push(spl_i64 handle, spl_i64 value) {
+    RtStringBuilder *builder = (RtStringBuilder *)(spl_u64)handle;
+    RtString *s = rt_as_string(value);
+    spl_u64 required;
+    char *new_data;
+    spl_u64 new_capacity;
+    if (!builder || !s) {
+        return 0;
+    }
+    if (s->len == 0) {
+        return 1;
+    }
+    required = builder->len + s->len;
+    if (required > builder->capacity) {
+        new_capacity = builder->capacity == 0 ? 32 : builder->capacity;
+        while (new_capacity < required) {
+            new_capacity = new_capacity * 2;
+        }
+        new_data = (char *)rt_alloc((spl_i64)(new_capacity + 1));
+        if (!new_data) {
+            return 0;
+        }
+        for (spl_u64 i = 0; i < builder->len; i = i + 1) {
+            new_data[i] = builder->data ? builder->data[i] : 0;
+        }
+        builder->data = new_data;
+        builder->capacity = new_capacity;
+    }
+    for (spl_u64 i = 0; i < s->len; i = i + 1) {
+        builder->data[builder->len + i] = s->data[i];
+    }
+    builder->len = required;
+    builder->data[builder->len] = 0;
+    return 1;
+}
+
+spl_i64 rt_string_builder_finish(spl_i64 handle) {
+    RtStringBuilder *builder = (RtStringBuilder *)(spl_u64)handle;
+    if (!builder || !builder->data) {
+        return rt_string_new((spl_i64)(spl_u64)"", 0);
+    }
+    return rt_string_new((spl_i64)(spl_u64)builder->data, (spl_i64)builder->len);
+}
+
+spl_i64 rt_string_builder_len(spl_i64 handle) {
+    RtStringBuilder *builder = (RtStringBuilder *)(spl_u64)handle;
+    return builder ? (spl_i64)builder->len : -1;
+}
+
+void rt_string_builder_free(spl_i64 handle) {
+    (void)handle;
+}
+
+spl_i64 rt_hash_text(spl_i64 value) {
+    RtString *s = rt_as_string(value);
+    spl_u64 hash = 1469598103934665603ULL;
+    if (!s) {
+        return 0;
+    }
+    for (spl_u64 i = 0; i < s->len; i = i + 1) {
+        hash ^= (spl_u64)(spl_u8)s->data[i];
+        hash *= 1099511628211ULL;
+    }
+    return (spl_i64)hash;
+}
+
+void rt_print_str(spl_i64 value, spl_i64 len) {
+    (void)value;
+    (void)len;
+}
+
+void rt_println_str(spl_i64 value, spl_i64 len) {
+    (void)value;
+    (void)len;
+}
+
+void rt_eprint_str(spl_i64 value, spl_i64 len) {
+    (void)value;
+    (void)len;
+}
+
+void rt_eprintln_str(spl_i64 value, spl_i64 len) {
+    (void)value;
+    (void)len;
+}
+
+void rt_print_value(spl_i64 value) {
+    (void)value;
+}
+
+void rt_println_value(spl_i64 value) {
+    (void)value;
+}
+
+void rt_eprint_value(spl_i64 value) {
+    (void)value;
+}
+
+void rt_eprintln_value(spl_i64 value) {
+    (void)value;
+}
+
+spl_i64 rt_interp_call(spl_i64 a, spl_i64 b, spl_i64 c, spl_i64 d, spl_i64 e, spl_i64 f, spl_i64 g, spl_i64 h) {
+    (void)a;
+    (void)b;
+    (void)c;
+    (void)d;
+    (void)e;
+    (void)f;
+    (void)g;
+    (void)h;
+    return rt_nil();
+}
+
+spl_i64 rt_function_not_found(spl_i64 name_ptr, spl_i64 name_len) {
+    (void)name_ptr;
+    (void)name_len;
+    return rt_nil();
+}
+
+double rt_math_pow(double base, double exponent) {
+    spl_i64 n = (spl_i64)exponent;
+    double out = 1.0;
+    if (exponent < 0.0 || (double)n != exponent) {
+        return 0.0;
+    }
+    for (spl_i64 i = 0; i < n; i = i + 1) {
+        out = out * base;
+    }
+    return out;
 }
 
 spl_i64 rt_len(spl_i64 value) {
@@ -489,6 +653,28 @@ spl_i64 rt_array_data_ptr(spl_i64 collection) {
         return 0;
     }
     return (spl_i64)(spl_u64)array->data;
+}
+
+spl_i64 rt_array_data_ptr_text(spl_i64 collection) {
+    return rt_array_data_ptr(collection);
+}
+
+spl_i64 rt_array_data_ptr_u8(spl_i64 collection) {
+    return rt_array_data_ptr(collection);
+}
+
+spl_i64 rt_array_set_len_known_text(spl_i64 collection, spl_i64 len_value) {
+    RtArray *array = rt_as_array(collection);
+    spl_i64 len = rt_index_arg(len_value);
+    if (!array || len < 0 || (spl_u64)len > array->capacity) {
+        return 0;
+    }
+    array->len = (spl_u64)len;
+    return 1;
+}
+
+spl_i64 rt_array_set_text(spl_i64 collection, spl_i64 index_value, spl_i64 value) {
+    return rt_index_set(collection, index_value, value);
 }
 
 spl_i64 rt_slice(spl_i64 value, spl_i64 start_value, spl_i64 end_value, spl_i64 step_value) {

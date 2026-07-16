@@ -254,26 +254,26 @@
   `simpleos_qemu_rv64_qmp_status=pass`,
   `simpleos_qemu_gpu_readback_status=pass`,
   `simpleos_qemu_wm_marker_status=pass`, and
-  `simpleos_qemu_rv64_blocker=pass`. The desktop-service rebuild path now
-  records both `-BuildCc` and `-BuildCxx` launch probes before native-build;
-  the current Windows MSYS2 LLVM install fails before compile with
-  `simpleos_qemu_rv64_desktop_service_build_status=blocked:build-cc-launch-failed`
-  and `-1073741515` for both clang and clang++, traced to `clang++.exe`
-  importing absent `libLLVM-19.dll`; the evidence rows now record
-  `simpleos_qemu_rv64_desktop_service_build_cc_missing_dlls=libLLVM-19.dll`
-  and `simpleos_qemu_rv64_desktop_service_build_cxx_missing_dlls=libLLVM-19.dll`.
+  `simpleos_qemu_rv64_blocker=pass`. The desktop-service rebuild path now has
+  launchable Windows RISC-V GCC/G++ wrappers after the MSYS2 toolchain repair:
+  `simpleos_qemu_rv64_desktop_service_build_cc_launch_status=pass`,
+  `simpleos_qemu_rv64_desktop_service_build_cxx_launch_status=pass`, and empty
+  missing-DLL rows. Native-build now reaches the freestanding link and stops at
+  `simpleos_qemu_rv64_desktop_service_build_status=blocked:desktop-service-build-exit-1`;
+  the retained raw linker diagnostic identifies duplicate boot runtime objects
+  across `baremetal_stubs`, `full_networking_runtime`, and
+  `ghdl_boot_info_runtime`, so the active blocker is RV64 boot-source selection,
+  not the old `libLLVM-19.dll` loader failure.
 - Windows SimpleOS FPGA RV64 serial evidence is recorded in
   `doc/09_report/windows_simpleos_fpga_rv64_serial_current_2026-07-16.md`.
   The direct PowerShell wrapper now anchors itself to the checkout root and was
   verified from outside the checkout. Current preflight evidence reports
   `simpleos_fpga_expected_entry_status=pass` and
   `simpleos_fpga_expected_kernel_status=pass` with repo-root absolute paths.
-  The rebuild path now records both `-BuildCc` and `-BuildCxx` launch probes
-  before native-build and reports the same current MSYS2 LLVM loader blocker,
-  including `simpleos_fpga_build_cc_missing_dlls=libLLVM-19.dll` and
-  `simpleos_fpga_build_cxx_missing_dlls=libLLVM-19.dll`.
-  The hardware lane remains fail-closed on missing serial device, missing boot
-  marker, missing toolchain status, and missing bitstream status.
+  The local MSYS2 RISC-V GCC/G++ wrappers are now launchable for rebuild
+  bootstrap attempts. The hardware lane remains fail-closed on missing serial
+  device, missing boot marker, missing toolchain status, and missing bitstream
+  status; no board/bitstream completion is claimed.
 - Windows Simple process inventory evidence is recorded in
   `doc/09_report/windows_simple_process_inventory_current_2026-07-16.md`.
   The helper used by the SimpleOS multiconfig wrapper now resolves

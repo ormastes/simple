@@ -350,14 +350,14 @@ if (-not [string]::IsNullOrWhiteSpace($BaseEvidencePath) -and (Test-Path -Litera
 
 $source = Read-KeyValueFile $Engine2dEvidencePath
 $qemuEntryPath = "examples/09_embedded/simple_os/arch/riscv64/desktop_service_entry.spl"
-$baremetalCorePath = "src/os/compositor/engine2d_baremetal_core.spl"
+$baremetalCorePath = "src/os/compositor/engine2d_baremetal_rect_core.spl"
 $virtioSurfacePath = "src/lib/gc_async_mut/gpu/engine2d/virtio_gpu_surface.spl"
 $vulkanSessionPath = "src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl"
 $qemuEntryFullPath = Join-Path $repoRoot $qemuEntryPath
 $baremetalCoreFullPath = Join-Path $repoRoot $baremetalCorePath
 $virtioSurfaceFullPath = Join-Path $repoRoot $virtioSurfacePath
 $vulkanSessionFullPath = Join-Path $repoRoot $vulkanSessionPath
-$sourceQemuEntryStatus = if (Test-FileContains $qemuEntryFullPath "create_fb_engine_core") { "pass" } else { "missing" }
+$sourceQemuEntryStatus = if (Test-FileContains $qemuEntryFullPath "rect_core_draw_rect_filled") { "pass" } else { "missing" }
 $sourceBaremetalCoreStatus = if (Test-FileContains $baremetalCoreFullPath "gui_fill4") { "pass" } else { "missing" }
 $sourceVirtioSurfaceStatus = if (Test-FileContains $virtioSurfaceFullPath "trait VirtioGpu2DSurface") { "pass" } else { "missing" }
 $sourceVulkanSessionStatus = if (Test-FileContains $vulkanSessionFullPath "class VulkanSession") { "pass" } else { "missing" }
