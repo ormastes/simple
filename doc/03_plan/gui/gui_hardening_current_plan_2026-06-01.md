@@ -273,6 +273,14 @@
   fail-closed on `blocked:desktop-service-not-wired-to-vulkan-engine2d-session`,
   `simpleos_engine2d_readback_nonblank_status=blocked:source-evidence-not-usable`,
   missing `.rdc`, and missing QEMU/host RenderDoc logs.
+- Windows SimpleOS RenderDoc raw-row gate evidence is recorded in
+  `doc/09_report/windows_simpleos_rdoc_raw_row_gate_current_2026-07-16.md`.
+  The wrapper now resolves repo-relative evidence, Simple binary, aggregate
+  script, and summary paths from `$PSScriptRoot` and captures native stderr
+  warnings without aborting. The out-of-tree Windows run reports
+  `simpleos_rdoc_raw_row_gate_status=pass`, with the missing magic-status case
+  blocked as `blocked:missing-simple-rdoc-magic` and the explicit
+  `simpleos_renderdoc_rdc_magic_status=pass` case passing.
 - Windows SimpleOS WM host-compare evidence is recorded in
   `doc/09_report/windows_simpleos_wm_host_compare_current_2026-07-16.md`. The
   wrapper now resolves repo-relative inputs from `$PSScriptRoot` and was

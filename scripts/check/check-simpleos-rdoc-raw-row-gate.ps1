@@ -7,6 +7,25 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$scriptDir = Split-Path -Parent $PSCommandPath
+$repoRoot = Resolve-Path -LiteralPath (Join-Path $scriptDir "..\..")
+Set-Location $repoRoot
+
+function Resolve-RepoPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return $path
+    }
+    if ([System.IO.Path]::IsPathRooted($path)) {
+        return $path
+    }
+    return Join-Path $repoRoot $path
+}
+
+$EvidenceDir = Resolve-RepoPath $EvidenceDir
+$SimpleBinary = Resolve-RepoPath $SimpleBinary
+$AggregateScript = Resolve-RepoPath $AggregateScript
+$SummaryPath = Resolve-RepoPath $SummaryPath
+
 function Write-Row($rows, [string]$key, [string]$value) {
     $rows.Add("$key=$value") | Out-Null
 }
@@ -99,11 +118,14 @@ function Get-RowValue([string[]]$lines, [string]$key) {
 
 function Invoke-Aggregate([string]$evidencePath, [string]$logPath) {
     $oldSimpleLib = $env:SIMPLE_LIB
+    $oldErrorActionPreference = $ErrorActionPreference
     $env:SIMPLE_LIB = "src"
     try {
+        $ErrorActionPreference = "Continue"
         $output = & $script:ResolvedSimpleBinary $script:ResolvedAggregateScript --evidence $evidencePath --mode=interpreter 2>&1
         $exitCode = $LASTEXITCODE
     } finally {
+        $ErrorActionPreference = $oldErrorActionPreference
         if ($null -eq $oldSimpleLib) {
             Remove-Item Env:SIMPLE_LIB -ErrorAction SilentlyContinue
         } else {
