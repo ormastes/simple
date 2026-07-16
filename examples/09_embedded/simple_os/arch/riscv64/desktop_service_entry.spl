@@ -1,3 +1,5 @@
+use os.compositor.engine2d_baremetal_core.{create_fb_engine_core}
+
 extern fn serial_println(msg: text)
 extern fn rt_riscv_harden_canary_value() -> i64
 extern fn rt_riscv_nvfs_probe() -> i64
@@ -25,6 +27,7 @@ extern fn rt_desktop_pci_display_init() -> i64
 extern fn rt_desktop_pci_display_flush_test() -> i64
 extern fn rt_desktop_pci_display_width() -> i64
 extern fn rt_desktop_pci_display_height() -> i64
+extern fn rt_gui_flush() -> i64
 
 fn _decode_status(raw: i64) -> i64:
     val wrapped_negative_floor = 1i64 << 60
@@ -36,6 +39,36 @@ fn _decode_status(raw: i64) -> i64:
 fn _fail(stage: text):
     serial_println("[desktop-service] failed stage={stage}")
     serial_println("TEST FAILED")
+
+fn _draw_engine2d_desktop_scene(width: i64, height: i64) -> bool:
+    if width <= 0 or height <= 0:
+        return false
+    var engine = create_fb_engine_core(0u64, width as i32, height as i32)
+    val w = width as i32
+    val h = height as i32
+    engine.clear(0xff0a2540u32)
+    engine.draw_rect_filled(0, 0, w, 44, 0xff101820u32)
+    engine.draw_rect_filled(0, 42, w, 2, 0xff3498dbu32)
+    engine.draw_rect_filled(0, h - 56, w, 56, 0xff101820u32)
+    engine.draw_rect_filled(0, h - 56, w, 2, 0xff3498dbu32)
+    engine.draw_rect_filled(24, 72, 272, 112, 0x66000000u32)
+    engine.draw_rect_filled(18, 66, 272, 112, 0xff1e293bu32)
+    engine.draw_rect_filled(18, 66, 272, 28, 0xff2050a0u32)
+    engine.draw_rect_filled(30, 75, 10, 10, 0xffe74c3cu32)
+    engine.draw_rect_filled(48, 75, 10, 10, 0xfff1c40fu32)
+    engine.draw_rect_filled(66, 75, 10, 10, 0xff27ae60u32)
+    engine.draw_rect_filled(266, 66, 24, 28, 0xffcc3333u32)
+    engine.draw_rect_filled(26, 102, 256, 68, 0xff182230u32)
+    engine.draw_rect_filled(36, 114, 96, 10, 0xff22c55eu32)
+    engine.draw_rect_filled(36, 134, 154, 10, 0xff60a5fau32)
+    engine.draw_rect_filled(36, 154, 126, 10, 0xfff59e0bu32)
+    engine.draw_rect_filled(196, 114, 64, 50, 0xff243447u32)
+    engine.draw_rect_filled(16, h - 42, 72, 28, 0xff1e293bu32)
+    engine.draw_rect_filled(96, h - 42, 72, 28, 0xff243447u32)
+    engine.draw_rect_filled(176, h - 42, 72, 28, 0xff243447u32)
+    engine.draw_rect_filled(256, h - 35, 42, 14, 0xff3498dbu32)
+    engine.present()
+    _decode_status(rt_gui_flush()) >= 0
 
 fn _smf_smoke() -> bool:
     if rt_riscv_nvfs_probe() == 1:
@@ -79,13 +112,15 @@ fn _init_display() -> bool:
     if display_rc < 0:
         serial_println("[display-riscv] Display unavailable rc={display_rc}")
         return false
-    val flush_rc = _decode_status(rt_desktop_pci_display_flush_test())
-    if flush_rc < 0:
-        serial_println("[display-riscv] Display flush failed rc={flush_rc}")
+    val width = rt_desktop_pci_display_width()
+    val height = rt_desktop_pci_display_height()
+    val draw_ok = _draw_engine2d_desktop_scene(width, height)
+    if not draw_ok:
+        serial_println("[display-riscv] Display Engine2D scene flush failed")
         return false
     serial_println("[display-riscv] Display GPU ready")
-    serial_println("[display-riscv] Display flush passed")
-    serial_println("[display-riscv] Display service ready: {rt_desktop_pci_display_width()}x{rt_desktop_pci_display_height()} framebuffer")
+    serial_println("[display-riscv] Engine2D baremetal scene flush passed")
+    serial_println("[display-riscv] Display service ready: {width}x{height} framebuffer")
     true
 
 fn _init_network() -> bool:

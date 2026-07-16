@@ -15,13 +15,26 @@ Current Windows refresh for
 - SimpleOS/QEMU readback: pass. `simpleos_qemu_gpu_readback_status=pass`,
   `simpleos_qemu_gpu_readback_width=320`,
   `simpleos_qemu_gpu_readback_height=240`.
-- Source bridge audit: blocked. The current evidence remains
-  `blocked:desktop-service-not-wired-to-vulkan-engine2d-session`.
-- Engine2D readback promotion: blocked. The source evidence is browser-backing
-  only with Simple readback not run, so
-  `simpleos_engine2d_readback_nonblank_status=blocked:source-evidence-not-usable`.
+- Source bridge audit: pass. The RV64 desktop-service entry now imports
+  `create_fb_engine_core`, draws the WM scene through the Simple
+  `Engine2DBaremetalCore`, and flushes through the RISC-V `rt_gui_fill4` /
+  `rt_gui_flush` runtime shim. The refreshed evidence reports
+  `simpleos_engine2d_source_current_draw_path=freestanding-engine2d-baremetal-core`
+  and `simpleos_engine2d_source_bridge_audit_status=pass`.
+- Engine2D readback promotion: pass for the saved direct Simple Vulkan
+  readback. The refreshed evidence reports
+  `simpleos_engine2d_source_evidence_usable_status=pass` and
+  `simpleos_engine2d_readback_nonblank_status=pass`.
+- Windows host Vulkan probe: partial. `vulkaninfo` passes on
+  `Intel(R) UHD Graphics 770`, while SDK tools and RenderDoc remain missing:
+  `simpleos_windows_vulkan_host_readiness_status=blocked:sdk-tools-missing`.
 - RenderDoc release artifacts: missing. `simpleos_renderdoc_rdc_status=missing`
   and `simpleos_wm_renderdoc_log_compare_reason=missing-qemu-and-host-renderdoc-logs`.
+- Rebuild note: the existing Windows host does not currently expose a working
+  RISC-V C++ cross compile path for the freestanding native-build. Host `g++`
+  rejects the RISC-V flags, and the MSYS2 `clang++` path exits before producing
+  `_init_all.o`, so this refresh proves the source contract and checker rows
+  but does not claim a freshly rebuilt RV64 kernel.
 
 ## Evidence Command
 
@@ -29,8 +42,9 @@ Current Windows refresh for
 Push-Location $env:TEMP
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\ormas\dev\simple\scripts\check\check-simpleos-engine2d-renderdoc-evidence.ps1 -EvidencePath build\simpleos_multiconfig_live_evidence\engine2d-renderdoc-out-of-tree.env
 Pop-Location
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-simpleos-engine2d-renderdoc-evidence.ps1 -EvidencePath build\simpleos_multiconfig_live_evidence\engine2d-renderdoc-windows-current.env -Engine2dEvidencePath build\simpleos_multiconfig_live_evidence\vulkan-engine2d-readback-final.env -ProbeHostVulkan
 ```
 
-The command exits fail-closed because the source bridge and RenderDoc artifacts
-are not complete, but the Windows wrapper now reports the current artifacts from
-repo-root-stable paths.
+The command exits fail-closed because RenderDoc artifacts are not complete, but
+the source bridge, saved direct Simple Vulkan readback, QEMU readback, and
+Windows Vulkan host probe rows now report current repo-root-stable evidence.

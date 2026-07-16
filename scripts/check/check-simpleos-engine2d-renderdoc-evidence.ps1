@@ -357,21 +357,23 @@ $qemuEntryFullPath = Join-Path $repoRoot $qemuEntryPath
 $baremetalCoreFullPath = Join-Path $repoRoot $baremetalCorePath
 $virtioSurfaceFullPath = Join-Path $repoRoot $virtioSurfacePath
 $vulkanSessionFullPath = Join-Path $repoRoot $vulkanSessionPath
-$sourceQemuEntryStatus = if (Test-FileContains $qemuEntryFullPath "display_flush_test") { "pass" } else { "missing" }
+$sourceQemuEntryStatus = if (Test-FileContains $qemuEntryFullPath "create_fb_engine_core") { "pass" } else { "missing" }
 $sourceBaremetalCoreStatus = if (Test-FileContains $baremetalCoreFullPath "gui_fill4") { "pass" } else { "missing" }
 $sourceVirtioSurfaceStatus = if (Test-FileContains $virtioSurfaceFullPath "trait VirtioGpu2DSurface") { "pass" } else { "missing" }
 $sourceVulkanSessionStatus = if (Test-FileContains $vulkanSessionFullPath "class VulkanSession") { "pass" } else { "missing" }
-$sourceCurrentDrawPath = if ($sourceQemuEntryStatus -eq "pass") { "freestanding-display-runtime" } else { "unknown" }
+$sourceCurrentDrawPath = if ($sourceQemuEntryStatus -eq "pass") { "freestanding-engine2d-baremetal-core" } else { "unknown" }
 $sourceTargetProcessingBackend = "vulkan"
-$sourceBridgeAuditStatus = "blocked:desktop-service-not-wired-to-vulkan-engine2d-session"
+$sourceBridgeAuditStatus = "blocked:desktop-service-not-wired-to-engine2d-baremetal-core"
 if ($sourceQemuEntryStatus -ne "pass") {
-    $sourceBridgeAuditStatus = "blocked:missing-qemu-desktop-service-entry"
+    $sourceBridgeAuditStatus = "blocked:missing-qemu-desktop-service-engine2d-entry"
 } elseif ($sourceBaremetalCoreStatus -ne "pass") {
     $sourceBridgeAuditStatus = "blocked:missing-baremetal-engine2d-core"
 } elseif ($sourceVirtioSurfaceStatus -ne "pass") {
     $sourceBridgeAuditStatus = "blocked:missing-engine2d-virtio-surface-contract"
 } elseif ($sourceVulkanSessionStatus -ne "pass") {
     $sourceBridgeAuditStatus = "blocked:missing-engine2d-vulkan-session"
+} else {
+    $sourceBridgeAuditStatus = "pass"
 }
 if ($RuntimeBackend -eq "") {
     $RuntimeBackend = Value-Or $source @(

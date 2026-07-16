@@ -276,11 +276,16 @@
   The wrapper now resolves repo-relative source evidence, QEMU readback,
   RenderDoc artifact/log, nested Simple Vulkan probe, and output evidence paths
   from `$PSScriptRoot` and was verified from outside the checkout. The current
-  run finds the saved Vulkan source evidence and reports
-  `simpleos_qemu_gpu_readback_status=pass` at `320x240`, while remaining
-  fail-closed on `blocked:desktop-service-not-wired-to-vulkan-engine2d-session`,
-  `simpleos_engine2d_readback_nonblank_status=blocked:source-evidence-not-usable`,
-  missing `.rdc`, and missing QEMU/host RenderDoc logs.
+  run finds the saved direct Simple Vulkan source evidence, reports
+  `simpleos_qemu_gpu_readback_status=pass` at `320x240`,
+  `simpleos_engine2d_source_current_draw_path=freestanding-engine2d-baremetal-core`,
+  `simpleos_engine2d_source_bridge_audit_status=pass`, and
+  `simpleos_engine2d_readback_nonblank_status=pass`. The RV64 desktop-service
+  entry now draws the WM scene through `Engine2DBaremetalCore` plus the RISC-V
+  `rt_gui_fill4`/`rt_gui_flush` shim. The lane still remains fail-closed on
+  missing `.rdc`, missing QEMU/host RenderDoc logs, and missing Windows Vulkan
+  SDK/RenderDoc tools; this Windows host also lacks a working RV64 C++ cross
+  compile path for a fresh desktop-service kernel rebuild.
 - Windows SimpleOS RenderDoc raw-row gate evidence is recorded in
   `doc/09_report/windows_simpleos_rdoc_raw_row_gate_current_2026-07-16.md`.
   The wrapper now resolves repo-relative evidence, Simple binary, aggregate

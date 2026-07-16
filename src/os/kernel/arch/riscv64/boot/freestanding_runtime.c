@@ -3187,6 +3187,26 @@ static void rt_gpu_fill_rect(spl_u32 x, spl_u32 y, spl_u32 w, spl_u32 h, spl_u32
     }
 }
 
+spl_u64 rt_gui_fill4(spl_u64 xy, spl_u64 wh, spl_u64 color, spl_u64 unused) {
+    spl_u32 x = (spl_u32)(xy >> 32);
+    spl_u32 y = (spl_u32)(xy & 0xffffffffULL);
+    spl_u32 w = (spl_u32)(wh >> 32);
+    spl_u32 h = (spl_u32)(wh & 0xffffffffULL);
+    (void)unused;
+    if (!g_rt_display_ready || !g_rt_gpu_fb) {
+        return 0ULL;
+    }
+    rt_gpu_fill_rect(x, y, w, h, (spl_u32)color);
+    return 1ULL;
+}
+
+spl_i64 rt_gui_flush(void) {
+    if (!g_rt_display_ready || !g_rt_gpu_fb) {
+        return -1;
+    }
+    return rt_gpu_cmd_transfer_flush();
+}
+
 static void rt_gpu_fill_wm_scene(void) {
     volatile spl_u32 *fb = (volatile spl_u32 *)g_rt_gpu_fb;
     for (spl_u32 y = 0; y < RT_GPU_HEIGHT; y = y + 1U) {
