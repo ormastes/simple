@@ -222,6 +222,26 @@ impl Lowerer {
             return Ok(result);
         }
 
+        // An erased nested receiver still has syntax-level ownership evidence;
+        // use it before the receiver-blind ANY fallback can choose a decoy.
+        if recv_hir.ty == TypeId::ANY && self.is_ambiguous_global_field(field) {
+            if let Some(receiver_struct) = self.try_resolve_receiver_struct_name_from_expr(receiver, ctx) {
+                if let Some(field_index) = self.try_resolve_global_field_index_by_name(&receiver_struct, field) {
+                    let field_ty = self
+                        .try_resolve_global_field_type_by_name(&receiver_struct, field)
+                        .or_else(|| self.try_resolve_field_type_by_name(&receiver_struct, field))
+                        .unwrap_or(TypeId::ANY);
+                    return Ok(HirExpr {
+                        kind: HirExprKind::FieldAccess {
+                            receiver: recv_hir,
+                            field_index,
+                        },
+                        ty: field_ty,
+                    });
+                }
+            }
+        }
+
         // Try regular struct field access first
         match self.get_field_info(recv_hir.ty, field) {
             Ok((field_index, field_ty)) => {

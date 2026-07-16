@@ -560,7 +560,7 @@ fn test_trait_typed_method_result_enables_result_builtin() {
 
 #[test]
 fn test_lower_ambiguous_global_field_chain_as_field_access() {
-    let source = "fn test(s: Holder) -> text:\n    return s.suggestion.new_text\n";
+    let source = "fn bait(r: Replacement) -> text:\n    return r.new_text\n\nfn test(s: Holder) -> text:\n    return s.suggestion.new_text\n";
     let mut parser = Parser::new(source);
     let module = parser.parse().expect("parse failed");
 
@@ -571,23 +571,36 @@ fn test_lower_ambiguous_global_field_chain_as_field_access() {
             vec![("suggestion".to_string(), Type::Simple("Suggestion".to_string()))],
         ),
         (
-            "Suggestion".to_string(),
+            "Replacement".to_string(),
             vec![
                 ("new_text".to_string(), Type::Simple("text".to_string())),
-                ("confidence".to_string(), Type::Simple("FixConfidence".to_string())),
+                ("start".to_string(), Type::Simple("i64".to_string())),
+                ("end".to_string(), Type::Simple("i64".to_string())),
+                ("source".to_string(), Type::Simple("text".to_string())),
             ],
         ),
-        (
-            "Replacement".to_string(),
-            vec![("new_text".to_string(), Type::Simple("text".to_string()))],
-        ),
     ])));
+    lowerer.set_duplicate_global_struct_defs(Arc::new(HashMap::from([(
+        "Suggestion".to_string(),
+        vec![
+            vec![
+                ("message".to_string(), Type::Simple("text".to_string())),
+                ("confidence".to_string(), Type::Simple("FixConfidence".to_string())),
+                ("new_text".to_string(), Type::Simple("text".to_string())),
+            ],
+            vec![("confidence".to_string(), Type::Simple("FixConfidence".to_string()))],
+        ],
+    )])));
+    lowerer.set_lenient_types(true);
     lowerer.set_ambiguous_field_names(Arc::new(HashSet::from(["new_text".to_string()])));
 
     let lowered = lowerer.lower_module(&module).unwrap();
-    let func = &lowered.functions[0];
+    let func = lowered.functions.iter().find(|func| func.name == "test").unwrap();
     if let HirStmt::Return(Some(expr)) = &func.body[0] {
-        assert!(matches!(expr.kind, HirExprKind::FieldAccess { .. }));
+        let HirExprKind::FieldAccess { field_index, .. } = &expr.kind else {
+            panic!("Expected field access");
+        };
+        assert_eq!(*field_index, 2, "Suggestion.new_text must use the receiver layout");
         assert_eq!(expr.ty, TypeId::STRING);
     } else {
         panic!("Expected return statement");

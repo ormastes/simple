@@ -1,10 +1,38 @@
 # BUG: freestanding native-build shifts cross-module struct field offsets by one slot for classes with `[u32]` array fields (SimpleOS 4K WM render)
 
-**Status:** open
+**Status:** source fix and regressions added; executable native/PPM verification pending
 **Severity:** high (blocks the SimpleOS x86_64 4K WM desktop from rendering a real PPM; cr2=0x0 null-deref cascade)
 **Component:** native-build freestanding codegen (`SIMPLE_BOOTSTRAP=1 native-build`, `--target x86_64-unknown-none --backend cranelift`) — cross-module class field-offset computation
 **Family:** same class as [`x64_freestanding_module_level_val_u32_desktop_gui_2026-07-12.md`](x64_freestanding_module_level_val_u32_desktop_gui_2026-07-12.md) (freestanding native-build silently mis-reads a value across a module boundary).
 **Found:** 2026-07-14, verifying the SimpleOS WM fullscreen evidence harness after the disk-less spawn fault and the baremetal-mutex halt were fixed.
+
+## Current source resolution (2026-07-16)
+
+The Rust seed now resolves an ambiguous field on an erased `ANY` receiver by
+recovering the receiver's declared struct before the receiver-blind global
+scan. The implementation is in
+`src/compiler_rust/compiler/src/hir/lower/expr/access.rs` via
+`try_resolve_receiver_struct_name_from_expr` and
+`try_resolve_global_field_index_by_name`. This is the source-level fix for the
+full-graph collision pinned below; it does not change the uniform one-word
+backend layout.
+
+Two non-duplicated regressions now describe the downstream contract:
+
+- `test/01_unit/compiler/mir/nested_typed_field_index_collision_spec.spl`
+  lowers a nested typed receiver through the pure-Simple HIR/MIR pipeline and
+  requires `FramebufferDriver.width` to serialize as `GetField` index 2 even
+  when a larger decoy declares `width` at index 0.
+- `scripts/check/check-native-seed-parity.shs` registers the cross-module
+  fixture under `test/fixtures/native_crossmodule_field_index/` once through
+  `run_strict_dual_backend_case`, which covers default LLVM and explicit
+  Cranelift without target-specific copies.
+
+These additions have not been executed in this edit. The native parity result,
+the real SimpleOS PPM result, and the three-stage bootstrap result remain
+pending. The separate HEAD-seed NVMe-init regression documented below still
+blocks reaching the render/PPM gate; this issue must not be marked verified or
+closed until that gate runs on a working Linux native-build host.
 
 ## Symptom
 
