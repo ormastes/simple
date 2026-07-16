@@ -141,6 +141,7 @@ impl MirLowering:
         var result_type = MirType.i64()
         var is_text = false
         var supported = false
+        var result_struct_name = ""
         match ok_type.kind:
             case HirTypeKind.Int(bits, signed):
                 if bits == 64 and signed:
@@ -149,6 +150,15 @@ impl MirLowering:
                 result_type = self.bootstrap_text_type()
                 is_text = true
                 supported = true
+            case HirTypeKind.Named(symbol, _):
+                if default_expr == nil:
+                    val type_symbol = self.symbols.get_symbol(symbol)
+                    if type_symbol != nil:
+                        match type_symbol.kind:
+                            case Struct:
+                                result_struct_name = type_symbol.name
+                                supported = true
+                            case _: ()
             case _: ()
         if not supported:
             self.error("unsupported Result unwrap payload type", Some(receiver.span))
@@ -226,6 +236,9 @@ impl MirLowering:
         var b_merge = self.builder
         b_merge.switch_to_block(merge_block)
         self.builder = b_merge
+        if result_struct_name != "":
+            self.struct_value_syms[result_local.id] = result_struct_name
+            self.local_hir_types[result_local.id] = ok_type
         result_local
 
     me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution) -> LocalId:
@@ -1592,6 +1605,7 @@ impl MirLowering:
                     wb_value = result_local
                 self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_value)
                 if val result_local = result:
+                    self.remember_call_hir_return(result_local, method_id)
                     result_local
                 else:
                     var b2 = self.builder
@@ -1617,6 +1631,7 @@ impl MirLowering:
                     wb_value = result_local
                 self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_value)
                 if val result_local = result:
+                    self.remember_call_hir_return(result_local, method_id)
                     result_local
                 else:
                     var b2 = self.builder
@@ -1642,6 +1657,7 @@ impl MirLowering:
                     wb_value = result_local
                 self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_value)
                 if val result_local = result:
+                    self.remember_call_hir_return(result_local, func_id)
                     result_local
                 else:
                     var b2 = self.builder
@@ -1660,7 +1676,9 @@ impl MirLowering:
 
                 val method_operand = self.symbol_to_operand(method_id)
                 val return_type = self.resolved_call_return_type(method_id)
-                self.emit_resolved_direct_call(method_operand, arg_operands, return_type)
+                val result = self.emit_resolved_direct_call(method_operand, arg_operands, return_type)
+                self.remember_call_hir_return(result, method_id)
+                result
 
             case Unresolved:
                 # Bug #138/#156 keystone: minimal-viable native resolution of
@@ -1717,6 +1735,7 @@ impl MirLowering:
                                         static_return_type = MirType(kind: MirTypeKind.Struct(static_result_symbol.id))
                                     case _: ()
                     val static_result = self.emit_resolved_direct_call(self.symbol_to_operand(static_method_id), static_args, static_return_type)
+                    self.remember_call_hir_return(static_result, static_method_id)
                     return static_result
 
                 val unresolved_receiver_local = if wb_kind != 0: wb_receiver else: self.lower_expr(receiver)
@@ -1741,6 +1760,7 @@ impl MirLowering:
                             im_wb_value = im_result_local
                         self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, im_wb_value)
                         if val im_result_local = im_result:
+                            self.remember_call_hir_return(im_result_local, resolved_method_id)
                             # Thread the callee's declared return struct name
                             # onto the result local (methchain lane fix) so a
                             # chained `.m2()` on THIS call's result resolves
