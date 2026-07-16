@@ -205,12 +205,14 @@ impl Lowerer {
             }
         };
 
-        // Lower field initializers (in order)
-        let mut fields_hir = Vec::new();
-        for (_field_name, field_expr) in fields {
-            let field_hir = self.lower_expr(field_expr, ctx)?;
-            fields_hir.push(field_hir);
-        }
+        // ROOT FIX (bug simpleos_native_build_field_defaults_and_boxed_trait_dispatch,
+        // 2026-07-16): see `lower_struct_init_fields` doc comment below for the
+        // full root-cause writeup. Brace-literal form (`S { field: v }`) always
+        // gives every field a name, so route it through the same
+        // declared-order-with-nil-fill resolver as the paren-call constructor
+        // form (`S(field: v)`, hir/lower/expr/calls.rs) uses.
+        let provided: Vec<(Option<&str>, &Expr)> = fields.iter().map(|(n, e)| (Some(n.as_str()), e)).collect();
+        let fields_hir = self.lower_struct_init_fields(name, struct_ty, &provided, ctx)?;
 
         Ok(HirExpr {
             kind: HirExprKind::StructInit {
@@ -219,6 +221,100 @@ impl Lowerer {
             },
             ty: struct_ty,
         })
+    }
+
+    /// Build the declared-order field HIR list for a struct/class
+    /// construction (either AST shape: brace literal `S { field: v }` or
+    /// paren-call constructor `S(field: v)`).
+    ///
+    /// ROOT FIX (bug simpleos_native_build_field_defaults_and_boxed_trait_dispatch,
+    /// 2026-07-16): MIR's StructInit lowering (`lower_struct_init_expr` in
+    /// mir/lower/lowering_expr_struct.rs) always derives
+    /// `field_offsets`/`field_types` from the struct's FULL declared field
+    /// list, in DECLARED order, via the type registry -- regardless of how
+    /// many fields the construction site actually wrote out. Both HIR
+    /// construction sites previously lowered exactly the arguments given, in
+    /// the ORDER WRITTEN IN SOURCE (the paren-call site went further and
+    /// dropped argument names entirely via `lower_call_args`, "lower
+    /// arguments as positional field initializers"), with no regard for the
+    /// field's declared name/index and no fill-in for omitted `= default`
+    /// fields. Any call that (a) omits a field with a declared default
+    /// (relying on the class-level default, e.g.
+    /// `vulkan_backend: VulkanBackend? = nil`) or (b) writes fields out of
+    /// declared order, silently shifted every later field's value into its
+    /// neighbor's byte slot; omitted trailing fields were left holding
+    /// whatever was already on the heap (poison), not the declared default.
+    ///
+    /// Resolve the struct's true declared field order -- locally via the type
+    /// registry, falling back to the cross-module `global_struct_defs` map
+    /// for closure-discovered types whose local TypeId erased to ANY (the
+    /// same fallback `access.rs` already uses for field READS) -- and build
+    /// the field list in THAT order: a named argument goes to its matching
+    /// declared slot, a positional (unnamed) argument fills the next
+    /// not-yet-assigned slot in declared order (preserving plain positional
+    /// construction), and any declared slot nothing fills gets a `nil`
+    /// placeholder instead of being left unset.
+    pub(super) fn lower_struct_init_fields(
+        &mut self,
+        name: &str,
+        struct_ty: TypeId,
+        provided: &[(Option<&str>, &Expr)],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Vec<HirExpr>> {
+        let declared_field_names: Option<Vec<String>> = self
+            .module
+            .types
+            .get(struct_ty)
+            .and_then(|hir_ty| match hir_ty {
+                HirType::Struct { fields: sf, .. } => Some(sf.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>()),
+                _ => None,
+            })
+            .or_else(|| {
+                let bare_name = name.rsplit('.').next().unwrap_or(name);
+                self.global_struct_defs.as_ref().and_then(|defs| {
+                    defs.get(bare_name)
+                        .map(|fs| fs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>())
+                })
+            });
+
+        let Some(declared) = declared_field_names else {
+            // Struct declaration not found anywhere (fully erased, no
+            // registry entry) -- fall back to lowering exactly what was
+            // written, in source order, matching prior behavior for this
+            // unresolvable case.
+            let mut out = Vec::with_capacity(provided.len());
+            for (_, expr) in provided {
+                out.push(self.lower_expr(expr, ctx)?);
+            }
+            return Ok(out);
+        };
+
+        let mut named: std::collections::HashMap<&str, &Expr> = std::collections::HashMap::new();
+        let mut positional: Vec<&Expr> = Vec::new();
+        for (opt_name, expr) in provided {
+            match opt_name {
+                Some(n) => {
+                    named.insert(n, expr);
+                }
+                None => positional.push(expr),
+            }
+        }
+
+        let mut pos_iter = positional.into_iter();
+        let mut out = Vec::with_capacity(declared.len());
+        for field_name in &declared {
+            if let Some(expr) = named.get(field_name.as_str()) {
+                out.push(self.lower_expr(expr, ctx)?);
+            } else if let Some(expr) = pos_iter.next() {
+                out.push(self.lower_expr(expr, ctx)?);
+            } else {
+                out.push(HirExpr {
+                    kind: HirExprKind::Nil,
+                    ty: TypeId::NIL,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Lower a dictionary literal to HIR: {key: value, ...}

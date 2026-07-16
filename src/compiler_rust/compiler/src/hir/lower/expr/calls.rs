@@ -95,8 +95,19 @@ impl Lowerer {
                 if matches!(self.module.types.get(struct_ty), Some(HirType::Bitfield { .. })) {
                     return self.lower_bitfield_constructor(struct_ty, args, ctx);
                 }
-                // Lower arguments as positional field initializers
-                let fields_hir = self.lower_call_args(args, ctx)?;
+                // ROOT FIX (bug simpleos_native_build_field_defaults_and_boxed_trait_dispatch,
+                // 2026-07-16): this used to be `lower_call_args`, which
+                // "lowers arguments as positional field initializers" —
+                // dropping `arg.name` entirely and lowering values in
+                // literal-source order regardless of the struct's declared
+                // field order. See `lower_struct_init_fields` in
+                // collections.rs for the full root-cause writeup; it
+                // reorders named args to their declared slot and fills any
+                // field the call site omits (relying on a class-level
+                // default) with `nil` instead of leaving it unset.
+                let provided: Vec<(Option<&str>, &Expr)> =
+                    args.iter().map(|a| (a.name.as_deref(), &a.value)).collect();
+                let fields_hir = self.lower_struct_init_fields(name, struct_ty, &provided, ctx)?;
                 return Ok(HirExpr {
                     kind: HirExprKind::StructInit {
                         ty: struct_ty,
@@ -111,7 +122,13 @@ impl Lowerer {
                 // In lenient mode, uppercase identifier with named arguments is likely
                 // a struct construction even if the type isn't in the registry.
                 // Use TypeId::ANY since we don't have the actual type info.
-                let fields_hir = self.lower_call_args(args, ctx)?;
+                // Struct type is unresolved (ANY) here, so
+                // lower_struct_init_fields falls back to source-order lowering
+                // (its "unresolvable struct" branch) — same effective
+                // behavior as before, just centralized through one helper.
+                let provided: Vec<(Option<&str>, &Expr)> =
+                    args.iter().map(|a| (a.name.as_deref(), &a.value)).collect();
+                let fields_hir = self.lower_struct_init_fields(name, TypeId::ANY, &provided, ctx)?;
                 return Ok(HirExpr {
                     kind: HirExprKind::StructInit {
                         ty: TypeId::ANY,
