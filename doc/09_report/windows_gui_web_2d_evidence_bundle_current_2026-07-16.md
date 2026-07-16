@@ -24,14 +24,16 @@ Full-completion result:
 - `windows_gui_web_2d_evidence_bundle_status=fail`
 - `windows_gui_web_2d_evidence_bundle_reason=vulkan-full,d3d12-full`
 - `windows_gui_web_2d_evidence_bundle_vulkan_full_reason=sdk-tools,renderdoc-tools,host-readiness,browser-run,browser-events,browser-backing,renderdoc-capture`
-- `windows_gui_web_2d_evidence_bundle_d3d12_full_reason=compare-status,native-d3d12-readback,browser-d3d12-backing,pairwise-argb-diff,argb-source-evidence,pix-gpu-debugger-gate,pix-or-gpu-debugger-status,pix-or-gpu-debugger-artifact`
+- `windows_gui_web_2d_evidence_bundle_d3d12_full_reason=compare-status,native-d3d12-readback,browser-d3d12-backing,pairwise-argb-diff,argb-source-evidence`
 
 The default bundle checker validates the current saved evidence set without
 rerunning live capture: strict DirectX D3D11 browser/event/GPU-capture proof,
 partial Vulkan host proof, and fail-closed D3D12 render-log proof with strict
 upstream DirectX diagnostics. `-RequireFullCompletion` is the release-style
 strict mode and remains blocked until Vulkan SDK/RenderDoc browser capture and
-D3D12/PIX evidence are available.
+D3D12 native/browser/Simple pairwise evidence is available. The D3D12 leaf
+evidence now includes a real Electron-vs-Chrome ARGB JSON comparison; it
+currently fails with 9,975 mismatched pixels and does not promote the full gate.
 
 The DirectX, Vulkan, and D3D12 leaf PowerShell checkers now resolve relative
 evidence and capture artifact paths from the repository root derived from
