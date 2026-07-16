@@ -50,9 +50,13 @@ per-run output.
 - `scripts/setup/setup-gui-web-2d-vulkan-env.shs` records host readiness and,
   when requested, launches the direct Electron Chromium, Chrome, and Simple
   Engine2D Vulkan probes before optional RenderDoc captures.
-- `scripts/setup/setup-gui-web-2d-vulkan-env.ps1` is a deferred Windows
-  readiness companion. It is not part of the current top-level GUI/web/2D
-  RenderDoc workflow.
+- `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 --check` records Windows host
+  readiness without installing tools or launching GUI apps. It consumes the
+  latest Simple Vulkan readback evidence when present, checks `vulkaninfo`,
+  `glslangValidator`, `spirv-as`, `dxc`, Chrome, Electron, and RenderDoc
+  commands, and writes compatible `gui_web_2d_vulkan_*` rows. Use
+  `--print-install` for Windows install hints; do not claim RenderDoc capture
+  until `renderdoccmd` is present and a valid `.rdc` artifact is produced.
 
 Compatibility wrappers remain:
 
