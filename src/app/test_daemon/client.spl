@@ -8,14 +8,12 @@ use std.daemon_sdk.client.{
     daemon_ensure_running, daemon_submit, daemon_poll_result,
     daemon_submit_and_wait, daemon_stop, daemon_ensure_responsive
 }
-use std.daemon_sdk.types.{DaemonResponse, DaemonState}
-use std.daemon_sdk.lock.{is_daemon_running}
 use app.test_daemon.types.{
-    TestDaemonConfig, test_daemon_config_default,
+    TestDaemonConfig,
     test_request_to_daemon, daemon_response_to_test_result, TestResult
 }
 use app.test_daemon.{
-    TREQ_RUN_SINGLE, TREQ_CLEAN_RUN, TREQ_STATUS, TREQ_STOP,
+    TREQ_RUN_SINGLE, TREQ_CLEAN_RUN, TREQ_STATUS,
     TRESP_COMPLETED
 }
 use app.io.mod.{process_spawn_async, process_wait}
@@ -40,23 +38,16 @@ fn test_daemon_ping(config: TestDaemonConfig, timeout_ms: i64) -> bool:
     val resp = daemon_submit_and_wait(req, config.daemon, timeout_ms)
     resp.request_id != "" and resp.status == TRESP_COMPLETED
 
-fn start_test_daemon_process(config: TestDaemonConfig) -> bool:
-    # Spawn the launcher async so we don't block on the daemon's own startup
-    # handshake. The launcher (`simple test-daemon start`) exits
-    # on its own once the light daemon's lock file appears (or after its
-    # internal ~2s give-up window) — it does not stay alive. If we never
-    # reap it, it sits as a zombie for the lifetime of this process; with
-    # the process runtime's shared child-reap/poll path, that leaked zombie
-    # can starve a later synchronous process-run call (e.g. the
-    # per-spec `timeout` subprocess in the directory-mode test loop),
-    # hanging the whole run. Reap it here with a bounded wait — the
-    # launcher is expected to exit in ~2s, so this adds negligible latency
-    # and never masks a real daemon-start failure (the caller's own
-    # is_daemon_running() poll loop still decides success/failure).
-    val pid = process_spawn_async(test_daemon_simple_binary(), ["test-daemon", "start"])
-    if pid > 0:
-        process_wait(pid, 4000)
-    pid > 0
+fn start_test_daemon_process(_config: TestDaemonConfig) -> bool:
+    # Reap the short-lived launcher; its full-daemon child is then owned by
+    # the host process manager instead of becoming our zombie on shutdown.
+    val pid = process_spawn_async(
+        test_daemon_simple_binary(),
+        ["run", "src/app/test_daemon/daemon_launcher.spl"]
+    )
+    if pid <= 0:
+        return false
+    process_wait(pid, 4000) == 0
 
 # ============================================================================
 # Submit Test
@@ -85,8 +76,9 @@ fn test_submit_and_wait(path: text, config: TestDaemonConfig, clean: bool, timeo
     if not test_daemon_ensure_responsive(config):
         return TestResult(test_path: path, status: -1, passed: 0, failed: 1, skipped: 0, duration_ms: 0, output: "test daemon unavailable", cached: false)
     val kind = if clean: TREQ_CLEAN_RUN else: TREQ_RUN_SINGLE
-    val req = test_request_to_daemon(kind, path, "", clean)
-    val resp = daemon_submit_and_wait(req, config.daemon, timeout_ms)
+    var req = test_request_to_daemon(kind, path, "", clean)
+    req.fields["timeout_ms"] = "{timeout_ms}"
+    val resp = daemon_submit_and_wait(req, config.daemon, timeout_ms + 5000)
     daemon_response_to_test_result(resp)
 
 # ============================================================================

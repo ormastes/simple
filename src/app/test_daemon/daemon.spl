@@ -10,7 +10,7 @@ use std.daemon_sdk.types.{
     daemon_response_new
 }
 use app.test_daemon.types.{
-    TestDaemonConfig, test_daemon_config_default
+    TestDaemonConfig, TestResult, test_daemon_config_default
 }
 use app.test_daemon.{
     TREQ_RUN_SINGLE, TREQ_RUN_ALL, TREQ_CLEAN_RUN, TREQ_STATUS, TREQ_STOP,
@@ -33,9 +33,10 @@ use app.test_daemon.session_broker.{SessionBroker, session_broker_new}
 use app.test_daemon.session_adapter.{run_test_child}
 use app.test_daemon.session_types.{
     TestSessionMeta, test_session_meta_default,
-    session_kind_from_name, reuse_mode_from_name, reset_policy_from_name
+    session_kind_from_name, reuse_mode_from_name, reset_policy_from_name,
+    meta_needs_session, LEASE_ACTIVE, REUSE_FRESH_PER_TEST, RESET_NONE
 }
-use app.test_daemon.{SESSION_KIND_LOCAL}
+use std.test_runner.test_classification.{classify_test_session}
 use app.test_daemon.adapters.qemu_adapter.{qemu_adapter_new}
 use app.test_daemon.adapters.container_adapter.{container_adapter_new}
 use app.test_daemon.adapters.service_adapter.{service_adapter_new}
@@ -182,7 +183,8 @@ impl TestDaemon:
                 return resp
 
         # Execute test
-        val result = self.execute_test(test_path)
+        val timeout_ms = self.request_timeout_ms(req)
+        val result = self.execute_test(req.id, test_path, timeout_ms)
 
         # Remove from active
         self.active_requests["{dedup_key}"] = ""
@@ -212,7 +214,7 @@ impl TestDaemon:
                 total_skipped = total_skipped + cached.skipped
                 total_cached = total_cached + 1
             else:
-                self.execute_test(test_path)
+                self.execute_test(req.id, test_path, 120000)
                 val entry = self.incremental_state.check_freshness(test_path)
                 if entry.test_path != "":
                     total_passed = total_passed + entry.passed
@@ -240,7 +242,7 @@ impl TestDaemon:
             resp.fields["error"] = "missing test_path"
             return resp
 
-        self.execute_test(test_path)
+        self.execute_test(req.id, test_path, self.request_timeout_ms(req))
 
     # --- Status query ---
 
@@ -422,15 +424,40 @@ impl TestDaemon:
 
     # --- Execute a test ---
 
-    fn execute_test(test_path: text) -> DaemonResponse:
+    fn request_timeout_ms(req: DaemonRequest) -> i64:
+        val requested = (req.fields["timeout_ms"] ?? "120000").to_i64() ?? 120000
+        if requested > 0: requested else: 120000
+
+    fn execute_test(request_id: text, test_path: text, timeout_ms: i64) -> DaemonResponse:
         val setup_start = rt_time_now_unix_micros()
+        val meta = classify_test_session(test_path)
+        var result: TestResult
+        if meta_needs_session(meta):
+            val lease = self.session_broker.acquire(meta)
+            if lease.status != LEASE_ACTIVE or lease.session_id == "":
+                result = TestResult(
+                    test_path: test_path, status: TRESP_FAILED,
+                    passed: 0, failed: 1, skipped: 0, duration_ms: 0,
+                    output: "could not acquire {session_kind_name(meta.session_kind)} session",
+                    cached: false
+                )
+            else:
+                result = self.session_broker.execute_in_session(lease.session_id, test_path, timeout_ms)
+                if meta.reuse_mode == REUSE_FRESH_PER_TEST:
+                    self.session_broker.stop_session(lease.session_id)
+                elif meta.reset_policy != RESET_NONE:
+                    if not self.session_broker.reset_session(lease.session_id, meta.reset_policy):
+                        self.session_broker.stop_session(lease.session_id)
+                else:
+                    self.session_broker.release(lease.session_id)
+        else:
+            result = run_test_child(test_path, timeout_ms, [])
         val setup_ms = (rt_time_now_unix_micros() - setup_start) / 1000
-        val result = run_test_child(test_path, 120000, [])
 
         # Record in cache
         self.incremental_state.record_daemon_result(test_path, result.status, result.passed, result.failed, result.skipped, result.duration_ms, result.output)
 
-        var resp = daemon_response_new("", result.status)
+        var resp = daemon_response_new(request_id, result.status)
         resp.fields["test_path"] = test_path
         resp.fields["passed"] = "{result.passed}"
         resp.fields["failed"] = "{result.failed}"

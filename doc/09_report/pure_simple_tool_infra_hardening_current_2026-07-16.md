@@ -42,7 +42,7 @@ so executable qualification is still blocked.
 | Format/fix | FAIL | Writes are atomic and failures propagate, but formatter rewriting is not lexer-span-aware and can alter raw strings/comments | Drive edits from lexer spans before qualifying formatter output | P0 |
 | Check | BLOCKED | Command is parse/validation only; full type inference is not enforced | Implement enforcing type analysis, then qualify the production probe | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
-| Test daemon | FAIL | Default launcher/client state directories disagree; normal requests bypass classification, lease/adapters/reset/release; child recursion, timeout transport, cache, and broker metadata are incomplete | Unify on the full daemon owner and route every request through one acquire/execute/reset/release transaction | P0 |
+| Test daemon | SOURCE FIXED | CLI/client now share the full daemon protocol, request IDs/timeouts survive transport, and classified sessions use acquire/execute/reset-or-release; dynamic qualification and truthful per-example counts remain | Run local/session/timeout/stop protocol fixtures, then replace child exit-code count synthesis with parsed runner results | P0 |
 | SPipe/docgen | WARN | Executable spec/manual exist; generated-doc validation blocked by seed | Regenerate once with admitted runtime | P1 |
 | MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P1 |
 | LSP MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P0 |
@@ -102,9 +102,9 @@ so executable qualification is still blocked.
    the global findings remain an explicit P1 cleanup lane.
 4. `simple check` now states its actual parse/validation behavior. Enforced full
    type inference remains an open P1 implementation bug.
-5. The default test-daemon launcher and client currently rendezvous in different
-   directories, and the full daemon path does not yet own the complete session
-   lifecycle. Daemon claims therefore remain unqualified.
+5. The default test-daemon rendezvous and lifecycle bypass are source-fixed.
+   Runtime protocol, shutdown, adapter, and timeout evidence remains NOT RUN,
+   so daemon claims are not yet dynamically qualified.
 6. Formatter edits still infer syntax from raw text. Until edits are constrained
    by lexer spans, comments and raw strings are vulnerable to semantic changes.
 
@@ -112,7 +112,7 @@ so executable qualification is still blocked.
 
 | Rank | Defect | Concrete solution |
 |---|---|---|
-| P0 | Test daemon state mismatch and lifecycle bypass | Delete the light/full split, share one state path, transport the requested deadline, and make the broker transaction authoritative |
+| P1 | Test daemon result counts are synthesized from child exit status | Parse the child runner result protocol and retain real passed/failed/skipped counts |
 | P0 | Formatter can rewrite non-code text | Tokenize once and restrict whitespace/block edits to lexer-approved spans |
 | P1 | Lint ignores severity/options, duplicates fix collection, and `--all` can mask earlier failures | Make the canonical registry return one result set and aggregate exit status monotonically |
 | P1 | Duplicate fast-token bucket construction is quadratic and cache freshness is false | Build buckets in one pass and persist/compare content hash or mtime before reuse |
@@ -241,6 +241,10 @@ so executable qualification is still blocked.
   positional parameters and `exec`; it never joins arguments into source text.
   Windows fails closed and failed spawns are not waited/untracked. Platform and
   CPU discovery now use native runtime owners instead of subprocess probes.
+- **Full daemon owner:** the CLI and runner client now start the same full
+  daemon protocol through a reaped short-lived launcher. Requests retain their
+  IDs and requested child deadlines; session metadata selects the broker, and
+  every acquired lease is stopped, reset, or released after execution.
 
 ## Latest bounded verification
 
@@ -248,6 +252,9 @@ so executable qualification is still blocked.
   full cosine candidate retention, bounded child execution, atomic writes, MCP
   quoting, and non-placeholder focused specs: PASS. Dynamic Simple tests are
   NOT RUN because no admitted runtime exists.
+- Full-daemon entry, canonical configuration, request-ID response routing,
+  timeout transport, and broker lifecycle source contracts: SOURCE
+  IMPLEMENTED; executable daemon protocol and adapter verdicts are NOT RUN.
 - Shell syntax, scoped diff hygiene, and the MCP/LSP native wrapper contract:
   PASS.
 - Working and staged direct environment/runtime facade guards: PASS.
