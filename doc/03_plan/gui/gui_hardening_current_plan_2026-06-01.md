@@ -222,7 +222,10 @@
   complete from this non-elevated shell. The D3D12 wrapper now records strict
   upstream DirectX diagnostic status, requiring DirectX browser backing,
   browser event proof, and DXCap capture before the D3D11 diagnostic is treated
-  as current supporting evidence.
+  as current supporting evidence. The wrapper now anchors repo-relative paths to
+  `$PSScriptRoot`, defaults to the current strict DirectX GPU-capture evidence,
+  and was verified from outside the checkout by absolute script path in
+  fail-closed `--check` mode.
   `scripts/check/check-windows-d3d12-render-log-evidence.ps1` now validates
   saved D3D12 evidence files: default mode accepts the current fail-closed shape
   with strict upstream DirectX support, while `-RequireD3D12Completion` fails on

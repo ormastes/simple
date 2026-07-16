@@ -7,6 +7,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup\setup-windows-d3d12-rende
 powershell -ExecutionPolicy Bypass -File scripts\setup\setup-windows-d3d12-render-log-env.ps1 --refresh-directx -BuildDir build\windows-d3d12-render-log-env-strict-current -TimeoutSecs 160
 powershell -ExecutionPolicy Bypass -File scripts\check\check-windows-d3d12-render-log-evidence.ps1 -EvidencePath build\windows-d3d12-render-log-env-strict-current\evidence.env
 powershell -ExecutionPolicy Bypass -File scripts\check\check-windows-d3d12-render-log-evidence.ps1 -EvidencePath build\windows-d3d12-render-log-env-strict-current\evidence.env -RequireD3D12Completion
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\ormas\dev\simple\scripts\setup\setup-windows-d3d12-render-log-env.ps1 --check -BuildDir build\windows-d3d12-render-log-env-out-of-tree-current
 ```
 
 Result:
@@ -34,6 +35,16 @@ The wrapper now runs on Windows PowerShell without throwing on
 `ProcessStartInfo.ArgumentList`, refreshes the DirectX diagnostic evidence, and
 fails closed on the D3D12-specific gates. D3D11/DXCap evidence is intentionally
 not promoted to D3D12 completion evidence.
+
+The wrapper also anchors repo-relative build and evidence paths to
+`$PSScriptRoot`, runs child refresh processes from the repository root, and now
+defaults to the current strict DirectX GPU-capture evidence at
+`build/gui-web-2d-directx-env-windows-event-strict-gpucap/evidence.env`. The
+out-of-tree `--check` run above still fails closed for D3D12 completion, but it
+records `windows_d3d12_render_log_compare_directx_diagnostic_env_file_status=pass`,
+`windows_d3d12_render_log_compare_directx_diagnostic_status=pass`,
+`windows_d3d12_render_log_compare_directx_diagnostic_event_status=pass`, and
+`windows_d3d12_render_log_compare_directx_diagnostic_gpu_capture_status=pass`.
 
 Environment bootstrap attempt:
 
@@ -69,6 +80,9 @@ Code change:
   status is `pass` only when DirectX browser backing, browser event routing, and
   DXCap GPU capture all pass; stale DirectX evidence without event proof no
   longer looks equivalent in D3D12 reports.
+- The wrapper now resolves repo-relative default paths from `$PSScriptRoot`,
+  so `--check` can be launched by absolute script path from outside the checkout
+  without losing the current DirectX diagnostic evidence.
 - The D3D12 evidence checker validates saved env files. Default mode accepts the
   current fail-closed D3D12 evidence shape when strict upstream DirectX
   diagnostics are present; `-RequireD3D12Completion` fails until native D3D12

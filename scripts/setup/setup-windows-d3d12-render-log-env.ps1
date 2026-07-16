@@ -2,7 +2,7 @@ param(
     [ValidateSet("--check", "--refresh-directx", "--print-install")]
     [string]$Mode = "--check",
     [string]$BuildDir = "build\windows-d3d12-render-log-env",
-    [string]$DirectxEvidencePath = "build\gui-web-2d-directx-env-windows\evidence.env",
+    [string]$DirectxEvidencePath = "build\gui-web-2d-directx-env-windows-event-strict-gpucap\evidence.env",
     [int]$Width = 320,
     [int]$Height = 240,
     [int]$TimeoutSecs = 120,
@@ -11,6 +11,18 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
+
+function Resolve-RepoPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return $path
+    }
+    if ([System.IO.Path]::IsPathRooted($path)) {
+        return $path
+    }
+    return Join-Path $repoRoot $path
+}
 
 if ($RemainingArgs -contains "--print-install" -or $MyInvocation.Line -match '(^|\s)--print-install(\s|$)') {
     $Mode = "--print-install"
@@ -108,7 +120,7 @@ function Invoke-ProcessBound([string]$exe, [string[]]$arguments, [string]$stdout
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $exe
     $startInfo.Arguments = ($arguments | ForEach-Object { Quote-Arg $_ }) -join " "
-    $startInfo.WorkingDirectory = (Get-Location).Path
+    $startInfo.WorkingDirectory = $repoRoot
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     $startInfo.UseShellExecute = $false
@@ -154,6 +166,8 @@ if ($Mode -eq "--print-install") {
     exit 0
 }
 
+$BuildDir = Resolve-RepoPath $BuildDir
+$DirectxEvidencePath = Resolve-RepoPath $DirectxEvidencePath
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 $nativeEnv = Join-Path $BuildDir "windows-d3d12-native-readback.env"
 $browserEnv = Join-Path $BuildDir "windows-d3d12-browser-backing.env"
@@ -167,7 +181,7 @@ if ($Mode -eq "--refresh-directx") {
     $ps = Command-Source "powershell.exe"
     $args = @(
         "-ExecutionPolicy", "Bypass",
-        "-File", "scripts\setup\setup-gui-web-2d-directx-env.ps1",
+        "-File", (Resolve-RepoPath "scripts\setup\setup-gui-web-2d-directx-env.ps1"),
         "--gpu-capture",
         "-BuildDir", (Join-Path $BuildDir "directx-diagnostic"),
         "-Width", "$Width",
