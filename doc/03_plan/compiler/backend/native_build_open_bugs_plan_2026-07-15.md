@@ -82,6 +82,10 @@ asm fails diagnostically instead of comparing against a fabricated version. Runt
 execution proof is pending a valid pure-Simple executable under the verification
 contract above.
 
+FreeBSD QEMU `--full` now runs the complete 15-case default-LLVM native-entry
+matrix after the focused explicit-Cranelift probe and requires zero codegen
+fallback hits; the cross-module Result control continues to cover both backends.
+
 ---
 
 ## Wave 1 — Codegen silent-wrong (highest priority: wrong answers, no diagnostic)
