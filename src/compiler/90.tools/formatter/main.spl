@@ -5,6 +5,73 @@
 # I/O imports
 use std.nogc_sync_mut.io.file_ops (file_read, file_write, file_exists)
 use app.io.cli_ops (get_args)
+use compiler.frontend.core.lexer_struct.{
+    make_core_lexer, core_lexer_next_token, core_lexer_token_text,
+    core_lexer_token_start, core_lexer_token_end
+}
+use compiler.core.tokens.{TOK_STRING_LIT, TOK_LBRACE, TOK_RBRACE, TOK_EOF, TOK_ERROR}
+
+fn formatter_gap_fingerprint(gap: String, preserve_whitespace: bool) -> String:
+    if preserve_whitespace and gap != "":
+        return "gap:{gap.len()}:{gap}"
+    var result = ""
+    for line in gap.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        if not trimmed.starts_with("#"):
+            # Unknown skipped lexer payload: preserve the whole gap exactly.
+            return "raw:{gap.len()}:{gap}"
+        val marker = line.find("#") ?? 0
+        val comment = line[marker:]
+        result = result + "comment:{comment.len()}:{comment}\n"
+    result
+
+fn formatter_lexical_fingerprint(source: String) -> Result<String, String>:
+    var lexer = make_core_lexer(source)
+    val source_len = source.chars().len()
+    var previous_end: i64 = 0
+    var brace_depth: i64 = 0
+    var result = ""
+    for _i in 0..1000000:
+        val (next_lexer, kind) = core_lexer_next_token(lexer)
+        lexer = next_lexer
+        val start = core_lexer_token_start(lexer)
+        val end_pos = core_lexer_token_end(lexer)
+        if kind == TOK_EOF:
+            if previous_end < source_len:
+                result = result + formatter_gap_fingerprint(source[previous_end:], brace_depth > 0)
+            return Ok(result)
+        if kind == TOK_ERROR:
+            return Err("formatter rejected lexically invalid source")
+        if start > previous_end:
+            result = result + formatter_gap_fingerprint(source[previous_end:start], brace_depth > 0)
+        val token_text = core_lexer_token_text(lexer)
+        result = result + "token:{kind}:{token_text.len()}:{token_text}\n"
+        if kind == TOK_STRING_LIT and start >= 0 and end_pos >= start and end_pos <= source_len:
+            val literal = source[start:end_pos]
+            result = result + "literal:{literal.len()}:{literal}\n"
+        if kind == TOK_LBRACE:
+            brace_depth = brace_depth + 1
+        elif kind == TOK_RBRACE and brace_depth > 0:
+            brace_depth = brace_depth - 1
+        if end_pos > previous_end:
+            previous_end = end_pos
+    Err("formatter lexer token limit exceeded")
+
+fn formatter_require_lexical_equivalence(original: String, formatted: String) -> Result<String, String>:
+    val original_fingerprint = formatter_lexical_fingerprint(original)
+    val formatted_fingerprint = formatter_lexical_fingerprint(formatted)
+    match original_fingerprint:
+        case Err(e): Err(e)
+        case Ok(before):
+            match formatted_fingerprint:
+                case Err(e): Err(e)
+                case Ok(after):
+                    if before != after:
+                        Err("formatter refused a semantics-changing rewrite")
+                    else:
+                        Ok(formatted)
 
 # Synchronous file I/O wrappers (runtime functions are synchronous)
 fn read_file(path: String) -> Result<String, String>:
@@ -81,11 +148,7 @@ class Formatter:
                 return Err(e)
 
     fn format_source(self, source: String) -> Result<String, String>:
-        # First pass: Fix missing commas
-        val fixed_commas = self.fix_missing_commas(source)
-
-        # Second pass: Fix indentation errors before formatting
-        val fixed_indent = self.fix_indentation(fixed_commas)
+        val fixed_indent = self.fix_indentation(source)
 
         val lines = fixed_indent.split("\n")
 
@@ -133,54 +196,7 @@ class Formatter:
                 for line in code:
                     result.push(line)
 
-                return Ok(result.join("\n"))
-
-    fn fix_missing_commas(source: String) -> String:
-        # Fix missing commas in function parameters, array literals, and dict literals.
-        # Patterns:
-        # - fn name(a: Type b: Type) -> fn name(a: Type, b: Type)
-        # - [1 2 3] -> [1, 2, 3]
-        # - dict literals with missing commas
-        var result = source
-
-        # Fix missing commas in function parameters: "Type identifier" → "Type, identifier"
-        # Pattern: ": Type identifier" where identifier is followed by ":"
-        # This is a simplified regex-like replacement
-        # For now, let's do basic text processing
-
-        # Fix array literals: "number number" → "number, number"
-        # Look for pattern: digit/] space digit/[
-        result = self.fix_array_commas(result)
-
-        # Fix dict literals: ": value key:" → ": value, key:"
-        result = self.fix_dict_commas(result)
-
-        # Fix function parameters: "Type name" → "Type, name" when followed by ":"
-        result = self.fix_param_commas(result)
-
-        return result
-
-    fn fix_array_commas(text: String) -> String:
-        """Fix missing commas in array literals like [1 2 3]"""
-        var result = text
-        # Simple heuristic: if we see "] digit" or "digit digit", add comma
-        # This is simplified - a full implementation would use proper parsing
-        # For now, just return unchanged - proper fix needs token-level work
-        return result
-
-    fn fix_dict_commas(text: String) -> String:
-        # Fix missing commas in dict literals
-        var result = text
-        # Pattern: ": value identifier:" → ": value, identifier:"
-        # This needs proper tokenization to implement correctly
-        return result
-
-    fn fix_param_commas(text: String) -> String:
-        """Fix missing commas in function parameters like fn(a: i32 b: i32)"""
-        var result = text
-        # Pattern: "type name" where name is followed by ":"
-        # This needs proper tokenization to implement correctly
-        return result
+                return formatter_require_lexical_equivalence(source, result.join("\n"))
 
     fn fix_indentation(source: String) -> String:
         """

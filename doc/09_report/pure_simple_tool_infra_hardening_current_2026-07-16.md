@@ -39,7 +39,7 @@ so executable qualification is still blocked.
 | Test runner | PARTIAL | POSIX parallel argv is injection-safe and tracked, but Windows parallel capture now fails closed pending a native redirected-spawn API; signal cleanup remains incomplete | Add runtime redirected argv spawn, use it on every host, then run timeout/RSS evidence | P0 |
 | Duplicate checker | PARTIAL | Cosine no longer silently drops blocks above 320, but advertised parallel/incremental switches are inert; fast-token bucketing and cache freshness remain defective | Remove or implement inert flags, make the token index linear, and key cache reads by real freshness | P0 |
 | Lint | SOURCE FIXED | Focused/global ownership is correct; global gates still report 30 UI and 45 hot-loop violations | Repair classified violations, then qualify canonical fixtures | P1 |
-| Format/fix | FAIL | Writes are atomic and failures propagate, but formatter rewriting is not lexer-span-aware and can alter raw strings/comments | Drive edits from lexer spans before qualifying formatter output | P0 |
+| Format/fix | SOURCE GUARDED | Writes are atomic and checked; formatter output now passes a CoreLexer token/literal/comment/raw-gap equivalence gate or fails closed | Replace heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
 | Check | BLOCKED | Command is parse/validation only; full type inference is not enforced | Implement enforcing type analysis, then qualify the production probe | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
 | Test daemon | SOURCE FIXED | CLI/client now share the full daemon protocol, request IDs/timeouts survive transport, and classified sessions use acquire/execute/reset-or-release; dynamic qualification and truthful per-example counts remain | Run local/session/timeout/stop protocol fixtures, then replace child exit-code count synthesis with parsed runner results | P0 |
@@ -105,15 +105,16 @@ so executable qualification is still blocked.
 5. The default test-daemon rendezvous and lifecycle bypass are source-fixed.
    Runtime protocol, shutdown, adapter, and timeout evidence remains NOT RUN,
    so daemon claims are not yet dynamically qualified.
-6. Formatter edits still infer syntax from raw text. Until edits are constrained
-   by lexer spans, comments and raw strings are vulnerable to semantic changes.
+6. Formatter edits still infer syntax from raw text, but semantics-changing
+   proposals are now rejected at the shared `format_source` boundary. Dynamic
+   preservation/idempotence evidence remains NOT RUN.
 
 ## Remaining-tool audit backlog
 
 | Rank | Defect | Concrete solution |
 |---|---|---|
 | P1 | Test daemon result counts are synthesized from child exit status | Parse the child runner result protocol and retain real passed/failed/skipped counts |
-| P0 | Formatter can rewrite non-code text | Tokenize once and restrict whitespace/block edits to lexer-approved spans |
+| P1 | Formatter heuristics are contained but not token-gap-native | Replace them incrementally with edits limited to lexer-approved whitespace gaps |
 | P1 | Lint ignores severity/options, duplicates fix collection, and `--all` can mask earlier failures | Make the canonical registry return one result set and aggregate exit status monotonically |
 | P1 | Duplicate fast-token bucket construction is quadratic and cache freshness is false | Build buckets in one pass and persist/compare content hash or mtime before reuse |
 | P1 | Duplicate CLI accepts inert parallel/cache flags and missing paths can exit zero | Reject unsupported flags, return usage/error status, or implement the promised modes |
@@ -245,6 +246,11 @@ so executable qualification is still blocked.
   daemon protocol through a reaped short-lived launcher. Requests retain their
   IDs and requested child deadlines; session metadata selects the broker, and
   every acquired lease is stopped, reset, or released after execution.
+- **Formatter containment:** do not port the Rust formatter or extend the
+  duplicate-check tokenizer. The shared pure-Simple `format_source` owner now
+  fingerprints CoreLexer tokens, exact literal slices, comments, and raw brace
+  gaps before accepting output. Any semantic drift returns an error before the
+  atomic write path.
 
 ## Latest bounded verification
 
@@ -255,6 +261,9 @@ so executable qualification is still blocked.
 - Full-daemon entry, canonical configuration, request-ID response routing,
   timeout transport, and broker lifecycle source contracts: SOURCE
   IMPLEMENTED; executable daemon protocol and adapter verdicts are NOT RUN.
+- Formatter token/literal/comment/raw-gap equivalence and idempotence fixtures:
+  SOURCE IMPLEMENTED; executable verdict is NOT RUN without an admitted
+  pure-Simple runtime.
 - Shell syntax, scoped diff hygiene, and the MCP/LSP native wrapper contract:
   PASS.
 - Working and staged direct environment/runtime facade guards: PASS.
