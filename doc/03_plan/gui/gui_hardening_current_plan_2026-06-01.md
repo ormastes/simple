@@ -255,6 +255,14 @@
   `simpleos_fpga_expected_kernel_status=pass` with repo-root absolute paths.
   The hardware lane remains fail-closed on missing serial device, missing boot
   marker, missing toolchain status, and missing bitstream status.
+- Windows Simple process inventory evidence is recorded in
+  `doc/09_report/windows_simple_process_inventory_current_2026-07-16.md`.
+  The helper used by the SimpleOS multiconfig wrapper now resolves
+  repo-relative evidence paths from `$PSScriptRoot` and was verified from
+  outside the checkout. Current evidence reports
+  `simple_process_inventory_status=pass`, `simple_process_inventory_count=0`,
+  and `simple_process_inventory_over_limit=false` without requesting process
+  cleanup.
 - Windows SimpleOS Engine2D RenderDoc evidence is recorded in
   `doc/09_report/windows_simpleos_engine2d_renderdoc_current_2026-07-16.md`.
   The wrapper now resolves repo-relative source evidence, QEMU readback,

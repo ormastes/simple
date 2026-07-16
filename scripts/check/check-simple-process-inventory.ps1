@@ -9,6 +9,21 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$scriptDir = Split-Path -Parent $PSCommandPath
+$repoRoot = Resolve-Path -LiteralPath (Join-Path $scriptDir "..\..")
+
+function Resolve-RepoPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return $path
+    }
+    if ([System.IO.Path]::IsPathRooted($path)) {
+        return $path
+    }
+    return Join-Path $repoRoot $path
+}
+
+$EvidencePath = Resolve-RepoPath $EvidencePath
+
 function Write-Rows([string[]]$rows) {
     $dir = Split-Path -Parent $EvidencePath
     if (-not [string]::IsNullOrWhiteSpace($dir)) {
