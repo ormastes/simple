@@ -242,3 +242,27 @@ lib modules).** That single fix unblocks the whole cascade and the SimpleOS WM r
 Until then, the boot reaches the first-frame render but faults through uninit-global
 function pointers in `_engine2d_draw_ir_render_box`. NVMe/port_outl/file-read/font
 blockers are all cleared and on origin.
+
+## CONCLUSIVE ROOT (2026-07-17): the module-global-init gap is KNOWN + DOCUMENTED (mutglobal_plan.md)
+
+Traced the systemic module-init blocker to its exact, already-documented source in
+`src/compiler/50.mir/_MirLowering/module_lowering.spl:645-698`:
+- `lower_const` lowers EVERY module-level `val`/`var` into `MirModule.constants` as a
+  CONSTANT-FOLDED value. A function-call initializer (`mutex_new(0)`, a font registry
+  built at init, a render-dispatch function ref) cannot be folded to a constant, so it
+  becomes null / zeroinitializer.
+- `lower_static` populates `MirModule.statics` for the mutable subset but ALSO only
+  stores a constant-folded `init` (nil for a function call), and the code comment
+  (lines 659-668) explicitly documents the remaining gap: "nothing downstream READS a
+  global's address for an identifier reference ... or WRITES to one ... wiring an actual
+  read/write through it is the documented follow-up." Plan: `scratchpad/mutglobal_plan.md`.
+
+So the SimpleOS WM first-frame render is blocked by the KNOWN, PLANNED mutable-/
+non-constant-global-init feature — NOT a per-site bug. Completing it requires: preserve
+the non-constant init EXPRESSION (don't fold to null), synthesize a per-module init
+routine that evaluates it and stores to the global, emit + call `__module_init` from the
+boot shim (which already calls it if present), and wire identifier read/write through the
+global storage — in dependency order, gated to freestanding to protect the 3-stage
+bootstrap determinism. This is the single fix that unblocks all 4 SimpleOS showcase cells.
+Six per-site fixes this session drove the boot from crash to the first-frame render; this
+documented compiler feature is the remaining work.
