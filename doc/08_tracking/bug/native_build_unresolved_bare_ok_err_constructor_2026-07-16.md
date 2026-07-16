@@ -71,3 +71,31 @@ Native-build name resolution / closure discovery must resolve the bare
 `Result.Ok`/`Result.Err` variant constructors before native lowering) so the
 compact form never lowers to an unresolved extern. Until then, freestanding/OS
 code should prefer the qualified form.
+
+## Update (2026-07-16 later): PRIMARY render blocker = NVMe init_from_grant MMIO fault-loop
+
+Field-fix seed (`4dcca1aa`) harness runs still fail to render
+(baseline_ppm_bytes=0, guest-render-fault). ELF-symbolized: the guest fault-loops
+(~212 recovered cr2=0x0 faults) inside `NvmeDriver.init_from_grant`
+(`driver_operations.spl`) at a `rt_volatile_write_u32` MMIO write to address 0 — a
+doorbell/register write on an unmapped or zero BAR. `vfs_boot_init` reaches
+`[vfs-init] pure-nvme grant ok` and NEVER returns (no framebuffer/desktop-ready),
+so the desktop never renders. The null-BAR guard (`bar0_result <= 0` +
+`bar0_virt == 0` -> Err) does NOT catch it, so SYS_MAP_BAR returns a
+POSITIVE-but-unmapped vaddr (native-build BAR-mapping/MMIO infra gap) OR an inner
+doorbell address computes to 0 during partial admin-queue setup.
+
+A bare-Ok/Err qualification sweep (~270 sites, 17 files) was applied and cut the
+runtime `unresolved fn` warnings 8 -> 4 and faults 245 -> 212, but did NOT unblock
+render (the MMIO fault-loop is the real blocker) AND was lost to a concurrent peer
+force-push before it landed durably. It is NOT worth re-running in isolation — the
+bare-Ok/Err fix belongs in the compiler native-build lowering (root), and the
+render needs the NVMe MMIO fault-loop fixed first.
+
+SMALLEST unblock to a real PPM (peer owns the vfs/os lane; needs a fast-iteration
+native-build host): make `init_from_grant` bail with Err BEFORE any doorbell/
+register write when the mapped BAR is not real (verify SYS_MAP_BAR actually mapped
+the page, or probe CAP without a faulting deref), so `_vfs_boot_init_pure_nvme_fat32`
+(vfs_boot_init.spl:255, called from vfs_boot_init.spl:163->191) returns false and
+the desktop degrades-no-disk and renders. The desktop already has degraded-no-disk
+font/spawn guards, so this is the minimal path to a nonblank PPM.
