@@ -1357,6 +1357,34 @@ impl HirLowering:
 
         HirExprKind.MatchCase(hir_scrutinee, hir_arms)
 
+    me strip_discarded_string_interps(s: Stmt) -> Stmt:
+        """Docstring guard: a bare string-literal expression STATEMENT whose
+        value is DISCARDED (non-tail position in a value block, any position
+        in a unit block) is documentation, not code. The flat bridge never
+        strips docstrings from bodies (Function.doc_comment stays empty) and
+        flat_bridge_build_string_interps brace-scans EVERY string literal, so
+        a doc example like `substitute_vars("Hello ${name}!", ...)` lowered
+        `{name}` as a REAL interpolation of an undefined variable and
+        loud-failed the whole module ("unresolved name: name" in
+        std.env.variables — parity case dynload_tagged_text). Strip the
+        interpolations so the discarded literal stays inert. Tail-position
+        strings are NEVER passed here — `fn f() -> text: "hi {who}"` keeps
+        interpolating."""
+        val sk: StmtKind = s.kind
+        match sk:
+            case StmtKind.Expr(e):
+                val e_t: Expr = e
+                match e_t.kind:
+                    case ExprKind.StringLit(sval, sinterps):
+                        if sinterps.?:
+                            return Stmt(
+                                kind: StmtKind.Expr(Expr(kind: ExprKind.StringLit(sval, nil), span: e_t.span)),
+                                span: s.span
+                            )
+                    case _: ()
+            case _: ()
+        s
+
     me lower_hir_block(b: Block) -> HirBlock:
         # NOTE: a former SIMPLE_BOOTSTRAP branch here returned
         # `HirBlock(stmts:, value:, span:)` — omitting the `has` field, which then
@@ -1386,7 +1414,13 @@ impl HirLowering:
             # A single source statement may desugar into several HIR statements
             # (tuple destructuring, see lower_hir_stmt_multi) -- splice them all
             # in, applying the tail-value extraction only to the very last one.
-            val lowered_list = self.lower_hir_stmt_multi(b.stmts[stmt_idx])
+            # Non-tail bare string statements are docstrings — strip their
+            # interpolations (see strip_discarded_string_interps).
+            val src_stmt = if stmt_idx < stmt_count - 1:
+                self.strip_discarded_string_interps(b.stmts[stmt_idx])
+            else:
+                b.stmts[stmt_idx]
+            val lowered_list = self.lower_hir_stmt_multi(src_stmt)
             val lowered_count = lowered_list.len()
             var li = 0
             while li < lowered_count:
@@ -1460,7 +1494,10 @@ impl HirLowering:
         val stmt_count = b.stmts.len()
         var stmt_idx = 0
         while stmt_idx < stmt_count:
-            val lowered_list: [HirStmt] = self.lower_hir_stmt_multi(b.stmts[stmt_idx])
+            # Unit block: EVERY statement's value is discarded, so a bare
+            # string statement at ANY position is a docstring — strip its
+            # interpolations (see strip_discarded_string_interps).
+            val lowered_list: [HirStmt] = self.lower_hir_stmt_multi(self.strip_discarded_string_interps(b.stmts[stmt_idx]))
             var li = 0
             while li < lowered_list.len():
                 stmts = stmts.push(lowered_list[li])

@@ -128,8 +128,24 @@ pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: Modu
     if parsed_module == nil:
         return false
     val parsed = parsed_module
-    (parsed.exports.len() > 0 and parsed.domain_blocks.len() == 0 and
-        parsed.functions.len() == 0 and parsed.classes.len() == 0 and parsed.actors.len() == 0 and
+    # Extern-only declaration modules (e.g. std.nogc_sync_mut.env.types: only
+    # `extern fn rt_env_*` + export) legitimately lower to a MIR module with
+    # zero functions — the externs resolve at link time. Treat them like the
+    # bodyless facades below instead of failing "MIR module has no functions".
+    # A module with any NON-extern parsed function still hard-fails there:
+    # HIR had bodies, so an empty MIR is a real lowering bug and must stay
+    # loud (bug bootstrap_stage2_empty_mir_bodies_2026-07-05).
+    var only_extern_functions = true
+    for fn_name in parsed.functions.keys():
+        val parsed_fn = parsed.functions[fn_name]
+        if not parsed_fn.is_extern:
+            only_extern_functions = false
+    # `export use backend.{...}` facades produce an Import record but NO
+    # Export record in the flat bridge (only bare `export a, b` emits one),
+    # e.g. std.nogc_async_mut.env.types — accept an import-only module as a
+    # facade too; it has no code of its own by the decl checks below.
+    ((parsed.exports.len() > 0 or parsed.imports.len() > 0) and parsed.domain_blocks.len() == 0 and
+        only_extern_functions and parsed.classes.len() == 0 and parsed.actors.len() == 0 and
         parsed.structs.len() == 0 and parsed.enums.len() == 0 and parsed.bitfields.len() == 0 and
         parsed.traits.len() == 0 and parsed.impls.len() == 0 and parsed.type_aliases.len() == 0 and
         parsed.constants.len() == 0 and parsed.static_asserts.len() == 0 and

@@ -57,6 +57,31 @@ fn hir_module_diag_enabled() -> bool:
         return true
     diag == "1"
 
+struct HirReexportSource:
+    """Result of chasing a re-export facade chain (find_reexport_source).
+    A struct (not an anonymous tuple) on purpose: multi-value tuple returns
+    are unreliable on the seed interpreter."""
+    found: bool
+    module_name: text
+    item_name: text
+
+fn hir_module_declares_item(m: Module, name: text) -> bool:
+    """True when module `m` itself declares `name` as any importable decl
+    kind register_imported_symbol knows how to register (functions covers
+    `extern fn` too — the parser stores externs in Module.functions with
+    is_extern=true)."""
+    if m.functions.contains_key(name):
+        return true
+    if m.classes.contains_key(name):
+        return true
+    if m.structs.contains_key(name):
+        return true
+    if m.enums.contains_key(name):
+        return true
+    if m.traits.contains_key(name):
+        return true
+    m.constants.contains_key(name)
+
 fn hir_module_logical_name_from_path(path: text) -> text:
     """Derive the dotted logical module name (e.g. `_wallB_mod_a`) from a
     source path (e.g. `src/_wallB_mod_a.spl`), matching
@@ -390,6 +415,52 @@ impl HirLowering:
             self.qualify_imported_function_symbol(imported_fn_sym, imported_mod_name, imported_name)
         elif as_const != nil:
             self.symbols.define(local_name, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+        else:
+            # Re-export facade chase: the imported module does not declare
+            # `imported_name` itself — it may re-export it (`export use
+            # backend.{name}`), e.g. std.env.types forwarding the rt_env_*
+            # externs from std.nogc_sync_mut.env.types. Without this, the
+            # import silently registered NOTHING and every use site died
+            # later with "unresolved name: rt_env_get" (native-build
+            # entry-closure path; parity case dynload_tagged_text).
+            val hop = self.find_reexport_source(imported_mod, imported_name, 0)
+            if hop.found:
+                val src_mod: Module? = self.modules_by_name.get(hop.module_name)
+                if src_mod != nil:
+                    self.register_imported_symbol(src_mod, hop.module_name, hop.item_name, local_name, import_span)
+
+    me find_reexport_source(facade_mod: Module, wanted: text, depth: i64) -> HirReexportSource:
+        """Resolve which transitive module actually DECLARES `wanted` when
+        `facade_mod` only re-exports it. Follows the facade's own imports
+        (explicit items, alias-aware; glob imports too) up to a small depth
+        bound so import cycles terminate. Only returns a module that declares
+        the item directly, so the caller's re-entry into
+        register_imported_symbol cannot recurse back in here for that hit."""
+        if depth > 8:
+            return HirReexportSource(found: false, module_name: "", item_name: "")
+        var import_idx = 0
+        while import_idx < facade_mod.imports.len():
+            val imp = facade_mod.imports[import_idx]
+            var matches = imp.items.len() == 0
+            var source_item = wanted
+            var item_idx = 0
+            while item_idx < imp.items.len():
+                val item = imp.items[item_idx]
+                val local = if item.has_alias: item.alias else: item.name
+                if local == wanted:
+                    matches = true
+                    source_item = item.name
+                item_idx = item_idx + 1
+            if matches:
+                val next_mod: Module? = self.modules_by_name.get(imp.module)
+                if next_mod != nil:
+                    if hir_module_declares_item(next_mod, source_item):
+                        return HirReexportSource(found: true, module_name: imp.module, item_name: source_item)
+                    val deeper = self.find_reexport_source(next_mod, source_item, depth + 1)
+                    if deeper.found:
+                        return deeper
+            import_idx = import_idx + 1
+        HirReexportSource(found: false, module_name: "", item_name: "")
 
     me register_imported_type_methods(imported_mod: Module, imported_mod_name: text, imported_name: text, local_owner: SymbolId, import_span: Span):
         val owner_module = hir_module_logical_name_from_path(imported_mod_name)

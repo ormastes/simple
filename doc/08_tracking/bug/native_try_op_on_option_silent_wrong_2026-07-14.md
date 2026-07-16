@@ -100,6 +100,27 @@ This removes silent wrongness for the proven typed forms but does not implement
 the tagged Option ABI. Unknown/unannotated method-result provenance remains
 open and is not guessed, because rejecting it could break valid Result `?`.
 
+## Diagnostic degraded to "MIR error: nil" — fixed (2026-07-16, q_optiontry_dynload lane)
+
+After the `Named("Option",[T]) -> HirTypeKind.Optional(T)` mapping landed
+(hir_lowering/types.spl), the fail-closed Optional arm in `lower_try_expr`
+became reachable for the `option_try_annotated_loud` / `option_try_direct_loud`
+parity cases — the build DID refuse loudly (rc=1, no binary), but the
+diagnostic printed as `[ERROR] MIR error: nil` instead of the expected
+"native Option try operator requires the tagged Option ABI", failing the
+parity harness diagnostic match.
+
+Root cause: `lower_try_expr` passed the bare `base.span` into `error(message,
+span: Span?)`. The seed interpreter does not auto-wrap a bare `Span` into the
+`Span?` parameter, so `_format_mir_error`'s `match err.span` (driver_pipeline)
+fell through BOTH the `Some(sp)` and `nil` arms and returned nil — the whole
+formatted message became nil. Every other loud-fail error site passes
+`Some(span)` explicitly.
+
+Fix: wrap the span — `self.error("native Option try operator requires the
+tagged Option ABI", Some(base.span))` (switch_operators_calls.spl). Both parity
+cases now loud-fail with the expected diagnostic and no binary.
+
 ## Reproduce
 
 `/tmp/wt_errhandling/` probes (Option `?` alongside Result `?`).
