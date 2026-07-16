@@ -1,5 +1,6 @@
 use std.spec.{describe, it, expect, after_each}
 use app.test_incremental_state_shared.{incremental_test_state_new, incremental_test_state_load}
+use app.test_cache_shared.{TestCacheEntry, shared_cache_build_entry, shared_cache_check_freshness}
 use app.io.mod.{file_write, file_delete, file_exists, dir_create_all}
 
 val incremental_state_spec_root = "/tmp/simple_incremental_state_spec"
@@ -10,6 +11,7 @@ fn incremental_state_test_path(name: text) -> text:
 fn incremental_state_cleanup():
     val paths = [
         incremental_state_test_path("sample_spec.spl"),
+        incremental_state_test_path("sample_dep.spl"),
         incremental_state_test_path("cache.sdn"),
         incremental_state_test_path("graph.sdn")
     ]
@@ -49,6 +51,21 @@ describe "IncrementalTestState":
         expect(entry.result_passed).to_equal(3)
         expect(entry.result_skipped).to_equal(1)
         expect(file_exists(graph_path)).to_equal(false)
+
+    it "invalidates a cached test when only an imported dependency changes":
+        dir_create_all(incremental_state_spec_root)
+        val test_path = incremental_state_test_path("sample_spec.spl")
+        val dep_path = incremental_state_test_path("sample_dep.spl")
+        file_write(test_path, "use sample_dep.{value}\n")
+        file_write(dep_path, "fn value():\n    1\n")
+
+        val cached = shared_cache_build_entry(test_path, [dep_path], 0, 1, 0, 0, 5, "pass")
+        var entries: {text: TestCacheEntry} = {}
+        entries[test_path] = cached
+
+        expect(shared_cache_check_freshness(entries, test_path, [dep_path]).result_status).to_equal(0)
+        file_write(dep_path, "fn value():\n    12345\n")
+        expect(shared_cache_check_freshness(entries, test_path, [dep_path]).result_status).to_equal(-1)
 
     it "uses the shared dep graph in runner mode without reverse dependency tracking":
         dir_create_all(incremental_state_spec_root)

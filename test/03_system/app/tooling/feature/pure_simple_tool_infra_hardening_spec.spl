@@ -143,9 +143,17 @@ describe "Pure-Simple tool and infrastructure hardening":
         )).to_equal("safe")
         expect(qualification_source_contract(
             "scripts/bootstrap/bootstrap-from-scratch.sh",
-            ["deploy_stage", "simple_binary_is_valid \"${deploy_stage}/simple${exe_suffix}\"", "mv \"${deploy_tmp}\" \"${deployed_bin}\"", "[ -x \"${deployed_bin}\" ] && simple_binary_is_valid", "simple_binary_is_valid \"${deployed_bin}\"", "restore_tmp", "runtime_hash_tmp", "mcp_hash_tmp"],
+            ["deploy_simple_binary_atomically \"${full_bin}\" \"${deployed_bin}\"", "rm -f \"${deploy_dir}/simple_seed${exe_suffix}\"", "mcp_hash_tmp"],
             ["install -m755 \"${full_bin}\" \"${deployed_bin}\"", "Installed current seed delegate"]
         )).to_equal("safe")
+        expect(qualification_source_contract(
+            "scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs",
+            ["deploy_simple_binary_atomically() (", "retained_previous", "trap cleanup_deploy_transaction 0", "mv \"$deploy_tmp\" \"$live\"", "simple_binary_is_valid \"$live\"", "mv \"$restore_tmp\" \"$live\""],
+            []
+        )).to_equal("safe")
+        val (_rollback_out, _rollback_err, rollback_code) = rt_process_run_timeout(
+            "sh", ["scripts/check/check-deploy-rollback-contract.shs"], 30000)
+        expect(rollback_code).to_equal(0)
         expect(qualification_source_contract(
             "src/app/cli/dispatch.spl",
             ["get_command_table"],
@@ -171,8 +179,13 @@ describe "Pure-Simple tool and infrastructure hardening":
         )).to_equal("safe")
         expect(qualification_source_contract(
             "src/app/io/cli_lint_commands.spl",
-            ["lint_source"],
+            ["fn cli_run_lint", "fn cli_run_fmt", "fn cli_run_fix", "lint_source", "check-ui-backend-isolation.shs", "check-cpu-hotloop-idiom.shs"],
             ["file_allows_lint"]
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "src/app/io/_CliCommands/run_commands.spl",
+            [],
+            ["fn cli_run_lint", "fn cli_run_fmt", "fn cli_run_fix"]
         )).to_equal("safe")
         expect(qualification_exit_class(0)).to_equal("pass")
         expect(qualification_exit_class(1)).to_equal("assertion_failure")
@@ -180,6 +193,9 @@ describe "Pure-Simple tool and infrastructure hardening":
         expect(qualification_exit_class(3)).to_equal("internal_error")
         expect(qualification_exit_class(4)).to_equal("empty_discovery")
         expect(qualification_exit_class(124)).to_equal("timeout_resource")
+        val (_outcome_out, _outcome_err, outcome_code) = rt_process_run_timeout(
+            "sh", ["scripts/check/check-test-runner-outcome-exits.shs"], 90000)
+        expect(outcome_code).to_equal(0)
         expect(qualification_source_contract(
             "src/app/gen_lean/main.spl",
             ["process_run_timeout", "src/compiler/90.tools/verify/main.spl"],
@@ -190,6 +206,9 @@ describe "Pure-Simple tool and infrastructure hardening":
             ["cli_run_file(\"src/app/gen_lean/main.spl\""],
             ["_cli_process_run(\"./bin/simple\", args)"]
         )).to_equal("safe")
+        val (_fix_out, _fix_err, fix_code, _fix_ms) = qualification_run_command(
+            ["fix", "test/fixtures/pure_simple_tooling/clean.spl", "--dry-run"], 30000)
+        expect(fix_code).to_equal(0)
         expect(qualification_termination_probe()).to_equal("safe")
 
     it "REQ-007 REQ-008 REQ-012 REQ-013 rejects unsafe paths and stale fallbacks":

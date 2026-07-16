@@ -16,19 +16,21 @@ Unix native-first MCP/LSP wrappers. The final audit also closed main-dispatch
 seed-dependent deployment admission, and weak wrapper probe-cache identity.
 The post-sync audit additionally closed stale-daemon false hits, omitted batch
 manifest entries, non-admitted rollback retention, and Windows native parity.
-The deployed `bin/simple` still identifies itself as the Rust bootstrap seed,
-so runtime and performance results from it cannot qualify pure-Simple
-production behavior.
+The latest source lane also consolidates lint/fmt/fix ownership, adds actual
+runner exit 3/4/124 probes, proves dependency-only cache invalidation, and
+extracts deployment into a fault-injected atomic rollback helper. The deployed
+runtime remains unavailable in the isolated lane, so executable qualification
+is still blocked.
 
 ## Tool matrix
 
 | Surface | Status | Bug / missing evidence | Root solution | Priority |
 |---|---|---|---|---|
-| Production runtime | BLOCKED | Clean Stage 2/3 pass; Stage 4 clears the repaired parser faults but did not produce an executable within the 25-minute bound | Resume from the retained verified Stage 3/cache in a fresh bounded session, then admit and atomically deploy | P0 |
+| Production runtime | BLOCKED | Stage 4 was found parsing 10,503 files before closure pruning; source fix is unverified because the final cycle stopped on a stale compiler-backfill guard | In a fresh session run one bounded `--full-bootstrap`, require closure-sized phase input, then admit and atomically deploy | P0 |
 | Test runner | IMPLEMENTED | Failure/outcome/count/nesting, exact manifest correspondence, and deadline-bounded batch re-exec implemented | Run 1,000-example RSS evidence on pure runtime | P0 |
 | Duplicate checker | IMPLEMENTED | Runtime qualification blocked by seed | Run hostile-path and measured benchmark probes on pure runtime | P0 |
 | Lint | IMPLEMENTED | Runtime qualification blocked by seed | Run canonical multi-name/scope fixture on pure runtime | P1 |
-| Format/fix | WARN | Duplicate handlers and raw-source worker execution | One implementation; in-process or cached worker | P1 |
+| Format/fix | SOURCE FIXED | Duplicate handlers removed; executable dry-run proof awaits admitted runtime | Run canonical dry-run and write fixtures after admission | P1 |
 | Check | BLOCKED | Deployed artifact lacks required CLI extern; global flag timeout open | Repair/deploy shared CLI ABI; deadline-bound production probe | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
 | Test daemon | IMPLEMENTED | Direct argv-safe startup/liveness, atomic fail-closed writes, and stale-sentinel handling implemented | Execute run/clean/hit/miss/invalidation matrix after admission | P2 |
@@ -73,14 +75,12 @@ production behavior.
 
 ## Current blockers
 
-1. A clean admitted full-CLI runtime is unavailable. Isolated Stage 2/3
-   self-hosting passes after the `copy_mem` ABI and typed `rt_dict_keys`
-   repairs. Bounded Stage 4 retries then exposed and fixed two pure-parser
-   defects: generic `>` swallowed the following layout dedent, and documented
-   `pub mod child` declarations were rejected. The final Stage 4 cleared both
-   prior parser failure points and remained CPU-active with bounded RSS, but
-   produced no executable or terminal diagnostic within the explicit
-   25-minute ceiling. The three-cycle cap is exhausted for this session.
+1. A clean admitted full-CLI runtime is unavailable. Phase profiling showed
+   Stage 4 receiving 10,503 sources because the bootstrap entry path passed
+   complete source roots before closure pruning. The source fix now seeds only
+   the entry and reuses the driver's import resolver. Its final bounded build
+   stopped before compilation because the compiler-backfill archive is stale
+   and requires `--full-bootstrap`; the three-cycle cap is exhausted.
 2. NFR-007 and NFR-009 evidence harnesses exist, but their production latency
    and RSS measurements cannot qualify while the deployed runtime is the seed.
 
@@ -89,6 +89,11 @@ production behavior.
 - Shell syntax, scoped diff hygiene, and the MCP/LSP native wrapper contract:
   PASS.
 - Working and staged direct environment/runtime facade guards: PASS.
+- Atomic deployment rollback fault injection: PASS, including restoration of
+  an admitted prior binary and rejection of an unadmitted prior binary.
+- Dependency-only shared-cache invalidation and actual runner exit 3/4/124
+  probes: SOURCE IMPLEMENTED; executable verdict blocked by missing `bin/simple`
+  in the isolated lane.
 - Isolated clean bootstrap: Stage 2 and Stage 3 self-hosting PASS in all three
   bounded cycles. Cycle 1 proved the typed `rt_dict_keys` repair and found the
   generic-close layout bug. Cycle 2 proved that repair and found missing
@@ -96,6 +101,8 @@ production behavior.
   remained at about 100% CPU with RSS growing controllably from 1.7 GiB to
   2.9 GiB; it was stopped at the announced 25-minute ceiling with no full-CLI
   executable. No fourth cycle was run.
+- Final bootstrap preflight: BLOCKED before compilation because stale compiler
+  backfill requires `--full-bootstrap`; no fourth cycle was run.
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system
   qualification: NOT RUN because the production runtime identity gate fails
   and this host has no PowerShell/Windows runtime.

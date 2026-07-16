@@ -992,56 +992,13 @@ if [ "${deploy}" -eq 1 ]; then
   mkdir -p "${deploy_dir}"
 
   deployed_bin="${deploy_dir}/simple${exe_suffix}"
-  prev_bin="${deploy_dir}/simple${exe_suffix}.pre_deploy"
-  deploy_tmp="${deploy_dir}/.simple${exe_suffix}.deploy.$$"
-  restore_tmp="${deploy_dir}/.simple${exe_suffix}.restore.$$"
-  runtime_hash_tmp="${deploy_dir}/.simple${exe_suffix}.sha256.deploy.$$"
-  deploy_stage="${deploy_dir}/.candidate.$$"
-  rm -f "${deploy_tmp}" "${restore_tmp}" "${runtime_hash_tmp}"
-  rm -rf "${deploy_stage}"
-  mkdir -p "${deploy_stage}"
-  install -m755 "${full_bin}" "${deploy_stage}/simple${exe_suffix}"
-  # Prove the candidate works from its production layout without a sibling
-  # seed before touching the currently valid deployment.
-  if ! simple_binary_is_valid "${deploy_stage}/simple${exe_suffix}"; then
-    echo "ERROR: deploy-layout candidate failed admission without a seed delegate." >&2
-    rm -rf "${deploy_stage}"
+  if ! deploy_simple_binary_atomically "${full_bin}" "${deployed_bin}"; then
+    echo "ERROR: atomic deployment candidate admission failed." >&2
     exit 1
   fi
-  rm -rf "${deploy_stage}"
-  printf '%s\n' "$(hash_file "${full_bin}")" >"${runtime_hash_tmp}"
-  # Retain only an already-admitted rollback. Restoring an arbitrary executable
-  # here could put a seed/debug runtime back on the production path.
-  if [ -x "${deployed_bin}" ] && simple_binary_is_valid "${deployed_bin}"; then
-    cp -p "${deployed_bin}" "${prev_bin}"
-  else
-    rm -f "${prev_bin}"
-  fi
-  install -m755 "${full_bin}" "${deploy_tmp}"
-  # The temporary and live paths share a directory/filesystem, so rename is
-  # atomic: readers see either the previous admitted runtime or the candidate.
-  mv "${deploy_tmp}" "${deployed_bin}"
   echo "Deployed full CLI binary to ${deployed_bin}"
-
-  # Re-run the complete provenance/frontend admission through the production
-  # path. Keep the rollback candidate until every post-swap probe passes.
-  if ! simple_binary_is_valid "${deployed_bin}"; then
-    echo "ERROR: deployed binary failed post-swap candidate admission." >&2
-    if [ -x "${prev_bin}" ]; then
-      install -m755 "${prev_bin}" "${restore_tmp}"
-      mv "${restore_tmp}" "${deployed_bin}"
-      echo "Restored previous binary to ${deployed_bin}" >&2
-    else
-      rm -f "${deployed_bin}"
-    fi
-    rm -f "${deploy_tmp}" "${restore_tmp}" "${runtime_hash_tmp}"
-    exit 1
-  fi
-  # The admitted runtime is now live and self-contained. Only now remove the
-  # construction-era delegate so rollback remained viable throughout probes.
-  mv "${runtime_hash_tmp}" "${deployed_bin}.sha256"
+  # The admitted runtime is now live and self-contained.
   rm -f "${deploy_dir}/simple_seed${exe_suffix}"
-  rm -f "${prev_bin}" "${deploy_tmp}" "${restore_tmp}"
   install -m755 "${ui_backend_bin}" "${deploy_dir}/simple_ui_backend${exe_suffix}"
   echo "Deployed cached UI backend to ${deploy_dir}/simple_ui_backend${exe_suffix}"
 

@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+
+fail() {
+    echo "check-deploy-rollback-contract: $*" >&2
+    exit 1
+}
+
+. scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-deploy-rollback.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+deploy_dir="$tmp/deploy"
+live_bin="$deploy_dir/simple"
+old_ref="$tmp/old-simple"
+candidate_bin="$tmp/candidate-simple"
+mkdir -p "$deploy_dir"
+printf '#!/bin/sh\necho old\n' >"$old_ref"
+printf '#!/bin/sh\necho candidate\n' >"$candidate_bin"
+chmod +x "$old_ref" "$candidate_bin"
+cp "$old_ref" "$live_bin"
+printf 'old-hash\n' >"${live_bin}.sha256"
+
+simple_binary_is_valid() {
+    case "$1" in
+        "$deploy_dir"/.candidate.*/simple) return 0 ;;
+    esac
+    cmp -s "$1" "$old_ref"
+}
+
+if deploy_simple_binary_atomically "$candidate_bin" "$live_bin"; then
+    fail "post-swap admission failure unexpectedly committed"
+fi
+cmp -s "$live_bin" "$old_ref" || fail "admitted previous runtime was not restored exactly"
+[ "$(cat "${live_bin}.sha256")" = "old-hash" ] || fail "rollback sidecar changed"
+[ ! -e "${live_bin}.pre_deploy" ] || fail "rollback copy leaked"
+[ ! -e "$deploy_dir/.simple.deploy.$$" ] || fail "deploy temporary leaked"
+[ ! -e "$deploy_dir/.simple.restore.$$" ] || fail "restore temporary leaked"
+[ ! -d "$deploy_dir/.candidate.$$" ] || fail "candidate staging directory leaked"
+
+printf '#!/bin/sh\necho unadmitted\n' >"$live_bin"
+chmod +x "$live_bin"
+printf 'unadmitted-hash\n' >"${live_bin}.sha256"
+if deploy_simple_binary_atomically "$candidate_bin" "$live_bin"; then
+    fail "unadmitted previous runtime transaction unexpectedly committed"
+fi
+[ ! -e "$live_bin" ] || fail "unadmitted previous runtime was restored"
+[ ! -e "${live_bin}.sha256" ] || fail "unadmitted previous sidecar survived"
+
+echo "check-deploy-rollback-contract: PASS"
