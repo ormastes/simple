@@ -41,7 +41,7 @@ use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I1
 use compiler.core.types.{TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY}
 use compiler.core.types.{TYPE_NIL}
 use compiler.core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
-use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_ANY}
+use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_ANY}
 use compiler.core.types.{TYPE_UNION}
 use compiler.core.types.{int_to_str}
 use compiler.core.types.{named_type_find}
@@ -50,6 +50,7 @@ use compiler.core.types.{union_type_register}
 use compiler.core.types.{dict_type_register}
 use compiler.core.types.{tuple_type_register}
 use compiler.core.types.{result_type_register}
+use compiler.core.types.{fn_type_register}
 use std.string_core.{char_code}
 
 # Import from split modules
@@ -640,24 +641,32 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             arr_type = TYPE_ARRAY_BOOL
         # absorb optional suffix: [T]? -> Option
         return parser_absorb_optional_suffix(arr_type)
-    # Function type: fn(T, T) -> T
+    # Function type: fn(T, T) -> T. Register the real param/return tags
+    # (mirroring dict_type_register/result_type_register/tuple_type_register
+    # above) instead of discarding them: a lambda VALUE stored in a `val` or
+    # threaded through a `fn(T) -> U`-typed parameter needs its real return
+    # type in HIR (HirTypeKind.Function's `ret` field), or the call
+    # expression through that parameter mis-types as Unit/Error downstream
+    # (parity cases local_lambda_value, enum_text_callback).
     if par_kind_get() == 20:
         parser_advance()
         parser_expect(140)
+        var fn_param_tags: [i64] = []
         if par_kind_get() != 141:
-            parser_parse_type()
+            fn_param_tags.push(parser_parse_type())
             for i in 0..100:
                 if par_kind_get() != 160:
                     break
                 parser_advance()
                 if par_kind_get() == 141:
                     break
-                parser_parse_type()
+                fn_param_tags.push(parser_parse_type())
         parser_expect(141)
+        var fn_ret_tag = TYPE_VOID
         if par_kind_get() == 167:
             parser_advance()
-            parser_parse_type()
-        return parser_absorb_optional_suffix(TYPE_FN)
+            fn_ret_tag = parser_parse_type()
+        return parser_absorb_optional_suffix(fn_type_register(fn_param_tags, fn_ret_tag))
     # Tuple type: (T, T)
     if par_kind_get() == 140:
         parser_advance()
@@ -681,16 +690,17 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         parser_expect(141)
         # Function type without the `fn` keyword: (T, ...) -> U. When `->`
         # (kind 167) follows the closing paren, the leading paren-group is the
-        # parameter list of a first-class function type, not a tuple. Parse and
-        # drop the return type and encode as TYPE_FN, exactly like the
-        # `fn(...) -> U` branch above (the bootstrap type-id lane carries only
-        # the fn-ness, not the signature; MIR derives call arity from the call
-        # site). Without this, `g: (i64) -> i64` mis-parsed as a tuple and left
-        # the `-> i64` tokens for the param parser to choke on.
+        # parameter list of a first-class function type, not a tuple. Register
+        # the already-collected param tags plus the return type via
+        # fn_type_register, exactly like the `fn(...) -> U` branch above (see
+        # its comment for why the real signature -- not just fn-ness -- is
+        # needed downstream in HIR). Without this, `g: (i64) -> i64` mis-parsed
+        # as a tuple and left the `-> i64` tokens for the param parser to
+        # choke on.
         if par_kind_get() == 167:
             parser_advance()
-            parser_parse_type()
-            return parser_absorb_optional_suffix(TYPE_FN)
+            val fn_ret_tag2 = parser_parse_type()
+            return parser_absorb_optional_suffix(fn_type_register(tuple_elem_tags, fn_ret_tag2))
         # A real tuple (2+ elements) carries its element tags via the
         # registry; a 0/1-element paren group keeps the old TYPE_ANY
         # behavior (a `(T)` paren-grouped single type is not a tuple).
