@@ -315,7 +315,19 @@ class Engine2D:
         sw.init(width, height)
         sw.clear(0x00000000u32)
         val capability = sw.capability()
-        Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
+        # NOTE(2026-07-16): explicitly pin every optional accelerator-backend
+        # field to nil rather than relying on the class-level `= nil` default
+        # being applied for an omitted named field. On this freestanding
+        # (cranelift, x86_64-unknown-none) codegen path that default was
+        # observed to NOT be applied: an offscreen Engine2D created here (used
+        # to render an embedded batch, e.g. the taskbar) had a garbage
+        # non-nil `vulkan_backend`, so `draw_rect_filled` took the "elif
+        # Some(vulkan)" branch and called through a bogus Vulkan backend,
+        # producing a wild instruction pointer (observed as
+        # 0xf000d43df000d43d). Root cause is a compiler/codegen bug (defaulted
+        # struct-literal fields not zero-initialized when omitted); this is
+        # the workaround at the call site until that's fixed upstream.
+        Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, metal_backend: nil, opencl_backend: nil, font_renderer: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
 
     me create_shared_vulkan_offscreen(width: i32, height: i32) -> Result<Engine2D, text>:
         """Create one transparent child framebuffer on this engine's Vulkan session."""
@@ -482,12 +494,20 @@ class Engine2D:
         fragile backend-parameter path during baremetal boot. The CPU backend
         remains an unused placeholder on this path, so it must not allocate
         or initialize any pixel buffer.
+
+        NOTE(2026-07-16): explicitly pin every optional accelerator-backend
+        field to nil rather than relying on the class-level `= nil` default
+        being applied for an omitted named field -- see the identical note
+        on `create_offscreen()` above. This is the root SimpleOS desktop
+        engine, so a garbage non-nil `vulkan_backend`/etc. here would corrupt
+        every draw call that checks it (observed: draw_image_scaled_blend
+        took the bogus "elif Some(vulkan)" branch and faulted).
         """
-        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: Some(backend), virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "baremetal")
+        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: Some(backend), virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, metal_backend: nil, opencl_backend: nil, font_renderer: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "baremetal")
 
     static fn create_with_virtio_gpu_backend(backend: VirtioGpuBackend) -> Engine2D:
         """Create engine with a pre-initialized VirtioGpuBackend."""
-        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: Some(backend), w: backend.w, h: backend.h, pacing: make_frame_pacing_counters(), selected_backend_name: "virtio_gpu")
+        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: Some(backend), cuda_backend: nil, vulkan_backend: nil, metal_backend: nil, opencl_backend: nil, font_renderer: nil, w: backend.w, h: backend.h, pacing: make_frame_pacing_counters(), selected_backend_name: "virtio_gpu")
 
     static fn create_with_backend_strict(width: i32, height: i32, backend_name: text) -> Result<Engine2D, BackendProbeResult>:
         """Create engine with a specific backend, returning diagnostics on failure.

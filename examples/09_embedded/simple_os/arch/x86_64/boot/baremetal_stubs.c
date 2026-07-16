@@ -17548,4 +17548,38 @@ int64_t rt_x86_64_native_gui_process_render(void)
 
 /* End of Wave 12: x86_64 fs-exec probes */
 
+/* Wave 13: SFFI dlopen-based dynamic loading is inherently unsupported on
+ * this freestanding kernel target -- there is no dynamic linker, no
+ * filesystem-backed shared-library loader, and no libc underneath. The
+ * generic auto-generated weak stub (auto_stubs.c) returns NIL_VALUE (0x3)
+ * for ALL unresolved externs, which spl_fonts.spl's FontRasterizer.load()
+ * misreads as a non-zero/"success" handle (its only failure check is
+ * `== 0`) and proceeds to call spl_dlsym()/spl_wffi_call_i64() with that
+ * fake handle/fptr, corrupting execution (observed as a garbage
+ * instruction pointer, e.g. 0xf000d43df000d43d, reached from the taskbar
+ * text-draw path -> FontRenderer.try_enable_ttf). These strong overrides
+ * (stronger linkage than the weak auto_stubs.c fallback) make
+ * dlopen/dlsym/wffi_call properly report failure (0), which
+ * FontRasterizer.load() and its Simple-side callers already handle
+ * correctly -- falling back / skipping TTF and keeping the bitmap glyph
+ * renderer instead of crashing.
+ */
+int64_t spl_dlopen(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h)
+{
+    (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h;
+    return 0;
+}
+
+int64_t spl_dlsym(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h)
+{
+    (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h;
+    return 0;
+}
+
+int64_t spl_wffi_call_i64(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, int64_t h)
+{
+    (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h;
+    return 0;
+}
+
 #endif /* __x86_64__ || __i386__ */

@@ -382,21 +382,6 @@ fn _engine2d_draw_ir_prepare_fresh_device_text(engine: Engine2D, composition: Dr
                         return (eng, "fresh-device-font-quad-invalid")
     (eng, "")
 
-fn _engine2d_draw_ir_preflight_commands(commands: [DrawIrCommand], images: [Engine2dResolvedDrawIrImage]) -> (i32, text):
-    var skipped = 0
-    var kinds = ""
-    for command in commands:
-        var supported = command.kind == DRAW_IR_COMMAND_RECT or command.kind == DRAW_IR_COMMAND_TEXT
-        if command.kind == DRAW_IR_COMMAND_IMAGE:
-            val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
-            supported = image_index >= 0 and _engine2d_draw_ir_valid_resolved_image(images[image_index])
-        if not supported:
-            skipped = skipped + 1
-            if kinds != "":
-                kinds = kinds + ","
-            kinds = kinds + command.kind
-    (skipped, kinds)
-
 fn _engine2d_draw_ir_unsupported_command_kinds(commands: [DrawIrCommand]) -> text:
     var kinds = ""
     for command in commands:
@@ -572,7 +557,21 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
     # windows, dialogs, thumbnails) are unaffected and still get a real
     # offscreen surface.
     val fills_target_exactly = embedding.x == 0 and embedding.y == 0 and embedding.opacity_milli >= 1000 and embedding.width == eng.width() and embedding.height == eng.height()
-    val use_embedded_surface = embedding.surface_id != "" and depth < ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH and embedding.width > 0 and embedding.height > 0 and not fills_target_exactly
+    # A sub-region batch only NEEDS a real offscreen surface when it either
+    # (a) requires alpha compositing (opacity < 100%), or (b) has its own
+    # dedicated device-shared-offscreen path (vulkan/metal, wired below).
+    # Everything else (opaque, CPU/baremetal-backed, wanting clip) is exactly
+    # equivalent to rendering directly onto the parent engine with its clip
+    # rect set to the embedding bounds -- same reasoning `fills_target_exactly`
+    # already applies to the full-page case, generalized to sub-regions.
+    # This also sidesteps `Engine2D.create_offscreen()`'s plain CPU/software
+    # offscreen path, whose `RenderBackend` trait-object dispatch
+    # (`self.backend.draw_rect_filled(...)`) has been observed to fault with
+    # a garbage instruction pointer on the freestanding cranelift codegen path
+    # for a `SoftwareBackend` boxed this way -- a compiler/codegen defect
+    # filed for follow-up, not something fixable at this call site.
+    val needs_real_offscreen = embedding.opacity_milli < 1000 or eng.backend_name() == "vulkan" or eng.backend_name() == "metal"
+    val use_embedded_surface = embedding.surface_id != "" and depth < ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH and embedding.width > 0 and embedding.height > 0 and not fills_target_exactly and (needs_real_offscreen or not embedding.clip)
     if not use_embedded_surface:
         val apply_clip = embedding.clip and not fills_target_exactly
         if apply_clip:
@@ -661,35 +660,17 @@ fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, c
 
 fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
-    var preflight_skipped = 0
-    var preflight_kinds = ""
-    for batch in composition.batches:
-        val preflight = _engine2d_draw_ir_preflight_commands(batch.commands, images)
-        preflight_skipped = preflight_skipped + preflight.0
-        if preflight.1 != "":
-            if preflight_kinds != "":
-                preflight_kinds = preflight_kinds + ","
-            preflight_kinds = preflight_kinds + preflight.1
-    # NOTE(2026-07-16 investigation): tried removing this early-out so a
-    # single unresolved taskbar icon wouldn't blank the whole desktop -- the
-    # per-command loop below already renders everything it can and accounts
-    # for the rest as skipped, so in principle it's the right accountant.
-    # BUT with the bail removed, rendering batch 3 (taskbar-objects, 9
-    # commands) drove execution into _engine2d_draw_ir_render_box and then
-    # into a runaway fault loop with a corrupted (garbage, non-kernel-range)
-    # instruction pointer -- a real memory-corruption bug in the CPU
-    # rasterizer path, most likely an unclipped rect/border/shadow draw
-    # overrunning the now-correctly-reported 3840x2160 framebuffer (see
-    # draw_rect_filled's `if self.clip_enabled` clipping in
-    # backend_baremetal.spl, which no-ops when clip is disabled). That bug
-    # must be root-caused and fixed FIRST; until then this bail is the only
-    # thing keeping the kernel from hanging for the full boot timeout. Filed
-    # for follow-up rather than shipped half-fixed.
-    if preflight_skipped > 0:
-        var rejected_readback = engine2d_readback([], "not_requested")
-        if readback_frame:
-            rejected_readback = engine.read_pixels_with_source()
-        return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, 0, preflight_skipped, preflight_kinds, rejected_readback)
+    # NOTE(2026-07-16): previously this preflight-scanned every batch and, if
+    # ANY command anywhere was unresolved (e.g. one missing taskbar icon on a
+    # degraded disk), bailed out with rendered=0 for the WHOLE composition.
+    # The per-command loop below (_engine2d_draw_ir_render_commands) already
+    # renders everything it can and accounts for the rest in skipped/
+    # unsupported_kinds, so the all-or-nothing preflight bail is removed:
+    # unresolved commands are now skipped individually and everything else
+    # still renders. This depended on backend_baremetal.spl's
+    # draw_rect_filled (and siblings) clamping unconditionally to the
+    # framebuffer bounds regardless of clip_enabled -- see that file for the
+    # fix that made this safe.
     var eng = engine
     var rendered = 0
     var skipped = 0
