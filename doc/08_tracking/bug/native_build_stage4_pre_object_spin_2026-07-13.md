@@ -498,6 +498,13 @@ runtime-object link. Temporary runtime, entry, and bootstrap-support objects
 are cleaned before the error. Production linking remains disabled until the
 complete inventory, unique-owner selection, and fingerprint are wired.
 
+The font runtime now defines `STBTT_STATIC` before instantiating the vendored
+`stb_truetype` implementation. Its internal `stbtt_*` implementation symbols
+therefore stay translation-unit-local while the existing 18 `rt_font_*`
+functions remain the public runtime ABI. This removes a future archive-owner
+collision prerequisite; it does not yet create or select a font provider
+archive.
+
 ## 2026-07-16 canonical core-C HTTP ownership
 
 The legacy `runtime.c` definition of `rt_http_get` returned a raw C string even
