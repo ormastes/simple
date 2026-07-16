@@ -21,6 +21,9 @@ extern fn rt_file_hash_sha256(path: text) -> text
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_getpid() -> i64
+extern fn rt_dir_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_delete(path: text) -> bool
 
 fn incremental_file_exists(path: text) -> bool:
     rt_file_exists(path)
@@ -37,12 +40,62 @@ fn incremental_parse_file(path: text):
 fn incremental_hash_text(content: text) -> i64:
     rt_hash_text(content)
 
+var _compiler_src_fingerprint_memo: text = "@@unset@@"
+
+fn native_build_compiler_source_fingerprint() -> text:
+    """Fingerprint of the live-interpreted compiler sources (src/compiler/**/*.spl).
+
+    The executable sha256 in native_build_compiler_identity() does not change
+    when the compiler runs its .spl sources interpreted — editing a lowering in
+    src/compiler changed codegen while the cache scope stayed identical, so
+    stale objects kept getting linked. Fingerprint the compiler tree: per-file
+    "path|size|sha256" lines joined into a manifest, hashed via a temp file
+    (rt_hash_text and rt_hash_sha256 are unavailable/broken under the seed
+    interpreter). Measured ~90ms for ~2900 files. Traversal order follows
+    rt_dir_list; any order instability only causes a safe cache miss
+    ([text].sort() is a no-op under the seed interpreter). Returns "" when no
+    src/compiler tree is visible from the build cwd (deployed binary outside
+    a repo) — identity is then unchanged.
+    """
+    if _compiler_src_fingerprint_memo != "@@unset@@":
+        return _compiler_src_fingerprint_memo
+    val root = "src/compiler"
+    if not rt_dir_exists(root):
+        _compiler_src_fingerprint_memo = ""
+        return ""
+    var lines: [text] = []
+    var dirs: [text] = [root]
+    var i = 0
+    while i < dirs.len():
+        val dir = dirs[i]
+        i = i + 1
+        val entries = rt_dir_list(dir) ?? []
+        for entry in entries:
+            val full = dir + "/" + entry
+            if rt_dir_exists(full):
+                dirs = dirs.push(full)
+            elif entry.ends_with(".spl"):
+                lines = lines.push("{full}|{rt_file_size(full)}|{rt_file_hash_sha256(full)}")
+    var fp = "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    rt_dir_create_all("build")
+    val tmp = "build/.compiler_src_fp.{rt_getpid()}.tmp"
+    if rt_file_write_text(tmp, lines.join("\n")):
+        val digest = rt_file_hash_sha256(tmp)
+        rt_file_delete(tmp)
+        if digest.len() == 64:
+            fp = "{digest.substring(0, 16)}n{lines.len()}"
+    _compiler_src_fingerprint_memo = fp
+    fp
+
 fn native_build_compiler_identity() -> text:
+    val src_fp = native_build_compiler_source_fingerprint()
     val args = rt_cli_get_args()
     if args.len() > 0:
         val hash = rt_file_hash_sha256(args[0])
         if hash.len() == 64:
-            return hash
+            if src_fp == "":
+                return hash
+            return "{hash}+src{src_fp}"
     # Fail closed: an unknown compiler must not reuse another compiler's cache.
     "uncacheable-{rt_getpid()}-{rt_time_now_unix_micros()}"
 

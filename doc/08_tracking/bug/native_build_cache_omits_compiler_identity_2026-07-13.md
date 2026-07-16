@@ -6,6 +6,30 @@ companion "same compiler retains hit" leg is blocked by a separate
 pre-existing cache-reload defect, filed as
 `native_build_cache_entries_lost_on_reload_2026-07-16.md`.
 
+**Reopened + re-resolved 2026-07-16 (interpreted-source facet):** the
+executable-sha256 identity was incomplete. When the compiler pipeline runs
+LIVE-INTERPRETED from `src/compiler/*.spl` (the normal state of the deployed
+seed binary), editing a lowering changes codegen while the executable — and
+therefore the cache scope — stays identical, so stale objects keep getting
+linked and a compiler fix appears not to work. Reproduced end-to-end:
+marker edit in `_MirToLlvm/core_codegen.spl` string-const emission; rebuild
+of the same entry (with or without `--clean`) reused the stale object
+(old output), while a fresh entry filename showed the new behavior.
+Fix: `native_build_compiler_source_fingerprint()` in
+`driver_build/incremental.spl` — walks `src/compiler/**/*.spl`, builds a
+`path|size|sha256` manifest, hashes it via a temp file
+(`rt_hash_text`/`rt_hash_sha256` are unavailable under the seed
+interpreter), and folds `+src<digest16>n<count>` into
+`native_build_compiler_identity()` (memoized per process; ~90-100 ms for
+2933 files; "" i.e. unchanged identity when no `src/compiler` tree is
+visible from the build cwd). Verified: compiler-source edit -> new scope
+`...+src<fp>` -> miss + correct new output; revert -> miss + original
+output; unchanged rebuild -> hit. Additionally `--clean` now actually
+wipes the entry's cache scope (CLI sets `SIMPLE_NATIVE_BUILD_CLEAN=1`,
+`driver_aot_output.spl` consumes it and `rt_dir_remove_all`s the scope
+root), and a cache hit now requires all cached objects to still exist on
+disk.
+
 ## Symptom
 
 After changing compiler lowering or code generation and bootstrapping a new

@@ -1,7 +1,15 @@
 # Bug: native-build BuildCache loses all entries on cross-process reload
 
-**Status (2026-07-16):** Source-fixed; executable two-build proof pending. Found
-while regression-testing `native_build_cache_omits_compiler_identity_2026-07-13.md`.
+**Status (2026-07-16):** RESOLVED — two-build gate PASS. On origin tip
+(eaee86e1e4d, deployed binary, live-interpreted pipeline), a rebuild of an
+unchanged single-module probe reported `[NATIVE] cache hit` cross-process and
+produced a correct binary; a compiler-source or scope change still misses.
+Hardening added while closing (q_cache_srcid lane): the hit path in
+`driver_aot_output.spl` now also requires every cached object file to still
+exist on disk (stale `build_cache.sdn` entries left behind by a `--clean`
+scope wipe or manual cache deletion are removed instead of "hit" into a link
+failure). Found while regression-testing
+`native_build_cache_omits_compiler_identity_2026-07-13.md`.
 
 - **Severity:** P2 (perf, silent: the incremental native object cache NEVER
   hits across processes in the live-interpreted pipeline — every native-build
