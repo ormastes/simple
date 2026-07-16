@@ -1,7 +1,9 @@
 # Native method cleanup global misresolution
 
-**Status (2026-07-15):** source implemented; strict LLVM/Cranelift dispatch
-execution remains pending.
+**Status: Resolved 2026-07-16** — owner dispatch verified empirically at
+c8f4b62261a under the dual-backend protocol (seed-interpreter oracle vs
+`native-build --entry`); regression case `method_owner_dispatch` added to
+`scripts/check/check-native-seed-parity.shs`.
 
 Strict `bootstrap_main` linking showed calls authored as `compiled.cleanup()` in a module
 with a conflicting wildcard-imported `backend_types.CompiledModule` resolving to
@@ -30,3 +32,36 @@ compatibility until a fresh self-hosted stage proves the old seed ambiguity is a
 
 The focused owner-dispatch regression is present but was not executed in the
 2026-07-15 source-only audit.
+
+## Regression evidence (2026-07-16, tip c8f4b62261a)
+
+Two unrelated owners exposing the same `cleanup` name; each receiver must bind
+its OWN owner's method:
+
+```simple
+struct JitMgr:      # cleanup() -> 222
+struct CompiledMod: # cleanup() -> 111 + self.name
+fn make_mod(n) -> CompiledMod: ...
+fn main():
+    print(make_mod(1).cleanup())   # must be 112, never 222
+    print(JitMgr(id: 7).cleanup()) # must be 222
+```
+
+- Oracle (`env -u SIMPLE_BOOTSTRAP bin/simple run p.spl`): `112`, `222` (rc 0).
+- Native (`env -u SIMPLE_BOOTSTRAP bin/simple native-build --entry p.spl -o out
+  --clean` + run): `112`, `222` (rc 0; native `print` emits no trailing
+  newline). Identical after newline normalization — no misresolution.
+- Targeted gate at the same tip: `NATIVE_SMOKE_CASES=enum_match
+  scripts/check/native-smoke-matrix.shs` ends
+  `total=1 pass=1 fail=0 ... codegen_fallback_hits=0`.
+- Parity regression: `method_owner_dispatch` in
+  `scripts/check/check-native-seed-parity.shs` (PARITY mode).
+
+Verification note: an earlier attempt against 8ac259873334 was blocked by the
+campaign-wide native-build wall (ca1e18c1744's rt_dict_*/rt_tuple_* extern
+migration vs the deployed 2026-07-11 seed, since reverted on main). A separate,
+still-open defect observed during verification: a method returning `text`
+natively prints a raw handle integer (see
+`native_method_text_return_prints_handle_2026-07-16.md`) — a text-decode gap on
+the method-result path, not a dispatch misresolution (the same program with
+`i64` returns has full parity).
