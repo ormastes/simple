@@ -131,3 +131,33 @@ boot must switch to the vmm-managed CR3) and flush TLB. Fixing SYS_MAP_BAR's
 mapping-reachability unblocks REAL NVMe -> FAT32 mount -> full SimpleOS render with
 font+apps (not just degraded). This is the single remaining blocker for the
 SimpleOS showcase surface.
+
+## CORRECTION (2026-07-16): CR3-reachability theory is WRONG — it's self.bar0_virt reading 0
+
+The prior "unreachable from active CR3" conclusion is retracted. The VMM bootstrap
+root logged at boot is `402669568` = `0x18004000`, which is EXACTLY the fault
+`cr3=0x18004000`. So `vmm_map_page` (called by `_handle_map_bar`) maps into the
+ACTIVE CR3 tree — the BAR vaddr IS reachable. And the fault is `cr2=0x0` (access to
+address **0**), NOT to the mapped BAR vaddr. If the MMIO used a valid `self.bar0_virt`
+(the positive value SYS_MAP_BAR returned), cr2 would be that vaddr, not 0.
+
+=> The real pin: **`self.bar0_virt` reads as 0 at the MMIO site** even though
+SYS_MAP_BAR returned positive and the null-BAR guard (`self.bar0_virt == 0` right
+after assignment) passed. That means either (a) the field WRITE
+`self.bar0_virt = bar0_result.to_u64()` does not persist across subsequent method
+calls in the native-build (a field-mutation-persistence codegen bug), or (b) a
+cross-module read of `self.bar0_virt` (e.g. via the mmio helpers /
+`nvme_sq_doorbell_addr`) resolves to a different/zero slot — the SAME
+native-build cross-module field-resolution family as the FramebufferDriver shift
+(bug simpleos_native_build_framebufferdriver_crossmodule_field_offset_shift_2026-07-14).
+The seed field fix `4dcca1aa` fixed FramebufferDriver READS but evidently not this
+NvmeDriver case (more fields, and possibly the WRITE side).
+
+NEXT: add a `serial_println` (NOT klog log_info/log_raw — those don't reach serial
+in freestanding) at (1) right after `self.bar0_virt = ...` and (2) at the first
+`mmio_*(self.bar0_virt + ...)` site, printing `self.bar0_virt` each time. If it
+prints positive then 0, it's field-persistence; if the doorbell helper sees 0 for
+a positive param, it's the cross-module shift. Then fix accordingly (thread
+bar0_virt as an explicit scalar param through the MMIO sites, mirroring the
+FramebufferDriver executor scalar-threading workaround, OR fix the seed field
+codegen). This unblocks NVMe -> FAT32 -> full SimpleOS render.
