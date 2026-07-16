@@ -100,6 +100,7 @@ RESULTS_FILE="$WORK_DIR/results.tsv"
 TOTAL=0
 PASS_N=0
 FAIL_N=0
+XFAIL_N=0
 
 norm() {
     # Canonicalize stdout: strip newlines and spaces so seed's added
@@ -1304,6 +1305,7 @@ record() {
     case "$status" in
         PASS) PASS_N=$((PASS_N + 1)) ;;
         FAIL) FAIL_N=$((FAIL_N + 1)) ;;
+        XFAIL) XFAIL_N=$((XFAIL_N + 1)) ;;
     esac
     printf '%s\t%s\t%s\t%s\n' "$id" "$mode" "$status" "$detail" >>"$RESULTS_FILE"
     echo "[$id] mode=$mode -> $status ($detail)"
@@ -1337,12 +1339,48 @@ build_native() {
     fi
 }
 
+# Memoized capability probe for the strict-cranelift leg. The cranelift
+# adapter (src/compiler/70.backend/backend/cranelift_codegen_adapter.spl) is
+# interpreted live and calls rt_cranelift_* SFFI externs that must be exported
+# by the deployed seed binary. Seeds older than the SFFI surface (e.g. missing
+# rt_cranelift_declare_string_data / rt_cranelift_declare_global_data) fail
+# EVERY cranelift build at interpretation time with "unknown extern function"
+# regardless of the case under test. That is a seed-deployment gap, not a
+# per-case regression: record those legs as XFAIL, referencing
+# $CRANELIFT_XFAIL_BUG, instead of 9 misleading per-construct FAILs. The probe
+# only downgrades on the exact missing-extern signature; any other cranelift
+# build failure still runs the cases and FAILs loudly.
+CRANELIFT_SEED_SUPPORT=""
+CRANELIFT_XFAIL_BUG="doc/08_tracking/bug/cranelift_seed_missing_sffi_externs_2026-07-16.md"
+
+cranelift_seed_supported() {
+    if [ -z "$CRANELIFT_SEED_SUPPORT" ]; then
+        probe_src="$WORK_DIR/cranelift_probe_${STAMP}.spl"
+        probe_bin="$WORK_DIR/cranelift_probe_${STAMP}_bin"
+        probe_log="$WORK_DIR/cranelift_probe_${STAMP}.build.log"
+        printf 'fn main():\n    print("probe")\n' >"$probe_src"
+        if build_native "$probe_src" "$probe_bin" "$probe_log" cranelift; then
+            CRANELIFT_SEED_SUPPORT="yes"
+        elif grep -q "unknown extern function: rt_cranelift_" "$probe_log"; then
+            CRANELIFT_SEED_SUPPORT="no"
+        else
+            CRANELIFT_SEED_SUPPORT="yes"
+        fi
+    fi
+    [ "$CRANELIFT_SEED_SUPPORT" = "yes" ]
+}
+
 run_strict_dual_backend_case() {
     id="$1"; writer="$2"; expected="$3"; mode="${4:-}"
     src="$WORK_DIR/case_${id}_${STAMP}.spl"
     "$writer" "$src"
 
     for backend in llvm cranelift; do
+        if [ "$backend" = "cranelift" ] && ! cranelift_seed_supported; then
+            record "${id}_${backend}" "strict-$backend" "XFAIL" \
+                "seed binary lacks rt_cranelift_* SFFI externs; see $CRANELIFT_XFAIL_BUG"
+            continue
+        fi
         bin="$WORK_DIR/case_${id}_${backend}_${STAMP}_bin"
         build_log="$WORK_DIR/case_${id}_${backend}_${STAMP}.build.log"
         build_ok=0
@@ -1581,8 +1619,12 @@ run_loud_fail_case int_overflow_loud write_case_int_overflow_loud \
     "integer literal out of range for i64"
 run_loud_fail_case match_guard_loud write_case_match_guard_loud \
     "match guards (case x if cond:) are not supported by native codegen yet"
-run_loud_fail_case static_ctor_ambiguous_loud write_case_static_ctor_ambiguous_loud \
-    "ambiguous static method call"
+# static_ctor upgraded loud-fail -> parity: static impl/struct-body methods
+# are now owner-qualified at HIR symbol definition (two `static fn new()` on
+# different types get distinct symbols instead of colliding on one bare-name
+# symbol), so `A.new()` / `B.new()` resolve unambiguously and no longer need
+# the "ambiguous static method call" refusal. Seed agrees (prints 12).
+run_parity_case static_ctor_disambiguated write_case_static_ctor_ambiguous_loud
 run_loud_fail_case result_unwrap_u64_loud write_case_result_unwrap_u64_loud \
     "unsupported Result unwrap payload type"
 run_loud_fail_case option_try_annotated_loud write_case_option_try_annotated_loud \
@@ -1608,7 +1650,7 @@ while IFS="$(printf '\t')" read -r id mode status detail; do
 done <"$RESULTS_FILE"
 
 echo ""
-echo "total=$TOTAL pass=$PASS_N fail=$FAIL_N"
+echo "total=$TOTAL pass=$PASS_N fail=$FAIL_N xfail=$XFAIL_N"
 echo "results_file=$RESULTS_FILE"
 
 if [ "$FAIL_N" -gt 0 ]; then

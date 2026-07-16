@@ -89,12 +89,11 @@ pub fn cranelift_compile_module_direct(options: CompileOptions, module: MirModul
             "Failed to create Cranelift AOT module"))
     print "[cranelift-direct] module"
 
-    val global_handles_opt = declare_module_statics(cl_module, module)
-    if not global_handles_opt.?:
+    val global_handles = declare_module_statics(cl_module, module)
+    if global_handles.has(STATICS_FAILED_KEY):
         cranelift_free_module(cl_module)
         return Err(compileerror_backend_error(BackendKind.Cranelift,
             "Failed to declare module statics"))
-    val global_handles = global_handles_opt.unwrap()
 
     var func_handles: Dict<text, i64> = {}
     for func in module.functions.values():
@@ -148,12 +147,11 @@ impl Codegen for CraneliftCodegenAdapter:
             return Err(compileerror_backend_error(BackendKind.Cranelift,
                 "Failed to create Cranelift AOT module"))
 
-        val global_handles_opt = declare_module_statics(cl_module, module)
-        if not global_handles_opt.?:
+        val global_handles = declare_module_statics(cl_module, module)
+        if global_handles.has(STATICS_FAILED_KEY):
             cranelift_free_module(cl_module)
             return Err(compileerror_backend_error(BackendKind.Cranelift,
                 "Failed to declare module statics"))
-        val global_handles = global_handles_opt.unwrap()
 
         # First pass: declare all functions so forward references work
         var func_handles: Dict<text, i64> = {}
@@ -237,32 +235,52 @@ fn build_signature(sig: MirSignature, is_main: bool) -> i64:
         cranelift_sig_set_return(cl_sig, mir_type_to_cl(sig.return_type))
     cl_sig
 
-fn cranelift_static_init_bits(static_: MirStatic) -> i64?:
+# Split supported/value pair instead of one `-> i64?` accessor: Option
+# returns from live-interpreted compiler code are unreliable (same seed
+# interpreter bug as STATICS_FAILED_KEY above).
+fn cranelift_static_init_supported(static_: MirStatic) -> bool:
     match static_.type_.kind:
         case I8 | U8 | I16 | U16 | I32 | U32 | I64 | U64 | Bool:
             ()
         case _:
-            return nil
+            return false
     if not static_.init.?:
-        return nil
+        return false
     match static_.init.unwrap().value:
-        case Int(value): Some(value)
-        case Bool(value): Some(if value: 1 else: 0)
-        case Zero: Some(0)
-        case _: nil
+        case Int(_): true
+        case Bool(_): true
+        case Zero: true
+        case _: false
 
-fn declare_module_statics(cl_module: i64, module: MirModule) -> Dict<i64, i64>?:
+fn cranelift_static_init_bits_value(static_: MirStatic) -> i64:
+    match static_.init.unwrap().value:
+        case Int(value): value
+        case Bool(value): if value: 1 else: 0
+        case _: 0
+
+# Sentinel key marking declare_module_statics failure. Real symbol ids are
+# non-negative, so -1 never collides. This avoids returning Dict<i64,i64>?:
+# in the live-interpreted native-build context an Option<Dict> return is
+# erased to nil even when the callee returns Some (seed interpreter bug —
+# see doc/08_tracking/bug/interp_option_dict_return_erased.md).
+val STATICS_FAILED_KEY: i64 = -1
+
+fn declare_module_statics(cl_module: i64, module: MirModule) -> Dict<i64, i64>:
     var handles: Dict<i64, i64> = {}
     for static_ in module.statics.values():
-        val initial_bits = cranelift_static_init_bits(static_)
-        if not initial_bits.?:
-            return nil
+        if not cranelift_static_init_supported(static_):
+            print "[cranelift] unsupported module static '{static_.name}' (non-scalar type or non-const init)"
+            handles[STATICS_FAILED_KEY] = 1
+            return handles
+        val initial_bits = cranelift_static_init_bits_value(static_)
         val name = "__simple_global_{static_.name}_{static_.symbol.id}"
-        val handle = cranelift_declare_global_data(cl_module, name, mir_type_to_cl(static_.type_), initial_bits.unwrap())
+        val handle = cranelift_declare_global_data(cl_module, name, mir_type_to_cl(static_.type_), initial_bits)
         if handle == 0:
-            return nil
+            print "[cranelift] declare_global_data failed for '{name}'"
+            handles[STATICS_FAILED_KEY] = 1
+            return handles
         handles[static_.symbol.id] = handle
-    Some(handles)
+    handles
 
 # ============================================================================
 # Function Compilation
