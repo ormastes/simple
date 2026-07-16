@@ -134,11 +134,15 @@
   `doc/09_report/windows_native_mdi_evidence_2026-07-16.md`.
 - Windows `bin/simple.cmd` source launches now skip zero-byte runtime candidates
   and route `.spl` source files through the current built Rust driver when
-  present. The 2026-07-16 launcher health report proves
-  `bin/simple.cmd src/os/hosted/hosted_win32_mdi_probe.spl --interpret` exits
-  `0` and emits Win32 MDI proof fields; `--version` still exits `0` through the
-  release path. This is a Windows source-launch fallback, not pure-Simple
-  release-binary completion. See
+  present. `scripts/check/check-windows-simple-cmd-launcher-health.ps1` now
+  proves this path by launching the Win32 MDI probe through `bin/simple.cmd`,
+  validating the proof env, and checking `--version`. The 2026-07-16 report
+  records `windows_simple_cmd_launcher_health_status=pass`,
+  `windows_simple_cmd_launcher_health_source_exit_code=0`,
+  `windows_simple_cmd_launcher_health_probe_backend=win32-native`, and
+  `windows_simple_cmd_launcher_health_probe_rendered_titlebar_css_applied=true`.
+  This is a Windows source-launch fallback, not pure-Simple release-binary
+  completion. See
   `doc/09_report/windows_simple_cmd_launcher_health_2026-07-16.md`.
 - Windows verification backstop: `scripts/audit/direct-env-runtime-guard.ps1`
   mirrors the required `direct-env-runtime-guard.shs` working/staged checks for

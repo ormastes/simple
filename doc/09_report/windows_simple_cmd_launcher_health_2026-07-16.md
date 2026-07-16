@@ -1,37 +1,46 @@
-# Windows simple.cmd Launcher Health - 2026-07-16
+﻿# Windows simple.cmd Launcher Health
 
-Current Windows PowerShell run:
+## Raw Evidence
 
-```powershell
-$env:SIMPLE_WIN32_MDI_PROOF_PATH='build/tmp/bin_simple_cmd_source_probe.env'
-$env:SIMPLE_WIN32_MDI_HOLD_MS='100'
-bin\simple.cmd src\os\hosted\hosted_win32_mdi_probe.spl --interpret
-bin\simple.cmd --version
-```
+- windows_simple_cmd_launcher_health_status=pass
+- windows_simple_cmd_launcher_health_reason=pass
+- windows_simple_cmd_launcher_health_source_exit_code=0
+- windows_simple_cmd_launcher_health_version_exit_code=0
+- windows_simple_cmd_launcher_health_version=Simple v0.9.6
+- windows_simple_cmd_launcher_health_simple_cmd=bin\simple.cmd
+- windows_simple_cmd_launcher_health_entry=src\os\hosted\hosted_win32_mdi_probe.spl
+- windows_simple_cmd_launcher_health_proof_path=build\tmp\windows_simple_cmd_launcher_health_2026-07-16\bin_simple_cmd_source_probe.env
+- windows_simple_cmd_launcher_health_source_output_path=build\tmp\windows_simple_cmd_launcher_health_2026-07-16\bin_simple_cmd_source_probe.out
+- windows_simple_cmd_launcher_health_version_output_path=build\tmp\windows_simple_cmd_launcher_health_2026-07-16\bin_simple_cmd_version.out
+- windows_simple_cmd_launcher_health_report_path=doc\09_report\windows_simple_cmd_launcher_health_2026-07-16.md
+- windows_simple_cmd_launcher_health_probe_status=pass
+- windows_simple_cmd_launcher_health_probe_backend=win32-native
+- windows_simple_cmd_launcher_health_probe_drag_moved=true
+- windows_simple_cmd_launcher_health_probe_focus_cycle_changed=true
+- windows_simple_cmd_launcher_health_probe_rendered_titlebar_css_applied=true
+- windows_simple_cmd_launcher_health_probe_rendered_titlebar_css_pixels=6784
 
-Result:
-
-- `source_launch_exit=0`
-- `proof_exists=True`
-- `version_exit=0`
-- `version=Simple v0.9.6`
-- `status=pass`
-- `backend=win32-native`
-- `window_title=SimpleOS Win32 Hosted MDI Probe`
-- `drag_moved=true`
-- `focus_cycle_changed=true`
-- `rendered_titlebar_css_applied=true`
-- `rendered_titlebar_css_pixels=6784`
-
-Code change:
-
-- `bin/simple.cmd` now ignores zero-byte runtime candidates.
-- `.spl` source-file launches prefer the current built Rust driver at
-  `src/compiler_rust/target/debug/simple.exe` when present, because the stale
-  April Windows release binary reports current source paths as missing.
-- Non-source commands such as `--version` still use the release candidate path.
-
-This is launcher health evidence, not a pure-Simple release-binary completion
-claim. The current driver prints the bootstrap-seed warning; the launcher
-fallback exists so Windows-hosted source evidence can run until a fresh
-pure-Simple release binary replaces the stale release candidate.
+## Source Probe Proof
+- status=pass
+- reason=pass
+- backend=win32-native
+- window_title=SimpleOS Win32 Hosted MDI Probe
+- window_count=4
+- focused_count=1
+- focused_before=101
+- focused_after=102
+- focus_cycle_changed=true
+- drag_moved=true
+- minimized_after_action=1
+- minimized_after_restore=0
+- titlebar_widget_markup_present=true
+- titlebar_input_markup_present=true
+- body_button_markup_present=true
+- body_input_markup_present=true
+- titlebar_css_present=true
+- rendered_titlebar_css_pixels=6784
+- rendered_titlebar_css_applied=true
+- terminal_before_x=50
+- terminal_after_x=140
+- terminal_before_y=60
+- terminal_after_y=100
