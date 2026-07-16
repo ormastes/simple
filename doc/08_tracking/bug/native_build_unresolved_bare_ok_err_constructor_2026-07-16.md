@@ -1,6 +1,6 @@
 ---
 id: native_build_unresolved_bare_ok_err_constructor_2026-07-16
-status: OPEN
+status: SOURCE_RESOLVED_EXECUTION_PENDING
 severity: high
 discovered: 2026-07-16
 area: compiler/native-build
@@ -10,6 +10,19 @@ related: doc/08_tracking/bug/simpleos_native_build_framebufferdriver_crossmodule
 ---
 
 # Native-build: bare `Ok(...)` / `Err(...)` Result constructors are unresolved → cr2=0x0 fault
+
+## Resolution (2026-07-16)
+
+Current Rust-seed lowering intercepts bare `Global("Ok"/"Err")` calls as
+Result MIR instructions. Pure-Simple lowering admits the bare identifiers as
+`NamedVar` calls and intercepts them as Result enum construction before
+ordinary generic-call lowering. The existing cross-module
+`Result<[u8], BytesError>` fixture now pins both bare constructors through the
+default-LLVM and explicit-Cranelift entry-closure checker. Source and regression
+coverage are present; executable verification remains pending.
+
+This closes only the constructor-resolution hypothesis. The later NVMe field
+and MMIO findings recorded below remain separate.
 
 ## Summary
 
@@ -64,13 +77,11 @@ the executed SimpleOS boot path (`driver_operations.spl`, `vfs_boot_init.spl`).
 This is the unblock for the SimpleOS WM render; it does NOT fix the underlying
 compiler resolution gap.
 
-## Real fix (compiler, not yet done)
+## Historical fix direction (implemented in current sources)
 
-Native-build name resolution / closure discovery must resolve the bare
-`Ok`/`Err` prelude aliases (or the frontend must desugar bare `Ok`/`Err` to the
-`Result.Ok`/`Result.Err` variant constructors before native lowering) so the
-compact form never lowers to an unresolved extern. Until then, freestanding/OS
-code should prefer the qualified form.
+Current sources implement the root fix during MIR lowering, so bare
+constructors no longer depend on prelude free-function aliases. Qualified forms
+remain only a historical workaround; executable verification is pending.
 
 ## Update (2026-07-16 later): PRIMARY render blocker = NVMe init_from_grant MMIO fault-loop
 

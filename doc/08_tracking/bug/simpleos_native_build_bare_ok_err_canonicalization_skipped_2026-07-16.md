@@ -1,9 +1,22 @@
 # Bug: bare `Ok(...)`/`Err(...)` canonicalization skipped in entry-closure native-build (NVMe/vfs boot modules)
 
 - **Date:** 2026-07-16
+- **Status:** source-resolved; dual-backend regression pinned, execution pending
 - **Severity:** critical (blocks SimpleOS x86_64 disk mount → diskless desktop → black screen)
 - **Component:** rust seed MIR lowering (`src/compiler_rust/compiler/src/mir/lower/lowering_expr_call.rs`)
 - **Related:** `simpleos_native_build_framebufferdriver_crossmodule_field_offset_shift_2026-07-14.md` (SEPARATE bug — a seed carrying that field-index fix still reproduces this one)
+
+## Resolution (2026-07-16)
+
+Current Rust-seed lowering intercepts bare `Global("Ok"/"Err")` calls as
+Result MIR instructions. Pure-Simple lowering admits the bare identifiers as
+`NamedVar` calls and intercepts them as Result enum construction before
+ordinary generic-call lowering. The shared cross-module
+`Result<[u8], BytesError>` fixture now exercises both bare constructors under
+the existing default-LLVM and explicit-Cranelift checker. Source and regression
+coverage are present; executable verification remains pending. The historical
+SimpleOS/NVMe observations below are retained as the original report and do not
+supersede the separate field/MMIO blockers.
 
 ## Symptom
 Kernel built via `native-build --entry-closure` (gui_entry_desktop.spl, cranelift,
