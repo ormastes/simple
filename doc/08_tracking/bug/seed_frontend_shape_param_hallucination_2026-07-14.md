@@ -164,3 +164,36 @@ lightweight test entry now pass `(depth + 1).to_text()` to `env_set`, with
 source regressions for the two dispatch paths. This fix is pending the same
 fresh Stage-2/Stage-3 rebuild required by the tuple-parser change; do not claim
 the runner is runnable until the rebuilt candidate executes a focused spec.
+
+## Patched compiler rebuild result (2026-07-16)
+
+The isolated `build/bootstrap-font-runner-fresh-20260716` lane refreshed the
+stale bootstrap-only Rust seed/runtime, then produced both pure-Simple compiler
+stages with Cranelift; the wrapper reported its built-in sanity passed for each.
+Stage 2 SHA-256 is
+`36e6a0346ad006171b8dbb907c014703efda99b8a64b53b9e51b190ef16a95c0` and
+Stage 3 SHA-256 is
+`ecc01d7362da39cc84de15b1b2cab41e3d488ce4235939be4fdcffdcec06e3ae`.
+Both symbol tables contain `parse_for_binding_names`, closing the prior stale
+Stage-3 blocker. The first LLVM invocation was rejected because that seed did
+not include the LLVM backend; the first Cranelift link exposed the stale
+runtime's missing `rt_cranelift_new_aot_module_triple`, which the canonical
+`--full-bootstrap` refresh supplied.
+
+A retained direct parser probe cannot be admitted through the bootstrap-only
+Stage 3: the removed `rust-hosted` bundle is rejected, while the supported
+`core-c-bootstrap` mode fails closed unless the entry is
+`src/app/cli/main.spl`. Do not weaken that production bootstrap guard for a
+test. The focused parser regression therefore remains pending on a full
+Stage-4 CLI that can execute `test`.
+
+One direct Stage-4 attempt then used the exact canonical environment and the
+verified Stage 3. A high-capability read-only review confirmed the command
+matched `bootstrap_native_build_main`. It emitted a zero-byte log and no
+candidate ELF, reached 35,635,608 KiB RSS at 6m54s, and exited 143 after roughly
+13 minutes. No early-OOM journal entry identifies the signal owner, so retain
+this as a bounded termination plus severe memory/observability evidence rather
+than assigning an unsupported cause. Do not rerun Stage 2 or Stage 3; the next
+lane should preserve their isolated cache and address Stage-4 peak memory and
+phase telemetry before one further full-CLI attempt. Runner admission remains
+pending.
