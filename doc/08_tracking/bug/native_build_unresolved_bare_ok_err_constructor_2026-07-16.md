@@ -172,3 +172,32 @@ a positive param, it's the cross-module shift. Then fix accordingly (thread
 bar0_virt as an explicit scalar param through the MMIO sites, mirroring the
 FramebufferDriver executor scalar-threading workaround, OR fix the seed field
 codegen). This unblocks NVMe -> FAT32 -> full SimpleOS render.
+
+## MAJOR PROGRESS (2026-07-17): NVMe blocker SOLVED; render now blocked at bga port_outl hang
+
+Two fixes landed the boot much further:
+1. NVMe I/O-not-ready degrade guard (`fix(os/vfs)`, ON ORIGIN): `_vfs_boot_init_pure_nvme_fat32`
+   now returns false when `transfer_evidence.doorbells_mapped`/`io_queue_ready` are false,
+   instead of proceeding to a FAT32 DMA read that doorbell-writes to null and fault-loops.
+   VERIFIED: boot advances past vfs-init to `[desktop-gui] initializing framebuffer...`,
+   faults 113->5, `[vfs-init] pure-nvme io not ready — degrading to no-disk`.
+2. (also confirmed: NVMe bar0_virt is VALID (0xFEBD0000) and CAP read SUCCEEDS — the earlier
+   "self.bar0_virt reads 0" correction was itself wrong; MMIO to the BAR works. The NVMe issue
+   was purely that doorbells never came up, so I/O degrades — not a mapping/field bug.)
+
+REMAINING render blocker (precisely pinned via serial markers): the boot reaches
+`bga_init_framebuffer` -> `enable_vga_pci_decode` -> `pci_config_read32(0,0,0,0)` and HANGS at
+`port_outl(0x0CF8, 0x80000000)` — the marker before the call prints, the marker after does NOT.
+An OUT instruction cannot hang at the CPU level, and `rt_port_outl`/`rt_port_inl` ARE defined in
+the ELF (0x10ce00/0x10ce90, not unresolved), so this is a NATIVE-BUILD CODEGEN issue on the 32-bit
+PCI-config port-I/O path that the peer's `bf3d89e755 feat(wm): harden ... fullscreen rendering`
+ADDED (enable_vga_pci_decode + find_bga_pci_device via port_outl/port_inl). The pre-`bf3d89e755`
+bga used 16-bit `port_outw`/`port_inw` (which work); early "reached scanout" harness runs used a
+CACHED pre-regression kernel. The u8 loop-counter (`while dev < 32`) was NOT the cause (fixing it
+to i64 did not help; reverted).
+
+NEXT (peer's os/wm lane — bf3d89e755 regression): fix the native-build codegen for the
+`port_outl(u16, u32)` call in the freestanding bga path (compare the working 16-bit `port_outw`
+lowering), OR have bga fall back to the 16-bit I/O-port path + fallback LFB (0xFD000000) instead
+of the 32-bit pci_config scan, so `bga_init_scanout` returns and emits `[scanout-evidence]`. That
+is the last step to a real SimpleOS WM PPM — the boot otherwise reaches framebuffer init cleanly.
