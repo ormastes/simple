@@ -6,6 +6,7 @@
 //! queue submitters attach below this boundary.
 
 use std::collections::VecDeque;
+use std::ffi::{c_char, CStr};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -91,6 +92,7 @@ impl HostGpuQueueState {
 }
 
 static QUEUE_STATE: OnceLock<Mutex<HostGpuQueueState>> = OnceLock::new();
+static LAST_PAYLOAD_TEXT_C: Mutex<[u8; 4096]> = Mutex::new([0; 4096]);
 
 fn queue_state() -> &'static Mutex<HostGpuQueueState> {
     QUEUE_STATE.get_or_init(|| Mutex::new(HostGpuQueueState::new()))
@@ -179,7 +181,8 @@ pub extern "C" fn rt_host_gpu_queue_emit(
     rt_host_gpu_queue_emit_payload_text(lane_code, kind_code, payload_size, backend_handle, 0, "")
 }
 
-pub fn rt_host_gpu_queue_emit_payload(
+#[no_mangle]
+pub extern "C" fn rt_host_gpu_queue_emit_payload(
     lane_code: i64,
     kind_code: i64,
     payload_size: i64,
@@ -221,6 +224,30 @@ pub fn rt_host_gpu_queue_emit_payload_text(
         payload_text: payload_text.to_string(),
     });
     packet_id
+}
+
+#[export_name = "rt_host_gpu_queue_emit_payload_text"]
+pub unsafe extern "C" fn rt_host_gpu_queue_emit_payload_text_c(
+    lane_code: i64,
+    kind_code: i64,
+    payload_size: i64,
+    backend_handle: i64,
+    payload_hash: i64,
+    payload_text: *const c_char,
+) -> i64 {
+    let payload_text = if payload_text.is_null() {
+        ""
+    } else {
+        unsafe { CStr::from_ptr(payload_text) }.to_str().unwrap_or("")
+    };
+    rt_host_gpu_queue_emit_payload_text(
+        lane_code,
+        kind_code,
+        payload_size,
+        backend_handle,
+        payload_hash,
+        payload_text,
+    )
 }
 
 #[no_mangle]
@@ -342,11 +369,13 @@ pub extern "C" fn rt_host_gpu_queue_last_backend_handle() -> i64 {
     queue_state().lock().map(|state| state.last_backend_handle).unwrap_or(0)
 }
 
-pub fn rt_host_gpu_queue_last_payload_size() -> i64 {
+#[no_mangle]
+pub extern "C" fn rt_host_gpu_queue_last_payload_size() -> i64 {
     queue_state().lock().map(|state| state.last_payload_size).unwrap_or(0)
 }
 
-pub fn rt_host_gpu_queue_last_payload_hash() -> i64 {
+#[no_mangle]
+pub extern "C" fn rt_host_gpu_queue_last_payload_hash() -> i64 {
     queue_state().lock().map(|state| state.last_payload_hash).unwrap_or(0)
 }
 
@@ -357,7 +386,21 @@ pub fn rt_host_gpu_queue_last_payload_text() -> String {
         .unwrap_or_default()
 }
 
-pub fn rt_host_gpu_queue_last_device_time_us() -> i64 {
+#[export_name = "rt_host_gpu_queue_last_payload_text"]
+pub extern "C" fn rt_host_gpu_queue_last_payload_text_c() -> *const c_char {
+    let text = rt_host_gpu_queue_last_payload_text();
+    let Ok(mut buffer) = LAST_PAYLOAD_TEXT_C.lock() else {
+        return std::ptr::null();
+    };
+    buffer.fill(0);
+    let bytes = text.as_bytes();
+    let len = bytes.len().min(buffer.len() - 1);
+    buffer[..len].copy_from_slice(&bytes[..len]);
+    buffer.as_ptr().cast()
+}
+
+#[no_mangle]
+pub extern "C" fn rt_host_gpu_queue_last_device_time_us() -> i64 {
     queue_state().lock().map(|state| state.last_device_time_us).unwrap_or(0)
 }
 
@@ -408,6 +451,21 @@ mod tests {
         assert_eq!(rt_host_gpu_queue_completed_count(), 1);
         assert_eq!(rt_host_gpu_queue_last_status(), RT_HOST_GPU_QUEUE_STATUS_COMPLETED);
         assert_eq!(rt_host_gpu_queue_last_backend_handle(), 7);
+    }
+
+    #[test]
+    fn c_payload_bridge_preserves_text_and_numeric_metadata() {
+        rt_host_gpu_lane_reset();
+        let payload = std::ffi::CString::new("draw-text").unwrap();
+
+        let packet_id =
+            unsafe { rt_host_gpu_queue_emit_payload_text_c(RT_HOST_GPU_LANE_GPU, 2, 9, 7, 42, payload.as_ptr()) };
+        assert_eq!(packet_id, 1);
+        assert_eq!(rt_host_gpu_queue_drain(1), 1);
+        assert_eq!(rt_host_gpu_queue_last_payload_size(), 9);
+        assert_eq!(rt_host_gpu_queue_last_payload_hash(), 42);
+        let text = unsafe { CStr::from_ptr(rt_host_gpu_queue_last_payload_text_c()) };
+        assert_eq!(text.to_str().unwrap(), "draw-text");
     }
 
     #[test]
