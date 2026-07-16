@@ -30,6 +30,12 @@ deadline-bound; `gen-lean` never dispatches back into itself.
 Batch children use the same bounded process facade and translate deadline
 termination to exit 124. Daemon PID checks and startup use argv-safe process
 operations, and request writes fail closed if their atomic rename fails.
+Tracked parallel children install one idempotent POSIX signal owner and poll it
+in execution and governor waits. A pending SIGINT, SIGTERM, or SIGHUP cleans
+tracked children before the runner exits; synchronous sequential children and
+fatal-crash descendant containment remain separate qualification work. The
+outcome probe sends SIGINT only to a parallel runner, requires exit 130, and
+checks that the child PID recorded by the fixture no longer exists.
 
 Lint uses the compiler's scoped annotation parser. Lint, format, and fix share a
 single behavior owner and production entrypoints do not execute raw source

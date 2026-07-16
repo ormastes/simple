@@ -1,14 +1,9 @@
-# Runner Lifecycle Manager - Robust Process and Container Cleanup
+# Runner Lifecycle Manager - Tracked Process and Container Cleanup
 #
-# Provides automatic cleanup of child processes and containers when test
-# runner exits (normal shutdown, signal, or crash).
-#
-# Features:
-# - Automatic PID/container tracking on spawn
-# - Cleanup on normal exit
-# - Cleanup on signal (SIGTERM/SIGINT)
-# - Heartbeat monitoring for orphan detection
-# - Process group management
+# Tracks children spawned through this owner. The parallel runner polls pending
+# POSIX signals and cleans these tracked resources before exiting. Synchronous
+# sequential children, fatal crashes, descendants, and process groups require
+# separate containment and are not claimed here.
 
 use std.test_runner.process_tracker.{tracker_register_pid, tracker_get_pids, tracker_unregister_pid, tracker_register_container, tracker_unregister_container, tracker_kill_all_children, tracker_stop_all_containers, tracker_container_runtime, get_running_containers, tracker_enable_heartbeat, tracker_send_heartbeat, tracker_check_heartbeat_alive}
 use std.test_runner.checkpoint.{checkpoint_save}
@@ -153,10 +148,8 @@ fn cleanup_all_children():
     """
     Kill all tracked processes and stop all containers.
 
-    This is called automatically on:
-    - Normal exit (via shutdown_graceful)
-    - Signal handlers (SIGTERM/SIGINT)
-    - Panic/crash handlers (future enhancement)
+    Called by explicit shutdown and cooperative signal handlers. Fatal crashes
+    cannot execute Simple cleanup callbacks.
 
     Returns: Total number of resources cleaned (processes + containers)
     """
@@ -280,40 +273,6 @@ fn cleanup_orphaned_containers():
             orphans_stopped = orphans_stopped + 1
 
     orphans_stopped
-
-# ============================================================================
-# Signal Handlers (Future Enhancement)
-# ============================================================================
-#
-# To make this production-ready, we need SFFI additions for signal handling:
-#
-# extern fn rt_signal_handler_install(signal: i64, handler_fn: fn())
-# extern fn rt_signal_raise(signal: i64)
-# extern fn rt_atexit_register(handler_fn: fn())
-#
-# fn install_signal_handlers():
-#     """Install cleanup handlers for common signals"""
-#     rt_signal_handler_install(15, on_sigterm)  # SIGTERM
-#     rt_signal_handler_install(2, on_sigint)    # SIGINT (Ctrl+C)
-#     rt_signal_handler_install(1, on_sighup)    # SIGHUP (terminal close)
-#     rt_atexit_register(on_normal_exit)         # Normal exit
-#
-# fn on_sigterm():
-#     cleanup_and_exit(143, "SIGTERM")  # 128 + 15
-#
-# fn on_sigint():
-#     cleanup_and_exit(130, "SIGINT (Ctrl+C)")  # 128 + 2
-#
-# fn on_sighup():
-#     cleanup_and_exit(129, "SIGHUP (terminal closed)")  # 128 + 1
-#
-# fn on_normal_exit():
-#     cleanup_all_children()
-#
-# Usage in main:
-#     install_signal_handlers()
-#     # ... run tests ...
-#     # Cleanup happens automatically on exit
 
 # ============================================================================
 # Exports

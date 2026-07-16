@@ -36,7 +36,7 @@ so executable qualification is still blocked.
 | Surface | Status | Bug / missing evidence | Root solution | Priority |
 |---|---|---|---|---|
 | Production runtime | BLOCKED | Stage 4 was found parsing 10,503 files before closure pruning; source fix is unverified because the final cycle stopped on a stale compiler-backfill guard | In a fresh session run one bounded `--full-bootstrap`, require closure-sized phase input, then admit and atomically deploy | P0 |
-| Test runner | PARTIAL | POSIX parallel argv is injection-safe; timed-out children are killed before tracker release and normalized to timeout, but Windows parallel capture fails closed and signal cleanup remains incomplete | Add runtime redirected argv spawn, activate tracker-owned signal polling, then run timeout/RSS evidence | P0 |
+| Test runner | PARTIAL | POSIX parallel children are tracked; timeouts and cooperatively dispatched SIGINT/TERM/HUP clean them before exit. Sequential/limited/fork/QEMU children remain synchronously untracked; Windows parallel capture fails closed | Move every execution mode onto an interruptible tracked process owner, add process-group/parent-death containment, then run signal/timeout/RSS evidence | P0 |
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; exact/cosine line gates share one tokenizer-derived signal prefix, preserve indentation, and exclude comment/string-only windows; runtime and performance qualification remain | Run the focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
 | Lint | SOURCE FIXED | Production CLI delegates to the canonical linter; the isolated 722-line legacy type/check pair is deleted and stale worker assertions now name `cli_run_lint`; global gates still report 30 UI and 45 hot-loop violations | Repair classified violations, then run the focused policy/uniqueness fixtures | P1 |
 | Format/fix | SOURCE GUARDED | Writes are atomic and checked; formatter output passes a CoreLexer equivalence gate or fails closed; existing empty files no longer false-fail | Replace heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
@@ -116,7 +116,8 @@ so executable qualification is still blocked.
 |---|---|---|
 | P1 | Formatter heuristics are contained but not token-gap-native | Replace them incrementally with edits limited to lexer-approved whitespace gaps |
 | P1 | Lint global gates still report classified UI/hot-loop violations | Repair the violations and run focused policy fixtures with an admitted runtime |
-| P1 | Process cleanup handlers are advertised but inactive | Reuse the signal owner and dispatch it in sequential, parallel, and governor waits; treat fatal-crash containment separately |
+| P1 | Signal cleanup covers only tracked parallel children | Move sequential, limited, fork, daemon, doctest, and QEMU children onto an interruptible tracked owner; contain descendant groups separately |
+| P1 | Signal runtime availability is not portable | Guard POSIX `sigaction`, report installation truthfully on Windows, and qualify Ctrl-C separately from POSIX HUP/TERM |
 | P2 | Direct broker callers can retain inactive leases | Production request/execution paths now reject and remove inactive leases; refactor broker-only tests before enforcing active-only retention inside `SessionBroker.acquire` |
 
 ## Latest primary review decisions
@@ -171,10 +172,12 @@ so executable qualification is still blocked.
   `driver_api_core.check_file` path, with Check returning after fatal HIR
   lowering and before monomorphization. This is not activated until an
   admitted runtime proves its startup, latency, and RSS are acceptable.
-- **Runner signals:** the runtime already records pending POSIX signals, but
-  no production loop dispatches them. Activation must cover sequential,
-  parallel, and resource-governor waits together; fatal crash cleanup needs
-  process-group or parent-death containment and is not the same guarantee.
+- **Runner signals:** one idempotent callback now owns each signal, and the
+  tracked parallel loop plus both governor waits cooperatively dispatch pending
+  POSIX signals. Failed kills remain tracked instead of disappearing from
+  cleanup state. Sequential/limited/fork/daemon/doctest/QEMU waits are still
+  synchronous and untracked; fatal-crash cleanup additionally needs process-
+  group or parent-death containment. Source comments no longer claim otherwise.
 - **Dependency closure:** the daemon and standalone runner now fingerprint the
   full cycle-safe import closure. The former magic depth-five ceiling silently
   omitted deeper dependencies and could return stale cache hits; the existing

@@ -16,7 +16,7 @@ fn exit(code: i64):
 # ============================================================================
 
 # Import stub implementations (will be replaced by actual SFFI later)
-use std.nogc_sync_mut.io.signal_stubs.{rt_signal_handler_available, rt_signal_handler_install, rt_atexit_register}
+use std.nogc_sync_mut.io.signal_stubs.{rt_signal_handler_available, rt_signal_handler_install}
 
 # ============================================================================
 # Signal Numbers (POSIX standard)
@@ -33,10 +33,10 @@ val SIGKILL = 9   # Kill (cannot be caught)
 
 # NOTE: This needs to be set by the test runner before installing handlers
 var _global_cleanup_handler: fn() = default_cleanup_handler
+var _signal_handlers_installed = false
 
 fn default_cleanup_handler():
-    """Default cleanup handler (does nothing)"""
-    pass_do_nothing
+    ()
 
 # ============================================================================
 # Signal Handler Installation
@@ -65,15 +65,16 @@ fn install_signal_handlers(cleanup_handler: fn()) -> bool:
     # Store cleanup handler reference
     _global_cleanup_handler = cleanup_handler
 
+    if _signal_handlers_installed:
+        return true
+
     # Install handlers for common signals
-    rt_signal_handler_install(SIGINT, on_sigint)
-    rt_signal_handler_install(SIGTERM, on_sigterm)
-    rt_signal_handler_install(SIGHUP, on_sighup)
-
-    # Register atexit handler for normal exit
-    rt_atexit_register(on_normal_exit)
-
-    true
+    val int_installed = rt_signal_handler_install(SIGINT, on_sigint)
+    val term_installed = rt_signal_handler_install(SIGTERM, on_sigterm)
+    val hup_installed = rt_signal_handler_install(SIGHUP, on_sighup)
+    val installed = int_installed and term_installed and hup_installed
+    _signal_handlers_installed = installed
+    installed
 
 # ============================================================================
 # Signal Handler Callbacks
@@ -130,6 +131,8 @@ fn on_normal_exit():
 
     Performs cleanup without changing exit code.
     """
+    # The runtime atexit bridge is flag-based and cannot dispatch after Simple
+    # execution has ended. Callers needing normal cleanup invoke it explicitly.
     _global_cleanup_handler()
 
 # ============================================================================
@@ -199,4 +202,3 @@ fn signal_name(signal: i64) -> text:
 # ============================================================================
 # Exports
 # ============================================================================
-

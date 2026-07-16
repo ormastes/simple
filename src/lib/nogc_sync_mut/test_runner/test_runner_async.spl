@@ -10,8 +10,10 @@ use std.io.sysinfo_ops.{cpu_count}
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions}
 use std.test_runner.test_runner_execute.{find_simple_binary, build_child_args, make_result_from_output}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
-use std.test_runner.runner_lifecycle.{spawn_tracked_process, wait_tracked_process, poll_tracked_process}
+use std.test_runner.runner_lifecycle.{spawn_tracked_process, wait_tracked_process, poll_tracked_process, cleanup_all_children}
 use std.test_runner.resource_governor.{ResourceGovernor, governor_create, governor_can_spawn, governor_wait_until_ready}
+use std.nogc_sync_mut.io.signal_handlers.{install_signal_handlers}
+use std.nogc_sync_mut.io.signal_stubs.{signal_dispatch_pending}
 
 extern fn rt_thread_sleep(millis: i64)
 
@@ -30,6 +32,14 @@ struct AsyncTestRun:
 val _WAIT_POLL_INITIAL_MS = 10
 val _WAIT_POLL_MEDIUM_MS = 50
 val _WAIT_POLL_MAX_MS = 100
+var _runner_signal_handlers_installed = false
+
+fn _cleanup_tracked_test_children():
+    val _ = cleanup_all_children()
+
+fn _ensure_runner_signal_handlers():
+    if not _runner_signal_handlers_installed and host_os() != "windows":
+        _runner_signal_handlers_installed = install_signal_handlers(_cleanup_tracked_test_children)
 
 # ============================================================================
 # Temp File Management
@@ -223,6 +233,7 @@ fn run_tests_parallel_with_monitoring(
 
     Returns: List of TestFileResult
     """
+    _ensure_runner_signal_handlers()
     var results: [TestFileResult] = []
     var active_runs: [AsyncTestRun] = []
     var next_file_idx = 0
@@ -237,6 +248,7 @@ fn run_tests_parallel_with_monitoring(
     print "  [parallel] Resource governor: max {gov.max_cpu_cores} cores, {gov.max_memory_mb}MB memory ({gov.resource_limit_pct}% limit)"
 
     while next_file_idx < files.len() or active_runs.len() > 0:
+        signal_dispatch_pending()
         # Spawn new tests (respecting both max_workers and resource governor)
         while active_runs.len() < max_workers and next_file_idx < files.len():
             # Check resource governor before spawning
