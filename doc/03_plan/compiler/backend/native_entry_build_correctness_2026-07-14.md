@@ -102,9 +102,15 @@ the shared binary — deploys require explicit user go-ahead).
     resolved-method returns before Result decoding. Unresolved late-dispatch
     methods are deliberately not guessed. Default-LLVM and explicit-Cranelift
     loud-fail cases for annotated locals/direct calls are wired on hosted
-    Linux/macOS/Windows and FreeBSD x86_64, with execution pending.
+    Linux/macOS/Windows and FreeBSD x86_64. ARM32 default LLVM and Windows
+    ARM64 LLVM/Cranelift add target-directed compile-refusal/no-object gates.
+    Execution is pending; these target gates do not claim Option support.
     Resolved-method execution and full tagged-Option support remain blocked on
     a runnable pure-Simple `native-build` gate.
+  - The cross-module `Result<[u8], E>` control now routes both its Ok and Err
+    paths through `?`. Existing LLVM and Cranelift gates schedule it on FreeBSD
+    x86_64 and AArch64/RISC-V QEMU without adding another cross build; execution
+    remains pending.
   - `native_text_option_unwrap_pointer_value_2026-07-15.md` has a flat-nullable
     implementation and harness controls. The historical CLI exit 139 has no
     retained current reproducer; executable verification remains pending the

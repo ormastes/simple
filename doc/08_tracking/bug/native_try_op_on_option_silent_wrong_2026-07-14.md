@@ -108,6 +108,12 @@ The hosted Linux/macOS/Windows matrix and FreeBSD x86_64 full gate now select
 the existing annotated-local and direct-call loud-fail cases for both backends,
 requiring a nonzero build, no artifact, and the exact diagnostic. Their CI
 execution is pending; resolved-method coverage remains source-contract only.
+ARM32 default LLVM and Windows ARM64 LLVM/Cranelift also schedule the same
+fixtures with explicit targets and require compile refusal with no object.
+Those are target-directed compiler checks, not target execution or tagged
+Option support. The cross-module Result control now sends both Ok and Err
+through `?` on FreeBSD x86_64 and AArch64/RISC-V QEMU to guard the unchanged
+Result path; that execution is pending too.
 
 ## Diagnostic degraded to "MIR error: nil" — fixed (2026-07-16, q_optiontry_dynload lane)
 

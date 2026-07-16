@@ -38,8 +38,8 @@ source fixes from executable proof.
 | 4 | Enum text-payload source fix landed; strict default-LLVM + explicit-Cranelift callback/match/field-assignment proof added, execution pending. |
 | 5 | Subject-enum variant precedence implemented for expression and statement match; focused Rust tests pending execution. |
 | 6 | Old two-slot `Any` premise is superseded by the one-word ABI; strict default-LLVM + explicit-Cranelift wrapper-to-extern forwarding proof added, execution pending. |
-| 7 | Source implemented at the contained MIR enum-bind owner; strict default-LLVM + explicit-Cranelift proof added, execution pending. |
-| 8 | Open/safer; typed local/direct-call/resolved-method Option `?` fail-closed provenance and additive `rt_enum_id` surfaces are source-implemented. Hosted Linux/macOS/Windows and FreeBSD x86_64 now schedule annotated/direct loud-fail checks under LLVM and Cranelift; execution is pending, resolved-method coverage is source-only, and unresolved late dispatch remains unguessed. The uniform tagged Option ABI remains blocked; flat text unwrap is implemented but unexecuted. |
+| 7 | Source implemented at the contained MIR enum-bind owner; the cross-module `Result<[u8], E>` fixture now routes both Ok and Err through `?`, with LLVM and Cranelift execution scheduled on FreeBSD x86_64 plus AArch64/RISC-V QEMU. Execution is pending. |
+| 8 | Open/safer; typed local/direct-call/resolved-method Option `?` fail-closed provenance and additive `rt_enum_id` surfaces are source-implemented. Hosted Linux/macOS/Windows and FreeBSD x86_64 schedule annotated/direct loud-fail checks under LLVM and Cranelift; ARM32 LLVM and Windows ARM64 LLVM/Cranelift add target-directed compile-refusal/no-object checks. Execution is pending, resolved-method coverage is source-only, and unresolved late dispatch remains unguessed. The uniform tagged Option ABI remains blocked; flat text unwrap is implemented but unexecuted. |
 | 9 | Capturing and non-capturing stored/passed lambda values implemented with a membership-checked closure ABI; strict hosted/simple-core default-LLVM + explicit-Cranelift proof added, execution pending. |
 | 10 | Captured scalar/struct closure storage implemented through the same closure ABI; strict dual-runtime/backend proof added, execution pending. |
 | 11 | Fixed by Unit-arm merge suppression and backend void-spill protection. |
@@ -85,7 +85,9 @@ asm fails diagnostically instead of comparing against a fabricated version. Runt
 
 FreeBSD QEMU `--full` now runs the complete 15-case default-LLVM native-entry
 matrix after the focused explicit-Cranelift probe and requires zero codegen
-fallback hits; the cross-module Result control continues to cover both backends.
+fallback hits. Its cross-module Result control now covers Ok payload extraction
+and Err propagation through `?` under both backends. The same fixture is wired
+for AArch64/RISC-V QEMU; execution is pending.
 
 The existing Linux x86_64 LLVM bootstrap CI leg now enables canonical Stage 5,
 which builds both pure-Simple MCP servers and runs their fresh-artifact

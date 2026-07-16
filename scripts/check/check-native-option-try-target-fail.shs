@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+TARGET="${1:?usage: check-native-option-try-target-fail.shs TARGET [llvm|cranelift]}"
+BACKEND="${2:-llvm}"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+BUILD_DIR="${BUILD_DIR:-build/check/native-option-try-target-fail/$TARGET/$BACKEND}"
+DIAGNOSTIC="native Option try operator requires the tagged Option ABI"
+
+case "$BACKEND" in
+    llvm|cranelift) ;;
+    *) echo "unsupported backend: $BACKEND" >&2; exit 2 ;;
+esac
+
+mkdir -p "$BUILD_DIR"
+for fixture in \
+    test/fixtures/compiler/native_option_try_annotated_loud.spl \
+    test/fixtures/compiler/native_option_try_direct_loud.spl; do
+    case_id="$(basename "$fixture" .spl)"
+    out="$BUILD_DIR/$case_id.o"
+    log="$BUILD_DIR/$case_id.log"
+    cache="$BUILD_DIR/$case_id-cache"
+    rm -rf "$cache" "$out" "$log"
+
+    status=0
+    set +e
+    if [ "$BACKEND" = cranelift ]; then
+        env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 \
+            "$SIMPLE_BIN" native-build --backend cranelift --emit-object \
+            --target "$TARGET" --entry "$fixture" --cache-dir "$cache" \
+            --output "$out" >"$log" 2>&1
+        status=$?
+    else
+        env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 \
+            "$SIMPLE_BIN" native-build --emit-object --target "$TARGET" \
+            --entry "$fixture" --cache-dir "$cache" --output "$out" \
+            >"$log" 2>&1
+        status=$?
+    fi
+    set -e
+
+    [ "$status" -ne 0 ] || { echo "$case_id unexpectedly compiled" >&2; exit 1; }
+    [ ! -e "$out" ] || { echo "$case_id left an object: $out" >&2; exit 1; }
+    grep -qF "$DIAGNOSTIC" "$log" || {
+        echo "$case_id missing diagnostic: $DIAGNOSTIC" >&2
+        exit 1
+    }
+done
+
+echo "native-option-try-target-fail: pass target=$TARGET backend=$BACKEND"
