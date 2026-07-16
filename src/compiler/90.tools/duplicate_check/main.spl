@@ -10,6 +10,8 @@ use compiler.tools.duplicate_check.semantic.{run_semantic_analysis, run_semantic
 use compiler.tools.duplicate_check.semantic_formatter.{print_semantic_text_report, print_semantic_json_report}
 use std.sffi.cli.{cli_get_args, cli_exit}
 use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.mod_stub.{is_dir}
 
 fn normalize_argv(all_args: [text]) -> [text]:
     var args: [text] = []
@@ -94,11 +96,25 @@ fn print_usage():
     print "  --semantic-model NAME   Ollama model (default: nomic-embed-text)"
     print "  --ollama-url URL    Ollama base URL (default: http://localhost:11434)"
     print "  --rebuild-embeddings  Force rebuild embedding cache"
-    print "  --parallel          Enable the shared scheduling path"
-    print "  --jobs N            Advisory worker count for the scheduling path"
-    print "  --no-cache          Disable incremental cache reuse"
-    print "  --cache-path PATH   Incremental cache path"
     print "  --help, -h          Show this help"
+
+fn unsupported_runtime_option(args: [text]) -> text:
+    for arg in args:
+        if arg == "--parallel" or arg == "--jobs" or arg.starts_with("--jobs="):
+            return "parallel duplicate detection is not implemented"
+        if arg == "--no-cache" or arg == "--cache-path" or arg.starts_with("--cache-path="):
+            return "incremental duplicate detection is not implemented"
+    ""
+
+fn unsupported_runtime_config(config: DuplicationConfig) -> text:
+    if config.use_parallel:
+        return "parallel duplicate detection is not implemented"
+    if config.use_incremental:
+        return "incremental duplicate detection is not implemented"
+    ""
+
+fn duplicate_target_exists(path: text) -> bool:
+    file_exists(path) or is_dir(path)
 
 fn set_mode(config: DuplicationConfig, mode: text) -> DuplicationConfig:
     if mode == "semantic" or mode == "semantic-llm" or mode == "token" or mode == "cosine":
@@ -289,9 +305,23 @@ fn main():
 
     val cmd_args = collect_command_args(raw_args)
 
+    val unsupported_arg = unsupported_runtime_option(cmd_args)
+    if unsupported_arg != "":
+        eprint("duplicate-check: {unsupported_arg}")
+        cli_exit(2)
+
     val config = parse_args(cmd_args)
 
     val target_path = target_path_from_args(cmd_args)
+
+    val unsupported = unsupported_runtime_config(config)
+    if unsupported != "":
+        eprint("duplicate-check: {unsupported}")
+        cli_exit(2)
+
+    if not duplicate_target_exists(target_path):
+        eprint("duplicate-check: target path does not exist: {target_path}")
+        cli_exit(2)
 
     val mode = analysis_mode(config)
     if mode == "semantic":
