@@ -1,7 +1,6 @@
 #[cfg(feature = "vulkan")]
 use super::vulkan_graphics_runtime_core::{alloc_handle, BufferUsage, VulkanBuffer, STATE};
-#[cfg(feature = "vulkan")]
-use crate::value::{byte_array_bytes, byte_array_write, RuntimeValue};
+use crate::value::{byte_array_bytes, byte_array_write, rt_byte_array_new, rt_byte_array_new_len, RuntimeValue};
 
 // ============================================================================
 // Buffer Management
@@ -198,6 +197,41 @@ pub extern "C" fn rt_vulkan_copy_from_buffer(_data: i64, _handle: i64, _offset: 
 
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Return a new byte array containing a bounded Vulkan buffer range.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_read_buffer_bytes(handle: i64, byte_count: i64, offset: i64) -> RuntimeValue {
+    if handle <= 0 || byte_count < 0 || offset < 0 {
+        return rt_byte_array_new(0);
+    }
+    let state = STATE.lock();
+    let Some(buf) = state.buffers.get(&handle) else {
+        return rt_byte_array_new(0);
+    };
+    let end = match offset.checked_add(byte_count) {
+        Some(end) if end as u64 <= buf.size() => end,
+        _ => return rt_byte_array_new(0),
+    };
+    let Ok(downloaded) = buf.download(end as u64) else {
+        return rt_byte_array_new(0);
+    };
+    let bytes = &downloaded[offset as usize..end as usize];
+    let result = rt_byte_array_new_len(bytes.len() as u64);
+    if byte_array_write(result, bytes) {
+        result
+    } else {
+        rt_byte_array_new(0)
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_read_buffer_bytes(_handle: i64, _byte_count: i64, _offset: i64) -> RuntimeValue {
+    rt_byte_array_new(0)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+
 /// Device-to-device buffer copy via staging download + upload.
 #[no_mangle]
 #[cfg(feature = "vulkan")]
@@ -233,4 +267,17 @@ pub extern "C" fn rt_vulkan_copy_buffer(dst: i64, src: i64, size: i64) -> i64 {
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_copy_buffer(_dst: i64, _src: i64, _size: i64) -> i64 {
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rt_vulkan_read_buffer_bytes;
+    use crate::value::rt_array_len;
+
+    #[test]
+    fn read_buffer_bytes_rejects_invalid_ranges_with_empty_bytes() {
+        assert_eq!(rt_array_len(rt_vulkan_read_buffer_bytes(0, 1, 0)), 0);
+        assert_eq!(rt_array_len(rt_vulkan_read_buffer_bytes(1, -1, 0)), 0);
+        assert_eq!(rt_array_len(rt_vulkan_read_buffer_bytes(1, 1, -1)), 0);
+    }
 }

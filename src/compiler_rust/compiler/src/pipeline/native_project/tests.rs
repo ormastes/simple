@@ -138,6 +138,32 @@ fn build_compiler_backfill_test_archive(root: &Path, name: &str, sources: &[&str
     archive
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn strip_llvm_constructors_preserves_priority_non_llvm_constructor() {
+    let temp = tempfile::tempdir().unwrap();
+    let archive = build_compiler_backfill_test_archive(
+        temp.path(),
+        "constructor_sections",
+        &[r#"
+__attribute__((constructor)) static void llvm_style_ctor(void) {}
+__attribute__((constructor(101))) static void non_llvm_ctor(void) {}
+"#],
+    );
+
+    let stripped = strip_llvm_constructors(&archive, temp.path()).unwrap();
+    let sections = std::process::Command::new("readelf")
+        .args(["-SW"])
+        .arg(stripped)
+        .output()
+        .unwrap();
+    assert!(sections.status.success());
+    let sections = String::from_utf8_lossy(&sections.stdout);
+    let names: Vec<&str> = sections.split_whitespace().collect();
+    assert!(!names.contains(&".init_array"));
+    assert!(names.contains(&".init_array.00101"));
+}
+
 #[test]
 fn simpleos_freestanding_linker_script_defaults_and_overrides() {
     use simple_common::target::{Target, TargetArch, TargetOS};

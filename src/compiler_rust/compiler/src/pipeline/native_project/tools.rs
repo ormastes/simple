@@ -1954,10 +1954,11 @@ fn verify_stripped_archive(archive_path: &Path) -> Result<(), StripError> {
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let fields: Vec<&str> = stdout.split_whitespace().collect();
     let forbidden = [".init_array", ".ctors", ".fini_array", ".dtors"];
     let remaining: Vec<String> = forbidden
         .iter()
-        .filter(|sec| stdout.contains(*sec))
+        .filter(|sec| fields.contains(sec))
         .map(|sec| sec.to_string())
         .collect();
 
@@ -1983,14 +1984,12 @@ pub(crate) fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<Pat
     let filtered = temp_dir.join("libsimple_native_all_stripped.a");
 
     let mut cmd = std::process::Command::new(&objcopy);
+    // Keep priority-tagged runtime constructors (for example Rust's
+    // `.init_array.00099`); they are not LLVM's plain global ctor section.
     cmd.arg("--remove-section=.init_array")
-        .arg("--remove-section=.init_array.*")
         .arg("--remove-section=.ctors")
-        .arg("--remove-section=.ctors.*")
         .arg("--remove-section=.fini_array")
-        .arg("--remove-section=.fini_array.*")
-        .arg("--remove-section=.dtors")
-        .arg("--remove-section=.dtors.*");
+        .arg("--remove-section=.dtors");
     // NOTE(2026-04-15): we deliberately do NOT strip __DATA,__mod_init_func /
     // __mod_term_func on macOS even though LIM-010 (LLVM static constructor
     // segfault) used to require it. ObjC class registration also lives in

@@ -12,6 +12,8 @@ extern fn sys_get_args() -> [text]
 # recursed infinitely (Stage 4 SIGSEGV at startup —
 # bootstrap_stage4_get_args_infinite_recursion_coredump_2026-06-21).
 extern fn rt_cli_get_args() -> [text]
+extern fn rt_cli_arg_count() -> i64
+extern fn rt_cli_arg_at(index: i64) -> text
 extern fn rt_exit(code: i64)
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_cli_run_tests(args: [text], gc_log: bool, gc_off: bool) -> i64
@@ -25,7 +27,6 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
-extern fn rt_path_absolute(path: text) -> text
 
 # --- Shell/file helpers (local copies to avoid circular imports) ---
 
@@ -131,24 +132,13 @@ fn _cli_find_on_path(argv0: text) -> text:
         return ""
     found.0.split("\n")[0].trim()
 
-fn _cli_resolve_symlink(path: text) -> text:
-    # Resolve symlinks (e.g. the bin/simple symlink) so seed-sibling lookups
-    # derive from the real binary's directory, not the symlink's. Backed by
-    # rt_path_absolute (std::fs::canonicalize, resolves all hops in one call
-    # and rejects loops internally); on any failure it already falls back to
-    # a cwd-joined absolute path, so we only guard the empty/degenerate case.
-    if path.len() == 0:
-        return path
-    val resolved = rt_path_absolute(path)
-    if resolved.len() > 0: resolved else: path
-
 fn _cli_current_exe_path() -> text:
-    val args = rt_cli_get_args() ?? []
-    if args.len() > 0:
-        var resolved = _cli_resolve_argv0(cwd(), args[0])
+    if rt_cli_arg_count() > 0:
+        val argv0 = rt_cli_arg_at(0)
+        var resolved = _cli_resolve_argv0(cwd(), argv0)
         if resolved == "":
-            resolved = _cli_find_on_path(args[0])
-        return _cli_resolve_symlink(resolved)
+            resolved = _cli_find_on_path(argv0)
+        return resolved
     ""
 
 pub fn cli_current_exe_path() -> text:
@@ -168,7 +158,9 @@ fn _cli_is_current_exe(path: text) -> bool:
         # If identity cannot be established, delegation is unsafe: the
         # candidate may be this process and recurse without bound.
         return true
-    val resolved = _cli_resolve_symlink(path)
+    var resolved = _cli_resolve_argv0(cwd(), path)
+    if resolved == "":
+        resolved = path
     current == resolved or current == path or current.ends_with("/" + path) or path.ends_with("/" + current)
 
 pub fn _cli_process_run(cmd: text, args: [text]) -> (text, text, i64):
