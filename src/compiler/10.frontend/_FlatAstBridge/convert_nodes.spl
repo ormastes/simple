@@ -926,6 +926,25 @@ fn convert_flat_expr(idx: i64) -> Expr:
                 span: span
             ))
         return Expr(kind: ExprKind.DictComprehension(dc_key, dc_val, dc_clauses), span: span)
+    elif tag == EXPR_SUFFIXED_LIT:
+        # ROOT FIX (bug mixed_unsigned_float_comparison_llvm_2026-07-16): a
+        # numeric literal with an explicit primitive-type unit suffix
+        # (255u8, 65535u16, 4294967295u32, 0x8000000000000000u64, 254.5f32,
+        # ...) parses to this flat-AST tag, but this function had NO branch
+        # for it -- every suffixed literal silently fell through to the
+        # final `else:` below and became ExprKind.NilLit, discarding both
+        # its real value AND its suffix. MIR's NilLit lowering then
+        # materializes the reserved nil sentinel `Const(Int(3), i64)` (see
+        # expr_dispatch.spl's NilLit case), so EVERY suffixed literal in the
+        # entire language silently became the integer 3 instead of its
+        # written value -- not just in comparisons.
+        val suf_name = expr_get_str(idx)
+        val suf_type = Type(kind: TypeKind.Named(suf_name, []), span: span)
+        val suf_literal = if suf_name.starts_with("f"):
+            Expr(kind: ExprKind.FloatLit(expr_get_float(idx).to_float()), span: span)
+        else:
+            Expr(kind: ExprKind.IntLit(expr_get_int(idx)), span: span)
+        return Expr(kind: ExprKind.Cast(suf_literal, suf_type), span: span)
     else:
         return Expr(kind: ExprKind.NilLit, span: span)
 

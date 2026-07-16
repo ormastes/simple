@@ -301,7 +301,16 @@ impl CoreLexer:
                         else:
                             break
                     hex_suffix = self.char_slice(hsuf_start, pos)
-                core_token_suffix_save(hex_suffix)
+                # ROOT FIX (bug mixed_unsigned_float_comparison_llvm_2026-07-16):
+                # make_token() -> core_token_capture() unconditionally resets
+                # core_last_token_suffix_slot to "" (see core_token_capture
+                # below). The decimal-literal suffix path already saves the
+                # suffix AFTER calling make_token() for exactly this reason;
+                # this hex branch previously saved it BEFORE make_token(),
+                # so make_token's internal reset wiped out the real suffix
+                # immediately and every hex literal with a unit suffix
+                # (0x8000000000000000u64) lexed as if it had NO suffix at
+                # all, even though `kind` was still correctly 7.
                 if hex_suffix != "":
                     self.pos = pos
                     self.col = self.col + (pos - start)
@@ -310,6 +319,7 @@ impl CoreLexer:
                     self.pos = pos
                     self.col = self.col + (pos - start)
                     self.make_token(1, num_text, start_line, start_col)
+                core_token_suffix_save(hex_suffix)
                 self.cur_text = num_text
                 core_token_text_save(num_text)
                 return
