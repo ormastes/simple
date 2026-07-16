@@ -18,6 +18,7 @@ use compiler.driver.smf_writer.{generate_smf_with_templates, generate_smf_with_o
 use compiler.driver.smf_binary_helpers.{u32_to_bytes, u64_to_bytes}
 use compiler.backend.backend.cmake_gen.{generate_cmake_for_modules}
 use driver_types.{CompileResult, CompileOptions, compileoptions_effective_mir_opt_level, CompileContext}
+use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.driver_core_types.{driver_output_format_is_smf, driver_output_format_is_both, driver_output_format_is_self_contained}
 use compiler.driver.driver.{CompilerDriver}
 use compiler.driver.driver_bootstrap.{bootstrap_entry_module_name}
@@ -40,6 +41,7 @@ extern fn rt_env_get(key: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_copy(src: text, dst: text) -> bool
 extern fn rt_file_size(path: text) -> i64
+extern fn rt_hash_text(content: text) -> i64
 
 fn driver_log_debug(log: Logger, message: text):
     if log.level >= 10:
@@ -89,10 +91,36 @@ fn driver_native_build_cache_scope(backend: text, cache_dir: text, target_cpu: t
     (cache_scope_root, scope)
 
 fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> text:
+    var found_path = ""
     for source in ctx.sources:
         if source.module_name == module_name:
-            return source.path
-    ""
+            found_path = source.path
+            break
+    if found_path == "":
+        return ""
+    # A single file can be loaded under multiple module aliases. BuildCache is
+    # keyed by source path, so sharing that entry would let one alias reuse the
+    # other alias's object. Fail closed for aliases instead of guessing.
+    var path_count = 0
+    for source in ctx.sources:
+        if source.path == found_path:
+            path_count = path_count + 1
+    if path_count == 1:
+        found_path
+    else:
+        ""
+
+pub fn driver_native_sources_fingerprint(sources: [SourceFile]) -> text:
+    # Conservative dependency closure: any loaded source change gets a new
+    # object-cache scope. Hash content into compact length-prefixed rows so the
+    # pass stays linear and path/module boundaries are unambiguous. Source
+    # order changes only cause a safe cache miss.
+    var rows: [text] = []
+    for source in sources:
+        val content_hash = rt_hash_text(source.content)
+        rows = rows.push("{source.path.len()}:{source.path}{source.module_name.len()}:{source.module_name}{source.content.len()}:{content_hash}")
+    val manifest = rows.join("\n")
+    "{rt_hash_text(manifest)}n{sources.len()}"
 
 pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: Module?) -> bool:
     if mir.functions.len() > 0 or mir.statics.len() > 0 or mir.constants.len() > 0 or mir.types.len() > 0:
@@ -230,12 +258,13 @@ impl CompilerDriver:
         val cache_dir = driver_native_build_cache_dir()
         rt_dir_create(cache_dir, true)
         val native_target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
-        val (cache_scope_root, _) = driver_native_build_cache_scope(effective_backend, cache_dir, native_target, driver_opt_level)
+        val (base_cache_scope_root, _) = driver_native_build_cache_scope(effective_backend, cache_dir, native_target, driver_opt_level)
+        val cache_scope_root = rt_path_join(base_cache_scope_root, "sources-{driver_native_sources_fingerprint(ctx.sources)}")
         # --clean requested a clean build: drop this entry's cache scope so no
         # previously compiled object in this scope can be reused. Consume the
         # flag (clear the env) so it applies to this build only.
         if (rt_env_get("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") == "1":
-            rt_dir_remove_all(cache_scope_root)
+            rt_dir_remove_all(base_cache_scope_root)
             rt_env_set("SIMPLE_NATIVE_BUILD_CLEAN", "")
         rt_dir_create(cache_scope_root, true)
         val cache_path = driver_native_build_cache_path(cache_dir)

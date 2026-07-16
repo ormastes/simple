@@ -2,7 +2,8 @@ use std.spec
 use std.io_runtime.{file_read}
 use std.common.validation.{is_hex_string}
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_compiler_identity}
-use compiler.driver.driver_aot_output.{driver_native_module_is_export_facade}
+use compiler.driver.driver_aot_output.{driver_native_module_is_export_facade, driver_native_sources_fingerprint}
+use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.parser_types.{Module, Export, DomainBlock}
 use compiler.mir.mir_data.{MirModule}
 use compiler.mir.mir_types.{MirConstant, MirConstValue, MirType}
@@ -37,10 +38,31 @@ describe "native-build cache plumbing policy":
         val src = file_read("src/compiler/80.driver/driver_aot_output.spl")
         expect(src).to_contain("SIMPLE_NATIVE_BUILD_CACHE_DIR")
         expect(src).to_contain("rt_path_join(cache_dir, \"build_cache.sdn\")")
-        expect(src).to_contain("val object_base = rt_path_join(cache_dir, \"object\")")
+        expect(src).to_contain("val object_base = rt_path_join(cache_scope_root, \"object\")")
         expect(src).to_contain("BuildCache.load(cache_path)")
         expect(src).to_contain("object_files = object_files.push(obj_path)")
         expect(src.contains("object_files = reconstructed_outputs")).to_equal(false)
+
+    it "scopes cached objects by every loaded source":
+        val first_sources = [
+            SourceFile(path: "a.spl", content: "fn a() -> i64: 1", module_name: "a"),
+            SourceFile(path: "b.spl", content: "fn b() -> i64: 2", module_name: "b")
+        ]
+        val changed_sources = [
+            first_sources[0],
+            SourceFile(path: "b.spl", content: "fn b() -> i64: 3", module_name: "b")
+        ]
+        val renamed_sources = [
+            first_sources[0],
+            SourceFile(path: "b.spl", content: "fn b() -> i64: 2", module_name: "renamed.b")
+        ]
+
+        expect(driver_native_sources_fingerprint(changed_sources) == driver_native_sources_fingerprint(first_sources)).to_equal(false)
+        expect(driver_native_sources_fingerprint(renamed_sources) == driver_native_sources_fingerprint(first_sources)).to_equal(false)
+        val src = file_read("src/compiler/80.driver/driver_aot_output.spl")
+        expect(src).to_contain("sources-{driver_native_sources_fingerprint(ctx.sources)}")
+        expect(src).to_contain("rt_dir_remove_all(base_cache_scope_root)")
+        expect(src).to_contain("if path_count == 1:")
 
     it "recognizes only parser-confirmed export facades":
         val empty_mir = MirModule(name: "facade", functions: {}, statics: {}, constants: {}, types: {})

@@ -306,6 +306,15 @@ and resolved provider ownership, and the pure-Simple cache records empty
 dependency lists. TODO 562 tracks that independent invalidation hole. The final
 bounded cycle therefore uses a fresh cache and will not be retried.
 
+TODO 562 source invalidation is now fixed conservatively: the object scope
+includes a length-delimited fingerprint of every loaded source, so any direct
+or transitive source change moves the build to a fresh scope. Source paths
+shared by module aliases are uncacheable because the current `BuildCache` key
+is path-only. This deliberately trades hit granularity for correctness without
+adding a second dependency-snapshot schema. Resolved provider/archive ownership
+remains separate and must enter the Stage4 link-profile fingerprint, not the
+per-module object key.
+
 The third and final bounded cycle used that fresh cache and the refreshed seed.
 It again stopped during phase 2 on the first bitwise pipe in
 `launch_metadata.spl`, before any cache object or capsule link was produced.
