@@ -574,7 +574,17 @@ impl Lowerer {
             // Static method calls on classes/structs
             // Only treat as static method if the name is NOT a local variable
             // (e.g., `text` is both a type alias and could be a variable name)
-            else if ctx.lookup(recv_name).is_none() && self.module.types.lookup(recv_name).is_some() {
+            // `Result`/`Option` are builtin generic enums: their instantiations are
+            // registered unnamed (type_resolver `register()`), so `types.lookup`
+            // misses them in modules that never lower the enum declaration itself
+            // (e.g. freestanding/entry-closure kernel modules without the std
+            // prelude). Without this, `Result.Ok(x)` degrades to a dynamic method
+            // call on an unresolved global `Result` → rt_function_not_found → NIL.
+            // Routing them through static-member lowering emits Global("Result::Ok")
+            // which MIR canonicalizes to ResultOk/ResultErr/OptionSome/OptionNone.
+            else if ctx.lookup(recv_name).is_none()
+                && (self.module.types.lookup(recv_name).is_some() || recv_name == "Result" || recv_name == "Option")
+            {
                 if let Some(result) = self.lower_simd_static_method(recv_name, method, args, ctx)? {
                     return Ok(result);
                 }
