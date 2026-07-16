@@ -1437,6 +1437,8 @@ impl MirLowering:
                         var right_i64 = false
                         var left_narrow_int = false
                         var right_narrow_int = false
+                        var left_signed_int = false
+                        var right_signed_int = false
                         var left_binop_type = MirType.i64()
                         var right_binop_type = MirType.i64()
                         if val left_type = self.local_mir_type_of(left_local):
@@ -1444,16 +1446,28 @@ impl MirLowering:
                             match left_type.kind:
                                 case MirTypeKind.F32: left_f32 = true
                                 case MirTypeKind.F64: left_f64 = true
-                                case MirTypeKind.I64 | MirTypeKind.U64: left_i64 = true
-                                case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32: left_narrow_int = true
+                                case MirTypeKind.I64:
+                                    left_i64 = true
+                                    left_signed_int = true
+                                case MirTypeKind.U64: left_i64 = true
+                                case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32:
+                                    left_narrow_int = true
+                                    left_signed_int = true
+                                case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32: left_narrow_int = true
                                 case _: ()
                         if val right_type = self.local_mir_type_of(right_local):
                             right_binop_type = right_type
                             match right_type.kind:
                                 case MirTypeKind.F32: right_f32 = true
                                 case MirTypeKind.F64: right_f64 = true
-                                case MirTypeKind.I64 | MirTypeKind.U64: right_i64 = true
-                                case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32: right_narrow_int = true
+                                case MirTypeKind.I64:
+                                    right_i64 = true
+                                    right_signed_int = true
+                                case MirTypeKind.U64: right_i64 = true
+                                case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32:
+                                    right_narrow_int = true
+                                    right_signed_int = true
+                                case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32: right_narrow_int = true
                                 case _: ()
                         var result_f64 = false
                         match result_type.kind:
@@ -1464,9 +1478,35 @@ impl MirLowering:
                         if right_f32 and (left_f64 or result_f64):
                             right_binop = b.emit_cast(mir_operand_copy(right_binop), MirType.f64())
                         var comparison = false
+                        var ordered_comparison = false
                         match op:
                             case Eq | NotEq | Lt | LtEq | Gt | GtEq: comparison = true
                             case _: ()
+                        match op:
+                            case Lt | LtEq | Gt | GtEq: ordered_comparison = true
+                            case _: ()
+                        val left_float = left_f32 or left_f64
+                        val right_float = right_f32 or right_f64
+                        val left_int = left_i64 or left_narrow_int
+                        val right_int = right_i64 or right_narrow_int
+                        val mixed_numeric_kinds = (left_float and right_int) or (left_int and right_float)
+                        if mixed_numeric_kinds:
+                            match op:
+                                case Eq:
+                                    val strict_eq = b.emit_const_bool(false)
+                                    self.builder = b
+                                    return strict_eq
+                                case NotEq:
+                                    val strict_ne = b.emit_const_bool(true)
+                                    self.builder = b
+                                    return strict_ne
+                                case _: ()
+                        val mixed_float_signed_int = (left_float and right_signed_int) or (left_signed_int and right_float)
+                        if ordered_comparison and mixed_float_signed_int:
+                            if not left_f64:
+                                left_binop = b.emit_cast(mir_operand_copy(left_binop), MirType.f64())
+                            if not right_f64:
+                                right_binop = b.emit_cast(mir_operand_copy(right_binop), MirType.f64())
                         if comparison and left_narrow_int and right_i64:
                             right_binop = b.emit_cast(mir_operand_copy(right_binop), left_binop_type)
                         elif comparison and left_i64 and right_narrow_int:
