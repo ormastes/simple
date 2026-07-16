@@ -601,3 +601,10 @@ The Stage4 closure now uses one pure-Simple insertion sorter for requested
 symbols, archive definitions, owner rows, and fingerprint rows. This replaces
 `[text].sort()`, which is a no-op under the deployed seed, so canonical order
 no longer depends on scan, dictionary, or caller iteration order.
+
+Stage4 admission is now fail-closed at the shared native-link boundary. Once
+`SIMPLE_BOOTSTRAP_STAGE4=1` is present, a missing or noncanonical CLI entry or
+entry-closure companion is rejected before runtime or entry objects are
+compiled; it can no longer fall through to the ordinary object linker. The
+same admission precedes every SimpleOS dispatch and rejects those unsupported
+routes instead of bypassing the hosted strict-composition barrier.
