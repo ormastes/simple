@@ -460,17 +460,14 @@ impl MirLowering:
         # `local_is_runtime_array`/`local_is_runtime_dict` on the resulting
         # LocalId -- neither Array/Slice nor Dict responds true here, so a
         # genuine array or dict receiver safely falls through untouched to
-        # its own existing `.map` handling below. This lowers `receiver` a
-        # second time if the fallthrough is taken; safe for the overwhelming
-        # common case (a plain variable, where lower_expr is a pure
-        # symbol-table lookup with no side effects and returns the identical
-        # LocalId both times -- see the `Var` case in expr_dispatch.spl) but
-        # a theoretical double-evaluation gap remains for a side-effecting
-        # receiver EXPRESSION (e.g. a function call) that turns out to be an
-        # array -- flagged here rather than silently risked; out of scope to
-        # fix without touching the array/dict dispatch this lane doesn't own.
+        # its own existing `.map` handling below. Cache this probe for that
+        # dispatch so a side-effecting receiver expression runs exactly once.
+        var prelowered_method_receiver: LocalId = 0
+        var has_prelowered_method_receiver = false
         if method == "map" and args.len() == 1:
             val recv_probe_local_map = self.lower_expr(receiver)
+            prelowered_method_receiver = recv_probe_local_map
+            has_prelowered_method_receiver = true
             if not self.local_is_runtime_array(recv_probe_local_map) and not self.local_is_runtime_dict(recv_probe_local_map):
                 val map_lambda_operand_opt = self.lower_lambda_value(args[0].value)
                 if val map_lambda_operand = map_lambda_operand_opt:
@@ -1738,7 +1735,12 @@ impl MirLowering:
                     self.remember_call_hir_return(static_result, static_method_id)
                     return static_result
 
-                val unresolved_receiver_local = if wb_kind != 0: wb_receiver else: self.lower_expr(receiver)
+                val unresolved_receiver_local = if wb_kind != 0:
+                    wb_receiver
+                elif has_prelowered_method_receiver:
+                    prelowered_method_receiver
+                else:
+                    self.lower_expr(receiver)
                 val unresolved_struct_name = self.struct_value_syms.get(unresolved_receiver_local.id)
                 if unresolved_struct_name != nil and unresolved_struct_name != "":
                     val unresolved_method_key = "{unresolved_struct_name}::{method}"
