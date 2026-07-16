@@ -138,6 +138,15 @@
   reports `STATUS: PASS direct-env-runtime-guard self-test`, `STATUS: PASS
   direct-env-runtime-guard` for `--working`, and `STATUS: PASS
   direct-env-runtime-guard` for `--staged`.
+- Windows GUI Web/2D evidence now has a consolidated PowerShell checker:
+  `scripts/check/check-windows-gui-web-2d-evidence-bundle.ps1`. Default mode
+  validates the saved strict DirectX artifact, partial Vulkan artifact, and
+  fail-closed D3D12 artifact in one run. On the 2026-07-16 Windows host it
+  reports `windows_gui_web_2d_evidence_bundle_status=pass`; the strict
+  `-RequireFullCompletion` mode fails as expected on `vulkan-full,d3d12-full`
+  until Vulkan SDK/RenderDoc browser capture and D3D12/PIX evidence are
+  available. Current details are in
+  `doc/09_report/windows_gui_web_2d_evidence_bundle_current_2026-07-16.md`.
 - Windows DirectX Web/2D evidence now has a current real-launch/capture pass in
   `doc/09_report/gui_web_2d_directx_windows_current_2026-07-16.md`. The
   PowerShell wrapper reports D3D11 native staging readback pass with matching
