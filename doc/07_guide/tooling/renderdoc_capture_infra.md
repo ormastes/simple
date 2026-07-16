@@ -82,6 +82,11 @@ per-run output.
   `--use-angle=d3d11`, and forwards the shared DirectX browser-backing validator
   rows. Passing browser pixels without native D3D11 readback remains a failed
   aggregate gate.
+- `scripts/setup/setup-gui-web-2d-directx-env.ps1 --gpu-capture` adds a
+  Windows GPU-debugger artifact gate by launching Chrome under `DXCap.exe` with
+  the D3D11 fixture. It reports
+  `gui_web_2d_directx_gpu_debugger_capture_status=pass` only when the `.vsglog`
+  artifact exists and starts with `GFXA` magic.
 
 Compatibility wrappers remain:
 

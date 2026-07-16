@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("--check", "--browser-backing", "--print-install")]
+    [ValidateSet("--check", "--browser-backing", "--gpu-capture", "--print-install")]
     [string]$Mode = "--check",
     [string]$BuildDir = "build\gui-web-2d-directx-env-windows",
     [string]$EvidencePath = "",
@@ -17,6 +17,8 @@ if ($RemainingArgs -contains "--print-install" -or $MyInvocation.Line -match '(^
     $Mode = "--print-install"
 } elseif ($RemainingArgs -contains "--browser-backing" -or $MyInvocation.Line -match '(^|\s)--browser-backing(\s|$)') {
     $Mode = "--browser-backing"
+} elseif ($RemainingArgs -contains "--gpu-capture" -or $MyInvocation.Line -match '(^|\s)--gpu-capture(\s|$)') {
+    $Mode = "--gpu-capture"
 } elseif ($RemainingArgs -contains "--check" -or $MyInvocation.Line -match '(^|\s)--check(\s|$)') {
     $Mode = "--check"
 }
@@ -31,8 +33,10 @@ Windows PowerShell:
 Required checks:
   Get-Command dxdiag
   Get-Command cargo
+  Get-Command DXCap.exe
   powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-directx-env.ps1 --check
   powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-directx-env.ps1 --browser-backing
+  powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-directx-env.ps1 --gpu-capture
 "@
 }
 
@@ -137,6 +141,19 @@ function Wait-ForFile([string]$path, [int]$timeoutMs = 5000) {
     return (Test-Path -LiteralPath $path)
 }
 
+function Has-GfxaMagic([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) { return $false }
+    $stream = [System.IO.File]::OpenRead($path)
+    try {
+        if ($stream.Length -lt 4) { return $false }
+        $bytes = New-Object byte[] 4
+        [void]$stream.Read($bytes, 0, 4)
+        return ([System.Text.Encoding]::ASCII.GetString($bytes) -eq "GFXA")
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 function Quote-Arg([string]$arg) {
     if ($arg -match '[\s"]') { return '"' + ($arg -replace '"', '\"') + '"' }
     return $arg
@@ -192,6 +209,7 @@ $rows = New-Object System.Collections.Generic.List[string]
 $NodeSource = Command-Source "node"
 $CargoSource = Command-Source "cargo"
 $DxdiagSource = Command-Source "dxdiag"
+$DxcapSource = Command-Source "DXCap.exe"
 $ElectronCaptureScript = Join-Path $RootDir "tools\electron-live-bitmap\capture_html_argb.js"
 $ChromeCaptureScript = Join-Path $RootDir "tools\chrome-live-bitmap\capture_html_argb.js"
 $DirectxBackingScript = Join-Path $RootDir "scripts\check\gui-web-2d-directx-browser-backing-status.js"
@@ -211,7 +229,7 @@ if ($electronSource -eq "") {
 
 $directxFlags = @("--no-sandbox", "--disable-gpu-sandbox", "--use-angle=d3d11", "--enable-gpu-rasterization", "--enable-zero-copy")
 
-Add-Row $rows "gui_web_2d_directx_mode" $(if ($Mode -eq "--browser-backing") { "windows-browser-backing" } else { "windows-check" })
+Add-Row $rows "gui_web_2d_directx_mode" $(if ($Mode -eq "--gpu-capture") { "windows-gpu-capture" } elseif ($Mode -eq "--browser-backing") { "windows-browser-backing" } else { "windows-check" })
 Add-Row $rows "gui_web_2d_directx_build_dir" "$BuildFullDir"
 Add-Row $rows "gui_web_2d_directx_evidence_path" "$EvidencePath"
 Add-Row $rows "gui_web_2d_directx_windows_setup_wrapper" "scripts/setup/setup-gui-web-2d-directx-env.ps1"
@@ -221,6 +239,8 @@ Add-Row $rows "gui_web_2d_directx_height" "$Height"
 Add-Row $rows "gui_web_2d_directx_timeout_secs" "$TimeoutSecs"
 Add-Row $rows "gui_web_2d_directx_dxdiag_status" (Tool-Status $DxdiagSource)
 Add-Row $rows "gui_web_2d_directx_dxdiag_path" "$DxdiagSource"
+Add-Row $rows "gui_web_2d_directx_dxcap_status" (Tool-Status $DxcapSource)
+Add-Row $rows "gui_web_2d_directx_dxcap_path" "$DxcapSource"
 Add-Row $rows "gui_web_2d_directx_cargo_status" (Tool-Status $CargoSource)
 Add-Row $rows "gui_web_2d_directx_cargo_path" "$CargoSource"
 Add-Row $rows "gui_web_2d_directx_node_status" (Tool-Status $NodeSource)
@@ -284,7 +304,8 @@ Add-Row $rows "gui_web_2d_directx_native_readback_stdout" "$nativeOut"
 Add-Row $rows "gui_web_2d_directx_native_readback_stderr" "$nativeErr"
 
 $browserBackingStatus = "not-run"
-if ($Mode -eq "--browser-backing") {
+$gpuCaptureStatus = "not-run"
+if ($Mode -eq "--browser-backing" -or $Mode -eq "--gpu-capture") {
     $electronArgb = Join-Path $BuildFullDir "electron_argb.json"
     $electronProof = Join-Path $BuildFullDir "electron_argb_proof.json"
     $electronOut = Join-Path $BuildFullDir "electron.out"
@@ -375,10 +396,70 @@ if ($Mode -eq "--browser-backing") {
     Add-Row $rows "gui_web_2d_directx_browser_backing_reason" $(if ($nativeGate -eq "pass") { "browser-backing-not-run" } else { "native-d3d11-readback-not-proven" })
 }
 
+if ($Mode -eq "--gpu-capture") {
+    $dxcapOut = Join-Path $BuildFullDir "dxcap-chrome.out"
+    $dxcapLog = Join-Path $BuildFullDir "dxcap-chrome.log"
+    $dxcapArtifact = Join-Path $BuildFullDir "dxcap_chrome_d3d11.vsglog"
+    $dxcapScreenshot = Join-Path $BuildFullDir "dxcap_chrome_d3d11.png"
+    Add-Row $rows "gui_web_2d_directx_gpu_debugger_tool" "DXCap.exe"
+    Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_artifact" "$dxcapArtifact"
+    Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_screenshot" "$dxcapScreenshot"
+    Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_stdout" "$dxcapOut"
+    Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_log" "$dxcapLog"
+    if ($DxcapSource -eq "") {
+        $gpuCaptureStatus = "blocked:dxcap-missing"
+        Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_status" "$gpuCaptureStatus"
+        Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_reason" "missing-DXCap.exe"
+    } elseif ($chromeSource -eq "") {
+        $gpuCaptureStatus = "blocked:chrome-missing"
+        Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_status" "$gpuCaptureStatus"
+        Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_reason" "missing-chrome"
+    } else {
+        $htmlUri = "file:///" + ($HtmlFullPath -replace "\\", "/")
+        $dxcapArgs = @(
+            "-file", "$dxcapArtifact",
+            "-frame", "1",
+            "-terminateonsave",
+            "-screenshot", "$dxcapScreenshot",
+            "-c", "$chromeSource",
+            "--headless=new",
+            "--no-sandbox",
+            "--disable-gpu-sandbox",
+            "--use-angle=d3d11",
+            "--enable-gpu-rasterization",
+            "--enable-zero-copy",
+            "--window-size=$Width,$Height",
+            "$htmlUri"
+        )
+        $dxcapStart = Get-Date
+        $dxcapTimeoutSecs = [Math]::Min($TimeoutSecs, 20)
+        $dxcapCode = Invoke-ProcessBound $DxcapSource $dxcapArgs $dxcapOut $dxcapLog $dxcapTimeoutSecs
+        Wait-ForFile $dxcapArtifact 5000 | Out-Null
+        Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.ProcessName -eq "chrome" -and
+            $_.StartTime -ge $dxcapStart -and
+            $_.Path -eq $chromeSource
+        } | Stop-Process -Force -ErrorAction SilentlyContinue
+        Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_exit_code" "$dxcapCode"
+        Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_timeout_secs" "$dxcapTimeoutSecs"
+        if (Has-GfxaMagic $dxcapArtifact) {
+            $gpuCaptureStatus = "pass"
+            Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_status" "$gpuCaptureStatus"
+            Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_reason" "vsglog-gfxa-magic-pass"
+            Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_artifact_magic" "GFXA"
+        } else {
+            $gpuCaptureStatus = "fail"
+            Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_status" "$gpuCaptureStatus"
+            Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_reason" "missing-gfxa-magic"
+            Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_artifact_magic" "missing-or-invalid"
+        }
+    }
+}
+
 $rows | Set-Content -Encoding ASCII -Path $EvidencePath
 $rows | ForEach-Object { Write-Output $_ }
 
-if (($Mode -eq "--check" -and $nativeGate -eq "pass") -or ($Mode -eq "--browser-backing" -and $browserBackingStatus -eq "pass")) {
+if (($Mode -eq "--check" -and $nativeGate -eq "pass") -or ($Mode -eq "--browser-backing" -and $browserBackingStatus -eq "pass") -or ($Mode -eq "--gpu-capture" -and $browserBackingStatus -eq "pass" -and $gpuCaptureStatus -eq "pass")) {
     exit 0
 }
 exit 1
