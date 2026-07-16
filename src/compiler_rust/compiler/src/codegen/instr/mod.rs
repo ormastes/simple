@@ -739,6 +739,7 @@ pub fn compile_instruction<M: Module>(
         MirInst::StructInit {
             dest,
             type_id,
+            struct_name,
             struct_size,
             field_offsets,
             field_types,
@@ -778,8 +779,32 @@ pub fn compile_instruction<M: Module>(
                     ctx.vreg_values.insert(*dest, arg_val);
                 }
             } else {
-                // Check if this struct type has a vtable (implements a trait)
-                let vtable_data_id = ctx.vtable_type_ids.get(type_id).copied();
+                // Check if this struct type has a vtable (implements a trait).
+                //
+                // `type_id` is only unique WITHIN the HIR module that allocated
+                // it (per-module `TypeIdAllocator` restarts at 16 for every
+                // module) — unrelated structs in different modules routinely
+                // land on the same numeric `type_id` (observed: SoftwareBackend,
+                // BaremetalBackend, CpuBackend, IntelBackend, ... all landed on
+                // TypeId(155) in one native-build). `vtable_type_ids` is a
+                // whole-program map, so keying it on the raw `type_id` alone
+                // silently aliases unrelated structs' vtables onto each other
+                // (whichever struct's impl is emitted last wins the slot).
+                // Prefer the collision-free `struct_name` (resolved from the
+                // LOCAL per-module type registry at lowering time) via
+                // `vtable_data_ids`; fall back to the old `type_id` lookup only
+                // when no name is available (e.g. synthetic/test StructInits).
+                // See bug
+                // simpleos_native_build_field_defaults_and_boxed_trait_dispatch_2026-07-16
+                // Symptom B (boxed SoftwareBackend trait dispatch faulted
+                // because the RenderBackend vtable it needed had been silently
+                // overwritten by an unrelated Engine2DExtended vtable sharing
+                // the same colliding `type_id`).
+                let vtable_data_id = struct_name
+                    .as_deref()
+                    .and_then(|name| ctx.vtable_data_ids.get(name))
+                    .copied()
+                    .or_else(|| ctx.vtable_type_ids.get(type_id).copied());
                 // If has_vtable, field offsets from MIR are 0,8,16,... but must be +8 at codegen
                 let shifted_offsets: Vec<u32>;
                 let effective_offsets = if vtable_data_id.is_some() {

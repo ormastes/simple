@@ -410,6 +410,17 @@ pub enum MirInst {
         dest: VReg,
         /// Type ID for the struct
         type_id: TypeId,
+        /// Struct's declared name, resolved from the LOCAL (per-module) type
+        /// registry at lowering time. `type_id` is only unique WITHIN the
+        /// HIR module that allocated it (`TypeIdAllocator` restarts at 16 for
+        /// every module) — two unrelated structs in different modules can
+        /// and do land on the same numeric `type_id`. Codegen's vtable
+        /// bookkeeping is a whole-program map, so it must key on this
+        /// collision-free name (when available) rather than the raw
+        /// `type_id` alone. See bug
+        /// simpleos_native_build_field_defaults_and_boxed_trait_dispatch_2026-07-16
+        /// Symptom B.
+        struct_name: Option<String>,
         /// Total struct size in bytes (for allocation)
         struct_size: u32,
         /// Byte offsets for each field (for direct stores)

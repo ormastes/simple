@@ -1445,9 +1445,29 @@ impl<M: Module> CodegenBackend<M> {
                 .define_data(data_id, &data_desc)
                 .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
-            // Record struct_name → DataId and struct_type_id → DataId for compile_struct_init
-            self.vtable_data_ids.insert(struct_name.clone(), data_id);
-            self.vtable_type_ids.insert(*struct_type_id, data_id);
+            // Record struct_name → DataId and struct_type_id → DataId for compile_struct_init.
+            //
+            // A concrete struct that implements MULTIPLE traits (e.g. both
+            // `RenderBackend` and `Engine2DExtended`) produces one entry here
+            // PER (struct, trait) pair, but `compile_struct_init` can only
+            // stamp ONE vtable pointer into a given instance. Whichever entry
+            // is inserted LAST used to win unconditionally — for the SimpleOS
+            // GPU backend structs that meant the `Engine2DExtended` vtable
+            // (never used for dynamic dispatch anywhere in the program —
+            // always invoked via direct static calls) silently clobbered the
+            // `RenderBackend` vtable (the one actually read through
+            // `Engine2D.backend: RenderBackend` generic/virtual dispatch),
+            // and --gc-sections then stripped the now-unreferenced
+            // `RenderBackend` vtable data object entirely. Keep the FIRST
+            // registration instead: traits are visited in source/impl
+            // declaration order, and every affected backend module declares
+            // `impl RenderBackend` before `impl Engine2DExtended`, so
+            // first-wins deterministically preserves the vtable that is
+            // actually dispatched through. See bug
+            // simpleos_native_build_field_defaults_and_boxed_trait_dispatch_2026-07-16
+            // Symptom B.
+            self.vtable_data_ids.entry(struct_name.clone()).or_insert(data_id);
+            self.vtable_type_ids.entry(*struct_type_id).or_insert(data_id);
         }
         Ok(())
     }

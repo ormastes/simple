@@ -138,6 +138,7 @@ shared_test!(shared_struct_init_field_ops, |f: &mut MirFunction| {
     block.instructions.push(MirInst::StructInit {
         dest: obj,
         type_id: TypeId::I64,
+        struct_name: None,
         struct_size: 8,
         field_offsets: vec![0],
         field_types: vec![TypeId::I64],

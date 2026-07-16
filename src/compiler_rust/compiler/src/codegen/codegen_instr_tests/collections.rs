@@ -221,6 +221,7 @@ fn codegen_struct_init_field_get_set() {
         block.instructions.push(MirInst::StructInit {
             dest: obj,
             type_id: TypeId::I64,
+            struct_name: None,
             struct_size: 8,
             field_offsets: vec![0],
             field_types: vec![TypeId::I64],
@@ -266,6 +267,7 @@ fn codegen_struct_field_get_native_types() {
         block.instructions.push(MirInst::StructInit {
             dest: obj,
             type_id: TypeId::I64,
+            struct_name: None,
             struct_size: 16,
             field_offsets: vec![0, 8],
             field_types: vec![TypeId::I32, TypeId::F64],

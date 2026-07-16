@@ -1411,6 +1411,7 @@ fn codegen_text_eq_uses_string_eq_not_native_eq() {
         block.instructions.push(MirInst::StructInit {
             dest: object,
             type_id: TypeId::I64,
+            struct_name: None,
             struct_size: 16,
             field_offsets: vec![0, 8],
             field_types: vec![TypeId::STRING, TypeId::STRING],

@@ -164,6 +164,7 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
         MirInst::StructInit {
             dest,
             type_id: _,
+            struct_name: _,
             struct_size,
             field_offsets,
             field_types,

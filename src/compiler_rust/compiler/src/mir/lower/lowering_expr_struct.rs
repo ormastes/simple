@@ -143,6 +143,7 @@ impl<'a> MirLowerer<'a> {
             block.instructions.push(MirInst::StructInit {
                 dest,
                 type_id: ty,
+                struct_name: type_name.clone(),
                 struct_size,
                 field_offsets,
                 field_types,
