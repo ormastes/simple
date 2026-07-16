@@ -763,6 +763,15 @@ macOS producer checklist:
 The Windows gate requires explicit D3D12 native readback evidence and
 Chrome/Electron D3D12-backed browser evidence. The older DirectX/D3D11 wrapper
 is diagnostic only unless its evidence explicitly states `d3d12`.
+On Windows hosts without a POSIX shell, use
+`scripts/setup/setup-windows-d3d12-render-log-env.ps1 --check` to create the
+same D3D12 evidence bundle in a fail-closed state. That wrapper writes native,
+browser, PIX/GPU-debugger, and compare env files under
+`build/windows-d3d12-render-log-env/`, links any D3D11/DXCap diagnostic env it
+finds, and keeps `windows_d3d12_render_log_compare_status=fail` until real
+D3D12 readback, browser backing, pairwise ARGB, and PIX/GPU-debugger rows are
+available. Use `--refresh-directx` only to refresh the D3D11 diagnostic lane;
+it does not satisfy D3D12 completion.
 
 ```sh
 WINDOWS_D3D12_NATIVE_READBACK_ENV=build/windows-d3d12-native-readback/evidence.env \
