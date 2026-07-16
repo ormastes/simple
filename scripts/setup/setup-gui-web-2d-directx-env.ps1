@@ -6,6 +6,8 @@ param(
     [string]$HtmlPath = "test\fixtures\html_css\generated_gui_vulkan_renderdoc_fixture.html",
     [int]$Width = 1280,
     [int]$Height = 720,
+    [ValidateSet("d3d11", "d3d12")]
+    [string]$AngleBackend = "d3d11",
     [int]$TimeoutSecs = 90,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$RemainingArgs = @()
@@ -229,7 +231,7 @@ if ($electronSource -eq "") {
     $electronSource = Tool-Source @("electron.cmd", "electron.exe", "electron") @()
 }
 
-$directxFlags = @("--no-sandbox", "--disable-gpu-sandbox", "--use-angle=d3d11", "--enable-gpu-rasterization", "--enable-zero-copy")
+$directxFlags = @("--no-sandbox", "--disable-gpu-sandbox", "--use-angle=$AngleBackend", "--enable-gpu-rasterization", "--enable-zero-copy")
 
 Add-Row $rows "gui_web_2d_directx_mode" $(if ($Mode -eq "--gpu-capture") { "windows-gpu-capture" } elseif ($Mode -eq "--browser-backing") { "windows-browser-backing" } else { "windows-check" })
 Add-Row $rows "gui_web_2d_directx_build_dir" "$BuildFullDir"
@@ -252,7 +254,7 @@ Add-Row $rows "gui_web_2d_directx_electron_path" "$electronSource"
 Add-Row $rows "gui_web_2d_directx_chrome_status" (Tool-Status $chromeSource)
 Add-Row $rows "gui_web_2d_directx_chrome_path" "$chromeSource"
 Add-Row $rows "gui_web_2d_directx_requested_api" "directx"
-Add-Row $rows "gui_web_2d_directx_requested_angle" "d3d11"
+Add-Row $rows "gui_web_2d_directx_requested_angle" "$AngleBackend"
 Add-Row $rows "gui_web_2d_directx_launch_flags" ($directxFlags -join " ")
 
 $nativeDir = Join-Path $BuildFullDir "directx-native"
@@ -425,8 +427,8 @@ if ($Mode -eq "--browser-backing" -or $Mode -eq "--gpu-capture") {
 if ($Mode -eq "--gpu-capture") {
     $dxcapOut = Join-Path $BuildFullDir "dxcap-chrome.out"
     $dxcapLog = Join-Path $BuildFullDir "dxcap-chrome.log"
-    $dxcapArtifact = Join-Path $BuildFullDir "dxcap_chrome_d3d11.vsglog"
-    $dxcapScreenshot = Join-Path $BuildFullDir "dxcap_chrome_d3d11.png"
+    $dxcapArtifact = Join-Path $BuildFullDir "dxcap_chrome_${AngleBackend}.vsglog"
+    $dxcapScreenshot = Join-Path $BuildFullDir "dxcap_chrome_${AngleBackend}.png"
     Add-Row $rows "gui_web_2d_directx_gpu_debugger_tool" "DXCap.exe"
     Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_artifact" "$dxcapArtifact"
     Add-Row $rows "gui_web_2d_directx_gpu_debugger_capture_screenshot" "$dxcapScreenshot"
@@ -451,7 +453,7 @@ if ($Mode -eq "--gpu-capture") {
             "--headless=new",
             "--no-sandbox",
             "--disable-gpu-sandbox",
-            "--use-angle=d3d11",
+            "--use-angle=$AngleBackend",
             "--enable-gpu-rasterization",
             "--enable-zero-copy",
             "--window-size=$Width,$Height",

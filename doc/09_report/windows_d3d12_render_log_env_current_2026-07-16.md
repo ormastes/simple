@@ -13,28 +13,34 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\ormas\dev\simple\sc
 Result:
 
 - `windows_d3d12_render_log_compare_status=fail`
-- `windows_d3d12_render_log_compare_blocked_gate_count=5`
-- `windows_d3d12_render_log_compare_blocked_gates=windows-d3d12-native-readback,browser-d3d12-backing,pairwise-argb-diff,argb-source-evidence,pix-or-gpu-debugger`
+- `windows_d3d12_render_log_compare_blocked_gate_count=4`
+- `windows_d3d12_render_log_compare_blocked_gates=windows-d3d12-native-readback,browser-d3d12-backing,pairwise-argb-diff,argb-source-evidence`
 - `windows_d3d12_render_log_compare_directx_diagnostic_env_file_status=pass`
 - `windows_d3d12_render_log_compare_directx_diagnostic_status=pass`
 - `windows_d3d12_render_log_compare_directx_diagnostic_event_status=pass`
 - `windows_d3d12_render_log_compare_directx_diagnostic_gpu_capture_status=pass`
 - `windows_d3d12_render_log_compare_directx_strict_diagnostic_status=pass`
-- `windows_d3d12_render_log_compare_directx_diagnostic_api=d3d11`
+- `windows_d3d12_render_log_compare_directx_diagnostic_api=d3d12`
 - `windows_d3d12_render_log_compare_refresh_directx_exit_code=0`
 - `windows_d3d12_pix_capture_status=unavailable`
 - `windows_d3d12_pix_capture_tool=`
 - `windows_d3d12_gpu_debugger_capture_tool=C:\WINDOWS\system32\DXCap.exe`
 - `windows_d3d12_gpu_debugger_directx_diagnostic_status=pass`
+- `windows_d3d12_render_log_compare_pix_gpu_debugger_gate_status=pass`
+- `windows_d3d12_render_log_compare_gpu_debugger_artifact=...\dxcap_chrome_d3d12.vsglog`
+- `windows_d3d12_render_log_evidence_gpu_debugger_artifact_magic=GFXA`
 - Default checker: `windows_d3d12_render_log_evidence_status=pass`
 - Default checker: `windows_d3d12_render_log_evidence_reason=pass`
 - Completion checker: `windows_d3d12_render_log_evidence_status=fail`
-- Completion checker: `windows_d3d12_render_log_evidence_reason=compare-status,native-d3d12-readback,browser-d3d12-backing,pairwise-argb-diff,argb-source-evidence,pix-gpu-debugger-gate,pix-or-gpu-debugger-status,pix-or-gpu-debugger-artifact`
+- Completion checker: `windows_d3d12_render_log_evidence_reason=compare-status,native-d3d12-readback,browser-d3d12-backing,pairwise-argb-diff,argb-source-evidence`
 
 The wrapper now runs on Windows PowerShell without throwing on
-`ProcessStartInfo.ArgumentList`, refreshes the DirectX diagnostic evidence, and
-fails closed on the D3D12-specific gates. D3D11/DXCap evidence is intentionally
-not promoted to D3D12 completion evidence.
+`ProcessStartInfo.ArgumentList`, refreshes the DirectX diagnostic evidence with
+`-AngleBackend d3d12`, and fails closed on the remaining D3D12-specific gates.
+The diagnostic proves a D3D12 request, browser event routing, ARGB capture, and
+a DXCap `GFXA` artifact for `dxcap_chrome_d3d12.vsglog`; it does not promote the
+browser gate because Chrome/Electron still fall back to D3D11/SwiftShader in
+their GPU info.
 
 The wrapper also anchors repo-relative build and evidence paths to
 `$PSScriptRoot`, runs child refresh processes from the repository root, and now
@@ -45,6 +51,10 @@ records `windows_d3d12_render_log_compare_directx_diagnostic_env_file_status=pas
 `windows_d3d12_render_log_compare_directx_diagnostic_status=pass`,
 `windows_d3d12_render_log_compare_directx_diagnostic_event_status=pass`, and
 `windows_d3d12_render_log_compare_directx_diagnostic_gpu_capture_status=pass`.
+The saved D3D12 evidence also records
+`windows_d3d12_render_log_compare_pix_gpu_debugger_gate_status=pass` through the
+DXCap artifact, while native D3D12 readback, actual browser D3D12 backing,
+pairwise ARGB diff, and full ARGB source evidence remain fail-closed.
 
 Environment bootstrap attempt:
 
@@ -83,8 +93,10 @@ Code change:
 - The wrapper now resolves repo-relative default paths from `$PSScriptRoot`,
   so `--check` can be launched by absolute script path from outside the checkout
   without losing the current DirectX diagnostic evidence.
-- The D3D12 evidence checker validates saved env files. Default mode accepts the
-  current fail-closed D3D12 evidence shape when strict upstream DirectX
-  diagnostics are present; `-RequireD3D12Completion` fails until native D3D12
-  readback, D3D12 browser backing, pairwise ARGB evidence, ARGB source evidence,
-  and PIX/GPU debugger artifact proof all pass.
+- The DirectX wrapper accepts `-AngleBackend d3d11|d3d12`; the D3D12 wrapper now
+  uses `d3d12` and records actual browser backing hints separately from the
+  request. The D3D12 evidence checker validates saved env files. Default mode
+  accepts the current fail-closed D3D12 evidence shape when strict upstream
+  DirectX diagnostics are present; `-RequireD3D12Completion` fails until native
+  D3D12 readback, actual D3D12 browser backing, pairwise ARGB evidence, and
+  full ARGB source evidence pass.

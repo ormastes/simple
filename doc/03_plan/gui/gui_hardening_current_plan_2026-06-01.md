@@ -187,8 +187,12 @@
   reporting the old `build/windows-d3d12-render-log-compare/evidence.env` path
   as missing. The refreshed 2026-07-16 aggregate report records
   `windows_d3d12_render_log_compare_env_file_status=pass`,
-  `windows_d3d12_render_log_compare_status=fail`, and the five remaining D3D12
-  gates, so Windows D3D12 remains incomplete but no longer looks absent.
+  `windows_d3d12_render_log_compare_status=fail`, and four remaining D3D12
+  gates. The D3D12 wrapper now launches the DirectX diagnostic with
+  `-AngleBackend d3d12` and records a DXCap `GFXA` artifact for the D3D12
+  request, so the PIX/GPU-debugger gate is no longer blocked; native D3D12
+  readback, actual browser D3D12 backing, pairwise ARGB diff, and full ARGB
+  source evidence remain incomplete.
 - Windows DirectX Web/2D evidence now has a current real-launch/capture pass in
   `doc/09_report/gui_web_2d_directx_windows_current_2026-07-16.md`. The
   PowerShell wrapper reports D3D11 native staging readback pass with matching
@@ -223,10 +227,10 @@
 - Windows D3D12 render-log environment evidence is recorded in
   `doc/09_report/windows_d3d12_render_log_env_current_2026-07-16.md`. The
   PowerShell wrapper now runs without the `ProcessStartInfo.ArgumentList`
-  compatibility crash, refreshes the passing D3D11/DXCap diagnostic, discovers
+  compatibility crash, refreshes the D3D12-request/DXCap diagnostic, discovers
   PIX via `WinPix.exe` and versioned install paths, and still fails closed on
   the true D3D12 gates: native D3D12 readback, browser D3D12 backing, pairwise
-  ARGB diffs, ARGB source evidence, and PIX/GPU-debugger capture. The attempted
+  ARGB diffs, and ARGB source evidence. The attempted
   `Microsoft.PIX` winget install reached the elevated engine phase and did not
   complete from this non-elevated shell. The D3D12 wrapper now records strict
   upstream DirectX diagnostic status, requiring DirectX browser backing,
@@ -238,7 +242,7 @@
   `scripts/check/check-windows-d3d12-render-log-evidence.ps1` now validates
   saved D3D12 evidence files: default mode accepts the current fail-closed shape
   with strict upstream DirectX support, while `-RequireD3D12Completion` fails on
-  the remaining native D3D12/browser/pairwise/ARGB/PIX gates.
+  the remaining native D3D12/browser/pairwise/ARGB gates.
 - Windows SimpleOS QEMU RV64 desktop evidence is recorded in
   `doc/09_report/windows_simpleos_qemu_rv64_desktop_current_2026-07-16.md`.
   The direct PowerShell wrapper now anchors itself to the checkout root and was

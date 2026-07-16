@@ -186,6 +186,7 @@ if ($Mode -eq "--refresh-directx") {
         "-BuildDir", (Join-Path $BuildDir "directx-diagnostic"),
         "-Width", "$Width",
         "-Height", "$Height",
+        "-AngleBackend", "d3d12",
         "-TimeoutSecs", "$TimeoutSecs"
     )
     $refreshCode = Invoke-ProcessBound $ps $args $directxOut $directxErr $TimeoutSecs
@@ -200,6 +201,19 @@ $directxNativeApi = Value-Or $directx @("directx_native_readback_api", "gui_web_
 $directxCaptureStatus = Value-Or $directx @("gui_web_2d_directx_gpu_debugger_capture_status") "missing"
 $directxEventStatus = Value-Or $directx @("gui_web_2d_directx_browser_event_status") "missing"
 $directxStrictDiagnosticStatus = if ($directxStatus -eq "pass" -and $directxEventStatus -eq "pass" -and $directxCaptureStatus -eq "pass") { "pass" } else { "fail" }
+$electronD3d12Hint = Value-Or $directx @("gui_web_2d_directx_electron_browser_backing_d3d12_hint_present") "false"
+$chromeD3d12Hint = Value-Or $directx @("gui_web_2d_directx_chrome_browser_backing_d3d12_hint_present") "false"
+$electronBackingStatus = Value-Or $directx @("gui_web_2d_directx_electron_browser_backing_status") "missing"
+$chromeBackingStatus = Value-Or $directx @("gui_web_2d_directx_chrome_browser_backing_status") "missing"
+$electronArgbStatus = Value-Or $directx @("gui_web_2d_directx_electron_argb_status") "missing"
+$chromeArgbStatus = Value-Or $directx @("gui_web_2d_directx_chrome_argb_status") "missing"
+$electronArgbChecksum = Value-Or $directx @("gui_web_2d_directx_electron_argb_checksum") "missing"
+$chromeArgbChecksum = Value-Or $directx @("gui_web_2d_directx_chrome_argb_checksum") "missing"
+$gpuDebuggerArtifact = Value-Or $directx @("gui_web_2d_directx_gpu_debugger_capture_artifact") ""
+$gpuDebuggerArtifactStatus = File-Status $gpuDebuggerArtifact
+$browserGateStatus = if ($directxNativeApi -eq "d3d12" -and $directxStatus -eq "pass" -and $directxEventStatus -eq "pass" -and $electronBackingStatus -eq "pass" -and $chromeBackingStatus -eq "pass" -and $electronD3d12Hint -eq "true" -and $chromeD3d12Hint -eq "true") { "pass" } else { "fail" }
+$argbSourceGateStatus = if ($electronArgbStatus -eq "pass" -and $chromeArgbStatus -eq "pass" -and $electronArgbChecksum -ne "missing" -and $chromeArgbChecksum -ne "missing") { "partial" } else { "fail" }
+$gpuDebuggerGateStatus = if ($directxNativeApi -eq "d3d12" -and $directxCaptureStatus -eq "pass" -and $gpuDebuggerArtifactStatus -eq "pass") { "pass" } else { "fail" }
 $pixTool = Latest-PixTool
 $dxcapTool = Command-Source "DXCap.exe"
 
@@ -220,12 +234,14 @@ Add-Row $nativeRows "windows_d3d12_native_readback_directx_diagnostic_api" "$dir
 Write-Rows $nativeEnv $nativeRows
 
 $browserRows = New-Object System.Collections.Generic.List[string]
-Add-Row $browserRows "windows_d3d12_electron_browser_backing_status" "unavailable"
-Add-Row $browserRows "windows_d3d12_electron_browser_backing_reason" "missing-d3d12-browser-backing-probe"
-Add-Row $browserRows "windows_d3d12_chrome_browser_backing_status" "unavailable"
-Add-Row $browserRows "windows_d3d12_chrome_browser_backing_reason" "missing-d3d12-browser-backing-probe"
-Add-Row $browserRows "windows_d3d12_browser_backing_status" "unavailable"
-Add-Row $browserRows "windows_d3d12_browser_backing_reason" "missing-d3d12-browser-backing-probe"
+Add-Row $browserRows "windows_d3d12_electron_browser_backing_status" "$electronBackingStatus"
+Add-Row $browserRows "windows_d3d12_electron_browser_backing_reason" $(if ($electronD3d12Hint -eq "true") { "directx-d3d12-diagnostic" } else { "d3d12-hint-missing" })
+Add-Row $browserRows "windows_d3d12_electron_browser_backing_d3d12_hint_present" "$electronD3d12Hint"
+Add-Row $browserRows "windows_d3d12_chrome_browser_backing_status" "$chromeBackingStatus"
+Add-Row $browserRows "windows_d3d12_chrome_browser_backing_reason" $(if ($chromeD3d12Hint -eq "true") { "directx-d3d12-diagnostic" } else { "d3d12-hint-missing" })
+Add-Row $browserRows "windows_d3d12_chrome_browser_backing_d3d12_hint_present" "$chromeD3d12Hint"
+Add-Row $browserRows "windows_d3d12_browser_backing_status" "$browserGateStatus"
+Add-Row $browserRows "windows_d3d12_browser_backing_reason" $(if ($browserGateStatus -eq "pass") { "electron-chrome-d3d12-diagnostic-pass" } else { "electron-or-chrome-d3d12-proof-missing" })
 Add-Row $browserRows "windows_d3d12_pixel_comparison_status" "missing"
 Add-Row $browserRows "windows_d3d12_pixel_comparison_mode" "missing"
 Add-Row $browserRows "windows_d3d12_electron_chrome_pairwise_diff_status" "missing"
@@ -237,6 +253,10 @@ foreach ($source in @("simple", "chrome", "electron")) {
     Add-Row $browserRows "windows_d3d12_${source}_argb_nonblank_pixel_count" "0"
     Add-Row $browserRows "windows_d3d12_${source}_argb_checksum" "missing"
 }
+Add-Row $browserRows "windows_d3d12_electron_argb_status" "$electronArgbStatus"
+Add-Row $browserRows "windows_d3d12_electron_argb_checksum" "$electronArgbChecksum"
+Add-Row $browserRows "windows_d3d12_chrome_argb_status" "$chromeArgbStatus"
+Add-Row $browserRows "windows_d3d12_chrome_argb_checksum" "$chromeArgbChecksum"
 Add-Row $browserRows "windows_d3d12_browser_backing_directx_diagnostic_env" "$DirectxEvidencePath"
 Add-Row $browserRows "windows_d3d12_browser_backing_directx_diagnostic_status" "$directxStatus"
 Add-Row $browserRows "windows_d3d12_browser_backing_directx_diagnostic_event_status" "$directxEventStatus"
@@ -249,23 +269,30 @@ Add-Row $pixRows "windows_d3d12_pix_capture_reason" "missing-pix-d3d12-capture"
 Add-Row $pixRows "windows_d3d12_pix_capture_tool" "$pixTool"
 Add-Row $pixRows "windows_d3d12_pix_capture_artifact" ""
 Add-Row $pixRows "windows_d3d12_pix_capture_artifact_magic" "missing"
-Add-Row $pixRows "windows_d3d12_gpu_debugger_capture_status" "unavailable"
-Add-Row $pixRows "windows_d3d12_gpu_debugger_capture_reason" "dxcap-d3d11-diagnostic-not-d3d12"
+Add-Row $pixRows "windows_d3d12_gpu_debugger_capture_status" $(if ($gpuDebuggerGateStatus -eq "pass") { "pass" } else { "unavailable" })
+Add-Row $pixRows "windows_d3d12_gpu_debugger_capture_reason" $(if ($gpuDebuggerGateStatus -eq "pass") { "d3d12-dxcap-gfxa-magic-pass" } else { "dxcap-d3d12-diagnostic-missing" })
 Add-Row $pixRows "windows_d3d12_gpu_debugger_capture_tool" "$dxcapTool"
-Add-Row $pixRows "windows_d3d12_gpu_debugger_capture_artifact" ""
+Add-Row $pixRows "windows_d3d12_gpu_debugger_capture_artifact" "$gpuDebuggerArtifact"
+Add-Row $pixRows "windows_d3d12_gpu_debugger_capture_artifact_file_status" "$gpuDebuggerArtifactStatus"
 Add-Row $pixRows "windows_d3d12_gpu_debugger_directx_diagnostic_status" "$directxCaptureStatus"
 Add-Row $pixRows "windows_d3d12_gpu_debugger_directx_diagnostic_event_status" "$directxEventStatus"
 Add-Row $pixRows "windows_d3d12_gpu_debugger_directx_strict_diagnostic_status" "$directxStrictDiagnosticStatus"
 Write-Rows $pixEnv $pixRows
 
-$blocked = @(
-    "windows-d3d12-native-readback",
-    "browser-d3d12-backing",
-    "pairwise-argb-diff",
-    "argb-source-evidence",
-    "pix-or-gpu-debugger"
-)
-$reason = "windows-d3d12-native-readback-unavailable;electron-d3d12-backing-unavailable;chrome-d3d12-backing-unavailable;browser-d3d12-backing-unavailable;pixel-comparison-missing;pairwise-diff-incomplete-or-fail;windows-d3d12-pix-or-gpu-debugger-unavailable"
+$blocked = New-Object System.Collections.Generic.List[string]
+$blocked.Add("windows-d3d12-native-readback") | Out-Null
+if ($browserGateStatus -ne "pass") { $blocked.Add("browser-d3d12-backing") | Out-Null }
+$blocked.Add("pairwise-argb-diff") | Out-Null
+$blocked.Add("argb-source-evidence") | Out-Null
+if ($gpuDebuggerGateStatus -ne "pass") { $blocked.Add("pix-or-gpu-debugger") | Out-Null }
+$reasonParts = New-Object System.Collections.Generic.List[string]
+$reasonParts.Add("windows-d3d12-native-readback-unavailable") | Out-Null
+if ($browserGateStatus -ne "pass") { $reasonParts.Add("browser-d3d12-backing-unavailable") | Out-Null }
+$reasonParts.Add("pixel-comparison-missing") | Out-Null
+$reasonParts.Add("pairwise-diff-incomplete-or-fail") | Out-Null
+$reasonParts.Add("argb-source-evidence-partial") | Out-Null
+if ($gpuDebuggerGateStatus -ne "pass") { $reasonParts.Add("windows-d3d12-pix-or-gpu-debugger-unavailable") | Out-Null }
+$reason = $reasonParts -join ";"
 
 $compareRows = New-Object System.Collections.Generic.List[string]
 Add-Row $compareRows "windows_d3d12_render_log_compare_status" "fail"
@@ -273,10 +300,10 @@ Add-Row $compareRows "windows_d3d12_render_log_compare_reason" "$reason"
 Add-Row $compareRows "windows_d3d12_render_log_compare_blocked_gate_count" "$($blocked.Count)"
 Add-Row $compareRows "windows_d3d12_render_log_compare_blocked_gates" "$($blocked -join ',')"
 Add-Row $compareRows "windows_d3d12_render_log_compare_native_readback_gate_status" "fail"
-Add-Row $compareRows "windows_d3d12_render_log_compare_browser_backing_gate_status" "fail"
+Add-Row $compareRows "windows_d3d12_render_log_compare_browser_backing_gate_status" "$browserGateStatus"
 Add-Row $compareRows "windows_d3d12_render_log_compare_pairwise_gate_status" "fail"
-Add-Row $compareRows "windows_d3d12_render_log_compare_argb_source_gate_status" "fail"
-Add-Row $compareRows "windows_d3d12_render_log_compare_pix_gpu_debugger_gate_status" "fail"
+Add-Row $compareRows "windows_d3d12_render_log_compare_argb_source_gate_status" "$argbSourceGateStatus"
+Add-Row $compareRows "windows_d3d12_render_log_compare_pix_gpu_debugger_gate_status" "$gpuDebuggerGateStatus"
 Add-Row $compareRows "windows_d3d12_render_log_compare_required_api" "d3d12"
 Add-Row $compareRows "windows_d3d12_render_log_compare_native_readback_env" "$nativeEnv"
 Add-Row $compareRows "windows_d3d12_render_log_compare_native_readback_env_file_status" "$(File-Status $nativeEnv)"
@@ -298,9 +325,9 @@ Add-Row $compareRows "windows_d3d12_render_log_compare_pix_artifact" ""
 Add-Row $compareRows "windows_d3d12_render_log_compare_pix_artifact_file_status" "missing"
 Add-Row $compareRows "windows_d3d12_render_log_compare_pix_artifact_magic" "missing"
 Add-Row $compareRows "windows_d3d12_render_log_compare_pix_artifact_file_magic" "missing"
-Add-Row $compareRows "windows_d3d12_render_log_compare_gpu_debugger_status" "unavailable"
-Add-Row $compareRows "windows_d3d12_render_log_compare_gpu_debugger_artifact" ""
-Add-Row $compareRows "windows_d3d12_render_log_compare_gpu_debugger_artifact_file_status" "missing"
+Add-Row $compareRows "windows_d3d12_render_log_compare_gpu_debugger_status" $(if ($gpuDebuggerGateStatus -eq "pass") { "pass" } else { "unavailable" })
+Add-Row $compareRows "windows_d3d12_render_log_compare_gpu_debugger_artifact" "$gpuDebuggerArtifact"
+Add-Row $compareRows "windows_d3d12_render_log_compare_gpu_debugger_artifact_file_status" "$gpuDebuggerArtifactStatus"
 Add-Row $compareRows "windows_d3d12_render_log_compare_refresh_directx_exit_code" "$refreshCode"
 Write-Rows $compareEnv $compareRows
 
