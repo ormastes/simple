@@ -187,3 +187,21 @@ codegen files (primarily incorrect call arity and undeclared lowered symbols),
 recorded in
 `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`.
 Strict fallback refusal worked and no replacement was deployed.
+
+## 2026-07-16 unique test-runner entry repair
+
+The recursion-guard candidate contained the CLI `main` symbol but no
+`test_runner_new` entry symbol. The CLI imported the runner's generic `main`
+under an alias, and the self-hosted entry closure rebound that call to the CLI
+entrypoint after `SIMPLE_TEST_DEPTH=1` was set. The runner now exposes the
+unique `run_test_cli` entry, used by both the unified CLI and the standalone
+runner wrapper; the focused source contract rejects the ambiguous alias.
+
+The current pure-Simple compiler semantically accepted all three production
+files. A bootstrap-native link also resolved
+`test_runner_new__test_runner_main__run_test_cli`, confirming that the runner
+entry is retained. Runtime calibration remains pending: the self-hosted
+standalone build reached its ten-minute cap without an artifact, while the
+bootstrap link cannot provide the hosted-only runner symbols because current
+native-build accepts only `simple-core` or `core-c-bootstrap`. No binary was
+deployed and no runner PASS is claimed.
