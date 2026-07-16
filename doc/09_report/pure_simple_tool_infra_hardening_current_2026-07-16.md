@@ -158,12 +158,28 @@ runtime remains unavailable, so executable qualification is still blocked.
 - **Test child execution:** daemon, worker-agent, and QEMU test children now
   share argv-preserving `process_run_timeout` execution. Test paths and QMP
   sockets are no longer shell-interpreted, and the requested deadline owns the
-  child. Environment-bearing GUI/service/hardware paths, container/remote
-  transports, and QMP/OpenOCD protocol shell sites remain explicit follow-ups.
+  child. GUI/service/hardware children use the same owner with scoped parent
+  environment restoration while dispatch remains synchronous. Remote terminal
+  execution and QMP/OpenOCD protocol shell sites remain explicit follow-ups.
 - **Native walker parity:** no wrapper-only patch was accepted. Traversal occurs
   entirely inside `rt_dir_walk`, and every available Simple type probe follows
   symlinks, so cycle prevention and file-only parity require coordinated C,
   Rust SFFI, interpreter, and Windows runtime-owner changes.
+- **Session adapter reachability:** the old registry retained only each
+  concrete adapter's inert `.base`, so production start/execute/reset/stop
+  calls never reached QEMU, container, service, GUI, or hardware code. The
+  broker now stores typed optional adapters and dispatches directly by kind;
+  production registration retains concrete state while unit brokers stay
+  dependency-free.
+- **Session resource identity:** deterministic scheduler keys now hash every
+  matching field, including reset policy, while each new lease adds a broker
+  instance suffix. Fresh concurrent acquisitions can no longer target the same
+  container name or QMP socket, and metadata cannot inject path separators or
+  shell syntax into resource IDs.
+- **Container transport:** Docker/Podman detection, lifecycle, inspection,
+  reset, execution, and teardown now share structured argv plus bounded host
+  execution. Fixed resource limits remain explicit argv entries; test paths,
+  images, and lease IDs never pass through a shell.
 
 ## Latest bounded verification
 
@@ -204,6 +220,12 @@ runtime remains unavailable, so executable qualification is still blocked.
 - Token-cache reference ownership and shared argv-safe daemon/agent/QEMU child
   execution: SOURCE IMPLEMENTED; executable cache/hostile-path/timeout verdicts
   are NOT RUN because no admitted runtime exists.
+- Concrete adapter dispatch, unique safe session instances, and container argv
+  transport: SOURCE IMPLEMENTED with focused pure helper/session contracts;
+  executable daemon/container verdict is NOT RUN without an admitted runtime.
+- Environment-bearing GUI/service/hardware child execution now shares bounded
+  argv execution and restores the parent environment; focused hostile-value
+  and restoration coverage is SOURCE IMPLEMENTED but NOT RUN.
 - New Simple unit/system behavior and the PowerShell contract: NOT RUN because
   no admitted pure-Simple runtime or PowerShell host exists. Previously passed
   global gates were not repeated after their session limit.

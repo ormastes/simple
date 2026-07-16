@@ -1,9 +1,19 @@
-use app.test_daemon.session_adapter.{run_test_child}
+use app.test_daemon.session_adapter.{run_test_child, run_test_child_env}
+use app.test_daemon.adapters.container_adapter.{container_create_args}
+use app.io.mod.{env_get, env_set}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 
 describe "test daemon child execution":
+    it "keeps hostile container values in single argv entries":
+        val name = "name; touch /tmp/nope"
+        val image = "registry/image with spaces:latest"
+        val args = container_create_args(name, image)
+        expect(args.len()).to_equal(14)
+        expect(args[2]).to_equal(name)
+        expect(args[11]).to_equal(image)
+
     it "preserves hostile test and adapter arguments as argv":
         val path_sentinel = "/tmp/simple_test_daemon_path_injection"
         val adapter_sentinel = "/tmp/simple_test_daemon_adapter_injection"
@@ -21,3 +31,22 @@ describe "test daemon child execution":
         expect(result.failed).to_equal(1)
         expect(rt_file_exists(path_sentinel)).to_equal(false)
         expect(rt_file_exists(adapter_sentinel)).to_equal(false)
+
+    it "restores parent environment after bounded child execution":
+        val key = "SIMPLE_TEST_DAEMON_ENV_RESTORE"
+        val sentinel = "/tmp/simple_test_daemon_env_injection"
+        val _cleanup = rt_file_delete(sentinel)
+        env_set(key, "before")
+        var child_env: {text: text} = {}
+        child_env[key] = "hostile; touch {sentinel} #"
+
+        val result = run_test_child_env(
+            "/tmp/missing",
+            5000,
+            [],
+            child_env
+        )
+
+        expect(result.failed).to_equal(1)
+        expect(env_get(key)).to_equal("before")
+        expect(rt_file_exists(sentinel)).to_equal(false)

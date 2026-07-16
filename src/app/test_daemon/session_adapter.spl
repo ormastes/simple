@@ -9,7 +9,7 @@ use app.test_daemon.session_types.{
     session_lease_new, session_key_to_id, meta_to_session_key
 }
 use app.test_daemon.types.{TestResult, TRESP_COMPLETED, TRESP_FAILED}
-use app.io.process_ops.{process_run_timeout}
+use app.io.mod.{process_run_timeout, env_set, env_vars}
 
 extern fn rt_time_now_unix_micros() -> i64
 
@@ -38,6 +38,23 @@ fn run_test_child(test_path: text, timeout_ms: i64, extra_args: [text]) -> TestR
         output: output,
         cached: false
     )
+
+fn run_test_child_env(test_path: text, timeout_ms: i64, extra_args: [text], env: {text: text}) -> TestResult:
+    # ponytail: synchronous parent env; use runtime env-aware run before concurrent dispatch.
+    val previous = env_vars()
+    val keys = env.keys()
+    for key in keys:
+        env_set(key, env[key])
+
+    val result = run_test_child(test_path, timeout_ms, extra_args)
+
+    for key in keys:
+        if previous.has(key):
+            env_set(key, previous[key])
+        else:
+            # rt_env_remove lacks core-C parity; empty is the portable absence value.
+            env_set(key, "")
+    result
 
 # ============================================================================
 # Adapter Interface

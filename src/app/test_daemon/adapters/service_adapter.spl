@@ -13,15 +13,13 @@ use app.test_daemon.{
     REUSE_SHARED_READ_ONLY, RESET_NONE, RESET_SOFT,
     TRESP_COMPLETED, TRESP_FAILED
 }
-use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
+use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new, run_test_child_env}
 use app.test_daemon.types.{TestResult}
 use app.io.mod.{process_spawn_async_env, process_is_alive, process_kill}
 use std.nogc_sync_mut.io.http_sffi.{http_get}
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_sleep_ms(ms: i64)
-extern fn rt_shell_exec(cmd: text) -> text
-extern fn rt_shell_exit_code() -> i64
 
 # ============================================================================
 # Service Adapter
@@ -186,27 +184,7 @@ impl ServiceAdapter:
         to the running service.
         """
         val service_url = lease.qmp_socket
-        val cmd = "SERVICE_URL={service_url} bin/simple test {test_path} --no-session-daemon --sequential 2>&1"
-
-        val start = rt_time_now_unix_micros()
-        val output = rt_shell_exec(cmd)
-        val exit_code = rt_shell_exit_code()
-        val duration_ms = (rt_time_now_unix_micros() - start) / 1000
-
-        val status = if exit_code == 0: TRESP_COMPLETED else: TRESP_FAILED
-        val passed = if exit_code == 0: 1 else: 0
-        val failed = if exit_code != 0: 1 else: 0
-
-        TestResult(
-            test_path: test_path,
-            status: status,
-            passed: passed,
-            failed: failed,
-            skipped: 0,
-            duration_ms: duration_ms,
-            output: output,
-            cached: false
-        )
+        run_test_child_env(test_path, timeout_ms, [], {"SERVICE_URL": service_url})
 
     me stop(lease: SessionLease) -> bool:
         """
