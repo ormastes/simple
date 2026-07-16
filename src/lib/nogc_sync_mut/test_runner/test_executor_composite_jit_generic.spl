@@ -4,8 +4,7 @@
 # composite runner so STM32H7 can load without the generic enum-heavy paths.
 
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions}
-use std.io.{time_now_unix_micros}
-use std.io_runtime.{shell}
+use std.io.{time_now_unix_micros, process_run_timeout}
 use std.nogc_sync_mut.debug.remote.types.{Architecture}
 use std.nogc_sync_mut.debug.remote.exec.types.{ExecResult, MemoryMap}
 use std.nogc_sync_mut.debug.remote.exec.manager.{RemoteExecutionManager}
@@ -62,18 +61,20 @@ fn run_test_file_jit_stm32h7_adapter(file_path: text, source: text, options: Tes
 
 fn run_test_file_jit_ch32v307(file_path: text, source: text, options: TestOptions) -> TestFileResult:
     val setup_start = time_now_unix_micros()
-    val wlink = shell("command -v wlink >/dev/null 2>&1")
-    val detected = shell("timeout 10 wlink status --chip CH32V30X 2>&1")
+    val (_wlink_out, _wlink_err, wlink_code) = process_run_timeout("which", ["wlink"], 5000)
+    val (detected_stdout, detected_stderr, detected_code) = process_run_timeout(
+        "wlink", ["status", "--chip", "CH32V30X"], 10000
+    )
     val setup_end = time_now_unix_micros()
     val setup_ms = (setup_end - setup_start) / 1000
 
-    if wlink.exit_code != 0:
+    if wlink_code != 0:
         return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 1, pending: 0,
             duration_ms: 0, setup_ms: setup_ms,
             error: "CH32V307 direct hardware path unavailable: wlink not installed", timed_out: false, cached: false)
 
-    val combined = detected.stdout + detected.stderr
-    if detected.exit_code != 0 or not combined.contains("CH32V307"):
+    val combined = detected_stdout + detected_stderr
+    if detected_code != 0 or not combined.contains("CH32V307"):
         return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 1, pending: 0,
             duration_ms: 0, setup_ms: setup_ms,
             error: "CH32V307 direct hardware path unavailable: probe not detected through wlink", timed_out: false, cached: false)

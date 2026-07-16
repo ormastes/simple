@@ -184,6 +184,9 @@ runtime remains unavailable, so executable qualification is still blocked.
   test execution, image build, version, and volume cleanup now use bounded
   structured argv. Runtime duration uses the real runtime clock instead of
   the former constant-zero placeholder.
+- **Composite hardware runner:** WCH-Link discovery/status uses bounded argv,
+  and STM32H7 logging/sleeping use native output/timing owners instead of
+  launching shells.
 - **Remote terminal transport:** the terminal owner now exposes bounded
   execution for SSH and Telnet. Telnet uses one absolute deadline across all
   reads, and the remote-PC adapter quotes the test path before sending the
