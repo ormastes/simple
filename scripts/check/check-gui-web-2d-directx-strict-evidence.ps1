@@ -5,7 +5,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+
+function Resolve-RepoPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return $path
+    }
+    if ([System.IO.Path]::IsPathRooted($path)) {
+        return $path
+    }
+    return Join-Path $repoRoot $path
+}
+
 function Read-KeyValueFile([string]$path) {
+    $path = Resolve-RepoPath $path
     $map = @{}
     if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) {
         return $map
@@ -28,6 +41,7 @@ function Value-Or($map, [string]$key, [string]$defaultValue = "") {
 }
 
 function Has-GfxaMagic([string]$path) {
+    $path = Resolve-RepoPath $path
     if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) { return $false }
     $stream = [System.IO.File]::OpenRead($path)
     try {

@@ -5,6 +5,7 @@ Current Windows PowerShell run:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-windows-gui-web-2d-evidence-bundle.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-windows-gui-web-2d-evidence-bundle.ps1 -RequireFullCompletion
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\ormas\dev\simple\scripts\check\check-windows-gui-web-2d-evidence-bundle.ps1
 ```
 
 Default result:
@@ -30,6 +31,11 @@ partial Vulkan host proof, and fail-closed D3D12 render-log proof with strict
 upstream DirectX diagnostics. `-RequireFullCompletion` is the release-style
 strict mode and remains blocked until Vulkan SDK/RenderDoc browser capture and
 D3D12/PIX evidence are available.
+
+The DirectX, Vulkan, and D3D12 leaf PowerShell checkers now resolve relative
+evidence and capture artifact paths from the repository root derived from
+`$PSScriptRoot`, so the bundle also passes when launched by absolute script path
+from outside the checkout root.
 
 Primary artifacts:
 
