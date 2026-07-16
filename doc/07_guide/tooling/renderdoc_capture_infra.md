@@ -54,9 +54,11 @@ per-run output.
   readiness without installing tools or launching GUI apps. It consumes the
   latest Simple Vulkan readback evidence when present, checks `vulkaninfo`,
   `glslangValidator`, `spirv-as`, `dxc`, Chrome, Electron, and RenderDoc
-  commands, and writes compatible `gui_web_2d_vulkan_*` rows. Use
-  `--print-install` for Windows install hints; do not claim RenderDoc capture
-  until `renderdoccmd` is present and a valid `.rdc` artifact is produced.
+  commands, and writes compatible `gui_web_2d_vulkan_*` rows. The Windows probe
+  also checks `VULKAN_SDK\Bin`, `RDOC_HOME`, and standard Chrome/RenderDoc
+  install paths before reporting a tool as missing. Use `--print-install` for
+  Windows install hints; do not claim RenderDoc capture until `renderdoccmd` is
+  present and a valid `.rdc` artifact is produced.
 
 Compatibility wrappers remain:
 

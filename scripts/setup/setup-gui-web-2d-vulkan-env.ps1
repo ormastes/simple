@@ -44,8 +44,30 @@ function Command-Source([string]$name) {
     return ""
 }
 
-function Command-Status([string]$name) {
-    if ((Command-Source $name) -ne "") { return "pass" }
+function Existing-Path([string[]]$paths) {
+    foreach ($path in $paths) {
+        if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path -LiteralPath $path)) {
+            return $path
+        }
+    }
+    return ""
+}
+
+function Candidate-Path([string]$base, [string]$child) {
+    if ([string]::IsNullOrWhiteSpace($base)) { return "" }
+    return Join-Path $base $child
+}
+
+function Tool-Source([string[]]$names, [string[]]$paths = @()) {
+    foreach ($name in $names) {
+        $source = Command-Source $name
+        if ($source -ne "") { return $source }
+    }
+    return Existing-Path $paths
+}
+
+function Tool-Status([string]$source) {
+    if ($source -ne "") { return "pass" }
     return "missing"
 }
 
@@ -91,16 +113,43 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent $EvidencePath) | O
 $rows = New-Object System.Collections.Generic.List[string]
 $simple = Read-KeyValueFile $SimpleReadbackEvidencePath
 
-$vulkanInfoStatus = Command-Status "vulkaninfo"
-$glslangStatus = Command-Status "glslangValidator"
-$spirvAsStatus = Command-Status "spirv-as"
-$dxcStatus = Command-Status "dxc"
-$chromeStatus = Command-Status "chrome"
-if ($chromeStatus -ne "pass") { $chromeStatus = Command-Status "chrome.exe" }
-$electronStatus = Command-Status "electron"
-if ($electronStatus -ne "pass") { $electronStatus = Command-Status "electron.exe" }
-$renderdocStatus = Command-Status "renderdoccmd"
-if ($renderdocStatus -ne "pass") { $renderdocStatus = Command-Status "qrenderdoc" }
+$vulkanSdkBin = Candidate-Path $env:VULKAN_SDK "Bin"
+$vulkanInfoSource = Tool-Source @("vulkaninfo", "vulkaninfo.exe") @(
+    (Candidate-Path $vulkanSdkBin "vulkaninfo.exe")
+)
+$glslangSource = Tool-Source @("glslangValidator", "glslangValidator.exe") @(
+    (Candidate-Path $vulkanSdkBin "glslangValidator.exe")
+)
+$spirvAsSource = Tool-Source @("spirv-as", "spirv-as.exe") @(
+    (Candidate-Path $vulkanSdkBin "spirv-as.exe")
+)
+$dxcSource = Tool-Source @("dxc", "dxc.exe") @(
+    (Candidate-Path $vulkanSdkBin "dxc.exe")
+)
+$chromeSource = Tool-Source @("chrome", "chrome.exe") @(
+    (Candidate-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
+    (Candidate-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe"),
+    (Candidate-Path $env:LocalAppData "Google\Chrome\Application\chrome.exe")
+)
+$electronSource = Tool-Source @("electron", "electron.exe") @()
+$renderdocSource = Tool-Source @("renderdoccmd", "renderdoccmd.exe", "qrenderdoc", "qrenderdoc.exe") @(
+    (Candidate-Path $env:RDOC_HOME "renderdoccmd.exe"),
+    (Candidate-Path $env:RDOC_HOME "qrenderdoc.exe"),
+    (Candidate-Path (Candidate-Path $env:RDOC_HOME "bin") "renderdoccmd.exe"),
+    (Candidate-Path (Candidate-Path $env:RDOC_HOME "bin") "qrenderdoc.exe"),
+    (Candidate-Path $env:ProgramFiles "RenderDoc\renderdoccmd.exe"),
+    (Candidate-Path $env:ProgramFiles "RenderDoc\qrenderdoc.exe"),
+    (Candidate-Path ${env:ProgramFiles(x86)} "RenderDoc\renderdoccmd.exe"),
+    (Candidate-Path ${env:ProgramFiles(x86)} "RenderDoc\qrenderdoc.exe")
+)
+
+$vulkanInfoStatus = Tool-Status $vulkanInfoSource
+$glslangStatus = Tool-Status $glslangSource
+$spirvAsStatus = Tool-Status $spirvAsSource
+$dxcStatus = Tool-Status $dxcSource
+$chromeStatus = Tool-Status $chromeSource
+$electronStatus = Tool-Status $electronSource
+$renderdocStatus = Tool-Status $renderdocSource
 
 $sdkToolsStatus = if ($glslangStatus -eq "pass" -and $spirvAsStatus -eq "pass" -and $dxcStatus -eq "pass") { "pass" } else { "blocked:sdk-tools-missing" }
 $simpleReadbackStatus = Value-Or $simple @("vulkan_engine2d_readback_status") "missing"
@@ -129,19 +178,19 @@ Add-Row $rows "gui_web_2d_vulkan_simple_status" "$simpleStatus"
 Add-Row $rows "gui_web_2d_vulkan_simple_backend_name" "$simpleBackend"
 Add-Row $rows "gui_web_2d_vulkan_simple_argb_checksum" "$simpleChecksum"
 Add-Row $rows "gui_web_2d_vulkan_vulkaninfo_status" "$vulkanInfoStatus"
-Add-Row $rows "gui_web_2d_vulkan_vulkaninfo_path" (Command-Source "vulkaninfo")
+Add-Row $rows "gui_web_2d_vulkan_vulkaninfo_path" "$vulkanInfoSource"
 Add-Row $rows "gui_web_2d_vulkan_glslang_validator_status" "$glslangStatus"
-Add-Row $rows "gui_web_2d_vulkan_glslang_validator_path" (Command-Source "glslangValidator")
+Add-Row $rows "gui_web_2d_vulkan_glslang_validator_path" "$glslangSource"
 Add-Row $rows "gui_web_2d_vulkan_spirv_as_status" "$spirvAsStatus"
-Add-Row $rows "gui_web_2d_vulkan_spirv_as_path" (Command-Source "spirv-as")
+Add-Row $rows "gui_web_2d_vulkan_spirv_as_path" "$spirvAsSource"
 Add-Row $rows "gui_web_2d_vulkan_dxc_status" "$dxcStatus"
-Add-Row $rows "gui_web_2d_vulkan_dxc_path" (Command-Source "dxc")
+Add-Row $rows "gui_web_2d_vulkan_dxc_path" "$dxcSource"
 Add-Row $rows "gui_web_2d_vulkan_chrome_status" "$chromeStatus"
-Add-Row $rows "gui_web_2d_vulkan_chrome_path" $(if ((Command-Source "chrome") -ne "") { Command-Source "chrome" } else { Command-Source "chrome.exe" })
+Add-Row $rows "gui_web_2d_vulkan_chrome_path" "$chromeSource"
 Add-Row $rows "gui_web_2d_vulkan_electron_status" "$electronStatus"
-Add-Row $rows "gui_web_2d_vulkan_electron_path" $(if ((Command-Source "electron") -ne "") { Command-Source "electron" } else { Command-Source "electron.exe" })
+Add-Row $rows "gui_web_2d_vulkan_electron_path" "$electronSource"
 Add-Row $rows "gui_web_2d_vulkan_renderdoc_status" "$renderdocStatus"
-Add-Row $rows "gui_web_2d_vulkan_renderdoc_cmd" $(if ((Command-Source "renderdoccmd") -ne "") { Command-Source "renderdoccmd" } else { Command-Source "qrenderdoc" })
+Add-Row $rows "gui_web_2d_vulkan_renderdoc_cmd" "$renderdocSource"
 Add-Row $rows "gui_web_2d_vulkan_sdk_tools_status" "$sdkToolsStatus"
 Add-Row $rows "gui_web_2d_vulkan_host_readiness_status" "$hostReadiness"
 
