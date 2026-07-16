@@ -19,6 +19,19 @@ static int64_t win_filetime_unix_micros(void) {
     return (int64_t)((uli.QuadPart - 116444736000000000ULL) / 10ULL);
 }
 
+static int64_t win_qpc_delta_to_nanos(int64_t delta_ticks, int64_t frequency) {
+    if (delta_ticks <= 0 || frequency <= 0) {
+        return 0;
+    }
+    int64_t seconds = delta_ticks / frequency;
+    int64_t remainder = delta_ticks % frequency;
+    if (seconds > INT64_MAX / 1000000000LL) {
+        return INT64_MAX;
+    }
+    int64_t nanos = seconds * 1000000000LL;
+    return nanos + (int64_t)((remainder * 1000000000LL) / frequency);
+}
+
 static int64_t win_monotonic_nanos(void) {
     static LARGE_INTEGER freq;
     static LARGE_INTEGER start;
@@ -30,7 +43,7 @@ static int64_t win_monotonic_nanos(void) {
         initialized = 1;
     }
     QueryPerformanceCounter(&now);
-    return (int64_t)(((now.QuadPart - start.QuadPart) * 1000000000LL) / freq.QuadPart);
+    return win_qpc_delta_to_nanos((int64_t)(now.QuadPart - start.QuadPart), (int64_t)freq.QuadPart);
 }
 #endif
 

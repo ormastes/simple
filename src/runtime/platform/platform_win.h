@@ -555,8 +555,12 @@ int64_t rt_time_now_nanos(void) {
     if (!QueryPerformanceFrequency(&freq) || !QueryPerformanceCounter(&count)) {
         return 0;
     }
-    /* Convert to nanoseconds: (count * 1e9) / freq */
-    return (int64_t)((count.QuadPart * 1000000000LL) / freq.QuadPart);
+    int64_t seconds = (int64_t)(count.QuadPart / freq.QuadPart);
+    int64_t remainder = (int64_t)(count.QuadPart % freq.QuadPart);
+    if (seconds > INT64_MAX / 1000000000LL) {
+        return INT64_MAX;
+    }
+    return seconds * 1000000000LL + (int64_t)((remainder * 1000000000LL) / freq.QuadPart);
 }
 
 int64_t rt_time_now_micros(void) {
@@ -564,8 +568,12 @@ int64_t rt_time_now_micros(void) {
     if (!QueryPerformanceFrequency(&freq) || !QueryPerformanceCounter(&count)) {
         return 0;
     }
-    /* Convert to microseconds: (count * 1e6) / freq */
-    return (int64_t)((count.QuadPart * 1000000LL) / freq.QuadPart);
+    int64_t seconds = (int64_t)(count.QuadPart / freq.QuadPart);
+    int64_t remainder = (int64_t)(count.QuadPart % freq.QuadPart);
+    if (seconds > INT64_MAX / 1000000LL) {
+        return INT64_MAX;
+    }
+    return seconds * 1000000LL + (int64_t)((remainder * 1000000LL) / freq.QuadPart);
 }
 
 /* ----------------------------------------------------------------
