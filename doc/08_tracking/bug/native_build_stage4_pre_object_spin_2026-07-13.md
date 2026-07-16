@@ -608,3 +608,10 @@ entry-closure companion is rejected before runtime or entry objects are
 compiled; it can no longer fall through to the ordinary object linker. The
 same admission precedes every SimpleOS dispatch and rejects those unsupported
 routes instead of bypassing the hosted strict-composition barrier.
+
+The Windows timestamp/progress owner now records a monotonic nanosecond epoch
+on both progress init and reset, then returns the nonnegative delta. Previously
+it returned absolute process-monotonic seconds, so reset did not reset elapsed
+time. The provider's logical Windows dependencies remain
+`rt_time_now_unix_micros` and `rt_time_now_nanos`; a dedicated archive policy
+still awaits measured COFF helper symbols and is not selected by Stage4.
