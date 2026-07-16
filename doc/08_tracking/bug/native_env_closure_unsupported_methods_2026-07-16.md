@@ -55,24 +55,45 @@ error: HIR lowering error in std.env.variables: unresolved name: name
    verified unchanged (a first, statement-level variant of this fix broke
    exactly that and was replaced).
 
-## Remaining gap (OPEN)
+## Remaining gap (`text.find` now FIXED, 2026-07-16 r_find_infer lane)
 
 With the three fixes above, the std.env closure now reaches MIR lowering and
 loud-fails on genuinely unimplemented native methods. At tip eaee86e1e4d that
 was `.find`/`.join`/`.last`/`.pop`; re-verified at tip 56e5862775c only
-`text.find` (expand_var_expr, lib/*/env/variables.spl) remains — join/last/pop
+`text.find` (expand_var_expr, lib/*/env/variables.spl) remained — join/last/pop
 resolved upstream in the interim:
 
 ```
 [ERROR] MIR error: MIR lowering error: unresolved method call: find
 ```
 
-These need native lowering support in
-50.mir/_MirLoweringExpr/method_calls_literals.spl (same family as the landed
-push/len/starts_with support). Additionally, even a direct
-`rt_env_get("HOME") != ""` probe that now BUILDS crashes at runtime (SIGSEGV
-in libc strlen) — the known "env_set SEGV only hits native-build" rt_env text
-ABI cluster, tracked separately.
+**Fixed** in `50.mir/_MirLoweringExpr/method_calls_literals.spl`: `find` is
+now handled in the same erased-receiver text-method arm as `rfind` (arity 1,
+maps to the already-deployed `rt_string_find` runtime extern — confirmed via
+`nm` on the deployed `bin/release/x86_64-unknown-linux-gnu/simple` and a
+direct extern-call probe under `bin/simple run`). `rt_string_find` was already
+in use for `rfind`, so no new runtime surface was needed. Seed interpreter
+parity confirmed: `interpreter_method/string.rs` ("find" arm) and
+`rt_string_find` both return a plain i64, -1 for not-found (language contract
+is `i64?`; the existing `rfind` comment's -1-vs-nil equivalence note applies
+identically here). Dual-backend probe (found index / not-found / empty
+needle) matches between `bin/simple run` (oracle) and `bin/simple
+native-build` (native, no trailing newline): `6` / `-1` / `0` both sides.
+
+Additionally, even a direct `rt_env_get("HOME") != ""` probe that now BUILDS
+crashes at runtime (SIGSEGV in libc strlen) — the known "env_set SEGV only
+hits native-build" rt_env text ABI cluster, tracked separately (unaffected by
+this fix; still open).
+
+`scripts/check/native-smoke-matrix.shs` was transiently blocked campaign-wide
+(verified at origin/main tip 45dcd340f16: ALL 15 probes, including a bare
+`print(1)`, failed with an unrelated pre-existing `error: semantic: type
+mismatch: cannot convert dict to int` before reaching any of this fix's code
+paths — see `native_build_dict_extern_regression_ca1e18c17_2026-07-16.md` /
+`desugar_module_rt_dict_keys_crash_2026-07-16.md`). That was fixed upstream
+(`b7f11bf098c`) by the time this lane's patch landed; re-verified at tip
+`f92419e4fc3` with this fix applied: `total=15 pass=15 fail=0
+codegen_fallback_hits=0`.
 
 ## Parity case disposition
 

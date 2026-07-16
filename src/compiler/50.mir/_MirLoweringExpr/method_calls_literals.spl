@@ -1437,6 +1437,17 @@ impl MirLowering:
         # (io_runtime.spl file_write: `rfind("/") ?? 0` then `<= 0` guard)
         # behaves identically for -1 and nil. Revisit if a closure site ever
         # distinguishes them.
+        # find (native_env_closure_unsupported_methods lane, 2026-07-16):
+        # same family as rfind, mapped to rt_string_find (already exported by
+        # the deployed seed and used by rfind above -- verified via `nm` on
+        # the deployed binary and a direct extern-call probe). Confirmed the
+        # seed interpreter (interpreter_method/string.rs "find") returns a
+        # plain i64, -1 for not-found, identical to rt_string_find -- so
+        # find/rfind share both the runtime symbol pattern AND the -1-vs-nil
+        # equivalence noted above. std.env.variables.expand_var_expr's
+        # `expr.find(":-")` / `.find(":=")` (the native_env_closure_
+        # unsupported_methods_2026-07-16 blocker) matches this exact
+        # zero-arg-string-arg / i64-result shape.
         # Bug (array.contains misrouted to string.contains): this whole arm
         # assumes an untyped/unresolved "contains" receiver is always a
         # STRING (mirroring trim/lower/split/replace/rfind, which really are
@@ -1482,10 +1493,11 @@ impl MirLowering:
                         if self.local_is_runtime_array(contains_recv_probe):
                             contains_recv_is_array = true
                     case _: ()
-        if (method == "trim" or method == "lower" or method == "to_lower" or method == "split" or method == "replace" or method == "rfind" or method == "contains") and resolution_is_unresolved and not contains_recv_is_array:
+        if (method == "trim" or method == "lower" or method == "to_lower" or method == "split" or method == "replace" or method == "rfind" or method == "find" or method == "contains") and resolution_is_unresolved and not contains_recv_is_array:
             val ts_arity_ok = match method:
                 case "split": args.len() == 1
                 case "rfind": args.len() == 1
+                case "find": args.len() == 1
                 case "replace": args.len() == 2
                 case "contains": args.len() == 1
                 case _: args.len() == 0
@@ -1525,6 +1537,7 @@ impl MirLowering:
                     case "replace": "rt_string_replace"
                     case "trim": "rt_string_trim"
                     case "rfind": "rt_string_rfind"
+                    case "find": "rt_string_find"
                     case "contains": "rt_string_contains"
                     case _: "rt_string_to_lower"
                 # Bug fix (task #178 text3 lane): trim/lower/to_lower/replace
