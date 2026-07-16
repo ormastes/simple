@@ -3,23 +3,13 @@
 use compiler.driver.driver_api_interpret (interpret_file)
 use compiler.common.driver_core_types (CompileResult)
 use std.nogc_sync_mut.sffi.cli (cli_get_args)
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_write, file_delete}
+use std.nogc_sync_mut.io.file_ops.{file_delete}
+use std.test_runner.test_result_wrapper.{build_interpreter_result_wrapper}
 
 fn report_errors(kind: text, errors: [text]) -> i64:
     for error in errors:
         print "font-evidence-runner: {kind}: {error}"
     1
-
-fn wrapped_path(path: text) -> text:
-    var slash = -1
-    var i = 0
-    while i < path.len():
-        if path[i:i + 1] == "/":
-            slash = i
-        i = i + 1
-    val dir = if slash >= 0: path[0:slash + 1] else: ""
-    val base = if slash >= 0: path[slash + 1:path.len()] else: path
-    dir + ".font_evidence_" + base
 
 fn main() -> i64:
     val args = cli_get_args()
@@ -27,20 +17,9 @@ fn main() -> i64:
         print "usage: font_evidence_runner <spec.spl>"
         return 2
 
-    val source = file_read(args[1])
-    if source == "":
-        print "font-evidence-runner: cannot read spec: {args[1]}"
-        return 1
-    val wrapped = wrapped_path(args[1])
-    if file_exists(wrapped):
-        print "font-evidence-runner: wrapper already exists: {wrapped}"
-        return 1
-    val harness = "use std.nogc_sync_mut.spec.{print_summary, get_exit_code, get_executed_test_count}\n" +
-        source + "\nprint_summary()\n" +
-        "if get_executed_test_count() == 0:\n    panic(\"font-evidence-runner: no examples executed\")\n" +
-        "if get_exit_code() != 0:\n    panic(\"font-evidence-runner: spec failed\")\n"
-    if not file_write(wrapped, harness):
-        print "font-evidence-runner: cannot write wrapper: {wrapped}"
+    val (wrapped, cleanup_path) = build_interpreter_result_wrapper(args[1])
+    if wrapped == "":
+        print "font-evidence-runner: cannot wrap spec: {args[1]}"
         return 1
     val result = interpret_file(wrapped)
     val code = match result:
@@ -52,7 +31,7 @@ fn main() -> i64:
         case CompileResult.BorrowError(errors): report_errors("borrow", errors)
         case CompileResult.CodegenError(message): report_errors("codegen", [message])
         case CompileResult.RuntimeError(message): report_errors("runtime", [message])
-    if not file_delete(wrapped):
-        print "font-evidence-runner: cannot delete wrapper: {wrapped}"
+    if cleanup_path != "" and not file_delete(cleanup_path):
+        print "font-evidence-runner: cannot delete wrapper: {cleanup_path}"
         return 1
     code

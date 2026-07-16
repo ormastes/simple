@@ -7,7 +7,8 @@
 
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions}
 use std.test_runner.test_runner_execute.{make_result_from_output}
-use std.io.{time_now_unix_micros}
+use std.test_runner.test_result_wrapper.{build_interpreter_result_wrapper}
+use std.io.{file_delete, file_exists, time_now_unix_micros}
 
 # SFFI declarations for fork bridge
 extern fn rt_fork_child_setup() -> i64
@@ -24,6 +25,10 @@ extern fn rt_cli_run_file(path: text, args: [text], gc_log: bool, gc_off: bool) 
 # =========================================================================
 
 fn run_test_file_fork(file_path: text, options: TestOptions) -> TestFileResult:
+    val (result_path, result_cleanup_path) = build_interpreter_result_wrapper(file_path)
+    if result_path == "":
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: 0, error: "failed to build interpreter result wrapper", timed_out: false, cached: false)
     val timeout_ms = options.timeout * 1000
     val start = time_now_unix_micros()
 
@@ -38,7 +43,7 @@ fn run_test_file_fork(file_path: text, options: TestOptions) -> TestFileResult:
         # Binary already in memory (COW), no loading needed.
         # rt_cli_run_file calls the Rust interpreter directly.
         var args: [text] = []
-        val result = rt_cli_run_file(file_path, args, options.gc_log, options.gc_off)
+        val result = rt_cli_run_file(result_path, args, options.gc_log, options.gc_off)
         rt_fork_child_exit(result)
         # UNREACHABLE — rt_fork_child_exit calls _exit()
         # Return a dummy value to satisfy type checker
@@ -48,6 +53,8 @@ fn run_test_file_fork(file_path: text, options: TestOptions) -> TestFileResult:
         # Fork failed — return error result
         val end = time_now_unix_micros()
         val duration_ms = (end - start) / 1000
+        if result_cleanup_path != "" and not options.keep_artifacts and file_exists(result_cleanup_path):
+            file_delete(result_cleanup_path)
         return TestFileResult(
             path: file_path,
             passed: 0,
@@ -66,6 +73,8 @@ fn run_test_file_fork(file_path: text, options: TestOptions) -> TestFileResult:
     val stdout = rt_fork_parent_stdout()
     val stderr = rt_fork_parent_stderr()
     val end = time_now_unix_micros()
+    if result_cleanup_path != "" and not options.keep_artifacts and file_exists(result_cleanup_path):
+        file_delete(result_cleanup_path)
     # duration_ms = only test execution time (excludes fork setup)
     val duration_ms = (end - after_fork) / 1000
 
@@ -87,4 +96,3 @@ fn run_test_file_fork(file_path: text, options: TestOptions) -> TestFileResult:
 # =========================================================================
 # Exports
 # =========================================================================
-

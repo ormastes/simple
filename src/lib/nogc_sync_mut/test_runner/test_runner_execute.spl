@@ -15,6 +15,7 @@
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions}
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
+use std.test_runner.test_result_wrapper.{build_interpreter_result_wrapper}
 use std.io.{file_exists, file_write, file_delete}
 use std.io.{time_now_unix_micros}
 use std.io.{process_run_timeout, process_run_with_limits, ProcessResult}
@@ -63,7 +64,15 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     # interpreter `run` path; rewrite them to method form first (sibling temp).
     val infix_path = preprocess_infix_matchers_only(file_path)
     val (wrapped_path, cleanup_path) = build_coverage_wrapper(infix_path, options)
-    val child_args = build_child_args(wrapped_path, options)
+    val (result_path, result_cleanup_path) = build_interpreter_result_wrapper(wrapped_path)
+    if result_path == "":
+        if cleanup_path != "" and not options.keep_artifacts and file_exists(cleanup_path):
+            file_delete(cleanup_path)
+        if infix_path != file_path and not options.keep_artifacts and file_exists(infix_path):
+            file_delete(infix_path)
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: 0, error: "failed to build interpreter result wrapper", timed_out: false, cached: false)
+    val child_args = build_child_args(result_path, options)
     val timeout_ms = options.timeout * 1000
     val setup_end = time_now_unix_micros()
     val setup_ms = (setup_end - setup_start) / 1000
@@ -85,6 +94,9 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
             if cleanup_path != "" and not options.keep_artifacts:
                 if file_exists(cleanup_path):
                     file_delete(cleanup_path)
+            if result_cleanup_path != "" and not options.keep_artifacts:
+                if file_exists(result_cleanup_path):
+                    file_delete(result_cleanup_path)
             if infix_path != file_path and not options.keep_artifacts:
                 if file_exists(infix_path):
                     file_delete(infix_path)
@@ -108,6 +120,9 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     if cleanup_path != "" and not options.keep_artifacts:
         if file_exists(cleanup_path):
             file_delete(cleanup_path)
+    if result_cleanup_path != "" and not options.keep_artifacts:
+        if file_exists(result_cleanup_path):
+            file_delete(result_cleanup_path)
     if infix_path != file_path and not options.keep_artifacts:
         if file_exists(infix_path):
             file_delete(infix_path)

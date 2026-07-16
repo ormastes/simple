@@ -746,6 +746,12 @@ child paths can return a stale nonzero process code after printing
 `0 failures`; do not classify those as file failures unless no BDD summary was
 parsed.
 
+Subprocess interpreter children are wrapped after matcher and coverage
+preprocessing; fork children receive the same result wrapper before `fork()`.
+The wrapper prints the shared spec summary, rejects failed examples, and rejects
+a run where no examples executed. A raw child exit code without that result
+contract is not test evidence.
+
 | Code | Meaning |
 |------|---------|
 | 0 | All pass |
@@ -946,9 +952,11 @@ bin/simple test test/03_system/ui/shared_ui_contract_spec.spl --tag slow
 - Skip tests without marking `pending`
 - Over-verify mocks -- verify behavior, not call counts
 
-### Interpreter Mode Limitation
+### Interpreter Mode
 
-The interpreter mode test runner only verifies file loading. The `it` block bodies do not execute in interpreter mode. Use compiled mode for actual execution of test logic.
+Interpreter mode executes supported `it` bodies and fails closed on red or
+zero-executed specs. Use native mode as additional coverage for syntax or
+runtime behavior that is not implemented by the interpreter.
 
 ---
 
