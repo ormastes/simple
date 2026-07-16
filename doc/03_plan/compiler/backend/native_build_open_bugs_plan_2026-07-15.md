@@ -95,6 +95,11 @@ Cranelift rejects ARM32 without leaving an object. AArch64 and RISC-V retain
 their dual-backend QEMU execution gates; hosted ARM32 linking remains
 explicitly unsupported.
 
+Windows x86_64 LLVM CI now also uses its freshly staged pure-Simple compiler
+to emit an `aarch64-pc-windows-msvc` COFF object with the default backend and
+requires `IMAGE_FILE_MACHINE_ARM64`. The legacy Windows ARM64 job that only
+inspected the repository's Linux binary has been removed.
+
 ---
 
 ## Wave 1 — Codegen silent-wrong (highest priority: wrong answers, no diagnostic)

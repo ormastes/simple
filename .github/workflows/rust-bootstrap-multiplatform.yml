@@ -22,6 +22,7 @@ on:
       - 'scripts/setup/platform-detect.shs'
       - 'test/fixtures/compiler/llvm_simd_row_native_probe.spl'
       - 'test/fixtures/native_crossmodule_result_u8/**'
+      - '.github/workflows/windows-tests.yml'
       - '.github/workflows/rust-bootstrap-multiplatform.yml'
   pull_request:
     paths:
@@ -44,6 +45,7 @@ on:
       - 'scripts/setup/platform-detect.shs'
       - 'test/fixtures/compiler/llvm_simd_row_native_probe.spl'
       - 'test/fixtures/native_crossmodule_result_u8/**'
+      - '.github/workflows/windows-tests.yml'
       - '.github/workflows/rust-bootstrap-multiplatform.yml'
   workflow_dispatch:
 
@@ -90,6 +92,10 @@ jobs:
     name: Native — ${{ matrix.name }} (${{ matrix.backend }})
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate bootstrap portability contracts
+        if: runner.os == 'Linux' && matrix.backend == 'llvm'
+        run: sh scripts/check/check-bootstrap-portability.shs
 
       - name: Setup MSVC
         if: runner.os == 'Windows'
@@ -204,6 +210,27 @@ jobs:
             NATIVE_PARITY_FAIL_ON_XFAIL=1 \
             PARITY_WORK_DIR="build/check/native-parity-${{ matrix.backend }}" \
             sh scripts/check/check-native-seed-parity.shs
+
+      - name: Run Windows ARM64 default-LLVM COFF object gate
+        if: runner.os == 'Windows' && matrix.backend == 'llvm'
+        shell: bash
+        run: |
+          stage3="$(find build/bootstrap/stage3 -type f -name simple.exe -print -quit)"
+          test -n "$stage3"
+          command -v llvm-readobj >/dev/null
+          mkdir -p build/check/windows-arm64
+          arm64_obj=build/check/windows-arm64/p2_add.obj
+          rm -rf build/check/windows-arm64/cache "$arm64_obj"
+          SIMPLE_RUNTIME_PATH="$PWD/src/compiler_rust/target/bootstrap" \
+            SIMPLE_NO_STUB_FALLBACK=1 "$stage3" native-build \
+            --target aarch64-pc-windows-msvc --emit-object \
+            --entry scripts/check/cert/redeploy_gate/fixtures/p2_add.spl \
+            --cache-dir build/check/windows-arm64/cache \
+            --output "$arm64_obj"
+          test -s "$arm64_obj"
+          header="$(llvm-readobj --file-headers "$arm64_obj")"
+          [[ "$header" == *"Format: COFF-ARM64"* ]]
+          [[ "$header" == *"Machine: IMAGE_FILE_MACHINE_ARM64 (0xAA64)"* ]]
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
