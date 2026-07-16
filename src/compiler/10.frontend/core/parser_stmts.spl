@@ -778,69 +778,48 @@ fn parse_if_stmt() -> i64:
     val elif_idx = elif_new(cond, then_body, else_body)
     stmt_if_stmt(cond, then_body, elif_idx, 0)
 
+fn parse_for_binding_name() -> text:
+    if par_kind_get() == 169:
+        parser_advance()
+        return "_"
+    if par_kind_get() == TOK_IDENT:
+        # Capture real identifier text before the keyword round-trip fallback.
+        val name = par_text_get()
+        parser_expect(6)
+        return name
+    val keyword_name = tok_kind_name(par_kind_get())
+    if keyword_lookup(keyword_name) == par_kind_get():
+        parser_advance()
+        return keyword_name
+    val invalid_name = par_text_get()
+    parser_expect(6)
+    invalid_name
+
+fn parse_for_binding_names(parenthesized: bool) -> text:
+    var names: [text] = []
+    names.push(parse_for_binding_name())
+    while par_kind_get() == 160:
+        parser_advance()
+        names.push(parse_for_binding_name())
+    if parenthesized:
+        parser_expect(141)
+    if not parenthesized and names.len() == 1:
+        return names[0]
+    var joined = "("
+    var ni = 0
+    while ni < names.len():
+        if ni > 0:
+            joined = joined + ","
+        joined = joined + names[ni]
+        ni = ni + 1
+    joined + ")"
+
 fn parse_for_stmt() -> i64:
     parser_advance()
-    var iter_name = ""
-    if par_kind_get() == 140:
-        # Tuple destructuring: for (a, b) in list:
-        # G40: any keyword or _ accepted as tuple-binding name via G26 round-trip.
-        parser_advance()  # consume (
-        var names: [text] = []
-        # G26/G40 round-trip bug (see parse_tuple_destructure_val above):
-        # tok_kind_name(TOK_IDENT) == "Ident" and keyword_lookup("Ident") ==
-        # TOK_IDENT (the not-a-keyword fallback), so the keyword round-trip
-        # check below is trivially true for EVERY plain identifier -- without
-        # this explicit TOK_IDENT branch first, every `for (k, v) in ...`
-        # name silently became the literal string "Ident" and the loop
-        # body's real `k`/`v` were never bound ("unresolved name: k"/"v").
-        if par_kind_get() == 169:
-            names.push("_")
-            parser_advance()
-        elif par_kind_get() == TOK_IDENT:
-            names.push(par_text_get())
-            parser_expect(6)
-        else:
-            val ft0_kn = tok_kind_name(par_kind_get())
-            if keyword_lookup(ft0_kn) == par_kind_get():
-                names.push(ft0_kn)
-                parser_advance()
-            else:
-                names.push(par_text_get())
-                parser_expect(6)
-        while par_kind_get() == 160:
-            parser_advance()  # consume ,
-            if par_kind_get() == 169:
-                names.push("_")
-                parser_advance()
-            elif par_kind_get() == TOK_IDENT:
-                names.push(par_text_get())
-                parser_expect(6)
-            else:
-                val ftN_kn = tok_kind_name(par_kind_get())
-                if keyword_lookup(ftN_kn) == par_kind_get():
-                    names.push(ftN_kn)
-                    parser_advance()
-                else:
-                    names.push(par_text_get())
-                    parser_expect(6)
-        parser_expect(141)
-        # Encode tuple pattern as "(a,b,c)" in iter_name
-        var joined = "("
-        var ni = 0
-        while ni < names.len():
-            if ni > 0:
-                joined = joined + ","
-            joined = joined + names[ni]
-            ni = ni + 1
-        joined = joined + ")"
-        iter_name = joined
-    elif par_kind_get() == 169:
-        # Wildcard binding: for _ in xs:
-        iter_name = "_"
+    val parenthesized = par_kind_get() == 140
+    if parenthesized:
         parser_advance()
-    else:
-        iter_name = par_text_get()
-        parser_expect(6)
+    val iter_name = parse_for_binding_names(parenthesized)
     parser_expect(50)
     val iterable = parse_expr()
     parser_expect(161)
@@ -1295,8 +1274,10 @@ fn parse_if_expr() -> i64:
 
 fn parse_for_expr() -> i64:
     parser_advance()
-    val iter_name = par_text_get()
-    parser_expect(6)
+    val parenthesized = par_kind_get() == 140
+    if parenthesized:
+        parser_advance()
+    val iter_name = parse_for_binding_names(parenthesized)
     parser_expect(50)
     val iterable = parse_expr()
     parser_expect(161)

@@ -61,19 +61,6 @@ Retained logs:
 Each ends with bare `empty`, exit 1, and no runner artifact. Do not repeat these
 three experiments without new dispatch-owner evidence.
 
-## Separate deployed-runtime blocker
-
-The available pure-Simple release ELF
-`release/x86_64-unknown-linux-gnu/simple` (SHA-256
-`04a38e21d6fbd86149d46d3ee2d761349f8ad29b02c5037a8eb589b6a1b9e4e0`)
-links an obsolete two-argument `rt_env_set`. GDB proves current callers pass
-`key_ptr,key_len,value_ptr,value_len`, but that artifact's `rt_env_set`
-disassembly consumes only the first two registers and passes `key_len` as the
-`setenv` value pointer. `test --help` and the source font runner therefore exit
-139. Current runtime sources already implement the four-argument ABI; rebuild
-and relink after the seed dispatch blocker is fixed rather than adding a CLI or
-font workaround.
-
 ## Verification and next blocker
 
 - `cargo check -p simple-compiler --tests` passes.
@@ -129,7 +116,51 @@ the tuple-destructuring grammar fix in a fresh bounded session; do not restart
 bootstrap here. A later successful candidate must still be copied without a
 sibling seed and run a real focused SSpec through `test` before admission.
 
+## Fresh bounded cycle (2026-07-16)
+
+The shared `for` target parser now accepts the repository's unparenthesized
+tuple form (`for name, value in ...`) through the same tuple encoding already
+used by the parenthesized form. The first retained retry stopped during
+discovery on six one-line mutating methods in
+`src/app/test_daemon/session_broker.spl` with `expected Fn, found Assign`.
+Because assignment is a side-effecting statement rather than an expression,
+those methods now use canonical indented bodies. Keep the compact assignment
+form recorded as unsupported until both discovery and native execution gain a
+focused grammar gate; do not silently reintroduce it.
+
+The second retry used the retained Stage-3 compiler directly without the
+wrapper's Stage-4 environment. It reached final link after closure discovery
+accepted the canonical session-broker method bodies, but linked the
+non-Stage-4 core-C archive and therefore reported the expected broad
+hosted-symbol omissions. This does not prove that a compiler containing the new
+tuple parser was built: the retained Stage-3 binary predates that source patch.
+The invocation is not a runtime-bundle defect and must not be repeated; the
+canonical environment sets `SIMPLE_BOOTSTRAP_STAGE4=1`, forces the whole
+archive, and clears the runtime override.
+
+The third and final retry used that exact canonical environment. After roughly
+one hour and more than 5 GiB RSS, its in-process phase repeated the old
+`unified_registry.spl:74` comma diagnostic. Inspection of the retained Stage-3
+binary shows that it contains the old `parse_for_stmt`/`parse_for_expr` logic
+and no `parse_for_binding_names` helper; its timestamp also predates the tuple
+source patch. Native object caching occurs after parsing and therefore cannot
+explain this parse-time diagnostic. This is not grounds for a fourth retry. A
+fresh bounded session must rebuild Stage 2 and Stage 3 from the patched source
+with an isolated cache, run the focused core-parser regression, and only then
+attempt the canonical Stage-4 command once.
+
 Do not fall back to the removed Rust-hosted bundle. After a pure CLI candidate
 passes admission, build the focused runner once and execute the calibration. A
 PASS still requires runner SHA-256 plus distinct deliberate-fail and
 zero-example exit-1 logs.
+
+The currently deployed pure CLI is not an admissible test runner. Its ELF has
+SHA-256 `04a38e21d6fbd86149d46d3ee2d761349f8ad29b02c5037a8eb589b6a1b9e4e0`;
+both `test --help` and a focused interpreter run exit 139 before the runner
+banner. GDB stops in `setenv`: `rt_env_set` receives value address `0x11` from
+the recursion-depth update in `_CliMain.main`. The native interpolation of the
+arithmetic expression produced a non-text value. Both the full CLI and the
+lightweight test entry now pass `(depth + 1).to_text()` to `env_set`, with
+source regressions for the two dispatch paths. This fix is pending the same
+fresh Stage-2/Stage-3 rebuild required by the tuple-parser change; do not claim
+the runner is runnable until the rebuilt candidate executes a focused spec.
