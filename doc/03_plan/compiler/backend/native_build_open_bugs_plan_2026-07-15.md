@@ -50,7 +50,7 @@ source fixes from executable proof.
 | 16 | Target-aware global cfg selection implemented across native, driver/JIT, imports, and module loading; AArch64/RISC-V LLVM object regressions added, execution pending. |
 | 17 | Module+owner-qualified method identity implemented through imports, HIR, MIR, bootstrap, trait defaults, and static methods; strict LLVM+Cranelift dispatch proof pending. |
 | 18 | Pure-Simple Cranelift dynload globals now declare, initialize, load, and store writable scalar data; strict LLVM+Cranelift init/mutation proof pending. |
-| 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, test-only deterministic requested-symbol owner validation, and pure-Simple explicit-entry dispatch are source-implemented; aggregate final-closure derivation, full link-profile fingerprint, remaining providers, production provider selection/link wiring, and strict execution remain. |
+| 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, POSIX/macOS/BSD core-C process-timeout ownership, test-only deterministic requested-symbol owner validation, and pure-Simple explicit-entry dispatch are source-implemented; aggregate final-closure derivation, full link-profile fingerprint, Windows process capture, remaining providers, production provider selection/link wiring, and strict execution remain. |
 | 20 | C-owned host-GPU queue facade and fail-closed archive ownership checks implemented; native queue execution proof remains. |
 | 21 | Reduced to the Rust seed parser's inline-continuation consumption bug; inline-first and block-first source fixes plus focused chained-inline regressions are implemented, while regression and real inspector execution remain pending. The pure-Simple parser needed no rewrite. |
 
@@ -117,7 +117,8 @@ remain test-only prerequisites. The exact CLI profile must derive its final requ
 closure after entry-object creation, validate unique archive ownership, and then
 order Simple objects → compiler capsule → capability providers → core-C → system
 libraries. The current provider inventory covers compiler hooks, time/progress,
-SQLite, and memtrack only; GPU/font/dynload, window, HTTP, process/thread,
+SQLite, memtrack, and POSIX/macOS/BSD process timeout only; GPU/font/dynload,
+window, HTTP, remaining process/thread,
 SMF/CUDA, and other CLI owners remain. Core-C currently overlaps memtrack, raw
 `libsimple_native_all.a` selection and allow-multiple-definition are still
 invalid for the strict profile, and provider ownership needs a separate link

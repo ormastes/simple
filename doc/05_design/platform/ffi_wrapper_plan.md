@@ -256,7 +256,7 @@ build/rust/
 | FFI Function | Rust API | Status |
 |--------------|----------|--------|
 | `rt_process_run` | `Command::output()` | DONE |
-| `rt_process_run_timeout` | Command + timeout | DONE (stub) |
+| `rt_process_run_timeout` | Direct exec + capture + monotonic timeout | POSIX/macOS/BSD source complete; Windows fail-closed; native proof pending |
 | `rt_process_run_with_limits` | nix + rlimit | DONE (stub) |
 | `rt_process_spawn` | `Command::spawn()` | TODO |
 | `rt_process_kill` | `Child::kill()` | TODO |

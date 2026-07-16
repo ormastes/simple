@@ -22,6 +22,16 @@
 #include "runtime.h"
 #include <string.h>
 
+SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
+    (void)cmd; (void)cmd_len; (void)args; (void)timeout_ms;
+    const char* error = "rt_process_run_timeout unsupported on Windows";
+    SplArray* result = rt_array_new(3);
+    rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
+    rt_array_push(result, rt_string_new((const uint8_t*)error, (uint64_t)strlen(error)));
+    rt_array_push(result, rt_value_int(-1));
+    return result;
+}
+
 int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
     (void)cmd; (void)args;
     return -1;
@@ -42,6 +52,7 @@ bool rt_process_is_alive(int64_t pid) {
 #else /* POSIX */
 
 #include "runtime.h"
+#include "runtime_fork.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,6 +78,31 @@ static struct RtProcSlot s_procs[RT_PROC_MAX];
 
 /* Static read buffer — returned pointer is valid until the next call */
 static char s_read_buf[RT_PROC_READ_BUF];
+
+static SplArray* process_timeout_result(const char* stdout_text, const char* stderr_text, int64_t code, int timed_out, int64_t timeout_ms) {
+    const char* out = stdout_text ? stdout_text : "";
+    const char* err = stderr_text ? stderr_text : "";
+    char* timeout_error = NULL;
+    if (timed_out) {
+        char marker[96];
+        snprintf(marker, sizeof(marker), "[TIMEOUT: Process killed after %lldms]", (long long)timeout_ms);
+        size_t err_len = strlen(err);
+        size_t marker_len = strlen(marker);
+        timeout_error = (char*)malloc(err_len + marker_len + 2);
+        if (timeout_error) {
+            memcpy(timeout_error, err, err_len);
+            if (err_len > 0) timeout_error[err_len++] = '\n';
+            memcpy(timeout_error + err_len, marker, marker_len + 1);
+            err = timeout_error;
+        }
+    }
+    SplArray* result = rt_array_new(3);
+    rt_array_push(result, rt_string_new((const uint8_t*)out, (uint64_t)strlen(out)));
+    rt_array_push(result, rt_string_new((const uint8_t*)err, (uint64_t)strlen(err)));
+    rt_array_push(result, rt_value_int(code));
+    free(timeout_error);
+    return result;
+}
 
 /* ===== Internal helpers ===== */
 
@@ -172,6 +208,55 @@ int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
     int64_t pid = rt_process_spawn_piped_argv(cmd, argv);
     free(argv);
     return pid;
+}
+
+SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
+    if (!cmd || cmd_len == 0 || cmd_len > SIZE_MAX - 1) {
+        return process_timeout_result("", "missing command", -1, 0, timeout_ms);
+    }
+
+    char* cmd_c = (char*)malloc((size_t)cmd_len + 1);
+    if (!cmd_c) return process_timeout_result("", "process spawn failed", -1, 0, timeout_ms);
+    memcpy(cmd_c, cmd, (size_t)cmd_len);
+    cmd_c[cmd_len] = '\0';
+
+    int64_t argc = args ? rt_array_len(args) : 0;
+    char** argv = (char**)malloc(sizeof(char*) * (size_t)(argc + 2));
+    if (!argv) {
+        free(cmd_c);
+        return process_timeout_result("", "process spawn failed", -1, 0, timeout_ms);
+    }
+    argv[0] = cmd_c;
+    for (int64_t i = 0; i < argc; i++) {
+        const uint8_t* data = rt_string_data(rt_array_get(args, i));
+        argv[i + 1] = (char*)(data ? data : (const uint8_t*)"");
+    }
+    argv[argc + 1] = NULL;
+
+    int64_t child_pid = rt_fork_child_setup();
+    if (child_pid == 0) {
+        int null_fd = open("/dev/null", O_RDONLY);
+        if (null_fd >= 0) {
+            (void)dup2(null_fd, STDIN_FILENO);
+            close(null_fd);
+        }
+        (void)unsetenv("_SIMPLE_STACK_SET");
+        execvp(cmd_c, argv);
+        perror("rt_process_run_timeout execvp");
+        rt_fork_child_exit(127);
+    }
+
+    free(argv);
+    free(cmd_c);
+    if (child_pid < 0) return process_timeout_result("", "process spawn failed", -1, 0, timeout_ms);
+
+    int64_t code = rt_fork_parent_wait(child_pid, timeout_ms > 0 ? timeout_ms : 0);
+    int timed_out = rt_fork_parent_timed_out() ? 1 : 0;
+    if (rt_fork_parent_signaled()) code = -1;
+    const char* out = rt_fork_parent_stdout();
+    const char* err = rt_fork_parent_stderr();
+    if (code == 127 && err && strstr(err, "rt_process_run_timeout execvp") != NULL) code = -1;
+    return process_timeout_result(out, err, code, timed_out, timeout_ms);
 }
 
 int64_t rt_editor_spawn_simple_dap(void) {

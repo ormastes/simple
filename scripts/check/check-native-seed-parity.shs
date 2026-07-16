@@ -1006,6 +1006,36 @@ fn main() -> i64:
 EOF
 }
 
+write_case_process_run_timeout() {
+    cat >"$1" <<'EOF'
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn main() -> i64:
+    val (arg_out, _, arg_code) = rt_process_run_timeout("/bin/sh", ["-c", "printf '%s' \"$1\"", "sh", "a b"], 2000)
+    print(arg_out)
+    print(arg_code)
+    val (out, err, code) = rt_process_run_timeout("/bin/sh", ["-c", "printf out; printf err >&2; exit 7"], 2000)
+    print(out)
+    print(err)
+    print(code)
+    val (large_out, large_err, large_code) = rt_process_run_timeout("/bin/sh", ["-c", "(i=0; while [ $i -lt 25000 ]; do printf 0123456789; i=$((i+1)); done) & (i=0; while [ $i -lt 25000 ]; do printf 9876543210 >&2; i=$((i+1)); done) & wait"], 5000)
+    print(large_out.len())
+    print(large_err.len())
+    print(large_code)
+    val (partial_out, partial_err, timeout_code) = rt_process_run_timeout("/bin/sh", ["-c", "printf partial; printf problem >&2; sleep 2"], 500)
+    print(partial_out)
+    print(partial_err.contains("problem"))
+    print(partial_err.contains("TIMEOUT"))
+    print(timeout_code)
+    val (_, _, orphan_code) = rt_process_run_timeout("/bin/sh", ["-c", "sleep 5 & echo $! > /tmp/simple_timeout_descendant_$PPID; exit 0"], 2000)
+    print(orphan_code)
+    val (descendant_state, _, descendant_check_code) = rt_process_run_timeout("/bin/sh", ["-c", "sleep 0.1; pid=$(cat /tmp/simple_timeout_descendant_$PPID); state=$(ps -o stat= -p \"$pid\" 2>/dev/null | tr -d ' '); case \"$state\" in ''|Z*) printf gone ;; *) printf alive ;; esac; rm -f /tmp/simple_timeout_descendant_$PPID"], 2000)
+    print(descendant_state)
+    print(descendant_check_code)
+    0
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # Runner: shared helpers.
 # ---------------------------------------------------------------------------
@@ -1249,6 +1279,7 @@ run_strict_dual_backend_case module_global_false_first_read write_case_module_gl
 run_strict_dual_backend_case enum_text_callback write_case_enum_text_callback "run"
 run_strict_dual_backend_case option_is_none_map write_case_option_is_none_map "011099"
 run_strict_dual_backend_case any_forwarding write_case_any_forwarding "10"
+run_strict_dual_backend_case process_run_timeout write_case_process_run_timeout "ab0outerr72500002500000partialtruetrue-10gone0"
 run_parity_case dict_from_call_keys write_case_dict_from_call_keys
 run_parity_case array_concat write_case_array_concat
 run_parity_case interp_bool_float write_case_interp_bool_float

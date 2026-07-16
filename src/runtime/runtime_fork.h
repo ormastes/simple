@@ -16,6 +16,7 @@
 #ifndef SPL_RUNTIME_FORK_H
 #define SPL_RUNTIME_FORK_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -48,9 +49,16 @@ int64_t rt_fork_child_setup(void);
  *
  * Returns:
  *   exit code of child process
- *   -1 on timeout or signal death
+ *   128 + signal number on signal death
+ *   -1 on timeout or wait/capture failure
  */
 int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms);
+
+/* True only when the most recent parent wait reached its deadline. */
+bool rt_fork_parent_timed_out(void);
+
+/* True only when the most recent child terminated by signal. */
+bool rt_fork_parent_signaled(void);
 
 /*
  * Get captured stdout from the last rt_fork_parent_wait() call.

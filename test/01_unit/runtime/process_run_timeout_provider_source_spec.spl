@@ -1,0 +1,40 @@
+extern fn rt_file_read_text(path: text) -> text
+
+use std.spec.{describe, it, expect}
+
+describe "core C process timeout provider":
+    it "owns the four-word tagged tuple ABI":
+        val header = rt_file_read_text("src/runtime/runtime.h") ?? ""
+        val provider = rt_file_read_text("src/runtime/runtime_process.c") ?? ""
+        val codegen = rt_file_read_text("src/compiler_rust/compiler/src/codegen/runtime_sffi.rs") ?? ""
+        val calls = rt_file_read_text("src/compiler_rust/compiler/src/codegen/instr/calls.rs") ?? ""
+
+        expect(header).to_contain("SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms);")
+        expect(provider).to_contain("SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms)")
+        expect(provider).to_contain("rt_array_new(3)")
+        expect(provider).to_contain("rt_string_new")
+        expect(provider).to_contain("rt_value_int(code)")
+        expect(codegen).to_contain("RuntimeFuncSpec::new(\"rt_process_run_timeout\", &[I64, I64, I64, I64], &[I64])")
+        expect(calls).to_contain("\"rt_process_run\" | \"rt_process_spawn\" | \"rt_process_execute\" | \"rt_process_run_timeout\" => Some((&[0], &[1]))")
+
+    it "captures POSIX output and cleans the timed process group":
+        val provider = rt_file_read_text("src/runtime/runtime_process.c") ?? ""
+        val fork_owner = rt_file_read_text("src/runtime/runtime_fork.c") ?? ""
+
+        expect(provider).to_contain("rt_fork_child_setup()")
+        expect(provider).to_contain("execvp(cmd_c, argv)")
+        expect(provider).to_contain("rt_fork_parent_wait(child_pid, timeout_ms > 0 ? timeout_ms : 0)")
+        expect(provider).to_contain("rt_fork_parent_stdout()")
+        expect(provider).to_contain("rt_fork_parent_stderr()")
+        expect(provider).to_contain("if (rt_fork_parent_signaled()) code = -1")
+        expect(fork_owner).to_contain("clock_gettime(CLOCK_MONOTONIC")
+        expect(fork_owner).to_contain("setpgid(0, 0)")
+        expect(fork_owner).to_contain("kill(-(pid_t)child_pid, SIGKILL)")
+        expect(fork_owner).to_contain("cleanup_descendants = stdout_open || stderr_open")
+        expect(fork_owner).to_contain("waitpid_nointr((pid_t)child_pid, &child_status, WNOHANG)")
+
+    it "fails closed on Windows until capture uses a Job Object":
+        val provider = rt_file_read_text("src/runtime/runtime_process.c") ?? ""
+
+        expect(provider).to_contain("rt_process_run_timeout unsupported on Windows")
+        expect(provider).to_contain("rt_value_int(-1)")

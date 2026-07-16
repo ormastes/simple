@@ -28,6 +28,9 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
     return -1;
 }
 
+bool rt_fork_parent_timed_out(void) { return false; }
+bool rt_fork_parent_signaled(void) { return false; }
+
 const char* rt_fork_parent_stdout(void) { return ""; }
 const char* rt_fork_parent_stderr(void) { return "fork not supported on Windows"; }
 
@@ -58,6 +61,8 @@ static int s_stderr_read_fd = -1;
 /* Stored results from last rt_fork_parent_wait() */
 static char* s_result_stdout = NULL;
 static char* s_result_stderr = NULL;
+static bool s_result_timed_out = false;
+static bool s_result_signaled = false;
 
 /* Initial and growth size for pipe read buffers */
 #define PIPE_BUF_INIT  4096
@@ -74,6 +79,14 @@ static void set_nonblocking(int fd) {
 static void free_results(void) {
     if (s_result_stdout) { SPL_FREE(s_result_stdout); s_result_stdout = NULL; }
     if (s_result_stderr) { SPL_FREE(s_result_stderr); s_result_stderr = NULL; }
+}
+
+static pid_t waitpid_nointr(pid_t pid, int* status, int options) {
+    pid_t waited;
+    do {
+        waited = waitpid(pid, status, options);
+    } while (waited < 0 && errno == EINTR);
+    return waited;
 }
 
 int64_t rt_fork_child_setup(void) {
@@ -106,6 +119,9 @@ int64_t rt_fork_child_setup(void) {
     if (pid == 0) {
         /* === CHILD PROCESS === */
 
+        /* Own a process group so timeout cleanup includes descendants. */
+        (void)setpgid(0, 0);
+
         /* Close read ends (parent uses these) */
         close(stdout_pipe[0]);
         close(stderr_pipe[0]);
@@ -128,6 +144,9 @@ int64_t rt_fork_child_setup(void) {
 
     /* === PARENT PROCESS === */
 
+    /* Close the race where the parent reaches timeout before the child sets it. */
+    (void)setpgid(pid, pid);
+
     /* Close write ends (child uses these) */
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
@@ -148,6 +167,8 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
 
     /* Free any previous results */
     free_results();
+    s_result_timed_out = false;
+    s_result_signaled = false;
 
     int stdout_fd = s_stdout_read_fd;
     int stderr_fd = s_stderr_read_fd;
@@ -158,12 +179,30 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
     size_t out_cap = PIPE_BUF_INIT;
     size_t out_len = 0;
     char* out_buf = (char*)SPL_MALLOC(out_cap, "fork_buf");
-    if (!out_buf) out_buf = (char*)SPL_CALLOC(1, 1, "fork_buf");
+    if (!out_buf) {
+        out_cap = 1;
+        out_buf = (char*)SPL_CALLOC(1, 1, "fork_buf");
+    }
 
     size_t err_cap = PIPE_BUF_INIT;
     size_t err_len = 0;
     char* err_buf = (char*)SPL_MALLOC(err_cap, "fork_buf");
-    if (!err_buf) err_buf = (char*)SPL_CALLOC(1, 1, "fork_buf");
+    if (!err_buf) {
+        err_cap = 1;
+        err_buf = (char*)SPL_CALLOC(1, 1, "fork_buf");
+    }
+    if (!out_buf || !err_buf) {
+        if (out_buf) SPL_FREE(out_buf);
+        if (err_buf) SPL_FREE(err_buf);
+        close(stdout_fd);
+        close(stderr_fd);
+        if (kill(-(pid_t)child_pid, SIGKILL) != 0) {
+            (void)kill((pid_t)child_pid, SIGKILL);
+        }
+        int status;
+        (void)waitpid_nointr((pid_t)child_pid, &status, 0);
+        return -1;
+    }
 
     /* Set non-blocking for poll */
     set_nonblocking(stdout_fd);
@@ -173,6 +212,11 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
     int stdout_open = 1;
     int stderr_open = 1;
     int timed_out = 0;
+    int child_exited = 0;
+    int child_status = 0;
+    int cleanup_descendants = 0;
+    int capture_failed = 0;
+    int wait_failed = 0;
 
     /* Calculate deadline */
     struct timespec ts_start;
@@ -183,6 +227,10 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
     }
 
     while (stdout_open || stderr_open) {
+        if (!child_exited) {
+            pid_t waited = waitpid_nointr((pid_t)child_pid, &child_status, WNOHANG);
+            if (waited == (pid_t)child_pid) child_exited = 1;
+        }
         struct pollfd fds[2];
         int nfds = 0;
 
@@ -200,7 +248,8 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
         }
 
         /* Calculate remaining time */
-        int poll_timeout = -1; /* infinite */
+        /* Wake periodically to observe a child whose descendants retain pipe fds. */
+        int poll_timeout = 50;
         if (timeout_ms > 0) {
             struct timespec ts_now;
             clock_gettime(CLOCK_MONOTONIC, &ts_now);
@@ -210,18 +259,21 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
                 timed_out = 1;
                 break;
             }
-            poll_timeout = (int)remaining;
+            if (remaining < poll_timeout) poll_timeout = (int)remaining;
         }
 
         int ret = poll(fds, nfds, poll_timeout);
         if (ret < 0) {
             if (errno == EINTR) continue;
-            break; /* poll error */
+            wait_failed = 1;
+            break;
         }
         if (ret == 0) {
-            /* Timeout */
-            timed_out = 1;
-            break;
+            if (child_exited) {
+                cleanup_descendants = stdout_open || stderr_open;
+                break;
+            }
+            continue;
         }
 
         /* Process events */
@@ -249,10 +301,16 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
                 while (1) {
                     /* Grow buffer if needed */
                     if (*len_ptr + PIPE_BUF_GROW > *cap_ptr) {
-                        *cap_ptr = *cap_ptr * 2;
-                        char* new_buf = (char*)SPL_REALLOC(*buf_ptr, *cap_ptr, "fork_buf");
-                        if (!new_buf) break;
+                        size_t new_cap = *cap_ptr;
+                        while (*len_ptr + PIPE_BUF_GROW > new_cap) new_cap *= 2;
+                        char* new_buf = (char*)SPL_REALLOC(*buf_ptr, new_cap, "fork_buf");
+                        if (!new_buf) {
+                            capture_failed = 1;
+                            *open_ptr = 0;
+                            break;
+                        }
                         *buf_ptr = new_buf;
+                        *cap_ptr = new_cap;
                     }
 
                     ssize_t n = read(fds[i].fd, *buf_ptr + *len_ptr, *cap_ptr - *len_ptr - 1);
@@ -275,11 +333,20 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
                 else stderr_open = 0;
             }
         }
+        if (capture_failed) break;
+        if (child_exited) {
+            cleanup_descendants = stdout_open || stderr_open;
+            break;
+        }
     }
 
     /* Close pipe read ends */
     close(stdout_fd);
     close(stderr_fd);
+
+    if (cleanup_descendants) {
+        (void)kill(-(pid_t)child_pid, SIGKILL);
+    }
 
     /* Null-terminate buffers */
     out_buf[out_len] = '\0';
@@ -290,25 +357,37 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
     s_result_stderr = err_buf;
 
     /* Handle timeout: kill child */
-    if (timed_out) {
-        kill((pid_t)child_pid, SIGKILL);
+    if (timed_out || wait_failed || capture_failed) {
+        s_result_timed_out = timed_out != 0;
+        if (kill(-(pid_t)child_pid, SIGKILL) != 0) {
+            (void)kill((pid_t)child_pid, SIGKILL);
+        }
         int status;
-        waitpid((pid_t)child_pid, &status, 0); /* Reap zombie */
-        return -1; /* Timeout indicator (matches existing convention) */
+        (void)waitpid_nointr((pid_t)child_pid, &status, 0);
+        return -1;
     }
 
     /* Wait for child to finish */
-    int status;
-    pid_t waited = waitpid((pid_t)child_pid, &status, 0);
+    int status = child_status;
+    pid_t waited = child_exited ? (pid_t)child_pid : waitpid_nointr((pid_t)child_pid, &status, 0);
 
     if (waited < 0) {
         return -1;
     } else if (WIFEXITED(status)) {
         return (int64_t)WEXITSTATUS(status);
     } else if (WIFSIGNALED(status)) {
-        return (int64_t)(128 + WTERMSIG(status)); /* Standard convention */
+        s_result_signaled = true;
+        return (int64_t)(128 + WTERMSIG(status));
     }
     return -1;
+}
+
+bool rt_fork_parent_timed_out(void) {
+    return s_result_timed_out;
+}
+
+bool rt_fork_parent_signaled(void) {
+    return s_result_signaled;
 }
 
 const char* rt_fork_parent_stdout(void) {

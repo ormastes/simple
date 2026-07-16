@@ -434,6 +434,7 @@ char*    spl_sprintf(const char* fmt, ...);
 int64_t  spl_shell(const char* cmd);
 char*    spl_shell_output(const char* cmd);  /* capture stdout */
 SplArray* rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args);
+SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms);
 
 /* ===== Process Async ===== */
 

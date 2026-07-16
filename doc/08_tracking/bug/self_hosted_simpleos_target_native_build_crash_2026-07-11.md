@@ -284,6 +284,11 @@ The missing `rt_array_len_safe` name required three aligned owner surfaces: the 
 
 With that fix, fresh stage 2 and self-hosted stage 3 succeeded. The strict full-CLI build reached final link, where the bootstrap stage had not exposed the hosted runtime archive and therefore omitted symbols such as `spl_dlsym`, `rt_process_run_timeout`, and platform GUI functions. Verification awaits a fresh capped cycle.
 
+The 2026-07-15 source follow-up adds the canonical POSIX/macOS/BSD core-C
+`rt_process_run_timeout` owner; Windows is fail-closed pending Job Object capture.
+This removes one provider gap but does not close the remaining Stage4 profile or
+replace the required capped executable verification.
+
 Correction: `rust-hosted` is a removed CLI bundle name, and the Cranelift native-build lane does not switch bundles through `SIMPLE_RUNTIME_PATH`. The full CLI closure must be reduced to supported core dependencies or gain an explicit supported hosted link lane; the ineffective environment workaround was removed.
 ## 2026-07-12 focused target handoff
 
