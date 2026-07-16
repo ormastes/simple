@@ -1,10 +1,14 @@
 use compiler.backend.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.config.{Logger}
 use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.*
+use compiler.mir.mir_lowering_types.{MirLowering}
 
 # mutglobal lane (module-level `var` mutation storage, see
 # scratchpad/mutglobal_plan.md). MirModule.statics/MirStatic previously had
@@ -91,6 +95,15 @@ fn build_mutable_global_module() -> MirModule:
     functions[bump_fn.symbol] = bump_fn
     MirModule(name: "test.llvm.mutable_global", functions: functions, statics: statics, constants: {}, types: {})
 
+fn translate_literal_globals() -> text:
+    val source = "var count = 5\nvar ratio = 1.5\nvar flag = false\nvar name = \"\"\n"
+    val ast = parse_full_frontend(source, "literal_globals.spl", "literal_globals.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("literal_globals.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    MirToLlvm.create("test.llvm.literal_globals", CodegenTarget.X86_64, nil).translate_module(mir)
+
 describe "LLVM mutable global static (mutglobal lane)":
     it "emits a real @global declaration with the static's initializer":
         val translator = MirToLlvm.create("test.llvm.mutable_global", CodegenTarget.X86_64, nil)
@@ -109,3 +122,12 @@ describe "LLVM mutable global static (mutglobal lane)":
         val output = translator.translate_module(build_mutable_global_module())
 
         expect(output).to_contain("store i64 %l2, ptr @g_counter")
+
+    it "infers primitive literal types for unannotated module globals", tag: ["only-compiled"]:
+        val output = translate_literal_globals()
+
+        expect(output).to_contain("@g_count = global i64 5")
+        expect(output).to_contain("@g_ratio = global double 1.5")
+        expect(output).to_contain("@g_flag = global i1 0")
+        expect(output).to_contain("@g_name = global ptr getelementptr inbounds")
+        expect(output.contains("global i64 getelementptr")).to_equal(false)
