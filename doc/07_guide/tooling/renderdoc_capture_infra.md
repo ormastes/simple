@@ -65,6 +65,11 @@ per-run output.
   files under the selected build directory and reports
   `gui_web_2d_vulkan_direct_run_status=pass` only when all direct lanes produce
   real artifacts. This is direct launch evidence, not a RenderDoc `.rdc` claim.
+- `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 --browser-backing` runs the
+  same direct Windows launch path, then forwards the shared
+  `gui-web-2d-vulkan-browser-backing-status.js` validator rows. Treat a
+  failing `gui_web_2d_vulkan_browser_backing_status` as authoritative even when
+  Electron/Chrome ARGB capture passes.
 - `scripts/setup/setup-gui-web-2d-vulkan-env.ps1 --renderdoc` runs the Windows
   direct evidence path and then attempts a RenderDoc Chrome capture when
   `renderdoccmd` or `qrenderdoc` is available. It emits

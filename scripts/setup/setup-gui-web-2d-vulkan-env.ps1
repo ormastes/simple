@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("--check", "--run", "--renderdoc", "--print-install")]
+    [ValidateSet("--check", "--run", "--browser-backing", "--renderdoc", "--print-install")]
     [string]$Mode = "--check",
     [string]$BuildDir = "build\gui-web-2d-vulkan-env-windows",
     [string]$EvidencePath = "",
@@ -18,6 +18,8 @@ if ($RemainingArgs -contains "--print-install" -or $MyInvocation.Line -match '(^
     $Mode = "--print-install"
 } elseif ($RemainingArgs -contains "--run" -or $MyInvocation.Line -match '(^|\s)--run(\s|$)') {
     $Mode = "--run"
+} elseif ($RemainingArgs -contains "--browser-backing" -or $MyInvocation.Line -match '(^|\s)--browser-backing(\s|$)') {
+    $Mode = "--browser-backing"
 } elseif ($RemainingArgs -contains "--renderdoc" -or $MyInvocation.Line -match '(^|\s)--renderdoc(\s|$)') {
     $Mode = "--renderdoc"
 } elseif ($RemainingArgs -contains "--check" -or $MyInvocation.Line -match '(^|\s)--check(\s|$)') {
@@ -44,6 +46,7 @@ Required checks:
   Get-Command renderdoccmd
   powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-vulkan-env.ps1 --check
   powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-vulkan-env.ps1 --run
+  powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-vulkan-env.ps1 --browser-backing
   powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-vulkan-env.ps1 --renderdoc
 "@
 }
@@ -107,6 +110,14 @@ function Value-Or($map, [string[]]$keys, [string]$defaultValue = "") {
 
 function Add-Row($rows, [string]$key, [string]$value) {
     $rows.Add("$key=$value") | Out-Null
+}
+
+function Add-EnvRows($rows, [string[]]$lines) {
+    foreach ($line in $lines) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        if ($line -notmatch '^[A-Za-z0-9_]+=.') { continue }
+        $rows.Add($line) | Out-Null
+    }
 }
 
 function Json-Value-Or([string]$path, [string[]]$keys, [string]$defaultValue = "") {
@@ -231,6 +242,7 @@ $HtmlFullPath = if ([System.IO.Path]::IsPathRooted($HtmlPath)) { $HtmlPath } els
 $NodeSource = Command-Source "node"
 $ElectronCaptureScript = Join-Path $RootDir "tools\electron-live-bitmap\capture_html_argb.js"
 $ChromeCaptureScript = Join-Path $RootDir "tools\chrome-live-bitmap\capture_html_argb.js"
+$BrowserBackingScript = Join-Path $RootDir "scripts\check\gui-web-2d-vulkan-browser-backing-status.js"
 
 $vulkanSdkBin = Candidate-Path $env:VULKAN_SDK "Bin"
 $vulkanInfoSource = Tool-Source @("vulkaninfo", "vulkaninfo.exe") @(
@@ -293,7 +305,7 @@ if ($vulkanInfoStatus -ne "pass") {
     $hostReadiness = "pass"
 }
 
-Add-Row $rows "gui_web_2d_vulkan_mode" $(if ($Mode -eq "--renderdoc") { "windows-renderdoc" } elseif ($Mode -eq "--run") { "windows-run" } else { "windows-check" })
+Add-Row $rows "gui_web_2d_vulkan_mode" $(if ($Mode -eq "--renderdoc") { "windows-renderdoc" } elseif ($Mode -eq "--browser-backing") { "windows-browser-backing" } elseif ($Mode -eq "--run") { "windows-run" } else { "windows-check" })
 Add-Row $rows "gui_web_2d_vulkan_build_dir" "$BuildFullDir"
 Add-Row $rows "gui_web_2d_vulkan_evidence_path" "$EvidencePath"
 Add-Row $rows "gui_web_2d_vulkan_windows_setup_wrapper" "scripts/setup/setup-gui-web-2d-vulkan-env.ps1"
@@ -323,7 +335,8 @@ Add-Row $rows "gui_web_2d_vulkan_sdk_tools_status" "$sdkToolsStatus"
 Add-Row $rows "gui_web_2d_vulkan_host_readiness_status" "$hostReadiness"
 
 $runStatus = "not-run"
-if ($Mode -eq "--run" -or $Mode -eq "--renderdoc") {
+$browserBackingStatus = "not-run"
+if ($Mode -eq "--run" -or $Mode -eq "--browser-backing" -or $Mode -eq "--renderdoc") {
     $runStatus = "fail"
     $electronOut = Join-Path $BuildFullDir "electron.out"
     $electronLog = Join-Path $BuildFullDir "electron.log"
@@ -410,6 +423,17 @@ if ($Mode -eq "--run" -or $Mode -eq "--renderdoc") {
     if ($simpleStatus -eq "pass" -and $electronArgbStatus -eq "pass" -and $chromeArgbStatus -eq "pass") {
         $runStatus = "pass"
     }
+    if ($NodeSource -ne "" -and (Test-Path -LiteralPath $BrowserBackingScript)) {
+        $browserBackingOut = @(& $NodeSource "$BrowserBackingScript" "$electronProof" "$electronArgb" "$chromeProof")
+        Add-EnvRows $rows $browserBackingOut
+        $browserBackingStatus = ($browserBackingOut | Where-Object { $_ -like "gui_web_2d_vulkan_browser_backing_status=*" } | Select-Object -Last 1) -replace '^.*=', ''
+        if ($browserBackingStatus -eq "") { $browserBackingStatus = "unknown" }
+    } else {
+        $browserBackingStatus = "unavailable"
+        Add-Row $rows "gui_web_2d_vulkan_browser_backing_mode" "gpu-feature-status"
+        Add-Row $rows "gui_web_2d_vulkan_browser_backing_status" "$browserBackingStatus"
+        Add-Row $rows "gui_web_2d_vulkan_browser_backing_reason" "missing-node-or-browser-backing-script"
+    }
     Add-Row $rows "gui_web_2d_vulkan_direct_run_status" "$runStatus"
 }
 
@@ -465,7 +489,7 @@ if ($Mode -eq "--renderdoc") {
 $rows | Set-Content -Encoding ASCII -Path $EvidencePath
 $rows | ForEach-Object { Write-Output $_ }
 
-if (($Mode -eq "--check" -and $hostReadiness -eq "pass" -and $simpleStatus -eq "pass") -or ($Mode -eq "--run" -and $runStatus -eq "pass") -or ($Mode -eq "--renderdoc" -and $runStatus -eq "pass" -and $renderdocCaptureStatus -eq "pass")) {
+if (($Mode -eq "--check" -and $hostReadiness -eq "pass" -and $simpleStatus -eq "pass") -or ($Mode -eq "--run" -and $runStatus -eq "pass") -or ($Mode -eq "--browser-backing" -and $runStatus -eq "pass" -and $browserBackingStatus -eq "pass") -or ($Mode -eq "--renderdoc" -and $runStatus -eq "pass" -and $renderdocCaptureStatus -eq "pass")) {
     exit 0
 }
 exit 1
