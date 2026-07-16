@@ -670,6 +670,21 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
             if preflight_kinds != "":
                 preflight_kinds = preflight_kinds + ","
             preflight_kinds = preflight_kinds + preflight.1
+    # NOTE(2026-07-16 investigation): tried removing this early-out so a
+    # single unresolved taskbar icon wouldn't blank the whole desktop -- the
+    # per-command loop below already renders everything it can and accounts
+    # for the rest as skipped, so in principle it's the right accountant.
+    # BUT with the bail removed, rendering batch 3 (taskbar-objects, 9
+    # commands) drove execution into _engine2d_draw_ir_render_box and then
+    # into a runaway fault loop with a corrupted (garbage, non-kernel-range)
+    # instruction pointer -- a real memory-corruption bug in the CPU
+    # rasterizer path, most likely an unclipped rect/border/shadow draw
+    # overrunning the now-correctly-reported 3840x2160 framebuffer (see
+    # draw_rect_filled's `if self.clip_enabled` clipping in
+    # backend_baremetal.spl, which no-ops when clip is disabled). That bug
+    # must be root-caused and fixed FIRST; until then this bail is the only
+    # thing keeping the kernel from hanging for the full boot timeout. Filed
+    # for follow-up rather than shipped half-fixed.
     if preflight_skipped > 0:
         var rejected_readback = engine2d_readback([], "not_requested")
         if readback_frame:

@@ -233,9 +233,16 @@ class Engine2dWmFrameExecutor:
                     serial_println("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} path=host-gpu scene_revision={scene_revision}")
                 return scene_revision
         val result = engine2d_draw_ir_adv_composition_present_with_images(self.engine, composition, false, images)
-        if result.fallback_required or result.skipped_command_count != 0 or result.rendered_command_count <= 0:
-            serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} degraded={degraded_window_count} skipped={result.skipped_command_count} reason={result.fallback_reason}")
+        # A partially-unsupported composition (e.g. one taskbar icon whose
+        # image never resolved because the backing disk lease is degraded)
+        # must still show the commands that DID render -- rejecting the
+        # whole frame over one unresolved icon regressed to a fully black
+        # screen even though 9 of 14 commands were perfectly renderable
+        # (SimpleOS baremetal desktop, 2026-07-16). Only bail when the
+        # composition produced literally nothing.
+        if result.rendered_command_count <= 0:
+            serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} degraded={degraded_window_count} skipped={result.skipped_command_count} rendered={result.rendered_command_count} fallback_required={result.fallback_required} reason={result.fallback_reason}")
             return 0
-        if degraded_window_count > 0:
-            serial_println("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} rendered={result.rendered_command_count} scene_revision={scene_revision}")
+        if degraded_window_count > 0 or result.skipped_command_count != 0:
+            serial_println("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={result.skipped_command_count} rendered={result.rendered_command_count} scene_revision={scene_revision}")
         scene_revision

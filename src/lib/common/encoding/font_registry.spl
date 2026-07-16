@@ -17,6 +17,7 @@ use std.common.crypto.sha256.{sha256_u8_hex}
 use std.io_runtime.{env_get}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_exists(path: text) -> bool
 
 # Pinned CLDR 48.2 literate-functional reach evidence. The annotated tag object
 # peels to the source commit below. Totals use per-territory fixed-decimal
@@ -372,8 +373,17 @@ fn validate_selected_font_asset(path: text, blob: [u8]) -> FontAssetRuntimeValid
     _validate_selected_font_asset(path, blob)
 
 fn load_selected_font_file(path: text) -> ([u8], FontAssetRuntimeValidation):
-    """Read and validate the exact bytes returned to the caller."""
+    """Read and validate the exact bytes returned to the caller.
+
+    Existence-gate the raw read: on freestanding/baremetal targets
+    rt_file_read_bytes is a hosted-only trap stub that HALTS the kernel,
+    while rt_file_exists is either VFS-backed (kernel export) or a plain
+    hosted check. A missing font must fail SOFT into the bitmap fallback,
+    not take down the first desktop compose (proven live 2026-07-16:
+    first-frame render halted in [TRAP] rt_file_read_bytes)."""
     val physical_path = selected_font_asset_physical_path(path)
+    if not rt_file_exists(physical_path):
+        return ([], _validate_selected_font_asset(path, []))
     val blob = rt_file_read_bytes(physical_path)
     (blob, _validate_selected_font_asset(path, blob))
 

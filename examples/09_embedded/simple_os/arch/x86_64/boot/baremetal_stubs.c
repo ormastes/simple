@@ -8369,6 +8369,12 @@ static void bga_write(uint16_t index, uint16_t value)
     outw(BGA_DATA_PORT, value);
 }
 
+static uint16_t bga_read_reg(uint16_t index)
+{
+    outw(BGA_INDEX_PORT, index);
+    return inw(BGA_DATA_PORT);
+}
+
 static uint32_t pci_config_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off)
 {
     uint32_t addr = 0x80000000u
@@ -8490,8 +8496,22 @@ RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
     if (width < 64 || width > 8192) {
         width = 1024;
     }
-    /* Initialize BGA display mode (1024x768x32) before setting fb params */
-    bga_init(width, 768, 32);
+    /* Only program a fallback 768-line BGA mode when no mode is active yet.
+     * The Simple-side driver (bga_init_scanout) programs and READBACK-verifies
+     * the real desktop mode BEFORE rt_gui_set_fb is called; unconditionally
+     * re-running bga_init here reprogrammed YRES to 768 and silently shrank
+     * the QEMU scanout from 3840x2160 to 3840x768 (root cause of the
+     * height-768 QMP screendumps, 2026-07-16). Adopt an already-enabled mode
+     * instead of clobbering it. */
+    if ((bga_read_reg(0x04) & 0x01) == 0) {
+        /* No active VBE mode: legacy fallback init (1024x768x32-class). */
+        bga_init(width, 768, 32);
+    } else {
+        g_fb_addr = detect_vga_lfb();
+        g_fb_width = (uint32_t)bga_read_reg(0x01);
+        g_fb_height = (uint32_t)bga_read_reg(0x02);
+        g_fb_pitch = (uint32_t)bga_read_reg(0x06) * 4;
+    }
     g_fb_addr = g_fb_addr ? g_fb_addr : (uint64_t)addr;  /* prefer PCI-detected addr */
     g_fb_w = (uint64_t)width;
     /* Diagnostic: print fb address and width */
@@ -14119,10 +14139,12 @@ RuntimeValue rt_map_for_each(RuntimeValue map, RuntimeValue callback)
  * This makes it immediately obvious when kernel code accidentally
  * uses a hosted-only API path.
  */
+void _bt_dump_from(uint64_t fp); /* DEBUG-INSTR: rbp-chain backtrace */
 #define TRAP_STUB_RET(n, nargs) \
     RuntimeValue n(TRAP_ARGS_##nargs) { \
         TRAP_SUPPRESS_##nargs \
         serial_puts("[TRAP] " #n " called on baremetal -- halting\r\n"); \
+        _bt_dump_from((uint64_t)__builtin_frame_address(0)); \
         for (;;) { __asm__ volatile("hlt"); } \
         return 0; \
     }
@@ -14130,6 +14152,7 @@ RuntimeValue rt_map_for_each(RuntimeValue map, RuntimeValue callback)
     void n(TRAP_ARGS_##nargs) { \
         TRAP_SUPPRESS_##nargs \
         serial_puts("[TRAP] " #n " called on baremetal -- halting\r\n"); \
+        _bt_dump_from((uint64_t)__builtin_frame_address(0)); \
         for (;;) { __asm__ volatile("hlt"); } \
     }
 #define TRAP_ARGS_0   void
@@ -14151,7 +14174,19 @@ TRAP_STUB_RET(rt_file_move, 2)
 TRAP_STUB_RET(rt_file_rename, 2)
 TRAP_STUB_RET(rt_file_is_dir, 1)
 TRAP_STUB_RET(rt_file_is_file, 1)
-TRAP_STUB_RET(rt_file_read_bytes, 1)
+/* rt_file_read_bytes is WEAK: kernels that mount a VFS override it with a
+ * Simple-side @export("C") backed by g_vfs_read_file_bytes (see
+ * gui_entry_desktop.spl). Entries without a VFS keep the trap. Needed because
+ * lib font loading (font_registry.load_selected_font_file) legitimately
+ * reaches this symbol on baremetal once rt_file_exists (VFS-backed) says the
+ * asset is present; halting here killed the first desktop compose. */
+__attribute__((weak)) RuntimeValue rt_file_read_bytes(RuntimeValue _a) {
+    (void)_a;
+    serial_puts("[TRAP] rt_file_read_bytes called on baremetal -- halting\r\n");
+    _bt_dump_from((uint64_t)__builtin_frame_address(0));
+    for (;;) { __asm__ volatile("hlt"); }
+    return 0;
+}
 TRAP_STUB_RET(rt_file_write_bytes, 2)
 TRAP_STUB_RET(rt_file_stat, 1)
 TRAP_STUB_RET(rt_file_realpath, 1)
@@ -15132,9 +15167,13 @@ static void _serial_puthex64(uint64_t v) {
  * _rich_fault_print(rip, errcode, cs, rflags, cr2, cr3)
  *   => rdi=rip, rsi=errcode, rdx=cs, rcx=rflags, r8=cr2, r9=cr3
  */
+uint64_t g_fault_rbp; /* DEBUG-INSTR: faulting context frame pointer */
+
 __attribute__((naked)) static void _rich_fault_entry(void)
 {
     __asm__ volatile(
+        /* DEBUG-INSTR: capture faulting context RBP (untouched at entry) */
+        "movq %%rbp, g_fault_rbp(%%rip)\n\t"
         /* Save scratch registers */
         "pushq %%rax\n\t"
         "pushq %%rdx\n\t"
@@ -15235,7 +15274,28 @@ void _rich_fault_print(uint64_t rip, uint64_t errcode, uint64_t cs,
     serial_puts("[fault] rflags=");  _serial_puthex64(rflags);  serial_puts("\r\n");
     serial_puts("[fault] cr2=");     _serial_puthex64(cr2);     serial_puts("\r\n");
     serial_puts("[fault] cr3=");     _serial_puthex64(cr3);     serial_puts("\r\n");
+    _bt_dump_from(g_fault_rbp); /* DEBUG-INSTR */
     serial_puts("[fault] *** END FRAME (recovering) ***\r\n");
+}
+
+/* DEBUG-INSTR: walk an rbp frame chain, printing return addresses that land
+ * in kernel text. Heap-free, bounded, defensive against garbage frames. */
+void _bt_dump_from(uint64_t fp)
+{
+    for (int i = 0; i < 16; i++) {
+        if (fp < 0x1000 || fp >= 0x20000000 || (fp & 7) != 0)
+            break;
+        uint64_t ra   = *(volatile uint64_t *)(fp + 8);
+        uint64_t next = *(volatile uint64_t *)fp;
+        serial_puts("[bt] ra=");
+        _serial_puthex64(ra);
+        serial_puts("\r\n");
+        if (ra < 0x100000 || ra >= 0x1800000)
+            break;
+        if (next <= fp)
+            break;
+        fp = next;
+    }
 }
 
 /* rt_install_rich_fault_hook — Wave 7C: called from Simple arch_init.

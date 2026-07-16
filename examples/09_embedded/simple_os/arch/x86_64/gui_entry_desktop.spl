@@ -24,7 +24,7 @@
 
 use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
 use os.kernel.boot.cpu.{port_inb, port_outb}
-use os.drivers.framebuffer.bga_init.{bga_device_id, bga_init_scanout, bga_pci_decode_is_enabled, find_bga_pci_device, scanout_evidence_is_valid}
+use os.drivers.framebuffer.bga_init.{bga_device_id, bga_init_scanout, bga_pci_decode_is_enabled, find_bga_pci_device, scanout_evidence_is_valid, bga_mmio_read, bga_read}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
 use os.drivers.input.ps2_keyboard.{Ps2Keyboard}
 use os.drivers.input.ps2_mouse.{Ps2Mouse, MouseState}
@@ -53,6 +53,13 @@ use std.nogc_sync_mut.text_layout.font_renderer.{font_renderer_register_selected
 @export("C", name: "rt_file_exists")
 fn rt_file_exists(path: text) -> bool:
     g_vfs_file_exists(path)
+
+@export("C", name: "rt_file_read_bytes")
+fn rt_file_read_bytes(path: text) -> [u8]:
+    # Route hosted-style byte reads to the mounted VFS (overrides the weak
+    # baremetal trap stub). On a degraded/absent mount this returns empty
+    # bytes, so callers like font loading fail SOFT instead of halting.
+    g_vfs_read_file_bytes(path)
 
 @export("C", name: "ord")
 fn ord(value: text) -> i64:
@@ -102,6 +109,22 @@ fn _vram_mapping_probe(fb_addr: i64, pml4_phys: i64):
 
 fn unsafe_cast_probe_color() -> i32:
     2054847231  # 0x7A7B7C7F: distinctive non-black test pattern
+
+fn _dbg_vbe_readback(tag: text):
+    # DEBUG-INSTR: re-read live BGA/VBE dispi regs to catch late clobbers.
+    val pci = find_bga_pci_device()
+    if pci.found and pci.mmio_bar >= 0x01000000:
+        val x = bga_mmio_read(pci.mmio_bar, 0x01)
+        val y = bga_mmio_read(pci.mmio_bar, 0x02)
+        val en = bga_mmio_read(pci.mmio_bar, 0x04)
+        val vw = bga_mmio_read(pci.mmio_bar, 0x06)
+        val vh = bga_mmio_read(pci.mmio_bar, 0x07)
+        serial_println("[dbg-vbe] {tag} xres={x} yres={y} enable={en} virt_w={vw} virt_h={vh}")
+    else:
+        val x = bga_read(0x01)
+        val y = bga_read(0x02)
+        val en = bga_read(0x04)
+        serial_println("[dbg-vbe] {tag} io xres={x} yres={y} enable={en}")
 
 fn _taskbar_clock_region_rgb_sha256(fb: FramebufferDriver, width: i32, height: i32) -> text:
     if width < 56 or height < 48:
@@ -401,7 +424,9 @@ fn spl_start():
     # wrapper captures its baseline immediately after the readiness markers,
     # and an unpainted scanout at that instant is an honest FAIL, not a race
     # to be excused.
+    _dbg_vbe_readback("pre-first-frame")
     val first_frame_revision = shell.render_baremetal_first_frame(wm_frame_executor)
+    _dbg_vbe_readback("post-first-frame")
     if first_frame_revision <= 0:
         serial_println("[production-readiness-failed] reason=simple2d-or-simple-web-frame-invalid")
         port_outb(0xF4, 1)
