@@ -114,15 +114,20 @@
    on Linux/Xvfb/Electron.
 - Windows-native MDI/titlebar evidence now has a dedicated wrapper/spec lane:
   `scripts/check/check-windows-native-mdi-evidence.shs`,
+  `scripts/check/check-windows-native-mdi-evidence.ps1`,
   `test/03_system/gui/windows_native_mdi_evidence_spec.spl`, and the native
   probe entry `src/os/hosted/hosted_win32_mdi_probe.spl`. On non-Windows hosts
   this lane must skip explicitly with `requires-windows`; it does not fake a
   pass. The wrapper is designed to prove a real Win32-hosted Simple Web MDI
   window, screenshot semantic coverage, in-process drag/focus/minimize/restore
   lifecycle actions, and titlebar button/body button/body input markup
-  presence. Real Windows-host execution evidence is still missing from this
-  Linux host, so native Windows titlebar button/input/CSS/event verification is
-  still not proven yet.
+  presence. The PowerShell wrapper is the Windows-native entrypoint for hosts
+  without `/bin/sh`; on the 2026-07-16 Windows host it fails fast with
+  `simple-source-launch-failed` because the available self-hosted `simple.exe`
+  artifacts reject repo-local `.spl` source paths before opening the Win32 MDI
+  probe. Native Windows titlebar button/input/CSS/event verification remains
+  incomplete until that Simple source-launch bootstrap issue is fixed and the
+  wrapper reports `windows_native_mdi_evidence_status=pass`.
  - Pure GUI release/perf evidence now defines a WM/web/native-runtime-free command
    boundary, SMF/dynlib performance contract, and fail-closed probe row. Current
    Linux-host evidence intentionally reports `pass=false` without a real
