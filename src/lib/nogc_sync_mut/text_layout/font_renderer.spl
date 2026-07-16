@@ -22,6 +22,18 @@ use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
 use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new}
+
+# Raw mutex handles behind literal-0-initialized module vars. A module-level
+# `val x: Mutex = mutex_new(0)` (function-call initializer) does NOT run on the
+# freestanding/baremetal native-build — only literal initializers (0, [], nil)
+# execute at module-init — so the Mutex object stays a null receiver whose
+# .lock() derefs null (cr2=0x0) and kills the first WM compose. A `var: Any = 0`
+# literal DOES initialize; lazily create the raw handle on first use (heap is up
+# by then). Single-core baremetal makes the lock a no-op; hosted still gets real
+# mutual exclusion once created.
+extern fn rt_mutex_new(initial: Any) -> Any
+extern fn rt_mutex_lock(handle: Any) -> Any
+extern fn rt_mutex_unlock(handle: Any, new_value: Any) -> Any
 use std.skia.entity.font.{sk_font_new, sk_font_style_normal, sk_typeface_from_attached_font}
 use std.skia.feature.glyph.ot_parser.{parse_offset_table}
 use std.skia.feature.shaper.font_fallback.{fallback_chain_new}
@@ -62,7 +74,16 @@ val RESOLVED_FONT_METRICS_CACHE_CONTENT_LIMIT: i64 = 4096
 var _resolved_font_metric_keys: [text] = []
 var _resolved_font_metric_values: [ResolvedFontMetrics] = []
 var _resolved_font_metric_cursor: i64 = 0
-val _resolved_font_metric_lock: Mutex = mutex_new(0)
+var _resolved_font_metric_lock_handle: Any = 0
+
+fn _resolved_font_metric_lock_acquire():
+    if _resolved_font_metric_lock_handle == 0:
+        _resolved_font_metric_lock_handle = rt_mutex_new(0)
+    rt_mutex_lock(_resolved_font_metric_lock_handle)
+
+fn _resolved_font_metric_lock_release():
+    if _resolved_font_metric_lock_handle != 0:
+        rt_mutex_unlock(_resolved_font_metric_lock_handle, 0)
 
 fn _resolved_font_metric_key(family: text, content: text, font_size: i32, identity: text) -> text:
     _resolved_font_metric_language_key(family, content, font_size, identity, "und")
@@ -91,27 +112,27 @@ fn _font_shaped_glyph_destination(pen_x: i32, pen_y: i32, glyph: CachedGlyph, as
     (true, x.to_i32(), y.to_i32())
 
 fn _resolved_font_metric_cached(key: text) -> ResolvedFontMetrics?:
-    _resolved_font_metric_lock.lock()
+    _resolved_font_metric_lock_acquire()
     var found: ResolvedFontMetrics? = nil
     var index: i64 = 0
     while index < _resolved_font_metric_keys.len() and found == nil:
         if _resolved_font_metric_keys[index] == key:
             found = _resolved_font_metric_values[index]
         index = index + 1
-    _resolved_font_metric_lock.unlock(0)
+    _resolved_font_metric_lock_release()
     found
 
 fn _resolved_font_metric_store(key: text, metrics: ResolvedFontMetrics):
-    _resolved_font_metric_lock.lock()
+    _resolved_font_metric_lock_acquire()
     if _resolved_font_metric_keys.len() < RESOLVED_FONT_METRICS_CACHE_LIMIT:
         _resolved_font_metric_keys.push(key)
         _resolved_font_metric_values.push(metrics)
-        _resolved_font_metric_lock.unlock(0)
+        _resolved_font_metric_lock_release()
         return
     _resolved_font_metric_keys[_resolved_font_metric_cursor] = key
     _resolved_font_metric_values[_resolved_font_metric_cursor] = metrics
     _resolved_font_metric_cursor = (_resolved_font_metric_cursor + 1) % RESOLVED_FONT_METRICS_CACHE_LIMIT
-    _resolved_font_metric_lock.unlock(0)
+    _resolved_font_metric_lock_release()
 
 # Loaded-default-font cache keyed by resolved family. browser_default_for_family
 # does a real dlopen + TTF parse (the universal sans face is 17MB), so without
@@ -124,40 +145,49 @@ var _browser_default_font_renderers: [FontRenderer] = []
 var _registered_selected_font_paths: [text] = []
 var _registered_selected_font_blobs: [[u8]] = []
 var _registered_selected_fonts_only: bool = false
-val _browser_default_font_lock: Mutex = mutex_new(0)
+var _browser_default_font_lock_handle: Any = 0
+
+fn _browser_default_font_lock_acquire():
+    if _browser_default_font_lock_handle == 0:
+        _browser_default_font_lock_handle = rt_mutex_new(0)
+    rt_mutex_lock(_browser_default_font_lock_handle)
+
+fn _browser_default_font_lock_release():
+    if _browser_default_font_lock_handle != 0:
+        rt_mutex_unlock(_browser_default_font_lock_handle, 0)
 
 fn _registered_selected_font_bytes(path: text) -> ([u8], bool):
-    _browser_default_font_lock.lock()
+    _browser_default_font_lock_acquire()
     var index: i64 = 0
     while index < _registered_selected_font_paths.len():
         if _registered_selected_font_paths[index] == path:
             val blob = _registered_selected_font_blobs[index]
-            _browser_default_font_lock.unlock(0)
+            _browser_default_font_lock_release()
             return (blob, true)
         index = index + 1
-    _browser_default_font_lock.unlock(0)
+    _browser_default_font_lock_release()
     ([], false)
 
 fn font_renderer_registered_selected_bytes_only() -> bool:
-    _browser_default_font_lock.lock()
+    _browser_default_font_lock_acquire()
     val enabled = _registered_selected_fonts_only
-    _browser_default_font_lock.unlock(0)
+    _browser_default_font_lock_release()
     enabled
 
 fn font_renderer_use_registered_selected_bytes_only():
     """Keep freestanding consumers away from host-only file externs."""
-    _browser_default_font_lock.lock()
+    _browser_default_font_lock_acquire()
     _registered_selected_fonts_only = true
     for renderer in _browser_default_font_renderers:
         renderer.clear_ttf()
     _browser_default_font_families = []
     _browser_default_font_renderers = []
-    _browser_default_font_lock.unlock(0)
-    _resolved_font_metric_lock.lock()
+    _browser_default_font_lock_release()
+    _resolved_font_metric_lock_acquire()
     _resolved_font_metric_keys = []
     _resolved_font_metric_values = []
     _resolved_font_metric_cursor = 0
-    _resolved_font_metric_lock.unlock(0)
+    _resolved_font_metric_lock_release()
 
 fn font_renderer_register_selected_bytes(path: text, blob: [u8]) -> bool:
     """Register exact pinned bytes for producer metrics and executor loading."""
@@ -171,32 +201,32 @@ fn font_renderer_register_selected_bytes(path: text, blob: [u8]) -> bool:
     renderer.clear_ttf()
     if identity != selected_font_asset_identity(candidate.?):
         return false
-    _browser_default_font_lock.lock()
+    _browser_default_font_lock_acquire()
     for registered_path in _registered_selected_font_paths:
         if registered_path == path:
-            _browser_default_font_lock.unlock(0)
+            _browser_default_font_lock_release()
             return true
     _registered_selected_font_paths.push(path)
     _registered_selected_font_blobs.push(blob)
-    _browser_default_font_lock.unlock(0)
+    _browser_default_font_lock_release()
     true
 
 fn _browser_default_for_family_cached(family: text) -> (FontRenderer, bool):
-    _browser_default_font_lock.lock()
+    _browser_default_font_lock_acquire()
     var index: i64 = 0
     while index < _browser_default_font_families.len():
         if _browser_default_font_families[index] == family:
             val hit = _browser_default_font_renderers[index]
-            _browser_default_font_lock.unlock(0)
+            _browser_default_font_lock_release()
             return (hit, true)
         index = index + 1
-    _browser_default_font_lock.unlock(0)
+    _browser_default_font_lock_release()
     val loaded = FontRenderer.browser_default_for_family(family)
     if loaded.has_sffi_ttf():
-        _browser_default_font_lock.lock()
+        _browser_default_font_lock_acquire()
         _browser_default_font_families.push(family)
         _browser_default_font_renderers.push(loaded)
-        _browser_default_font_lock.unlock(0)
+        _browser_default_font_lock_release()
     (loaded, false)
 
 val FONT_ATLAS_WIDTH: i32 = 1024
