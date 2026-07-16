@@ -16,6 +16,9 @@
   calls it without raw-source recursion.
 - Route `test-daemon` dispatch directly to `app.test_daemon`; fingerprint the
   test and every dependency with SHA-256 through the shared file-hash facade.
+- Reuse one daemon binary selector in CLI, runner client, launcher, and daemon
+  child. Prefer a valid `SIMPLE_BINARY` candidate and spawn it with argv, not a
+  shell command.
 - Run repository UI/hot-loop lint gates only for explicit `--all`; keep focused
   lint local to its requested files.
 - Generated launcher templates own native candidate order and defaults; checked

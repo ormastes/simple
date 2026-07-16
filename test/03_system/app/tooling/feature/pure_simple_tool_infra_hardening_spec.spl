@@ -18,6 +18,7 @@ debug fallbacks.
 """
 
 use std.spec.*
+use std.io_runtime.{env_get}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
@@ -27,8 +28,14 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_time_now_unix_micros() -> i64
 
+fn qualification_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != nil and configured != "":
+        return configured
+    "bin/simple"
+
 fn qualification_runtime_identity() -> text:
-    val (out, err, code) = rt_process_run("bin/simple", ["--version"])
+    val (out, err, code) = rt_process_run(qualification_binary(), ["--version"])
     val identity = out + err
     if code != 0:
         return "unrunnable"
@@ -40,7 +47,7 @@ fn qualification_runtime_identity() -> text:
 
 fn qualification_run_command(args: [text], timeout_ms: i64) -> (text, text, i32, i64):
     val start = rt_time_now_unix_micros()
-    val (out, err, code) = rt_process_run_timeout("bin/simple", args, timeout_ms)
+    val (out, err, code) = rt_process_run_timeout(qualification_binary(), args, timeout_ms)
     val elapsed_ms = (rt_time_now_unix_micros() - start) / 1000
     (out, err, code, elapsed_ms)
 
@@ -72,13 +79,13 @@ fn qualification_hostile_path_probe() -> text:
     val (_setup_out, _setup_err, setup_code) = rt_process_run("/bin/sh", ["-c", setup])
     if setup_code != 0:
         return "setup-failed"
-    val (_out, _err, _code) = rt_process_run_timeout("bin/simple", ["duplicate-check", root], 30000)
+    val (_out, _err, _code) = rt_process_run_timeout(qualification_binary(), ["duplicate-check", root], 30000)
     if rt_file_exists(sentinel):
         return "shell-executed"
     "safe"
 
 fn qualification_daemon_done(result: text) -> text:
-    val (_out, _err, _code) = rt_process_run_timeout("bin/simple", ["test-daemon", "stop"], 30000)
+    val (_out, _err, _code) = rt_process_run_timeout(qualification_binary(), ["test-daemon", "stop"], 30000)
     result
 
 fn qualification_daemon_cache_probe() -> text:
@@ -88,25 +95,25 @@ fn qualification_daemon_cache_probe() -> text:
     val green = "use std.spec.*\ndescribe \"cache probe\":\n    it \"passes\":\n        expect(1).to_equal(1)\n"
     val red = "use std.spec.*\ndescribe \"cache probe changed\":\n    it \"fails after invalidation\":\n        expect(1).to_equal(2)\n"
     if not rt_file_write_text(path, green): return "setup-failed"
-    val (_stop_out, _stop_err, _stop_code) = rt_process_run_timeout("bin/simple", ["test-daemon", "stop"], 30000)
-    val (clean_out, clean_err, clean_code) = rt_process_run_timeout("bin/simple", ["test-daemon", "clean", path], 30000)
+    val (_stop_out, _stop_err, _stop_code) = rt_process_run_timeout(qualification_binary(), ["test-daemon", "stop"], 30000)
+    val (clean_out, clean_err, clean_code) = rt_process_run_timeout(qualification_binary(), ["test-daemon", "clean", path], 30000)
     if clean_code != 0 or not (clean_out + clean_err).contains("test_daemon_cache=clean"): return qualification_daemon_done("clean-failed")
-    val (hit_out, hit_err, hit_code) = rt_process_run_timeout("bin/simple", ["test-daemon", "run", path], 30000)
+    val (hit_out, hit_err, hit_code) = rt_process_run_timeout(qualification_binary(), ["test-daemon", "run", path], 30000)
     if hit_code != 0 or not (hit_out + hit_err).contains("test_daemon_cache=hit"): return qualification_daemon_done("hit-failed")
     if not rt_file_write_text(path, red): return qualification_daemon_done("edit-failed")
-    val (miss_out, miss_err, miss_code) = rt_process_run_timeout("bin/simple", ["test-daemon", "run", path], 30000)
+    val (miss_out, miss_err, miss_code) = rt_process_run_timeout(qualification_binary(), ["test-daemon", "run", path], 30000)
     if miss_code == 0 or not (miss_out + miss_err).contains("test_daemon_cache=miss"): return qualification_daemon_done("stale-hit")
-    val (_status_out, _status_err, status_code) = rt_process_run_timeout("bin/simple", ["test-daemon", "status"], 30000)
-    val (_done_out, _done_err, done_code) = rt_process_run_timeout("bin/simple", ["test-daemon", "stop"], 30000)
+    val (_status_out, _status_err, status_code) = rt_process_run_timeout(qualification_binary(), ["test-daemon", "status"], 30000)
+    val (_done_out, _done_err, done_code) = rt_process_run_timeout(qualification_binary(), ["test-daemon", "stop"], 30000)
     if status_code != 0 or done_code != 0: return "lifecycle-failed"
     "safe"
 
 fn qualification_termination_probe() -> text:
     val (_check_out, _check_err, check_code) = rt_process_run_timeout(
-        "bin/simple", ["--quiet", "check", "test/fixtures/pure_simple_tooling/clean.spl"], 30000)
+        qualification_binary(), ["--quiet", "check", "test/fixtures/pure_simple_tooling/clean.spl"], 30000)
     if check_code != 0: return "check-failed-or-timeout"
     val (_lean_out, _lean_err, lean_code) = rt_process_run_timeout(
-        "bin/simple", ["gen-lean", "not-a-command"], 30000)
+        qualification_binary(), ["gen-lean", "not-a-command"], 30000)
     if lean_code == 0 or lean_code == -1: return "gen-lean-did-not-fail-bounded"
     "safe"
 
@@ -265,6 +272,11 @@ describe "Pure-Simple tool and infrastructure hardening":
             ["ALLOW_SOURCE_FALLBACK", "PREFER_NATIVE"]
         )).to_equal("safe")
         expect(qualification_source_contract(
+            "scripts/check/check-windows-tool-wrapper-contract.ps1",
+            ["New-FakeNative", "without a sidecar", "mcp-error", "lsp-error", "content-addressed stamp", "explicit override fell through"],
+            []
+        )).to_equal("safe")
+        expect(qualification_source_contract(
             "src/app/test_daemon/light_daemon.spl",
             ["cached.result_status != -1"],
             ["cached.test_path != \"\""]
@@ -273,6 +285,16 @@ describe "Pure-Simple tool and infrastructure hardening":
             "src/app/cli/_CliMain/main_and_help.spl",
             ["use app.test_daemon.main.{cli_test_daemon}"],
             ["use app.io.cli_commands.{cli_test_daemon}"]
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "src/app/test_daemon/binary.spl",
+            ["env_get(\"SIMPLE_BINARY\")", "cli_get_args()", "file_exists(configured)"],
+            []
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "src/app/test_daemon/client.spl",
+            ["process_spawn_async(test_daemon_simple_binary(), [\"test-daemon\", \"start\"])"],
+            ["process_spawn_async(\"/bin/sh\"", "bin/simple test-daemon start"]
         )).to_equal("safe")
         expect(qualification_source_contract(
             "src/app/io/_CliCommands/handler_commands.spl",

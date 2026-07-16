@@ -13,6 +13,8 @@ design. Sidecars must not invent parallel names or silent placeholders.
 | B | duplicate-check IO/security, lint/fmt/fix ownership | `/root/lint_dup_audit` | `/root` | primary highest-capability Codex |
 | C | provenance, deployment, MCP/LSP/Linux/Windows wrappers | `/root/docs_scripts_audit` | `/root` | primary highest-capability Codex |
 | D | requirements, architecture, system spec/manual, integration, verification | primary `/root` | `/root` | primary highest-capability Codex |
+| E | post-sync check/type-inference and lint-debt audit | `/root/post_sync_completion`, `/root/pure_runtime_audit` | `/root` | primary highest-capability Codex |
+| F | isolated Windows resolver negative contracts | `/root/windows_parity_audit` | `/root` | primary highest-capability Codex |
 
 ## Merge order
 

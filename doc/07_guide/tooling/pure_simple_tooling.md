@@ -62,6 +62,9 @@ CLI dispatch imports the daemon's real application owner; no parallel daemon
 implementation is permitted under `app.io` or `app.cli`. Cache validity hashes
 the test source and every discovered dependency, so same-size rewrites and
 coarse filesystem timestamps cannot produce false hits.
+Daemon startup and child tests use the same selector. Set `SIMPLE_BINARY` when
+qualifying a candidate before deployment; the launcher passes it directly as
+argv and does not shell back to `bin/simple`.
 
 ## Focused and Repository-wide Checks
 

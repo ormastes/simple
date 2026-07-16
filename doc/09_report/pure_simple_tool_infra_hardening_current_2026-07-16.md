@@ -37,7 +37,7 @@ runtime remains unavailable, so executable qualification is still blocked.
 | Format/fix | SOURCE FIXED | Duplicate handlers removed; executable dry-run proof awaits admitted runtime | Run canonical dry-run and write fixtures after admission | P1 |
 | Check | BLOCKED | Command is parse/validation only; full type inference is not enforced | Implement enforcing type analysis, then qualify the production probe | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
-| Test daemon | IMPLEMENTED | Real application owner and content-hash invalidation implemented; dynamic matrix blocked by runtime | Execute run/clean/hit/miss/same-size dependency invalidation after admission | P2 |
+| Test daemon | IMPLEMENTED | Shared candidate selector, argv-safe startup, and content-hash invalidation implemented; dynamic matrix blocked by runtime | Execute pinned-candidate run/clean/hit/miss/same-size dependency invalidation after admission | P2 |
 | SPipe/docgen | WARN | Executable spec/manual exist; generated-doc validation blocked by seed | Regenerate once with admitted runtime | P1 |
 | MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P1 |
 | LSP MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P0 |
@@ -93,6 +93,24 @@ runtime remains unavailable, so executable qualification is still blocked.
 4. `simple check` now states its actual parse/validation behavior. Enforced full
    type inference remains an open P1 implementation bug.
 
+## Latest primary review decisions
+
+- **Type inference:** do not flip the existing HM warn pass to fatal yet. The
+  canonical driver is the right owner, but its checked-in burndown requires a
+  stable stage-4 runtime, crash/blast measurement, and false-positive triage
+  first. The lightweight production `check` contract stays truthful rather
+  than importing a currently unqualified compiler graph.
+- **UI isolation:** do not narrow the gate from all `rt_*` calls to rendering
+  names. The architecture explicitly forbids every direct runtime call in app,
+  example, and UI-library layers. Most of the 30 findings need existing
+  env/process/file/time facades; platform-owner exceptions need exact reviewed
+  ownership, while the RISC-V desktop entry retains genuine direct display
+  bypasses.
+- **CPU hot loops:** the 45 findings are not one mechanical baseline update.
+  Browser pixel/span work, software blend/copy loops, and repeated compositor
+  lookup are real owner-level debt; bounded parser/control/hardware polling
+  loops need exact reason annotations only after the real hot paths move.
+
 ## Latest bounded verification
 
 - Shell syntax, scoped diff hygiene, and the MCP/LSP native wrapper contract:
@@ -109,6 +127,17 @@ runtime remains unavailable, so executable qualification is still blocked.
 - Native smoke evidence no longer accepts historical cache-hit log lines or an
   arbitrary candidate stamp; it requires current-run records and verified
   repair of the selected candidate's exact content-hash stamp.
+- Daemon CLI, runner client, launcher, and child execution now share one
+  `SIMPLE_BINARY`-first selector; the system spec also runs every production
+  command through the pinned candidate.
+- Windows contract coverage now includes isolated fake-native negative cases
+  for sidecars, correlated protocol errors, stamp invalidation, and explicit
+  MCP/LSP overrides; execution still requires a Windows PowerShell host.
+- Shared daemon-selector caller/forbidden-shell source contracts, qualification
+  binary routing, Windows fake-contract markers, and owned whitespace: PASS.
+- New Simple unit/system behavior and the PowerShell contract: NOT RUN because
+  no admitted pure-Simple runtime or PowerShell host exists. Previously passed
+  global gates were not repeated after their session limit.
 - Isolated clean bootstrap: Stage 2 and Stage 3 self-hosting PASS in all three
   bounded cycles. Cycle 1 proved the typed `rt_dict_keys` repair and found the
   generic-close layout bug. Cycle 2 proved that repair and found missing

@@ -16,7 +16,8 @@ Its generated manual mirrors to
 5. Honor scoped multi-name lint attributes through the canonical parser.
 6. Derive dispatch inventory from the command table.
 7. Select cached native MCP/LSP artifacts and reject source/seed fallback.
-8. Prove daemon cache hit/miss equivalence and same-size dependency invalidation.
+8. Prove a pinned pre-deploy candidate survives daemon startup/child execution,
+   plus cache hit/miss equivalence and same-size dependency invalidation.
 9. Prove checker and `gen-lean` terminate within deadlines; checker help states
    only the validation it actually enforces.
 10. Measure warm CLI/test/MCP/LSP latency and max RSS against selected NFRs.

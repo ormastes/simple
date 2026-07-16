@@ -67,6 +67,9 @@ OK even when stdout contains a green-looking summary. The runner compares
 authored runnable examples with executed examples for interpreter SSpec files;
 count mismatch is `internal_error`. A daemon child receives an explicit marker;
 the client detects the marker and directly invokes the no-daemon runner.
+Daemon launch and child execution share one binary selector: an explicit
+`SIMPLE_BINARY` candidate wins, so pre-deploy qualification cannot fall back to
+the currently deployed `bin/simple`.
 
 Parent memory is bounded by fixed-size batch re-exec using the same command and
 serialized options. This is deliberately simpler than adding a new allocator or

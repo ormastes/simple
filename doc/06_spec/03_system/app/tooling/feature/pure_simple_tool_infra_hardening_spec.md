@@ -53,12 +53,19 @@ and corrupts the selected candidate's exact stamp. It passes stale-stamp repair
 only when the current re-probe succeeds and rewrites the expected content hash.
 Windows routes all three launchers through one bounded SHA-256/protocol
 admission helper and preserves argument forwarding.
+Its contract uses isolated fake native executables to reject absent/mismatched
+sidecars, correlated protocol errors, stale content-addressed stamps, and
+missing explicit MCP/LSP overrides without touching production artifacts.
 
 The production test-daemon probe exercises `clean`, cache hit, source-change
-miss, status, and stop through `bin/simple`. Cached and executed paths preserve
-the same exit outcome, while the response records `clean`, `hit`, or `miss`.
+miss, status, and stop through the selected qualification binary. Cached and
+executed paths preserve the same exit outcome, while the response records
+`clean`, `hit`, or `miss`.
 Main CLI dispatch reaches the daemon application's real owner, and dependency
 cache keys use content hashes so same-size dependency rewrites invalidate.
+CLI, test-runner client, launcher, and daemon child share one executable
+selector. A valid `SIMPLE_BINARY` pre-deploy candidate wins and is spawned with
+an argv vector, so qualification never silently switches to deployed tooling.
 
 ## Measure warm tooling budgets
 
