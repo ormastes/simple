@@ -364,9 +364,11 @@ symbol is verified from the artifact rather than passed through a nonexistent
 Engine2D runtime adapters.
 CUDA font execution uses the separately source-tracked Simple-generated PTX
 companion in `backend_cuda_font_ptx.spl`. The default CUDA 2D module contains
-no font entry. Canonical CUDA construction verifies the compiled source,
-emitter-version, PTX-hash, entry, and program-version tuple, then installs it
-through `Engine2D.install_cuda_font_artifact`. Once installed, CUDA uploads the
+no font entry. Canonical CUDA construction verifies the runtime PTX hash, entry,
+and program version, then attempts installation through
+`Engine2D.install_cuda_font_artifact`. The checker and focused SPipe compare the
+pinned source/emitter hashes exactly with the current Simple emitter. Once
+installed, CUDA uploads the
 atlas on generation change, marshals the exact 15-slot pointer ABI,
 synchronizes each submitted quad, and mirrors only completed prefixes.
 The installer rechecks payload consistency, then delegates to the existing
@@ -378,9 +380,10 @@ source-tracked tuple, proves tampered bytes reject, confirms canonical
 construction installed the pinned identity, dispatches one canonical
 `FontRenderBatch`, and compares device-origin readback with its CPU oracle. It
 is independent of the Vulkan Engine3D native evidence rows. A retained native
-PASS is still required for promotion. If the companion is missing, stale, or
-rejected, CUDA construction fails before rendering. Normal Engine2D
-construction never loads ignored `build/` output.
+PASS is still required for promotion. If the companion is missing, stale,
+rejected, or unsupported by the active driver's PTX ISA, CUDA font dispatch is
+unavailable and the existing CPU font fallback applies; primitive CUDA remains
+available. Normal Engine2D construction never loads ignored `build/` output.
 The current Simple package path is not that trust anchor: `PackageVerify` warns
 that checksum verification is skipped, and the package builder still emits
 `checksum_placeholder`. Treat checker artifacts as retained evidence only. Do

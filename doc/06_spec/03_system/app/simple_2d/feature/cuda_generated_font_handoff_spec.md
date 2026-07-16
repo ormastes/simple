@@ -12,15 +12,17 @@
 ### Authenticate the source-tracked Simple-generated CUDA font artifact
 
 The scenario loads the compiled-in PTX from
-`backend_cuda_font_ptx.spl`, recomputes its SHA-256, checks the independently
-pinned source hash, emitter-version hash, program version, and exact entry, and
-proves a one-byte change is rejected. It reads no environment variable,
+`backend_cuda_font_ptx.spl`, compares its source and emitter-version hashes with
+a fresh Simple CUDA emission, recomputes its PTX SHA-256, checks the program
+version and exact entry, and proves a one-byte change is rejected. It reads no environment variable,
 ignored build artifact, adjacent hash, or package placeholder.
 
 ### Prove native submission and device readback
 
 Canonical `Engine2D` CUDA construction installs the tracked bytes only through
-`install_cuda_font_artifact`. The scenario submits one 1×1
+`install_cuda_font_artifact` when the active driver accepts them. A rejected
+companion leaves primitive CUDA usable but cannot pass this required font
+scenario. The scenario submits one 1×1
 `FontRenderBatch`, requires `cuda:success`, captures a nonzero device readback
 handle, and compares all 16 pixels with the exact 4×4 CPU oracle. CUDA or
 artifact unavailability, fallback rendering, stale identity, or any pixel

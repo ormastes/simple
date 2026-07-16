@@ -335,8 +335,8 @@ if probe.status != BackendStatus.Initialized:
 
 ### CUDA font PTX addendum
 
-> Manually synchronized on 2026-07-15; no Simple/docgen or CUDA device command
-> ran in this session.
+> Manually synchronized on 2026-07-16; no unit/docgen or CUDA device command
+> passed in this session.
 
 The synchronized scenarios require the default CUDA 2D PTX module to exclude
 `simple_font_atlas_composite_v1_u32`; reject invalid batches and reset atlas
@@ -353,11 +353,17 @@ Checks that generic CUDA 2D PTX does not embed the generated font entry.
 Rejects empty, entry-less, suffix-only, and changed companion payloads while
 allowing an already-pinned identical generated PTX module.
 
-#### hands a checker-identified font artifact to Engine2D without invalid mutation
+#### rejects inconsistent caller-provided font artifacts without mutation
 
 Rejects empty payloads, wrong digests, wrong program versions, and wrong entry
-symbols before delegating one exact checker-identified artifact to the existing
-CUDA session installer.
+symbols before delegating one self-consistent caller-provided artifact to the
+existing CUDA session installer.
+
+#### keeps an already-pinned tracked CUDA font identity idempotent without a device load
+
+Checks runtime PTX identity and tamper rejection, then exercises only the
+already-loaded idempotence path. Real module load, cleanup, dispatch, and
+readback remain owned by the focused CUDA handoff system scenario.
 
 #### fails closed for invalid font batches and invalidates atlas generations
 

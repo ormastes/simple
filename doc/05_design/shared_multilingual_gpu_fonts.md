@@ -280,9 +280,12 @@ installation. Engine2D owns only bounded validation and session installation
 through `install_cuda_font_artifact`. The source-tracked
 `backend_cuda_font_ptx.spl` is the production owner: it binds generated PTX to
 the exact source hash, emitter-version hash, PTX SHA-256, entry, and
-`FONT_ATLAS_COMPOSITE_PROGRAM_VERSION`. `create_requested_backend` verifies
-that tuple and calls the existing installer after CUDA initialization; it never
-reads an environment variable, evidence file, or ignored build path.
+`FONT_ATLAS_COMPOSITE_PROGRAM_VERSION`. `create_requested_backend` verifies the
+runtime PTX hash, entry, and program version and attempts the existing installer
+after CUDA initialization; the checker and SPipe bind the source/emitter hashes
+to a fresh Simple emission. A rejected companion disables CUDA font dispatch,
+not primitive CUDA. The factory never reads an environment variable, evidence
+file, or ignored build path.
 
 The existing package verifier is not an alternative owner because checksum
 verification is explicitly skipped and its builder still produces

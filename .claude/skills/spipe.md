@@ -683,8 +683,9 @@ observe a pass:
   argument binding, submit/synchronize, and `device_readback`; conditional unit
   execution is not a release PASS when the device is unavailable.
   The CUDA adapter must prove the separately source-tracked Simple-generated
-  PTX companion passes its compiled source, emitter-version, PTX-hash, entry,
-  and program-version tuple, while checker regeneration matches that tuple and
+  PTX companion passes runtime PTX-hash, entry, and program-version checks,
+  while checker/SPipe exact equality binds its pinned source and emitter-version
+  hashes to the current Simple emission and
   the default 2D module provides no font entry; all 15 value/pointer slots are ordered exactly,
   atlas generation is invalidated on font replacement, each accepted prefix is synchronized before
   CPU-mirror parity is updated, and final pixels come from `device_readback`.

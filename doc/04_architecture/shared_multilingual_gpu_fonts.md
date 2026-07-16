@@ -283,10 +283,12 @@ Ignored `build/portable_compute_toolchains` output may prove emission and device
 execution, but Engine2D never discovers it. The source-tracked
 `backend_cuda_font_ptx.spl` owns the immutable PTX bytes, source/emitter hashes,
 expected PTX SHA-256, entry, and common program version. Canonical CUDA
-construction verifies that compiled trust tuple before passing the same values
-to `install_cuda_font_artifact`; failure tears down the CUDA engine. The current
-package verifier remains inadmissible because it skips checksum validation and
-its builder emits a placeholder checksum.
+construction verifies the runtime PTX hash, entry, and program version before
+attempting `install_cuda_font_artifact`. The checker and SPipe compare the
+source/emitter hashes exactly with a fresh Simple emission. A rejected companion
+leaves primitive CUDA available while font dispatch follows the existing CPU
+fallback policy. The current package verifier remains inadmissible because it
+skips checksum validation and its builder emits a placeholder checksum.
 
 ## Rejected structures
 

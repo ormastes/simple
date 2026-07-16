@@ -2,14 +2,15 @@
 
 Date: 2026-07-15
 
-Status: blocked on a reproducible pure-Simple emitter run (2026-07-16)
+Status: trust anchor implemented; retained CUDA device readback pending (2026-07-16)
 
 ## Impact
 
-The pure-Simple portable emitter and checker can generate and authenticate a
-CUDA font PTX for retained test evidence, and Engine2D can validate and install
-caller-supplied bytes. Production construction cannot safely auto-install that
-artifact because the only generated copy is mutable ignored `build/` output.
+The pure-Simple portable emitter and checker generated and authenticated a CUDA
+font PTX which is now source-tracked with immutable hashes. Engine2D validates
+and attempts that companion during CUDA construction without reading mutable
+ignored `build/` output or disabling primitive CUDA when the active driver
+cannot load the font PTX.
 
 ## Evidence
 
@@ -112,3 +113,15 @@ repair the compiler/backend defect, then rebuild the current Stage 3/Stage 4
 chain before resuming the scalar-argv sentinel and CUDA checker. Do not
 generate, pin, or install CUDA PTX until the current full CLI passes that
 sentinel.
+
+## 2026-07-16 trust-anchor implementation
+
+A stable pure-Simple emitter app produced the CUDA source without the test
+runner. `nvcc 13.0.88 --ptx -arch=compute_75` compiled the tracked companion;
+its PTX SHA-256 is
+`40afab945e6c40c239a6859d63723e76599758ea50e120e0edf7a058aa6922b4`.
+Runtime construction checks the PTX hash, exact versioned entry, and common
+program version. The checker and focused SPipe bind the pinned source and
+emitter-version hashes exactly to a fresh Simple emission. Criteria 1-3 are
+implemented; criterion 4 remains open until the canonical runner and retained
+CUDA device-origin readback pass.

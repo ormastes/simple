@@ -172,10 +172,10 @@ describe "<Feature Name>":
   its versioned exported symbol, and prove the promoted runtime loaded that same
   artifact; a handwritten PTX or independently generated SPIR-V blob is not
   emitter provenance. CUDA font execution must use the separately
-  source-tracked Simple-generated companion after its compiled source,
-  emitter-version, PTX-hash, entry, and program-version tuple passes; checker
-  regeneration must match that tuple. The default CUDA 2D module must not
-  provide the font entry.
+  source-tracked Simple-generated companion after runtime PTX hash, entry, and
+  program-version checks pass; checker/SPipe exact equality must bind its pinned
+  source and emitter-version hashes to the current Simple emission. The default
+  CUDA 2D module must not provide the font entry.
   Production CUDA loading additionally requires packaged or tracked generated
   PTX bound to an immutable trusted hash and program version; ignored `build/`
   output and caller-provided adjacent hashes cannot satisfy that trust gate.
