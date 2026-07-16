@@ -9,16 +9,35 @@ use super::tools::{
     archive_create_command, build_compiler_backfill_archive, build_stage4_c_runtime_library,
     build_stage4_cli_c_provider_archives, build_stage4_runtime_capsule_archive,
     build_stage4_rust_runtime_projection_archive, find_archive_tool, find_c_compiler, find_compiler_rt_builtins,
-    find_cxx_compiler, find_native_all_library, find_objcopy_tool, is_system_symbol, nm_command,
-    strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
-    validate_stage4_cli_c_provider_archive_disjointness,
+    find_cxx_compiler, find_objcopy_tool, is_system_symbol, nm_command, strip_llvm_constructors, target_c_compiler,
+    target_cxx_compiler, terminfo_link_args, validate_stage4_cli_c_provider_archive_disjointness,
 };
+
+#[cfg(target_os = "macos")]
+fn add_macos_base_link_args(cmd: &mut std::process::Command) {
+    cmd.arg("-Wl,-ld_classic").arg("-Wl,-dead_strip");
+}
+
+#[cfg(target_os = "macos")]
+fn add_macos_native_all_host_support(cmd: &mut std::process::Command) {
+    if let Some(llvm_lib) = simple_common::platform::cc_detect::find_homebrew_llvm_lib() {
+        cmd.arg(format!("-L{}", llvm_lib));
+        cmd.arg(format!("-Wl,-rpath,{}", llvm_lib));
+    }
+    cmd.arg("-lc++");
+    for framework in simple_common::platform::link_config::PlatformLinkConfig::macos_frameworks() {
+        cmd.arg("-framework").arg(framework);
+    }
+}
 
 impl NativeProjectBuilder {
     pub(crate) fn stage4_rust_runtime_staticlib(runtime_path: &Path) -> Result<PathBuf, String> {
         let archive = runtime_path.join("deps/libsimple_runtime.a");
         if !archive.is_file() {
-            return Err(format!("Stage4 Rust runtime staticlib is missing: {}", archive.display()));
+            return Err(format!(
+                "Stage4 Rust runtime staticlib is missing: {}",
+                archive.display()
+            ));
         }
         Ok(archive)
     }
@@ -1079,7 +1098,7 @@ int main(int argc, char** argv) {
         }
 
         #[cfg(target_os = "macos")]
-        cmd.arg("-Wl,-ld_classic");
+        add_macos_base_link_args(&mut cmd);
 
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         cmd.arg("-no-pie");
@@ -1363,15 +1382,9 @@ int main(int argc, char** argv) {
                 cmd.arg("-Wl,--no-as-needed");
             }
         }
-        if cfg!(target_os = "macos") && find_native_all_library().is_some() {
-            if let Some(llvm_lib) = simple_common::platform::cc_detect::find_homebrew_llvm_lib() {
-                cmd.arg(format!("-L{}", llvm_lib));
-                cmd.arg(format!("-Wl,-rpath,{}", llvm_lib));
-            }
-            cmd.arg("-lc++");
-            for fw in simple_common::platform::link_config::PlatformLinkConfig::macos_frameworks() {
-                cmd.arg("-framework").arg(fw);
-            }
+        #[cfg(target_os = "macos")]
+        if has_native_all {
+            add_macos_native_all_host_support(&mut cmd);
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -2218,6 +2231,22 @@ mod linker_tests {
     use super::*;
     use crate::pipeline::native_project::tools::hosted_linux_cross_compiler;
     use simple_common::target::{Target, TargetArch, TargetOS};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_native_all_link_args_dead_strip_and_retain_metal_support() {
+        let mut command = std::process::Command::new("clang++");
+        add_macos_base_link_args(&mut command);
+        add_macos_native_all_host_support(&mut command);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(args.iter().any(|arg| arg == "-Wl,-dead_strip"));
+        assert!(args.iter().any(|arg| arg == "-lc++"));
+        assert!(args.windows(2).any(|pair| pair == ["-framework", "Metal"]));
+    }
 
     #[test]
     fn hosted_linux_cross_compilers_select_gnu_toolchains() {

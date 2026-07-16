@@ -51,3 +51,28 @@ the system linker.
 4. The hash-bound pure-runtime redeploy gate passes before replacing
    `bin/release/aarch64-apple-darwin-macho/simple`.
 
+## Stage 2/3 resolution evidence (2026-07-16)
+
+The provider list was mostly a reachability artifact. macOS force-loaded every
+entry-closure object but did not request section dead stripping, so references
+from unreachable optional functions remained link requirements. Adding
+`-Wl,-dead_strip` reduced the strict missing set from 171 symbols to the two
+genuinely live entry hooks. Native-all now directly exports
+`__simple_runtime_init` and `__simple_runtime_shutdown`, and macOS host
+frameworks are selected from the actual native-all choice rather than a second
+global archive lookup.
+
+Evidence:
+
+- focused Mach-O archive probe: force-load fails without dead stripping and
+  passes with it;
+- `macos_native_all_link_args_dead_strip_and_retain_metal_support`: PASS;
+- `hosted_runtime_lifecycle_hooks_are_callable`: PASS;
+- strict Stage 2: 711 objects (`3 compiled, 708 cached`), zero failed, sanity
+  PASS, SHA-256
+  `a320dfd6644ba10560e05e88c9d354fb91e68326275f825fc0c1688b28ea9741`;
+- strict Stage 3 self-host: 711 compiled, zero failed, sanity PASS, SHA-256
+  `d22da42d15916a8e88822617ca9e8cb573527aaf4005a6b47624c4100b18c5e4`.
+
+Stage 2/3 are resolved. Acceptance item 4 remains open until a full CLI is
+produced and passes the redeploy gate; no deployed runtime was replaced here.

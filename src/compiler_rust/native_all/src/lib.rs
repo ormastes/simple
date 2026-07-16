@@ -35,6 +35,20 @@ use simple_runtime::value::{
     rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_tuple_new, rt_tuple_set, RuntimeValue,
 };
 
+/// Hosted bootstrap lifecycle hooks expected by the generated native entry.
+/// The C runtime owns the same no-op initialization boundary; native_all must
+/// export it directly because dependency staticlibs may dead-strip unreferenced
+/// `#[no_mangle]` functions before the final Simple link.
+#[no_mangle]
+pub extern "C" fn __simple_runtime_init() {}
+
+#[no_mangle]
+pub extern "C" fn __simple_runtime_shutdown() {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+}
+
 #[no_mangle]
 pub extern "C" fn rt_jit_cleanup(handle: i64) -> i64 {
     simple_compiler::native_jit_cleanup_handle(handle)
@@ -2021,6 +2035,12 @@ pub extern "C" fn rt_cli_run_file(path: RuntimeValue, args: RuntimeValue, gc_log
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hosted_runtime_lifecycle_hooks_are_callable() {
+        __simple_runtime_init();
+        __simple_runtime_shutdown();
+    }
 
     #[test]
     fn native_build_entry_infers_single_bare_spl() {
