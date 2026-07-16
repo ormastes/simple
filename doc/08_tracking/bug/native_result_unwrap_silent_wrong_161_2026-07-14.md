@@ -49,3 +49,46 @@ gate. The Result case is native-authoritative because the seed oracle's
 `/tmp/wt_errhandling/p*.spl` (errhandling lane probes). Oracle:
 `env -u SIMPLE_BOOTSTRAP bin/simple run p.spl`; native:
 `env -u SIMPLE_BOOTSTRAP bin/simple native-build --entry p.spl -o out --clean`.
+
+## Follow-up (2026-07-16): Option-text tail of the parity case
+
+The gate's `result_unwrap` case (expected `779yes08optoptFfallback`) still
+failed on its **Option** tail: `absent_text.unwrap_or(option_fallback())`
+(receiver `text? = nil`) evaluated the fallback lazily (the `F` printed) but
+then printed the fallback string's raw char* as a decimal pointer
+(e.g. `...optoptF98015628508273`). Minimal repro:
+`val t: text? = nil; print(t.unwrap_or("fallback"))` → decimal pointer.
+
+**Root cause (one layer above MIR):** the flat-AST bridge encodes every `T?`
+annotation as `TypeKind.Named("Option", [T])`
+(`10.frontend/_FlatAstBridge/convert_nodes.spl`, TYPE_OPTION_I64/F64/TEXT/BOOL
+tags) — never as `TypeKind.Optional`. `lower_named_kind`
+(`20.hir/hir_lowering/types.spl`) special-cases `Result` and `Dict` but had no
+`Option` case, so the name fell through to the unresolved-symbol branch (no
+`Option` symbol exists) and the whole annotation collapsed to
+`HirTypeKind.Error`. MIR's `option_inner_hir_type` then saw no `Optional`,
+typed the `unwrap_or` merge slot `i64` (nil-initialized receivers have no
+`local_is_str` rescue), and `print()`'s numeric-coercion branch rendered the
+text pointer as a decimal.
+
+**Fix:** map 1-arg `Named("Option", [T])` → `HirTypeKind.Optional(T)` in
+`lower_named_kind`, mirroring the existing `Result`/`Dict` cases. Argless
+`Option` (the parser only threads i64/f64/text/bool inners through dedicated
+tags) keeps its previous fall-through behavior. After the fix the case prints
+exactly `779yes08optoptFfallback`; native-smoke-matrix stays 15/15
+(fail=0, codegen_fallback_hits=0).
+
+**Verification hazard:** `build/native_cache` is keyed by a compiler hash that
+does NOT change when the live-interpreted `src/compiler/*.spl` sources change;
+`--clean` does not invalidate it either. After editing compiler sources,
+`rm -rf build/native_cache` or the old per-module objects keep being linked
+(observed: fixed MIR lowering ran and traced correctly while the produced
+binary still contained the pre-fix code).
+
+**Separate gate defect found while verifying:** in
+`scripts/check/check-native-seed-parity.shs`, `record()` assigns `mode="$2"`,
+clobbering the global `mode` that `run_strict_dual_backend_case` reads for its
+second (cranelift) loop iteration — so every `*_llvm_cranelift` leg
+deterministically fails with `invalid --mode 'strict-llvm'` after the llvm
+leg's `record` call. Pre-existing (reproduces at de7cb5a238a); needs a distinct
+local variable name in one of the two functions.

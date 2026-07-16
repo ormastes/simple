@@ -356,6 +356,23 @@ impl HirLowering:
         HirType(kind: kind, span: lt.span)
 
     me lower_named_kind(name: text, hir_args: [HirType], span: Span) -> HirTypeKind:
+        # bug: native_result_unwrap silent-wrong tail -- `T?` optional
+        # annotations arrive from the flat-AST bridge as Named("Option", [T])
+        # (convert_nodes.spl TYPE_OPTION_I64/F64/TEXT/BOOL tags), NOT as
+        # TypeKind.Optional (that parser kind is not what the flat path
+        # emits). Without this mapping every such annotation fell through to
+        # the unresolved-symbol branch below (no `Option` symbol exists) and
+        # collapsed to HirTypeKind.Error, so MIR's option_inner_hir_type saw
+        # no Optional, typed `x.unwrap_or(default)` results as I64, and
+        # print() rendered the raw char* of a text default as a decimal
+        # pointer (e.g. `absent_text.unwrap_or("fallback")` printed
+        # `101808922192363`). Mirror the Result/Dict special cases in the
+        # match: build the real HirTypeKind.Optional. A bare argless
+        # `Option` (the parser only threads i64/f64/text/bool inners through
+        # dedicated tags; every other `T?` collapses to plain TYPE_OPTION)
+        # deliberately keeps the pre-existing fall-through behavior.
+        if name == "Option" and hir_args.len() == 1:
+            return HirTypeKind.Optional(hir_args[0])
         match name:
             case "i8": HirTypeKind.Int(8, true)
             case "i16": HirTypeKind.Int(16, true)
