@@ -20,7 +20,8 @@ use compiler.backend.linker.linker_wrapper.*
 # Split into modules:
 #   linker_wrapper_helpers.spl — SMF linking, self-contained linking, binary helpers
 
-use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, env_get, host_os, host_arch, process_run, cwd}
+use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, env_get, process_run, cwd}
+use std.platform.{host_os, host_arch}
 use std.log.{debug, info}
 use std.string_builder.{StringBuilder}
 
@@ -123,8 +124,16 @@ fn linker_trace_enabled() -> bool:
 fn hosted_native_link_os_supported(os: text) -> bool:
     os == "linux" or os == "macos" or os == "darwin" or os == "windows" or os == "freebsd"
 
+fn hosted_native_link_arch_supported(os: text, arch: text) -> bool:
+    not (os == "windows" and (arch == "aarch64" or arch == "arm64"))
+
 fn hosted_native_link_unsupported_error(os: text) -> text:
     "Native linking is unsupported on host OS '" + os + "'"
+
+fn hosted_native_link_unsupported_arch_error(os: text, arch: text) -> text:
+    if os == "windows" and (arch == "aarch64" or arch == "arm64"):
+        return "Windows ARM64 native linking unsupported: MSVC linker and CRT discovery are x64-only"
+    "Native linking is unsupported on host architecture '" + arch + "' for OS '" + os + "'"
 
 # ============================================================================
 # Native Linking
@@ -142,6 +151,9 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
         print "[LINKER] os={os}"
     if not hosted_native_link_os_supported(os):
         return Err(hosted_native_link_unsupported_error(os))
+    val arch = host_arch()
+    if not hosted_native_link_arch_supported(os, arch):
+        return Err(hosted_native_link_unsupported_arch_error(os, arch))
 
     # If inputs are SMF/LSM, build a self-contained binary instead of raw native link.
     val smf_inputs = filter_smf_inputs(object_files)
@@ -560,6 +572,15 @@ fn cc_fallback_object_args(object_files: [text]) -> [text]:
         args.push(obj)
     args
 
+fn hosted_cross_cc_required(target: text, os: text, arch: text) -> bool:
+    if os != "linux":
+        return false
+    if target.starts_with("aarch64-") or target.starts_with("arm64-"):
+        return arch != "aarch64" and arch != "arm64"
+    if target.starts_with("riscv64-") or target.starts_with("riscv64gc-") or target.starts_with("rv64-"):
+        return arch != "riscv64" and arch != "rv64"
+    false
+
 fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     # SimpleOS targets must NEVER reach this function. SimpleOS has no
     # fork/exec, so subprocess cc is unavailable — in-process LLD is the
@@ -578,12 +599,14 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         return Err("cc fallback requires at least one object file")
 
     val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
-    val hosted_cross = target.starts_with("aarch64-") or target.starts_with("riscv64-")
+    val os_name = host_os()
+    val arch_name = host_arch()
+    val hosted_cross = hosted_cross_cc_required(target, os_name, arch_name)
     var cc = env_get("SIMPLE_CC") ?? ""
     if cc == "":
-        if target.starts_with("aarch64-"):
+        if hosted_cross and (target.starts_with("aarch64-") or target.starts_with("arm64-")):
             cc = "aarch64-linux-gnu-gcc"
-        elif target.starts_with("riscv64-"):
+        elif hosted_cross:
             cc = "riscv64-linux-gnu-gcc"
         else:
             cc = "cc"
@@ -591,7 +614,6 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     # Keep the fallback complete: native-build links user objects, runtime
     # objects, and a generated entry object. Truncating this list produces a
     # binary with an unresolved main.
-    val os_name = host_os()
     if os_name == "macos" or os_name == "darwin":
         # External libs/frameworks referenced by libsimple_native_all.a (see
         # link_native macos branch). Respect the bootstrap-exported Homebrew
