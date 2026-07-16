@@ -14,6 +14,9 @@ Result:
 
 - `gui_web_2d_vulkan_simple_status=pass`
 - `gui_web_2d_vulkan_simple_backend_name=vulkan`
+- `gui_web_2d_vulkan_simple_argb_width=16`
+- `gui_web_2d_vulkan_simple_argb_height=16`
+- `gui_web_2d_vulkan_simple_argb_pixel_count=256`
 - `gui_web_2d_vulkan_simple_argb_checksum=140781974135910`
 - `gui_web_2d_vulkan_vulkaninfo_status=pass`
 - `gui_web_2d_vulkan_vulkaninfo_path=C:\WINDOWS\system32\vulkaninfo.exe`
@@ -26,6 +29,7 @@ Result:
 - `gui_web_2d_vulkan_host_readiness_status=blocked:sdk-tools-missing`
 - Partial checker: `gui_web_2d_vulkan_strict_evidence_status=pass`
 - Partial checker: `gui_web_2d_vulkan_strict_evidence_reason=pass`
+- Partial checker: `gui_web_2d_vulkan_strict_evidence_simple_metrics_status=pass`
 - Host-readiness checker: `gui_web_2d_vulkan_strict_evidence_status=fail`
 - Host-readiness checker: `gui_web_2d_vulkan_strict_evidence_reason=sdk-tools,renderdoc-tools,host-readiness`
 
@@ -54,8 +58,10 @@ Code change:
   through the Windows SDK.
 - The Vulkan strict evidence checker validates saved env files without rerunning
   live capture. Its default mode accepts the partial evidence currently present
-  on this host; `-RequireHostReadiness` fails closed until `glslangValidator`,
-  `spirv-as`, and RenderDoc are installed.
+  on this host only when the saved Simple Vulkan readback metrics are present
+  and positive: `16x16`, 256 pixels, backend `vulkan`, and checksum
+  `140781974135910`; `-RequireHostReadiness` fails closed until
+  `glslangValidator`, `spirv-as`, and RenderDoc are installed.
 - The Vulkan setup wrapper now resolves the default Simple readback evidence
   path from the repository root and runs child processes from the repository
   root. The out-of-tree `--check` command above was launched from

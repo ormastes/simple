@@ -57,9 +57,17 @@ function Has-RdocMagic([string]$path) {
     }
 }
 
+function Is-PositiveInt([string]$value) {
+    $parsed = 0
+    return ([int]::TryParse($value, [ref]$parsed) -and $parsed -gt 0)
+}
+
 $evidence = Read-KeyValueFile $EvidencePath
 $simpleStatus = Value-Or $evidence "gui_web_2d_vulkan_simple_status" "missing"
 $simpleBackend = Value-Or $evidence "gui_web_2d_vulkan_simple_backend_name" "missing"
+$simpleWidth = Value-Or $evidence "gui_web_2d_vulkan_simple_argb_width" "0"
+$simpleHeight = Value-Or $evidence "gui_web_2d_vulkan_simple_argb_height" "0"
+$simplePixelCount = Value-Or $evidence "gui_web_2d_vulkan_simple_argb_pixel_count" "0"
 $simpleChecksum = Value-Or $evidence "gui_web_2d_vulkan_simple_argb_checksum" ""
 $vulkaninfoStatus = Value-Or $evidence "gui_web_2d_vulkan_vulkaninfo_status" "missing"
 $dxcStatus = Value-Or $evidence "gui_web_2d_vulkan_dxc_status" "missing"
@@ -76,9 +84,11 @@ $chromeEventStatus = Value-Or $evidence "gui_web_2d_vulkan_chrome_event_status" 
 $renderdocCaptureStatus = Value-Or $evidence "gui_web_2d_vulkan_renderdoc_capture_status" "missing"
 $renderdocRdc = Value-Or $evidence "gui_web_2d_vulkan_renderdoc_capture_rdc" ""
 $renderdocRdcMagic = if ($RequireRenderDoc) { if (Has-RdocMagic $renderdocRdc) { "RDOC" } else { "missing-or-invalid" } } else { "not-required" }
+$simpleMetricsStatus = if ((Is-PositiveInt $simpleWidth) -and (Is-PositiveInt $simpleHeight) -and (Is-PositiveInt $simplePixelCount)) { "pass" } else { "invalid-simple-vulkan-readback-metrics" }
 
 $failures = New-Object System.Collections.Generic.List[string]
 if ($simpleStatus -ne "pass" -or $simpleBackend -ne "vulkan" -or $simpleChecksum -eq "") { $failures.Add("simple-vulkan-readback") | Out-Null }
+if ($simpleMetricsStatus -ne "pass") { $failures.Add("simple-vulkan-readback-metrics") | Out-Null }
 if ($vulkaninfoStatus -ne "pass") { $failures.Add("vulkaninfo") | Out-Null }
 if ($dxcStatus -ne "pass") { $failures.Add("dxc") | Out-Null }
 if ($RequireHostReadiness -and ($glslangStatus -ne "pass" -or $spirvAsStatus -ne "pass" -or $sdkToolsStatus -ne "pass")) { $failures.Add("sdk-tools") | Out-Null }
@@ -97,6 +107,10 @@ Write-Output "gui_web_2d_vulkan_strict_evidence_reason=$reason"
 Write-Output "gui_web_2d_vulkan_strict_evidence_path=$EvidencePath"
 Write-Output "gui_web_2d_vulkan_strict_evidence_simple_status=$simpleStatus"
 Write-Output "gui_web_2d_vulkan_strict_evidence_simple_backend=$simpleBackend"
+Write-Output "gui_web_2d_vulkan_strict_evidence_simple_metrics_status=$simpleMetricsStatus"
+Write-Output "gui_web_2d_vulkan_strict_evidence_simple_argb_width=$simpleWidth"
+Write-Output "gui_web_2d_vulkan_strict_evidence_simple_argb_height=$simpleHeight"
+Write-Output "gui_web_2d_vulkan_strict_evidence_simple_argb_pixel_count=$simplePixelCount"
 Write-Output "gui_web_2d_vulkan_strict_evidence_vulkaninfo_status=$vulkaninfoStatus"
 Write-Output "gui_web_2d_vulkan_strict_evidence_dxc_status=$dxcStatus"
 Write-Output "gui_web_2d_vulkan_strict_evidence_glslang_status=$glslangStatus"

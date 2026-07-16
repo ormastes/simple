@@ -138,6 +138,11 @@ function Add-EnvRows($rows, [string[]]$lines) {
     }
 }
 
+function Is-PositiveInt([string]$value) {
+    $parsed = 0
+    return ([int]::TryParse($value, [ref]$parsed) -and $parsed -gt 0)
+}
+
 function Json-Value-Or([string]$path, [string[]]$keys, [string]$defaultValue = "") {
     if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) { return $defaultValue }
     try {
@@ -313,7 +318,10 @@ $sdkToolsStatus = if ($glslangStatus -eq "pass" -and $spirvAsStatus -eq "pass" -
 $simpleReadbackStatus = Value-Or $simple @("vulkan_engine2d_readback_status") "missing"
 $simpleBackend = Value-Or $simple @("vulkan_engine2d_readback_backend_name", "simpleos_engine2d_runtime_backend") ""
 $simpleChecksum = Value-Or $simple @("vulkan_engine2d_readback_rect_actual_checksum", "simpleos_engine2d_readback_checksum") ""
-$simpleStatus = if ($simpleReadbackStatus -eq "pass" -and $simpleBackend -eq "vulkan" -and $simpleChecksum -ne "") { "pass" } else { "blocked:simple-vulkan-readback-missing" }
+$simpleWidth = Value-Or $simple @("gui_web_2d_vulkan_simple_argb_width", "simpleos_engine2d_viewport_width") "0"
+$simpleHeight = Value-Or $simple @("gui_web_2d_vulkan_simple_argb_height", "simpleos_engine2d_viewport_height") "0"
+$simplePixelCount = Value-Or $simple @("vulkan_engine2d_readback_rect_pixels") "0"
+$simpleStatus = if ($simpleReadbackStatus -eq "pass" -and $simpleBackend -eq "vulkan" -and $simpleChecksum -ne "" -and (Is-PositiveInt $simpleWidth) -and (Is-PositiveInt $simpleHeight) -and (Is-PositiveInt $simplePixelCount)) { "pass" } else { "blocked:simple-vulkan-readback-missing" }
 
 if ($vulkanInfoStatus -ne "pass") {
     $hostReadiness = "blocked:vulkaninfo-missing-or-failed"
@@ -338,6 +346,9 @@ Add-Row $rows "gui_web_2d_vulkan_timeout_secs" "$TimeoutSecs"
 Add-Row $rows "gui_web_2d_vulkan_simple_readback_evidence_path" "$SimpleReadbackEvidencePath"
 Add-Row $rows "gui_web_2d_vulkan_simple_status" "$simpleStatus"
 Add-Row $rows "gui_web_2d_vulkan_simple_backend_name" "$simpleBackend"
+Add-Row $rows "gui_web_2d_vulkan_simple_argb_width" "$simpleWidth"
+Add-Row $rows "gui_web_2d_vulkan_simple_argb_height" "$simpleHeight"
+Add-Row $rows "gui_web_2d_vulkan_simple_argb_pixel_count" "$simplePixelCount"
 Add-Row $rows "gui_web_2d_vulkan_simple_argb_checksum" "$simpleChecksum"
 Add-Row $rows "gui_web_2d_vulkan_vulkaninfo_status" "$vulkanInfoStatus"
 Add-Row $rows "gui_web_2d_vulkan_vulkaninfo_path" "$vulkanInfoSource"

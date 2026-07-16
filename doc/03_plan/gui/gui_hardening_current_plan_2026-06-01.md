@@ -222,8 +222,10 @@
 - Windows Vulkan Web/2D evidence is recorded in
   `doc/09_report/gui_web_2d_vulkan_windows_current_2026-07-16.md`. The wrapper
   now discovers Windows Kit `dxc.exe`, and the current host proves Simple Vulkan
-  readback plus `vulkaninfo`; live browser/RenderDoc evidence remains blocked
-  because `glslangValidator`, `spirv-as`, and RenderDoc are not installed. The
+  readback plus `vulkaninfo`. The partial Vulkan checker now requires the saved
+  Simple Vulkan readback metrics to be present and positive: backend `vulkan`,
+  `16x16`, 256 pixels, and checksum `140781974135910`. Live browser/RenderDoc
+  evidence remains blocked because `glslangValidator`, `spirv-as`, and RenderDoc are not installed. The
   attempted `KhronosGroup.VulkanSDK` winget install reached the administrator
   UAC step and was canceled by the user, so the Vulkan SDK/RenderDoc bootstrap
   is an environment action rather than a code pass.
