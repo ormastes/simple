@@ -34,6 +34,7 @@ use compiler.backend.linker.smf_getter.{SmfGetter}
 use compiler.backend.linker.smf_enums.{Platform, Arch}
 use compiler.backend.linker.obj_taker.{ObjTaker, ObjTakeResult, objtaker_with_defaults, objtaker_take_object}
 use compiler.backend.linker.platform_defaults.{elf_emulation}
+use compiler.backend.backend.runtime_compiler.{find_c_compiler, hosted_c_compiler_plan}
 
 # Re-export CRT discovery (extracted to crt_discovery.spl)
 use compiler.backend.linker.crt_discovery.*
@@ -560,13 +561,8 @@ fn cc_fallback_object_args(object_files: [text]) -> [text]:
     args
 
 fn hosted_cross_cc_required(target: text, os: text, arch: text) -> bool:
-    if os != "linux":
-        return false
-    if target.starts_with("aarch64-") or target.starts_with("arm64-"):
-        return arch != "aarch64" and arch != "arm64"
-    if target.starts_with("riscv64-") or target.starts_with("riscv64gc-") or target.starts_with("rv64-"):
-        return arch != "riscv64" and arch != "rv64"
-    false
+    val plan = hosted_c_compiler_plan(target, os, arch)
+    plan.requires_cross and plan.supported
 
 fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     # SimpleOS targets must NEVER reach this function. SimpleOS has no
@@ -588,13 +584,16 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     val os_name = host_os()
     val arch_name = host_arch()
-    val hosted_cross = hosted_cross_cc_required(target, os_name, arch_name)
+    val compiler_plan = hosted_c_compiler_plan(target, os_name, arch_name)
+    if not compiler_plan.supported:
+        return Err("hosted C target '" + target + "' is unsupported on '" + arch_name + "-" + os_name + "'")
+    val hosted_cross = compiler_plan.requires_cross
     var cc = env_get("SIMPLE_CC") ?? ""
     if cc == "":
-        if hosted_cross and (target.starts_with("aarch64-") or target.starts_with("arm64-")):
-            cc = "aarch64-linux-gnu-gcc"
-        elif hosted_cross:
-            cc = "riscv64-linux-gnu-gcc"
+        if hosted_cross:
+            cc = find_c_compiler()
+            if cc == "":
+                return Err("required cross C compiler '" + compiler_plan.command + "' was not found")
         else:
             cc = "cc"
 

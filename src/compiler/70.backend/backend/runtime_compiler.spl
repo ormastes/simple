@@ -11,7 +11,7 @@
 #       case Err(msg): report_error(msg)
 
 use compiler.backend.backend.io_compat.{backend_shell_tuple}
-use std.io_runtime.{host_arch}
+use std.io_runtime.{host_arch, host_os}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
@@ -63,22 +63,81 @@ fn runtime_compile_trace_enabled() -> bool:
 # C Compiler Discovery
 # ============================================================================
 
+pub struct HostedCCompilerPlan:
+    requires_cross: bool
+    supported: bool
+    command: text
+
+fn hosted_c_arch_kind(arch: text) -> text:
+    if arch == "x86_64" or arch == "amd64":
+        return "x86_64"
+    if arch == "aarch64" or arch == "arm64":
+        return "aarch64"
+    if arch == "riscv64" or arch == "riscv64gc" or arch == "rv64" or arch == "rv64gc":
+        return "riscv64"
+    ""
+
+fn hosted_c_target_os_matches(target: text, host_os_name: text) -> bool:
+    if not target.contains("-"):
+        return true
+    if host_os_name == "linux":
+        return target.ends_with("-linux-gnu")
+    if host_os_name == "macos" or host_os_name == "darwin":
+        return target.ends_with("-apple-darwin")
+    if host_os_name == "windows":
+        return target.ends_with("-pc-windows-msvc")
+    if host_os_name == "freebsd":
+        return target.ends_with("-unknown-freebsd")
+    false
+
+pub fn hosted_c_compiler_plan(target: text, host_os_name: text, host_arch_name: text) -> HostedCCompilerPlan:
+    """Classify hosted C compilation without enabling unsupported cross targets."""
+    if target == "" or target == "host" or target == "native":
+        return HostedCCompilerPlan(requires_cross: false, supported: true, command: "")
+    val target_arch_text = if target.contains("-"): target.split("-")[0] else: target
+    val target_arch = hosted_c_arch_kind(target_arch_text)
+    val host_kind = hosted_c_arch_kind(host_arch_name)
+    val requires_cross = target_arch != "" and host_kind != "" and target_arch != host_kind
+    if target_arch == "" or host_kind == "" or not hosted_c_target_os_matches(target, host_os_name):
+        return HostedCCompilerPlan(requires_cross: requires_cross, supported: false, command: "")
+    if not requires_cross:
+        return HostedCCompilerPlan(requires_cross: false, supported: true, command: "")
+    if host_os_name == "linux" and target_arch == "aarch64":
+        return HostedCCompilerPlan(requires_cross: true, supported: true, command: "aarch64-linux-gnu-gcc")
+    if host_os_name == "linux" and target_arch == "riscv64":
+        return HostedCCompilerPlan(requires_cross: true, supported: true, command: "riscv64-linux-gnu-gcc")
+    HostedCCompilerPlan(requires_cross: true, supported: false, command: "")
+
+pub fn hosted_cross_c_compiler_name(target: text, host_os_name: text, host_arch_name: text) -> text:
+    val plan = hosted_c_compiler_plan(target, host_os_name, host_arch_name)
+    if plan.requires_cross and plan.supported:
+        return plan.command
+    ""
+
 fn find_c_compiler() -> text:
     """Find a C compiler on the system.
 
     Tries SIMPLE_CC env var first, then platform-specific discovery.
     Returns the command name or empty string if none found.
     """
-    # User override via env var
+    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val plan = hosted_c_compiler_plan(target, host_os(), host_arch())
+    if not plan.supported:
+        return ""
+
+    # User override via env var, after target admission.
     val simple_cc = rt_env_get("SIMPLE_CC")
     if simple_cc != "" and simple_cc != nil:
         return simple_cc
 
-    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
-    if target.starts_with("aarch64-") and rt_file_exists("/usr/bin/aarch64-linux-gnu-gcc"):
-        return "aarch64-linux-gnu-gcc"
-    if target.starts_with("riscv64-") and rt_file_exists("/usr/bin/riscv64-linux-gnu-gcc"):
-        return "riscv64-linux-gnu-gcc"
+    if plan.requires_cross:
+        val (out, err, code) = backend_shell_tuple("command -v {plan.command} 2>/dev/null")
+        if code == 0:
+            for path in out.split("\n"):
+                val resolved = path.trim()
+                if resolved != "":
+                    return resolved
+        return ""
 
     if _is_windows():
         return _find_c_compiler_windows()
