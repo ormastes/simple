@@ -304,6 +304,7 @@ Add-Row $rows "gui_web_2d_directx_native_readback_stdout" "$nativeOut"
 Add-Row $rows "gui_web_2d_directx_native_readback_stderr" "$nativeErr"
 
 $browserBackingStatus = "not-run"
+$browserEventStatus = "not-run"
 $gpuCaptureStatus = "not-run"
 if ($Mode -eq "--browser-backing" -or $Mode -eq "--gpu-capture") {
     $electronArgb = Join-Path $BuildFullDir "electron_argb.json"
@@ -482,7 +483,7 @@ if ($Mode -eq "--gpu-capture") {
 $rows | Set-Content -Encoding ASCII -Path $EvidencePath
 $rows | ForEach-Object { Write-Output $_ }
 
-if (($Mode -eq "--check" -and $nativeGate -eq "pass") -or ($Mode -eq "--browser-backing" -and $browserBackingStatus -eq "pass") -or ($Mode -eq "--gpu-capture" -and $browserBackingStatus -eq "pass" -and $gpuCaptureStatus -eq "pass")) {
+if (($Mode -eq "--check" -and $nativeGate -eq "pass") -or ($Mode -eq "--browser-backing" -and $browserBackingStatus -eq "pass" -and $browserEventStatus -eq "pass") -or ($Mode -eq "--gpu-capture" -and $browserBackingStatus -eq "pass" -and $browserEventStatus -eq "pass" -and $gpuCaptureStatus -eq "pass")) {
     exit 0
 }
 exit 1

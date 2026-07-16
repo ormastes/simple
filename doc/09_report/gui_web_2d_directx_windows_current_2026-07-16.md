@@ -7,6 +7,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-directx-
 powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-directx-env.ps1 --browser-backing -BuildDir build\gui-web-2d-directx-env-windows-current-browser -EvidencePath build\gui-web-2d-directx-env-windows-current-browser\evidence.env -TimeoutSecs 120
 powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-directx-env.ps1 --gpu-capture -BuildDir build\gui-web-2d-directx-env-windows-current-gpucap -EvidencePath build\gui-web-2d-directx-env-windows-current-gpucap\evidence.env -TimeoutSecs 160
 powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-directx-env.ps1 --gpu-capture -BuildDir build\gui-web-2d-directx-env-windows-event-gpucap -EvidencePath build\gui-web-2d-directx-env-windows-event-gpucap\evidence.env -TimeoutSecs 160
+powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-directx-env.ps1 --gpu-capture -BuildDir build\gui-web-2d-directx-env-windows-event-strict-gpucap -EvidencePath build\gui-web-2d-directx-env-windows-event-strict-gpucap\evidence.env -TimeoutSecs 160
 ```
 
 Result:
@@ -57,8 +58,15 @@ Primary artifacts:
 - `build/gui-web-2d-directx-env-windows-event-gpucap/chrome_argb_proof.json`
 - `build/gui-web-2d-directx-env-windows-event-gpucap/dxcap_chrome_d3d11.vsglog`
 - `build/gui-web-2d-directx-env-windows-event-gpucap/dxcap_chrome_d3d11.png`
+- `build/gui-web-2d-directx-env-windows-event-strict-gpucap/evidence.env`
+- `build/gui-web-2d-directx-env-windows-event-strict-gpucap/electron_argb_proof.json`
+- `build/gui-web-2d-directx-env-windows-event-strict-gpucap/chrome_argb_proof.json`
+- `build/gui-web-2d-directx-env-windows-event-strict-gpucap/dxcap_chrome_d3d11.vsglog`
 
 The event-enabled capture records focus, keyboard, text input, pointer down/up,
 and click delivery in both Electron and Chrome before the ARGB readback and
 DXCap GPU-debugger capture. This evidence is stronger than static screenshot or
-pixel proof alone.
+pixel proof alone. The strict wrapper gate now requires
+`gui_web_2d_directx_browser_event_status=pass` for `--browser-backing` and
+`--gpu-capture`; browser pixels and GPU backing are not sufficient without
+event-routing evidence.

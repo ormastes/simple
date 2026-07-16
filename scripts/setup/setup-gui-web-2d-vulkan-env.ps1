@@ -355,6 +355,7 @@ Add-Row $rows "gui_web_2d_vulkan_host_readiness_status" "$hostReadiness"
 
 $runStatus = "not-run"
 $browserBackingStatus = "not-run"
+$browserEventStatus = "not-run"
 if ($Mode -eq "--run" -or $Mode -eq "--browser-backing" -or $Mode -eq "--renderdoc") {
     $runStatus = "fail"
     $electronOut = Join-Path $BuildFullDir "electron.out"
@@ -462,7 +463,7 @@ if ($Mode -eq "--run" -or $Mode -eq "--browser-backing" -or $Mode -eq "--renderd
     $browserEventStatus = if ($electronEventStatus -eq "pass" -and $chromeEventStatus -eq "pass") { "pass" } else { "fail" }
     Add-Row $rows "gui_web_2d_vulkan_browser_event_status" "$browserEventStatus"
     Add-Row $rows "gui_web_2d_vulkan_browser_event_reason" $(if ($browserEventStatus -eq "pass") { "electron-chrome-events-pass" } else { "electron-or-chrome-event-proof-missing" })
-    if ($simpleStatus -eq "pass" -and $electronArgbStatus -eq "pass" -and $chromeArgbStatus -eq "pass") {
+    if ($simpleStatus -eq "pass" -and $electronArgbStatus -eq "pass" -and $chromeArgbStatus -eq "pass" -and $browserEventStatus -eq "pass") {
         $runStatus = "pass"
     }
     if ($NodeSource -ne "" -and (Test-Path -LiteralPath $BrowserBackingScript)) {
@@ -531,7 +532,7 @@ if ($Mode -eq "--renderdoc") {
 $rows | Set-Content -Encoding ASCII -Path $EvidencePath
 $rows | ForEach-Object { Write-Output $_ }
 
-if (($Mode -eq "--check" -and $hostReadiness -eq "pass" -and $simpleStatus -eq "pass") -or ($Mode -eq "--run" -and $runStatus -eq "pass") -or ($Mode -eq "--browser-backing" -and $runStatus -eq "pass" -and $browserBackingStatus -eq "pass") -or ($Mode -eq "--renderdoc" -and $runStatus -eq "pass" -and $renderdocCaptureStatus -eq "pass")) {
+if (($Mode -eq "--check" -and $hostReadiness -eq "pass" -and $simpleStatus -eq "pass") -or ($Mode -eq "--run" -and $runStatus -eq "pass" -and $browserEventStatus -eq "pass") -or ($Mode -eq "--browser-backing" -and $runStatus -eq "pass" -and $browserEventStatus -eq "pass" -and $browserBackingStatus -eq "pass") -or ($Mode -eq "--renderdoc" -and $runStatus -eq "pass" -and $browserEventStatus -eq "pass" -and $renderdocCaptureStatus -eq "pass")) {
     exit 0
 }
 exit 1
