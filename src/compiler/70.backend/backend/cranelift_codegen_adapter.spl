@@ -426,7 +426,7 @@ fn cl_translate_instruction(
         case BinOp(dest, op, left, right):
             val a = cl_translate_operand(ctx, cl_module, left, value_map, slot_map, func)
             val b = cl_translate_operand(ctx, cl_module, right, value_map, slot_map, func)
-            val result = cl_translate_binop(ctx, cl_module, op, a, b, left, func)
+            val result = cl_translate_binop(ctx, cl_module, op, a, b, left, right, func)
             value_map[dest.id] = result
             if slot_map.has(dest.id):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
@@ -435,7 +435,7 @@ fn cl_translate_instruction(
         case CheckedBinOp(dest, op, left, right):
             val a = cl_translate_operand(ctx, cl_module, left, value_map, slot_map, func)
             val b = cl_translate_operand(ctx, cl_module, right, value_map, slot_map, func)
-            val result = cl_translate_binop(ctx, cl_module, op, a, b, left, func)
+            val result = cl_translate_binop(ctx, cl_module, op, a, b, left, right, func)
             value_map[dest.id] = result
             store_local_result(ctx, dest, result, slot_map, func)
 
@@ -855,8 +855,9 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
 # Binary Operation Translation
 # ============================================================================
 
-fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, a: i64, b: i64, left_operand: MirOperand, func: MirFunction) -> i64:
+fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, a: i64, b: i64, left_operand: MirOperand, right_operand: MirOperand, func: MirFunction) -> i64:
     val is_float = operand_is_float(left_operand, func)
+    val is_unsigned = operand_is_unsigned(left_operand, func) or operand_is_unsigned(right_operand, func)
     match op:
         case Add:
             if is_float: cranelift_fadd(ctx, a, b) else: cranelift_iadd(ctx, a, b)
@@ -889,13 +890,13 @@ fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, a: i64, b: i64, le
         case Ne:
             if is_float: cranelift_fcmp(ctx, CL_FCMP_NE, a, b) else: cranelift_icmp(ctx, CL_CMP_NE, a, b)
         case Lt:
-            if is_float: cranelift_fcmp(ctx, CL_FCMP_LT, a, b) else: cranelift_icmp(ctx, CL_CMP_SLT, a, b)
+            if is_float: cranelift_fcmp(ctx, CL_FCMP_LT, a, b) elif is_unsigned: cranelift_icmp(ctx, CL_CMP_ULT, a, b) else: cranelift_icmp(ctx, CL_CMP_SLT, a, b)
         case Le:
-            if is_float: cranelift_fcmp(ctx, CL_FCMP_LE, a, b) else: cranelift_icmp(ctx, CL_CMP_SLE, a, b)
+            if is_float: cranelift_fcmp(ctx, CL_FCMP_LE, a, b) elif is_unsigned: cranelift_icmp(ctx, CL_CMP_ULE, a, b) else: cranelift_icmp(ctx, CL_CMP_SLE, a, b)
         case Gt:
-            if is_float: cranelift_fcmp(ctx, CL_FCMP_GT, a, b) else: cranelift_icmp(ctx, CL_CMP_SGT, a, b)
+            if is_float: cranelift_fcmp(ctx, CL_FCMP_GT, a, b) elif is_unsigned: cranelift_icmp(ctx, CL_CMP_UGT, a, b) else: cranelift_icmp(ctx, CL_CMP_SGT, a, b)
         case Ge:
-            if is_float: cranelift_fcmp(ctx, CL_FCMP_GE, a, b) else: cranelift_icmp(ctx, CL_CMP_SGE, a, b)
+            if is_float: cranelift_fcmp(ctx, CL_FCMP_GE, a, b) elif is_unsigned: cranelift_icmp(ctx, CL_CMP_UGE, a, b) else: cranelift_icmp(ctx, CL_CMP_SGE, a, b)
         case Offset:
             cranelift_iadd(ctx, a, b)
         case MatMul:
@@ -1138,9 +1139,17 @@ fn operand_type(operand: MirOperand, func: MirFunction) -> MirType:
 fn operand_is_float(operand: MirOperand, func: MirFunction) -> bool:
     type_is_float(operand_type(operand, func))
 
+fn operand_is_unsigned(operand: MirOperand, func: MirFunction) -> bool:
+    type_is_unsigned(operand_type(operand, func))
+
 fn type_is_float(ty: MirType) -> bool:
     match ty.kind:
         case F32 | F64: true
+        case _: false
+
+fn type_is_unsigned(ty: MirType) -> bool:
+    match ty.kind:
+        case U8 | U16 | U32 | U64: true
         case _: false
 
 fn type_is_aggregate(ty: MirType) -> bool:

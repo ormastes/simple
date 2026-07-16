@@ -67,6 +67,7 @@ struct CraneliftCodegenState:
     target: CraneliftTarget
     mode: CodegenMode
     local_values: Dict<i64, i64>    # LocalId -> Cranelift value
+    unsigned_locals: Dict<i64, bool>
     block_map: Dict<i64, i64>       # BlockId -> Cranelift block
     function_map: Dict<text, i64>   # name -> function id
     symbol_map: Dict<i64, text>     # SymbolId -> function name
@@ -92,6 +93,11 @@ enum CodegenMode:
     Jit         # Immediate execution
     Aot         # Object file generation
 
+fn mir_type_is_unsigned(type_: MirType) -> bool:
+    match type_.kind:
+        case U8 | U16 | U32 | U64: true
+        case _: false
+
 struct CodegenError:
     """Codegen error."""
     message: text
@@ -110,6 +116,7 @@ impl CraneliftCodegenState:
             target: target,
             mode: mode,
             local_values: {},
+            unsigned_locals: {},
             block_map: {},
             function_map: {},
             symbol_map: {},
@@ -164,7 +171,10 @@ impl CraneliftCodegenState:
     me compile_cranelift_function(fn_: MirFunction) -> bool:
         """Compile a MIR function to native code."""
         self.local_values = {}
+        self.unsigned_locals = {}
         self.block_map = {}
+        for local in fn_.locals:
+            self.unsigned_locals[local.id.id] = mir_type_is_unsigned(local.type_)
 
         # Build signature
         val sig = self.build_signature(fn_.signature)
@@ -300,7 +310,8 @@ impl CraneliftCodegenState:
             case BinOp(dest, op, left, right):
                 val lv = self.compile_operand(left)
                 val rv = self.compile_operand(right)
-                val result = self.compile_cranelift_binop(op, lv, rv)
+                val unsigned = self.operand_is_unsigned(left) or self.operand_is_unsigned(right)
+                val result = self.compile_cranelift_binop(op, lv, rv, unsigned)
                 self.local_values[dest.id] = result
 
             case UnaryOp(dest, op, operand):
@@ -490,7 +501,12 @@ impl CraneliftCodegenState:
         """Get Cranelift value for a local."""
         self.local_values[local.id] ?? 0
 
-    me compile_cranelift_binop(op: MirBinOp, left: i64, right: i64) -> i64:
+    me operand_is_unsigned(operand: MirOperand) -> bool:
+        match operand.kind:
+            case Copy(local) | Move(local): self.unsigned_locals[local.id] ?? false
+            case Const(_, type_): mir_type_is_unsigned(type_)
+
+    me compile_cranelift_binop(op: MirBinOp, left: i64, right: i64, unsigned: bool) -> i64:
         """Compile binary operation."""
         match op:
             case Add:
@@ -518,13 +534,13 @@ impl CraneliftCodegenState:
             case Ne:
                 cranelift_icmp(self.current_ctx, CL_CMP_NE, left, right)
             case Lt:
-                cranelift_icmp(self.current_ctx, CL_CMP_SLT, left, right)
+                cranelift_icmp(self.current_ctx, if unsigned: CL_CMP_ULT else: CL_CMP_SLT, left, right)
             case Le:
-                cranelift_icmp(self.current_ctx, CL_CMP_SLE, left, right)
+                cranelift_icmp(self.current_ctx, if unsigned: CL_CMP_ULE else: CL_CMP_SLE, left, right)
             case Gt:
-                cranelift_icmp(self.current_ctx, CL_CMP_SGT, left, right)
+                cranelift_icmp(self.current_ctx, if unsigned: CL_CMP_UGT else: CL_CMP_SGT, left, right)
             case Ge:
-                cranelift_icmp(self.current_ctx, CL_CMP_SGE, left, right)
+                cranelift_icmp(self.current_ctx, if unsigned: CL_CMP_UGE else: CL_CMP_SGE, left, right)
             case _:
                 self.error("unsupported codegen binary operator: {op}", nil)
                 0

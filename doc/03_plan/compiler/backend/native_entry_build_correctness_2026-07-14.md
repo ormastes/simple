@@ -13,10 +13,12 @@ failure is **never** silently converted to a wrong answer.
 - **Gate 1 — matrix:** `scripts/check/native-smoke-matrix.shs` must report
   `total=15 pass=15 fail=0 codegen_fallback_hits=0`.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
-  regression harness) must report `native_seed_parity=true`. It defines **73
-  logical cases / 90 recorded checks** because strict-dual cases record LLVM
+  regression harness) must report `native_seed_parity=true`. It defines **74
+  logical cases / 92 recorded checks** because strict-dual cases record LLVM
   and Cranelift separately; execution of the expanded matrix is pending.
-  Five modes: PARITY (seed==native after newline-normalize), NATIVE-AUTHORITATIVE
+  The full unfiltered gate is now scheduled on Linux x86_64 LLVM (STRICT-DUAL
+  cases also build Cranelift); its first CI execution is pending. Five modes:
+  PARITY (seed==native after newline-normalize), NATIVE-AUTHORITATIVE
   (oracle provably broken → assert native==known-correct + document divergence),
   STRICT-DUAL (LLVM and Cranelift must match a fixed expected value), LOUD-FAIL
   (unsupported constructs and overflow must build-fail without leaving a
@@ -111,14 +113,15 @@ the shared binary — deploys require explicit user go-ahead).
     paths through `?`. Existing LLVM and Cranelift gates schedule it on FreeBSD
     x86_64 and AArch64/RISC-V QEMU without adding another cross build; execution
     remains pending.
-  - `native_text_option_unwrap_pointer_value_2026-07-15.md` has a flat-nullable
-    implementation and harness controls. The historical CLI exit 139 has no
-    retained current reproducer; executable verification remains pending the
-    repaired staged native/parity CI.
+  - `native_text_option_unwrap_pointer_value_2026-07-15.md` is resolved at
+    origin tip 8932fcb3a148: its exact flat-nullable text repro builds and
+    prints `opt`. Explicit enum Option remains the separate tagged-ABI item.
   - `native_mixed_numeric_ordering_codegen_2026-07-16.md` is source-fixed for
     signed integers through shared MIR coercion before LLVM or Cranelift.
     Strict dual-backend execution is pending that staged CI. Unsigned
-    high-bit casts are also source-fixed and covered by a separate strict case.
+    high-bit casts and signed/unsigned ordering are source-fixed and covered by
+    separate strict cases; the latter restores unsigned Cranelift predicates in
+    both pure-Simple owners.
 - Option `.map` now evaluates a side-effecting receiver exactly once and
   inlines its literal lambda with the decoded payload, preserving primitive
   text/float/bool/integer results through the tagged runtime-value merge.

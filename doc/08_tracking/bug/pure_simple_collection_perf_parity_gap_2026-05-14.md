@@ -150,6 +150,10 @@ hashset_contains 0.39x C  0.65x Rust
   The 3-sample benchmark still remained below parity:
   `list_traverse` 0.28x vs C / 0.18x vs Rust, `list_push` 0.63x vs C / 1.34x
   vs Rust, and `set_contains` 0.38x vs C / 0.18x vs Rust.
+- A 2026-07-16 bottom-up audit found this predicate selection had regressed in
+  both current pure-Simple Cranelift owners. The shared operand unsignedness
+  rule is restored and a strict LLVM/Cranelift high-bit ordering case now
+  covers all four predicates in both operand orders; CI execution is pending.
 - A flat source-closure text hash path now avoids per-call docstring string
   allocation, stores hash values in `HashMap.Entry`, reuses stored hashes during
   resize, and uses `rt_hash_text`/`rt_string_eq` for text probe checks. This
