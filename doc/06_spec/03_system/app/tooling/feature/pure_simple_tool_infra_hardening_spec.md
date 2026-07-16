@@ -33,7 +33,9 @@ operations, and request writes fail closed if their atomic rename fails.
 
 Lint uses the compiler's scoped annotation parser. Lint, format, and fix share a
 single behavior owner and production entrypoints do not execute raw source
-workers.
+workers. Repository-wide UI and hot-loop gates run only for explicit `--all`;
+focused lint remains scoped. `check` truthfully promises parse/validation only
+until full type inference has an enforcing implementation.
 
 ## Reject unsafe paths and stale fallbacks
 
@@ -52,6 +54,8 @@ admission helper and preserves argument forwarding.
 The production test-daemon probe exercises `clean`, cache hit, source-change
 miss, status, and stop through `bin/simple`. Cached and executed paths preserve
 the same exit outcome, while the response records `clean`, `hit`, or `miss`.
+Main CLI dispatch reaches the daemon application's real owner, and dependency
+cache keys use content hashes so same-size dependency rewrites invalidate.
 
 ## Measure warm tooling budgets
 

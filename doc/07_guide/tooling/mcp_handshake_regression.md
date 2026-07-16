@@ -23,8 +23,11 @@ sh scripts/check/check-mcp-native-smoke.shs
 
 Do not validate only with `SIMPLE_MCP_FULL=1`: that bypasses the default shell
 handshake and previously allowed its ID parser to regress unnoticed.
-`check-mcp-wrapper-contract.shs` extracts the generated wrapper from tracked
-`setup.shs` into a temporary directory, so a stale `bin/` wrapper cannot mask a
+`check-mcp-wrapper-contract.shs` extracts both generated wrappers from tracked
+`setup.shs` into an isolated temporary `root/bin` layout. It proves fresh log
+directory creation, correlated MCP/LSP calls, cache hits, hash mismatch
+rejection, explicit-override failure, and changed-binary cache invalidation, so
+a stale installed wrapper or pre-existing `.simple` directory cannot mask a
 source regression.
 
 ## Fresh bootstrap artifacts

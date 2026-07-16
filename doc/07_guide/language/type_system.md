@@ -70,12 +70,12 @@ fn distance(x: f64, y: f64) -> f64:
 ### Running the Type Checker
 
 ```bash
-simple check src/main.spl             # Check a file
-simple check --show-types src/lib.spl # Show inferred types
-simple check --verbose src/*.spl      # Verbose with suggestions
+simple check src/main.spl # Parse and validate a file
 ```
 
-Type checking is optional -- it only runs when you use `simple check` or `--type-check` flags.
+`simple check` currently enforces parsing and source validation. Full inferred
+type diagnostics are not yet an enforced CLI contract; use normal build/test
+compilation when semantic qualification is required.
 
 ### Forward References
 

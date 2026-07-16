@@ -22,6 +22,7 @@ explicit boundaries, not cross-cutting business behavior.
 | CLI command inventory | `app.cli.dispatch.table` | dispatch statistics/help/qualification |
 | Test file outcome | test-runner result/parser modules | single runner, main runner, daemon |
 | Nested-test routing | test daemon/client | runner-launched child processes |
+| Test-daemon lifecycle/cache | `app.test_daemon` and shared cache facade | main CLI, test client |
 | File discovery/read | stdlib IO facades | duplicate checker |
 | Lint attributes/results | compiler lint configuration and `Linter` | CLI lint wrapper |
 | Format/fix behavior | one `app.io` CLI handler | thin command entrypoint |
@@ -40,6 +41,8 @@ explicit boundaries, not cross-cutting business behavior.
 - Wrappers contain selection/adaptation only; behavior stays in one owner.
 - Cache hits are observationally equivalent to misses and invalidation follows
   every relevant input/config/tool-version change.
+- Dependency cache identity is content-based; timestamps and file sizes are not
+  sufficient validity evidence.
 
 ## Test outcome contract
 
@@ -79,7 +82,9 @@ a second implementation.
 CLI lint calls `Linter.lint_source`, which already applies canonical file
 attributes and levels. Lint/fmt/fix have one handler; the command entrypoint
 calls it directly or invokes a validated cached worker only when isolation is
-required.
+required. Global UI and hot-loop policy scripts belong to explicit `--all`, not
+focused file lint. `check` exposes parse/validation until semantic inference has
+an enforcing owner; help text must not claim otherwise.
 
 ## MCP/LSP startup, caches, and invalidation
 

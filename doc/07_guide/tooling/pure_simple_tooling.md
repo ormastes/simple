@@ -58,6 +58,20 @@ compiler, and runner resource use remain centrally controlled.
 The client must detect stale or dead daemon state, replace the stale lock/PID,
 and keep `test-daemon start/status/stop` available through pure Simple
 entrypoints. A stale daemon lock must not force users to clean files manually.
+CLI dispatch imports the daemon's real application owner; no parallel daemon
+implementation is permitted under `app.io` or `app.cli`. Cache validity hashes
+the test source and every discovered dependency, so same-size rewrites and
+coarse filesystem timestamps cannot produce false hits.
+
+## Focused and Repository-wide Checks
+
+`simple check` parses and validates source without executing it. Full type
+inference is not yet an enforced check contract; the open tracking bug records
+the missing implementation rather than advertising a stronger guarantee.
+
+`simple lint <path>` stays scoped to that path. The UI architecture and hot-loop
+repository gates run under `simple lint --all`, where unrelated global debt is
+intentionally release-blocking.
 
 ## Resource Guard
 
@@ -76,12 +90,12 @@ Verification for tooling changes should include:
 
 For staged compiler or MCP changes, the bootstrap wrapper must pass its built-in
 Stage 2 and Stage 3 compiler sanity, then run the matching stage sanity SSpec
-and MCP command-line handshake SSpec. `bin/simple_mcp_server` defaults to the cached
-native server; `SIMPLE_MCP_NATIVE` selects an exact artifact for reproducible
-verification. Raw-source execution is an explicit debug fallback controlled by
-`SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=1` and may use only a deployed pure-Simple
-runtime. A wrapper handshake that silently runs raw source or the Rust seed is
-not production evidence.
+and MCP command-line handshake SSpec. `bin/simple_mcp_server` and
+`bin/simple_lsp_mcp_server` select only hash-matched native artifacts;
+`SIMPLE_MCP_NATIVE` and `SIMPLE_LSP_MCP_NATIVE` select exact artifacts and fail
+closed when the override is missing or its correlated protocol call fails.
+Successful probes are cached by artifact hash and wrapper-contract version.
+Raw source, Rust seed, and debug fallbacks are not production evidence.
 
 ## Completion Gate
 

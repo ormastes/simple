@@ -204,10 +204,12 @@ bin/simple_mcp_server
 - **Startup**: < 1s (optimized single-process)
 - **Tool count**: determined from the deployed native server's `tools/list`
 - **MCP wrapper behavior**: `simple_mcp_server` launches a cached compiled
-  artifact and fails closed by default. Its explicit
-  `SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=1` mode is debugging-only and supplies no
-  production or bootstrap evidence. LSP wrapper fallback policy is separate;
-  the Stage 5 gate bypasses both wrappers and probes the exact fresh native pair.
+  artifact and fails closed. `SIMPLE_MCP_NATIVE` and
+  `SIMPLE_LSP_MCP_NATIVE` select exact hash-matched artifacts; a bad override
+  never falls through to a default. Wrapper admission requires a correlated
+  successful tool call and caches that result by artifact hash and contract
+  version. The Stage 5 gate bypasses both wrappers and probes the exact fresh
+  native pair.
 
 ---
 

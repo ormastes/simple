@@ -102,12 +102,13 @@ foreach ($candidate in $candidates) {
     if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
     $item = Get-Item -LiteralPath $candidate
     if ($item.Length -le 0) { continue }
-    $sidecar = "$candidate.sha256"
-    if (-not (Test-Path -LiteralPath $sidecar -PathType Leaf)) { continue }
-    $expected = ((Get-Content -LiteralPath $sidecar -TotalCount 1).Trim() -split '\s+')[0].ToLowerInvariant()
-    if ($expected -notmatch '^[0-9a-f]{64}$') { continue }
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $candidate).Hash.ToLowerInvariant()
-    if ($actual -ne $expected) { continue }
+    if ($Kind -ne "simple") {
+        $sidecar = "$candidate.sha256"
+        if (-not (Test-Path -LiteralPath $sidecar -PathType Leaf)) { continue }
+        $expected = ((Get-Content -LiteralPath $sidecar -TotalCount 1).Trim() -split '\s+')[0].ToLowerInvariant()
+        if ($expected -notmatch '^[0-9a-f]{64}$' -or $actual -ne $expected) { continue }
+    }
 
     $cacheDir = Join-Path $RepoRoot ".simple\cache\mcp-probe"
     $stamp = Join-Path $cacheDir "$Kind-$actual-$ContractVersion.stamp"

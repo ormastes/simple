@@ -18,9 +18,13 @@ The post-sync audit additionally closed stale-daemon false hits, omitted batch
 manifest entries, non-admitted rollback retention, and Windows native parity.
 The latest source lane also consolidates lint/fmt/fix ownership, adds actual
 runner exit 3/4/124 probes, proves dependency-only cache invalidation, and
-extracts deployment into a fault-injected atomic rollback helper. The deployed
-runtime remains unavailable in the isolated lane, so executable qualification
-is still blocked.
+extracts deployment into a fault-injected atomic rollback helper. A final
+three-way audit repaired the outcome probe arguments, routed CLI daemon calls
+to the real owner, made dependency fingerprints content-based, restored lint's
+public API use, scoped global lint gates to `--all`, corrected duplicate-check
+path parsing, removed its dead parallel CLI, normalized `gen-lean` argv, and
+hardened MCP/LSP wrapper probe correlation and atomic stamps. The deployed
+runtime remains unavailable, so executable qualification is still blocked.
 
 ## Tool matrix
 
@@ -29,11 +33,11 @@ is still blocked.
 | Production runtime | BLOCKED | Stage 4 was found parsing 10,503 files before closure pruning; source fix is unverified because the final cycle stopped on a stale compiler-backfill guard | In a fresh session run one bounded `--full-bootstrap`, require closure-sized phase input, then admit and atomically deploy | P0 |
 | Test runner | IMPLEMENTED | Failure/outcome/count/nesting, exact manifest correspondence, and deadline-bounded batch re-exec implemented | Run 1,000-example RSS evidence on pure runtime | P0 |
 | Duplicate checker | IMPLEMENTED | Runtime qualification blocked by seed | Run hostile-path and measured benchmark probes on pure runtime | P0 |
-| Lint | IMPLEMENTED | Runtime qualification blocked by seed | Run canonical multi-name/scope fixture on pure runtime | P1 |
+| Lint | SOURCE FIXED | Focused/global ownership is correct; global gates still report 30 UI and 45 hot-loop violations | Repair classified violations, then qualify canonical fixtures | P1 |
 | Format/fix | SOURCE FIXED | Duplicate handlers removed; executable dry-run proof awaits admitted runtime | Run canonical dry-run and write fixtures after admission | P1 |
-| Check | BLOCKED | Deployed artifact lacks required CLI extern; global flag timeout open | Repair/deploy shared CLI ABI; deadline-bound production probe | P1 |
+| Check | BLOCKED | Command is parse/validation only; full type inference is not enforced | Implement enforcing type analysis, then qualify the production probe | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
-| Test daemon | IMPLEMENTED | Direct argv-safe startup/liveness, atomic fail-closed writes, and stale-sentinel handling implemented | Execute run/clean/hit/miss/invalidation matrix after admission | P2 |
+| Test daemon | IMPLEMENTED | Real application owner and content-hash invalidation implemented; dynamic matrix blocked by runtime | Execute run/clean/hit/miss/same-size dependency invalidation after admission | P2 |
 | SPipe/docgen | WARN | Executable spec/manual exist; generated-doc validation blocked by seed | Regenerate once with admitted runtime | P1 |
 | MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P1 |
 | LSP MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P0 |
@@ -83,6 +87,11 @@ is still blocked.
    and requires `--full-bootstrap`; the three-cycle cap is exhausted.
 2. NFR-007 and NFR-009 evidence harnesses exist, but their production latency
    and RSS measurements cannot qualify while the deployed runtime is the seed.
+3. `simple lint --all` correctly exposes 30 UI architecture and 45 hot-loop
+   violations. Focused lint no longer fails on that unrelated repository debt;
+   the global findings remain an explicit P1 cleanup lane.
+4. `simple check` now states its actual parse/validation behavior. Enforced full
+   type inference remains an open P1 implementation bug.
 
 ## Latest bounded verification
 
@@ -94,6 +103,9 @@ is still blocked.
 - Dependency-only shared-cache invalidation and actual runner exit 3/4/124
   probes: SOURCE IMPLEMENTED; executable verdict blocked by missing `bin/simple`
   in the isolated lane.
+- MCP/LSP wrapper contract: PASS with fresh-layout log creation, explicit
+  override rejection, content-hash cache invalidation, correlated protocol
+  results, and atomic probe stamps.
 - Isolated clean bootstrap: Stage 2 and Stage 3 self-hosting PASS in all three
   bounded cycles. Cycle 1 proved the typed `rt_dict_keys` repair and found the
   generic-close layout bug. Cycle 2 proved that repair and found missing

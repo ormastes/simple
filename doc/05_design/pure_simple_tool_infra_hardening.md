@@ -14,6 +14,10 @@
 - Replace CLI lint substring parsing with `Linter.lint_source`.
 - Make `cli_lint_commands` the behavior owner; `lint_entry` only parses/help and
   calls it without raw-source recursion.
+- Route `test-daemon` dispatch directly to `app.test_daemon`; fingerprint the
+  test and every dependency with SHA-256 through the shared file-hash facade.
+- Run repository UI/hot-loop lint gates only for explicit `--all`; keep focused
+  lint local to its requested files.
 - Generated launcher templates own native candidate order and defaults; checked
   launchers are regenerated outputs.
 
@@ -50,7 +54,7 @@ allowed.
 | REQ-009..010 | multi-name scoped lint suppression and single-handler source contract |
 | REQ-011 | table-derived command counts |
 | REQ-012 | Unix/Windows native-first wrapper contracts and correlated MCP/LSP calls |
-| REQ-013 | daemon lifecycle plus cache hit/miss/invalidation equivalence |
+| REQ-013 | daemon lifecycle plus cache hit/miss/same-size dependency invalidation equivalence |
 | REQ-014 | checker/global-flag and `gen-lean` deadline/no-recursion fixtures |
 | REQ-015 | mirrored executable spec/manual and guide links |
 
