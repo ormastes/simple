@@ -283,6 +283,15 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
         serial_println("[vfs-init] pure-nvme transfer failed")
         return false
     val transfer_evidence = transfer_evidence_result.unwrap()
+    # If the NVMe I/O path is not functional (doorbells not mapped or the I/O
+    # queue never came up), no DMA/sector read can succeed — attempting the
+    # FAT32 boot-sector read below issues a submission-queue doorbell write to a
+    # null/zero doorbell address and page-faults (cr2=0x0), hanging boot before
+    # the desktop can degrade to no-disk and render. Bail here so vfs_boot_init
+    # falls through to the degraded-no-disk path and the WM still renders.
+    if not transfer_evidence.doorbells_mapped or not transfer_evidence.io_queue_ready:
+        serial_println("[vfs-init] pure-nvme io not ready (doorbells/io-queue) — degrading to no-disk")
+        return false
     val lease_result = vfs_boot_nvme_system_fat32_lease_from_transfer_evidence(
         g_nvme.get_sector_size(),
         g_nvme.get_sector_count(),
