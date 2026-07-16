@@ -423,3 +423,16 @@ produced the admitted Stage 3 hash
 `1764d74b2ff77f558b07cdf27a041d5e3e96824a7ef4b563151a6c29ba7a6816`.
 No full CLI, deployment, native-all selection, stub, or ignored symbol is
 claimed; TODO535 remains the provider-composition owner.
+
+## 2026-07-16 aggregate final-request derivation
+
+The shared pure-Simple final-link boundary now derives the exact Stage4
+`rt_*`/`spl_*` request set after the generated entry object exists. One
+fail-closed `nm -g` scan covers the final Simple objects plus entry shim,
+normalizes Mach-O prefixes, subtracts sibling definitions, and returns a sorted
+unique closure. The exact Stage4 profile also rejects `libsimple_native_all.a`.
+Because LLVM-default and explicit-Cranelift objects share this boundary, the
+derivation is backend-neutral. Unique production owner selection, capability
+archive wiring, the separate link-profile fingerprint, and fresh strict/native
+proof remain open; this change does not infer a manifest from the historical
+207-symbol grouped baseline.

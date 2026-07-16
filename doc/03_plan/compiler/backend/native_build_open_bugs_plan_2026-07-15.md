@@ -50,7 +50,7 @@ source fixes from executable proof.
 | 16 | Target-aware global cfg selection implemented across native, driver/JIT, imports, and module loading; AArch64/RISC-V LLVM object regressions added, execution pending. |
 | 17 | Module+owner-qualified method identity implemented through imports, HIR, MIR, bootstrap, trait defaults, and static methods; strict LLVM+Cranelift dispatch proof pending. |
 | 18 | Pure-Simple Cranelift dynload globals now declare, initialize, load, and store writable scalar data; strict LLVM+Cranelift init/mutation proof pending. |
-| 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, POSIX/macOS/BSD and Windows core-C process-timeout ownership, test-only deterministic requested-symbol owner validation, and pure-Simple explicit-entry dispatch are source-implemented; aggregate final-closure derivation, full link-profile fingerprint, remaining providers, production provider selection/link wiring, and strict execution remain. Windows compile/native proof is pending. |
+| 19 | Open/partial; dispatch/spin, compiler backfill/provider slices, POSIX/macOS/BSD and Windows core-C process-timeout ownership, pure-Simple aggregate final-request derivation, test-only deterministic requested-symbol owner validation, and pure-Simple explicit-entry dispatch are source-implemented; full link-profile fingerprint, remaining providers, production provider selection/link wiring, and strict execution remain. Windows compile/native proof is pending. |
 | 20 | C-owned host-GPU queue facade and fail-closed archive ownership checks implemented; native queue execution proof remains. |
 | 21 | Reduced to the Rust seed parser's inline-continuation consumption bug; inline-first and block-first source fixes plus focused chained-inline regressions are implemented, while regression and real inspector execution remain pending. The pure-Simple parser needed no rewrite. |
 
@@ -113,11 +113,12 @@ not production wiring for that bootstrap shape. Current source now routes the
 canonical Stage4 one-binary `--entry src/app/cli/main.spl` through the in-process
 pure-Simple project driver without a silent seed retry or raw native-all path;
 executable proof remains pending. Rust `native_project` validators
-remain test-only prerequisites. The exact CLI profile must derive its final requested `rt_*`/`spl_*`
-closure after entry-object creation, validate unique archive ownership, and then
-order Simple objects → compiler capsule → capability providers → core-C → system
-libraries. The current provider inventory covers compiler hooks, time/progress,
-SQLite, memtrack, and POSIX/macOS/BSD process timeout only; GPU/font/dynload,
+remain test-only prerequisites. The exact CLI profile now derives its final requested
+`rt_*`/`spl_*` closure after entry-object creation; it must next validate unique
+archive ownership and order Simple objects → compiler capsule → capability
+providers → core-C → system libraries. The current provider inventory covers
+compiler hooks, time/progress, SQLite, memtrack, and POSIX/macOS/BSD plus Windows
+process-timeout source ownership (Windows compile/native proof pending); GPU/font/dynload,
 window, HTTP, remaining process/thread,
 SMF/CUDA, and other CLI owners remain. Core-C currently overlaps memtrack, raw
 `libsimple_native_all.a` selection and allow-multiple-definition are still

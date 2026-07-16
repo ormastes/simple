@@ -16,6 +16,8 @@ use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_s
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, _get_temp_dir, _obj_ext, _is_windows, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_requested_from_nm_output}
+use std.platform.{is_macos}
 
 # TODO(compiler-native-link-facades): replace these direct runtime imports with
 # compiler-safe environment/process/file facades; tracked in
@@ -30,6 +32,20 @@ extern fn rt_dir_create_all(path: text) -> bool
 
 fn llvm_link_trace_enabled() -> bool:
     (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
+fn llvm_stage4_final_requested_symbols(objects: [text]) -> Result<[text], text>:
+    if objects.len() == 0:
+        return Err("Stage4 final object closure is empty")
+    var args: [text] = ["-g"]
+    for object in objects:
+        args = args.push(object)
+    val (nm_out, nm_err, nm_code) = rt_process_run("nm", args)
+    if nm_code != 0:
+        return Err("Stage4 final object symbol scan failed: {nm_err}")
+    val requested = stage4_requested_from_nm_output(nm_out, is_macos())
+    if requested.len() == 0:
+        return Err("Stage4 final runtime symbol request closure is empty")
+    Ok(requested)
 
 # ============================================================================
 # Configuration
@@ -300,6 +316,29 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             if bootstrap_support_obj != "":
                 rt_file_delete(bootstrap_support_obj)
             return Err("Entry point compilation failed: {err}")
+
+    var stage4_requested_symbols: [text] = []
+    val stage4_profile = ((rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1" and
+        (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? "") == "src/app/cli/main.spl" and
+        (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1")
+    if stage4_profile:
+        if bootstrap_native_all != "":
+            cleanup_runtime_objects(runtime_objects)
+            rt_file_delete(entry_obj_path)
+            return Err("Stage4 strict profile rejects libsimple_native_all.a")
+        var final_simple_objects: [text] = []
+        for object in user_objects:
+            final_simple_objects = final_simple_objects.push(object)
+        final_simple_objects = final_simple_objects.push(entry_obj_path)
+        match llvm_stage4_final_requested_symbols(final_simple_objects):
+            case Ok(symbols):
+                stage4_requested_symbols = symbols
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                rt_file_delete(entry_obj_path)
+                return Err(err)
+        if trace:
+            print "[LLVM-LINK] Stage4 requested runtime symbols: {stage4_requested_symbols.len()}"
 
     # Step 3: Combine all objects and link
     if trace:

@@ -1,0 +1,59 @@
+use compiler.backend.backend.stage4_symbol_closure.{stage4_requested_from_nm_output}
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "Stage4 aggregate final symbol closure":
+    it "subtracts sibling definitions and returns sorted unique runtime requests":
+        val rows = """
+first.o:
+                 U rt_cross
+                 U rt_need
+                 U rt_need
+                 U user_helper
+                 U rt_unique
+                 U rt_weak_lower_fn
+                 w rt_weak_lower_fn
+                 U rt_weak_lower_data
+                 v rt_weak_lower_data
+                 U rt_weak_upper_fn
+                 W rt_weak_upper_fn
+                 U rt_weak_upper_data
+                 V rt_weak_upper_data
+                 U rt_weak_defined
+                 U rt_malformed
+second.o:
+0000000000000000 T rt_cross
+0000000000000000 u rt_unique
+0000000000000000 W rt_weak_defined
+                 U spl_init_args
+                 u rt_malformed
+not-an-address W rt_malformed
+"""
+        val requested = stage4_requested_from_nm_output(rows, false)
+        expect(requested.len()).to_equal(7)
+        expect(requested[0]).to_equal("rt_malformed")
+        expect(requested[1]).to_equal("rt_need")
+        expect(requested[2]).to_equal("rt_weak_lower_data")
+        expect(requested[3]).to_equal("rt_weak_lower_fn")
+        expect(requested[4]).to_equal("rt_weak_upper_data")
+        expect(requested[5]).to_equal("rt_weak_upper_fn")
+        expect(requested[6]).to_equal("spl_init_args")
+
+    it "normalizes the leading object underscore only for Mach-O":
+        val rows = "                 U _spl_init_args\n"
+        val macho = stage4_requested_from_nm_output(rows, true)
+        val elf = stage4_requested_from_nm_output(rows, false)
+        expect(macho.len()).to_equal(1)
+        expect(macho[0]).to_equal("spl_init_args")
+        expect(elf.len()).to_equal(0)
+
+    it "derives after the entry object and before the shared final link":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val entry_pos = source.find("val entry_obj_path = match c_result")
+        val closure_pos = source.find("match llvm_stage4_final_requested_symbols(final_simple_objects)")
+        val link_pos = source.find("val link_result = link_to_native(all_objects, output, link_config)")
+        expect(entry_pos).to_be_greater_than(-1)
+        expect(closure_pos).to_be_greater_than(entry_pos)
+        expect(link_pos).to_be_greater_than(closure_pos)
+        expect(source).to_contain("Stage4 strict profile rejects libsimple_native_all.a")

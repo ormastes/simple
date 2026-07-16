@@ -1,0 +1,52 @@
+# Stage4 final object symbol-closure derivation.
+
+fn stage4_canonical_host_symbol(name: text, macho_prefixes: bool) -> text:
+    if macho_prefixes and (name.starts_with("_rt_") or name.starts_with("_spl_")):
+        return name.substring(1)
+    name
+
+fn stage4_nm_has_address(parts: [text], type_index: i64) -> bool:
+    if type_index <= 0:
+        return false
+    var address = parts[type_index - 1]
+    val colon = address.last_index_of(":") ?? -1
+    if colon >= 0:
+        address = address.substring(colon + 1)
+    if address == "":
+        return false
+    var i = 0
+    while i < address.len():
+        val digit = address[i:i + 1]
+        if not ((digit >= "0" and digit <= "9") or
+                (digit >= "a" and digit <= "f") or
+                (digit >= "A" and digit <= "F")):
+            return false
+        i = i + 1
+    true
+
+pub fn stage4_requested_from_nm_output(nm_output: text, macho_prefixes: bool) -> [text]:
+    """Return sorted strong rt_*/spl_* requests not defined by sibling objects."""
+    var defined: Dict<text, bool> = {}
+    var undefined: Dict<text, bool> = {}
+    for line in nm_output.split("\n"):
+        val parts = line.split_whitespace()
+        if parts.len() < 2:
+            continue
+        val type_index = parts.len() - 2
+        val type_code = parts[type_index]
+        val symbol = stage4_canonical_host_symbol(parts[parts.len() - 1], macho_prefixes)
+        if not symbol.starts_with("rt_") and not symbol.starts_with("spl_"):
+            continue
+        if type_code == "U":
+            undefined[symbol] = true
+        elif type_code == "u" and stage4_nm_has_address(parts, type_index):
+            defined[symbol] = true
+        elif type_code != "w" and type_code != "v" and stage4_nm_has_address(parts, type_index):
+            defined[symbol] = true
+
+    var requested: [text] = []
+    for symbol in undefined.keys():
+        if not defined.has(symbol):
+            requested = requested.push(symbol)
+    requested.sort()
+    requested
