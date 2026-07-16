@@ -104,6 +104,10 @@ the shared binary — deploys require explicit user go-ahead).
   - `native_text_option_unwrap_pointer_value_2026-07-15.md` has a flat-nullable
     implementation and harness controls; executable verification is pending
     repair of the pure-Simple CLI exit 139.
+  - `native_mixed_numeric_ordering_codegen_2026-07-16.md` records the shared
+    MIR coercion fix still needed because LLVM and Cranelift currently choose
+    comparison type from the left operand. The two interpreter paths are
+    source-fixed; their executable proof is pending the same runnable CLI.
 - Option `.map` now evaluates a side-effecting receiver exactly once. Option
   `.map` transforms producing non-i64 results remain open: lifted lambdas
   currently expose an i64 call ABI, and
