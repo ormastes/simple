@@ -16,7 +16,7 @@ fn write_test_file(path: text, content: text):
     expect(rt_file_write_text(path, content)).to_equal(true)
 
 fn lexical_config():
-    var config = default_config()
+    var config = apply_analysis_mode(default_config(), "token")
     config.min_tokens = 8
     config.min_lines = 3
     config.min_impact = 1
@@ -37,6 +37,48 @@ fn contains_path(files: [text], expected: text) -> bool:
     false
 
 describe "duplicate_check detector grouping regressions":
+    it "ignores identical comment-only code-shaped windows in token mode":
+        val root = "/tmp/simple_duplicate_detector_comment_only"
+        ensure_clean_dir(root)
+
+        val comments = "# fn fake(seed: i64) -> i64:\n#     val total = seed + 1\n#     return total\n"
+        val file_a = "{root}/a.spl"
+        val file_b = "{root}/b.spl"
+        write_test_file(file_a, comments)
+        write_test_file(file_b, comments)
+
+        val groups = find_duplicates([file_a, file_b], lexical_config(), new_token_cache_manager())
+
+        expect(groups.len()).to_equal(0)
+
+    it "ignores identical triple-docstring-only code-shaped windows in token mode":
+        val root = "/tmp/simple_duplicate_detector_docstring_only"
+        ensure_clean_dir(root)
+
+        val docstring = "\"\"\"\nfn fake(seed: i64) -> i64:\n    val total = seed + 1\n    return total\n\"\"\"\n"
+        val file_a = "{root}/a.spl"
+        val file_b = "{root}/b.spl"
+        write_test_file(file_a, docstring)
+        write_test_file(file_b, docstring)
+
+        val groups = find_duplicates([file_a, file_b], lexical_config(), new_token_cache_manager())
+
+        expect(groups.len()).to_equal(0)
+
+    it "keeps real duplicated functions in token mode":
+        val root = "/tmp/simple_duplicate_detector_real_function"
+        ensure_clean_dir(root)
+
+        val body = "fn shared_logic(seed: i64) -> i64:\n    val base = seed + 1\n    val total = base * 2\n    return total\n"
+        val file_a = "{root}/a.spl"
+        val file_b = "{root}/b.spl"
+        write_test_file(file_a, body)
+        write_test_file(file_b, body)
+
+        val groups = find_duplicates([file_a, file_b], lexical_config(), new_token_cache_manager())
+
+        expect(groups.len()).to_be_greater_than(0)
+
     it "keeps exact-match occurrences across three files":
         val root = "/tmp/simple_duplicate_detector_exact"
         ensure_clean_dir(root)

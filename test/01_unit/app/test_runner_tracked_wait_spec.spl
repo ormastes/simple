@@ -1,9 +1,12 @@
-use std.test_runner.runner_lifecycle.{spawn_tracked_process, wait_tracked_process}
+use std.test_runner.runner_lifecycle.{spawn_tracked_process, wait_tracked_process, poll_tracked_process, cleanup_all_children}
 use std.test_runner.process_tracker.{tracker_clear, tracker_get_pids}
 use std.io.{process_is_running}
 use std.nogc_sync_mut.io.env_ops.{host_os}
 
 describe "tracked test child wait":
+    after_each:
+        cleanup_all_children()
+
     it "kills and untracks a timed-out child":
         if host_os() == "windows":
             return
@@ -12,4 +15,17 @@ describe "tracked test child wait":
         expect(pid).to_be_greater_than(0)
         expect(wait_tracked_process(pid, 10)).to_equal(-1)
         expect(process_is_running(pid)).to_equal(false)
+        expect(tracker_get_pids().len()).to_equal(0)
+
+    it "retains the observed exit code when polling completes":
+        if host_os() == "windows":
+            return
+        tracker_clear()
+        val pid = spawn_tracked_process("/bin/sh", ["-c", "exit 7"])
+        var exit_code: i64 = -2
+        var attempts = 0
+        while exit_code == -2 and attempts < 100:
+            exit_code = poll_tracked_process(pid)
+            attempts = attempts + 1
+        expect(exit_code).to_equal(7)
         expect(tracker_get_pids().len()).to_equal(0)

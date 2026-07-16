@@ -37,7 +37,7 @@ so executable qualification is still blocked.
 |---|---|---|---|---|
 | Production runtime | BLOCKED | Stage 4 was found parsing 10,503 files before closure pruning; source fix is unverified because the final cycle stopped on a stale compiler-backfill guard | In a fresh session run one bounded `--full-bootstrap`, require closure-sized phase input, then admit and atomically deploy | P0 |
 | Test runner | PARTIAL | POSIX parallel argv is injection-safe; timed-out children are killed before tracker release and normalized to timeout, but Windows parallel capture fails closed and signal cleanup remains incomplete | Add runtime redirected argv spawn, activate tracker-owned signal polling, then run timeout/RSS evidence | P0 |
-| Duplicate checker | PARTIAL | Fast exact-window buckets are linear, indentation-sensitive, and collapse shifted clone regions; token-cache reads are content-hash fresh, missing targets fail, unavailable modes are rejected, and adjacent one-line docs remain distinct; string/comment lexical context remains approximate | Replace line-shaped signal detection with lexer-aware spans before full qualification | P1 |
+| Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; exact/cosine line gates share one tokenizer-derived signal prefix, preserve indentation, and exclude comment/string-only windows; runtime and performance qualification remain | Run the focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
 | Lint | SOURCE FIXED | Production CLI delegates to the canonical linter; the isolated 722-line legacy type/check pair is deleted and stale worker assertions now name `cli_run_lint`; global gates still report 30 UI and 45 hot-loop violations | Repair classified violations, then run the focused policy/uniqueness fixtures | P1 |
 | Format/fix | SOURCE GUARDED | Writes are atomic and checked; formatter output now passes a CoreLexer token/literal/comment/raw-gap equivalence gate or fails closed | Replace heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
 | Check | BLOCKED | Command is parse/validation only; full type inference is not enforced | Implement enforcing type analysis, then qualify the production probe | P1 |
@@ -116,7 +116,6 @@ so executable qualification is still blocked.
 |---|---|---|
 | P1 | Formatter heuristics are contained but not token-gap-native | Replace them incrementally with edits limited to lexer-approved whitespace gaps |
 | P1 | Lint global gates still report classified UI/hot-loop violations | Repair the violations and run focused policy fixtures with an admitted runtime |
-| P1 | Exact duplicate signal detection is not lexer-aware inside multiline strings/comments | Drive signal classification from canonical lexer spans while retaining exact indentation-sensitive window keys |
 | P1 | Process cleanup handlers are advertised but inactive | Install one tracker-owned signal/crash cleanup hook per process |
 | P2 | Direct broker callers can retain inactive leases | Production request/execution paths now reject and remove inactive leases; refactor broker-only tests before enforcing active-only retention inside `SessionBroker.acquire` |
 
@@ -157,13 +156,13 @@ so executable qualification is still blocked.
   absolute deadline; its independent 600-attempt guard silently truncated all
   waits to about 60 seconds. The redundant guard is deleted, so every caller
   now receives the timeout it requested.
-- **Duplicate token mode:** the fast child remains separate for its measured
-  low latency, but it now runs through the existing 30-second timeout facade.
-  Facade timeout `-1` is normalized to the truthful CLI timeout class `124`.
-  Its file discovery now reuses `dir_walk_native`, preserving hostile path
-  boundaries and deterministic sort order without shell/newline parsing.
-  Runtime walker symlink/file parity and incremental-cache mutation remain
-  separate tracked fixes.
+- **Duplicate token ownership:** the low-latency fast script remains an
+  explicit audit tool with native deterministic discovery, but the production
+  CLI no longer launches it. Token and cosine gates use the canonical detector's
+  one-per-file tokenizer signal prefix, so comments and string literals cannot
+  create code-shaped candidates; exact keys retain leading indentation. Runtime
+  walker parity, canonical-path performance, and incremental-cache mutation
+  remain separate qualification items.
 - **Dependency closure:** the daemon and standalone runner now fingerprint the
   full cycle-safe import closure. The former magic depth-five ceiling silently
   omitted deeper dependencies and could return stale cache hits; the existing
@@ -281,9 +280,10 @@ so executable qualification is still blocked.
 - Tracked-wait timeout cleanup and canonical runner-summary precedence have
   focused source specs; executable verdict is NOT RUN without an admitted
   pure-Simple runtime.
-- Duplicate exact-window indexing, content-hash cache freshness, unsupported
-  mode rejection, and missing-target failure: SOURCE IMPLEMENTED; executable
-  verdict is NOT RUN without an admitted pure-Simple runtime.
+- Duplicate exact-window indexing, lexer-derived signal filtering,
+  content-hash cache freshness, unsupported mode rejection, and missing-target
+  failure: SOURCE IMPLEMENTED; executable verdict is NOT RUN without an
+  admitted pure-Simple runtime.
 - Default semantic adjacent-function extraction with one-line docs: SOURCE
   IMPLEMENTED; executable verdict is NOT RUN without an admitted runtime.
 - Exact duplicate indentation preservation, code-shaped signal filtering, and

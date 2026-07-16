@@ -1,7 +1,7 @@
 # Duplicate-check — token interner + progress/verbose logging
 
 use compiler.tools.duplicate_check.config.{DuplicationConfig}
-use compiler.tools.duplicate_check.tokenizer.{SimpleToken, tokenize, token_to_string}
+use compiler.tools.duplicate_check.tokenizer.{SimpleToken, SimpleTokenKind, tokenize, token_to_string}
 use compiler.tools.duplicate_check.features.{FeatureVec, extract_token_frequencies, build_feature_vector, cosine_similarity}
 use compiler.tools.duplicate_check.debug.{debug_log, debug_log_progress}
 use compiler.tools.duplicate_check.cache.{TokenCacheManager, get_cached_tokens, set_cached_tokens, set_cached_tokens_with_content, get_cached_content}
@@ -116,7 +116,7 @@ struct SimilarityPrep:
     file_count: i64
 
 fn normalize_line_for_duplicate_key(line: text) -> text:
-    line.trim()
+    line.trim_end()
 
 fn line_window_key(lines: [text], start: i64, window: i64) -> text:
     var key = ""
@@ -128,11 +128,29 @@ fn line_window_key(lines: [text], start: i64, window: i64) -> text:
         i = i + 1
     key
 
-fn line_window_has_signal(key: text) -> bool:
-    val trimmed = key.trim()
-    if trimmed.len() == 0:
+fn signal_line_prefix(source: text, config: DuplicationConfig) -> [i64]:
+    val lines = source.split("\n")
+    var signal_lines: [bool] = []
+    for line in lines:
+        signal_lines.push(false)
+
+    for token in tokenize(source, config):
+        val is_signal = token.kind == SimpleTokenKind.Keyword and (token.value == "fn" or token.value == "if" or token.value == "while" or token.value == "for" or token.value == "match" or token.value == "return" or token.value == "val" or token.value == "var")
+        if is_signal and token.line > 0 and token.line <= signal_lines.len():
+            signal_lines[token.line - 1] = true
+
+    var prefix: [i64] = [0]
+    var count = 0
+    for has_signal in signal_lines:
+        if has_signal:
+            count = count + 1
+        prefix.push(count)
+    prefix
+
+fn window_has_signal(prefix: [i64], start: i64, window: i64) -> bool:
+    if start < 0 or window <= 0 or start + window >= prefix.len():
         return false
-    trimmed.contains("fn ") or trimmed.contains("if ") or trimmed.contains("while ") or trimmed.contains("for ") or trimmed.contains("match") or trimmed.contains("return") or trimmed.contains("val ") or trimmed.contains("var ")
+    prefix[start + window] > prefix[start]
 
 fn fast_line_window_duplicate_groups(files: [text], config: DuplicationConfig) -> [DuplicateGroup]:
     var exact_map = {}
@@ -141,13 +159,14 @@ fn fast_line_window_duplicate_groups(files: [text], config: DuplicationConfig) -
     for file in files:
         val source = read_detector_source(file)
         val lines = source.split("\n")
+        val signal_prefix = signal_line_prefix(source, config)
         if lines.len() < window:
             continue
 
         var start = 0
         while start + window <= lines.len():
             val key = line_window_key(lines, start, window)
-            if line_window_has_signal(key):
+            if window_has_signal(signal_prefix, start, window):
                 val block = DuplicateBlock(
                     file: file,
                     line_start: start + 1,

@@ -137,8 +137,12 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
     var summary_failed = -1
     var summary_skipped = -1
     var summary_pending = -1
+    var summary_passed_pos = -1
+    var summary_failed_pos = -1
+    var bdd_summary_pos = -1
     var results_seen = false
     var results_valid = false
+    var results_pos = -1
     var results_passed = 0
     var results_failed = 0
     var results_skipped = 0
@@ -152,8 +156,22 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
         val trimmed = clean.trim()
         val canonical_results = trimmed.starts_with("Results:") and trimmed.contains(" total") and trimmed.contains(" passed") and trimmed.contains(" failed")
         if canonical_results:
+            # Start a new summary segment. Authored output before a canonical-
+            # shaped line must not leak into a later real BDD/direct summary.
+            total_passed = 0
+            total_failed = 0
+            total_skipped = 0
+            total_pending = 0
+            summary_passed = -1
+            summary_failed = -1
+            summary_skipped = -1
+            summary_pending = -1
+            summary_passed_pos = -1
+            summary_failed_pos = -1
+            bdd_summary_pos = -1
             results_seen = true
             results_valid = false
+            results_pos = pos
             val result_total = extract_number_before(s: trimmed, keyword: "total")
             val result_passed = extract_number_before(s: trimmed, keyword: "passed")
             val result_failed = extract_number_before(s: trimmed, keyword: "failed")
@@ -167,8 +185,10 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
                 results_pending = if parsed_pending >= 0: parsed_pending else: 0
         elif trimmed.starts_with("Passed:"):
             summary_passed = extract_number_after_colon(s: trimmed, prefix: "Passed:")
+            summary_passed_pos = pos
         elif trimmed.starts_with("Failed:"):
             summary_failed = extract_number_after_colon(s: trimmed, prefix: "Failed:")
+            summary_failed_pos = pos
         elif clean.contains("example") and clean.contains("failure"):
             # Accept both plural ("2 examples, 0 failures") and singular
             # ("1 example, 1 failure") summary lines. The interpreter's BDD
@@ -180,6 +200,7 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
             val examples_count = extract_number_before(s: clean, keyword: "example")
             val failures_count = extract_number_before(s: clean, keyword: "failure")
             if examples_count >= 0 and failures_count >= 0:
+                bdd_summary_pos = pos
                 val passed = examples_count - failures_count
                 if passed > 0:
                     total_passed = total_passed + passed
@@ -200,8 +221,16 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
         if next < 0:
             break
         pos = next + 1
-    # The last canonical outer summary is authoritative. Test-authored lines
-    # beginning with "Results:" are ordinary output and must not poison it.
+    # The last complete summary family is authoritative: the outer runner emits
+    # Results last, while direct specs emit Passed/Failed after authored output.
+    val direct_summary_pos = if summary_passed_pos > summary_failed_pos: summary_passed_pos else: summary_failed_pos
+    val direct_summary_after_results = summary_passed >= 0 and summary_failed >= 0 and summary_passed_pos > results_pos and summary_failed_pos > results_pos
+    if direct_summary_after_results and direct_summary_pos >= bdd_summary_pos:
+        val skipped = if summary_skipped >= 0: summary_skipped else: total_skipped
+        val pending = if summary_pending >= 0: summary_pending else: total_pending
+        return (summary_passed, summary_failed, skipped, pending)
+    if bdd_summary_pos > results_pos:
+        return (total_passed, total_failed, total_skipped, total_pending)
     if results_seen:
         if not results_valid:
             return (0, 0, 0, 0)
