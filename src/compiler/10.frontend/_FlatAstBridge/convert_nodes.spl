@@ -31,6 +31,7 @@ use compiler.core.types.{TYPE_RESULT, TYPE_FUTURE, TYPE_POLL, TYPE_TASK, TYPE_GE
 use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NAMED_BASE, TYPE_UNION_BASE, type_tag_name, int_to_str}
 use compiler.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value}
 use compiler.core.types.{is_result_tag, result_tag_to_id, result_type_get_ok, result_type_get_err}
+use compiler.core.types.{is_tuple_type_tag, tuple_type_tag_to_id, tuple_type_get_elems}
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
@@ -264,6 +265,23 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
     if is_result_tag(type_expr_idx):
         val rid = result_tag_to_id(type_expr_idx)
         return Type(kind: TypeKind.Named("Result", [convert_flat_type(result_type_get_ok(rid)), convert_flat_type(result_type_get_err(rid))]), span: make_span())
+    # Tuple type annotation `(A, B, C)` (e.g. an extern fn's declared tuple
+    # return): the parser registers the element tags (types.spl
+    # TYPE_TUPLE_BASE registry, mirroring Dict<K,V>/Result above) instead of
+    # collapsing to TYPE_ANY. Rebuild the real TypeKind.Tuple here so HIR
+    # lower_type produces HirTypeKind.Tuple and a destructure of a
+    # tuple-returning call types each element correctly (parity case
+    # process_run_timeout). Must precede the `>= TYPE_UNION_BASE` catch-all
+    # below, same as the dict/result checks.
+    if is_tuple_type_tag(type_expr_idx):
+        val tuple_tag_id = tuple_type_tag_to_id(type_expr_idx)
+        val tuple_elem_type_tags = tuple_type_get_elems(tuple_tag_id)
+        var tuple_elem_types: [Type] = []
+        var tt_i = 0
+        while tt_i < tuple_elem_type_tags.len():
+            tuple_elem_types.push(convert_flat_type(tuple_elem_type_tags[tt_i]))
+            tt_i = tt_i + 1
+        return Type(kind: TypeKind.Tuple(tuple_elem_types), span: make_span())
     if type_expr_idx == TYPE_FUTURE:
         return Type(kind: TypeKind.Named("Future", []), span: make_span())
     if type_expr_idx == TYPE_POLL:
@@ -295,6 +313,22 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
         if arg_idx >= 0:
             type_args.push(convert_flat_type(arg_idx))
         Type(kind: TypeKind.Named(base_name, type_args), span: make_span())
+    elif tag == EXPR_TUPLE:
+        # Tuple TYPE annotation, e.g. an extern fn's `-> (text, text, i32)`
+        # return (threaded through as an expr-arena index by #146, same as
+        # `-> T`): the flat tag space has no TYPE_TUPLE, so the parser stores
+        # the parenthesized element list as an EXPR_TUPLE node. Previously
+        # this fell into the Infer catch-all below, erasing the element types
+        # -- HIR lower_type then produced Error/i64 defaults and a tuple
+        # destructure of the call result printed text handles as decimal
+        # integers (parity case process_run_timeout).
+        val tuple_type_args = expr_get_args(type_expr_idx)
+        var tuple_type_elems: [Type] = []
+        var tt_i = 0
+        while tt_i < tuple_type_args.len():
+            tuple_type_elems.push(convert_flat_type(tuple_type_args[tt_i]))
+            tt_i = tt_i + 1
+        Type(kind: TypeKind.Tuple(tuple_type_elems), span: make_span())
     else:
         Type(kind: TypeKind.Infer, span: make_span())
 

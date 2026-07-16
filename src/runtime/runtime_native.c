@@ -4595,6 +4595,44 @@ SplArray* rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args) {
     return result;
 }
 
+/* Native-codegen tuple facades for the process externs.
+ *
+ * The pure-Simple LLVM backend emits extern calls with the .spl-declared
+ * shape -- `rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64)
+ * -> (text, text, i32)` -- i.e. cmd as ONE tagged-or-raw text value, and it
+ * destructures the tuple result as a pointer to 3 native i64 words (the
+ * rt_alloc'd word-block layout of aggregate_intrinsics.spl's Tuple case).
+ * The C owners (rt_process_run_timeout in runtime_process.c, rt_process_run
+ * above) use the seed ABI instead: cmd as a (ptr, len) pair and an SplArray*
+ * result whose slot 2 is a TAGGED int (rt_value_int). Calling the seed-ABI
+ * symbol directly from generated native code therefore misaligns every
+ * argument after cmd and misreads the result (parity case
+ * process_run_timeout: SIGSEGV). translate_call (core_codegen.spl) rewrites
+ * the callee names to these facades on the native path; the seed-ABI symbols
+ * stay untouched for seed-compiled callers. */
+static int64_t* rt_process_result_to_tuple(SplArray* result) {
+    int64_t* tuple = (int64_t*)rt_alloc(3 * (int64_t)sizeof(int64_t));
+    if (!tuple) return NULL;
+    tuple[0] = rt_array_get(result, 0);
+    tuple[1] = rt_array_get(result, 1);
+    /* slot 2 is always pushed via rt_value_int by both C owners: untag. */
+    tuple[2] = rt_value_as_int(rt_array_get(result, 2));
+    return tuple;
+}
+
+int64_t* rt_process_run_tuple(int64_t cmd, SplArray* args) {
+    const char* cmd_c = rt_interp_cstr(cmd);
+    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+    return rt_process_result_to_tuple(rt_process_run(cmd_c ? cmd_c : "", cmd_len, args));
+}
+
+int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms) {
+    const char* cmd_c = rt_interp_cstr(cmd);
+    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+    return rt_process_result_to_tuple(
+        rt_process_run_timeout(cmd_c ? cmd_c : "", cmd_len, args, timeout_ms));
+}
+
 int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
     if (!path_ptr || path_len > SIZE_MAX - 1) return 0;
     char* path = (char*)malloc((size_t)path_len + 1);

@@ -32,6 +32,17 @@ extern fn rt_env_get(key: text) -> text
 fn hir_module_env_get(key: text) -> text:
     rt_env_get(key)
 
+# Isolated single-arm extraction (the reliable seed idiom: ONE match per
+# function boundary, explicit return per arm). Used by the fn-signature
+# registration pass to capture tuple-return element types into
+# fn_tuple_returns while the HirType is freshly constructed.
+fn hir_tuple_return_elem_list(t: HirType) -> [HirType]:
+    match t.kind:
+        case HirTypeKind.Tuple(tuple_elems):
+            return tuple_elems
+        case _:
+            return []
+
 fn hir_module_phase_probe(msg: text):
     if hir_module_diag_enabled():
         eprint("[BOOTSTRAP-PHASE] " + msg)
@@ -1037,6 +1048,15 @@ impl HirLowering:
                 val return_name: text = parser_type_kind_named_name(fn_decl.return_type.kind)
                 eprint("[flat-function-roundtrip] phase=hir name={fn_decl.name} return={return_name}")
             val fn_type = self.declared_callable_type(fn_decl, nil)
+            # Capture tuple-return element types by NAME while a freshly
+            # lower_type'd HirType is same-pass (see fn_tuple_returns in
+            # types.spl: reading the Tuple payload back out of the stored
+            # symbol type at destructure time yields garbage on the seed
+            # interpreter). Explicit annotations only; generics skipped.
+            if fn_decl.type_params.len() == 0 and fn_decl.has_return_type:
+                val fn_ret_tuple_elems = hir_tuple_return_elem_list(self.lower_type(fn_decl.return_type))
+                if fn_ret_tuple_elems.len() > 0:
+                    self.fn_tuple_returns[name] = fn_ret_tuple_elems
             self.symbols.define(name, SymbolKind.Function, fn_type, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 

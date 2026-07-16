@@ -96,6 +96,18 @@ class HirLowering:
     # struct-positional reinterpretation (irrefutable) silently wins and the
     # arm is always taken (native_const_pattern_lowers_irrefutably bug).
     enum_variant_names: {text: bool}
+    # Function name -> tuple element types of its DECLARED tuple return type
+    # (`fn f(...) -> (text, text, i32)`), captured in module_lowering's
+    # signature-registration pass straight off the freshly lower_type'd
+    # return HirType. Lets lower_tuple_destructure type each element of
+    # `val (a, b, c) = f(...)` (a CALL init has no local_tuple_types entry).
+    # A by-NAME side registry is used deliberately instead of reading the
+    # Function symbol's stored type_ back out of the symbol table at
+    # destructure time: extracting the Tuple payload from a symbol-table-
+    # stored HirTypeKind.Function later yields garbage on the seed
+    # interpreter (cross-pass enum-payload landmine, observed disc
+    # 2735847868), while a fresh same-pass extraction is reliable.
+    fn_tuple_returns: {text: [HirType]}
 
 struct LoweringError:
     message: text
@@ -122,6 +134,7 @@ fn hirlowering_new() -> HirLowering:
     val empty_struct_field_order: HirFieldOrderByName = {}
     val empty_local_tuple_types: HirLocalTupleTypes = {}
     val empty_enum_variant_names: {text: bool} = {}
+    val empty_fn_tuple_returns: {text: [HirType]} = {}
     HirLowering(
         symbols: SymbolTable.new(),
         errors: empty_errors,
@@ -139,7 +152,8 @@ fn hirlowering_new() -> HirLowering:
         local_struct_types: empty_local_struct_types,
         struct_field_order_by_name: empty_struct_field_order,
         local_tuple_types: empty_local_tuple_types,
-        enum_variant_names: empty_enum_variant_names
+        enum_variant_names: empty_enum_variant_names,
+        fn_tuple_returns: empty_fn_tuple_returns
     )
 
 fn hirlowering_for_module(filename: text, modules_by_name: HirModulesByName) -> HirLowering:
@@ -278,6 +292,7 @@ impl HirLowering:
             return HirType(kind: named_kind, span: lt.span)
 
         val d_tuple: i64 = hir_type_kind_disc(TypeKind.Tuple([]))
+
         val d_array: i64 = hir_type_kind_disc(TypeKind.Array(lt, nil))
         val d_func: i64 = hir_type_kind_disc(TypeKind.Function([], lt))
         val d_opt: i64 = hir_type_kind_disc(TypeKind.Optional(lt))

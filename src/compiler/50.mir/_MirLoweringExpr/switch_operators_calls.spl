@@ -29,6 +29,21 @@ extern fn rt_enum_discriminant(value: Any) -> i64
 # in one program do not collide onto the same address.
 var _mir_lambda_lift_counter: i64 = 0
 
+# print(x.contains(y)) etc.: method-call results are untyped on this path
+# (MIR method lowering does not thread return types), so
+# lower_bootstrap_print_call's explicit-numeric/bool coercion misses them and
+# a bool-returning text/dict/array method printed its raw 1/0 instead of
+# true/false (parity case process_run_timeout expects
+# print(err.contains("problem")) -> "true"). Detect the well-known
+# bool-returning method NAMES on the print argument's own HIR expr.
+# Isolated single-arm match with return-per-arm (the reliable seed idiom).
+fn print_arg_is_bool_method_call(e: HirExpr) -> bool:
+    match e.kind:
+        case HirExprKind.MethodCall(_, pb_method, _, _):
+            return pb_method == "contains" or pb_method == "starts_with" or pb_method == "ends_with" or pb_method == "contains_key"
+        case _:
+            return false
+
 fn int_list_contains(xs: [i64], v: i64) -> bool:
     var i = 0
     while i < xs.len():
@@ -685,6 +700,14 @@ impl MirLowering:
                     arg_is_float = true
                 case _:
                     ()
+        # Method-call bool results (see print_arg_is_bool_method_call above):
+        # overrides the numeric default too -- the temp holding e.g. a
+        # `.contains(...)` result is tracked as plain I64 by the method
+        # lowering, so without this it printed 1/0 instead of true/false.
+        if not arg_is_bool and not arg_is_float and args.len() > 0:
+            if print_arg_is_bool_method_call(args[0].value):
+                arg_is_bool = true
+                arg_is_numeric = false
         if arg_is_numeric or arg_is_bool or arg_is_float:
             val raw_render_fn = if arg_is_bool: "rt_raw_bool_to_string" elif arg_is_float: "rt_raw_f64_to_string" else: "rt_raw_i64_to_string"
             val num_op = MirOperand(kind: MirOperandKind.Const(

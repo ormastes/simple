@@ -47,6 +47,7 @@ use compiler.core.types.{named_type_find}
 use compiler.core.types.{primitive_integer_bit_width_from_name}
 use compiler.core.types.{union_type_register}
 use compiler.core.types.{dict_type_register}
+use compiler.core.types.{tuple_type_register}
 use compiler.core.types.{result_type_register}
 use std.string_core.{char_code}
 
@@ -657,15 +658,23 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
     # Tuple type: (T, T)
     if par_kind_get() == 140:
         parser_advance()
+        # Collect the element tags instead of discarding them: a 2+ element
+        # tuple registers them in the tuple type registry (types.spl
+        # TYPE_TUPLE_BASE) so the AST bridge can rebuild TypeKind.Tuple with
+        # real element types. Previously every parenthesized tuple type
+        # collapsed to bare TYPE_ANY, so `-> (text, text, i32)` lost its
+        # element types and a destructure of the call result defaulted every
+        # element to i64 (parity case process_run_timeout).
+        var tuple_elem_tags: [i64] = []
         if par_kind_get() != 141:
-            parser_parse_type()
+            tuple_elem_tags.push(parser_parse_type())
             for i in 0..100:
                 if par_kind_get() != 160:
                     break
                 parser_advance()
                 if par_kind_get() == 141:
                     break
-                parser_parse_type()
+                tuple_elem_tags.push(parser_parse_type())
         parser_expect(141)
         # Function type without the `fn` keyword: (T, ...) -> U. When `->`
         # (kind 167) follows the closing paren, the leading paren-group is the
@@ -679,6 +688,11 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             parser_advance()
             parser_parse_type()
             return parser_absorb_optional_suffix(TYPE_FN)
+        # A real tuple (2+ elements) carries its element tags via the
+        # registry; a 0/1-element paren group keeps the old TYPE_ANY
+        # behavior (a `(T)` paren-grouped single type is not a tuple).
+        if tuple_elem_tags.len() >= 2:
+            return parser_absorb_optional_suffix(tuple_type_register(tuple_elem_tags))
         return parser_absorb_optional_suffix(TYPE_ANY)
     # Dict type: {K: V}
     if par_kind_get() == 142:

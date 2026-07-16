@@ -260,6 +260,29 @@ impl HirLowering:
     # this, every element previously defaulted to i64 downstream, silently
     # printing garbage for a mixed-type tuple's non-i64 elements (a text
     # field read back as raw i64 bits).
+    # Isolated single-arm extraction helpers for lower_tuple_destructure's
+    # call-init typing (same idiom as lower_type / lower_hir_stmt's
+    # disc-dispatch): a NESTED match expression mis-propagates its payload on
+    # the seed (observed: callee SymbolId.id read as 0 for every destructure),
+    # and `var` mutation inside nested match arms is dropped outright (the
+    # arm_get_body env-storage landmine). One match per function boundary
+    # with an explicit return per arm is the reliable shape.
+    fn td_callee_expr_name(callee: HirExpr) -> text:
+        match callee.kind:
+            case HirExprKind.Var(td_cs):
+                return self.symbols.symbol_display_name(td_cs, "")
+            case HirExprKind.NamedVar(_, td_cs2_name):
+                return td_cs2_name
+            case _:
+                return ""
+
+    fn td_init_callee_name(hir_init: HirExpr) -> text:
+        match hir_init.kind:
+            case HirExprKind.Call(td_callee, _, _):
+                return self.td_callee_expr_name(td_callee)
+            case _:
+                return ""
+
     me lower_tuple_destructure(name: text, hir_init: HirExpr, is_mut: bool, span: Span) -> HirStmt:
         val inner = name.slice(1, name.len() - 1)
         val parts = inner.split(",")
@@ -277,6 +300,25 @@ impl HirLowering:
         if val td_bs = td_base_sym:
             if self.local_tuple_types.has(td_bs.id):
                 td_elem_types = self.local_tuple_types[td_bs.id]
+        # Call init: `val (a, b, c) = f(...)` where f's declared return type
+        # is a tuple. Without this, every destructured element's Let has a
+        # nil type, so downstream consumers default the locals to i64 --
+        # e.g. `val (out, err, code) = rt_process_run_timeout(...)` (declared
+        # `-> (text, text, i32)`) typed out/err as i64, which made the native
+        # print lowering (lower_bootstrap_print_call's explicit-numeric
+        # coercion) render the text HANDLES as decimal integers and broke
+        # every text method on them (parity case process_run_timeout).
+        # Element types come from the by-NAME fn_tuple_returns registry
+        # (module_lowering's signature pass) -- deliberately NOT from the
+        # callee symbol's stored Function type: reading that Tuple payload
+        # back out of the symbol table here yields garbage on the seed
+        # interpreter (see fn_tuple_returns doc comment in types.spl), and
+        # symbols.get_symbol itself mis-dispatches from this layer (see
+        # symbol_display_name's docstring in hir_types.spl).
+        if td_elem_types.len() == 0:
+            val td_callee_name: text = self.td_init_callee_name(hir_init)
+            if td_callee_name != "" and self.fn_tuple_returns.has(td_callee_name):
+                td_elem_types = self.fn_tuple_returns[td_callee_name]
         var i = 0
         while i < parts.len():
             val pname = parts[i]
