@@ -596,3 +596,8 @@ section absence, and the measured symbol contract on each hosted platform
 before the provider can enter the inventory. Apple/BSD archiver behavior and
 MSVC/MinGW archive formats are therefore still pending, as are the remaining
 providers and production hash/digest/cache/link wiring.
+
+The Stage4 closure now uses one pure-Simple insertion sorter for requested
+symbols, archive definitions, owner rows, and fingerprint rows. This replaces
+`[text].sort()`, which is a no-op under the deployed seed, so canonical order
+no longer depends on scan, dictionary, or caller iteration order.
