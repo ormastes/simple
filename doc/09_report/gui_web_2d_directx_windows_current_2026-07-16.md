@@ -30,6 +30,10 @@ Result:
 - `gui_web_2d_directx_browser_event_status=pass`
 - `gui_web_2d_directx_browser_event_reason=electron-chrome-events-pass`
 - `gui_web_2d_directx_electron_event_status=pass`
+- `gui_web_2d_directx_electron_argb_width=1280`
+- `gui_web_2d_directx_electron_argb_height=720`
+- `gui_web_2d_directx_electron_argb_pixel_count=921600`
+- `gui_web_2d_directx_electron_argb_nonblank_pixel_count=921600`
 - `gui_web_2d_directx_electron_focus_event_count=3`
 - `gui_web_2d_directx_electron_keyboard_event_count=2`
 - `gui_web_2d_directx_electron_input_event_count=1`
@@ -37,6 +41,10 @@ Result:
 - `gui_web_2d_directx_electron_pointer_up_event_count=2`
 - `gui_web_2d_directx_electron_click_event_count=1`
 - `gui_web_2d_directx_chrome_event_status=pass`
+- `gui_web_2d_directx_chrome_argb_width=1280`
+- `gui_web_2d_directx_chrome_argb_height=720`
+- `gui_web_2d_directx_chrome_argb_pixel_count=921600`
+- `gui_web_2d_directx_chrome_argb_nonblank_pixel_count=921600`
 - `gui_web_2d_directx_chrome_focus_event_count=2`
 - `gui_web_2d_directx_chrome_keyboard_event_count=2`
 - `gui_web_2d_directx_chrome_input_event_count=1`
@@ -49,6 +57,7 @@ Result:
 - `gui_web_2d_directx_gpu_debugger_capture_artifact_magic=GFXA`
 - `gui_web_2d_directx_strict_evidence_status=pass`
 - `gui_web_2d_directx_strict_evidence_reason=pass`
+- `gui_web_2d_directx_strict_evidence_argb_metrics_status=pass`
 - `gui_web_2d_directx_strict_evidence_gpu_capture_artifact_magic=GFXA`
 
 Primary artifacts:
@@ -78,10 +87,10 @@ pixel proof alone. The strict wrapper gate now requires
 event-routing evidence.
 
 The strict evidence checker validates existing env files without rerunning live
-capture. It passes on the strict artifact above and fails closed on the older
-`build/gui-web-2d-directx-env-windows-current-gpucap/evidence.env` artifact
-with `gui_web_2d_directx_strict_evidence_reason=browser-events`, because that
-older file predates browser event proof rows.
+capture. It now requires Electron and Chrome ARGB source metrics to be present,
+nonzero, and dimension-consistent with the requested capture size. It passes on
+the strict artifact above and fails closed on older artifacts that predate
+browser event proof rows or ARGB source metrics.
 
 The DirectX setup wrapper now runs child processes from the repository root.
 The out-of-tree `--check` command above was launched from

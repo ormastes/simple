@@ -207,10 +207,13 @@
   checksum `1023148974`, Electron and Chrome browser-backing pass with D3D11
   hints present, structured browser event routing pass for focus, keyboard,
   text input, pointer down/up, and click delivery in both Electron and Chrome,
-  and DXCap GPU capture pass with `GFXA` artifact magic in
+  Electron and Chrome ARGB source metrics at `1280x720` with 921,600 nonblank
+  pixels each, and DXCap GPU capture pass with `GFXA` artifact magic in
   `build/gui-web-2d-directx-env-windows-event-strict-gpucap/dxcap_chrome_d3d11.vsglog`.
-  The DirectX and Vulkan browser wrappers now require browser event proof for
-  live browser pass status; static pixels and GPU backing no longer pass alone.
+  The DirectX strict checker now requires browser event proof and nonzero,
+  dimension-consistent ARGB source metrics for live browser pass status; static
+  pixels and GPU backing no longer pass alone. The Vulkan browser wrapper also
+  requires browser event proof.
   The DirectX setup wrapper now runs child processes from the repository root
   and was verified from outside the checkout by absolute script path in
   `--check` mode with native D3D11 readback still passing.

@@ -134,6 +134,33 @@ function Proof-Status([string]$proofPath, [string]$argbPath) {
     return "unknown"
 }
 
+function Read-ArgbJsonSummary([string]$path) {
+    $result = @{
+        status = "missing"
+        width = "0"
+        height = "0"
+        pixel_count = "0"
+        nonblank_pixel_count = "0"
+    }
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) { return $result }
+    try {
+        $argb = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $pixels = @($argb.pixels)
+        $nonblank = 0
+        foreach ($pixel in $pixels) {
+            if ("$pixel" -ne "0" -and "$pixel" -ne "") { $nonblank++ }
+        }
+        $result.status = "pass"
+        $result.width = "$([int]$argb.width)"
+        $result.height = "$([int]$argb.height)"
+        $result.pixel_count = "$($pixels.Count)"
+        $result.nonblank_pixel_count = "$nonblank"
+    } catch {
+        $result.status = "fail"
+    }
+    return $result
+}
+
 function Wait-ForFile([string]$path, [int]$timeoutMs = 5000) {
     $deadline = (Get-Date).AddMilliseconds($timeoutMs)
     while ((Get-Date) -lt $deadline) {
@@ -334,6 +361,11 @@ if ($Mode -eq "--browser-backing" -or $Mode -eq "--gpu-capture") {
         Add-Row $rows "gui_web_2d_directx_electron_argb_path" "$electronArgb"
         Add-Row $rows "gui_web_2d_directx_electron_argb_proof" "$electronProof"
         Add-Row $rows "gui_web_2d_directx_electron_argb_status" (Proof-Status $electronProof $electronArgb)
+        $electronArgbSummary = Read-ArgbJsonSummary $electronArgb
+        Add-Row $rows "gui_web_2d_directx_electron_argb_width" "$($electronArgbSummary.width)"
+        Add-Row $rows "gui_web_2d_directx_electron_argb_height" "$($electronArgbSummary.height)"
+        Add-Row $rows "gui_web_2d_directx_electron_argb_pixel_count" "$($electronArgbSummary.pixel_count)"
+        Add-Row $rows "gui_web_2d_directx_electron_argb_nonblank_pixel_count" "$($electronArgbSummary.nonblank_pixel_count)"
         Add-Row $rows "gui_web_2d_directx_electron_argb_checksum" (Json-Value-Or $electronProof @("checksum", "captured_argb_sha256") "")
         Add-Row $rows "gui_web_2d_directx_electron_event_status" (Json-Value-Or $electronProof @("event_status", "event_proof.status") "missing")
         Add-Row $rows "gui_web_2d_directx_electron_event_reason" (Json-Value-Or $electronProof @("event_reason", "event_proof.reason") "")
@@ -380,6 +412,11 @@ if ($Mode -eq "--browser-backing" -or $Mode -eq "--gpu-capture") {
         Add-Row $rows "gui_web_2d_directx_chrome_argb_proof" "$chromeProof"
         Add-Row $rows "gui_web_2d_directx_chrome_geometry" "$chromeGeometry"
         Add-Row $rows "gui_web_2d_directx_chrome_argb_status" (Proof-Status $chromeProof $chromeArgb)
+        $chromeArgbSummary = Read-ArgbJsonSummary $chromeArgb
+        Add-Row $rows "gui_web_2d_directx_chrome_argb_width" "$($chromeArgbSummary.width)"
+        Add-Row $rows "gui_web_2d_directx_chrome_argb_height" "$($chromeArgbSummary.height)"
+        Add-Row $rows "gui_web_2d_directx_chrome_argb_pixel_count" "$($chromeArgbSummary.pixel_count)"
+        Add-Row $rows "gui_web_2d_directx_chrome_argb_nonblank_pixel_count" "$($chromeArgbSummary.nonblank_pixel_count)"
         Add-Row $rows "gui_web_2d_directx_chrome_argb_checksum" (Json-Value-Or $chromeProof @("checksum") "")
         Add-Row $rows "gui_web_2d_directx_chrome_event_status" (Json-Value-Or $chromeProof @("event_status", "event_proof.status") "missing")
         Add-Row $rows "gui_web_2d_directx_chrome_event_reason" (Json-Value-Or $chromeProof @("event_reason", "event_proof.reason") "")
