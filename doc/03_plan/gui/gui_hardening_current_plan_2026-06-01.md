@@ -158,6 +158,10 @@
   attempted `KhronosGroup.VulkanSDK` winget install reached the administrator
   UAC step and was canceled by the user, so the Vulkan SDK/RenderDoc bootstrap
   is an environment action rather than a code pass.
+  `scripts/check/check-gui-web-2d-vulkan-strict-evidence.ps1` now validates
+  saved Vulkan evidence files: partial Simple Vulkan/vulkaninfo/Windows Kit
+  `dxc` evidence passes, while `-RequireHostReadiness` fails closed on the
+  missing SDK tools and RenderDoc.
 - Windows D3D12 render-log environment evidence is recorded in
   `doc/09_report/windows_d3d12_render_log_env_current_2026-07-16.md`. The
   PowerShell wrapper now runs without the `ProcessStartInfo.ArgumentList`

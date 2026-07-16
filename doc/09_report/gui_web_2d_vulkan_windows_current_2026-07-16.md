@@ -4,6 +4,8 @@ Current Windows PowerShell run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\setup\setup-gui-web-2d-vulkan-env.ps1 --check -BuildDir build\gui-web-2d-vulkan-env-windows-current-check -EvidencePath build\gui-web-2d-vulkan-env-windows-current-check\evidence.env -TimeoutSecs 90
+powershell -ExecutionPolicy Bypass -File scripts\check\check-gui-web-2d-vulkan-strict-evidence.ps1 -EvidencePath build\gui-web-2d-vulkan-env-windows-current-check\evidence.env
+powershell -ExecutionPolicy Bypass -File scripts\check\check-gui-web-2d-vulkan-strict-evidence.ps1 -EvidencePath build\gui-web-2d-vulkan-env-windows-current-check\evidence.env -RequireHostReadiness
 ```
 
 Result:
@@ -20,6 +22,10 @@ Result:
 - `gui_web_2d_vulkan_renderdoc_status=missing`
 - `gui_web_2d_vulkan_sdk_tools_status=blocked:sdk-tools-missing`
 - `gui_web_2d_vulkan_host_readiness_status=blocked:sdk-tools-missing`
+- Partial checker: `gui_web_2d_vulkan_strict_evidence_status=pass`
+- Partial checker: `gui_web_2d_vulkan_strict_evidence_reason=pass`
+- Host-readiness checker: `gui_web_2d_vulkan_strict_evidence_status=fail`
+- Host-readiness checker: `gui_web_2d_vulkan_strict_evidence_reason=sdk-tools,renderdoc-tools,host-readiness`
 
 Environment bootstrap attempt:
 
@@ -36,6 +42,7 @@ Primary artifacts:
 
 - `build/gui-web-2d-vulkan-env-windows-current-check/evidence.env`
 - `scripts/setup/setup-gui-web-2d-vulkan-env.ps1`
+- `scripts/check/check-gui-web-2d-vulkan-strict-evidence.ps1`
 
 Code change:
 
@@ -43,3 +50,7 @@ Code change:
   Kit when Vulkan SDK `Bin\dxc.exe` is absent. This prevents a false `dxc`
   missing result on Windows hosts with the DirectX shader compiler installed
   through the Windows SDK.
+- The Vulkan strict evidence checker validates saved env files without rerunning
+  live capture. Its default mode accepts the partial evidence currently present
+  on this host; `-RequireHostReadiness` fails closed until `glslangValidator`,
+  `spirv-as`, and RenderDoc are installed.
