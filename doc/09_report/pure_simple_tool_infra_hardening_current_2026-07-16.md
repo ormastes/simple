@@ -23,24 +23,30 @@ three-way audit repaired the outcome probe arguments, routed CLI daemon calls
 to the real owner, made dependency fingerprints content-based, restored lint's
 public API use, scoped global lint gates to `--all`, corrected duplicate-check
 path parsing, removed its dead parallel CLI, normalized `gen-lean` argv, and
-hardened MCP/LSP wrapper probe correlation and atomic stamps. The deployed
-runtime remains unavailable, so executable qualification is still blocked.
+hardened MCP/LSP wrapper probe correlation and atomic stamps. The latest
+remaining-tool audit additionally activated the shared process governor,
+removed cosine candidate truncation, made tool writes atomic and checked,
+bounded remaining runner subprocesses, and quoted MCP CLI inputs. It also
+invalidated earlier optimistic daemon and formatter status: both retain
+release-blocking correctness defects. The deployed runtime remains unavailable,
+so executable qualification is still blocked.
 
 ## Tool matrix
 
 | Surface | Status | Bug / missing evidence | Root solution | Priority |
 |---|---|---|---|---|
 | Production runtime | BLOCKED | Stage 4 was found parsing 10,503 files before closure pruning; source fix is unverified because the final cycle stopped on a stale compiler-backfill guard | In a fresh session run one bounded `--full-bootstrap`, require closure-sized phase input, then admit and atomically deploy | P0 |
-| Test runner | IMPLEMENTED | Failure/outcome/count/nesting, exact manifest correspondence, and deadline-bounded batch re-exec implemented | Run 1,000-example RSS evidence on pure runtime | P0 |
-| Duplicate checker | IMPLEMENTED | Token child is deadline-bound and shell-free; native walker runtime parity and cosine cache mutation remain open | Repair `rt_dir_walk` symlink/file parity and cache mutation, then run hostile-path and measured probes | P0 |
+| Test runner | PARTIAL | POSIX parallel argv is injection-safe and tracked, but Windows parallel capture now fails closed pending a native redirected-spawn API; signal cleanup remains incomplete | Add runtime redirected argv spawn, use it on every host, then run timeout/RSS evidence | P0 |
+| Duplicate checker | PARTIAL | Cosine no longer silently drops blocks above 320, but advertised parallel/incremental switches are inert; fast-token bucketing and cache freshness remain defective | Remove or implement inert flags, make the token index linear, and key cache reads by real freshness | P0 |
 | Lint | SOURCE FIXED | Focused/global ownership is correct; global gates still report 30 UI and 45 hot-loop violations | Repair classified violations, then qualify canonical fixtures | P1 |
-| Format/fix | SOURCE FIXED | Duplicate handlers removed; executable dry-run proof awaits admitted runtime | Run canonical dry-run and write fixtures after admission | P1 |
+| Format/fix | FAIL | Writes are atomic and failures propagate, but formatter rewriting is not lexer-span-aware and can alter raw strings/comments | Drive edits from lexer spans before qualifying formatter output | P0 |
 | Check | BLOCKED | Command is parse/validation only; full type inference is not enforced | Implement enforcing type analysis, then qualify the production probe | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
-| Test daemon | IMPLEMENTED | Requested waits no longer truncate at 60 seconds and dependency closure is no longer depth-truncated; dynamic matrix remains unqualified | Execute long-wait, deep dependency invalidation, and pinned-candidate cache probes after admission | P2 |
+| Test daemon | FAIL | Default launcher/client state directories disagree; normal requests bypass classification, lease/adapters/reset/release; child recursion, timeout transport, cache, and broker metadata are incomplete | Unify on the full daemon owner and route every request through one acquire/execute/reset/release transaction | P0 |
 | SPipe/docgen | WARN | Executable spec/manual exist; generated-doc validation blocked by seed | Regenerate once with admitted runtime | P1 |
 | MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P1 |
 | LSP MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P0 |
+| MCP CLI passthrough | SOURCE FIXED | Binary and every JSON-derived argument are shell quoted; structured argv is still preferable when response capture supports it | Run hostile apostrophe/metacharacter protocol fixtures after runtime admission | P0 |
 | Windows CLI/MCP/LSP | IMPLEMENTED | Shared bounded SHA-256 and real-protocol admission; executable Windows evidence missing | Run `check-windows-tool-wrapper-contract.ps1` on Windows | P0 |
 | `gen-lean` | IMPLEMENTED | Main dispatch reaches the distinct deadline-bound worker; runtime proof blocked by seed | Run bounded invalid-subcommand/worker probe | P2 |
 | Lean proof checker | SOURCE FIXED | Configured timeout now reaches every Lake operation; executable fake-Lake timeout proof awaits admitted runtime | Run the focused shell-timeout spec and a fake-Lake check after admission | P1 |
@@ -96,6 +102,23 @@ runtime remains unavailable, so executable qualification is still blocked.
    the global findings remain an explicit P1 cleanup lane.
 4. `simple check` now states its actual parse/validation behavior. Enforced full
    type inference remains an open P1 implementation bug.
+5. The default test-daemon launcher and client currently rendezvous in different
+   directories, and the full daemon path does not yet own the complete session
+   lifecycle. Daemon claims therefore remain unqualified.
+6. Formatter edits still infer syntax from raw text. Until edits are constrained
+   by lexer spans, comments and raw strings are vulnerable to semantic changes.
+
+## Remaining-tool audit backlog
+
+| Rank | Defect | Concrete solution |
+|---|---|---|
+| P0 | Test daemon state mismatch and lifecycle bypass | Delete the light/full split, share one state path, transport the requested deadline, and make the broker transaction authoritative |
+| P0 | Formatter can rewrite non-code text | Tokenize once and restrict whitespace/block edits to lexer-approved spans |
+| P1 | Lint ignores severity/options, duplicates fix collection, and `--all` can mask earlier failures | Make the canonical registry return one result set and aggregate exit status monotonically |
+| P1 | Duplicate fast-token bucket construction is quadratic and cache freshness is false | Build buckets in one pass and persist/compare content hash or mtime before reuse |
+| P1 | Duplicate CLI accepts inert parallel/cache flags and missing paths can exit zero | Reject unsupported flags, return usage/error status, or implement the promised modes |
+| P1 | Process cleanup handlers are advertised but inactive | Install one tracker-owned signal/crash cleanup hook per process |
+| P2 | Broker records failed leases and synthetic QEMU identity | Commit leases only after successful start and retain real PID/QMP metadata |
 
 ## Latest primary review decisions
 
@@ -206,9 +229,25 @@ runtime remains unavailable, so executable qualification is still blocked.
 - **QEMU protocol transport:** the daemon adapter now reuses the persistent QMP
   client for status, snapshots, and restore; process/file/directory facades
   replace its remaining shell calls, and each short-lived QMP fd is closed.
+- **Remaining shared roots:** the process governor now enforces its configured
+  cap with atomic admission and underflow-safe release. File overwrite uses the
+  runtime atomic-write owner, and formatter/fix propagate write failure.
+  Duplicate cosine analysis retains every inverted-index candidate instead of
+  silently sampling 320 blocks.
+- **MCP CLI boundary:** retain the existing static command registry, but quote
+  the binary and every JSON-derived value at the single shell boundary. This is
+  the smallest compatible injection fix until response capture accepts argv.
+- **Parallel runner boundary:** POSIX capture passes argv through fixed shell
+  positional parameters and `exec`; it never joins arguments into source text.
+  Windows fails closed and failed spawns are not waited/untracked. Platform and
+  CPU discovery now use native runtime owners instead of subprocess probes.
 
 ## Latest bounded verification
 
+- Remaining-tool focused source contracts, including atomic process admission,
+  full cosine candidate retention, bounded child execution, atomic writes, MCP
+  quoting, and non-placeholder focused specs: PASS. Dynamic Simple tests are
+  NOT RUN because no admitted runtime exists.
 - Shell syntax, scoped diff hygiene, and the MCP/LSP native wrapper contract:
   PASS.
 - Working and staged direct environment/runtime facade guards: PASS.

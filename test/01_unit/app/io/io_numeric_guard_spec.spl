@@ -1,11 +1,25 @@
 extern fn rt_file_read_text(path: text) -> text
+use std.nogc_sync_mut.io.process_governor.{
+    proc_slot_active, proc_slot_acquire, proc_slot_release, proc_slot_reset
+}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_delete}
 
 describe "app io numeric guards":
     it "guards SIMPLE_MAX_PROCS parsing":
-        val source = rt_file_read_text("src/app/io/process_governor.spl") ?? ""
+        val source = rt_file_read_text("src/lib/nogc_sync_mut/io/process_governor.spl") ?? ""
 
         expect(source).to_contain("_proc_gov_positive_int_or_zero(env_val)")
+        expect(source).to_contain("trimmed.len() > 18")
         expect(source.contains("val n = int(env_val)")).to_equal(false)
+
+    it "tracks process slots without underflow":
+        proc_slot_reset(9223372036854775807)
+        expect(proc_slot_active()).to_equal(0)
+        proc_slot_acquire()
+        expect(proc_slot_active()).to_equal(1)
+        proc_slot_release()
+        proc_slot_release()
+        expect(proc_slot_active()).to_equal(0)
 
     it "guards file_size shell output parsing":
         val source = rt_file_read_text("src/app/io/file_shell.spl") ?? ""
@@ -13,3 +27,12 @@ describe "app io numeric guards":
         expect(source).to_contain("for ch in trimmed:")
         expect(source).to_contain("if ch < \"0\" or ch > \"9\":")
         expect(source).to_contain("return 0")
+
+    it "routes overwrites through the checked atomic file owner":
+        val path = "/tmp/simple_atomic_file_owner_spec.txt"
+        val _cleanup = file_delete(path)
+        expect(file_write(path, "before")).to_equal(true)
+        expect(file_write(path, "after")).to_equal(true)
+        expect(file_read(path)).to_equal("after")
+        expect(file_write("/missing/simple/parent/output.txt", "nope")).to_equal(false)
+        file_delete(path)

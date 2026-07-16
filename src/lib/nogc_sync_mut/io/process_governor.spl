@@ -10,12 +10,14 @@
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_thread_sleep(millis: i64)
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
 
 # ============================================================================
 # Module State
 # ============================================================================
 
-val _ACQUIRE_MAX_ITERATIONS: i64 = 600
+val _ACQUIRE_WARN_ITERATIONS: i64 = 600
+val _active_procs: AtomicI64 = atomic_i64_new(0)
 
 # ============================================================================
 # CPU Count Helper (inlined so this file has no extra imports)
@@ -31,13 +33,19 @@ fn _cpu_count() -> i64:
 # Initialisation (lazy, called on first acquire)
 # ============================================================================
 
-fn _proc_gov_init():
-    return ()
+fn _proc_gov_positive_int_or_zero(value: text) -> i64:
+    val trimmed = value.trim()
+    if trimmed == "" or trimmed.len() > 18:
+        return 0
+    for ch in trimmed:
+        if ch < "0" or ch > "9":
+            return 0
+    int(trimmed)
 
 fn _proc_slot_limit() -> i64:
     val env_val = rt_env_get("SIMPLE_MAX_PROCS")
     if env_val != nil and env_val != "":
-        val n = int(env_val)
+        val n = _proc_gov_positive_int_or_zero(env_val)
         if n > 0:
             return n
     val default_val = _cpu_count() * 4
@@ -57,17 +65,33 @@ fn proc_slot_max() -> i64:
 
 fn proc_slot_active() -> i64:
     """Return the current number of active (tracked) processes."""
-    0
+    _active_procs.load(MemoryOrdering.SeqCst)
 
 fn proc_slot_acquire():
     """
     Claim a process slot before spawning.
 
     Blocks (with exponential back-off up to 500 ms) until a slot is free.
-    Gives up after ~5 min (600 iterations) to prevent permanent hangs from leaked slots.
+    Warns periodically while preserving the configured hard cap.
     Must be paired with proc_slot_release() after the process exits.
     """
-    return ()
+    var delay_ms: i64 = 10
+    var iteration: i64 = 0
+    while true:
+        val active = _active_procs.load(MemoryOrdering.SeqCst)
+        if active < _proc_slot_limit() and _active_procs.compare_exchange(
+            active, active + 1, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst
+        ):
+            return
+        rt_thread_sleep(delay_ms)
+        if delay_ms < 500:
+            delay_ms = delay_ms * 2
+            if delay_ms > 500:
+                delay_ms = 500
+        iteration = iteration + 1
+        if iteration >= _ACQUIRE_WARN_ITERATIONS:
+            print "[process-governor] still waiting for a child-process slot"
+            iteration = 0
 
 fn proc_slot_release():
     """
@@ -75,7 +99,13 @@ fn proc_slot_release():
 
     Safe to call even when _active_procs is already 0 (no-op).
     """
-    return ()
+    var active = _active_procs.load(MemoryOrdering.SeqCst)
+    while active > 0:
+        if _active_procs.compare_exchange(
+            active, active - 1, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst
+        ):
+            return
+        active = _active_procs.load(MemoryOrdering.SeqCst)
 
 fn proc_slot_reset(count: i64):
     """
@@ -83,7 +113,16 @@ fn proc_slot_reset(count: i64):
 
     Use after tracker_kill_all_children() which clears the whole list at once.
     """
-    return ()
+    if count <= 0:
+        return
+    var active = _active_procs.load(MemoryOrdering.SeqCst)
+    while active > 0:
+        val next = if count >= active: 0 else: active - count
+        if _active_procs.compare_exchange(
+            active, next, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst
+        ):
+            return
+        active = _active_procs.load(MemoryOrdering.SeqCst)
 
 # ============================================================================
 # Exports
