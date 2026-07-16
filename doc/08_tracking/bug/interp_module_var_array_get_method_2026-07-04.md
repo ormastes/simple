@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-04
 **Severity:** medium (silent-ish — semantic error at eval time, misleading message)
-**Status:** open — workaround in use
+**Status:** source-fixed; focused interpreter execution pending
 
 ## Symptom
 
@@ -28,11 +28,11 @@ to pin the exact broken call form.
 Bracket indexing on module-level arrays: `_let_names[i]` — matches the
 established `_di_names[idx]` precedent in di_runtime.spl.
 
-## Next step
+## Resolution (2026-07-16)
 
-The method-dispatch path for module-level var receivers appears to resolve
-builtin array methods differently from locals (falls through to an extern
-lookup). Likely near the interpreter's method-call resolution for global/
-module bindings. Cross-ref the module-var findings ledger:
-[[interp_cross_module_struct_field_collision_2026-07-04]] (different bug,
-same "module-scope resolution differs from local" family).
+Static tracing found that module and local receivers already share method
+dispatch. The stale `rt_args_count` diagnostic hid the current root: native
+array `.get(i)` was absent from both live pure-Simple interpreter dispatchers.
+Both now validate arity and integer indices, bounds-check, and return the raw
+element. The interpreter regression spec covers local and module-level arrays;
+execution awaits a permitted pure-Simple test binary.
