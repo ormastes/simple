@@ -487,6 +487,19 @@ impl CompilerDriver:
                 global_symbol_ids: {},
                 target_context: target_context
             )
+            # Crossmodule field-index prepass: the entry module is lowered
+            # BEFORE the dependency modules it imports, so without this an
+            # imported struct's field order was unknown while lowering the
+            # entry and resolve_field_index silently defaulted to index 0
+            # (SEGV on `state.driver.width` across modules). Register every
+            # module's name-keyed struct layout before lowering any module.
+            var direct_prescan_idx = 0
+            while direct_prescan_idx < self.ctx.sources.len():
+                val src_prescan = self.ctx.sources[direct_prescan_idx]
+                val prescan_hir = self.ctx.hir_modules[src_prescan.module_name]
+                if prescan_hir != nil:
+                    direct_lowering.prescan_module_struct_names(prescan_hir)
+                direct_prescan_idx = direct_prescan_idx + 1
             while direct_idx < self.ctx.sources.len():
                 val src_direct = self.ctx.sources[direct_idx]
                 val name_direct = src_direct.module_name
@@ -567,6 +580,11 @@ impl CompilerDriver:
         log_debug("[lower_to_mir] lowering to MIR")
         var lower_trace_count = 0
         if self.ctx.sources.len() <= 0:
+            # Same crossmodule struct prepass as the --entry-closure loop
+            # above: register all modules' struct layouts before lowering
+            # any module on the shared MirLowering instance.
+            for prescan_module in self.ctx.hir_modules:
+                lowering.prescan_module_struct_names(prescan_module)
             for hir_module in self.ctx.hir_modules:
                 val name = hir_module.name
                 var mir_module = lowering.lower_module(hir_module)

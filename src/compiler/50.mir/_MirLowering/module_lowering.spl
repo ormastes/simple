@@ -274,6 +274,62 @@ impl MirLowering:
     fn asm_target_spec_backend(spec: AsmTargetSpec) -> text:
         spec.backend
 
+    me prescan_module_struct_names(module: HirModule):
+        """Cross-module struct-name prepass (crossmodule field-index SEGV).
+
+        Entry-closure lowering iterates modules on ONE shared MirLowering,
+        and the ENTRY module is lowered BEFORE the dependency modules it
+        imports. A field read on an imported struct value (`state.driver`
+        where DisplayState lives in another module) therefore found nothing
+        in struct_field_order — the provider module's structs had not been
+        registered yet — and resolve_field_index silently fell back to
+        field index 0, reading `frame_id` as the `driver` pointer (SIGSEGV
+        at address 7). Callers that loop several HIR modules over one
+        MirLowering must call this for EVERY module before lowering ANY of
+        them, so imported struct layouts resolve regardless of lowering
+        order.
+
+        NAME-keyed maps only: field_map is keyed by per-module numeric
+        SymbolIds which collide across modules (each module has its own
+        SymbolTable), so it must never be filled cross-module. Existing
+        entries are kept (first module wins on a name collision); the
+        module's own registration in lower_module still overwrites
+        unconditionally at lowering time, so a module's local definition
+        always shadows an imported same-name struct while that module is
+        being lowered.
+
+        Also derives struct_field_type_name from the DECLARED field types
+        (`driver: FramebufferDriver`), so chained access off an imported
+        nested struct (`state.driver.width`, bug #166 mechanism) resolves
+        too — the construct-site prescan that normally fills that map runs
+        per-module and hits the same ordering gap."""
+        val prescan_struct_values = module.structs.values()
+        var psi = 0
+        while psi < prescan_struct_values.len():
+            val struct_def = prescan_struct_values[psi]
+            var field_names: [text] = []
+            var field_type_names: [text] = []
+            var pfi = 0
+            while pfi < struct_def.fields.len():
+                val pre_field = struct_def.fields[pfi]
+                field_names.push(pre_field.name)
+                var pre_field_type_name = ""
+                val pre_field_type = pre_field.type_
+                if pre_field_type != nil:
+                    match pre_field_type.kind:
+                        case Named(pre_field_type_sym, _):
+                            val pre_field_type_symbol = module.symbols.get_symbol(pre_field_type_sym)
+                            if pre_field_type_symbol.?:
+                                pre_field_type_name = pre_field_type_symbol.name
+                        case _: ()
+                field_type_names.push(pre_field_type_name)
+                pfi = pfi + 1
+            if not self.struct_field_order.has(struct_def.name):
+                self.struct_field_order[struct_def.name] = field_names
+            if not self.struct_field_type_name.has(struct_def.name):
+                self.struct_field_type_name[struct_def.name] = field_type_names
+            psi = psi + 1
+
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""
         var function_names: [text] = []

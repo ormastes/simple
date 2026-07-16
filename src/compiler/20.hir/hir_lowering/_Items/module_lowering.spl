@@ -527,43 +527,21 @@ impl HirLowering:
             # SIMPLE_COMPILER_TRACE=1 ("class `Module` has no field named `path`").
             eprint("[hir-lower] lower_module:start module={module.name}")
         self.lowered_impl_functions = {}
-        # Pass -1: pre-scan struct field TYPES (name-keyed, from the raw
-        # pre-HIR declaration -- no symbol resolution needed) before ANY
-        # function body is lowered. Nested-field-access support (see
-        # struct_field_types_by_name doc comment in types.spl) needs this
-        # available while lowering `val s = S(...)higher up in a function
-        # body, but this module's main struct-lowering pass (which fully
-        # resolves each HirStruct, further down in lower_module) runs AFTER
-        # functions are lowered (see the `functions[fn_key] = hir_fn` loop
-        # below) -- too late for that Let-statement lowering to see it. This
-        # pre-scan is deliberately separate from (and superseded by) that
-        # later full pass; it exists purely so the registry is non-empty
-        # early, at whatever partial fidelity self.lower_type can manage
-        # before other symbols are registered.
-        # NOTE: struct field type ANNOTATIONS are unreliable on this path
-        # (`arr: [i64]` parses to TypeKind.Infer, both parser- and HIR-level --
-        # a documented pre-existing limitation, see bug #156's
-        # method_calls_literals.spl comment). This pre-scan is still worth
-        # doing (cheap, and correct for any field shape the parser DOES
-        # preserve); the construction-site inference in
-        # try_register_local_struct_type (statements.spl) is what actually
-        # recovers array-typed fields in practice, and it MERGES into
-        # (overwrites) whatever this pass records.
-        val prescan_struct_names = module.structs.keys()
-        var prescan_idx = 0
-        while prescan_idx < prescan_struct_names.len():
-            val prescan_name = prescan_struct_names[prescan_idx]
-            val prescan_struct: Struct = module.structs[prescan_name]
-            var prescan_field_types: Dict<text, HirType> = {}
-            var prescan_field_order: [text] = []
-            for prescan_field in prescan_struct.fields:
-                prescan_field_types[prescan_field.name] = self.lower_type(prescan_field.type_)
-                prescan_field_order = prescan_field_order.push(prescan_field.name)
-            self.struct_field_types_by_name[prescan_name] = prescan_field_types
-            self.struct_field_order_by_name[prescan_name] = prescan_field_order
-            prescan_idx = prescan_idx + 1
-        # Pre-scan every enum-variant short name (parallel to the struct
-        # pre-scan above) so lower_pattern can give a subject-owned enum
+        # NOTE (moved): the struct field-type pre-scan that used to run HERE
+        # now runs AFTER Pass 0 (imports) and the declare pass below — see the
+        # "Pass -1 (relocated)" block. Running it first meant every
+        # struct-typed field (`inner: Inner`, `driver: FramebufferDriver`)
+        # hit lower_named_kind before ANY type symbol was defined and emitted
+        # "unresolved type" — historically swallowed, but fatal since HIR
+        # lowering errors became build errors (type lowering diagnostic
+        # recovery). The consumers of struct_field_types_by_name /
+        # struct_field_order_by_name are all in FUNCTION-BODY lowering, which
+        # still runs after the relocated pre-scan, so the "registry is
+        # populated before any function body" guarantee is unchanged — with
+        # strictly better fidelity, since module-local and imported type
+        # names now resolve to real Named kinds instead of decaying to Error.
+        # Pre-scan every enum-variant short name (needs no symbol resolution,
+        # so it keeps running first) so lower_pattern can give a subject-owned enum
         # variant precedence over an unrelated same-named struct/class. Keeps
         # `case Const(a, b, c):` a refutable enum-variant pattern instead of
         # an irrefutable struct-positional pattern
@@ -604,6 +582,46 @@ impl HirLowering:
             hir_module_phase_probe("phase3:hir:declare:done {module.name}")
         if bootstrap_diag:
             eprint("[hir-lower] declare:done module={module.name}")
+
+        # Pass -1 (relocated): pre-scan struct field TYPES (name-keyed) before
+        # ANY function body is lowered. Nested-field-access support (see
+        # struct_field_types_by_name doc comment in types.spl) needs this
+        # available while lowering `val s = S(...)` higher up in a function
+        # body, but this module's main struct-lowering pass (which fully
+        # resolves each HirStruct, further down in lower_module) runs AFTER
+        # functions are lowered -- too late for that Let-statement lowering to
+        # see it. This pre-scan is deliberately separate from (and superseded
+        # by) that later full pass. It MUST run after resolve_import_symbols
+        # (Pass 0) and declare_module_symbols above: lowering a struct-typed
+        # field (`driver: FramebufferDriver`) resolves the field type through
+        # lower_named_kind, and before those passes no type symbol exists yet,
+        # so every such field emitted "unresolved type" -- historically
+        # swallowed, but a fatal build error since HIR lowering errors became
+        # fatal (crossmodule_field_index_collision parity case: the provider
+        # module's own sibling struct failed to resolve and the whole
+        # native-build aborted).
+        # NOTE: struct field type ANNOTATIONS are unreliable on this path
+        # (`arr: [i64]` parses to TypeKind.Infer, both parser- and HIR-level --
+        # a documented pre-existing limitation, see bug #156's
+        # method_calls_literals.spl comment). This pre-scan is still worth
+        # doing (cheap, and correct for any field shape the parser DOES
+        # preserve); the construction-site inference in
+        # try_register_local_struct_type (statements.spl) is what actually
+        # recovers array-typed fields in practice, and it MERGES into
+        # (overwrites) whatever this pass records.
+        val prescan_struct_names = module.structs.keys()
+        var prescan_idx = 0
+        while prescan_idx < prescan_struct_names.len():
+            val prescan_name = prescan_struct_names[prescan_idx]
+            val prescan_struct: Struct = module.structs[prescan_name]
+            var prescan_field_types: Dict<text, HirType> = {}
+            var prescan_field_order: [text] = []
+            for prescan_field in prescan_struct.fields:
+                prescan_field_types[prescan_field.name] = self.lower_type(prescan_field.type_)
+                prescan_field_order = prescan_field_order.push(prescan_field.name)
+            self.struct_field_types_by_name[prescan_name] = prescan_field_types
+            self.struct_field_order_by_name[prescan_name] = prescan_field_order
+            prescan_idx = prescan_idx + 1
 
         # Second pass: lower definitions
         if bootstrap_diag:

@@ -34,6 +34,78 @@ pending. The separate HEAD-seed NVMe-init regression documented below still
 blocks reaching the render/PPM gate; this issue must not be marked verified or
 closed until that gate runs on a working Linux native-build host.
 
+## Pure-Simple pipeline root cause + fix (2026-07-16, parity case `crossmodule_field_index_collision_llvm`)
+
+The `run_strict_dual_backend_case crossmodule_field_index_collision` LLVM leg
+SEGV'd (rc=139, fault address 0x7 — `frame_id`'s VALUE 7 dereferenced as the
+`driver` pointer). Root cause in the pure-Simple pipeline
+(`bin/simple native-build --entry`, in-process compiler_driver):
+
+- `driver_pipeline.spl`'s entry-closure loop lowers all modules on ONE shared
+  `MirLowering`, and the ENTRY module is lowered BEFORE the dependency modules
+  it imports. `MirLowering.struct_field_order` / `struct_field_type_name` are
+  only populated by `lower_module` for the module being lowered, so while the
+  entry was lowered they contained only the entry's own structs (the decoy),
+  never the provider's `DisplayState`/`FramebufferDriver`.
+- The call-return registration (`emit_resolved_direct_call`) DID correctly tag
+  the `make_display_state()` result local as `DisplayState` in
+  `struct_value_syms`, but `resolve_field_index`'s name-keyed lookup found no
+  `DisplayState` entry and silently fell back to field index 0: `state.driver`
+  read `frame_id` (=7) as a pointer, and the chained `.width` read index 0 off
+  address 0x7 → SIGSEGV. The decoy is not required to reproduce; a no-decoy
+  control SEGVs identically (the ordering gap, not a name collision, is the
+  root).
+
+Fix: `MirLowering.prescan_module_struct_names(module)`
+(`src/compiler/50.mir/_MirLowering/module_lowering.spl`) registers every
+module's NAME-keyed struct field order plus decl-derived field-type names
+(`driver: FramebufferDriver`, needed for the bug-#166 chained-access
+mechanism) — and both shared-instance lowering loops in
+`src/compiler/80.driver/driver_pipeline.spl` now run it over ALL HIR modules
+before lowering ANY module. Name-keyed maps only: `field_map` is keyed by
+per-module numeric SymbolIds that collide across modules and must stay
+module-local. Existing entries win (module-local defs are re-registered
+unconditionally by `lower_module` at lowering time, so a local same-name
+struct still shadows an imported one while its module is lowered).
+
+After the fix the parity case prints `640/480` rc=0 on the strict-LLVM leg
+(decoy and no-decoy controls both), and `scripts/check/native-smoke-matrix.shs`
+stays 15/15 pass, fail=0, codegen_fallback_hits=0. The Cranelift leg of the
+same case fails to BUILD (`Failed to declare module statics`, backend
+(cranelift)) both before and after this fix — a separate pre-existing
+cranelift-backend gap, not addressed here.
+
+### Follow-up (2026-07-16, at tip): HIR Pass -1 field-type pre-scan vs fatal lowering errors
+
+After "fix(hir): type lowering diagnostic recovery" (00b5f60ea93) made all HIR
+lowering `error(...)` diagnostics fatal, the same parity case stopped
+BUILDING: `error: HIR lowering error in
+test.fixtures.native_crossmodule_field_index.provider: unresolved type:
+FramebufferDriver`. Root cause: HIR `lower_module`'s "Pass -1" pre-scan
+(`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl`) lowered every
+struct field TYPE via `lower_type` BEFORE `resolve_import_symbols` (Pass 0)
+and `declare_module_symbols` ran, so every struct-typed field — including a
+module's OWN sibling struct (`driver: FramebufferDriver`) and even the
+single-module `inner: Inner` shape — hit `lower_named_kind` with an empty
+type-symbol table and emitted "unresolved type". Historically that error was
+swallowed (the pre-scan was documented as "partial fidelity"); once fatal, it
+broke ANY module with a struct-typed field on the native-build entry-closure
+path.
+
+Fix: relocate the Pass -1 struct field-type pre-scan to run AFTER Pass 0 and
+the declare pass (still before any function body is lowered, which is the
+only ordering its consumers — statements.spl / expressions.spl nested-field
+support — need). Module-local and imported names now resolve to real Named
+kinds. Loudness preserved (verified): a Named field type that is genuinely
+out of scope in a dependency module (declared elsewhere, not imported) still
+fails the build with "unresolved type: ..." both from the relocated pre-scan
+and from the later full struct-lowering pass. Note a PRE-EXISTING, unrelated
+gap: a field type name that is declared NOWHERE in the compilation (a true
+typo, e.g. `field_a: TotallyMissingType`) is collapsed to `TypeKind.Infer` by
+the parser/flat-AST bridge before HIR ever sees it, so it builds silently —
+identical behavior at baseline tip and after this fix (parser-level, not a
+loud-to-silent change; filed here for visibility).
+
 ## Symptom
 
 When a `class` that has one or more `[u32]` (dynamic array) fields **before** its scalar fields is passed across a module boundary and the receiving module reads a scalar field, the read lands **one slot too early** — it returns the value of the *previous* field (or garbage from before the first read field).
