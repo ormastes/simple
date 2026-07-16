@@ -32,17 +32,18 @@ runtime remains unavailable, so executable qualification is still blocked.
 |---|---|---|---|---|
 | Production runtime | BLOCKED | Stage 4 was found parsing 10,503 files before closure pruning; source fix is unverified because the final cycle stopped on a stale compiler-backfill guard | In a fresh session run one bounded `--full-bootstrap`, require closure-sized phase input, then admit and atomically deploy | P0 |
 | Test runner | IMPLEMENTED | Failure/outcome/count/nesting, exact manifest correspondence, and deadline-bounded batch re-exec implemented | Run 1,000-example RSS evidence on pure runtime | P0 |
-| Duplicate checker | IMPLEMENTED | Token child is now deadline-bound; fast-script newline/leading-dash enumeration and cosine cache mutation remain open | Replace fast-script shell discovery with `dir_walk_native`, repair cache mutation, then run hostile-path and measured probes | P0 |
+| Duplicate checker | IMPLEMENTED | Token child is deadline-bound and shell-free; native walker runtime parity and cosine cache mutation remain open | Repair `rt_dir_walk` symlink/file parity and cache mutation, then run hostile-path and measured probes | P0 |
 | Lint | SOURCE FIXED | Focused/global ownership is correct; global gates still report 30 UI and 45 hot-loop violations | Repair classified violations, then qualify canonical fixtures | P1 |
 | Format/fix | SOURCE FIXED | Duplicate handlers removed; executable dry-run proof awaits admitted runtime | Run canonical dry-run and write fixtures after admission | P1 |
 | Check | BLOCKED | Command is parse/validation only; full type inference is not enforced | Implement enforcing type analysis, then qualify the production probe | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
-| Test daemon | IMPLEMENTED | Requested waits no longer truncate at 60 seconds; dynamic matrix and depth-greater-than-five dependency invalidation remain unqualified | Execute long-wait and pinned-candidate cache probes after admission, then remove the dependency-depth ceiling | P2 |
+| Test daemon | IMPLEMENTED | Requested waits no longer truncate at 60 seconds and dependency closure is no longer depth-truncated; dynamic matrix remains unqualified | Execute long-wait, deep dependency invalidation, and pinned-candidate cache probes after admission | P2 |
 | SPipe/docgen | WARN | Executable spec/manual exist; generated-doc validation blocked by seed | Regenerate once with admitted runtime | P1 |
 | MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P1 |
 | LSP MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P0 |
 | Windows CLI/MCP/LSP | IMPLEMENTED | Shared bounded SHA-256 and real-protocol admission; executable Windows evidence missing | Run `check-windows-tool-wrapper-contract.ps1` on Windows | P0 |
 | `gen-lean` | IMPLEMENTED | Main dispatch reaches the distinct deadline-bound worker; runtime proof blocked by seed | Run bounded invalid-subcommand/worker probe | P2 |
+| Lean proof checker | SOURCE FIXED | Configured timeout now reaches every Lake operation; executable fake-Lake timeout proof awaits admitted runtime | Run the focused shell-timeout spec and a fake-Lake check after admission | P1 |
 
 ## Ranked work items
 
@@ -136,8 +137,17 @@ runtime remains unavailable, so executable qualification is still blocked.
 - **Duplicate token mode:** the fast child remains separate for its measured
   low latency, but it now runs through the existing 30-second timeout facade.
   Facade timeout `-1` is normalized to the truthful CLI timeout class `124`.
-  Replacing its shell-based file discovery and repairing incremental-cache
-  mutation are separate open fixes, not hidden by this deadline repair.
+  Its file discovery now reuses `dir_walk_native`, preserving hostile path
+  boundaries and deterministic sort order without shell/newline parsing.
+  Runtime walker symlink/file parity and incremental-cache mutation remain
+  separate tracked fixes.
+- **Dependency closure:** the daemon and standalone runner now fingerprint the
+  full cycle-safe import closure. The former magic depth-five ceiling silently
+  omitted deeper dependencies and could return stale cache hits; the existing
+  `seen` set already provides finite traversal.
+- **Proof checker:** `CheckerConfig.timeout_ms` now reaches `LakeRunner`, and
+  build/check/clean share the existing platform-aware process deadline through
+  `shell_timeout`. Timeout markers remain visible as failed proof results.
 - **Lint/fmt/fix review:** no import rewrite was accepted. `cli_ops` already
   re-exports `cli_lint_commands`, `run_commands.spl` has no duplicate handlers,
   and `simple.cmd` already resolves the admitted pure-Simple executable.
@@ -174,6 +184,10 @@ runtime remains unavailable, so executable qualification is still blocked.
 - Daemon requested-deadline ownership and bounded duplicate token-child source
   contracts: PASS by scoped source inspection; dynamic timeout behavior is NOT
   RUN because no admitted runtime exists.
+- Fast duplicate native discovery, full cycle-safe test dependency closure,
+  checker-to-Lake deadline propagation, and the shared shell-timeout facade:
+  PASS by scoped source contracts and diff hygiene. Their focused Simple specs
+  are NOT RUN because no admitted runtime exists.
 - New Simple unit/system behavior and the PowerShell contract: NOT RUN because
   no admitted pure-Simple runtime or PowerShell host exists. Previously passed
   global gates were not repeated after their session limit.
