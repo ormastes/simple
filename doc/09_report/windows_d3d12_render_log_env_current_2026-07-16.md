@@ -27,6 +27,14 @@ Result:
 - `windows_d3d12_electron_chrome_pairwise_diff_mismatch_count=9975`
 - `windows_d3d12_electron_chrome_pairwise_diff_width=320`
 - `windows_d3d12_electron_chrome_pairwise_diff_height=240`
+- `windows_d3d12_electron_argb_width=320`
+- `windows_d3d12_electron_argb_height=240`
+- `windows_d3d12_electron_argb_pixel_count=76800`
+- `windows_d3d12_electron_argb_nonblank_pixel_count=76800`
+- `windows_d3d12_chrome_argb_width=320`
+- `windows_d3d12_chrome_argb_height=240`
+- `windows_d3d12_chrome_argb_pixel_count=76800`
+- `windows_d3d12_chrome_argb_nonblank_pixel_count=76800`
 - `windows_d3d12_pix_capture_status=unavailable`
 - `windows_d3d12_pix_capture_tool=`
 - `windows_d3d12_gpu_debugger_capture_tool=C:\WINDOWS\system32\DXCap.exe`
@@ -60,8 +68,10 @@ The saved D3D12 evidence also records
 `windows_d3d12_render_log_compare_pix_gpu_debugger_gate_status=pass` through the
 DXCap artifact. The wrapper now compares the Electron and Chrome ARGB JSON
 captures directly; the current evidence is a real `320x240` mismatch, not a
-placeholder. Native D3D12 readback, actual browser D3D12 backing, Simple
-pairwise ARGB diff, and full ARGB source evidence remain fail-closed.
+placeholder. It also records source dimensions, pixel counts, and nonblank
+pixel counts for both browser captures. Native D3D12 readback, actual browser
+D3D12 backing, Simple pairwise ARGB diff, and full ARGB source evidence remain
+fail-closed.
 
 Environment bootstrap attempt:
 
@@ -107,4 +117,6 @@ Code change:
   DirectX diagnostics are present; `-RequireD3D12Completion` fails until native
   D3D12 readback, actual D3D12 browser backing, Simple pairwise ARGB evidence,
   and full ARGB source evidence pass. Electron-vs-Chrome ARGB comparison is now
-  recorded as real evidence and currently fails with 9,975 mismatched pixels.
+  recorded as real evidence and currently fails with 9,975 mismatched pixels;
+  both browser ARGB source captures are recorded as `320x240`, 76,800 pixels,
+  and 76,800 nonblank pixels.

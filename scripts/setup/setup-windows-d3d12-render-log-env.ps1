@@ -212,6 +212,33 @@ function Compare-ArgbJson([string]$leftPath, [string]$rightPath) {
     return $result
 }
 
+function Read-ArgbJsonSummary([string]$path) {
+    $result = @{
+        status = "missing"
+        width = "0"
+        height = "0"
+        pixel_count = "0"
+        nonblank_pixel_count = "0"
+    }
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) { return $result }
+    try {
+        $argb = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $pixels = @($argb.pixels)
+        $nonblank = 0
+        foreach ($pixel in $pixels) {
+            if ("$pixel" -ne "0" -and "$pixel" -ne "") { $nonblank++ }
+        }
+        $result.status = "pass"
+        $result.width = "$([int]$argb.width)"
+        $result.height = "$([int]$argb.height)"
+        $result.pixel_count = "$($pixels.Count)"
+        $result.nonblank_pixel_count = "$nonblank"
+    } catch {
+        $result.status = "fail"
+    }
+    return $result
+}
+
 if ($Mode -eq "--print-install") {
     Write-Install
     exit 0
@@ -263,10 +290,12 @@ $chromeArgbChecksum = Value-Or $directx @("gui_web_2d_directx_chrome_argb_checks
 $electronArgbPath = Value-Or $directx @("gui_web_2d_directx_electron_argb_path") ""
 $chromeArgbPath = Value-Or $directx @("gui_web_2d_directx_chrome_argb_path") ""
 $electronChromeDiff = Compare-ArgbJson $electronArgbPath $chromeArgbPath
+$electronArgbSummary = Read-ArgbJsonSummary $electronArgbPath
+$chromeArgbSummary = Read-ArgbJsonSummary $chromeArgbPath
 $gpuDebuggerArtifact = Value-Or $directx @("gui_web_2d_directx_gpu_debugger_capture_artifact") ""
 $gpuDebuggerArtifactStatus = File-Status $gpuDebuggerArtifact
 $browserGateStatus = if ($directxNativeApi -eq "d3d12" -and $directxStatus -eq "pass" -and $directxEventStatus -eq "pass" -and $electronBackingStatus -eq "pass" -and $chromeBackingStatus -eq "pass" -and $electronD3d12Hint -eq "true" -and $chromeD3d12Hint -eq "true") { "pass" } else { "fail" }
-$argbSourceGateStatus = if ($electronArgbStatus -eq "pass" -and $chromeArgbStatus -eq "pass" -and $electronArgbChecksum -ne "missing" -and $chromeArgbChecksum -ne "missing") { "partial" } else { "fail" }
+$argbSourceGateStatus = if ($electronArgbStatus -eq "pass" -and $chromeArgbStatus -eq "pass" -and $electronArgbChecksum -ne "missing" -and $chromeArgbChecksum -ne "missing" -and [int]$electronArgbSummary.nonblank_pixel_count -gt 0 -and [int]$chromeArgbSummary.nonblank_pixel_count -gt 0) { "partial" } else { "fail" }
 $gpuDebuggerGateStatus = if ($directxNativeApi -eq "d3d12" -and $directxCaptureStatus -eq "pass" -and $gpuDebuggerArtifactStatus -eq "pass") { "pass" } else { "fail" }
 $pixTool = Latest-PixTool
 $dxcapTool = Command-Source "DXCap.exe"
@@ -312,8 +341,16 @@ foreach ($source in @("simple")) {
     Add-Row $browserRows "windows_d3d12_${source}_argb_checksum" "missing"
 }
 Add-Row $browserRows "windows_d3d12_electron_argb_status" "$electronArgbStatus"
+Add-Row $browserRows "windows_d3d12_electron_argb_width" "$($electronArgbSummary.width)"
+Add-Row $browserRows "windows_d3d12_electron_argb_height" "$($electronArgbSummary.height)"
+Add-Row $browserRows "windows_d3d12_electron_argb_pixel_count" "$($electronArgbSummary.pixel_count)"
+Add-Row $browserRows "windows_d3d12_electron_argb_nonblank_pixel_count" "$($electronArgbSummary.nonblank_pixel_count)"
 Add-Row $browserRows "windows_d3d12_electron_argb_checksum" "$electronArgbChecksum"
 Add-Row $browserRows "windows_d3d12_chrome_argb_status" "$chromeArgbStatus"
+Add-Row $browserRows "windows_d3d12_chrome_argb_width" "$($chromeArgbSummary.width)"
+Add-Row $browserRows "windows_d3d12_chrome_argb_height" "$($chromeArgbSummary.height)"
+Add-Row $browserRows "windows_d3d12_chrome_argb_pixel_count" "$($chromeArgbSummary.pixel_count)"
+Add-Row $browserRows "windows_d3d12_chrome_argb_nonblank_pixel_count" "$($chromeArgbSummary.nonblank_pixel_count)"
 Add-Row $browserRows "windows_d3d12_chrome_argb_checksum" "$chromeArgbChecksum"
 Add-Row $browserRows "windows_d3d12_browser_backing_directx_diagnostic_env" "$DirectxEvidencePath"
 Add-Row $browserRows "windows_d3d12_browser_backing_directx_diagnostic_status" "$directxStatus"
