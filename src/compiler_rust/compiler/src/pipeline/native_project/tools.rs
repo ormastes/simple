@@ -280,6 +280,7 @@ fn find_core_c_runtime_source_root() -> Option<PathBuf> {
 fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Option<PathBuf> {
     let archive = build_dir.join(host_archive_name());
     let runtime_root = find_core_c_runtime_source_root()?;
+    let target = effective_target();
     let mut runtime_inputs = vec![
         "runtime_native.c",
         "runtime_directx_core.c",
@@ -299,6 +300,12 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_thread.h",
         "platform/platform.h",
     ];
+    if target.os == simple_common::target::TargetOS::Linux {
+        // The portable compositor remains in the full CLI closure on Linux.
+        // Reuse its canonical non-target providers so live Cocoa/Win32 calls
+        // fail closed instead of becoming generated bootstrap stubs.
+        runtime_inputs.extend(["hosted_cocoa.c", "hosted_win32.c"]);
+    }
     if std::env::var("SIMPLE_CORE_C_INCLUDE_HTTPS_OPENSSL").ok().as_deref() == Some("1") {
         runtime_inputs.push("runtime_https_openssl_core.c");
     }
@@ -319,7 +326,6 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
 
     std::fs::create_dir_all(build_dir).ok()?;
 
-    let target = effective_target();
     let cc = target_c_compiler(target);
     let ar = find_archive_tool();
     let obj_ext = host_object_extension();
@@ -1299,6 +1305,306 @@ pub(crate) fn build_stage4_cli_c_provider_archives(build_dir: &Path) -> Result<V
     validate_stage4_system_library_ownership(&archives[1], &STAGE4_C_PROVIDER_SPECS[1], &sqlite, &sqlite_definitions)?;
     validate_stage4_system_library_ownership(&archives[2], &STAGE4_C_PROVIDER_SPECS[2], &libc, &libc_definitions)?;
     Ok(archives)
+}
+
+/// Project the exact Stage-4 runtime/provider closure needed by a CLI entry.
+///
+/// Requested symbols remain global; every other retained definition is local.
+/// The result is a deterministic single-member archive with no runtime ABI
+/// dependency left unresolved.
+pub(crate) fn build_stage4_runtime_capsule_archive(
+    core_archive: &Path,
+    provider_archives: &[PathBuf],
+    requested_symbols: &[String],
+    temp_dir: &Path,
+) -> Result<PathBuf, String> {
+    if provider_archives.len() != STAGE4_C_PROVIDER_SPECS.len() {
+        return Err(format!(
+            "Stage4 runtime capsule requires exactly {} C providers (found {})",
+            STAGE4_C_PROVIDER_SPECS.len(),
+            provider_archives.len()
+        ));
+    }
+    for (provider, spec) in provider_archives.iter().zip(STAGE4_C_PROVIDER_SPECS) {
+        validate_stage4_cli_c_provider_archive(provider, spec)?;
+    }
+    let inputs: Vec<(&str, &Path)> = std::iter::once(("core", core_archive))
+        .chain(
+            STAGE4_C_PROVIDER_SPECS
+                .iter()
+                .zip(provider_archives)
+                .map(|(spec, archive)| (spec.source, archive.as_path())),
+        )
+        .collect();
+    validate_archive_definition_disjointness(&inputs)?;
+    project_stage4_archive_closure(
+        &inputs.iter().map(|(_, archive)| *archive).collect::<Vec<_>>(),
+        requested_symbols,
+        &[],
+        temp_dir,
+        "stage4_runtime_capsule",
+    )
+}
+
+/// Project the requested Rust runtime exports without exposing the rlib's
+/// remaining global ABI. Allowed runtime externals must be supplied by the
+/// adjacent exact Stage-4 capsules.
+pub(crate) fn build_stage4_rust_runtime_projection_archive(
+    rust_runtime_archive: &Path,
+    requested_symbols: &[String],
+    allowed_external_runtime_symbols: &[String],
+    temp_dir: &Path,
+) -> Result<PathBuf, String> {
+    project_stage4_archive_closure(
+        &[rust_runtime_archive],
+        requested_symbols,
+        allowed_external_runtime_symbols,
+        temp_dir,
+        "stage4_rust_runtime",
+    )
+}
+
+fn project_stage4_archive_closure(
+    inputs: &[&Path],
+    requested_symbols: &[String],
+    allowed_external_runtime_symbols: &[String],
+    temp_dir: &Path,
+    stem: &str,
+) -> Result<PathBuf, String> {
+    if !cfg!(all(target_os = "linux", target_env = "gnu")) {
+        return Err("Stage4 archive projection currently requires native GNU/Linux binutils semantics".to_string());
+    }
+    let output = temp_dir.join(format!("libsimple_{stem}.a"));
+    let closure_object = temp_dir.join(format!("{stem}_closure.o"));
+    let localized_object = temp_dir.join(format!("{stem}_local.o"));
+    let localize_path = temp_dir.join(format!("{stem}_localize.syms"));
+    if inputs.is_empty() {
+        return Err("Stage4 archive projection requires at least one input".to_string());
+    }
+    for input in inputs {
+        if safe_canonicalize(input) == safe_canonicalize(&output) {
+            return Err("Stage4 projection inputs and output archive must differ".to_string());
+        }
+    }
+    let requested: BTreeSet<String> = requested_symbols.iter().cloned().collect();
+    if requested.is_empty() {
+        return Err("Stage4 requested symbol set is empty".to_string());
+    }
+    if requested.len() != requested_symbols.len() {
+        return Err("Stage4 requested symbol set contains duplicates".to_string());
+    }
+    let allowed_external: BTreeSet<String> = allowed_external_runtime_symbols.iter().cloned().collect();
+    if let Some(symbol) = allowed_external
+        .iter()
+        .find(|symbol| !symbol.starts_with("rt_") && !symbol.starts_with("spl_"))
+    {
+        return Err(format!(
+            "Stage4 allowed external `{symbol}` is not a runtime ABI symbol"
+        ));
+    }
+
+    let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_file(&closure_object);
+    let _ = std::fs::remove_file(&localized_object);
+    let _ = std::fs::remove_file(&localize_path);
+
+    let result = (|| {
+        let mut root_counts = BTreeMap::<String, usize>::new();
+        for input in inputs {
+            let (defined, _) = archive_global_symbols(input)?;
+            for (raw_symbol, count) in defined {
+                let symbol = canonical_archive_symbol(&raw_symbol);
+                if requested.contains(symbol) {
+                    *root_counts.entry(symbol.to_string()).or_default() += count;
+                }
+            }
+        }
+        for symbol in &requested {
+            let count = root_counts.get(symbol).copied().unwrap_or_default();
+            if count != 1 {
+                return Err(format!(
+                    "Stage4 projection root `{symbol}` has {count} archive definitions"
+                ));
+            }
+        }
+
+        std::fs::create_dir_all(temp_dir).map_err(|err| {
+            format!(
+                "failed to create Stage4 runtime capsule directory {}: {err}",
+                temp_dir.display()
+            )
+        })?;
+        let cc = find_c_compiler();
+        let mut closure_cmd = std::process::Command::new(&cc);
+        closure_cmd
+            .arg("-nostdlib")
+            .arg("-no-pie")
+            .arg("-Wl,-r")
+            .arg("-Wl,--gc-sections");
+        for symbol in &requested {
+            closure_cmd.arg(format!("-Wl,--undefined={symbol}"));
+        }
+        closure_cmd.arg("-Wl,--start-group");
+        for archive in inputs {
+            closure_cmd.arg(archive);
+        }
+        let closure = closure_cmd
+            .arg("-Wl,--end-group")
+            .arg("-o")
+            .arg(&closure_object)
+            .output()
+            .map_err(|err| format!("failed to execute Stage4 runtime capsule closure link with {cc}: {err}"))?;
+        if !closure.status.success() {
+            return Err(format!(
+                "Stage4 runtime capsule closure link failed: {}",
+                String::from_utf8_lossy(&closure.stderr).trim()
+            ));
+        }
+
+        let (closure_defined, closure_undefined) = archive_global_symbols(&closure_object)?;
+        for symbol in &requested {
+            let count: usize = closure_defined
+                .iter()
+                .filter(|(raw, _)| canonical_archive_symbol(raw) == symbol)
+                .map(|(_, count)| *count)
+                .sum();
+            if count != 1 {
+                return Err(format!(
+                    "Stage4 runtime capsule root `{symbol}` has {count} definitions"
+                ));
+            }
+        }
+        let unresolved_runtime: Vec<&str> = closure_undefined
+            .iter()
+            .map(|symbol| canonical_archive_symbol(symbol))
+            .filter(|symbol| symbol.starts_with("rt_") || symbol.starts_with("spl_"))
+            .filter(|symbol| !allowed_external.contains(*symbol))
+            .collect();
+        if !unresolved_runtime.is_empty() {
+            return Err(format!(
+                "Stage4 runtime capsule has unresolved runtime symbols: {}",
+                unresolved_runtime.join(", ")
+            ));
+        }
+
+        let localize_text = closure_defined
+            .keys()
+            .filter(|raw| !requested.contains(canonical_archive_symbol(raw)))
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(
+            &localize_path,
+            if localize_text.is_empty() {
+                String::new()
+            } else {
+                localize_text + "\n"
+            },
+        )
+        .map_err(|err| format!("failed to write Stage4 runtime capsule localization list: {err}"))?;
+
+        let objcopy = find_objcopy_tool().ok_or_else(|| "Stage4 runtime capsule requires objcopy".to_string())?;
+        let localized = std::process::Command::new(&objcopy)
+            .arg(format!("--localize-symbols={}", localize_path.display()))
+            .arg("--remove-section=.init_array")
+            .arg("--remove-section=.init_array.*")
+            .arg("--remove-section=.ctors")
+            .arg("--remove-section=.ctors.*")
+            .arg("--remove-section=.fini_array")
+            .arg("--remove-section=.fini_array.*")
+            .arg("--remove-section=.dtors")
+            .arg("--remove-section=.dtors.*")
+            .arg("--remove-section=__mod_init_func")
+            .arg("--remove-section=__mod_term_func")
+            .arg(&closure_object)
+            .arg(&localized_object)
+            .output()
+            .map_err(|err| format!("failed to execute Stage4 runtime capsule objcopy: {err}"))?;
+        if !localized.status.success() {
+            return Err(format!(
+                "Stage4 runtime capsule objcopy failed: {}",
+                String::from_utf8_lossy(&localized.stderr).trim()
+            ));
+        }
+
+        let (localized_defined, localized_undefined) = archive_global_symbols(&localized_object)?;
+        let actual: BTreeMap<String, usize> = localized_defined
+            .iter()
+            .map(|(symbol, count)| (canonical_archive_symbol(symbol).to_string(), *count))
+            .collect();
+        let expected: BTreeMap<String, usize> = requested.iter().map(|symbol| (symbol.clone(), 1)).collect();
+        if actual != expected {
+            return Err(format!(
+                "Stage4 runtime capsule globals differ from requested roots: expected {expected:?}, found {actual:?}"
+            ));
+        }
+        let unresolved_runtime: Vec<&str> = localized_undefined
+            .iter()
+            .map(|symbol| canonical_archive_symbol(symbol))
+            .filter(|symbol| symbol.starts_with("rt_") || symbol.starts_with("spl_"))
+            .filter(|symbol| !allowed_external.contains(*symbol))
+            .collect();
+        if !unresolved_runtime.is_empty() {
+            return Err(format!(
+                "Stage4 runtime capsule has unresolved runtime symbols after localization: {}",
+                unresolved_runtime.join(", ")
+            ));
+        }
+        let forbidden_sections = forbidden_archive_sections(&localized_object)?;
+        if !forbidden_sections.is_empty() {
+            return Err(format!(
+                "Stage4 runtime capsule retained constructor/destructor sections: {}",
+                forbidden_sections.join(", ")
+            ));
+        }
+
+        let ar = find_archive_tool();
+        let archived = archive_create_command(&ar, &output, std::slice::from_ref(&localized_object), false, true)
+            .output()
+            .map_err(|err| format!("failed to execute deterministic archive tool {ar}: {err}"))?;
+        if !archived.status.success() {
+            return Err(format!(
+                "failed to create Stage4 runtime capsule archive: {}",
+                String::from_utf8_lossy(&archived.stderr).trim()
+            ));
+        }
+        let members = archive_list_command(&ar, &output)
+            .output()
+            .map_err(|err| format!("failed to inspect Stage4 runtime capsule archive members: {err}"))?;
+        let member_stdout = String::from_utf8_lossy(&members.stdout);
+        let member_names: Vec<&str> = member_stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        let expected_member = format!("{stem}_local.o");
+        if !members.status.success() || member_names != [expected_member.as_str()] {
+            return Err(format!(
+                "Stage4 projection archive must contain exactly {expected_member} (found {})",
+                member_names.join(", ")
+            ));
+        }
+        let (output_defined, output_undefined) = archive_global_symbols(&output)?;
+        if output_defined != localized_defined || output_undefined != localized_undefined {
+            return Err("Stage4 runtime capsule symbol table changed while archiving".to_string());
+        }
+        let output_sections = forbidden_archive_sections(&output)?;
+        if !output_sections.is_empty() {
+            return Err(format!(
+                "Stage4 runtime capsule archive retained constructor/destructor sections: {}",
+                output_sections.join(", ")
+            ));
+        }
+        Ok(output.clone())
+    })();
+
+    let _ = std::fs::remove_file(&closure_object);
+    let _ = std::fs::remove_file(&localized_object);
+    let _ = std::fs::remove_file(&localize_path);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&output);
+    }
+    result
 }
 
 /// Build the Stage-4 compiler hook archive without importing a second runtime.

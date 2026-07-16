@@ -6,22 +6,34 @@ use std::path::{Path, PathBuf};
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
-    archive_create_command, build_compiler_backfill_archive, find_archive_tool, find_c_compiler,
-    find_compiler_rt_builtins, find_cxx_compiler, find_native_all_library, find_objcopy_tool, is_system_symbol,
-    nm_command, strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
-    build_stage4_c_runtime_library,
+    archive_create_command, build_compiler_backfill_archive, build_stage4_c_runtime_library,
+    build_stage4_cli_c_provider_archives, build_stage4_runtime_capsule_archive,
+    build_stage4_rust_runtime_projection_archive, find_archive_tool, find_c_compiler, find_compiler_rt_builtins,
+    find_cxx_compiler, find_native_all_library, find_objcopy_tool, is_system_symbol, nm_command,
+    strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
+    validate_stage4_cli_c_provider_archive_disjointness,
 };
 
 impl NativeProjectBuilder {
+    pub(crate) fn stage4_rust_runtime_staticlib(runtime_path: &Path) -> Result<PathBuf, String> {
+        let archive = runtime_path.join("deps/libsimple_runtime.a");
+        if !archive.is_file() {
+            return Err(format!("Stage4 Rust runtime staticlib is missing: {}", archive.display()));
+        }
+        Ok(archive)
+    }
+
     pub(crate) fn prepare_stage4_compiler_backfill_archive(
         &self,
         selected_runtime: Option<&(PathBuf, bool)>,
+        additional_providers: &[PathBuf],
         temp_dir: &Path,
     ) -> Result<Option<PathBuf>, String> {
         let Some(source) = self.selected_stage4_compiler_backfill_archive()? else {
             return Ok(None);
         };
-        let providers = selected_runtime.map(|(path, _)| vec![path.clone()]).unwrap_or_default();
+        let mut providers = selected_runtime.map(|(path, _)| vec![path.clone()]).unwrap_or_default();
+        providers.extend_from_slice(additional_providers);
         build_compiler_backfill_archive(&source, &providers, temp_dir).map(Some)
     }
 
@@ -559,6 +571,70 @@ impl NativeProjectBuilder {
         Ok(rsp_path)
     }
 
+    #[cfg(target_os = "linux")]
+    fn stage4_live_runtime_requests(
+        temp_dir: &Path,
+        object_paths: &[PathBuf],
+        main_o: &Path,
+        init_o: Option<&PathBuf>,
+        alias_stub: &Path,
+    ) -> Result<Vec<String>, String> {
+        let mut inputs = Vec::with_capacity(object_paths.len() + 3);
+        inputs.push(main_o.to_path_buf());
+        if let Some(init) = init_o {
+            inputs.push(init.clone());
+        }
+        inputs.extend_from_slice(object_paths);
+        inputs.push(alias_stub.to_path_buf());
+        let projection_dir = temp_dir.join("stage4_live");
+        std::fs::create_dir_all(&projection_dir)
+            .map_err(|err| format!("create Stage4 live projection directory: {err}"))?;
+        let response = Self::write_linker_object_response_file(&projection_dir, &inputs)?;
+        let live = temp_dir.join("stage4_live_entry.o");
+        let cc = target_c_compiler(effective_target());
+        let output = std::process::Command::new(&cc)
+            .args([
+                "-nostdlib",
+                "-no-pie",
+                "-Wl,-r",
+                "-Wl,--gc-sections",
+                "-Wl,-u,main",
+                "-Wl,-u,spl_main",
+            ])
+            .arg(format!("@{}", response.display()))
+            .arg("-o")
+            .arg(&live)
+            .output()
+            .map_err(|err| format!("execute Stage4 live entry projection with {cc}: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Stage4 live entry projection failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let mut requested: Vec<String> = Self::read_undefined_symbol_set(&live)?
+            .into_iter()
+            .filter(|symbol| {
+                symbol.starts_with("rt_")
+                    || symbol.starts_with("spl_")
+                    || matches!(
+                        symbol.as_str(),
+                        "panic"
+                            | "stderr_write"
+                            | "stderr_flush"
+                            | "__simple_runtime_init"
+                            | "__simple_runtime_shutdown"
+                            | "__simple_call_module_inits"
+                    )
+            })
+            .collect();
+        requested.sort();
+        if requested.is_empty() {
+            return Err("Stage4 live entry projection produced no runtime requests".to_string());
+        }
+        Ok(requested)
+    }
+
     fn cached_global_symbols<'a>(
         cache: &'a mut HashMap<PathBuf, Vec<String>>,
         obj: &Path,
@@ -877,7 +953,115 @@ int main(int argc, char** argv) {
             }
             other => other,
         };
-        let compiler_backfill = self.prepare_stage4_compiler_backfill_archive(selected_runtime.as_ref(), temp_dir)?;
+        #[cfg(target_os = "linux")]
+        let stage4_c_providers = if self.is_authorized_stage4_compiler_entry() {
+            build_stage4_cli_c_provider_archives(&temp_dir.join("stage4_c_providers"))?
+        } else {
+            Vec::new()
+        };
+        #[cfg(not(target_os = "linux"))]
+        let stage4_c_providers: Vec<PathBuf> = Vec::new();
+        let exact_stage4 = !stage4_c_providers.is_empty();
+        if exact_stage4 && std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() != Ok("1") {
+            return Err("Stage4 exact provider profile requires SIMPLE_NO_STUB_FALLBACK=1".to_string());
+        }
+        let stage4_rust_runtime = if exact_stage4 {
+            let runtime_path = self
+                .config
+                .runtime_path
+                .as_ref()
+                .ok_or_else(|| "Stage4 requires an explicit Rust runtime path".to_string())?;
+            // Project from the staticlib, not the bare rlib. The staticlib
+            // carries the Rust std/alloc and crate dependency closure needed
+            // by retained runtime exports while the capsule localizes every
+            // definition outside the requested ABI.
+            Some(Self::stage4_rust_runtime_staticlib(runtime_path)?)
+        } else {
+            None
+        };
+        let mut backfill_providers = stage4_c_providers.clone();
+        if let Some(rust_runtime) = stage4_rust_runtime.as_ref() {
+            backfill_providers.push(rust_runtime.clone());
+        }
+        let compiler_backfill =
+            self.prepare_stage4_compiler_backfill_archive(selected_runtime.as_ref(), &backfill_providers, temp_dir)?;
+        #[cfg(target_os = "linux")]
+        let stage4_profile = if exact_stage4 {
+            let (core, is_native_all) = selected_runtime
+                .as_ref()
+                .ok_or_else(|| "Stage4 requires the fresh core-C runtime".to_string())?;
+            if *is_native_all {
+                return Err("Stage4 exact provider profile forbids native_all".to_string());
+            }
+            let compiler = compiler_backfill
+                .as_ref()
+                .ok_or_else(|| "Stage4 requires the dedicated compiler backfill".to_string())?;
+            validate_stage4_cli_c_provider_archive_disjointness(core, compiler, &stage4_c_providers)?;
+
+            let rust_runtime = stage4_rust_runtime.as_ref().expect("validated Stage4 Rust runtime");
+            let mut provider_paths = vec![compiler.as_path(), core.as_path(), rust_runtime.as_path()];
+            provider_paths.extend(stage4_c_providers.iter().map(PathBuf::as_path));
+            let alias_stub = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, imports)?;
+            let requested =
+                Self::stage4_live_runtime_requests(temp_dir, object_paths, &main_o, init_o.as_ref(), &alias_stub)?;
+
+            let compiler_defined = Self::read_defined_symbol_set(compiler)?;
+            let mut c_defined = Self::read_defined_symbol_set(core)?;
+            for provider in &stage4_c_providers {
+                c_defined.extend(Self::read_defined_symbol_set(provider)?);
+            }
+            let rust_defined = Self::read_defined_symbol_set(rust_runtime)?;
+            let mut c_requested = Vec::new();
+            let mut rust_requested = Vec::new();
+            let mut missing = Vec::new();
+            for symbol in requested {
+                if compiler_defined.contains(&symbol) {
+                    continue;
+                }
+                if c_defined.contains(&symbol) {
+                    c_requested.push(symbol);
+                } else if rust_defined.contains(&symbol) {
+                    rust_requested.push(symbol);
+                } else {
+                    missing.push(symbol);
+                }
+            }
+            if !missing.is_empty() {
+                return Err(format!(
+                    "Stage4 requested symbols have no archive owner: {}",
+                    missing.join(", ")
+                ));
+            }
+            let mut allowed_c_runtime: Vec<String> = c_defined
+                .iter()
+                .filter(|symbol| symbol.starts_with("rt_") || symbol.starts_with("spl_"))
+                .cloned()
+                .collect();
+            allowed_c_runtime.sort();
+            let rust_capsule = build_stage4_rust_runtime_projection_archive(
+                rust_runtime,
+                &rust_requested,
+                &allowed_c_runtime,
+                &temp_dir.join("stage4_rust_runtime"),
+            )?;
+            for dependency in Self::read_undefined_symbol_set(&rust_capsule)? {
+                if c_defined.contains(&dependency) && !c_requested.contains(&dependency) {
+                    c_requested.push(dependency);
+                }
+            }
+            c_requested.sort();
+            let c_capsule = build_stage4_runtime_capsule_archive(
+                core,
+                &stage4_c_providers,
+                &c_requested,
+                &temp_dir.join("stage4_runtime_capsule"),
+            )?;
+            Some((alias_stub, rust_capsule, c_capsule))
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "linux"))]
+        let stage4_profile: Option<(PathBuf, PathBuf, PathBuf)> = None;
         let has_native_all = selected_runtime
             .as_ref()
             .is_some_and(|(_, is_native_all)| *is_native_all);
@@ -901,7 +1085,9 @@ int main(int argc, char** argv) {
         cmd.arg("-no-pie");
 
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        cmd.arg("-Wl,-z,muldefs");
+        if !exact_stage4 {
+            cmd.arg("-Wl,-z,muldefs");
+        }
 
         if let Some(ref ls) = self.config.linker_script {
             cmd.arg(format!("-T{}", ls.display()));
@@ -999,35 +1185,85 @@ int main(int argc, char** argv) {
             }
         }
 
-        if let Some(backfill) = compiler_backfill.as_ref() {
-            cmd.arg(backfill);
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if exact_stage4 {
+            let (stubs_o, rust_capsule, c_capsule) = stage4_profile.as_ref().expect("validated Stage4 profile");
+            let backfill = compiler_backfill.as_ref().expect("validated Stage4 compiler backfill");
+            let mut roots =
+                Self::runtime_retention_symbols(object_paths, &main_o, init_o.as_ref(), rust_capsule, imports)?;
+            roots.extend(Self::runtime_retention_symbols(
+                object_paths,
+                &main_o,
+                init_o.as_ref(),
+                c_capsule,
+                imports,
+            )?);
+            roots.sort();
+            roots.dedup();
+            Self::add_elf_undefined_roots(&mut cmd, &roots);
+            cmd.arg(stubs_o)
+                .arg("-Wl,--start-group")
+                .arg(backfill)
+                .arg(rust_capsule)
+                .arg(c_capsule)
+                .arg("-Wl,--end-group");
         }
 
-        if let Some((runtime_lib, is_native_all)) = selected_runtime.as_ref() {
-            if *is_native_all {
-                #[cfg(target_os = "macos")]
-                {
-                    cmd.arg("-Wl,-force_load").arg(runtime_lib);
-                }
-                #[cfg(target_os = "windows")]
-                {
-                    if is_clang_cl {
-                        cmd.arg(runtime_lib);
-                    } else if is_msvc {
-                        cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", runtime_lib.display()));
-                    } else {
-                        cmd.arg("-Wl,--whole-archive");
-                        cmd.arg(runtime_lib);
-                        cmd.arg("-Wl,--no-whole-archive");
+        if !exact_stage4 {
+            if let Some(backfill) = compiler_backfill.as_ref() {
+                cmd.arg(backfill);
+            }
+        }
+
+        if !exact_stage4 {
+            if let Some((runtime_lib, is_native_all)) = selected_runtime.as_ref() {
+                if *is_native_all {
+                    #[cfg(target_os = "macos")]
+                    {
+                        cmd.arg("-Wl,-force_load").arg(runtime_lib);
                     }
-                }
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                {
-                    if std::env::var("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE").as_deref() == Ok("1") {
-                        cmd.arg("-Wl,--whole-archive");
-                        cmd.arg(runtime_lib);
-                        cmd.arg("-Wl,--no-whole-archive");
-                    } else {
+                    #[cfg(target_os = "windows")]
+                    {
+                        if is_clang_cl {
+                            cmd.arg(runtime_lib);
+                        } else if is_msvc {
+                            cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", runtime_lib.display()));
+                        } else {
+                            cmd.arg("-Wl,--whole-archive");
+                            cmd.arg(runtime_lib);
+                            cmd.arg("-Wl,--no-whole-archive");
+                        }
+                    }
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    {
+                        if std::env::var("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE").as_deref() == Ok("1") {
+                            cmd.arg("-Wl,--whole-archive");
+                            cmd.arg(runtime_lib);
+                            cmd.arg("-Wl,--no-whole-archive");
+                        } else {
+                            let roots = Self::runtime_retention_symbols(
+                                object_paths,
+                                &main_o,
+                                init_o.as_ref(),
+                                runtime_lib,
+                                imports,
+                            )?;
+                            Self::add_elf_undefined_roots(&mut cmd, &roots);
+                            cmd.arg(runtime_lib);
+                        }
+                    }
+                    if std::env::var("SIMPLE_BOOTSTRAP_STAGE4").as_deref() == Ok("1") {
+                        let core_c_runtime = build_stage4_c_runtime_library(&temp_dir.join("stage4_core_c_runtime"))
+                            .ok_or_else(|| "failed to build Stage 4 core-C runtime supplement".to_string())?;
+                        cmd.arg(core_c_runtime);
+                    }
+                } else {
+                    #[cfg(target_os = "macos")]
+                    {
+                        cmd.arg("-Wl,-force_load").arg(runtime_lib);
+                    }
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    {
                         let roots = Self::runtime_retention_symbols(
                             object_paths,
                             &main_o,
@@ -1038,26 +1274,9 @@ int main(int argc, char** argv) {
                         Self::add_elf_undefined_roots(&mut cmd, &roots);
                         cmd.arg(runtime_lib);
                     }
-                }
-                if std::env::var("SIMPLE_BOOTSTRAP_STAGE4").as_deref() == Ok("1") {
-                    let core_c_runtime = build_stage4_c_runtime_library(&temp_dir.join("stage4_core_c_runtime"))
-                        .ok_or_else(|| "failed to build Stage 4 core-C runtime supplement".to_string())?;
-                    cmd.arg(core_c_runtime);
-                }
-            } else {
-                #[cfg(target_os = "macos")]
-                {
-                    cmd.arg("-Wl,-force_load").arg(runtime_lib);
-                }
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                {
-                    let roots =
-                        Self::runtime_retention_symbols(object_paths, &main_o, init_o.as_ref(), runtime_lib, imports)?;
-                    Self::add_elf_undefined_roots(&mut cmd, &roots);
+                    #[cfg(all(not(target_os = "macos"), not(target_os = "linux"), not(target_os = "freebsd")))]
                     cmd.arg(runtime_lib);
                 }
-                #[cfg(all(not(target_os = "macos"), not(target_os = "linux"), not(target_os = "freebsd")))]
-                cmd.arg(runtime_lib);
             }
         }
 
@@ -1157,19 +1376,21 @@ int main(int argc, char** argv) {
 
         #[cfg(not(target_os = "windows"))]
         {
-            let mut provider_paths = Vec::new();
-            if let Some(backfill) = compiler_backfill.as_ref() {
-                provider_paths.push(backfill.as_path());
-            }
-            if let Some((runtime, _)) = selected_runtime.as_ref() {
-                provider_paths.push(runtime.as_path());
-            }
-            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, imports)?;
-            cmd.arg(&stubs_o);
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            if let Some((runtime_lib, _)) = selected_runtime.as_ref() {
-                // ponytail: ELF archives resolve left-to-right; stubs may reference runtime helpers.
-                cmd.arg(runtime_lib);
+            if !exact_stage4 {
+                let mut provider_paths = Vec::new();
+                if let Some(backfill) = compiler_backfill.as_ref() {
+                    provider_paths.push(backfill.as_path());
+                }
+                if let Some((runtime, _)) = selected_runtime.as_ref() {
+                    provider_paths.push(runtime.as_path());
+                }
+                let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, imports)?;
+                cmd.arg(&stubs_o);
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                if let Some((runtime_lib, _)) = selected_runtime.as_ref() {
+                    // ponytail: ELF archives resolve left-to-right; stubs may reference runtime helpers.
+                    cmd.arg(runtime_lib);
+                }
             }
         }
         #[cfg(target_os = "windows")]

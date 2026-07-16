@@ -128,22 +128,23 @@ pub use channels::RuntimeChannel;
 // Re-export collection SFFI functions
 pub use collections::{
     rt_array_clear, rt_array_data_ptr, rt_array_data_ptr_text, rt_array_data_ptr_u8, rt_array_extend_i64,
-    rt_array_first, rt_array_get, rt_array_get_i64_raw, rt_array_get_text, rt_array_header_ptr, rt_array_len, rt_array_len_safe,
-    rt_array_new, rt_array_new_with_cap_u64, rt_array_pop, rt_array_push, rt_array_push_i64_raw, rt_array_set, rt_array_set_len_known,
-    rt_array_set_len_known_text, rt_array_set_text, rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at,
-    rt_bytes_u64_le_at, rt_bytes_u8_at, rt_bytes_u8_set, rt_contains, rt_cstring_to_text, rt_hash_text,
-    rt_for_iterable, rt_index_get, rt_index_set, rt_len, rt_range, rt_range_inclusive, rt_slice, rt_string_char_at,
-    rt_string_bytes, rt_string_chars, rt_string_char_code_at, rt_string_concat, rt_string_data, rt_string_ends_with,
-    rt_string_eq, rt_string_find, rt_string_index_of, rt_string_join, rt_string_len, rt_string_new, rt_string_replace,
-    rt_string_rfind, rt_string_split, rt_string_starts_with, rt_string_to_float, rt_string_to_int,
-    rt_string_to_int_lenient, rt_string_to_lower, rt_string_to_upper, rt_string_trim, rt_string_trim_end,
-    rt_string_trim_start, rt_to_string, rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set,
-    rt_typed_bytes_u8_data_at, rt_typed_bytes_u8_push, rt_typed_words_u32_at, rt_typed_words_u32_data_at,
-    rt_typed_words_u32_push, rt_typed_words_u32_push_known_at, rt_typed_words_u32_push_known_data_at,
-    rt_typed_words_u32_set, rt_typed_words_u32_store_known_data_at, rt_typed_words_u32_unchecked,
-    rt_typed_words_u64_at, rt_typed_words_u64_data_at, rt_typed_words_u64_data_at_checked, rt_typed_words_u64_push,
-    rt_typed_words_u64_push_known_at, rt_typed_words_u64_push_known_data_at, rt_typed_words_u64_raw_data_at,
-    rt_typed_words_u64_set, rt_typed_words_u64_store_known_data_at, rt_typed_words_u64_unchecked,
+    rt_array_first, rt_array_get, rt_array_get_i64_raw, rt_array_get_text, rt_array_header_ptr, rt_array_len,
+    rt_array_len_safe, rt_array_new, rt_array_new_with_cap_u64, rt_array_pop, rt_array_push, rt_array_push_i64_raw,
+    rt_array_set, rt_array_set_len_known, rt_array_set_len_known_text, rt_array_set_text, rt_byte_array_new,
+    rt_byte_array_new_len, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_at, rt_bytes_u8_set, rt_contains,
+    rt_cstring_to_text, rt_hash_text, rt_for_iterable, rt_index_get, rt_index_set, rt_len, rt_range,
+    rt_range_inclusive, rt_slice, rt_string_char_at, rt_interp_cstr, rt_string_bytes, rt_string_chars,
+    rt_string_char_code_at, rt_string_concat, rt_string_data, rt_string_ends_with, rt_string_eq, rt_string_find,
+    rt_string_index_of, rt_string_join, rt_string_len, rt_string_new, rt_string_replace, rt_string_rfind,
+    rt_string_split, rt_string_starts_with, rt_string_to_float, rt_string_to_int, rt_string_to_int_lenient,
+    rt_string_to_lower, rt_string_to_upper, rt_string_trim, rt_string_trim_end, rt_string_trim_start, rt_to_string,
+    rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set, rt_typed_bytes_u8_data_at, rt_typed_bytes_u8_push,
+    rt_typed_words_u32_at, rt_typed_words_u32_data_at, rt_typed_words_u32_push, rt_typed_words_u32_push_known_at,
+    rt_typed_words_u32_push_known_data_at, rt_typed_words_u32_set, rt_typed_words_u32_store_known_data_at,
+    rt_typed_words_u32_unchecked, rt_typed_words_u64_at, rt_typed_words_u64_data_at,
+    rt_typed_words_u64_data_at_checked, rt_typed_words_u64_push, rt_typed_words_u64_push_known_at,
+    rt_typed_words_u64_push_known_data_at, rt_typed_words_u64_raw_data_at, rt_typed_words_u64_set,
+    rt_typed_words_u64_store_known_data_at, rt_typed_words_u64_unchecked,
 };
 pub(crate) use collections::{byte_array_bytes, byte_array_write};
 pub use collections::{rt_any_add, rt_array_all, rt_array_any, rt_array_filter, rt_array_find};
@@ -225,8 +226,8 @@ pub use hpcollections::{
 pub use objects::{
     hash_variant_discriminant, rt_closure_func_ptr, rt_closure_get_capture, rt_closure_new, rt_closure_set_capture,
     rt_enum_check_discriminant, rt_enum_discriminant, rt_enum_id, rt_enum_new, rt_enum_payload, rt_option_map,
-    rt_object_class_id,
-    rt_object_field_count, rt_object_field_get, rt_object_field_set, rt_object_new, rt_is_some, rt_unwrap_or_self,
+    rt_object_class_id, rt_object_field_count, rt_object_field_get, rt_object_field_set, rt_object_new, rt_is_some,
+    rt_unwrap_or_self,
 };
 
 // Re-export unique pointer SFFI functions
@@ -349,10 +350,10 @@ pub use sffi::rt_time_now_seconds;
 // Re-export environment & process SFFI functions
 pub use sffi::{
     rt_condition_probe, rt_decision_probe, rt_env_all, rt_env_cwd, rt_env_exists, rt_env_get, rt_env_get_i64,
-    rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_exit, rt_get_env, rt_lexer_source_set, rt_lexer_source_slice, rt_path_probe,
-    rt_platform_name, rt_process_execute, rt_process_is_running, rt_process_kill, rt_process_run,
-    rt_process_run_timeout, rt_process_spawn, rt_process_spawn_async, rt_process_spawn_inherit, rt_process_wait,
-    rt_set_env, rt_term_enable_ansi, rt_term_get_size,
+    rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_exit, rt_get_env, rt_lexer_source_set,
+    rt_lexer_source_slice, rt_path_probe, rt_platform_name, rt_process_execute, rt_process_is_running, rt_process_kill,
+    rt_process_run, rt_process_run_timeout, rt_process_spawn, rt_process_spawn_async, rt_process_spawn_inherit,
+    rt_process_wait, rt_set_env, rt_term_enable_ansi, rt_term_get_size,
 };
 
 // Re-export runtime configuration SFFI functions
@@ -364,8 +365,9 @@ pub use cli_sffi::{
     rt_cli_handle_diagram, rt_cli_handle_linkers, rt_cli_handle_run, rt_cli_handle_web, rt_cli_print_help,
     rt_cli_print_version, rt_cli_read_file, rt_cli_run_check, rt_cli_run_code, rt_cli_run_sffi_gen, rt_cli_run_file,
     rt_cli_run_fix, rt_cli_run_fmt, rt_cli_run_gen_lean, rt_cli_run_lex, rt_cli_run_lint, rt_cli_run_migrate,
-    rt_cli_run_query, rt_cli_run_repl, rt_cli_run_tests, rt_cli_run_verify, rt_cli_version, rt_cli_watch_file,
-    rt_compile_to_llvm_ir, rt_compile_to_native, rt_compile_to_native_with_opt, rt_exec, rt_exec_output,
+    rt_cli_run_query, rt_cli_run_repl, rt_cli_run_tests, rt_cli_run_tests_process_args, rt_cli_run_verify,
+    rt_cli_version, rt_cli_watch_file, rt_compile_to_llvm_ir, rt_compile_to_native,
+    rt_compile_to_native_with_opt, rt_exec, rt_exec_output,
 };
 
 // Re-export dynamic-loading / WFFI SFFI functions.

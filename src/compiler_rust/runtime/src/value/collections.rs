@@ -1566,6 +1566,34 @@ pub extern "C" fn rt_string_data(string: RuntimeValue) -> *const u8 {
     unsafe { str_ptr.add(1) as *const u8 }
 }
 
+/// Return UTF-8 data for a tagged runtime string, or preserve an already-raw
+/// C string pointer used by bootstrap/interpreter call sites.
+#[no_mangle]
+pub extern "C" fn rt_interp_cstr(value: RuntimeValue) -> *const u8 {
+    let data = rt_string_data(value);
+    if data.is_null() {
+        value.to_raw() as usize as *const u8
+    } else {
+        data
+    }
+}
+
+#[cfg(test)]
+mod interp_cstr_tests {
+    use super::{rt_interp_cstr, rt_string_data, rt_string_new};
+    use crate::value::RuntimeValue;
+
+    #[test]
+    fn accepts_runtime_string_and_raw_pointer() {
+        let bytes = b"Hello";
+        let string = rt_string_new(bytes.as_ptr(), bytes.len() as u64);
+        assert_eq!(rt_interp_cstr(string), rt_string_data(string));
+
+        let raw = RuntimeValue::from_raw(bytes.as_ptr() as usize as u64);
+        assert_eq!(rt_interp_cstr(raw), bytes.as_ptr());
+    }
+}
+
 /// Concatenate two strings
 #[no_mangle]
 pub extern "C" fn rt_string_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue {

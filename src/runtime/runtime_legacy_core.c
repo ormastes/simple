@@ -355,19 +355,6 @@ int rt_file_create_excl(const char* path, int64_t path_len,
     return 1;
 }
 
-/* weak: runtime_native.c provides the strong definition; both objects are
- * linked together in the core-c-bootstrap bundle, so this must not duplicate
- * the exported symbol. */
-__attribute__((weak)) int rt_file_exists(const char* path) {
-    if (!path || !*path) return 0;
-#if defined(_WIN32)
-    DWORD attrs = GetFileAttributesA(path);
-    return attrs != INVALID_FILE_ATTRIBUTES ? 1 : 0;
-#else
-    return access(path, F_OK) == 0 ? 1 : 0;
-#endif
-}
-
 bool rt_is_dir(const char* path) {
     struct stat st;
     return path && stat(path, &st) == 0 && S_ISDIR(st.st_mode);

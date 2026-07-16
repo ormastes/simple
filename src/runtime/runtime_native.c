@@ -37,6 +37,7 @@
 #include <netdb.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -3512,11 +3513,226 @@ static int64_t rt_http_download_tuple(int64_t status, uint64_t bytes, const char
     return tuple;
 }
 
+#define RT_HTTP_CLIENT_CAPACITY 64
+#define RT_HTTP_CLIENT_SLOT_BITS 8
+
+typedef struct {
+    uint64_t generation;
+    int64_t timeout_ms;
+    int in_use;
+} RtHttpClientSlot;
+
+static RtHttpClientSlot rt_http_clients[RT_HTTP_CLIENT_CAPACITY];
+static atomic_flag rt_http_clients_lock = ATOMIC_FLAG_INIT;
+static uint64_t rt_http_client_next_generation = 1;
+
+static void rt_http_clients_acquire(void) {
+    while (atomic_flag_test_and_set_explicit(&rt_http_clients_lock, memory_order_acquire)) {}
+}
+
+static void rt_http_clients_release(void) {
+    atomic_flag_clear_explicit(&rt_http_clients_lock, memory_order_release);
+}
+
+static int rt_http_client_slot(int64_t handle, uint64_t* generation) {
+    uint64_t raw = (uint64_t)handle;
+    uint64_t encoded_slot = raw & ((1u << RT_HTTP_CLIENT_SLOT_BITS) - 1u);
+    if (handle <= 0 || encoded_slot == 0 || encoded_slot > RT_HTTP_CLIENT_CAPACITY) return -1;
+    *generation = raw >> RT_HTTP_CLIENT_SLOT_BITS;
+    return (int)encoded_slot - 1;
+}
+
+static int rt_http_client_timeout(int64_t handle, int64_t* timeout_ms) {
+    uint64_t generation = 0;
+    int slot = rt_http_client_slot(handle, &generation);
+    if (slot < 0) return 0;
+    rt_http_clients_acquire();
+    RtHttpClientSlot* client = &rt_http_clients[slot];
+    int valid = client->in_use && client->generation == generation;
+    if (valid) *timeout_ms = client->timeout_ms;
+    rt_http_clients_release();
+    return valid;
+}
+
+int64_t rt_http_client_create(void) {
+    rt_http_clients_acquire();
+    for (int slot = 0; slot < RT_HTTP_CLIENT_CAPACITY; slot++) {
+        if (rt_http_clients[slot].in_use) continue;
+        uint64_t generation = rt_http_client_next_generation++;
+        if (generation == 0 || generation > ((uint64_t)INT64_MAX >> RT_HTTP_CLIENT_SLOT_BITS)) {
+            generation = 1;
+            rt_http_client_next_generation = 2;
+        }
+        rt_http_clients[slot].generation = generation;
+        rt_http_clients[slot].timeout_ms = 0;
+        rt_http_clients[slot].in_use = 1;
+        int64_t handle = (int64_t)((generation << RT_HTTP_CLIENT_SLOT_BITS) | (uint64_t)(slot + 1));
+        rt_http_clients_release();
+        return handle;
+    }
+    rt_http_clients_release();
+    return 0;
+}
+
+bool rt_http_client_set_timeout(int64_t handle, int64_t timeout_ms) {
+    if (timeout_ms < 0) return false;
+    uint64_t generation = 0;
+    int slot = rt_http_client_slot(handle, &generation);
+    if (slot < 0) return false;
+    rt_http_clients_acquire();
+    RtHttpClientSlot* client = &rt_http_clients[slot];
+    bool valid = client->in_use && client->generation == generation;
+    if (valid) client->timeout_ms = timeout_ms;
+    rt_http_clients_release();
+    return valid;
+}
+
+void rt_http_client_destroy(int64_t handle) {
+    uint64_t generation = 0;
+    int slot = rt_http_client_slot(handle, &generation);
+    if (slot < 0) return;
+    rt_http_clients_acquire();
+    RtHttpClientSlot* client = &rt_http_clients[slot];
+    if (client->in_use && client->generation == generation) {
+        client->in_use = 0;
+        client->timeout_ms = 0;
+    }
+    rt_http_clients_release();
+}
+
 #if !defined(_WIN32)
-static int rt_http_send_all(int fd, const void* data, size_t len) {
+static int rt_http_remaining_ms(int64_t deadline_ms) {
+    if (deadline_ms == 0) return -1;
+    int64_t remaining = deadline_ms - rt_time_now_monotonic_ms();
+    if (remaining <= 0) {
+        errno = ETIMEDOUT;
+        return 0;
+    }
+    return remaining > INT32_MAX ? INT32_MAX : (int)remaining;
+}
+
+static int rt_http_wait_fd(int fd, short events, int64_t deadline_ms) {
+    if (deadline_ms == 0) return 1;
+    for (;;) {
+        int timeout_ms = rt_http_remaining_ms(deadline_ms);
+        if (timeout_ms == 0) return 0;
+        struct pollfd poll_fd = {.fd = fd, .events = events};
+        int result = poll(&poll_fd, 1, timeout_ms);
+        if (result > 0) return (poll_fd.revents & (events | POLLERR | POLLHUP)) != 0;
+        if (result == 0) errno = ETIMEDOUT;
+        if (result >= 0 || errno != EINTR) return 0;
+    }
+}
+
+typedef struct {
+    atomic_int refs;
+    atomic_int done;
+    char* host;
+    char* port;
+    struct addrinfo hints;
+    struct addrinfo* results;
+    int result_code;
+    int result_errno;
+    int notify_read_fd;
+    int notify_write_fd;
+} RtHttpResolveJob;
+
+static void rt_http_resolve_job_release(RtHttpResolveJob* job) {
+    if (atomic_fetch_sub_explicit(&job->refs, 1, memory_order_acq_rel) != 1) return;
+    if (job->results) freeaddrinfo(job->results);
+    close(job->notify_read_fd);
+    free(job->host); free(job->port); free(job);
+}
+
+static void* rt_http_resolve_worker(void* context) {
+    RtHttpResolveJob* job = (RtHttpResolveJob*)context;
+    errno = 0;
+    job->result_code = getaddrinfo(job->host, job->port, &job->hints, &job->results);
+    job->result_errno = errno;
+    atomic_store_explicit(&job->done, 1, memory_order_release);
+    char completed = 1;
+    while (write(job->notify_write_fd, &completed, 1) < 0 && errno == EINTR) {}
+    close(job->notify_write_fd);
+    rt_http_resolve_job_release(job);
+    return NULL;
+}
+
+static int rt_http_resolve(const char* host, const char* port, const struct addrinfo* hints,
+                           int64_t deadline_ms, struct addrinfo** results_out) {
+    if (deadline_ms == 0) return getaddrinfo(host, port, hints, results_out);
+    if (rt_http_remaining_ms(deadline_ms) == 0) return EAI_SYSTEM;
+
+    RtHttpResolveJob* job = (RtHttpResolveJob*)calloc(1, sizeof(*job));
+    if (!job) return EAI_MEMORY;
+    job->host = strdup(host);
+    job->port = strdup(port);
+    int notify[2] = {-1, -1};
+    if (!job->host || !job->port || pipe(notify) != 0) {
+        free(job->host); free(job->port); free(job); return EAI_SYSTEM;
+    }
+    job->notify_read_fd = notify[0];
+    job->notify_write_fd = notify[1];
+    job->hints = *hints;
+    atomic_init(&job->refs, 2);
+    atomic_init(&job->done, 0);
+
+    pthread_attr_t thread_attr;
+    if (pthread_attr_init(&thread_attr) != 0) {
+        close(notify[0]); close(notify[1]); free(job->host); free(job->port); free(job);
+        return EAI_SYSTEM;
+    }
+    if (pthread_attr_setdetachstate(&thread_attr, PTHREAD_CREATE_DETACHED) != 0) {
+        pthread_attr_destroy(&thread_attr);
+        close(notify[0]); close(notify[1]); free(job->host); free(job->port); free(job);
+        return EAI_SYSTEM;
+    }
+    pthread_t thread;
+    int create_result = pthread_create(&thread, &thread_attr, rt_http_resolve_worker, job);
+    pthread_attr_destroy(&thread_attr);
+    if (create_result != 0) {
+        close(notify[0]); close(notify[1]); free(job->host); free(job->port); free(job);
+        errno = create_result;
+        return EAI_SYSTEM;
+    }
+
+    struct pollfd completion = {.fd = job->notify_read_fd, .events = POLLIN};
+    for (;;) {
+        int remaining_ms = rt_http_remaining_ms(deadline_ms);
+        if (remaining_ms == 0) break;
+        int wait_result = poll(&completion, 1, remaining_ms);
+        if (wait_result > 0 && atomic_load_explicit(&job->done, memory_order_acquire)) break;
+        if (wait_result < 0 && errno == EINTR) continue;
+        if (wait_result == 0) errno = ETIMEDOUT;
+        break;
+    }
+    if (!atomic_load_explicit(&job->done, memory_order_acquire) ||
+        rt_http_remaining_ms(deadline_ms) == 0) {
+        errno = ETIMEDOUT;
+        rt_http_resolve_job_release(job);
+        return EAI_SYSTEM;
+    }
+    int result_code = job->result_code;
+    errno = job->result_errno;
+    if (result_code == 0) { *results_out = job->results; job->results = NULL; }
+    rt_http_resolve_job_release(job);
+    return result_code;
+}
+
+static void rt_http_set_socket_timeout(int fd, int64_t deadline_ms) {
+    int remaining = rt_http_remaining_ms(deadline_ms);
+    if (remaining <= 0) return;
+    struct timeval timeout = {.tv_sec = remaining / 1000, .tv_usec = (remaining % 1000) * 1000};
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+}
+
+static int rt_http_send_all(int fd, const void* data, size_t len, int64_t deadline_ms) {
     const uint8_t* ptr = (const uint8_t*)data;
     while (len > 0) {
+        if (!rt_http_wait_fd(fd, POLLOUT, deadline_ms)) return 0;
         ssize_t sent = send(fd, ptr, len, 0);
+        if (sent < 0 && errno == EINTR) continue;
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
         if (sent <= 0) return 0;
         ptr += (size_t)sent;
         len -= (size_t)sent;
@@ -3633,9 +3849,15 @@ static int rt_http_method_is_token(const char* method) {
 }
 
 static int rt_http_perform(const char* method, const char* url, RtCoreArray* headers,
-                           const uint8_t* body, size_t body_len, int64_t* status_out,
+                           const uint8_t* body, size_t body_len, int64_t timeout_ms,
+                           int64_t* status_out,
                            uint8_t** body_out, size_t* body_len_out, char* error, size_t error_cap) {
     *status_out = -1; *body_out = NULL; *body_len_out = 0;
+    int64_t deadline_ms = 0;
+    if (timeout_ms > 0) {
+        int64_t now = rt_time_now_monotonic_ms();
+        deadline_ms = timeout_ms > INT64_MAX - now ? INT64_MAX : now + timeout_ms;
+    }
     if (!rt_http_method_is_token(method) || !url) {
         snprintf(error, error_cap, "invalid HTTP method or URL"); return 0;
     }
@@ -3668,17 +3890,42 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
     char port_text[8]; snprintf(port_text, sizeof(port_text), "%d", port);
     struct addrinfo hints, *results = NULL;
     memset(&hints, 0, sizeof(hints)); hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host_port, port_text, &hints, &results) != 0) {
-        free(host_port); snprintf(error, error_cap, "HTTP host lookup failed"); return 0;
+    errno = 0;
+    if (rt_http_resolve(host_port, port_text, &hints, deadline_ms, &results) != 0) {
+        free(host_port);
+        snprintf(error, error_cap, errno == ETIMEDOUT ? "HTTP request timed out" : "HTTP host lookup failed");
+        return 0;
     }
     int fd = -1;
     for (struct addrinfo* item = results; item; item = item->ai_next) {
+        if (deadline_ms != 0 && rt_http_remaining_ms(deadline_ms) == 0) break;
         fd = socket(item->ai_family, item->ai_socktype, item->ai_protocol);
-        if (fd >= 0 && connect(fd, item->ai_addr, item->ai_addrlen) == 0) break;
+        if (fd < 0) continue;
+        if (deadline_ms != 0) {
+            int flags = fcntl(fd, F_GETFL, 0);
+            if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+                close(fd); fd = -1; continue;
+            }
+        }
+        int connected = connect(fd, item->ai_addr, item->ai_addrlen) == 0;
+        if (!connected && deadline_ms != 0 && errno == EINPROGRESS &&
+            rt_http_wait_fd(fd, POLLOUT, deadline_ms)) {
+            int socket_error = 0;
+            socklen_t socket_error_len = sizeof(socket_error);
+            connected = getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &socket_error_len) == 0 &&
+                        socket_error == 0;
+            if (!connected && socket_error != 0) errno = socket_error;
+        }
+        if (connected) break;
         if (fd >= 0) { close(fd); fd = -1; }
     }
     freeaddrinfo(results);
-    if (fd < 0) { free(host_port); snprintf(error, error_cap, "HTTP connection failed"); return 0; }
+    if (fd < 0) {
+        free(host_port);
+        snprintf(error, error_cap, errno == ETIMEDOUT ? "HTTP request timed out" : "HTTP connection failed");
+        return 0;
+    }
+    rt_http_set_socket_timeout(fd, deadline_ms);
     const char* request_target = target ? target : "/";
     char* query_target = NULL;
     if (request_target[0] == '?' || request_target[0] == '#') {
@@ -3707,9 +3954,14 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
              rt_http_append(&request, &request_len, &request_cap, line, (size_t)line_len);
     }
     ok = ok && rt_http_append(&request, &request_len, &request_cap, "\r\n", 2);
-    if (ok) ok = rt_http_send_all(fd, request, request_len) && rt_http_send_all(fd, body, body_len);
+    if (ok) ok = rt_http_send_all(fd, request, request_len, deadline_ms) &&
+                 rt_http_send_all(fd, body, body_len, deadline_ms);
     free(request); free(host_port);
-    if (!ok) { close(fd); snprintf(error, error_cap, "HTTP request write failed"); return 0; }
+    if (!ok) {
+        close(fd);
+        snprintf(error, error_cap, errno == ETIMEDOUT ? "HTTP request timed out" : "HTTP request write failed");
+        return 0;
+    }
     size_t received = 0, capacity = 8192;
     uint8_t* response = (uint8_t*)malloc(capacity + 1);
     if (!response) { close(fd); snprintf(error, error_cap, "out of memory"); return 0; }
@@ -3720,7 +3972,12 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
             if (!grown) { free(response); close(fd); snprintf(error, error_cap, "out of memory"); return 0; }
             response = grown;
         }
+        if (!rt_http_wait_fd(fd, POLLIN, deadline_ms)) {
+            free(response); close(fd); snprintf(error, error_cap, "HTTP request timed out"); return 0;
+        }
         ssize_t n = recv(fd, response + received, capacity - received, 0);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
         if (n < 0) { free(response); close(fd); snprintf(error, error_cap, "HTTP response read failed"); return 0; }
         if (n == 0) break;
         received += (size_t)n;
@@ -3759,7 +4016,7 @@ int64_t rt_http_get(int64_t url_value) {
     return rt_http_tuple(-1, NULL, 0, "native HTTP is unavailable on Windows core runtime");
 #else
     int64_t status = -1; uint8_t* body = NULL; size_t body_len = 0; char error[160] = {0};
-    int ok = rt_http_perform("GET", url->data, NULL, NULL, 0,
+    int ok = rt_http_perform("GET", url->data, NULL, NULL, 0, 0,
                              &status, &body, &body_len, error, sizeof(error));
     int64_t result = ok ? rt_http_tuple(status, body, body_len, "")
                         : rt_http_tuple(-1, NULL, 0, error);
@@ -3767,8 +4024,9 @@ int64_t rt_http_get(int64_t url_value) {
 #endif
 }
 
-int64_t rt_http_request(int64_t method_value, int64_t url_value, int64_t headers_value,
-                        int64_t body_value) {
+static int64_t rt_http_request_with_timeout(int64_t method_value, int64_t url_value,
+                                            int64_t headers_value, int64_t body_value,
+                                            int64_t timeout_ms) {
     RtCoreString* method = rt_core_as_string(method_value);
     RtCoreString* url = rt_core_as_string(url_value);
     RtCoreString* body = rt_core_as_string(body_value);
@@ -3779,11 +4037,26 @@ int64_t rt_http_request(int64_t method_value, int64_t url_value, int64_t headers
     int64_t status = -1; uint8_t* response = NULL; size_t response_len = 0; char error[160] = {0};
     int ok = rt_http_perform(method->data, url->data, rt_core_as_array(headers_value),
                              body ? (const uint8_t*)body->data : NULL, body ? (size_t)body->len : 0,
+                             timeout_ms,
                              &status, &response, &response_len, error, sizeof(error));
     int64_t result = ok ? rt_http_tuple(status, response, response_len, "")
                         : rt_http_tuple(-1, NULL, 0, error);
     free(response); return result;
 #endif
+}
+
+int64_t rt_http_request(int64_t method_value, int64_t url_value, int64_t headers_value,
+                        int64_t body_value) {
+    return rt_http_request_with_timeout(method_value, url_value, headers_value, body_value, 0);
+}
+
+int64_t rt_http_client_request(int64_t client, int64_t method, int64_t url,
+                               int64_t headers, int64_t body) {
+    int64_t timeout_ms = 0;
+    if (!rt_http_client_timeout(client, &timeout_ms)) {
+        return rt_http_tuple(-1, NULL, 0, "invalid HTTP client");
+    }
+    return rt_http_request_with_timeout(method, url, headers, body, timeout_ms);
 }
 
 int64_t rt_http_download(int64_t url_value, int64_t output_path_value) {
@@ -3794,7 +4067,8 @@ int64_t rt_http_download(int64_t url_value, int64_t output_path_value) {
     return rt_http_download_tuple(-1, 0, "native HTTP is unavailable on Windows core runtime");
 #else
     int64_t status = -1; uint8_t* body = NULL; size_t body_len = 0; char error[160] = {0};
-    int ok = rt_http_perform("GET", url->data, NULL, NULL, 0, &status, &body, &body_len, error, sizeof(error));
+    int ok = rt_http_perform("GET", url->data, NULL, NULL, 0, 0,
+                             &status, &body, &body_len, error, sizeof(error));
     if (ok) {
         FILE* file = fopen(output_path->data, "wb");
         if (!file) {
@@ -4459,6 +4733,10 @@ int64_t rt_time_now_unix_micros(void) {
     return (int64_t)ts.tv_sec * 1000000LL + (int64_t)ts.tv_nsec / 1000LL;
 }
 
+int64_t rt_time_ms(void) {
+    return rt_time_now_unix_micros() / 1000LL;
+}
+
 int64_t rt_entropy_hardware_ready(void) {
     return 0;
 }
@@ -4475,6 +4753,10 @@ int64_t rt_time_now_nanos(void) {
 
 int64_t rt_time_now_micros(void) {
     return rt_time_now_ns() / 1000LL;
+}
+
+int64_t rt_time_now_monotonic_ms(void) {
+    return rt_time_now_micros() / 1000LL;
 }
 
 void rt_sleep_ms(int64_t ms) {
@@ -4520,6 +4802,20 @@ void rt_ptr_write_i64(int64_t addr, int64_t offset, int64_t value) {
 
 void rt_panic(const char* msg) {
     spl_panic(msg);
+}
+
+void panic(int64_t msg) {
+    RtCoreString* text = rt_core_as_string(msg);
+    spl_panic(text ? text->data : "panic");
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((weak))
+#endif
+int64_t spl_str_ptr(const char* value) {
+    int64_t raw = (int64_t)(uintptr_t)value;
+    RtCoreString* text = rt_core_as_string(raw);
+    return (int64_t)(uintptr_t)(text ? text->data : value);
 }
 
 /* ================================================================

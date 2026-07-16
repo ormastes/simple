@@ -245,6 +245,8 @@ int64_t  rt_page_size(void);
 
 int64_t  rt_time_now_nanos(void);   /* Nanosecond precision monotonic time */
 int64_t  rt_time_now_micros(void);  /* Microsecond precision monotonic time */
+int64_t  rt_time_now_monotonic_ms(void);
+int64_t  rt_time_ms(void);          /* Unix epoch milliseconds */
 
 /* ===== Stdin/Stdout I/O ===== */
 
@@ -361,6 +363,11 @@ int64_t  rt_path_extension(int64_t path_value);
 int64_t  rt_http_get(int64_t url);
 int64_t  rt_http_request(int64_t method, int64_t url, int64_t headers, int64_t body);
 int64_t  rt_http_download(int64_t url, int64_t output_path);
+int64_t  rt_http_client_create(void);
+bool     rt_http_client_set_timeout(int64_t client, int64_t timeout_ms);
+int64_t  rt_http_client_request(int64_t client, int64_t method, int64_t url,
+                                int64_t headers, int64_t body);
+void     rt_http_client_destroy(int64_t client);
 int64_t  rt_gui_get_glyph_8x16(int32_t codepoint);
 int64_t  rt_jit_cleanup(int64_t handle);
 int64_t  rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload);
@@ -817,6 +824,7 @@ __declspec(noreturn) void spl_panic(const char* msg);
 #else
 void     spl_panic(const char* msg) __attribute__((noreturn));
 #endif
+void     panic(int64_t msg);
 
 /* ===== SIMD Text Dispatch ===== */
 

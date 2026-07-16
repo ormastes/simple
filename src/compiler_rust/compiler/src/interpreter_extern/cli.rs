@@ -197,6 +197,12 @@ pub fn rt_cli_run_tests(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Native Stage4 owns this scalar bridge. Interpreting the full CLI would
+/// otherwise re-enter the current seed process after main has raised depth.
+pub fn rt_cli_run_tests_process_args(_args: &[Value]) -> Result<Value, CompileError> {
+    interpreter_not_supported("rt_cli_run_tests_process_args")
+}
+
 /// Validate test database
 pub fn rt_test_db_validate(args: &[Value]) -> Result<Value, CompileError> {
     let path = match args.first() {

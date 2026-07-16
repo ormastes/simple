@@ -2,6 +2,8 @@
 
 Date: 2026-07-15
 
+Status: blocked on a reproducible pure-Simple emitter run (2026-07-16)
+
 ## Impact
 
 The pure-Simple portable emitter and checker can generate and authenticate a
@@ -54,3 +56,30 @@ Accept the generation input only when `evidence.env` reports
 and current Simple invocation/runtime plus emitter/source/artifact SHA-256 rows.
 The adjacent hash remains test provenance; independently pin the accepted PTX
 in its package manifest or tracked generated module before factory installation.
+
+## 2026-07-16 bounded attempt
+
+The CUDA checker was run once with the freshly linked Stage4 CLI and fixed
+`CUDA_ARCH=compute_75`. It failed before `nvcc`: the requested emitter spec
+crossed from the canonical C array runtime into a localized Rust
+`rt_cli_run_tests` closure, decoded as an empty argument list, and entered the
+unfocused test runner. No PTX or acceptable artifact hash was produced.
+
+The final permitted Stage4 rebuild terminated with SIGSEGV before producing a
+log or binary, so the session's three-cycle cap was reached. Higher-model
+review then refined the source repair to a scalar-only runtime entry which
+reads canonical C argv through the existing `spl_arg_count`/`spl_get_arg`
+scalar/raw ABI, avoiding the mixed-runtime container ABI while preserving
+inherited stdio and GC flags. Parser and interpreter-registration tests passed
+during refinement; the final link remains pending because the runtime criterion
+had already reached its three-cycle cap. No rebuilt Stage4 runtime evidence
+exists for this source shape. Do not pin or embed a CUDA payload from this run.
+
+Resume in a fresh session by rebuilding Stage4 once, first proving
+`SIMPLE_BOOTSTRAP_DRIVER=/bin/echo <candidate> test SENTINEL.spl` prints both
+`test` and `SENTINEL.spl`, then running the checker once. If it reports
+`cuda_font_status=compiled_artifact_verified`, mirror
+`backend_vulkan_font_spirv.spl`: add one tracked generated CUDA PTX module,
+pin the exact source/version/artifact hashes, install through
+`Engine2D.install_cuda_font_artifact`, and extend the existing CUDA unit/system
+specs rather than creating a parallel renderer, cache, kernel, or verifier.

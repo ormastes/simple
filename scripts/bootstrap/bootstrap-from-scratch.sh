@@ -443,6 +443,7 @@ bootstrap_native_build_main() {
   compiler=$1
   output=$2
   env RUST_LOG="${RUST_LOG:-error}" \
+    SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_BOOTSTRAP_STAGE4=1 \
     SIMPLE_NATIVE_BUILD_TARGET="${PLATFORM}" \
@@ -808,12 +809,11 @@ if [ "${stage3_ok:-0}" -eq 1 ] && [ -x "${stage3}" ]; then
   echo "stage3 sha256: ${hash3}"
   if [ "${hash2}" != "${hash3}" ]; then
     echo "warning: stage2 and stage3 hashes differ (expected when runtime is embedded)"
-    echo "  Using stage2 (with runtime) for stage 4"
-    stage_for_build="${stage2}"
+    echo "  Using verified Stage 3 for stage 4"
   else
     echo "Bootstrap verification passed."
-    stage_for_build="${stage3}"
   fi
+  stage_for_build="${stage3}"
 else
   if [ "${stage2_capability_ok:-0}" -eq 1 ] && [ -x "${stage2}" ]; then
     echo "Stage 3 unavailable — using capability-verified Stage 2 for stage 4"

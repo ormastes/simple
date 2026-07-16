@@ -1222,6 +1222,23 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     assert!(core_c_symbols.contains("rt_invlpg"));
     assert!(core_c_symbols.contains("serial_println"));
     assert!(core_c_symbols.contains("unsafe_addr_of"));
+    if effective_target().os == simple_common::target::TargetOS::Linux {
+        for symbol in [
+            "rt_cocoa_window_new",
+            "rt_cocoa_layer_create",
+            "rt_cocoa_layer_blend_rect",
+            "rt_cocoa_layer_blur",
+            "rt_cocoa_layer_gradient_v",
+            "rt_win32_window_new",
+            "rt_win32_dib_create",
+            "rt_win32_dib_present_rect",
+        ] {
+            assert!(
+                core_c_symbols.contains(symbol),
+                "Linux core-C runtime must own hosted fallback `{symbol}`"
+            );
+        }
+    }
     for symbol in [
         "rt_array_concat",
         "rt_is_none",
@@ -2096,6 +2113,173 @@ fn test_stage4_cli_c_provider_disjointness_requires_exact_component_set() {
     assert!(error.contains("requires exactly 3 providers (found 0)"));
 }
 
+#[test]
+fn test_stage4_rust_runtime_selector_requires_staticlib() {
+    let temp = tempfile::tempdir().unwrap();
+    let deps = temp.path().join("deps");
+    std::fs::create_dir_all(&deps).unwrap();
+    let staticlib = deps.join("libsimple_runtime.a");
+    std::fs::write(&staticlib, b"staticlib").unwrap();
+    std::fs::write(deps.join("libsimple_runtime.rlib"), b"rlib").unwrap();
+
+    assert_eq!(
+        NativeProjectBuilder::stage4_rust_runtime_staticlib(temp.path()).unwrap(),
+        staticlib
+    );
+    std::fs::remove_file(&staticlib).unwrap();
+    let error = NativeProjectBuilder::stage4_rust_runtime_staticlib(temp.path()).unwrap_err();
+    assert!(error.contains(&staticlib.display().to_string()));
+    assert!(error.contains("staticlib"));
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn test_stage4_runtime_capsule_keeps_only_requested_globals() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = build_compiler_backfill_test_archive(
+        temp.path(),
+        "stage4_runtime_core",
+        &[r#"
+static void retained_helper(void) {}
+void rt_capsule_root(void) { retained_helper(); }
+__attribute__((constructor)) static void discarded_ctor(void) { retained_helper(); }
+"#],
+    );
+    let providers = build_stage4_cli_c_provider_archives(&temp.path().join("providers")).unwrap();
+    let output = build_stage4_runtime_capsule_archive(
+        &core,
+        &providers,
+        &["rt_time_now_seconds_f64".to_string(), "rt_capsule_root".to_string()],
+        &temp.path().join("capsule"),
+    )
+    .unwrap();
+
+    let (defined, undefined) = super::tools::archive_global_symbols(&output).unwrap();
+    assert_eq!(
+        defined,
+        std::collections::BTreeMap::from([
+            ("rt_capsule_root".to_string(), 1),
+            ("rt_time_now_seconds_f64".to_string(), 1),
+        ])
+    );
+    assert!(!undefined
+        .iter()
+        .any(|symbol| symbol.starts_with("rt_") || symbol.starts_with("spl_")));
+    assert_eq!(archive_members(&output).unwrap(), ["stage4_runtime_capsule_local.o"]);
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn test_stage4_linux_exact_core_projects_fail_closed_platform_abi() {
+    const REQUESTED: &[&str] = &[
+        "rt_cocoa_layer_blend_rect",
+        "rt_cocoa_layer_blur",
+        "rt_cocoa_layer_create",
+        "rt_cocoa_layer_gradient_v",
+        "rt_cocoa_layer_read_pixel",
+        "rt_cocoa_window_close",
+        "rt_cocoa_window_new",
+        "rt_win32_dib_create",
+        "rt_win32_dib_fill_rect",
+        "rt_win32_dib_present",
+        "rt_win32_dib_present_rect",
+        "rt_win32_window_close",
+        "rt_win32_window_new",
+    ];
+
+    let temp = tempfile::tempdir().unwrap();
+    let core = build_core_c_runtime_library(&temp.path().join("core")).unwrap();
+    let providers = build_stage4_cli_c_provider_archives(&temp.path().join("providers")).unwrap();
+    let requested: Vec<String> = REQUESTED.iter().map(|symbol| (*symbol).to_string()).collect();
+    let capsule = build_stage4_runtime_capsule_archive(
+        &core,
+        &providers,
+        &requested,
+        &temp.path().join("capsule"),
+    )
+    .unwrap();
+
+    let (defined, undefined) = super::tools::archive_global_symbols(&capsule).unwrap();
+    assert_eq!(
+        defined,
+        REQUESTED
+            .iter()
+            .map(|symbol| ((*symbol).to_string(), 1))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    );
+    assert!(!undefined
+        .iter()
+        .any(|symbol| symbol.starts_with("rt_") || symbol.starts_with("spl_")));
+
+    run_stage4_c_probe(
+        temp.path(),
+        "stage4_fail_closed_platform_probe",
+        r#"
+#include <stdbool.h>
+#include <stdint.h>
+
+extern int64_t rt_cocoa_window_new(int64_t, int64_t, int64_t);
+extern bool rt_cocoa_window_close(int64_t);
+extern int64_t rt_cocoa_layer_create(int64_t, int64_t, int64_t, int64_t);
+extern bool rt_cocoa_layer_blend_rect(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+extern int64_t rt_win32_window_new(int64_t, int64_t, int64_t);
+extern bool rt_win32_window_close(int64_t);
+extern int64_t rt_win32_dib_create(int64_t, int64_t, int64_t, int64_t);
+extern bool rt_win32_dib_fill_rect(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+
+int main(void) {
+    if (rt_cocoa_window_new(1, 1, 0) != -1 || rt_cocoa_window_close(1)) return 1;
+    if (rt_cocoa_layer_create(1, 1, 1, 0) != -1 || rt_cocoa_layer_blend_rect(1, 0, 0, 1, 1, 0, 0)) return 2;
+    if (rt_win32_window_new(1, 1, 0) != -1 || rt_win32_window_close(1)) return 3;
+    if (rt_win32_dib_create(1, 1, 1, 0) != -1 || rt_win32_dib_fill_rect(1, 0, 0, 1, 1, 0)) return 4;
+    return 0;
+}
+"#,
+        &[&capsule],
+        &[],
+        &[],
+    );
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn test_stage4_rust_runtime_projection_keeps_roots_and_allowed_runtime_externals_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let rust_runtime = build_compiler_backfill_test_archive(
+        temp.path(),
+        "stage4_rust_runtime_source",
+        &[r#"
+extern void rt_adjacent_capsule(void);
+static void retained_helper(void) { rt_adjacent_capsule(); }
+void rt_projected_root(void) { retained_helper(); }
+void rt_unrequested_export(void) {}
+__attribute__((constructor)) static void discarded_ctor(void) { rt_unrequested_export(); }
+"#],
+    );
+    let output = build_stage4_rust_runtime_projection_archive(
+        &rust_runtime,
+        &["rt_projected_root".to_string()],
+        &["rt_adjacent_capsule".to_string()],
+        &temp.path().join("projection"),
+    )
+    .unwrap();
+
+    let (defined, undefined) = super::tools::archive_global_symbols(&output).unwrap();
+    assert_eq!(
+        defined,
+        std::collections::BTreeMap::from([("rt_projected_root".to_string(), 1)])
+    );
+    assert_eq!(
+        undefined
+            .iter()
+            .filter(|symbol| symbol.starts_with("rt_") || symbol.starts_with("spl_"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["rt_adjacent_capsule"]
+    );
+    assert_eq!(archive_members(&output).unwrap(), ["stage4_rust_runtime_local.o"]);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry() {
@@ -2346,7 +2530,7 @@ fn test_stage4_compiler_entries_prepare_dedicated_backfill_through_gate() {
                 .entry_file(entry);
         let output_dir = temp.path().join(format!("{entry_name}-prepared"));
         let prepared = builder
-            .prepare_stage4_compiler_backfill_archive(Some(&(provider.clone(), false)), &output_dir)
+            .prepare_stage4_compiler_backfill_archive(Some(&(provider.clone(), false)), &[], &output_dir)
             .unwrap()
             .unwrap();
         assert_eq!(prepared, output_dir.join("libsimple_compiler_backfill.a"));
@@ -2509,10 +2693,14 @@ fn test_runtime_bundle_host_gpu_rejects_missing_engine2d_queue_symbols() {
 }
 
 #[test]
-fn test_runtime_bundle_hosted_is_allowed_for_authorized_stage4_cli() {
+fn test_runtime_bundle_hosted_is_rejected_without_full_stage4_authorization() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
     let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
-    unsafe { std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", "1") };
+    unsafe {
+        std::env::remove_var("SIMPLE_BOOTSTRAP");
+        std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", "1");
+    }
     let temp = tempfile::tempdir().unwrap();
     let native_all = temp.path().join("libsimple_native_all.a");
     std::fs::write(&native_all, b"all").unwrap();
@@ -2525,11 +2713,15 @@ fn test_runtime_bundle_hosted_is_allowed_for_authorized_stage4_cli() {
     let mut builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("simple")).config(config);
     builder.entry_file = Some(PathBuf::from("/project/src/app/cli/main.spl"));
 
-    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
-    assert_eq!(selected, (native_all, true));
+    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(error.contains("removed Rust-hosted runtime bundles"));
     match old_stage4 {
         Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", value) },
         None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP_STAGE4") },
+    }
+    match old_bootstrap {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP") },
     }
 }
 

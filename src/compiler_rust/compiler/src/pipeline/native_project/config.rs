@@ -61,17 +61,6 @@ fn is_bootstrap_main_entry(path: &Option<PathBuf>) -> bool {
         && path.as_ref().and_then(|p| p.file_name()).and_then(|name| name.to_str()) == Some("bootstrap_main.spl")
 }
 
-fn is_authorized_stage4_cli_entry(path: &Option<PathBuf>) -> bool {
-    if std::env::var("SIMPLE_BOOTSTRAP_STAGE4").as_deref() != Ok("1") {
-        return false;
-    }
-    path.as_ref().is_some_and(|path| {
-        path.to_string_lossy()
-            .replace('\\', "/")
-            .ends_with("/src/app/cli/main.spl")
-    })
-}
-
 fn runtime_path_has_abi_complete_simple_core(runtime_path: Option<&Path>) -> bool {
     runtime_path.is_some_and(|path| {
         ["simple-core", "simple_core"].iter().any(|lane_dir| {
@@ -204,10 +193,7 @@ impl NativeProjectBuilder {
         selected_runtime: Option<&(PathBuf, bool)>,
     ) -> Result<(), String> {
         if let Some((runtime_lib, true)) = selected_runtime {
-            if is_bootstrap_main_entry(&self.entry_file)
-                || is_authorized_stage4_cli_entry(&self.entry_file)
-                || self.resolve_runtime_lane() == NativeRuntimeLane::HostGpu
-            {
+            if is_bootstrap_main_entry(&self.entry_file) || self.resolve_runtime_lane() == NativeRuntimeLane::HostGpu {
                 return Ok(());
             }
             let entry = self
@@ -226,8 +212,7 @@ impl NativeProjectBuilder {
     }
 
     pub(crate) fn selected_runtime_library(&self, temp_dir: &Path) -> Result<Option<(PathBuf, bool)>, String> {
-        let bootstrap_hosted =
-            is_bootstrap_main_entry(&self.entry_file) || is_authorized_stage4_cli_entry(&self.entry_file);
+        let bootstrap_hosted = is_bootstrap_main_entry(&self.entry_file) || self.is_authorized_stage4_compiler_entry();
         if self.runtime_bundle_requests_removed_hosted() && !bootstrap_hosted {
             return Err(
                 "native-build removed Rust-hosted runtime bundles; use simple-core or core-c-bootstrap".to_string(),
@@ -255,7 +240,7 @@ impl NativeProjectBuilder {
             "libsimple_runtime.a"
         };
 
-        if is_bootstrap_main_entry(&self.entry_file) || is_authorized_stage4_cli_entry(&self.entry_file) {
+        if is_bootstrap_main_entry(&self.entry_file) {
             if let Some(ref rp) = self.config.runtime_path {
                 let native_all = rp.join(native_all_name);
                 if native_all.exists() {

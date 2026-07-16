@@ -4,7 +4,15 @@
 //! They are part of the runtime library so they can be linked into native binaries.
 
 use super::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_string_new, RuntimeValue};
+use std::ffi::CStr;
 use std::process::{Command, Stdio};
+
+unsafe extern "C" {
+    #[link_name = "spl_arg_count"]
+    fn canonical_arg_count() -> i64;
+    #[link_name = "spl_get_arg"]
+    fn canonical_arg_at(index: i64) -> *const std::os::raw::c_char;
+}
 
 /// CLI version string from VERSION file (set by build.rs), falls back to Cargo.toml
 const CLI_VERSION: &str = match option_env!("SIMPLE_VERSION") {
@@ -386,7 +394,59 @@ pub extern "C" fn rt_cli_run_repl(_gc_log: u8, _gc_off: u8) -> i64 {
 pub extern "C" fn rt_cli_run_tests(args: RuntimeValue, gc_log: u8, gc_off: u8) -> i64 {
     // Extract args array to Vec<String>
     let arg_strings = extract_string_array(args);
+    run_tests_with_args(&arg_strings, gc_log, gc_off)
+}
 
+/// Stage4 scalar-only test bridge. Read argv through the canonical C runtime's
+/// scalar/raw ABI, never through a container RuntimeValue from another heap.
+#[no_mangle]
+pub extern "C" fn rt_cli_run_tests_process_args(gc_log: u8, gc_off: u8) -> i64 {
+    let count = unsafe { canonical_arg_count() }.max(0);
+    let process_args: Vec<String> = (0..count)
+        .filter_map(|index| {
+            let ptr = unsafe { canonical_arg_at(index) };
+            (!ptr.is_null()).then(|| unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
+        })
+        .collect();
+    let arg_strings = test_args_from_process(&process_args);
+    run_tests_with_args(&arg_strings, gc_log, gc_off)
+}
+
+fn cli_global_option_needs_value(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--backend"
+            | "--execution-limit"
+            | "--fixed-be"
+            | "--interpreter-mode"
+            | "--jit-threshold"
+            | "--lang"
+            | "--log-mode"
+            | "--max-recursion-depth"
+            | "--progress"
+            | "--run-config"
+            | "--surface"
+            | "--timeout"
+    )
+}
+
+fn test_args_from_process(process_args: &[String]) -> Vec<String> {
+    let mut index = 1;
+    while index < process_args.len() {
+        let arg = &process_args[index];
+        if arg == "test" {
+            return process_args[index + 1..]
+                .iter()
+                .filter(|arg| !matches!(arg.as_str(), "--gc-log" | "--gc-off" | "--gc=off"))
+                .cloned()
+                .collect();
+        }
+        index += if cli_global_option_needs_value(arg) { 2 } else { 1 };
+    }
+    Vec::new()
+}
+
+fn run_tests_with_args(arg_strings: &[String], gc_log: u8, gc_off: u8) -> i64 {
     // Delegate to the Rust seed driver (same resolution as lint/check/fmt).
     // Spawning current_exe() here is wrong when this runtime is linked into
     // the self-hosted stage4 CLI: stage4's `test` dispatch calls back into
@@ -412,7 +472,7 @@ pub extern "C" fn rt_cli_run_tests(args: RuntimeValue, gc_log: u8, gc_off: u8) -
     cmd.arg("test");
 
     // Add all arguments
-    for arg in &arg_strings {
+    for arg in arg_strings {
         cmd.arg(arg);
     }
 
@@ -434,6 +494,42 @@ pub extern "C" fn rt_cli_run_tests(args: RuntimeValue, gc_log: u8, gc_off: u8) -
             eprintln!("Failed to run tests: {}", e);
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod test_process_arg_bridge_tests {
+    use super::test_args_from_process;
+
+    #[no_mangle]
+    extern "C" fn spl_arg_count() -> i64 {
+        0
+    }
+
+    #[no_mangle]
+    extern "C" fn spl_get_arg(_index: i64) -> *const std::os::raw::c_char {
+        std::ptr::null()
+    }
+
+    #[test]
+    fn slices_only_arguments_after_the_test_command() {
+        let process_args = ["simple", "test", "focused_spec.spl", "--gc-log", "--fail-fast"].map(String::from);
+        assert_eq!(
+            test_args_from_process(&process_args),
+            ["focused_spec.spl", "--fail-fast"].map(String::from)
+        );
+    }
+
+    #[test]
+    fn returns_empty_without_a_test_command() {
+        let process_args = ["simple", "--version"].map(String::from);
+        assert!(test_args_from_process(&process_args).is_empty());
+    }
+
+    #[test]
+    fn skips_a_global_option_value_named_test() {
+        let process_args = ["simple", "--run-config", "test", "test", "focused_spec.spl"].map(String::from);
+        assert_eq!(test_args_from_process(&process_args), ["focused_spec.spl"].map(String::from));
     }
 }
 

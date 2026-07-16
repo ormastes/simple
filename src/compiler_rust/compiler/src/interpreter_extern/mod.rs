@@ -675,6 +675,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cli_run_spipe_docgen", cli::rt_cli_run_spipe_docgen);
     insert_simple!("rt_cli_run_task_gen", cli::rt_cli_run_task_gen);
     insert_simple!("rt_cli_run_tests", cli::rt_cli_run_tests);
+    insert_simple!("rt_cli_run_tests_process_args", cli::rt_cli_run_tests_process_args);
     insert_simple!("rt_cli_run_todo_gen", cli::rt_cli_run_todo_gen);
     insert_simple!("rt_cli_run_todo_scan", cli::rt_cli_run_todo_scan);
     insert_simple!("rt_cli_run_verify", cli::rt_cli_run_verify);
@@ -2460,6 +2461,11 @@ mod tests {
     #[test]
     fn dispatch_registers_cranelift_emit_object_raw() {
         assert!(EXTERN_DISPATCH.contains_key("rt_cranelift_emit_object_raw"));
+    }
+
+    #[test]
+    fn dispatch_registers_scalar_stage4_test_bridge() {
+        assert!(EXTERN_DISPATCH.contains_key("rt_cli_run_tests_process_args"));
     }
 
     #[test]

@@ -746,6 +746,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_cli_run_code",
     "rt_cli_run_repl",
     "rt_cli_run_tests",
+    "rt_cli_run_tests_process_args",
     "rt_cli_run_verify",
     "rt_cli_run_check",
     "rt_cli_run_lint",

@@ -83,8 +83,8 @@ mod imp {
         false
     }
     #[inline]
-    pub fn dib_resize(_dib: i64, _w: i64, _h: i64) -> bool {
-        false
+    pub fn dib_resize(_hwnd: i64, _dib: i64, _w: i64, _h: i64) -> i64 {
+        WIN32_INVALID_HANDLE
     }
     #[inline]
     pub fn dib_read_pixel(_dib: i64, _x: i64, _y: i64) -> i64 {
@@ -676,24 +676,28 @@ mod imp {
         s.orphans.remove(&dib).is_some()
     }
 
-    pub fn dib_resize(dib: i64, w: i64, h: i64) -> bool {
+    pub fn dib_resize(_hwnd: i64, dib: i64, w: i64, h: i64) -> i64 {
         if w <= 0 || h <= 0 {
-            return false;
+            return WIN32_INVALID_HANDLE;
         }
         let mut s = state().lock().unwrap();
         if let Some(&owner) = s.dib_to_hwnd.get(&dib) {
             if let Some(wnd) = s.hwnds.get_mut(&owner) {
-                return resize_hwnd_locked(wnd, w, h);
+                return if resize_hwnd_locked(wnd, w, h) {
+                    dib
+                } else {
+                    WIN32_INVALID_HANDLE
+                };
             }
-            return false;
+            return WIN32_INVALID_HANDLE;
         }
         let Some(d) = s.orphans.get_mut(&dib) else {
-            return false;
+            return WIN32_INVALID_HANDLE;
         };
         d.w = w;
         d.h = h;
         d.pixels = vec![0; (w as usize) * (h as usize)];
-        true
+        dib
     }
 
     pub fn dib_read_pixel(dib: i64, x: i64, y: i64) -> i64 {
@@ -899,8 +903,8 @@ pub unsafe extern "C" fn rt_win32_dib_free(dib: i64) -> bool {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rt_win32_dib_resize(dib: i64, w: i64, h: i64) -> bool {
-    imp::dib_resize(dib, w, h)
+pub unsafe extern "C" fn rt_win32_dib_resize(hwnd: i64, dib: i64, w: i64, h: i64) -> i64 {
+    imp::dib_resize(hwnd, dib, w, h)
 }
 
 #[no_mangle]
@@ -964,7 +968,25 @@ mod tests {
                 WIN32_INVALID_HANDLE
             );
             assert!(!rt_win32_dib_fill_rect(1, 0, 0, 10, 10, 0));
+            assert_eq!(rt_win32_dib_resize(1, 2, 10, 10), WIN32_INVALID_HANDLE);
             assert_eq!(rt_win32_message_pump(0), 0);
+        }
+    }
+
+    #[test]
+    fn dib_resize_export_matches_simple_abi() {
+        let _: unsafe extern "C" fn(i64, i64, i64, i64) -> i64 = rt_win32_dib_resize;
+    }
+
+    #[cfg(all(target_os = "windows", feature = "win32-real"))]
+    #[test]
+    fn real_dib_resize_returns_original_handle_or_sentinel() {
+        unsafe {
+            let dib = rt_win32_dib_create(0, 2, 2, 0);
+            assert!(dib > 0);
+            assert_eq!(rt_win32_dib_resize(0, dib, 4, 3), dib);
+            assert_eq!(rt_win32_dib_resize(0, -99, 4, 3), WIN32_INVALID_HANDLE);
+            assert!(rt_win32_dib_free(dib));
         }
     }
 }

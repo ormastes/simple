@@ -102,6 +102,21 @@ pure-Simple runner instead of `rt_cli_run_tests`. Acceptance needs one passing
 and one deliberately failing SSpec with the candidate self-pinned, no seed
 available, and no current-binary respawn loop. TODO 572 owns that work.
 
+## Mixed-runtime argument ABI finding (2026-07-16)
+
+The exact Stage4 profile localized the Rust closure rooted at
+`rt_cli_run_tests`, including Rust `rt_array_len`/`rt_array_get`, while CLI
+argv arrays are allocated by the canonical C runtime. Consequently
+`simple test focused_spec.spl` reached the delegate as bare `simple test`.
+Scalar `-c` arguments were unaffected. The CLI test arm now calls a scalar-only
+Rust bridge which reads canonical C argv through `spl_arg_count`/`spl_get_arg`,
+then uses the inherited-stdio test delegate. Parser and interpreter-registration
+tests passed during refinement, but the final link remains pending after the
+three-cycle cap. Acceptance is an exact candidate sentinel with
+`SIMPLE_BOOTSTRAP_DRIVER=/bin/echo`; the candidate must print
+`test focused_spec.spl`. The 2026-07-16 candidate rebuild SIGSEGV'd before
+output, so this runtime acceptance remains pending rather than claimed.
+
 Separately, TODO 548's shell compiler-admission replacement is now shared by
 bootstrap and the QEMU wrapper. `candidate_frontend_smoke` and
 `simple_binary_is_valid` live in

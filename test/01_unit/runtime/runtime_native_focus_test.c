@@ -4,13 +4,14 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-static int start_server(unsigned short* port, const char* body) {
+static int start_server(unsigned short* port, const char* body, int delay_ms) {
     int server = socket(AF_INET, SOCK_STREAM, 0);
     assert(server >= 0);
     struct sockaddr_in address = {0};
@@ -29,6 +30,7 @@ static int start_server(unsigned short* port, const char* body) {
         if (client >= 0) {
             char request[2048];
             (void)read(client, request, sizeof(request));
+            if (delay_ms > 0) usleep((useconds_t)delay_ms * 1000);
             char response[256];
             int response_len = snprintf(response, sizeof(response),
                 "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
@@ -173,8 +175,8 @@ int main(void) {
     int64_t tuple = rt_tuple_new(9);
     assert(rt_tuple_set(tuple, 8, rt_value_int(88)));
     assert(rt_tuple_get(tuple, 8) == rt_value_int(88));
-    assert(rt_is_none(0));
-    assert(!rt_is_some(0));
+    assert(rt_is_none(rt_value_nil()));
+    assert(!rt_is_some(rt_value_nil()));
     assert(rt_math_pow(2.0, 3.0) == 8.0);
     uint64_t mmio = 0;
     rt_volatile_write_u8((int64_t)(uintptr_t)&mmio, 0x12);
@@ -200,6 +202,28 @@ int main(void) {
     assert(rt_array_get((SplArray*)(uintptr_t)glyph, 0) == 0);
     assert(rt_array_get((SplArray*)(uintptr_t)glyph, 1) != 0);
     rt_sleep_secs(0);
+    int64_t monotonic_before = rt_time_now_monotonic_ms();
+    assert(monotonic_before > 0);
+    assert(rt_time_now_monotonic_ms() >= monotonic_before);
+    int64_t epoch_ms = rt_time_ms();
+    assert(epoch_ms >= (int64_t)time(NULL) * 1000 - 1000);
+    assert(epoch_ms <= (int64_t)time(NULL) * 1000 + 1000);
+    int64_t pointer_text = text("pointer");
+    assert(strcmp((const char*)(uintptr_t)spl_str_ptr((const char*)(uintptr_t)pointer_text),
+                  "pointer") == 0);
+    const char* raw_pointer = "raw-pointer";
+    assert((const char*)(uintptr_t)spl_str_ptr(raw_pointer) == raw_pointer);
+
+    pid_t panic_child = fork();
+    assert(panic_child >= 0);
+    if (panic_child == 0) {
+        (void)freopen("/dev/null", "w", stderr);
+        panic(text("focused panic"));
+        _exit(1);
+    }
+    int panic_status = 0;
+    assert(waitpid(panic_child, &panic_status, 0) == panic_child);
+    assert(WIFEXITED(panic_status) && WEXITSTATUS(panic_status) == 1);
 
     char crlf_url[] = "http://127.0.0.1\r\n:1/";
     int64_t invalid = rt_http_request(text("GET"), text(crlf_url),
@@ -226,7 +250,7 @@ int main(void) {
     assert(access(nul_path, F_OK) != 0);
 
     unsigned short port;
-    pid_t child = start_server(&port, "hello");
+    pid_t child = start_server(&port, "hello", 0);
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%u/", port);
     int64_t response = rt_http_get(text(url));
@@ -242,8 +266,40 @@ int main(void) {
     assert(strcmp((const char*)rt_string_data(rt_tuple_get(response, 1)), "request") == 0);
     assert(waitpid(child, NULL, 0) == child);
 
+    int64_t client = rt_http_client_create();
+    assert(client > 0);
+    assert(!rt_http_client_set_timeout(client, -1));
+    assert(rt_http_client_set_timeout(client, 50));
+    unsigned short delayed_port;
+    child = start_server(&delayed_port, "too late", 200);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/", delayed_port);
+    int64_t started = rt_time_now_monotonic_ms();
+    int64_t timed_out = rt_http_client_request(
+        client, text("GET"), text(url), (int64_t)rt_array_new(0), text(""));
+    int64_t elapsed = rt_time_now_monotonic_ms() - started;
+    assert(rt_value_as_int(rt_tuple_get(timed_out, 0)) == -1);
+    assert(strstr((const char*)rt_string_data(rt_tuple_get(timed_out, 2)), "timed out") != NULL);
+    assert(elapsed >= 0 && elapsed < 1000);
+    assert(waitpid(child, NULL, 0) == child);
+    rt_http_client_destroy(client);
+    int64_t destroyed = rt_http_client_request(
+        client, text("GET"), text(url), (int64_t)rt_array_new(0), text(""));
+    assert(rt_value_as_int(rt_tuple_get(destroyed, 0)) == -1);
+    assert(strstr((const char*)rt_string_data(rt_tuple_get(destroyed, 2)), "invalid HTTP client") != NULL);
+    int64_t replacement = rt_http_client_create();
+    assert(replacement > 0 && replacement != client);
+    assert(!rt_http_client_set_timeout(client, 1));
+    rt_http_client_destroy(replacement);
+
+    int64_t clients[80];
+    int client_count = 0;
+    while (client_count < 80 && (clients[client_count] = rt_http_client_create()) > 0) client_count++;
+    assert(client_count == 64);
+    assert(rt_http_client_create() == 0);
+    for (int i = 0; i < client_count; i++) rt_http_client_destroy(clients[i]);
+
     unsigned short download_port;
-    child = start_server(&download_port, "abc");
+    child = start_server(&download_port, "abc", 0);
     snprintf(url, sizeof(url), "http://127.0.0.1:%u/", download_port);
     const char* output = "/tmp/simple-runtime-native-download-test";
     int64_t downloaded = rt_http_download(text(url), text(output));

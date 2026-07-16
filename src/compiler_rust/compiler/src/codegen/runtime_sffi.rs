@@ -1305,6 +1305,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cli_run_repl", &[I8, I8], &[I64]),
     // Testing
     RuntimeFuncSpec::new("rt_cli_run_tests", &[I64, I8, I8], &[I64]),
+    RuntimeFuncSpec::new("rt_cli_run_tests_process_args", &[I8, I8], &[I64]),
     RuntimeFuncSpec::new("rt_test_db_validate", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_test_db_enable_validation", &[I8], &[]),
     RuntimeFuncSpec::new("rt_test_run_is_stale", &[I64, I64], &[I8]),
