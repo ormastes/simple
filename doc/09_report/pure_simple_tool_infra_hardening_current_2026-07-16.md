@@ -32,12 +32,12 @@ runtime remains unavailable, so executable qualification is still blocked.
 |---|---|---|---|---|
 | Production runtime | BLOCKED | Stage 4 was found parsing 10,503 files before closure pruning; source fix is unverified because the final cycle stopped on a stale compiler-backfill guard | In a fresh session run one bounded `--full-bootstrap`, require closure-sized phase input, then admit and atomically deploy | P0 |
 | Test runner | IMPLEMENTED | Failure/outcome/count/nesting, exact manifest correspondence, and deadline-bounded batch re-exec implemented | Run 1,000-example RSS evidence on pure runtime | P0 |
-| Duplicate checker | IMPLEMENTED | Runtime qualification blocked by seed | Run hostile-path and measured benchmark probes on pure runtime | P0 |
+| Duplicate checker | IMPLEMENTED | Token child is now deadline-bound; fast-script newline/leading-dash enumeration and cosine cache mutation remain open | Replace fast-script shell discovery with `dir_walk_native`, repair cache mutation, then run hostile-path and measured probes | P0 |
 | Lint | SOURCE FIXED | Focused/global ownership is correct; global gates still report 30 UI and 45 hot-loop violations | Repair classified violations, then qualify canonical fixtures | P1 |
 | Format/fix | SOURCE FIXED | Duplicate handlers removed; executable dry-run proof awaits admitted runtime | Run canonical dry-run and write fixtures after admission | P1 |
 | Check | BLOCKED | Command is parse/validation only; full type inference is not enforced | Implement enforcing type analysis, then qualify the production probe | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
-| Test daemon | IMPLEMENTED | Shared candidate selector, argv-safe startup, and content-hash invalidation implemented; dynamic matrix blocked by runtime | Execute pinned-candidate run/clean/hit/miss/same-size dependency invalidation after admission | P2 |
+| Test daemon | IMPLEMENTED | Requested waits no longer truncate at 60 seconds; dynamic matrix and depth-greater-than-five dependency invalidation remain unqualified | Execute long-wait and pinned-candidate cache probes after admission, then remove the dependency-depth ceiling | P2 |
 | SPipe/docgen | WARN | Executable spec/manual exist; generated-doc validation blocked by seed | Regenerate once with admitted runtime | P1 |
 | MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P1 |
 | LSP MCP wrapper | IMPLEMENTED | Native-first hash/protocol contract and content-addressed probe cache passed statically | Collect protocol latency/RSS evidence | P0 |
@@ -63,7 +63,10 @@ runtime remains unavailable, so executable qualification is still blocked.
 8. **PSH-008 — Windows parity:** remove Rust precedence after coordinating the
    currently dirty launcher lane.
 9. **PSH-009 — Remaining tool defects:** checker deadline, test-runner RSS,
-   nested timeout, test-daemon invalidation, and `gen-lean` recursion.
+   nested timeout, test-daemon invalidation, and `gen-lean` recursion. Source
+   fixes now close the duplicate token-child deadline, hidden daemon 60-second
+   ceiling, runner batch deadline, and `gen-lean` recursion; executable RSS and
+   long-wait/cache qualification remain.
 
 ## Acceptance evidence required before PASS
 
@@ -126,6 +129,18 @@ runtime remains unavailable, so executable qualification is still blocked.
   focused repeated decimal/hexadecimal entity spec. Clipping and framebuffer
   mutation remain unmodified because their parity cannot be executed with an
   admitted runtime.
+- **Daemon deadline:** `daemon_poll_result` already had the authoritative
+  absolute deadline; its independent 600-attempt guard silently truncated all
+  waits to about 60 seconds. The redundant guard is deleted, so every caller
+  now receives the timeout it requested.
+- **Duplicate token mode:** the fast child remains separate for its measured
+  low latency, but it now runs through the existing 30-second timeout facade.
+  Facade timeout `-1` is normalized to the truthful CLI timeout class `124`.
+  Replacing its shell-based file discovery and repairing incremental-cache
+  mutation are separate open fixes, not hidden by this deadline repair.
+- **Lint/fmt/fix review:** no import rewrite was accepted. `cli_ops` already
+  re-exports `cli_lint_commands`, `run_commands.spl` has no duplicate handlers,
+  and `simple.cmd` already resolves the admitted pure-Simple executable.
 
 ## Latest bounded verification
 
@@ -156,6 +171,9 @@ runtime remains unavailable, so executable qualification is still blocked.
   pure-Simple runtime.
 - Numeric entity piece-buffering and repeated decimal/hexadecimal Draw IR spec:
   SOURCE IMPLEMENTED; executable verdict blocked by the same runtime gate.
+- Daemon requested-deadline ownership and bounded duplicate token-child source
+  contracts: PASS by scoped source inspection; dynamic timeout behavior is NOT
+  RUN because no admitted runtime exists.
 - New Simple unit/system behavior and the PowerShell contract: NOT RUN because
   no admitted pure-Simple runtime or PowerShell host exists. Previously passed
   global gates were not repeated after their session limit.
