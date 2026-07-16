@@ -92,10 +92,10 @@ the shared binary — deploys require explicit user go-ahead).
 - Fold a parity-harness case per landed lane fix (inline, not via a sub-lane —
   the rogue-redeploy incident showed sub-lanes can wander into heavy ops).
 - Open filed bugs, in bottom-up order:
-  - `native_try_op_on_option_silent_wrong_2026-07-14.md` remains blocked on a
-    uniform Option producer/consumer ABI and a runnable pure-Simple
-    `native-build` verification gate. The reviewed tagged-handle design is
-    recorded in the bug.
+  - `native_try_op_on_option_silent_wrong_2026-07-14.md` now fails closed for
+    authoritatively typed locals and direct-call returns instead of entering
+    Result decoding. Full support remains blocked on a uniform Option
+    producer/consumer ABI and a runnable pure-Simple `native-build` gate.
   - `native_text_option_unwrap_pointer_value_2026-07-15.md` has a flat-nullable
     implementation and harness controls; executable verification is pending
     repair of the pure-Simple CLI exit 139.

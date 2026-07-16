@@ -39,7 +39,7 @@ source fixes from executable proof.
 | 5 | Subject-enum variant precedence implemented for expression and statement match; focused Rust tests pending execution. |
 | 6 | Old two-slot `Any` premise is superseded by the one-word ABI; strict default-LLVM + explicit-Cranelift wrapper-to-extern forwarding proof added, execution pending. |
 | 7 | Source implemented at the contained MIR enum-bind owner; strict default-LLVM + explicit-Cranelift proof added, execution pending. |
-| 8 | Open; additive `rt_enum_id` runtime/backend surfaces are source-implemented, but the uniform tagged Option ABI remains blocked. Flat text unwrap is implemented but unexecuted. |
+| 8 | Open/safer; typed local/direct-call Option `?` now fails closed before Result decoding, and additive `rt_enum_id` surfaces are source-implemented. The uniform tagged Option ABI remains blocked; flat text unwrap is implemented but unexecuted. |
 | 9 | Capturing and non-capturing stored/passed lambda values implemented with a membership-checked closure ABI; strict hosted/simple-core default-LLVM + explicit-Cranelift proof added, execution pending. |
 | 10 | Captured scalar/struct closure storage implemented through the same closure ABI; strict dual-runtime/backend proof added, execution pending. |
 | 11 | Fixed by Unit-arm merge suppression and backend void-spill protection. |

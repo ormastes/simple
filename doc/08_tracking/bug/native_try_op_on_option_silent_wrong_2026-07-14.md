@@ -2,7 +2,7 @@
 
 **Severity:** high (silent-wrong on BOTH oracle and native — no diagnostic)
 **Found:** 2026-07-14, errhandling lane
-**Status:** open
+**Status:** typed local/direct-call forms now fail closed; tagged Option support open
 **Backend:** native-build `--entry` and seed interpreter
 
 ## Symptom
@@ -86,6 +86,19 @@ The emergency MIR call-lowering registration now also uses the canonical
 `Some = 0`, `None = 1` order instead of reversing the variants when module
 registration is missing. A focused source-contract spec keeps both owners in
 lockstep; this prerequisite likewise does not close the ABI bug.
+
+## Fail-closed boundary (2026-07-16)
+
+MIR lowering now rejects an authoritatively typed Optional base before the
+existing Result `?` decoder evaluates it. Annotated locals and direct-call
+Optional returns have independent loud-fail parity cases; a strict default-LLVM
+plus explicit-Cranelift Result `?` control preserves Ok and Err propagation.
+The diagnostic is fatal in the native driver, so no binary survives this known
+wrong path.
+
+This removes silent wrongness for the proven typed forms but does not implement
+the tagged Option ABI. Unknown/unannotated method-result provenance remains
+open and is not guessed, because rejecting it could break valid Result `?`.
 
 ## Reproduce
 
