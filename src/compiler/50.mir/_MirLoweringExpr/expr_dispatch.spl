@@ -1403,14 +1403,37 @@ impl MirLowering:
                             val eq_res = b_eq.emit_call(eq_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], MirType.i64())
                             self.builder = b_eq
                             if val eq_local = eq_res:
+                                var raw_bool_val = eq_local
                                 match op:
                                     case NotEq:
                                         var b_neq = self.builder
                                         val neq_local = b_neq.emit_binop(MirBinOp.BitXor, mir_operand_copy(eq_local), mir_operand_const_int(1), MirType.i64())
                                         self.builder = b_neq
-                                        return neq_local
+                                        raw_bool_val = neq_local
                                     case _:
-                                        return eq_local
+                                        ()
+                                # rt_text_eq_any returns a raw i64 0/1 (its real
+                                # C ABI return, matching `declare i64
+                                # @rt_text_eq_any(...)`), not a native i1 --
+                                # unlike `rt_is_some` (declared `i1`), so the
+                                # result CANNOT simply be relabeled Bool: any
+                                # later consumer that reads the MIR-declared
+                                # type expects a genuine i1 value, and print()'s
+                                # bool-vs-int render-fn dispatch
+                                # (lower_bootstrap_print_call's is_bool check
+                                # via local_mir_type_of) only fires on a true
+                                # Bool-typed local, else text == text prints
+                                # "1"/"0" instead of "true"/"false" (parity
+                                # case option_is_none_map_llvm's final
+                                # `.unwrap_or(...) == "..."` assertions).
+                                # Narrow via a genuine icmp (mirrors
+                                # decode_runtime_value's Bool-tag decode
+                                # pattern in this same file) rather than
+                                # bitcasting/relabeling the wide value.
+                                var b_narrow = self.builder
+                                val bool_local = b_narrow.emit_binop(MirBinOp.Eq, mir_operand_copy(raw_bool_val), mir_operand_const_int(1), MirType.bool())
+                                self.builder = b_narrow
+                                return bool_local
 
                         val mir_op = self.lower_binop(op)
                         # Float arithmetic must carry an F64 dest: infer_binop_type

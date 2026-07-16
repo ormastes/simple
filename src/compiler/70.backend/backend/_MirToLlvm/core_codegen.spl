@@ -542,6 +542,24 @@ impl MirTextCodegen for MirToLlvm:
             return self.ret_value_for_type(dst_ty, value)
         if value == "0":
             return self.ret_value_for_type(dst_ty, "0")
+        # `bool?` (Option<bool>) storage into the flat-nullable-ABI receiver
+        # slot needs the raw i1 reinterpreted as the pointer-shaped Option
+        # encoding (mirrors how an Option<i64> receiver goes through
+        # `inttoptr i64 ... to ptr`, see core_codegen.spl's "handle unbox"
+        # comment above translate_copy_move). `select_cast_instruction` has
+        # no i1->ptr case (bit widths differ, LLVM's `bitcast` requires equal
+        # width) and falls through to its generic "bitcast" default, which
+        # llc rejects outright ("invalid cast opcode for cast from 'i1' to
+        # 'ptr'") -- root cause of the option_is_none_map_llvm parity case's
+        # second failure (`some_bool: bool? = true`'s own initializer).
+        # Bridge properly: zext the 1-bit value to a real integer width
+        # first, then inttoptr that.
+        if src_ty == "i1" and dst_ty == "ptr":
+            val widened = self.builder.fresh_local()
+            self.builder.emit("  {widened} = zext i1 {value} to i64")
+            val tmp = self.builder.fresh_local()
+            self.builder.emit("  {tmp} = inttoptr i64 {widened} to ptr")
+            return tmp
         val cast_inst = self.select_cast_instruction(src_ty, dst_ty)
         val tmp = self.builder.fresh_local()
         self.builder.emit("  {tmp} = {cast_inst} {src_ty} {value} to {dst_ty}")

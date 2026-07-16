@@ -149,23 +149,34 @@ impl MirLowering:
         if self.struct_value_syms.has(local.id) or self.runtime_array_locals.has(local.id) or self.runtime_dict_locals.has(local.id) or self.runtime_value_locals.has(local.id):
             return nil
         if val type_ = self.local_mir_type_of(local):
-            val kind = match type_.kind:
-                case MirTypeKind.I8: HirTypeKind.Int(8, true)
-                case MirTypeKind.U8: HirTypeKind.Int(8, false)
-                case MirTypeKind.I16: HirTypeKind.Int(16, true)
-                case MirTypeKind.U16: HirTypeKind.Int(16, false)
-                case MirTypeKind.I32: HirTypeKind.Int(32, true)
-                case MirTypeKind.U32: HirTypeKind.Int(32, false)
-                case MirTypeKind.I64: HirTypeKind.Int(64, true)
-                case MirTypeKind.U64: HirTypeKind.Int(64, false)
-                case MirTypeKind.F32: HirTypeKind.Float(32)
-                case MirTypeKind.F64: HirTypeKind.Float(64)
-                case MirTypeKind.Bool: HirTypeKind.Bool
-                case MirTypeKind.Char: HirTypeKind.Char
+            # NOTE: each arm returns directly (rather than yielding a value
+            # assigned via `val kind = match ...` and wrapped afterwards) --
+            # a match-arm that mixes a plain-value arm (bare no-payload enum
+            # variant like `HirTypeKind.Str`) with a sibling arm that does an
+            # early `return` from within a nested `if/else` corrupts the
+            # bare-variant tag under the seed interpreter (root cause of the
+            # option_is_none_map_llvm ptr->i1 cast bug: this exact pattern
+            # made `HirTypeKind.Str` fail to match `case HirTypeKind.Str` at
+            # the call site, so `.unwrap_or()` never took the text path).
+            match type_.kind:
+                case MirTypeKind.I8: return Some(HirType(kind: HirTypeKind.Int(8, true), span: span))
+                case MirTypeKind.U8: return Some(HirType(kind: HirTypeKind.Int(8, false), span: span))
+                case MirTypeKind.I16: return Some(HirType(kind: HirTypeKind.Int(16, true), span: span))
+                case MirTypeKind.U16: return Some(HirType(kind: HirTypeKind.Int(16, false), span: span))
+                case MirTypeKind.I32: return Some(HirType(kind: HirTypeKind.Int(32, true), span: span))
+                case MirTypeKind.U32: return Some(HirType(kind: HirTypeKind.Int(32, false), span: span))
+                case MirTypeKind.I64: return Some(HirType(kind: HirTypeKind.Int(64, true), span: span))
+                case MirTypeKind.U64: return Some(HirType(kind: HirTypeKind.Int(64, false), span: span))
+                case MirTypeKind.F32: return Some(HirType(kind: HirTypeKind.Float(32), span: span))
+                case MirTypeKind.F64: return Some(HirType(kind: HirTypeKind.Float(64), span: span))
+                case MirTypeKind.Bool: return Some(HirType(kind: HirTypeKind.Bool, span: span))
+                case MirTypeKind.Char: return Some(HirType(kind: HirTypeKind.Char, span: span))
                 case MirTypeKind.Opaque(name):
-                    if name == "str": HirTypeKind.Str else: return nil
+                    if name == "str":
+                        return Some(HirType(kind: HirTypeKind.Str, span: span))
+                    else:
+                        return nil
                 case _: return nil
-            return Some(HirType(kind: kind, span: span))
         nil
 
     me option_text_value(value_local: LocalId, result_type: MirType) -> LocalId:
@@ -177,6 +188,36 @@ impl MirLowering:
         val text_res = b_text.emit_call(text_op, [mir_operand_copy(value_local)], result_type)
         self.builder = b_text
         text_res ?? value_local
+
+    me option_bool_value(value_local: LocalId) -> LocalId:
+        """Decode an `Option<bool>` receiver back to a genuine i1.
+
+        `Option<T>` locals are lowered (function_lowering.spl's `lower_type`,
+        `Optional(inner) -> Tuple([Bool, inner])`) to the flat-nullable-ABI
+        pointer representation everywhere the backend primes an aggregate
+        MIR type as `ptr` (matches how `is_some`/`is_none` reinterpret the
+        receiver as a pointer for the null check). For `Option<i64>` this is
+        representationally free -- an i64 payload is pointer-width, so the
+        raw ptr bit pattern IS already usable wherever an i64 is expected
+        (arithmetic like `x * 2` round-trips through the backend's implicit
+        ptrtoint coercions) -- but `Option<bool>`'s 1-bit payload is NOT
+        pointer-width: binding the raw ptr-typed receiver directly as a
+        lambda parameter or unwrap_or result (declared type Bool) leaves a
+        `not x`/comparison operating on a genuine `ptr` value instead of a
+        real `i1`, which the backend's unary/binop lowering then
+        misinterprets as an implicit is-null/truthiness check on the pointer
+        itself (parity case option_is_none_map_llmv's `some_bool.map(fn(x:
+        bool) -> bool: not x)` and plain `some_bool.unwrap_or(false)`).
+        Bridge explicitly: ptrtoint to a real integer width, then trunc down
+        to i1 -- the same two-step reversal of value_as_type's i1->ptr
+        "handle unbox" bridge in core_codegen.spl."""
+        var b_wide = self.builder
+        val widened = b_wide.emit_cast(mir_operand_copy(value_local), MirType.i64())
+        self.builder = b_wide
+        var b_narrow = self.builder
+        val narrowed = b_narrow.emit_cast(mir_operand_copy(widened), MirType.bool())
+        self.builder = b_narrow
+        narrowed
 
     me lower_result_unwrap(receiver: HirExpr, ok_type: HirType, default_expr: HirExpr?) -> LocalId:
         var result_type = MirType.i64()
@@ -454,11 +495,23 @@ impl MirLowering:
             var b_some_uo = self.builder
             b_some_uo.switch_to_block(some_block_uo)
             self.builder = b_some_uo
+            var uo_is_bool = false
+            match uo_result_type.kind:
+                case MirTypeKind.Bool: uo_is_bool = true
+                case _: ()
             var some_val_uo = receiver_local
             if uo_is_text:
                 some_val_uo = self.option_text_value(receiver_local, uo_result_type)
             elif self.runtime_value_locals.has(receiver_local.id):
                 some_val_uo = self.decode_runtime_value(receiver_local, uo_result_type)
+            elif uo_is_bool:
+                # Bare `some_bool.unwrap_or(default)` (no `.map()` in
+                # between): the receiver is the `Option<bool>` variable
+                # itself, ptr-shaped per option_bool_value's doc comment, not
+                # yet routed through box_runtime_value/decode_runtime_value's
+                # tagged-Bool scheme (that only applies to a `.map()` result).
+                # Decode the same way.
+                some_val_uo = self.option_bool_value(receiver_local)
             b_some_uo = self.builder
             b_some_uo.emit_copy(result_local_uo, some_val_uo)
             b_some_uo.terminate_goto(merge_block_uo)
@@ -548,8 +601,21 @@ impl MirLowering:
                         b_some_map.switch_to_block(some_block_map)
                         self.builder = b_some_map
                         var some_val_map = receiver_local
+                        var map_inner_is_bool = false
+                        match map_inner_type.kind:
+                            case MirTypeKind.Bool: map_inner_is_bool = true
+                            case _: ()
                         if self.runtime_value_locals.has(receiver_local.id):
                             some_val_map = self.decode_runtime_value(receiver_local, map_inner_type)
+                        elif map_inner_is_bool:
+                            # `Option<bool>` receiver: see option_bool_value's
+                            # doc comment -- the receiver is ptr-shaped (the
+                            # flat-nullable-ABI encoding an `Optional(Bool)`
+                            # local is primed with), not a raw i1, so binding
+                            # it straight to the lambda's `x: bool` parameter
+                            # would feed a `ptr` value into `not x` / any bool
+                            # op. Decode explicitly.
+                            some_val_map = self.option_bool_value(receiver_local)
                         val map_call_local = self.lower_inline_lambda_with_locals(map_params, map_body, [some_val_map])
                         val map_value_type = self.option_map_value_hir_type(map_call_local, map_body.span)
                         var map_call_tagged = map_call_local
