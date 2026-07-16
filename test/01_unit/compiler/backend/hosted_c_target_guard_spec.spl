@@ -1,0 +1,53 @@
+use std.spec.*
+use compiler.backend.backend.llvm_native_link.{hosted_c_target_matches_host}
+use std.io_runtime.{rt_file_read_text}
+
+describe "hosted C target guard":
+    it "allows implicit and explicit host targets":
+        expect(hosted_c_target_matches_host("", "linux", "x86_64")).to_be(true)
+        expect(hosted_c_target_matches_host("host", "windows", "aarch64")).to_be(true)
+        expect(hosted_c_target_matches_host("native", "freebsd", "x86_64")).to_be(true)
+
+    it "allows same-host architecture aliases":
+        expect(hosted_c_target_matches_host("x86_64", "macos", "x86_64")).to_be(true)
+        expect(hosted_c_target_matches_host("arm64", "windows", "aarch64")).to_be(true)
+        expect(hosted_c_target_matches_host("rv64", "linux", "riscv64")).to_be(true)
+
+    it "allows matching Linux architectures":
+        expect(hosted_c_target_matches_host("x86_64-unknown-linux-gnu", "linux", "x86_64")).to_be(true)
+        expect(hosted_c_target_matches_host("aarch64-unknown-linux-gnu", "linux", "aarch64")).to_be(true)
+        expect(hosted_c_target_matches_host("riscv64-unknown-linux-gnu", "linux", "riscv64")).to_be(true)
+        expect(hosted_c_target_matches_host("riscv64gc-unknown-linux-gnu", "linux", "riscv64")).to_be(true)
+
+    it "allows matching macOS Windows and FreeBSD targets":
+        expect(hosted_c_target_matches_host("aarch64-apple-darwin", "macos", "aarch64")).to_be(true)
+        expect(hosted_c_target_matches_host("arm64-apple-darwin", "macos", "aarch64")).to_be(true)
+        expect(hosted_c_target_matches_host("x86_64-pc-windows-msvc", "windows", "x86_64")).to_be(true)
+        expect(hosted_c_target_matches_host("x86_64-unknown-freebsd", "freebsd", "x86_64")).to_be(true)
+
+    it "rejects architecture mismatches":
+        expect(hosted_c_target_matches_host("aarch64-unknown-linux-gnu", "linux", "x86_64")).to_be(false)
+        expect(hosted_c_target_matches_host("riscv64-unknown-linux-gnu", "linux", "aarch64")).to_be(false)
+        expect(hosted_c_target_matches_host("x86_64-pc-windows-msvc", "windows", "aarch64")).to_be(false)
+
+    it "rejects operating-system mismatches":
+        expect(hosted_c_target_matches_host("x86_64-apple-darwin", "linux", "x86_64")).to_be(false)
+        expect(hosted_c_target_matches_host("aarch64-unknown-linux-gnu", "macos", "aarch64")).to_be(false)
+        expect(hosted_c_target_matches_host("x86_64-unknown-freebsd", "windows", "x86_64")).to_be(false)
+
+    it "rejects ABI mismatches and unsupported hosted widths":
+        expect(hosted_c_target_matches_host("x86_64-unknown-linux-musl", "linux", "x86_64")).to_be(false)
+        expect(hosted_c_target_matches_host("x86_64-pc-windows-gnu", "windows", "x86_64")).to_be(false)
+        expect(hosted_c_target_matches_host("riscv64-unknown-freebsd", "freebsd", "riscv64")).to_be(false)
+        expect(hosted_c_target_matches_host("armv7-unknown-linux-gnueabihf", "linux", "armv7")).to_be(false)
+
+    it "guards before host C runtime and entry compilation":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val simpleos_guard = source.index_of("if is_simpleos_riscv32_link") ?? -1
+        val hosted_guard = source.index_of("if not hosted_c_target_matches_host") ?? -1
+        val runtime_compile = source.index_of("val rt_result = compile_runtime_objects") ?? -1
+        val entry_compile = source.index_of("val c_result = compile_entry_point_c") ?? -1
+        expect(simpleos_guard).to_be_greater_than(-1)
+        expect(hosted_guard).to_be_greater_than(simpleos_guard)
+        expect(runtime_compile).to_be_greater_than(hosted_guard)
+        expect(entry_compile).to_be_greater_than(runtime_compile)

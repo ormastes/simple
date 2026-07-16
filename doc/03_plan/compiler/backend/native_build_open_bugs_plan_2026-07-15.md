@@ -64,6 +64,12 @@ candidate native-build probe is killed before producing its proof artifact.
 This remains an execution blocker; no host-GPU or QEMU PASS is claimed until
 that admission failure is fixed and the self-test completes.
 
+Hosted native linking now fails closed before compiling the C runtime or entry
+shim when an explicit target architecture or OS differs from the compiler
+host. Host/unset and exact hosted targets remain supported; SimpleOS keeps its
+specialized link lanes. Real hosted cross-linking remains open until one
+resolved target compiler/sysroot is threaded through both C compilation steps.
+
 ---
 
 ## Wave 1 — Codegen silent-wrong (highest priority: wrong answers, no diagnostic)
