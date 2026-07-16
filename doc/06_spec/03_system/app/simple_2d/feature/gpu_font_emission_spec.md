@@ -22,6 +22,15 @@ artifact-hash fields, real compilation diagnostics, and execution are not.
 
 ## Operator flow
 
+### Invoke the stable pure-Simple GPU source emitter without a generated test file
+
+Run `bin/simple run src/app/portable_compute_emit/main.spl cuda` to print the
+optimization and versioned font-companion CUDA source plus their SHA-256
+identity markers. Replace `cuda` with `hip`, `opencl`, `metal`, or `webgpu`;
+use `vulkan` for the dedicated GLSL font source. Unknown targets and malformed
+argument counts exit nonzero. The native checker calls this tracked app
+directly and never creates or executes a temporary SSpec emitter.
+
 ### Emit the selected font composite program and plan compilation
 
 1. Run the executable SSpec with the self-hosted pure-Simple runtime once it is

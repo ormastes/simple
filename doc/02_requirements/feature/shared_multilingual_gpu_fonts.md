@@ -58,8 +58,13 @@ Status: selected on 2026-07-11 (`L2+C1+S1+F1+R1+P1+G1`)
   report hits, misses, evictions, bytes, generations, and dirty regions.
 - **REQ-010 GPU emission:** Reuse the portable emitter for deterministic
   CUDA/HIP/OpenCL/Metal/WGSL source and the separate Vulkan SPIR-V contract.
-  Versioned entry symbols, source/version hashes, compile plans, and fail-closed
-  diagnostics are required. Emission/compilation is not execution evidence.
+  One tracked pure-Simple command invokes those existing emitters; it must not
+  generate a test file or create a second emitter. Versioned entry symbols,
+  source/version hashes, compile plans, and fail-closed diagnostics are
+  required. Production CUDA admission additionally requires source-tracked or
+  packaged PTX bound to an independently trusted immutable SHA-256 and program
+  version; caller-adjacent hashes and ignored build evidence are insufficient.
+  Emission/compilation is not execution evidence.
 - **REQ-011 Engine2D:** Preserve `Engine2D.load_font`/`draw_text` behavior through
   the shared owner and atlas material; retain compatibility adapters until
   parity and reference-removal gates pass. Web semantic/layout (the current

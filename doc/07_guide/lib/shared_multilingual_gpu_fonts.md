@@ -323,6 +323,11 @@ print artifact.source
 
 Choose another portable target to emit its source; inspect the matching compile
 plan before invoking a toolchain. Printing source proves emission only.
+For a stable command surface, run
+`bin/simple run src/app/portable_compute_emit/main.spl cuda`; the accepted
+targets are `cuda`, `hip`, `opencl`, `metal`, `webgpu`, and `vulkan`. The app
+calls these same compiler emitters and prints delimited source plus source and
+version SHA-256 markers. It does not compile, install, or execute an artifact.
 The Vulkan shader's 15-input ABI is two storage-buffer bindings plus the exact
 contiguous 13-field parameter block, and its entry is `main`.
 `vulkan_font_atlas_compile_plan` records canonical source and external
@@ -335,8 +340,9 @@ Portable backend planning emits a separate optimization artifact and font
 companion artifact for each selected target. The font path uses the
 `_font_atlas` suffix and requires the versioned composite entry; it is not
 concatenated with the optimization module (especially for WGSL, whose bindings
-conflict). `check-portable-compute-toolchains.shs` splits the two marked Simple
-emitter outputs and compiles distinct native companions; a target is verified
+conflict). `check-portable-compute-toolchains.shs` invokes the tracked
+`portable_compute_emit` app, splits its two marked outputs, and compiles
+distinct native companions; a target is verified
 only when both artifacts export their required symbols. Its retained
 `evidence.env` records the configured Simple invocation path/SHA-256 separately
 from its resolved native ELF or Mach-O runtime path/SHA-256, canonical emitter source/version

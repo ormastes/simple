@@ -209,6 +209,10 @@ format for CUDA, HIP, OpenCL, Metal, and WGSL. Each portable backend plan now
 contains a separate optimization/font artifact pair with distinct paths; WGSL
 is never concatenated because the modules own conflicting bindings. Exported-symbol and source/version-hash evidence
 remain promotion gates rather than fields fabricated on the artifact.
+`src/app/portable_compute_emit/main.spl` is the single stable command handoff:
+it calls these existing emitters, prints delimited source and identity markers,
+and rejects unknown targets. It owns no renderer, cache, compiler toolchain, or
+artifact installation path.
 The native toolchain checker preserves that pair as distinct PTX/HSACO/SPIR-V/
 metallib files and rejects aggregate target readiness when either symbol set is
 missing. It also compiles the canonical Vulkan GLSL into a separately validated
