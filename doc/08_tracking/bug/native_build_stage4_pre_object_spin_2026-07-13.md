@@ -492,6 +492,12 @@ validation boundary alone therefore makes no production-link or cache-
 correctness claim and does not permit stubs, `native_all`, or broad core-C as a
 fallback.
 
+The strict Stage4 path now fails closed after deriving its final requested
+symbols instead of discarding that closure and falling through to the ordinary
+runtime-object link. Temporary runtime, entry, and bootstrap-support objects
+are cleaned before the error. Production linking remains disabled until the
+complete inventory, unique-owner selection, and fingerprint are wired.
+
 ## 2026-07-16 canonical core-C HTTP ownership
 
 The legacy `runtime.c` definition of `rt_http_get` returned a raw C string even
