@@ -18,9 +18,9 @@ Current Windows refresh for
   `simpleos_qemu_rv64_canonical_kernel_status=pass`.
 - Disk image preflight: pass. `simpleos_qemu_rv64_image_status=pass` and
   `simpleos_qemu_rv64_canonical_image_status=pass`.
-- Live boot/capture: pass. `-RunLiveBoot` now selects the existing desktop
-  service kernel when available and reports
-  `simpleos_qemu_rv64_live_kernel_selection=existing-desktop-service`.
+- Live boot/capture: pass. `-RunLiveBoot -BuildDesktopServiceKernel` now builds
+  and selects the desktop-service kernel and reports
+  `simpleos_qemu_rv64_live_kernel_selection=built-desktop-service`.
   The Windows run launches QEMU, captures serial output, SSH, HTTP, QMP
   screendump, GPU readback, and the WM marker:
   `simpleos_qemu_serial_console_status=pass`,
@@ -31,20 +31,19 @@ Current Windows refresh for
   `simpleos_qemu_gpu_readback_status=pass`,
   `simpleos_qemu_wm_marker_status=pass`, and
   `simpleos_qemu_rv64_blocker=pass`.
-- Desktop-service rebuild bootstrap: advanced past the Windows compiler-loader
-  blocker. MSYS2 was repaired with matching mingw64 GCC/LLVM packages plus the
-  `riscv64-unknown-elf` GCC/newlib/binutils packages, and the repo now provides
-  GCC/G++ wrapper scripts that strip clang-style `--target=riscv64-unknown-elf`
-  before delegating to the RISC-V cross tools. Current probe rows show
+- Desktop-service rebuild bootstrap: pass. MSYS2 was repaired with matching
+  mingw64 GCC/LLVM packages plus the `riscv64-unknown-elf`
+  GCC/newlib/binutils packages, and the repo now provides GCC/G++ wrapper
+  scripts that strip clang-style `--target=riscv64-unknown-elf` before
+  delegating to the RISC-V cross tools. Current probe rows show
   `simpleos_qemu_rv64_desktop_service_build_cc_launch_status=pass`,
   `simpleos_qemu_rv64_desktop_service_build_cxx_launch_status=pass`, and empty
-  missing-DLL rows. Native-build now reaches the freestanding link and stops at
-  `simpleos_qemu_rv64_desktop_service_build_status=blocked:desktop-service-build-exit-1`.
-  The retained object-directory diagnostic shows the previous runtime helper
-  gaps are resolved; the remaining raw linker diagnostic is duplicate boot
-  runtime selection across `baremetal_stubs`, `full_networking_runtime`, and
-  `ghdl_boot_info_runtime`. That is now a build graph / boot-source selection
-  blocker, not a missing Windows DLL blocker.
+  missing-DLL rows. Native-build now reaches
+  `simpleos_qemu_rv64_desktop_service_build_status=pass`. The desktop-service
+  build path narrows RV64 boot-source selection to the full networking runtime
+  and crypto helpers, restores the freestanding `_start`, initializes
+  `_stack_top`, and includes the probe/runtime helper exports needed when
+  `baremetal_stubs` is not linked.
 
 ## Evidence Command
 
@@ -52,12 +51,10 @@ Current Windows refresh for
 Push-Location $env:TEMP
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\ormas\dev\simple\scripts\check\check-simpleos-qemu-rv64-desktop-evidence.ps1 -EvidencePath build\simpleos_multiconfig_live_evidence\qemu-rv64-desktop-out-of-tree.env
 Pop-Location
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-simpleos-qemu-rv64-desktop-evidence.ps1 -EvidencePath build\simpleos_multiconfig_live_evidence\qemu-rv64-desktop-live-current.env -RunLiveBoot -BootTimeoutSeconds 60
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-simpleos-qemu-rv64-desktop-evidence.ps1 -EvidencePath build\simpleos_multiconfig_live_evidence\qemu-rv64-desktop-build-toolchain-current.env -BuildDesktopServiceKernel -BuildCc scripts\tool\riscv64-unknown-elf-gcc-wrapper.cmd -BuildCxx scripts\tool\riscv64-unknown-elf-gxx-wrapper.cmd
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-simpleos-qemu-rv64-desktop-evidence.ps1 -EvidencePath build\simpleos_multiconfig_live_evidence\qemu-rv64-desktop-built-live-current.env -RunLiveBoot -BootTimeoutSeconds 60 -BuildDesktopServiceKernel -BuildCc scripts\tool\riscv64-unknown-elf-gcc-wrapper.cmd -BuildCxx scripts\tool\riscv64-unknown-elf-gxx-wrapper.cmd
 ```
 
-The live command proves the Windows QEMU launch, network probes, QMP screendump,
+The live command proves the repaired RISC-V compiler launch path, native
+desktop-service rebuild, Windows QEMU launch, network probes, QMP screendump,
 GPU readback, and WM marker path. RenderDoc `.rdc` and structured QEMU/host
-RenderDoc log evidence remain separate gates. The build-toolchain command now
-proves the repaired RISC-V compiler launch path and the current RV64
-desktop-service link blocker.
+RenderDoc log evidence remain separate gates.

@@ -61,6 +61,7 @@ __asm__(
     ".section .text.entry,\"ax\",@progbits\n"
     ".globl _start\n"
     "_start:\n"
+    "la sp, _stack_top\n"
     "j __simple_entry_start\n"
 );
 #endif

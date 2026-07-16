@@ -246,8 +246,9 @@
   `qemu-system-riscv64.exe`, reports `simpleos_qemu_rv64_kernel_status=pass`
   and `simpleos_qemu_rv64_image_status=pass`, and records repo-root absolute
   kernel, disk image, artifact, log, and build helper paths. Current live
-  `-RunLiveBoot` evidence now selects the existing desktop-service kernel and
-  reaches `simpleos_qemu_rv64_live_kernel_selection=existing-desktop-service`,
+  `-RunLiveBoot -BuildDesktopServiceKernel` evidence now builds and selects the
+  desktop-service kernel and reaches
+  `simpleos_qemu_rv64_live_kernel_selection=built-desktop-service`,
   `simpleos_qemu_serial_console_status=pass`,
   `simpleos_qemu_rv64_ssh_probe_status=pass`,
   `simpleos_qemu_rv64_http_probe_status=pass`,
@@ -258,12 +259,11 @@
   launchable Windows RISC-V GCC/G++ wrappers after the MSYS2 toolchain repair:
   `simpleos_qemu_rv64_desktop_service_build_cc_launch_status=pass`,
   `simpleos_qemu_rv64_desktop_service_build_cxx_launch_status=pass`, and empty
-  missing-DLL rows. Native-build now reaches the freestanding link and stops at
-  `simpleos_qemu_rv64_desktop_service_build_status=blocked:desktop-service-build-exit-1`;
-  the retained raw linker diagnostic identifies duplicate boot runtime objects
-  across `baremetal_stubs`, `full_networking_runtime`, and
-  `ghdl_boot_info_runtime`, so the active blocker is RV64 boot-source selection,
-  not the old `libLLVM-19.dll` loader failure.
+  missing-DLL rows. Native-build now reaches
+  `simpleos_qemu_rv64_desktop_service_build_status=pass`; the Windows wrapper
+  narrows the desktop-service boot source set, the RV64 freestanding `_start`
+  initializes `_stack_top`, and the built kernel completes serial, SSH, HTTP,
+  QMP screendump, GPU readback, and WM marker probes.
 - Windows SimpleOS FPGA RV64 serial evidence is recorded in
   `doc/09_report/windows_simpleos_fpga_rv64_serial_current_2026-07-16.md`.
   The direct PowerShell wrapper now anchors itself to the checkout root and was

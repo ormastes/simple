@@ -1533,6 +1533,12 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
                     .and_then(|name| name.to_str())
                     .map(|name| name.starts_with("ghdl_boot_info"))
                     .unwrap_or(false);
+            let rv64_desktop_service_boot = cross_target.arch == simple_common::target::TargetArch::Riscv64
+                && entry
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name == "desktop_service_entry.spl")
+                    .unwrap_or(false);
             let boot_dir = entry.parent().unwrap_or(std::path::Path::new(".")).join("boot");
             let debug_boot_sources = self.config.verbose || std::env::var("SIMPLE_LINKER_DEBUG").is_ok();
             if skip_boot_autodiscovery && debug_boot_sources {
@@ -1637,6 +1643,17 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
                             }
                             let minimal_boot = std::env::var("SIMPLE_BOOT_MINIMAL").is_ok();
                             let ssh_live_boot = std::env::var("SIMPLE_SSH_LIVE_BUILD_MARKER").is_ok();
+                            if rv64_desktop_service_boot
+                                && stem != "full_networking_runtime"
+                                && stem != "curve25519_ring_helper"
+                                && stem != "ed25519_scalar_helper"
+                                && stem != "ed25519_sha512_helper"
+                                && stem != "tls13_aes256_gcm_helper"
+                                && stem != "tls13_sha256_helper"
+                                && stem != "ed25519_verify_helper"
+                            {
+                                continue;
+                            }
                             if ssh_live_boot && stem == "baremetal_stubs" {
                                 continue;
                             }

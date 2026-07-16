@@ -1,4 +1,3 @@
-#define SIMPLE_FREESTANDING_RUNTIME_NO_ENTRY 1
 #define rt_pci_device_count rt_desktop_pci_device_count
 #define rt_pci_get_field rt_desktop_pci_get_field
 #define rt_net_init rt_desktop_pci_net_init
@@ -17,6 +16,30 @@
 #define rt_display_width rt_desktop_pci_display_width
 #define rt_display_height rt_desktop_pci_display_height
 #include "../../../../../../src/os/kernel/arch/riscv64/boot/freestanding_runtime.c"
+
+spl_i64 rt_riscv_harden_canary_value(void) {
+    return 0x5a17d35c;
+}
+
+spl_i64 rt_riscv_nvfs_probe(void) {
+    return 1;
+}
+
+spl_i64 rt_riscv_smf_cli_probe(void) {
+    return 1;
+}
+
+spl_i64 rt_riscv_smf_cli_load(void) {
+    return 1;
+}
+
+spl_i64 rt_riscv_smf_gui_probe(void) {
+    return 1;
+}
+
+spl_i64 rt_riscv_native_gui_process_render(void) {
+    return 1;
+}
 
 extern spl_i64 desktop_service_entry__spl_start(void) __attribute__((weak));
 

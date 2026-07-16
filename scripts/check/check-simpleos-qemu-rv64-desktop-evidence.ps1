@@ -554,11 +554,15 @@ if ($BuildDesktopServiceKernel) {
         $oldSimpleLib = $env:SIMPLE_LIB
         $oldCc = $env:CC
         $oldCxx = $env:CXX
+        $oldBootMinimal = $env:SIMPLE_BOOT_MINIMAL
+        $oldSshLiveBuildMarker = $env:SIMPLE_SSH_LIVE_BUILD_MARKER
         try {
             $env:SIMPLE_OS_BUILD_BACKEND = $(if ([string]::IsNullOrWhiteSpace($BuildBackend)) { "cranelift" } else { $BuildBackend })
             $env:SIMPLE_LIB = "src"
             $env:CC = $BuildCc
             $env:CXX = $desktopServiceBuildCxx
+            $env:SIMPLE_BOOT_MINIMAL = "1"
+            $env:SIMPLE_SSH_LIVE_BUILD_MARKER = "1"
             $desktopStdoutPath = "$DesktopServiceBuildLogPath.stdout"
             $desktopStderrPath = "$DesktopServiceBuildLogPath.stderr"
             Remove-Item -LiteralPath $desktopStdoutPath, $desktopStderrPath -Force -ErrorAction SilentlyContinue
@@ -596,6 +600,8 @@ if ($BuildDesktopServiceKernel) {
             if ($null -eq $oldSimpleLib) { Remove-Item Env:SIMPLE_LIB -ErrorAction SilentlyContinue } else { $env:SIMPLE_LIB = $oldSimpleLib }
             if ($null -eq $oldCc) { Remove-Item Env:CC -ErrorAction SilentlyContinue } else { $env:CC = $oldCc }
             if ($null -eq $oldCxx) { Remove-Item Env:CXX -ErrorAction SilentlyContinue } else { $env:CXX = $oldCxx }
+            if ($null -eq $oldBootMinimal) { Remove-Item Env:SIMPLE_BOOT_MINIMAL -ErrorAction SilentlyContinue } else { $env:SIMPLE_BOOT_MINIMAL = $oldBootMinimal }
+            if ($null -eq $oldSshLiveBuildMarker) { Remove-Item Env:SIMPLE_SSH_LIVE_BUILD_MARKER -ErrorAction SilentlyContinue } else { $env:SIMPLE_SSH_LIVE_BUILD_MARKER = $oldSshLiveBuildMarker }
         }
         }
     }
