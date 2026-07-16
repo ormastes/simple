@@ -288,6 +288,9 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_mcp_core.c",
         "runtime_font.c",
         "runtime_pool.c",
+        "runtime_memtrack.c",
+        "runtime_fork.c",
+        "runtime_process.c",
         "runtime_simd_utf8.c",
         // engine2d SIMD row kernels (C/NEON) backing rt_engine2d_simd_*_row_u32;
         // replaces the Rust-seed engine2d_simd_ops backing for native builds.
@@ -310,7 +313,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         runtime_inputs.push("runtime_https_openssl_core.c");
     }
     if include_stage4_hosted {
-        runtime_inputs.extend(["runtime_font.c", "runtime_memtrack.c", "runtime_sqlite.c"]);
+        runtime_inputs.push("runtime_sqlite.c");
     }
 
     let fingerprint = runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?;

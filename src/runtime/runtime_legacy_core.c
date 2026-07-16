@@ -21,8 +21,43 @@
 #include <process.h>
 #include <windows.h>
 #else
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
+
+int64_t rt_getpid(void) {
+#if defined(_WIN32)
+    return (int64_t)_getpid();
+#else
+    return (int64_t)getpid();
+#endif
+}
+
+int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
+    if (pid <= 0) return -1;
+#if defined(_WIN32)
+    HANDLE process = (HANDLE)(intptr_t)pid;
+    DWORD result = WaitForSingleObject(process, timeout_ms <= 0 ? INFINITE : (DWORD)timeout_ms);
+    if (result == WAIT_TIMEOUT) return -2;
+    DWORD exit_code = 0;
+    if (result != WAIT_OBJECT_0 || !GetExitCodeProcess(process, &exit_code)) return -1;
+    CloseHandle(process);
+    return (int64_t)exit_code;
+#else
+    int status = 0;
+    if (timeout_ms <= 0) {
+        return waitpid((pid_t)pid, &status, 0) < 0 ? -1
+            : WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    }
+    for (int64_t elapsed = 0; elapsed < timeout_ms; elapsed += 10) {
+        pid_t result = waitpid((pid_t)pid, &status, WNOHANG);
+        if (result < 0) return -1;
+        if (result > 0) return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        usleep(10000);
+    }
+    return -2;
+#endif
+}
 
 int64_t rt_thread_available_parallelism(void) {
 #if defined(_WIN32)

@@ -25,10 +25,28 @@ type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 static INTERPRETER_CALL_TRACE: LazyLock<Option<String>> =
     LazyLock::new(|| std::env::var("SIMPLE_INTERPRETER_CALL_TRACE").ok());
 
-fn trace_interpreter_call_enter(name: &str) -> Option<Instant> {
+fn trace_interpreter_call_enter(func: &FunctionDef) -> Option<Instant> {
     let filter = INTERPRETER_CALL_TRACE.as_deref()?;
-    if filter == "1" || filter == "all" || name.contains(filter) {
-        eprintln!("[interp-call] enter {name}");
+    if filter == "1" || filter == "all" || func.name.contains(filter) {
+        if func.name == "empty" {
+            let key = func as *const FunctionDef as usize;
+            let owner = FUNCTION_MODULE_OWNER.with(|cell| cell.borrow().get(&key).cloned());
+            let params = func
+                .params
+                .iter()
+                .map(|param| param.name.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            eprintln!(
+                "[interp-call] enter {} owner={} params=[{}] static={}",
+                func.name,
+                owner.as_deref().unwrap_or("<unknown>"),
+                params,
+                func.is_static
+            );
+        } else {
+            eprintln!("[interp-call] enter {}", func.name);
+        }
         Some(Instant::now())
     } else {
         None
@@ -672,7 +690,7 @@ fn exec_function_inner(
     impl_methods: &ImplMethods,
     self_ctx: Option<(&str, &Arc<HashMap<String, Value>>)>,
 ) -> Result<Value, CompileError> {
-    let trace_start = trace_interpreter_call_enter(&func.name);
+    let trace_start = trace_interpreter_call_enter(func);
 
     // Layout recording for 4KB page locality optimization
     crate::layout_recorder::record_function_call(&func.name);
@@ -775,7 +793,7 @@ fn exec_function_with_values_inner(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    let trace_start = trace_interpreter_call_enter(&func.name);
+    let trace_start = trace_interpreter_call_enter(func);
 
     // Layout recording for 4KB page locality optimization
     crate::layout_recorder::record_function_call(&func.name);

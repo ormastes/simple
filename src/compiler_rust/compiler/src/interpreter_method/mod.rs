@@ -109,6 +109,10 @@ pub(crate) use special::{
     lookup_class_method_index, lookup_impl_method_index,
 };
 
+fn use_bare_module_fallback(receiver_in_env: bool, receiver_is_class: bool) -> bool {
+    !receiver_in_env && !receiver_is_class
+}
+
 /// Main entry point for method call evaluation
 #[allow(clippy::borrowed_box, clippy::too_many_arguments)] // reason: Box<dyn Trait> dispatch with ABI-locked entry; refactoring deferred
 pub(crate) fn evaluate_method_call(
@@ -123,7 +127,21 @@ pub(crate) fn evaluate_method_call(
 ) -> Result<Value, CompileError> {
     // Support module-style dot calls (lib.func()) by resolving directly to imported functions/classes.
     if let Expr::Identifier(module_name) = receiver.as_ref() {
-        if env.get(module_name).is_none() {
+        if method == "empty" {
+            if let Ok(filter) = std::env::var("SIMPLE_INTERPRETER_CALL_TRACE") {
+                if filter == "1" || filter == "all" || method.contains(&filter) {
+                    eprintln!(
+                        "[interp-call-route] route=method receiver={} name={} argc={} env={} class={}",
+                        module_name,
+                        method,
+                        args.len(),
+                        env.get(module_name).is_some(),
+                        classes.contains_key(module_name)
+                    );
+                }
+            }
+        }
+        if use_bare_module_fallback(env.get(module_name).is_some(), classes.contains_key(module_name)) {
             if let Some(func) = functions.get(method).cloned() {
                 return exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             }
@@ -1414,6 +1432,52 @@ pub(crate) fn evaluate_method_call(
             ),
             ctx,
         ))
+    }
+}
+
+#[cfg(test)]
+mod module_fallback_tests {
+    use super::*;
+    use simple_parser::ast::Node;
+    use simple_parser::Parser;
+
+    #[test]
+    fn class_missing_from_env_does_not_call_colliding_bare_function() {
+        let module = Parser::new(
+            r#"class CollisionSpan:
+    static fn empty() -> i32: 17
+
+fn empty(shape: i64) -> i32: shape as i32"#,
+        )
+        .parse()
+        .expect("parse collision fixture");
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        for node in module.items {
+            match node {
+                Node::Class(def) => {
+                    classes.insert(def.name.clone(), Arc::new(def));
+                }
+                Node::Function(def) => {
+                    functions.insert(def.name.clone(), Arc::new(def));
+                }
+                _ => {}
+            }
+        }
+        let mut env = Env::new();
+        let receiver = Box::new(Expr::Identifier("CollisionSpan".to_string()));
+        let result = evaluate_method_call(
+            &receiver,
+            "empty",
+            &[],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &Enums::new(),
+            &ImplMethods::new(),
+        )
+        .expect("resolve class static method");
+        assert_eq!(result, Value::Int(17));
     }
 }
 

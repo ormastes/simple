@@ -1644,6 +1644,18 @@ int64_t rt_string_find(int64_t value, int64_t needle) {
     return -1;
 }
 
+int64_t rt_string_rfind(int64_t value, int64_t needle) {
+    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* n = rt_core_as_string(needle);
+    if (!s || !n) return -1;
+    if (n->len == 0) return (int64_t)s->len;
+    if (n->len > s->len) return -1;
+    for (uint64_t i = s->len - n->len + 1; i-- > 0;) {
+        if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) return (int64_t)i;
+    }
+    return -1;
+}
+
 /* Task #178 (text3 lane): `.contains()` had a frontend extern declaration
  * (types.spl) and a backend LLVM decl (llvm_lib_translate.spl) but NO C
  * implementation anywhere in src/runtime/ -- a genuine missing symbol, not

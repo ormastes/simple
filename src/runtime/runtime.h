@@ -393,6 +393,7 @@ int64_t  rt_slice(int64_t value, int64_t start, int64_t end, int64_t step);
 int64_t  rt_string_starts_with(int64_t value, int64_t prefix);
 int64_t  rt_string_ends_with(int64_t value, int64_t suffix);
 int64_t  rt_string_find(int64_t value, int64_t needle);
+int64_t  rt_string_rfind(int64_t value, int64_t needle);
 int64_t  rt_string_to_lower(int64_t value);
 int64_t  rt_string_to_upper(int64_t value);
 int64_t  rt_string_split(int64_t value, int64_t delimiter);

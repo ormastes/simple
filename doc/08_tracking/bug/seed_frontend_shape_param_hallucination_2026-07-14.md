@@ -1,7 +1,9 @@
 # Seed interpreter regression: qualified `Span.empty()` dispatches to `empty(shape)`
 
-**Status:** unresolved blocker. The first candidate fix is disproven by three
-bounded rebuild traces; no focused runner executable exists.
+**Status:** root cause fixed and bootstrap seed rebuilt on 2026-07-16. The
+focused runner reached final link, and the four missing `core-c-bootstrap`
+owners now have a source fix plus archive-symbol evidence. A rebuilt runner is
+still required.
 
 ## Symptom
 
@@ -14,22 +16,28 @@ error: semantic: function expects argument for parameter 'shape', but none was p
 The focused font runner reached this after parsing its six-module closure and
 entering HIR declaration for `sffi/cli.spl`.
 
-## Confirmed diagnosis
+## Confirmed root cause
 
-The diagnostic is real argument binding against the wrong function. The first
-executable HIR-declaration call is `Span.empty()`. Multiple bare-name `Span`
-types exist, and the unrelated tensor factory
-`src/lib/nogc_sync_mut/src/tensor/factory.spl::empty(shape)` is also present in
-the closure. With `SIMPLE_INTERPRETER_CALL_TRACE=empty`, every attempted focused
-runner rebuild ends with an unmatched `[interp-call] enter empty` immediately
-before the missing-`shape` diagnostic. The exact qualified-dispatch branch and
-lost owner identity still need a targeted trace; the existing call trace emits
-only the selected bare function name.
+The parser lowers ordinary `Span.empty()` dot syntax to `Expr::MethodCall`, not
+to the previously investigated `Call(Path)` or `Call(FieldAccess)` routes. The
+method dispatcher treated any identifier absent from the local environment as
+a module and immediately called a same-named bare function. An imported
+`Span` can be present in the class registry but absent from that environment,
+so the fallback selected the unrelated tensor `empty(shape)` with zero args.
+
+The shared guard now permits the bare module fallback only when the receiver is
+absent from both the environment and class registry. The focused regression
+constructs exactly that state: `CollisionSpan` remains in `classes`, is absent
+from `env`, and competes with a bare `empty(shape)`. An env-gated trace records
+the MethodCall receiver/argc and selected function owner/parameter names only
+for `empty`.
 
 ## Impact (critical for the redeploy)
 
-The defect blocks strict native-builds before MIR/object emission, including the
-focused font evidence runner needed to calibrate pure-Simple SSpec execution.
+The frontend defect no longer blocks HIR/native-build discovery. The focused
+font evidence runner is still unavailable until the corrected core-C archive
+is rebuilt into a new candidate, so pure-Simple SSpec calibration remains
+pending.
 
 ## Disproven fixes
 
@@ -65,12 +73,30 @@ disassembly consumes only the first two registers and passes `key_len` as the
 and relink after the seed dispatch blocker is fixed rather than adding a CLI or
 font workaround.
 
-## Verification handle
+## Verification and next blocker
 
-`cargo check -p simple-compiler` passes. Rust test binaries remain blocked before
-execution by unrelated undefined `spl_arg_count`/`spl_get_arg` symbols. Before
-another seed rebuild, extend the narrow interpreter trace to record the callee
-AST route, qualified receiver, selected function owner, and signature only when
-the selected name is `empty`. Then make one owner-preserving fix and require the
-focused runner build to pass HIR/MIR/link. A PASS still requires the resulting
-runner SHA-256 plus deliberate-fail and zero-example calibration logs.
+- `cargo check -p simple-compiler --tests` passes.
+- `cargo build --profile bootstrap -p simple-driver` passes; rebuilt seed
+  SHA-256: `a7fa5348b1be7fb8652a0742f44c0b575870e634ec500c25b6efe1269d716b4b`.
+- `build/font-runner-methodcall-fixed/cycle1-native-build.log` proves the
+  missing-`shape` diagnostic is gone and discovery advances to the wrapper.
+- Parenthesizing the wrapper's documented multi-line boolean grammar advances
+  native-build through parse and object generation.
+- The final retained attempt,
+  `build/font-runner-methodcall-fixed/native-build.log`, reaches link and fails
+  only on `rt_getpid`, `rt_process_wait`, `rt_process_run_timeout`, and
+  `rt_string_rfind` missing from `core-c-bootstrap`.
+- The core-C source list now reuses `runtime_process.c`, `runtime_fork.c`, and
+  `runtime_memtrack.c`; core compatibility owns `rt_getpid`/`rt_process_wait`,
+  and the tagged-string owner implements `rt_string_rfind` beside
+  `rt_string_find`.
+- A direct build of the canonical Linux source list proves the archive exports
+  all four symbols. Its C contract compile then exposed and fixed an unrelated
+  missing delay argument in an existing HTTP fixture.
+- Rust test harness startup remains independently blocked before test execution
+  by its existing undefined `spl_arg_count`/`spl_get_arg` link baseline.
+
+Do not fall back to the removed Rust-hosted bundle. The next bounded session
+must rebuild the bootstrap seed, build the focused runner once, and execute the
+calibration. A PASS still requires runner SHA-256 plus distinct deliberate-fail
+and zero-example exit-1 logs.
