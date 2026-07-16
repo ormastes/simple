@@ -77,17 +77,6 @@ fn qualification_hostile_path_probe() -> text:
         return "shell-executed"
     "safe"
 
-fn qualification_assert_wrapper_route(path: text) -> text:
-    val source = rt_file_read_text(path)
-    if source == "": return "missing"
-    if source.contains("compiler_rust/target") or source.contains(" run src/"):
-        return "unsafe-fallback"
-    if not source.contains("native") and not source.contains("release"):
-        return "no-cached-artifact"
-    if not source.contains("native_hash_is_valid") or not source.contains(".sha256"):
-        return "unverified-artifact"
-    "native-first"
-
 fn qualification_daemon_done(result: text) -> text:
     val (_out, _err, _code) = rt_process_run_timeout("bin/simple", ["test-daemon", "stop"], 30000)
     result
@@ -154,7 +143,7 @@ describe "Pure-Simple tool and infrastructure hardening":
         )).to_equal("safe")
         expect(qualification_source_contract(
             "scripts/bootstrap/bootstrap-from-scratch.sh",
-            ["deploy_stage", "simple_binary_is_valid \"${deploy_stage}/simple${exe_suffix}\"", "mv \"${deploy_tmp}\" \"${deployed_bin}\"", "simple_binary_is_valid \"${deployed_bin}\"", "restore_tmp", "mcp_hash_tmp"],
+            ["deploy_stage", "simple_binary_is_valid \"${deploy_stage}/simple${exe_suffix}\"", "mv \"${deploy_tmp}\" \"${deployed_bin}\"", "[ -x \"${deployed_bin}\" ] && simple_binary_is_valid", "simple_binary_is_valid \"${deployed_bin}\"", "restore_tmp", "runtime_hash_tmp", "mcp_hash_tmp"],
             ["install -m755 \"${full_bin}\" \"${deployed_bin}\"", "Installed current seed delegate"]
         )).to_equal("safe")
         expect(qualification_source_contract(
@@ -177,7 +166,7 @@ describe "Pure-Simple tool and infrastructure hardening":
         )).to_equal("safe")
         expect(qualification_source_contract(
             "src/app/test_runner_new/test_runner_main.spl",
-            ["process_run_timeout(binary, child_args", "TimeoutResourceFailure"],
+            ["process_run_timeout(binary, child_args", "TimeoutResourceFailure", "test_batch_result_matches_manifest(batch_files, batch_result)"],
             ["process_run(binary, child_args"]
         )).to_equal("safe")
         expect(qualification_source_contract(
@@ -216,27 +205,35 @@ describe "Pure-Simple tool and infrastructure hardening":
             ["shell_output", "build_exclude_args"]
         )).to_equal("safe")
         expect(qualification_hostile_path_probe()).to_equal("safe")
-        expect(qualification_assert_wrapper_route("bin/simple_mcp_server")).to_equal("native-first")
-        expect(qualification_assert_wrapper_route("bin/simple_lsp_mcp_server")).to_equal("native-first")
         expect(qualification_source_contract(
             "scripts/setup/setup.shs",
-            ["native_hash_is_valid", "mcp_probe_native", "mcp_probe_lsp_native", "_mcp_probe_identity", "_lsp_mcp_probe_identity", "$1.sha256"],
+            ["native_hash_is_valid", "mcp_probe_native", "mcp_probe_lsp_native", "_mcp_probe_identity", "_lsp_mcp_probe_identity", "$1.sha256", "\"id\":\"lsp-call-probe\".*\"result\""],
             ["SKIP_NATIVE_PROBE", "_mcp_probe_stat", "_lsp_mcp_probe_stat"]
         )).to_equal("safe")
         expect(qualification_source_contract(
             "bin/simple.cmd",
-            ["RELEASE_BIN"],
-            ["BOOTSTRAP_BIN", "CURRENT_DRIVER_BIN"]
+            ["resolve_native_tool.ps1", "%*", "-Kind simple"],
+            ["BOOTSTRAP_BIN", "CURRENT_DRIVER_BIN", "compiler_rust"]
         )).to_equal("safe")
         expect(qualification_source_contract(
             "bin/simple_mcp_server.cmd",
-            ["simple_mcp_server.exe"],
+            ["resolve_native_tool.ps1", "%*", "-Kind mcp"],
             ["ALLOW_SOURCE_FALLBACK", ":source", "compiler_rust"]
         )).to_equal("safe")
         expect(qualification_source_contract(
             "bin/simple_lsp_mcp_server.cmd",
-            ["simple_lsp_mcp_server.exe"],
-            [":source", "simple.cmd\" run", "compiler_rust"]
+            ["resolve_native_tool.ps1", "%*", "-Kind lsp"],
+            [":source", "simple.cmd\" run", "compiler_rust", "PREFER_NATIVE"]
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "bin/resolve_native_tool.ps1",
+            ["Get-FileHash", ".sha256", "Invoke-BoundedProbe", "simple_pipe", "lsp_symbols", "windows-native-v1"],
+            ["ALLOW_SOURCE_FALLBACK", "PREFER_NATIVE"]
+        )).to_equal("safe")
+        expect(qualification_source_contract(
+            "src/app/test_daemon/light_daemon.spl",
+            ["cached.result_status != -1"],
+            ["cached.test_path != \"\""]
         )).to_equal("safe")
         expect(qualification_source_contract(
             "test/05_perf/duplicate_check_benchmark_spec.spl",

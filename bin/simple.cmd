@@ -1,55 +1,18 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 
-set "SCRIPT_DIR=%~dp0"
-for %%I in ("%SCRIPT_DIR%..") do set "REPO_ROOT=%%~fI"
+set "RESOLVER=%~dp0resolve_native_tool.ps1"
+set "POWERSHELL=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%RESOLVER%" goto :missing
+if not exist "%POWERSHELL%" goto :missing
 
-set "BOOTSTRAP_BIN="
-if exist "%REPO_ROOT%\src\compiler_rust\target\bootstrap\simple.exe" (
-    for %%P in ("%REPO_ROOT%\src\compiler_rust\target\bootstrap\simple.exe") do if %%~zP GTR 0 (
-        set "BOOTSTRAP_BIN=%%~fP"
-    )
-)
+set "EXE="
+for /f "usebackq delims=" %%P in (`"%POWERSHELL%" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%RESOLVER%" -Kind simple`) do if not defined EXE set "EXE=%%P"
+if not defined EXE goto :missing
 
-set "CURRENT_DRIVER_BIN="
-if exist "%REPO_ROOT%\src\compiler_rust\target\debug\simple.exe" (
-    for %%P in ("%REPO_ROOT%\src\compiler_rust\target\debug\simple.exe") do if %%~zP GTR 0 (
-        set "CURRENT_DRIVER_BIN=%%~fP"
-    )
-)
+"%EXE%" %*
+exit /b %ERRORLEVEL%
 
-set "RELEASE_BIN="
-for %%P in (
-    "%REPO_ROOT%\bin\release\x86_64-pc-windows-msvc\simple.exe"
-    "%REPO_ROOT%\bin\release\x86_64-pc-windows-gnu\simple.exe"
-    "%REPO_ROOT%\bin\release\aarch64-pc-windows-msvc\simple.exe"
-    "%REPO_ROOT%\bin\release\aarch64-pc-windows-gnu\simple.exe"
-    "%REPO_ROOT%\bin\release\simple.exe"
-) do (
-    if not defined RELEASE_BIN if exist %%~fP if %%~zP GTR 0 (
-        set "RELEASE_BIN=%%~fP"
-    )
-)
-
-if /I "%~1"=="lint" if defined BOOTSTRAP_BIN (
-    "%BOOTSTRAP_BIN%" %*
-    exit /b %ERRORLEVEL%
-)
-
-if /I "%~x1"==".spl" if defined CURRENT_DRIVER_BIN (
-    "%CURRENT_DRIVER_BIN%" %*
-    exit /b %ERRORLEVEL%
-)
-
-if defined RELEASE_BIN (
-    "%RELEASE_BIN%" %*
-    exit /b %ERRORLEVEL%
-)
-
-if defined BOOTSTRAP_BIN (
-    "%BOOTSTRAP_BIN%" %*
-    exit /b %ERRORLEVEL%
-)
-
-echo error: no Simple runtime found 1>&2
-exit /b 1
+:missing
+echo error: no admitted pure-Simple Windows runtime found 1>&2
+exit /b 127

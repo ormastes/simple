@@ -46,6 +46,8 @@ MCP and LSP launchers select validated cached native artifacts. A missing or
 failed native probe is an explicit failure, never permission to run source,
 debug, or seed fallbacks. Probe stamps are keyed by the validated SHA-256
 identity, and production has no environment switch that bypasses probing.
+Windows routes all three launchers through one bounded SHA-256/protocol
+admission helper and preserves argument forwarding.
 
 The production test-daemon probe exercises `clean`, cache hit, source-change
 miss, status, and stop through `bin/simple`. Cached and executed paths preserve
@@ -82,5 +84,5 @@ The source contracts are implemented. The executable spec remains red while
 daemon, checker, MCP, and LSP production evidence cannot yet qualify the
 pure-Simple route. A passing manual without those executable production probes
 is not accepted as qualification evidence.
-The Windows launcher assertions also remain red until the active owner of the
-currently dirty `.cmd` lane removes Rust/debug/source precedence.
+Windows source parity is implemented; executable Windows and pure-runtime
+qualification remain required before PASS.

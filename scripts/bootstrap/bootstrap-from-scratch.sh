@@ -995,8 +995,9 @@ if [ "${deploy}" -eq 1 ]; then
   prev_bin="${deploy_dir}/simple${exe_suffix}.pre_deploy"
   deploy_tmp="${deploy_dir}/.simple${exe_suffix}.deploy.$$"
   restore_tmp="${deploy_dir}/.simple${exe_suffix}.restore.$$"
+  runtime_hash_tmp="${deploy_dir}/.simple${exe_suffix}.sha256.deploy.$$"
   deploy_stage="${deploy_dir}/.candidate.$$"
-  rm -f "${deploy_tmp}" "${restore_tmp}"
+  rm -f "${deploy_tmp}" "${restore_tmp}" "${runtime_hash_tmp}"
   rm -rf "${deploy_stage}"
   mkdir -p "${deploy_stage}"
   install -m755 "${full_bin}" "${deploy_stage}/simple${exe_suffix}"
@@ -1008,7 +1009,14 @@ if [ "${deploy}" -eq 1 ]; then
     exit 1
   fi
   rm -rf "${deploy_stage}"
-  [ -x "${deployed_bin}" ] && cp -p "${deployed_bin}" "${prev_bin}"
+  printf '%s\n' "$(hash_file "${full_bin}")" >"${runtime_hash_tmp}"
+  # Retain only an already-admitted rollback. Restoring an arbitrary executable
+  # here could put a seed/debug runtime back on the production path.
+  if [ -x "${deployed_bin}" ] && simple_binary_is_valid "${deployed_bin}"; then
+    cp -p "${deployed_bin}" "${prev_bin}"
+  else
+    rm -f "${prev_bin}"
+  fi
   install -m755 "${full_bin}" "${deploy_tmp}"
   # The temporary and live paths share a directory/filesystem, so rename is
   # atomic: readers see either the previous admitted runtime or the candidate.
@@ -1026,11 +1034,12 @@ if [ "${deploy}" -eq 1 ]; then
     else
       rm -f "${deployed_bin}"
     fi
-    rm -f "${deploy_tmp}" "${restore_tmp}"
+    rm -f "${deploy_tmp}" "${restore_tmp}" "${runtime_hash_tmp}"
     exit 1
   fi
   # The admitted runtime is now live and self-contained. Only now remove the
   # construction-era delegate so rollback remained viable throughout probes.
+  mv "${runtime_hash_tmp}" "${deployed_bin}.sha256"
   rm -f "${deploy_dir}/simple_seed${exe_suffix}"
   rm -f "${prev_bin}" "${deploy_tmp}" "${restore_tmp}"
   install -m755 "${ui_backend_bin}" "${deploy_dir}/simple_ui_backend${exe_suffix}"

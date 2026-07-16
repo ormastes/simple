@@ -102,7 +102,7 @@ stable key/value or JSON data.
 
 ## Failure and rollback
 
-Deployment validates before swap, preserves the old target, probes the new
+Deployment validates before swap, preserves only an already-admitted old target, probes the new
 target, and restores the old target on any failure. A missing native MCP/LSP
 artifact or failed protocol probe is a production error, not permission to run
 raw source.
