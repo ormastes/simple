@@ -72,31 +72,26 @@ int32_t rt_timestamp_get_day(int64_t micros) {
     return d;
 }
 
+static int64_t time_of_day_micros(int64_t micros) {
+    int64_t value = micros % (86400LL * 1000000LL);
+    if (value < 0) value += 86400LL * 1000000LL;
+    return value;
+}
+
 int32_t rt_timestamp_get_hour(int64_t micros) {
-    int64_t secs = micros / 1000000LL;
-    int64_t s = secs % 86400;
-    if (s < 0) s += 86400;
-    return (int32_t)(s / 3600);
+    return (int32_t)(time_of_day_micros(micros) / (3600LL * 1000000LL));
 }
 
 int32_t rt_timestamp_get_minute(int64_t micros) {
-    int64_t secs = micros / 1000000LL;
-    int64_t s = secs % 86400;
-    if (s < 0) s += 86400;
-    return (int32_t)((s % 3600) / 60);
+    return (int32_t)((time_of_day_micros(micros) / (60LL * 1000000LL)) % 60);
 }
 
 int32_t rt_timestamp_get_second(int64_t micros) {
-    int64_t secs = micros / 1000000LL;
-    int64_t s = secs % 60;
-    if (s < 0) s += 60;
-    return (int32_t)s;
+    return (int32_t)((time_of_day_micros(micros) / 1000000LL) % 60);
 }
 
 int32_t rt_timestamp_get_microsecond(int64_t micros) {
-    int64_t us = micros % 1000000LL;
-    if (us < 0) us += 1000000LL;
-    return (int32_t)us;
+    return (int32_t)(time_of_day_micros(micros) % 1000000LL);
 }
 
 /* ---- Construct timestamp from UTC components ---- */

@@ -615,3 +615,10 @@ it returned absolute process-monotonic seconds, so reset did not reset elapsed
 time. The provider's logical Windows dependencies remain
 `rt_time_now_unix_micros` and `rt_time_now_nanos`; a dedicated archive policy
 still awaits measured COFF helper symbols and is not selected by Stage4.
+
+Timestamp time-of-day extraction now shares one floor-day microsecond
+remainder. Negative sub-second values such as `-1` therefore produce
+`23:59:59.999999` for the preceding date instead of the inconsistent
+`00:00:00.999999`; nonnegative timestamps retain the same result. The shared
+pure-Simple time utility and bootstrap SFFI template now use the same floor-day
+rule, so interpreter, hosted runtime, and generated bootstrap owners agree.
