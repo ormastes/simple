@@ -95,70 +95,20 @@ fn dtrace(msg: text) -> ():
     if (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
         eprint(msg)
 
-# Diagnostics-plumbing: HirLowering.errors (unresolved-name / other lowering
-# diagnostics, e.g. "unresolved name: nosuchfn") was collected per-module but
-# never copied into ctx.errors here, so an unresolved identifier silently
-# decayed to HirExprKind.Error and only surfaced downstream as a backend
-# crash (nil-callee / undefined-%lN) far from the real cause.
-#
-# `HirLowering.error()` (20.hir/hir_lowering/types.spl) is a shared channel:
-# every call tags `kind: LoweringErrorKind.Other` regardless of what actually
-# happened, so `kind` can't discriminate "genuinely unresolved" from
-# "internal type-synthesis noise that lowering already recovered from".
-# Confirmed empirically: `Result type expects 2 type arguments` fires during
-# ordinary `?`-operator lowering of `Result<i64, text>` (native-smoke-matrix
-# case (15) result_try_op, a currently-passing build) without affecting the
-# compiled program's correctness — promoting every entry to fatal here
-# regresses that build. Only "unresolved name: X" is the class this fix
-# targets (a bare `nosuchfn(1)` call, matching the task's known bug where an
-# unresolved ident silently decayed to HirExprKind.Error); everything else
-# stays a non-fatal warning.
-#
-# #158 Phase A: "generic functions are not supported..." is the second class
-# added to this allowlist. Root cause: the flat-AST bridge (convert_decl_fn,
-# 10.frontend/_FlatAstBridge/convert_nodes.spl) previously hardcoded a plain
-# `fn`'s type_params to `[]`, so `fn id<T>(x: T) -> T` silently erased its `T`
-# to Infer/ANY through HIR/MIR/LLVM and returned 0 instead of the argument on
-# the native --entry path (no diagnostic at all). Now that type_params are
-# threaded through, `lower_function` (20.hir/hir_lowering/_Items/
-# declaration_lowering.spl) raises this error for any function with its own
-# type parameters. Without adding it here, that push would (like every other
-# HirLowering.error() call) decay to a non-fatal warning and the build would
-# proceed into monomorphize/MIR/LLVM anyway, resurfacing as a cryptic
-# backend/llc crash instead of a clear diagnostic — real monomorphization is
-# tracked separately (#158 Phase B), so until then this must hard-fail here.
-#
-# #158 generics sweep: tried promoting "unresolved type:" to fatal too, on
-# the theory that a generic struct/class method's `T` return type falling
-# through lower_named_kind's unresolved-name fallback was the failure mode --
-# REVERTED, empirically unsafe: native-smoke-matrix showed "unresolved type:
-# Any" (case 4, for_in_array) and "unresolved type: Option" (case 14,
-# option_nil_check) are both legitimate non-fatal noise on currently-passing
-# builds (same class as the pre-existing "Result type expects 2 type
-# arguments" exemption above -- these pseudo/builtin type names hit this
-# fallback but the build completes correctly via a different path
-# regardless). Do not re-add "unresolved type:" here without auditing every
-# existing caller first. The real, narrower fix for the generic
-# struct/class-method case is the "generic struct/class methods are not
-# supported..." entry below, raised explicitly by lower_impl
-# (20.hir/hir_lowering/_Items/trait_impl_lowering.spl) once impl_.type_params
-# is populated (see that file's comment) -- it does not rely on this
-# catch-all at all.
+# HIR diagnostics are fatal by default. Lowering sites must explicitly mark
+# only diagnostics whose fallback is known to preserve semantics as Recovered.
 fn _format_hir_lowering_error(name: text, err: LoweringError) -> text:
     if err.span.file != "":
         "HIR lowering error in {name} ({err.span.file}:{err.span.line}:{err.span.col}): {err.message}"
     else:
         "HIR lowering error in {name}: {err.message}"
 
-fn _hir_lowering_error_is_fatal(message: text) -> bool:
-    message.starts_with("unresolved name:") or message.starts_with("invalid binary operator") or message.starts_with("generic functions are not supported on the native build path yet") or message.starts_with("untyped function returns a value:") or message.starts_with("generic struct/class methods are not supported on the native build path yet")
-
 fn _driver_collect_hir_errors(ctx: CompileContext, name: text, errors: [LoweringError]):
     for err in errors:
-        if _hir_lowering_error_is_fatal(err.message):
-            ctx.add_error(_format_hir_lowering_error(name, err))
-        else:
+        if err.kind == LoweringErrorKind.Recovered:
             ctx.add_warning(_format_hir_lowering_error(name, err))
+        else:
+            ctx.add_error(_format_hir_lowering_error(name, err))
 
 class CheckBackendImpl(Backend):
     fn name() -> text:

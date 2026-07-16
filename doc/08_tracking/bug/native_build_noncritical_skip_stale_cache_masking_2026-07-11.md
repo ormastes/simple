@@ -80,7 +80,7 @@ build, then breaking `mod_a` and rebuilding WITHOUT clearing the cache.
   exit 1, `[ERROR] phase 3 FAILED` /
   `error: HIR lowering error in tmp_repro2.mod_a: unresolved name: nosuchfn`,
   NO output binary — the stale cached object is not substituted (the fatal
-  allowlist in `_hir_lowering_error_is_fatal`, driver.spl, fails the build
+  fatal-by-default HIR diagnostic policy in `driver.spl` fails the build
   before the AOT cache phase; `BuildCache.has_cached_object`
   (driver_build/incremental.spl) additionally fingerprints cache entries
   against CURRENT source, so a failing changed source can never map to an old
