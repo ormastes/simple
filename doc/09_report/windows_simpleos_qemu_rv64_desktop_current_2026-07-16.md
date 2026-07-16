@@ -38,6 +38,10 @@ Current Windows refresh for
   when the Windows MSYS2 LLVM tools cannot load. Current probe rows show
   `simpleos_qemu_rv64_desktop_service_build_cc_launch_exit_code=-1073741515`
   and `simpleos_qemu_rv64_desktop_service_build_cxx_launch_exit_code=-1073741515`.
+  The wrapper also records
+  `simpleos_qemu_rv64_desktop_service_build_cc_missing_dlls=libLLVM-19.dll`
+  and
+  `simpleos_qemu_rv64_desktop_service_build_cxx_missing_dlls=libLLVM-19.dll`.
   `objdump -p` shows the installed `clang++.exe` imports `libLLVM-19.dll`,
   while that DLL is absent from `C:\dev\tool\msys2`; this is the concrete local
   rebuild blocker.

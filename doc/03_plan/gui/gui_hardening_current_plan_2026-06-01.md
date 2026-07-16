@@ -259,7 +259,9 @@
   the current Windows MSYS2 LLVM install fails before compile with
   `simpleos_qemu_rv64_desktop_service_build_status=blocked:build-cc-launch-failed`
   and `-1073741515` for both clang and clang++, traced to `clang++.exe`
-  importing absent `libLLVM-19.dll`.
+  importing absent `libLLVM-19.dll`; the evidence rows now record
+  `simpleos_qemu_rv64_desktop_service_build_cc_missing_dlls=libLLVM-19.dll`
+  and `simpleos_qemu_rv64_desktop_service_build_cxx_missing_dlls=libLLVM-19.dll`.
 - Windows SimpleOS FPGA RV64 serial evidence is recorded in
   `doc/09_report/windows_simpleos_fpga_rv64_serial_current_2026-07-16.md`.
   The direct PowerShell wrapper now anchors itself to the checkout root and was
@@ -267,7 +269,9 @@
   `simpleos_fpga_expected_entry_status=pass` and
   `simpleos_fpga_expected_kernel_status=pass` with repo-root absolute paths.
   The rebuild path now records both `-BuildCc` and `-BuildCxx` launch probes
-  before native-build and reports the same current MSYS2 LLVM loader blocker.
+  before native-build and reports the same current MSYS2 LLVM loader blocker,
+  including `simpleos_fpga_build_cc_missing_dlls=libLLVM-19.dll` and
+  `simpleos_fpga_build_cxx_missing_dlls=libLLVM-19.dll`.
   The hardware lane remains fail-closed on missing serial device, missing boot
   marker, missing toolchain status, and missing bitstream status.
 - Windows Simple process inventory evidence is recorded in

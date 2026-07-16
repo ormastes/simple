@@ -44,24 +44,61 @@ function Resolve-BuildCxx([string]$cc, [string]$cxx) {
 
 function Test-BuildToolLaunch([string]$toolPath) {
     if ([string]::IsNullOrWhiteSpace($toolPath)) {
-        return @{ status = "missing"; exit_code = "" }
+        return @{ status = "missing"; exit_code = ""; missing_dlls = "" }
     }
     if (-not (Test-Path -LiteralPath $toolPath)) {
-        return @{ status = "missing"; exit_code = "" }
+        return @{ status = "missing"; exit_code = ""; missing_dlls = "" }
     }
     $stdoutPath = [System.IO.Path]::GetTempFileName()
     $stderrPath = [System.IO.Path]::GetTempFileName()
     try {
         $process = Start-Process -FilePath $toolPath -ArgumentList @("--version") -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -Wait -PassThru
         if ($process.ExitCode -eq 0) {
-            return @{ status = "pass"; exit_code = "$($process.ExitCode)" }
+            return @{ status = "pass"; exit_code = "$($process.ExitCode)"; missing_dlls = "" }
         }
-        return @{ status = "launch-failed"; exit_code = "$($process.ExitCode)" }
+        return @{ status = "launch-failed"; exit_code = "$($process.ExitCode)"; missing_dlls = (Find-MissingImportedDlls $toolPath) }
     } catch {
-        return @{ status = "launch-failed"; exit_code = "exception" }
+        return @{ status = "launch-failed"; exit_code = "exception"; missing_dlls = (Find-MissingImportedDlls $toolPath) }
     } finally {
         Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Find-MissingImportedDlls([string]$toolPath) {
+    $toolDir = Split-Path -Parent $toolPath
+    $objdump = Join-Path $toolDir "objdump.exe"
+    if (-not (Test-Path -LiteralPath $objdump)) {
+        $cmd = Get-Command objdump.exe -ErrorAction SilentlyContinue
+        if ($null -ne $cmd) {
+            $objdump = $cmd.Source
+        }
+    }
+    if (-not (Test-Path -LiteralPath $objdump)) {
+        return ""
+    }
+    $systemDlls = @("KERNEL32.dll", "msvcrt.dll", "USER32.dll", "ADVAPI32.dll", "SHELL32.dll", "ole32.dll", "OLEAUT32.dll", "WS2_32.dll")
+    $pathDirs = @($toolDir) + (($env:PATH -split ';') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $dump = & $objdump -p $toolPath 2>$null
+    $missing = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in $dump) {
+        if ($line -match 'DLL Name:\s*(\S+)') {
+            $dll = $Matches[1]
+            if ($systemDlls -contains $dll) {
+                continue
+            }
+            $found = $false
+            foreach ($dir in $pathDirs) {
+                if (Test-Path -LiteralPath (Join-Path $dir $dll)) {
+                    $found = $true
+                    break
+                }
+            }
+            if (-not $found -and -not $missing.Contains($dll)) {
+                $missing.Add($dll) | Out-Null
+            }
+        }
+    }
+    [string]::Join(";", $missing)
 }
 
 function Test-FileNonEmpty([string]$path) {
@@ -263,8 +300,10 @@ $buildCcUsed = ""
 $buildCxxUsed = ""
 $buildCcLaunchStatus = "not-requested"
 $buildCcLaunchExitCode = ""
+$buildCcMissingDlls = ""
 $buildCxxLaunchStatus = "not-requested"
 $buildCxxLaunchExitCode = ""
+$buildCxxMissingDlls = ""
 $buildCommand = "$BuildSimpleBinary native-build --source build/os/generated --source examples/09_embedded/simple_os/arch/riscv64 --backend cranelift --opt-level=aggressive --log on --timeout 180 --entry-closure --entry $ExpectedEntry --target riscv64-unknown-none -o $ExpectedKernelPath --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld"
 
 if ($BuildFpgaSerialKernel) {
@@ -284,8 +323,10 @@ if ($BuildFpgaSerialKernel) {
         $cxxProbe = Test-BuildToolLaunch $buildCxxUsed
         $buildCcLaunchStatus = $ccProbe.status
         $buildCcLaunchExitCode = $ccProbe.exit_code
+        $buildCcMissingDlls = $ccProbe.missing_dlls
         $buildCxxLaunchStatus = $cxxProbe.status
         $buildCxxLaunchExitCode = $cxxProbe.exit_code
+        $buildCxxMissingDlls = $cxxProbe.missing_dlls
         if ($buildCcLaunchStatus -ne "pass") {
             $buildStatus = "blocked:build-cc-launch-failed"
         } elseif ($buildCxxLaunchStatus -ne "pass") {
@@ -407,8 +448,10 @@ Write-Row $rows "simpleos_fpga_build_cc" "$buildCcUsed"
 Write-Row $rows "simpleos_fpga_build_cxx" "$buildCxxUsed"
 Write-Row $rows "simpleos_fpga_build_cc_launch_status" "$buildCcLaunchStatus"
 Write-Row $rows "simpleos_fpga_build_cc_launch_exit_code" "$buildCcLaunchExitCode"
+Write-Row $rows "simpleos_fpga_build_cc_missing_dlls" "$buildCcMissingDlls"
 Write-Row $rows "simpleos_fpga_build_cxx_launch_status" "$buildCxxLaunchStatus"
 Write-Row $rows "simpleos_fpga_build_cxx_launch_exit_code" "$buildCxxLaunchExitCode"
+Write-Row $rows "simpleos_fpga_build_cxx_missing_dlls" "$buildCxxMissingDlls"
 Write-Row $rows "simpleos_fpga_build_command" "$buildCommand"
 Write-Row $rows "simpleos_fpga_build_log_path" "$BuildLogPath"
 Write-Row $rows "simpleos_fpga_expected_entry" "$ExpectedEntry"

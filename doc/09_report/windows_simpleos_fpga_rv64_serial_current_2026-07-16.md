@@ -24,7 +24,9 @@ Current Windows refresh for
   `simpleos_fpga_build_status=blocked:build-cc-launch-failed` on the current
   Windows MSYS2 LLVM install. Current rows show
   `simpleos_fpga_build_cc_launch_exit_code=-1073741515` and
-  `simpleos_fpga_build_cxx_launch_exit_code=-1073741515`. `objdump -p` shows
+  `simpleos_fpga_build_cxx_launch_exit_code=-1073741515`, plus
+  `simpleos_fpga_build_cc_missing_dlls=libLLVM-19.dll` and
+  `simpleos_fpga_build_cxx_missing_dlls=libLLVM-19.dll`. `objdump -p` shows
   the installed `clang++.exe` imports `libLLVM-19.dll`, which is absent from
   `C:\dev\tool\msys2`; this is the local RV64 rebuild blocker before any FPGA
   hardware/bitstream gate.
