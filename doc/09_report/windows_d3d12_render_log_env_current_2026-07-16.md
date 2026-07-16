@@ -44,6 +44,7 @@ Result:
 - `windows_d3d12_render_log_evidence_gpu_debugger_artifact_magic=GFXA`
 - Default checker: `windows_d3d12_render_log_evidence_status=pass`
 - Default checker: `windows_d3d12_render_log_evidence_reason=pass`
+- Default checker: `windows_d3d12_render_log_evidence_browser_argb_metrics_status=pass`
 - Completion checker: `windows_d3d12_render_log_evidence_status=fail`
 - Completion checker: `windows_d3d12_render_log_evidence_reason=compare-status,native-d3d12-readback,browser-d3d12-backing,pairwise-argb-diff,argb-source-evidence`
 
@@ -114,9 +115,10 @@ Code change:
   uses `d3d12` and records actual browser backing hints separately from the
   request. The D3D12 evidence checker validates saved env files. Default mode
   accepts the current fail-closed D3D12 evidence shape when strict upstream
-  DirectX diagnostics are present; `-RequireD3D12Completion` fails until native
-  D3D12 readback, actual D3D12 browser backing, Simple pairwise ARGB evidence,
-  and full ARGB source evidence pass. Electron-vs-Chrome ARGB comparison is now
-  recorded as real evidence and currently fails with 9,975 mismatched pixels;
-  both browser ARGB source captures are recorded as `320x240`, 76,800 pixels,
-  and 76,800 nonblank pixels.
+  DirectX diagnostics are present and browser ARGB source metrics are present,
+  nonzero, and dimension-consistent; `-RequireD3D12Completion` fails until
+  native D3D12 readback, actual D3D12 browser backing, Simple pairwise ARGB
+  evidence, and full ARGB source evidence pass. Electron-vs-Chrome ARGB
+  comparison is now recorded as real evidence and currently fails with 9,975
+  mismatched pixels; both browser ARGB source captures are recorded as
+  `320x240`, 76,800 pixels, and 76,800 nonblank pixels.

@@ -196,9 +196,11 @@
   `windows_d3d12_electron_chrome_pairwise_diff_status=fail` with 9,975
   mismatched pixels. Browser ARGB source evidence now also records dimensions,
   pixel counts, and nonblank pixel counts for both Electron and Chrome
-  captures: `320x240`, 76,800 pixels, and 76,800 nonblank pixels each. Native
-  D3D12 readback, actual browser D3D12 backing, Simple pairwise ARGB diff, and
-  full ARGB source evidence remain incomplete.
+  captures: `320x240`, 76,800 pixels, and 76,800 nonblank pixels each. The
+  D3D12 evidence checker now validates those browser source rows in default
+  mode before accepting the current fail-closed evidence shape. Native D3D12
+  readback, actual browser D3D12 backing, Simple pairwise ARGB diff, and full
+  ARGB source evidence remain incomplete.
 - Windows DirectX Web/2D evidence now has a current real-launch/capture pass in
   `doc/09_report/gui_web_2d_directx_windows_current_2026-07-16.md`. The
   PowerShell wrapper reports D3D11 native staging readback pass with matching
@@ -239,7 +241,8 @@
   pairwise ARGB diffs, and ARGB source evidence. The Electron-vs-Chrome ARGB
   comparison is now recorded from real captures and currently fails with 9,975
   mismatched pixels; the browser ARGB source rows also record `320x240`,
-  76,800-pixel, fully nonblank captures. The attempted
+  76,800-pixel, fully nonblank captures, and the D3D12 checker now fails default
+  validation if those rows are absent, zero, or dimension-inconsistent. The attempted
   `Microsoft.PIX` winget install reached the elevated engine phase and did not
   complete from this non-elevated shell. The D3D12 wrapper now records strict
   upstream DirectX diagnostic status, requiring DirectX browser backing,
