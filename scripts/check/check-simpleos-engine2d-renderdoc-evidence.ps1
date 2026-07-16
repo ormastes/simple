@@ -103,6 +103,21 @@ function Get-FileSizeText([string]$path) {
     return ((Get-Item -LiteralPath $path).Length).ToString()
 }
 
+function Get-FileSha256Text([string]$path) {
+    if (-not (Test-FileNonEmpty $path)) {
+        return "missing"
+    }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $path))
+    try {
+        $hash = $sha.ComputeHash($stream)
+        return (($hash | ForEach-Object { $_.ToString("x2") }) -join "")
+    } finally {
+        $stream.Dispose()
+        $sha.Dispose()
+    }
+}
+
 function Test-PpmNonblank([string]$path) {
     if (-not (Test-FileNonEmpty $path)) {
         return "missing"
@@ -543,6 +558,8 @@ if (-not [string]::IsNullOrWhiteSpace($evidenceDir)) {
 Write-Row $rows "simpleos_engine2d_renderdoc_wrapper" "check-simpleos-engine2d-renderdoc-evidence.ps1"
 Write-Row $rows "simpleos_engine2d_source_evidence_path" "$Engine2dEvidencePath"
 Write-Row $rows "simpleos_engine2d_source_evidence_status" $(if (Test-FileNonEmpty $Engine2dEvidencePath) { "pass" } else { "missing" })
+Write-Row $rows "simpleos_engine2d_source_evidence_size_bytes" (Get-FileSizeText $Engine2dEvidencePath)
+Write-Row $rows "simpleos_engine2d_source_evidence_sha256" (Get-FileSha256Text $Engine2dEvidencePath)
 Write-Row $rows "simpleos_engine2d_source_evidence_mode" (Value-Or $source @("gui_web_2d_vulkan_mode") "")
 Write-Row $rows "simpleos_engine2d_source_simple_status" (Value-Or $source @("gui_web_2d_vulkan_simple_status") "")
 Write-Row $rows "simpleos_engine2d_source_browser_backing_status" (Value-Or $source @("gui_web_2d_vulkan_browser_backing_status") "")
@@ -600,6 +617,9 @@ Write-Row $rows "simpleos_engine2d_readback_nonblank_status" "$engineReadbackNon
 Write-Row $rows "simpleos_qemu_gpu_readback_status" $(if ($qemuReadbackStatus -eq "pass") { "pass" } else { "missing" })
 Write-Row $rows "simpleos_qemu_gpu_readback_reason" "$qemuReadbackStatus"
 Write-Row $rows "simpleos_qemu_gpu_readback_path" "$QemuReadbackPath"
+Write-Row $rows "simpleos_qemu_gpu_readback_file_status" $(if (Test-FileNonEmpty $QemuReadbackPath) { "pass" } else { "missing" })
+Write-Row $rows "simpleos_qemu_gpu_readback_size_bytes" (Get-FileSizeText $QemuReadbackPath)
+Write-Row $rows "simpleos_qemu_gpu_readback_sha256" (Get-FileSha256Text $QemuReadbackPath)
 Write-Row $rows "simpleos_qemu_gpu_readback_width" "$($qemuReadbackDimensions.width)"
 Write-Row $rows "simpleos_qemu_gpu_readback_height" "$($qemuReadbackDimensions.height)"
 Write-Row $rows "simpleos_qemu_gpu_readback_dimensions_status" "$($qemuReadbackDimensions.status)"

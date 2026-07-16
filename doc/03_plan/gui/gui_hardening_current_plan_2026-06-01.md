@@ -310,6 +310,10 @@
   from `$PSScriptRoot` and was verified from outside the checkout. The current
   run finds the saved direct Simple Vulkan source evidence, reports
   `simpleos_qemu_gpu_readback_status=pass` at `320x240`,
+  records source evidence identity
+  `8d9fb88e1efaaed80a9b9ff0a35f43231961d21eb80b9db4cf073cafa634b3bd` and QEMU
+  readback PPM identity
+  `f816071a30e6ef3a36b43699cb42f4c1ba35a317040572825ea88d35458d35b9`,
   `simpleos_engine2d_source_current_draw_path=freestanding-engine2d-baremetal-core`,
   `simpleos_engine2d_source_bridge_audit_status=pass`, and
   `simpleos_engine2d_readback_nonblank_status=pass`. The RV64 desktop-service

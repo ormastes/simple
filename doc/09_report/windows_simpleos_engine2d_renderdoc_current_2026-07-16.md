@@ -11,10 +11,15 @@ Current Windows refresh for
   readback, RenderDoc artifact, log, Simple binary, and nested Simple Vulkan
   probe paths resolve from the checkout root even when launched from `%TEMP%`.
 - Source evidence discovery: pass. The wrapper finds
-  `build/gui-web-2d-vulkan-env/evidence.env` by repo-root path.
+  `build/simpleos_multiconfig_live_evidence/vulkan-engine2d-readback-final.env`
+  by repo-root path, records `simpleos_engine2d_source_evidence_size_bytes=2152`,
+  and records
+  `simpleos_engine2d_source_evidence_sha256=8d9fb88e1efaaed80a9b9ff0a35f43231961d21eb80b9db4cf073cafa634b3bd`.
 - SimpleOS/QEMU readback: pass. `simpleos_qemu_gpu_readback_status=pass`,
   `simpleos_qemu_gpu_readback_width=320`,
-  `simpleos_qemu_gpu_readback_height=240`.
+  `simpleos_qemu_gpu_readback_height=240`,
+  `simpleos_qemu_gpu_readback_size_bytes=230415`, and
+  `simpleos_qemu_gpu_readback_sha256=f816071a30e6ef3a36b43699cb42f4c1ba35a317040572825ea88d35458d35b9`.
 - Source bridge audit: pass. The RV64 desktop-service entry now imports
   `create_fb_engine_core`, draws the WM scene through the Simple
   `Engine2DBaremetalCore`, and flushes through the RISC-V `rt_gui_fill4` /
@@ -50,3 +55,6 @@ The command exits fail-closed because RenderDoc artifacts and two Vulkan SDK
 tools are not complete, but the source bridge, saved direct Simple Vulkan
 readback, QEMU readback, Windows Kit `dxc.exe`, and Windows Vulkan host probe
 rows now report current repo-root-stable evidence.
+The wrapper now also records byte size and SHA-256 identity for the consumed
+Simple Vulkan readback env and QEMU screendump PPM so the bridge evidence is
+tied to concrete artifacts.
