@@ -161,6 +161,57 @@ function Value-Or($map, [string[]]$keys, [string]$defaultValue = "") {
     return $defaultValue
 }
 
+function Compare-ArgbJson([string]$leftPath, [string]$rightPath) {
+    $result = @{
+        status = "missing"
+        reason = "missing-argb-json"
+        mismatch_count = "0"
+        width = "0"
+        height = "0"
+    }
+    if ([string]::IsNullOrWhiteSpace($leftPath) -or [string]::IsNullOrWhiteSpace($rightPath)) { return $result }
+    if (-not (Test-Path -LiteralPath $leftPath) -or -not (Test-Path -LiteralPath $rightPath)) { return $result }
+    try {
+        $left = Get-Content -LiteralPath $leftPath -Raw | ConvertFrom-Json
+        $right = Get-Content -LiteralPath $rightPath -Raw | ConvertFrom-Json
+        $leftWidth = [int]$left.width
+        $leftHeight = [int]$left.height
+        $rightWidth = [int]$right.width
+        $rightHeight = [int]$right.height
+        $result.width = "$leftWidth"
+        $result.height = "$leftHeight"
+        if ($leftWidth -ne $rightWidth -or $leftHeight -ne $rightHeight) {
+            $result.status = "fail"
+            $result.reason = "dimension-mismatch"
+            return $result
+        }
+        $leftPixels = @($left.pixels)
+        $rightPixels = @($right.pixels)
+        if ($leftPixels.Count -ne $rightPixels.Count) {
+            $result.status = "fail"
+            $result.reason = "pixel-count-mismatch"
+            $result.mismatch_count = "$([Math]::Abs($leftPixels.Count - $rightPixels.Count))"
+            return $result
+        }
+        $mismatches = 0
+        for ($i = 0; $i -lt $leftPixels.Count; $i++) {
+            if ("$($leftPixels[$i])" -ne "$($rightPixels[$i])") { $mismatches++ }
+        }
+        $result.mismatch_count = "$mismatches"
+        if ($mismatches -eq 0) {
+            $result.status = "pass"
+            $result.reason = "argb-identical"
+        } else {
+            $result.status = "fail"
+            $result.reason = "argb-mismatch"
+        }
+    } catch {
+        $result.status = "fail"
+        $result.reason = "argb-json-read-error"
+    }
+    return $result
+}
+
 if ($Mode -eq "--print-install") {
     Write-Install
     exit 0
@@ -209,6 +260,9 @@ $electronArgbStatus = Value-Or $directx @("gui_web_2d_directx_electron_argb_stat
 $chromeArgbStatus = Value-Or $directx @("gui_web_2d_directx_chrome_argb_status") "missing"
 $electronArgbChecksum = Value-Or $directx @("gui_web_2d_directx_electron_argb_checksum") "missing"
 $chromeArgbChecksum = Value-Or $directx @("gui_web_2d_directx_chrome_argb_checksum") "missing"
+$electronArgbPath = Value-Or $directx @("gui_web_2d_directx_electron_argb_path") ""
+$chromeArgbPath = Value-Or $directx @("gui_web_2d_directx_chrome_argb_path") ""
+$electronChromeDiff = Compare-ArgbJson $electronArgbPath $chromeArgbPath
 $gpuDebuggerArtifact = Value-Or $directx @("gui_web_2d_directx_gpu_debugger_capture_artifact") ""
 $gpuDebuggerArtifactStatus = File-Status $gpuDebuggerArtifact
 $browserGateStatus = if ($directxNativeApi -eq "d3d12" -and $directxStatus -eq "pass" -and $directxEventStatus -eq "pass" -and $electronBackingStatus -eq "pass" -and $chromeBackingStatus -eq "pass" -and $electronD3d12Hint -eq "true" -and $chromeD3d12Hint -eq "true") { "pass" } else { "fail" }
@@ -244,10 +298,14 @@ Add-Row $browserRows "windows_d3d12_browser_backing_status" "$browserGateStatus"
 Add-Row $browserRows "windows_d3d12_browser_backing_reason" $(if ($browserGateStatus -eq "pass") { "electron-chrome-d3d12-diagnostic-pass" } else { "electron-or-chrome-d3d12-proof-missing" })
 Add-Row $browserRows "windows_d3d12_pixel_comparison_status" "missing"
 Add-Row $browserRows "windows_d3d12_pixel_comparison_mode" "missing"
-Add-Row $browserRows "windows_d3d12_electron_chrome_pairwise_diff_status" "missing"
+Add-Row $browserRows "windows_d3d12_electron_chrome_pairwise_diff_status" "$($electronChromeDiff.status)"
+Add-Row $browserRows "windows_d3d12_electron_chrome_pairwise_diff_reason" "$($electronChromeDiff.reason)"
+Add-Row $browserRows "windows_d3d12_electron_chrome_pairwise_diff_mismatch_count" "$($electronChromeDiff.mismatch_count)"
+Add-Row $browserRows "windows_d3d12_electron_chrome_pairwise_diff_width" "$($electronChromeDiff.width)"
+Add-Row $browserRows "windows_d3d12_electron_chrome_pairwise_diff_height" "$($electronChromeDiff.height)"
 Add-Row $browserRows "windows_d3d12_electron_simple_pairwise_diff_status" "missing"
 Add-Row $browserRows "windows_d3d12_chrome_simple_pairwise_diff_status" "missing"
-foreach ($source in @("simple", "chrome", "electron")) {
+foreach ($source in @("simple")) {
     Add-Row $browserRows "windows_d3d12_${source}_argb_width" "0"
     Add-Row $browserRows "windows_d3d12_${source}_argb_height" "0"
     Add-Row $browserRows "windows_d3d12_${source}_argb_nonblank_pixel_count" "0"

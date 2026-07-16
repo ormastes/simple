@@ -190,9 +190,12 @@
   `windows_d3d12_render_log_compare_status=fail`, and four remaining D3D12
   gates. The D3D12 wrapper now launches the DirectX diagnostic with
   `-AngleBackend d3d12` and records a DXCap `GFXA` artifact for the D3D12
-  request, so the PIX/GPU-debugger gate is no longer blocked; native D3D12
-  readback, actual browser D3D12 backing, pairwise ARGB diff, and full ARGB
-  source evidence remain incomplete.
+  request, so the PIX/GPU-debugger gate is no longer blocked. The wrapper now
+  performs a real Electron-vs-Chrome ARGB JSON comparison for the `320x240`
+  diagnostic captures; the current evidence records
+  `windows_d3d12_electron_chrome_pairwise_diff_status=fail` with 9,975
+  mismatched pixels. Native D3D12 readback, actual browser D3D12 backing,
+  Simple pairwise ARGB diff, and full ARGB source evidence remain incomplete.
 - Windows DirectX Web/2D evidence now has a current real-launch/capture pass in
   `doc/09_report/gui_web_2d_directx_windows_current_2026-07-16.md`. The
   PowerShell wrapper reports D3D11 native staging readback pass with matching
@@ -229,8 +232,10 @@
   PowerShell wrapper now runs without the `ProcessStartInfo.ArgumentList`
   compatibility crash, refreshes the D3D12-request/DXCap diagnostic, discovers
   PIX via `WinPix.exe` and versioned install paths, and still fails closed on
-  the true D3D12 gates: native D3D12 readback, browser D3D12 backing, pairwise
-  ARGB diffs, and ARGB source evidence. The attempted
+  the true D3D12 gates: native D3D12 readback, browser D3D12 backing, Simple
+  pairwise ARGB diffs, and ARGB source evidence. The Electron-vs-Chrome ARGB
+  comparison is now recorded from real captures and currently fails with 9,975
+  mismatched pixels. The attempted
   `Microsoft.PIX` winget install reached the elevated engine phase and did not
   complete from this non-elevated shell. The D3D12 wrapper now records strict
   upstream DirectX diagnostic status, requiring DirectX browser backing,
