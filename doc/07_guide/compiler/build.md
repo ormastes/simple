@@ -227,7 +227,12 @@ scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
 
 # Rebuild Rust seed/runtime and relink the full CLI
 scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --full-cli
+scripts/bootstrap/bootstrap-from-scratch.sh --release
 ```
+
+`--release` implies deployment and fails unless the deployed self-hosted
+binary passes `simple test test --whole --mode=interpreter`, including long
+specs, source-comment doctests, and Markdown embedded-code tests.
 
 On Windows, use the Windows bootstrap wrapper:
 

@@ -605,6 +605,23 @@ simple test --unit          # test/01_unit/
 simple test --integration   # test/02_integration/
 simple test --system        # test/03_system/
 simple test --all           # entire test/
+simple test --whole         # all specs/long tests + .spl and Markdown doctests
+```
+
+`--all` expands spec discovery. `--whole` is the release gate: it also runs
+comment-embedded `.spl` doctests and executable `simple`, `spl`, and
+`sdoctest` fences from the configured Markdown sources.
+
+Source doctests use the existing docstring form:
+
+```simple
+fn add_one(value: i64) -> i64:
+    """Add one.
+
+    sdoctest:
+        expect(add_one(1)).to_equal(2)
+    """
+    value + 1
 ```
 
 ### Advanced Test Layers (opt-in)

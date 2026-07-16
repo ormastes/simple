@@ -14,6 +14,8 @@
 - State file exists with `phase: verify` marked complete
 - Verification report shows all checks passed
 - No critical issues flagged
+- Release-bound lanes record a passing `bin/simple test test --whole --mode=interpreter`
+  result covering specs/long tests, source doctests, and Markdown embeds
 
 ## Process
 

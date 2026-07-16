@@ -124,6 +124,10 @@ BYL export consumed by that manual layer.
 Mission-critical SimpleOS release SPipe evidence must also cite
 `sh scripts/check/check-simpleos-mission-critical-release.shs` and keep
 `release_blockers=none`; matrix readiness alone is not release evidence.
+Every release-bound SPipe lane must also pass
+`bin/simple test test --whole --mode=interpreter`, which combines all
+spec/long-test discovery with `.spl` comment doctests and configured Markdown
+code-fence tests. `--all` or `--only-slow` alone is not whole-release evidence.
 If the hardening matrix reports `reason=stale-static-reports`, refresh the
 named reports until `simpleos_hardening_stale_reports=none` before accepting
 the lane.

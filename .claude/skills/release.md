@@ -24,6 +24,9 @@ SPipe/manual evidence; it must not create or update SPipe specs, repair
 generated-manual quality, or accept lower-model sidecar-review gaps after
 verify. If generated manuals, sidecar review, or SPipe coverage are missing or
 stale, stop and return to verify/implementation.
+After bootstrap, run `bin/simple test test --whole --mode=interpreter`; it is a
+release blocker covering all specs/long tests, `.spl` comment doctests, and
+executable Markdown code fences.
 For SimpleOS mission-critical releases, also run
 `sh scripts/check/check-simpleos-mission-critical-release.shs`; do not release
 while it reports blocked or failed, and PASS requires `release_blockers=none`.
@@ -107,7 +110,7 @@ Do NOT push without explicit user approval.
 
 ## Pre-Release Checklist
 
-- [ ] `bin/simple test` passing
+- [ ] `bin/simple test test --whole --mode=interpreter` passing
 - [ ] `bin/simple build lint` clean
 - [ ] `bin/simple todo-scan` — no critical TODOs
 - [ ] Local bootstrap build works (3-stage)

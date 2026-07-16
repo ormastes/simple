@@ -47,8 +47,10 @@ fn extract_doctests(file_path: text) -> [Doctest]:
     val lines = content.split("\n")
     var doctests: [Doctest] = []
     var i = 0
-    var in_doc_block = false
     var in_code_block = false
+    var in_docstring = false
+    var in_sdoctest = false
+    var sdoctest_indent = 0
     var code_lines: [text] = []
     var start_line = 0
     var should_fail = false
@@ -56,6 +58,52 @@ fn extract_doctests(file_path: text) -> [Doctest]:
     while i < lines.len():
         val line = lines[i]
         val trimmed = line.trim()
+
+        if trimmed.contains("\"\"\""):
+            val quote_at = trimmed.index_of("\"\"\"") ?? -1
+            val quote_tail = trimmed[quote_at + 3:]
+            if quote_tail.contains("\"\"\""):
+                i = i + 1
+                continue
+            if in_sdoctest and code_lines.len() > 0:
+                doctests.push(Doctest(
+                    source_file: file_path,
+                    line_number: start_line,
+                    code: code_lines.join("\n"),
+                    expected_output: "",
+                    should_fail: false
+                ))
+            in_docstring = not in_docstring
+            in_sdoctest = false
+            code_lines = []
+            i = i + 1
+            continue
+
+        if in_docstring:
+            val indent = line.len() - line.trim_start().len()
+            if trimmed == "sdoctest:":
+                in_sdoctest = true
+                sdoctest_indent = indent
+                start_line = i + 2
+                code_lines = []
+            elif in_sdoctest and trimmed != "" and indent > sdoctest_indent:
+                var code_start = sdoctest_indent + 4
+                if code_start > line.len():
+                    code_start = indent
+                code_lines.push(line[code_start:])
+            elif in_sdoctest and trimmed != "":
+                if code_lines.len() > 0:
+                    doctests.push(Doctest(
+                        source_file: file_path,
+                        line_number: start_line,
+                        code: code_lines.join("\n"),
+                        expected_output: "",
+                        should_fail: false
+                    ))
+                in_sdoctest = false
+                code_lines = []
+            i = i + 1
+            continue
 
         # Detect doc comments
         if trimmed.starts_with("///") or trimmed.starts_with("##"):
@@ -263,7 +311,7 @@ fn run_md_doctests(file_path: text, timeout_ms: i64) -> TestFileResult:
 # =========================================================================
 
 fn build_spl_doctest_code(source_content: text, dt: Doctest) -> text:
-    source_content + "\n\n# --- doctest from line {dt.line_number} ---\n" + dt.code
+    source_content + "\n\n# --- doctest from line {dt.line_number} ---\nuse std.spec.*\n" + dt.code
 
 fn run_spl_doctests_same_file(file_path: text, timeout_ms: i64) -> SdoctestFileResult:
     if not file_exists(file_path):
@@ -381,11 +429,11 @@ fn discover_spl_doctest_files(dirs: [text]) -> [text]:
             # Skip spec and test files
             if file_path.ends_with("_spec.spl") or file_path.ends_with("_test.spl"):
                 continue
-            # Fast pre-check: only process files containing ///
+            # Fast pre-check for either supported source-comment form.
             val content = file_read(file_path) ?? ""
             if content == "":
                 continue
-            if not content.contains("///"):
+            if not content.contains("///") and not content.contains("##") and not content.contains("sdoctest:"):
                 continue
             # Check for @doctest_skip marker
             if content.contains("# @doctest_skip"):
@@ -395,4 +443,3 @@ fn discover_spl_doctest_files(dirs: [text]) -> [text]:
             if doctests.len() > 0:
                 result.push(file_path)
     result
-

@@ -52,6 +52,12 @@ complete when workflow/tooling behavior changed and the matching guide, skill,
 agent, command, or generated/manual spec docs are still stale. Update the docs
 first, then run focused verification evidence once.
 
+For release-bound SPipe lanes, the final test-runner evidence is
+`bin/simple test test --whole --mode=interpreter`. `--whole` must retain all
+spec/long-test discovery and execute both `.spl` comment doctests and configured
+Markdown code fences; a narrower `--all`, `--only-slow`, or smoke run is not
+release evidence.
+
 For work spanning multiple host or capability rows, keep every unavailable
 row's acceptance-criterion IDs active. Reuse its authoritative TODO and plan,
 or create them when none exist, and record the missing prerequisite, exact

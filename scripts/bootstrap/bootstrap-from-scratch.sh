@@ -40,6 +40,7 @@ Options:
                      Implied by --deploy and one-binary mode.
   --fresh-cache      Clear the dynload native cache once before rebuilding
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
+  --release          Deploy, then run the release-blocking whole test suite
   --target=<triple>  Target platform (freebsd-x86_64 or simpleos-x86_64)
   --verbose          Accepted for compatibility
   --jobs=<n|full|half|min|auto>
@@ -62,6 +63,7 @@ pure_simple=0
 full_bootstrap=0
 full_cli=0
 fresh_cache=0
+release_tests=0
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
 case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
   1|true|yes|on) strict_bootstrap=1 ;;
@@ -83,6 +85,10 @@ while [ "$#" -gt 0 ]; do
       jobs=${1#*=}
       ;;
     --deploy)
+      deploy=1
+      ;;
+    --release)
+      release_tests=1
       deploy=1
       ;;
     --full-bootstrap)
@@ -1033,6 +1039,11 @@ if [ "${deploy}" -eq 1 ]; then
   # Recreate wrapper/launcher entrypoints (bin/simple plus release links)
   if [ "${os}" != "windows" ]; then
     "${repo_root}/scripts/setup/setup.shs"
+  fi
+
+  if [ "${release_tests}" -eq 1 ]; then
+    echo "Stage 6: running release whole-test gate..."
+    run_logged stage6-whole-tests "${deployed_bin}" test test --whole --mode=interpreter
   fi
 fi
 

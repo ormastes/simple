@@ -1126,8 +1126,8 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: [build-bootstrap, build-installers, simpleos-build]
-    if: always() && needs.build-bootstrap.result != 'cancelled'
+    needs: [build-bootstrap, build-installers, simpleos-build, whole-tests]
+    if: always() && needs.build-bootstrap.result != 'cancelled' && needs.whole-tests.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1430,32 +1430,37 @@ jobs:
           echo "tar xzf /tmp/simple/*.spk -C ~/.local" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
-  slow-tests:
-    name: Run Slow Tests
-    needs: check-version
-    if: needs.check-version.outputs.changed == 'true'
+  whole-tests:
+    name: Run Whole Test Suite
+    needs: [check-version, build-bootstrap]
+    if: needs.check-version.outputs.changed == 'true' && needs.build-bootstrap.result == 'success'
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Download Linux bootstrap runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-linux-x86_64
+          path: bootstrap-artifact
+
       - name: Setup bootstrap runtime
         run: |
-          if [ -f "bin/release/simple" ]; then
-            chmod +x bin/release/simple
-            echo "✓ Bootstrap runtime ready"
-          else
-            echo "⚠ No committed bootstrap runtime — skipping slow tests"
-            echo "SKIP_TESTS=true" >> $GITHUB_ENV
-          fi
+          PKG=$(find bootstrap-artifact -name 'simple-bootstrap-*-linux-x86_64.spk' -print -quit)
+          test -n "$PKG"
+          mkdir -p build/release-whole-runtime
+          tar -xzf "$PKG" -C build/release-whole-runtime
+          SIMPLE_BIN=$(find build/release-whole-runtime -path '*/bin/simple' -type f -print -quit)
+          test -n "$SIMPLE_BIN"
+          chmod +x "$SIMPLE_BIN"
+          "$SIMPLE_BIN" --version
+          echo "SIMPLE_WHOLE_TEST_BIN=$PWD/$SIMPLE_BIN" >> "$GITHUB_ENV"
 
-      - name: Run Simple/SPipe slow tests
-        if: env.SKIP_TESTS != 'true'
+      - name: Run specs, long tests, source doctests, and Markdown embeds
         run: |
-          export PATH="$PWD/bin:$PWD/bin/release:$PATH"
-          bin/simple test --only-slow
-        continue-on-error: true
+          "$SIMPLE_WHOLE_TEST_BIN" test test --whole --mode=interpreter
 
   test-installation:
     name: Test Installation

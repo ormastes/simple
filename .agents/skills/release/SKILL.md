@@ -28,6 +28,9 @@ description: Version bump and release. Accepts version argument (major/first, mi
 ## Prerequisite
 
 Run $verify first — must show STATUS: PASS.
+After bootstrap, run `bin/simple test test --whole --mode=interpreter`; it is a
+release blocker for all specs/long tests, `.spl` comment doctests, and
+configured Markdown code fences.
 For SimpleOS mission-critical releases, also run
 `sh scripts/check/check-simpleos-mission-critical-release.shs`; do not release
 while it reports blocked or failed, and PASS requires `release_blockers=none`.

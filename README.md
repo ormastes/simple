@@ -614,6 +614,7 @@ Run SDoctest examples:
 simple test --sdoctest README.md      # Run verified examples in Markdown/docs
 simple test --sdoctest src/math.spl   # Run file-local doctest examples
 simple test --sdoctest --tag slow     # Filter by tag
+simple test test --whole              # Release gate: specs, long tests, source + Markdown doctests
 ```
 
 `--doctest` is still accepted as a compatibility alias, but `--sdoctest` is the clearer name for the implemented path.

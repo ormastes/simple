@@ -23,6 +23,11 @@ description: "Codex release skill. Version bump (major/minor/patch/exact), CHANG
 
 Run `verify` skill first — must show **STATUS: PASS**.
 
+Run `bin/simple test test --whole --mode=interpreter` after bootstrap and
+before changing versions or tags. This release-blocking command includes the
+full spec/long-test surface, `.spl` comment doctests, and executable Markdown
+code fences; any failure stops release.
+
 Do NOT proceed with release if verification has any FAIL items.
 For SimpleOS mission-critical releases, also run
 `sh scripts/check/check-simpleos-mission-critical-release.shs`; do not release
