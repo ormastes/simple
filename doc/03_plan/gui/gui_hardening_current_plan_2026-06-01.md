@@ -164,7 +164,10 @@
   the true D3D12 gates: native D3D12 readback, browser D3D12 backing, pairwise
   ARGB diffs, ARGB source evidence, and PIX/GPU-debugger capture. The attempted
   `Microsoft.PIX` winget install reached the elevated engine phase and did not
-  complete from this non-elevated shell.
+  complete from this non-elevated shell. The D3D12 wrapper now records strict
+  upstream DirectX diagnostic status, requiring DirectX browser backing,
+  browser event proof, and DXCap capture before the D3D11 diagnostic is treated
+  as current supporting evidence.
  - Pure GUI release/perf evidence now defines a WM/web/native-runtime-free command
    boundary, SMF/dynlib performance contract, and fail-closed probe row. Current
    Linux-host evidence intentionally reports `pass=false` without a real

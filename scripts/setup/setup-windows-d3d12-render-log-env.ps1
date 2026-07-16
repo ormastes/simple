@@ -184,6 +184,8 @@ $directx = Read-KeyValueFile $DirectxEvidencePath
 $directxStatus = Value-Or $directx @("gui_web_2d_directx_browser_backing_status", "gui_web_2d_directx_native_readback_gate_status", "gui_web_2d_directx_native_readback_status") "missing"
 $directxNativeApi = Value-Or $directx @("directx_native_readback_api", "gui_web_2d_directx_native_readback_api", "gui_web_2d_directx_requested_angle", "gui_web_2d_directx_requested_api") "d3d11"
 $directxCaptureStatus = Value-Or $directx @("gui_web_2d_directx_gpu_debugger_capture_status") "missing"
+$directxEventStatus = Value-Or $directx @("gui_web_2d_directx_browser_event_status") "missing"
+$directxStrictDiagnosticStatus = if ($directxStatus -eq "pass" -and $directxEventStatus -eq "pass" -and $directxCaptureStatus -eq "pass") { "pass" } else { "fail" }
 $pixTool = Latest-PixTool
 $dxcapTool = Command-Source "DXCap.exe"
 
@@ -198,6 +200,8 @@ Add-Row $nativeRows "windows_d3d12_native_readback_actual_checksum" "-1"
 Add-Row $nativeRows "windows_d3d12_native_readback_wrapper_gate_status" "fail"
 Add-Row $nativeRows "windows_d3d12_native_readback_directx_diagnostic_env" "$DirectxEvidencePath"
 Add-Row $nativeRows "windows_d3d12_native_readback_directx_diagnostic_status" "$directxStatus"
+Add-Row $nativeRows "windows_d3d12_native_readback_directx_diagnostic_event_status" "$directxEventStatus"
+Add-Row $nativeRows "windows_d3d12_native_readback_directx_strict_diagnostic_status" "$directxStrictDiagnosticStatus"
 Add-Row $nativeRows "windows_d3d12_native_readback_directx_diagnostic_api" "$directxNativeApi"
 Write-Rows $nativeEnv $nativeRows
 
@@ -221,6 +225,8 @@ foreach ($source in @("simple", "chrome", "electron")) {
 }
 Add-Row $browserRows "windows_d3d12_browser_backing_directx_diagnostic_env" "$DirectxEvidencePath"
 Add-Row $browserRows "windows_d3d12_browser_backing_directx_diagnostic_status" "$directxStatus"
+Add-Row $browserRows "windows_d3d12_browser_backing_directx_diagnostic_event_status" "$directxEventStatus"
+Add-Row $browserRows "windows_d3d12_browser_backing_directx_strict_diagnostic_status" "$directxStrictDiagnosticStatus"
 Write-Rows $browserEnv $browserRows
 
 $pixRows = New-Object System.Collections.Generic.List[string]
@@ -234,6 +240,8 @@ Add-Row $pixRows "windows_d3d12_gpu_debugger_capture_reason" "dxcap-d3d11-diagno
 Add-Row $pixRows "windows_d3d12_gpu_debugger_capture_tool" "$dxcapTool"
 Add-Row $pixRows "windows_d3d12_gpu_debugger_capture_artifact" ""
 Add-Row $pixRows "windows_d3d12_gpu_debugger_directx_diagnostic_status" "$directxCaptureStatus"
+Add-Row $pixRows "windows_d3d12_gpu_debugger_directx_diagnostic_event_status" "$directxEventStatus"
+Add-Row $pixRows "windows_d3d12_gpu_debugger_directx_strict_diagnostic_status" "$directxStrictDiagnosticStatus"
 Write-Rows $pixEnv $pixRows
 
 $blocked = @(
@@ -265,6 +273,9 @@ Add-Row $compareRows "windows_d3d12_render_log_compare_pix_env_file_status" "$(F
 Add-Row $compareRows "windows_d3d12_render_log_compare_directx_diagnostic_env" "$DirectxEvidencePath"
 Add-Row $compareRows "windows_d3d12_render_log_compare_directx_diagnostic_env_file_status" "$(File-Status $DirectxEvidencePath)"
 Add-Row $compareRows "windows_d3d12_render_log_compare_directx_diagnostic_status" "$directxStatus"
+Add-Row $compareRows "windows_d3d12_render_log_compare_directx_diagnostic_event_status" "$directxEventStatus"
+Add-Row $compareRows "windows_d3d12_render_log_compare_directx_diagnostic_gpu_capture_status" "$directxCaptureStatus"
+Add-Row $compareRows "windows_d3d12_render_log_compare_directx_strict_diagnostic_status" "$directxStrictDiagnosticStatus"
 Add-Row $compareRows "windows_d3d12_render_log_compare_directx_diagnostic_api" "$directxNativeApi"
 Add-Row $compareRows "windows_d3d12_render_log_compare_pairwise_status" "missing"
 Add-Row $compareRows "windows_d3d12_render_log_compare_argb_checksum_reason" "missing-argb-checksum"

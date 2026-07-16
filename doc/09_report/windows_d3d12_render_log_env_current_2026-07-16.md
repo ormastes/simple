@@ -4,6 +4,7 @@ Current Windows PowerShell run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\setup\setup-windows-d3d12-render-log-env.ps1 --refresh-directx -BuildDir build\windows-d3d12-render-log-env-current -TimeoutSecs 160
+powershell -ExecutionPolicy Bypass -File scripts\setup\setup-windows-d3d12-render-log-env.ps1 --refresh-directx -BuildDir build\windows-d3d12-render-log-env-strict-current -TimeoutSecs 160
 ```
 
 Result:
@@ -13,6 +14,9 @@ Result:
 - `windows_d3d12_render_log_compare_blocked_gates=windows-d3d12-native-readback,browser-d3d12-backing,pairwise-argb-diff,argb-source-evidence,pix-or-gpu-debugger`
 - `windows_d3d12_render_log_compare_directx_diagnostic_env_file_status=pass`
 - `windows_d3d12_render_log_compare_directx_diagnostic_status=pass`
+- `windows_d3d12_render_log_compare_directx_diagnostic_event_status=pass`
+- `windows_d3d12_render_log_compare_directx_diagnostic_gpu_capture_status=pass`
+- `windows_d3d12_render_log_compare_directx_strict_diagnostic_status=pass`
 - `windows_d3d12_render_log_compare_directx_diagnostic_api=d3d11`
 - `windows_d3d12_render_log_compare_refresh_directx_exit_code=0`
 - `windows_d3d12_pix_capture_status=unavailable`
@@ -45,6 +49,8 @@ Primary artifacts:
 - `build/windows-d3d12-render-log-env-current/windows-d3d12-pix.env`
 - `build/windows-d3d12-render-log-env-current/directx-diagnostic/evidence.env`
 - `build/windows-d3d12-render-log-env-current/report.md`
+- `build/windows-d3d12-render-log-env-strict-current/evidence.env`
+- `build/windows-d3d12-render-log-env-strict-current/directx-diagnostic/evidence.env`
 
 Code change:
 
@@ -52,3 +58,7 @@ Code change:
   PowerShell-compatible process argument quoting and discovers PIX through
   `WinPix.exe`, legacy `PIXWin.exe`, and versioned `Program Files\Microsoft PIX`
   install paths.
+- The wrapper now records strict upstream DirectX diagnostic status. The strict
+  status is `pass` only when DirectX browser backing, browser event routing, and
+  DXCap GPU capture all pass; stale DirectX evidence without event proof no
+  longer looks equivalent in D3D12 reports.
