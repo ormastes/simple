@@ -26,15 +26,16 @@ Current Windows refresh for
   `simpleos_engine2d_source_evidence_usable_status=pass` and
   `simpleos_engine2d_readback_nonblank_status=pass`.
 - Windows host Vulkan probe: partial. `vulkaninfo` passes on
-  `Intel(R) UHD Graphics 770`, while SDK tools and RenderDoc remain missing:
+  `Intel(R) UHD Graphics 770`, Windows Kit `dxc.exe` is discovered, while
+  `glslangValidator`, `spirv-as`, and RenderDoc remain missing:
   `simpleos_windows_vulkan_host_readiness_status=blocked:sdk-tools-missing`.
 - RenderDoc release artifacts: missing. `simpleos_renderdoc_rdc_status=missing`
   and `simpleos_wm_renderdoc_log_compare_reason=missing-qemu-and-host-renderdoc-logs`.
-- Rebuild note: the existing Windows host does not currently expose a working
-  RISC-V C++ cross compile path for the freestanding native-build. Host `g++`
-  rejects the RISC-V flags, and the MSYS2 `clang++` path exits before producing
-  `_init_all.o`, so this refresh proves the source contract and checker rows
-  but does not claim a freshly rebuilt RV64 kernel.
+- Rebuild note: the RV64 desktop-service kernel now has current built-live QEMU
+  evidence in `build/simpleos_multiconfig_live_evidence/qemu-rv64-desktop-built-live-current.env`.
+  This Engine2D checker consumes the rebuilt QEMU screendump and saved direct
+  Simple Vulkan readback; the remaining fail-closed gap is RenderDoc/SDK tool
+  availability, not the RISC-V C++ cross compile path.
 
 ## Evidence Command
 
@@ -45,6 +46,7 @@ Pop-Location
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-simpleos-engine2d-renderdoc-evidence.ps1 -EvidencePath build\simpleos_multiconfig_live_evidence\engine2d-renderdoc-windows-current.env -Engine2dEvidencePath build\simpleos_multiconfig_live_evidence\vulkan-engine2d-readback-final.env -ProbeHostVulkan
 ```
 
-The command exits fail-closed because RenderDoc artifacts are not complete, but
-the source bridge, saved direct Simple Vulkan readback, QEMU readback, and
-Windows Vulkan host probe rows now report current repo-root-stable evidence.
+The command exits fail-closed because RenderDoc artifacts and two Vulkan SDK
+tools are not complete, but the source bridge, saved direct Simple Vulkan
+readback, QEMU readback, Windows Kit `dxc.exe`, and Windows Vulkan host probe
+rows now report current repo-root-stable evidence.

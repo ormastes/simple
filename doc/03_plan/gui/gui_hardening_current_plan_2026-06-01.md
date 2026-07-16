@@ -293,10 +293,10 @@
   `simpleos_engine2d_source_bridge_audit_status=pass`, and
   `simpleos_engine2d_readback_nonblank_status=pass`. The RV64 desktop-service
   entry now draws the WM scene through `Engine2DBaremetalCore` plus the RISC-V
-  `rt_gui_fill4`/`rt_gui_flush` shim. The lane still remains fail-closed on
-  missing `.rdc`, missing QEMU/host RenderDoc logs, and missing Windows Vulkan
-  SDK/RenderDoc tools; this Windows host also lacks a working RV64 C++ cross
-  compile path for a fresh desktop-service kernel rebuild.
+  `rt_gui_fill4`/`rt_gui_flush` shim, and the checker now discovers Windows Kit
+  `dxc.exe`. The lane still remains fail-closed on missing `.rdc`, missing
+  QEMU/host RenderDoc logs, missing `glslangValidator`/`spirv-as`, and missing
+  RenderDoc tools.
 - Windows SimpleOS RenderDoc raw-row gate evidence is recorded in
   `doc/09_report/windows_simpleos_rdoc_raw_row_gate_current_2026-07-16.md`.
   The wrapper now resolves repo-relative evidence, Simple binary, aggregate

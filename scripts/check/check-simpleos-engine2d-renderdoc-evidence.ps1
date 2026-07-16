@@ -188,6 +188,41 @@ function Command-Status([string]$name) {
     return "missing"
 }
 
+function Candidate-Path([string]$base, [string]$child) {
+    if ([string]::IsNullOrWhiteSpace($base)) {
+        return ""
+    }
+    return Join-Path $base $child
+}
+
+function WindowsKit-Tool([string]$toolName) {
+    $kitRoot = Candidate-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+    if ([string]::IsNullOrWhiteSpace($kitRoot) -or -not (Test-Path -LiteralPath $kitRoot)) {
+        return ""
+    }
+    $versions = Get-ChildItem -LiteralPath $kitRoot -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending
+    foreach ($version in $versions) {
+        foreach ($arch in @("x64", "x86", "arm64")) {
+            $candidate = Join-Path $version.FullName (Join-Path $arch $toolName)
+            if (Test-Path -LiteralPath $candidate) {
+                return $candidate
+            }
+        }
+    }
+    return ""
+}
+
+function Command-Or-WindowsKit-Status([string]$name) {
+    if ((Command-Status $name) -eq "pass") {
+        return "pass"
+    }
+    if ((WindowsKit-Tool $name) -ne "") {
+        return "pass"
+    }
+    return "missing"
+}
+
 function First-Match-OrEmpty([string]$text, [string]$pattern) {
     $m = [regex]::Match($text, $pattern)
     if ($m.Success -and $m.Groups.Count -gt 1) {
@@ -481,7 +516,7 @@ if ($ProbeHostVulkan) {
     }
     $glslangStatus = Command-Status "glslangValidator"
     $spirvAsStatus = Command-Status "spirv-as"
-    $dxcStatus = Command-Status "dxc"
+    $dxcStatus = Command-Or-WindowsKit-Status "dxc.exe"
     $sdkToolsStatus = if ($glslangStatus -eq "pass" -and $spirvAsStatus -eq "pass" -and $dxcStatus -eq "pass") { "pass" } else { "blocked:sdk-tools-missing" }
     $chromePath = "C:\Program Files\Google\Chrome\Application\chrome.exe"
     $chromeStatus = if (Test-Path -LiteralPath $chromePath) { "pass" } else { "missing" }
