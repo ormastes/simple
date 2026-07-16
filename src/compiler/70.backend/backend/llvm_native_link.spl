@@ -13,6 +13,7 @@ use app.io.sysinfo_ops.{getpid}
 use compiler.backend.backend.entry_point.{generate_entry_point_ir}
 use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
+use compiler.backend.backend.llvm_capability.{find_nm_portable}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, _get_temp_dir, _obj_ext, _is_windows, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
@@ -36,10 +37,13 @@ fn llvm_link_trace_enabled() -> bool:
 fn llvm_stage4_final_requested_symbols(objects: [text]) -> Result<[text], text>:
     if objects.len() == 0:
         return Err("Stage4 final object closure is empty")
+    val nm = find_nm_portable()
+    if nm == "":
+        return Err("Stage4 final object symbol scan requires llvm-nm or nm")
     var args: [text] = ["-g"]
     for object in objects:
         args = args.push(object)
-    val (nm_out, nm_err, nm_code) = rt_process_run("nm", args)
+    val (nm_out, nm_err, nm_code) = rt_process_run(nm, args)
     if nm_code != 0:
         return Err("Stage4 final object symbol scan failed: {nm_err}")
     val requested = stage4_requested_from_nm_output(nm_out, is_macos())
@@ -51,6 +55,9 @@ pub fn llvm_stage4_candidate_archive_inventory(labels: [text], paths: [text]) ->
     match stage4_validate_candidate_archive_inputs(labels, paths):
         case Err(err): return Err(err)
         case Ok(()): ()
+    val nm = find_nm_portable()
+    if nm == "":
+        return Err("Stage4 candidate archive scan requires llvm-nm or nm")
     var scans: [text] = []
     var i = 0
     while i < paths.len():
@@ -58,7 +65,7 @@ pub fn llvm_stage4_candidate_archive_inventory(labels: [text], paths: [text]) ->
         val path = paths[i]
         if not rt_file_exists(path):
             return Err("Stage4 candidate archive '" + label + "' is missing at '" + path + "'")
-        val (nm_out, nm_err, nm_code) = rt_process_run("nm", ["-g", path])
+        val (nm_out, nm_err, nm_code) = rt_process_run(nm, ["-g", path])
         if nm_code != 0:
             return Err("Stage4 candidate archive '" + label + "' scan failed at '" + path + "': " + nm_err)
         if nm_out.trim() == "":

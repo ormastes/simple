@@ -284,9 +284,38 @@ not-an-address W rt_malformed
         val inventory_source = source.substring(inventory_pos, config_pos)
         val validate_pos = inventory_source.find("stage4_validate_candidate_archive_inputs(")
         val exists_pos = inventory_source.find("rt_file_exists(")
-        val scan_pos = inventory_source.find("rt_process_run(\"nm\"")
+        val resolver_pos = inventory_source.find("find_nm_portable()")
+        val scan_pos = inventory_source.find("rt_process_run(nm")
         expect(validate_pos).to_be_greater_than(-1)
+        expect(resolver_pos).to_be_greater_than(validate_pos)
         expect(exists_pos).to_be_greater_than(validate_pos)
+        expect(scan_pos).to_be_greater_than(resolver_pos)
         expect(scan_pos).to_be_greater_than(exists_pos)
         val occurrences = source.split("llvm_stage4_candidate_archive_inventory").len() - 1
         expect(occurrences).to_equal(1)
+
+    it "routes both Stage4 symbol scans through the portable nm resolver":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val final_pos = source.find("fn llvm_stage4_final_requested_symbols")
+        val inventory_pos = source.find("fn llvm_stage4_candidate_archive_inventory")
+        val config_pos = source.find("# Configuration")
+        val final_source = source.substring(final_pos, inventory_pos)
+        val inventory_source = source.substring(inventory_pos, config_pos)
+        expect(final_source).to_contain("find_nm_portable()")
+        expect(final_source).to_contain("rt_process_run(nm, args)")
+        expect(inventory_source).to_contain("find_nm_portable()")
+        expect(inventory_source).to_contain("rt_process_run(nm, [\"-g\", path])")
+        expect(source.split("rt_process_run(\"nm\"").len() - 1).to_equal(0)
+
+    it "keeps the portable nm override and LLVM-first fallback order":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_capability.spl") ?? ""
+        val resolver_pos = source.find("pub fn find_nm_portable")
+        val detect_pos = source.find("# Detect libLLVM availability")
+        val resolver_source = source.substring(resolver_pos, detect_pos)
+        val override_pos = resolver_source.find("env_get(\"SIMPLE_NM\")")
+        val newest_pos = resolver_source.find("\"llvm-nm-22\"")
+        val fallback_pos = resolver_source.find("\"nm\"")
+        expect(override_pos).to_be_greater_than(-1)
+        expect(newest_pos).to_be_greater_than(override_pos)
+        expect(fallback_pos).to_be_greater_than(newest_pos)
+        expect(source).to_contain("for path in out.split(\"\\n\")")

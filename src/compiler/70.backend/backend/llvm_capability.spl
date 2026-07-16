@@ -8,6 +8,7 @@
 # Supports Linux, macOS, FreeBSD, and Windows.
 
 use compiler.backend.backend.io_compat.{backend_shell_tuple}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.platform.{get_host_os}
 use std.io_runtime.{host_arch}
 use compiler.backend.llvm_version.{
@@ -188,9 +189,10 @@ fn find_tool_portable(candidates: [text]) -> text:
         if is_windows:
             val (out, err, code) = backend_shell_tuple("where {candidate} 2>NUL")
             if code == 0:
-                val path = out.trim()
-                if path != "":
-                    return path
+                for path in out.split("\n"):
+                    val resolved = path.trim()
+                    if resolved != "":
+                        return resolved
         else:
             val (out, err, code) = backend_shell_tuple("command -v {candidate} 2>/dev/null")
             if code == 0:
@@ -211,13 +213,16 @@ fn find_clang_portable() -> text:
 fn find_wasm_ld_portable() -> text:
     find_tool_portable(["wasm-ld-19", "wasm-ld-18", "wasm-ld-17", "wasm-ld-16", "wasm-ld"])
 
-fn find_nm_portable() -> text:
-    val os = get_host_os()
-    if os == "macos":
-        # macOS nm is BSD nm, prefer llvm-nm
-        find_tool_portable(["llvm-nm-18", "llvm-nm-17", "llvm-nm-16", "llvm-nm", "nm"])
-    else:
-        find_tool_portable(["nm"])
+pub fn find_nm_portable() -> text:
+    val configured = env_get("SIMPLE_NM") ?? ""
+    if configured != "":
+        return configured
+    # llvm-nm handles ELF, Mach-O, COFF objects, and Unix/MSVC archives with
+    # one argument contract. Keep platform nm as the final hosted fallback.
+    find_tool_portable([
+        "llvm-nm-22", "llvm-nm-21", "llvm-nm-20", "llvm-nm-19",
+        "llvm-nm-18", "llvm-nm-17", "llvm-nm-16", "llvm-nm", "nm"
+    ])
 
 # ============================================================================
 # Detect libLLVM availability
