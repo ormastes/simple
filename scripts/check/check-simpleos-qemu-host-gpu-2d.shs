@@ -110,32 +110,31 @@ else
     RUNTIME_PATH_IS_DEFAULT=1
 fi
 LINUX_DEFAULT_RUNTIME_PATH=$LINUX_RUNTIME_TARGET/bootstrap
-
-linux_runtime_artifact_is_valid() {
-    runtime_dir=$1
-    [ -s "$runtime_dir/libsimple_runtime.a" ] || return 1
-    set -- "$runtime_dir"/.fingerprint/simple-runtime-*/lib-simple_runtime.json
-    [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
-    features=$(sed -n 's/^.*"features":"\(.*\)","declared_features":.*$/\1/p' "$1")
-    case "$features" in *'\"cuda\"'*) ;; *) return 1 ;; esac
-    case "$features" in *'\"vulkan\"'*) ;; *) return 1 ;; esac
-}
-
-prepare_linux_runtime() {
-    linux_runtime_artifact_is_valid "$RUNTIME_PATH" && return 0
-    [ "$ACTIVE_HOST" = linux ] || return 1
-    [ "$RUNTIME_PATH_IS_DEFAULT" = 1 ] || return 1
-    [ "$RUNTIME_PATH" = "$LINUX_DEFAULT_RUNTIME_PATH" ] || return 1
-    command -v cargo >/dev/null 2>&1 || return 1
-    rm -rf "$LINUX_RUNTIME_TARGET"
-    mkdir -p "$(dirname "$LINUX_RUNTIME_TARGET")"
-    CARGO_TARGET_DIR="$ROOT_DIR/$LINUX_RUNTIME_TARGET" cargo build --locked \
-        --manifest-path "$ROOT_DIR/src/compiler_rust/Cargo.toml" \
-        --package simple-runtime --lib --profile bootstrap --features vulkan,cuda \
-        >"$BUILD_DIR/runtime-build.log" 2>&1 || return 1
-    linux_runtime_artifact_is_valid "$RUNTIME_PATH"
-}
-
+ 
+ linux_runtime_artifact_is_valid() {
+     runtime_dir=$1
+     [ -s "$runtime_dir/libsimple_runtime.a" ] || return 1
+     set -- "$runtime_dir"/.fingerprint/simple-runtime-*/lib-simple_runtime.json
+     [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
+     features=$(sed -n 's/^.*"features":"\(.*\)","declared_features":.*$/\1/p' "$1")
+     case "$features" in *'\"cuda\"'*) ;; *) return 1 ;; esac
+     case "$features" in *'\"vulkan\"'*) ;; *) return 1 ;; esac
+ }
+ 
+ prepare_linux_runtime() {
+     linux_runtime_artifact_is_valid "$RUNTIME_PATH" && return 0
+     [ "$ACTIVE_HOST" = linux ] || return 1
+     [ "$RUNTIME_PATH_IS_DEFAULT" = 1 ] || return 1
+     [ "$RUNTIME_PATH" = "$LINUX_DEFAULT_RUNTIME_PATH" ] || return 1
+     command -v cargo >/dev/null 2>&1 || return 1
+     rm -rf "$LINUX_RUNTIME_TARGET"
+     mkdir -p "$(dirname "$LINUX_RUNTIME_TARGET")"
+     CARGO_TARGET_DIR="$ROOT_DIR/$LINUX_RUNTIME_TARGET" cargo build --locked \
+         --manifest-path "$ROOT_DIR/src/compiler_rust/Cargo.toml" \
+         --package simple-runtime --lib --profile bootstrap --features vulkan,cuda \
+         >"$BUILD_DIR/runtime-build.log" 2>&1 || return 1
+     linux_runtime_artifact_is_valid "$RUNTIME_PATH"
+ }
 find_simple() {
     if [ -n "${SIMPLE_BIN:-}" ]; then
         simple_binary_is_valid "$SIMPLE_BIN" || return 1
@@ -188,7 +187,6 @@ run_pinned_native_build() {
 serial_has_pass() {
     log=$1
     isa=$2
-    qemu_args=$3
     [ "$(grep -aEc "^HOST_GPU_MAP_OK isa=$isa .*[[:space:]]*$" "$log")" -eq 1 ] &&
     [ "$(grep -aEc "^HOST_GPU_HELLO_OK isa=$isa .*[[:space:]]*$" "$log")" -eq 1 ] &&
     [ "$(grep -aEc "^HOST_GPU_PROCESS_OK isa=$isa .*[[:space:]]*$" "$log")" -eq 1 ] &&
@@ -214,7 +212,6 @@ serial_qemu_execution_valid() {
 
 arm64_production_serial_has_correlated_frame() {
     log=$1
-    qemu_args=$2
     [ -f "$log" ] || return 1
     serial_qemu_execution_valid "$log" "$qemu_args" || return 1
     ramfb_pattern='^\[WM\] ramfb configured successfully via fw_cfg DMA[[:space:]]*$'
@@ -229,7 +226,7 @@ arm64_production_serial_has_correlated_frame() {
     [ "$(grep -aEc "$presented_pattern" "$log")" -eq 1 ] || return 1
     [ "$(grep -aEc "$first_frame_pattern" "$log")" -eq 1 ] || return 1
     [ "$(grep -aEc "$desktop_ready_pattern" "$log")" -eq 1 ] || return 1
-    negotiation_timing_evidence_valid "$log" aarch64 production "$(negotiation_applicability aarch64 "$qemu_args" production)" "$BACKEND" || return 1
+    negotiation_timing_evidence_valid "$log" aarch64 production "$(negotiation_applicability aarch64)" "$BACKEND" || return 1
     ! grep -aEq '^\[desktop-gui-arm64\] fatal ' "$log" || return 1
 
     ready_generation=$(sed -n "s/^\\[wm-frame\\] host-gpu-ready backend=$BACKEND generation=\\([1-9][0-9]*\\)[[:space:]]*$/\\1/p" "$log")
@@ -312,18 +309,11 @@ serial_receipts_valid() {
 }
 
 negotiation_applicability() {
-    isa=$1
-    encoded=$2
-    lane=${3:-probe}
-    qemu_argv_evidence_valid "$isa" "$encoded" "$lane" || return 1
-    accel=$(encoded_argv_field "$encoded" 4) || return 1
-    if [ "$accel" = "$(encoded_arg tcg)" ]; then
+    if [ "$1" = "$HOST_ARCH" ]; then
+        echo native-isa
+    else
         echo cross-isa-tcg-correctness-only
-        return 0
     fi
-    expected_native=$(host_native_accel)
-    [ -n "$expected_native" ] && [ "$isa" = "$HOST_ARCH" ] && [ "$accel" = "$(encoded_arg "$expected_native")" ] || return 1
-    echo native-isa
 }
 
 render_latency_p95_us() {
@@ -413,13 +403,12 @@ negotiation_timing_evidence_valid() (
             return substr($n, length(prefix) + 1)
         }
         $1 == "HOST_GPU_MAP_OK" {
-            if (expected_scope == "probe") {
-                if (NF != 3 || $2 != "isa=" expected_isa || field(3, "device=") !~ /^[1-9][0-9]*$/) bad = 1
-            } else if (expected_scope == "production") {
-                if (NF != 4 || $2 != "scope=production" || $3 != "isa=" expected_isa || field(4, "base=") !~ /^[1-9][0-9]*$/) bad = 1
-            } else bad = 1
-            map_count++
-            map_line = NR
+            if (expected_scope != "probe" || NF != 3 || $2 != "isa=" expected_isa || field(3, "device=") !~ /^[1-9][0-9]*$/) {
+                bad = 1
+            } else {
+                map_count++
+                map_line = NR
+            }
         }
         $1 == "HOST_GPU_HELLO_OK" {
             if (expected_scope != "probe" || NF < 3 || $2 != "isa=" expected_isa) {
@@ -537,7 +526,6 @@ negotiation_timing_evidence_valid() (
                     if (hello_count != 1 || done_line >= hello_line || hello_generation + 0 != declared_final + 0) exit 1
                 } else if (hello_count != 0) exit 1
             } else if (expected_scope == "production") {
-                if (map_count != 1 || map_line >= first_event_line) exit 1
                 if (result == "selected") {
                     if (ready_count != 1 || done_line >= ready_line || ready_backend != final_backend ||
                         ready_generation + 0 != declared_final + 0) exit 1
@@ -747,45 +735,6 @@ qemu_bin_for_isa() {
     esac
 }
 
-host_native_accel() {
-    case "$ACTIVE_HOST" in
-        linux) echo kvm ;;
-        macos) echo hvf ;;
-        windows) echo whpx ;;
-        *) return 1 ;;
-    esac
-}
-
-host_native_accel_available() {
-    case "$(host_native_accel 2>/dev/null || true)" in
-        kvm) [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] ;;
-        hvf) [ "$(sysctl -n kern.hv_support 2>/dev/null || true)" = 1 ] ;;
-        whpx)
-            command -v powershell.exe >/dev/null 2>&1 &&
-                powershell.exe -NoProfile -NonInteractive -Command \
-                    '(Get-CimInstance Win32_ComputerSystem).HypervisorPresent' 2>/dev/null |
-                tr -d '\r' | grep -iq '^true$'
-            ;;
-        *) return 1 ;;
-    esac
-}
-
-qemu_accel_supported() {
-    "$1" -accel help 2>&1 | grep -Eq "^[[:space:]]*$2[[:space:]]*$"
-}
-
-qemu_accel_for_isa() {
-    isa=$1
-    qemu_bin=$2
-    native=$(host_native_accel 2>/dev/null || true)
-    if [ "$isa" = "$HOST_ARCH" ] && [ -n "$native" ] && host_native_accel_available && qemu_accel_supported "$qemu_bin" "$native"; then
-        echo "$native"
-    else
-        qemu_accel_supported "$qemu_bin" tcg || return 1
-        echo tcg
-    fi
-}
-
 qemu_capabilities_available() {
     isa=$1
     qemu_bin=$2
@@ -795,12 +744,10 @@ qemu_capabilities_available() {
     "$qemu_bin" -machine help >"$capability_dir/$isa-machines.log" 2>&1 || return 1
     "$qemu_bin" -device help >"$capability_dir/$isa-devices.log" 2>&1 || return 1
     "$qemu_bin" -object help >"$capability_dir/$isa-objects.log" 2>&1 || return 1
-    "$qemu_bin" -accel help >"$capability_dir/$isa-accels.log" 2>&1 || return 1
     grep -Eq "(^|[[:space:],])$machine([[:space:],]|$)" "$capability_dir/$isa-machines.log" || return 1
     grep -Fq ivshmem-plain "$capability_dir/$isa-devices.log" || return 1
     [ "$isa" != aarch64 ] || grep -Fq ramfb "$capability_dir/$isa-devices.log" || return 1
     grep -Fq memory-backend-file "$capability_dir/$isa-objects.log" || return 1
-    grep -Eq '^[[:space:]]*tcg[[:space:]]*$' "$capability_dir/$isa-accels.log" || return 1
 }
 
 metal_guest_contract_available() {
@@ -914,14 +861,6 @@ encoded_kernel_path_valid() {
     esac
 }
 
-aarch64_accel_cpu_valid() {
-    if [ "$1" = tcg ]; then
-        [ "$2" = "$(encoded_arg cortex-a72)" ]
-    else
-        [ "$1" = native ] && [ "$2" = "$(encoded_arg host)" ]
-    fi
-}
-
 qemu_argv_evidence_valid() (
     isa=$1
     encoded=$2
@@ -931,7 +870,6 @@ qemu_argv_evidence_valid() (
     IFS=,
     set -- ${encoded#hex:}
     IFS=$old_ifs
-    [ "$#" -ge 4 ] || return 1
     if [ "$lane" = production ] && [ "$isa" = aarch64 ]; then
         kernel_suffix=$(encoded_arg "$(basename "$(arm64_production_kernel)")")
     else
@@ -941,65 +879,48 @@ qemu_argv_evidence_valid() (
     object_prefix='memory-backend-file,id=hostgpu,share=on,mem-path='
     object_suffix=',size=8M'
     ivshmem=$(encoded_arg 'ivshmem-plain,memdev=hostgpu')
-    [ "$3" = "$(encoded_arg -accel)" ] || return 1
-    case "$4" in
-        "$(encoded_arg tcg)") accel=tcg ;;
-        "$(encoded_arg kvm)"|"$(encoded_arg hvf)"|"$(encoded_arg whpx)") accel=native ;;
-        *) return 1 ;;
-    esac
     case "$isa:$lane" in
         x86_64:probe)
-            [ "$#" -eq 16 ] &&
+            [ "$#" -eq 14 ] &&
             [ "$1" = "$(encoded_arg -machine)" ] && [ "$2" = "$(encoded_arg q35)" ] &&
-            [ "$5" = "$(encoded_arg -m)" ] && [ "$6" = "$(encoded_arg 512M)" ] &&
-            [ "$7" = "$(encoded_arg -kernel)" ] && encoded_kernel_path_valid "$8" "$kernel_suffix" &&
-            [ "$9" = "$(encoded_arg -nographic)" ] && [ "${10}" = "$(encoded_arg -no-reboot)" ] &&
-            [ "${11}" = "$(encoded_arg -device)" ] && [ "${12}" = "$(encoded_arg virtio-net-pci)" ] &&
-            [ "${13}" = "$(encoded_arg -object)" ] && encoded_arg_has_affixes "${14}" "$object_prefix" "$object_suffix" &&
-            [ "${15}" = "$(encoded_arg -device)" ] && [ "${16}" = "$ivshmem" ]
+            [ "$3" = "$(encoded_arg -m)" ] && [ "$4" = "$(encoded_arg 512M)" ] &&
+            [ "$5" = "$(encoded_arg -kernel)" ] && encoded_kernel_path_valid "$6" "$kernel_suffix" &&
+            [ "$7" = "$(encoded_arg -nographic)" ] && [ "$8" = "$(encoded_arg -no-reboot)" ] &&
+            [ "$9" = "$(encoded_arg -device)" ] && [ "${10}" = "$(encoded_arg virtio-net-pci)" ] &&
+            [ "${11}" = "$(encoded_arg -object)" ] && encoded_arg_has_affixes "${12}" "$object_prefix" "$object_suffix" &&
+            [ "${13}" = "$(encoded_arg -device)" ] && [ "${14}" = "$ivshmem" ]
             ;;
         aarch64:probe)
+            [ "$#" -eq 15 ] &&
+            [ "$1" = "$(encoded_arg -machine)" ] && [ "$2" = "$(encoded_arg virt)" ] &&
+            [ "$3" = "$(encoded_arg -cpu)" ] && [ "$4" = "$(encoded_arg cortex-a72)" ] &&
+            [ "$5" = "$(encoded_arg -m)" ] && [ "$6" = "$(encoded_arg 512M)" ] &&
+            [ "$7" = "$(encoded_arg -kernel)" ] && encoded_kernel_path_valid "$8" "$kernel_suffix" &&
+            [ "$9" = "$(encoded_arg -nographic)" ] && [ "${10}" = "$(encoded_arg -device)" ] &&
+            [ "${11}" = "$(encoded_arg virtio-net-pci)" ] && [ "${12}" = "$(encoded_arg -object)" ] &&
+            encoded_arg_has_affixes "${13}" "$object_prefix" "$object_suffix" &&
+            [ "${14}" = "$(encoded_arg -device)" ] && [ "${15}" = "$ivshmem" ]
+            ;;
+        aarch64:production)
             [ "$#" -eq 17 ] &&
             [ "$1" = "$(encoded_arg -machine)" ] && [ "$2" = "$(encoded_arg virt)" ] &&
-            [ "$5" = "$(encoded_arg -cpu)" ] && aarch64_accel_cpu_valid "$accel" "$6" &&
-            [ "$7" = "$(encoded_arg -m)" ] && [ "$8" = "$(encoded_arg 512M)" ] &&
-            [ "$9" = "$(encoded_arg -kernel)" ] && encoded_kernel_path_valid "${10}" "$kernel_suffix" &&
-            [ "${11}" = "$(encoded_arg -nographic)" ] && [ "${12}" = "$(encoded_arg -device)" ] &&
+            [ "$3" = "$(encoded_arg -cpu)" ] && [ "$4" = "$(encoded_arg cortex-a72)" ] &&
+            [ "$5" = "$(encoded_arg -m)" ] && [ "$6" = "$(encoded_arg 512M)" ] &&
+            [ "$7" = "$(encoded_arg -kernel)" ] && encoded_kernel_path_valid "$8" "$kernel_suffix" &&
+            [ "$9" = "$(encoded_arg -nographic)" ] && [ "${10}" = "$(encoded_arg -device)" ] &&
+            [ "${11}" = "$(encoded_arg ramfb)" ] && [ "${12}" = "$(encoded_arg -device)" ] &&
             [ "${13}" = "$(encoded_arg virtio-net-pci)" ] && [ "${14}" = "$(encoded_arg -object)" ] &&
             encoded_arg_has_affixes "${15}" "$object_prefix" "$object_suffix" &&
             [ "${16}" = "$(encoded_arg -device)" ] && [ "${17}" = "$ivshmem" ]
             ;;
-        aarch64:production)
-            [ "$#" -eq 19 ] &&
-            [ "$1" = "$(encoded_arg -machine)" ] && [ "$2" = "$(encoded_arg virt)" ] &&
-            [ "$5" = "$(encoded_arg -cpu)" ] && aarch64_accel_cpu_valid "$accel" "$6" &&
-            [ "$7" = "$(encoded_arg -m)" ] && [ "$8" = "$(encoded_arg 512M)" ] &&
-            [ "$9" = "$(encoded_arg -kernel)" ] && encoded_kernel_path_valid "${10}" "$kernel_suffix" &&
-            [ "${11}" = "$(encoded_arg -nographic)" ] && [ "${12}" = "$(encoded_arg -device)" ] &&
-            [ "${13}" = "$(encoded_arg ramfb)" ] && [ "${14}" = "$(encoded_arg -device)" ] &&
-            [ "${15}" = "$(encoded_arg virtio-net-pci)" ] && [ "${16}" = "$(encoded_arg -object)" ] &&
-            encoded_arg_has_affixes "${17}" "$object_prefix" "$object_suffix" &&
-            [ "${18}" = "$(encoded_arg -device)" ] && [ "${19}" = "$ivshmem" ]
-            ;;
         riscv64:probe)
-            if [ "$accel" = tcg ]; then
-                [ "$#" -eq 13 ] &&
-                [ "$1" = "$(encoded_arg -machine)" ] && [ "$2" = "$(encoded_arg virt)" ] &&
-                [ "$5" = "$(encoded_arg -m)" ] && [ "$6" = "$(encoded_arg 512M)" ] &&
-                [ "$7" = "$(encoded_arg -kernel)" ] && encoded_kernel_path_valid "$8" "$kernel_suffix" &&
-                [ "$9" = "$(encoded_arg -nographic)" ] && [ "${10}" = "$(encoded_arg -object)" ] &&
-                encoded_arg_has_affixes "${11}" "$object_prefix" "$object_suffix" &&
-                [ "${12}" = "$(encoded_arg -device)" ] && [ "${13}" = "$ivshmem" ]
-            else
-                [ "$#" -eq 15 ] &&
-                [ "$1" = "$(encoded_arg -machine)" ] && [ "$2" = "$(encoded_arg virt)" ] &&
-                [ "$5" = "$(encoded_arg -cpu)" ] && [ "$6" = "$(encoded_arg host)" ] &&
-                [ "$7" = "$(encoded_arg -m)" ] && [ "$8" = "$(encoded_arg 512M)" ] &&
-                [ "$9" = "$(encoded_arg -kernel)" ] && encoded_kernel_path_valid "${10}" "$kernel_suffix" &&
-                [ "${11}" = "$(encoded_arg -nographic)" ] && [ "${12}" = "$(encoded_arg -object)" ] &&
-                encoded_arg_has_affixes "${13}" "$object_prefix" "$object_suffix" &&
-                [ "${14}" = "$(encoded_arg -device)" ] && [ "${15}" = "$ivshmem" ]
-            fi
+            [ "$#" -eq 11 ] &&
+            [ "$1" = "$(encoded_arg -machine)" ] && [ "$2" = "$(encoded_arg virt)" ] &&
+            [ "$3" = "$(encoded_arg -m)" ] && [ "$4" = "$(encoded_arg 512M)" ] &&
+            [ "$5" = "$(encoded_arg -kernel)" ] && encoded_kernel_path_valid "$6" "$kernel_suffix" &&
+            [ "$7" = "$(encoded_arg -nographic)" ] && [ "$8" = "$(encoded_arg -object)" ] &&
+            encoded_arg_has_affixes "$9" "$object_prefix" "$object_suffix" &&
+            [ "${10}" = "$(encoded_arg -device)" ] && [ "${11}" = "$ivshmem" ]
             ;;
         *) return 1 ;;
     esac
@@ -1014,9 +935,7 @@ arm64_production_evidence_valid() (
     arm64_production_serial_has_correlated_frame "$production_log" "$production_args" || return 1
     qemu_argv_evidence_valid aarch64 "$probe_args" || return 1
     qemu_argv_evidence_valid aarch64 "$production_args" production || return 1
-    [ "$(encoded_argv_field "$probe_args" 4)" = "$(encoded_argv_field "$production_args" 4)" ] || return 1
-    [ "$(encoded_argv_field "$probe_args" 6)" = "$(encoded_argv_field "$production_args" 6)" ] || return 1
-    [ "$(encoded_argv_field "$probe_args" 15)" = "$(encoded_argv_field "$production_args" 17)" ] || return 1
+    [ "$(encoded_argv_field "$probe_args" 13)" = "$(encoded_argv_field "$production_args" 15)" ] || return 1
     probe_generation=$(sed -n 's/^HOST_GPU_PROCESS_OK isa=aarch64 .* generation=\([1-9][0-9]*\) .*/\1/p' "$probe_log")
     production_first_generation=$(sed -n "s/^HOST_GPU_NEGOTIATION_DONE scope=production isa=aarch64 result=selected backend=$BACKEND attempts=[1-3] first_generation=\\([1-9][0-9]*\\) .*/\\1/p" "$production_log")
     production_ready_generation=$(sed -n "s/^\\[wm-frame\\] host-gpu-ready backend=$BACKEND generation=\\([1-9][0-9]*\\)[[:space:]]*$/\\1/p" "$production_log")
@@ -1134,13 +1053,13 @@ validate_report() (
                 fi
                 if ! {
                     [ "$row_reason" = ok ] &&
-                    row_qemu_device_args=$(report_one "$report" "${prefix}_qemu_device_args") &&
-                    [ -f "$row_log" ] && serial_has_pass "$row_log" "$report_isa" "$row_qemu_device_args" &&
+                    [ -f "$row_log" ] && serial_has_pass "$row_log" "$report_isa" &&
                     [ "$row_processing_backend" = "$(serial_processing_backend "$row_log" "$report_isa")" ] &&
                     row_qemu_version=$(report_one "$report" "${prefix}_qemu_version") &&
                     row_render_sample_count=$(report_one "$report" "${prefix}_render_sample_count") &&
                     row_render_readback_p95_us=$(report_one "$report" "${prefix}_render_readback_p95_us") &&
                     row_render_latency_applicability=$(report_one "$report" "${prefix}_render_latency_applicability") &&
+                    row_qemu_device_args=$(report_one "$report" "${prefix}_qemu_device_args") &&
                     row_daemon_rss=$(report_one "$report" "${prefix}_daemon_max_rss_kib") &&
                     row_qemu_rss=$(report_one "$report" "${prefix}_qemu_max_rss_kib") &&
                     row_combined_rss=$(report_one "$report" "${prefix}_combined_max_rss_kib") &&
@@ -1248,28 +1167,6 @@ self_test() {
     REQUIRE_CUDA=0
     temp_dir=$(mktemp -d)
     trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
-    runtime_fixtures="$temp_dir/runtime-fixtures"
-    for fixture in valid missing-cuda missing-vulkan missing-archive multiple; do
-        mkdir -p "$runtime_fixtures/$fixture/bootstrap/.fingerprint/simple-runtime-one"
-        printf '%s\n' x >"$runtime_fixtures/$fixture/bootstrap/libsimple_runtime.a"
-    done
-    printf '%s\n' '{"features":"[\"cpu-simd\", \"cuda\", \"default\", \"vulkan\"]","declared_features":"[]"}' >"$runtime_fixtures/valid/bootstrap/.fingerprint/simple-runtime-one/lib-simple_runtime.json"
-    printf '%s\n' '{"features":"[\"cpu-simd\", \"default\", \"vulkan\"]","declared_features":"[\"cuda\"]"}' >"$runtime_fixtures/missing-cuda/bootstrap/.fingerprint/simple-runtime-one/lib-simple_runtime.json"
-    printf '%s\n' '{"features":"[\"cpu-simd\", \"cuda\", \"default\"]","declared_features":"[\"vulkan\"]"}' >"$runtime_fixtures/missing-vulkan/bootstrap/.fingerprint/simple-runtime-one/lib-simple_runtime.json"
-    cp "$runtime_fixtures/valid/bootstrap/.fingerprint/simple-runtime-one/lib-simple_runtime.json" "$runtime_fixtures/missing-archive/bootstrap/.fingerprint/simple-runtime-one/lib-simple_runtime.json"
-    rm -f "$runtime_fixtures/missing-archive/bootstrap/libsimple_runtime.a"
-    cp "$runtime_fixtures/valid/bootstrap/.fingerprint/simple-runtime-one/lib-simple_runtime.json" "$runtime_fixtures/multiple/bootstrap/.fingerprint/simple-runtime-one/lib-simple_runtime.json"
-    mkdir -p "$runtime_fixtures/multiple/bootstrap/.fingerprint/simple-runtime-two"
-    cp "$runtime_fixtures/valid/bootstrap/.fingerprint/simple-runtime-one/lib-simple_runtime.json" "$runtime_fixtures/multiple/bootstrap/.fingerprint/simple-runtime-two/lib-simple_runtime.json"
-    linux_runtime_artifact_is_valid "$runtime_fixtures/valid/bootstrap"
-    if linux_runtime_artifact_is_valid "$runtime_fixtures/missing-cuda/bootstrap" ||
-       linux_runtime_artifact_is_valid "$runtime_fixtures/missing-vulkan/bootstrap" ||
-       linux_runtime_artifact_is_valid "$runtime_fixtures/missing-archive/bootstrap" ||
-       linux_runtime_artifact_is_valid "$runtime_fixtures/multiple/bootstrap"
-    then
-        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
-        exit 1
-    fi
     pass_log="$temp_dir/pass.log"
     fail_log="$temp_dir/fail.log"
     corrupt_log="$temp_dir/corrupt.log"
@@ -1346,8 +1243,6 @@ self_test() {
     production_stale_negotiation_log="$temp_dir/arm64-production-stale-negotiation.log"
     production_duplicate_log="$temp_dir/arm64-production-duplicate.log"
     production_missing_log="$temp_dir/arm64-production-missing.log"
-    production_missing_map_log="$temp_dir/arm64-production-missing-map.log"
-    production_late_map_log="$temp_dir/arm64-production-late-map.log"
     metal_production_log="$temp_dir/metal-arm64-production.log"
     directx_production_log="$temp_dir/directx-arm64-production.log"
     pass_report="$temp_dir/pass.env"
@@ -1387,25 +1282,20 @@ self_test() {
         -device virtio-net-pci -object "memory-backend-file,id=hostgpu,share=on,mem-path=$temp_dir/x86 host gpu.shm,size=8M" \
         -device ivshmem-plain,memdev=hostgpu)
     x86_native_qemu_args=$(encode_argv_hex -machine q35 -accel kvm -m 512M -kernel "$(kernel_for_isa x86_64)" -nographic -no-reboot \
-        -device virtio-net-pci -object "memory-backend-file,id=hostgpu,share=on,mem-path=$temp_dir/x86 native host gpu.shm,size=8M" \
+        -device virtio-net-pci -object "memory-backend-file,id=hostgpu,share=on,mem-path=$temp_dir/x86 host gpu.shm,size=8M" \
         -device ivshmem-plain,memdev=hostgpu)
-    arm_qemu_args=$(encode_argv_hex -machine virt -accel tcg -cpu cortex-a72 -m 512M -kernel "$(kernel_for_isa aarch64)" -nographic \
+    arm_qemu_args=$(encode_argv_hex -machine virt -cpu cortex-a72 -m 512M -kernel "$(kernel_for_isa aarch64)" -nographic \
         -device virtio-net-pci -object "memory-backend-file,id=hostgpu,share=on,mem-path=$temp_dir/arm host gpu.shm,size=8M" \
         -device ivshmem-plain,memdev=hostgpu)
-    arm_production_qemu_args=$(encode_argv_hex -machine virt -accel tcg -cpu cortex-a72 -m 512M -kernel "$(arm64_production_kernel)" -nographic \
+    arm_production_qemu_args=$(encode_argv_hex -machine virt -cpu cortex-a72 -m 512M -kernel "$(arm64_production_kernel)" -nographic \
         -device ramfb -device virtio-net-pci -object "memory-backend-file,id=hostgpu,share=on,mem-path=$temp_dir/arm host gpu.shm,size=8M" \
         -device ivshmem-plain,memdev=hostgpu)
-    arm_production_other_shm_args=$(encode_argv_hex -machine virt -accel tcg -cpu cortex-a72 -m 512M -kernel "$(arm64_production_kernel)" -nographic \
+    arm_production_other_shm_args=$(encode_argv_hex -machine virt -cpu cortex-a72 -m 512M -kernel "$(arm64_production_kernel)" -nographic \
         -device ramfb -device virtio-net-pci -object "memory-backend-file,id=hostgpu,share=on,mem-path=$temp_dir/other arm host gpu.shm,size=8M" \
         -device ivshmem-plain,memdev=hostgpu)
-    rv_qemu_args=$(encode_argv_hex -machine virt -accel tcg -m 512M -kernel "$(kernel_for_isa riscv64)" -nographic \
+    rv_qemu_args=$(encode_argv_hex -machine virt -m 512M -kernel "$(kernel_for_isa riscv64)" -nographic \
         -object "memory-backend-file,id=hostgpu,share=on,mem-path=$temp_dir/rv host gpu.shm,size=8M" \
         -device ivshmem-plain,memdev=hostgpu)
-    saved_host_arch=$HOST_ARCH
-    HOST_ARCH=x86_64
-    [ "$(negotiation_applicability x86_64 "$x86_native_qemu_args")" = native-isa ]
-    [ "$(negotiation_applicability aarch64 "$arm_qemu_args")" = cross-isa-tcg-correctness-only ]
-    HOST_ARCH=$saved_host_arch
     cat >"$valid_simple" <<'EOF'
 #!/bin/sh
 if [ "$1" = "--version" ]; then
@@ -1577,7 +1467,6 @@ TEST PASSED
 EOF
     cat >"$production_log" <<EOF
 [WM] ramfb configured successfully via fw_cfg DMA
-HOST_GPU_MAP_OK scope=production isa=aarch64 base=4096
 [wm-frame] host-gpu-fallback reason=negotiation status=2 detail=2
 HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa=aarch64 backend=metal generation=46 outcome=rejected status=2 reason=9 daemon_elapsed_us=10 guest_elapsed_us=20
 HOST_GPU_NEGOTIATION_ATTEMPT scope=production isa=aarch64 backend=directx generation=47 outcome=rejected status=2 reason=9 daemon_elapsed_us=10 guest_elapsed_us=20
@@ -1604,9 +1493,6 @@ EOF
         "$production_log" >"$production_stale_negotiation_log"
     { cat "$production_log"; grep '^\[wm-frame\] host-gpu-presented ' "$production_log"; } >"$production_duplicate_log"
     grep -v '^\[desktop-gui-arm64\] desktop-ready ' "$production_log" >"$production_missing_log"
-    grep -v '^HOST_GPU_MAP_OK scope=production ' "$production_log" >"$production_missing_map_log"
-    grep -v '^HOST_GPU_MAP_OK scope=production ' "$production_log" |
-        awk '/^HOST_GPU_NEGOTIATION_DONE / { print "HOST_GPU_MAP_OK scope=production isa=aarch64 base=4096" } { print }' >"$production_late_map_log"
     cat >"$metal_production_log" <<EOF
 [WM] ramfb configured successfully via fw_cfg DMA
 HOST_GPU_MAP_OK scope=production isa=aarch64 base=4096
@@ -1807,71 +1693,69 @@ EOF
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
-    serial_has_pass "$pass_log" aarch64 "$arm_qemu_args"
-    serial_has_pass "$vulkan_log" aarch64 "$arm_qemu_args"
+    serial_has_pass "$pass_log" aarch64
+    serial_has_pass "$vulkan_log" aarch64
     REQUIRE_CUDA=1
-    if serial_has_pass "$vulkan_log" aarch64 "$arm_qemu_args"; then
+    if serial_has_pass "$vulkan_log" aarch64; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
     REQUIRE_CUDA=0
-    if serial_has_pass "$fail_log" aarch64 "$arm_qemu_args"; then
+    if serial_has_pass "$fail_log" aarch64; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
-    if serial_has_pass "$corrupt_log" aarch64 "$arm_qemu_args"; then
+    if serial_has_pass "$corrupt_log" aarch64; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
-    if serial_has_pass "$corrupt_draw_ir_log" aarch64 "$arm_qemu_args"; then
+    if serial_has_pass "$corrupt_draw_ir_log" aarch64; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
-    if serial_has_pass "$wrong_backend_log" aarch64 "$arm_qemu_args"; then
+    if serial_has_pass "$wrong_backend_log" aarch64; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
-    if serial_has_pass "$wrong_generation_log" aarch64 "$arm_qemu_args"; then
+    if serial_has_pass "$wrong_generation_log" aarch64; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
-    if serial_render_fixture_valid "$wrong_fixture_log" aarch64 || serial_has_pass "$wrong_fixture_log" aarch64 "$arm_qemu_args"; then
+    if serial_render_fixture_valid "$wrong_fixture_log" aarch64 || serial_has_pass "$wrong_fixture_log" aarch64; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
-    if serial_has_pass "$wrong_fixture_correlation_log" aarch64 "$arm_qemu_args"; then
+    if serial_has_pass "$wrong_fixture_correlation_log" aarch64; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
-    if serial_has_pass "$stale_generation_log" aarch64 "$arm_qemu_args"; then
+    if serial_has_pass "$stale_generation_log" aarch64; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
-    if serial_has_pass "$trailing_log" aarch64 "$arm_qemu_args"; then
+    if serial_has_pass "$trailing_log" aarch64; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
-    if serial_has_pass "$contradictory_terminal_log" aarch64 "$arm_qemu_args"; then
+    if serial_has_pass "$contradictory_terminal_log" aarch64; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
-    arm64_production_serial_has_correlated_frame "$production_log" "$arm_production_qemu_args"
+    arm64_production_serial_has_correlated_frame "$production_log"
     arm64_production_evidence_valid "$pass_log" "$arm_qemu_args" "$production_log" "$arm_production_qemu_args"
-    arm64_production_serial_has_correlated_frame "$production_discontinuous_log" "$arm_production_qemu_args"
+    arm64_production_serial_has_correlated_frame "$production_discontinuous_log"
     if arm64_production_evidence_valid "$pass_log" "$arm_qemu_args" "$production_log" "$arm_production_other_shm_args" ||
        arm64_production_evidence_valid "$pass_log" "$arm_qemu_args" "$production_discontinuous_log" "$arm_production_qemu_args"
     then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
-    if arm64_production_serial_has_correlated_frame "$production_wrong_backend_log" "$arm_production_qemu_args" ||
-       arm64_production_serial_has_correlated_frame "$production_wrong_run_log" "$arm_production_qemu_args" ||
-       arm64_production_serial_has_correlated_frame "$production_wrong_frame_log" "$arm_production_qemu_args" ||
-       arm64_production_serial_has_correlated_frame "$production_stale_negotiation_log" "$arm_production_qemu_args" ||
-       arm64_production_serial_has_correlated_frame "$production_duplicate_log" "$arm_production_qemu_args" ||
-       arm64_production_serial_has_correlated_frame "$production_missing_log" "$arm_production_qemu_args" ||
-       arm64_production_serial_has_correlated_frame "$production_missing_map_log" "$arm_production_qemu_args" ||
-       arm64_production_serial_has_correlated_frame "$production_late_map_log" "$arm_production_qemu_args"
+    if arm64_production_serial_has_correlated_frame "$production_wrong_backend_log" ||
+       arm64_production_serial_has_correlated_frame "$production_wrong_run_log" ||
+       arm64_production_serial_has_correlated_frame "$production_wrong_frame_log" ||
+       arm64_production_serial_has_correlated_frame "$production_stale_negotiation_log" ||
+       arm64_production_serial_has_correlated_frame "$production_duplicate_log" ||
+       arm64_production_serial_has_correlated_frame "$production_missing_log"
     then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
@@ -1946,24 +1830,21 @@ EOF
         exit 1
     fi
     qemu_argv_evidence_valid x86_64 "$x86_qemu_args"
-    qemu_argv_evidence_valid x86_64 "$x86_native_qemu_args"
     qemu_argv_evidence_valid aarch64 "$arm_qemu_args"
     qemu_argv_evidence_valid aarch64 "$arm_production_qemu_args" production
     qemu_argv_evidence_valid riscv64 "$rv_qemu_args"
-    if qemu_argv_evidence_valid x86_64 "$(encode_argv_hex -machine q35 -m 512M -kernel "$(kernel_for_isa x86_64)" -nographic -no-reboot -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
-       qemu_argv_evidence_valid x86_64 "$(encode_argv_hex -machine q35 -accel bogus -m 512M -kernel "$(kernel_for_isa x86_64)" -nographic -no-reboot -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
-       qemu_argv_evidence_valid x86_64 "$(encode_argv_hex -machine virt -accel tcg -m 512M -kernel "$(kernel_for_isa x86_64)" -nographic -no-reboot -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
-       qemu_argv_evidence_valid aarch64 "$(encode_argv_hex -machine virt -accel tcg -cpu cortex-a72 -m 512M -kernel "$(kernel_for_isa x86_64)" -nographic -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
-       qemu_argv_evidence_valid aarch64 "$(encode_argv_hex -machine virt -accel tcg -cpu cortex-a72 -m 512M -kernel "evil$(basename "$(kernel_for_isa aarch64)")" -nographic -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
-       qemu_argv_evidence_valid riscv64 "$(encode_argv_hex -machine virt -accel tcg -m 512M -kernel "$(kernel_for_isa riscv64)" -nographic -object memory-backend-file,id=hostgpu,share=on,mem-path=x,readonly=on,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
-       qemu_argv_evidence_valid riscv64 "$(encode_argv_hex -machine virt -accel tcg -m 512M -kernel "$(kernel_for_isa riscv64)" -nographic -object memory-backend-file,id=hostgpu,share=off,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
-       qemu_argv_evidence_valid riscv64 "$(encode_argv_hex -machine virt -accel tcg -m 512M -kernel "$(kernel_for_isa riscv64)" -nographic -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=wrong)" ||
-       qemu_argv_evidence_valid aarch64 "$(encode_argv_hex -machine virt -accel tcg -cpu cortex-a72 -m 512M -kernel "$(arm64_production_kernel)" -nographic -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" production
+    if qemu_argv_evidence_valid x86_64 "$(encode_argv_hex -machine virt -m 512M -kernel "$(kernel_for_isa x86_64)" -nographic -no-reboot -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
+       qemu_argv_evidence_valid aarch64 "$(encode_argv_hex -machine virt -cpu cortex-a72 -m 512M -kernel "$(kernel_for_isa x86_64)" -nographic -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
+       qemu_argv_evidence_valid aarch64 "$(encode_argv_hex -machine virt -cpu cortex-a72 -m 512M -kernel "evil$(basename "$(kernel_for_isa aarch64)")" -nographic -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
+       qemu_argv_evidence_valid riscv64 "$(encode_argv_hex -machine virt -m 512M -kernel "$(kernel_for_isa riscv64)" -nographic -object memory-backend-file,id=hostgpu,share=on,mem-path=x,readonly=on,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
+       qemu_argv_evidence_valid riscv64 "$(encode_argv_hex -machine virt -m 512M -kernel "$(kernel_for_isa riscv64)" -nographic -object memory-backend-file,id=hostgpu,share=off,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" ||
+       qemu_argv_evidence_valid riscv64 "$(encode_argv_hex -machine virt -m 512M -kernel "$(kernel_for_isa riscv64)" -nographic -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=wrong)" ||
+       qemu_argv_evidence_valid aarch64 "$(encode_argv_hex -machine virt -cpu cortex-a72 -m 512M -kernel "$(arm64_production_kernel)" -nographic -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)" production
     then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
-    wrong_machine_args=$(encode_argv_hex -machine virt -accel tcg -m 512M -kernel "$(kernel_for_isa x86_64)" -nographic -no-reboot -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)
+    wrong_machine_args=$(encode_argv_hex -machine virt -m 512M -kernel "$(kernel_for_isa x86_64)" -nographic -no-reboot -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path=x,size=8M -device ivshmem-plain,memdev=hostgpu)
     sed "s|simpleos_qemu_host_gpu_2d_linux_x86_64_qemu_device_args=$x86_qemu_args|simpleos_qemu_host_gpu_2d_linux_x86_64_qemu_device_args=$wrong_machine_args|" "$pass_report" >"$bad_backend_report"
     if validate_report "$bad_backend_report" >/dev/null 2>&1; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
@@ -2027,11 +1908,11 @@ EOF
         exit 1
     fi
     set_host_contract macos
-    serial_has_pass "$metal_log" aarch64 "$arm_qemu_args"
-    arm64_production_serial_has_correlated_frame "$metal_production_log" "$arm_production_qemu_args"
-    if serial_has_pass "$metal_wrong_mask_log" aarch64 "$arm_qemu_args" ||
-       serial_has_pass "$metal_wrong_backend_log" aarch64 "$arm_qemu_args" ||
-       serial_has_pass "$metal_wrong_generation_log" aarch64 "$arm_qemu_args"
+    serial_has_pass "$metal_log" aarch64
+    arm64_production_serial_has_correlated_frame "$metal_production_log"
+    if serial_has_pass "$metal_wrong_mask_log" aarch64 ||
+       serial_has_pass "$metal_wrong_backend_log" aarch64 ||
+       serial_has_pass "$metal_wrong_generation_log" aarch64
     then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
@@ -2068,12 +1949,12 @@ EOF
     } >"$metal_pass_report"
     validate_report "$metal_pass_report" >/dev/null
     set_host_contract windows
-    serial_has_pass "$directx_log" aarch64 "$arm_qemu_args"
-    serial_has_pass "$directx_vulkan_log" aarch64 "$arm_qemu_args"
-    arm64_production_serial_has_correlated_frame "$directx_production_log" "$arm_production_qemu_args"
-    if serial_has_pass "$directx_wrong_mask_log" aarch64 "$arm_qemu_args" ||
-       serial_has_pass "$directx_wrong_backend_log" aarch64 "$arm_qemu_args" ||
-       serial_has_pass "$directx_wrong_identity_log" aarch64 "$arm_qemu_args"
+    serial_has_pass "$directx_log" aarch64
+    serial_has_pass "$directx_vulkan_log" aarch64
+    arm64_production_serial_has_correlated_frame "$directx_production_log"
+    if serial_has_pass "$directx_wrong_mask_log" aarch64 ||
+       serial_has_pass "$directx_wrong_backend_log" aarch64 ||
+       serial_has_pass "$directx_wrong_identity_log" aarch64
     then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
@@ -2252,13 +2133,7 @@ if [ -z "${SIMPLEOS_GPU_HOST_BIN:-}" ]; then
     elif [ "$host" = windows ]; then
         runtime_reason=directx-runtime-artifact-missing
     fi
-    runtime_ready=0
-    if [ "$host" = linux ]; then
-        if prepare_linux_runtime; then runtime_ready=1; fi
-    elif [ -d "$RUNTIME_PATH" ] && { [ "$host" != macos ] || core_c_bootstrap_runtime_available; }; then
-        runtime_ready=1
-    fi
-    if [ "$runtime_ready" != 1 ]; then
+    if [ ! -d "$RUNTIME_PATH" ] || { [ "$host" = macos ] && ! core_c_bootstrap_runtime_available; }; then
         for isa in x86_64 aarch64 riscv64; do emit_row "$host" "$isa" blocked "$runtime_reason" none; done
         echo "simpleos_qemu_host_gpu_2d_host=$host"
         echo "simpleos_qemu_host_gpu_2d_host_arch=$HOST_ARCH"
@@ -2388,29 +2263,21 @@ run_guest() {
     fi
     "$daemon" "$@" >"$daemon_log" 2>&1 &
     daemon_pid=$!
-    qemu_accel=$(qemu_accel_for_isa "$isa" "$qemu_bin")
     case "$isa" in
         x86_64)
-            set -- -machine q35 -accel "$qemu_accel" -m 512M -kernel "$kernel" -nographic -no-reboot \
+            set -- -machine q35 -m 512M -kernel "$kernel" -nographic -no-reboot \
                 -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path="$shm",size=8M \
                 -device ivshmem-plain,memdev=hostgpu
             ;;
         aarch64)
-            qemu_cpu=$(if [ "$qemu_accel" = tcg ]; then echo cortex-a72; else echo host; fi)
-            set -- -machine virt -accel "$qemu_accel" -cpu "$qemu_cpu" -m 512M -kernel "$kernel" -nographic \
+            set -- -machine virt -cpu cortex-a72 -m 512M -kernel "$kernel" -nographic \
                 -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path="$shm",size=8M \
                 -device ivshmem-plain,memdev=hostgpu
             ;;
         riscv64)
-            if [ "$qemu_accel" = tcg ]; then
-                set -- -machine virt -accel tcg -m 512M -kernel "$kernel" -nographic \
-                    -object memory-backend-file,id=hostgpu,share=on,mem-path="$shm",size=8M \
-                    -device ivshmem-plain,memdev=hostgpu
-            else
-                set -- -machine virt -accel "$qemu_accel" -cpu host -m 512M -kernel "$kernel" -nographic \
-                    -object memory-backend-file,id=hostgpu,share=on,mem-path="$shm",size=8M \
-                    -device ivshmem-plain,memdev=hostgpu
-            fi
+            set -- -machine virt -m 512M -kernel "$kernel" -nographic \
+                -object memory-backend-file,id=hostgpu,share=on,mem-path="$shm",size=8M \
+                -device ivshmem-plain,memdev=hostgpu
             ;;
     esac
     qemu_version=$("$qemu_bin" --version 2>&1 | sed -n '1p')
@@ -2431,8 +2298,7 @@ run_guest() {
     if [ "$isa" = aarch64 ] && [ "$probe_valid" = 1 ]; then
         production_serial="$BUILD_DIR/aarch64-production-serial.log"
         rm -f "$production_serial"
-        qemu_cpu=$(if [ "$qemu_accel" = tcg ]; then echo cortex-a72; else echo host; fi)
-        set -- -machine virt -accel "$qemu_accel" -cpu "$qemu_cpu" -m 512M -kernel "$(arm64_production_kernel)" -nographic \
+        set -- -machine virt -cpu cortex-a72 -m 512M -kernel "$(arm64_production_kernel)" -nographic \
             -device ramfb -device virtio-net-pci \
             -object memory-backend-file,id=hostgpu,share=on,mem-path="$shm",size=8M \
             -device ivshmem-plain,memdev=hostgpu

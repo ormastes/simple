@@ -54,6 +54,16 @@ source fixes from executable proof.
 | 20 | C-owned host-GPU queue facade and fail-closed archive ownership checks implemented; native queue execution proof remains. |
 | 21 | Reduced to the Rust seed parser's inline-continuation consumption bug; inline-first and block-first source fixes plus focused chained-inline regressions are implemented, while regression and real inspector execution remain pending. The pure-Simple parser needed no rewrite. |
 
+## Verification update (2026-07-16)
+
+The host-GPU checker had seven unresolved merge-conflict blocks and could not
+parse. Those blocks were resolved in the checker, including the TCG/native
+QEMU argument distinction and runtime-evidence predicates. `bash -n` now passes.
+The checker self-test still stops at pure-Simple candidate admission: the
+candidate native-build probe is killed before producing its proof artifact.
+This remains an execution blocker; no host-GPU or QEMU PASS is claimed until
+that admission failure is fixed and the self-test completes.
+
 ---
 
 ## Wave 1 — Codegen silent-wrong (highest priority: wrong answers, no diagnostic)
