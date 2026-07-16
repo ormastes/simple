@@ -70,6 +70,18 @@ host. Host/unset and exact hosted targets remain supported; SimpleOS keeps its
 specialized link lanes. Real hosted cross-linking remains open until one
 resolved target compiler/sysroot is threaded through both C compilation steps.
 
+Target-qualified `asm match`/`asm assert` lowering no longer assumes
+`x86_64-linux-gnu` with LLVM 15. The driver now creates one immutable target
+context from the requested triple, normalized host fallback, effective backend,
+and cached LLVM tool version, then threads it through normal, bootstrap, and
+nested-lambda MIR lowering. Linux, macOS, Windows, FreeBSD, x86/x86_64,
+ARM/AArch64, and RISC-V normalization regressions are recorded. LLVM remains
+the default; Cranelift remains available only when selected explicitly. Because
+Cranelift exposes no version discovery surface yet, version-qualified Cranelift
+asm fails diagnostically instead of comparing against a fabricated version. Runtime
+execution proof is pending a valid pure-Simple executable under the verification
+contract above.
+
 ---
 
 ## Wave 1 — Codegen silent-wrong (highest priority: wrong answers, no diagnostic)

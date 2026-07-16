@@ -15,12 +15,13 @@ use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptio
 use compiler.backend.backend.backend_helpers.{compile_bootstrap_module_with_backend}
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_function_count, bootstrap_hir_function_at}
-use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module, bootstrap_set_entry_hir_module, bootstrap_clear_entry_hir_module, bootstrap_lower_extra_hir_module_to_mir, bootstrap_function_value_names_reset, bootstrap_register_function_value_module}
+use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module_for_target, bootstrap_set_entry_hir_module, bootstrap_clear_entry_hir_module, bootstrap_lower_extra_hir_module_to_mir_for_target, bootstrap_function_value_names_reset, bootstrap_register_function_value_module}
 use compiler.mir_opt.{ssa_alloca_transform_blocks}
 use compiler.common.driver_core_types.{CompileResult}
 use driver_types.{CompileContext, CompileOptions}
 use compiler.driver.driver_log_helpers.{log_phase, log_error}
 use compiler.driver.driver_source_loading.{_driver_module_name_from_path}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_write_text_at(path: text, offset: i64, content: text) -> bool
@@ -111,6 +112,7 @@ pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, b
     if bootstrap_trace_enabled():
         print "[driver-mir] bootstrap free:start"
     var next_ctx = ctx
+    val target_context = driver_mir_target_context(ctx.options)
     # Hand the real HIR module for the requested entry (produced by the HIR phase
     # from the freshly-parsed Module.functions) to the MIR free path so it lowers
     # real bodies instead of ret-0 stubs.
@@ -122,7 +124,7 @@ pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, b
             bootstrap_register_function_value_module(hir_module)
     if ctx.bootstrap_entry_hir.?:
         bootstrap_set_entry_hir_module(ctx.bootstrap_entry_hir.unwrap())
-    var bootstrap_mir = bootstrap_lower_hir_globals_to_mir_module()
+    var bootstrap_mir = bootstrap_lower_hir_globals_to_mir_module_for_target(target_context)
     # --entry-closure builds parse+HIR-lower EVERY module reachable from the
     # entry (see SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE handling in driver.spl and
     # flat_is_bootstrap_entry_path), but the line above only feeds the single
@@ -144,7 +146,7 @@ pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, b
                 if extra_name != entry_module_name:
                     if bootstrap_trace_enabled():
                         print "[driver-mir] bootstrap closure extra module={extra_name}"
-                    val _added = bootstrap_lower_extra_hir_module_to_mir(extra_hir)
+                    val _added = bootstrap_lower_extra_hir_module_to_mir_for_target(extra_hir, target_context)
     next_ctx.bootstrap_entry_mir = Some(bootstrap_mir)
     next_ctx.mir_modules[entry_module_name] = bootstrap_mir
     if bootstrap_trace_enabled():
@@ -211,10 +213,11 @@ pub fn bootstrap_driver_stub_mir_function(symbol: SymbolId, name: text) -> MirFu
         memory_banks: 0
     )
 
-pub fn bootstrap_lower_hir_globals_to_mir_module_driver() -> MirModule:
+pub fn bootstrap_lower_hir_globals_to_mir_module_driver(ctx: CompileContext) -> MirModule:
     """Driver-local entry point for real bootstrap MIR lowering."""
     log_phase("aot:bootstrap_driver_mir:start")
-    val module = bootstrap_lower_hir_globals_to_mir_module()
+    val target_context = driver_mir_target_context(ctx.options)
+    val module = bootstrap_lower_hir_globals_to_mir_module_for_target(target_context)
     log_phase("aot:bootstrap_driver_mir:done")
     module
 
@@ -465,7 +468,7 @@ pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_na
         log_phase("aot:bootstrap_native_local_real:local_mir")
         var next_ctx = ctx
         log_phase("aot:bootstrap_native_local_real:free_mir:start")
-        val bootstrap_mir = bootstrap_lower_hir_globals_to_mir_module_driver()
+        val bootstrap_mir = bootstrap_lower_hir_globals_to_mir_module_driver(ctx)
         log_phase("aot:bootstrap_native_local_real:free_mir:done")
         next_ctx.bootstrap_entry_mir = Some(bootstrap_mir)
         return compile_bootstrap_context_to_native(next_ctx, backend_name, output)

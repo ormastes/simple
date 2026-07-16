@@ -31,6 +31,7 @@ use driver_types.{CompileContext, CompileOptions}
 use compiler.driver.driver.{CompilerDriver}
 use compiler.driver.driver_log_helpers.{log_debug, log_warn, log_phase}
 use compiler.driver.driver_source_loading.{_format_nll_error, _driver_is_bootstrap_entry_source}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -415,6 +416,8 @@ impl CompilerDriver:
                 skip_idx = skip_idx + 1
             return self.ctx.errors.len() == 0
 
+        val target_context = driver_mir_target_context(self.ctx.options)
+
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
             val bootstrap_hir = self.ctx.hir_modules["app.cli.bootstrap_main"]
             if bootstrap_hir == nil:
@@ -422,7 +425,7 @@ impl CompilerDriver:
                 log_phase("aot:lower_to_mir:missing_hir module=app.cli.bootstrap_main")
                 return false
             log_phase("aot:bootstrap_fixed:start module=app.cli.bootstrap_main functions={bootstrap_hir.functions.len()}")
-            var bootstrap_lowering = MirLowering.new(bootstrap_hir.symbols)
+            var bootstrap_lowering = MirLowering.new_for_target(bootstrap_hir.symbols, target_context)
             var bootstrap_mir = bootstrap_lowering.lower_module(bootstrap_hir)
             self.ctx.bootstrap_entry_mir = Some(bootstrap_mir)
             _driver_collect_mir_errors(self.ctx, bootstrap_lowering.errors)
@@ -480,7 +483,8 @@ impl CompilerDriver:
                 lambda_bindings: {},
                 lambda_capture_snapshot: {},
                 current_has_vhdl_metadata: false,
-                global_symbol_ids: {}
+                global_symbol_ids: {},
+                target_context: target_context
             )
             while direct_idx < self.ctx.sources.len():
                 val src_direct = self.ctx.sources[direct_idx]
@@ -553,7 +557,8 @@ impl CompilerDriver:
             lambda_bindings: {},
             lambda_capture_snapshot: {},
             current_has_vhdl_metadata: false,
-            global_symbol_ids: {}
+            global_symbol_ids: {},
+            target_context: target_context
         )
 
         # BUG-001 diagnostic: log module count entering MIR lowering
