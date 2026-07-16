@@ -54,6 +54,40 @@ function Command-Source([string]$name) {
     return ""
 }
 
+function Existing-Path([string[]]$paths) {
+    foreach ($path in $paths) {
+        if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path -LiteralPath $path)) {
+            return $path
+        }
+    }
+    return ""
+}
+
+function Candidate-Path([string]$base, [string]$child) {
+    if ([string]::IsNullOrWhiteSpace($base)) { return "" }
+    return Join-Path $base $child
+}
+
+function Latest-PixTool {
+    $pathTool = Command-Source "WinPix.exe"
+    if ($pathTool -ne "") { return $pathTool }
+    $pathTool = Command-Source "PIXWin.exe"
+    if ($pathTool -ne "") { return $pathTool }
+    $pixRoot = Candidate-Path $env:ProgramFiles "Microsoft PIX"
+    if (-not [string]::IsNullOrWhiteSpace($pixRoot) -and (Test-Path -LiteralPath $pixRoot)) {
+        $versions = Get-ChildItem -LiteralPath $pixRoot -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending
+        foreach ($version in $versions) {
+            $candidate = Join-Path $version.FullName "WinPix.exe"
+            if (Test-Path -LiteralPath $candidate) { return $candidate }
+        }
+    }
+    return Existing-Path @(
+        (Candidate-Path $env:ProgramFiles "Microsoft PIX\WinPix.exe"),
+        (Candidate-Path ${env:ProgramFiles(x86)} "Microsoft PIX\WinPix.exe")
+    )
+}
+
 function File-Status([string]$path) {
     if ([string]::IsNullOrWhiteSpace($path)) { return "missing" }
     if (-not (Test-Path -LiteralPath $path)) { return "missing" }
@@ -63,10 +97,17 @@ function File-Status([string]$path) {
     return "pass"
 }
 
+function Quote-Arg([string]$arg) {
+    if ($arg -match '[\s"]') {
+        return '"' + ($arg -replace '"', '\"') + '"'
+    }
+    return $arg
+}
+
 function Invoke-ProcessBound([string]$exe, [string[]]$arguments, [string]$stdoutPath, [string]$stderrPath, [int]$timeoutSecs) {
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $exe
-    foreach ($arg in $arguments) { $startInfo.ArgumentList.Add($arg) }
+    $startInfo.Arguments = ($arguments | ForEach-Object { Quote-Arg $_ }) -join " "
     $startInfo.WorkingDirectory = (Get-Location).Path
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
@@ -143,7 +184,7 @@ $directx = Read-KeyValueFile $DirectxEvidencePath
 $directxStatus = Value-Or $directx @("gui_web_2d_directx_browser_backing_status", "gui_web_2d_directx_native_readback_gate_status", "gui_web_2d_directx_native_readback_status") "missing"
 $directxNativeApi = Value-Or $directx @("directx_native_readback_api", "gui_web_2d_directx_native_readback_api", "gui_web_2d_directx_requested_angle", "gui_web_2d_directx_requested_api") "d3d11"
 $directxCaptureStatus = Value-Or $directx @("gui_web_2d_directx_gpu_debugger_capture_status") "missing"
-$pixTool = Command-Source "PIXWin.exe"
+$pixTool = Latest-PixTool
 $dxcapTool = Command-Source "DXCap.exe"
 
 $nativeRows = New-Object System.Collections.Generic.List[string]

@@ -152,6 +152,15 @@
   attempted `KhronosGroup.VulkanSDK` winget install reached the administrator
   UAC step and was canceled by the user, so the Vulkan SDK/RenderDoc bootstrap
   is an environment action rather than a code pass.
+- Windows D3D12 render-log environment evidence is recorded in
+  `doc/09_report/windows_d3d12_render_log_env_current_2026-07-16.md`. The
+  PowerShell wrapper now runs without the `ProcessStartInfo.ArgumentList`
+  compatibility crash, refreshes the passing D3D11/DXCap diagnostic, discovers
+  PIX via `WinPix.exe` and versioned install paths, and still fails closed on
+  the true D3D12 gates: native D3D12 readback, browser D3D12 backing, pairwise
+  ARGB diffs, ARGB source evidence, and PIX/GPU-debugger capture. The attempted
+  `Microsoft.PIX` winget install reached the elevated engine phase and did not
+  complete from this non-elevated shell.
  - Pure GUI release/perf evidence now defines a WM/web/native-runtime-free command
    boundary, SMF/dynlib performance contract, and fail-closed probe row. Current
    Linux-host evidence intentionally reports `pass=false` without a real
