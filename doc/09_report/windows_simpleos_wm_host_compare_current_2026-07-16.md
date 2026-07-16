@@ -17,6 +17,10 @@ Current Windows refresh for `scripts/check/check-simpleos-wm-host-compare-eviden
   `simpleos_wm_host_capture_kind=hosted-wm-rect-scene`.
 - Strict ARGB comparison: pass. `simpleos_wm_argb_diff_status=pass`,
   `simpleos_wm_argb_mismatch_count=0`.
+- Fresh live-QEMU source: pass. After the desktop-service QEMU live boot, the
+  wrapper compared the fresh `qemu-screendump.ppm` against a hosted WM capture
+  and again reported `simpleos_wm_argb_diff_status=pass` with
+  `simpleos_wm_argb_mismatch_count=0`.
 - Release compare gate: missing. `simpleos_wm_qemu_host_compare_status=missing`
   because QEMU/host RenderDoc logs and `simpleos-wm.rdc` are not present.
 
@@ -26,6 +30,7 @@ Current Windows refresh for `scripts/check/check-simpleos-wm-host-compare-eviden
 Push-Location $env:TEMP
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\ormas\dev\simple\scripts\check\check-simpleos-wm-host-compare-evidence.ps1 -EvidencePath build\simpleos_multiconfig_live_evidence\wm-host-compare-out-of-tree-capture.env -HostPpmPath build\os\systest\qemu-riscv64-desktop\host-wm-out-of-tree.ppm -HostCaptureLogPath build\simpleos_multiconfig_live_evidence\host-wm-capture-out-of-tree.log -AttemptHostWmCapture
 Pop-Location
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-simpleos-wm-host-compare-evidence.ps1 -EvidencePath build\simpleos_multiconfig_live_evidence\wm-host-compare-live-current.env -AttemptHostWmCapture
 ```
 
 The command exits fail-closed because the RenderDoc artifacts are missing, but

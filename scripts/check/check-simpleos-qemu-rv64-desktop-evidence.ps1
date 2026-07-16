@@ -313,6 +313,11 @@ $legacyKernelPath = Resolve-RepoPath "build/os/simpleos_riscv64.elf"
 $fpgaKernelPath = Resolve-RepoPath "build/os/simpleos_riscv64_fpga.elf"
 $canonicalImagePath = Resolve-RepoPath "build/os/fat32-riscv64.img"
 $storageProbeImagePath = Resolve-RepoPath "build/qemu-rv64-storage-probe.img"
+$liveKernelSelection = "requested"
+if ($RunLiveBoot -and $KernelPath -eq $canonicalKernelPath -and (Test-Path -LiteralPath $DesktopServiceKernelPath)) {
+    $KernelPath = $DesktopServiceKernelPath
+    $liveKernelSelection = "existing-desktop-service"
+}
 if ([string]::IsNullOrWhiteSpace($BuildLogPath)) {
     $BuildLogPath = Join-Path $ArtifactDir "rv64-build.log"
 }
@@ -467,6 +472,7 @@ if ($BuildDesktopServiceKernel) {
             if ($desktopProcess.ExitCode -eq 0 -and (Test-Path -LiteralPath $DesktopServiceKernelPath)) {
                 $desktopServiceBuildStatus = "pass"
                 $KernelPath = $DesktopServiceKernelPath
+                $liveKernelSelection = "built-desktop-service"
             } else {
                 $desktopServiceBuildStatus = "blocked:desktop-service-build-exit-$($desktopProcess.ExitCode)"
             }
@@ -714,6 +720,7 @@ if ($RunLiveBoot) {
 Write-Row $rows "simpleos_qemu_rv64_evidence_wrapper" "check-simpleos-qemu-rv64-desktop-evidence.ps1"
 Write-Row $rows "simpleos_qemu_rv64_live_boot_requested" $(if ($RunLiveBoot) { "true" } else { "false" })
 Write-Row $rows "simpleos_qemu_rv64_live_boot_status" "$liveBootStatus"
+Write-Row $rows "simpleos_qemu_rv64_live_kernel_selection" "$liveKernelSelection"
 Write-Row $rows "simpleos_qemu_rv64_qemu_exit_status" "$qemuExitStatus"
 Write-Row $rows "simpleos_qemu_rv64_artifact_dir" "$ArtifactDir"
 Write-Row $rows "simpleos_qemu_rv64_serial_log_path" "$SerialLogPath"

@@ -18,15 +18,19 @@ Current Windows refresh for
   `simpleos_qemu_rv64_canonical_kernel_status=pass`.
 - Disk image preflight: pass. `simpleos_qemu_rv64_image_status=pass` and
   `simpleos_qemu_rv64_canonical_image_status=pass`.
-- Live boot serial: pass. `-RunLiveBoot` launches QEMU, captures OpenSBI and
-  SimpleOS serial output, and reports `simpleos_qemu_serial_console_status=pass`
-  after `SIMPLEOS_RISCV_SMF_FS_PASS` / `TEST PASSED`.
-- Live service/capture probes: fail closed. The guest exits after the serial
-  pass before SSH, HTTP, QMP screendump, or structured WM/GPU readback can be
-  probed, so the current evidence reports
-  `simpleos_qemu_rv64_live_boot_status=guest-exited-before-service-probes`,
-  `simpleos_qemu_rv64_qemu_exit_status=exited:unknown`, and
-  `simpleos_qemu_rv64_blocker=guest-exited-before-service-probes`.
+- Live boot/capture: pass. `-RunLiveBoot` now selects the existing desktop
+  service kernel when available and reports
+  `simpleos_qemu_rv64_live_kernel_selection=existing-desktop-service`.
+  The Windows run launches QEMU, captures serial output, SSH, HTTP, QMP
+  screendump, GPU readback, and the WM marker:
+  `simpleos_qemu_serial_console_status=pass`,
+  `simpleos_qemu_rv64_ssh_probe_status=pass`,
+  `simpleos_qemu_rv64_http_probe_status=pass`,
+  `simpleos_qemu_rv64_http_status_code=200`,
+  `simpleos_qemu_rv64_qmp_status=pass`,
+  `simpleos_qemu_gpu_readback_status=pass`,
+  `simpleos_qemu_wm_marker_status=pass`, and
+  `simpleos_qemu_rv64_blocker=pass`.
 
 ## Evidence Command
 
@@ -37,6 +41,6 @@ Pop-Location
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-simpleos-qemu-rv64-desktop-evidence.ps1 -EvidencePath build\simpleos_multiconfig_live_evidence\qemu-rv64-desktop-live-current.env -RunLiveBoot -BootTimeoutSeconds 60
 ```
 
-The live command proves the Windows QEMU launch and serial boot path, but it
-does not complete the release capture gate because the guest exits before
-network and GPU/WM capture probes.
+The live command proves the Windows QEMU launch, network probes, QMP screendump,
+GPU readback, and WM marker path. RenderDoc `.rdc` and structured QEMU/host
+RenderDoc log evidence remain separate gates.

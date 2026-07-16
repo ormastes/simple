@@ -246,11 +246,15 @@
   `qemu-system-riscv64.exe`, reports `simpleos_qemu_rv64_kernel_status=pass`
   and `simpleos_qemu_rv64_image_status=pass`, and records repo-root absolute
   kernel, disk image, artifact, log, and build helper paths. Current live
-  `-RunLiveBoot` evidence launches QEMU and reaches
-  `simpleos_qemu_serial_console_status=pass` with `SIMPLEOS_RISCV_SMF_FS_PASS`
-  / `TEST PASSED`, but remains fail-closed because the guest exits before SSH,
-  HTTP, QMP screendump, or structured WM/GPU capture probes:
-  `simpleos_qemu_rv64_blocker=guest-exited-before-service-probes`.
+  `-RunLiveBoot` evidence now selects the existing desktop-service kernel and
+  reaches `simpleos_qemu_rv64_live_kernel_selection=existing-desktop-service`,
+  `simpleos_qemu_serial_console_status=pass`,
+  `simpleos_qemu_rv64_ssh_probe_status=pass`,
+  `simpleos_qemu_rv64_http_probe_status=pass`,
+  `simpleos_qemu_rv64_qmp_status=pass`,
+  `simpleos_qemu_gpu_readback_status=pass`,
+  `simpleos_qemu_wm_marker_status=pass`, and
+  `simpleos_qemu_rv64_blocker=pass`.
 - Windows SimpleOS FPGA RV64 serial evidence is recorded in
   `doc/09_report/windows_simpleos_fpga_rv64_serial_current_2026-07-16.md`.
   The direct PowerShell wrapper now anchors itself to the checkout root and was
@@ -290,7 +294,8 @@
   wrapper now resolves repo-relative inputs from `$PSScriptRoot` and was
   verified from outside the checkout. Hosted stdout capture completes with
   `simpleos_host_wm_capture_status=pass`, both QEMU and host PPMs pass as
-  `320x240` WM rect scenes, and strict ARGB comparison reports
+  `320x240` WM rect scenes, including the fresh desktop-service QEMU
+  screendump. Strict ARGB comparison reports
   `simpleos_wm_argb_diff_status=pass` with
   `simpleos_wm_argb_mismatch_count=0`. The release compare gate remains
   fail-closed on missing QEMU/host RenderDoc logs and `.rdc` capture.
