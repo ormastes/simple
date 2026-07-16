@@ -176,7 +176,9 @@ bin/simple spipe-docgen <spec> --output doc/06_spec --no-index
 
 Focused interpreter execution must reuse `build_interpreter_result_wrapper`
 through the pure test runner or `src/app/test/font_evidence_runner.spl`. The
-wrapper inspects the canonical spec module's `get_executed_test_count` and
+focused runner requires the selected pure-Simple binary as its first argument
+and invokes it on that wrapper instead of embedding a second compiler closure.
+The wrapper inspects the canonical spec module's `get_executed_test_count` and
 `get_exit_code` after execution.
 `CompileResult.Success` alone is inadmissible. The deliberate failing fixture
 must exit 1 with `test-runner: spec failed`; the zero-executed fixture must exit

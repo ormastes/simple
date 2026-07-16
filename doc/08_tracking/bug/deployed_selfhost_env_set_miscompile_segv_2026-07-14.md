@@ -205,3 +205,22 @@ standalone build reached its ten-minute cap without an artifact, while the
 bootstrap link cannot provide the hosted-only runner symbols because current
 native-build accepts only `simple-core` or `core-c-bootstrap`. No binary was
 deployed and no runner PASS is claimed.
+
+The focused `font_evidence_runner.spl` no longer embeds `interpret_file` and its
+full compiler closure. It builds only the shared result wrapper and invokes the
+explicitly selected pure-Simple child binary with `run`, preserving the same
+fail/empty calibration markers while making a small standalone runner build
+possible. The process owner preserves argv boundaries on Windows through the
+existing runtime API; the runner preserves stderr and distinguishes launch
+failure from an explicit timeout marker.
+
+## 2026-07-16 focused runner closure reduction
+
+The focused runner now requires `<pure-simple-bin> <spec.spl>` and uses the
+app-owned process facade. Its native entry closure resolved only the CLI, file,
+result-wrapper, and process owner modules; it no longer imports the compiler or
+full test orchestrator. The current retained self-hosted compiler nevertheless
+remained CPU-bound for five minutes without a diagnostic or output binary, so
+the third bounded build cycle was stopped. No runner artifact or fail/empty
+calibration PASS is claimed; resume only with a newer admitted pure-Simple
+compiler/runtime.

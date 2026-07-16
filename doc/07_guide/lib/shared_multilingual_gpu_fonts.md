@@ -653,8 +653,9 @@ SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/03_system/app/simple_2d/feature/g
 Interpreter runs are diagnostics only. These native source gates still do not
 substitute for submission, SimpleOS pixel, Engine3D, or performance gates.
 
-A focused runner using `interpret_file` is trustworthy only when its wrapper
-checks `get_executed_test_count` and `get_exit_code` inside the interpreted source;
+A focused runner invoking a selected pure-Simple runtime is trustworthy only
+when its wrapper checks `get_executed_test_count` and `get_exit_code` inside the
+interpreted source;
 `CompileResult.Success` by itself is false green for matcher failures. The fail
 fixture must exit 1 with `test-runner: spec failed`; the empty fixture must exit
 1 with `test-runner: no examples executed`. Reject 2/124/139 and retain exact
@@ -667,6 +668,10 @@ Engine3D, or performance evidence. Use the two calibration fixtures under
 The pure runner and focused runner share
 `std.test_runner.test_result_wrapper.build_interpreter_result_wrapper`; do not
 fork another harness or bypass its summary and fail-closed checks.
+Pass the exact admitted pure-Simple CLI as the focused runner's first argument;
+the second argument is the spec path. It deliberately has no implicit binary
+fallback. The runner preserves child stdout/stderr, maps only an explicit
+timeout marker to 124, and reports launch failure as 1.
 
 Run each acceptance gate once per session. Unavailable hardware or the stale
 self-hosted runtime is a blocker record, never a synthetic PASS.

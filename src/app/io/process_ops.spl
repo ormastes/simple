@@ -2,6 +2,7 @@
 # Extracted from mod.spl for modularity
 
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
+use std.nogc_sync_mut.sffi.system.{process_run_timeout as sffi_process_run_timeout}
 
 # Extern fn declarations (runtime resolves at file level)
 
@@ -108,49 +109,9 @@ fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, 
         (stdout, stderr, wrapper_code)
 
 fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
-    # Windows implementation using async spawn + temp files.
     val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
-
-    var temp_dir = rt_env_get("TEMP")
-    if temp_dir == "":
-        temp_dir = rt_env_get("TMP")
-    if temp_dir == "":
-        temp_dir = "C:\\Windows\\Temp"
-
-    val pid_str = "{rt_getpid()}"
-    val time_str = "{rt_time_now_unix_micros()}"
-    val stdout_file = "{temp_dir}\\simple_out_{pid_str}_{time_str}.txt"
-    val stderr_file = "{temp_dir}\\simple_err_{pid_str}_{time_str}.txt"
-
-    val args_str = args.join(" ")
-
-    val full_cmd = if args_str == "":
-        "{cmd} > \"{stdout_file}\" 2> \"{stderr_file}\""
-    else:
-        "{cmd} {args_str} > \"{stdout_file}\" 2> \"{stderr_file}\""
-
-    proc_slot_acquire()
-    val pid = rt_process_spawn_async("cmd", ["/c", full_cmd])
-    val exit_code = rt_process_wait(pid, effective_timeout)
-    proc_slot_release()
-
-    var stdout = ""
-    var stderr = ""
-
-    if rt_file_exists(stdout_file):
-        stdout = rt_file_read_text(stdout_file)
-        rt_file_delete(stdout_file)
-
-    if rt_file_exists(stderr_file):
-        stderr = rt_file_read_text(stderr_file)
-        rt_file_delete(stderr_file)
-
-    if exit_code == -2:
-        rt_process_kill(pid)
-        val timeout_secs = effective_timeout / 1000
-        (stdout, stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
-    else:
-        (stdout, stderr, exit_code)
+    # Preserve argv boundaries and avoid cmd.exe reinterpretation.
+    sffi_process_run_timeout(cmd, args, effective_timeout)
 
 fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     # Platform-agnostic timeout wrapper.
