@@ -5,11 +5,58 @@
 **Area:** native codegen (module-level var initialization)
 **Related:** baremetal module-level `val` zeroing (`feedback_baremetal_module_val_zero`), native env_get raw pointer (`native_env_get_raw_pointer_2026-06-12.md`)
 
-**Status (2026-07-15):** Pure-Simple scalar-global initialization fix landed.
+**Status (2026-07-16): RESOLVED (scalar bool/i64 module globals).** Pure-Simple
+scalar-global initialization fix landed 2026-07-15 and is now native-verified.
 Strict default-LLVM + explicit-Cranelift direct/getter first-read regression added to
-`scripts/check/check-native-seed-parity.shs`. The same regression now covers
-read-then-write name resolution and interpolation of the module slot; execution
-awaits a fresh pure-Simple compiler binary.
+`scripts/check/check-native-seed-parity.shs`
+(`write_case_module_global_false_first_read`). The same regression covers
+read-then-write name resolution and interpolation of the module slot.
+
+`var s = ""` (text) module globals are NOT covered by this fix — that is a
+distinct codegen bug, filed separately (see Regression evidence below).
+
+## Regression evidence (2026-07-16, lane modvar_bool)
+
+Native-build verification of the scalar cases (bool + i64):
+
+```
+# var FLAG = false / var COUNT = 0, read at startup then mutated
+$ env -u SIMPLE_BOOTSTRAP bin/simple native-build --entry pb.spl -o pb --clean && ./pb
+FLAG false (ok)
+direct false (ok)
+count=0
+after true (ok)
+count2=7            # rc=0
+```
+
+`var FLAG = false` reads false directly and via a getter fn; `var COUNT = 0`
+reads 0; both mutate and re-read correctly. The existing parity probe
+`write_case_module_global_false_first_read` (bool first-read + read-then-write
++ `{state}` interpolation) builds and prints `00|73|state=3` natively (rc=0),
+its expected value — the fix is confirmed.
+
+Verification caveats (see Fix direction / CONFLICT notes):
+- The seed interpreter `bin/simple run` (stale compiled-in interpreter) still
+  prints the OLD buggy `FLAG truthy (BUG)` for this repro, so it is not a valid
+  oracle here; the live-`src/compiler` native path is the correct reference and
+  emits the fixed `false` values.
+- At the target commit the seed cannot load current `src/compiler`
+  (`error: semantic: type mismatch: cannot convert dict to int`), so
+  `native-smoke-matrix.shs` and the parity harness cannot execute there
+  (`total=15 pass=0 fail=15` — all "build-failed", a seed↔source regression
+  independent of this bug). The scalar verification above was run at commit
+  `5c67273d180`, where `bootstrap_globals.spl` is byte-identical to the target
+  and native-build loads cleanly.
+
+## Third finding (2026-07-16): `var s = ""` text global → llc type mismatch
+
+Filed as `doc/08_tracking/bug/native_module_var_text_global_type_mismatch_2026-07-16.md`.
+Module-level `var NAME = ""` emits `@g_NAME = global i64 <ptr getelementptr>`,
+which `llc` rejects (`constant expression type mismatch: got type 'ptr' but
+expected 'i64'`) — the global slot type (`i64`) and the string initializer
+(`ptr`) disagree in `core_codegen.spl` around the
+`{g_name} = global {g_ty} {g_init}` emit. Distinct from the bool/i64 scalar
+fix; text globals need a runtime-handle init, not a raw char* constant.
 
 ## Repro
 
