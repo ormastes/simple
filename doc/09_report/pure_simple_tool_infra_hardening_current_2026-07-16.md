@@ -185,7 +185,8 @@ runtime remains unavailable, so executable qualification is still blocked.
   reads, and the remote-PC adapter quotes the test path before sending the
   unavoidable remote shell command. T32 SWD forwards the requested deadline
   to TRACE32, relay scripts use bounded structured argv, and production
-  remote-PC configuration remains open.
+  remote-PC configuration remains open. Remote test paths are restricted to
+  traversal-free repo-relative `test/*.spl` paths before command construction.
 - **Hardware protocol transport:** OpenOCD process startup and every TRACE32
   profile now use structured argv with explicit deadlines. OpenOCD commands
   share the bounded Telnet owner, and program paths reject command-language

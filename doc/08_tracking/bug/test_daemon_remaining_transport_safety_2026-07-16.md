@@ -24,12 +24,11 @@ Date: 2026-07-16
   structured argv for discovery and commands.
 - T32 SWD forwards caller deadlines into the TRACE32 process owner. Relay
   scripts use bounded structured argv for execute, send, and receive.
+- Remote execution accepts only repo-relative `test/*.spl` paths without
+  traversal, alternate separators, or control characters.
 
 ## Remaining work
 
 - Remote-PC remains unreachable from production registration because no
   terminal configuration source is defined for the daemon.
-- Remote test paths are safely shell-quoted but are not yet restricted to a
-  centrally validated repo-relative policy.
-
-The remaining fixes belong in the shared configuration and path-policy owners.
+The remaining fix belongs in the shared daemon configuration owner.
