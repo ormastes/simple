@@ -1,5 +1,9 @@
 # Shared Multilingual GPU Fonts — Domain Research TLDR
 
+> Historical pre-selection snapshot. Current selected state and evidence limits
+> are authoritative in `doc/02_requirements/feature/shared_multilingual_gpu_fonts.md`
+> and `doc/07_guide/lib/shared_multilingual_gpu_fonts.md`.
+
 - L2 is the only currently verified reproducible ranking: pin CLDR 48.2 and
   deterministically derive “CLDR literate-functional reach.”
 - Noto OFL script families are the safest multilingual base.

@@ -38,12 +38,14 @@ stale PASS artifact.
 
 > **Interpreter-mode verification caveat.** `it` bodies may execute, but the
 > outer file summary can still print `PASS`/exit 0 after matcher failures. A
-> focused `interpret_file` wrapper must inspect same-compilation-unit
+> focused `interpret_file` execution must reuse
+> `build_interpreter_result_wrapper` so the same compilation unit inspects
 > `get_executed_test_count` and `get_exit_code`; `CompileResult.Success` alone
 > is never PASS. Calibrate with deliberate-red and zero-executed fixtures, and
 > keep interpreter evidence diagnostic. Tracked:
 > `doc/08_tracking/bug/test_runner_interpreter_file_summary_greenwash_2026-07-03.md`.
-> Reuse `src/app/test/font_evidence_runner.spl`; do not create another wrapper.
+> Reuse the pure test runner or `src/app/test/font_evidence_runner.spl`; do not
+> create another result wrapper.
 
 The SPipe dev entrypoint lives at:
 
@@ -639,13 +641,18 @@ observe a pass:
   Run shared multilingual font acceptance SSpecs with
   `SIMPLE_NO_STUB_FALLBACK=1 bin/simple test <spec> --mode=native`; interpreter runs are diagnostics and cannot
   promote a manifest cell, backend, or performance row.
-  The canonical `src/app/test/font_evidence_runner.spl` runner must append `print_summary`,
+  The pure test runner and canonical `src/app/test/font_evidence_runner.spl`
+  must share `build_interpreter_result_wrapper`, which appends `print_summary`,
   `get_executed_test_count`, and `get_exit_code` checks to the interpreted source.
   `CompileResult.Success` alone is false green: matcher failures only update
-  spec state. Prove deliberate-red and zero-executed-example fixtures exit nonzero
-  before using that runner as diagnostic evidence. It must use the existing
-  file facade, map every non-success `CompileResult` nonzero, and delete its
-  temporary wrapper.
+  spec state. Require exit 1 plus `test-runner: spec failed` for deliberate-red
+  and exit 1 plus `test-runner: no examples executed` for zero-executed before
+  using that runner as diagnostic evidence; reject 2/124/139. Use
+  `scripts/check/fixtures/font_evidence_runner_fail_spec.spl` and
+  `scripts/check/fixtures/font_evidence_runner_empty_spec.spl`. It must use the
+  existing file facade, map every non-success `CompileResult` nonzero, and
+  delete its temporary wrapper. Retain exact commands, runner binary SHA-256,
+  and both logs under the canonical `$system_test` artifact path.
   Resolve matrix policy by exact language and category. Unknown axes fail
   closed, and `witness_family` must not be treated as a loadable asset unless
   the resolved status is `native` or `fallback`.

@@ -23,7 +23,7 @@ This is a consolidation and completion feature, not a greenfield font stack. The
 | `src/lib/nogc_sync_mut/engine/render/font_atlas.spl:1-83` | ASCII atlas geometry only | Explicitly has no texture upload and renders tinted cells. |
 | `src/lib/gc_async_mut/engine/render/gpu_pipeline.spl:201-220` | Game/3D-facing `DrawText` quad generation | Ignores real `FontId` resources and binds texture handle zero. |
 | `src/lib/gc_async_mut/gpu/engine3d/backend.spl:82-159` | Texture, shader and compute API shape | Several concrete backends still emulate resource operations; native promotion needs per-backend proof. |
-| `doc/09_report/verify_simple_2d_vector_fonts_2026-07-11.md` | Current focused evidence | Overall FAIL: warm-cache NFR missed, canonical binary absent, and CUDA/Vulkan/native-host rows unavailable. |
+| `doc/09_report/simple_2d_vector_fonts_perf_2026-07-11.md` | Historical focused evidence | PENDING pure-Simple retained performance evidence; the recorded rows do not promote current native font execution. |
 
 ## Current backend truth
 

@@ -96,6 +96,13 @@ windows preserve an explicit language field. Missing language remains `und`
 and keeps the previous monospace default, while an explicit language without a
 family requests the multilingual sans fallback.
 
+Installed releases retain canonical `assets/fonts/...` identity strings. The
+installer copies the complete pinned asset tree plus license/notices below
+`share/simple` and exports that directory as `SIMPLE_ASSET_ROOT`. The existing
+registry byte-load boundary maps selected canonical paths beneath that root;
+without an installed root it preserves repository-relative paths. Selected-file
+validation still checks the pinned byte length and SHA-256 before material creation.
+
 `ShapedGlyph` now owns absolute source/cluster identity and current advance/
 offset values so reordering cannot detach metadata. `ShapedRun.language` is
 caller metadata (`und` when omitted); script direction remains a per-run flag,

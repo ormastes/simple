@@ -39,8 +39,9 @@ The pinned 10-language × 10-category source policy contains 67 native cells,
 serif complex-script cells. It accepts sans Hindi and Arabic/Urdu witnesses plus
 the exact monochrome Noto Emoji `U+1F600` corpus tuple for every selected
 language tag; the last promoted-baseline self-hosted shaping/material scenario
-exited 0. The refreshed scenario with
-pending serif probes exits 139 in the tracked stale-ABI CLI before assertions.
+exited 0. The refreshed scenario with pending serif probes has no admitted
+runner PASS: pinned release SHA `04a38e21…` exits 139 before assertions, while
+the latest retained candidate reaches a separate recursion guard.
 Other complex scripts, emoji sequences/color, general GSUB/GPOS/BiDi, Engine3D native
 execution, executed Web/GUI/WM glyph-pixel parity, retained SimpleOS guest
 pixel evidence, retained native v5 stage/promotion evidence, and performance targets remain gated. Transient Vulkan evidence owns fused queue/device, fence observation, readback, and CPU-oracle timings; durable records never make captured handles reusable authority. Atlas and face generations invalidate cached material; unavailable

@@ -43,7 +43,7 @@ release must not create, rewrite, or weaken SPipe evidence after verification.
 - Every REQ-NNN has at least one test
 - Every required SPipe generated/manual spec exists under `doc/06_spec/` at the
   path mirrored from the executable `test/...` spec
-- For changed specs, `simple spipe-docgen <spec> --output doc/06_spec --no-index`
+- For changed specs, `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`
   reports complete documentation with `0 stubs`; a generated manual marked as a
   stub is a FAIL even when the `.md` file exists.
 - Scenario-oriented generated docs read as manuals: primary scenario steps are
@@ -54,6 +54,9 @@ release must not create, rewrite, or weaken SPipe evidence after verification.
   accepted architecture/design/spec/manual references.
 - CUDA font production trust must satisfy the canonical artifact rule in
   `.codex/skills/system_test/SKILL.md` before PASS.
+- Shared-font interpreter calibration must satisfy `$system_test`: fail and
+  empty fixtures each exit 1 with their distinct canonical marker; reject
+  2/124/139 and retain commands, binary SHA-256, and logs at its artifact path.
 - Placeholder helpers for shared interfaces or manual setup/checker flow fail
   explicitly with `assert(false)` or `fail(...)` until implemented; silent
   placeholder passes are a FAIL.

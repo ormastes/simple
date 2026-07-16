@@ -84,6 +84,13 @@ and Arabic witness faces, and exact-corpus Noto Emoji. Serif Devanagari/Arabic
 and two rank-eleven Bengali faces remain candidates.
 The distribution-size gate counts unique binaries, metadata, licenses, and the
 Roboto Slab copyright notice together against the 80 MiB ceiling.
+The release installer copies `assets/fonts/`, `LICENSE`, and
+`THIRD_PARTY_NOTICES.md` below `share/simple`. Its wrapper exports that share
+directory as `SIMPLE_ASSET_ROOT`; the registry byte-load boundary resolves the
+same canonical paths there. A configured
+installed root takes precedence; without one, repository-relative paths remain
+unchanged.
+Installed paths do not create a second catalog or change pinned identities.
 The two serif script candidates have bounded default-instance source profiles
 and independent glyph/advance/offset probes. They remain unavailable to normal
 selection because the retained full pure-Simple CLI has not executed those
@@ -126,8 +133,10 @@ and accepts exact monochrome Noto Emoji `U+1F600` corpus tuples for all ten
 selected language tags. The matrix totals are 67 `native`, 4 explicit
 script-sans mono `fallback`, 26 `not-designed-for-script`, and 3 `unavailable`;
 the last promoted-baseline shaping/material scenario exited 0. The refreshed
-scenario with pending serif probes exits 139 in the tracked stale-ABI
-pure-Simple CLI before assertions.
+scenario with pending serif probes has no current runner PASS. The pinned
+release artifact SHA `04a38e21…` exits 139 before assertions; the latest
+retained candidate reaches a distinct recursion guard. Both are tracked in
+`doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`.
 An accepted identity cell means
 the exact pinned face stayed live, parsed cmap and runtime glyph IDs agreed for
 the exact language witness, bounded hmtx advances matched, shaping completed,
@@ -139,7 +148,7 @@ GPU execution, and the refreshed source-policy run remain incomplete.
 The pending serif probes pin Noto Serif Devanagari glyphs and Noto Naskh
 Arabic/Urdu GSUB/GPOS results, reject wrong-language pairs, marks, profile
 drift, and non-default axes, and require nonzero canonical material per glyph.
-They are readiness evidence only until a current-ABI pure-Simple CLI runs them.
+They are readiness evidence only until a working deployed pure-Simple CLI runs them.
 
 ## Current shared material
 
@@ -286,6 +295,10 @@ mode reproduced it, and a full-CLI build without `examples/10_tooling` also
 reproduced it with no new cache objects. This is a compiler/runtime deployment
 defect, not font-source failure, and neither a seed, minimal-stage binary, nor
 the pre-bridge full CLI is native acceptance evidence.
+A fresh full CLI has not yet been admitted. The exact binary digest, command,
+GDB failure site, retained-candidate recursion result, and latest bounded
+bootstrap failure are recorded in the tracked deployment bug linked above;
+none is font acceptance evidence.
 
 Canonical `FontRenderer` fallback glyphs are rasterized on CPU. Environment-
 published accelerator pixels are compatibility-only diagnostics and cannot
@@ -639,12 +652,18 @@ substitute for submission, SimpleOS pixel, Engine3D, or performance gates.
 
 A focused runner using `interpret_file` is trustworthy only when its wrapper
 checks `get_executed_test_count` and `get_exit_code` inside the interpreted source;
-`CompileResult.Success` by itself is false green for matcher failures. First
-prove deliberate-red and zero-executed-example fixtures exit nonzero, and bind
-the log to the fresh pure-Simple runner digest. The result may be labeled only
+`CompileResult.Success` by itself is false green for matcher failures. The fail
+fixture must exit 1 with `test-runner: spec failed`; the empty fixture must exit
+1 with `test-runner: no examples executed`. Reject 2/124/139 and retain exact
+commands, runner SHA-256, and both logs under
+`build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/`.
+The result may be labeled only
 `interpret-diagnostic`; it cannot promote manifest, native GPU, SimpleOS pixel,
 Engine3D, or performance evidence. Use the two calibration fixtures under
 `scripts/check/fixtures/font_evidence_runner_{fail,empty}_spec.spl`.
+The pure runner and focused runner share
+`std.test_runner.test_result_wrapper.build_interpreter_result_wrapper`; do not
+fork another harness or bypass its summary and fail-closed checks.
 
 Run each acceptance gate once per session. Unavailable hardware or the stale
 self-hosted runtime is a blocker record, never a synthetic PASS.

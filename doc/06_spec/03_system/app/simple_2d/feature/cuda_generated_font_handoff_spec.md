@@ -4,6 +4,9 @@
 **Traceability:** REQ-010, REQ-014; NFR-002, NFR-008
 **Executable:** `test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl`
 
+> Hand-maintained mirror pending canonical `spipe-docgen`; no generated-manual
+> PASS is claimed.
+
 This focused scenario proves only the generated CUDA Engine2D font-composite
 handoff. It is independent of the Vulkan Engine3D, SimpleOS framebuffer, and
 performance rows in `native_gpu_font_readback_spec.spl`; those rows need not use
@@ -13,7 +16,7 @@ the same device or backend.
 
 ### Prove native submission and device readback
 
-Run `check-portable-compute-toolchains.shs` with a fresh pure-Simple compiler,
+Run `sh scripts/check/check-portable-compute-toolchains.shs` with a fresh pure-Simple compiler,
 its resolved native runtime, `nvcc`, and an explicit device-supported
 `CUDA_ARCH`. Point `CUDA_FONT_TOOLCHAIN_EVIDENCE` at the resulting
 `evidence.env`, then execute this one-scenario spec.

@@ -75,12 +75,15 @@ face pass without test-side policy mutation, as do the ten exact monochrome
 Noto Emoji `U+1F600` corpus tuples. The source-policy matrix is 67 `native`
 plus 4 `fallback` cells; the remaining cells are 26
 `not-designed-for-script` and 3 `unavailable` serif complex-script cells.
-The refreshed scenario containing the pending serif probes currently exits 139
-in the tracked stale-ABI pure-Simple CLI before reaching assertions.
+The refreshed scenario containing the pending serif probes has no admitted
+runner PASS. Pinned release SHA `04a38e21…` exits 139 before assertions, while
+the latest retained candidate reaches a separate recursion guard; see the
+tracked deployment bug at
+`doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`.
 The executable source also probes the exact default Noto Serif Devanagari and
 Noto Naskh Arabic/Urdu faces, including independent glyph/advance/offset
 oracles and nonzero material per glyph. Those probes are not selection-policy
-PASS evidence until a current-ABI pure-Simple CLI reaches their assertions.
+PASS evidence until a working deployed pure-Simple CLI reaches their assertions.
 Missing/stale inputs, Arabic marks outside the selected witnesses, other Indic
 sequences, and emoji sequences fail closed. This does not prove general emoji
 or GPU execution.

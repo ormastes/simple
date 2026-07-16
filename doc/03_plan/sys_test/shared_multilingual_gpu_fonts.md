@@ -100,18 +100,18 @@ behavior.
 | REQ-001 | `shared_font_manifest_spec.spl` / `shared_font_manifest_spec.md` | pinned hashes/top ten; script totals; tenth/eleventh boundary | 3 source cases; fresh regeneration and native execution pending |
 | REQ-002 | `shared_font_manifest_spec.spl` / `shared_font_manifest_spec.md` | fixed decimal/fallback; alias/macrolanguage policy; double regeneration | 3 source cases; fresh regeneration and native execution pending |
 | REQ-003 | `shared_font_manifest_spec.spl` / `shared_font_manifest_spec.md` | complete sparse cells; honest fallback; unavailable/not-designed distinction | 3 source cases; fresh regeneration and native execution pending |
-| REQ-004 | `shared_font_manifest_spec.spl` / `shared_font_manifest_spec.md` | complete license metadata; checksum/table validation; missing field rejection | 3 source cases; fresh byte/license validation pending |
+| REQ-004 | `shared_font_manifest_spec.spl` / `shared_font_manifest_spec.md`, `font_asset_manifest_spec.spl`, `install_font_assets_spec.spl` | complete license metadata; checksum/table validation; installed-prefix asset/notice resolution; missing field rejection | repository manifest and installed-root source/unit cases present; temp-prefix execution remains pending |
 | REQ-005 | `shared_font_manifest_spec.spl` / `shared_font_manifest_spec.md` | pinned catalog revision; unchanged accepted bytes; corpus rejection | 3 source cases; current pure-Simple corpus execution pending |
 | REQ-006 | `shared_font_surfaces_spec.spl` / `shared_font_surfaces_spec.md` | one owner; identical batch identity; no duplicate material cache | 3 source cases; interpreter diagnostic and native route execution pending |
-| REQ-007 | `shared_font_shaping_acceptance_spec.spl` plus focused unit and renderer oracles | exact-face simple-script oracle; exact Hindi `dev2` and bounded Arabic/Urdu vectors on sans; explicit hi/ar/ur mono fallback; exact monochrome Noto Emoji `U+1F600` corpus tuple under all ten selected language tags; pending exact Serif Devanagari/Naskh default-instance probes | sans and exact-corpus Emoji source policy promoted; serif probes are source-complete but cells remain unavailable because the stale-ABI pure-Simple CLI crashes before assertions; sequence/color Emoji remains fail-closed |
+| REQ-007 | `shared_font_shaping_acceptance_spec.spl` plus focused unit and renderer oracles | exact-face simple-script oracle; exact Hindi `dev2` and bounded Arabic/Urdu vectors on sans; explicit hi/ar/ur mono fallback; exact monochrome Noto Emoji `U+1F600` corpus tuple under all ten selected language tags; pending exact Serif Devanagari/Naskh default-instance probes | sans and exact-corpus Emoji source policy promoted; serif probes remain unavailable; pinned release SHA `04a38e21…` exits 139 before assertions, while the latest retained candidate reaches a separate recursion guard; sequence/color Emoji remains fail-closed |
 | REQ-008 | `shared_font_manifest_spec.spl` plus focused sfnt/bitmap unit specs | compound/default-glyf corpus reconstruction; unsupported-format/axis rejection; literal default-variable + bitmap fixtures | 3/3 source; refreshed literal variable oracle execution blocked |
 | REQ-009 | `font_renderer_spec.spl`, backend font unit specs, and `shared_font_surfaces_spec.spl` | live font-identity separation; bounded glyph-cache counters; backend-local atlas owner + generation; shared program-version/transform rejection; warm/dirty regions | 3/3 source gate; rotation/skew/subpixel/nonuniform CTM stay unsupported and retained native execution remains pending |
 | REQ-010 | `gpu_font_emission_spec.spl`, `cuda_generated_font_handoff_spec.spl`, plus portable toolchain checker | five source targets; Vulkan contract; deterministic failures/hashes; native artifact exports the versioned font entry; checker CUDA artifact installs and wins device-readback dispatch; default/handwritten CUDA font PTX is rejected; production packaging authenticates an immutable PTX hash/program version and rejects tampering before installation | source-complete for emission and conditional handoff; retained checker provenance, exact pinned-Vulkan identity, generated-only CUDA handoff, and exact pinned-Vulkan gates are source-covered; host compiler/device execution plus a non-placeholder package trust anchor remain pending |
 | REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, production host route contract, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical SimpleOS pixels | canonical `taskbar-clock` WM DrawIR source route and 56x48 dynamic crop are source-covered; expected hash, hosted image/motion/nested parity, and retained QEMU PASS pending |
 | REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 3/3 source gates with facade selection, distinct HUD/world pipelines, atlas owner/generation/hash, fenced submission, and readback checks; native execution pending |
 | REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 3/3 source gate: live tuple promotion, controlled unavailable classification, and forged-proof rejection are wired; retained native PASS is pending |
-| REQ-014 | seven present specs/manuals | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 0/7 canonical manual regenerations accepted; seven drafts exist, but native execution/docgen refresh is blocked by the current Stage 4 LLVM module-construction SIGSEGV |
-| REQ-015 | `font_render_config_spec.spl`, `shared_font_surfaces_spec.spl`, and focused Engine2D/Engine3D font specs | validation and length-delimited identity; bitmap/vector/shaped propagation; Suggested/Preferred/Required behavior; unsupported mode/CTM rejects before cache/backend mutation; legacy default equivalence | 5 source-covered; deployed execution is blocked by the current Stage 4 LLVM module-construction SIGSEGV; the pre-bridge full CLI is not acceptance evidence |
+| REQ-014 | seven present specs/manuals | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 0/7 canonical manual regenerations accepted; seven drafts exist; no retained candidate currently reaches valid runner/docgen completion |
+| REQ-015 | `font_render_config_spec.spl`, `shared_font_surfaces_spec.spl`, and focused Engine2D/Engine3D font specs | validation and length-delimited identity; bitmap/vector/shaped propagation; Suggested/Preferred/Required behavior; unsupported mode/CTM rejects before cache/backend mutation; legacy default equivalence | 5 source-covered; no admitted pure-Simple runner currently reaches test results; the pre-bridge full CLI is not acceptance evidence |
 
 | NFR | Evidence | Pass condition | Current evidence |
 |---|---|---|---|
@@ -174,13 +174,19 @@ SIMPLE_NO_STUB_FALLBACK=1 bin/simple test <spec> --mode=native
 bin/simple spipe-docgen <spec> --output doc/06_spec --no-index
 ```
 
-If a focused `interpret_file` runner is used, its wrapper must inspect the
-canonical spec module's `get_executed_test_count` and `get_exit_code` after execution.
-`CompileResult.Success` alone is inadmissible. A deliberate failing fixture and
-a zero-executed-example fixture must both exit nonzero before any focused result counts;
-the runner remains `interpret-diagnostic` and cannot satisfy native or
-performance rows. Retain the runner digest and focused logs under
-`build/shared_multilingual_gpu_fonts_interpret/`.
+Focused interpreter execution must reuse `build_interpreter_result_wrapper`
+through the pure test runner or `src/app/test/font_evidence_runner.spl`. The
+wrapper inspects the canonical spec module's `get_executed_test_count` and
+`get_exit_code` after execution.
+`CompileResult.Success` alone is inadmissible. The deliberate failing fixture
+must exit 1 with `test-runner: spec failed`; the zero-executed fixture must exit
+1 with `test-runner: no examples executed`. Reject 2/124/139 and retain exact
+commands, runner SHA-256, and both logs under
+`build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/` before
+any focused result counts. The runner remains `interpret-diagnostic` and cannot
+satisfy native or performance rows. Pinned release-artifact crash provenance
+and the distinct retained-candidate result are recorded in
+`doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`.
 
 Then run the existing UI SSpec evidence audit and require
 `find doc/06_spec -name '*_spec.spl'` to return no paths.

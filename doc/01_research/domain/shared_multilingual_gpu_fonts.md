@@ -156,3 +156,7 @@ glyph material, native-promotion obligation, and NFR targets are selected.
 ## Sidecar review
 
 The `font_license_coverage` and `font_gpu_emission` sidecars independently researched licenses/coverage and backend program paths. The primary agent checked their claims against repository state and authoritative sources before accepting them.
+
+Current implementation and evidence status is maintained in
+`doc/07_guide/lib/shared_multilingual_gpu_fonts.md`; this research remains the
+pre-selection domain record.

@@ -92,7 +92,7 @@ describe "<Feature Name>":
 - No test depends on external state or other tests
 - Error paths use `Result<T, E>` pattern, not exceptions
 - After writing or changing an SSpec file, run
-  `simple spipe-docgen <spec> --output doc/06_spec --no-index`. The generator
+  `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`. The generator
   must report the affected spec as complete with `0 stubs`; if it reports an
   auto/manual spec as a stub, fix the spec or docgen validation before handoff.
 - Scenario-oriented specs must produce manual-quality generated docs:
@@ -197,13 +197,18 @@ describe "<Feature Name>":
   passes one tiny `check` fixture. A bootstrap-only stage compiler, a Rust
   seed, or a candidate whose full-CLI closure has unresolved runtime
   symbols is blocker evidence, not an executable font PASS.
-  The canonical `src/app/test/font_evidence_runner.spl` runner must append `print_summary`,
+  The canonical runner and the pure test runner must reuse
+  `build_interpreter_result_wrapper`; it appends `print_summary`,
   `get_executed_test_count`, and `get_exit_code` checks inside the interpreted source.
   `CompileResult.Success` alone is false green because matcher failures update
-  spec state without raising. Before trusting the runner, prove a deliberate
-  failing spec and a zero-executed-example spec both exit nonzero. The canonical
-  calibrations are `scripts/check/fixtures/font_evidence_runner_fail.spl` and
-  `scripts/check/fixtures/font_evidence_runner_empty.spl`.
+  spec state without raising. Before trusting the runner, require exit 1 plus
+  `test-runner: spec failed` from
+  `scripts/check/fixtures/font_evidence_runner_fail_spec.spl`, and exit 1 plus
+  `test-runner: no examples executed` from
+  `scripts/check/fixtures/font_evidence_runner_empty_spec.spl`. Reject usage
+  exit 2, timeout 124, signal exit 139, and missing markers. Retain the exact
+  commands, runner binary SHA-256, and both logs under
+  `build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/`.
   Shaped pixel evidence must include a nonzero bearing or GPOS offset and check
   the full CPU/device pixels. Pen positions are +Y-down baseline offsets;
   OpenType y offsets are negated, and quad top-left is

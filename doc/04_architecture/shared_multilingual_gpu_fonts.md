@@ -20,6 +20,7 @@ plugin interface, renderer factory, or new native dependency.
 | Existing path | Kept responsibility |
 |---|---|
 | `src/lib/common/encoding/font_registry.spl` | Static pinned language/category catalog; nine identity-profile families, sans Devanagari/Arabic witness faces, and exact monochrome Noto Emoji `U+1F600` corpus coverage are accepted (12 total). Serif Devanagari/Arabic and two rank-eleven Bengali faces remain candidates. `selected_font_asset_for_language_category` resolves only accepted `native`/`fallback` cells to bundled candidates. |
+| `src/app/release/install.spl` and `common/encoding/font_registry.spl` | Install the unchanged font/CLDR tree and notices below `share/simple`, then resolve selected registry-relative paths at the shared byte-load boundary through `SIMPLE_ASSET_ROOT`; hashes and exact installed-layout matching preserve one canonical candidate identity. |
 | `src/lib/common/encoding/font_cldr_rank.spl` | Targeted, exact-arithmetic CLDR ranking core with fixture evidence; validating XML input and pinned-source replay remain gates. |
 | `src/lib/common/encoding/sfnt.spl` | Neutral sfnt directory/fvar owner and typed default-`glyf` preflight shared by both production loaders; the old Skia parser modules are compatibility re-exports. |
 | `src/lib/common/gpu/font_atlas_composite.spl` | Shared atlas subrect/color material plus exact OpenCL, Metal, and Vulkan GLSL sources used by compiler emission and runtime adapters. |

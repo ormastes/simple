@@ -14,6 +14,7 @@
 
 use std.common.encoding.sfnt.{validate_glyf_font_instance, sfnt_manifest_tables_match, sfnt_manifest_names_match}
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.io_runtime.{env_get}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
 
@@ -265,10 +266,31 @@ class FontAssetRuntimeValidation:
     family: text
     reason: text
 
-fn selected_font_asset_candidate_for_path(path: text) -> FontAssetCandidate?:
+fn _selected_font_asset_candidate_for_path_with_root(path: text, root: text) -> FontAssetCandidate?:
+    val clean = root.trim()
+    val base = if clean.ends_with("/"): clean.slice(0, clean.len() - 1) else: clean
     for candidate in selected_font_asset_candidates():
-        if candidate.local_path == path: return candidate
+        if candidate.local_path == path:
+            return candidate
+        if ((base == "share/simple" or base.ends_with("/share/simple")) and
+            path == base + "/" + candidate.local_path):
+            return candidate
     nil
+
+fn selected_font_asset_candidate_for_path(path: text) -> FontAssetCandidate?:
+    _selected_font_asset_candidate_for_path_with_root(path, env_get("SIMPLE_ASSET_ROOT"))
+
+fn _selected_font_asset_physical_path_from_root(path: text, root: text) -> text:
+    val candidate = _selected_font_asset_candidate_for_path_with_root(path, root)
+    val clean = root.trim()
+    if candidate == nil or clean == "": return path
+    val base = if clean.ends_with("/"): clean.slice(0, clean.len() - 1) else: clean
+    if base != "share/simple" and not base.ends_with("/share/simple"): return path
+    base + "/" + candidate.?.local_path
+
+fn selected_font_asset_physical_path(path: text) -> text:
+    """Resolve a selected asset beneath the installed Simple share root."""
+    _selected_font_asset_physical_path_from_root(path, env_get("SIMPLE_ASSET_ROOT"))
 
 fn simpleos_default_font_asset_candidate() -> FontAssetCandidate:
     """Pinned monospace face staged into SimpleOS images."""
@@ -351,7 +373,8 @@ fn validate_selected_font_asset(path: text, blob: [u8]) -> FontAssetRuntimeValid
 
 fn load_selected_font_file(path: text) -> ([u8], FontAssetRuntimeValidation):
     """Read and validate the exact bytes returned to the caller."""
-    val blob = rt_file_read_bytes(path)
+    val physical_path = selected_font_asset_physical_path(path)
+    val blob = rt_file_read_bytes(physical_path)
     (blob, _validate_selected_font_asset(path, blob))
 
 class FontCoverageCell:

@@ -34,7 +34,9 @@ Status: selected on 2026-07-11 (`L2+C1+S1+F1+R1+P1+G1`)
 - **REQ-004 Asset manifest:** Every bundled binary records family, file, category,
   upstream URL/tag/commit, SHA-256, embedded version/names, copyright, SPDX
   license, RFN state, modification state, sfnt tables, scripts/codepoints,
-  fallback role, and size. Missing or incompatible metadata fails closed.
+  fallback role, and size. Release installation preserves the same bytes,
+  licenses, and notices below one shared resource root without changing the
+  canonical asset identity. Missing or incompatible metadata fails closed.
 - **REQ-005 Selected candidates:** Evaluate the pinned 16-file Google Fonts
   candidate catalog from commit `ec0464b978de222073645d6d3366f3fdf03376d8`;
   accept only files that pass REQ-004 and executable corpus coverage. Preserve

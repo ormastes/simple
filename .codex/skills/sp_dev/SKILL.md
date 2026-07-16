@@ -526,6 +526,14 @@ font GPU emission, or GUI/Web/2D/3D text.
     submit-through-device-completion interval, never sum it with the later
     fence-observation `sync` interval, and record offscreen presentation as
     `not-applicable-offscreen` while still requiring device readback.
+14. Interpreter diagnostics reuse `build_interpreter_result_wrapper` through
+    the canonical test runner or `src/app/test/font_evidence_runner.spl`.
+    Before trusting them, require exit 1 and the distinct canonical failure
+    markers from
+    `scripts/check/fixtures/font_evidence_runner_fail_spec.spl` and
+    `scripts/check/fixtures/font_evidence_runner_empty_spec.spl`; reject
+    2/124/139 and retain commands, binary SHA-256, and logs per `$system_test`.
+    They never replace native evidence.
 
 For UI-test helper work, keep the test-library surface consistent: new SSpec
 manual specs use canonical `use std.spec.*` and `step("...")`, existing

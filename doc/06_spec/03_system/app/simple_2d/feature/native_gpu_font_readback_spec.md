@@ -4,6 +4,9 @@
 **Traceability:** REQ-011, REQ-012, REQ-013, REQ-014; NFR-002, NFR-004, NFR-005, NFR-006, NFR-007, NFR-008
 **Executable:** `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl`
 
+> Hand-maintained mirror pending canonical `spipe-docgen`; no generated-manual
+> PASS is claimed.
+
 This scenario has two fail-closed classification rows and three independent
 live evidence rows. Vulkan Engine2D and
 the Engine3D font adapter render on a consistent device name/type/driver tuple;

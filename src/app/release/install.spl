@@ -11,9 +11,11 @@
 
 use app.io.mod.{process_run}
 use std.io_runtime.{cwd}
+use std.common.crypto.sha256.{sha256_u8_hex}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_copy(src: text, dst: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
@@ -35,7 +37,7 @@ fn parse_prefix_arg() -> text:
                     found_flag = true
     "/usr/local"
 
-fn main():
+fn main() -> i64:
     val prefix = parse_prefix_arg()
     val script_dir = cwd()
 
@@ -51,24 +53,45 @@ fn main():
     rt_dir_create(prefix + "/lib", true)
     rt_dir_create(prefix + "/include", true)
     rt_dir_create(prefix + "/share/simple/src", true)
+    rt_dir_create(prefix + "/share/simple/assets/fonts", true)
+
+    print "Installing bundled fonts and notices..."
+    if not copy_font_tree(src: script_dir + "/assets/fonts", dst: prefix + "/share/simple/assets/fonts"):
+        print "  ERROR: bundled font installation incomplete"
+        return 1
+    val license_ok = copy_file_unchanged(script_dir + "/LICENSE", prefix + "/share/simple/LICENSE")
+    val notices_ok = copy_file_unchanged(script_dir + "/THIRD_PARTY_NOTICES.md", prefix + "/share/simple/THIRD_PARTY_NOTICES.md")
+    if not license_ok or not notices_ok:
+        print "  ERROR: license or third-party notice installation failed"
+        return 1
 
     # Install runtime binary
     print "Installing binaries..."
     val runtime_src = script_dir + "/bin/simple_runtime"
     val runtime_dst = prefix + "/bin/simple_runtime"
     if rt_file_exists(runtime_src):
-        rt_file_copy(runtime_src, runtime_dst)
-        process_run("chmod", ["+x", runtime_dst])
+        if not rt_file_copy(runtime_src, runtime_dst):
+            print "  ERROR: simple_runtime copy failed"
+            return 1
+        val runtime_chmod = process_run("chmod", ["+x", runtime_dst])
+        if runtime_chmod.2 != 0:
+            print "  ERROR: simple_runtime chmod failed"
+            return 1
         print "  Installed simple_runtime"
     else:
         print "  ERROR: simple_runtime not found"
-        return
+        return 1
 
     # Create CLI wrapper
-    val wrapper = "#!/bin/sh\nSHARE_DIR=\"" + prefix + "/share/simple\"\nRUNTIME=\"" + prefix + "/bin/simple_runtime\"\nexport LD_LIBRARY_PATH=\"" + prefix + "/lib:$LD_LIBRARY_PATH\"\nexec \"$RUNTIME\" \"$SHARE_DIR/src/app/cli/main.spl\" \"$@\"\n"
+    val wrapper = "#!/bin/sh\nSHARE_DIR=\"" + prefix + "/share/simple\"\nRUNTIME=\"" + prefix + "/bin/simple_runtime\"\nexport SIMPLE_ASSET_ROOT=\"$SHARE_DIR\"\nexport LD_LIBRARY_PATH=\"" + prefix + "/lib:$LD_LIBRARY_PATH\"\nexec \"$RUNTIME\" \"$SHARE_DIR/src/app/cli/main.spl\" \"$@\"\n"
     val wrapper_path = prefix + "/bin/simple"
-    rt_file_write_text(wrapper_path, wrapper)
-    process_run("chmod", ["+x", wrapper_path])
+    if not rt_file_write_text(wrapper_path, wrapper):
+        print "  ERROR: simple CLI wrapper write failed"
+        return 1
+    val wrapper_chmod = process_run("chmod", ["+x", wrapper_path])
+    if wrapper_chmod.2 != 0:
+        print "  ERROR: simple CLI wrapper chmod failed"
+        return 1
     print "  Installed simple CLI wrapper"
 
     # Install libraries
@@ -97,6 +120,7 @@ fn main():
     print ""
     print "Test installation:"
     print "  simple --version"
+    0
 
 fn copy_source_tree(src: text, dst: text):
     val files = rt_dir_walk(src)
@@ -110,6 +134,22 @@ fn copy_source_tree(src: text, dst: text):
             rt_file_copy(f, dst_file)
             count = count + 1
     print "  Copied " + count.to_text() + " source files"
+
+fn copy_font_tree(src: text, dst: text) -> bool:
+    val files = rt_dir_walk(src)
+    var count = 0
+    for f in files:
+        val rel = f.slice(src.len() + 1)
+        val dst_file = dst + "/" + rel
+        rt_dir_create(get_parent(dst_file), true)
+        if copy_file_unchanged(f, dst_file):
+            count = count + 1
+    print "  Copied " + count.to_text() + " resource files"
+    count == 57
+
+fn copy_file_unchanged(src: text, dst: text) -> bool:
+    if not rt_file_copy(src, dst): return false
+    sha256_u8_hex(rt_file_read_bytes(src)) == sha256_u8_hex(rt_file_read_bytes(dst))
 
 fn get_parent(p: text) -> text:
     var i = p.len() - 1

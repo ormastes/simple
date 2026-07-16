@@ -151,3 +151,39 @@ passed `simple_binary_is_valid`, including the isolated Cranelift `p2_add`
 build/run and five-second invalid-mode probe. This resolves the focused
 candidate-admission crash; it does not deploy a full CLI or close the separate
 Stage 4 provider-composition work.
+
+## 2026-07-16 test-runner admission result
+
+At repository revision `0bfc5c9c22e2fa2e6cdaa1d65f89efc3fc5e2702`, the
+tracked release artifact still has SHA-256
+`04a38e21d6fbd86149d46d3ee2d761349f8ad29b02c5037a8eb589b6a1b9e4e0`.
+This focused command exited 139 before runner discovery:
+
+```text
+bin/release/simple test --help
+```
+
+GDB recorded `__strlen_avx2 -> __add_to_environ -> rt_env_set ->
+io.env_ops.env_set -> cli main`, with key `SIMPLE_TEST_DEPTH` and value pointer
+`0x11`. The value is the 17-byte key length forwarded by the obsolete
+two-argument implementation; it is not evidence of broken string interpolation.
+
+The retained pure-Simple candidate
+`build/pure-cli-current/full-seed-refresh/x86_64-unknown-linux-gnu/simple`
+(SHA-256 `dbf2718a6c12a0020649de5b6b2df395a10beefc7cd4e67705d8c59f7b070a34`)
+did not crash on the distinct one-file `--list --no-session-daemon
+--no-session-share --no-cache --no-cover-check` probe, but exited 1 through the
+recursion guard before runner output. Its symbol table contains the CLI main but
+no `test_runner_new` main symbol, so it is not an admitted runner either.
+
+One canonical recovery attempt ran:
+
+```text
+env SIMPLE_NO_STUB_FALLBACK=1 scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy --no-mcp --jobs=min
+```
+
+The Rust bootstrap refresh completed, then strict Stage 2 failed on 39 LLVM
+codegen files (primarily incorrect call arity and undeclared lowered symbols),
+recorded in
+`build/bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`.
+Strict fallback refusal worked and no replacement was deployed.
