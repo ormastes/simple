@@ -110,6 +110,21 @@ runtime remains unavailable, so executable qualification is still blocked.
   Browser pixel/span work, software blend/copy loops, and repeated compositor
   lookup are real owner-level debt; bounded parser/control/hardware polling
   loops need exact reason annotations only after the real hot paths move.
+- **Compositor lookup:** repeated exact-ID scans now share one bounded
+  `surface_index` owner. Z-order transforms, app/process group queries, hit
+  testing, and rendering retain their intentional ordered scans. A focused
+  identity/Z-order test covers present and missing IDs across focus, mutation,
+  and removal.
+- **Software spans:** do not route `self.buf` through the existing free-function
+  span facade yet; the documented self-field mutation-loss bug makes that
+  superficially minimal rewrite unsafe. Native blend additionally disagrees
+  with `color.blend` for partial destination alpha. Both blockers and the exact
+  parity coverage are recorded in the mutable-array extern bug.
+- **Browser raster:** the reviewed next owner fixes are clipped iframe blit via
+  `simd_blit_rect`, row fill ownership through `fill_span`, and piece-buffered
+  numeric-entity decoding. They remain unmodified in this source-only lane
+  because clipping and framebuffer mutation parity cannot be executed with an
+  admitted runtime.
 
 ## Latest bounded verification
 
@@ -135,6 +150,9 @@ runtime remains unavailable, so executable qualification is still blocked.
   MCP/LSP overrides; execution still requires a Windows PowerShell host.
 - Shared daemon-selector caller/forbidden-shell source contracts, qualification
   binary routing, Windows fake-contract markers, and owned whitespace: PASS.
+- Compositor exact-ID lookup consolidation and its focused behavior spec:
+  SOURCE IMPLEMENTED; executable verdict blocked by the unavailable admitted
+  pure-Simple runtime.
 - New Simple unit/system behavior and the PowerShell contract: NOT RUN because
   no admitted pure-Simple runtime or PowerShell host exists. Previously passed
   global gates were not repeated after their session limit.
