@@ -120,6 +120,30 @@ impl HirLowering:
                     fn_symbol_name = self.symbols.method_symbol_name(owner_symbol, fn_.name)
                 case _: ()
         val fn_symbol_kind = if fn_.is_method and not fn_.is_static: SymbolKind.Method else: SymbolKind.Function
+        # Static impl/class methods arrive with is_method=false, so the
+        # qualification above never applies to them: the lookup below misses
+        # the owner-qualified symbol that module_lowering's impl-method
+        # declaration pass predeclared WITH its full signature
+        # (declared_callable_type), and a fresh plain-name symbol is defined
+        # instead. That fresh symbol is what HirImpl.methods -- and therefore
+        # MIR's "static::{Owner}::{method}" dispatch in struct_method_syms --
+        # carries, so resolved_call_return_type fell back to its untyped i64
+        # default and a text-returning static's print rendered the raw tagged
+        # string handle as a decimal integer (bug
+        # native_method_text_return_prints_handle_2026-07-16). Renaming the
+        # symbol to the qualified form is NOT an option: the module ALSO
+        # lowers the same static as a plain top-level function (module
+        # .functions carries impl methods), and that copy emits the DEFINITION
+        # under the plain name -- a qualified call site then fails to link
+        # (verified empirically: ld.lld undefined symbol Widget.category).
+        # Instead, give the fallback-defined symbol its real declared
+        # signature so call-result typing works exactly like the predeclared
+        # instance-method path. Statics have no receiver param, so no owner
+        # context is needed.
+        val fn_fallback_type: HirType? = if fn_.is_static and self.current_method_self_type.?:
+            self.declared_callable_type(fn_, nil)
+        else:
+            nil
         if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not fn_.is_method:
             fn_symbol_id = bootstrap_hir_symbol_for_name(fn_.name)
         else:
@@ -130,11 +154,11 @@ impl HirLowering:
                 # `Some(nil)` in current_function or emit a nil symbol id into
                 # downstream `.id` consumers.
                 if found_symbol == nil:
-                    fn_symbol_id = self.symbols.define(fn_symbol_name, fn_symbol_kind, nil, fn_.span, fn_.visibility, false, nil)
+                    fn_symbol_id = self.symbols.define(fn_symbol_name, fn_symbol_kind, fn_fallback_type, fn_.span, fn_.visibility, false, nil)
                 else:
                     fn_symbol_id = found_symbol
             else:
-                fn_symbol_id = self.symbols.define(fn_symbol_name, fn_symbol_kind, nil, fn_.span, fn_.visibility, false, nil)
+                fn_symbol_id = self.symbols.define(fn_symbol_name, fn_symbol_kind, fn_fallback_type, fn_.span, fn_.visibility, false, nil)
         self.current_function = Some(fn_symbol_id)
         # NOTE(#133): push the function scope unconditionally, including under
         # SIMPLE_BOOTSTRAP. Bug #133: params were never lowered under bootstrap

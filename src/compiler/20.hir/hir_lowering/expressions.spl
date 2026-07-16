@@ -362,6 +362,43 @@ impl HirLowering:
                                 val fld_struct_fields = self.struct_field_types_by_name[fld_struct_name]
                                 if fld_struct_fields.has(fld_name_t):
                                     fld_field_type = Some(fld_struct_fields[fld_name_t])
+                        if not fld_field_type.?:
+                            # Receiver/param field typing (native --entry path,
+                            # bug native_method_text_return_prints_handle):
+                            # local_struct_types only covers `val x =
+                            # StructName(...)` bindings, so `self.name` inside
+                            # a method (and `w.name` for a typed param `w:
+                            # Widget`) stayed type_-nil here and MIR defaulted
+                            # the field local to i64 -- a text field's tagged
+                            # handle then rendered as a raw decimal through
+                            # coerce_concat_operand / print's numeric branch.
+                            # Recover the owning struct from the base symbol's
+                            # own declared type (typed params), falling back to
+                            # the enclosing method's receiver type for a
+                            # `self`/`me` base whose param symbol carries no
+                            # explicit annotation.
+                            var fld_owner_sym_opt: SymbolId? = nil
+                            val fld_base_sym_type = self.symbols.get_symbol_type(fld_base_sym)
+                            if fld_base_sym_type.?:
+                                match fld_base_sym_type.unwrap().kind:
+                                    case HirTypeKind.Named(fld_owner_sym0, _):
+                                        fld_owner_sym_opt = Some(fld_owner_sym0)
+                                    case _: ()
+                            if not fld_owner_sym_opt.? and self.current_method_self_type.?:
+                                val fld_base_symbol = self.symbols.get_symbol(fld_base_sym)
+                                if fld_base_symbol != nil:
+                                    if fld_base_symbol.name == "self" or fld_base_symbol.name == "me":
+                                        match self.current_method_self_type.unwrap().kind:
+                                            case HirTypeKind.Named(fld_owner_sym1, _):
+                                                fld_owner_sym_opt = Some(fld_owner_sym1)
+                                            case _: ()
+                            if val fld_owner_sym = fld_owner_sym_opt:
+                                val fld_owner_symbol = self.symbols.get_symbol(fld_owner_sym)
+                                if fld_owner_symbol != nil:
+                                    if self.struct_field_types_by_name.has(fld_owner_symbol.name):
+                                        val fld_owner_fields = self.struct_field_types_by_name[fld_owner_symbol.name]
+                                        if fld_owner_fields.has(fld_name_t):
+                                            fld_field_type = Some(fld_owner_fields[fld_name_t])
                     return HirExpr(kind: HirExprKind.Field(fld_lowered_base, fld_name_t, nil), type_: fld_field_type, span: e.span)
                 case _:
                     pass
