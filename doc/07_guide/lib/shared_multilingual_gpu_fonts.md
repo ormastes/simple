@@ -273,13 +273,16 @@ family/category/language/script tuple resolves through the pinned sparse matrix,
 requires the exact resolved family (or `auto`), validates the CLDR script, and
 loads the unchanged bundled face; unavailable tuples reject before cache
 mutation. Engine3D fixes one font target per frame and promotes Vulkan from
-`pending` to selected only after end-frame device readback evidence. Focused unit and shared-surface
-specs cover source behavior; REQ-015 remains open until the deployed
-pure-Simple runtime executes those specs successfully. The bounded current-source
-bootstrap now links Stage 2 and completes Stage 3, but Stage 4 full-CLI linking
-still fails closed on 208 unresolved hosted-provider symbols. This is a
-compiler/runtime deployment defect, not font-source failure, and neither a seed
-nor a minimal-stage binary is native acceptance evidence.
+`pending` to selected only after end-frame device readback evidence. Focused
+unit and shared-surface specs cover source behavior; REQ-015 remains open until
+the deployed pure-Simple runtime executes those specs successfully. The exact
+Stage 4 provider work resolved the earlier 208-symbol link failure and produced
+one full CLI before the scalar test-argv bridge landed. That older binary is not
+current acceptance evidence. Two bounded current-source rebuilds then SIGSEGV'd
+before logging or emitting a candidate, including one after the bootstrap
+runtime archive was refreshed with the scalar bridge. This is a compiler/runtime
+deployment defect, not font-source failure, and neither a seed, minimal-stage
+binary, nor the pre-bridge full CLI is native acceptance evidence.
 
 Canonical `FontRenderer` fallback glyphs are rasterized on CPU. Environment-
 published accelerator pixels are compatibility-only diagnostics and cannot

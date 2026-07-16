@@ -83,3 +83,12 @@ Resume in a fresh session by rebuilding Stage4 once, first proving
 pin the exact source/version/artifact hashes, install through
 `Engine2D.install_cuda_font_artifact`, and extend the existing CUDA unit/system
 specs rather than creating a parallel renderer, cache, kernel, or verifier.
+
+## 2026-07-16 continuation
+
+The bootstrap `libsimple_runtime.a` was refreshed successfully and now exports
+`rt_cli_run_tests_process_args`. A single cache-preserving Stage 4 rebuild from
+the verified Stage 3 compiler reproduced the pre-log SIGSEGV, emitted no
+candidate, and did not modify the 1,164-object cache. No core was retained.
+The CUDA checker was therefore not rerun and the trust-anchor criteria remain
+unchanged.
