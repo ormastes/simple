@@ -87,6 +87,15 @@ class HirLowering:
     # (e.g. a text field) of a mixed-type tuple -- see is_tuple_positional_field
     # in expressions.spl and lower_tuple_destructure below.
     local_tuple_types: HirLocalTupleTypes
+    # Set of every enum-variant short name declared in this compilation
+    # (populated up-front in module_lowering pre-scan, parallel to
+    # struct_field_order_by_name). Used by lower_pattern to keep a bare
+    # positional pattern like `case Const(a, b, c):` a REFUTABLE enum-variant
+    # pattern when the subject enum owns a `Const` variant, even though an
+    # unrelated `class Const` is also registered -- without this guard the
+    # struct-positional reinterpretation (irrefutable) silently wins and the
+    # arm is always taken (native_const_pattern_lowers_irrefutably bug).
+    enum_variant_names: {text: bool}
 
 struct LoweringError:
     message: text
@@ -111,6 +120,7 @@ fn hirlowering_new() -> HirLowering:
     val empty_local_struct_types: HirLocalStructTypes = {}
     val empty_struct_field_order: HirFieldOrderByName = {}
     val empty_local_tuple_types: HirLocalTupleTypes = {}
+    val empty_enum_variant_names: {text: bool} = {}
     HirLowering(
         symbols: SymbolTable.new(),
         errors: empty_errors,
@@ -127,7 +137,8 @@ fn hirlowering_new() -> HirLowering:
         struct_field_types_by_name: empty_struct_field_types,
         local_struct_types: empty_local_struct_types,
         struct_field_order_by_name: empty_struct_field_order,
-        local_tuple_types: empty_local_tuple_types
+        local_tuple_types: empty_local_tuple_types,
+        enum_variant_names: empty_enum_variant_names
     )
 
 fn hirlowering_for_module(filename: text, modules_by_name: HirModulesByName) -> HirLowering:
