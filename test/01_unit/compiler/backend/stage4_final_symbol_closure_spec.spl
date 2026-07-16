@@ -1,4 +1,4 @@
-use compiler.backend.backend.stage4_symbol_closure.{stage4_requested_from_nm_output, stage4_select_requested_archive_indices}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input}
 use std.spec.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -99,6 +99,101 @@ not-an-address W rt_malformed
         val empty_requested = stage4_select_requested_archive_indices([], ["core-c"], ["0000000000000000 T rt_a"], false)
         val mismatched = stage4_select_requested_archive_indices(["rt_a"], ["core-c"], [], false)
         val empty_archive = stage4_select_requested_archive_indices(["rt_a"], ["core-c"], [""], false)
+        val duplicate_label = stage4_select_requested_archive_indices(
+            ["rt_a"], ["core-c", "core-c"], ["0000000000000000 T rt_a", "0000000000000000 T rt_b"], false
+        )
         expect(empty_requested.is_err()).to_equal(true)
         expect(mismatched.is_err()).to_equal(true)
         expect(empty_archive.is_err()).to_equal(true)
+        expect(duplicate_label.is_err()).to_equal(true)
+
+    it "resolves sorted unique owner rows without changing selected indices":
+        val requested = ["rt_b", "rt_a", "rt_b"]
+        val labels = ["provider-b", "provider-a", "unused"]
+        val scans = [
+            "0000000000000000 T rt_b",
+            "0000000000000000 T rt_a",
+            "0000000000000000 T rt_unused"
+        ]
+        val selected_before = stage4_select_requested_archive_indices(requested, labels, scans, false).unwrap()
+        val (selected, owner_rows) = stage4_resolve_requested_archive_owners(requested, labels, scans, false).unwrap()
+        expect(selected.len()).to_equal(selected_before.len())
+        expect(selected[0]).to_equal(selected_before[0])
+        expect(selected[1]).to_equal(selected_before[1])
+        expect(owner_rows.len()).to_equal(2)
+        expect(owner_rows[0]).to_equal("rt_a=provider-a")
+        expect(owner_rows[1]).to_equal("rt_b=provider-b")
+
+    it "canonicalizes link-profile row permutations":
+        val first = stage4_link_profile_fingerprint_input(
+            "x86_64-unknown-linux-gnu", "llvm", "opt=3,pie=true", "compiler-hash",
+            ["src/b.spl=source-b", "src/a.spl=source-a"],
+            ["provider-z=archive-z", "provider-a=archive-a"],
+            ["rt_z=provider-z", "rt_a=provider-a"]
+        ).unwrap()
+        val permuted = stage4_link_profile_fingerprint_input(
+            "x86_64-unknown-linux-gnu", "llvm", "opt=3,pie=true", "compiler-hash",
+            ["src/a.spl=source-a", "src/b.spl=source-b"],
+            ["provider-a=archive-a", "provider-z=archive-z"],
+            ["rt_a=provider-a", "rt_z=provider-z"]
+        ).unwrap()
+        expect(permuted).to_equal(first)
+
+    it "includes every scalar and named-row group in the link-profile input":
+        val base = stage4_link_profile_fingerprint_input(
+            "x86_64-unknown-linux-gnu", "llvm", "opt=3,pie=true", "compiler-a",
+            ["src/main.spl=source-a"], ["core-c=archive-a"], ["rt_need=core-c"]
+        ).unwrap()
+        val target = stage4_link_profile_fingerprint_input(
+            "aarch64-unknown-linux-gnu", "llvm", "opt=3,pie=true", "compiler-a",
+            ["src/main.spl=source-a"], ["core-c=archive-a"], ["rt_need=core-c"]
+        ).unwrap()
+        val backend = stage4_link_profile_fingerprint_input(
+            "x86_64-unknown-linux-gnu", "cranelift", "opt=3,pie=true", "compiler-a",
+            ["src/main.spl=source-a"], ["core-c=archive-a"], ["rt_need=core-c"]
+        ).unwrap()
+        val options = stage4_link_profile_fingerprint_input(
+            "x86_64-unknown-linux-gnu", "llvm", "opt=2,pie=true", "compiler-a",
+            ["src/main.spl=source-a"], ["core-c=archive-a"], ["rt_need=core-c"]
+        ).unwrap()
+        val compiler = stage4_link_profile_fingerprint_input(
+            "x86_64-unknown-linux-gnu", "llvm", "opt=3,pie=true", "compiler-b",
+            ["src/main.spl=source-a"], ["core-c=archive-a"], ["rt_need=core-c"]
+        ).unwrap()
+        val sources = stage4_link_profile_fingerprint_input(
+            "x86_64-unknown-linux-gnu", "llvm", "opt=3,pie=true", "compiler-a",
+            ["src/main.spl=source-b"], ["core-c=archive-a"], ["rt_need=core-c"]
+        ).unwrap()
+        val archives = stage4_link_profile_fingerprint_input(
+            "x86_64-unknown-linux-gnu", "llvm", "opt=3,pie=true", "compiler-a",
+            ["src/main.spl=source-a"], ["core-c=archive-b"], ["rt_need=core-c"]
+        ).unwrap()
+        val owners = stage4_link_profile_fingerprint_input(
+            "x86_64-unknown-linux-gnu", "llvm", "opt=3,pie=true", "compiler-a",
+            ["src/main.spl=source-a"], ["core-c=archive-a"], ["rt_need=compiler"]
+        ).unwrap()
+        expect(target == base).to_be(false)
+        expect(backend == base).to_be(false)
+        expect(options == base).to_be(false)
+        expect(compiler == base).to_be(false)
+        expect(sources == base).to_be(false)
+        expect(archives == base).to_be(false)
+        expect(owners == base).to_be(false)
+
+    it "fails closed on missing malformed and duplicate named rows":
+        val missing = stage4_link_profile_fingerprint_input(
+            "x86_64-unknown-linux-gnu", "llvm", "opt=3", "compiler-a",
+            [], ["core-c=archive-a"], ["rt_need=core-c"]
+        )
+        val malformed = stage4_link_profile_fingerprint_input(
+            "x86_64-unknown-linux-gnu", "llvm", "opt=3", "compiler-a",
+            ["src/main.spl=source-a"], ["core-c"], ["rt_need=core-c"]
+        )
+        val duplicate = stage4_link_profile_fingerprint_input(
+            "x86_64-unknown-linux-gnu", "llvm", "opt=3", "compiler-a",
+            ["src/main.spl=source-a"], ["core-c=archive-a"],
+            ["rt_need=core-c", "rt_need=compiler"]
+        )
+        expect(missing.is_err()).to_be(true)
+        expect(malformed.is_err()).to_be(true)
+        expect(duplicate.is_err()).to_be(true)

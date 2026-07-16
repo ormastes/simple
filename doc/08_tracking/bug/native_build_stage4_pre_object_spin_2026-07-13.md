@@ -454,6 +454,26 @@ ownership, the remaining provider families, platform-specific constructor
 gates, final link-profile fingerprinting, and strict native proof are still
 required before Stage4 composition can be enabled.
 
+## 2026-07-16 source-only link-profile fingerprint canonicalization
+
+The pure Stage4 closure contract now has a source-level owner resolution and
+cache-input boundary. `stage4_resolve_requested_archive_owners` preserves the
+selector's declared archive order while also returning sorted, unique
+`symbol=label` rows for requested symbols. The versioned
+`stage4_link_profile_fingerprint_input` canonicalizes target, backend, link
+options, compiler hash, source hashes, archive hashes, and the resolved
+symbol-to-owner rows. Named row groups are sorted and reject empty, malformed,
+or duplicate names, so caller iteration order cannot change the canonical
+input and no ownership dimension can disappear silently.
+
+This is source-only canonicalization, not production cache correctness.
+Production still lacks a complete capability-owned provider archive inventory,
+so neither owner resolution nor its fingerprint input is wired into the final
+link or cache namespace. Archive discovery/localization, provider completeness,
+the actual digest/store boundary, invalidation proof, and strict native evidence
+remain open. No manifest is inferred, and raw `native_all`, generated stubs, or
+broad core-C are not accepted as substitutes for the missing inventory.
+
 ## 2026-07-16 canonical core-C HTTP ownership
 
 The legacy `runtime.c` definition of `rt_http_get` returned a raw C string even

@@ -72,19 +72,23 @@ fn stage4_global_definitions_from_nm_output(nm_output: text, macho_prefixes: boo
     definitions.sort()
     Ok(definitions)
 
-pub fn stage4_select_requested_archive_indices(requested: [text], archive_labels: [text], archive_nm_outputs: [text], macho_prefixes: bool) -> Result<[i64], text>:
-    """Validate unique symbol ownership and return selected archives in declared order."""
+pub fn stage4_resolve_requested_archive_owners(requested: [text], archive_labels: [text], archive_nm_outputs: [text], macho_prefixes: bool) -> Result<([i64], [text]), text>:
+    """Validate unique ownership and return selected archives plus requested owner rows."""
     if requested.len() == 0:
         return Err("Stage4 requested symbol closure is empty")
     if archive_labels.len() == 0 or archive_labels.len() != archive_nm_outputs.len():
         return Err("Stage4 archive labels and symbol scans must be non-empty and have equal length")
 
     var owner_by_symbol: Dict<text, i64> = {}
+    var labels_seen: Dict<text, bool> = {}
     var archive_i = 0
     while archive_i < archive_labels.len():
         val label = archive_labels[archive_i]
         if label == "":
             return Err("Stage4 archive label is empty")
+        if labels_seen.has(label):
+            return Err("Stage4 archive label '" + label + "' is repeated")
+        labels_seen[label] = true
         val definitions_result = stage4_global_definitions_from_nm_output(archive_nm_outputs[archive_i], macho_prefixes, label)
         val definitions = match definitions_result:
             case Ok(symbols): symbols
@@ -98,13 +102,16 @@ pub fn stage4_select_requested_archive_indices(requested: [text], archive_labels
 
     var requested_seen: Dict<text, bool> = {}
     var selected_by_index: Dict<i64, bool> = {}
+    var owner_rows: [text] = []
     for symbol in requested:
         if requested_seen.has(symbol):
             continue
         requested_seen[symbol] = true
         if not owner_by_symbol.has(symbol):
             return Err("Stage4 requested symbol '" + symbol + "' has no archive owner")
-        selected_by_index[owner_by_symbol[symbol]] = true
+        val owner_i = owner_by_symbol[symbol]
+        selected_by_index[owner_i] = true
+        owner_rows = owner_rows.push(symbol + "=" + archive_labels[owner_i])
 
     var selected: [i64] = []
     archive_i = 0
@@ -112,4 +119,59 @@ pub fn stage4_select_requested_archive_indices(requested: [text], archive_labels
         if selected_by_index.has(archive_i):
             selected = selected.push(archive_i)
         archive_i = archive_i + 1
-    Ok(selected)
+    owner_rows.sort()
+    Ok((selected, owner_rows))
+
+pub fn stage4_select_requested_archive_indices(requested: [text], archive_labels: [text], archive_nm_outputs: [text], macho_prefixes: bool) -> Result<[i64], text>:
+    """Validate unique symbol ownership and return selected archives in declared order."""
+    match stage4_resolve_requested_archive_owners(requested, archive_labels, archive_nm_outputs, macho_prefixes):
+        case Ok((selected, _)): Ok(selected)
+        case Err(err): Err(err)
+
+fn stage4_canonical_fingerprint_rows(group: text, rows: [text]) -> Result<[text], text>:
+    if rows.len() == 0:
+        return Err("Stage4 link profile " + group + " rows are empty")
+    var names: Dict<text, bool> = {}
+    var canonical: [text] = []
+    for row in rows:
+        val separator = row.index_of("=") ?? -1
+        if separator <= 0 or separator >= row.len() - 1:
+            return Err("Stage4 link profile " + group + " row must be non-empty name=value")
+        val name = row.substring(0, separator)
+        if names.has(name):
+            return Err("Stage4 link profile " + group + " repeats name '" + name + "'")
+        names[name] = true
+        canonical = canonical.push(row)
+    canonical.sort()
+    Ok(canonical)
+
+pub fn stage4_link_profile_fingerprint_input(target: text, backend: text, link_options: text, compiler_hash: text, source_hash_rows: [text], archive_hash_rows: [text], owner_rows: [text]) -> Result<text, text>:
+    """Return the versioned canonical input for a separate Stage4 link-profile hash."""
+    if target == "" or backend == "" or link_options == "" or compiler_hash == "":
+        return Err("Stage4 link profile scalar fields must be non-empty")
+
+    val source_result = stage4_canonical_fingerprint_rows("source hash", source_hash_rows)
+    val sources = match source_result:
+        case Ok(rows): rows
+        case Err(err): return Err(err)
+    val archive_result = stage4_canonical_fingerprint_rows("archive hash", archive_hash_rows)
+    val archives = match archive_result:
+        case Ok(rows): rows
+        case Err(err): return Err(err)
+    val owner_result = stage4_canonical_fingerprint_rows("owner", owner_rows)
+    val owners = match owner_result:
+        case Ok(rows): rows
+        case Err(err): return Err(err)
+
+    var input = "stage4-link-profile-v1"
+    input = input + "\ntarget[{target.len()}]=" + target
+    input = input + "\nbackend[{backend.len()}]=" + backend
+    input = input + "\nlink_options[{link_options.len()}]=" + link_options
+    input = input + "\ncompiler_hash[{compiler_hash.len()}]=" + compiler_hash
+    for row in sources:
+        input = input + "\nsource_hash[{row.len()}]=" + row
+    for row in archives:
+        input = input + "\narchive_hash[{row.len()}]=" + row
+    for row in owners:
+        input = input + "\nowner[{row.len()}]=" + row
+    Ok(input)
