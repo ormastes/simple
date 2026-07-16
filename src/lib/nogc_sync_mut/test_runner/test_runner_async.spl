@@ -3,7 +3,7 @@
 # Implements parallel test execution using process_spawn_async + process_wait.
 # Manages worker pool, stdout/stderr capture via temp files, and result collection.
 
-use std.io.{process_spawn_async, process_wait, process_kill, process_is_running}
+use std.io.{process_is_running}
 use std.io.{file_write, file_read, file_delete, file_exists}
 use std.io.{time_now_unix_micros}
 use std.nogc_sync_mut.io.env_ops.{env_get, host_os}
@@ -11,7 +11,7 @@ use std.io.sysinfo_ops.{cpu_count}
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions}
 use std.test_runner.test_runner_execute.{find_simple_binary, build_child_args, make_result_from_output}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
-use std.test_runner.runner_lifecycle.{spawn_tracked_process, untrack_process}
+use std.test_runner.runner_lifecycle.{spawn_tracked_process, wait_tracked_process}
 use std.test_runner.resource_governor.{ResourceGovernor, governor_create, governor_can_spawn, governor_wait_until_ready}
 
 extern fn rt_thread_sleep(millis: i64)
@@ -173,9 +173,9 @@ fn collect_async_result(run: AsyncTestRun) -> TestFileResult:
     # Wait for process to complete (with timeout)
     var exit_code: i64 = -1
     if run.pid > 0:
-        exit_code = process_wait(run.pid, run.timeout_ms)
-        # Unregister from tracker now that the process has been reaped.
-        untrack_process(run.pid)
+        val elapsed_ms = (time_now_unix_micros() - run.start_time) / 1000
+        val remaining_ms = if elapsed_ms < run.timeout_ms: run.timeout_ms - elapsed_ms else: 1
+        exit_code = wait_tracked_process(run.pid, remaining_ms)
 
     val end_time = time_now_unix_micros()
     val duration_ms = (end_time - run.start_time) / 1000
@@ -350,7 +350,6 @@ fn run_tests_parallel_with_monitoring(
             val elapsed_ms = (current_time - run.start_time) / 1000
 
             if elapsed_ms > run.timeout_ms:
-                process_kill(run.pid)
                 val result = collect_async_result(run)
                 results.push(result)
                 had_completion = true

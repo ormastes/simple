@@ -137,7 +137,7 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
     var summary_failed = -1
     var summary_skipped = -1
     var summary_pending = -1
-    var results_count = 0
+    var results_seen = false
     var results_valid = false
     var results_passed = 0
     var results_failed = 0
@@ -150,8 +150,10 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
         val line = if next >= 0: output[pos:next] else: output[pos:]
         val clean = strip_ansi(line)
         val trimmed = clean.trim()
-        if trimmed.starts_with("Results:"):
-            results_count = results_count + 1
+        val canonical_results = trimmed.starts_with("Results:") and trimmed.contains(" total") and trimmed.contains(" passed") and trimmed.contains(" failed")
+        if canonical_results:
+            results_seen = true
+            results_valid = false
             val result_total = extract_number_before(s: trimmed, keyword: "total")
             val result_passed = extract_number_before(s: trimmed, keyword: "passed")
             val result_failed = extract_number_before(s: trimmed, keyword: "failed")
@@ -188,20 +190,20 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
         elif trimmed.starts_with("Skipped:"):
             summary_skipped = extract_number_after_colon(s: trimmed, prefix: "Skipped:")
         # Count individual "... pending" test lines
-        elif not trimmed.starts_with("Results:") and clean.contains("... pending"):
+        elif not canonical_results and clean.contains("... pending"):
             total_pending = total_pending + 1
         # Count skipped (separate from pending)
-        if not trimmed.starts_with("Results:") and not trimmed.starts_with("Skipped:") and clean.contains("skipped"):
+        if not canonical_results and not trimmed.starts_with("Skipped:") and clean.contains("skipped"):
             val skip_count2 = extract_number_before(s: clean, keyword: "skipped")
             if skip_count2 > 0:
                 total_skipped = total_skipped + skip_count2
         if next < 0:
             break
         pos = next + 1
-    # The outer runner summary is authoritative. Multiple or malformed outer
-    # summaries are ambiguous and must not fall back to an earlier green line.
-    if results_count > 0:
-        if results_count != 1 or not results_valid:
+    # The last canonical outer summary is authoritative. Test-authored lines
+    # beginning with "Results:" are ordinary output and must not poison it.
+    if results_seen:
+        if not results_valid:
             return (0, 0, 0, 0)
         return (results_passed, results_failed, results_skipped, results_pending)
     if summary_passed >= 0 and summary_failed >= 0:

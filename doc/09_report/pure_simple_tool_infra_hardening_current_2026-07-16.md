@@ -36,9 +36,9 @@ so executable qualification is still blocked.
 | Surface | Status | Bug / missing evidence | Root solution | Priority |
 |---|---|---|---|---|
 | Production runtime | BLOCKED | Stage 4 was found parsing 10,503 files before closure pruning; source fix is unverified because the final cycle stopped on a stale compiler-backfill guard | In a fresh session run one bounded `--full-bootstrap`, require closure-sized phase input, then admit and atomically deploy | P0 |
-| Test runner | PARTIAL | POSIX parallel argv is injection-safe and tracked, but Windows parallel capture now fails closed pending a native redirected-spawn API; signal cleanup remains incomplete | Add runtime redirected argv spawn, use it on every host, then run timeout/RSS evidence | P0 |
+| Test runner | PARTIAL | POSIX parallel argv is injection-safe; timed-out children are killed before tracker release and normalized to timeout, but Windows parallel capture fails closed and signal cleanup remains incomplete | Add runtime redirected argv spawn, activate tracker-owned signal polling, then run timeout/RSS evidence | P0 |
 | Duplicate checker | PARTIAL | Fast exact-window buckets are linear, indentation-sensitive, and collapse shifted clone regions; token-cache reads are content-hash fresh, missing targets fail, unavailable modes are rejected, and adjacent one-line docs remain distinct; string/comment lexical context remains approximate | Replace line-shaped signal detection with lexer-aware spans before full qualification | P1 |
-| Lint | SOURCE FIXED | Production CLI now delegates file policy to the canonical linter, severity/profile overrides work in both directions, fix rules run once, and `--all` preserves earlier failures; global gates still report 30 UI and 45 hot-loop violations | Repair classified violations, then run the focused policy/uniqueness fixtures | P1 |
+| Lint | SOURCE FIXED | Production CLI delegates to the canonical linter; the isolated 722-line legacy type/check pair is deleted and stale worker assertions now name `cli_run_lint`; global gates still report 30 UI and 45 hot-loop violations | Repair classified violations, then run the focused policy/uniqueness fixtures | P1 |
 | Format/fix | SOURCE GUARDED | Writes are atomic and checked; formatter output now passes a CoreLexer token/literal/comment/raw-gap equivalence gate or fails closed | Replace heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
 | Check | BLOCKED | Command is parse/validation only; full type inference is not enforced | Implement enforcing type analysis, then qualify the production probe | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
@@ -115,7 +115,7 @@ so executable qualification is still blocked.
 | Rank | Defect | Concrete solution |
 |---|---|---|
 | P1 | Formatter heuristics are contained but not token-gap-native | Replace them incrementally with edits limited to lexer-approved whitespace gaps |
-| P1 | Lint still carries dead legacy registries and unqualified global violations | Delete the unused parallel lint modules after an admitted compile, repair classified UI/hot-loop violations, and run focused policy fixtures |
+| P1 | Lint global gates still report classified UI/hot-loop violations | Repair the violations and run focused policy fixtures with an admitted runtime |
 | P1 | Exact duplicate signal detection is not lexer-aware inside multiline strings/comments | Drive signal classification from canonical lexer spans while retaining exact indentation-sensitive window keys |
 | P1 | Process cleanup handlers are advertised but inactive | Install one tracker-owned signal/crash cleanup hook per process |
 | P2 | Direct broker callers can retain inactive leases | Production request/execution paths now reject and remove inactive leases; refactor broker-only tests before enforcing active-only retention inside `SessionBroker.acquire` |
@@ -245,6 +245,13 @@ so executable qualification is still blocked.
   positional parameters and `exec`; it never joins arguments into source text.
   Windows fails closed and failed spawns are not waited/untracked. Platform and
   CPU discovery now use native runtime owners instead of subprocess probes.
+- **Tracked child timeout:** the lifecycle owner now waits, kills, and releases
+  timed-out children as one operation. Parallel collection uses only that owner;
+  a child is never untracked while still running, and runtime `-2` becomes the
+  canonical runner timeout `-1`.
+- **Runner summary parsing:** only canonical `Results: N total, P passed, F
+  failed` lines own aggregate counts. Test-authored `Results:` output is ignored,
+  and the last canonical outer summary wins.
 - **Full daemon owner:** the CLI and runner client now start the same full
   daemon protocol through a reaped short-lived launcher. Requests retain their
   IDs and requested child deadlines; session metadata selects the broker, and
@@ -268,8 +275,12 @@ so executable qualification is still blocked.
   SOURCE IMPLEMENTED; executable verdict is NOT RUN without an admitted
   pure-Simple runtime.
 - Lint canonical severity/profile policy, unique shared-rule collection, and
-  monotonic fileless `--all` aggregation: SOURCE IMPLEMENTED; executable
-  verdict is NOT RUN without an admitted pure-Simple runtime.
+  monotonic fileless `--all` aggregation: SOURCE IMPLEMENTED. The unreferenced
+  722-line parallel implementation is deleted; executable verdict is NOT RUN
+  without an admitted pure-Simple runtime.
+- Tracked-wait timeout cleanup and canonical runner-summary precedence have
+  focused source specs; executable verdict is NOT RUN without an admitted
+  pure-Simple runtime.
 - Duplicate exact-window indexing, content-hash cache freshness, unsupported
   mode rejection, and missing-target failure: SOURCE IMPLEMENTED; executable
   verdict is NOT RUN without an admitted pure-Simple runtime.
