@@ -277,6 +277,7 @@ void*    rt_alloc(int64_t size);
 void*    rt_realloc(void* ptr, int64_t size);
 void     rt_free(void* ptr);
 void*    rt_memcpy(void* dst, const void* src, int64_t n);
+void*    copy_mem(void* dst, const void* src, int64_t n);
 void*    rt_memset(void* dst, int8_t val, int64_t n);
 void     rt_exit(int64_t code);
 int64_t  rt_time_now_unix(void);

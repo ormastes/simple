@@ -2121,6 +2121,10 @@ void* rt_memcpy(void* dst, const void* src, int64_t n) {
     return memcpy(dst, src, (size_t)n);
 }
 
+void* copy_mem(void* dst, const void* src, int64_t n) {
+    return rt_memcpy(dst, src, n);
+}
+
 void* rt_memset(void* dst, int8_t val, int64_t n) {
     return memset(dst, (int)val, (size_t)n);
 }

@@ -24,7 +24,7 @@ production behavior.
 
 | Surface | Status | Bug / missing evidence | Root solution | Priority |
 |---|---|---|---|---|
-| Production runtime | BLOCKED | Deployed binary identifies as Rust bootstrap seed | Build and admit a clean pure-Simple candidate, then atomically deploy | P0 |
+| Production runtime | BLOCKED | Clean Stage 2/3 now pass; full CLI Stage 4 still lacks a verified post-fix run | Re-run the bounded full bootstrap in a fresh session, admit, then atomically deploy | P0 |
 | Test runner | IMPLEMENTED | Failure/outcome/count/nesting, exact manifest correspondence, and deadline-bounded batch re-exec implemented | Run 1,000-example RSS evidence on pure runtime | P0 |
 | Duplicate checker | IMPLEMENTED | Runtime qualification blocked by seed | Run hostile-path and measured benchmark probes on pure runtime | P0 |
 | Lint | IMPLEMENTED | Runtime qualification blocked by seed | Run canonical multi-name/scope fixture on pure runtime | P1 |
@@ -73,9 +73,11 @@ production behavior.
 
 ## Current blockers
 
-1. A clean admitted pure-Simple runtime is unavailable; the shared worktree has
-   concurrent compiler changes, so this lane must not build/deploy a binary that
-   silently folds in another session's work.
+1. A clean admitted full-CLI runtime is unavailable. Isolated Stage 2/3
+   self-hosting passed after adding the missing `copy_mem` runtime ABI alias.
+   Stage 4 then exposed a `Dict`/`Map.keys` dispatch crash in async desugaring;
+   the existing `rt_dict_keys` regression contract is restored, but the
+   mandatory three-cycle cap prevents another full rebuild in this session.
 2. NFR-007 and NFR-009 evidence harnesses exist, but their production latency
    and RSS measurements cannot qualify while the deployed runtime is the seed.
 
@@ -84,6 +86,10 @@ production behavior.
 - Shell syntax, scoped diff hygiene, and the MCP/LSP native wrapper contract:
   PASS.
 - Working and staged direct environment/runtime facade guards: PASS.
+- Isolated clean bootstrap: Stage 2 and Stage 3 self-hosting PASS. Stage 4
+  failed at `Map.keys`; GDB localized the call to async desugaring and the
+  typed `rt_dict_keys` owner was restored. Post-fix full rebuild: NOT RUN due
+  the three-cycle runaway guard.
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system
   qualification: NOT RUN because the production runtime identity gate fails
   and this host has no PowerShell/Windows runtime.
