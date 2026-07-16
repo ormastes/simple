@@ -211,6 +211,12 @@ describe "<Feature Name>":
   exit 2, timeout 124, signal exit 139, and missing markers. Retain the exact
   commands, runner binary SHA-256, and both logs under
   `build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/`.
+  The focused runner accepts exactly `<pure-simple-bin> <spec.spl>` and never
+  discovers or falls back to `bin/simple`, a bootstrap stage, or the Rust seed.
+  It uses the existing process and file facades and propagates ordinary child
+  exit codes. When the process facade returns `-1`, it maps a timeout marker to
+  124 and other launch failure to 1. It preserves child stderr and removes its
+  temporary interpreter wrapper on every exit path.
   Shaped pixel evidence must include a nonzero bearing or GPOS offset and check
   the full CPU/device pixels. Pen positions are +Y-down baseline offsets;
   OpenType y offsets are negated, and quad top-left is

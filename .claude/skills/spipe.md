@@ -651,8 +651,9 @@ observe a pass:
   `scripts/check/fixtures/font_evidence_runner_fail_spec.spl` and
   `scripts/check/fixtures/font_evidence_runner_empty_spec.spl`. It must use the
   existing file facade and accept `<pure-simple-bin> <spec.spl>`. It must
-  propagate child exit codes, map an explicit timeout to 124 and launch failure
-  to 1, preserve child stderr, and delete its temporary wrapper. Retain exact
+  propagate ordinary child exit codes, map a process-facade `-1` timeout marker
+  to 124 and other `-1` launch failure to 1, preserve child stderr, and delete
+  its temporary wrapper. Retain exact
   commands, runner binary SHA-256,
   and both logs under the canonical `$system_test` artifact path.
   Resolve matrix policy by exact language and category. Unknown axes fail

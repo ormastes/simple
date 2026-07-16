@@ -533,6 +533,11 @@ font GPU emission, or GUI/Web/2D/3D text.
     `scripts/check/fixtures/font_evidence_runner_fail_spec.spl` and
     `scripts/check/fixtures/font_evidence_runner_empty_spec.spl`; reject
     2/124/139 and retain commands, binary SHA-256, and logs per `$system_test`.
+    The focused runner accepts exactly `<pure-simple-bin> <spec.spl>`, never
+    performs implicit binary/seed fallback, uses the existing process/file
+    facades, and propagates ordinary child exit codes. For process-facade `-1`,
+    it maps a timeout marker to 124 and other launch failure to 1. It preserves
+    stderr and deletes its temporary wrapper.
     They never replace native evidence.
 
 For UI-test helper work, keep the test-library surface consistent: new SSpec

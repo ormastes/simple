@@ -46,7 +46,11 @@ Provide one configurable, license-audited multilingual font pipeline shared by S
 - Reviewed shared vocabulary: canonical `FontRenderer`; one possible
   `FontRenderBatch`/`prepare_text` material seam only if persistent shared atlas
   evidence requires it. No parallel renderer/emitter hierarchy.
-- Manual flows: `step("Load a licensed multilingual font manifest")`, `step("Shape and rasterize the same glyph run through 2D and 3D")`, `step("Emit the selected GPU backend program")`, `step("Prove native submission and compare device readback with the CPU oracle")`.
+- Manual flows: `step("Load the pinned multilingual font manifest")`,
+  `step("Accept exact-face-bound simple-script shaping")`,
+  `step("Prepare one shared font batch for 2D and 3D")`,
+  `step("Emit the selected font composite program and plan compilation")`, and
+  `step("Prove native submission and device readback")`.
 - Setup/checkers: `setup_shared_font_fixture`, `expect_font_license`, `expect_language_coverage`, `expect_backend_emission`, `expect_font_render_parity`.
 - Any temporary helper must call `assert(false)` or `fail(...)` with the missing capability; no silent placeholder is acceptable.
 - Generated-manual review owner: primary Codex agent after sidecar merge.
@@ -1381,3 +1385,14 @@ pixels, and performance evidence remain release-blocking.
   artifact provenance; the checker-adjacent hash remains evidence and cannot
   replace an independent package/tracked trust anchor. The command was not run
   after the three-cycle cap. STATUS: FAIL.
+
+- Pure-runner and process-doc refresh (2026-07-16): the final bounded full-CLI
+  build passed Stages 2/3, then failed after more than one hour and 5.6 GiB RSS
+  because the pure Stage-4 parser rejects tuple destructuring in
+  `for name, lit_def in literals_config.custom`. No candidate reached seedless
+  admission, so seven native specs, seven canonical manual regenerations,
+  performance/native-GPU records, and the SimpleOS crop hash remain pending.
+  The focused-runner argv/no-fallback/process-facade/exit/stderr/cleanup contract
+  is synchronized across Codex, generic-agent, and Claude SPipe instructions.
+  `.gemini/commands/` contains no command files for this lane, so its mirror is
+  explicitly N/A rather than invented. STATUS: FAIL.

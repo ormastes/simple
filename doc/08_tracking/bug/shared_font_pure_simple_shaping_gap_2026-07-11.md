@@ -1,41 +1,40 @@
-# Pure-Simple shaping cannot feed the shared font renderer
+# Pure-Simple shaping generalization and executable evidence gaps
 
-Status: open — blocks shared multilingual GPU fonts REQ-005/007/009/012/013
+Status: narrowed — exact selected witnesses are source-complete; general shaping
+and executable serif/device evidence remain open
 
 ## Problem
 
-`FontRenderer` still prepares ordinary text as codepoints, while the existing
-Skia shaper produces glyph IDs through an explicit neutral run. `FontGlyphRun`
-now carries the exact live face handle/generation pair and logical codepoint
-cluster positions, and the renderer rejects mismatches instead of reverse
-resolving a generation globally. It still omits advances/offsets, direction,
-language, script, and UTF-8 byte clusters. The current pure shaper is not an acceptance substitute:
-its text conversion is ASCII-only, GSUB is identity, and Arabic/Devanagari handling is
-explicitly partial. Cyrillic and Urdu Arabic-extension script detection now
-work, but detection alone does not provide accepted shaping.
+`DrawIrGlyphRunPayload` is the handle-free durable value and carries glyph IDs,
+positions, logical clusters, and validity across producer/Draw IR boundaries.
+At material preparation, `FontRenderer.prepare_selected_glyph_run*` binds that
+payload to the active selected rasterizer; its `FontGlyphRun` carries the exact
+live face/generation identity. The selected source policy includes bounded Hindi
+`dev2`, Arabic/Urdu lookup-vector, Latin/Cyrillic/Han, and monochrome
+single-codepoint Emoji witnesses. These are deliberately witness-specific;
+general GSUB/GPOS, marks, BiDi, mixed-script fallback, color/sequence Emoji, and
+the three serif matrix cells remain fail-closed until executable corpus proof.
 
-Progress: fallback runs now resolve an exact live per-face OpenType snapshot;
+Fallback runs resolve an exact live per-face OpenType snapshot;
 stale or unbound attached faces fail closed instead of borrowing another blob.
 The existing cmap owner parses validated Unicode format 12 with
 Windows 3/10 precedence, so bundled Noto Emoji resolves `U+1F600` to its real
 glyph ID. Per-run face binding is now present, but emoji fallback or mixed-face
 shaping is not promoted without the remaining GSUB/GPOS corpus gate.
 
-The layout parser now retains table-bounded absolute GSUB lookup/subtable
-locations and safely decodes Coverage formats 1/2 plus SingleSubst formats 1/2.
-The shaper intentionally does not apply them until Script/LangSys/Feature
-selection identifies active lookups; substitution completeness remains false.
+The layout parser retains table-bounded absolute GSUB lookup/subtable locations
+and safely decodes Coverage formats 1/2 plus SingleSubst formats 1/2. The shaper
+applies only the bounded selected-witness plans; unsupported or general lookup
+coverage keeps substitution incomplete and fails closed.
 
-## Smallest valid fix
+## Smallest remaining work
 
-1. Complete the existing `ShapedGlyph`/`FontGlyphRun` bridge while keeping the
-   public `FontRenderBatch` seam stable.
-2. Add an owned glyph-ID raster operation and key atlas entries by immutable
-   face/default-variation identity + glyph ID + rendering configuration.
-3. Reuse `text_codepoints`; complete decoded GSUB/GPOS, per-run faces,
-   clusters, offsets, language/script/direction, and full selected-script
-   behavior in the existing shaper.
-4. Route prepared batches through that path and retain codepoint bitmap fallback.
+1. Extend decoded GSUB/GPOS selection/application beyond the pinned witness
+   plans without weakening unsupported-lookup rejection.
+2. Run the existing serif corpus probes and native device/readback specs through
+   an admitted self-hosted test runner before promoting the three serif cells.
+3. Retain the implemented shaped-run bridge, glyph-index raster/cache identity,
+   shared `FontRenderBatch` route, and codepoint bitmap compatibility fallback.
 
 ## Selector/application acceptance
 
@@ -73,7 +72,8 @@ one reviewed slice. The replacement must:
 
 Common/Inherited run resolution is implemented with a linear, deterministic
 preceding-then-following policy and focused static fixtures. Executable evidence
-is still pending, and GSUB plan selection/application remains the open blocker.
+is still pending, and general GSUB/GPOS plan selection/application remains the
+open shaping blocker beyond the bounded accepted witnesses.
 
 - Pinned Latin, Han, Devanagari, Arabic/Urdu, and Cyrillic fixtures expose stable
   face, glyph, cluster, advance, offsets, direction, language, and script.
