@@ -251,11 +251,18 @@ fn extract_string(val: RuntimeValue) -> Option<String> {
     }
 }
 
-fn build_isa_and_triple(target: i64) -> Option<(Triple, std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>)> {
+fn build_isa_for_triple(triple: Triple) -> Option<(Triple, std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>)> {
     let mut flag_builder = settings::builder();
     flag_builder.set("opt_level", "speed").ok()?;
     flag_builder.set("is_pic", "true").ok()?;
 
+    let flags = settings::Flags::new(flag_builder);
+    let isa_builder = cranelift_codegen::isa::lookup(triple.clone()).ok()?;
+    let isa = isa_builder.finish(flags).ok()?;
+    Some((triple, isa))
+}
+
+fn build_isa_and_triple(target: i64) -> Option<(Triple, std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>)> {
     // When target arch matches host arch, use Triple::host() for correct OS/ABI detection
     // (e.g., windows-gnu vs windows-msvc). Only use explicit triples for cross-compilation.
     let triple = match target {
@@ -273,10 +280,16 @@ fn build_isa_and_triple(target: i64) -> Option<(Triple, std::sync::Arc<dyn crane
         _ => Triple::host(),
     };
 
-    let flags = settings::Flags::new(flag_builder);
-    let isa_builder = cranelift_codegen::isa::lookup(triple.clone()).ok()?;
-    let isa = isa_builder.finish(flags).ok()?;
-    Some((triple, isa))
+    build_isa_for_triple(triple)
+}
+
+fn build_aot_isa_and_triple(target: &str) -> Option<(Triple, std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>)> {
+    let triple = if target.is_empty() {
+        Triple::host()
+    } else {
+        target.parse::<Triple>().ok()?
+    };
+    build_isa_for_triple(triple)
 }
 
 // ============================================================================
@@ -1434,11 +1447,36 @@ pub unsafe extern "C" fn rt_cranelift_new_aot_module(name_ptr: i64, name_len: i6
         return 0;
     }
 
-    let (triple, isa) = match build_isa_and_triple(target) {
+    let (_, isa) = match build_isa_and_triple(target) {
         Some(v) => v,
         None => return 0,
     };
 
+    rt_cranelift_new_aot_module_impl(name, isa)
+}
+
+/// Create a new AOT module for an exact target triple.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cranelift_new_aot_module_triple(
+    name_ptr: i64,
+    name_len: i64,
+    target_ptr: i64,
+    target_len: i64,
+) -> i64 {
+    let name = string_from_ptr(name_ptr, name_len);
+    if name.is_empty() || target_len < 0 || (target_len > 0 && target_ptr == 0) {
+        return 0;
+    }
+    let target = string_from_ptr(target_ptr, target_len);
+    let (_, isa) = match build_aot_isa_and_triple(&target) {
+        Some(v) => v,
+        None => return 0,
+    };
+
+    rt_cranelift_new_aot_module_impl(name, isa)
+}
+
+fn rt_cranelift_new_aot_module_impl(name: String, isa: std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>) -> i64 {
     let builder = match ObjectBuilder::new(isa, name, cranelift_module::default_libcall_names()) {
         Ok(b) => b,
         Err(_) => return 0,
@@ -1546,6 +1584,10 @@ pub fn register_cranelift_sffi_functions(builder: &mut JITBuilder) {
     // Module management (rt_ prefix — have Simple wrappers)
     builder.symbol("rt_cranelift_new_module", rt_cranelift_new_module as *const u8);
     builder.symbol("rt_cranelift_new_aot_module", rt_cranelift_new_aot_module as *const u8);
+    builder.symbol(
+        "rt_cranelift_new_aot_module_triple",
+        rt_cranelift_new_aot_module_triple as *const u8,
+    );
     builder.symbol(
         "rt_cranelift_finalize_module",
         rt_cranelift_finalize_module as *const u8,
@@ -1795,6 +1837,78 @@ mod tests {
                 path.len() as i64,
             ));
             assert!(!std::fs::read(path.as_ref()).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn test_aot_target_triple_controls_object_format() {
+        use object::Object;
+
+        unsafe {
+            let name = "target_triple";
+            let temp_dir = tempfile::tempdir().unwrap();
+
+            let windows_target = "aarch64-pc-windows-msvc";
+            let windows_module = rt_cranelift_new_aot_module_triple(
+                name.as_ptr() as i64,
+                name.len() as i64,
+                windows_target.as_ptr() as i64,
+                windows_target.len() as i64,
+            );
+            assert!(windows_module > 0);
+            let windows_path = temp_dir.path().join("windows_arm64.obj");
+            let windows_path = windows_path.to_string_lossy();
+            assert!(rt_cranelift_emit_object_raw(
+                windows_module,
+                windows_path.as_ptr() as i64,
+                windows_path.len() as i64,
+            ));
+            let windows_bytes = std::fs::read(windows_path.as_ref()).unwrap();
+            let windows_file = object::File::parse(windows_bytes.as_slice()).unwrap();
+            assert_eq!(windows_file.format(), object::BinaryFormat::Coff);
+            assert_eq!(windows_file.architecture(), object::Architecture::Aarch64);
+            assert_eq!(u16::from_le_bytes([windows_bytes[0], windows_bytes[1]]), 0xaa64);
+
+            let linux_target = "aarch64-unknown-linux-gnu";
+            let linux_module = rt_cranelift_new_aot_module_triple(
+                name.as_ptr() as i64,
+                name.len() as i64,
+                linux_target.as_ptr() as i64,
+                linux_target.len() as i64,
+            );
+            assert!(linux_module > 0);
+            let linux_path = temp_dir.path().join("linux_aarch64.o");
+            let linux_path = linux_path.to_string_lossy();
+            assert!(rt_cranelift_emit_object_raw(
+                linux_module,
+                linux_path.as_ptr() as i64,
+                linux_path.len() as i64,
+            ));
+            let linux_bytes = std::fs::read(linux_path.as_ref()).unwrap();
+            let linux_file = object::File::parse(linux_bytes.as_slice()).unwrap();
+            assert_eq!(linux_file.format(), object::BinaryFormat::Elf);
+            assert_eq!(linux_file.architecture(), object::Architecture::Aarch64);
+            assert_eq!(linux_bytes[4], 2); // ELFCLASS64
+            assert_eq!(u16::from_le_bytes([linux_bytes[16], linux_bytes[17]]), 1); // ET_REL
+
+            assert_eq!(
+                rt_cranelift_new_aot_module_triple(name.as_ptr() as i64, name.len() as i64, 0, 1),
+                0,
+            );
+            assert_eq!(
+                rt_cranelift_new_aot_module_triple(name.as_ptr() as i64, name.len() as i64, 0, -1),
+                0,
+            );
+            let invalid = "not-a-target-triple";
+            assert_eq!(
+                rt_cranelift_new_aot_module_triple(
+                    name.as_ptr() as i64,
+                    name.len() as i64,
+                    invalid.as_ptr() as i64,
+                    invalid.len() as i64,
+                ),
+                0,
+            );
         }
     }
 

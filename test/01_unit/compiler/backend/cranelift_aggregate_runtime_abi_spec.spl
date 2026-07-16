@@ -1,9 +1,43 @@
 """Regression contract for Cranelift aggregate runtime representation."""
 
 use std.io_runtime.{file_read}
+use std.platform.{host_arch}
 use std.spec.*
+use compiler.backend.backend.mir_target_context_provider.{backend_requested_aot_target_triple}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text)
+
+fn with_native_target(value: text, block: fn()):
+    val previous = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    rt_env_set("SIMPLE_NATIVE_BUILD_TARGET", value)
+    block()
+    rt_env_set("SIMPLE_NATIVE_BUILD_TARGET", previous)
 
 describe "Cranelift aggregate runtime ABI":
+    it "preserves programmatic AOT targets when no explicit triple is set":
+        with_native_target("", fn():
+            val expected_aarch64 = if host_arch() == "aarch64" or host_arch() == "arm64": "" else: "aarch64-unknown-linux-gnu"
+            expect(backend_requested_aot_target_triple("aarch64")).to_equal(expected_aarch64)
+            expect(backend_requested_aot_target_triple("riscv64")).to_equal("riscv64gc-unknown-linux-gnu")
+            expect(backend_requested_aot_target_triple("simpleos-x86_64")).to_equal("x86_64-unknown-none")
+        )
+        with_native_target("aarch64-pc-windows-msvc", fn():
+            expect(backend_requested_aot_target_triple("riscv64")).to_equal("aarch64-pc-windows-msvc")
+        )
+        with_native_target("x86_64-unknown-simpleos", fn():
+            expect(backend_requested_aot_target_triple("riscv64")).to_equal("x86_64-unknown-none")
+        )
+        with_native_target("x86_64-unknown-simpleos-elf", fn():
+            expect(backend_requested_aot_target_triple("riscv64")).to_equal("x86_64-unknown-none")
+        )
+        with_native_target("host", fn():
+            expect(backend_requested_aot_target_triple("aarch64")).to_equal("")
+        )
+        with_native_target("native", fn():
+            expect(backend_requested_aot_target_triple("aarch64")).to_equal("")
+        )
+
     it "owns a behavioral aggregate and bounds check":
         val check = file_read("scripts/check/check-cranelift-aot-aggregates.shs")
         val cross_check = file_read("scripts/check/check-cranelift-aot-aggregate-cross.shs")
@@ -15,6 +49,8 @@ describe "Cranelift aggregate runtime ABI":
         expect(cross_check).to_contain("aarch64-unknown-linux-gnu AArch64")
         expect(cross_check).to_contain("riscv64-unknown-linux-gnu RISC-V")
         expect(cross_check).to_contain("Type:[[:space:]]+REL")
+        expect(cross_check).to_contain("Class:[[:space:]]+ELF64")
+        expect(cross_check).to_contain("Machine:[[:space:]]+$machine")
         expect(cross_check).to_contain("function address missing")
         expect(cross_check).to_contain("CRANELIFT_CROSS_EXECUTE")
         expect(cross_check).to_contain("native_crossmodule_result_u8/main.spl")
@@ -28,6 +64,45 @@ describe "Cranelift aggregate runtime ABI":
         expect(fixture).to_contain("if call_pair(add_pair) != 42: return 10")
         expect(fixture).to_contain("if identity(local_value) != 17: return 11")
         expect(fixture).to_contain("fn main() -> i64:")
+
+    it "threads the exact requested triple through the AOT boundary":
+        val provider = file_read("src/compiler/70.backend/backend/mir_target_context_provider.spl")
+        val adapter = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        val legacy = file_read("src/compiler/70.backend/codegen.spl")
+        val wrapper = file_read("src/lib/nogc_sync_mut/sffi/codegen.spl")
+        val ffi_wrapper = file_read("src/lib/nogc_sync_mut/ffi/codegen.spl")
+        val compiler_generator = file_read("src/compiler/90.tools/sffi_gen/specs/cranelift_advanced.spl")
+        val app_generator = file_read("src/app/ffi_gen.specs/cranelift_core.spl")
+        val rust = file_read("src/compiler_rust/compiler/src/codegen/cranelift_sffi.rs")
+        val runtime = file_read("src/compiler_rust/compiler/src/codegen/runtime_sffi.rs")
+        val interpreter = file_read("src/compiler_rust/compiler/src/interpreter_extern/cranelift.rs")
+        val registry = file_read("src/compiler_rust/compiler/src/interpreter_extern/mod.rs")
+        val resolver = file_read("src/compiler_rust/compiler/src/elf_utils.rs")
+        val llvm_calls = file_read("src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs")
+        val instruction_calls = file_read("src/compiler_rust/compiler/src/codegen/instr/calls.rs")
+        expect(provider).to_contain("fn backend_requested_target_triple() -> text:")
+        expect(provider).to_contain("fn backend_requested_aot_target_triple(target_arch: text) -> text:")
+        expect(provider).to_contain("if target == \"host\" or target == \"native\": \"\" else: target")
+        expect(provider).to_contain("case \"aarch64\": \"aarch64-unknown-linux-gnu\"")
+        expect(adapter).to_contain("cranelift_new_aot_module(\"bootstrap_main\", target_triple)")
+        expect(adapter).to_contain("cranelift_new_aot_module(module.name, target_triple)")
+        expect(legacy).to_contain("backend_requested_aot_target_triple(target_arch)")
+        expect(wrapper).to_contain("extern fn rt_cranelift_new_aot_module(name_ptr: i64, name_len: i64, target: i64)")
+        expect(wrapper).to_contain("extern fn rt_cranelift_new_aot_module_triple(name_ptr: i64, name_len: i64, target_ptr: i64, target_len: i64)")
+        expect(wrapper).to_contain("rt_cranelift_new_aot_module_triple(name.ptr(), name.len(), target.ptr(), target.len())")
+        expect(ffi_wrapper).to_contain("rt_cranelift_new_aot_module_triple(name.ptr(), name.len(), target.ptr(), target.len())")
+        expect(compiler_generator).to_contain("unsafe_extern_c(\"rt_cranelift_new_aot_module_triple\"")
+        expect(app_generator).to_contain("unsafe_extern_c(\"rt_cranelift_new_aot_module_triple\"")
+        expect(rust).to_contain("target.parse::<Triple>().ok()?")
+        expect(rust).to_contain("object::BinaryFormat::Coff")
+        expect(rust).to_contain("object::BinaryFormat::Elf")
+        expect(runtime).to_contain("RuntimeFuncSpec::new(\"rt_cranelift_new_aot_module_triple\", &[I64, I64, I64, I64], &[I64])")
+        expect(interpreter).to_contain("pub fn rt_cranelift_new_aot_module_triple(args: &[Value]) -> Result<Value, CompileError>")
+        expect(interpreter).to_contain("fn interpreter_cranelift_aot_validates_arity()")
+        expect(registry).to_contain("\"rt_cranelift_new_aot_module_triple\"")
+        expect(resolver).to_contain("\"rt_cranelift_new_aot_module_triple\"")
+        expect(llvm_calls).to_contain("\"rt_cranelift_new_aot_module_triple\" => Some(&[0, 2])")
+        expect(instruction_calls).to_contain("\"rt_cranelift_new_aot_module_triple\" => Some(&[0, 2])")
 
     it "keeps dictionaries on the heap runtime ABI":
         val core = file_read("src/runtime/simple_core/core_array.spl")

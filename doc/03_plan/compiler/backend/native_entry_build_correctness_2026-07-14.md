@@ -102,18 +102,19 @@ the shared binary — deploys require explicit user go-ahead).
     Result decoding. Full support remains blocked on a uniform Option
     producer/consumer ABI and a runnable pure-Simple `native-build` gate.
   - `native_text_option_unwrap_pointer_value_2026-07-15.md` has a flat-nullable
-    implementation and harness controls; executable verification is pending
-    repair of the pure-Simple CLI exit 139.
+    implementation and harness controls. The historical CLI exit 139 has no
+    retained current reproducer; executable verification remains pending the
+    repaired staged native/parity CI.
   - `native_mixed_numeric_ordering_codegen_2026-07-16.md` is source-fixed for
     signed integers through shared MIR coercion before LLVM or Cranelift.
-    Strict dual-backend execution is pending the same runnable CLI. Unsigned
+    Strict dual-backend execution is pending that staged CI. Unsigned
     high-bit casts are also source-fixed and covered by a separate strict case.
 - Option `.map` now evaluates a side-effecting receiver exactly once and
   inlines its literal lambda with the decoded payload, preserving primitive
   text/float/bool/integer results through the tagged runtime-value merge.
   Array `map`/`filter`/`fold` retain their existing lifted i64 ABI. The strict
   dual-backend typed-output/filter control is source-complete; executable proof
-  remains pending the runnable pure-Simple gate.
+  remains pending the staged pure-Simple gate.
 - The whole-compiler redeploy (#99 / stage4) remains separate and blocked on
   seed-backend bugs (cranelift enum miscompile + seed-LLVM mcall_direct arg
   count) — **not** part of this correctness campaign; see

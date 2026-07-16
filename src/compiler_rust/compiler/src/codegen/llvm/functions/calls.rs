@@ -148,6 +148,7 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 
         // Cranelift self-hosting
         "rt_cranelift_new_module" | "rt_cranelift_new_aot_module" => Some(&[0]),
+        "rt_cranelift_new_aot_module_triple" => Some(&[0, 2]),
         "rt_cranelift_begin_function" => Some(&[1]),
         "rt_cranelift_get_function_ptr" => Some(&[1]),
 

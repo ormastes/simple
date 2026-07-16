@@ -16574,7 +16574,7 @@ The following wrapper functions were detected:
 - `cranelift_isub()` → wraps `rt_cranelift_isub()`
 - `cranelift_jump()` → wraps `rt_cranelift_jump()`
 - `cranelift_load()` → wraps `rt_cranelift_load()`
-- `cranelift_new_aot_module()` → wraps `rt_cranelift_new_aot_module()`
+- `cranelift_new_aot_module()` → wraps `rt_cranelift_new_aot_module_triple()`
 - `cranelift_new_module()` → wraps `rt_cranelift_new_module()`
 - `cranelift_new_signature()` → wraps `rt_cranelift_new_signature()`
 - `cranelift_null()` → wraps `rt_cranelift_null()`

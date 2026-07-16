@@ -17,6 +17,7 @@ use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
 use compiler.backend.backend.cranelift_gemm_fusion.{GemmAddFusion, detect_gemm_add_pair}
 use compiler.backend.backend.cranelift_runtime_imports.{translate_runtime_import_call_i64}
+use compiler.backend.backend.mir_target_context_provider.{backend_requested_aot_target_triple}
 use std.sffi.codegen.*
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
@@ -65,11 +66,6 @@ val CL_LINKAGE_LOCAL: i64 = 2
 # Calling convention
 val CL_CC_SYSTEM_V: i64 = 0
 
-# Target
-val CL_TARGET_X86_64: i64 = 0
-val CL_TARGET_AARCH64: i64 = 1
-val CL_TARGET_RISCV64: i64 = 2
-
 # ============================================================================
 # Cranelift Codegen Adapter
 # ============================================================================
@@ -80,10 +76,10 @@ class CraneliftCodegenAdapter:
 
 pub fn cranelift_compile_module_direct(options: CompileOptions, module: MirModule) -> Result<CodegenOutput, CompileError>:
     print "[cranelift-direct] start"
-    val target_code = codegen_target_to_cl(options.target)
+    val target_triple = backend_requested_aot_target_triple(options.target.to_text())
     print "[cranelift-direct] target"
 
-    val cl_module = cranelift_new_aot_module("bootstrap_main", target_code)
+    val cl_module = cranelift_new_aot_module("bootstrap_main", target_triple)
     if cl_module == 0:
         return Err(compileerror_backend_error(BackendKind.Cranelift,
             "Failed to create Cranelift AOT module"))
@@ -139,10 +135,10 @@ impl Codegen for CraneliftCodegenAdapter:
     fn output_kind() -> CodegenOutputKind: CodegenOutputKind.ObjectCode
 
     fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
-        val target_code = codegen_target_to_cl(self.options.target)
+        val target_triple = backend_requested_aot_target_triple(self.options.target.to_text())
 
         # Create AOT module
-        val cl_module = cranelift_new_aot_module(module.name, target_code)
+        val cl_module = cranelift_new_aot_module(module.name, target_triple)
         if cl_module == 0:
             return Err(compileerror_backend_error(BackendKind.Cranelift,
                 "Failed to create Cranelift AOT module"))
@@ -182,18 +178,6 @@ impl Codegen for CraneliftCodegenAdapter:
             return Err(compileerror_backend_error(BackendKind.Cranelift,
                 "Emitted object file was empty or unreadable: {output_path}"))
         Ok(CodegenOutput.object(module.name, object_bytes))
-
-# ============================================================================
-# Target Mapping
-# ============================================================================
-
-fn codegen_target_to_cl(target: CodegenTarget) -> i64:
-    match target:
-        case X86_64 | SimpleOS_X86_64: CL_TARGET_X86_64
-        case AArch64: CL_TARGET_AARCH64
-        case Riscv64: CL_TARGET_RISCV64
-        case Host: CL_TARGET_X86_64
-        case _: CL_TARGET_X86_64
 
 # ============================================================================
 # MIR Type → Cranelift Type Code

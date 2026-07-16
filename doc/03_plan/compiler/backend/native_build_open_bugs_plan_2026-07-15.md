@@ -79,8 +79,9 @@ ARM/AArch64, and RISC-V normalization regressions are recorded. LLVM remains
 the default; Cranelift remains available only when selected explicitly. Because
 Cranelift exposes no version discovery surface yet, version-qualified Cranelift
 asm fails diagnostically instead of comparing against a fabricated version. Runtime
-execution proof is pending a valid pure-Simple executable under the verification
-contract above.
+  execution proof is pending the repaired staged pure-Simple CI under the
+  verification contract above; the historical exit 139 has no retained current
+  reproducer.
 
 FreeBSD QEMU `--full` now runs the complete 15-case default-LLVM native-entry
 matrix after the focused explicit-Cranelift probe and requires zero codegen
@@ -99,6 +100,14 @@ Windows x86_64 LLVM CI now also uses its freshly staged pure-Simple compiler
 to emit an `aarch64-pc-windows-msvc` COFF object with the default backend and
 requires `IMAGE_FILE_MACHINE_ARM64`. The legacy Windows ARM64 job that only
 inspected the repository's Linux binary has been removed.
+
+Cranelift AOT source now sends the exact requested target triple from the
+pure-Simple target-context owner through a new ABI entrypoint; the legacy
+architecture-code export remains intact for staged/bootstrap compatibility.
+Invalid explicit triples fail module creation rather than falling back to the
+host. The Windows staged lane separately requires explicit Cranelift to emit an
+ARM64 COFF object; this is object-format coverage only, not Windows ARM64
+linking or execution coverage.
 
 ---
 

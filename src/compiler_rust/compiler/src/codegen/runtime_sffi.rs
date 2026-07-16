@@ -1399,9 +1399,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Module management
     RuntimeFuncSpec::new("rt_cranelift_module_new", &[I64, I64], &[I64]), // name (RuntimeValue), target -> module_handle
     RuntimeFuncSpec::new("rt_cranelift_new_module", &[I64, I64, I64], &[I64]), // name_ptr, name_len, target -> module_handle (JIT)
-    RuntimeFuncSpec::new("rt_cranelift_new_aot_module", &[I64, I64, I64], &[I64]), // name_ptr, name_len, target -> module_handle (AOT)
-    RuntimeFuncSpec::new("rt_cranelift_finalize_module", &[I64], &[I64]),          // module -> success
-    RuntimeFuncSpec::new("rt_cranelift_free_module", &[I64], &[]),                 // module -> ()
+    RuntimeFuncSpec::new("rt_cranelift_new_aot_module", &[I64, I64, I64], &[I64]), // name_ptr, name_len, target -> module_handle (legacy AOT)
+    RuntimeFuncSpec::new("rt_cranelift_new_aot_module_triple", &[I64, I64, I64, I64], &[I64]), // name_ptr, name_len, target_ptr, target_len -> module_handle (AOT)
+    RuntimeFuncSpec::new("rt_cranelift_finalize_module", &[I64], &[I64]),                      // module -> success
+    RuntimeFuncSpec::new("rt_cranelift_free_module", &[I64], &[]),                             // module -> ()
     // Signature building
     RuntimeFuncSpec::new("rt_cranelift_new_signature", &[I64], &[I64]), // call_conv -> sig_handle
     RuntimeFuncSpec::new("rt_cranelift_sig_add_param", &[I64, I64], &[]), // sig, type -> ()
@@ -1767,6 +1768,16 @@ mod tests {
         let sig = spec.build_signature(crate::codegen::shared::platform_call_conv());
         assert_eq!(sig.params.len(), 2);
         assert_eq!(sig.returns.len(), 1);
+    }
+
+    #[test]
+    fn cranelift_aot_module_uses_two_text_slices() {
+        let spec = RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == "rt_cranelift_new_aot_module_triple")
+            .expect("Cranelift AOT module constructor must be registered");
+        assert_eq!(spec.params, [I64, I64, I64, I64]);
+        assert_eq!(spec.returns, [I64]);
     }
 
     #[test]

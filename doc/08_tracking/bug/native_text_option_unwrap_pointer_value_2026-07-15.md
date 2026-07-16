@@ -2,8 +2,9 @@
 
 **Severity:** high (silent wrong value)
 **Found:** 2026-07-15 while adding Result unwrap preservation controls
-**Status:** flat nullable source fix complete; executable verification blocked
-by the pre-existing pure-Simple CLI exit 139
+**Status:** flat nullable source fix complete; executable verification pending
+the repaired staged pure-Simple native/parity CI. The historical exit 139 has no
+retained command, log, or backtrace proving a current blocker.
 **Backend:** pure-Simple `native-build --entry` MIR lowering
 
 ## Reproduction
