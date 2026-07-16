@@ -3962,6 +3962,37 @@ int main(int argc, char** argv) {
 
 #[cfg(not(target_os = "windows"))]
 #[test]
+fn empty_module_init_set_still_emits_main_stub_owner() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("probe");
+    let builder = NativeProjectBuilder::new(temp.path().to_path_buf(), output);
+
+    let init_object = builder
+        .generate_init_caller(temp.path(), &[], None)
+        .unwrap()
+        .expect("empty init set must still own __simple_call_module_inits");
+    let symbols = std::process::Command::new("nm")
+        .arg("-g")
+        .arg(&init_object)
+        .output()
+        .unwrap();
+    assert!(symbols.status.success());
+    assert!(String::from_utf8_lossy(&symbols.stdout).contains("__simple_call_module_inits"));
+
+    let main_object = builder.compile_main_stub(temp.path()).unwrap();
+    let linked_probe = temp.path().join("linked-probe");
+    let link_status = std::process::Command::new("c++")
+        .arg(&main_object)
+        .arg(&init_object)
+        .arg("-o")
+        .arg(&linked_probe)
+        .status()
+        .unwrap();
+    assert!(link_status.success(), "optional main-stub hooks must link without providers");
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
 fn test_bootstrap_stub_mode_defers_libc_process_symbols_to_linker() {
     let _guard = no_stub_fallback_env_lock().lock().unwrap();
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());

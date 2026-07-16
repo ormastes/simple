@@ -1,7 +1,6 @@
 # Validate MCP native smoke outputs without Python.
 
-use std.nogc_sync_mut.io_runtime.{env_get, file_read}
-use std.common.base_encoding.{text_to_bytes}
+use std.nogc_sync_mut.io_runtime.{env_get, file_read, file_read_bytes}
 
 struct SmokeResult:
     json_valid: bool
@@ -36,13 +35,30 @@ fn parse_nonnegative_i64(value: text) -> i64:
         i = i + 1
     n
 
-fn validate_content_length_frames(raw: text) -> bool:
-    val bytes = text_to_bytes(raw)
-    val prefix = text_to_bytes("Content-Length: ")
+fn bytes_match_at(values: [u8], needle: [u8], pos: i64) -> bool:
+    if pos < 0 or pos + needle.len() > values.len():
+        return false
+    var i: i64 = 0
+    while i < needle.len():
+        if values[pos + i] != needle[i]:
+            return false
+        i = i + 1
+    true
+
+fn ascii_bytes(value: text) -> [u8]:
+    var result: [u8] = []
+    var i: i64 = 0
+    while i < value.len():
+        result.push(value.char_code_at(i).to_u8())
+        i = i + 1
+    result
+
+fn validate_content_length_frames(bytes: [u8]) -> bool:
+    val prefix = ascii_bytes("Content-Length: ")
     var pos: i64 = 0
     var count: i64 = 0
     while pos < bytes.len():
-        if pos + prefix.len() > bytes.len() or bytes[pos:pos + prefix.len()] != prefix:
+        if not bytes_match_at(bytes, prefix, pos):
             return false
         var len_end = pos + prefix.len()
         while len_end < bytes.len() and bytes[len_end] >= 48u8 and bytes[len_end] <= 57u8:
@@ -57,9 +73,9 @@ fn validate_content_length_frames(raw: text) -> bool:
         if declared <= 0:
             return false
         var body_start = len_end
-        if body_start + 4 <= bytes.len() and bytes[body_start:body_start + 4] == text_to_bytes("\r\n\r\n"):
+        if bytes_match_at(bytes, ascii_bytes("\r\n\r\n"), body_start):
             body_start = body_start + 4
-        elif body_start + 2 <= bytes.len() and bytes[body_start:body_start + 2] == text_to_bytes("\n\n"):
+        elif bytes_match_at(bytes, ascii_bytes("\n\n"), body_start):
             body_start = body_start + 2
         else:
             return false
@@ -71,40 +87,6 @@ fn validate_content_length_frames(raw: text) -> bool:
         pos = body_end
         count = count + 1
     count > 0
-
-fn count_content_length_frames(raw: text) -> i64:
-    val bytes = text_to_bytes(raw)
-    val prefix = text_to_bytes("Content-Length: ")
-    var pos: i64 = 0
-    var count: i64 = 0
-    while pos < bytes.len():
-        if pos + prefix.len() > bytes.len() or bytes[pos:pos + prefix.len()] != prefix:
-            return count
-        var len_end = pos + prefix.len()
-        while len_end < bytes.len() and bytes[len_end] >= 48u8 and bytes[len_end] <= 57u8:
-            len_end = len_end + 1
-        if len_end == pos + prefix.len():
-            return count
-        var declared: i64 = 0
-        var digit_pos = pos + prefix.len()
-        while digit_pos < len_end:
-            declared = declared * 10 + (bytes[digit_pos] as i64) - 48
-            digit_pos = digit_pos + 1
-        if declared <= 0:
-            return count
-        var body_start = len_end
-        if body_start + 4 <= bytes.len() and bytes[body_start:body_start + 4] == text_to_bytes("\r\n\r\n"):
-            body_start = body_start + 4
-        elif body_start + 2 <= bytes.len() and bytes[body_start:body_start + 2] == text_to_bytes("\n\n"):
-            body_start = body_start + 2
-        else:
-            return count
-        val body_end = body_start + declared
-        if body_end > bytes.len():
-            return count
-        pos = body_end
-        count = count + 1
-    count
 
 fn extract_json_payloads(text_value: text) -> [text]:
     var payloads: [text] = []
@@ -276,9 +258,10 @@ fn payload_for_id(payloads: [text], id: text) -> text:
 
 fn validate_payload_file(path: text, prefix: text) -> SmokeResult:
     val raw = file_read(path)
+    val raw_bytes = file_read_bytes(path)
     val expected_frames: i64 = if prefix == "mcp": 4 else: 3
     val frame_count = count_occurrences(raw, "Content-Length:")
-    val framing_valid = frame_count >= expected_frames and validate_content_length_frames(raw) and not raw.contains("Content-Length: 2305843009213693951")
+    val framing_valid = frame_count >= expected_frames and validate_content_length_frames(raw_bytes) and not raw.contains("Content-Length: 2305843009213693951")
     val payloads = extract_json_payloads(raw)
     var json_valid = payloads.len() >= expected_frames and frame_count >= expected_frames
     val initialize_frame = payload_for_id(payloads, "1")

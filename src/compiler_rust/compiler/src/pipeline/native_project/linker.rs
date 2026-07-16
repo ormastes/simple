@@ -719,6 +719,15 @@ int main(int argc, char** argv) {
 "#
         } else {
             r#"
+#if defined(__APPLE__)
+extern "C" {
+    int __attribute__((weak)) spl_main(void) { return 0; }
+    void __attribute__((weak)) rt_set_args(int, char**) {}
+    void __attribute__((weak)) __simple_runtime_init(void) {}
+    void __attribute__((weak)) __simple_runtime_shutdown(void) {}
+    void __attribute__((weak)) __simple_call_module_inits(void) {}
+}
+#else
 extern "C" {
     int __attribute__((weak)) spl_main(void);
     void __attribute__((weak)) rt_set_args(int argc, char** argv);
@@ -726,6 +735,7 @@ extern "C" {
     void __attribute__((weak)) __simple_runtime_shutdown(void);
     void __attribute__((weak)) __simple_call_module_inits(void);
 }
+#endif
 int main(int argc, char** argv) {
     if (__simple_runtime_init) __simple_runtime_init();
     if (__simple_call_module_inits) __simple_call_module_inits();
@@ -793,9 +803,11 @@ int main(int argc, char** argv) {
                 }
             }
         }
-        if init_names.is_empty() {
-            return Ok(None);
-        }
+        // Always emit the caller, even when this entry has no module init
+        // functions. The generated main stub references
+        // `__simple_call_module_inits`; ELF accepts that weak undefined symbol,
+        // but Darwin's classic linker rejects it. An empty concrete owner keeps
+        // the hosted link contract identical on every Unix platform.
         init_names.sort();
         init_names.dedup();
 
