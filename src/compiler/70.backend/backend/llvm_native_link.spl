@@ -10,6 +10,7 @@
 #   val result = link_llvm_native(user_objects, output, config, verbose)
 
 use app.io.sysinfo_ops.{getpid}
+use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
 use compiler.backend.backend.entry_point.{generate_entry_point_ir}
 use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
@@ -115,24 +116,13 @@ fn hosted_c_target_matches_host(target: text, host_os_name: text, host_arch_name
     if target == "" or target == "host" or target == "native":
         return true
 
-    val is_x86_64 = if target == "x86_64" or target == "amd64":
-        host_arch_name == "x86_64" or host_arch_name == "amd64"
-    elif target.starts_with("x86_64-") or target.starts_with("amd64-"):
-        host_arch_name == "x86_64" or host_arch_name == "amd64"
-    else:
-        false
-    val is_aarch64 = if target == "aarch64" or target == "arm64":
-        host_arch_name == "aarch64" or host_arch_name == "arm64"
-    elif target.starts_with("aarch64-") or target.starts_with("arm64-"):
-        host_arch_name == "aarch64" or host_arch_name == "arm64"
-    else:
-        false
-    val is_riscv64 = if target == "riscv64" or target == "rv64":
-        host_arch_name == "riscv64" or host_arch_name == "rv64"
-    elif target.starts_with("riscv64") or target.starts_with("rv64"):
-        host_arch_name == "riscv64" or host_arch_name == "rv64"
-    else:
-        false
+    val target_arch_text = if target.contains("-"): target.split("-")[0] else: target
+    val target_arch = mir_target_context_normalize_arch(target_arch_text)
+    val host_arch_normalized = mir_target_context_normalize_arch(host_arch_name)
+    val hosted_riscv64_arch = target_arch_text == "riscv64" or target_arch_text == "riscv64gc" or target_arch_text == "rv64" or target_arch_text == "rv64gc"
+    val is_x86_64 = target_arch == "x86_64" and host_arch_normalized == "x86_64"
+    val is_aarch64 = target_arch == "aarch64" and host_arch_normalized == "aarch64"
+    val is_riscv64 = hosted_riscv64_arch and host_arch_normalized == "riscv64"
     if not is_x86_64 and not is_aarch64 and not is_riscv64:
         return false
 
@@ -141,12 +131,6 @@ fn hosted_c_target_matches_host(target: text, host_os_name: text, host_arch_name
     if not target.contains("-"):
         return not is_riscv64 or host_os_name == "linux"
 
-    val canonical_arch = if is_x86_64:
-        "x86_64"
-    elif is_aarch64:
-        "aarch64"
-    else:
-        "riscv64"
     val canonical_suffix = match host_os_name:
         case "linux": "-unknown-linux-gnu"
         case "macos" | "darwin": "-apple-darwin"
@@ -155,13 +139,7 @@ fn hosted_c_target_matches_host(target: text, host_os_name: text, host_arch_name
         case _: ""
     if canonical_suffix == "":
         return false
-    if target == "{canonical_arch}{canonical_suffix}":
-        return true
-    if is_x86_64 and target == "amd64{canonical_suffix}":
-        return true
-    if is_aarch64 and target == "arm64{canonical_suffix}":
-        return true
-    is_riscv64 and (target == "riscv64gc{canonical_suffix}" or target == "rv64{canonical_suffix}")
+    target.substring(target_arch_text.len()) == canonical_suffix
 
 # ============================================================================
 # C-Based Entry Point Compiler (no llc needed)
