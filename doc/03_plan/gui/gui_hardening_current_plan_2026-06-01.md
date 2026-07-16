@@ -144,6 +144,16 @@
   This is a Windows source-launch fallback, not pure-Simple release-binary
   completion. See
   `doc/09_report/windows_simple_cmd_launcher_health_2026-07-16.md`.
+- Windows Web WM modern-shell live evidence now has a PowerShell wrapper:
+  `scripts/check/check-web-wm-modern-shell-evidence.ps1`. On the 2026-07-16
+  Windows host it generates the Simple Web WM preview through `bin/simple.cmd`,
+  captures it through real Electron, writes ARGB/PNG/audit artifacts, and drives
+  real interaction events. The refreshed evidence reports
+  `web_wm_modern_shell_evidence_status=pass`,
+  `web_wm_modern_shell_evidence_bitmap_nonblank_status=pass`,
+  `web_wm_modern_shell_evidence_audit_pass=pass`,
+  `web_wm_modern_shell_evidence_interaction_pass=pass`, and
+  `web_wm_modern_shell_evidence_interaction_event_count=13`.
 - Windows verification backstop: `scripts/audit/direct-env-runtime-guard.ps1`
   mirrors the required `direct-env-runtime-guard.shs` working/staged checks for
   PowerShell-only hosts where `sh` is unavailable. The 2026-07-16 Windows run
