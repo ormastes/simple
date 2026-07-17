@@ -753,3 +753,150 @@ fn main() -> i64:
 "#,
     42
 );
+
+// =============================================================================
+// Task #170: `Result<i64,_>` Ok(v) payload extraction must not divide
+// multiples-of-8 by 8 (deployed 2026-07-11 seed BoxInt<<3 tag-shift landmine).
+//
+// Root cause class (see #121/#122/#123 commits, 2026-07-04): a construct
+// site (Ok/Some -> rt_enum_new) and an extract site (match-binding/`?`/
+// unwrap -> rt_enum_payload) must agree on whether the scalar payload is
+// tagged. A mismatched pair (raw-construct + untag-extract, or vice versa)
+// silently right-shifts a multiple-of-8 payload by 3 bits (48 -> 6, 8 -> 1,
+// 64 -> 8) while leaving non-multiples of 8 unaffected by the shift's low
+// bits (masking artifacts differ) -- exactly the deployed-binary symptom.
+// These tests exercise construct+extract through the compiled JIT path
+// (not just symbol relocation) so a reintroduced mismatch fails loudly on
+// the actual returned value, across match-binding, `.unwrap()`, and `?`
+// propagation forms. See
+// doc/08_tracking/bug/native_result_unwrap_silent_wrong_161_2026-07-14.md
+// and doc/08_tracking/bug/seed_interp_flat_nullable_unwrap_wrong_value_2026-07-16.md
+// for adjacent (already-fixed) landmines in this same tag/box family.
+//
+// jit-only (not interp_jit): `RunningType::Interpreter` (the pure AST
+// tree-walking backend reached via `Interpreter::run` in this test harness)
+// SIGSEGVs on ANY `match <Result-returning call>(): case Ok(v): return v`
+// construct -- reproduced independently with a minimal `Ok(1)` case, so it
+// is a pre-existing, orthogonal interpreter-backend crash unrelated to the
+// tag/box value bug this section regression-tests, not something to fix or
+// paper over here. See
+// doc/08_tracking/bug/interpreter_result_match_return_sigsegv_2026-07-17.md.
+// =============================================================================
+
+backend_test!(
+    jit_result_ok_match_extraction_multiple_of_8,
+    jit,
+    r#"
+fn get() -> Result<i64, text>:
+    return Ok(48)
+
+fn main() -> i64:
+    match get():
+        case Ok(v):
+            return v
+        case Err(e):
+            return -1
+"#,
+    48
+);
+
+backend_test!(
+    jit_result_ok_match_extraction_small_multiple_of_8,
+    jit,
+    r#"
+fn get() -> Result<i64, text>:
+    return Ok(8)
+
+fn main() -> i64:
+    match get():
+        case Ok(v):
+            return v
+        case Err(e):
+            return -1
+"#,
+    8
+);
+
+backend_test!(
+    jit_result_ok_match_extraction_negative_multiple_of_8,
+    jit,
+    r#"
+fn get() -> Result<i64, text>:
+    return Ok(-8)
+
+fn main() -> i64:
+    match get():
+        case Ok(v):
+            return v
+        case Err(e):
+            return -1
+"#,
+    -8
+);
+
+backend_test!(
+    jit_result_ok_match_extraction_non_multiple_of_8_control,
+    jit,
+    r#"
+fn get() -> Result<i64, text>:
+    return Ok(42)
+
+fn main() -> i64:
+    match get():
+        case Ok(v):
+            return v
+        case Err(e):
+            return -1
+"#,
+    42
+);
+
+backend_test!(
+    jit_result_ok_unwrap_multiple_of_8,
+    jit,
+    r#"
+fn get() -> Result<i64, text>:
+    return Ok(64)
+
+fn main() -> i64:
+    return get().unwrap()
+"#,
+    64
+);
+
+backend_test!(
+    jit_result_ok_try_op_multiple_of_8,
+    jit,
+    r#"
+fn get() -> Result<i64, text>:
+    return Ok(16)
+
+fn caller() -> Result<i64, text>:
+    let v: i64 = get()?
+    return Ok(v)
+
+fn main() -> i64:
+    match caller():
+        case Ok(v):
+            return v
+        case Err(e):
+            return -1
+"#,
+    16
+);
+
+backend_test!(
+    jit_result_ok_if_val_multiple_of_8,
+    jit,
+    r#"
+fn get() -> Result<i64, text>:
+    return Ok(48)
+
+fn main() -> i64:
+    if val Ok(v) = get():
+        return v
+    else:
+        return -1
+"#,
+    48
+);
