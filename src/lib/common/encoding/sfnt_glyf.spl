@@ -534,10 +534,26 @@ fn rasterize_sfnt_glyf(font: OtFont, glyph_id: u32, size_px: i64) -> Option<Sfnt
         Some(value): value
         None: return None
     val commands = parsed_outline.commands
+    val scale = size_px as f64 / units_per_em as f64
+    var has_drawable_point = false
+    for command in commands:
+        if command.verb != SFNT_GLYF_CLOSE:
+            has_drawable_point = true
+    if not has_drawable_point:
+        # Whitespace/empty glyph: a valid 0x0 bitmap with real advance —
+        # matches the dylib lane's semantics. Also avoids returning None for
+        # a routine case: match None-discrimination is unreliable on the
+        # baremetal lane (a legit None here surfaced in the caller's Some
+        # arm as nil -> "field access on nil receiver" panic at bounds.right,
+        # 2026-07-18; first WM label glyph was a space).
+        return Some(SfntGlyfBitmap(
+            width: 0, height: 0,
+            advance: _round_glyf_metric(horizontal[0] as f64 * scale),
+            bearing_x: _round_glyf_metric(horizontal[1] as f64 * scale),
+            bearing_y: 0, pixels: []))
     val bounds = match _outline_bounds(commands):
         Some(value): value
         None: return None
-    val scale = size_px as f64 / units_per_em as f64
     val em_w = bounds.right - bounds.left
     val em_h = bounds.bottom - bounds.top
     val raw_w = em_w * scale
