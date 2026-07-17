@@ -200,17 +200,28 @@ Evidence:
 - intended output: `build/native_probe/full-cycle3/simple` (not produced)
 - result: exit 124 after 2400 seconds
 
-The diagnostics identified a provenance split: native Stage 4 enabled
-`SIMPLE_NATIVE_ARENA_DECLS=1`, but statement/expression counters and accessors
-still preferred persistent `SIMPLE_BOOTSTRAP_*` environment mirrors while the
-live arrays were reset per module. Commit `48921b1f924` had aligned these
-stores, but the logic was lost in the broad restore `10d50ad3e27`. The
-2026-07-17 repair restores local count slots, arena-preferred reads, disabled
-environment mirrors, and in-place arena reuse across expression, statement,
-declaration, arm, elif, and module storage. It also removes the Flat AST
-bridge's duplicate direct read of stale `SIMPLE_BOOTSTRAP_DECL_TAG_*` values;
-that read could misclassify a current trait/impl as a function and then treat
-its method declaration IDs as statement IDs. The regression
-`bootstrap_expr_stmt_arena_spec.spl` reproduces the stale 1706/1756 counters.
+Initial evidence suggested an arena/environment provenance split, and the
+2026-07-17 repair restored local count slots, arena-preferred reads, disabled
+environment mirrors, in-place arena reuse, and arena-only declaration tags.
+Those are valid ownership/performance repairs, but a rebuilt Cycle 5 candidate
+still reproduced the exact OOB series. Reset tracing then localized the first
+series (204, 207, 210, 213 against 64 statements) to the four fat-arrow arms
+in `src/lib/common/ui/widget.spl`. `parse_match_arms_common` stored each raw
+expression ID directly in `arm_body`, whose declared and consumed contract is
+statement IDs; the bridge therefore passed expression-arena IDs to
+`stmt_get_tag`. The root fix wraps the expression with the existing
+`stmt_expr_stmt` constructor. `bootstrap_expr_stmt_arena_spec.spl` now checks
+that fat-arrow arm bodies contain `STMT_EXPR` nodes.
 A fresh Stage-4 admission run remains required before closing the performance
 incident.
+
+## Cycle 6 evidence — cross-arena OOB removed
+
+The rebuilt Cycle 6 candidate compiled 4 changed units with 711 cache hits.
+Its bounded Stage-4 run emitted none of the prior statement-arena OOB or
+`missing stmt tag` diagnostics. It advanced through frontend loading and then
+failed normally in phase 2 at
+`src/compiler/60.mir_opt/mir_opt/collection_opt_core.spl:470`: the bootstrap
+parser rejected the `mut counts` parameter in `count_inst_uses` with
+`expected ), got Ident 'counts'`. This is the next admission blocker; the
+fat-arrow match-arm arena defect is no longer the stopping point.

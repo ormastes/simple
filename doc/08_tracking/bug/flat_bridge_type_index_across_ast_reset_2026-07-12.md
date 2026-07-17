@@ -19,30 +19,30 @@ at line 8) raised, from the Rust seed's `collections.rs:479` bounds check:
 error: semantic: array index out of bounds: index is 48 but length is 13
 ```
 
-## 2026-07-17 correction: native arena and environment provenance
+## 2026-07-17 correction: fat-arrow match arms crossed AST arenas
 
 A compiled, single-thread Stage-4 run disproved concurrency as a requirement
-for this failure class. It repeatedly read statement indices 1706 through
-1756 while the current statement arena contained 462 nodes. Sequential module
-parses reset the live arrays, but the reverted statement/expression code kept
-allocating from and reading persistent `SIMPLE_BOOTSTRAP_*` environment
-counters and fields even when `SIMPLE_NATIVE_ARENA_DECLS=1` selected native
-arena ownership. A stale index could therefore be out of bounds or, worse,
-silently resolve to an unrelated in-bounds node.
+for this failure class. After native arena ownership and stale declaration-tag
+precedence were repaired, Cycle 5 still reproduced the exact OOB sequences.
+Reset tracing localized the first sequence to
+`src/lib/common/ui/widget.spl`: its four single-expression fat-arrow match
+arms produced expression IDs 204, 207, 210, and 213 while the statement arena
+contained 64 nodes.
 
-The corrective implementation restores the proven `48921b1f924` ownership
-rule in `ast_stmt.spl` and `_AstExpr/{nodes,accessors}.spl`: native mode uses
-local count slots, skips per-node environment mirrors, ignores stale mirrored
-fields, and clears arrays in place. Declaration/module arrays and scalar slots
-are likewise reset in place, including newer trait and parameter-mutation
-parallel fields. Finally, `flat_decl_tag_text` now delegates exclusively to
-the arena-aware `decl_get_tag`; its unconditional direct environment read was
-misclassifying current trait/impl bodies as functions, turning method
-declaration IDs into the observed out-of-range statement IDs. The tag bounds
-guards remain defensive diagnostics; they are not the data-integrity fix. The regression
-`bootstrap_expr_stmt_arena_spec.spl` injects the observed stale counters and
-slot-zero fields, crosses two sequential parse/bridge calls, and verifies that
-a stale mirrored function tag cannot override a current trait tag.
+The root defect was in `parse_match_arms_common`: for `Pattern => expression`,
+it appended the raw expression ID to `arm_body`. Match-arm bodies are declared
+and consumed as statement-ID lists, so the bridge later called
+`convert_flat_stmt_in_list` with an expression-arena index. The fix uses the
+existing `stmt_expr_stmt(expression, 0)` constructor, matching the already
+correct nearby if/match lowering path. The arena and declaration-tag repairs
+remain useful hardening, but they did not remove this reproduced OOB. The
+regression inspects the parser arena directly and requires `STMT_EXPR` in each
+fat-arrow arm body.
+
+Cycle 6 confirmation: a rebuilt pure-Simple bootstrap candidate passed every
+previous OOB location without a `stmt_get_tag` or missing-tag diagnostic. The
+run stopped later on an unrelated `mut`-parameter parse error in
+`collection_opt_core.spl:470`.
 
 ## Original 2026-07-12 hypothesis (superseded)
 

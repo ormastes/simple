@@ -6,9 +6,12 @@
 
 use compiler.core.ast.{
     ast_reset,
-    EXPR_INT_LIT, expr_count, expr_int_lit, expr_get_int, expr_get_tag,
-    STMT_EXPR, stmt_count, stmt_expr_stmt, stmt_get_expr, stmt_get_tag
+    EXPR_INT_LIT, expr_count, expr_int_lit, expr_get_args, expr_get_int, expr_get_tag,
+    STMT_EXPR, stmt_count, stmt_expr_stmt, stmt_get_expr, stmt_get_tag,
+    arm_get_body, decl_get_body, module_get_decls
 }
+use compiler.core.parser.{parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 
 extern fn rt_env_get(key: text) -> text
@@ -96,3 +99,22 @@ describe "bootstrap declaration arena ownership", tag: ["only-compiled"]:
         expect(rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)).to_equal(true)
         expect(rt_env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena)).to_equal(true)
         expect(rt_env_set("SIMPLE_BOOTSTRAP_DECL_TAG_0", old_decl_tag)).to_equal(true)
+
+describe "fat-arrow match arm arenas":
+    it "stores arrow expressions as statement nodes":
+        val source = "enum Mode:\n    A\n    B\n" +
+            "fn mode_name(mode: Mode) -> text:\n" +
+            "    return match mode:\n" +
+            "        Mode.A => \"A\"\n" +
+            "        Mode.B => \"B\"\n"
+        parser_init_with_path(source, "fat_arrow_match.spl")
+        parse_module_body()
+
+        val declarations = module_get_decls()
+        val function_body = decl_get_body(declarations[1])
+        val match_expr = stmt_get_expr(function_body[0])
+        val arms = expr_get_args(match_expr)
+        val first_arm_body = arm_get_body(arms[0])
+
+        expect(first_arm_body.len()).to_equal(1)
+        expect(stmt_get_tag(first_arm_body[0])).to_equal(STMT_EXPR)
