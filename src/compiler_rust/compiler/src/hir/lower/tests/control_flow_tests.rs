@@ -341,3 +341,25 @@ fn test_standalone_match_subject_enum_const_variant_beats_unrelated_const_struct
         "standalone match must extract its subject-owned Const payload: {repr}"
     );
 }
+
+#[test]
+fn test_regular_if_patterned_elif_binds_local() {
+    let source = "fn unwrap_after_regular(value: i64?) -> i64:\n    if false:\n        return 0\n    elif val unwrapped = value:\n        return unwrapped\n    return -1\n";
+    let module = parse_and_lower(source).unwrap();
+    let function = module
+        .functions
+        .iter()
+        .find(|f| f.name == "unwrap_after_regular")
+        .unwrap();
+    let hir_repr = format!("{:?}", function.body);
+
+    assert!(
+        function.locals.iter().any(|local| local.name == "unwrapped"),
+        "{hir_repr}"
+    );
+    assert!(!hir_repr.contains("Global(\"unwrapped\")"), "{hir_repr}");
+
+    let mir = crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed");
+    let mir_repr = format!("{mir:?}");
+    assert!(!mir_repr.contains("global_name: \"unwrapped\""), "{mir_repr}");
+}

@@ -58,6 +58,59 @@ impl Lowerer {
         Ok(stmts)
     }
 
+    fn lower_elif_chain(
+        &mut self,
+        branches: &[(Option<Pattern>, Expr, ast::Block)],
+        mut else_block: Option<Vec<HirStmt>>,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Option<Vec<HirStmt>>> {
+        for (pattern, condition, body) in branches.iter().rev() {
+            if let Some(pattern) = pattern {
+                let subject = self.lower_expr(condition, ctx)?;
+                let subject_ty = subject.ty;
+                let subject_idx = ctx.locals.len();
+                ctx.add_local("$if_let_subject_elif".to_string(), subject_ty, Mutability::Immutable);
+                let store = HirStmt::Let {
+                    local_index: subject_idx,
+                    ty: subject_ty,
+                    value: Some(subject),
+                };
+                let condition = self.if_let_pattern_condition(subject_idx, subject_ty, pattern, ctx)?;
+                let bindings = self.extract_pattern_bindings(pattern, subject_ty);
+                let mutability = if matches!(pattern, Pattern::MutIdentifier(_)) {
+                    Mutability::Mutable
+                } else {
+                    Mutability::Immutable
+                };
+                for (name, ty) in &bindings {
+                    ctx.add_local(name.clone(), *ty, mutability);
+                }
+                let mut then_block = self.build_pattern_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
+                then_block.extend(self.lower_block(body, ctx)?);
+                for (name, _) in &bindings {
+                    ctx.local_map.remove(name);
+                }
+                else_block = Some(vec![
+                    store,
+                    HirStmt::If {
+                        condition,
+                        then_block,
+                        else_block,
+                    },
+                ]);
+            } else {
+                let condition = self.lower_expr(condition, ctx)?;
+                let then_block = self.lower_block(body, ctx)?;
+                else_block = Some(vec![HirStmt::If {
+                    condition,
+                    then_block,
+                    else_block,
+                }]);
+            }
+        }
+        Ok(else_block)
+    }
+
     pub(super) fn lower_node(&mut self, node: &Node, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
         match node {
             Node::Let(let_stmt) => {
@@ -290,82 +343,13 @@ impl Lowerer {
                     }
 
                     // 8. Handle else block (elif branches + else)
-                    let mut else_block = if let Some(eb) = &if_stmt.else_block {
+                    let else_block = if let Some(eb) = &if_stmt.else_block {
                         Some(self.lower_block(eb, ctx)?)
                     } else {
                         None
                     };
 
-                    for (elif_pattern, elif_cond, elif_body) in if_stmt.elif_branches.iter().rev() {
-                        if let Some(ep) = elif_pattern {
-                            // `elif val Some(x) = elif_cond:` — mirror the first
-                            // branch: each elif has its OWN subject (elif_cond),
-                            // its own pattern condition, and its own bindings.
-                            // (Previously the elif reused the first branch's
-                            // subject and never registered the binding, so the
-                            // body saw `Unknown variable: x` and matched the
-                            // wrong value.)
-                            let elif_subject_hir = self.lower_expr(elif_cond, ctx)?;
-                            let elif_subject_ty = elif_subject_hir.ty;
-                            let elif_subject_idx = ctx.locals.len();
-                            ctx.add_local(
-                                "$if_let_subject_elif".to_string(),
-                                elif_subject_ty,
-                                Mutability::Immutable,
-                            );
-                            let elif_store = HirStmt::Let {
-                                local_index: elif_subject_idx,
-                                ty: elif_subject_ty,
-                                value: Some(elif_subject_hir),
-                            };
-
-                            let elif_condition =
-                                self.if_let_pattern_condition(elif_subject_idx, elif_subject_ty, ep, ctx)?;
-
-                            let elif_bindings = self.extract_pattern_bindings(ep, elif_subject_ty);
-                            let elif_mutability = if matches!(ep, Pattern::MutIdentifier(_)) {
-                                Mutability::Mutable
-                            } else {
-                                Mutability::Immutable
-                            };
-                            for (name, ty) in &elif_bindings {
-                                ctx.add_local(name.clone(), *ty, elif_mutability);
-                            }
-
-                            let elif_binding_stmts = self.build_pattern_binding_stmts(
-                                ep,
-                                elif_subject_idx,
-                                elif_subject_ty,
-                                &elif_bindings,
-                                ctx,
-                            );
-
-                            let mut elif_then = Vec::new();
-                            elif_then.extend(elif_binding_stmts);
-                            elif_then.extend(self.lower_block(elif_body, ctx)?);
-
-                            for (name, _) in &elif_bindings {
-                                ctx.local_map.remove(name);
-                            }
-
-                            else_block = Some(vec![
-                                elif_store,
-                                HirStmt::If {
-                                    condition: elif_condition,
-                                    then_block: elif_then,
-                                    else_block,
-                                },
-                            ]);
-                        } else {
-                            let elif_condition = self.lower_expr(elif_cond, ctx)?;
-                            let elif_then = self.lower_block(elif_body, ctx)?;
-                            else_block = Some(vec![HirStmt::If {
-                                condition: elif_condition,
-                                then_block: elif_then,
-                                else_block,
-                            }]);
-                        }
-                    }
+                    let else_block = self.lower_elif_chain(&if_stmt.elif_branches, else_block, ctx)?;
 
                     let mut result = vec![store_stmt];
                     result.push(HirStmt::If {
@@ -379,22 +363,13 @@ impl Lowerer {
                     let condition = self.lower_expr(&if_stmt.condition, ctx)?;
                     let then_block = self.lower_block(&if_stmt.then_block, ctx)?;
 
-                    let mut else_block = if let Some(eb) = &if_stmt.else_block {
+                    let else_block = if let Some(eb) = &if_stmt.else_block {
                         Some(self.lower_block(eb, ctx)?)
                     } else {
                         None
                     };
 
-                    for (_elif_pattern, elif_cond, elif_body) in if_stmt.elif_branches.iter().rev() {
-                        let elif_condition = self.lower_expr(elif_cond, ctx)?;
-                        let elif_then = self.lower_block(elif_body, ctx)?;
-
-                        else_block = Some(vec![HirStmt::If {
-                            condition: elif_condition,
-                            then_block: elif_then,
-                            else_block,
-                        }]);
-                    }
+                    let else_block = self.lower_elif_chain(&if_stmt.elif_branches, else_block, ctx)?;
 
                     Ok(vec![HirStmt::If {
                         condition,

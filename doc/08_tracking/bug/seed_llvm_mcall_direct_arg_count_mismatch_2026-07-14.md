@@ -133,6 +133,15 @@ generics, enum cases, and static receivers must remain fail-closed rather than
 being declared as external symbols. The run exited 2 normally with no timeout,
 OOM, crash, or orphan.
 
+The next isolated fix unified regular and pattern-leading `elif` branches
+through one pattern-aware HIR lowering helper. Its HIR/MIR regression first
+reproduced `UnknownVariable("unwrapped")`, then passed with the binding retained
+as a local. The single bounded bootstrap removed both real manifestations,
+`global_local` and `receiver_mir_type_uw`; current `main` also removed the
+separate `local_unsigned` leak. Stage 2 now reports 32 undeclared-global
+diagnostics (down from 38), with no argument-count errors. The run exited 2
+normally without timeout, OOM, crash, hang, or orphan.
+
 ## Context: in-guest RUN is otherwise REACHABLE
 
 This bug does NOT block a plain in-guest run: `/usr/bin/simple --version` runs
