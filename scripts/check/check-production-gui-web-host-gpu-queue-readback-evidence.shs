@@ -233,6 +233,43 @@ run_queue_probe() {
     do
         append_env "$key" "$(field_of "$key" "$BUILD_DIR/queue_probe.env")"
     done
+
+    queue_probe_native="$BUILD_DIR/runtime_queue_probe_native"
+    case "$RUN_UNAME_S" in
+        MINGW*|MSYS*|CYGWIN*) queue_probe_native="${queue_probe_native}.exe" ;;
+    esac
+    queue_probe_native_runtime_path="${SIMPLE_RUNTIME_PATH:-$ROOT_DIR/src/compiler_rust/target/bootstrap}"
+    rm -rf "$BUILD_DIR/queue_probe_native_cache" "$queue_probe_native" \
+        "$BUILD_DIR/queue_probe_native.env" "$BUILD_DIR/queue_probe_native.err"
+    set +e
+    env -u SIMPLE_BOOTSTRAP SIMPLE_BINARY="$SIMPLE_BIN" SIMPLE_NO_STUB_FALLBACK=1 \
+        SIMPLE_LIB="$SIMPLE_LIB_CONFIGURED" \
+        timeout "$COMPILER_PROBE_TIMEOUT" "$SIMPLE_BIN" native-build \
+        --runtime-bundle host-gpu --runtime-path "$queue_probe_native_runtime_path" \
+        --entry "$queue_probe_source" --cache-dir "$BUILD_DIR/queue_probe_native_cache" \
+        --mode one-binary --output "$queue_probe_native" \
+        >"$BUILD_DIR/queue_probe_native_build.out" 2>"$BUILD_DIR/queue_probe_native_build.err"
+    queue_probe_native_build_code=$?
+    queue_probe_native_run_code=125
+    if [ "$queue_probe_native_build_code" = "0" ] && [ -x "$queue_probe_native" ]; then
+        timeout "$PROBE_TIMEOUT" "$queue_probe_native" \
+            >"$BUILD_DIR/queue_probe_native.env" 2>"$BUILD_DIR/queue_probe_native.err"
+        queue_probe_native_run_code=$?
+    fi
+    set -e
+    append_env "queue_probe_native_runtime_path" "$queue_probe_native_runtime_path"
+    append_env "queue_probe_native_build_exit_code" "$queue_probe_native_build_code"
+    append_compiler_probe_timeout_env "queue_probe_native_build" "$queue_probe_native_build_code"
+    append_env "queue_probe_native_run_exit_code" "$queue_probe_native_run_code"
+    append_probe_timeout_env "queue_probe_native_run" "$queue_probe_native_run_code"
+    if [ "$code" = "0" ] \
+        && [ "$queue_probe_native_build_code" = "0" ] \
+        && [ "$queue_probe_native_run_code" = "0" ] \
+        && cmp -s "$BUILD_DIR/queue_probe.env" "$BUILD_DIR/queue_probe_native.env"; then
+        append_env "queue_probe_native_status" "pass"
+    else
+        append_env "queue_probe_native_status" "fail"
+    fi
 }
 
 run_existing_runtime_spec() {
@@ -631,6 +668,7 @@ if [ "$queue_emit_status" = "pass" ] \
     && [ "$same_frame_gpu_backend_readback_status" = "pass" ] \
     && [ "$event_frame_correlation_status" = "pass" ] \
     && [ "$(status_of nogc_draw_ir_runtime_queue_status)" = "pass" ] \
+    && [ "$(status_of queue_probe_native_status)" = "pass" ] \
     && [ "$(status_of browser_host_event_roundtrip_status)" = "pass" ] \
     && [ "$(status_of host_gpu_event_queue_status)" = "pass" ] \
     && [ "$(status_of backend_readback_handle_contract_status)" = "pass" ] \
@@ -855,6 +893,9 @@ report_browser_host_event_exit="$(field_of browser_host_event_roundtrip_exit_cod
 report_browser_host_event_reason="$(field_of browser_host_event_roundtrip_reason "$ENV_PATH")"
 report_nogc_draw_ir_runtime_queue_status="$(field_of nogc_draw_ir_runtime_queue_status "$ENV_PATH")"
 report_nogc_draw_ir_runtime_queue_exit="$(field_of nogc_draw_ir_runtime_queue_spec_exit_code "$ENV_PATH")"
+report_queue_probe_native_status="$(field_of queue_probe_native_status "$ENV_PATH")"
+report_queue_probe_native_build_exit="$(field_of queue_probe_native_build_exit_code "$ENV_PATH")"
+report_queue_probe_native_run_exit="$(field_of queue_probe_native_run_exit_code "$ENV_PATH")"
 report_gc_draw_ir_runtime_queue_status="$(field_of gc_draw_ir_runtime_queue_status "$ENV_PATH")"
 report_gc_draw_ir_runtime_queue_exit="$(field_of gc_draw_ir_runtime_queue_spec_exit_code "$ENV_PATH")"
 report_host_gpu_event_queue_status="$(field_of host_gpu_event_queue_status "$ENV_PATH")"
@@ -981,6 +1022,7 @@ mkdir -p "$(dirname -- "$REPORT_PATH")"
     echo "| directx_native_spec | ${report_directx_native_readback_spec_status:-missing} | sspec_wrapper_contract | test/03_system/check/directx_native_readback_spec.spl | ${report_directx_native_readback_spec_exit:-missing} | wrapper contract evidence for native DirectX gate |"
     echo "| generated_2d_native_wrappers_spec | ${report_generated_2d_native_readback_wrappers_spec_status:-missing} | sspec_wrapper_contract | test/03_system/check/generated_2d_native_readback_wrappers_spec.spl | ${report_generated_2d_native_readback_wrappers_spec_exit:-missing} | wrapper contract evidence for Metal/ROCm native readback gates |"
     echo "| nogc_draw_ir_runtime_queue | ${report_nogc_draw_ir_runtime_queue_status:-missing} | canonical_no_gc_queue_dispatch | test/01_unit/lib/nogc_async_mut/gpu/engine2d/draw_ir_runtime_queue_spec.spl | ${report_nogc_draw_ir_runtime_queue_exit:-missing} | required_for_Draw_IR_queue_dispatch |"
+    echo "| runtime_queue_probe_native | ${report_queue_probe_native_status:-missing} | direct_no_stub_native_queue_dispatch | test/01_unit/lib/nogc_async_mut/gpu/engine2d/runtime_queue_probe.spl | build=${report_queue_probe_native_build_exit:-missing}/run=${report_queue_probe_native_run_exit:-missing} | required_for_native_archive_and_SFFI_queue_dispatch |"
     echo "| gc_draw_ir_runtime_queue | ${report_gc_draw_ir_runtime_queue_status:-missing} | legacy_gc_queue_bridge | test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_queue_spec.spl | ${report_gc_draw_ir_runtime_queue_exit:-missing} | compatibility bridge evidence |"
     echo "| browser_event | ${report_browser_host_event_status:-missing} | host_event_roundtrip | ${report_browser_host_event_source:-missing} | ${report_browser_host_event_exit:-missing} | required_for_host_event_roundtrip |"
     echo "| event_queue | ${report_host_gpu_event_queue_status:-missing} | runtime_event_receipt | runtime_event_receipt | ${report_host_gpu_event_queue_exit:-missing} | required_for_event_flow |"

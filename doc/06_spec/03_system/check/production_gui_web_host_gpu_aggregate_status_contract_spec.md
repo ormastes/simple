@@ -163,7 +163,7 @@ expect(script).to_contain("append_env \"production_gui_web_host_gpu_queue_readba
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -175,6 +175,15 @@ expect(script.contains("cat >\"$BUILD_DIR/queue_probe.spl\"")).to_be(false)
 expect(probe).to_contain("queue_zero_backend_packet_id=")
 expect(probe).to_contain("queue_nonzero_backend_last_backend_handle=")
 expect(probe).to_contain("queue_overflow_packet_id=")
+expect(script).to_contain("SIMPLE_NO_STUB_FALLBACK=1")
+expect(script).to_contain("\"$SIMPLE_BIN\" native-build")
+expect(script).to_contain("queue_probe_native_runtime_path=\"${SIMPLE_RUNTIME_PATH:-$ROOT_DIR/src/compiler_rust/target/bootstrap}\"")
+expect(script).to_contain("--runtime-bundle host-gpu --runtime-path \"$queue_probe_native_runtime_path\"")
+expect(script).to_contain("--mode one-binary --output \"$queue_probe_native\"")
+expect(script).to_contain("if [ \"$code\" = \"0\" ]")
+expect(script).to_contain("cmp -s \"$BUILD_DIR/queue_probe.env\" \"$BUILD_DIR/queue_probe_native.env\"")
+expect(script).to_contain("[ \"$(status_of queue_probe_native_status)\" = \"pass\" ]")
+expect(script).to_contain("| runtime_queue_probe_native | ${report_queue_probe_native_status:-missing} | direct_no_stub_native_queue_dispatch |")
 ```
 
 </details>
