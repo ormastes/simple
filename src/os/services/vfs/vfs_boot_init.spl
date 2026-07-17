@@ -350,17 +350,18 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     if exec_probe.len() <= 4 or not _bytes_have_elf_magic(exec_probe):
         serial_println("[vfs-init] exec probe failed")
         return false
-    # BUG(codegen, freestanding entry-closure cranelift): BlockDevice
-    # trait-object dispatch performs an extra dereference — the indirect call
-    # in Fat32Core.read_boot_sector (+0x18, self._device_sector_size()) jumps
-    # to the callee's own first 8 code bytes read as an address
-    # (rip=cr2=0x0001e0ec8148e589 = "push rbp; mov rbp,rsp; sub rsp,0x1e0"),
-    # and the recovering fault handler then storms without progressing.
-    # Until that dispatch bug is fixed, skip the hosted SharedFat32Driver
-    # mount so the desktop keeps its degraded-but-rendering fallback. The
-    # scalar direct reader above has already validated geometry, version,
-    # and app-payload reads at their correct clusters.
-    if true:
+    # BUG(codegen, freestanding entry-closure cranelift) C8 re-verification
+    # (2026-07-17, SEED-CODEGEN lane): TEMPORARILY re-enabled to test whether
+    # a vtable-compaction fix (mir/lower/lowering_core.rs +
+    # codegen/common_backend.rs: vtable slots are now indexed by the trait's
+    # CANONICAL slot number instead of being compacted to only the methods an
+    # impl overrides) resolves this. Static analysis of NvmeBlockAdapter's
+    # OWN vtable (nm + objdump on a foreign build) found it already correctly
+    # laid out (3/3 methods, no gap) BEFORE this fix, so the fix may be a
+    # no-op for this exact path — this boot test is the actual discriminator.
+    # If this reintroduces the wild-jump/fault-storm, REVERT to `if true:`
+    # and restore the comment above describing the original symptom.
+    if false:
         serial_println("[vfs-init] hosted fat32 mount skipped: blockdevice-dispatch-codegen-bug")
         return false
     g_adapter = adapter

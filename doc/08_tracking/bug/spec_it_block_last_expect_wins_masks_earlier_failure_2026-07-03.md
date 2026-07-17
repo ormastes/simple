@@ -5,7 +5,8 @@
 grep for as the trustworthy signal under the interpreter-mode greenwash
 caveat) is itself unreliable whenever an `it` block contains more than one
 `expect()`/`assert_*` call
-**Status:** source-resolved; fail-then-pass regression pinned, execution pending
+**Status:** Open — mitigated in new specs by using a single combined
+assertion per `it` block; no interpreter fix yet
 
 ## Summary
 
@@ -97,11 +98,3 @@ file-summary bug and should be prioritized accordingly.
   exactly one meaningful `expect()`/`assert_*`, or explicitly combine
   multiple checks into one boolean before the final assertion, until the
   runner itself accumulates failures correctly.
-
-## Resolution (2026-07-16)
-
-The canonical `std.spec` implementation now leaves `current_test_error` set
-until `_execute_it` finishes; successful expectations do not overwrite it.
-The shared red sibling fixture includes a failing expectation followed by a
-passing one, and its existing system contract requires the file to remain red
-while also executing the later sibling describe. Runtime execution is pending.

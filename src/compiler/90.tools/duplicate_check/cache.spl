@@ -1,94 +1,29 @@
-# File-level token caching with content-hash invalidation
+# File-level token caching with timestamp-based invalidation
 
 use compiler.tools.duplicate_check.tokenizer.{SimpleToken}
-use std.nogc_sync_mut.io.file_ops.{file_stat, file_exists, file_hash_sha256}
+use std.nogc_sync_mut.io.file_ops.{file_stat, file_read, file_exists}
+use std.nogc_sync_mut.io.process_ops.{shell_output}
 
 struct TokenCache:
     file_path: text
     mtime: i64
-    source_hash: text
     tokens: [SimpleToken]
     content: text
 
-class TokenCacheManager:
+struct TokenCacheManager:
     cache: {text: TokenCache}
-
-impl TokenCacheManager:
-    fn fresh_tokens(file_path: text, current_hash: text):
-        if self.cache.has(file_path):
-            val cached = self.cache[file_path]
-            if cached.source_hash == current_hash:
-                return cached.tokens
-        nil
-
-    fn content(file_path: text) -> text:
-        if self.cache.has(file_path):
-            return self.cache[file_path].content
-        ""
-
-    me tokens(file_path: text, tokenize_fn: fn(text) -> [SimpleToken]) -> [SimpleToken]:
-        val current_hash = file_hash_sha256(file_path)
-        val cached_tokens = self.fresh_tokens(file_path, current_hash)
-        if cached_tokens != nil:
-            return cached_tokens
-
-        val result = tokenize_fn(file_path)
-        self.cache[file_path] = TokenCache(
-            file_path: file_path,
-            mtime: get_file_mtime(file_path),
-            source_hash: current_hash,
-            tokens: result,
-            content: ""
-        )
-        result
-
-    fn cached_tokens(file_path: text):
-        if self.cache.has(file_path):
-            val cached = self.cache[file_path]
-            if cached.source_hash == file_hash_sha256(file_path):
-                return cached.tokens
-        nil
-
-    me store(file_path: text, tokens: [SimpleToken]):
-        val current_mtime = get_file_mtime(file_path)
-        val existing_content = self.content(file_path)
-        self.cache[file_path] = TokenCache(
-            file_path: file_path,
-            mtime: current_mtime,
-            source_hash: file_hash_sha256(file_path),
-            tokens: tokens,
-            content: existing_content
-        )
-
-    me store_with_content(file_path: text, tokens: [SimpleToken], content: text):
-        self.cache[file_path] = TokenCache(
-            file_path: file_path,
-            mtime: get_file_mtime(file_path),
-            source_hash: file_hash_sha256(file_path),
-            tokens: tokens,
-            content: content
-        )
-
-    me invalidate(file_path: text):
-        if self.cache.has(file_path):
-            var new_cache = {}
-            for key in self.cache.keys():
-                if key != file_path:
-                    new_cache[key] = self.cache[key]
-            self.cache = new_cache
-
-    me clear():
-        self.cache = {}
-
-    fn stats() -> text:
-        val entries = self.cache.keys().len()
-        var total_tokens = 0
-        for key in self.cache.keys():
-            total_tokens = total_tokens + self.cache[key].tokens.len()
-        "Cache: {entries} files, {total_tokens} tokens"
 
 fn new_token_cache_manager() -> TokenCacheManager:
     TokenCacheManager(cache: {})
+
+fn checksum_text(content: text, seed: i64) -> i64:
+    val bytes = content.bytes()
+    var total = if seed > 0: seed else: 1
+    var i = 0
+    while i < bytes.len():
+        total = total + bytes[i] + ((i % 97) + 1)
+        i = i + 1
+    total
 
 fn get_file_mtime(file_path: text) -> i64:
     if not file_exists(file_path):
@@ -98,32 +33,79 @@ fn get_file_mtime(file_path: text) -> i64:
         return stat_mtime
     1
 
-fn get_fresh_cached_tokens(manager: TokenCacheManager, file_path: text, current_hash: text):
-    manager.fresh_tokens(file_path, current_hash)
+fn get_fresh_cached_tokens(manager: TokenCacheManager, file_path: text, current_mtime: i64):
+    if manager.cache.has(file_path):
+        val cached = manager.cache[file_path]
+        if cached.mtime == current_mtime:
+            return cached.tokens
+
+    nil
 
 fn get_cached_content(manager: TokenCacheManager, file_path: text) -> text:
-    manager.content(file_path)
+    if manager.cache.has(file_path):
+        return manager.cache[file_path].content
+    ""
 
 fn get_tokens_cached(manager: TokenCacheManager, file_path: text, tokenize_fn: fn(text) -> [SimpleToken]) -> [SimpleToken]:
-    manager.tokens(file_path, tokenize_fn)
+    val current_mtime = get_file_mtime(file_path)
+
+    val cached_tokens = get_fresh_cached_tokens(manager, file_path, current_mtime)
+    if cached_tokens != nil:
+        return cached_tokens
+
+    val tokens = tokenize_fn(file_path)
+
+    manager.cache[file_path] = TokenCache(
+        file_path: file_path,
+        mtime: current_mtime,
+        tokens: tokens,
+        content: ""
+    )
+
+    tokens
 
 fn get_cached_tokens(manager: TokenCacheManager, file_path: text):
-    manager.cached_tokens(file_path)
+    if manager.cache.has(file_path):
+        return manager.cache[file_path].tokens
+    nil
 
 fn set_cached_tokens(manager: TokenCacheManager, file_path: text, tokens: [SimpleToken]):
-    manager.store(file_path, tokens)
+    val current_mtime = get_file_mtime(file_path)
+    val existing_content = get_cached_content(manager, file_path)
+    manager.cache[file_path] = TokenCache(
+        file_path: file_path,
+        mtime: current_mtime,
+        tokens: tokens,
+        content: existing_content
+    )
 
 fn set_cached_tokens_with_content(manager: TokenCacheManager, file_path: text, tokens: [SimpleToken], content: text):
-    manager.store_with_content(file_path, tokens, content)
+    manager.cache[file_path] = TokenCache(
+        file_path: file_path,
+        mtime: 0,
+        tokens: tokens,
+        content: content
+    )
 
 fn invalidate_file(manager: TokenCacheManager, file_path: text):
     """Explicitly invalidate cache entry for a file."""
-    manager.invalidate(file_path)
+    if manager.cache.has(file_path):
+        var new_cache = {}
+        for key in manager.cache.keys():
+            if key != file_path:
+                new_cache[key] = manager.cache[key]
+        manager.cache = new_cache
 
 fn clear_cache(manager: TokenCacheManager):
     """Clear all cached entries."""
-    manager.clear()
+    manager.cache = {}
 
 fn get_cache_stats(manager: TokenCacheManager) -> text:
     """Get cache statistics as formatted string."""
-    manager.stats()
+    val entries = manager.cache.keys().len()
+
+    var total_tokens = 0
+    for key in manager.cache.keys():
+        total_tokens = total_tokens + manager.cache[key].tokens.len()
+
+    "Cache: {entries} files, {total_tokens} tokens"

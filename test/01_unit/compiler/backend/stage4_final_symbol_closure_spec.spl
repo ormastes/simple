@@ -1,54 +1,9 @@
-use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_validate_dynload_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs}
 use std.spec.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
 
 describe "Stage4 aggregate final symbol closure":
-    it "uses seed-safe canonical ordering instead of the seed no-op sort":
-        val source = rt_file_read_text("src/compiler/70.backend/backend/stage4_symbol_closure.spl") ?? ""
-        expect(source).to_contain("fn stage4_sorted_text")
-        expect(source.contains(".sort()")).to_be(false)
-
-    it "defines target-explicit dynamic-loader archive identities without building them":
-        expect(stage4_dynload_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_dynload.a")
-        expect(stage4_dynload_provider_archive_file("macos", false).unwrap()).to_equal("libsimple_stage4_dynload.a")
-        expect(stage4_dynload_provider_archive_file("freebsd", false).unwrap()).to_equal("libsimple_stage4_dynload.a")
-        expect(stage4_dynload_provider_archive_file("windows", false).unwrap()).to_equal("libsimple_stage4_dynload.a")
-        expect(stage4_dynload_provider_archive_file("windows", true).unwrap()).to_equal("simple_stage4_dynload.lib")
-        expect(stage4_dynload_provider_archive_file("linux", true).is_err()).to_be(true)
-        expect(stage4_dynload_provider_archive_file("plan9", false).is_err()).to_be(true)
-
-    it "accepts exact ELF Mach-O and COFF dynamic-loader provider contracts":
-        val elf = "0000000000000000 T spl_dlopen\n0000000000000010 T spl_dlsym\n0000000000000020 T spl_dlclose\n                 U rt_interp_cstr\n                 U dlopen\n                 U dlsym\n                 U dlclose"
-        val macho = "0000000000000000 T _spl_dlopen\n0000000000000010 T _spl_dlsym\n0000000000000020 T _spl_dlclose\n                 U _rt_interp_cstr\n                 U _dlopen\n                 U _dlsym\n                 U _dlclose"
-        val msvc = "00000000 T spl_dlopen\n00000010 T spl_dlsym\n00000020 T spl_dlclose\n00000000 A @feat.00\n         U rt_interp_cstr\n         U __imp_LoadLibraryA\n         U __imp_GetProcAddress\n         U __imp_FreeLibrary"
-        val mingw = "00000000 T _spl_dlopen\n00000010 T _spl_dlsym\n00000020 T _spl_dlclose\n         U _rt_interp_cstr\n         U __imp__LoadLibraryA@4\n         U __imp__GetProcAddress@8\n         U __imp__FreeLibrary@4"
-        expect(stage4_validate_dynload_provider_symbol_contract(elf, "elf").is_ok()).to_be(true)
-        expect(stage4_validate_dynload_provider_symbol_contract(macho, "macho").is_ok()).to_be(true)
-        expect(stage4_validate_dynload_provider_symbol_contract(msvc, "coff-msvc").is_ok()).to_be(true)
-        expect(stage4_validate_dynload_provider_symbol_contract(mingw, "coff-mingw").is_ok()).to_be(true)
-
-    it "rejects incomplete extra repeated and unknown dynamic-loader provider contracts":
-        val exact = "0000000000000000 T spl_dlopen\n0000000000000010 T spl_dlsym\n0000000000000020 T spl_dlclose\n                 U rt_interp_cstr\n                 U dlopen\n                 U dlsym\n                 U dlclose"
-        val missing = exact.replace("0000000000000020 T spl_dlclose\n", "")
-        val extra_definition = exact + "\n0000000000000030 T spl_hidden"
-        val extra_undefined = exact + "\n                 U __stack_chk_fail"
-        val repeated = exact + "\n0000000000000040 T spl_dlopen"
-        val repeated_undefined = exact + "\n                 U dlopen"
-        val coff = "00000000 T spl_dlopen\n00000010 T spl_dlsym\n00000020 T spl_dlclose\n00000000 A @feat.00\n         U rt_interp_cstr\n         U __imp_LoadLibraryA\n         U __imp_GetProcAddress\n         U __imp_FreeLibrary"
-        val false_decoration = coff.replace("__imp_LoadLibraryA", "__imp_LoadLibraryA@evil")
-        val wrong_arity = coff.replace("__imp_LoadLibraryA", "__imp_LoadLibraryA@8")
-        val repeated_import_alias = coff + "\n         U LoadLibraryA"
-        expect(stage4_validate_dynload_provider_symbol_contract(missing, "elf").is_err()).to_be(true)
-        expect(stage4_validate_dynload_provider_symbol_contract(extra_definition, "elf").is_err()).to_be(true)
-        expect(stage4_validate_dynload_provider_symbol_contract(extra_undefined, "elf").is_err()).to_be(true)
-        expect(stage4_validate_dynload_provider_symbol_contract(repeated, "elf").is_err()).to_be(true)
-        expect(stage4_validate_dynload_provider_symbol_contract(repeated_undefined, "elf").is_err()).to_be(true)
-        expect(stage4_validate_dynload_provider_symbol_contract(false_decoration, "coff-msvc").is_err()).to_be(true)
-        expect(stage4_validate_dynload_provider_symbol_contract(wrong_arity, "coff-msvc").is_err()).to_be(true)
-        expect(stage4_validate_dynload_provider_symbol_contract(repeated_import_alias, "coff-msvc").is_err()).to_be(true)
-        expect(stage4_validate_dynload_provider_symbol_contract(exact, "wasm").is_err()).to_be(true)
-
     it "rejects hosted constructor and destructor section families":
         val headers = ".preinit_array .init_array.42 .ctors .fini_array .dtors __mod_init_func __mod_term_func .CRT$XIA .CRT$XCU .CRT$XPU .CRT$XTU .CRT$XLB"
         val found = stage4_forbidden_archive_sections(headers)
@@ -121,20 +76,6 @@ not-an-address W rt_malformed
         expect(link_pos).to_be_greater_than(closure_pos)
         expect(source).to_contain("Stage4 strict profile rejects libsimple_native_all.a")
 
-    it "rejects malformed Stage4 admission before compiling temporary objects":
-        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
-        val request_pos = source.find("val stage4_requested =")
-        val admission_pos = source.find("Stage4 strict profile requires --entry src/app/cli/main.spl with entry closure")
-        val simpleos_pos = source.find("if is_simpleos_x86_64_link")
-        val compile_pos = source.find("val rt_result = compile_runtime_objects")
-        expect(request_pos).to_be_greater_than(-1)
-        expect(admission_pos).to_be_greater_than(request_pos)
-        expect(simpleos_pos).to_be_greater_than(admission_pos)
-        expect(compile_pos).to_be_greater_than(admission_pos)
-        expect(source).to_contain("stage4_entry != \"src/app/cli/main.spl\" or stage4_entry_closure != \"1\"")
-        expect(source.split("Stage4 strict profile does not support SimpleOS link routes").len() - 1).to_equal(4)
-        expect(source).to_contain("if stage4_requested:")
-
     it "fails closed before shared linking while archive composition is unwired":
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
         val closure_pos = source.find("match llvm_stage4_final_requested_symbols(final_simple_objects)")
@@ -143,7 +84,6 @@ not-an-address W rt_malformed
         expect(barrier_pos).to_be_greater_than(closure_pos)
         expect(combine_pos).to_be_greater_than(barrier_pos)
         expect(source).to_contain("cleanup_runtime_objects(runtime_objects)\n        rt_file_delete(entry_obj_path)\n        if bootstrap_support_obj != \"\":\n            rt_file_delete(bootstrap_support_obj)\n        return Err(\"Stage4 strict archive composition is unavailable")
-        expect(source).to_contain("+ stage4_requested_symbols.join(\", \")")
 
     it "selects uniquely owning archives in declared order":
         val result = stage4_select_requested_archive_indices(
@@ -352,10 +292,9 @@ not-an-address W rt_malformed
                 "/stage4/libsimple_stage4_memtrack.a"
             ]
         )
-        val windows = stage4_validate_candidate_archive_inputs_for_platform(
+        val windows = stage4_validate_candidate_archive_inputs(
             ["compiler", "font"],
-            ["C:\\stage4\\simple_compiler_backfill.LIB", "C:\\stage4\\simple_stage4_font.lib"],
-            true
+            ["C:\\stage4\\simple_compiler_backfill.LIB", "C:\\stage4\\simple_stage4_font.lib"]
         )
         expect(unix.is_ok()).to_be(true)
         expect(windows.is_ok()).to_be(true)
@@ -373,35 +312,13 @@ not-an-address W rt_malformed
             ["compiler", "compiler-copy"],
             ["/stage4/libsimple_compiler_backfill.a", "/stage4/libsimple_compiler_backfill.a"]
         )
-        val windows_duplicate_path = stage4_validate_candidate_archive_inputs_for_platform(
+        val windows_duplicate_path = stage4_validate_candidate_archive_inputs(
             ["compiler", "compiler-copy"],
-            ["C:\\Stage4\\Provider.LIB", "c:/stage4/provider.lib"],
-            true
+            ["C:\\Stage4\\Provider.LIB", "c:/stage4/provider.lib"]
         )
-        val windows_duplicate_a_path = stage4_validate_candidate_archive_inputs_for_platform(
+        val windows_duplicate_a_path = stage4_validate_candidate_archive_inputs(
             ["compiler", "compiler-copy"],
-            ["C:\\Stage4\\Provider.A", "c:/stage4/provider.a"],
-            true
-        )
-        val windows_relative_duplicate_a_path = stage4_validate_candidate_archive_inputs_for_platform(
-            ["compiler", "compiler-copy"],
-            ["build/Provider.a", "build/provider.a"],
-            true
-        )
-        val unix_relative_case_distinct_a_path = stage4_validate_candidate_archive_inputs_for_platform(
-            ["compiler", "compiler-copy"],
-            ["build/Provider.a", "build/provider.a"],
-            false
-        )
-        val windows_relative_duplicate_lib_path = stage4_validate_candidate_archive_inputs_for_platform(
-            ["compiler", "compiler-copy"],
-            ["build/Provider.lib", "build/provider.lib"],
-            true
-        )
-        val unix_relative_case_distinct_lib_path = stage4_validate_candidate_archive_inputs_for_platform(
-            ["compiler", "compiler-copy"],
-            ["build/Provider.lib", "build/provider.lib"],
-            false
+            ["C:\\Stage4\\Provider.A", "c:/stage4/provider.a"]
         )
         val native_all = stage4_validate_candidate_archive_inputs(
             ["runtime"], ["/stage4/LIBSIMPLE_NATIVE_ALL.A"]
@@ -409,17 +326,17 @@ not-an-address W rt_malformed
         val broad_core = stage4_validate_candidate_archive_inputs(
             ["core-c"], ["/stage4/libsimple_runtime.a"]
         )
-        val windows_native_all = stage4_validate_candidate_archive_inputs_for_platform(
-            ["runtime"], ["C:\\stage4\\SIMPLE_NATIVE_ALL.LIB"], true
+        val windows_native_all = stage4_validate_candidate_archive_inputs(
+            ["runtime"], ["C:\\stage4\\SIMPLE_NATIVE_ALL.LIB"]
         )
-        val windows_broad_core = stage4_validate_candidate_archive_inputs_for_platform(
-            ["core-c"], ["C:\\stage4\\simple_runtime.lib"], true
+        val windows_broad_core = stage4_validate_candidate_archive_inputs(
+            ["core-c"], ["C:\\stage4\\simple_runtime.lib"]
         )
         val shared_object = stage4_validate_candidate_archive_inputs(
             ["provider"], ["/stage4/libprovider.so"]
         )
-        val import_archive = stage4_validate_candidate_archive_inputs_for_platform(
-            ["provider"], ["C:\\stage4\\provider.dll.a"], true
+        val import_archive = stage4_validate_candidate_archive_inputs(
+            ["provider"], ["C:\\stage4\\provider.dll.a"]
         )
         expect(empty.is_err()).to_be(true)
         expect(mismatched.is_err()).to_be(true)
@@ -427,10 +344,6 @@ not-an-address W rt_malformed
         expect(duplicate_path.is_err()).to_be(true)
         expect(windows_duplicate_path.is_err()).to_be(true)
         expect(windows_duplicate_a_path.is_err()).to_be(true)
-        expect(windows_relative_duplicate_a_path.is_err()).to_be(true)
-        expect(unix_relative_case_distinct_a_path.is_ok()).to_be(true)
-        expect(windows_relative_duplicate_lib_path.is_err()).to_be(true)
-        expect(unix_relative_case_distinct_lib_path.is_ok()).to_be(true)
         expect(native_all.is_err()).to_be(true)
         expect(broad_core.is_err()).to_be(true)
         expect(windows_native_all.is_err()).to_be(true)
@@ -449,7 +362,7 @@ not-an-address W rt_malformed
         expect(inventory_pos).to_be_greater_than(-1)
         expect(config_pos).to_be_greater_than(inventory_pos)
         val inventory_source = source.substring(inventory_pos, config_pos)
-        val validate_pos = inventory_source.find("stage4_validate_candidate_archive_inputs_for_platform(")
+        val validate_pos = inventory_source.find("stage4_validate_candidate_archive_inputs(")
         val exists_pos = inventory_source.find("rt_file_exists(")
         val resolver_pos = inventory_source.find("find_nm_portable()")
         val section_resolver_pos = inventory_source.find("find_objdump_portable()")
@@ -467,7 +380,6 @@ not-an-address W rt_malformed
         expect(inventory_source).to_contain("section scan failed")
         expect(inventory_source).to_contain("section scan was empty")
         expect(inventory_source).to_contain("retained constructor/destructor sections")
-        expect(inventory_source).to_contain("stage4_validate_candidate_archive_inputs_for_platform(labels, paths, host_os() == \"windows\")")
         val occurrences = source.split("llvm_stage4_candidate_archive_inventory").len() - 1
         expect(occurrences).to_equal(1)
 

@@ -36,7 +36,9 @@ wall (interpreter). Before: killed, never completed. Fixes, in
 ### Residual (still open, separate concerns)
 
 - Interpreter tokenize() is ~2ms/token; 7m20s for 22 files is completion,
-  not speed.
+  not speed. Next JIT blocker: W1006 "mutation without mut capability"
+  lowering `get_tokens_cached` (cache.spl mutates `manager.cache` through a
+  parameter) — capability-model issue, needs its own fix.
 - Something on the dev box SIGTERMs processes matching `simple run` at
   ~63–66s wall (pattern-based sweep; the same binary copied to another name
   runs 7m+ undisturbed). Long-running verification must use a renamed
@@ -48,14 +50,6 @@ wall (interpreter). Before: killed, never completed. Fixes, in
   `it`-block context), and `phase1_integration_spec.spl` — "reuses the
   token cache across repeated scans" fails with the same signature. Same
   probable root as the W1006 mut-capability note above.
-
-### Token-cache capability resolution (2026-07-16)
-
-`TokenCacheManager` now has class identity and owns every mutation behind `me`
-methods. Existing free functions remain compatibility wrappers. This removes
-the W1006 value-parameter mutation path and makes writes visible across repeat
-scans without threading `mut` capability through the detector call graph.
-Executable confirmation remains gated on an admitted pure-Simple runtime.
 
 ## Symptom
 

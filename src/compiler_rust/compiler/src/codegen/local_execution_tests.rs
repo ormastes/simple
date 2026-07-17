@@ -132,6 +132,99 @@ fn test_backend_switching_same_result() {
 }
 
 // =============================================================================
+// Trait-object (vtable) dispatch tests (bug C8, 2026-07-17)
+// =============================================================================
+
+#[test]
+fn test_cranelift_jit_vtable_dispatch_full_impl() {
+    // Full match to the real BlockDevice/NvmeBlockAdapter shape: a 3-method
+    // trait, one concrete struct implementing ALL 3 methods, a wrapper struct
+    // holding the trait-typed field, and a method that rebinds it through a
+    // locally-typed `val` before calling — exactly `_device_sector_size`'s
+    // `val dev: BlockDevice = self.device; dev.sector_size()` pattern.
+    let mut em = LocalExecutionManager::cranelift().expect("cranelift init");
+    let mir = source_to_mir(
+        "trait Dev:\n\
+         \x20   fn read_x() -> i64\n\
+         \x20   fn write_x(v: i64) -> bool\n\
+         \x20   fn size_x() -> i64\n\
+         \n\
+         struct DevA:\n\
+         \x20   x: i64\n\
+         \n\
+         impl Dev for DevA:\n\
+         \x20   fn read_x() -> i64:\n\
+         \x20       return 1\n\
+         \x20   fn write_x(v: i64) -> bool:\n\
+         \x20       return true\n\
+         \x20   fn size_x() -> i64:\n\
+         \x20       return 77\n\
+         \n\
+         struct Core:\n\
+         \x20   device: Dev\n\
+         \n\
+         impl Core:\n\
+         \x20   fn get_size() -> i64:\n\
+         \x20       val dev: Dev = self.device\n\
+         \x20       return dev.size_x()\n\
+         \n\
+         fn run() -> i64:\n\
+         \x20   val d = DevA(x: 5)\n\
+         \x20   val c = Core(device: d)\n\
+         \x20   return c.get_size()\n",
+    );
+
+    em.compile_module(&mir).expect("compile");
+    let result = em.execute("run", &[]).expect("execute");
+    assert_eq!(result, 77, "expected size_x()==77 via vtable dispatch, got {result}");
+}
+
+#[test]
+fn test_cranelift_jit_vtable_dispatch_partial_impl_compaction() {
+    // Control case for the "compacted vtable" theory: the concrete struct
+    // implements only 2 of the trait's 3 methods (skips the MIDDLE slot,
+    // `write_x`). If `emit_vtable_data_objects` writes function pointers at
+    // the ENUMERATE index of the (already slot-filtered) `method_fns` vec
+    // while the call site loads at the trait's CANONICAL `vtable_slot`
+    // (unaffected by the impl's omission), `size_x` (real slot 2) reads past
+    // the end of a 2-entry (16-byte) vtable blob -> out-of-bounds garbage
+    // function pointer -> wild jump when called.
+    let mut em = LocalExecutionManager::cranelift().expect("cranelift init");
+    let mir = source_to_mir(
+        "trait Dev:\n\
+         \x20   fn read_x() -> i64\n\
+         \x20   fn write_x(v: i64) -> bool\n\
+         \x20   fn size_x() -> i64\n\
+         \n\
+         struct DevB:\n\
+         \x20   x: i64\n\
+         \n\
+         impl Dev for DevB:\n\
+         \x20   fn read_x() -> i64:\n\
+         \x20       return 1\n\
+         \x20   fn size_x() -> i64:\n\
+         \x20       return 88\n\
+         \n\
+         struct Core2:\n\
+         \x20   device: Dev\n\
+         \n\
+         impl Core2:\n\
+         \x20   fn get_size() -> i64:\n\
+         \x20       val dev: Dev = self.device\n\
+         \x20       return dev.size_x()\n\
+         \n\
+         fn run2() -> i64:\n\
+         \x20   val d = DevB(x: 5)\n\
+         \x20   val c = Core2(device: d)\n\
+         \x20   return c.get_size()\n",
+    );
+
+    em.compile_module(&mir).expect("compile");
+    let result = em.execute("run2", &[]).expect("execute");
+    assert_eq!(result, 88, "expected size_x()==88 via vtable dispatch, got {result}");
+}
+
+// =============================================================================
 // ExecutionResult (captured output) Tests
 // =============================================================================
 

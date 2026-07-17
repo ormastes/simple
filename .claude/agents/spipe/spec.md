@@ -49,11 +49,6 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
    `src/app/test/font_evidence_runner.spl`; never trust outer PASS/exit without
    executed-count and spec-exit counters. The focused and pure runners share
    `build_interpreter_result_wrapper`; do not create another harness.
-   The focused runner accepts exactly `<pure-simple-bin> <spec.spl>`, uses the
-   existing process/file facades, never falls back to another compiler or seed,
-   preserves stderr and ordinary child status, maps a process-facade `-1`
-   timeout marker to 124 and other `-1` launch failure to 1, and removes its
-   temporary wrapper on every exit path.
    CUDA font production specs must apply the canonical artifact-trust rule in
    `.claude/skills/spipe.md`.
 10. Append the spec file list, generated manual paths, coverage matrix, and

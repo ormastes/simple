@@ -2,17 +2,9 @@
 
 **Date:** 2026-07-04
 **Severity:** medium
-**Status:** source-resolved; regression present, execution pending
+**Status:** open
 
-## Resolution (2026-07-16)
-
-All five formula sections are now enclosed by `describe` blocks: LINEST,
-TREND, GROWTH, PROB, and RANDARRAY contain 28 authored examples in total.
-Independently, the runner now executes top-level `it` blocks and fails closed
-when authored and recorded example counts differ, so the original silent-skip
-condition no longer exists. A fresh executable gate is still pending.
-
-## Original symptom
+## Symptom
 
 `test/01_unit/app/office/sheets/formula_regression_spec.spl` had 24
 top-level `it` blocks with no enclosing `describe`. Per the test-runner
@@ -21,7 +13,7 @@ quirk ("Top-level `it` outside `describe` is silently ignored" — see
 addendum), none of them ever executed; `bin/simple test` on the file
 reported `Passed: 1` (just the file-load check), not 24.
 
-## Original location
+## Where
 
 `test/01_unit/app/office/sheets/formula_regression_spec.spl` — the
 `# LINEST Tests` section was wrapped in `describe "LINEST":` during the
@@ -31,7 +23,7 @@ stats form depended on it actually running. The `# TREND Tests`, `# GROWTH
 Tests`, `# PROB Tests`, and `# RANDARRAY Tests` sections (20 `it` blocks)
 are still orphaned and were left alone as out-of-scope for that batch.
 
-## Original fix direction
+## Fix
 
 Wrap each remaining section's `it` blocks in its own `describe` (mirroring
 the LINEST section) and re-indent bodies by one level. Re-run the file and

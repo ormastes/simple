@@ -11,26 +11,14 @@ use app.test_daemon.session_types.{
 use app.test_daemon.{
     SESSION_KIND_REMOTE_PC, LEASE_IDLE, LEASE_ACTIVE,
     REUSE_SHARED_WITH_RESET, RESET_SOFT,
-    TRESP_FAILED
+    TRESP_COMPLETED, TRESP_FAILED
 }
-use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new, test_result_from_child_output}
+use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
 use app.test_daemon.types.{TestResult}
 use std.terminal.types.{TerminalConfig, TerminalConnection, TerminalExecResult}
-use std.terminal.connection.{terminal_connect, terminal_execute_timeout, terminal_close, terminal_is_connected}
+use std.terminal.connection.{terminal_connect, terminal_execute, terminal_close, terminal_is_connected}
 
 extern fn rt_time_now_unix_micros() -> i64
-
-fn remote_shell_quote(value: text) -> text:
-    "'" + value.replace("'", "'\\''") + "'"
-
-fn remote_test_path_is_valid(test_path: text) -> bool:
-    test_path.starts_with("test/") and test_path.ends_with(".spl") and
-        not test_path.contains("/../") and not test_path.ends_with("/..") and
-        not test_path.contains("\\") and not test_path.contains("\n") and
-        not test_path.contains("\r") and not test_path.contains("\u0000")
-
-fn remote_test_command(test_path: text) -> text:
-    "bin/simple test " + remote_shell_quote(test_path) + " --no-session-daemon --sequential 2>&1"
 
 # ============================================================================
 # Remote PC Adapter
@@ -175,18 +163,6 @@ impl RemotePcAdapter:
         Returns:
             TestResult with pass/fail status, output, and duration
         """
-        if not remote_test_path_is_valid(test_path):
-            return TestResult(
-                test_path: test_path,
-                status: TRESP_FAILED,
-                passed: 0,
-                failed: 1,
-                skipped: 0,
-                duration_ms: 0,
-                output: "error: remote test path must be a repo-relative test/*.spl path",
-                cached: false
-            )
-
         if not self.connection.?:
             return TestResult(
                 test_path: test_path,
@@ -199,13 +175,24 @@ impl RemotePcAdapter:
                 cached: false
             )
 
-        val cmd = remote_test_command(test_path)
+        val cmd = "bin/simple test {test_path} --no-session-daemon --sequential 2>&1"
         val start = rt_time_now_unix_micros()
-        val result = terminal_execute_timeout(self.connection, cmd, timeout_ms)
+        val result = terminal_execute(self.connection, cmd, timeout_ms)
         val duration_ms = (rt_time_now_unix_micros() - start) / 1000
 
-        test_result_from_child_output(
-            test_path, result.stdout, result.stderr, result.exit_code, duration_ms, timeout_ms
+        val status = if result.exit_code == 0: TRESP_COMPLETED else: TRESP_FAILED
+        val passed = if result.exit_code == 0: 1 else: 0
+        val failed = if result.exit_code != 0: 1 else: 0
+
+        TestResult(
+            test_path: test_path,
+            status: status,
+            passed: passed,
+            failed: failed,
+            skipped: 0,
+            duration_ms: duration_ms,
+            output: result.stdout,
+            cached: false
         )
 
     me stop(lease: SessionLease) -> bool:

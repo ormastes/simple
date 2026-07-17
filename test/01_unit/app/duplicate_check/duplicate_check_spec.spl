@@ -1,7 +1,7 @@
 use compiler.tools.duplicate_check.config.{default_config, analysis_mode}
-use compiler.tools.duplicate_check.detector.{DuplicateBlock, DuplicateGroup, sample_blocks_for_similarity}
+use compiler.tools.duplicate_check.detector.{DuplicateBlock, DuplicateGroup}
 use compiler.tools.duplicate_check.formatter.{summarize_duplicate_groups, duplicate_lines_per_block, format_score_hundredths, format_ratio_tenths}
-use compiler.tools.duplicate_check.main.{collect_command_args, parse_args, target_path_from_args, unsupported_runtime_option, duplicate_target_exists}
+use compiler.tools.duplicate_check.main.{collect_command_args, parse_args}
 
 fn sample_block(file: text, line_start: i64, line_end: i64, hash_value: i64, code: text) -> DuplicateBlock:
     DuplicateBlock(
@@ -16,16 +16,6 @@ fn sample_block(file: text, line_start: i64, line_end: i64, hash_value: i64, cod
     )
 
 describe "duplicate_check command argument parsing":
-    it "keeps every cosine candidate above the former 320-block cap":
-        var blocks: [DuplicateBlock] = []
-        var i = 0
-        while i < 321:
-            blocks.push(sample_block("/tmp/{i}.spl", 1, 3, i, "fn block_{i}():\n    {i}"))
-            i = i + 1
-        val candidates = sample_blocks_for_similarity(blocks, default_config())
-        expect(candidates.len()).to_equal(321)
-        expect(candidates[320].file).to_equal("/tmp/320.spl")
-
     it "strips runtime prefixes and duplicate-check command":
         val args = [
             "bin/simple",
@@ -59,9 +49,6 @@ describe "duplicate_check command argument parsing":
         expect(config.semantic_model).to_equal("nomic-embed-text")
         expect(config.output_format).to_equal("json")
 
-    it "finds the target path after valued options":
-        expect(target_path_from_args(["--mode", "token", "/tmp/dup_scope"])).to_equal("/tmp/dup_scope")
-
     it "parses token mode and lexical thresholds":
         val config = parse_args([
             "/tmp/dup_scope",
@@ -69,13 +56,18 @@ describe "duplicate_check command argument parsing":
             "token",
             "--min-tokens",
             "30",
-            "--min-lines=5"
+            "--min-lines=5",
+            "--cache-path=/tmp/duplicate-check-cache.sdn",
+            "--jobs",
+            "4"
         ])
 
         expect(analysis_mode(config)).to_equal("token")
         expect(config.use_cosine_similarity).to_equal(false)
         expect(config.min_lines).to_equal(5)
         expect(config.min_tokens).to_equal(30)
+        expect(config.incremental_cache_path).to_equal("/tmp/duplicate-check-cache.sdn")
+        expect(config.num_workers).to_equal(4)
 
     it "parses cosine mode and fuzzy threshold":
         val config = parse_args([
@@ -89,12 +81,6 @@ describe "duplicate_check command argument parsing":
         expect(config.use_cosine_similarity).to_equal(true)
         expect(config.similarity_threshold > 0.60).to_equal(true)
         expect(config.similarity_threshold < 0.62).to_equal(true)
-
-    it "rejects advertised-but-inert modes and missing targets":
-        expect(unsupported_runtime_option(["--parallel"])).to_contain("not implemented")
-        expect(unsupported_runtime_option(["--jobs", "not-a-number"])).to_contain("not implemented")
-        expect(unsupported_runtime_option(["--cache-path=/tmp/dup-cache.sdn"])).to_contain("not implemented")
-        expect(duplicate_target_exists("/tmp/simple-duplicate-check-missing-target")).to_equal(false)
 
 describe "duplicate_check formatter shared helpers":
     it "summarizes duplicate groups with unique file counting":

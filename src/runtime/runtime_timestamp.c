@@ -128,15 +128,12 @@ int64_t rt_timestamp_diff_days(int64_t micros1, int64_t micros2) {
 
 /* ---- Progress tracking (process-local monotonic timer) ---- */
 static int g_progress_initialized = 0;
-#ifdef _WIN32
-static int64_t g_progress_start_nanos = 0;
-#else
+#ifndef _WIN32
 static struct timespec g_progress_start;
 #endif
 
 void rt_progress_init(void) {
 #ifdef _WIN32
-    g_progress_start_nanos = rt_time_now_nanos();
     g_progress_initialized = 1;
 #else
     clock_gettime(CLOCK_MONOTONIC, &g_progress_start);
@@ -146,7 +143,6 @@ void rt_progress_init(void) {
 
 void rt_progress_reset(void) {
 #ifdef _WIN32
-    g_progress_start_nanos = rt_time_now_nanos();
     g_progress_initialized = 1;
 #else
     clock_gettime(CLOCK_MONOTONIC, &g_progress_start);
@@ -160,9 +156,7 @@ double rt_progress_get_elapsed_seconds(void) {
         rt_progress_init();
         return 0.0;
     }
-    int64_t elapsed_nanos = rt_time_now_nanos() - g_progress_start_nanos;
-    if (elapsed_nanos <= 0) return 0.0;
-    return (double)elapsed_nanos / 1000000000.0;
+    return (double)rt_time_now_nanos() / 1000000000.0;
 #else
     if (!g_progress_initialized) {
         rt_progress_init();

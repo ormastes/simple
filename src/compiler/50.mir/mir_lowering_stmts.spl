@@ -290,6 +290,39 @@ impl MirLowering:
                         self.error("let binding has no resolved symbol", Some(span))
                     return
 
+                val expr_disc = mir_hir_stmt_kind_disc(HirStmtKind.Expr(fallback_expr))
+                if mir_hir_stmt_kind_disc(stmt_kind_value) == expr_disc:
+                    # ROOT FIX (stage2-chain MIR wall, 2026-07-17): this file's
+                    # raw multi-arm `match stmt_kind_value` below mirrors the
+                    # exact interpreter misroute already fixed one layer up in
+                    # 20.hir/hir_lowering/statements.spl (bug doc
+                    # hir_stmt_expr_payload_extraction_nil_2026-07-17.md) — on
+                    # stage4/native-build worker execution, a genuine
+                    # HirStmtKind.Expr matches none of the qualified `case`
+                    # arms below and silently falls through to `case _: ()`,
+                    # a no-op. Every bare-expression statement (`print(...)`,
+                    # `1 + 1`, ...) then lowers to ZERO MIR instructions,
+                    # tripping bootstrap_globals.spl's "bootstrap entry
+                    # lowered to 0 MIR instructions (ret-0 stub module)" guard
+                    # with no other diagnosable error (confirmed via
+                    # [mir-lower-free]/[mir-lower] phase trace on a 3-line
+                    # `print/1+1/print` repro: instr-total=0 despite HIR
+                    # reporting the function's body fully lowered). Fixed the
+                    # same way as the HIR layer: pre-dispatch by discriminant,
+                    # then extract the payload via a single-arm match (the
+                    # Let arm above already uses this idiom successfully).
+                    val expr: HirExpr = match stmt_kind_value:
+                        case HirStmtKind.Expr(einner):
+                            einner
+                        case _:
+                            fallback_expr
+                    val diag_is_nil = match expr.kind:
+                        case HirExprKind.NilLit: true
+                        case _: false
+                    print "[DIAG3] extracted expr is NilLit={diag_is_nil}"
+                    self.lower_expr(expr)
+                    return
+
                 match stmt_kind_value:
                     case HirStmtKind.Expr(extracted_expr):
                         val expr: HirExpr = extracted_expr

@@ -27,11 +27,6 @@
    must use calibrated `src/app/test/font_evidence_runner.spl` counters through
    the shared `build_interpreter_result_wrapper`; native acceptance remains
    authoritative.
-   The focused runner accepts exactly `<pure-simple-bin> <spec.spl>`, uses the
-   existing process/file facades, never discovers or falls back to another
-   compiler/seed, preserves stderr and ordinary child status, maps a
-   process-facade `-1` timeout marker to 124 and other `-1` launch failure to 1,
-   and removes its temporary wrapper on every exit path.
    CUDA font production verification must apply the canonical artifact-trust
    rule in `.claude/skills/spipe.md` before PASS.
 5. Run build checks: `set -o pipefail; bin/simple build check 2>&1 | tail -30`

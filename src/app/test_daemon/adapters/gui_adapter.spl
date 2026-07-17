@@ -12,12 +12,14 @@ use app.test_daemon.{
     REUSE_EXCLUSIVE_REUSED, RESET_SOFT,
     TRESP_COMPLETED, TRESP_FAILED
 }
-use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new, run_test_child_env}
+use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
 use app.test_daemon.types.{TestResult}
 use app.io.mod.{process_spawn_async_env, process_is_alive, process_kill}
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_sleep_ms(ms: i64)
+extern fn rt_shell_exec(cmd: text) -> text
+extern fn rt_shell_exit_code() -> i64
 
 # ============================================================================
 # Helper Functions — Path classification and routing
@@ -141,10 +143,34 @@ impl GuiAdapter:
         Executes a GUI test with the appropriate display environment.
         Sets DISPLAY for X11-based tests.
         """
-        var env: {text: text} = {}
-        if self.mode == "headless" or self.mode == "container":
-            env["DISPLAY"] = ":99"
-        run_test_child_env(test_path, timeout_ms, [], env)
+        val display_env = if self.mode == "headless": "DISPLAY=:99"
+            elif self.mode == "container": "DISPLAY=:99"
+            else: ""
+
+        val cmd = if display_env != "":
+            "{display_env} bin/simple test {test_path} --no-session-daemon --sequential 2>&1"
+        else:
+            "bin/simple test {test_path} --no-session-daemon --sequential 2>&1"
+
+        val start = rt_time_now_unix_micros()
+        val output = rt_shell_exec(cmd)
+        val exit_code = rt_shell_exit_code()
+        val duration_ms = (rt_time_now_unix_micros() - start) / 1000
+
+        val status = if exit_code == 0: TRESP_COMPLETED else: TRESP_FAILED
+        val passed = if exit_code == 0: 1 else: 0
+        val failed = if exit_code != 0: 1 else: 0
+
+        TestResult(
+            test_path: test_path,
+            status: status,
+            passed: passed,
+            failed: failed,
+            skipped: 0,
+            duration_ms: duration_ms,
+            output: output,
+            cached: false
+        )
 
     fn health(lease: SessionLease) -> bool:
         """

@@ -32,7 +32,6 @@ use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NA
 use compiler.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value}
 use compiler.core.types.{is_result_tag, result_tag_to_id, result_type_get_ok, result_type_get_err}
 use compiler.core.types.{is_tuple_type_tag, tuple_type_tag_to_id, tuple_type_get_elems}
-use compiler.core.types.{is_fn_type_tag, fn_type_tag_to_id, fn_type_get_params, fn_type_get_ret}
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
@@ -283,27 +282,6 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
             tuple_elem_types.push(convert_flat_type(tuple_elem_type_tags[tt_i]))
             tt_i = tt_i + 1
         return Type(kind: TypeKind.Tuple(tuple_elem_types), span: make_span())
-    # Function type `fn(T, ...) -> U` / `(T, ...) -> U` specialization: the
-    # parser registers the real param/return tags (fn_type_register, mirroring
-    # the dict/result/tuple registries above) instead of collapsing every
-    # function-type annotation to the bare, signature-less TYPE_FN below.
-    # Rebuild the real TypeKind.Function(params, ret) here so HIR lower_type's
-    # existing d_func dispatch fires (producing a real HirTypeKind.Function
-    # with the correct return type) instead of falling through to the bare
-    # `Named("fn", [])` path, which has no case in lower_named_kind and
-    # fatals with "unresolved type: fn" (parity cases local_lambda_value,
-    # enum_text_callback). Must precede the `>= TYPE_UNION_BASE` catch-all
-    # below, same as the dict/result/tuple checks.
-    if is_fn_type_tag(type_expr_idx):
-        val fn_tag_id = fn_type_tag_to_id(type_expr_idx)
-        val fn_param_type_tags = fn_type_get_params(fn_tag_id)
-        var fn_param_types: [Type] = []
-        var fp_i = 0
-        while fp_i < fn_param_type_tags.len():
-            fn_param_types.push(convert_flat_type(fn_param_type_tags[fp_i]))
-            fp_i = fp_i + 1
-        val fn_ret_type = convert_flat_type(fn_type_get_ret(fn_tag_id))
-        return Type(kind: TypeKind.Function(fn_param_types, fn_ret_type), span: make_span())
     if type_expr_idx == TYPE_FUTURE:
         return Type(kind: TypeKind.Named("Future", []), span: make_span())
     if type_expr_idx == TYPE_POLL:
@@ -1007,25 +985,6 @@ fn convert_flat_expr(idx: i64) -> Expr:
                 span: span
             ))
         return Expr(kind: ExprKind.DictComprehension(dc_key, dc_val, dc_clauses), span: span)
-    elif tag == EXPR_SUFFIXED_LIT:
-        # ROOT FIX (bug mixed_unsigned_float_comparison_llvm_2026-07-16): a
-        # numeric literal with an explicit primitive-type unit suffix
-        # (255u8, 65535u16, 4294967295u32, 0x8000000000000000u64, 254.5f32,
-        # ...) parses to this flat-AST tag, but this function had NO branch
-        # for it -- every suffixed literal silently fell through to the
-        # final `else:` below and became ExprKind.NilLit, discarding both
-        # its real value AND its suffix. MIR's NilLit lowering then
-        # materializes the reserved nil sentinel `Const(Int(3), i64)` (see
-        # expr_dispatch.spl's NilLit case), so EVERY suffixed literal in the
-        # entire language silently became the integer 3 instead of its
-        # written value -- not just in comparisons.
-        val suf_name = expr_get_str(idx)
-        val suf_type = Type(kind: TypeKind.Named(suf_name, []), span: span)
-        val suf_literal = if suf_name.starts_with("f"):
-            Expr(kind: ExprKind.FloatLit(expr_get_float(idx).to_float()), span: span)
-        else:
-            Expr(kind: ExprKind.IntLit(expr_get_int(idx)), span: span)
-        return Expr(kind: ExprKind.Cast(suf_literal, suf_type), span: span)
     else:
         return Expr(kind: ExprKind.NilLit, span: span)
 

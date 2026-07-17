@@ -7,21 +7,13 @@ use app.test_daemon.session_types.{
     SessionKey, SessionDescriptor, SessionLease, TestSessionMeta,
     LEASE_IDLE, LEASE_ACTIVE, LEASE_RESETTING, LEASE_STOPPING,
     SESSION_KIND_QEMU_VM, SESSION_KIND_CONTAINER, SESSION_KIND_SERVICE,
-    SESSION_KIND_GUI, SESSION_KIND_BROWSER, SESSION_KIND_OPENOCD,
-    SESSION_KIND_TRACE32, SESSION_KIND_SIMULATOR, SESSION_KIND_REMOTE_PC,
+    SESSION_KIND_OPENOCD, SESSION_KIND_TRACE32, SESSION_KIND_SIMULATOR,
     REUSE_FRESH_PER_TEST,
     session_key_to_id, session_key_matches, session_lease_new,
     session_descriptor_new, session_kind_name, meta_to_session_key
 }
-use app.test_daemon.types.{TestResult, TRESP_FAILED}
-use app.test_daemon.adapters.qemu_adapter.{QemuAdapter}
-use app.test_daemon.adapters.container_adapter.{ContainerAdapter}
-use app.test_daemon.adapters.service_adapter.{ServiceAdapter}
-use app.test_daemon.adapters.gui_adapter.{GuiAdapter}
-use app.test_daemon.adapters.hardware_adapter.{
-    OpenocdAdapter, Trace32Adapter
-}
-use app.test_daemon.adapters.remote_pc_adapter.{RemotePcAdapter}
+use app.test_daemon.session_adapter.{SessionAdapter, AdapterRegistry, adapter_registry_new}
+use app.test_daemon.types.{TestResult}
 
 extern fn rt_time_now_unix_micros() -> i64
 
@@ -30,18 +22,11 @@ extern fn rt_time_now_unix_micros() -> i64
 # ============================================================================
 
 class SessionBroker:
-    qemu: QemuAdapter?
-    container: ContainerAdapter?
-    service: ServiceAdapter?
-    gui: GuiAdapter?
-    openocd: OpenocdAdapter?
-    trace32: Trace32Adapter?
-    remote_pcs: [RemotePcAdapter]
+    registry: AdapterRegistry
     leases: [SessionLease]
     max_sessions: Dict<text, i64>
     idle_timeout_ms: i64
     startup_timeout_ms: i64
-    next_instance_id: i64
 
 fn session_broker_new() -> SessionBroker:
     var max: Dict<text, i64> = {}
@@ -52,50 +37,18 @@ fn session_broker_new() -> SessionBroker:
     max["trace32_board"] = 1
     max["simulator_process"] = 2
     SessionBroker(
-        qemu: nil,
-        container: nil,
-        service: nil,
-        gui: nil,
-        openocd: nil,
-        trace32: nil,
-        remote_pcs: [],
+        registry: adapter_registry_new(),
         leases: [],
         max_sessions: max,
         idle_timeout_ms: 300000,
-        startup_timeout_ms: 60000,
-        next_instance_id: 1
+        startup_timeout_ms: 60000
     )
 
 impl SessionBroker:
-    me register_qemu(adapter: QemuAdapter):
-        self.qemu = adapter
-    me register_container(adapter: ContainerAdapter):
-        self.container = adapter
-    me register_service(adapter: ServiceAdapter):
-        self.service = adapter
-    me register_gui(adapter: GuiAdapter):
-        self.gui = adapter
-    me register_openocd(adapter: OpenocdAdapter):
-        self.openocd = adapter
-    me register_trace32(adapter: Trace32Adapter):
-        self.trace32 = adapter
-    me register_remote_pc(adapter: RemotePcAdapter): self.remote_pcs.push(adapter)
+    # --- Adapter registration ---
 
-    fn session_key_for_meta(meta: TestSessionMeta) -> SessionKey:
-        val kind = meta.session_kind
-        if kind == SESSION_KIND_QEMU_VM:
-            if val adapter = self.qemu: return adapter.session_key(meta)
-        if kind == SESSION_KIND_CONTAINER:
-            if val adapter = self.container: return adapter.session_key(meta)
-        if kind == SESSION_KIND_SERVICE:
-            if val adapter = self.service: return adapter.session_key(meta)
-        if kind == SESSION_KIND_GUI or kind == SESSION_KIND_BROWSER:
-            if val adapter = self.gui: return adapter.session_key(meta)
-        if kind == SESSION_KIND_OPENOCD:
-            if val adapter = self.openocd: return adapter.session_key(meta)
-        if kind == SESSION_KIND_TRACE32:
-            if val adapter = self.trace32: return adapter.session_key(meta)
-        meta_to_session_key(meta)
+    me register_adapter(adapter: SessionAdapter):
+        self.registry.register(adapter)
 
     # --- Acquire a session ---
 
@@ -108,11 +61,11 @@ impl SessionBroker:
         4. If under limit → start new via adapter
         5. If at limit → evict oldest idle, then start new
         """
-        val key = self.session_key_for_meta(meta)
+        val key = meta_to_session_key(meta)
 
         # Fresh-per-test always gets a new session
         if meta.reuse_mode == REUSE_FRESH_PER_TEST:
-            return self.start_new_session(key)
+            return self.start_new_session(meta, key)
 
         # Look for existing idle session with matching key
         var i = 0
@@ -148,7 +101,7 @@ impl SessionBroker:
                 # No idle session to evict — return a pending lease
                 return session_lease_new(key)
 
-        self.start_new_session(key)
+        self.start_new_session(meta, key)
 
     # --- Release a session ---
 
@@ -184,12 +137,15 @@ impl SessionBroker:
         while i < self.leases.len():
             if self.leases[i].session_id == session_id:
                 val lease = self.leases[i]
-                return self.execute_adapter(lease, test_path, timeout_ms)
+                val adapter = self.registry.find_by_kind(lease.key.kind)
+                if adapter.?:
+                    return adapter.execute(lease, test_path, timeout_ms)
+                break
             i = i + 1
         # Fallback: return error result
         TestResult(
             test_path: test_path,
-            status: TRESP_FAILED,
+            status: 3,
             passed: 0,
             failed: 1,
             skipped: 0,
@@ -205,30 +161,35 @@ impl SessionBroker:
         while i < self.leases.len():
             if self.leases[i].session_id == session_id:
                 val lease = self.leases[i]
-                self.leases[i] = SessionLease(
-                    session_id: lease.session_id,
-                    key: lease.key,
-                    pid: lease.pid,
-                    qmp_socket: lease.qmp_socket,
-                    status: LEASE_RESETTING,
-                    snapshot_name: lease.snapshot_name,
-                    created_at: lease.created_at,
-                    last_used_at: rt_time_now_unix_micros(),
-                    test_count: lease.test_count
-                )
-                val ok = self.reset_adapter(lease, policy)
-                self.leases[i] = SessionLease(
-                    session_id: lease.session_id,
-                    key: lease.key,
-                    pid: lease.pid,
-                    qmp_socket: lease.qmp_socket,
-                    status: LEASE_IDLE,
-                    snapshot_name: lease.snapshot_name,
-                    created_at: lease.created_at,
-                    last_used_at: rt_time_now_unix_micros(),
-                    test_count: lease.test_count
-                )
-                return ok
+                val adapter = self.registry.find_by_kind(lease.key.kind)
+                if adapter.?:
+                    # Mark resetting
+                    self.leases[i] = SessionLease(
+                        session_id: lease.session_id,
+                        key: lease.key,
+                        pid: lease.pid,
+                        qmp_socket: lease.qmp_socket,
+                        status: LEASE_RESETTING,
+                        snapshot_name: lease.snapshot_name,
+                        created_at: lease.created_at,
+                        last_used_at: rt_time_now_unix_micros(),
+                        test_count: lease.test_count
+                    )
+                    val ok = adapter.reset(lease, policy)
+                    # Mark idle again
+                    self.leases[i] = SessionLease(
+                        session_id: lease.session_id,
+                        key: lease.key,
+                        pid: lease.pid,
+                        qmp_socket: lease.qmp_socket,
+                        status: LEASE_IDLE,
+                        snapshot_name: lease.snapshot_name,
+                        created_at: lease.created_at,
+                        last_used_at: rt_time_now_unix_micros(),
+                        test_count: lease.test_count
+                    )
+                    return ok
+                break
             i = i + 1
         false
 
@@ -238,8 +199,12 @@ impl SessionBroker:
         var i = 0
         while i < self.leases.len():
             val lease = self.leases[i]
-            if not self.health_adapter(lease):
-                self.stop_session(lease.session_id)
+            val adapter = self.registry.find_by_kind(lease.key.kind)
+            if adapter.?:
+                val healthy = adapter.health(lease)
+                if not healthy:
+                    # Mark as stopping and remove
+                    self.stop_session(lease.session_id)
             i = i + 1
 
     # --- Cleanup idle sessions past timeout ---
@@ -254,7 +219,9 @@ impl SessionBroker:
             if (lease.status == LEASE_IDLE and
                     (now - lease.last_used_at) > timeout_us):
                 # Expired — stop via adapter
-                self.stop_adapter(lease)
+                val adapter = self.registry.find_by_kind(lease.key.kind)
+                if adapter.?:
+                    adapter.stop(lease)
             else:
                 new_leases.push(lease)
             i = i + 1
@@ -269,7 +236,9 @@ impl SessionBroker:
         while i < self.leases.len():
             val lease = self.leases[i]
             if lease.session_id == session_id:
-                self.stop_adapter(lease)
+                val adapter = self.registry.find_by_kind(lease.key.kind)
+                if adapter.?:
+                    adapter.stop(lease)
                 stopped = true
             else:
                 new_leases.push(lease)
@@ -283,7 +252,9 @@ impl SessionBroker:
         var i = 0
         while i < self.leases.len():
             val lease = self.leases[i]
-            self.stop_adapter(lease)
+            val adapter = self.registry.find_by_kind(lease.key.kind)
+            if adapter.?:
+                adapter.stop(lease)
             i = i + 1
         self.leases = []
 
@@ -303,24 +274,6 @@ impl SessionBroker:
         var i = 0
         while i < self.leases.len():
             if self.leases[i].status == LEASE_IDLE:
-                count = count + 1
-            i = i + 1
-        count
-
-    fn idle_count_by_kind(kind: i64) -> i64:
-        var count: i64 = 0
-        var i = 0
-        while i < self.leases.len():
-            if self.leases[i].key.kind == kind and self.leases[i].status == LEASE_IDLE:
-                count = count + 1
-            i = i + 1
-        count
-
-    fn active_count_by_kind(kind: i64) -> i64:
-        var count: i64 = 0
-        var i = 0
-        while i < self.leases.len():
-            if self.leases[i].key.kind == kind and self.leases[i].status == LEASE_ACTIVE:
                 count = count + 1
             i = i + 1
         count
@@ -350,14 +303,28 @@ impl SessionBroker:
 
     # --- Private helpers ---
 
-    me start_new_session(key: SessionKey) -> SessionLease:
-        val instance_id = "{session_key_to_id(key)}_{self.next_instance_id}"
-        self.next_instance_id = self.next_instance_id + 1
-        var desc = session_descriptor_new(key)
-        desc.config["session_id"] = instance_id
-        val lease = self.start_adapter(desc)
+    me start_new_session(meta: TestSessionMeta, key: SessionKey) -> SessionLease:
+        val adapter = self.registry.find_by_kind(key.kind)
+        if adapter.?:
+            val desc = session_descriptor_new(key)
+            val lease = adapter.start(desc)
+            val counted = SessionLease(
+                session_id: lease.session_id,
+                key: lease.key,
+                pid: lease.pid,
+                qmp_socket: lease.qmp_socket,
+                status: lease.status,
+                snapshot_name: lease.snapshot_name,
+                created_at: lease.created_at,
+                last_used_at: lease.last_used_at,
+                test_count: 1
+            )
+            self.leases.push(counted)
+            return counted
+        # No adapter — return a default lease
+        val lease = session_lease_new(key)
         val counted = SessionLease(
-            session_id: instance_id,
+            session_id: lease.session_id,
             key: lease.key,
             pid: lease.pid,
             qmp_socket: lease.qmp_socket,
@@ -369,125 +336,6 @@ impl SessionBroker:
         )
         self.leases.push(counted)
         counted
-
-    me start_adapter(desc: SessionDescriptor) -> SessionLease:
-        val kind = desc.key.kind
-        if kind == SESSION_KIND_QEMU_VM:
-            if val adapter = self.qemu: return adapter.start(desc)
-        if kind == SESSION_KIND_CONTAINER:
-            if val adapter = self.container: return adapter.start(desc)
-        if kind == SESSION_KIND_SERVICE:
-            if val adapter = self.service: return adapter.start(desc)
-        if kind == SESSION_KIND_GUI or kind == SESSION_KIND_BROWSER:
-            if val adapter = self.gui: return adapter.start(desc)
-        if kind == SESSION_KIND_OPENOCD:
-            if val adapter = self.openocd: return adapter.start(desc)
-        if kind == SESSION_KIND_TRACE32:
-            if val adapter = self.trace32: return adapter.start(desc)
-        if kind == SESSION_KIND_REMOTE_PC:
-            var i = 0
-            while i < self.remote_pcs.len():
-                if self.remote_pcs[i].terminal_config.name == desc.key.target:
-                    return self.remote_pcs[i].start(desc)
-                i = i + 1
-        session_lease_new(desc.key)
-
-    me execute_adapter(lease: SessionLease, test_path: text, timeout_ms: i64) -> TestResult:
-        val kind = lease.key.kind
-        if kind == SESSION_KIND_QEMU_VM:
-            if val adapter = self.qemu: return adapter.execute(lease, test_path, timeout_ms)
-        if kind == SESSION_KIND_CONTAINER:
-            if val adapter = self.container: return adapter.execute(lease, test_path, timeout_ms)
-        if kind == SESSION_KIND_SERVICE:
-            if val adapter = self.service: return adapter.execute(lease, test_path, timeout_ms)
-        if kind == SESSION_KIND_GUI or kind == SESSION_KIND_BROWSER:
-            if val adapter = self.gui: return adapter.execute(lease, test_path, timeout_ms)
-        if kind == SESSION_KIND_OPENOCD:
-            if val adapter = self.openocd: return adapter.execute(lease, test_path, timeout_ms)
-        if kind == SESSION_KIND_TRACE32:
-            if val adapter = self.trace32: return adapter.execute(lease, test_path, timeout_ms)
-        if kind == SESSION_KIND_REMOTE_PC:
-            var i = 0
-            while i < self.remote_pcs.len():
-                if self.remote_pcs[i].terminal_config.name == lease.key.target:
-                    return self.remote_pcs[i].execute(lease, test_path, timeout_ms)
-                i = i + 1
-        TestResult(
-            test_path: test_path,
-            status: TRESP_FAILED,
-            passed: 0,
-            failed: 1,
-            skipped: 0,
-            duration_ms: 0,
-            output: "no adapter found for session {lease.session_id}",
-            cached: false
-        )
-
-    me reset_adapter(lease: SessionLease, policy: i64) -> bool:
-        val kind = lease.key.kind
-        if kind == SESSION_KIND_QEMU_VM:
-            if val adapter = self.qemu: return adapter.reset(lease, policy)
-        if kind == SESSION_KIND_CONTAINER:
-            if val adapter = self.container: return adapter.reset(lease, policy)
-        if kind == SESSION_KIND_SERVICE:
-            if val adapter = self.service: return adapter.reset(lease, policy)
-        if kind == SESSION_KIND_GUI or kind == SESSION_KIND_BROWSER:
-            if val adapter = self.gui: return adapter.reset(lease, policy)
-        if kind == SESSION_KIND_OPENOCD:
-            if val adapter = self.openocd: return adapter.reset(lease, policy)
-        if kind == SESSION_KIND_TRACE32:
-            if val adapter = self.trace32: return adapter.reset(lease, policy)
-        if kind == SESSION_KIND_REMOTE_PC:
-            var i = 0
-            while i < self.remote_pcs.len():
-                if self.remote_pcs[i].terminal_config.name == lease.key.target:
-                    return self.remote_pcs[i].reset(lease, policy)
-                i = i + 1
-        false
-
-    fn health_adapter(lease: SessionLease) -> bool:
-        val kind = lease.key.kind
-        if kind == SESSION_KIND_QEMU_VM:
-            if val adapter = self.qemu: return adapter.health(lease)
-        if kind == SESSION_KIND_CONTAINER:
-            if val adapter = self.container: return adapter.health(lease)
-        if kind == SESSION_KIND_SERVICE:
-            if val adapter = self.service: return adapter.health(lease)
-        if kind == SESSION_KIND_GUI or kind == SESSION_KIND_BROWSER:
-            if val adapter = self.gui: return adapter.health(lease)
-        if kind == SESSION_KIND_OPENOCD:
-            if val adapter = self.openocd: return adapter.health(lease)
-        if kind == SESSION_KIND_TRACE32:
-            if val adapter = self.trace32: return adapter.health(lease)
-        if kind == SESSION_KIND_REMOTE_PC:
-            var i = 0
-            while i < self.remote_pcs.len():
-                if self.remote_pcs[i].terminal_config.name == lease.key.target:
-                    return self.remote_pcs[i].health(lease)
-                i = i + 1
-        false
-
-    me stop_adapter(lease: SessionLease) -> bool:
-        val kind = lease.key.kind
-        if kind == SESSION_KIND_QEMU_VM:
-            if val adapter = self.qemu: return adapter.stop(lease)
-        if kind == SESSION_KIND_CONTAINER:
-            if val adapter = self.container: return adapter.stop(lease)
-        if kind == SESSION_KIND_SERVICE:
-            if val adapter = self.service: return adapter.stop(lease)
-        if kind == SESSION_KIND_GUI or kind == SESSION_KIND_BROWSER:
-            if val adapter = self.gui: return adapter.stop(lease)
-        if kind == SESSION_KIND_OPENOCD:
-            if val adapter = self.openocd: return adapter.stop(lease)
-        if kind == SESSION_KIND_TRACE32:
-            if val adapter = self.trace32: return adapter.stop(lease)
-        if kind == SESSION_KIND_REMOTE_PC:
-            var i = 0
-            while i < self.remote_pcs.len():
-                if self.remote_pcs[i].terminal_config.name == lease.key.target:
-                    return self.remote_pcs[i].stop(lease)
-                i = i + 1
-        false
 
     me evict_oldest_idle(kind: i64) -> bool:
         var oldest_idx = -1
@@ -504,7 +352,9 @@ impl SessionBroker:
 
         if oldest_idx >= 0:
             val lease = self.leases[oldest_idx]
-            self.stop_adapter(lease)
+            val adapter = self.registry.find_by_kind(kind)
+            if adapter.?:
+                adapter.stop(lease)
             # Remove from list
             var new_leases: [SessionLease] = []
             var j = 0

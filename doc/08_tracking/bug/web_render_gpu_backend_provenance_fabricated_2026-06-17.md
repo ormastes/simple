@@ -1,9 +1,5 @@
 # Web-Render GPU Backend Provenance Fabricated - 2026-06-17
 
-**Status:** fix applied 2026-07-16; executable SPipe verification is blocked
-until the pure-Simple test runner is rebuilt. Static rendering and runtime
-facade gates pass.
-
 ## Severity
 P1 — correctness/integrity. Renders false "GPU-backed" provenance into the
 shared `WebRenderArtifact` boundary that downstream code and specs trust.
@@ -68,22 +64,20 @@ CPU oracle (0 mismatches over a 16x8 framebuffer under `bin/simple test`). This
 shows the real GPU path works and is verifiable — the web path simply does not
 use it.
 
-## Implemented Fix
+## Proposed Fix (separate change — not applied here)
+Tie the provenance to the path that actually produced the pixels. Two viable
+directions:
+- **Truthful label (smaller):** the web pixel path reports `engine2d_backend =
+  "software"` (or `cpu`) with a `requested_backend`/`downgrade_reason` field, and
+  only stamps GPU-queue provenance when a GPU backend genuinely produced the
+  bytes. Update `web_render_pixel_backend_queue_spec` to assert the truthful
+  label.
+- **Real routing (larger):** route the web raster through
+  `Engine2D.create_requested_backend(...)` so `selected_backend_name` is the
+  real backend and GPU kernels actually rasterize the surface.
 
-- Deleted the fixed backend handle `7` and passes only the handle returned by
-  `Engine2DReadback` / `Engine2dDrawIrAdvResult`.
-- Runtime queue emission now requires `device_readback` and a positive handle,
-  submits the artifact checksum and payload text, and stamps evidence only when
-  the drained handle, byte count, checksum, and payload text all match.
-- CPU mirrors and cache hits are labeled `software`, stay queue-neutral, and
-  use the explicit reason `cached Engine2D pixel mirror`.
-- The focused spec accepts a GPU row only when the live readback supplies the
-  device source and handle; a host without that device proves fail-closed
-  neutrality only, not positive GPU execution.
-
-The larger renderer-routing work remains separate: production acceptance still
-requires retained live device readback and matching pixels from the canonical
-GPU gate.
+Do not "fix" by bending the existing spec to keep `== "vulkan"` green — that
+asserts the lie.
 
 ## Related
 - `rt_vulkan_only_executes_under_classic_interpret_2026-06-17.md` (why GPU

@@ -264,7 +264,7 @@ Consider adding version sync to the `/release` skill to automate this.
 | Linux ARM64 | `aarch64-unknown-linux-gnu` | `simple_mcp_server` | Planned |
 | macOS x86_64 | `x86_64-apple-darwin` | `simple_mcp_server` | Planned |
 | macOS ARM64 | `aarch64-apple-darwin` | `simple_mcp_server` | Planned |
-| Windows x86_64 | `x86_64-pc-windows-msvc` | `simple_mcp_server.exe` | Native wrapper implemented; qualification required |
+| Windows x86_64 | `x86_64-pc-windows-msvc` | `simple_mcp_server.exe` | Planned |
 | FreeBSD x86_64 | `x86_64-unknown-freebsd` | `simple_mcp_server` | Planned |
 
 ---

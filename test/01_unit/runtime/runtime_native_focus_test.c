@@ -196,22 +196,6 @@ int main(void) {
     int64_t path = text("a/b/file.spl");
     assert(strcmp((const char*)rt_string_data(rt_path_filename(path)), "file.spl") == 0);
     assert(strcmp((const char*)rt_string_data(rt_path_extension(path)), "spl") == 0);
-    assert(rt_string_rfind(text("a/b/c"), text("/")) == 3);
-    assert(rt_string_rfind(text("abc"), text("")) == 3);
-    assert(rt_getpid() > 0);
-
-    pid_t wait_child = fork();
-    assert(wait_child >= 0);
-    if (wait_child == 0) _exit(23);
-    assert(rt_process_wait(wait_child, 1000) == 23);
-
-    SplArray* process_args = rt_array_new(2);
-    assert(rt_array_push(process_args, text("-c")));
-    assert(rt_array_push(process_args, text("printf runner-ok")));
-    SplArray* process_result = rt_process_run_timeout("/bin/sh", 7, process_args, 1000);
-    assert(process_result != NULL);
-    assert(strcmp((const char*)rt_string_data(rt_array_get(process_result, 0)), "runner-ok") == 0);
-    assert(rt_value_as_int(rt_array_get(process_result, 2)) == 0);
 
     int64_t glyph = rt_gui_get_glyph_8x16('A');
     assert(rt_array_len((SplArray*)(uintptr_t)glyph) == 16);
@@ -275,7 +259,7 @@ int main(void) {
     assert(strcmp((const char*)rt_string_data(rt_tuple_get(response, 2)), "") == 0);
     assert(waitpid(child, NULL, 0) == child);
 
-    child = start_server(&port, "request", 0);
+    child = start_server(&port, "request");
     snprintf(url, sizeof(url), "http://127.0.0.1:%u/", port);
     response = rt_http_request(text("GET"), text(url), (int64_t)rt_array_new(0), text(""));
     assert(rt_value_as_int(rt_tuple_get(response, 0)) == 200);

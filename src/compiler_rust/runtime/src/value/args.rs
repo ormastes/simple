@@ -173,14 +173,6 @@ pub(super) fn cli_arg_at(index: i64) -> String {
         .unwrap_or_default()
 }
 
-/// Return an owned snapshot for runtime-internal consumers such as the CLI
-/// test bridge. Keeping this inside the runtime avoids depending on symbols
-/// supplied only by a particular executable host.
-pub(super) fn cli_args_snapshot() -> Vec<String> {
-    auto_init_args_if_empty();
-    PROGRAM_ARGS.lock().clone()
-}
-
 /// Get program arguments as a RuntimeValue array.
 ///
 /// Returns a heap-allocated RuntimeArray containing RuntimeString values.
@@ -355,15 +347,5 @@ mod tests {
         assert_eq!(cli_arg_at(2), "two words");
         assert_eq!(cli_arg_at(-1), "");
         assert_eq!(cli_arg_at(3), "");
-    }
-
-    #[test]
-    fn test_cli_args_snapshot_is_owned() {
-        rt_set_args_vec(&["simple".to_string(), "test".to_string()]);
-        let mut snapshot = cli_args_snapshot();
-        snapshot.push("focused_spec.spl".to_string());
-
-        assert_eq!(snapshot.len(), 3);
-        assert_eq!(cli_args_snapshot(), ["simple", "test"].map(String::from));
     }
 }

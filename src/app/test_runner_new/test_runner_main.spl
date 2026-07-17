@@ -10,14 +10,13 @@
 
 use std.io.{env_set, env_get}
 use std.io.{time_now_unix_micros}
-use std.io.{dir_create_all, dir_remove_all}
+use std.io.{dir_create_all}
 use std.io.{file_write, file_read, file_exists}
-use app.io.process_ops.{process_run_timeout}
-use std.io_runtime.{get_args, getpid}
+use std.io.{process_run}
+use std.io_runtime.{get_args}
 
-use std.test_runner.test_runner_types.{TestExecutionMode, TestFileResult, TestOptions, TestRunResult, TestRunOutcome, classify_test_run_result, test_run_outcome_exit_code, test_run_outcome_name}
+use std.test_runner.test_runner_types.{TestExecutionMode, TestFileResult, TestOptions, TestRunResult}
 use std.test_runner.test_runner_args.parse_test_args
-use std.test_runner.test_batch_protocol.{write_test_batch_manifest, read_test_batch_manifest, write_test_batch_result, read_test_batch_result, test_batch_result_matches_manifest}
 use std.test_runner.test_config.{TestConfig, load_test_config}
 use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_di_test_tag, is_skip_marker_file, count_skip_marker_cases, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers, count_spec_files_on_disk}
 use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
@@ -98,7 +97,7 @@ fn generate_spipe_docs_for_results(results: [TestFileResult], options: TestOptio
     docgen_args.push("--output")
     docgen_args.push("doc/06_spec")
     docgen_args.push("--no-index")
-    val (stdout, stderr, code) = process_run_timeout("bin/simple", docgen_args, 120000)
+    val (stdout, stderr, code) = process_run("bin/simple", docgen_args)
     val spec_count = docgen_args.len() - 4
     if code == 0:
         if options.verbose:
@@ -157,10 +156,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     val session_setup_start = time_now_unix_micros()
 
     val use_cache = not updated_options.no_cache
-    val all_files = if updated_options.batch_manifest != "":
-        read_test_batch_manifest(updated_options.batch_manifest)
-    else:
-        discover_test_files_fast(updated_options.path, updated_options, use_cache)
+    val all_files = discover_test_files_fast(updated_options.path, updated_options, use_cache)
 
     # Validate # @cover annotations for system tests
     if not updated_options.no_cover_check:
@@ -206,9 +202,6 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         print "No test files found in {options.path}"
         return TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
 
-    if updated_options.batch_size > 0 and updated_options.batch_manifest == "" and files.len() > updated_options.batch_size:
-        return run_tests_in_batches(files, updated_options)
-
     # MEMORY DEBUG: coverage disabled (GROUP 3)
     # if options.coverage:
     #     setup_coverage()
@@ -241,8 +234,8 @@ fn run_tests(options: TestOptions) -> TestRunResult:
                 print_result(dr, updated_options.format)
             return summarize_test_results(daemon_results)
         else:
-            # Daemon could not start/respond (for example, a stale pidfile).
-            # Fall back to direct execution instead of failing the
+            # Daemon could not start/respond (e.g. stale pidfile, light_daemon
+            # IPC mismatch). Fall back to direct execution instead of failing the
             # whole run 0/N — the parallel path below has its own resource
             # governor. Mirrors test_runner_client.spl's "running directly".
             print "WARNING: test daemon unavailable; running directly [fallback]"
@@ -770,138 +763,6 @@ fn summarize_test_results(results: [TestFileResult]) -> TestRunResult:
             total_cached = total_cached + 1
     TestRunResult(files: results, total_passed: total_passed, total_failed: total_failed, total_skipped: total_skipped, total_pending: total_pending, total_timed_out: total_timed_out, total_duration_ms: total_duration_ms, total_setup_ms: total_setup_ms, total_cached: total_cached)
 
-fn parent_peak_rss_kb() -> i64:
-    val status = file_read("/proc/self/status") ?? ""
-    for line in status.split("\n"):
-        if line.starts_with("VmHWM:"):
-            val fields = line.split_whitespace()
-            if fields.len() >= 2:
-                return to_int(fields[1])
-    -1
-
-fn valid_batch_protocol_path(path: text, suffix: text) -> bool:
-    path.starts_with(".simple/test-batches/") and not path.contains("..") and path.ends_with(suffix)
-
-fn run_tests_in_batches(files: [text], options: TestOptions) -> TestRunResult:
-    val raw_args = get_args()
-    if raw_args.len() == 0 or not file_exists(raw_args[0]):
-        return TestRunResult(files: [], total_passed: 0, total_failed: 1, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
-
-    val binary = raw_args[0]
-    val batch_root = ".simple/test-batches/{time_now_unix_micros()}"
-    dir_create_all(batch_root)
-    var child_base_args: [text] = []
-    var arg_index = 1
-    if raw_args.len() > 1 and raw_args[1] == "test":
-        child_base_args.push("test")
-        arg_index = 2
-    else:
-        var runner_index = -1
-        var scan_index = 1
-        while scan_index < raw_args.len():
-            if raw_args[scan_index].ends_with("/app/test_runner_new/main.spl") or raw_args[scan_index] == "src/app/test_runner_new/main.spl":
-                runner_index = scan_index
-                break
-            scan_index = scan_index + 1
-        if runner_index < 0:
-            dir_remove_all(batch_root)
-            return TestRunResult(files: [], total_passed: 0, total_failed: 1, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
-        var prefix_index = 1
-        while prefix_index <= runner_index:
-            child_base_args.push(raw_args[prefix_index])
-            prefix_index = prefix_index + 1
-        arg_index = runner_index + 1
-    while arg_index < raw_args.len():
-        child_base_args.push(raw_args[arg_index])
-        arg_index = arg_index + 1
-
-    var all_results: [TestFileResult] = []
-    var total_passed = 0
-    var total_failed = 0
-    var total_skipped = 0
-    var total_pending = 0
-    var total_timed_out = 0
-    var total_duration_ms = 0
-    var total_setup_ms = 0
-    var total_cached = 0
-    var offset = 0
-    var batch_index = 0
-    val prior_test_depth = env_get("SIMPLE_TEST_DEPTH") ?? ""
-    while offset < files.len():
-        var batch_files: [text] = []
-        var end = offset + options.batch_size
-        if end > files.len():
-            end = files.len()
-        var file_index = offset
-        while file_index < end:
-            batch_files.push(files[file_index])
-            file_index = file_index + 1
-
-        val manifest_path = "{batch_root}/{batch_index}.manifest"
-        val result_path = "{batch_root}/{batch_index}.result"
-        if not write_test_batch_manifest(manifest_path, batch_files):
-            all_results.push(TestFileResult(path: manifest_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: 0, setup_ms: 0, error: "could not write batch manifest", timed_out: false, cached: false))
-            break
-
-        var child_args: [text] = []
-        for base_arg in child_base_args:
-            child_args.push(base_arg)
-        child_args.push("--batch-size=0")
-        child_args.push("--batch-manifest={manifest_path}")
-        child_args.push("--batch-result={result_path}")
-        # The child is runner-owned re-exec, not a nested test authored by a
-        # spec. Reset only around the synchronous spawn so the CLI guard still
-        # rejects real nested `simple test` calls.
-        env_set("SIMPLE_TEST_DEPTH", "0")
-        val batch_timeout_ms = if options.parallel_timeout > 0: options.parallel_timeout * 1000 else: 300000
-        val (stdout, stderr, raw_child_code) = process_run_timeout(binary, child_args, batch_timeout_ms)
-        val child_code = if raw_child_code == -1: test_run_outcome_exit_code(TestRunOutcome.TimeoutResourceFailure) else: raw_child_code as i64
-        env_set("SIMPLE_TEST_DEPTH", prior_test_depth)
-        if stdout != "":
-            print stdout
-        if stderr != "":
-            print stderr
-
-        val read_result = read_test_batch_result(result_path)
-        if not read_result.valid:
-            val timed_out = child_code == test_run_outcome_exit_code(TestRunOutcome.TimeoutResourceFailure)
-            val failed = if child_code == test_run_outcome_exit_code(TestRunOutcome.AssertionOrChildFailure): 1 else: 0
-            all_results.push(TestFileResult(path: manifest_path, passed: 0, failed: failed, skipped: 0, pending: 0, duration_ms: 0, setup_ms: 0, error: read_result.error, timed_out: timed_out, cached: false))
-            total_failed = total_failed + failed
-            if timed_out:
-                total_timed_out = total_timed_out + 1
-            break
-
-        val batch_result = read_result.result
-        if not test_batch_result_matches_manifest(batch_files, batch_result):
-            all_results.push(TestFileResult(path: manifest_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: 0, setup_ms: 0, error: "batch result does not match manifest", timed_out: false, cached: false))
-            break
-        val batch_outcome = classify_test_run_result(batch_result, false)
-        val expected_code = test_run_outcome_exit_code(batch_outcome)
-        for file_result in batch_result.files:
-            all_results.push(file_result)
-        if batch_outcome == TestRunOutcome.InternalError or batch_outcome == TestRunOutcome.UsageError or batch_outcome == TestRunOutcome.EmptySelection:
-            all_results.push(TestFileResult(path: manifest_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: 0, setup_ms: 0, error: "batch child outcome: {test_run_outcome_name(batch_outcome)}", timed_out: false, cached: false))
-        total_passed = total_passed + batch_result.total_passed
-        total_failed = total_failed + batch_result.total_failed
-        total_skipped = total_skipped + batch_result.total_skipped
-        total_pending = total_pending + batch_result.total_pending
-        total_timed_out = total_timed_out + batch_result.total_timed_out
-        total_duration_ms = total_duration_ms + batch_result.total_duration_ms
-        total_setup_ms = total_setup_ms + batch_result.total_setup_ms
-        total_cached = total_cached + batch_result.total_cached
-        if child_code != expected_code:
-            all_results.push(TestFileResult(path: manifest_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: 0, setup_ms: 0, error: "batch exit/result outcome mismatch", timed_out: false, cached: false))
-            break
-        if options.fail_fast and child_code != 0:
-            break
-        offset = end
-        batch_index = batch_index + 1
-        print "Batch boundary: completed={offset}/{files.len()} parent_pid={getpid()} parent_max_rss_kb={parent_peak_rss_kb()}"
-
-    dir_remove_all(batch_root)
-    TestRunResult(files: all_results, total_passed: total_passed, total_failed: total_failed, total_skipped: total_skipped, total_pending: total_pending, total_timed_out: total_timed_out, total_duration_ms: total_duration_ms, total_setup_ms: total_setup_ms, total_cached: total_cached)
-
 # =========================================================================
 # Main Entry Point
 # =========================================================================
@@ -923,18 +784,6 @@ fn run_test_cli() -> i64:
     val options = parse_test_args(args)
     report_free_mem("AFTER_PARSE_ARGS")
 
-    if options.batch_manifest != "":
-        if not valid_batch_protocol_path(options.batch_manifest, ".manifest") or not valid_batch_protocol_path(options.batch_result, ".result"):
-            return test_run_outcome_exit_code(TestRunOutcome.UsageError)
-        print "Batch worker: pid={getpid()} manifest={options.batch_manifest}"
-        val batch_result = run_tests(options)
-        if options.batch_result == "" or not write_test_batch_result(options.batch_result, batch_result):
-            return test_run_outcome_exit_code(TestRunOutcome.InternalError)
-        print_summary(batch_result, options.format)
-        val batch_outcome = classify_test_run_result(batch_result, false)
-        print "Outcome: {test_run_outcome_name(batch_outcome)}"
-        return test_run_outcome_exit_code(batch_outcome)
-
     # Handle run management commands (status/stop/etc.)
     if has_run_management_flag(args):
         return handle_run_management(args)
@@ -948,7 +797,7 @@ fn run_test_cli() -> i64:
         print "Error: No test types enabled. Check config/simple.test.sdn configuration."
         print "  run_spec_tests: {config.run_spec_tests}"
         print "  run_sdoctests: {config.run_sdoctests}"
-        return test_run_outcome_exit_code(TestRunOutcome.InternalError)
+        return 1
 
     if options.sdoctest:
         run_sdoc = true
@@ -971,15 +820,12 @@ fn run_test_cli() -> i64:
         report_free_mem("AFTER_RUN_{result_files.len()}_files")
         print_summary(result, options.format)
 
-        val empty_is_success = options.list or options.manifest_status
-        val outcome = classify_test_run_result(result, empty_is_success)
-        print "Outcome: {test_run_outcome_name(outcome)}"
-
         # Persist test results to database and regenerate reports
         if not options.list and not options.no_db:
             db = update_test_database(result, run_start, run_end)
 
-        exit_code = test_run_outcome_exit_code(outcome)
+        if not result.is_ok():
+            exit_code = 1
 
     # spl_doctest execution (complement to sdoctest)
     var spl_doctest_passed = 0
@@ -998,16 +844,14 @@ fn run_test_cli() -> i64:
         print ""
 
         if not spl_doctest_ok:
-            if exit_code == 0:
-                exit_code = test_run_outcome_exit_code(TestRunOutcome.AssertionOrChildFailure)
+            exit_code = 1
 
     if run_sdoc:
         val sdoctest_config = load_sdoctest_config("config/sdoctest.sdn")
         val sdoctest_result = run_sdoctest_mode(options, sdoctest_config)
         print_sdoctest_summary(sdoctest_result)
         if not sdoctest_result.is_ok():
-            if exit_code == 0:
-                exit_code = test_run_outcome_exit_code(TestRunOutcome.AssertionOrChildFailure)
+            exit_code = 1
 
     # Generate test_result.md from database
     match db:

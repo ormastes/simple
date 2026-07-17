@@ -316,6 +316,7 @@ pub(crate) fn bind_args_with_injected(
         bound.insert(param.name.clone(), Value::Tuple(variadic_values));
     }
 
+    let dbg_all_param_names_tmp: Vec<String> = params_to_bind.iter().map(|p| p.name.clone()).collect();
     for param in params_to_bind {
         if !bound.contains_key(&param.name) {
             if let Some(default_expr) = &param.default {
@@ -330,6 +331,14 @@ pub(crate) fn bind_args_with_injected(
             } else if let Some(injected_val) = injected.get(&param.name) {
                 bound.insert(param.name.clone(), injected_val.clone());
             } else {
+                if std::env::var("SIMPLE_DEBUG_ARG_BINDING").is_ok() {
+                    eprintln!(
+                        "[DEBUG arg_binding TMP] missing param '{}'; full param list={:?}; args given={}",
+                        param.name,
+                        dbg_all_param_names_tmp,
+                        args.len()
+                    );
+                }
                 let ctx = ErrorContext::new()
                     .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                     .with_help("check the function signature and provide the correct number of arguments");

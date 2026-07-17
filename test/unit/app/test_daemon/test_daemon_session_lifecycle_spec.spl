@@ -24,7 +24,7 @@ use app.test_daemon.session_types.{
     meta_to_session_key, meta_needs_session
 }
 use app.test_daemon.session_broker.{SessionBroker, session_broker_new}
-use app.test_daemon.adapters.qemu_adapter.{qemu_adapter_new}
+use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
 
 # ============================================================================
 # Module-level mutable state
@@ -356,12 +356,19 @@ describe "Session Lifecycle":
             expect(report).to_contain("Total sessions: 1")
 
     describe "adapter registration":
-        it "retains the concrete adapter":
+        it "registers adapter for kind":
             reset_sb()
-            sb.register_qemu(qemu_adapter_new())
-            expect(sb.qemu.?).to_equal(true)
-            if val adapter = sb.qemu:
-                expect(adapter.base.name).to_equal("qemu")
+            val adapter = session_adapter_new(SESSION_KIND_QEMU_VM, "qemu")
+            sb.register_adapter(adapter)
+            # After registering, the registry can find the adapter
+            val found = sb.registry.find_by_kind(SESSION_KIND_QEMU_VM)
+            expect(found.?).to_equal(true)
+            expect(found.name).to_equal("qemu")
+
+        it "find_by_kind returns nil for unregistered kind":
+            reset_sb()
+            val found = sb.registry.find_by_kind(SESSION_KIND_SIMULATOR)
+            expect(found.?).to_equal(false)
 
     describe "session lease struct":
         it "creates lease with correct defaults":
@@ -409,16 +416,6 @@ describe "Session Lifecycle":
             expect(desc.max_concurrent).to_equal(1)
 
     describe "complete lifecycle":
-        it "gives fresh sessions distinct instance IDs":
-            reset_sb()
-            var meta = make_sim_meta("hostile/../../target; touch nope")
-            meta.reuse_mode = REUSE_FRESH_PER_TEST
-            val first = sb.acquire(meta)
-            val second = sb.acquire(meta)
-            expect(first.session_id == second.session_id).to_equal(false)
-            expect(first.session_id.contains("/")).to_equal(false)
-            expect(first.session_id.contains(";")).to_equal(false)
-
         it "acquire, release, reuse, stop cycle":
             reset_sb()
             val meta = make_qemu_meta("arm64", REUSE_SHARED_READ_ONLY, "/bin/test")

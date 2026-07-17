@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-03
 **Severity:** high (silent wrong values / parse failure)
-**Status:** source-resolved; focused pure-Simple regressions added, execution pending
+**Status:** open — workaround in use
 
 ## Symptoms
 
@@ -30,16 +30,7 @@ boundary. Only scalar helpers (`_mat_abs`, `_mat_snap`) are factored out.
 
 ## Next step
 
-Run the focused cases in
-`src/compiler/10.frontend/core/interpreter/test_interp.spl` once a permitted
-pure-Simple verification binary is available. Static review on 2026-07-16
-found that nested array types recurse through `parser_parse_type_impl`, array
-arguments retain their value IDs in `eval_function_call`, and literal and
-variable indices share `eval_index_expr`. The regressions cover both original
-symptoms without relying on unsafe value extraction after a parse failure.
-
-The earlier suspected Dict-in-struct copy path is unrelated: only value-type
-struct parameters are copied, while arrays retain their value IDs. Nested 2D
-assignment is also a separate backend-parity concern; the pure-Simple
-interpreter already mutates the evaluated inner-array value ID and must not be
-changed to compensate for a Rust-seed-only limitation.
+Minimal repros for (1) and (2) in interpreter unit tests; likely the same
+value-copy path as the Dict-in-struct corruption
+([[interp_dict_in_struct_copy_corruption_2026-07-03]]) — parameter-passed
+aggregates lose element addressing.

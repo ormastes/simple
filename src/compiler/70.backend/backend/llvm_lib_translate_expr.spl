@@ -31,9 +31,10 @@ fn translate_instruction(
     inst: MirInst,
     value_map: {i64: i64},
     local_types: {i64: i64},
-    local_unsigned: {i64: bool},
     block_map: {i64: i64},
-    func_map: {text: i64}
+    func_map: {text: i64},
+    known_function_names: [text],
+    known_function_refs: i64
 ) -> {i64: i64}:
     var local_value_map: Dict<i64, i64> = value_map
     val inst_kind = inst.kind
@@ -63,7 +64,7 @@ fn translate_instruction(
         return translate_call(
             ctx, mod_, builder, tm,
             rt_tuple_get(payload, 0), rt_tuple_get(payload, 1), rt_tuple_get(payload, 2),
-            local_value_map, local_types, func_map
+            local_value_map, local_types, func_map, known_function_names, known_function_refs
         )
 
     match inst_kind:
@@ -148,7 +149,7 @@ fn translate_instruction(
                 case _: ()
 
         case Cast(dest, operand, target):
-            local_value_map = translate_cast(ctx, mod_, builder, tm, dest, operand, target, local_value_map, local_types, local_unsigned, func_map)
+            local_value_map = translate_cast(ctx, mod_, builder, tm, dest, operand, target, local_value_map, local_types, func_map)
 
         case Bitcast(dest, operand, target):
             val op_val = translate_operand(ctx, mod_, builder, tm, operand, local_value_map, local_types, func_map)
@@ -176,7 +177,7 @@ fn translate_instruction(
             val call_args: [MirOperand] = [value]
             local_value_map = translate_call(
                 ctx, mod_, builder, tm, dest_opt as i64, func as i64, call_args as i64,
-                local_value_map, local_types, func_map
+                local_value_map, local_types, func_map, known_function_names, known_function_refs
             )
 
         case Call(_, _, _):
@@ -184,7 +185,7 @@ fn translate_instruction(
             local_value_map = translate_call(
                 ctx, mod_, builder, tm,
                 rt_tuple_get(payload, 0), rt_tuple_get(payload, 1), rt_tuple_get(payload, 2),
-                local_value_map, local_types, func_map
+                local_value_map, local_types, func_map, known_function_names, known_function_refs
             )
 
         case CallIndirect(dest, ptr, args, sig):
@@ -509,13 +510,11 @@ fn translate_aggregate(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
 fn translate_cast(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
                   dest: LocalId, operand: MirOperand, target: MirType,
                   value_map: {i64: i64}, local_types: {i64: i64},
-                  local_unsigned: {i64: bool},
                   func_map: {text: i64}) -> {i64: i64}:
     var local_value_map: Dict<i64, i64> = value_map
     val op_val = translate_operand(ctx, mod_, builder, tm, operand, value_map, local_types, func_map)
     val target_ty = tm.map_type(target)
-    val source_unsigned = get_operand_unsigned(operand, local_unsigned)
-    set_raw_handle(local_value_map, dest.id, coerce_llvm_cast_value(builder, op_val, target_ty, source_unsigned))
+    set_raw_handle(local_value_map, dest.id, coerce_llvm_value(builder, op_val, target_ty))
     local_value_map
 
 # ============================================================================
@@ -553,17 +552,11 @@ fn coerce_llvm_value(builder: i64, value: i64, target_ty: i64) -> i64:
         return llvm_build_ptr_to_int(builder, value, target_ty, "coerce")
     llvm_build_bitcast(builder, value, target_ty, "coerce")
 
-fn coerce_llvm_cast_value(builder: i64, value: i64, target_ty: i64, source_unsigned: bool) -> i64:
-    val source_kind = llvm_get_type_kind(llvm_type_of(value))
-    val target_kind = llvm_get_type_kind(target_ty)
-    if source_unsigned and source_kind == 8 and (target_kind == 2 or target_kind == 3):
-        return llvm_build_ui_to_fp(builder, value, target_ty, "coerce")
-    coerce_llvm_value(builder, value, target_ty)
-
 fn translate_call(ctx: i64, mod_: i64, builder: i64, tm: LlvmLibTypeMapper,
                   raw_dest: i64, raw_func: i64, raw_args: i64,
                   value_map: {i64: i64}, local_types: {i64: i64},
-                  func_map: {text: i64}) -> {i64: i64}:
+                  func_map: {text: i64}, known_function_names: [text],
+                  known_function_refs: i64) -> {i64: i64}:
     var local_value_map: Dict<i64, i64> = value_map
     var has_dest = false
     var dest_id = 0
@@ -883,15 +876,6 @@ fn get_operand_type_ref(operand: MirOperand, local_types: {i64: i64}, tm: LlvmLi
             get_local_type(local_types, tm, local.id)
         case Const(_, type_):
             tm.map_type(type_)
-
-fn get_operand_unsigned(operand: MirOperand, local_unsigned: {i64: bool}) -> bool:
-    match operand.kind:
-        case Copy(local): local_unsigned.get(local.id) ?? false
-        case Move(local): local_unsigned.get(local.id) ?? false
-        case Const(_, type_):
-            match type_.kind:
-                case U8 | U16 | U32 | U64: true
-                case _: false
 
 fn is_float_type_ref(ctx: i64, ty: i64) -> bool:
     val kind = llvm_get_type_kind(ty)

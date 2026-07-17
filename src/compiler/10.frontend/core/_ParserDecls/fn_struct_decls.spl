@@ -720,78 +720,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         val fname = par_text_get()
         parser_expect(6)
         parser_expect(161)
-        # native_infer_collapse_undeclared_field_type_2026-07-16: a field type
-        # that is a single bareword identifier NOT found by named_type_find
-        # (not a struct/class/enum/trait, not a primitive, not a fixed-width
-        # integer name) falls all the way through parser_parse_type_impl's
-        # catch-all to TYPE_VOID -- which is literally 0 (core/types.spl), so
-        # convert_flat_type's FIRST check (`type_expr_idx <= 0` -> Infer, its
-        # sentinel for "no type annotation was written at all") swallows it
-        # before the later, unreachable-for-0 `== TYPE_VOID -> Named("void")`
-        # check ever runs. The field silently becomes TypeKind.Infer instead
-        # of surfacing HIR's "unresolved type" diagnostic (which already
-        # fires correctly for every OTHER unresolved-type shape since
-        # 00b5f60ea93). Reproduced: `struct Widget: field_a: TotallyMissingType`
-        # native-builds and RUNS with no error.
-        #
-        # Fix is deliberately narrow: peek the bareword identifier BEFORE
-        # calling parser_parse_type() (a pure read, parser_parse_type_impl
-        # itself reads the same two calls first, so this has no side effect),
-        # and only when the call actually fell to TYPE_VOID *and* the peeked
-        # token really was a plain identifier (excludes `[T]`, `fn(...)`,
-        # `(A,B)`, and `Foo<...>` shapes, which reach TYPE_VOID through other
-        # branches and are out of scope here) do we override the field's
-        # type. This struct's OWN declared type parameters (`type_params`,
-        # already parsed above at line ~625, e.g. `struct Box<T>: value: T`)
-        # are excluded -- proven load-bearing: `Box<T>` with `value: T`
-        # native-builds AND runs correctly today by relying on this exact
-        # TYPE_VOID fallback (there is no type-param scope registry to
-        # consult otherwise), so T/U/K/V-style bare type-param references
-        # must keep resolving to TYPE_VOID unchanged. The literal name "void"
-        # is also excluded since it already round-trips correctly through
-        # TYPE_VOID -> Named("void", []) by coincidence of the same fallback.
-        # A genuinely-undeclared name (in neither category) is instead
-        # re-encoded as a synthesized EXPR_IDENT node (expr_ident, the same
-        # helper used throughout this parser) whose index flows through
-        # convert_flat_type's existing `tag == EXPR_IDENT` case into
-        # Named(<real name>, []), reaching HIR exactly like every other
-        # resolved-name type reference so the existing unresolved-type
-        # diagnostic can fire. Nested/generic-argument positions (e.g. the
-        # `T` inside `value: Option<T>`) are untouched -- those recurse into
-        # parser_parse_type() separately and are not touched by this
-        # peek/override, which wraps only the outermost per-field call.
-        val field_type_peek_kind = par_kind_get()
-        val field_type_peek_name = par_text_get()
-        val field_type_raw = parser_parse_type()
-        var ftype = field_type_raw
-        if field_type_raw == TYPE_VOID and field_type_peek_kind == 6 and field_type_peek_name != "void":
-            var field_type_is_own_type_param = false
-            var ftp_i = 0
-            while ftp_i < type_params.len():
-                if type_params[ftp_i] == field_type_peek_name:
-                    field_type_is_own_type_param = true
-                ftp_i = ftp_i + 1
-            if not field_type_is_own_type_param:
-                # convert_flat_type's own comment documents the flat-tag
-                # space: 0..33 are reserved fixed TYPE_* constants (TYPE_VOID
-                # = 0, TYPE_BOOL = 1, TYPE_I64 = 2, ... TYPE_I32 = 33), and
-                # only an index in the 34..(TYPE_UNION_BASE=500)-1 "tag-space
-                # hole" is treated as a real expr-arena index (its `tag ==
-                # EXPR_IDENT` case is what rebuilds Named(name, []) for an
-                # extern fn's `-> T` / a tuple type's elements today).
-                # expr_ident's returned index is simply the arena's current
-                # node count, so for a struct parsed early in a small unit
-                # (few/no expressions parsed yet) it can land anywhere in
-                # 0..33 -- silently colliding with one of those fixed
-                # constants (verified: the naive single-call version above
-                # produced index 1, which convert_flat_type reads back as
-                # TYPE_BOOL, silently mistyping the field as `bool` instead
-                # of firing "unresolved type"). Burn throwaway nodes until
-                # the real one lands clear of the reserved range.
-                var ftype_candidate = expr_ident(field_type_peek_name, 0)
-                while ftype_candidate < 34:
-                    ftype_candidate = expr_ident(field_type_peek_name, 0)
-                ftype = ftype_candidate
+        val ftype = parser_parse_type()
         field_names.push(fname)
         field_types.push(ftype)
         var fbits: i64 = -1

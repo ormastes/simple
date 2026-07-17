@@ -10,7 +10,7 @@ use std.daemon_sdk.types.{
     daemon_response_new
 }
 use app.test_daemon.types.{
-    TestDaemonConfig, TestResult, test_daemon_config_default
+    TestDaemonConfig, test_daemon_config_default
 }
 use app.test_daemon.{
     TREQ_RUN_SINGLE, TREQ_RUN_ALL, TREQ_CLEAN_RUN, TREQ_STATUS, TREQ_STOP,
@@ -23,28 +23,23 @@ use app.test_daemon.{
 }
 use app.test_daemon.agent_pool.{AgentPool, agent_pool_new}
 use app.test_incremental_state_shared.{IncrementalTestState, incremental_test_state_load}
+use app.test_daemon.qemu_broker.{QemuBroker, qemu_broker_new}
 use app.test_daemon.resource_policy.{
     test_daemon_can_accept_client, test_daemon_can_start_qemu,
     test_daemon_effective_qemu_limit, test_daemon_poll_sleep_ms
 }
 use app.test_daemon.resource_snapshot.{test_daemon_resource_snapshot}
 use app.test_daemon.session_broker.{SessionBroker, session_broker_new}
-use app.test_daemon.session_adapter.{run_test_child}
 use app.test_daemon.session_types.{
     TestSessionMeta, test_session_meta_default,
-    session_kind_from_name, reuse_mode_from_name, reset_policy_from_name,
-    session_kind_name, meta_needs_session, SESSION_KIND_QEMU_VM,
-    LEASE_ACTIVE, REUSE_FRESH_PER_TEST, RESET_NONE
+    session_kind_from_name, reuse_mode_from_name, reset_policy_from_name
 }
-use std.test_runner.test_classification.{classify_test_session}
-use app.test_daemon.adapters.qemu_adapter.{qemu_adapter_new}
-use app.test_daemon.adapters.container_adapter.{container_adapter_new}
-use app.test_daemon.adapters.service_adapter.{service_adapter_new}
-use app.test_daemon.adapters.gui_adapter.{gui_adapter_new}
-use app.test_daemon.adapters.hardware_adapter.{openocd_adapter_new, trace32_adapter_new}
-use app.test_daemon.adapters.remote_pc_adapter.{remote_pc_adapter_new}
-use std.terminal.credential.config_parser.{parse_terminal_config}
-use std.terminal.types.{TERM_KIND_SSH, TERM_KIND_TELNET}
+use app.test_daemon.{SESSION_KIND_LOCAL}
+use app.test_daemon.adapters.qemu_adapter.{QemuAdapter, qemu_adapter_new}
+use app.test_daemon.adapters.container_adapter.{ContainerAdapter, container_adapter_new}
+use app.test_daemon.adapters.service_adapter.{ServiceAdapter, service_adapter_new}
+use app.test_daemon.adapters.gui_adapter.{GuiAdapter, gui_adapter_new}
+use app.test_daemon.adapters.hardware_adapter.{OpenocdAdapter, Trace32Adapter, openocd_adapter_new, trace32_adapter_new}
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_hash_text(s: text) -> i64
@@ -60,6 +55,7 @@ class TestDaemon:
     runner: DaemonRunner
     config: TestDaemonConfig
     incremental_state: IncrementalTestState
+    qemu_broker: QemuBroker
     agent_pool: AgentPool
     session_broker: SessionBroker
     active_requests: {text: text}
@@ -80,6 +76,7 @@ impl TestDaemon:
             # Periodic session broker cleanup every 50 cycles
             val state = self.runner.get_state()
             if state.cycle_count % 50 == 0:
+                self.qemu_broker.cleanup_idle(self.config.qemu_session_timeout_ms)
                 self.session_broker.cleanup_idle()
 
             # Periodic agent stale cleanup every 30 cycles
@@ -167,7 +164,7 @@ impl TestDaemon:
         # Change detection (unless clean run)
         if clean != "true":
             val cached = self.incremental_state.check_freshness(test_path)
-            if cached.result_status != -1:
+            if cached.test_path != "":
                 # Remove from active
                 self.active_requests["{dedup_key}"] = ""
                 var resp = daemon_response_new(req.id, TRESP_CACHED)
@@ -181,8 +178,7 @@ impl TestDaemon:
                 return resp
 
         # Execute test
-        val timeout_ms = self.request_timeout_ms(req)
-        val result = self.execute_test(req.id, test_path, timeout_ms)
+        val result = self.execute_test(test_path)
 
         # Remove from active
         self.active_requests["{dedup_key}"] = ""
@@ -212,7 +208,7 @@ impl TestDaemon:
                 total_skipped = total_skipped + cached.skipped
                 total_cached = total_cached + 1
             else:
-                self.execute_test(req.id, test_path, 120000)
+                self.execute_test(test_path)
                 val entry = self.incremental_state.check_freshness(test_path)
                 if entry.test_path != "":
                     total_passed = total_passed + entry.passed
@@ -240,7 +236,7 @@ impl TestDaemon:
             resp.fields["error"] = "missing test_path"
             return resp
 
-        self.execute_test(req.id, test_path, self.request_timeout_ms(req))
+        self.execute_test(test_path)
 
     # --- Status query ---
 
@@ -252,8 +248,8 @@ impl TestDaemon:
         resp.fields["errors_count"] = "{state.errors_count}"
         resp.fields["cycle_count"] = "{state.cycle_count}"
         resp.fields["cache_entries"] = "{self.incremental_state.entries.keys().len()}"
-        resp.fields["qemu_active"] = "{self.session_broker.active_count_by_kind(SESSION_KIND_QEMU_VM)}"
-        resp.fields["qemu_idle"] = "{self.session_broker.idle_count_by_kind(SESSION_KIND_QEMU_VM)}"
+        resp.fields["qemu_active"] = "{self.qemu_broker.active_count()}"
+        resp.fields["qemu_idle"] = "{self.qemu_broker.idle_count()}"
         val snap = self.current_resource_snapshot()
         resp.fields["resource_cpu_percent"] = "{snap.cpu_percent}"
         resp.fields["resource_memory_percent"] = "{snap.memory_percent}"
@@ -267,6 +263,7 @@ impl TestDaemon:
 
     fn handle_stop(req: DaemonRequest) -> DaemonResponse:
         self.incremental_state.save()
+        self.qemu_broker.shutdown_all()
         self.session_broker.shutdown_all()
         self.runner.shutdown()
         daemon_response_new(req.id, TRESP_COMPLETED)
@@ -303,13 +300,12 @@ impl TestDaemon:
         val status = (req.fields["status"] ?? "0").to_i64() ?? 0
         val passed = (req.fields["passed"] ?? "0").to_i64() ?? 0
         val failed = (req.fields["failed"] ?? "0").to_i64() ?? 0
-        val skipped = (req.fields["skipped"] ?? "0").to_i64() ?? 0
         val duration_ms = (req.fields["duration_ms"] ?? "0").to_i64() ?? 0
         val output = req.fields["output"] ?? ""
         self.agent_pool.report_result(agent_id, test_path, status, passed, failed, duration_ms, output)
 
         # Also record in cache
-        self.incremental_state.record_daemon_result(test_path, status, passed, failed, skipped, duration_ms, output)
+        self.incremental_state.record_daemon_result(test_path, status, passed, failed, 0, duration_ms, output)
 
         var resp = daemon_response_new(req.id, TRESP_COMPLETED)
         resp.fields["test_path"] = test_path
@@ -355,12 +351,6 @@ impl TestDaemon:
         )
 
         val lease = self.session_broker.acquire(meta)
-        if lease.status != LEASE_ACTIVE or lease.session_id == "":
-            if lease.session_id != "":
-                self.session_broker.stop_session(lease.session_id)
-            var failed = daemon_response_new(req.id, TRESP_FAILED)
-            failed.fields["error"] = "could not acquire {kind_name} session"
-            return failed
         var resp = daemon_response_new(req.id, TRESP_COMPLETED)
         resp.fields["session_id"] = lease.session_id
         resp.fields["pid"] = "{lease.pid}"
@@ -428,49 +418,35 @@ impl TestDaemon:
 
     # --- Execute a test ---
 
-    fn request_timeout_ms(req: DaemonRequest) -> i64:
-        val requested = (req.fields["timeout_ms"] ?? "120000").to_i64() ?? 120000
-        if requested > 0: requested else: 120000
+    fn execute_test(test_path: text) -> DaemonResponse:
+        # Shell out to the local child runner; the daemon owns scheduling.
+        extern fn rt_shell_exec(cmd: text) -> text
+        extern fn rt_shell_exit_code() -> i64
 
-    fn execute_test(request_id: text, test_path: text, timeout_ms: i64) -> DaemonResponse:
         val setup_start = rt_time_now_unix_micros()
-        val meta = classify_test_session(test_path)
-        var result: TestResult
-        if meta_needs_session(meta):
-            val lease = self.session_broker.acquire(meta)
-            if lease.status != LEASE_ACTIVE or lease.session_id == "":
-                if lease.session_id != "":
-                    self.session_broker.stop_session(lease.session_id)
-                result = TestResult(
-                    test_path: test_path, status: TRESP_FAILED,
-                    passed: 0, failed: 1, skipped: 0, duration_ms: 0,
-                    output: "could not acquire {session_kind_name(meta.session_kind)} session",
-                    cached: false
-                )
-            else:
-                result = self.session_broker.execute_in_session(lease.session_id, test_path, timeout_ms)
-                if meta.reuse_mode == REUSE_FRESH_PER_TEST:
-                    self.session_broker.stop_session(lease.session_id)
-                elif meta.reset_policy != RESET_NONE:
-                    if not self.session_broker.reset_session(lease.session_id, meta.reset_policy):
-                        self.session_broker.stop_session(lease.session_id)
-                else:
-                    self.session_broker.release(lease.session_id)
-        else:
-            result = run_test_child(test_path, timeout_ms, [])
+        val cmd = "bin/simple test {test_path} --no-session-daemon --sequential 2>&1"
         val setup_ms = (rt_time_now_unix_micros() - setup_start) / 1000
 
-        # Record in cache
-        self.incremental_state.record_daemon_result(test_path, result.status, result.passed, result.failed, result.skipped, result.duration_ms, result.output)
+        val test_start = rt_time_now_unix_micros()
+        val output = rt_shell_exec(cmd)
+        val exit_code = rt_shell_exit_code()
+        val duration_ms = (rt_time_now_unix_micros() - test_start) / 1000
 
-        var resp = daemon_response_new(request_id, result.status)
+        val status = if exit_code == 0: TRESP_COMPLETED else: TRESP_FAILED
+        val passed = if exit_code == 0: 1 else: 0
+        val failed = if exit_code != 0: 1 else: 0
+
+        # Record in cache
+        self.incremental_state.record_daemon_result(test_path, status, passed, failed, 0, duration_ms, output)
+
+        var resp = daemon_response_new("", status)
         resp.fields["test_path"] = test_path
-        resp.fields["passed"] = "{result.passed}"
-        resp.fields["failed"] = "{result.failed}"
-        resp.fields["skipped"] = "{result.skipped}"
-        resp.fields["duration_ms"] = "{result.duration_ms}"
+        resp.fields["passed"] = "{passed}"
+        resp.fields["failed"] = "{failed}"
+        resp.fields["skipped"] = "0"
+        resp.fields["duration_ms"] = "{duration_ms}"
         resp.fields["setup_ms"] = "{setup_ms}"
-        resp.fields["output"] = result.output
+        resp.fields["output"] = output
         resp.fields["cached"] = "false"
         resp
 
@@ -487,8 +463,8 @@ impl TestDaemon:
     fn current_resource_snapshot():
         test_daemon_resource_snapshot(
             self.active_request_count(),
-            self.session_broker.active_count(),
-            self.session_broker.idle_count()
+            self.qemu_broker.active_count() + self.session_broker.active_count(),
+            self.qemu_broker.idle_count() + self.session_broker.idle_count()
         )
 
 # ============================================================================
@@ -500,6 +476,7 @@ fn test_daemon_start(config: TestDaemonConfig) -> TestDaemon:
 
     val runner = daemon_runner_start(config.daemon)
     val incremental_state = incremental_test_state_load(config.cache_path, config.dep_graph_path, true)
+    val qemu_broker = qemu_broker_new(config.resource_policy.max_qemu_sessions)
     val pool = agent_pool_new(5)
 
     # Initialize session broker with all adapters
@@ -508,24 +485,25 @@ fn test_daemon_start(config: TestDaemonConfig) -> TestDaemon:
     broker.startup_timeout_ms = config.session_startup_timeout_ms
     broker.max_sessions["qemu_vm"] = config.resource_policy.max_qemu_sessions
 
-    broker.register_qemu(qemu_adapter_new())
-    broker.register_container(container_adapter_new())
-    broker.register_service(service_adapter_new())
-    broker.register_gui(gui_adapter_new(""))
-    broker.register_openocd(openocd_adapter_new())
-    broker.register_trace32(trace32_adapter_new())
-    val terminal_configs = parse_terminal_config("config/t32/t32_terminal.sdn")
-    var terminal_index = 0
-    while terminal_index < terminal_configs.len():
-        val terminal_config = terminal_configs[terminal_index]
-        if terminal_config.kind == TERM_KIND_SSH or terminal_config.kind == TERM_KIND_TELNET:
-            broker.register_remote_pc(remote_pc_adapter_new(terminal_config))
-        terminal_index = terminal_index + 1
+    # Register adapters
+    val qemu_a = qemu_adapter_new()
+    broker.register_adapter(qemu_a.base)
+    val container_a = container_adapter_new()
+    broker.register_adapter(container_a.base)
+    val service_a = service_adapter_new()
+    broker.register_adapter(service_a.base)
+    val gui_a = gui_adapter_new()
+    broker.register_adapter(gui_a.base)
+    val openocd_a = openocd_adapter_new()
+    broker.register_adapter(openocd_a.base)
+    val trace32_a = trace32_adapter_new()
+    broker.register_adapter(trace32_a.base)
 
     TestDaemon(
         runner: runner,
         config: config,
         incremental_state: incremental_state,
+        qemu_broker: qemu_broker,
         agent_pool: pool,
         session_broker: broker,
         active_requests: {}

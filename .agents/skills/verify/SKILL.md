@@ -34,11 +34,6 @@ not create, rewrite, or weaken SPipe after verification.
   `scripts/check/fixtures/font_evidence_runner_empty_spec.spl` must exit 1 with
   `test-runner: no examples executed`; reject 2/124/139 and retain commands,
   binary SHA-256, and logs. Native evidence remains authoritative.
-  The focused runner must accept exactly `<pure-simple-bin> <spec.spl>`, use
-  existing process/file facades, never discover or fall back to another
-  compiler, preserve stderr and ordinary child exit status, map a
-  process-facade `-1` timeout marker to 124 and other `-1` launch failure to 1,
-  and remove its temporary wrapper on every exit path.
 - Scenario-oriented generated docs read as manuals: primary steps visible,
   inline/previous setup expanded, executable SPipe folded by default, detailed
   edge/matrix/stress/helper cases folded or skipped by policy.

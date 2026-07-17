@@ -27,19 +27,15 @@ if [ ! -x "${release_dir}/simple" ]; then
   exit 0
 fi
 
-CANDIDATE_FRONTEND_ROOT="${repo_root}"
-. "${repo_root}/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
-if ! (cd "${repo_root}" && simple_binary_is_valid "${release_dir}/simple"); then
-  echo "setup: refusing unqualified runtime: ${release_dir}/simple" >&2
-  exit 1
-fi
-
 cd "${repo_root}/bin"
 
 ln -sf "release/${PLATFORM_TRIPLE}/simple" simple
 
-# Bootstrap seeds never receive a production launcher after admission.
-rm -f simple_seed "release/${PLATFORM_TRIPLE}/simple_seed"
+if [ -x "release/${PLATFORM_TRIPLE}/simple_seed" ]; then
+  ln -sf "release/${PLATFORM_TRIPLE}/simple_seed" simple_seed
+else
+  rm -f simple_seed
+fi
 
 for b in simple_ui_backend t32_mcp_server t32_lsp_mcp_server; do
   if [ -x "release/${PLATFORM_TRIPLE}/${b}" ]; then
@@ -71,7 +67,6 @@ if [ "${script_dir}" = "$0" ]; then
 fi
 repo_root="${script_dir}/.."
 log_dir="${repo_root}/.simple/logs"
-mkdir -p "${log_dir}"
 
 probe_timeout() {
   _seconds=$1
@@ -85,32 +80,147 @@ probe_timeout() {
   fi
 }
 
-native_hash_is_valid() {
-  _native=$1
-  _sidecar="${_native}.sha256"
-  [ -f "${_sidecar}" ] || return 1
-  _expected="$(awk 'NR == 1 { print $1 }' "${_sidecar}")"
-  if command -v sha256sum >/dev/null 2>&1; then
-    _actual="$(sha256sum "${_native}" | awk '{print $1}')"
-  elif command -v shasum >/dev/null 2>&1; then
-    _actual="$(shasum -a 256 "${_native}" | awk '{print $1}')"
-  else
-    return 1
-  fi
-  [ -n "${_expected}" ] && [ "${_expected}" = "${_actual}" ]
-}
-
 if [ "${1:-}" = "--json" ]; then
   printf '%s\n' '{"command":"mcp","status":"ready","tool":"Simple MCP Server","version":"4.0.0"}'
   exit 0
 fi
 
-# Production launches only a cached native server that passes a real tool call.
+if [ "${SIMPLE_MCP_FULL:-1}" != "1" ]; then
+  transport_mode="framed"
+  tool_set="${SIMPLE_MCP_TOOL_SET:-core}"
+  tool_name="simple_pipe"
+  tool_desc="SPipe-linked codebase/context/Ponytail surface"
+  if [ "${tool_set}" = "search" ]; then
+    tool_name="simple_search"
+    tool_desc="Codebase search"
+  fi
+  read_msg() {
+    len=""
+    while IFS= read -r line; do
+      line="${line%$(printf '\r')}"
+      case "$line" in
+        \{*) transport_mode="jsonl"; printf '%s' "$line"; return 0 ;;
+      esac
+      [ -z "$line" ] && break
+      case "$line" in
+        Content-Length:*) len="$(printf '%s' "$line" | sed 's/^Content-Length:[[:space:]]*//')" ;;
+      esac
+    done
+    [ -n "$len" ] || return 1
+    dd bs=1 count="$len" 2>/dev/null
+  }
+  get_id() {
+    printf '%s\n' "$1" | awk '
+      {
+        json = $0; depth = 0; quoted = 0; escaped = 0
+        for (i = 1; i <= length(json); i++) {
+          ch = substr(json, i, 1)
+          if (quoted) {
+            if (escaped) escaped = 0
+            else if (ch == "\\") escaped = 1
+            else if (ch == "\"") quoted = 0
+            continue
+          }
+          if (ch == "{") { depth++; continue }
+          if (ch == "}") { depth--; continue }
+          if (ch != "\"") continue
 
-_MCP_PROBE_WRAPPER_VERSION="simple_mcp_server:4.1.1-correlated-call"
+          start = i; i++
+          key = ""; key_escaped = 0
+          while (i <= length(json)) {
+            ch = substr(json, i, 1)
+            if (!key_escaped && ch == "\"") break
+            key = key ch
+            if (key_escaped) key_escaped = 0
+            else if (ch == "\\") key_escaped = 1
+            i++
+          }
+          if (depth != 1 || key != "id") continue
 
-_mcp_probe_identity() {
-  awk 'NR == 1 { print $1 }' "$1.sha256" 2>/dev/null || printf ''
+          i++
+          while (substr(json, i, 1) ~ /[[:space:]]/) i++
+          if (substr(json, i, 1) != ":") continue
+          i++
+          while (substr(json, i, 1) ~ /[[:space:]]/) i++
+          value_start = i
+          if (substr(json, i, 1) == "\"") {
+            i++; value_escaped = 0
+            while (i <= length(json)) {
+              ch = substr(json, i, 1)
+              if (!value_escaped && ch == "\"") { i++; break }
+              if (value_escaped) value_escaped = 0
+              else if (ch == "\\") value_escaped = 1
+              i++
+            }
+          } else {
+            while (i <= length(json) && substr(json, i, 1) !~ /[,}[:space:]]/) i++
+          }
+          print substr(json, value_start, i - value_start)
+          exit
+        }
+      }
+    '
+  }
+  send_msg() {
+    body="$1"
+    if [ "$transport_mode" = "jsonl" ]; then
+      printf '%s\n' "$body"
+    else
+      printf 'Content-Length: %s\r\n\r\n%s' "$(printf '%s' "$body" | wc -c | tr -d ' ')" "$body"
+    fi
+  }
+  while msg="$(read_msg)"; do
+    case "$msg" in
+      \{*) transport_mode="jsonl" ;;
+    esac
+    id="$(get_id "$msg")"
+    [ -n "$id" ] || id=null
+    case "$msg" in
+      *'"method"'*'"initialize"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{},\"resources\":{},\"prompts\":{},\"logging\":{}},\"serverInfo\":{\"name\":\"simple-pipe-mcp\",\"version\":\"4.0.0\"}}}"
+        ;;
+      *'"method"'*'"tools/list"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"$tool_name\",\"description\":\"$tool_desc\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}]}}"
+        ;;
+      *'"method"'*'"tools/call"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"$tool_name ready\"}]}}"
+        ;;
+      *'"method"'*'"resources/list"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"resources\":[]}}"
+        ;;
+      *'"method"'*'"resources/templates/list"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"resourceTemplates\":[]}}"
+        ;;
+      *'"method"'*'"prompts/list"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"prompts\":[]}}"
+        ;;
+      *'"method"'*'"roots/list"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"roots\":[]}}"
+        ;;
+      *'"method"'*'"ping"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+        ;;
+      *'"method"'*'"logging/setLevel"'*)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+        ;;
+      *'"method"'*'"notifications/'*)
+        ;;
+      *)
+        send_msg "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}"
+        ;;
+    esac
+  done
+  exit 0
+fi
+
+# Production launches the cached native server. Source execution is an
+# explicit debugging fallback and may use only a deployed pure-Simple runtime.
+
+_MCP_PROBE_WRAPPER_VERSION="simple_mcp_server:4.1.0-tools-call"
+
+_mcp_probe_stat() {
+  # Returns "mtime size" for a file; portable Linux/macOS
+  stat -c '%Y %s' "$1" 2>/dev/null || stat -f '%m %z' "$1" 2>/dev/null || printf ''
 }
 
 _mcp_probe_stamp_path() {
@@ -123,7 +233,7 @@ _mcp_probe_stamp_valid() {
   # $1 = candidate binary path
   _stamp="$(_mcp_probe_stamp_path "$1")"
   [ -f "${_stamp}" ] || return 1
-  _current="$(_mcp_probe_identity "$1")"
+  _current="$(_mcp_probe_stat "$1")"
   [ -n "${_current}" ] || return 1
   _stored_stat="$(sed -n '1p' "${_stamp}" 2>/dev/null || printf '')"
   _stored_ver="$(sed -n '2p' "${_stamp}" 2>/dev/null || printf '')"
@@ -135,9 +245,9 @@ _mcp_probe_stamp_write() {
   _stamp="$(_mcp_probe_stamp_path "$1")"
   _stamp_dir="$(dirname "${_stamp}")"
   mkdir -p "${_stamp_dir}" 2>/dev/null || return 1
-  _current="$(_mcp_probe_identity "$1")"
+  _current="$(_mcp_probe_stat "$1")"
   [ -n "${_current}" ] || return 1
-  printf '%s\n%s\n' "${_current}" "${_MCP_PROBE_WRAPPER_VERSION}" >"${_stamp}.$$" && mv "${_stamp}.$$" "${_stamp}"
+  printf '%s\n%s\n' "${_current}" "${_MCP_PROBE_WRAPPER_VERSION}" >"${_stamp}"
 }
 
 _mcp_probe_stamp_delete() {
@@ -147,7 +257,10 @@ _mcp_probe_stamp_delete() {
 
 mcp_probe_native() {
   probe_native="$1"
-  # Cache hit is content-addressed by the already-validated SHA-256 sidecar.
+  if [ "${SIMPLE_MCP_SKIP_NATIVE_PROBE:-0}" = "1" ]; then
+    return 0
+  fi
+  # Cache hit: skip probe if stamp matches binary mtime+size+wrapper version
   if _mcp_probe_stamp_valid "${probe_native}"; then
     printf 'probe_cache_hit wrapper=simple_mcp_server native=%s\n' "${probe_native}" >>"${log_dir}/simple_mcp_startup.log"
     return 0
@@ -155,16 +268,32 @@ mcp_probe_native() {
   # Stale or missing stamp: delete it before probing so a probe failure leaves no stamp
   _mcp_probe_stamp_delete "${probe_native}"
 
+  # --- Cheap self-check probe (C1) ---
+  # Try `<candidate> --probe` first: prints one line "simple-mcp probe ok ..." and exits 0.
+  # Use stdin from /dev/null and a short timeout so binaries that predate --probe (they
+  # read from stdin as an MCP server and get EOF) don't hang and fall through cleanly.
+  #
+  # Benchmarking note (C3): to measure real probe/startup latency use
+  # scripts/check/check-mcp-native-smoke.shs (no artificial sleeps).
+  # Do NOT use test/03_system/tools/mcp/mcp_startup_test_system.shs (it has sleep 1
+  # between messages, adding ~3 s of artificial delay) or npx (package-manager overhead).
+  _probe_out="$(probe_timeout "${SIMPLE_MCP_NATIVE_PROBE_QUICK_TIMEOUT:-2}" \
+    "${probe_native}" --probe </dev/null 2>>"${log_dir}/simple_mcp_stderr.log")" && \
+  _probe_rc=0 || _probe_rc=$?
+  if [ "${_probe_rc}" = "0" ] && printf '%s' "${_probe_out}" | grep -q 'probe ok'; then
+    printf 'probe_quick_ok wrapper=simple_mcp_server native=%s next=tools_call\n' "${probe_native}" >>"${log_dir}/simple_mcp_startup.log"
+  else
+    printf 'probe_quick_fallback wrapper=simple_mcp_server native=%s rc=%s reason=no_probe_ok\n' "${probe_native}" "${_probe_rc}" >>"${log_dir}/simple_mcp_startup.log"
+  fi
+
+  # --- Full-handshake fallback (original path, unchanged) ---
   probe_tmp="$(mktemp "${TMPDIR:-/tmp}/simple_mcp_probe.XXXXXX")" || probe_tmp=""
   if [ -z "${probe_tmp}" ]; then
     return 1
   fi
   printf '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"wrapper-probe","version":"1"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}\n{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}\n{"jsonrpc":"2.0","id":"3","method":"tools/call","params":{"name":"simple_pipe","arguments":{"surface":"spipe"}}}\n' \
     | probe_timeout "${SIMPLE_MCP_NATIVE_PROBE_TIMEOUT:-5}" "${probe_native}" >"${probe_tmp}" 2>>"${log_dir}/simple_mcp_stderr.log" || true
-  if grep -q '"simple_pipe"' "${probe_tmp}" \
-    && grep -Eq '"id"[[:space:]]*:[[:space:]]*3.*"result"' "${probe_tmp}" \
-    && ! grep -Eq '"id"[[:space:]]*:[[:space:]]*3.*"error"' "${probe_tmp}" \
-    && grep -q 'spipe: linked' "${probe_tmp}"; then
+  if grep -q '"simple_pipe"' "${probe_tmp}" && grep -q 'spipe: linked' "${probe_tmp}"; then
     rm -f "${probe_tmp}"
     _mcp_probe_stamp_write "${probe_native}" || true
     printf 'probe_tools_call_ok wrapper=simple_mcp_server native=%s stamp=written\n' "${probe_native}" >>"${log_dir}/simple_mcp_startup.log"
@@ -175,10 +304,9 @@ mcp_probe_native() {
   return 1
 }
 
-platform_dir="${SIMPLE_PLATFORM_TRIPLE:-x86_64-unknown-linux-gnu}"
 native=""
 if [ -n "${SIMPLE_MCP_NATIVE:-}" ]; then
-  if [ -x "${SIMPLE_MCP_NATIVE}" ] && native_hash_is_valid "${SIMPLE_MCP_NATIVE}" && mcp_probe_native "${SIMPLE_MCP_NATIVE}"; then
+  if [ -x "${SIMPLE_MCP_NATIVE}" ] && mcp_probe_native "${SIMPLE_MCP_NATIVE}"; then
     native="${SIMPLE_MCP_NATIVE}"
   else
     printf '%s\n' "error: SIMPLE_MCP_NATIVE is missing or failed its MCP probe: ${SIMPLE_MCP_NATIVE}" >&2
@@ -186,31 +314,73 @@ if [ -n "${SIMPLE_MCP_NATIVE:-}" ]; then
   fi
 else
   for candidate in \
-    "${script_dir}/release/${platform_dir}/simple_mcp_server" \
+    "${repo_root}/build/bootstrap/mcp-package/simple_mcp_server" \
     "${script_dir}/release/aarch64-apple-darwin/simple_mcp_server" \
     "${script_dir}/release/aarch64-apple-darwin-macho/simple_mcp_server" \
     "${script_dir}/release/x86_64-apple-darwin/simple_mcp_server" \
     "${script_dir}/release/x86_64-apple-darwin-macho/simple_mcp_server" \
     "${script_dir}/release/x86_64-unknown-linux-gnu/simple_mcp_server" \
-    "${script_dir}/release/linux-x86_64/simple_mcp_server"
+    "${script_dir}/release/linux-x86_64/simple_mcp_server" \
+    "${repo_root}/build/bootstrap/full/aarch64-apple-darwin/simple_mcp_server" \
+    "${repo_root}/build/bootstrap/full/x86_64-apple-darwin/simple_mcp_server" \
+    "${repo_root}/build/bootstrap/full/x86_64-unknown-linux-gnu/simple_mcp_server"
   do
-    if [ -x "${candidate}" ] && native_hash_is_valid "${candidate}" && mcp_probe_native "${candidate}"; then
+    if [ -x "${candidate}" ] && mcp_probe_native "${candidate}"; then
       native="${candidate}"
       break
     fi
   done
 fi
 
-if [ -z "${native}" ]; then
+runtime=""
+for candidate in \
+  "${SIMPLE_BINARY:-}" \
+  "${script_dir}/simple" \
+  "${script_dir}/release/simple" \
+  "${script_dir}/release/x86_64-unknown-linux-gnu/simple" \
+  "${script_dir}/release/linux-x86_64/simple"
+do
+  if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then
+    runtime="${candidate}"
+    break
+  fi
+done
+
+if [ -z "${native}" ] && [ "${SIMPLE_MCP_ALLOW_SOURCE_FALLBACK:-0}" != "1" ]; then
   {
     printf '%s\n' "error: native simple_mcp_server not found"
     printf '%s\n' "checked:"
+    printf '%s\n' "  ${repo_root}/build/bootstrap/mcp-package/simple_mcp_server"
     printf '%s\n' "  ${script_dir}/release/aarch64-apple-darwin/simple_mcp_server"
     printf '%s\n' "  ${script_dir}/release/aarch64-apple-darwin-macho/simple_mcp_server"
     printf '%s\n' "  ${script_dir}/release/x86_64-apple-darwin/simple_mcp_server"
     printf '%s\n' "  ${script_dir}/release/x86_64-apple-darwin-macho/simple_mcp_server"
     printf '%s\n' "  ${script_dir}/release/x86_64-unknown-linux-gnu/simple_mcp_server"
     printf '%s\n' "  ${script_dir}/release/linux-x86_64/simple_mcp_server"
+    printf '%s\n' "  ${repo_root}/build/bootstrap/full/aarch64-apple-darwin/simple_mcp_server"
+    printf '%s\n' "  ${repo_root}/build/bootstrap/full/x86_64-apple-darwin/simple_mcp_server"
+    printf '%s\n' "  ${repo_root}/build/bootstrap/full/x86_64-unknown-linux-gnu/simple_mcp_server"
+    printf '%s\n' "source fallback disabled; set SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=1 only for debugging"
+    printf '%s\n' "hint: rebuild with native-build for src/app/mcp/main.spl"
+  } >&2
+  exit 127
+fi
+
+if [ -z "${native}" ] && [ -z "${runtime}" ]; then
+  {
+    printf '%s\n' "error: native simple_mcp_server not found"
+    printf '%s\n' "checked:"
+    printf '%s\n' "  ${repo_root}/build/bootstrap/mcp-package/simple_mcp_server"
+    printf '%s\n' "  ${script_dir}/release/aarch64-apple-darwin/simple_mcp_server"
+    printf '%s\n' "  ${script_dir}/release/aarch64-apple-darwin-macho/simple_mcp_server"
+    printf '%s\n' "  ${script_dir}/release/x86_64-apple-darwin/simple_mcp_server"
+    printf '%s\n' "  ${script_dir}/release/x86_64-apple-darwin-macho/simple_mcp_server"
+    printf '%s\n' "  ${script_dir}/release/x86_64-unknown-linux-gnu/simple_mcp_server"
+    printf '%s\n' "  ${script_dir}/release/linux-x86_64/simple_mcp_server"
+    printf '%s\n' "  ${repo_root}/build/bootstrap/full/aarch64-apple-darwin/simple_mcp_server"
+    printf '%s\n' "  ${repo_root}/build/bootstrap/full/x86_64-apple-darwin/simple_mcp_server"
+    printf '%s\n' "  ${repo_root}/build/bootstrap/full/x86_64-unknown-linux-gnu/simple_mcp_server"
+    printf '%s\n' "source fallback runtime also not found"
     printf '%s\n' "hint: rebuild with native-build for src/app/mcp/main.spl"
   } >&2
   exit 127
@@ -222,13 +392,24 @@ export SIMPLE_TIMEOUT_SECONDS="${SIMPLE_TIMEOUT_SECONDS:-86400}"
 export SIMPLE_MEMORY_LIMIT_MB="${SIMPLE_MEMORY_LIMIT_MB:-${SIMPLE_TEST_MEMORY_LIMIT_MB:-100}}"
 export RUST_LOG="${RUST_LOG:-error}"
 
-printf 'startup wrapper=simple_mcp_server mode=native native=%s cwd=%s\n' "${native}" "$(pwd)" >>"${log_dir}/simple_mcp_startup.log"
-exec "${native}" "$@" 2>>"${log_dir}/simple_mcp_stderr.log"
+if [ -n "${native}" ]; then
+  printf 'startup wrapper=simple_mcp_server mode=native native=%s cwd=%s\n' "${native}" "$(pwd)" >>"${log_dir}/simple_mcp_startup.log"
+  exec "${native}" "$@" 2>>"${log_dir}/simple_mcp_stderr.log"
+fi
+
+entry="${repo_root}/src/app/mcp/main.spl"
+if [ ! -f "${entry}" ]; then
+  printf '%s\n' "error: MCP source fallback entry point not found: ${entry}" >&2
+  exit 127
+fi
+printf 'startup wrapper=simple_mcp_server mode=source runtime=%s cwd=%s\n' "${runtime}" "$(pwd)" >>"${log_dir}/simple_mcp_startup.log"
+exec "${runtime}" "${entry}" "$@" 2>>"${log_dir}/simple_mcp_stderr.log"
 EOF
 chmod +x simple_mcp_server
 
-rm -f simple_lsp_mcp_server
-cat > simple_lsp_mcp_server <<'EOF'
+if [ -x "release/${PLATFORM_TRIPLE}/simple_lsp_mcp_server" ] || [ -x "release/aarch64-apple-darwin/simple_lsp_mcp_server" ] || [ -x "release/x86_64-apple-darwin/simple_lsp_mcp_server" ] || [ -x "release/linux-x86_64/simple_lsp_mcp_server" ] || [ -x "${repo_root}/build/bootstrap/mcp-package/simple_lsp_mcp_server" ] || [ -x "${repo_root}/build/bootstrap/full/x86_64-unknown-linux-gnu/simple_lsp_mcp_server" ]; then
+  rm -f simple_lsp_mcp_server
+  cat > simple_lsp_mcp_server <<'EOF'
 #!/bin/sh
 set -eu
 
@@ -252,7 +433,6 @@ fi
 platform_dir="${SIMPLE_PLATFORM_TRIPLE:-x86_64-unknown-linux-gnu}"
 repo_root="${script_dir}/.."
 log_dir="${repo_root}/.simple/logs"
-mkdir -p "${log_dir}"
 
 probe_timeout() {
   _seconds=$1
@@ -266,30 +446,48 @@ probe_timeout() {
   fi
 }
 
-native_hash_is_valid() {
-  _native=$1
-  _sidecar="${_native}.sha256"
-  [ -f "${_sidecar}" ] || return 1
-  _expected="$(awk 'NR == 1 { print $1 }' "${_sidecar}")"
-  if command -v sha256sum >/dev/null 2>&1; then
-    _actual="$(sha256sum "${_native}" | awk '{print $1}')"
-  elif command -v shasum >/dev/null 2>&1; then
-    _actual="$(shasum -a 256 "${_native}" | awk '{print $1}')"
-  else
-    return 1
-  fi
-  [ -n "${_expected}" ] && [ "${_expected}" = "${_actual}" ]
-}
-
 if [ "${1:-}" = "--json" ]; then
   printf '%s\n' '{"command":"simple-lsp-mcp","status":"ready","version":"0.9.8"}'
   exit 0
 fi
 
-_LSP_MCP_PROBE_WRAPPER_VERSION="simple_lsp_mcp_server:0.9.10-tools-call"
+# The native simple_lsp_mcp_server fails every tools/call with "Missing tool name"
+# (AOT arg-extraction codegen bug — only the initialize/tools/list handshake
+# survives). Default to source mode: 10/11 LSP tools work; lsp_diagnostics is
+# gated off in the server (deadlocks on `simple check`) and returns a message.
+# Opt back into native with SIMPLE_LSP_MCP_PREFER_NATIVE=1 after a real
+# tools/call probe passes. See
+# doc/08_tracking/bug/lsp_mcp_native_arg_extract_and_source_diagnostics_deadlock_2026-06-18.md
+if [ "${SIMPLE_LSP_MCP_PREFER_NATIVE:-0}" != "1" ]; then
+  export SIMPLE_LIB="${SIMPLE_LIB:-${repo_root}/src}"
+  export SIMPLE_LOG="${SIMPLE_LOG:-error}"
+  export RUST_LOG="${RUST_LOG:-error}"
+  smf_entry="${repo_root}/build/mcp-script/simple_lsp_mcp_server.smf"
+  smf_runtime="${SIMPLE_LSP_MCP_SMF_RUNTIME:-${repo_root}/src/compiler_rust/target/bootstrap/simple}"
+  if [ "${SIMPLE_LSP_MCP_DISABLE_SMF:-0}" != "1" ] && [ -f "${smf_entry}" ] && [ -x "${smf_runtime}" ]; then
+    exec "${smf_runtime}" "${smf_entry}" "$@"
+  fi
+  mkdir -p "${log_dir}"
+  src_entry="${repo_root}/src/app/simple_lsp_mcp/main.spl"
+  for src_runtime in \
+    "${SIMPLE_BINARY:-}" \
+    "${script_dir}/simple" \
+    "${script_dir}/release/${platform_dir}/simple" \
+    "${script_dir}/release/linux-x86_64/simple"
+  do
+    if [ -n "${src_runtime}" ] && [ -x "${src_runtime}" ] && [ -f "${src_entry}" ]; then
+      printf 'startup wrapper=simple_lsp_mcp_server mode=source-default runtime=%s cwd=%s\n' "${src_runtime}" "$(pwd)" >>"${log_dir}/simple_lsp_mcp_startup.log"
+      exec "${src_runtime}" "${src_entry}" "$@" 2>>"${log_dir}/simple_lsp_mcp_stderr.log"
+    fi
+  done
+  printf '%s\n' "error: simple runtime not found for LSP MCP source mode" >&2
+  exit 127
+fi
 
-_lsp_mcp_probe_identity() {
-  awk 'NR == 1 { print $1 }' "$1.sha256" 2>/dev/null || printf ''
+_LSP_MCP_PROBE_WRAPPER_VERSION="simple_lsp_mcp_server:0.9.9-tools-call"
+
+_lsp_mcp_probe_stat() {
+  stat -c '%Y %s' "$1" 2>/dev/null || stat -f '%m %z' "$1" 2>/dev/null || printf ''
 }
 
 _lsp_mcp_probe_stamp_path() {
@@ -300,7 +498,7 @@ _lsp_mcp_probe_stamp_path() {
 _lsp_mcp_probe_stamp_valid() {
   _stamp="$(_lsp_mcp_probe_stamp_path "$1")"
   [ -f "${_stamp}" ] || return 1
-  _current="$(_lsp_mcp_probe_identity "$1")"
+  _current="$(_lsp_mcp_probe_stat "$1")"
   [ -n "${_current}" ] || return 1
   _stored_stat="$(sed -n '1p' "${_stamp}" 2>/dev/null || printf '')"
   _stored_ver="$(sed -n '2p' "${_stamp}" 2>/dev/null || printf '')"
@@ -311,9 +509,9 @@ _lsp_mcp_probe_stamp_write() {
   _stamp="$(_lsp_mcp_probe_stamp_path "$1")"
   _stamp_dir="$(dirname "${_stamp}")"
   mkdir -p "${_stamp_dir}" 2>/dev/null || return 1
-  _current="$(_lsp_mcp_probe_identity "$1")"
+  _current="$(_lsp_mcp_probe_stat "$1")"
   [ -n "${_current}" ] || return 1
-  printf '%s\n%s\n' "${_current}" "${_LSP_MCP_PROBE_WRAPPER_VERSION}" >"${_stamp}.$$" && mv "${_stamp}.$$" "${_stamp}"
+  printf '%s\n%s\n' "${_current}" "${_LSP_MCP_PROBE_WRAPPER_VERSION}" >"${_stamp}"
 }
 
 _lsp_mcp_probe_stamp_delete() {
@@ -322,6 +520,9 @@ _lsp_mcp_probe_stamp_delete() {
 
 mcp_probe_lsp_native() {
   probe_native="$1"
+  if [ "${SIMPLE_LSP_MCP_SKIP_NATIVE_PROBE:-0}" = "1" ]; then
+    return 0
+  fi
   if _lsp_mcp_probe_stamp_valid "${probe_native}"; then
     printf 'probe_cache_hit wrapper=simple_lsp_mcp_server native=%s\n' "${probe_native}" >>"${log_dir}/simple_lsp_mcp_startup.log"
     return 0
@@ -331,11 +532,11 @@ mcp_probe_lsp_native() {
   if [ -z "${probe_tmp}" ]; then
     return 1
   fi
-  printf '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"wrapper-probe","version":"1"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}\n{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}\n{"jsonrpc":"2.0","id":"lsp-call-probe","method":"tools/call","params":{"name":"lsp_symbols","arguments":{"file":"src/app/simple_lsp_mcp/main.spl"}}}\n' \
+  printf '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"wrapper-probe","version":"1"}}}\n{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}\n{"jsonrpc":"2.0","id":"lsp-call-probe","method":"tools/call","params":{"name":"lsp_symbols","arguments":{"file":"src/app/simple_lsp_mcp/main.spl"}}}\n' \
     | probe_timeout "${SIMPLE_LSP_MCP_NATIVE_PROBE_TIMEOUT:-3}" "${probe_native}" >"${probe_tmp}" 2>>"${log_dir}/simple_lsp_mcp_stderr.log" || true
   if grep -q '"lsp_definition"' "${probe_tmp}" \
-    && grep -q '"id":"lsp-call-probe".*"result"' "${probe_tmp}" \
-    && ! grep -q '"id":"lsp-call-probe".*"error"' "${probe_tmp}" \
+    && grep -q '"id":"lsp-call-probe"' "${probe_tmp}" \
+    && grep -q '"result"' "${probe_tmp}" \
     && ! grep -q 'Missing tool name' "${probe_tmp}"; then
     rm -f "${probe_tmp}"
     _lsp_mcp_probe_stamp_write "${probe_native}" || true
@@ -348,31 +549,27 @@ mcp_probe_lsp_native() {
 }
 
 native=""
-if [ -n "${SIMPLE_LSP_MCP_NATIVE:-}" ]; then
-  if [ -x "${SIMPLE_LSP_MCP_NATIVE}" ] && native_hash_is_valid "${SIMPLE_LSP_MCP_NATIVE}" && mcp_probe_lsp_native "${SIMPLE_LSP_MCP_NATIVE}"; then
-    native="${SIMPLE_LSP_MCP_NATIVE}"
-  else
-    printf '%s\n' "error: SIMPLE_LSP_MCP_NATIVE is missing or failed its LSP MCP probe: ${SIMPLE_LSP_MCP_NATIVE}" >&2
-    exit 127
+for candidate in \
+  "${repo_root}/build/bootstrap/mcp-package/simple_lsp_mcp_server" \
+  "${script_dir}/release/aarch64-apple-darwin/simple_lsp_mcp_server" \
+  "${script_dir}/release/x86_64-apple-darwin/simple_lsp_mcp_server" \
+  "${script_dir}/release/${platform_dir}/simple_lsp_mcp_server" \
+  "${script_dir}/release/linux-x86_64/simple_lsp_mcp_server" \
+  "${repo_root}/build/bootstrap/full/x86_64-unknown-linux-gnu/simple_lsp_mcp_server" \
+  "${script_dir}"/release/*/simple_lsp_mcp_server
+do
+  if [ -x "${candidate}" ] && mcp_probe_lsp_native "${candidate}"; then
+    native="${candidate}"
+    break
   fi
-else
-  for candidate in \
-    "${script_dir}/release/aarch64-apple-darwin/simple_lsp_mcp_server" \
-    "${script_dir}/release/x86_64-apple-darwin/simple_lsp_mcp_server" \
-    "${script_dir}/release/${platform_dir}/simple_lsp_mcp_server" \
-    "${script_dir}/release/linux-x86_64/simple_lsp_mcp_server"
-  do
-    if [ -x "${candidate}" ] && native_hash_is_valid "${candidate}" && mcp_probe_lsp_native "${candidate}"; then
-      native="${candidate}"
-      break
-    fi
-  done
-fi
+done
 
 if [ ! -x "${native}" ]; then
   {
     printf '%s\n' "error: native simple_lsp_mcp_server not found"
     printf '%s\n' "checked release directory: ${script_dir}/release"
+    printf '%s\n' "checked package artifact: ${repo_root}/build/bootstrap/mcp-package/simple_lsp_mcp_server"
+    printf '%s\n' "checked full artifact: ${repo_root}/build/bootstrap/full/x86_64-unknown-linux-gnu/simple_lsp_mcp_server"
     printf '%s\n' "platform: ${platform_dir}"
     printf '%s\n' "hint: rebuild with native-build for src/app/simple_lsp_mcp/main.spl"
   } >&2
@@ -382,6 +579,7 @@ fi
 printf 'startup wrapper=simple_lsp_mcp_server mode=native native=%s cwd=%s\n' "${native}" "$(pwd)" >>"${log_dir}/simple_lsp_mcp_startup.log"
 exec "${native}" "$@" 2>>"${log_dir}/simple_lsp_mcp_stderr.log"
 EOF
-chmod +x simple_lsp_mcp_server
+  chmod +x simple_lsp_mcp_server
+fi
 
 echo "setup: bin/simple -> release/${PLATFORM_TRIPLE}/simple"

@@ -58,7 +58,3 @@ uint8_t* rt_memcpy(uint8_t* dst, const uint8_t* src, int64_t n) {
     memcpy(dst, src, (size_t)n);
     return dst;
 }
-
-uint8_t* copy_mem(uint8_t* dst, const uint8_t* src, int64_t n) {
-    return rt_memcpy(dst, src, n);
-}

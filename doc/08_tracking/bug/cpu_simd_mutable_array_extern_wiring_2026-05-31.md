@@ -114,19 +114,3 @@ row fill callers, but it does not close the full-frame 8K performance blocker:
 the mutable typed-array write-back bridge is still required before browser
 layout can safely bulk-fill a full framebuffer through the native mutable
 extern.
-
-## 2026-07-16: offset span and alpha-parity audit
-
-The remaining software-backend gather/copy/scatter loops cannot be replaced by
-the native mutable copy entrypoint until this bridge is proven. Passing
-`self.buf` through a free-function facade is also covered by the separate
-`self_pass_to_free_fn_mutation_loss` compiler bug, so that apparent one-line
-rewrite is not qualification-safe.
-
-Blend needs an additional semantic repair before native offset spans are
-admitted: the native row kernel and the current Simple SIMD scalar reference
-force output alpha to 255, while the production `color.blend` path preserves
-Porter-Duff output alpha (`sa + da * (255 - sa) / 255`). Existing opaque-
-destination tests hide the mismatch. The eventual bridge work must add
-unequal-offset copy/blend cases and transparent/partial-alpha parity against
-`color.blend` before routing production backend spans through native code.

@@ -199,9 +199,9 @@ execution of the canonical `p2_add.spl` fixture. A failed sanity removes that
 stage from consideration on Linux, macOS, Windows/POSIX-shell, and FreeBSD.
 
 The `Rust Bootstrap Multiplatform` workflow runs this canonical stage path with
-LLVM and explicit Cranelift on Linux x86_64, macOS AArch64, macOS x86_64, and
-Windows x86_64. It uploads Stage 2/Stage 3 pure-Simple artifacts, never the Rust
-seed as the platform result.
+LLVM on Linux x86_64 and macOS AArch64, and with explicit Cranelift on macOS
+x86_64 and Windows x86_64. It uploads Stage 2/Stage 3 pure-Simple artifacts,
+never the Rust seed as the platform result.
 
 The Linux Stage 3 artifact then runs
 `scripts/check/check-llvm-simd-row-native-arch.shs`: native x86_64 plus QEMU

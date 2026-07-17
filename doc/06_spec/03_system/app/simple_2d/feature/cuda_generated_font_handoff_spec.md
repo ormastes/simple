@@ -1,6 +1,6 @@
 # CUDA Generated Font Handoff
 
-**Status:** conditional release gate; current CUDA device execution unavailable/pending
+**Status:** conditional supporting evidence; release-blocking when CUDA is selected
 **Traceability:** REQ-010, REQ-014; NFR-002, NFR-008
 **Executable:** `test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl`
 

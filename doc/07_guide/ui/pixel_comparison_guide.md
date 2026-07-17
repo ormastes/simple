@@ -42,7 +42,7 @@ SIMPLE_LIB=src PIXEL_HTML=test/fixtures/pixel_compare/simple_text.html \
 PIXEL_W=320 PIXEL_H=240 \
 PIXEL_OUT_JSON=build/pixel_compare/simple_out.json \
 PIXEL_OUT_PPM=build/pixel_compare/simple_out.ppm \
-SIMPLE_NO_STUB_FALLBACK=1 bin/simple run tools/pixel_compare/render_and_save_simple.spl
+src/compiler_rust/target/release/simple run tools/pixel_compare/render_and_save_simple.spl
 ```
 
 ### 3. Compare
@@ -200,19 +200,14 @@ font/text work outside the current exact fixture gates.
 
 ## Rendering Paths
 
-The canonical path is HTML/Web semantic layout → `DrawIrComposition` →
-Engine2D. Resolved selected-vector text carries stable font identity and ordered
-advances in Draw IR; Engine2D alone prepares transient
-`FontRenderBatch`/atlas material through the shared `FontRenderer`. The older
-5×7 layout painter and heuristic renderer are compatibility/diagnostic paths,
-not production completion evidence.
+The Simple web renderer has two code paths:
+
+1. **Layout renderer** (`simple_web_html_layout_renderer.spl`) — Real HTML parser + CSS cascade + block layout + 5x7 bitmap font paint. Used for generic HTML.
+2. **Heuristic renderer** (`simple_web_engine2d_renderer.spl`) — Pattern-matching substring heuristic for known HTML structures (famous site corpus, WM scenes). Falls through to layout renderer for unrecognized HTML.
 
 ## Known Limitations
 
-- **Compatibility bitmap font**: the 5×7 painter cannot bit-match browser text.
-  The selected vector-font path already uses the shared TTF/font renderer;
-  remaining acceptance is native device/readback and fixed-oracle evidence, not
-  another rasterizer integration.
+- **Bitmap font**: 5x7 glyph grid scaled by `glyph_scale(font_size)` cannot match Chrome's vector font rendering. Needs TTF rasterizer integration (stb_truetype available in `src/runtime/stb_truetype.h`).
 - **Font offload evidence**: `vector_font_offload.spl` is the typed evidence
   path for real GPU-returned vector glyph pixels. Use
   `vector_font_preferred_offload_evidence(...)` and
@@ -245,24 +240,17 @@ not production completion evidence.
   expected values). That readback wrapper is the production proof gate: it only marks
   bitmap glyph rasterization ready after generated-kernel submit and
   checksum-matched device readback.
-- **Antialiasing differs**: the compatibility 5×7 painter is binary, while the
-  selected vector path uses coverage8/grayscale alpha; neither is assumed to
-  bit-match browser subpixel text without a fixed oracle.
+- **No anti-aliasing**: Binary black/white pixels vs Chrome's subpixel AA.
 - **Tauri real capture**: No real WebView capture path exists yet. Chromium-via-Electron is the primary reference.
-- **Runtime**: use an admitted self-hosted `bin/simple`; bootstrap-stage and Rust
-  seed binaries are not pixel or font acceptance evidence. If admission fails,
-  record the compiler blocker instead of falling back.
+- **Interpreter binary (v0.4.0)**: Cannot load `gc_async_mut.gpu.*` modules due to `Gpu` keyword parse error. Use native binary `src/compiler_rust/target/release/simple` (v1.0.0-beta).
 
 ## Test Fixtures
 
 ### Shared font comparisons
 
-Before comparing resolved selected-vector font pixels, assert that layout and
-Draw IR carry the same pinned `font-identity`, ordered advances, and direction.
-When shaping is selected, also assert identical shaped glyph
-IDs/positions/clusters. Language and script remain producer/shaper evidence;
-they are not serialized in `DrawIrGlyphRunPayload`. Use exact RGBA8 for the
-integer alpha oracle; broader native antialiasing requires
+Before comparing font pixels, assert that layout and Draw IR carry the same
+pinned `font-identity`, ordered advances, direction, language, and script. Use
+exact RGBA8 for the integer alpha oracle; broader native antialiasing requires
 the fixture's fixed absolute edge/coverage limits. Nonblank pixels, equal
 checksums, upload, or emitted GPU source do not prove native execution; record
 the backend, submitted payload hash, completed fence, and readback origin.

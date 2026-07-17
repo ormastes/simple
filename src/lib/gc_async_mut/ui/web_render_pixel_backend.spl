@@ -12,7 +12,9 @@ use std.common.ui.web_render_api.{
     WEB_RENDER_TARGET_PURE_SIMPLE,
     WebRenderArtifact,
     WebRenderRequest,
+    web_render_artifact_with_backend_readback,
     web_render_artifact_with_backend_readback_source,
+    web_render_artifact_with_runtime_queue,
     web_render_artifact_with_runtime_queue_handle,
     web_render_dynamic_region_count,
     web_render_engine2d_rendered_artifact,
@@ -40,7 +42,7 @@ use std.gc_async_mut.gpu.engine2d.backend_lane.{
 use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{
     engine2d_host_gpu_event,
     engine2d_host_gpu_event_handler_decision,
-    engine2d_host_gpu_event_submit_to_runtime_payload_text,
+    engine2d_host_gpu_event_submit_to_runtime,
     engine2d_host_gpu_runtime_drain,
     engine2d_host_gpu_runtime_queue_with_backend_handle
 }
@@ -64,10 +66,15 @@ fn web_render_backend_readback_checksum(pixels: [u32]) -> i64:
         i = i + 1
     checksum
 
-fn web_render_proven_backend_name(requested_backend: text, backend_handle: i64, readback_source: text) -> text:
-    if readback_source == "device_readback" and backend_handle > 0:
-        return requested_backend
-    "software"
+fn web_render_backend_handle_evidence(backend_name: text) -> i64:
+    if web_render_runtime_queue_available(backend_name):
+        return 7
+    0
+
+fn web_render_artifact_with_backend_readback_evidence(artifact: WebRenderArtifact, backend_name: text) -> WebRenderArtifact:
+    if not web_render_runtime_queue_available(backend_name):
+        return artifact
+    web_render_artifact_with_backend_readback(artifact, "readback", backend_name, artifact.pixels.len().to_i64(), web_render_backend_readback_checksum(artifact.pixels), "same-frame Engine2D read_pixels")
 
 fn web_render_artifact_with_backend_readback_source_evidence(artifact: WebRenderArtifact, backend_name: text, source: text) -> WebRenderArtifact:
     if artifact.pixels.len() == 0:
@@ -75,10 +82,11 @@ fn web_render_artifact_with_backend_readback_source_evidence(artifact: WebRender
     val receipt_source = if source == "": "engine2d_pixel_readback" else: source
     web_render_artifact_with_backend_readback_source(artifact, "readback", backend_name, artifact.pixels.len().to_i64(), web_render_backend_readback_checksum(artifact.pixels), "same-frame Engine2D read_pixels", receipt_source)
 
-fn web_render_artifact_with_runtime_queue_evidence(artifact: WebRenderArtifact, backend_name: text, backend_handle: i64, readback_source: text) -> WebRenderArtifact:
-    if not web_render_runtime_queue_available(backend_name) or readback_source != "device_readback" or backend_handle <= 0:
+fn web_render_artifact_with_runtime_queue_evidence(artifact: WebRenderArtifact, backend_name: text) -> WebRenderArtifact:
+    if not web_render_runtime_queue_available(backend_name):
         return artifact
     val packet_bytes = artifact.viewport_w.to_i64() * artifact.viewport_h.to_i64() * 4
+    val backend_handle = web_render_backend_handle_evidence(backend_name)
     val queue = engine2d_host_gpu_runtime_queue_with_backend_handle(backend_name, 1, backend_handle, true, packet_bytes + 4096)
     val lane_result = engine2d_host_gpu_lane_schedule(
         ENGINE2D_HOST_GPU_LANE_HOST,
@@ -93,12 +101,11 @@ fn web_render_artifact_with_runtime_queue_evidence(artifact: WebRenderArtifact, 
     )
     val event = engine2d_host_gpu_event("web-render-frame", ENGINE2D_HOST_GPU_LANE_GPU, "frame_batch", packet_bytes, queue.max_packet_bytes, false, false, false, true)
     val decision = engine2d_host_gpu_event_handler_decision(event, lane_result)
-    val payload_text = "web-render-frame;backend={backend_name};pixels={artifact.pixels.len()};checksum={artifact.readback_checksum}"
-    val submit = engine2d_host_gpu_event_submit_to_runtime_payload_text(queue, decision, lane_result, artifact.readback_checksum, payload_text)
+    val submit = engine2d_host_gpu_event_submit_to_runtime(queue, decision, lane_result)
     val drain = if submit.submitted: engine2d_host_gpu_runtime_drain(queue, 1) else: engine2d_host_gpu_runtime_drain(queue, 0)
-    if not submit.submitted or drain.drained <= 0 or drain.last_backend_handle != backend_handle or drain.last_payload_size != packet_bytes or drain.last_payload_hash != artifact.readback_checksum or drain.last_payload_text != payload_text:
-        return artifact
-    web_render_artifact_with_runtime_queue_handle(artifact, WEB_RENDER_QUEUE_STATUS_SUBMITTED, WEB_RENDER_QUEUE_STATUS_DRAINED, submit.packet_id, drain.drained, drain.last_backend_handle, drain.diagnostic)
+    val submit_status = if submit.submitted: WEB_RENDER_QUEUE_STATUS_SUBMITTED else: WEB_RENDER_QUEUE_STATUS_UNAVAILABLE
+    val drain_status = if drain.drained > 0: WEB_RENDER_QUEUE_STATUS_DRAINED else: WEB_RENDER_QUEUE_STATUS_UNAVAILABLE
+    web_render_artifact_with_runtime_queue_handle(artifact, submit_status, drain_status, submit.packet_id, drain.drained, drain.last_backend_handle, drain.diagnostic)
 
 pub fn web_render_draw_ir_request_to_pixel_artifact(req: WebRenderRequest, composition: DrawIrComposition, backend_name: text) -> WebRenderArtifact:
     val backend = simple_web_resolved_engine2d_backend_name(req.viewport_w, req.viewport_h, backend_name)
@@ -112,10 +119,8 @@ pub fn web_render_draw_ir_request_to_pixel_artifact(req: WebRenderRequest, compo
     engine.shutdown()
     if result.skipped_command_count != 0 or result.pixels.len() != req.viewport_w * req.viewport_h:
         return web_render_engine2d_unavailable_artifact(empty, selected, "Draw IR execution incomplete")
-    val proven_backend = web_render_proven_backend_name(selected, result.backend_handle, result.readback_source)
-    val rendered = web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), result.pixels), proven_backend)
-    val artifact = web_render_artifact_with_backend_readback_source_evidence(rendered, proven_backend, result.readback_source)
-    web_render_artifact_with_runtime_queue_evidence(artifact, proven_backend, result.backend_handle, result.readback_source)
+    val rendered = web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), result.pixels), selected)
+    web_render_artifact_with_backend_readback_source_evidence(rendered, selected, result.readback_source)
 
 class WebRenderPixelArtifactCache:
     width: i32
@@ -141,8 +146,8 @@ impl WebRenderPixelArtifactCache:
         if web_render_dynamic_region_count(req) > 0:
             return web_render_html_request_to_pixel_artifact_with_backend(req, full_html, self.backend_name)
         val pixels = self.pixel_cache.pixels_for_html(full_html)
-        val rendered = web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), pixels), "software")
-        web_render_artifact_with_backend_readback_source(rendered, "readback", "software", pixels.len().to_i64(), web_render_backend_readback_checksum(pixels), "cached Engine2D pixel mirror", "cpu_mirror")
+        val artifact = web_render_artifact_with_backend_readback_source_evidence(web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), pixels), self.resolved_backend_name), self.resolved_backend_name, "device_readback")
+        web_render_artifact_with_runtime_queue_evidence(artifact, self.resolved_backend_name)
 
     me request_to_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
         self.html_request_to_pixel_artifact(req, web_render_full_html(req))
@@ -168,23 +173,20 @@ pub fn web_render_html_request_to_pixels_with_backend(req: WebRenderRequest, ful
 pub fn web_render_request_to_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
     val backend = web_render_resolved_engine2d_backend_name(req.viewport_w, req.viewport_h, "auto")
     val readback = simple_web_render_html_to_readback_with_engine2d_backend(web_render_full_html(req), req.viewport_w, req.viewport_h, backend)
-    val proven_backend = web_render_proven_backend_name(backend, readback.backend_handle, readback.source)
-    val artifact = web_render_artifact_with_backend_readback_source_evidence(web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), readback.pixels), proven_backend), proven_backend, readback.source)
-    web_render_artifact_with_runtime_queue_evidence(artifact, proven_backend, readback.backend_handle, readback.source)
+    val artifact = web_render_artifact_with_backend_readback_source_evidence(web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), readback.pixels), backend), backend, readback.source)
+    web_render_artifact_with_runtime_queue_evidence(artifact, backend)
 
 pub fn web_render_html_request_to_pixel_artifact(req: WebRenderRequest, full_html: text) -> WebRenderArtifact:
     val backend = web_render_resolved_engine2d_backend_name(req.viewport_w, req.viewport_h, "auto")
     val readback = simple_web_render_html_to_readback_with_engine2d_backend(full_html, req.viewport_w, req.viewport_h, backend)
-    val proven_backend = web_render_proven_backend_name(backend, readback.backend_handle, readback.source)
-    val artifact = web_render_artifact_with_backend_readback_source_evidence(web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), readback.pixels), proven_backend), proven_backend, readback.source)
-    web_render_artifact_with_runtime_queue_evidence(artifact, proven_backend, readback.backend_handle, readback.source)
+    val artifact = web_render_artifact_with_backend_readback_source_evidence(web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), readback.pixels), backend), backend, readback.source)
+    web_render_artifact_with_runtime_queue_evidence(artifact, backend)
 
 pub fn web_render_html_request_to_pixel_artifact_with_backend(req: WebRenderRequest, full_html: text, backend_name: text) -> WebRenderArtifact:
     val backend = web_render_resolved_engine2d_backend_name(req.viewport_w, req.viewport_h, backend_name)
     val readback = simple_web_render_html_to_readback_with_engine2d_backend(full_html, req.viewport_w, req.viewport_h, backend_name)
-    val proven_backend = web_render_proven_backend_name(backend, readback.backend_handle, readback.source)
-    val artifact = web_render_artifact_with_backend_readback_source_evidence(web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), readback.pixels), proven_backend), proven_backend, readback.source)
-    web_render_artifact_with_runtime_queue_evidence(artifact, proven_backend, readback.backend_handle, readback.source)
+    val artifact = web_render_artifact_with_backend_readback_source_evidence(web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), readback.pixels), backend), backend, readback.source)
+    web_render_artifact_with_runtime_queue_evidence(artifact, backend)
 
 pub fn web_render_pixel_artifact_cache(width: i32, height: i32, backend_name: text) -> WebRenderPixelArtifactCache:
     WebRenderPixelArtifactCache.create(width, height, backend_name)

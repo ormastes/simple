@@ -329,10 +329,23 @@ pub struct MirModule {
     /// in the codegen to initialize with the function's import address.
     pub extern_fn_names: std::collections::HashSet<String>,
     /// Vtable impl records: one entry per `impl Trait for Struct` in this module.
-    /// Each entry is (struct_type_id, struct_name, vtable_symbol, method_fn_names_in_slot_order).
+    /// Each entry is (struct_type_id, struct_name, vtable_symbol, method_fns_by_slot).
     /// vtable_symbol = "__vtable__StructName__for__TraitName"
-    /// method_fn_names_in_slot_order = function names ordered by vtable slot index.
-    pub vtable_impls: Vec<(crate::hir::TypeId, String, String, Vec<String>)>,
+    /// method_fns_by_slot is INDEXED BY THE TRAIT'S CANONICAL VTABLE SLOT NUMBER
+    /// (index i = slot i), sized `max_implemented_slot + 1` — NOT compacted to
+    /// only the methods this impl actually provides. A trait method the impl
+    /// doesn't override (e.g. an unoverridden default method) leaves `None` at
+    /// its slot rather than shifting every later slot down. Compacting here
+    /// silently desynced this vector's index from the `vtable_slot` that
+    /// dispatch call sites compute independently (from the trait's OWN
+    /// declaration order), so a later trait method's dispatch would read past
+    /// the end of a too-short vtable blob — out-of-bounds garbage read as a
+    /// function pointer (bug simpleos_native_build_entry_closure_codegen_defects
+    /// C8 investigation, 2026-07-17: confirmed via cranelift JIT execution,
+    /// not just static analysis — a struct implementing methods at trait
+    /// slots {0, 2} produced a 2-slot/16-byte blob that dispatch's slot-2
+    /// (16-byte-offset) load read one slot past the end of).
+    pub vtable_impls: Vec<(crate::hir::TypeId, String, String, Vec<Option<String>>)>,
 }
 
 impl MirModule {

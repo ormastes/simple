@@ -10,8 +10,46 @@ use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 fn collect_files(path: text, config: DuplicationConfig) -> [text]:
     collect_detector_files(path, config)
 
-fn sample_blocks_for_similarity(all_blocks: [DuplicateBlock], _config: DuplicationConfig) -> [DuplicateBlock]:
-    all_blocks
+fn sample_blocks_for_similarity(all_blocks: [DuplicateBlock], config: DuplicationConfig) -> [DuplicateBlock]:
+    # Outer safety net only — the real pruning now happens via the shared
+    # signature-token inverted index in build_similarity_adjacency (bucket by
+    # shared vocabulary, only cosine-score within-bucket pairs), not by
+    # capping the candidate pool to an arbitrary small N.
+    val max_blocks_to_analyze = 320
+    var blocks_to_analyze = all_blocks
+    if all_blocks.len() > max_blocks_to_analyze:
+        log_progress(config, "WARNING: Too many blocks ({all_blocks.len()}), sampling {max_blocks_to_analyze} across files")
+        # Sample blocks distributed across files instead of taking first N
+        # Group blocks by file, then round-robin pick from each file
+        var file_blocks = {}
+        for block in all_blocks:
+            if file_blocks.has(block.file):
+                var grouped = file_blocks[block.file]
+                grouped.push(block)
+                file_blocks[block.file] = grouped
+            else:
+                file_blocks[block.file] = [block]
+
+        val file_keys = file_blocks.keys()
+        var limited = []
+        var round = 0
+        var done = false
+        while not done:
+            var added_any = false
+            for fk in file_keys:
+                val fblocks = file_blocks[fk]
+                if round < fblocks.len():
+                    limited.push(fblocks[round])
+                    added_any = true
+                    if limited.len() >= max_blocks_to_analyze:
+                        done = true
+                        break
+            if not added_any:
+                done = true
+            round = round + 1
+        blocks_to_analyze = limited
+        log_verbose(config, "  Sampled from {file_keys.len()} files")
+    blocks_to_analyze
 
 fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> SimilarityPrep:
     log_progress(config, "Pre-computing features for {blocks_to_analyze.len()} blocks...")

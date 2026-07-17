@@ -1,14 +1,38 @@
-# Test daemon CLI — one protocol and one full daemon owner.
+# Lightweight test daemon CLI entrypoint.
 
 use std.sffi.cli.{cli_get_args}
-use std.daemon_sdk.lock.{is_daemon_running}
-use app.test_daemon.client.{
-    test_daemon_ensure_responsive, test_submit_and_wait,
-    test_daemon_status, test_daemon_stop
-}
-use app.test_daemon.types.{test_daemon_config_default, TRESP_COMPLETED, TRESP_CACHED}
+use app.io.process_ops.{process_run, process_run_timeout}
 
+extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_rename(from: text, to: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_sleep_ms(ms: i64)
+extern fn rt_time_now_unix_micros() -> i64
+
+# Atomic write: tmp + rename. Plain rt_file_write_text does open(create,
+# truncate) then write() as two separate steps, so a concurrent reader that
+# lists the directory and opens the file between those steps can observe a
+# 0-byte (or partially written) file. The daemon's poll loop lists+reads
+# request files this way, so a non-atomic write here races with it and the
+# daemon can misread an in-flight request as empty ("missing test path"),
+# consuming and discarding the real request (#98).
+fn atomic_write_text(path: text, content: text) -> bool:
+    val tmp_path = "{path}.tmp"
+    if rt_file_write_text(tmp_path, content):
+        if rt_file_rename(tmp_path, path):
+            return true
+        rt_file_delete(tmp_path)
+    rt_file_write_text(path, content)
+
+val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
+val LIGHT_REQ_DIR: text = ".build/test_daemon_light/requests"
+val LIGHT_RESP_DIR: text = ".build/test_daemon_light/responses"
+val LIGHT_LOCK: text = ".build/test_daemon_light/daemon.lock"
+val LIGHT_STOP: text = ".build/test_daemon_light/stop"
 
 fn test_daemon_args() -> [text]:
     val raw = cli_get_args()
@@ -30,15 +54,126 @@ fn test_daemon_args() -> [text]:
         if raw[i].ends_with("/app/test_daemon/main.spl") or raw[i] == "src/app/test_daemon/main.spl":
             start_idx = i + 1
         i = i + 1
-    raw[start_idx:]
+
+    i = start_idx
+    while i < raw.len():
+        args.push(raw[i])
+        i = i + 1
+    args
 
 fn print_usage():
     print "Usage:"
-    print "  simple test-daemon start"
-    print "  simple test-daemon stop"
-    print "  simple test-daemon status"
-    print "  simple test-daemon run <path>"
-    print "  simple test-daemon clean <path>"
+    print "  simple test-daemon start       Start lightweight test daemon"
+    print "  simple test-daemon stop        Stop lightweight test daemon"
+    print "  simple test-daemon status      Show lightweight daemon status"
+    print "  simple test-daemon run <path>  Run test via daemon"
+    print "  simple test-daemon clean <path> Force-run via daemon"
+
+fn simple_binary() -> text:
+    val raw = cli_get_args()
+    # Source-mode argv can begin with this file's own .spl path (when the seed
+    # interprets test_daemon/main.spl directly). It exists, but it is not
+    # executable; passing it to process_run(_timeout) produces a misleading
+    # permission-denied failure instead of running the test. Same fix as
+    # test_runner_single.spl's simple_binary().
+    if raw.len() > 0 and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and rt_file_exists(raw[0]):
+        return raw[0]
+    if rt_file_exists("src/compiler_rust/target/debug/simple"):
+        return "src/compiler_rust/target/debug/simple"
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    "./bin/simple"
+
+fn ensure_dirs():
+    rt_dir_create_all(LIGHT_DAEMON_DIR)
+    rt_dir_create_all(LIGHT_REQ_DIR)
+    rt_dir_create_all(LIGHT_RESP_DIR)
+
+fn daemon_pid() -> text:
+    if not rt_file_exists(LIGHT_LOCK):
+        return ""
+    val content = rt_file_read_text(LIGHT_LOCK) ?? ""
+    if content == "":
+        return ""
+    content.split("\n")[0].trim()
+
+fn daemon_lock_alive() -> bool:
+    val pid = daemon_pid()
+    if pid == "":
+        return false
+    val (_stdout, _stderr, code) = process_run_timeout(
+        "/bin/sh",
+        ["-c", "kill -0 {pid} 2>/dev/null"],
+        1000
+    )
+    code == 0
+
+fn ensure_daemon() -> bool:
+    ensure_dirs()
+    if daemon_lock_alive():
+        return true
+    rt_file_delete(LIGHT_LOCK)
+    rt_file_delete(LIGHT_STOP)
+    val binary = simple_binary()
+    val (_daemon_out, _daemon_err, daemon_code) = process_run(
+        "/bin/sh",
+        ["-c", "SIMPLE_EXECUTION_MODE=interpret {binary} run src/app/test_daemon/light_daemon.spl >/tmp/simple-test-daemon-light.log 2>&1 &"]
+    )
+    if daemon_code != 0:
+        rt_file_write_text("/tmp/simple-test-daemon-light.log", "failed to spawn light daemon: {daemon_code}\n")
+        return false
+    var waits = 0
+    while waits < 40:
+        if daemon_lock_alive():
+            return true
+        rt_sleep_ms(50)
+        waits = waits + 1
+    rt_file_write_text("/tmp/simple-test-daemon-light.log", "light daemon shell exited but did not create lock\n")
+    false
+
+fn cli_test_daemon_start() -> i64:
+    if not ensure_daemon():
+        print "Failed to start test daemon"
+        return 1
+    print "Test daemon running (pid: {daemon_pid()})"
+    0
+
+fn cli_test_daemon_stop() -> i64:
+    ensure_dirs()
+    if not daemon_lock_alive():
+        rt_file_delete(LIGHT_LOCK)
+        print "Test daemon: not running"
+        return 0
+    rt_file_write_text(LIGHT_STOP, "stop")
+    var waits = 0
+    while waits < 40:
+        if not daemon_lock_alive():
+            rt_file_delete(LIGHT_LOCK)
+            print "Test daemon stopped"
+            return 0
+        rt_sleep_ms(50)
+        waits = waits + 1
+    print "Failed to stop test daemon"
+    1
+
+fn cli_test_daemon_status() -> i64:
+    if daemon_lock_alive():
+        print "Test daemon: running (pid: {daemon_pid()})"
+        return 0
+    rt_file_delete(LIGHT_LOCK)
+    print "Test daemon: not running"
+    0
+
+fn print_response(content: text) -> i64:
+    val newline = content.find("\n") ?? -1
+    if newline < 0:
+        print content
+        return 1
+    val code = content[0:newline].trim().to_i64() ?? 1
+    val body = content[newline + 1:]
+    if body != "":
+        print body
+    code
 
 fn cli_test_daemon_run(args: [text], clean: bool) -> i64:
     if args.len() == 0:
@@ -48,50 +183,42 @@ fn cli_test_daemon_run(args: [text], clean: bool) -> i64:
     if not path.ends_with(".spl") or not rt_file_exists(path):
         print "error: test file not found: {path}"
         return 1
-    val result = test_submit_and_wait(path, test_daemon_config_default(), clean, 600000)
-    if result.output != "":
-        print result.output
-    if result.status == TRESP_COMPLETED or result.status == TRESP_CACHED: 0 else: 1
+    if not ensure_daemon():
+        print "Failed to start test daemon"
+        return 1
 
-fn cli_test_daemon(args: [text]) -> i64:
+    val id = "{rt_time_now_unix_micros()}-{rt_getpid()}.req"
+    val req_path = "{LIGHT_REQ_DIR}/{id}"
+    val resp_path = "{LIGHT_RESP_DIR}/{id}.resp"
+    rt_file_delete(resp_path)
+    atomic_write_text(req_path, path)
+    val deadline = rt_time_now_unix_micros() + 600000000
+    while rt_time_now_unix_micros() < deadline:
+        if rt_file_exists(resp_path):
+            val content = rt_file_read_text(resp_path) ?? ""
+            rt_file_delete(resp_path)
+            return print_response(content)
+        rt_sleep_ms(100)
+    print "ERROR: test daemon timed out: {path}"
+    1
+
+fn main() -> i64:
+    val args = test_daemon_args()
     if args.len() == 0:
         print_usage()
         return 1
 
-    val config = test_daemon_config_default()
     val subcmd = args[0]
     if subcmd == "start":
-        if test_daemon_ensure_responsive(config):
-            print "Test daemon: running"
-            return 0
-        print "Failed to start test daemon"
-        return 1
-    if subcmd == "stop":
-        if not is_daemon_running(config.daemon.lock_path):
-            print "Test daemon: not running"
-            return 0
-        if test_daemon_stop(config):
-            print "Test daemon stopped"
-            return 0
-        print "Failed to stop test daemon"
-        return 1
-    if subcmd == "status":
-        if not is_daemon_running(config.daemon.lock_path):
-            print "Test daemon: not running"
-            return 0
-        val status = test_daemon_status(config)
-        if status.status == TRESP_COMPLETED:
-            print "Test daemon: running"
-            return 0
-        print "Test daemon: unresponsive"
-        return 1
-    if subcmd == "run":
+        return cli_test_daemon_start()
+    elif subcmd == "stop":
+        return cli_test_daemon_stop()
+    elif subcmd == "status":
+        return cli_test_daemon_status()
+    elif subcmd == "run":
         return cli_test_daemon_run(args[1:], false)
-    if subcmd == "clean":
+    elif subcmd == "clean":
         return cli_test_daemon_run(args[1:], true)
 
     print "Unknown test-daemon subcommand: {subcmd}"
     1
-
-fn main() -> i64:
-    cli_test_daemon(test_daemon_args())

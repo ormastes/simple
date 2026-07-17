@@ -1,89 +1,9 @@
 # Stage4 final object symbol-closure derivation.
 
-fn stage4_sorted_text(values: [text]) -> [text]:
-    # The deployed seed's built-in text-array sorting is a no-op.
-    var sorted: [text] = []
-    for value in values:
-        var inserted = false
-        var next: [text] = []
-        for current in sorted:
-            if not inserted and value < current:
-                next = next.push(value)
-                inserted = true
-            next = next.push(current)
-        if not inserted:
-            next = next.push(value)
-        sorted = next
-    sorted
-
 fn stage4_canonical_host_symbol(name: text, macho_prefixes: bool) -> text:
     if macho_prefixes and (name.starts_with("_rt_") or name.starts_with("_spl_")):
         return name.substring(1)
     name
-
-fn stage4_dynload_provider_symbol(name: text, object_format: text) -> text:
-    var symbol = name
-    if object_format == "macho" and symbol.starts_with("_"):
-        symbol = symbol.substring(1)
-    elif object_format == "coff-msvc" or object_format == "coff-mingw":
-        var imported = false
-        if symbol.starts_with("__imp_"):
-            imported = true
-            symbol = symbol.substring(6)
-        if symbol.starts_with("_"):
-            symbol = symbol.substring(1)
-        val decoration = symbol.last_index_of("@") ?? -1
-        val known_stdcall_import = symbol == "LoadLibraryA@4" or symbol == "GetProcAddress@8" or symbol == "FreeLibrary@4"
-        if imported and known_stdcall_import:
-            symbol = symbol.substring(0, decoration)
-    symbol
-
-pub fn stage4_dynload_provider_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
-    """Return the target/linker-specific archive name without building or selecting it."""
-    if target_os_name == "windows":
-        if msvc_linker:
-            return Ok("simple_stage4_dynload.lib")
-        return Ok("libsimple_stage4_dynload.a")
-    if msvc_linker:
-        return Err("Stage4 MSVC dynamic-loader archives require a Windows target")
-    if target_os_name == "linux" or target_os_name == "macos" or target_os_name == "freebsd":
-        return Ok("libsimple_stage4_dynload.a")
-    Err("Stage4 dynamic-loader provider has no archive policy for target OS '" + target_os_name + "'")
-
-pub fn stage4_validate_dynload_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
-    """Validate the exact dedicated dynamic-loader ABI from a portable nm scan."""
-    if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
-        return Err("Unsupported Stage4 dynamic-loader object format '" + object_format + "'")
-
-    var definitions: Dict<text, bool> = {}
-    var undefined: Dict<text, bool> = {}
-    for line in nm_output.split("\n"):
-        val parts = line.split_whitespace()
-        if parts.len() < 2:
-            continue
-        val type_index = parts.len() - 2
-        val type_code = parts[type_index]
-        val raw_symbol = parts[parts.len() - 1]
-        if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
-            continue
-        val symbol = stage4_dynload_provider_symbol(raw_symbol, object_format)
-        if type_code == "U":
-            if undefined.has(symbol):
-                return Err("Stage4 dynamic-loader provider repeats undefined symbol '" + symbol + "'")
-            undefined[symbol] = true
-        elif stage4_nm_has_address(parts, type_index):
-            if definitions.has(symbol):
-                return Err("Stage4 dynamic-loader provider repeats global definition '" + symbol + "'")
-            definitions[symbol] = true
-
-    if definitions.len() != 3 or not definitions.has("spl_dlclose") or not definitions.has("spl_dlopen") or not definitions.has("spl_dlsym"):
-        return Err("Stage4 dynamic-loader provider definitions differ from the exact ABI: " + definitions.keys().join(", "))
-    if object_format == "coff-msvc" or object_format == "coff-mingw":
-        if undefined.len() != 4 or not undefined.has("FreeLibrary") or not undefined.has("GetProcAddress") or not undefined.has("LoadLibraryA") or not undefined.has("rt_interp_cstr"):
-            return Err("Stage4 dynamic-loader provider undefined symbols differ from the Windows contract: " + undefined.keys().join(", "))
-    elif undefined.len() != 4 or not undefined.has("dlclose") or not undefined.has("dlopen") or not undefined.has("dlsym") or not undefined.has("rt_interp_cstr"):
-        return Err("Stage4 dynamic-loader provider undefined symbols differ from the Unix contract: " + undefined.keys().join(", "))
-    Ok(())
 
 fn stage4_nm_has_address(parts: [text], type_index: i64) -> bool:
     if type_index <= 0:
@@ -128,7 +48,8 @@ pub fn stage4_requested_from_nm_output(nm_output: text, macho_prefixes: bool) ->
     for symbol in undefined.keys():
         if not defined.has(symbol):
             requested = requested.push(symbol)
-    stage4_sorted_text(requested)
+    requested.sort()
+    requested
 
 fn stage4_global_definitions_from_nm_output(nm_output: text, macho_prefixes: bool, owner: text) -> Result<[text], text>:
     var seen: Dict<text, bool> = {}
@@ -148,9 +69,10 @@ fn stage4_global_definitions_from_nm_output(nm_output: text, macho_prefixes: boo
         definitions = definitions.push(symbol)
     if definitions.len() == 0:
         return Err("Stage4 archive '" + owner + "' has no global definitions")
-    Ok(stage4_sorted_text(definitions))
+    definitions.sort()
+    Ok(definitions)
 
-pub fn stage4_validate_candidate_archive_inputs_for_platform(archive_labels: [text], archive_paths: [text], windows_paths: bool) -> Result<(), text>:
+pub fn stage4_validate_candidate_archive_inputs(archive_labels: [text], archive_paths: [text]) -> Result<(), text>:
     """Validate the strict Stage4 candidate archive identity inputs."""
     if archive_labels.len() == 0 or archive_labels.len() != archive_paths.len():
         return Err("Stage4 archive labels and paths must be non-empty and have equal length")
@@ -170,7 +92,8 @@ pub fn stage4_validate_candidate_archive_inputs_for_platform(archive_labels: [te
         # unparenthesized multi-line booleans do not parse under the deployed
         # seed (known runtime limitation) — keep single-line forms here.
         var path_key = path
-        if windows_paths:
+        val windows_path = path.contains("\\") or (path.len() >= 2 and path[1:2] == ":")
+        if file_name.ends_with(".lib") or windows_path:
             path_key = path.replace("\\", "/").lower()
         if labels_seen.has(label):
             return Err("Stage4 archive label '" + label + "' is repeated")
@@ -183,9 +106,6 @@ pub fn stage4_validate_candidate_archive_inputs_for_platform(archive_labels: [te
         paths_seen[path_key] = true
         i = i + 1
     Ok(())
-
-pub fn stage4_validate_candidate_archive_inputs(archive_labels: [text], archive_paths: [text]) -> Result<(), text>:
-    stage4_validate_candidate_archive_inputs_for_platform(archive_labels, archive_paths, false)
 
 pub fn stage4_forbidden_archive_sections(section_headers: text) -> [text]:
     """Return initializer/finalizer section families forbidden in Stage4 providers."""
@@ -271,7 +191,8 @@ pub fn stage4_resolve_requested_archive_owners(requested: [text], archive_labels
         if selected_by_index.has(archive_i):
             selected = selected.push(archive_i)
         archive_i = archive_i + 1
-    Ok((selected, stage4_sorted_text(owner_rows)))
+    owner_rows.sort()
+    Ok((selected, owner_rows))
 
 pub fn stage4_select_requested_archive_indices(requested: [text], archive_labels: [text], archive_nm_outputs: [text], macho_prefixes: bool) -> Result<[i64], text>:
     """Validate unique symbol ownership and return selected archives in declared order."""
@@ -293,7 +214,8 @@ fn stage4_canonical_fingerprint_rows(group: text, rows: [text]) -> Result<[text]
             return Err("Stage4 link profile " + group + " repeats name '" + name + "'")
         names[name] = true
         canonical = canonical.push(row)
-    Ok(stage4_sorted_text(canonical))
+    canonical.sort()
+    Ok(canonical)
 
 pub fn stage4_link_profile_fingerprint_input(target: text, backend: text, link_options: text, compiler_hash: text, source_hash_rows: [text], archive_hash_rows: [text], owner_rows: [text]) -> Result<text, text>:
     """Return the versioned canonical input for a separate Stage4 link-profile hash."""

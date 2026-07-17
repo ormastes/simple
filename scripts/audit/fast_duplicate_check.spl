@@ -3,7 +3,7 @@
 # gate keeps its ~24ms cold start.
 
 use std.nogc_sync_mut.io.file_ops.{file_read_text}
-use std.nogc_sync_mut.io.dir_ops.{dir_walk_native}
+use std.nogc_sync_mut.io.process_ops.{process_run}
 use std.nogc_sync_mut.sffi.cli.{cli_get_args, cli_exit}
 
 struct FastDupConfig:
@@ -21,6 +21,9 @@ struct FastDupBlock:
 struct FastDupBucket:
     key: text
     blocks: [FastDupBlock]
+
+fn shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\"'\"'") + "'"
 
 fn basename(path: text) -> text:
     var idx = path.len() - 1
@@ -125,40 +128,53 @@ fn collect_files(config: FastDupConfig) -> [text]:
             return []
         return [config.path]
 
+    val command = "find " + shell_quote(config.path) + " -name '*.spl' 2>/dev/null | sort"
+    val result = process_run("/bin/sh", ["-c", command])
     var files: [text] = []
-    for path in dir_walk_native(config.path):
-        if path.ends_with(".spl") and not excluded(path, config.excludes):
+    if result.2 != 0:
+        return files
+    for raw in result.0.split("\n"):
+        val path = raw.trim()
+        if path != "" and not excluded(path, config.excludes):
             files = files.push(path)
-    files.sort()
     files
 
 fn has_signal(window: text) -> bool:
-    for line in window.split("\n"):
-        val stripped = line.trim()
-        if stripped.starts_with("#"):
-            continue
-        if stripped.starts_with("fn ") or stripped.starts_with("me ") or
-            stripped.starts_with("if ") or stripped.starts_with("elif ") or
-            stripped.starts_with("while ") or stripped.starts_with("for ") or
-            stripped.starts_with("match ") or stripped.starts_with("return") or
-            stripped.starts_with("val ") or stripped.starts_with("var ") or
-            stripped.starts_with("class ") or stripped.starts_with("struct ") or
-            stripped.starts_with("enum "):
-            return true
-    false
+    val stripped = window.trim()
+    if stripped == "":
+        return false
+    stripped.contains("fn ") or stripped.contains("if ") or stripped.contains("while ") or
+        stripped.contains("for ") or stripped.contains("match") or stripped.contains("return") or
+        stripped.contains("val ") or stripped.contains("var ")
 
 fn window_key(lines: [text], start: i64, min_lines: i64) -> text:
     var parts: [text] = []
     var idx = start
     while idx < start + min_lines:
-        # Indentation is semantic in Simple, so exact-mode keys retain it.
-        parts = parts.push(lines[idx])
+        parts = parts.push(lines[idx].trim())
         idx = idx + 1
     parts.join("\n")
 
+fn bucket_index(buckets: [FastDupBucket], key: text) -> i64:
+    var idx = 0
+    while idx < buckets.len():
+        if buckets[idx].key == key:
+            return idx
+        idx = idx + 1
+    -1
+
+fn add_block(buckets: [FastDupBucket], key: text, block: FastDupBlock) -> [FastDupBucket]:
+    val idx = bucket_index(buckets, key)
+    if idx < 0:
+        return buckets.push(FastDupBucket(key: key, blocks: [block]))
+    var updated = buckets
+    var bucket = updated[idx]
+    bucket.blocks = bucket.blocks.push(block)
+    updated[idx] = bucket
+    updated
+
 fn find_duplicate_buckets(files: [text], min_lines: i64) -> [FastDupBucket]:
     var buckets: [FastDupBucket] = []
-    var bucket_by_key: {text: i64} = {}
     for path in files:
         val source = file_read_text(path)
         val lines = source.split("\n")
@@ -168,52 +184,9 @@ fn find_duplicate_buckets(files: [text], min_lines: i64) -> [FastDupBucket]:
         while start <= lines.len() - min_lines:
             val key = window_key(lines, start, min_lines)
             if has_signal(key):
-                val block = FastDupBlock(file: path, line_start: start + 1, line_end: start + min_lines)
-                if bucket_by_key.has(key):
-                    val idx = bucket_by_key[key]
-                    var bucket = buckets[idx]
-                    bucket.blocks = bucket.blocks.push(block)
-                    buckets[idx] = bucket
-                else:
-                    bucket_by_key[key] = buckets.len()
-                    buckets = buckets.push(FastDupBucket(key: key, blocks: [block]))
+                buckets = add_block(buckets, key, FastDupBlock(file: path, line_start: start + 1, line_end: start + min_lines))
             start = start + 1
-    collapse_shifted_duplicate_buckets(buckets, min_lines)
-
-fn shifted_bucket_continues(previous: FastDupBucket, current: FastDupBucket, min_lines: i64) -> bool:
-    if previous.blocks.len() < 2 or previous.blocks.len() != current.blocks.len():
-        return false
-    var i = 0
-    while i < previous.blocks.len():
-        val before = previous.blocks[i]
-        val after = current.blocks[i]
-        if before.file != after.file or after.line_start != before.line_end - min_lines + 2:
-            return false
-        i = i + 1
-    true
-
-fn merge_shifted_buckets(previous: FastDupBucket, current: FastDupBucket) -> FastDupBucket:
-    var blocks: [FastDupBlock] = []
-    var i = 0
-    while i < previous.blocks.len():
-        blocks.push(FastDupBlock(
-            file: previous.blocks[i].file,
-            line_start: previous.blocks[i].line_start,
-            line_end: current.blocks[i].line_end
-        ))
-        i = i + 1
-    FastDupBucket(key: previous.key, blocks: blocks)
-
-fn collapse_shifted_duplicate_buckets(buckets: [FastDupBucket], min_lines: i64) -> [FastDupBucket]:
-    var collapsed: [FastDupBucket] = []
-    for bucket in buckets:
-        if bucket.blocks.len() < 2:
-            continue
-        if collapsed.len() > 0 and shifted_bucket_continues(collapsed[collapsed.len() - 1], bucket, min_lines):
-            collapsed[collapsed.len() - 1] = merge_shifted_buckets(collapsed[collapsed.len() - 1], bucket)
-        else:
-            collapsed.push(bucket)
-    collapsed
+    buckets
 
 fn duplicate_count(buckets: [FastDupBucket]) -> i64:
     var count = 0
@@ -226,16 +199,11 @@ fn duplicate_total_lines(buckets: [FastDupBucket], min_lines: i64) -> i64:
     var total = 0
     for bucket in buckets:
         if bucket.blocks.len() >= 2:
-            total = total + bucket.blocks.len() * bucket_line_count(bucket, min_lines)
+            total = total + bucket.blocks.len() * min_lines
     total
 
 fn impact_score(bucket: FastDupBucket, min_lines: i64) -> i64:
-    bucket.blocks.len() * bucket.blocks.len() * bucket_line_count(bucket, min_lines)
-
-fn bucket_line_count(bucket: FastDupBucket, fallback: i64) -> i64:
-    if bucket.blocks.len() == 0:
-        return fallback
-    bucket.blocks[0].line_end - bucket.blocks[0].line_start + 1
+    bucket.blocks.len() * bucket.blocks.len() * min_lines
 
 fn best_unprinted_bucket(buckets: [FastDupBucket], printed: [bool], min_lines: i64) -> i64:
     var best = -1
@@ -271,8 +239,7 @@ fn print_text_report(buckets: [FastDupBucket], file_count: i64, min_lines: i64):
             break
         printed[idx] = true
         val bucket = buckets[idx]
-        val lines_each = bucket_line_count(bucket, min_lines)
-        print(group_num.to_string() + ". Impact Score: " + impact_score(bucket, min_lines).to_string() + " (" + bucket.blocks.len().to_string() + " occurrences, " + lines_each.to_string() + " lines each)")
+        print(group_num.to_string() + ". Impact Score: " + impact_score(bucket, min_lines).to_string() + " (" + bucket.blocks.len().to_string() + " occurrences, " + min_lines.to_string() + " lines each)")
         print("   Files:")
         for block in bucket.blocks:
             print("   - " + block.file + ":" + block.line_start.to_string() + "-" + block.line_end.to_string())
@@ -295,8 +262,7 @@ fn print_json_report(buckets: [FastDupBucket], file_count: i64, min_lines: i64):
         if not first_group:
             print(",")
         first_group = false
-        val lines_each = bucket_line_count(bucket, min_lines)
-        print("    {\"occurrences\": " + bucket.blocks.len().to_string() + ", \"lines_each\": " + lines_each.to_string() + ", \"total_lines\": " + (bucket.blocks.len() * lines_each).to_string() + ", \"impact_score\": " + impact_score(bucket, min_lines).to_string() + ", \"blocks\": [")
+        print("    {\"occurrences\": " + bucket.blocks.len().to_string() + ", \"lines_each\": " + min_lines.to_string() + ", \"total_lines\": " + (bucket.blocks.len() * min_lines).to_string() + ", \"impact_score\": " + impact_score(bucket, min_lines).to_string() + ", \"blocks\": [")
         var first_block = true
         for block in bucket.blocks:
             if not first_block:

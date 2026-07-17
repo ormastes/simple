@@ -768,7 +768,7 @@ else
       SIMPLE_NO_DEPRECATED_WARNINGS=1 \
       "${stage2_bin}" native-build \
       --target "${PLATFORM}" \
-      --backend "${backend}" \
+      --backend cranelift \
       --source src/compiler --source src/app --source src/lib \
       --entry-closure \
       --threads 1 \
@@ -967,8 +967,6 @@ if [ "${build_mcp}" -eq 1 ]; then
       mcp_build_ok=0
       echo "  WARNING: ${mcp_name} produced a zero-byte file"
     else
-      printf '%s\n' "$(hash_file "${full_dir}/${mcp_name}${exe_suffix}")" \
-        >"${full_dir}/${mcp_name}${exe_suffix}.sha256"
       echo "  ${mcp_name}: ${full_dir}/${mcp_name}${exe_suffix}"
     fi
   done
@@ -1000,14 +998,41 @@ if [ "${deploy}" -eq 1 ]; then
   deploy_dir="bin/release/${PLATFORM}"
   mkdir -p "${deploy_dir}"
 
-  deployed_bin="${deploy_dir}/simple${exe_suffix}"
-  if ! deploy_simple_binary_atomically "${full_bin}" "${deployed_bin}"; then
-    echo "ERROR: atomic deployment candidate admission failed." >&2
+  # Deploy gate: never swap bin/simple to the self-hosted stage4 binary unless
+  # a working seed driver exists at the delegate path. Without it the stage4
+  # self-exec guard blocks `bin/simple test` host-wide (see
+  # doc/08_tracking/bug/stage4_deploy_no_seed_test_runner_blocked_2026-06-11.md).
+  seed_probe() {
+    [ -x "$1" ] || return 1
+    out="$(run_timeout 30 "$1" -c 'print(1+1)' 2>/dev/null)" || return 1
+    [ "${out}" = "2" ]
+  }
+  seed_delegate="${deploy_dir}/simple_seed${exe_suffix}"
+  seed_src="${full_dir}/simple_seed${exe_suffix}"
+  if ! seed_probe "${seed_src}"; then
+    echo "ERROR: deploy refused — current seed driver failed smoke test: ${seed_src}." >&2
     exit 1
   fi
+  install -m755 "${seed_src}" "${seed_delegate}"
+  echo "Installed current seed delegate: ${seed_src} -> ${seed_delegate}"
+
+  deployed_bin="${deploy_dir}/simple${exe_suffix}"
+  prev_bin="${deploy_dir}/simple${exe_suffix}.pre_deploy"
+  [ -x "${deployed_bin}" ] && cp "${deployed_bin}" "${prev_bin}"
+  install -m755 "${full_bin}" "${deployed_bin}"
   echo "Deployed full CLI binary to ${deployed_bin}"
-  # The admitted runtime is now live and self-contained.
-  rm -f "${deploy_dir}/simple_seed${exe_suffix}"
+
+  # Post-swap smoke: the deployed binary must evaluate code; restore on failure.
+  smoke_out="$(run_timeout 30 "${deployed_bin}" -c 'print(1+1)' 2>/dev/null)"
+  if [ "${smoke_out}" != "2" ]; then
+    echo "ERROR: deployed binary failed smoke test (-c 'print(1+1)' -> '${smoke_out}')." >&2
+    if [ -x "${prev_bin}" ]; then
+      mv "${prev_bin}" "${deployed_bin}"
+      echo "Restored previous binary to ${deployed_bin}" >&2
+    fi
+    exit 1
+  fi
+  rm -f "${prev_bin}"
   install -m755 "${ui_backend_bin}" "${deploy_dir}/simple_ui_backend${exe_suffix}"
   echo "Deployed cached UI backend to ${deploy_dir}/simple_ui_backend${exe_suffix}"
 
@@ -1015,12 +1040,7 @@ if [ "${deploy}" -eq 1 ]; then
   if [ "${build_mcp}" -eq 1 ] && [ "${mcp_build_ok}" -eq 1 ]; then
     for mcp_bin_name in simple_mcp_server simple_lsp_mcp_server; do
       if [ -x "${full_dir}/${mcp_bin_name}${exe_suffix}" ] && [ -s "${full_dir}/${mcp_bin_name}${exe_suffix}" ]; then
-        mcp_deploy_tmp="${deploy_dir}/.${mcp_bin_name}${exe_suffix}.deploy.$$"
-        mcp_hash_tmp="${deploy_dir}/.${mcp_bin_name}${exe_suffix}.sha256.deploy.$$"
-        install -m755 "${full_dir}/${mcp_bin_name}${exe_suffix}" "${mcp_deploy_tmp}"
-        install -m644 "${full_dir}/${mcp_bin_name}${exe_suffix}.sha256" "${mcp_hash_tmp}"
-        mv "${mcp_deploy_tmp}" "${deploy_dir}/${mcp_bin_name}${exe_suffix}"
-        mv "${mcp_hash_tmp}" "${deploy_dir}/${mcp_bin_name}${exe_suffix}.sha256"
+        install -m755 "${full_dir}/${mcp_bin_name}${exe_suffix}" "${deploy_dir}/${mcp_bin_name}${exe_suffix}"
         echo "Deployed ${mcp_bin_name} to ${deploy_dir}/${mcp_bin_name}${exe_suffix}"
       fi
     done

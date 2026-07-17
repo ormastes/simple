@@ -1413,8 +1413,11 @@ impl<'a> MirLowerer<'a> {
                 if let Some(ref trait_name) = hir_impl.trait_name {
                     if let Some(trait_info) = trait_infos.get(trait_name) {
                         let vtable_sym = format!("__vtable__{}__for__{}", hir_impl.type_name, trait_name);
-                        // Build method function names in vtable slot order
-                        let mut slot_fns: Vec<(u32, String)> = trait_info
+                        // Collect (canonical trait slot, implementing fn name) for
+                        // every trait method this impl actually overrides. Slots the
+                        // impl doesn't override (e.g. an unoverridden default method)
+                        // are simply absent here — do NOT compact them away below.
+                        let slot_fns: Vec<(u32, String)> = trait_info
                             .methods
                             .iter()
                             .filter_map(|(method_name, sig)| {
@@ -1424,8 +1427,28 @@ impl<'a> MirLowerer<'a> {
                                     .map(|fn_name| (sig.vtable_slot, fn_name.clone()))
                             })
                             .collect();
-                        slot_fns.sort_by_key(|(slot, _)| *slot);
-                        let method_fns: Vec<String> = slot_fns.into_iter().map(|(_, fn_name)| fn_name).collect();
+                        // Build a vector INDEXED BY CANONICAL SLOT NUMBER (index i ==
+                        // slot i), sized to the highest implemented slot + 1, with
+                        // `None` at any slot this impl doesn't override. This keeps
+                        // the vector's index space identical to the slot numbers
+                        // `find_trait_for_method_on_receiver` hands to dispatch call
+                        // sites — compacting to only-implemented-methods (the old
+                        // behavior) desynced the two, so a call dispatching a LATER
+                        // trait method than this impl's own count would read past the
+                        // end of a too-short vtable data blob (bug
+                        // simpleos_native_build_entry_closure_codegen_defects C8
+                        // investigation, 2026-07-17).
+                        let max_slot = slot_fns.iter().map(|(slot, _)| *slot).max();
+                        let method_fns: Vec<Option<String>> = match max_slot {
+                            Some(max_slot) => {
+                                let mut by_slot: Vec<Option<String>> = vec![None; (max_slot + 1) as usize];
+                                for (slot, fn_name) in slot_fns {
+                                    by_slot[slot as usize] = Some(fn_name);
+                                }
+                                by_slot
+                            }
+                            None => Vec::new(),
+                        };
                         module.vtable_impls.push((
                             hir_impl.type_id,
                             hir_impl.type_name.clone(),

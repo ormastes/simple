@@ -13,14 +13,15 @@ use app.test_daemon.{
     SESSION_KIND_CONTAINER, LEASE_IDLE, LEASE_ACTIVE,
     REUSE_EXCLUSIVE_REUSED, REUSE_FRESH_PER_TEST,
     RESET_RECREATE, RESET_SOFT, RESET_HARD,
-    TRESP_FAILED
+    TRESP_COMPLETED, TRESP_FAILED
 }
-use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new, test_result_from_child_output}
+use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
 use app.test_daemon.types.{TestResult}
-use app.io.mod.{process_run_timeout}
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_hash_text(s: text) -> i64
+extern fn rt_shell_exec(cmd: text) -> text
+extern fn rt_shell_exit_code() -> i64
 
 # ============================================================================
 # Container Adapter
@@ -30,17 +31,18 @@ class ContainerAdapter:
     base: SessionAdapter
     runtime: text          # "docker" or "podman"
     default_image: text    # e.g. "simple-test:latest"
+    resource_flags: text   # cgroup caps so a runaway `simple` can't OOM the host
 
 fn detect_container_runtime() -> text:
     """
     Detects which container runtime is available on the system.
     Prefers docker over podman. Returns "none" if neither is found.
     """
-    val (_docker_out, _docker_err, docker_code) = process_run_timeout("docker", ["--version"], 5000)
-    if docker_code == 0:
+    rt_shell_exec("docker --version 2>/dev/null")
+    if rt_shell_exit_code() == 0:
         return "docker"
-    val (_podman_out, _podman_err, podman_code) = process_run_timeout("podman", ["--version"], 5000)
-    if podman_code == 0:
+    rt_shell_exec("podman --version 2>/dev/null")
+    if rt_shell_exit_code() == 0:
         return "podman"
     "none"
 
@@ -49,20 +51,11 @@ fn container_adapter_new() -> ContainerAdapter:
     ContainerAdapter(
         base: session_adapter_new(SESSION_KIND_CONTAINER, "container"),
         runtime: runtime,
-        default_image: "simple-test:latest"
+        default_image: "simple-test:latest",
+        # --memory-swap == --memory disables swap, so a leaking `simple` is
+        # killed at the cap instead of thrashing host swap into a global OOM.
+        resource_flags: "--memory=4g --memory-swap=4g --pids-limit=512 --cpus=4.0"
     )
-
-fn container_image(target: text, fallback: text) -> text:
-    val separator = target.find(":")
-    if separator < 0: return fallback
-    target.slice(separator + 1, target.len())
-
-fn container_create_args(name: text, image: text) -> [text]:
-    [
-        "create", "--name", name,
-        "--memory=4g", "--memory-swap=4g", "--pids-limit=512", "--cpus=4.0",
-        "-v", ".:/workspace", "-w", "/workspace", image, "sleep", "infinity"
-    ]
 
 # ============================================================================
 # Impl
@@ -107,31 +100,44 @@ impl ContainerAdapter:
             return session_lease_new(desc.key)
 
         val image = desc.key.target
-        val session_id = desc.config["session_id"] ?? session_key_to_id(desc.key)
-        val container_name = session_id
+        val session_id = session_key_to_id(desc.key)
+        val container_name = "simple_test_{session_id}"
 
-        val actual_image = container_image(image, self.default_image)
-        val create_args = container_create_args(container_name, actual_image)
-        val (_create_out, _create_err, create_exit) = process_run_timeout(rt, create_args, 30000)
+        # Extract image from target (format: "runtime:image")
+        val actual_image = if image.contains(":"):
+            val parts = image.split(":")
+            # rejoin everything after the first colon (handles image:tag)
+            var img = ""
+            var i = 1
+            while i < parts.len():
+                if i > 1:
+                    img = "{img}:"
+                img = "{img}{parts[i]}"
+                i = i + 1
+            img
+        else:
+            self.default_image
+
+        # Build create command with volume mount for project
+        val create_cmd = "{rt} create --name {container_name} {self.resource_flags} -v .:/workspace -w /workspace {actual_image} sleep infinity"
+        rt_shell_exec(create_cmd)
+        val create_exit = rt_shell_exit_code()
 
         if create_exit != 0:
             # Container may already exist from a previous run — remove and retry
-            val _removed = process_run_timeout(rt, ["rm", "-f", container_name], 30000)
-            val (_retry_out, _retry_err, retry_exit) = process_run_timeout(rt, create_args, 30000)
-            if retry_exit != 0:
+            rt_shell_exec("{rt} rm -f {container_name} 2>/dev/null")
+            rt_shell_exec(create_cmd)
+            if rt_shell_exit_code() != 0:
                 return session_lease_new(desc.key)
 
         # Start the container
-        val (_start_out, _start_err, start_exit) = process_run_timeout(rt, ["start", container_name], 30000)
-        if start_exit != 0:
-            val _removed = process_run_timeout(rt, ["rm", "-f", container_name], 30000)
+        rt_shell_exec("{rt} start {container_name}")
+        if rt_shell_exit_code() != 0:
+            rt_shell_exec("{rt} rm -f {container_name} 2>/dev/null")
             return session_lease_new(desc.key)
 
         # Get container PID
-        val (pid_stdout, _pid_stderr, _pid_exit) = process_run_timeout(
-            rt, ["inspect", "--format={{{{.State.Pid}}}}", container_name], 30000
-        )
-        val pid_output = pid_stdout.trim()
+        val pid_output = rt_shell_exec("{rt} inspect --format='{{{{.State.Pid}}}}' {container_name} 2>/dev/null").trim()
         val pid = pid_output.to_i64() ?? 0
 
         val now = rt_time_now_unix_micros()
@@ -154,10 +160,7 @@ impl ContainerAdapter:
         val rt = self.runtime
         if rt == "none":
             return false
-        val (stdout, _stderr, _exit_code) = process_run_timeout(
-            rt, ["inspect", "--format={{{{.State.Running}}}}", lease.session_id], 10000
-        )
-        val output = stdout.trim()
+        val output = rt_shell_exec("{rt} inspect --format='{{{{.State.Running}}}}' {lease.session_id} 2>/dev/null").trim()
         output == "true"
 
     me reset(lease: SessionLease, policy: i64) -> bool:
@@ -172,26 +175,37 @@ impl ContainerAdapter:
 
         if policy == RESET_SOFT or policy == RESET_HARD:
             # Restart the running container
-            val (_stdout, _stderr, exit_code) = process_run_timeout(rt, ["restart", lease.session_id], 30000)
-            return exit_code == 0
+            rt_shell_exec("{rt} restart {lease.session_id}")
+            return rt_shell_exit_code() == 0
 
         if policy == RESET_RECREATE:
             # Full teardown and rebuild
-            val _removed = process_run_timeout(rt, ["rm", "-f", lease.session_id], 30000)
+            rt_shell_exec("{rt} rm -f {lease.session_id} 2>/dev/null")
 
             # Extract image from key target
             val image = lease.key.target
-            val actual_image = container_image(image, self.default_image)
+            val actual_image = if image.contains(":"):
+                val parts = image.split(":")
+                var img = ""
+                var i = 1
+                while i < parts.len():
+                    if i > 1:
+                        img = "{img}:"
+                    img = "{img}{parts[i]}"
+                    i = i + 1
+                img
+            else:
+                self.default_image
 
             # Recreate
-            val create_args = container_create_args(lease.session_id, actual_image)
-            val (_create_out, _create_err, create_exit) = process_run_timeout(rt, create_args, 30000)
-            if create_exit != 0:
+            val create_cmd = "{rt} create --name {lease.session_id} {self.resource_flags} -v .:/workspace -w /workspace {actual_image} sleep infinity"
+            rt_shell_exec(create_cmd)
+            if rt_shell_exit_code() != 0:
                 return false
 
             # Start
-            val (_start_out, _start_err, start_exit) = process_run_timeout(rt, ["start", lease.session_id], 30000)
-            return start_exit == 0
+            rt_shell_exec("{rt} start {lease.session_id}")
+            return rt_shell_exit_code() == 0
 
         false
 
@@ -215,17 +229,36 @@ impl ContainerAdapter:
                 cached: false
             )
 
-        val (stdout, stderr, exit_code) = process_run_timeout(
-            rt,
-            [
-                "exec", lease.session_id, "bin/simple", "test", test_path,
-                "--no-session-daemon", "--sequential"
-            ],
-            timeout_ms
-        )
+        # Build the exec command with timeout
+        val timeout_sec = timeout_ms / 1000
+        val exec_cmd = "{rt} exec {lease.session_id} timeout {timeout_sec} bin/simple test {test_path} --no-session-daemon --sequential"
+        val output = rt_shell_exec(exec_cmd)
+        val exit_code = rt_shell_exit_code()
         val end_time = rt_time_now_unix_micros()
         val duration_ms = (end_time - start_time) / 1000
-        test_result_from_child_output(test_path, stdout, stderr, exit_code as i64, duration_ms, timeout_ms)
+
+        if exit_code == 0:
+            TestResult(
+                test_path: test_path,
+                status: TRESP_COMPLETED,
+                passed: 1,
+                failed: 0,
+                skipped: 0,
+                duration_ms: duration_ms,
+                output: output,
+                cached: false
+            )
+        else:
+            TestResult(
+                test_path: test_path,
+                status: TRESP_FAILED,
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                duration_ms: duration_ms,
+                output: output,
+                cached: false
+            )
 
     me stop(lease: SessionLease) -> bool:
         """
@@ -234,5 +267,5 @@ impl ContainerAdapter:
         val rt = self.runtime
         if rt == "none":
             return false
-        val (_stdout, _stderr, exit_code) = process_run_timeout(rt, ["rm", "-f", lease.session_id], 30000)
-        exit_code == 0
+        rt_shell_exec("{rt} rm -f {lease.session_id} 2>/dev/null")
+        rt_shell_exit_code() == 0

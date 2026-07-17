@@ -123,20 +123,6 @@ pub fn rt_cranelift_new_aot_module(args: &[Value]) -> Result<Value, CompileError
     Ok(Value::Int(handle))
 }
 
-/// Create a new AOT module for an exact target triple.
-pub fn rt_cranelift_new_aot_module_triple(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 4 {
-        return Ok(Value::Int(0));
-    }
-    let name_ptr = value_to_i64(&args[0]);
-    let name_len = value_to_i64(&args[1]);
-    let target_ptr = value_to_i64(&args[2]);
-    let target_len = value_to_i64(&args[3]);
-    let handle =
-        unsafe { cranelift_sffi::rt_cranelift_new_aot_module_triple(name_ptr, name_len, target_ptr, target_len) };
-    Ok(Value::Int(handle))
-}
-
 /// Finalize module (JIT: compile; AOT: finalize)
 pub fn rt_cranelift_finalize_module(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
@@ -863,7 +849,7 @@ pub fn rt_write_file(args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{interpreter_cranelift_arg_handles, rt_cranelift_emit_object_raw, rt_cranelift_new_aot_module_triple};
+    use super::{interpreter_cranelift_arg_handles, rt_cranelift_emit_object_raw};
     use crate::value::Value;
 
     #[test]
@@ -883,17 +869,5 @@ mod tests {
     #[test]
     fn interpreter_cranelift_emit_object_raw_validates_arity() {
         assert_eq!(rt_cranelift_emit_object_raw(&[]).unwrap(), Value::Bool(false));
-    }
-
-    #[test]
-    fn interpreter_cranelift_aot_validates_arity() {
-        assert_eq!(
-            rt_cranelift_new_aot_module_triple(&[Value::Int(0), Value::Int(0), Value::Int(0)]).unwrap(),
-            Value::Int(0)
-        );
-        assert_eq!(
-            rt_cranelift_new_aot_module_triple(&[Value::Int(0), Value::Int(0), Value::Int(0), Value::Int(0),]).unwrap(),
-            Value::Int(0)
-        );
     }
 }

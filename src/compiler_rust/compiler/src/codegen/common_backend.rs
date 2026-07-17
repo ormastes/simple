@@ -1392,9 +1392,17 @@ impl<M: Module> CodegenBackend<M> {
     /// `compile_struct_init` can write the vtable_ptr at offset 0.
     fn emit_vtable_data_objects(
         &mut self,
-        vtable_impls: &[(crate::hir::TypeId, String, String, Vec<String>)],
+        vtable_impls: &[(crate::hir::TypeId, String, String, Vec<Option<String>>)],
     ) -> BackendResult<()> {
         for (struct_type_id, struct_name, vtable_sym, method_fns) in vtable_impls {
+            // `method_fns` is INDEXED BY CANONICAL TRAIT VTABLE SLOT (index i ==
+            // slot i, see MirModule::vtable_impls doc comment) — NOT compacted to
+            // only the methods this impl overrides. `n` is therefore
+            // `highest_implemented_slot + 1`, matching exactly what dispatch call
+            // sites compute their `slot_offset` against. Do not shrink this back
+            // to a filtered/compacted count — that reintroduces an out-of-bounds
+            // read for any later-slot method (bug
+            // simpleos_native_build_entry_closure_codegen_defects C8, 2026-07-17).
             let n = method_fns.len();
             if n == 0 {
                 continue;
@@ -1409,8 +1417,17 @@ impl<M: Module> CodegenBackend<M> {
             let mut data_desc = cranelift_module::DataDescription::new();
             data_desc.define(vec![0u8; n * 8].into_boxed_slice());
 
-            // For each method slot, write a relocation pointing to the implementing function.
-            for (slot, fn_name) in method_fns.iter().enumerate() {
+            // For each method slot, write a relocation pointing to the implementing
+            // function — skipping slots this impl doesn't override (left zero).
+            for (slot, fn_name_opt) in method_fns.iter().enumerate() {
+                let Some(fn_name) = fn_name_opt else {
+                    // Not overridden by this impl (e.g. an unoverridden default
+                    // trait method) — leave this slot zero. A call site that
+                    // actually dispatches through this slot for THIS struct
+                    // would be a separate, pre-existing "no impl for this
+                    // method" bug; it is not this out-of-bounds defect.
+                    continue;
+                };
                 // Look up the func_id — try both mangled and unmangled names.
                 let func_id_opt = self
                     .func_ids

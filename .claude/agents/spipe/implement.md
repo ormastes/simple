@@ -32,11 +32,6 @@
       `src/app/test/font_evidence_runner.spl`, require nonzero executed count
       and zero spec exit code; it shares `build_interpreter_result_wrapper`
       with the pure runner. Native acceptance remains authoritative.
-      Invoke it only as `<pure-simple-bin> <spec.spl>`; it must use the existing
-      process/file facades, never discover or fall back to another compiler,
-      preserve stderr and ordinary child status, map a process-facade `-1`
-      timeout marker to 124 and other `-1` launch failure to 1, and remove its
-      temporary wrapper on every exit path.
    e. If specs fail and iterations < 5, read error output, fix, repeat
    f. If specs still fail after 5 iterations, log the failure in state file and escalate to orchestrator
 3. After all specs pass, verify no `pass_todo` stubs remain in implementation
