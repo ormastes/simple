@@ -17,6 +17,7 @@ use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
 use compiler.backend.backend.cranelift_gemm_fusion.{GemmAddFusion, detect_gemm_add_pair}
 use compiler.backend.backend.cranelift_runtime_imports.{translate_runtime_import_call_i64}
+use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
 use std.sffi.codegen.*
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
@@ -1121,7 +1122,21 @@ fn cl_is_lowering_owned_runtime(name: text) -> bool:
 fn cl_function_emit_name(name: text) -> text:
     if name == "main":
         return "__simple_main"
-    if cl_is_lowering_owned_runtime(name):
+    # cl_is_lowering_owned_runtime names are unconditionally runtime-routed
+    # in cl_translate_call above -- a same-named local body is unreachable
+    # by any ordinary call, so it only needs a private symbol to avoid a
+    # module-level declaration clash (never a call-resolution decision).
+    #
+    # mir_runtime_owned_call_name (rt_array_new/rt_array_push) is NOT added
+    # to that unconditional list: the array-literal lowering path
+    # (Aggregate case below) calls the bare runtime name directly, outside
+    # func_handles entirely, while an ORDINARY named call to the same bare
+    # name (e.g. an explicit source `rt_array_new(0)`) must still resolve
+    # through the normal func_handles lookup below and reach its own local
+    # body -- see mir_call_ownership.spl. Mangling only the local
+    # DEFINITION's emitted symbol here (not the call-routing decision)
+    # keeps both interpretations coexisting in one module.
+    if cl_is_lowering_owned_runtime(name) or mir_runtime_owned_call_name(name):
         return "__simple_local_{name}"
     name
 

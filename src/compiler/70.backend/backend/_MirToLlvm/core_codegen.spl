@@ -16,6 +16,7 @@ use compiler.backend.llvm_type_mapper.LlvmTypeMapper
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
+use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -97,6 +98,16 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[llvm-translate] runtime"
         self.emit_runtime_declarations()
+
+        # Origin discriminator (see mir_call_ownership.spl): record which
+        # runtime-owned names this module ALSO defines a local function
+        # for, BEFORE any function is emitted. llvm_function_symbol_name
+        # consults this to mangle only a colliding local definition's own
+        # symbol -- ordinary named calls to any other function are
+        # unaffected.
+        for fn_owner in module.functions.values():
+            if mir_runtime_owned_call_name(fn_owner.name):
+                self.owned_name_has_local[fn_owner.name] = true
 
         # mutglobal lane (module-level `var` mutation storage, see
         # scratchpad/mutglobal_plan.md): emit real LLVM `@name = global ...`
@@ -1225,23 +1236,29 @@ impl MirTextCodegen for MirToLlvm:
                 val local_id = self.local_id_value(local)
                 self.local_value_text(local_id)
             case Const(value, type_):
-                # For function references, return @name directly
+                # For function references, return @name directly. An
+                # ordinary named call (this path) must resolve to a
+                # colliding LOCAL definition's mangled symbol, not the bare
+                # runtime name a compiler-generated hardcoded call owns --
+                # see mir_call_ownership.spl / llvm_function_symbol_name.
                 match type_.kind:
                     case FuncPtr(signature):
                         match value:
                             case Str(name):
+                                val resolved = self.llvm_function_symbol_name(name)
                                 if signature.return_type != nil:
-                                    self.remember_function_return_type(name, self.llvm_type_text(signature.return_type))
-                                self.unknown_func_decls[name] = true
-                                "@{name}"
+                                    self.remember_function_return_type(resolved, self.llvm_type_text(signature.return_type))
+                                self.unknown_func_decls[resolved] = true
+                                "@{resolved}"
                             case _: self.translate_const_value(value)
                     case Function(_, ret):
                         match value:
                             case Str(name):
+                                val resolved = self.llvm_function_symbol_name(name)
                                 if ret != nil:
-                                    self.remember_function_return_type(name, self.llvm_type_text(ret))
-                                self.unknown_func_decls[name] = true
-                                "@{name}"
+                                    self.remember_function_return_type(resolved, self.llvm_type_text(ret))
+                                self.unknown_func_decls[resolved] = true
+                                "@{resolved}"
                             case _: self.translate_const_value(value)
                     case _:
                         self.translate_const_value(value)

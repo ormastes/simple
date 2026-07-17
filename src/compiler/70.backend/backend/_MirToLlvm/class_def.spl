@@ -14,6 +14,7 @@ use compiler.backend.llvm_type_mapper.{LlvmTypeMapper, llvm_type_mapper_create_f
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
+use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -70,17 +71,26 @@ class MirToLlvm:
     # consumed by LoadGlobal/StoreGlobal translation.
     global_static_names: Dict<i64, text>
     global_static_types: Dict<i64, text>
+    # Runtime-owned names (see mir_call_ownership.spl) that this module ALSO
+    # defines a local function for -- populated once at the start of
+    # translate_module. Non-empty membership is what triggers the local
+    # definition's private-symbol mangling (see llvm_function_symbol_name)
+    # so a compiler-generated hardcoded runtime call keeps sole ownership of
+    # the bare symbol.
+    owned_name_has_local: Dict<text, bool>
 
     fn native_int() -> text:
         """Return the native integer type for the current target."""
         self.native_int_type
 
     fn llvm_function_symbol_name(name: text) -> text:
-        if name != "main":
-            return name
-        if self.entry_main_symbol:
-            return "__simple_main"
-        "__simple_main_" + self.builder.module_name.replace(".", "_")
+        if name == "main":
+            if self.entry_main_symbol:
+                return "__simple_main"
+            return "__simple_main_" + self.builder.module_name.replace(".", "_")
+        if mir_runtime_owned_call_name(name) and self.owned_name_has_local.has(name):
+            return mir_runtime_owned_local_symbol(name)
+        name
 
     fn is_unsigned_mir_kind(kind: MirTypeKind) -> bool:
         """True for U8/U16/U32/U64 -- the MIR-level distinction llvm_type_text
@@ -144,7 +154,8 @@ class MirToLlvm:
             current_function_name: "",
             entry_main_symbol: true,
             global_static_names: {},
-            global_static_types: {}
+            global_static_types: {},
+            owned_name_has_local: {}
         )
 
     static fn create_baremetal(module_name: text, target: CodegenTarget, cpu_override: text?) -> MirToLlvm:
@@ -182,7 +193,8 @@ class MirToLlvm:
             current_function_name: "",
             entry_main_symbol: true,
             global_static_names: {},
-            global_static_types: {}
+            global_static_types: {},
+            owned_name_has_local: {}
         )
 
 # ============================================================================
