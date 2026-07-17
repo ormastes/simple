@@ -1150,10 +1150,10 @@ pub extern "C" fn rt_system_cpu_count() -> i64 {
         .unwrap_or(1)
 }
 
-#[no_mangle]
-pub extern "C" fn spl_thread_cpu_count() -> i64 {
-    rt_system_cpu_count()
-}
+// spl_thread_cpu_count: the shim formerly here now lives in simple-runtime
+// (runtime/src/executor.rs), whose object files are bundled into this same
+// staticlib — keeping both defined breaks the Stage-2 bootstrap link with
+// `duplicate symbol '_spl_thread_cpu_count'`.
 
 #[no_mangle]
 pub extern "C" fn rt_process_exists(pid: i64) -> i64 {
