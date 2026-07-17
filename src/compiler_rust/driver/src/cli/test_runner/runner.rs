@@ -217,6 +217,22 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 
     // Discover doctests for both full-suite and targeted doctest paths.
     let doctest_cache = discover_all_doctests(&options);
+    let doctest_count =
+        doctest_cache.src_examples.len() + doctest_cache.doc_examples.len() + doctest_cache.md_examples.len();
+    if targeted_discovery_is_empty(options.path.is_some(), test_files.len(), doctest_count) {
+        if !quiet {
+            eprintln!("No tests discovered for explicit path: {}", test_path.display());
+        }
+        return TestRunResult {
+            files: Vec::new(),
+            total_listed: 0,
+            total_passed: 0,
+            total_failed: 1,
+            total_skipped: 0,
+            total_ignored: 0,
+            total_duration_ms: suite_start.elapsed().as_millis() as u64,
+        };
+    }
 
     // Handle --list-skip-features: show features from .skip files
     if options.list_skip_features {
@@ -635,6 +651,10 @@ fn determine_test_path(options: &TestOptions) -> PathBuf {
         }
         cwd.join("test")
     })
+}
+
+fn targeted_discovery_is_empty(explicit: bool, test_count: usize, doctest_count: usize) -> bool {
+    explicit && test_count == 0 && doctest_count == 0
 }
 
 /// Discover and filter test files
@@ -1640,7 +1660,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{handle_run_management_with_db, platform_tag_matches_mode};
+    use super::{handle_run_management_with_db, platform_tag_matches_mode, targeted_discovery_is_empty};
     use crate::cli::test_runner::types::{OutputFormat, TestExecutionMode, TestOptions};
     use crate::test_db::{TestRunRecord, TestRunStatus, list_runs};
     use crate::unified_db::Database;
@@ -1685,5 +1705,13 @@ mod tests {
             "baremetal",
             &TestExecutionMode::Composite("interpreter(remote(baremetal(riscv32)))".to_string())
         ));
+    }
+
+    #[test]
+    fn targeted_empty_discovery_fails_instead_of_passing_zero_tests() {
+        assert!(targeted_discovery_is_empty(true, 0, 0));
+        assert!(!targeted_discovery_is_empty(false, 0, 0));
+        assert!(!targeted_discovery_is_empty(true, 1, 0));
+        assert!(!targeted_discovery_is_empty(true, 0, 1));
     }
 }

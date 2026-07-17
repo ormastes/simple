@@ -109,6 +109,16 @@ compiled into the deployed binary (a later bootstrap step; the seed's own
 path). If a low-level shim is ever needed it belongs in the C runtime, not the
 Rust seed.
 
+## Fresh bootstrap evidence (2026-07-17)
+
+A clean, cgroup-capped bootstrap from pushed `main` rebuilt the Rust seed and
+runtime successfully, then failed Stage 2 with this same seed-only LLVM defect:
+43 files failed verification, led by `str.substring` calls with two arguments
+against three-argument declarations. The retained evidence is
+`build/bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`; no
+Stage 2 binary was produced. The bootstrap exited 2 normally, without timeout,
+OOM, crash, or orphaned child.
+
 ## Context: in-guest RUN is otherwise REACHABLE
 
 This bug does NOT block a plain in-guest run: `/usr/bin/simple --version` runs
