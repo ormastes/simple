@@ -309,11 +309,21 @@ pub fn merge_cached_module_definitions(
                 if name != "main" {
                     // Don't add "main" from imported modules -- Arc clone is cheap
                     functions.insert(name.clone(), func_def.clone());
+                    // See the matching guard in evaluation_helpers.rs::process_use_stmt:
+                    // this same `func_def` Arc may already be registered in the
+                    // process-wide FUNCTION_OVERLOADS map from an earlier pass over
+                    // this module. Dedup by pointer identity to cap unbounded
+                    // overload-list growth across repeated cache-hit imports (this
+                    // alone does not fix the mutation-loss bug — see the longer
+                    // note at the matching site for why; the real fix is
+                    // `exec_function_with_values_and_writeback` in
+                    // interpreter_call/core/function_exec.rs).
                     FUNCTION_OVERLOADS.with(|cell| {
-                        cell.borrow_mut()
-                            .entry(name.clone())
-                            .or_default()
-                            .push(func_def.clone());
+                        let mut overloads = cell.borrow_mut();
+                        let entry = overloads.entry(name.clone()).or_default();
+                        if !entry.iter().any(|existing| Arc::ptr_eq(existing, func_def)) {
+                            entry.push(func_def.clone());
+                        }
                     });
                 }
             }

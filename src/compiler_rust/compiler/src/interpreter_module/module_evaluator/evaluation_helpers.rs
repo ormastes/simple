@@ -526,8 +526,31 @@ fn process_use_stmt(
                 for (name, export_value) in module_exports.iter() {
                     if let Value::Function { def, .. } = export_value {
                         global_functions.insert(name.clone(), Arc::clone(def));
+                        // `def` may already have an equivalent entry in
+                        // FUNCTION_OVERLOADS from an earlier registration pass for
+                        // this same module (FUNCTION_OVERLOADS is a process-wide
+                        // thread_local, not scoped per importer, and a module can be
+                        // registered/merged more than once across import sites).
+                        // Guard by pointer identity so we don't grow the overload
+                        // list unboundedly across repeated imports of the same
+                        // export. NOTE: this dedup is NOT sufficient by itself to
+                        // fix the mutation-loss bug below — module_merger.rs's
+                        // `merge_module_definitions` mints its OWN fresh
+                        // `Arc::new(f.clone())` for a module's functions, so a
+                        // module reached via that path still yields a
+                        // pointer-distinct duplicate that this check cannot catch.
+                        // The actual fix for calls being silently routed through
+                        // the overload-resolution path (which used to skip `mut`
+                        // parameter write-back) is
+                        // `exec_function_with_values_and_writeback` in
+                        // interpreter_call/core/function_exec.rs — see
+                        // doc/08_tracking/bug/sspec_it_block_loses_cross_module_class_mutation_2026-07-17.md.
                         FUNCTION_OVERLOADS.with(|cell| {
-                            cell.borrow_mut().entry(name.clone()).or_default().push(Arc::clone(def));
+                            let mut overloads = cell.borrow_mut();
+                            let entry = overloads.entry(name.clone()).or_default();
+                            if !entry.iter().any(|existing| Arc::ptr_eq(existing, def)) {
+                                entry.push(Arc::clone(def));
+                            }
                         });
                     }
                     env.insert(name.clone(), export_value.clone());

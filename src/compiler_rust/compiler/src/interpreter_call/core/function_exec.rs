@@ -390,6 +390,49 @@ pub(crate) fn exec_function_with_values(
     })
 }
 
+/// Like `exec_function_with_values`, but also writes mutated `mut`
+/// container-typed parameters (Array/Dict/Object/Tuple) back to the caller's
+/// bindings — the same write-back `exec_function_inner` performs for the
+/// plain single-definition call path (Bug #19's `write_back_mutable_arguments`).
+///
+/// The unqualified-call overload-resolution path (interpreter_call/mod.rs
+/// Priority 4, used whenever `FUNCTION_OVERLOADS[name].len() > 1`) used to
+/// call plain `exec_function_with_values` with already-evaluated `Value`s
+/// and no caller-side identifier info, so a `mut`-parameter mutation was
+/// silently dropped for any call routed through it — including a call to a
+/// function with only ONE real definition that happened to be registered
+/// twice (e.g. once per module-export unpacking site), which is common for
+/// any cross-module `use module.{name}` import. This variant additionally
+/// takes the original call-site `Argument` expressions (unevaluated — only
+/// used to map a callee parameter back to a caller identifier/field, exactly
+/// like `write_back_mutable_arguments`'s normal contract) so the mutation is
+/// observed via the same mechanism the non-overloaded path already used. See
+/// doc/08_tracking/bug/sspec_it_block_loses_cross_module_class_mutation_2026-07-17.md.
+#[allow(clippy::too_many_arguments)] // reason: mirrors exec_function_with_values plus one extra param
+pub(crate) fn exec_function_with_values_and_writeback(
+    func: &FunctionDef,
+    args: &[Value],
+    original_args: &[Argument],
+    outer_env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    with_effect_check!(func, {
+        exec_function_with_values_and_writeback_inner(
+            func,
+            args,
+            original_args,
+            outer_env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )
+    })
+}
+
 /// Execute function with already-evaluated Values and self context for method calls
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn exec_function_with_values_and_self(
@@ -775,6 +818,72 @@ fn exec_function_inner(
     }
 
     // Runtime profiler return hook
+    if crate::runtime_profile::is_profiling_active() {
+        crate::runtime_profile::record_full_return(None);
+    }
+
+    trace_interpreter_call_exit(trace_start, &func.name, if result.is_ok() { "ok" } else { "err" });
+
+    result
+}
+
+#[allow(clippy::too_many_arguments)] // reason: mirrors exec_function_with_values_inner plus one extra param
+fn exec_function_with_values_and_writeback_inner(
+    func: &FunctionDef,
+    args: &[Value],
+    original_args: &[Argument],
+    outer_env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    let trace_start = trace_interpreter_call_enter(func);
+
+    crate::layout_recorder::record_function_call(&func.name);
+
+    if diagram_sffi::is_diagram_enabled() {
+        diagram_sffi::trace_call(&func.name);
+    }
+
+    if crate::runtime_profile::is_profiling_active() {
+        crate::runtime_profile::record_full_call(&func.name, None, vec![], crate::runtime_profile::CallType::Direct);
+    }
+
+    if let Some(cov) = crate::coverage::get_global_coverage() {
+        cov.lock().unwrap().record_function_call(&func.name);
+    }
+
+    let mut local_env = Env::new();
+    let self_mode = SelfMode::IncludeSelf;
+    let bound = bind_args_with_values(
+        &func.params,
+        args,
+        outer_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        self_mode,
+    )?;
+
+    crate::layout_recorder::record_function_return();
+
+    let result = execute_function_body(
+        func,
+        bound,
+        &mut local_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        true,
+    );
+
+    if result.is_ok() {
+        write_back_mutable_arguments(func, original_args, outer_env, &local_env, classes, self_mode);
+    }
+
     if crate::runtime_profile::is_profiling_active() {
         crate::runtime_profile::record_full_return(None);
     }

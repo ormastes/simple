@@ -298,9 +298,10 @@ pub(crate) fn evaluate_call(
                     .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                     .collect::<Result<Vec<_>, _>>()?;
                 if let Some(func) = select_overload(&overloads, &evaluated_args) {
-                    return core::exec_function_with_values(
+                    return core::exec_function_with_values_and_writeback(
                         &func,
                         &evaluated_args,
+                        args,
                         env,
                         functions,
                         classes,
