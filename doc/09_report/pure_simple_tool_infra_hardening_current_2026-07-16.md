@@ -39,7 +39,7 @@ so executable qualification is still blocked.
 | Test runner | PARTIAL | POSIX parallel children are tracked; timeouts and cooperatively dispatched SIGINT/TERM/HUP clean them before exit. Sequential/limited/fork/QEMU children remain synchronously untracked; Windows parallel capture fails closed | Move every execution mode onto an interruptible tracked process owner, add process-group/parent-death containment, then run signal/timeout/RSS evidence | P0 |
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; exact/cosine line gates share one tokenizer-derived signal prefix, preserve indentation, and exclude comment/string-only windows; runtime and performance qualification remain | Run the focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
 | Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP performance now fails closed instead of invoking inert `build lint`; global gates still report 29 UI and 41 hot-loop violations | Add one repository-scanner owner for the four MCP rules, repair classified violations, then run focused fixtures | P1 |
-| Format/fix | SOURCE GUARDED | Writes are atomic and checked; formatter output passes a CoreLexer equivalence gate or fails closed; existing empty files no longer false-fail | Replace heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
+| Format/fix | SOURCE GUARDED | Writes are atomic and checked; output passes a CoreLexer equivalence gate or fails closed; empty files are accepted; generic cast brackets retain parser-required adjacency | Replace remaining heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
 | Check | PARTIAL | Driver API Check now stops after fatal HIR analysis and before diagnostic-free monomorphization. Production CLI remains parse/policy-only, can false-green HIR-invalid code, and may delegate to the seed | Retain CLI policy checks, route semantics through `driver_api_core.check_file`, consolidate duplicate workers, remove seed delegation only after direct-path latency/RSS qualification | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
 | Test daemon | SOURCE FIXED | CLI/client share the full daemon protocol; local, container, remote, lightweight, and agent paths now retain canonical passed/failed/skipped counts and fail closed on malformed outer summaries; dynamic qualification remains | Run the authored local/session/count-cache/timeout/stop protocol fixtures with an admitted runtime | P0 |
@@ -290,7 +290,9 @@ so executable qualification is still blocked.
   duplicate-check tokenizer. The shared pure-Simple `format_source` owner now
   fingerprints CoreLexer tokens, exact literal slices, comments, and raw brace
   gaps before accepting output. Any semantic drift returns an error before the
-  atomic write path.
+  atomic write path. Blind `<`/`>` spacing is removed because cast generics such
+  as `value as Box<T>` require adjacency and whitespace-only fingerprints cannot
+  distinguish those delimiters from comparisons.
 
 ## Latest bounded verification
 
@@ -301,7 +303,8 @@ so executable qualification is still blocked.
 - Full-daemon entry, canonical configuration, request-ID response routing,
   timeout transport, and broker lifecycle source contracts: SOURCE
   IMPLEMENTED; executable daemon protocol and adapter verdicts are NOT RUN.
-- Formatter token/literal/comment/raw-gap equivalence and idempotence fixtures:
+- Formatter token/literal/comment/raw-gap equivalence, generic-cast adjacency,
+  and idempotence fixtures:
   SOURCE IMPLEMENTED; executable verdict is NOT RUN without an admitted
   pure-Simple runtime.
 - Lint canonical severity/profile policy, unique shared-rule collection, and
