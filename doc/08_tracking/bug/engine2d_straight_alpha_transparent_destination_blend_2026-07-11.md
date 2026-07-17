@@ -1,7 +1,6 @@
 # Engine2D Straight-Alpha Blend on Transparent Destinations
 
-Status: fixed (pure-Simple lib path; native SIMD row kernel has a known
-follow-up gap, see Resolution)
+Status: fixed (pure-Simple, C native SIMD, and hosted Rust paths)
 
 `std.gpu.engine2d.color.blend` computes RGB as if the destination were opaque
 while separately computing src-over alpha. For 50% straight-alpha white over
@@ -40,34 +39,22 @@ in tests). When `da=0` (transparent dst) it reduces to `out_a=sa`,
 Files changed:
 - `src/lib/gc_async_mut/gpu/engine2d/color.spl` — fixed `blend()`, the shared owner.
 - `src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl` — fixed the pure-Simple
-  scalar reference path `_scalar_blend_row()` identically (it duplicated the
-  same flawed formula and additionally hardcoded output alpha to 255). Added a
-  `KNOWN DIVERGENCE` comment: the public `simd_blend_row()` entry point routes
-  through the native `rt_engine2d_simd_blend_row_u32` kernel
-  (`src/runtime/runtime_simd_dispatch.c`) when native SIMD is detected on the
-  host, and that C kernel still hardcodes an opaque destination — it was
-  **not** fixed here because doing so requires a native runtime rebuild, which
-  is out of scope for this pure-Simple change. Native/scalar parity holds for
-  opaque destinations only; transparent-destination parity for the native row
-  path is an open follow-up.
+  scalar reference path `_scalar_blend_row()` identically. The C native SIMD
+  row kernel and hosted Rust runtime/interpreter paths now use the same formula,
+  including transparent and translucent destinations.
 - `test/01_unit/lib/gpu/engine2d/engine2d_color_spec.spl` (+ duplicate at
   `test/unit/lib/gpu/engine2d/engine2d_color_spec.spl`) — added a `blend`
   context: opaque-over-opaque, transparent-over-any, semi-over-opaque
   (established case unchanged), any-over-transparent (bug repro, asserts
   `0x80FFFFFF` exactly), semi-over-semi.
-- `test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl` — added a
-  transparent-destination case against `_scalar_blend_row` directly (not the
-  public `simd_blend_row` dispatcher, since that would nondeterministically
-  route through the unfixed native kernel on hosts with SIMD detected).
+- `test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl` — verifies exact
+  transparent/translucent results and native/scalar row parity.
 - `test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` —
   updated the stale CPU/GPU parity anchor from `0x101F2F3F` (the old buggy
   value for `0x01020304` src-over `0x10203040` dst, da=0x10) to the correct
   `0x101E2D3C`.
 
-Verification: seed-interpreter probe showed OLD=`0x80808080` /
-NEW=`0x80FFFFFF` for the doc's exact repro. `engine2d_color_spec.spl` 13/13,
-`simd_kernels_spec.spl` blend groups 4/4 (2 pre-existing unrelated fill-kernel
-failures unchanged before/after), `engine2d_shared_raster_parity_spec.spl`
-40/40, `helpers_parity_spec.spl` and `cpu_simd_session_contract_spec.spl`
-unaffected (all green). No compiler changes; no bootstrap/rebuild performed
-or required for the pure-Simple fix.
+Verification: the strict pure-Simple native `simd_kernels_spec.spl` executable
+passes 27 examples with 0 failures. The focused hosted Rust runtime and
+interpreter suites pass 5 and 1 tests respectively, and the C SIMD kernel,
+span, tagged-blend, and row-scheduling checker passes.

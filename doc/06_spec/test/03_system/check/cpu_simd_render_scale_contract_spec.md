@@ -27,7 +27,7 @@ cpu_simd_render_scale_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -42,12 +42,12 @@ The scale wrapper is the focused evidence gate for CPU-SIMD rendering at 4K and 
 |-------|-------|
 | Category | Other |
 | Status | Active |
-| Requirements | N/A |
+| Requirements | REQ-CPU-SIMD-SCALE-001 through REQ-CPU-SIMD-SCALE-013 |
 | Plan | doc/07_guide/platform/gui_perf_benchmark_comparison.md |
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/cpu_simd_render_scale_contract_spec.spl` |
-| Updated | 2026-07-16 |
+| Updated | 2026-07-17 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -59,7 +59,7 @@ dimensions to a tiny fixture while preserving the same code path.
 
 ## Requirements
 
-**Requirements:** N/A
+**Requirements:** REQ-CPU-SIMD-SCALE-001 through REQ-CPU-SIMD-SCALE-013
 
 - REQ-CPU-SIMD-SCALE-001: The scale wrapper emits CPU-SIMD and software p50/p95
   frame timing fields for the 4K and 8K rows.
@@ -84,6 +84,11 @@ dimensions to a tiny fixture while preserving the same code path.
   without rerunning render benchmarks.
 - REQ-CPU-SIMD-SCALE-010: CPU-SIMD rows require positive provider/native hits,
   while scalar software rows require zero SIMD hits.
+- REQ-CPU-SIMD-SCALE-011: Native CLI dimensions, DPI, and sample counts retain
+  their parsed values when narrowed to `i32`.
+- REQ-CPU-SIMD-SCALE-012: Strict architecture evidence rejects any missing
+  x86_64, AArch64, or RISC-V target result.
+- REQ-CPU-SIMD-SCALE-013: Strict native-probe mode rejects a missing artifact.
 
 ## Plan
 
@@ -170,9 +175,9 @@ expect(script).to_contain("_software_checksum_parity")
 expect(script).to_contain("cpu_simd_render_scale_4k_software_checksum_parity=true")
 expect(script).to_contain("cpu_simd_render_scale_8k_software_checksum_parity=true")
 expect(script).to_contain("CPU_SIMD_RENDER_SCALE_4K_EXPECTED_CHECKSUM")
-expect(script).to_contain("sum32:35624123900197965")
+expect(script).to_contain("sum32:35493787911101004")
 expect(script).to_contain("CPU_SIMD_RENDER_SCALE_8K_EXPECTED_CHECKSUM")
-expect(script).to_contain("sum32:142496654044810320")
+expect(script).to_contain("sum32:141975144273648204")
 expect(script).to_contain("require_value \"${label}_native_simd_executed\" \"true\"")
 expect(script).to_contain("require_positive \"${label}_simd_provider_hits\"")
 expect(script).to_contain("require_positive \"${label}_native_simd_hits\"")
@@ -227,6 +232,8 @@ expect(exporter.contains("web_render_backend")).to_equal(false)
 expect(exporter).to_contain("fn _render_software_pixels(html: text, width: i32, height: i32, backend: text) -> [u32]")
 expect(exporter).to_contain("raw.parse_int() ?? fallback")
 expect(exporter).to_contain("raw.parse_int() ?? fallback.to_i64()")
+expect(exporter).to_contain("parsed.to_i32()")
+expect(exporter.contains("parsed as i32")).to_equal(false)
 expect(exporter).to_contain("simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(html, width, height, backend)")
 expect(exporter.contains("simple_web_render_html_to_pixels_with_engine2d_backend")).to_equal(false)
 expect(exporter).to_contain("_render_software_pixels(html, width, height, backend)")
@@ -384,6 +391,7 @@ Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Render canonical HTML through the CPU SIMD Draw IR route")
 val root = "build/test-cpu-simd-render-scale-contract"
 val command =
     "rm -rf " + root + " && mkdir -p " + root +
@@ -395,6 +403,7 @@ val command =
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
+step("Render the same fixture through the scalar route")
 val out = file_read(root + "/stdout.txt")
 expect(out).to_contain("cpu_simd_render_scale_contract_status=pass")
 expect(out).to_contain("cpu_simd_render_scale_contract_mode=native")
@@ -420,6 +429,7 @@ expect(out).to_contain("gui_perf_cpu_base_compare_schedule_order=software_first"
 expect(out).to_contain("gui_perf_cpu_base_compare_target_met=")
 expect(out).to_contain("gui_perf_cpu_base_compare_simd_provider_hits=")
 expect(out).to_contain("gui_perf_cpu_base_compare_native_simd_executed=")
+step("Compare pixels and SIMD counters")
 expect(out).to_contain("cpu_simd_render_scale_4k_software_checksum_parity=true")
 expect(out).to_contain("cpu_simd_render_scale_8k_software_checksum_parity=true")
 ```
@@ -496,6 +506,71 @@ expect(out).to_contain("cpu_simd_render_scale_arch_matrix_only=1")
 
 </details>
 
+Scenario helper used by the strict architecture rejection examples:
+
+```simple
+fn _arch_matrix_result(name: text, x86: text, aarch64: text, riscv64: text) -> (text, i64):
+    val root = "build/test-cpu-simd-render-scale-arch-matrix-" + name
+    val env_path = root + "/evidence.env"
+    val command =
+        "rm -rf " + root + " && mkdir -p " + root +
+        " && printf '%s\\n' " +
+        "'cpu_simd_engine2d_arch_matrix_status=pass' " +
+        "'cpu_simd_engine2d_arch_matrix_x86_64_target_binary_status=" + x86 + "' " +
+        "'cpu_simd_engine2d_arch_matrix_aarch64_target_binary_status=" + aarch64 + "' " +
+        "'cpu_simd_engine2d_arch_matrix_riscv64_target_binary_status=" + riscv64 + "' > " + env_path +
+        " && CPU_SIMD_RENDER_SCALE_ARCH_MATRIX_ONLY=1" +
+        " CPU_SIMD_RENDER_SCALE_REQUIRE_ARCH_MATRIX=1" +
+        " CPU_SIMD_RENDER_SCALE_ARCH_MATRIX_ENV=" + env_path +
+        " sh scripts/check/check-cpu-simd-render-scale-contract.shs > " + root + "/stdout.txt"
+    val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+    (file_read(root + "/stdout.txt"), code)
+```
+
+#### rejects a missing x86_64 target result
+
+```simple
+step("Validate strict architecture evidence")
+val (out, code) = _arch_matrix_result("x86-missing", "missing", "pass", "pass")
+expect(code).to_equal(1)
+expect(out).to_contain("arch_matrix_x86_64_target_binary_expected_pass_got_missing")
+```
+
+#### rejects a missing AArch64 target result
+
+```simple
+step("Validate strict architecture evidence")
+val (out, code) = _arch_matrix_result("aarch64-missing", "pass", "missing", "pass")
+expect(code).to_equal(1)
+expect(out).to_contain("arch_matrix_aarch64_target_binary_expected_pass_got_missing")
+```
+
+#### rejects a missing RISC-V target result
+
+```simple
+step("Validate strict architecture evidence")
+val (out, code) = _arch_matrix_result("riscv-missing", "pass", "pass", "missing")
+expect(code).to_equal(1)
+expect(out).to_contain("arch_matrix_riscv64_target_binary_expected_pass_got_missing")
+```
+
+#### rejects a required native probe that is absent
+
+```simple
+step("Validate strict native probe evidence")
+val root = "build/test-cpu-simd-render-scale-native-probe-missing"
+val command =
+    "rm -rf " + root + " && mkdir -p " + root +
+    " && CPU_SIMD_RENDER_SCALE_PROBE_ONLY=1" +
+    " CPU_SIMD_RENDER_SCALE_REQUIRE_NATIVE_PROBE=1" +
+    " CPU_SIMD_RENDER_SCALE_NATIVE_PROBE_BIN=" + root + "/missing" +
+    " OUT_DIR=" + root + "/out" +
+    " sh scripts/check/check-cpu-simd-render-scale-contract.shs > " + root + "/stdout.txt"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+expect(file_read(root + "/stdout.txt")).to_contain("native_probe_missing")
+```
+
 
 </details>
 
@@ -503,8 +578,8 @@ expect(out).to_contain("cpu_simd_render_scale_arch_matrix_only=1")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

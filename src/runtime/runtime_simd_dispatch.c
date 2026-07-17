@@ -905,6 +905,25 @@ SplArray* rt_engine2d_simd_blend_row_u32(SplArray* dst, SplArray* src) {
     const int64_t* src_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(src);
     int64_t* out = (int64_t*)(uintptr_t)rt_array_data_ptr(a);
     if (!out || !dst_data || !src_data) return a;
+    if ((uint64_t)n <= SIZE_MAX / sizeof(int64_t)) {
+        int64_t* raw_dst = (int64_t*)malloc((size_t)n * sizeof(int64_t));
+        int64_t* raw_src = (int64_t*)malloc((size_t)n * sizeof(int64_t));
+        if (raw_dst && raw_src) {
+            for (int64_t i = 0; i < n; i++) {
+                raw_dst[i] = engine2d_unbox_pixel(dst_data[i]);
+                raw_src[i] = engine2d_unbox_pixel(src_data[i]);
+            }
+            engine2d_blend_into(raw_dst, raw_dst, raw_src, n);
+            for (int64_t i = 0; i < n; i++) {
+                out[i] = engine2d_box_pixel((uint32_t)raw_dst[i]);
+            }
+            free(raw_src);
+            free(raw_dst);
+            return a;
+        }
+        free(raw_src);
+        free(raw_dst);
+    }
     for (int64_t i = 0; i < n; i++) {
         uint32_t dst_pixel = engine2d_unbox_pixel(dst_data[i]);
         uint32_t src_pixel = engine2d_unbox_pixel(src_data[i]);

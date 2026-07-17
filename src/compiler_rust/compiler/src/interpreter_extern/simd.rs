@@ -1539,7 +1539,7 @@ pub fn rt_engine2d_simd_copy_row_u32(args: &[Value]) -> Result<Value, CompileErr
 }
 
 /// rt_engine2d_simd_blend_row_u32(dst_row: [u32], src_row: [u32]) -> [u32]
-/// Src-over blend of src over dst, element-wise (truncating-integer, out alpha=255, 0xAARRGGBB).
+/// Src-over blend of straight-alpha src over dst, element-wise (0xAARRGGBB).
 pub fn rt_engine2d_simd_blend_row_u32(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 2 {
         return Err(CompileError::runtime(
@@ -1559,11 +1559,14 @@ pub fn rt_engine2d_simd_blend_row_u32(args: &[Value]) -> Result<Value, CompileEr
         } else if sa == 0 {
             d
         } else {
+            let da = (d >> 24) & 0xFF;
             let inv = 255 - sa;
-            let r = (((s >> 16) & 0xFF) * sa + ((d >> 16) & 0xFF) * inv) / 255;
-            let g = (((s >> 8) & 0xFF) * sa + ((d >> 8) & 0xFF) * inv) / 255;
-            let b = ((s & 0xFF) * sa + (d & 0xFF) * inv) / 255;
-            (255u32 << 24) | (r << 16) | (g << 8) | b
+            let dst_weight = da * inv / 255;
+            let out_alpha = sa + dst_weight;
+            let r = (((s >> 16) & 0xFF) * sa + ((d >> 16) & 0xFF) * dst_weight) / out_alpha;
+            let g = (((s >> 8) & 0xFF) * sa + ((d >> 8) & 0xFF) * dst_weight) / out_alpha;
+            let b = ((s & 0xFF) * sa + (d & 0xFF) * dst_weight) / out_alpha;
+            (out_alpha << 24) | (r << 16) | (g << 8) | b
         };
         out.push(pixel);
     }
@@ -2130,21 +2133,14 @@ pub fn rt_rank_select_free(args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(test)]
 mod engine2d_span_tests {
-    use super::{pack_u32_array, rt_engine2d_simd_copy_span_u32, unpack_u32_array};
+    use super::{pack_u32_array, rt_engine2d_simd_blend_row_u32, rt_engine2d_simd_copy_span_u32, unpack_u32_array};
     use crate::value::Value;
 
     #[test]
     fn copy_span_preserves_adjacent_pixels_and_rejects_negative_bounds() {
         let dst = pack_u32_array(vec![0; 8]);
         let src = pack_u32_array(vec![10, 11, 12, 13, 14, 15, 16, 17]);
-        let copied = rt_engine2d_simd_copy_span_u32(&[
-            dst,
-            Value::Int(2),
-            src,
-            Value::Int(3),
-            Value::Int(4),
-        ])
-        .unwrap();
+        let copied = rt_engine2d_simd_copy_span_u32(&[dst, Value::Int(2), src, Value::Int(3), Value::Int(4)]).unwrap();
         assert_eq!(
             unpack_u32_array("copied", &copied).unwrap(),
             vec![0, 0, 13, 14, 15, 16, 0, 0]
@@ -2174,6 +2170,17 @@ mod engine2d_span_tests {
         assert_eq!(
             unpack_u32_array("unchanged", &unchanged).unwrap(),
             vec![0, 0, 13, 14, 15, 16, 16, 17]
+        );
+    }
+
+    #[test]
+    fn blend_row_preserves_straight_alpha_and_packed_pixels() {
+        let dst = pack_u32_array(vec![0x0000_0000, 0x8000_00ff, 0x0011_2233]);
+        let src = pack_u32_array(vec![0x80ff_ffff, 0x80ff_0000, 0x0000_0000]);
+        let blended = rt_engine2d_simd_blend_row_u32(&[dst, src]).unwrap();
+        assert_eq!(
+            unpack_u32_array("blended", &blended).unwrap(),
+            vec![0x80ff_ffff, 0xbfaa_0054, 0x0011_2233]
         );
     }
 }

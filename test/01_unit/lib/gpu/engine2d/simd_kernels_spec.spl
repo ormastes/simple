@@ -9,7 +9,7 @@ detection. Covers AC-6: CPU acceleration via SSE4.2/AVX2/NEON.
 
 use std.spec.{describe, context, it, expect}
 use std.io_runtime.{file_read}
-use std.gpu.engine2d.simd_kernels.{SimdLevel, detect_simd_level, cpu_simd_runtime_evidence, simd_fill_row, engine2d_simd_fill_buffer_u32, engine2d_simd_fill_rows_u32, rt_engine2d_simd_fill_span_u32, rt_engine2d_simd_copy_span_u32, simd_blend_row, simd_blit_row, _scalar_blend_row}
+use std.gpu.engine2d.simd_kernels.{SimdLevel, detect_simd_level, cpu_simd_runtime_evidence, simd_fill_row, engine2d_simd_fill_buffer_u32, engine2d_simd_fill_rows_u32, rt_engine2d_simd_fill_span_u32, rt_engine2d_simd_copy_span_u32, engine2d_simd_blend_row_u32, simd_blend_row, simd_blit_row, _scalar_blend_row}
 
 # ============================================================================
 # SimdLevel detection
@@ -142,6 +142,17 @@ describe "simd_fill_row":
         buf = rt_engine2d_simd_fill_span_u32(buf, 0, -1, 0xFFFFFFFFu32)
         expect(buf[0]).to_equal(0u32)
 
+    it "clips fill spans at the destination end and preserves zero-count rows":
+        var buf: [u32] = [0x01020304u32; 8]
+        buf = rt_engine2d_simd_fill_span_u32(buf, 6, 8, 0xFFFFFFFFu32)
+        expect(buf[5]).to_equal(0x01020304u32)
+        expect(buf[6]).to_equal(0xFFFFFFFFu32)
+        expect(buf[7]).to_equal(0xFFFFFFFFu32)
+        buf = rt_engine2d_simd_fill_span_u32(buf, 0, 0, 0u32)
+        expect(buf[0]).to_equal(0x01020304u32)
+        buf = rt_engine2d_simd_fill_span_u32(buf, 8, 1, 0u32)
+        expect(buf[7]).to_equal(0xFFFFFFFFu32)
+
 # ============================================================================
 # simd_blend_row — Porter-Duff alpha blending
 # ============================================================================
@@ -167,21 +178,29 @@ describe "simd_blend_row":
         expect(r).to_be_greater_than(100)
         expect(r).to_be_less_than(200)
 
-    it "translucent source over transparent destination preserves src exactly (straight-alpha over-transparent, doc/08_tracking/bug/engine2d_straight_alpha_transparent_destination_blend_2026-07-11.md)":
-        # Exercises _scalar_blend_row directly (the pure-Simple reference path
-        # fixed alongside color.blend). NOTE: on hosts where
-        # native_pixel_rows_enabled() is true, the public simd_blend_row()
-        # entry point instead routes through the native
-        # rt_engine2d_simd_blend_row_u32 kernel (runtime_simd_dispatch.c),
-        # which still hardcodes an opaque destination and has NOT been fixed
-        # here (native runtime rebuild is out of scope for this change — see
-        # the KNOWN DIVERGENCE comment in simd_kernels.spl). Calling the
-        # scalar path directly keeps this assertion deterministic across
-        # hosts instead of silently depending on SIMD detection.
+    it "translucent source over transparent destination preserves src exactly":
         var dst: [u32] = [0x00000000; 4]
         var src: [u32] = [0x80FF0000; 4]
-        _scalar_blend_row(dst, src, 0, 4)
+        simd_blend_row(dst, src, 0, 4)
         expect(dst[0]).to_equal(0x80FF0000u32)
+
+    it "native and scalar rows match for transparent and translucent destinations":
+        val native_dst: [u32] = [0x00000000u32, 0x800000FFu32, 0x00112233u32, 0x7FFFFFFFu32]
+        var scalar_dst: [u32] = [0x00000000u32, 0x800000FFu32, 0x00112233u32, 0x7FFFFFFFu32]
+        val src: [u32] = [0x80FFFFFFu32, 0x80FF0000u32, 0x00000000u32, 0xFFFFFFFFu32]
+        _scalar_blend_row(scalar_dst, src, 0, 4)
+        val native = engine2d_simd_blend_row_u32(native_dst, src)
+        expect(native).to_equal(scalar_dst)
+        expect(native[0]).to_equal(0x80FFFFFFu32)
+        expect(native[1]).to_equal(0xBFAA0054u32)
+        expect(native[2]).to_equal(0x00112233u32)
+        expect(native[3]).to_equal(0xFFFFFFFFu32)
+
+    it "native blend handles empty and one-pixel rows":
+        expect(engine2d_simd_blend_row_u32([], []).len()).to_equal(0)
+        val one = engine2d_simd_blend_row_u32([0x00000000u32], [0x80FFFFFFu32])
+        expect(one.len()).to_equal(1)
+        expect(one[0]).to_equal(0x80FFFFFFu32)
 
 # ============================================================================
 # simd_blit_row — pixel copy

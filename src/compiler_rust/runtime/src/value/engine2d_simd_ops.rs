@@ -101,9 +101,12 @@ fn blend_pixel(src: u32, dst: u32) -> u32 {
     if sa == 0 {
         return dst;
     }
+    let da = dst >> 24;
     let inv = 255 - sa;
-    let channel = |shift| ((((src >> shift) & 0xff_u32) * sa + ((dst >> shift) & 0xff_u32) * inv) / 255_u32) & 0xff_u32;
-    0xff00_0000_u32 | (channel(16) << 16) | (channel(8) << 8) | channel(0)
+    let dst_weight = da * inv / 255;
+    let out_alpha = sa + dst_weight;
+    let channel = |shift| (((src >> shift) & 0xff_u32) * sa + ((dst >> shift) & 0xff_u32) * dst_weight) / out_alpha;
+    (out_alpha << 24) | (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
 /// Rust-hosted ABI for source-over native `[u32]` row blending.
@@ -292,6 +295,29 @@ mod tests {
         let src = pixel_array(&[0x0000_0000, 0xffff_0000]);
         let blended = rt_engine2d_simd_blend_row_u32(dst, src);
         assert_eq!(pixel_vec(blended), vec![0xff10_2030, 0xffff_0000]);
+    }
+
+    #[test]
+    fn hosted_blend_matches_straight_alpha_boundaries() {
+        let cases = [
+            (0x80ff_ffff, 0x0000_0000, 0x80ff_ffff),
+            (0x80ff_0000, 0x8000_00ff, 0xbfaa_0054),
+            (0x0000_0000, 0x0011_2233, 0x0011_2233),
+            (0xffff_ffff, 0x7fff_ffff, 0xffff_ffff),
+        ];
+        for (src, dst, expected) in cases {
+            assert_eq!(blend_pixel(src, dst), expected, "src={src:#010x} dst={dst:#010x}");
+        }
+    }
+
+    #[test]
+    fn hosted_blend_row_preserves_length_and_packed_pixels() {
+        for count in [0_usize, 1, 2, 3, 4] {
+            let dst_values = vec![0x0000_0000; count];
+            let src_values = vec![0x80ff_ffff; count];
+            let blended = rt_engine2d_simd_blend_row_u32(pixel_array(&dst_values), pixel_array(&src_values));
+            assert_eq!(pixel_vec(blended), src_values, "count={count}");
+        }
     }
 
     #[cfg(target_arch = "aarch64")]

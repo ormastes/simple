@@ -171,12 +171,17 @@ class CpuSimdRuntimeEvidence:
     native_simd_bit_exact: bool  # native output == scalar reference, byte-exact
     native_simd_hits: i64
 
+fn _bool_text(value: bool) -> text:
+    if value:
+        return "true"
+    "false"
+
 impl CpuSimdRuntimeEvidence:
     fn executed_all() -> bool:
         self.executed_fill and self.executed_copy and self.executed_alpha and self.executed_scroll
 
     fn diagnostic_text() -> text:
-        "arch={self.arch};feature={self.feature};level={self.level};x86={self.x86_available.to_text()};arm={self.arm_available.to_text()};riscv={self.riscv_available.to_text()};executed={self.executed_all().to_text()};checksum={self.checksum};hits={self.hit_summary};native_simd_executed={self.native_simd_executed.to_text()};native_simd_bit_exact={self.native_simd_bit_exact.to_text()};native_simd_hits={self.native_simd_hits};reason={self.reason}"
+        "arch={self.arch};feature={self.feature};level={self.level};x86={_bool_text(self.x86_available)};arm={_bool_text(self.arm_available)};riscv={_bool_text(self.riscv_available)};executed={_bool_text(self.executed_all())};checksum={self.checksum};hits={self.hit_summary};native_simd_executed={_bool_text(self.native_simd_executed)};native_simd_bit_exact={_bool_text(self.native_simd_bit_exact)};native_simd_hits={self.native_simd_hits};reason={self.reason}"
 
 class NativeSimdPixelEvidence:
     """Proof that the native vectorized pixel-row kernels actually ran on
@@ -317,16 +322,8 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
 # scalar: they are in-place sub-range copies that a return-style row kernel
 # can't express without extra marshalling, and they were never Rust-backed.)
 #
-# KNOWN DIVERGENCE (doc/08_tracking/bug/engine2d_straight_alpha_transparent_destination_blend_2026-07-11.md):
-# `_scalar_blend_row` below now composites straight alpha correctly for a
-# transparent/translucent dst (unpremultiplies by the real output alpha
-# instead of hardcoding 255). The native `rt_engine2d_simd_blend_row_u32`
-# kernel (runtime_simd_dispatch.c) has NOT been updated to match — it still
-# assumes an opaque dst and forces output alpha to 255. Both paths agree when
-# dst is opaque (da=255, the pre-existing/established case); they DIVERGE for
-# a transparent/translucent dst. Fixing the C kernel requires a native
-# runtime rebuild, out of scope for this change — do not silently rely on
-# native-row parity for translucent destinations until that lands.
+# Native and scalar rows use the same straight-alpha source-over formula,
+# including transparent and translucent destinations.
 var _native_rows_cached: bool = false
 var _native_rows_detected: bool = false
 
