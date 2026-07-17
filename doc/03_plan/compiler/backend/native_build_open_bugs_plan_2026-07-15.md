@@ -143,8 +143,10 @@ the array handle remains a runtime array through `.push` and write-back. A new
 strict dual-backend case covers a non-first field's `.push`, field index assignment,
 and visibility of that array handle through an alias captured before mutation.
 The case contributes one logical case and two recorded checks; LLVM and
-Cranelift execution is pending, so no executable PASS or resolved disposition
-is claimed here. Broader class-reference/struct-copy semantics remain separate.
+Cranelift native-build shapes were re-verified locally. Linux runs the case in
+the full gate; macOS arm64/x64, Windows x64, and FreeBSD now select it
+explicitly, with first staged platform-matrix execution pending. Broader
+class-reference/struct-copy semantics remain separate.
 
 ---
 

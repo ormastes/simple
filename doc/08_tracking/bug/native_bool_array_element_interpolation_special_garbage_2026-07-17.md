@@ -68,9 +68,10 @@ Two MIR fixes preserve the bool type through the complete failing path:
 
 `scripts/check/check-native-seed-parity.shs` adds the strict dual-backend
 `bool_array_element_interp` case. It checks direct interpolation of
-`flags[0]`/`flags[1]` and interpolation after both `val` and `var` bindings,
-with fixed expected `true`/`false` output on LLVM and Cranelift. Executable
-verification is pending.
+`flags[0]`/`flags[1]`, bare and interpolated output after `val`/`var` bindings,
+and primitive array fields on a struct and class, with fixed output on LLVM and
+Cranelift. Linux runs it in the full gate; macOS arm64/x64, Windows x64, and
+FreeBSD select it explicitly. First staged platform-matrix execution is pending.
 
 ## Cross-reference
 

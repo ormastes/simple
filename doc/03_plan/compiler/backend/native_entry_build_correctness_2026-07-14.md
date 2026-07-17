@@ -136,15 +136,19 @@ the shared binary — deploys require explicit user go-ahead).
     is source-fixed in MIR: indexed reads retain the array element type before
     the bootstrap text fallback, and both Let-lowering paths preserve bool
     initializer types on fresh bound locals. A strict dual-backend case covers
-    direct index interpolation plus `val` and `var` bindings; execution is
-    pending.
+    direct/bound interpolation, bare bound-value printing, and primitive array
+    fields on structs/classes. Linux runs it in the full gate; macOS arm64/x64,
+    Windows x64, and FreeBSD select it explicitly. First staged platform-matrix
+    execution is pending.
   - `native_class_array_field_mutation_segfault_2026-07-17.md` is source-fixed
     by registering declared class-field aggregate metadata and mirroring normal
     field projection provenance in mutating-receiver prelowering. A strict
     dual-backend case covers a non-first field's `.push`, field index assignment, and
-    visibility of that array handle through an alias captured before mutation;
-    execution is pending. Broader class-reference/struct-copy semantics remain
-    separate.
+    visibility of that array handle through an alias captured before mutation.
+    The exact native-build shapes were re-verified locally; Linux runs the case
+    in the full gate, while macOS arm64/x64, Windows x64, and FreeBSD select it
+    explicitly. First staged platform-matrix execution is pending. Broader
+    class-reference/struct-copy semantics remain separate.
   - Hosted `riscv32-unknown-linux-gnu` remains intentionally unsupported until
     a verified ILP32D linker/sysroot/CRT owner exists. The existing Linux
     architecture gate now exercises the original hosted target boundary with a
