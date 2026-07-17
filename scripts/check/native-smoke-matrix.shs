@@ -290,6 +290,39 @@ fn main() -> i64:
 EOF
 }
 
+# Bug #189 (native codegen -- struct-valued Dict access crashes): `var m:
+# Dict<text, S> = {}` (plain empty-literal init) then `m[k] = S(...)`
+# SIGSEGV'd on `m[k].field` and misdecoded `.keys()` text as garbage ints.
+# Root causes (all in src/compiler/50.mir): (1) mir_lowering_stmts.spl's
+# Let-binding `effective_type` trusted an empty dict literal's defaulted
+# Dict(i64,i64) MIR type over the binding's own `Dict<K,V>` annotation, so
+# every later read/keys() decoded a real struct pointer / text key as a
+# boxed INTEGER (`raw >> 3`); (2) expr_dispatch.spl's dict-index read never
+# propagated the decoded value's struct NAME into struct_value_syms (unlike
+# the array-index-read path), so resolve_field_index silently defaulted
+# every field access to index 0 -- invisible for single-field structs,
+# wrong for `m[k].y` on a multi-field one. Encodes both into the exit code
+# (the harness only compares rc, not stdout): x + y confirms per-field
+# struct decoding (30 + 40 = 70, only equal if `.y` isn't misread as `.x`),
+# and the `+3` bonus only lands if `.keys()` yields the real key text "k1"
+# rather than a garbage decoded int.
+write_case_dict_struct_value() {
+    cat >"$1" <<'EOF'
+struct Point:
+    x: i64
+    y: i64
+
+fn main() -> i64:
+    var m: Dict<text, Point> = {}
+    m["k1"] = Point(x: 30, y: 40)
+    var key_ok = 0
+    for k in m.keys():
+        if k == "k1":
+            key_ok = 3
+    return m["k1"].x + m["k1"].y + key_ok
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -384,6 +417,7 @@ result_try_op|(15) Result + ? operator|write_case_result_try|7|no
 match_value_position|(16) value-position match (val r = match n)|write_case_match_value|7|no
 match_value_position_return|(17) value-position match, arm returns|write_case_match_value_return|7|no
 trait_default|(18) trait default method dispatch (#157)|write_case_trait_default|42|no
+dict_struct_value|(19) struct-valued Dict m[k].field + keys() text (#189)|write_case_dict_struct_value|73|no
 "
 
 # NOTE: read from a file (not a pipe) so the loop body runs in THIS shell,
