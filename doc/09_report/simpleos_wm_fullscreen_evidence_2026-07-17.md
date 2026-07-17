@@ -10,13 +10,13 @@
 - simple bin version: simple-bootstrap 1.0.0-beta
 - simple bin sha256: 6faa17dbe4342c9fa94c48025c7c57cfdf150c1dea9b8cd9b99877610f9291e7
 - qmp socket: build/simpleos_wm_fullscreen_evidence/qmp.sock
-- kernel: build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf (sha256=deaa891ac9977429dcaffd71194588a24df097ebc1d22a6c174c8983b6f046b3)
-- disk image: build/simpleos_wm_fullscreen_evidence/fat32-x86_64-font.img (pass, sha256=d9f46eb12760d95528818bcd3f2f9de9662b5e8f95a24ebbbdbee6ef9551d3fa)
+- kernel: build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf (sha256=edcbddf3bf3504f4f941f77e9c07b3090c4fffa8d891aac274caa6b0786d5528)
+- disk image: build/simpleos_wm_fullscreen_evidence/fat32-x86_64-font.img (pass, sha256=c330ffe3b5f561db8860c6239684195fb14b2d56c11be2944cf0217563dbc41b)
 - pinned font asset: assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf (1708408 bytes, sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081)
 - guest font marker: [font-evidence] family=Noto Sans Mono asset_sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081 raster=pure-sfnt-glyf route=shared-wm-draw-ir component_id=taskbar-clock font_size=12 text=00:00 region=right56,bottom48 region_rgb_sha256=ffbd5f7690557565c42853ffd4fd4a6c6049203eaa0d8cc5f8cb981a409287c4
 - font region: build/simpleos_wm_fullscreen_evidence/font-region.rgb (0 bytes, sha256=-, origin=qemu-pmemsave)
 - scanout: address=4160749568 width=3840 height=2160 byte-pitch=15360 format=argb8888 generation=1
-- host nonce: simpleos-wm-1784311612-77304
+- host nonce: simpleos-wm-1784312162-83808
 - input sequences: baseline=0 maximize=0 restore=0
 - maximize IRQ/state/frame: - | - | -
 - restore IRQ/state/frame: - | - | -
@@ -27,7 +27,7 @@
 - baseline ppm: build/simpleos_wm_fullscreen_evidence/baseline.ppm (24883217 bytes)
 - maximized ppm: build/simpleos_wm_fullscreen_evidence/fullscreen.ppm (0 bytes)
 - restored ppm: build/simpleos_wm_fullscreen_evidence/restored.ppm (0 bytes)
-- serial log: build/simpleos_wm_fullscreen_evidence/serial.log (51182 bytes)
+- serial log: build/simpleos_wm_fullscreen_evidence/serial.log (51741 bytes)
 
 This wrapper boots the wm-simple-web SimpleOS QEMU target directly
 (same q35/max/2G/BGA-std flags as os.qemu_runner._wm_simple_web_qmp_capture_target),
