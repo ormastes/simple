@@ -916,3 +916,94 @@ pub(super) fn eval_collection_expr(
         _ => Ok(None),
     }
 }
+
+#[cfg(test)]
+mod seed_regression_tests {
+    //! Regression tests for 0ee3727522d: the interpreter's brace-form
+    //! `Expr::StructInit` handler (this file, `eval_collection_expr`) used to
+    //! build its field map purely from spread base + explicit fields, never
+    //! consulting the class's declared fields -- an omitted `= default` (or
+    //! bare, no-default) field was left missing from the map ENTIRELY, so
+    //! later `.field` access failed with "class has no field named X"
+    //! instead of yielding the default or nil. The paren-form constructor
+    //! path (`instantiate_class`) already pre-filled every declared field;
+    //! this fix brought brace-form construction to parity.
+
+    use crate::interpreter::evaluate_module;
+    use simple_parser::Parser;
+
+    /// Run a Simple snippet and return the `main = <expr>` exit code.
+    fn run(src: &str) -> i32 {
+        let mut parser = Parser::new(src);
+        let module = parser.parse().expect("parse");
+        evaluate_module(&module.items).expect("evaluate")
+    }
+
+    #[test]
+    fn brace_form_omitted_field_with_declared_default_uses_default_value() {
+        let src = r#"
+class Widget:
+    a: i64
+    b: i64 = 42
+    c: i64
+
+val w = Widget { a: 1, c: 3 }
+var result_ = -1
+if w.a == 1 and w.b == 42 and w.c == 3:
+    result_ = 0
+else:
+    result_ = 1
+main = result_
+"#;
+        assert_eq!(
+            run(src),
+            0,
+            "omitted field `b` (declared default 42) must be pre-filled, not missing entirely"
+        );
+    }
+
+    #[test]
+    fn brace_form_omitted_field_with_no_default_is_nil_not_missing() {
+        let src = r#"
+class Widget:
+    a: i64
+    b: i64
+    c: i64
+
+val w = Widget { a: 1, c: 3 }
+var result_ = -1
+if w.a == 1 and w.c == 3 and w.b == nil:
+    result_ = 0
+else:
+    result_ = 1
+main = result_
+"#;
+        // Pre-fix this either errored ("class has no field named b") or hit
+        // an out-of-bounds/incoherent read; post-fix `w.b` must read back
+        // as nil rather than the field being absent from the map.
+        assert_eq!(
+            run(src),
+            0,
+            "omitted field `b` with no declared default must read back as nil, not be missing (no OOB)"
+        );
+    }
+
+    #[test]
+    fn brace_form_all_fields_present_still_assigns_correct_values() {
+        let src = r#"
+class Widget:
+    a: i64
+    b: i64 = 42
+    c: i64
+
+val w = Widget { a: 10, b: 20, c: 30 }
+var result_ = -1
+if w.a == 10 and w.b == 20 and w.c == 30:
+    result_ = 0
+else:
+    result_ = 1
+main = result_
+"#;
+        assert_eq!(run(src), 0, "explicitly provided fields must not be clobbered by the default pre-fill pass");
+    }
+}

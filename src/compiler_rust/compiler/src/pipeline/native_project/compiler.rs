@@ -1013,4 +1013,65 @@ mod bootstrap_rewrite_tests {
         let out = apply_bootstrap_rewrite(src);
         assert!(out.contains("run_fn: any\n"), "got: {out}");
     }
+
+    /// Regression for 610b4572a32: a `?` immediately preceded by `)` is
+    /// always the Try operator on a call result and must survive the
+    /// nullable-type-suffix stripping pass. Table-driven over the shapes
+    /// that previously lost their `?` (BinaryWriter.len fault repro:
+    /// `val resp = _vfs_request(...)?` silently became
+    /// `val resp = _vfs_request(...)`).
+    #[test]
+    fn try_operator_after_call_close_paren_survives_rewrite() {
+        let cases: &[(&str, &str)] = &[
+            ("fn g():\n    val r = f(x)?\n", "f(x)?"),
+            ("fn g():\n    val r = f()?\n", "f()?"),
+            ("fn g():\n    val r = obj.method(a, b)?\n", "obj.method(a, b)?"),
+            // Nested call still ends in `)`, so the Try `?` right after it
+            // must also survive.
+            ("fn g():\n    val r = f(g(x))?\n", "f(g(x))?"),
+            // `?` followed by other terminator characters (not just newline).
+            ("fn g():\n    val items = [f(x)?, 1]\n", "f(x)?,"),
+            ("fn g():\n    if f(x)?:\n        pass\n", "f(x)?:"),
+        ];
+        for (src, expect_contains) in cases {
+            let out = apply_bootstrap_rewrite(src);
+            assert!(
+                out.contains(expect_contains),
+                "Try operator after `)` must survive for {src:?}, got: {out}"
+            );
+        }
+    }
+
+    /// Unchanged behavior: optional-type suffix `?` (e.g. `[T]?`, `Type?`)
+    /// is NOT preceded by `)`, so it must still be stripped exactly as
+    /// before the 610b4572a32 fix.
+    #[test]
+    fn optional_type_suffix_still_stripped_when_not_preceded_by_call_close() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("fn g() -> [T]?:\n    return []\n", "-> [T]:\n", "[T]?"),
+            ("struct S:\n    field: Widget?\n", "field: Widget\n", "Widget?"),
+        ];
+        for (src, expect_contains, must_not_contain) in cases {
+            let out = apply_bootstrap_rewrite(src);
+            assert!(out.contains(expect_contains), "case {src:?} got: {out}");
+            assert!(!out.contains(must_not_contain), "case {src:?} got: {out}");
+        }
+    }
+
+    /// Documents CURRENT (not necessarily desired) behavior: index-Try
+    /// `dict[k]?` is preceded by `]`, not `)`, so it is NOT covered by the
+    /// 610b4572a32 `)`-preceded special case and its `?` is still silently
+    /// stripped today -- the same bug class as the fixed call-Try case, left
+    /// open. Pin this so a future fix (or further regression) is caught by
+    /// an intentional test update, not a silent behavior change.
+    #[test]
+    fn dict_index_try_operator_currently_stripped_documented_gap() {
+        let src = "fn g():\n    val r = dict[k]?\n";
+        let out = apply_bootstrap_rewrite(src);
+        assert!(
+            !out.contains("dict[k]?"),
+            "current behavior: index-Try `?` (preceded by `]`) is still stripped: got {out}"
+        );
+        assert!(out.contains("dict[k]\n"), "got: {out}");
+    }
 }

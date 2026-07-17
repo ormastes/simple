@@ -1012,6 +1012,13 @@ pub extern "C" fn spl_get_arg(index: i64) -> *const std::os::raw::c_char {
 // ---------------------------------------------------------------------------
 
 fn main() {
+    // TEMPORARY debug hook for bug C8 (trait-object vtable dispatch
+    // out-of-bounds) investigation. Remove before landing the fix.
+    if std::env::var("SIMPLE_DEBUG_VTABLE_TEST").is_ok() {
+        simple_compiler::codegen::vtable_c8_debug::run();
+        return;
+    }
+
     // macOS GUI mode: run on main thread (Cocoa requires EventLoop on main thread).
     // Shared-WM browser mode also needs this even when SIMPLE_GUI is not set.
     if std::env::var("SIMPLE_GUI").is_ok() || browser_shared_wm_needs_main_thread() {
@@ -1758,5 +1765,40 @@ mod tests {
 
         assert!(target.is_none());
         assert_eq!(program_args, vec!["--target", "x86_64-simpleos"]);
+    }
+
+    // -------------------------------------------------------------------
+    // Regression tests for 7a4cb1ab3d3: the pure-Rust seed bin has no
+    // Simple-generated code in its link, so it must provide its own
+    // spl_arg_count/spl_get_arg for the runtime's extern-imported CLI-arg
+    // accessors (cli_sffi.rs) -- otherwise every plain
+    // `cargo build -p simple-driver --bin simple` fails with undefined
+    // symbols. Verify the providers are present, exported, and behave
+    // correctly (including the negative/out-of-range null-guard).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn spl_arg_count_matches_process_args_len() {
+        let expected = std::env::args().count() as i64;
+        assert_eq!(spl_arg_count(), expected);
+    }
+
+    #[test]
+    fn spl_get_arg_returns_first_process_arg() {
+        let expected = std::env::args().next().expect("process always has argv[0]");
+        let ptr = spl_get_arg(0);
+        assert!(!ptr.is_null(), "argv[0] must be provided");
+        let got = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn spl_get_arg_out_of_range_and_negative_index_returns_null() {
+        assert!(
+            spl_get_arg(-1).is_null(),
+            "negative index must return null, not underflow the `as usize` cast"
+        );
+        let out_of_range = spl_arg_count() + 1000;
+        assert!(spl_get_arg(out_of_range).is_null(), "out-of-range index must return null, not read OOB");
     }
 }

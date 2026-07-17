@@ -2562,4 +2562,78 @@ mod tests {
         assert!(names.contains("rt_dict_new"));
         assert!(names.contains("rt_dict_set"));
     }
+
+    // =========================================================================
+    // Regression tests for 8932fcb3a14: vtable selection must be keyed by
+    // struct NAME (collision-free, whole-program `vtable_data_ids`), not the
+    // raw per-module `TypeId` (`vtable_type_ids`) -- `HirModule::new()` gives
+    // every module a fresh `TypeIdAllocator` starting at 16, so unrelated
+    // structs in different modules routinely collide on the same numeric
+    // TypeId. Both maps must use `entry().or_insert()` (first registration
+    // wins) so a struct's LATER (struct, trait) impl registration -- e.g. an
+    // `Engine2DExtended` impl that is never dynamically dispatched -- cannot
+    // silently clobber an EARLIER one (e.g. `RenderBackend`, the vtable that
+    // IS read through dynamic dispatch).
+    // =========================================================================
+
+    #[test]
+    fn vtable_data_ids_first_registration_wins_by_struct_name() {
+        let mut backend = test_backend();
+        let render_backend_vtable = backend
+            .module
+            .declare_anonymous_data(false, false)
+            .expect("declare first vtable data");
+        let engine2d_extended_vtable = backend
+            .module
+            .declare_anonymous_data(false, false)
+            .expect("declare second vtable data");
+        assert_ne!(render_backend_vtable, engine2d_extended_vtable);
+
+        // Same struct name ("SoftwareBackend"), two (struct, trait) impl
+        // registrations -- RenderBackend registered first (source/impl
+        // declaration order), Engine2DExtended second.
+        backend
+            .vtable_data_ids
+            .entry("SoftwareBackend".to_string())
+            .or_insert(render_backend_vtable);
+        backend
+            .vtable_data_ids
+            .entry("SoftwareBackend".to_string())
+            .or_insert(engine2d_extended_vtable);
+
+        assert_eq!(
+            backend.vtable_data_ids.get("SoftwareBackend"),
+            Some(&render_backend_vtable),
+            "later registration for the same struct name must NOT clobber the first (dispatched) vtable"
+        );
+    }
+
+    #[test]
+    fn vtable_type_ids_first_registration_wins_across_colliding_typeid() {
+        let mut backend = test_backend();
+        let software_backend_vtable = backend
+            .module
+            .declare_anonymous_data(false, false)
+            .expect("declare first vtable data");
+        let baremetal_backend_vtable = backend
+            .module
+            .declare_anonymous_data(false, false)
+            .expect("declare second vtable data");
+        assert_ne!(software_backend_vtable, baremetal_backend_vtable);
+
+        // `TypeIdAllocator` restarts at 16 per module, so two UNRELATED
+        // structs in different modules can and do land on the same numeric
+        // TypeId (observed collision: TypeId(155) in the SimpleOS kernel
+        // build, shared by 12+ backend structs).
+        let colliding_type_id = TypeId(155);
+        backend.vtable_type_ids.entry(colliding_type_id).or_insert(software_backend_vtable);
+        backend.vtable_type_ids.entry(colliding_type_id).or_insert(baremetal_backend_vtable);
+
+        assert_eq!(
+            backend.vtable_type_ids.get(&colliding_type_id),
+            Some(&software_backend_vtable),
+            "first struct registered under a colliding TypeId must keep the slot; the whole-program \
+             map must not let a later unrelated struct's impl silently alias it"
+        );
+    }
 }
