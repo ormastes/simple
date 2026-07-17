@@ -41,3 +41,29 @@ physical source must be parsed once and its parsed module reused.
    guard without cache deletion or seed fallback.
 4. A focused regression covers two import aliases resolving to one source and
    proves one parse/module result.
+
+## 2026-07-17 continuation
+
+Phase 2 now builds a unique physical-source parse plan using lexical path
+normalization, parses each physical file once, caches the resulting `Module`
+in explicitly reassigned arrays, and registers that same result under every
+logical alias. Phase profiling now reports `collected` and `unique` source
+counts separately. The focused two-alias plan regression passed under the
+bootstrap seed before the final dictionary-to-array reliability hardening; the
+final source awaits executable re-verification in the next bounded cycle.
+
+Executable Stage4 acceptance remains open because the retained Stage3 spends
+over seven minutes in phase 1 before the new phase-2 code can run. A refreshed
+24 MiB pure-Simple Stage3 was built successfully (714 compiled, zero failed,
+99.7 seconds) using an isolated source-correct runtime overlay. Replacing the
+phase-1 membership arrays with local `Dict<text, bool>` values was rejected:
+the refreshed Stage3 reproduced the known compiled-dictionary mutation defect,
+reached 12.7 GiB RSS in 85 seconds, and never left source loading. That unsafe
+change was removed.
+
+The next bounded continuation must implement a reliable array-backed
+open-addressed text set (exact string comparison after hash probing) for the
+phase-1 loaded-module, queued-import, and scanned-path sets, rebuild Stage3,
+then verify the phase-2 unique count and one-parse-per-path trace. No further
+Stage4 retry is permitted in the current continuation because the three-cycle
+cap was reached.

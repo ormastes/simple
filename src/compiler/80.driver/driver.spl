@@ -71,6 +71,7 @@ use compiler.driver.driver_source_loading.{
     _driver_collect_sources, _driver_collect_sources_via_find,
     _driver_entry_import_dirname, _driver_entry_import_module_paths,
     _driver_resolve_entry_import, _driver_collect_entry_import_source,
+    _driver_canonical_source_path, _driver_unique_physical_sources,
     _format_type_infer_error, _format_nll_error, _format_coherence_error, _format_trait_error
 }
 
@@ -96,6 +97,14 @@ fn _driver_text_list_contains(items: [text], item: text) -> bool:
             return true
         i = i + 1
     false
+
+fn _driver_text_list_index(items: [text], item: text) -> i64:
+    var i = 0
+    while i < items.len():
+        if items[i] == item:
+            return i
+        i = i + 1
+    -1
 
 # Env-gated driver trace probe. Set SIMPLE_INTERP_TRACE=1 to enable the
 # [DRV]/[BOOTSTRAP-PHASE] loading/lowering probe trail.
@@ -500,10 +509,11 @@ pub class CompilerDriver:
                 # Its imports are identical for every alias, so scanning each
                 # alias grows the closure queue exponentially and can exhaust
                 # memory before parsing begins.
-                if _driver_text_list_contains(closure_scanned_paths, closure_src.path):
+                val closure_physical_key = _driver_canonical_source_path(closure_src.path)
+                if _driver_text_list_contains(closure_scanned_paths, closure_physical_key):
                     closure_idx = closure_idx + 1
                     continue
-                closure_scanned_paths = closure_scanned_paths.push(closure_src.path)
+                closure_scanned_paths = closure_scanned_paths.push(closure_physical_key)
                 val closure_dir = _driver_entry_import_dirname(closure_src.path)
                 val closure_imports = _driver_entry_import_module_paths(closure_src.content)
                 if source_trace:
@@ -618,28 +628,42 @@ pub class CompilerDriver:
                         if not requested_entry_match:
                             self.ctx.errors.push("native-build entry mismatch: requested entry '{native_entry}' but resolver also selected '{source.path}' (module {source.module_name}) — refusing silent substitution")
                             return false
-                    if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
-                        dtrace("[BOOTSTRAP-PHASE] phase2:parse:entry {source.path} module={source.module_name}")
-                    log_phase("phase2:parse:file:start {source.path} chars={source.content.len()}")
-                    val entry_module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
-                    log_phase("phase2:parse:file:done {source.path}")
-                    # parser_error() only sets the par_had_error flag (par_errors
-                    # is a dead list and parser_error_count() a stub returning 0);
-                    # nothing in this pipeline ever consumed it, so any parse
-                    # error during the entry parse was silently ignored and the
-                    # build proceeded on the error-recovered AST -- a
-                    # silent-wrong-binary channel (found via the `-> ?i64`
-                    # prefix-type diagnostic being emitted-and-ignored). Read via
-                    # the accessor: interpreted module globals read directly from
-                    # another module are stale. Fail phase 2 on any parse error.
-                    if par_had_error_get():
-                        self.ctx.errors.push("parse error in {source.path} (see [parser_error] output above)")
-                        return false
-                    if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
-                        dtrace("[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
-                    self.ctx.modules[source.module_name] = entry_module
                     entry_sources = entry_sources.push(source)
                 entry_idx = entry_idx + 1
+            val unique_entry_sources = _driver_unique_physical_sources(entry_sources)
+            log_phase("phase2:parse:closure:sources collected={entry_sources.len()} unique={unique_entry_sources.len()}")
+            var parsed_entry_paths: [text] = []
+            var parsed_entry_modules: [Module] = []
+            for source in unique_entry_sources:
+                val physical_key = _driver_canonical_source_path(source.path)
+                if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
+                    dtrace("[BOOTSTRAP-PHASE] phase2:parse:entry {source.path} module={source.module_name}")
+                log_phase("phase2:parse:file:start {source.path} chars={source.content.len()}")
+                val entry_module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
+                log_phase("phase2:parse:file:done {source.path}")
+                # parser_error() only sets the par_had_error flag (par_errors
+                # is a dead list and parser_error_count() a stub returning 0);
+                # nothing in this pipeline ever consumed it, so any parse
+                # error during the entry parse was silently ignored and the
+                # build proceeded on the error-recovered AST -- a
+                # silent-wrong-binary channel (found via the `-> ?i64`
+                # prefix-type diagnostic being emitted-and-ignored). Read via
+                # the accessor: interpreted module globals read directly from
+                # another module are stale. Fail phase 2 on any parse error.
+                if par_had_error_get():
+                    self.ctx.errors.push("parse error in {source.path} (see [parser_error] output above)")
+                    return false
+                if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
+                    dtrace("[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
+                parsed_entry_paths = parsed_entry_paths.push(physical_key)
+                parsed_entry_modules = parsed_entry_modules.push(entry_module)
+            for source in entry_sources:
+                val physical_key = _driver_canonical_source_path(source.path)
+                val parsed_idx = _driver_text_list_index(parsed_entry_paths, physical_key)
+                if parsed_idx < 0:
+                    self.ctx.errors.push("internal entry-closure parse cache miss for {source.path}")
+                    return false
+                self.ctx.modules[source.module_name] = parsed_entry_modules[parsed_idx]
             self.ctx.sources = entry_sources
             if entry_sources.len() == 0:
                 self.ctx.errors.push("native entry source not found: {native_entry}")

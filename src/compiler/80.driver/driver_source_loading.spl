@@ -62,6 +62,46 @@ pub fn _driver_module_name_from_path(path: text) -> text:
     mod_path = mod_path.replace(".sdn", "")
     mod_path.replace("/", ".")
 
+pub fn _driver_canonical_source_path(path: text) -> text:
+    """Lexically normalize a source path for physical-file identity.
+    Source discovery is repo-local, so resolving `.`/`..`, repeated separators,
+    and Windows separators is sufficient without filesystem/symlink I/O."""
+    val normalized = path.replace("\\", "/")
+    val absolute = normalized.starts_with("/")
+    var parts: [text] = []
+    for part in normalized.split("/"):
+        if part == "" or part == ".":
+            continue
+        if part == ".." and parts.len() > 0 and parts[parts.len() - 1] != "..":
+            parts = parts[0:parts.len() - 1]
+        elif part == ".." and not absolute:
+            parts = parts.push(part)
+        elif part != "..":
+            parts = parts.push(part)
+    val joined = parts.join("/")
+    if absolute:
+        "/" + joined
+    else:
+        joined
+
+pub fn _driver_unique_physical_sources(sources: [SourceFile]) -> [SourceFile]:
+    """Keep the first logical source for each normalized physical path.
+    Logical aliases remain in the caller's source list for module registration;
+    this list is only the phase-2 parse plan."""
+    var unique: [SourceFile] = []
+    var seen: [text] = []
+    for source in sources:
+        val key = _driver_canonical_source_path(source.path)
+        var already_seen = false
+        for seen_key in seen:
+            if seen_key == key:
+                already_seen = true
+                break
+        if not already_seen:
+            seen = seen.push(key)
+            unique = unique.push(source)
+    unique
+
 pub fn _driver_module_aliases(path: text, content: text, module_name: text) -> [SourceFile]:
     # Entry-closure loading adds the requested import name after resolution.
     # Do not invent lib.* -> std.* aliases here: real src/std mirrors may own them.
