@@ -16,7 +16,13 @@
 # @cover src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl 5%
 
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.core.ast.{ast_reset}
 use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
 
 describe "Flat AST bridge interpolation fragment recovery does not stick par_had_error":
     it "recovers from a non-expression brace region in a string literal without leaving par_had_error set":
@@ -30,6 +36,45 @@ describe "Flat AST bridge interpolation fragment recovery does not stick par_had
 
         expect(module.constants.contains("s")).to_equal(true)
         expect(parser_has_errors()).to_equal(false)
+
+    it "keeps brace-literal function scopes isolated during bootstrap HIR lowering":
+        val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", "1")).to_equal(true)
+
+        # Build the June 2026 repro source without placing its unmatched open
+        # and close braces in one host-test string literal.
+        val open = "{"
+        val close = "}"
+        val src = "fn open_brace(x: text) -> text:\n    \" " + open + " \"\n\n" +
+            "fn main():\n" +
+            "    val ob = open_brace(\"unused\")\n" +
+            "    val rule = \".a\" + ob + \"color: red\" + \" " + close + " \"\n" +
+            "    print(\"RULE: [\" + rule + \"]\")\n\n" +
+            "main()\n"
+
+        ast_reset()
+        val module = parse_and_build_module(src, "brace_literal_scope.spl")
+        var lowering = HirLowering.with_filename("brace_literal_scope.spl")
+        val hir = lowering.lower_module(module)
+        val open_id = hir.symbols.lookup("open_brace")
+        val main_id = hir.symbols.lookup("main")
+        var kept_open = false
+        var kept_main = false
+        for function in hir.functions.values():
+            if function.name == "open_brace":
+                kept_open = true
+            if function.name == "main":
+                kept_main = true
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(open_id.?).to_equal(true)
+        expect(main_id.?).to_equal(true)
+        expect(kept_open).to_equal(true)
+        expect(kept_main).to_equal(true)
+
+        ast_reset()
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)).to_equal(true)
 
     it "still reports a real top-level parse error via the same flag":
         # Sanity check: the fix must not blind the gate to genuine module-level

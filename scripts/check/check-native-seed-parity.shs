@@ -27,6 +27,8 @@
 # (stderr — banners/diagnostics — is captured separately and never enters
 # the compared value) and normalized via `tr -d '\n' | tr -d ' '` to a
 # canonical, whitespace-insensitive character sequence before comparing.
+# A parity case may also supply a fixed expected value; then both normalized
+# outputs must match that value as well as each other.
 #
 # Every seed and native run is wrapped in `timeout` (see SEED_TIMEOUT_S /
 # NATIVE_RUN_TIMEOUT_S below): while authoring this harness the seed
@@ -994,6 +996,23 @@ fn main() -> i64:
 EOF
 }
 
+write_case_brace_literal_scope() {
+    # June 2026 cross-function repro adapted for the CLI harness: unmatched
+    # literal braces must stay literal and must not poison HIR scope or make
+    # the entry point disappear. The CLI invokes main, so omit the source
+    # repro's trailing main() call and return an explicit native entry status.
+    cat >"$1" <<'EOF'
+fn open_brace(x: text) -> text:
+    " { "
+
+fn main() -> i64:
+    val ob = open_brace("unused")
+    val rule = ".a" + ob + "color: red" + " } "
+    print("RULE: [" + rule + "]")
+    return 0
+EOF
+}
+
 write_case_dict_from_call_keys() {
     # dict returned from a function, keys()-iter index (abde1838e3e): the call
     # -result dict's string keys came back un-decoded so every d[k] returned 0;
@@ -1628,6 +1647,7 @@ run_strict_dual_backend_case() {
 
 run_parity_case() {
     id="$1"; writer="$2"
+    expected="${3:-}"
     case_selected "$id" || return 0
     src="$WORK_DIR/case_${id}_${STAMP}.spl"
     bin="$WORK_DIR/case_${id}_${STAMP}_bin"
@@ -1644,6 +1664,10 @@ run_parity_case() {
         native_norm="$(printf '%s' "$native_raw" | norm)"
         if [ "$native_rc" -ne 0 ]; then
             record "$id" "parity" "FAIL" "native run rc=$native_rc; stderr=$build_log.run.stderr"
+        elif [ -n "$expected" ] && [ "$seed_norm" != "$expected" ]; then
+            record "$id" "parity" "FAIL" "seed=[$seed_norm] want=[$expected] REGRESSION"
+        elif [ -n "$expected" ] && [ "$native_norm" != "$expected" ]; then
+            record "$id" "parity" "FAIL" "native=[$native_norm] want=[$expected] REGRESSION"
         elif [ "$native_norm" = "$seed_norm" ]; then
             record "$id" "parity" "PASS" "seed=[$seed_norm] native=[$native_norm]"
         else
@@ -1792,6 +1816,7 @@ run_strict_dual_backend_case result_try write_case_result_try "8boom"
 run_strict_dual_backend_case any_forwarding write_case_any_forwarding "10"
 run_strict_dual_backend_case logical_short_circuit write_case_logical_short_circuit "falsetrueRtrueRtrue"
 run_strict_dual_backend_case interp_logical_bool write_case_interp_logical_bool "v=true"
+run_parity_case brace_literal_scope write_case_brace_literal_scope "RULE:[.a{color:red}]"
 run_strict_dual_backend_case process_run_timeout write_case_process_run_timeout "ab0outerr72500002500000partialtruetrue-10gone0"
 run_strict_dual_backend_case dynload_tagged_text write_case_dynload_tagged_text "dynload-ok"
 run_strict_dual_backend_case mixed_numeric_comparison write_case_mixed_numeric_comparison "101001010011001100110011000000000011"

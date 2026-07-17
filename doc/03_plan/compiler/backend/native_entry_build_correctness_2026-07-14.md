@@ -13,12 +13,13 @@ failure is **never** silently converted to a wrong answer.
 - **Gate 1 — matrix:** `scripts/check/native-smoke-matrix.shs` must report
   `total=15 pass=15 fail=0 codegen_fallback_hits=0`.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
-  regression harness) must report `native_seed_parity=true`. It defines **78
-  logical cases / 99 recorded checks** because strict-dual cases record LLVM
+  regression harness) must report `native_seed_parity=true`. It defines **79
+  logical cases / 100 recorded checks** because strict-dual cases record LLVM
   and Cranelift separately; execution of the expanded matrix is pending.
   The full unfiltered gate is now scheduled on Linux x86_64 LLVM (STRICT-DUAL
   cases also build Cranelift); its first CI execution is pending. Five modes:
-  PARITY (seed==native after newline-normalize), NATIVE-AUTHORITATIVE
+  PARITY (seed==native after newline-normalize, with an optional fixed expected
+  value that both must match), NATIVE-AUTHORITATIVE
   (oracle provably broken → assert native==known-correct + document divergence),
   STRICT-DUAL (LLVM and Cranelift must match a fixed expected value), LOUD-FAIL
   (unsupported constructs and overflow must build-fail without leaving a
@@ -98,6 +99,11 @@ the shared binary — deploys require explicit user go-ahead).
   `interp_bool_float`, and `static_ctor_disambiguated` pin the entrypoint,
   closure, dict-call, collection, interpolation, and constructor fixes. The
   expanded dual-backend matrix still requires the executable gate above.
+- The `brace_literal_scope` parity case carries the June unmatched-brace
+  cross-function reproduction adapted for the CLI harness: it returns `i64`
+  from `main` and omits the trailing `main()` call because the CLI invokes the
+  entry point. Its source is present, but execution is pending and the original
+  bug remains open.
 - Open filed bugs, in bottom-up order:
   - `native_try_op_on_option_silent_wrong_2026-07-14.md` source-implements a
     fail-closed path for authoritatively typed locals, direct-call returns, and

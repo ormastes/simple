@@ -1,7 +1,7 @@
 # Brace-containing string literal corrupts lowering scope across functions
 
 Date: 2026-06-12
-Status: open (workaround in place)
+Status: open (current-source safeguards present; exact regression execution pending)
 Severity: P2
 Related: `short_grammar_placeholder_interpolation_2026-05-27.md`,
 memory note "Brace Interpolation in Literals"
@@ -59,3 +59,20 @@ inside must lower as plain text and never affect other functions' scopes.
 Audit interpolation detection in the lexer/lowering: a lone `{` followed by
 whitespace (no identifier) should not open an interpolation region; lowering
 errors inside one function must not refer to locals of another.
+
+## Current-source audit (2026-07-17)
+
+The current normal flat bridge already falls back to a plain literal when an
+interpolation fragment is invalid or braces remain unmatched. The dormant
+bootstrap HIR helper also produces no interpolation parts for the exact
+unmatched `" { "` opener, but it has no live call root and therefore is not
+evidence that the historical cross-function scope-corruption reproduction is
+fixed. No speculative bootstrap-helper change is retained in this lane.
+
+The parity harness contains the June reproduction adapted for CLI execution:
+`main` returns `i64`, and the source-level trailing `main()` call is omitted
+because the CLI invokes the entry point. It asserts both seed and native outputs
+after the harness's standard whitespace normalization. The expected output is
+`RULE:[.a{color:red}]`. This regression has not been executed in the current
+lane, so the original bug remains open until the seed/native run proves that
+scope isolation and entry-point preservation both hold.
