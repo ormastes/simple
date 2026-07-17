@@ -2,7 +2,12 @@
 
 **Date:** 2026-07-17
 **Severity:** high (fail-open: silent no-op artifacts look like successful builds)
-**Status:** partially fixed — pure-Simple dynSMF detection landed 2026-07-17
+**Status:** fixed 2026-07-17 (both halves) — Rust emitter root fix landed 31202fb53e4:
+compile_module_to_memory_native_with_context now wraps top-level script
+statements via wrap_entry_script_as_main before lowering (real payload —
+print program emits 3728-byte SMF whose run prints run-ok) and hard-errors
+if main fails to materialize; run-path guard added for silent no-op SMF.
+Pure-Simple dynSMF detection landed earlier the same day
 (export-witness check in `src/os/smf/smf_dynlib.spl` /
 `src/os/smf/dynsmf_session.spl`: artifact status now scans the artifact's own
 bytes for each required `exports` name as a null-terminated ASCII run — the
