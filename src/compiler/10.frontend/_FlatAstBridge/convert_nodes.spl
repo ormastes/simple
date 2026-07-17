@@ -487,7 +487,17 @@ fn flat_bridge_parse_interp_inner(inner: text) -> i64:
     val had_error_before = parser_has_errors()
     val diagnostics_suppressed_before = parser_diagnostics_suppressed_get()
     parser_diagnostics_suppressed_set(true)
-    lex_init_with_path(inner, "")
+    # Bug interp_brace_literal_collides_with_string_interpolation: a
+    # placeholder written with padding spaces (e.g. `{ x }`, the common style
+    # for JSON/SDN-shaped text) previously sub-lexed the RAW inner text
+    # including the surrounding whitespace; something about that leading/
+    # trailing padding made the sub-parse fail to land exactly on TOK_EOF, so
+    # `part_idx` came back -1 and the whole placeholder silently fell back to
+    # printing its literal `{ x }` text -- even though `x` is a perfectly
+    # valid, declared variable. The seed oracle trims this padding before
+    # parsing (`{ x }` interpolates fine there); do the same here so a
+    # spaced-out placeholder behaves identically to its unspaced `{x}` form.
+    lex_init_with_path(inner.trim(), "")
     parser_advance()
     val idx = parse_expr()
     if idx < 0:
@@ -521,7 +531,20 @@ fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
     val n = value.len()
     while i < n:
         val ch = value[i:i + 1]
-        if depth == 0 and ch == "{":
+        val ch_next = if i + 1 < n: value[i + 1:i + 2] else: ""
+        if depth == 0 and ch == "{" and ch_next == "{":
+            # `{{` escape (Python f-string / Rust format! parity; doc
+            # interp_brace_literal_collides_with_string_interpolation): a
+            # literal `{` written doubled so it is never mistaken for the
+            # start of an interpolation region. Do not open a region --
+            # split_interpolation_segments (MIR layer) applies the same
+            # doubled-brace skip so the literal-segment positions stay
+            # aligned with this function's interps list.
+            i = i + 1
+        elif depth == 0 and ch == "}" and ch_next == "}":
+            # `}}` escape, mirror of `{{` above.
+            i = i + 1
+        elif depth == 0 and ch == "{":
             depth = 1
             inner = ""
         elif depth > 0 and ch == "{":
@@ -548,6 +571,40 @@ fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
         return []
     interps
 
+fn flat_bridge_decode_brace_escapes(value: text) -> text:
+    """Bug interp_brace_literal_collides_with_string_interpolation: a string
+    made up ENTIRELY of `{{`/`}}` escapes (no real `{expr}` placeholder) skips
+    the MIR interpolation-lowering path entirely (has_interps stays false, see
+    expr_dispatch.spl), so nothing downstream ever decodes the doubled braces
+    -- decode them to single literal ones here, directly on the plain-literal
+    text. (When a real placeholder IS also present, str_val is left untouched
+    and split_interpolation_segments -- 50.mir -- does this same decode while
+    splitting segments, since that path needs positional alignment with the
+    interps list instead of a standalone text rewrite.)
+
+    NOTE: does not use an Option-based "still needs processing" signal here
+    on purpose -- this runtime's `[T]?` representation cannot distinguish
+    `Some([])` from `nil` (an empty list and an absent value both come back
+    as an empty/false `.?` check), so signaling through the interps field
+    silently degrades an intended `Some([])` into `nil`.
+    """
+    var result = ""
+    var i = 0
+    val n = value.len()
+    while i < n:
+        val ch = value[i:i + 1]
+        val ch_next = if i + 1 < n: value[i + 1:i + 2] else: ""
+        if ch == "{" and ch_next == "{":
+            result = result + "{"
+            i = i + 2
+        elif ch == "}" and ch_next == "}":
+            result = result + "}"
+            i = i + 2
+        else:
+            result = result + ch
+            i = i + 1
+    result
+
 fn convert_flat_expr(idx: i64) -> Expr:
     if idx < 0:
         return Expr(kind: ExprKind.NilLit, span: make_span())
@@ -563,8 +620,13 @@ fn convert_flat_expr(idx: i64) -> Expr:
     elif tag == EXPR_STRING_LIT:
         val str_val = expr_get_str(idx)
         val str_interps = flat_bridge_build_string_interps(str_val, span)
-        val str_interps_opt = if str_interps.len() > 0: str_interps else: nil
-        return Expr(kind: ExprKind.StringLit(str_val, str_interps_opt), span: span)
+        if str_interps.len() > 0:
+            return Expr(kind: ExprKind.StringLit(str_val, str_interps), span: span)
+        else:
+            # No real `{expr}` placeholder (str_interps is empty). Decode any
+            # `{{`/`}}` escapes directly since nothing downstream will (see
+            # flat_bridge_decode_brace_escapes).
+            return Expr(kind: ExprKind.StringLit(flat_bridge_decode_brace_escapes(str_val), nil), span: span)
     elif tag == EXPR_BOOL_LIT:
         return Expr(kind: ExprKind.BoolLit(expr_get_int(idx) != 0), span: span)
     elif tag == EXPR_NIL_LIT:
