@@ -13,9 +13,8 @@ Three additional exact owners remain ratcheted pending dedicated prerequisites:
 the contract-pinned minimal freestanding argv facade, the SimpleOS guest target
 pipeline, and the WM Draw IR scalar-buffer workaround for documented Stage3
 aggregate corruption and QEMU FFI cost. Their existing contract tests pin the
-restricted closures; the hosted image patcher and CLI test entry remain
-unclassified consumer violations, and the SimpleOS tool main remains a facade
-migration item.
+restricted closures. The hosted image patcher, SimpleOS tool main, and CLI test
+entry now use narrow facades; no unclassified direct-runtime consumer remains.
 
 **Status:** GATE LIVE, GAPS OPEN (2026-07-07) · **Owner:** UI/rendering · **Scope:** enforce the
 three-facade rendering architecture across `src/app/**` and `examples/**`.
