@@ -1099,8 +1099,27 @@ fn try_compile_builtin_method_call<M: Module>(
         "clear" => "rt_array_clear",
         // Generic collection methods (work on String, Array, Tuple, Dict)
         "len" | "length" => "rt_len",
-        // Result/Option methods
-        "unwrap" | "unwrap_or" => "rt_enum_payload",
+        // Result/Option methods.
+        //
+        // This is the bare/dynamic-dispatch fallback used when the receiver's
+        // static type is erased (`Any`) or is a flat-nullable `T?` (HIR
+        // `Pointer { inner: T }`, which stores its payload directly rather
+        // than as a boxed `Option::Some` enum object). `rt_enum_payload`
+        // returns tagged-nil (`RuntimeValue` bit pattern `3`, see
+        // `create_enum_value` in codegen/instr/result.rs) whenever the
+        // receiver is not a genuine heap-tagged `Enum` object — which is
+        // always true for flat-nullable locals holding a present value.
+        // Callers here then either pass that nil straight to `print` (empty
+        // output instead of the value) or, when the statically-inferred
+        // return type is an integer, wrap it in another `BoxInt`, which
+        // re-tags the nil bit-pattern as if it were a raw int and prints the
+        // tag pattern itself (`3`) instead of the real value — see
+        // doc/08_tracking/bug/seed_interp_flat_nullable_unwrap_wrong_value_2026-07-16.md.
+        // `rt_unwrap_or_self` has the correct fallback semantics: it returns
+        // the enum's payload for a genuine boxed `Enum`, and otherwise
+        // returns the receiver value unchanged (already the right answer for
+        // a flat-nullable's raw/tagged payload).
+        "unwrap" | "unwrap_or" => "rt_unwrap_or_self",
         "is_none" => {
             let Some(&func_id) = ctx.runtime_funcs.get("rt_is_none") else {
                 return Ok(None);

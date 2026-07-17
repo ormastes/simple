@@ -81,6 +81,47 @@ impl<'a> MirLowerer<'a> {
         matches!(registry.get(*ret), Some(HirType::Array { element, .. }) if *element == element_type)
     }
 
+    /// Box a scalar payload value before storing it in an `Option`/`Result`
+    /// enum object (`OptionSome`/`ResultOk`/`ResultErr`).
+    ///
+    /// `rt_enum_new` stores `payload` as an opaque `RuntimeValue` and
+    /// `rt_enum_payload`/`rt_unwrap_or_self` return it verbatim — the
+    /// convention everywhere else in this runtime is that such payloads are
+    /// tagged (`(value << 3) | TAG_INT` for ints, `TAG_HEAP` for heap
+    /// objects). Integer/bool literals lowered as MIR values are native
+    /// (untagged) scalars, so storing them directly makes the enum's
+    /// payload field hold a raw value with an accidental tag-bit pattern:
+    /// `Some(9)` stores raw `9`, whose low 3 bits (`0b001`) happen to equal
+    /// `TAG_HEAP`, so a later consumer (e.g. `print`) misreads it as an
+    /// invalid heap pointer (`<invalid-heap:0x9>`) instead of the tagged int
+    /// `9`. This mirrors the general enum-variant-payload boxing already
+    /// done a few lines below for arbitrary user enums (see
+    /// `doc/08_tracking/bug/enum_field_i64_zero_destructure_2026-04-28.md`);
+    /// the `Some`/`Ok`/`Err` fast paths above bypassed that logic.
+    fn box_enum_payload_if_needed(&mut self, value: VReg, arg_ty: TypeId) -> MirLowerResult<VReg> {
+        let needs_box = matches!(
+            arg_ty,
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::BOOL
+        );
+        if !needs_box {
+            return Ok(value);
+        }
+        self.with_func(|func, current_block| {
+            let boxed = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::BoxInt { dest: boxed, value });
+            boxed
+        })
+    }
+
     pub(super) fn box_arg_for_any_param(&mut self, arg: VReg, arg_expr: &HirExpr) -> MirLowerResult<VReg> {
         let arg_ty = arg_expr.ty;
         let needs_int_box = matches!(
@@ -208,26 +249,32 @@ impl<'a> MirLowerer<'a> {
         if let HirExprKind::Global(name) = &callee.kind {
             match (name.as_str(), arg_regs.as_slice()) {
                 ("Some", [value]) => {
+                    let arg_ty = args.first().map(|a| a.ty).unwrap_or(TypeId::ANY);
+                    let value = self.box_enum_payload_if_needed(*value, arg_ty)?;
                     return self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::OptionSome { dest, value: *value });
+                        block.instructions.push(MirInst::OptionSome { dest, value });
                         dest
                     });
                 }
                 ("Ok", [value]) => {
+                    let arg_ty = args.first().map(|a| a.ty).unwrap_or(TypeId::ANY);
+                    let value = self.box_enum_payload_if_needed(*value, arg_ty)?;
                     return self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::ResultOk { dest, value: *value });
+                        block.instructions.push(MirInst::ResultOk { dest, value });
                         dest
                     });
                 }
                 ("Err", [value]) => {
+                    let arg_ty = args.first().map(|a| a.ty).unwrap_or(TypeId::ANY);
+                    let value = self.box_enum_payload_if_needed(*value, arg_ty)?;
                     return self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::ResultErr { dest, value: *value });
+                        block.instructions.push(MirInst::ResultErr { dest, value });
                         dest
                     });
                 }
@@ -320,10 +367,12 @@ impl<'a> MirLowerer<'a> {
 
                 match (enum_name, variant_name, arg_regs.as_slice()) {
                     ("Option", "Some", [value]) => {
+                        let arg_ty = args.first().map(|a| a.ty).unwrap_or(TypeId::ANY);
+                        let value = self.box_enum_payload_if_needed(*value, arg_ty)?;
                         return self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::OptionSome { dest, value: *value });
+                            block.instructions.push(MirInst::OptionSome { dest, value });
                             dest
                         });
                     }
@@ -336,18 +385,22 @@ impl<'a> MirLowerer<'a> {
                         });
                     }
                     ("Result", "Ok", [value]) => {
+                        let arg_ty = args.first().map(|a| a.ty).unwrap_or(TypeId::ANY);
+                        let value = self.box_enum_payload_if_needed(*value, arg_ty)?;
                         return self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::ResultOk { dest, value: *value });
+                            block.instructions.push(MirInst::ResultOk { dest, value });
                             dest
                         });
                     }
                     ("Result", "Err", [value]) => {
+                        let arg_ty = args.first().map(|a| a.ty).unwrap_or(TypeId::ANY);
+                        let value = self.box_enum_payload_if_needed(*value, arg_ty)?;
                         return self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::ResultErr { dest, value: *value });
+                            block.instructions.push(MirInst::ResultErr { dest, value });
                             dest
                         });
                     }

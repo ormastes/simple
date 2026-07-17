@@ -1057,6 +1057,110 @@ impl Lowerer {
                             value: Some(value),
                         });
                     }
+                } else if let Pattern::Enum {
+                    name: nested_enum_name,
+                    variant: nested_variant_name,
+                    payload: Some(nested_patterns),
+                } = p
+                {
+                    // Nested struct pattern inside an enum payload:
+                    // `case Shape.Circle(Point(x, y)):`. The parser cannot
+                    // distinguish an enum-variant pattern from a struct
+                    // pattern written with call syntax at parse time, so
+                    // `Point(x, y)` parses as `Pattern::Enum { name: "_",
+                    // variant: "Point", payload: Some([Identifier("x"),
+                    // Identifier("y")]) }` (see parser_patterns.rs) — the same
+                    // ambiguity already handled for *top-level* arm patterns
+                    // via `class_struct_fields` above. Until now this nested
+                    // position had no handling at all — only the plain
+                    // `Identifier`/`MutIdentifier` case above emitted a
+                    // binding statement. `collect_pattern_bindings` DOES
+                    // recurse into nested `Pattern::Enum` payload patterns and
+                    // registers locals for `x`/`y`, but with no initializer
+                    // emitted here those locals kept whatever zeroed value
+                    // was already on the stack — the arm was selected
+                    // correctly but bound `x = 0, y = 0`. See
+                    // doc/08_tracking/bug/seed_interp_nested_struct_pattern_in_enum_payload_binds_zeros_2026-07-16.md.
+                    let struct_info = (nested_enum_name == "_")
+                        .then(|| self.module.types.lookup(nested_variant_name))
+                        .flatten()
+                        .and_then(|tid| match self.module.types.get(tid) {
+                            Some(HirType::Struct { fields, .. }) => Some((tid, fields.clone())),
+                            _ => None,
+                        });
+                    if let Some((struct_ty, struct_fields)) = struct_info {
+                        // Extract this payload slot (same rt_enum_payload
+                        // call as the Identifier case above, indexed into the
+                        // multi-field wrapper array when the outer variant
+                        // carries more than one payload item), but typed as
+                        // the nested struct so FieldAccess below reads the
+                        // struct's own sequential 8-byte-per-field layout
+                        // instead of being (un)boxed as a scalar.
+                        let base_payload_expr = HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_enum_payload".to_string(),
+                                args: vec![HirExpr {
+                                    kind: HirExprKind::Local(subject_idx),
+                                    ty: subject_ty,
+                                }],
+                            },
+                            ty: if payload_patterns.len() == 1 {
+                                struct_ty
+                            } else {
+                                payload_array_ty.unwrap_or(TypeId::ANY)
+                            },
+                        };
+                        let struct_payload_expr = if payload_patterns.len() == 1 {
+                            base_payload_expr
+                        } else {
+                            HirExpr {
+                                kind: HirExprKind::Index {
+                                    receiver: Box::new(base_payload_expr),
+                                    index: Box::new(HirExpr {
+                                        kind: HirExprKind::Integer(i as i64),
+                                        ty: TypeId::I64,
+                                    }),
+                                },
+                                ty: struct_ty,
+                            }
+                        };
+
+                        // Struct fields are matched positionally (`Point(x, y)`
+                        // binds x -> field 0, y -> field 1 in declaration
+                        // order) — the parser discards field names even for
+                        // the named-field spelling `Point(x: a, y: b)`, so
+                        // there is no name to look up here, only position.
+                        for (field_index, field_pattern) in nested_patterns.iter().enumerate() {
+                            let (Pattern::Identifier(bound_name) | Pattern::MutIdentifier(bound_name)) =
+                                field_pattern
+                            else {
+                                continue;
+                            };
+                            let Some(&local_idx) = ctx.local_map.get(bound_name) else {
+                                continue;
+                            };
+                            let Some(&(_, field_ty)) = struct_fields.get(field_index) else {
+                                continue;
+                            };
+                            if field_ty != TypeId::ANY {
+                                if let Some(local) = ctx.locals.get_mut(local_idx) {
+                                    local.ty = field_ty;
+                                }
+                            }
+                            let value = HirExpr {
+                                kind: HirExprKind::FieldAccess {
+                                    receiver: Box::new(struct_payload_expr.clone()),
+                                    field_index,
+                                },
+                                ty: field_ty,
+                            };
+                            binding_stmts.push(HirStmt::Let {
+                                local_index: local_idx,
+                                ty: field_ty,
+                                value: Some(value),
+                            });
+                        }
+                    }
                 }
             }
         }
