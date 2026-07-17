@@ -10,7 +10,7 @@
 # Usage:
 #   use std.gpu.engine2d.backend_rocm.{RocmBackend}
 
-use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_handle}
+use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_identity}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a}
 use std.gpu.engine2d.glyph.{render_text_to_buffer}
@@ -34,6 +34,7 @@ use std.gc_async_mut.gpu.engine2d.sffi_rocm.{
 }
 use std.gpu.engine2d.backend_rocm_runtime_ops.{
     rocm_backend_is_available, rocm_backend_init_runtime, rocm_backend_device_count,
+    rocm_backend_device_identity, rocm_backend_device_name, rocm_backend_device_memory,
     rocm_backend_compile_hsaco, rocm_backend_unload_module,
     rocm_backend_malloc, rocm_backend_free, rocm_backend_memset,
     rocm_backend_get_function, rocm_backend_synchronize,
@@ -42,6 +43,16 @@ use std.gpu.engine2d.backend_rocm_runtime_ops.{
 use std.gpu.engine2d.backend_rocm_kernels.{_engine2d_hip_source}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_ENTRY, font_atlas_composite_program_version_valid, font_destination_origin}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
+
+val ROCM_MAX_FRAMEBUFFER_PIXELS: i64 = 100000000
+
+fn rocm_framebuffer_pixel_count(width: i32, height: i32) -> i32:
+    if width <= 0 or height <= 0:
+        return 0
+    val total = _i64(width) * _i64(height)
+    if total <= 0 or total > ROCM_MAX_FRAMEBUFFER_PIXELS:
+        return 0
+    total as i32
 
 fn rocm_font_atlas_composite_args(atlas: i64, framebuffer: i64,
                                   atlas_width: i64, atlas_height: i64, atlas_count: i64,
@@ -107,12 +118,16 @@ fn probe_rocm() -> BackendProbeResult:
     val dev_count = rocm_backend_device_count()
     if dev_count < 1:
         return _rocm_probe_unavailable("rocm-device-unavailable", "ROCm init succeeded but no AMD GPU device found")
+    val device_name = rocm_backend_device_name(0)
+    val device_memory = rocm_backend_device_memory(0)
+    if device_name == "" or device_memory <= 0:
+        return _rocm_probe_failed("rocm-device-metadata-gap", "ROCm device metadata unavailable")
     # Step 4: try to compile the kernel module from HIP source as a self-test
     val module = rocm_backend_compile_hsaco(_engine2d_hip_source())
     if module == 0:
         return _rocm_probe_failed("rocm-kernel-gap", "ROCm device present but HIP kernel compilation failed (hip-toolchain-missing or driver mismatch)")
     rocm_backend_unload_module(module)
-    _rocm_probe_ready("amd-gpu")
+    _rocm_probe_ready(device_name)
 
 # ============================================================================
 # ROCm Backend
@@ -144,6 +159,7 @@ class RocmBackend:
     host_buf: [u32]
     w: i32
     h: i32
+    pixel_count: i32
     d_framebuffer: i64      # Device pointer to GPU framebuffer
     hip_module: i64          # Handle to compiled HIP module
     mask_buf: [u8]
@@ -156,6 +172,8 @@ class RocmBackend:
     clip_enabled: bool
     initialized: bool
     dirty: bool              # True when GPU has changes not yet copied to host
+    completion_unknown: bool # True when transfer/synchronization failed
+    device_identity: i64     # Stable nonzero identity from the HIP device UUID
     last_probe: BackendProbeResult   # Typed result from most recent probe/init
 
     # Cached kernel function handles
@@ -182,6 +200,7 @@ class RocmBackend:
             host_buf: [],
             w: 0,
             h: 0,
+            pixel_count: 0,
             d_framebuffer: 0,
             hip_module: 0,
             mask_buf: [],
@@ -194,6 +213,8 @@ class RocmBackend:
             clip_enabled: false,
             initialized: false,
             dirty: false,
+            completion_unknown: false,
+            device_identity: 0,
             last_probe: BackendProbeResult.unavailable("rocm", "not probed"),
             fn_clear: 0,
             fn_rect_filled: 0,
@@ -285,8 +306,10 @@ class RocmBackend:
             )
             val grid_size = (total + 255) / 256
             if not _launch_kernel_1d(self, self.fn_font_atlas_composite, grid_size, 256, args):
+                self.completion_unknown = true
                 return submitted
             if not rocm_backend_synchronize():
+                self.completion_unknown = true
                 return submitted
             self.dirty = true
             submitted = submitted + 1
@@ -305,16 +328,18 @@ impl RenderBackend for RocmBackend:
             self.initialized = false
             return false
 
-        if width <= 0 or height <= 0:
-            self.last_probe = _rocm_probe_failed("rocm-invalid-dimensions", "ROCm framebuffer dimensions must be positive")
+        val total = rocm_framebuffer_pixel_count(width, height)
+        if total <= 0:
+            self.last_probe = _rocm_probe_failed("rocm-invalid-dimensions", "ROCm framebuffer dimensions exceed the supported host array")
             self.initialized = false
             return false
 
         self.w = width
         self.h = height
+        self.pixel_count = total
 
         # Allocate device framebuffer (4 bytes per pixel = u32)
-        val fb_size = _i64(width) * _i64(height) * 4
+        val fb_size = _i64(total) * 4
         self.d_framebuffer = rocm_backend_malloc(fb_size)
         if self.d_framebuffer == 0:
             self.last_probe = _rocm_probe_failed("rocm-alloc-failed", "ROCm device framebuffer allocation failed")
@@ -322,11 +347,24 @@ impl RenderBackend for RocmBackend:
             return false
 
         # Clear device framebuffer to black
-        rocm_backend_memset(self.d_framebuffer, 0, fb_size)
+        if not rocm_backend_memset(self.d_framebuffer, 0, fb_size):
+            rocm_backend_free(self.d_framebuffer)
+            self.d_framebuffer = 0
+            self.last_probe = _rocm_probe_failed("rocm-clear-failed", "ROCm device framebuffer clear failed")
+            self.initialized = false
+            return false
 
         # Allocate host buffer
-        val total = width * height
         self.host_buf = [0u32; total]
+        if self.host_buf.len() != _i64(total):
+            rocm_backend_free(self.d_framebuffer)
+            self.d_framebuffer = 0
+            self.pixel_count = 0
+            self.w = 0
+            self.h = 0
+            self.last_probe = _rocm_probe_failed("rocm-host-alloc-failed", "ROCm host framebuffer allocation failed")
+            self.initialized = false
+            return false
 
         # Compile HIP C++ kernels into module
         self.hip_module = rocm_backend_compile_hsaco(_engine2d_hip_source())
@@ -364,8 +402,18 @@ impl RenderBackend for RocmBackend:
         self.clip_w = width
         self.clip_h = height
         self.clip_enabled = false
+        self.device_identity = rocm_backend_device_identity()
+        if self.device_identity <= 0:
+            rocm_backend_unload_module(self.hip_module)
+            self.hip_module = 0
+            rocm_backend_free(self.d_framebuffer)
+            self.d_framebuffer = 0
+            self.last_probe = _rocm_probe_failed("rocm-device-identity-gap", "ROCm device UUID identity unavailable")
+            self.initialized = false
+            return false
         self.initialized = true
         self.dirty = false
+        self.completion_unknown = false
         true
 
     me shutdown():
@@ -395,10 +443,14 @@ impl RenderBackend for RocmBackend:
         self.host_buf = []
         self.w = 0
         self.h = 0
+        self.pixel_count = 0
         self.mask_buf = []
         self.mask_w = 0
         self.mask_h = 0
         self.initialized = false
+        self.dirty = false
+        self.completion_unknown = false
+        self.device_identity = 0
 
     me clear(color: u32):
         if not self.initialized:
@@ -408,8 +460,10 @@ impl RenderBackend for RocmBackend:
         val total = _i64(self.w) * _i64(self.h)
         val grid_size = (total + block_size - 1) / block_size
         val args: [i64] = [self.d_framebuffer, _i64_from_u32(color), _i64(self.w), _i64(self.h)]
-        _launch_kernel_1d(self, self.fn_clear, grid_size, block_size, args)
-        self.dirty = true
+        if _launch_kernel_1d(self, self.fn_clear, grid_size, block_size, args):
+            self.dirty = true
+        else:
+            self.completion_unknown = true
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         if not self.initialized:
@@ -417,8 +471,10 @@ impl RenderBackend for RocmBackend:
         val args: [i64] = [self.d_framebuffer, _i64(x), _i64(y), _i64(w), _i64(h), _i64_from_u32(color), _i64(self.w), _i64(self.h)]
         val grid_dim = _grid_for_rect(w, h)
         val block_dim = _block_for_rect()
-        _launch_kernel_2d(self, self.fn_rect_outline, grid_dim, block_dim, args)
-        self.dirty = true
+        if _launch_kernel_2d(self, self.fn_rect_outline, grid_dim, block_dim, args):
+            self.dirty = true
+        else:
+            self.completion_unknown = true
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         if not self.initialized:
@@ -426,8 +482,10 @@ impl RenderBackend for RocmBackend:
         val args: [i64] = [self.d_framebuffer, _i64(x), _i64(y), _i64(w), _i64(h), _i64_from_u32(color), _i64(self.w), _i64(self.h)]
         val grid_dim = _grid_for_rect(w, h)
         val block_dim = _block_for_rect()
-        _launch_kernel_2d(self, self.fn_rect_filled, grid_dim, block_dim, args)
-        self.dirty = true
+        if _launch_kernel_2d(self, self.fn_rect_filled, grid_dim, block_dim, args):
+            self.dirty = true
+        else:
+            self.completion_unknown = true
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         if not self.initialized:
@@ -447,8 +505,10 @@ impl RenderBackend for RocmBackend:
         val block_size: i64 = 256
         val grid_size = (_i64(line_len) + block_size - 1) / block_size
         val args: [i64] = [self.d_framebuffer, _i64(x1), _i64(y1), _i64(x2), _i64(y2), _i64_from_u32(color), _i64(thickness), _i64(self.w), _i64(self.h)]
-        _launch_kernel_1d(self, self.fn_line, grid_size, block_size, args)
-        self.dirty = true
+        if _launch_kernel_1d(self, self.fn_line, grid_size, block_size, args):
+            self.dirty = true
+        else:
+            self.completion_unknown = true
 
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
         if not self.initialized:
@@ -459,8 +519,10 @@ impl RenderBackend for RocmBackend:
         val grid_dim = _grid_for_rect(bw, bh)
         val block_dim = _block_for_rect()
         val args: [i64] = [self.d_framebuffer, _i64(cx), _i64(cy), _i64(r), _i64_from_u32(color), _i64(self.w), _i64(self.h), 0]
-        _launch_kernel_2d(self, self.fn_circle, grid_dim, block_dim, args)
-        self.dirty = true
+        if _launch_kernel_2d(self, self.fn_circle, grid_dim, block_dim, args):
+            self.dirty = true
+        else:
+            self.completion_unknown = true
 
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
         if not self.initialized:
@@ -470,8 +532,10 @@ impl RenderBackend for RocmBackend:
         val grid_dim = _grid_for_rect(bw, bh)
         val block_dim = _block_for_rect()
         val args: [i64] = [self.d_framebuffer, _i64(cx), _i64(cy), _i64(r), _i64_from_u32(color), _i64(self.w), _i64(self.h), 1]
-        _launch_kernel_2d(self, self.fn_circle_filled, grid_dim, block_dim, args)
-        self.dirty = true
+        if _launch_kernel_2d(self, self.fn_circle_filled, grid_dim, block_dim, args):
+            self.dirty = true
+        else:
+            self.completion_unknown = true
 
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
         if not self.initialized:
@@ -480,8 +544,10 @@ impl RenderBackend for RocmBackend:
         val grid_dim = _grid_for_rect(w, h)
         val block_dim = _block_for_rect()
         val args: [i64] = [self.d_framebuffer, _i64(x), _i64(y), _i64(w), _i64(h), _i64(radius), _i64_from_u32(color), _i64(self.w), _i64(self.h)]
-        _launch_kernel_2d(self, self.fn_rounded_rect, grid_dim, block_dim, args)
-        self.dirty = true
+        if _launch_kernel_2d(self, self.fn_rounded_rect, grid_dim, block_dim, args):
+            self.dirty = true
+        else:
+            self.completion_unknown = true
 
     me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
         if not self.initialized:
@@ -505,8 +571,10 @@ impl RenderBackend for RocmBackend:
         val grid_dim = _grid_for_rect(bw, bh)
         val block_dim = _block_for_rect()
         val args: [i64] = [self.d_framebuffer, _i64(x1), _i64(y1), _i64(x2), _i64(y2), _i64(x3), _i64(y3), _i64_from_u32(color), _i64(self.w), _i64(self.h), _i64(min_x), _i64(min_y)]
-        _launch_kernel_2d(self, self.fn_triangle_filled, grid_dim, block_dim, args)
-        self.dirty = true
+        if _launch_kernel_2d(self, self.fn_triangle_filled, grid_dim, block_dim, args):
+            self.dirty = true
+        else:
+            self.completion_unknown = true
 
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
         if not self.initialized:
@@ -514,8 +582,10 @@ impl RenderBackend for RocmBackend:
         val grid_dim = _grid_for_rect(w, h)
         val block_dim = _block_for_rect()
         val args: [i64] = [self.d_framebuffer, _i64(x), _i64(y), _i64(w), _i64(h), _i64_from_u32(top_color), _i64_from_u32(bottom_color), _i64(self.w), _i64(self.h)]
-        _launch_kernel_2d(self, self.fn_gradient_rect, grid_dim, block_dim, args)
-        self.dirty = true
+        if _launch_kernel_2d(self, self.fn_gradient_rect, grid_dim, block_dim, args):
+            self.dirty = true
+        else:
+            self.completion_unknown = true
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         if not self.initialized:
@@ -526,8 +596,10 @@ impl RenderBackend for RocmBackend:
         if _draw_image_with_kernel(self, self.fn_blit_image_nonzero, x, y, text_buf.width, text_buf.height, text_buf.pixels):
             self.dirty = true
             return
-        _gpu_draw_text_fallback(self, x, y, text_val, color, font_size)
-        self.dirty = true
+        if self.completion_unknown:
+            return
+        if _gpu_draw_text_fallback(self, x, y, text_val, color, font_size):
+            self.dirty = true
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         if not self.initialized:
@@ -561,16 +633,21 @@ impl RenderBackend for RocmBackend:
 
     me present():
         # Copy GPU framebuffer to host memory; guard against uninitialized state
+        if self.completion_unknown:
+            return
         if self.initialized and self.dirty and self.d_framebuffer != 0:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
-            _download_framebuffer(self.d_framebuffer, self.host_buf, fb_size)
-            rocm_backend_synchronize()
+            if not _download_framebuffer(self.d_framebuffer, self.host_buf, fb_size) or not rocm_backend_synchronize():
+                self.completion_unknown = true
+                return
             self.dirty = false
 
     fn read_pixels() -> [u32]:
         self.read_pixels_with_source().pixels
 
     fn read_pixels_with_source() -> Engine2DReadback:
+        if self.completion_unknown:
+            return engine2d_readback([], "completion_unknown")
         # Guard: if not initialized or framebuffer pointer is null, return empty
         # to avoid a null-pointer device-memory read.
         if not self.initialized or self.d_framebuffer == 0:
@@ -579,16 +656,18 @@ impl RenderBackend for RocmBackend:
         var source = "host_cache_after_device_present"
         if self.dirty:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
-            _download_framebuffer(self.d_framebuffer, self.host_buf, fb_size)
-            rocm_backend_synchronize()
+            if not _download_framebuffer(self.d_framebuffer, self.host_buf, fb_size) or not rocm_backend_synchronize():
+                return engine2d_readback([], "completion_unknown")
             source = "device_readback"
-        var copy: [u32] = [0u32; self.w * self.h]
+        var copy: [u32] = [0u32; self.pixel_count]
+        if copy.len() != _i64(self.pixel_count):
+            return engine2d_readback([], "completion_unknown")
         var i = 0
-        while i < self.w * self.h:
+        while i < self.pixel_count:
             copy[i] = self.host_buf[i]
             i = i + 1
         if source == "device_readback":
-            return engine2d_readback_with_handle(copy, source, self.d_framebuffer)
+            return engine2d_readback_with_identity(copy, source, self.d_framebuffer, self.device_identity)
         engine2d_readback(copy, source)
 
     fn width() -> i32:
@@ -657,7 +736,6 @@ impl RenderBackend for RocmBackend:
 impl Engine2DExtended for RocmBackend:
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
         if not self.initialized:
-            self.dirty = true
             return
         val text_buf = text_blit_buffer(text_val, fg, bg, font_size)
         if text_buf.is_empty():
@@ -720,17 +798,13 @@ fn _block_for_rect() -> RocmBlockDim:
 # handle the u32-to-u8 conversion needed for pixel data.
 # ============================================================================
 
-fn _upload_pixels_to_device(d_dst: i64, pixels: [u32], count: i64):
+fn _upload_pixels_to_device(d_dst: i64, pixels: [u32], count: i64) -> bool:
     """Upload host pixel array to device memory."""
-    rocm_engine2d_upload_pixels(d_dst, pixels, count)
+    rocm_engine2d_upload_pixels(d_dst, pixels, count) == 0
 
-fn _download_framebuffer(d_src: i64, host_buf: [u32], byte_size: i64):
+fn _download_framebuffer(d_src: i64, host_buf: [u32], byte_size: i64) -> bool:
     """Download device framebuffer to host buffer."""
-    rocm_engine2d_download_pixels(d_src, host_buf, byte_size)
-
-fn _upload_host_to_device(d_dst: i64, host_buf: [u32], byte_size: i64):
-    """Upload host buffer to device memory."""
-    rocm_engine2d_upload_host_buf(d_dst, host_buf, byte_size)
+    rocm_engine2d_download_pixels(d_src, host_buf, byte_size) == 0
 
 fn _draw_image_with_kernel(backend: RocmBackend, func: i64, x: i32, y: i32, w: i32, h: i32, pixels: [u32]) -> bool:
     if not backend.initialized:
@@ -746,11 +820,20 @@ fn _draw_image_with_kernel(backend: RocmBackend, func: i64, x: i32, y: i32, w: i
     val d_src = rocm_backend_malloc(byte_size)
     if d_src == 0:
         return false
-    _upload_pixels_to_device(d_src, pixels, pixel_count)
+    if not _upload_pixels_to_device(d_src, pixels, pixel_count):
+        rocm_backend_free(d_src)
+        return false
     val grid_dim = _grid_for_rect(w, h)
     val block_dim = _block_for_rect()
     val args: [i64] = [backend.d_framebuffer, d_src, _i64(x), _i64(y), _i64(w), _i64(h), _i64(backend.w), _i64(backend.h)]
-    _launch_kernel_2d(backend, func, grid_dim, block_dim, args)
+    if not _launch_kernel_2d(backend, func, grid_dim, block_dim, args):
+        backend.completion_unknown = true
+        rocm_backend_free(d_src)
+        return false
+    if not rocm_backend_synchronize():
+        backend.completion_unknown = true
+        rocm_backend_free(d_src)
+        return false
     rocm_backend_free(d_src)
     true
 
@@ -758,7 +841,7 @@ fn _draw_image_with_kernel(backend: RocmBackend, func: i64, x: i32, y: i32, w: i
 # Text Rendering Fallback
 # ============================================================================
 
-fn _gpu_draw_text_fallback(backend: RocmBackend, x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+fn _gpu_draw_text_fallback(backend: RocmBackend, x: i32, y: i32, text_val: text, color: u32, font_size: i32) -> bool:
     """Render text on CPU and upload affected region to GPU.
 
     For production use, a glyph atlas would be pre-uploaded to GPU memory
@@ -767,19 +850,23 @@ fn _gpu_draw_text_fallback(backend: RocmBackend, x: i32, y: i32, text_val: text,
     """
     # Guard: caller already checked initialized; guard d_framebuffer here too
     if backend.d_framebuffer == 0:
-        return
+        return false
     # Ensure host buffer is current
     if backend.dirty:
         val fb_size = _i64(backend.w) * _i64(backend.h) * 4
-        _download_framebuffer(backend.d_framebuffer, backend.host_buf, fb_size)
-        rocm_backend_synchronize()
+        if not _download_framebuffer(backend.d_framebuffer, backend.host_buf, fb_size) or not rocm_backend_synchronize():
+            backend.completion_unknown = true
+            return false
 
     # Render glyphs into host buffer using shared glyph module
     render_text_to_buffer(backend.host_buf, backend.w, backend.h, x, y, text_val, color, font_size)
 
     # Re-upload entire framebuffer (simpler; for production, upload only the dirty rect)
     val fb_size = _i64(backend.w) * _i64(backend.h) * 4
-    _upload_host_to_device(backend.d_framebuffer, backend.host_buf, fb_size)
+    if rocm_engine2d_upload_host_buf(backend.d_framebuffer, backend.host_buf, fb_size) != 0:
+        backend.completion_unknown = true
+        return false
+    true
 
 # Conversion Helpers
 # ============================================================================

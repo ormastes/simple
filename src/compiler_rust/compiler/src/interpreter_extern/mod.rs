@@ -924,6 +924,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_rocm_device_count", gpu_rocm::rt_rocm_device_count_fn);
     insert_simple!("rt_rocm_device_get", gpu_rocm::rt_rocm_device_get_fn);
+    insert_simple!("rt_rocm_device_identity", gpu_rocm::rt_rocm_device_identity_fn);
     insert_simple!("rt_rocm_device_memory", gpu_rocm::rt_rocm_device_memory_fn);
     insert_simple!("rt_rocm_device_name", gpu_rocm::rt_rocm_device_name_fn);
     insert_simple!("rt_rocm_compile_hsaco", gpu_rocm::rt_rocm_compile_hsaco_fn);

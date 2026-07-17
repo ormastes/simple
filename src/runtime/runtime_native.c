@@ -159,44 +159,6 @@ int64_t rt_vulkan_device_count(void) { return 0; }
 #define SPL_HOSTED_UNAVAILABLE_WEAK
 #endif
 
-/* ROCm */
-bool rt_rocm_init(void) { return false; }
-bool rt_rocm_is_available(void) { return false; }
-int64_t rt_rocm_device_count(void) { return 0; }
-int64_t rt_rocm_malloc(int64_t size) { (void)size; return -3; }
-bool rt_rocm_free(int64_t ptr) { (void)ptr; return false; }
-bool rt_rocm_memset(int64_t ptr, int64_t value, int64_t size) {
-    (void)ptr; (void)value; (void)size;
-    return false;
-}
-int64_t rt_rocm_compile_hsaco(int64_t source) { (void)source; return -3; }
-int64_t rt_rocm_get_function(int64_t module, int64_t name) {
-    (void)module; (void)name;
-    return -3;
-}
-bool rt_rocm_launch_kernel(int64_t func, int64_t grid_x, int64_t grid_y,
-                           int64_t grid_z, int64_t block_x, int64_t block_y,
-                           int64_t block_z, int64_t shared_mem, int64_t args) {
-    (void)func; (void)grid_x; (void)grid_y; (void)grid_z;
-    (void)block_x; (void)block_y; (void)block_z; (void)shared_mem; (void)args;
-    return false;
-}
-bool rt_rocm_unload_module(int64_t module) { (void)module; return false; }
-
-/* ROCm Engine2D */
-int64_t rt_engine2d_rocm_upload_pixels(int64_t dst, int64_t pixels, int64_t count) {
-    (void)dst; (void)pixels; (void)count;
-    return -3;
-}
-int64_t rt_engine2d_rocm_download_pixels(int64_t src, int64_t pixels, int64_t byte_size) {
-    (void)src; (void)pixels; (void)byte_size;
-    return -3;
-}
-int64_t rt_engine2d_rocm_upload_host_buf(int64_t dst, int64_t host_buf, int64_t byte_size) {
-    (void)dst; (void)host_buf; (void)byte_size;
-    return -3;
-}
-
 /* oneAPI */
 bool rt_oneapi_init(void) { return false; }
 bool rt_oneapi_is_available(void) { return false; }

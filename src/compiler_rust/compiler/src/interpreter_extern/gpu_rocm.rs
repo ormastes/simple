@@ -52,6 +52,11 @@ pub fn rt_rocm_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::text(String::new()))
 }
 
+pub fn rt_rocm_device_identity_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _id = arg_i64(args, 0, "rt_rocm_device_identity", 1)?;
+    Ok(Value::Int(0))
+}
+
 pub fn rt_rocm_set_device_fn(args: &[Value]) -> Result<Value, CompileError> {
     let _id = arg_i64(args, 0, "rt_rocm_set_device", 1)?;
     Ok(Value::Bool(false))

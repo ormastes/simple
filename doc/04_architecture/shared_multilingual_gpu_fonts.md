@@ -293,6 +293,14 @@ suffix on CPU. `hip` is a configuration alias for canonical target `rocm`.
 This is source routing and fail-closed fallback coverage, not native AMD
 submission or device-readback evidence.
 
+Hosted native builds now link a separate optional `runtime_rocm.c` owner. It
+loads HIP and HIPRTC at process scope without headers or link-time ROCm
+dependencies, converts Simple arrays through runtime accessors, and exposes a
+stable nonzero identity only when `hipDeviceGetUuid` succeeds. Engine2D clears
+dirty state only after copy plus synchronization and labels a readback as
+device-origin only with that UUID identity. A mock HIP/HIPRTC ABI checker covers
+the provider and failure gates; real AMD pixels remain the promotion boundary.
+
 Production deployment has a separate trust boundary from toolchain evidence.
 Ignored `build/portable_compute_toolchains` output may prove emission and device
 execution, but Engine2D never discovers it. The source-tracked

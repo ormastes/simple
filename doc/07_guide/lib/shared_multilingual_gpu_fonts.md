@@ -430,8 +430,13 @@ The backend compiles that source into its existing HIP module, caches the
 versioned entry and atlas by owner/generation, and returns the first
 unsubmitted quad for Engine2D CPU replay. Current regressions prove source
 identity, invalid/uninitialized rejection, configuration routing, and replay
-without AMD hardware. Native HIP submission and device-origin readback remain
-pending and no ROCm promotion is claimed.
+without AMD hardware. Hosted native builds also compile the optional
+`runtime_rocm.c` provider; run
+`sh scripts/check/check-runtime-rocm-provider.shs` to validate its HIP/HIPRTC
+ABI with local mock libraries. The checker covers UUID identity, module/kernel
+launch argument storage, transfers, streams, and Engine2D copies, but native
+HIP submission and device-origin pixels on AMD hardware remain pending and no
+ROCm promotion is claimed.
 
 `atlas_generation` is a process-unique, positive, sequential dependency token,
 not a renderer-local edit count. Each renderer atlas change reserves a token

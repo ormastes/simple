@@ -247,7 +247,12 @@ backend-local atlas owner/generation and versioned function handle, rejects an
 unsupported program or unready session before mutation, and reports the first
 unsubmitted quad for CPU replay. Target `rocm` is canonical and `hip` is its
 configuration alias. This source contract does not promote AMD hardware
-execution. Other backends retain image/alpha compatibility. Engine3D
+execution. The hosted provider is isolated in `runtime_rocm.c`, dynamically
+loads HIP/HIPRTC once, copies typed Simple arrays through public accessors, and
+fails closed when runtime symbols, device metadata, UUID identity, transfer, or
+synchronization evidence is missing. A mock shared-library integration checker
+exercises that ABI without claiming AMD execution. Other backends retain
+image/alpha compatibility. Engine3D
 retains CPU HUD/world compatibility and now has dedicated Vulkan font pipeline,
 sampler-descriptor, depth, fence, and device-readback ownership. Its atlas
 texture is warm only when both canonical batch owner identity and dependency

@@ -332,6 +332,46 @@ int64_t  rt_array_data_ptr_u8(SplArray* array);
 int64_t  rt_array_header_ptr(SplArray* array);
 int8_t   rt_array_set_len_known(int64_t header_ptr, int64_t len);
 int8_t   rt_array_set_len_known_text(int64_t header_ptr, int64_t len);
+
+/* ===== Hosted ROCm/HIP runtime ===== */
+
+bool     rt_rocm_init(void);
+bool     rt_rocm_shutdown(void);
+bool     rt_rocm_is_available(void);
+int64_t  rt_rocm_device_count(void);
+int64_t  rt_rocm_device_get(int64_t id);
+int64_t  rt_rocm_device_name(int64_t device);
+int64_t  rt_rocm_device_memory(int64_t device);
+int64_t  rt_rocm_device_identity(int64_t device);
+bool     rt_rocm_set_device(int64_t device);
+int64_t  rt_rocm_get_device(void);
+int64_t  rt_rocm_malloc(int64_t size);
+int64_t  rt_rocm_mem_alloc(int64_t size);
+bool     rt_rocm_free(int64_t ptr);
+bool     rt_rocm_mem_free(int64_t ptr);
+bool     rt_rocm_memcpy_h2d(int64_t dst, int64_t src, int64_t size);
+bool     rt_rocm_memcpy_htod(int64_t dst, int64_t src, int64_t size);
+bool     rt_rocm_memcpy_d2h(int64_t dst, int64_t src, int64_t size);
+bool     rt_rocm_memcpy_dtoh(int64_t dst, int64_t src, int64_t size);
+bool     rt_rocm_memcpy_d2d(int64_t dst, int64_t src, int64_t size);
+bool     rt_rocm_memset(int64_t ptr, int64_t value, int64_t size);
+int64_t  rt_rocm_compile_hsaco(int64_t source);
+int64_t  rt_rocm_module_load(int64_t source);
+int64_t  rt_rocm_get_function(int64_t module, int64_t name);
+int64_t  rt_rocm_kernel_get(int64_t module, int64_t name);
+bool     rt_rocm_launch_kernel(int64_t function, int64_t grid_x, int64_t grid_y,
+                              int64_t grid_z, int64_t block_x, int64_t block_y,
+                              int64_t block_z, int64_t shared_mem, int64_t args);
+bool     rt_rocm_unload_module(int64_t module);
+bool     rt_rocm_synchronize(void);
+int64_t  rt_rocm_create_stream(void);
+bool     rt_rocm_destroy_stream(int64_t stream);
+bool     rt_rocm_stream_synchronize(int64_t stream);
+int64_t  rt_rocm_get_last_error(void);
+int64_t  rt_engine2d_rocm_upload_pixels(int64_t dst, int64_t pixels, int64_t count);
+int64_t  rt_engine2d_rocm_download_pixels(int64_t src, int64_t pixels, int64_t byte_size);
+int64_t  rt_engine2d_rocm_upload_host_buf(int64_t dst, int64_t host_buf, int64_t byte_size);
+
 int64_t  rt_bytes_u8_at(SplArray* array, int64_t idx);
 int64_t  rt_bytes_u32_le_at(SplArray* array, int64_t idx);
 int64_t  rt_bytes_u64_le_at(SplArray* array, int64_t idx);

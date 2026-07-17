@@ -1459,3 +1459,13 @@ pixels, and performance evidence remain release-blocking.
   now asserts the exact ordered ten-language and ten-category arrays, preventing
   silent reorder or substitution while retaining the established 10x10 matrix.
   No admitted pure-Simple runner executed the spec. STATUS: FAIL.
+
+- Hosted ROCm provider closure (2026-07-17): native builds now include a
+  separate fail-closed `runtime_rocm.c` owner that dynamically loads HIP and
+  HIPRTC, preserves the canonical Simple array ABI, and derives device identity
+  from the HIP UUID. Engine2D no longer clears dirty state or reports device
+  provenance after failed copy/synchronization. The bounded mock-library
+  checker passed, including compile/module/kernel arguments, streams, UUID,
+  and pixel transfers. This is source and mock-ABI evidence only; the current
+  host has no AMD device, so retained native pixels and promotion remain
+  pending. STATUS: FAIL.

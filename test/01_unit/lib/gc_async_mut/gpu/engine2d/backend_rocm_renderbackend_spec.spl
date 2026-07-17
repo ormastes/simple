@@ -7,7 +7,7 @@
 # fallback / error-classification paths that pass on a GPU-less host.
 # No skip(), no hollow expects, no boolean-wrapper asserts.
 
-use std.gpu.engine2d.backend_rocm.{RocmBackend, probe_rocm, rocm_font_atlas_composite_args}
+use std.gpu.engine2d.backend_rocm.{RocmBackend, probe_rocm, rocm_font_atlas_composite_args, rocm_framebuffer_pixel_count}
 use std.gpu.engine2d.backend_rocm_kernels.{_engine2d_hip_source}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
@@ -30,6 +30,12 @@ fn _has_invalid_hip_hash_comment(source: text) -> bool:
     false
 
 describe "RocmBackend init guards":
+
+    it "bounds framebuffer multiplication before device or host allocation":
+        expect(rocm_framebuffer_pixel_count(10000, 10000)).to_equal(100000000)
+        expect(rocm_framebuffer_pixel_count(10000, 10001)).to_equal(0)
+        expect(rocm_framebuffer_pixel_count(65536, 65536)).to_equal(0)
+        expect(rocm_framebuffer_pixel_count(0, 64)).to_equal(0)
 
     it "create() yields initialized=false without AMD hardware":
         var b = RocmBackend.create()
@@ -92,6 +98,23 @@ describe "RocmBackend draw-method init guards (GPU-less)":
         expect(runtime).to_contain("pub fn rocm_backend_synchronize() -> bool:")
         expect(runtime).to_contain("pub fn rocm_backend_launch_kernel(func: i64")
         expect(runtime).to_contain("args: [i64]) -> bool:")
+
+    it "fails closed when ROCm framebuffer transfer or identity evidence is unavailable":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_rocm.spl")
+        val runtime = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl")
+        expect(source).to_contain("if not _download_framebuffer(self.d_framebuffer, self.host_buf, fb_size) or not rocm_backend_synchronize():")
+        expect(source).to_contain("self.completion_unknown = true")
+        expect(source).to_contain("return engine2d_readback([], \"completion_unknown\")")
+        expect(source).to_contain("engine2d_readback_with_identity(copy, source, self.d_framebuffer, self.device_identity)")
+        expect(source).to_contain("if self.device_identity <= 0:")
+        expect(runtime).to_contain("rt_rocm_device_identity(device)")
+        expect(source).to_contain("_rocm_probe_ready(device_name)")
+        expect(source).to_contain("if device_name == \"\" or device_memory <= 0:")
+        expect(source).to_contain("if not rocm_backend_memset(self.d_framebuffer, 0, fb_size):")
+        expect(source).to_contain("if self.host_buf.len() != _i64(total):")
+        expect(source).to_contain("if copy.len() != _i64(self.pixel_count):\n            return engine2d_readback([], \"completion_unknown\")")
+        expect(source).to_contain("if not _upload_pixels_to_device(d_src, pixels, pixel_count):")
+        expect(source).to_contain("if not rocm_backend_synchronize():\n        backend.completion_unknown = true")
 
     it "invalidates reusable ROCm atlas metadata without hardware":
         var b = RocmBackend.create()

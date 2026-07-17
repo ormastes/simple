@@ -12,7 +12,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_pool.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_framebuffer.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_directx_core.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_hosted_gpu_stubs.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_rocm.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_hosted_signal.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_hosted_fs.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_font.c");
@@ -124,7 +124,7 @@ fn compile_c_runtime_sources() {
         "runtime_pool.c",
         "runtime_framebuffer.c",
         "runtime_directx_core.c",
-        "runtime_hosted_gpu_stubs.c",
+        "runtime_rocm.c",
         "runtime_hosted_signal.c",
         "runtime_hosted_fs.c",
         "runtime_font.c",
@@ -193,7 +193,7 @@ fn collect_c_runtime_exports(root: &Path, exported: &mut HashSet<String>) {
         "runtime_pool.c",
         "runtime_framebuffer.c",
         "runtime_directx_core.c",
-        "runtime_hosted_gpu_stubs.c",
+        "runtime_rocm.c",
         "runtime_hosted_signal.c",
         "runtime_hosted_fs.c",
         "runtime_font.c",
