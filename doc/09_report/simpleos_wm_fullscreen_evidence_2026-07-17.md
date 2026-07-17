@@ -1,7 +1,7 @@
 # SimpleOS WM Fullscreen Evidence
 
 - status: fail
-- reason: guest-render-fault
+- reason: capture-input-or-guest-correlation-failed
 - wrapper: scripts/check/check-simpleos-wm-fullscreen-evidence.shs (sha256=88008270a6102116fc63a784d4f9f0a336047e4e07bc378cb4c94de00c155030)
 - simple bin: build/bootstrap/stage3/aarch64-apple-darwin/simple
 - resolved binary: /Users/ormastes/simple/build/bootstrap/stage3/aarch64-apple-darwin/simple
@@ -10,13 +10,13 @@
 - simple bin version: simple-bootstrap 1.0.0-beta
 - simple bin sha256: 6faa17dbe4342c9fa94c48025c7c57cfdf150c1dea9b8cd9b99877610f9291e7
 - qmp socket: build/simpleos_wm_fullscreen_evidence/qmp.sock
-- kernel: build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf (sha256=d5d58bb9f1a55c4e3ddfe97659b90a7c768f8a986bb527f5911bb7527390309f)
-- disk image: build/simpleos_wm_fullscreen_evidence/fat32-x86_64-font.img (pass, sha256=e600f88ef0844cac5991e0f930cf0e2b6d6afe13cf8ecc9c1099bd9156d66eb6)
+- kernel: build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf (sha256=17f037597b6d83f1e3778c0917b95943522ce8af3fcdfca785007a4e0c94d2c0)
+- disk image: build/simpleos_wm_fullscreen_evidence/fat32-x86_64-font.img (pass, sha256=4d6890a939796ff6b3ce9c22dfbad012d9bb4a04ab0980ccdd7bb23b3c83e121)
 - pinned font asset: assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf (1708408 bytes, sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081)
 - guest font marker: -
 - font region: build/simpleos_wm_fullscreen_evidence/font-region.rgb (0 bytes, sha256=-, origin=qemu-pmemsave)
 - scanout: address=4160749568 width=3840 height=2160 byte-pitch=15360 format=argb8888 generation=1
-- host nonce: simpleos-wm-1784308647-35374
+- host nonce: simpleos-wm-1784308921-40767
 - input sequences: baseline=0 maximize=0 restore=0
 - maximize IRQ/state/frame: - | - | -
 - restore IRQ/state/frame: - | - | -
@@ -24,10 +24,10 @@
 - baseline sha256: -
 - maximized sha256: -
 - restored sha256: -
-- baseline ppm: build/simpleos_wm_fullscreen_evidence/baseline.ppm (0 bytes)
+- baseline ppm: build/simpleos_wm_fullscreen_evidence/baseline.ppm (24883217 bytes)
 - maximized ppm: build/simpleos_wm_fullscreen_evidence/fullscreen.ppm (0 bytes)
 - restored ppm: build/simpleos_wm_fullscreen_evidence/restored.ppm (0 bytes)
-- serial log: build/simpleos_wm_fullscreen_evidence/serial.log (50403 bytes)
+- serial log: build/simpleos_wm_fullscreen_evidence/serial.log (52092 bytes)
 
 This wrapper boots the wm-simple-web SimpleOS QEMU target directly
 (same q35/max/2G/BGA-std flags as os.qemu_runner._wm_simple_web_qmp_capture_target),
