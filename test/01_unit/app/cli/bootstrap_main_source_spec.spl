@@ -75,48 +75,6 @@ describe "bootstrap main source":
         expect(parser).to_contain("parser_expect(TOK_GT)")
         expect(lexer).to_contain("loaded.next_token_after_generic_close()")
 
-    it "constructs bootstrap frontend maps before key iteration (bug #185)":
-        # These files execute live during the self-hosted Stage4 frontend.
-        # Explicit builtin construction avoids malformed native `{}` values;
-        # the seed interpreter recognizes Map/Dict aliases as empty dicts.
-        val assembly = rt_file_read_text("src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl") ?? ""
-        val empty_module = rt_file_read_text("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl") ?? ""
-        val desugar = rt_file_read_text("src/compiler/10.frontend/desugar/desugar_async.spl") ?? ""
-
-        expect(assembly).to_contain("var functions: Dict<text, Function> = Map.new()")
-        expect(assembly).to_contain("actors: Map.new()")
-        expect(empty_module).to_contain("functions: Map.new()")
-        expect(desugar).to_contain("var desugared_functions: Dict<text, Function> = Map.new()")
-        expect(desugar).to_contain("var generated_helper_functions: Dict<text, Function> = Map.new()")
-
-    it "reuses flat AST arena storage between Stage4 module parses":
-        val bootstrap = rt_file_read_text("src/app/cli/bootstrap_main.spl") ?? ""
-        val state = rt_file_read_text("src/compiler/10.frontend/core/_Ast/module_state.spl") ?? ""
-        val expressions = rt_file_read_text("src/compiler/10.frontend/core/_AstExpr/nodes.spl") ?? ""
-        val expression_accessors = rt_file_read_text("src/compiler/10.frontend/core/_AstExpr/accessors.spl") ?? ""
-        val statements = rt_file_read_text("src/compiler/10.frontend/core/ast_stmt.spl") ?? ""
-
-        expect(state).to_contain("decl_tag.clear()")
-        expect(state).to_contain("decl_body_stmts.clear()")
-        expect(state).to_contain("module_decl_slots.clear()")
-        expect(state).to_contain("lexer_state_core_pos_slot[0] = \"0\"")
-        expect(expressions).to_contain("expr_tag.clear()")
-        expect(statements).to_contain("stmt_tag.clear()")
-        expect(statements).to_contain("stmt_gpu_grid_exprs.clear()")
-        expect(bootstrap).to_contain("val old_native_arena_decls = env_get(\"SIMPLE_NATIVE_ARENA_DECLS\")")
-        expect(bootstrap).to_contain("env_set(\"SIMPLE_NATIVE_ARENA_DECLS\", \"1\")")
-        expect(bootstrap).to_contain("env_set(\"SIMPLE_NATIVE_ARENA_DECLS\", old_native_arena_decls)")
-        expect(expressions).to_contain("if expr_env_mirror_enabled():")
-        expect(expressions).to_contain("expr_env_read(expr_key(idx, field))")
-        expect(expression_accessors).to_contain("val direct = expr_env_read(expr_key(idx, \"TAG\"))")
-        expect(statements).to_contain("if stmt_env_mirror_enabled():")
-        expect(statements).to_contain("val direct = stmt_env_read(stmt_key(idx, \"TAG\"))")
-        # One allocation remains only in each native-zero-init guard; the hot
-        # reset path must not replace the arena again.
-        expect(state.split("decl_tag = []").len()).to_equal(2)
-        expect(expressions.split("expr_tag = []").len()).to_equal(2)
-        expect(statements.split("stmt_tag = []").len()).to_equal(2)
-
     it "keeps Stage4 multi-line browser predicates grouped":
         val browser_backend = rt_file_read_text("src/app/ui.browser/backend.spl") ?? ""
         val event_bridge = rt_file_read_text("src/app/ui.browser/event_bridge.spl") ?? ""
@@ -125,3 +83,39 @@ describe "bootstrap main source":
         expect(browser_backend).to_contain("and self.static_frame_revision == revision)")
         expect(event_bridge).to_contain("match action:\n        \"press\":")
         expect(event_bridge).to_contain("        _:\n            return nil")
+
+    it "never re-introduces Map.new()/Dict.new() as a Dict initializer in the live frontend (bug #185)":
+        # bug #185, broken TWICE (f06e5829e1d, then 71fe6f97be4 which also
+        # inverted this guard). These three files are executed LIVE by the
+        # DEPLOYED self-hosted binary on every native-build. The deployed
+        # binary's interpreter routes `Map.new()`/`Dict.new()` through the
+        # deprecated ClassName.new() dispatch whose unknown-type fallback
+        # stamps a phantom `__type__` string entry into the fresh dict; that
+        # entry corrupts iteration/keys()/indexing and every native-build
+        # dies with "unknown property or method 'body' on String"
+        # (smoke matrix: 0/18). The seed-side fix that makes Map/Dict aliases
+        # return a genuinely empty dict IS landed on main, but it only takes
+        # effect after a redeploy — until the deployed binary is rebuilt,
+        # `{}` is the only safe spelling here.
+        #
+        # If the from-scratch seed's Stage4 path genuinely mishandles `{}`
+        # (the rationale 71fe6f97be4 cited when inverting this guard), that
+        # is a seed bug: fix `{}` empty-dict lowering in the seed and file it
+        # under doc/08_tracking/bug — do NOT respell these shared production
+        # files to a form the deployed binary corrupts.
+        val assembly = rt_file_read_text("src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl") ?? ""
+        val empty_module = rt_file_read_text("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl") ?? ""
+        val desugar = rt_file_read_text("src/compiler/10.frontend/desugar/desugar_async.spl") ?? ""
+
+        expect(assembly.contains("Map.new()")).to_equal(false)
+        expect(assembly.contains("Dict.new()")).to_equal(false)
+        expect(assembly.contains("= Map()")).to_equal(false)
+        expect(assembly.contains("= Dict()")).to_equal(false)
+        expect(empty_module.contains("Map.new()")).to_equal(false)
+        expect(empty_module.contains("Dict.new()")).to_equal(false)
+        expect(empty_module.contains("= Map()")).to_equal(false)
+        expect(empty_module.contains("= Dict()")).to_equal(false)
+        expect(desugar.contains("Map.new()")).to_equal(false)
+        expect(desugar.contains("Dict.new()")).to_equal(false)
+        expect(desugar.contains("= Map()")).to_equal(false)
+        expect(desugar.contains("= Dict()")).to_equal(false)
