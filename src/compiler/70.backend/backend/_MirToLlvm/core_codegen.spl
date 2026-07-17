@@ -61,15 +61,32 @@ fn llvm_bootstrap_ssa_function(fn_: MirFunction) -> MirFunction:
     fn_
 
 fn llvm_module_name_from_entry_path(path: text) -> text:
-    var mod_path = path
+    # MUST stay byte-identical to _driver_module_name_from_path
+    # (80.driver/driver_source_loading.spl) — module.name is derived there,
+    # and this function re-derives the entry module's name from the
+    # SIMPLE_NATIVE_BUILD_ENTRY path for the entry_main_symbol comparison.
+    # When the two drift, main is never renamed to __simple_main and EVERY
+    # out-of-tree entry (e.g. /tmp probes with '-' in the path) fails to
+    # link (70a29867bc2 added /src/-stripping + '-'/' '→'_' only on the
+    # driver side; that broke the whole native-smoke-matrix 0/19).
+    var mod_path = path.replace("\\", "/")
     while mod_path.starts_with("../"):
         mod_path = mod_path.substring(3)
     if mod_path.starts_with("./"):
         mod_path = mod_path.substring(2)
+    val absolute_src = mod_path.find("/src/") ?? -1
+    if absolute_src >= 0:
+        mod_path = mod_path.substring(absolute_src + 5)
+    else:
+        val absolute_examples = mod_path.find("/examples/") ?? -1
+        if absolute_examples >= 0:
+            mod_path = mod_path.substring(absolute_examples + 1)
     if mod_path.starts_with("src/"):
         mod_path = mod_path.substring(4)
     mod_path = mod_path.replace(".spl", "")
     mod_path = mod_path.replace(".sdn", "")
+    mod_path = mod_path.replace("-", "_")
+    mod_path = mod_path.replace(" ", "_")
     mod_path.replace("/", ".")
 
 fn llvm_module_is_native_entry(module_name: text) -> bool:
