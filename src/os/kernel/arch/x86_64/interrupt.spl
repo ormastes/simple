@@ -344,3 +344,42 @@ fn spl_x86_on_user_fault(rip: u64, cs: u64, cr2: u64):
     _pf_serial_puts(" cs=")
     _pf_serial_hex(cs)
     _pf_serial_puts("\n")
+
+# ============================================================================
+# Kernel-mode #UD (ud2) fatal termination — C8 ud2-recovery fix
+# ============================================================================
+# `_rich_fault_entry`'s kernel-mode (CPL=0), no-error-code recovery path used
+# to advance-RIP-by-2-and-iretq blindly for ANY vector that pushes no error
+# code — including #UD (vector 6, invalid opcode). A `ud2` (opcode 0x0F 0x0B)
+# is never a random invalid opcode to skip past: it is an INTENTIONAL trap
+# instruction, e.g. the compiler's duck-dispatch-sentinel guard emitted by
+# `compile_method_call_virtual`
+# (src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs) when a
+# MIR vtable slot equals the `DUCK_DISPATCH_UNSUPPORTED_SLOT` sentinel.
+# "Recovering" it turned an honest, deliberate abort into a silent wild-jump
+# fault storm — the real root cause behind the C8 defect chain (see
+# doc/08_tracking/bug/simpleos_native_build_entry_closure_codegen_defects_2026-07-17.md,
+# C8-FIX lane item 3). The ISR stub now detects the `ud2` opcode at the
+# faulting RIP before recovering and calls this function instead of
+# iretq-ing back into the trap; the stub parks the CPU (cli/hlt loop)
+# afterwards, so this must never return control to the faulting code.
+
+@export("C", name: "spl_x86_on_kernel_ud2_fault")
+fn spl_x86_on_kernel_ud2_fault(rip: u64):
+    """Fatal-diagnostic marker for an unrecovered kernel-mode `ud2` (#UD) trap.
+
+    Called from `_rich_fault_entry` only after it has confirmed the two bytes
+    at the faulting RIP are the `ud2` opcode (0x0F 0x0B). Prints the vector
+    and RIP, then the ISR stub halts — it never advances past the trap or
+    iretqs back into it, unlike the old blind recovery.
+
+    Heap-free and self-contained by contract: the whole point is that the
+    fault handler must not itself fault, so this path allocates nothing and
+    does not attempt to read/disassemble further than the two already-
+    confirmed-readable opcode bytes at RIP (the stub already fetched them).
+    """
+    _pf_serial_puts("\n[fault] FATAL: kernel #UD (ud2) trap at rip=")
+    _pf_serial_hex(rip)
+    _pf_serial_puts(" vector=6 (#UD)\n")
+    _pf_serial_puts("[fault] ud2 is an intentional trap (e.g. compiler duck-dispatch")
+    _pf_serial_puts(" sentinel guard) — halting instead of resuming past it\n")

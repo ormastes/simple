@@ -17,11 +17,22 @@ pub static RECURSION_DEPTH: AtomicUsize = AtomicUsize::new(0);
 pub static MAX_RECURSION_DEPTH: AtomicU64 = AtomicU64::new(1000);
 
 /// Whether stack overflow detection is enabled.
-#[cfg(debug_assertions)]
+///
+/// Defaults to `true` in both debug and release builds. A genuine cycle in
+/// interpreted Simple code (e.g. a local function shadowing an imported
+/// symbol of the same name, calling itself forever) must surface as a clean
+/// `CompileError::StackOverflow` diagnostic, not a raw native stack overflow
+/// that aborts the process — see
+/// doc/08_tracking/bug/interp_app_io_mod_import_stack_overflow_2026-07-17.md.
+/// Release builds previously defaulted this to `false`, so `simple run` and
+/// most `simple test` invocations had no safety net at all. Debug builds
+/// have defaulted to `true` (limit 1000) for a long time without stability
+/// issues, and 1000 levels of interpreter recursion comfortably fits inside
+/// the 64MB `simple-main` thread stack (verified empirically), so flipping
+/// the release default carries the same behavior debug builds already rely
+/// on. `SIMPLE_STACK_OVERFLOW_DETECTION=0` / `set_stack_overflow_detection_enabled(false)`
+/// remain available to opt back out.
 pub static STACK_OVERFLOW_DETECTION_ENABLED: AtomicBool = AtomicBool::new(true);
-
-#[cfg(not(debug_assertions))]
-pub static STACK_OVERFLOW_DETECTION_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Set stack overflow detection on/off.
 #[inline]

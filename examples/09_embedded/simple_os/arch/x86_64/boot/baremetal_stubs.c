@@ -15246,11 +15246,46 @@ __attribute__((naked)) static void _rich_fault_entry(void)
         "addq $8, %%rsp\n\t"
         "iretq\n\t"
         "3:\n\t"
-        /* No error code: advance RIP (at [rsp]), iretq. Only reached for
-         * kernel-mode faults (CS==0x08 was detected above). */
+        /* No error code: RIP is at (%rsp). Only reached for kernel-mode
+         * faults (CS==0x08 was detected above). This is the ONLY path #UD
+         * (vector 6) can land on — #UD never pushes an error code.
+         *
+         * Before blindly advancing+iretq-ing, check whether the faulting
+         * instruction IS `ud2` (opcode 0x0F 0x0B). A `ud2` is always an
+         * INTENTIONAL trap (e.g. the compiler's duck-dispatch-sentinel guard
+         * in compile_method_call_virtual, closures_structs.rs) — never a
+         * random invalid opcode safe to skip past. The old blind "RIP += 2,
+         * iretq" recovery treated it like any other recoverable fault, which
+         * turned an honest, deliberate abort into a silent wild-jump storm
+         * (see C8 in doc/08_tracking/bug/
+         * simpleos_native_build_entry_closure_codegen_defects_2026-07-17.md).
+         * All OTHER no-error-code vectors (#DE, #BP, #OF, ...) keep the
+         * exact prior 2-byte-skip recovery, unchanged.
+         *
+         * `popq` does not touch EFLAGS, so it is safe to restore the scratch
+         * registers to their exact fault-time values AFTER the `cmpl` and
+         * still branch on the live ZF from it. */
+        "pushq %%rax\n\t"
+        "pushq %%rcx\n\t"
+        "movq 16(%%rsp), %%rax\n\t"    /* rax = faulting RIP (above the 2 pushes) */
+        "movzwl (%%rax), %%ecx\n\t"    /* ecx = 2 bytes at RIP */
+        "cmpl $0x0B0F, %%ecx\n\t"      /* 0x0F 0x0B (ud2) as a little-endian u16 */
+        "popq %%rcx\n\t"
+        "popq %%rax\n\t"
+        "je 6f\n\t"
         "addq $2, (%%rsp)\n\t"
         "movq $0x3, %%rax\n\t"
         "iretq\n\t"
+        "6:\n\t"
+        /* Kernel ud2: fatal, never recover/iretq. Frame here (no error
+         * code): [rsp]=RIP, [rsp+8]=CS. spl_x86_on_kernel_ud2_fault prints
+         * the diagnostic; registers are free to clobber, we never return. */
+        "movq (%%rsp), %%rdi\n\t"      /* arg0: faulting RIP */
+        "callq spl_x86_on_kernel_ud2_fault\n\t"
+        "cli\n\t"
+        "7:\n\t"
+        "hlt\n\t"
+        "jmp 7b\n\t"
         "9:\n\t"
         /* Ring-3 unrecoverable fault: deliver fatal signal + park the CPU.
          * Frame here: [rsp]=errcode, [rsp+8]=user RIP, [rsp+16]=CS; CR2 holds

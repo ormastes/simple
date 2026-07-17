@@ -180,6 +180,51 @@ fn runner_runs_from_file() {
     // Only compilation mode creates .smf output. Just verify execution succeeded.
 }
 
+/// Regression test for bug seed_compile_smf_stub_fail_open_2026-07-17.
+///
+/// Reproduces the exact CLI-level repro from the bug report end to end:
+/// `Runner::compile_file` (`simple compile hello.spl -o hello.smf`) followed
+/// by `Runner::run_smf` (`simple run hello.smf`). Before the fix, `compile`
+/// interpreted the bare `print("run-ok")` script for its compile-time side
+/// effect, discarded the result, and wrote a byte-identical 219-byte
+/// constant-return stub SMF for every input; `run` on that stub then exited 0
+/// having executed no user code and printed nothing. This is the absolute
+/// stdout oracle the bug's "Fix direction" section calls for: exit 0 alone
+/// (satisfied by the stub too) is not sufficient evidence.
+#[test]
+fn compile_file_then_run_smf_bare_script_print_executes_for_real() {
+    use simple_runtime::value::{rt_capture_stdout_start, rt_capture_stdout_stop};
+
+    let dir = tempfile::tempdir().unwrap();
+    let src_path = dir.path().join("hello.spl");
+    let smf_path = dir.path().join("hello.smf");
+    std::fs::write(&src_path, "print(\"run-ok\")\n").unwrap();
+
+    let runner = Runner::new();
+    runner
+        .compile_file(&src_path, &smf_path)
+        .expect("compile_file should succeed on a valid bare-script source");
+
+    let smf_bytes = std::fs::metadata(&smf_path).expect("smf artifact must exist").len();
+    assert!(
+        smf_bytes > 219,
+        "expected a real compiled SMF, got a byte count ({}) matching the known 219-byte fail-open stub",
+        smf_bytes
+    );
+
+    rt_capture_stdout_start();
+    let exit = runner.run_smf(&smf_path).expect("run_smf should succeed");
+    let captured = rt_capture_stdout_stop();
+
+    assert_eq!(exit, 0);
+    assert!(
+        captured.contains("run-ok"),
+        "expected `run hello.smf` to actually execute the compiled script and print \
+'run-ok' (not silently exit 0 having run no user code), got captured stdout: {:?}",
+        captured
+    );
+}
+
 #[test]
 fn dependency_analysis_finds_imports_and_macros() {
     let source = r#"
