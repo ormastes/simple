@@ -710,9 +710,10 @@ observe a pass:
   Compare every language total and script subtotal with the checked-in derived
   ledger. The synthetic unit fixture proves scanner/arithmetic behavior only.
 - **Effect oracles are absolute, not "non-zero".** Transparency/blend specs use
-  effective alpha `sa=(coverage*fg_a+127)/255`, then assert
-  `out_rgb=(fg_rgb*sa+bg_rgb*(255-sa))/255` and
-  `out_a=sa+bg_a*(255-sa)/255`; zero coverage leaves the background untouched.
+  effective alpha `sa=(coverage*fg_a+127)/255`; when `sa==0`, output is the
+  unchanged background. Otherwise assert
+  `dst_weight=bg_a*(255-sa)/255`, `out_a=sa+dst_weight`, and
+  `out_rgb=(fg_rgb*sa+bg_rgb*dst_weight)/out_a`.
   Full coverage replaces the foreground only when `fg_a==255`. See
   `font_glyph_transparency_spec.spl`.
 - **Config/env backend selection.** When one API selects its lane (SIMD CPU vs

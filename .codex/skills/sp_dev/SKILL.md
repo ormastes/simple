@@ -492,6 +492,9 @@ font GPU emission, or GUI/Web/2D/3D text.
    Vulkan promotion additionally requires the validated precompiled-SPIR-V
    artifact mode and its exact pinned hash; runtime GLSL is diagnostic execution
    only.
+   Straight-ARGB compositing is `FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION = 2`;
+   retained CUDA PTX and Vulkan SPIR-V with another version are stale and must
+   be regenerated and re-pinned before promotion, never trusted by bypassing the check.
 7. Shaping and material preparation fail closed unless every required operation
    completed. Hosted runs remain bound to the exact live face handle and
    generation. Registered-only SimpleOS runs are the bounded exception: exact

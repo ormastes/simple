@@ -347,7 +347,9 @@ GLSL-to-SPIR-V metadata; its evidence contract fails closed on missing bytes,
 bad magic, or missing `main`. A valid synthetic contract is not compilation or
 execution, and no compiled artifact exists absent real external capture.
 Native-target signatures include explicit atlas/destination element counts and
-guard computed indices; WGSL uses `arrayLength` for the same fail-closed bound.
+guard computed indices. WGSL rejects nonpositive dimensions, negative atlas
+origins, overflowing products, invalid subrects, and destination-add overflow
+before unsigned casts, then uses `arrayLength` for the final buffer bound.
 Portable backend planning emits a separate optimization artifact and font
 companion artifact for each selected target. The font path uses the
 `_font_atlas` suffix and requires the versioned composite entry; it is not

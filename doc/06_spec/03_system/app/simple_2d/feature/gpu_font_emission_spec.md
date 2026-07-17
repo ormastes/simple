@@ -22,6 +22,14 @@ artifact-hash fields, real compilation diagnostics, and execution are not.
 
 ## Operator flow
 
+### Gate configured ROCm font readback with admitted and provenance-bound evidence
+
+`check-rocm-engine2d-font-readback.shs` verifies the strict public Engine2D
+route, `Required(rocm)` configured text, pre-present device readback, and exact
+CPU pixels. Mock mode is explicitly non-real. Real mode starts fail-closed,
+admits and pins the self-host compiler, sanitizes loader state, and records the
+loaded HIP/HIPRTC libraries plus AMD device/driver and source/binary hashes.
+
 ### Invoke the stable pure-Simple GPU source emitter without a generated test file
 
 Run `bin/simple run src/app/portable_compute_emit/main.spl cuda` to print the
@@ -92,8 +100,10 @@ source and entry/version hashes twice and requires exact equality.
 - Metal includes `metal_stdlib`, binds atlas/destination at buffers 0/1, and
   receives one `FontAtlasCompositeParams` constant block at buffer 2.
 - WGSL binds a read-only atlas at binding 0 and read-write destination at
-  binding 1, indexes the atlas with `sy * atlas_width + sx`, and guards both
-  buffers plus the 11-element parameter block with `arrayLength`.
+  binding 1. Before unsigned casts it rejects nonpositive dimensions, negative
+  atlas origins, overflowing products, invalid atlas subrects, and destination
+  addition overflow; it then bounds computed indices against `arrayLength` for
+  both buffers and preserves the 11-element parameter block.
 - WGSL remains source-only: `produces_binary()` is false and no compilation or
   execution evidence is synthesized.
 - Portable backend planning returns optimization/font companion pairs with

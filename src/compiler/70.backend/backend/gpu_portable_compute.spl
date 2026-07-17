@@ -792,7 +792,59 @@ fn emit_portable_font_atlas_composite_kernel(target: PortableComputeTarget) -> P
         return PortableComputeArtifact(
             target: target,
             entry_name: name,
-            source: "@group(0) @binding(0) var<storage, read> atlas: array<u32>;\n@group(0) @binding(1) var<storage, read_write> dst: array<u32>;\n@group(0) @binding(2) var<storage, read> params: array<i32>;\n\n@compute @workgroup_size(64)\nfn {name}(@builtin(global_invocation_id) global_id: vec3<u32>) {\n    if (arrayLength(&params) < 11u) { return; }\n    let atlas_width = u32(params[0]);\n    let atlas_height = u32(params[1]);\n    let atlas_x = u32(params[2]);\n    let atlas_y = u32(params[3]);\n    let quad_width = u32(params[4]);\n    let quad_height = u32(params[5]);\n    let dst_width = u32(params[6]);\n    let dst_height = u32(params[7]);\n    let color = bitcast<u32>(params[10]);\n    let i = global_id.x;\n    if (i >= quad_width * quad_height) { return; }\n    let sx = atlas_x + i % quad_width;\n    let sy = atlas_y + i / quad_width;\n    if (sx >= atlas_width || sy >= atlas_height) { return; }\n    let si = sy * atlas_width + sx;\n    if (si >= arrayLength(&atlas)) { return; }\n    let dx = i32(i % quad_width) + params[8];\n    let dy = i32(i / quad_width) + params[9];\n    if (dx < 0 || dy < 0 || dx >= i32(dst_width) || dy >= i32(dst_height)) { return; }\n    let di = u32(dy) * dst_width + u32(dx);\n    if (di >= arrayLength(&dst)) { return; }\n    let mask_a = atlas[si] >> 24u;\n    let sa = (mask_a * (color >> 24u) + 127u) / 255u;\n    if (sa == 0u) { return; }\n    let d = dst[di];\n    let da = d >> 24u;\n    let inv = 255u - sa;\n    let dst_weight = (da * inv) / 255u;\n    let out_a = sa + dst_weight;\n    let out_r = (((color >> 16u) & 255u) * sa + ((d >> 16u) & 255u) * dst_weight) / out_a;\n    let out_g = (((color >> 8u) & 255u) * sa + ((d >> 8u) & 255u) * dst_weight) / out_a;\n    let out_b = ((color & 255u) * sa + (d & 255u) * dst_weight) / out_a;\n    dst[di] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;\n}\n",
+            source: "@group(0) @binding(0) var<storage, read> atlas: array<u32>;\n" +
+                "@group(0) @binding(1) var<storage, read_write> dst: array<u32>;\n" +
+                "@group(0) @binding(2) var<storage, read> params: array<i32>;\n\n" +
+                "@compute @workgroup_size(64)\n" +
+                "fn {name}(@builtin(global_invocation_id) global_id: vec3<u32>) {\n" +
+                "    if (arrayLength(&params) < 11u) { return; }\n" +
+                "    if (params[0] <= 0 || params[1] <= 0 || params[4] <= 0 || params[5] <= 0 ||\n" +
+                "        params[6] <= 0 || params[7] <= 0 || params[2] < 0 || params[3] < 0) { return; }\n" +
+                "    let atlas_width = u32(params[0]);\n" +
+                "    let atlas_height = u32(params[1]);\n" +
+                "    let atlas_x = u32(params[2]);\n" +
+                "    let atlas_y = u32(params[3]);\n" +
+                "    let quad_width = u32(params[4]);\n" +
+                "    let quad_height = u32(params[5]);\n" +
+                "    let dst_width = u32(params[6]);\n" +
+                "    let dst_height = u32(params[7]);\n" +
+                "    if (atlas_width > 0xffffffffu / atlas_height ||\n" +
+                "        quad_width > 0xffffffffu / quad_height ||\n" +
+                "        dst_width > 0xffffffffu / dst_height) { return; }\n" +
+                "    if (atlas_x > atlas_width || atlas_y > atlas_height ||\n" +
+                "        quad_width > atlas_width - atlas_x || quad_height > atlas_height - atlas_y) { return; }\n" +
+                "    let atlas_count = atlas_width * atlas_height;\n" +
+                "    let quad_count = quad_width * quad_height;\n" +
+                "    let dst_count = dst_width * dst_height;\n" +
+                "    if (atlas_count > arrayLength(&atlas) || dst_count > arrayLength(&dst)) { return; }\n" +
+                "    let color = bitcast<u32>(params[10]);\n" +
+                "    let i = global_id.x;\n" +
+                "    if (i >= quad_count) { return; }\n" +
+                "    let local_x = i % quad_width;\n" +
+                "    let local_y = i / quad_width;\n" +
+                "    let sx = atlas_x + local_x;\n" +
+                "    let sy = atlas_y + local_y;\n" +
+                "    let si = sy * atlas_width + sx;\n" +
+                "    if (si >= atlas_count) { return; }\n" +
+                "    if (params[8] > 2147483647 - i32(local_x) || params[9] > 2147483647 - i32(local_y)) { return; }\n" +
+                "    let dx = params[8] + i32(local_x);\n" +
+                "    let dy = params[9] + i32(local_y);\n" +
+                "    if (dx < 0 || dy < 0 || dx >= i32(dst_width) || dy >= i32(dst_height)) { return; }\n" +
+                "    let di = u32(dy) * dst_width + u32(dx);\n" +
+                "    if (di >= dst_count) { return; }\n" +
+                "    let mask_a = atlas[si] >> 24u;\n" +
+                "    let sa = (mask_a * (color >> 24u) + 127u) / 255u;\n" +
+                "    if (sa == 0u) { return; }\n" +
+                "    let d = dst[di];\n" +
+                "    let da = d >> 24u;\n" +
+                "    let inv = 255u - sa;\n" +
+                "    let dst_weight = (da * inv) / 255u;\n" +
+                "    let out_a = sa + dst_weight;\n" +
+                "    let out_r = (((color >> 16u) & 255u) * sa + ((d >> 16u) & 255u) * dst_weight) / out_a;\n" +
+                "    let out_g = (((color >> 8u) & 255u) * sa + ((d >> 8u) & 255u) * dst_weight) / out_a;\n" +
+                "    let out_b = ((color & 255u) * sa + (d & 255u) * dst_weight) / out_a;\n" +
+                "    dst[di] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;\n" +
+                "}\n",
             binary_format: portable_compute_binary_format(target)
         )
     val ty = portable_compute_u32_type(target)
