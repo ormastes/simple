@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-04
 **Severity:** medium
-**Status:** open
+**Status:** RESOLVED (triage-confirmed 2026-07-17: selector lane reproduced fix in current source via bootstrap-seed run + git log -S)
 
 ## Symptom
 

@@ -1,7 +1,7 @@
 # `arr[i].field = value` rejected as invalid assignment target
 
 Date: 2026-07-11
-Status: Open (worked around at each call site)
+Status: RESOLVED (triage-confirmed 2026-07-17: selector lane reproduced fix in current source via bootstrap-seed run + git log -S; call-site workarounds can be unwound)
 Severity: P3 — language ergonomics gap, not a functional blocker
 
 ## Reproducer
