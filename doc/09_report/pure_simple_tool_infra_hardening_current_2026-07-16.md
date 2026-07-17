@@ -39,7 +39,7 @@ so executable qualification is still blocked.
 | Test runner | PARTIAL | POSIX parallel children are tracked; resource-limited children now honor the requested soft deadline with one five-second TERM-to-KILL grace. Sequential/limited/fork/QEMU children remain synchronously untracked; Windows parallel capture fails closed | Move every execution mode onto an interruptible tracked process owner, add process-group/parent-death containment, then run signal/timeout/RSS evidence | P0 |
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; cosine candidate progress is time-throttled instead of reading RSS and writing stderr per pair; exact/cosine line gates share one tokenizer-derived signal prefix; runtime/performance qualification remain | Run focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
 | Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP performance now fails closed instead of invoking inert `build lint`; global gates still report 29 UI and 41 hot-loop violations | Add one repository-scanner owner for the four MCP rules, repair classified violations, then run focused fixtures | P1 |
-| Format/fix | SOURCE GUARDED | Writes are atomic and checked; output passes a CoreLexer equivalence gate or fails closed; empty files are accepted; generic cast brackets retain parser-required adjacency | Replace remaining heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
+| Format/fix | SOURCE GUARDED | Writes are atomic and checked; output passes a CoreLexer equivalence gate or fails closed; empty files and generic casts are safe; the corrupting indentation-repair prepass is deleted | Replace remaining heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
 | Check | PARTIAL | Driver API Check now stops after fatal HIR analysis and before diagnostic-free monomorphization. Production CLI remains parse/policy-only, can false-green HIR-invalid code, and may delegate to the seed | Retain CLI policy checks, route semantics through `driver_api_core.check_file`, consolidate duplicate workers, remove seed delegation only after direct-path latency/RSS qualification | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
 | Test daemon | SOURCE FIXED | CLI/client share the full daemon protocol; local, container, remote, lightweight, and agent paths now retain canonical passed/failed/skipped counts and fail closed on malformed outer summaries; dynamic qualification remains | Run the authored local/session/count-cache/timeout/stop protocol fixtures with an admitted runtime | P0 |
@@ -304,6 +304,11 @@ so executable qualification is still blocked.
   atomic write path. Blind `<`/`>` spacing is removed because cast generics such
   as `value as Box<T>` require adjacency and whitespace-only fingerprints cannot
   distinguish those delimiters from comparisons.
+- **Formatter indentation:** the removed `fix_indentation` prepass dedented
+  after `return` and again before `else`/`elif`, moving valid branches outside
+  their function while leaving the token fingerprint unchanged. The existing
+  `format_code_lines` pass already preserves source-derived indentation, so no
+  replacement heuristic is needed.
 
 ## Latest bounded verification
 
@@ -315,7 +320,7 @@ so executable qualification is still blocked.
   timeout transport, and broker lifecycle source contracts: SOURCE
   IMPLEMENTED; executable daemon protocol and adapter verdicts are NOT RUN.
 - Formatter token/literal/comment/raw-gap equivalence, generic-cast adjacency,
-  and idempotence fixtures:
+  branch indentation, and idempotence fixtures:
   SOURCE IMPLEMENTED; executable verdict is NOT RUN without an admitted
   pure-Simple runtime.
 - Lint canonical severity/profile policy, unique shared-rule collection, and
