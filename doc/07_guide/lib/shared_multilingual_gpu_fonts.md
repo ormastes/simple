@@ -82,8 +82,9 @@ The unchanged binaries and adjacent metadata/licenses are bundled under
 accepted in source policy—nine identity-profile families, the sans Devanagari
 and Arabic witness faces, and exact-corpus Noto Emoji. Serif Devanagari/Arabic
 and two rank-eleven Bengali faces remain candidates.
-The distribution-size gate counts unique binaries, metadata, licenses, and the
-Roboto Slab copyright notice together against the 80 MiB ceiling.
+The distribution-size gate counts all 57 files under `assets/fonts` plus root
+`LICENSE` and `THIRD_PARTY_NOTICES.md`: 59 files and 53,433,272 bytes against
+the 80 MiB ceiling.
 The release installer copies `assets/fonts/`, `LICENSE`, and
 `THIRD_PARTY_NOTICES.md` below `share/simple`. Its wrapper exports that share
 directory as `SIMPLE_ASSET_ROOT`; the registry byte-load boundary resolves the
