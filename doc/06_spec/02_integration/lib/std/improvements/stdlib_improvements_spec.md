@@ -27,7 +27,7 @@ stdlib_improvements_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 46 | 46 | 0 | 0 |
+| 47 | 47 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -401,6 +401,37 @@ Reproduction: this block contains the complete executable scenario source.
 val text = "line1\nline2\nline3"
 val lines = text.lines()
 expect lines.len() == 3
+```
+
+</details>
+
+#### lines aliases preserve Rust-compatible edge cases
+
+1. expect empty lines length
+2. expect empty split_lines length
+3. expect CRLF lines length and values
+4. expect repeated trailing LF length and final empty value
+5. expect lone CR length and value
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect "".lines().len() == 0
+expect "".split_lines().len() == 0
+val crlf = "a\r\nb".lines()
+expect crlf.len() == 2
+expect crlf[0] == "a"
+expect crlf[1] == "b"
+val trailing = "a\n\n".split_lines()
+expect trailing.len() == 2
+expect trailing[1] == ""
+val lone_cr = "a\rb".lines()
+expect lone_cr.len() == 1
+expect lone_cr[0] == "a\rb"
 ```
 
 </details>
@@ -955,7 +986,7 @@ expect fail_second.is_err() == true
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/02_integration/lib/std/improvements/stdlib_improvements_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-17 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -970,8 +1001,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 46 |
-| Active scenarios | 46 |
+| Total scenarios | 47 |
+| Active scenarios | 47 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

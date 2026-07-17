@@ -1,6 +1,6 @@
 # Pure-Simple text.split_lines method is missing at runtime
 
-**Status:** OPEN
+**Status:** source fixed; interpreter and strict dual-backend execution pending
 **Severity:** High for self-hosted compiler/tooling paths
 **Affected surface:** compiled pure-Simple method dispatch for `text`
 
@@ -29,6 +29,11 @@ and retains the required linear-time scan. This is not evidence that
 - Add interpreter and native execution tests that call the method directly.
 - Remove this bug only after a deployed Stage 4 binary passes those tests.
 
-## Verification (2026-07-16)
+## Verification (2026-07-17)
 
-Still reproduces at origin tip 8932fcb3a148: `probe04_split_lines_a.spl` (`content.split_lines()` on a 3-line string). Native: `native-build --entry --clean` exit 1 with `[mir-lower] WARNING: unresolved method call 'split_lines' lowered to const-0 placeholder` then `[ERROR] MIR lowering error: unresolved method call: split_lines`. No binary produced; exactly matches documented symptom.
+Pure-Simple interpreter dispatch and MIR lowering now accept both
+`split_lines()` and its canonical `lines()` alias. Empty input returns `[]`;
+CRLF normalization, trailing-newline suppression, repeated trailing LF, and
+lone CR match Rust `str::lines()`. The strict dual-backend parity case covers
+both names and those edge cases. Execution remains pending in the staged full
+gate; do not mark the deployment criterion complete until that gate runs.

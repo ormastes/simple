@@ -13,8 +13,8 @@ failure is **never** silently converted to a wrong answer.
 - **Gate 1 — matrix:** `scripts/check/native-smoke-matrix.shs` must report
   `total=15 pass=15 fail=0 codegen_fallback_hits=0`.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
-  regression harness) must report `native_seed_parity=true`. It defines **77
-  logical cases / 97 recorded checks** because strict-dual cases record LLVM
+  regression harness) must report `native_seed_parity=true`. It defines **78
+  logical cases / 99 recorded checks** because strict-dual cases record LLVM
   and Cranelift separately; execution of the expanded matrix is pending.
   The full unfiltered gate is now scheduled on Linux x86_64 LLVM (STRICT-DUAL
   cases also build Cranelift); its first CI execution is pending. Five modes:
