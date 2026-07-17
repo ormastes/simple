@@ -225,3 +225,31 @@ failed normally in phase 2 at
 parser rejected the `mut counts` parameter in `count_inst_uses` with
 `expected ), got Ident 'counts'`. This is the next admission blocker; the
 fat-arrow match-arm arena defect is no longer the stopping point.
+
+## Cycles 7–9 evidence — three parser gaps removed, admission still open
+
+The mandatory three-cycle follow-up preserved the warm native cache and used
+only pure-Simple bootstrap compilers. Each bootstrap candidate rebuilt all 715
+units with zero compilation failures and linked successfully:
+
+- Cycle 7 taught impl/class method parsing to consume canonical
+  `mut name: Type`, preserve the marker when implicit `self` is prepended, and
+  write the aligned `PARAM_MUTS` arena. Stage 4 passed `collection_opt_core.spl`
+  and next rejected keyword-named parameter uses such as `loop.header`.
+- Cycle 8 disambiguated `loop:` control flow from the established keyword-as-
+  identifier forms at both primary-expression and statement dispatch. Stage 4
+  passed `loop_licm.spl` and next rejected the widely used `me fn name(...)`
+  mutable-method spelling in `src/lib/nogc_sync_mut/db/accel.spl`.
+- Cycle 9 accepted both `me name(...)` and `me fn name(...)` through the same
+  mutable-method path. Its bounded Stage-4 run passed every earlier blocker,
+  then stopped in phase 2 at
+  `src/std/nogc_sync_mut/env/variables.spl:362` with
+  `expected =, got (` for the destructuring binding
+  `val Some(dollar_idx) = dollar_pos`.
+
+The direct pure-parser regression now checks aligned method names/mutability,
+leading `loop.header`, both fat-arrow statement wrappers, and `me fn` parsing.
+The full CLI and its test runner were not produced, so executable spec evidence,
+font/pixel/performance evidence, production verification, and publication remain
+open. Per the three-cycle cap, the `val Some(...)` parser gap is recorded here
+for the next scoped session rather than repaired or retried in this one.
