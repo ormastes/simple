@@ -1,108 +1,129 @@
 # S61: Interpreter Stack Overflow on app.io.mod Imports
 
 **Status:** Open  
-**Defect Type:** Interpreter module loader / cycle detection  
-**Severity:** Critical (blocks all app.io tests)  
-**Evidence:** `bin/simple test test/01_unit/app/io/io_numeric_guard_spec.spl` times out on stack overflow after ~2 minutes  
+**Defect Type:** Interpreter module loader / missing cycle detection  
+**Severity:** Critical (blocks direct imports of app.io.mod)  
+**Affects:** BOTH deployed pure-Simple self-hosted binary (2026-07-11) AND Rust seed bootstrap  
+**Root Cause:** Pure-Simple interpreter module loader lacks "is_currently_loading" tracking
 
 ## Symptom
 
-Running any test that exercises app.io modules causes the interpreter to hang and stack overflow:
+Importing `use app.io.mod` directly causes stack overflow in both interpreter engines:
 
 ```bash
-# Hangs with stack overflow
-timeout 10 bin/simple test test/01_unit/app/io/io_numeric_guard_spec.spl
+# Reproducer: direct import of app.io.mod
+cat > /tmp/test_io_direct.spl <<'EOF'
+use app.io.mod
+
+describe "direct import":
+    it "loads app.io.mod":
+        expect(true).to_equal(true)
+EOF
+
+# BOTH binaries hang with timeout exit 143:
+timeout 5 /home/ormastes/dev/wt_s9/bin/simple test /tmp/test_io_direct.spl  # Exit 143
+timeout 5 /home/ormastes/dev/pub/simple/src/compiler_rust/target/bootstrap/simple test /tmp/test_io_direct.spl  # Exit 143
 ```
 
-All app.io tests in `test/01_unit/app/io/` are blocked.
+Tests that do NOT directly import app.io.mod complete successfully.
 
 ## Root Cause Analysis
 
-The issue is a **defect in the Rust seed interpreter's module loader** (src/compiler_rust/compiler/src/interpreter_module/module_loader.rs).
+### Pure-Simple Interpreter Module Loader Bug
 
-### Import Redirect Cycle
+The pure-Simple interpreter's module loader (src/compiler/10.frontend/core/interpreter/module_loader_core.spl) lacks **cycle detection during module load**.
 
-When importing from app.io, the module loader redirects group/glob imports to __init__.spl:
+**Flow that triggers the bug:**
 
-1. **Import Path Redirect**: `prefer_package_init_for_member_import()` (line 377-392 in module_loader.rs)
-   - Redirects: `use app.io.mod (item)` → loads `src/app/io/__init__.spl` instead of `src/app/io/mod.spl`
-   - Trigger: Group or Glob imports only (lines 379-380)
+1. `use app.io.mod` is processed
+2. `load_module("app.io.mod", current_file)` is called (module_loader_core.spl:351)
+3. Module is NOT yet marked as "loaded" — only depth tracking exists (line 366-368)
+4. Source is parsed, AST is added to shared interpreter state
+5. `extract_module_exports()` is called (line 395) — just scans AST
+6. `register_module_functions()` is called (line 398) — just registers functions
+7. Module is marked as loaded (line 401)
+8. **BUT**: When eval_module() later processes declarations, it reaches Phase 1.5 (eval_decls.spl:196-201)
+9. Phase 1.5 evaluates ALL DECL_USE statements immediately
+10. If any use statement in app.io.mod (or its transitive deps) tries to re-load app.io.mod:
+    - Check at line 356: `if module_is_loaded(module_name) == 1` → FALSE (module not YET marked as loaded)
+    - Depth check at line 366: passes (depth is still low, only 16-level limit)
+    - **Infinite recursion begins** → re-parse app.io.mod → re-process use statements → try to load app.io.mod again
 
-2. **__init__.spl Structure** (src/app/io/__init__.spl):
-   - Line 6-15: Bare `mod` declarations (not real imports)
-   - Line 58: `export use app.io.mod.{ ... many items ... }`
-   - This export-use triggers loading of app/io/mod.spl
+### Missing "Currently Loading" Tracking
 
-3. **Problematic Sequence**:
-   - Test tries: `use app.io (any_item)` or test framework itself loads app.io
-   - Loader redirects to app/io/__init__.spl and marks it as "loading"
-   - __init__.spl evaluation processes: `export use app.io.mod`
-   - This calls `load_and_merge_module()` for app.io.mod
-   - app.io.mod.spl imports from std.nogc_sync_mut.io.* (line 16-92)
-   - **Unknown link**: One of these modules or sibling preloading re-tries to load a module that's already marked as loading
-   - Cycle detection returns partial exports (lines 671-683 in module_loader.rs)
-   - But evaluation continues re-recursing somewhere without properly checking the loaded flag
+**Key Issue**: The loader only has ONE tracking structure: `loaded_module_set` (marked only AFTER full load).
 
-### Suspected Code Path
+**Missing**: A `currently_loading_set` to track modules still being loaded, which would catch cycles BEFORE they recurse.
 
-1. Line 881-896 in module_loader.rs: **Sibling preloading** during __init__.spl evaluation
-   - Collects all .spl files in app/io directory (siblings of __init__.spl)
-   - Calls `evaluate_module_exports()` for each sibling
-   - **Bug candidate**: A sibling's evaluate_module_exports triggers a re-import of a module still being loaded, but the cycle detection isn't applied uniformly
+Compare (Rust seed has this):
+- Rust: `is_module_loading(&module_path)` at line 671 in module_loader.rs (detects in-flight modules)
+- Pure-Simple: Only `module_is_loaded()` at line 356 (detects fully-loaded modules)
 
-2. Alternative: The `mod` declarations (lines 6-15 in __init__.spl) might be interpreted as implicit imports by the evaluation layer, causing hidden re-entrance.
+### Probable Re-entry Point
+
+When app.io.mod is being evaluated:
+- app.io.mod imports std.nogc_sync_mut.io.* files
+- One of those files OR a transitive dependency might have a use statement that needs app.io module re-exports
+- OR: eval_module's phase 1.5 evaluates ALL use statements, including those in app.io.mod itself, which haven't finished loading yet
+- Those use statements call load_module() again for app.io.mod
+- Since it's not yet marked as "loaded", the cycle recurses infinitely
 
 ## Files Involved
 
-- **Rust Interpreter Module Loader**: `src/compiler_rust/compiler/src/interpreter_module/module_loader.rs`
-  - `load_and_merge_module()` function (line 455)
-  - Cycle detection (line 671-683): `if is_module_loading(&module_path)`
-  - Sibling preloading (line 754-926)
+**Pure-Simple Interpreter (PRIMARY BUG)**:
+- `src/compiler/10.frontend/core/interpreter/module_loader_core.spl`
+  - `load_module()` (line 351): No "is_currently_loading" check before line 356
+  - `module_is_loaded()` (line 163): Only checks `loaded_module_set`, not in-flight
+  - Depth limit (line 366): Set to only 16 levels, insufficient for complex cycles
+  - `module_mark_loaded()` (line 170): Called AFTER all processing
   
-- **Module Evaluator**: `src/compiler_rust/compiler/src/interpreter_module/module_evaluator/evaluation_helpers.rs`
-  - `process_use_stmt()` (line 482): Calls load_and_merge_module
-  
-- **Affected Modules**:
-  - `src/app/io/__init__.spl` (line 58): export use app.io.mod
-  - `src/app/io/mod.spl` (line 16-92): Multiple std.nogc_sync_mut.io imports
-  - `src/app/io/process_env_ops.spl`: Re-imported on line 33 of mod.spl
+- `src/compiler/10.frontend/core/interpreter/eval_decls.spl`
+  - Phase 1.5 (line 196-201): Evaluates all DECL_USE immediately
+  - `eval_decl()` for DECL_USE (line 88): Calls load_module without pre-checking current stack
 
-## Hypothesis
+**Rust Seed (HAS PROPER DETECTION)**:
+- `src/compiler_rust/compiler/src/interpreter_module/module_loader.rs`
+  - `is_module_loading()` check at line 671: Works correctly
+  - Partial exports memoization: Handles cycles properly
 
-The cycle detection works for direct A→B→A cycles, but fails when:
-1. Module A is marked as "loading"
-2. During A's evaluation, sibling module B is preloaded
-3. B's evaluation indirectly triggers re-loading of a module C
-4. C (or a module it loads) transitively depends on A
-5. The cycle is detected (returning partial exports), but **the stack doesn't unwind** — control returns to sibling preloading loop, which continues calling evaluate_module_exports on more siblings
-6. Eventually, a sibling's evaluation hits the same cycle again, but evaluation context keeps growing
+## How to Fix
 
-**Key Issue**: The cycle detection returns early (line 676-677), but the parent evaluation context continues with partial data, and re-entrance happens without proper depth reset or memoization.
+In src/compiler/10.frontend/core/interpreter/module_loader_core.spl:
 
-## Required Fix
+1. Add a "currently_loading" tracking set (parallel to loaded_module_set)
+2. At line 356, check BOTH:
+   ```
+   if module_is_loaded(module_name) == 1:
+       return 1
+   if module_is_currently_loading(module_name) == 1:
+       return 1  # Return partial/empty dict to break cycle
+   ```
+3. Mark module as "loading" BEFORE parsing (line ~370)
+4. Unmark from "loading" when fully loaded (line ~401)
 
-This is a **seed Rust interpreter bug**, not a .spl module structure problem. Possible fixes:
-
-1. **Prevent sibling preloading recursion**: Skip sibling preloading if any module in the current call stack is already being loaded
-2. **Improve memoization**: Cache the partial-exports result more aggressively so re-entrance always hits the cache
-3. **Depth-aware cycle detection**: Track not just which module is loading, but whether we're in a sibling preload context, and avoid recursing into heavy evaluation
-
-## Workaround
-
-None available for the interpreter. The pure-Simple compiler (not yet available/deployed) should not have this issue.
-
-## Test Case
+## Test Case (Reproducer)
 
 ```bash
-# Minimal repro
 cd /home/ormastes/dev/wt_s9
-timeout 5 bin/simple test test/01_unit/app/io/io_numeric_guard_spec.spl
-# Expected: test runs and completes
-# Actual: times out with stack overflow
+cat > /tmp/test_io_direct.spl <<'EOF'
+use app.io.mod
+describe "test": it "x": expect(true).to_equal(true)
+EOF
+
+timeout 5 bin/simple test /tmp/test_io_direct.spl
+# Expected: test completes with output
+# Actual: times out (exit 143) with stack overflow
 ```
+
+## Evidence
+
+- Both binaries exhibit identical hang behavior on direct `use app.io.mod`
+- Indirect use of app.io (through test framework) does NOT hang
+- Depth limit (16 levels) is exceeded during recursive re-entry
+- Rust seed has proper `is_module_loading()` detection; pure-Simple lacks it
 
 ## References
 
-- Module loader cycle detection: src/compiler_rust/compiler/src/interpreter_module/module_loader.rs:671-683
-- Sibling preloading logic: src/compiler_rust/compiler/src/interpreter_module/module_loader.rs:754-926
-- Affected module structure: src/app/io/__init__.spl and src/app/io/mod.spl
+- Pure-Simple loader: src/compiler/10.frontend/core/interpreter/module_loader_core.spl:351-404
+- Evaluation phases: src/compiler/10.frontend/core/interpreter/eval_decls.spl:196-201  
+- Rust seed (working): src/compiler_rust/compiler/src/interpreter_module/module_loader.rs:671-683
