@@ -6,11 +6,15 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/simpleos_wm_fullscreen_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/simpleos_wm_fullscreen_evidence_$(date -u +%F).md}"
+WRAPPER="scripts/check/check-simpleos-wm-fullscreen-evidence.shs"
+WRAPPER_SHA256=""
 SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 SIMPLE_BIN_STATUS=unchecked
 SIMPLE_BIN_RESOLVED=""
 SIMPLE_BIN_VERSION=""
 SIMPLE_BIN_SHA256=""
+KERNEL_OUTPUT=""
+KERNEL_SHA256=""
 LAUNCH_OUT="$BUILD_DIR/qemu.out"
 SERIAL_LOG="$BUILD_DIR/serial.log"
 QMP_SOCKET="$BUILD_DIR/qmp.sock"
@@ -31,6 +35,7 @@ FONT_REGION_EXPECTED_SHA256=""
 FONT_ASSET_BYTES=0
 FONT_ASSET_SHA256=""
 DISK_IMAGE=""
+DISK_IMAGE_SHA256=""
 disk_image_status=not-staged
 QEMU_PID=""
 
@@ -107,6 +112,13 @@ file_sha256() {
     fi
 }
 
+is_sha256() {
+    [ "${#1}" -eq 64 ] && case "$1" in
+        *[!0-9a-f]*) false ;;
+        *) true ;;
+    esac
+}
+
 regular_file_status() {
     path="$1"
     if [ -z "$path" ]; then
@@ -154,6 +166,8 @@ emit_failure() {
     {
         echo "simpleos_wm_fullscreen_status=fail"
         echo "simpleos_wm_fullscreen_reason=$reason"
+        echo "simpleos_wm_fullscreen_wrapper=$WRAPPER"
+        echo "simpleos_wm_fullscreen_wrapper_sha256=$WRAPPER_SHA256"
         echo "simpleos_wm_fullscreen_simple_bin=$SIMPLE_BIN"
         echo "simpleos_wm_fullscreen_simple_bin_resolved=$SIMPLE_BIN_RESOLVED"
         echo "simpleos_wm_fullscreen_simple_bin_source=$SIMPLE_BIN_SOURCE"
@@ -163,8 +177,11 @@ emit_failure() {
         echo "simpleos_wm_fullscreen_qemu_out=$LAUNCH_OUT"
         echo "simpleos_wm_fullscreen_serial_log=$SERIAL_LOG"
         echo "simpleos_wm_fullscreen_serial_log_bytes=$(file_byte_count "$SERIAL_LOG")"
+        echo "simpleos_wm_fullscreen_kernel=$KERNEL_OUTPUT"
+        echo "simpleos_wm_fullscreen_kernel_sha256=$KERNEL_SHA256"
         echo "simpleos_wm_fullscreen_disk_image=$DISK_IMAGE"
         echo "simpleos_wm_fullscreen_disk_image_status=$disk_image_status"
+        echo "simpleos_wm_fullscreen_disk_image_sha256=$DISK_IMAGE_SHA256"
         echo "simpleos_wm_fullscreen_font_asset=$FONT_ASSET"
         echo "simpleos_wm_fullscreen_font_asset_bytes=$FONT_ASSET_BYTES"
         echo "simpleos_wm_fullscreen_font_asset_sha256=$FONT_ASSET_SHA256"
@@ -177,15 +194,24 @@ emit_failure() {
         echo
         echo "- status: fail"
         echo "- reason: $reason"
+        echo "- wrapper: $WRAPPER (sha256=$WRAPPER_SHA256)"
         echo "- simple bin: $SIMPLE_BIN"
         echo "- resolved binary: $SIMPLE_BIN_RESOLVED"
         echo "- simple bin source: $SIMPLE_BIN_SOURCE"
         echo "- simple bin status: $SIMPLE_BIN_STATUS"
         echo "- simple bin version: $SIMPLE_BIN_VERSION"
         echo "- simple bin sha256: $SIMPLE_BIN_SHA256"
+        echo "- kernel: $KERNEL_OUTPUT (sha256=$KERNEL_SHA256)"
+        echo "- disk image: $DISK_IMAGE ($disk_image_status, sha256=$DISK_IMAGE_SHA256)"
     } >"$REPORT_PATH"
     cat "$BUILD_DIR/evidence.env"
 }
+
+WRAPPER_SHA256="$(file_sha256 "$WRAPPER")"
+if ! is_sha256 "$WRAPPER_SHA256"; then
+    emit_failure "artifact-sha256-invalid"
+    exit 1
+fi
 
 SIMPLE_BIN_RESOLVED="$(resolve_path "${SIMPLE_BIN:-missing}")"
 if is_rust_seed_path "${SIMPLE_BIN:-}" || is_rust_seed_path "$SIMPLE_BIN_RESOLVED"; then
@@ -216,7 +242,7 @@ case "$(printf '%s' "$SIMPLE_BIN_VERSION" | tr '[:upper:]' '[:lower:]')" in
         exit 1
         ;;
 esac
-if [ -z "$SIMPLE_BIN_VERSION" ] || [ -z "$SIMPLE_BIN_SHA256" ]; then
+if [ -z "$SIMPLE_BIN_VERSION" ] || ! is_sha256 "$SIMPLE_BIN_SHA256"; then
     SIMPLE_BIN_STATUS=unverified
     emit_failure "simple-bin-provenance-unverified"
     exit 1
@@ -304,6 +330,12 @@ SPL
     fi
 fi
 
+KERNEL_SHA256="$(file_sha256 "$KERNEL_OUTPUT")"
+if ! is_sha256 "$KERNEL_SHA256"; then
+    emit_failure "artifact-sha256-invalid"
+    exit 1
+fi
+
 rm -f "$QMP_SOCKET" "$SERIAL_LOG"
 
 DISK_IMAGE="${SIMPLEOS_WM_DISK_IMAGE:-$BUILD_DIR/fat32-x86_64-font.img}"
@@ -323,6 +355,11 @@ fi
 disk_image_status="$(regular_file_status "$DISK_IMAGE")"
 if [ "$disk_image_status" != pass ]; then
     emit_failure "production-fat32-disk-missing"
+    exit 1
+fi
+DISK_IMAGE_SHA256="$(file_sha256 "$DISK_IMAGE")"
+if ! is_sha256 "$DISK_IMAGE_SHA256"; then
+    emit_failure "artifact-sha256-invalid"
     exit 1
 fi
 
@@ -667,9 +704,28 @@ PY
     fi
 fi
 
+if [ "$status" = pass ]; then
+    wrapper_sha256_now="$(file_sha256 "$WRAPPER")"
+    kernel_sha256_now="$(file_sha256 "$KERNEL_OUTPUT")"
+    disk_image_sha256_now="$(file_sha256 "$DISK_IMAGE")"
+    if ! is_sha256 "$wrapper_sha256_now" || \
+       ! is_sha256 "$kernel_sha256_now" || \
+       ! is_sha256 "$disk_image_sha256_now"; then
+        status=fail
+        reason=artifact-sha256-invalid
+    elif [ "$wrapper_sha256_now" != "$WRAPPER_SHA256" ] || \
+         [ "$kernel_sha256_now" != "$KERNEL_SHA256" ] || \
+         [ "$disk_image_sha256_now" != "$DISK_IMAGE_SHA256" ]; then
+        status=fail
+        reason=artifact-sha256-mismatch
+    fi
+fi
+
 {
     echo "simpleos_wm_fullscreen_status=$status"
     echo "simpleos_wm_fullscreen_reason=$reason"
+    echo "simpleos_wm_fullscreen_wrapper=$WRAPPER"
+    echo "simpleos_wm_fullscreen_wrapper_sha256=$WRAPPER_SHA256"
     echo "simpleos_wm_fullscreen_simple_bin=$SIMPLE_BIN"
     echo "simpleos_wm_fullscreen_simple_bin_resolved=$SIMPLE_BIN_RESOLVED"
     echo "simpleos_wm_fullscreen_simple_bin_source=$SIMPLE_BIN_SOURCE"
@@ -681,8 +737,11 @@ fi
     echo "simpleos_wm_fullscreen_serial_log_bytes=$(file_byte_count "$SERIAL_LOG")"
     echo "simpleos_wm_fullscreen_qemu_out=$LAUNCH_OUT"
     echo "simpleos_wm_fullscreen_capture_out=$CAPTURE_OUT"
+    echo "simpleos_wm_fullscreen_kernel=$KERNEL_OUTPUT"
+    echo "simpleos_wm_fullscreen_kernel_sha256=$KERNEL_SHA256"
     echo "simpleos_wm_fullscreen_disk_image=$DISK_IMAGE"
     echo "simpleos_wm_fullscreen_disk_image_status=$disk_image_status"
+    echo "simpleos_wm_fullscreen_disk_image_sha256=$DISK_IMAGE_SHA256"
     echo "simpleos_wm_fullscreen_font_asset=$FONT_ASSET"
     echo "simpleos_wm_fullscreen_font_asset_bytes=$FONT_ASSET_BYTES"
     echo "simpleos_wm_fullscreen_font_asset_sha256=$FONT_ASSET_SHA256"
@@ -734,6 +793,7 @@ fi
     echo
     echo "- status: $status"
     echo "- reason: $reason"
+    echo "- wrapper: $WRAPPER (sha256=$WRAPPER_SHA256)"
     echo "- simple bin: $SIMPLE_BIN"
     echo "- resolved binary: $SIMPLE_BIN_RESOLVED"
     echo "- simple bin source: $SIMPLE_BIN_SOURCE"
@@ -741,7 +801,8 @@ fi
     echo "- simple bin version: $SIMPLE_BIN_VERSION"
     echo "- simple bin sha256: $SIMPLE_BIN_SHA256"
     echo "- qmp socket: $QMP_SOCKET"
-    echo "- disk image: $DISK_IMAGE ($disk_image_status)"
+    echo "- kernel: $KERNEL_OUTPUT (sha256=$KERNEL_SHA256)"
+    echo "- disk image: $DISK_IMAGE ($disk_image_status, sha256=$DISK_IMAGE_SHA256)"
     echo "- pinned font asset: $FONT_ASSET ($FONT_ASSET_BYTES bytes, sha256=$FONT_ASSET_SHA256)"
     echo "- guest font marker: ${font_marker:--}"
     echo "- font region: $FONT_REGION_RGB (${font_region_bytes:-0} bytes, sha256=${font_region_sha256:--}, origin=qemu-pmemsave)"

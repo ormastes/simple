@@ -607,8 +607,10 @@ The x86_64 SimpleOS witness is now the existing 12 px `taskbar-clock` command in
 real `SharedWmScene -> DrawIrComposition -> Engine2D` frame; the private
 post-frame `A`/32 px draw was deleted. The fullscreen QEMU wrapper captures the
 dynamic rightmost 56x48 slot (8,064 RGB bytes) and retains the candidate hash,
-but the expected hash is intentionally unset until a trusted QEMU run records
-it. Source routing is complete; REQ-011 pixel promotion remains unavailable.
+and retained consumers now require the canonical wrapper, kernel ELF, and
+FAT32 image paths with independently recomputed SHA-256 values. The expected
+pixel hash is intentionally unset until a trusted QEMU run records it. Source
+routing and artifact binding are complete; REQ-011 pixel promotion remains unavailable.
 Do not add another font draw path or reuse Engine3D HUD/world.
 
 ## Completion workflow

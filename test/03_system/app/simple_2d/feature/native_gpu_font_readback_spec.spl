@@ -24,6 +24,11 @@ use test.helpers.shared_multilingual_gpu_fonts_perf_evidence.{
 val FONT_PATH = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
 val FONT_ASSET_SHA256 = "2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081"
 val FONT_REGION_RGB_SHA256 = ""
+val SIMPLEOS_EVIDENCE_ROOT = "build/simpleos_wm_fullscreen_evidence/"
+val SIMPLEOS_WRAPPER_PATH = "scripts/check/check-simpleos-wm-fullscreen-evidence.shs"
+val SIMPLEOS_KERNEL_PATH = "build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf"
+val SIMPLEOS_DISK_PATH = "build/simpleos_wm_fullscreen_evidence/fat32-x86_64-font.img"
+val SIMPLEOS_ZERO_SHA256 = "0000000000000000000000000000000000000000000000000000000000000000"
 
 class Engine2DFontReadbackEvidence:
     status: text
@@ -154,6 +159,46 @@ fn expect_simpleos_font_pixel_oracle(evidence: SimpleOsFontPixelEvidence) -> boo
     FONT_REGION_RGB_SHA256.len() == 64 and evidence.status == "pass" and evidence.asset_sha256 == FONT_ASSET_SHA256 and
         evidence.region_rgb_sha256 == FONT_REGION_RGB_SHA256 and
         evidence.device_origin == "qemu-pmemsave" and evidence.region_rgb_bytes == 8064
+
+fn _simpleos_evidence_value(record: text, key: text) -> text:
+    val prefix = key + "="
+    var value = ""
+    var found = false
+    for line in record.split("\n"):
+        if line.starts_with(prefix):
+            if found: return ""
+            found = true
+            value = line.substring(prefix.len(), line.len())
+    value
+
+fn _simpleos_sha256_valid(value: text) -> bool:
+    if value.len() != 64: return false
+    val allowed = "0123456789abcdef"
+    var index: i64 = 0
+    while index < value.len():
+        if not allowed.contains(value[index].to_text()): return false
+        index = index + 1
+    true
+
+fn _simpleos_artifact_metadata_valid(record: text) -> bool:
+    val wrapper_sha256 = _simpleos_evidence_value(record, "simpleos_wm_fullscreen_wrapper_sha256")
+    val kernel_sha256 = _simpleos_evidence_value(record, "simpleos_wm_fullscreen_kernel_sha256")
+    val disk_sha256 = _simpleos_evidence_value(record, "simpleos_wm_fullscreen_disk_image_sha256")
+    _simpleos_evidence_value(record, "simpleos_wm_fullscreen_wrapper") == SIMPLEOS_WRAPPER_PATH and
+        _simpleos_evidence_value(record, "simpleos_wm_fullscreen_kernel") == SIMPLEOS_KERNEL_PATH and
+        _simpleos_evidence_value(record, "simpleos_wm_fullscreen_disk_image") == SIMPLEOS_DISK_PATH and
+        _simpleos_sha256_valid(wrapper_sha256) and _simpleos_sha256_valid(kernel_sha256) and
+        _simpleos_sha256_valid(disk_sha256)
+
+fn _simpleos_artifact_files_valid(record: text) -> bool:
+    file_exists(SIMPLEOS_WRAPPER_PATH) and file_exists(SIMPLEOS_KERNEL_PATH) and
+        file_exists(SIMPLEOS_DISK_PATH) and
+        file_hash_sha256(SIMPLEOS_WRAPPER_PATH) == _simpleos_evidence_value(record, "simpleos_wm_fullscreen_wrapper_sha256") and
+        file_hash_sha256(SIMPLEOS_KERNEL_PATH) == _simpleos_evidence_value(record, "simpleos_wm_fullscreen_kernel_sha256") and
+        file_hash_sha256(SIMPLEOS_DISK_PATH) == _simpleos_evidence_value(record, "simpleos_wm_fullscreen_disk_image_sha256")
+
+fn _simpleos_canonical_artifact_record() -> text:
+    "simpleos_wm_fullscreen_wrapper={SIMPLEOS_WRAPPER_PATH}\nsimpleos_wm_fullscreen_wrapper_sha256={SIMPLEOS_ZERO_SHA256}\nsimpleos_wm_fullscreen_kernel={SIMPLEOS_KERNEL_PATH}\nsimpleos_wm_fullscreen_kernel_sha256={SIMPLEOS_ZERO_SHA256}\nsimpleos_wm_fullscreen_disk_image={SIMPLEOS_DISK_PATH}\nsimpleos_wm_fullscreen_disk_image_sha256={SIMPLEOS_ZERO_SHA256}\n"
 
 fn _collect_engine2d_font_readback() -> Engine2DFontReadbackEvidence:
     var engine = Engine2D.create_with_backend(64, 64, "vulkan")
@@ -386,7 +431,7 @@ fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
     evidence
 
 fn _collect_simpleos_pixel_evidence() -> SimpleOsFontPixelEvidence:
-    val root = "build/simpleos_wm_fullscreen_evidence/"
+    val root = SIMPLEOS_EVIDENCE_ROOT
     val evidence_path = root + "evidence.env"
     if not file_exists(evidence_path):
         return SimpleOsFontPixelEvidence(
@@ -395,12 +440,14 @@ fn _collect_simpleos_pixel_evidence() -> SimpleOsFontPixelEvidence:
             region_rgb_bytes: 0)
     val record = file_read(evidence_path)
     val font_region_path = root + "font-region.rgb"
-    val valid = (record.contains("simpleos_wm_fullscreen_status=pass") and
-        record.contains("simpleos_wm_fullscreen_disk_image_status=pass") and
-        record.contains("simpleos_wm_fullscreen_font_asset_sha256=" + FONT_ASSET_SHA256) and
-        record.contains("simpleos_wm_fullscreen_font_region_rgb_bytes=8064") and
-        record.contains("simpleos_wm_fullscreen_font_region_rgb_sha256=" + FONT_REGION_RGB_SHA256) and
-        record.contains("simpleos_wm_fullscreen_scanout_pixel_format=argb8888") and
+    val valid = (_simpleos_artifact_metadata_valid(record) and
+        _simpleos_artifact_files_valid(record) and
+        _simpleos_evidence_value(record, "simpleos_wm_fullscreen_status") == "pass" and
+        _simpleos_evidence_value(record, "simpleos_wm_fullscreen_disk_image_status") == "pass" and
+        _simpleos_evidence_value(record, "simpleos_wm_fullscreen_font_asset_sha256") == FONT_ASSET_SHA256 and
+        _simpleos_evidence_value(record, "simpleos_wm_fullscreen_font_region_rgb_bytes") == "8064" and
+        _simpleos_evidence_value(record, "simpleos_wm_fullscreen_font_region_rgb_sha256") == FONT_REGION_RGB_SHA256 and
+        _simpleos_evidence_value(record, "simpleos_wm_fullscreen_scanout_pixel_format") == "argb8888" and
         file_exists(font_region_path) and file_size(font_region_path) == 8064 and
         file_hash_sha256(font_region_path) == FONT_REGION_RGB_SHA256 and
         file_exists(root + "serial.log") and file_exists(root + "baseline.ppm.raw") and
@@ -414,6 +461,31 @@ fn _collect_simpleos_pixel_evidence() -> SimpleOsFontPixelEvidence:
         region_rgb_bytes: if valid: 8064 else: 0)
 
 describe "native GPU font promotion evidence":
+    # @req REQ-014
+    it "should reject missing or noncanonical SimpleOS artifact provenance":
+        expect(_simpleos_artifact_metadata_valid("")).to_be(false)
+        val copied = _simpleos_canonical_artifact_record().replace(
+            SIMPLEOS_WRAPPER_PATH, "/tmp/copied-simpleos-evidence.shs")
+        expect(_simpleos_artifact_metadata_valid(copied)).to_be(false)
+
+    # @req REQ-014
+    it "should reject malformed or ambiguous SimpleOS artifact hashes":
+        val uppercase = _simpleos_canonical_artifact_record().replace(
+            SIMPLEOS_ZERO_SHA256, "A000000000000000000000000000000000000000000000000000000000000000")
+        expect(_simpleos_artifact_metadata_valid(uppercase)).to_be(false)
+        val duplicate = _simpleos_canonical_artifact_record() +
+            "simpleos_wm_fullscreen_wrapper_sha256={SIMPLEOS_ZERO_SHA256}\n"
+        expect(_simpleos_artifact_metadata_valid(duplicate)).to_be(false)
+        val empty_first = "simpleos_wm_fullscreen_wrapper_sha256=\n" +
+            _simpleos_canonical_artifact_record()
+        expect(_simpleos_artifact_metadata_valid(empty_first)).to_be(false)
+
+    # @req REQ-014
+    it "should reject copied env-only SimpleOS artifact evidence":
+        val copied_record = _simpleos_canonical_artifact_record()
+        expect(_simpleos_artifact_metadata_valid(copied_record)).to_be(true)
+        expect(_simpleos_artifact_files_valid(copied_record)).to_be(false)
+
     # @req REQ-013
     it "should classify controlled missing native graphics hardware as unavailable":
         step("Prove native submission and device readback")

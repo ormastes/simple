@@ -186,3 +186,22 @@ describe "SimpleOS WM fullscreen evidence Simple binary contract":
         expect(output).to_contain("simpleos_wm_fullscreen_simple_bin_status=unverified")
         val (_files_out, _files_err, files_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/qemu.out && test ! -f " + root + "/out/capture.out"])
         expect(files_code).to_equal(0)
+
+    it "reports actual external kernel and disk hashes without trusting caller digests":
+        val root = "build/test-simpleos-wm-fullscreen-artifact-hashes"
+        val command = "rm -rf " + root + " && mkdir -p " + root + "/bin && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple v1.0.0 pure-Simple\"; exit 0; fi' 'exit 99' > " + root + "/fake-simple && printf '%s\\n' '#!/bin/sh' 'for arg do' 'case \"$arg\" in' 'unix:*,server,nowait) socket=${arg#unix:}; socket=${socket%,server,nowait};;' 'esac' 'done' 'python3 -c \"import socket,sys;s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.close()\" \"$socket\"' > " + root + "/bin/qemu-system-x86_64 && chmod +x " + root + "/fake-simple " + root + "/bin/qemu-system-x86_64 && printf 'kernel-fixture\\n' > " + root + "/kernel.elf && printf 'disk-fixture\\n' > " + root + "/disk.img && PATH=$PWD/" + root + "/bin:$PATH SIMPLE_BIN=$PWD/" + root + "/fake-simple SIMPLEOS_WM_KERNEL_ARTIFACT=" + root + "/kernel.elf SIMPLEOS_WM_DISK_IMAGE=" + root + "/disk.img SIMPLEOS_WM_KERNEL_SHA256=caller-kernel-digest SIMPLEOS_WM_DISK_IMAGE_SHA256=caller-disk-digest BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val output = file_read(root + "/stdout.txt")
+        expect(output).to_contain("simpleos_wm_fullscreen_reason=qemu-exited-early")
+        expect(output).to_contain("simpleos_wm_fullscreen_wrapper=")
+        expect(output).to_contain("simpleos_wm_fullscreen_wrapper_sha256=")
+        expect(output).to_contain("simpleos_wm_fullscreen_kernel=" + root + "/kernel.elf")
+        expect(output).to_contain("simpleos_wm_fullscreen_kernel_sha256=19034b8326bddd75c6fd63c489ada9c7f6a8807312e1dd9318bc23c4898ad498")
+        expect(output).to_contain("simpleos_wm_fullscreen_disk_image=" + root + "/disk.img")
+        expect(output).to_contain("simpleos_wm_fullscreen_disk_image_sha256=9cb90d8552da342ff12e0ef99273d75c95089049824fda79a4dfb18d7cd7d411")
+        expect(output.contains("caller-kernel-digest")).to_be(false)
+        expect(output.contains("caller-disk-digest")).to_be(false)
+        val (_capture_out, _capture_err, capture_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/capture.out"])
+        expect(capture_code).to_equal(0)

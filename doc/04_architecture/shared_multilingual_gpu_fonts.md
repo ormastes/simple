@@ -224,7 +224,9 @@ gate, image/motion backgrounds, nested content, or rejected readback. The
 x86_64 SimpleOS entry registers the pinned face before composition and its `taskbar-clock` witness now
 originates in `SharedWmScene -> DrawIrComposition -> Engine2D`. The old private
 post-frame draw path is removed. The dynamic rightmost 56x48 QEMU crop is
-source-wired but its expected hash and retained PASS remain pending.
+source-wired. Retained evidence now binds and independently recomputes the
+canonical wrapper, kernel ELF, and FAT32 image hashes; its expected pixel hash
+and retained PASS remain pending.
 Widget producers read existing `lang`/`font-family` properties, and
 `SharedWmWindow.language` preserves explicit WM language; absent metadata stays
 `und` and retains the previous Noto Sans Mono behavior.

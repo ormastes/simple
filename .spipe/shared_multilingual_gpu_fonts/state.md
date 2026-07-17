@@ -170,6 +170,12 @@ pixels, and performance evidence remain release-blocking.
 
 ## Log
 
+- simpleos-artifact-binding lane: The fullscreen producer and retained
+  consumer now bind the canonical wrapper, kernel ELF, and FAT32 image by exact
+  path and independently recomputed SHA-256. Duplicate, malformed,
+  noncanonical, env-only, and changed artifacts fail closed; the trusted QEMU
+  font-region hash and retained PASS remain pending.
+
 - rocm-font-source lane: Shared HIP emission/runtime source identity, canonical
   `rocm` configuration with `hip` alias, GPU-less batch rejection, and
   Engine2D quad-zero CPU replay regressions were added to existing specs.
