@@ -49,6 +49,7 @@ use os.kernel.arch.x86_64.host_gpu_ivshmem_vmm.{map_qemu_host_gpu_ivshmem_bar2_a
 use common.gpu.simpleos_host_gpu_protocol.{SIMPLEOS_HOST_GPU_ISA_X86_64, SIMPLEOS_HOST_GPU_BACKEND_VULKAN}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.nogc_sync_mut.text_layout.font_renderer.{font_renderer_register_selected_bytes, font_renderer_use_registered_selected_bytes_only}
+use std.common.encoding.font_registry.{validate_selected_font_asset}
 
 @export("C", name: "rt_file_exists")
 fn rt_file_exists(path: text) -> bool:
@@ -337,25 +338,35 @@ fn spl_start():
     val font_path = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
     # load_font_bytes routes through the selected-asset registry validator,
     # including exact byte length, SHA-256, sfnt tables, names, and axes.
-    # Only read the font from the VFS when a filesystem actually mounted: on a
-    # failed FAT32/NVMe mount (`[vfs] mount_failed`), g_root_fat32 is a non-nil
-    # Fat32Core wrapping an uninitialized BlockDevice, so g_vfs_read_file_bytes ->
-    # Fat32Core -> NVMe read_sector null-derefs (cr2=0x0) and takes down the first
-    # desktop compose. Skipping the read here lets the desktop fall back to the
-    # built-in bitmap font and still render, instead of crashing.
+    # Always attempt the read (no longer gated on g_vfs_mounted): the hosted
+    # Fat32Core/BlockDevice trait path (g_root_fat32) is still avoided --
+    # g_vfs_read_file_bytes now tries the pure-Simple scalar/direct FAT32
+    # reader first (vfs_boot_read_pure_nvme_fat32_path_bytes), which never
+    # touches g_root_fat32, before falling back to the g_vfs_initialized-gated
+    # hosted path. On a failed FAT32/NVMe mount (`[vfs] mount_failed`) the
+    # direct reader itself no-ops safely (returns []), and the existing
+    # g_vfs_initialized gate inside g_vfs_read_file_bytes still protects the
+    # hosted Fat32Core dispatch from the null-deref (cr2=0x0) miscompile
+    # described below -- so this remains crash-safe on every degraded boot
+    # path while unblocking the common case where the disk + direct reader
+    # are healthy but the hosted mount was skipped for the C8
+    # blockdevice-dispatch-codegen-bug.
     font_renderer_use_registered_selected_bytes_only()
     var font_loaded = false
     var font_blob: [u8] = []
-    if g_vfs_mounted:
-        font_blob = g_vfs_read_file_bytes("/" + font_path)
+    font_blob = g_vfs_read_file_bytes("/" + font_path)
+    serial_println("[desktop-gui] font read canonical bytes={font_blob.len()}")
+    font_loaded = engine.load_font_bytes(font_path, font_blob)
+    if not font_loaded:
+        # The direct FAT32 builder uses an 8.3 alias. Retry it when the
+        # canonical file is missing or invalid, while retaining canonical identity.
+        font_blob = g_vfs_read_file_bytes("/SYS/FONTS/NOTOSANS")
+        serial_println("[desktop-gui] font read alias bytes={font_blob.len()}")
         font_loaded = engine.load_font_bytes(font_path, font_blob)
-        if not font_loaded:
-            # The direct FAT32 builder uses an 8.3 alias. Retry it when the
-            # canonical file is missing or invalid, while retaining canonical identity.
-            font_blob = g_vfs_read_file_bytes("/SYS/FONTS/NOTOSANS")
-            font_loaded = engine.load_font_bytes(font_path, font_blob)
+        serial_println("[desktop-gui] font validator accepted={font_loaded}")
     if font_loaded:
         font_loaded = font_renderer_register_selected_bytes(font_path, font_blob)
+        serial_println("[desktop-gui] font register accepted={font_loaded}")
     if font_loaded:
         serial_println("[desktop-gui] font identity=sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100 raster=pure-sfnt-glyf")
     else:

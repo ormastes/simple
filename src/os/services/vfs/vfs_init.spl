@@ -501,6 +501,26 @@ pub fn g_vfs_read_file_bytes(name: text) -> [u8]:
     val seeded_exec = app_registry_cached_bytes(name)
     if seeded_exec.len() > 0:
         return _clone_bytes(seeded_exec)
+    # Try the pure-Simple scalar/direct FAT32 reader FIRST, before the
+    # g_vfs_initialized gate below. vfs_boot_read_pure_nvme_fat32_path_bytes
+    # never touches g_root_fat32 / the BlockDevice trait object -- it walks
+    # FAT32 directories and cluster chains via raw mmio reads into a DMA
+    # scratch buffer (see vfs_boot_init.spl) -- so it is safe to call even
+    # when the hosted Fat32Core mount was skipped for the C8
+    # "blockdevice-dispatch-codegen-bug" and g_vfs_initialized never became
+    # true. It internally no-ops (returns []) when the direct reader itself
+    # isn't ready, so this is a harmless probe on every other boot path
+    # (virtio-blk, disk-less harness, etc). This is what unblocks reading
+    # /SYS/FONTS/<short-name> for the pinned taskbar-clock font when the
+    # hosted mount is degraded but the disk and direct reader are healthy.
+    val direct_scalar_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(name)
+    if direct_scalar_bytes.len() > 0:
+        return _clone_bytes(direct_scalar_bytes)
+    val root_name_direct = g_vfs_root_path(name)
+    if root_name_direct != name:
+        val direct_scalar_root_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(root_name_direct)
+        if direct_scalar_root_bytes.len() > 0:
+            return _clone_bytes(direct_scalar_root_bytes)
     # No root filesystem mounted (e.g. the disk-less WM harness where the NVMe
     # exec probe failed): the trait-device FAT32 read machinery below dispatches
     # through g_root_fat32.unwrap().stat(), and native-build miscompiles the

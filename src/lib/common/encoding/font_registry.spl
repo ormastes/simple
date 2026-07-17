@@ -305,7 +305,14 @@ class FontAssetRuntimeValidation:
     reason: text
 
 fn _font_asset_normalized_root(root: text) -> text:
-    var normalized = root.trim().replace("\\", "/")
+    # Typed intermediates: under the self-hosted stage3 compiler a bare
+    # string builtin (.replace/.ends_with) whose receiver is a chained call
+    # result or untyped val mis-lowers and passes a tagged int to the
+    # rt_string_* extern (decode_string tag/pointer fault, bug a06bc1d5
+    # family). This function is on the SimpleOS baremetal font-load path
+    # (load_font_bytes -> selected_font_asset_candidate_for_path -> here).
+    val trimmed: text = root.trim()
+    var normalized: text = trimmed.replace("\\", "/")
     while normalized.len() > 1 and normalized.ends_with("/"):
         normalized = normalized.slice(0, normalized.len() - 1)
     normalized
@@ -373,10 +380,15 @@ fn simpleos_default_font_asset_candidate() -> FontAssetCandidate:
 
 fn simpleos_font_asset_guest_path(candidate: FontAssetCandidate) -> text:
     """Return the readable VFAT long-name byte-source path for a selected face."""
-    val parts = candidate.local_path.split("/")
+    # Typed intermediates: bare .split on a struct-field receiver is
+    # type-erased under stage3 (decode_string tag/pointer fault family);
+    # this runs in-guest for staged font registration.
+    val local_path: text = candidate.local_path
+    val parts = local_path.split("/")
     if parts.len() == 0:
         return ""
-    "/SYS/FONTS/" + parts[parts.len() - 1]
+    val leaf: text = parts[parts.len() - 1]
+    "/SYS/FONTS/" + leaf
 
 fn simpleos_font_asset_short_name(candidate: FontAssetCandidate) -> text:
     """Return the unique 8.3 base alias retained for compatibility readers."""
@@ -572,8 +584,12 @@ fn selected_font_asset_for_language_category(language: text, category: text) -> 
         resolved.witness_family == ""):
         return nil
     for candidate in selected_font_asset_candidates():
+        # Typed intermediate: bare .starts_with on a struct-field receiver of
+        # a loop variable is type-erased under stage3 and faults in
+        # rt_string_starts_with (decode_string family) on baremetal.
+        val coverage_state: text = candidate.coverage_state
         if (candidate.family == resolved.witness_family and
-            candidate.coverage_state.starts_with("accepted-simple:")):
+            coverage_state.starts_with("accepted-simple:")):
             return candidate
     nil
 

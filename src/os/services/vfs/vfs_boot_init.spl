@@ -689,14 +689,56 @@ fn _vfs_boot_init_direct_fat32_reader_from_bytes(b: [u8]) -> Result<bool, text>:
 fn _vfs_boot_fat32_cluster_lba(cluster: u32) -> u64:
     g_boot_fat32_data_start_lba + ((cluster - 2u32).to_u64() * g_boot_fat32_sectors_per_cluster.to_u64())
 
+# Debug budget for the [vfs-init] fat next markers below (first hops only,
+# so a 418-cluster font chain doesn't flood serial). Literal-initialized:
+# native-build --entry only runs literal module initializers.
+var g_boot_fat32_fat_hop_prints: i64 = 0
+
 fn _vfs_boot_fat32_next_cluster(cluster: u32) -> u32:
-    val fat_offset = cluster * 4u32
-    val fat_lba = g_boot_fat32_reserved_sectors.to_u64() + (fat_offset / g_boot_fat32_bytes_per_sector).to_u64()
-    val entry_offset = (fat_offset % g_boot_fat32_bytes_per_sector).to_i32()
-    val sector = _vfs_boot_nvme_read_sector_bytes(fat_lba, g_boot_fat32_bytes_per_sector)
-    if sector.is_err():
+    """Read the FAT32 entry for `cluster` and return the next cluster in the
+    chain (masked to 28 bits), or 0x0FFFFFFF (end) on any read failure.
+
+    REWRITTEN on the PROVEN scalar primitives only: this function was never
+    exercised before multi-cluster font reads (root/SYS/FONTS dirs are all
+    single-cluster, so every scan ended at the b0==0 marker first). The old
+    body used four unproven mechanisms on baremetal: a fresh g_nvme.alloc_dma
+    per hop, the rt_array_new_with_cap/rt_typed_bytes_u8_push byte-array
+    builder, the buf-based _vfs_boot_u32_le multi-call combine (this file
+    documents the fused byte-combine miscompiling in this build), and bare
+    chained .to_u64()/.to_i32() conversions (C7). Live run confirmed the
+    chain walk died on its very first hop (cluster 15713 read, then stop).
+    Now: reuse the existing scratch DMA buffer (safe -- every caller is done
+    with scratch contents before advancing) + read_shared_dma_in_namespace_
+    on_queue (proven by the 1-sector boot-sector probe) + _vfs_boot_mem_u32_le
+    (proven single mmio_read32; FAT entry offsets are always 4-byte aligned
+    since entry = cluster*4).
+    """
+    val fat_offset: u32 = cluster * 4u32
+    val sector_index: u32 = fat_offset / g_boot_fat32_bytes_per_sector
+    val entry_in_sector: u32 = fat_offset % g_boot_fat32_bytes_per_sector
+    # FAT region base = reserved sectors (BPB), NOT the data-region base.
+    val fat_lba: u64 = g_boot_fat32_reserved_sectors.to_u64() + sector_index.to_u64()
+    if g_boot_fat32_scratch_cpu_addr == 0u64 or g_boot_fat32_scratch_phys_addr == 0u64 or g_boot_fat32_scratch_byte_len < g_boot_fat32_bytes_per_sector.to_u64():
+        serial_println("[vfs-init] fat next scratch invalid c={cluster}")
         return 0x0FFFFFFFu32
-    _vfs_boot_u32_le(sector.unwrap(), entry_offset) & 0x0FFFFFFFu32
+    val scratch = SharedDmaBuffer(
+        cpu_virt_addr: g_boot_fat32_scratch_cpu_addr,
+        host_phys_addr: g_boot_fat32_scratch_phys_addr,
+        device_addr: g_boot_fat32_scratch_phys_addr,
+        byte_len: g_boot_fat32_scratch_byte_len,
+        cache_policy: DmaCachePolicy.Coherent,
+        owner: DmaOwner(task_id: 0u64, bdf_bus: 0u8, bdf_device: 0u8, bdf_function: 0u8),
+        allocation_id: 2u64
+    )
+    val read = g_nvme.read_shared_dma_in_namespace_on_queue(1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, fat_lba, 1u32, scratch)
+    if read.is_err():
+        serial_println("[vfs-init] fat next read failed c={cluster} lba={fat_lba}")
+        return 0x0FFFFFFFu32
+    val next: u32 = _vfs_boot_mem_u32_le(g_boot_fat32_scratch_cpu_addr, entry_in_sector.to_u64()) & 0x0FFFFFFFu32
+    if g_boot_fat32_fat_hop_prints < 4:
+        g_boot_fat32_fat_hop_prints = g_boot_fat32_fat_hop_prints + 1
+        serial_println("[vfs-init] fat next c={cluster} lba={fat_lba} off={entry_in_sector} -> {next}")
+    next
 
 fn _vfs_boot_fat83_short_name_key(name: text) -> [u8]:
     var base: [u8] = []
@@ -837,13 +879,38 @@ fn _vfs_boot_read_cluster_to_scratch(cluster: u32) -> bool:
     true
 
 fn _vfs_boot_read_file_chain_raw(first_cluster: u32, size: u32) -> [u8]:
+    """Walk the full FAT32 cluster chain via the scratch/DMA scalar reader,
+    accumulating up to `size` bytes.
+
+    BUG FIX (font read truncation): this previously read only the FIRST
+    cluster and returned min(size, one-cluster-bytes) regardless of the
+    requested size -- correct only for the single-cluster VERSION.TXT/
+    NVFSVER.TXT boot fixtures this helper originally served. Callers that
+    pass a real multi-KB/MB file size (e.g. vfs_boot_read_pure_nvme_fat32_path_bytes
+    reading /SYS/FONTS/<name>, a 1.7MB TTF) got silently truncated to 4096
+    bytes, which then fails byte-length/SHA-256 font validation. Walk the
+    chain with _vfs_boot_fat32_next_cluster (already proven for directory
+    continuation) instead.
+    """
     if first_cluster < 2u32 or size == 0u32:
         return []
-    if not _vfs_boot_read_cluster_to_scratch(first_cluster):
-        return []
-    val max_bytes = g_boot_fat32_sectors_per_cluster.to_u64() * g_boot_fat32_bytes_per_sector.to_u64()
-    val copy_len = if size.to_u64() < max_bytes: size.to_u64() else: max_bytes
-    rt_bytes_from_raw(g_boot_fat32_scratch_cpu_addr as i64, copy_len as i64)
+    var out: [u8] = []
+    var cluster = first_cluster
+    # `as` casts, NOT bare `.to_uXX()` on the chained out.len() receiver: the
+    # freestanding bare->qualified alias bridge can resolve a bare conversion
+    # on an erased/chained receiver to another struct's method (C7 defect,
+    # same family as _vfs_boot_mem_u16_le's documented `as u32` requirement).
+    val cluster_bytes = g_boot_fat32_sectors_per_cluster.to_u64() * g_boot_fat32_bytes_per_sector.to_u64()
+    while cluster >= 2u32 and cluster < 0x0FFFFFF8u32 and (out.len() as u32) < size:
+        if not _vfs_boot_read_cluster_to_scratch(cluster):
+            return out
+        val remaining = (size as u64) - (out.len() as u64)
+        val copy_len = if remaining < cluster_bytes: remaining else: cluster_bytes
+        val chunk = rt_bytes_from_raw(g_boot_fat32_scratch_cpu_addr as i64, copy_len as i64)
+        for b in chunk:
+            out.push(b)
+        cluster = _vfs_boot_fat32_next_cluster(cluster)
+    out
 
 fn _vfs_boot_dirent_name11_raw(base: u64, off: u64, e0: u32, e1: u32, e2: u32, e3: u32, e4: u32, e5: u32, e6: u32, e7: u32, e8: u32, e9: u32, e10: u32) -> bool:
     _vfs_boot_mem_byte(base, off) == e0 and
@@ -914,6 +981,12 @@ fn _vfs_boot_dirent_matches_short_name_raw(base: u64, off: u64, short_name: text
         return _vfs_boot_dirent_name11_raw(base, off, 0x53u32, 0x59u32, 0x53u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32)
     if short_name == "APPS":
         return _vfs_boot_dirent_name11_raw(base, off, 0x41u32, 0x50u32, 0x50u32, 0x53u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "FONTS":
+        # /SYS/FONTS directory itself: without this case the /SYS/FONTS/<name>
+        # branch resolves SYS but the FONTS dirent scan falls through to false
+        # (serial signature: root+SYS cluster reads only, then
+        # "font unavailable fallback=bitmap").
+        return _vfs_boot_dirent_name11_raw(base, off, 0x46u32, 0x4Fu32, 0x4Eu32, 0x54u32, 0x53u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32)
     if short_name == "NVFSVER.TXT":
         return _vfs_boot_dirent_name11_raw(base, off, 0x4Eu32, 0x56u32, 0x46u32, 0x53u32, 0x56u32, 0x45u32, 0x52u32, 0x20u32, 0x54u32, 0x58u32, 0x54u32)
     if short_name == "BROWSMF.SMF":
@@ -936,6 +1009,46 @@ fn _vfs_boot_dirent_matches_short_name_raw(base: u64, off: u64, short_name: text
         return _vfs_boot_dirent_name11_raw(base, off, 0x4Cu32, 0x4Cu32, 0x56u32, 0x4Du32, 0x53u32, 0x4Du32, 0x46u32, 0x20u32, 0x53u32, 0x4Du32, 0x46u32)
     if short_name == "WINHLSMF.SMF":
         return _vfs_boot_dirent_name11_raw(base, off, 0x57u32, 0x49u32, 0x4Eu32, 0x48u32, 0x4Cu32, 0x53u32, 0x4Du32, 0x46u32, 0x53u32, 0x4Du32, 0x46u32)
+    # Pinned font 8.3 short names (see scripts/os/make_os_disk.c font_fat_names[]
+    # and src/lib/common/encoding/font_registry.spl simpleos_font_asset_short_name)
+    # -- staged under /SYS/FONTS/<name>. Missing here caused
+    # guest-pinned-font-evidence-unavailable: vfs_boot_read_pure_nvme_fat32_path_bytes's
+    # /SYS/FONTS/ branch found the FONTS directory and produced the byte-correct
+    # short name (e.g. "NOTOSANS") from simpleos_font_asset_short_guest_path, but
+    # this whitelist rejected every dirent scan because these 16 names were never
+    # enumerated, so the scan always fell through to `false`.
+    if short_name == "NSANSSC":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x4Eu32, 0x53u32, 0x41u32, 0x4Eu32, 0x53u32, 0x53u32, 0x43u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "NSANSDEV":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x4Eu32, 0x53u32, 0x41u32, 0x4Eu32, 0x53u32, 0x44u32, 0x45u32, 0x56u32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "NSANSARB":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x4Eu32, 0x53u32, 0x41u32, 0x4Eu32, 0x53u32, 0x41u32, 0x52u32, 0x42u32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "NSANSBEN":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x4Eu32, 0x53u32, 0x41u32, 0x4Eu32, 0x53u32, 0x42u32, 0x45u32, 0x4Eu32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "NSERIFSC":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x4Eu32, 0x53u32, 0x45u32, 0x52u32, 0x49u32, 0x46u32, 0x53u32, 0x43u32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "NSERFDEV":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x4Eu32, 0x53u32, 0x45u32, 0x52u32, 0x46u32, 0x44u32, 0x45u32, 0x56u32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "NNASKHAR":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x4Eu32, 0x4Eu32, 0x41u32, 0x53u32, 0x4Bu32, 0x48u32, 0x41u32, 0x52u32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "NSERFBEN":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x4Eu32, 0x53u32, 0x45u32, 0x52u32, 0x46u32, 0x42u32, 0x45u32, 0x4Eu32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "NOTOSANS":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x4Eu32, 0x4Fu32, 0x54u32, 0x4Fu32, 0x53u32, 0x41u32, 0x4Eu32, 0x53u32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "BUNGEE":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x42u32, 0x55u32, 0x4Eu32, 0x47u32, 0x45u32, 0x45u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "NUNITO":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x4Eu32, 0x55u32, 0x4Eu32, 0x49u32, 0x54u32, 0x4Fu32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "CAVEAT":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x43u32, 0x41u32, 0x56u32, 0x45u32, 0x41u32, 0x54u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "ROBOSLAB":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x52u32, 0x4Fu32, 0x42u32, 0x4Fu32, 0x53u32, 0x4Cu32, 0x41u32, 0x42u32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "UNIFRAKT":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x55u32, 0x4Eu32, 0x49u32, 0x46u32, 0x52u32, 0x41u32, 0x4Bu32, 0x54u32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "PIXELIFY":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x50u32, 0x49u32, 0x58u32, 0x45u32, 0x4Cu32, 0x49u32, 0x46u32, 0x59u32, 0x20u32, 0x20u32, 0x20u32)
+    if short_name == "NOTOEMOJ":
+        return _vfs_boot_dirent_name11_raw(base, off, 0x4Eu32, 0x4Fu32, 0x54u32, 0x4Fu32, 0x45u32, 0x4Du32, 0x4Fu32, 0x4Au32, 0x20u32, 0x20u32, 0x20u32)
     false
 
 fn _vfs_boot_read_short_name_from_dir(start_cluster: u32, short_name: text) -> [u8]:
@@ -959,7 +1072,11 @@ fn _vfs_boot_read_short_name_from_dir(start_cluster: u32, short_name: text) -> [
     []
 
 fn _vfs_boot_short_name_for_path(path: text) -> text:
-    val upper = path.upper()
+    # `upper` MUST be explicitly typed `text`: under the self-hosted stage3
+    # compiler a bare `.starts_with`/`.ends_with` on a type-erased receiver
+    # (untyped val) mis-lowers and passes a tagged int to rt_string_starts_with
+    # (decode_string +0x46 fault, cr2=0x5800000000 — bug a06bc1d5 family).
+    val upper: text = path.upper()
     if upper.starts_with("/SYS/FONTS/"):
         return upper.substring(11, upper.len())
     if path == "/VERSION.TXT" or path == "/SYS/VERSION.TXT":
@@ -995,11 +1112,18 @@ fn _vfs_boot_short_name_for_path(path: text) -> text:
     if upper.ends_with("/NVFSVER.TXT") or upper == "NVFSVER.TXT":
         return "NVFSVER.TXT"
     for entry in app_registry_boot_seed_entries():
-        if upper.ends_with("/" + entry.fat32_leaf.upper()) or upper == entry.fat32_leaf.upper():
-            return entry.fat32_leaf.upper()
+        # Typed intermediates: `entry.fat32_leaf` is a struct-field read off a
+        # loop variable — an erased receiver for the bare `.upper()` builtin
+        # under stage3 (same decode_string tag/pointer fault family as above).
+        val seed_leaf: text = entry.fat32_leaf
+        val seed_leaf_upper: text = seed_leaf.upper()
+        if upper.ends_with("/" + seed_leaf_upper) or upper == seed_leaf_upper:
+            return seed_leaf_upper
     val lookup = app_registry_lookup(path)
     if lookup != nil:
-        return lookup.unwrap().fat32_leaf.upper()
+        val lookup_entry = lookup.unwrap()
+        val lookup_leaf: text = lookup_entry.fat32_leaf
+        return lookup_leaf.upper()
     ""
 
 pub fn vfs_boot_read_pure_nvme_fat32_path_bytes(path: text) -> [u8]:
@@ -1024,7 +1148,9 @@ pub fn vfs_boot_read_pure_nvme_fat32_path_bytes(path: text) -> [u8]:
             if apps_cluster_direct >= 2u32:
                 return _vfs_boot_read_short_name_from_dir_raw(apps_cluster_direct, short_name)
         return []
-    val upper = path.upper()
+    # Explicitly typed for the same stage3 erased-receiver starts_with
+    # mis-lowering as _vfs_boot_short_name_for_path above.
+    val upper: text = path.upper()
     if upper.starts_with("/SYS/APPS/"):
         val sys_cluster = _vfs_boot_find_dirent_cluster(g_boot_fat32_root_cluster, "SYS", true)
         if sys_cluster >= 2u32:
