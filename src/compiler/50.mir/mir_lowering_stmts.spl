@@ -28,6 +28,23 @@ fn mir_stmt_local_id_value(local: LocalId) -> i64:
 fn mir_hir_stmt_kind_disc(k: HirStmtKind) -> i64:
     rt_enum_discriminant(k)
 
+fn mir_expr_kind_is_place(k: HirExprKind) -> bool:
+    """True when a HIR expression is a PLACE read -- it evaluates to the
+    SAME memory an existing binding already owns (a plain variable read,
+    a field projection, an index/tuple-index projection) rather than a
+    freshly-constructed value (a struct literal, a call result, ...).
+    Used by Bug #177's struct local-alias fix (see
+    MirLowering.maybe_copy_struct_value below): structs are
+    pointer-represented, so binding a NEW name straight to a place read's
+    result (as the bitfield/struct pass-through does for a genuinely
+    fresh aggregate) makes the new and old names literal aliases of the
+    same struct memory."""
+    match k:
+        case Var(_) | NamedVar(_, _) | Field(_, _, _) | Index(_, _) | TupleIndex(_, _):
+            true
+        case _:
+            false
+
 # ============================================================================
 # Statement Lowering
 # ============================================================================
@@ -86,6 +103,66 @@ impl MirLowering:
                     case MirTypeKind.Unit: true
                     case _: false
             case nil: false
+
+    me maybe_copy_struct_value(init_local: LocalId, struct_sym: text?, init_is_place: bool) -> LocalId?:
+        """Bug #177 (native struct local-alias copy missing): `var b = a` /
+        `val b = a` for a struct-typed `a` used to alias the binding's
+        symbol straight to `a`'s own local (the same `bf_sym != nil or
+        struct_sym != nil: self.local_map[symbol] = init_local` pass-through
+        the bitfield/fresh-aggregate case correctly uses to skip a redundant
+        copy) -- correct when the initializer is a FRESH aggregate (a struct
+        literal, a call result: no other name can alias that memory yet),
+        but wrong when it is a PLACE read of an EXISTING binding (a plain
+        variable read, `outer.child`, `arr[i]`, ...): structs are
+        pointer-represented (see the struct_sym computation just above each
+        caller), so aliasing there made `b.x = 41` write through to `a.x` /
+        `outer.child.n` too. Structs are VALUE types (mirrors Bug #167's
+        by-value struct PARAM copy and the interpreter's Value.Struct
+        copy-on-bind); classes stay reference types (Bug s19's
+        class_type_names), so this copy is skipped for anything registered
+        there -- `var d = someClassInstance; d.x = 41` must still leak into
+        `someClassInstance.x`. Returns the fresh per-binding copy's LocalId
+        when a copy was materialized, nil when the caller should fall back
+        to its existing alias/plain-copy behavior (non-struct, class, or a
+        fresh-construction initializer -- keeps the redundant-copy cost
+        confined to the one case that actually needs it)."""
+        if struct_sym == nil or not init_is_place:
+            return nil
+        val struct_type_name = struct_sym ?? ""
+        if struct_type_name == "" or self.class_type_names.has(struct_type_name):
+            return nil
+        if not self.struct_field_order.has(struct_type_name):
+            return nil
+        val struct_symbol_id: SymbolId? = match self.local_mir_type_of(init_local):
+            case Some(t):
+                match t.kind:
+                    case MirTypeKind.Struct(sym): Some(sym)
+                    case _: nil
+            case nil: nil
+        if val type_symbol = struct_symbol_id:
+            # Mirrors function_lowering.spl's Bug #167 per-call defensive
+            # copy: read every field off the incoming place's pointer and
+            # rebuild a fresh aggregate, so the new binding owns private
+            # memory instead of the source's.
+            val field_names = self.struct_field_order[struct_type_name]
+            var copy_ops: [MirOperand] = []
+            var cfi = 0
+            while cfi < field_names.len():
+                var field_bldr = self.builder
+                val field_val = field_bldr.emit_get_field(mir_operand_copy(init_local), cfi, MirType.i64())
+                self.builder = field_bldr
+                copy_ops = copy_ops.push(mir_operand_copy(field_val))
+                cfi = cfi + 1
+            var agg_bldr = self.builder
+            val copy_local = agg_bldr.emit_aggregate(
+                AggregateKind.Struct(type_symbol),
+                copy_ops,
+                MirType(kind: MirTypeKind.Struct(type_symbol))
+            )
+            self.builder = agg_bldr
+            self.struct_value_syms[copy_local.id] = struct_type_name
+            return Some(copy_local)
+        nil
 
     me lower_stmt(stmt: HirStmt):
         """Lower HIR statement to MIR."""
@@ -247,9 +324,18 @@ impl MirLowering:
                         # Struct values are pointer-represented; alias the binding
                         # straight to the constructed local (like the bitfield
                         # pass-through) so struct_value_syms (keyed by that local's
-                        # .id) stays valid for a later `p.x` field read.
+                        # .id) stays valid for a later `p.x` field read. Bug #177:
+                        # that alias is only safe when `init_local` is a FRESH
+                        # aggregate -- when the initializer is a PLACE read of an
+                        # existing struct binding (`var b = a`, `var inner =
+                        # outer.child`), maybe_copy_struct_value materializes a
+                        # private per-binding copy instead (skipped for classes,
+                        # which keep reference semantics).
                         val struct_sym = self.struct_value_syms.get(init_local.id)
-                        if bf_sym != nil or struct_sym != nil:
+                        val struct_copy = self.maybe_copy_struct_value(init_local, struct_sym, mir_expr_kind_is_place(let_init.kind))
+                        if val copy_local = struct_copy:
+                            self.local_map[symbol_value_id] = copy_local
+                        elif bf_sym != nil or struct_sym != nil:
                             self.local_map[symbol_value_id] = init_local
                         else:
                             var b = self.builder
@@ -377,9 +463,11 @@ impl MirLowering:
                         # materializing an intermediate I64 local.
                         var has_init = false
                         var init_local = LocalId(id: 0)
+                        var init_is_place = false
                         if val init_expr = init:
                             init_local = self.lower_expr(init_expr)
                             has_init = true
+                            init_is_place = mir_expr_kind_is_place(init_expr.kind)
 
                         # Bitfield construction (`val inst = BitfieldType(raw)`)
                         # is a bit-identical identity pass-through: alias the
@@ -428,7 +516,13 @@ impl MirLowering:
                             self.local_mir_type_of(init_local) ?? mir_type
                         else:
                             mir_type
-                        if bf_sym != nil or struct_sym != nil:
+                        # Bug #177: same struct-value-copy guard as the disc==1
+                        # early-Let path above -- kept in sync (this arm is dead
+                        # today, see the comment above effective_type).
+                        val struct_copy2 = self.maybe_copy_struct_value(init_local, struct_sym, init_is_place)
+                        if val copy_local2 = struct_copy2:
+                            self.local_map[symbol_id] = copy_local2
+                        elif bf_sym != nil or struct_sym != nil:
                             self.local_map[symbol_id] = init_local
                         else:
                             var b = self.builder
