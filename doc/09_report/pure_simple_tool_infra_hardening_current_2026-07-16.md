@@ -40,7 +40,7 @@ so executable qualification is still blocked.
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; cosine candidate progress is time-throttled instead of reading RSS and writing stderr per pair; exact/cosine line gates share one tokenizer-derived signal prefix; runtime/performance qualification remain | Run focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
 | Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP performance now fails closed instead of invoking inert `build lint`; global gates still report 29 UI and 41 hot-loop violations | Add one repository-scanner owner for the four MCP rules, repair classified violations, then run focused fixtures | P1 |
 | Format/fix | SOURCE GUARDED | Writes are atomic and checked; output passes a CoreLexer equivalence gate or fails closed; empty files and generic casts are safe; the corrupting indentation-repair prepass is deleted | Replace remaining heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
-| Check | PARTIAL | Driver API Check now stops after fatal HIR analysis and before diagnostic-free monomorphization. Production CLI remains parse/policy-only, can false-green HIR-invalid code, and may delegate to the seed | Retain CLI policy checks, route semantics through `driver_api_core.check_file`, consolidate duplicate workers, remove seed delegation only after direct-path latency/RSS qualification | P1 |
+| Check | PARTIAL | Driver API Check stops after fatal HIR analysis; production parse/policy workers now apply SSpec guidance equally in human and JSON modes. CLI can still false-green HIR-invalid code and may delegate to the seed | Retain CLI policy checks, route semantics through `driver_api_core.check_file`, consolidate duplicate workers, remove seed delegation only after direct-path latency/RSS qualification | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
 | Test daemon | SOURCE FIXED | CLI/client share the full daemon protocol; local, container, remote, lightweight, and agent paths now retain canonical passed/failed/skipped counts and fail closed on malformed outer summaries; dynamic qualification remains | Run the authored local/session/count-cache/timeout/stop protocol fixtures with an admitted runtime | P0 |
 | SPipe/docgen | WARN | Executable spec/manual exist; generated-doc validation blocked by seed | Regenerate once with admitted runtime | P1 |
@@ -194,6 +194,10 @@ so executable qualification is still blocked.
   lowering and before monomorphization. Production routing is not activated
   until an admitted runtime proves startup, latency, and RSS and the lightweight
   SSpec/HGL/concurrency/hygiene policies remain intact.
+- **Check JSON parity:** both the active worker and reachable in-process
+  fallback now evaluate SSpec command-block guidance independently of output
+  mode. Human mode prints the existing redirect; JSON suppresses prose but
+  counts one failed file, so mode selection cannot turn the same source green.
 - **Runner signals:** one idempotent callback now owns each signal, and the
   tracked parallel loop plus both governor waits cooperatively dispatch pending
   POSIX signals. Failed kills remain tracked instead of disappearing from
