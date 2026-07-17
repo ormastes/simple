@@ -2,6 +2,9 @@
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
 use crate::hir::{BinOp, HirExpr, HirExprKind, HirType, TypeId, UnaryOp};
+use crate::mir::blocks::Terminator;
+use crate::mir::effects::LocalKind;
+use crate::mir::function::MirLocal;
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
@@ -37,6 +40,17 @@ impl<'a> MirLowerer<'a> {
             self.emit_decision_probe(dest, 0, 0)?;
 
             Ok(dest)
+        } else if matches!(op, BinOp::And | BinOp::Or) {
+            // Short-circuit evaluation. `AndSuspend`/`OrSuspend` (the `and~`/`or~`
+            // await-forms) intentionally fall through to the eager path below —
+            // only the plain short-circuit operators are handled here.
+            //
+            // Previously this fell into the generic eager path (both operands
+            // lowered unconditionally, then bitwise-ANDed/ORed in codegen), so
+            // `x and call()` ran `call()` even when `x` was false — a silent
+            // logic-corruption bug when the RHS has side effects (native-build
+            // entry-closure defect C3).
+            self.lower_short_circuit_logical(op, left, right)
         } else {
             // `is` against a qualified enum variant (e.g. `a is E.A` or `a is E::A`):
             // The RHS is either Global("E::A") (bare field access, no args) or
@@ -209,6 +223,120 @@ impl<'a> MirLowerer<'a> {
                 })
             }
         }
+    }
+
+    /// Lower `left and right` / `left or right` with true short-circuit control
+    /// flow: `right` is only evaluated when its value can affect the result.
+    /// Mirrors the interpreter's `BinOp::And`/`BinOp::Or` handling
+    /// (interpreter/expr/ops.rs) and the block/temp-local merge pattern used
+    /// for `HirStmt::If` (lowering_stmt.rs).
+    fn lower_short_circuit_logical(&mut self, op: BinOp, left: &HirExpr, right: &HirExpr) -> MirLowerResult<VReg> {
+        let left_reg = self.lower_expr(left)?;
+
+        // Temp local to carry the boolean result across the two branches into
+        // the merge block (VRegs don't survive block boundaries without a
+        // phi/local, same constraint the If-statement lowering works around).
+        // Uses TypeId::I64 (not BOOL) to match the proven HirStmt::If merge
+        // local exactly: booleans flow as i64 0/1 everywhere else in this
+        // codegen (every comparison widens via `ensure_i64` immediately after
+        // the icmp), and a BOOL-typed local risks codegen declaring it at i8
+        // width while ConstBool/comparisons feed it i64-shaped values.
+        let temp_local_index = self.with_func(|func, _| {
+            let index = func.params.len() + func.locals.len();
+            func.locals.push(MirLocal {
+                name: format!("__logical_{}", index),
+                ty: TypeId::I64,
+                kind: LocalKind::Local,
+                is_ghost: false,
+            });
+            index
+        })?;
+
+        let (eval_rhs_block, short_block, merge_block) = self.with_func(|func, current_block| {
+            let eval_rhs_block = func.new_block();
+            let short_block = func.new_block();
+            let merge_block = func.new_block();
+            let block = func.block_mut(current_block).unwrap();
+            block.terminator = if op == BinOp::And {
+                // left is truthy -> must evaluate right; left is falsy -> short-circuit false
+                Terminator::Branch {
+                    cond: left_reg,
+                    then_block: eval_rhs_block,
+                    else_block: short_block,
+                }
+            } else {
+                // Or: left is truthy -> short-circuit true; left is falsy -> must evaluate right
+                Terminator::Branch {
+                    cond: left_reg,
+                    then_block: short_block,
+                    else_block: eval_rhs_block,
+                }
+            };
+            (eval_rhs_block, short_block, merge_block)
+        })?;
+
+        // short_block: result is fully determined by `left` alone.
+        self.set_current_block(short_block)?;
+        let short_value = self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::ConstInt {
+                dest,
+                value: if op == BinOp::Or { 1 } else { 0 },
+            });
+            dest
+        })?;
+        self.with_func(|func, current_block| {
+            let addr = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index: temp_local_index,
+            });
+            block.instructions.push(MirInst::Store {
+                addr,
+                value: short_value,
+                ty: TypeId::I64,
+            });
+        })?;
+        self.finalize_block_jump(merge_block)?;
+
+        // eval_rhs_block: result is `right`'s truthiness (right is only ever
+        // lowered here, never on the short-circuit path).
+        self.set_current_block(eval_rhs_block)?;
+        let right_reg = self.lower_expr(right)?;
+        self.with_func(|func, current_block| {
+            let addr = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index: temp_local_index,
+            });
+            block.instructions.push(MirInst::Store {
+                addr,
+                value: right_reg,
+                ty: TypeId::I64,
+            });
+        })?;
+        self.finalize_block_jump(merge_block)?;
+
+        // merge_block: load the merged result.
+        self.set_current_block(merge_block)?;
+        self.with_func(|func, current_block| {
+            let addr = func.new_vreg();
+            let value = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index: temp_local_index,
+            });
+            block.instructions.push(MirInst::Load {
+                dest: value,
+                addr,
+                ty: TypeId::I64,
+            });
+            value
+        })
     }
 
     pub(super) fn lower_unary_expr(&mut self, op: UnaryOp, operand: &HirExpr) -> MirLowerResult<VReg> {
