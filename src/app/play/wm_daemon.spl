@@ -32,12 +32,11 @@ use app.play.wm_daemon_ensure.{wm_daemon_ensure_healthy}
 use os.compositor.host_compositor_core.{HostWmConfig, HostBackendKind, HostWmHandle, HostCompositor, init_headless_host_wm}
 use common.window_protocol.geometry.{Size}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_FOCUS}
-use app.io.mod.{process_spawn_async, env_get}
-
-extern fn rt_sleep_ms(ms: i64)
-extern fn rt_env_get(key: text) -> text?
-extern fn rt_getpid() -> i64
-extern fn rt_time_now_unix_micros() -> i64
+use std.nogc_sync_mut.io.process_ops.{process_spawn_async}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.sffi.system.{sleep_ms}
 
 val WM_DAEMON_IDLE_SLEEP_MS: i64 = 16
 
@@ -132,8 +131,8 @@ pub fn wm_daemon_route(comp_in: HostCompositor, req: DaemonRequest) -> WmRouteOu
         resp.set_field("running", "true")
         resp.set_field("backend", "headless")
         resp.set_field("windows", "{comp.windows.len()}")
-        resp.set_field("pid", "{rt_getpid()}")
-        val now = rt_time_now_unix_micros()
+        resp.set_field("pid", "{getpid()}")
+        val now = time_now_unix_micros()
         val uptime_ms = if _wm_daemon_start_micros > 0: (now - _wm_daemon_start_micros) / 1000 else: 0
         resp.set_field("uptime_ms", "{uptime_ms}")
         resp.set_field("last_frame_ms", "{_wm_daemon_last_cycle_micros / 1000}")
@@ -202,10 +201,10 @@ fn _wm_daemon_serve() -> i64:
         print "wm daemon: lock held by another instance"
         return 1
     wm_daemon_reset_stop()
-    _wm_daemon_start_micros = rt_time_now_unix_micros()
+    _wm_daemon_start_micros = time_now_unix_micros()
     _wm_daemon_last_cycle_micros = _wm_daemon_start_micros
     print "wm daemon: serving (headless)"
-    val render = (rt_env_get("SIMPLE_WM_DAEMON_RENDER") ?? "") == "1"
+    val render = env_get("SIMPLE_WM_DAEMON_RENDER") == "1"
     # Poll cycle is inlined here (instead of runner.run_poll_cycle(closure))
     # because the compositor must be reassigned from each route outcome in this
     # frame: nested closures cannot modify outer vars, and typed class params
@@ -222,8 +221,8 @@ fn _wm_daemon_serve() -> i64:
             clear_processed_requests(config.request_dir, processed_ids)
         if render:
             handle.run_once()
-        _wm_daemon_last_cycle_micros = rt_time_now_unix_micros()
-        rt_sleep_ms(WM_DAEMON_IDLE_SLEEP_MS)
+        _wm_daemon_last_cycle_micros = time_now_unix_micros()
+        sleep_ms(WM_DAEMON_IDLE_SLEEP_MS)
     runner.shutdown()
     0
 

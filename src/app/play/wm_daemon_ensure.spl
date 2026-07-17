@@ -8,7 +8,7 @@
 #
 #  - wm_daemon_autoconnect(): call once per hosted GUI app launch (wired at
 #    os.compositor.host_compositor_bootstrap.init_host_wm). ONE lock-file
-#    probe via wm_daemon_is_running() (already a cheap rt_file_exists + PID
+#    probe via wm_daemon_is_running() (already a cheap lock-file + PID
 #    liveness check — see daemon_sdk/lock.spl); a hit returns immediately, a
 #    miss spawns `simple play daemon serve` DETACHED and returns WITHOUT
 #    waiting for the daemon to finish initializing. No sleeps, no retries —
@@ -27,12 +27,10 @@ use app.play.wm_daemon_client.{wm_daemon_config, wm_daemon_is_running, WMD_STATU
 use std.daemon_sdk.types.{daemon_request_new}
 use std.daemon_sdk.client.{daemon_submit_and_wait}
 use std.daemon_sdk.lock.{read_daemon_pid, is_pid_alive}
-use app.io.mod.{process_spawn_async, env_get}
-
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_process_kill(pid: i64) -> bool
-extern fn rt_sleep_ms(ms: i64)
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_delete}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_kill}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.sffi.system.{sleep_ms}
 
 fn _wm_daemon_spawn_detached() -> bool:
     val exe = env_get("SIMPLE_BIN") ?? "bin/simple"
@@ -66,21 +64,21 @@ pub fn wm_daemon_ensure_healthy() -> text:
       stale-lock-relaunched | stale-lock-relaunch-failed
     """
     val config = wm_daemon_config()
-    if not rt_file_exists(config.lock_path):
+    if not file_exists(config.lock_path):
         return if _wm_daemon_spawn_detached(): "not-running-relaunched" else: "not-running-relaunch-failed"
     if wm_daemon_health(500):
         return "healthy"
     val pid = read_daemon_pid(config.lock_path)
     if pid > 0 and is_pid_alive(pid):
-        rt_process_kill(pid)
-        rt_sleep_ms(250)
-        rt_file_delete(config.lock_path)
+        process_kill(pid)
+        sleep_ms(250)
+        file_delete(config.lock_path)
         val ok = _wm_daemon_spawn_detached()
         print "[wm-daemon] unhealthy: killed pid={pid}, relaunched"
         return if ok: "unhealthy-killed-relaunched" else: "unhealthy-relaunch-failed"
     # Stale lock: file exists but no live process behind it — relaunch
     # without a kill (pid<=0 or already dead, so no kill call is made).
-    rt_file_delete(config.lock_path)
+    file_delete(config.lock_path)
     val ok2 = _wm_daemon_spawn_detached()
     print "[wm-daemon] stale-lock: no live process, relaunched"
     return if ok2: "stale-lock-relaunched" else: "stale-lock-relaunch-failed"
