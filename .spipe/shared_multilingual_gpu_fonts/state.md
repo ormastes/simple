@@ -149,14 +149,11 @@ Provide one configurable, license-audited multilingual font pipeline shared by S
   color: u32, font_size: i32) -> bool`, plus matching `load_font`/`unload_font`;
   both consume the same batch. World coordinates project through the stored
   view/projection matrices; CPU is fallback evidence, never native promotion.
-- Manual steps: `step("Load the pinned multilingual font manifest")`,
+- Frozen manual steps: `step("Load the pinned multilingual font manifest")`,
+  `step("Accept exact-face-bound simple-script shaping")`,
   `step("Prepare one shared font batch for 2D and 3D")`,
-  `step("Render legacy Web GUI and WM text through DrawIR")`,
-  `step("Shape selected Unicode scripts with the pinned face")`,
-  `step("Emit the selected font composite program and plan compilation")`,
-  `step("Render Engine3D HUD and world text on the promoted backend")`,
-  `step("Capture SimpleOS pinned-font pixels")`, and
-  `step("Measure warm font rendering and resource bounds")`.
+  `step("Emit the selected font composite program and plan compilation")`, and
+  `step("Prove native submission and device readback")`.
 - Setup/checkers: `setup_shared_font_fixture`, `expect_font_license`,
   `expect_language_coverage`, `expect_shared_font_batch`,
   `expect_backend_emission`, and `expect_font_render_parity`.
@@ -1396,3 +1393,20 @@ pixels, and performance evidence remain release-blocking.
   is synchronized across Codex, generic-agent, and Claude SPipe instructions.
   `.gemini/commands/` contains no command files for this lane, so its mirror is
   explicitly N/A rather than invented. STATUS: FAIL.
+
+- Current-main truth review (2026-07-17): parallel manifest, documentation,
+  and implementation audits rechecked clean `origin/main` at `92248f477db`.
+  The exact top-ten language order, ten categories, sixteen tracked licensed
+  assets, honest 67/4/26/3 matrix, shared `FontRenderer`/`FontRenderBatch`,
+  Draw-IR Web/GUI/WM routes, separate Engine3D consumers, portable emitters,
+  and source-tracked CUDA PTX trust gate are present. Completion is still
+  blocked: no admitted current pure-Simple runner or canonical docgen output;
+  no retained native device, performance, or QEMU font-pixel evidence;
+  registered-only SimpleOS shaping cannot yet accept Arabic/Devanagari runs;
+  and the baremetal invalid-metrics route draws placeholder bars. Review also
+  found raw `rt_mutex_*` ownership in `font_renderer.spl` and a hosted-racy
+  scalar atlas generation counter. It also flagged a mutable module-global
+  Engine2D pool at the audited baseline; intervening commit `4d3f37e3e9e`
+  removed that pool before this refresh landed. The remaining findings are
+  source blockers, not evidence passes. No runtime command ran and no PASS is
+  claimed. STATUS: FAIL.

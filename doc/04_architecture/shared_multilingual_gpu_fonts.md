@@ -200,8 +200,10 @@ Direct arch/*/wm_entry.spl invocation - - compatibility only; not a canonical ta
 
 Legacy commands without `font-identity` retain bitmap text. Identified commands
 must resolve the exact pinned candidate and live generation or clear vector
-state before bitmap fallback. Unicode shaping fails closed until every run
-vector and face binding agrees. Engine3D and SimpleOS evidence comes from their
+state before bitmap fallback. The current freestanding WM no-font-stack branch
+instead emits thin rectangle placeholders; it is boot-safety behavior, not
+selected-font or bitmap-fallback evidence. Unicode shaping fails closed until
+every run vector and face binding agrees. Engine3D and SimpleOS evidence comes from their
 own device/guest paths; host mirrors and test-only status fields are not valid
 edges. Performance observation reuses existing renderer/backend counters and
 timers rather than adding a benchmark-only renderer, cache, or upload path.
@@ -223,12 +225,13 @@ source-wired but its expected hash and retained PASS remain pending.
 Widget producers read existing `lang`/`font-family` properties, and
 `SharedWmWindow.language` preserves explicit WM language; absent metadata stays
 `und` and retains the previous Noto Sans Mono behavior.
-The bounded current-source bootstrap now links Stage 2 and completes Stage 3,
-but Stage 4 full-CLI linking still fails closed on 208 unresolved
-hosted-provider symbols. This is a compiler/runtime deployment defect, not
-font-source failure, and neither a seed nor a minimal-stage binary is native
-acceptance evidence. Canonical `FontRenderer` fallback glyphs are rasterized on
-CPU; environment-published accelerator pixels cannot enter `FontRenderBatch`
+No current pure-Simple full CLI is admitted. The earlier 208-symbol link wall
+was resolved, but later retained rebuilds stopped at different Stage 4 parser,
+LLVM construction, and resource-growth failures; none produced current
+acceptance evidence. This is a compiler/runtime deployment defect, not
+font-source failure, and neither a seed, minimal-stage binary, nor stale full
+CLI is native acceptance evidence. Canonical `FontRenderer` fallback glyphs
+are rasterized on CPU; environment-published accelerator pixels cannot enter `FontRenderBatch`
 or its cache. GPU backends only compose the prepared alpha atlas.
 The steps below remain the full promotion contract, not current native-execution
 evidence.

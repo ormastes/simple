@@ -539,6 +539,11 @@ font GPU emission, or GUI/Web/2D/3D text.
     it maps a timeout marker to 124 and other launch failure to 1. It preserves
     stderr and deletes its temporary wrapper.
     They never replace native evidence.
+15. AC-13 source review must reject font owners that import raw `rt_mutex_*`
+    calls instead of the existing mutex facade, mutable module-global engine
+    pools, or unsynchronized scalar generation counters used by hosted paths.
+    Freestanding initialization constraints justify a facade repair, not a
+    second raw-runtime owner or a hosted data race.
 
 For UI-test helper work, keep the test-library surface consistent: new SSpec
 manual specs use canonical `use std.spec.*` and `step("...")`, existing

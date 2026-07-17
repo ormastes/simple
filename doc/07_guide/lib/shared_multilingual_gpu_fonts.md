@@ -287,18 +287,23 @@ unit and shared-surface specs cover source behavior; REQ-015 remains open until
 the deployed pure-Simple runtime executes those specs successfully. The exact
 Stage 4 provider work resolved the earlier 208-symbol link failure and produced
 one full CLI before the scalar test-argv bridge landed. That older binary is not
-current acceptance evidence. Bounded current-source rebuilds then SIGSEGV'd
-before logging or emitting a candidate, including after the bootstrap runtime
-archive was refreshed with the scalar bridge. A debugger located the crash in
-`llvm::DataLayout::setAlignment` during LLVM module construction. One-worker
-mode reproduced it, and a full-CLI build without `examples/10_tooling` also
-reproduced it with no new cache objects. This is a compiler/runtime deployment
-defect, not font-source failure, and neither a seed, minimal-stage binary, nor
-the pre-bridge full CLI is native acceptance evidence.
+current acceptance evidence. Later bounded current-source runs stopped at
+different parser, LLVM construction, and resource-growth failures; none
+produced an admitted candidate. This is a compiler/runtime deployment defect,
+not font-source failure, and neither a seed, minimal-stage binary, nor the
+pre-bridge full CLI is native acceptance evidence.
 A fresh full CLI has not yet been admitted. The exact binary digest, command,
-GDB failure site, retained-candidate recursion result, and latest bounded
+GDB failure site, retained-candidate recursion result, and bounded
 bootstrap failure are recorded in the tracked deployment bug linked above;
 none is font acceptance evidence.
+
+Current source limitations must remain visible during that recovery.
+Registered-byte-only SimpleOS shaping does not yet accept Arabic or Devanagari
+runs, and the freestanding WM invalid-metrics branch draws thin rectangle bars
+to keep the desktop alive. Those bars are not glyph fallback or pixel-oracle
+evidence. The shared renderer also still needs its raw mutex ownership and
+hosted atlas-generation synchronization moved behind existing facades before
+AC-13 can pass.
 
 Canonical `FontRenderer` fallback glyphs are rasterized on CPU. Environment-
 published accelerator pixels are compatibility-only diagnostics and cannot

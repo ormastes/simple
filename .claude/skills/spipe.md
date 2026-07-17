@@ -390,6 +390,10 @@ shared font batch for 2D and 3D`; `Emit the selected font composite program and
 plan compilation`; `Prove native submission and device readback`. Engine3D
 HUD/world stays a separate consumer lane. Full rules live in `$sp_dev` under
 “Shared multilingual font work.”
+AC-13 review rejects raw `rt_mutex_*` ownership in font modules, mutable
+module-global engine pools, and hosted unsynchronized generation counters;
+freestanding initialization constraints must be repaired through the existing
+facades rather than by adding parallel runtime owners.
 NFR-008 promotion must flow from `VulkanFontCompositeEvidence` and
 `vulkan_font_stage_evidence_ready` into durable `FontPerfBudgetEvidence`, then
 through `read_font_perf_evidence` and `expect_font_perf_budget`. `queue_device`
