@@ -155,8 +155,10 @@ the shared binary — deploys require explicit user go-ahead).
     a verified ILP32D linker/sysroot/CRT owner exists. The existing Linux
     architecture gate now exercises the original hosted target boundary with a
     flagless default-LLVM full build, requires loud failure and no output, then
-    emits a nonempty ELF32 RISC-V relocatable object for the flagless default-LLVM
-    `riscv32-unknown-none-elf` recovery path. First staged execution is pending.
+    emits nonempty ELF32 RISC-V relocatable objects for both the minimal
+    flagless default-LLVM `riscv32-unknown-none-elf` recovery probe and the
+    shared cross-module Result/arithmetic correctness fixture. RV32 remains
+    object-only; first staged execution is pending.
 - Option `.map` now evaluates a side-effecting receiver exactly once and
   inlines its literal lambda with the decoded payload, preserving primitive
   text/float/bool/integer results through the tagged runtime-value merge.
