@@ -1,9 +1,32 @@
 use crate::ast::{Expr, TensorMode, TensorSlice};
 use crate::error::ParseError;
 use crate::parser_impl::core::Parser;
-use crate::token::TokenKind;
+use crate::token::{FStringToken, TokenKind};
 
 impl<'a> Parser<'a> {
+    /// Extract a plain string value from the current token if it is a
+    /// `TokenKind::String` or a `TokenKind::FString` made up solely of literal
+    /// parts (no interpolation). Double-quoted strings lex as `FString` by
+    /// default now, so `device="cuda"` in grid/tensor literals must accept
+    /// both forms; a `String`-only match silently rejected valid syntax
+    /// (task #184: grid_literal_remains_contextual).
+    fn device_string_literal(&self) -> Option<String> {
+        match &self.current.kind {
+            TokenKind::String(s) => Some(s.clone()),
+            TokenKind::FString(parts) => {
+                let mut out = String::new();
+                for part in parts {
+                    match part {
+                        FStringToken::Literal(s) => out.push_str(s),
+                        FStringToken::Expr(_) | FStringToken::ExprWithFormat(_, _) => return None,
+                    }
+                }
+                Some(out)
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn parse_primary_math(&mut self) -> Result<Expr, ParseError> {
         match &self.current.kind {
             TokenKind::Grid => self.parse_grid_literal(),
@@ -35,13 +58,12 @@ impl<'a> Parser<'a> {
         let device = if self.check_ident("device") {
             self.advance(); // consume 'device'
             self.expect(&TokenKind::Assign)?;
-            match &self.current.kind {
-                TokenKind::String(s) => {
-                    let dev = s.clone();
+            match self.device_string_literal() {
+                Some(dev) => {
                     self.advance();
                     Some(dev)
                 }
-                _ => {
+                None => {
                     return Err(ParseError::unexpected_token(
                         "string literal for device",
                         format!("{:?}", self.current.kind),
@@ -82,8 +104,13 @@ impl<'a> Parser<'a> {
 
             let mut cells = Vec::new();
             loop {
-                // Parse cell expression
-                let cell = self.parse_expression()?;
+                // Parse cell expression. `grid_row_depth` tells `parse_bitwise_or`
+                // that a `|` here closes the cell/row instead of continuing a
+                // bitwise-or expression (task #184: grid_literal_remains_contextual).
+                self.grid_row_depth += 1;
+                let cell = self.parse_expression();
+                self.grid_row_depth -= 1;
+                let cell = cell?;
                 cells.push(cell);
 
                 if self.check(&TokenKind::Pipe) {
@@ -194,13 +221,12 @@ impl<'a> Parser<'a> {
         let device = if self.check_ident("device") {
             self.advance(); // consume 'device'
             self.expect(&TokenKind::Assign)?;
-            match &self.current.kind {
-                TokenKind::String(s) => {
-                    let dev = s.clone();
+            match self.device_string_literal() {
+                Some(dev) => {
                     self.advance();
                     Some(dev)
                 }
-                _ => {
+                None => {
                     return Err(ParseError::unexpected_token(
                         "string literal for device",
                         format!("{:?}", self.current.kind),

@@ -123,7 +123,39 @@ impl<'a> Parser<'a> {
         DoubleAmp => BinOp::And,
         AndSuspend => BinOp::AndSuspend,
     );
-    parse_binary_single!(parse_bitwise_or, parse_bitwise_xor, Pipe, BinOp::BitOr);
+    // Bitwise OR: `|`. Hand-written instead of parse_binary_single! (task #184):
+    // grid literals reuse `|` as the row/cell delimiter (`grid:\n    | 1 | 2 |`).
+    // While parsing a grid row's cell expression (`grid_row_depth > 0`, set by
+    // `parse_grid_rows` in expressions/primary/math.rs), a `|` must close the
+    // cell/row instead of being consumed as a continuing BitOr operand — see
+    // `grid_literal_remains_contextual`.
+    pub(crate) fn parse_bitwise_or(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_bitwise_xor()?;
+        if self.grid_row_depth > 0 {
+            return Ok(left);
+        }
+        loop {
+            if self.check(&TokenKind::Pipe) {
+                // Case 1: trailing operator on this line
+                self.advance();
+                self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
+            } else if self.peek_through_newlines_and_indents_is(&TokenKind::Pipe) {
+                // Case 2: operator on next line (leading continuation)
+                self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
+                self.advance(); // consume the operator
+                self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
+            } else {
+                break;
+            }
+            let right = self.parse_bitwise_xor()?;
+            left = Expr::Binary {
+                op: BinOp::BitOr,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
     parse_binary_single!(parse_bitwise_xor, parse_bitwise_and, Xor, BinOp::BitXor);
     parse_binary_single!(parse_bitwise_and, parse_shift, Ampersand, BinOp::BitAnd);
 

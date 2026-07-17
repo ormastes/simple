@@ -92,6 +92,12 @@ pub struct Parser<'a> {
     /// `MAX_PARSE_RECURSION_DEPTH` so a non-advancing misparse yields a located
     /// `parse error (recovery limit)` instead of a native stack overflow / SIGABRT.
     pub(crate) parse_recursion_depth: u32,
+    /// Nesting depth while parsing a grid literal row's cell expression (task #184).
+    /// `|` is both the grid row/cell delimiter (`grid:\n    | 1 | 2 |`) and the
+    /// bitwise-or operator. While > 0, `parse_bitwise_or` treats `|` as a
+    /// delimiter to close the cell rather than consuming it as a continuing
+    /// BitOr operand. See `grid_literal_remains_contextual`.
+    pub(crate) grid_row_depth: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -120,6 +126,7 @@ impl<'a> Parser<'a> {
             deferred_dedent_count: 0,
             call_arg_depth: 0,
             parse_recursion_depth: 0,
+            grid_row_depth: 0,
         };
 
         // Check for common mistakes in the initial token
@@ -207,6 +214,7 @@ impl<'a> Parser<'a> {
             deferred_dedent_count: 0,
             call_arg_depth: 0,
             parse_recursion_depth: 0,
+            grid_row_depth: 0,
         }
     }
 
