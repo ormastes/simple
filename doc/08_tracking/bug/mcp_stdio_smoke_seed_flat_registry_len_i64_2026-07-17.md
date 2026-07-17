@@ -235,26 +235,62 @@ unload is used (opt-in API, exported from
 - `__init__.spl`: re-exports the new `_owned` functions alongside their
   existing counterparts.
 
-### Regression spec
+### Regression specs
 
-`test/01_unit/compiler_core/interpreter/registry_scoping_spec.spl` — mocks
-mirroring the real guarded logic (same "hm_* not importable standalone in
-interpreter-mode runtime" constraint documented in the neighboring
-`interp_resource_tracker_spec.spl`, same directory). 7 examples, 0
-failures via `timeout 240 src/compiler_rust/target/release/simple test
-test/01_unit/compiler_core/interpreter/registry_scoping_spec.spl` (exit 0):
-pins the CURRENT bare-name collision policy (last-write-wins — not changed
-to fail-closed; that would be a wholesale redesign and contradicts the
-codebase's documented diagnostic-only choice for the private-helper case),
-proves the pre-fix unguarded unload deletes a surviving module's entry
-(regression proof) and that the guarded unload does not, and confirms a
-later module's partial registration never shifts/corrupts an earlier
-module's already-registered slots.
+Two complementary specs, both run via
+`timeout 240 src/compiler_rust/target/release/simple test <path>` (exit 0):
 
-**Verifiability caveat:** the pure-Simple binary (`bin/release/<triple>/simple`)
-is too stale to exercise these source edits end-to-end (redeploy wall,
-separate campaign) and a full bootstrap was out of scope for this lane;
-the regression spec runs its own faithful mock of the guarded logic on the
-seed binary, not the compiled `eval_tables.spl`/`interp_resource_tracker.spl`
-themselves. The source edits are reviewed/read-verified but not
-build-verified in this pass.
+- `test/01_unit/compiler_core/interpreter/registry_scoping_real_spec.spl` —
+  **real import** (`use compiler.core.interpreter.eval_tables.{...}` /
+  `use compiler.core.interpreter.interp_resource_tracker.{...}`), calling
+  the ACTUAL `func_table_register`/`func_table_lookup`/
+  `func_table_remove_owned`/`irt_init`/`irt_begin_module`/
+  `irt_track_func_owned`/`irt_unload_module` from this fix directly (no
+  mock). 3 examples, 0 failures. This directly build-and-run-verifies the
+  fix: it proves, against the real functions, that (1) a bare-name
+  collision between two modules survives the overwritten module's unload,
+  (2) unloading the sole owner of a name still removes it, and (3)
+  `func_table_remove_owned` no-ops on a mismatched decl_id and removes on a
+  match. Modeled after the real-import pattern already proven viable for
+  this same directory family by
+  `test/01_unit/compiler/interpreter/module_loader_lazy_spec.spl` (which
+  imports `compiler.core.interpreter.module_loader_core`/`module_loader_lazy`
+  directly and executes real logic, confirmed by running it standalone:
+  2/4 examples pass, 2 fail on unrelated pre-existing `std.ctype` fn-count
+  drift — proof the import path executes real code, not a no-op). This
+  contradicts the "hm_* not importable standalone" assumption in the
+  neighboring `interp_resource_tracker_spec.spl`'s header comment for THIS
+  particular set of functions — `func_table_register`/`irt_track_func_owned`
+  etc. import and run fine; that comment's blocker evidently applies to a
+  different part of the surface (possibly the hashmap bucket-array
+  bootstrap helpers used by a wider entry point), not this fix's functions.
+- `test/01_unit/compiler_core/interpreter/registry_scoping_spec.spl` — mock
+  companion (kept as design-level armor / documentation of the pre-fix vs
+  post-fix contrast). 7 examples, 0 failures. Pins the CURRENT bare-name
+  collision policy (last-write-wins — not changed to fail-closed; that
+  would be a wholesale redesign and contradicts the codebase's documented
+  diagnostic-only choice for the private-helper case), demonstrates the
+  PRE-FIX unguarded unload deleting a surviving module's entry
+  (regression proof), and confirms a later module's partial registration
+  never shifts/corrupts an earlier module's already-registered slots.
+
+**Known remaining gap (named, not fixed — scoped out as narrower/rarer):**
+`func_remove_return_type_owned` guards against removing a return-type entry
+when a *different* decl_id currently owns the name in `func_table` — but
+`extern fn` declarations never get a `func_table` entry at all (only a
+return-type entry), so `func_table_lookup(name)` is always `-1` for a
+purely-extern name and the guard falls through to unconditional removal.
+Two modules whose same-named `extern fn` declarations have differing
+return types, with the first selectively unloaded after the second
+overwrote its return-type entry, can still have the survivor's
+return-type entry clobbered on the first's unload. Lower severity (extern
+signatures rarely differ across modules for the same name) and not fixed
+in this pass — flagged for whoever extends this guard further.
+
+**Verifiability:** the pure-Simple binary (`bin/release/<triple>/simple`)
+is too stale to exercise these edits through a full bootstrap/redeploy
+(separate campaign, out of scope for this lane), but the seed binary
+(`src/compiler_rust/target/release/simple`) DOES execute the real,
+modified `.spl` source directly via `simple test`/interpreter mode — the
+real-import spec above is genuine build-and-run verification of the fixed
+functions, not merely a source read or a parallel reimplementation.
