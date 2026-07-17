@@ -346,8 +346,9 @@ contiguous 13-field parameter block, and its entry is `main`.
 GLSL-to-SPIR-V metadata; its evidence contract fails closed on missing bytes,
 bad magic, or missing `main`. A valid synthetic contract is not compilation or
 execution, and no compiled artifact exists absent real external capture.
-Native-target signatures include explicit atlas/destination element counts and
-guard computed indices. WGSL rejects nonpositive dimensions, negative atlas
+Native-target signatures include explicit atlas/destination element counts,
+reject invalid atlas subrects before origin/index addition, and guard computed
+indices. WGSL rejects nonpositive dimensions, negative atlas
 origins, overflowing products, invalid subrects, and destination-add overflow
 before unsigned casts, then uses `arrayLength` for the final buffer bound.
 Portable backend planning emits a separate optimization artifact and font

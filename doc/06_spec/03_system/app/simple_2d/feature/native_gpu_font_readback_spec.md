@@ -7,8 +7,9 @@
 > Hand-maintained mirror pending canonical `spipe-docgen`; no generated-manual
 > PASS is claimed.
 
-This scenario has two fail-closed classification rows and three independent
-live evidence rows. Vulkan Engine2D and
+This scenario has three SimpleOS provenance rejection rows, two fail-closed
+classification rows, and three independent live evidence rows. Vulkan Engine2D
+and
 the Engine3D font adapter render on a consistent device name/type/driver tuple;
 SimpleOS supplies a
 pinned-font guest framebuffer oracle; and the warm performance/resource
@@ -19,6 +20,12 @@ tuple check is not a device UUID or retained execution proof. CPU rendering,
 upload-only evidence, and environment claims are not substitutes.
 
 ## Operator flow
+
+### Reject noncanonical SimpleOS artifact evidence
+
+Reject missing or copied wrapper provenance, malformed or ambiguous SHA-256
+fields, and copied metadata whose canonical retained files do not match. These
+three fail-closed rows do not claim QEMU execution or retained pixel evidence.
 
 ### Classify unavailable hardware
 
@@ -107,5 +114,5 @@ record; missing, stale, partial, or non-passing evidence fails closed.
   exact CPU parity. NFR-008 source/schema coverage is present; the retained
   native v5 record remains pending.
 
-The executable spec is the authority. Regenerate this manual after all five
+The executable spec is the authority. Regenerate this manual after all eight
 scenarios pass and require SPipe docgen to report zero stubs.

@@ -88,8 +88,8 @@ source and entry/version hashes twice and requires exact equality.
 ### Atlas composition bindings
 
 - CUDA/HIP/OpenCL source contains atlas, destination, coordinates, dimensions,
-  explicit buffer element counts, guarded source/destination indices, and
-  alpha-composition logic.
+  explicit buffer element counts, safe subtractive atlas-origin/extent guards,
+  guarded source/destination indices, and alpha-composition logic.
 - HIP emission must equal the exact shared `font_atlas_composite_hip_source()`
   consumed by the ROCm runtime; equality is source evidence, not compilation or
   AMD device execution.
@@ -98,7 +98,8 @@ source and entry/version hashes twice and requires exact equality.
   libraries to reproduce the runtime ABI, UUID identity, launch-argument, and
   transfer gates. Its pass is not an AMD pixel-oracle pass.
 - Metal includes `metal_stdlib`, binds atlas/destination at buffers 0/1, and
-  receives one `FontAtlasCompositeParams` constant block at buffer 2.
+  receives one `FontAtlasCompositeParams` constant block at buffer 2; it rejects
+  invalid atlas origins/extents before any atlas index addition.
 - WGSL binds a read-only atlas at binding 0 and read-write destination at
   binding 1. Before unsigned casts it rejects nonpositive dimensions, negative
   atlas origins, overflowing products, invalid atlas subrects, and destination
