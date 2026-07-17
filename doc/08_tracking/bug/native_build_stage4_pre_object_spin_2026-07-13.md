@@ -2,9 +2,11 @@
 
 ## Status
 
-Dispatch fixed; strict Stage-4 link blocked. The earlier quadratic entry-closure
-scan and canonical Rust-seed dispatch bug are fixed. A fresh bounded build now
-emits every object and fails honestly at the unresolved-symbol gate.
+Dispatch and the quadratic entry-closure scan are fixed; strict Stage-4 link
+composition remains blocked. The latest bounded exact-entry run resolved its
+source closure without an import or phase diagnostic, then terminated with
+SIGBUS before emitting objects. That post-resolution phase boundary is not yet
+localized.
 
 The 2026-07-15 source follow-up also routes the canonical Stage4 one-binary
 `--entry` through the existing in-process pure-Simple project driver and clears
@@ -690,3 +692,21 @@ workspace's sparse profile omitted tracked `src/os`. The remaining blocker is
 now the Stage 4 SIGBUS after closure resolution. The three-cycle cap was
 reached, so the next continuation must capture phase tracing to locate the
 exact phase boundary rather than rerunning the same command blindly.
+
+## Next bounded phase diagnostic
+
+No new logging code is required. Add both existing opt-ins to the reproducer:
+
+```sh
+export SIMPLE_COMPILER_PHASE_PROFILE=1
+export SIMPLE_COMPILER_TRACE=1
+```
+
+The last emitted marker localizes the failure without another broad trace
+patch. Check, in order, for `phase1:load_sources:done`,
+`phase2:parse:done`, `phase3:hir_typecheck:done`, and
+`aot:lower_to_mir:done`. All later AOT steps already have paired start/done
+markers, and entry into native linking is marked by `[LLVM-LINK] enter`.
+`SIMPLE_INTERP_TRACE` adds source-loading detail but does not enable the phase
+profiler; `SIMPLE_BOOTSTRAP_DEBUG` does not replace this canonical driver phase
+stream.
