@@ -35,6 +35,23 @@ The exact Stage 4 command is recorded in:
   linker child, output binary, or diagnostic output.
 - The retained native cache contained 1,424 module objects during Stage 4.
 
+## Root cause found
+
+The Stage 4 wrapper deliberately seeds only `src/app/cli/main.spl`, clears the
+pre-enabled closure flag, and expects `CompilerDriver.load_sources_impl()` to
+walk imports before enabling closure mode. A later sync regression restored a
+`not has_project_source` guard on that walk. Because the Stage 4 entry is under
+`src/`, the walk was skipped and the subsequent legacy project fallback loaded
+all of `src/app`, `src/lib`, `src/compiler`, and `src/runtime`. That accounts for
+the observed 1,424 objects and the pre-link time/RSS runaway.
+
+The narrow correction removes that location guard while retaining the explicit
+entry, AOT-mode, and not-already-closure guards. A source-contract regression
+now prevents a future sync from silently restoring the whole-tree behavior.
+The bounded Apple Stage 4 acceptance run remains required after this change is
+merged; the earlier three-cycle cap prohibits claiming it from another retry in
+the same verification turn.
+
 This is not a missing provider-symbol failure: Stage 4 did not reach the exact
 provider-capsule linker. The previous missing hosted signal symbols were fixed
 separately by `runtime_hosted_signal.c`, and the focused runtime tests pass.
