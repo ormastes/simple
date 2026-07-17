@@ -1,5 +1,6 @@
 // Block closure execution helpers for interpreter_call module
 
+use super::super::interpreter_control::{optional_let_binding, LetBind};
 use super::super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update};
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
@@ -140,7 +141,13 @@ pub(super) fn exec_block_closure(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     let mut throwaway = captured_env.clone();
-    exec_block_closure_into(nodes, &mut throwaway, functions, classes, enums, impl_methods)
+    match exec_block_closure_into(nodes, &mut throwaway, functions, classes, enums, impl_methods) {
+        // A `return` inside this block/BDD-it-block body (bug #188b) exits THIS
+        // call, yielding the returned value as the block's own result — it must
+        // not escape further as an error. See `CompileError::BlockReturn`.
+        Err(CompileError::BlockReturn(value)) => Ok(value),
+        other => other,
+    }
 }
 
 /// Like `exec_block_closure`, but runs against `out_env` and, on normal
@@ -374,20 +381,43 @@ pub(super) fn exec_block_closure_into(
                         enums,
                         impl_methods,
                     )?;
-                    let mut bindings = std::collections::HashMap::new();
-                    if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                        for (name, val) in bindings {
-                            local_env.insert(name, val);
+                    // `if val IDENT = expr:` is an optional-binding: only take the branch
+                    // when the value is present, binding IDENT to the *unwrapped* value.
+                    // Running a bare identifier pattern through `pattern_matches` always
+                    // matches (even nil/None) and binds the Option wrapper itself — see
+                    // `optional_let_binding`'s doc comment and bug #188a. Defer structural
+                    // patterns (Some(x), enums, tuples, …) to `pattern_matches`.
+                    match optional_let_binding(pattern, &value) {
+                        LetBind::Bind(name, inner) => {
+                            local_env.insert(name, inner);
+                            last_value = exec_block_closure_mut(
+                                &if_stmt.then_block.statements,
+                                &mut local_env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?;
+                            handled = true;
                         }
-                        last_value = exec_block_closure_mut(
-                            &if_stmt.then_block.statements,
-                            &mut local_env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        )?;
-                        handled = true;
+                        LetBind::Skip => {}
+                        LetBind::NotApplicable => {
+                            let mut bindings = std::collections::HashMap::new();
+                            if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
+                                for (name, val) in bindings {
+                                    local_env.insert(name, val);
+                                }
+                                last_value = exec_block_closure_mut(
+                                    &if_stmt.then_block.statements,
+                                    &mut local_env,
+                                    functions,
+                                    classes,
+                                    enums,
+                                    impl_methods,
+                                )?;
+                                handled = true;
+                            }
+                        }
                     }
                 } else if evaluate_expr(
                     &if_stmt.condition,
@@ -413,21 +443,39 @@ pub(super) fn exec_block_closure_into(
                     for (pattern, cond, block) in &if_stmt.elif_branches {
                         if let Some(pattern) = pattern {
                             let value = evaluate_expr(cond, &mut local_env, functions, classes, enums, impl_methods)?;
-                            let mut bindings = std::collections::HashMap::new();
-                            if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                                for (name, val) in bindings {
-                                    local_env.insert(name, val);
+                            match optional_let_binding(pattern, &value) {
+                                LetBind::Bind(name, inner) => {
+                                    local_env.insert(name, inner);
+                                    last_value = exec_block_closure_mut(
+                                        &block.statements,
+                                        &mut local_env,
+                                        functions,
+                                        classes,
+                                        enums,
+                                        impl_methods,
+                                    )?;
+                                    handled = true;
+                                    break;
                                 }
-                                last_value = exec_block_closure_mut(
-                                    &block.statements,
-                                    &mut local_env,
-                                    functions,
-                                    classes,
-                                    enums,
-                                    impl_methods,
-                                )?;
-                                handled = true;
-                                break;
+                                LetBind::Skip => {}
+                                LetBind::NotApplicable => {
+                                    let mut bindings = std::collections::HashMap::new();
+                                    if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
+                                        for (name, val) in bindings {
+                                            local_env.insert(name, val);
+                                        }
+                                        last_value = exec_block_closure_mut(
+                                            &block.statements,
+                                            &mut local_env,
+                                            functions,
+                                            classes,
+                                            enums,
+                                            impl_methods,
+                                        )?;
+                                        handled = true;
+                                        break;
+                                    }
+                                }
                             }
                         } else if evaluate_expr(cond, &mut local_env, functions, classes, enums, impl_methods)?.truthy()
                         {
@@ -911,6 +959,23 @@ pub(super) fn exec_block_closure_into(
                 IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
                 return Err(CompileError::LoopContinue);
             }
+            Node::Return(ret) => {
+                // `return` inside a lambda/block-closure body must exit THIS body,
+                // yielding the value to the body's own call boundary — not become
+                // just the "value" of whatever if/match/loop statement it's nested
+                // in (bug #188b). Mirror `Node::Break`/`Node::Continue` above: raise
+                // a sentinel that propagates via `?` through nested
+                // `exec_block_closure_mut` calls and is caught at the lambda/
+                // block-closure/BDD call boundary (see `CompileError::BlockReturn`).
+                let value = if let Some(expr) = &ret.value {
+                    evaluate_expr(expr, &mut local_env, functions, classes, enums, impl_methods)?
+                } else {
+                    Value::Nil
+                };
+                CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
+                IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
+                return Err(CompileError::BlockReturn(value));
+            }
             _ => {
                 last_value = Value::Nil;
             }
@@ -998,20 +1063,40 @@ fn exec_block_closure_mut(
                 let mut handled = false;
                 if let Some(pattern) = &if_stmt.let_pattern {
                     let value = evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
-                    let mut bindings = std::collections::HashMap::new();
-                    if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                        for (name, val) in bindings {
-                            local_env.insert(name, val);
+                    // See the `optional_let_binding` fix in the sibling `exec_block_closure_into`
+                    // above (bug #188a) — `pattern_matches` alone always matches a bare
+                    // identifier pattern, even against nil/None, so it must be tried first.
+                    match optional_let_binding(pattern, &value) {
+                        LetBind::Bind(name, inner) => {
+                            local_env.insert(name, inner);
+                            last_value = exec_block_closure_mut(
+                                &if_stmt.then_block.statements,
+                                local_env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?;
+                            handled = true;
                         }
-                        last_value = exec_block_closure_mut(
-                            &if_stmt.then_block.statements,
-                            local_env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        )?;
-                        handled = true;
+                        LetBind::Skip => {}
+                        LetBind::NotApplicable => {
+                            let mut bindings = std::collections::HashMap::new();
+                            if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
+                                for (name, val) in bindings {
+                                    local_env.insert(name, val);
+                                }
+                                last_value = exec_block_closure_mut(
+                                    &if_stmt.then_block.statements,
+                                    local_env,
+                                    functions,
+                                    classes,
+                                    enums,
+                                    impl_methods,
+                                )?;
+                                handled = true;
+                            }
+                        }
                     }
                 } else if evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?
                     .truthy()
@@ -1030,21 +1115,39 @@ fn exec_block_closure_mut(
                     for (pattern, cond, block) in &if_stmt.elif_branches {
                         if let Some(pattern) = pattern {
                             let value = evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?;
-                            let mut bindings = std::collections::HashMap::new();
-                            if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                                for (name, val) in bindings {
-                                    local_env.insert(name, val);
+                            match optional_let_binding(pattern, &value) {
+                                LetBind::Bind(name, inner) => {
+                                    local_env.insert(name, inner);
+                                    last_value = exec_block_closure_mut(
+                                        &block.statements,
+                                        local_env,
+                                        functions,
+                                        classes,
+                                        enums,
+                                        impl_methods,
+                                    )?;
+                                    handled = true;
+                                    break;
                                 }
-                                last_value = exec_block_closure_mut(
-                                    &block.statements,
-                                    local_env,
-                                    functions,
-                                    classes,
-                                    enums,
-                                    impl_methods,
-                                )?;
-                                handled = true;
-                                break;
+                                LetBind::Skip => {}
+                                LetBind::NotApplicable => {
+                                    let mut bindings = std::collections::HashMap::new();
+                                    if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
+                                        for (name, val) in bindings {
+                                            local_env.insert(name, val);
+                                        }
+                                        last_value = exec_block_closure_mut(
+                                            &block.statements,
+                                            local_env,
+                                            functions,
+                                            classes,
+                                            enums,
+                                            impl_methods,
+                                        )?;
+                                        handled = true;
+                                        break;
+                                    }
+                                }
                             }
                         } else if evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?.truthy() {
                             last_value = exec_block_closure_mut(
@@ -1442,6 +1545,19 @@ fn exec_block_closure_mut(
             Node::Continue(_) => {
                 return Err(CompileError::LoopContinue);
             }
+            Node::Return(ret) => {
+                // See the matching `Node::Return` arm in `exec_block_closure_into`
+                // above (bug #188b) — propagate via the `BlockReturn` sentinel so a
+                // `return` nested inside an if/match/loop body still exits the
+                // whole enclosing lambda/block-closure body, not just this nested
+                // call.
+                let value = if let Some(expr) = &ret.value {
+                    evaluate_expr(expr, local_env, functions, classes, enums, impl_methods)?
+                } else {
+                    Value::Nil
+                };
+                return Err(CompileError::BlockReturn(value));
+            }
             _ => {
                 last_value = Value::Nil;
             }
@@ -1514,5 +1630,74 @@ mod tests {
                 "source buffer must remain shared across field-map COW"
             );
         }
+    }
+
+    /// Parse `src` (must define `fn probe(): ...`) and return its body statements —
+    /// used to drive `exec_block_closure`/`exec_block_closure_into` the same way a
+    /// lambda/block-closure/BDD `it`-block body would be driven.
+    fn parse_probe_body(src: &str) -> Vec<Node> {
+        let mut parser = Parser::new(src);
+        let module = parser.parse().expect("parse probe");
+        module
+            .items
+            .iter()
+            .find_map(|node| match node {
+                Node::Function(function) if function.name == "probe" => Some(function.body.statements.clone()),
+                _ => None,
+            })
+            .expect("probe function")
+    }
+
+    /// Bug #188a: `if val v = x:` inside a lambda/block-closure/BDD `it`-block
+    /// body must skip the branch when `x` is absent (nil/None). This executor
+    /// (`exec_block_closure_into`'s `Node::If` handling) had its own copy of the
+    /// pre-fix `pattern_matches`-only logic — a bare identifier pattern always
+    /// matches, even against nil — and never received the `optional_let_binding`
+    /// fix landed for the statement-level `exec_if`.
+    #[test]
+    fn if_val_skips_when_absent_in_block_closure() {
+        let body = parse_probe_body("fn probe():\n    if val v = x:\n        \"TAKEN\"\n    else:\n        \"SKIPPED\"\n");
+        let mut env = Env::new();
+        env.insert("x".to_string(), Value::Nil);
+        let result = exec_block_closure(&body, &env, &mut HashMap::new(), &mut HashMap::new(), &HashMap::new(), &HashMap::new())
+            .expect("exec_block_closure");
+        assert_eq!(result.to_display_string(), "SKIPPED");
+    }
+
+    /// Companion case: a present value must still take the branch, bound to the
+    /// (unwrapped) value.
+    #[test]
+    fn if_val_binds_when_present_in_block_closure() {
+        let body = parse_probe_body("fn probe():\n    if val v = x:\n        v\n    else:\n        99\n");
+        let mut env = Env::new();
+        env.insert("x".to_string(), Value::Int(42));
+        let result = exec_block_closure(&body, &env, &mut HashMap::new(), &mut HashMap::new(), &HashMap::new(), &HashMap::new())
+            .expect("exec_block_closure");
+        assert_eq!(result.as_int().expect("int"), 42);
+    }
+
+    /// Bug #188b: `return` inside a match arm nested in a lambda/block-closure
+    /// body must exit THIS body with the returned value — not just become the
+    /// match statement's "value" (discarded to Nil, since `Node::Return` wasn't
+    /// even handled) while execution falls through to the next statement.
+    #[test]
+    fn return_inside_match_arm_exits_block_closure() {
+        let body = parse_probe_body("fn probe():\n    match 1:\n        1: return 100\n    return 999\n");
+        let env = Env::new();
+        let result = exec_block_closure(&body, &env, &mut HashMap::new(), &mut HashMap::new(), &HashMap::new(), &HashMap::new())
+            .expect("exec_block_closure");
+        assert_eq!(result.as_int().expect("int"), 100);
+    }
+
+    /// Companion case: a bare top-level `return` (no match/if nesting) inside a
+    /// block-closure body must also exit with its value, not fall through to
+    /// `Value::Nil` via the generic wildcard arm.
+    #[test]
+    fn return_at_top_level_exits_block_closure() {
+        let body = parse_probe_body("fn probe():\n    return 100\n");
+        let env = Env::new();
+        let result = exec_block_closure(&body, &env, &mut HashMap::new(), &mut HashMap::new(), &HashMap::new(), &HashMap::new())
+            .expect("exec_block_closure");
+        assert_eq!(result.as_int().expect("int"), 100);
     }
 }

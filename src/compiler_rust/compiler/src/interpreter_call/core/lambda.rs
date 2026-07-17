@@ -64,7 +64,13 @@ pub(crate) fn exec_lambda(
         // Run the block against local_env in place (same statement semantics as the
         // clone-isolated wrapper) so a `me`-method's mutation to an object argument
         // is observable for write-back below.
-        exec_block_closure_into(nodes, &mut local_env, functions, classes, enums, impl_methods)
+        match exec_block_closure_into(nodes, &mut local_env, functions, classes, enums, impl_methods) {
+            // A `return` inside this lambda's block body (bug #188b) exits THIS
+            // lambda call, yielding the returned value as the call's result — it
+            // must not escape further as an error. See `CompileError::BlockReturn`.
+            Err(CompileError::BlockReturn(value)) => Ok(value),
+            other => other,
+        }
     } else {
         evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)
     };
