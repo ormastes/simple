@@ -410,6 +410,13 @@ requires extracted optimization/font source bytes to match their emitter-declare
 hashes and rejects missing or malformed hashes before compilation. A well-formed stale
 Vulkan source may compile and retain `.comp`/`.spv` candidates for review, but
 evidence remains invalid until both source and artifact pins match.
+Portable font admission aggregates only `PORTABLE_COMPUTE_TARGETS` and first
+requires emitted semantics to match `PORTABLE_COMPUTE_EXPECTED_SEMANTICS`,
+`candidate_compiled=true`, and `artifact_validated=true`. Evidence records the
+compiler and validator path/version/SHA-256; Vulkan additionally requires a
+passing `spirv-val` row. Stale pins remain `pinned_verified=false`. Independent
+review may then update tracked source/artifact pins, after which a reproducing
+run must set `pinned_verified=true`; never repin merely to green the first run.
 
 For RenderDoc evidence, use the shared helper interface instead of spelling
 `renderdoccmd` directly in each spec or check script:

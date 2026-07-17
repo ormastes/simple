@@ -495,6 +495,13 @@ font GPU emission, or GUI/Web/2D/3D text.
    Straight-ARGB compositing is `FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION = 2`;
    retained CUDA PTX and Vulkan SPIR-V with another version are stale and must
    be regenerated and re-pinned before promotion, never trusted by bypassing the check.
+   Admission is two-phase and aggregates only `PORTABLE_COMPUTE_TARGETS`:
+   candidate generation must match `PORTABLE_COMPUTE_EXPECTED_SEMANTICS`, set
+   `candidate_compiled=true` and `artifact_validated=true`, and record compiler
+   plus validator path/version/SHA-256 (`spirv-val` is mandatory for Vulkan).
+   Stale pins keep `pinned_verified=false` and cannot promote. Only independent
+   review may update tracked source/artifact pins; a reproducing run must then
+   set `pinned_verified=true`. Never repin merely to make the first run green.
 7. Shaping and material preparation fail closed unless every required operation
    completed. Hosted runs remain bound to the exact live face handle and
    generation. Registered-only SimpleOS runs are the bounded exception: exact

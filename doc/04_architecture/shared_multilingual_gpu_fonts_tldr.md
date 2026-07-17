@@ -6,6 +6,9 @@ Simple emits the shared atlas-composite programs; backend adapters own device
 resources and may claim execution only after submission and device readback.
 The shared batch gate rejects unknown atlas-composite program versions and
 noncanonical transforms before either engine mutates native state.
+Portable GPU admission is two-phase: requested targets first compile and
+validate semantics-compatible candidates with tool/validator provenance, then
+independent review and exact reproduction may mark tracked pins verified.
 
 `font_types.spl` also owns the one immutable `FontRenderConfig` and
 `FontExecutionPolicy`. `Suggested(auto)` uses the engine's executable adapter

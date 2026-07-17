@@ -55,6 +55,13 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
    hashes. Vulkan font checking rejects missing/malformed hashes before compilation; a
    well-formed stale source may retain compiled `.comp`/`.spv` candidates for
    review, but remains invalid until source and artifact pins both match.
+   Checker specs must prove `PORTABLE_COMPUTE_TARGETS`-only aggregation, emitted
+   semantics equality with `PORTABLE_COMPUTE_EXPECTED_SEMANTICS`, phase-one
+   `candidate_compiled=true` plus
+   `artifact_validated=true`, compiler/validator path-version-SHA provenance,
+   and mandatory `spirv-val` validation for Vulkan. Stale pins must remain
+   `pinned_verified=false`; only an independently reviewed pin update followed
+   by reproduction may set `pinned_verified=true`.
 10. Append the spec file list, generated manual paths, coverage matrix, and
     manual rendering policy to state file
 

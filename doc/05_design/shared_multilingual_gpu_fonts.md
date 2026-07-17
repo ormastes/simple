@@ -221,8 +221,14 @@ artifact installation path.
 The native toolchain checker preserves that pair as distinct PTX/HSACO/SPIR-V/
 metallib files and rejects aggregate target readiness when either symbol set is
 missing. It also compiles the canonical Vulkan GLSL into a separately validated
-SPIR-V companion. Runtime promotion still requires loading the verified font
-companion.
+SPIR-V companion. Requested-target candidate admission requires the expected
+semantics revision, `candidate_compiled=true`, `artifact_validated=true`, and
+compiler/validator path, version, and SHA-256 provenance; Vulkan additionally
+requires a passing `spirv-val` result. Candidate validation does not imply pin
+trust. Independent review must update the tracked source/artifact tuple and a
+fresh reproduction must set `pinned_verified=true`; unrequested targets do not
+affect the aggregate. Runtime promotion still requires loading the verified
+font companion.
 A bounded, embedded font-specific Vulkan SPIR-V contract is attempted by the
 retained session. Its 10,772 bytes and SHA-256
 `e25d25b8157fc2554822637603471a442f678eb58e20da167bfb023d7577880a` are pinned.
@@ -339,7 +345,7 @@ blob is stored under its readable registry-owned `/SYS/FONTS` VFAT long name,
 with a unique 8.3 compatibility alias, and registered under the canonical
 repository identity. Pure-Simple FAT32 readers
 use a bounded 32 MiB ceiling, admitting the largest 25,125,512-byte selected
-face; the C compatibility reader remains bounded at 4 MiB. Required guest
+face; the C compatibility reader remains bounded at 32 MiB. Required guest
 evidence is exact alias/length/hash, successful glyph
 material, WM Draw IR family/identity, and nonblank framebuffer output for Latin
 plus one accepted non-ASCII simple-script witness. Host-repository presence is

@@ -327,6 +327,12 @@ SPIR-V declare semantics revision 1; the common source declares revision 2.
 Their runtime trust gates therefore reject the stale generated companions until
 an admitted pure-Simple emitter regenerates source, artifacts, and pinned
 identities. Dynamic source backends consume revision-2 source directly.
+The portable checker keeps candidate compilation/validation separate from pin
+trust: requested targets must report `candidate_compiled=true` and
+`artifact_validated=true` at the expected semantics revision, with compiler and
+validator path/version/SHA-256 provenance (`spirv-val` is mandatory for
+Vulkan). Only an independently reviewed, reproducible tracked tuple may report
+`pinned_verified=true`; unrequested targets do not affect the aggregate.
 
 ## Rejected structures
 

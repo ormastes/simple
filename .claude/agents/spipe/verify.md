@@ -29,6 +29,13 @@
    authoritative.
    CUDA font production verification must apply the canonical artifact-trust
    rule in `.claude/skills/spipe.md` before PASS.
+   Verify the portable checker aggregates only `PORTABLE_COMPUTE_TARGETS`,
+   matches emitted semantics to `PORTABLE_COMPUTE_EXPECTED_SEMANTICS`, and
+   separates `candidate_compiled`/`artifact_validated` from `pinned_verified`.
+   Require compiler and validator path/version/SHA-256 provenance plus passing
+   `spirv-val` evidence for Vulkan. Phase one with stale pins must remain
+   `pinned_verified=false`; only independently reviewed pins reproduced by a
+   second run may set it true. Never accept repinning merely to green phase one.
 5. Run build checks: `set -o pipefail; bin/simple build check 2>&1 | tail -30`
 6. Run numbered artifact guard:
    `sh scripts/audit/numbered-artifact-guard.shs --working`

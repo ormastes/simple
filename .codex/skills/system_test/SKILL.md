@@ -182,6 +182,14 @@ describe "<Feature Name>":
   before compilation. A well-formed stale Vulkan source may compile and retain
   its `.comp`/`.spv` candidate for review, but its evidence remains invalid;
   admission requires both source and artifact pins to match.
+  The portable checker aggregates only targets named by
+  `PORTABLE_COMPUTE_TARGETS` and rejects a source whose emitted semantics does
+  not equal `PORTABLE_COMPUTE_EXPECTED_SEMANTICS`. Phase one requires
+  `candidate_compiled=true` and `artifact_validated=true`, with compiler and
+  validator path/version/SHA-256 provenance and a passing `spirv-val` row for
+  Vulkan. Stale pins must report `pinned_verified=false`. After independent
+  review updates tracked source/artifact pins, a reproducing phase-two run must
+  report `pinned_verified=true`; never update pins merely to green phase one.
   Compiled native evidence must name the Simple-emitted font companion, prove
   its versioned exported symbol, and prove the promoted runtime loaded that same
   artifact; a handwritten PTX or independently generated SPIR-V blob is not
