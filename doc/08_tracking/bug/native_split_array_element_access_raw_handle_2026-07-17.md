@@ -2,7 +2,7 @@
 
 **Severity:** high (silent wrong value)
 **Found:** 2026-07-17 during review of the `text.split_lines()` fix lane
-**Status:** open
+**Status:** source fixed; strict dual-backend execution pending
 **Backend:** pure-Simple `native-build --entry` MIR lowering / LLVM
 
 ## Symptom
@@ -45,5 +45,8 @@ threaded through) so string ops route via the str runtime path.
 
 ## Coverage gap
 
-The native-seed parity harness (90 cases) does not cover split-element reads;
-add a case when fixing (split + index + print + len + eq + for-in join).
+The native-seed parity harness now covers split + index + print + len + eq +
+for-in join, plus a `split_lines()` element read. The fix records `[text]` HIR
+metadata at both producers and consults it at both runtime-array
+element consumers, so `rt_array_get` results decode as text rather than
+integers. LLVM and Cranelift execution remains pending in the staged full gate.

@@ -375,14 +375,13 @@ impl MirLowering:
             self.runtime_value_locals[typed.id] = true
             self.builder = b
             return typed
-        if disc == rt_enum_discriminant(MirTypeKind.Opaque("")):
+        if self.mir_type_is_str(result_type):
             # A string element/value read back off an array or dict is a
             # TAGGED heap-string handle (box_runtime_value tags raw string
             # literals via rt_strlen + rt_string_new before storing them),
-            # but every OTHER consumer of an Opaque("str")-typed local
-            # (method calls, tag_str_local_if_raw, etc.) assumes Opaque
-            # "str" means a RAW char*. Left undecoded, the tagged handle's
-            # bits get treated as a raw pointer downstream -> SIGSEGV or
+            # but downstream string consumers (method calls,
+            # tag_str_local_if_raw, etc.) expect a RAW char*. Left undecoded,
+            # the tagged handle's bits get treated as a raw pointer -> SIGSEGV or
             # garbage (e.g. `for s in ["ab","cd"]: s.len()`). rt_interp_cstr
             # is the existing bug #136 autodetector: unwraps an
             # already-tagged handle to its real char* data buffer, or
@@ -1630,6 +1629,13 @@ impl MirLowering:
                             result_type_from_base = true
                         case MirTypeKind.Dict(_, value_type):
                             result_type = value_type
+                            result_type_from_base = true
+                        case _: ()
+                if not result_type_from_base and self.local_hir_types.has(base_local.id):
+                    val base_hir_type = self.local_hir_types[base_local.id]
+                    match base_hir_type.kind:
+                        case HirTypeKind.Array(element_type, _) | HirTypeKind.Slice(element_type):
+                            result_type = self.lower_type(element_type)
                             result_type_from_base = true
                         case _: ()
                 if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
