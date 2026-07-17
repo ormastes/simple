@@ -1,7 +1,7 @@
 # Release workflows reference missing checker scripts
 
 - Date: 2026-07-17
-- Status: open
+- Status: resolved
 - Severity: P1 release pipeline failure
 
 ## Symptom
@@ -25,3 +25,20 @@ referenced local script missing from the repository. Do not restore the deleted
 historical scripts blindly: the old payload checker verified notices but did not
 authenticate the bundled font tree, and the old SimpleOS wrapper depended on a
 second missing QEMU script.
+
+## Resolution
+
+The four workflow entrypoints are tracked again with current owners:
+
+- executable roles use explicit byte budgets, including `simple-runtime`;
+- directory/tar payloads require repository-identical notices and a complete,
+  byte-identical tracked font tree when fonts are part of that package;
+- SimpleOS smoke/full delegate to the canonical `simple os test --scenario`
+  surface instead of a deleted QEMU tier script;
+- MCP publish downloads the tagged Linux x64 bootstrap plus checksum, verifies
+  it, and stages the package's exact native bin target.
+
+Focused evidence:
+`sh test/01_unit/scripts/release_checker_contract_test.shs` passes with tiny
+local payload/release fixtures and a fake SimpleOS CLI. This does not replace
+live QEMU or GitHub release evidence in their workflows.
