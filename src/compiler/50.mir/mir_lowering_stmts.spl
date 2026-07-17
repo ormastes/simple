@@ -452,7 +452,39 @@ impl MirLowering:
                         val effective_type = if self.local_is_runtime_array(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else if self.local_is_runtime_dict(init_local):
-                            self.local_mir_type_of(init_local) ?? mir_type
+                            # Bug #189 (native struct-valued Dict access
+                            # SIGSEGV): an empty dict literal (`{}`) has no
+                            # entries to infer key/value types from, so
+                            # lower_dict_lit (method_calls_literals.spl)
+                            # defaults BOTH to plain i64 -- discarding the
+                            # real value type (e.g. Struct(S) for `Dict<text,
+                            # S>`, or `text` for the key). Blindly trusting
+                            # the initializer's inferred type here (as the
+                            # array/str/float/bool siblings do, where an
+                            # untyped initializer's OWN type is still the
+                            # best info available) then poisoned every later
+                            # read of this binding: `local_mir_type_of`
+                            # reported Dict(I64,I64), so expr_dispatch.spl's
+                            # dict-index-read applied `decode_runtime_value`'s
+                            # boxed-INTEGER `raw >> 3` decode to a real heap
+                            # struct pointer from `rt_dict_get` (mangling the
+                            # address -> SIGSEGV on the next `.field` GEP/
+                            # load), and `.keys()`/`.values()`
+                            # (method_calls_literals.spl) misdecoded text
+                            # keys as garbage ints the same way. When an
+                            # explicit `var x: Dict<K, V> = ...` annotation is
+                            # present and resolves to a Dict, it is always at
+                            # least as informative as the initializer (Simple
+                            # requires the annotation to type an empty `{}`
+                            # literal in the first place) -- prefer it over
+                            # the initializer's inferred type in that case.
+                            val annotated_is_dict = match mir_type.kind:
+                                case MirTypeKind.Dict(_, _): true
+                                case _: false
+                            if let_type != nil and annotated_is_dict:
+                                mir_type
+                            else:
+                                self.local_mir_type_of(init_local) ?? mir_type
                         else if self.local_is_str(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else if self.local_is_float(init_local):

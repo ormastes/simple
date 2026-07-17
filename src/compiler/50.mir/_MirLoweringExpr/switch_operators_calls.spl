@@ -1365,8 +1365,45 @@ impl MirLowering:
         val result = b2.emit_call(func_operand, [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), mir_operand_copy(payload_local)], MirType.i64())
         self.builder = b2
         if val r = result:
-            return r
+            return self.tag_enum_construct_result(r)
         payload_local
+
+    me tag_enum_construct_result(r: LocalId) -> LocalId:
+        """Bug #189 (enum-valued Dict/Array SIGSEGV or silent no-match):
+        `rt_enum_new` already returns a properly TAG_HEAP-tagged RuntimeValue
+        (see rt_enum_new in compiler_rust/runtime/src/value/objects.rs --
+        `RuntimeValue::from_heap_ptr`), but `emit_call` above declares its
+        MIR return type as a bare `MirType.i64()` like any other runtime
+        call, with nothing distinguishing it from a genuine raw integer.
+        Left as plain I64 this local caused two independent bugs downstream:
+        (1) box_runtime_value (expr_dispatch.spl), used whenever this value
+        is stored as a Dict/Array element, sees `local_mir_type_of == I64`
+        and takes the plain-integer boxing branch (`shl 3`), corrupting the
+        already-tagged handle; (2) lower_array_lit's element-type inference
+        (`local_mir_type_of(first_element)`) records the array's element
+        type as I64 too, so a later read decodes it via `decode_runtime_value`'s
+        integer branch (`shr 3`) instead of passing it through raw. For a
+        DICT this was previously masked by an unrelated read-side bug (empty
+        `{}` dict-literal bindings defaulted their value type to i64,
+        forcing the same compensating `shr 3` on every read) that happened
+        to cancel the extra `shl 3` out; for an ARRAY the same shl-then-shr
+        round trip already canceled out with no read-side bug involved at
+        all. Fixing the dict read-side type (mir_lowering_stmts.spl's
+        Let-binding `effective_type`) exposed bug (1) on its own. Retagging
+        the result to a dedicated non-numeric Opaque("enum") MIR type here
+        (mirroring the Opaque("str") tag already used for raw string
+        handles) fixes both at the root: box_runtime_value's numeric-type
+        match no longer fires (falls to its raw-passthrough default, exactly
+        like Struct(symbol) values), and any element/value-type inference
+        that reads this local's own registered type now sees a real,
+        distinct, non-integer type instead of a bare I64 that happens to be
+        an enum handle in disguise."""
+        var b = self.builder
+        val typed = b.new_temp(MirType(kind: MirTypeKind.Opaque("enum")))
+        b.emit_copy(typed, r)
+        self.builder = b
+        self.runtime_value_locals[typed.id] = true
+        typed
 
     me lower_enum_construct_named(enum_name: text, variant: text, args: [HirCallArg]) -> LocalId:
         """Same as lower_enum_lit but entered from the MethodCall path, where
@@ -1420,7 +1457,11 @@ impl MirLowering:
         val result = b2.emit_call(func_operand, [mir_operand_copy(enum_id_local), mir_operand_copy(disc_local), mir_operand_copy(payload_local)], MirType.i64())
         self.builder = b2
         if val r = result:
-            return r
+            # Bug #189: see tag_enum_construct_result's docstring (used by
+            # lower_enum_lit just above) -- same fix for the MethodCall-style
+            # construction path (`Shape.Circle(7)` via receiver=Shape,
+            # method=Circle).
+            return self.tag_enum_construct_result(r)
         payload_local
 
     me lower_struct_construct(symbol: SymbolId, struct_name: text, args: [HirCallArg]) -> LocalId:

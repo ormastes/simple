@@ -1673,7 +1673,33 @@ impl MirLowering:
                     val get_res = b_dget.emit_call(get_op, [mir_operand_copy(base_local), mir_operand_copy(dict_key)], MirType.i64())
                     self.builder = b_dget
                     if val get_local = get_res:
-                        return self.decode_runtime_value(get_local, dict_result_type)
+                        val decoded = self.decode_runtime_value(get_local, dict_result_type)
+                        # Bug #189 (struct-valued Dict field misread, second
+                        # symptom found alongside the SIGSEGV): a struct-typed
+                        # dict result decodes via decode_runtime_value's
+                        # default raw-passthrough arm (no shift, correct
+                        # bits), but that arm does not register the VALUE's
+                        # struct NAME in struct_value_syms the way
+                        # lower_array_lit/the array Index case already do via
+                        # array_element_struct_syms. resolve_field_index's
+                        # fallback chain (HIR type annotation, then
+                        # struct_value_syms keyed by this local) then finds
+                        # neither for a freshly-decoded dict-read result and
+                        # silently defaults every field access to index 0 --
+                        # `m["k1"].y` read `x`'s value instead of `y`'s (only
+                        # invisible for single-field structs, where field 0
+                        # IS the only field). dict_result_type is already the
+                        # correctly-resolved Struct(symbol) here (from either
+                        # the annotated Dict<K,V> or the literal's inferred
+                        # value type), so just look up its name and propagate
+                        # it the same way the array path does.
+                        match dict_result_type.kind:
+                            case MirTypeKind.Struct(struct_symbol):
+                                val struct_type_sym = self.symbols.get_symbol(struct_symbol)
+                                if struct_type_sym != nil and struct_type_sym.name != "":
+                                    self.struct_value_syms[decoded.id] = struct_type_sym.name
+                            case _: ()
+                        return decoded
                     return base_local
                 val index_local = self.lower_expr(index)
                 if val cli_arg_local = self.try_lower_bootstrap_cli_arg_index(base, index_local):
