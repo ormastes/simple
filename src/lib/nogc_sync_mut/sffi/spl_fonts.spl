@@ -34,9 +34,8 @@
 # the built-in vector/bitmap renderers for unsupported glyphs.
 
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
-use std.common.encoding.sfnt.{font_runtime_ttf_default_supported, parse_offset_table}
-use std.common.encoding.sfnt_cmap.{sfnt_cmap_glyph_id}
-use std.common.encoding.sfnt_glyf.{rasterize_sfnt_glyf}
+use std.common.encoding.sfnt.{font_runtime_ttf_default_supported}
+use std.common.encoding.sfnt_glyf.{sfnt_rasterize_codepoint_parts, sfnt_rasterize_glyph_index_parts, sfnt_blob_glyph_exists}
 use std.common.encoding.font_registry.{selected_font_asset_candidate_for_path, validate_selected_font_asset, load_selected_font_file, selected_font_asset_identity_for_path}
 #
 # Usage:
@@ -291,31 +290,24 @@ impl FontRasterizer:
     fn _rasterize_selected_outline(codepoint: i64, size_px: i64) -> GlyphBitmap?:
         if self.selected_blob.len() == 0 or codepoint < 0 or codepoint > 1114111 or size_px <= 0:
             return nil
-        # match-based Option unwrap: `if val font = ...` binding from an
-        # Option-returning fn yields a value whose downstream field access
-        # faults on baremetal (guest EXCEPTION in find_table/parse_cmap_*,
-        # 2026-07-18); the match Some(v) unwrap is the kernel-proven form.
-        val maybe_font = parse_offset_table(self.selected_blob)
-        val font = match maybe_font:
-            Some(value): value
-            None: return nil
-        val glyph_id = sfnt_cmap_glyph_id(font, codepoint as u32)
-        if glyph_id == 0:
+        # Flat cross-module API: Option<struct> results do not survive the
+        # module boundary on baremetal (Some binding arrives nil -> "field
+        # access on nil receiver" panic, 2026-07-18). sfnt_glyf keeps all
+        # Option handling intra-module and returns (pixels, metrics, ok).
+        val parts = sfnt_rasterize_codepoint_parts(self.selected_blob, codepoint, size_px)
+        if not parts.2:
             return nil
-        val maybe_bitmap = rasterize_sfnt_glyf(font, glyph_id, size_px)
-        val bitmap = match maybe_bitmap:
-            Some(value): value
-            None: return nil
         if not self.is_current():
             return nil
+        val metrics: [i64] = parts.1
         GlyphBitmap(
-            width: bitmap.width,
-            height: bitmap.height,
-            advance: bitmap.advance,
-            bearing_x: bitmap.bearing_x,
-            bearing_y: bitmap.bearing_y,
+            width: metrics[0],
+            height: metrics[1],
+            advance: metrics[2],
+            bearing_x: metrics[3],
+            bearing_y: metrics[4],
             handle: 0,
-            pixels: bitmap.pixels,
+            pixels: parts.0,
         )
 
     # Rasterize the given Unicode codepoint at the given pixel size.
@@ -378,37 +370,29 @@ impl FontRasterizer:
         if (not self.is_current() or self.selected_blob.len() == 0 or
             glyph_index <= 0 or glyph_index > 4294967295 or size_px <= 0 or size_px > 512):
             return nil
-        # match-based Option unwrap (see _rasterize_selected_outline).
-        val maybe_font = parse_offset_table(self.selected_blob)
-        val font = match maybe_font:
-            Some(value): value
-            None: return nil
-        val maybe_bitmap = rasterize_sfnt_glyf(font, glyph_index as u32, size_px)
-        val bitmap = match maybe_bitmap:
-            Some(value): value
-            None: return nil
+        # Flat cross-module API (see _rasterize_selected_outline).
+        val parts = sfnt_rasterize_glyph_index_parts(self.selected_blob, glyph_index, size_px)
+        if not parts.2:
+            return nil
         if not self.is_current():
             return nil
+        val metrics: [i64] = parts.1
         GlyphBitmap(
-            width: bitmap.width,
-            height: bitmap.height,
-            advance: bitmap.advance,
-            bearing_x: bitmap.bearing_x,
-            bearing_y: bitmap.bearing_y,
+            width: metrics[0],
+            height: metrics[1],
+            advance: metrics[2],
+            bearing_x: metrics[3],
+            bearing_y: metrics[4],
             handle: 0,
-            pixels: bitmap.pixels,
+            pixels: parts.0,
         )
 
     fn has_glyph(codepoint: i64) -> bool:
         if not self.is_current():
             return false
         if self.lib_handle == 0:
-            # match-based Option unwrap (see _rasterize_selected_outline).
-            val maybe_font = parse_offset_table(self.selected_blob)
-            val font = match maybe_font:
-                Some(value): value
-                None: return false
-            return sfnt_cmap_glyph_id(font, codepoint as u32) != 0
+            # Flat cross-module API (see _rasterize_selected_outline).
+            return sfnt_blob_glyph_exists(self.selected_blob, codepoint)
         var args: [i64] = []
         args.push(codepoint)
         val present = spl_wffi_call_i64(self.has_glyph_fp, args, 1) == 1

@@ -10,13 +10,13 @@
 - simple bin version: simple-bootstrap 1.0.0-beta
 - simple bin sha256: 6faa17dbe4342c9fa94c48025c7c57cfdf150c1dea9b8cd9b99877610f9291e7
 - qmp socket: build/simpleos_wm_fullscreen_evidence/qmp.sock
-- kernel: build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf (sha256=7ec98dc6cb7b37cc7fc13ba0092261d0ab50ea02c43445036a8879aa9bb6e11d)
-- disk image: build/simpleos_wm_fullscreen_evidence/fat32-x86_64-font.img (pass, sha256=19e5b6cc1bcebdbb5ea482566ed2d793a126e2c7863074222f7bd0f4cf8937a6)
+- kernel: build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf (sha256=b1196baa09d3ec9d7875c6251aca3916f8003a02e23b1f94c34ed5bad860a9e6)
+- disk image: build/simpleos_wm_fullscreen_evidence/fat32-x86_64-font.img (pass, sha256=89087b62385367f6a303a418a04a181eb4f5ad62f302d3103edf53f023ca408a)
 - pinned font asset: assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf (1708408 bytes, sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081)
 - guest font marker: -
 - font region: build/simpleos_wm_fullscreen_evidence/font-region.rgb (0 bytes, sha256=-, origin=qemu-pmemsave)
 - scanout: address=4160749568 width=3840 height=2160 byte-pitch=15360 format=argb8888 generation=1
-- host nonce: simpleos-wm-1784306510-13768
+- host nonce: simpleos-wm-1784306810-19477
 - input sequences: baseline=0 maximize=0 restore=0
 - maximize IRQ/state/frame: - | - | -
 - restore IRQ/state/frame: - | - | -
@@ -27,7 +27,7 @@
 - baseline ppm: build/simpleos_wm_fullscreen_evidence/baseline.ppm (0 bytes)
 - maximized ppm: build/simpleos_wm_fullscreen_evidence/fullscreen.ppm (0 bytes)
 - restored ppm: build/simpleos_wm_fullscreen_evidence/restored.ppm (0 bytes)
-- serial log: build/simpleos_wm_fullscreen_evidence/serial.log (50714 bytes)
+- serial log: build/simpleos_wm_fullscreen_evidence/serial.log (50403 bytes)
 
 This wrapper boots the wm-simple-web SimpleOS QEMU target directly
 (same q35/max/2G/BGA-std flags as os.qemu_runner._wm_simple_web_qmp_capture_target),
