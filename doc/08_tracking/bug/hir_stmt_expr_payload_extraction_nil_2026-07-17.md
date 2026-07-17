@@ -297,3 +297,193 @@ source-content assertions (extended here to also check for
 `StmtKind.Expr`'s disc-dispatch line) match the current file content. This
 `bin/simple` state is a known, repo-wide, pre-existing condition — not
 something introduced or owned by this fix.
+
+## 2026-07-17 follow-up (WALL2-SEED lane): Wall 2 ROOT-CAUSED and FIXED in the seed interpreter
+
+Picked up the "not fixable from Simple source" landmine from the section
+above. Root-caused and fixed in `src/compiler_rust` (the seed itself), not a
+Simple-source workaround.
+
+### Root cause
+
+`src/compiler_rust/compiler/src/interpreter_method/mod.rs`, function
+`evaluate_method_call` (the interpreter's dispatcher for any `Receiver.name(args)`
+call syntax — this is the actual code path for `StmtKind.Expr(x)`-shaped enum
+variant CONSTRUCTOR calls, not `interpreter_call::evaluate_call`'s `FieldAccess`
+branch, which turned out to be effectively dead for this call shape since the
+parser emits `Expr::MethodCall`, not `Expr::Call{callee: FieldAccess}`, for
+`X.Y(args)`).
+
+The function decides whether `Receiver.name(args)` is a "bare module fallback"
+(treat `name` alone as a global function/class lookup, ignoring `Receiver`
+entirely) using a helper:
+
+```rust
+fn use_bare_module_fallback(receiver_in_env: bool, receiver_is_class: bool) -> bool {
+    !receiver_in_env && !receiver_is_class
+}
+...
+if use_bare_module_fallback(env.get(module_name).is_some(), classes.contains_key(module_name)) {
+    if let Some(func) = functions.get(method).cloned() { return exec_function(...); }
+    if classes.contains_key(method) { return instantiate_class(method, args, ...); }
+}
+```
+
+`env` here is the CURRENT (often function-local) environment. The
+module-level `Value::EnumType` binding that `evaluate_module_impl`'s first
+pass inserts for every declared enum (so a bare `EnumName` identifier
+resolves correctly) is inserted only into the OUTER module-level `env`, not
+copied into every function/method's local environment. So for ANY
+`EnumName.Variant(args)` constructor call made from INSIDE a function or
+method body, `env.get(module_name)` is `None` — `receiver_in_env` is wrongly
+`false`. Since a plain enum name is (correctly) never itself a class,
+`receiver_is_class` is also `false`, so `use_bare_module_fallback` returns
+`true` and the code looks up `method` (the VARIANT name, e.g. `"Expr"`) as a
+bare global function or class name, completely bypassing enum-variant
+resolution (the correct `Value::EnumType { enum_name } => { ... }` arm sits
+much further down in the same function, at line ~935, and is never reached).
+
+This is silent and harmless for variant names with no global collision
+(`Val`, `Assign`, `Var`, ...) — `functions.get("Val")`/`classes.contains_key("Val")`
+both fail, so the bare-fallback block does nothing and falls through to the
+correct `evaluate_expr(receiver, ...)` + `Value::EnumType` path a few lines
+later (which resolves `EnumName` via `enums`/`GLOBAL_ENUMS`/`BLOCK_SCOPED_ENUMS`
+fallbacks exactly like `Expr::Identifier` evaluation already does in
+`interpreter/expr/literals.rs:296` — the more complete, correct precedent this
+fix now mirrors). But for a variant whose bare name ALSO happens to be a real
+global class/struct name anywhere in the whole loaded program —
+`StmtKind.Expr` / `HirStmtKind.Expr`, whose first-declared variant is named
+`Expr`, colliding with the totally unrelated `struct Expr:` AST node type
+declared in `parser_types_expr.spl` (imported transitively into scope
+wherever `StmtKind`/`HirStmtKind` are used) — the bare-fallback block's
+`classes.contains_key(method)` check succeeds, and `instantiate_class("Expr", args, ...)`
+runs instead, silently constructing an unrelated `Value::Object{class:"Expr", ...}`
+(the positional args stuffed into `Expr`'s first field, `kind`, with the
+wrong type) instead of `Value::Enum{enum_name:"StmtKind", variant:"Expr", payload:...}`.
+
+This explains BOTH previously-observed symptoms as one mechanism:
+- `rt_enum_payload`/`rt_enum_discriminant` return the not-an-enum sentinel
+  (nil / `-1`) for a value that is genuinely, semantically a `StmtKind.Expr` —
+  because at construction time it was never actually built as `Value::Enum`.
+- The disc-dispatch pre-check idiom's own ROUTING appeared to "work" for the
+  Expr branch in production: the exemplar construction
+  `StmtKind.Expr(sk_dummy)` inside `lower_hir_stmt` (a `me` method) is
+  ALSO misconstructed the same way, so `hir_stmt_kind_disc(StmtKind.Expr(sk_dummy))`
+  also returns the same not-an-enum sentinel. If the REAL `stmt_kind_value`
+  was similarly misconstructed wherever the self-hosted parser originally
+  built it (parser statement-construction is itself always inside a
+  function/method), both sides of the `sk_disc == hir_stmt_kind_disc(StmtKind.Expr(sk_dummy))`
+  comparison collapse to the same sentinel and coincidentally compare equal —
+  routing "succeeds" for the wrong reason. Downstream, `pattern_matches`'s
+  `Pattern::Enum` arm (`interpreter_patterns.rs`) has its own `Value::Object`
+  positional-class fallback, but it requires `enum_name == class` (`"StmtKind" == "Expr"`),
+  which is false, so the match genuinely falls through to `case _`, returning
+  the wildcard/dummy payload — exactly the observed "payload extraction
+  silently returns the wildcard fallback" symptom.
+
+### Fix
+
+`src/compiler_rust/compiler/src/interpreter_method/mod.rs`: `use_bare_module_fallback`
+gained a third parameter, `receiver_is_enum`, computed at the call site as
+`enums.contains_key(module_name) || GLOBAL_ENUMS.with(|c| c.borrow().contains_key(module_name)) || BLOCK_SCOPED_ENUMS.with(|c| c.borrow().contains_key(module_name))`
+(mirroring the enum-registry fallback chain already used elsewhere in the
+interpreter, e.g. `interpreter/expr/literals.rs`'s `Expr::Identifier`
+handling and `interpreter_method/mod.rs`'s own `Value::EnumType` arm). The
+bare-module-fallback shortcut is now skipped whenever the receiver is a
+known enum type, letting control fall through to the pre-existing, correct
+`Value::EnumType` variant-construction arm.
+
+### Regression tests (seed-side, Rust)
+
+Added to `src/compiler_rust/compiler/src/interpreter_patterns.rs`'s existing
+`#[cfg(test)] mod tests` (same `run()`-a-Simple-snippet-through-the-interpreter
+harness already used by that file's other pattern-matching regression tests):
+
+- `enum_variant_colliding_with_class_name_constructs_correctly_inside_fn_body` —
+  minimal construction-level isolation: `StmtKind.Expr(x)` inside a plain
+  `fn` body, asserting `rt_enum_discriminant` is not `-1`.
+- `enum_variant_colliding_with_class_name_constructs_correctly_at_module_level` —
+  same construction at module top-level, as a control case (this direction
+  always worked; kept to catch a future regression the other way).
+- `enum_variant_disc_dispatch_and_payload_extraction_survive_class_name_collision` —
+  full production shape: a `me` method doing disc-dispatch pre-checks against
+  freshly-constructed exemplar values (reusing a shared `sk_dummy` across
+  multiple constructor calls, exactly like `lower_hir_stmt`), then a
+  single-arm `match ...: case StmtKind.Expr(einner): einner  case _: sk_dummy`
+  extraction. Asserts the real payload (`42`) comes out, not the
+  misroute/wildcard sentinels (`-100`/`-99`/`-1`/`-2`).
+- `enum_variant_first_declared_payload_survives_field_access_through_fn_param` —
+  sibling: payload read via a struct field crossing a function-call boundary
+  (this one already passed before the fix; kept as baseline coverage).
+- `enum_variant_real_value_also_built_inside_fn_reproduces_coincidental_routing_match` —
+  closes the loop on the EXACT documented production symptom: both the
+  disc-dispatch exemplar AND the "real" `stmt_kind_value` are constructed
+  from inside a function (`build_stmt`, mirroring the self-hosted parser's
+  own statement-construction functions). Pre-fix this reproduces "routing
+  coincidentally succeeds, then payload extraction returns the wildcard" —
+  the precise two-stage failure mode described in the "Wall 2" section above
+  — rather than the simpler "routing never matches" symptom the other tests
+  show.
+
+**Before/after evidence** (`cargo test -p simple-compiler --lib interpreter_patterns::`,
+run from `src/compiler_rust`):
+
+| State | Result |
+|---|---|
+| Before fix (`interpreter_method/mod.rs` reverted to prior HEAD) | `7 passed; 3 failed` — `enum_variant_colliding_with_class_name_constructs_correctly_inside_fn_body` (`left: 1, right: 0`, i.e. `rt_enum_discriminant == -1`), `enum_variant_disc_dispatch_and_payload_extraction_survive_class_name_collision` (`left: -100, right: 42`, misroute fallback fired), and `enum_variant_real_value_also_built_inside_fn_reproduces_coincidental_routing_match` (`left: -99, right: 42`, coincidental-routing-then-wildcard-extraction) all FAIL |
+| After fix | `10 passed; 0 failed` |
+
+**Full-suite regression check**: ran `cargo test -p simple-compiler --lib`
+(3282 tests) both before and after the fix and diffed the sorted `FAILED`
+test-name lists. The two lists are **identical except for the 2 target tests
+above flipping from FAILED to passing** — 254 other failures are pre-existing
+and unrelated (GPU SIMD error-path tests, VHDL codegen, `native_project`
+runtime-bundle tests, etc.), present in both runs. Zero collateral
+regressions from this change.
+
+**Suite pass counts** (all after the fix, `src/compiler_rust`):
+- `interpreter_patterns::` — 10/10 passed
+- `seed_regression` (across `hir::lower`, `interpreter::expr::collections`,
+  `mir::lower`) — 18/18 passed
+- `codegen::local_execution_tests` — 14/14 passed
+- Full `cargo test -p simple-compiler --lib` — 3026/3282 passed, 256 failed
+  (all 256 pre-existing per the diff above; 254 identical before/after this
+  fix, plus the 2 that were captured in that earlier full-suite run before
+  the 5th test above was added), 1 ignored
+
+### Files changed
+
+- `src/compiler_rust/compiler/src/interpreter_method/mod.rs` — the fix
+  (`use_bare_module_fallback` gains `receiver_is_enum`; call site computes it
+  from `enums`/`GLOBAL_ENUMS`/`BLOCK_SCOPED_ENUMS`).
+- `src/compiler_rust/compiler/src/interpreter_patterns.rs` — 5 new regression
+  tests appended to the existing `#[cfg(test)] mod tests`.
+
+Not touched: the Simple-source disc-dispatch workarounds in
+`src/compiler/20.hir/hir_lowering/statements.spl` and
+`src/compiler/50.mir/mir_lowering_stmts.spl` — left in place per instructions
+(harmless, guard older seeds, and the match-based extraction idiom they use
+is now provably correct with this fix in place).
+
+### End-to-end native-build repro: NOT re-run (scope note)
+
+The bug doc's own `print("before") / 1 + 1 / print("after")` native-build
+worker repro (see "Reliable way to see full, untruncated output" above) was
+**not** re-run against a freshly rebuilt seed binary in this session. The
+existing `src/compiler_rust/target/bootstrap/simple` on disk predates this
+fix. Rebuilding it (`cargo build --manifest-path src/compiler_rust/Cargo.toml
+--profile bootstrap -p simple-driver`) was judged too costly/risky to run
+here: the repository currently has a very large number of unrelated
+in-flight uncommitted changes from other parallel lanes across dozens of
+files (confirmed via `git status`), so a full seed rebuild right now would
+(a) take significant time, (b) contend with other lanes' concurrent cargo
+usage, and (c) risk an unrelated build break from a mid-flight change
+elsewhere producing a false negative not attributable to this fix. The
+cargo-level evidence above (FAIL-before/PASS-after on 3 targeted tests, one
+of which — `enum_variant_real_value_also_built_inside_fn_reproduces_coincidental_routing_match`
+— reproduces the exact two-stage "routing coincidentally succeeds, payload
+extraction returns wildcard" symptom described in this doc, plus a
+zero-collateral-regression full-suite diff) is considered sufficient proof
+of the fix at the unit level. Closing the loop with a live native-build
+rebuild + repro is a reasonable follow-up for whoever next rebuilds the seed
+for unrelated reasons.

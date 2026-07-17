@@ -109,8 +109,8 @@ pub(crate) use special::{
     lookup_class_method_index, lookup_impl_method_index,
 };
 
-fn use_bare_module_fallback(receiver_in_env: bool, receiver_is_class: bool) -> bool {
-    !receiver_in_env && !receiver_is_class
+fn use_bare_module_fallback(receiver_in_env: bool, receiver_is_class: bool, receiver_is_enum: bool) -> bool {
+    !receiver_in_env && !receiver_is_class && !receiver_is_enum
 }
 
 /// Main entry point for method call evaluation
@@ -141,7 +141,28 @@ pub(crate) fn evaluate_method_call(
                 }
             }
         }
-        if use_bare_module_fallback(env.get(module_name).is_some(), classes.contains_key(module_name)) {
+        // A `module_name` that isn't a local binding and isn't a class can
+        // still be a genuine ENUM TYPE name (`EnumName.Variant(args)`) --
+        // `env` here is the CURRENT (often function-local) environment, which
+        // does not carry the module-level `Value::EnumType` binding that
+        // `evaluate_module_impl`'s first pass inserts only into the
+        // module-level `env` (see `interpreter/expr/literals.rs`'s
+        // `Expr::Identifier` handling, which already falls back to
+        // `enums`/`GLOBAL_ENUMS` for exactly this reason). Without this
+        // check, `use_bare_module_fallback` mis-treats every enum-variant
+        // constructor call made from inside a function/method body as a bare
+        // global lookup on the VARIANT name alone, silently constructing an
+        // unrelated global class/function that happens to share the
+        // variant's bare name (e.g. `StmtKind.Expr(x)` inside a function
+        // resolved to the unrelated `class Expr:` instead of the
+        // `StmtKind::Expr` variant, because "Expr" is both a variant name
+        // and a global struct name) instead of falling through to the
+        // correct `Value::EnumType` construction path below. See bug doc
+        // hir_stmt_expr_payload_extraction_nil_2026-07-17.md (Wall 2).
+        let receiver_is_enum = enums.contains_key(module_name)
+            || GLOBAL_ENUMS.with(|cell| cell.borrow().contains_key(module_name))
+            || BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().contains_key(module_name));
+        if use_bare_module_fallback(env.get(module_name).is_some(), classes.contains_key(module_name), receiver_is_enum) {
             if let Some(func) = functions.get(method).cloned() {
                 return exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             }
