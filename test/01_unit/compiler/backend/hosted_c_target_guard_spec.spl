@@ -201,15 +201,44 @@ describe "hosted C target guard":
     it "guards before host C runtime and entry compilation":
         val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
         val simpleos_guard = source.index_of("if is_simpleos_riscv32_link") ?? -1
-        val hosted_guard = source.index_of("if not hosted_c_target_matches_host") ?? -1
+        val hosted_plan = source.index_of("val hosted_plan = hosted_c_compiler_plan") ?? -1
+        val hosted_guard = source.index_of("if not hosted_plan.supported") ?? -1
         val arch_guard = source.index_of("if not hosted_native_link_arch_supported") ?? -1
         val runtime_compile = source.index_of("val rt_result = compile_runtime_objects") ?? -1
         val entry_compile = source.index_of("val c_result = compile_entry_point_c") ?? -1
         expect(simpleos_guard).to_be_greater_than(-1)
-        expect(hosted_guard).to_be_greater_than(simpleos_guard)
+        expect(hosted_plan).to_be_greater_than(simpleos_guard)
+        expect(hosted_guard).to_be_greater_than(hosted_plan)
         expect(arch_guard).to_be_greater_than(hosted_guard)
         expect(runtime_compile).to_be_greater_than(arch_guard)
         expect(entry_compile).to_be_greater_than(runtime_compile)
+
+    it "preserves explicit bare-metal mode in both direct LLVM paths":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_codegen_adapter.spl") ?? ""
+        val predicate_start = source.index_of("fn llvm_codegen_bare_metal_requested") ?? -1
+        val translate_start = source.index_of("pub fn llvm_translate_module_direct_ir") ?? -1
+        val direct_start = source.index_of("pub fn llvm_compile_module_direct(") ?? -1
+        val compiled_start = source.index_of("pub fn llvm_compile_module_direct_compiled") ?? -1
+        val impl_start = source.index_of("impl Codegen for LlvmCodegenAdapter") ?? -1
+        expect(predicate_start).to_be_greater_than(-1)
+        expect(translate_start).to_be_greater_than(predicate_start)
+        expect(direct_start).to_be_greater_than(translate_start)
+        expect(compiled_start).to_be_greater_than(direct_start)
+        expect(impl_start).to_be_greater_than(compiled_start)
+
+        val helpers = source.substring(predicate_start, translate_start)
+        val translate = source.substring(translate_start, direct_start)
+        val direct = source.substring(direct_start, compiled_start)
+        val compiled = source.substring(compiled_start, impl_start)
+        expect(helpers).to_contain("mir_target_context_os_from(requested_target, \"\") == \"baremetal\"")
+        expect(helpers).to_contain("LlvmTargetConfig.for_target_portable_numeric_baremetal")
+        expect(helpers).to_contain("LlvmTargetConfig.for_target_portable_numeric(options.target")
+        expect(helpers).to_contain("MirToLlvm.create_baremetal")
+        expect(helpers).to_contain("MirToLlvm.create(module_name")
+        expect(translate).to_contain("llvm_codegen_translator(module.name, options.target)")
+        expect(direct).to_contain("llvm_codegen_target_config(options)")
+        expect(compiled).to_contain("llvm_codegen_target_config(options)")
+        expect(compiled).to_contain("llvm_codegen_translator(\"app.cli.bootstrap_main\", options.target)")
 
     it "guards every shared native linker caller before bundle or platform dispatch":
         val source = rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl") ?? ""

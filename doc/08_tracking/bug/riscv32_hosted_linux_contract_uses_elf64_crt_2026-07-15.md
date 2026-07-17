@@ -37,5 +37,8 @@ be rerouted to SimpleOS merely because an output filename contains `rv32`.
 Focused source tests cover these fail-closed boundaries; executable proof
 is now scheduled in the existing Linux architecture gate. It requires the
 flagless default-LLVM full native build to fail, leave no executable, and name
-the rejected hosted target. The same gate statically pins the bare-metal
-recovery target; first staged CI execution remains pending.
+the rejected hosted target. The direct LLVM adapter preserves the canonical
+bare-metal target mode for both normal and bootstrap object emission instead
+of collapsing `none-elf` back to the hosted RV32 contract. The gate then requires the flagless default-LLVM
+bare-metal recovery target to emit a nonempty ELF32 RISC-V relocatable object;
+first staged CI execution remains pending.
