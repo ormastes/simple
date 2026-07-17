@@ -17,7 +17,7 @@ use std.nogc_sync_mut.text_layout.font_advance_layout.{font_batch_apply_advances
 use std.nogc_sync_mut.io.font_sffi.{font_face_ascent, free_font, font_face_identity, font_face_is_live, load_font}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
-use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted}
+use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new}
@@ -203,15 +203,18 @@ fn font_renderer_use_registered_selected_bytes_only():
 
 fn font_renderer_register_selected_bytes(path: text, blob: [u8]) -> bool:
     """Register exact pinned bytes for producer metrics and executor loading."""
-    val candidate = selected_font_asset_candidate_for_path(path)
-    if candidate == nil:
+    # Path-based identity instead of `candidate.?` + field access: unwrapping
+    # the Option-returning candidate lookup and touching fields faults on
+    # baremetal (cr2=0x0 class, 2026-07-18); "" doubles as the unmanaged gate.
+    val expected_identity: text = selected_font_asset_identity_for_path(path)
+    if expected_identity == "":
         return false
     var renderer = FontRenderer.new()
     if not renderer.try_load_selected_bytes(path, blob):
         return false
     val identity = renderer.current_font_identity()
     renderer.clear_ttf()
-    if identity != selected_font_asset_identity(candidate.?):
+    if identity != expected_identity:
         return false
     _browser_default_font_lock_acquire()
     for registered_path in _registered_selected_font_paths:
