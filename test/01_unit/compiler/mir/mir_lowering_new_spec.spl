@@ -413,6 +413,36 @@ describe "Mir Lowering New":
         expect(parser_expr).to_contain("[parser-expr] call:start")
         expect(ast_expr).to_contain("[ast-expr] call-alloc:start")
 
+    it "keeps integer div rem and right shift signedness aligned across native backends":
+        val textual_llvm = read_mir_source("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")
+        val llvm_api = read_mir_source("src/compiler/70.backend/backend/llvm_lib_translate_expr.spl")
+        val cranelift = read_mir_source("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        val legacy_cranelift = read_mir_source("src/compiler/70.backend/codegen.spl")
+        val parity = read_mir_source("scripts/check/check-native-seed-parity.shs")
+
+        expect(textual_llvm).to_contain("self.builder.emit_udiv(dest_name, ty, left_val, right_val)")
+        expect(textual_llvm).to_contain("self.builder.emit_div(dest_name, ty, left_val, right_val)")
+        expect(textual_llvm).to_contain("self.builder.emit_urem(dest_name, ty, left_val, right_val)")
+        expect(textual_llvm).to_contain("self.builder.emit_rem(dest_name, ty, left_val, right_val)")
+        expect(textual_llvm).to_contain("if left_unsigned:")
+        expect(textual_llvm).to_contain("self.builder.emit_lshr(dest_name, ty, left_val, right_val)")
+        expect(textual_llvm).to_contain("self.builder.emit_ashr(dest_name, ty, left_val, right_val)")
+
+        expect(llvm_api).to_contain("elif is_unsigned: llvm_build_udiv(builder, lhs, rhs, \"div\")")
+        expect(llvm_api).to_contain("else: llvm_build_sdiv(builder, lhs, rhs, \"div\")")
+        expect(llvm_api).to_contain("elif is_unsigned: llvm_build_urem(builder, lhs, rhs, \"rem\")")
+        expect(llvm_api).to_contain("else: llvm_build_srem(builder, lhs, rhs, \"rem\")")
+        expect(llvm_api).to_contain("if left_is_unsigned: llvm_build_lshr(builder, lhs, rhs, \"shr\")")
+        expect(llvm_api).to_contain("else: llvm_build_ashr(builder, lhs, rhs, \"shr\")")
+
+        expect(cranelift).to_contain("elif is_unsigned: cranelift_udiv(ctx, a, b) else: cranelift_sdiv(ctx, a, b)")
+        expect(cranelift).to_contain("if is_unsigned: cranelift_urem(ctx, a, b) else: cranelift_srem(ctx, a, b)")
+        expect(cranelift).to_contain("if left_is_unsigned: cranelift_ushr(ctx, a, b) else: cranelift_sshr(ctx, a, b)")
+        expect(legacy_cranelift).to_contain("if unsigned: cranelift_udiv(self.current_ctx, left, right) else: cranelift_sdiv(self.current_ctx, left, right)")
+        expect(legacy_cranelift).to_contain("if unsigned: cranelift_urem(self.current_ctx, left, right) else: cranelift_srem(self.current_ctx, left, right)")
+        expect(legacy_cranelift).to_contain("if left_unsigned: cranelift_ushr(self.current_ctx, left, right) else: cranelift_sshr(self.current_ctx, left, right)")
+        expect(parity).to_contain("run_strict_dual_backend_case unsigned_div_rem_shift write_case_unsigned_div_rem_shift \"111111\"")
+
 # # # MIR Lowering Initialization Specification
 # #
 # # **Feature IDs:** #TBD

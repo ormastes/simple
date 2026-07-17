@@ -155,3 +155,11 @@ default LLVM and Windows ARM64 LLVM/Cranelift require successful nonempty target
 objects and reject the retired fail-closed diagnostic. Static portability
 coverage pins backend selection and the target-object contract. Execution is
 pending; the payload-3 collision and uniform tagged Option ABI remain open.
+
+The exact open ABI matrix is preserved in
+`test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl`. It covers
+raw and explicit `Some(3)`, raw and explicit absence with `unwrap_or(777)`, and
+raw/explicit `Some(0)` controls. Set `NATIVE_OPEN_BUG_REPROS=1` on the native
+parity harness to run it under default LLVM and explicit Cranelift; expected
+output is `3377777700`. It remains opt-in and red until all typed boundaries
+share the uniform tagged representation.
