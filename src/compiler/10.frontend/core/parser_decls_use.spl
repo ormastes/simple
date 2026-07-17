@@ -9,7 +9,9 @@ use compiler.core.tokens.{tok_kind_name, keyword_lookup}
 use compiler.core.tokens.{TOK_IDENT, TOK_STRING_LIT}
 use compiler.core.tokens.{TOK_KW_FN, TOK_KW_VAL, TOK_KW_VAR, TOK_KW_LAZY, TOK_KW_STATIC, TOK_KW_ME}
 use compiler.core.tokens.{TOK_KW_USE, TOK_KW_EXPORT}
-use compiler.core.tokens.{TOK_STAR, TOK_MINUS, TOK_SLASH, TOK_ASSIGN, TOK_ARROW}
+use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_WHERE}
+use compiler.core.tokens.{TOK_STAR, TOK_MINUS, TOK_SLASH, TOK_ASSIGN, TOK_ARROW, TOK_SHR}
+use compiler.core.tokens.{TOK_LT, TOK_GT, TOK_LT_GENERIC}
 use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
 use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
 use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_DOT, TOK_DOTDOT}
@@ -22,13 +24,13 @@ use compiler.core.tokens.{TOK_KW_GENERIC, TOK_KW_LIMITS, TOK_KW_CANDIDATES}
 use compiler.core.tokens.{TOK_KW_AS}
 use compiler.core.types.{TYPE_VOID, TYPE_NAMED_BASE, named_type_find}
 use compiler.core.parser.{par_kind_get, par_text_get}
-use compiler.core.parser.{parser_advance, parser_expect, parser_parse_type}
+use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_parse_type}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.frontend.core.parser_stmts.{parse_block}
 use compiler.core.ast.{expr_int_lit}
 use compiler.core.ast.{decl_use_import, decl_set_lazy, decl_export_names}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
-use compiler.core.ast.{decl_fn, decl_impl_block, decl_ce_block, decl_set_impl_trait}
+use compiler.core.ast.{decl_fn, decl_impl_block, decl_ce_block, decl_set_impl_trait, decl_set_type_params}
 use compiler.core.ast.{decl_set_param_defaults}
 
 # ===== Use/Export Declarations =====
@@ -444,13 +446,42 @@ fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i
     decl_set_param_defaults(mid, param_defaults)
     return mid
 
+fn skip_impl_where_clause():
+    if par_kind_get() != TOK_KW_WHERE:
+        return
+    parser_advance()
+
+    var generic_depth: i64 = 0
+    var needs_constraint_colon = true
+    for i in 0..1000:
+        val kind = par_kind_get()
+        if kind == TOK_EOF:
+            parser_error("unterminated where clause in impl header")
+            return
+        if kind == TOK_LT or kind == TOK_LT_GENERIC:
+            generic_depth = generic_depth + 1
+        elif kind == TOK_GT:
+            generic_depth = generic_depth - 1
+        elif kind == TOK_SHR:
+            generic_depth = generic_depth - 2
+        elif generic_depth == 0 and kind == TOK_COMMA:
+            needs_constraint_colon = true
+        elif generic_depth == 0 and kind == TOK_COLON:
+            if not needs_constraint_colon:
+                return
+            needs_constraint_colon = false
+        parser_advance()
+
+    parser_error("where clause in impl header is too long")
+
 fn parse_impl_decl() -> i64:
     # impl StructName:  |  impl TraitName for StructName:
     parser_advance()
+    val type_params = parse_type_params()
     var target_name = par_text_get()
-    parser_expect(6)
+    parser_parse_type()
     var trait_name = ""
-    if par_kind_get() == 45:
+    if par_kind_get() == TOK_KW_FOR:
         # `impl Trait for Type:` — methods attach to the concrete type;
         # trait conformance is not checked at this stage. The leading name
         # was the trait; capture it (#157) so module_assembly can restore the
@@ -459,8 +490,9 @@ fn parse_impl_decl() -> i64:
         trait_name = target_name
         parser_advance()
         target_name = par_text_get()
-        parser_expect(6)
-    parser_expect(161)
+        parser_parse_type()
+    skip_impl_where_clause()
+    parser_expect(TOK_COLON)
     parser_skip_newlines()
     parser_expect(181)
 
@@ -496,6 +528,7 @@ fn parse_impl_decl() -> i64:
             parser_advance()
 
     val impl_idx = decl_impl_block(target_name, method_ids, 0)
+    decl_set_type_params(impl_idx, type_params)
     if trait_name != "":
         decl_set_impl_trait(impl_idx, trait_name)
     impl_idx
