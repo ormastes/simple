@@ -419,6 +419,30 @@ impl HirLowering:
             self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span)
         elif as_trait != nil:
             self.symbols.define(local_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+            # #190: an imported trait is only registered as a symbol here --
+            # it never runs through the module-level `for trait_ in
+            # module.traits: self.lower_trait(trait_)` loop (that loop only
+            # walks THIS module's own decls), so `self.lowered_traits` (the
+            # registry `lower_impl`'s default-method injection reads, task
+            # #55/#157) stays empty for it. When an impl in THIS module
+            # implements a cross-module trait, the injection then finds
+            # nothing to inject and an un-overridden default dies at MIR time
+            # with "unresolved method call" (interpreter oracle unaffected --
+            # it resolves defaults dynamically, not via this HIR-time table).
+            # Lower the imported trait on demand, guarded so a repeated
+            # import (e.g. two `use` items reaching the same trait) or a glob
+            # import does not re-lower it. Deliberately NOT an eager
+            # import-graph walk: only traits actually named in a `use`
+            # resolve here, so this cannot blast-radius into unrelated
+            # stdlib traits that happen to sit in an imported module.
+            if not self.lowered_traits.contains_key(imported_name):
+                self.lower_trait(as_trait.unwrap())
+            if local_name != imported_name and self.lowered_traits.contains_key(imported_name):
+                # Aliased import (`use .mod.{Trait as T}`): lower_trait keys
+                # the registry by the trait's OWN declared name, but
+                # lower_impl looks it up by the name the impl clause uses
+                # locally -- alias that key too.
+                self.lowered_traits[local_name] = self.lowered_traits[imported_name]
         elif as_fn != nil:
             val fn_type = self.declared_callable_type(as_fn, nil)
             val imported_fn_sym = self.symbols.define(local_name, SymbolKind.Function, fn_type, import_span, Visibility.Public, false, Some(imported_mod_name))
