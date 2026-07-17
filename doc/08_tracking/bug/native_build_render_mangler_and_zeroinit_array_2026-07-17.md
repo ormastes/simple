@@ -79,3 +79,27 @@ alloc / MMIO map length / write-loop bound hardcoded 4MiB), not QEMU (64MiB
 aperture). Delegated to Codex. Capture recipe: /tmp/cap3.shs (screendump, sandbox
 off, short AF_UNIX path). Fault chain + hollow-render both RESOLVED; only the
 4MiB coverage cap remains for a full 4K frame.
+
+## MILESTONE 2 (07-17 late): FULL 4K RENDER via pure-Simple stage3 toolchain
+Bootstrap Stage 2+3 GREEN on aarch64-apple-darwin (cranelift dynload) after:
+seed staged sans llvm → --backend=cranelift; stale target/bootstrap/
+libsimple_native_all.a lacked copy_mem → rebuilt; duplicate spl_thread_cpu_count
+(native_all shim vs new runtime impl) → dedup (pushed e7c8cecf). The stage3
+pure-Simple binary passes the harness policy gate, native-builds the ENTIRE
+SimpleOS kernel (with --timeout 300; see perf note), kernel boots ZERO faults,
+first-frame in 2.6s, and QMP screendump verifies EVERY pixel painted:
+8,294,400/8,294,400 at 3840x2160, bbox x[0..3839] y[0..2159], 6 genuine WM
+chrome colors. Root #8 fixes (rt_array_repeat cap, dead back_buffer, direct-MMIO
+paths) all confirmed effective under the self-hosted compiler.
+
+PERF GAP (recorded per rules): stage3 native-build exceeds the 60s/file default
+on 3 giant files (simple_web_html_layout_renderer.spl, backend_vulkan_font_spirv
+.spl, backend_vulkan_spirv_raster_blobs.spl — huge literals); harness now passes
+--timeout 300. Fix the self-hosted compiler's big-literal compile perf or split
+the blobs; do not lower the timeout until then.
+
+REMAINING for harness PASS: `guest-pinned-font-evidence-unavailable` — the guest
+cannot load the pinned NotoSansMono TTF from the FAT32/NVMe disk (vfs boot-init
+degrades pure-nvme io → font_renderer never gets selected bytes → taskbar-clock
+renders as non-glyph). The RENDER path is fully proven; this is the FONT-LOAD
+(storage io) path.
