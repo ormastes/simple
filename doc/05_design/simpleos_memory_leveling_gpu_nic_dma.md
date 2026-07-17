@@ -23,7 +23,14 @@ The stable names are `MemoryTier`, `MemoryDomain`, `MemoryPageState`,
 `MemoryLevelingPolicy`, `MemoryAllocation`, and `MemoryLevelingStats`.
 Allocation records contain stable identity, owner, byte/page count, domain,
 tier, state, pin/in-flight/mapping counters, DMA direction/coherency, access and
-cooldown epochs, reclaim eligibility, physical layout, and optional swap slot.
+cooldown epochs, reclaim eligibility, and optional swap slot. The kernel record
+stores the numeric owner id in fourteen runtime-value slots (112 bytes). One
+flag word packs page count, coherency, reclaimability, and candidate-queued
+state. A deduplicated queued `u64` allocation id adds at most eight bytes, making the
+conservative retained total 120 bytes. The language placement intent owns the
+descriptive owner label, and DMA/VMM owners retain physical layout.
+The 61-bit page-count payload admits values through
+`MEMORY_ALLOCATION_MAX_PAGE_COUNT`; larger requests fail as `invalid-request`.
 
 Physical layout is explicit: either one proven contiguous range or a segment
 list. Code may derive `base + offset` only for a single segment that covers the
@@ -31,15 +38,28 @@ requested range.
 
 ## Registry And Pressure
 
-The kernel coordinator owns allocation records, generation-tagged bounded
-candidate rings, reservations, transitions, and incremental counters. Lifecycle
+The kernel coordinator owns allocation records, deduplicated allocation-id
+candidate queues, reservations, transitions, and incremental counters. Lifecycle
 events update counters in O(1). Stats queries copy counters and never scan PMM,
 VMM, or the registry.
 
+Stats include concrete tier bytes, domain bytes, pressure level, candidate and
+protection counters, swap activity, and retained metadata record/byte counts.
+
 Pressure handles at most `min(config.pressure_batch_limit, 64)` candidates.
-Stale generations and protected, pinned, mapped, in-flight, device-owned,
-non-coherent, or cooldown records are skipped with a reason counter. Refaults
-refresh access epoch and extend cooldown.
+Protected, pinned, mapped, in-flight, device-owned, non-coherent, or cooldown
+records are skipped with a reason counter. Cooldown records remain deduplicated
+in the queue until eligible; other consumed records clear their queued bit so a
+later lifecycle event may enqueue them again. Refaults refresh access epoch and
+extend cooldown.
+If the runtime cannot hand a selected id to swap because its coordinator or
+mapping is unavailable, or swap-out fails, it requeues the still-eligible id.
+The manager's queued bit makes this recovery idempotent with swap rollback.
+
+For each enabled CPU, GPU, NIC, DMA, and swap pool, pressure compares remaining
+free bytes with that pool's high and low watermarks. The observed watermark
+level is combined with the caller level by severity, so configured pressure is
+enforced without treating a reclaim threshold as a hard allocation ceiling.
 
 ## Ownership State
 

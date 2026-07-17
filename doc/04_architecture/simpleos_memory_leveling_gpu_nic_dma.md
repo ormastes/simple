@@ -59,10 +59,19 @@ coherency, or cooldown makes an allocation ineligible.
 The registry is indexed by stable allocation id. It owns metadata, not bytes.
 Lifecycle events update bytes/allocations by domain/tier, pins, in-flight work,
 candidate queues, transition counts, failures, and swap counters incrementally.
+The allocation record uses fourteen native runtime-value slots (112 bytes).
+Page count, coherency, reclaimability, and candidate-queued state share one
+typed flag word. At most one directly stored queued `u64` allocation id adds one slot, so retained
+leveling metadata is conservatively bounded at 120 bytes per tracked allocation.
+The packed page count is limited to 61 bits; registry admission rejects larger
+values before shifting them into the flag word.
+Language-facing owner labels stay in placement intent, while contiguous/scatter
+physical layout stays in the canonical DMA/VMM mapping owner.
 
-Candidate queues are bounded generation rings. Access/lifecycle events enqueue
-or refresh candidates. A pressure call processes at most the configured batch,
-clamped to 64 by the selected NFR. It never scans all PMM pages.
+The candidate queue stores deduplicated allocation ids. Access/lifecycle events
+enqueue eligible records. A pressure call processes at most the configured
+batch, clamped to 64 by the selected NFR. Cooldown and failed swap handoffs
+requeue the same id without duplication. It never scans all PMM pages.
 
 ## Effect Transactions
 
@@ -100,9 +109,15 @@ or pinning but not transparent migration.
 
 Each domain has capacity, reserved bytes, low watermark, high watermark, and
 current bytes. Allocation checks preserve the CPU reserve and each enabled
-device reserve. Pressure levels are normal, elevated, critical, and emergency.
+device reserve. Watermarks apply to remaining free bytes: below the high
+watermark raises effective pressure to elevated, and at or below the low
+watermark raises it to critical. An explicit emergency or critical caller level
+is never lowered. Pressure levels are normal, elevated, critical, and emergency.
 The selector prefers cold unpinned CPU memory, respects cooldown, and records
 why protected candidates were skipped.
+
+The O(1) snapshot includes bytes for every concrete tier, domain totals, the
+current pressure level, and retained metadata record/byte counts.
 
 ## MDSOC
 

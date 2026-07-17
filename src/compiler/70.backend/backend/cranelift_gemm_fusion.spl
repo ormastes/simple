@@ -8,24 +8,32 @@ use compiler.mir.mir_data.{MirFunction}
 use compiler.mir.mir_instructions.{MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator}
 use compiler.mir.mir_types.{LocalId}
 
+extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_payload(value: Any) -> i64
+extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
+
 struct GemmAddFusion:
     dest: LocalId
     matmul_left: MirOperand
     matmul_right: MirOperand
     addend: MirOperand
 
-fn operand_copy_local_id(operand: MirOperand) -> i64?:
-    match operand.kind:
-        case Copy(local) | Move(local): Some(local.id)
-        case _: nil
+fn operand_copy_local_id(operand: MirOperand) -> i64:
+    val kind = operand.kind
+    val placeholder = LocalId(id: -1)
+    val disc = rt_enum_discriminant(kind)
+    val copy_disc = rt_enum_discriminant(MirOperandKind.Copy(placeholder))
+    val move_disc = rt_enum_discriminant(MirOperandKind.Move(placeholder))
+    if disc != copy_disc and disc != move_disc:
+        return -1
+    val payload = rt_enum_payload(kind)
+    if payload <= 3:
+        return -1
+    val local: LocalId = payload
+    local.id
 
 fn operand_uses_local(operand: MirOperand, local_id: i64) -> bool:
-    # NOTE: explicit match, not `if found.?:` -- the operand's local id can
-    # legitimately be 0; truthiness on the boxed i64? would make this always
-    # report "not used" for local 0, silently missing GEMM-add fusion.
-    match operand_copy_local_id(operand):
-        case Some(found_id): found_id == local_id
-        case nil: false
+    operand_copy_local_id(operand) == local_id
 
 fn local_is_temp(func: MirFunction, local_id: i64) -> bool:
     for local in func.locals:
@@ -109,21 +117,34 @@ fn local_use_count_in_function(func: MirFunction, local_id: i64) -> i64:
     count
 
 fn detect_gemm_add_pair(func: MirFunction, matmul_inst: MirInst, add_inst: MirInst) -> GemmAddFusion?:
-    match matmul_inst.kind:
-        case BinOp(matmul_dest, MatMul, matmul_left, matmul_right):
-            match add_inst.kind:
-                case BinOp(add_dest, BroadcastAdd, add_left, add_right):
-                    if not local_is_temp(func, matmul_dest.id):
-                        return nil
-                    if local_use_count_in_function(func, matmul_dest.id) != 1:
-                        return nil
-                    if operand_uses_local(add_left, matmul_dest.id):
-                        return Some(GemmAddFusion(dest: add_dest, matmul_left: matmul_left, matmul_right: matmul_right, addend: add_right))
-                    if operand_uses_local(add_right, matmul_dest.id):
-                        return Some(GemmAddFusion(dest: add_dest, matmul_left: matmul_left, matmul_right: matmul_right, addend: add_left))
-                    nil
-                case _:
-                    nil
-        case _:
-            nil
-
+    val matmul_kind = matmul_inst.kind
+    val add_kind = add_inst.kind
+    # Stage2 native mode can misbind multi-field enum source patterns from the
+    # enum header. Decode BinOp payloads explicitly, as the codegen path does.
+    if rt_enum_discriminant(matmul_kind) != 0x3d5f86a0 or rt_enum_discriminant(add_kind) != 0x3d5f86a0:
+        return nil
+    val matmul_payload = rt_enum_payload(matmul_kind)
+    val add_payload = rt_enum_payload(add_kind)
+    if matmul_payload <= 3 or add_payload <= 3:
+        return nil
+    val matmul_dest: LocalId = rt_tuple_get(matmul_payload, 0)
+    val matmul_op: MirBinOp = rt_tuple_get(matmul_payload, 1)
+    val matmul_left: MirOperand = rt_tuple_get(matmul_payload, 2)
+    val matmul_right: MirOperand = rt_tuple_get(matmul_payload, 3)
+    val add_dest: LocalId = rt_tuple_get(add_payload, 0)
+    val add_op: MirBinOp = rt_tuple_get(add_payload, 1)
+    val add_left: MirOperand = rt_tuple_get(add_payload, 2)
+    val add_right: MirOperand = rt_tuple_get(add_payload, 3)
+    if rt_enum_discriminant(matmul_op) != rt_enum_discriminant(MirBinOp.MatMul):
+        return nil
+    if rt_enum_discriminant(add_op) != rt_enum_discriminant(MirBinOp.BroadcastAdd):
+        return nil
+    if not local_is_temp(func, matmul_dest.id):
+        return nil
+    if local_use_count_in_function(func, matmul_dest.id) != 1:
+        return nil
+    if operand_uses_local(add_left, matmul_dest.id):
+        return Some(GemmAddFusion(dest: add_dest, matmul_left: matmul_left, matmul_right: matmul_right, addend: add_right))
+    if operand_uses_local(add_right, matmul_dest.id):
+        return Some(GemmAddFusion(dest: add_dest, matmul_left: matmul_left, matmul_right: matmul_right, addend: add_left))
+    nil

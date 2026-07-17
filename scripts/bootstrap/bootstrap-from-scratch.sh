@@ -829,11 +829,18 @@ if [ "${stage3_ok:-0}" -eq 1 ] && [ -x "${stage3}" ]; then
   echo "stage3 sha256: ${hash3}"
   if [ "${hash2}" != "${hash3}" ]; then
     echo "warning: stage2 and stage3 hashes differ (expected when runtime is embedded)"
-    echo "  Using verified Stage 3 for stage 4"
+    if [ "${stage2_capability_ok:-0}" -eq 1 ]; then
+      echo "  Using capability-verified Stage 2 with embedded runtime for stage 4"
+      stage_for_build="${stage2}"
+    else
+      echo "  No capability-verified compiler is available for stage 4"
+      stage_for_build=""
+      stage4_is_seed=1
+    fi
   else
     echo "Bootstrap verification passed."
+    stage_for_build="${stage3}"
   fi
-  stage_for_build="${stage3}"
 else
   if [ "${stage2_capability_ok:-0}" -eq 1 ] && [ -x "${stage2}" ]; then
     echo "Stage 3 unavailable — using capability-verified Stage 2 for stage 4"

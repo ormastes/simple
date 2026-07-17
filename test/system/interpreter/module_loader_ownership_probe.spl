@@ -1,0 +1,162 @@
+use compiler.core.ast.{
+    ast_reset, decl_get_body, decl_get_is_async, decl_get_name,
+    decl_get_visibility_text, module_decl_count_get, module_get_decls
+}
+use compiler.core.interpreter.eval_tables.{
+    func_lookup_return_type, func_table_lookup, func_table_reset,
+    struct_table_get_module, struct_table_lookup, struct_table_reset
+}
+use compiler.core.interpreter.interp_resource_tracker.{irt_get_func_count, irt_get_struct_count}
+use compiler.core.interpreter.module_loader_core.{
+    interp_unload_module, load_module, load_module_register_only,
+    load_module_selective, module_is_loaded, module_loader_init
+}
+use compiler.core.parser.{parser_has_errors, parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+
+fn check_public_method_parser() -> text:
+    ast_reset()
+    parser_init_with_path(
+        "class PublicMethods:\n" +
+        "    pub static fn static_api() -> i64:\n" +
+        "        1\n" +
+        "    pub fn instance_api() -> i64:\n" +
+        "        2\n" +
+        "    pub me mutable_api():\n" +
+        "        pass_dn\n" +
+        "\n" +
+        "val sentinel = 7\n",
+        "module_loader_ownership_probe.spl",
+    )
+    parse_module_body()
+    if parser_has_errors(): return "valid public methods produced parser errors"
+
+    val decls = module_get_decls()
+    if decls.len() != 3: return "valid public method declaration count mismatch"
+    val methods = decl_get_body(decls[0])
+    if methods.len() != 3: return "valid public method count mismatch"
+    if decl_get_is_async(methods[0]) != 1: return "static method mode mismatch"
+    if decl_get_is_async(methods[1]) != 0: return "instance method mode mismatch"
+    if decl_get_is_async(methods[2]) != 2: return "me method mode mismatch"
+    for method_id in methods:
+        if decl_get_visibility_text(method_id) != "public":
+            return "public method visibility was not preserved"
+    if decl_get_name(decls[2]) != "sentinel": return "valid parser recovery lost sentinel"
+
+    ast_reset()
+    parser_init_with_path(
+        "class InvalidPublicField:\n" +
+        "    pub value: i64\n" +
+        "\n" +
+        "val sentinel = 9\n",
+        "module_loader_ownership_probe.spl",
+    )
+    parse_module_body()
+    if not parser_has_errors(): return "unsupported public field was accepted"
+    val recovered_decls = module_get_decls()
+    if recovered_decls.len() != 2: return "invalid public field recovery declaration count mismatch"
+    if decl_get_name(recovered_decls[1]) != "sentinel": return "invalid public field recovery lost sentinel"
+    ""
+
+fn check_cached_module_aliases() -> text:
+    ast_reset()
+    func_table_reset()
+    struct_table_reset()
+    module_loader_init()
+
+    val current_file = "test/fixtures/cross_module_struct/mod_b_main.spl"
+    if load_module("mod_a", current_file) != 1: return "initial module load failed"
+    val original_fn = func_table_lookup("make_foo")
+    val original_struct = struct_table_lookup("Foo")
+    val original_struct_module = struct_table_get_module("Foo")
+    if original_fn < 0 or original_struct < 0: return "initial symbols were not registered"
+
+    if load_module("mod_collision", current_file) != 1: return "collision module load failed"
+    val collision_decl_count = module_decl_count_get()
+    if func_table_lookup("make_foo") == original_fn: return "function collision was not installed"
+    if struct_table_lookup("Foo") == original_struct: return "struct collision was not installed"
+
+    if load_module_register_only("mod_a", ["make_foo:make_foo_alias"], current_file) != 1:
+        return "cached function alias load failed"
+    if load_module_selective("mod_a", ["Foo:FooAlias"], current_file) != 1:
+        return "cached struct alias load failed"
+    if module_decl_count_get() != collision_decl_count: return "cached aliases reparsed the module"
+    if func_table_lookup("make_foo_alias") != original_fn: return "function alias owner mismatch"
+    if struct_table_lookup("FooAlias") != original_struct: return "struct alias owner mismatch"
+    if struct_table_get_module("FooAlias") != original_struct_module: return "struct alias path mismatch"
+
+    load_module_register_only("mod_a", ["make_foo:make_foo_alias"], current_file)
+    load_module_register_only("mod_a", ["make_foo:shared_alias"], current_file)
+    load_module_register_only("mod_collision", ["make_foo:shared_alias"], current_file)
+    load_module_register_only("mod_a", ["make_foo:shared_alias"], current_file)
+    if func_table_lookup("shared_alias") != original_fn: return "A/B/A alias history mismatch"
+    if irt_get_func_count("mod_a") != 3 or irt_get_struct_count("mod_a") != 2:
+        return "module ownership tracking was not idempotent"
+
+    val collision_fn = func_table_lookup("make_foo")
+    val collision_struct = struct_table_lookup("Foo")
+    val collision_struct_module = struct_table_get_module("Foo")
+    if interp_unload_module("mod_a") < 3: return "cached owner unload failed"
+    if module_is_loaded("mod_a") != 0 or module_is_loaded("mod_collision") != 1:
+        return "module load state was not isolated"
+    if func_table_lookup("make_foo") != collision_fn or struct_table_lookup("Foo") != collision_struct:
+        return "unload removed the surviving collision owner"
+    if func_table_lookup("shared_alias") != collision_fn: return "alias history was not restored"
+
+    if load_module("mod_a", current_file) != 1: return "owner reload failed"
+    if interp_unload_module("mod_a") < 2: return "reloaded owner unload failed"
+    if func_table_lookup("make_foo") != collision_fn or struct_table_lookup("Foo") != collision_struct:
+        return "reload unload did not restore collision owner"
+    if struct_table_get_module("Foo") != collision_struct_module: return "restored struct path mismatch"
+
+    if load_module_register_only("std.option", ["Some"], current_file) != 1:
+        return "resolved-path module load failed"
+    val option_decl_count = module_decl_count_get()
+    val original_some = func_table_lookup("Some")
+    if load_module_register_only("lib.option", ["Some:SomeAlias"], current_file) != 1:
+        return "resolved-path alias load failed"
+    if module_decl_count_get() != option_decl_count: return "resolved-path alias reparsed the module"
+    if func_table_lookup("SomeAlias") != original_some: return "resolved-path alias owner mismatch"
+    interp_unload_module("std.option")
+    if module_is_loaded("std.option") != 0 or module_is_loaded("lib.option") != 0:
+        return "same-file aliases were not unloaded together"
+    if func_table_lookup("Some") >= 0 or func_table_lookup("SomeAlias") >= 0:
+        return "same-file bindings survived unload"
+    ""
+
+fn check_extern_metadata_ownership() -> text:
+    ast_reset()
+    func_table_reset()
+    struct_table_reset()
+    module_loader_init()
+    val current_file = "test/fixtures/cross_module_struct/mod_b_main.spl"
+    if load_module("mod_a", current_file) != 1: return "regular owner load failed"
+    val regular_decl = func_table_lookup("make_foo")
+    val regular_ret = func_lookup_return_type("make_foo")
+    if load_module("mod_extern_collision", current_file) != 1: return "extern owner load failed"
+    val extern_ret = func_lookup_return_type("make_foo")
+    if extern_ret == regular_ret: return "extern metadata collision was not installed"
+    if load_module("mod_collision", current_file) != 1: return "second regular owner load failed"
+    if interp_unload_module("mod_collision") < 2: return "second regular owner unload failed"
+    if func_table_lookup("make_foo") != regular_decl: return "callable restoration skipped regular owner"
+    if func_lookup_return_type("make_foo") != extern_ret: return "extern metadata was not restored"
+    interp_unload_module("mod_extern_collision")
+    if func_table_lookup("make_foo") != regular_decl: return "extern unload removed regular callable"
+    if func_lookup_return_type("make_foo") != regular_ret: return "regular metadata was not restored"
+    ""
+
+fn main() -> i64:
+    val parser_error = check_public_method_parser()
+    if parser_error != "":
+        print "module_loader_ownership_probe_status=fail detail=" + parser_error
+        return 1
+    val alias_error = check_cached_module_aliases()
+    if alias_error != "":
+        print "module_loader_ownership_probe_status=fail detail=" + alias_error
+        return 1
+    val extern_error = check_extern_metadata_ownership()
+    if extern_error != "":
+        print "module_loader_ownership_probe_status=fail detail=" + extern_error
+        return 1
+    print "module_loader_ownership_probe_status=pass"
+    0

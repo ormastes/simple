@@ -4,13 +4,54 @@ use std.fs_driver.block_device.{BlockDevice}
 use os.kernel.boot.mmio.{mmio_reset_for_test}
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE}
 use os.kernel.memory.pmm.{pmm_init_identity_range, pmm_get_manager, pmm_alloc_page_raw}
-use os.kernel.memory.vmm.{vmm_init_sparse_for_test, vmm_map_page, vmm_read_pte, vmm_translate}
+use os.kernel.memory.vmm.{vmm_init_sparse_for_test, vmm_map_page, vmm_read_pte, vmm_translate, vmm_active_root}
+use os.kernel.memory.memory_owned_pages.{memory_owned_pages_detach_in, memory_owned_pages_finalize}
 use os.kernel.memory.memory_leveling_vmm.{memory_vmm_write_physical, memory_vmm_read_physical}
 use os.kernel.memory.memory_leveling_manager.{simpleos_memory_leveling_config_default}
-use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_init, memory_leveling_runtime_manager, memory_leveling_runtime_register_cpu_range}
-use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_install_block_device, memory_swap_runtime_clear_for_test, memory_swap_runtime_poll_pmm_pressure, memory_swap_runtime_release_range, memory_swap_runtime_handle_fault, memory_swap_runtime_last_fault_reason, memory_swap_runtime_last_fault_state}
+use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_init, memory_leveling_runtime_manager, memory_leveling_runtime_register_cpu_range, memory_leveling_runtime_stats}
+use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_install_block_device, memory_swap_runtime_clear_for_test, memory_swap_runtime_poll_pmm_pressure, memory_swap_runtime_apply_pressure, memory_swap_runtime_can_release_range_in, memory_swap_runtime_release_range, memory_swap_runtime_release_range_in, memory_swap_runtime_handle_fault, memory_swap_runtime_last_fault_reason, memory_swap_runtime_last_fault_state}
 
 describe "SimpleOS pressure-driven swap":
+
+    it "rolls back an 8KiB registration above 4KiB capacity":
+        mmio_reset_for_test()
+        memory_swap_runtime_clear_for_test()
+        expect(pmm_init_identity_range(64 * 1024 * 1024, 1024 * 1024, 2 * 1024 * 1024)).to_equal(true)
+        expect(vmm_init_sparse_for_test(pmm_get_manager(), 0)).to_equal(true)
+        var config = simpleos_memory_leveling_config_default()
+        config.physical_capacity_bytes = 4096
+        config.cpu_capacity_bytes = 4096
+        config.cpu_reserved_bytes = 0
+        config.cpu_low_watermark_bytes = 0
+        config.cpu_high_watermark_bytes = 4096
+        config.nic_reserved_bytes = 0
+        config.dma_reserved_bytes = 0
+        memory_leveling_runtime_init(config)
+
+        val registered = memory_leveling_runtime_register_cpu_range(0x74000000, 8192, 99)
+        expect(registered.ok).to_equal(false)
+        expect(registered.reason).to_equal("domain-capacity")
+        val manager = memory_leveling_runtime_manager()
+        val stats = memory_leveling_runtime_stats()
+        expect(manager.runtime_mappings.len()).to_equal(0)
+        expect(stats.allocation_count).to_equal(0)
+        expect(stats.byte_count).to_equal(0)
+        expect(stats.cpu_bytes).to_equal(0)
+
+    it "requeues selected pages while the swap coordinator is unavailable":
+        mmio_reset_for_test()
+        memory_swap_runtime_clear_for_test()
+        expect(pmm_init_identity_range(64 * 1024 * 1024, 1024 * 1024, 2 * 1024 * 1024)).to_equal(true)
+        expect(vmm_init_sparse_for_test(pmm_get_manager(), 0)).to_equal(true)
+        memory_leveling_runtime_init(simpleos_memory_leveling_config_default())
+        expect(memory_leveling_runtime_register_cpu_range(0x74100000, 4096, 100).ok).to_equal(true)
+
+        val first = memory_swap_runtime_apply_pressure("critical")
+        val second = memory_swap_runtime_apply_pressure("critical")
+        expect(first.report.selected).to_equal(1)
+        expect(first.failed).to_equal(1)
+        expect(second.report.selected).to_equal(1)
+        expect(second.failed).to_equal(1)
 
     it "selects a bounded mapped page swaps it and restores on fault":
         mmio_reset_for_test()
@@ -77,4 +118,44 @@ describe "SimpleOS pressure-driven swap":
         val second_virt = VirtAddr(addr: 0x73001000)
         expect(vmm_map_page(second_virt, PhysAddr(addr: second_phys), flags)).to_equal(true)
         expect(memory_leveling_runtime_register_cpu_range(second_virt.addr, 4096, 77).ok).to_equal(true)
+        expect(memory_swap_runtime_poll_pmm_pressure().swapped).to_equal(1)
+
+    it "detaches a mixed resident and swapped range before releasing runtime ownership":
+        mmio_reset_for_test()
+        memory_swap_runtime_clear_for_test()
+        expect(pmm_init_identity_range(64 * 1024 * 1024, 1024 * 1024, 2 * 1024 * 1024)).to_equal(true)
+        expect(vmm_init_sparse_for_test(pmm_get_manager(), 0)).to_equal(true)
+        var config = simpleos_memory_leveling_config_default()
+        config.pressure_batch_limit = 1
+        config.cpu_low_watermark_bytes = 64 * 1024 * 1024
+        config.cpu_high_watermark_bytes = 64 * 1024 * 1024
+        memory_leveling_runtime_init(config)
+        val memory_device = MemBlockDevice.new(8, 512)
+        val device: BlockDevice = memory_device
+        expect(memory_swap_runtime_install_block_device(device, 0, 1)).to_equal("ok")
+
+        val first_virt = VirtAddr(addr: 0x73100000)
+        val second_virt = VirtAddr(addr: 0x73101000)
+        val flags = VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_USER | VM_NO_EXECUTE)
+        expect(vmm_map_page(first_virt, PhysAddr(addr: pmm_alloc_page_raw()), flags)).to_equal(true)
+        expect(vmm_map_page(second_virt, PhysAddr(addr: pmm_alloc_page_raw()), flags)).to_equal(true)
+        val registered = memory_leveling_runtime_register_cpu_range(first_virt.addr, 8192, 77)
+        expect(registered.ok).to_equal(true)
+        expect(memory_swap_runtime_poll_pmm_pressure().swapped).to_equal(1)
+        expect(vmm_read_pte(first_virt)).to_equal(0)
+        expect(vmm_read_pte(second_virt)).to_be_greater_than(0)
+
+        val root = vmm_active_root()
+        expect(memory_swap_runtime_can_release_range_in(first_virt.addr, 8192, 77, root).ok).to_equal(true)
+        val detached = memory_owned_pages_detach_in(first_virt.addr, 2, root)
+        expect(detached.ok).to_equal(true)
+        expect(vmm_read_pte(second_virt)).to_equal(0)
+        expect(memory_swap_runtime_release_range_in(first_virt.addr, 8192, 77, root).ok).to_equal(true)
+        expect(memory_leveling_runtime_manager().runtime_mappings.len()).to_equal(0)
+        memory_owned_pages_finalize(detached.txn)
+        expect(vmm_read_pte(second_virt)).to_equal(0)
+
+        val reusable_virt = VirtAddr(addr: 0x73102000)
+        expect(vmm_map_page(reusable_virt, PhysAddr(addr: pmm_alloc_page_raw()), flags)).to_equal(true)
+        expect(memory_leveling_runtime_register_cpu_range(reusable_virt.addr, 4096, 77).ok).to_equal(true)
         expect(memory_swap_runtime_poll_pmm_pressure().swapped).to_equal(1)

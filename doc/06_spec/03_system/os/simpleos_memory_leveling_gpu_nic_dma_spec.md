@@ -39,7 +39,7 @@ simpleos_memory_leveling_gpu_nic_dma_spec -> os
 
 ### SimpleOS GPU NIC DMA memory leveling
 
-#### REQ-001 REQ-002 keeps language and kernel configurations separate
+#### REQ-001 REQ-002 NFR-006 keeps language and kernel configurations separate
 
 - Create an independently owned language placement configuration
 - var placement = simple memory placement config from intent
@@ -77,7 +77,7 @@ expect(os_config.swap_enabled).to_equal(true)
 
 </details>
 
-#### REQ-003 REQ-005 REQ-006 enforces identity ownership pins and DMA order
+#### REQ-003 REQ-005 REQ-006 NFR-003 enforces identity ownership pins and DMA order
 
 - Allocate a tracked cold CPU buffer with stable identity
    - Expected: allocation.ok is true
@@ -132,7 +132,7 @@ expect(manager.unmap_device(allocation.allocation_id, 91).state).to_equal("cpu_o
 
 </details>
 
-#### REQ-008 REQ-014 bounds pressure and reports incremental counters
+#### REQ-008 REQ-014 NFR-001 NFR-002 bounds pressure and reports incremental counters
 
 - Configure a pressure batch larger than the hard safety bound
 - var config = simpleos memory leveling config default
@@ -143,7 +143,11 @@ expect(manager.unmap_device(allocation.allocation_id, 91).state).to_equal("cpu_o
 - Inspect maintained counters without a registry scan
    - Expected: stats.allocation_count equals `70`
    - Expected: stats.cpu_bytes equals `70 * 4096`
+   - Expected: stats.cpu_cold_bytes equals `70 * 4096`
    - Expected: stats.candidate_count equals `70`
+   - Expected: stats.pressure_level equals `critical`
+   - Expected: stats.metadata_record_count equals `70`
+   - Expected: stats.metadata_bytes equals `70u64 * MEMORY_LEVELING_ALLOCATION_METADATA_BYTES`
 
 
 <details>
@@ -172,7 +176,11 @@ step("Inspect maintained counters without a registry scan")
 val stats = manager.snapshot()
 expect(stats.allocation_count).to_equal(70)
 expect(stats.cpu_bytes).to_equal(70 * 4096)
+expect(stats.cpu_cold_bytes).to_equal(70 * 4096)
 expect(stats.candidate_count).to_equal(70)
+expect(stats.pressure_level).to_equal("critical")
+expect(stats.metadata_record_count).to_equal(70)
+expect(stats.metadata_bytes).to_equal(70u64 * MEMORY_LEVELING_ALLOCATION_METADATA_BYTES)
 ```
 
 </details>
@@ -187,6 +195,8 @@ expect(stats.candidate_count).to_equal(70)
 - Consume the GPU reservation without starving the CPU reserve
    - Expected: manager.request(simple_memory_placement_config_from_intent(gpu_intent), memory_leveling_policy_from_intent(gpu_intent), 10, 1, 2).ok is true
    - Expected: manager.request(simple_memory_placement_config_from_intent(gpu_intent), memory_leveling_policy_from_intent(gpu_intent), 1, 1, 2).reason equals `reservation-protected`
+- Raise pressure when remaining CPU bytes cross the high watermark
+   - Expected: manager.apply_pressure("normal").level equals `elevated`
 
 
 <details>
@@ -201,6 +211,8 @@ var config = simpleos_memory_leveling_config_default()
 config.physical_capacity_bytes = 100
 config.cpu_capacity_bytes = 100
 config.cpu_reserved_bytes = 20
+config.cpu_low_watermark_bytes = 25
+config.cpu_high_watermark_bytes = 50
 config.gpu_capacity_bytes = 50
 config.gpu_reserved_bytes = 10
 config.nic_reserved_bytes = 10
@@ -216,11 +228,53 @@ step("Consume the GPU reservation without starving the CPU reserve")
 val gpu_intent = simple_memory_device_gpu()
 expect(manager.request(simple_memory_placement_config_from_intent(gpu_intent), memory_leveling_policy_from_intent(gpu_intent), 10, 1, 2).ok).to_equal(true)
 expect(manager.request(simple_memory_placement_config_from_intent(gpu_intent), memory_leveling_policy_from_intent(gpu_intent), 1, 1, 2).reason).to_equal("reservation-protected")
+
+step("Raise pressure when remaining CPU bytes cross the high watermark")
+expect(manager.apply_pressure("normal").level).to_equal("elevated")
 ```
 
 </details>
 
-#### REQ-009 preserves bytes across committed swap transitions
+#### NFR-005 retains a cold candidate until cooldown expires
+
+- Touch a reclaimable CPU allocation to establish cooldown
+   - Expected: manager.touch(allocation.allocation_id, 30).ok is true
+- Skip the candidate before expiry without dropping it
+   - Expected: cooling.inspected equals `1`
+   - Expected: cooling.selected equals `0`
+   - Expected: cooling.skipped equals `1`
+- Select the retained candidate when cooldown expires
+   - Expected: cooled.inspected equals `1`
+   - Expected: cooled.selected equals `1`
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Touch a reclaimable CPU allocation to establish cooldown")
+val intent = simple_memory_iso_cpu_cold()
+val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
+val allocation = manager.request(simple_memory_placement_config_from_intent(intent), memory_leveling_policy_from_intent(intent), 4096, 1, 30)
+expect(manager.touch(allocation.allocation_id, 30).ok).to_equal(true)
+
+step("Skip the candidate before expiry without dropping it")
+val cooling = manager.apply_pressure("critical")
+expect(cooling.inspected).to_equal(1)
+expect(cooling.selected).to_equal(0)
+expect(cooling.skipped).to_equal(1)
+
+step("Select the retained candidate when cooldown expires")
+val cooled = manager.apply_pressure("critical")
+expect(cooled.inspected).to_equal(1)
+expect(cooled.selected).to_equal(1)
+```
+
+</details>
+
+#### REQ-009 NFR-004 preserves bytes across committed swap transitions
 
 - Prepare a cold allocation for swap
    - Expected: manager.prepare_swap(allocation.allocation_id, 31).state equals `migrating`
@@ -264,7 +318,7 @@ expect(store.release(written.slot_id, allocation.allocation_id).ok).to_equal(tru
 
 </details>
 
-#### REQ-011 validates scatter DMA metadata and synchronization
+#### REQ-004 REQ-011 validates scatter DMA metadata and synchronization
 
 - Create a DMA descriptor with two explicit physical segments
 - owner: DmaOwner
@@ -364,7 +418,7 @@ expect(memory_leveling_device_migration_unavailable(502).reason).to_equal("migra
 
 </details>
 
-#### REQ-013 REQ-015 reports QEMU support without hardware overclaim
+#### REQ-013 REQ-015 NFR-009 reports QEMU support without hardware overclaim
 
 - Inspect the QEMU virtio capability report
    - Expected: capabilities.virtio_gpu_backing is true

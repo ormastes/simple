@@ -18,8 +18,15 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
-
 extern fn rt_env_get(key: text) -> text
+extern fn rt_dict_get_i64_raw(dict: i64, key: i64) -> i64
+extern fn rt_dict_set_i64_raw(dict: i64, key: i64, value: i64) -> bool
+
+fn mir_method_dict_contains_i64(dict: i64, key: i64) -> bool:
+    rt_dict_get_i64_raw(dict, key) != 0
+
+fn mir_method_dict_set_i64(dict: i64, key: i64, value: i64):
+    rt_dict_set_i64_raw(dict, key, value)
 
 # ============================================================================
 # Expression Lowering
@@ -522,6 +529,73 @@ impl MirLowering:
             self.struct_value_syms[result_local.id] = result_struct_name
             self.local_hir_types[result_local.id] = payload_type
         result_local
+
+    me lower_array_pair_runtime_method(receiver_local: LocalId, method: text, args: [HirCallArg]) -> LocalId:
+        """Lower Array.zip/enumerate through the shared boxed-tuple runtime ABI."""
+        if not self.local_is_runtime_array(receiver_local):
+            return LocalId(id: -1)
+
+        val pair_array_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
+        var receiver_element_type = MirType.i64()
+        val receiver_array_type_opt = self.local_mir_type_of(receiver_local)
+        if receiver_array_type_opt.?:
+            val receiver_array_type: MirType = receiver_array_type_opt ?? MirType.i64()
+            match receiver_array_type.kind:
+                case MirTypeKind.Array(element_type, _) | MirTypeKind.Slice(element_type):
+                    receiver_element_type = element_type
+                case _: ()
+
+        if (method == "zip" or method.ends_with(".zip")) and args.len() == 1:
+            val other_array = self.lower_expr(args[0].value)
+            if not self.local_is_runtime_array(other_array):
+                return LocalId(id: -1)
+            var other_element_type = MirType.i64()
+            val other_array_type_opt = self.local_mir_type_of(other_array)
+            if other_array_type_opt.?:
+                val other_array_type: MirType = other_array_type_opt ?? MirType.i64()
+                match other_array_type.kind:
+                    case MirTypeKind.Array(element_type, _) | MirTypeKind.Slice(element_type):
+                        other_element_type = element_type
+                    case _: ()
+            val zip_shape = self.new_boxed_tuple_shape([receiver_element_type, other_element_type])
+            if mir_method_dict_contains_i64(self.array_element_boxed_tuple_shapes, receiver_local.id):
+                self.set_boxed_tuple_nested_shape(zip_shape, 0, self.array_element_boxed_tuple_shapes[receiver_local.id])
+            if mir_method_dict_contains_i64(self.array_element_boxed_tuple_shapes, other_array.id):
+                self.set_boxed_tuple_nested_shape(zip_shape, 1, self.array_element_boxed_tuple_shapes[other_array.id])
+            val zip_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_array_zip"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: [MirType.i64(), MirType.i64()],
+                    return_type: pair_array_type,
+                    is_variadic: false
+                )))
+            ))
+            val zip_result = self.emit_resolved_direct_call(zip_op, [
+                mir_operand_copy(receiver_local),
+                mir_operand_copy(other_array)
+            ], pair_array_type)
+            mir_method_dict_set_i64(self.array_element_boxed_tuple_shapes, zip_result.id, zip_shape)
+            return zip_result
+
+        if (method == "enumerate" or method.ends_with(".enumerate")) and args.len() == 0:
+            val enumerate_shape = self.new_boxed_tuple_shape([MirType.i64(), receiver_element_type])
+            if mir_method_dict_contains_i64(self.array_element_boxed_tuple_shapes, receiver_local.id):
+                self.set_boxed_tuple_nested_shape(enumerate_shape, 1, self.array_element_boxed_tuple_shapes[receiver_local.id])
+            val enumerate_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_array_enumerate"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: [MirType.i64()],
+                    return_type: pair_array_type,
+                    is_variadic: false
+                )))
+            ))
+            val enumerate_result = self.emit_resolved_direct_call(enumerate_op, [
+                mir_operand_copy(receiver_local)
+            ], pair_array_type)
+            mir_method_dict_set_i64(self.array_element_boxed_tuple_shapes, enumerate_result.id, enumerate_shape)
+            return enumerate_result
+
+        LocalId(id: -1)
 
     me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution) -> LocalId:
         """Lower method call based on resolution.
@@ -2025,11 +2099,24 @@ impl MirLowering:
                     wb_kind = 2
                 case _: ()
 
+        if method == "zip" or method.ends_with(".zip") or method == "enumerate" or method.ends_with(".enumerate"):
+            val pair_receiver = if has_prelowered_method_receiver:
+                prelowered_method_receiver
+            else:
+                self.lower_expr(receiver)
+            prelowered_method_receiver = pair_receiver
+            has_prelowered_method_receiver = true
+            val pair_result = self.lower_array_pair_runtime_method(pair_receiver, method, args)
+            if pair_result.id >= 0:
+                return pair_result
+
         match resolution:
             case InstanceMethod(type_id, method_id):
                 # Direct method call on type
                 val arg_operands = if wb_kind != 0:
                     self.build_args_from_receiver(wb_receiver, args)
+                elif has_prelowered_method_receiver:
+                    self.build_args_from_receiver(prelowered_method_receiver, args)
                 else:
                     self.lower_receiver_and_args(receiver, args)
                 val method_operand = self.symbol_to_operand(method_id)
@@ -2056,6 +2143,8 @@ impl MirLowering:
             case TraitMethod(trait_id, method_id):
                 val arg_operands = if wb_kind != 0:
                     self.build_args_from_receiver(wb_receiver, args)
+                elif has_prelowered_method_receiver:
+                    self.build_args_from_receiver(prelowered_method_receiver, args)
                 else:
                     self.lower_receiver_and_args(receiver, args)
                 val method_operand = self.symbol_to_operand(method_id)
@@ -2082,6 +2171,8 @@ impl MirLowering:
             case FreeFunction(func_id):
                 val arg_operands = if wb_kind != 0:
                     self.build_args_from_receiver(wb_receiver, args)
+                elif has_prelowered_method_receiver:
+                    self.build_args_from_receiver(prelowered_method_receiver, args)
                 else:
                     self.lower_receiver_and_args(receiver, args)
                 val func_operand = self.symbol_to_operand(func_id)
@@ -2181,8 +2272,10 @@ impl MirLowering:
                     prelowered_method_receiver
                 else:
                     self.lower_expr(receiver)
-                val unresolved_struct_name = self.struct_value_syms.get(unresolved_receiver_local.id)
-                if unresolved_struct_name != nil and unresolved_struct_name != "":
+                var unresolved_struct_name = ""
+                if mir_method_dict_contains_i64(self.struct_value_syms, unresolved_receiver_local.id):
+                    unresolved_struct_name = self.struct_value_syms[unresolved_receiver_local.id]
+                if unresolved_struct_name != "":
                     val unresolved_method_key = "{unresolved_struct_name}::{method}"
                     # Method symbols are owner-qualified during HIR lowering,
                     # so unrelated types may safely expose the same method name.
@@ -2253,6 +2346,9 @@ impl MirLowering:
                 # same-named method on some other Unresolved-typed receiver
                 # (which this codebase does not currently have, but might grow)
                 # can't be misdispatched as an array op.
+                val pair_result = self.lower_array_pair_runtime_method(unresolved_receiver_local, method, args)
+                if pair_result.id >= 0:
+                    return pair_result
                 if self.local_is_runtime_array(unresolved_receiver_local):
                     if method == "map" and args.len() == 1:
                         val map_lambda_operand = self.lower_lambda_value(args[0].value)
@@ -2626,9 +2722,10 @@ impl MirLowering:
                     val local_type = self.local_mir_type_of(local)
                     if local_type != nil:
                         lowered_elem_type = local_type
-                    val elem_vname = self.struct_value_syms.get(local.id)
-                    if elem_vname != nil:
-                        elem_struct_name = elem_vname ?? ""
+                    # Avoid native method-resolution collisions on generic
+                    # `.get` (observed dispatch to Config.get here).
+                    if self.struct_value_syms.has(local.id):
+                        elem_struct_name = self.struct_value_syms[local.id]
                 val boxed = self.box_runtime_value(local)
                 operands = operands.push(mir_operand_copy(boxed))
 

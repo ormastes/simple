@@ -24,6 +24,7 @@ extern fn rt_getpid() -> i64
 extern fn rt_dir_exists(path: text) -> bool
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_file_delete(path: text) -> bool
+extern fn rt_enum_discriminant(value: Any) -> i64
 
 fn incremental_file_exists(path: text) -> bool:
     rt_file_exists(path)
@@ -275,14 +276,17 @@ class BuildCache:
 
 impl BuildCache:
     static fn empty(cache_path: text) -> BuildCache:
-        BuildCache(entries: {}, fingerprints: {}, cache_path: cache_path, version: 0)
+        return BuildCache(entries: {}, fingerprints: {}, cache_path: cache_path, version: 0)
 
     static fn load(cache_path: text) -> BuildCache:
         """Load cache from disk, or create empty if not found."""
         if not incremental_file_exists(cache_path):
             return BuildCache.empty(cache_path)
 
-        match incremental_parse_file(cache_path):
+        val parsed_cache = incremental_parse_file(cache_path)
+        if parsed_cache == nil or rt_enum_discriminant(parsed_cache) < 0:
+            return BuildCache.empty(cache_path)
+        match parsed_cache:
             case Ok(sdn_value):
                 val ver = sdn_value.get("version")
                 var version: i64 = 0
@@ -378,10 +382,10 @@ impl BuildCache:
                             entries[source] = entry
                             fingerprints[source] = fp
 
-                BuildCache(entries: entries, fingerprints: fingerprints,
-                           cache_path: cache_path, version: version)
+                return BuildCache(entries: entries, fingerprints: fingerprints,
+                                  cache_path: cache_path, version: version)
             case Err(error):
-                BuildCache.empty(cache_path)
+                return BuildCache.empty(cache_path)
 
     me save():
         """Persist cache to disk."""

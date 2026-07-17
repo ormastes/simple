@@ -4,22 +4,27 @@
 # benchmark from reporting timings for a broken transition.
 
 use test.perf.bench.lib.timing.{BenchResult, bench_csv, bench_csv_header, bench_measure}
-use std.memory_leveling.{memory_leveling_policy_from_intent, simple_memory_iso_cpu_cold, simple_memory_placement_config_from_intent}
+use std.memory_leveling.{MEMORY_LEVELING_ALLOCATION_METADATA_BYTES, memory_leveling_policy_from_intent, simple_memory_iso_cpu_cold, simple_memory_placement_config_from_intent}
 use os.kernel.memory.memory_leveling_manager.{memory_leveling_manager_new, simpleos_memory_leveling_config_default}
-use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_dma_sync_for_cpu, memory_leveling_runtime_dma_sync_for_device, memory_leveling_runtime_register_cpu_range, memory_leveling_runtime_register_dma, memory_leveling_runtime_reset_for_test, memory_leveling_runtime_unregister_dma}
-use os.kernel.memory.memory_swap.{memory_swap_checksum, memory_swap_store_new}
+use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_dma_sync_for_cpu, memory_leveling_runtime_dma_sync_for_device, memory_leveling_runtime_register_cpu_range_in, memory_leveling_runtime_register_dma, memory_leveling_runtime_reset_for_test, memory_leveling_runtime_unregister_dma}
+use os.kernel.memory.memory_swap.{memory_swap_checksum, memory_swap_result_bytes, memory_swap_store_new}
 
 const BENCH_ITERS: i64 = 16
 const PAGE_BYTES: u64 = 4096
 const OWNER_ID: u64 = 41
+const ADDRESS_SPACE_ROOT: u64 = 2
 
 fn require(ok: bool, message: text):
     if not ok:
         panic(message)
 
+fn baseline_array_once():
+    val payload: [u8] = [0u8; 4096]
+    require(payload.len() == 4096, "baseline_array_4096 returned the wrong byte count")
+
 fn allocation_once():
     memory_leveling_runtime_reset_for_test()
-    val result = memory_leveling_runtime_register_cpu_range(0x100000, PAGE_BYTES, OWNER_ID)
+    val result = memory_leveling_runtime_register_cpu_range_in(0x100000, PAGE_BYTES, OWNER_ID, ADDRESS_SPACE_ROOT)
     require(result.ok, "allocation_register_4096 rejected a valid range")
     require(result.allocation_ids.len() == 1, "allocation_register_4096 returned the wrong allocation count")
 
@@ -64,8 +69,9 @@ fn swap_once(payload: [u8]):
     require(manager.prepare_restore(allocation.allocation_id, OWNER_ID).ok, "swap_roundtrip_4096 restore prepare failed")
     val restored = store.read(written.slot_id, allocation.allocation_id, 0)
     require(restored.ok, "swap_roundtrip_4096 read failed")
-    require(restored.bytes.len() == payload.len(), "swap_roundtrip_4096 changed payload length")
-    require(memory_swap_checksum(restored.bytes) == memory_swap_checksum(payload), "swap_roundtrip_4096 changed payload")
+    val restored_bytes = memory_swap_result_bytes(restored)
+    require(restored_bytes.len() == payload.len(), "swap_roundtrip_4096 changed payload length")
+    require(memory_swap_checksum(restored_bytes) == memory_swap_checksum(payload), "swap_roundtrip_4096 changed payload")
     require(manager.commit_restore(allocation.allocation_id, OWNER_ID).ok, "swap_roundtrip_4096 restore commit failed")
     require(store.release(written.slot_id, allocation.allocation_id).ok, "swap_roundtrip_4096 slot release failed")
 
@@ -94,8 +100,27 @@ fn protected_once():
     require(report.inspected == 1, "protected_skip inspected an unexpected count")
     require(report.selected == 0 and report.skipped == 1, "protected_skip did not skip the pinned allocation")
 
+fn metadata_evidence() -> text:
+    val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
+    val intent = simple_memory_iso_cpu_cold()
+    var i: u64 = 0
+    while i < 64:
+        val allocation = manager.request(simple_memory_placement_config_from_intent(intent), memory_leveling_policy_from_intent(intent), PAGE_BYTES, 1, i + 1)
+        require(allocation.ok, "metadata evidence allocation failed")
+        i = i + 1
+    val stats = manager.snapshot()
+    require(stats.metadata_record_count == 64, "metadata evidence record count changed")
+    require(stats.metadata_bytes == 64u64 * MEMORY_LEVELING_ALLOCATION_METADATA_BYTES, "metadata evidence byte count changed")
+    "memory_leveling_metadata_record_count={stats.metadata_record_count} memory_leveling_metadata_bytes={stats.metadata_bytes} memory_leveling_metadata_bytes_per_allocation={MEMORY_LEVELING_ALLOCATION_METADATA_BYTES} memory_leveling_pressure_scan_bound=64"
+
+fn benchmark_units_per_second(result: BenchResult, units_per_iteration: i64) -> i64:
+    if result.total_ns <= 0:
+        return 0
+    (result.iters * units_per_iteration * 1000000000) / result.total_ns
+
 fn main():
     val payload = make_payload()
+    val baseline: BenchResult = bench_measure("baseline_array_4096", BENCH_ITERS, \: baseline_array_once())
     val r1: BenchResult = bench_measure("allocation_register_4096", BENCH_ITERS, \: allocation_once())
     val r2: BenchResult = bench_measure("pressure_batch_64", BENCH_ITERS, \: pressure_once())
     val r3: BenchResult = bench_measure("swap_roundtrip_4096", BENCH_ITERS, \: swap_once(payload))
@@ -103,8 +128,12 @@ fn main():
     val r5: BenchResult = bench_measure("protected_skip", BENCH_ITERS, \: protected_once())
 
     print bench_csv_header()
+    print bench_csv(baseline)
     print bench_csv(r1)
     print bench_csv(r2)
     print bench_csv(r3)
     print bench_csv(r4)
     print bench_csv(r5)
+    print metadata_evidence()
+    print "memory_leveling_allocation_baseline_p50_ns={baseline.p50_ns} memory_leveling_allocation_leveling_p50_ns={r1.p50_ns}"
+    print "memory_leveling_swap_bytes_per_s={benchmark_units_per_second(r3, PAGE_BYTES as i64)} memory_leveling_dma_transitions_per_s={benchmark_units_per_second(r4, 4)} memory_leveling_reclaim_candidates_per_s={benchmark_units_per_second(r2, 64)}"

@@ -11,6 +11,9 @@ use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
+use std.alloc.sffi.{rt_dict_get}
+
+extern fn rt_value_as_int(value: i64) -> i64
 
 # ============================================================================
 # HIR Module Structure
@@ -231,10 +234,10 @@ impl SymbolTable:
 
         if is_type_symbol:
             val scope = self.scopes[self.current_scope.id]
-            val existing = scope.symbols.get(name)
+            val existing = rt_dict_get(scope.symbols, name)
             if existing != nil:
                 # Already registered — return the existing id (first-write-wins)
-                return SymbolId(id: existing)
+                return SymbolId(id: rt_value_as_int(existing))
 
         val raw_id = self.next_symbol_id
         val id = SymbolId(id: raw_id)
@@ -276,9 +279,9 @@ impl SymbolTable:
             # of the stored value -- see doc/08_tracking/bug/
             # vhdl_backend_spec_remaining_failures_2026-07-02.md). Use the
             # plain nil-check idiom on a single `.get()` call instead.
-            val found = scope.symbols.get(name)
+            val found = rt_dict_get(scope.symbols, name)
             if found != nil:
-                return Some(SymbolId(id: found))
+                return Some(SymbolId(id: rt_value_as_int(found)))
 
             match scope.parent:
                 case Some(parent):
@@ -294,9 +297,9 @@ impl SymbolTable:
 
         loop:
             val scope = self.scopes[scope_id.id]
-            val found = scope.symbols.get(name)
+            val found = rt_dict_get(scope.symbols, name)
             if found != nil:
-                return SymbolId(id: found)
+                return SymbolId(id: rt_value_as_int(found))
 
             match scope.parent:
                 case Some(parent):
@@ -339,8 +342,11 @@ impl SymbolTable:
         bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
         match id:
             case SymbolId(raw):
-                val found: Symbol? = self.symbols[raw]
-                if val sym = found:
+                # Avoid seed-native `if val` binding nil for a present flat
+                # struct value. Read the dictionary payload exactly once.
+                val found = rt_dict_get(self.symbols, raw)
+                if found != nil:
+                    val sym: Symbol = found
                     return sym.name
                 fallback
             case _:

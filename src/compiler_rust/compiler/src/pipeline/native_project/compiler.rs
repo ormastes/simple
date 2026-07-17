@@ -185,17 +185,15 @@ impl NativeProjectBuilder {
     pub(crate) fn compile_entries_parallel(
         &self,
         entries: &[(usize, PathBuf, String)],
-        temp_dir: &Path,
         canonical_entry: &Option<PathBuf>,
         imports: &ModuleImports,
-    ) -> Vec<Result<(usize, PathBuf), (PathBuf, String)>> {
+    ) -> Vec<Result<(usize, Vec<u8>), (PathBuf, String)>> {
         let project_root = self.project_root.clone();
         let source_dirs = self.source_dirs.clone();
         let fallback_root = self.source_root.clone();
         let file_timeout = self.config.file_timeout;
         let stack_size = self.config.stack_size;
         let verbose = self.config.verbose;
-        let temp_dir = temp_dir.to_path_buf();
         let total = entries.len();
         let no_mangle = self.config.no_mangle;
         let opt_level = self.config.opt_level;
@@ -224,12 +222,10 @@ impl NativeProjectBuilder {
                     imports.clone(),
                 ) {
                     Ok(obj_code) => {
-                        let obj_path = temp_dir.join(format!("mod_{}.o", idx));
-                        std::fs::write(&obj_path, &obj_code).map_err(|e| (path.clone(), format!("write .o: {e}")))?;
                         if verbose && (progress_i + 1) % 50 == 0 {
                             eprintln!("  [{}/{}] compiled", progress_i + 1, total);
                         }
-                        Ok((*idx, obj_path))
+                        Ok((*idx, obj_code))
                     }
                     Err(e) => {
                         let msg = format!("{}: {}", path.display(), e);
@@ -244,10 +240,9 @@ impl NativeProjectBuilder {
     pub(crate) fn compile_entries_sequential(
         &self,
         entries: &[(usize, PathBuf, String)],
-        temp_dir: &Path,
         canonical_entry: &Option<PathBuf>,
         imports: &ModuleImports,
-    ) -> Vec<Result<(usize, PathBuf), (PathBuf, String)>> {
+    ) -> Vec<Result<(usize, Vec<u8>), (PathBuf, String)>> {
         let total = entries.len();
         entries
             .iter()
@@ -271,12 +266,10 @@ impl NativeProjectBuilder {
                     imports.clone(),
                 ) {
                     Ok(obj_code) => {
-                        let obj_path = temp_dir.join(format!("mod_{}.o", idx));
-                        std::fs::write(&obj_path, &obj_code).map_err(|e| (path.clone(), format!("write .o: {e}")))?;
                         if self.config.verbose && (progress_i + 1) % 10 == 0 {
                             eprintln!("  [{}/{}] compiled", progress_i + 1, total);
                         }
-                        Ok((*idx, obj_path))
+                        Ok((*idx, obj_code))
                     }
                     Err(e) => {
                         let msg = format!("{}: {}", path.display(), e);

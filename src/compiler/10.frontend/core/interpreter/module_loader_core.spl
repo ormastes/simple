@@ -13,23 +13,24 @@
 # Path resolution is in module_loader_resolve.spl.
 
 use compiler.core.frontend.{core_frontend_parse_isolated, core_frontend_parse_append}
+use std.string_core.{str_index_of}
 use compiler.core.ast.{
     decl_get_imports,
     decl_get_name,
     decl_get_ret_type,
     decl_get_tag,
-    module_get_decls,
-    module_get_path
+    module_decl_at,
+    module_decl_count_get
 }
 use compiler.common.gc_config.{is_nogc_family, is_gc_family, is_noalloc_family, is_allocating_family}
 use compiler.core.interpreter.eval.{eval_warnings}
-use compiler.core.interpreter.eval_tables.{func_register_return_type, func_table_lookup, func_table_register, struct_table_lookup, struct_table_register}
+use compiler.core.interpreter.eval_tables.{func_register_return_type, func_table_lookup, func_table_register, struct_table_get_module, struct_table_lookup, struct_table_register, struct_table_register_owned}
 use compiler.core.interpreter.interp_resource_tracker.{
     irt_begin_module,
     irt_init,
     irt_track_enum,
-    irt_track_func_owned,
-    irt_track_struct_owned,
+    irt_track_func,
+    irt_track_struct,
     irt_unload_module
 }
 
@@ -44,17 +45,17 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_path_join(base: text, rel: text) -> text
 
 # AST Declaration Tags (from ast.spl)
-val DECL_FN = 1
-val DECL_EXTERN_FN = 2
-val DECL_STRUCT = 3
-val DECL_VAL = 4
-val DECL_VAR = 5
-val DECL_USE = 6
-val DECL_EXPORT = 7
-val DECL_ENUM = 8
-val DECL_AOP_ADVICE = 14
-val DECL_DI_BINDING = 15
-val DECL_ARCH_RULE = 16
+val DECL_FN: i64 = 1
+val DECL_EXTERN_FN: i64 = 2
+val DECL_STRUCT: i64 = 3
+val DECL_VAL: i64 = 4
+val DECL_VAR: i64 = 5
+val DECL_USE: i64 = 6
+val DECL_EXPORT: i64 = 7
+val DECL_ENUM: i64 = 8
+val DECL_AOP_ADVICE: i64 = 14
+val DECL_DI_BINDING: i64 = 15
+val DECL_ARCH_RULE: i64 = 16
 
 # Helper struct for building CoreDecl (defined in ast_types.spl)
 # Since we can't use generics at runtime, we construct these manually
@@ -81,8 +82,9 @@ fn get_decl_info(did: i64) -> ModuleDeclInfo:
 var loaded_module_paths: [text] = []
 var loaded_module_file_paths: [text] = []
 var loaded_module_exports: [[text]] = []
-# Dict for O(1) module loaded check
-var loaded_module_set = {}
+var loaded_module_decl_starts: [i64] = []
+var loaded_module_decl_ends: [i64] = []
+var loaded_module_active: [bool] = []
 
 # ===== Deferred (Lazy) Module Tracking =====
 
@@ -132,7 +134,7 @@ fn try_force_any_deferred_for(symbol_name: text) -> i64:
             if imported_names.len() > 0:
                 var can_provide = false
                 for imported_name in imported_names:
-                    if imported_name == symbol_name:
+                    if import_binding_local_name(imported_name) == symbol_name:
                         can_provide = true
                 if not can_provide:
                     i = i + 1
@@ -151,7 +153,9 @@ fn module_loader_init():
     loaded_module_paths = []
     loaded_module_file_paths = []
     loaded_module_exports = []
-    loaded_module_set = {}
+    loaded_module_decl_starts = []
+    loaded_module_decl_ends = []
+    loaded_module_active = []
     deferred_module_names = []
     deferred_module_files = []
     deferred_module_imports = []
@@ -161,17 +165,40 @@ fn module_loader_init():
     irt_init()
 
 fn module_is_loaded(module_path: text) -> i64:
-    if not loaded_module_set.has(module_path):
-        return 0
-    if loaded_module_set[module_path] == true:
-        return 1
+    var i: i64 = 0
+    for loaded_path in loaded_module_paths:
+        if loaded_path == module_path:
+            if loaded_module_active[i]:
+                return 1
+            return 0
+        i = i + 1
     0
 
-fn module_mark_loaded(module_path: text, file_path: text, exports: [text]):
+fn module_mark_loaded(module_path: text, file_path: text, exports: [text], decl_start: i64, decl_end: i64):
+    var existing_index: i64 = 0
+    for existing_path in loaded_module_paths:
+        if existing_path == module_path:
+            loaded_module_file_paths[existing_index] = file_path
+            loaded_module_exports[existing_index] = exports
+            loaded_module_decl_starts[existing_index] = decl_start
+            loaded_module_decl_ends[existing_index] = decl_end
+            loaded_module_active[existing_index] = true
+            return
+        existing_index = existing_index + 1
     loaded_module_paths.push(module_path)
     loaded_module_file_paths.push(file_path)
     loaded_module_exports.push(exports)
-    loaded_module_set[module_path] = true
+    loaded_module_decl_starts.push(decl_start)
+    loaded_module_decl_ends.push(decl_end)
+    loaded_module_active.push(true)
+
+fn module_find_by_name(module_name: text) -> i64:
+    var i: i64 = 0
+    for loaded_name in loaded_module_paths:
+        if loaded_name == module_name:
+            return i
+        i = i + 1
+    -1
 
 fn module_get_file_path(module_name: text) -> text:
     var i: i64 = 0
@@ -197,7 +224,9 @@ fn module_alias_loaded(alias_name: text, file_path: text) -> i64:
     if module_is_loaded(alias_name) == 1:
         return 1
     val exports = loaded_module_exports[existing_idx]
-    module_mark_loaded(alias_name, file_path, exports)
+    val decl_start = loaded_module_decl_starts[existing_idx]
+    val decl_end = loaded_module_decl_ends[existing_idx]
+    module_mark_loaded(alias_name, file_path, exports, decl_start, decl_end)
     1
 
 # ===== Module Load Depth Guard =====
@@ -221,17 +250,17 @@ fn parse_module_ast(source: text, path: text) -> i64:
         return 1
     0
 
-fn extract_module_exports() -> [text]:
+fn extract_module_exports(decl_start: i64, decl_end: i64) -> [text]:
     # Extract exported function names from parsed module
     # Scans all declarations for DECL_EXPORT statements
 
     var exports: [text] = []
     var export_all = 0
 
-    val decls = module_get_decls()
-
     # First pass: check for export statements
-    for did in decls:
+    var decl_index = decl_start
+    while decl_index < decl_end:
+        val did = module_decl_at(decl_index)
         val tag = decl_get_tag(did)
 
         if tag == DECL_EXPORT:
@@ -239,29 +268,32 @@ fn extract_module_exports() -> [text]:
             val names = decl_get_imports(did)
             for name in names:
                 exports.push(name)
+        decl_index = decl_index + 1
 
     # If no explicit exports found, export all functions
     if exports.len() == 0:
         export_all = 1
 
     if export_all == 1:
-        for did in decls:
+        decl_index = decl_start
+        while decl_index < decl_end:
+            val did = module_decl_at(decl_index)
             val tag = decl_get_tag(did)
 
             if tag == DECL_FN:
                 val name = decl_get_name(did)
                 exports.push(name)
+            decl_index = decl_index + 1
 
     exports
 
-fn register_module_functions():
+fn register_module_functions(owner_path: text, decl_start: i64, decl_end: i64):
     # Register all module functions in interpreter's function table
     # This makes them available for calls
 
-    val decls = module_get_decls()
-    val mod_path = module_get_path()
-
-    for did in decls:
+    var decl_index = decl_start
+    while decl_index < decl_end:
+        val did = module_decl_at(decl_index)
         val tag = decl_get_tag(did)
 
         if tag == DECL_FN:
@@ -269,32 +301,31 @@ fn register_module_functions():
             val ret_type = decl_get_ret_type(did)
             func_table_register(name, did)
             func_register_return_type(name, ret_type)
-            # pure_interp_registry_2026-07-17: record the owning decl_id so a
-            # later bare-name collision from another module doesn't let this
-            # module's unload delete the OTHER module's live registration.
-            irt_track_func_owned(mod_path, name, did)
+            irt_track_func(owner_path, name, did, ret_type, 1)
 
         if tag == DECL_EXTERN_FN:
             val name = decl_get_name(did)
             val ret_type = decl_get_ret_type(did)
             func_register_return_type(name, ret_type)
-            irt_track_func_owned(mod_path, name, did)
+            irt_track_func(owner_path, name, did, ret_type, 0)
 
         if tag == DECL_STRUCT:
             val name = decl_get_name(did)
             struct_table_register(name, did)
-            irt_track_struct_owned(mod_path, name, did)
+            irt_track_struct(owner_path, name, did, struct_table_get_module(name))
 
         if tag == DECL_IMPL:
             for method_id in decl_get_body(did):
                 val method_name = decl_get_name(method_id)
+                val ret_type = decl_get_ret_type(method_id)
                 func_table_register(method_name, method_id)
-                func_register_return_type(method_name, decl_get_ret_type(method_id))
-                irt_track_func_owned(mod_path, method_name, method_id)
+                func_register_return_type(method_name, ret_type)
+                irt_track_func(owner_path, method_name, method_id, ret_type, 1)
 
         if tag == DECL_ENUM:
             val name = decl_get_name(did)
-            irt_track_enum(mod_path, name)
+            irt_track_enum(owner_path, name)
+        decl_index = decl_index + 1
 
 # ===== Public API =====
 
@@ -319,10 +350,11 @@ fn load_module_parse_only(module_name: text, current_file: text) -> i64:
     _module_load_depth = _module_load_depth - 1
     parse_ok
 
-fn load_module_register_only(module_name: text, current_file: text) -> i64:
+fn load_module_register_only(module_name: text, imported_names: [text], current_file: text) -> i64:
     # Parse a module and register its symbols without evaluating a caller module.
     if module_is_loaded(module_name) == 1:
-        return 1
+        irt_begin_module(module_name)
+        return register_cached_import_aliases(module_name, imported_names)
     if _module_load_depth >= _MODULE_LOAD_MAX_DEPTH:
         return 0
     _module_load_depth = _module_load_depth + 1
@@ -330,7 +362,8 @@ fn load_module_register_only(module_name: text, current_file: text) -> i64:
     val resolved_path = resolve_module_path(module_name, current_file)
     if module_alias_loaded(module_name, resolved_path) == 1:
         _module_load_depth = _module_load_depth - 1
-        return 1
+        irt_begin_module(module_name)
+        return register_cached_import_aliases(module_name, imported_names)
     check_gc_family_boundary(current_file, resolved_path, module_name)
 
     val source = load_module_source(resolved_path)
@@ -338,18 +371,24 @@ fn load_module_register_only(module_name: text, current_file: text) -> i64:
         _module_load_depth = _module_load_depth - 1
         return 0
 
+    val decl_start = module_decl_count_get()
     val parse_ok = parse_module_ast(source, resolved_path)
     if parse_ok == 0:
         _module_load_depth = _module_load_depth - 1
         return 0
 
+    val decl_end = module_decl_count_get()
+    if not import_alias_targets_exist(imported_names, decl_start, decl_end):
+        _module_load_depth = _module_load_depth - 1
+        return 0
     irt_begin_module(module_name)
-    val exports = extract_module_exports()
-    register_module_functions()
-    module_mark_loaded(module_name, resolved_path, exports)
+    val exports = extract_module_exports(decl_start, decl_end)
+    register_module_functions(module_name, decl_start, decl_end)
+    val aliases_ok = register_import_aliases(module_name, imported_names, decl_start, decl_end, resolved_path)
+    module_mark_loaded(module_name, resolved_path, exports, decl_start, decl_end)
 
     _module_load_depth = _module_load_depth - 1
-    1
+    aliases_ok
 
 fn load_module(module_name: text, current_file: text) -> i64:
     # Load a module by name and register its exports
@@ -386,51 +425,109 @@ fn load_module(module_name: text, current_file: text) -> i64:
         return 0
 
     # Parse module (append mode — preserves caller's AST)
+    val decl_start = module_decl_count_get()
     val parse_ok = parse_module_ast(source, resolved_path)
     if parse_ok == 0:
         _module_load_depth = _module_load_depth - 1
         return 0
 
+    val decl_end = module_decl_count_get()
     # Begin tracking this module for selective unload
     irt_begin_module(module_name)
 
     # Extract exports
-    val exports = extract_module_exports()
+    val exports = extract_module_exports(decl_start, decl_end)
 
     # Register functions (also hooks into irt_track_*)
-    register_module_functions()
+    register_module_functions(module_name, decl_start, decl_end)
 
     # Mark as loaded
-    module_mark_loaded(module_name, resolved_path, exports)
+    module_mark_loaded(module_name, resolved_path, exports, decl_start, decl_end)
 
     _module_load_depth = _module_load_depth - 1
     1
+
+fn import_binding_original_name(binding: text) -> text:
+    val separator = str_index_of(binding, ":")
+    if separator >= 0:
+        return binding.slice(0, separator)
+    binding
+
+fn import_binding_local_name(binding: text) -> text:
+    val separator = str_index_of(binding, ":")
+    if separator >= 0:
+        return binding.slice(separator + 1, binding.len())
+    binding
+
+fn register_cached_import_aliases(module_name: text, imported_names: [text]) -> i64:
+    val module_index = module_find_by_name(module_name)
+    if module_index < 0:
+        return 0
+    register_import_aliases(
+        module_name,
+        imported_names,
+        loaded_module_decl_starts[module_index],
+        loaded_module_decl_ends[module_index],
+        loaded_module_file_paths[module_index],
+    )
+
+fn import_alias_targets_exist(imported_names: [text], decl_start: i64, decl_end: i64) -> bool:
+    for binding in imported_names:
+        val original_name = import_binding_original_name(binding)
+        val local_name = import_binding_local_name(binding)
+        if original_name == local_name:
+            continue
+
+        var target_found = false
+        var decl_index = decl_start
+        while decl_index < decl_end:
+            val did = module_decl_at(decl_index)
+            if decl_get_name(did) == original_name:
+                val tag = decl_get_tag(did)
+                if tag == DECL_FN or tag == DECL_STRUCT:
+                    target_found = true
+            decl_index = decl_index + 1
+        if not target_found:
+            return false
+    true
+
+fn register_import_aliases(module_name: text, imported_names: [text], decl_start: i64, decl_end: i64, owner_path: text) -> i64:
+    var all_aliases_bound: i64 = 1
+    for binding in imported_names:
+        val original_name = import_binding_original_name(binding)
+        val local_name = import_binding_local_name(binding)
+        if original_name == local_name:
+            continue
+
+        var alias_bound = false
+        var decl_index = decl_start
+        while decl_index < decl_end:
+            val did = module_decl_at(decl_index)
+            if decl_get_name(did) == original_name:
+                val tag = decl_get_tag(did)
+                if tag == DECL_FN:
+                    func_table_register(local_name, did)
+                    val ret_type = decl_get_ret_type(did)
+                    func_register_return_type(local_name, ret_type)
+                    irt_track_func(module_name, local_name, did, ret_type, 1)
+                    alias_bound = true
+                if tag == DECL_STRUCT:
+                    struct_table_register_owned(local_name, did, owner_path)
+                    irt_track_struct(module_name, local_name, did, owner_path)
+                    alias_bound = true
+            decl_index = decl_index + 1
+
+        if not alias_bound:
+            all_aliases_bound = 0
+    all_aliases_bound
 
 fn load_module_selective(module_name: text, imported_names: [text], current_file: text) -> i64:
     # Load module and register requested names
     # Returns 1 on success, 0 on failure
 
-    # Check if already loaded
-    if module_is_loaded(module_name) == 1:
-        return 1
-
-    # Optimization: if all requested names are already in function table,
-    # skip loading the module entirely (handles built-in functions)
-    var all_available = true
-    for name in imported_names:
-        if func_table_lookup(name) < 0:
-            all_available = false
-            break
-    if all_available and imported_names.len() > 0:
-        module_mark_loaded(module_name, "", imported_names)
-        return 1
-
-    # Full load
-    val load_ok = load_module(module_name, current_file)
-    if load_ok == 0:
-        return 0
-
-    1
+    # Selective imports must preserve exact original/local bindings, so bypass
+    # outline-only lazy loading and register the owning module eagerly.
+    load_module_register_only(module_name, imported_names, current_file)
 
 # ===== GC Family Boundary Warnings =====
 #
@@ -544,6 +641,6 @@ fn interp_unload_module(module_name: text) -> i64:
         val same_file = file_path != "" and loaded_module_file_paths[i] == file_path
         if same_name or same_file:
             removed = removed + irt_unload_module(loaded_name)
-            loaded_module_set[loaded_name] = false
+            loaded_module_active[i] = false
         i = i + 1
     removed

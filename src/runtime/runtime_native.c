@@ -3638,6 +3638,47 @@ int64_t rt_dict_entries(int64_t dict) {
     return (int64_t)(uintptr_t)arr;
 }
 
+/* Array helpers for .zip() and .enumerate() on native runtime.
+ * Keep tuple shape consistent with dict entry exports and runtime ABI.
+ */
+int64_t rt_array_zip(int64_t a, int64_t b) {
+    RtCoreArray* left = rt_core_as_array(a);
+    RtCoreArray* right = rt_core_as_array(b);
+    if (!left || !right) return 0;
+    int64_t result_len = left->len;
+    if (right->len < result_len) result_len = right->len;
+    SplArray* result = rt_array_new(result_len);
+    if (!result) return 0;
+    int64_t i = 0;
+    while (i < result_len) {
+        int64_t pair = rt_tuple_new(2);
+        if (pair == rt_core_nil()) return 0;
+        rt_tuple_set(pair, 0, rt_array_get((SplArray*)left, i));
+        rt_tuple_set(pair, 1, rt_array_get((SplArray*)right, i));
+        rt_array_push(result, pair);
+        i = i + 1;
+    }
+    return (int64_t)(uintptr_t)result;
+}
+
+int64_t rt_array_enumerate(int64_t array) {
+    RtCoreArray* source = rt_core_as_array(array);
+    if (!source) return 0;
+    int64_t len = source->len;
+    SplArray* result = rt_array_new(len);
+    if (!result) return 0;
+    int64_t i = 0;
+    while (i < len) {
+        int64_t pair = rt_tuple_new(2);
+        if (pair == rt_core_nil()) return 0;
+        rt_tuple_set(pair, 0, rt_value_int(i));
+        rt_tuple_set(pair, 1, rt_array_get((SplArray*)source, i));
+        rt_array_push(result, pair);
+        i = i + 1;
+    }
+    return (int64_t)(uintptr_t)result;
+}
+
 /* Normalize an iterable for index-based for-loops (mirrors the Rust/JIT runtime).
  * Dicts become an array of (key, value) tuples; everything else passes through.
  * Native AOT links the C runtime, which previously lacked this symbol entirely,

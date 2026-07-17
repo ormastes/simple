@@ -91,6 +91,34 @@ fn native_object_staging_survives_cache_clean() {
 }
 
 #[test]
+fn native_object_materialization_retries_the_complete_cached_and_fresh_set() {
+    let cache = tempfile::tempdir().unwrap();
+    let cached_source = cache.path().join("cached.o");
+    std::fs::write(&cached_source, b"cached-object").unwrap();
+    let cached_objects = vec![(0usize, cached_source)];
+    let fresh_objects = vec![(1usize, b"fresh-object".to_vec())];
+
+    let initial = tempfile::tempdir().unwrap();
+    let initial_path = initial.path().to_path_buf();
+    let mut removed_initial = false;
+    let (replacement, mut all_paths) =
+        materialize_native_objects_with_initial_and_hook(initial, &cached_objects, &fresh_objects, |directory| {
+            if !removed_initial {
+                std::fs::remove_dir_all(directory).unwrap();
+                removed_initial = true;
+            }
+        })
+        .unwrap();
+
+    assert!(removed_initial);
+    assert_ne!(replacement.path(), initial_path);
+    all_paths.sort_by_key(|(index, _)| *index);
+    assert_eq!(std::fs::read(&all_paths[0].1).unwrap(), b"cached-object");
+    assert_eq!(std::fs::read(&all_paths[1].1).unwrap(), b"fresh-object");
+    assert!(all_paths.iter().all(|(_, path)| path.starts_with(replacement.path())));
+}
+
+#[test]
 fn msvc_lib_archive_commands_use_native_argument_forms() {
     let archive = PathBuf::from("out.lib");
     let objects = vec![PathBuf::from("one.obj"), PathBuf::from("two.obj")];
@@ -213,13 +241,7 @@ __attribute__((constructor(101))) static void non_llvm_ctor(void) {}
 #[test]
 fn canonical_bootstrap_does_not_force_diagnostic_whole_archive_mode() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest_dir
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap().parent().unwrap();
     let script = std::fs::read_to_string(repo_root.join("scripts/bootstrap/bootstrap-from-scratch.sh")).unwrap();
 
     assert!(!script.contains("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1"));
@@ -1063,9 +1085,9 @@ fn test_entry_closure_real_frontend_core_package_has_no_ambiguous_export() {
         })
         .source_dir(repo_root.join("src"))
         .entry_file(entry);
-    let files = builder.discover_files().expect(
-        "real src/compiler/10.frontend/core package must resolve without a false ambiguous-export error",
-    );
+    let files = builder
+        .discover_files()
+        .expect("real src/compiler/10.frontend/core package must resolve without a false ambiguous-export error");
     assert!(files.iter().any(|path| same_file_path(path, &core_init)));
 }
 
@@ -1086,11 +1108,7 @@ fn test_entry_closure_bare_export_rejects_genuine_duplicate_definitions() {
     let init = package.join("__init__.spl");
     let a = package.join("a.spl");
     let b = package.join("b.spl");
-    std::fs::write(
-        &entry,
-        "use pkg2.{helper}\nfn main() -> i64:\n    return helper()\n",
-    )
-    .unwrap();
+    std::fs::write(&entry, "use pkg2.{helper}\nfn main() -> i64:\n    return helper()\n").unwrap();
     std::fs::write(&init, "export helper\n").unwrap();
     // Two genuinely different symbols happen to share a name: this must
     // still fail loudly rather than silently pick one.
@@ -4031,10 +4049,9 @@ fn test_llvm_mangle_resolves_desugared_cross_module_method() {
     );
 
     match &mir.functions[0].blocks[0].instructions[0] {
-        crate::mir::MirInst::MethodCallStatic { func_name, .. } => assert_eq!(
-            func_name,
-            "frontend__treesitter__outline_lexer__treesitter_match_token"
-        ),
+        crate::mir::MirInst::MethodCallStatic { func_name, .. } => {
+            assert_eq!(func_name, "frontend__treesitter__outline_lexer__treesitter_match_token")
+        }
         other => panic!("expected static method call, got {other:?}"),
     }
 }
@@ -6156,7 +6173,11 @@ fn test_global_build_fingerprint_manifest_roundtrip_and_reason() {
     let line = base.to_manifest_line();
     let parsed = GlobalBuildFingerprint::from_manifest_line(&line).expect("manifest line must parse");
     assert_eq!(parsed, base, "manifest round-trip must preserve all five components");
-    assert_eq!(base.changed_reason(&parsed), None, "identical fingerprints report no change");
+    assert_eq!(
+        base.changed_reason(&parsed),
+        None,
+        "identical fingerprints report no change"
+    );
 
     let mut layout_changed = base;
     layout_changed.layout = 0x9999_9999_9999_9999;
@@ -6232,7 +6253,11 @@ fn test_incremental_hardening_invalidates_on_cross_module_struct_change() {
     // Build 1: cold cache -> both modules compile fresh.
     let r1 = build();
     assert_eq!(r1.cached, 0, "cold build must not report cache hits");
-    assert!(r1.compiled >= 2, "cold build must compile both modules, got {}", r1.compiled);
+    assert!(
+        r1.compiled >= 2,
+        "cold build must compile both modules, got {}",
+        r1.compiled
+    );
 
     // Build 2: leaf body-only change in A (constant), B untouched. B stays cached
     // -> incrementality is real (not a full rebuild on every edit).
