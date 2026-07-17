@@ -65,6 +65,17 @@ decoded `…|NotoSansMono-Regular|…`. Worked around in font_registry with
 primitive char-extraction stripping; the builtin needs an all-occurrences
 native lowering (rt_string_replace appears to be single-shot).
 
+## Sibling defect: text char-extraction loop faults on baremetal
+First workaround attempt for the `.replace` defect (a `str_char_at(family, i)`
+loop stripping spaces, running during font candidate construction) produced a
+guest EXCEPTION FRAME (`rip=0x8a2bc01` in the
+`FontRasterizer.load_selected_bytes` → candidate-construction path, right
+after `font read alias bytes=1708408`, stray `51984207` printed). `s[idx]`
+text indexing on a text *parameter* is implicated (the same op on a LOCAL
+literal receiver works — `char_from_code_inline`'s ASCII table). Replaced
+with a literal lookup table (`_font_candidate_no_space_family`). Not
+root-caused; same erased/typed-receiver builtin family as above.
+
 ## Related perf blocker (repro attempt)
 The minimal host repro could not complete: `stage3 native-build --backend
 cranelift --runtime-bundle simple-core --mode dynload` on a 7-line entry spun
