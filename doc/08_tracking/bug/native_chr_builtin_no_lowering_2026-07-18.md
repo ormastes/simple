@@ -92,6 +92,15 @@ literal receiver works — `char_from_code_inline`'s ASCII table). Replaced
 with a literal lookup table (`_font_candidate_no_space_family`). Not
 root-caused; same erased/typed-receiver builtin family as above.
 
+## Perf gap: pure-Simple glyf rasterization slows 4K WM re-render past 90s
+With real fonts active, the F11-maximize re-render (full-4K window + text via
+`rasterize_sfnt_glyf`'s per-pixel `_coverage` edge sampling) no longer fits
+the harness's 90s correlation budget under TCG x86_64-on-arm64 (guest printed
+the irq marker, then state/frame arrived after the deadline). Budget raised
+to 300s in check-simpleos-wm-fullscreen-evidence.shs (strictness unchanged).
+Real fix: glyph bitmap caching across frames on the executor path and/or a
+scanline rasterizer instead of 4x-sample per-pixel coverage.
+
 ## Related perf blocker (repro attempt)
 The minimal host repro could not complete: `stage3 native-build --backend
 cranelift --runtime-bundle simple-core --mode dynload` on a 7-line entry spun
