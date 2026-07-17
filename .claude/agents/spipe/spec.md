@@ -51,6 +51,10 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
    `build_interpreter_result_wrapper`; do not create another harness.
    CUDA font production specs must apply the canonical artifact-trust rule in
    `.claude/skills/spipe.md`.
+   Extracted optimization/font source bytes must match their emitter-declared
+   hashes. Vulkan font checking rejects missing/malformed hashes before compilation; a
+   well-formed stale source may retain compiled `.comp`/`.spv` candidates for
+   review, but remains invalid until source and artifact pins both match.
 10. Append the spec file list, generated manual paths, coverage matrix, and
     manual rendering policy to state file
 

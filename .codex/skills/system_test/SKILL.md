@@ -172,7 +172,11 @@ describe "<Feature Name>":
   `FontRenderer`. This source/spec result is not QEMU framebuffer evidence.
   Vulkan font promotion requires `artifact_mode=precompiled-spirv` and the exact
   pinned artifact hash; runtime GLSL may be diagnostic execution but cannot
-  satisfy native promotion.
+  satisfy native promotion. The checker requires extracted optimization/font
+  source bytes to match their emitter-declared hashes and rejects malformed hashes
+  before compilation. A well-formed stale Vulkan source may compile and retain
+  its `.comp`/`.spv` candidate for review, but its evidence remains invalid;
+  admission requires both source and artifact pins to match.
   Compiled native evidence must name the Simple-emitted font companion, prove
   its versioned exported symbol, and prove the promoted runtime loaded that same
   artifact; a handwritten PTX or independently generated SPIR-V blob is not

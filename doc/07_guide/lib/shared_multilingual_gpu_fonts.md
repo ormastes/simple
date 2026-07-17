@@ -362,15 +362,22 @@ only when both artifacts export their required symbols. Its retained
 `evidence.env` records the configured Simple invocation path/SHA-256 separately
 from its resolved native ELF or Mach-O runtime path/SHA-256, canonical emitter source/version
 hashes, generated-source SHA-256, compiler executable/version,
-and compiled artifact SHA-256/bytes/required symbols. The same checker emits
-canonical Vulkan GLSL and compiles a distinct Vulkan 1.1 `.spv`, preferring the
+and compiled artifact SHA-256/bytes/required symbols. The checker emits source
+bytes only through the raw emitter protocol and rejects them before compilation
+unless their SHA-256 equals the emitter-declared source hash for both the
+optimization and font companions. It also emits canonical Vulkan GLSL and
+compiles a distinct Vulkan 1.1 `.spv`, preferring the
 pinned artifact's `glslc` recipe with glslang as a fallback, but accepts it only
 when the canonical source and fresh artifact
 match the pinned
 `c94b13736bdf7022835c008c09d714507da4cd0b6ef4607a5eadc9a23549cd2c`
 and `e25d25b8157fc2554822637603471a442f678eb58e20da167bfb023d7577880a`
 identities exactly. A mismatch
-fails closed; the checker does not install its fresh artifact. Production keeps
+fails closed; the checker does not install its fresh artifact. Missing or
+malformed source hashes stop before compilation. A well-formed stale source is
+compiled and its `.comp`/`.spv` candidate is retained for review, but evidence
+remains invalid; only matching source and artifact pins may report
+`compiled_artifact_verified`. Production keeps
 the independently pinned embedded SPIR-V, but `VulkanSession` currently rejects
 its stale semantics before resource creation.
 CUDA compile plans use

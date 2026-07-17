@@ -405,7 +405,11 @@ is one fused submit-through-device-completion interval; the later `sync` field
 is fence observation, not disjoint device time. Offscreen rendering records
 `not-applicable-offscreen` presentation and still requires device readback.
 Vulkan promotion also requires the exact pinned precompiled-SPIR-V hash;
-magic-valid alternative modules and runtime GLSL remain unpromoted.
+magic-valid alternative modules and runtime GLSL remain unpromoted. The checker
+requires extracted optimization/font source bytes to match their emitter-declared
+hashes and rejects missing or malformed hashes before compilation. A well-formed stale
+Vulkan source may compile and retain `.comp`/`.spv` candidates for review, but
+evidence remains invalid until both source and artifact pins match.
 
 For RenderDoc evidence, use the shared helper interface instead of spelling
 `renderdoccmd` directly in each spec or check script:

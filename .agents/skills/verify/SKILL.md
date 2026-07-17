@@ -49,6 +49,10 @@ not create, rewrite, or weaken SPipe after verification.
 - Shared interface/manual helper names match the design/spec/manual references
 - CUDA font production trust must satisfy the canonical artifact rule in
   `.codex/skills/system_test/SKILL.md` before PASS.
+- The checker requires extracted optimization/font source bytes to match their
+  emitter-declared hashes. Vulkan rejects missing/malformed hashes before compilation;
+  a well-formed stale source may retain compiled `.comp`/`.spv` candidates for
+  review, but remains invalid until both source and artifact pins match.
 - Placeholder helper definitions fail explicitly with `assert(false)` or
   `fail(...)`; silent no-op helpers are a FAIL
 - For broad SPipe lanes, the recorded cooperative review plan is complete or

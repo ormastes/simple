@@ -71,11 +71,14 @@ The dedicated Vulkan plan preserves the canonical source, `main` symbol,
 GLSL/SPIR-V formats, tool hint, and `.comp`/`.spv` suffixes. Synthetic artifact
 contracts cover `pass`, missing bytes, bad magic, and missing `main`. Contract
 validity is metadata validation, not compilation or GPU execution evidence.
-The toolchain checker rejects missing or malformed SHA-256 provenance before
-compilation. When a well-formed generated source differs from the admitted
-source pin, it records `vulkan_font_source_equivalent=false`, compiles and
-retains the candidate `.comp`/`.spv` for review, then reports an invalid result;
-only matching source and artifact pins may report `compiled_artifact_verified`.
+The emitter writes each delimited body with raw output, and the toolchain
+checker requires the extracted optimization, font, and Vulkan bytes to match
+their emitter-declared SHA-256 values before compilation. Missing, malformed,
+or byte-mismatched provenance fails closed. When a well-formed generated source
+differs only from the admitted source pin, it records
+`vulkan_font_source_equivalent=false`, compiles and retains the candidate
+`.comp`/`.spv` for review, then reports an invalid result; only matching source
+and artifact pins may report `compiled_artifact_verified`.
 
 | Target | Source marker | Source | Planned output | Tool hint |
 |---|---|---|---|---|
