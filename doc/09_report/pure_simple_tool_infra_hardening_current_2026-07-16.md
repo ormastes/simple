@@ -552,6 +552,17 @@ so executable qualification is still blocked.
   spawn/internal `-1`, clean up process groups where supported, and avoid
   blocking on descendant-held pipes. Native/interpreter flood and descendant
   timeout regressions plus a production-runner source contract cover the fix.
+- The fresh Stage 2 nine-file LLVM frontier includes an arity-wiring regression.
+  Commit `7669a89bede` deleted the production `llvm.set_fn_arities(...)`
+  wiring while leaving discovery and backend unit coverage intact; the setter
+  is restored and source-pinned. Separately, project-wide import fallback can
+  rebind leaked payload/local/generic names (`args`, `T`, and `count`) to
+  unrelated `system.args`, `Tensor.T`, and `Iterator.count` symbols. Two
+  bounded fail-closed experiments regressed to 31 and then 19 failing files,
+  proving that a resolver-only spelling heuristic is unsafe; both experiments
+  were removed. The remaining repair must preserve destructured-local and
+  active-generic provenance before MIR global resolution. Fresh Stage 2
+  admission for the arity-only repair remains pending.
 - Lowercase `shared` was independently found to bind as a lowercase pattern
   but parse as capitalized `Shared` when read, allowing lenient project
   lowering to turn an ordinary local into an undeclared enum-like global.

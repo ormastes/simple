@@ -11,6 +11,17 @@ use crate::pipeline::execution::runtime_bundle_env_lock_for_tests as runtime_bun
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
 use super::*;
 
+#[test]
+fn test_llvm_project_path_propagates_import_function_arities() {
+    let compiler = include_str!("compiler.rs");
+    assert!(
+        compiler.contains(
+            "llvm.set_import_map(imports.import_map.clone());\n            llvm.set_fn_arities(imports.fn_arities.clone());"
+        ),
+        "LLVM project compilation must install discovered function arities before codegen"
+    );
+}
+
 fn simd_tier_env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))

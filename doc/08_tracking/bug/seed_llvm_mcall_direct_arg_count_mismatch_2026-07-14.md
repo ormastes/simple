@@ -301,3 +301,18 @@ cases/static receivers fail closed instead of being emitted as external
 `declare`s, then re-run this same gate command. The redeploy-gate verdict
 recorded in `hir_stmt_expr_payload_extraction_nil_2026-07-17.md` is
 NOT-READY, citing this doc as the concrete, already-open blocker.
+
+### 2026-07-17 follow-up: arity wiring and bare-name capture
+
+The fresh-seed nine-file recurrence had two causes. Commit `7669a89bede`
+accidentally removed `llvm.set_fn_arities(imports.fn_arities.clone())` from the
+production LLVM project path, re-exposing explicit imported function values
+such as `char_to_ascii` and `cuda_available`; the setter is restored and
+source-pinned. Two bounded experiments then confirmed that resolving bare
+`GlobalLoad` names cannot safely be restricted by spelling alone: a strict
+local/explicit-use rule regressed to 31 failing files, and declaration-backed
+resolution still left 19. Both incomplete resolver changes were removed.
+The remaining `args`, `T`, and `count` captures require binding provenance:
+destructured locals must remain MIR locals and active generics must not lower
+as runtime globals. No Stage 2 binary was produced; the next session must fix
+that frontend/MIR metadata boundary rather than add another name heuristic.
