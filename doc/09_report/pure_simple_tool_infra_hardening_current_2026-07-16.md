@@ -35,7 +35,7 @@ so executable qualification is still blocked.
 
 | Surface | Status | Bug / missing evidence | Root solution | Priority |
 |---|---|---|---|---|
-| Production runtime | BLOCKED | A fresh-seed bounded Stage 2 admits the imported-enum `Shared` and `String.smf` fixes, then exits normally on a mixed LLVM import/linkage and bare-name-capture frontier; no fresh CLI exists | Preserve local/generic binding provenance, rebuild, admit, and atomically deploy | P0 |
+| Production runtime | BLOCKED | A fresh-seed bounded Stage 2 admits the imported-enum, `String.smf`, and function-arity repairs and compiles every module, then fails at the final link because LLVM places a module's functions in one non-discardable `.text` section and some cross-module method calls retain semantic dotted names; no fresh CLI exists | Emit discardable per-function LLVM sections, normalize desugared method imports, rebuild, admit, and atomically deploy | P0 |
 | Test runner | SOURCE REPAIRED / DEPLOY BLOCKED | The retained release binary crashes in stale two-arg `rt_env_set`; current ABI is correct. Rust native/interpreter wait owners now return `-2` while live, retain the child, reap after kill, and inherit async output so unread pipes cannot hang chatty children. The fresh-seed Stage 2 now reaches a later LLVM import/linkage frontier | Fix the remaining bootstrap frontier, rebuild/deploy the pure CLI, run green/red/empty fixtures, then remove temporary Rust opt-in | P0 |
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; cosine candidate progress is time-throttled instead of reading RSS and writing stderr per pair; exact/cosine line gates share one tokenizer-derived signal prefix; runtime/performance qualification remain | Run focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
 | Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP001-MCP004 share one stable aggregate and LSP scope, while repository mode still fails closed pending an aggregate scanner owner; the UI isolation ratchet has zero new violations; the hot-loop gate reports 30 new findings | Run the retained directory-walk spec, wire the aggregate repository owner, repair classified violations, then run focused fixtures | P1 |
@@ -92,12 +92,15 @@ so executable qualification is still blocked.
 ## Current blockers
 
 1. A clean admitted full-CLI runtime is unavailable. The correctly selected
-   fresh seed clears both imported-enum `Shared` and `String.smf`, then exits
-   normally at Stage 2 on the last pre-arity-run mixed nine-file frontier (`cuda_available`,
-   `system.args`, four `char_to_ascii` sites, two `Tensor.T` sites, and
-   `Iterator.count`). The earlier wrapper run was not admission evidence:
-   `CARGO_TARGET_DIR` rebuilt a fresh shared seed, but the wrapper selected the
-   stale worktree-local seed from its independently computed path.
+   fresh seed now compiles every Stage 2 module and reaches the final linker,
+   admitting the imported-enum, `String.smf`, and function-arity repairs. The
+   retained objects expose two independent roots: dotted semantic method names
+   such as `TreeSitter.match_token` did not try the discovered desugared export
+   `treesitter_match_token`, and LLVM emitted all functions in a module into one
+   `.text` section, preventing `--gc-sections` from discarding unreachable
+   functions with obsolete runtime references. The method normalization is
+   fixed and regression-tested; per-function LLVM sections remain the immediate
+   bootstrap blocker.
 2. NFR-007 and NFR-009 evidence harnesses exist, but their production latency
    and RSS measurements cannot qualify while the deployed runtime is the seed.
 3. The UI isolation ratchet has zero new violations after 22 exact bare-metal,
@@ -588,12 +591,24 @@ so executable qualification is still blocked.
   types back to `ANY` in either discovery order, erases references to ambiguous
   enum/struct owners, conservatively retains payload shape on unit/payload
   conflicts, and prevents late global materialization from overwriting an
-  authoritative local enum. Those regressions each pass 1/1. A direct bounded
-  Stage 2 with the correctly selected fresh seed contains no `Shared` or
-  `String.smf` diagnostic, admitting both fixes. It exits normally at a
-  distinct nine-file LLVM import/linkage frontier and produces no Stage 2
-  binary. The earlier wrapper result was stale-seed evidence because its seed
-  selection does not follow `CARGO_TARGET_DIR`.
+  authoritative local enum. Those regressions each pass 1/1. The first direct
+  bounded Stage 2 with the correctly selected fresh seed contained no `Shared`
+  or `String.smf` diagnostic and exposed a nine-file LLVM/arity frontier. The
+  later current-seed run described below admits that arity repair and advances
+  to the final link. The earlier wrapper result was stale-seed evidence because
+  its seed selection does not follow `CARGO_TARGET_DIR`.
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system
   qualification: NOT RUN because the production runtime identity gate fails
   and this host has no PowerShell/Windows runtime.
+- A fresh current-seed Stage 2 admission compiled every source module and
+  reached the final linker. It produced no earlier LLVM verifier,
+  undeclared-global, imported-enum, `String.smf`, or call-arity failure. Object
+  inspection showed callers with raw `TreeSitter.match_token` while the owner
+  defined `frontend__treesitter__outline_lexer__treesitter_match_token`; the
+  shared dotted-name resolver now tries the conventional lower-joined spelling
+  before bare fallback, with an exact MIR regression passing 1/1. The same
+  inspection showed multi-function objects with one `.text` section, so the
+  already-enabled `--gc-sections` cannot remove dead functions carrying legacy
+  `rt_*`, primitive-method, or bare-name references. Strict mode did not hide
+  these with fallback stubs: its one generated object was a resolved-symbol
+  compatibility jump, and its diagnostic now names that accurately.
