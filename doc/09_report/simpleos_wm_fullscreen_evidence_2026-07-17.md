@@ -10,13 +10,13 @@
 - simple bin version: simple-bootstrap 1.0.0-beta
 - simple bin sha256: 6faa17dbe4342c9fa94c48025c7c57cfdf150c1dea9b8cd9b99877610f9291e7
 - qmp socket: build/simpleos_wm_fullscreen_evidence/qmp.sock
-- kernel: build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf (sha256=13cca56c881ff92d3d294104243658c7a7f89cf28c3221634e018ce779e63c66)
-- disk image: build/simpleos_wm_fullscreen_evidence/fat32-x86_64-font.img (pass, sha256=a160cca51ab87eb636f67d16dcfefd6242a1cb6473b19083deb13645d2951eb6)
+- kernel: build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf (sha256=01330b9e6fe7ffb5550742870afc9bd3892d4cb5b48c838b3738dcf9a62616b2)
+- disk image: build/simpleos_wm_fullscreen_evidence/fat32-x86_64-font.img (pass, sha256=e4af0c7763b7691d20a023f4f4cd762ada0f8760ba0d5b979dc5879535c3fc5d)
 - pinned font asset: assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf (1708408 bytes, sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081)
 - guest font marker: [font-evidence] family=Noto Sans Mono asset_sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081 raster=pure-sfnt-glyf route=shared-wm-draw-ir component_id=taskbar-clock font_size=12 text=00:00 region=right56,bottom48 region_rgb_sha256=ffbd5f7690557565c42853ffd4fd4a6c6049203eaa0d8cc5f8cb981a409287c4
 - font region: build/simpleos_wm_fullscreen_evidence/font-region.rgb (0 bytes, sha256=-, origin=qemu-pmemsave)
 - scanout: address=4160749568 width=3840 height=2160 byte-pitch=15360 format=argb8888 generation=1
-- host nonce: simpleos-wm-1784310551-64731
+- host nonce: simpleos-wm-1784311094-71152
 - input sequences: baseline=0 maximize=0 restore=0
 - maximize IRQ/state/frame: - | - | -
 - restore IRQ/state/frame: - | - | -
