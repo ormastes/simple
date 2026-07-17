@@ -230,8 +230,19 @@ archive_prefix="lib"
 archive_suffix=".a"
 if [ "${os}" = "windows" ]; then
   exe_suffix=".exe"
-  archive_prefix=""
-  archive_suffix=".lib"
+  if [ "${SIMPLE_LINKER_FLAVOR:-}" = "msvc" ]; then
+    archive_prefix=""
+    archive_suffix=".lib"
+  elif [ "${SIMPLE_LINKER_FLAVOR:-}" = "gnu" ]; then
+    archive_prefix="lib"
+    archive_suffix=".a"
+  elif [ "${PLATFORM_ABI}" = "gnu" ]; then
+    archive_prefix="lib"
+    archive_suffix=".a"
+  else
+    archive_prefix=""
+    archive_suffix=".lib"
+  fi
 fi
 
 hash_file() {

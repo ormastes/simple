@@ -237,6 +237,11 @@ invalid for the strict profile, and provider ownership needs a separate link
 profile digest/cache namespace from the canonical input rather than changing
 per-module object keys.
 
+Windows bootstrap artifact discovery now distinguishes MSVC `.lib` from MinGW
+`lib*.a`: explicit linker flavor wins, then canonical `PLATFORM_ABI` preserves
+the public `--msvc`/`--mingw` selection. Static source coverage is present;
+native Windows artifact receipts remain pending.
+
 ---
 
 ## Wave 4 — App/lane-specific (scoped, lower priority)
