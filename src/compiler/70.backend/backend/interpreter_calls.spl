@@ -135,16 +135,26 @@ impl InterpreterBackendImpl:
                 # symbol-keyed `.has()/[]` here would miss or nil-deref. Iterate
                 # `.values()` and match on the populated `name` text instead —
                 # the same robust idiom process_module uses to find `main`.
-                val cf_candidates = ctx.module.functions.values()
-                var cf_target_index = -1
-                var cf_i = 0
-                while cf_i < cf_candidates.len():
-                    val cf_f: HirFunction = cf_candidates[cf_i]
-                    if cf_f.name == f_t.name:
-                        cf_target_index = cf_i
-                    cf_i = cf_i + 1
-                if cf_target_index >= 0:
-                    self.call_hir_function(cf_candidates[cf_target_index], args, ctx)
+                # O(1) resolve via the prebuilt name index (perf); fall back to
+                # the linear scan only when the index is absent (non-process_module
+                # entry points). Last-writer-wins matches the old no-break loop.
+                var cf_target_hit: HirFunction? = nil
+                if ctx.fn_by_name.has(f_t.name):
+                    val cf_hit2: HirFunction = ctx.fn_by_name[f_t.name]
+                    cf_target_hit = Some(cf_hit2)
+                elif not ctx.has_fn_index:
+                    val cf_candidates = ctx.module.functions.values()
+                    var cf_target_index = -1
+                    var cf_i = 0
+                    while cf_i < cf_candidates.len():
+                        val cf_f: HirFunction = cf_candidates[cf_i]
+                        if cf_f.name == f_t.name:
+                            cf_target_index = cf_i
+                        cf_i = cf_i + 1
+                    if cf_target_index >= 0:
+                        cf_target_hit = Some(cf_candidates[cf_target_index])
+                if cf_target_hit.?:
+                    self.call_hir_function(cf_target_hit.unwrap(), args, ctx)
                 else:
                     Err(BackendError.runtime_error("function '{f_t.name}' not found", Some(span)))
 

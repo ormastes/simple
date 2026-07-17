@@ -80,7 +80,18 @@ impl InterpreterBackendImpl:
             val ns: Symbol = nsym_
             val ns_id: i64 = ns.id.id
             names_map[ns_id] = ns.name
-        val ctx = EvalContext(env: env, module: module, backend: self, names: names_map)
+        # Build the name -> HirFunction index ONCE (perf). Both the Call
+        # fast-path in eval_expr and call_function used to linear-scan
+        # module.functions.values() with NO early break on every named call;
+        # for a self-host build (~5.8k fns) that is an O(calls * fns) blowup.
+        # Last-writer-wins here mirrors the old no-break loop exactly. Iterate
+        # .values() bound to a typed local (ANY-erasure cure, same idiom as
+        # names_map) and key by the proven-readable HirFunction.name text.
+        var fn_index: Dict<text, HirFunction> = {}
+        for fidx_fn_ in module.functions.values():
+            val fidx_f: HirFunction = fidx_fn_
+            fn_index[fidx_f.name] = fidx_f
+        val ctx = EvalContext(env: env, module: module, backend: self, names: names_map, fn_by_name: fn_index, has_fn_index: true)
 
         # Locate `main` by symbol name via the symbol table. The cranelift seed
         # miscompiles two things on the single-file / synthetic-main HIR module:
@@ -450,17 +461,29 @@ impl InterpreterBackendImpl:
                         # Resolve the HirFunction straight from the module by name
                         # (same robust idiom process_module uses for `main`) and
                         # call it directly, bypassing the nil-payload Function value.
-                        val cf_named_candidates = ctx.module.functions.values()
+                        # O(1) resolve via the prebuilt name index (perf). The
+                        # index is populated by process_module; when absent (other
+                        # EvalContext entry points) fall back to the linear scan
+                        # so behavior is unchanged. Last-writer-wins in the index
+                        # matches the old no-break loop.
                         var cf_named_index = -1
-                        var cf_named_i = 0
-                        while cf_named_i < cf_named_candidates.len():
-                            val cf_f2: HirFunction = cf_named_candidates[cf_named_i]
-                            if cf_f2.name == cname_t:
-                                cf_named_index = cf_named_i
-                            cf_named_i = cf_named_i + 1
-                        if cf_named_index >= 0:
+                        var cf_named_hit: HirFunction? = nil
+                        if ctx.fn_by_name.has(cname_t):
+                            val cf_hit: HirFunction = ctx.fn_by_name[cname_t]
+                            cf_named_hit = Some(cf_hit)
+                        elif not ctx.has_fn_index:
+                            val cf_named_candidates = ctx.module.functions.values()
+                            var cf_named_i = 0
+                            while cf_named_i < cf_named_candidates.len():
+                                val cf_f2: HirFunction = cf_named_candidates[cf_named_i]
+                                if cf_f2.name == cname_t:
+                                    cf_named_index = cf_named_i
+                                cf_named_i = cf_named_i + 1
+                            if cf_named_index >= 0:
+                                cf_named_hit = Some(cf_named_candidates[cf_named_index])
+                        if cf_named_hit.?:
                             itrace("[EE] Call user-fn fast-path name={cname_t}")
-                            return self.call_hir_function(cf_named_candidates[cf_named_index], arg_values, ctx)
+                            return self.call_hir_function(cf_named_hit.unwrap(), arg_values, ctx)
                         # Struct/class construction (bug doc iteration 21, target
                         # (b)): `P(x: 5)` lowers to a Call whose callee names a
                         # declared struct/class. After builtin + user-fn misses,
@@ -715,12 +738,16 @@ impl InterpreterBackendImpl:
                 match right:
                     case Value.Int(r):
                         Ok(Value.Bool(l > r))
+                    case Value.Float(r):
+                        Ok(Value.Bool(l.to_f64() > r))
                     case _:
                         Err(BackendError.type_error("invalid operands for >", Some(span)))
             case Value.Float(l):
                 match right:
                     case Value.Float(r):
                         Ok(Value.Bool(l > r))
+                    case Value.Int(r):
+                        Ok(Value.Bool(l > r.to_f64()))
                     case _:
                         Err(BackendError.type_error("invalid operands for >", Some(span)))
             case _:
@@ -732,12 +759,16 @@ impl InterpreterBackendImpl:
                 match right:
                     case Value.Int(r):
                         Ok(Value.Bool(l >= r))
+                    case Value.Float(r):
+                        Ok(Value.Bool(l.to_f64() >= r))
                     case _:
                         Err(BackendError.type_error("invalid operands for >=", Some(span)))
             case Value.Float(l):
                 match right:
                     case Value.Float(r):
                         Ok(Value.Bool(l >= r))
+                    case Value.Int(r):
+                        Ok(Value.Bool(l >= r.to_f64()))
                     case _:
                         Err(BackendError.type_error("invalid operands for >=", Some(span)))
             case _:
@@ -789,12 +820,16 @@ impl InterpreterBackendImpl:
                         match right:
                             case Value.Int(r):
                                 Ok(Value.Int(l - r))
+                            case Value.Float(r):
+                                Ok(Value.Float(l.to_f64() - r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for -", Some(span)))
                     case Value.Float(l):
                         match right:
                             case Value.Float(r):
                                 Ok(Value.Float(l - r))
+                            case Value.Int(r):
+                                Ok(Value.Float(l - r.to_f64()))
                             case _:
                                 Err(BackendError.type_error("invalid operands for -", Some(span)))
                     case _:
@@ -806,32 +841,46 @@ impl InterpreterBackendImpl:
                         match right:
                             case Value.Int(r):
                                 Ok(Value.Int(l * r))
+                            case Value.Float(r):
+                                Ok(Value.Float(l.to_f64() * r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for *", Some(span)))
                     case Value.Float(l):
                         match right:
                             case Value.Float(r):
                                 Ok(Value.Float(l * r))
+                            case Value.Int(r):
+                                Ok(Value.Float(l * r.to_f64()))
                             case _:
                                 Err(BackendError.type_error("invalid operands for *", Some(span)))
                     case _:
                         Err(BackendError.type_error("invalid operands for *", Some(span)))
 
             case HirBinOp.Div:
+                if left.is_int() or left.is_float():
+                    match right:
+                        case Value.Int(r):
+                            if r == 0:
+                                return Err(BackendError.runtime_error("division by zero", Some(span)))
+                        case Value.Float(r):
+                            if r == 0.0:
+                                return Err(BackendError.runtime_error("division by zero", Some(span)))
+                        case _: ()
                 match left:
                     case Value.Int(l):
                         match right:
                             case Value.Int(r):
-                                if r == 0:
-                                    Err(BackendError.runtime_error("division by zero", Some(span)))
-                                else:
-                                    Ok(Value.Int(l / r))
+                                Ok(Value.Int(l / r))
+                            case Value.Float(r):
+                                Ok(Value.Float(l.to_f64() / r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for /", Some(span)))
                     case Value.Float(l):
                         match right:
                             case Value.Float(r):
                                 Ok(Value.Float(l / r))
+                            case Value.Int(r):
+                                Ok(Value.Float(l / r.to_f64()))
                             case _:
                                 Err(BackendError.type_error("invalid operands for /", Some(span)))
                     case _:
@@ -891,12 +940,16 @@ impl InterpreterBackendImpl:
                         match right:
                             case Value.Int(r):
                                 Ok(Value.Bool(l < r))
+                            case Value.Float(r):
+                                Ok(Value.Bool(l.to_f64() < r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for <", Some(span)))
                     case Value.Float(l):
                         match right:
                             case Value.Float(r):
                                 Ok(Value.Bool(l < r))
+                            case Value.Int(r):
+                                Ok(Value.Bool(l < r.to_f64()))
                             case _:
                                 Err(BackendError.type_error("invalid operands for <", Some(span)))
                     case Value.String(l):
@@ -914,12 +967,16 @@ impl InterpreterBackendImpl:
                         match right:
                             case Value.Int(r):
                                 Ok(Value.Bool(l <= r))
+                            case Value.Float(r):
+                                Ok(Value.Bool(l.to_f64() <= r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for <=", Some(span)))
                     case Value.Float(l):
                         match right:
                             case Value.Float(r):
                                 Ok(Value.Bool(l <= r))
+                            case Value.Int(r):
+                                Ok(Value.Bool(l <= r.to_f64()))
                             case _:
                                 Err(BackendError.type_error("invalid operands for <=", Some(span)))
                     case _:
