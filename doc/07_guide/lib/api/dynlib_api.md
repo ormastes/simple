@@ -92,6 +92,17 @@ record deterministic failed evidence rows until the wrapper or another compiler
 worker materializes them. Plain app-root startup remains quiet; use
 `--dynsmf-status` when operator or test evidence is needed.
 
+Each successful background compile writes three sidecars next to the artifact:
+`<id>.smf.srchash` (whole-source hash), `<id>.smf.ifacehash` (heuristic hash of
+exported-signature lines only), and `<id>.smf.abi` (the manifest `abi_version`).
+Artifact status is fail-closed on all three: a missing or mismatched `.abi`
+sidecar reports `abi_mismatch` and the artifact is never loaded; a srchash
+mismatch is split by the interface hash into `stale_impl` (exported interface
+unchanged — recompiling the module alone is sufficient) versus
+`stale_interface` (exported interface changed — dependents need a rebuild too);
+a legacy artifact without an `.ifacehash` sidecar falls back to the generic
+`stale_source`. `--dynsmf-status` prints one `id:reason:ready=` line per entry.
+
 ## Current Limitations
 
 - **Libraries must be pre-registered**: `dylib_async_open` calls

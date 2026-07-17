@@ -178,19 +178,90 @@ fn dynsmf_source_hash_stored(artifact_path: text) -> i64:
         return -1
     raw.trim().to_i64() ?? -1
 
+fn dynsmf_abi_path(artifact_path: text) -> text:
+    artifact_path + ".abi"
+
+fn dynsmf_abi_stored(artifact_path: text) -> text:
+    val sidecar = dynsmf_abi_path(artifact_path)
+    if not rt_file_exists(sidecar):
+        return ""
+    val raw = rt_file_read_text(sidecar) ?? ""
+    raw.trim()
+
+fn dynsmf_ifacehash_path(artifact_path: text) -> text:
+    artifact_path + ".ifacehash"
+
+# ponytail: heuristic line-level interface fingerprint — matches exported
+# signature lines only (pub fn/struct/class/enum, trait, export), trimmed and
+# hashed with the same primitive srchash uses (rt_hash_text). Good enough to
+# tell "impl body changed" from "exported interface changed" for dynSMF
+# staleness without pulling compiler internals into the os/smf layer. Upgrade
+# path: reuse the compiler's SHB interface-hash extractor (src/compiler/80.driver/)
+# once it is reachable from here.
+fn dynsmf_interface_line_is_exported(trimmed_line: text) -> bool:
+    trimmed_line.starts_with("pub fn") or trimmed_line.starts_with("pub struct") or
+        trimmed_line.starts_with("pub class") or trimmed_line.starts_with("pub enum") or
+        trimmed_line.starts_with("pub trait") or
+        trimmed_line.starts_with("trait") or trimmed_line.starts_with("export")
+
+fn dynsmf_interface_fingerprint(source_text: text) -> text:
+    var rows: [text] = []
+    val lines = source_text.split("\n")
+    var idx = 0
+    while idx < lines.len():
+        val trimmed = lines[idx].trim()
+        if dynsmf_interface_line_is_exported(trimmed):
+            rows.push(trimmed)
+        idx = idx + 1
+    rows.join("\n")
+
+fn dynsmf_interface_hash_of_text(source_text: text) -> i64:
+    rt_hash_text(dynsmf_interface_fingerprint(source_text))
+
+fn dynsmf_interface_hash_current(source_path: text) -> i64:
+    val content = rt_file_read_text(source_path) ?? ""
+    dynsmf_interface_hash_of_text(content)
+
+fn dynsmf_interface_hash_stored(artifact_path: text) -> i64:
+    val sidecar = dynsmf_ifacehash_path(artifact_path)
+    if not rt_file_exists(sidecar):
+        return -1
+    val raw = rt_file_read_text(sidecar) ?? ""
+    if raw == "":
+        return -1
+    raw.trim().to_i64() ?? -1
+
 fn dynsmf_artifact_status_with_hash(entry: DynSmfManifestEntry, file_present: bool, data: [u8], source_path: text) -> DynSmfArtifactStatus:
     val base = dynsmf_artifact_status_from_bytes(entry, file_present, data)
     if not base.ready:
         return base
+    # abi_version enforcement is fail-closed: a missing or mismatched `.abi`
+    # sidecar means the artifact must never be treated as loadable, even if
+    # the srchash/ifacehash sidecars still look fresh. It needs no source
+    # path, so it runs before the source-path guard below.
+    val stored_abi = dynsmf_abi_stored(entry.path)
+    if stored_abi == "" or stored_abi != entry.abi_version:
+        return DynSmfArtifactStatus(library_id: base.library_id, path: base.path, ready: false, reason: "abi_mismatch", byte_count: base.byte_count, magic_hex: base.magic_hex)
     if source_path == "":
         return base
     val stored = dynsmf_source_hash_stored(entry.path)
     if stored == -1:
         return DynSmfArtifactStatus(library_id: base.library_id, path: base.path, ready: false, reason: "stale_source", byte_count: base.byte_count, magic_hex: base.magic_hex)
     val current = dynsmf_source_hash_current(source_path)
-    if current != stored:
+    if current == stored:
+        return base
+    # Whole-source hash moved. Use the interface-hash sidecar to tell an
+    # impl-only edit (module-only rebuild is sufficient) apart from an
+    # exported-interface edit (dependents need a rebuild too). When the
+    # ifacehash sidecar itself is absent we cannot make that distinction, so
+    # fall back to the original generic "stale_source" reason.
+    val stored_iface = dynsmf_interface_hash_stored(entry.path)
+    if stored_iface == -1:
         return DynSmfArtifactStatus(library_id: base.library_id, path: base.path, ready: false, reason: "stale_source", byte_count: base.byte_count, magic_hex: base.magic_hex)
-    base
+    val current_iface = dynsmf_interface_hash_current(source_path)
+    if current_iface == stored_iface:
+        return DynSmfArtifactStatus(library_id: base.library_id, path: base.path, ready: false, reason: "stale_impl", byte_count: base.byte_count, magic_hex: base.magic_hex)
+    DynSmfArtifactStatus(library_id: base.library_id, path: base.path, ready: false, reason: "stale_interface", byte_count: base.byte_count, magic_hex: base.magic_hex)
 
 fn dynsmf_artifact_status(entry: DynSmfManifestEntry) -> DynSmfArtifactStatus:
     if entry.path == "":
@@ -445,6 +516,8 @@ export dynsmf_default_manifest, dynsmf_manifest_all_precompiled, dynsmf_manifest
 export dynsmf_build_plan, dynsmf_build_plans, dynsmf_build_plans_ready
 export dynsmf_artifact_status_from_bytes, dynsmf_artifact_status, dynsmf_artifacts_ready
 export dynsmf_srchash_path, dynsmf_source_hash_current, dynsmf_source_hash_stored, dynsmf_artifact_status_with_hash
+export dynsmf_abi_path, dynsmf_abi_stored, dynsmf_ifacehash_path
+export dynsmf_interface_fingerprint, dynsmf_interface_hash_of_text, dynsmf_interface_hash_current, dynsmf_interface_hash_stored
 export dynsmf_session_request_background_compiles, dynsmf_session_request_background_compiles_from_statuses, dynsmf_session_queue_missing_background_compiles
 export dynsmf_policy_default, dynsmf_policy_from_args_env
 export dynsmf_session_new, dynsmf_session_autoload, dynsmf_session_autoload_checked, dynsmf_session_load, dynsmf_session_load_checked

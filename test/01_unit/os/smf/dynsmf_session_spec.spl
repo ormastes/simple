@@ -29,12 +29,20 @@ short, and invalid SMF artifacts before accepting a handle.
 """
 
 use std.spec
+use app.io.mod.{file_write, file_delete}
 use os.smf.dynsmf_session.{
     DynSmfManifestEntry,
     DynSmfArtifactStatus,
     dynsmf_default_manifest,
     dynsmf_manifest_all_precompiled,
     dynsmf_artifact_status_from_bytes,
+    dynsmf_artifact_status_with_hash,
+    dynsmf_srchash_path,
+    dynsmf_source_hash_current,
+    dynsmf_abi_path,
+    dynsmf_ifacehash_path,
+    dynsmf_interface_hash_current,
+    dynsmf_interface_fingerprint,
     dynsmf_build_plans,
     dynsmf_build_plans_ready,
     dynsmf_policy_default,
@@ -248,3 +256,116 @@ describe "dynSMF session lifecycle":
         expect(symbol_after.status).to_equal("ok")
         expect(symbol_after.generation).to_be_greater_than(symbol_before.generation)
         expect(reloaded.evidence[8].action).to_equal("reload")
+
+describe "dynSMF interface fingerprint (heuristic exported-line hash input)":
+    it "extracts only exported-signature lines and drops private helpers":
+        val source_text = "fn helper() -> i64:\n    1\n\npub fn demo() -> i64:\n    2\n\nexport demo\n"
+        val fingerprint = dynsmf_interface_fingerprint(source_text)
+        expect(fingerprint).to_contain("pub fn demo() -> i64:")
+        expect(fingerprint).to_contain("export demo")
+        expect(fingerprint).to_not_contain("fn helper")
+
+    it "produces an unchanged fingerprint when only a private helper body changes":
+        val before = "pub fn demo() -> i64:\n    1\n\nfn helper() -> i64:\n    1\n"
+        val after = "pub fn demo() -> i64:\n    1\n\nfn helper() -> i64:\n    2\n"
+        expect(dynsmf_interface_fingerprint(before)).to_equal(dynsmf_interface_fingerprint(after))
+
+    it "produces a changed fingerprint when an exported signature changes":
+        val before = "pub fn demo() -> i64:\n    1\n"
+        val after = "pub fn demo(extra: i64) -> i64:\n    1\n"
+        expect(dynsmf_interface_fingerprint(before)).to_not_equal(dynsmf_interface_fingerprint(after))
+
+describe "dynSMF abi_version + interface-hash hardening (fail-closed sidecars)":
+    it "flags a missing abi sidecar as abi_mismatch (deliberate-red: fail-closed, never mask)":
+        val artifact_path = "build/dynsmf/_ifacehardening_spec_missing_abi.smf"
+        val source_path = "build/dynsmf/_ifacehardening_spec_missing_abi_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_srchash_path(artifact_path), dynsmf_source_hash_current(source_path).to_text())
+        file_write(dynsmf_ifacehash_path(artifact_path), dynsmf_interface_hash_current(source_path).to_text())
+        # Deliberately do NOT write an `.abi` sidecar.
+        val entry = DynSmfManifestEntry(id: "spec_missing_abi", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], source_path)
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("abi_mismatch")
+        file_delete(source_path)
+        file_delete(dynsmf_srchash_path(artifact_path))
+        file_delete(dynsmf_ifacehash_path(artifact_path))
+
+    it "flags a wrong abi sidecar as abi_mismatch and never treats the artifact as loadable (deliberate-red)":
+        val artifact_path = "build/dynsmf/_ifacehardening_spec_wrong_abi.smf"
+        val source_path = "build/dynsmf/_ifacehardening_spec_wrong_abi_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_srchash_path(artifact_path), dynsmf_source_hash_current(source_path).to_text())
+        file_write(dynsmf_ifacehash_path(artifact_path), dynsmf_interface_hash_current(source_path).to_text())
+        file_write(dynsmf_abi_path(artifact_path), "999")
+        val entry = DynSmfManifestEntry(id: "spec_wrong_abi", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], source_path)
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("abi_mismatch")
+        file_delete(source_path)
+        file_delete(dynsmf_srchash_path(artifact_path))
+        file_delete(dynsmf_ifacehash_path(artifact_path))
+        file_delete(dynsmf_abi_path(artifact_path))
+
+    it "reports the artifact ready when abi and srchash sidecars both match current source":
+        val artifact_path = "build/dynsmf/_ifacehardening_spec_fresh.smf"
+        val source_path = "build/dynsmf/_ifacehardening_spec_fresh_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_abi_path(artifact_path), "1")
+        file_write(dynsmf_srchash_path(artifact_path), dynsmf_source_hash_current(source_path).to_text())
+        val entry = DynSmfManifestEntry(id: "spec_fresh", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], source_path)
+        expect(status.ready).to_equal(true)
+        expect(status.reason).to_equal("smf_artifact_ready")
+        file_delete(source_path)
+        file_delete(dynsmf_abi_path(artifact_path))
+        file_delete(dynsmf_srchash_path(artifact_path))
+
+    it "reports stale_impl when srchash is stale but the interface hash is unchanged (module-only rebuild)":
+        val artifact_path = "build/dynsmf/_ifacehardening_spec_stale_impl.smf"
+        val source_path = "build/dynsmf/_ifacehardening_spec_stale_impl_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_abi_path(artifact_path), "1")
+        # srchash sidecar deliberately stale (does not match current whole-file hash).
+        file_write(dynsmf_srchash_path(artifact_path), "1")
+        # ifacehash sidecar matches the CURRENT exported-interface fingerprint (signature unchanged).
+        file_write(dynsmf_ifacehash_path(artifact_path), dynsmf_interface_hash_current(source_path).to_text())
+        val entry = DynSmfManifestEntry(id: "spec_stale_impl", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], source_path)
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("stale_impl")
+        file_delete(source_path)
+        file_delete(dynsmf_abi_path(artifact_path))
+        file_delete(dynsmf_srchash_path(artifact_path))
+        file_delete(dynsmf_ifacehash_path(artifact_path))
+
+    it "reports stale_interface when both srchash and the interface hash are stale (dependents need a rebuild)":
+        val artifact_path = "build/dynsmf/_ifacehardening_spec_stale_interface.smf"
+        val source_path = "build/dynsmf/_ifacehardening_spec_stale_interface_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_abi_path(artifact_path), "1")
+        file_write(dynsmf_srchash_path(artifact_path), "1")
+        file_write(dynsmf_ifacehash_path(artifact_path), "1")
+        val entry = DynSmfManifestEntry(id: "spec_stale_interface", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], source_path)
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("stale_interface")
+        file_delete(source_path)
+        file_delete(dynsmf_abi_path(artifact_path))
+        file_delete(dynsmf_srchash_path(artifact_path))
+        file_delete(dynsmf_ifacehash_path(artifact_path))
+
+    it "falls back to stale_source when the ifacehash sidecar is absent (legacy artifact, cannot distinguish)":
+        val artifact_path = "build/dynsmf/_ifacehardening_spec_missing_ifacehash.smf"
+        val source_path = "build/dynsmf/_ifacehardening_spec_missing_ifacehash_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_abi_path(artifact_path), "1")
+        file_write(dynsmf_srchash_path(artifact_path), "1")
+        # Deliberately no `.ifacehash` sidecar written.
+        val entry = DynSmfManifestEntry(id: "spec_missing_ifacehash", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], source_path)
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("stale_source")
+        file_delete(source_path)
+        file_delete(dynsmf_abi_path(artifact_path))
+        file_delete(dynsmf_srchash_path(artifact_path))
