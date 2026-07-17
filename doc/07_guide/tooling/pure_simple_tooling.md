@@ -4,7 +4,7 @@ This guide records the production contract for `bin/simple` tooling.
 
 ## Runtime Boundary
 
-`test`, `test-daemon`, `check`, `examples-check`, `fmt`, `lint`, `fix`,
+`test`, `test-daemon`, `check`, `examples-check`, `fmt`, `lint`, `fix`, `duplicate-check`,
 `verify`, `spipe-docgen`, `native-build`, `vscode`, `electron`, and `security`
 must route to pure Simple entrypoints by default. The Rust compiler under
 `src/compiler_rust/` is a seed/bootstrap implementation only. It must not be
@@ -99,6 +99,16 @@ and MCP command-line handshake SSpec. `bin/simple_mcp_server` and
 closed when the override is missing or its correlated protocol call fails.
 Successful probes are cached by artifact hash and wrapper-contract version.
 Raw source, Rust seed, and debug fallbacks are not production evidence.
+
+Every bootstrap route that produces a Stage 4 full CLI runs
+`scripts/check/check-bootstrap-essential-tools-smoke.shs` with the exact fresh
+binary. From a temporary non-repository working directory it checks real
+test-runner pass/fail/empty outcomes, focused lint pass/deny outcomes, and
+duplicate-check clean/exact-clone JSON outcomes. The aggregate is bounded,
+sets `SIMPLE_NO_STUB_FALLBACK=1`, and fails closed; a deployed wrapper, raw
+source worker, Rust seed, stale binary, or help-only response cannot satisfy it.
+The gate establishes command dispatch and minimal behavior only. Release still
+requires the full test, lint, and duplication evidence for its scope.
 
 ## Completion Gate
 

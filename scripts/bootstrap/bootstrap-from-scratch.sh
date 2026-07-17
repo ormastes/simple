@@ -897,6 +897,10 @@ fi
 run_logged stage4-redeploy-gate run_timeout_kill 180 sh \
   scripts/check/cert/redeploy_gate/redeploy_gate.shs "${full_bin}"
 
+run_logged stage4-essential-tools-smoke run_timeout_kill 180 env \
+  SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
+  sh scripts/check/check-bootstrap-essential-tools-smoke.shs
+
 echo "Stage 4b: compiling cached UI backend..."
 ui_backend_bin="${full_dir}/simple_ui_backend${exe_suffix}"
 prepare_native_cache stage4b-ui-backend

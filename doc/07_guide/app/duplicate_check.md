@@ -58,8 +58,8 @@ Use `--progress` to print periodic progress to stderr while keeping stdout
 reserved for the normal text or JSON report:
 
 ```bash
-bin/simple run src/compiler/90.tools/duplicate_check/main.spl duplicate-check src/compiler --mode token --progress
-bin/simple run src/compiler/90.tools/duplicate_check/main.spl duplicate-check src/compiler --mode cosine --progress --progress-interval-ms 10000
+bin/simple duplicate-check src/compiler --mode token --progress
+bin/simple duplicate-check src/compiler --mode cosine --progress --progress-interval-ms 10000
 ```
 
 Progress lines include phase, completed work, elapsed seconds, and current RSS.
@@ -85,6 +85,16 @@ whether cache data is warm. As a practical guide on a developer laptop:
 For refactors, prefer scanning the smallest owned directory first. If token or
 cosine mode stays in one phase for several progress intervals, narrow the target
 path or raise `--min-lines` / `--min-tokens`.
+
+## Bootstrap Smoke Boundary
+
+The full CLI links the canonical duplicate-check owner in-process; production
+evidence must not execute `main.spl` as a raw source worker. After Stage 4,
+`scripts/check/check-bootstrap-essential-tools-smoke.shs` runs the exact fresh
+binary from a temporary non-repository directory. It requires clean token JSON
+to exit 0 with zero groups and an exact clone pair to exit 1 with one group,
+two occurrences, and ten duplicated lines. This proves dispatch and a minimal
+detector path; it does not replace semantic/cosine or repository-scale checks.
 
 ---
 

@@ -183,6 +183,15 @@ Stage 4: Full CLI (compiled by verified stage when available)
   -> Backend: selected backend (LLVM default; Cranelift supported)
 ```
 
+After the fresh Stage 4 full CLI passes candidate admission, bootstrap runs
+`scripts/check/check-bootstrap-essential-tools-smoke.shs` against that exact
+absolute binary before continuing. The bounded gate calibrates the test runner
+with green, red, and empty specs; calibrates focused lint with clean and
+`STUB003` fixtures; and requires duplicate-check to distinguish a clean file
+from one exact clone pair. Any wrong exit or missing marker stops bootstrap.
+This is a post-bootstrap sanity gate, not a substitute for release `--whole`
+tests or repository-wide lint and duplication policy.
+
 Before Stage 2 is used to build Stage 3, and before Stage 3 is accepted, the
 wrapper runs the shared bootstrap compiler sanity: exact bootstrap version,
 fail-closed rejection of unsupported `run`, then strict native-build and

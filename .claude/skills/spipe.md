@@ -813,6 +813,14 @@ e.g. a probe handshake), then remove work in order — no double start, exec
 compiled artifacts, lazy tool registry, SHB interface-only loading, thin
 host-wrapper imports — before moving work (background compile, keep-warm).
 Startup gates bound startup only; MCP stdio reads must never gain timeouts.
+For Stage 4 full-CLI acceptance, run the bounded
+`scripts/check/check-bootstrap-essential-tools-smoke.shs` once after candidate
+admission and before later bootstrap/deploy work. Point it at the exact fresh
+CLI, disable stub fallback, and require calibrated test-runner, lint, and
+duplicate-check outcomes plus the aggregate pass marker. Raw source, a deployed
+wrapper, Rust seed, or stale binary is not evidence. This sanity does not
+replace release `--whole` or repository-wide policy checks, and it must not be
+copied into compiler Stages 2 or 3.
 For bootstrap MCP acceptance, run the shared bounded checker once after both
 Stage 5 outputs exist and before deploy. Point it at the exact fresh MCP/LSP
 paths, disable fallback, send initialize/initialized/tools-list, and require
@@ -998,9 +1006,10 @@ before `kill()`/`waitpid()`) belong in the seed runtime too — a failed spawn's
 `-1` reaching `kill(-1)` SIGTERMs every user process (tmux + all SSH sessions +
 `systemd --user`). Such seed changes only take effect after a seed rebuild
 through `scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy`.
-Normal bootstrap reuses the Rust seed and never runs cargo. The wrapper has a
-`-c 'print(1+1)'` deploy smoke gate; still run focused post-deploy smoke before
-claiming the pure-Simple toolchain is healthy (see `.claude/rules/bootstrap.md`).
+Normal bootstrap reuses the Rust seed and never runs cargo. The wrapper's
+`-c 'print(1+1)'` probe is only compiler sanity; the Stage 4 essential-tools
+gate above must pass before claiming the pure-Simple toolchain is healthy (see
+`.claude/rules/bootstrap.md`).
 See `doc/07_guide/runtime/process_kill_safety.md`.
 
 ### Bootstrap gate uses the deployed `bin/release`, not the Rust seed

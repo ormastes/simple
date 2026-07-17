@@ -82,6 +82,16 @@ CLI, test-runner client, launcher, and daemon child share one executable
 selector. A valid `SIMPLE_BINARY` pre-deploy candidate wins and is spawned with
 an argv vector, so qualification never silently switches to deployed tooling.
 
+## Gate essential tools on the fresh Stage 4 CLI
+
+The bootstrap gate uses one exact, absolute Stage 4 candidate from a temporary
+non-repository working directory. “Run the fresh test runner sanity” calibrates
+green, assertion-failing, and empty suites. “Run the fresh lint sanity” checks
+one clean file and one `STUB003` denial. “Run the fresh duplicate checker
+sanity” requires clean JSON and the deterministic one-group/two-occurrence/
+ten-line clone result. Only all three markers plus the aggregate marker pass;
+raw-source, seed, wrapper, stale-binary, and fallback paths are rejected.
+
 ## Measure warm tooling budgets
 
 After one discarded warm-up, focused CLI and single-test samples retain p95

@@ -52,6 +52,14 @@ complete when workflow/tooling behavior changed and the matching guide, skill,
 agent, command, or generated/manual spec docs are still stale. Update the docs
 first, then run focused verification evidence once.
 
+Bootstrap/tooling lanes that produce a Stage 4 full CLI must retain the bounded
+`scripts/check/check-bootstrap-essential-tools-smoke.shs` gate against the exact
+fresh binary. Require the test-runner, lint, duplicate-check, and aggregate pass
+markers. Raw-source execution, a deployed wrapper, Rust seed, stale artifact,
+or disabled stub-fallback guard is not equivalent evidence. Treat this as
+post-bootstrap command sanity; it does not replace release `--whole` tests or
+the applicable full lint and duplication gates.
+
 For release-bound SPipe lanes, the final test-runner evidence is
 `bin/simple test test --whole --mode=interpreter`. `--whole` must retain all
 spec/long-test discovery and execute both `.spl` comment doctests and configured
