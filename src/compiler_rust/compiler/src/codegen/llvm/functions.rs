@@ -1997,9 +1997,19 @@ impl LlvmBackend {
                         let casted = self.coerce_value_to_type(val, target_ty, builder)?;
                         arg_vals.push(casted.into());
                     }
-                    let call_site = builder
-                        .build_call(func, &arg_vals, "mcall_direct")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("qualified method call", &e))?;
+                    let call_site = if declared_param_types.len() != arg_vals.len() {
+                        let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                            arg_vals.iter().map(|_| i64_type.into()).collect();
+                        let fn_type = i64_type.fn_type(&param_types, false);
+                        let fn_ptr = func.as_global_value().as_pointer_value();
+                        builder
+                            .build_indirect_call(fn_type, fn_ptr, &arg_vals, "mcall_direct")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("qualified method call", &e))?
+                    } else {
+                        builder
+                            .build_call(func, &arg_vals, "mcall_direct")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("qualified method call", &e))?
+                    };
                     if let Some(d) = dest {
                         if let Some(ret_val) = call_site.try_as_basic_value().left() {
                             vreg_map.insert(*d, ret_val);
@@ -2849,6 +2859,53 @@ mod tests {
     use crate::mir::{CallTarget, LocalKind, MirInst, MirLocal, Terminator, VReg};
     use simple_common::target::{Target, TargetArch, TargetOS};
     use std::collections::HashMap;
+
+    #[test]
+    fn method_call_static_arity_mismatch_uses_typed_indirect_call() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("method_arity_mismatch").unwrap();
+
+        let mut method = MirFunction::new(
+            "Boxed.read".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        method.blocks[0].instructions.push(MirInst::LocalAddr {
+            dest: VReg(0),
+            local_index: 1,
+        });
+        method.blocks[0].instructions.push(MirInst::Load {
+            dest: VReg(1),
+            addr: VReg(0),
+            ty: crate::hir::TypeId::I64,
+        });
+        method.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+
+        let mut caller = MirFunction::new(
+            "main".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 3,
+        });
+        caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)),
+            receiver: VReg(0),
+            func_name: "Boxed.read".to_string(),
+            args: vec![],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+
+        backend.compile_function(&method).unwrap();
+        backend.compile_function(&caller).unwrap();
+
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("mcall_direct"), "{ir}");
+        backend.verify().unwrap();
+    }
 
     #[test]
     fn direct_call_dest_uses_callee_return_type() {

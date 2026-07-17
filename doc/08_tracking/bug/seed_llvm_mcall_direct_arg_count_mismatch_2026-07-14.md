@@ -96,18 +96,15 @@ Regression test: `test/01_unit/compiler/backend/llvm_call_arity_reconcile_spec.s
 `(i64, i64)` signature; a 3-arg call to the same callee stays a bare call. No
 regression in the existing LLVM backend specs.
 
-### The Rust seed is intentionally NOT patched
+### Temporary Rust seed repair (2026-07-17)
 
-Per project rule ("fix `.spl` not the Rust seed"; the seed is bootstrap-only) and
-explicit direction, the Rust seed's inkwell backend
-(`src/compiler_rust/.../codegen/llvm/functions.rs`, the `mcall_direct` site) is
-left as-is. Its bug is a SEPARATE instance rooted in the inkwell-specific
-`implicit_local_param_slots` param inflation, which the pure-Simple backend does
-not replicate. The fix lands in the real compiler and takes full effect once
-compiled into the deployed binary (a later bootstrap step; the seed's own
-`--backend llvm` inkwell path can be avoided by routing through the llc/text
-path). If a low-level shim is ever needed it belongs in the C runtime, not the
-Rust seed.
+The pure llc/text path cannot yet bootstrap end to end: Stage 2 cross-target
+dispatch and Stage 3 `rt_native_build` re-enter the Rust seed, while the
+Cranelift seed has separate enum/payload corruption. The smallest bootstrap
+repair therefore makes `mcall_direct` use the same typed-indirect arity
+reconciliation already used by sibling LLVM call paths. Matching calls remain
+direct. The focused LLVM verifier regression
+`method_call_static_arity_mismatch_uses_typed_indirect_call` passes.
 
 ## Fresh bootstrap evidence (2026-07-17)
 
@@ -118,6 +115,12 @@ against three-argument declarations. The retained evidence is
 `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`; no
 Stage 2 binary was produced. The bootstrap exited 2 normally, without timeout,
 OOM, crash, or orphaned child.
+
+After the temporary seed repair, the same bounded Stage 2 run reported zero
+argument-count verifier errors (down from the systemic 43-file failure). Stage
+2 now stops later on 19 files with 38 undeclared-global diagnostics; that is a
+separate symbol-lowering bug, led by `char_to_ascii`, `self`, `Shared`, and
+generic symbols. No pure compiler or deployment was produced.
 
 ## Context: in-guest RUN is otherwise REACHABLE
 
