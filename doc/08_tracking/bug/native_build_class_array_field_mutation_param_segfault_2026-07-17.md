@@ -94,3 +94,60 @@ and its strict harness registration.
 This is source hardening, not runtime closure. The strict dual-backend fixture
 remains opt-in until LLVM and Cranelift both print `1` and exit zero; only then
 should it join the Linux, macOS, Windows, and FreeBSD selected green gates.
+
+## Root-cause narrowing (2026-07-17, lane S53 — #138 self-host census)
+
+Confirmed repro at origin tip `f6e7e2a18e5`: the checked-in fixture builds
+clean and SIGSEGVs at runtime (`rc=139`, e.g. crash address `0xbe7e8ec6854` —
+a boxed/tagged value being dereferenced as a pointer, not a real heap address).
+The fault was narrowed with fast dual-protocol probes (native-build, fresh
+filenames):
+
+1. **Not write-specific.** Both a write-only body (`cs[0].value = 5`, no RHS
+   field read) AND a read-only body (`print(cs[0].value)`) on a `[Counter]`
+   PARAMETER SIGSEGV. So the defect is *field access on an indexed element of a
+   class-typed array parameter*, in either direction — not the `FieldSet`
+   store path per se, and not the `Index + FieldSet` combination the original
+   hypothesis named.
+2. **Parameter-specific.** The identical field read on a LOCAL array
+   (`val cs = [Counter.new(7), ...]; print(cs[0].value)` with no function
+   boundary) builds and prints `7`, rc=0. Passing the array across a function
+   call is what breaks it.
+3. **Metadata is present.** `function_lowering.spl:184-200` already registers
+   typed array params: `runtime_array_locals[local]=true`,
+   `runtime_value_locals[local]=true`, and (for `Named` element types)
+   `array_element_struct_syms[local]="Counter"`. So `local_is_runtime_array`
+   is true for the param and the read routes through `rt_array_get` +
+   `decode_runtime_value` + struct-provenance propagation — same path the
+   working LOCAL case uses.
+4. **Class-vs-struct is the discriminator.** A param array of a *struct*
+   (value type, e.g. `struct Point: x: i64; fn rd(ps: [Point]): print(ps[0].x)`)
+   does NOT crash (rc=0) — though it prints a wrong/empty value, a separate
+   value defect. A param array of a *class* (reference type) SIGSEGVs. The
+   defect is specific to CLASS (reference-type) elements crossing the
+   array-parameter boundary.
+5. **`decode_runtime_value` (expr_dispatch.spl:356) makes no class/struct
+   distinction** — a `Named` result type matches none of its integer/bool/
+   float/array/dict/str cases and falls through to
+   `runtime_value_locals[raw.id]=true; return raw` (line 419-421), returning
+   the boxed handle undecoded for BOTH structs and classes.
+
+**Fix locus (revised):** the box/representation of a runtime-array element that
+is a class (reference) handle, at the *argument-passing boundary* — i.e. how a
+`[Class]` value is boxed/passed as a call argument vs. how the callee's
+`rt_array_get`/field-access consumes it. Local arrays work; the same array
+passed as an argument does not. Not `Index + FieldSet` store lowering as first
+hypothesized. Class elements crash (boxed-value-as-pointer deref); struct/
+primitive elements yield wrong values. A safe fix must not regress the
+pervasive `[SomeClass]`-param usage in the compiler's own sources, so it needs
+a real backend-level box/unbox audit + dual-backend fixture proof, not a
+localized MIR-lowering patch.
+
+**Diagnostic note:** `SIMPLE_DUMP_MIR=<filter>` dumps via `eprintln!`
+(`common_backend.rs:1599`), which is lost in native-build's worker stderr — so
+MIR-dump inspection of this crash is not available through the plain
+native-build path; use a JIT/interpreter path or capture worker stderr.
+
+Not fixed in lane S53 (deep codegen box-model change, high regression risk on
+the self-host build; out of a single census lane's safe scope). Analysis above
+supersedes the "likely Index + FieldSet lowering" guess in the Impact section.
