@@ -127,3 +127,35 @@ timeout 5 bin/simple test /tmp/test_io_direct.spl
 - Pure-Simple loader: src/compiler/10.frontend/core/interpreter/module_loader_core.spl:351-404
 - Evaluation phases: src/compiler/10.frontend/core/interpreter/eval_decls.spl:196-201  
 - Rust seed (working): src/compiler_rust/compiler/src/interpreter_module/module_loader.rs:671-683
+
+## STATUS: ROOT-CAUSE THEORY REFUTED (2026-07-17, S65 re-verification)
+
+The module-import-cycle theory above does NOT survive independent re-verification
+at origin tip 99f0294dbda against the deployed release binary:
+
+1. `bin/simple run` on a file containing only `use app.io.mod` completes CLEAN
+   (rc=0, normal output). Same for `use compiler.core.interpreter.module_loader_core`.
+   Module loading is identical across entry commands, so a fatal load-time cycle
+   in this graph cannot exist.
+2. `bin/simple test` hangs (rc=124) on EVERY spec file — including a vanilla
+   `describe/it` spec with zero `use` statements — wedging at the same point
+   (after loading `std.nogc_sync_mut.test_runner.test_executor_composite_jit_generic`,
+   zero further output between 90s and 240s). The hang is test-runner-init-wide,
+   not app.io-specific. The repro in this doc reproduces the generic hang, not a
+   module cycle.
+3. The test-runner infra chain does not transitively import `app.io.mod` or
+   `module_loader_core` (repo-wide grep negative).
+4. The deployed release binary `bin/release/x86_64-unknown-linux-gnu/simple`
+   (46,170,032 bytes, mtime 2026-07-11 08:52, sha256 prefix 561767c6615bc013) is
+   a Rust SEED binary (prints the "bootstrap seed only" warning), not the
+   self-hosted binary. Directory-mode `bin/simple test <dir>` additionally fails
+   with `unknown extern function: rt_process_run_bounded` — that extern IS
+   registered in current-tree seed source, so the stale binary predates it.
+
+Superseding hypothesis: the single-file spec hang is the known stale-seed-binary
+regression (see release-sanity finding "Jul-16 seed stage1 spin = seed-binary
+regression (fresh seed clean)"), to be confirmed by running the vanilla-spec
+probe on a freshly built seed. The loader-hardening change drafted from this
+doc's theory (in-flight cycle tracking, lane S64) is held un-landed: plausible
+defense-in-depth, but its motivating bug is unconfirmed and it is unverifiable
+until redeploy.
