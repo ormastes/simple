@@ -477,6 +477,11 @@ so executable qualification is still blocked.
   and pattern-leading chains. Focused HIR/MIR regression PASS; one bounded
   bootstrap removed `global_local`, `receiver_mir_type_uw`, and (from current
   `main`) `local_unsigned`, reducing undeclared globals from 38 to 32.
+- LLVM imported function values now use the existing exact arity index;
+  focused positive/zero-arity/unknown-negative verifier coverage PASS. One
+  bounded bootstrap removed all `char_to_ascii` and `cuda_available` failures,
+  reducing undeclared globals from 32 to 22 while preserving fail-closed
+  unknown identifiers.
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system
   qualification: NOT RUN because the production runtime identity gate fails
   and this host has no PowerShell/Windows runtime.

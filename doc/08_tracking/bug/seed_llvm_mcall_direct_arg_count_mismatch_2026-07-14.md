@@ -142,6 +142,15 @@ separate `local_unsigned` leak. Stage 2 now reports 32 undeclared-global
 diagnostics (down from 38), with no argument-count errors. The run exited 2
 normally without timeout, OOM, crash, hang, or orphan.
 
+LLVM now receives the existing project import-arity index and predeclares only
+exact known function-valued `GlobalLoad` symbols before compiling bodies. The
+focused verifier covers the canonical layered `char_to_ascii` name, a
+zero-argument `cuda_available` sibling, and an unresolved `self` negative case.
+The single bounded bootstrap removed all ten imported-function diagnostics,
+reducing the total from 32 to 22. Unknown locals, generics, enum cases, and
+static receivers remain fail-closed. The run exited 2 normally without
+timeout, OOM, crash, hang, or orphan.
+
 ## Context: in-guest RUN is otherwise REACHABLE
 
 This bug does NOT block a plain in-guest run: `/usr/bin/simple --version` runs

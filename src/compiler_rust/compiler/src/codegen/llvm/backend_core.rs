@@ -51,6 +51,8 @@ pub struct LlvmBackend {
     pub(super) context: Box<Context>,
     /// Import map: raw function name → mangled name for cross-module resolution
     pub(super) import_map: std::sync::Arc<std::collections::HashMap<String, String>>,
+    /// Exact arity for imported functions, keyed by canonical mangled symbol.
+    pub(super) fn_arities: std::sync::Arc<std::collections::HashMap<String, usize>>,
     /// Mangled module-level data exports, used to distinguish imported data
     /// from imported function symbols when a GlobalLoad references a symbol
     /// that was not present in the importing module's `mir.globals`.
@@ -174,6 +176,7 @@ impl LlvmBackend {
                 coverage_counter: RefCell::new(0),
                 context,
                 import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+                fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 use_map: std::collections::HashMap::new(),
                 function_return_types: RefCell::new(std::collections::HashMap::new()),
@@ -185,6 +188,10 @@ impl LlvmBackend {
     /// Set the import map for cross-module function resolution
     pub fn set_import_map(&mut self, map: std::sync::Arc<std::collections::HashMap<String, String>>) {
         self.import_map = map;
+    }
+
+    pub fn set_fn_arities(&mut self, arities: std::sync::Arc<std::collections::HashMap<String, usize>>) {
+        self.fn_arities = arities;
     }
 
     /// Set the project-wide data export set for cross-module global references.
@@ -297,6 +304,19 @@ impl LlvmBackend {
         for func in &module_ir.functions {
             for block in &func.blocks {
                 for inst in &block.instructions {
+                    if let crate::mir::MirInst::GlobalLoad { global_name, .. } = inst {
+                        if !self.data_exports.contains(global_name) {
+                            if let Some(&arity) = self.fn_arities.get(global_name) {
+                                if m.get_function(global_name).is_none() && m.get_global(global_name).is_none() {
+                                    let params: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                                        std::iter::repeat_n(rv_type.into(), arity).collect();
+                                    let function = m.add_function(global_name, rv_type.fn_type(&params, false), None);
+                                    function.set_linkage(inkwell::module::Linkage::External);
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     let (name, is_store) = match inst {
                         crate::mir::MirInst::GlobalLoad { global_name, .. } => (global_name, false),
                         crate::mir::MirInst::GlobalStore { global_name, .. } => (global_name, true),
@@ -1103,7 +1123,12 @@ impl LlvmBackend {
 #[cfg(all(test, feature = "llvm"))]
 mod tests {
     use super::LlvmBackend;
+    use crate::hir::TypeId;
+    use crate::mir::{MirFunction, MirInst, MirModule, Terminator, VReg};
     use simple_common::target::{Target, TargetArch, TargetOS};
+    use simple_parser::ast::Visibility;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     #[test]
     fn create_module_emits_target_triple_and_datalayout() {
@@ -1115,6 +1140,54 @@ mod tests {
         assert!(ir.contains("target triple"));
         assert!(ir.contains("x86_64"));
         assert!(ir.contains("target datalayout"));
+    }
+
+    #[test]
+    fn global_load_declares_only_exact_known_imported_functions() {
+        let mut backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Linux)).unwrap();
+        backend.create_module("function_values").unwrap();
+        backend.set_fn_arities(Arc::new(HashMap::from([
+            ("backend__backend__common__ascii_utils__char_to_ascii".to_string(), 1),
+            ("nogc_sync_mut__io__cuda_sffi__cuda_available".to_string(), 0),
+        ])));
+
+        let mut caller = MirFunction::new("main".to_string(), TypeId::I64, Visibility::Public);
+        caller.blocks[0].instructions.push(MirInst::GlobalLoad {
+            dest: VReg(0),
+            global_name: "backend__backend__common__ascii_utils__char_to_ascii".to_string(),
+            ty: TypeId::I64,
+        });
+        caller.blocks[0].instructions.push(MirInst::GlobalLoad {
+            dest: VReg(1),
+            global_name: "nogc_sync_mut__io__cuda_sffi__cuda_available".to_string(),
+            ty: TypeId::I64,
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+
+        let mut unresolved = MirFunction::new("unresolved".to_string(), TypeId::I64, Visibility::Private);
+        unresolved.blocks[0].instructions.push(MirInst::GlobalLoad {
+            dest: VReg(0),
+            global_name: "self".to_string(),
+            ty: TypeId::I64,
+        });
+        unresolved.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+
+        let mut mir = MirModule::new();
+        mir.functions = vec![caller.clone(), unresolved];
+        backend.declare_globals(&mir);
+        backend.compile_function(&caller).unwrap();
+
+        let ir = backend.get_ir().unwrap();
+        assert!(
+            ir.contains("declare i64 @backend__backend__common__ascii_utils__char_to_ascii(i64)"),
+            "{ir}"
+        );
+        assert!(
+            ir.contains("declare i64 @nogc_sync_mut__io__cuda_sffi__cuda_available()"),
+            "{ir}"
+        );
+        assert!(!ir.contains("@self"), "{ir}");
+        backend.verify().unwrap();
     }
 }
 

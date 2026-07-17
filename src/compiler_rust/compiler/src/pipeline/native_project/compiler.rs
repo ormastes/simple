@@ -615,6 +615,7 @@ pub(crate) fn compile_file_to_object(
                 LlvmBackend::new_with_opt_level_and_cpu(target, opt_level, native_build_cpu_for_target(target))
                     .map_err(|e| format!("{}: llvm init: {e}", file_path.display()))?;
             llvm.set_import_map(imports.import_map.clone());
+            llvm.set_fn_arities(imports.fn_arities.clone());
             llvm.set_data_exports(imports.data_exports.clone());
             llvm.set_use_map(use_map.clone());
             if !no_mangle {
