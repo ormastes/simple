@@ -174,6 +174,13 @@ focused AST regression passes; the single bounded bootstrap removed both
 `slice` diagnostics, reducing undeclared globals from 14 to 12. The run exited
 2 normally without timeout, OOM, crash, hang, or orphan.
 
+`Tensor<T, N>.ndim` now returns the runtime shape rank from
+`self._shape.len()` instead of loading the generic type parameter `N` as a
+value. The source-contract regression pins the complete method body; the single
+bounded bootstrap removed both `N` diagnostics, reducing undeclared globals
+from 12 to 10. The run exited 2 normally without timeout, OOM, crash, hang, or
+orphan.
+
 ## Context: in-guest RUN is otherwise REACHABLE
 
 This bug does NOT block a plain in-guest run: `/usr/bin/simple --version` runs
