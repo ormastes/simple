@@ -4,76 +4,36 @@
 
 """# CUDA Generated Font Handoff
 
-Conditional device evidence that the source-tracked Simple-generated CUDA font
-artifact passes its immutable trust tuple, is installed by canonical Engine2D
-construction, dispatches on CUDA, and matches an exact CPU pixel oracle.
+Fail-closed evidence for the source-tracked CUDA font artifact while its
+straight-ARGB semantics lag the current common compositor. Canonical
+regeneration with an admitted pure-Simple emitter is required before native
+CUDA device-readback promotion can run again.
 """
 
-use std.spec.{describe, it, expect, step, fail_test}
-use std.gpu.engine2d.engine.{Engine2D}
+use std.spec.{describe, it, expect, step}
 use std.gpu.engine2d.backend_cuda_font_ptx.{
     FONT_ATLAS_COMPOSITE_CUDA_SOURCE_SHA256,
     FONT_ATLAS_COMPOSITE_CUDA_VERSION_SHA256,
     FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256,
     FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION,
+    FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION,
     cuda_font_atlas_composite_ptx,
     cuda_font_atlas_composite_ptx_trusted
 }
-use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 use std.common.crypto.sha256.{sha256_text}
-use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION}
 use compiler.backend.gpu_portable_compute.{PortableComputeTarget, emit_portable_font_atlas_composite_kernel}
 
 describe "CUDA generated font handoff evidence":
-    it "should authenticate the tracked CUDA font artifact and read back its pixels":
-        step("Authenticate the source-tracked Simple-generated CUDA font artifact")
+    it "should reject the stale tracked artifact until canonical regeneration":
+        step("Compare the retained artifact identity with the corrected common compositor")
         val ptx = cuda_font_atlas_composite_ptx()
         val current = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.Cuda)
-        expect(FONT_ATLAS_COMPOSITE_CUDA_SOURCE_SHA256).to_equal(current.source_hash())
-        expect(FONT_ATLAS_COMPOSITE_CUDA_VERSION_SHA256).to_equal(current.version_hash())
+        expect(FONT_ATLAS_COMPOSITE_CUDA_SOURCE_SHA256 == current.source_hash()).to_be(false)
+        expect(FONT_ATLAS_COMPOSITE_CUDA_VERSION_SHA256 == current.version_hash()).to_be(false)
         expect(FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256).to_equal(sha256_text(ptx))
         expect(FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION).to_equal(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION)
-        expect(cuda_font_atlas_composite_ptx_trusted(ptx)).to_be(true)
+        expect(FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION).to_equal(1)
+        expect(FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION).to_equal(2)
+        expect(cuda_font_atlas_composite_ptx_trusted(ptx)).to_be(false)
         expect(cuda_font_atlas_composite_ptx_trusted(ptx + " ")).to_be(false)
-
-        step("Prove native submission and device readback")
-        var engine = Engine2D.create_with_backend(4, 4, "cuda")
-        if engine.backend_name() != "cuda":
-            engine.shutdown()
-            fail_test("CUDA font handoff unavailable: native CUDA Engine2D backend or tracked font artifact is unavailable")
-        else:
-            val pinned_identity = engine.cuda_backend.?.session.font_module_identity
-            engine.clear(0xff000000u32)
-            val batch = FontRenderBatch(
-                program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION,
-                font_identity: "cuda-generated-font-handoff", face_generation: 1,
-                valid: true, atlas_width: 1, atlas_height: 1,
-                atlas_pixels: [0xff000000u32],
-                quads: [FontRenderQuad(
-                    codepoint: 65, byte_offset: 0, dst_x: 1, dst_y: 1,
-                    width: 1, height: 1, atlas_x: 0, atlas_y: 0,
-                    color: 0xffff0000u32)],
-                atlas_generation: 1, dirty_rects: [])
-            val drawn = engine._draw_font_batch_plan(0, 0, batch, ["cuda"])
-            val readback = engine.read_pixels_with_source()
-            val execution_target = engine.font_execution_target()
-            val execution_attempts = engine.font_execution_attempts()
-            engine.shutdown()
-
-            var oracle = [0xff000000u32; 16]
-            oracle[5] = 0xffff0000u32
-            var mismatches: i64 = if readback.pixels.len() == oracle.len(): 0 else: 1
-            var pixel_index: i64 = 0
-            while pixel_index < readback.pixels.len() and pixel_index < oracle.len():
-                if readback.pixels[pixel_index] != oracle[pixel_index]:
-                    mismatches = mismatches + 1
-                pixel_index = pixel_index + 1
-
-            expect(drawn).to_be(true)
-            expect(execution_target).to_equal("cuda")
-            expect(execution_attempts).to_contain("cuda:success")
-            expect(pinned_identity).to_equal("generated-ptx:" + FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256)
-            expect(readback.source).to_equal("device_readback")
-            expect(readback.backend_handle).to_be_greater_than(0)
-            expect(readback.pixel_count).to_equal(16)
-            expect(mismatches).to_equal(0)

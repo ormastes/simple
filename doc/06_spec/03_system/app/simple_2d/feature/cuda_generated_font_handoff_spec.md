@@ -1,6 +1,6 @@
 # CUDA Generated Font Handoff
 
-**Status:** conditional supporting evidence; release-blocking when CUDA is selected
+**Status:** fail-closed stale-artifact evidence; native CUDA promotion pending regeneration
 **Traceability:** REQ-010, REQ-014; NFR-002, NFR-008
 **Executable:** `test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl`
 
@@ -9,24 +9,21 @@
 
 ## Operator flow
 
-### Authenticate the source-tracked Simple-generated CUDA font artifact
+### Reject the stale source-tracked CUDA font artifact
 
-The scenario loads the compiled-in PTX from
-`backend_cuda_font_ptx.spl`, compares its source and emitter-version hashes with
-a fresh Simple CUDA emission, recomputes its PTX SHA-256, checks the program
-version and exact entry, and proves a one-byte change is rejected. It reads no environment variable,
-ignored build artifact, adjacent hash, or package placeholder.
+The scenario loads the compiled-in PTX from `backend_cuda_font_ptx.spl`, proves
+its retained PTX SHA-256 is intact, and compares it with the corrected common
+straight-ARGB emitter. ABI program version remains `1`; common compositor
+semantics are revision `2`, while the retained PTX is explicitly revision `1`.
+The trust gate therefore rejects both the exact stale bytes and tampered bytes.
 
-### Prove native submission and device readback
+### Restore native submission and device readback
 
-Canonical `Engine2D` CUDA construction installs the tracked bytes only through
-`install_cuda_font_artifact` when the active driver accepts them. A rejected
-companion leaves primitive CUDA usable but cannot pass this required font
-scenario. The scenario submits one 1×1
-`FontRenderBatch`, requires `cuda:success`, captures a nonzero device readback
-handle, and compares all 16 pixels with the exact 4×4 CPU oracle. CUDA or
-artifact unavailability, fallback rendering, stale identity, or any pixel
-mismatch fails explicitly.
+Canonical `Engine2D` construction now refuses to install the stale companion,
+while primitive CUDA remains usable. Native font submission and exact CPU pixel
+parity must be restored only after an admitted pure-Simple emitter regenerates
+the CUDA source, PTX, hashes, and semantics revision. Tool-only regeneration is
+not accepted as source provenance.
 
 The default CUDA optimization module still contains no font entry. The tracked
 font companion is separate, immutable for the session, and unloaded with the
@@ -36,8 +33,8 @@ outputs are not production inputs.
 ## Evidence artifacts
 
 - source-tracked `src/lib/gc_async_mut/gpu/engine2d/backend_cuda_font_ptx.spl`
-- focused SPipe result and device-origin readback evidence
+- focused SPipe stale-artifact rejection result
 - optional regeneration output under `build/portable_compute_toolchains/`
 
-The executable spec is authoritative. Regenerate this manual after the
-scenario passes and require SPipe docgen to report zero stubs.
+The executable spec is authoritative. Regenerate this manual with the admitted
+SPipe docgen; no CUDA device-origin font readback PASS is currently claimed.

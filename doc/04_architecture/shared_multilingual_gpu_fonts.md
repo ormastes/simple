@@ -299,7 +299,14 @@ dependencies, converts Simple arrays through runtime accessors, and exposes a
 stable nonzero identity only when `hipDeviceGetUuid` succeeds. Engine2D clears
 dirty state only after copy plus synchronization and labels a readback as
 device-origin only with that UUID identity. A mock HIP/HIPRTC ABI checker covers
-the provider and failure gates; real AMD pixels remain the promotion boundary.
+the provider and failure gates. The common GPU programs and portable codegen
+use the same integer straight-ARGB rule as the CPU compositor: destination
+weight includes destination alpha before RGB is divided by output alpha. The C
+oracle fixes both transparent (`0x80c08040`) and translucent (`0xbf956030`)
+results. `check-rocm-engine2d-font-readback.shs` then binds a configured-font
+device readback to an admitted self-host binary, immutable source/binary hashes,
+and retained runtime/device provenance; real AMD pixels remain the promotion
+boundary.
 
 Production deployment has a separate trust boundary from toolchain evidence.
 Ignored `build/portable_compute_toolchains` output may prove emission and device
@@ -312,6 +319,13 @@ source/emitter hashes exactly with a fresh Simple emission. A rejected companion
 leaves primitive CUDA available while font dispatch follows the existing CPU
 fallback policy. The current package verifier remains inadmissible because it
 skips checksum validation and its builder emits a placeholder checksum.
+
+Straight-ARGB correction increments a separate compositor semantics revision
+without changing the version-1 entry ABI. The retained CUDA PTX and Vulkan
+SPIR-V declare semantics revision 1; the common source declares revision 2.
+Their runtime trust gates therefore reject the stale generated companions until
+an admitted pure-Simple emitter regenerates source, artifacts, and pinned
+identities. Dynamic source backends consume revision-2 source directly.
 
 ## Rejected structures
 

@@ -85,6 +85,7 @@ int main(void) {
     require(rt_rocm_device_memory(0) == ((int64_t)8 << 30), "device memory");
     int64_t identity = rt_rocm_device_identity(0);
     require(identity > 0 && identity == rt_rocm_device_identity(0), "stable device UUID identity");
+    require(rt_rocm_device_identity(1) == 0, "invalid device UUID identity");
     require(rt_rocm_set_device(0) && rt_rocm_get_device() == 0, "device selection");
     require(!rt_rocm_set_device(1), "invalid device rejection");
     int64_t error = rt_rocm_get_last_error();
@@ -118,6 +119,38 @@ int main(void) {
     int64_t stream = rt_rocm_create_stream();
     require(stream > 0 && rt_rocm_stream_synchronize(stream) && rt_rocm_destroy_stream(stream), "stream lifecycle");
     require(rt_rocm_unload_module(module), "module unload");
+
+    int64_t atlas_device = rt_rocm_malloc(4);
+    int64_t target_device = rt_rocm_malloc(4);
+    const int64_t atlas_value[] = {0x80000000};
+    const int64_t target_value[] = {0};
+    TestArray *atlas = array_new(atlas_value, 1);
+    TestArray *target = array_new(target_value, 1);
+    int64_t font_source = string_value(
+        "extern \"C\" __global__ void simple_font_atlas_composite_v1_u32("
+        "const unsigned int* atlas, unsigned int* dst, long atlas_width, "
+        "long atlas_height, long atlas_count, long atlas_x, long atlas_y, "
+        "long quad_width, long quad_height, long dst_width, long dst_height, "
+        "long dst_count, long dst_x, long dst_y, long color) {}");
+    int64_t font_module = rt_rocm_compile_hsaco(font_source);
+    int64_t font_function = rt_rocm_get_function(font_module, string_value("simple_font_atlas_composite_v1_u32"));
+    const int64_t font_values[] = {
+        atlas_device, target_device, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0xffc08040
+    };
+    TestArray *font_args = array_new(font_values, 15);
+    require(atlas_device > 0 && target_device > 0 && font_module > 0 && font_function > 0, "font composite setup");
+    require(rt_engine2d_rocm_upload_pixels(atlas_device, (int64_t)(uintptr_t)atlas, 1) == 0, "font atlas upload");
+    require(rt_engine2d_rocm_upload_pixels(target_device, (int64_t)(uintptr_t)target, 1) == 0, "font target upload");
+    require(rt_rocm_launch_kernel(font_function, 1, 1, 1, 1, 1, 1, 0, (int64_t)(uintptr_t)font_args), "font composite launch");
+    require(rt_engine2d_rocm_download_pixels(target_device, (int64_t)(uintptr_t)target, 4) == 0, "font target readback");
+    require(target->data[0] == 0x80c08040, "font composite transparent pixel parity");
+    target->data[0] = 0x80402010;
+    require(rt_engine2d_rocm_upload_pixels(target_device, (int64_t)(uintptr_t)target, 1) == 0, "font translucent target upload");
+    require(rt_rocm_launch_kernel(font_function, 1, 1, 1, 1, 1, 1, 0, (int64_t)(uintptr_t)font_args), "font translucent composite launch");
+    require(rt_engine2d_rocm_download_pixels(target_device, (int64_t)(uintptr_t)target, 4) == 0, "font translucent target readback");
+    require(target->data[0] == 0xbf956030, "font composite translucent pixel parity");
+    require(rt_rocm_unload_module(font_module) && rt_rocm_free(atlas_device) && rt_rocm_free(target_device), "font composite cleanup");
+
     module = rt_rocm_module_load(source);
     require(module > 0 && rt_rocm_kernel_get(module, string_value("mock_kernel")) > 0, "legacy module aliases");
     require(rt_rocm_unload_module(module), "legacy module unload");

@@ -250,8 +250,11 @@ configuration alias. This source contract does not promote AMD hardware
 execution. The hosted provider is isolated in `runtime_rocm.c`, dynamically
 loads HIP/HIPRTC once, copies typed Simple arrays through public accessors, and
 fails closed when runtime symbols, device metadata, UUID identity, transfer, or
-synchronization evidence is missing. A mock shared-library integration checker
-exercises that ABI without claiming AMD execution. Other backends retain
+synchronization evidence is missing. Atlas composition preserves straight ARGB:
+`dst_weight = dst_alpha * (255 - src_alpha) / 255`, output alpha is source alpha
+plus that weight, and each RGB numerator is divided by output alpha. A mock
+shared-library integration checker exercises that ABI and transparent plus
+translucent pixel oracles without claiming AMD execution. Other backends retain
 image/alpha compatibility. Engine3D
 retains CPU HUD/world compatibility and now has dedicated Vulkan font pipeline,
 sampler-descriptor, depth, fence, and device-readback ownership. Its atlas

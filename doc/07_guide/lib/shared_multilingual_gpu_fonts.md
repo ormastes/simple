@@ -434,9 +434,24 @@ without AMD hardware. Hosted native builds also compile the optional
 `runtime_rocm.c` provider; run
 `sh scripts/check/check-runtime-rocm-provider.shs` to validate its HIP/HIPRTC
 ABI with local mock libraries. The checker covers UUID identity, module/kernel
-launch argument storage, transfers, streams, and Engine2D copies, but native
-HIP submission and device-origin pixels on AMD hardware remain pending and no
-ROCm promotion is claimed.
+launch argument storage, transfers, streams, Engine2D copies, and exact
+straight-ARGB transparent/translucent composite pixels. To exercise the public
+configured-font route, use an admitted self-host binary:
+
+```bash
+PURE_SIMPLE_BIN=bin/release/<triple>/simple \
+  sh scripts/check/check-rocm-engine2d-font-readback.shs --mock
+PURE_SIMPLE_BIN=bin/release/<triple>/simple \
+  sh scripts/check/check-rocm-engine2d-font-readback.shs --real-amd
+```
+
+Mock evidence is explicitly non-real. Real mode starts fail-closed, sanitizes
+loader variables, requires a root-owned system ROCm provider plus an AMD sysfs
+device bound to `amdgpu`, verifies the actually loaded HIP library, and records
+compiler, harness, compositor, ROCm-kernel, runtime, native-binary, provider,
+driver, and device provenance. Native HIP submission and device-origin pixels
+on AMD hardware remain pending until that real-mode record passes; no ROCm
+promotion is claimed from source or mock evidence.
 
 `atlas_generation` is a process-unique, positive, sequential dependency token,
 not a renderer-local edit count. Each renderer atlas change reserves a token
@@ -458,6 +473,12 @@ replay coverage; Metal currently has static rejection
 evidence only because its session has no injectable dispatch seam. None of
 this promotes native execution or completes REQ-009 program/backend cache
 identity.
+
+Program version 1 is the stable entry ABI; compositor semantics are tracked
+separately. The straight-ARGB fix is semantics revision 2. Retained CUDA PTX and
+Vulkan SPIR-V are revision 1 and are deliberately rejected until regenerated
+through the admitted pure-Simple emitter. Do not update only their embedded
+bytes or hashes from a tool-only source reconstruction.
 
 For OpenCL, compiler emission and Engine2D runtime compilation now share the
 exact source returned by
