@@ -19,6 +19,7 @@ unsafe extern "C" {
     fn rt_atexit_install() -> i64;
     fn rt_atexit_check() -> i64;
     fn rt_remove(path: *const std::ffi::c_char) -> i64;
+    fn copy_mem(dst: *mut u8, src: *const u8, n: i64) -> *mut u8;
 }
 
 #[test]
@@ -90,4 +91,14 @@ fn hosted_remove_deletes_files_and_empty_directories() {
     }
     assert!(!file.exists());
     assert!(!root.exists());
+}
+
+#[test]
+fn hosted_copy_mem_forwards_to_the_bounded_memory_copy_owner() {
+    let source = [10_u8, 20, 30, 40];
+    let mut destination = [0xaa_u8; 6];
+    let copied = unsafe { copy_mem(destination.as_mut_ptr().add(1), source.as_ptr(), 4) };
+
+    assert_eq!(copied, unsafe { destination.as_mut_ptr().add(1) });
+    assert_eq!(destination, [0xaa, 10, 20, 30, 40, 0xaa]);
 }

@@ -107,3 +107,14 @@ SIMPLE_LSP_ENABLE_DIAGNOSTICS=1 SIMPLE_LIB=$PWD/src bin/simple run src/app/simpl
 ## Runtime verification (2026-07-17)
 
 Native `simple_lsp_mcp_server` (x86_64-unknown-linux-gnu): `initialize` answers correctly; real `tools/call` (`lsp_symbols`) returns `{"content":[{"type":"text","text":"Missing tool name"}],"isError":true}` (defect 1 STILL-REPRODUCES, exact match). Source-level: `SIMPLE_LSP_ENABLE_DIAGNOSTICS` gate and "diagnostics unavailable in source mode" message confirmed present at `src/app/simple_lsp_mcp/tools.spl:41-43` (mitigation in place); underlying deadlock (defect 2) not independently triggered (risk of unbounded hang exceeded budget).
+
+### macOS wrapper smoke follow-up
+
+The production MCP wrapper passes startup, request-ID correlation, schema,
+functional-call, and 153-tool checks. Its framing validator was separately
+fixed to inspect `file_read_bytes` because `file_read` normalizes CRLF and the
+deployed interpreter's `text_to_bytes` exposes internal four-byte text units.
+The LSP wrapper still exits 1: both existing Darwin native candidates fail the
+real-call probe, then source fallback reaches the stale deployed compiler and
+reports `unknown extern function: rt_cli_arg_count`. A fresh Stage 4 deploy is
+therefore still required before the current LSP source can be verified.

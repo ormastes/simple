@@ -2,8 +2,8 @@
 
 ## Status
 
-Open. The third and final bounded bootstrap cycle reached the Stage 3 linker
-and failed on one undefined symbol.
+Resolved in source and focused runtime verification on 2026-07-17. The broader
+Stage 3/4 bootstrap remains open under its own provider-selection gate.
 
 ## Evidence
 
@@ -22,9 +22,15 @@ Undefined symbols for architecture arm64:
 only `rt_memcpy` from `runtime_memory.c`. The failure is therefore provider
 composition, not source lowering.
 
-## Required fix
+## Resolution
 
-Give the Rust-hosted memory component an ABI-compatible `copy_mem` owner that
-forwards to `rt_memcpy`, add a discriminating overlap/copy regression, rebuild
-`simple-native-all`, and rerun only the cached Stage 3 shard in a fresh turn.
-The core-C Stage 4 profile must continue rejecting duplicate providers.
+`runtime_memory.c` now gives the Rust-hosted memory component an ABI-compatible
+`copy_mem` owner that forwards to `rt_memcpy`. The focused runtime suite passes
+7/7, including guard-byte and returned-destination assertions, and the rebuilt
+`libsimple_native_all.a` exports both `_copy_mem` and `_rt_memcpy`.
+
+The cached Stage 3 link no longer reports `_copy_mem`. Its current failure is a
+separate invocation/provider-selection issue: the old Stage 3 driver selected
+`target/bootstrap/deps/libsimple_runtime.a` instead of
+`libsimple_native_all.a`, leaving 73 hosted compiler hooks unresolved. Resume
+with the explicit bootstrap hosted-bundle selector in a fresh bounded turn.
