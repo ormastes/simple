@@ -758,20 +758,25 @@ fn main() -> i64:
 // Task #170: `Result<i64,_>` Ok(v) payload extraction must not divide
 // multiples-of-8 by 8 (deployed 2026-07-11 seed BoxInt<<3 tag-shift landmine).
 //
-// Root cause class (see #121/#122/#123 commits, 2026-07-04): a construct
-// site (Ok/Some -> rt_enum_new) and an extract site (match-binding/`?`/
-// unwrap -> rt_enum_payload) must agree on whether the scalar payload is
-// tagged. A mismatched pair (raw-construct + untag-extract, or vice versa)
-// silently right-shifts a multiple-of-8 payload by 3 bits (48 -> 6, 8 -> 1,
-// 64 -> 8) while leaving non-multiples of 8 unaffected by the shift's low
-// bits (masking artifacts differ) -- exactly the deployed-binary symptom.
-// These tests exercise construct+extract through the compiled JIT path
-// (not just symbol relocation) so a reintroduced mismatch fails loudly on
-// the actual returned value, across match-binding, `.unwrap()`, and `?`
-// propagation forms. See
-// doc/08_tracking/bug/native_result_unwrap_silent_wrong_161_2026-07-14.md
+// Root cause: MIR's extraction side (lowering_stmt.rs) has always assumed
+// `rt_enum_payload` results are tagged and inserts UnboxInt (>>3) when
+// storing into a concrete int/bool local -- exactly what a `case Ok(v):`
+// bind, `?`, or `.unwrap()` does. Until commit 14922f8e3cb (2026-07-17,
+// "flat-nullable unwrap + nested struct pattern in enum payload"),
+// Some/Ok/Err construction (lowering_expr_call.rs) stored scalar payloads
+// RAW (no <<3), so the extraction side's UnboxInt silently right-shifted a
+// multiple-of-8 payload by 3 bits (48 -> 6, 8 -> 1, 64 -> 8) while leaving
+// non-multiples of 8 apparently fine -- exactly the deployed 2026-07-11
+// seed binary's symptom (that binary predates 14922f8e3cb, which fixes
+// this by boxing scalars at all 6 Some/Ok/Err construction sites via
+// box_enum_payload_if_needed()). These tests exercise construct+extract
+// through the compiled JIT path (not just symbol relocation) so a
+// reintroduced mismatch fails loudly on the actual returned value, across
+// match-binding, `.unwrap()`, `?`, and if-val propagation forms. See
+// doc/08_tracking/bug/task_170_result_ok_multiple_of_8_divide_verify_2026-07-17.md,
+// doc/08_tracking/bug/native_result_unwrap_silent_wrong_161_2026-07-14.md,
 // and doc/08_tracking/bug/seed_interp_flat_nullable_unwrap_wrong_value_2026-07-16.md
-// for adjacent (already-fixed) landmines in this same tag/box family.
+// for the fix commit and adjacent landmines in this same tag/box family.
 //
 // jit-only (not interp_jit): `RunningType::Interpreter` (the pure AST
 // tree-walking backend reached via `Interpreter::run` in this test harness)

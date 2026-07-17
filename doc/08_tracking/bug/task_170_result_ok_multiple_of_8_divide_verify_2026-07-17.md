@@ -11,37 +11,55 @@ artifact still has the bug.
 ## Premise given to this lane (task #170)
 
 "A global tag/box convention reconciliation (#122/#123) has landed in seed
-SOURCE since [the 2026-07-11 deploy]." This is **not accurate as stated**:
-commits `8c52af0ece0`/`2b3c23fe004`/`cf903fbb594`/`5ed5e0fc6de`
-("fix(seed-conv): unify enum payload tag/box convention across all
-construct/extract sites (#122)") are **not ancestors of current `main`
-HEAD** (`662e7c7cad2` at verification time) -- confirmed via
-`git merge-base --is-ancestor <sha> HEAD` (result: NOT an ancestor for all
-four near-duplicate hashes). The helper functions that commit introduced
+SOURCE since [the 2026-07-11 deploy]." **The #122/#123 commits specifically
+are not the fix that landed**: commits `8c52af0ece0`/`2b3c23fe004`/
+`cf903fbb594`/`5ed5e0fc6de` ("fix(seed-conv): unify enum payload tag/box
+convention across all construct/extract sites (#122)") are **not ancestors
+of current `main` HEAD** (`662e7c7cad2` at verification time) -- confirmed
+via `git merge-base --is-ancestor <sha> HEAD` (NOT an ancestor for all four
+near-duplicate hashes). The helper functions that commit introduced
 (`tag_enum_payload`/`untag_enum_payload_for` in
 `compiler/src/codegen/instr/helpers.rs`) do not exist anywhere in the
-current source tree. This commit appears to be an orphaned/lost commit from
-a parallel lane (consistent with this repo's known force-push/rebase-race
-history, see `.claude/memory` feedback on stash/push races), not something
-that landed on `main`.
+current source tree -- this commit is an orphaned/lost commit from a
+parallel lane (consistent with this repo's known force-push/rebase-race
+history), not something that landed on `main`.
 
-What **did** land on `main` (both ancestors of HEAD, same day, net change
-on `result.rs` = zero): `420bd315d87` "fix(stage4-wall): tag scalar payload
-in ResultOk/OptionSome codegen -- cranelift JIT double-untag (#121)"
-followed four minutes later by `6fa7130ba1c` "revert(stage4-wall): back out
-ResultOk/OptionSome payload tagging (#121)". So `result.rs` in current HEAD
-is at the **same tagging convention it had before #121/#122/#123 ever
-started**: `create_enum_value` stores the payload VReg raw (no `<<3`),
-`compile_try_unwrap`/`compile_pattern_bind`/`compile_enum_payload` extract
-via a bare `rt_enum_payload` call (no `>>3`). Construct and extract are
-**consistent (raw+raw)** in the reachable-from-HEAD state of
-`codegen/instr/{result,pattern,enum_union}.rs` -- this consistency, not the
-#122 convention, is why the bug is empirically gone in current source (see
-Verification below). Whatever produced the deployed 2026-07-11 binary's
-raw-construct+untag-extract mismatch is not reachable from current `main`;
-the how/why of the deployed-binary-specific state was not further
-bisected (out of scope -- the task is verify current source, not
-archaeology on a stale artifact).
+**The actual fix is a different, later commit: `14922f8e3cb`** ("fix(seed):
+flat-nullable unwrap + nested struct pattern in enum payload (JIT path)",
+2026-07-17, confirmed ancestor of HEAD). Its own commit message says it is
+**not deployed** ("bin/release untouched"), which is exactly consistent
+with deployed-broken / built-from-HEAD-fixed. Root cause, confirmed by
+reading the code on both sides of the construct/extract boundary:
+
+- **Extraction always assumed a tagged (boxed) payload.**
+  `compiler/src/mir/lower/lowering_stmt.rs` (~line 657-686): when a value
+  produced by `rt_enum_payload` (tracked via `self.tagged_vregs`) is stored
+  into a concrete int/bool-typed local -- exactly what a `case Ok(v):`
+  pattern-bind or a `?`/`.unwrap()` result assignment does -- MIR inserts an
+  `UnboxInt` (i.e. `value >> 3`) to convert the assumed-tagged
+  `RuntimeValue` back to a raw scalar. This logic pre-dates this lane's
+  investigation and was not itself changed.
+- **Construction did NOT box scalar payloads until `14922f8e3cb`.** Before
+  that commit, `Some(x)`/`Ok(x)`/`Err(x)` construction
+  (`compiler/src/mir/lower/lowering_expr_call.rs`) passed the scalar VReg
+  straight into `MirInst::OptionSome`/`ResultOk`/`ResultErr` with no boxing,
+  so `Ok(48)` stored the raw `48`. Extraction then unconditionally treated
+  that raw `48` as tagged and applied `>>3`, yielding `6` -- exactly the
+  deployed-binary symptom. `14922f8e3cb` adds
+  `box_enum_payload_if_needed()`, which inserts a `MirInst::BoxInt`
+  (`(value << 3) | TAG_INT`) on the scalar payload at all six
+  `Some`/`Ok`/`Err`/`Option.Some`/`Result.Ok`/`Result.Err` construction
+  sites, matching what extraction already assumed. After the fix, `Ok(48)`
+  stores `(48<<3)|TAG_INT`, and the pre-existing `UnboxInt` at the
+  extraction/bind site correctly recovers `48`.
+
+(A secondary, same-day-in-2026-07-04, net-zero pair also touched this area:
+`420bd315d87` "tag scalar payload in ResultOk/OptionSome codegen" followed
+four minutes later by its own revert `6fa7130ba1c` -- both are ancestors of
+HEAD but cancel out and are not the operative fix; they are a different,
+lower-level (codegen `create_enum_value`, not MIR `lowering_expr_call`)
+attempt at the same class of problem, tried and reverted the same week
+#121/#122/#123 were active.)
 
 ## Verification: deployed binary (BROKEN) vs. freshly-built current source (FIXED)
 
@@ -72,11 +90,15 @@ or differently-tagged raw value). The freshly built binary from current
 
 ## Conclusion
 
-**Source-fixed, deployed-stale.** No code fix was needed in this lane --
-current `main` source already produces correct `Ok(v)` extraction for
-multiples of 8 (and all other tested values) through the JIT codegen path.
-The 2026-07-11 deployed seed binary is stale and should be excluded from use
-as an oracle for `Result`-extraction-of-multiples-of-8 comparisons until
+**Source-fixed, deployed-stale.** No new code fix was needed *from this
+lane* -- the fix (`14922f8e3cb`, boxing scalar payloads at `Some`/`Ok`/`Err`
+construction to match the pre-existing tagged-extraction assumption) already
+landed on `main` on 2026-07-17, before this verification, but per its own
+commit message was **explicitly not deployed** to `bin/release`. Current
+`main` source already produces correct `Ok(v)` extraction for multiples of
+8 (and all other tested values) through the JIT codegen path. The
+2026-07-11 deployed seed binary is stale and should be excluded from use as
+an oracle for `Result`-extraction-of-multiples-of-8 comparisons until
 redeployed. Closes on next seed redeploy (subject to standard explicit-user-
 approval gate for `bin/release` writes -- not performed by this lane per
 task hard rules).
@@ -100,8 +122,11 @@ reproduces on trivial `Ok(1)` values too).
 
 "Red" baseline for these tests is the empirical deployed-binary failure
 table above rather than a literal revert-and-rerun of the Rust regression
-tests, since the actual root-cause commits (#121 fix, #122 unify) are not
-present in current `main` history to revert.
+tests, since the actual fix (`14922f8e3cb`) already landed on `main` before
+this lane started and reverting it locally to reproduce "red" was judged
+unnecessary extra churn in an already contention-prone shared worktree (see
+Operational hazard below) given the deployed-binary A/B already supplies a
+real, independently-built red baseline.
 
 ## Files
 
