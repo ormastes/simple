@@ -7,7 +7,7 @@ use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_data.{MirFunction, MirModule, MirSignature, BlockId, LocalId}
-use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp}
+use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, GpuAtomicOpKind}
 use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, MirConstValue, LocalKind}
 
 fn cuda_u32() -> MirType: MirType(kind: MirTypeKind.U32)
@@ -113,6 +113,14 @@ describe "CUDA backend intensive MIR contract":
         expect(ptx).to_contain("cvta.shared.u64 %r2, shared_2;")
         expect(ptx).to_contain("ld.param.u64 %r0, [param_0];")
         assert_no_placeholder_output(ptx)
+
+    it "rejects compare-exchange through the deprecated generic atomic instruction":
+        val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.GpuAtomicOp(LocalId(id: 2), GpuAtomicOpKind.CompareExchange, MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1))), span: nil)
+        ], terminator: MirTerminator.Ret(nil))
+        val fn_ = cuda_function(13, "cuda_deprecated_compare_exchange", [cuda_ptr(), cuda_u32()], MirType.unit(), [cuda_arg(0, 0, "ptr", cuda_ptr()), cuda_arg(1, 1, "value", cuda_u32()), cuda_temp(2, cuda_u32())], [block], true)
+
+        assert_backend_error_contains(fn_, "compare-exchange requires GpuAtomicCas")
 
     it "rejects indirect calls with CUDA backend identity preserved":
         val sig = MirSignature(params: [cuda_u32()], return_type: cuda_u32(), is_variadic: false)

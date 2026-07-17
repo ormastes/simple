@@ -6,6 +6,10 @@
 # Use this instead of repeated .push() when building arrays,
 # especially in performance-critical code like persistent collections.
 
+# Array literals do not expose a capacity constructor. Keep the established
+# runtime-backed array allocation behind this one typed module boundary.
+extern fn rt_array_new_with_cap<T>(cap: i64) -> [T]
+
 
 struct ArrayBuilder<T>:
     """Efficient builder for constructing arrays.
@@ -22,7 +26,7 @@ struct ArrayBuilder<T>:
     Performance:
         - Construction: O(1)
         - Push: O(1) amortized
-        - Build: O(1) if at capacity, O(n) if slicing needed
+        - Build: O(1)
     """
     data: [T]           # Pre-allocated backing array
     len: i64            # Current number of elements
@@ -56,10 +60,11 @@ impl<T> ArrayBuilder<T>:
         Example:
             val builder = ArrayBuilder.with_capacity(1000)
         """
+        val actual_cap = if cap < 0: 0 else: cap
         ArrayBuilder(
-            data: Array.allocate(cap),
+            data: rt_array_new_with_cap<T>(actual_cap),
             len: 0,
-            capacity: cap
+            capacity: actual_cap
         )
 
     # =========================================================================
@@ -80,7 +85,7 @@ impl<T> ArrayBuilder<T>:
         if self.len >= self.capacity:
             self.grow()
 
-        self.data[self.len] = value
+        self.data.push(value)
         self.len = self.len + 1
 
     me push_safe(self, value: T):
@@ -96,22 +101,20 @@ impl<T> ArrayBuilder<T>:
         Example:
             builder.push_safe(42)  # Safe, will grow if needed
         """
-        if self.len >= self.capacity:
-            self.grow()
-
         self.push(value)
 
     me push_unchecked(self, value: T):
-        """Push without bounds checking (unsafe, use only when capacity guaranteed).
+        """Push without growing the builder's capacity metadata.
 
-        Use this in tight loops where you've pre-allocated exact capacity.
+        Use this in tight loops where you've pre-allocated exact capacity. The
+        underlying array append remains memory safe.
 
         Args:
             value: Element to add
 
-        SAFETY: Caller must ensure len < capacity
+        Caller should ensure len < capacity to preserve the no-growth contract.
         """
-        self.data[self.len] = value
+        self.data.push(value)
         self.len = self.len + 1
 
     # =========================================================================
@@ -127,11 +130,11 @@ impl<T> ArrayBuilder<T>:
         """
         val new_cap = if self.capacity == 0: 16 else: self.capacity * 2
 
-        var new_data = Array.allocate(new_cap)
+        var new_data: [T] = rt_array_new_with_cap<T>(new_cap)
 
         # Copy existing elements
         for i in 0..self.len:
-            new_data[i] = self.data[i]
+            new_data.push(self.data[i])
 
         self.data = new_data
         self.capacity = new_cap
@@ -155,9 +158,9 @@ impl<T> ArrayBuilder<T>:
             while new_cap < required:
                 new_cap = new_cap * 2
 
-            var new_data = Array.allocate(new_cap)
+            var new_data: [T] = rt_array_new_with_cap<T>(new_cap)
             for i in 0..self.len:
-                new_data[i] = self.data[i]
+                new_data.push(self.data[i])
 
             self.data = new_data
             self.capacity = new_cap
@@ -169,23 +172,18 @@ impl<T> ArrayBuilder<T>:
     fn build(self) -> [T]:
         """Return the built array with exact size.
 
-        If the builder filled to capacity, returns the backing array directly.
-        Otherwise, slices to exact length.
+        Returns the backing array directly; its logical length always tracks
+        the number of pushed elements.
 
         Returns:
             Array containing all pushed elements
 
-        Time: O(1) if at capacity, O(n) if slicing
+        Time: O(1)
 
         Example:
             val array = builder.build()
         """
-        if self.len == self.capacity:
-            # Exactly at capacity - return directly
-            self.data
-        else:
-            # Slice to exact size
-            self.data[0..self.len]
+        self.data
 
     fn build_move(self) -> [T]:
         """Build array, consuming the builder.
@@ -251,6 +249,7 @@ impl<T> ArrayBuilder<T>:
 
         Keeps allocated capacity.
         """
+        self.data.clear()
         self.len = 0
 
     me truncate(self, new_len: i64):
@@ -264,7 +263,12 @@ impl<T> ArrayBuilder<T>:
         if new_len > self.len:
             return
 
-        self.len = new_len
+        val clamped_len = if new_len < 0: 0 else: new_len
+        var retained: [T] = rt_array_new_with_cap<T>(self.capacity)
+        for i in 0..clamped_len:
+            retained.push(self.data[i])
+        self.data = retained
+        self.len = clamped_len
 
 # ============================================================================
 # Usage Examples

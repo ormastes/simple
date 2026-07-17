@@ -375,7 +375,10 @@ pub(crate) fn compile_method_call_static<M: Module>(
         )
     ) || matches!(
         lookup_name.rsplit_once('.'),
-        Some(("Array" | "array" | "Tuple" | "tuple" | "str" | "String" | "string", _))
+        Some((
+            "Array" | "array" | "Dict" | "dict" | "Tuple" | "tuple" | "str" | "String" | "string",
+            _
+        ))
     );
     let prefer_builtin_first = lookup_name.contains('.') && allow_qualified_builtin;
 

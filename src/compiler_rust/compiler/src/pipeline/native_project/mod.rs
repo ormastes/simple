@@ -46,6 +46,21 @@ pub(crate) fn native_project_rust_trace_enabled() -> bool {
     )
 }
 
+fn native_object_staging_dir(cache_base_dir: &Path, cache_dir: &Path) -> Result<tempfile::TempDir, String> {
+    let staging_parent = cache_base_dir
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(staging_parent)
+        .map_err(|e| format!("create native object staging parent {}: {e}", staging_parent.display()))?;
+    std::fs::create_dir_all(cache_dir)
+        .map_err(|e| format!("create native object cache {}: {e}", cache_dir.display()))?;
+    tempfile::Builder::new()
+        .prefix("native-objects-")
+        .tempdir_in(staging_parent)
+        .map_err(|e| format!("create native object staging in {}: {e}", staging_parent.display()))
+}
+
 /// Initialize the rayon global thread pool with appropriate stack size and
 /// thread count for compilation workloads.
 ///
@@ -413,15 +428,18 @@ impl NativeProjectBuilder {
         self
     }
 
-    /// Resolve the cache directory path.
-    /// Includes target triple in the path to prevent cross-target contamination
-    /// (e.g., host Mach-O objects being served for a riscv64-elf build).
-    pub(crate) fn cache_dir(&self) -> PathBuf {
-        let base = self
+    /// Resolve the configured cache root before target isolation.
+    pub(crate) fn cache_base_dir(&self) -> PathBuf {
+        self
             .config
             .cache_dir
             .clone()
-            .unwrap_or_else(|| self.project_root.join(".simple/native_cache"));
+            .unwrap_or_else(|| self.project_root.join(".simple/native_cache"))
+    }
+
+    /// Resolve the effective cache directory, including a cross-target triple.
+    pub(crate) fn cache_dir(&self) -> PathBuf {
+        let base = self.cache_base_dir();
         let target = effective_target();
         if target.is_host() {
             base
@@ -544,6 +562,7 @@ impl NativeProjectBuilder {
         }
 
         // 2. Set up incremental state
+        let cache_base_dir = self.cache_base_dir();
         let cache_dir = self.cache_dir();
         let objects_dir = cache_dir.join("objects");
 
@@ -562,8 +581,8 @@ impl NativeProjectBuilder {
             std::fs::create_dir_all(&objects_dir).map_err(|e| format!("create cache dir: {e}"))?;
         }
 
-        // 3. Create temp directory for .o files
-        let mut temp_dir = Some(tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?);
+        // 3. Stage .o files beside the cache so system-temp and cache cleanup cannot remove them.
+        let mut temp_dir = Some(native_object_staging_dir(&cache_base_dir, &cache_dir)?);
         let temp_dir_path = temp_dir
             .as_ref()
             .map(|dir| dir.path().to_path_buf())

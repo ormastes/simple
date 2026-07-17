@@ -38,6 +38,22 @@ fn dict_field_keys_uses_builtin_dict_dispatch() {
 }
 
 #[test]
+fn dict_field_values_uses_builtin_dict_dispatch() {
+    let mir = compile_to_mir(
+        "struct Module:\n    functions: Dict<text, i64>\n\nfn test(module: Module) -> [i64]:\n    return module.functions.values()\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "Dict.values"
+    )));
+    assert!(!has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "Map.values" || func_name == "values"
+    )));
+}
+
+#[test]
 fn text_rfind_does_not_resolve_to_trait_default() {
     let mir = compile_to_mir(
         r#"struct text:

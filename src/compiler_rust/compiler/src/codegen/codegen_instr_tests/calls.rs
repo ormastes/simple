@@ -840,6 +840,25 @@ fn object_relocates_to_symbol(object: &[u8], symbol: &str) -> bool {
 }
 
 #[test]
+fn codegen_qualified_dict_values_uses_runtime_dispatch() {
+    let object = aot_object("qualified_dict_values", |f| {
+        let dict = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: dict, value: 0 });
+        block.instructions.push(MirInst::MethodCallStatic {
+            dest: Some(dest),
+            receiver: dict,
+            func_name: "Dict.values".to_string(),
+            args: vec![],
+        });
+        dest
+    });
+
+    assert!(object_relocates_to_symbol(&object, "rt_dict_values"));
+}
+
+#[test]
 fn codegen_inline_spl_f64_to_bits_does_not_emit_runtime_symbol() {
     let object = aot_object("inline_spl_f64_to_bits", |f| {
         let value = f.new_vreg();

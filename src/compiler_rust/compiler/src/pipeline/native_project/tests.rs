@@ -45,6 +45,26 @@ fn command_args(command: &std::process::Command) -> Vec<String> {
 }
 
 #[test]
+fn native_object_staging_survives_cache_clean() {
+    let root = tempfile::tempdir().unwrap();
+    let cache_base_dir = root.path().join("native-cache");
+    let cache_dir = cache_base_dir.join("aarch64-unknown-linux-gnu");
+    fs::create_dir_all(&cache_dir).unwrap();
+    fs::write(cache_dir.join("stale"), b"stale").unwrap();
+    fs::remove_dir_all(&cache_base_dir).unwrap();
+
+    let staging = native_object_staging_dir(&cache_base_dir, &cache_dir).unwrap();
+    let object = staging.path().join("mod_0.o");
+    fs::write(&object, b"object").unwrap();
+    assert!(cache_dir.is_dir());
+    fs::remove_dir_all(&cache_base_dir).unwrap();
+
+    assert!(!staging.path().starts_with(&cache_base_dir));
+    assert_eq!(staging.path().parent(), Some(root.path()));
+    assert_eq!(fs::read(object).unwrap(), b"object");
+}
+
+#[test]
 fn msvc_lib_archive_commands_use_native_argument_forms() {
     let archive = PathBuf::from("out.lib");
     let objects = vec![PathBuf::from("one.obj"), PathBuf::from("two.obj")];
