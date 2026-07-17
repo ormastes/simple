@@ -1,6 +1,6 @@
 //! Dictionary type and SFFI functions.
 
-use super::collections::{rt_array_new, rt_array_push, RuntimeString};
+use super::collections::{rt_array_new, rt_array_push};
 use super::core::RuntimeValue;
 use super::heap::{get_typed_ptr, get_typed_ptr_mut, unregister_heap_ptr, HeapHeader, HeapObjectType};
 
@@ -142,59 +142,34 @@ pub extern "C" fn rt_dict_len(dict: RuntimeValue) -> i64 {
     unsafe { (*d).len as i64 }
 }
 
-/// Hash function for RuntimeValue (handles strings specially)
+/// Hash function for RuntimeValue (handles strings specially, and
+/// structurally hashes composite (struct/enum/tuple) keys). Delegates to the
+/// single canonical structural hash shared with `rt_value_eq`/`==`
+/// (`super::sffi::equality::value_hash`) so a key's hash bucket and its
+/// `keys_equal` check can never disagree.
+///
+/// Root-cause fix (JIT/compiled-path dict composite keys via variables used
+/// pointer identity, follow-up to the interpreter-side fix in
+/// `value_impl.rs`): previously this hashed the RAW POINTER BITS for any
+/// non-string heap value, so two separately-allocated, structurally-equal
+/// struct/enum/tuple keys hashed to DIFFERENT buckets and `rt_dict_get`
+/// would probe the wrong slots and return NIL even though `keys_equal`
+/// (once also fixed, see below) would have matched them.
 pub(super) fn hash_value(v: RuntimeValue) -> u64 {
-    // For strings, use the pre-computed hash
-    if let Some(str_ptr) = get_typed_ptr::<RuntimeString>(v, HeapObjectType::String) {
-        unsafe {
-            return (*str_ptr).hash;
-        }
-    }
-
-    // For other types, hash the raw bits
-    let bits = v.to_raw();
-    let mut hash = 0xcbf29ce484222325u64;
-    for i in 0..8 {
-        hash ^= (bits >> (i * 8)) & 0xff;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
+    super::sffi::equality::value_hash(v)
 }
 
-/// Value-based equality for dictionary keys (handles strings specially)
+/// Value-based equality for dictionary keys (handles strings specially, and
+/// now structurally compares composite (struct/enum/tuple) keys). Delegates
+/// to `rt_value_eq` -- the same equality used by the compiled `==` operator
+/// -- instead of the old hand-rolled check that only special-cased String
+/// and fell back to raw-pointer identity (`a == b`) for every other heap
+/// type. That fallback was the root cause of the JIT/compiled-path
+/// composite-key dict-miss bug: a key built via a separate allocation (a
+/// VARIABLE, not a literal at the insert/lookup site) is now found by
+/// structural equality instead of requiring the exact same heap pointer.
 pub(super) fn keys_equal(a: RuntimeValue, b: RuntimeValue) -> bool {
-    // Fast path: same raw value
-    if a == b {
-        return true;
-    }
-
-    // String comparison by content
-    if let (Some(str_a), Some(str_b)) = (
-        get_typed_ptr::<RuntimeString>(a, HeapObjectType::String),
-        get_typed_ptr::<RuntimeString>(b, HeapObjectType::String),
-    ) {
-        unsafe {
-            // First check hash (fast reject)
-            if (*str_a).hash != (*str_b).hash {
-                return false;
-            }
-
-            // Check length
-            let len_a = (*str_a).len;
-            let len_b = (*str_b).len;
-            if len_a != len_b {
-                return false;
-            }
-
-            // Compare bytes
-            let data_a = (str_a as *const u8).add(std::mem::size_of::<RuntimeString>());
-            let data_b = (str_b as *const u8).add(std::mem::size_of::<RuntimeString>());
-            return std::slice::from_raw_parts(data_a, len_a as usize)
-                == std::slice::from_raw_parts(data_b, len_b as usize);
-        }
-    }
-
-    false
+    super::sffi::rt_value_eq(a, b) != 0
 }
 
 /// Get a value from a dictionary by key
@@ -301,11 +276,7 @@ pub extern "C" fn rt_dict_set(dict: RuntimeValue, key: RuntimeValue, value: Runt
 
 #[no_mangle]
 pub extern "C" fn rt_dict_set_i64_raw(dict: RuntimeValue, key: i64, value: i64) -> bool {
-    rt_dict_set(
-        dict,
-        RuntimeValue::from_int(key),
-        RuntimeValue::from_raw(value as u64),
-    )
+    rt_dict_set(dict, RuntimeValue::from_int(key), RuntimeValue::from_raw(value as u64))
 }
 
 /// Clear all entries from a dictionary
@@ -447,5 +418,197 @@ pub extern "C" fn rt_dict_remove(dict: RuntimeValue, key: RuntimeValue) -> Runti
             }
         }
         RuntimeValue::NIL
+    }
+}
+
+/// Follow-up to S22's interpreter-side fix (747a2354ca5, `value_impl.rs`
+/// `to_key_string`/`wrap_dict_entry`) and the JIT/compiled-path gap it
+/// deliberately left open (see
+/// `doc/08_tracking/bug/dict_struct_key_iteration_single_entry_2026-06-13.md`,
+/// "Second, DISTINCT defect location found"): the native/compiled dict
+/// (`RuntimeDict` in this file) stores the actual `RuntimeValue` key rather
+/// than a serialized string, so it never had the interpreter's TYPE
+/// corruption bug -- but `hash_value`/`keys_equal` only special-cased
+/// `String` and fell back to raw-pointer identity (`a == b`) for every other
+/// heap type. Two SEPARATELY constructed struct/enum/tuple keys with equal
+/// field values (e.g. a key read out of a VARIABLE rather than built inline
+/// at the insert/lookup call site) therefore never matched. Root-cause fix:
+/// `hash_value`/`keys_equal` now delegate to the canonical structural
+/// hash/equality shared with the compiled `==` operator
+/// (`super::sffi::equality::{value_hash, rt_value_eq}`).
+#[cfg(test)]
+mod dict_composite_key_tests {
+    use super::*;
+    use crate::value::collections::{rt_string_new, rt_tuple_new, rt_tuple_set};
+    use crate::value::objects::{rt_enum_new, rt_object_field_set, rt_object_new};
+
+    fn text(s: &str) -> RuntimeValue {
+        rt_string_new(s.as_ptr(), s.len() as u64)
+    }
+
+    /// Build a fresh, separately-allocated `K { a: i64, b: text }`-shaped
+    /// object every call -- simulates a key read out of a VARIABLE (not
+    /// constructed inline at the dict insert/lookup call site).
+    fn make_k(a: i64, b: &str) -> RuntimeValue {
+        let obj = rt_object_new(42, 2);
+        assert!(rt_object_field_set(obj, 0, RuntimeValue::from_int(a)));
+        assert!(rt_object_field_set(obj, 1, text(b)));
+        obj
+    }
+
+    #[test]
+    fn struct_key_via_variable_is_found_by_structural_equality() {
+        let d = rt_dict_new(8);
+        let k1 = make_k(1, "x"); // "insert" key
+        assert!(rt_dict_set(d, k1, RuntimeValue::from_int(42)));
+
+        let k2 = make_k(1, "x"); // "lookup" key: separate allocation, same fields
+        assert_ne!(k1.to_raw(), k2.to_raw(), "test setup must use distinct allocations");
+        assert!(
+            rt_dict_contains(d, k2),
+            "structurally-equal struct key via variable must be found"
+        );
+        assert_eq!(
+            rt_dict_get(d, k2).as_int(),
+            42,
+            "d[k2] must recover the value inserted under k1"
+        );
+    }
+
+    #[test]
+    fn struct_key_with_different_field_is_not_found() {
+        let d = rt_dict_new(8);
+        let k1 = make_k(1, "x");
+        assert!(rt_dict_set(d, k1, RuntimeValue::from_int(42)));
+
+        let k_other = make_k(1, "y"); // differs in field `b`
+        assert!(!rt_dict_contains(d, k_other));
+        assert!(rt_dict_get(d, k_other).is_nil());
+    }
+
+    #[test]
+    fn struct_key_reinsert_with_equal_key_updates_value_not_len() {
+        // Direct native-path repro of the bug doc's "over-count" symptom:
+        // re-inserting a "duplicate" (structurally-equal, separately
+        // allocated) struct key must update the SAME entry, not create a
+        // second one.
+        let d = rt_dict_new(8);
+        assert!(rt_dict_set(d, make_k(7, "z"), RuntimeValue::from_int(111)));
+        assert_eq!(rt_dict_len(d), 1);
+        assert!(rt_dict_set(d, make_k(7, "z"), RuntimeValue::from_int(222)));
+        assert_eq!(
+            rt_dict_len(d),
+            1,
+            "structurally-equal struct key must overwrite, not add a second entry"
+        );
+        assert_eq!(rt_dict_get(d, make_k(7, "z")).as_int(), 222);
+    }
+
+    #[test]
+    fn struct_key_via_variable_can_be_removed() {
+        // rt_dict_remove also calls hash_value/keys_equal (same fix), so a
+        // key looked up via a separately-allocated variable must be
+        // removable, not just gettable.
+        let d = rt_dict_new(8);
+        assert!(rt_dict_set(d, make_k(1, "x"), RuntimeValue::from_int(42)));
+        assert_eq!(rt_dict_len(d), 1);
+
+        let removed = rt_dict_remove(d, make_k(1, "x"));
+        assert_eq!(
+            removed.as_int(),
+            42,
+            "rt_dict_remove must recover the value for a structurally-equal variable key"
+        );
+        assert_eq!(rt_dict_len(d), 0);
+        assert!(!rt_dict_contains(d, make_k(1, "x")));
+    }
+
+    #[test]
+    fn enum_key_via_variable_is_found_by_structural_equality() {
+        let d = rt_dict_new(8);
+        let k1 = rt_enum_new(0, 3, RuntimeValue::from_int(9));
+        assert!(rt_dict_set(d, k1, RuntimeValue::from_int(42)));
+
+        let k2 = rt_enum_new(0, 3, RuntimeValue::from_int(9));
+        assert_ne!(k1.to_raw(), k2.to_raw());
+        assert!(rt_dict_contains(d, k2));
+        assert_eq!(rt_dict_get(d, k2).as_int(), 42);
+
+        let k_diff = rt_enum_new(0, 4, RuntimeValue::from_int(9));
+        assert!(!rt_dict_contains(d, k_diff));
+    }
+
+    #[test]
+    fn tuple_key_via_variable_is_found_by_structural_equality() {
+        let d = rt_dict_new(8);
+        let k1 = rt_tuple_new(2);
+        assert!(rt_tuple_set(k1, 0, RuntimeValue::from_int(1)));
+        assert!(rt_tuple_set(k1, 1, text("x")));
+        assert!(rt_dict_set(d, k1, RuntimeValue::from_int(42)));
+
+        let k2 = rt_tuple_new(2);
+        assert!(rt_tuple_set(k2, 0, RuntimeValue::from_int(1)));
+        assert!(rt_tuple_set(k2, 1, text("x")));
+        assert_ne!(k1.to_raw(), k2.to_raw());
+        assert!(rt_dict_contains(d, k2));
+        assert_eq!(rt_dict_get(d, k2).as_int(), 42);
+    }
+
+    #[test]
+    fn nested_struct_in_tuple_key_via_variable_is_found() {
+        // A composite-within-composite key (Tuple containing an Object),
+        // built as two independent allocations for insert vs. lookup.
+        fn make_nested(n: i64) -> RuntimeValue {
+            let obj = rt_object_new(43, 1);
+            assert!(rt_object_field_set(obj, 0, RuntimeValue::from_int(n)));
+            let tup = rt_tuple_new(2);
+            assert!(rt_tuple_set(tup, 0, obj));
+            assert!(rt_tuple_set(tup, 1, RuntimeValue::from_int(n)));
+            tup
+        }
+
+        let d = rt_dict_new(8);
+        assert!(rt_dict_set(d, make_nested(5), RuntimeValue::from_int(42)));
+        assert!(rt_dict_contains(d, make_nested(5)));
+        assert_eq!(rt_dict_get(d, make_nested(5)).as_int(), 42);
+        assert!(!rt_dict_contains(d, make_nested(6)));
+    }
+
+    #[test]
+    fn scalar_keys_via_variable_are_unaffected_by_this_fix() {
+        // int and text keys already worked via variables pre-fix (int is
+        // raw-bits identity-equal across "copies"; text is content-compared
+        // by the pre-existing String special case). Pin that this fix does
+        // not regress them.
+        let d = rt_dict_new(8);
+        let int_key_insert = RuntimeValue::from_int(1234);
+        assert!(rt_dict_set(d, int_key_insert, RuntimeValue::from_int(1)));
+        let int_key_lookup = RuntimeValue::from_int(1234);
+        assert_eq!(rt_dict_get(d, int_key_lookup).as_int(), 1);
+
+        let text_key_insert = text("hello");
+        assert!(rt_dict_set(d, text_key_insert, RuntimeValue::from_int(2)));
+        let text_key_lookup = text("hello");
+        assert_ne!(text_key_insert.to_raw(), text_key_lookup.to_raw());
+        assert_eq!(rt_dict_get(d, text_key_lookup).as_int(), 2);
+    }
+
+    #[test]
+    fn struct_key_survives_table_growth_across_many_inserts() {
+        // Exercise `dict_grow`'s rehash path (which also calls `hash_value`)
+        // with composite keys, so the fix is verified under growth too, not
+        // just a small fixed-capacity table.
+        let d = rt_dict_new(4);
+        for i in 0..64 {
+            assert!(rt_dict_set(d, make_k(i, "z"), RuntimeValue::from_int(i * 10)));
+        }
+        assert_eq!(rt_dict_len(d), 64);
+        for i in 0..64 {
+            assert_eq!(
+                rt_dict_get(d, make_k(i, "z")).as_int(),
+                i * 10,
+                "entry {i} must survive growth/rehash"
+            );
+        }
     }
 }
