@@ -69,6 +69,7 @@ impl Lowerer {
             // Check if receiver is an enum type - handle as enum variant access
             if let Some(type_id) = self.module.types.lookup(recv_name) {
                 if let Some(HirType::Enum { name: _, variants, .. }) = self.module.types.get(type_id) {
+                    let is_placeholder = variants.is_empty();
                     // Check if field is a valid variant name
                     for (variant_name, variant_fields) in variants {
                         if variant_name == field {
@@ -89,31 +90,27 @@ impl Lowerer {
                             }
                         }
                     }
-                    if let Some(ref defs) = self.global_enum_defs.clone() {
-                        if let Some(variant_summary) = defs.get(recv_name) {
-                            if variant_summary.iter().any(|(vname, _)| vname == field) {
-                                let variants: Vec<(String, Option<Vec<TypeId>>)> = variant_summary
-                                    .iter()
-                                    .map(|(vname, payload_arity)| {
-                                        let payload = payload_arity.map(|n| vec![TypeId::ANY; n]);
-                                        (vname.clone(), payload)
-                                    })
-                                    .collect();
-                                let global_type_id = self.module.types.register_named(
-                                    recv_name.to_string(),
-                                    HirType::Enum {
-                                        name: recv_name.to_string(),
-                                        variants,
-                                        generic_params: vec![],
-                                        is_generic_template: false,
-                                        type_bindings: std::collections::HashMap::new(),
-                                    },
-                                );
-                                self.globals.insert(recv_name.to_string(), global_type_id);
-                                return Ok(HirExpr {
-                                    kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
-                                    ty: global_type_id,
-                                });
+                    if is_placeholder {
+                        if let Some(ref defs) = self.global_enum_defs.clone() {
+                            if let Some(variant_summary) = defs.get(recv_name) {
+                                if variant_summary.iter().any(|(vname, _)| vname == field) {
+                                    let variants = self.resolve_global_enum_variants(variant_summary);
+                                    let global_type_id = self.module.types.update_named(
+                                        recv_name.to_string(),
+                                        HirType::Enum {
+                                            name: recv_name.to_string(),
+                                            variants,
+                                            generic_params: vec![],
+                                            is_generic_template: false,
+                                            type_bindings: std::collections::HashMap::new(),
+                                        },
+                                    );
+                                    self.globals.insert(recv_name.to_string(), global_type_id);
+                                    return Ok(HirExpr {
+                                        kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
+                                        ty: global_type_id,
+                                    });
+                                }
                             }
                         }
                     }
@@ -141,13 +138,7 @@ impl Lowerer {
                     if let Some(variant_summary) = defs.get(recv_name) {
                         // The enum exists globally — register it now so
                         // subsequent accesses hit the fast path above.
-                        let variants: Vec<(String, Option<Vec<TypeId>>)> = variant_summary
-                            .iter()
-                            .map(|(vname, payload_arity)| {
-                                let payload = payload_arity.map(|n| vec![TypeId::ANY; n]);
-                                (vname.clone(), payload)
-                            })
-                            .collect();
+                        let variants = self.resolve_global_enum_variants(variant_summary);
                         let type_id = self.module.types.register_named(
                             recv_name.to_string(),
                             HirType::Enum {
@@ -457,13 +448,7 @@ impl Lowerer {
         if let Some(ref defs) = self.global_enum_defs.clone() {
             if let Some(variant_summary) = defs.get(enum_name) {
                 if variant_summary.iter().any(|(vname, _)| vname == field) {
-                    let variants: Vec<(String, Option<Vec<TypeId>>)> = variant_summary
-                        .iter()
-                        .map(|(vname, payload_arity)| {
-                            let payload = payload_arity.map(|n| vec![TypeId::ANY; n]);
-                            (vname.clone(), payload)
-                        })
-                        .collect();
+                    let variants = self.resolve_global_enum_variants(variant_summary);
                     let type_id = self.module.types.register_named(
                         enum_name.to_string(),
                         HirType::Enum {

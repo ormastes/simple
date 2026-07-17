@@ -26,11 +26,7 @@ pub(crate) struct ImportMapResult {
     /// definition so the HIR lowerer can disambiguate field lookups by the
     /// requested field name instead of relying on the lossy first-wins map.
     pub duplicate_struct_defs: std::collections::HashMap<String, Vec<Vec<(String, simple_parser::Type)>>>,
-    /// Global enum definitions: enum_name -> variants, where each variant is
-    /// `(variant_name, payload_arity)`. `payload_arity = None` means a unit
-    /// variant (no fields); `Some(n)` means a payload variant with `n` fields
-    /// (field types are unknown at this layer and will be `TypeId::ANY` when
-    /// the lowerer eagerly registers the enum into its TypeRegistry).
+    /// Global enum definitions with their payload field types.
     ///
     /// W15-H: this fixes class-1 of the HIR ANY-field bug — TitleCase enum
     /// receivers (`TypeKind`, `TokenKind`, etc.) referenced in a compilation
@@ -38,7 +34,7 @@ pub(crate) struct ImportMapResult {
     /// missing from `module.types.name_to_id`, so `lookup(recv_name)` in
     /// `expr/access.rs::lower_field_access` returned None and the
     /// enum-variant early-return fell through to the field-access fallback.
-    pub enum_defs: std::collections::HashMap<String, Vec<(String, Option<usize>)>>,
+    pub enum_defs: std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>,
     /// Set of mangled names that correspond to module-level `val`/`var`/`const`
     /// (i.e. DATA, not functions). Used by the cranelift backend to decide
     /// whether a cross-module imported global should be declared as a data
@@ -229,7 +225,8 @@ pub(crate) fn build_import_map(
     let mut raw_to_mangled: HashMap<String, Vec<String>> = HashMap::new();
     let mut struct_defs: HashMap<String, Vec<(String, simple_parser::Type)>> = HashMap::new();
     let mut duplicate_struct_defs: HashMap<String, Vec<Vec<(String, simple_parser::Type)>>> = HashMap::new();
-    let mut enum_defs: HashMap<String, Vec<(String, Option<usize>)>> = HashMap::new();
+    let mut enum_defs: HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>> = HashMap::new();
+    let mut duplicate_enum_defs: HashSet<String> = HashSet::new();
     let mut data_exports: HashSet<String> = HashSet::new();
     let mut fn_arities: HashMap<String, usize> = HashMap::new();
     let mut trait_impls: HashMap<String, Vec<String>> = HashMap::new();
@@ -379,22 +376,54 @@ pub(crate) fn build_import_map(
                             .or_default()
                             .push(type_mangled.clone());
                         data_exports.insert(type_mangled);
-                        // W15-H: harvest enum variant arity into the global
+                        // W15-H: harvest enum payload types into the global
                         // enum-defs sidecar so the lowerer can eagerly seed
                         // `module.types.name_to_id` and `self.globals` with
                         // the real enum TypeId for cross-module receivers.
-                        let variant_summary: Vec<(String, Option<usize>)> = e
+                        let mut variant_summary: Vec<(String, Option<Vec<simple_parser::Type>>)> = e
                             .variants
                             .iter()
                             .map(|v| {
-                                let payload_arity = v.fields.as_ref().map(|fields| fields.len());
-                                (v.name.clone(), payload_arity)
+                                let payload = v
+                                    .fields
+                                    .as_ref()
+                                    .map(|fields| fields.iter().map(|field| field.ty.clone()).collect());
+                                (v.name.clone(), payload)
                             })
                             .collect();
+                        if enum_defs.contains_key(&e.name) {
+                            duplicate_enum_defs.insert(e.name.clone());
+                        }
                         let entry = enum_defs.entry(e.name.clone()).or_default();
-                        for variant in variant_summary {
-                            if !entry.iter().any(|(name, _)| name == &variant.0) {
-                                entry.push(variant);
+                        if duplicate_enum_defs.contains(&e.name) {
+                            let erase_payload = |payload: &mut Option<Vec<simple_parser::Type>>| {
+                                if let Some(fields) = payload {
+                                    for field in fields {
+                                        *field = simple_parser::Type::Simple("Any".to_string());
+                                    }
+                                }
+                            };
+                            for (_, payload) in entry.iter_mut() {
+                                erase_payload(payload);
+                            }
+                            for (_, payload) in variant_summary.iter_mut() {
+                                erase_payload(payload);
+                            }
+                        }
+                        for (variant_name, variant_payload) in variant_summary {
+                            if let Some((_, existing_payload)) =
+                                entry.iter_mut().find(|(name, _)| name == &variant_name)
+                            {
+                                let conflicting_payload_len = match (&*existing_payload, &variant_payload) {
+                                    (None, None) => None,
+                                    (Some(left), Some(right)) => Some(left.len().max(right.len())),
+                                    (Some(fields), None) | (None, Some(fields)) => Some(fields.len().max(1)),
+                                };
+                                if let Some(len) = conflicting_payload_len {
+                                    *existing_payload = Some(vec![simple_parser::Type::Simple("Any".to_string()); len]);
+                                }
+                            } else {
+                                entry.push((variant_name, variant_payload));
                             }
                         }
                         for m in &e.methods {
@@ -681,6 +710,23 @@ pub(crate) fn build_import_map(
     map.entry("get_errors".to_string())
         .or_insert_with(|| compile_result_get_errors.clone());
 
+    // A bare payload owner that has multiple definitions is not safe to
+    // resolve through the global name table. Erase the whole field, including
+    // nested wrappers, so discovery order cannot invent an owner.
+    let mut ambiguous_type_owners = duplicate_enum_defs;
+    ambiguous_type_owners.extend(duplicate_struct_defs.keys().cloned());
+    for variants in enum_defs.values_mut() {
+        for (_, payload) in variants {
+            if let Some(fields) = payload {
+                for field in fields {
+                    if type_mentions_ambiguous_owner(field, &ambiguous_type_owners) {
+                        *field = simple_parser::Type::Simple("Any".to_string());
+                    }
+                }
+            }
+        }
+    }
+
     // Drop ambiguous (empty-name sentinel) entries before returning.
     fn_return_types.retain(|_, ty| !matches!(ty, simple_parser::Type::Simple(s) if s.is_empty()));
     ImportMapResult {
@@ -695,6 +741,44 @@ pub(crate) fn build_import_map(
         data_exports,
         fn_arities,
         fn_return_types,
+    }
+}
+
+fn type_mentions_ambiguous_owner(ty: &simple_parser::Type, ambiguous: &std::collections::HashSet<String>) -> bool {
+    use simple_parser::Type;
+
+    match ty {
+        Type::Simple(name) | Type::DynTrait(name) | Type::UnitWithRepr { name, .. } => ambiguous.contains(name),
+        Type::Generic { name, args } => {
+            ambiguous.contains(name) || args.iter().any(|arg| type_mentions_ambiguous_owner(arg, ambiguous))
+        }
+        Type::Capability { inner, .. }
+        | Type::Pointer { inner, .. }
+        | Type::Optional(inner)
+        | Type::Array { element: inner, .. }
+        | Type::Simd { element: inner, .. } => type_mentions_ambiguous_owner(inner, ambiguous),
+        Type::Tuple(fields) | Type::Union(fields) => fields
+            .iter()
+            .any(|field| type_mentions_ambiguous_owner(field, ambiguous)),
+        Type::LabeledTuple(fields) => fields
+            .iter()
+            .any(|field| type_mentions_ambiguous_owner(&field.ty, ambiguous)),
+        Type::Function { params, ret } => {
+            params
+                .iter()
+                .any(|param| type_mentions_ambiguous_owner(param, ambiguous))
+                || ret
+                    .as_deref()
+                    .is_some_and(|ret| type_mentions_ambiguous_owner(ret, ambiguous))
+        }
+        Type::Constructor { target, args } => {
+            type_mentions_ambiguous_owner(target, ambiguous)
+                || args
+                    .as_ref()
+                    .is_some_and(|args| args.iter().any(|arg| type_mentions_ambiguous_owner(arg, ambiguous)))
+        }
+        Type::TypeBinding { value, .. } => type_mentions_ambiguous_owner(value, ambiguous),
+        Type::SelfType | Type::ConstKeySet { .. } | Type::DependentKeys { .. } => false,
     }
 }
 

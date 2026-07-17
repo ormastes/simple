@@ -147,8 +147,9 @@ pub struct InstrContext<'a, M: Module> {
     pub vreg_types: &'a mut HashMap<VReg, TypeId>,
     /// Mangled function name → declared parameter count for cross-module free functions.
     pub fn_arities: &'a std::sync::Arc<std::collections::HashMap<String, usize>>,
-    /// Global enum definitions: enum name -> [(variant name, payload arity)].
-    pub enum_defs: &'a std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>,
+    /// Global enum definitions with payload field types.
+    pub enum_defs:
+        &'a std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>>,
     /// Native-project builds currently lower escaped runtime-pool closure
     /// returns as raw typed integers. Regular interpreter/native paths already
     /// pass a Simple RuntimeValue through rt_pool_join.
@@ -210,8 +211,9 @@ impl<'a, M: Module> InstrContext<'a, M> {
             Box::leak(Box::new(std::collections::HashMap::new()));
         let fn_arities: &'static std::sync::Arc<std::collections::HashMap<String, usize>> =
             Box::leak(Box::new(std::sync::Arc::new(std::collections::HashMap::new())));
-        let enum_defs: &'static std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>> =
-            Box::leak(Box::new(std::sync::Arc::new(std::collections::HashMap::new())));
+        let enum_defs: &'static std::sync::Arc<
+            std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>,
+        > = Box::leak(Box::new(std::sync::Arc::new(std::collections::HashMap::new())));
         let data_exports: &'static std::sync::Arc<std::collections::HashSet<String>> =
             Box::leak(Box::new(std::sync::Arc::new(std::collections::HashSet::new())));
         let vtable_data_ids: &'static std::collections::BTreeMap<String, cranelift_module::DataId> =

@@ -631,7 +631,7 @@ impl Lowerer {
             .is_some_and(|summary| {
                 summary
                     .iter()
-                    .any(|(variant, payload_arity)| variant == name && payload_arity.is_none())
+                    .any(|(variant, payload)| variant == name && payload.is_none())
             })
     }
 

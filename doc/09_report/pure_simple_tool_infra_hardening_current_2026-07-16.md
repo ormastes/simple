@@ -35,8 +35,8 @@ so executable qualification is still blocked.
 
 | Surface | Status | Bug / missing evidence | Root solution | Priority |
 |---|---|---|---|---|
-| Production runtime | BLOCKED | The latest bounded manual bootstrap clears discovery, then exits normally at Stage 2 on imported-enum `Shared` in HIP/OpenCL plus a separate `String.smf` field-inference failure; no fresh CLI exists | Fix both HIR owner/type-preservation failures, rebuild, admit, and atomically deploy | P0 |
-| Test runner | SOURCE REPAIRED / DEPLOY BLOCKED | The retained release binary crashes in stale two-arg `rt_env_set`; current ABI is correct. Rust native/interpreter wait owners now return `-2` while live, retain the child, reap after kill, and inherit async output so unread pipes cannot hang chatty children. Stage 2 now reaches native compilation but still fails on `Shared` and `String.smf` | Fix the remaining HIR failures, rebuild/deploy the pure CLI, run green/red/empty fixtures, then remove temporary Rust opt-in | P0 |
+| Production runtime | BLOCKED | A fresh-seed bounded Stage 2 admits the imported-enum `Shared` and `String.smf` fixes, then exits normally on nine later LLVM undeclared-symbol imports; no fresh CLI exists | Repair the LLVM import/linkage frontier, rebuild, admit, and atomically deploy | P0 |
+| Test runner | SOURCE REPAIRED / DEPLOY BLOCKED | The retained release binary crashes in stale two-arg `rt_env_set`; current ABI is correct. Rust native/interpreter wait owners now return `-2` while live, retain the child, reap after kill, and inherit async output so unread pipes cannot hang chatty children. The fresh-seed Stage 2 now reaches a later LLVM import/linkage frontier | Fix the remaining bootstrap frontier, rebuild/deploy the pure CLI, run green/red/empty fixtures, then remove temporary Rust opt-in | P0 |
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; cosine candidate progress is time-throttled instead of reading RSS and writing stderr per pair; exact/cosine line gates share one tokenizer-derived signal prefix; runtime/performance qualification remain | Run focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
 | Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP001-MCP004 share one stable aggregate and LSP scope, while repository mode still fails closed pending safe recursive discovery; the UI isolation ratchet has zero new violations; the hot-loop gate reports 30 new findings | Repair native directory-walk parity, wire the aggregate repository owner, repair classified violations, then run focused fixtures | P1 |
 | Bootstrap essential tools | SOURCE WIRED | The exact fresh Stage 4 CLI now gates calibrated test-runner, focused lint, and deterministic duplicate-check outcomes from a non-repository cwd; raw-source duplicate dispatch is structurally forbidden | Run the aggregate after a fresh admitted Stage 4 binary exists | P0 |
@@ -91,12 +91,13 @@ so executable qualification is still blocked.
 
 ## Current blockers
 
-1. A clean admitted full-CLI runtime is unavailable. The latest full/manual
-   bootstrap clears the prior `CompareExchange` frontier but exits normally at
-   Stage 2 on imported-enum `Shared` lowering in the HIP/OpenCL dependency
-   closures plus a separate `String.smf` field-inference failure in CLI compile.
-   Focused enum coverage passes but does not reproduce the real project path,
-   so the next lane must fix imported owner preservation rather than retry.
+1. A clean admitted full-CLI runtime is unavailable. The correctly selected
+   fresh seed clears both imported-enum `Shared` and `String.smf`, then exits
+   normally at Stage 2 on nine LLVM undeclared-symbol imports (`cuda_available`,
+   `system.args`, four `char_to_ascii` sites, two `Tensor.T` sites, and
+   `Iterator.count`). The earlier wrapper run was not admission evidence:
+   `CARGO_TARGET_DIR` rebuilt a fresh shared seed, but the wrapper selected the
+   stale worktree-local seed from its independently computed path.
 2. NFR-007 and NFR-009 evidence harnesses exist, but their production latency
    and RSS measurements cannot qualify while the deployed runtime is the seed.
 3. The UI isolation ratchet has zero new violations after 22 exact bare-metal,
@@ -538,14 +539,31 @@ so executable qualification is still blocked.
   lowering to turn an ordinary local into an undeclared enum-like global.
   Parser and HIR regressions now pin lowercase parameter, local, and read
   spelling; capitalized enum variants still lex as ordinary identifiers. The
-  exact parser regression passes 1/1. The exact compiler regression is source-
-  complete but its crate currently fails before test execution on unrelated
-  upstream `wrap_entry_script_as_main` visibility/signature mismatches.
+  exact parser and compiler regressions each pass 1/1. The compiler regression
+  initially exposed the unrelated upstream `wrap_entry_script_as_main`
+  visibility/signature mismatch recorded below.
 - The upstream wrapper mismatch was a real regression: a later SimpleOS
   rewrite reverted the tested two-argument wrapper while leaving its callers
   and four hosted/freestanding semantic tests intact. The wrapper now again
   keeps constant hosted globals and all freestanding declarations at module
   scope, while script statements still enter the synthetic `main`.
+- The remaining imported `Shared` failure was traced past the earlier direct-
+  parameter test to nested imported enum payloads: project discovery retained
+  payload arity but discarded the payload's enum type, so destructuring
+  `MirInstKind.Ref(..., borrow_kind: MirBorrowKind, ...)` bound `borrow_kind`
+  as `ANY`. Global enum metadata now retains parser `Type`s, registers every
+  enum name first, then resolves payload owners in a second pass. The focused
+  project-map/HIR/MIR regression preserves the nested enum owner and passes
+  1/1. A review-found same-name collision risk now erases ambiguous payload
+  types back to `ANY` in either discovery order, erases references to ambiguous
+  enum/struct owners, conservatively retains payload shape on unit/payload
+  conflicts, and prevents late global materialization from overwriting an
+  authoritative local enum. Those regressions each pass 1/1. A direct bounded
+  Stage 2 with the correctly selected fresh seed contains no `Shared` or
+  `String.smf` diagnostic, admitting both fixes. It exits normally at a
+  distinct nine-file LLVM import/linkage frontier and produces no Stage 2
+  binary. The earlier wrapper result was stale-seed evidence because its seed
+  selection does not follow `CARGO_TARGET_DIR`.
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system
   qualification: NOT RUN because the production runtime identity gate fails
   and this host has no PowerShell/Windows runtime.

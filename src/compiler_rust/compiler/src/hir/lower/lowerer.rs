@@ -14,7 +14,7 @@ use crate::type_inference_config::TypeInferenceConfig;
 type GlobalStructDefs = std::sync::Arc<HashMap<String, Vec<(String, Type)>>>;
 type DuplicateGlobalStructDefs = std::sync::Arc<HashMap<String, Vec<Vec<(String, Type)>>>>;
 type AmbiguousFieldNames = std::sync::Arc<HashSet<String>>;
-type GlobalEnumDefs = std::sync::Arc<HashMap<String, Vec<(String, Option<usize>)>>>;
+type GlobalEnumDefs = std::sync::Arc<HashMap<String, Vec<(String, Option<Vec<Type>>)>>>;
 
 pub struct Lowerer {
     pub(super) module: HirModule,
@@ -101,7 +101,7 @@ pub struct Lowerer {
     /// originally motivated the old "single-field structs only" filter).
     pub(super) ambiguous_field_names: Option<AmbiguousFieldNames>,
     /// Global enum definitions from all compilation units, keyed by enum
-    /// name with payload arity per variant. Set by the native_project
+    /// name with payload field types per variant. Set by the native_project
     /// compiler driver before `lower_module` runs and consumed by
     /// `register_global_enums()` to eagerly seed `module.types.name_to_id`
     /// and `globals` with real enum TypeIds. Without this, cross-module
@@ -357,17 +357,15 @@ impl Lowerer {
     /// when an enum reaches the file via re-export rather than a direct
     /// `use` chain (W13-F class 1).
     ///
-    /// Variant payloads are filled with `TypeId::ANY` because the imports
-    /// walker only collects payload arity, not field types — that's enough
-    /// for `expr/access.rs::lower_field_access` (which only inspects
-    /// `variant_fields.is_none()`) and is byte-symmetric with the
-    /// placeholder strategy used in `module_pass.rs` Pass 0.
+    /// All names are registered before payloads are resolved so references to
+    /// another project enum do not depend on hash-map iteration order.
     pub fn register_global_enums(&mut self) {
         let defs = match self.global_enum_defs.clone() {
             Some(d) => d,
             None => return,
         };
-        for (enum_name, variant_summary) in defs.iter() {
+        let mut seeded = Vec::new();
+        for enum_name in defs.keys() {
             // Skip enums that already have a real registration (locally
             // defined in this compilation unit, or pre-registered by
             // `preregister_imported_type_names` for a directly-imported
@@ -376,25 +374,11 @@ impl Lowerer {
             if self.module.types.lookup(enum_name).is_some() {
                 continue;
             }
-            let variants: Vec<(String, Option<Vec<super::super::types::TypeId>>)> = variant_summary
-                .iter()
-                .map(|(variant_name, payload_arity)| {
-                    let payload = payload_arity.map(|n| {
-                        // Variant has `n` payload fields with unknown types
-                        // — represent as `TypeId::ANY` placeholders. Only
-                        // the `is_none()` distinction is consumed by the
-                        // enum-variant early-return in
-                        // `expr/access.rs::lower_field_access`.
-                        vec![super::super::types::TypeId::ANY; n]
-                    });
-                    (variant_name.clone(), payload)
-                })
-                .collect();
             let type_id = self.module.types.register_named(
                 enum_name.clone(),
                 super::super::types::HirType::Enum {
                     name: enum_name.clone(),
-                    variants,
+                    variants: vec![],
                     generic_params: vec![],
                     is_generic_template: false,
                     type_bindings: std::collections::HashMap::new(),
@@ -406,7 +390,47 @@ impl Lowerer {
             // imported enum names that lacked a registered TypeId), which
             // is the W13-F class 1 root cause.
             self.globals.insert(enum_name.clone(), type_id);
+            seeded.push(enum_name.clone());
         }
+
+        for enum_name in seeded {
+            let Some(variant_summary) = defs.get(&enum_name) else {
+                continue;
+            };
+            let variants = self.resolve_global_enum_variants(variant_summary);
+            let type_id = self.module.types.update_named(
+                enum_name.clone(),
+                super::super::types::HirType::Enum {
+                    name: enum_name.clone(),
+                    variants,
+                    generic_params: vec![],
+                    is_generic_template: false,
+                    type_bindings: std::collections::HashMap::new(),
+                },
+            );
+            self.globals.insert(enum_name, type_id);
+        }
+    }
+
+    pub(super) fn resolve_global_enum_variants(
+        &mut self,
+        summary: &[(String, Option<Vec<Type>>)],
+    ) -> Vec<(String, Option<Vec<TypeId>>)> {
+        summary
+            .iter()
+            .map(|(variant_name, payload)| {
+                let payload = payload.as_ref().map(|fields| {
+                    fields
+                        .iter()
+                        .map(|field| match field {
+                            Type::Simple(name) if name == "Any" => TypeId::ANY,
+                            _ => self.resolve_type(field).unwrap_or(TypeId::ANY),
+                        })
+                        .collect()
+                });
+                (variant_name.clone(), payload)
+            })
+            .collect()
     }
 
     /// Take ownership of the memory warnings

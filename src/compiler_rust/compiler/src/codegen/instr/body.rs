@@ -400,7 +400,7 @@ pub fn compile_function_body<M: Module>(
     vtable_data_ids: &std::collections::BTreeMap<String, cranelift_module::DataId>,
     vtable_type_ids: &std::collections::BTreeMap<crate::hir::TypeId, cranelift_module::DataId>,
     fn_arities: &std::sync::Arc<std::collections::HashMap<String, usize>>,
-    enum_defs: &std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>,
+    enum_defs: &std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>>,
     tag_runtime_pool_join_result: bool,
 ) -> InstrResult<()> {
     let mut func_ctx = FunctionBuilderContext::new();

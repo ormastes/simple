@@ -117,7 +117,7 @@ impl Codegen {
 
     pub fn set_enum_defs(
         &mut self,
-        defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>,
+        defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>>,
     ) {
         self.backend.set_enum_defs(defs);
     }

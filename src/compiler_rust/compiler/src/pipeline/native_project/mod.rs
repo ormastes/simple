@@ -172,8 +172,8 @@ pub(crate) fn effective_target() -> simple_common::target::Target {
 
 /// Grouped duplicate struct definitions: bare type name → list of field-lists.
 type DuplicateStructDefs = std::sync::Arc<std::collections::HashMap<String, Vec<Vec<(String, simple_parser::Type)>>>>;
-/// Enum definitions: enum name → list of (variant name, optional payload arity).
-type EnumDefs = std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>;
+/// Enum definitions: enum name → list of (variant name, optional payload types).
+type EnumDefs = std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>>;
 
 /// Cross-module import resolution data shared across compilation units.
 ///
@@ -198,7 +198,7 @@ pub(crate) struct ModuleImports {
     /// Used only for bounded field-name disambiguation when `struct_defs`
     /// lost information due to same-name collisions across modules.
     pub duplicate_struct_defs: DuplicateStructDefs,
-    /// Global enum definitions: enum_name -> [(variant_name, payload_arity)].
+    /// Global enum definitions with payload field types.
     /// Shared across all compilation units. The HIR lowerer consumes this in
     /// `compile_file_to_object` to eagerly seed `module.types.name_to_id` and
     /// `globals` with real enum TypeIds for cross-module enum receivers
@@ -430,8 +430,7 @@ impl NativeProjectBuilder {
 
     /// Resolve the configured cache root before target isolation.
     pub(crate) fn cache_base_dir(&self) -> PathBuf {
-        self
-            .config
+        self.config
             .cache_dir
             .clone()
             .unwrap_or_else(|| self.project_root.join(".simple/native_cache"))

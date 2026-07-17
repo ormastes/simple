@@ -265,7 +265,7 @@ pub struct CodegenBackend<M: Module> {
     /// functions. Used to strip spurious nil receivers from module-qualified calls.
     pub fn_arities: std::sync::Arc<std::collections::HashMap<String, usize>>,
     /// Global enum definitions harvested during native-project discovery.
-    pub enum_defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>,
+    pub enum_defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>>,
     /// Native-project compatibility: tag rt_pool_join results after raw
     /// closure-return lowering. Kept false for interpreter and `compile --native`.
     pub tag_runtime_pool_join_result: bool,
@@ -833,7 +833,7 @@ impl<M: Module> CodegenBackend<M> {
 
     pub fn set_enum_defs(
         &mut self,
-        defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>,
+        defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>>,
     ) {
         self.enum_defs = defs;
     }
@@ -2691,8 +2691,14 @@ mod tests {
         // TypeId (observed collision: TypeId(155) in the SimpleOS kernel
         // build, shared by 12+ backend structs).
         let colliding_type_id = TypeId(155);
-        backend.vtable_type_ids.entry(colliding_type_id).or_insert(software_backend_vtable);
-        backend.vtable_type_ids.entry(colliding_type_id).or_insert(baremetal_backend_vtable);
+        backend
+            .vtable_type_ids
+            .entry(colliding_type_id)
+            .or_insert(software_backend_vtable);
+        backend
+            .vtable_type_ids
+            .entry(colliding_type_id)
+            .or_insert(baremetal_backend_vtable);
 
         assert_eq!(
             backend.vtable_type_ids.get(&colliding_type_id),

@@ -3493,8 +3493,180 @@ fn test_build_import_map_records_enum_defs_without_callable_variant_symbols() {
     assert!(!result.all_mangled.contains_key("Type.Var"));
     assert_eq!(
         result.enum_defs.get("Type"),
-        Some(&vec![("Int".to_string(), Some(2)), ("Var".to_string(), Some(1))])
+        Some(&vec![
+            (
+                "Int".to_string(),
+                Some(vec![
+                    simple_parser::Type::Simple("i32".to_string()),
+                    simple_parser::Type::Simple("bool".to_string()),
+                ]),
+            ),
+            (
+                "Var".to_string(),
+                Some(vec![simple_parser::Type::Simple("i64".to_string())]),
+            ),
+        ])
     );
+}
+
+#[test]
+fn test_duplicate_global_enum_payload_types_are_erased() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    std::fs::create_dir_all(&lib_root).unwrap();
+    let left = lib_root.join("left.spl");
+    let right = lib_root.join("right.spl");
+    let left_source = "enum Envelope:\n    Value(value: LeftKind)\n    Empty\n";
+    let right_source = "enum Envelope:\n    Value(value: RightKind)\n    Empty\n";
+    std::fs::write(&left, left_source).unwrap();
+    std::fs::write(&right, right_source).unwrap();
+
+    for file_sources in [
+        vec![
+            (left.clone(), left_source.to_string()),
+            (right.clone(), right_source.to_string()),
+        ],
+        vec![
+            (right.clone(), right_source.to_string()),
+            (left.clone(), left_source.to_string()),
+        ],
+    ] {
+        let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+        assert_eq!(
+            result.enum_defs.get("Envelope"),
+            Some(&vec![
+                (
+                    "Value".to_string(),
+                    Some(vec![simple_parser::Type::Simple("Any".to_string())]),
+                ),
+                ("Empty".to_string(), None),
+            ])
+        );
+    }
+}
+
+#[test]
+fn test_ambiguous_global_payload_owners_are_erased_in_both_orders() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    std::fs::create_dir_all(&lib_root).unwrap();
+    let left = lib_root.join("left.spl");
+    let right = lib_root.join("right.spl");
+    let envelope = lib_root.join("envelope.spl");
+    let left_source = "enum MemorySpace:\n    Shared\n\nstruct Point:\n    x: i64\n";
+    let right_source = "enum MemorySpace:\n    Private\n\nstruct Point:\n    y: bool\n";
+    let envelope_source = "enum Envelope:\n    Space(value: MemorySpace)\n    Location(value: Point)\n";
+
+    for file_sources in [
+        vec![
+            (envelope.clone(), envelope_source.to_string()),
+            (left.clone(), left_source.to_string()),
+            (right.clone(), right_source.to_string()),
+        ],
+        vec![
+            (right.clone(), right_source.to_string()),
+            (left.clone(), left_source.to_string()),
+            (envelope.clone(), envelope_source.to_string()),
+        ],
+    ] {
+        let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+        assert_eq!(
+            result.enum_defs.get("Envelope"),
+            Some(&vec![
+                (
+                    "Space".to_string(),
+                    Some(vec![simple_parser::Type::Simple("Any".to_string())]),
+                ),
+                (
+                    "Location".to_string(),
+                    Some(vec![simple_parser::Type::Simple("Any".to_string())]),
+                ),
+            ])
+        );
+    }
+}
+
+#[test]
+fn test_duplicate_global_enum_unit_payload_conflict_is_not_order_dependent() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    std::fs::create_dir_all(&lib_root).unwrap();
+    let left = lib_root.join("left.spl");
+    let right = lib_root.join("right.spl");
+    let left_source = "enum Envelope:\n    Empty\n";
+    let right_source = "enum Envelope:\n    Empty(value: i64)\n";
+
+    for file_sources in [
+        vec![
+            (left.clone(), left_source.to_string()),
+            (right.clone(), right_source.to_string()),
+        ],
+        vec![
+            (right.clone(), right_source.to_string()),
+            (left.clone(), left_source.to_string()),
+        ],
+    ] {
+        let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+        assert_eq!(
+            result.enum_defs.get("Envelope"),
+            Some(&vec![(
+                "Empty".to_string(),
+                Some(vec![simple_parser::Type::Simple("Any".to_string())]),
+            )])
+        );
+    }
+}
+
+#[test]
+fn test_global_enum_payload_keeps_nested_enum_owner() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    std::fs::create_dir_all(&lib_root).unwrap();
+
+    let types_path = lib_root.join("types.spl");
+    std::fs::write(
+        &types_path,
+        "enum MemorySpace:\n    Shared\n    Private\n\nenum Envelope:\n    Space(value: MemorySpace)\n    Empty\n",
+    )
+    .unwrap();
+    let consumer_path = src_root.join("consumer.spl");
+    let consumer_source = "fn describe(value: Envelope) -> text:\n    match value:\n        case Envelope.Space(space):\n            match space:\n                case Shared:\n                    return \"shared\"\n                case Private:\n                    return \"private\"\n        case Envelope.Empty:\n            return \"empty\"\n";
+    std::fs::write(&consumer_path, consumer_source).unwrap();
+
+    let file_sources = vec![
+        (types_path.clone(), std::fs::read_to_string(&types_path).unwrap()),
+        (consumer_path.clone(), consumer_source.to_string()),
+    ];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+    let ast = simple_parser::Parser::new(consumer_source).parse().unwrap();
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_global_enum_defs(std::sync::Arc::new(result.enum_defs));
+    lowerer.register_global_enums();
+
+    let lowered = lowerer
+        .lower_module(&ast)
+        .expect("nested imported enum payload should lower");
+    let function = lowered
+        .functions
+        .iter()
+        .find(|function| function.name == "describe")
+        .unwrap();
+    let space = function.locals.iter().find(|local| local.name == "space").unwrap();
+    assert!(matches!(
+        lowered.types.get(space.ty),
+        Some(crate::hir::HirType::Enum { name, .. }) if name == "MemorySpace"
+    ));
+    let hir = format!("{:?}", function.body);
+    assert!(hir.contains("rt_enum_payload"), "{hir}");
+    assert!(!hir.contains("Global(\"Shared\")"), "{hir}");
+
+    let mir = crate::mir::lower_to_mir(&lowered).expect("nested imported enum payload should reach MIR");
+    let mir = format!("{mir:?}");
+    assert!(!mir.contains("global_name: \"Shared\""), "{mir}");
 }
 
 #[test]

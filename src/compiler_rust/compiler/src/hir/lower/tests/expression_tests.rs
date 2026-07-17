@@ -672,7 +672,10 @@ fn test_lower_global_enum_variant_constructor_identifier_call() {
     let mut lowerer = Lowerer::new();
     lowerer.set_global_enum_defs(Arc::new(HashMap::from([(
         "Type".to_string(),
-        vec![("Int".to_string(), Some(2))],
+        vec![(
+            "Int".to_string(),
+            Some(vec![Type::Simple("i64".to_string()), Type::Simple("bool".to_string())]),
+        )],
     )])));
     lowerer.register_global_enums();
     let lowered = lowerer.lower_module(&module).unwrap();
@@ -964,6 +967,27 @@ fn test_await_expr_string_type_propagates() {
     } else {
         panic!("Expected Let statement with await expression");
     }
+}
+
+#[test]
+fn test_global_enum_defs_do_not_overwrite_authoritative_local_enum() {
+    let source = "enum E:\n    A\n\nfn pick() -> E:\n    return E.B\n";
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+    let mut lowerer = Lowerer::new();
+    lowerer.set_global_enum_defs(Arc::new(HashMap::from([(
+        "E".to_string(),
+        vec![("B".to_string(), None)],
+    )])));
+    lowerer.register_global_enums();
+
+    let error = lowerer
+        .lower_module(&module)
+        .expect_err("local E must not gain global variant B");
+    assert!(
+        error.to_string().contains("enum 'E' has no variant named 'B'"),
+        "{error}"
+    );
 }
 
 /// Task #80 f-path repro (dap dap_handlers.spl / lsp verification.spl): a
