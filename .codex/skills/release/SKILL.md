@@ -53,11 +53,12 @@ Apply bump rule (major/minor/patch) or use exact version.
 
 ### 3. Update All Version Locations
 
-| File | Field/Pattern |
-|------|---------------|
-| `VERSION` | Entire file content |
-| `src/app/cli/main_part1.spl` | Hardcoded fallback in `get_version()` |
-| `src/app/cli/bootstrap_main.spl` | Hardcoded in `bootstrap_version()` |
+| File | Line | Field/Pattern |
+|------|------|---------------|
+| `VERSION` | — | Entire file content |
+| `src/app/cli/cli_helpers.spl` | 15 | Hardcoded fallback in `get_version()` |
+| `src/app/cli/_CliMain/args_and_os_commands.spl` | 67 | Hardcoded fallback in `get_version()` |
+| `src/app/cli/bootstrap_main.spl` | 18 | Hardcoded in `bootstrap_version()` |
 
 ### 4. Update CHANGELOG
 
@@ -117,7 +118,7 @@ override that credential.
 
 | Artifact | Path |
 |----------|------|
-| Updated version | `VERSION`, `src/app/cli/main_part1.spl`, `src/app/cli/bootstrap_main.spl` |
+| Updated version | `VERSION`, `src/app/cli/cli_helpers.spl`, `src/app/cli/_CliMain/args_and_os_commands.spl`, `src/app/cli/bootstrap_main.spl` |
 | Changelog | `CHANGELOG.md` |
 | Git tag | `vX.Y.Z` |
 
@@ -130,6 +131,6 @@ override that credential.
 - NEVER update SPipe in release; release must consume verified SPipe evidence
 - NEVER accept generated-manual quality or sidecar-review gaps during release
 - NEVER push without user approval
-- NEVER skip version locations — all 3 version sources must be updated
+- NEVER skip version locations — all 4 version sources must be updated (VERSION file + 3 .spl files)
 - NEVER release if `find doc/06_spec -name '*_spec.spl' | wc -l` is nonzero
 - All code in `.spl` — no Python, no Bash

@@ -18,7 +18,8 @@ description: Version bump and release. Accepts version argument (major/first, mi
 2. Calculate new version
 3. Update all version locations:
    - `VERSION` — entire file
-   - `src/app/cli/main_part1.spl` — hardcoded fallback in `get_version()`
+   - `src/app/cli/cli_helpers.spl` — hardcoded fallback in `get_version()`
+   - `src/app/cli/_CliMain/args_and_os_commands.spl` — hardcoded fallback in `get_version()`
    - `src/app/cli/bootstrap_main.spl` — hardcoded in `bootstrap_version()`
 4. Update `CHANGELOG.md` with new section
 5. Commit: `jj commit -m "chore: release vX.Y.Z"`

@@ -251,6 +251,18 @@ impl<'a> super::Lexer<'a> {
                 // A top-level ':' means: brace_depth==1, paren_depth==0, not in a string.
                 let mut last_top_colon: Option<usize> = None;
                 while let Some(c) = self.peek() {
+                    // An unescaped newline inside a non-triple f-string's
+                    // interpolation expression means the `{` was never
+                    // matched on this line (e.g. a literal `{` in a
+                    // single-line string). Stop and backtrack so an
+                    // unmatched brace cannot run away across lines and
+                    // consume later, unrelated source (functions, strings,
+                    // etc). Triple f-strings legitimately allow multi-line
+                    // expressions and are unaffected.
+                    if c == '\n' && !is_triple {
+                        expr_failed = true;
+                        break;
+                    }
                     // Handle escape sequences - translate them for the expression
                     if c == '\\' {
                         self.advance();
@@ -296,22 +308,18 @@ impl<'a> super::Lexer<'a> {
                         }
                         continue;
                     }
-                    // Track unescaped string boundaries. In a single-line
-                    // f-string, an unescaped double quote at top level closes
-                    // the OUTER string; it cannot start a nested expression
-                    // string. Stop and backtrack so an unmatched literal `{`
-                    // cannot consume later functions while searching for `}`.
-                    // Triple f-strings may contain an unescaped nested
-                    // double-quoted string, and escaped quotes are handled by
-                    // the backslash arm above.
+                    // Track unescaped string boundaries: an unescaped double
+                    // quote toggles a nested string literal inside the
+                    // interpolation expression (e.g. `{xs.join("-")}`).
+                    // Braces/quotes inside that nested string don't affect
+                    // interpolation depth. Escaped quotes are handled by the
+                    // backslash arm above. Runaway unmatched `{` across lines
+                    // is separately contained by the newline guard above.
                     if c == '"' {
                         if let Some(quote) = in_string {
                             if quote == c {
                                 in_string = None; // End of string
                             }
-                        } else if !is_triple {
-                            expr_failed = true;
-                            break;
                         } else {
                             in_string = Some(c); // Start of string
                         }

@@ -166,16 +166,27 @@ main()
     }
 
     #[test]
-    fn test_interpolation_expression_accepts_raw_string_call_argument() {
-        let source = r#"val desc = "{desc}<{constraints.join(', ')}>""#;
-        assert!(find_errors(source).is_empty());
+    fn test_nested_string_literal_in_interpolation() {
+        let tokens = get_fstring_tokens(r#"val j = "j={xs.join("-")}""#);
         assert_eq!(
-            get_fstring_tokens(source),
+            tokens,
             vec![TokenKind::FString(vec![
-                FStringToken::Expr("desc".to_string()),
-                FStringToken::Literal("<".to_string()),
-                FStringToken::Expr("constraints.join(', ')".to_string()),
-                FStringToken::Literal(">".to_string()),
+                FStringToken::Literal("j=".to_string()),
+                FStringToken::Expr("xs.join(\"-\")".to_string()),
+            ])]
+        );
+    }
+
+    #[test]
+    fn test_nested_interpolation_literal_does_not_change_outer_brace_depth() {
+        let tokens = get_fstring_tokens(
+            r#"val ty = "struct_{member_ids.map("{_}").join("_")}""#,
+        );
+        assert_eq!(
+            tokens,
+            vec![TokenKind::FString(vec![
+                FStringToken::Literal("struct_".to_string()),
+                FStringToken::Expr("member_ids.map(\"{_}\").join(\"_\")".to_string()),
             ])]
         );
     }

@@ -204,6 +204,23 @@ fn test_map_tuple_placeholder_inside_fstring_interpolation() {
 }
 
 #[test]
+fn nested_string_literals_remain_fstring_expressions() {
+    for source in [
+        r#""j={xs.join("-")}""#,
+        r#""struct_{member_ids.map("{_}").join("_")}""#,
+    ] {
+        let module = parse(source).expect("nested string interpolation should parse");
+        let Node::Expression(Expr::FString { parts, .. }) = &module.items[0] else {
+            panic!("Expected outer FString, got {:?}", module.items[0]);
+        };
+        assert!(
+            parts.iter().any(|part| matches!(part, FStringPart::Expr(_))),
+            "nested string interpolation must not silently fall back to a literal: {parts:?}"
+        );
+    }
+}
+
+#[test]
 fn test_coalesce_default_parses_full_arithmetic_expression() {
     let module = parse("value ?? -1 * 100").unwrap();
     if let Node::Expression(Expr::Coalesce { expr, default }) = &module.items[0] {
