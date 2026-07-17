@@ -277,3 +277,261 @@ approach — use typed dispatch-and-print probes like steps 1-3 above
 instead). `vfs_boot_init.spl:374` is confirmed restored to `if true:`
 (hosted FAT32 mount stays skipped; C8 is still open, not fixed by this
 lane).
+
+### C8-FIELD lane (2026-07-17) — six-way static elimination, dispatch codegen is CLEAN; reframed to runtime data corruption
+
+Picked up the two untested discriminators the C8-RELOC lane flagged (storage-
+vs-chained-read, nesting depth) and ran them, plus several more, across every
+compilation pipeline this repo has. **Every one is clean.** This section
+documents the elimination and reframes where the bug must actually live.
+
+**Repro fixtures used throughout:** a 3-method trait (`read_x`/`write_x`/
+`size_x`, matching `BlockDevice`'s exact 3-method/slot-2 shape) implemented by
+one struct, nested two levels deep (`Outer.inner: Middle`, `Middle.device:
+Dev`), built via nested struct-literal constructors exactly like
+`SharedFat32Driver(inner: Fat32Core.new(device), ...)`, then dispatched via
+`o.inner.device.size_x()` in various forms. A 1-method trait was tried first
+and discarded — slot offset 0 makes "correct 2-deref dispatch" and "one extra
+deref" produce identical bytes (`[rax+0]` vs `[rax]`), so it cannot
+discriminate; the 3-method/slot-`0x10` shape is required.
+
+**Six independent negative results, weakest to strongest:**
+
+1. **Hosted Cranelift JIT** (`LocalExecutionManager::cranelift()`, is_pic=true,
+   host x86_64-linux). Four new tests added to `local_execution_tests.rs`
+   alongside the existing two vtable-dispatch controls:
+   `test_cranelift_jit_vtable_dispatch_two_level_single_local_chain` (the
+   exact C8-RELOC step-3 shape: `val bd: Dev = o.inner.device; bd.size_x()`),
+   `..._two_level_split_hops` (discriminator a: `val mid = o.inner; val bd:
+   Dev = mid.device; bd.size_x()`), `..._single_level_no_outer_nest`
+   (discriminator b: no outer struct, `Middle` alone), and
+   `..._two_level_chained_expr` (`o.inner.device.size_x()` with no
+   intermediate local at all). **All four return 99 correctly.** 18/18 in
+   `codegen::local_execution_tests`, 18/18 in `seed_regression`.
+2. **AOT single-module, freestanding, matched settings**
+   (`codegen::cranelift::Codegen::for_target_with_opt_level_and_cpu`,
+   `x86_64-unknown-none`, `NativeOptimizationLevel::Aggressive` ->
+   `is_pic=false` per `BackendSettings::aot_for_target`, matching the kernel
+   build's `--opt-level=aggressive --target x86_64-unknown-none` exactly).
+   Disassembled the emitted `.o` directly (`objdump -dr`): dispatch is
+   `and rax,~7 ; mov rax,[rax]` (object -> vtable) `; mov rax,[rax+0x10]`
+   (vtable+slot2 -> fnptr) `; call rax` — a clean, correctly-offset 2-deref
+   sequence. No extra indirection.
+3. **The real native-build pipeline, not the Rust API bypass.** Established
+   that `native-build`'s actual frontend (discovery, HIR lowering, MIR
+   lowering — including the `TraitMethod`/`Unresolved` resolution logic in
+   `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` and
+   `src/compiler/35.semantics/resolve_strategies.spl`) is the **pure-Simple
+   self-hosted driver** (`src/app/cli/native_build_main.spl` +
+   `src/compiler/*.spl`), spawned as a worker process by the Rust seed's
+   `native-build` subcommand; the Rust codegen crate (`compiler_rust`) only
+   supplies the final Cranelift/LLVM emission backend. Tests 1-2 above use
+   `compiler_rust`'s OWN Rust-side `hir::lower`/`mir::lower_to_mir`, which is
+   a **separate, parallel implementation** from the pipeline that actually
+   built the faulting kernel — so they are weaker evidence than tests 3-6,
+   which drive the real worker end to end. (Also confirmed independently:
+   the currently-deployed `bin/simple` is the Rust-cargo-built seed binary
+   itself — `strings` shows `cranelift-entity`/`rand` crate paths and
+   `driver/src/seed_warning.rs`'s literal warning text — not a self-hosted
+   pure-Simple binary, so `src/compiler_rust` is confirmed to be in the
+   live path for the actual kernel-build recipe.)
+4. **Cross-module, local var, real pipeline.** Two `.spl` files (struct/trait
+   definitions + `build_outer()` constructor in one module, the two-hop
+   dispatch in a second module importing the first — mirroring
+   `shared_fat32_driver.spl` vs `vfs_boot_init.spl`), built via
+   `bin/…/target/bootstrap/simple native-build --entry-closure --backend
+   cranelift --opt-level=aggressive --cpu x86-64-v1 --target
+   x86_64-unknown-none` (env: `SIMPLE_BOOTSTRAP=1
+   SIMPLE_ALLOW_FREESTANDING_STUBS=1`), producing two separate cached `.o`
+   files and a linked ELF. Disassembled the LINKED ELF: `build_outer`'s
+   writes (`Outer.inner`@0, `Middle.device`@0, `DevC`'s vtable ptr@0, all via
+   RIP-relative `lea` for the vtable stamp) agree exactly with
+   `run_two_hop_combined`'s reads; final dispatch is the same clean
+   `[rax] ; [rax+0x10] ; call` sequence. **This disproves the offset-
+   disagreement-across-modules hypothesis directly** (write-side and
+   read-side offsets checked byte-for-byte, not inferred).
+5. **Cross-module, module-level global, real pipeline.** Same as #4 but the
+   outer struct is held in `var g_outer: Outer = build_outer()` at module
+   scope and reassigned (`g_outer = build_outer()`), mirroring
+   `g_pure_nvme_root_fat32`'s actual shape exactly (this specific variant —
+   global storage of the OUTER struct, not just the inner `g_adapter` the
+   prior lane checked — was untested until now, and is a real bug class in
+   this codebase per C1 "module-global initializers never emitted"). The
+   global read/write goes through `movabs` absolute addressing (not
+   RIP-relative) as expected; still a clean 2-deref dispatch at the end,
+   correct slot offset.
+6. **TypeId-collision decoy, real pipeline.** Directly targeted commit
+   `8932fcb3a14` ("fix(seed): key vtable selection by struct NAME, not
+   per-module TypeId" — landed the night before this lane, fixing a
+   cross-struct vtable-data clobber from `HirModule::new()` resetting the
+   `TypeId` allocator per module). Added a third module defining an unrelated
+   5-method trait/struct (`DecoyTrait`/`DecoyStruct`) that, as the first
+   user-defined type in its own module, very plausibly collides on the same
+   raw per-module `TypeId` as `DevC` in the C8 fixture module; wired it into
+   the same `--entry-closure` closure and called both paths from `main`.
+   `nm`/`readelf -sW` on the resulting ELF show two separate, correctly-sized
+   vtable data objects (`__vtable__DevC__for__Dev` = 24 bytes/3 slots,
+   `__vtable__DecoyStruct__for__DecoyTrait` = 40 bytes/5 slots) with correct
+   relocation content (function addresses match `nm` exactly, in declaration
+   order) and no cross-contamination; the dispatch site for `DevC` still
+   resolves through `DevC`'s own vtable, unaffected by the decoy. **This
+   specific already-fixed collision class does not resurface for C8's shape
+   either.**
+
+**Reframe (per external review of this elimination — recorded here because
+it changes the search space for the next lane):** dispatch is a clean 2-deref
+`obj -> [obj]=vtable -> [vtable+0x10]=fnptr -> call` in every build config,
+including ones matched to the faulting kernel's exact flags. A wild jump to
+the callee's OWN prologue bytes despite clean dispatch code means the
+*pointed-to runtime data* is wrong, not the *dispatch instructions* — i.e.
+either (a) the live object's field-0 does not actually contain the vtable
+data address at runtime (corrupt-at-construction, or overwritten after
+construction, or the receiver isn't the object it's assumed to be), or (b)
+the vtable data section's bytes are overwritten by the time the dispatch
+runs. **Both are runtime corruption, invisible to any static `.o`/ELF
+disassembly** — which is exactly why six independent static analyses (three
+from the C8-RELOC lane, three more here) all come back clean while the
+kernel still faults. Static analysis of this dispatch shape is now
+exhausted; further identical-flavor static repros are not expected to add
+information.
+
+**Correction to the task's own recipe pointer, discovered en route:**
+`scripts/check/check-simpleos-x86-64-wm-render-event-evidence.shs` builds
+`wm_entry.spl` — this entry file does **not** import `vfs_boot_init` at all
+(`grep -rl vfs_boot_init examples/09_embedded/simple_os/arch/x86_64/*.spl`
+lists `boot_stage2/3_entry.spl`, `desktop_entry.spl`,
+`desktop_import_probe_entry.spl`, `desktop_e2e_entry.spl`,
+`fs_exec_general_ring3_entry.spl`, `gui_entry_desktop.spl`, `os_entry.spl`,
+`servers_entry.spl`, `shell_serial_entry.spl`, `tools_verify_entry.spl`,
+`toolchain_exec_probe_entry.spl`, `toolchain_vfs_probe_entry.spl` — NOT
+`wm_entry.spl`). A from-scratch `wm_entry.spl` build (fresh, isolated
+`--cache-dir`, `--clean`, `vfs_boot_init.spl:374` toggled to `if false:`)
+confirmed this empirically: `nm` shows a legacy lowercase C-style
+`_fat32_*`/`nvme_admin_cmd`/`simpleos_nvme_*` driver, zero `NvmeBlockAdapter`
+or `sector_size` symbols anywhere in the binary — `wm_entry.spl` boots
+through an entirely different, non-pure-Simple FS/NVMe path and cannot
+reproduce C8 by construction. `gui_entry_desktop.spl` — the entry named in
+C1-C4's own header ("All found on `native-build`... building
+`gui_entry_desktop.spl`") and imported by `check-simpleos-x86-64-wm-qemu-
+readiness.shs` / `check-simpleos-wm-fullscreen-evidence.shs` / others — is
+the correct entry point; it directly imports `vfs_boot_init` via
+`os.services.vfs.vfs_init`. **Next lane: use `gui_entry_desktop.spl` as
+`--entry`, not `wm_entry.spl`, for any further C8 QEMU work.**
+
+**The decisive static check — DONE, no QEMU needed, and it redirects the
+fix locus.** Built `gui_entry_desktop.spl` fresh (isolated `--cache-dir`,
+`vfs_boot_init.spl:374` briefly `if false:`, same flags as the kernel
+recipe: `--backend cranelift --cpu x86-64-v1 --opt-level=aggressive --mode
+dynload --entry-closure --target x86_64-unknown-none`, linked via
+`clang --target=x86_64-unknown-elf`; 684 files compiled matching the prior
+lane's "666 files" ballpark, confirming this is the same real build).
+`nm` now shows `NvmeBlockAdapter`'s full method set including
+`services__vfs__vfs_block_adapters__NvmeBlockAdapter_dot_sector_size` at
+`0a601232` and `__vtable__NvmeBlockAdapter__for__BlockDevice` at `0a7d04c8`.
+Disassembled `sector_size`'s actual prologue:
+
+```
+0a601232 <...NvmeBlockAdapter_dot_sector_size>:
+ a601232: 55                    push   %rbp
+ a601233: 48 89 e5              mov    %rbp,%rsp
+ a601236: 48 81 ec 90 00 00 00  sub    $0x90,%rsp
+```
+
+**`sub $0x90,%rsp` — a 144-byte frame, NOT `sub rsp,0x1e0` (480 bytes).**
+`NvmeBlockAdapter.sector_size()`'s real entry bytes, in *this* build, do not
+match the fault value's decoded bytes.
+
+**Correction to this lane's own first-pass check (do not repeat the
+mistake):** an initial `grep` for the literal mnemonic text `sub
+$0x1e0,%rsp` over `objdump -d`'s decoded output found zero matches and this
+doc briefly concluded "no function anywhere has a 480-byte frame" /
+"corruption is non-code garbage." **That check was wrong and the conclusion
+has been retracted.** `objdump`'s linear/recursive disassembly only prints
+`sub $0x1e0,%rsp` at addresses it independently decided were instruction
+*boundaries* — the fault value is a candidate *byte offset into anywhere in
+`.text`*, not necessarily a boundary objdump's decoder ever visits (and
+many functions in this codebase interleave single-byte `movb $imm,(%reg)`
+string-literal writes for inlined panic messages, which reliably desyncs
+objdump's linear decode for long stretches — confirmed directly: manually
+walking `Fat32Core._device_sector_size`'s own disassembly in this exact
+684-file build repeatedly hit stray `.byte 0xXX` decode failures from this
+exact cause). The correct check is a **raw byte search** of `.text`, not a
+text-search of objdump's rendering. Redone properly
+(`objcopy -O binary --only-section=.text`, then a byte-string search for
+`89 e5 48 81 ec e0 01` — the exact 7 bytes this lane's own earlier
+reasoning derived as the byte-for-byte match for `cr2`, read starting 2
+bytes into a `push rbp; mov rbp,rsp; sub rsp,0x1e0` prologue): **61
+occurrences** in this build's 41.6MB `.text` section. This byte sequence is
+common, not absent — `sub rsp,0x1e0` (480-byte frames, likely from the same
+inlined-panic-string pattern seen throughout this codebase) is a widely
+repeated shape, not a unique fingerprint. Attempting to also manually trace
+`_device_sector_size`'s own dispatch instructions to completion (to check
+whether *this specific* call site's slot-2 dispatch is clean or corrupted
+in this exact 684-file build, as opposed to the differently-built binary
+the C8-RELOC lane inspected) hit the same objdump-desync wall — the
+function is dominated by multi-hundred-byte inlined error-string
+construction, and manually re-deriving true instruction boundaries through
+it by hand was not completed in this session.
+
+**Net effect of the correction:** the "zero matches -> non-code garbage,
+upstream of vtable selection" claim is **retracted**. The extra-deref
+hypothesis (dispatch reads the callee's own code bytes as a pointer) is
+**not eliminated** by this check — if anything, the 61-occurrence result
+shows it remains entirely plausible in general, since 480-byte frames are
+common in this codebase and the true faulting build's actual
+`_device_sector_size`/`sector_size` shape at the time of the original
+report may well have had one. This lane's six-way *dispatch-instruction*
+elimination (clean 2-deref, correct offset, in every isolated
+shape/pipeline/module-topology tried) still stands on its own terms — it is
+strong evidence the *general* struct-field-trait-dispatch lowering
+mechanism is not systematically broken — but it does **not**, on its own,
+prove the specific corruption in the real kernel build is "upstream of
+vtable selection" rather than "an extra dereference at this one call site
+under conditions (register pressure, specific surrounding code, or a
+codegen path this lane's minimal fixtures didn't trigger) not reproduced by
+this lane's fixtures." Both remain open.
+
+**Recommended next probe, unretracted:** a genuine QEMU boot with the vfs
+skip lifted (entry = `gui_entry_desktop.spl`, per the correction above),
+instrumented with a **typed runtime print** (not raw-address, which already
+failed once via `any`-boxing) at the `_device_sector_size` call site: print
+the integer value of the receiver pointer itself and of `*(receiver)` (its
+claimed vtable pointer field), and compare both against the static
+`__vtable__NvmeBlockAdapter__for__BlockDevice` address from a fresh `nm` of
+that exact build. Receiver's field-0 ≠ the static vtable address -> the
+object's vtable pointer is corrupt at rest (hunt the store, or the receiver
+isn't actually an `NvmeBlockAdapter`) — consistent with "upstream of
+dispatch." Field-0 *matches* the static vtable address exactly, yet the
+call still lands on a wild address -> the dispatch *instructions themselves*
+are doing something wrong specifically at this call site despite this
+lane's clean isolated-fixture results (an extra deref, or a slot-offset
+miscomputation this lane's fixtures didn't trigger) — consistent with the
+original "extra deref" theory being right after all, just not reproducible
+in isolation. This single runtime comparison is what actually decides the
+fix locus; neither this lane's static work nor any further isolated-shape
+repro can substitute for it.
+
+**Files touched during this lane, final state confirmed:**
+`src/compiler_rust/compiler/src/codegen/local_execution_tests.rs` (4 new
+control tests, kept — permanent regression coverage), `src/os/services/vfs/
+vfs_boot_init.spl` (line 374 toggled `if true:` -> `if false:` -> `if true:`
+**twice** in this lane — once for the wm_entry.spl false-start, once for the
+gui_entry_desktop.spl decisive check — verified via `sed -n '374p'` +
+`git diff` = empty after each restoration, never left lifted between steps).
+`src/compiler_rust/runtime/build.rs` had 3 pre-existing `jj` conflict
+markers (unrelated to C8, from a concurrent lane's merge) blocking ALL
+cargo builds in this repo; resolved by keeping both sides' `println!`/
+source-list entries (`runtime_hosted_gpu_stubs.c` and `runtime_rocm.c` both
+exist on disk and both loops already skip missing files, so keeping both is
+safe) — flagged explicitly here since this lane does not commit; a parallel
+lane's rebase later converged the working copy back to a clean, matching
+`build.rs` on its own, so no action is needed from the coordinator beyond
+being aware this happened (this lane's uncommitted edits to
+`local_execution_tests.rs` and this doc were also silently reverted once by
+the same kind of concurrent sync mid-session and had to be re-applied —
+flagging this so the coordinator commits promptly rather than leaving this
+lane's output uncommitted). Scratch/one-off repro sources and kernel builds
+(including `build/os/simpleos_wm_x86_64_c8check*.elf` and
+`build/os/simpleos_desktop_c8check.elf`, both deleted after use) were kept
+under the session scratchpad and `build/os/` (gitignored) and are not part
+of this repo's tracked state.

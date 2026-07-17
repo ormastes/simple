@@ -225,6 +225,154 @@ fn test_cranelift_jit_vtable_dispatch_partial_impl_compaction() {
 }
 
 // =============================================================================
+// C8-FIELD lane (2026-07-17): two-hop trait-field discriminator probes.
+//
+// Mirrors the exact freestanding kernel shapes from the C8-RELOC addendum
+// (doc/08_tracking/bug/simpleos_native_build_entry_closure_codegen_defects_2026-07-17.md):
+//   SharedFat32Driver(inner: Fat32Core.new(device), ...) -> outer.inner.device.method()
+// Common fixture: a 2-level struct nest (Outer.inner: Middle, Middle.device: Dev
+// trait-typed field), built via nested struct-literal constructors exactly like
+// `SharedFat32Driver(inner: Fat32Core.new(g_adapter), ...)`.
+//
+// All four variants PASS under the hosted Cranelift JIT (this file) — this is
+// a CONTROL result, not a repro: the C8-FIELD lane additionally reproduced the
+// exact freestanding/entry-closure/aggressive/is_pic=false AOT pipeline (both
+// single-module and genuine cross-module/entry-closure native-build, with the
+// outer struct held in a local AND in a module-level global, AND with a
+// TypeId-collision-prone decoy trait/struct in a third module) via direct
+// disassembly of the emitted object code / linked ELF, and found the same
+// clean 2-deref dispatch (object -> vtable -> [vtable+slot_offset] -> call)
+// in every case. C8 does NOT reduce to this shape at the seed-codegen level;
+// see the bug doc's C8-FIELD addendum for the six-way elimination and the
+// next-probe recommendation (runtime pointer comparison under QEMU).
+// =============================================================================
+
+const C8_FIELD_FIXTURE_PREFIX: &str = "trait Dev:\n\
+     \x20   fn size_x() -> i64\n\
+     \n\
+     struct DevC:\n\
+     \x20   x: i64\n\
+     \n\
+     impl Dev for DevC:\n\
+     \x20   fn size_x() -> i64:\n\
+     \x20       return 99\n\
+     \n\
+     struct Middle:\n\
+     \x20   device: Dev\n\
+     \n\
+     struct Outer:\n\
+     \x20   inner: Middle\n\
+     \n";
+
+#[test]
+fn test_cranelift_jit_vtable_dispatch_two_level_single_local_chain() {
+    // Exact shape of the decisive C8-RELOC repro (step 3): two-hop field
+    // chain (`outer.inner.device`) read into ONE local in a single
+    // statement, then dispatch on that local. This is the shape that
+    // FAULTED in the freestanding kernel build.
+    let mut em = LocalExecutionManager::cranelift().expect("cranelift init");
+    let src = format!(
+        "{C8_FIELD_FIXTURE_PREFIX}\
+         fn run_two_hop_combined() -> i64:\n\
+         \x20   val d = DevC(x: 5)\n\
+         \x20   val m = Middle(device: d)\n\
+         \x20   val o = Outer(inner: m)\n\
+         \x20   val bd: Dev = o.inner.device\n\
+         \x20   return bd.size_x()\n"
+    );
+    let mir = source_to_mir(&src);
+
+    em.compile_module(&mir).expect("compile");
+    let result = em.execute("run_two_hop_combined", &[]).expect("execute");
+    assert_eq!(
+        result, 99,
+        "two-hop combined-chain dispatch (outer.inner.device) expected size_x()==99, got {result}"
+    );
+}
+
+#[test]
+fn test_cranelift_jit_vtable_dispatch_two_level_split_hops() {
+    // Discriminator (a) from the C8-RELOC addendum: split the two-hop chain
+    // into two separate statements (`val mid = o.inner; val bd: Dev =
+    // mid.device; bd.size_x()`). If this FAILS while the combined-chain
+    // test above passes, the erased/chained READ is the bug. If both pass
+    // or both fail identically, storage-at-construction is implicated
+    // instead.
+    let mut em = LocalExecutionManager::cranelift().expect("cranelift init");
+    let src = format!(
+        "{C8_FIELD_FIXTURE_PREFIX}\
+         fn run_two_hop_split() -> i64:\n\
+         \x20   val d = DevC(x: 5)\n\
+         \x20   val m = Middle(device: d)\n\
+         \x20   val o = Outer(inner: m)\n\
+         \x20   val mid = o.inner\n\
+         \x20   val bd: Dev = mid.device\n\
+         \x20   return bd.size_x()\n"
+    );
+    let mir = source_to_mir(&src);
+
+    em.compile_module(&mir).expect("compile");
+    let result = em.execute("run_two_hop_split", &[]).expect("execute");
+    assert_eq!(
+        result, 99,
+        "split-hop dispatch (mid = o.inner; bd = mid.device) expected size_x()==99, got {result}"
+    );
+}
+
+#[test]
+fn test_cranelift_jit_vtable_dispatch_single_level_no_outer_nest() {
+    // Discriminator (b) from the C8-RELOC addendum: drop the OUTER nesting
+    // entirely (no `Outer` wrapping `Middle`) — just a single struct-literal
+    // constructor storing a trait-typed field, then a single-hop field read
+    // into a local before dispatch. If THIS alone fails, the bug is simply
+    // "trait-typed constructor argument stored into a struct field via a
+    // struct literal," independent of nesting depth.
+    let mut em = LocalExecutionManager::cranelift().expect("cranelift init");
+    let src = format!(
+        "{C8_FIELD_FIXTURE_PREFIX}\
+         fn run_single_level() -> i64:\n\
+         \x20   val d = DevC(x: 5)\n\
+         \x20   val m = Middle(device: d)\n\
+         \x20   val bd: Dev = m.device\n\
+         \x20   return bd.size_x()\n"
+    );
+    let mir = source_to_mir(&src);
+
+    em.compile_module(&mir).expect("compile");
+    let result = em.execute("run_single_level", &[]).expect("execute");
+    assert_eq!(
+        result, 99,
+        "single-level field-store+read dispatch expected size_x()==99, got {result}"
+    );
+}
+
+#[test]
+fn test_cranelift_jit_vtable_dispatch_two_level_chained_expr() {
+    // Variant: chained-EXPRESSION dispatch with no intermediate local at
+    // all for the trait value (`o.inner.device.size_x()` in one
+    // expression), vs. field-read-into-local-then-dispatch (the other three
+    // tests). Distinguishes whether materializing the trait value into a
+    // typed local matters.
+    let mut em = LocalExecutionManager::cranelift().expect("cranelift init");
+    let src = format!(
+        "{C8_FIELD_FIXTURE_PREFIX}\
+         fn run_chained_expr() -> i64:\n\
+         \x20   val d = DevC(x: 5)\n\
+         \x20   val m = Middle(device: d)\n\
+         \x20   val o = Outer(inner: m)\n\
+         \x20   return o.inner.device.size_x()\n"
+    );
+    let mir = source_to_mir(&src);
+
+    em.compile_module(&mir).expect("compile");
+    let result = em.execute("run_chained_expr", &[]).expect("execute");
+    assert_eq!(
+        result, 99,
+        "chained-expression dispatch (o.inner.device.size_x()) expected size_x()==99, got {result}"
+    );
+}
+
+// =============================================================================
 // ExecutionResult (captured output) Tests
 // =============================================================================
 
