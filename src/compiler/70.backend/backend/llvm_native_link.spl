@@ -20,20 +20,13 @@ use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
 use compiler.backend.backend.stage4_symbol_closure.{stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_validate_candidate_archive_inputs_for_platform}
 use std.platform.{host_arch, host_os, is_macos}
-
-# TODO(compiler-native-link-facades): replace these direct runtime imports with
-# compiler-safe environment/process/file facades; tracked in
-# doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_env_get(key: text) -> text
-extern fn rt_dir_create_all(path: text) -> bool
+# Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
+# facade already used by the sibling llvm_backend_tools.spl for process_run);
+# resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
+use std.nogc_sync_mut.io_runtime.{env_get, file_delete, file_exists, file_write, process_run, dir_create_all}
 
 fn llvm_link_trace_enabled() -> bool:
-    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    (env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
 fn llvm_stage4_final_requested_symbols(objects: [text]) -> Result<[text], text>:
     if objects.len() == 0:
@@ -44,7 +37,7 @@ fn llvm_stage4_final_requested_symbols(objects: [text]) -> Result<[text], text>:
     var args: [text] = ["-g"]
     for object in objects:
         args = args.push(object)
-    val (nm_out, nm_err, nm_code) = rt_process_run(nm, args)
+    val (nm_out, nm_err, nm_code) = process_run(nm, args)
     if nm_code != 0:
         return Err("Stage4 final object symbol scan failed: {nm_err}")
     val requested = stage4_requested_from_nm_output(nm_out, is_macos())
@@ -67,10 +60,10 @@ pub fn llvm_stage4_candidate_archive_inventory(labels: [text], paths: [text]) ->
     while i < paths.len():
         val label = labels[i]
         val path = paths[i]
-        if not rt_file_exists(path):
+        if not file_exists(path):
             return Err("Stage4 candidate archive '" + label + "' is missing at '" + path + "'")
         val section_flag = if section_reader.lower().contains("readelf"): "-S" else: "-h"
-        val (section_out, section_err, section_code) = rt_process_run(section_reader, [section_flag, path])
+        val (section_out, section_err, section_code) = process_run(section_reader, [section_flag, path])
         if section_code != 0:
             return Err("Stage4 candidate archive '" + label + "' section scan failed at '" + path + "': " + section_err)
         if section_err.trim() != "":
@@ -80,7 +73,7 @@ pub fn llvm_stage4_candidate_archive_inventory(labels: [text], paths: [text]) ->
         val forbidden_sections = stage4_forbidden_archive_sections(section_out)
         if forbidden_sections.len() > 0:
             return Err("Stage4 candidate archive '" + label + "' retained constructor/destructor sections at '" + path + "': " + forbidden_sections.join(", "))
-        val (nm_out, nm_err, nm_code) = rt_process_run(nm, ["-g", path])
+        val (nm_out, nm_err, nm_code) = process_run(nm, ["-g", path])
         if nm_code != 0:
             return Err("Stage4 candidate archive '" + label + "' scan failed at '" + path + "': " + nm_err)
         if nm_out.trim() == "":
@@ -157,7 +150,7 @@ fn compile_entry_point_c(pid: i64, verbose: bool, opt_level: i64) -> Result<text
     # filename would leak into the binary and break bootstrap determinism. Keep
     # the PID in the directory (concurrency-safe) and use a fixed basename.
     val entry_dir = "{tmp_dir}/simple_entry_{pid}"
-    rt_dir_create_all(entry_dir)
+    dir_create_all(entry_dir)
     val entry_c = "{entry_dir}/simple_entry.c"
     val entry_o = "{entry_dir}/simple_entry{ext}"
     var c_source = "extern void spl_init_args(int argc, char** argv);\n"
@@ -171,7 +164,7 @@ fn compile_entry_point_c(pid: i64, verbose: bool, opt_level: i64) -> Result<text
     c_source = c_source + "    __simple_runtime_shutdown();\n"
     c_source = c_source + "    return (int)result;\n"
     c_source = c_source + "}\n"
-    rt_file_write_text(entry_c, c_source)
+    file_write(entry_c, c_source)
 
     val use_msvc = _is_msvc_cc(cc)
     var comp_args: [text] = []
@@ -202,8 +195,8 @@ fn compile_entry_point_c(pid: i64, verbose: bool, opt_level: i64) -> Result<text
         comp_args.push(entry_o)
         comp_args.push(entry_c)
 
-    val (ep_out, ep_err, ep_code) = rt_process_run(cc, comp_args)
-    rt_file_delete(entry_c)
+    val (ep_out, ep_err, ep_code) = process_run(cc, comp_args)
+    file_delete(entry_c)
     if ep_code != 0:
         return Err("Entry point compilation failed: {ep_out}{ep_err}")
     Ok(entry_o)
@@ -248,10 +241,10 @@ fn compile_bootstrap_native_all_support_c(pid: i64, verbose: bool, opt_level: i6
     val tmp_dir = _get_temp_dir()
     val ext = _obj_ext()
     val support_dir = "{tmp_dir}/simple_bootstrap_native_all_{pid}"
-    rt_dir_create_all(support_dir)
+    dir_create_all(support_dir)
     val support_c = "{support_dir}/simple_bootstrap_native_all_support.c"
     val support_o = "{support_dir}/simple_bootstrap_native_all_support{ext}"
-    rt_file_write_text(support_c, bootstrap_native_all_support_source())
+    file_write(support_c, bootstrap_native_all_support_source())
 
     val use_msvc = _is_msvc_cc(cc)
     var comp_args: [text] = []
@@ -282,8 +275,8 @@ fn compile_bootstrap_native_all_support_c(pid: i64, verbose: bool, opt_level: i6
         comp_args.push(support_o)
         comp_args.push(support_c)
 
-    val (out, err, code) = rt_process_run(cc, comp_args)
-    rt_file_delete(support_c)
+    val (out, err, code) = process_run(cc, comp_args)
+    file_delete(support_c)
     if code != 0:
         return Err("Bootstrap native_all support compilation failed: {out}{err}")
     Ok(support_o)
@@ -312,9 +305,9 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     if trace:
         print "[LLVM-LINK] pid={pid}"
 
-    val stage4_requested = (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1"
-    val stage4_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
-    val stage4_entry_closure = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""
+    val stage4_requested = (env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1"
+    val stage4_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    val stage4_entry_closure = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""
     if stage4_requested and (stage4_entry != "src/app/cli/main.spl" or stage4_entry_closure != "1"):
         return Err("Stage4 strict profile requires --entry src/app/cli/main.spl with entry closure")
 
@@ -338,7 +331,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             return Err("Stage4 strict profile does not support SimpleOS link routes")
         return link_simpleos_riscv32(user_objects, output, verbose)
 
-    val hosted_target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val hosted_target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     val hosted_os = host_os()
     val hosted_arch = host_arch()
     val hosted_plan = hosted_c_compiler_plan(hosted_target, hosted_os, hosted_arch)
@@ -353,11 +346,11 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     # rt_native_build), which the C runtime objects do not define; without it
     # the link dies with "undefined symbol: rt_native_build" (#146/#79).
     var bootstrap_native_all = ""
-    val native_all_runtime_path = rt_env_get("SIMPLE_RUNTIME_PATH") ?? ""
+    val native_all_runtime_path = env_get("SIMPLE_RUNTIME_PATH") ?? ""
     if native_all_runtime_path != "" and not hosted_plan.requires_cross:
         val native_all_name = if hosted_os == "windows": "simple_native_all.lib" else: "libsimple_native_all.a"
         val native_all = native_all_runtime_path + "/" + native_all_name
-        if rt_file_exists(native_all):
+        if file_exists(native_all):
             bootstrap_native_all = native_all
 
     # Step 1: Always compile the FRESH C runtime to object files, even when the
@@ -412,14 +405,14 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         case Err(err):
             cleanup_runtime_objects(runtime_objects)
             if bootstrap_support_obj != "":
-                rt_file_delete(bootstrap_support_obj)
+                file_delete(bootstrap_support_obj)
             return Err("Entry point compilation failed: {err}")
 
     var stage4_requested_symbols: [text] = []
     if stage4_requested:
         if bootstrap_native_all != "":
             cleanup_runtime_objects(runtime_objects)
-            rt_file_delete(entry_obj_path)
+            file_delete(entry_obj_path)
             return Err("Stage4 strict profile rejects libsimple_native_all.a")
         var final_simple_objects: [text] = []
         for object in user_objects:
@@ -430,14 +423,14 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 stage4_requested_symbols = symbols
             case Err(err):
                 cleanup_runtime_objects(runtime_objects)
-                rt_file_delete(entry_obj_path)
+                file_delete(entry_obj_path)
                 return Err(err)
         if trace:
             print "[LLVM-LINK] Stage4 requested runtime symbols: {stage4_requested_symbols.len()}"
         cleanup_runtime_objects(runtime_objects)
-        rt_file_delete(entry_obj_path)
+        file_delete(entry_obj_path)
         if bootstrap_support_obj != "":
-            rt_file_delete(bootstrap_support_obj)
+            file_delete(bootstrap_support_obj)
         return Err("Stage4 strict archive composition is unavailable until provider inventory and unique-owner selection are wired; requested: " + stage4_requested_symbols.join(", "))
 
     # Step 3: Combine all objects and link
@@ -483,8 +476,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     # Cleanup temp files
     cleanup_runtime_objects(runtime_objects)
     if bootstrap_support_obj != "":
-        rt_file_delete(bootstrap_support_obj)
-    rt_file_delete(entry_obj_path)
+        file_delete(bootstrap_support_obj)
+    file_delete(entry_obj_path)
 
     match link_result:
         case Ok(path):
@@ -495,7 +488,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             Err("Linking failed: {e}")
 
 fn is_simpleos_riscv64_link(user_objects: [text], output: text) -> bool:
-    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     if is_simpleos_riscv64_target(target):
         return true
     if output.contains("simpleos_riscv64"):
@@ -509,14 +502,14 @@ fn is_simpleos_riscv64_target(target: text) -> bool:
     target == "riscv64gc-simpleos" or target == "riscv64gc-unknown-simpleos" or target == "riscv64gc-unknown-simpleos-elf" or target == "riscv64gc-unknown-none" or target == "riscv64gc-unknown-none-elf" or target == "riscv64-simpleos" or target == "riscv64-unknown-simpleos" or target == "riscv64-unknown-simpleos-elf" or target == "riscv64-unknown-none" or target == "riscv64-unknown-none-elf"
 
 fn is_simpleos_arm64_link(output: text) -> bool:
-    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     is_simpleos_arm64_target(target) or output.contains("simpleos_arm64")
 
 fn is_simpleos_arm64_target(target: text) -> bool:
     target == "aarch64-simpleos" or target == "aarch64-unknown-simpleos" or target == "aarch64-unknown-simpleos-elf" or target == "aarch64-unknown-none" or target == "aarch64-unknown-none-elf"
 
 fn is_simpleos_x86_64_link(user_objects: [text], output: text) -> bool:
-    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     if is_simpleos_x86_64_target(target):
         return true
     if output.contains("simpleos_wm_simple_web_check") or output.contains("simpleos_x86_64"):
@@ -527,22 +520,22 @@ fn is_simpleos_x86_64_target(target: text) -> bool:
     target == "simpleos" or target == "simpleos-x86_64" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos" or target == "x86_64-unknown-simpleos-elf" or target == "x86_64-unknown-none" or target == "x86_64-unknown-none-elf"
 
 fn simpleos_x86_64_sysroot() -> text:
-    val configured = rt_env_get("SIMPLE_SYSROOT") ?? ""
+    val configured = env_get("SIMPLE_SYSROOT") ?? ""
     if configured != "":
         return configured
-    val legacy = rt_env_get("SIMPLEOS_SYSROOT") ?? ""
+    val legacy = env_get("SIMPLEOS_SYSROOT") ?? ""
     if legacy != "":
         return legacy
     "build/os/sysroot"
 
 fn simpleos_x86_64_user_link_inputs(sysroot: text) -> [text]:
-    val configured_crt0 = rt_env_get("SIMPLE_CRT0_PATH") ?? ""
-    val configured_libc = rt_env_get("SIMPLE_LIBC_PATH") ?? ""
-    val configured_runtime = rt_env_get("SIMPLE_SIMPLE_CORE_PATH") ?? ""
+    val configured_crt0 = env_get("SIMPLE_CRT0_PATH") ?? ""
+    val configured_libc = env_get("SIMPLE_LIBC_PATH") ?? ""
+    val configured_runtime = env_get("SIMPLE_SIMPLE_CORE_PATH") ?? ""
     val target_runtime = "build/os/simple-core-simpleos/libsimple_runtime.a"
     val runtime = if configured_runtime != "":
         configured_runtime
-    elif rt_file_exists(target_runtime):
+    elif file_exists(target_runtime):
         target_runtime
     else:
         "{sysroot}/lib/libsimple_runtime.a"
@@ -554,7 +547,7 @@ fn simpleos_x86_64_user_link_inputs(sysroot: text) -> [text]:
     inputs
 
 fn is_simpleos_riscv32_link(user_objects: [text], output: text) -> bool:
-    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     is_simpleos_riscv32_link_for_target(target, user_objects, output)
 
 fn is_simpleos_riscv32_link_for_target(target: text, user_objects: [text], output: text) -> bool:
@@ -578,7 +571,7 @@ fn compile_simpleos_x86_64_c(src: text, obj: text, opt_level: i64) -> Result<tex
         opt = "-O0"
     elif opt_level == 1:
         opt = "-Os"
-    val (_out, err, code) = rt_process_run("cc", [
+    val (_out, err, code) = process_run("cc", [
         "-c", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie", "-mno-red-zone",
         "-ffunction-sections", "-fdata-sections", opt,
         "-I", "examples/09_embedded/simple_os/arch/x86_64/boot",
@@ -594,7 +587,7 @@ fn compile_simpleos_arm64(src: text, obj: text, opt_level: i64) -> Result<text, 
         opt = "-O0"
     elif opt_level == 1:
         opt = "-Os"
-    val (_out, err, code) = rt_process_run("clang", [
+    val (_out, err, code) = process_run("clang", [
         "-target", "aarch64-unknown-none-elf", "-c", "-ffreestanding", "-nostdlib",
         "-fno-pie", "-ffunction-sections", "-fdata-sections", opt,
         "-I", "examples/09_embedded/simple_os/arch/arm64/boot",
@@ -622,7 +615,7 @@ fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_le
         case Err(e): return Err(e)
         case Ok(_): pass
 
-    val configured_script = rt_env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+    val configured_script = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
     val linker_script = if configured_script != "": configured_script else: "examples/09_embedded/simple_os/arch/arm64/linker.ld"
     var args: [text] = ["-T", linker_script, "-nostdlib", "--gc-sections", "-o", output, crt_o, stubs_o]
     val spl_start = simpleos_spl_start_symbol(user_objects)
@@ -630,9 +623,9 @@ fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_le
         args.push("--defsym=spl_start={spl_start}")
     for obj in user_objects:
         args.push(obj)
-    val (_out, err, code) = rt_process_run("ld.lld", args)
-    rt_file_delete(crt_o)
-    rt_file_delete(stubs_o)
+    val (_out, err, code) = process_run("ld.lld", args)
+    file_delete(crt_o)
+    file_delete(stubs_o)
     if code != 0:
         return Err("SimpleOS ARM64 freestanding link failed: {err}")
     if verbose:
@@ -640,7 +633,7 @@ fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_le
     Ok(output)
 
 fn compile_simpleos_x86_64_asm(src: text, obj: text) -> Result<text, text>:
-    val (_out, err, code) = rt_process_run("cc", [
+    val (_out, err, code) = process_run("cc", [
         "-c", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie", "-mno-red-zone",
         "-o", obj, src
     ])
@@ -649,16 +642,16 @@ fn compile_simpleos_x86_64_asm(src: text, obj: text) -> Result<text, text>:
     Ok(obj)
 
 fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
-    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     if target == "simpleos" or target == "simpleos-x86_64" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos" or target == "x86_64-unknown-simpleos-elf":
         val sysroot = simpleos_x86_64_sysroot()
         val support = simpleos_x86_64_user_link_inputs(sysroot)
         for path in support:
-            if not rt_file_exists(path):
+            if not file_exists(path):
                 return Err("SimpleOS x86_64 sysroot is incomplete: missing {path}; run sh src/os/port/llvm/sysroot.shs or set SIMPLE_SYSROOT")
-        val configured_script = rt_env_get("SIMPLE_LINKER_SCRIPT") ?? ""
+        val configured_script = env_get("SIMPLE_LINKER_SCRIPT") ?? ""
         val linker_script = if configured_script != "": configured_script else: "{sysroot}/share/simpleos/simpleos.ld"
-        if not rt_file_exists(linker_script):
+        if not file_exists(linker_script):
             return Err("SimpleOS x86_64 sysroot is incomplete: missing {linker_script}; run sh src/os/port/llvm/sysroot.shs or set SIMPLE_SYSROOT")
 
         val entry_result = compile_entry_point_c(getpid(), verbose, opt_level)
@@ -677,9 +670,9 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
         user_args.push(support[1])
         user_args.push(support[2])
         user_args.push("--end-group")
-        val linker = if rt_file_exists("/usr/bin/ld.lld"): "/usr/bin/ld.lld" else: "ld.lld"
-        val (_user_out, user_err, user_code) = rt_process_run(linker, user_args)
-        rt_file_delete(entry_object)
+        val linker = if file_exists("/usr/bin/ld.lld"): "/usr/bin/ld.lld" else: "ld.lld"
+        val (_user_out, user_err, user_code) = process_run(linker, user_args)
+        file_delete(entry_object)
         if user_code != 0:
             return Err("SimpleOS x86_64 user executable link failed: {user_err}")
         if verbose:
@@ -708,7 +701,7 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
         case Err(e): return Err(e)
         case Ok(_): pass
 
-    val linker_script_env = rt_env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+    val linker_script_env = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
     val linker_script = if linker_script_env != "":
         linker_script_env
     else:
@@ -721,11 +714,11 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
     ]
     for obj in user_objects:
         args.push(obj)
-    val (_link_out, link_err, link_code) = rt_process_run("ld.lld", args)
-    rt_file_delete(crt_o)
-    rt_file_delete(stubs_o)
-    rt_file_delete(type_o)
-    rt_file_delete(auto_o)
+    val (_link_out, link_err, link_code) = process_run("ld.lld", args)
+    file_delete(crt_o)
+    file_delete(stubs_o)
+    file_delete(type_o)
+    file_delete(auto_o)
     if link_code != 0:
         return Err("SimpleOS x86_64 freestanding link failed: {link_err}")
     if verbose:
@@ -770,8 +763,8 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
     entry_src = entry_src + "3:\n"
     entry_src = entry_src + "  wfi\n"
     entry_src = entry_src + "  j 3b\n"
-    rt_file_write_text(entry_s, entry_src)
-    val (entry_out, entry_err, entry_code) = rt_process_run("riscv64-unknown-elf-gcc", [
+    file_write(entry_s, entry_src)
+    val (entry_out, entry_err, entry_code) = process_run("riscv64-unknown-elf-gcc", [
         "-c", "-march=rv64gc", "-mabi=lp64d", "-ffreestanding", "-nostdlib",
         "-o", entry_o, entry_s
     ])
@@ -800,9 +793,9 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
     stub_src = stub_src + "uint64_t rt_riscv_native_gui_process_render(void){return 1;}\n"
     stub_src = stub_src + "uint64_t riscv64_hardening_boot_canary_marker(void){return 0;}\n"
     stub_src = stub_src + "uint64_t sandbox_boot_apply_embedded_riscv64(void){return 0;}\n"
-    rt_file_write_text(stub_c, stub_src)
+    file_write(stub_c, stub_src)
     if not uses_freestanding_runtime:
-        val (stub_out, stub_err, stub_code) = rt_process_run("riscv64-unknown-elf-gcc", [
+        val (stub_out, stub_err, stub_code) = process_run("riscv64-unknown-elf-gcc", [
             "-c", "-march=rv64gc", "-mabi=lp64d", "-ffreestanding", "-nostdlib",
             "-o", stub_o, stub_c
         ])
@@ -811,7 +804,7 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
 
     val runtime_o = "build/os/simpleos_riscv64_freestanding_runtime.o"
     if uses_freestanding_runtime:
-        val (runtime_out, runtime_err, runtime_code) = rt_process_run("riscv64-unknown-elf-gcc", [
+        val (runtime_out, runtime_err, runtime_code) = process_run("riscv64-unknown-elf-gcc", [
             "-c", "-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany", "-ffreestanding", "-nostdlib",
             "-DSIMPLE_BOOT_MINIMAL=1", "-DSIMPLE_RUNTIME_NO_ENTRY=1", "-DSIMPLE_RUNTIME_NO_WEAK_HEAP=1",
             "-o", runtime_o, "src/os/kernel/arch/riscv64/boot/freestanding_runtime.c"
@@ -819,7 +812,7 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
         if runtime_code != 0:
             return Err("SimpleOS RISC-V runtime compilation failed: {runtime_out}{runtime_err}")
 
-    val configured_script = rt_env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+    val configured_script = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
     val linker_script = if configured_script != "": configured_script else: "src/os/kernel/arch/riscv64/linker.ld"
     var args: [text] = [
         "-m", "elf64lriscv",
@@ -858,7 +851,7 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
     if verbose:
         val joined_args = args.join(" ")
         print "[llvm-link] SimpleOS RISC-V link: ld.lld {joined_args}"
-    val (stdout, stderr, code) = rt_process_run("ld.lld", args)
+    val (stdout, stderr, code) = process_run("ld.lld", args)
     if code != 0:
         return Err("SimpleOS RISC-V link failed: {stdout}{stderr}")
     Ok(output)
@@ -869,15 +862,15 @@ fn link_simpleos_riscv32(user_objects: [text], output: text, verbose: bool) -> R
     var stub_src = "#include <stdint.h>\n"
     stub_src = stub_src + "#define UART0 ((volatile uint8_t*)0x10000000UL)\n"
     stub_src = stub_src + "void rt_riscv_uart_put(uint64_t b){while(!(UART0[5]&0x20)){} UART0[0]=(uint8_t)b;}\n"
-    rt_file_write_text(stub_c, stub_src)
-    val (stub_out, stub_err, stub_code) = rt_process_run("riscv64-unknown-elf-gcc", [
+    file_write(stub_c, stub_src)
+    val (stub_out, stub_err, stub_code) = process_run("riscv64-unknown-elf-gcc", [
         "-c", "-march=rv32imafdc", "-mabi=ilp32d", "-ffreestanding", "-nostdlib",
         "-o", stub_o, stub_c
     ])
     if stub_code != 0:
         return Err("SimpleOS RV32 stub compilation failed: {stub_out}{stub_err}")
 
-    val linker_script_env = rt_env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+    val linker_script_env = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
     val linker_script = if linker_script_env != "":
         linker_script_env
     else:
@@ -897,7 +890,7 @@ fn link_simpleos_riscv32(user_objects: [text], output: text, verbose: bool) -> R
     if verbose:
         val joined_args = args.join(" ")
         print "[llvm-link] SimpleOS RV32 link: ld.lld {joined_args}"
-    val (stdout, stderr, code) = rt_process_run("ld.lld", args)
+    val (stdout, stderr, code) = process_run("ld.lld", args)
     if code != 0:
         return Err("SimpleOS RV32 link failed: {stdout}{stderr}")
     Ok(output)
