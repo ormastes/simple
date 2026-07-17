@@ -732,3 +732,34 @@ markers, and entry into native linking is marked by `[LLVM-LINK] enter`.
 `SIMPLE_INTERP_TRACE` adds source-loading detail but does not enable the phase
 profiler; `SIMPLE_BOOTSTRAP_DEBUG` does not replace this canonical driver phase
 stream.
+
+## 2026-07-17 phase diagnostic and module-path fix
+
+The requested phase-profiled exact-entry run no longer SIGBUSed. It reached
+native linking in 226.83 seconds at 1.274 GiB maximum RSS and retained 1,350
+objects. The first concrete failure was generated `_init_all.cpp`: absolute
+workspace paths leaked into module-init symbols, so the temporary workspace
+name `simple-main-bootstrap` contributed an illegal `-` to C identifiers.
+
+`_driver_module_name_from_path` now normalizes separators, strips absolute
+workspace prefixes through `/src/` or `/examples/`, and replaces remaining
+hyphens/spaces with underscores. The focused physical-source regression covers
+absolute compiler/tooling paths and a relative hyphenated module path (5/5
+examples pass). Because old cached objects retained the previous absolute
+module prefix despite an unchanged content hash, verification used a clean
+isolated shard; this is concrete evidence that native object cache identity
+must include canonical module identity, not source content alone.
+
+The refreshed pure-Simple Stage 3 then completed from that shard with 708
+compiled, zero failed, a 24 MiB executable, and version plus `rt_native_build`,
+Cranelift, and array-runtime symbol sanity checks passing. A Stage 4 retry with
+the new compiler compiled the init caller successfully and advanced to the
+ordinary unresolved-provider link set; the earlier invalid-C blocker is fixed.
+
+The canonical wrapper environment (`SIMPLE_BOOTSTRAP_STAGE4=1`, low-memory,
+strict core-C lane) did not preserve that bounded behavior: after 3m42s it had
+emitted no phase/log output, used 5.8 GiB RSS, and saturated one CPU before the
+runaway guard terminated it. This was the third bounded Stage 4 cycle, so no
+retry was made. The next fix must make the canonical Stage 4 wrapper use the
+same bounded pure-Simple closure path before strict provider/backfill linking;
+it must not re-enter the pre-object whole-tree bootstrap path.
