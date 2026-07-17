@@ -1725,6 +1725,36 @@ impl MirLowering:
                 val index_local = self.lower_expr(index)
                 if val cli_arg_local = self.try_lower_bootstrap_cli_arg_index(base, index_local):
                     return cli_arg_local
+                # Text values are tagged runtime handles, not raw element
+                # pointers. Normalize literals and runtime-produced text to
+                # the same representation before bounds checking and lookup.
+                if self.local_is_str(base_local):
+                    val tagged_base = self.ensure_tagged_str(base_local)
+                    val text_len_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_string_len"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var b_text_len = self.builder
+                    val text_len_res = b_text_len.emit_call(text_len_op, [mir_operand_copy(tagged_base)], MirType.i64())
+                    if val text_len = text_len_res:
+                        b_text_len.emit(MirInst(
+                            kind: MirInstKind.Intrinsic(nil, "bounds_check", [
+                                mir_operand_copy(index_local),
+                                mir_operand_copy(text_len)
+                            ]),
+                            span: nil
+                        ))
+                    self.builder = b_text_len
+                    val char_at_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_string_char_at"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var b_char_at = self.builder
+                    val char_at_res = b_char_at.emit_call(char_at_op, [mir_operand_copy(tagged_base), mir_operand_copy(index_local)], MirType.i64())
+                    self.builder = b_char_at
+                    if val char_at_local = char_at_res:
+                        return self.decode_runtime_value(char_at_local, MirType(kind: MirTypeKind.Opaque("str")))
+                    return base_local
                 self.emit_bounds_check_for_index(base.type_, base_local, index_local)
                 var result_type = MirType.i64()
                 var result_type_from_base = false

@@ -1,8 +1,8 @@
 # Native path: `text[i]` bracket indexing has no string-aware lowering — garbage output, then SIGSEGV on comparison
 
 **Date:** 2026-07-17
-**Severity:** Critical (silent wrong output escalating to crash; core string/codepoint-indexing feature)
-**Status:** open
+**Severity:** Critical (silent wrong output escalating to crash; core string-indexing feature)
+**Status:** partial — native safety/source fix added; dual-backend execution and UTF-8 semantics remain pending
 **Task:** #178 native text interpolation + string ops verification round 2 (lane S47)
 
 ## Symptom
@@ -80,10 +80,11 @@ string pointer.
 
 ## Expected
 
-`s[i]` must lower identically to `s.char_at(i)` for a string receiver:
-codepoint-indexed, bounds-checked, returning a proper tagged single-character
-string — not fall through to the generic raw-array GEP/load path used for
-untyped/unresolved receivers.
+`s[i]` must use string-aware, bounds-checked lowering and return a proper
+single-character string, not fall through to the generic raw-array GEP/load
+path used for untyped/unresolved receivers. Whether the index unit is a UTF-8
+byte or codepoint remains the separate unresolved language decision recorded
+in `text_len_bytes_vs_index_codepoints_2026-07-02.md`.
 
 ## Suggested direction
 
@@ -95,6 +96,16 @@ runtime call `char_at()` uses (`method_calls_literals.spl` ~line 1634), rather
 than reaching the raw-pointer `emit_gep`/`emit_load` fallback.
 
 ## Verification
+
+- `text_bracket_index` is a strict LLVM/Cranelift parity case covering an
+  ASCII raw literal and tagged concatenation receiver, equality,
+  interpolation, and one-byte result length. It is selected on macOS,
+  Windows, and FreeBSD as well as the full Linux gate.
+- UTF-8/codepoint indexing remains a separate semantic blocker: the runtime
+  accessor and bounds contract are byte-indexed today, so this fix does not
+  claim or silently choose codepoint semantics.
+- Source/static gates may pass without executing Simple; native dual-backend
+  execution is required before marking this bug closed.
 
 - Reproduced on worktree `/home/ormastes/dev/wt_r_find_infer` at tip
   `ffc0c360ba4` (fetched 2026-07-17), using
