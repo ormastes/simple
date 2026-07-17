@@ -1002,3 +1002,172 @@ this addendum was clobbered once mid-session by a concurrent working-copy
 sync (the file reverted to its pre-lane 713-line state while this lane's
 other edits survived) and was re-applied; commit this file promptly to
 avoid a second loss.
+
+### C8-CLOSE lane (2026-07-17) — ud2-recovery hardened; full-kernel
+### re-verification run with the fresh seed; C8's boot storm is CONFIRMED
+### **NOT resolved** — the dispatch-sentinel fix was necessary but not
+### sufficient, a second, still-unidentified runtime defect reproduces the
+### byte-identical storm
+
+**Task 1 — the latent ud2-recovery defect is fixed (pure-Simple decision,
+minimal asm wiring).** The freestanding fault-recovery ISR
+(`_rich_fault_entry`, `examples/09_embedded/simple_os/arch/x86_64/boot/
+baremetal_stubs.c:15177-15303`) used to blindly "RIP += 2, iretq" for ANY
+kernel-mode (CPL=0), no-error-code vector — including #UD (vector 6). #UD
+never pushes an error code, so it is the *only* vector that can land on
+that path. A `ud2` (opcode `0x0F 0x0B`) is always an INTENTIONAL trap (e.g.
+the compiler's duck-dispatch-sentinel guard in
+`compile_method_call_virtual`, `closures_structs.rs:1373`) and must never
+be "recovered" — see the C8-FIX lane's item 3 above for why this exact
+defect is what turned every honest sentinel trap into a wild-jump storm
+throughout this bug's history.
+
+Fix, at `baremetal_stubs.c`'s no-error-code recovery label (`"3:"`,
+previously just `addq $2,(%rsp); movq $0x3,%rax; iretq`): before
+recovering, read the 2 bytes at the faulting RIP (`movq 16(%rsp),%rax`
+after two scratch `pushq`s; `movzwl (%rax),%ecx`) and compare against
+`0x0B0F` (the `ud2` opcode as a little-endian u16). `popq` does not touch
+EFLAGS, so the scratch registers are restored to their exact fault-time
+values *after* the compare and the branch is taken on the still-live ZF —
+zero risk of corrupting the interrupted context's registers on the
+non-ud2 (unchanged, still-recovering) path. On a match, control passes to
+a new label that calls a new pure-Simple function,
+`spl_x86_on_kernel_ud2_fault(rip: u64)`
+(`src/os/kernel/arch/x86_64/interrupt.spl:367-397`, exported
+`@export("C", name: "spl_x86_on_kernel_ud2_fault")`, mirroring the
+existing ring-3 `spl_x86_on_user_fault` pattern exactly), which prints a
+`FATAL: kernel #UD (ud2) trap at rip=... vector=6 (#UD)` diagnostic to
+COM1; the ISR then `cli`/`hlt`-loops and **never iretqs back into the
+trap**. All other no-error-code vectors (#DE, #BP, #OF, ...) and the
+separate errcode-present kernel-CPL0 path (used by the legitimate W^X
+probe, `rt_harden_text_write_trap_probe` in `crt0.s`) are untouched —
+confirmed by inspection, the edited block is the sole change.
+
+**Test:** no cheap hosted regression test exists for this — the fix lives
+inside a `__attribute__((naked))` ISR stub that can only be exercised by an
+actual CPU trap under a freestanding boot; there is no fault-injection
+harness for `_rich_fault_entry` under `test/`. Reported honestly per the
+task's own allowance rather than adding a source-grep test that would
+assert nothing behavioral. The QEMU boot in this lane IS the exercise (see
+below) — the fix is proven *inert-but-correct*: it never fired (0
+occurrences of the new `FATAL: kernel #UD` marker across a 130s boot with
+~69762 recovered faults), which is the CORRECT outcome given item 2 below
+(the live crash is not a literal `ud2`), and the code path itself was
+verified via disassembly-level manual trace (advisor-reviewed: offset
+math, opcode encoding, and the pop-then-branch-on-stale-ZF register
+discipline all check out).
+
+**Task 2 — fresh seed built, identity check PASSES, ELF is well-formed,
+but the full boot storm reproduces byte-identical to history.**
+
+1. **Fresh seed:** rebuilt via the documented recipe
+   (`cargo build --manifest-path src/compiler_rust/Cargo.toml --profile
+   bootstrap -p simple-driver`, ~6m46s, exit 0, 0 errors) from current HEAD
+   (`f06e5829e1d2`, both `ca1e18c1744` and `b843353b50e` confirmed
+   ancestors via `git merge-base --is-ancestor`). Output:
+   `src/compiler_rust/target/bootstrap/simple` (27.8 MB, built 08:37 UTC).
+   **Not copied to `bin/` — deployment stays user-gated.**
+2. **Identity check (link-free, no QEMU):** `SIMPLE_DEBUG_METHOD_DISPATCH=1`
+   native-build of `gui_entry_desktop.spl` with the fresh seed. Grep for
+   `sector_size`: `'sector_size' lowered as virtual trait call at slot 2` —
+   confirmed real slot, not the `4294967295` duck-dispatch sentinel. Grepped
+   the **entire** build log (not just `sector_size`) for the sentinel value
+   `4294967295`: **zero occurrences, anywhere** — the duck-dispatch-sentinel
+   mechanism the C8-FIX lane diagnosed is definitively absent from this
+   build, at every call site, not just the one named in the original report.
+3. **ELF sanity (the build-plumbing wall the C8-FIX lane hit):** using the
+   *production* recipe (`--source build/os/generated --source "$ENTRY"
+   --entry-closure --entry "$ENTRY" ... --cache-dir ...`, `SIMPLE_BOOTSTRAP=1
+   SIMPLE_LIB=$ROOT_DIR/src SIMPLE_OS_LOG_MODE=off
+   SIMPLE_ALLOW_FREESTANDING_STUBS=1`, matching
+   `check-simpleos-wm-fullscreen-evidence.shs` exactly rather than the
+   task's abbreviated flag list, specifically to avoid reproducing that
+   wall) instead of an ad-hoc `cargo build`-adjacent recipe: `Build complete:
+   655 compiled, 0 cached, 0 failed`, ELF linked at 16141 KB, **`nm | wc -l`
+   = 7212** (well above the ~4000+ healthy threshold, nowhere near the
+   ~236-symbol malformed case). Both new fault-handler symbols resolved and
+   mirror each other exactly: `spl_x86_on_kernel_ud2_fault` /
+   `spl_x86_on_user_fault` both present as `T` (defined, text section) under
+   both their mangled (`os__kernel__arch__x86_64__interrupt__...`) and bare
+   exported names. **The build-plumbing wall from the C8-FIX lane is not
+   reproduced this lane** — this was the production recipe, not an ad-hoc
+   one.
+4. **Lifted `vfs_boot_init.spl:374`** (`if true:` → `if false:`), rebuilt
+   (cache hit 649/655, only the 6 files touched by the one-line change
+   recompiled; ELF byte-size identical, `nm` count identical — confirms the
+   cache reuse did not silently serve stale dispatch codegen from before the
+   fix). Booted under `qemu-system-x86_64 -name c8close` (q35/qemu64/2G,
+   `-display none -no-reboot`, NVMe attached via `-drive
+   file=build/os/_wk/fat32-font.img,if=none,id=nvm,format=raw,snapshot=on
+   -device nvme,serial=deadbeef,drive=nvm`, serial to file), bounded to 130s
+   via `timeout 130`.
+5. **Result: the fault storm reproduced, byte-identical to every prior C8
+   report.** `cr2=0x0001e0ec8148e589` is the very **first** fault of the
+   entire boot (immediately after `[vfs-init] scalar scratch read ok
+   cluster=3962`, the last live log line before the storm — no earlier,
+   unrelated fault precedes it), then increments by exactly `+2` per
+   recovered fault for **69762 occurrences** across the 130s window (serial
+   log: 697700 lines, 21.7 MB, gzipped to 406 KB at
+   `build/os/_wkc8close/serial.log.gz`). The new Task-1 `FATAL: kernel #UD`
+   marker **never fired** (0 occurrences) — this specific wild-jump target
+   is confirmed NOT a literal `ud2` opcode (the byte-check at that RIP found
+   no match), so the storm is going through the *other*, deliberately
+   untouched kernel-CPL0 no-error-code recovery path. The backtrace's return
+   address is **constant across all 69762 iterations**:
+   `[bt] ra=0x0000000008958d0d`. Resolved via `objdump -d -M x86-64` against
+   `build/os/_wkc8close/desktop.elf`: this is the instruction immediately
+   after `call 89587d2
+   <lib__nogc_async_mut__fs_driver__fat32_core__Fat32Core_dot__device_sector_size>`
+   inside `Fat32Core.read_boot_sector` — **the exact same call site named in
+   the original C8 report** ("`Fat32Core.read_boot_sector+0x18` calling
+   `self._device_sector_size()`"). Disassembly of `_device_sector_size`
+   itself shows a `self`-tag guard (`and $0xfffffffffffffff8,%rsi; test
+   %rsi,%rsi; jne ...`) followed by an inline, byte-at-a-time stack string
+   build (`r,u,n,t,i,m,e, ,e,r,r,o,r,:, ,...` — "runtime error: ...") — a
+   *different* codegen pattern than the previously-diagnosed duck-dispatch
+   sentinel's single `rt_eprintln_str` call + `ud2`, not yet fully traced
+   past this point (out of scope for this lane to finish reverse-engineering
+   — the exact instruction that computes/jumps to `0x0001e0ec8148e589` was
+   not located; the wild target address is far outside the 16 MB ELF's
+   range and matches no symbol, consistent with a garbage vtable-slot value
+   or corrupted trait-object field read at runtime rather than a
+   MIR-lowering/codegen defect).
+6. **Conclusion — C8 is NOT closed.** The C8-FIX lane's diagnosis (MIR
+   duck-dispatch-sentinel → `ud2` → blind recovery → wild jump) is real,
+   confirmed fixed (items 2-3 above), and worth keeping — but it is **not
+   the full story**. A second, still-unidentified defect reproduces the
+   textually-identical crash signature (same call site, same exact `cr2`
+   base address, same +2 walk pattern) even with the sentinel mechanism
+   completely absent from the build. This is consistent with the C8-FIELD
+   lane's earlier "dispatch codegen is CLEAN; reframed to runtime data
+   corruption" hypothesis (see that lane's section above) — the most likely
+   remaining suspect is a corrupted/garbage vtable pointer or trait-object
+   field somewhere in the `g_pure_nvme_root_fat32.inner.device` chain at
+   *runtime*, which the MIR-lowering-level `SIMPLE_DEBUG_METHOD_DISPATCH`
+   identity check cannot see (it only proves the compile-time slot-index
+   decision is correct, not that the runtime vtable data at that slot is
+   valid). **Do not lift `vfs_boot_init.spl:374` permanently** — the skip
+   must stay until this second defect is found. Handed off, not solved:
+   next lane should disassemble further into `_device_sector_size` past the
+   `self`-nil-guard shown above to find the actual indirect call/jmp that
+   produces `0x0001e0ec8148e589`, and inspect the runtime layout of
+   `SharedFat32Driver.inner.device` (the trait-object fat pointer / vtable
+   pointer fields) at the point of construction vs. at the point of this
+   call.
+7. **`vfs_boot_init.spl:374` restored VERBATIM** to `if true:` before
+   finishing this lane — confirmed via `sed -n '374p'` (`if true:`) and
+   `git diff src/os/services/vfs/vfs_boot_init.spl` (0 lines).
+8. **Evidence, gitignored, left for the next lane:**
+   `build/os/_wkc8close/desktop.elf` (16.5 MB, the exact booted binary),
+   `build/os/_wkc8close/native-build.out` (build log with the
+   `SIMPLE_DEBUG_METHOD_DISPATCH` trace), `build/os/_wkc8close/
+   serial.log.gz` (406 KB gzipped, 697700-line full boot transcript),
+   `build/os/_wkc8close/qemu_stderr.log` (just the timeout-signal
+   termination line, nothing else). The large regenerable `native-cache/`
+   dir was removed after use. Files touched this lane, final state:
+   `src/os/kernel/arch/x86_64/interrupt.spl` (new
+   `spl_x86_on_kernel_ud2_fault` function, kept),
+   `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c` (ud2
+   detection in `_rich_fault_entry`'s no-error-code recovery path, kept),
+   `src/os/services/vfs/vfs_boot_init.spl` (touched then restored, `git
+   diff` empty). No commits made this lane per the coordinator's hard rule.
