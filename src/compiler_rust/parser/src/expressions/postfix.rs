@@ -129,20 +129,6 @@ impl<'a> Parser<'a> {
         // Track indents consumed for multi-line method chaining
         let mut consumed_indents: usize = 0;
 
-        // Lookahead disambiguation: Foo<Int>.bar() and Foo<Int>::bar()
-        //
-        // After parsing a bare Identifier as primary, if the next token is `<`, we
-        // speculatively try to consume a generic-arg list `<TypeArgs>`.  We commit only
-        // if the token *after* the closing `>` is `.`, `::`, or `(` — i.e. the `<...>`
-        // is clearly a type-argument list, not a comparison.  On failure we backtrack
-        // transparently and `<` is handled as `BinOp::Lt` by the binary-expression layer.
-        //
-        // The parsed generic args are discarded in the seed; the identifier is kept as-is
-        // so that the postfix loop can continue with `.bar()` or `::bar()`.
-        if matches!(&expr, Expr::Identifier(_)) && self.check(&TokenKind::Lt) {
-            self.try_skip_ident_generic_args();
-        }
-
         loop {
             match &self.current.kind {
                 TokenKind::LParen => {
@@ -1051,17 +1037,17 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Lookahead disambiguation for `Foo<Int>.bar()` and `Foo<Int>::bar()`.
+    /// Lookahead for `Foo<Int>.bar()`, `Foo<Int>::bar()`, and `Foo<Int> { ... }`.
     ///
     /// Called when the just-parsed primary is a bare `Identifier` and the current token is `<`.
     /// Speculatively consumes `<TypeArgs>` (using `parse_type` for each arg, with `>>` splitting).
-    /// **Commits** (leaves the parser after the `>`) only if the token after `>` is `.`, `::`,
-    /// or `(` — clear evidence that `<...>` is a type-argument list, not a comparison.
+    /// **Commits** (leaves the parser after the `>`) only if a postfix or enabled struct
+    /// literal follows — clear evidence that `<...>` is a type-argument list, not a comparison.
     /// **Backtracks** otherwise, leaving `<` as `TokenKind::Lt` for the binary-expression layer.
     ///
     /// The parsed type args are discarded in the seed; the caller's `expr` (Identifier) is
     /// unchanged so that the postfix loop can continue with `.bar()` or `::bar()`.
-    fn try_skip_ident_generic_args(&mut self) {
+    pub(super) fn try_skip_ident_generic_args(&mut self) {
         // Save state for backtracking
         let saved_current = self.current.clone();
         let saved_previous = self.previous.clone();
@@ -1086,7 +1072,8 @@ impl<'a> Parser<'a> {
                         // After closing all nested levels, check if continuation follows
                         ok = self.check(&TokenKind::Dot)
                             || self.check(&TokenKind::DoubleColon)
-                            || self.check(&TokenKind::LParen);
+                            || self.check(&TokenKind::LParen)
+                            || (!self.no_brace_postfix && self.check(&TokenKind::LBrace));
                         break;
                     }
                     continue;
@@ -1126,7 +1113,8 @@ impl<'a> Parser<'a> {
                 if depth == 0 {
                     ok = self.check(&TokenKind::Dot)
                         || self.check(&TokenKind::DoubleColon)
-                        || self.check(&TokenKind::LParen);
+                        || self.check(&TokenKind::LParen)
+                        || (!self.no_brace_postfix && self.check(&TokenKind::LBrace));
                     break;
                 }
                 continue;

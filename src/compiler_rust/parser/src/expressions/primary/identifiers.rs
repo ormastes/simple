@@ -173,6 +173,9 @@ impl<'a> Parser<'a> {
     fn parse_identifier_or_struct(&mut self, name: &str) -> Result<Expr, ParseError> {
         let name = name.to_string();
         self.advance();
+        if self.check(&TokenKind::Lt) {
+            self.try_skip_ident_generic_args();
+        }
         // Check for path expression: Name::Variant
         // DEPRECATED: Use dot syntax instead (Name.Variant)
         if self.check(&TokenKind::DoubleColon) {

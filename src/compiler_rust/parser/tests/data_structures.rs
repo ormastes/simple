@@ -1,4 +1,4 @@
-use simple_parser::ast::{Mutability, Node, Type, Visibility};
+use simple_parser::ast::{Expr, Mutability, Node, Type, Visibility};
 use simple_parser::Parser;
 
 fn parse(src: &str) -> Vec<Node> {
@@ -195,6 +195,20 @@ fn parse_impl_generic_params() {
 fn parse_struct_init_expression() {
     parse_ok("let p = Point { x: 1, y: 2 }");
     parse_ok("let p = Point {}");
+}
+
+#[test]
+fn parse_generic_struct_init_expression() {
+    let items = parse("let iter = SliceIter<T> { slice: self, index: 0 }");
+    let Node::Let(binding) = &items[0] else {
+        panic!("expected let binding");
+    };
+    let Some(Expr::StructInit { name, fields, .. }) = &binding.value else {
+        panic!("expected generic struct initialization");
+    };
+
+    assert_eq!(name, "SliceIter");
+    assert_eq!(fields[0], ("slice".to_string(), Expr::Identifier("self".to_string())));
 }
 
 // Doc comment parsing tests

@@ -155,10 +155,10 @@ Import discovery now records exact arities for concrete class, struct, enum,
 trait, impl, extend, and extern-class methods, including implicit receivers,
 while excluding abstract/pass-only trait methods. Focused discovery coverage
 passes. The single bounded bootstrap removed `Tensor.T` and `Iterator.count`,
-reducing undeclared globals from 22 to 18. A newly exposed `slice` method-value
-failure is the next import-discovery lane; unknown enum/generic/static/local
-symbols remain fail-closed. The run exited 2 normally without timeout, OOM,
-crash, hang, or orphan.
+reducing undeclared globals from 22 to 18. A newly exposed `slice` failure
+remained for separate classification; unknown enum/generic/static/local symbols
+remain fail-closed. The run exited 2 normally without timeout, OOM, crash, hang,
+or orphan.
 
 Implicit receiver discovery now recurses through `as` casts. A focused HIR/MIR
 regression proves a cast-wrapped `self` is an injected parameter rather than a
@@ -166,6 +166,13 @@ regression proves a cast-wrapped `self` is an injected parameter rather than a
 reducing undeclared globals from 18 to 14. The run exited 2 normally without
 timeout, OOM, crash, hang, or orphan. Review also identified `slice` as generic
 struct-literal parsing, not import discovery, so it remains a separate lane.
+
+Generic identifier lookahead now recognizes an enabled `{` continuation and
+routes `SliceIter<T> { ... }` through the existing struct initializer while
+preserving comparison backtracking and control-flow brace suppression. The
+focused AST regression passes; the single bounded bootstrap removed both
+`slice` diagnostics, reducing undeclared globals from 14 to 12. The run exited
+2 normally without timeout, OOM, crash, hang, or orphan.
 
 ## Context: in-guest RUN is otherwise REACHABLE
 
