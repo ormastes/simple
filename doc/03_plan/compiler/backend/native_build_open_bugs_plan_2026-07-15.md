@@ -130,6 +130,19 @@ host. The Windows staged lane separately requires explicit Cranelift to emit an
 ARM64 COFF object; this is object-format coverage only, not Windows ARM64
 linking or execution coverage.
 
+## Audit addendum (2026-07-17): class array-field mutation
+
+`native_class_array_field_mutation_segfault_2026-07-17.md` was filed after the
+historical numbered audit above. Its source fix is implemented in MIR: class
+field declarations now populate the aggregate metadata used by field lowering,
+and mutating-receiver prelowering mirrors normal field projection provenance so
+the array handle remains a runtime array through `.push` and write-back. A new
+strict dual-backend case covers a non-first field's `.push`, field index assignment,
+and visibility of that array handle through an alias captured before mutation.
+The case contributes one logical case and two recorded checks; LLVM and
+Cranelift execution is pending, so no executable PASS or resolved disposition
+is claimed here. Broader class-reference/struct-copy semantics remain separate.
+
 ---
 
 ## Wave 1 — Codegen silent-wrong (highest priority: wrong answers, no diagnostic)

@@ -12,6 +12,15 @@ fn switch_operators_calls_source() -> text:
 fn mir_to_llvm_core_source() -> text:
     rt_file_read_text("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl") ?? ""
 
+fn hir_items_module_lowering_source() -> text:
+    rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl") ?? ""
+
+fn mir_module_lowering_source() -> text:
+    rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+
+fn method_calls_literals_source() -> text:
+    rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl") ?? ""
+
 describe "bootstrap MIR binary lowering source":
     it "lowers normal binary operators without optional special-op nil checks":
         val source = expr_dispatch_source()
@@ -61,6 +70,23 @@ describe "bootstrap MIR binary lowering source":
         expect(stmt_source).to_contain("fn local_is_bool(local: LocalId) -> bool:")
         expect(stmt_source).to_contain("case MirTypeKind.Bool: return true")
         expect(stmt_source.split("self.local_is_bool(init_local)").len() - 1).to_equal(2)
+
+    it "preserves class array-field metadata and mutating projection provenance":
+        val hir_source = hir_items_module_lowering_source()
+        val mir_source = mir_module_lowering_source()
+        val expr_source = expr_dispatch_source()
+        val method_source = method_calls_literals_source()
+
+        expect(hir_source).to_contain("self.prescan_composite_field_types(prescan_name, prescan_struct.fields)")
+        expect(hir_source).to_contain("self.prescan_composite_field_types(prescan_name, prescan_class.fields)")
+        expect(mir_source).to_contain("self.register_composite_field_metadata(class_def.name, class_def.fields, module.symbols, false)")
+        expect(mir_source).to_contain("self.register_composite_field_metadata(class_def.name, class_def.fields, module.symbols, true)")
+        expect(mir_source).to_contain("if overwrite or not self.struct_field_order.has(name):")
+        expect(mir_source).to_contain("if overwrite or not self.struct_field_array_element_type_name.has(name):")
+        expect(mir_source).to_contain("field_array_element_type_name = \"__runtime_array__\"")
+        expect(mir_source).to_contain("self.struct_field_array_element_type_name[name] = field_array_element_type_names")
+        expect(expr_source.split("self.remember_field_projection_provenance(base, base_local, field_idx").len() - 1).to_equal(2)
+        expect(method_source).to_contain("self.remember_field_projection_provenance(base, wb_base, wb_field_idx, wb_receiver)")
 
     it "lowers pointer text equality through runtime string compare":
         val source = mir_to_llvm_core_source()

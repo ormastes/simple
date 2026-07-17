@@ -145,6 +145,26 @@ impl MirLowering:
             case MirTypeKind.Dict(_, _): true
             case _: false
 
+    me remember_field_projection_provenance(base: HirExpr, base_local: LocalId, field_idx: i64, result: LocalId):
+        """Carry nested aggregate/array identity through a field projection."""
+        val base_struct_name = self.resolve_base_struct_name(base, base_local)
+        if val name = base_struct_name:
+            if self.struct_field_type_name.has(name):
+                val nested_types = self.struct_field_type_name[name]
+                if field_idx >= 0 and field_idx < nested_types.len():
+                    val nested_name = nested_types[field_idx]
+                    if nested_name != "":
+                        self.struct_value_syms[result.id] = nested_name
+            if self.struct_field_array_element_type_name.has(name):
+                val element_types = self.struct_field_array_element_type_name[name]
+                if field_idx >= 0 and field_idx < element_types.len():
+                    val element_name = element_types[field_idx]
+                    if element_name != "":
+                        self.runtime_array_locals[result.id] = true
+                        self.runtime_value_locals[result.id] = true
+                        if element_name != "__runtime_array__":
+                            self.array_element_struct_syms[result.id] = element_name
+
     fn mir_type_is_str(t: MirType) -> bool:
         """True for the native string MIR types: the fat-pointer struct
         Tuple([Ptr(U8), U64]) that `Str` lowers to (function_lowering.lower_type)
@@ -746,28 +766,9 @@ impl MirLowering:
                     var field_builder = self.builder
                     val field_result = field_builder.emit_get_field(mir_operand_copy(base_local), field_idx, field_type)
                     self.builder = field_builder
-                    # Bug #166: propagate the field's own struct type (if any) so a
-                    # further `.field` chained off this result resolves against the
-                    # right struct instead of resolve_field_index silently
-                    # defaulting the next lookup to index 0 (`r.origin.y` read
-                    # `x`'s slot because `r.origin`'s type was otherwise unknown).
-                    val base_struct_name = self.resolve_base_struct_name(base, base_local)
-                    if val bsn = base_struct_name:
-                        if self.struct_field_type_name.has(bsn):
-                            val nested_types = self.struct_field_type_name[bsn]
-                            if field_idx >= 0 and field_idx < nested_types.len():
-                                val nested_name = nested_types[field_idx]
-                                if nested_name != "":
-                                    self.struct_value_syms[field_result.id] = nested_name
-                        if self.struct_field_array_element_type_name.has(bsn):
-                            val element_types = self.struct_field_array_element_type_name[bsn]
-                            if field_idx >= 0 and field_idx < element_types.len():
-                                val element_name = element_types[field_idx]
-                                if element_name != "":
-                                    self.runtime_array_locals[field_result.id] = true
-                                    self.runtime_value_locals[field_result.id] = true
-                                    if element_name != "__runtime_array__":
-                                        self.array_element_struct_syms[field_result.id] = element_name
+                    # Keep chained aggregate and array-field identity on the
+                    # projected local for later field/index/method lowering.
+                    self.remember_field_projection_provenance(base, base_local, field_idx, field_result)
                     return field_result
                 case _:
                     pass
@@ -2049,25 +2050,7 @@ impl MirLowering:
                 var b = self.builder
                 val result = b.emit_get_field(mir_operand_copy(base_local), field_idx, field_type)
                 self.builder = b
-                # Bug #166: same struct-name propagation as the disc-guarded
-                # Field arm above, kept in sync for this fallback dispatch path.
-                val base_struct_name2 = self.resolve_base_struct_name(base, base_local)
-                if val bsn2 = base_struct_name2:
-                    if self.struct_field_type_name.has(bsn2):
-                        val nested_types2 = self.struct_field_type_name[bsn2]
-                        if field_idx >= 0 and field_idx < nested_types2.len():
-                            val nested_name2 = nested_types2[field_idx]
-                            if nested_name2 != "":
-                                self.struct_value_syms[result.id] = nested_name2
-                    if self.struct_field_array_element_type_name.has(bsn2):
-                        val element_types2 = self.struct_field_array_element_type_name[bsn2]
-                        if field_idx >= 0 and field_idx < element_types2.len():
-                            val element_name2 = element_types2[field_idx]
-                            if element_name2 != "":
-                                self.runtime_array_locals[result.id] = true
-                                self.runtime_value_locals[result.id] = true
-                                if element_name2 != "__runtime_array__":
-                                    self.array_element_struct_syms[result.id] = element_name2
+                self.remember_field_projection_provenance(base, base_local, field_idx, result)
                 result
 
             # Type cast: expr as Type

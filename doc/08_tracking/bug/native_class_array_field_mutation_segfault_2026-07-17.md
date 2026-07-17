@@ -1,14 +1,14 @@
 # BUG: native backend segfaults on class array-field mutation via .push() or index-assignment
 
 - **Date:** 2026-07-17
-- **Status:** open
+- **Status:** source fix implemented; execution pending
 - **Area:** compiler native codegen (class field access + array mutation)
 - **Severity:** high (segfault / runtime crash)
 
 ## Symptom
 
-Compiled native-build segfaults or produces corrupted reads when a class method
-mutates an array field directly via:
+Compiled native-build segfaults or produces corrupted reads when code mutates a
+class instance's array field directly via:
 - `.push(...)` call on the field: `self.<array-field>.push(value)`
 - Index-assignment on the field: `self.<array-field>[i] = value`
 
@@ -56,5 +56,27 @@ rather than scalar fields. The scalar mutation loss in that doc is silent
 
 ## Affected code paths
 
-Any compiled class method that directly mutates a field array (native-build
+Any compiled access that directly mutates a class field array (native-build
 codegen, LLVM or Cranelift backends).
+
+## Source fix and regression coverage
+
+The source fix restores the missing class-field metadata and projection
+provenance at the MIR boundary:
+
+1. HIR/MIR aggregate prescans register declared `HirClass` field order, nested
+   type name, representation, and array element type in the existing
+   name-keyed metadata used for field lowering, while preserving declaration
+   order and existing collision/shadow rules.
+2. Mutating-method `Field` prelowering mirrors ordinary field projection after
+   `emit_get_field`: class/nested values retain `struct_value_syms`; array
+   fields retain `runtime_array_locals` and `runtime_value_locals`; named array
+   elements retain `array_element_struct_syms`.
+
+`scripts/check/check-native-seed-parity.shs` adds the strict dual-backend
+`class_array_field_mutation` case. It pushes into the non-first field
+`Container.items`, assigns an indexed element, rereads length and values, and
+confirms the same array handle is visible through an alias captured before
+mutation while the leading scalar field remains unchanged. The fixed normalized
+expected output is `2742274299` on LLVM and Cranelift. Execution is pending; this
+does not claim broader class-reference or struct-copy semantics are resolved.

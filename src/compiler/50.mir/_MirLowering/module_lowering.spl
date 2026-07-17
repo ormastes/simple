@@ -276,8 +276,51 @@ impl MirLowering:
     fn asm_target_spec_backend(spec: AsmTargetSpec) -> text:
         spec.backend
 
+    me register_composite_field_metadata(name: text, fields: [HirField], symbols: SymbolTable, overwrite: bool):
+        """Register name-keyed struct/class field metadata."""
+        var field_names: [text] = []
+        var field_type_names: [text] = []
+        var field_repr_names: [text] = []
+        var field_array_element_type_names: [text] = []
+        var fi = 0
+        while fi < fields.len():
+            val field = fields[fi]
+            field_names.push(field.name)
+            var field_type_name = ""
+            var field_repr_name = ""
+            var field_array_element_type_name = ""
+            if field.type_ != nil:
+                match field.type_.kind:
+                    case Str:
+                        field_repr_name = "str"
+                    case Named(field_type_sym, _):
+                        val field_type_symbol = symbols.get_symbol(field_type_sym)
+                        if field_type_symbol.?:
+                            field_type_name = field_type_symbol.name
+                    case Array(field_element_type, _):
+                        field_array_element_type_name = "__runtime_array__"
+                        match field_element_type.kind:
+                            case Named(field_element_sym, _):
+                                val field_element_symbol = symbols.get_symbol(field_element_sym)
+                                if field_element_symbol.?:
+                                    field_array_element_type_name = field_element_symbol.name
+                            case _: ()
+                    case _: ()
+            field_type_names.push(field_type_name)
+            field_repr_names.push(field_repr_name)
+            field_array_element_type_names.push(field_array_element_type_name)
+            fi = fi + 1
+        if overwrite or not self.struct_field_order.has(name):
+            self.struct_field_order[name] = field_names
+        if overwrite or not self.struct_field_type_name.has(name):
+            self.struct_field_type_name[name] = field_type_names
+        if overwrite or not self.struct_field_repr_name.has(name):
+            self.struct_field_repr_name[name] = field_repr_names
+        if overwrite or not self.struct_field_array_element_type_name.has(name):
+            self.struct_field_array_element_type_name[name] = field_array_element_type_names
+
     me prescan_module_struct_names(module: HirModule):
-        """Cross-module struct-name prepass (crossmodule field-index SEGV).
+        """Cross-module struct/class-name prepass (field-index SEGV).
 
         Entry-closure lowering iterates modules on ONE shared MirLowering,
         and the ENTRY module is lowered BEFORE the dependency modules it
@@ -309,50 +352,13 @@ impl MirLowering:
         var psi = 0
         while psi < prescan_struct_values.len():
             val struct_def = prescan_struct_values[psi]
-            var field_names: [text] = []
-            var field_type_names: [text] = []
-            var field_repr_names: [text] = []
-            var field_array_element_type_names: [text] = []
-            var pfi = 0
-            while pfi < struct_def.fields.len():
-                val pre_field = struct_def.fields[pfi]
-                field_names.push(pre_field.name)
-                var pre_field_type_name = ""
-                var pre_field_repr_name = ""
-                var pre_field_array_element_type_name = ""
-                val pre_field_type = pre_field.type_
-                if pre_field_type != nil:
-                    match pre_field_type.kind:
-                        case Str:
-                            pre_field_repr_name = "str"
-                        case Named(pre_field_type_sym, _):
-                            val pre_field_type_symbol = module.symbols.get_symbol(pre_field_type_sym)
-                            if pre_field_type_symbol.?:
-                                pre_field_type_name = pre_field_type_symbol.name
-                        case Array(pre_field_element_type, _):
-                            # Non-empty sentinel means this field is a runtime
-                            # array even when its element is primitive or
-                            # another array. A named element replaces it below.
-                            pre_field_array_element_type_name = "__runtime_array__"
-                            match pre_field_element_type.kind:
-                                case Named(pre_field_element_sym, _):
-                                    val pre_field_element_symbol = module.symbols.get_symbol(pre_field_element_sym)
-                                    if pre_field_element_symbol.?:
-                                        pre_field_array_element_type_name = pre_field_element_symbol.name
-                                case _: ()
-                        case _: ()
-                field_type_names.push(pre_field_type_name)
-                field_repr_names.push(pre_field_repr_name)
-                field_array_element_type_names.push(pre_field_array_element_type_name)
-                pfi = pfi + 1
-            if not self.struct_field_order.has(struct_def.name):
-                self.struct_field_order[struct_def.name] = field_names
-            if not self.struct_field_type_name.has(struct_def.name):
-                self.struct_field_type_name[struct_def.name] = field_type_names
-            if not self.struct_field_repr_name.has(struct_def.name):
-                self.struct_field_repr_name[struct_def.name] = field_repr_names
-            if not self.struct_field_array_element_type_name.has(struct_def.name):
-                self.struct_field_array_element_type_name[struct_def.name] = field_array_element_type_names
+            self.register_composite_field_metadata(struct_def.name, struct_def.fields, module.symbols, false)
+            psi = psi + 1
+        val prescan_class_values = module.classes.values()
+        psi = 0
+        while psi < prescan_class_values.len():
+            val class_def = prescan_class_values[psi]
+            self.register_composite_field_metadata(class_def.name, class_def.fields, module.symbols, false)
             psi = psi + 1
 
     me lower_module(module: HirModule) -> MirModule:
@@ -361,6 +367,20 @@ impl MirLowering:
         for function in module.functions.values():
             function_names.push(function.name)
         self.current_function_names = function_names
+        # Cross-module prescans keep the first definition. The module being
+        # lowered is authoritative for its own same-name struct/class.
+        val local_struct_values = module.structs.values()
+        var local_meta_i = 0
+        while local_meta_i < local_struct_values.len():
+            val struct_def = local_struct_values[local_meta_i]
+            self.register_composite_field_metadata(struct_def.name, struct_def.fields, module.symbols, true)
+            local_meta_i = local_meta_i + 1
+        val local_class_values = module.classes.values()
+        local_meta_i = 0
+        while local_meta_i < local_class_values.len():
+            val class_def = local_class_values[local_meta_i]
+            self.register_composite_field_metadata(class_def.name, class_def.fields, module.symbols, true)
+            local_meta_i = local_meta_i + 1
         # Entry-closure lowering reuses one MirLowering while replacing its
         # active SymbolTable for every module. Method SymbolIds are therefore
         # module-local state and must not survive that boundary.

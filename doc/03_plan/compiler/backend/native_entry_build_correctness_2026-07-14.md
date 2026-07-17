@@ -13,8 +13,8 @@ failure is **never** silently converted to a wrong answer.
 - **Gate 1 — matrix:** `scripts/check/native-smoke-matrix.shs` must report
   `total=15 pass=15 fail=0 codegen_fallback_hits=0`.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
-  regression harness) must report `native_seed_parity=true`. It defines **80
-  logical cases / 102 recorded checks** because strict-dual cases record LLVM
+  regression harness) must report `native_seed_parity=true`. It defines **81
+  logical cases / 104 recorded checks** because strict-dual cases record LLVM
   and Cranelift separately; execution of the expanded matrix is pending.
   The full unfiltered gate is now scheduled on Linux x86_64 LLVM (STRICT-DUAL
   cases also build Cranelift); its first CI execution is pending. Five modes:
@@ -139,6 +139,13 @@ the shared binary — deploys require explicit user go-ahead).
     initializer types on fresh bound locals. A strict dual-backend case covers
     direct index interpolation plus `val` and `var` bindings; execution is
     pending.
+  - `native_class_array_field_mutation_segfault_2026-07-17.md` is source-fixed
+    by registering declared class-field aggregate metadata and mirroring normal
+    field projection provenance in mutating-receiver prelowering. A strict
+    dual-backend case covers a non-first field's `.push`, field index assignment, and
+    visibility of that array handle through an alias captured before mutation;
+    execution is pending. Broader class-reference/struct-copy semantics remain
+    separate.
 - Option `.map` now evaluates a side-effecting receiver exactly once and
   inlines its literal lambda with the decoded payload, preserving primitive
   text/float/bool/integer results through the tagged runtime-value merge.

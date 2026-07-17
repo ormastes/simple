@@ -123,6 +123,16 @@ fn hir_module_is_bootstrap_entry(module_name: text) -> bool:
     hir_module_logical_name_from_path(entry_path) == hir_module_logical_name_from_path(module_name)
 
 impl HirLowering:
+    me prescan_composite_field_types(name: text, fields: [Field]):
+        """Register parser struct/class fields before function lowering."""
+        var field_types: Dict<text, HirType> = {}
+        var field_order: [text] = []
+        for field in fields:
+            field_types[field.name] = self.lower_type(field.type_)
+            field_order = field_order.push(field.name)
+        self.struct_field_types_by_name[name] = field_types
+        self.struct_field_order_by_name[name] = field_order
+
     # Nested-field-access support (native --entry path bug, see
     # struct_field_types_by_name doc comment in types.spl): record this
     # struct's field NAME -> declared HirType, purely from the static
@@ -654,7 +664,7 @@ impl HirLowering:
         if bootstrap_diag:
             eprint("[hir-lower] declare:done module={module.name}")
 
-        # Pass -1 (relocated): pre-scan struct field TYPES (name-keyed) before
+        # Pass -1 (relocated): pre-scan struct/class field TYPES (name-keyed) before
         # ANY function body is lowered. Nested-field-access support (see
         # struct_field_types_by_name doc comment in types.spl) needs this
         # available while lowering `val s = S(...)` higher up in a function
@@ -663,7 +673,7 @@ impl HirLowering:
         # functions are lowered -- too late for that Let-statement lowering to
         # see it. This pre-scan is deliberately separate from (and superseded
         # by) that later full pass. It MUST run after resolve_import_symbols
-        # (Pass 0) and declare_module_symbols above: lowering a struct-typed
+        # (Pass 0) and declare_module_symbols above: lowering an aggregate-typed
         # field (`driver: FramebufferDriver`) resolves the field type through
         # lower_named_kind, and before those passes no type symbol exists yet,
         # so every such field emitted "unresolved type" -- historically
@@ -671,7 +681,7 @@ impl HirLowering:
         # fatal (crossmodule_field_index_collision parity case: the provider
         # module's own sibling struct failed to resolve and the whole
         # native-build aborted).
-        # NOTE: struct field type ANNOTATIONS are unreliable on this path
+        # NOTE: aggregate field type ANNOTATIONS are unreliable on this path
         # (`arr: [i64]` parses to TypeKind.Infer, both parser- and HIR-level --
         # a documented pre-existing limitation, see bug #156's
         # method_calls_literals.spl comment). This pre-scan is still worth
@@ -685,13 +695,14 @@ impl HirLowering:
         while prescan_idx < prescan_struct_names.len():
             val prescan_name = prescan_struct_names[prescan_idx]
             val prescan_struct: Struct = module.structs[prescan_name]
-            var prescan_field_types: Dict<text, HirType> = {}
-            var prescan_field_order: [text] = []
-            for prescan_field in prescan_struct.fields:
-                prescan_field_types[prescan_field.name] = self.lower_type(prescan_field.type_)
-                prescan_field_order = prescan_field_order.push(prescan_field.name)
-            self.struct_field_types_by_name[prescan_name] = prescan_field_types
-            self.struct_field_order_by_name[prescan_name] = prescan_field_order
+            self.prescan_composite_field_types(prescan_name, prescan_struct.fields)
+            prescan_idx = prescan_idx + 1
+        val prescan_class_names = module.classes.keys()
+        prescan_idx = 0
+        while prescan_idx < prescan_class_names.len():
+            val prescan_name = prescan_class_names[prescan_idx]
+            val prescan_class: Class = module.classes[prescan_name]
+            self.prescan_composite_field_types(prescan_name, prescan_class.fields)
             prescan_idx = prescan_idx + 1
 
         # Second pass: lower definitions
