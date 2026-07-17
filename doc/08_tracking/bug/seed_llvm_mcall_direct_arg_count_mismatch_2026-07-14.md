@@ -122,6 +122,17 @@ argument-count verifier errors (down from the systemic 43-file failure). Stage
 separate symbol-lowering bug, led by `char_to_ascii`, `self`, `Shared`, and
 generic symbols. No pure compiler or deployment was produced.
 
+A bounded follow-up tested exact-arity lazy declarations for mapped imported
+function values. Its focused LLVM verifier regression covered both one- and
+zero-argument imports, but the real Stage 2 result was unchanged: 19 files and
+38 diagnostics. The project path resolves `char_to_ascii` as the double-prefixed
+`backend__backend__common__ascii_utils__char_to_ascii`, which does not match the
+discovered arity key. The ineffective code was removed. A fresh scoped session
+must repair import-key normalization before retrying; unresolved locals,
+generics, enum cases, and static receivers must remain fail-closed rather than
+being declared as external symbols. The run exited 2 normally with no timeout,
+OOM, crash, or orphan.
+
 ## Context: in-guest RUN is otherwise REACHABLE
 
 This bug does NOT block a plain in-guest run: `/usr/bin/simple --version` runs

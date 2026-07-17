@@ -468,6 +468,11 @@ so executable qualification is still blocked.
   executable. No fourth cycle was run.
 - Final bootstrap preflight: BLOCKED before compilation because stale compiler
   backfill requires `--full-bootstrap`; no fourth cycle was run.
+- Seed LLVM imported-function-value experiment: focused exact-arity coverage
+  PASS, but the single bounded bootstrap remained at 19 files / 38 undeclared
+  globals because project resolution double-prefixes the imported symbol. The
+  ineffective implementation was removed and the three-cycle cap stopped the
+  lane; no crash, hang, OOM, or orphan occurred.
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system
   qualification: NOT RUN because the production runtime identity gate fails
   and this host has no PowerShell/Windows runtime.
