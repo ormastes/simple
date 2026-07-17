@@ -159,6 +159,7 @@ fn expr_uses_self(expr: &ast::Expr) -> bool {
         }
         ast::Expr::Binary { left, right, .. } => expr_uses_self(left) || expr_uses_self(right),
         ast::Expr::Unary { operand, .. } => expr_uses_self(operand),
+        ast::Expr::Cast { expr, .. } => expr_uses_self(expr),
         ast::Expr::Call { callee, args } => expr_uses_self(callee) || args_use_self(args),
         ast::Expr::MethodCall { receiver, args, .. } => expr_uses_self(receiver) || args_use_self(args),
         ast::Expr::FieldAccess { receiver, .. } => expr_uses_self(receiver),

@@ -363,3 +363,18 @@ fn test_regular_if_patterned_elif_binds_local() {
     let mir_repr = format!("{mir:?}");
     assert!(!mir_repr.contains("global_name: \"unwrapped\""), "{mir_repr}");
 }
+
+#[test]
+fn test_implicit_self_inside_if_let_cast_binds_local() {
+    let source = "class Buffer:\n    inner: i64\n\n    fn read_cast() -> i64:\n        if val value = self.inner as i64:\n            return value\n        return 0\n";
+    let module = parse_and_lower(source).unwrap();
+    let function = module.functions.iter().find(|f| f.name.ends_with("read_cast")).unwrap();
+    let hir_repr = format!("{:?}", function.body);
+
+    assert!(function.params.iter().any(|param| param.name == "self"), "{hir_repr}");
+    assert!(!hir_repr.contains("Global(\"self\")"), "{hir_repr}");
+
+    let mir = crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed");
+    let mir_repr = format!("{mir:?}");
+    assert!(!mir_repr.contains("global_name: \"self\""), "{mir_repr}");
+}

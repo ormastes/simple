@@ -160,6 +160,13 @@ failure is the next import-discovery lane; unknown enum/generic/static/local
 symbols remain fail-closed. The run exited 2 normally without timeout, OOM,
 crash, hang, or orphan.
 
+Implicit receiver discovery now recurses through `as` casts. A focused HIR/MIR
+regression proves a cast-wrapped `self` is an injected parameter rather than a
+`GlobalLoad`; the single bounded bootstrap removed all four `self` diagnostics,
+reducing undeclared globals from 18 to 14. The run exited 2 normally without
+timeout, OOM, crash, hang, or orphan. Review also identified `slice` as generic
+struct-literal parsing, not import discovery, so it remains a separate lane.
+
 ## Context: in-guest RUN is otherwise REACHABLE
 
 This bug does NOT block a plain in-guest run: `/usr/bin/simple --version` runs

@@ -36,7 +36,7 @@ so executable qualification is still blocked.
 | Surface | Status | Bug / missing evidence | Root solution | Priority |
 |---|---|---|---|---|
 | Production runtime | BLOCKED | Stage 4 was found parsing 10,503 files before closure pruning; source fix is unverified because the final cycle stopped on a stale compiler-backfill guard | In a fresh session run one bounded `--full-bootstrap`, require closure-sized phase input, then admit and atomically deploy | P0 |
-| Test runner | SOURCE REPAIRED / DEPLOY BLOCKED | The retained release binary crashes in stale two-arg `rt_env_set`; current ABI is correct. Rust native/interpreter wait owners now return `-2` while live, retain the child, reap after kill, and inherit async output so unread pipes cannot hang chatty children. The seed LLVM `mcall_direct` repair has focused verifier coverage and removed all Stage 2 arity errors; Stage 2 now stops on 19 files with undeclared-global lowering | Repair the shared undeclared-global root, rebuild/deploy the pure CLI, run green/red/empty fixtures, then remove temporary Rust opt-in | P0 |
+| Test runner | SOURCE REPAIRED / DEPLOY BLOCKED | The retained release binary crashes in stale two-arg `rt_env_set`; current ABI is correct. Rust native/interpreter wait owners now return `-2` while live, retain the child, reap after kill, and inherit async output so unread pipes cannot hang chatty children. The seed LLVM `mcall_direct` repair has focused verifier coverage and removed all Stage 2 arity errors; Stage 2 now stops on 14 undeclared-global diagnostics | Repair the remaining shared symbol-lowering roots, rebuild/deploy the pure CLI, run green/red/empty fixtures, then remove temporary Rust opt-in | P0 |
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; cosine candidate progress is time-throttled instead of reading RSS and writing stderr per pair; exact/cosine line gates share one tokenizer-derived signal prefix; runtime/performance qualification remain | Run focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
 | Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP001-MCP004 share one stable aggregate and LSP scope, while repository mode still fails closed pending safe recursive discovery; the UI isolation ratchet has zero new violations; the hot-loop gate reports 30 new findings | Repair native directory-walk parity, wire the aggregate repository owner, repair classified violations, then run focused fixtures | P1 |
 | Bootstrap essential tools | SOURCE WIRED | The exact fresh Stage 4 CLI now gates calibrated test-runner, focused lint, and deterministic duplicate-check outcomes from a non-repository cwd; raw-source duplicate dispatch is structurally forbidden | Run the aggregate after a fresh admitted Stage 4 binary exists | P0 |
@@ -485,7 +485,13 @@ so executable qualification is still blocked.
 - Exact import arities now include concrete methods and implicit receivers,
   with abstract/pass-only exclusions. Focused discovery coverage PASS; one
   bounded bootstrap removed `Tensor.T` and `Iterator.count`, reducing
-  undeclared globals from 22 to 18 and exposing `slice` as the next method lane.
+  undeclared globals from 22 to 18.
+- Implicit receiver discovery now sees `self` through `as` casts. Focused
+  HIR/MIR coverage PASS; one bounded bootstrap removed all four `self`
+  diagnostics, reducing undeclared globals from 18 to 14. It exited 2 normally
+  with no timeout, OOM, crash, hang, or orphan. Parallel review classified the
+  remaining `slice` diagnostics as generic struct-literal parsing rather than
+  import discovery.
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system
   qualification: NOT RUN because the production runtime identity gate fails
   and this host has no PowerShell/Windows runtime.
