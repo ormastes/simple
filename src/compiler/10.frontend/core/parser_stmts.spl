@@ -34,6 +34,7 @@ use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT}
 use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
 use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_ARRAY_LIT}
 use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit}
+use compiler.core.ast.{expr_int_lit, expr_float_lit}
 use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr, expr_match_expr}
 use compiler.core.ast.{expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
 use compiler.core.ast.{expr_unit, expr_block, expr_lambda}
@@ -52,6 +53,8 @@ use compiler.core.ast.{elif_new}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
 use compiler.core.types.{TYPE_ARRAY_ANY}
 use compiler.core.types.{TYPE_NIL}
+use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
+use compiler.core.types.{TYPE_NAMED_BASE}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_warn_print_if_needed}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
@@ -671,15 +674,77 @@ fn parse_var_decl_stmt() -> i64:
             parser_expect(6)
 
     var type_tag = 0
+    var has_type_annotation = false
+    var type_looks_named = false
     if par_kind_get() == 161:
         parser_advance()
+        # Peek the raw type-position token before parser_parse_type() resolves
+        # it: a plain identifier that parser_parse_type_impl's named-type
+        # lookup (named_type_find) fails to resolve decays SILENTLY to
+        # TYPE_VOID (no parser_error of its own -- see parser.spl's ident
+        # branch, which always returns from within itself). That happens for
+        # any struct/class/enum declared in ANOTHER module: a single-file
+        # parse (e.g. `simple check` on one file, or a struct referenced
+        # before its own declaration in the same file) has no cross-module
+        # type registry yet. Capture the raw name/kind now so a var-decl with
+        # no initializer can still tell "unresolved PascalCase named type"
+        # (safe to nil-default, matches this codebase's struct/class naming
+        # convention -- Engine2D, TlsCertificateChain, HttpResponseData, ...)
+        # apart from a genuinely unsupported category (text, Dict, Option,
+        # ...), which always resolves to a *non-void* type tag of its own.
+        val type_start_kind = par_kind_get()
+        val type_start_text = par_text_get()
+        type_looks_named = type_start_kind == TOK_IDENT and type_start_text.len() > 0 and type_start_text[0:1] >= "A" and type_start_text[0:1] <= "Z"
         type_tag = parser_parse_type()
+        has_type_annotation = true
 
     # Type inference for var declarations handled after initialization
+
+    # G-varnoinit: `var name: Type` with no initializer (assigned later, e.g.
+    # in if/elif/else arms). The seed grammar accepts this declare-then-assign
+    # form; this parser used to unconditionally require `=` here, hard-erroring
+    # with "expected =, got Newline" on any such declaration (blocked the
+    # hosted-WM entry closure at draw_ir_adv.spl:586 and several stdlib
+    # files). Only trigger on an actual statement-end token so a genuinely
+    # malformed `=`-less declaration followed by garbage still falls through
+    # to the ordinary parser_expect(100) error below.
+    val at_stmt_end = par_kind_get() == TOK_NEWLINE or par_kind_get() == TOK_SEMICOLON or par_kind_get() == TOK_DEDENT or par_kind_get() == TOK_EOF
+    if has_type_annotation and at_stmt_end:
+        return stmt_var_decl(name, type_tag, var_no_init_default_expr(type_tag, type_looks_named), 0)
 
     parser_expect(100)
     val init = parse_expr()
     stmt_var_decl(name, type_tag, init, 0)
+
+# Synthesizes the default-value initializer for a `var name: Type` declared
+# with no `=`. Chosen to match seed runtime semantics (oracle probes,
+# 2026-07-17): scalar primitives zero-init (seed's `var x: i64` read before
+# any assignment observably reads back 0); named struct/class types nil-init
+# (seed's `var t: SomeStruct` reads as a nil receiver until assigned, and
+# accessing a field before assignment already fails loud at runtime via the
+# existing nil-receiver check -- not a new failure mode, just deferred to
+# first use). Every other category (text, Option, Result, Dict, arrays,
+# tuples, fn types, unions/intersections/refinements, bare struct/any/void)
+# has no safe, well-defined zero value to replicate: the seed's own
+# read-before-assign behavior for those is undefined garbage (e.g. `var s:
+# text` read before assignment observably returned a corrupt length under
+# the seed), so guessing one here would turn a loud gap into a silently
+# wrong answer. Those are rejected with a located parser error instead.
+fn var_no_init_default_expr(type_tag: i64, type_looks_named: bool) -> i64:
+    if type_tag == TYPE_BOOL:
+        return expr_bool_lit(0, 0)
+    val is_plain_int = type_tag == TYPE_I64 or type_tag == TYPE_U8 or type_tag == TYPE_U16 or type_tag == TYPE_U32
+    val is_wide_int = type_tag == TYPE_U64 or type_tag == TYPE_I8 or type_tag == TYPE_I16 or type_tag == TYPE_I32
+    if is_plain_int or is_wide_int:
+        return expr_int_lit(0, 0)
+    if type_tag == TYPE_F64:
+        return expr_float_lit("0.0", 0)
+    if type_tag >= TYPE_NAMED_BASE:
+        return expr_nil_lit(0)
+    if type_tag == TYPE_VOID and type_looks_named:
+        return expr_nil_lit(0)
+    parser_error("var without initializer not yet supported for this declared type; only bool/i64/f64/fixed-width-int scalars and named struct/class types support declare-without-initializer -- add an explicit initializer")
+    expr_nil_lit(0)
 
 # ===== Control Flow Statements =====
 
