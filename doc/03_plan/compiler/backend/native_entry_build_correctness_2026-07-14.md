@@ -13,8 +13,8 @@ failure is **never** silently converted to a wrong answer.
 - **Gate 1 — matrix:** `scripts/check/native-smoke-matrix.shs` must report
   `total=15 pass=15 fail=0 codegen_fallback_hits=0`.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
-  regression harness) must report `native_seed_parity=true`. It defines **74
-  logical cases / 92 recorded checks** because strict-dual cases record LLVM
+  regression harness) must report `native_seed_parity=true`. It defines **76
+  logical cases / 95 recorded checks** because strict-dual cases record LLVM
   and Cranelift separately; execution of the expanded matrix is pending.
   The full unfiltered gate is now scheduled on Linux x86_64 LLVM (STRICT-DUAL
   cases also build Cranelift); its first CI execution is pending. Five modes:
@@ -121,7 +121,12 @@ the shared binary — deploys require explicit user go-ahead).
     Strict dual-backend execution is pending that staged CI. Unsigned
     high-bit casts and signed/unsigned ordering are source-fixed and covered by
     separate strict cases; the latter restores unsigned Cranelift predicates in
-    both pure-Simple owners.
+    both pure-Simple owners. Unsigned division, remainder, and right shift now
+    select `udiv`/`urem`/logical shift in both LLVM routes and both active
+    Cranelift owners; signed-left right shift remains arithmetic even when its
+    count is unsigned. A strict dual-backend case covers all four operations;
+    a separate LLVM parity case covers narrow signed-left widening without
+    routing that backend-specific coercion probe through Cranelift.
 - Option `.map` now evaluates a side-effecting receiver exactly once and
   inlines its literal lambda with the decoded payload, preserving primitive
   text/float/bool/integer results through the tagged runtime-value merge.
