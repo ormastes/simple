@@ -676,13 +676,25 @@ pub(crate) fn generate_stub_object(
         return Ok(stub_o);
     }
 
-    eprintln!(
-        "Generating {} stub functions for unresolved symbols...",
-        needs_stub.len()
-    );
+    if strict_no_stub_fallback {
+        eprintln!(
+            "Generating {} compatibility aliases for resolved symbols...",
+            needs_stub.len()
+        );
+    } else {
+        eprintln!(
+            "Generating {} stub functions for unresolved symbols...",
+            needs_stub.len()
+        );
+    }
     let preview = needs_stub.iter().take(80).cloned().collect::<Vec<_>>().join(", ");
     eprintln!(
-        "Unresolved symbol preview: {}{}",
+        "{} preview: {}{}",
+        if strict_no_stub_fallback {
+            "Compatibility alias"
+        } else {
+            "Unresolved symbol"
+        },
         preview,
         if needs_stub.len() > 80 { " ..." } else { "" }
     );
