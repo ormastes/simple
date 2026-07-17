@@ -72,7 +72,17 @@ fn color_a(c: u32) -> i32:
 # ============================================================================
 
 fn blend(src: u32, dst: u32) -> u32:
-    """Alpha-blend src over dst using standard Porter-Duff src-over.
+    """Alpha-blend src over dst using standard Porter-Duff src-over on
+    straight (non-premultiplied) alpha.
+
+    Composites in premultiplied space (srcRGB*srcA over dstRGB*dstA) and then
+    unpremultiplies by the resulting output alpha. This matters when dst is
+    (partly) transparent: e.g. blending 50% straight-alpha white over fully
+    transparent black must yield 0x80FFFFFF (outA=srcA, outRGB=srcRGB), not
+    0x80808080 — the old formula treated dst's RGB as if dst were always
+    opaque and never unpremultiplied the result, darkening any translucent
+    draw over a transparent destination. Opaque destinations (da=255) are
+    unaffected: the formula reduces to the classic `src*sa + dst*(1-sa)`.
 
     Args:
         src: Source color (foreground)
@@ -95,12 +105,16 @@ fn blend(src: u32, dst: u32) -> u32:
     val db = color_b(dst)
     val da = color_a(dst)
 
-    # src-over: out = src * sa + dst * (1 - sa)
     val inv_a = 255 - sa
-    val out_r = (sr * sa + dr * inv_a) / 255
-    val out_g = (sg * sa + dg * inv_a) / 255
-    val out_b = (sb * sa + db * inv_a) / 255
-    val out_a = sa + (da * inv_a) / 255
+    # dst_weight is dst's premultiplied contribution to the output, already
+    # scaled to the same 0..255 basis as `sa` — reused for both the alpha
+    # accumulation and each unpremultiplied channel below.
+    val dst_weight = (da * inv_a) / 255
+    val out_a = sa + dst_weight
+
+    val out_r = (sr * sa + dr * dst_weight) / out_a
+    val out_g = (sg * sa + dg * dst_weight) / out_a
+    val out_b = (sb * sa + db * dst_weight) / out_a
 
     rgba(out_r, out_g, out_b, out_a)
 

@@ -316,6 +316,17 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
 # packed i64 and the same kernels run over it. (blit/scroll stay pure-Simple
 # scalar: they are in-place sub-range copies that a return-style row kernel
 # can't express without extra marshalling, and they were never Rust-backed.)
+#
+# KNOWN DIVERGENCE (doc/08_tracking/bug/engine2d_straight_alpha_transparent_destination_blend_2026-07-11.md):
+# `_scalar_blend_row` below now composites straight alpha correctly for a
+# transparent/translucent dst (unpremultiplies by the real output alpha
+# instead of hardcoding 255). The native `rt_engine2d_simd_blend_row_u32`
+# kernel (runtime_simd_dispatch.c) has NOT been updated to match — it still
+# assumes an opaque dst and forces output alpha to 255. Both paths agree when
+# dst is opaque (da=255, the pre-existing/established case); they DIVERGE for
+# a transparent/translucent dst. Fixing the C kernel requires a native
+# runtime rebuild, out of scope for this change — do not silently rely on
+# native-row parity for translucent destinations until that lands.
 var _native_rows_cached: bool = false
 var _native_rows_detected: bool = false
 
@@ -379,6 +390,11 @@ pub fn simd_blend_row(mut dst: any, src: [u32], offset: i64, count: i64):
     _scalar_blend_row(dst, src, offset, count)
 
 pub fn _scalar_blend_row(mut dst: any, src: [u32], offset: i64, count: i64):
+    # Porter-Duff src-over on straight (non-premultiplied) alpha, matching
+    # std.gpu.engine2d.color.blend. Composite in premultiplied space and
+    # unpremultiply by the resulting output alpha so a transparent dst pixel
+    # (da=0) yields outA=sa/outRGB=srcRGB instead of the old hardcoded-opaque,
+    # darkened-toward-gray result. Opaque dst (da=255) is unaffected.
     var i: i64 = 0
     while i < count:
         val idx = (offset + i).to_i32()
@@ -388,6 +404,7 @@ pub fn _scalar_blend_row(mut dst: any, src: [u32], offset: i64, count: i64):
             dst[idx] = s
         elif sa > 0:
             val d = dst[idx]
+            val da = (d >> 24) & 0xFF
             val inv_a = 255 - sa
             val dr = (d >> 16) & 0xFF
             val dg = (d >> 8) & 0xFF
@@ -395,10 +412,12 @@ pub fn _scalar_blend_row(mut dst: any, src: [u32], offset: i64, count: i64):
             val sr = (s >> 16) & 0xFF
             val sg = (s >> 8) & 0xFF
             val sb = s & 0xFF
-            val r = (sr * sa + dr * inv_a) / 255
-            val g = (sg * sa + dg * inv_a) / 255
-            val b = (sb * sa + db * inv_a) / 255
-            dst[idx] = (255 << 24) | (r << 16) | (g << 8) | b
+            val dst_weight = (da * inv_a) / 255
+            val out_a = sa + dst_weight
+            val r = (sr * sa + dr * dst_weight) / out_a
+            val g = (sg * sa + dg * dst_weight) / out_a
+            val b = (sb * sa + db * dst_weight) / out_a
+            dst[idx] = (out_a << 24) | (r << 16) | (g << 8) | b
         i = i + 1
 
 # ============================================================================

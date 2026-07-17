@@ -9,7 +9,7 @@ detection. Covers AC-6: CPU acceleration via SSE4.2/AVX2/NEON.
 
 use std.spec.{describe, context, it, expect}
 use std.io_runtime.{file_read}
-use std.gpu.engine2d.simd_kernels.{SimdLevel, detect_simd_level, cpu_simd_runtime_evidence, simd_fill_row, engine2d_simd_fill_buffer_u32, engine2d_simd_fill_rows_u32, simd_blend_row, simd_blit_row}
+use std.gpu.engine2d.simd_kernels.{SimdLevel, detect_simd_level, cpu_simd_runtime_evidence, simd_fill_row, engine2d_simd_fill_buffer_u32, engine2d_simd_fill_rows_u32, simd_blend_row, simd_blit_row, _scalar_blend_row}
 
 # ============================================================================
 # SimdLevel detection
@@ -157,6 +157,22 @@ describe "simd_blend_row":
         val r = (dst[0] >> 16) & 0xFF
         expect(r).to_be_greater_than(100)
         expect(r).to_be_less_than(200)
+
+    it "translucent source over transparent destination preserves src exactly (straight-alpha over-transparent, doc/08_tracking/bug/engine2d_straight_alpha_transparent_destination_blend_2026-07-11.md)":
+        # Exercises _scalar_blend_row directly (the pure-Simple reference path
+        # fixed alongside color.blend). NOTE: on hosts where
+        # native_pixel_rows_enabled() is true, the public simd_blend_row()
+        # entry point instead routes through the native
+        # rt_engine2d_simd_blend_row_u32 kernel (runtime_simd_dispatch.c),
+        # which still hardcodes an opaque destination and has NOT been fixed
+        # here (native runtime rebuild is out of scope for this change — see
+        # the KNOWN DIVERGENCE comment in simd_kernels.spl). Calling the
+        # scalar path directly keeps this assertion deterministic across
+        # hosts instead of silently depending on SIMD detection.
+        var dst: [u32] = [0x00000000; 4]
+        var src: [u32] = [0x80FF0000; 4]
+        _scalar_blend_row(dst, src, 0, 4)
+        expect(dst[0]).to_equal(0x80FF0000u32)
 
 # ============================================================================
 # simd_blit_row — pixel copy
