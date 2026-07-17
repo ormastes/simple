@@ -78,6 +78,12 @@ pub fn stage4_time_provider_archive_file(target_os_name: text, msvc_linker: bool
     """Return the target/linker-specific time/progress archive name without selecting it."""
     stage4_hosted_provider_archive_file("time", target_os_name, msvc_linker)
 
+pub fn stage4_fork_provider_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
+    """Return the POSIX fork-isolation archive name without selecting Windows stubs."""
+    if target_os_name == "windows":
+        return Err("Stage4 fork isolation has no Windows provider")
+    stage4_hosted_provider_archive_file("fork", target_os_name, msvc_linker)
+
 pub fn stage4_windows_c_object_uses_msvc_abi(target_os_name: text, target: text, cc: text, msvc_linker: bool) -> Result<bool, text>:
     """Classify the selected Windows C driver and reject linker-ABI disagreement."""
     if target_os_name != "windows":
@@ -126,6 +132,12 @@ pub fn stage4_memtrack_provider_object_format(target_os_name: text, msvc_objects
 
 pub fn stage4_time_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
     """Return the portable-nm contract for a hosted time/progress provider."""
+    stage4_hosted_provider_object_format(target_os_name, msvc_objects)
+
+pub fn stage4_fork_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
+    """Return the portable-nm contract for a POSIX fork-isolation provider."""
+    if target_os_name == "windows":
+        return Err("Stage4 fork isolation has no Windows provider")
     stage4_hosted_provider_object_format(target_os_name, msvc_objects)
 
 pub fn stage4_validate_dynload_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
@@ -184,7 +196,7 @@ fn stage4_validate_runtime_provider_symbol_contract(nm_output: text, object_form
         val symbol = stage4_provider_symbol(raw_symbol, object_format)
         val is_undefined = type_code == "U" or ((type_code == "w" or type_code == "v") and not stage4_nm_has_address(parts, type_index))
         if is_undefined:
-            if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
+            if symbol.starts_with("rt_") or symbol.starts_with("spl_") or symbol == "g_memtrack_enabled":
                 if not required.has(symbol):
                     return Err("Stage4 " + provider + " provider has unexpected runtime dependency '" + symbol + "'")
                 if dependencies.has(symbol):
@@ -238,6 +250,19 @@ pub fn stage4_validate_time_provider_symbol_contract(nm_output: text, object_for
         "rt_timestamp_get_microsecond", "rt_timestamp_get_minute", "rt_timestamp_get_month",
         "rt_timestamp_get_second", "rt_timestamp_get_year"
     ], clock_dependencies)
+
+pub fn stage4_validate_fork_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
+    """Validate the exact fork-isolation ABI and its POSIX memtrack dependencies."""
+    if object_format == "coff-msvc" or object_format == "coff-mingw":
+        return Err("Stage4 fork isolation has no Windows provider")
+    var memtrack_dependencies: [text] = []
+    if object_format == "elf" or object_format == "macho":
+        memtrack_dependencies = ["g_memtrack_enabled", "spl_memtrack_record", "spl_memtrack_unrecord"]
+    stage4_validate_runtime_provider_symbol_contract(nm_output, object_format, "fork", [
+        "rt_fork_child_setup", "rt_fork_parent_wait", "rt_fork_parent_timed_out",
+        "rt_fork_parent_signaled", "rt_fork_parent_stdout", "rt_fork_parent_stderr",
+        "rt_fork_child_exit"
+    ], memtrack_dependencies)
 
 fn stage4_nm_has_address(parts: [text], type_index: i64) -> bool:
     if type_index <= 0:

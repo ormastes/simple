@@ -1,4 +1,4 @@
-use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_select_requested_archive_indices, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs, stage4_validate_candidate_archive_inputs_for_platform}
 use std.spec.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -185,6 +185,28 @@ describe "Stage4 aggregate final symbol closure":
         expect(stage4_validate_time_provider_symbol_contract(windows + "         U rt_time_now_nanos\n", "coff-msvc").is_err()).to_be(true)
         expect(stage4_validate_time_provider_symbol_contract(exact, "wasm").is_err()).to_be(true)
 
+    it "accepts the exact hosted fork ABI and POSIX memtrack dependencies":
+        val exact = "00000000 T rt_fork_child_setup\n00000010 T rt_fork_parent_wait\n00000020 T rt_fork_parent_timed_out\n00000030 T rt_fork_parent_signaled\n00000040 T rt_fork_parent_stdout\n00000050 T rt_fork_parent_stderr\n00000060 T rt_fork_child_exit\n"
+        val posix_dependencies = "         U g_memtrack_enabled\n         U spl_memtrack_record\n         U spl_memtrack_unrecord\n"
+        val prefixed = exact.replace(" T rt_", " T _rt_")
+        val prefixed_dependencies = posix_dependencies.replace(" U g_", " U _g_").replace(" U spl_", " U _spl_")
+        expect(stage4_validate_fork_provider_symbol_contract(exact + posix_dependencies + "         U poll\n", "elf").is_ok()).to_be(true)
+        expect(stage4_validate_fork_provider_symbol_contract(prefixed + prefixed_dependencies + "         U _poll\n", "macho").is_ok()).to_be(true)
+        expect(stage4_validate_fork_provider_symbol_contract(exact + "00000000 A @feat.00\n         U exit\n", "coff-msvc").is_err()).to_be(true)
+        expect(stage4_validate_fork_provider_symbol_contract(prefixed + "         U _exit\n", "coff-mingw").is_err()).to_be(true)
+
+    it "rejects fork ABI and platform-specific memtrack dependency drift":
+        val exact = "00000000 T rt_fork_child_setup\n00000010 T rt_fork_parent_wait\n00000020 T rt_fork_parent_timed_out\n00000030 T rt_fork_parent_signaled\n00000040 T rt_fork_parent_stdout\n00000050 T rt_fork_parent_stderr\n00000060 T rt_fork_child_exit\n"
+        val dependencies = "         U g_memtrack_enabled\n         U spl_memtrack_record\n         U spl_memtrack_unrecord\n"
+        expect(stage4_validate_fork_provider_symbol_contract(exact.replace("00000060 T rt_fork_child_exit\n", "") + dependencies, "elf").is_err()).to_be(true)
+        expect(stage4_validate_fork_provider_symbol_contract(exact + "00000070 T rt_fork_extra\n" + dependencies, "elf").is_err()).to_be(true)
+        expect(stage4_validate_fork_provider_symbol_contract(exact + dependencies.replace("         U g_memtrack_enabled\n", ""), "elf").is_err()).to_be(true)
+        expect(stage4_validate_fork_provider_symbol_contract(exact + dependencies.replace("         U spl_memtrack_record\n", ""), "elf").is_err()).to_be(true)
+        expect(stage4_validate_fork_provider_symbol_contract(exact + dependencies.replace("         U spl_memtrack_unrecord\n", ""), "elf").is_err()).to_be(true)
+        expect(stage4_validate_fork_provider_symbol_contract(exact + dependencies + "         U spl_hidden_dependency\n", "elf").is_err()).to_be(true)
+        expect(stage4_validate_fork_provider_symbol_contract(exact + dependencies, "coff-msvc").is_err()).to_be(true)
+        expect(stage4_validate_fork_provider_symbol_contract(exact, "wasm").is_err()).to_be(true)
+
     it "compiles stages validates and cleans the time provider after memtrack":
         expect(stage4_time_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_time.a")
         expect(stage4_time_provider_archive_file("windows", true).unwrap()).to_equal("simple_stage4_time.lib")
@@ -206,6 +228,27 @@ describe "Stage4 aggregate final symbol closure":
         expect(source).to_contain("stage4_validate_time_provider_symbol_contract(scans[0], object_format)")
         expect(source).to_contain("file_delete(memtrack_provider_archive)\n                if bootstrap_support_obj != \"\":\n                    file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 time provider failed")
         expect(source).to_contain("file_delete(time_provider_archive)")
+
+    it "stages validates and cleans the fork provider after its memtrack dependency":
+        expect(stage4_fork_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_fork.a")
+        expect(stage4_fork_provider_archive_file("windows", true).is_err()).to_be(true)
+        expect(stage4_fork_provider_archive_file("windows", false).is_err()).to_be(true)
+        expect(stage4_fork_provider_archive_file("linux", true).is_err()).to_be(true)
+        expect(stage4_fork_provider_object_format("freebsd", false).unwrap()).to_equal("elf")
+        expect(stage4_fork_provider_object_format("macos", false).unwrap()).to_equal("macho")
+        expect(stage4_fork_provider_object_format("windows", false).is_err()).to_be(true)
+        expect(stage4_fork_provider_object_format("windows", true).is_err()).to_be(true)
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val memtrack_pos = source.last_index_of("llvm_stage4_build_memtrack_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)") ?? -1
+        val fork_pos = source.last_index_of("llvm_stage4_build_fork_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)") ?? -1
+        val barrier_pos = source.find("Stage4 strict archive composition is unavailable")
+        expect(fork_pos).to_be_greater_than(memtrack_pos)
+        expect(barrier_pos).to_be_greater_than(fork_pos)
+        expect(source).to_contain("llvm_stage4_build_single_object_provider_archive(runtime_objects, \"runtime_fork\"")
+        expect(source).to_contain("llvm_stage4_candidate_archive_inventory([\"runtime_fork\"], [archive_path])")
+        expect(source).to_contain("stage4_validate_fork_provider_symbol_contract(scans[0], object_format)")
+        expect(source).to_contain("file_delete(time_provider_archive)\n                if bootstrap_support_obj != \"\":\n                    file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 fork provider failed")
+        expect(source).to_contain("file_delete(fork_provider_archive)")
 
     it "stages validates and cleans the memtrack provider before the fail-closed barrier":
         expect(stage4_memtrack_provider_archive_file("linux", false).unwrap()).to_equal("libsimple_stage4_memtrack.a")
@@ -246,6 +289,7 @@ describe "Stage4 aggregate final symbol closure":
         expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 font provider failed")
         expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 memtrack provider failed")
         expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 time provider failed")
+        expect(strict_source).to_contain("file_delete(bootstrap_support_obj)\n                return Err(\"Stage4 fork provider failed")
 
     it "rejects hosted constructor and destructor section families":
         val headers = ".preinit_array .init_array.42 .ctors .fini_array .dtors __mod_init_func __mod_term_func .CRT$XIA .CRT$XCU .CRT$XPU .CRT$XTU .CRT$XLB"
@@ -673,8 +717,8 @@ not-an-address W rt_malformed
         expect(source).to_contain("find_archive_portable()")
         expect(source).to_contain("stage4_runtime_provider_object_matches(object, object_stem, object_ext, windows_paths)")
         expect(source.contains("_obj_ext() == \".obj\"")).to_be(false)
-        expect(source.split("stage4_msvc_objects, stage4_msvc_linker, pid").len() - 1).to_equal(4)
-        expect(source.split("archive_file, object_ext, target_os_name == \"windows\", pid").len() - 1).to_equal(4)
+        expect(source.split("stage4_msvc_objects, stage4_msvc_linker, pid").len() - 1).to_equal(5)
+        expect(source.split("archive_file, object_ext, target_os_name == \"windows\", pid").len() - 1).to_equal(5)
         expect(source).to_contain("compile_entry_point_c(pid, verbose, options.opt_level, hosted_cc)")
         expect(source).to_contain("compile_bootstrap_native_all_support_c(pid, verbose, options.opt_level, hosted_cc)")
         expect(source.contains("object.ends_with(object_stem + object_ext)")).to_be(false)
