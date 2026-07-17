@@ -54,7 +54,9 @@ until full type inference has an enforcing implementation.
 Duplicate-check walks and reads files through Simple IO APIs. Paths containing
 spaces, apostrophes, semicolons, wildcard characters, or shell operators remain
 data and cannot execute a command. One canonical benchmark provides real
-result, persistence, and cache assertions.
+result, persistence, and cache assertions. Cosine comparison progress uses an
+unknown-total count and the shared time throttle; it never treats every
+candidate pair as a completed phase.
 
 MCP and LSP launchers select validated cached native artifacts. A missing or
 failed native probe is an explicit failure, never permission to run source,
