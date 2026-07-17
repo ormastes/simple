@@ -2,9 +2,9 @@
 
 ## Status
 
-Open. Apple Silicon Stage 2/3 self-host succeeds, but the exact Stage 4
-`core-c-bootstrap` full-CLI compile does not reach its linker within the
-bounded verification envelope.
+Open. Apple Silicon Stage 2/3 self-host succeeds. The whole-tree Stage 4
+runaway is now traced to two sync regressions, but the corrected compiler
+rebuild currently stops at the separately tracked missing `copy_mem` provider.
 
 ## Reproduction
 
@@ -34,23 +34,29 @@ The exact Stage 4 command is recorded in:
   mandatory 63-minute ceiling after about 52 CPU-minutes. It still had no
   linker child, output binary, or diagnostic output.
 - The retained native cache contained 1,424 module objects during Stage 4.
+- A phase-profiled retry from `main` exposed a second sync regression in
+  `bootstrap_main.spl`: it pre-enabled closure mode and passed four source
+  roots. The driver loaded 10,502 aliased sources in 1.257 seconds, then was
+  terminated while parsing an unrelated lint module. Peak RSS was 296 MB.
+- The corrected entry-only wrapper and hosted `rt_remove` provider produced a
+  new 24 MiB Stage 3 compiler. The next compiler rebuild reached the linker and
+  failed only on `_copy_mem`; the three-cycle cap stopped further retries.
 
 ## Root cause found
 
-The Stage 4 wrapper deliberately seeds only `src/app/cli/main.spl`, clears the
+The intended Stage 4 path seeds only `src/app/cli/main.spl`, clears the
 pre-enabled closure flag, and expects `CompilerDriver.load_sources_impl()` to
-walk imports before enabling closure mode. A later sync regression restored a
-`not has_project_source` guard on that walk. Because the Stage 4 entry is under
-`src/`, the walk was skipped and the subsequent legacy project fallback loaded
-all of `src/app`, `src/lib`, `src/compiler`, and `src/runtime`. That accounts for
-the observed 1,424 objects and the pre-link time/RSS runaway.
+walk imports before enabling closure mode. One sync regression restored a
+`not has_project_source` guard on that walk. A second restored the old wrapper
+that set closure mode to `1` and supplied `src/compiler`, `src/app`, `src/lib`,
+and `examples/10_tooling` as inputs. Together they bypassed pruning and expanded
+the graph to either the whole tree or 10,502 path aliases.
 
-The narrow correction removes that location guard while retaining the explicit
-entry, AOT-mode, and not-already-closure guards. A source-contract regression
-now prevents a future sync from silently restoring the whole-tree behavior.
-The bounded Apple Stage 4 acceptance run remains required after this change is
-merged; the earlier three-cycle cap prohibits claiming it from another retry in
-the same verification turn.
+The correction removes the location guard and restores entry-only wrapper
+inputs while retaining explicit-entry, AOT-mode, and not-already-closure
+guards. Source-contract regressions pin both halves. The bounded Apple Stage 4
+acceptance run remains required after the `copy_mem` provider gap is fixed in a
+fresh verification turn.
 
 This is not a missing provider-symbol failure: Stage 4 did not reach the exact
 provider-capsule linker. The previous missing hosted signal symbols were fixed

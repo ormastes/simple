@@ -1,4 +1,5 @@
 use simple_runtime as _;
+use std::ffi::CString;
 
 unsafe extern "C" {
     fn rt_fb_fill32(dst_addr: u64, pixel_count: u64, color: u64);
@@ -17,6 +18,7 @@ unsafe extern "C" {
     fn rt_signal_check(signal_num: i64) -> i64;
     fn rt_atexit_install() -> i64;
     fn rt_atexit_check() -> i64;
+    fn rt_remove(path: *const std::ffi::c_char) -> i64;
 }
 
 #[test]
@@ -69,4 +71,23 @@ fn hosted_signal_latches_validate_bounds_and_start_clear() {
         assert_eq!(rt_atexit_install(), 1);
         assert_eq!(rt_atexit_install(), 1);
     }
+}
+
+#[test]
+fn hosted_remove_deletes_files_and_empty_directories() {
+    let root = std::env::temp_dir().join(format!("simple-hosted-remove-{}", std::process::id()));
+    let file = root.join("file.txt");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir(&root).expect("create hosted remove test directory");
+    std::fs::write(&file, b"remove me").expect("create hosted remove test file");
+
+    let file_path = CString::new(file.to_string_lossy().as_bytes()).expect("file path CString");
+    let root_path = CString::new(root.to_string_lossy().as_bytes()).expect("root path CString");
+    unsafe {
+        assert_eq!(rt_remove(file_path.as_ptr()), 0);
+        assert_eq!(rt_remove(root_path.as_ptr()), 0);
+        assert!(rt_remove(root_path.as_ptr()) < 0);
+    }
+    assert!(!file.exists());
+    assert!(!root.exists());
 }

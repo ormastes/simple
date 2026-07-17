@@ -14,6 +14,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_directx_core.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_hosted_gpu_stubs.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_hosted_signal.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_hosted_fs.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_font.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_value.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_db.c");
@@ -125,6 +126,7 @@ fn compile_c_runtime_sources() {
         "runtime_directx_core.c",
         "runtime_hosted_gpu_stubs.c",
         "runtime_hosted_signal.c",
+        "runtime_hosted_fs.c",
         "runtime_font.c",
     ];
 
@@ -193,6 +195,7 @@ fn collect_c_runtime_exports(root: &Path, exported: &mut HashSet<String>) {
         "runtime_directx_core.c",
         "runtime_hosted_gpu_stubs.c",
         "runtime_hosted_signal.c",
+        "runtime_hosted_fs.c",
         "runtime_font.c",
     ];
     for source in LINKED_C_SOURCES {
