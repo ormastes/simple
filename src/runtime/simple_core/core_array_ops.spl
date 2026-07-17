@@ -407,6 +407,30 @@ pub fn rt_typed_words_u32_push_known_data_at(array: i64, items: i64, idx: i64, v
         set_array_len(array, actual_idx + 1)
     return 1
 
+# Runtime-local one-call construction for Metal/Processing readback. Returning
+# an array created by a different hosted runtime registry makes rt_array_len
+# observe zero when simple-core owns the executable's array ABI. Keep the
+# external GPU boundary pointer-only and construct the [u32] in this owner.
+pub fn rt_u32s_from_raw(data_ptr: i64, count: i64) -> i64:
+    if data_ptr <= 0 or count <= 0:
+        return rt_array_new_with_cap_u64(0)
+    val result = rt_array_new_with_cap_u64(count)
+    if array_is_valid(result) < 1:
+        return result
+    var i = 0
+    while i < count:
+        val offset = i * 4
+        val byte0 = spl_load_u8(data_ptr, offset)
+        val byte1 = spl_load_u8(data_ptr, offset + 1)
+        val byte2 = spl_load_u8(data_ptr, offset + 2)
+        val byte3 = spl_load_u8(data_ptr, offset + 3)
+        val word = byte0 | (byte1 << 8) | (byte2 << 16) | (byte3 << 24)
+        if rt_typed_words_u32_push_known_at(result, i, word) < 1:
+            rt_array_free(result)
+            return rt_array_new_with_cap_u64(0)
+        i = i + 1
+    result
+
 pub fn rt_typed_words_u32_store_known_data_at(array: i64, items: i64, idx: i64, value: i64) -> i8:
     return rt_typed_words_u32_push_known_data_at(array, items, idx, value)
 
