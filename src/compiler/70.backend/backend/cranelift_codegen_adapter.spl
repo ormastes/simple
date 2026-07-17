@@ -12,7 +12,7 @@
 use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature, MirConstValue, MirStatic, LocalId, LocalKind, MirLocal}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBody, MirBlock, BlockId, MirInst, MirInstKind, MirBinOp, MirUnaryOp,
     MirOperand, MirOperandKind, MirTerminator, SwitchCase}
-use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, CompileOptions, CompileError, compileerror_backend_error}
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, CompileOptions, CompileError, compileerror_backend_error, compileerror_target_unsupported}
 use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
 use compiler.backend.backend.cranelift_gemm_fusion.{GemmAddFusion, detect_gemm_add_pair}
@@ -81,6 +81,8 @@ class CraneliftCodegenAdapter:
 pub fn cranelift_compile_module_direct(options: CompileOptions, module: MirModule) -> Result<CodegenOutput, CompileError>:
     print "[cranelift-direct] start"
     val target_code = codegen_target_to_cl(options.target)
+    if target_code < 0:
+        return Err(compileerror_target_unsupported(BackendKind.Cranelift, options.target))
     print "[cranelift-direct] target"
 
     val cl_module = cranelift_new_aot_module("bootstrap_main", target_code)
@@ -131,15 +133,14 @@ impl Codegen for CraneliftCodegenAdapter:
     fn backend_name() -> text: "cranelift"
 
     fn supports_target(target: CodegenTarget) -> bool:
-        match target:
-            case X86_64 | AArch64 | Riscv64 | SimpleOS_X86_64: true
-            case Host: true
-            case _: false
+        codegen_target_to_cl(target) >= 0
 
     fn output_kind() -> CodegenOutputKind: CodegenOutputKind.ObjectCode
 
     fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
         val target_code = codegen_target_to_cl(self.options.target)
+        if target_code < 0:
+            return Err(compileerror_target_unsupported(BackendKind.Cranelift, self.options.target))
 
         # Create AOT module
         val cl_module = cranelift_new_aot_module(module.name, target_code)
@@ -194,7 +195,7 @@ fn codegen_target_to_cl(target: CodegenTarget) -> i64:
         case AArch64: CL_TARGET_AARCH64
         case Riscv64: CL_TARGET_RISCV64
         case Host: CL_TARGET_X86_64
-        case _: CL_TARGET_X86_64
+        case _: -1
 
 # ============================================================================
 # MIR Type → Cranelift Type Code

@@ -115,7 +115,10 @@ build. The pure-Simple architecture job now requires a default-LLVM ARM32
 ELF32/ARM relocatable object from the staged compiler and proves explicit
 Cranelift rejects ARM32 without leaving an object. AArch64 and RISC-V retain
 their dual-backend QEMU execution gates; hosted ARM32 linking remains
-explicitly unsupported.
+explicitly unsupported. The Cranelift target mapper now returns an unsupported
+sentinel instead of silently mapping unknown targets to x86_64; both direct and
+trait codegen paths convert that sentinel to `compileerror_target_unsupported`.
+First staged execution of the rejection and QEMU checks is pending.
 
 Windows x86_64 LLVM CI now also uses its freshly staged pure-Simple compiler
 to emit an `aarch64-pc-windows-msvc` COFF object with the default backend and

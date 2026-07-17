@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 SIMPLE_BIN="${SIMPLE_BIN:-bin/release/x86_64-unknown-linux-gnu/simple}"
 BUILD_DIR="${BUILD_DIR:-build/check/cranelift-aot-aggregate-cross}"
 FIXTURE="test/fixtures/compiler/stage4_struct_enum_array_probe.spl"
+EXEC_FIXTURE="test/fixtures/native_crossmodule_result_u8/main.spl"
 READELF="${READELF:-$(command -v llvm-readelf || command -v readelf)}"
 test -x "$SIMPLE_BIN"
 mkdir -p "$BUILD_DIR"
@@ -28,13 +29,57 @@ check_target() {
     printf '%s\n' "$header" | grep -Eq "Machine:[[:space:]]+$machine([[:space:]]|$)"
 }
 
+check_unsupported_arm32() {
+    target=armv7-unknown-linux-gnueabihf
+    out="$BUILD_DIR/$target.o"
+    log="$BUILD_DIR/$target.log"
+    rm -rf "$BUILD_DIR/$target-cache" "$out" "$log"
+    status=0
+    env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BIN" native-build \
+        --backend cranelift --emit-object --target "$target" \
+        --source test/fixtures/compiler --entry-closure --entry "$FIXTURE" \
+        --cache-dir "$BUILD_DIR/$target-cache" -o "$out" >"$log" 2>&1 || status=$?
+    [ "$status" -ne 0 ]
+    [ ! -e "$out" ]
+    grep -Fq "Backend cranelift does not support target arm" "$log"
+}
+
+check_execution() {
+    target="$1"
+    runner="$2"
+    sysroot="$3"
+    out="$BUILD_DIR/$target-result-u8"
+    log="$BUILD_DIR/$target-result-u8.log"
+    actual="$BUILD_DIR/$target-result-u8.actual"
+    stderr="$BUILD_DIR/$target-result-u8.stderr"
+    rm -rf "$BUILD_DIR/$target-result-u8-cache" "$out" "$log" "$actual" "$stderr"
+    env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BIN" native-build \
+        --backend cranelift --target "$target" --mode one-binary \
+        --source test/fixtures --source src/lib --entry-closure --entry "$EXEC_FIXTURE" \
+        --cache-dir "$BUILD_DIR/$target-result-u8-cache" -o "$out" >"$log" 2>&1
+    timeout 30 "$runner" -L "$sysroot" "$out" >"$actual" 2>"$stderr"
+    printf 'result-u8-ok\n' | cmp - "$actual"
+    test ! -s "$stderr"
+}
+
+check_unsupported_arm32
 if [ "$#" -eq 0 ]; then
     set -- aarch64-unknown-linux-gnu riscv64-unknown-linux-gnu
 fi
 for target in "$@"; do
     case "$target" in
-        aarch64-unknown-linux-gnu) check_target "$target" AArch64 ;;
-        riscv64-unknown-linux-gnu) check_target "$target" RISC-V ;;
+        aarch64-unknown-linux-gnu)
+            check_target "$target" AArch64
+            if [ "${CRANELIFT_CROSS_EXECUTE:-0}" = 1 ]; then
+                check_execution "$target" qemu-aarch64 /usr/aarch64-linux-gnu
+            fi
+            ;;
+        riscv64-unknown-linux-gnu)
+            check_target "$target" RISC-V
+            if [ "${CRANELIFT_CROSS_EXECUTE:-0}" = 1 ]; then
+                check_execution "$target" qemu-riscv64 /usr/riscv64-linux-gnu
+            fi
+            ;;
         *) echo "unsupported target: $target" >&2; exit 2 ;;
     esac
 done

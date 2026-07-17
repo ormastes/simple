@@ -769,7 +769,7 @@ else
       SIMPLE_NO_DEPRECATED_WARNINGS=1 \
       "${stage2_bin}" native-build \
       --target "${PLATFORM}" \
-      --backend cranelift \
+      --backend "${backend}" \
       --source src/compiler --source src/app --source src/lib \
       --entry-closure \
       --threads 1 \

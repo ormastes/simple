@@ -77,6 +77,13 @@ after the harness's standard whitespace normalization. The expected output is
 lane, so the original bug remains open until the seed/native run proves that
 scope isolation and entry-point preservation both hold.
 
+The focused core CI lane additionally executes
+`test/01_unit/compiler/frontend/interp_fragment_sticky_error_spec.spl`, which
+pins speculative-fragment error cleanup and current-source HIR scope isolation.
+The bootstrap portability audit prevents that test, its workflow triggers, or
+its interpreter-mode invocation from being silently dropped. This is supporting
+coverage only: the full CLI parity reproduction below remains the closure gate.
+
 ## Runtime verification (2026-07-17)
 
 Ran exact repro: `bin/simple run` output matches byte-for-byte: `HIR lowering error: Unknown variable: rule while lowering open_brace` then `error[E1002]: function 'main' not found`. Scope bleed across functions triggered by brace literal confirmed STILL-REPRODUCES.

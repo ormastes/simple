@@ -44,6 +44,7 @@ grep -Fq 'stage4-essential-tools-smoke' scripts/bootstrap/bootstrap-from-scratch
 grep -Fq 'SIMPLE_BINARY="$(absolute_path "${full_bin}")"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "essential-tools smoke does not receive the fresh Stage 4 binary"
 essential_tools_smoke=scripts/check/check-bootstrap-essential-tools-smoke.shs
 grep -Fq 'essential_test_runner_smoke=true' "${essential_tools_smoke}" || fail "test-runner bootstrap smoke missing"
+grep -Fq 'essential_list_constructor_smoke=true' "${essential_tools_smoke}" || fail "List constructor bootstrap smoke missing"
 grep -Fq 'essential_lint_smoke=true' "${essential_tools_smoke}" || fail "lint bootstrap smoke missing"
 grep -Fq 'essential_duplicate_checker_smoke=true' "${essential_tools_smoke}" || fail "duplicate-check bootstrap smoke missing"
 grep -Fq 'bootstrap_essential_tools_smoke=true' "${essential_tools_smoke}" || fail "essential-tools aggregate pass marker missing"
@@ -102,7 +103,11 @@ grep -Fq 'CRANELIFT_CROSS_EXECUTE=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BIN="$compi
 grep -Fq 'sh scripts/check/check-cranelift-aot-aggregate-cross.shs' "${multiplatform}" || fail "Cranelift cross-execution gate missing"
 grep -Fq 'choco install llvm --version=18.1.8 -y --no-progress --allow-downgrade' "${multiplatform}" || fail "Windows LLVM install cannot replace an incompatible preinstalled version"
 grep -Fq 'run: sh scripts/check/check-bootstrap-portability.shs' "${multiplatform}" || fail "bootstrap portability contracts are not executed in CI"
-dynload_archive_body=$(sed -n '/- name: Validate Linux Stage4 dynload provider archive/,/- name: Run strict staged native smoke matrix/p' "${multiplatform}")
+dynload_archive_body=$(awk '
+$0 == "      - name: Validate Linux Stage4 dynload provider archive" { inside=1; print; next }
+inside && /^      - (name:|uses:)/ { exit }
+inside { print }
+' "${multiplatform}")
 for required in \
   "if: runner.os == 'Linux' && matrix.backend == 'llvm'" \
   'stage3="$(find build/bootstrap/stage3' \
@@ -221,6 +226,19 @@ generic_origin_repro=test/fixtures/compiler/native_runtime_generic_call_origin_c
 test -f "${generic_origin_repro}" || fail "generic runtime call-origin reproducer missing"
 [ "$(grep -Fc "'${generic_origin_repro}'" "${core_pipeline}")" -eq 2 ] || fail "generic runtime call-origin reproducer must trigger push and pull-request checks"
 grep -Fq 'print(rt_array_new(0))' "${generic_origin_repro}" || fail "generic runtime call-origin reproducer lost explicit source call"
+interp_scope_spec=test/01_unit/compiler/frontend/interp_fragment_sticky_error_spec.spl
+list_constructor_spec=test/01_unit/lib/core/list_constructor_hardening_spec.spl
+for focused_spec in "${interp_scope_spec}" "${list_constructor_spec}"; do
+  test -f "${focused_spec}" || fail "focused interpreter regression missing: ${focused_spec}"
+  [ "$(grep -Fc "'${focused_spec}'" "${core_pipeline}")" -eq 2 ] || fail "focused interpreter regression must trigger push and pull-request checks: ${focused_spec}"
+  grep -Fq "SIMPLE_LIB=src \"\$SIMPLE_BINARY\" test ${focused_spec} --mode=interpreter" "${core_pipeline}" || fail "focused interpreter regression is not executed: ${focused_spec}"
+done
+grep -Fq 'SIMPLE_LIB=src "$SIMPLE_BINARY" run src/compiler/10.frontend/core/interpreter/test_interp.spl' "${core_pipeline}" || fail "pure-Simple core interpreter integration is not executed"
+for rust_constructor_owner in \
+  src/compiler_rust/parser/src/expressions/postfix.rs \
+  src/compiler_rust/compiler/src/interpreter_call/core/class_instantiation.rs; do
+  [ "$(grep -Fc "'${rust_constructor_owner}'" "${core_pipeline}")" -eq 2 ] || fail "Rust constructor owner must trigger push and pull-request checks: ${rust_constructor_owner}"
+done
 if grep -R -E --include='*.spl' '^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+(rt_array_new|rt_array_new_with_cap|rt_array_new_with_cap_u64|rt_byte_array_new|rt_array_push|rt_dict_new|rt_dict_insert|rt_tuple_new|rt_tuple_set|rt_enum_new)[[:space:]<(]' src/compiler src/app src/lib >/dev/null; then
   fail "owned code defines a guarded compiler-generated runtime helper before MIR call origin exists"
 fi
@@ -231,7 +249,7 @@ grep -q 'chmod +x "$compiler"' "${multiplatform}" || fail "downloaded pure-Simpl
 grep -q 'SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BIN="$compiler"' "${multiplatform}" || fail "native architecture gate permits stub fallback"
 grep -Fq 'binutils-arm-linux-gnueabihf' "${multiplatform}" || fail "ARM32 object inspection toolchain missing"
 grep -Fq 'check_unsupported_arm32' scripts/check/check-cranelift-aot-aggregate-cross.shs || fail "Cranelift ARM32 rejection gate missing"
-grep -Fq "does not support target.*arm" scripts/check/check-cranelift-aot-aggregate-cross.shs || fail "Cranelift ARM32 rejection diagnostic is not checked"
+grep -Fq "Backend cranelift does not support target arm" scripts/check/check-cranelift-aot-aggregate-cross.shs || fail "Cranelift ARM32 rejection diagnostic is not checked"
 grep -Fq 'if [ "$NATIVE_SMOKE_BACKEND" = cranelift ]; then' scripts/check/native-smoke-matrix.shs || fail "native smoke lacks explicit Cranelift branch"
 grep -Fq 'set -- "$@" --backend=cranelift' scripts/check/native-smoke-matrix.shs || fail "native smoke does not select Cranelift explicitly"
 if grep -Fq -- '--backend "$NATIVE_SMOKE_BACKEND"' scripts/check/native-smoke-matrix.shs; then

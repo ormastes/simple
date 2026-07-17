@@ -2,8 +2,8 @@
 
 **Date:** 2026-06-12
 **Severity:** P2 (blocks interpreter-mode specs for all `core.collections.List`-backed modules)
-**Status:** Source fixed; direct-constructor regression added 2026-07-15,
-execution pending
+**Status:** Source fixed in Rust-seed and pure-Simple interpreters;
+direct-constructor execution pending
 
 ## Symptom
 
@@ -39,14 +39,28 @@ or bare local `List` values.
 ## Resolution
 
 Generic-call parsing now preserves `List<i64>()` as a call to `List`, and the
-shared class-instantiation path honors the object returned by an implicit
-zero-argument `new`. `List.new()` therefore returns `List(items: [])` instead
-of falling back to a preinitialized object whose `items` field is nil.
+Rust class-instantiation path honors the object returned by an implicit
+zero-argument `new`. The pure-Simple core interpreter now mirrors that rule:
+an uppercase declared type called with no source arguments dispatches an
+existing static `Type__new`, while the field-bearing call inside `new` still
+falls through to ordinary construction. `List.new()` therefore returns
+`List(items: [])` instead of a value whose `items` field is nil.
+
+The pure-Simple fix also registers methods nested in parser-generated
+`DECL_IMPL` blocks for both the current module and lazily loaded modules. A
+small active-constructor stack prevents `Type.new()` implementations that
+return `Type()` from recursively invoking themselves; it does not suppress a
+different type's constructor.
 
 `test/01_unit/lib/core/list_constructor_hardening_spec.spl` now exercises the
 original spelling directly, pushes one item, and reads it back. This replaces
-the earlier source scan that merely banned the crashing spelling. Execution is
-pending the canonical pure-Simple test lane.
+the earlier source scan that merely banned the crashing spelling. The focused
+core CI lane now executes this exact spec in interpreter mode and the bootstrap
+portability audit pins both its workflow triggers and command. First CI
+execution is pending. The core-interpreter integration program also contains a
+local generic `Bucket<T>()` sentinel and CI requires its `Fail: 0` / `ALL TESTS
+PASSED` summary, covering the pure-Simple evaluator rather than only the Rust
+seed's class-instantiation implementation.
 
 ## Notes
 
