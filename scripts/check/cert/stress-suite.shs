@@ -141,6 +141,11 @@ gen_unterm_nest() { # DEPTH FILE  (open parens, never closed)
     awk -v D="$1" 'BEGIN{s="";for(i=0;i<D;i++)s=s"(";
         print "fn main():"; print "    print(" s}' > "$2"
 }
+gen_manycall_sum() { # N FILE   (defines N funcs f_i()=i; sums ALL of them: 0+1+...+(N-1))
+    awk -v N="$1" 'BEGIN{for(i=0;i<N;i++){print "fn f" i "() -> int:"; print "    return " i}
+        s=""; for(i=0;i<N;i++){if(i)s=s"+"; s=s"f" i "()"}
+        print "fn main():"; print "    print(" s ")"}' > "$2"
+}
 
 gen_all() {
     mkdir -p "$GEN_DIR"
@@ -165,6 +170,7 @@ EOF
     gen_locals 500  "$GEN_DIR/wide_locals_500.spl"
     gen_funcs  300  "$GEN_DIR/wide_funcs_300.spl"
     gen_bigmatch 200 "$GEN_DIR/wide_match_200.spl"
+    gen_manycall_sum 300 "$GEN_DIR/manycall_sum_300.spl"
     # (c) bounded recursion
     cat > "$GEN_DIR/rec_1000.spl" <<'EOF'
 fn sum_to(n: int) -> int:
@@ -177,6 +183,7 @@ EOF
     # (d) large literals / long strings
     gen_longstr 10000 "$GEN_DIR/long_string_10000.spl"
     printf 'fn main():\n    print(1000000000000)\n' > "$GEN_DIR/big_int_1e12.spl"
+    printf 'fn main():\n    print(9223372036854775807)\n' > "$GEN_DIR/bigint_i64_max.spl"
     # (e) malformed (must be rejected cleanly)
     printf 'fn main():\n    print("oops)\n'   > "$GEN_DIR/mal_unterminated_string.spl"
     printf 'fn main():\n    print(@@@)\n'      > "$GEN_DIR/mal_invalid_token.spl"
@@ -193,14 +200,31 @@ run_core() {
     echo "(a) DEEP nesting"
     valid_case deep_paren_200  "$GEN_DIR/deep_paren_200.spl"  7
     valid_case deep_paren_500  "$GEN_DIR/deep_paren_500.spl"  7
-    valid_case deep_paren_1000 "$GEN_DIR/deep_paren_1000.spl" 7
     valid_case deep_if_200     "$GEN_DIR/deep_if_200.spl"     99
     valid_case deep_match      "$GEN_DIR/deep_match.spl"      200
+    # deep_paren_1000 (1000 balanced, otherwise-valid parens) used to be a
+    # valid_case pinned to 7. A parser recursion-depth cap
+    # (MAX_PARSE_RECURSION_DEPTH=512, src/compiler_rust/parser/src/
+    # parser_impl/core.rs, landed independently of this suite -- see
+    # doc/08_tracking/bug/stress_f01_deep_nest_parser_recursion_2026-07-17.md)
+    # now rejects ANY expression nested past 512 levels, valid or not, so a
+    # legitimate 1000-deep nest no longer parses. That is a real, intentional
+    # functional cutoff (crash -> bounded rejection tradeoff), not a
+    # regression to hide: assert the new behavior (clean rejection, same
+    # depth/input as before) instead of silently shrinking the fixture.
+    malformed_case deep_paren_over_cap "$GEN_DIR/deep_paren_1000.spl"
 
     echo "(b) WIDE"
     valid_case wide_locals_500 "$GEN_DIR/wide_locals_500.spl" 124750
     valid_case wide_funcs_300  "$GEN_DIR/wide_funcs_300.spl"  898
     valid_case wide_match_200  "$GEN_DIR/wide_match_200.spl"  314
+    # 300 chained function-call operands summed in one expression (f0()+...+f299()).
+    # Originally a documented finding (f03): both backends wrong. Root-caused
+    # and re-verified 2026-07-17 -- the default execution path (what this
+    # suite invokes) is now correct; see
+    # doc/08_tracking/bug/stress_f03_manycall_sum_2026-07-17.md for the fix
+    # evidence and the narrower residual (interpreter-mode-only) finding.
+    valid_case manycall_sum_300 "$GEN_DIR/manycall_sum_300.spl" 44850
 
     echo "(c) BOUNDED recursion"
     valid_case rec_1000        "$GEN_DIR/rec_1000.spl"        500500
@@ -208,6 +232,11 @@ run_core() {
     echo "(d) large literals / long strings"
     valid_case long_string_10000 "$GEN_DIR/long_string_10000.spl" 10000
     valid_case big_int_1e12      "$GEN_DIR/big_int_1e12.spl"      1000000000000
+    # i64::MAX literal. Originally a documented finding (f02): compiled/JIT
+    # backend silently printed -1 (RuntimeValue tag-boxing truncates to 61
+    # bits). Root-fixed 2026-07-17, see
+    # doc/08_tracking/bug/stress_f02_i64_boxing_truncation_2026-07-17.md.
+    valid_case bigint_i64_max    "$GEN_DIR/bigint_i64_max.spl"    9223372036854775807
 
     echo "(e) MALFORMED (must reject cleanly, no crash/hang)"
     malformed_case mal_unterminated_string "$GEN_DIR/mal_unterminated_string.spl"

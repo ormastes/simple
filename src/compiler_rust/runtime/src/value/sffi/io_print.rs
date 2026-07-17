@@ -340,6 +340,21 @@ pub extern "C" fn rt_raw_u64_to_string(raw: i64) -> RuntimeValue {
     unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
 }
 
+/// Convert a raw native signed `i64` payload to a string RuntimeValue.
+///
+/// Symmetric to `rt_raw_u64_to_string`: `RuntimeValue::from_int`/`as_int` only
+/// round-trip a signed 61-bit payload (`(value << 3) | TAG_INT`), so any i64
+/// outside `[-2^60, 2^60)` silently loses its top bits when boxed the normal
+/// way (e.g. i64::MAX `9223372036854775807` boxes to `-1`, `2^62` boxes to
+/// `0`). Callers stringifying a raw i64-typed scalar (print/println/etc. args)
+/// must route through this helper instead of boxing + `rt_value_to_string` so
+/// large-magnitude signed literals/values print correctly in compiled code.
+#[no_mangle]
+pub extern "C" fn rt_raw_i64_to_string(raw: i64) -> RuntimeValue {
+    let s = raw.to_string();
+    unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
+}
+
 /// Format a RuntimeValue using a format specifier string.
 /// The format spec follows Python conventions: [[fill]align][sign][#][0][width][grouping][.precision][type]
 ///
@@ -854,6 +869,26 @@ mod tests {
         assert_eq!(top_bit_text, "9223372036854775808");
         assert_eq!(all_bits_text, "18446744073709551615");
         assert_eq!(marker_text, "14627333968688430831");
+    }
+
+    #[test]
+    fn test_raw_i64_to_string_preserves_values_outside_61bit_box_range() {
+        // Regression: stress-suite finding f02
+        // (doc/08_tracking/bug/stress_f02_i64_boxing_truncation_2026-07-17.md).
+        // RuntimeValue::from_int/as_int only round-trip a signed 61-bit
+        // payload; boxing i64::MAX the normal way silently truncates to -1,
+        // and 2^62 truncates to 0. rt_raw_i64_to_string must bypass that.
+        let i64_max = rt_raw_i64_to_string(i64::MAX);
+        let i64_min = rt_raw_i64_to_string(i64::MIN);
+        let two_pow_62 = rt_raw_i64_to_string(1i64 << 62);
+        let small = rt_raw_i64_to_string(42);
+        let neg_small = rt_raw_i64_to_string(-7);
+
+        assert_eq!(value_to_display_string(i64_max), "9223372036854775807");
+        assert_eq!(value_to_display_string(i64_min), "-9223372036854775808");
+        assert_eq!(value_to_display_string(two_pow_62), "4611686018427387904");
+        assert_eq!(value_to_display_string(small), "42");
+        assert_eq!(value_to_display_string(neg_small), "-7");
     }
 
     #[test]

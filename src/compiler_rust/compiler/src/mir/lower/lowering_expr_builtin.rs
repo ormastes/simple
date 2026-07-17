@@ -260,13 +260,25 @@ impl<'a> MirLowerer<'a> {
             let mut boxed_arg_regs = Vec::new();
             for arg in args {
                 let arg_reg = self.lower_expr(arg)?;
-                if arg.ty == TypeId::U64 {
+                // BoxInt/BoxFloat pack a value into the 61-bit tagged-int
+                // RuntimeValue payload (`(value << 3) | TAG_INT`); any i64/u64
+                // magnitude outside that range silently loses its top bits
+                // (e.g. i64::MAX boxes to -1, 2^62 boxes to 0 -- see
+                // doc/08_tracking/bug/stress_f02_i64_boxing_truncation_2026-07-17.md).
+                // u64 already routes around this via rt_raw_u64_to_string;
+                // I64 needs the signed counterpart for the same reason.
+                if arg.ty == TypeId::U64 || arg.ty == TypeId::I64 {
+                    let raw_to_string_fn = if arg.ty == TypeId::U64 {
+                        "rt_raw_u64_to_string"
+                    } else {
+                        "rt_raw_i64_to_string"
+                    };
                     let stringified = self.with_func(|func, current_block| {
                         let stringified = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
                         block.instructions.push(MirInst::Call {
                             dest: Some(stringified),
-                            target: CallTarget::from_name("rt_raw_u64_to_string"),
+                            target: CallTarget::from_name(raw_to_string_fn),
                             args: vec![arg_reg],
                         });
                         stringified
@@ -274,10 +286,11 @@ impl<'a> MirLowerer<'a> {
                     boxed_arg_regs.push(stringified);
                     continue;
                 }
-                let needs_int_boxing = matches!(
-                    arg.ty,
-                    TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
-                );
+                // I64/U64 are handled above via the raw-to-string bypass (both can
+                // exceed the 61-bit boxed-int range); this list only covers widths
+                // that always fit.
+                let needs_int_boxing =
+                    matches!(arg.ty, TypeId::I16 | TypeId::I32 | TypeId::U8 | TypeId::U16 | TypeId::U32);
                 let needs_float_boxing = matches!(arg.ty, TypeId::F32 | TypeId::F64);
                 let needs_bool_boxing = arg.ty == TypeId::BOOL || arg.ty == TypeId::I8;
                 if needs_int_boxing || needs_float_boxing || needs_bool_boxing {

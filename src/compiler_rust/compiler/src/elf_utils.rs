@@ -644,6 +644,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_eprint_value" => value::rt_eprint_value as *const () as usize,
         "rt_eprintln_value" => value::rt_eprintln_value as *const () as usize,
         "rt_raw_u64_to_string" => value::rt_raw_u64_to_string as *const () as usize,
+        "rt_raw_i64_to_string" => value::rt_raw_i64_to_string as *const () as usize,
         "rt_capture_stdout_start" => value::rt_capture_stdout_start as *const () as usize,
         "rt_capture_stderr_start" => value::rt_capture_stderr_start as *const () as usize,
         "rt_file_mmap_len" => value::rt_file_mmap_len as *const () as usize,

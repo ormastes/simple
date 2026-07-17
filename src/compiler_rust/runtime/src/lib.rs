@@ -83,6 +83,9 @@ static SIMPLE_KEEP_RT_PATH_PROBE: extern "C" fn(u64, u32) = value::rt_path_probe
 static SIMPLE_KEEP_RT_RAW_U64_TO_STRING: extern "C" fn(i64) -> RuntimeValue = value::rt_raw_u64_to_string;
 #[cfg(feature = "runtime-symbol-table")]
 #[used]
+static SIMPLE_KEEP_RT_RAW_I64_TO_STRING: extern "C" fn(i64) -> RuntimeValue = value::rt_raw_i64_to_string;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
 static SIMPLE_KEEP_RT_DYN_TORCH_TENSOR_FROM_BITS_1D: extern "C" fn(*const i64, i64) -> u64 =
     rt_dyn_torch_tensor_from_bits_1d;
 #[cfg(feature = "runtime-symbol-table")]
@@ -642,6 +645,7 @@ pub use value::{
 // Re-export RuntimeDict struct
 pub use value::RuntimeDict;
 pub use value::rt_raw_u64_to_string;
+pub use value::rt_raw_i64_to_string;
 
 // Re-export network SFFI functions used by compiled host SMFs.
 pub use value::{
