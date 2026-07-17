@@ -949,7 +949,14 @@ pub(crate) fn evaluate_call(
                 );
                 // Special builtin types
                 match type_name.as_str() {
-                    "Map" | "Dict" | "HashMap" | "BTreeMap" => {
+                    // Bug #185: "Map"/"Dict" fell through to the generic
+                    // unknown-type fallback below, which stamps a phantom
+                    // `__type__` string field onto the result — so
+                    // `Map.new()`/`Dict.new()` returned a dict pre-loaded with
+                    // one bogus entry instead of a genuinely empty one. Join
+                    // them into the same empty-`Value::Dict` arm as
+                    // `HashMap`/`BTreeMap`.
+                    "HashMap" | "BTreeMap" | "Map" | "Dict" => {
                         return Ok(Value::Dict(std::sync::Arc::new(std::collections::HashMap::new())))
                     }
                     "HashSet" | "BTreeSet" => return Ok(Value::array(Vec::new())),
@@ -1333,6 +1340,59 @@ pub(crate) fn evaluate_call(
                 "value is not callable".to_string(),
                 ctx,
             ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod deprecated_new_dispatch_tests {
+    use super::*;
+
+    /// Bug #185: the deprecated `ClassName.new()` dispatch's builtin-type match
+    /// special-cased only `"HashMap" | "BTreeMap"` to return a genuinely empty
+    /// `Value::Dict`. `"Map"`/`"Dict"` (not registered in `classes`) fell
+    /// through to the generic unknown-type fallback, which stamps a phantom
+    /// `__type__` string field onto the result — so `Map.new()`/`Dict.new()`
+    /// returned a dict pre-loaded with one bogus entry instead of an empty one.
+    /// This broke native-build whenever compiler frontend `.spl` files used
+    /// `Map.new()` (interpreted live by the seed).
+    #[test]
+    fn dict_new_returns_genuinely_empty_dict() {
+        let callee: Box<Expr> = Box::new(Expr::Path(vec!["Dict".to_string(), "new".to_string()]));
+        let mut env = Env::new();
+        let result = evaluate_call(
+            &callee,
+            &[],
+            &mut env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("evaluate_call Dict.new()");
+        match result {
+            Value::Dict(map) => assert_eq!(map.len(), 0, "Dict.new() must not contain a phantom __type__ entry"),
+            other => panic!("Dict.new() must return a Value::Dict, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn map_new_returns_genuinely_empty_dict() {
+        let callee: Box<Expr> = Box::new(Expr::Path(vec!["Map".to_string(), "new".to_string()]));
+        let mut env = Env::new();
+        let result = evaluate_call(
+            &callee,
+            &[],
+            &mut env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("evaluate_call Map.new()");
+        match result {
+            Value::Dict(map) => assert_eq!(map.len(), 0, "Map.new() must not contain a phantom __type__ entry"),
+            other => panic!("Map.new() must return a Value::Dict, got {:?}", other),
         }
     }
 }
