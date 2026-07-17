@@ -1433,3 +1433,12 @@ pixels, and performance evidence remain release-blocking.
   preparation. Static direct-runtime and rendering-coupling guards pass; no
   admitted current pure-Simple runner, docgen result, or retained QEMU pixels
   exist, so executable and guest evidence remain pending. STATUS: FAIL.
+
+- Registered-only SPipe truth sync (2026-07-17): canonical Codex development
+  and system-test skills plus the Claude SPipe mirror now distinguish hosted
+  live-face shaping from the exact validated handle-zero SimpleOS exception,
+  forbid host ABI/filesystem access after registered-only mode begins, require
+  handle-free Draw IR and the existing selected-byte renderer, and keep source
+  regression coverage separate from QEMU framebuffer proof. The stale guide
+  paragraph claiming hosted handles were still required is corrected. No
+  runtime, docgen, GPU, or QEMU command ran. STATUS: FAIL.

@@ -165,6 +165,11 @@ describe "<Feature Name>":
   may promote only after its exact-face shape-to-`FontRenderBatch` gate passes;
   parser/cmap/raster evidence alone is insufficient. Variation-selector,
   modifier, ZWJ, color, and multi-codepoint emoji remain fail-closed.
+  The final irreversible registered-only SimpleOS scenario must register the
+  exact Arabic and Devanagari bytes, shape the accepted Arabic/Urdu and Hindi
+  witnesses without host font ABI or filesystem access, keep Draw IR
+  handle-free, and prepare nonempty material through the existing selected-byte
+  `FontRenderer`. This source/spec result is not QEMU framebuffer evidence.
   Vulkan font promotion requires `artifact_mode=precompiled-spirv` and the exact
   pinned artifact hash; runtime GLSL may be diagnostic execution but cannot
   satisfy native promotion.

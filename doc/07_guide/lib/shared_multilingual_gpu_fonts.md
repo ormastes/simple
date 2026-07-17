@@ -190,9 +190,10 @@ The OpenType parser now supports validated Unicode cmap formats 4 and 12,
 including bundled Noto Emoji `U+1F600`. Mixed-face fallback is accepted only
 for the exact Chinese-mono-to-Noto-Sans-SC row; broader per-script fallback
 still requires complete GSUB/GPOS and corpus evidence.
-The shaper binds OpenType data by exact fallback face handle/generation; an
-unbound or stale attached face never borrows another face's blob. Binding also
-requires the OpenType blob SHA-256 to match the live face identity.
+Hosted shaping binds OpenType data by exact fallback face handle/generation; an
+unbound or stale attached face never borrows another face's blob, and the blob
+SHA-256 must match the live face identity. Registered-only SimpleOS instead
+accepts only the exact validated registered blob with handle/generation `0`.
 
 The opt-in shaped path now keeps each `ShapedGlyph`'s absolute source index,
 cluster, current advance, and explicit zero offset through Arabic reversal,
@@ -221,9 +222,11 @@ accepted runs with
 `shaped_run_to_font_glyph_run`; incomplete runs remain non-renderable even when
 their pre-GSUB glyph indices match. Engine2D consumes only that neutral text-layout
 value through `draw_glyph_run`, preserving the batch-only layer boundary. It
-carries a revocable generation token rather than a native face pointer. The
-canonical renderer rejects mismatched or freed face handle/generation pairs and keys cache/atlas
-entries by face + lifetime generation + glyph index + size. This is a bounded
+carries a revocable generation token rather than a native face pointer. Hosted
+material rejects mismatched or freed face handle/generation pairs and keys
+cache/atlas entries by face + lifetime generation + glyph index + size;
+registered-only material uses the handle-free payload with the existing
+selected-byte rasterizer identity/generation. This is a bounded
 renderer seam, not complete mixed-face GSUB/GPOS or automatic `draw_text`
 shaping. The identity subset is the 54-native/1-fallback evidence above; exact
 Hindi and the exact pinned Arabic/Urdu lookup-vector cases are separately
@@ -474,9 +477,12 @@ the submitted batch hash, draw/submit evidence, a completed fence,
 device-origin readback, a nonblank absolute glyph oracle, and CPU comparison.
 Missing hardware is `unavailable`, never a simulated pass.
 
-Neutral shaped runs bind glyph IDs to the exact live face handle/generation and
-preserve logical codepoint clusters. Those values are not UTF-8 byte offsets;
-face liveness and every parallel vector length must match before rasterization.
+Hosted neutral shaped runs bind glyph IDs to the exact live face
+handle/generation; registered-only runs bind the exact validated blob with
+handle/generation `0` and cross Draw IR only as handle-free glyph material.
+Both preserve logical codepoint clusters. Those values are not UTF-8 byte
+offsets; hosted face liveness or registered-byte identity, plus every parallel
+vector length, must match before rasterization.
 Their x/y values are baseline pen offsets in device coordinates. The shaper
 negates OpenType +Y-up offsets, and `FontRenderer` applies bitmap bearings at
 `x = pen_x + bearing_x`, `y = ascent + pen_y - bearing_y - height`. Do not place
@@ -575,9 +581,11 @@ fallback. Pure-Simple path readers retain a bounded 32 MiB ceiling, above the
 largest pinned 25,125,512-byte face; the C compatibility reader remains at its
 actual 4 MiB bound. The Simple Browser accepts only those validated registered
 bytes and rejects any skipped Draw IR command. Missing or changed assets cannot
-become a selected vector face. Registered-only complex-script shaping remains
-pending because it requires hosted shaping handles and therefore fails closed
-in the guest. Packaging and a host-side image hash are not guest rendering evidence.
+become a selected vector face. Registered-only source paths bind the exact
+validated Arabic/Devanagari blobs to the existing pure-Simple shaper with
+handle/generation `0`, emit only handle-free glyph payloads, and materialize
+them through the existing selected-byte renderer. Retained guest/QEMU pixels
+remain pending; packaging and a host-side image hash are not guest rendering evidence.
 The pure-Simple builders own the canonical path. The still-live C image writer
 mirrors the readable names and fixed short aliases for compatibility with its
 existing toolchain/evidence image callers.

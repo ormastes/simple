@@ -390,6 +390,10 @@ shared font batch for 2D and 3D`; `Emit the selected font composite program and
 plan compilation`; `Prove native submission and device readback`. Engine3D
 HUD/world stays a separate consumer lane. Full rules live in `$sp_dev` under
 “Shared multilingual font work.”
+The final irreversible registered-only SimpleOS shaping scenario uses exact
+validated Arabic/Devanagari registered bytes, no host font ABI or filesystem
+access after the mode switch, handle-free Draw IR, and the existing
+selected-byte `FontRenderer`; it never implies a QEMU framebuffer PASS.
 AC-13 review rejects raw `rt_mutex_*` ownership in font modules, mutable
 module-global engine pools, and hosted unsynchronized generation counters;
 freestanding initialization constraints must be repaired through the existing

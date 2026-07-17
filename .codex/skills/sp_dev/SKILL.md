@@ -479,8 +479,11 @@ font GPU emission, or GUI/Web/2D/3D text.
    artifact mode and its exact pinned hash; runtime GLSL is diagnostic execution
    only.
 7. Shaping and material preparation fail closed unless every required operation
-   completed and the final glyphs remain bound to the exact live face handle
-   and generation.
+   completed. Hosted runs remain bound to the exact live face handle and
+   generation. Registered-only SimpleOS runs are the bounded exception: exact
+   validated registered bytes bind through the existing shaper with
+   handle/generation `0`, then only a handle-free glyph payload may cross Draw
+   IR to the existing selected-byte `FontRenderer`/`FontRenderBatch` path.
 8. Freeze these five SSpec phrases exactly:
    `Load the pinned multilingual font manifest`;
    `Accept exact-face-bound simple-script shaping`;
@@ -507,6 +510,9 @@ font GPU emission, or GUI/Web/2D/3D text.
     guest path/length/hash plus glyph and framebuffer evidence. Host-repository
     asset presence is not guest proof. Source wiring or a serial marker is not
     pixel proof; retain the independent QEMU `pmemsave` crop and evidence record.
+    After registered-only mode begins, accepted Arabic/Urdu and Hindi shaping
+    must use the exact registered bytes without host font ABI or filesystem
+    access. Source/unit/SPipe coverage never substitutes for the QEMU crop.
 12. Runtime font configuration uses the one text-layout-owned
     `FontRenderConfig` beside `FontRenderBatch`. Evidence
     must vary and assert every family/category/language/script, size,
