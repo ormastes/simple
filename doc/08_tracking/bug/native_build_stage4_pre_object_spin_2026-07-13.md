@@ -648,6 +648,16 @@ This advances production provider inventory only: unique
 owner selection, hashing/cache admission, link ordering, execution proof, and
 the remaining provider families are still open.
 
+## 2026-07-17 emit-object fail-closed admission
+
+The cache-aware native driver returned successful `--emit-object` output before
+calling the shared native linker, which let `SIMPLE_BOOTSTRAP_STAGE4=1` bypass
+the strict one-binary admission and provider-composition barrier. The driver
+now rejects that incompatible mode before loading or mutating the build cache.
+Ordinary LLVM-default and explicit-Cranelift object emission remain unchanged;
+only the Stage4 one-binary profile is rejected. A focused source regression
+pins both the fail-fast ordering and the later ordinary emit-object path.
+
 Timestamp time-of-day extraction now shares one floor-day microsecond
 remainder. Negative sub-second values such as `-1` therefore produce
 `23:59:59.999999` for the preceding date instead of the inconsistent
