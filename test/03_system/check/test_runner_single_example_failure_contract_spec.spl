@@ -95,3 +95,35 @@ describe "test runner single example failure contract":
         expect(code).to_equal(0)
         expect(output).to_contain("2 examples")
         expect(output).to_contain("0 failures")
+
+    it "fails the wrapper when a spec is killed at its per-file timeout budget":
+        # Regression: test_runner_60s_silent_kill_greenwash — a file killed
+        # at the configured per-file timeout budget must never read as PASS
+        # just because whatever it printed before being killed looked clean.
+        val root = "build/test-runner-single-timeout-kill"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            "printf 'extern fn rt_sleep_ms(ms: i64)\\n\\nuse std.spec.*\\n\\ndescribe \"timeout probe\":\\n    it \"sleeps past the tiny budget\":\\n        rt_sleep_ms(5000)\\n        expect(1).to_equal(1)\\n' > " + root + "/child_timeout_spec.spl && " +
+            "bin/simple run src/app/test_runner_new/test_runner_single.spl " + root + "/child_timeout_spec.spl --timeout=1"
+        val (stdout, stderr, code) = process_run("/bin/sh", ["-c", command])
+        val output = stdout + stderr
+
+        expect(code).to_equal(1)
+        expect(output).to_contain("Failed: 1")
+        expect(output).to_contain("FAIL " + root + "/child_timeout_spec.spl")
+
+    it "fails the wrapper when a top-level `it` outside any describe fails":
+        # Regression: test_runner_orphan_it_silently_ignored — an orphan `it`
+        # (no enclosing describe) still executes at the interpreter level,
+        # but its ✗/✓ never folds into any per-describe "N examples, M
+        # failures" summary line, so the runner must count it directly
+        # rather than trusting only that summary line.
+        val root = "build/test-runner-single-orphan-it"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            "printf 'use std.spec.*\\n\\ndescribe \"wrapped\":\\n    it \"passes\":\\n        expect(1).to_equal(1)\\n\\nit \"DELIBERATE FAIL PROBE\":\\n    expect(1).to_equal(2)\\n' > " + root + "/child_orphan_spec.spl && " +
+            "bin/simple run src/app/test_runner_new/test_runner_single.spl " + root + "/child_orphan_spec.spl"
+        val (stdout, stderr, code) = process_run("/bin/sh", ["-c", command])
+        val output = stdout + stderr
+
+        expect(code).to_equal(1)
+        expect(output).to_contain("Failed: 1")
+        expect(output).to_contain("FAIL " + root + "/child_orphan_spec.spl")

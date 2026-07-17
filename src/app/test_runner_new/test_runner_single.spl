@@ -300,30 +300,46 @@ fn main() -> i64:
     if stderr != "":
         print stderr
     val combined = stdout + "\n" + stderr
-    # Fail-closed zero-executed check FIRST: a spec whose only content is
-    # pending()/an orphan describe with no real `it` executions must not read
-    # as PASS just because the child process happened to exit 0 (bug:
-    # zero-executed single-file greenwash). This takes priority over the
-    # legacy "N examples, M failures" summary parse below, which miscounts
-    # exactly this case as "1 example, 0 failures".
     val (real_passed, real_failed) = count_real_examples(combined)
     val real_executed = real_passed + real_failed
+    val (summary_passed, summary_failed, has_summary) = parse_child_example_summary(combined)
     var failed = 0
     var passed = 0
-    if real_executed == 0:
+    if code == -1 and stderr.contains("[TIMEOUT:"):
+        # process_run_timeout killed the child at the configured per-file
+        # budget: it never got a chance to finish, so nothing it printed
+        # (partial summary lines included) can be trusted as a real result.
+        # Bug: test_runner_60s_silent_kill_greenwash — a killed file must
+        # never read as PASS just because the pre-kill output looked clean.
+        failed = 1
+        passed = 0
+        print "error: test-runner: file timed out"
+    elif real_executed == 0 and (has_summary == 0 or summary_failed == 0):
+        # Fail-closed zero-executed check: a spec whose only content is
+        # pending()/an orphan describe with no real `it` executions must not
+        # read as PASS just because the child process happened to exit 0 and
+        # its aggregate "N examples, M failures" summary line looked clean
+        # (that line counts pending() as an executed example — bug:
+        # zero-executed single-file greenwash). Skipped when the summary
+        # line ALREADY reports real failures (has_summary==1 and
+        # summary_failed>0): that signal is trustworthy on its own even
+        # without a corroborating ✓/✗ glyph (e.g. a non-interpreter child
+        # that reports failures as plain text).
         failed = 1
         passed = 0
         print "error: test-runner: no examples executed"
     else:
-        val (summary_passed, summary_failed, has_summary) = parse_child_example_summary(combined)
-        passed = real_passed
-        failed = real_failed
-        # Fail-closed: if the legacy summary parse saw MORE failures than the
-        # glyph count did (e.g. a reporting format this file doesn't
-        # recognize), never let the lower count silently win.
-        if has_summary == 1 and summary_failed > failed:
-            failed = summary_failed
-            passed = if summary_passed < passed: summary_passed else: passed
+        passed = if has_summary == 1: summary_passed else: (if code == 0: 1 else: 0)
+        failed = if has_summary == 1: summary_failed else: (if code == 0: 0 else: 1)
+        # Fail-closed: never let either counting method's LOWER failure count
+        # silently win. This is what catches an orphan top-level `it` (bug:
+        # test_runner_orphan_it_silently_ignored) — its real ✗ marker prints,
+        # but it has no enclosing `describe` to fold it into any "N examples,
+        # M failures" summary line, so the summary alone would miss it.
+        if real_failed > failed:
+            failed = real_failed
+            if real_passed < passed:
+                passed = real_passed
         if code != 0 and failed == 0:
             failed = 1
         if failed > 0:

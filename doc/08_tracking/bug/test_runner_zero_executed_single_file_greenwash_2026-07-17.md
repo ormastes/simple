@@ -32,12 +32,20 @@ executions still parsed as "1 passed, 0 failed" and the process itself exited
 interpreter's own per-example markers (✓ pass / ✗ fail glyphs, or the
 compiled-mode textual `"... ok"` / `"... FAILED"` suffixes) via the new
 `count_real_examples()` helper, instead of trusting the aggregate summary
-line. If zero real examples were observed, the file fails closed with
+line. If zero real examples were observed AND the summary line does not
+already report a real failure count of its own, the file fails closed with
 `error: test-runner: no examples executed` regardless of exit code or the
 (miscounting) summary line. When real failures are observed, it prints
-`error: test-runner: spec failed`. The old summary-line parse
-(`parse_child_example_summary`) is kept only as a fail-closed upper bound
-(never allowed to reduce a failure count the glyph-based count found).
+`error: test-runner: spec failed`. A killed/timed-out child (`process_run_timeout`
+returning `-1` with a `[TIMEOUT:` marker) is detected first and reported as
+`error: test-runner: file timed out` — see
+[[test_runner_60s_silent_kill_greenwash_2026-07-04]]. The old summary-line
+parse (`parse_child_example_summary`) is kept only as a fail-closed lower
+bound (never allowed to reduce a failure count the glyph-based count found),
+and its own reported failure count is trusted when it is already nonzero even
+without a corroborating glyph (so a non-interpreter child that only prints
+plain "N examples, M failures" text — as some of this file's own contract
+fixtures do — is not itself misread as "zero executed").
 
 ### Why NOT the usual result-wrapper contract
 
@@ -60,6 +68,11 @@ wrapper" duplicate (per repo rule).
 - `timeout 240 src/compiler_rust/target/bootstrap/simple test scripts/check/fixtures/font_evidence_runner_empty_spec.spl` → exit 1, `error: test-runner: no examples executed`, `Failed: 1`, `FAIL`.
 - `timeout 240 src/compiler_rust/target/bootstrap/simple test scripts/check/fixtures/font_evidence_runner_fail_spec.spl` → exit 1, `error: test-runner: spec failed`, `Failed: 1`, `FAIL` (unchanged outcome, message now present).
 - A green one-`it` spec → exit 0, `Passed: 1`, `Failed: 0`, `PASS`.
+- A spec killed at a tiny `--timeout=1` budget (`rt_sleep_ms(5000)` inside the
+  only `it`) → exit 1, `error: test-runner: file timed out`, `Failed: 1`, `FAIL`.
+- An orphan top-level `it` (no enclosing `describe`) that fails, alongside a
+  passing wrapped `it` → exit 1, `Passed: 1`, `Failed: 1`,
+  `error: test-runner: spec failed`, `FAIL`.
 
 ## Cross-refs
 
