@@ -6,6 +6,7 @@ use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 # Extern fn declarations (runtime resolves at file level)
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
 extern fn rt_env_get(key: text) -> text
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
@@ -40,7 +41,7 @@ pub struct ProcessResult:
 # Process Execution
 # ============================================================================
 
-fn process_run(cmd: text, args: [text]) -> (text, text, i64):
+fn _resolve_process_cmd(cmd: text) -> text:
     var resolved_cmd = cmd
     if _is_windows_platform():
         if not cmd.ends_with(".exe") and not cmd.ends_with(".cmd") and not cmd.ends_with(".bat"):
@@ -52,8 +53,19 @@ fn process_run(cmd: text, args: [text]) -> (text, text, i64):
             val check = rt_process_run("which", [cmd])
             if check.2 == 0 and check.0.trim() != "":
                 resolved_cmd = check.0.trim()
+    resolved_cmd
+
+fn process_run(cmd: text, args: [text]) -> (text, text, i64):
+    val resolved_cmd = _resolve_process_cmd(cmd)
     proc_slot_acquire()
     val result = rt_process_run(resolved_cmd, args)
+    proc_slot_release()
+    result
+
+pub fn process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
+    val resolved_cmd = _resolve_process_cmd(cmd)
+    proc_slot_acquire()
+    val result = rt_process_run_bounded(resolved_cmd, args, timeout_ms, max_output_bytes)
     proc_slot_release()
     result
 
@@ -156,7 +168,7 @@ fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text,
     else:
         process_run_timeout_unix(cmd, args, timeout_ms)
 
-fn process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64) -> ProcessResult:
+fn _process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64, max_output_bytes: i64) -> ProcessResult:
     """
     Execute a process with resource limits enforced via ulimit.
 
@@ -175,16 +187,19 @@ fn process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_byte
     if _is_windows_platform():
         eprint("[WARNING] Resource limits not supported on Windows - using timeout only")
         val effective_timeout = if timeout_ms <= 0: 0 else: timeout_ms
-        val (stdout, stderr, exit_code) = if effective_timeout <= 0:
+        val (stdout, stderr, exit_code) = if max_output_bytes > 0:
+            process_run_bounded(cmd, args, effective_timeout, max_output_bytes)
+        elif effective_timeout <= 0:
             process_run(cmd, args)
         else:
             process_run_timeout(cmd, args, effective_timeout)
+        val timed_out = effective_timeout > 0 and exit_code == -1 and (stderr.contains("TIMEOUT") or stderr.contains("timed out"))
         return ProcessResult(
             stdout: stdout,
             stderr: stderr,
             exit_code: exit_code,
-            limit_exceeded: effective_timeout > 0 and exit_code == -1,
-            limit_type: if effective_timeout > 0 and exit_code == -1: "timeout" else: ""
+            limit_exceeded: timed_out,
+            limit_type: if timed_out: "timeout" else: ""
         )
 
     val memory_kb = if memory_bytes > 0: memory_bytes / 1024 else: 0
@@ -214,13 +229,19 @@ fn process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_byte
         "{limit_cmds}exec {full_cmd}"
 
     proc_slot_acquire()
-    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", wrapped_cmd])
+    val (stdout, stderr, code) = if max_output_bytes > 0:
+        rt_process_run_bounded("/bin/sh", ["-c", wrapped_cmd], timeout_ms, max_output_bytes)
+    else:
+        rt_process_run("/bin/sh", ["-c", wrapped_cmd])
     proc_slot_release()
 
     var limit_exceeded = false
     var limit_type = ""
 
-    if code == 124:
+    if code == -1 and (stderr.contains("TIMEOUT") or stderr.contains("timed out")):
+        limit_exceeded = true
+        limit_type = "timeout"
+    elif code == 124:
         limit_exceeded = true
         limit_type = "timeout"
     elif code == 137:
@@ -251,6 +272,12 @@ fn process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_byte
         limit_exceeded: limit_exceeded,
         limit_type: limit_type
     )
+
+pub fn process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64) -> ProcessResult:
+    _process_run_with_limits(cmd, args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs, 0)
+
+pub fn process_run_with_limits_bounded(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64, max_output_bytes: i64) -> ProcessResult:
+    _process_run_with_limits(cmd, args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs, max_output_bytes)
 
 pub fn process_output(cmd: text, args: [text]) -> text:
     val (stdout, stderr, code) = process_run(cmd, args)

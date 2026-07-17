@@ -1,7 +1,7 @@
 # Fork Buffer Allocation Tracking Tests (WI-1)
 #
 # Verifies that fork pipe buffers in runtime_fork.c use
-# SPL_MALLOC/SPL_FREE/SPL_REALLOC/SPL_CALLOC macros.
+# SPL_MALLOC/SPL_FREE macros and keep capture memory bounded.
 #
 # For actual ASan verification:
 #   ASAN_OPTIONS=detect_leaks=1 build/asan/simple test test/unit/memleak/fork_alloc_tracking_spec.spl
@@ -16,19 +16,23 @@ describe "WI-1: runtime_fork.c includes memtrack header":
 describe "WI-1: Fork buffer allocations tracked":
     it "stdout buffer uses SPL_MALLOC with fork_buf tag":
         val content = rt_file_read_text("src/runtime/runtime_fork.c") ?? ""
-        expect(content.contains("SPL_MALLOC(out_cap, \"fork_buf\")")).to_equal(true)
+        expect(content.contains("SPL_MALLOC(FORK_CAPTURE_LIMIT + FORK_CAPTURE_MARKER_MAX + 1U, \"fork_buf\")")).to_equal(true)
 
     it "stderr buffer uses SPL_MALLOC with fork_buf tag":
         val content = rt_file_read_text("src/runtime/runtime_fork.c") ?? ""
-        expect(content.contains("SPL_MALLOC(err_cap, \"fork_buf\")")).to_equal(true)
+        expect(content.contains("SPL_MALLOC(FORK_CAPTURE_LIMIT + FORK_CAPTURE_MARKER_MAX + 1U, \"fork_buf\")")).to_equal(true)
 
-    it "buffer fallback uses SPL_CALLOC":
+    it "capture limit is fixed at four MiB per stream":
         val content = rt_file_read_text("src/runtime/runtime_fork.c") ?? ""
-        expect(content.contains("SPL_CALLOC(1, 1, \"fork_buf\")")).to_equal(true)
+        expect(content.contains("#define FORK_CAPTURE_LIMIT (4U * 1024U * 1024U)")).to_equal(true)
 
-    it "buffer growth uses SPL_REALLOC":
+    it "buffer capture does not grow with child output":
         val content = rt_file_read_text("src/runtime/runtime_fork.c") ?? ""
-        expect(content.contains("SPL_REALLOC(*buf_ptr, *cap_ptr, \"fork_buf\")")).to_equal(true)
+        expect(content.contains("SPL_REALLOC(")).to_equal(false)
+
+    it "truncated output reports the omitted byte count":
+        val content = rt_file_read_text("src/runtime/runtime_fork.c") ?? ""
+        expect(content.contains("[output truncated: %llu bytes omitted]")).to_equal(true)
 
 describe "WI-1: Fork result cleanup tracked":
     it "free_results uses SPL_FREE for stdout":

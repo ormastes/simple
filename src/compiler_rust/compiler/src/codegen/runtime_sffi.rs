@@ -1271,6 +1271,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_spawn", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_execute", &[I64, I64, I64], &[I32]),
     RuntimeFuncSpec::new("rt_process_run_timeout", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_run_bounded", &[I64, I64, I64, I64, I64], &[I64]),
     // rt_process_is_running(pid) -> bool (as i64: 0/1)
     RuntimeFuncSpec::new("rt_process_is_running", &[I64], &[I64]),
     // rt_process_wait(pid, timeout_ms) -> exit_code

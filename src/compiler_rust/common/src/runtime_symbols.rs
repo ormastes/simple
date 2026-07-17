@@ -1649,6 +1649,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_pool_new",
     "rt_pool_release",
     "rt_process_run_timeout",
+    "rt_process_run_bounded",
     "rt_process_run_with_limits",
     "rt_profiler_is_active",
     "rt_profiler_record_call",

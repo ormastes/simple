@@ -4,7 +4,7 @@
  * Key design decisions:
  * - Uses pipe() + fork() + dup2() for stdio capture
  * - poll() multiplexes reads from stdout/stderr pipes (avoids deadlock)
- * - Growing buffers via realloc for large test output
+ * - Fixed-size head/tail buffers for bounded test output
  * - _exit() in child to avoid atexit handlers and double-flush
  * - SIGKILL on timeout (clean kill, OS reclaims everything)
  * - Signal handlers reset in child after fork
@@ -64,9 +64,86 @@ static char* s_result_stderr = NULL;
 static bool s_result_timed_out = false;
 static bool s_result_signaled = false;
 
-/* Initial and growth size for pipe read buffers */
-#define PIPE_BUF_INIT  4096
-#define PIPE_BUF_GROW  4096
+/* Each stream retains at most 4 MiB of child output, split head/tail. */
+#define FORK_CAPTURE_LIMIT (4U * 1024U * 1024U)
+#define FORK_CAPTURE_HEAD (FORK_CAPTURE_LIMIT / 2U)
+#define FORK_CAPTURE_TAIL (FORK_CAPTURE_LIMIT - FORK_CAPTURE_HEAD)
+#define FORK_CAPTURE_MARKER_MAX 96U
+#define PIPE_READ_CHUNK 4096U
+
+typedef struct {
+    char* data;
+    uint64_t total;
+    size_t head_len;
+    size_t tail_len;
+    size_t tail_start;
+} ForkCapture;
+
+static void reverse_bytes(char* data, size_t len) {
+    for (size_t left = 0, right = len ? len - 1 : 0; left < right; left++, right--) {
+        char tmp = data[left];
+        data[left] = data[right];
+        data[right] = tmp;
+    }
+}
+
+static void capture_append(ForkCapture* capture, const char* bytes, size_t len) {
+    if (UINT64_MAX - capture->total < len) capture->total = UINT64_MAX;
+    else capture->total += (uint64_t)len;
+
+    size_t head_add = FORK_CAPTURE_HEAD - capture->head_len;
+    if (head_add > len) head_add = len;
+    memcpy(capture->data + capture->head_len, bytes, head_add);
+    capture->head_len += head_add;
+    bytes += head_add;
+    len -= head_add;
+    if (len == 0) return;
+
+    char* tail = capture->data + FORK_CAPTURE_HEAD;
+    if (len >= FORK_CAPTURE_TAIL) {
+        memcpy(tail, bytes + len - FORK_CAPTURE_TAIL, FORK_CAPTURE_TAIL);
+        capture->tail_start = 0;
+        capture->tail_len = FORK_CAPTURE_TAIL;
+        return;
+    }
+
+    size_t overflow = capture->tail_len + len > FORK_CAPTURE_TAIL
+        ? capture->tail_len + len - FORK_CAPTURE_TAIL : 0;
+    capture->tail_start = (capture->tail_start + overflow) % FORK_CAPTURE_TAIL;
+    capture->tail_len -= overflow;
+    size_t write_at = (capture->tail_start + capture->tail_len) % FORK_CAPTURE_TAIL;
+    size_t first = FORK_CAPTURE_TAIL - write_at;
+    if (first > len) first = len;
+    memcpy(tail + write_at, bytes, first);
+    memcpy(tail, bytes + first, len - first);
+    capture->tail_len += len;
+}
+
+static size_t capture_finish(ForkCapture* capture) {
+    char* tail = capture->data + FORK_CAPTURE_HEAD;
+    if (capture->tail_start != 0 && capture->tail_len != 0) {
+        reverse_bytes(tail, capture->tail_start);
+        reverse_bytes(tail + capture->tail_start, capture->tail_len - capture->tail_start);
+        reverse_bytes(tail, capture->tail_len);
+        capture->tail_start = 0;
+    }
+
+    size_t marker_len = 0;
+    if (capture->total > capture->head_len + capture->tail_len) {
+        char marker[FORK_CAPTURE_MARKER_MAX];
+        uint64_t omitted = capture->total - capture->head_len - capture->tail_len;
+        int written = snprintf(marker, sizeof(marker), "\n[output truncated: %llu bytes omitted]\n",
+                               (unsigned long long)omitted);
+        if (written > 0) marker_len = (size_t)written;
+        memmove(capture->data + capture->head_len + marker_len, tail, capture->tail_len);
+        memcpy(capture->data + capture->head_len, marker, marker_len);
+    } else {
+        memmove(capture->data + capture->head_len, tail, capture->tail_len);
+    }
+    size_t result_len = capture->head_len + marker_len + capture->tail_len;
+    capture->data[result_len] = '\0';
+    return result_len;
+}
 
 static void set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -175,22 +252,9 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
     s_stdout_read_fd = -1;
     s_stderr_read_fd = -1;
 
-    /* Allocate growing buffers */
-    size_t out_cap = PIPE_BUF_INIT;
-    size_t out_len = 0;
-    char* out_buf = (char*)SPL_MALLOC(out_cap, "fork_buf");
-    if (!out_buf) {
-        out_cap = 1;
-        out_buf = (char*)SPL_CALLOC(1, 1, "fork_buf");
-    }
-
-    size_t err_cap = PIPE_BUF_INIT;
-    size_t err_len = 0;
-    char* err_buf = (char*)SPL_MALLOC(err_cap, "fork_buf");
-    if (!err_buf) {
-        err_cap = 1;
-        err_buf = (char*)SPL_CALLOC(1, 1, "fork_buf");
-    }
+    /* Allocate fixed-size bounded captures, plus marker and terminator space. */
+    char* out_buf = (char*)SPL_MALLOC(FORK_CAPTURE_LIMIT + FORK_CAPTURE_MARKER_MAX + 1U, "fork_buf");
+    char* err_buf = (char*)SPL_MALLOC(FORK_CAPTURE_LIMIT + FORK_CAPTURE_MARKER_MAX + 1U, "fork_buf");
     if (!out_buf || !err_buf) {
         if (out_buf) SPL_FREE(out_buf);
         if (err_buf) SPL_FREE(err_buf);
@@ -203,6 +267,8 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
         (void)waitpid_nointr((pid_t)child_pid, &status, 0);
         return -1;
     }
+    ForkCapture out_capture = {out_buf, 0, 0, 0, 0};
+    ForkCapture err_capture = {err_buf, 0, 0, 0, 0};
 
     /* Set non-blocking for poll */
     set_nonblocking(stdout_fd);
@@ -215,7 +281,6 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
     int child_exited = 0;
     int child_status = 0;
     int cleanup_descendants = 0;
-    int capture_failed = 0;
     int wait_failed = 0;
 
     /* Calculate deadline */
@@ -279,43 +344,24 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
         /* Process events */
         for (int i = 0; i < nfds; i++) {
             if (fds[i].revents & (POLLIN | POLLHUP)) {
-                /* Determine which buffer */
-                char** buf_ptr;
-                size_t* len_ptr;
-                size_t* cap_ptr;
+                /* Determine which bounded capture owns this pipe. */
+                ForkCapture* capture;
                 int* open_ptr;
 
                 if (fds[i].fd == stdout_fd) {
-                    buf_ptr = &out_buf;
-                    len_ptr = &out_len;
-                    cap_ptr = &out_cap;
+                    capture = &out_capture;
                     open_ptr = &stdout_open;
                 } else {
-                    buf_ptr = &err_buf;
-                    len_ptr = &err_len;
-                    cap_ptr = &err_cap;
+                    capture = &err_capture;
                     open_ptr = &stderr_open;
                 }
 
                 /* Read available data */
                 while (1) {
-                    /* Grow buffer if needed */
-                    if (*len_ptr + PIPE_BUF_GROW > *cap_ptr) {
-                        size_t new_cap = *cap_ptr;
-                        while (*len_ptr + PIPE_BUF_GROW > new_cap) new_cap *= 2;
-                        char* new_buf = (char*)SPL_REALLOC(*buf_ptr, new_cap, "fork_buf");
-                        if (!new_buf) {
-                            capture_failed = 1;
-                            *open_ptr = 0;
-                            break;
-                        }
-                        *buf_ptr = new_buf;
-                        *cap_ptr = new_cap;
-                    }
-
-                    ssize_t n = read(fds[i].fd, *buf_ptr + *len_ptr, *cap_ptr - *len_ptr - 1);
+                    char chunk[PIPE_READ_CHUNK];
+                    ssize_t n = read(fds[i].fd, chunk, sizeof(chunk));
                     if (n > 0) {
-                        *len_ptr += n;
+                        capture_append(capture, chunk, (size_t)n);
                     } else if (n == 0) {
                         /* EOF */
                         *open_ptr = 0;
@@ -333,7 +379,6 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
                 else stderr_open = 0;
             }
         }
-        if (capture_failed) break;
         if (child_exited) {
             cleanup_descendants = stdout_open || stderr_open;
             break;
@@ -348,16 +393,16 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
         (void)kill(-(pid_t)child_pid, SIGKILL);
     }
 
-    /* Null-terminate buffers */
-    out_buf[out_len] = '\0';
-    err_buf[err_len] = '\0';
+    /* Linearize retained head/tail data and insert truncation markers. */
+    (void)capture_finish(&out_capture);
+    (void)capture_finish(&err_capture);
 
     /* Store results for getter functions */
     s_result_stdout = out_buf;
     s_result_stderr = err_buf;
 
     /* Handle timeout: kill child */
-    if (timed_out || wait_failed || capture_failed) {
+    if (timed_out || wait_failed) {
         s_result_timed_out = timed_out != 0;
         if (kill(-(pid_t)child_pid, SIGKILL) != 0) {
             (void)kill((pid_t)child_pid, SIGKILL);

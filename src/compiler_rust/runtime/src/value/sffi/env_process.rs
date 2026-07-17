@@ -353,6 +353,149 @@ where
     })
 }
 
+fn spawn_bounded_output_reader<R>(reader: Option<R>, max_bytes: usize) -> std::sync::mpsc::Receiver<Vec<u8>>
+where
+    R: std::io::Read + Send + 'static,
+{
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::Read;
+
+        let head_limit = max_bytes / 2 + max_bytes % 2;
+        let tail_limit = max_bytes / 2;
+        let mut head = Vec::with_capacity(head_limit);
+        let mut tail = Vec::with_capacity(tail_limit);
+        let mut total = 0_u64;
+        let mut chunk = [0_u8; 8192];
+        if let Some(mut pipe) = reader {
+            while let Ok(count) = pipe.read(&mut chunk) {
+                if count == 0 {
+                    break;
+                }
+                total = total.saturating_add(count as u64);
+                let head_count = (head_limit - head.len()).min(count);
+                head.extend_from_slice(&chunk[..head_count]);
+                let remainder = &chunk[head_count..count];
+                if tail_limit == 0 || remainder.is_empty() {
+                    continue;
+                }
+                if remainder.len() >= tail_limit {
+                    tail.clear();
+                    tail.extend_from_slice(&remainder[remainder.len() - tail_limit..]);
+                } else {
+                    let excess = tail.len().saturating_add(remainder.len()).saturating_sub(tail_limit);
+                    if excess > 0 {
+                        tail.drain(..excess);
+                    }
+                    tail.extend_from_slice(remainder);
+                }
+            }
+        }
+
+        let retained = head.len().saturating_add(tail.len()) as u64;
+        if total > retained {
+            let marker = format!("\n[output truncated: {} bytes omitted]\n", total - retained);
+            head.extend_from_slice(marker.as_bytes());
+        }
+        head.extend_from_slice(&tail);
+        let _ = sender.send(head);
+    });
+    receiver
+}
+
+fn finish_child_output_bounded(
+    mut child: std::process::Child,
+    timeout_ms: i64,
+    max_output_bytes: usize,
+) -> std::io::Result<(Vec<u8>, Vec<u8>, i64, bool)> {
+    use std::sync::mpsc::TryRecvError;
+    use std::time::{Duration, Instant};
+
+    let child_pid = child.id();
+    let stdout = spawn_bounded_output_reader(child.stdout.take(), max_output_bytes);
+    let stderr = spawn_bounded_output_reader(child.stderr.take(), max_output_bytes);
+    let deadline = (timeout_ms > 0).then(|| Instant::now() + Duration::from_millis(timeout_ms as u64));
+    let mut status = None;
+    let mut stdout_bytes = None;
+    let mut stderr_bytes = None;
+
+    loop {
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(child_status) => status = child_status,
+                Err(error) => {
+                    #[cfg(unix)]
+                    {
+                        if unsafe { libc::kill(-(child_pid as i32), libc::SIGKILL) } != 0 {
+                            let _ = child.kill();
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    if stdout_bytes.is_none() {
+                        let _ = stdout.recv_timeout(Duration::from_millis(100));
+                    }
+                    if stderr_bytes.is_none() {
+                        let _ = stderr.recv_timeout(Duration::from_millis(100));
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        if stdout_bytes.is_none() {
+            match stdout.try_recv() {
+                Ok(bytes) => stdout_bytes = Some(bytes),
+                Err(TryRecvError::Disconnected) => stdout_bytes = Some(Vec::new()),
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        if stderr_bytes.is_none() {
+            match stderr.try_recv() {
+                Ok(bytes) => stderr_bytes = Some(bytes),
+                Err(TryRecvError::Disconnected) => stderr_bytes = Some(Vec::new()),
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        if status.is_some() && stdout_bytes.is_some() && stderr_bytes.is_some() {
+            return Ok((
+                stdout_bytes.take().unwrap_or_default(),
+                stderr_bytes.take().unwrap_or_default(),
+                status.take().and_then(|status| status.code()).unwrap_or(-1) as i64,
+                false,
+            ));
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            #[cfg(unix)]
+            {
+                let group_kill_rc = unsafe { libc::kill(-(child_pid as i32), libc::SIGKILL) };
+                if group_kill_rc != 0 && status.is_none() {
+                    let _ = child.kill();
+                }
+            }
+            #[cfg(not(unix))]
+            if status.is_none() {
+                let _ = child.kill();
+            }
+            if status.is_none() {
+                let _ = child.wait();
+            }
+            // Prefer the process-group close, but bound the drain in case an
+            // escaped descendant still retains an inherited pipe.
+            let receive_missing = |bytes: Option<Vec<u8>>, receiver: &std::sync::mpsc::Receiver<Vec<u8>>| {
+                bytes.unwrap_or_else(|| receiver.recv_timeout(Duration::from_millis(100)).unwrap_or_default())
+            };
+            return Ok((
+                receive_missing(stdout_bytes, &stdout),
+                receive_missing(stderr_bytes, &stderr),
+                -1,
+                true,
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn finish_child_output(mut child: std::process::Child, timeout_ms: i64) -> std::io::Result<(Vec<u8>, Vec<u8>, i64)> {
     use std::time::{Duration, Instant};
 
@@ -862,6 +1005,65 @@ pub unsafe extern "C" fn rt_process_run_timeout(
     }
 }
 
+/// Execute a command while bounding captured stdout and stderr independently.
+/// Retains the beginning and end of truncated streams and kills the child process
+/// group on timeout so descendants cannot keep the capture pipes open.
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_run_bounded(
+    cmd_ptr: *const u8,
+    cmd_len: u64,
+    args: RuntimeValue,
+    timeout_ms: i64,
+    max_output_bytes: i64,
+) -> RuntimeValue {
+    use std::process::{Command, Stdio};
+    crate::value::sffi::file_io::file_ops::invalidate_all_read_caches();
+
+    let make_tuple = |stdout: &[u8], stderr: &[u8], exit_code: i64| {
+        let stdout = String::from_utf8_lossy(stdout);
+        let stderr = String::from_utf8_lossy(stderr);
+        let tuple = rt_tuple_new(3);
+        rt_tuple_set(tuple, 0, rt_string_new(stdout.as_ptr(), stdout.len() as u64));
+        rt_tuple_set(tuple, 1, rt_string_new(stderr.as_ptr(), stderr.len() as u64));
+        rt_tuple_set(tuple, 2, RuntimeValue::from_int(exit_code));
+        tuple
+    };
+    let Ok(max_output_bytes) = usize::try_from(max_output_bytes) else {
+        return make_tuple(b"", b"", -1);
+    };
+    let Some(cmd_str) = ptr_string(cmd_ptr, cmd_len, 1024 * 1024) else {
+        return make_tuple(b"", b"", -1);
+    };
+
+    let mut command = Command::new(cmd_str);
+    clear_simple_child_stack_env(&mut command);
+    configure_timeout_child_process_group(&mut command);
+    for index in 0..rt_array_len(args) {
+        if let Some(arg) = extract_string(rt_array_get(args, index)) {
+            command.arg(arg);
+        }
+    }
+    let child = match command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return make_tuple(b"", b"", -1),
+    };
+
+    match finish_child_output_bounded(child, timeout_ms, max_output_bytes) {
+        Ok((stdout, mut stderr, exit_code, timed_out)) => {
+            if timed_out {
+                stderr.extend_from_slice(b"\nTIMEOUT\n");
+            }
+            make_tuple(&stdout, &stderr, exit_code)
+        }
+        Err(_) => make_tuple(b"", b"", -1),
+    }
+}
+
 // ============================================================================
 // Resource-Limited Process Execution
 // ============================================================================
@@ -1214,6 +1416,12 @@ mod tests {
         String::from_utf8_lossy(slice).to_string()
     }
 
+    unsafe fn runtime_string_is_utf8(val: RuntimeValue) -> bool {
+        let len = rt_string_len(val);
+        let ptr = rt_string_data(val);
+        std::str::from_utf8(std::slice::from_raw_parts(ptr, len as usize)).is_ok()
+    }
+
     unsafe fn runtime_args(args: &[&str]) -> RuntimeValue {
         let array = rt_array_new(args.len() as u64);
         for arg in args {
@@ -1243,6 +1451,77 @@ mod tests {
             assert_eq!(exit_code, 0);
             assert!(stderr.len() >= 200000);
             assert_ne!(stderr, "TIMEOUT");
+        }
+    }
+
+    #[test]
+    fn test_process_run_bounded_retains_head_and_tail() {
+        unsafe {
+            let cmd = "/bin/sh";
+            let args = runtime_args(&[
+                "-c",
+                "python3 - <<'PY'\nimport sys\nsys.stdout.write('HEAD' + 'x' * 200000 + 'TAIL')\nsys.stderr.write('ERRHEAD' + 'y' * 200000 + 'ERRTAIL')\nPY",
+            ]);
+            let result = rt_process_run_bounded(cmd.as_ptr(), cmd.len() as u64, args, 5_000, 1024);
+            let stdout = extract_string_test(rt_tuple_get(result, 0));
+            let stderr = extract_string_test(rt_tuple_get(result, 1));
+
+            assert_eq!(rt_tuple_get(result, 2).as_int(), 0);
+            assert!(stdout.starts_with("HEAD"));
+            assert!(stdout.ends_with("TAIL"));
+            assert!(stdout.contains("[output truncated: 198984 bytes omitted]"));
+            assert!(stderr.starts_with("ERRHEAD"));
+            assert!(stderr.ends_with("ERRTAIL"));
+            assert!(stderr.contains("[output truncated: 198990 bytes omitted]"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_process_run_bounded_timeout_kills_pipe_holding_descendant() {
+        unsafe {
+            let cmd = "/bin/sh";
+            let args = runtime_args(&[
+                "-c",
+                "python3 - <<'PY'\nimport sys\nsys.stdout.write('OUTHEAD' + 'x' * 200000 + 'OUTTAIL')\nsys.stderr.write('ERRHEAD' + 'y' * 200000 + 'ERRTAIL')\nPY\nsleep 30 &",
+            ]);
+            let started = std::time::Instant::now();
+            let result = rt_process_run_bounded(cmd.as_ptr(), cmd.len() as u64, args, 100, 1024);
+
+            assert_eq!(rt_tuple_get(result, 2).as_int(), -1);
+            let stdout = extract_string_test(rt_tuple_get(result, 0));
+            let stderr = extract_string_test(rt_tuple_get(result, 1));
+            assert!(stdout.starts_with("OUTHEAD"));
+            assert!(stdout.contains("[output truncated:"));
+            assert!(stdout.ends_with("OUTTAIL"));
+            assert!(stderr.starts_with("ERRHEAD"));
+            assert!(stderr.contains("[output truncated:"));
+            assert!(stderr.contains("ERRTAIL"));
+            assert!(stderr.ends_with("TIMEOUT\n"));
+            assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_process_run_bounded_timeout_preserves_stream_received_early() {
+        unsafe {
+            let cmd = "/bin/sh";
+            let args = runtime_args(&[
+                "-c",
+                "python3 - <<'PY'\nimport sys\nsys.stdout.write('a' * 511 + 'é' + 'x' * 2000 + 'TAIL')\nPY\nexec 1>&-; python3 -c 'import os,time; os.setsid(); time.sleep(2)' &",
+            ]);
+            let started = std::time::Instant::now();
+            let result = rt_process_run_bounded(cmd.as_ptr(), cmd.len() as u64, args, 500, 1024);
+
+            assert_eq!(rt_tuple_get(result, 2).as_int(), -1);
+            let stdout_value = rt_tuple_get(result, 0);
+            let stdout = extract_string_test(stdout_value);
+            assert!(runtime_string_is_utf8(stdout_value));
+            assert!(stdout.contains('\u{fffd}'));
+            assert!(stdout.ends_with("TAIL"));
+            assert!(extract_string_test(rt_tuple_get(result, 1)).ends_with("TIMEOUT\n"));
+            assert!(started.elapsed() < std::time::Duration::from_millis(1500));
         }
     }
 

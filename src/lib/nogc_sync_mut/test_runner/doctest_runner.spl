@@ -4,10 +4,10 @@
 # and Markdown files, then runs them as test cases.
 
 use std.io.{file_read, file_exists, file_atomic_write, file_remove}
-use std.io.{process_run_timeout, process_run}
+use std.io.{process_run_bounded}
 use std.io.{dir_walk}
 use std.io.{time_now_unix_micros}
-use std.test_runner.test_runner_types.TestFileResult
+use std.test_runner.test_runner_types.{TestFileResult, TEST_OUTPUT_CAPTURE_BYTES}
 use std.test_runner.test_runner_execute.find_simple_binary
 use std.test_runner.sdoctest.types.{SdoctestFileResult, SdoctestRunResult, SdoctestBlock, BlockResult, BlockStatus}
 use std.io.{env_get}
@@ -223,10 +223,12 @@ fn run_doctests(file_path: text, timeout_ms: i64) -> TestFileResult:
         val temp_path = "{_dt_get_temp_dir()}/simple_doctest_{dt.line_number}.spl"
         file_atomic_write(temp_path, dt.code)
 
-        val result = process_run_timeout(binary, [temp_path], timeout_ms)
+        val result = process_run_bounded(binary, [temp_path], timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
         val exit_code = result.2
 
-        if dt.should_fail:
+        if exit_code == -1:
+            failed = failed + 1
+        elif dt.should_fail:
             if exit_code != 0:
                 passed = passed + 1
             else:
@@ -277,10 +279,12 @@ fn run_md_doctests(file_path: text, timeout_ms: i64) -> TestFileResult:
         val temp_path = "{_dt_get_temp_dir()}/simple_md_doctest_{dt.line_number}.spl"
         file_atomic_write(temp_path, dt.code)
 
-        val result = process_run_timeout(binary, [temp_path], timeout_ms)
+        val result = process_run_bounded(binary, [temp_path], timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
         val exit_code = result.2
 
-        if dt.should_fail:
+        if exit_code == -1:
+            failed = failed + 1
+        elif dt.should_fail:
             if exit_code != 0:
                 passed = passed + 1
             else:
@@ -351,8 +355,7 @@ fn run_spl_doctests_same_file(file_path: text, timeout_ms: i64) -> SdoctestFileR
         file_atomic_write(temp_path, composite_code)
 
         val start = time_now_unix_micros()
-        # Use process_run (not process_run_timeout — known arg-passing bug)
-        val result = process_run(binary, [temp_path])
+        val result = process_run_bounded(binary, [temp_path], timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
         val stdout = result.0
         val stderr = result.1
         val exit_code = result.2
@@ -369,10 +372,16 @@ fn run_spl_doctests_same_file(file_path: text, timeout_ms: i64) -> SdoctestFileR
 
         if exit_code == -1:
             errors = errors + 1
+            val process_error = if stderr.contains("TIMEOUT") or stderr.contains("timed out"):
+                "TIMEOUT"
+            elif stderr != "":
+                stderr
+            else:
+                "Process failed to start or returned an internal error"
             block_results.push(BlockResult(
                 block: block, status: BlockStatus.Error,
                 duration_ms: duration_ms, stdout: stdout, stderr: stderr,
-                error: "TIMEOUT"
+                error: process_error
             ))
         elif dt.should_fail:
             if exit_code != 0:

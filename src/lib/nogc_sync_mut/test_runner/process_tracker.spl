@@ -9,7 +9,8 @@
 # - Cleanup happens on shutdown (SIGTERM/SIGINT handlers)
 # - Heartbeat monitoring detects orphaned children
 
-use std.io.{process_kill, process_is_running, process_run_timeout, time_now_unix_micros}
+use std.io.{process_kill, process_is_running, process_run_bounded, time_now_unix_micros}
+use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 
 # ============================================================================
 # Module State - Active Tracking
@@ -154,12 +155,12 @@ fn tracker_stop_all_containers() -> i64:
 
     for container_id in _tracked_containers:
         # Try graceful stop (10s timeout)
-        val (_stop_out, _stop_err, stop_code) = process_run_timeout(runtime, ["stop", "-t", "10", container_id], 15000)
+        val (_stop_out, _stop_err, stop_code) = process_run_bounded(runtime, ["stop", "-t", "10", container_id], 15000, TEST_OUTPUT_CAPTURE_BYTES)
         if stop_code == 0:
             stopped = stopped + 1
         else:
             # Force remove if stop failed
-            val (_rm_out, _rm_err, rm_code) = process_run_timeout(runtime, ["rm", "-f", container_id], 15000)
+            val (_rm_out, _rm_err, rm_code) = process_run_bounded(runtime, ["rm", "-f", container_id], 15000, TEST_OUTPUT_CAPTURE_BYTES)
             if rm_code == 0:
                 stopped = stopped + 1
 
@@ -174,13 +175,13 @@ fn tracker_stop_all_containers() -> i64:
 
 fn is_docker_available() -> bool:
     """Check if Docker runtime is available"""
-    val (_out, _err, code) = process_run_timeout("docker", ["--version"], 5000)
+    val (_out, _err, code) = process_run_bounded("docker", ["--version"], 5000, TEST_OUTPUT_CAPTURE_BYTES)
     code == 0
 
 fn tracker_container_runtime() -> text:
     if is_docker_available():
         return "docker"
-    val (_out, _err, code) = process_run_timeout("podman", ["--version"], 5000)
+    val (_out, _err, code) = process_run_bounded("podman", ["--version"], 5000, TEST_OUTPUT_CAPTURE_BYTES)
     if code == 0: "podman" else: "none"
 
 fn get_running_containers() -> [text]:
@@ -195,8 +196,8 @@ fn get_running_containers() -> [text]:
     if runtime == "none":
         return []
 
-    val (output, _stderr, exit_code) = process_run_timeout(
-        runtime, ["ps", "-q", "--filter", "label=simple-test-runner=1"], 15000
+    val (output, _stderr, exit_code) = process_run_bounded(
+        runtime, ["ps", "-q", "--filter", "label=simple-test-runner=1"], 15000, TEST_OUTPUT_CAPTURE_BYTES
     )
     if exit_code != 0 or output == "" or output == nil:
         return []
@@ -278,5 +279,4 @@ fn tracker_check_heartbeat_alive(timeout_ms: i64) -> bool:
 # ============================================================================
 # Exports
 # ============================================================================
-
 

@@ -66,6 +66,13 @@ seed opt-in. Bound it with the canonical resource cap, `timeout -k`, and
 redirected output. Never treat that opt-in as production fallback or release
 evidence; remove it after the rebuilt pure runner passes the same fixture.
 
+Runner subprocess capture must use the shared bounded process facade (4 MiB
+per stdout/stderr stream), preserving head, tail, and the omitted-byte marker.
+This applies to interpreter, native/SMF compile+run, composite, doctest,
+parallel temp-file, and fork lanes. Timeout verification requires both the
+timeout exit and marker, plus descendant-held-pipe evidence; do not treat every
+spawn/internal `-1` as a timeout or truncate only after an unbounded capture.
+
 For release-bound SPipe lanes, the final test-runner evidence is
 `bin/simple test test --whole --mode=interpreter`. `--whole` must retain all
 spec/long-test discovery and execute both `.spl` comment doctests and configured

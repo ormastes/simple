@@ -4,11 +4,175 @@
 
 use crate::error::CompileError;
 use crate::value::Value;
+use std::collections::VecDeque;
 use std::io::Read;
 use std::process::Child;
 
 fn clear_simple_child_stack_env(command: &mut std::process::Command) {
     command.env_remove("_SIMPLE_STACK_SET");
+}
+
+#[cfg(unix)]
+fn configure_timeout_child_process_group(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_timeout_child_process_group(_command: &mut std::process::Command) {}
+
+const OUTPUT_TRUNCATION_PREFIX: &str = "\n[output truncated: ";
+const POST_TIMEOUT_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
+
+struct BoundedOutputReader {
+    handle: std::thread::JoinHandle<()>,
+    output: std::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+fn read_bounded<R: Read>(mut reader: R, max_bytes: usize) -> Vec<u8> {
+    let head_len = (max_bytes + 1) / 2;
+    let tail_len = max_bytes - head_len;
+    // Allocate only as output arrives; a hostile caller can request an enormous
+    // limit and must not force that allocation before the child writes anything.
+    let mut head = Vec::new();
+    let mut tail: VecDeque<u8> = VecDeque::new();
+    let mut total = 0usize;
+    let mut chunk = [0u8; 8192];
+
+    while let Ok(count) = reader.read(&mut chunk) {
+        if count == 0 {
+            break;
+        }
+        total = total.saturating_add(count);
+        let head_count = (head_len - head.len()).min(count);
+        head.extend_from_slice(&chunk[..head_count]);
+        if tail_len == 0 || head_count == count {
+            continue;
+        }
+        let rest = &chunk[head_count..count];
+        let overflow = tail.len().saturating_add(rest.len()).saturating_sub(tail_len);
+        tail.drain(..overflow.min(tail.len()));
+        let rest_start = rest.len().saturating_sub(tail_len);
+        tail.extend(&rest[rest_start..]);
+        while tail.len() > tail_len {
+            tail.pop_front();
+        }
+    }
+
+    if total <= max_bytes {
+        head.extend(tail);
+        return head;
+    }
+
+    let marker = format!("{OUTPUT_TRUNCATION_PREFIX}{} bytes omitted]\n", total - max_bytes);
+    head.extend_from_slice(marker.as_bytes());
+    head.extend(tail);
+    head
+}
+
+fn spawn_bounded_output_reader<R: Read + Send + 'static>(
+    reader: Option<R>,
+    max_bytes: usize,
+) -> Option<BoundedOutputReader> {
+    reader.map(|pipe| {
+        let (sender, output) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _ = sender.send(read_bounded(pipe, max_bytes));
+        });
+        BoundedOutputReader { handle, output }
+    })
+}
+
+fn receive_bounded_output(output: std::sync::mpsc::Receiver<Vec<u8>>, bounded_wait: bool) -> Vec<u8> {
+    if bounded_wait {
+        output.recv_timeout(POST_TIMEOUT_DRAIN_GRACE).unwrap_or_default()
+    } else {
+        output.recv().unwrap_or_default()
+    }
+}
+
+fn finish_bounded_output_reader(reader: Option<BoundedOutputReader>, bounded_wait: bool) -> Vec<u8> {
+    let Some(reader) = reader else {
+        return Vec::new();
+    };
+    if !bounded_wait {
+        let _ = reader.handle.join();
+    }
+    receive_bounded_output(reader.output, bounded_wait)
+}
+
+fn finish_child_output_bounded(mut child: Child, timeout_ms: i64, max_output_bytes: usize) -> (Vec<u8>, Vec<u8>, i64) {
+    let stdout_reader = spawn_bounded_output_reader(child.stdout.take(), max_output_bytes);
+    let stderr_reader = spawn_bounded_output_reader(child.stderr.take(), max_output_bytes);
+    let deadline = std::time::Instant::now().checked_add(std::time::Duration::from_millis(timeout_ms.max(0) as u64));
+
+    let mut timed_out = false;
+    let mut aborted = false;
+    let mut status = None;
+    loop {
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(Some(exit_status)) => status = Some(exit_status),
+                Ok(None) if timeout_ms <= 0 => status = child.wait().ok(),
+                Ok(None) => {}
+                Err(_) => {
+                    aborted = true;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+            }
+        }
+        let readers_finished = stdout_reader.as_ref().is_none_or(|reader| reader.handle.is_finished())
+            && stderr_reader.as_ref().is_none_or(|reader| reader.handle.is_finished());
+        if status.is_some() && readers_finished {
+            break;
+        }
+        if timeout_ms > 0 && deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            timed_out = true;
+            #[cfg(unix)]
+            {
+                let rc = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                if rc != 0 {
+                    let _ = child.kill();
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = child.kill();
+            if status.is_none() {
+                let _ = child.wait();
+            }
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let bounded_drain = timed_out || aborted;
+    let stdout = finish_bounded_output_reader(stdout_reader, bounded_drain);
+    let mut stderr = finish_bounded_output_reader(stderr_reader, bounded_drain);
+    if timed_out {
+        if !stderr.is_empty() {
+            stderr.push(b'\n');
+        }
+        stderr.extend_from_slice(b"Process timed out");
+    }
+    (
+        stdout,
+        stderr,
+        if timed_out {
+            -1
+        } else {
+            status.and_then(|status| status.code()).unwrap_or(-1) as i64
+        },
+    )
 }
 
 fn finish_child_output_with_timeout(mut child: Child, timeout_ms: i64) -> Result<(String, String, i64), ()> {
@@ -590,6 +754,78 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Run a command while retaining at most `max_output_bytes` from each stream.
+///
+/// Truncated streams contain their retained head and tail separated by
+/// `\n[output truncated: N bytes omitted]\n`; the marker is outside the byte budget.
+pub fn rt_process_run_bounded(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 4 {
+        return Err(CompileError::runtime(
+            "rt_process_run_bounded requires 4 arguments (cmd, args, timeout_ms, max_output_bytes)",
+        ));
+    }
+    let cmd = match &args[0] {
+        Value::Str(value) => value.as_ref().clone(),
+        _ => return Err(CompileError::runtime("rt_process_run_bounded: cmd must be a string")),
+    };
+    let cmd_args = match &args[1] {
+        Value::Array(values) => values
+            .iter()
+            .filter_map(|value| match value {
+                Value::Str(value) => Some(value.as_ref().clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_process_run_bounded: args must be an array of strings",
+            ))
+        }
+    };
+    let timeout_ms = match args[2] {
+        Value::Int(value) => value,
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_process_run_bounded: timeout_ms must be an integer",
+            ))
+        }
+    };
+    let max_output_bytes = match args[3] {
+        Value::Int(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_process_run_bounded: max_output_bytes must be a non-negative integer",
+            ))
+        }
+    };
+
+    let mut command = std::process::Command::new(&*cmd);
+    clear_simple_child_stack_env(&mut command);
+    configure_timeout_child_process_group(&mut command);
+    let child = match command
+        .args(cmd_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            return Ok(Value::Tuple(vec![
+                Value::text(String::new()),
+                Value::text(String::new()),
+                Value::Int(-1),
+            ]))
+        }
+    };
+    let (stdout, stderr, exit_code) = finish_child_output_bounded(child, timeout_ms, max_output_bytes);
+    Ok(Value::Tuple(vec![
+        Value::text(String::from_utf8_lossy(&stdout).into_owned()),
+        Value::text(String::from_utf8_lossy(&stderr).into_owned()),
+        Value::Int(exit_code),
+    ]))
+}
+
 /// Spawn a process asynchronously and return its PID
 ///
 /// Callable from Simple as: `rt_process_spawn_async(cmd, args)`
@@ -933,6 +1169,79 @@ mod tests {
         unsafe {
             std::env::remove_var("_SIMPLE_STACK_SET");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_run_bounded_drains_flooding_streams_with_head_and_tail() {
+        let result = rt_process_run_bounded(&[
+            Value::text("/bin/sh".to_string()),
+            Value::Array(Arc::new(vec![
+                Value::text("-c".to_string()),
+                Value::text(
+                    "printf HEAD; head -c 10000 /dev/zero | tr '\\0' x; printf TAIL; printf HEAD >&2; head -c 10000 /dev/zero | tr '\\0' y >&2; printf TAIL >&2"
+                        .to_string(),
+                ),
+            ])),
+            Value::Int(5_000),
+            Value::Int(64),
+        ])
+        .unwrap();
+        let Value::Tuple(parts) = result else {
+            panic!("expected tuple");
+        };
+        assert_eq!(parts[2], Value::Int(0));
+        for part in &parts[..2] {
+            let Value::Str(output) = part else {
+                panic!("expected string");
+            };
+            assert!(output.starts_with("HEAD"));
+            assert!(output.ends_with("TAIL"));
+            assert!(output.contains("\n[output truncated: 9944 bytes omitted]\n"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_run_bounded_timeout_kills_descendant_process_group() {
+        let result = rt_process_run_bounded(&[
+            Value::text("/bin/sh".to_string()),
+            Value::Array(Arc::new(vec![
+                Value::text("-c".to_string()),
+                Value::text("sleep 30 & child=$!; printf '%s' \"$child\"".to_string()),
+            ])),
+            Value::Int(100),
+            Value::Int(128),
+        ])
+        .unwrap();
+        let Value::Tuple(parts) = result else {
+            panic!("expected tuple");
+        };
+        assert_eq!(parts[2], Value::Int(-1));
+        let Value::Str(stdout) = &parts[0] else {
+            panic!("expected stdout string");
+        };
+        let Value::Str(stderr) = &parts[1] else {
+            panic!("expected stderr string");
+        };
+        let descendant = stdout.parse::<i32>().expect("descendant pid");
+        assert!(stderr.ends_with("Process timed out"));
+        for _ in 0..100 {
+            if unsafe { libc::kill(descendant, 0) } != 0 {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("descendant process {descendant} survived timeout cleanup");
+    }
+
+    #[test]
+    fn bounded_output_timeout_does_not_wait_for_an_open_pipe() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        assert!(receive_bounded_output(receiver, true).is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        drop(sender);
     }
 
     #[test]

@@ -7,7 +7,8 @@
 
 use std.test_runner.process_tracker.{tracker_register_pid, tracker_get_pids, tracker_unregister_pid, tracker_register_container, tracker_unregister_container, tracker_kill_all_children, tracker_stop_all_containers, tracker_container_runtime, get_running_containers, tracker_enable_heartbeat, tracker_send_heartbeat, tracker_check_heartbeat_alive}
 use std.test_runner.checkpoint.{checkpoint_save}
-use std.io.{process_spawn_async, process_run_timeout, process_wait, process_kill, process_is_running}
+use std.io.{process_spawn_async, process_run_bounded, process_wait, process_kill, process_is_running}
+use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release, proc_slot_reset)
 use std.io_runtime.{exit}
 use std.io.{time_now_unix_micros}
@@ -115,7 +116,7 @@ fn run_tracked_container(
     ]
     for arg in args:
         run_args.push(arg)
-    val (stdout, _stderr, exit_code) = process_run_timeout(runtime, run_args, 60000)
+    val (stdout, _stderr, exit_code) = process_run_bounded(runtime, run_args, 60000, TEST_OUTPUT_CAPTURE_BYTES)
     val container_id = if exit_code == 0: stdout.trim() else: ""
 
     if container_id != "" and container_id != nil:
@@ -134,8 +135,8 @@ fn stop_tracked_container(container_id: text):
         return
 
     # Try graceful stop
-    val (_stdout, _stderr, exit_code) = process_run_timeout(
-        runtime, ["stop", "-t", "10", container_id], 15000
+    val (_stdout, _stderr, exit_code) = process_run_bounded(
+        runtime, ["stop", "-t", "10", container_id], 15000, TEST_OUTPUT_CAPTURE_BYTES
     )
     if exit_code == 0:
         tracker_unregister_container(container_id)
@@ -265,8 +266,8 @@ fn cleanup_orphaned_containers():
     var orphans_stopped = 0
 
     for container_id in all_containers:
-        val (_stdout, _stderr, exit_code) = process_run_timeout(
-            runtime, ["rm", "-f", container_id], 15000
+        val (_stdout, _stderr, exit_code) = process_run_bounded(
+            runtime, ["rm", "-f", container_id], 15000, TEST_OUTPUT_CAPTURE_BYTES
         )
         if exit_code == 0:
             tracker_unregister_container(container_id)

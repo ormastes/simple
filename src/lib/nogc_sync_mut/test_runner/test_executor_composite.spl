@@ -4,11 +4,11 @@
 #
 # Split from test_runner_execute.spl for maintainability.
 
-use std.test_runner.test_runner_types.{TestFileResult, TestOptions}
+use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
 use std.test_runner.test_executor_parsing.{find_simple_binary, build_child_args, make_result_from_output, parse_test_output}
 use std.io.{file_exists, file_read}
 use std.io.{time_now_unix_micros}
-use std.io.{process_run_timeout}
+use std.io.{process_run_bounded}
 use std.io_runtime.{shell}
 use std.nogc_sync_mut.jit.jit_types.{JitBinary}
 use std.nogc_sync_mut.jit.jit_util.{hex_i64}
@@ -119,7 +119,7 @@ fn run_test_file_baremetal(file_path: text, options: TestOptions, base: text, ar
     - .elf files: run directly on QEMU with semihosting
     """
     # All .spl test files run via the host interpreter.
-    # Tests that need QEMU invoke it themselves (via rt_process_run_timeout).
+    # Tests that need QEMU invoke it themselves through bounded capture.
     # Pure-logic tests just check constants and run without QEMU.
     if file_path.ends_with(".spl"):
         return run_test_file_baremetal_via_interpreter(file_path: file_path, options, arch: arch)
@@ -141,7 +141,7 @@ fn run_test_file_baremetal_via_interpreter(file_path: text, options: TestOptions
     val setup_ms = (setup_end - setup_start) / 1000
 
     val test_start = time_now_unix_micros()
-    val (stdout, stderr, exit_code) = process_run_timeout(binary, child_args, timeout_ms)
+    val (stdout, stderr, exit_code) = process_run_bounded(binary, child_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
     val test_end = time_now_unix_micros()
     val duration_ms = (test_end - test_start) / 1000
     var result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
@@ -197,10 +197,11 @@ fn run_test_file_baremetal_ghdl(file_path: text, options: TestOptions, elf_path:
 
     val timeout_ms = timeout_secs * 1000
     val test_start = time_now_unix_micros()
-    val (stdout, stderr, exit_code) = process_run_timeout(
+    val (stdout, stderr, exit_code) = process_run_bounded(
         "bash",
         ["src/lib/nogc_async_mut_noalloc/baremetal/ghdl_runner.shs", elf_path, "--timeout={timeout_secs}"],
-        timeout_ms
+        timeout_ms,
+        TEST_OUTPUT_CAPTURE_BYTES
     )
     val test_end = time_now_unix_micros()
     val duration_ms = (test_end - test_start) / 1000
@@ -235,7 +236,7 @@ fn run_test_file_baremetal_qemu(file_path: text, options: TestOptions, arch: tex
 
     val timeout_ms = options.timeout * 1000
     val test_start = time_now_unix_micros()
-    val (stdout, stderr, exit_code) = process_run_timeout(qemu_bin, qemu_args, timeout_ms)
+    val (stdout, stderr, exit_code) = process_run_bounded(qemu_bin, qemu_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
     val test_end = time_now_unix_micros()
     val duration_ms = (test_end - test_start) / 1000
 

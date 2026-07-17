@@ -544,6 +544,14 @@ so executable qualification is still blocked.
   Rust-seed runner probe remains unsuitable as executable proof because that
   seed embeds the pre-fix driver and still reaches the unrelated
   `database.spl` parser error; it emitted only three lines and exited normally.
+- Test subprocess capture was unbounded in native, interpreter, composite,
+  doctest, parallel temp-file, and fork paths. The shared bounded process
+  facade now retains a 4 MiB head/tail window per stream with an omitted-byte
+  marker; async reads and the C fork bridge apply the same bound. Timeout paths
+  preserve bounded diagnostics, distinguish timeout markers from generic
+  spawn/internal `-1`, clean up process groups where supported, and avoid
+  blocking on descendant-held pipes. Native/interpreter flood and descendant
+  timeout regressions plus a production-runner source contract cover the fix.
 - Lowercase `shared` was independently found to bind as a lowercase pattern
   but parse as capitalized `Shared` when read, allowing lenient project
   lowering to turn an ordinary local into an undeclared enum-like global.

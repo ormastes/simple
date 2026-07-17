@@ -3,7 +3,7 @@
 # Core test execution modes: interpreter, SMF, native, and safe mode.
 #
 # NOTE: PID tracking for self-protection would require refactoring to use
-# rt_process_spawn_async + rt_process_wait instead of process_run_timeout.
+# rt_process_spawn_async + rt_process_wait instead of synchronous bounded runs.
 # Current implementation uses synchronous execution which doesn't expose PIDs.
 # This is a future enhancement for Week 1 completion.
 #
@@ -12,13 +12,13 @@
 #   - test_executor_composite.spl: composite/baremetal/remote/QEMU platform execution
 #   - test_runner_execute.spl (this file): core execution modes (interpreter, SMF, native, safe)
 
-use std.test_runner.test_runner_types.{TestFileResult, TestOptions}
+use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
 use std.test_runner.test_result_wrapper.{build_interpreter_result_wrapper}
 use std.io.{file_exists, file_write, file_delete}
 use std.io.{time_now_unix_micros}
-use std.io.{process_run_timeout, process_run_with_limits, ProcessResult}
+use std.io.{process_run_bounded, process_run_with_limits_bounded, ProcessResult}
 
 # Import from split-out files (same directory, but need use for re-export)
 use std.test_runner.test_executor_parsing.{
@@ -84,7 +84,7 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     var exit_code = 0
     if (options.max_mem_gb > 0 or options.max_procs > 0) and not options.no_limits:
         val memory_bytes = if options.max_mem_gb > 0: options.max_mem_gb * 1024 * 1024 * 1024 else: 0
-        val result = process_run_with_limits(binary, child_args, timeout_ms, memory_bytes, 0, 0, options.max_procs)
+        val result = process_run_with_limits_bounded(binary, child_args, timeout_ms, memory_bytes, 0, 0, options.max_procs, TEST_OUTPUT_CAPTURE_BYTES)
         stdout = result.stdout
         stderr = result.stderr
         exit_code = result.exit_code
@@ -103,7 +103,7 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: dur, setup_ms: setup_ms, error: limit_exceeded_message(result, options), timed_out: false, cached: false)
     else:
-        val (out, err, code) = process_run_timeout(binary, child_args, timeout_ms)
+        val (out, err, code) = process_run_bounded(binary, child_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
         stdout = out
         stderr = err
         exit_code = code
@@ -157,7 +157,7 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
         var exit_code = 0
         if (options.max_mem_gb > 0 or options.max_procs > 0) and not options.no_limits:
             val memory_bytes = if options.max_mem_gb > 0: options.max_mem_gb * 1024 * 1024 * 1024 else: 0
-            val result = process_run_with_limits(binary, run_args, timeout_ms, memory_bytes, 0, 0, options.max_procs)
+            val result = process_run_with_limits_bounded(binary, run_args, timeout_ms, memory_bytes, 0, 0, options.max_procs, TEST_OUTPUT_CAPTURE_BYTES)
             stdout = result.stdout
             stderr = result.stderr
             exit_code = result.exit_code
@@ -167,7 +167,7 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
                 return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                     duration_ms: dur, setup_ms: 0, error: limit_exceeded_message(result, options), timed_out: false, cached: false)
         else:
-            val (out, err, code) = process_run_timeout(binary, run_args, timeout_ms)
+            val (out, err, code) = process_run_bounded(binary, run_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
             stdout = out
             stderr = err
             exit_code = code
@@ -196,7 +196,7 @@ fn run_test_file_native_old(file_path: text, options: TestOptions) -> TestFileRe
         run_args.push("--gc-log")
     if options.gc_off:
         run_args.push("--gc=off")
-    val result = process_run_with_limits(binary, run_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs)
+    val result = process_run_with_limits_bounded(binary, run_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs, TEST_OUTPUT_CAPTURE_BYTES)
     val stdout = result.stdout
     val stderr = result.stderr
     val exit_code = result.exit_code
@@ -576,7 +576,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         compile_args.push("--verbose")
         print "[native] Compiling {file_path} to {smf_path}"
 
-    val compile_result = process_run_with_limits(binary, compile_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs)
+    val compile_result = process_run_with_limits_bounded(binary, compile_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs, TEST_OUTPUT_CAPTURE_BYTES)
     val compile_stdout = compile_result.stdout
     val compile_stderr = compile_result.stderr
     val compile_exit = compile_result.exit_code
@@ -616,7 +616,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     var exit_code = 0
     if (options.max_mem_gb > 0 or options.max_procs > 0) and not options.no_limits:
         val memory_bytes = if options.max_mem_gb > 0: options.max_mem_gb * 1024 * 1024 * 1024 else: 0
-        val result = process_run_with_limits(binary, run_args, timeout_ms, memory_bytes, 0, 0, options.max_procs)
+        val result = process_run_with_limits_bounded(binary, run_args, timeout_ms, memory_bytes, 0, 0, options.max_procs, TEST_OUTPUT_CAPTURE_BYTES)
         stdout = result.stdout
         stderr = result.stderr
         exit_code = result.exit_code
@@ -631,7 +631,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: dur, setup_ms: 0, error: limit_exceeded_message(result, options), timed_out: false, cached: false)
     else:
-        val (out, err, code) = process_run_timeout(binary, run_args, timeout_ms)
+        val (out, err, code) = process_run_bounded(binary, run_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
         stdout = out
         stderr = err
         exit_code = code
@@ -679,8 +679,8 @@ fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileRes
     if options.gc_off:
         run_args.push("--gc=off")
 
-    val result = process_run_with_limits(
-        binary, run_args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs
+    val result = process_run_with_limits_bounded(
+        binary, run_args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs, TEST_OUTPUT_CAPTURE_BYTES
     )
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000

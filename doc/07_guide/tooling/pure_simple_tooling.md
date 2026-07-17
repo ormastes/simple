@@ -80,6 +80,15 @@ Verification for tooling changes should include:
 - direct env/process facade guard;
 - bounded-output smoke for performance-sensitive tools such as `native-build`.
 
+The production test runner uses `process_run_bounded` (and the bounded limits
+variant) with a 4 MiB cap for each stdout/stderr stream. Truncated streams keep
+their head and tail and include an exact omitted-byte marker, so early compiler
+diagnostics and final SPipe summaries remain available. Parallel temp-file and
+fork capture apply the same bound. Timeout handling must kill the process group
+where supported and must never block indefinitely waiting for a descendant that
+kept a pipe open. A plain `-1` exit is not sufficient timeout evidence; require
+the timeout marker so spawn/internal failures remain ordinary failures.
+
 For staged compiler or MCP changes, the bootstrap wrapper must pass its built-in
 Stage 2 and Stage 3 compiler sanity, then run the matching stage sanity SSpec
 and MCP command-line handshake SSpec. `bin/simple_mcp_server` defaults to the cached
