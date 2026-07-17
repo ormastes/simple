@@ -170,6 +170,14 @@ struct TextBlitParams {
     int fb_h;
 };
 
+struct ClipParams {
+    int x;
+    int y;
+    int w;
+    int h;
+    int enabled;
+};
+
 // ---- Helper: extract ARGB channels ----
 
 static inline uint4 unpack_argb(uint c) {
@@ -191,8 +199,14 @@ static inline uint lerp_channel(uint a, uint b, int t, int max_t) {
 }
 
 // Bounds-checked single-pixel write (mirrors CPU sw_set_pixel framebuffer clip).
-static inline void plot(device uint* fb, int x, int y, int fb_w, int fb_h, uint color) {
-    if (x >= 0 && x < fb_w && y >= 0 && y < fb_h) {
+static inline bool inside_clip(int x, int y, constant ClipParams& clip) {
+    return clip.enabled == 0 ||
+        (clip.w > 0 && clip.h > 0 && x >= clip.x && y >= clip.y &&
+         x < clip.x + clip.w && y < clip.y + clip.h);
+}
+
+static inline void plot(device uint* fb, int x, int y, int fb_w, int fb_h, uint color, constant ClipParams& clip) {
+    if (x >= 0 && x < fb_w && y >= 0 && y < fb_h && inside_clip(x, y, clip)) {
         fb[y * fb_w + x] = color;
     }
 }
@@ -225,6 +239,7 @@ static inline uint blend_src_over(uint src, uint dst) {
 kernel void kernel_clear(
     device uint* fb        [[buffer(0)]],
     constant ClearParams& p [[buffer(1)]],
+    constant ClipParams& clip [[buffer(4)]],
     uint tid               [[thread_position_in_grid]]
 ) {
     int total = p.width * p.height;
@@ -237,6 +252,7 @@ kernel void kernel_clear(
 kernel void kernel_draw_rect_filled(
     device uint* fb        [[buffer(0)]],
     constant RectParams& p [[buffer(1)]],
+    constant ClipParams& clip [[buffer(4)]],
     uint2 tid              [[thread_position_in_grid]]
 ) {
     int lx = (int)tid.x;
@@ -246,6 +262,7 @@ kernel void kernel_draw_rect_filled(
     int px = p.x + lx;
     int py = p.y + ly;
     if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+    if (!inside_clip(px, py, clip)) return;
 
     int idx = py * p.fb_w + px;
     fb[idx] = blend_src_over(p.color, fb[idx]);
@@ -256,6 +273,7 @@ kernel void kernel_draw_rect_filled(
 kernel void kernel_draw_rect_outline(
     device uint* fb        [[buffer(0)]],
     constant RectParams& p [[buffer(1)]],
+    constant ClipParams& clip [[buffer(4)]],
     uint2 tid              [[thread_position_in_grid]]
 ) {
     int lx = (int)tid.x;
@@ -269,6 +287,7 @@ kernel void kernel_draw_rect_outline(
     int px = p.x + lx;
     int py = p.y + ly;
     if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+    if (!inside_clip(px, py, clip)) return;
 
     int idx = py * p.fb_w + px;
     fb[idx] = p.color;
@@ -279,6 +298,7 @@ kernel void kernel_draw_rect_outline(
 kernel void kernel_draw_line(
     device uint* fb         [[buffer(0)]],
     constant LineParams& p  [[buffer(1)]],
+    constant ClipParams& clip [[buffer(4)]],
     uint tid                [[thread_position_in_grid]]
 ) {
     // Bit-exact replay of the CPU sw_bresenham loop: thread t draws the pixel
@@ -309,9 +329,9 @@ kernel void kernel_draw_line(
     int half_w = p.thickness / 2;
     for (int off = -half_w; off <= half_w; off++) {
         if (adx >= ady) {
-            plot(fb, cx, cy + off, p.fb_w, p.fb_h, p.color);
+            plot(fb, cx, cy + off, p.fb_w, p.fb_h, p.color, clip);
         } else {
-            plot(fb, cx + off, cy, p.fb_w, p.fb_h, p.color);
+            plot(fb, cx + off, cy, p.fb_w, p.fb_h, p.color, clip);
         }
     }
 }
@@ -324,6 +344,7 @@ kernel void kernel_draw_line(
 kernel void kernel_draw_circle(
     device uint* fb           [[buffer(0)]],
     constant CircleParams& p  [[buffer(1)]],
+    constant ClipParams& clip [[buffer(4)]],
     uint tid                  [[thread_position_in_grid]]
 ) {
     int i = (int)tid;
@@ -348,14 +369,14 @@ kernel void kernel_draw_circle(
 
     int cx = p.cx;
     int cy = p.cy;
-    plot(fb, cx + px, cy + py, p.fb_w, p.fb_h, p.color);
-    plot(fb, cx - px, cy + py, p.fb_w, p.fb_h, p.color);
-    plot(fb, cx + px, cy - py, p.fb_w, p.fb_h, p.color);
-    plot(fb, cx - px, cy - py, p.fb_w, p.fb_h, p.color);
-    plot(fb, cx + py, cy + px, p.fb_w, p.fb_h, p.color);
-    plot(fb, cx - py, cy + px, p.fb_w, p.fb_h, p.color);
-    plot(fb, cx + py, cy - px, p.fb_w, p.fb_h, p.color);
-    plot(fb, cx - py, cy - px, p.fb_w, p.fb_h, p.color);
+    plot(fb, cx + px, cy + py, p.fb_w, p.fb_h, p.color, clip);
+    plot(fb, cx - px, cy + py, p.fb_w, p.fb_h, p.color, clip);
+    plot(fb, cx + px, cy - py, p.fb_w, p.fb_h, p.color, clip);
+    plot(fb, cx - px, cy - py, p.fb_w, p.fb_h, p.color, clip);
+    plot(fb, cx + py, cy + px, p.fb_w, p.fb_h, p.color, clip);
+    plot(fb, cx - py, cy + px, p.fb_w, p.fb_h, p.color, clip);
+    plot(fb, cx + py, cy - px, p.fb_w, p.fb_h, p.color, clip);
+    plot(fb, cx - py, cy - px, p.fb_w, p.fb_h, p.color, clip);
 }
 
 // ---- kernel_draw_circle_filled ----
@@ -363,6 +384,7 @@ kernel void kernel_draw_circle(
 kernel void kernel_draw_circle_filled(
     device uint* fb           [[buffer(0)]],
     constant CircleParams& p  [[buffer(1)]],
+    constant ClipParams& clip [[buffer(4)]],
     uint2 tid                 [[thread_position_in_grid]]
 ) {
     int bw = 2 * p.r + 1;
@@ -380,6 +402,7 @@ kernel void kernel_draw_circle_filled(
     int px = p.cx - p.r + lx;
     int py = p.cy - p.r + ly;
     if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+    if (!inside_clip(px, py, clip)) return;
 
     int idx = py * p.fb_w + px;
     fb[idx] = blend_src_over(p.color, fb[idx]);
@@ -455,6 +478,7 @@ inline uint _rr_corner_arc_blend(int cx, int cy, int rad, int dx_sign, int dy_si
 kernel void kernel_draw_rounded_rect(
     device uint* fb                  [[buffer(0)]],
     constant RoundedRectParams& p    [[buffer(1)]],
+    constant ClipParams& clip        [[buffer(4)]],
     uint2 tid                        [[thread_position_in_grid]]
 ) {
     int lx = (int)tid.x;
@@ -470,6 +494,7 @@ kernel void kernel_draw_rounded_rect(
     int px = p.x + lx;
     int py = p.y + ly;
     if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+    if (!inside_clip(px, py, clip)) return;
     int idx = py * p.fb_w + px;
 
     uint dst = fb[idx];
@@ -529,6 +554,7 @@ inline bool _rr_ring_hit(int rad, int ax, int ay) {
 kernel void kernel_draw_rounded_rect_outline(
     device uint* fb                         [[buffer(0)]],
     constant RoundedRectOutlineParams& p    [[buffer(1)]],
+    constant ClipParams& clip               [[buffer(4)]],
     uint2 tid                               [[thread_position_in_grid]]
 ) {
     int lx = (int)tid.x;
@@ -608,6 +634,7 @@ kernel void kernel_draw_rounded_rect_outline(
     int px = p.x + lx;
     int py = p.y + ly;
     if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+    if (!inside_clip(px, py, clip)) return;
     fb[py * p.fb_w + px] = p.color;
 }
 
@@ -616,6 +643,7 @@ kernel void kernel_draw_rounded_rect_outline(
 kernel void kernel_draw_triangle_filled(
     device uint* fb               [[buffer(0)]],
     constant TriangleParams& p    [[buffer(1)]],
+    constant ClipParams& clip     [[buffer(4)]],
     uint2 tid                     [[thread_position_in_grid]]
 ) {
     int bw = 0;  // computed from bounding box
@@ -655,6 +683,7 @@ kernel void kernel_draw_triangle_filled(
     if (!inside) return;
 
     if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+    if (!inside_clip(px, py, clip)) return;
 
     int idx = py * p.fb_w + px;
     fb[idx] = blend_src_over(p.color, fb[idx]);
@@ -665,6 +694,7 @@ kernel void kernel_draw_triangle_filled(
 kernel void kernel_draw_gradient_rect(
     device uint* fb               [[buffer(0)]],
     constant GradientParams& p    [[buffer(1)]],
+    constant ClipParams& clip     [[buffer(4)]],
     uint2 tid                     [[thread_position_in_grid]]
 ) {
     int lx = (int)tid.x;
@@ -686,6 +716,7 @@ kernel void kernel_draw_gradient_rect(
     int px = p.x + lx;
     int py = p.y + ly;
     if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+    if (!inside_clip(px, py, clip)) return;
 
     int idx = py * p.fb_w + px;
     // CPU-lane oracle (emu_draw_gradient_rect -> core.draw_rect_filled) alpha-
@@ -703,6 +734,7 @@ kernel void kernel_blit_image(
     device uint* fb             [[buffer(0)]],
     constant BlitParams& p      [[buffer(1)]],
     device const uint* src      [[buffer(2)]],
+    constant ClipParams& clip   [[buffer(4)]],
     uint2 tid                   [[thread_position_in_grid]]
 ) {
     int lx = (int)tid.x;
@@ -712,6 +744,7 @@ kernel void kernel_blit_image(
     int px = p.x + lx;
     int py = p.y + ly;
     if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+    if (!inside_clip(px, py, clip)) return;
 
     int src_idx = ly * p.w + lx;
     int dst_idx = py * p.fb_w + px;
@@ -724,6 +757,7 @@ kernel void kernel_composite_image(
     device uint* fb                       [[buffer(0)]],
     constant ImageCompositeParams& p      [[buffer(1)]],
     device const uint* src                [[buffer(2)]],
+    constant ClipParams& clip             [[buffer(4)]],
     uint2 tid                             [[thread_position_in_grid]]
 ) {
     int lx = (int)tid.x;
@@ -733,6 +767,7 @@ kernel void kernel_composite_image(
     int px = p.x + lx;
     int py = p.y + ly;
     if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+    if (!inside_clip(px, py, clip)) return;
 
     int src_idx = ly * p.w + lx;
     int dst_idx = py * p.fb_w + px;
@@ -756,6 +791,7 @@ kernel void kernel_indexed_fill(
     constant IndexedFillParams& p         [[buffer(1)]],
     device const uchar* idx_buf           [[buffer(2)]],
     device const uint* lut                [[buffer(3)]],
+    constant ClipParams& clip             [[buffer(4)]],
     uint2 tid                             [[thread_position_in_grid]]
 ) {
     int lx = (int)tid.x;
@@ -769,6 +805,7 @@ kernel void kernel_indexed_fill(
     int px = p.x + lx;
     int py = p.y + ly;
     if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+    if (!inside_clip(px, py, clip)) return;
 
     int dst_idx = py * p.fb_w + px;
     fb[dst_idx] = val;
@@ -789,6 +826,7 @@ kernel void kernel_glyph_atlas_blit(
     constant TextBlitParams& p           [[buffer(1)]],
     device const uint* codepoints        [[buffer(2)]],
     device const uint* atlas             [[buffer(3)]],
+    constant ClipParams& clip            [[buffer(4)]],
     uint2 tid                            [[thread_position_in_grid]]
 ) {
     int lx = (int)tid.x;
@@ -815,6 +853,7 @@ kernel void kernel_glyph_atlas_blit(
     int px = p.x + lx;
     int py = p.y + ly;
     if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+    if (!inside_clip(px, py, clip)) return;
     fb[py * p.fb_w + px] = p.color;
 }
 """

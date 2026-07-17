@@ -1,13 +1,13 @@
-# Bug: Engine2D Metal GPU-only-mode scissor clip is unimplemented (silent no-op)
+# Bug: Engine2D Metal GPU-only-mode scissor clip evidence
 
-- **Status:** open (honest — no dishonest claim; documented in code)
-- **Severity:** P2 (correctness gap on the fast Metal lane; no false-green)
+- **Status:** implemented; current-source native Metal evidence pending
+- **Severity:** P2 (implementation complete; deployment evidence remains)
 - **Component:** `src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl`
-  (`set_clip` ~line 389, `clear_clip` ~line 400)
+  (`set_clip`, `clear_clip`, `_bind_metal_clip`)
 - **Platform:** macOS only (real Metal GPU). Cannot be reproduced or verified on
   the Linux CI host (no Metal runtime).
 
-## Symptom
+## Original symptom
 
 In GPU-only (fast) mode — `_gpu_only_mode()` true, the CPU mirror shrunk to 1x1
 by `use_gpu_only()` — `MetalBackend.set_clip(x, y, w, h)` records the clip on the
@@ -20,16 +20,22 @@ In mirror-backed (non-fast) mode this is NOT a problem: `set_clip` forwards to
 the full-size CPU mirror, which enforces the clip, and `read_pixels()` returns
 the mirror — so clipped output is correct there.
 
-## Honesty status (why this is not a false-green)
+## Implemented fix (2026-07-17)
 
-The code does not pretend clip works on the GPU path. `set_clip` carries an
-explicit comment: "the GPU dispatch path does not apply one either — a clip is a
-no-op here." The related (now-closed) readback bug
-`engine2d_fast_metal_clip_poisons_gpu_readback_2026-07-03.md` documents the
-same fact but tracks only the readback-poisoning interaction, not the underlying
-unimplemented-scissor gap — hence this dedicated open record.
+`MetalBackend` now owns the active clip state and binds a 20-byte `ClipParams`
+record at Metal buffer index 4 for every compute dispatch. Every drawing kernel
+rejects pixels outside that rectangle; `kernel_clear` deliberately ignores the
+clip to retain the established full-surface clear contract. This reuses the
+existing `metal_sffi_set_bytes` interface and does not change the runtime ABI.
 
-## What is missing to wire it (real fix)
+The macOS-only readback regression switches the backend to GPU-only mode, draws
+a full-surface rectangle through a small clip, clears the clip, and verifies
+absolute inside/outside pixels plus a post-clear draw. The implementation is no
+longer missing, but closure still requires this current source to be built and
+the native Metal regression to pass; the stale deployed CLI cannot provide that
+evidence while the tracked Stage-4 bootstrap blocker remains open.
+
+## Original proposed approach
 
 Thread the active clip rect into every Metal compute kernel dispatch as push
 constants and reject out-of-clip pixels in each `.metal` kernel (the same clip
@@ -41,11 +47,7 @@ Metal scissor/render-region stage. This requires:
 2. `_dispatch_metal_*` in `backend_metal.spl` to pass `clip_x/clip_y/clip_w/
    clip_h/clip_enabled` into the push-constant buffer.
 3. `rt_metal_*` runtime support (`metal_graphics_runtime.rs`) if the push-constant
-   layout changes.
-
-This is NOT a contained pure-Simple change (needs kernel + runtime work) and
-cannot be verified on a non-macOS host, so it is deliberately left unimplemented
-and honestly marked rather than faked.
+   layout changes. The implemented buffer-4 design avoided that ABI change.
 
 ## Verification requirement (when implemented, macOS)
 

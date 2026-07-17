@@ -314,6 +314,11 @@ class MetalBackend:
     d_framebuffer: i64
     w: i32
     h: i32
+    clip_x: i32
+    clip_y: i32
+    clip_w: i32
+    clip_h: i32
+    clip_enabled: bool
     dirty: bool
     initialized: bool
     gpu_frame_complete: bool
@@ -347,6 +352,11 @@ fn make_metal_backend() -> MetalBackend:
         d_framebuffer: 0,
         w: 0,
         h: 0,
+        clip_x: 0,
+        clip_y: 0,
+        clip_w: 0,
+        clip_h: 0,
+        clip_enabled: false,
         dirty: false,
         initialized: false,
         gpu_frame_complete: false,
@@ -418,6 +428,11 @@ impl RenderBackend for MetalBackend:
         self.command_queue = self.session.command_queue
         self.w = width
         self.h = height
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = width
+        self.clip_h = height
+        self.clip_enabled = false
         self.dirty = false
         self.initialized = true
         self.gpu_frame_complete = false
@@ -640,23 +655,18 @@ impl RenderBackend for MetalBackend:
         emu_draw_image_blend(self, x, y, w, h, pixels)
     me set_clip(x: i32, y: i32, w: i32, h: i32):
         self.mirror.set_clip(x, y, w, h)
-        # In GPU-only (fast) mode the CPU mirror is shrunk to 1x1, so it cannot
-        # enforce a clip, and the GPU dispatch path does not apply one either —
-        # a clip is a no-op here (the Metal compute kernels do not yet carry a
-        # clip-rect push constant). This is an honestly-tracked unimplemented
-        # gap, NOT a claim that clip works on the fast lane — see
-        # doc/08_tracking/bug/engine2d_metal_gpu_only_clip_unimplemented_2026-07-06.md
-        # Do NOT clear gpu_frame_complete: that would poison the single-shot GPU
-        # readback (read_pixels would drop to the 1x1 mirror) and, via the `and`
-        # accumulator on subsequent draw ops, skip their GPU dispatches entirely.
-        # See
-        # doc/08_tracking/bug/engine2d_fast_metal_clip_poisons_gpu_readback_2026-07-03.md
-        if not self._gpu_only_mode():
-            self.gpu_frame_complete = false
+        self.clip_x = x
+        self.clip_y = y
+        self.clip_w = w
+        self.clip_h = h
+        self.clip_enabled = true
     me clear_clip():
         self.mirror.clear_clip()
-        if not self._gpu_only_mode():
-            self.gpu_frame_complete = false
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = self.w
+        self.clip_h = self.h
+        self.clip_enabled = false
     me set_mask(mask_pixels: [u8], w: i32, h: i32):
         self.mirror.set_mask(mask_pixels, w, h)
         self.gpu_frame_complete = false
@@ -1017,6 +1027,7 @@ impl MetalBackend:
         var encoded = metal_sffi_set_buffer(encoder, fb, 0, 0)
         encoded = encoded and (metal_set_bytes_ptr(encoder, params, 24, 1) != 0)
         encoded = encoded and metal_sffi_set_buffer(encoder, src_buf, 0, 2)
+        encoded = encoded and self._bind_metal_clip(encoder)
         val bx = 16
         val by = 16
         val gx = ((_metal_i64(block_w) + bx - 1) / bx) * bx
@@ -1103,6 +1114,7 @@ impl MetalBackend:
         var encoded = metal_sffi_set_buffer(encoder, self.d_framebuffer, 0, 0)
         encoded = encoded and (metal_set_bytes_ptr(encoder, params, 28, 1) != 0)
         encoded = encoded and metal_sffi_set_buffer(encoder, src_buf, 0, 2)
+        encoded = encoded and self._bind_metal_clip(encoder)
         if encoded:
             val bx = 16
             val by = 16
@@ -1546,6 +1558,7 @@ impl MetalBackend:
         encoded = encoded and (metal_set_bytes_ptr(encoder, params, params_len, 1) != 0)
         encoded = encoded and metal_sffi_set_buffer(encoder, source, 0, 2)
         encoded = encoded and metal_sffi_set_buffer(encoder, auxiliary, 0, 3)
+        encoded = encoded and self._bind_metal_clip(encoder)
         val block_x = 16
         val block_y = 16
         val grid_x = ((_metal_i64(w) + block_x - 1) / block_x) * block_x
@@ -1575,6 +1588,20 @@ impl MetalBackend:
         self.pending_composite_source = 0
         true
 
+    me _bind_metal_clip(encoder: i64) -> bool:
+        val params = metal_host_alloc(20)
+        if params == 0:
+            return false
+        metal_host_write_i32(params, 0, self.clip_x as i64)
+        metal_host_write_i32(params, 4, self.clip_y as i64)
+        metal_host_write_i32(params, 8, self.clip_w as i64)
+        metal_host_write_i32(params, 12, self.clip_h as i64)
+        val enabled = if self.clip_enabled: 1 else: 0
+        metal_host_write_i32(params, 16, enabled)
+        val bound = metal_set_bytes_ptr(encoder, params, 20, 4) != 0
+        metal_host_free(params)
+        bound
+
     me _dispatch_metal_1d(pipeline: i64, threads: i64, block_x: i64, params: i64, params_len: i64) -> bool:
         # Snapshot queue and framebuffer handles before allocating command
         # objects so all failure paths operate on one submission state.
@@ -1591,6 +1618,7 @@ impl MetalBackend:
             return false
         var encoded = metal_sffi_set_buffer(encoder, fb, 0, 0)
         encoded = encoded and (metal_set_bytes_ptr(encoder, params, params_len, 1) != 0)
+        encoded = encoded and self._bind_metal_clip(encoder)
         if encoded:
             encoded = metal_sffi_dispatch_compute(encoder, pipeline, threads, 1, 1, block_x, 1, 1)
         encoded = encoded and metal_sffi_end_compute_encoder(encoder)
@@ -1627,6 +1655,7 @@ impl MetalBackend:
             return false
         var encoded = metal_sffi_set_buffer(encoder, fb, 0, 0)
         encoded = encoded and (metal_set_bytes_ptr(encoder, params, params_len, 1) != 0)
+        encoded = encoded and self._bind_metal_clip(encoder)
         val block_x = 16
         val block_y = 16
         val grid_x = ((_metal_i64(w) + block_x - 1) / block_x) * block_x

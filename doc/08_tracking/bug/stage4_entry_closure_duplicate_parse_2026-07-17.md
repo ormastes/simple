@@ -136,3 +136,28 @@ initialization gate. The offscreen selection now uses an explicitly initialized
 `Engine2D?`, assigns `Some(created)` on every backend path, and unwraps only
 after selection. No fourth full closure run was started. Full executable
 acceptance remains open at this later Engine2D boundary.
+
+## 2026-07-17 macOS public-trait and module-order continuation
+
+The first bounded cycle used the pushed Engine2D fix, retained a 2,021
+collected / 1,247 unique source plan, passed the prior Engine2D boundary, and
+reached `src/compiler/70.backend/backend/codegen_types.spl` at 327.422 seconds.
+It exposed that visibility dispatch omitted the established `pub trait` form.
+The parser now routes public traits through `parse_struct_or_trait_decl`, and
+a focused native `pub trait` probe compiled and ran (`ready`).
+
+After the latest remote compiler changes were incorporated into Stage3, cycles
+two and three both SIGBUSed immediately after phase 2 began. macOS crash reports
+identified `Map.keys` called from `desugar_async.desugar_module`; the receiver
+was the tagged runtime `Dict` created by the required `{}` initializer, not a
+`Map` struct. Rewriting `Map.keys` traversal did not change the fault and was
+reverted, proving its body was not the cause.
+
+The frontend `Module` now carries explicit `function_order` and `actor_order`
+arrays populated during flat-AST assembly. Async desugaring consumes those
+arrays and records generated helper names as they are created, removing its
+three `.keys()` snapshots without reintroducing the interpreter-corrupting
+`Map.new()` spelling. All `Module` construction paths carry the new fields. A
+fresh Stage3 rebuilt incrementally (8 compiled, 700 cached, zero failed), then
+compiled and ran a new native module (`ready`). No fourth full Stage4 cycle was
+started; executable acceptance remains open for the next bounded continuation.

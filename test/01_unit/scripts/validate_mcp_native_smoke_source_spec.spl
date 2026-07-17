@@ -4,6 +4,12 @@ use std.spec.{describe, it, expect}
 fn validator_source() -> text:
     rt_file_read_text("scripts/check/validate_mcp_native_smoke.spl") ?? ""
 
+fn optimized_bootstrap_source() -> text:
+    rt_file_read_text("src/app/mcp/bootstrap/main_optimized.spl") ?? ""
+
+fn nfr_gate_source() -> text:
+    rt_file_read_text("scripts/check/check-mcp-lsp-nfr-evidence.shs") ?? ""
+
 describe "MCP native smoke validator source":
     it "validates Content-Length against raw file bytes":
         val source = validator_source()
@@ -15,3 +21,27 @@ describe "MCP native smoke validator source":
         expect(source).to_contain("val crlf_separator: [u8] = [13u8, 10u8, 13u8, 10u8]")
         expect(source.contains("text_to_bytes(raw)")).to_equal(false)
         expect(source.contains("bytes[pos:pos + prefix.len()]")).to_equal(false)
+
+    it "dispatches optimized BugDB tools to persistent handlers":
+        val source = optimized_bootstrap_source()
+
+        expect(source).to_contain("get_bug_by_id(db_path, bug_id)")
+        expect(source).to_contain("add_bug_from_json(db_path, bug_json)")
+        expect(source).to_contain("update_bug_from_json(db_path, bug_id, bug_json)")
+        expect(source).to_contain("Missing required argument: id")
+        expect(source).to_contain("Missing required argument: bug")
+        expect(source.contains("integration pending")).to_equal(false)
+
+        val schema = rt_file_read_text("src/lib/nogc_async_mut/mcp/schema.spl") ?? ""
+        expect(schema).to_contain("req: \"\\\"id\\\",\\\"bug\\\"\"")
+
+    it "keeps the MCP/LSP NFR evidence gate portable to stock macOS":
+        val source = nfr_gate_source()
+
+        expect(source).to_contain("TIME_STYLE=gnu")
+        expect(source).to_contain("TIME_STYLE=bsd")
+        expect(source).to_contain("/usr/bin/time -l")
+        expect(source).to_contain("maximum resident set size")
+        expect(source).to_contain("perl -e 'alarm shift; exec @ARGV'")
+        expect(source.contains("command -v timeout")).to_equal(false)
+        expect(source.contains("gnu_time_required")).to_equal(false)

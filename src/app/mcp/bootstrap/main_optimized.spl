@@ -25,6 +25,7 @@ use app.mcp.diag_edit_tools.{handle_simple_edit, handle_simple_multi_edit, handl
 use app.mcp.diag_vcs_tools.{handle_simple_diff, handle_simple_log, handle_simple_squash, handle_simple_new}
 use app.mcp.debug_tools.{handle_debug_create_session, handle_debug_list_sessions, handle_debug_close_session, handle_debug_set_breakpoint, handle_debug_remove_breakpoint, handle_debug_continue, handle_debug_step, handle_debug_get_variables, handle_debug_stack_trace, handle_debug_evaluate}
 use app.mcp.debug_log_tools.{handle_debug_log_enable, handle_debug_log_disable, handle_debug_log_clear, handle_debug_log_query, handle_debug_log_tree, handle_debug_log_status}
+use app.mcp.bugdb_resource.{get_bug_by_id, add_bug_from_json, update_bug_from_json}
 
 # --- Pre-computed responses (Phase 5) ---
 const INIT_RESULT = """{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true},"resources":{"subscribe":true,"listChanged":true},"prompts":{"listChanged":true},"logging":{},"completions":{},"tasks":{}},"serverInfo":{"name":"simple-mcp","version":"2.1.0","instructions":"Search for Simple MCP tools when the user asks about Simple language source code, bugs, tests, or features."}}"""
@@ -237,8 +238,26 @@ fn dispatch_diag(id: text, tool_name: text, body: text) -> text:
         make_error_response(id, -32601, "Unknown diagnostic tool: " + tool_name)
 
 fn dispatch_bugdb(id: text, tool_name: text, body: text) -> text:
-    # TODO: Import bugdb handlers when available
-    val content = "BugDB handler for {tool_name} - integration pending"
+    val db_path = "doc/08_tracking/bug/bug_db.sdn"
+    val bug_id = extract_nested_string(body, "arguments", "id")
+    val content = if tool_name == "bugdb_get":
+        if bug_id == "":
+            return make_error_response(id, -32602, "Missing required argument: id")
+        get_bug_by_id(db_path, bug_id)
+    elif tool_name == "bugdb_add":
+        val bug_json = extract_nested_string(body, "arguments", "bug")
+        if bug_json == "":
+            return make_error_response(id, -32602, "Missing required argument: bug")
+        add_bug_from_json(db_path, bug_json)
+    elif tool_name == "bugdb_update":
+        val bug_json = extract_nested_string(body, "arguments", "bug")
+        if bug_id == "":
+            return make_error_response(id, -32602, "Missing required argument: id")
+        if bug_json == "":
+            return make_error_response(id, -32602, "Missing required argument: bug")
+        update_bug_from_json(db_path, bug_id, bug_json)
+    else:
+        return make_error_response(id, -32601, "Unknown BugDB tool: " + tool_name)
     val result_content = LB() + jp("type", js("text")) + "," + jp("text", js(content)) + RB()
     val result = LB() + jp("content", "[" + result_content + "]") + "," + jp("isError", "false") + RB()
     make_result_response(id, result)
