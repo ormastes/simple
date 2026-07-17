@@ -54,7 +54,48 @@ fn native_build_cpu_for_target(target: simple_common::target::Target) -> TargetC
     }
 }
 
-fn wrap_entry_script_as_main(mut module: simple_parser::ast::Module) -> simple_parser::ast::Module {
+fn is_const_global_initializer(expr: &Expr) -> bool {
+    fn is_numeric_const(expr: &Expr) -> bool {
+        match expr {
+            Expr::Integer(_) | Expr::TypedInteger(_, _) | Expr::Float(_) | Expr::TypedFloat(_, _) => true,
+            Expr::Binary { left, right, .. } => is_numeric_const(left) && is_numeric_const(right),
+            Expr::Unary { operand, .. } => is_numeric_const(operand),
+            _ => false,
+        }
+    }
+    match expr {
+        Expr::Bool(_) | Expr::String(_) => true,
+        Expr::FString { parts, .. } => {
+            parts.is_empty() || (parts.len() == 1 && matches!(parts[0], simple_parser::ast::FStringPart::Literal(_)))
+        }
+        expr => is_numeric_const(expr),
+    }
+}
+
+fn is_simple_name_pattern(pattern: &simple_parser::Pattern) -> bool {
+    match pattern {
+        simple_parser::Pattern::Identifier(_) | simple_parser::Pattern::MutIdentifier(_) => true,
+        simple_parser::Pattern::Typed { pattern, .. } => is_simple_name_pattern(pattern),
+        _ => false,
+    }
+}
+
+fn is_liftable_global_decl(node: &Node) -> bool {
+    match node {
+        Node::Const(decl) => is_const_global_initializer(&decl.value),
+        Node::Static(decl) => is_const_global_initializer(&decl.value),
+        Node::Let(decl) => {
+            is_simple_name_pattern(&decl.pattern)
+                && decl.value.as_ref().map(is_const_global_initializer).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn wrap_entry_script_as_main(
+    mut module: simple_parser::ast::Module,
+    is_freestanding: bool,
+) -> simple_parser::ast::Module {
     if has_explicit_main(&module.items) {
         return module;
     }
@@ -62,7 +103,10 @@ fn wrap_entry_script_as_main(mut module: simple_parser::ast::Module) -> simple_p
     let mut lifted = Vec::new();
     let mut script_body = Vec::new();
     for item in module.items {
-        if is_script_statement(&item) {
+        let is_module_level_decl = matches!(item, Node::Let(_) | Node::Const(_) | Node::Static(_));
+        if is_liftable_global_decl(&item) || (is_freestanding && is_module_level_decl) {
+            lifted.push(item);
+        } else if is_script_statement(&item) {
             script_body.push(item);
         } else {
             lifted.push(item);
@@ -284,11 +328,16 @@ pub(crate) fn compile_file_to_object(
     // first-wins pick in codegen (bug
     // x64_freestanding_cfg_multivariant_misdispatch).
     super::discovery::strip_inactive_cfg_arch_fns(&mut ast, effective_target().arch);
-    let mut ast = if is_entry { wrap_entry_script_as_main(ast) } else { ast };
-    if matches!(
+    let is_freestanding = matches!(
         target.os,
         simple_common::target::TargetOS::None | simple_common::target::TargetOS::SimpleOS
-    ) {
+    );
+    let mut ast = if is_entry {
+        wrap_entry_script_as_main(ast, is_freestanding)
+    } else {
+        ast
+    };
+    if is_freestanding {
         let module_prefix = module_prefix_from_path(file_path, source_root);
         inject_freestanding_module_global_init(&mut ast, &module_prefix);
     }

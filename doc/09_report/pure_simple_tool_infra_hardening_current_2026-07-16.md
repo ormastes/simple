@@ -541,6 +541,11 @@ so executable qualification is still blocked.
   exact parser regression passes 1/1. The exact compiler regression is source-
   complete but its crate currently fails before test execution on unrelated
   upstream `wrap_entry_script_as_main` visibility/signature mismatches.
+- The upstream wrapper mismatch was a real regression: a later SimpleOS
+  rewrite reverted the tested two-argument wrapper while leaving its callers
+  and four hosted/freestanding semantic tests intact. The wrapper now again
+  keeps constant hosted globals and all freestanding declarations at module
+  scope, while script statements still enter the synthetic `main`.
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system
   qualification: NOT RUN because the production runtime identity gate fails
   and this host has no PowerShell/Windows runtime.
