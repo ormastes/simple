@@ -138,6 +138,27 @@ pub(super) fn eval_collection_expr(
         Expr::StructInit { name, fields, spread } => {
             let mut map = HashMap::new();
 
+            // Strip module prefix from class name (e.g., "dt.Duration" -> "Duration")
+            // This ensures method lookup works correctly for imported types
+            let class_name = name.rsplit('.').next().unwrap_or(name).to_string();
+
+            // Pre-fill every declared field with its `= default` expression (or nil
+            // when no default is given), matching paren-form construction
+            // (instantiate_class in interpreter_call/core/class_instantiation.rs).
+            // Without this, brace-form init omits fields entirely when the
+            // literal doesn't mention them, so later `.field` access fails with
+            // "class has no field named X" instead of yielding nil.
+            if let Some(class_def) = classes.get(&class_name).cloned() {
+                for field in &class_def.fields {
+                    let val = if let Some(default_expr) = &field.default {
+                        evaluate_expr(default_expr, env, functions, classes, enums, impl_methods)?
+                    } else {
+                        Value::Nil
+                    };
+                    map.insert(field.name.clone(), val);
+                }
+            }
+
             // If there's a spread expression, evaluate it first to get the base struct
             if let Some(spread_expr) = spread {
                 let base_val = evaluate_expr(spread_expr, env, functions, classes, enums, impl_methods)?;
@@ -176,9 +197,6 @@ pub(super) fn eval_collection_expr(
                 let v = evaluate_expr(fexpr, env, functions, classes, enums, impl_methods)?;
                 map.insert(fname.clone(), v);
             }
-            // Strip module prefix from class name (e.g., "dt.Duration" -> "Duration")
-            // This ensures method lookup works correctly for imported types
-            let class_name = name.rsplit('.').next().unwrap_or(name).to_string();
             Ok(Some(Value::Object {
                 class: class_name,
                 fields: Arc::new(map),
