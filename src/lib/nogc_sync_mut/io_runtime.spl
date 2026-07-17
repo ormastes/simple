@@ -31,7 +31,8 @@ extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_size(path: text) -> i64
-extern fn sys_get_args() -> [text]
+extern fn rt_cli_arg_count() -> i64
+extern fn rt_cli_arg_at(index: i64) -> text
 extern fn rt_exit(code: i64)
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_is_running(pid: i64) -> bool
@@ -154,22 +155,28 @@ pub fn file_size_raw(path: text) -> i64:
 # Process Execution
 # ============================================================================
 
-# NOTE (process_run_tuple_ambiguity_2026-07-17): the return tuple is labeled
-# (stdout/stderr/exit_code) rather than left as a bare (text, text, i64).
-# An unlabeled tuple with two repeated `text` fields trips a standalone-
-# compile-mode-only ambiguity check ("anonymous multi-return tuple contains
-# repeated field types; add labels to disambiguate") the moment any entry
-# file does field access (`.0`/`.2`) or destructuring on this function's
-# result — confirmed via a 5-line minimal repro that fails identically to
-# src/app/mcp/main_lazy_json.spl's standalone compile. Labeling here is the
-# true root fix: it requires no caller changes (both `.0`/`.1`/`.2` indexed
-# access and `val (a, b, c) = process_run(...)` destructuring keep compiling
-# and behave identically at runtime — verified with matching probes before
-# this change), unlike migrating ~150 call sites (`grep -rl "use std.io_runtime.*process_run"
-# src test` excluding vendor) to a struct or adding a parallel
-# process_run_result API. See
+# NOTE (process_run_tuple_ambiguity_2026-07-17): an unlabeled tuple with two
+# repeated `text` fields trips a standalone-compile-mode-only ambiguity check
+# ("anonymous multi-return tuple contains repeated field types; add labels to
+# disambiguate") the moment any entry file does field access (`.0`/`.2`) or
+# destructuring on this function's result — see
 # doc/08_tracking/bug/mcp_main_lazy_json_standalone_compile_process_run_tuple_ambiguity_2026-07-17.md
-pub fn process_run(cmd: text, args: [text]) -> (stdout: text, stderr: text, exit_code: i64):
+# A same-day follow-up labeled the return tuple (stdout/stderr/exit_code) to
+# fix that, but the frozen Stage-1 bootstrap seed cannot PARSE a labeled
+# tuple return type at all (`-> (name: type, ...)` — a *documented* feature,
+# see doc/07_guide/quick_reference/syntax_quick_reference.md "Multi-Return
+# Tuples") — confirmed with minimal probes against
+# src/compiler_rust/target/bootstrap/simple, including the doc's own
+# `div_rem` example. Since io_runtime.spl sits on bootstrap_main.spl's
+# entry-closure import graph, that turned "unparseable by the seed" into a
+# hard Stage-1 bootstrap blocker (phase 2 aborts on the first parse error).
+# Reverting to the unlabeled tuple here to unblock Stage-1; the standalone-
+# compile ambiguity this reintroduces only affects narrow entry-file
+# `.0`/destructuring callers (e.g. main_lazy_json.spl) and should be fixed
+# at that call site instead of on this ~150-caller, bootstrap-critical
+# signature. See
+# doc/08_tracking/bug/seed_parser_labeled_tuple_return_type_gap_2026-07-17.md
+pub fn process_run(cmd: text, args: [text]) -> (text, text, i64):
     rt_process_run(cmd, args)
 
 # ============================================================================
@@ -203,16 +210,19 @@ pub fn time_now_unix_micros() -> i64:
     rt_time_now_unix_micros()
 
 pub fn get_args() -> [text]:
-    sys_get_args()
+    val count = rt_cli_arg_count()
+    var args: [text] = []
+    var i = 0
+    while i < count:
+        args = args.push(rt_cli_arg_at(i))
+        i = i + 1
+    args
 
 pub fn cli_arg_count() -> i64:
-    sys_get_args().len()
+    rt_cli_arg_count()
 
 pub fn cli_arg_at(index: i64) -> text:
-    val args = sys_get_args()
-    if index >= 0 and index < args.len():
-        return args[index]
-    ""
+    rt_cli_arg_at(index)
 
 pub fn exit(code: i64):
     rt_exit(code)
