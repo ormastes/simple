@@ -172,7 +172,9 @@ A wrong-but-silent result is the worst failure class; these go first.
 **Note on #8:** blocked on a runnable pure-Simple `native-build` verification gate
 (source-only landing cannot prove absence of double-wrapping / payload-3 collision
 / Result regressions). Do this last in Wave 1, with the ABI acceptance matrix from
-the bug docs as the gate.
+the bug docs as the gate. That matrix must also prove level-aware nested Option
+wrapping, bit-preserving float payloads, and the ARM32 constructor ABI; a runtime
+ID check alone cannot distinguish `Option<T>` from `Option<Option<T>>`.
 
 ---
 
