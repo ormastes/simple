@@ -35,8 +35,8 @@ so executable qualification is still blocked.
 
 | Surface | Status | Bug / missing evidence | Root solution | Priority |
 |---|---|---|---|---|
-| Production runtime | BLOCKED | The latest full/manual bootstrap exits normally at Stage 2 on imported-enum `Shared` lowering in the HIP/OpenCL dependency closures; no fresh CLI exists | Fix import-aware enum-owner lowering, rebuild, admit, and atomically deploy | P0 |
-| Test runner | SOURCE REPAIRED / DEPLOY BLOCKED | The retained release binary crashes in stale two-arg `rt_env_set`; current ABI is correct. Rust native/interpreter wait owners now return `-2` while live, retain the child, reap after kill, and inherit async output so unread pipes cannot hang chatty children. Owner-qualified `CompareExchange` removed both diagnostics and the CUDA failing root; Stage 2 now stops only on imported-enum `Shared` lowering | Fix the remaining enum-owner lowering, rebuild/deploy the pure CLI, run green/red/empty fixtures, then remove temporary Rust opt-in | P0 |
+| Production runtime | BLOCKED | The latest bounded manual bootstrap clears discovery, then exits normally at Stage 2 on imported-enum `Shared` in HIP/OpenCL plus a separate `String.smf` field-inference failure; no fresh CLI exists | Fix both HIR owner/type-preservation failures, rebuild, admit, and atomically deploy | P0 |
+| Test runner | SOURCE REPAIRED / DEPLOY BLOCKED | The retained release binary crashes in stale two-arg `rt_env_set`; current ABI is correct. Rust native/interpreter wait owners now return `-2` while live, retain the child, reap after kill, and inherit async output so unread pipes cannot hang chatty children. Stage 2 now reaches native compilation but still fails on `Shared` and `String.smf` | Fix the remaining HIR failures, rebuild/deploy the pure CLI, run green/red/empty fixtures, then remove temporary Rust opt-in | P0 |
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; cosine candidate progress is time-throttled instead of reading RSS and writing stderr per pair; exact/cosine line gates share one tokenizer-derived signal prefix; runtime/performance qualification remain | Run focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
 | Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP001-MCP004 share one stable aggregate and LSP scope, while repository mode still fails closed pending safe recursive discovery; the UI isolation ratchet has zero new violations; the hot-loop gate reports 30 new findings | Repair native directory-walk parity, wire the aggregate repository owner, repair classified violations, then run focused fixtures | P1 |
 | Bootstrap essential tools | SOURCE WIRED | The exact fresh Stage 4 CLI now gates calibrated test-runner, focused lint, and deterministic duplicate-check outcomes from a non-repository cwd; raw-source duplicate dispatch is structurally forbidden | Run the aggregate after a fresh admitted Stage 4 binary exists | P0 |
@@ -94,8 +94,9 @@ so executable qualification is still blocked.
 1. A clean admitted full-CLI runtime is unavailable. The latest full/manual
    bootstrap clears the prior `CompareExchange` frontier but exits normally at
    Stage 2 on imported-enum `Shared` lowering in the HIP/OpenCL dependency
-   closures. Two bounded spelling workarounds did not advance that frontier,
-   so the next lane must fix import-aware enum-owner lowering rather than retry.
+   closures plus a separate `String.smf` field-inference failure in CLI compile.
+   Focused enum coverage passes but does not reproduce the real project path,
+   so the next lane must fix imported owner preservation rather than retry.
 2. NFR-007 and NFR-009 evidence harnesses exist, but their production latency
    and RSS measurements cannot qualify while the deployed runtime is the seed.
 3. The UI isolation ratchet has zero new violations after 22 exact bare-metal,
@@ -517,10 +518,12 @@ so executable qualification is still blocked.
   spelling and focused lexer regression advance Stage 2. The newline-preserving
   `lean_backend.spl:166` hoist and exact builder regression advance again to
   `vulkan/spirv_builder.spl:234`. Its struct/function cache-key hoists and exact
-  no-duplicate-emission regression advance to `c_type_mapper.spl:97`. The
-  `Shared` admission remains
-  provisional; strict runs exit normally with no timeout, OOM, crash, hang,
-  orphan, or seed fallback.
+  no-duplicate-emission regression advance to `c_type_mapper.spl:97`. Eight
+  safe backend type-mapper separator spellings then clear discovery entirely.
+  Native compilation still reports HIP/OpenCL `Shared` plus the independent
+  CLI `String.smf` inference failure, so the focused enum fix is not admitted.
+  Strict runs exit normally with no timeout, OOM, crash, hang, orphan, or seed
+  fallback.
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system
   qualification: NOT RUN because the production runtime identity gate fails
   and this host has no PowerShell/Windows runtime.

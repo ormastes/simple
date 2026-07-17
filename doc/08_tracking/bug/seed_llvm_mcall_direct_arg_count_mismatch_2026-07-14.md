@@ -221,9 +221,14 @@ newline-preserving `lean_backend.spl:166` join is covered by an exact
 `vulkan/spirv_builder.spl:234` nested `member_ids.map("{_}")`. Hoisting the
 struct and adjacent function cache-key rendering is covered by an exact
 cache/output regression and advances discovery to the same-class
-`c_type_mapper.spl:97` tuple separator. Therefore the
-imported-`Shared` Stage 2 delta remains provisional. All bounded runs exited 1
-normally with no timeout, OOM, crash, hang, orphan, or seed fallback.
+`c_type_mapper.spl:97` tuple separator. Normalizing the eight comma/space-only
+backend type-mapper separators clears discovery completely. The bounded native
+build then fails on exactly three files: HIP/OpenCL still load undeclared
+`Shared`, while `compile_opt_and_driver.spl` separately cannot infer the
+`String.smf` field type. Thus the focused imported-enum regression does not
+admit the fix on the real project path and further owner-preservation work is
+required. `CompareExchange` remains absent. All bounded runs exited 1 normally
+with no timeout, OOM, crash, hang, orphan, or seed fallback.
 
 ## Context: in-guest RUN is otherwise REACHABLE
 
