@@ -1,6 +1,6 @@
 # Pure-Simple tool and infrastructure hardening status
 
-Date: 2026-07-16
+Date: 2026-07-17
 
 ## Executive status
 
@@ -38,7 +38,7 @@ so executable qualification is still blocked.
 | Production runtime | BLOCKED | Stage 4 was found parsing 10,503 files before closure pruning; source fix is unverified because the final cycle stopped on a stale compiler-backfill guard | In a fresh session run one bounded `--full-bootstrap`, require closure-sized phase input, then admit and atomically deploy | P0 |
 | Test runner | PARTIAL | POSIX parallel children are tracked; timeouts and cooperatively dispatched SIGINT/TERM/HUP clean them before exit. Sequential/limited/fork/QEMU children remain synchronously untracked; Windows parallel capture fails closed | Move every execution mode onto an interruptible tracked process owner, add process-group/parent-death containment, then run signal/timeout/RSS evidence | P0 |
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; exact/cosine line gates share one tokenizer-derived signal prefix, preserve indentation, and exclude comment/string-only windows; runtime and performance qualification remain | Run the focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
-| Lint | SOURCE FIXED | Production CLI delegates to the canonical linter; the isolated 722-line legacy type/check pair is deleted and stale worker assertions now name `cli_run_lint`; global gates still report 30 UI and 45 hot-loop violations | Repair classified violations, then run the focused policy/uniqueness fixtures | P1 |
+| Lint | SOURCE FIXED | Production CLI delegates to the canonical linter; the isolated 722-line legacy type/check pair is deleted; the hot-loop BYTE rule now scopes typed names to their declaring file; global gates still report 30 UI and 41 hot-loop violations | Repair classified violations, wire the currently inert MCP-perf rules to their real owner, then run the focused policy/uniqueness fixtures | P1 |
 | Format/fix | SOURCE GUARDED | Writes are atomic and checked; formatter output passes a CoreLexer equivalence gate or fails closed; existing empty files no longer false-fail | Replace heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
 | Check | PARTIAL | Driver API Check now stops after fatal HIR analysis and before diagnostic-free monomorphization. Production CLI remains parse/policy-only, can false-green HIR-invalid code, and may delegate to the seed | Retain CLI policy checks, route semantics through `driver_api_core.check_file`, consolidate duplicate workers, remove seed delegation only after direct-path latency/RSS qualification | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
@@ -97,7 +97,7 @@ so executable qualification is still blocked.
    and requires `--full-bootstrap`; the three-cycle cap is exhausted.
 2. NFR-007 and NFR-009 evidence harnesses exist, but their production latency
    and RSS measurements cannot qualify while the deployed runtime is the seed.
-3. `simple lint --all` correctly exposes 30 UI architecture and 45 hot-loop
+3. `simple lint --all` correctly exposes 30 UI architecture and 41 hot-loop
    violations. Focused lint no longer fails on that unrelated repository debt;
    the global findings remain an explicit P1 cleanup lane.
 4. `simple check` now states its actual parse/validation behavior. Enforced full
@@ -115,7 +115,7 @@ so executable qualification is still blocked.
 | Rank | Defect | Concrete solution |
 |---|---|---|
 | P1 | Formatter heuristics are contained but not token-gap-native | Replace them incrementally with edits limited to lexer-approved whitespace gaps |
-| P1 | Lint global gates still report classified UI/hot-loop violations | Repair the violations and run focused policy fixtures with an admitted runtime |
+| P1 | Lint global gates still report classified UI/hot-loop violations; the MCP-perf subprocess route is inert | Repair the violations, call the real MCP-perf lint owner directly, and run focused policy fixtures with an admitted runtime |
 | P1 | Signal cleanup covers only tracked parallel children | Move sequential, limited, fork, daemon, doctest, and QEMU children onto an interruptible tracked owner; contain descendant groups separately |
 | P1 | Signal runtime availability is not portable | Guard POSIX `sigaction`, report installation truthfully on Windows, and qualify Ctrl-C separately from POSIX HUP/TERM |
 | P2 | Direct broker callers can retain inactive leases | Production request/execution paths now reject and remove inactive leases; refactor broker-only tests before enforcing active-only retention inside `SessionBroker.acquire` |
@@ -133,10 +133,23 @@ so executable qualification is still blocked.
   env/process/file/time facades; platform-owner exceptions need exact reviewed
   ownership, while the RISC-V desktop entry retains genuine direct display
   bypasses.
-- **CPU hot loops:** the 45 findings are not one mechanical baseline update.
+- **CPU hot loops:** the 41 findings are not one mechanical baseline update.
   Browser pixel/span work, software blend/copy loops, and repeated compositor
   lookup are real owner-level debt; bounded parser/control/hardware polling
   loops need exact reason annotations only after the real hot paths move.
+- **Hot-loop BYTE ownership:** the gate formerly collected `[u8]` identifiers
+  across the entire designated set, so `data[...]` in one file could inherit an
+  unrelated byte declaration from another. Detection now pairs each name with
+  its declaring file. Positive and cross-file-negative fixtures pass directly;
+  the real gate still reports 41 LOOP/SUBSTR findings and no BYTE false hit.
+- **Lint MCP performance:** `cli_lint_commands` currently launches the known
+  inert `build lint --mcp-perf` compatibility lane, while the four real MCP
+  performance lint functions have no production caller. Do not claim coverage;
+  add one aggregate owner and invoke it directly in a runtime-qualified slice.
+- **UI facade duplication:** `src/lib/common/ui/host_winit_surface.spl` has no
+  callers and duplicates the canonical `std.nogc_sync_mut.io.window_winit`
+  owner. Delete it with an absence/canonical-owner regression in a focused UI
+  cleanup slice; the remaining raw runtime findings require owner migrations.
 - **Compositor lookup:** repeated exact-ID scans now share one bounded
   `surface_index` owner. Z-order transforms, app/process group queries, hit
   testing, and rendering retain their intentional ordered scans. A focused

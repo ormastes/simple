@@ -196,18 +196,18 @@ awk -v SF="$loop_single" 'FILENAME==SF { seen[$0]=1; next } !($0 in seen)' "$loo
 cat "$loop_single" "$tmp_dir/loop_multi.txt" >"$loop_hits" || true
 
 # Byte-array element reads: names declared `name: [u8]` (as a field or a
-# param), then indexed elsewhere as `name[...]`. Two-pass structural
-# heuristic (collect u8-typed names, then grep their index use) rather than
-# one fragile regex.
-u8_names="$tmp_dir/u8_names.txt"
-sed -E 's/.*[^A-Za-z0-9_]([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*:[[:space:]]*\[u8\].*/\1/' "$u8_decl_hits" \
-    | sort -u | sed '/^$/d' >"$u8_names" || true
+# param), then indexed in that same file as `name[...]`. Keep each name paired
+# with its declaring file: a common identifier in another designated file is
+# unrelated and must not become a false positive.
+u8_file_names="$tmp_dir/u8_file_names.txt"
+sed -E 's/^([^:]+):[0-9]+:.*[^A-Za-z0-9_]([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*:[[:space:]]*\[u8\].*/\1\t\2/' "$u8_decl_hits" \
+    | sort -u | sed '/^$/d' >"$u8_file_names" || true
 
-if [ -s "$u8_names" ] && [ -s "$existing" ]; then
-    while IFS= read -r name; do
-        [ -n "$name" ] || continue
-        xargs rg -n -H -e "\\b${name}\\[[A-Za-z0-9_]" <"$existing" 2>/dev/null || true
-    done <"$u8_names" >"$byte_hits"
+if [ -s "$u8_file_names" ]; then
+    while IFS="$(printf '\t')" read -r file name; do
+        [ -n "$file" ] && [ -n "$name" ] || continue
+        rg -n -H -e "\\b${name}\\[[A-Za-z0-9_]" "$file" 2>/dev/null || true
+    done <"$u8_file_names" >"$byte_hits"
 fi
 
 # Annotation check: a hit is exempt if the SAME line or the line immediately
