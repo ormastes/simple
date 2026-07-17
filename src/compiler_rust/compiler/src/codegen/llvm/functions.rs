@@ -2129,34 +2129,26 @@ impl LlvmBackend {
                 }
 
                 // Map well-known methods to runtime functions
+                // MUST match Cranelift's exact mapping at src/codegen/instr/calls.rs:3162-3201
                 let runtime_func = match method {
-                    // Collection methods
-                    "len" => Some("rt_len"),
-                    "push" => Some("rt_array_push"),
-                    "pop" => Some("rt_array_pop"),
-                    "clear" => Some("rt_array_clear"),
-                    "reverse" => Some("rt_array_reverse"),
-                    "sort" => Some("rt_array_sort"),
-                    "first" => Some("rt_array_first"),
-                    "last" => Some("rt_array_last"),
-                    "find" | "index_of" | "find_str" => Some("rt_string_find"),
-                    "any" => Some("rt_array_any"),
-                    "all" => Some("rt_array_all"),
-                    "filter" => Some("rt_array_filter"),
-                    "map" => Some("rt_option_map"),
-                    // String methods
+                    // Copied verbatim from Cranelift lines 3163-3200
+                    "contains" | "contains_key" | "has_key" => Some("rt_contains"),
+                    "len" | "length" => Some("rt_len"),
                     "starts_with" => Some("rt_string_starts_with"),
                     "ends_with" => Some("rt_string_ends_with"),
                     "concat" => Some("rt_string_concat"),
-                    "contains" => Some("rt_contains"),
                     "char_at" | "at" => Some("rt_string_char_at"),
                     "char_code_at" => Some("rt_string_char_code_at"),
+                    "push" => Some("rt_array_push"),
+                    "pop" => Some("rt_array_pop"),
+                    "clear" => Some("rt_array_clear"),
                     "join" => Some("rt_string_join"),
                     "trim" => Some("rt_string_trim"),
                     "trim_start" => Some("rt_string_trim_start"),
                     "trim_end" => Some("rt_string_trim_end"),
                     "split" => Some("rt_string_split"),
-                    "repeat" => Some("lib__common__string_core__str_repeat"),
+                    "bytes" => Some("rt_string_bytes"),
+                    "chars" => Some("rt_string_chars"),
                     "replace" => Some("rt_string_replace"),
                     "to_upper" | "upper" => Some("rt_string_to_upper"),
                     "to_lower" | "lower" => Some("rt_string_to_lower"),
@@ -2164,17 +2156,25 @@ impl LlvmBackend {
                     "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => {
                         Some("rt_string_to_float")
                     }
+                    "index_of" | "find" | "find_str" => Some("rt_string_find"),
                     "rfind" | "last_index_of" => Some("rt_string_rfind"),
-                    "to_string" | "str" => Some("rt_to_string"),
-                    // Index methods
+                    "to_string" | "to_text" | "str" => Some("rt_to_string"),
+                    "slice" | "substring" => Some("rt_slice"),
                     "get" => Some("rt_index_get"),
-                    "slice" => Some("rt_slice"),
-                    // Note: "substring" is handled specially above (expands to rt_len + rt_slice)
-                    // Dict methods
                     "keys" => Some("rt_dict_keys"),
                     "values" => Some("rt_dict_values"),
-                    "contains_key" | "has_key" => Some("rt_contains"),
-                    // Option/Result methods
+                    "filter" => Some("rt_array_filter"),
+                    "sort" => Some("rt_array_sort"),
+                    "reverse" => Some("rt_array_reverse"),
+                    "first" => Some("rt_array_first"),
+                    "last" => Some("rt_array_last"),
+                    "find" => Some("rt_array_find"),
+                    "any" => Some("rt_array_any"),
+                    "all" => Some("rt_array_all"),
+                    // LLVM-specific mappings (not in Cranelift, verified to exist)
+                    "repeat" => Some("lib__common__string_core__str_repeat"),
+                    "map" => Some("rt_option_map"),
+                    // Option/Result methods (LLVM-specific)
                     "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
                     "is_none" => Some("rt_is_none"),
                     "is_some" => Some("rt_is_some"),

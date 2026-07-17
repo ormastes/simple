@@ -1609,3 +1609,51 @@ fn codegen_inline_typed_bytes_u64_le_at_does_not_emit_runtime_symbol() {
 
     assert!(!object_relocates_to_symbol(&object, "rt_typed_bytes_u64_le_at"));
 }
+
+// Regression test for S63 fix: LLVM backend method-call→rt_* lowering (stage2 unblock)
+// These tests assert that previously-missing string methods now properly relocate to
+// rt_* symbols instead of emitting unresolved literal method names (e.g., "str.bytes").
+// Verifies the fix in src/codegen/llvm/functions.rs that added missing method mappings.
+// Note: "length" alias is verified in the mapping but not tested here because rt_len
+// is inlined for simple cases, so there would be no runtime relocation in the object file.
+#[test]
+fn codegen_string_bytes_method_calls_rt_string_bytes() {
+    let object = aot_object("string_bytes_method", |f| {
+        let receiver = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: receiver, value: 1 });
+        block.instructions.push(MirInst::MethodCallStatic {
+            dest: Some(dest),
+            receiver,
+            func_name: "bytes".to_string(),
+            args: vec![],
+        });
+        dest
+    });
+    assert!(
+        object_relocates_to_symbol(&object, "rt_string_bytes"),
+        "string.bytes() must compile to rt_string_bytes, not unresolved 'bytes' symbol"
+    );
+}
+
+#[test]
+fn codegen_string_chars_method_calls_rt_string_chars() {
+    let object = aot_object("string_chars_method", |f| {
+        let receiver = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: receiver, value: 1 });
+        block.instructions.push(MirInst::MethodCallStatic {
+            dest: Some(dest),
+            receiver,
+            func_name: "chars".to_string(),
+            args: vec![],
+        });
+        dest
+    });
+    assert!(
+        object_relocates_to_symbol(&object, "rt_string_chars"),
+        "string.chars() must compile to rt_string_chars, not unresolved 'chars' symbol"
+    );
+}
