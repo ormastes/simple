@@ -7,7 +7,7 @@
   `src/compiler_rust/compiler/src/interpreter_method/collections.rs`,
   `src/compiler_rust/compiler/src/interpreter_method/mod.rs`. Contrast:
   `src/compiler_rust/compiler/src/interpreter/node_exec.rs` (index-store, already fast).
-- **Status:** Track A IMPLEMENTED + VERIFIED (2026-07-07) — see "Fix landed (Track A)" below.
+- **Status:** status: RESOLVED (triage-confirmed 2026-07-17: Track A implemented + verified 2026-07-07, O(N²)→O(N) confirmed)
   Fix plan: `doc/03_plan/compiler/perf/interp_array_mutating_method_fast_path_plan.md`.
 - **Source sweep:** this record is the corrected write-up of Task #33's completed sweep,
   `/private/tmp/claude-501/-Users-ormastes-simple/7597a415-f0b0-4c3f-822d-107292b34bec/scratchpad/bare_array_param_sweep.md`
