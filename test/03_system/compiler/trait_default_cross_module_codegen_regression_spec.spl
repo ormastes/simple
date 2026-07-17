@@ -1,0 +1,148 @@
+"""
+# Cross-Module Trait Default-Method Dispatch — Native Codegen Regression
+
+**Feature IDs:** #190
+**Category:** Compiler / HIR Lowering / Native Codegen
+**Status:** Regression
+
+## Overview
+
+#157 (`fix(native): resolve trait default-method dispatch on native path`)
+fixed un-overridden trait *default* methods dispatching correctly on the
+native-build path when the trait and its impl are declared in the **same**
+module. That fix seeds `HirLowering.lowered_traits` (the registry
+`lower_impl`'s default-method injection reads) from the module's own
+`for trait_ in module.traits: self.lower_trait(trait_)` loop, which only
+walks the CURRENTLY-lowered module's own declarations.
+
+When the trait lives in an **imported** module and the impl is in a
+different (e.g. the entry) module, `register_imported_symbol`
+(`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl`, the
+`elif as_trait != nil:` arm) only defined a placeholder `Trait` symbol — it
+never lowered the imported trait into `lowered_traits`. `lower_impl`'s
+injection then found nothing to inject for a cross-module trait, so calling
+an un-overridden default died at MIR time with `unresolved method call`
+(interpreter mode was unaffected: it resolves defaults dynamically, not via
+this HIR-time table).
+
+Fix: `register_imported_symbol`'s trait arm now lowers the imported trait
+on demand (guarded by `lowered_traits.contains_key`, so a repeated/glob
+import does not re-lower it) the moment a named-item `use` import of the
+trait resolves it, before this module's own impls are lowered (import resolution
+already runs before impl lowering, task #55). Deliberately NOT an eager
+import-graph walk over every imported module's traits — only traits actually
+named in a `use` get lowered here.
+
+This spec probes the case #157's own smoke coverage (case `trait_default`,
+`scripts/check/native-smoke-matrix.shs`) cannot: the harness writes one
+single-file probe per case, so a genuinely cross-module (two-file) scenario
+needs its own harness. Both files are written fresh at spec run and compiled
+with the default self-hosted toolchain (not `--source src/...` bulk compile),
+mirroring how a real user's multi-file project builds via `native-build
+--entry`.
+
+## Research
+
+**Research:** repo task #190 (lane S49); prior fix `doc/09_report` / commit
+`06ee58b010e` (#157, same-module).
+
+## Syntax
+
+```sh
+bin/simple test test/03_system/compiler/trait_default_cross_module_codegen_regression_spec.spl
+```
+"""
+
+use std.spec.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Deliberately NOT under a `.../test/...` path segment: the native-build
+# entry-closure import walk (`_driver_collect_entry_import_source`,
+# driver_source_loading.spl) hard-excludes any resolved import path
+# containing "/test/", "/tests/", "/testdata/", "/doc/", or "/verification/"
+# (fixture/test trees are kept out of production closures) -- writing the
+# two probe files under such a path silently drops the imported trait
+# module from the compile closure and the build fails with "produced empty
+# mir_modules", unrelated to whatever is actually under test.
+val BUILD_DIR: text = "build/native_probe_190/trait_default_cross_module_regression"
+val TRAIT_SOURCE_PATH: text = BUILD_DIR + "/greeter_mod_190.spl"
+val ENTRY_SOURCE_PATH: text = BUILD_DIR + "/entry_probe_190.spl"
+val NATIVE_PATH: text = BUILD_DIR + "/entry_probe_190.bin"
+
+fn shell(command: text) -> (text, i64):
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    (stdout + stderr, code)
+
+fn trait_module_source() -> text:
+    # Trait lives in its OWN module: one required method + one default that
+    # calls it. No other decl in this file (deliberately narrow probe) --
+    # exercises `register_imported_symbol`'s trait arm in isolation.
+    # A RAW triple-quoted string (r"""..."""): a plain double-quoted string
+    # containing a literal `{identifier}` would be parsed by Simple's OWN
+    # lexer as string interpolation, not literal text -- an ordinary
+    # `"...{Trait}...\n"` here would make the compiler look for a variable
+    # named `Trait` in THIS spec file and fail loudly with "Unknown
+    # variable" (hit this exact footgun while writing this probe). `r"""`
+    # keeps interpolation markers and backslashes literal.
+    r"""trait Greeter190:
+    fn name(self) -> i64
+    fn greet(self) -> i64:
+        return self.name() + self.name()
+
+fn greeter190_marker() -> i64:
+    return 0
+"""
+
+fn entry_module_source() -> text:
+    # Impl lives in the ENTRY module, trait is cross-module imported. `greet`
+    # is never overridden here -- this is exactly the case #157's same-module
+    # fix does not cover. Named item-list import (`.{Greeter190}`), not a
+    # glob: the native-build entry-closure discovery walk
+    # (`_driver_entry_import_module_paths`, driver_source_loading.spl) scans
+    # source TEXT for the `{...}` item-list form to find cross-file imports
+    # to pull into the compile closure -- a bare `use .mod.*` glob import is
+    # never discovered by it, so the trait module silently never gets
+    # compiled in and the build fails with "produced empty mir_modules".
+    r"""use .greeter_mod_190.{Greeter190}
+
+struct Pal190:
+    v: i64
+
+impl Greeter190 for Pal190:
+    fn name(self) -> i64:
+        return self.v
+
+fn main() -> i64:
+    val p = Pal190(v: 21)
+    return p.greet()
+"""
+
+describe "cross-module trait default-method dispatch (#190)":
+    it "writes the two-file cross-module trait probe":
+        val (mkdir_out, mkdir_code) = shell("mkdir -p " + BUILD_DIR)
+        expect(mkdir_code).to_equal(0)
+        expect(mkdir_out).to_equal("")
+
+        val (trait_write_out, trait_write_code) = shell("cat > " + TRAIT_SOURCE_PATH + " <<'EOF'\n" + trait_module_source() + "EOF")
+        expect(trait_write_code).to_equal(0)
+        expect(trait_write_out).to_equal("")
+
+        val (entry_write_out, entry_write_code) = shell("cat > " + ENTRY_SOURCE_PATH + " <<'EOF'\n" + entry_module_source() + "EOF")
+        expect(entry_write_code).to_equal(0)
+        expect(entry_write_out).to_equal("")
+
+    it "interpreter oracle: un-overridden cross-module default dispatches to 42":
+        step("bin/simple run must reach the default body via dynamic dispatch")
+        val (run_out, run_code) = shell("env -u SIMPLE_BOOTSTRAP bin/simple run " + ENTRY_SOURCE_PATH)
+        expect(run_code).to_equal(42)
+
+    it "native-build: un-overridden cross-module default must dispatch to 42, not fail loudly":
+        step("Native compile of the two-file probe must succeed (regressed: 'MIR lowering error: unresolved method call: greet')")
+        val (compile_out, compile_code) = shell("env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH bin/simple native-build --entry " + ENTRY_SOURCE_PATH + " -o " + NATIVE_PATH + " --clean")
+        expect(compile_out.contains("unresolved method call")).to_equal(false)
+        expect(compile_code).to_equal(0)
+
+        step("The standalone native binary exits 42 (matches the interpreter oracle)")
+        val (native_out, native_code) = shell(NATIVE_PATH)
+        expect(native_code).to_equal(42)
