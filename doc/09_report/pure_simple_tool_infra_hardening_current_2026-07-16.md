@@ -38,7 +38,7 @@ so executable qualification is still blocked.
 | Production runtime | BLOCKED | Stage 4 was found parsing 10,503 files before closure pruning; source fix is unverified because the final cycle stopped on a stale compiler-backfill guard | In a fresh session run one bounded `--full-bootstrap`, require closure-sized phase input, then admit and atomically deploy | P0 |
 | Test runner | PARTIAL | POSIX parallel children are tracked; resource-limited children now honor the requested soft deadline with one five-second TERM-to-KILL grace. Sequential/limited/fork/QEMU children remain synchronously untracked; Windows parallel capture fails closed | Move every execution mode onto an interruptible tracked process owner, add process-group/parent-death containment, then run signal/timeout/RSS evidence | P0 |
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; cosine candidate progress is time-throttled instead of reading RSS and writing stderr per pair; exact/cosine line gates share one tokenizer-derived signal prefix; runtime/performance qualification remain | Run focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
-| Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP performance fails closed without an owner; the UI gate classifies 22 exact restricted owners and reports 2 new consumer violations; the hot-loop gate reports 41 violations | Add one repository-scanner owner for the four MCP rules, repair classified violations, then run focused fixtures | P1 |
+| Lint | SOURCE GUARDED | Production CLI delegates to the canonical file linter; dead duplicate paths are deleted; hot-loop BYTE names are file-scoped; MCP performance fails closed without an owner; the UI gate classifies 22 exact restricted owners and reports 1 new consumer violation; the hot-loop gate reports 41 violations | Add one repository-scanner owner for the four MCP rules, repair classified violations, then run focused fixtures | P1 |
 | Format/fix | SOURCE GUARDED | Writes are atomic and checked; output passes a CoreLexer equivalence gate or fails closed; empty files and generic casts are safe; the corrupting indentation-repair prepass is deleted | Replace remaining heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
 | Check | PARTIAL | Driver API Check stops after fatal HIR analysis; production parse/policy workers now apply SSpec guidance equally in human and JSON modes. CLI can still false-green HIR-invalid code and may delegate to the seed | Retain CLI policy checks, route semantics through `driver_api_core.check_file`, consolidate duplicate workers, remove seed delegation only after direct-path latency/RSS qualification | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
@@ -97,7 +97,7 @@ so executable qualification is still blocked.
    and requires `--full-bootstrap`; the three-cycle cap is exhausted.
 2. NFR-007 and NFR-009 evidence harnesses exist, but their production latency
    and RSS measurements cannot qualify while the deployed runtime is the seed.
-3. `simple lint --all` correctly exposes 2 new UI consumer violations after 22
+3. `simple lint --all` correctly exposes 1 new UI consumer violation after 22
    exact bare-metal, target-adapter, and restricted facade owners were classified, plus 41 hot-loop
    violations. Focused lint no longer fails on that unrelated repository debt;
    the global findings remain an explicit P1 cleanup lane.
@@ -180,6 +180,10 @@ so executable qualification is still blocked.
   minimal argv facade and exact environment facade. A source contract forbids
   raw externs in the consumer while preserving the restricted target pipeline;
   new isolation findings fall from 3 to 2.
+- **SimpleOS image patcher I/O:** the hosted patch utility now uses the narrow
+  binary-file SFFI facade and the real boolean write ABI. Failed writes return
+  nonzero, and its caller removes stale output and propagates failure; the UI
+  gate falls from 2 to 1 new finding.
 - **Compositor lookup:** repeated exact-ID scans now share one bounded
   `surface_index` owner. Z-order transforms, app/process group queries, hit
   testing, and rendering retain their intentional ordered scans. A focused
