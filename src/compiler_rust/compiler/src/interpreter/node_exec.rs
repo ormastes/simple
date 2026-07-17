@@ -1883,3 +1883,75 @@ pub(crate) fn exec_augmented_assignment(
         ))
     }
 }
+
+#[cfg(test)]
+mod struct_local_alias_cow_tests {
+    use super::*;
+    use simple_parser::Span;
+
+    /// Bug #187 (reported): "var b = a; b.x = 41" was claimed to leak the
+    /// mutation into `a` under the interpreter, mirroring the native MIR
+    /// pointer-aliasing bug fixed in `ad31f0554cd` ("fix(mir): copy struct
+    /// value on local-alias bind instead of aliasing"). That native bug is
+    /// specific to the pointer-represented struct model on the native/LLVM
+    /// path — the interpreter's `Value::Object { fields: Arc<HashMap<..>>, .. }`
+    /// representation is a different animal. Field assignment (the
+    /// `Value::Object` arm of `exec_assignment` above) already does
+    /// `Arc::make_mut(&mut fields)` before mutating, which clones the field
+    /// map whenever it is shared (Arc strong_count > 1, e.g. right after
+    /// `var b = a`). This gives struct local-aliases correct copy-on-write
+    /// value semantics with NO explicit bind-time copy needed — confirmed by
+    /// manual repro (direct field assign, nested struct field, array-element
+    /// alias, param-then-local-alias, and reverse-order mutation) all showing
+    /// no leak. This test locks that guarantee in: aliasing a struct to a
+    /// second local name and mutating through the alias must not be visible
+    /// through the original name (and vice versa).
+    #[test]
+    fn field_assignment_cow_protects_struct_local_alias() {
+        let mut fields = HashMap::new();
+        fields.insert("x".to_string(), Value::Int(10));
+        let a_value = Value::Object {
+            class: "Point".to_string(),
+            fields: Arc::new(fields),
+        };
+
+        let mut env = Env::new();
+        env.insert("a".to_string(), a_value.clone());
+        // `var b = a` — a cheap Arc-clone of the SAME underlying field map
+        // (strong_count now 2), exactly like the interpreter's `Node::Let`
+        // binding (`bind_pattern_value`, which does not deep-copy Object values).
+        env.insert("b".to_string(), a_value);
+
+        // b.x = 41
+        let span = Span::new(0, 0, 0, 0);
+        let assign = simple_parser::ast::AssignmentStmt {
+            span,
+            target: Expr::FieldAccess {
+                receiver: Box::new(Expr::Identifier("b".to_string())),
+                field: "x".to_string(),
+            },
+            op: AssignOp::Assign,
+            value: Expr::Integer(41),
+        };
+        exec_assignment(
+            &assign,
+            &mut env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("exec_assignment");
+
+        let a_x = match env.get("a").expect("a") {
+            Value::Object { fields, .. } => fields.get("x").expect("a.x").as_int().expect("int"),
+            other => panic!("a must remain an Object, got {:?}", other),
+        };
+        let b_x = match env.get("b").expect("b") {
+            Value::Object { fields, .. } => fields.get("x").expect("b.x").as_int().expect("int"),
+            other => panic!("b must remain an Object, got {:?}", other),
+        };
+        assert_eq!(a_x, 10, "a must be unaffected by mutation through alias b");
+        assert_eq!(b_x, 41, "b must observe its own mutation");
+    }
+}
