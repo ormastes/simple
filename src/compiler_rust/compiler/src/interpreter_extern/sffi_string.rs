@@ -86,6 +86,37 @@ pub fn rt_string_len_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(len))
 }
 
+/// Return the UTF-8 bytes of a `text` value as a real interpreter
+/// `Value::Array` of `Value::Int` elements (one per byte, 0-255) — mirrors
+/// the interpreter's `text.bytes()` method and the runtime's native
+/// `rt_string_bytes` (used by the compiled/native path).
+///
+/// This hand-written `EXTERN_DISPATCH` entry exists so interpreted callers
+/// of `extern fn rt_string_bytes(value: text) -> [i64]` get real array
+/// semantics (`.len()`, indexing, iteration) without any round trip through
+/// `RuntimeValue` tag bits or the dynamically-loaded runtime library. Without
+/// it, the call fell through to `interpreter_extern::dynamic_sffi`'s
+/// dlopen-based dispatch: that loads a *separate* `libsimple_runtime`
+/// instance (its own allocator arena, distinct from the one statically
+/// linked into the interpreter), whose returned array handle is neither a
+/// valid `Value::Array` nor safely decodable as a plain integer — every
+/// caller doing `.len()` on the result crashed with `method 'len' not found
+/// on type 'i64' (receiver value: <pointer-shaped number>)`. See bug
+/// seed_flat_registry_len_i64_2026-07-17.
+pub fn rt_string_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let text = match args.first() {
+        Some(Value::Str(s)) => s.as_str(),
+        _ => {
+            return Err(CompileError::semantic_with_context(
+                "rt_string_bytes expects text argument".to_string(),
+                ErrorContext::new().with_code(codes::TYPE_MISMATCH),
+            ))
+        }
+    };
+    let items: Vec<Value> = text.as_bytes().iter().map(|&b| Value::Int(b as i64)).collect();
+    Ok(Value::array(items))
+}
+
 /// Check if two strings are equal
 pub fn rt_string_eq_fn(args: &[Value]) -> Result<Value, CompileError> {
     let a_raw = args

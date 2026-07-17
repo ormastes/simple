@@ -136,13 +136,211 @@ bug).
 
 ### Status
 
-Not fixed. Per task scope (`src/compiler_rust` is out of scope; "do not edit
+~~Not fixed. Per task scope (`src/compiler_rust` is out of scope; "do not edit
 Rust"), this is reported with a minimal, deterministic repro for whoever next
 works the seed's flat-registry defect class (see the referenced doc's Wall-2
 and SDNVALUE fixes for the two already-fixed sibling instances of this same
 mechanism). The `--stdio` symptom (Symptom 1) is fixed in `main.spl`; the
 underlying round-trip still cannot be verified end-to-end against the seed
-binaries until Symptom 2 is resolved in `src/compiler_rust`.
+binaries until Symptom 2 is resolved in `src/compiler_rust`.~~ **FIXED
+2026-07-17 (Worker P, Rust-authorized lane) — see follow-up below. Root cause
+was NOT the flat function/enum registry after all** (that theory, while
+directionally right about "same defect class", didn't hold for this specific
+crash — see below).
+
+## 2026-07-17 follow-up (Worker P lane): Symptom 2 ROOT-CAUSED and FIXED — not a registry collision, a dynamic-SFFI dual-runtime-instance bug
+
+### Repro history note
+
+The bug doc's original minimal repro (`use .main_lazy_protocol` flipping a
+clean `extract_id()` call into the crash) stopped reproducing on the current
+WC: a parallel session (Worker N) had already fixed `main_lazy_protocol.spl`'s
+`NL` → `_PROTO_NL` typo and added explicit imports, which incidentally removed
+that specific trigger. The crash still reproduced on the **full closure**
+(`simple run src/app/mcp/main.spl` piped an `initialize` request) with a
+*different* pointer value, confirming a second, still-live trigger of the
+same symptom class. Bisected down to a genuinely minimal, always-reproducible,
+zero-ambiguity repro with no other module involved at all:
+
+```simple
+extern fn rt_string_bytes(value: text) -> [i64]
+
+fn main() -> i64:
+    val hb = rt_string_bytes("abc")
+    print "hb.len()={hb.len()}"   # crashed: method `len` not found on type `i64`
+    0
+```
+
+This crashes standalone, with `rt_string_bytes` declared directly in the same
+file — no `main_lazy_protocol.spl`, no cross-module ambiguity, no
+`extract_id`/`extract_field_raw` involved. The "flat/global function registry"
+theory (this doc's original hypothesis, and the coordinator's initial hint
+about an unresolved `NL` identifier corrupting a registry slot) does **not**
+explain this: the crash is 100% intrinsic to calling any interpreter-mode
+`extern fn` declared with an array return type (`[i64]`, `[u8]`, ...) that has
+no hand-written interpreter handler. `mcp_sdk/core/json.spl`'s newer,
+byte-scanning `find_sub`/`extract_field_raw` (added for perf, using
+`rt_string_bytes`) happens to be the first real caller of such an extern
+reachable from the MCP server's import closure — main_lazy_protocol.spl (and,
+separately, whichever module wins the `extract_id`/`extract_field_raw`
+same-name-same-arity tie between `main_lazy_json.spl` and
+`mcp_sdk/core/json.spl`) only mattered insofar as it changed whether this
+code path was reached at all, not because of any registry corruption
+mechanism. That `extract_id`-candidate ambiguity is real (confirmed via
+`SIMPLE_DEBUG_OVERLOAD_SELECT=1` tracing: `current="<entry>"` matches neither
+candidate's owning module, so `select_overload`'s module-tie-break is a no-op
+and it falls back to first-registered-wins) but is orthogonal to this crash:
+once `rt_string_bytes` works, both `extract_id` candidates are individually
+correct, so the crash is gone regardless of which one wins the tie. Not
+pursued further — a real but separate architectural gap (unqualified-import
+overload resolution has no concept of "which specific `use` statement at the
+call site selected this symbol"), out of scope here.
+
+### Root cause
+
+`src/compiler_rust/compiler/src/interpreter_extern/mod.rs`'s
+`call_extern_function_with_values` checks a hand-written `EXTERN_DISPATCH`
+table first; only externs with **no** entry there fall through to
+`interpreter_extern::dynamic_sffi::try_call_dynamic`, which `dlopen`s
+`libsimple_runtime.so`/`.dylib`/`.dll` and calls the resolved symbol via
+`dlsym` + a raw `i64`-args/`i64`-return `transmute`. `rt_string_bytes` had no
+`EXTERN_DISPATCH` entry, so every call went through this dynamic path.
+
+Two compounding defects there:
+
+1. **Return marshaling.** `dynamic_sffi::i64_to_value` always wrapped the raw
+   `i64` result as `Value::Int(v)` ("since we don't know the return type at
+   this level" — its own doc comment). But `rt_string_bytes`'s real Rust
+   signature returns `RuntimeValue`, the runtime's tagged-pointer
+   representation (`(payload << 3) | tag`, see
+   `RuntimeValue::from_int`/`as_int`). For an array return, `v` is a tagged
+   heap-object handle, not a plain integer — wrapping it as `Value::Int`
+   leaks the tag bits as if they were user data. Any array method call on the
+   result (starting with `.len()`) then hits the interpreter's final
+   "unknown method" fallback: `method 'len' not found on type 'i64'
+   (receiver value: <the tagged handle's bits, an astronomically large
+   number — the "pointer-shaped number" this doc originally flagged>)`.
+2. **Dual runtime instances (found and reverted, not shipped — see Attempt
+   1 below).** Even after teaching the dynamic path to materialize a real
+   `Value::Array` via `RuntimeValue`/`rt_array_len`/`rt_array_get`, the array
+   came back with the *wrong* length. `dynamic_sffi`'s `dlopen`ed
+   `libsimple_runtime` is a genuinely separate loaded instance from the
+   `simple_runtime` crate statically linked into the interpreter binary —
+   each has its own copy of the runtime's global allocator/arena state. A
+   string built via the statically-linked `rt_string_new` and then read by
+   `rt_string_bytes` running in the *dynamically-loaded* instance (or vice
+   versa for the array-side read) tag-checks as invalid in the other
+   instance's bookkeeping and silently degrades (empty array / `len()` back
+   to `-1`), even though the raw tag bits look identical. This is a real,
+   separate landmine in `dynamic_sffi`'s general design (any heap-object
+   round trip across this boundary is fragile), but chasing it with
+   dlsym-based fixes on both the argument- and return-marshaling sides did
+   not converge and at one point re-introduced the original crash — abandoned
+   in favor of the fix below, which sidesteps the dual-instance problem
+   entirely.
+
+### Fix
+
+Added a hand-written `EXTERN_DISPATCH` handler for `rt_string_bytes`,
+matching the existing pattern used by its siblings (`rt_string_new_fn`,
+`rt_string_len_fn`, `rt_array_new_fn`, ...) — checked *before*
+`dynamic_sffi::try_call_dynamic` ever runs, so the dlopen/dual-instance path
+is never reached for this extern at all:
+
+- `src/compiler_rust/compiler/src/interpreter_extern/sffi_string.rs`: new
+  `pub fn rt_string_bytes_fn(args: &[Value]) -> Result<Value, CompileError>`.
+  Takes `Value::Str` directly (the interpreter's own native string
+  representation — no `RuntimeValue`/tag bits/dlopen involved at all) and
+  returns a real `Value::Array` of `Value::Int` byte values (0-255), mirroring
+  the interpreter's existing `text.bytes()` method and the runtime's native
+  `rt_string_bytes` (used by the compiled/native path, unaffected by this
+  change).
+- `src/compiler_rust/compiler/src/interpreter_extern/mod.rs`: registered via
+  `insert_simple!("rt_string_bytes", sffi_string::rt_string_bytes_fn);` in
+  `init_dispatch_table()`, next to the other `rt_string_*` entries.
+
+No `.spl` production files changed for this fix (Rust-only, per this lane's
+scope). No special-casing of `extract_id`, `main_lazy_protocol`, or any
+module name — the fix is general: it makes `rt_string_bytes` (and, by the
+same established pattern, any other array-returning extern someone
+hand-writes an `EXTERN_DISPATCH` entry for) behave correctly for interpreted
+callers, independent of import closure or which module reaches it.
+
+### Regression tests (Rust, `interpreter_extern::mod.rs`'s existing `#[cfg(test)] mod tests`)
+
+- `rt_string_bytes_dispatches_through_native_handler_seed_flat_registry_len_i64_2026_07_17`
+  — asserts `EXTERN_DISPATCH` has an entry for `rt_string_bytes` and that
+  calling it with `Value::text("abc")` returns
+  `Value::array([Int(97), Int(98), Int(99)])` (not just "doesn't crash" —
+  the actual correct byte values).
+- `rt_string_bytes_rejects_non_text_argument` — control case, a non-text
+  argument must error, not silently misbehave.
+
+**Verified fail→pass both directions**: temporarily commenting out the
+`insert_simple!("rt_string_bytes", ...)` registration line reproduces
+`missing rt_string_bytes` / `registered handler` panics on both new tests
+(`5 passed; 2 failed`); restoring it passes all 7 tests in this module
+(`cargo test -p simple-compiler --lib interpreter_extern::tests::`).
+
+### End-to-end verification
+
+- Minimal repro (`extern fn rt_string_bytes(value: text) -> [i64]` +
+  `.len()`), standalone and cross-module: no crash, correct value (`hb.len()
+  == 3` for `"abc"`).
+- `mcp_sdk/core/json.spl`'s `extract_id` (the byte-scanning implementation
+  this bug's crash actually ran through), called directly: `id=1` for the
+  documented `initialize` message — correct extraction, not just
+  crash-free.
+- Full closure, real transport: `printf '<initialize JSON-RPC line>' |
+  src/compiler_rust/target/release/simple run src/app/mcp/main.spl` (rebuilt
+  with this fix) now returns a well-formed `{"jsonrpc":"2.0","id":1,"result":
+  {...,"serverInfo":{"name":"simple-mcp-full","version":"4.0.0"}}}` response
+  — exit 0, no crash. (Run without the CLI's `--stdio` flag: this lane found
+  Symptom 1's `main.spl:406` guard fix — `if args.len() > 0 and args[0] !=
+  "--stdio":` — had been lost from the working copy again, `git status`/`git
+  log` confirm it was never committed; flagged, not re-applied here since
+  `.spl` production edits are out of this Rust-only lane's scope, and the
+  documented canonical invocation never passes `--stdio` anyway.)
+- `test/03_system/app/mcp/mcp_stdio_contract_spec.spl`'s own two `it` blocks
+  were replicated manually (the seed's `simple test <file>` subcommand
+  itself is separately broken — it attempts to compile the entire
+  self-hosted compiler source tree and hits an unrelated pre-existing parse
+  error in `src/compiler/10.frontend/core/parser_preprocessor.spl`, a
+  known, documented, repo-wide seed-tooling limitation, not something this
+  fix introduced or can address): sending `initialize` +
+  `notifications/initialized` + `tools/list` gives a brace-balanced response
+  containing `"id":1"`, `"serverInfo"`, `"id":2"`, and a non-empty
+  `"tools":[...]`; sending a malformed (non-JSON) line exits cleanly within
+  the bounded timeout with empty output (the spec's documented fail-closed
+  case). Both `it` blocks' assertions pass when evaluated by hand against
+  this rebuilt binary.
+  **Caveat:** `mcp_stdio_contract_spec.spl:45-46`'s `simple_binary()` is
+  hardcoded to `"src/compiler_rust/target/release/simple"` — the on-disk
+  seed — not this lane's isolated `CARGO_TARGET_DIR` build. So even once
+  `simple test`'s own unrelated brokenness is fixed, running this spec
+  in-place will NOT exercise this fix until someone rebuilds/redeploys that
+  on-disk binary (and `target/bootstrap/simple`) with these changes — out
+  of this lane's "never overwrite the shared release binary" scope by
+  design. The manual replication above (against a binary built from this
+  fix) is the faithful proof; the literal spec file only goes green after
+  a redeploy.
+- `cargo test -p simple-compiler --lib` full suite: run before/after this
+  change to confirm zero collateral regressions (see report for exact
+  before/after counts).
+
+### Files changed
+
+- `src/compiler_rust/compiler/src/interpreter_extern/sffi_string.rs` —
+  `rt_string_bytes_fn` (the fix).
+- `src/compiler_rust/compiler/src/interpreter_extern/mod.rs` — dispatch
+  table registration + 2 new regression tests.
+
+Not touched: `interpreter_extern/dynamic_sffi.rs` (the dual-runtime-instance
+landmine documented above under "Attempt 1" remains latent for any *other*
+array/string-returning extern that lacks an `EXTERN_DISPATCH` entry — flagged
+as a follow-up, not fixed here, since the clean fix for `rt_string_bytes`
+specifically sidesteps it entirely rather than fixing the general dynamic
+dispatch bridge).
 
 ## Pure-Simple compiler audit 2026-07-17 (marker: `pure_interp_registry_2026-07-17`)
 

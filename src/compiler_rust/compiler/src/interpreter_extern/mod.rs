@@ -1645,6 +1645,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_string_builder_finish", sffi_string::rt_string_builder_finish_fn);
     insert_simple!("rt_string_builder_len", sffi_string::rt_string_builder_len_fn);
     insert_simple!("rt_string_builder_free", sffi_string::rt_string_builder_free_fn);
+    // seed_flat_registry_len_i64_2026-07-17: native handler (fixes crash on interpreted array-returning extern calls)
+    insert_simple!("rt_string_bytes", sffi_string::rt_string_bytes_fn);
     insert_simple!("rt_string_eq", sffi_string::rt_string_eq_fn);
     insert_simple!("rt_string_len", sffi_string::rt_string_len_fn);
     insert_simple!("rt_string_new", sffi_string::rt_string_new_fn);
@@ -2536,5 +2538,57 @@ mod tests {
         let result = handler(&[bytes], &mut env, &mut functions, &mut classes, &enums, &impl_methods).unwrap();
 
         assert_eq!(result, Value::text("hé"));
+    }
+
+    /// Regression for bug seed_flat_registry_len_i64_2026-07-17: minimal
+    /// repro is `extern fn rt_string_bytes(value: text) -> [i64]` +
+    /// `rt_string_bytes("abc").len()` under the interpreter. Before the fix
+    /// (no `EXTERN_DISPATCH` entry for `rt_string_bytes`), the call fell
+    /// through to `interpreter_extern::dynamic_sffi`'s dlopen-based fallback,
+    /// which returned a raw `RuntimeValue` array handle from a *separate*
+    /// runtime instance wrapped as `Value::Int` — every array method call on
+    /// it (starting with `.len()`) crashed with `method 'len' not found on
+    /// type 'i64' (receiver value: <pointer-shaped number>)`. This asserts
+    /// the dispatch table has a native handler and that it returns a real
+    /// `Value::Array` of the correct byte values (not just "doesn't crash").
+    #[test]
+    fn rt_string_bytes_dispatches_through_native_handler_seed_flat_registry_len_i64_2026_07_17() {
+        assert!(EXTERN_DISPATCH.contains_key("rt_string_bytes"), "missing rt_string_bytes");
+
+        let handler = EXTERN_DISPATCH.get("rt_string_bytes").expect("registered handler");
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let result = handler(
+            &[Value::text("abc")],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("rt_string_bytes should not error on a plain text argument");
+
+        assert_eq!(
+            result,
+            Value::array(vec![Value::Int(b'a' as i64), Value::Int(b'b' as i64), Value::Int(b'c' as i64)]),
+            "rt_string_bytes(\"abc\") must be a real Value::Array([97, 98, 99]), not an opaque handle"
+        );
+    }
+
+    #[test]
+    fn rt_string_bytes_rejects_non_text_argument() {
+        let handler = EXTERN_DISPATCH.get("rt_string_bytes").expect("registered handler");
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let result = handler(&[Value::Int(42)], &mut env, &mut functions, &mut classes, &enums, &impl_methods);
+        assert!(result.is_err(), "rt_string_bytes should reject a non-text argument, not silently misbehave");
     }
 }
