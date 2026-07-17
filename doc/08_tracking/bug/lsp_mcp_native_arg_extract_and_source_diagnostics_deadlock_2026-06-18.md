@@ -103,3 +103,7 @@ SIMPLE_LSP_ENABLE_DIAGNOSTICS=1 SIMPLE_LIB=$PWD/src bin/simple run src/app/simpl
   `SIMPLE_LSP_MCP_PREFER_NATIVE=1` fails closed instead of caching a broken
   binary. Standard Darwin release candidates are checked before the legacy
   Mach-O platform directory.
+
+## Runtime verification (2026-07-17)
+
+Native `simple_lsp_mcp_server` (x86_64-unknown-linux-gnu): `initialize` answers correctly; real `tools/call` (`lsp_symbols`) returns `{"content":[{"type":"text","text":"Missing tool name"}],"isError":true}` (defect 1 STILL-REPRODUCES, exact match). Source-level: `SIMPLE_LSP_ENABLE_DIAGNOSTICS` gate and "diagnostics unavailable in source mode" message confirmed present at `src/app/simple_lsp_mcp/tools.spl:41-43` (mitigation in place); underlying deadlock (defect 2) not independently triggered (risk of unbounded hang exceeded budget).

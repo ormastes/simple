@@ -22,3 +22,7 @@ Open. G3.2 has a passing 3600-step logic session in
 
 Make the native/JIT Game2D path reliable, then restore the 3600-frame rendered
 session as an affordable gate.
+
+## Runtime verification (2026-07-17)
+
+Current spec `test/03_system/game2d/breakout_production_spec.spl` (lines 16-33) still states verbatim: "`bin/simple run` SIGSEGVs on `LoopDriver.step` (Cranelift JIT bug)... every scenario runs via `bin/simple test` (interpreter only)" and "Interpreted 800x600 software rendering costs ~14s/frame... the full 3600-frame interpreter path is tracked as too slow". Did not run actual 3600-frame session (hours at 14s/frame, outside budget). Source-confirmed STILL-REPRODUCES; blocker remains unresolved.

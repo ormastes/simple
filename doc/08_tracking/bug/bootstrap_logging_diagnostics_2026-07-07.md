@@ -56,3 +56,7 @@ That does not say which MIR/HIR function or phase produced the bad receiver.
   - `src/app/cli/native_build_main.spl`
   - `src/compiler/50.mir/_MirLowering/bootstrap_globals.spl`
   - `src/compiler/50.mir/_MirLowering/function_lowering.spl`
+
+## Runtime verification (2026-07-17)
+
+No single deterministic repro exists for this issue as documented. Source grep confirms the "Done" items are present at tip: `SIMPLE_BOOTSTRAP_DIAG=1 SIMPLE_COMPILER_TRACE=1` rerun hint present at `src/app/cli/native_build_main.spl:213`, and `interp_call_dispatches_plain_io_externs` test exists at `interpreter_sffi.rs:837`. The "Remaining items" are open-ended and require a real failure to reproduce; status remains IN_PROGRESS.

@@ -76,3 +76,7 @@ after the harness's standard whitespace normalization. The expected output is
 `RULE:[.a{color:red}]`. This regression has not been executed in the current
 lane, so the original bug remains open until the seed/native run proves that
 scope isolation and entry-point preservation both hold.
+
+## Runtime verification (2026-07-17)
+
+Ran exact repro: `bin/simple run` output matches byte-for-byte: `HIR lowering error: Unknown variable: rule while lowering open_brace` then `error[E1002]: function 'main' not found`. Scope bleed across functions triggered by brace literal confirmed STILL-REPRODUCES.

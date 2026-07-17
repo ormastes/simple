@@ -49,3 +49,7 @@ the *call form under interp+newtype* that breaks.)
 
 A first-class newtype would enforce #1, preserve the wrapper through arithmetic
 (#2), lower under JIT (#3), and keep direct fn-field calls working (#4).
+
+## Runtime verification (2026-07-17)
+
+**Item #1 (no type-safety enforcement) STILL-REPRODUCES:** `mix(Lba, Ppn)` accepted and ran, printed `5` with no type error. **Item #3 (JIT cannot lower) STILL-REPRODUCES:** `HIR lowering error: Unknown type: Lba` seen during same run (JIT fallback). **Item #2 (arithmetic erases wrapper) FIXED-AT-TIP:** `(l + Lba(value:1)).value` printed `6` cleanly with no `undefined field` error — arithmetic now preserves the wrapper (matches fix credit to `612a1372a28`). **Item #4 (fn-field call under interp+import):** not independently tested (requires genuine cross-module import, out of budget).

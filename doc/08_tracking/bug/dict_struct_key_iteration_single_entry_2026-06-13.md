@@ -30,3 +30,7 @@ Found during `doc/03_plan/language/gpu_fpga/sycl_parity_unified_kernel_plan_2026
 W3.1. Likely related to struct-key hashing/equality in the interpreter dict
 implementation. A minimal repro should insert 3 entries keyed by a 2-field
 struct and count iteration visits.
+
+## Runtime verification (2026-07-17)
+
+Probed with 3 entries inserted into `Dict<Key,i64>` (2-field struct key). Symptom drifted from documented single-entry undercounting: `d.len()` now reports **4** (overcounting by 1), and iteration crashes with `error: semantic: undefined field: unknown property or method 'a' on String` — one of the iterated "keys" is a plain String, not a Key struct. This is not the exact documented symptom but clearly the same underlying struct-key Dict corruption class and is at least as broken (type confusion + silent over-counting).

@@ -43,3 +43,7 @@ support enabled and LLVM 18 discoverable, then rerun the RISC-V64 source-to-QEMU
 ## Notes
 
 Do not treat the passing prebuilt ELF smoke as current-source rebuild evidence.
+
+## Runtime verification (2026-07-17)
+
+`env -u SIMPLE_BOOTSTRAP native-build --backend llvm --entry r3p02_repro.spl --target riscv64gc-unknown-none` fails immediately (no QEMU/boot involved) with exact match to documented error: `error: native backend 'llvm' is not available in this build; rebuild the Rust driver with --features llvm or use --backend cranelift`. Confirmed reproducible without cross-toolchain or QEMU dependency. STILL-REPRODUCES (classified as non-QEMU since toolchain block occurs before any boot/emulation).

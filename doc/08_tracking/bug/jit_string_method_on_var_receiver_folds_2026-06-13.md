@@ -76,3 +76,7 @@ JIT/AOT regression test: `val T = "ABCDEF"; assert T.char_at(0) == "A"` and
   ordering — `__module_init` does run and materialize the string.
 - Pre-existing: reproduces on the pre-session seed (not introduced by the
   2026-06-13 str.bytes/JIT-guard/flatten work).
+
+## Runtime verification (2026-07-17)
+
+Probed with exact repro: `val T = "ABCDEF"` then `T.char_at(0)` → empty, `T.length()` → `<value:0xffffffffffffffff>`. `TABLE.char_at(0)` (module-level) also → empty. All three results match documented table exactly. No JIT-failure message printed (ran through working JIT path and mis-compiled silently, consistent with root cause analysis).

@@ -156,3 +156,7 @@ candidate evidence. `src/app/cli/check.spl::run_check` unconditionally runs the
 whole-tree repository-hygiene tail, so unrelated tracked-policy failures can
 reject a correct frontend. Its Git subguards are also not authoritative in a
 jj-only workspace containing `.jj` but no `.git`.
+
+## Runtime verification (2026-07-17)
+
+`bin/simple test r3p09_tiny_spec.spl` (env `-u SIMPLE_BOOTSTRAP`) exit 1, failed with `error: semantic: unknown extern function: rt_cli_arg_count`. This extern is declared in current `src/compiler_rust/compiler/src/interpreter_extern/mod.rs:635` — deployed seed binary is skewed vs. current source on some externs (also affects `rt_vulkan_create_offscreen_render_pass`). Net effect matches doc's claim (`bin/simple test <spec>` unreliable on this host) though specific error differs. Broader note: deployed `bin/release/x86_64-unknown-linux-gnu/simple` lacks `rt_cli_arg_count` and `rt_vulkan_create_offscreen_render_pass` present in current `src/compiler_rust` — pending in-flight seed redeploy.
