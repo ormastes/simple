@@ -13,6 +13,10 @@ unsafe extern "C" {
     fn rt_engine2d_rocm_upload_pixels(dst: i64, pixels: i64, count: i64) -> i64;
     fn rt_engine2d_rocm_download_pixels(src: i64, pixels: i64, byte_size: i64) -> i64;
     fn rt_engine2d_rocm_upload_host_buf(dst: i64, host_buf: i64, byte_size: i64) -> i64;
+    fn rt_signal_install(signal_num: i64) -> i64;
+    fn rt_signal_check(signal_num: i64) -> i64;
+    fn rt_atexit_install() -> i64;
+    fn rt_atexit_check() -> i64;
 }
 
 #[test]
@@ -51,5 +55,18 @@ fn unavailable_hosted_rocm_pixel_transport_fails_closed() {
         assert_eq!(rt_engine2d_rocm_upload_pixels(1, 2, 3), -3);
         assert_eq!(rt_engine2d_rocm_download_pixels(1, 2, 3), -3);
         assert_eq!(rt_engine2d_rocm_upload_host_buf(1, 2, 3), -3);
+    }
+}
+
+#[test]
+fn hosted_signal_latches_validate_bounds_and_start_clear() {
+    unsafe {
+        assert_eq!(rt_signal_install(-1), 0);
+        assert_eq!(rt_signal_install(32), 0);
+        assert_eq!(rt_signal_check(-1), 0);
+        assert_eq!(rt_signal_check(32), 0);
+        assert_eq!(rt_atexit_check(), 0);
+        assert_eq!(rt_atexit_install(), 1);
+        assert_eq!(rt_atexit_install(), 1);
     }
 }

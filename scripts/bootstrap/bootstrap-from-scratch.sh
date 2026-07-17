@@ -471,6 +471,7 @@ bootstrap_native_build_main() {
     --runtime-bundle core-c-bootstrap \
     --source src/compiler --source src/app --source src/lib --source examples/10_tooling \
     --entry-closure \
+    --low-memory \
     --threads "${selfhost_jobs}" \
     --cache-dir "${native_cache_dir}" \
     --mode one-binary \
