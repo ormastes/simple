@@ -102,10 +102,24 @@ calls already work correctly (verified by the existing
 matrix cases 5/6, which import functions/traits directly rather than typed
 values).
 
+### Gap 2 atomic acceptance boundary (2026-07-17)
+
+Do not patch this with a short-name or suffix scan in MIR. Constructor/local
+and imported-factory results must retain the defining module plus type owner so
+the existing qualified method symbol is selected. Imported trait defaults must
+also chase a separately declared trait through a three-module A-trait/B-impl/
+C-consumer graph. Acceptance must cover inherent and explicit-trait methods,
+same-module and three-module defaults (including default-to-required dispatch),
+two modules exporting the same type and method names under aliases, two local
+types sharing a method name, typed parameters, constructor locals, and imported
+factory returns. Same-name overloads remain separately unsupported and must
+fail loudly because parser `Impl.methods` is name-keyed. This remains open; a
+single MIR map insertion would be a partial and collision-prone fix.
+
 ## Scope note
 
 Neither gap blocks #190 (cross-module trait *default* dispatch specifically
 works once the trait and the implementing type are directly imported by the
 same module, or the type crosses a module boundary via a plain function
-rather than a bare type import). Filed here as OPEN rather than fixed, per
-repo policy against silently working around a discovered defect.
+rather than a bare type import). Gap 2 remains open rather than silently
+working around the discovered defect.
