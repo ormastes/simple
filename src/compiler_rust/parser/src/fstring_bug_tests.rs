@@ -75,6 +75,35 @@ fn sample(version, serialized):
         }
     }
 
+    #[test]
+    fn test_unmatched_open_brace_stops_at_current_string_boundary() {
+        let source = r#"fn open_brace(x: text) -> text:
+    " { "
+
+fn main():
+    val ob = open_brace("unused")
+    val rule = ".a" + ob + "color: red" + " } "
+    print("RULE: [" + rule + "]")
+
+main()
+"#;
+        assert!(find_errors(source).is_empty());
+        let tokens = get_fstring_tokens(source);
+        assert_eq!(
+            tokens.len(),
+            7,
+            "the first unmatched brace must not consume later strings/functions"
+        );
+        assert_eq!(
+            tokens[0],
+            TokenKind::FString(vec![FStringToken::Literal(" { ".to_string())])
+        );
+        assert_eq!(
+            tokens[4],
+            TokenKind::FString(vec![FStringToken::Literal(" } ".to_string())])
+        );
+    }
+
     /// The exact pattern from utilities.spl line 153:
     /// "{v: {version}, data: " + serialized + "}"
     #[test]

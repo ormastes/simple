@@ -15,6 +15,27 @@ use super::super::super::types::*;
 use super::super::*;
 use super::parse_and_lower;
 
+#[test]
+fn unmatched_literal_brace_does_not_consume_later_function_scope() {
+    let source = r#"fn open_brace(x: text) -> text:
+    " { "
+
+fn main():
+    val ob = open_brace("unused")
+    val rule = ".a" + ob + "color: red" + " } "
+    print("RULE: [" + rule + "]")
+
+main()
+"#;
+    let module =
+        parse_and_lower(source).expect("literal braces must not leak expressions across functions");
+    assert!(module
+        .functions
+        .iter()
+        .any(|function| function.name == "open_brace"));
+    assert!(module.functions.iter().any(|function| function.name == "main"));
+}
+
 // =============================================================================
 // #1: Result.Ok / Option.Some qualified-receiver routing (86e56ca7867)
 // =============================================================================

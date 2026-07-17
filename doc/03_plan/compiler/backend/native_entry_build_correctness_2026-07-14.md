@@ -106,9 +106,12 @@ the shared binary — deploys require explicit user go-ahead).
   adaptation. `NATIVE_OPEN_BUG_REPROS=1` additionally selects the exact June
   cross-function source as `brace_literal_scope_exact`, including Unit `main`
   and the trailing top-level `main()` call that exercises `_expr_N` restoration
-  plus `functions.contains("main")`. Candidate map-initialization fix
-  `f06e5829` was reverted by `0f535b099788`; there is no active source fix.
-  Exact Linux execution remains pending and the original bug stays open.
+  plus `functions.contains("main")`. The active root fix stops the Rust seed's
+  single-line f-string interpolation scan at its outer closing quote instead
+  of consuming later functions while seeking a `}`; exact lexer and HIR
+  regressions cover the source. The broad map-initialization workaround
+  `f06e5829` remains reverted by `0f535b099788`. Exact Linux execution remains
+  pending, so the opt-in case stays known-red until measured.
 - Open filed bugs, in bottom-up order:
   - `native_try_op_on_option_silent_wrong_2026-07-14.md` source-implements `?`
     for authoritatively typed flat and boxed Option locals/direct-call returns;

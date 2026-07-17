@@ -296,15 +296,22 @@ impl<'a> super::Lexer<'a> {
                         }
                         continue;
                     }
-                    // Track unescaped string boundaries
-                    // For double quote: always track as string delimiter
-                    // For single quote: only track as string start if NOT preceded by identifier/number/closing paren
-                    // (otherwise it's the transpose operator, e.g., A' in "m{ A' @ A }")
+                    // Track unescaped string boundaries. In a single-line
+                    // f-string, an unescaped double quote at top level closes
+                    // the OUTER string; it cannot start a nested expression
+                    // string. Stop and backtrack so an unmatched literal `{`
+                    // cannot consume later functions while searching for `}`.
+                    // Triple f-strings may contain an unescaped nested
+                    // double-quoted string, and escaped quotes are handled by
+                    // the backslash arm above.
                     if c == '"' {
                         if let Some(quote) = in_string {
                             if quote == c {
                                 in_string = None; // End of string
                             }
+                        } else if !is_triple {
+                            expr_failed = true;
+                            break;
                         } else {
                             in_string = Some(c); // Start of string
                         }

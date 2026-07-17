@@ -1,7 +1,7 @@
 # Brace-containing string literal corrupts lowering scope across functions
 
 Date: 2026-06-12
-Status: open (current-source safeguards present; exact regression execution pending)
+Status: source fixed; exact regression execution pending
 Severity: P2
 Related: `short_grammar_placeholder_interpolation_2026-05-27.md`,
 memory note "Brace Interpolation in Literals"
@@ -74,9 +74,9 @@ case is the native-entry adaptation. With `NATIVE_OPEN_BUG_REPROS=1`,
 `brace_literal_scope_exact` preserves Unit `main` and the trailing top-level
 `main()` call so `_expr_N` restoration and the `functions.contains("main")`
 branch cannot be adapted away. Both expect normalized output
-`RULE:[.a{color:red}]`. The exact case is deliberately opt-in and red until a
-source fix lands and Linux execution proves scope isolation plus entry-point
-preservation.
+`RULE:[.a{color:red}]`. The exact case remains deliberately opt-in and red
+until Linux execution proves the active source fix preserves scope isolation
+and the entry point.
 
 The focused core CI lane additionally executes
 `test/01_unit/compiler/frontend/interp_fragment_sticky_error_spec.spl`, which
@@ -85,11 +85,34 @@ The bootstrap portability audit prevents that test, its workflow triggers, or
 its interpreter-mode invocation from being silently dropped. This is supporting
 coverage only: the full CLI parity reproduction below remains the closure gate.
 
+## Root fix (2026-07-17)
+
+The corruption was in the Rust seed f-string lexer, not empty-map freshness.
+While scanning a possible `{...}` interpolation in a single-line string,
+`scan_fstring_impl` treated the outer closing `"` as the start of a nested
+string. For the exact source it therefore scanned from `" { "` across the
+next function until the later `}` in `" } "`, attaching `main`'s `rule`
+expression to `open_brace` and consuming the real entry point.
+
+The shared scanner now stops and backtracks when a top-level unescaped `"`
+closes a non-triple f-string. Triple f-strings and escaped nested quotes retain
+their existing behavior. The exact source is pinned both as a lexer-boundary
+regression and as a parser-to-HIR scope/entry-point regression. The pure-Simple
+lexer already stopped unmatched interpolation lookahead and required no change.
+Independent `{}` literals were also traced through pure-Simple MIR and both
+runtime owners; each evaluation allocates a fresh dictionary, so the reverted
+`Map.new()` caller rewrite remains correctly absent.
+
 ## Runtime verification (2026-07-17)
 
-Ran exact repro: `bin/simple run` output matches byte-for-byte: `HIR lowering error: Unknown variable: rule while lowering open_brace` then `error[E1002]: function 'main' not found`. Scope bleed across functions triggered by brace literal confirmed STILL-REPRODUCES.
+Before the source fix, the exact `bin/simple run` repro matched byte-for-byte:
+`HIR lowering error: Unknown variable: rule while lowering open_brace` followed
+by `error[E1002]: function 'main' not found`. Post-fix seed/CLI execution has
+not been run in this lane; the opt-in parity case remains known-red until that
+authorized execution succeeds.
 
-Candidate fix `f06e5829` replaced the frontend bridge's brace-initialized maps
-with explicit `Map.new()` construction, but `0f535b099788` reverted it before
-this lane synced. There is therefore no active source fix to verify. The exact
-opt-in Linux parity case above remains the closure gate for the eventual fix.
+Discarded candidate `f06e5829` replaced the frontend bridge's brace-initialized
+maps with explicit `Map.new()` construction; `0f535b099788` correctly reverted
+that caller workaround. It did not repair the seed scanner that consumed the
+cross-function source. The scanner fix above is the active fix; the exact
+opt-in Linux parity case remains its closure gate.
