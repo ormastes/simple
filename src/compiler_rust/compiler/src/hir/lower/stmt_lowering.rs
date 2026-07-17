@@ -1987,3 +1987,136 @@ mod host_gpu_lane_statement_tests {
         assert_eq!(names, vec!["rt_host_gpu_lane_event", "rt_host_gpu_lane_event"]);
     }
 }
+
+#[cfg(test)]
+mod nested_struct_pattern_in_enum_payload_tests {
+    use super::super::lower;
+    use crate::hir::types::{HirExpr, HirExprKind, HirModule, HirStmt, LocalVar};
+    use simple_parser::Parser;
+
+    fn lower_source(source: &str) -> crate::hir::lower::LowerResult<HirModule> {
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        lower(&ast)
+    }
+
+    /// Find the initializer expression of the first `Let` statement binding
+    /// local `name`, recursing into `If` then/else blocks -- a `match`
+    /// statement lowers to a chain of `If`s, one per arm, and the binding
+    /// `Let`s for a matched arm's payload live inside that arm's `then_block`.
+    fn find_let_value<'a>(stmts: &'a [HirStmt], locals: &[LocalVar], name: &str) -> Option<&'a HirExpr> {
+        for stmt in stmts {
+            match stmt {
+                HirStmt::Let {
+                    local_index, value, ..
+                } => {
+                    if locals.get(*local_index).map(|l| l.name.as_str()) == Some(name) {
+                        if let Some(v) = value {
+                            return Some(v);
+                        }
+                    }
+                }
+                HirStmt::If {
+                    then_block, else_block, ..
+                } => {
+                    if let Some(v) = find_let_value(then_block, locals, name) {
+                        return Some(v);
+                    }
+                    if let Some(else_b) = else_block {
+                        if let Some(v) = find_let_value(else_b, locals, name) {
+                            return Some(v);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    // Bug fix 14922f8e3cb (build_pattern_binding_stmts): a nested
+    // struct-destructuring sub-pattern inside an enum payload
+    // (`case Shape.Circle(Point(x, y)):`) had NO handling at all in the loop
+    // over payload sub-patterns -- only a plain `Identifier`/`MutIdentifier`
+    // sub-pattern emitted a binding `Let`. `collect_pattern_bindings`
+    // (a separate pass) still registers locals for `x`/`y`, so the names
+    // exist, but pre-fix no `Let` statement initializes them from the
+    // payload at all -- they keep whatever zeroed value is already on the
+    // stack. Reverting the fix removes the `else if let Pattern::Enum { .. }`
+    // branch this test exercises, so `find_let_value` finds NO initializer
+    // for `x`/`y` and this test fails outright (not merely a wrong value).
+    // Exact repro source from
+    // doc/08_tracking/bug/seed_interp_nested_struct_pattern_in_enum_payload_binds_zeros_2026-07-16.md.
+    #[test]
+    fn nested_struct_pattern_in_single_payload_binds_fields_via_field_access() {
+        let module = lower_source(
+            "struct Point:\n    x: i64\n    y: i64\n\nenum Shape:\n    Circle(Point)\n    Empty\n\nfn main() -> i64:\n    val s = Shape.Circle(Point(x: 3, y: 5))\n    match s:\n        case Shape.Circle(Point(x, y)): print(x * 10 + y)\n        case Shape.Empty: print(99)\n    return 0\n",
+        )
+        .expect("source should lower");
+
+        let func = module
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("main function should lower");
+
+        let x_value = find_let_value(&func.body, &func.locals, "x")
+            .expect("nested struct pattern must emit a Let binding for x (pre-fix: none emitted at all)");
+        assert!(
+            matches!(x_value.kind, HirExprKind::FieldAccess { field_index: 0, .. }),
+            "x should bind via FieldAccess to field 0 of the nested Point struct, got {:?}",
+            x_value.kind
+        );
+
+        let y_value = find_let_value(&func.body, &func.locals, "y")
+            .expect("nested struct pattern must emit a Let binding for y (pre-fix: none emitted at all)");
+        assert!(
+            matches!(y_value.kind, HirExprKind::FieldAccess { field_index: 1, .. }),
+            "y should bind via FieldAccess to field 1 of the nested Point struct, got {:?}",
+            y_value.kind
+        );
+    }
+
+    // Edge case: nested struct pattern as the SECOND item of a multi-field
+    // outer variant (`CircleAt(id, Point)` matched as
+    // `case Shape.CircleAt(id, Point(x, y))`). This exercises the
+    // `payload_patterns.len() > 1` branch, which indexes into the wrapper
+    // array (`rt_enum_payload(...)[i]`) before applying `FieldAccess` -- an
+    // off-by-one in that index would silently read the wrong payload slot.
+    #[test]
+    fn nested_struct_pattern_in_multi_payload_indexes_correct_slot() {
+        let module = lower_source(
+            "struct Point:\n    x: i64\n    y: i64\n\nenum Shape:\n    CircleAt(id: i64, point: Point)\n    Empty\n\nfn main() -> i64:\n    val s = Shape.CircleAt(id: 7, point: Point(x: 3, y: 5))\n    match s:\n        case Shape.CircleAt(id, Point(x, y)): print(id * 100 + x * 10 + y)\n        case Shape.Empty: print(99)\n    return 0\n",
+        )
+        .expect("source should lower");
+
+        let func = module
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("main function should lower");
+
+        let x_value = find_let_value(&func.body, &func.locals, "x")
+            .expect("nested struct pattern (2nd payload slot) must emit a Let binding for x");
+        match &x_value.kind {
+            HirExprKind::FieldAccess { field_index, receiver } => {
+                assert_eq!(*field_index, 0, "x is Point's field 0");
+                match &receiver.kind {
+                    HirExprKind::Index { index, .. } => {
+                        assert!(
+                            matches!(index.kind, HirExprKind::Integer(1)),
+                            "the nested Point pattern is the 2nd (index 1) item of the outer \
+                             variant's payload array, got index expr {:?}",
+                            index.kind
+                        );
+                    }
+                    other => panic!(
+                        "expected the struct payload to be indexed out of the multi-field wrapper array, got receiver {:?}",
+                        other
+                    ),
+                }
+            }
+            other => panic!("expected FieldAccess for x, got {:?}", other),
+        }
+    }
+}

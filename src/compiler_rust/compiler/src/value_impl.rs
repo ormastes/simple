@@ -652,3 +652,175 @@ impl Value {
         }
     }
 }
+
+#[cfg(test)]
+mod dict_composite_key_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// Build a fresh `Value::Object` for the same logical struct value on
+    /// every call. Each call constructs a brand-new `HashMap`, which (per
+    /// Rust std) seeds its own randomized hasher, so repeated calls can (and
+    /// empirically do) iterate `fields` in different orders across the test
+    /// run -- exactly the nondeterminism that made the pre-fix `to_key_string`
+    /// (which fell through to derived `Debug`) produce different strings for
+    /// structurally-equal values. Field insertion order here is also varied
+    /// call-to-call to make the repro as hostile as possible.
+    fn make_point(a: i64, b: i64, c: i64, insertion_order: usize) -> Value {
+        let mut fields = HashMap::new();
+        let inserts: [(&str, Value); 3] = [("a", Value::Int(a)), ("b", Value::Int(b)), ("c", Value::Int(c))];
+        // Rotate insertion order by `insertion_order` so the same 3 (name,
+        // value) pairs go into the HashMap in a different sequence each time.
+        for i in 0..3 {
+            let (name, value) = &inserts[(i + insertion_order) % 3];
+            fields.insert(name.to_string(), value.clone());
+        }
+        Value::Object {
+            class: "Point3".to_string(),
+            fields: Arc::new(fields),
+        }
+    }
+
+    // --- Bug 1 reproducer: deterministic composite dict keys ---
+    //
+    // Pre-fix, `to_key_string()` for `Value::Object` fell through to the
+    // catch-all `format!("{other:?}")` (derived `Debug`), which iterates
+    // `fields` (an `Arc<HashMap<String, Value>>`) in whatever order that
+    // specific HashMap instance happens to hash to. Reverting the fix makes
+    // this test flaky-fail (not deterministically fail every run) because
+    // HashMap's random seed varies per process/instance -- this is the same
+    // nondeterminism documented in
+    // doc/08_tracking/bug/dict_struct_key_iteration_single_entry_2026-06-13.md.
+    // Constructing the SAME struct value 20+ times, with rotated field
+    // insertion order each time, and asserting every resulting key string is
+    // byte-identical is the reliable way to catch it.
+    #[test]
+    fn object_to_key_string_is_deterministic_across_many_constructions() {
+        let first = make_point(7, 8, 9, 0).to_key_string();
+        for order in 0..25 {
+            let key_string = make_point(7, 8, 9, order).to_key_string();
+            assert_eq!(
+                key_string, first,
+                "Value::Object::to_key_string() must be deterministic regardless of \
+                 HashMap field-insertion order (construction #{order})"
+            );
+        }
+        // Sorted-field-name canonicalization also means the string is
+        // legible/stable, not just consistent -- pin the exact shape.
+        assert_eq!(first, "Point3{a=7,b=8,c=9}");
+    }
+
+    #[test]
+    fn enum_to_key_string_is_deterministic_and_distinguishes_variants() {
+        let circle_a = Value::Enum {
+            enum_name: "Shape".to_string(),
+            variant: "Circle".to_string(),
+            payload: Some(Box::new(make_point(1, 2, 3, 0))),
+        };
+        let circle_b = Value::Enum {
+            enum_name: "Shape".to_string(),
+            variant: "Circle".to_string(),
+            payload: Some(Box::new(make_point(1, 2, 3, 1))),
+        };
+        assert_eq!(
+            circle_a.to_key_string(),
+            circle_b.to_key_string(),
+            "two Shape::Circle(Point) values with equal fields must produce the same dict key \
+             regardless of the nested struct's field insertion order"
+        );
+
+        let square = Value::Enum {
+            enum_name: "Shape".to_string(),
+            variant: "Square".to_string(),
+            payload: Some(Box::new(make_point(1, 2, 3, 0))),
+        };
+        assert_ne!(
+            circle_a.to_key_string(),
+            square.to_key_string(),
+            "different enum variants with the same payload must still produce different dict keys"
+        );
+    }
+
+    #[test]
+    fn tuple_to_key_string_is_deterministic_across_nested_composite_elements() {
+        let first = Value::Tuple(vec![make_point(1, 2, 3, 0), Value::Int(4)]).to_key_string();
+        for order in 0..25 {
+            let key_string = Value::Tuple(vec![make_point(1, 2, 3, order), Value::Int(4)]).to_key_string();
+            assert_eq!(
+                key_string, first,
+                "Value::Tuple::to_key_string() must be deterministic even when it contains a \
+                 nested composite (Object) element (rotation #{order})"
+            );
+        }
+    }
+
+    // --- Bug 1 reproducer: __dict_entry__ marker round-trip ---
+    //
+    // The interpreter's `Dict` backing map only ever stores a `String` key
+    // (`to_key_string()`); the original key `Value` is otherwise discarded.
+    // `wrap_dict_entry`/`unwrap_dict_entry`/`dict_entry_key_for_iteration`/
+    // `dict_entry_value_for_iteration` are the mechanism that lets a
+    // composite (struct/enum/tuple/array) key survive insert -> get and
+    // insert -> iterate (`.keys()`, `.entries()`, `for k,v in dict`). Before
+    // this fix these helpers did not exist at all, so any test asserting
+    // their round-trip behavior fails to compile/link on a revert -- the
+    // strongest possible regression signal for an API addition.
+    #[test]
+    fn wrap_dict_entry_round_trips_composite_key_through_get_and_iteration() {
+        let key = make_point(1, 2, 3, 0);
+        let value = Value::text("payload");
+
+        let stored = Value::wrap_dict_entry(&key, value.clone());
+
+        // Key-in-hand recovery (get/set/contains call sites).
+        assert_eq!(
+            Value::unwrap_dict_entry(&key, stored.clone()),
+            value,
+            "unwrap_dict_entry must recover the original value for a composite key"
+        );
+
+        // Blind recovery (iteration: for k,v in dict / .keys() / .entries()),
+        // where only the map's raw string key is on hand.
+        let string_key = key.to_key_string();
+        let recovered_key = Value::dict_entry_key_for_iteration(&stored, &string_key);
+        assert!(
+            matches!(recovered_key, Value::Object { .. }),
+            "iterating a struct-keyed dict must yield the ORIGINAL struct value, not a \
+             Value::text(string_key) stand-in -- got {recovered_key:?}"
+        );
+        assert_eq!(
+            recovered_key.to_key_string(),
+            key.to_key_string(),
+            "recovered iteration key must be structurally equal to the original key"
+        );
+
+        let recovered_value = Value::dict_entry_value_for_iteration(&stored);
+        assert_eq!(
+            recovered_value, value,
+            "dict_entry_value_for_iteration must recover the original stored value"
+        );
+    }
+
+    #[test]
+    fn wrap_dict_entry_is_a_noop_for_scalar_keys() {
+        // Scalar keys (int/text/bool/float/nil/symbol) must be stored
+        // bit-for-bit unchanged -- wrap_dict_entry must NOT wrap them in a
+        // marker tuple, so scalar-keyed dict behavior is untouched by this
+        // fix (per the fix's own stated scope).
+        for key in [
+            Value::Int(42),
+            Value::text("k"),
+            Value::Bool(true),
+            Value::Float(1.5),
+            Value::Nil,
+        ] {
+            let value = Value::text("v");
+            let stored = Value::wrap_dict_entry(&key, value.clone());
+            assert_eq!(
+                stored, value,
+                "scalar key {key:?} must not be wrapped in a __dict_entry__ marker tuple"
+            );
+        }
+    }
+}

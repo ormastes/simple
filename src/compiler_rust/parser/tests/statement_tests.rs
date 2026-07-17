@@ -38,6 +38,94 @@ fn test_let_mut_statement() {
     }
 }
 
+// Bug fix a1397571773 (parser_patterns.rs, parse_keyword_as_pattern): the
+// plain-identifier fallback used to bind keyword-named locals with the
+// PascalCase spelling passed in by callers for the enum-variant branches
+// (e.g. `Pattern::Identifier("Kernel")`), while every READ of that local
+// resolves the lowercase spelling (`kernel` is only ever lexed as a keyword
+// from lowercase source text; `Expr::Identifier` reads it back lowercase via
+// `parse_keyword_identifier`). That permanent case mismatch meant `var
+// kernel = ...` bound a name no later read could ever match. The fix
+// lowercases in the fallback branch only. Reverting it flips this
+// assertion back to `"Kernel"`.
+#[test]
+fn test_var_keyword_identifier_binds_lowercase_pattern() {
+    let module = parse("var kernel = 5").unwrap();
+    if let Node::Let(stmt) = &module.items[0] {
+        assert_eq!(
+            stmt.pattern,
+            Pattern::Identifier("kernel".to_string()),
+            "keyword-as-identifier pattern must bind the lowercase spelling so reads of `kernel` resolve"
+        );
+    } else {
+        panic!("Expected let/var statement, got {:?}", module.items[0]);
+    }
+}
+
+// Edge case: the SAME keyword token (`kernel`) followed by `(` takes the
+// enum-variant-with-payload branch of `parse_keyword_as_pattern`, which the
+// fix deliberately leaves untouched -- variant names are conventionally
+// PascalCase (`case Kernel(x):`) and must NOT be lowercased.
+#[test]
+fn test_keyword_identifier_enum_payload_pattern_keeps_pascalcase_variant() {
+    let module = parse(
+        "fn run() -> i64:\n    val s = 5\n    match s:\n        case Kernel(x): print(x)\n        case _: print(0)\n    return 0\n",
+    )
+    .unwrap();
+    let func = module
+        .items
+        .iter()
+        .find_map(|item| if let Node::Function(f) = item { Some(f) } else { None })
+        .expect("run function should parse");
+    let match_stmt = func
+        .body
+        .statements
+        .iter()
+        .find_map(|stmt| if let Node::Match(m) = stmt { Some(m) } else { None })
+        .expect("match statement should parse");
+    assert_eq!(
+        match_stmt.arms[0].pattern,
+        Pattern::Enum {
+            name: "_".to_string(),
+            variant: "Kernel".to_string(),
+            payload: Some(vec![Pattern::Identifier("x".to_string())]),
+        },
+        "enum-variant-with-payload pattern must keep the PascalCase variant spelling, unaffected \
+         by the plain-identifier lowercase fix"
+    );
+}
+
+// Edge case: the qualified-path branch (`Name.Variant`) is likewise
+// untouched -- `case Foo.Kernel:` must keep `Kernel` as the (PascalCase)
+// variant name, not fold it into the plain-identifier lowercase fallback.
+#[test]
+fn test_keyword_identifier_qualified_path_pattern_keeps_pascalcase_variant() {
+    let module = parse(
+        "fn run() -> i64:\n    val s = 5\n    match s:\n        case Foo.Kernel: print(1)\n        case _: print(0)\n    return 0\n",
+    )
+    .unwrap();
+    let func = module
+        .items
+        .iter()
+        .find_map(|item| if let Node::Function(f) = item { Some(f) } else { None })
+        .expect("run function should parse");
+    let match_stmt = func
+        .body
+        .statements
+        .iter()
+        .find_map(|stmt| if let Node::Match(m) = stmt { Some(m) } else { None })
+        .expect("match statement should parse");
+    assert_eq!(
+        match_stmt.arms[0].pattern,
+        Pattern::Enum {
+            name: "Foo".to_string(),
+            variant: "Kernel".to_string(),
+            payload: None,
+        },
+        "qualified-path pattern must keep the PascalCase variant spelling"
+    );
+}
+
 // === Control Flow Tests ===
 
 #[test]

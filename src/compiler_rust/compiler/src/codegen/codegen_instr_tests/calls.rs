@@ -183,6 +183,135 @@ fn codegen_direct_bare_unwrap_redirects_to_runtime() {
     }));
 }
 
+// Bug fix 14922f8e3cb (flat-nullable unwrap): a bare/dynamic-dispatch
+// `.unwrap()`/`.unwrap_or()` used to compile to a call to `rt_enum_payload`,
+// which returns tagged-nil for any receiver that is not a genuine
+// heap-tagged `Enum` object -- always true for a flat-nullable (`i64?`)
+// local holding a present value, since flat-nullables store their payload
+// directly rather than as a boxed `Option::Some`. That produced the wrong
+// value end-to-end (`i64? = 100` printed `3`, the nil tag pattern, instead
+// of `100`). The fix in `codegen/instr/closures_structs.rs`
+// (`try_compile_builtin_method_call`) re-routes both method names to
+// `rt_unwrap_or_self`, which returns the receiver unchanged when it is not a
+// genuine boxed enum -- the correct fallback for a flat-nullable's raw
+// payload. See
+// doc/08_tracking/bug/seed_interp_flat_nullable_unwrap_wrong_value_2026-07-16.md.
+//
+// These tests assert on the SYMBOL the compiled object relocates to for the
+// runtime call, not just that compilation succeeds (the pre-existing
+// `codegen_direct_bare_unwrap_redirects_to_runtime` above only checks the
+// latter and would keep passing on a revert). Reverting the fix restores
+// the `rt_enum_payload` mapping, which flips both assertions here.
+// The bare-name dispatch that ultimately reaches `try_compile_builtin_method_call`
+// (the function this fix touches) is `MirInst::MethodCallStatic` with a
+// dot-less `func_name` (`compile_method_call_static` in
+// `codegen/instr/closures_structs.rs`, its final `else` branch once
+// `use_map`/`import_map` cross-module resolution comes up empty) -- NOT
+// `MirInst::Call`. A `MirInst::Call { target: CallTarget::from_name("unwrap") }`
+// (as used by the pre-existing `codegen_direct_bare_unwrap_redirects_to_runtime`
+// above) takes an entirely different path in `compile_call` and simply
+// declares an external symbol literally named "unwrap" -- it never reaches
+// the method-name-to-runtime-function mapping this bug fixed, so it cannot
+// distinguish the fix from its revert (confirmed empirically: relocates to
+// symbol "unwrap", not `rt_enum_payload` or `rt_unwrap_or_self`).
+#[test]
+fn codegen_bare_unwrap_calls_rt_unwrap_or_self_not_rt_enum_payload() {
+    let object = aot_object("bare_unwrap_symbol", |f| {
+        let recv = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: recv, value: 100 });
+        block.instructions.push(MirInst::MethodCallStatic {
+            dest: Some(dest),
+            receiver: recv,
+            func_name: "unwrap".to_string(),
+            args: vec![],
+        });
+        dest
+    });
+
+    assert!(
+        object_relocates_to_symbol(&object, "rt_unwrap_or_self"),
+        "bare .unwrap() must compile to a call to rt_unwrap_or_self (correct fallback: \
+         returns the receiver unchanged for a non-enum/flat-nullable value)"
+    );
+    assert!(
+        !object_relocates_to_symbol(&object, "rt_enum_payload"),
+        "bare .unwrap() must NOT compile to rt_enum_payload -- that returns tagged-nil for a \
+         flat-nullable's raw payload, which is the reverted (wrong) behavior"
+    );
+}
+
+// Edge case: `unwrap_or` shares the exact same fallback mapping in
+// `try_compile_builtin_method_call` (`"unwrap" | "unwrap_or" => "rt_unwrap_or_self"`).
+// A fix that only patched the `unwrap` arm (e.g. a hand-edited partial
+// revert) would leave this one still calling `rt_enum_payload`.
+#[test]
+fn codegen_bare_unwrap_or_calls_rt_unwrap_or_self_not_rt_enum_payload() {
+    let object = aot_object("bare_unwrap_or_symbol", |f| {
+        let recv = f.new_vreg();
+        let fallback = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: recv, value: 100 });
+        block.instructions.push(MirInst::ConstInt { dest: fallback, value: 0 });
+        block.instructions.push(MirInst::MethodCallStatic {
+            dest: Some(dest),
+            receiver: recv,
+            func_name: "unwrap_or".to_string(),
+            args: vec![fallback],
+        });
+        dest
+    });
+
+    assert!(
+        object_relocates_to_symbol(&object, "rt_unwrap_or_self"),
+        "bare .unwrap_or() must compile to a call to rt_unwrap_or_self, same as .unwrap()"
+    );
+    assert!(
+        !object_relocates_to_symbol(&object, "rt_enum_payload"),
+        "bare .unwrap_or() must NOT compile to rt_enum_payload"
+    );
+}
+
+// Edge case: chained/nested unwrap (`opt.unwrap().unwrap()`, as would arise
+// from a doubly-nested flat-nullable). Both call sites in the chain must
+// route through the same fixed symbol -- a partial fix that only patched
+// the first dispatch point (e.g. an inlined fast path bypassing the shared
+// match arm) would leave the second `unwrap` still on the old mapping.
+#[test]
+fn codegen_chained_unwrap_calls_use_rt_unwrap_or_self_at_every_step() {
+    let object = aot_object("chained_unwrap_symbol", |f| {
+        let recv = f.new_vreg();
+        let mid = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: recv, value: 100 });
+        block.instructions.push(MirInst::MethodCallStatic {
+            dest: Some(mid),
+            receiver: recv,
+            func_name: "unwrap".to_string(),
+            args: vec![],
+        });
+        block.instructions.push(MirInst::MethodCallStatic {
+            dest: Some(dest),
+            receiver: mid,
+            func_name: "unwrap".to_string(),
+            args: vec![],
+        });
+        dest
+    });
+
+    assert!(
+        object_relocates_to_symbol(&object, "rt_unwrap_or_self"),
+        "every .unwrap() call in a chain must compile to rt_unwrap_or_self"
+    );
+    assert!(
+        !object_relocates_to_symbol(&object, "rt_enum_payload"),
+        "no step of a chained .unwrap() should fall back to rt_enum_payload"
+    );
+}
+
 #[test]
 fn codegen_direct_result_helpers_redirect_to_runtime() {
     assert!(aot_compiles("direct_result_helpers", |f| {
