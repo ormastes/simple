@@ -47,3 +47,19 @@ state, interned strings) is never freed; the stage4 parser stores AST nodes in
 global tables that only grow. Fix direction: either interpreter-level release
 of dead heap between top-level calls, or a `parser_reset()`/arena-reuse hook
 in the stage4 parser.
+
+## 2026-07-17 native Stage4 evidence
+
+The same retention shape was reproduced in a no-GC pure-Simple Stage4 process.
+`ast_reset`, `expr_reset`, and `stmt_reset` replaced every flat arena array for
+each parsed module. They now allocate only for native zero initialization and
+otherwise clear and reuse backing storage. At 157 parsed modules, maximum RSS
+fell from about 9.3 GiB to 7.9 GiB (about 15%) in like-for-like runs.
+
+The remaining slope correlated with bootstrap expression/statement setters
+mirroring roughly ten and six environment variables per node respectively.
+Native Stage4 now makes the flat arrays authoritative, gates those mirror
+writes, keeps node counts in local slots, and ignores stale per-node environment
+keys. The aggregate AST modules pass the bootstrap compile gate. Full Stage4
+memory and executable verification remains open and is intentionally deferred
+after the third bounded retry.

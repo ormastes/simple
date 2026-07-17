@@ -67,3 +67,22 @@ phase-1 loaded-module, queued-import, and scanned-path sets, rebuild Stage3,
 then verify the phase-2 unique count and one-parse-per-path trace. No further
 Stage4 retry is permitted in the current continuation because the three-cycle
 cap was reached.
+
+## 2026-07-17 macOS arena continuation
+
+The array-backed closure sets and unique physical-source plan now run in a
+fresh 24 MiB pure-Simple Stage3. Stage4 phase 1 completed in 26.643 seconds and
+reported 2,020 collected sources and 1,246 unique physical sources. Phase 2
+advanced through roughly 174 unique files without the former duplicate parse
+or compiled-`Map` crash. This satisfies the collection/counting portion of the
+fix; full executable acceptance remains open.
+
+The bounded retries then isolated the remaining growth to flat AST reset and
+bootstrap environment mirroring. Reusing the declaration/expression/statement
+arrays reduced RSS at the like-for-like 157-file point from about 9.3 GiB to
+7.9 GiB (about 15%). Source now also disables per-node expression/statement
+environment mirrors while the native arena is authoritative, and native
+readers bypass stale keys from prior modules. The aggregate AST modules compile
+successfully through the bootstrap gate. A fresh Stage4 executable run is
+deferred to the next continuation because this continuation reached the
+mandatory three-cycle cap.
