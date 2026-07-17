@@ -86,3 +86,27 @@ readers bypass stale keys from prior modules. The aggregate AST modules compile
 successfully through the bootstrap gate. A fresh Stage4 executable run is
 deferred to the next continuation because this continuation reached the
 mandatory three-cycle cap.
+
+## 2026-07-17 macOS grammar-hardening continuation
+
+A fresh pure-Simple Stage3 (24 MiB, 707 compiled, zero failed) verified the
+native-arena source and drove three bounded Stage4 cycles. Phase 1 improved
+from 21.974 seconds to 18.271 seconds while retaining the 2,020 collected /
+1,246 unique physical-source plan. The cycles exposed and fixed two real
+source grammar incompatibilities in the browser lane:
+
+- parenthesized the multi-line static-frame predicate in
+  `src/app/ui.browser/backend.spl`;
+- replaced multi-line `=>` match arms with canonical colon arms in
+  `src/app/ui.browser/event_bridge.spl`.
+
+Both files pass focused bootstrap compilation. The third cycle advanced to
+`src/lib/nogc_async_mut/io/tcp.spl` at 127.075 seconds and exposed missing
+comma-list support for established `class X with A, B, C` syntax. The Stage4
+frontend now consumes all comma-separated mixin identifiers, and the Simple
+parser probe parses the real async TCP module through `PROBE_DONE`.
+
+No fourth Stage4 run was started because the mandatory three-cycle cap was
+reached. Full executable acceptance remains open; the next bounded
+continuation should rebuild Stage3 with the comma-list parser fix and resume
+the exact Stage4 command without deleting caches.
