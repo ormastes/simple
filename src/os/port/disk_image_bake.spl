@@ -20,7 +20,7 @@ use std.io_runtime as io
 use os.port.initramfs_pack.{PackConfig, PayloadEntry as InitramfsPayloadEntry,
     cmd_build, validate_image}
 use os.port.disk_image.{DiskImageConfig, PayloadEntry, build}
-use std.common.encoding.font_registry.{selected_font_asset_candidates, simpleos_font_asset_guest_path, simpleos_font_asset_short_name, load_selected_font_file}
+use os.port.font_bundle.{simpleos_font_bundle_entries, load_simpleos_font_bundle_entry}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_env_get(key: text) -> text?
@@ -58,18 +58,6 @@ fn _build_initramfs(out_initramfs: text, hello_rs_path: text, hello_c_path: text
             guest_path: "/usr/share/test/hello_c.o",
             is_dir: false,
         ))
-    for font in selected_font_asset_candidates():
-        val font_loaded = load_selected_font_file(font.local_path)
-        val font_validation = font_loaded.1
-        if not font_validation.valid:
-            return Err("bake: SimpleOS font asset invalid: " + font_validation.reason)
-        payloads.push(InitramfsPayloadEntry(
-            host_path: font.local_path,
-            guest_path: simpleos_font_asset_guest_path(font),
-            is_dir: false,
-            data: font_loaded.0,
-        ))
-
     val config = PackConfig(
         simple_binary: "build/bootstrap/stage3/simple_simpleos",
         llvm_prefix: "build/os/llvm/cross/bin",
@@ -210,15 +198,14 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
     else:
         print "bake: Simple compiler payload skipped (set SIMPLEOS_SIMPLE_BINARY and touch build/os/.bake_include_simple_compiler to embed)"
 
-    for font in selected_font_asset_candidates():
-        val font_loaded = load_selected_font_file(font.local_path)
-        val font_validation = font_loaded.1
-        if not font_validation.valid:
-            return Err("bake: SimpleOS font asset invalid: " + font_validation.reason)
+    for entry in simpleos_font_bundle_entries():
+        val loaded = load_simpleos_font_bundle_entry(entry)
+        if not loaded.valid:
+            return Err("bake: SimpleOS font bundle entry invalid: " + loaded.reason)
         nested_payloads.push(PayloadEntry(
-            path: simpleos_font_asset_short_name(font),
-            data: font_loaded.0,
-            guest_path: simpleos_font_asset_guest_path(font),
+            path: entry.guest_short_name,
+            data: loaded.data,
+            guest_path: entry.guest_long_path,
         ))
 
     var payload_bytes: u64 = 0u64

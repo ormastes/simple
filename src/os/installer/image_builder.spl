@@ -13,7 +13,7 @@ use os.tools.pkg.pkg_format.{
     ExtendedManifest, PkgArch, PackageType,
     pkg_arch_to_text, pkg_arch_from_text
 }
-use std.common.encoding.font_registry.{selected_font_asset_candidates, simpleos_font_asset_guest_path, load_selected_font_file}
+use os.port.font_bundle.{simpleos_font_bundle_entries, load_simpleos_font_bundle_entry}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_env_get(key: text) -> text?
@@ -144,12 +144,12 @@ impl ImageBuilder:
                 return Err(e)
         var font_guest_paths: [text] = []
         var font_blobs: [[u8]] = []
-        for font in selected_font_asset_candidates():
-            val loaded = load_selected_font_file(font.local_path)
-            if not loaded.1.valid:
-                return Err("SimpleOS font asset invalid: " + loaded.1.reason)
-            font_guest_paths.push(simpleos_font_asset_guest_path(font))
-            font_blobs.push(loaded.0)
+        for entry in simpleos_font_bundle_entries():
+            val loaded = load_simpleos_font_bundle_entry(entry)
+            if not loaded.valid:
+                return Err("SimpleOS font bundle entry invalid: " + loaded.reason)
+            font_guest_paths.push(entry.guest_long_path)
+            font_blobs.push(loaded.data)
         print "Creating {artifact_kind}: {self.config.output_path}"
         print "  Architecture: {arch_name}"
         print "  Size: {self.config.image_size_mb} MB"
@@ -242,7 +242,8 @@ impl ImageBuilder:
             _ensure_parent_dirs(rootfs_root, font_path)
             if not rt_file_write_bytes(rootfs_root + font_path, font_blobs[font_index]):
                 return Err("SimpleOS font asset staging failed: " + font_path)
-            manifest = manifest + _manifest_file(font_path, "font-asset", "simpleos-core")
+            val kind = if font_path.ends_with(".ttf"): "font-asset" else: "font-notice"
+            manifest = manifest + _manifest_file(font_path, kind, "simpleos-core")
             font_index = font_index + 1
         Ok(manifest)
 

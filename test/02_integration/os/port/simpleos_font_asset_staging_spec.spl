@@ -1,6 +1,12 @@
 use std.spec
 use std.io_runtime.{file_read}
-use std.common.encoding.font_registry.{selected_font_asset_candidates, simpleos_default_font_asset_candidate, simpleos_font_asset_guest_path, simpleos_font_asset_short_guest_path, simpleos_font_asset_short_name}
+use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_bundle_asset_pins, simpleos_default_font_asset_candidate, simpleos_font_asset_guest_path, simpleos_font_asset_short_guest_path, simpleos_font_asset_short_name}
+use os.port.font_bundle.{simpleos_font_bundle_entries}
+
+fn bundle_pin_sha256(path: text) -> text:
+    for pin in selected_font_bundle_asset_pins():
+        if pin.path == path: return pin.sha256
+    ""
 
 fn expect_simpleos_font_asset():
     val font = simpleos_default_font_asset_candidate()
@@ -13,26 +19,32 @@ fn expect_simpleos_font_asset():
     val disk_writer = file_read("src/os/port/disk_image.spl")
     val direct_script = file_read("scripts/os/make_os_disk.shs")
     val direct_builder = file_read("scripts/os/make_os_disk.c")
+    val companion_manifest = file_read("scripts/os/simpleos_font_bundle_companion.sha256")
     val guest = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl")
     val browser = file_read("src/os/apps/simple_browser/main.spl")
     val vfs = file_read("src/os/services/vfs/vfs_init.spl")
     val adapter = file_read("src/os/services/vfs/c_nvme_block_adapter.spl")
     val boot_vfs = file_read("src/os/services/vfs/vfs_boot_init.spl")
+    val x86_stubs = file_read("examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c")
+    val arm64_stubs = file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
     expect(selected_font_asset_candidates().len()).to_equal(16)
-    expect(image_builder).to_contain("for font in selected_font_asset_candidates()")
-    expect(image_builder).to_contain("font_guest_paths.push(simpleos_font_asset_guest_path(font))")
-    expect(image_builder).to_contain("font_blobs.push(loaded.0)")
+    expect(simpleos_font_bundle_entries().len()).to_equal(53)
+    expect(image_builder).to_contain("for entry in simpleos_font_bundle_entries()")
+    expect(image_builder).to_contain("font_guest_paths.push(entry.guest_long_path)")
+    expect(image_builder).to_contain("font_blobs.push(loaded.data)")
     expect(image_builder).to_contain("_ensure_parent_dirs(rootfs_root, font_path)")
     expect(image_builder).to_contain("rt_file_write_bytes(rootfs_root + font_path, font_blobs[font_index])")
-    expect(image_builder).to_contain("_manifest_file(font_path, \"font-asset\", \"simpleos-core\")")
+    expect(image_builder).to_contain("val kind = if font_path.ends_with(\".ttf\"): \"font-asset\" else: \"font-notice\"")
+    expect(image_builder).to_contain("_manifest_file(font_path, kind, \"simpleos-core\")")
     expect(image_builder.contains("rootfs_root, \"/\" + font_path")).to_equal(false)
     expect(image_builder.contains("{rootfs_root}/\" + font_path")).to_equal(false)
-    expect(initramfs).to_contain("for font in selected_font_asset_candidates()")
-    expect(initramfs).to_contain("file_write_bytes(font_dst, font_loaded.0)")
-    expect(legacy_bake).to_contain("for font in selected_font_asset_candidates()")
-    expect(legacy_bake).to_contain("path: simpleos_font_asset_short_name(font)")
-    expect(legacy_bake).to_contain("data: font_loaded.0")
+    expect(initramfs).to_contain("for entry in simpleos_font_bundle_entries()")
+    expect(initramfs).to_contain("file_write_bytes(font_dst, loaded.data)")
+    expect(legacy_bake).to_contain("for entry in simpleos_font_bundle_entries()")
+    expect(legacy_bake).to_contain("path: entry.guest_short_name")
+    expect(legacy_bake).to_contain("data: loaded.data")
     expect(legacy_bake).to_contain("nested_payloads.push(PayloadEntry(")
+    expect(legacy_bake.index_of("val config = PackConfig(") < legacy_bake.index_of("for entry in simpleos_font_bundle_entries()")).to_be(true)
     expect(legacy_bake).to_contain("var size_mb: u64 = 128u64")
     expect(legacy_bake).to_contain("val required_mb = (payload_bytes + 1048575u64) / 1048576u64 + 16u64")
     expect(legacy_bake.contains("bake_disk_via_mkfs_fat")).to_equal(false)
@@ -45,14 +57,42 @@ fn expect_simpleos_font_asset():
     expect(direct_script).to_contain("if [ \"$size_bits\" -lt 128 ]")
     expect(direct_script).to_contain("shasum -a 256")
     expect(direct_script).to_contain("2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081")
+    expect(direct_script).to_contain("53 files / 51,932,523 bytes")
+    expect(direct_script).to_contain("sha256sum --check \"$font_companion_manifest\"")
+    expect(direct_script).to_contain("shasum -a 256 --check \"$font_companion_manifest\"")
     expect(direct_builder).to_contain("FONT_ASSET_COUNT = 16")
     expect(direct_builder).to_contain("SIMPLEOS_FONT_ASSET_NSANSSC")
     expect(direct_builder).to_contain("SIMPLEOS_FONT_ASSET_NOTOEMOJ")
     expect(direct_builder).to_contain("SIMPLEOS_FONT_ASSET_COUNT=16")
+    expect(direct_builder).to_contain("SIMPLEOS_FONT_BUNDLE_COUNT=53")
     expect(direct_builder).to_contain("SIMPLEOS_FONT_ASSET_PATH=/SYS/FONTS/NOTOSANS")
+    expect(direct_builder).to_contain("SIMPLEOS_FONT_NOTICES_PATH=/SYS/FONTS/NOTICES.MD")
     expect(direct_builder).to_contain("font_long_names[FONT_ASSET_COUNT]")
     expect(direct_builder).to_contain("NotoSansMono[wdth,wght].ttf")
     expect(direct_builder).to_contain("put_named_dir_entry(fonts, &fonts_n, font_fat_names[i], font_long_names[i]")
+    expect(direct_builder).to_contain("read_sibling_file(font_companion_anchor_paths[i], \"METADATA.pb\")")
+    expect(direct_builder).to_contain("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf")
+    expect(direct_builder.contains("read_sibling_file(font_asset_path")).to_equal(false)
+    expect(direct_builder).to_contain("assets/fonts/cldr/release-48-2/LICENSE")
+    expect(direct_builder).to_contain("THIRD_PARTY_NOTICES.md")
+    expect(direct_builder).to_contain("if (fonts_n != 91)")
+    expect(direct_builder).to_contain("fonts[4096]")
+    expect(4096 / 32).to_equal(128)
+    expect(91).to_be_less_than(4096 / 32)
+
+    var companion_manifest_count: i64 = 0
+    for line in companion_manifest.split("\n"):
+        if line.trim() != "": companion_manifest_count = companion_manifest_count + 1
+    expect(companion_manifest_count).to_equal(35)
+    for entry in simpleos_font_bundle_entries():
+        val pin_sha256 = bundle_pin_sha256(entry.source_path)
+        if pin_sha256 != "":
+            if entry.source_path.ends_with(".ttf"):
+                expect(direct_script).to_contain(entry.source_path)
+                expect(direct_script).to_contain(pin_sha256)
+                expect(direct_builder).to_contain(entry.source_path)
+            else:
+                expect(companion_manifest).to_contain(pin_sha256 + "  " + entry.source_path)
     expect(guest).to_contain("g_vfs_read_file_bytes(\"/SYS/FONTS/NOTOSANS\")")
     expect(guest).to_contain("font_renderer_use_registered_selected_bytes_only()")
     expect(guest).to_contain("font_renderer_register_selected_bytes(font_path, font_blob)")
@@ -67,9 +107,14 @@ fn expect_simpleos_font_asset():
     expect(browser).to_contain("if registered_fonts != required_fonts:")
     expect(vfs).to_contain("FAT32_PATH_READ_BUFFER_MAX: u64 = 33554432")
     expect(vfs).to_contain("driver.read(handle, FAT32_PATH_READ_BUFFER_MAX)")
-    expect(vfs).to_contain("C_FAT32_PATH_READ_BUFFER_MAX: u64 = 4194304")
-    expect(adapter).to_contain("FAT32_PATH_READ_BUFFER_MAX: u64 = 4194304")
+    expect(vfs).to_contain("C_FAT32_PATH_READ_BUFFER_MAX: u64 = 33554432")
+    expect(adapter).to_contain("FAT32_PATH_READ_BUFFER_MAX: u64 = 33554432")
     expect(boot_vfs).to_contain("PURE_FAT32_FILE_READ_MAX: u64 = 33554432")
+    expect(x86_stubs).to_contain("simpleos_fat32_path_read_buf[33554432]")
+    expect(x86_stubs).to_contain("simpleos_fat32_path_read_buf_size = 33554432")
+    expect(arm64_stubs).to_contain("simpleos_fat32_path_read_buf[33554432]")
+    expect(arm64_stubs).to_contain("simpleos_fat32_path_read_buf_size = 33554432")
+    expect(25125512).to_be_less_than(33554432)
     expect(boot_vfs).to_contain("driver.read(handle, PURE_FAT32_FILE_READ_MAX)")
 
 fn expect_simpleos_font_guest_paths():
@@ -91,12 +136,15 @@ fn expect_simpleos_font_guest_paths():
     expect(short_paths[8]).to_equal("/SYS/FONTS/NOTOSANS")
 
 describe "SimpleOS pinned font asset staging":
-    it "uses the pinned Noto Sans Mono path length and hash":
+    it "should use the pinned Noto Sans Mono path length and hash":
+        step("Inspect the default SimpleOS font identity")
         val font = simpleos_default_font_asset_candidate()
         expect(font.local_path).to_equal("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf")
         expect(font.byte_len).to_equal(1708408)
         expect(font.sha256).to_equal("2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081")
 
-    it "stages the selected catalog through every Simple image tree builder":
+    it "should stage the selected catalog through every Simple image tree builder":
+        step("Inspect the shared 53-file SimpleOS font/legal projection")
         expect_simpleos_font_asset()
+        step("Preserve every existing guest font registry path")
         expect_simpleos_font_guest_paths()

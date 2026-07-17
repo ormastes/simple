@@ -182,6 +182,20 @@ static struct bytes read_file(const char *path)
     return out;
 }
 
+static struct bytes read_sibling_file(const char *path, const char *leaf)
+{
+    char sibling[1024];
+    const char *slash = path ? strrchr(path, '/') : NULL;
+    size_t prefix_len = slash ? (size_t)(slash - path + 1) : 0;
+    size_t leaf_len = strlen(leaf);
+    if (!path || prefix_len + leaf_len >= sizeof(sibling))
+        die("font companion path too long");
+    if (prefix_len)
+        memcpy(sibling, path, prefix_len);
+    memcpy(sibling + prefix_len, leaf, leaf_len + 1);
+    return read_file(sibling);
+}
+
 static struct bytes read_cfat4k_baseline(void)
 {
     const char *override = getenv("SIMPLEOS_CFAT4K_BASELINE");
@@ -238,6 +252,17 @@ static void put_dir_entry(unsigned char *entries, int *count, const char *name, 
     write_u16(entry, 26, (uint16_t)((uint32_t)cluster & 0xffffU));
     write_u32(entry, 28, (uint32_t)size);
     *count += 1;
+}
+
+static void font_companion_fat_name(char out[12], const char *font_name, const char *extension)
+{
+    size_t extension_len = strlen(extension);
+    if (extension_len > 3)
+        die("bad font companion extension");
+    memcpy(out, font_name, 8);
+    memset(out + 8, ' ', 3);
+    memcpy(out + 8, extension, extension_len);
+    out[11] = '\0';
 }
 
 static unsigned char fat_lfn_checksum(const char *short_name)
@@ -493,6 +518,26 @@ int main(int argc, char **argv)
         "RobotoSlab[wght].ttf", "UnifrakturCook-Bold.ttf",
         "PixelifySans[wght].ttf", "NotoEmoji[wght].ttf"
     };
+    /* Compatibility overrides may relocate validated TTF bytes only. Keep
+     * metadata/licenses anchored to the canonical pinned repository tree. */
+    static const char *font_companion_anchor_paths[FONT_ASSET_COUNT] = {
+        "assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf",
+        "assets/fonts/google-fonts/ofl/notosansdevanagari/NotoSansDevanagari[wdth,wght].ttf",
+        "assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf",
+        "assets/fonts/google-fonts/ofl/notosansbengali/NotoSansBengali[wdth,wght].ttf",
+        "assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf",
+        "assets/fonts/google-fonts/ofl/notoserifdevanagari/NotoSerifDevanagari[wdth,wght].ttf",
+        "assets/fonts/google-fonts/ofl/notonaskharabic/NotoNaskhArabic[wght].ttf",
+        "assets/fonts/google-fonts/ofl/notoserifbengali/NotoSerifBengali[wdth,wght].ttf",
+        "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf",
+        "assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf",
+        "assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf",
+        "assets/fonts/google-fonts/ofl/caveat/Caveat[wght].ttf",
+        "assets/fonts/google-fonts/apache/robotoslab/RobotoSlab[wght].ttf",
+        "assets/fonts/google-fonts/ofl/unifrakturcook/UnifrakturCook-Bold.ttf",
+        "assets/fonts/google-fonts/ofl/pixelifysans/PixelifySans[wght].ttf",
+        "assets/fonts/google-fonts/ofl/notoemoji/NotoEmoji[wght].ttf"
+    };
     if (argc != 5)
         die("usage: make_os_disk IMAGE PLATFORM SIZE_BITS KERNEL");
     const char *img_path = argv[1];
@@ -548,6 +593,8 @@ int main(int argc, char **argv)
     struct bytes hello_ir_payload = read_file(getenv("SIMPLEOS_HELLO_IR"));
     struct bytes fsexec_payload = read_file(getenv("SIMPLEOS_FSEXEC_BINARY"));
     struct bytes font_payloads[FONT_ASSET_COUNT];
+    struct bytes font_metadata_payloads[FONT_ASSET_COUNT];
+    struct bytes font_license_payloads[FONT_ASSET_COUNT];
     for (int i = 0; i < FONT_ASSET_COUNT; ++i) {
         const char *font_asset_path = getenv(font_env_names[i]);
         if (!font_asset_path || font_asset_path[0] == '\0') {
@@ -559,7 +606,22 @@ int main(int argc, char **argv)
             fprintf(stderr, "%s could not be read\n", font_env_names[i]);
             return 1;
         }
+        font_metadata_payloads[i] = read_sibling_file(font_companion_anchor_paths[i], "METADATA.pb");
+        font_license_payloads[i] = read_sibling_file(
+            font_companion_anchor_paths[i], i == 12 ? "LICENSE.txt" : "OFL.txt");
+        if (!font_metadata_payloads[i].len || !font_license_payloads[i].len) {
+            fprintf(stderr, "%s companion metadata/license could not be read\n", font_env_names[i]);
+            return 1;
+        }
     }
+    struct bytes font_copyright_payload = read_sibling_file(font_companion_anchor_paths[12], "COPYRIGHT.txt");
+    struct bytes font_corpus_payload = read_file("assets/fonts/google-fonts/CORPUS.sdn");
+    struct bytes cldr_license_payload = read_file("assets/fonts/cldr/release-48-2/LICENSE");
+    struct bytes simple_license_payload = read_file("LICENSE");
+    struct bytes third_party_notices_payload = read_file("THIRD_PARTY_NOTICES.md");
+    if (!font_copyright_payload.len || !font_corpus_payload.len || !cldr_license_payload.len ||
+        !simple_license_payload.len || !third_party_notices_payload.len)
+        die("SimpleOS font bundle global notice could not be read");
     struct bytes cfat4k = read_cfat4k_baseline();
     struct bytes kernel = kernel_file.len ? kernel_file : text_bytes("SIMPLEOS_UEFI_KERNEL_MISSING\n");
     struct bytes bootloader = bootloader_file.len ? bootloader_file : text_bytes("SIMPLEOS_UEFI_BOOTLOADER_MISSING\n");
@@ -594,7 +656,7 @@ int main(int argc, char **argv)
         "/usr/share/simpleos/toolchain/llvm/hello.ll\n/usr/bin/simple status=standalone-required\n/sys/apps/simple status=standalone-required\n/sys/apps/simple_compiler status=standalone-required\n/sys/apps/simple_interpreter status=standalone-required\n/sys/apps/simple_loader status=standalone-required\n/sys/apps/llvm status=standalone-required\n"
         "/sys/apps/clang status=standalone-required\n/sys/apps/rust status=standalone-required\nSimpleOS LLVM standalone app v1\nclang version 20.0.0\nSimpleOS Rust standalone app v1\n"
         "/usr/share/simpleos/toolchain/llvm/pipeline.step\n/usr/share/simpleos/toolchain/clang/pipeline.step\n/usr/share/simpleos/toolchain/rust/pipeline.step\n"
-        "SIMPLEOS_FONT_ASSET_COUNT=16\nSIMPLEOS_FONT_ASSET_PATH=/SYS/FONTS/NOTOSANS\n",
+        "SIMPLEOS_FONT_ASSET_COUNT=16\nSIMPLEOS_FONT_BUNDLE_COUNT=53\nSIMPLEOS_FONT_ASSET_PATH=/SYS/FONTS/NOTOSANS\nSIMPLEOS_FONT_NOTICES_PATH=/SYS/FONTS/NOTICES.MD\n",
         lane, lane, platform);
 
     struct bytes llvm_manifest = textf("[toolchain]\napp=llvm\ntitle=LLVM\ntool=/sys/apps/llvm\nlane=%s\nmode=native-filesystem-app\nstatus=standalone-required\ncapability_primary=local-ir-inspection\nproof_primary=/usr/share/simpleos/toolchain/llvm/hello.ll\ncapability_secondary=object-assembly-inspection\nproof_secondary=/usr/share/simpleos/toolchain/llvm/hello.s\npipeline=compile-pipeline-step\nproof_pipeline=/usr/share/simpleos/toolchain/llvm/pipeline.step\n", lane);
@@ -676,8 +738,18 @@ int main(int argc, char **argv)
     int hello_ir_cluster = hello_ir_payload.len ? alloc_clusters(hello_ir_payload.data, hello_ir_payload.len) : 0;
     int fsexec_cluster = fsexec_payload.len ? alloc_clusters(fsexec_payload.data, fsexec_payload.len) : 0;
     int font_clusters[FONT_ASSET_COUNT];
-    for (int i = 0; i < FONT_ASSET_COUNT; ++i)
+    int font_metadata_clusters[FONT_ASSET_COUNT];
+    int font_license_clusters[FONT_ASSET_COUNT];
+    for (int i = 0; i < FONT_ASSET_COUNT; ++i) {
         font_clusters[i] = alloc_clusters(font_payloads[i].data, font_payloads[i].len);
+        font_metadata_clusters[i] = alloc_clusters(font_metadata_payloads[i].data, font_metadata_payloads[i].len);
+        font_license_clusters[i] = alloc_clusters(font_license_payloads[i].data, font_license_payloads[i].len);
+    }
+    int font_copyright_cluster = alloc_clusters(font_copyright_payload.data, font_copyright_payload.len);
+    int font_corpus_cluster = alloc_clusters(font_corpus_payload.data, font_corpus_payload.len);
+    int cldr_license_cluster = alloc_clusters(cldr_license_payload.data, cldr_license_payload.len);
+    int simple_license_cluster = alloc_clusters(simple_license_payload.data, simple_license_payload.len);
+    int third_party_notices_cluster = alloc_clusters(third_party_notices_payload.data, third_party_notices_payload.len);
     int llvm_cluster = alloc_clusters(llvm_app.data, llvm_app.len);
     int clang_cluster = alloc_clusters(clang_app.data, clang_app.len);
     int rust_cluster = alloc_clusters(rust_app.data, rust_app.len);
@@ -715,9 +787,31 @@ int main(int argc, char **argv)
     put_dir_entry(sys, &sys_n, "APPS       ", apps_cluster, 0, 0x10);
     put_dir_entry(sys, &sys_n, "PERF       ", perf_cluster, 0, 0x10);
     put_dir_entry(sys, &sys_n, "FONTS      ", fonts_cluster, 0, 0x10);
-    for (int i = 0; i < FONT_ASSET_COUNT; ++i)
+    for (int i = 0; i < FONT_ASSET_COUNT; ++i) {
         put_named_dir_entry(fonts, &fonts_n, font_fat_names[i], font_long_names[i],
                             font_clusters[i], font_payloads[i].len, 0x20);
+        char metadata_name[12], license_name[12];
+        font_companion_fat_name(metadata_name, font_fat_names[i], "PB");
+        font_companion_fat_name(license_name, font_fat_names[i], i == 12 ? "LIC" : "OFL");
+        put_dir_entry(fonts, &fonts_n, metadata_name,
+                      font_metadata_clusters[i], font_metadata_payloads[i].len, 0x20);
+        put_dir_entry(fonts, &fonts_n, license_name,
+                      font_license_clusters[i], font_license_payloads[i].len, 0x20);
+    }
+    char copyright_name[12];
+    font_companion_fat_name(copyright_name, font_fat_names[12], "CPY");
+    put_dir_entry(fonts, &fonts_n, copyright_name,
+                  font_copyright_cluster, font_copyright_payload.len, 0x20);
+    put_dir_entry(fonts, &fonts_n, "CORPUS  SDN",
+                  font_corpus_cluster, font_corpus_payload.len, 0x20);
+    put_dir_entry(fonts, &fonts_n, "CLDR    LIC",
+                  cldr_license_cluster, cldr_license_payload.len, 0x20);
+    put_dir_entry(fonts, &fonts_n, "SIMPLE  LIC",
+                  simple_license_cluster, simple_license_payload.len, 0x20);
+    put_dir_entry(fonts, &fonts_n, "NOTICES MD ",
+                  third_party_notices_cluster, third_party_notices_payload.len, 0x20);
+    if (fonts_n != 91)
+        die("SimpleOS font bundle directory manifest mismatch");
     put_dir_entry(sys, &sys_n, "NVFSVER TXT", nvfs_cluster, nvfs.len, 0x20);
     put_dir_entry(sys, &sys_n, "TOOLSET SDN", toolset_cluster, toolset.len, 0x20);
     if (simple_tool_manifest_cluster)

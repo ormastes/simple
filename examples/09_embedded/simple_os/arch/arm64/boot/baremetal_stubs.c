@@ -2680,10 +2680,10 @@ RuntimeValue rt_arm_fat32_root_cluster(void) { return ENCODE_INT(g_arm_fat32_roo
 static int g_simpleos_blk_ready = 0;
 
 /* Path-read buffer exposed to Simple via simpleos_fat32_path_read_buffer_addr().
- * 4 MiB matches the x86_64 reference; arm64 RAM is 254M with a 64M heap and 8M
- * stack (fs_exec_linker.ld), so a 4 MiB BSS reservation is well within budget. */
-static uint8_t simpleos_fat32_path_read_buf[4194304] __attribute__((aligned(16)));
-static const uint32_t simpleos_fat32_path_read_buf_size = 4194304;
+ * The 32 MiB cap matches x86_64 and fits the largest pinned 25,125,512-byte
+ * face. arm64 RAM is 254 MiB; the selected image reserves this buffer once. */
+static uint8_t simpleos_fat32_path_read_buf[33554432] __attribute__((aligned(16)));
+static const uint32_t simpleos_fat32_path_read_buf_size = 33554432;
 
 uint64_t simpleos_fat32_path_read_buffer_addr(void)
 {

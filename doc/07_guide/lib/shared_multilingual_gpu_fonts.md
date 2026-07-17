@@ -103,6 +103,15 @@ unchanged. The resolver accepts any nonempty share or portable package root,
 normalizes trailing separators and Windows backslashes, and appends only the
 registry-owned relative asset path; unmanaged paths are never redirected.
 Installed paths do not create a second catalog or change pinned identities.
+SimpleOS images use the OS-owned `simpleos_font_bundle_entries()` projection:
+all 50 Google Fonts files, the CLDR license, root `LICENSE`, and
+`THIRD_PARTY_NOTICES.md` (53 files / 51,932,523 bytes). The six CLDR
+XML/tag/source/ranking inputs stay host-build evidence because the guest uses
+the compiled ranking, not those inputs. Existing TTF long paths and 8.3 aliases
+remain unchanged; metadata, licenses, corpus, and notices use unique 8.3
+siblings below `/SYS/FONTS`. The legacy C writer checks the 16 TTF hashes plus
+the exact 35-entry pinned companion manifest before mutation and uses 91 of its
+128 font-directory entries.
 The two serif script candidates have bounded default-instance source profiles
 and independent glyph/advance/offset probes. They remain unavailable to normal
 selection because the retained full pure-Simple CLI has not executed those
@@ -647,22 +656,25 @@ direct-compatibility gate, image/motion backgrounds, nested content, and
 rejected-readback retries remain non-completion paths. Do not add a paint-local
 loader, atlas, cache, or private font draw path.
 
-SimpleOS image construction now iterates the same 16-entry selected candidate
-catalog used by language/category resolution. Installer rootfs, initramfs, and
-pure-Simple nested FAT32 staging validate each exact returned byte array against
-its pinned length and SHA-256, then store it under a readable registry-owned
-VFAT long name in `/SYS/FONTS`, with a unique 8.3 compatibility alias. The
-canonical `/assets/fonts/...` value remains the identity. The pure-Simple image
-writer emits LFN slots and the shared reader resolves them before its raw 8.3
-fallback. Pure-Simple path readers retain a bounded 32 MiB ceiling, above the
-largest pinned 25,125,512-byte face; the C compatibility reader remains at its
-actual 4 MiB bound. The Simple Browser accepts only those validated registered
-bytes and rejects any skipped Draw IR command. Missing or changed assets cannot
-become a selected vector face. Registered-only source paths bind the exact
-validated Arabic/Devanagari blobs to the existing pure-Simple shaper with
-handle/generation `0`, emit only handle-free glyph payloads, and materialize
-them through the existing selected-byte renderer. Retained guest/QEMU pixels
-remain pending; packaging and a host-side image hash are not guest rendering evidence.
+SimpleOS image construction now iterates the closed 53-entry OS projection
+described above. Installer rootfs, initramfs, and pure-Simple nested FAT32
+staging validate each immutable source against its pinned SHA-256; root
+`LICENSE` and `THIRD_PARTY_NOTICES.md` are nonempty transport-owned inputs. The
+16 TTFs retain their readable registry-owned VFAT long names and unique 8.3
+compatibility aliases, while provenance and legal companions use collision-free
+8.3 names below `/SYS/FONTS`. The canonical `/assets/fonts/...` TTF value remains
+the identity. The pure-Simple image writer emits LFN slots and the shared reader
+resolves them before its raw 8.3 fallback. Pure-Simple path readers retain a
+bounded 32 MiB ceiling, above the largest pinned 25,125,512-byte face; the live
+x86_64 and ARM64 C bridges use the same cap. This adds 28 MiB of static `.bss`
+to the selected architecture's kernel image. The Simple Browser
+accepts only validated registered TTF bytes and rejects any skipped Draw IR
+command. Missing or changed assets cannot become a selected vector face.
+Registered-only source paths bind the exact validated Arabic/Devanagari blobs
+to the existing pure-Simple shaper with handle/generation `0`, emit only
+handle-free glyph payloads, and materialize them through the existing
+selected-byte renderer. Retained guest/QEMU pixels remain pending; packaging
+and a host-side image hash are not guest rendering evidence.
 The pure-Simple builders own the canonical path. The still-live C image writer
 mirrors the readable names and fixed short aliases for compatibility with its
 existing toolchain/evidence image callers.

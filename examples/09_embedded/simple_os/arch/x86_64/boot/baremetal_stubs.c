@@ -2662,7 +2662,7 @@ int fat32_read_file(const char *name, uint8_t *buf, uint32_t max_size,
 
 /* ----------------------------------------------------------------------------
  * Streaming FAT32 reader for large files (clang_static ~119 MB) that do not fit
- * the 4 MiB static path-read buffer. The exec loader (fs_elf_exec_smoke_entry)
+ * the 32 MiB static path-read buffer. The exec loader (fs_elf_exec_smoke_entry)
  * opens the file once, reads the ELF header/phdrs, then streams each PT_LOAD's
  * file range DIRECTLY into the already-mapped user frames (identity-mapped phys
  * destinations) instead of buffering the whole ELF. Forward-cursor design: as
@@ -2804,8 +2804,8 @@ int64_t simpleos_fat32_stream_read_at(uint64_t file_off, uint64_t dst, uint64_t 
 
 static uint8_t simpleos_fat32_read_buf[32768];
 static const uint32_t simpleos_fat32_read_buf_size = 32768;
-static uint8_t simpleos_fat32_path_read_buf[4194304];
-static const uint32_t simpleos_fat32_path_read_buf_size = 4194304;
+static uint8_t simpleos_fat32_path_read_buf[33554432];
+static const uint32_t simpleos_fat32_path_read_buf_size = 33554432;
 
 static const char *simpleos_known_app_name(uint64_t app_id)
 {
