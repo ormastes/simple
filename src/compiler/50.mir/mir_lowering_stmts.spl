@@ -311,15 +311,42 @@ impl MirLowering:
                     # same way as the HIR layer: pre-dispatch by discriminant,
                     # then extract the payload via a single-arm match (the
                     # Let arm above already uses this idiom successfully).
+                    #
+                    # RESIDUAL, UNFIXED (deeper) landmine, same bug class:
+                    # even after this disc-dispatch fix routes correctly here,
+                    # the single-arm `case HirStmtKind.Expr(einner): einner`
+                    # extraction below itself unreliably returns the `case _`
+                    # fallback (a NilLit placeholder) instead of the real
+                    # payload, under this exact seed native-build worker
+                    # execution context -- confirmed independently at BOTH
+                    # this layer and the analogous StmtKind.Expr extraction
+                    # one layer up (20.hir/hir_lowering/statements.spl). Ruled
+                    # out as the cause: function size/nesting (isolating the
+                    # match into its own top-level function made no
+                    # difference), stale/shared local bindings (re-reading
+                    # `stmt.kind` fresh made no difference), and reuse of the
+                    # same dummy value for both the disc exemplar and the
+                    # match fallback. This durably reproduces (0 catch-all
+                    # misses in the OUTER disc-dispatch, but the INNER
+                    # single-arm match still returns the wrong branch every
+                    # time) -- see bug doc
+                    # hir_stmt_expr_payload_extraction_nil_2026-07-17.md for
+                    # the full evidence chain and repro. Net effect: every
+                    # bare-expression statement (print calls, arithmetic,
+                    # ...) now emits a REAL (non-zero) MIR instruction instead
+                    # of silently vanishing, but that instruction is a NilLit
+                    # sentinel constant, not the real computation -- the
+                    # produced binary builds, links, and runs, but silently
+                    # does not perform the statement's real effect. This is
+                    # necessary-but-insufficient: it is real, measured
+                    # progress (0 MIR instructions -> hard guard failure,
+                    # fixed), but does not by itself make bare-expression
+                    # statements semantically correct.
                     val expr: HirExpr = match stmt_kind_value:
                         case HirStmtKind.Expr(einner):
                             einner
                         case _:
                             fallback_expr
-                    val diag_is_nil = match expr.kind:
-                        case HirExprKind.NilLit: true
-                        case _: false
-                    print "[DIAG3] extracted expr is NilLit={diag_is_nil}"
                     self.lower_expr(expr)
                     return
 
