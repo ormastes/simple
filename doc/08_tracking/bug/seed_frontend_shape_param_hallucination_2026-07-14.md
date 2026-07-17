@@ -165,6 +165,13 @@ source regressions for the two dispatch paths. This fix is pending the same
 fresh Stage-2/Stage-3 rebuild required by the tuple-parser change; do not claim
 the runner is runnable until the rebuilt candidate executes a focused spec.
 
+The 2026-07-17 `e6fa51c872e` worktree sync regressed both calls back to
+arithmetic interpolation and removed the two negative source assertions. A
+bounded GDB reproduction again reached `setenv` with value pointer `0x11`. The
+explicit `.to_text()` calls and their positive/negative source guards are
+restored; the deployed `04a38e21...` binary remains rejected until a fresh
+pure-Simple build passes the focused runner command.
+
 ## Verification (2026-07-17)
 
 Runtime repro at tip 9feac6ef6e5 confirms the fix is present and working:
