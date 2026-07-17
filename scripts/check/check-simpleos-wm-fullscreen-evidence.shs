@@ -7,7 +7,10 @@ cd "$ROOT_DIR"
 BUILD_DIR="${BUILD_DIR:-build/simpleos_wm_fullscreen_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/simpleos_wm_fullscreen_evidence_$(date -u +%F).md}"
 SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
-SIMPLE_BIN_STATUS=pass
+SIMPLE_BIN_STATUS=unchecked
+SIMPLE_BIN_RESOLVED=""
+SIMPLE_BIN_VERSION=""
+SIMPLE_BIN_SHA256=""
 LAUNCH_OUT="$BUILD_DIR/qemu.out"
 SERIAL_LOG="$BUILD_DIR/serial.log"
 QMP_SOCKET="$BUILD_DIR/qmp.sock"
@@ -37,25 +40,26 @@ rm -f "$LAUNCH_OUT" "$SERIAL_LOG" "$QMP_SOCKET" "$CAPTURE_OUT" \
     "$BASELINE_RAW" "$FULLSCREEN_RAW" "$RESTORED_RAW" \
     "$FONT_REGION_RGB" "$BUILD_DIR/evidence.env"
 
-is_rust_seed_simple() {
+resolve_path() {
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$1" 2>/dev/null || true
+    elif command -v readlink >/dev/null 2>&1; then
+        readlink -f "$1" 2>/dev/null || true
+    else
+        return 0
+    fi
+}
+
+is_rust_seed_path() {
     case "$1" in
-        src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
+        *"/src/compiler_rust/"*|*"/compiler_rust/target/"*) return 0 ;;
+        *) return 1 ;;
     esac
 }
 
-if [ -n "${SIMPLE_BIN:-}" ]; then
-    if is_rust_seed_simple "$SIMPLE_BIN"; then
-        SIMPLE_BIN_SOURCE="explicit-env-rust-seed-forbidden"
-        SIMPLE_BIN_STATUS=forbidden
-    fi
-else
+if [ -z "${SIMPLE_BIN:-}" ]; then
     SIMPLE_BIN=""
-    SIMPLE_BIN_SOURCE=missing
+    SIMPLE_BIN_SOURCE=auto-cached-pure-simple
     for candidate in \
         "$ROOT_DIR"/build/bootstrap/stage3/*/simple \
         "$ROOT_DIR"/build/bootstrap/stage2/*/simple \
@@ -63,15 +67,16 @@ else
         "$ROOT_DIR"/release/*/simple \
         "$ROOT_DIR"/bin/simple
     do
-        if [ -f "$candidate" ]; then
-            SIMPLE_BIN="$candidate"
-            SIMPLE_BIN_SOURCE="self-hosted:$candidate"
-            SIMPLE_BIN_STATUS=pass
-            break
+        if [ -x "$candidate" ]; then
+            resolved="$(resolve_path "$candidate")"
+            if [ -n "$resolved" ] && ! is_rust_seed_path "$resolved"; then
+                SIMPLE_BIN="$candidate"
+                break
+            fi
         fi
     done
 fi
-export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS SIMPLE_BIN_RESOLVED SIMPLE_BIN_VERSION SIMPLE_BIN_SHA256
 
 cleanup() {
     if [ -n "$QEMU_PID" ]; then
@@ -150,8 +155,11 @@ emit_failure() {
         echo "simpleos_wm_fullscreen_status=fail"
         echo "simpleos_wm_fullscreen_reason=$reason"
         echo "simpleos_wm_fullscreen_simple_bin=$SIMPLE_BIN"
+        echo "simpleos_wm_fullscreen_simple_bin_resolved=$SIMPLE_BIN_RESOLVED"
         echo "simpleos_wm_fullscreen_simple_bin_source=$SIMPLE_BIN_SOURCE"
         echo "simpleos_wm_fullscreen_simple_bin_status=$SIMPLE_BIN_STATUS"
+        echo "simpleos_wm_fullscreen_simple_bin_version=$SIMPLE_BIN_VERSION"
+        echo "simpleos_wm_fullscreen_simple_bin_sha256=$SIMPLE_BIN_SHA256"
         echo "simpleos_wm_fullscreen_qemu_out=$LAUNCH_OUT"
         echo "simpleos_wm_fullscreen_serial_log=$SERIAL_LOG"
         echo "simpleos_wm_fullscreen_serial_log_bytes=$(file_byte_count "$SERIAL_LOG")"
@@ -170,22 +178,50 @@ emit_failure() {
         echo "- status: fail"
         echo "- reason: $reason"
         echo "- simple bin: $SIMPLE_BIN"
+        echo "- resolved binary: $SIMPLE_BIN_RESOLVED"
         echo "- simple bin source: $SIMPLE_BIN_SOURCE"
         echo "- simple bin status: $SIMPLE_BIN_STATUS"
+        echo "- simple bin version: $SIMPLE_BIN_VERSION"
+        echo "- simple bin sha256: $SIMPLE_BIN_SHA256"
     } >"$REPORT_PATH"
     cat "$BUILD_DIR/evidence.env"
 }
 
-if [ "$SIMPLE_BIN_STATUS" = forbidden ]; then
+SIMPLE_BIN_RESOLVED="$(resolve_path "${SIMPLE_BIN:-missing}")"
+if is_rust_seed_path "${SIMPLE_BIN:-}" || is_rust_seed_path "$SIMPLE_BIN_RESOLVED"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
     emit_failure "simple-bin-forbidden"
     exit 1
 fi
 
-if [ ! -f "$SIMPLE_BIN" ]; then
+if [ -z "${SIMPLE_BIN:-}" ] || [ ! -x "$SIMPLE_BIN" ] || [ -z "$SIMPLE_BIN_RESOLVED" ]; then
     SIMPLE_BIN_STATUS=missing
     emit_failure "simple-bin-missing"
     exit 1
 fi
+
+if ! SIMPLE_BIN_VERSION_RAW="$("$SIMPLE_BIN" --version 2>&1)"; then
+    SIMPLE_BIN_STATUS=unverified
+    emit_failure "simple-bin-provenance-unverified"
+    exit 1
+fi
+SIMPLE_BIN_VERSION="$(printf '%s' "$SIMPLE_BIN_VERSION_RAW" | tr '\n' ' ' | sed 's/[[:space:]][[:space:]]*/ /g; s/ $//')"
+SIMPLE_BIN_SHA256="$(file_sha256 "$SIMPLE_BIN_RESOLVED")"
+case "$(printf '%s' "$SIMPLE_BIN_VERSION" | tr '[:upper:]' '[:lower:]')" in
+    *rust-built*|*rust*seed*|*bootstrap*seed*)
+        SIMPLE_BIN_STATUS=forbidden
+        SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-provenance-forbidden"
+        emit_failure "simple-bin-forbidden"
+        exit 1
+        ;;
+esac
+if [ -z "$SIMPLE_BIN_VERSION" ] || [ -z "$SIMPLE_BIN_SHA256" ]; then
+    SIMPLE_BIN_STATUS=unverified
+    emit_failure "simple-bin-provenance-unverified"
+    exit 1
+fi
+SIMPLE_BIN_STATUS=pass
 
 FONT_ASSET_BYTES="$(file_byte_count "$FONT_ASSET")"
 FONT_ASSET_SHA256="$(file_sha256 "$FONT_ASSET")"
@@ -635,8 +671,11 @@ fi
     echo "simpleos_wm_fullscreen_status=$status"
     echo "simpleos_wm_fullscreen_reason=$reason"
     echo "simpleos_wm_fullscreen_simple_bin=$SIMPLE_BIN"
+    echo "simpleos_wm_fullscreen_simple_bin_resolved=$SIMPLE_BIN_RESOLVED"
     echo "simpleos_wm_fullscreen_simple_bin_source=$SIMPLE_BIN_SOURCE"
     echo "simpleos_wm_fullscreen_simple_bin_status=$SIMPLE_BIN_STATUS"
+    echo "simpleos_wm_fullscreen_simple_bin_version=$SIMPLE_BIN_VERSION"
+    echo "simpleos_wm_fullscreen_simple_bin_sha256=$SIMPLE_BIN_SHA256"
     echo "simpleos_wm_fullscreen_qmp_socket=$QMP_SOCKET"
     echo "simpleos_wm_fullscreen_serial_log=$SERIAL_LOG"
     echo "simpleos_wm_fullscreen_serial_log_bytes=$(file_byte_count "$SERIAL_LOG")"
@@ -696,8 +735,11 @@ fi
     echo "- status: $status"
     echo "- reason: $reason"
     echo "- simple bin: $SIMPLE_BIN"
+    echo "- resolved binary: $SIMPLE_BIN_RESOLVED"
     echo "- simple bin source: $SIMPLE_BIN_SOURCE"
     echo "- simple bin status: $SIMPLE_BIN_STATUS"
+    echo "- simple bin version: $SIMPLE_BIN_VERSION"
+    echo "- simple bin sha256: $SIMPLE_BIN_SHA256"
     echo "- qmp socket: $QMP_SOCKET"
     echo "- disk image: $DISK_IMAGE ($disk_image_status)"
     echo "- pinned font asset: $FONT_ASSET ($FONT_ASSET_BYTES bytes, sha256=$FONT_ASSET_SHA256)"

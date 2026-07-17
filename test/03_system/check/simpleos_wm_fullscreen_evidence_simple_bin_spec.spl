@@ -72,9 +72,16 @@ describe "SimpleOS WM fullscreen evidence Simple binary contract":
         expect(script).to_contain("SIMPLE_BIN_STATUS=pass")
         expect(script).to_contain("\"$ROOT_DIR\"/bin/release/*/simple")
         expect(script).to_contain("\"$ROOT_DIR\"/release/*/simple")
-        expect(script).to_contain("\"$ROOT_DIR\"/build/bootstrap/stage3/simple")
+        expect(script).to_contain("\"$ROOT_DIR\"/build/bootstrap/stage3/*/simple")
         expect(script).to_contain("\"$ROOT_DIR\"/bin/simple")
-        expect(script).to_contain("is_rust_seed_simple")
+        expect(script).to_contain("is_rust_seed_path")
+        expect(script).to_contain("resolve_path")
+        expect(script).to_contain("SIMPLE_BIN_RESOLVED")
+        expect(script).to_contain("\"$SIMPLE_BIN\" --version")
+        expect(script).to_contain("if ! SIMPLE_BIN_VERSION_RAW=")
+        expect(script).to_contain("rust-built")
+        expect(script).to_contain("rust*seed")
+        expect(script).to_contain("bootstrap*seed")
         expect(script).to_contain("SIMPLE_BIN_STATUS=forbidden")
         expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS")
         expect(script).to_contain("simpleos_wm_fullscreen_simple_bin=")
@@ -143,3 +150,39 @@ describe "SimpleOS WM fullscreen evidence Simple binary contract":
         expect(qemu_code).to_equal(0)
         val (_capture_out, _capture_err, capture_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/capture.out"])
         expect(capture_code).to_equal(0)
+
+    it "rejects a symlink resolving to a Rust seed before SimpleOS QMP launch":
+        val root = "build/test-simpleos-wm-fullscreen-seed-symlink-forbidden"
+        val command = "rm -rf " + root + " && mkdir -p " + root + "/src/compiler_rust/target/bootstrap && printf '%s\\n' '#!/bin/sh' 'echo should-not-run >&2' 'exit 99' > " + root + "/src/compiler_rust/target/bootstrap/simple && chmod +x " + root + "/src/compiler_rust/target/bootstrap/simple && ln -s \"$PWD/" + root + "/src/compiler_rust/target/bootstrap/simple\" " + root + "/simple-link && SIMPLE_BIN=$PWD/" + root + "/simple-link BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val output = file_read(root + "/stdout.txt")
+        expect(output).to_contain("simpleos_wm_fullscreen_reason=simple-bin-forbidden")
+        expect(output).to_contain("simpleos_wm_fullscreen_simple_bin_status=forbidden")
+        val (_files_out, _files_err, files_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/qemu.out && test ! -f " + root + "/out/capture.out"])
+        expect(files_code).to_equal(0)
+
+    it "rejects a binary identifying as a Rust seed before SimpleOS QMP launch":
+        val root = "build/test-simpleos-wm-fullscreen-seed-version-forbidden"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then' 'echo \"WARNING: this Rust-built Simple binary is a bootstrap seed only\"' 'exit 0' 'fi' 'exit 99' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && SIMPLE_BIN=$PWD/" + root + "/fake-simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val output = file_read(root + "/stdout.txt")
+        expect(output).to_contain("simpleos_wm_fullscreen_reason=simple-bin-forbidden")
+        expect(output).to_contain("simpleos_wm_fullscreen_simple_bin_status=forbidden")
+        val (_files_out, _files_err, files_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/qemu.out && test ! -f " + root + "/out/capture.out"])
+        expect(files_code).to_equal(0)
+
+    it "rejects a failing version probe before SimpleOS QMP launch":
+        val root = "build/test-simpleos-wm-fullscreen-version-probe-failed"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '#!/bin/sh' 'echo Simple v1.0.0-beta' 'exit 1' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && SIMPLE_BIN=$PWD/" + root + "/fake-simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val output = file_read(root + "/stdout.txt")
+        expect(output).to_contain("simpleos_wm_fullscreen_reason=simple-bin-provenance-unverified")
+        expect(output).to_contain("simpleos_wm_fullscreen_simple_bin_status=unverified")
+        val (_files_out, _files_err, files_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/qemu.out && test ! -f " + root + "/out/capture.out"])
+        expect(files_code).to_equal(0)
