@@ -110,7 +110,12 @@ fn handle_loop_control(ctrl: Control) -> Option<Result<Control, CompileError>> {
 
 /// Result of evaluating an `if val IDENT = expr` / `elif val IDENT = expr`
 /// optional-binding condition.
-enum LetBind {
+///
+/// `pub(crate)` so `interpreter_call::block_execution`'s lambda/block-closure/BDD
+/// if-let handling can reuse it too (see `optional_let_binding` doc comment and
+/// bug #188a — that sibling executor had its own copy of the pre-fix
+/// `pattern_matches`-only logic and never received this fix).
+pub(crate) enum LetBind {
     /// Pattern is not a simple identifier binding — defer to `pattern_matches`.
     NotApplicable,
     /// Value is absent (nil / Option::None) — skip this branch.
@@ -126,7 +131,7 @@ enum LetBind {
 /// held the Option wrapper rather than its payload. Handle the identifier case
 /// here with correct semantics; defer structural patterns (Some(x), enums,
 /// tuples, …) to `pattern_matches`.
-fn optional_let_binding(pattern: &Pattern, value: &Value) -> LetBind {
+pub(crate) fn optional_let_binding(pattern: &Pattern, value: &Value) -> LetBind {
     let name = match pattern {
         Pattern::Identifier(n) | Pattern::MutIdentifier(n) | Pattern::MoveIdentifier(n) => n.clone(),
         _ => return LetBind::NotApplicable,
@@ -4738,20 +4743,41 @@ pub(crate) fn exec_if_core(
     // Handle if-let: if let PATTERN = EXPR:
     if let Some(pattern) = &if_stmt.let_pattern {
         let value = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
-        let mut bindings = HashMap::new();
-        if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-            for (name, val) in bindings {
-                env.insert(name, val);
+        // `if val IDENT = expr:` is an optional-binding — try `optional_let_binding`
+        // first (bug #188a). `pattern_matches` alone always matches a bare
+        // identifier pattern, even against nil/None, so relying on it directly
+        // wrongly takes this branch when the value is absent. This is the
+        // `exec_if_core` sibling of the fix already landed in `exec_if` — `if val`
+        // reaches THIS function instead whenever the `if` is the last statement
+        // of a function/block body (implicit-return / value position).
+        match optional_let_binding(pattern, &value) {
+            LetBind::Bind(name, inner) => {
+                env.insert(name, inner);
+                let (flow, last_val) = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
+                return match flow {
+                    Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
+                    other => Ok((other, Value::Nil)),
+                };
             }
-            let (flow, last_val) = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
-            return match flow {
-                Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
-                other => Ok((other, Value::Nil)),
-            };
+            LetBind::Skip => {}
+            LetBind::NotApplicable => {
+                let mut bindings = HashMap::new();
+                if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
+                    for (name, val) in bindings {
+                        env.insert(name, val);
+                    }
+                    let (flow, last_val) =
+                        exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
+                    return match flow {
+                        Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
+                        other => Ok((other, Value::Nil)),
+                    };
+                }
+                // Pattern didn't match - fall through to elif branches / else below.
+                // (Previously this returned the else block directly, silently skipping
+                // every `elif`/`elif val ...` branch in if-expression position.)
+            }
         }
-        // Pattern didn't match - fall through to elif branches / else below.
-        // (Previously this returned the else block directly, silently skipping
-        // every `elif`/`elif val ...` branch in if-expression position.)
     } else {
         // Normal if condition
         let cond_val = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
@@ -4773,16 +4799,29 @@ pub(crate) fn exec_if_core(
     for (pattern, cond, block) in if_stmt.elif_branches.iter() {
         if let Some(pattern) = pattern {
             let value = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
-            let mut bindings = HashMap::new();
-            if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                for (name, val) in bindings {
-                    env.insert(name, val);
+            match optional_let_binding(pattern, &value) {
+                LetBind::Bind(name, inner) => {
+                    env.insert(name, inner);
+                    let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
+                    return match flow {
+                        Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
+                        other => Ok((other, Value::Nil)),
+                    };
                 }
-                let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
-                return match flow {
-                    Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
-                    other => Ok((other, Value::Nil)),
-                };
+                LetBind::Skip => {}
+                LetBind::NotApplicable => {
+                    let mut bindings = HashMap::new();
+                    if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
+                        for (name, val) in bindings {
+                            env.insert(name, val);
+                        }
+                        let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
+                        return match flow {
+                            Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
+                            other => Ok((other, Value::Nil)),
+                        };
+                    }
+                }
             }
         } else {
             let elif_val = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
@@ -4810,6 +4849,76 @@ pub(crate) fn exec_if_core(
     }
 
     Ok((Control::Next, Value::Nil))
+}
+
+#[cfg(test)]
+mod exec_if_core_tests {
+    use super::*;
+    use simple_parser::Parser;
+
+    /// Parse `src` (must define `fn probe(): ...`) and return the LAST statement
+    /// of its body as an `IfStmt` — the shape `exec_block_fn` dispatches to
+    /// `exec_if_core` for (an `if` used in value/implicit-return position).
+    fn parse_trailing_if(src: &str) -> IfStmt {
+        let mut parser = Parser::new(src);
+        let module = parser.parse().expect("parse probe");
+        let body = module
+            .items
+            .iter()
+            .find_map(|node| match node {
+                Node::Function(function) if function.name == "probe" => Some(function.body.statements.clone()),
+                _ => None,
+            })
+            .expect("probe function");
+        match body.last().cloned().expect("body has statements") {
+            Node::If(if_stmt) => if_stmt,
+            other => panic!("expected trailing If statement, got {:?}", other),
+        }
+    }
+
+    /// Bug #188a: `if val v = x:` in VALUE POSITION — an `if` that is the last
+    /// statement of a function body is executed by `exec_if_core` (not `exec_if`,
+    /// which was already fixed). `exec_if_core` had its own copy of the pre-fix
+    /// `pattern_matches`-only logic, which always matches a bare identifier
+    /// pattern — even against nil/None — so the branch was wrongly TAKEN when
+    /// the value is absent. It must be SKIPPED instead.
+    #[test]
+    fn exec_if_core_skips_if_val_when_absent() {
+        let if_stmt = parse_trailing_if("fn probe():\n    if val v = x:\n        \"TAKEN\"\n    else:\n        \"SKIPPED\"\n");
+        let mut env = Env::new();
+        env.insert("x".to_string(), Value::Nil);
+        let (flow, value) = exec_if_core(
+            &if_stmt,
+            &mut env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("exec_if_core");
+        assert!(matches!(flow, Control::Next));
+        assert_eq!(value.to_display_string(), "SKIPPED");
+    }
+
+    /// Companion case: a genuinely present value must still take the branch,
+    /// with the identifier bound to the (unwrapped) value.
+    #[test]
+    fn exec_if_core_takes_if_val_when_present() {
+        let if_stmt = parse_trailing_if("fn probe():\n    if val v = x:\n        v\n    else:\n        99\n");
+        let mut env = Env::new();
+        env.insert("x".to_string(), Value::Int(42));
+        let (flow, value) = exec_if_core(
+            &if_stmt,
+            &mut env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("exec_if_core");
+        assert!(matches!(flow, Control::Next));
+        assert_eq!(value.as_int().expect("int"), 42);
+    }
 }
 
 /// Execute an if statement as an expression, returning the branch's implicit value.

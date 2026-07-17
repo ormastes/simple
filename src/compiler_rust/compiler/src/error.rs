@@ -532,6 +532,20 @@ pub enum CompileError {
     LoopBreak(Option<crate::value::Value>),
     #[error("loop continue")]
     LoopContinue,
+
+    /// Explicit `return` reached while executing a lambda/block-closure/BDD
+    /// `it`-block body (`interpreter_call::block_execution`'s value-producing
+    /// statement executor). That executor's own `Result<Value, CompileError>`
+    /// signature has no channel to distinguish "this is the block's value" from
+    /// "this is a function-style early return", so — mirroring the
+    /// `LoopBreak`/`LoopContinue` sentinel pattern above — `return` raises this
+    /// variant, which propagates via `?` through arbitrarily nested
+    /// if/match/loop bodies within the SAME lambda/block-closure body and is
+    /// caught at that body's own call boundary (`exec_lambda`'s `DoBlock` arm,
+    /// `exec_block_closure`), converting it back into `Ok(value)`. See bug
+    /// #188b (interpreter_ifval_optioncheck_return_divergence_2026-07-17).
+    #[error("block return")]
+    BlockReturn(crate::value::Value),
 }
 
 impl CompileError {
@@ -653,6 +667,7 @@ impl CompileError {
             Self::TimeoutExceeded { .. } => "timeout exceeded",
             Self::LoopBreak(_) => "loop break",
             Self::LoopContinue => "loop continue",
+            Self::BlockReturn(_) => "block return",
         }
     }
 
