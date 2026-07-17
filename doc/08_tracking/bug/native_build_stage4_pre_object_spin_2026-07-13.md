@@ -595,19 +595,19 @@ This is policy evidence, not archive evidence. Production remains fail-closed:
 the compiler does not yet create or select this archive. Compile/archive/scan
 proof must establish one-member composition, deterministic bytes, forbidden-
 section absence, and the measured symbol contract on each hosted platform
-before the provider can enter the inventory. FreeBSD and Windows MSVC archive
-execution and the MinGW archive format are therefore still pending; only MinGW
-proof remains unscheduled. The remaining providers and production
+before the provider can enter the inventory. FreeBSD, Windows MSVC, and MinGW
+archive executions are therefore still pending, but no current hosted format
+remains unscheduled. The remaining providers and production
 inventory/hash/cache/linking are also pending.
 
-Hosted Linux+macOS arm64/x64+FreeBSD x86_64+Windows MSVC x64
+Hosted Linux+macOS arm64/x64+FreeBSD x86_64+Windows MSVC x64+MinGW x64
 compile/archive/scan proof is source-scheduled, with first execution pending.
 The checker independently compiles and deterministically archives
 `runtime_dynload.c` twice, requires the exact single member, compares archive
-hashes and bytes, and sends both measured ELF/Mach-O/COFF-MSVC archives through
-the existing pure-Simple forbidden-section and exact-symbol validators. This
-source scheduling is not measured FreeBSD, Windows MSVC, or MinGW archive proof
-and makes no production inventory/hash/cache/linking claim.
+hashes and bytes, and sends both measured ELF/Mach-O/COFF-MSVC/COFF-MinGW
+archives through the existing pure-Simple forbidden-section and exact-symbol
+validators. This source scheduling is not measured FreeBSD, Windows MSVC, or
+MinGW archive proof and makes no production inventory/hash/cache/linking claim.
 
 The Stage4 closure now uses one pure-Simple insertion sorter for requested
 symbols, archive definitions, owner rows, and fingerprint rows. This replaces

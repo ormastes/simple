@@ -10,19 +10,29 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
 
 host_os=$(uname -s 2>/dev/null || true)
+cross_target=${SIMPLE_STAGE4_DYNLOAD_ARCHIVE_CROSS_TARGET:-}
 object_name=runtime_dynload.o
 archive_name=libsimple_stage4_dynload.a
-case "$host_os" in
-    Linux) archive_format=elf ;;
-    Darwin) archive_format=macho ;;
-    FreeBSD) archive_format=elf ;;
-    MINGW*|MSYS*|CYGWIN*|Windows*)
-        [ "${SIMPLE_WINDOWS_ABI:-}" = "msvc" ] || die "Windows proof requires SIMPLE_WINDOWS_ABI=msvc"
-        archive_format=coff-msvc
-        object_name=runtime_dynload.obj
-        archive_name=simple_stage4_dynload.lib
+case "$cross_target" in
+    "")
+        case "$host_os" in
+            Linux) archive_format=elf ;;
+            Darwin) archive_format=macho ;;
+            FreeBSD) archive_format=elf ;;
+            MINGW*|MSYS*|CYGWIN*|Windows*)
+                [ "${SIMPLE_WINDOWS_ABI:-}" = "msvc" ] || die "Windows proof requires SIMPLE_WINDOWS_ABI=msvc"
+                archive_format=coff-msvc
+                object_name=runtime_dynload.obj
+                archive_name=simple_stage4_dynload.lib
+                ;;
+            *) die "requires Linux, macOS, FreeBSD, or Windows MSVC" ;;
+        esac
         ;;
-    *) die "requires Linux, macOS, FreeBSD, or Windows MSVC" ;;
+    x86_64-w64-mingw32)
+        [ "$host_os" = "Linux" ] || die "MinGW cross proof requires Linux"
+        archive_format=coff-mingw
+        ;;
+    *) die "unsupported archive cross target: $cross_target" ;;
 esac
 
 SIMPLE_BINARY=${SIMPLE_BINARY:-bin/simple}
@@ -46,7 +56,12 @@ else
     die "requires clang, cc, or gcc"
 fi
 
-if [ "$archive_format" = "coff-msvc" ]; then
+if [ "$cross_target" = "x86_64-w64-mingw32" ]; then
+    compiler_target=$("$CC" -dumpmachine 2>/dev/null) \
+        || die "failed to query the MinGW C compiler target"
+    [ "$compiler_target" = "x86_64-w64-mingw32" ] \
+        || die "MinGW proof requires x86_64-w64-mingw32 (found: $compiler_target)"
+elif [ "$archive_format" = "coff-msvc" ]; then
     compiler_target=$("$CC" --print-target-triple 2>/dev/null) \
         || die "failed to query the Windows C compiler target"
     case "$compiler_target" in
