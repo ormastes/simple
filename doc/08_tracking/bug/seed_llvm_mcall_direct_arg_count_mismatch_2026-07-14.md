@@ -218,7 +218,10 @@ language's single-quoted raw separator inside that interpolation is pinned by a
 focused Rust lexer regression (1 pass) and advances Stage 2 again. Hoisting the
 newline-preserving `lean_backend.spl:166` join is covered by an exact
 `LeanBuilder.build()` regression and advances discovery to the same-class
-`vulkan/spirv_builder.spl:234` nested `member_ids.map("{_}")`. Therefore the
+`vulkan/spirv_builder.spl:234` nested `member_ids.map("{_}")`. Hoisting the
+struct and adjacent function cache-key rendering is covered by an exact
+cache/output regression and advances discovery to the same-class
+`c_type_mapper.spl:97` tuple separator. Therefore the
 imported-`Shared` Stage 2 delta remains provisional. All bounded runs exited 1
 normally with no timeout, OOM, crash, hang, orphan, or seed fallback.
 
