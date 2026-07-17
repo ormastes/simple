@@ -267,7 +267,7 @@ pub(super) fn get_i64(args: &[Value], index: usize, func: &str) -> Result<i64, C
 
 pub(super) fn get_string(args: &[Value], index: usize, func: &str) -> Result<String, CompileError> {
     match args.get(index) {
-        Some(Value::Str(v)) => Ok(v.clone()),
+        Some(Value::Str(v)) => Ok(v.as_ref().clone()),
         _ => Err(wrong_arg_type(func, index, "text")),
     }
 }
@@ -385,5 +385,16 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             winit_sffi_buffer::dispatch_buffer(name, args)
         }
         _ => Err(unknown_function(name)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_string_clones_shared_text_into_owned_string() {
+        let args = [Value::text("Simple GUI")];
+        assert_eq!(get_string(&args, 0, "test").unwrap(), "Simple GUI");
     }
 }

@@ -21,3 +21,30 @@ The verified Stage 3 compiler was used for the exact Stage 4 `main.spl` entry wi
 - Artifact: `build/macos-metal-browser-backing/simple-typed-full-target.argb.json`.
 - Chrome and Electron Metal backing both passed and matched each other exactly.
 - The deployed July 5 full CLI remains too old for current Metal encoder externs, so the aggregate Simple/Chrome/Electron gate cannot close until a current full CLI can be deployed.
+
+## Fresh gate refresh after parser hardening
+
+- The Stage4 first-file `Map.keys` SIGBUS was fixed by constructing bootstrap
+  frontend maps with `Map.new()`. A later generic-type closing `>` no longer
+  swallows the following class dedent; the T32 mini closure and full CLI closure
+  both passed the former `t32_cli/types.spl` parse failure.
+- The exact full closure then exposed duplicate physical sources in phase 2.
+  After 750.8 seconds only 202 of 2,095 parse entries had completed, with many
+  consecutive duplicate paths, so the run was stopped under the runaway guard.
+  The blocker and acceptance criteria are tracked in
+  `doc/08_tracking/bug/stage4_entry_closure_duplicate_parse_2026-07-17.md`.
+- Fresh Chrome and Electron captures both used ANGLE Metal on Apple M4 and
+  matched bit-exactly at 320x240: 76,800 nonblank pixels and checksum
+  `329775811848360` each.
+- The Simple side remains fail-closed on the deployed CLI: portable Metal
+  emission and framebuffer evidence stop at `rt_cli_arg_count`; current
+  CPU/Metal and browser rendering stop at the missing
+  `rt_metal_destroy_compute_encoder` extern.
+- Building the GUI-feature host driver exposed a stale `Arc<String>` to
+  `String` conversion in winit SFFI. The conversion was fixed and the documented
+  GUI driver build completed in two minutes.
+- The shared-MDI titlebar contract passes. The live sample emitted its full MDI
+  protocol but did not leave an Aqua window. The evidence wrapper also allowed
+  the launcher's AppleScript nudge to block before its own deadline; the wrapper
+  now disables that redundant nudge so bounded window discovery owns the
+  timeout. No live-window PASS is claimed.
