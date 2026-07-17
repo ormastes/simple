@@ -1,0 +1,72 @@
+# Unit hardening for std.test_runner.test_runner_args.
+#
+# Focuses on flags not already covered by
+# test/01_unit/app/test_runner_new/test_runner_args_ci_spec.spl (--ci/--whole
+# basics) or test/01_unit/app/test_runner/args_spec.spl (a local reimplementation
+# of an older mirror of this module): sdoctest-force/env forms, --mode= with
+# plain and composite platform specs, --timeout, target-path collection, and
+# unknown-flag fail-closed behavior on the REAL module.
+
+use std.test_runner.test_runner_args.{parse_test_args, parse_mode_str}
+use std.test_runner.test_runner_types.{TestExecutionMode, execution_mode_to_string}
+
+describe "test_runner_args flag parsing (hardening)":
+    context "sdoctest flags":
+        it "sets sdoctest_force without also flipping plain sdoctest on":
+            val options = parse_test_args(["--sdoctest-force"])
+            expect(options.sdoctest_force).to_equal(true)
+            expect(options.sdoctest).to_equal(false)
+
+        it "parses --sdoctest-env= with the equals form":
+            val options = parse_test_args(["--sdoctest-env=production"])
+            expect(options.sdoctest_env).to_equal("production")
+
+        it "parses --sdoctest-env with a following token":
+            val options = parse_test_args(["--sdoctest-env", "staging"])
+            expect(options.sdoctest_env).to_equal("staging")
+
+    context "--mode= plain runtimes":
+        it "maps --mode=jit to a Composite(jit) spec":
+            val options = parse_test_args(["--mode=jit"])
+            expect(execution_mode_to_string(options.mode)).to_equal("jit")
+
+        it "maps --mode native via the two-token form":
+            val options = parse_test_args(["--mode", "native"])
+            expect(execution_mode_to_string(options.mode)).to_equal("native")
+
+    context "--mode= composite platform specs":
+        it "wraps a bare baremetal spec with an implicit interpreter( prefix":
+            val options = parse_test_args(["--mode=baremetal(riscv32)"])
+            expect(execution_mode_to_string(options.mode)).to_equal("interpreter(baremetal(riscv32))")
+
+        it "keeps an explicit native( prefix as-is (no double-wrapping)":
+            val options = parse_test_args(["--mode=native(baremetal(riscv32))"])
+            expect(execution_mode_to_string(options.mode)).to_equal("native(baremetal(riscv32))")
+
+        it "keeps a nested jit(remote(baremetal(...))) spec as-is":
+            val options = parse_test_args(["--mode=jit(remote(baremetal(stm32h7)))"])
+            expect(execution_mode_to_string(options.mode)).to_equal("jit(remote(baremetal(stm32h7)))")
+
+    context "--timeout":
+        it "parses a numeric timeout token":
+            val options = parse_test_args(["--timeout", "45"])
+            expect(options.timeout).to_equal(45)
+
+    context "target-path collection":
+        it "takes the first non-flag token as the path":
+            val options = parse_test_args(["first/path", "second/path"])
+            expect(options.path).to_equal("first/path")
+
+        it "defaults to test/ when no path token is given":
+            val options = parse_test_args([])
+            expect(options.path).to_equal("test/")
+
+    context "deliberate-red: malformed / unknown input":
+        it "ignores an unrecognized long flag instead of crashing or misrouting it as a path":
+            val options = parse_test_args(["--totally-unknown-flag-xyz"])
+            expect(options.path).to_equal("test/")
+            expect(options.fail_fast).to_equal(false)
+
+        it "falls back to Interpreter for parse_mode_str on garbage input":
+            val mode = parse_mode_str("not-a-real-mode-!!@@")
+            expect(execution_mode_to_string(mode)).to_equal("interpreter")
