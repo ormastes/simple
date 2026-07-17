@@ -43,14 +43,15 @@ fn detect_platform() -> text:
 
 fn find_runtime_binary(platform: text) -> text:
     val runtime_platform = normalize_runtime_platform(platform)
+    val runtime_name = if platform.starts_with("windows"): "simple.exe" else: "simple"
     val candidates = [
-        "build/bootstrap/full/{runtime_platform}/simple",
-        "build/bootstrap/stage3/{runtime_platform}/simple",
-        "build/bootstrap/stage2/{runtime_platform}/simple",
-        "bin/release/{runtime_platform}/simple",
-        "bin/release/{platform}/simple",
-        "bin/release/simple",
-        "bin/simple"
+        "build/bootstrap/full/{runtime_platform}/{runtime_name}",
+        "build/bootstrap/stage3/{runtime_platform}/{runtime_name}",
+        "build/bootstrap/stage2/{runtime_platform}/{runtime_name}",
+        "bin/release/{runtime_platform}/{runtime_name}",
+        "bin/release/{platform}/{runtime_name}",
+        "bin/release/{runtime_name}",
+        "bin/{runtime_name}"
     ]
 
     for candidate in candidates:
@@ -83,7 +84,8 @@ fn build_bootstrap(output_path: text, platform: text):
 
     # Copy runtime binary from the pure Simple bootstrap/release outputs.
     val runtime_src = find_runtime_binary(platform)
-    val runtime_dst = tmp_dir + "/bin/simple"
+    val is_windows = platform.starts_with("windows")
+    val runtime_dst = tmp_dir + if is_windows: "/bin/simple.exe" else: "/bin/simple-runtime"
 
     if runtime_src == "":
         print "Error: Runtime binary not found in pure Simple build outputs"
@@ -93,6 +95,26 @@ fn build_bootstrap(output_path: text, platform: text):
     if not file_copy(runtime_src, runtime_dst):
         print "Error: Failed to copy runtime binary from {runtime_src}"
         return
+
+    val assets_result = process_run("cp", ["-r", "assets", tmp_dir])
+    if (assets_result[2] != 0 or not file_copy("LICENSE", tmp_dir + "/LICENSE") or
+            not file_copy("THIRD_PARTY_NOTICES.md", tmp_dir + "/THIRD_PARTY_NOTICES.md")):
+        print "Error: Failed to stage bundled fonts or notices"
+        return
+    if is_windows:
+        val wrapper = "@echo off\r\nset \"SIMPLE_ASSET_ROOT=%~dp0..\"\r\n\"%~dp0simple.exe\" %*\r\n"
+        if not file_write(tmp_dir + "/bin/simple.bat", wrapper):
+            print "Error: Failed to create asset-root launcher"
+            return
+    else:
+        val wrapper = "#!/bin/sh\nSCRIPT_DIR=$(dirname \"$0\")\nexport SIMPLE_ASSET_ROOT=\"$SCRIPT_DIR/..\"\nexec \"$SCRIPT_DIR/simple-runtime\" \"$@\"\n"
+        if not file_write(tmp_dir + "/bin/simple", wrapper):
+            print "Error: Failed to create asset-root launcher"
+            return
+        val wrapper_chmod = process_run("chmod", ["755", tmp_dir + "/bin/simple"])
+        if wrapper_chmod[2] != 0:
+            print "Error: Failed to create asset-root launcher"
+            return
 
     # Copy stdlib files (essential subset)
     val stdlib_files = ["core.spl", "io.spl", "json.spl", "http.spl"]

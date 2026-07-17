@@ -163,8 +163,9 @@ jobs:
             cd bootstrap-download
             tar -xzf "${ASSET_NAME}"
 
-            # Find the simple binary (should be in simple-bootstrap-VERSION-PLATFORM/bin/simple)
-            BOOTSTRAP_BIN=$(find . -name "simple" -type f | head -1)
+            # Prefer the payload runtime; older bootstrap packages exposed it as bin/simple.
+            BOOTSTRAP_BIN=$(find . -name "simple-runtime" -type f | head -1)
+            [ -n "$BOOTSTRAP_BIN" ] || BOOTSTRAP_BIN=$(find . -name "simple" -type f | head -1)
 
             if [ -n "$BOOTSTRAP_BIN" ]; then
               chmod +x "$BOOTSTRAP_BIN"
@@ -676,12 +677,18 @@ jobs:
               if [[ "$PLATFORM" == windows-* ]]; then
                 BIN_NAME="simple.exe"
               else
-                BIN_NAME="simple"
+                BIN_NAME="simple-runtime"
               fi
               cp "$BINARY_TO_PACKAGE" "${PKG_DIR}/bin/${BIN_NAME}"
               chmod +x "${PKG_DIR}/bin/${BIN_NAME}"
               if [[ "$PLATFORM" != windows-* ]] && command -v strip >/dev/null 2>&1; then
                 strip "${PKG_DIR}/bin/${BIN_NAME}" || true
+              fi
+              if [[ "$PLATFORM" == windows-* ]]; then
+                printf '%s\r\n' '@echo off' 'set "SIMPLE_ASSET_ROOT=%~dp0.."' '"%~dp0simple.exe" %*' > "${PKG_DIR}/bin/simple.bat"
+              else
+                printf '%s\n' '#!/bin/sh' 'SCRIPT_DIR=$(dirname -- "$0")' 'export SIMPLE_ASSET_ROOT="$SCRIPT_DIR/.."' 'exec "$SCRIPT_DIR/simple-runtime" "$@"' > "${PKG_DIR}/bin/simple"
+                chmod +x "${PKG_DIR}/bin/simple"
               fi
               echo "✓ Copied binary: $(basename $BINARY_TO_PACKAGE) → bin/${BIN_NAME}"
             else
@@ -733,6 +740,7 @@ jobs:
           sh scripts/check-executable-size-budgets.shs --skip-missing \
             "${BINARY_TO_PACKAGE:-}" \
             "${PKG_DIR}/bin/simple" \
+            "${PKG_DIR}/bin/simple-runtime" \
             "${PKG_DIR}/bin/simple.exe" \
             "${PKG_DIR}/bin/simple_mcp_server" \
             "${PKG_DIR}/bin/simple_mcp_server.exe" \
@@ -748,6 +756,7 @@ jobs:
           cp README.md "${PKG_DIR}/" 2>/dev/null || true
           cp LICENSE "${PKG_DIR}/" 2>/dev/null || true
           cp THIRD_PARTY_NOTICES.md "${PKG_DIR}/" 2>/dev/null || true
+          cp -r assets "${PKG_DIR}/"
 
           # Prune development-only dependency caches and downloaded test runtimes
           # so release artifacts do not redistribute unrelated third-party payloads.
@@ -826,7 +835,10 @@ jobs:
           if ls bootstrap-artifact/simple-bootstrap-*.spk 1>/dev/null 2>&1; then
             cd bootstrap-artifact
             tar -xzf simple-bootstrap-*.spk
-            if [ -f bin/simple ]; then
+            if [ -f bin/simple-runtime ]; then
+              cp bin/simple-runtime ../bin/release/simple
+              chmod +x ../bin/release/simple
+            elif [ -f bin/simple ]; then
               cp bin/simple ../bin/release/simple
               chmod +x ../bin/release/simple
             elif [ -f simple ]; then
@@ -865,14 +877,18 @@ jobs:
             mkdir -p staging-deb/usr/local/bin
             mkdir -p staging-deb/usr/local/lib/simple/lib
             mkdir -p staging-deb/usr/local/share/doc/simple-lang
+            mkdir -p staging-deb/usr/local/share/simple/assets
 
             cp bin/release/simple staging-deb/usr/local/lib/simple/simple
             chmod 755 staging-deb/usr/local/lib/simple/simple
-            ln -sf /usr/local/lib/simple/simple staging-deb/usr/local/bin/simple
+            printf '%s\n' '#!/bin/sh' 'export SIMPLE_ASSET_ROOT=/usr/local/share/simple' 'exec /usr/local/lib/simple/simple "$@"' > staging-deb/usr/local/bin/simple
+            chmod 755 staging-deb/usr/local/bin/simple
             cp -r src/lib/. staging-deb/usr/local/lib/simple/lib/ || true
             cp README.md staging-deb/usr/local/share/doc/simple-lang/ || true
             cp LICENSE staging-deb/usr/local/share/doc/simple-lang/ || true
             cp THIRD_PARTY_NOTICES.md staging-deb/usr/local/share/doc/simple-lang/ || true
+            cp -r assets/fonts staging-deb/usr/local/share/simple/assets/
+            cp LICENSE THIRD_PARTY_NOTICES.md staging-deb/usr/local/share/simple/
 
             fpm -s dir -t deb \
               --name simple-lang \
@@ -956,12 +972,14 @@ jobs:
 
           if [ -f bin/release/windows-x86_64/simple.exe ]; then
             # Prepare Windows staging
-            mkdir -p staging-win/bin staging-win/lib staging-win/doc
+            mkdir -p staging-win/bin staging-win/lib staging-win/doc staging-win/assets
             cp bin/release/windows-x86_64/simple.exe staging-win/bin/simple.exe
             cp -r src/lib/. staging-win/lib/ || true
             cp README.md staging-win/doc/ || true
             cp LICENSE staging-win/doc/ || true
             cp THIRD_PARTY_NOTICES.md staging-win/doc/ || true
+            cp -r assets/fonts staging-win/assets/
+            cp LICENSE THIRD_PARTY_NOTICES.md staging-win/
 
             # Process NSIS template
             sed -e "s|\${VERSION}|${VERSION}|g" \
@@ -1029,6 +1047,7 @@ jobs:
             cp CHANGELOG.md README.md LICENSE THIRD_PARTY_NOTICES.md VERSION "$PKG_ROOT/"
             cp -r config "$PKG_ROOT/" 2>/dev/null || true
             cp -r resources "$PKG_ROOT/" 2>/dev/null || true
+            cp -r assets "$PKG_ROOT/"
             mkdir -p "$PKG_ROOT/bin"
             cp bin/README.md "$PKG_ROOT/bin/" 2>/dev/null || true
             cp bin/FILE.md "$PKG_ROOT/bin/" 2>/dev/null || true

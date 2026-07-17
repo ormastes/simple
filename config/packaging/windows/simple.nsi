@@ -51,6 +51,13 @@ Section "Simple Language" SEC01
     SetOutPath "$INSTDIR\doc"
     File /nonfatal "${SOURCE_DIR}\doc\README.md"
     File /nonfatal "${SOURCE_DIR}\doc\LICENSE"
+
+    SetOutPath "$INSTDIR\assets\fonts"
+    File /r "${SOURCE_DIR}\assets\fonts\*.*"
+
+    SetOutPath "$INSTDIR"
+    File "${SOURCE_DIR}\LICENSE"
+    File "${SOURCE_DIR}\THIRD_PARTY_NOTICES.md"
 SectionEnd
 
 Section -AdditionalIcons
@@ -73,6 +80,7 @@ Section -Post
     ; Add to PATH
     ReadRegStr $0 HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path"
     WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path" "$0;$INSTDIR\bin"
+    WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "SIMPLE_ASSET_ROOT" "$INSTDIR"
     SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
 SectionEnd
 
@@ -82,6 +90,7 @@ Section Uninstall
     ReadRegStr $0 HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path"
     ${WordReplace} $0 ";$INSTDIR\bin" "" "+" $0
     WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path" "$0"
+    DeleteRegValue HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "SIMPLE_ASSET_ROOT"
 
     ; Remove shortcuts
     Delete "$SMPROGRAMS\Simple Language\Simple REPL.lnk"
@@ -93,6 +102,9 @@ Section Uninstall
     RMDir /r "$INSTDIR\bin"
     RMDir /r "$INSTDIR\lib"
     RMDir /r "$INSTDIR\doc"
+    RMDir /r "$INSTDIR\assets"
+    Delete "$INSTDIR\LICENSE"
+    Delete "$INSTDIR\THIRD_PARTY_NOTICES.md"
     Delete "$INSTDIR\uninst.exe"
     RMDir "$INSTDIR"
 

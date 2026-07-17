@@ -88,7 +88,10 @@ the 80 MiB ceiling.
 The release installer copies `assets/fonts/`, `LICENSE`, and
 `THIRD_PARTY_NOTICES.md` below `share/simple`. Its wrapper exports that share
 directory as `SIMPLE_ASSET_ROOT`; the registry byte-load boundary resolves the
-same canonical paths there. A configured
+same canonical paths there. Portable bootstrap/full archives also bundle the
+tree and launch `simple-runtime` through an asset-root wrapper. Unix installer
+packages use `/usr/local/share/simple`; Windows portable/NSIS packages use the
+installed package root. A configured
 installed root takes precedence; without one, repository-relative paths remain
 unchanged.
 Installed paths do not create a second catalog or change pinned identities.

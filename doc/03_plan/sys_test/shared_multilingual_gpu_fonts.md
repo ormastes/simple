@@ -42,6 +42,7 @@ Focused exact-face unit gates (execution and manual generation pending):
 |---|---|
 | `test/01_unit/lib/skia/selected_devanagari_spec.spl` | `doc/06_spec/01_unit/lib/skia/selected_devanagari_spec.md` |
 | `test/01_unit/lib/skia/selected_arabic_spec.spl` | `doc/06_spec/01_unit/lib/skia/selected_arabic_spec.md` |
+| `test/01_unit/app/release/install_font_assets_spec.spl` | `doc/06_spec/01_unit/app/release/install_font_assets_spec.md` (manual draft; canonical generation pending) |
 
 Supporting conditional pair: `test/02_integration/rendering/vulkan_font_composite_classification_spec.spl`
 and `doc/06_spec/02_integration/rendering/vulkan_font_composite_classification_spec.md`.
