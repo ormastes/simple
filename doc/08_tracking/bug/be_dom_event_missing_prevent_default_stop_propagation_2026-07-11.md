@@ -32,3 +32,7 @@ Failing tests: `event_api_spec` "prevents default action", "stops propagation".
 `BeDomEvent` gains `default_prevented: bool` and `propagation_stopped: bool`
 fields plus `me prevent_default()` / `me stop_propagation()` methods, so the
 `event_api` forwarders can record and expose the flags.
+
+## Resolution (2026-07-17)
+
+FIXED (haiku fix lane F1, opus-reviewed APPROVE): BeDomEvent gained default_prevented/propagation_stopped bool fields + me prevent_default()/stop_propagation() (dom.spl). Behavioral repro via bootstrap seed prints default_prevented=true propagation_stopped=true, including through a forwarder-function call shape. Ctor at dom.spl:102 is the only construction site.

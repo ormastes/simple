@@ -47,3 +47,7 @@ comment block at `:3703-3706`) from
 `test/01_unit/app/ui/browser_backend_pixel_paths_spec.spl` to confirm no hidden caller (expected:
 all stay green, since grep found none). Not done in this record's authoring pass — scoped as a
 separate, disjoint follow-up so it doesn't get bundled into an unrelated commit.
+
+## Resolution (2026-07-17)
+
+FIXED (haiku fix lane F3, opus-reviewed APPROVE): css_bytes_find/css_bytes_match_close/css_bytes_trimmed_eq deleted (44 lines); zero-caller re-verified independently twice; only history comments remain.

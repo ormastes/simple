@@ -47,3 +47,7 @@ Extend `tag_defaults` branches:
 
 ## Related, already fixed
 None in this session.
+
+## Resolution (2026-07-17)
+
+PARTIALLY FIXED (haiku fix lane F2, opus-reviewed APPROVE): h4/h5/h6 UA default branches added to tag_defaults (16/13/11px, bold, symmetric margins). The doc's remaining wishlist items are NOT covered by this change.

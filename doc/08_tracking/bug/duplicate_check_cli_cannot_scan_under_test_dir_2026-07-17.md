@@ -54,3 +54,7 @@ Add a `--no-default-excludes` (or `--exclude-reset`) flag to `main.spl`'s
 `--exclude` additions from the command line — analogous to `--no-ignore` in
 common file-search tools. Small, backward compatible, does not change
 default behavior.
+
+## Resolution (2026-07-17)
+
+FIXED (haiku fix lane F4, opus-reviewed APPROVE, static verification only — tool unreachable by working harness): --no-default-excludes flag added to parse_args + help text; exact-match arm, no prefix shadowing of --exclude=.

@@ -98,3 +98,7 @@ same expression appeared outside a string literal.
 - Bisected with a direct-reference control (no interpolation) in the same
   lambda shape, which builds and runs correctly on both paths, isolating the
   defect to the interpolation-specific capture-scan exclusion.
+
+## Resolution (2026-07-17)
+
+FIXED (haiku fix lane F5, opus-reviewed APPROVE, static verification only): collect_free_var_syms and lambda_capture_scan_supported now recurse into string interpolations via two mirrored helpers (switch_operators_calls.spl); lambda_body_captures already handled StringLit and is untouched.
