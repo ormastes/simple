@@ -283,6 +283,18 @@ impl Lowerer {
             return Ok(result);
         }
 
+        // C8-DEEP fix: resolve import aliases (`use Real as Alias`) for the
+        // static-call callee, exactly as type-annotation resolution already
+        // does (`type_resolver.rs` `resolve_type_alias`). Without this,
+        // `Alias.staticfn(...)` built its qualified name from the raw `Alias`
+        // token and bound to a same-printed-name GLOBAL type instead of the
+        // alias target — so `Fat32Core.new()` under
+        // `use {SharedFat32Driver as Fat32Core}` constructed a real Fat32Core
+        // while the `: Fat32Core` annotation + `.mount()` used SharedFat32Driver,
+        // yielding a type-confused box and the SimpleOS boot fault storm.
+        let aliased_class_name = self.resolve_type_alias(class_name).map(str::to_string);
+        let class_name: &str = aliased_class_name.as_deref().unwrap_or(class_name);
+
         let class_ty = self
             .module
             .types

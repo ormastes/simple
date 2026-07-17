@@ -1171,3 +1171,190 @@ but the full boot storm reproduces byte-identical to history.**
    detection in `_rich_fault_entry`'s no-error-code recovery path, kept),
    `src/os/services/vfs/vfs_boot_init.spl` (touched then restored, `git
    diff` empty). No commits made this lane per the coordinator's hard rule.
+
+### C8-DEEP lane (2026-07-17) — ROOT CAUSE FOUND & byte-level CONFIRMED:
+### import-alias inconsistency — `use {SharedFat32Driver as Fat32Core}` then
+### `Fat32Core.new(...)` binds the CONSTRUCTOR to the real `Fat32Core.new`
+### while the type annotation + `.mount()` bind to the `SharedFat32Driver`
+### alias, so a real Fat32Core box is dispatched as a SharedFat32Driver. NOT
+### a trait-object / vtable / extra-deref / TypeId-collision defect — those
+### were all downstream symptoms of one mis-bound constructor `call`.
+
+**The whole C8 "trait-object extra-deref" framing is a red herring.** The
+adapter trait-object box, its vtable, the dispatch codegen, and
+`Fat32Core.new`'s field stores are ALL provably correct in the preserved
+`build/os/_wkc8close/desktop.elf` (verified by disassembly + `objdump -s`
+vtable dump — see items below). The storm is produced by exactly one
+wrong compile-time method-resolution decision, which then walks a chain of
+type-confused `self` pointers into a code-bytes-as-function-pointer call.
+
+**1. The wrong call.** `src/os/services/vfs/vfs_boot_init.spl:379`,
+`g_pure_nvme_root_fat32.mount("", "")`, where `g_pure_nvme_root_fat32` is
+declared `Fat32Core` (line 96) and assigned `Fat32Core.new(g_adapter)`
+(line 378). `Fat32Core` HAS its own `mount` method
+(`Fat32Core.mount` @ `0x895c31f` in the ELF). But codegen emitted a call to
+**`SharedFat32Driver.mount` @ `0x8dda17f`** instead (disasm at
+`0x8e12d3c`: `movabs $0x8dda17f,%r9; call *%r9`, with `self`=the Fat32Core
+box). Confirmed independently by the preserved
+`SIMPLE_DEBUG_METHOD_DISPATCH` build log
+(`build/os/_wkc8close/native-build.out:46`):
+`[CODEGEN-METHOD-STATIC] in '_vfs_boot_init_pure_nvme_fat32'
+func_name='SharedFat32Driver.mount' args=2`.
+
+**2. Why that call storms (full byte chain, all addresses from the
+preserved ELF).** `SharedFat32Driver` is `class { inner: Fat32Core; ... }`
+and `SharedFat32Driver.mount` does `self.inner.mount()`, reading
+`self.inner = [self+0]`. But `self` is really a **Fat32Core** box, whose
+field 0 is `device: BlockDevice` (the NvmeBlockAdapter trait-object box).
+So it calls `Fat32Core.mount(adapter_box)` →
+`read_boot_sector(adapter_box)` → `_device_sector_size(adapter_box)`. Now
+`self`=adapter_box (a `NvmeBlockAdapter`, which DOES carry a vtable header
+at `[0]`). `_device_sector_size` does `device=[self+0]` = the vtable
+address `0x8f42d78`; `vtable=[device]` = slot 0 = `NvmeBlockAdapter.read_sector`
+@ `0x8e0e7d1`; `fn=[vtable+0x10]` = `[0x8e0e7e1]`. `read_sector` is only 14
+bytes, so `0x8e0e7e1` lands inside the *next* method (`write_sector` @
+`0x8e0e7df`) at its prologue+2: the 8 bytes there are
+`89 e5 48 81 ec e0 01 00` = **`0x0001e0ec8148e589` = cr2, exactly** (LE of
+`mov %rsp,%rbp; sub $0x1e0,%rsp`). `call *rax` to that non-canonical value
+faults; the blind RIP+=2 recovery ISR walks unmapped space → the 69762-fault
+storm. Every "prologue bytes as a pointer" observation across all prior C8
+lanes was this one code-bytes read, not a trait-ABI defect.
+
+**3. Root cause — an IMPORT-ALIAS resolution INCONSISTENCY (NOT a TypeId
+collision; my first draft of this item was wrong and is corrected here).**
+`src/os/services/vfs/vfs_boot_init.spl:20` is
+`use os.services.fat32.shared_fat32_driver.{SharedFat32Driver as Fat32Core}`
+— inside this file the name `Fat32Core` is an ALIAS for `SharedFat32Driver`
+(while the *real* `Fat32Core` from `std.fs_driver` is also in scope
+transitively). Line 96/378 read
+`var g_pure_nvme_root_fat32: Fat32Core = Fat32Core.new(g_adapter)`. The
+compiler resolves the SAME token `Fat32Core` two different ways:
+- **type-annotation position** (`: Fat32Core`) and **instance dispatch**
+  (`.mount()`) honor the alias → `SharedFat32Driver` /
+  `SharedFat32Driver.mount` (proven: log line 46 `func_name=
+  'SharedFat32Driver.mount'`, call @`0x8dda17f`; `.mount` is a real method
+  of SharedFat32Driver so this half is self-consistent).
+- **static-call callee position** (`Fat32Core.new`) IGNORES the alias and
+  binds to the *real* `Fat32Core.new` @ `0x895861b` (proven: the call at
+  `0x8e12ce0` targets `0x895861b` =
+  `lib__nogc_async_mut__fs_driver__fat32_core__Fat32Core_dot_new`, and
+  `SharedFat32Driver.new` is ABSENT from the ELF symbol table entirely — its
+  only would-be caller was mis-bound, so `--gc-sections` stripped it).
+Net effect: a *real* `Fat32Core` box (size `0xc0`, `device` at offset 0) is
+constructed, stored into a slot the rest of the code treats as a
+`SharedFat32Driver` (`inner: Fat32Core` at offset 0). `SharedFat32Driver.mount`
+then reads `self.inner = [self+0]` = the Fat32Core's `device` field (the
+adapter box) and calls `Fat32Core.mount` on it (`0x8dda334` → `0x895c31f`) →
+the byte chain in item 2 → storm.
+
+**4. Type-position honors the alias, call-callee position does not.** The
+consistent half (`self.inner.mount()` inside SharedFat32Driver, `call
+0x895c31f`) is the real `Fat32Core.mount` and is CORRECT — it only faults
+because its `self` is the wrong object handed in by the mis-constructed
+box, not because *its* resolution is wrong. The single defect is that
+`AliasName.staticmethod(...)` does not apply the local `use ... as
+AliasName` rename when a global type of the alias's *printed* name
+(`Fat32Core`) also exists. Any file that aliases an imported type to a name
+that shadows a real global type, then calls `Alias.staticfn(...)`, hits
+this.
+
+**5. Disproven hypotheses (do not re-chase):** trait-object fat-pointer
+order; dispatch extra-deref in `compile_method_call_virtual`
+(`closures_structs.rs:1406-1408` — correct for the boxed model);
+`compile_struct_init` vtable-header vs field-0 collision (correct: adapter
+box @ ctor `0x8e0aaf9` stores `&vtable` at `[0]`, fields at `[8]+`; vtable
+slot 2 @ `0x8f42d88` = `0x8e0fc2c` = real `sector_size`); Fat32Core header
+(it implements no trait, `device` at offset 0, stored correctly by
+`Fat32Core.new` @ `0x8958ddc`). The duck-dispatch sentinel (C8-FIX) is a
+genuinely separate, already-fixed bug; the `ud2`-recovery hardening
+(C8-CLOSE) is correct and worth keeping. Both were real but neither is this.
+
+**6. Fix (see below for landed state).** The correct behavior is that
+`Fat32Core.new(...)` under `use {SharedFat32Driver as Fat32Core}` binds to
+`SharedFat32Driver.new`, exactly as the type-position and `.mount()` already
+do; then a real `SharedFat32Driver` is built and the whole chain is
+type-consistent. Two ways to reach that:
+- **(root, compiler)** make static-method-call callee resolution consult the
+  file's import-alias map before falling back to the global type registry,
+  so `Alias.staticfn` maps through the alias like type-position does.
+- **(pragmatic, source)** drop the shadowing alias in `vfs_boot_init.spl`
+  and refer to `SharedFat32Driver` directly (the alias only exists as a
+  legacy rename and actively hides a same-named real type).
+Skip at `vfs_boot_init.spl:374` remains `if true:` (verified `sed -n
+'374p'`) — see item 7 for why it stays despite the C8 storm being fixed.
+
+**7. FIX LANDED (root, compiler) + BOOT-VERIFIED.** Applied the root fix in
+`src/compiler_rust/compiler/src/hir/lower/expr/simd.rs`
+`lower_static_method_call`: resolve `class_name` through
+`self.resolve_type_alias(...)` before building the qualified callee name,
+mirroring `type_resolver.rs:116` exactly (non-aliased names are unchanged via
+`unwrap_or`). Regression test added:
+`hir::lower::import_loader::tests::aliased_import_static_method_call_resolves_to_alias_target`
+(`use {Real as Alias}` + `Alias.make()` must emit `Global("RealWidget.make")`).
+- **Hosted gate:** `cargo build -p simple-compiler` clean; new test passes;
+  full `--lib` suite shows **zero stable new failures** (baseline 260 failing
+  at HEAD; two runs with the fix gave 263/261 with a *non-overlapping* delta
+  set of known env/timing/global-state flakes — watchdog timeout,
+  configured-active-tier cache, runtime-bundle env — each passing in
+  isolation).
+- **Binary gate (fresh bootstrap seed, production recipe, skip lifted):**
+  `SharedFat32Driver.new` (`0x08ddde74`) is now PRESENT and CALLED from all 3
+  mount sites (was entirely ABSENT/gc-stripped before the fix); the
+  `g_pure_nvme_root_fat32` constructor now targets it instead of the real
+  `Fat32Core.new`. `nm | wc -l` = 7240 (healthy).
+- **Boot gate (QEMU `-kernel`, NVMe attached, 130s):** the C8 storm is GONE —
+  **zero** `0x0001e0ec8148e589`, serial log 952 lines (was 697700), ud2
+  handler silent (0 `FATAL: kernel #UD`). With the skip LIFTED, `.mount()` now
+  RUNS to completion through `read_boot_sector`/`_device_sector_size` and all
+  scalar reads (clusters 2/5/7/3962), returning a graceful `Err`
+  ("shared FAT32 root mount required/failed") — a functional result, not a
+  fault. Framebuffer/engine2d/compositor come up and reach `pre-first-frame`.
+  (NB: `-kernel` load, not OVMF pflash — matches C8-CLOSE's storm-repro
+  methodology for an apples-to-apples codegen comparison; not a board-run
+  claim.)
+- **Scope honesty — "C8 storm removed" ≠ "VFS brought up".** The codegen
+  blocker is gone, but `SharedFat32Driver.mount` still returns `Err` on this
+  image; whether that is disk-content, lease geometry, or mount logic was NOT
+  diagnosed this lane. VFS bring-up remains open work; only the fault storm is
+  resolved.
+- **First-frame: attempted, not confirmed-rendered.** Reached
+  `compositor ready` + `[dbg-vbe] pre-first-frame` in BOTH configs, but
+  **no** explicit `rendered`/`present`/`blit` marker appears in either serial
+  log — the first render is *entered* and then faults in the draw_ir path
+  (below), so "first-frame RENDERED" is not evidenced here (nor was it, given
+  the render fault predates this lane; the C8 storm previously masked it).
+- **Why the skip stays `if true:`, and the render faults.** A separate,
+  non-C8 fault set in the `engine2d` GPU `draw_ir` path (`rip=0x88b112f`
+  `engine2d_draw_ir_render_commands`, plus `0x8008860`/`0x80109cb` —
+  scattered, bounded, ~650 recovered faults, NOT a storm) appears
+  **identically with the skip ON and OFF** (second skip-on boot: same rips, C8
+  storm still 0) — so it is independent of the **vfs mount path**. It is very
+  unlikely fix-introduced (this fix alters codegen only for aliased *type*
+  static calls; the active `baremetal-framebuffer` draw_ir path uses none —
+  the sole engine2d alias is a *function* alias in the unused vulkan backend),
+  but a true pre-fix A/B was NOT run (the pre-fix seed was overwritten), so
+  this is stated as "independent of the mount path", not "predates the fix".
+  Notably its `cr2=0x244c8d4c7500c640` LE-decodes to `40 c6 00 75 4c 8d 4c 24`
+  (`movb`/`lea` opcode bytes) and increments (…640/648/650/651/652) — the SAME
+  code-bytes-as-pointer *family* as C8, but in a DIFFERENT lowering (my
+  static-call fix did not kill it, so likely an instance-method/vtable or
+  another mis-resolved-call path). That is the next lane's lead. Skip restored
+  to `if true:` and re-verified (`sed -n '374p'`).
+
+**Follow-up (out of scope, flagged not fixed):** the pure-Simple compiler
+(`src/compiler/35.semantics/resolve*.spl`, `10.frontend/.../cg_expr.spl`) has
+its own static-method-call resolution; check it for the same alias gap so the
+self-hosted binary is correct too when it builds the kernel (the current
+kernel is seed-built, so the seed fix is what this boot verified).
+
+**Files changed this lane:**
+`src/compiler_rust/compiler/src/hir/lower/expr/simd.rs` (root fix),
+`src/compiler_rust/compiler/src/hir/lower/import_loader.rs` (regression test).
+`vfs_boot_init.spl` touched-then-restored (`git diff` empty).
+
+**Evidence:** static addresses/bytes are from
+`build/os/_wkc8close/desktop.elf` (disasm `scratchpad/desktop.disasm`);
+fix-verification ELF/logs at `build/os/_wkc8deep/`
+(`desktop.elf` skip-lifted, `desktop_skipon.elf`, `serial.log`,
+`serial_skipon.log`); backups + baseline failure set at
+`scratchpad/c8deep_backup/`.

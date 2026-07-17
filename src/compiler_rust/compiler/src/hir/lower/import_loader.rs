@@ -1090,6 +1090,62 @@ fn read_hardware(addr: u64) -> u64:
     }
 
     #[test]
+    fn aliased_import_static_method_call_resolves_to_alias_target() {
+        // C8-DEEP regression: `use {Real as Alias}` then a static-method /
+        // constructor call `Alias.make(...)` must bind the callee to the
+        // ALIAS TARGET (`RealWidget.make`), exactly as the type-annotation
+        // path (`: Alias`) already resolves it. Before the fix the callee was
+        // built from the raw `Alias` token, so `Alias.make` bound to a
+        // same-printed-name global type instead of the alias target — which
+        // on SimpleOS constructed a real `Fat32Core` where the code expected a
+        // `SharedFat32Driver`, yielding a type-confused box and the boot fault
+        // storm (see doc/08_tracking/bug/simpleos_native_build_entry_closure_
+        // codegen_defects_2026-07-17.md, C8-DEEP).
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let owner = src.join("owner");
+        fs::create_dir_all(&owner).unwrap();
+
+        fs::write(
+            owner.join("widget.spl"),
+            "class RealWidget:\n    value: i64\n\nimpl RealWidget:\n    static fn make() -> RealWidget:\n        RealWidget(value: 7)\n",
+        )
+        .unwrap();
+        let main_path = src.join("main.spl");
+        fs::write(
+            &main_path,
+            r#"use owner.widget.{RealWidget as Widget}
+
+fn build() -> Widget:
+    Widget.make()
+"#,
+        )
+        .unwrap();
+
+        let source = fs::read_to_string(&main_path).unwrap();
+        let mut parser = Parser::new(&source);
+        let ast = parser.parse().expect("parse failed");
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let mut lowerer = Lowerer::with_module_resolver(resolver, main_path);
+        let lowered = lowerer.lower_module(&ast).expect("HIR lowering should succeed");
+        let func = lowered
+            .functions
+            .iter()
+            .find(|func| func.name == "build")
+            .expect("build function");
+        let body = format!("{:?}", func.body);
+
+        assert!(
+            body.contains("Global(\"RealWidget.make\")"),
+            "static call should resolve alias to target RealWidget.make; body: {body}"
+        );
+        assert!(
+            !body.contains("Global(\"Widget.make\")"),
+            "static call still uses unresolved alias name Widget.make; body: {body}"
+        );
+    }
+
+    #[test]
     fn import_target_intersection_matches_group_reexports() {
         let requested = ImportTarget::Single("shell".to_string());
         let available = ImportTarget::Group(vec![
