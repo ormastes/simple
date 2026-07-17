@@ -184,11 +184,9 @@ the atlas steps and both native loader owners now share the neutral default-glyf
 preflight. The bounded compound corpus path, exact default-instance request
 guard, and built-in monochrome bitmap fallback are implemented; broader legal
 compound component modes, complete shaping, and complete cache keys remain open.
-That renderer fallback is distinct from the current freestanding WM boot-safety
-branch, which emits thin rectangles when the font stack cannot initialize.
-Rectangle placeholders cannot satisfy selected-font, glyph, or pixel-oracle
-acceptance and must remain reported as a limitation until that branch consumes
-real bitmap or vector font material.
+The freestanding WM boot-safety branch reuses that canonical legacy bitmap text
+command when selected metrics cannot initialize. It remains compatibility
+fallback rather than selected-font or QEMU pixel-oracle evidence.
 
 1. Resolve the requested family/category and the shaped run's language/script
    through the validated sparse matrix.

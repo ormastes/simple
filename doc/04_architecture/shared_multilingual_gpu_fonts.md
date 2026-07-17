@@ -200,9 +200,9 @@ Direct arch/*/wm_entry.spl invocation - - compatibility only; not a canonical ta
 
 Legacy commands without `font-identity` retain bitmap text. Identified commands
 must resolve the exact pinned candidate and live generation or clear vector
-state before bitmap fallback. The current freestanding WM no-font-stack branch
-instead emits thin rectangle placeholders; it is boot-safety behavior, not
-selected-font or bitmap-fallback evidence. Unicode shaping fails closed until
+state before bitmap fallback. The freestanding WM no-font-stack branch now
+emits the canonical legacy bitmap text command; this is readable compatibility
+fallback, not selected-font evidence. Unicode shaping fails closed until
 every run vector and face binding agrees. Engine3D and SimpleOS evidence comes from their
 own device/guest paths; host mirrors and test-only status fields are not valid
 edges. Performance observation reuses existing renderer/backend counters and

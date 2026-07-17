@@ -299,11 +299,10 @@ none is font acceptance evidence.
 
 Current source limitations must remain visible during that recovery.
 Registered-byte-only SimpleOS shaping does not yet accept Arabic or Devanagari
-runs, and the freestanding WM invalid-metrics branch draws thin rectangle bars
-to keep the desktop alive. Those bars are not glyph fallback or pixel-oracle
-evidence. The shared renderer also still needs its raw mutex ownership and
-hosted atlas-generation synchronization moved behind existing facades before
-AC-13 can pass.
+runs. The freestanding WM invalid-metrics branch now retains readable canonical
+legacy bitmap text after the shared renderer locks and atlas generation moved
+behind the existing mutex facade. This fallback is not selected-font or retained
+QEMU pixel-oracle evidence.
 
 Canonical `FontRenderer` fallback glyphs are rasterized on CPU. Environment-
 published accelerator pixels are compatibility-only diagnostics and cannot

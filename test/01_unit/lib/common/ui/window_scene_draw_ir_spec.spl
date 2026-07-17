@@ -3,12 +3,14 @@
 
 use std.spec
 use common.ui.builder.{column, label, build_tree_with_title}
-use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DRAW_IR_SOURCE_WM_SCENE, draw_ir_event_target_context, simple_2d_draw_ir_adv_composition_plan}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DRAW_IR_SOURCE_WM_SCENE, draw_ir_event_target_context, draw_ir_text, simple_2d_draw_ir_adv_composition_plan}
 use common.ui.taskbar_model.{AppRef, TaskbarModel, TrayItem, WindowRef}
 use common.ui.window.{WindowManager}
 use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_SIMPLE_WEB}
 use common.ui.window_scene.{shared_wm_drag_window, shared_wm_scene_from_window_manager, shared_wm_scene_layout_key, shared_wm_translate_pointer_event, shared_wm_translate_pointer_event_cached}
 use common.ui.window_scene_draw_ir.{shared_wm_scene_draw_ir_composition}
+
+extern fn rt_file_read_text(path: text) -> text
 
 fn _tree(title: text):
     build_tree_with_title(column("{title}_root", [label("{title}_label", title)]), title, "glass_dark")
@@ -38,6 +40,22 @@ fn _scene():
     shared_wm_scene_from_window_manager(manager, registry, 800, 600)
 
 describe "window scene Draw IR projection":
+
+    it "retains readable bitmap text when selected metrics are unavailable":
+        val source = rt_file_read_text("src/lib/common/ui/window_scene_draw_ir.spl")
+        val draw_ir_route = rt_file_read_text("src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl")
+        val engine = rt_file_read_text("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+        val baremetal = rt_file_read_text("src/lib/gc_async_mut/gpu/engine2d/backend_baremetal.spl")
+        val fallback = draw_ir_text("fallback", 1, 2, "A", 0xffffffffu32)
+        expect(fallback.kind).to_equal(DRAW_IR_COMMAND_TEXT)
+        expect(fallback.computed_style.len()).to_equal(0)
+        expect(source).to_contain("draw_ir_text(component_id, x, legacy_y, value, color)")
+        expect(source.contains("draw_ir_rect(component_id, x, legacy_y, bar_w, 2, color)")).to_equal(false)
+        expect(draw_ir_route).to_contain("if font_identity != \"\":")
+        expect(draw_ir_route).to_contain("eng.draw_text(x, y, command.text_value, command.color")
+        expect(engine).to_contain("if selected != nil:")
+        expect(engine).to_contain("bm.draw_text(x, y, text_val, color, font_size)")
+        expect(baremetal).to_contain("render_text_to_buffer(buf, text_w, text_h, 0, 0, text_val, color, font_size)")
 
     it "projects the window manager chrome and windows into composed Draw IR batches":
         val scene = _scene()

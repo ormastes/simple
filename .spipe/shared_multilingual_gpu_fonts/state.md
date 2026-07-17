@@ -1410,3 +1410,15 @@ pixels, and performance evidence remain release-blocking.
   removed that pool before this refresh landed. The remaining findings are
   source blockers, not evidence passes. No runtime command ran and no PASS is
   claimed. STATUS: FAIL.
+
+- Facade-lock and WM fallback repair (2026-07-17): the generic runtime mutex now
+  holds exclusion through explicit unlock and rejects foreign/double unlock;
+  the shared Pure Simple renderer uses hosted-eager, freestanding-lazy typed
+  facade locks for both caches and the atlas generation counter. The WM
+  invalid-metrics branch therefore emits the canonical legacy bitmap text
+  command again instead of a two-pixel rectangle placeholder. Focused runtime
+  mutex tests passed 3/3, the standalone framebuffer runtime target passed 3/3,
+  static renderer/WM contracts and rendering/direct-runtime guards pass, and
+  independent high review accepted both source lanes. No admitted current
+  pure-Simple runner or retained QEMU pixel capture exists, so no native font
+  or SimpleOS pixel PASS is claimed. STATUS: FAIL.

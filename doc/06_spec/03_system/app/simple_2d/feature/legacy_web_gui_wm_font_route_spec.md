@@ -67,9 +67,9 @@ IDs, positions, and logical clusters. The source contract also proves that the
 Simple Browser registers validated VFS bytes before using that same route; it
 does not replace the pending retained QEMU pixel oracle. This scenario still
 does not prove native GPU submission, device readback, or native CPU/GPU pixel
-parity. It also does not accept the current freestanding WM invalid-metrics
-rectangle bars as font output; those placeholders only prevent a boot-time
-fault and remain a SimpleOS pixel-evidence blocker.
+parity. The freestanding WM invalid-metrics path now retains canonical legacy
+bitmap text rather than rectangle placeholders; it remains compatibility
+fallback and does not replace the retained SimpleOS pixel oracle.
 
 <details>
 <summary>Folded executable detail</summary>
