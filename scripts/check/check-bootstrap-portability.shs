@@ -111,13 +111,22 @@ inside && /^      - (name:|uses:)/ { exit }
 inside { print }
 ' "${multiplatform}")
 for required in \
-  "if: (runner.os == 'Linux' || runner.os == 'macOS') && matrix.backend == 'llvm'" \
-  'stage3="$(find build/bootstrap/stage3' \
+  "if: (runner.os == 'Linux' || runner.os == 'macOS' || runner.os == 'Windows') && matrix.backend == 'llvm'" \
+  'stage3="$(find build/bootstrap/stage3 -type f \( -name simple -o -name simple.exe \) -print -quit)"' \
   'test -n "$stage3"' \
+  'if [ "$RUNNER_OS" = "Windows" ]; then' \
+  'command -v clang >/dev/null 2>&1' \
+  'command -v llvm-ar >/dev/null 2>&1' \
+  'command -v llvm-nm >/dev/null 2>&1' \
+  'command -v llvm-objdump >/dev/null 2>&1' \
+  'compiler_target=$(clang --print-target-triple)' \
+  'x86_64-*-windows-msvc*) ;;' \
+  '*) printf '\''%s\n'\'' "unexpected Windows clang target: $compiler_target" >&2; exit 1 ;;' \
+  'export CC=clang AR=llvm-ar SIMPLE_NM=llvm-nm SIMPLE_OBJDUMP=llvm-objdump SIMPLE_WINDOWS_ABI=msvc' \
   'SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BINARY="$stage3" sh scripts/check/check-stage4-hosted-dynload-provider-archive.shs'; do
   printf '%s\n' "${dynload_archive_body}" | grep -Fq -- "${required}" || fail "hosted Stage4 dynload archive gate missing: ${required}"
 done
-if printf '%s\n' "${dynload_archive_body}" | grep -Eq 'continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true|src/compiler_rust/target|--backend'; then
+if printf '%s\n' "${dynload_archive_body}" | grep -Eq 'continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true|bin/release|src/compiler_rust/target|SIMPLE_RUNTIME_PATH|--backend'; then
   fail "hosted Stage4 dynload archive gate is optional, uses a fallback, or overrides the fresh staged compiler backend"
 fi
 dynload_archive_check=scripts/check/check-stage4-hosted-dynload-provider-archive.shs
@@ -125,11 +134,33 @@ dynload_archive_validator=scripts/check/validate_stage4_hosted_dynload_provider_
 grep -Fq 'Linux) archive_format=elf ;;' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks the Linux ELF mapping"
 grep -Fq 'Darwin) archive_format=macho ;;' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks the macOS Mach-O mapping"
 grep -Fq 'FreeBSD) archive_format=elf ;;' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks the FreeBSD ELF mapping"
-grep -Fq '*) die "requires Linux, macOS, or FreeBSD" ;;' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not reject unsupported hosts"
+for required in \
+  'object_name=runtime_dynload.o' \
+  'archive_name=libsimple_stage4_dynload.a' \
+  'MINGW*|MSYS*|CYGWIN*|Windows*)' \
+  '[ "${SIMPLE_WINDOWS_ABI:-}" = "msvc" ] || die "Windows proof requires SIMPLE_WINDOWS_ABI=msvc"' \
+  'archive_format=coff-msvc' \
+  'object_name=runtime_dynload.obj' \
+  'archive_name=simple_stage4_dynload.lib' \
+  '*) die "requires Linux, macOS, FreeBSD, or Windows MSVC" ;;' \
+  'compiler_target=$("$CC" --print-target-triple 2>/dev/null)' \
+  'x86_64-*-windows-msvc*) ;;' \
+  '*) die "Windows proof requires x86_64 Windows MSVC clang (found: $compiler_target)" ;;' \
+  'command -v cygpath >/dev/null 2>&1 || die "Windows MSVC proof requires cygpath"' \
+  'BUILD_DIR=$(cygpath -m "$BUILD_DIR")' \
+  'object="$BUILD_DIR/$lane/$object_name"' \
+  'archive="$BUILD_DIR/$lane/$archive_name"' \
+  'members=$("$AR" t "$archive") \' \
+  '|| die "failed to list archive members for lane $lane"' \
+  'members=$(printf '\''%s'\'' "$members" | tr -d '\''\r'\'')' \
+  '[ "$members" = "$object_name" ]' \
+  'archive_a="$BUILD_DIR/a/$archive_name"' \
+  'archive_b="$BUILD_DIR/b/$archive_name"'; do
+  grep -Fq -- "${required}" "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks hosted name/target portability: ${required}"
+done
 grep -Fq 'for lane in a b; do' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks independent builds"
 grep -Fq 'SOURCE=src/runtime/runtime_dynload.c' "${dynload_archive_check}" || fail "Stage4 dynload archive checker uses the wrong source owner"
 grep -Fq '"$AR" rcsD "$archive" "$object"' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks deterministic archive mode"
-grep -Fq '[ "$members" = "runtime_dynload.o" ]' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not enforce its sole member"
 grep -Fq 'cmp -s "$archive_a" "$archive_b"' "${dynload_archive_check}" || fail "Stage4 dynload archive checker does not compare independent bytes"
 grep -Fq 'sha256_file() {' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks its SHA-256 helper"
 grep -Fq 'command -v sha256sum' "${dynload_archive_check}" || fail "Stage4 dynload archive checker lacks sha256sum support"
@@ -152,7 +183,7 @@ inside { print }
 ' "${dynload_archive_validator}")
 for required in \
   'if archive_format == "":' \
-  'if archive_format != "elf" and archive_format != "macho":'; do
+  'if archive_format != "elf" and archive_format != "macho" and archive_format != "coff-msvc":'; do
   printf '%s\n' "${dynload_format_guard}" | grep -Fq -- "${required}" || fail "Stage4 dynload validator does not reject missing or unknown formats before scanning: ${required}"
 done
 grep -Fq 'stage4_validate_dynload_provider_symbol_contract(scans[0], archive_format)' "${dynload_archive_validator}" || fail "Stage4 dynload validator bypasses the canonical archive A symbol contract"

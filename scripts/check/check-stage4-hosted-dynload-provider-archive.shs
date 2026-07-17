@@ -10,11 +10,19 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
 
 host_os=$(uname -s 2>/dev/null || true)
+object_name=runtime_dynload.o
+archive_name=libsimple_stage4_dynload.a
 case "$host_os" in
     Linux) archive_format=elf ;;
     Darwin) archive_format=macho ;;
     FreeBSD) archive_format=elf ;;
-    *) die "requires Linux, macOS, or FreeBSD" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows*)
+        [ "${SIMPLE_WINDOWS_ABI:-}" = "msvc" ] || die "Windows proof requires SIMPLE_WINDOWS_ABI=msvc"
+        archive_format=coff-msvc
+        object_name=runtime_dynload.obj
+        archive_name=simple_stage4_dynload.lib
+        ;;
+    *) die "requires Linux, macOS, FreeBSD, or Windows MSVC" ;;
 esac
 
 SIMPLE_BINARY=${SIMPLE_BINARY:-bin/simple}
@@ -36,6 +44,15 @@ elif command -v gcc >/dev/null 2>&1; then
     CC=gcc
 else
     die "requires clang, cc, or gcc"
+fi
+
+if [ "$archive_format" = "coff-msvc" ]; then
+    compiler_target=$("$CC" --print-target-triple 2>/dev/null) \
+        || die "failed to query the Windows C compiler target"
+    case "$compiler_target" in
+        x86_64-*-windows-msvc*) ;;
+        *) die "Windows proof requires x86_64 Windows MSVC clang (found: $compiler_target)" ;;
+    esac
 fi
 
 if [ -n "${AR:-}" ]; then
@@ -65,10 +82,14 @@ sha256_file() {
 
 mkdir -p "$BUILD_DIR/a" "$BUILD_DIR/b"
 BUILD_DIR=$(CDPATH= cd -- "$BUILD_DIR" && pwd)
+if [ "$archive_format" = "coff-msvc" ]; then
+    command -v cygpath >/dev/null 2>&1 || die "Windows MSVC proof requires cygpath"
+    BUILD_DIR=$(cygpath -m "$BUILD_DIR")
+fi
 
 for lane in a b; do
-    object="$BUILD_DIR/$lane/runtime_dynload.o"
-    archive="$BUILD_DIR/$lane/libsimple_stage4_dynload.a"
+    object="$BUILD_DIR/$lane/$object_name"
+    archive="$BUILD_DIR/$lane/$archive_name"
     rm -f "$object" "$archive"
     "$CC" -c -Os -ffunction-sections -fdata-sections \
         -fno-unwind-tables -fno-asynchronous-unwind-tables \
@@ -79,12 +100,13 @@ for lane in a b; do
         || die "failed to create deterministic archive for lane $lane"
     members=$("$AR" t "$archive") \
         || die "failed to list archive members for lane $lane"
-    [ "$members" = "runtime_dynload.o" ] \
-        || die "lane $lane archive must contain exactly runtime_dynload.o (found: $members)"
+    members=$(printf '%s' "$members" | tr -d '\r')
+    [ "$members" = "$object_name" ] \
+        || die "lane $lane archive must contain exactly $object_name (found: $members)"
 done
 
-archive_a="$BUILD_DIR/a/libsimple_stage4_dynload.a"
-archive_b="$BUILD_DIR/b/libsimple_stage4_dynload.a"
+archive_a="$BUILD_DIR/a/$archive_name"
+archive_b="$BUILD_DIR/b/$archive_name"
 sha_a=$(sha256_file "$archive_a")
 sha_b=$(sha256_file "$archive_b")
 [ "$sha_a" = "$sha_b" ] || die "independent archive SHA-256 values differ"
