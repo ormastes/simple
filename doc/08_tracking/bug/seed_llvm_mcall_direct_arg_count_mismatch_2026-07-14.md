@@ -174,3 +174,67 @@ in-guest on SimpleOS x86_64 under real OVMF (ring-3 `cs=0x2b`, prints
 `Simple v1.0.0-beta`, `rc=0`) — loader, ring-3 transition, syscalls, and FAT32
 I/O all work. Only self-interpretation of arbitrary programs hits the
 cranelift enum trap; only the LLVM rebuild hits this `mcall_direct` bug.
+
+### 2026-07-17 follow-up (FULLBOOT lane): reproduced byte-for-byte on a fresh from-scratch seed; full 19-file/symbol table captured
+Ran the authoritative `scripts/bootstrap/bootstrap-from-scratch.sh
+--full-bootstrap --full-cli --mode=dynload --output=build/bootstrap
+--jobs=half` gate as the redeploy-readiness test for
+`hir_stmt_expr_payload_extraction_nil_2026-07-17.md` (that lane's own cert-
+import wall is separately fixed and confirmed on disk). Rebuilt the Rust
+seed clean from scratch (`cargo build --profile bootstrap -p simple-driver`
+detected, so no backend/feature fix was needed for the seed itself). Stage 2
+failed with **exactly** this doc's already-diagnosed "ineffective"
+follow-up result: **19 files, 38 diagnostics** — an exact match on both
+counts, confirming this is the same still-open symbol-lowering bug, not a
+new regression introduced since. (Initially misfiled as a new bug in this
+lane's first pass; retracted after `git diff origin/main` showed the
+working tree still carries this investigation's in-progress edits —
+notably `src/compiler/70.backend/backend/llvm_lib_translate_expr.spl`,
+`backend_types.spl`, `mir_lowering_stmts.spl`, and the Rust-side
+`src/compiler_rust/compiler/src/pipeline/native_project/{compiler,imports,mod,tests}.rs`
+uncommitted vs `origin/main`, consistent with "the ineffective code was
+removed" being an in-progress, not-yet-committed revert rather than a
+completed one. Since the reproduced file/diagnostic counts match this doc's
+prior entry exactly, the current on-disk state — committed or not — is the
+same state already diagnosed here, so this is confirmation, not new
+information about causation.)
+Full 19-file → undeclared-symbol table (supplementing "led by
+`char_to_ascii`, `self`, `Shared`, and generic symbols" above with the
+complete set observed this run):
+| File | Undeclared symbol |
+|---|---|
+| `src/app/io/feature_registry.spl` | `nogc_sync_mut__io__cuda_sffi__cuda_available` |
+| `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` | `global_local` |
+| `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` | `receiver_mir_type_uw` |
+| `src/compiler/70.backend/backend/cuda_backend.spl` | `CompareExchange` |
+| `src/compiler/70.backend/backend/hip_backend.spl` | `Shared` |
+| `src/compiler/70.backend/backend/llvm_lib_translate_expr.spl` | `local_unsigned` |
+| `src/compiler/70.backend/backend/native/isel_aarch64.spl` | `backend__backend__common__ascii_utils__char_to_ascii` |
+| `src/compiler/70.backend/backend/native/isel_riscv32.spl` | `backend__backend__common__ascii_utils__char_to_ascii` |
+| `src/compiler/70.backend/backend/native/isel_riscv64.spl` | `backend__backend__common__ascii_utils__char_to_ascii` |
+| `src/compiler/70.backend/backend/native/isel_x86_64.spl` | `backend__backend__common__ascii_utils__char_to_ascii` |
+| `src/compiler/70.backend/backend/opencl_backend.spl` | `Shared` |
+| `src/compiler_rust/lib/std/src/core/collections.spl` | `nogc_sync_mut__src__tensor__Tensor_dot_T` |
+| `src/compiler_rust/lib/std/src/core/list.spl` | `nogc_sync_mut__src__tensor__Tensor_dot_T` |
+| `src/compiler_rust/lib/std/src/core/traits.spl` | `C` (the `collect<C: FromIterator<Self.Item>>` generic param) |
+| `src/lib/nogc_async_mut/io/buffer.spl` | `self` |
+| `src/lib/nogc_sync_mut/io/buffer.spl` | `self` |
+| `src/lib/nogc_sync_mut/src/array_builder.spl` | `Array` |
+| `src/lib/nogc_sync_mut/src/table.spl` | `compiler_rust__lib__std__src__core__traits__Iterator_dot_count` |
+| `src/lib/nogc_sync_mut/src/tensor.spl` | `N` (the `Tensor<T, N>` generic param) |
+Every "bare" undeclared symbol cross-checked against its source is a
+generic type parameter (`C`, `N`) or a method receiver (`self`) — matching
+this doc's existing "unresolved locals, generics, enum cases, and static
+receivers must remain fail-closed" diagnosis precisely. Evidence:
+`build/native_probe/redeploy-gate-fullboot-20260717.log.gz` (gate wrapper),
+`build/bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log.gz`
+(full 19-file detail). No stage2/3/4 binary was produced; Stage 4 correctly
+refused a seed fallback (`error: full CLI build requires a verified
+pure-Simple stage2/stage3 compiler; refusing seed fallback`, exit 2) rather
+than silently shipping an unverified candidate.
+**No new action needed beyond this doc's existing prescription**: repair
+import-key normalization so unresolved locals/generics/enum
+cases/static receivers fail closed instead of being emitted as external
+`declare`s, then re-run this same gate command. The redeploy-gate verdict
+recorded in `hir_stmt_expr_payload_extraction_nil_2026-07-17.md` is
+NOT-READY, citing this doc as the concrete, already-open blocker.

@@ -759,3 +759,98 @@ run through the same `native_build_worker.spl` phase-1 collector:
 full `--source src/lib` phase-1 collection to completion) now that the cert
 wall is gone — not done in this lane, given the multi-hour interpreted-seed
 runtime for a whole-tree pass observed above.
+
+## 2026-07-17 follow-up (FULLBOOT lane): gate run — NOT-READY, hits the known Stage 2 LLVM symbol-lowering wall
+
+Ran the gate per the section above, against the current working tree (not
+a freshly-synced clean `origin/main` checkout — see the caveat in the
+verdict below). No other lane had a live `--full-bootstrap` run for this
+same objective (a stale-PID reference was already dead; a live
+`--full-bootstrap` found via `pgrep` belonged to an unrelated lane in a
+separate worktree, `build/worktrees/simpleos-sync-recover-gh`, with its own
+`src/compiler_rust/target` — confirmed no shared state, so this run
+proceeded in the main checkout).
+
+**Command:**
+```
+CAP_MEM_MAX=32G scripts/resource/run_capped.shs timeout -k 30s 10800s \
+  scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --mode=dynload \
+  --full-cli --output=build/bootstrap --jobs=half
+```
+(No `--deploy` — this lane never touches `bin/`/`bin/release/`, per its
+charter; deployment is user-gated.)
+
+**Backend/profile resolution:** no script or Cargo-feature fix was needed.
+LLVM 18 was detected on this host (`LLVM_FOUND=1`, `/usr/lib/llvm-18`), and
+`bootstrap-from-scratch.sh` already conditions `--features llvm` on that
+detection (line ~530) before invoking `cargo build --profile bootstrap -p
+simple-driver`/`-p simple-native-all`. The "native backend 'llvm' is not
+available" symptom described in this lane's charter only occurs when a seed
+is hand-built without `--features llvm` (e.g. via the bare `cargo build
+--profile bootstrap -p simple-driver` command in some manual recipes,
+without the flag) — `--full-bootstrap` on a host with LLVM detected does
+not hit that path. Confirmed empirically: the seed content-hash staleness
+gate correctly detected the on-disk seed was stale (Rust source changed
+since last build) and rebuilt both crates with `--features llvm`, 0 errors.
+
+**Stage-by-stage outcome:**
+
+| Stage | Result |
+|---|---|
+| Rust seed rebuild (`simple-driver` + `simple-native-all`, both `--features llvm`) | PASS — 0 errors, fresh seed at `src/compiler_rust/target/bootstrap/simple` (145MB, timestamped this run), carries this week's interpreter fixes (Wall-2 enum/class collision fix, SdnValue fix, cert-import repoint — all confirmed present via `git diff origin/main` on the 4 touched `tls/*.spl` files being empty) |
+| Stage 2 (seed → `bootstrap_main.spl`, LLVM backend, `--entry-closure`) | **FAIL** — 19 files, 38 diagnostics, `llvm codegen: semantic: llvm global load referenced undeclared symbol <name>`. **This is a KNOWN, already-open, already-diagnosed wall** — `doc/08_tracking/bug/seed_llvm_mcall_direct_arg_count_mismatch_2026-07-14.md`'s "separate symbol-lowering bug" entry (documented before this run, same exact 19-file/38-diagnostic counts). An initial pass here misfiled this as a new regression; retracted after `git diff origin/main` showed the working tree still carries that investigation's uncommitted in-progress edits in exactly the affected codegen files. Full symbol table appended to the existing doc, not a new one. |
+| Stage 3 (self-host verify) | Not reached — no Stage 2 binary to self-host from |
+| Stage 4 (full CLI) | Refused seed fallback by design: `error: full CLI build requires a verified pure-Simple stage2/stage3 compiler; refusing seed fallback` (exit 2) — this is the gate's fail-closed behavior working as intended, not a separate defect |
+| Stage 5 (MCP servers) | Not reached |
+
+**Extended smoke checks / 3-of-17 parity-xfail spot-check:** NOT RUN — no
+stage2/3/4 binary was produced this run, so there is no fresh
+self-hosted candidate to check multi-fn `-c` compile / enum construct-match
+/ Option-Result chains against, or to spot-run parity-xfail cases with. (A
+smoke script was drafted for the next attempt:
+`/tmp/claude-1000/-home-ormastes-dev-pub-simple/487db31f-7b5a-420a-8c9f-6d58fe0d2db7/scratchpad/fullboot_extended_smoke.sh`,
+scratch-only, not part of the repo.)
+
+**Verdict: NOT-READY.** The cert-import wall (previous blocker) is
+confirmed fixed and the from-scratch seed rebuild is clean and carries all
+of this week's interpreter-level fixes. But this run was **not a clean
+origin/main run**: the working tree (71 uncommitted files across many
+concurrent lanes at run time) still carries the
+`seed_llvm_mcall_direct_arg_count_mismatch_2026-07-14.md` investigation's
+uncommitted in-progress edits in exactly the codegen files that failed
+(`llvm_lib_translate_expr.spl`, `backend_types.spl`,
+`mir_lowering_stmts.spl`, plus the Rust-side
+`native_project/{compiler,imports,mod,tests}.rs` +
+`mir/lower/lowering_expr_builtin.rs`, all dirty vs `origin/main`). Stage 2
+failed with **exactly** that doc's already-diagnosed 19-file/38-diagnostic
+symbol-lowering wall — the fingerprint match is strong evidence this is the
+same known bug, not a new defect, but it is an *inference from matching
+counts*, not a direct verification against a clean tree. In particular,
+this run's Stage 2 showed **zero** `mcall_direct` argument-count errors
+(that doc's earlier, now-fixed 43-file wall), which means the seed carries
+that fix — but whether that fix is committed on `origin/main` or only lives
+in the dirty, uncommitted Rust sources this seed was built from was **not
+checked**. If it turns out to be uncommitted, a coordinator re-running "this
+same command" from a freshly-synced clean `main` could hit the earlier
+43-file arg-count wall instead of this 19-file one, and "repair import-key
+normalization" (that doc's prescribed next step) would not by itself be the
+complete remaining work. Concrete asks for whoever picks this up: (1)
+reconcile/commit the working tree to a known state (commits are the
+coordinator's call, not this lane's), (2) then confirm which wall a truly
+clean `origin/main` checkout hits before trusting "repair import-key
+normalization" as the sole remaining prerequisite, (3) fix it, (4) re-run
+this same gate command. Out of this gate-runner lane's scope to fix (a fix
+lane should pick it up) — this lane's job was to run the gate and classify
+the failure correctly, which required one self-correction: an earlier pass
+in this same lane briefly misfiled this as a new regression, retracted once
+cross-checked against `git log`/`git diff origin/main` (see the referenced
+doc's 2026-07-17 follow-up for the full correction trail).
+
+**Evidence paths:** `build/native_probe/redeploy-gate-fullboot-20260717.log.gz`
+(gate wrapper log), `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log.gz`
+(19-file failure detail — also fully reproduced in
+`doc/08_tracking/bug/seed_llvm_mcall_direct_arg_count_mismatch_2026-07-14.md`'s
+2026-07-17 follow-up section so the gzip does not lose load-bearing
+evidence), `build/bootstrap/logs/x86_64-unknown-linux-gnu/rust-seed-build.log`
+and `rust-native-all-build.log` (clean seed rebuild evidence, both plain
+text, small).
