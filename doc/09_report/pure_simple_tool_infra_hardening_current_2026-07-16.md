@@ -513,8 +513,9 @@ so executable qualification is still blocked.
   regression passes and three independent reviews pass. The earlier
   `parser_preprocessor.spl:207` nested-empty-string interpolation is fixed and
   pinned for spaced `=`/`==`; bounded Stage 2 now advances to the next same-
-  class nested-string parse blocker at `trait_solver.spl:72:47`. The `Shared`
-  admission remains
+  class nested-string parse blocker at `trait_solver.spl:72:47`. Its raw-string
+  spelling and focused lexer regression advance Stage 2 to the next same-class
+  use at `lean_backend.spl:166`. The `Shared` admission remains
   provisional; strict runs exit normally with no timeout, OOM, crash, hang,
   orphan, or seed fallback.
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system

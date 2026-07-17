@@ -165,6 +165,21 @@ main()
         }
     }
 
+    #[test]
+    fn test_interpolation_expression_accepts_raw_string_call_argument() {
+        let source = r#"val desc = "{desc}<{constraints.join(', ')}>""#;
+        assert!(find_errors(source).is_empty());
+        assert_eq!(
+            get_fstring_tokens(source),
+            vec![TokenKind::FString(vec![
+                FStringToken::Expr("desc".to_string()),
+                FStringToken::Literal("<".to_string()),
+                FStringToken::Expr("constraints.join(', ')".to_string()),
+                FStringToken::Literal(">".to_string()),
+            ])]
+        );
+    }
+
     /// {{ escape still works
     #[test]
     fn test_double_brace_escape_still_works() {
