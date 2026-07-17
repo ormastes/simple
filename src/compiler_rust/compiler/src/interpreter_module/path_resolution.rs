@@ -361,36 +361,45 @@ fn try_variant_stdlib_root(search_root: &Path, variant: &str, stdlib_parts: &[St
         if !base_root.is_dir() {
             continue;
         }
-        for variant_root in stdlib_root_candidates(&base_root) {
-            if !variant_root.ends_with(variant) && !variant_root.to_string_lossy().contains(&format!("/{variant}/")) {
-                continue;
-            }
 
-            let relative: PathBuf = stdlib_parts.iter().collect();
+        // Look up the concurrency-variant directory (`nogc_sync_mut`,
+        // `gc_async_mut`, etc.) directly by name. `stdlib_root_candidates`
+        // is a *hardware SIMD-tier* helper (avx2/sse2/scalar variants under
+        // `variants/<tier>`); it never returns a path ending in a
+        // concurrency-variant name, so filtering its output by `variant`
+        // here always failed and this fast path never fired. That silently
+        // let bare `std.io` (etc.) fall through to the generic subpath scan
+        // below, where a stale duplicate stdlib tree earlier in the search
+        // order (`src/compiler_rust/lib/std/src`) could win over the real
+        // package (see `loads_real_exports_from_std_io_package` /
+        // `prefers_variant_std_io_for_nogc_sync_mut_callers`).
+        let variant_root = base_root.join(variant);
+        if !variant_root.is_dir() {
+            continue;
+        }
 
-            // Package (__init__.spl) wins over a same-named file HERE,
-            // deliberately, unlike the subdir loop in
-            // resolve_module_path_uncached below (see the comment there).
-            // This "preferred variant" fast path also fires while resolving
-            // imports *from inside* a facade file such as
-            // `nogc_sync_mut/io.spl`, which re-exports its own package
-            // (`nogc_sync_mut/io/__init__.spl`) via the fully-qualified
-            // `use std.nogc_sync_mut.io.{...}`. If the file won here, that
-            // self-referencing facade would resolve back to itself instead
-            // of the package, and its re-exports would come up empty (see
-            // `loads_real_exports_from_std_io_package` /
-            // `prefers_variant_std_io_for_nogc_sync_mut_callers`).
-            let mut init_path = variant_root.join(&relative);
-            init_path.push("__init__.spl");
-            if init_path.is_file() {
-                return Some(init_path);
-            }
+        let relative: PathBuf = stdlib_parts.iter().collect();
 
-            let mut file_path = variant_root.join(&relative);
-            file_path.set_extension("spl");
-            if file_path.is_file() {
-                return Some(file_path);
-            }
+        // Package (__init__.spl) wins over a same-named file HERE,
+        // deliberately, unlike the subdir loop in
+        // resolve_module_path_uncached below (see the comment there).
+        // This "preferred variant" fast path also fires while resolving
+        // imports *from inside* a facade file such as
+        // `nogc_sync_mut/io.spl`, which re-exports its own package
+        // (`nogc_sync_mut/io/__init__.spl`) via the fully-qualified
+        // `use std.nogc_sync_mut.io.{...}`. If the file won here, that
+        // self-referencing facade would resolve back to itself instead
+        // of the package, and its re-exports would come up empty.
+        let mut init_path = variant_root.join(&relative);
+        init_path.push("__init__.spl");
+        if init_path.is_file() {
+            return Some(init_path);
+        }
+
+        let mut file_path = variant_root.join(&relative);
+        file_path.set_extension("spl");
+        if file_path.is_file() {
+            return Some(file_path);
         }
     }
 

@@ -2326,6 +2326,7 @@ mod tests {
             .join("..")
             .join("..")
             .join("examples")
+            .join("06_io")
             .join("ui")
             .join("web_wm.spl");
 
