@@ -144,12 +144,14 @@ cases now loud-fail with the expected diagnostic and no binary.
 
 The fail-closed boundary above is historical: `lower_try_expr` now supports
 authoritatively typed flat and boxed Option locals/direct-call returns.
-Resolved-method provenance is source-implemented; unresolved late dispatch is
-still not guessed. The two durable fixtures use ordinary present payloads `5`
-and `4`; payload `3` is deliberately excluded because treating its collision
-with the flat nil sentinel as success would encode the remaining ABI bug.
+Resolved-method provenance is source-implemented. A third durable fixture
+exercises the existing unresolved-method symbol-return path through `?`; it
+does not guess a type for genuinely unknown late dispatch. The fixtures use
+ordinary present payloads `5`, `4`, and `6`; payload `3` is deliberately
+excluded because treating its collision with the flat nil sentinel as success
+would encode the remaining ABI bug.
 
-Hosted Linux/macOS/Windows and FreeBSD x86_64 select the same two
+Hosted Linux/macOS/Windows and FreeBSD x86_64 select all three
 native-authoritative cases under flagless LLVM and explicit Cranelift. ARM32
 default LLVM and Windows ARM64 LLVM/Cranelift require successful nonempty target
 objects and reject the retired fail-closed diagnostic. Static portability
