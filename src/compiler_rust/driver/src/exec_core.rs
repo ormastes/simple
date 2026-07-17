@@ -1053,6 +1053,17 @@ impl Default for ExecCore {
 
 /// Run the main function from a loaded module
 pub fn run_main(module: &LoadedModule) -> Result<i32, String> {
+    // Fail closed on a genuinely empty code section: this is the "no user
+    // code compiled at all" signature of a stub/no-op SMF (bug
+    // seed_compile_smf_stub_fail_open_2026-07-17). Bounded, obvious guard
+    // only -- a real (even trivial) compiled `main` always emits at least a
+    // `ret`-equivalent instruction, so this never rejects legitimate output.
+    if module.code_mem.size() == 0 {
+        return Err(format!(
+            "cannot run {}: module has an empty code section (no compiled user code) -- refusing to silently exit 0",
+            module.path.display()
+        ));
+    }
     type MainFn = extern "C" fn() -> i32;
     let main: MainFn = module.entry_point().ok_or("no main entry found")?;
     Ok(main())

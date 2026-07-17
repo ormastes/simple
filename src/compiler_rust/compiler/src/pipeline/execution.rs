@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use simple_common::gc::GcAllocator;
 use simple_common::target::{Target, TargetArch};
-use simple_parser::ast::{Module, Node};
+use simple_parser::ast::{Expr, Module, Node};
 use simple_type::check as type_check;
 use tracing::instrument;
 
@@ -26,6 +26,24 @@ pub use crate::smf_builder::{generate_smf_bytes, generate_smf_bytes_for_target, 
 // Provide the old generate_smf_from_object function for compatibility
 pub fn generate_smf_from_object(object_code: &[u8], gc: Option<&Arc<dyn GcAllocator>>) -> Vec<u8> {
     crate::smf_builder::generate_smf_from_object(object_code, gc)
+}
+
+/// Detect a top-level `main = <expr>` assignment: the legacy script exit-code
+/// idiom exercised throughout `compiler/tests/compile_and_run.rs`. The
+/// interpreter runs the whole script and the final value bound to `main`
+/// becomes the process exit code.
+///
+/// Kept as an explicit, narrow carve-out from the script-to-native-`main`
+/// synthesis in `compile_module_to_memory_native_with_context` so that
+/// historical contract keeps working via the interpreter fallback, while
+/// general script statements (e.g. a bare `print(...)` with no `main =`
+/// binding) get real codegen instead of a silent no-op stub SMF (bug
+/// seed_compile_smf_stub_fail_open_2026-07-17).
+fn assigns_to_main(items: &[Node]) -> bool {
+    items.iter().any(|item| match item {
+        Node::Assignment(assign) => matches!(&assign.target, Expr::Identifier(name) if name == "main"),
+        _ => false,
+    })
 }
 
 fn generate_linked_smf_from_object(
@@ -501,6 +519,25 @@ impl CompilerPipeline {
             ast_module
         };
 
+        // Real (non-interpreted) compilation of bare script entries: a module
+        // with no explicit `fn main` and no `main = <expr>` result binding
+        // gets a synthesized `main` wrapping its top-level statements -- the
+        // same transform the native-build/native-binary pipeline already
+        // applies (`native_project::wrap_entry_script_as_main`) -- so
+        // `compile -o *.smf` emits real code instead of interpreting the
+        // script for side effects at compile time and discarding them into a
+        // constant-return stub (bug seed_compile_smf_stub_fail_open_2026-07-17).
+        // The legacy `main = <expr>` idiom, and modules with no top-level
+        // script statements at all (pure declaration/library files), are left
+        // untouched: they fall through to the interpreter fallback below
+        // exactly as before.
+        let wraps_script_entry = has_script_statements(&ast_module.items) && !assigns_to_main(&ast_module.items);
+        let ast_module = if wraps_script_entry {
+            crate::pipeline::native_project::wrap_entry_script_as_main(ast_module, false)
+        } else {
+            ast_module
+        };
+
         // 4. Compilability analysis for hybrid execution
         let compilability = analyze_module(&ast_module.items);
         let boxed_returns = boxed_return_functions(&ast_module.items);
@@ -527,6 +564,19 @@ impl CompilerPipeline {
         let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
 
         if !has_main_function {
+            if wraps_script_entry {
+                // We already synthesized a `main` from the script body above
+                // (bug seed_compile_smf_stub_fail_open_2026-07-17) and it
+                // still did not reach MIR: a genuine lowering/codegen gap,
+                // not a case for a silent fail-open stub.
+                let where_ = source_file
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<in-memory source>".to_string());
+                return Err(CompileError::Semantic(format!(
+                    "SMF emission failed for {}: the entry script could not be lowered to a real `main` entry point",
+                    where_
+                )));
+            }
             // Fallback: evaluate via interpreter and wrap result
             let main_value = self.evaluate_module_with_project(&ast_module.items)?;
             return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));

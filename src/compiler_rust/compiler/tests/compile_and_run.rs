@@ -156,6 +156,39 @@ fn compile_boolean_false() {
     assert_eq!(compile_and_run("main = if false: 0 else: 42"), 42);
 }
 
+/// Regression test for bug seed_compile_smf_stub_fail_open_2026-07-17:
+/// `compile()` on a bare script entry (no `fn main`, no `main = <expr>`
+/// result-binding idiom) must synthesize a real `main` and generate real
+/// executable code for the script body, instead of interpreting it for side
+/// effects at compile time and discarding them into a 219-byte
+/// constant-return stub SMF that does nothing when run. This is the exact
+/// `print("run-ok")` scenario from the bug report.
+#[test]
+fn compile_and_run_bare_script_print_executes_for_real() {
+    use simple_runtime::value::{rt_capture_stdout_start, rt_capture_stdout_stop};
+
+    rt_capture_stdout_start();
+    let exit_code = compile_and_run("print(\"run-ok\")");
+    let captured = rt_capture_stdout_stop();
+
+    assert_eq!(exit_code, 0);
+    assert!(
+        captured.contains("run-ok"),
+        "expected the compiled script to actually execute `print(\"run-ok\")` at run time \
+(not interpret-and-discard into a stub), got captured stdout: {:?}",
+        captured
+    );
+}
+
+/// The legacy `main = <expr>` result-binding idiom must keep working
+/// unchanged alongside a preceding script statement (bug
+/// seed_compile_smf_stub_fail_open_2026-07-17 fix is scoped to bare scripts
+/// with no `main =` binding; this case still uses the interpreter fallback).
+#[test]
+fn compile_and_run_main_assignment_with_preceding_statement_unaffected() {
+    assert_eq!(compile_and_run("val x = 40\nmain = x + 2"), 42);
+}
+
 // =============================================================================
 // Native compilation tests (HIR → MIR → Cranelift)
 // =============================================================================
