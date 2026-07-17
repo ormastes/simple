@@ -1,7 +1,7 @@
 # expect(a == b).to_equal(false) comparison-matcher footgun
 
 **Date:** 2026-07-17
-**Status:** OPEN — checker landed; bulk sweep ATTEMPTED AND REVERTED (see below)
+**Status:** PHASE-1 SWEPT — parse-aware transformer rewrote 1,386 simple cases in 321 files (2026-07-17); ~1,360 complex lines remain flagged by the checker
 
 ## Symptom
 
@@ -51,3 +51,19 @@ the practical verification set.
 ## Remainder
 
 Full current hit list: run `sh scripts/check/check-expect-footgun.shs`.
+
+## Phase-1 sweep (landed, 2026-07-17)
+
+Redone with a parse-aware transformer (balanced-paren operand extraction,
+single top-level comparator required, top-level and/or/not excluded,
+single-line matches only). Rewrites: positives -> `expect(A).to_equal(B)`;
+negatives -> `assert_not_equal(A, B)` only where the file imports
+`use std.spec.*` (else left for phase 2). Per-file invariants enforced:
+line count unchanged, expect+assert count unchanged, only matched lines
+touched. Post-apply audit: every changed line in all 321 files conforms to
+the expected before/after patterns vs origin (0 files excluded).
+Behavioral spec runs are blocked by the documented tooling walls (stale
+deployed binary's rt_cli_arg_count gap; seed runner cannot compile the
+pure-Simple test-runner) — A/B confirmed the failure is byte-identical for
+origin and swept content, i.e. pre-existing and unrelated. Remaining
+~1,360 complex lines: run the checker for the current list.
