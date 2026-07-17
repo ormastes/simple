@@ -1380,6 +1380,39 @@ internal_export HirLowering, HirBuilder
 
 See [Friend Access Control](../design/friend_access_control.md) and [Layered Compiler Architecture](../design/layered_compiler_architecture.md).
 
+### Module Resolution: File vs Package (known-inconsistent — read before relying on it)
+
+When a directory contains both `name/__init__.spl` (a package) and a sibling
+`name.spl` file with the same leaf name, which one `use foo.name` resolves
+to is **not consistent** across the interpreter's resolution strategies, and
+for `use std.<name>` specifically a seed-bundled stdlib copy
+(`src/compiler_rust/lib/std/src`) is consulted *before* your project's own
+`src/lib/`, so a same-named package there can win regardless of what
+`src/lib/<family>/` contains. Do not assume file-wins or package-wins as a
+blanket rule. Two concrete, opposite examples in the current stdlib:
+
+- `std.spec`: the canonical BDD framework is the **file**
+  (`src/lib/<family>/spec.spl`), with a same-named `spec/` package holding
+  only the skip/ignore-decorator submodules. `print_summary`/`get_exit_code`/
+  `get_executed_test_count` currently are NOT reliably reachable via
+  `use std.spec.{...}` — see the bug doc below for why.
+- `std.io`: the canonical implementation is the **package**
+  (`src/lib/<family>/io/__init__.spl`, with real submodules like
+  `file_ops.spl`/`env_ops.spl`); the sibling `io.spl` file is a thin facade
+  that re-exports from the package via a fully-qualified import, and
+  deliberately depends on package-first resolution to avoid resolving back
+  to itself.
+
+Multi-segment imports that name a submodule directly (`use
+std.spec.decorators.{skip}`) are unaffected either way — they resolve
+`decorators.spl` inside the `spec/` directory as a plain file, never hitting
+the file/package ambiguity at the leaf name itself. A package `__init__.spl`
+can only bare-`export` names defined by files inside its own directory — it
+cannot re-export names from an external same-named sibling file.
+
+Full root-cause analysis, evidence, and what has/hasn't been fixed:
+`doc/08_tracking/bug/std_spec_package_shadows_file_print_summary_2026-07-17.md`.
+
 ---
 
 ## Method Chaining / Fluent API

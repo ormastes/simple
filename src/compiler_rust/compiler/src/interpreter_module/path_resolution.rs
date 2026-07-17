@@ -368,6 +368,18 @@ fn try_variant_stdlib_root(search_root: &Path, variant: &str, stdlib_parts: &[St
 
             let relative: PathBuf = stdlib_parts.iter().collect();
 
+            // Package (__init__.spl) wins over a same-named file HERE,
+            // deliberately, unlike the subdir loop in
+            // resolve_module_path_uncached below (see the comment there).
+            // This "preferred variant" fast path also fires while resolving
+            // imports *from inside* a facade file such as
+            // `nogc_sync_mut/io.spl`, which re-exports its own package
+            // (`nogc_sync_mut/io/__init__.spl`) via the fully-qualified
+            // `use std.nogc_sync_mut.io.{...}`. If the file won here, that
+            // self-referencing facade would resolve back to itself instead
+            // of the package, and its re-exports would come up empty (see
+            // `loads_real_exports_from_std_io_package` /
+            // `prefers_variant_std_io_for_nogc_sync_mut_callers`).
             let mut init_path = variant_root.join(&relative);
             init_path.push("__init__.spl");
             if init_path.is_file() {
@@ -708,15 +720,22 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                             "gc_async_mut",
                             "nogc_async_mut_noalloc",
                         ] {
-                            let mut sub_init = stdlib_root.join(subdir).join(&stdlib_relative);
-                            sub_init.push("__init__.spl");
-                            if sub_init.exists() && sub_init.is_file() {
-                                return Ok(sub_init);
-                            }
+                            // File wins over a same-named package directory
+                            // (see the matching precedence note in
+                            // try_variant_stdlib_root above). Checking
+                            // __init__.spl first here let `use std.spec.{...}`
+                            // resolve to the `spec/` package instead of the
+                            // sibling `spec.spl` file, hiding print_summary/
+                            // get_exit_code/get_executed_test_count.
                             let mut sub_path = stdlib_root.join(subdir).join(&stdlib_relative);
                             sub_path.set_extension("spl");
                             if sub_path.exists() && sub_path.is_file() {
                                 return Ok(sub_path);
+                            }
+                            let mut sub_init = stdlib_root.join(subdir).join(&stdlib_relative);
+                            sub_init.push("__init__.spl");
+                            if sub_init.exists() && sub_init.is_file() {
+                                return Ok(sub_init);
                             }
                         }
 
@@ -1011,6 +1030,64 @@ mod tests {
         assert_eq!(
             resolved,
             root.join("variants/lib/crypto/openssl/std/common/crypto/constant_time.spl")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // --- per-family subdir loop: file-vs-package precedence ----------------
+    // Narrow regression for the per-family subdir loop in
+    // resolve_module_path_uncached (doc/08_tracking/bug/std_spec_package_shadows_file_print_summary_2026-07-17.md,
+    // "shipped hardening"): when a `src/lib/<family>/` directory has both
+    // `spec.spl` (file) and a same-named `spec/` package directory, that
+    // loop must prefer the file. It previously checked `__init__.spl` first.
+    //
+    // IMPORTANT — this test does NOT prove `use std.spec` is reachable
+    // end-to-end. The real interpreter also probes a seed-bundled
+    // `src/compiler_rust/lib/std/src` tree *before* it ever reaches this
+    // per-family loop (see the bug doc's Root Cause 1); that tree has its
+    // own `spec/__init__.spl` with no `print_summary`, and it wins first in
+    // the real repo. This synthetic fixture has no such tree, so it only
+    // isolates and proves the narrow subdir-loop precedence fix, not the
+    // reported symptom.
+    fn write_spec_shadow_project(root: &Path, family: &str) {
+        fs::create_dir_all(root.join("src/app")).unwrap();
+        fs::write(root.join("src/app/main.spl"), "fn main():\n    0\n").unwrap();
+        fs::create_dir_all(root.join(format!("src/lib/{family}"))).unwrap();
+        fs::write(
+            root.join(format!("src/lib/{family}/spec.spl")),
+            "pub fn print_summary():\n    0\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join(format!("src/lib/{family}/spec"))).unwrap();
+        fs::write(
+            root.join(format!("src/lib/{family}/spec/__init__.spl")),
+            "export check\nfn check():\n    0\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn family_subdir_loop_prefers_file_over_same_named_package_directory() {
+        let root = unique_overlay_dir("spec_shadow");
+        // Populate every family the subdir search iterates (nogc_async_mut is
+        // checked first) so the fix is proven regardless of search order.
+        for family in [
+            "nogc_async_mut",
+            "nogc_sync_mut",
+            "nogc_async_immut",
+            "common",
+            "gc_async_mut",
+            "nogc_async_mut_noalloc",
+        ] {
+            write_spec_shadow_project(&root, family);
+        }
+        let base_dir = root.join("src/app");
+        let parts: Vec<String> = ["std", "spec"].iter().map(|s| s.to_string()).collect();
+        let resolved = resolve_module_path(&parts, &base_dir).unwrap();
+        assert!(
+            resolved.ends_with("spec.spl") && !resolved.ends_with("__init__.spl"),
+            "expected `use std.spec` to resolve to the spec.spl FILE, not the spec/ package \
+             directory; got {resolved:?}"
         );
         let _ = fs::remove_dir_all(&root);
     }
