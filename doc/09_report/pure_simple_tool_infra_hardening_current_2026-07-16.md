@@ -510,10 +510,13 @@ so executable qualification is still blocked.
   bounded source-spelling attempts did not advance and were not retained.
 - Seed enum-owner lookup now consults the typed subject's canonical summary
   only for an empty imported-enum placeholder. Its collision-focused HIR/MIR
-  regression passes and three independent reviews pass. Clean full-bootstrap
-  admission is still provisional because synced `origin/main` stops earlier
-  while parsing `parser_preprocessor.spl:207`; the strict run exited 1 normally
-  with no timeout, OOM, crash, hang, orphan, or seed fallback.
+  regression passes and three independent reviews pass. The earlier
+  `parser_preprocessor.spl:207` nested-empty-string interpolation is fixed and
+  pinned for spaced `=`/`==`; bounded Stage 2 now advances to the next same-
+  class nested-string parse blocker at `trait_solver.spl:72:47`. The `Shared`
+  admission remains
+  provisional; strict runs exit normally with no timeout, OOM, crash, hang,
+  orphan, or seed fallback.
 - Pure-Simple runtime, Windows execution, latency, RSS, and executable system
   qualification: NOT RUN because the production runtime identity gate fails
   and this host has no PowerShell/Windows runtime.

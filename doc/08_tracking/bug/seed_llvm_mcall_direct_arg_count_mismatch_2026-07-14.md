@@ -206,11 +206,16 @@ existing binding behavior, and a focused HIR/MIR regression covers two owners
 that both define `Shared`, a foreign-owner-only unit, and a nonempty same-name
 local enum. The regression passes. One strict, full-bootstrap admission from a
 clean `origin/main` worktree rebuilt the seed/runtime and exited 1 normally at
-Stage 2 discovery, before HIP/OpenCL were compiled: the synced source currently
-fails to parse `parser_preprocessor.spl:207` (`expected Comma`, found an
-interpolated string fragment). Therefore the imported-`Shared` fix is focused-
-test admitted but its Stage 2 delta remains provisional. The bounded run had no
-timeout, OOM, crash, hang, or orphan and did not fall back to the seed.
+Stage 2 discovery, before HIP/OpenCL were compiled, on a nested-empty-string
+interpolation in `parser_preprocessor.spl:207`. Hoisting that `join("")` result
+to an identifier fixes the parse while retaining the compact interpolation; a
+real preprocessing regression covers spaced `=` and `==` with the detected host
+architecture. The next bounded Stage 2 run no longer mentioned
+`parser_preprocessor` and advanced to the next same-class nested-string parse
+error in
+`trait_solver.spl:72:47` (`expected expression`, found `Comma`). Therefore the
+imported-`Shared` Stage 2 delta remains provisional. Both bounded runs exited 1
+normally with no timeout, OOM, crash, hang, orphan, or seed fallback.
 
 ## Context: in-guest RUN is otherwise REACHABLE
 
