@@ -135,6 +135,19 @@ Left for follow-up (out of scope / higher risk, not touched):
   found` (`worker_is_secure_context`, `worker_create_with_secure_context`,
   `worker_global_scope_create`) — unrelated to this bug, untouched.
 
+## Correction (2026-07-17) — root cause narrowed, "cross-module" framing was wrong
+
+Follow-up isolation (T3 lane, SSpec regression-spec sweep) found the
+"Verification caveat" above mischaracterizes the trigger. Cross-module
+`mut`-param class mutation (including `set_timeout`/`EventLoop`) actually
+**works correctly** when called from a plain standalone `fn main()` script —
+it is NOT a general cross-module limitation. The real trigger is calling the
+mutating function from inside a `std.spec` `it` block specifically (SSpec's
+own harness plumbing, not module boundaries). See
+`doc/08_tracking/bug/sspec_it_block_loses_cross_module_class_mutation_2026-07-17.md`
+for the full repro and narrowing. The `mut` adoption in this commit remains
+correct and necessary; only the stated root cause needed correcting.
+
 ## Expected
 
 Cross-module mutation of a class/collection argument via a `me` method or field
