@@ -614,10 +614,25 @@ impl Lowerer {
     }
 
     pub(crate) fn subject_enum_has_variant(&self, subject_ty: TypeId, name: &str) -> bool {
-        matches!(
-            self.module.types.get(subject_ty),
-            Some(HirType::Enum { variants, .. }) if variants.iter().any(|(variant, _)| variant == name)
-        )
+        let Some(HirType::Enum {
+            name: owner, variants, ..
+        }) = self.module.types.get(subject_ty)
+        else {
+            return false;
+        };
+        let local_has_variant = variants.iter().any(|(variant, _)| variant == name);
+        if local_has_variant || !variants.is_empty() {
+            return local_has_variant;
+        }
+
+        self.global_enum_defs
+            .as_ref()
+            .and_then(|defs| defs.get(owner))
+            .is_some_and(|summary| {
+                summary
+                    .iter()
+                    .any(|(variant, payload_arity)| variant == name && payload_arity.is_none())
+            })
     }
 
     fn pattern_binding_is_mutable(pattern: &Pattern, name: &str) -> bool {

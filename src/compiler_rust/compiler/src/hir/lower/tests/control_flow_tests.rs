@@ -401,6 +401,58 @@ fn test_expression_match_bare_enum_variants_check_discriminants() {
 }
 
 #[test]
+fn test_imported_same_named_unit_variants_follow_typed_subject() {
+    let source = "fn render(kind: BorrowKind) -> text:\n    val rendered = match kind:\n        case Shared: \"shared\"\n        case _: \"other\"\n    match kind:\n        case Shared:\n            return rendered\n        case _:\n            return \"other\"\n";
+    let mut parser = simple_parser::Parser::new(source);
+    let parsed = parser.parse().expect("parse failed");
+
+    let mut lowerer = Lowerer::new();
+    let placeholder = lowerer.module.types.register_named(
+        "BorrowKind".to_string(),
+        HirType::Enum {
+            name: "BorrowKind".to_string(),
+            variants: vec![],
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: std::collections::HashMap::new(),
+        },
+    );
+    lowerer.globals.insert("BorrowKind".to_string(), placeholder);
+    lowerer.set_global_enum_defs(std::sync::Arc::new(std::collections::HashMap::from([
+        ("BorrowKind".to_string(), vec![("Shared".to_string(), None)]),
+        (
+            "MemorySpace".to_string(),
+            vec![("Shared".to_string(), None), ("WorkgroupOnly".to_string(), None)],
+        ),
+    ])));
+    lowerer.register_global_enums();
+
+    assert!(!lowerer.subject_enum_has_variant(placeholder, "WorkgroupOnly"));
+    let authoritative = lowerer.module.types.register(HirType::Enum {
+        name: "BorrowKind".to_string(),
+        variants: vec![("Mutable".to_string(), None)],
+        generic_params: vec![],
+        is_generic_template: false,
+        type_bindings: std::collections::HashMap::new(),
+    });
+    assert!(!lowerer.subject_enum_has_variant(authoritative, "Shared"));
+
+    let module = lowerer.lower_module(&parsed).expect("HIR lowering should succeed");
+    let function = module.functions.iter().find(|f| f.name.ends_with("render")).unwrap();
+    let hir_repr = format!("{:?}", function.body);
+    assert_eq!(hir_repr.matches("rt_enum_check_discriminant").count(), 2, "{hir_repr}");
+    assert!(!hir_repr.contains("Global(\"Shared\")"), "{hir_repr}");
+    assert!(
+        !function.locals.iter().any(|local| local.name == "Shared"),
+        "{hir_repr}"
+    );
+
+    let mir = crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed");
+    let mir_repr = format!("{mir:?}");
+    assert!(!mir_repr.contains("global_name: \"Shared\""), "{mir_repr}");
+}
+
+#[test]
 fn test_expression_match_identifier_binding_is_initialized() {
     let source = "enum BorrowKind:\n    Shared\n    Mutable\n\nfn identity(kind: BorrowKind) -> BorrowKind:\n    val copied = match kind:\n        case bound: bound\n    return copied\n";
     let module = parse_and_lower(source).unwrap();

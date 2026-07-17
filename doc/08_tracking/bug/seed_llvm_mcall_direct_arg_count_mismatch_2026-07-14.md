@@ -199,6 +199,19 @@ remaining fix is
 import-aware enum-owner registration/lowering, not an external declaration or
 another call-site spelling change.
 
+The Rust seed now resolves a bare unit variant from the typed subject's global
+enum summary only when that subject is an empty imported-enum placeholder.
+Materialized local variants remain authoritative, payload variants keep their
+existing binding behavior, and a focused HIR/MIR regression covers two owners
+that both define `Shared`, a foreign-owner-only unit, and a nonempty same-name
+local enum. The regression passes. One strict, full-bootstrap admission from a
+clean `origin/main` worktree rebuilt the seed/runtime and exited 1 normally at
+Stage 2 discovery, before HIP/OpenCL were compiled: the synced source currently
+fails to parse `parser_preprocessor.spl:207` (`expected Comma`, found an
+interpolated string fragment). Therefore the imported-`Shared` fix is focused-
+test admitted but its Stage 2 delta remains provisional. The bounded run had no
+timeout, OOM, crash, hang, or orphan and did not fall back to the seed.
+
 ## Context: in-guest RUN is otherwise REACHABLE
 
 This bug does NOT block a plain in-guest run: `/usr/bin/simple --version` runs
