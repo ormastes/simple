@@ -30,6 +30,7 @@ short, and invalid SMF artifacts before accepting a handle.
 
 use std.spec
 use app.io.mod.{file_write, file_delete}
+use std.common.string_core.{char_code}
 use os.smf.dynsmf_session.{
     DynSmfManifestEntry,
     DynSmfArtifactStatus,
@@ -56,6 +57,47 @@ use os.smf.dynsmf_session.{
     dynsmf_session_unload,
     dynsmf_id_disabled
 }
+
+# Test-only helpers for the stub-artifact honesty (export-witness) check.
+# These are NOT part of the production reader (smf_artifact_has_export in
+# src/os/smf/smf_dynlib.spl) — they exist only so the pre-existing abi/
+# interface-hash sidecar specs below (which are not about proving the
+# export-witness gate itself) can clear the new gate. The dedicated proof of
+# the gate, further down, uses a hand-written literal byte array instead of
+# these helpers for its one positive case (false-green guard).
+fn spec_stub_honesty_padded_bytes() -> [u8]:
+    """Magic + zero padding well past the known 219-byte stub size and with
+    no export names present — clears the unconditional size floor for
+    exports:[] fixtures (dynsmf_artifact_size_exceeds_stub_floor)."""
+    var data: [u8] = [83, 77, 70, 0]
+    var i = 0
+    while i < 250:
+        data.push(0)
+        i = i + 1
+    data
+
+fn spec_stub_honesty_witness_bytes(exports: [text]) -> [u8]:
+    """Magic + zero padding past the known stub size, followed by each
+    export name written as a null-terminated ASCII run — the real SMF
+    string-table convention (src/compiler/70.backend/linker/smf_reader.spl
+    read_string_from_table) that smf_artifact_has_export scans for. Used so
+    pre-existing abi/hash specs can clear the export-witness gate without
+    hand-typing long export names such as 'format_new_diagnostics_block'."""
+    var data: [u8] = [83, 77, 70, 0]
+    var i = 0
+    while i < 250:
+        data.push(0)
+        i = i + 1
+    var j = 0
+    while j < exports.len():
+        val name = exports[j]
+        var k = 0
+        while k < name.len():
+            data.push(char_code(name.char_at(k)) as u8)
+            k = k + 1
+        data.push(0)
+        j = j + 1
+    data
 
 describe "dynSMF manifest":
     it "declares all requested stdlib-like library ids":
@@ -324,7 +366,7 @@ describe "dynSMF abi_version + interface-hash hardening (fail-closed sidecars)":
         file_write(dynsmf_ifacehash_path(artifact_path), dynsmf_interface_hash_current(source_path).to_text())
         # Deliberately do NOT write an `.abi` sidecar.
         val entry = DynSmfManifestEntry(id: "spec_missing_abi", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
-        val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], source_path)
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_padded_bytes(), source_path)
         expect(status.ready).to_equal(false)
         expect(status.reason).to_equal("abi_mismatch")
         file_delete(source_path)
@@ -339,7 +381,7 @@ describe "dynSMF abi_version + interface-hash hardening (fail-closed sidecars)":
         file_write(dynsmf_ifacehash_path(artifact_path), dynsmf_interface_hash_current(source_path).to_text())
         file_write(dynsmf_abi_path(artifact_path), "999")
         val entry = DynSmfManifestEntry(id: "spec_wrong_abi", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
-        val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], source_path)
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_padded_bytes(), source_path)
         expect(status.ready).to_equal(false)
         expect(status.reason).to_equal("abi_mismatch")
         file_delete(source_path)
@@ -354,7 +396,7 @@ describe "dynSMF abi_version + interface-hash hardening (fail-closed sidecars)":
         file_write(dynsmf_abi_path(artifact_path), "1")
         file_write(dynsmf_srchash_path(artifact_path), dynsmf_source_hash_current(source_path).to_text())
         val entry = DynSmfManifestEntry(id: "spec_fresh", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
-        val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], source_path)
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_padded_bytes(), source_path)
         expect(status.ready).to_equal(true)
         expect(status.reason).to_equal("smf_artifact_ready")
         file_delete(source_path)
@@ -371,7 +413,7 @@ describe "dynSMF abi_version + interface-hash hardening (fail-closed sidecars)":
         # ifacehash sidecar matches the CURRENT exported-interface fingerprint (signature unchanged).
         file_write(dynsmf_ifacehash_path(artifact_path), dynsmf_interface_hash_current(source_path).to_text())
         val entry = DynSmfManifestEntry(id: "spec_stale_impl", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
-        val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], source_path)
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_padded_bytes(), source_path)
         expect(status.ready).to_equal(false)
         expect(status.reason).to_equal("stale_impl")
         file_delete(source_path)
@@ -387,7 +429,7 @@ describe "dynSMF abi_version + interface-hash hardening (fail-closed sidecars)":
         file_write(dynsmf_srchash_path(artifact_path), "1")
         file_write(dynsmf_ifacehash_path(artifact_path), "1")
         val entry = DynSmfManifestEntry(id: "spec_stale_interface", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
-        val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], source_path)
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_padded_bytes(), source_path)
         expect(status.ready).to_equal(false)
         expect(status.reason).to_equal("stale_interface")
         file_delete(source_path)
@@ -403,7 +445,7 @@ describe "dynSMF abi_version + interface-hash hardening (fail-closed sidecars)":
         file_write(dynsmf_srchash_path(artifact_path), "1")
         # Deliberately no `.ifacehash` sidecar written.
         val entry = DynSmfManifestEntry(id: "spec_missing_ifacehash", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
-        val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], source_path)
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_padded_bytes(), source_path)
         expect(status.ready).to_equal(false)
         expect(status.reason).to_equal("stale_source")
         file_delete(source_path)
@@ -420,7 +462,8 @@ describe "dynSMF toolchain entries — fresh-sidecar status transitions (on-dema
             val source_path = plans[idx].source_path
             file_write(dynsmf_abi_path(entry.path), entry.abi_version)
             file_write(dynsmf_srchash_path(entry.path), dynsmf_source_hash_current(source_path).to_text())
-            val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], source_path)
+            val data = if entry.exports.len() == 0: spec_stub_honesty_padded_bytes() else: spec_stub_honesty_witness_bytes(entry.exports)
+            val status = dynsmf_artifact_status_with_hash(entry, true, data, source_path)
             expect(status.ready).to_equal(true)
             expect(status.reason).to_equal("smf_artifact_ready")
             file_delete(dynsmf_abi_path(entry.path))
@@ -435,7 +478,96 @@ describe "dynSMF toolchain entries — fresh-sidecar status transitions (on-dema
         expect(entry.id).to_equal("todo_scan")
         file_write(dynsmf_srchash_path(entry.path), dynsmf_source_hash_current(source_path).to_text())
         # Deliberately do NOT write an `.abi` sidecar.
-        val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], source_path)
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_witness_bytes(entry.exports), source_path)
         expect(status.ready).to_equal(false)
         expect(status.reason).to_equal("abi_mismatch")
         file_delete(dynsmf_srchash_path(entry.path))
+
+describe "dynSMF stub-artifact honesty (export-witness check, doc/08_tracking/bug/seed_compile_smf_stub_fail_open_2026-07-17.md)":
+    it "reports stub_artifact for a stub-sized (219-byte) artifact with NO witnessed exports, even with fresh abi/srchash/ifacehash sidecars (deliberate-red: byte-for-byte length of today's real hollow stub)":
+        val artifact_path = "build/dynsmf/_stubhonesty_spec_stub_sized.smf"
+        val source_path = "build/dynsmf/_stubhonesty_spec_stub_sized_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_abi_path(artifact_path), "1")
+        file_write(dynsmf_srchash_path(artifact_path), dynsmf_source_hash_current(source_path).to_text())
+        file_write(dynsmf_ifacehash_path(artifact_path), dynsmf_interface_hash_current(source_path).to_text())
+        val entry = DynSmfManifestEntry(id: "spec_stub_sized", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: ["open", "close"])
+        # Hand-written literal bytes: magic + zero padding to exactly 219
+        # bytes (the known real stub size) — no "open"/"close" names present,
+        # matching the actual build/dynsmf/*.smf stubs on disk today.
+        val data = [83, 77, 70, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0]
+        expect(data.len()).to_equal(219)
+        val status = dynsmf_artifact_status_with_hash(entry, true, data, source_path)
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("stub_artifact")
+        file_delete(source_path)
+        file_delete(dynsmf_abi_path(artifact_path))
+        file_delete(dynsmf_srchash_path(artifact_path))
+        file_delete(dynsmf_ifacehash_path(artifact_path))
+
+    it "reports stub_artifact when the payload exceeds the stub size but lacks the required export names (padding alone does not satisfy the witness)":
+        val artifact_path = "build/dynsmf/_stubhonesty_spec_padding_only.smf"
+        val entry = DynSmfManifestEntry(id: "spec_padding_only", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: ["open", "close"])
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_padded_bytes(), "")
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("stub_artifact")
+
+    it "passes the export-witness check when the payload exceeds the stub size AND the artifact's own bytes carry the required export names":
+        val artifact_path = "build/dynsmf/_stubhonesty_spec_with_witness.smf"
+        val source_path = "build/dynsmf/_stubhonesty_spec_with_witness_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_abi_path(artifact_path), "1")
+        file_write(dynsmf_srchash_path(artifact_path), dynsmf_source_hash_current(source_path).to_text())
+        val entry = DynSmfManifestEntry(id: "spec_with_witness", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: ["open", "close"])
+        # Hand-written literal bytes, constructed independently of the
+        # checker's own parsing code (smf_artifact_has_export in
+        # src/os/smf/smf_dynlib.spl) — NOT produced via
+        # spec_stub_honesty_witness_bytes. magic(4) + 220 zero-padding bytes
+        # (> the 219-byte stub floor) + "open\0" + "close\0" (null-terminated
+        # ASCII, the real SMF string-table convention):
+        val data = [83, 77, 70, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            111, 112, 101, 110, 0, 99, 108, 111, 115, 101, 0]
+        expect(data.len()).to_equal(235)
+        val status = dynsmf_artifact_status_with_hash(entry, true, data, source_path)
+        expect(status.ready).to_equal(true)
+        expect(status.reason).to_equal("smf_artifact_ready")
+        file_delete(source_path)
+        file_delete(dynsmf_abi_path(artifact_path))
+        file_delete(dynsmf_srchash_path(artifact_path))
+
+    it "reports stub_artifact for an empty-exports entry whose payload does not exceed the known stub size (honesty floor)":
+        val artifact_path = "build/dynsmf/_stubhonesty_spec_empty_exports_small.smf"
+        val entry = DynSmfManifestEntry(id: "spec_empty_exports_small", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], "")
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("stub_artifact")
+
+    it "passes the honesty floor for an empty-exports entry whose payload exceeds the known 219-byte stub size":
+        val artifact_path = "build/dynsmf/_stubhonesty_spec_empty_exports_large.smf"
+        val source_path = "build/dynsmf/_stubhonesty_spec_empty_exports_large_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_abi_path(artifact_path), "1")
+        file_write(dynsmf_srchash_path(artifact_path), dynsmf_source_hash_current(source_path).to_text())
+        val entry = DynSmfManifestEntry(id: "spec_empty_exports_large", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_padded_bytes(), source_path)
+        expect(status.ready).to_equal(true)
+        expect(status.reason).to_equal("smf_artifact_ready")
+        file_delete(source_path)
+        file_delete(dynsmf_abi_path(artifact_path))
+        file_delete(dynsmf_srchash_path(artifact_path))

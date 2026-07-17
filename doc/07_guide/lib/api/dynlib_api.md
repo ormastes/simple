@@ -101,7 +101,17 @@ mismatch is split by the interface hash into `stale_impl` (exported interface
 unchanged — recompiling the module alone is sufficient) versus
 `stale_interface` (exported interface changed — dependents need a rebuild too);
 a legacy artifact without an `.ifacehash` sidecar falls back to the generic
-`stale_source`. `--dynsmf-status` prints one `id:reason:ready=` line per entry.
+`stale_source`. Before any sidecar is consulted, artifact status also runs an
+export-witness check (`smf_artifact_has_export` in `smf_dynlib.spl`): it scans
+the artifact's own bytes for each name in the manifest entry's `exports` list
+as a null-terminated ASCII run — the same convention the real SMF string
+table uses — and unconditionally requires the payload to exceed the known
+219-byte hollow-stub size, since a bare name match alone is not sufficient
+(the stub already contains a literal `main` symbol). A hollow artifact (e.g.
+the stub described in
+`doc/08_tracking/bug/seed_compile_smf_stub_fail_open_2026-07-17.md`) reports
+`stub_artifact` and is never loaded regardless of how fresh its sidecars are.
+`--dynsmf-status` prints one `id:reason:ready=` line per entry.
 
 ## Current Limitations
 

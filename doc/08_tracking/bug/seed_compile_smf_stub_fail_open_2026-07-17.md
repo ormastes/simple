@@ -2,7 +2,17 @@
 
 **Date:** 2026-07-17
 **Severity:** high (fail-open: silent no-op artifacts look like successful builds)
-**Status:** open
+**Status:** partially fixed — pure-Simple dynSMF detection landed 2026-07-17
+(export-witness check in `src/os/smf/smf_dynlib.spl` /
+`src/os/smf/dynsmf_session.spl`: artifact status now scans the artifact's own
+bytes for each required `exports` name as a null-terminated ASCII run — the
+real SMF string-table convention — and unconditionally requires the payload
+to exceed the known 219-byte stub size (a bare name match alone is not
+sufficient, since the stub already contains a literal `main` symbol),
+failing closed with reason `stub_artifact` otherwise; verified via
+`--dynsmf-status` on all 7 real `build/dynsmf/*.smf` artifacts on this host).
+The root Rust emitter fix (making `compile -o *.smf` either emit a real
+payload or fail closed) is still open.
 
 ## Symptom
 

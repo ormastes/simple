@@ -1,3 +1,5 @@
+use std.common.string_core.{char_code}
+
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]
 
@@ -180,6 +182,60 @@ pub fn smf_dlopen_checked(req: DynLoadRequest, next_handle: int) -> DynLoadResul
     if not smf_artifact_has_magic(data):
         return DynLoadResult.fail(req.library_name, "invalid smf magic")
     base
+
+# ============================================================================
+# Export-witness symbol enumeration (stub-artifact honesty check)
+#
+# smf_dlsym above resolves symbols entirely from the caller-supplied
+# `registry` text, which dynSMF sessions synthesize from the MANIFEST's
+# `exports` list (see dynsmf_symbol_registry in dynsmf_session.spl) — it
+# never reads exports out of the artifact's own bytes, so there was no
+# existing symbol-table reader in this loader to reuse.
+#
+# The real SMF string table (src/compiler/70.backend/linker/smf_reader.spl,
+# read_string_from_table) stores symbol names as plain null-terminated ASCII
+# — the same convention the hollow stub's own `main\0`/`code\0` literals use
+# (doc/08_tracking/bug/seed_compile_smf_stub_fail_open_2026-07-17.md). Rather
+# than re-deriving the exact section/symbol-table offsets (that full reader —
+# src/compiler/70.backend/linker/smf_reader.spl, smf_header.spl,
+# _SmfReaderMemory/symbol_parser.spl — is a heavier, section/relocation-
+# oriented parser meant for the compiler's own module loader), this witness
+# scans the artifact bytes directly for `name` followed by a NUL byte
+# anywhere in the payload. That is a real name check (it recognizes the
+# actual encoding a genuine artifact would use), not a fabricated format —
+# but it is only a witness, not a full parse: dynsmf_artifact_witnesses_exports
+# in dynsmf_session.spl pairs it with an unconditional minimum-size floor,
+# because the stub itself already contains "main" (a bare name match on a
+# generic symbol like "main" is not sufficient — see that function).
+# ============================================================================
+
+pub fn smf_artifact_has_export(data: [u8], name: text) -> bool:
+    """True if `name` appears in the artifact's bytes as a null-terminated
+    ASCII run (the real SMF string-table convention). Returns false for an
+    empty name, a name that cannot fit, or any artifact without the magic.
+    """
+    val name_len = name.len()
+    if name_len == 0:
+        return false
+    if not smf_artifact_has_magic(data):
+        return false
+    if data.len() < name_len + 1:
+        return false
+    var start = 0
+    while start + name_len + 1 <= data.len():
+        if data[start + name_len] == 0 and smf_bytes_match_ascii_at(data, start, name):
+            return true
+        start = start + 1
+    false
+
+fn smf_bytes_match_ascii_at(data: [u8], start: int, name: text) -> bool:
+    var i = 0
+    val n = name.len()
+    while i < n:
+        if data[start + i] != (char_code(name.char_at(i)) as u8):
+            return false
+        i = i + 1
+    true
 
 pub fn smf_dlsym(handle_id: int, symbol_name: text, registry: text) -> DynSymResult:
     """Look up a symbol by name in a loaded SMF library handle.

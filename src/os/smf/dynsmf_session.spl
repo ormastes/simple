@@ -1,4 +1,4 @@
-use os.smf.smf_dynlib.{DynLoadRequest, smf_dlopen, smf_dlopen_checked, smf_dlsym, smf_dlclose}
+use os.smf.smf_dynlib.{DynLoadRequest, smf_dlopen, smf_dlopen_checked, smf_dlsym, smf_dlclose, smf_artifact_has_export}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]
@@ -249,10 +249,48 @@ fn dynsmf_interface_hash_stored(artifact_path: text) -> i64:
         return -1
     raw.trim().to_i64() ?? -1
 
+# Known size of the hollow stub currently emitted by `simple compile -o
+# *.smf` for ANY input (doc/08_tracking/bug/seed_compile_smf_stub_fail_open_2026-07-17.md):
+# valid `SMF\0` magic, a tiny code section, and a single `main` symbol, always
+# exactly this many bytes.
+val dynsmf_known_stub_byte_count: int = 219
+
+# ponytail: honesty floor applied to EVERY manifest entry, not only ones with
+# an empty `exports` list. Reason: the hollow stub already contains a literal
+# `main` symbol (see bug doc), so an entry whose required witness is exactly
+# ["main"] (fmt_tool, fix_tool, todo_scan today) would trivially "pass" a
+# name-only check against the very stub this feature exists to catch. The
+# size floor is therefore unconditional (ANDed with the name witness below,
+# not just a fallback for exports:[]) — a real artifact is expected to carry
+# more than a no-op stub's payload regardless of how many exports it lists.
+# Upgrade path: once the Rust emitter fix lands, replace this heuristic with
+# an exact real-payload check (e.g. a compile-receipt sidecar) that does not
+# depend on the current stub's specific byte count.
+fn dynsmf_artifact_size_exceeds_stub_floor(data: [u8]) -> bool:
+    data.len() > dynsmf_known_stub_byte_count
+
+fn dynsmf_artifact_witnesses_exports(entry: DynSmfManifestEntry, data: [u8]) -> bool:
+    if not dynsmf_artifact_size_exceeds_stub_floor(data):
+        return false
+    var idx = 0
+    while idx < entry.exports.len():
+        if not smf_artifact_has_export(data, entry.exports[idx]):
+            return false
+        idx = idx + 1
+    true
+
 fn dynsmf_artifact_status_with_hash(entry: DynSmfManifestEntry, file_present: bool, data: [u8], source_path: text) -> DynSmfArtifactStatus:
     val base = dynsmf_artifact_status_from_bytes(entry, file_present, data)
     if not base.ready:
         return base
+    # Stub-artifact honesty check runs right after the magic check and
+    # before the abi/hash sidecar checks below: a hollow artifact (no
+    # witnessed exports) is invalid regardless of how fresh its sidecars
+    # look. This is exactly today's real-world failure mode — the 219-byte
+    # stub passes magic validation and can carry freshly-written abi/srchash/
+    # ifacehash sidecars, yet executes nothing.
+    if not dynsmf_artifact_witnesses_exports(entry, data):
+        return DynSmfArtifactStatus(library_id: base.library_id, path: base.path, ready: false, reason: "stub_artifact", byte_count: base.byte_count, magic_hex: base.magic_hex)
     # abi_version enforcement is fail-closed: a missing or mismatched `.abi`
     # sidecar means the artifact must never be treated as loadable, even if
     # the srchash/ifacehash sidecars still look fresh. It needs no source
@@ -547,6 +585,7 @@ export dynsmf_default_manifest, dynsmf_manifest_all_precompiled, dynsmf_manifest
 export dynsmf_build_plan, dynsmf_build_plans, dynsmf_build_plans_ready
 export dynsmf_artifact_status_from_bytes, dynsmf_artifact_status, dynsmf_artifacts_ready
 export dynsmf_srchash_path, dynsmf_source_hash_current, dynsmf_source_hash_stored, dynsmf_artifact_status_with_hash
+export dynsmf_known_stub_byte_count, dynsmf_artifact_size_exceeds_stub_floor, dynsmf_artifact_witnesses_exports
 export dynsmf_abi_path, dynsmf_abi_stored, dynsmf_ifacehash_path
 export dynsmf_interface_fingerprint, dynsmf_interface_hash_of_text, dynsmf_interface_hash_current, dynsmf_interface_hash_stored
 export dynsmf_session_request_background_compiles, dynsmf_session_request_background_compiles_from_statuses, dynsmf_session_queue_missing_background_compiles
