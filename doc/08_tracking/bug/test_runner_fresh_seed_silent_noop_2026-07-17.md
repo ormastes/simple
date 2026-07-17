@@ -1,8 +1,46 @@
 # Fresh bootstrap seed `test` command: NOT a fail-open — real signal buried under a duplicated whole-tree parse
 
 **Date:** 2026-07-17
-**Severity:** medium (misdiagnosis risk + seed unsuitable for release-gate use, not a correctness bug)
-**Status:** investigated — premise disproven; distinct noise/perf defect confirmed and reported (Rust-side, not fixed here)
+**Severity:** high — genuine hang confirmed on directory/section targets (see "UPDATE" below); single-file path is fail-closed and not a fail-open
+**Status:** investigated — single-file premise disproven (misdiagnosis); directory/section target reproduces a REAL indefinite hang past "Session setup", unresolved, Rust+`.spl`-side, reported not fixed
+
+## UPDATE: directory/section target reproduces a genuine hang (not exit-0 fail-open, but blocks the release gate all the same)
+
+A 4th discriminator — fresh seed against a 2-file scratch directory
+(`test <dir>` instead of `test <single-file.spl>`) — changes the picture for
+the release-gate-relevant case (Fact A used `test <section>`, a directory).
+Unlike every single-file repro below, the directory target's last lines were:
+
+```
+error: semantic: unknown extern function: rt_cli_arg_count
+WARNING: test daemon unavailable; running directly [fallback]
+Running 2 test file(s) [mode: interpreter]...
+Self-protection enabled (stops when free CPU < 25% AND free RAM < 25%)
+  Max memory per test: 16GB
+Change-detection cache bypassed (--clean)
+Session setup: 5103ms
+
+EXITCODE=124
+```
+
+i.e. it DOES take the `.spl`-side `test_runner_main.spl` path (daemon
+start fails with the same `rt_cli_arg_count` error Fact A reports on the OLD
+binary, falls back to direct execution per `test_runner_main.spl:241`), and
+after printing `Session setup: 5103ms` it produced **zero further output for
+900s** until `timeout 900` killed it (exit 124 = killed, not 0) on just two
+trivial one-`it` spec files that normally run in milliseconds. This matches
+Fact A's description almost exactly ("Running N test file(s)... Session
+setup: Xms" then silent for a long time, never seen completing) — but on the
+FRESH seed, not just the OLD binary, and for a directory target specifically.
+This is a genuine hang in the per-file loop starting at
+`src/app/test_runner_new/test_runner_main.spl:307`, not yet root-caused
+(not enough budget left in this pass to bisect further); it was NOT
+reproduced for single-file targets (all of which completed in ~3 minutes via
+a different, Rust-embedded-runner code path — see below). **This directory
+case is the one that should be bisected next**, since it is the actual shape
+of Fact A's `test <section>` repro and it never reached a verdict either way
+(no exit-0 fail-open confirmed, but no fail-closed confirmed either — just an
+unresolved hang past a 15-minute budget).
 
 ## Symptom as reported
 
@@ -51,15 +89,19 @@ truncation):
    `✗ fails deliberately`, `Passed: 0`, `Failed: 1`, `FAIL`. Real assertion
    failure correctly counted and propagated.
 
-All three cases: **correct exit code, correct pass/fail accounting**. The
-fresh seed's embedded (temporary) Rust test runner
-(`src/compiler_rust/driver/src/cli/test_runner/{runner,execution}.rs`) is
-fail-closed for both "zero executed" and "real failure" on this build. This
-is a *different* code path from the OLD/deployed binary's `.spl`
-`test_runner_new`/daemon route (which prints `Session setup:`/`Running N
-test file(s) [mode: interpreter]` — none of those strings appear anywhere in
-any of the three fresh-seed logs; the fresh seed's `test` subcommand does not
-go through that `.spl` path at all).
+All three cases: **correct exit code, correct pass/fail accounting**. For an
+explicit single-file target, the fresh seed's embedded (temporary) Rust test
+runner (`src/compiler_rust/driver/src/cli/test_runner/{runner,execution}.rs`)
+is fail-closed for both "zero executed" and "real failure" — none of the
+`.spl`-side markers (`Session setup:`, `Running N test file(s) [mode:
+interpreter]`) appeared in any of the three single-file logs. **This does
+NOT generalize to directory/section targets** — see the UPDATE above: a
+2-file directory target DOES take the `.spl` `test_runner_main.spl`/daemon
+route (daemon start fails on the same `rt_cli_arg_count` error Fact A
+reports, falls back to direct execution) and hangs indefinitely past
+`Session setup:`. So Fact B's attribution of "Session setup" to the fresh
+seed was not a conflation after all for directory targets — only for the
+specific single-file repro this doc's discriminators exercised.
 
 ## The real, separate defect: duplicated whole-tree parse, no closing marker
 
