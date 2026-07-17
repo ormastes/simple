@@ -176,3 +176,31 @@ The misleading timeout hint in `native_build_main.spl`
 ("use the in-process backend for cross-target builds") is DEBUNKED — in-process
 shares the same interpreted parse. (File was under concurrent edit; not
 patched here to avoid a clobber.)
+
+## Linux confirmation 2026-07-17 — compiled in-process Stage 4 still exceeds 40 minutes
+
+A clean x86_64 Linux publication worktree built `bootstrap_main.spl` with a
+pure-Simple Stage 3 compiler in 484.6 seconds (715 compiled, 0 failed). The
+result then entered the authorized compiled in-process Stage 4 path for
+`src/app/cli/main.spl`, with `--entry-closure`, one thread, a warm 53 MiB
+native cache, and the `core-c-bootstrap` runtime lane.
+
+The process remained continuously CPU-active and emitted no parse, type, or
+link diagnostic, but produced no output before the explicit 2400-second
+timeout. RSS grew gradually to about 10.5 GiB. A concurrent independent Stage
+4 run showed the same one-CPU profile beyond 46 minutes, which rules out a
+local cache/output collision and confirms the timeout remains reproducible on
+the newer compiled in-process path.
+
+Evidence:
+
+- worktree: `/tmp/simple-font-publish-20260717`
+- log: `build/native_probe/full-cycle3.log` (empty because the compiled path
+  emits only on completion/error)
+- intended output: `build/native_probe/full-cycle3/simple` (not produced)
+- result: exit 124 after 2400 seconds
+
+This session stopped at its mandatory three-cycle cap. The next run should use
+the existing warm cache and a measured phase profiler with a timeout above the
+observed reference duration; repeating the same uninstrumented 40-minute gate
+does not add evidence.
