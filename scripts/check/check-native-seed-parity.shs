@@ -1552,6 +1552,238 @@ fn main() -> i64:
 EOF
 }
 
+# --- T1 batch (2026-07-17): 7 recently-fixed native-path compiler bugs -----
+
+write_case_var_no_init_defaults() {
+    # Bug fba65ba62a2: `var name: Type` with NO initializer now synthesizes a
+    # seed-matching default (0 for i64, nil for a named struct type) at parse
+    # time instead of failing to parse. Assign in if/else arms, then read;
+    # also confirm `var` WITH an initializer is unaffected.
+    cat >"$1" <<'EOF'
+struct Pt:
+    v: i64
+
+fn classify(n: i64) -> i64:
+    var result: i64
+    if n < 0:
+        result = 1
+    else if n == 0:
+        result = 2
+    else:
+        result = 3
+    return result
+
+fn main() -> i64:
+    var x: i64
+    x = 5
+    print(x)
+    var p: Pt
+    p = Pt(v: 9)
+    print(p.v)
+    print(classify(-5))
+    print(classify(0))
+    print(classify(7))
+    var y = 11
+    print(y)
+    return 0
+EOF
+}
+
+write_case_var_no_init_read_default() {
+    # The synthesized default must be OBSERVABLE on a read that happens
+    # before any assignment (0 / 0.0 / false), including inside a nested
+    # block, matching the seed's own read-before-assign value.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    var x: i64
+    print(x)
+    if true:
+        var y: i64
+        print(y)
+        y = 8
+        print(y)
+    var z: f64
+    print(z)
+    var b: bool
+    print(b)
+    return 0
+EOF
+}
+
+write_case_var_no_init_unsupported_type_loud() {
+    # Types with no safe seed-matching default (text here) must fail with a
+    # located parser error at declaration time -- never a guessed value.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    var s: text
+    print(s)
+    return 0
+EOF
+}
+
+write_case_block_lambda_call_arg() {
+    # Bug 2454d381d0d: a lambda with an INDENTED BLOCK body (val-binding +
+    # tail expression) passed inline as a call argument to an fn-typed
+    # parameter. Before the fix, capture analysis had no `Block` case and
+    # `lower_lambda_value` bailed to nil for every block-bodied lambda.
+    cat >"$1" <<'EOF'
+fn apply(f: fn(i64) -> i64, x: i64) -> i64:
+    return f(x)
+
+fn main() -> i64:
+    val r = apply(\v:
+        val doubled = v * 2
+        doubled + 1
+    , 5)
+    print(r)
+    return 0
+EOF
+}
+
+write_case_filter_block_lambda() {
+    # `.filter()` (builtin Array method, no MethodResolver entry) with a
+    # block-bodied lambda argument -- same Block-capture-analysis fix as
+    # block_lambda_call_arg, different call site (method_calls_literals.spl's
+    # Unresolved-array-builtin arm). The seed interpreter's `run` SEGFAULTS on
+    # ANY block-bodied lambda passed to `.filter()` (confirmed independent of
+    # the lambda's body shape -- a plain val-binding + comparison body
+    # crashes it too), so this is native-authoritative, not parity.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val xs = [1, 2, 3, 4]
+    val kept = xs.filter(\x:
+        val doubled = x * 2
+        doubled > 2
+    )
+    print(kept.len())
+    return 0
+EOF
+}
+
+write_case_string_interp_brace_forms() {
+    # Bug 142d5837c0d: `{{`/`}}` are literal-brace escapes (print as a single
+    # `{`/`}`), a SPACED placeholder `{ expr }` evaluates the expression, and
+    # a plain `{name}` interpolates a variable -- all in the same source, all
+    # via the bootstrap-mode-nil-gate-removed native path.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val n = 5
+    val name = "world"
+    print("{{literal}}")
+    print("{ n + 1 }")
+    print("hello {name}")
+    print("}}only")
+    return 0
+EOF
+}
+
+write_case_option_try_flat_chain() {
+    # Bug 44cc66f0339: native `?` (try) on a flat-nullable Option (`i64?`),
+    # chained across two functions. Values (10, 7) are chosen to avoid the
+    # flat-ABI's reserved nil-sentinel bit pattern (3 -- see
+    # option_try_annotated_loud). Native-authoritative: the seed's own
+    # `i64?.unwrap_or()` prints zero bytes for ANY i64? receiver, confirmed
+    # independent of `?` (pre-existing seed defect, see option_try_*_loud).
+    cat >"$1" <<'EOF'
+fn half_flat(n: i64) -> i64?:
+    if n % 2 == 0:
+        return n / 2
+    return nil
+
+fn chain_flat(n: i64) -> i64?:
+    val h = half_flat(n)?
+    return h + 100
+
+fn main() -> i64:
+    print(chain_flat(10).unwrap_or(-1))
+    print(chain_flat(7).unwrap_or(-1))
+    return 0
+EOF
+}
+
+write_case_option_try_boxed_text_chain() {
+    # Same `?` fix, boxed lane: a `text?` receiver goes through the boxed
+    # (non-flat) Option representation. Also exercises `?` short-circuiting
+    # on a genuine None-returning call (chain_text(false)).
+    cat >"$1" <<'EOF'
+fn greet(ok: bool) -> text?:
+    if ok:
+        return "hi"
+    return nil
+
+fn chain_text(ok: bool) -> text?:
+    val g = greet(ok)?
+    return g + "!"
+
+fn main() -> i64:
+    print(chain_text(true).unwrap_or("none"))
+    print(chain_text(false).unwrap_or("none"))
+    return 0
+EOF
+}
+
+write_case_block_lambda_capture_readonly() {
+    # Bug 2454d381d0d (capture analysis): a block-bodied lambda that reads
+    # (never mutates) an outer `val`. Native-authoritative: the seed's `run`
+    # interpreter silently DROPS the captured value for a block-bodied lambda
+    # (f(3)=6, f(4)=8 -- as if `bias` were 0), while native correctly adds it
+    # (f(3)=16, f(4)=18) -- confirmed with no if/else and no mutation
+    # involved, isolating this from both the tail-value bug and the
+    # capture-mutation gap documented in self_hosted_lambda_block_body_tail_value.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val bias = 10
+    val f = \v:
+        val scaled = v * 2
+        scaled + bias
+    print(f(3))
+    print(f(4))
+    return 0
+EOF
+}
+
+write_case_class_me_mutation() {
+    # Bug-6 adjacent: `me`-receiver self-mutation on a CLASS (not struct --
+    # see the existing me_receiver case). Native-authoritative: the seed
+    # cannot even parse `me` (same landmine as me_receiver), confirming the
+    # `me` mutation path works for class receivers too.
+    cat >"$1" <<'EOF'
+class Counter:
+    var x: i64
+
+    fn selfset(me):
+        me.x = 41
+
+fn main() -> i64:
+    var c = Counter(x: 1)
+    c.selfset()
+    print(c.x)
+    return 0
+EOF
+}
+
+write_case_splitlines_crlf_elements() {
+    # Bugs 4539b364955 (split element types) + 9feac6ef6e5 (split_lines
+    # lowering): split_lines() on a CRLF-separated string, then len/index/
+    # print/for-in-concat on the resulting elements. Native-authoritative:
+    # the seed's own runtime has no `split_lines` at all ("Function
+    # 'str.split_lines' not found"), then segfaults iterating the bogus
+    # result -- a pre-existing seed gap, not a native regression.
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val parts = "aa\r\nbb\r\ncc".split_lines()
+    print(parts.len())
+    print(parts[0])
+    print(parts[1].len())
+    print(parts[2] == "cc")
+    var joined = ""
+    for part in parts:
+        joined = joined + part
+    print(joined)
+    return 0
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # Runner: shared helpers.
 # ---------------------------------------------------------------------------
@@ -1885,6 +2117,10 @@ run_parity_case array_concat write_case_array_concat
 run_parity_case interp_bool_float write_case_interp_bool_float
 run_strict_dual_backend_case bool_array_element_interp write_case_bool_array_element_interp "true/falsetrue/falsetrue/false"
 run_parity_case payloadless_enum_equality write_case_payloadless_enum_equality
+run_parity_case var_no_init_defaults write_case_var_no_init_defaults "5912311"
+run_parity_case var_no_init_read_default write_case_var_no_init_read_default "0080.0false"
+run_parity_case block_lambda_call_arg write_case_block_lambda_call_arg "11"
+run_parity_case string_interp_brace_forms write_case_string_interp_brace_forms "{literal}6helloworld}only"
 
 # --- NATIVE-AUTHORITATIVE: seed oracle broken/unparseable for these --------
 run_native_authoritative_case me_receiver write_case_me_receiver "41" \
@@ -1913,6 +2149,18 @@ run_native_authoritative_case result_unwrap write_case_result_unwrap "779yes08op
     "seed's Result.unwrap_or does not preserve Result payload/tag semantics (observed raw value marker and Err payload)"
 run_native_authoritative_case const_pattern_refutable write_case_const_pattern_refutable "CONST_ARMOTHER_ARM" \
     "seed reinterprets a bare 'case Const(..)' enum-variant pattern as an irrefutable Struct pattern when a same-named class exists, taking the const arm for Inst.Other too (prints CONST_ARM twice)"
+run_native_authoritative_case filter_block_lambda write_case_filter_block_lambda "3" \
+    "seed's 'run' interpreter SEGFAULTS on ANY block-bodied lambda passed to .filter() (confirmed independent of body shape); native correctly lowers it via the Block-capture-analysis fix (2454d381d0d), kept=3"
+run_native_authoritative_case option_try_flat_chain write_case_option_try_flat_chain "105-1" \
+    "seed's i64?.unwrap_or() prints zero bytes for any i64? receiver (same pre-existing seed defect as option_try_annotated_loud/option_try_direct_loud, confirmed independent of '?')"
+run_native_authoritative_case option_try_boxed_text_chain write_case_option_try_boxed_text_chain "hi!none" \
+    "same pre-existing seed Option.unwrap_or() defect on the boxed (text?) lane; native correctly chains ? and short-circuits on the None-returning call"
+run_native_authoritative_case block_lambda_capture_readonly write_case_block_lambda_capture_readonly "1618" \
+    "seed's 'run' interpreter silently drops a block-bodied lambda's captured read-only outer val (prints f(3)=6/f(4)=8 as if bias=0); native correctly captures it (f(3)=16/f(4)=18)"
+run_native_authoritative_case class_me_mutation write_case_class_me_mutation "41" \
+    "seed cannot even PARSE 'me' (same landmine as the existing me_receiver case), confirmed here for a class receiver too"
+run_native_authoritative_case splitlines_crlf_elements write_case_splitlines_crlf_elements "3aa2trueaabbcc" \
+    "seed's own runtime has no split_lines at all (\"Function 'str.split_lines' not found\"), then segfaults iterating the bogus result -- a pre-existing seed gap, not a native regression"
 
 # --- LOUD-FAIL: native-build must refuse these constructs, not miscompile --
 run_loud_fail_case int_overflow_loud write_case_int_overflow_loud \
@@ -1947,6 +2195,8 @@ run_loud_fail_case array_contains_loud write_case_array_contains_loud \
     "unresolved method call: contains"
 run_loud_fail_case array_slice_loud write_case_array_slice_loud \
     "unresolved method call: slice"
+run_loud_fail_case var_no_init_unsupported_type_loud write_case_var_no_init_unsupported_type_loud \
+    "var without initializer not yet supported for this declared type"
 run_runtime_fail_case result_unwrap_err_runtime write_case_result_unwrap_err_runtime \
     'called `.unwrap()` on an Err Result'
 run_runtime_fail_case option_text_unwrap_nil_runtime write_case_option_text_unwrap_nil_runtime \
