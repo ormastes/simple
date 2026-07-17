@@ -75,10 +75,11 @@ fn infers_labeled_tuple_literal_and_field() {
 }
 
 #[test]
-fn rejects_repeated_same_type_anonymous_function_return() {
-    let items = parse_items("fn ambiguous() -> (u8, u8):\n    return (1, 2)\nmain = 0");
-    let err = check(&items).expect_err("anonymous repeated same-type returns should fail");
-    assert!(format!("{err:?}").contains("anonymous multi-return tuple"));
+fn allows_process_like_anonymous_function_return() {
+    let items = parse_items(
+        "fn process_like() -> (text, text, i64):\n    return (\"out\", \"err\", 0)\nmain = 0",
+    );
+    check(&items).expect("tuple position disambiguates repeated field types");
 }
 
 #[test]

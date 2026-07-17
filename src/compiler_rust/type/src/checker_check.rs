@@ -406,20 +406,6 @@ impl TypeChecker {
                 Ok(())
             }
             Node::Function(func) => {
-                if let Some(AstType::Tuple(types)) = &func.return_type {
-                    for i in 0..types.len() {
-                        let left = self.ast_type_to_type(&types[i]);
-                        for right_ty in types.iter().skip(i + 1) {
-                            let right = self.ast_type_to_type(right_ty);
-                            if left == right {
-                                return Err(TypeError::Other(
-                                    "anonymous multi-return tuple contains repeated field types; add labels to disambiguate"
-                                        .to_string(),
-                                ));
-                            }
-                        }
-                    }
-                }
                 // Register the function name in current scope (for nested functions)
                 let func_ty = self.fresh_var();
                 self.env.insert(func.name.clone(), func_ty.clone());

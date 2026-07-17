@@ -14,9 +14,9 @@ use compiler.hir.inference.types.*
 use compiler.hir.inference.infer.{InferenceEngine}
 use compiler.frontend.parser_types_expr.{Expr, BinOp, UnaryOp, CallArg as Argument, LambdaParam, Pattern, Block}
 from compiler.types.type_system.checker import {TypeError}
-from compiler.types.type_system.expr_infer import {infer_expr as synthesize_expr}
+use compiler.types.type_system.expr_infer.{infer_expr}
 from compiler.types.type_system.module_check import {ast_type_to_inference_type_engine}
-from compiler.types.type_system.stmt_check import {check_stmt as regular_check_stmt}
+use compiler.types.type_system.stmt_check.{check_stmt}
 from compiler.types.type_system.type_utils import {call_arg_value, lambda_param_type_or_fresh}
 
 # ============================================================================
@@ -52,7 +52,7 @@ fn infer_expr_bidir(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>,
     match mode:
         case Synthesize:
             # No expected type - use normal inference
-            synthesize_expr(engine, expr, env)
+            infer_expr(engine, expr, env)
 
         case Check(expected):
             # Expected type available - propagate downward
@@ -87,7 +87,7 @@ fn check_expr(engine: InferenceEngine, expr: Expr, expected: Type,
                     Ok(expected)
                 case _:
                     # Expected is not an integer type - synthesize and check
-                    val inferred = synthesize_expr(engine, expr, env)?
+                    val inferred = infer_expr(engine, expr, env)?
                     engine_unify(engine, inferred, expected)?
                     Ok(expected)
 
@@ -101,7 +101,7 @@ fn check_expr(engine: InferenceEngine, expr: Expr, expected: Type,
                     engine_unify(engine, inferred, expected)?
                     Ok(expected)
                 case _:
-                    val inferred = synthesize_expr(engine, expr, env)?
+                    val inferred = infer_expr(engine, expr, env)?
                     engine_unify(engine, inferred, expected)?
                     Ok(expected)
 
@@ -132,7 +132,7 @@ fn check_expr(engine: InferenceEngine, expr: Expr, expected: Type,
         # ====================================================================
         case IfExpr(let_pattern, condition, then_branch, else_branch):
             # Check condition is bool
-            val cond_ty = synthesize_expr(engine, condition, env)?
+            val cond_ty = infer_expr(engine, condition, env)?
             engine_unify(engine, cond_ty, type_Bool())?
 
             # Check both branches against expected type
@@ -149,7 +149,7 @@ fn check_expr(engine: InferenceEngine, expr: Expr, expected: Type,
         # ====================================================================
         case MatchCase(subject, arms):
             # Synthesize subject type
-            val subject_ty = synthesize_expr(engine, subject, env)?
+            val subject_ty = infer_expr(engine, subject, env)?
 
             # Check each arm against expected type
             for arm in arms:
@@ -163,7 +163,7 @@ fn check_expr(engine: InferenceEngine, expr: Expr, expected: Type,
                             arm_env = arm_env_set(arm_env, binding.name, binding.ty)
                         # Check guard is boolean if present
                         if guard.?:
-                            val guard_ty = synthesize_expr(engine, guard.unwrap(), arm_env)
+                            val guard_ty = infer_expr(engine, guard.unwrap(), arm_env)
                             if guard_ty.?:
                                 engine_unify(engine, guard_ty.unwrap(), type_Bool())
                         # Check arm body against expected type
@@ -172,7 +172,7 @@ fn check_expr(engine: InferenceEngine, expr: Expr, expected: Type,
                             engine_unify(engine, body_ty_value, expected)
                     case _:
                         # Fallback: synthesize and unify
-                        val arm_ty = synthesize_expr(engine, arm, env)
+                        val arm_ty = infer_expr(engine, arm, env)
                         if has_arm_ty:
                             engine_unify(engine, arm_ty_value, expected)
 
@@ -261,7 +261,7 @@ fn check_expr(engine: InferenceEngine, expr: Expr, expected: Type,
         # ====================================================================
         case Call(callee, args):
             # Synthesize function type
-            val callee_ty = synthesize_expr(engine, callee, env)?
+            val callee_ty = infer_expr(engine, callee, env)?
 
             # Create expected function type with expected return
             var param_types: [Type] = []
@@ -286,7 +286,7 @@ fn check_expr(engine: InferenceEngine, expr: Expr, expected: Type,
         # ====================================================================
         case _:
             # For other expressions, synthesize type and check compatibility
-            val inferred = synthesize_expr(engine, expr, env)?
+            val inferred = infer_expr(engine, expr, env)?
             engine_unify(engine, inferred, expected)?
             Ok(expected)
 
@@ -308,7 +308,7 @@ fn synthesize_lambda(engine: InferenceEngine, params: [LambdaParam], body: Expr,
         new_env[param.name] = param_ty
 
     # Synthesize body type
-    val body_ty = synthesize_expr(engine, body, new_env)?
+    val body_ty = infer_expr(engine, body, new_env)?
 
     Ok(type_Function(params: param_types, ret: body_ty))
 
@@ -343,12 +343,12 @@ fn synthesize_array(engine: InferenceEngine, elements: [Expr],
         return Ok(type_Array(elem: elem_ty, size: nil))
 
     # Infer first element type
-    val first_ty = synthesize_expr(engine, elements[0], env)?
+    val first_ty = infer_expr(engine, elements[0], env)?
 
     # Unify all other elements
     var i = 1
     while i < elements_len(elements):
-        val elem_ty = synthesize_expr(engine, elements[i], env)?
+        val elem_ty = infer_expr(engine, elements[i], env)?
         engine_unify(engine, first_ty, elem_ty)?
         i = i + 1
 
@@ -360,7 +360,7 @@ fn synthesize_tuple(engine: InferenceEngine, elements: [Expr],
     var elem_types: [Type] = []
 
     for elem in elements:
-        elem_types = elem_types_push(elem_types, synthesize_expr(engine, elem, env)?)
+        elem_types = elem_types_push(elem_types, infer_expr(engine, elem, env)?)
 
     Ok(type_Tuple(elements: elem_types))
 
@@ -376,8 +376,8 @@ fn synthesize_dict(engine: InferenceEngine, pairs: [(Expr, Expr)],
     val _destruct_1 = pairs[0]
     val first_key = _destruct_1[0]
     val first_value = _destruct_1[1]
-    val key_ty = synthesize_expr(engine, first_key, env)?
-    val value_ty = synthesize_expr(engine, first_value, env)?
+    val key_ty = infer_expr(engine, first_key, env)?
+    val value_ty = infer_expr(engine, first_value, env)?
 
     # Unify all other pairs
     var i = 1
@@ -385,8 +385,8 @@ fn synthesize_dict(engine: InferenceEngine, pairs: [(Expr, Expr)],
         val _destruct_2 = pairs[i]
         val k = _destruct_2[0]
         val v = _destruct_2[1]
-        val k_ty = synthesize_expr(engine, k, env)?
-        val v_ty = synthesize_expr(engine, v, env)?
+        val k_ty = infer_expr(engine, k, env)?
+        val v_ty = infer_expr(engine, v, env)?
         engine_unify(engine, key_ty, k_ty)?
         engine_unify(engine, value_ty, v_ty)?
         i = i + 1
@@ -470,7 +470,7 @@ fn check_stmt_bidir(engine: InferenceEngine, stmt: Node, env: Dict<text, Type>,
                     Ok(new_env)
             elif has_initializer:
                 # No annotation - Synthesize mode
-                val init_ty = synthesize_expr(engine, initializer_value, env)?
+                val init_ty = infer_expr(engine, initializer_value, env)?
                 new_env = new_env_set(new_env, name, init_ty)
                 Ok(new_env)
             else:
@@ -492,7 +492,7 @@ fn check_stmt_bidir(engine: InferenceEngine, stmt: Node, env: Dict<text, Type>,
                     new_env = new_env_set(new_env, name, init_ty)
                     Ok(new_env)
             elif has_initializer:
-                val init_ty = synthesize_expr(engine, initializer_value, env)?
+                val init_ty = infer_expr(engine, initializer_value, env)?
                 new_env = new_env_set(new_env, name, init_ty)
                 Ok(new_env)
             else:
@@ -505,7 +505,7 @@ fn check_stmt_bidir(engine: InferenceEngine, stmt: Node, env: Dict<text, Type>,
 
         case _:
             # Delegate other statements to regular statement checking
-            regular_check_stmt(engine, stmt, env, current_fn_ret_type)
+            check_stmt(engine, stmt, env, current_fn_ret_type)
 
 # ============================================================================
 # Public API
