@@ -40,7 +40,7 @@ so executable qualification is still blocked.
 | Duplicate checker | SOURCE FIXED | Production token mode uses the canonical detector; exact/cosine line gates share one tokenizer-derived signal prefix, preserve indentation, and exclude comment/string-only windows; runtime and performance qualification remain | Run the focused token/cosine fixtures and benchmark the canonical path with an admitted runtime | P1 |
 | Lint | SOURCE FIXED | Production CLI delegates to the canonical linter; the isolated 722-line legacy type/check pair is deleted and stale worker assertions now name `cli_run_lint`; global gates still report 30 UI and 45 hot-loop violations | Repair classified violations, then run the focused policy/uniqueness fixtures | P1 |
 | Format/fix | SOURCE GUARDED | Writes are atomic and checked; formatter output passes a CoreLexer equivalence gate or fails closed; existing empty files no longer false-fail | Replace heuristic transforms incrementally with token-gap edits, then run executable preservation/idempotence fixtures | P0 |
-| Check | BLOCKED | Command is parse/validation only and can false-green HIR-invalid tuple destructuring | Route through `driver_api_core.check_file`, stop Check after HIR before monomorphization, remove seed delegation, then qualify latency/RSS | P1 |
+| Check | PARTIAL | Driver API Check now stops after fatal HIR analysis and before diagnostic-free monomorphization. Production CLI remains parse/policy-only, can false-green HIR-invalid code, and may delegate to the seed | Retain CLI policy checks, route semantics through `driver_api_core.check_file`, consolidate duplicate workers, remove seed delegation only after direct-path latency/RSS qualification | P1 |
 | CLI dispatch | IMPLEMENTED | Statistics are table-derived; runtime evidence blocked by seed | Execute inventory probe after admission | P1 |
 | Test daemon | SOURCE FIXED | CLI/client share the full daemon protocol; local, container, remote, lightweight, and agent paths now retain canonical passed/failed/skipped counts and fail closed on malformed outer summaries; dynamic qualification remains | Run the authored local/session/count-cache/timeout/stop protocol fixtures with an admitted runtime | P0 |
 | SPipe/docgen | WARN | Executable spec/manual exist; generated-doc validation blocked by seed | Regenerate once with admitted runtime | P1 |
@@ -169,9 +169,10 @@ so executable qualification is still blocked.
   and `fix` reuses its existing existence guard instead of rejecting valid
   empty files.
 - **Check enforcement:** the smallest enforcing owner is the existing
-  `driver_api_core.check_file` path, with Check returning after fatal HIR
-  lowering and before monomorphization. This is not activated until an
-  admitted runtime proves its startup, latency, and RSS are acceptable.
+  `driver_api_core.check_file` path. Its Check mode now returns after fatal HIR
+  lowering and before monomorphization. Production routing is not activated
+  until an admitted runtime proves startup, latency, and RSS and the lightweight
+  SSpec/HGL/concurrency/hygiene policies remain intact.
 - **Runner signals:** one idempotent callback now owns each signal, and the
   tracked parallel loop plus both governor waits cooperatively dispatch pending
   POSIX signals. Failed kills remain tracked instead of disappearing from
