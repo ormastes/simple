@@ -74,3 +74,69 @@ Option<Dict> return is erased to nil even when the callee returns `Some`
 failed with "Failed to declare module statics" before ever reaching the
 missing externs. The adapter now returns a plain Dict with a `-1` sentinel
 failure key.
+
+## Update 2026-07-17: earliest-failure point moved even earlier (10th missing extern)
+
+Re-verified from a fresh `wt_clif` worktree at origin tip `5aee6bc6a25` (this
+doc's binary evidence is unchanged: same deployed
+`bin/release/x86_64-unknown-linux-gnu/simple`, built 2026-07-11 08:52, 68
+`rt_cranelift_*` symbols, all 9 originally-listed names above still absent
+per `nm --defined-only`).
+
+Same-day commit `f26cccd64fb` ("fix(cranelift): preserve target triple for
+AOT", 2026-07-16 17:10 UTC) changed `cranelift_new_aot_module` in
+`src/lib/nogc_sync_mut/ffi/codegen.spl` and
+`src/lib/nogc_sync_mut/sffi/codegen.spl` from calling the old
+`rt_cranelift_new_aot_module(name_ptr, name_len, target: i64)` (int target
+code, present in the deployed seed) to calling a brand-new
+`rt_cranelift_new_aot_module_triple(name_ptr, name_len, target_ptr,
+target_len)` (full target-triple text, for correct cross-compile AOT). This
+extern is registered in `interpreter_extern/mod.rs` and implemented in
+`codegen/cranelift_sffi.rs` in current HEAD source, but — like the 9 above —
+the deployed seed binary predates it (`nm` count: 0).
+
+Net effect: `rt_cranelift_new_aot_module_triple` is called **first**. inside
+`cranelift_compile_module_direct`/`compile_module`, immediately after
+resolving the target triple and before `declare_module_statics` or any
+function/string declaration is reached. So the very first cranelift SFFI
+call in the entire pipeline now fails, for every program without exception
+— reproduced with the smallest possible probe:
+
+```
+fn main():
+    print(42)
+```
+
+```
+env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH bin/simple native-build \
+  --entry probe1.spl -o probe1_bin --backend cranelift --clean
+...
+[cranelift-direct] start
+[cranelift-direct] target
+error: semantic: unknown extern function: rt_cranelift_new_aot_module_triple
+```
+
+This is strictly earlier than the previously-documented
+`rt_cranelift_declare_string_data` failure point (module creation happens
+before any static/string declaration), so the total missing-extern count is
+now **10**, not 9. No pure-Simple logic bug: the call site is internally
+consistent with the current Rust seed source; the gap is purely deployed-
+binary staleness (same root cause, same fix — redeploy).
+
+The `cranelift_seed_supported()` capability probe in
+`scripts/check/check-native-seed-parity.shs` needs **no change**: its match
+is the generic prefix `unknown extern function: rt_cranelift_` (not tied to
+one symbol name), so it already downgrades this case to XFAIL correctly
+regardless of which of the 10 missing externs is hit first.
+
+Verdict for this pass: **BLOCKED-on-seed**, no code change applied. A
+targeted pure-Simple revert (fall back to the old int-target-code extern for
+the plain host-native case, only using the new triple extern when
+`SIMPLE_NATIVE_BUILD_TARGET` requests real cross-compilation) was considered
+and rejected: it would only relabel the failure from
+`rt_cranelift_new_aot_module_triple` to the already-documented
+`rt_cranelift_declare_string_data` (or similar) a few instructions later —
+every cranelift build still XFAILs either way under this seed — so it is
+pure churn against an already-correct call site for zero verification-gate
+benefit. Fix remains: redeploy the seed/self-hosted binary from current
+source.
