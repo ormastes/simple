@@ -146,7 +146,11 @@ The case contributes one logical case and two recorded checks; LLVM and
 Cranelift native-build shapes were re-verified locally. Linux runs the case in
 the full gate; macOS arm64/x64, Windows x64, and FreeBSD now select it
 explicitly, with first staged platform-matrix execution pending. Broader
-class-reference/struct-copy semantics remain separate.
+class-reference/struct-copy semantics were split: nested value-struct copies
+now recursively isolate local and plain-parameter copies while embedded class
+fields remain shared (`native_nested_struct_value_copy_alias_2026-07-17.md`).
+Its strict dual-backend case is selected on hosted macOS/Windows and FreeBSD;
+execution is pending. Array-of-class boxing remains separate.
 
 ---
 

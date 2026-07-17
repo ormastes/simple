@@ -14,9 +14,9 @@ failure is **never** silently converted to a wrong answer.
   `total=15 pass=15 fail=0 codegen_fallback_hits=0`.
 - **Gate 2 — parity:** `scripts/check/check-native-seed-parity.shs` (dual-backend
   regression harness) must report `native_seed_parity=true`. By default it
-  defines **85 logical cases / 111 recorded checks** because strict-dual cases
+  defines **86 logical cases / 113 recorded checks** because strict-dual cases
   record LLVM and Cranelift separately. `NATIVE_OPEN_BUG_REPROS=1` expands this
-  to **88 logical cases / 116 recorded checks**; execution is opt-in because
+  to **89 logical cases / 118 recorded checks**; execution is opt-in because
   those three reproductions remain known-red. Execution of the expanded matrix
   is pending.
   The full unfiltered gate is now scheduled on Linux x86_64 LLVM (STRICT-DUAL
@@ -155,8 +155,14 @@ the shared binary — deploys require explicit user go-ahead).
     visibility of that array handle through an alias captured before mutation.
     The exact native-build shapes were re-verified locally; Linux runs the case
     in the full gate, while macOS arm64/x64, Windows x64, and FreeBSD select it
-    explicitly. First staged platform-matrix execution is pending. Broader
-    class-reference/struct-copy semantics remain separate.
+    explicitly. First staged platform-matrix execution is pending.
+  - `native_nested_struct_value_copy_alias_2026-07-17.md` is source-fixed by
+    routing local and plain-parameter value copies through one recursive MIR
+    owner. Nested value structs are isolated, embedded classes stay shared,
+    and nil nested fields are guarded. A strict LLVM/Cranelift case runs in
+    Linux's full board and the hosted macOS/Windows plus FreeBSD selections;
+    execution is pending. Array-of-class boxing and cyclic value layouts remain
+    separate.
   - Hosted `riscv32-unknown-linux-gnu` remains intentionally unsupported until
     a verified ILP32D linker/sysroot/CRT owner exists. The existing Linux
     architecture gate now exercises the original hosted target boundary with a

@@ -104,6 +104,74 @@ impl MirLowering:
                     case _: false
             case nil: false
 
+    me copy_struct_value_recursive(init_local: LocalId, struct_type_name: text, type_symbol: SymbolId, copy_chain: [text]) -> LocalId:
+        """Rebuild a value struct, recursively copying nested value structs."""
+        val field_names = self.struct_field_order[struct_type_name]
+        val nested_names = self.struct_field_type_name.get(struct_type_name) ?? []
+        var copy_ops: [MirOperand] = []
+        var cfi = 0
+        while cfi < field_names.len():
+            var field_type = MirType.i64()
+            var nested_name = ""
+            var nested_symbol = SymbolId(id: -1)
+            var copy_nested = false
+            if cfi < nested_names.len():
+                nested_name = nested_names[cfi]
+            # Classes remain shared references. Cyclic value layouts are not
+            # recursively expanded: their back-edge stays shared until the
+            # type checker rejects cyclic value structs.
+            # ponytail: reject cyclic value structs before deep-copying cycles.
+            if nested_name != "" and not self.class_type_names.has(nested_name) and not copy_chain.contains(nested_name):
+                nested_symbol = self.symbols.lookup_or_invalid(nested_name)
+                if nested_symbol.is_valid() and self.struct_field_order.has(nested_name):
+                    field_type = MirType(kind: MirTypeKind.Struct(nested_symbol))
+                    copy_nested = true
+
+            var field_bldr = self.builder
+            val field_val = field_bldr.emit_get_field(mir_operand_copy(init_local), cfi, field_type)
+            self.builder = field_bldr
+            var copied_field = field_val
+
+            if copy_nested:
+                # Preserve a nil nested field instead of dereferencing it.
+                var guard_bldr = self.builder
+                val result_slot = guard_bldr.emit_entry_alloc(field_type)
+                guard_bldr.emit_store(mir_operand_copy(result_slot), mir_operand_copy(field_val))
+                val null_value = guard_bldr.new_temp(field_type)
+                guard_bldr.emit_const(null_value, MirConstValue.Zero, field_type)
+                val has_value = guard_bldr.emit_binop(MirBinOp.Ne, mir_operand_copy(field_val), mir_operand_copy(null_value), MirType.bool())
+                val copy_block = guard_bldr.new_block(Some("structcopy_nested"))
+                val merge_block = guard_bldr.new_block(Some("structcopy_merge"))
+                guard_bldr.terminate_if(mir_operand_copy(has_value), copy_block, merge_block)
+                guard_bldr.switch_to_block(copy_block)
+                self.builder = guard_bldr
+
+                var nested_chain: [text] = []
+                for seen_name in copy_chain:
+                    nested_chain.push(seen_name)
+                nested_chain.push(nested_name)
+                val nested_copy = self.copy_struct_value_recursive(field_val, nested_name, nested_symbol, nested_chain)
+
+                var merge_bldr = self.builder
+                merge_bldr.emit_store(mir_operand_copy(result_slot), mir_operand_copy(nested_copy))
+                merge_bldr.terminate_goto(merge_block)
+                merge_bldr.switch_to_block(merge_block)
+                copied_field = merge_bldr.emit_load(mir_operand_copy(result_slot), field_type)
+                self.builder = merge_bldr
+
+            copy_ops.push(mir_operand_copy(copied_field))
+            cfi = cfi + 1
+
+        var agg_bldr = self.builder
+        val copy_local = agg_bldr.emit_aggregate(
+            AggregateKind.Struct(type_symbol),
+            copy_ops,
+            MirType(kind: MirTypeKind.Struct(type_symbol))
+        )
+        self.builder = agg_bldr
+        self.struct_value_syms[copy_local.id] = struct_type_name
+        copy_local
+
     me maybe_copy_struct_value(init_local: LocalId, struct_sym: text?, init_is_place: bool) -> LocalId?:
         """Bug #177 (native struct local-alias copy missing): `var b = a` /
         `val b = a` for a struct-typed `a` used to alias the binding's
@@ -140,28 +208,7 @@ impl MirLowering:
                     case _: nil
             case nil: nil
         if val type_symbol = struct_symbol_id:
-            # Mirrors function_lowering.spl's Bug #167 per-call defensive
-            # copy: read every field off the incoming place's pointer and
-            # rebuild a fresh aggregate, so the new binding owns private
-            # memory instead of the source's.
-            val field_names = self.struct_field_order[struct_type_name]
-            var copy_ops: [MirOperand] = []
-            var cfi = 0
-            while cfi < field_names.len():
-                var field_bldr = self.builder
-                val field_val = field_bldr.emit_get_field(mir_operand_copy(init_local), cfi, MirType.i64())
-                self.builder = field_bldr
-                copy_ops = copy_ops.push(mir_operand_copy(field_val))
-                cfi = cfi + 1
-            var agg_bldr = self.builder
-            val copy_local = agg_bldr.emit_aggregate(
-                AggregateKind.Struct(type_symbol),
-                copy_ops,
-                MirType(kind: MirTypeKind.Struct(type_symbol))
-            )
-            self.builder = agg_bldr
-            self.struct_value_syms[copy_local.id] = struct_type_name
-            return Some(copy_local)
+            return Some(self.copy_struct_value_recursive(init_local, struct_type_name, type_symbol, [struct_type_name]))
         nil
 
     me maybe_copy_array_value(init_local: LocalId, effective_type: MirType, init_is_place: bool) -> LocalId?:
@@ -206,9 +253,10 @@ impl MirLowering:
         "push the ORIGINAL tagged element unchanged" step (not
         lower_array_map's decode/re-box round trip): a copy must preserve
         every element's raw tagged word bit-for-bit, matching
-        rt_array_copy's own memcpy semantics -- this is a SHALLOW copy, same
-        boundary as #167/#177's existing shallow struct-copy (an array of
-        structs copies each element's pointer, not the pointed-to struct).
+        rt_array_copy's own memcpy semantics -- this remains a SHALLOW array
+        copy (an array of structs copies each element's pointer, not the
+        pointed-to struct). Nested fields inside a directly copied struct use
+        copy_struct_value_recursive above; array element depth is separate.
         Returns the fresh copy's LocalId (already flag-propagated -- NOT yet
         bound into local_map, unlike maybe_copy_struct_value, since the
         caller's two call sites bind local_map slightly differently) when a

@@ -240,7 +240,7 @@ impl MirLowering:
                         # (`c.n = c.n + 1`) silently mutated the caller's `c`
                         # too. Materialize a private per-call copy by reading
                         # every field off the incoming arg pointer and
-                        # rebuilding a fresh aggregate (mirrors
+                        # recursively rebuilding nested value structs (mirrors
                         # lower_struct_construct in switch_operators_calls.spl),
                         # then rebind the parameter symbol to the COPY instead
                         # of the raw arg local.
@@ -268,23 +268,7 @@ impl MirLowering:
                         # copy now applies only to a genuine `struct` param
                         # that is neither a `me` receiver nor `mut`-marked,
                         # which is exactly Bug #167's original, correct scope.
-                        val field_names = self.struct_field_order[parameter_type.name]
-                        var copy_ops: [MirOperand] = []
-                        var cfi = 0
-                        while cfi < field_names.len():
-                            var field_bldr = self.builder
-                            val field_val = field_bldr.emit_get_field(mir_operand_copy(local), cfi, MirType.i64())
-                            self.builder = field_bldr
-                            copy_ops = copy_ops.push(mir_operand_copy(field_val))
-                            cfi = cfi + 1
-                        var agg_bldr = self.builder
-                        val copy_local = agg_bldr.emit_aggregate(
-                            AggregateKind.Struct(type_symbol),
-                            copy_ops,
-                            MirType(kind: MirTypeKind.Struct(type_symbol))
-                        )
-                        self.builder = agg_bldr
-                        self.struct_value_syms[copy_local.id] = parameter_type.name
+                        val copy_local = self.copy_struct_value_recursive(local, parameter_type.name, type_symbol, [parameter_type.name])
                         if val copy_symbol = param.symbol:
                             if copy_symbol != nil:
                                 self.local_map[copy_symbol.id] = copy_local
