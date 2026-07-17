@@ -1442,3 +1442,8 @@ pixels, and performance evidence remain release-blocking.
   regression coverage separate from QEMU framebuffer proof. The stale guide
   paragraph claiming hosted handles were still required is corrected. No
   runtime, docgen, GPU, or QEMU command ran. STATUS: FAIL.
+
+- Catalog axis regression guard (2026-07-17): the existing manifest unit spec
+  now asserts the exact ordered ten-language and ten-category arrays, preventing
+  silent reorder or substitution while retaining the established 10x10 matrix.
+  No admitted pure-Simple runner executed the spec. STATUS: FAIL.
