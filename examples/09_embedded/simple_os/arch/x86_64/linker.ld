@@ -22,8 +22,22 @@ ENTRY(_entry32)
 
 SECTIONS
 {
-    /* Kernel starts at 1MB (standard for multiboot) */
-    . = 0x100000;
+    /* Kernel load base.
+     *
+     * Historically 1MB (0x100000, the classic multiboot low-memory mark). That
+     * works for QEMU `-kernel` and for a small (~2MB text) kernel under
+     * GRUB-EFI/OVMF. But the large merged ring-3 kernel (~22.6MB text) occupies
+     * the whole low region [1MB, ~237MB] once its file image + 236MB BSS are
+     * placed there, which starves GRUB-EFI's multiboot1 relocator of a safe
+     * low scratch/trampoline slot and makes it fault (#UD at RIP~0x1012 in the
+     * relocator, caught by OVMF, before the kernel _start ever runs).
+     *
+     * Loading at 128MB leaves the entire [1MB, 128MB) low region free for
+     * GRUB's relocator trampoline + multiboot info, while staying well within
+     * the crt0 identity map (first 4GiB) and below the PMM heap region
+     * (0x80000000). QEMU `-kernel` honours p_paddr identically, so that path is
+     * unaffected. */
+    . = 0x8000000;
     _kernel_start = .;
 
     /* Code section — .text.entry first for Multiboot header */

@@ -54,6 +54,64 @@ fn native_build_cpu_for_target(target: simple_common::target::Target) -> TargetC
     }
 }
 
+/// True for initializer expressions that `module_pass` captures as a
+/// compile-time-constant global initializer (into `global_init_values` /
+/// `global_init_strings`). Kept a strict subset of that capture so a lifted
+/// declaration is always emitted with a real `.data` slot rather than an
+/// uninitialized `.bss`/stub one.
+fn is_const_global_initializer(expr: &Expr) -> bool {
+    fn is_numeric_const(e: &Expr) -> bool {
+        match e {
+            Expr::Integer(_) | Expr::TypedInteger(_, _) | Expr::Float(_) | Expr::TypedFloat(_, _) => true,
+            Expr::Binary { left, right, .. } => is_numeric_const(left) && is_numeric_const(right),
+            Expr::Unary { operand, .. } => is_numeric_const(operand),
+            _ => false,
+        }
+    }
+    match expr {
+        Expr::Bool(_) | Expr::String(_) => true,
+        Expr::FString { parts, .. } => {
+            parts.is_empty()
+                || (parts.len() == 1 && matches!(parts[0], simple_parser::ast::FStringPart::Literal(_)))
+        }
+        e => is_numeric_const(e),
+    }
+}
+
+/// True when a pattern binds a single simple name (what `module_pass`'s
+/// `extract_pattern_name` accepts). Only such `var` declarations become globals.
+fn is_simple_name_pattern(pattern: &simple_parser::Pattern) -> bool {
+    use simple_parser::Pattern;
+    match pattern {
+        Pattern::Identifier(_) | Pattern::MutIdentifier(_) => true,
+        Pattern::Typed { pattern: inner, .. } => is_simple_name_pattern(inner),
+        _ => false,
+    }
+}
+
+/// A top-level `val`/`var`/`const`/`static` declaration with a simple name and a
+/// compile-time-constant initializer must stay at module scope (become a real
+/// global with a `.data` initializer) instead of being buried inside the
+/// synthetic `main`. Freestanding entries expose the entry point as `spl_start`
+/// / `_start`, not `main`, so a declaration moved into the (dead) synthetic
+/// `main` is never initialized AND is invisible to the real entry function:
+/// its `GlobalLoad` references dangle to undefined symbols that the freestanding
+/// stubber then resolves to weak `.text` stubs, so the load reads code bytes as
+/// garbage (see freestanding_entry_module_val_initializers_never_run bug).
+/// Non-const initializers stay in `main` (their init side effect is preserved
+/// for script entries; the freestanding non-const case remains a separate gap).
+fn is_liftable_global_decl(node: &Node) -> bool {
+    match node {
+        Node::Const(c) => is_const_global_initializer(&c.value),
+        Node::Static(s) => is_const_global_initializer(&s.value),
+        Node::Let(l) => {
+            is_simple_name_pattern(&l.pattern)
+                && l.value.as_ref().map(is_const_global_initializer).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
 fn wrap_entry_script_as_main(mut module: simple_parser::ast::Module) -> simple_parser::ast::Module {
     if has_explicit_main(&module.items) {
         return module;
@@ -62,7 +120,10 @@ fn wrap_entry_script_as_main(mut module: simple_parser::ast::Module) -> simple_p
     let mut lifted = Vec::new();
     let mut script_body = Vec::new();
     for item in module.items {
-        if is_script_statement(&item) {
+        if is_liftable_global_decl(&item) {
+            // Keep const-initialized module-level declarations as real globals.
+            lifted.push(item);
+        } else if is_script_statement(&item) {
             script_body.push(item);
         } else {
             lifted.push(item);

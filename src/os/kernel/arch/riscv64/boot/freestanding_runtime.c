@@ -3603,3 +3603,12 @@ spl_i64 rt_string_to_upper(spl_i64 value) {
     }
     return out_value;
 }
+
+/* TLB invalidation. The portable kernel MMIO layer (os.kernel.boot.mmio)
+ * calls rt_invlpg to drop a stale translation after remapping. RISC-V has no
+ * single-page invlpg; sfence.vma with no operands flushes the whole TLB, which
+ * is a correct (conservative) superset of invalidating the one address. */
+void rt_invlpg(spl_u64 addr) {
+    (void)addr;
+    __asm__ volatile("sfence.vma" ::: "memory");
+}
