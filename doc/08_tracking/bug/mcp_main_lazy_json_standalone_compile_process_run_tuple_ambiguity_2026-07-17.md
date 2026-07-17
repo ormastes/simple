@@ -1,5 +1,7 @@
 # main_lazy_json.spl standalone-compile: `process_run`'s unlabeled (text, text, i64) return trips a standalone-only tuple-ambiguity check
 
+**Status:** FIXED 2026-07-17 (Worker S) — see "Resolution" section at the end.
+
 **Date:** 2026-07-17
 **Scope:** `src/app/mcp/main_lazy_json.spl` (standalone-compile only); root
 cause is `std.io_runtime.process_run` / `std.nogc_sync_mut.io.process_ops.process_run`'s
@@ -103,3 +105,71 @@ one file, e.g. a future lazy-module compile sweep.
 
 All four files' standalone `simple compile` now succeeds; `main.spl`'s full
 compile was re-verified clean (`EXIT=0`) after every edit in this list.
+
+## Resolution (Worker S, 2026-07-17)
+
+**Mechanism:** the standalone-compile-mode ambiguity check fires on the
+*declared return type* of any function whose result an entry file accesses
+by field index or destructures, when that type is an unlabeled tuple with
+repeated field types — not merely on the underlying `extern fn` it wraps.
+Confirmed via isolated probes: an `extern fn rt_process_run(...) -> (text,
+text, i64)` combined with a *labeled* wrapper `pub fn process_run(...) ->
+(stdout: text, stderr: text, exit_code: i64): rt_process_run(cmd, args)`
+compiles standalone cleanly, and both existing call styles keep working
+against the labeled type — indexed access (`.0`/`.1`/`.2`) and 3-way
+destructuring (`val (a, b, c) = process_run(...)`) both still compile and
+return the same values at runtime as before labeling.
+
+**Chosen path:** neither of the two options this bug originally sketched
+(struct-migrate all callers, or add a parallel struct-returning function).
+Caller census: `use std.io_runtime` import lines that also reference
+`process_run` appear in **~150 files** across `src/` and `test/` (far above
+the guide's <15 threshold for a mechanical struct migration, and adding a
+parallel `process_run_result` API would have left permanent dual-API debt
+for a class of bug the labels below fix everywhere at once). Instead this
+is a **true root fix**: `src/lib/nogc_sync_mut/io_runtime.spl`'s
+`pub fn process_run` return type was changed from
+`-> (text, text, i64)` to `-> (stdout: text, stderr: text, exit_code:
+i64)`. Zero caller changes were required anywhere in the repo — the label
+alone clears the standalone-compile ambiguity check for every module that
+imports `process_run` from `std.io_runtime`, not just
+`main_lazy_json.spl`.
+
+**One caveat found in the process:** *named* field access on the labeled
+tuple (e.g. `result.stdout`) works under direct interpreter `run` but fails
+under the test-runner's execution path with `semantic: undefined field:
+unknown property or method 'stdout' on Tuple`. No current caller uses named
+field access on `process_run`'s result (all ~150 use `.0`/`.1`/`.2` or
+destructuring), so this doesn't block anything, but it's a real
+inconsistency across execution paths for labeled-tuple field access worth
+flagging for whoever next works on the interpreter/test-runner value
+representation for labeled tuples — not fixed here (out of this lane's
+scope; no Rust changes made per this lane's hard rules).
+
+**Verification:**
+- `timeout 300 src/compiler_rust/target/bootstrap/simple compile
+  src/app/mcp/main_lazy_json.spl -o probe.smf` → now compiles cleanly
+  (`Compiled ... -> probe.smf`), no error at all (not even a residual
+  different limitation).
+- `timeout 300 src/compiler_rust/target/release/simple check
+  src/app/mcp/main.spl` → `All checks passed (1 file(s))`, exit 0.
+- New regression spec `test/01_unit/lib/io_runtime/process_run_result_spec.spl`
+  (indexed-access + destructuring + nonzero-exit-code cases) → `3 examples,
+  0 failures` via `timeout 240 src/compiler_rust/target/release/simple test
+  <spec>`.
+- Spot-checked 5 other real callers of `std.io_runtime.process_run`
+  (`src/app/cli/theme_sync.spl`, `src/compiler/70.backend/linker/linker_wrapper_helpers.spl`,
+  `src/lib/nogc_sync_mut/package/installer/tool_detect.spl`,
+  `src/app/simple_lsp_mcp/tools.spl`) with `simple check` — all still pass
+  (one other file, `src/app/mcpgdb/main.spl`, fails standalone `check` on an
+  unrelated pre-existing `export use module.*` wildcard error in a
+  different transitive module, confirmed present before this change too via
+  a scoped revert-and-retest).
+
+**Not touched:** `std.nogc_sync_mut.io.process_ops.process_run` (a
+separate facade, not `std.io_runtime`'s owner file, and not imported by
+`main_lazy_json.spl`) has the identical unlabeled-tuple shape and likely the
+same standalone-compile limitation. Left as-is — out of this lane's scope
+(only `std.io_runtime`, the facade actually named in this bug's repro, was
+in scope). Flagging here so it isn't silently forgotten if someone next
+hits a standalone-compile failure through that module instead.
