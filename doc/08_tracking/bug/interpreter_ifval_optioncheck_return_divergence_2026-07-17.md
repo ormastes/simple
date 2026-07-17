@@ -1,9 +1,18 @@
-# Interpreter diverges from native on `if val v = x.?:` and `return`-inside-value-match-arm
+# Seed interpreter diverges from native on `if val v = x.?:` and `return`-inside-value-match-arm
 
 **Lane:** S35 (parallel bug-fix campaign, tasks #182/#183)
 **Date:** 2026-07-17
 **Status:** notable finding, not itself fixed — documents a pre-existing, already-known
 class of interpreter bug that the S35 task brief unknowingly relied on as "ground truth".
+
+**Identity note:** `env -u SIMPLE_BOOTSTRAP bin/simple run <file>.spl` (the task
+brief's prescribed oracle) prints "this Rust-built Simple binary is a bootstrap
+seed only" on every invocation, confirmed via `bin/simple --version` in this
+session. So "the interpreter" below is specifically the **Rust bootstrap seed's**
+interpreter (bootstrap-only per repo convention; already slated for
+retirement), not the self-hosted pure-Simple binary's own interpreter path —
+this matches prior art (`reference_interpreter_dict_and_value_quirks.md` calls
+these "seed interp landmines").
 
 ## Summary
 
@@ -93,6 +102,18 @@ though native has been correct since 2026-07-13/14.
   interpreter's `if val`/Option-check and `return`-signal-propagation paths,
   a different subsystem). Filing here per the task's "notable finding beyond
   these two bugs" instruction so it doesn't get silently re-discovered.
+
+## Coverage note: match guards
+
+The task brief also asked to probe match "with/without guards." Guards
+(`case x if cond:`) were verified by **code inspection, not a runtime probe**:
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` lines 2240-2261
+(`lower_match_case`) show a guard arm hits `self.error(...)` (a real compile
+diagnostic) AND emits an `rt_panic` call, so pipelines that drop
+`MirLowering.errors` still abort loudly at runtime instead of miscompiling.
+This is unambiguous from the source (loud failure both at compile time and,
+defensively, at runtime), so it was left out of scope for these two
+silent-wrong-answer bugs rather than re-verified empirically.
 
 ## Probe matrix (all on worktree tip `be3ac62df6c`, fresh filenames, LLVM backend)
 
