@@ -10,15 +10,33 @@
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_thread_sleep(millis: i64)
-use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+extern fn rt_atomic_int_new(initial: i64) -> i64
+extern fn rt_atomic_int_load(handle: i64) -> i64
+extern fn rt_atomic_int_compare_exchange(handle: i64, current: i64, new_value: i64) -> bool
 use std.nogc_sync_mut.io.signal_stubs.{signal_dispatch_pending}
 
 # ============================================================================
 # Module State
 # ============================================================================
+#
+# NOTE: the active-process counter is a lazily-created raw atomic *handle*
+# (i64), not a module-level `AtomicI64` class instance. A module-level `val`
+# whose declared type is a class imported from a different module resolves to
+# a nil receiver when read from inside a function body under the bootstrap
+# seed's interpreter (confirmed by isolated repro; see
+# doc/08_tracking/bug/std_process_run_standalone_crash_2026-07-17.md). Raw
+# extern-backed i64 handles, lazily created on first use inside a function,
+# do not hit this landmine. Do not reintroduce an `AtomicI64` (or similar
+# imported-class) module-level global here without re-verifying against that
+# bug.
 
 val _ACQUIRE_WARN_ITERATIONS: i64 = 600
-val _active_procs: AtomicI64 = atomic_i64_new(0)
+var _active_procs_handle: i64 = -1
+
+fn _active_procs_h() -> i64:
+    if _active_procs_handle < 0:
+        _active_procs_handle = rt_atomic_int_new(0)
+    _active_procs_handle
 
 # ============================================================================
 # CPU Count Helper (inlined so this file has no extra imports)
@@ -66,7 +84,7 @@ fn proc_slot_max() -> i64:
 
 fn proc_slot_active() -> i64:
     """Return the current number of active (tracked) processes."""
-    _active_procs.load(MemoryOrdering.SeqCst)
+    rt_atomic_int_load(_active_procs_h())
 
 fn proc_slot_acquire():
     """
@@ -78,11 +96,12 @@ fn proc_slot_acquire():
     """
     var delay_ms: i64 = 10
     var iteration: i64 = 0
+    val handle = _active_procs_h()
     while true:
         signal_dispatch_pending()
-        val active = _active_procs.load(MemoryOrdering.SeqCst)
-        if active < _proc_slot_limit() and _active_procs.compare_exchange(
-            active, active + 1, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst
+        val active = rt_atomic_int_load(handle)
+        if active < _proc_slot_limit() and rt_atomic_int_compare_exchange(
+            handle, active, active + 1
         ):
             return
         rt_thread_sleep(delay_ms)
@@ -101,13 +120,12 @@ fn proc_slot_release():
 
     Safe to call even when _active_procs is already 0 (no-op).
     """
-    var active = _active_procs.load(MemoryOrdering.SeqCst)
+    val handle = _active_procs_h()
+    var active = rt_atomic_int_load(handle)
     while active > 0:
-        if _active_procs.compare_exchange(
-            active, active - 1, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst
-        ):
+        if rt_atomic_int_compare_exchange(handle, active, active - 1):
             return
-        active = _active_procs.load(MemoryOrdering.SeqCst)
+        active = rt_atomic_int_load(handle)
 
 fn proc_slot_reset(count: i64):
     """
@@ -117,14 +135,13 @@ fn proc_slot_reset(count: i64):
     """
     if count <= 0:
         return
-    var active = _active_procs.load(MemoryOrdering.SeqCst)
+    val handle = _active_procs_h()
+    var active = rt_atomic_int_load(handle)
     while active > 0:
         val next = if count >= active: 0 else: active - count
-        if _active_procs.compare_exchange(
-            active, next, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst
-        ):
+        if rt_atomic_int_compare_exchange(handle, active, next):
             return
-        active = _active_procs.load(MemoryOrdering.SeqCst)
+        active = rt_atomic_int_load(handle)
 
 # ============================================================================
 # Exports
