@@ -53,3 +53,15 @@ module; field lookup then resolves against the wrong definition.
 
 Tooling-surface smoke matrix during the 2026-07-17 test-runner hardening
 campaign (md/sdoctest lane probe hit it first; directory probe confirmed).
+
+## Second (internal) collision found 2026-07-17 — fixed
+
+The rename exposed a SECOND, runner-internal instance of the same landmine:
+`test_db_core.spl` defines a `struct` and `test_db_compat.spl` a `class`
+that shared the name (`TestDatabase` before the rename, `RunnerTestDb`
+after it), so DB-writing runs could still resolve the wrong definition.
+Fixed by renaming the core-struct cluster to `RunnerTestDbCore`
+(`test_db_core.spl`, `test_db_validation.spl`, `test_db_migrate.spl`,
+`test_db_perf.spl`; compat class and its users unchanged; 0 leftovers,
+green single-file and md-lane probes pass). The underlying interpreter
+defect (global struct registry not module-scoped) remains open seed-side.
