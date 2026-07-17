@@ -7,6 +7,9 @@
 //! - Semaphore: Counting semaphore
 //! - Barrier: Synchronization barrier
 
+use parking_lot::lock_api::RawMutex as _;
+use parking_lot::RawMutex as ParkingRawMutex;
+use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Condvar, Mutex, RwLock};
 use std::time::Duration;
@@ -176,19 +179,41 @@ pub extern "C" fn rt_atomic_free(atomic: RuntimeValue) {
 #[repr(C)]
 pub struct RuntimeMutex {
     pub header: HeapHeader,
-    /// The mutex holding the protected value
-    pub inner: *mut Arc<Mutex<RuntimeValue>>,
+    /// Raw lock held across the explicit Simple lock/unlock calls.
+    pub lock: ParkingRawMutex,
+    /// Protected value, accessed only while `lock` is held.
+    pub value: UnsafeCell<RuntimeValue>,
+    /// Process-unique ID of the thread allowed to unlock; zero means unlocked.
+    pub owner: AtomicU64,
     /// Mutex ID for debugging
     pub mutex_id: u64,
 }
 
+// Safety: `value` is accessed only while `lock` is held, and `owner` prevents
+// a foreign thread from ending another thread's explicit lock interval.
+unsafe impl Sync for RuntimeMutex {}
+
 static NEXT_MUTEX_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_MUTEX_THREAD_ID: AtomicU64 = AtomicU64::new(1);
+
+fn allocate_mutex_thread_id() -> u64 {
+    let id = NEXT_MUTEX_THREAD_ID.fetch_add(1, Ordering::Relaxed);
+    assert_ne!(id, 0, "runtime mutex thread ID space exhausted");
+    id
+}
+
+thread_local! {
+    static MUTEX_THREAD_ID: u64 = allocate_mutex_thread_id();
+}
+
+fn current_mutex_thread_id() -> u64 {
+    MUTEX_THREAD_ID.with(|id| *id)
+}
 
 /// Create a new mutex protecting the given value.
 #[no_mangle]
 pub extern "C" fn rt_mutex_new(value: RuntimeValue) -> RuntimeValue {
     let mutex_id = NEXT_MUTEX_ID.fetch_add(1, Ordering::SeqCst);
-    let inner = Box::into_raw(Box::new(Arc::new(Mutex::new(value))));
 
     let size = std::mem::size_of::<RuntimeMutex>();
     let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
@@ -196,26 +221,23 @@ pub extern "C" fn rt_mutex_new(value: RuntimeValue) -> RuntimeValue {
     unsafe {
         let ptr = std::alloc::alloc_zeroed(layout) as *mut RuntimeMutex;
         if ptr.is_null() {
-            drop(Box::from_raw(inner));
             return RuntimeValue::NIL;
         }
 
-        (*ptr).header = HeapHeader::new(HeapObjectType::Mutex, size as u32);
-        (*ptr).inner = inner;
-        (*ptr).mutex_id = mutex_id;
+        ptr.write(RuntimeMutex {
+            header: HeapHeader::new(HeapObjectType::Mutex, size as u32),
+            lock: ParkingRawMutex::INIT,
+            value: UnsafeCell::new(value),
+            owner: AtomicU64::new(0),
+            mutex_id,
+        });
 
         RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
     }
 }
 
 fn as_mutex_ptr(value: RuntimeValue) -> Option<*mut RuntimeMutex> {
-    let ptr = get_typed_ptr_mut::<RuntimeMutex>(value, HeapObjectType::Mutex)?;
-    unsafe {
-        if (*ptr).inner.is_null() {
-            return None;
-        }
-        Some(ptr)
-    }
+    get_typed_ptr_mut::<RuntimeMutex>(value, HeapObjectType::Mutex)
 }
 
 /// Lock the mutex and return the protected value.
@@ -227,11 +249,10 @@ pub extern "C" fn rt_mutex_lock(mutex: RuntimeValue) -> RuntimeValue {
     };
 
     unsafe {
-        let arc = &*(*mx_ptr).inner;
-        match arc.lock() {
-            Ok(guard) => *guard,
-            Err(_) => RuntimeValue::NIL, // Poisoned
-        }
+        let mutex = &*mx_ptr;
+        mutex.lock.lock();
+        mutex.owner.store(current_mutex_thread_id(), Ordering::Release);
+        *mutex.value.get()
     }
 }
 
@@ -244,10 +265,12 @@ pub extern "C" fn rt_mutex_try_lock(mutex: RuntimeValue) -> RuntimeValue {
     };
 
     unsafe {
-        let arc = &*(*mx_ptr).inner;
-        match arc.try_lock() {
-            Ok(guard) => *guard,
-            Err(_) => RuntimeValue::NIL,
+        let mutex = &*mx_ptr;
+        if mutex.lock.try_lock() {
+            mutex.owner.store(current_mutex_thread_id(), Ordering::Release);
+            *mutex.value.get()
+        } else {
+            RuntimeValue::NIL
         }
     }
 }
@@ -261,14 +284,18 @@ pub extern "C" fn rt_mutex_unlock(mutex: RuntimeValue, new_value: RuntimeValue) 
     };
 
     unsafe {
-        let arc = &*(*mx_ptr).inner;
-        match arc.lock() {
-            Ok(mut guard) => {
-                *guard = new_value;
-                1
-            }
-            Err(_) => 0,
+        let mutex = &*mx_ptr;
+        let owner = current_mutex_thread_id();
+        if mutex
+            .owner
+            .compare_exchange(owner, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return 0;
         }
+        *mutex.value.get() = new_value;
+        mutex.lock.unlock();
+        1
     }
 }
 
@@ -282,6 +309,7 @@ pub extern "C" fn rt_mutex_id(mutex: RuntimeValue) -> i64 {
 }
 
 /// Free a mutex.
+/// The caller must ensure no thread can concurrently start using this handle.
 #[no_mangle]
 pub extern "C" fn rt_mutex_free(mutex: RuntimeValue) {
     let Some(mx_ptr) = as_mutex_ptr(mutex) else {
@@ -289,9 +317,10 @@ pub extern "C" fn rt_mutex_free(mutex: RuntimeValue) {
     };
 
     unsafe {
-        if !(*mx_ptr).inner.is_null() {
-            drop(Box::from_raw((*mx_ptr).inner));
+        if (*mx_ptr).owner.load(Ordering::Acquire) != 0 || (*mx_ptr).lock.is_locked() {
+            return;
         }
+        std::ptr::drop_in_place(mx_ptr);
         let size = std::mem::size_of::<RuntimeMutex>();
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
         unregister_heap_ptr(mx_ptr as *mut HeapHeader);
@@ -377,6 +406,7 @@ mod tests {
         // Lock and get value
         let locked = rt_mutex_lock(mx);
         assert_eq!(locked.as_int(), 42);
+        assert!(rt_mutex_try_lock(mx).is_nil());
 
         // Unlock with new value
         let result = rt_mutex_unlock(mx, RuntimeValue::from_int(100));
@@ -385,8 +415,48 @@ mod tests {
         // Lock again to verify new value
         let locked2 = rt_mutex_lock(mx);
         assert_eq!(locked2.as_int(), 100);
+        assert_eq!(rt_mutex_unlock(mx, RuntimeValue::from_int(100)), 1);
+        assert_eq!(rt_mutex_unlock(mx, RuntimeValue::from_int(100)), 0);
 
         rt_mutex_free(mx);
+    }
+
+    #[test]
+    fn test_mutex_rejects_foreign_unlock_and_holds_waiters() {
+        let mx = rt_mutex_new(RuntimeValue::from_int(42));
+        assert_eq!(rt_mutex_lock(mx).as_int(), 42);
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            assert_eq!(rt_mutex_unlock(mx, RuntimeValue::from_int(-1)), 0);
+            assert!(rt_mutex_try_lock(mx).is_nil());
+            started_tx.send(()).unwrap();
+            let value = rt_mutex_lock(mx).as_int();
+            assert_eq!(rt_mutex_unlock(mx, RuntimeValue::from_int(101)), 1);
+            done_tx.send(value).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        assert_eq!(rt_mutex_unlock(mx, RuntimeValue::from_int(100)), 1);
+        assert_eq!(done_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 100);
+        waiter.join().unwrap();
+
+        assert_eq!(rt_mutex_lock(mx).as_int(), 101);
+        assert_eq!(rt_mutex_unlock(mx, RuntimeValue::from_int(101)), 1);
+        rt_mutex_free(mx);
+    }
+
+    #[test]
+    fn test_mutex_free_refuses_a_held_lock() {
+        let mx = rt_mutex_new(RuntimeValue::from_int(7));
+        assert_eq!(rt_mutex_lock(mx).as_int(), 7);
+        rt_mutex_free(mx);
+        assert!(rt_mutex_id(mx) > 0);
+        assert_eq!(rt_mutex_unlock(mx, RuntimeValue::from_int(8)), 1);
+        rt_mutex_free(mx);
+        assert_eq!(rt_mutex_id(mx), 0);
     }
 
     #[test]

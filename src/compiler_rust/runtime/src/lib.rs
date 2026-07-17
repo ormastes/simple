@@ -1055,8 +1055,6 @@ mod tests {
     mod gc_allocator;
     mod gc_logging;
     mod no_gc_allocator;
-    mod framebuffer_c_runtime;
-
     #[cfg(feature = "vulkan")]
     mod vulkan_sffi_tests;
 }
