@@ -323,6 +323,26 @@ fn test_if_let_multi_field_enum_payload_uses_array_get() {
 }
 
 #[test]
+fn test_if_let_identifier_binding_copies_subject_value() {
+    let source = "class Mutex:\n    handle: any\n\nfn acquire(current: Mutex?):\n    if val active = current:\n        active.handle\n";
+    let module = parse_and_lower(source).unwrap();
+    let HirStmt::If { then_block, .. } = &module.functions[0].body[1] else {
+        panic!("expected lowered if-val statement")
+    };
+    assert!(matches!(
+        &then_block[0],
+        HirStmt::Let {
+            local_index: 2,
+            value: Some(HirExpr {
+                kind: HirExprKind::Local(1),
+                ..
+            }),
+            ..
+        }
+    ));
+}
+
+#[test]
 fn test_standalone_match_subject_enum_const_variant_beats_unrelated_const_struct() {
     let source = "class Const:\n    value: i64\n\nenum Inst:\n    Const(i64, i64, i64)\n    Other\n\nfn destination(inst: Inst) -> i64:\n    match inst:\n        case Const(dest, _, _):\n            return dest\n        case _:\n            return -1\n";
     let module = parse_and_lower(source).unwrap();

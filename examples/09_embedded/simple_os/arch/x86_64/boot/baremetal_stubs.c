@@ -8627,7 +8627,9 @@ RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n)
 {
     int64_t count = (int64_t)n; /* MIR passes raw i64 count. */
     if (count < 0) count = 0;
-    if (count > 0x100000) count = 0x100000;
+    /* Permit a full 64 MiB ARGB32 framebuffer aperture.  The former
+     * 0x100000-element limit truncated 3840x2160 fills after 4 MiB. */
+    if (count > 0x1000000) count = 0x1000000;
     uint64_t cap = count > 0 ? (uint64_t)count : 1ULL;
     size_t bytes = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(bytes);

@@ -103,6 +103,10 @@ fn declared_type_name(ty: Option<&Type>) -> Option<&str> {
     }
 }
 
+fn is_optional_function_call(expr: &Expr, declared_type: Option<&Type>) -> bool {
+    matches!(declared_type, Some(Type::Optional(_))) && matches!(expr, Expr::Call { .. })
+}
+
 /// True when the existing global metadata/codegen path already preserves the
 /// initializer without lowering an executable assignment.
 fn already_initialized_without_runtime_assignment(expr: &Expr, declared_type: Option<&Type>) -> bool {
@@ -151,44 +155,12 @@ fn sanitized_component(raw: &str) -> String {
     }
 }
 
-/// Append one compiler-reserved module initializer containing declaration-order
-/// assignments for every initializer that cannot be represented as static
-/// global metadata. The linker discovers the exported `__module_init_*` symbol.
-pub(super) fn inject_freestanding_module_global_init(module: &mut Module, module_prefix: &str) {
-    let span = Span::new(0, 0, 0, 0);
-    let mut statements = Vec::new();
-
-    for item in &module.items {
-        let candidate = match item {
-            Node::Static(stmt) => Some((stmt.name.as_str(), &stmt.value, stmt.ty.as_ref())),
-            Node::Const(stmt) => Some((stmt.name.as_str(), &stmt.value, stmt.ty.as_ref())),
-            Node::Let(stmt) => stmt.value.as_ref().and_then(|value| {
-                pattern_name(&stmt.pattern)
-                    .map(|name| (name, value, stmt.ty.as_ref().or_else(|| pattern_type(&stmt.pattern))))
-            }),
-            _ => None,
-        };
-        let Some((name, value, declared_type)) = candidate else {
-            continue;
-        };
-        if already_initialized_without_runtime_assignment(value, declared_type) {
-            continue;
-        }
-        statements.push(Node::Assignment(AssignmentStmt {
-            span,
-            target: Expr::Identifier(name.to_string()),
-            op: AssignOp::Assign,
-            value: value.clone(),
-        }));
-    }
-
-    if statements.is_empty() {
-        return;
-    }
+fn runtime_init_function(name: String, statements: Vec<Node>, span: Span) -> Node {
+    let mut statements = statements;
     statements.push(Node::Return(ReturnStmt { span, value: None }));
-    module.items.push(Node::Function(FunctionDef {
+    Node::Function(FunctionDef {
         span,
-        name: format!("__module_init_{}_dynamic", sanitized_component(module_prefix)),
+        name,
         generic_params: Vec::new(),
         params: Vec::new(),
         return_type: Some(Type::Simple("void".to_string())),
@@ -210,7 +182,65 @@ pub(super) fn inject_freestanding_module_global_init(module: &mut Module, module
         is_generic_template: false,
         specialization_of: None,
         type_bindings: std::collections::HashMap::new(),
-    }));
+    })
+}
+
+/// Append compiler-reserved module initializers for values that cannot be
+/// represented as static global metadata. Optional function-call globals get
+/// one declaration-indexed initializer each so no same-shaped declaration can
+/// be collapsed or skipped by the freestanding module-init symbol pipeline.
+pub(super) fn inject_freestanding_module_global_init(module: &mut Module, module_prefix: &str) {
+    let span = Span::new(0, 0, 0, 0);
+    let mut statements = Vec::new();
+    let mut optional_call_initializers = Vec::new();
+
+    for (declaration_index, item) in module.items.iter_mut().enumerate() {
+        let candidate = match item {
+            Node::Static(stmt) => Some((stmt.name.as_str(), &mut stmt.value, stmt.ty.as_ref())),
+            Node::Const(stmt) => Some((stmt.name.as_str(), &mut stmt.value, stmt.ty.as_ref())),
+            Node::Let(stmt) => stmt.value.as_mut().and_then(|value| {
+                pattern_name(&stmt.pattern)
+                    .map(|name| (name, value, stmt.ty.as_ref().or_else(|| pattern_type(&stmt.pattern))))
+            }),
+            _ => None,
+        };
+        let Some((name, value, declared_type)) = candidate else {
+            continue;
+        };
+        if already_initialized_without_runtime_assignment(value, declared_type) {
+            continue;
+        }
+        let assignment = Node::Assignment(AssignmentStmt {
+            span,
+            target: Expr::Identifier(name.to_string()),
+            op: AssignOp::Assign,
+            value: value.clone(),
+        });
+        if is_optional_function_call(value, declared_type) {
+            // Freestanding global storage otherwise starts as raw zero. Keep
+            // the slot a valid Optional even before its eager initializer runs.
+            *value = Expr::Nil;
+            optional_call_initializers.push((declaration_index, assignment));
+        } else {
+            statements.push(assignment);
+        }
+    }
+
+    let prefix = sanitized_component(module_prefix);
+    if !statements.is_empty() {
+        module.items.push(runtime_init_function(
+            format!("__module_init_{}_dynamic", prefix),
+            statements,
+            span,
+        ));
+    }
+    for (declaration_index, assignment) in optional_call_initializers {
+        module.items.push(runtime_init_function(
+            format!("__module_init_{}_dynamic_optional_{declaration_index:08}", prefix),
+            vec![assignment],
+            span,
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -246,6 +276,48 @@ mod tests {
             })
             .collect();
         assert_eq!(targets, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn synthesizes_every_optional_call_global_in_declaration_order() {
+        let source = "struct Mutex:\n    value: i64\nfn mutex_new(value: i64) -> Mutex:\n    Mutex(value: value)\nvar first: Mutex? = mutex_new(0)\nfn between():\n    return\nvar second: Mutex? = mutex_new(0)\n";
+        let mut module = Parser::new(source).parse().expect("parse optional call globals");
+        inject_freestanding_module_global_init(&mut module, "font_renderer");
+
+        let initializers: Vec<(&str, &str)> = module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Node::Function(function) if function.name.contains("_dynamic_optional_") => {
+                    let target = function.body.statements.iter().find_map(|statement| match statement {
+                        Node::Assignment(AssignmentStmt {
+                            target: Expr::Identifier(name),
+                            ..
+                        }) => Some(name.as_str()),
+                        _ => None,
+                    })?;
+                    Some((function.name.as_str(), target))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            initializers,
+            vec![
+                ("__module_init_font_renderer_dynamic_optional_00000002", "first"),
+                ("__module_init_font_renderer_dynamic_optional_00000004", "second"),
+            ]
+        );
+
+        let seeded_nil: Vec<&str> = module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Node::Let(stmt) if matches!(stmt.value, Some(Expr::Nil)) => pattern_name(&stmt.pattern),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(seeded_nil, vec!["first", "second"]);
     }
 
     #[test]

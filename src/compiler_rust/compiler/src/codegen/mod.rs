@@ -26,6 +26,7 @@ pub mod parallel;
 pub mod runtime_sffi;
 pub mod shared;
 pub mod types_util;
+pub mod vtable_c8_debug;
 pub mod vulkan;
 pub mod wasm_bindgen_gen;
 

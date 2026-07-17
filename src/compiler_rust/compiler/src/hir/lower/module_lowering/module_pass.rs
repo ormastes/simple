@@ -14,6 +14,9 @@ use crate::hir::types::{
 fn try_const_eval(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Integer(val) => Some(*val),
+        // RuntimeValue nil is the tagged sentinel 0x3. Recording it here keeps
+        // scalar Optional globals in .data instead of raw-zero BSS.
+        Expr::Nil => Some(3),
         // Suffixed literals (`11i64`, `0xFF_u32`): same constant, typed form.
         // Without this arm, global initializers using suffixed elements (e.g.
         // FONT_ROWS_PACKED's `...i64` table) were silently dropped → zero table.
@@ -1834,5 +1837,15 @@ fn extract_pattern_type(pattern: &simple_parser::Pattern) -> Option<simple_parse
     match pattern {
         Pattern::Typed { ty, .. } => Some(ty.clone()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod scalar_const_eval_tests {
+    use super::*;
+
+    #[test]
+    fn nil_global_scalar_uses_tagged_nil_sentinel() {
+        assert_eq!(try_const_eval(&Expr::Nil), Some(3));
     }
 }

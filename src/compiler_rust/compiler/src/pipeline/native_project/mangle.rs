@@ -589,6 +589,37 @@ fn resolve_method_call_static(
             // collide with generic user methods or lack a bare_rt_redirect entry).
             return;
         }
+        if !has_type_qualifier
+            && matches!(
+                method,
+                "len"
+                    | "to_i8"
+                    | "to_i16"
+                    | "to_i32"
+                    | "to_i64"
+                    | "to_u8"
+                    | "to_u16"
+                    | "to_u32"
+                    | "to_u64"
+                    | "to_f32"
+                    | "to_f64"
+                    | "to_int"
+                    | "to_float"
+            )
+        {
+            // Same defect class as the string-builtin guard above, for NUMERIC
+            // builtins: a bare erased-receiver `.to_i32()` (e.g. `value.len()
+            // .to_i32()`, `commands.len().to_i32()`) must lower to the builtin
+            // conversion, not rebind through the single-candidate suffix
+            // fallback to the ONLY user method of that name (`Px.to_i32`,
+            // window_protocol/geometry.spl), which would deref the raw integer
+            // as a Px pointer -> null-receiver fault on the SimpleOS WM
+            // first-frame render (cr2=0, 2026-07-17). Leaving the name bare
+            // routes it through codegen's builtin numeric lowering (a direct
+            // truncation/extension), which is the correct semantics for every
+            // primitive receiver.
+            return;
+        }
         let type_part_lower = type_part.to_lowercase();
         let candidates = local_suffix_index.get(method).or_else(|| suffix_index.get(method));
         if let Some(candidates) = candidates {

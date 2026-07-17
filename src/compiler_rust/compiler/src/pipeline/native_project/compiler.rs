@@ -54,68 +54,7 @@ fn native_build_cpu_for_target(target: simple_common::target::Target) -> TargetC
     }
 }
 
-/// True for initializer expressions that `module_pass` captures as a
-/// compile-time-constant global initializer (into `global_init_values` /
-/// `global_init_strings`). Kept a strict subset of that capture so a lifted
-/// declaration is always emitted with a real `.data` slot rather than an
-/// uninitialized `.bss`/stub one.
-fn is_const_global_initializer(expr: &Expr) -> bool {
-    fn is_numeric_const(e: &Expr) -> bool {
-        match e {
-            Expr::Integer(_) | Expr::TypedInteger(_, _) | Expr::Float(_) | Expr::TypedFloat(_, _) => true,
-            Expr::Binary { left, right, .. } => is_numeric_const(left) && is_numeric_const(right),
-            Expr::Unary { operand, .. } => is_numeric_const(operand),
-            _ => false,
-        }
-    }
-    match expr {
-        Expr::Bool(_) | Expr::String(_) => true,
-        Expr::FString { parts, .. } => {
-            parts.is_empty()
-                || (parts.len() == 1 && matches!(parts[0], simple_parser::ast::FStringPart::Literal(_)))
-        }
-        e => is_numeric_const(e),
-    }
-}
-
-/// True when a pattern binds a single simple name (what `module_pass`'s
-/// `extract_pattern_name` accepts). Only such `var` declarations become globals.
-fn is_simple_name_pattern(pattern: &simple_parser::Pattern) -> bool {
-    use simple_parser::Pattern;
-    match pattern {
-        Pattern::Identifier(_) | Pattern::MutIdentifier(_) => true,
-        Pattern::Typed { pattern: inner, .. } => is_simple_name_pattern(inner),
-        _ => false,
-    }
-}
-
-/// A top-level `val`/`var`/`const`/`static` declaration with a simple name and a
-/// compile-time-constant initializer must stay at module scope (become a real
-/// global with a `.data` initializer) instead of being buried inside the
-/// synthetic `main`. Freestanding entries expose the entry point as `spl_start`
-/// / `_start`, not `main`, so a declaration moved into the (dead) synthetic
-/// `main` is never initialized AND is invisible to the real entry function:
-/// its `GlobalLoad` references dangle to undefined symbols that the freestanding
-/// stubber then resolves to weak `.text` stubs, so the load reads code bytes as
-/// garbage (see freestanding_entry_module_val_initializers_never_run bug).
-/// Non-const initializers stay in `main` (their init side effect is preserved
-/// for script entries; the freestanding non-const case remains a separate gap).
-fn is_liftable_global_decl(node: &Node) -> bool {
-    match node {
-        Node::Const(c) => is_const_global_initializer(&c.value),
-        Node::Static(s) => is_const_global_initializer(&s.value),
-        Node::Let(l) => {
-            is_simple_name_pattern(&l.pattern)
-                && l.value.as_ref().map(is_const_global_initializer).unwrap_or(false)
-        }
-        _ => false,
-    }
-}
-
-pub(crate) fn wrap_entry_script_as_main(
-    mut module: simple_parser::ast::Module,
-    is_freestanding: bool,
-) -> simple_parser::ast::Module {
+fn wrap_entry_script_as_main(mut module: simple_parser::ast::Module) -> simple_parser::ast::Module {
     if has_explicit_main(&module.items) {
         return module;
     }
@@ -123,24 +62,7 @@ pub(crate) fn wrap_entry_script_as_main(
     let mut lifted = Vec::new();
     let mut script_body = Vec::new();
     for item in module.items {
-        // Under freestanding targets ALL module-level declarations must stay
-        // lifted, not just const-foldable ones: the synthetic `main` below is
-        // dead code there (the real freestanding entry point is
-        // `spl_start`/`_start`, never `main`), so burying a declaration in it
-        // does not just skip its runtime init side effect -- it drops the
-        // global's registration entirely (module_pass only scans top-level
-        // `module.items`), turning any reference to it from another function
-        // in the same file into a dangling/undefined symbol (bug
-        // freestanding_entry_module_val_initializers_never_run, C1 class).
-        // `inject_freestanding_module_global_init`, which runs right after
-        // this transform, synthesizes the actual runtime-init call for the
-        // non-const ones once they are visible here.
-        let is_module_level_decl = matches!(item, Node::Let(_) | Node::Const(_) | Node::Static(_));
-        if is_liftable_global_decl(&item) || (is_freestanding && is_module_level_decl) {
-            // Keep const-initialized (always) and, under freestanding, all
-            // other module-level declarations as real globals.
-            lifted.push(item);
-        } else if is_script_statement(&item) {
+        if is_script_statement(&item) {
             script_body.push(item);
         } else {
             lifted.push(item);
@@ -337,8 +259,15 @@ pub(crate) fn compile_file_to_object(
 ) -> Result<Vec<u8>, String> {
     // Bootstrap hack: normalize optional types that older lenient type resolver misses
     let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
+    let target = effective_target();
     let mut source = if is_bootstrap {
-        apply_bootstrap_rewrite(source)
+        apply_bootstrap_rewrite_for_target(
+            source,
+            matches!(
+                target.os,
+                simple_common::target::TargetOS::None | simple_common::target::TargetOS::SimpleOS
+            ),
+        )
     } else {
         // Non-bootstrap: just normalize text? -> text for basic compat
         source.replace("text?", "text")
@@ -355,17 +284,11 @@ pub(crate) fn compile_file_to_object(
     // first-wins pick in codegen (bug
     // x64_freestanding_cfg_multivariant_misdispatch).
     super::discovery::strip_inactive_cfg_arch_fns(&mut ast, effective_target().arch);
-    let target = effective_target();
-    let is_freestanding = matches!(
+    let mut ast = if is_entry { wrap_entry_script_as_main(ast) } else { ast };
+    if matches!(
         target.os,
         simple_common::target::TargetOS::None | simple_common::target::TargetOS::SimpleOS
-    );
-    let mut ast = if is_entry {
-        wrap_entry_script_as_main(ast, is_freestanding)
-    } else {
-        ast
-    };
-    if is_freestanding {
+    ) {
         let module_prefix = module_prefix_from_path(file_path, source_root);
         inject_freestanding_module_global_init(&mut ast, &module_prefix);
     }
@@ -615,7 +538,6 @@ pub(crate) fn compile_file_to_object(
                 LlvmBackend::new_with_opt_level_and_cpu(target, opt_level, native_build_cpu_for_target(target))
                     .map_err(|e| format!("{}: llvm init: {e}", file_path.display()))?;
             llvm.set_import_map(imports.import_map.clone());
-            llvm.set_fn_arities(imports.fn_arities.clone());
             llvm.set_data_exports(imports.data_exports.clone());
             llvm.set_use_map(use_map.clone());
             if !no_mangle {
@@ -766,8 +688,50 @@ fn find_balanced_gt(s: &str) -> Option<usize> {
 /// Handles: `?` stripping, `.?` -> `!= nil`, `fn()` types -> `any`,
 /// `impl<>` stripping, `cli` block commenting, etc.
 fn apply_bootstrap_rewrite(source: &str) -> String {
+    apply_bootstrap_rewrite_for_target(source, false)
+}
+
+fn apply_bootstrap_rewrite_for_target(source: &str, preserve_module_global_optional_calls: bool) -> String {
     // Protect `?` inside string literals from being stripped
     let mut s = crate::pipeline::module_loader::protect_question_marks_in_strings(source);
+
+    // The freestanding module-global init pass runs after this rewrite and
+    // needs the Optional type marker to split every `T? = function_call()`
+    // declaration into its own startup symbol. Preserve only that top-level
+    // shape; bootstrap normalization still strips Optional markers elsewhere.
+    if preserve_module_global_optional_calls {
+        s = s
+            .split_inclusive('\n')
+            .map(|chunk| {
+                let (line, newline) = chunk.strip_suffix('\n').map_or((chunk, ""), |line| (line, "\n"));
+                let is_module_global = !line.chars().next().is_some_and(char::is_whitespace)
+                    && matches!(line.split_whitespace().next(), Some("var" | "val" | "static" | "const"));
+                if !is_module_global {
+                    return chunk.to_string();
+                }
+                let Some((declaration, initializer)) = line.split_once('=') else {
+                    return chunk.to_string();
+                };
+                let initializer_trimmed = initializer.trim_start();
+                let is_function_call = initializer_trimmed.find('(').is_some_and(|open| {
+                    open > 0
+                        && initializer_trimmed[..open]
+                            .chars()
+                            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | ':'))
+                });
+                let declaration_trimmed = declaration.trim_end();
+                if !declaration_trimmed.ends_with('?') || !is_function_call {
+                    return chunk.to_string();
+                }
+                let type_without_optional = &declaration_trimmed[..declaration_trimmed.len() - 1];
+                let spacing_before_equals = &declaration[declaration_trimmed.len()..];
+                format!(
+                    "{}\x00GLOBAL_OPTIONAL\x00{}={}{}",
+                    type_without_optional, spacing_before_equals, initializer, newline
+                )
+            })
+            .collect();
+    }
 
     // Protect ?? (null coalesce) before stripping ? from types
     s = s.replace("??", "\x00COALESCE\x00");
@@ -836,6 +800,9 @@ fn apply_bootstrap_rewrite(source: &str) -> String {
 
     // Restore ?? (null coalesce) operator
     s = s.replace("\x00COALESCE\x00", "??");
+
+    // Restore module-global Optional markers after general type normalization.
+    s = s.replace("\x00GLOBAL_OPTIONAL\x00", "?");
 
     // Restore `?` inside string literals
     s = s.replace("\x00QMARK\x00", "?");
@@ -1061,7 +1028,7 @@ fn apply_bootstrap_rewrite(source: &str) -> String {
 
 #[cfg(test)]
 mod bootstrap_rewrite_tests {
-    use super::apply_bootstrap_rewrite;
+    use super::{apply_bootstrap_rewrite, apply_bootstrap_rewrite_for_target};
 
     /// Lambda EXPRESSIONS (`fn(...)` followed by `:`) must keep their
     /// parameter list. Regression test for the stage4
@@ -1140,6 +1107,20 @@ mod bootstrap_rewrite_tests {
             assert!(out.contains(expect_contains), "case {src:?} got: {out}");
             assert!(!out.contains(must_not_contain), "case {src:?} got: {out}");
         }
+    }
+
+    #[test]
+    fn module_global_optional_call_type_survives_for_freestanding_init_split() {
+        let src = "var first: Mutex? = mutex_new(0)\nfn use_local():\n    var local: Mutex? = mutex_new(0)\nvar second: Mutex? = mutex_new(0)\n";
+        let out = apply_bootstrap_rewrite_for_target(src, true);
+        assert!(out.contains("var first: Mutex? = mutex_new(0)"), "got: {out}");
+        assert!(out.contains("var second: Mutex? = mutex_new(0)"), "got: {out}");
+        assert!(out.contains("    var local: Mutex = mutex_new(0)"), "got: {out}");
+        let hosted = apply_bootstrap_rewrite(src);
+        assert!(
+            !hosted.contains("Mutex?"),
+            "hosted bootstrap behavior changed: {hosted}"
+        );
     }
 
     /// Documents CURRENT (not necessarily desired) behavior: index-Try

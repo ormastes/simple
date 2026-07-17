@@ -164,12 +164,12 @@ impl FramebufferDriver:
     static fn from_boot_info(fb: FramebufferInfo) -> FramebufferDriver:
         """Create driver from Limine framebuffer info.
 
-        Double-buffered MMIO mode: draw ops target `back_buffer`;
-        `swap_buffers()` flushes the dirty rect to hardware MMIO.
+        Direct-MMIO mode: draw ops target `front_addr` directly, so this path
+        does not allocate a redundant full-frame software back buffer.
         """
         FramebufferDriver(
             front_addr: framebuffer_info_phys_addr(fb),
-            back_buffer: _zero_u32_buffer(fb.width * fb.height),
+            back_buffer: [],
             host_buffer: [],
             width: fb.width,
             height: fb.height,
@@ -185,12 +185,12 @@ impl FramebufferDriver:
     static fn from_scanout_raw(front_addr: u64, width: u32, height: u32, pitch: u32, bpp: u32) -> FramebufferDriver:
         """Create a direct framebuffer without a struct-by-value ABI boundary.
 
-        Double-buffered MMIO mode: draw ops target `back_buffer`;
-        `swap_buffers()` flushes the dirty rect to hardware MMIO.
+        Direct-MMIO mode: draw ops target `front_addr` directly, so this path
+        does not allocate a redundant full-frame software back buffer.
         """
         FramebufferDriver(
             front_addr: front_addr,
-            back_buffer: _zero_u32_buffer(width * height),
+            back_buffer: [],
             host_buffer: [],
             width: width,
             height: height,
@@ -642,16 +642,40 @@ impl FramebufferSurface for FramebufferDriver:
         self.height
 
     me framebuffer_clear_argb(color: u32):
-        self.clear(framebuffer_argb_to_color(color))
+        if self.front_addr != 0u64:
+            self.framebuffer_fill_rect_argb(0u32, 0u32, self.width, self.height, color)
+        else:
+            self.clear(framebuffer_argb_to_color(color))
 
     me framebuffer_fill_rect_argb(x: u32, y: u32, w: u32, h: u32, color: u32):
-        self.fill_rect(x, y, w, h, framebuffer_argb_to_color(color))
+        # The freestanding trait receiver is value-copied, so mutations to its
+        # software back_buffer/dirty fields are detached from the later present
+        # call. MMIO surfaces therefore render straight to the authoritative
+        # front buffer; host-backed surfaces retain the buffered hosted path.
+        if self.front_addr != 0u64:
+            var row: u32 = 0u32
+            while row < h and y + row < self.height:
+                var col: u32 = 0u32
+                while col < w and x + col < self.width:
+                    val offset = (y + row).to_u64() * self.pitch.to_u64() + (x + col).to_u64() * 4u64
+                    mmio_write32(self.front_addr + offset, color)
+                    col = col + 1u32
+                row = row + 1u32
+        else:
+            self.fill_rect(x, y, w, h, framebuffer_argb_to_color(color))
 
     me framebuffer_put_pixel_argb(x: u32, y: u32, color: u32):
-        self.put_pixel(x, y, framebuffer_argb_to_color(color))
+        if x >= self.width or y >= self.height:
+            return
+        if self.front_addr != 0u64:
+            val offset = y.to_u64() * self.pitch.to_u64() + x.to_u64() * 4u64
+            mmio_write32(self.front_addr + offset, color)
+        else:
+            self.put_pixel(x, y, framebuffer_argb_to_color(color))
 
     fn framebuffer_read_pixel_argb(x: u32, y: u32) -> u32:
         self.read_pixel(x, y)
 
     me framebuffer_present():
-        self.swap_buffers()
+        if self.front_addr == 0u64:
+            self.swap_buffers()

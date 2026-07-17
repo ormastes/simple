@@ -616,7 +616,12 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
     # for a `SoftwareBackend` boxed this way -- a compiler/codegen defect
     # filed for follow-up, not something fixable at this call site.
     val needs_real_offscreen = embedding.opacity_milli < 1000 or eng.backend_name() == "vulkan" or eng.backend_name() == "metal"
-    val use_embedded_surface = embedding.surface_id != "" and depth < ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH and embedding.width > 0 and embedding.height > 0 and not fills_target_exactly and (needs_real_offscreen or not embedding.clip)
+    # Opaque baremetal batches can render directly into the MMIO parent: the
+    # command loop already applies embedding offsets, and no opacity surface
+    # or device-shared target is needed. This avoids one full-frame software
+    # allocation per desktop/chrome/taskbar batch on the bump-only OS heap.
+    val baremetal_direct = eng.backend_name() == "baremetal" and embedding.opacity_milli >= 1000
+    val use_embedded_surface = embedding.surface_id != "" and depth < ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH and embedding.width > 0 and embedding.height > 0 and not fills_target_exactly and (needs_real_offscreen or (not embedding.clip and not baremetal_direct))
     if not use_embedded_surface:
         val apply_clip = embedding.clip and not fills_target_exactly
         if apply_clip:
