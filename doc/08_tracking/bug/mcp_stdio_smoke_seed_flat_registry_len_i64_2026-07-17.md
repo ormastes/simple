@@ -143,3 +143,118 @@ and SDNVALUE fixes for the two already-fixed sibling instances of this same
 mechanism). The `--stdio` symptom (Symptom 1) is fixed in `main.spl`; the
 underlying round-trip still cannot be verified end-to-end against the seed
 binaries until Symptom 2 is resolved in `src/compiler_rust`.
+
+## Pure-Simple compiler audit 2026-07-17 (marker: `pure_interp_registry_2026-07-17`)
+
+Separate lane (Worker T), scoped to `src/compiler/**` (the pure-Simple
+compiler's own interpreter), to determine whether the SAME failure mode
+(an unrelated/never-called module corrupting an unrelated function's call
+elsewhere) exists in our own registry design, not just the Rust seed's.
+
+**Registry map** (`src/compiler/10.frontend/core/interpreter/`):
+- `eval_tables.spl` — `func_table_*`/`struct_table_*`: chained-hash maps
+  (`ft_keys`/`ft_vals`/`ft_buckets`/`ft_nexts`, same shape for structs),
+  keyed by **bare name** (not module-qualified). `func_table_register`
+  overwrites on collision (last-write-wins), with a diagnostic-only warning
+  for `_`-prefixed private helpers whose signature differs
+  (`_ftr_warn_collision`) — public/method (`Type__method`-mangled) names
+  collide silently, no warning.
+- `value.spl` — separate value arena (`val_kinds`/`val_ints`/`val_texts`/…),
+  index-based (`value_id: i64`) with a free-list for slot reuse. Kind is
+  stored in a **separate parallel array** (`val_kinds[vid]`), never encoded
+  into the value word itself.
+- `module_loader_core.spl` — `register_module_functions()` registers a
+  module's decls (scanned from the freshly-parsed AST) into the tables
+  *after* a successful parse; it does not evaluate function bodies, so an
+  unresolved identifier inside a body is never touched at registration time.
+- `module_loader_lazy.spl` (gated off by default, `SIMPLE_LAZY_PARSE=1`) —
+  outline-scans a module's top-level surface and defers real
+  parsing/registration until first symbol use
+  (`try_force_any_deferred_for`); a never-called deferred module is never
+  parsed at all, let alone registered.
+
+**Audit table** (failure modes a–e from the task; each vs. this design):
+
+| # | Failure mode | Present? | Evidence |
+|---|---|---|---|
+| a | Bare-name keys allow cross-module collision/overwrite | **Yes** | `eval_tables.spl:168-182` (`func_table_register`, last-write-wins); `eval_tables.spl:480-494` (`struct_table_register`, same, no warning at all — matches the pre-existing `feedback_interp_struct_name_collision_global_registry` note). Method names are mangled `Type__method` at parse time (`parser_decls_use.spl:387`) but still bare-keyed, so two modules each defining a struct of the same name with a same-named method collide too. |
+| b | Registration before identifiers resolve, corrupting registry/slot state | **No** | `module_loader_core.spl:257-294` (`register_module_functions`) only reads `decl_get_tag/name/ret_type` off the parsed AST — it never evaluates expressions/bodies, so an unresolved identifier inside a function body cannot reach registration. Confirmed the AST arena is append-only (`core_frontend_parse_append`, `module_get_decls()` scans only the freshly-appended module's decls) so stored `decl_id`s stay stable across later parses. |
+| c | Slot/index-based registry where a failed/partial registration shifts later slots | **No** | Both `eval_tables.spl` tables and `value.spl`'s value arena are append-based (`ft_keys.push(...)`, `val_kinds.push(...)`); removal tombstones in place (`func_table_remove` clears key/value, unlinks the hash chain, never compacts) and reuse goes through an explicit free-list (`val_free_list`). No index ever shifts because of another entry's removal or a partial registration. Regression spec: Group 3 in `registry_scoping_spec.spl` (below). |
+| d | Double-registration of cross-module fns (seed's FUNCTION_OVERLOADS class) | **N/A / narrower** | The interpreter has no overload table at all — one bare name = one slot, always (no seed-style dual-path double-registration to lose a mut-param writeback). The analogous risk here is (a)'s plain collision, not a writeback-loss bug. |
+| e | Silent fallback to a global/flat lookup when scoped lookup misses | **Yes (opt-in path only)** | `module_loader_core.spl:125-148` (`try_force_any_deferred_for`) walks ALL deferred modules and force-loads the *first* one whose recorded export list contains the requested bare symbol name — if two lazily-deferred modules both export the same name, whichever was deferred first wins materialization regardless of which one the caller actually meant. Gated behind `SIMPLE_LAZY_PARSE=1` (default OFF via `lazy_parse_enabled()`), so not on the default path. |
+
+**Verdict: does NOT share the seed's specific failure mode, but has a
+related, narrower defect (now fixed).** The seed's symptom
+(`method 'len' not found on i64`, a pointer-shaped receiver value) is a
+type-tag/boxing corruption: the seed apparently encodes type information
+into the value word itself, so a slot/tag mixup makes an integer look
+pointer-shaped. The pure-Simple interpreter's value representation
+(`value.spl`) stores kind in a **separate** parallel array
+(`val_kinds[vid]`), never encoded into the same word as the payload —
+structurally, a registry-slot mixup here cannot manifest as "int now looks
+like a pointer" the way it does in the seed. Registration is also
+strictly decl-scan-based (b) over an append-only AST arena, so an
+unresolved identifier in a body cannot perturb registration at all, and
+there is no index-shift-on-removal (c) or seed-style double-registration
+path (d).
+
+**However**, the audit surfaced a genuine, narrower cross-module
+corruption bug in the **unload** path, in the same spirit as (a): if
+module A registers `helper` and module B (loaded later) also registers
+`helper` (bare-name collision — table now holds B's decl_id), later
+selectively unloading A via `interp_unload_module`/`irt_unload_module`
+blindly called `func_table_remove("helper")` — deleting B's LIVE
+registration, not A's stale one. This is a real "unrelated module's
+function disappears" corruption, reachable whenever selective module
+unload is used (opt-in API, exported from
+`compiler/10.frontend/core/interpreter/__init__.spl`; not on the default
+`load_module` hot path).
+
+### Fix (root-cause, additive — no wholesale registry redesign)
+
+- `eval_tables.spl`: added `func_table_remove_owned(name, expected_decl_id)`,
+  `func_remove_return_type_owned(name, expected_decl_id)`,
+  `struct_table_remove_owned(name, expected_decl_id)` — each no-ops
+  (leaves the table untouched) when the table's current entry for `name`
+  does not match `expected_decl_id`, i.e. when a different module's
+  registration is the one currently live. Existing unguarded
+  `func_table_remove`/`func_remove_return_type`/`struct_table_remove` are
+  untouched (no signature change, no blast radius on any caller not
+  migrated).
+- `interp_resource_tracker.spl`: added `irt_func_decls`/`irt_struct_decls`
+  parallel arrays recording the owning `decl_id` per tracked name; new
+  `irt_track_func_owned`/`irt_track_struct_owned` hooks populate them (the
+  old `irt_track_func`/`irt_track_struct` still work, pushing a `-1`
+  sentinel so array lengths stay lockstepped — `irt_unload_module` falls
+  back to the old unguarded removal only for `-1`-sentinel/legacy entries).
+  `irt_unload_module` now calls the `_owned` removal variants whenever an
+  owner decl_id was recorded.
+- `module_loader_core.spl`: the 4 call sites in `register_module_functions`
+  (`DECL_FN`, `DECL_EXTERN_FN`, `DECL_STRUCT`, `DECL_IMPL` methods) now call
+  `irt_track_func_owned`/`irt_track_struct_owned` with the decl's own id.
+- `__init__.spl`: re-exports the new `_owned` functions alongside their
+  existing counterparts.
+
+### Regression spec
+
+`test/01_unit/compiler_core/interpreter/registry_scoping_spec.spl` — mocks
+mirroring the real guarded logic (same "hm_* not importable standalone in
+interpreter-mode runtime" constraint documented in the neighboring
+`interp_resource_tracker_spec.spl`, same directory). 7 examples, 0
+failures via `timeout 240 src/compiler_rust/target/release/simple test
+test/01_unit/compiler_core/interpreter/registry_scoping_spec.spl` (exit 0):
+pins the CURRENT bare-name collision policy (last-write-wins — not changed
+to fail-closed; that would be a wholesale redesign and contradicts the
+codebase's documented diagnostic-only choice for the private-helper case),
+proves the pre-fix unguarded unload deletes a surviving module's entry
+(regression proof) and that the guarded unload does not, and confirms a
+later module's partial registration never shifts/corrupts an earlier
+module's already-registered slots.
+
+**Verifiability caveat:** the pure-Simple binary (`bin/release/<triple>/simple`)
+is too stale to exercise these source edits end-to-end (redeploy wall,
+separate campaign) and a full bootstrap was out of scope for this lane;
+the regression spec runs its own faithful mock of the guarded logic on the
+seed binary, not the compiled `eval_tables.spl`/`interp_resource_tracker.spl`
+themselves. The source edits are reviewed/read-verified but not
+build-verified in this pass.
