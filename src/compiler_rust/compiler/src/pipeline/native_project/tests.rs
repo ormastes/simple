@@ -3764,6 +3764,46 @@ fn test_llvm_mangle_does_not_rebind_qualified_method_to_unrelated_type() {
 }
 
 #[test]
+fn test_llvm_mangle_resolves_desugared_cross_module_method() {
+    let mut mir = crate::mir::MirModule::new();
+    let mut func = crate::mir::MirFunction::new(
+        "main".to_string(),
+        crate::hir::TypeId::VOID,
+        simple_parser::Visibility::Private,
+    );
+    func.blocks[0].instructions.push(crate::mir::MirInst::MethodCallStatic {
+        dest: Some(crate::mir::VReg(1)),
+        receiver: crate::mir::VReg(0),
+        func_name: "TreeSitter.match_token".to_string(),
+        args: vec![],
+    });
+    func.blocks[0].terminator = crate::mir::Terminator::Return(None);
+    mir.functions.push(func);
+
+    let import_map = std::collections::HashMap::from([(
+        "treesitter_match_token".to_string(),
+        "frontend__treesitter__outline_lexer__treesitter_match_token".to_string(),
+    )]);
+    super::mangle::mangle_mir(
+        &mut mir,
+        "frontend__treesitter__outline",
+        true,
+        &import_map,
+        &std::collections::HashSet::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    );
+
+    match &mir.functions[0].blocks[0].instructions[0] {
+        crate::mir::MirInst::MethodCallStatic { func_name, .. } => assert_eq!(
+            func_name,
+            "frontend__treesitter__outline_lexer__treesitter_match_token"
+        ),
+        other => panic!("expected static method call, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_re_exports_include_glob_imported_facade_symbols() {
     let temp = tempfile::tempdir().unwrap();
     let project_root = temp.path().join("project");

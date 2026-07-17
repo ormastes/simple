@@ -99,6 +99,8 @@ pub(crate) fn resolve_name_variants(
         }
     }
     if let Some(pos) = name.find('.') {
+        let type_part = &name[..pos];
+        let method_part = &name[pos + 1..];
         let underscored = format!("{}__{}", &name[..pos], &name[pos + 1..]);
         if let Some(resolved) = use_map.get(&underscored).or_else(|| import_map.get(&underscored)) {
             return Some(resolved.clone());
@@ -109,9 +111,12 @@ pub(crate) fn resolve_name_variants(
                 return Some(resolved.clone());
             }
         }
-        let func_part = &name[pos + 1..];
-        if !func_part.is_empty() {
-            if let Some(resolved) = use_map.get(func_part).or_else(|| import_map.get(func_part)) {
+        let lower_joined = format!("{}_{}", type_part.to_lowercase(), method_part);
+        if let Some(resolved) = use_map.get(&lower_joined).or_else(|| import_map.get(&lower_joined)) {
+            return Some(resolved.clone());
+        }
+        if !method_part.is_empty() {
+            if let Some(resolved) = use_map.get(method_part).or_else(|| import_map.get(method_part)) {
                 return Some(resolved.clone());
             }
         }
