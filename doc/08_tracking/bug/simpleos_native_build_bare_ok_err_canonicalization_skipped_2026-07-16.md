@@ -1,7 +1,12 @@
 # Bug: bare `Ok(...)`/`Err(...)` canonicalization skipped in entry-closure native-build (NVMe/vfs boot modules)
 
 - **Date:** 2026-07-16
-- **Status:** source-resolved; dual-backend regression pinned, execution pending
+- **Status:** FIXED — landed `86e56ca7867` (2026-07-16). Actual root was
+  qualified `Result.Ok/Err` routing (`types.lookup("Result")` misses unnamed
+  builtin-generic instantiations in entry-closure modules), not bare-Ok MIR
+  canonicalization itself. Runtime-verified: unresolved `Ok|Err` warnings
+  11→0, NVMe advances to `fat32 scalar mount ready`. The pure-Simple-side
+  regression coverage below (dual-backend fixture) remains valid.
 - **Severity:** critical (blocks SimpleOS x86_64 disk mount → diskless desktop → black screen)
 - **Component:** rust seed MIR lowering (`src/compiler_rust/compiler/src/mir/lower/lowering_expr_call.rs`)
 - **Related:** `simpleos_native_build_framebufferdriver_crossmodule_field_offset_shift_2026-07-14.md` (SEPARATE bug — a seed carrying that field-index fix still reproduces this one)

@@ -433,3 +433,13 @@ one shot], and **(2) the separate HEAD-seed NVMe-init regression** that must be 
 build a HEAD-seed kernel that boots to the render stage and thereby verify (1). Scanout-resolution
 match is likely downstream of (1). Both worked source patches (compiler fix + render nil-guards)
 are captured under `scratchpad/screendump_handoff/`.
+
+---
+
+## 2026-07-16 — Related same-family bugs FIXED; access.rs patch uncommitted on disk
+
+Same-day landing of interconnected struct-lowering root causes:
+- `6b59a8c4bf7`: struct-init declared-order lowering + nil default fill (general compiler correctness, affects all named-arg/default-field code)
+- `8932fcb3a14`: vtable keyed by struct NAME not per-module TypeId (all 13 RenderBackend vtables now emitted; Symptom B root fix in sibling bug `simpleos_native_build_field_defaults_and_boxed_trait_dispatch_2026-07-16.md`)
+
+**Access.rs field-type pre-scan patch READY but UNCOMMITTED on disk** (at `scratchpad/screendump_handoff/compiler_field_fix.patch`). The patch recovers receiver-struct name from erased ANY to resolve ambiguous field indices correctly; bootstrap-safe (seed rebuild 3m29s, no regression). Awaiting runtime verification of: (1) composition builds fully, (2) Engine2D creation dims read correctly, (3) first-frame-rendered screendump non-black.

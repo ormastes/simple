@@ -433,6 +433,25 @@ HEAD-seed kernel that boots to the render stage (to verify the field fix). Rende
 **Owner.** Rust-seed HIR-lowering maintainer (same as item D's linker/lowering owner). This UI
 wave supplies the fast native-build repro loop + the confirmed root cause; it does not own the seed fix.
 
+### D.2 — 2026-07-16 status (full landed fix chain)
+
+**Landed today — interconnected struct-lowering + Result routing corrections:**
+- `7a4cb1ab3d3` + `81fe38e6dd6`: seed spl_arg providers (plain cargo builds fixed)
+- `86e56ca7867`: qualified Result.Ok/Err routing (NVMe init_from_grant root)
+- `610b4572a32`: bootstrap rewrite was deleting Try operators (BinaryWriter.len root)
+- `77c519cdab43`: trait-impl virtualization scoped to local impls (fb-init regression)
+- `73b6b02eca2`: BGA enable-bit fix, rt_file_read_bytes weak + VFS export, font soft-fail, frame-degraded policy
+- `4c1a5365c61`: unconditional rasterizer clipping, per-command preflight, strong dl stubs, Engine2D nil pinning
+- `6b59a8c4bf7`: struct-init declared-order lowering (Symptom A root fix)
+- `8932fcb3a14`: vtable NAME-keyed (Symptom B root fix; all 13 RenderBackend vtables)
+
+**Boot depth:** compositor ready → shell initialized → launcher apps=15 → [wm-frame] executor → first-frame-rendered
+
+**Screendump state:** 3840×2160 honest dims (QMP `-vga std`, real OVMF + nvme FAT32), still **BLACK** (0.00%);
+confirmed as downstream of cross-module field-index shift (access.rs patch ready but uncommitted)
+
+**Open blocker:** compose retry-recovery leak — alloc sz 8MB per `create_offscreen` → ~5 faults exhausts heap → boot halts.
+
 ---
 
 ## E — fb-lane trait unification remainder (CompositorBackend vs RenderBackend)
