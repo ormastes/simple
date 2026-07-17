@@ -144,13 +144,7 @@ pub fn _driver_entry_import_module_paths(content: text) -> [text]:
             result = result.push(mp)
     result
 
-pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
-    """File path backing a dotted module path, or "" when none exists.
-    Candidates are ordered so the module name derived from the returned path
-    (_driver_module_name_from_path) matches the import path when possible:
-    working-directory-relative first, then src/, then the importing file's
-    directory, then the canonical src/lib package root and std aliases."""
-    val rel = module_path.replace(".", "/")
+fn _driver_try_entry_import_rel(rel: text, entry_dir: text) -> text:
     var roots: [text] = ["", "src/"]
     if entry_dir != "":
         roots = roots.push(entry_dir + "/")
@@ -162,6 +156,59 @@ pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
             return base + "/mod.spl"
         if rt_file_exists(base + "/__init__.spl"):
             return base + "/__init__.spl"
+    ""
+
+fn _driver_resolve_rewritten_import(module_path: text, prefix: text, rel_prefix: text, entry_dir: text) -> text:
+    if module_path != prefix and not module_path.starts_with(prefix + "."):
+        return ""
+    var rel = rel_prefix
+    if module_path.len() > prefix.len():
+        rel = rel + "/" + module_path.substring(prefix.len() + 1).replace(".", "/")
+    _driver_try_entry_import_rel(rel, entry_dir)
+
+fn _driver_entry_import_parent(module_path: text) -> text:
+    # Preserve the leading-dot relative-import marker and remove only a real
+    # dotted path segment. `..backend_types.CompiledUnit` becomes
+    # `..backend_types`, while `..backend_types` has no further parent.
+    var leading = 0
+    while leading < module_path.len() and module_path.substring(leading, leading + 1) == ".":
+        leading = leading + 1
+    var last = -1
+    var i = leading
+    while i < module_path.len():
+        if module_path.substring(i, i + 1) == ".":
+            last = i
+        i = i + 1
+    if last < 0:
+        return ""
+    module_path[0:last]
+
+fn _driver_resolve_relative_entry_import(module_path: text, entry_dir: text) -> text:
+    if not module_path.starts_with("."):
+        return ""
+    var dots = 0
+    while dots < module_path.len() and module_path.substring(dots, dots + 1) == ".":
+        dots = dots + 1
+    if dots >= module_path.len():
+        return ""
+    var base_dir = entry_dir
+    var up = 1
+    while up < dots:
+        base_dir = _driver_entry_import_dirname(base_dir)
+        up = up + 1
+    val rel = module_path.substring(dots).replace(".", "/")
+    _driver_try_entry_import_rel(rel, base_dir)
+
+fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> text:
+    val relative = _driver_resolve_relative_entry_import(module_path, entry_dir)
+    if relative != "":
+        return relative
+
+    val rel = module_path.replace(".", "/")
+    val direct = _driver_try_entry_import_rel(rel, entry_dir)
+    if direct != "":
+        return direct
+
     if not module_path.starts_with("std."):
         val lib_base = "src/lib/" + rel
         if rt_file_exists(lib_base + ".spl"):
@@ -170,6 +217,14 @@ pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
             return lib_base + "/mod.spl"
         if rt_file_exists(lib_base + "/__init__.spl"):
             return lib_base + "/__init__.spl"
+        for family in ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]:
+            val family_base = "src/lib/" + family + "/" + rel
+            if rt_file_exists(family_base + ".spl"):
+                return family_base + ".spl"
+            if rt_file_exists(family_base + "/mod.spl"):
+                return family_base + "/mod.spl"
+            if rt_file_exists(family_base + "/__init__.spl"):
+                return family_base + "/__init__.spl"
     if module_path.starts_with("std."):
         val lib_base = "src/lib/" + rel.substring(4)
         if rt_file_exists(lib_base + ".spl"):
@@ -187,7 +242,105 @@ pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
                 return family_base + "/mod.spl"
             if rt_file_exists(family_base + "/__init__.spl"):
                 return family_base + "/__init__.spl"
+
+    # Match the canonical numbered compiler layout used by the interpreter's
+    # module resolver. Some layers also retain a same-named wrapper directory;
+    # try both forms without scanning the full source tree.
+    var mapped = _driver_resolve_rewritten_import(module_path, "compiler.common", "compiler/00.common", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.core", "compiler/10.frontend/core", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.frontend", "compiler/10.frontend", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.blocks", "compiler/15.blocks/blocks", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.hir", "compiler/20.hir", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.traits", "compiler/25.traits", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.types", "compiler/30.types", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.semantics", "compiler/35.semantics", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.monomorphize", "compiler/40.mono/monomorphize", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "monomorphize", "compiler/40.mono/monomorphize", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.mir", "compiler/50.mir", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.borrow", "compiler/55.borrow", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.mir_opt", "compiler/60.mir_opt/mir_opt", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.backend", "compiler/70.backend", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.driver", "compiler/80.driver", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.shb", "compiler/80.driver/shb", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.interpreter", "compiler/95.interp/interpreter", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "linker", "compiler/70.backend/linker", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.browser", "app/ui.browser", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "app.ui.render", "app/ui.render", entry_dir)
+    if mapped != "":
+        return mapped
+    mapped = _driver_resolve_rewritten_import(module_path, "cmm_lsp", "examples/10_tooling/trace32_tools/cmm_lsp", entry_dir)
+    if mapped != "":
+        return mapped
+    val backend_wrapped = _driver_resolve_rewritten_import(module_path, "compiler.backend", "compiler/70.backend/backend", entry_dir)
+    if backend_wrapped != "":
+        return backend_wrapped
     ""
+
+pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
+    """File path backing a Simple import path, or "" when none exists.
+    Exact modules are preferred. Dotted terminal names are then removed one at
+    a time because Simple permits `use module.function` as a glob-style import
+    of the containing source module."""
+    var probe = module_path
+    while probe != "":
+        val resolved = _driver_resolve_entry_import_exact(probe, entry_dir)
+        if resolved != "":
+            return resolved
+        probe = _driver_entry_import_parent(probe)
+    ""
+
+pub fn _driver_collect_entry_import_source(p: text) -> [SourceFile]:
+    """Load one explicitly resolved closure import.
+    Bulk collection exclusions must not hide a file named `check.spl` or an
+    imported async lowering module. Test, fixture, doc, and verification trees
+    remain excluded from production closure builds."""
+    var result: [SourceFile] = []
+    if not p.ends_with(".spl"):
+        return result
+    if p.contains("/test/") or p.contains("/tests/") or p.contains("/testdata/") or p.contains("/doc/") or p.contains("/verification/"):
+        return result
+    val content = rt_file_read_text(p) ?? ""
+    if content == "":
+        return result
+    _driver_module_aliases(p, content, _driver_module_name_from_path(p))
 
 fn _driver_is_filtered_test_helper_path(path: text) -> bool:
     val normalized = path.replace("\\", "/")

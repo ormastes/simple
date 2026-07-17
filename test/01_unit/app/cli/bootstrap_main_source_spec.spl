@@ -1,5 +1,6 @@
 extern fn rt_file_read_text(path: text) -> text
 use std.spec.{describe, it, expect}
+use compiler.driver.driver_source_loading.{_driver_resolve_entry_import, _driver_collect_entry_import_source}
 
 fn bootstrap_main_source() -> text:
     rt_file_read_text("src/app/cli/bootstrap_main.spl") ?? ""
@@ -37,6 +38,7 @@ describe "bootstrap main source":
         expect(driver_source).to_contain("var closure_scanned_paths: [text] = []")
         expect(driver_source).to_contain("if _driver_text_list_contains(closure_scanned_paths, closure_src.path):")
         expect(driver_source).to_contain("closure_scanned_paths = closure_scanned_paths.push(closure_src.path)")
+        expect(driver_source).to_contain("_driver_collect_entry_import_source(closure_file)")
 
     it "propagates entry-closure state into the bootstrap runtime":
         val source = bootstrap_main_source()
@@ -54,3 +56,14 @@ describe "bootstrap main source":
         expect(source).to_contain("extern fn sys_get_args() -> [text]")
         expect(source).to_contain("sys_get_args()")
         expect(source.contains("extern fn rt_get_args() -> [text]")).to_equal(false)
+
+    it "resolves closure aliases, terminal symbols, and relative modules":
+        expect(_driver_resolve_entry_import("compiler.core.parser", "src/app/cli")).to_equal("src/compiler/10.frontend/core/parser.spl")
+        expect(_driver_resolve_entry_import("compiler.backend.backend_api", "src/app/cli")).to_equal("src/compiler/70.backend/backend/backend_api.spl")
+        expect(_driver_resolve_entry_import("std.test_runner.test_runner_args.parse_test_args", "src/app/cli")).to_equal("src/lib/nogc_async_mut/test_runner/test_runner_args.spl")
+        expect(_driver_resolve_entry_import("app.ui.browser.app", "src/app/cli")).to_equal("src/app/ui.browser/app.spl")
+        expect(_driver_resolve_entry_import(".types", "src/compiler/40.mono/monomorphize")).to_equal("src/compiler/40.mono/monomorphize/types.spl")
+
+    it "loads an explicitly imported command excluded only from bulk scans":
+        val loaded = _driver_collect_entry_import_source("src/app/cli/check.spl")
+        expect(loaded.len()).to_be_greater_than(0)

@@ -664,3 +664,29 @@ seconds at about 1.26 GiB maximum RSS instead of repeating scans. It now fails
 boundedly on unresolved import aliases, terminal member imports, and relative
 imports. Those resolver gaps are the next blocker; they are separate from this
 closed pre-object spin root cause and must be fixed in a fresh capped session.
+
+## 2026-07-17 resolver continuation
+
+The closure resolver now mirrors the language loader's numbered compiler-layer,
+stdlib-family, dotted-package, terminal-symbol, and relative-path contracts.
+Explicit imports load their resolved file even when its name or directory is
+excluded only from bulk scans (`check.spl` and `hir_lowering/async`), while
+test/doc/fixture trees remain excluded. A focused source spec pins the resolver
+and explicit-import contracts.
+
+The refreshed Stage 3 completed with 715 compiled, zero failed, a 24 MiB
+binary, version sanity PASS, 51.86 seconds wall time, and about 518 MiB maximum
+RSS. Three bounded Stage 4 observations then converged source resolution:
+
+1. cycle 1 reduced roughly 80 unresolved imports to nine;
+2. after materializing the tracked `src/os` sparse root and replacing stale
+   cross-layer relative imports, cycle 2 reduced nine to two;
+3. after canonicalizing `pipeline_fn.spl`, cycle 3 emitted no unresolved-import
+   or phase-failure diagnostic but terminated with SIGBUS before producing objects or an output
+   binary (17.67 seconds, about 1.56 GiB maximum RSS).
+
+The apparent missing `os.*` modules were not a repository defect: the isolated
+workspace's sparse profile omitted tracked `src/os`. The remaining blocker is
+now the Stage 4 SIGBUS after closure resolution. The three-cycle cap was
+reached, so the next continuation must capture phase tracing to locate the
+exact phase boundary rather than rerunning the same command blindly.
