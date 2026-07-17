@@ -179,10 +179,13 @@ font facade before Web layout and Engine2D execution and rejects any skipped
 Draw IR command. A guest path marker without glyph/framebuffer evidence is not
 support.
 
-Registered-only SimpleOS rendering currently fails closed for complex-script
-shaping because the shaping owner still requires hosted font handles. Arabic
-and Devanagari commands are skipped and therefore fail the Browser gate; hosted
-Simple shaping support is not evidence of SimpleOS shaping support.
+Registered-only SimpleOS producers validate the pinned bytes and bind that
+`OtFont` directly to the existing pure-Simple shaper with handle/generation
+`0`; they never call the stubbed baremetal `rt_font_load_bytes`. The accepted
+Arabic and Devanagari witnesses lower to handle-free `DrawIrGlyphRunPayload`,
+then the existing registered `FontRasterizer` prepares `FontRenderBatch`
+material. Hosted producers retain the live-face binding path. This source and
+regression coverage is not retained QEMU framebuffer evidence.
 
 The completion topology keeps all remaining paths on existing owners:
 

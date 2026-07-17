@@ -1,7 +1,7 @@
 <!-- Hand-maintained generated-style mirror; canonical docgen timed out. -->
 # Exact-face Shared Font Shaping Acceptance
 
-Status: **PENDING focused rerun after the exact Hindi scenario update**.
+Status: **PENDING focused rerun after the registered-only scenario update**.
 
 Prior recorded command:
 
@@ -9,10 +9,10 @@ Prior recorded command:
 bin/release/simple test test/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.spl --mode=interpreter
 ```
 
-The recorded command predates the exact Hindi scenario update and is not reused
+The recorded command predates the registered-only scenario update and is not reused
 as current PASS evidence. The focused stage-3 interpreter rerun timed out after
 90 seconds with no stdout, and `spipe-docgen` timed out after 60 seconds with no
-stdout. The executable source contains seven scenarios.
+stdout. The executable source contains eight scenarios.
 
 ## Accept exact-face-bound simple-script shaping
 
@@ -37,6 +37,13 @@ stdout. The executable source contains seven scenarios.
    identity, same generation, and one material quad per glyph.
 8. Require an unmapped codepoint to remain incomplete and invalid.
 9. Free a selected face and require its previously shaped material to fail.
+10. In the final irreversible scenario, register the exact Noto Sans Arabic and
+    Noto Sans Devanagari blobs and switch to registered-only mode.
+11. Resolve the exact `العربية`/`ar` and `हिन्दी`/`hi` witnesses and require
+    `resolved` handle-free glyph payloads.
+12. Reload each payload identity through the existing registered-byte
+    `FontRenderer`, prepare selected glyph material, and require a valid
+    nonempty `FontRenderBatch` without a hosted font handle.
 
 ## Preserve multi-face atlas identity and evict stale dependencies
 

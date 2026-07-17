@@ -12,7 +12,7 @@ use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_c
 use std.common.encoding.utf8.{text_codepoints}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 use std.nogc_sync_mut.io.font_sffi.{FontHandle, load_font, free_font, glyph_index, font_face_identity, font_face_is_live}
-use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer, resolve_font_metrics_with_language, font_renderer_register_selected_bytes, font_renderer_use_registered_selected_bytes_only}
 use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels}
 use std.skia.entity.font.{SkFont, sk_font_new, sk_font_style_normal, sk_typeface_from_attached_font}
 use std.skia.feature.glyph.ot_parser.{OtFont, find_table, parse_offset_table, read_u16_be}
@@ -402,3 +402,29 @@ describe "shared font shaping acceptance":
         expect_complex_run_rejected(fixture, "😀🏻", "und")
         expect_complex_run_rejected(fixture, "😀‍😀", "und")
         free_font(fixture.handle)
+
+    # @req REQ-007
+    it "should shape and materialize exact registered-only SimpleOS witnesses":
+        step("Accept exact-face-bound simple-script shaping")
+        var registered = 0
+        for asset in selected_font_asset_candidates():
+            if asset.family == "Noto Sans Arabic" or asset.family == "Noto Sans Devanagari":
+                expect(font_renderer_register_selected_bytes(asset.local_path, file_read_bytes(asset.local_path))).to_be(true)
+                registered = registered + 1
+        expect(registered).to_equal(2)
+        font_renderer_use_registered_selected_bytes_only()
+        val arabic = resolve_font_metrics_with_language("sans-serif", "العربية", 32, "ar")
+        val hindi = resolve_font_metrics_with_language("sans-serif", "हिन्दी", 32, "hi")
+        expect(arabic.reason).to_equal("resolved")
+        expect(arabic.glyph_run.valid).to_be(true)
+        expect(hindi.reason).to_equal("resolved")
+        expect(hindi.glyph_run.valid).to_be(true)
+        var renderer = FontRenderer.new()
+        expect(renderer.try_load_registered_identity(arabic.identity)).to_be(true)
+        val arabic_batch = renderer.prepare_selected_glyph_run(arabic.glyph_run, 0xFFFFFFFFu32, 32)
+        expect(arabic_batch.valid).to_be(true)
+        expect(arabic_batch.quads.len()).to_be_greater_than(0)
+        expect(renderer.try_load_registered_identity(hindi.identity)).to_be(true)
+        val hindi_batch = renderer.prepare_selected_glyph_run(hindi.glyph_run, 0xFFFFFFFFu32, 32)
+        expect(hindi_batch.valid).to_be(true)
+        expect(hindi_batch.quads.len()).to_be_greater_than(0)

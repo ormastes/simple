@@ -14,6 +14,7 @@ use std.skia.feature.shaper.selected_arabic.{selected_arabic_glyphs}
 use std.nogc_sync_mut.text_layout.font_types.{FontGlyphRun}
 use std.nogc_sync_mut.io.font_sffi.{font_face_current_generation, font_face_identity, font_face_is_live}
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.encoding.font_registry.{validate_selected_font_asset}
 extern fn rt_font_glyph_index(font_handle: i64, codepoint: i64) -> i64
 # ===== Arabic joining form =====
 enum ArabicJoinForm:
@@ -664,6 +665,13 @@ fn _selected_arabic_complete(codepoints: [u32], start: i64, end_idx: i64,
         index = index + 1
     true
 
+fn _selected_blob_matches(font: SkFont, ot_font: Option<OtFont>) -> bool:
+    match ot_font:
+        case Some(parsed):
+            validate_selected_font_asset(font.typeface.font_path, parsed.blob).valid
+        case None:
+            false
+
 fn _build_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script, language: text, font: SkFont, ot_font: Option<OtFont>, ot_font_handle: i64, ot_font_generation: i64, gsub_lookups: [GsubLookup], features_empty: bool, start_x: f64, start_y: f64) -> ShapedRun:
     val rtl = script_is_rtl(scr)
     val shaped_glyphs = _dispatch_shape_run(codepoints, start: start, end_idx: end_idx, scr: scr, language: language, ot_font: ot_font, gsub_lookups: gsub_lookups, font_size: font.size)
@@ -682,9 +690,10 @@ fn _build_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script, language
         font.typeface.font_handle == ot_font_handle and
         font.typeface.font_generation == ot_font_generation and
         font_face_is_live(font.typeface.font_handle, font.typeface.font_generation))
-    val selected_devanagari_complete = (handle_matches and features_empty and scr == Script.Devanagari and
+    val selected_blob_matches = if handle_matches: false else: _selected_blob_matches(font, ot_font)
+    val selected_devanagari_complete = ((handle_matches or selected_blob_matches) and features_empty and scr == Script.Devanagari and
         _selected_devanagari_complete(codepoints, start, end_idx, language, ot_font, font.size, shaped_glyphs))
-    val selected_arabic_complete = (handle_matches and features_empty and scr == Script.Arabic and
+    val selected_arabic_complete = ((handle_matches or selected_blob_matches) and features_empty and scr == Script.Arabic and
         (font.typeface.font_path == "assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf" or
          font.typeface.font_path == "assets/fonts/google-fonts/ofl/notonaskharabic/NotoNaskhArabic[wght].ttf") and
         _selected_arabic_complete(codepoints, start, end_idx, language, ot_font, font.size, shaped_glyphs))

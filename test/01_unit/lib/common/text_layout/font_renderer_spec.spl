@@ -5,6 +5,7 @@ use common.text_layout.font_renderer.{
     browser_chrome_compatible_vector_font_name,
     CachedGlyph, GlyphCache, FontRenderer, FontRenderBatch, ResolvedFontMetrics, resolve_font_metrics, resolve_font_metrics_with_language,
     font_renderer_register_selected_bytes,
+    font_renderer_use_registered_selected_bytes_only,
     browser_font_download_script_path, browser_font_face_source_urls,
     browser_font_face_family_value, browser_font_face_source_from_family_value,
     browser_font_cache_dir, browser_font_face_cached_source_path, ensure_browser_font_face_sources,
@@ -649,3 +650,32 @@ describe "shared font renderer fallbacks":
         expect(cache.stats().font_identity).to_equal("sha256=b;axes=wght:700")
         expect(cache.max_entries).to_equal(8)
         expect(cache.max_bytes).to_equal(33554432)
+
+    it "shapes registered-only Arabic and Devanagari without filesystem reads":
+        val candidates = selected_font_asset_candidates()
+        var registered = 0
+        for candidate in candidates:
+            if candidate.family == "Noto Sans Arabic" or candidate.family == "Noto Sans Devanagari":
+                expect(font_renderer_register_selected_bytes(candidate.local_path, file_read_bytes(candidate.local_path))).to_be(true)
+                registered = registered + 1
+        expect(registered).to_equal(2)
+        font_renderer_use_registered_selected_bytes_only()
+        val arabic = resolve_font_metrics_with_language("sans-serif", "العربية", 32, "ar")
+        val hindi = resolve_font_metrics_with_language("sans-serif", "हिन्दी", 32, "hi")
+        expect(arabic.valid).to_be(true)
+        expect(arabic.reason).to_equal("resolved")
+        expect(arabic.glyph_run.valid).to_be(true)
+        expect(arabic.glyph_run.glyph_ids.len()).to_be_greater_than(0)
+        expect(hindi.valid).to_be(true)
+        expect(hindi.reason).to_equal("resolved")
+        expect(hindi.glyph_run.valid).to_be(true)
+        expect(hindi.glyph_run.glyph_ids.len()).to_be_greater_than(0)
+        var renderer = FontRenderer.new()
+        expect(renderer.try_load_registered_identity(arabic.identity)).to_be(true)
+        val arabic_batch = renderer.prepare_selected_glyph_run(arabic.glyph_run, 4294967295u32, 32)
+        expect(arabic_batch.valid).to_be(true)
+        expect(arabic_batch.quads.len()).to_be_greater_than(0)
+        expect(renderer.try_load_registered_identity(hindi.identity)).to_be(true)
+        val hindi_batch = renderer.prepare_selected_glyph_run(hindi.glyph_run, 4294967295u32, 32)
+        expect(hindi_batch.valid).to_be(true)
+        expect(hindi_batch.quads.len()).to_be_greater_than(0)

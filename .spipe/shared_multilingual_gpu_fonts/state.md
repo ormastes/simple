@@ -1422,3 +1422,14 @@ pixels, and performance evidence remain release-blocking.
   independent high review accepted both source lanes. No admitted current
   pure-Simple runner or retained QEMU pixel capture exists, so no native font
   or SimpleOS pixel PASS is claimed. STATUS: FAIL.
+
+- Registered-only shaping repair (2026-07-17): the exact pinned Arabic/Urdu and
+  Hindi witnesses now bind validated registered OpenType blobs directly to the
+  existing pure-Simple shaper with handle/generation zero, then materialize the
+  handle-free Draw IR payload through the existing selected-byte
+  `FontRenderer`/`FontRenderBatch`. The route does not call SimpleOS's stubbed
+  host font ABI. A focused unit reproduction, SimpleOS source-contract guard,
+  and final irreversible SPipe scenario cover shaping plus nonempty batch
+  preparation. Static direct-runtime and rendering-coupling guards pass; no
+  admitted current pure-Simple runner, docgen result, or retained QEMU pixels
+  exist, so executable and guest evidence remain pending. STATUS: FAIL.

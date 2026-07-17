@@ -349,9 +349,11 @@ Remaining completion behavior is intentionally narrow:
   clusters, advances, offsets, language, script, direction, and parallel vector
   lengths agree. Unsupported GSUB/GPOS lookups reject the run rather than
   returning a partial sequence.
-- Registered-only SimpleOS currently cannot obtain hosted shaping handles, so
-  complex-script commands fail closed and make the Browser reject the frame;
-  this is a pending guest capability, not a fallback PASS.
+- Registered-only SimpleOS validates the exact registered blob, binds it to the
+  existing shaper without a hosted face handle, and accepts only the pinned
+  Hindi and Arabic/Urdu witnesses. The resulting handle-free glyph payload is
+  materialized by the existing selected-byte rasterizer and `FontRenderBatch`;
+  no app-private ABI, shaper, cache, or Draw IR material is introduced.
 - Engine3D HUD/world consumes `FontRenderBatch`; promotion requires real
   texture/sampler/pipeline/draw/fence/readback evidence from its chosen backend.
 - SimpleOS validates the staged candidate/hash before boot and checks literal

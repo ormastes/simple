@@ -50,8 +50,11 @@ does not own a font renderer: its scene
 carries Draw IR family/identity semantics and the persistent Engine2D owns
 `FontRenderer` materialization. Missing guest file support, an identity mismatch,
 or an unavailable vector runtime retains the fixed bitmap fallback.
-Registered-only complex-script shaping is still unavailable on SimpleOS and
-fails the Browser frame instead of claiming hosted shaping as guest evidence.
+Registered-only source paths now shape the pinned Hindi and Arabic/Urdu
+witnesses from validated VFS bytes without the host font ABI, then materialize
+them through the existing selected-byte `FontRenderer`. This is executable
+regression coverage, not retained guest/QEMU framebuffer evidence; the Browser
+frame and pixel-oracle gates still fail until that evidence is captured.
 VFAT writing and lookup currently support ASCII long names; nested directories
 chain across clusters, while invalid names and fixed-root overflow fail closed.
 

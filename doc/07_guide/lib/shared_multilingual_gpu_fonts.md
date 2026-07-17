@@ -297,12 +297,15 @@ GDB failure site, retained-candidate recursion result, and bounded
 bootstrap failure are recorded in the tracked deployment bug linked above;
 none is font acceptance evidence.
 
-Current source limitations must remain visible during that recovery.
-Registered-byte-only SimpleOS shaping does not yet accept Arabic or Devanagari
-runs. The freestanding WM invalid-metrics branch now retains readable canonical
+Current evidence limitations must remain visible during that recovery.
+Registered-byte-only source paths now accept the exact pinned Arabic/Urdu and
+Hindi witnesses through validated handle-zero OpenType binding and materialize
+the handle-free payload with the existing selected-byte renderer. A focused
+unit reproduction, SimpleOS source guard, and SPipe regression protect that
+route. The freestanding WM invalid-metrics branch retains readable canonical
 legacy bitmap text after the shared renderer locks and atlas generation moved
-behind the existing mutex facade. This fallback is not selected-font or retained
-QEMU pixel-oracle evidence.
+behind the existing mutex facade. Neither source route is retained QEMU
+pixel-oracle evidence.
 
 Canonical `FontRenderer` fallback glyphs are rasterized on CPU. Environment-
 published accelerator pixels are compatibility-only diagnostics and cannot

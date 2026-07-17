@@ -29,7 +29,7 @@ use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new}
 use std.skia.entity.font.{sk_font_new, sk_font_style_normal, sk_typeface_from_attached_font}
 use std.skia.feature.glyph.ot_parser.{parse_offset_table}
 use std.skia.feature.shaper.font_fallback.{fallback_chain_new}
-use std.skia.feature.shaper.shaper.{shaped_run_to_font_glyph_run, shaper_new, shaper_shape_with_language, shaper_with_ot_face}
+use std.skia.feature.shaper.shaper.{shaped_run_to_font_glyph_run, shaper_new, shaper_shape_with_language, shaper_with_ot_face, shaper_with_ot_font}
 use std.skia.feature.shaper.script_detect.{Script, script_of}
 export use std.nogc_sync_mut.text_layout.font_types.{
     CachedGlyph, FontCacheStats, FontGlyphRun, FontTextPayload, FontRenderQuad, FontRenderBatch,
@@ -1269,8 +1269,7 @@ fn _resolved_font_empty_shaped() -> _ResolvedShapedGlyphRun:
 fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: text, font_size: i32, language: text) -> _ResolvedShapedGlyphRun:
     if not selected_font_simple_tuple_accepted(candidate.family, language):
         return _resolved_font_empty_shaped()
-    if font_renderer_registered_selected_bytes_only():
-        return _resolved_font_empty_shaped()
+    val registered_only = font_renderer_registered_selected_bytes_only()
     val decoded = text_codepoints(content)
     if decoded.len() == 0:
         return _resolved_font_empty_shaped()
@@ -1279,17 +1278,35 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
         if codepoint < 0 or codepoint > 1114111:
             return _resolved_font_empty_shaped()
         codepoints.push(codepoint as u32)
-    val font_path = selected_font_asset_physical_path(candidate.local_path)
-    val parsed = parse_offset_table(file_read_bytes(font_path))
+    val font_path = if registered_only:
+        candidate.local_path
+    else:
+        selected_font_asset_physical_path(candidate.local_path)
+    val font_blob = if registered_only:
+        val registered = _registered_selected_font_bytes(candidate.local_path)
+        if not registered.1:
+            return _resolved_font_empty_shaped()
+        registered.0
+    else:
+        file_read_bytes(font_path)
+    val parsed = parse_offset_table(font_blob)
     if parsed == nil:
         return _resolved_font_empty_shaped()
-    val loaded = load_font(font_path)
-    if loaded == nil:
-        return _resolved_font_empty_shaped()
-    val face = loaded.?
-    val font = sk_font_new(sk_typeface_from_attached_font(candidate.family, sk_font_style_normal(), font_path, face.handle), font_size.to_f64())
-    val shaper = shaper_with_ot_face(shaper_new(fallback_chain_new(font)), face.handle, parsed.?)
-    val runs = shaper_shape_with_language(shaper, codepoints, font, 0.0, 0.0, language)
+    val shaped = if registered_only:
+        val font = sk_font_new(sk_typeface_from_attached_font(candidate.family, sk_font_style_normal(), font_path, 0), font_size.to_f64())
+        val shaper = shaper_with_ot_font(shaper_new(fallback_chain_new(font)), parsed.?)
+        (shaper_shape_with_language(shaper, codepoints, font, 0.0, 0.0, language), 0, 0)
+    else:
+        val loaded = load_font(font_path)
+        if loaded == nil:
+            return _resolved_font_empty_shaped()
+        val face = loaded.?
+        val font = sk_font_new(sk_typeface_from_attached_font(candidate.family, sk_font_style_normal(), font_path, face.handle), font_size.to_f64())
+        val shaper = shaper_with_ot_face(shaper_new(fallback_chain_new(font)), face.handle, parsed.?)
+        val result = (shaper_shape_with_language(shaper, codepoints, font, 0.0, 0.0, language), face.handle, face.generation)
+        free_font(face)
+        result
+    val runs = shaped.0
     var glyph_ids: [u32] = []
     var xs: [i32] = []
     var ys: [i32] = []
@@ -1299,7 +1316,7 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
     var valid = runs.len() > 0
     for run in runs:
         val material = shaped_run_to_font_glyph_run(run)
-        if not material.valid or material.face_id != face.handle or material.face_generation != face.generation:
+        if not material.valid or material.face_id != shaped.1 or material.face_generation != shaped.2:
             valid = false
         var i: i64 = 0
         while i < material.glyph_ids.len() and i < run.glyphs.len():
@@ -1318,7 +1335,6 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
             i = i + 1
         if i != material.glyph_ids.len() or i != run.glyphs.len():
             valid = false
-    free_font(face)
     val width = total_advance.to_i32()
     val payload = draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, valid and width >= 0)
     _ResolvedShapedGlyphRun(valid: payload.valid, payload: payload, advances: if payload.valid: advances else: [], width: if payload.valid: width else: 0)
@@ -1344,8 +1360,8 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
         )
         if val cached = _resolved_font_metric_cached(expected_key):
             return cached
-    # Shape first: the producer's short-lived font_sffi face must be gone before
-    # the executor-facing selected rasterizer snapshots its identity/generation.
+    # Shape first. Hosted producers use a short-lived font_sffi face; registered-
+    # only producers bind the already-validated OpenType blob without a host ABI.
     val shaped = if complex_script != 0 and selected_candidate != nil:
         _resolve_selected_shaped_glyph_run(selected_candidate.?, content, font_size, normalized_language)
     else:
