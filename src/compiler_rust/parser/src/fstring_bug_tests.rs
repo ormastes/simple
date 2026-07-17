@@ -343,4 +343,65 @@ main()
             other => panic!("Expected plain FString, got: {:?}", other),
         }
     }
+
+    // =========================================================================
+    // Nested-quote tests (the reported bug)
+    // =========================================================================
+
+    /// Nested double-quoted string inside f-string interpolation
+    /// This is the exact case reported as broken: f"prefix {m.get("key")} suffix"
+    #[test]
+    fn test_nested_double_quote_in_interpolation() {
+        let source = r#"val x = f"prefix {m.get("key")} suffix""#;
+        let errors = find_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Nested double-quoted string should not error: {:?}",
+            errors
+        );
+        let tokens = get_fstring_tokens(source);
+        assert_eq!(tokens.len(), 1);
+        match &tokens[0] {
+            TokenKind::FString(parts) => {
+                assert!(parts.iter().any(|p| *p == FStringToken::Expr(r#"m.get("key")"#.to_string())));
+            }
+            other => panic!("Expected FString with nested quote, got: {:?}", other),
+        }
+    }
+
+    /// Nested single-quoted string inside f-string interpolation
+    #[test]
+    fn test_nested_single_quote_in_interpolation() {
+        let source = r#"val x = f"value {a ?? 'default'} end""#;
+        let errors = find_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Nested single-quoted string should not error: {:?}",
+            errors
+        );
+    }
+
+    /// Multiple nested quotes in same f-string
+    #[test]
+    fn test_multiple_nested_quotes() {
+        let source = r#"val x = f"a {x.get("k1")} b {y.get("k2")} c""#;
+        let errors = find_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Multiple nested quotes should not error: {:?}",
+            errors
+        );
+    }
+
+    /// Complex nested case with method call and nested dict access
+    #[test]
+    fn test_complex_nested_interpolation() {
+        let source = r#"val x = f"result: {data["key"]["nested"]}""#;
+        let errors = find_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Complex nested access should not error: {:?}",
+            errors
+        );
+    }
 }
