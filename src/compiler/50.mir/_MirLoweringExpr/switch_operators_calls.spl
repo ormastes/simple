@@ -1066,26 +1066,175 @@ impl MirLowering:
         result
 
     me lower_try_expr(base: HirExpr) -> LocalId:
-        """Lower `expr?` (Try) on a Result value. If the runtime discriminant
-        is Err (=1), propagate: return the whole Result from the enclosing
-        function (which must itself return Result). Otherwise yield the Ok
-        payload via rt_enum_payload. Without this arm, Try fell to the default
-        `unsupported MIR expression` path and emitted a use of an undefined
-        SSA value (llc: use of undefined value)."""
+        """Lower `expr?` (Try) on a Result or flat-nullable Option value.
+
+        Result: if the runtime discriminant is Err (=1), propagate: return
+        the whole Result from the enclosing function (which must itself
+        return Result). Otherwise yield the Ok payload via rt_enum_payload.
+        Without this arm, Try fell to the default `unsupported MIR
+        expression` path and emitted a use of an undefined SSA value (llc:
+        use of undefined value).
+
+        Option: presence is tested via rt_is_some, mirroring `.unwrap()`'s
+        mechanics in method_calls_literals.spl. On absence, propagate None
+        upward by returning the SAME reserved nil sentinel (bit pattern 3)
+        that a bare `nil` tail expression in an Optional-returning function
+        already emits (see NilLit in expr_dispatch.spl) -- an early
+        `terminate_return` instead of `.unwrap()`'s panic.
+
+        Payload extraction must handle BOTH physical Option representations
+        this codebase has: the flat-nullable ABI (`val x: i64? = 3`), whose
+        raw i64 word IS its own payload with no boxed discriminant/payload
+        pair to decode, AND the explicitly-constructed boxed enum ABI
+        (`Some(v)`/`None`, lowered via lower_enum_construct_named ->
+        rt_enum_new, the SAME mechanism Result's Ok/Err use). rt_is_some
+        already recognizes both forms (see rt_is_none's C comment), but a
+        naive raw-passthrough payload (correct for the flat form) would
+        silently return the boxed ENUM HANDLE itself for `Some(v)` --
+        verified empirically as a silent wrong answer before this branch was
+        added. Disambiguate at runtime via rt_enum_discriminant, which
+        returns -1 for any value that is not a registered boxed-enum handle
+        (rt_core_as_enum's registry-membership check in runtime_native.c) --
+        a flat raw payload (even one that aliases the heap-tag bits) is
+        never registered, so this correctly routes flat payloads through
+        raw-passthrough and boxed Some(v) through rt_enum_payload. This
+        inherits, unchanged, the same already-accepted flat-ABI trade-off
+        every other flat Option operation has (is_some/unwrap/unwrap_or/??/
+        .? -- see NilLit's comment): a literal flat payload of exactly `3`
+        is indistinguishable from None. That is a pre-existing ABI
+        limitation, not a new gap introduced by this lowering."""
         if val base_type = self.enum_match_expr_type(base):
             match base_type.kind:
-                case HirTypeKind.Optional(_):
-                    # Must be Some(...): a bare Span passed into the Span?
-                    # parameter is not auto-wrapped by the seed interpreter,
-                    # so _format_mir_error's `match err.span` fell through
-                    # both arms and the diagnostic degraded to "MIR error:
-                    # nil" instead of this loud refusal.
-                    self.error("native Option try operator requires the tagged Option ABI", Some(base.span))
-                    var failed = self.builder
-                    val result = failed.new_temp(MirType.i64())
-                    failed.emit_const(result, MirConstValue.Zero, MirType.i64())
-                    self.builder = failed
-                    return result
+                case HirTypeKind.Optional(inner):
+                    val base_local = self.lower_expr(base)
+
+                    # Determine the physical lane FIRST via rt_enum_discriminant
+                    # (-1 = not a registered boxed enum = flat raw payload; see
+                    # this method's docstring). Deciding presence from the
+                    # discriminant directly (rather than delegating to
+                    # rt_is_none/rt_is_some for the boxed lane) sidesteps a
+                    # separate, pre-existing landmine: rt_is_none's boxed-enum
+                    # check tests the discriminant against a legacy HASHED
+                    # constant, not the plain positional index
+                    # lower_enum_construct_named actually assigns (Some=0,
+                    # None=1 via enum_variant_disc) -- confirmed empirically
+                    # (`None.unwrap_or(777)` on this codebase's existing
+                    # `.unwrap_or()` prints a garbage payload instead of 777,
+                    # i.e. is_some() already misreports a boxed None as
+                    # present, upstream of and unrelated to this method).
+                    # Comparing the discriminant against the SAME index
+                    # enum_variant_disc computed at construction time (the
+                    # same style Result's own `?` below already uses for its
+                    # Err key) is exact for the boxed lane and never touches
+                    # that shared helper's hash mismatch.
+                    var b_disc = self.builder
+                    val disc_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_enum_discriminant"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                            params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false
+                        )))
+                    ))
+                    val disc_res = b_disc.emit_call(disc_op, [mir_operand_copy(base_local)], MirType.i64())
+                    self.builder = b_disc
+                    var disc_local = LocalId(id: 0)
+                    if val dl = disc_res:
+                        disc_local = dl
+
+                    var b_lane = self.builder
+                    val not_enum_key = b_lane.emit_const_int(-1)
+                    val is_boxed_local = b_lane.emit_binop(MirBinOp.Ne, mir_operand_copy(disc_local), mir_operand_copy(not_enum_key), MirType.bool())
+                    self.builder = b_lane
+
+                    val boxed_block = b_lane.new_block(Some("try_opt_boxed"))
+                    val flat_block = b_lane.new_block(Some("try_opt_flat"))
+                    val none_block = b_lane.new_block(Some("try_opt_none"))
+                    val payload_merge_block = b_lane.new_block(Some("try_opt_payload_merge"))
+                    val raw_payload_local = b_lane.new_temp(MirType.i64())
+                    b_lane.terminate_if(mir_operand_copy(is_boxed_local), boxed_block, flat_block)
+                    self.builder = b_lane
+
+                    # Boxed lane: compare the discriminant directly against
+                    # Option's registered None index (default 1 = the
+                    # reserved Some=0/None=1 order if this module never
+                    # constructed Some/None itself, so this dead branch still
+                    # compiles).
+                    var b_boxed = self.builder
+                    b_boxed.switch_to_block(boxed_block)
+                    var none_disc = 1
+                    if self.enum_variant_index.has("Option"):
+                        none_disc = enum_variant_disc(self.enum_variant_index["Option"], "None")
+                    val none_key = b_boxed.emit_const_int(none_disc)
+                    val is_boxed_none = b_boxed.emit_binop(MirBinOp.Eq, mir_operand_copy(disc_local), mir_operand_copy(none_key), MirType.bool())
+                    val boxed_some_block = b_boxed.new_block(Some("try_opt_boxed_some"))
+                    b_boxed.terminate_if(mir_operand_copy(is_boxed_none), none_block, boxed_some_block)
+                    self.builder = b_boxed
+
+                    var b_boxed_some = self.builder
+                    b_boxed_some.switch_to_block(boxed_some_block)
+                    val payload_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_enum_payload"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                            params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false
+                        )))
+                    ))
+                    val boxed_payload_res = b_boxed_some.emit_call(payload_op, [mir_operand_copy(base_local)], MirType.i64())
+                    self.builder = b_boxed_some
+                    var b_boxed_some2 = self.builder
+                    if val bpl = boxed_payload_res:
+                        b_boxed_some2.emit_copy(raw_payload_local, bpl)
+                    b_boxed_some2.terminate_goto(payload_merge_block)
+                    self.builder = b_boxed_some2
+
+                    # Flat lane: rt_is_some's sentinel-based check is exact
+                    # here (no boxed-enum hash involved), matching
+                    # `.unwrap()`'s own mechanics.
+                    var b_flat = self.builder
+                    b_flat.switch_to_block(flat_block)
+                    val is_some_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_is_some"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                            params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
+                        )))
+                    ))
+                    val is_some_res = b_flat.emit_call(is_some_op, [mir_operand_copy(base_local)], MirType.bool())
+                    self.builder = b_flat
+                    var is_some_local = LocalId(id: 0)
+                    if val isl = is_some_res:
+                        is_some_local = isl
+                    var b_flat2 = self.builder
+                    val flat_some_block = b_flat2.new_block(Some("try_opt_flat_some"))
+                    b_flat2.terminate_if(mir_operand_copy(is_some_local), flat_some_block, none_block)
+                    self.builder = b_flat2
+
+                    var b_flat_some = self.builder
+                    b_flat_some.switch_to_block(flat_some_block)
+                    b_flat_some.emit_copy(raw_payload_local, base_local)
+                    b_flat_some.terminate_goto(payload_merge_block)
+                    self.builder = b_flat_some
+
+                    # Absent (either lane): propagate None upward via the
+                    # SAME reserved nil sentinel a bare `nil` tail expression
+                    # already emits.
+                    var b_none = self.builder
+                    b_none.switch_to_block(none_block)
+                    val nil_result = b_none.new_temp(MirType.i64())
+                    b_none.emit_const(nil_result, MirConstValue.Int(3), MirType.i64())
+                    self.nil_locals[nil_result.id] = true
+                    b_none.terminate_return(Some(mir_operand_copy(nil_result)))
+                    self.builder = b_none
+
+                    var b_pm = self.builder
+                    b_pm.switch_to_block(payload_merge_block)
+                    self.builder = b_pm
+
+                    var payload_local = raw_payload_local
+                    match inner.kind:
+                        case HirTypeKind.Str:
+                            payload_local = self.option_text_value(raw_payload_local, self.bootstrap_text_type())
+                        case _:
+                            if self.runtime_value_locals.has(raw_payload_local.id):
+                                payload_local = self.decode_runtime_value(raw_payload_local, self.lower_type(inner))
+                    return payload_local
                 case _: ()
         val res_local = self.lower_expr(base)
         var b = self.builder
