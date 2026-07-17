@@ -4,7 +4,7 @@
 **Severity:** Medium (silent behavioral divergence, no diagnostic on either
 side — both paths compile and run successfully, they just disagree on the
 resulting string content)
-**Status:** open
+**Status:** source fixed; dual-backend execution pending
 **Task:** #178 native text interpolation + string ops verification round 2 (lane S47)
 
 ## Symptom
@@ -67,3 +67,15 @@ should route through the same "no interpolation" handling as single-quoted
   `env -u SIMPLE_BOOTSTRAP bin/simple run` (oracle) and
   `env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH bin/simple native-build`
   (native), with two independently-named probe files to rule out caching.
+
+## Resolution evidence
+
+- The core parser now records a no-interpolation bit on flat string literals
+  whose token provenance is single-quoted, triple-quoted, or raw-prefixed.
+- Both flat-AST-to-HIR paths check that bit before interpolation scanning and
+  preserve the literal text with no interpolation parts.
+- `raw_string_interpolation_contract` is a strict LLVM/Cranelift parity case
+  covering an ordinary interpolating double-quoted control plus single,
+  triple, `r"..."`, and `r"""..."""` literal-brace forms. It is selected on
+  hosted non-Linux and FreeBSD gates; execution remains pending because this
+  source-only repair session did not run compiler/native commands.

@@ -176,6 +176,11 @@ val path = 'C:\Users\name'          # Backslashes are literal
 
 # r"..." prefix also works
 val pattern = r"no\escape"
+
+# Triple-quoted strings are raw and may span lines
+val template = """Hello, {name}
+This keeps braces literal."""
+val raw_template = r"""C:\temp\{name}"""
 ```
 
 ### Typed String Literals
