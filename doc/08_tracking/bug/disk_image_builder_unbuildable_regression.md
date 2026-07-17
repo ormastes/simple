@@ -50,3 +50,7 @@ native path):
    in `disk_image` type-checks (`cannot iterate over this type`).
 2. Native: the `llc` "multiple definition of local value 'l5'" — a duplicate SSA
    value name in emitted LLVM IR for whatever construct `disk_image` uses.
+
+## Triage note (2026-07-17)
+
+Likely fixed by commit `2138b3d9fca6` ("fix(disk-image): FAT32 builder — field default, truncate u64 unbox, 8.3 names, dynamic FAT sizing", 2026-07-11): commit's own E2E verification shows `nested_payloads` omitted, `ring-3 FSEXEC_OK rc=42` — a working disk-image build+boot. The interp-path `cannot iterate over this type` symptom is resolved. The native-build LLVM "multiple definition of local value 'l5'" half of the symptom is not explicitly re-confirmed in that commit message; pending runtime verification via native-build from source on current HEAD.

@@ -1,5 +1,7 @@
 # Baremetal CR3 RuntimeValue/Raw ABI Mismatch
 
+**Status:** Resolved — workaround deployed; live QEMU evidence confirms correct CR3 and boot progression.
+
 The x86_64 baremetal stubs exposed `rt_write_cr3(RuntimeValue)` and decoded its
 argument by shifting right three bits. Pure-Simple Cranelift extern calls pass
 the declared `u64` physical address raw, so VMM attempted to load

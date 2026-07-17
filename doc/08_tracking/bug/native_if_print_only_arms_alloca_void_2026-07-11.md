@@ -38,3 +38,7 @@ fn main() -> i64:
 
 (Exact failing probe was produced by the Wall-3 agent while building probe
 fixtures; re-derive with the shape above on the normal native path.)
+
+## Triage note (2026-07-17)
+
+Confirmed fixed by commit `3f6dbe1b4abd` ("#169 materialize void spill slots as i64 (llc reject)", 2026-07-13). The commit directly addresses the `alloca void` symptom; commit message includes verified native==oracle regression evidence confirming the fix closes the gap.

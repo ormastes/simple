@@ -22,3 +22,7 @@ During known CSS-quadratic first-frame hang, operator following documented comme
 
 ## Next Step
 Either re-add instrumentation via new std.debug stage tracer (P0 module in progress) and fix comment, or remove lying comment. Known issue: stage-logging was added earlier 2026-07-05 but lost (likely parallel-session working-copy clobber). Separately: add M9 smoke test to verify `_has_buffered_mouse` field read behavior.
+
+## Triage note (2026-07-17)
+
+Likely fixed by commit `e6de3effdb5` (2026-07-05): added `std.debug` `dbg_stage` tracer with real stage instrumentation in `app.spl` (parse_start/done, backend_create_start/done, window_created, first_frame_start/done, launch_start, file_checked); `main.spl` comment rewritten to describe the real tracer and cites this bug doc as history. Pending runtime verification of stage instrumentation in live UI launch.

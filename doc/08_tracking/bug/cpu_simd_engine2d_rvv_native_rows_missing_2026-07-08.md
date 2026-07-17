@@ -2,7 +2,7 @@
 
 ## Status
 
-closed
+Resolved — proof evidence recorded; RVV native path proven via native binaries with `vsetvli`, `vmv.v.x`, `vle64.v`, and `vse64.v` instructions.
 
 ## Evidence
 

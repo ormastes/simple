@@ -46,3 +46,7 @@ the core_string.spl semantics. Raw-int return convention matches sibling C rt_*.
   fails the baremetal build on drift, OR
 - Make the rv64 freestanding closure compile core_string.spl directly so there
   is one implementation.
+
+## Triage note (2026-07-17)
+
+Likely fixed by commit `7c30ce49d04f` which adds the missing `rt_string_to_int` and `rt_contains` implementations to the freestanding C runtime, resolving the link-time undefined-symbol gap. Pending runtime verification: link and run the rv64 SimpleOS web-server closure from source with zero undefined symbol errors.

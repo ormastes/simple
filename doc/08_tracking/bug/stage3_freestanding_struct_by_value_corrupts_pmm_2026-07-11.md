@@ -1,5 +1,7 @@
 # Stage3 Freestanding Struct-by-Value Corrupts PMM
 
+**Status (2026-07-17):** Likely fixed by commits `ca1e18c1744a` and `7c30ce49d04f` per triage evidence (see note below).
+
 The stage3 Cranelift x86_64 freestanding build passed `PhysMemManager` by value
 to `_bitmap_clear`. The callee read a corrupted `bitmap_addr` and repeatedly
 wrote to address `-122`, producing recovered page faults instead of initializing
@@ -28,3 +30,7 @@ and optional response payloads under this ABI. The direct production desktop
 therefore uses `arch_x86_64_direct_boot_init()`, which retains fault-hook,
 per-CPU, CPUID-topology, and syscall initialization without pretending the
 multiboot wrapper supplied Limine aggregates.
+
+## Triage note (2026-07-17)
+
+Commits `ca1e18c1744a` and `7c30ce49d04f` likely address the aggregate ABI and enum-payload defects described above. The workarounds (scalar-only APIs, direct-boot path) are confirmed in production use. Pending runtime verification: fresh stage3 freestanding build must compile and boot with zero PMM/VMM faults.

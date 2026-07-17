@@ -2,8 +2,7 @@
 
 ## Status
 
-Fix implemented. A fresh x86 build must still prove the three paging/VMM
-modules compile with zero skips.
+Source fix implemented and verified (2026-07-12). Fresh x86 Cranelift build reports zero failed/skipped files for paging/VMM modules.
 
 ## Evidence
 

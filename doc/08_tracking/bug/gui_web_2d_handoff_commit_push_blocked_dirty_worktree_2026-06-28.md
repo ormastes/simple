@@ -2,6 +2,8 @@
 
 Date: 2026-06-28
 
+**Status (2026-07-17):** Work committed and present on HEAD despite rebase churn. Worktree blocker is historical; see triage note below.
+
 ## Summary
 
 The headless GUI/Web/2D handoff hardening work is committed locally as
