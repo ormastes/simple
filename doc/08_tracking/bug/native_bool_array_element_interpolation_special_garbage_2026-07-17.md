@@ -1,7 +1,7 @@
 # BUG: native backend bool array element via string interpolation prints `<special:N>` garbage
 
 - **Date:** 2026-07-17
-- **Status:** open
+- **Status:** source fix implemented; execution pending
 - **Area:** compiler native codegen (array element read + bool string interpolation)
 - **Severity:** medium (silent wrong output; no crash)
 
@@ -48,8 +48,20 @@ var text = if x: "true" else: "false"
 print text                    # Correct workaround
 ```
 
-Or cast through an intermediate bool variable used elsewhere first (forces
-type narrowing).
+## Source fix and regression coverage
+
+Two MIR fixes preserve the bool type through the complete failing path:
+
+1. Index lowering retains the array's known element type and applies the
+   bootstrap text fallback only when no element type was recovered.
+2. Both Let-lowering paths preserve a bool initializer's MIR type when a
+   `val` or `var` binding creates a fresh local.
+
+`scripts/check/check-native-seed-parity.shs` adds the strict dual-backend
+`bool_array_element_interp` case. It checks direct interpolation of
+`flags[0]`/`flags[1]` and interpolation after both `val` and `var` bindings,
+with fixed expected `true`/`false` output on LLVM and Cranelift. Executable
+verification is pending.
 
 ## Cross-reference
 

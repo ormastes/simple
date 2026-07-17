@@ -1462,7 +1462,8 @@ The `icmp ne i64 undef` blocker is fixed for the bounded real-main shard.
 Source regression now covers:
 
 - normal bootstrap binary operators bypass the optional special-op nil path;
-- untyped bootstrap indexes default to text values;
+- typed array indexes retain their element type; only unknown bootstrap indexes
+  fall back to text values;
 - `lower_if` preserves explicit `return` terminators instead of overwriting
   branch blocks with `goto merge`;
 - pointer/text CLI comparisons lower through typed `rt_strcmp`;

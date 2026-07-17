@@ -60,6 +60,15 @@ impl MirLowering:
                     case _: return false
         false
 
+    fn local_is_bool(local: LocalId) -> bool:
+        """True when a lowered local holds a native Bool value."""
+        for item in self.builder.locals:
+            if item.id.id == local.id:
+                match item.type_.kind:
+                    case MirTypeKind.Bool: return true
+                    case _: return false
+        false
+
     fn local_is_unit(local: LocalId) -> bool:
         """True when a lowered local's registered MIR type is Unit -- e.g. the
         placeholder result of a void statement like `print "x"` used as a
@@ -196,7 +205,8 @@ impl MirLowering:
                         # of rt_strlen. When the initializer is a real string
                         # value, thread its string MIR type onto the binding
                         # regardless of the (unreliable) inferred let_type.
-                        # Same preservation for a float binding (`val y = x * 4.0`):
+                        # Same preservation for float and Bool bindings
+                        # (`val y = x * 4.0`, `val flag = flags[0]`):
                         # the inferred let_type is unreliably non-nil (i64) on this
                         # path, so mir_type defaulted to i64, the binding's SSA
                         # spill slot was alloca'd i64, and the f64 value
@@ -204,7 +214,8 @@ impl MirLowering:
                         # degrading later comparisons to icmp on truncated ints.
                         # When the initializer is a real float value, thread its
                         # F64/F32 MIR type onto the binding (same rationale as the
-                        # string case above).
+                        # string case above). Bool must likewise remain Bool so
+                        # text interpolation selects the boolean formatter.
                         #
                         # Bug #138: the array case above was gated on
                         # `let_type == nil`, unlike its str/float siblings just
@@ -219,7 +230,7 @@ impl MirLowering:
                         # the SplArray header as if they were an element, then
                         # feeding that garbage i64 to rt_len/rt_string_starts_with
                         # as a tagged handle (SIGSEGV). Thread unconditionally,
-                        # matching str/float.
+                        # matching str/float/bool.
                         val effective_type = if self.local_is_runtime_array(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else if self.local_is_runtime_dict(init_local):
@@ -227,6 +238,8 @@ impl MirLowering:
                         else if self.local_is_str(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else if self.local_is_float(init_local):
+                            self.local_mir_type_of(init_local) ?? mir_type
+                        else if self.local_is_bool(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else:
                             mir_type
@@ -338,7 +351,7 @@ impl MirLowering:
                         # lower_struct_construct writes the map.
                         val struct_sym: text? = if has_init: self.struct_value_syms.get(init_local.id) else: nil
                         # See the disc==1 early-Let path: a `val`/`var xs = ...`
-                        # must inherit the initializer's real Array/Slice type
+                        # must inherit the initializer's real Array/Slice/Bool type
                         # (unconditionally -- a non-nil-but-Infer-defaulted
                         # `type_` is as unreliable as a nil one, see Bug #138)
                         # so later `xs[i]` reads take rt_array_get instead of a
@@ -350,6 +363,8 @@ impl MirLowering:
                         else if has_init and self.local_is_runtime_dict(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else if has_init and self.local_is_float(init_local):
+                            self.local_mir_type_of(init_local) ?? mir_type
+                        else if has_init and self.local_is_bool(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else:
                             mir_type
